@@ -1,0 +1,24 @@
+.DS_Store
+dist/
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+*.tmp
+*.bak-*
+
+# Local runtime/cache files
+.cache/
+.env
+.env.*
+
+# Build artifacts (Go binaries built inside the source dir). The dir shares the
+# project name, so anchor each binary by relative path to avoid matching the dir.
+/ais-switch-proxy/ais-switch-proxy
+/ais-switch-proxy/ais-switch-proxy-linux
+/ais-switch-proxy/ais-switch-proxy-linux-*
+/ais-switch-proxy/ais-switch-proxy.exe
+
+# Agent/IDE session state
+.omx/

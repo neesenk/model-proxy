@@ -1,0 +1,284 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// Daemon (supervisor/worker) model for `ais-switch-proxy serve --daemon`.
+//
+// Roles are selected by the AIS_SWITCH_PROXY_ROLE env var so no new subcommand is needed:
+//   - (unset)  foreground invocation. With --daemon it launches a detached
+//               supervisor and returns; otherwise it runs the proxy inline.
+//   - supervisor: detaches from the terminal, redirects stdio to the log file,
+//               writes a pid file, and supervises the worker: spawn → wait →
+//               restart on exit (exponential backoff, reset after sustained uptime).
+//               Forwards SIGTERM/SIGINT to the worker and exits.
+//   - worker:   runs the actual proxy (http.ListenAndServe). stdio is already the
+//               log file (set by the supervisor), so all logs land there. Because
+//               stderr is a regular file, color.go's tty check auto-disables color
+//               → file logs stay escape-free.
+
+const (
+	envRole        = "AIS_SWITCH_PROXY_ROLE"
+	roleSupervisor = "supervisor"
+	roleWorker     = "worker"
+)
+
+// serveArgs holds parsed `serve` flags.
+type serveArgs struct {
+	config  string
+	daemon  bool
+	logFile string // --log-file override
+}
+
+func parseServeArgs(args []string) serveArgs {
+	sa := serveArgs{config: "config.yaml"}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--daemon" || a == "-d":
+			sa.daemon = true
+		case a == "--config" || a == "-config":
+			if i+1 < len(args) {
+				sa.config = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(a, "--config="):
+			sa.config = strings.TrimPrefix(a, "--config=")
+		case a == "--log-file":
+			if i+1 < len(args) {
+				sa.logFile = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(a, "--log-file="):
+			sa.logFile = strings.TrimPrefix(a, "--log-file=")
+		}
+	}
+	if env := os.Getenv("AIS_SWITCH_PROXY_CONFIG"); env != "" {
+		sa.config = env
+	}
+	return sa
+}
+
+// cmdServe dispatches by role: supervisor / worker run their loops; an unset
+// role with --daemon launches a detached supervisor; otherwise serve inline.
+func cmdServe(args []string) {
+	sa := parseServeArgs(args)
+	switch os.Getenv(envRole) {
+	case roleSupervisor:
+		runSupervisor(sa)
+		return
+	case roleWorker:
+		runProxy(sa)
+		return
+	}
+	if sa.daemon {
+		if err := daemonize(sa); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	runProxy(sa)
+}
+
+// runProxy loads the config and runs the proxy inline (used by the worker and by
+// plain foreground serve). When stdout/stderr is a log file (worker case) all
+// logs land there; when a tty (foreground) logs go to the terminal.
+func runProxy(sa serveArgs) {
+	cfg, err := LoadConfig(sa.config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// In true foreground mode (no role, no --daemon), mirror logs to the configured
+	// file too. The worker's stdio is already the log file (set by the supervisor),
+	// so it must NOT reopen/mirror — that would double every line.
+	if os.Getenv(envRole) == "" && !sa.daemon {
+		if lf := resolveLogFile(sa, cfg); lf != "" {
+			if f, err := openLogFile(lf); err == nil {
+				log.SetOutput(io.MultiWriter(os.Stderr, f))
+			}
+		}
+	}
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	p := NewProxy(cfg)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", p.handler)
+	log.Printf("ais-switch-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
+	if err := http.ListenAndServe(cfg.Listen, mux); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// daemonize launches a detached supervisor (new session, stdio → log file) and
+// returns, so the invoking shell gets its prompt back.
+func daemonize(sa serveArgs) error {
+	cfg, err := LoadConfig(sa.config)
+	if err != nil {
+		return err
+	}
+	logFile := resolveLogFile(sa, cfg)
+	// resolveLogFile always falls back to the OS temp dir, so this is defensive.
+	if logFile == "" {
+		return fmt.Errorf("no log_file resolved (set log_file in config or pass --log-file)")
+	}
+	lf, err := openLogFile(logFile)
+	if err != nil {
+		return fmt.Errorf("open log file %s: %w", logFile, err)
+	}
+
+	cmd := exec.Command(os.Args[0], "serve", "--config", sa.config)
+	cmd.Env = append(os.Environ(), envRole+"="+roleSupervisor)
+	cmd.Stdin = nil
+	cmd.Stdout = lf
+	cmd.Stderr = lf
+	cmd.SysProcAttr = sysProcAttrDetach() // setsid: detach from controlling terminal
+	if err := cmd.Start(); err != nil {
+		lf.Close()
+		return fmt.Errorf("start supervisor: %w", err)
+	}
+	// The supervisor inherits the lf fd; the parent can close its copy now.
+	pid := cmd.Process.Pid
+	_ = cmd.Process.Release()
+	lf.Close()
+
+	fmt.Printf("ais-switch-proxy daemonized: supervisor pid=%d log=%s pidfile=%s\n",
+		pid, logFile, pidFilePath(logFile))
+	fmt.Printf("  stop with: kill -TERM %d  (or kill -TERM $(cat %s))\n", pid, pidFilePath(logFile))
+	return nil
+}
+
+// runSupervisor supervises the worker: spawn, wait, restart on exit with backoff.
+// Exits when it receives SIGTERM/SIGINT (forwarding SIGTERM to the worker first).
+func runSupervisor(sa serveArgs) {
+	cfg, err := LoadConfig(sa.config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logFile := resolveLogFile(sa, cfg)
+	// stdio is already the log file (set by daemonize); point the log package at it.
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
+	pidPath := pidFilePath(logFile)
+	if err := writePidFile(pidPath, os.Getpid()); err != nil {
+		log.Printf("[supervisor] warn: write pid file %s: %v", pidPath, err)
+	}
+	defer os.Remove(pidPath)
+
+	log.Printf("[supervisor] started pid=%d log=%s", os.Getpid(), logFile)
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	const uptimeReset = 30 * time.Second // reset backoff after the worker lived this long
+
+	for {
+		// Exit if a signal arrived before we spawn the next worker.
+		select {
+		case sig := <-sigCh:
+			log.Printf("[supervisor] received %v, exiting", sig)
+			return
+		default:
+		}
+
+		worker := spawnWorker(sa)
+		started := time.Now()
+		exitCh := make(chan error, 1)
+		go func() { exitCh <- worker.Wait() }()
+
+		select {
+		case sig := <-sigCh:
+			// Graceful shutdown: forward SIGTERM, wait up to 10s, then SIGKILL.
+			log.Printf("[supervisor] received %v, stopping worker pid=%d", sig, worker.Process.Pid)
+			_ = worker.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-exitCh:
+			case <-time.After(10 * time.Second):
+				log.Printf("[supervisor] worker pid=%d did not exit, killing", worker.Process.Pid)
+				_ = worker.Process.Kill()
+				<-exitCh
+			}
+			log.Printf("[supervisor] exiting")
+			return
+		case err := <-exitCh:
+			lived := time.Since(started)
+			if lived >= uptimeReset {
+				backoff = time.Second // sustained uptime → reset backoff
+			}
+			log.Printf("[supervisor] worker pid=%d exited after %s: %v — restarting in %s",
+				worker.Process.Pid, lived, err, backoff)
+		}
+
+		// Backoff wait, interruptible by a stop signal.
+		select {
+		case sig := <-sigCh:
+			log.Printf("[supervisor] received %v during backoff, exiting", sig)
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// spawnWorker starts a worker process whose stdio is the supervisor's (the log file).
+func spawnWorker(sa serveArgs) *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "serve", "--config", sa.config)
+	cmd.Env = append(os.Environ(), envRole+"="+roleWorker)
+	cmd.Stdin = nil
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		log.Printf("[supervisor] failed to spawn worker: %v", err)
+		return cmd
+	}
+	log.Printf("[supervisor] spawned worker pid=%d", cmd.Process.Pid)
+	return cmd
+}
+
+// resolveLogFile picks the log file path: --log-file flag > config log_file > default
+// (the OS temp dir, e.g. /tmp on Linux, $TMPDIR on macOS — runtime artifacts belong
+// there, not under the config dir). Returns "" only if the temp dir can't be resolved.
+func resolveLogFile(sa serveArgs, cfg *Config) string {
+	if sa.logFile != "" {
+		return expandPath(sa.logFile)
+	}
+	if cfg.LogFile != "" {
+		return cfg.LogFile
+	}
+	// Default: the OS temp dir (runtime artifacts: logs + pid), per Unix convention.
+	return filepath.Join(os.TempDir(), "ais-switch-proxy.log")
+}
+
+// openLogFile opens (creating parent dirs) a log file for append.
+func openLogFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+}
+
+// pidFilePath derives the pid file path from the log file path.
+func pidFilePath(logFile string) string {
+	if strings.HasSuffix(logFile, ".log") {
+		return strings.TrimSuffix(logFile, ".log") + ".pid"
+	}
+	return logFile + ".pid"
+}
+
+func writePidFile(path string, pid int) error {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", pid)), 0o644)
+}
