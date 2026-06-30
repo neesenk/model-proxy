@@ -236,6 +236,72 @@ func runSupervisor(sa serveArgs) {
 	}
 }
 
+// cmdStop stops a running `serve --daemon` by reading the pid file (derived from
+// the same log path the supervisor used) and sending SIGTERM. The supervisor
+// forwards SIGTERM to its worker, waits for it, removes the pid file, and exits.
+// Waits up to 15s for the process to disappear; falls back to SIGKILL.
+func cmdStop(args []string) {
+	sa := parseServeArgs(args)
+	cfg, err := LoadConfig(sa.config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logFile := resolveLogFile(sa, cfg)
+	pidPath := pidFilePath(logFile)
+
+	pidStr, err := os.ReadFile(pidPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println(cYellow("No daemon running.") + " (pid file not found: " + cGray(pidPath) + ")")
+			return
+		}
+		log.Fatal(err)
+	}
+	var pid int
+	for _, c := range pidStr {
+		if c < '0' || c > '9' {
+			break
+		}
+		pid = pid*10 + int(c-'0')
+	}
+	if pid <= 0 {
+		log.Fatalf("invalid pid in %s: %q", pidPath, string(pidStr))
+	}
+
+	// Check the process exists and is signalable.
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		log.Fatalf("find process %d: %v", pid, err)
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		// Process is gone — clean up the stale pid file.
+		os.Remove(pidPath)
+		fmt.Println(cYellow("Daemon not running.") + " (removed stale pid file " + cGray(pidPath) + ")")
+		return
+	}
+
+	fmt.Printf("Stopping ais-switch-proxy daemon (pid=%d)...\n", pid)
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		log.Fatalf("send SIGTERM to %d: %v", pid, err)
+	}
+
+	// Wait for the process to exit (it removes its own pid file on graceful exit).
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			// Gone.
+			fmt.Println(cGreen("✓ Stopped."))
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// Didn't exit gracefully — force kill.
+	fmt.Fprintf(os.Stderr, "graceful stop timed out, sending SIGKILL to %d\n", pid)
+	_ = proc.Kill()
+	os.Remove(pidPath)
+	fmt.Println(cGreen("✓ Killed."))
+}
+
 // spawnWorker starts a worker process whose stdio is the supervisor's (the log file).
 func spawnWorker(sa serveArgs) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], "serve", "--config", sa.config)

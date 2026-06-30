@@ -50,7 +50,8 @@ GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
 
 # 1b. 守护进程模式（父子进程，崩溃自动拉起，日志写文件）
 ./ais-switch-proxy serve --daemon --config config.yaml
-# 停止：kill -TERM $(cat <log_file 同目录的 .pid>)
+# 停止：
+./ais-switch-proxy stop --config config.yaml   # 或 kill -TERM $(cat <log_file 同目录的 .pid>)
 
 # 2. 改写客户端配置指向代理（先自动备份）
 ./ais-switch-proxy takeover opencode      # 单个: claude|opencode|codex|pi
@@ -240,6 +241,14 @@ log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log   # 自定义日志 + p
 ```
 
 > 限制：`setsid` 仅 Unix；Windows 上 supervisor 不脱离控制台（仍可监控/拉起）。`go build ./...` 会写出主二进制，交叉编译后记得用对应平台二进制运行。
+
+### `stop` —— 停止 daemon
+
+```bash
+./ais-switch-proxy stop --config config.yaml
+```
+
+读 pid 文件（与 `serve --daemon` 同路径），向 supervisor 发 `SIGTERM`：supervisor 转发给 worker 优雅退出、清理 pid 文件。等最多 15s，超时 `SIGKILL` 兜底。无 daemon 运行时友好提示，并清理 stale pid 文件。`--config`/`--log-file` 须与启动时一致（用来定位 pid 文件）。
 
 ## 路由与模型映射
 

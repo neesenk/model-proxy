@@ -23,14 +23,15 @@ import sys
 import time
 import urllib.request
 
-PROXY = "http://127.0.0.1:15721"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 15721
 
 # ANSI 颜色（非 tty 时可禁用；这里简单始终用）。
 DIM = "\033[2m"
 RESET = "\033[0m"
 
 
-def stream_messages(model_alias: str, prompt: str, max_tokens: int):
+def stream_messages(base: str, model_alias: str, prompt: str, max_tokens: int):
     """流式 POST /v1/messages，yield 解析出的事件 dict。
 
     SSE 格式：`event: <type>` 行后跟 `data: <json>` 行，空行分隔。
@@ -42,7 +43,7 @@ def stream_messages(model_alias: str, prompt: str, max_tokens: int):
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
     req = urllib.request.Request(
-        f"{PROXY}/v1/messages",
+        f"{base}/v1/messages",
         data=body,
         headers={
             "content-type": "application/json",
@@ -90,9 +91,12 @@ def main():
                     help="模型别名（须在 config model_map 里）或真实模型名（如 glm-5.2）")
     ap.add_argument("--max-tokens", type=int, default=1024,
                     help="最大输出 token；thinking 模型建议 ≥1024，复杂问题 2000+")
+    ap.add_argument("--host", default=DEFAULT_HOST, help=f"代理主机（默认 {DEFAULT_HOST}）")
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"代理端口（默认 {DEFAULT_PORT}）")
     args = ap.parse_args()
 
-    print(f"→ POST {PROXY}/v1/messages  (model={args.model}, max_tokens={args.max_tokens})")
+    base = f"http://{args.host}:{args.port}"
+    print(f"→ POST {base}/v1/messages  (model={args.model}, max_tokens={args.max_tokens})")
     print(f"→ prompt: {args.prompt!r}")
     print("—" * 60)
 
@@ -104,7 +108,7 @@ def main():
     text_chars = 0
 
     try:
-        for ev in stream_messages(args.model, args.prompt, args.max_tokens):
+        for ev in stream_messages(base, args.model, args.prompt, args.max_tokens):
             t = ev.get("type")
             if t == "message_start":
                 model = ev.get("message", {}).get("model")
@@ -137,7 +141,7 @@ def main():
         print(f"\n✗ HTTP {e.code}: {e.read().decode()[:300]}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"\n✗ 连不上代理 {PROXY}：{e}", file=sys.stderr)
+        print(f"\n✗ 连不上代理 {base}：{e}", file=sys.stderr)
         print("  先启动：ais-switch-proxy serve --config config.yaml", file=sys.stderr)
         sys.exit(1)
 

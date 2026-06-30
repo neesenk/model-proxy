@@ -14,6 +14,7 @@ Usage:
     --daemon        Run detached (supervisor/worker): supervisor monitors the worker
                     and auto-restarts it on crash. Logs go to the configured log file.
     --log-file FILE Override the log file path (default: log_file from config).
+  ais-switch-proxy stop    [--config config.yaml] [--log-file FILE]  Stop a running --daemon (SIGTERM the supervisor)
   ais-switch-proxy takeover [--config config.yaml] [client]  Rewrite client config to point at the proxy
   ais-switch-proxy restore  [--config config.yaml] [client]  Restore client config from backup
   ais-switch-proxy login    [--config config.yaml]       Compass SSO login, writes sso_cookie_file
@@ -41,6 +42,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		cmdServe(os.Args[2:])
+	case "stop":
+		cmdStop(os.Args[2:])
 	case "takeover":
 		cmdTakeover(os.Args[2:])
 	case "restore":
