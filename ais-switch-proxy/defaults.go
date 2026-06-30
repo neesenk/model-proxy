@@ -50,12 +50,34 @@ routes:
     model_map: {}
 
 takeover:
-  proxy_url: http://127.0.0.1:15721
+  # proxy_url defaults to http://<listen> when unset — leave it commented so
+  # changing the listen port above is enough. Uncomment to override.
+  # proxy_url: http://127.0.0.1:15721
   claude_file: ~/.claude/settings.json
   opencode_file: ~/.config/opencode/opencode.json
-  opencode_provider_id: anthropic
+  opencode_provider_id: ais-switch
   codex_file: ~/.codex/config.toml
   pi_file: ~/.pi/agent/models.json
   pi_provider_name: ais-switch-proxy
-  pi_models: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"]
+  # pi_models: when unset, takeover writes the real gateway model IDs from the
+  # models cache (glm-5.2 / deepseek-v4-pro / deepseek-v4-flash). Uncomment to
+  # override with a custom list (e.g. aliases, if you also configure model_map).
+  # pi_models: ["glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash"]
+  # Per-model output limits written into client configs (opencode limit.output,
+  # pi maxTokens) and modalities. context_window comes from the gateway models
+  # cache. Models not listed here fall back to defaults (output_tokens: 4096,
+  # input/output: [text]). Edit per model as needed.
+  model_limits:
+    glm-5.2:
+      output_tokens: 4096
+      input: ["text"]
+      output: ["text"]
+    deepseek-v4-pro:
+      output_tokens: 4096
+      input: ["text"]
+      output: ["text"]
+    deepseek-v4-flash:
+      output_tokens: 4096
+      input: ["text"]
+      output: ["text"]
 `

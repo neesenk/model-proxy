@@ -39,27 +39,78 @@ func rewriteOpencode(cfg *Config) error {
 	if prov == nil {
 		prov = map[string]any{}
 	}
-	// The built-in anthropic provider hits baseURL + /messages, so baseURL ends with /v1.
+	// opencode's @ai-sdk/anthropic appends /messages to baseURL, so baseURL ends
+	// with /v1 (→ <proxy>/v1/messages). For a non-built-in provider id, opencode
+	// needs `npm` to point at the SDK implementation; @ai-sdk/anthropic ships in
+	// the opencode binary.
 	baseURL := strings.TrimRight(cfg.Takeover.ProxyURL, "/") + "/v1"
 	prov[pid] = map[string]any{
-		"name": "ais-switch-proxy",
+		"name":  "AIS Switch",
+		"npm":   "@ai-sdk/anthropic",
 		"options": map[string]any{
-			"baseURL": baseURL,
 			"apiKey":  "PROXY_MANAGED",
+			"baseURL": baseURL,
 		},
-		"models": opencodeModels(),
+		"models": opencodeModels(cfg),
 	}
 	v["provider"] = prov
 	return writeJSONConfig(file, v)
 }
 
-// opencode model aliases (must be in anthropic's built-in allowlist); the proxy maps them to real model names.
-func opencodeModels() map[string]any {
-	return map[string]any{
-		"claude-opus-4-7":   map[string]any{"name": "glm-5.2 (opus)", "limit": map[string]any{"context": 200000, "output": 32768}},
-		"claude-sonnet-4-6": map[string]any{"name": "deepseek-v4-pro (sonnet)", "limit": map[string]any{"context": 200000, "output": 32768}},
-		"claude-haiku-4-5":  map[string]any{"name": "deepseek-v4-flash (haiku)", "limit": map[string]any{"context": 200000, "output": 32768}},
+// gatewayModels returns the real model IDs to expose to clients (pi/opencode),
+// sourced from the models cache (refreshed by `serve`/`models`). Falls back to a
+// hardcoded default if the cache is absent. Clients send these real names; the
+// proxy passes them through (no model_map aliasing needed).
+func gatewayModels(cfg *Config) []string {
+	if c, _ := loadModelsCache(modelsCachePath(cfg)); c != nil && len(c.Data) > 0 {
+		ids := make([]string, 0, len(c.Data))
+		for _, m := range c.Data {
+			ids = append(ids, m.ID)
+		}
+		return ids
 	}
+	// Fallback: the known gateway models.
+	return []string{"glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash"}
+}
+
+// opencodeModels builds the opencode provider model map using real gateway model
+// IDs (no aliasing). Fields mirror the verified opencode config template:
+// name (from pricing table), limit.{context,output}, modalities.{input,output}.
+// context: config model_limits.context > gateway models cache > omitted.
+// output/modalities: config model_limits, falling back to defaults.
+func opencodeModels(cfg *Config) map[string]any {
+	cache, _ := loadModelsCache(modelsCachePath(cfg))
+	ids := gatewayModels(cfg)
+	out := make(map[string]any, len(ids))
+	for _, id := range ids {
+		name := id
+		if p := lookupPricing(id); p != nil && p.DisplayName != "" {
+			name = p.DisplayName
+		}
+		ml := cfg.Takeover.modelLimit(id)
+		ctx := ml.Context
+		if ctx == 0 && cache != nil {
+			for _, m := range cache.Data {
+				if m.ID == id && m.ContextWindow > 0 {
+					ctx = m.ContextWindow
+					break
+				}
+			}
+		}
+		limit := map[string]any{"output": ml.OutputTokens}
+		if ctx > 0 {
+			limit["context"] = ctx
+		}
+		out[id] = map[string]any{
+			"name":  name,
+			"limit": limit,
+			"modalities": map[string]any{
+				"input":  ml.Input,
+				"output": ml.Output,
+			},
+		}
+	}
+	return out
 }
 
 // rewritePi: ~/.pi/agent/models.json
@@ -78,14 +129,49 @@ func rewritePi(cfg *Config) error {
 	if prov == nil {
 		prov = map[string]any{}
 	}
+	// Use real gateway model IDs (from the cache) unless PiModels is explicitly
+	// configured (an override). Real names pass through the proxy without aliasing.
+	var modelIDs []string
+	if len(cfg.Takeover.PiModels) > 0 {
+		modelIDs = cfg.Takeover.PiModels
+	} else {
+		modelIDs = gatewayModels(cfg)
+	}
+	cache, _ := loadModelsCache(modelsCachePath(cfg))
 	models := []map[string]any{}
-	for _, m := range cfg.Takeover.PiModels {
-		models = append(models, map[string]any{"id": m})
+	for _, id := range modelIDs {
+		name := id
+		if p := lookupPricing(id); p != nil && p.DisplayName != "" {
+			name = p.DisplayName
+		}
+		ml := cfg.Takeover.modelLimit(id)
+		ctx := ml.Context
+		if ctx == 0 && cache != nil {
+			for _, m := range cache.Data {
+				if m.ID == id && m.ContextWindow > 0 {
+					ctx = m.ContextWindow
+					break
+				}
+			}
+		}
+		entry := map[string]any{
+			"name":      name,
+			"id":        id,
+			"input":     ml.Input,
+			"maxTokens": ml.OutputTokens,
+		}
+		if ctx > 0 {
+			entry["contextWindow"] = ctx
+		}
+		models = append(models, entry)
 	}
 	if len(models) == 0 {
-		models = []map[string]any{{"id": "claude-opus-4-7"}}
+		ml := defaultModelLimit
+		models = []map[string]any{{"id": "glm-5.2", "name": "glm-5.2", "input": ml.Input, "maxTokens": ml.OutputTokens}}
 	}
-	baseURL := strings.TrimRight(cfg.Takeover.ProxyURL, "/") + "/v1"
+	// pi's `api: anthropic-messages` appends /v1/messages itself, so baseUrl must
+	// be the bare proxy URL WITHOUT /v1 (otherwise pi hits /v1/v1/messages → 502).
+	baseURL := strings.TrimRight(cfg.Takeover.ProxyURL, "/")
 	prov[name] = map[string]any{
 		"baseUrl": baseURL,
 		"api":     "anthropic-messages",

@@ -37,14 +37,57 @@ type Route struct {
 }
 
 type Takeover struct {
-	ProxyURL            string   `yaml:"proxy_url"`
-	ClaudeFile          string   `yaml:"claude_file"`
-	OpencodeFile        string   `yaml:"opencode_file"`
-	OpencodeProviderID  string   `yaml:"opencode_provider_id"`
-	CodexFile           string   `yaml:"codex_file"`
-	PiFile              string   `yaml:"pi_file"`
-	PiProviderName      string   `yaml:"pi_provider_name"`
-	PiModels            []string `yaml:"pi_models"`
+	ProxyURL            string                `yaml:"proxy_url"`
+	ClaudeFile          string                `yaml:"claude_file"`
+	OpencodeFile        string                `yaml:"opencode_file"`
+	OpencodeProviderID  string                `yaml:"opencode_provider_id"`
+	CodexFile           string                `yaml:"codex_file"`
+	PiFile              string                `yaml:"pi_file"`
+	PiProviderName      string                `yaml:"pi_provider_name"`
+	PiModels            []string              `yaml:"pi_models"`
+	// ModelLimits holds per-model output limits (max output tokens, modalities).
+	// Keyed by model id. Used by takeover when writing client configs. Models not
+	// listed fall back to DefaultOutputTokens / default modalities. This keeps
+	// model-specific values in config, not hardcoded in client-rewrite code.
+	ModelLimits         map[string]ModelLimit `yaml:"model_limits"`
+}
+
+// ModelLimit is per-model metadata takeover writes into client configs.
+// Context is optional; when 0, the value from the gateway models cache is used
+// (and if that's missing too, the field is omitted).
+type ModelLimit struct {
+	Context      int64    `yaml:"context"`
+	OutputTokens int      `yaml:"output_tokens"`
+	Input        []string `yaml:"input"`
+	Output       []string `yaml:"output"`
+}
+
+// defaultModelLimit is the fallback when a model isn't in ModelLimits.
+var defaultModelLimit = ModelLimit{
+	OutputTokens: 4096,
+	Input:        []string{"text"},
+	Output:       []string{"text"},
+}
+
+// modelLimit returns the limit for a model, applying config overrides on top of
+// the default (so partial config still fills the gaps).
+func (t *Takeover) modelLimit(modelID string) ModelLimit {
+	m := defaultModelLimit
+	if ml, ok := t.ModelLimits[modelID]; ok {
+		if ml.OutputTokens > 0 {
+			m.OutputTokens = ml.OutputTokens
+		}
+		if len(ml.Input) > 0 {
+			m.Input = ml.Input
+		}
+		if len(ml.Output) > 0 {
+			m.Output = ml.Output
+		}
+		if ml.Context > 0 {
+			m.Context = ml.Context
+		}
+	}
+	return m
 }
 
 // expandPath expands ~ and the env: prefix.
@@ -113,6 +156,12 @@ func LoadConfig(path string) (*Config, error) {
 	t.OpencodeFile = expandPath(t.OpencodeFile)
 	t.CodexFile = expandPath(t.CodexFile)
 	t.PiFile = expandPath(t.PiFile)
+	// If proxy_url is unset, derive it from `listen` so changing the port only
+	// requires editing `listen` (a common footgun: proxy_url pointing at the old
+	// default port while listen moved). An explicit proxy_url always wins.
+	if t.ProxyURL == "" && cfg.Listen != "" {
+		t.ProxyURL = "http://" + cfg.Listen
+	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
