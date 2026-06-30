@@ -106,6 +106,11 @@ func runProxy(sa serveArgs) {
 		if lf := resolveLogFile(sa, cfg); lf != "" {
 			if f, err := openLogFile(lf); err == nil {
 				log.SetOutput(io.MultiWriter(os.Stderr, f))
+				// Logs now land in a file too → disable color so escape codes
+				// don't pollute the file (logColorEnabled was set at init from
+				// stderr being a tty, but the MultiWriter writes the same bytes
+				// to both, and files must stay escape-free).
+				logColorEnabled = false
 			}
 		}
 	}
