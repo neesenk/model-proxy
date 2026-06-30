@@ -24,6 +24,11 @@ GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
 
 `config.yaml`（可用 `ais-switch-proxy config init` 生成模板）。路径支持 `~` 展开与 `env:VAR`。
 
+配置文件查找顺序（首个存在的文件生效）：
+1. `--config PATH` flag（显式指定）
+2. `~/.ais-switch/ais-switch-proxy.yaml`（用户级，跨目录共享）
+3. `./config.yaml`（当前目录）
+
 关键段：
 - 顶层: `listen`(监听地址)、`log_level`、`log_file`(运行时日志 + pid 文件;不配则默认 `$TMPDIR/ais-switch-proxy.log`/`/tmp/ais-switch-proxy.log`,pid 同目录 `.pid`。`serve --daemon` 写入此文件,前台配了也会镜像)
 - `auth`: SSO cookie 文件路径、CQP 换取端点、可选 `static_key`（跳过换取）、gemini key env
@@ -215,7 +220,6 @@ ais-switch-proxy import-pricing --db /path/to/cc-switch.db  # 指定 DB
 - `logout` — 删除 `sso_cookie_file`。
 
 环境变量：
-- `AIS_SWITCH_PROXY_CONFIG` — 配置文件路径（覆盖 `--config`）
 - `AIS_SSO_COOKIE` — SSO cookie 整串（覆盖 `sso_cookie_file`，便于 Linux）
 
 ### `serve --daemon` —— 守护进程模式

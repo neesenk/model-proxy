@@ -42,7 +42,7 @@ type serveArgs struct {
 }
 
 func parseServeArgs(args []string) serveArgs {
-	sa := serveArgs{config: "config.yaml"}
+	sa := serveArgs{config: configPath(args)}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -63,9 +63,6 @@ func parseServeArgs(args []string) serveArgs {
 		case strings.HasPrefix(a, "--log-file="):
 			sa.logFile = strings.TrimPrefix(a, "--log-file=")
 		}
-	}
-	if env := os.Getenv("AIS_SWITCH_PROXY_CONFIG"); env != "" {
-		sa.config = env
 	}
 	return sa
 }

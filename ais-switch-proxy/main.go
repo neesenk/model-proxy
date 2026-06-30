@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -29,8 +30,9 @@ Usage:
 
 client: claude | opencode | codex | pi | all (default all)
 
+Config lookup order: --config PATH > ~/.ais-switch/ais-switch-proxy.yaml > ./config.yaml
+
 Environment:
-  AIS_SWITCH_PROXY_CONFIG  Config file path (overrides --config)
   AIS_SSO_COOKIE    Full SSO cookie string (overrides sso_cookie_file, handy on Linux)
 `
 
@@ -71,13 +73,22 @@ func main() {
 	}
 }
 
-// configPath scans --config / -config / --config= manually and ignores other
-// flags (e.g. login's --import) so flag.Parse doesn't choke on unknown flags.
-// AIS_SWITCH_PROXY_CONFIG overrides --config.
+// homeDirForTest is overridden in tests to redirect the user-config lookup.
+// In production it's empty, and os.UserHomeDir() is used.
+var homeDirForTest = ""
+
+// configPath resolves the config file path, scanning --config / -config /
+// --config= manually (ignoring other flags so flag.Parse doesn't choke on
+// unknown ones like login's --import). Lookup order:
+//
+//	1. --config PATH flag            (explicit)
+//	2. ~/.ais-switch/ais-switch-proxy.yaml   (user-level, shared across CWDs)
+//	3. ./config.yaml                 (current directory)
+//
+// The first existing file wins. If none exists, "./config.yaml" is returned so
+// LoadConfig reports a clear "not found" error.
 func configPath(args []string) string {
-	if env := os.Getenv("AIS_SWITCH_PROXY_CONFIG"); env != "" {
-		return env
-	}
+	// 1. explicit flag
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--config" || a == "-config" {
@@ -89,6 +100,20 @@ func configPath(args []string) string {
 			return strings.TrimPrefix(a, "--config=")
 		}
 	}
+	// 2. user-level config under ~/.ais-switch/
+	home := homeDirForTest
+	if home == "" {
+		if h, err := os.UserHomeDir(); err == nil {
+			home = h
+		}
+	}
+	if home != "" {
+		p := filepath.Join(home, ".ais-switch", "ais-switch-proxy.yaml")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// 3. current directory
 	return "config.yaml"
 }
 
