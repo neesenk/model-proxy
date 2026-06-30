@@ -22,3 +22,19 @@ func runCmd(name string, args ...string) error {
 	c := exec.Command(name, args...)
 	return c.Start()
 }
+
+// mask redacts a secret for logging. Keeps the first 2 and last 2 chars (so a
+// value is still identifiable in debug), replacing the middle with "…". Short
+// or empty values become "****" so they never leak verbatim. Used for cookies,
+// API keys, tokens — never log raw secrets.
+func mask(s string) string {
+	if s == "" {
+		return "(empty)"
+	}
+	// Short secrets: don't reveal even partial — full mask.
+	const minReveal = 8
+	if len(s) < minReveal {
+		return "****"
+	}
+	return s[:2] + "…" + s[len(s)-2:]
+}

@@ -13,6 +13,8 @@ type Config struct {
 	Listen   string   `yaml:"listen"`
 	LogLevel string   `yaml:"log_level"`
 	LogFile  string   `yaml:"log_file"`
+	ModelsCacheFile        string `yaml:"models_cache_file"`
+	ModelsRefreshInterval  string `yaml:"models_refresh_interval"`
 	Auth     AuthCfg  `yaml:"auth"`
 	Routes   []Route  `yaml:"routes"` // preserve order; yaml maps aren't ordered, so use a struct slice
 	Takeover Takeover `yaml:"takeover"`
@@ -74,6 +76,8 @@ func LoadConfig(path string) (*Config, error) {
 		Listen   string         `yaml:"listen"`
 		LogLevel string         `yaml:"log_level"`
 		LogFile  string         `yaml:"log_file"`
+		ModelsCacheFile       string `yaml:"models_cache_file"`
+		ModelsRefreshInterval string `yaml:"models_refresh_interval"`
 		Auth     AuthCfg        `yaml:"auth"`
 		Routes   map[string]Route `yaml:"routes"`
 		Takeover Takeover       `yaml:"takeover"`
@@ -88,6 +92,8 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.Listen = raw.Listen
 	cfg.LogLevel = raw.LogLevel
 	cfg.LogFile = raw.LogFile
+	cfg.ModelsCacheFile = raw.ModelsCacheFile
+	cfg.ModelsRefreshInterval = raw.ModelsRefreshInterval
 	cfg.Auth = raw.Auth
 	cfg.Takeover = raw.Takeover
 

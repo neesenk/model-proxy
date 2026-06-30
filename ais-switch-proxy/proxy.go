@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,9 +45,11 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
-		w.Header().Set("content-type", "application/json")
-		w.WriteHeader(200)
-		w.Write([]byte(`{"object":"list","data":[]}`))
+		// List server-side models: forward to the claude route's upstream
+		// (<upstream>/models, e.g. .../compass-api/v1/models) with CQP auth.
+		// The client path /v1/models maps to upstream /models (the /v1 prefix is
+		// already in the route's upstream base).
+		p.serveModels(w, r)
 		return
 	}
 
@@ -57,6 +60,70 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 	}
 	st := p.routes[route.Name]
 	p.forward(st, w, r)
+}
+
+// serveModels lists server-side models by forwarding GET /v1/models to the first
+// cqp-authed route's upstream at /models (e.g. .../compass-api/v1/models), with
+// the CQP bearer key injected. The client path /v1/models maps to upstream /models
+// because the /v1 version prefix is already part of the route's upstream base.
+// Errors fall back to an empty list so clients don't hard-fail on listing.
+func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
+	st := p.cqpRoute()
+	if st == nil {
+		writeModels(w, nil)
+		return
+	}
+	// Build the upstream URL: <upstream>/models, preserving the client's query.
+	target := strings.TrimRight(st.route.Upstream, "/") + "/models"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		writeModels(w, nil)
+		return
+	}
+	if err := st.auth.Inject(req); err != nil {
+		http.Error(w, "auth: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+	resp, err := st.client.Do(req)
+	if err != nil {
+		log.Printf("[models] upstream: %v", err)
+		writeModels(w, nil)
+		return
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		log.Printf("[models] upstream status=%d body=%s", resp.StatusCode, truncate(string(rb), 200))
+		writeModels(w, nil)
+		return
+	}
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(200)
+	w.Write(rb)
+}
+
+// cqpRoute returns the first route using CQP auth (the gateway route), or nil.
+func (p *Proxy) cqpRoute() *routeState {
+	for _, st := range p.routes {
+		if st.route.Auth == "cqp" {
+			return st
+		}
+	}
+	return nil
+}
+
+// writeModels emits an (empty or given) OpenAI-style model list.
+func writeModels(w http.ResponseWriter, data []byte) {
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(200)
+	if len(data) > 0 {
+		w.Write(data)
+		return
+	}
+	w.Write([]byte(`{"object":"list","data":[]}`))
 }
 
 // forward proxies a request: read body → rewrite model → inject auth → forward → stream back.
@@ -85,9 +152,18 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 		if st.route.UpstreamPath != "" {
 			path = st.route.UpstreamPath
 		}
-		// Preserve the query string.
+		// Build the upstream URL. For the claude/messages route with CQP auth, the
+		// gateway expects ?beta=true (matches AIS Switch); append it preserving any
+		// existing query.
 		targetURL := strings.TrimRight(upstream, "/") + path
-		if r.URL.RawQuery != "" {
+		isMessagesCQP := st.route.Auth == "cqp" && strings.Contains(path, "/messages")
+		if isMessagesCQP && !strings.Contains(targetURL, "beta=") {
+			if r.URL.RawQuery != "" {
+				targetURL += "?" + r.URL.RawQuery + "&beta=true"
+			} else {
+				targetURL += "?beta=true"
+			}
+		} else if r.URL.RawQuery != "" {
 			targetURL += "?" + r.URL.RawQuery
 		}
 
@@ -96,15 +172,27 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "build upstream req: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// Copy client headers (drop hop-by-hop and host).
-		copyHeaders(req.Header, r.Header)
-		req.Header.Del("Host")
-		req.Header.Del("Content-Length")
+		// Copy only a whitelist of client headers (matches AIS Switch / ais-switch-cli
+		// forwarder), not all — avoids leaking the client's Authorization/Cookie/other
+		// headers to the upstream beyond what's intended.
+		copyHeaderWhitelist(req.Header, r.Header,
+			"content-type", "accept", "user-agent", "x-session-id",
+			"user_id", "x-claude-code-session-id", "x-interaction-type", "x-interaction-id",
+			"prompt_cache_key", "x-anthropic-billing-header", "anthropic-beta", "accept-language")
 		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
 		if err := st.auth.Inject(req); err != nil {
 			http.Error(w, "auth: "+err.Error(), http.StatusUnauthorized)
 			return
+		}
+		// Gateway-specific headers for the claude/messages route (matches AIS Switch):
+		// anthropic-version is always sent; x-compass-request-id is a per-request UUID
+		// the gateway expects on managed-key requests.
+		if strings.Contains(st.route.Upstream, "compass") {
+			req.Header.Set("anthropic-version", "2023-06-01")
+			if st.route.Auth == "cqp" {
+				req.Header.Set("x-compass-request-id", newRequestID())
+			}
 		}
 
 		start := time.Now()
@@ -132,7 +220,13 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 			time.Since(start).Milliseconds(), len(body))
 
 		// Copy response headers and body back (streaming flush).
-		copyHeaders(w.Header(), resp.Header)
+		// Full copy is fine here — these are the upstream's response headers
+		// (content-type, etc.) we want to pass to the client.
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
 		w.WriteHeader(resp.StatusCode)
 		flushCopy(w, resp.Body)
 		resp.Body.Close()
@@ -158,12 +252,27 @@ func flushCopy(w http.ResponseWriter, rc io.ReadCloser) {
 	}
 }
 
-func copyHeaders(dst, src http.Header) {
-	for k, vs := range src {
-		for _, v := range vs {
-			dst.Add(k, v)
+// copyHeaderWhitelist copies only the named headers from src to dst (first value
+// only). Matches the AIS Switch / ais-switch-cli forwarder whitelist so the
+// client's Authorization/Cookie/other headers don't leak upstream.
+func copyHeaderWhitelist(dst, src http.Header, keys ...string) {
+	for _, k := range keys {
+		if v := src.Get(k); v != "" {
+			dst.Set(k, v)
 		}
 	}
+}
+
+// newRequestID returns a random UUID v4 string, for x-compass-request-id.
+func newRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Extremely unlikely; fall back to a time-based value.
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // extractModel reads the model field from the JSON body.

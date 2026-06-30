@@ -10,6 +10,12 @@ log_level: info            # debug | info | warn | error
 # Uncomment to override:
 # log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log
 
+# Gateway model-list cache + scheduled refresh (used by serve and the models command).
+# Default cache file: next to sso_cookie_file (ais-switch-proxy-models.json).
+# Default refresh interval: 1h. Uncomment to override:
+# models_cache_file: ~/.ais-switch/ais-switch-proxy-models.json
+# models_refresh_interval: 1h
+
 auth:
   sso_cookie_file: ~/.ais-switch/google_oauth_auth.json
   cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate

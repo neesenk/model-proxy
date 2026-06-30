@@ -65,11 +65,129 @@ opencode run -m anthropic/claude-opus-4-7 "..."
 # 直连场景：只换 CQP key
 ./ais-switch-proxy mint-key
 
+# 列出网关模型（缓存到文件，serve 时后台定时刷新）
+./ais-switch-proxy models                 # 打印缓存（过期则刷新）
+./ais-switch-proxy models --refresh       # 强制刷新后再打印
+
 # 查看登录账号 / 月度用量
 ./ais-switch-proxy status
 # 登出（清除 sso_cookie_file）
 ./ais-switch-proxy logout
 ```
+
+## 通过代理使用（客户端配置）
+
+代理监听 `http://127.0.0.1:15721`（`config.yaml` 的 `listen`），按 URL 路径前缀同时支持三种协议：
+
+- **Anthropic `/v1/messages`** —— 实测可用（claude code / opencode 等走这个；下面的 Python demo 也用它）
+- **OpenAI 兼容 `/v1/chat/completions`、`/v1/responses`** —— 代理转发 + CQP 注入正常，但网关侧当前对 Bearer key 返回 401（需 SSO cookie 鉴权，见 `AGENTS.md` 的 codex 路由说明）
+- **Gemini `/v1beta/*`** —— 需 `GEMINI_API_KEY`
+
+### 快速 demo（Python，零依赖）
+
+`examples/demo.py` 直接调 `/v1/messages`，不依赖任何 SDK：
+
+```bash
+# 1. 启动代理
+./ais-switch-proxy serve --config config.yaml
+
+# 2. 跑 demo（默认 prompt "reply with exactly: pong"，model 别名 claude-haiku-4-5）
+python3 examples/demo.py
+python3 examples/demo.py "What is 2+2? one word" claude-haiku-4-5
+```
+
+代理把别名 `claude-haiku-4-5` 映射成网关真实模型 `deepseek-v4-flash`，注入真实 CQP key，返回结果。
+
+### Anthropic 接口（实测可用）
+
+客户端把 baseURL 指向 `http://127.0.0.1:15721`，apiKey 任意（代理用 CQP key 替换）：
+
+```bash
+curl http://127.0.0.1:15721/v1/messages \
+  -H "content-type: application/json" \
+  -H "Authorization: Bearer ANY" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-haiku-4-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+### OpenAI 兼容接口
+
+客户端把 baseURL 指向 `http://127.0.0.1:15721/v1`，apiKey 任意：
+
+```bash
+curl http://127.0.0.1:15721/v1/chat/completions \
+  -H "content-type: application/json" \
+  -H "Authorization: Bearer ANY" \
+  -d '{"model":"gpt-5.5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:15721/v1", api_key="ANY")
+client.chat.completions.create(model="gpt-5.5", messages=[{"role":"user","content":"hi"}])
+```
+
+> ⚠️ OpenAI 路由 `/v1/chat/completions` 当前上游 401（网关需 SSO cookie 鉴权）。若你的网关 account 支持，可配 `auth.static_key` 或调整路由鉴权；否则用上面的 Anthropic `/v1/messages`。
+
+### 三种协议对照
+
+| 客户端协议 | 端点 | 路由 | 上游 | 鉴权 | 状态 |
+|---|---|---|---|---|---|
+| Anthropic | `/v1/messages` | claude | compass 网关 | CQP key (Bearer) | ✅ 实测可用 |
+| OpenAI 兼容 | `/v1/chat/completions`、`/v1/responses` | codex | compass 网关 | CQP key (Bearer) | ⚠️ 上游 401 |
+| Gemini | `/v1beta/*` | gemini | googleapis | x-goog-api-key | 需 GEMINI_API_KEY |
+
+- **model 改写**：请求体 `model` 字段按 `config.yaml` 的 `model_map` 改写（如 `claude-haiku-4-5` → `deepseek-v4-flash`）。客户端发的模型名是别名，上游收到的是真实模型名。
+- **apiKey 占位**：客户端填任意值（约定 `PROXY_MANAGED`），代理注入真实 CQP key，原占位 token 不会泄漏到上游。
+- **可用模型**：`ais-switch-proxy models` 查看网关实际支持的模型列表。
+
+### 一键接管客户端
+
+`takeover` 自动改写客户端配置文件指向代理（先备份）：
+
+```bash
+./ais-switch-proxy takeover all        # claude | opencode | codex | pi | all
+./ais-switch-proxy restore all         # 还原
+```
+
+- **claude**: `~/.claude/settings.json` 设 `env.ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED`（走 Anthropic 协议）
+- **opencode**: `~/.config/opencode/opencode.json` 的 `provider.anthropic.options.{baseURL,apiKey}`；模型用 anthropic 内置白名单别名
+- **codex**: `~/.codex/config.toml` 注入 `[model_providers.ais_switch_proxy]` + 顶层 `model_provider`（走 OpenAI responses 协议）
+- **pi**: `~/.pi/agent/models.json` 的 `providers.ais-switch-proxy`，`api: anthropic-messages`，`baseUrl` 指代理 `/v1`
+
+> 自定义客户端（不在 takeover 列表里）：直接把它的 baseURL 指向 `http://127.0.0.1:15721`、apiKey 填任意值即可走 Anthropic 协议。
+
+### `models` —— 网关模型列表（缓存 + 定时刷新）
+
+`models` 列出 Compass 网关的真实模型（经 CQP key 调 `<upstream>/models`）。模型列表**缓存到文件**，避免每次都打网关：
+
+- 缓存文件：`models_cache_file`（默认 `~/.ais-switch/ais-switch-proxy-models.json`，即 `sso_cookie_file` 同目录）
+- 刷新间隔：`models_refresh_interval`（默认 `1h`，支持 `30m`/`2h` 等 Go duration）
+- `serve` 启动时后台 goroutine **立即刷新一次**（预热缓存），之后按间隔定时刷新
+- `models` 命令：缓存新鲜（< 间隔）则直接打印缓存；过期则拉取并更新；`--refresh` 强制刷新
+
+配置（`config.yaml`，均可选）：
+```yaml
+# models_cache_file: ~/.ais-switch/ais-switch-proxy-models.json
+# models_refresh_interval: 1h
+```
+
+`models` 输出还合并了**定价元数据**（显示名、输入/输出每百万 token 价格），来自一份内置的定价表（147 条，导出自 AIS Switch 的 `cc-switch.db` `model_pricing` 表）。运行时**不依赖** `cc-switch.db`。
+
+### `import-pricing` —— 刷新定价表
+
+定价数据源自 AIS Switch 桌面端（它在 schema 初始化时从二进制内嵌数据播种 147 条到 `model_pricing` 表，无远程端点）。`import-pricing` 把这张表导出成本地 JSON，运行时优先读取：
+
+```bash
+ais-switch-proxy import-pricing                  # 从 ~/.ais-switch/cc-switch.db 导出
+ais-switch-proxy import-pricing --db /path/to/cc-switch.db  # 指定 DB
+```
+
+- 写入 `~/.ais-switch/models_pricing.json`（运行时自动读取，无需重建二进制）
+- 无此文件时退化到二进制内嵌的默认定价表（`data/models_pricing.json`，随仓库分发）
+- AIS Switch 升级带新定价后，重跑 `import-pricing` 即可刷新
+
+> 注：定价表里没有的模型（如较新的 `glm-5.2`）在 `models` 输出中显示 `—`。
 
 ### `login` —— Compass SSO 登录
 
@@ -137,20 +255,16 @@ log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log   # 自定义日志 + p
 
 ## 客户端接管说明
 
-- **claude**: `~/.claude/settings.json` 设 `env.ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED`
-- **opencode**: `~/.config/opencode/opencode.json` 的 `provider.anthropic.options.{baseURL,apiKey}`；模型用 anthropic 内置白名单别名（`claude-opus-4-7` 等），代理侧映射
-- **codex**: `~/.codex/config.toml` 注入 `[model_providers.ais_switch_proxy]` + 顶层 `model_provider`
-- **pi**: `~/.pi/agent/models.json` 的 `providers.ais-switch-proxy`，`api: anthropic-messages`，`baseUrl` 指代理 `/v1`（参考 [pi.dev/docs](https://pi.dev/docs/latest/models)）
-
-备份文件：`<原文件>.ais-switch-proxy.bak`（纯净副本）+ `.ais-switch-proxy.bak.meta`。
+`takeover` 改写的各客户端配置文件细节见上文[通过代理使用 → 一键接管客户端](#一键接管客户端)。备份文件：`<原文件>.ais-switch-proxy.bak`（纯净副本）+ `.ais-switch-proxy.bak.meta`。
 
 ## 验证状态
 
 - ✅ claude 路由 + CQP 认证 + 模型映射 + 流式转发：端到端实测（`/v1/messages` + FAKE key → 200 + `model=glm-5.2`）
+- ✅ OpenAI 兼容路由 `/v1/chat/completions`：代理转发 + CQP 鉴权注入工作正常（上游对 `gpt-5.5` 返回 401 是网关侧 project scope/鉴权问题，非代理故障）
 - ✅ `mint-key`：输出 64 字符 CQP key
 - ✅ `login`：完整 SSO 流程（bootstrap 拿登录 URL + SSO_A → loopback/回车信号 → 轮询 auth/info 升级 SSO_C → fetchAPIKey 补全身份）由 mock 后端全流程测试覆盖；`login --import` + `status` + `logout` 用真实后端端到端实测（导入真实 SSO cookie → `get_or_generate` 真实换取 64 字符托管 CQP key）✓。浏览器交互需本地实测。
 - ✅ takeover/restore：claude/codex/opencode/pi 配置改写与还原往返正确
-- ⚠️ codex/gemini 路由的**上游鉴权**未在本机实测（codex 可能需 OAuth 而非 CQP，gemini 需 `GEMINI_API_KEY`）。鉴权策略可配置，不通时按 config 调 `auth` 字段。
+- ⚠️ codex/gemini 路由的**上游鉴权**未在本机完全实测（codex 可能需 OAuth/project scope 而非 CQP，gemini 需 `GEMINI_API_KEY`）。鉴权策略可配置，不通时按 config 调 `auth` 字段。
 
 ## 与 AIS Switch 代理的关系
 

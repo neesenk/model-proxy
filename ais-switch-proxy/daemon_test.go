@@ -92,7 +92,3 @@ func TestWriteReadPidFile(t *testing.T) {
 	}
 }
 
-func homeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
-}

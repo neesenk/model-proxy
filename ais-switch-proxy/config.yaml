@@ -1,11 +1,17 @@
 # ais-switch-proxy config — standalone from AIS Switch, portable to Linux.
 # Paths support ~ expansion. env:ENV_VAR reads an environment variable.
 
-listen: 127.0.0.1:15721
+listen: 127.0.0.1:15722
 log_level: info            # debug | info | warn | error
 # Runtime log + pid file. Default when unset: /tmp/ais-switch-proxy.log (pid: /tmp/ais-switch-proxy.pid).
 # Uncomment to override:
 # log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log
+
+# Gateway model-list cache + scheduled refresh (used by serve and the models command).
+# Default cache file: next to sso_cookie_file (ais-switch-proxy-models.json).
+# Default refresh interval: 1h. Uncomment to override:
+# models_cache_file: ~/.ais-switch/ais-switch-proxy-models.json
+# models_refresh_interval: 1h
 
 auth:
   sso_cookie_file: ~/.ais-switch/google_oauth_auth.json

@@ -21,6 +21,8 @@ Usage:
   ais-switch-proxy logout   [--config config.yaml]       Clear sso_cookie_file (log out)
   ais-switch-proxy status   [--config config.yaml]       Show logged-in account / monthly usage
   ais-switch-proxy mint-key [--config config.yaml]       Mint and print a CQP key (for direct mode)
+  ais-switch-proxy models  [--config config.yaml] [--refresh]  List gateway models (cached, refreshes on schedule)
+  ais-switch-proxy import-pricing [--config config.yaml] [--db FILE]  Export pricing from AIS Switch's cc-switch.db
   ais-switch-proxy config init                            Generate a config.yaml template
   ais-switch-proxy config print [--config config.yaml]   Print the effective config
 
@@ -51,6 +53,10 @@ func main() {
 		cmdStatus(os.Args[2:])
 	case "mint-key":
 		cmdMintKey(os.Args[2:])
+	case "models":
+		cmdModels(os.Args[2:])
+	case "import-pricing":
+		cmdImportPricing(os.Args[2:])
 	case "config":
 		cmdConfig(os.Args[2:])
 	case "-h", "--help", "help":

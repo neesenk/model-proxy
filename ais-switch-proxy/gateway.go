@@ -196,7 +196,7 @@ func (c *CompassClient) bootstrapAt(endpoint string) (string, error) {
 			resp.StatusCode, truncate(string(body), 300))
 	}
 	for _, ck := range c.PublicCookies() {
-		logf("[GoogleGateway] bootstrap jar cookie: %s=%s", ck.Name, ck.Value)
+		logf("[GoogleGateway] bootstrap jar cookie: %s=%s", ck.Name, mask(ck.Value))
 	}
 	return loginURL, nil
 }
@@ -231,7 +231,7 @@ func (c *CompassClient) checkSessionAt(endpoint string) (*AuthInfoData, error) {
 		u, _ := url.Parse(endpoint)
 		var names []string
 		for _, ck := range c.Jar.Cookies(u) {
-			names = append(names, ck.Name+"="+ck.Value)
+			names = append(names, ck.Name+"="+mask(ck.Value))
 		}
 		logf("[GoogleGateway] auth/info jar cookies: %s", strings.Join(names, "; "))
 	}
@@ -241,7 +241,10 @@ func (c *CompassClient) checkSessionAt(endpoint string) (*AuthInfoData, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	logf("[GoogleGateway] auth/info status=%d body=%s", resp.StatusCode, truncate(string(body), 150))
+	// Log status + body length only — the auth/info body carries identity (email,
+	// userid) that shouldn't land in logs. The error path below keeps a truncated
+	// body for diagnosis since it surfaces to the caller on failure, not routine logs.
+	logf("[GoogleGateway] auth/info status=%d body=%dB", resp.StatusCode, len(body))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("compass sso session check failed: status=%d body=%s",
 			resp.StatusCode, truncate(string(body), 200))
