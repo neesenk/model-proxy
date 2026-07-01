@@ -109,10 +109,11 @@ def stream_codex(base: str, model: str, prompt: str, max_tokens: int):
 
     codex responses SSE 事件类型：response.created, response.output_text.delta,
     response.completed 等。reasoning（思考）在 response.reasoning_text.delta。
+    Note: codex backend requires store:false (proxy injects it) and does not
+    accept max_tokens/max_output_tokens — omit the limit entirely.
     """
     body = json.dumps({
         "model": model,
-        "max_tokens": max_tokens,
         "stream": True,
         "input": [{"type": "message", "role": "user",
                    "content": [{"type": "input_text", "text": prompt}]}],

@@ -30,6 +30,7 @@ type modelRouteState struct {
 	models   map[string]bool
 	upstream string
 	auth     AuthProvider
+	authName string // "cqp" | "codex_oauth" | "static" | "none"
 	modelMap map[string]string
 }
 
@@ -50,6 +51,7 @@ func NewProxy(cfg *Config) *Proxy {
 				models:   map[string]bool{},
 				upstream: mr.Upstream,
 				auth:     newAuthProvider(mr.Auth, cfg),
+				authName: mr.Auth,
 				modelMap: mr.ModelMap,
 			}
 			for _, m := range mr.Models {
@@ -174,12 +176,16 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 			upstream = mr.upstream
 			auth = mr.auth
 			modelMap = mr.modelMap
-			// authName is inferred from which entry matched; used for ?beta=true
-			// and compass-header logic below. We don't store the name on the
-			// entry, so approximate via the upstream host.
-			authName = "" // matched entry: skip route-level cqp/compass assumptions
+			authName = mr.authName
 			break
 		}
+	}
+
+	// The chatgpt.com codex backend requires store:false in the request body
+	// (it rejects with 400 "Store must be set to false"). Inject it for
+	// codex_oauth requests only; gateway requests are left untouched.
+	if authName == "codex_oauth" {
+		body = ensureJSONField(body, "store", false)
 	}
 
 	// Rewrite the model alias (if configured) before forwarding.
@@ -348,4 +354,23 @@ func rewriteModel(body []byte, newModel string) []byte {
 		return body
 	}
 	return out
+}
+
+// ensureJSONField sets body[key] = val if the key is absent. Used to inject
+// required fields the upstream expects (e.g. store:false for the codex backend)
+// without overwriting a value the client already set.
+func ensureJSONField(body []byte, key string, val any) []byte {
+	var v map[string]any
+	if err := json.Unmarshal(body, &v); err != nil {
+		return body
+	}
+	if _, ok := v[key]; !ok {
+		v[key] = val
+		out, err := json.Marshal(v)
+		if err != nil {
+			return body
+		}
+		return out
+	}
+	return body
 }
