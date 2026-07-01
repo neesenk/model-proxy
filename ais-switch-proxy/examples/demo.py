@@ -65,17 +65,21 @@ def stream_sse(url: str, body: bytes, headers: dict):
                     yield data
 
 
-def stream_anthropic(base: str, model: str, prompt: str, max_tokens: int):
+def stream_anthropic(base: str, model: str, prompt: str, max_tokens: int, thinking_budget: int = 0):
     """Anthropic /v1/messages。yield (kind, text) 增量 + ('meta', dict) 事件。
 
     kind: 'thinking' | 'text' | 'meta'
+    thinking_budget > 0 enables extended thinking with that token budget.
     """
-    body = json.dumps({
+    payload = {
         "model": model,
         "max_tokens": max_tokens,
         "stream": True,
         "messages": [{"role": "user", "content": prompt}],
-    }).encode()
+    }
+    if thinking_budget > 0:
+        payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+    body = json.dumps(payload).encode()
     headers = {
         "content-type": "application/json",
         "Authorization": "Bearer ANY",
@@ -104,20 +108,24 @@ def stream_anthropic(base: str, model: str, prompt: str, max_tokens: int):
                 yield ("meta", meta)
 
 
-def stream_codex(base: str, model: str, prompt: str, max_tokens: int):
+def stream_codex(base: str, model: str, prompt: str, max_tokens: int, effort: str = ""):
     """codex /v1/responses。yield (kind, text) + ('meta', dict)。
 
     codex responses SSE 事件类型：response.created, response.output_text.delta,
     response.completed 等。reasoning（思考）在 response.reasoning_text.delta。
     Note: codex backend requires store:false (proxy injects it) and does not
     accept max_tokens/max_output_tokens — omit the limit entirely.
+    effort (low|medium|high) sets reasoning effort if non-empty.
     """
-    body = json.dumps({
+    payload = {
         "model": model,
         "stream": True,
         "input": [{"type": "message", "role": "user",
                    "content": [{"type": "input_text", "text": prompt}]}],
-    }).encode()
+    }
+    if effort:
+        payload["reasoning"] = {"effort": effort}
+    body = json.dumps(payload).encode()
     headers = {
         "content-type": "application/json",
         "Authorization": "Bearer ANY",
@@ -150,7 +158,11 @@ def main():
     ap.add_argument("--protocol", choices=["anthropic", "codex"], default="anthropic",
                     help="协议：anthropic(/v1/messages) 或 codex(/v1/responses)。默认 anthropic")
     ap.add_argument("--max-tokens", type=int, default=1024,
-                    help="最大输出 token；thinking 模型建议 ≥1024，复杂问题 2000+")
+                    help="最大输出 token；thinking 模型建议 ≥1024，复杂问题 2000+（codex 协议忽略）")
+    ap.add_argument("--effort", choices=["low", "medium", "high"], default="",
+                    help="codex 协议推理等级：low|medium|high（仅 --protocol codex 生效）")
+    ap.add_argument("--thinking-budget", type=int, default=0,
+                    help="anthropic 协议思考 token 预算（仅 --protocol anthropic 生效，0=不启用/用模型默认）")
     ap.add_argument("--host", default=DEFAULT_HOST, help=f"代理主机（默认 {DEFAULT_HOST}）")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"代理端口（默认 {DEFAULT_PORT}）")
     args = ap.parse_args()
@@ -160,11 +172,19 @@ def main():
 
     base = f"http://{args.host}:{args.port}"
     path = "/v1/responses" if args.protocol == "codex" else "/v1/messages"
-    print(f"→ POST {base}{path}  (protocol={args.protocol}, model={args.model}, max_tokens={args.max_tokens})")
+    thinking_info = ""
+    if args.protocol == "codex" and args.effort:
+        thinking_info = f", effort={args.effort}"
+    elif args.protocol == "anthropic" and args.thinking_budget > 0:
+        thinking_info = f", thinking_budget={args.thinking_budget}"
+    print(f"→ POST {base}{path}  (protocol={args.protocol}, model={args.model}, max_tokens={args.max_tokens}{thinking_info})")
     print(f"→ prompt: {args.prompt!r}")
     print("—" * 60)
 
-    streamer = stream_codex if args.protocol == "codex" else stream_anthropic
+    if args.protocol == "codex":
+        streamer = lambda base, model, prompt, mt: stream_codex(base, model, prompt, mt, args.effort)
+    else:
+        streamer = lambda base, model, prompt, mt: stream_anthropic(base, model, prompt, mt, args.thinking_budget)
     start = time.time()
     in_thinking = False
     usage = None
