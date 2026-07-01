@@ -192,10 +192,15 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
-		// If upstream_path is empty, keep the original path.
+		// If upstream_path is empty, derive the upstream path from the client path.
+		// The route's upstream base already contains the version prefix (e.g.
+		// .../compass-api/v1), so strip the client's leading /v1 to avoid a
+		// doubled /v1/v1 path (which the gateway rejects for /v1/responses).
 		path := r.URL.Path
 		if st.route.UpstreamPath != "" {
 			path = st.route.UpstreamPath
+		} else if strings.HasPrefix(path, "/v1/") {
+			path = strings.TrimPrefix(path, "/v1")
 		}
 		// Build the upstream URL. For the claude/messages route with CQP auth, the
 		// gateway expects ?beta=true (matches AIS Switch); append it preserving any
