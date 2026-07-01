@@ -26,7 +26,7 @@ GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
 
 配置文件查找顺序（首个存在的文件生效）：
 1. `--config PATH` flag（显式指定）
-2. `~/.ais-switch/ais-switch-proxy.yaml`（用户级，跨目录共享）
+2. `~/.ais-switch/config.yaml`（用户级，跨目录共享）
 3. `./config.yaml`（当前目录）
 
 关键段：

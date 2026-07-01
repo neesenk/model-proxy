@@ -30,7 +30,7 @@ Usage:
 
 client: claude | opencode | codex | pi | all (default all)
 
-Config lookup order: --config PATH > ~/.ais-switch/ais-switch-proxy.yaml > ./config.yaml
+Config lookup order: --config PATH > ~/.ais-switch/config.yaml > ./config.yaml
 
 Environment:
   AIS_SSO_COOKIE    Full SSO cookie string (overrides sso_cookie_file, handy on Linux)
@@ -82,7 +82,7 @@ var homeDirForTest = ""
 // unknown ones like login's --import). Lookup order:
 //
 //	1. --config PATH flag            (explicit)
-//	2. ~/.ais-switch/ais-switch-proxy.yaml   (user-level, shared across CWDs)
+//	2. ~/.ais-switch/config.yaml   (user-level, shared across CWDs)
 //	3. ./config.yaml                 (current directory)
 //
 // The first existing file wins. If none exists, "./config.yaml" is returned so
@@ -108,7 +108,7 @@ func configPath(args []string) string {
 		}
 	}
 	if home != "" {
-		p := filepath.Join(home, ".ais-switch", "ais-switch-proxy.yaml")
+		p := filepath.Join(home, ".ais-switch", "config.yaml")
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}

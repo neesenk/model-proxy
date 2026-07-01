@@ -8,7 +8,7 @@ import (
 
 func TestParseServeArgs(t *testing.T) {
 	// All cases use an explicit --config so the result doesn't depend on whether
-	// ~/.ais-switch/ais-switch-proxy.yaml exists on the test host.
+	// ~/.ais-switch/config.yaml exists on the test host.
 	cases := []struct {
 		name string
 		args []string
@@ -34,7 +34,7 @@ func TestParseServeArgs(t *testing.T) {
 }
 
 // TestConfigPath_LookupOrder verifies the lookup order:
-// --config flag > ~/.ais-switch/ais-switch-proxy.yaml > ./config.yaml.
+// --config flag > ~/.ais-switch/config.yaml > ./config.yaml.
 func TestConfigPath_LookupOrder(t *testing.T) {
 	// 1. explicit flag wins over everything.
 	got := configPath([]string{"--config", "/explicit.yaml"})
@@ -54,7 +54,7 @@ func TestConfigPath_LookupOrder(t *testing.T) {
 	if err := os.MkdirAll(aisDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	homeCfg := filepath.Join(aisDir, "ais-switch-proxy.yaml")
+	homeCfg := filepath.Join(aisDir, "config.yaml")
 	if err := os.WriteFile(homeCfg, []byte("listen: 127.0.0.1:0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
