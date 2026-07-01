@@ -44,7 +44,7 @@ func TestFetchModels(t *testing.T) {
 }
 
 func TestFetchModels_NoCQPRoute(t *testing.T) {
-	cfg := &Config{Routes: []Route{{Name: "g", Auth: "gemini_key", Upstream: "http://x"}}}
+	cfg := &Config{Routes: []Route{{Name: "g", Auth: "static", Upstream: "http://x"}}}
 	if _, err := fetchModels(cfg); err == nil {
 		t.Error("expected error for no cqp route")
 	}

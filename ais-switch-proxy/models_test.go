@@ -70,8 +70,8 @@ func TestServeModels_NoCQPRouteFallsBackToEmpty(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Routes: []Route{{
-			Name: "gemini", PathPrefixes: []string{"/v1beta"},
-			Upstream: "http://x", Auth: "gemini_key",
+			Name: "other", PathPrefixes: []string{"/v1beta"},
+			Upstream: "http://x", Auth: "static",
 		}},
 	}
 	p := NewProxy(cfg)

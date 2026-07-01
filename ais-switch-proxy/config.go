@@ -21,10 +21,12 @@ type Config struct {
 }
 
 type AuthCfg struct {
-	SSOCookieFile   string `yaml:"sso_cookie_file"`
-	CQPMintURL      string `yaml:"cqp_mint_url"`
-	StaticKey       string `yaml:"static_key"`
-	GeminiAPIKeyEnv string `yaml:"gemini_api_key_env"`
+	SSOCookieFile string `yaml:"sso_cookie_file"`
+	CQPMintURL    string `yaml:"cqp_mint_url"`
+	StaticKey     string `yaml:"static_key"`
+	// CodexAuthFile is ~/.codex/auth.json — read by the codex_oauth auth provider
+	// to get the ChatGPT access/refresh tokens for the codex native backend.
+	CodexAuthFile string `yaml:"codex_auth_file"`
 }
 
 type Route struct {
@@ -32,19 +34,35 @@ type Route struct {
 	PathPrefixes  []string          `yaml:"path_prefixes"`
 	Upstream      string            `yaml:"upstream"`
 	UpstreamPath  string            `yaml:"upstream_path"`
-	Auth          string            `yaml:"auth"` // cqp | gemini_key | static | none
+	Auth          string            `yaml:"auth"` // cqp | codex_oauth | static | none
 	ModelMap      map[string]string `yaml:"model_map"`
+	// ModelRouting enables per-model upstream/auth selection within this route.
+	// A request whose model matches an entry's Models uses that entry's
+	// Upstream/Auth/ModelMap; otherwise the route's top-level fields are used.
+	// Used by the codex route to send codex-native models (gpt-5.5) to the
+	// chatgpt.com backend (codex OAuth) and gateway models to compass (CQP).
+	ModelRouting []ModelRoute `yaml:"model_routing"`
+}
+
+// ModelRoute is one per-model routing entry within a Route.
+type ModelRoute struct {
+	Models   []string          `yaml:"models"`
+	Upstream string            `yaml:"upstream"`
+	Auth     string            `yaml:"auth"` // cqp | codex_oauth | static | none
+	ModelMap map[string]string `yaml:"model_map"`
 }
 
 type Takeover struct {
-	ProxyURL            string                `yaml:"proxy_url"`
-	ClaudeFile          string                `yaml:"claude_file"`
-	OpencodeFile        string                `yaml:"opencode_file"`
-	OpencodeProviderID  string                `yaml:"opencode_provider_id"`
-	CodexFile           string                `yaml:"codex_file"`
-	PiFile              string                `yaml:"pi_file"`
-	PiProviderName      string                `yaml:"pi_provider_name"`
-	PiModels            []string              `yaml:"pi_models"`
+	ProxyURL     string                `yaml:"proxy_url"`
+	ClaudeFile   string                `yaml:"claude_file"`
+	OpencodeFile string                `yaml:"opencode_file"`
+	CodexFile    string                `yaml:"codex_file"`
+	PiFile       string                `yaml:"pi_file"`
+	// ProviderID is the single provider identifier used by takeover for every
+	// agent that takes one (opencode, pi, codex, and future agents). claude
+	// doesn't use it (it writes env vars). Default "ais-switch-proxy".
+	ProviderID   string                `yaml:"provider_id"`
+	PiModels     []string              `yaml:"pi_models"`
 	// ModelLimits holds per-model output limits (max output tokens, modalities).
 	// Keyed by model id. Used by takeover when writing client configs. Models not
 	// listed fall back to DefaultOutputTokens / default modalities. This keeps
@@ -148,6 +166,7 @@ func LoadConfig(path string) (*Config, error) {
 
 	// Expand auth paths.
 	cfg.Auth.SSOCookieFile = expandPath(cfg.Auth.SSOCookieFile)
+	cfg.Auth.CodexAuthFile = expandPath(cfg.Auth.CodexAuthFile)
 	// Expand log path.
 	cfg.LogFile = expandPath(cfg.LogFile)
 	// Expand takeover paths.

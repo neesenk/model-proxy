@@ -23,14 +23,19 @@ func rewriteClaude(cfg *Config) error {
 	return writeJSONConfig(file, v)
 }
 
+// providerID returns the configured provider id (default "ais-switch-proxy").
+func providerID(cfg *Config) string {
+	if cfg.Takeover.ProviderID != "" {
+		return cfg.Takeover.ProviderID
+	}
+	return "ais-switch-proxy"
+}
+
 // rewriteOpencode: ~/.config/opencode/opencode.json
 // Sets provider.<id>.options.{baseURL,apiKey} → proxy.
 func rewriteOpencode(cfg *Config) error {
 	file := cfg.Takeover.OpencodeFile
-	pid := cfg.Takeover.OpencodeProviderID
-	if pid == "" {
-		pid = "anthropic"
-	}
+	pid := providerID(cfg)
 	v, err := readJSONConfig(file)
 	if err != nil {
 		return err
@@ -117,10 +122,7 @@ func opencodeModels(cfg *Config) map[string]any {
 // providers.<name> = { baseUrl, api: anthropic-messages, apiKey: PROXY_MANAGED, models:[{id}] }
 func rewritePi(cfg *Config) error {
 	file := cfg.Takeover.PiFile
-	name := cfg.Takeover.PiProviderName
-	if name == "" {
-		name = "ais-switch-proxy"
-	}
+	name := providerID(cfg)
 	v, err := readJSONConfig(file)
 	if err != nil {
 		return err
@@ -183,7 +185,9 @@ func rewritePi(cfg *Config) error {
 }
 
 // rewriteCodex: ~/.codex/config.toml
-// Text edit: set top-level model_provider=ais_switch_proxy and inject a [model_providers.ais_switch_proxy] section.
+// Text edit: set top-level model_provider=<id> and inject a [model_providers."<id>"] section.
+// The provider id is the unified ProviderID (default ais-switch-proxy); hyphens
+// are fine because the section header is quoted.
 func rewriteCodex(cfg *Config) error {
 	file := cfg.Takeover.CodexFile
 	data, err := readFile(file)
@@ -191,20 +195,22 @@ func rewriteCodex(cfg *Config) error {
 		return err
 	}
 	text := string(data)
+	pid := providerID(cfg)
+	header := fmt.Sprintf(`model_providers."%s"`, pid)
 
-	// Inject / replace the model_providers.ais_switch_proxy section.
+	// Inject / replace the model_providers."<id>" section.
 	section := fmt.Sprintf(`
-[model_providers.ais_switch_proxy]
+[model_providers."%s"]
 name = "AIS Switch Proxy"
 base_url = "%s"
 wire_api = "responses"
 requires_openai_auth = true
-`, cfg.Takeover.ProxyURL)
+`, pid, cfg.Takeover.ProxyURL)
 
-	text = replaceOrAppendTOMLSection(text, "model_providers.ais_switch_proxy", section)
+	text = replaceOrAppendTOMLSection(text, header, section)
 
 	// Set the top-level model_provider.
-	text = setTOMLTopKey(text, "model_provider", `"ais_switch_proxy"`)
+	text = setTOMLTopKey(text, "model_provider", fmt.Sprintf("%q", pid))
 
 	return writeFile(file, []byte(text), 0o644)
 }

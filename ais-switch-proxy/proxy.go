@@ -18,22 +18,46 @@ type Proxy struct {
 }
 
 type routeState struct {
-	route  *Route
-	auth   AuthProvider
-	client *http.Client
+	route       *Route
+	auth        AuthProvider // top-level route auth
+	client      *http.Client
+	modelRoutes []modelRouteState // per-model routing entries (model_routing)
+}
+
+// modelRouteState is a compiled ModelRoute: which models it matches, and its
+// own upstream/auth (so a single route can split requests across backends).
+type modelRouteState struct {
+	models   map[string]bool
+	upstream string
+	auth     AuthProvider
+	modelMap map[string]string
 }
 
 func NewProxy(cfg *Config) *Proxy {
 	p := &Proxy{cfg: cfg, routes: map[string]*routeState{}}
 	for i := range cfg.Routes {
 		r := &cfg.Routes[i]
-		p.routes[r.Name] = &routeState{
+		st := &routeState{
 			route: r,
-			auth:  newAuthProvider(r, cfg),
+			auth:  newAuthProvider(r.Auth, cfg),
 			client: &http.Client{
 				Timeout: 0, // no overall timeout for streaming
 			},
 		}
+		// Compile per-model routing entries.
+		for _, mr := range r.ModelRouting {
+			mrs := modelRouteState{
+				models:   map[string]bool{},
+				upstream: mr.Upstream,
+				auth:     newAuthProvider(mr.Auth, cfg),
+				modelMap: mr.ModelMap,
+			}
+			for _, m := range mr.Models {
+				mrs.models[m] = true
+			}
+			st.modelRoutes = append(st.modelRoutes, mrs)
+		}
+		p.routes[r.Name] = st
 	}
 	return p
 }
@@ -137,8 +161,30 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 	r.Body.Close()
 
 	model := extractModel(body)
+
+	// Select upstream/auth/model_map for this request. If a model_routing entry
+	// matches the request's model, it wins; otherwise the route's top-level
+	// fields are used.
+	upstream := st.route.Upstream
+	auth := st.auth
+	modelMap := st.route.ModelMap
+	authName := st.route.Auth
+	for _, mr := range st.modelRoutes {
+		if mr.models[model] {
+			upstream = mr.upstream
+			auth = mr.auth
+			modelMap = mr.modelMap
+			// authName is inferred from which entry matched; used for ?beta=true
+			// and compass-header logic below. We don't store the name on the
+			// entry, so approximate via the upstream host.
+			authName = "" // matched entry: skip route-level cqp/compass assumptions
+			break
+		}
+	}
+
+	// Rewrite the model alias (if configured) before forwarding.
 	mapped := model
-	if m, ok := st.route.ModelMap[model]; ok && m != "" {
+	if m, ok := modelMap[model]; ok && m != "" {
 		mapped = m
 	}
 	if mapped != model && mapped != "" {
@@ -146,7 +192,6 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
-		upstream := st.route.Upstream
 		// If upstream_path is empty, keep the original path.
 		path := r.URL.Path
 		if st.route.UpstreamPath != "" {
@@ -156,7 +201,7 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 		// gateway expects ?beta=true (matches AIS Switch); append it preserving any
 		// existing query.
 		targetURL := strings.TrimRight(upstream, "/") + path
-		isMessagesCQP := st.route.Auth == "cqp" && strings.Contains(path, "/messages")
+		isMessagesCQP := authName == "cqp" && strings.Contains(path, "/messages")
 		if isMessagesCQP && !strings.Contains(targetURL, "beta=") {
 			if r.URL.RawQuery != "" {
 				targetURL += "?" + r.URL.RawQuery + "&beta=true"
@@ -181,16 +226,16 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 			"prompt_cache_key", "x-anthropic-billing-header", "anthropic-beta", "accept-language")
 		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
-		if err := st.auth.Inject(req); err != nil {
+		if err := auth.Inject(req); err != nil {
 			http.Error(w, "auth: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
 		// Gateway-specific headers for the claude/messages route (matches AIS Switch):
 		// anthropic-version is always sent; x-compass-request-id is a per-request UUID
 		// the gateway expects on managed-key requests.
-		if strings.Contains(st.route.Upstream, "compass") {
+		if strings.Contains(upstream, "compass") {
 			req.Header.Set("anthropic-version", "2023-06-01")
-			if st.route.Auth == "cqp" {
+			if authName == "cqp" {
 				req.Header.Set("x-compass-request-id", newRequestID())
 			}
 		}
@@ -207,7 +252,7 @@ func (p *Proxy) forward(st *routeState, w http.ResponseWriter, r *http.Request) 
 			resp.Body.Close()
 			log.Printf("[route=%s] %s",
 				st.route.Name, cl(ansiYellow, "401, refreshing auth and retrying"))
-			if rerr := st.auth.Refresh(); rerr != nil {
+			if rerr := auth.Refresh(); rerr != nil {
 				http.Error(w, "auth refresh: "+rerr.Error(), http.StatusUnauthorized)
 				return
 			}

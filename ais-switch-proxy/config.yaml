@@ -16,8 +16,8 @@ log_level: info            # debug | info | warn | error
 auth:
   sso_cookie_file: ~/.ais-switch/google_oauth_auth.json
   cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
+  codex_auth_file: ~/.codex/auth.json   # codex OAuth tokens, for the chatgpt.com backend
   # static_key: "..."
-  # gemini_api_key_env: GEMINI_API_KEY
 
 routes:
   claude:
@@ -34,17 +34,20 @@ routes:
       claude-haiku-4-5: deepseek-v4-flash
   codex:
     path_prefixes: ["/v1/chat/completions", "/v1/responses"]
+    # Default backend: the compass gateway (for gateway models like glm-5.2).
     upstream: https://compass.llm.shopee.io/compass-api/v1
     upstream_path: ""
     auth: cqp
     model_map:
       gpt-5.5: gpt-5.5
-  gemini:
-    path_prefixes: ["/v1beta"]
-    upstream: https://generativelanguage.googleapis.com
-    upstream_path: ""
-    auth: gemini_key
-    model_map: {}
+    # Per-model routing: codex-native models go to the chatgpt.com backend with
+    # codex OAuth; everything else falls back to the gateway above. This lets
+    # codex use both gpt-5.5 (native) and gateway models in one session without
+    # switching providers.
+    model_routing:
+      - models: [gpt-5.5]
+        upstream: https://chatgpt.com/backend-api/codex
+        auth: codex_oauth
 
 takeover:
   # proxy_url defaults to http://<listen> when unset — leave it commented so
@@ -52,10 +55,11 @@ takeover:
   # proxy_url: http://127.0.0.1:15721
   claude_file: ~/.claude/settings.json
   opencode_file: ~/.config/opencode/opencode.json
-  opencode_provider_id: ais-switch
   codex_file: ~/.codex/config.toml
   pi_file: ~/.pi/agent/models.json
-  pi_provider_name: ais-switch-proxy
+  # provider_id is the single identifier used by takeover for every agent that
+  # takes one (opencode, pi, codex, future agents). claude doesn't use it.
+  provider_id: ais-switch-proxy
   # pi_models: when unset, takeover writes the real gateway model IDs from the
   # models cache (glm-5.2 / deepseek-v4-pro / deepseek-v4-flash). Uncomment to
   # override with a custom list (e.g. aliases, if you also configure model_map).
