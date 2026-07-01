@@ -169,70 +169,82 @@ const (
 	codexOAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 )
 
-// CodexOAuthProvider reads ~/.codex/auth.json's access_token and injects it as
-// Bearer for the chatgpt.com/backend-api/codex backend. On 401 it refreshes via
-// refresh_token and writes the new tokens back to auth.json (shared with codex CLI).
+// CodexOAuthProvider reads the proxy's OWN codex OAuth tokens (from
+// cfg.Auth.CodexAuthFile, default ~/.ais-switch/codex_oauth_auth.json — obtained
+// via `ais-switch-proxy codex-login`, NOT shared with codex CLI's ~/.codex/auth.json)
+// and injects the access_token as Bearer for the chatgpt.com/backend-api/codex
+// backend. On 401 it refreshes via refresh_token and writes new tokens back.
 type CodexOAuthProvider struct {
 	authFile  string
 	tokenURL  string // override for tests; defaults to codexOAuthTokenURL
 
-	mu     sync.Mutex
-	cached string    // access_token
-	exp    time.Time // access_token expiry (parsed from JWT)
+	mu        sync.Mutex
+	cached    string    // access_token
+	exp       time.Time // access_token expiry (parsed from JWT)
+	accountID string    // chatgpt account_id (parsed from id_token JWT)
 }
 
 func newCodexOAuthProvider(authFile string) *CodexOAuthProvider {
 	return &CodexOAuthProvider{authFile: authFile, tokenURL: codexOAuthTokenURL}
 }
 
-// codexAuthFile is the on-disk format of ~/.codex/auth.json.
+// codexAuthFile is the on-disk format of the proxy's codex_oauth_auth.json.
 type codexAuthFile struct {
 	AuthMode string `json:"auth_mode"`
 	Tokens   struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
 		AccountID    string `json:"account_id"`
 	} `json:"tokens"`
 	LastRefresh string `json:"last_refresh"`
 }
 
 func (p *CodexOAuthProvider) Inject(req *http.Request) error {
-	tok, err := p.token()
+	tok, acct, err := p.token()
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Del("x-api-key")
+	// codex backend requires these headers (matches codex CLI's originator +
+	// account scoping). Without originator the backend returns 403.
+	req.Header.Set("originator", "codex_cli_rs")
+	if acct != "" {
+		req.Header.Set("ChatGPT-Account-Id", acct)
+	}
 	return nil
 }
 
-// token returns a valid access_token, refreshing if cached is missing/expired.
-func (p *CodexOAuthProvider) token() (string, error) {
+// token returns a valid access_token and the chatgpt account_id, refreshing if
+// cached is missing/expired.
+func (p *CodexOAuthProvider) token() (string, string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Use cached if present and not near expiry (5 min skew).
 	if p.cached != "" && (p.exp.IsZero() || time.Until(p.exp) > 5*time.Minute) {
-		return p.cached, nil
+		return p.cached, p.accountID, nil
 	}
-	// Load from file (codex CLI may have refreshed it independently).
+	// Load from file.
 	af, err := p.load()
 	if err != nil {
-		return "", fmt.Errorf("read codex auth: %w", err)
+		return "", "", fmt.Errorf("read codex auth: %w", err)
 	}
 	exp := jwtExpiry(af.Tokens.AccessToken)
+	acct := accountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID)
 	// If file token still valid, cache and use it.
 	if af.Tokens.AccessToken != "" && (exp.IsZero() || time.Until(exp) > 5*time.Minute) {
-		p.cached, p.exp = af.Tokens.AccessToken, exp
-		return p.cached, nil
+		p.cached, p.exp, p.accountID = af.Tokens.AccessToken, exp, acct
+		return p.cached, p.accountID, nil
 	}
 	// Need refresh.
 	if af.Tokens.RefreshToken == "" {
-		return "", fmt.Errorf("codex auth has no refresh_token; run `codex login`")
+		return "", "", fmt.Errorf("codex auth has no refresh_token; run `ais-switch-proxy codex-login`")
 	}
 	if err := p.refreshLocked(af); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return p.cached, nil
+	return p.cached, p.accountID, nil
 }
 
 // Refresh forces a token refresh (called on upstream 401).
@@ -244,9 +256,41 @@ func (p *CodexOAuthProvider) Refresh() error {
 		return fmt.Errorf("read codex auth: %w", err)
 	}
 	if af.Tokens.RefreshToken == "" {
-		return fmt.Errorf("codex auth has no refresh_token; run `codex login`")
+		return fmt.Errorf("codex auth has no refresh_token; run `ais-switch-proxy codex-login`")
 	}
 	return p.refreshLocked(af)
+}
+
+// accountIDFromTokens returns the chatgpt account_id: prefer the stored field,
+// else parse it from the id_token JWT's https://api.openai.com/auth.chatgpt_account_id claim.
+func accountIDFromTokens(idToken, stored string) string {
+	if stored != "" {
+		return stored
+	}
+	if idToken == "" {
+		return ""
+	}
+	parts := strings.Split(idToken, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload := parts[1]
+	if pad := len(payload) % 4; pad != 0 {
+		payload += strings.Repeat("=", 4-pad)
+	}
+	b, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return ""
+	}
+	var c struct {
+		Auth struct {
+			AccountID string `json:"chatgpt_account_id"`
+		} `json:"https://api.openai.com/auth"`
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		return ""
+	}
+	return c.Auth.AccountID
 }
 
 func (p *CodexOAuthProvider) load() (*codexAuthFile, error) {
@@ -303,13 +347,14 @@ func (p *CodexOAuthProvider) refreshLocked(af *codexAuthFile) error {
 		af.Tokens.RefreshToken = tok.RefreshToken
 	}
 	if tok.IDToken != "" {
-		// Preserve other fields; only rewrite tokens we track. Re-marshal full file.
+		af.Tokens.IDToken = tok.IDToken
 	}
 	af.LastRefresh = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := p.save(af); err != nil {
 		return fmt.Errorf("write codex auth: %w", err)
 	}
 	p.cached, p.exp = tok.AccessToken, jwtExpiry(tok.AccessToken)
+	p.accountID = accountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID)
 	return nil
 }
 
@@ -360,7 +405,7 @@ func newAuthProvider(authName string, cfg *Config) AuthProvider {
 	case "codex_oauth":
 		f := cfg.Auth.CodexAuthFile
 		if f == "" {
-			f = "~/.codex/auth.json"
+			f = "~/.ais-switch/codex_oauth_auth.json"
 		}
 		return newCodexOAuthProvider(expandPath(f))
 	case "static":

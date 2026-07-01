@@ -19,6 +19,7 @@ Usage:
   ais-switch-proxy takeover [--config config.yaml] [client]  Rewrite client config to point at the proxy
   ais-switch-proxy restore  [--config config.yaml] [client]  Restore client config from backup
   ais-switch-proxy login    [--config config.yaml]       Compass SSO login, writes sso_cookie_file
+  ais-switch-proxy codex-login [--config config.yaml]   codex OAuth device flow (independent tokens, for the chatgpt.com backend)
   ais-switch-proxy login --import [--config config.yaml] Import SSO cookie from the AIS Switch desktop app
   ais-switch-proxy logout   [--config config.yaml]       Clear sso_cookie_file (log out)
   ais-switch-proxy status   [--config config.yaml]       Show logged-in account / monthly usage
@@ -52,6 +53,8 @@ func main() {
 		cmdRestore(os.Args[2:])
 	case "login":
 		cmdLogin(os.Args[2:])
+	case "codex-login":
+		cmdCodexLogin(os.Args[2:])
 	case "logout":
 		cmdLogout(os.Args[2:])
 	case "status":
