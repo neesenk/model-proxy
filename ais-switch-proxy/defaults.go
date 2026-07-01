@@ -37,18 +37,16 @@ routes:
       claude-haiku-4-5: deepseek-v4-flash
   codex:
     path_prefixes: ["/v1/chat/completions", "/v1/responses"]
-    # Default backend: the compass gateway (for gateway models like glm-5.2).
-    upstream: https://compass.llm.shopee.io/compass-api/v1
+    # Default backend: chatgpt.com (codex OAuth). All codex-native models
+    # (gpt-5.5, gpt-5.4, ...) go here automatically without enumerating each.
+    upstream: https://chatgpt.com/backend-api/codex
     upstream_path: ""
-    auth: cqp
-    model_map:
-      gpt-5.5: gpt-5.5
-    # Per-model routing: codex-native models go to the chatgpt.com backend with
-    # codex OAuth; everything else falls back to the gateway above.
+    auth: codex_oauth
+    # Gateway models (glm-5.2, deepseek-*) route to compass with CQP key.
     model_routing:
-      - models: [gpt-5.5]
-        upstream: https://chatgpt.com/backend-api/codex
-        auth: codex_oauth
+      - models: [glm-5.2, deepseek-v4-pro, deepseek-v4-flash]
+        upstream: https://compass.llm.shopee.io/compass-api/v1
+        auth: cqp
 
 takeover:
   # proxy_url defaults to http://<listen> when unset — leave it commented so
