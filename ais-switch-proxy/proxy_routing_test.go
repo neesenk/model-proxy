@@ -5,22 +5,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 )
 
-// TestForward_ModelRouting_SplitsByModel verifies that a route with model_routing
-// sends matching models to the entry's upstream+auth and others to the route's
-// default upstream+auth.
-func TestForward_ModelRouting_SplitsByModel(t *testing.T) {
+// TestForward_ProviderRouting_SplitsByModel verifies that the proxy routes
+// requests to different providers based on the route's model→provider/model map.
+func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	var codexHit, gwHit requestHit
-	// codex native backend
 	codexUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		codexHit = captureHit(r)
 		w.Header().Set("content-type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	}))
 	defer codexUp.Close()
-	// gateway backend
 	gwUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gwHit = captureHit(r)
 		w.Header().Set("content-type", "application/json")
@@ -28,58 +24,78 @@ func TestForward_ModelRouting_SplitsByModel(t *testing.T) {
 	}))
 	defer gwUp.Close()
 
-	// CQP provider with a static key (skip real minting).
 	cfg := &Config{
-		Auth: AuthCfg{StaticKey: "cqp-key"},
-		Routes: []Route{{
-			Name:         "codex",
-			PathPrefixes: []string{"/v1/responses"},
-			Upstream:     gwUp.URL, // default = gateway
-			Auth:         "static",
-			ModelRouting: []ModelRoute{{
-				Models:   []string{"gpt-5.5"},
-				Upstream: codexUp.URL,
-				Auth:     "static",
+		Auth: AuthCfg{StaticKey: "gw-key"},
+		Providers: map[string]Provider{
+			"codex":    {BaseURL: codexUp.URL, Auth: "static", APIKey: "codex-token"},
+			"compass":  {BaseURL: gwUp.URL, Auth: "static"},
+		},
+		Routes: map[string]ProtocolRoute{
+			"openai": {Models: map[string]string{
+				"gpt-5.5": "codex/gpt-5.5",
+				"glm-5.2": "compass/glm-5.2",
 			}},
-		}},
+		},
 	}
-	// Make the codex_oauth entry use a static key too (override after build):
 	p := NewProxy(cfg)
-	// Replace the model_route auth with a static-key provider for deterministic test.
-	for i := range p.routes {
-		if p.routes[i].route.Name == "codex" {
-			for j := range p.routes[i].modelRoutes {
-				p.routes[i].modelRoutes[j].auth = &StaticProvider{key: "codex-oauth-token"}
-			}
-		}
-	}
+	// Override the codex provider auth with a known token for deterministic test.
+	p.authCache["codex"] = &StaticProvider{key: "codex-token"}
+
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
-	// 1) gpt-5.5 → codex backend, codex OAuth token.
+	// 1) gpt-5.5 → codex provider
 	codexHit, gwHit = requestHit{}, requestHit{}
 	post(t, px.URL+"/v1/responses", `{"model":"gpt-5.5","input":[]}`)
 	if codexHit.path == "" {
 		t.Error("gpt-5.5: expected to hit codex backend")
 	}
 	if gwHit.path != "" {
-		t.Error("gpt-5.5: should not hit gateway backend")
+		t.Error("gpt-5.5: should not hit compass backend")
 	}
-	if codexHit.auth != "Bearer codex-oauth-token" {
-		t.Errorf("gpt-5.5 auth=%q want Bearer codex-oauth-token", codexHit.auth)
+	if codexHit.auth != "Bearer codex-token" {
+		t.Errorf("gpt-5.5 auth=%q want Bearer codex-token", codexHit.auth)
 	}
 
-	// 2) glm-5.2 → gateway backend, CQP key.
+	// 2) glm-5.2 → compass provider
 	codexHit, gwHit = requestHit{}, requestHit{}
 	post(t, px.URL+"/v1/responses", `{"model":"glm-5.2","input":[]}`)
 	if gwHit.path == "" {
-		t.Error("glm-5.2: expected to hit gateway backend")
+		t.Error("glm-5.2: expected to hit compass backend")
 	}
 	if codexHit.path != "" {
 		t.Error("glm-5.2: should not hit codex backend")
 	}
-	if gwHit.auth != "Bearer cqp-key" {
-		t.Errorf("glm-5.2 auth=%q want Bearer cqp-key", gwHit.auth)
+	if gwHit.auth != "Bearer gw-key" {
+		t.Errorf("glm-5.2 auth=%q want Bearer gw-key", gwHit.auth)
+	}
+}
+
+// TestForward_UnknownModel errors when the model isn't in the route.
+func TestForward_UnknownModel(t *testing.T) {
+	gwUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{}`))
+	}))
+	defer gwUp.Close()
+	cfg := &Config{
+		Auth: AuthCfg{StaticKey: "k"},
+		Providers: map[string]Provider{
+			"compass": {BaseURL: gwUp.URL, Auth: "static"},
+		},
+		Routes: map[string]ProtocolRoute{
+			"openai": {Models: map[string]string{"gpt-5.5": "compass/gpt-5.5"}},
+		},
+	}
+	p := NewProxy(cfg)
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+	resp, err := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"unknown"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 502 {
+		t.Errorf("expected 502 for unknown model, got %d", resp.StatusCode)
 	}
 }
 
@@ -120,34 +136,3 @@ func (r *stringReaderImpl) Read(p []byte) (int, error) {
 	r.pos += n
 	return n, nil
 }
-
-// Ensure the static provider's key is used end-to-end (no time dependency).
-func TestForward_ModelRouting_NoMatchFallsBack(t *testing.T) {
-	gwUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{}`))
-	}))
-	defer gwUp.Close()
-	cfg := &Config{
-		Auth: AuthCfg{StaticKey: "k"},
-		Routes: []Route{{
-			Name: "codex", PathPrefixes: []string{"/v1/responses"},
-			Upstream: gwUp.URL, Auth: "static",
-			ModelRouting: []ModelRoute{{Models: []string{"only-this"}, Upstream: "http://nope", Auth: "static"}},
-		}},
-	}
-	p := NewProxy(cfg)
-	px := httptest.NewServer(http.HandlerFunc(p.handler))
-	defer px.Close()
-	// model not in any routing entry → falls back to route default (gwUp).
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"other"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Errorf("expected 200 from fallback upstream, got %d", resp.StatusCode)
-	}
-}
-
-// avoid unused import warnings if time isn't used elsewhere here
-var _ = time.Now

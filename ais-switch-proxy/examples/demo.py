@@ -25,7 +25,7 @@ import time
 import urllib.request
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 15721
+DEFAULT_PORT = 15722
 
 # ANSI 颜色（非 tty 时可禁用；这里简单始终用）。
 DIM = "\033[2m"

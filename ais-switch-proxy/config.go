@@ -16,7 +16,15 @@ type Config struct {
 	ModelsCacheFile        string `yaml:"models_cache_file"`
 	ModelsRefreshInterval  string `yaml:"models_refresh_interval"`
 	Auth     AuthCfg  `yaml:"auth"`
-	Routes   []Route  `yaml:"routes"` // preserve order; yaml maps aren't ordered, so use a struct slice
+	// Providers defines upstream backends (baseURL + auth + models). Referenced
+	// by name from routes. Supports external providers (static apiKey) and
+	// managed ones (PROXY_MANAGED → proxy injects real credentials).
+	Providers map[string]Provider `yaml:"providers"`
+	// Routes maps protocol name (anthropic | openai) to its model→provider/model
+	// mapping. The proxy exposes each protocol at its standard path
+	// (/v1/messages for anthropic, /v1/chat/completions + /v1/responses for
+	// openai) and forwards to the provider using the SAME protocol (no conversion).
+	Routes   map[string]ProtocolRoute `yaml:"routes"`
 	Takeover Takeover `yaml:"takeover"`
 }
 
@@ -24,32 +32,40 @@ type AuthCfg struct {
 	SSOCookieFile string `yaml:"sso_cookie_file"`
 	CQPMintURL    string `yaml:"cqp_mint_url"`
 	StaticKey     string `yaml:"static_key"`
-	// CodexAuthFile is ~/.codex/auth.json — read by the codex_oauth auth provider
-	// to get the ChatGPT access/refresh tokens for the codex native backend.
+	// CodexAuthFile is read by the codex_oauth auth provider to get the ChatGPT
+	// access/refresh tokens for the codex native backend.
 	CodexAuthFile string `yaml:"codex_auth_file"`
 }
 
-type Route struct {
-	Name          string            `yaml:"name"`
-	PathPrefixes  []string          `yaml:"path_prefixes"`
-	Upstream      string            `yaml:"upstream"`
-	UpstreamPath  string            `yaml:"upstream_path"`
-	Auth          string            `yaml:"auth"` // cqp | codex_oauth | static | none
-	ModelMap      map[string]string `yaml:"model_map"`
-	// ModelRouting enables per-model upstream/auth selection within this route.
-	// A request whose model matches an entry's Models uses that entry's
-	// Upstream/Auth/ModelMap; otherwise the route's top-level fields are used.
-	// Used by the codex route to send codex-native models (gpt-5.5) to the
-	// chatgpt.com backend (codex OAuth) and gateway models to compass (CQP).
-	ModelRouting []ModelRoute `yaml:"model_routing"`
+// Provider is an upstream backend definition: baseURL + auth + models.
+// Referenced by name from routes. A provider's baseURL is the API base (e.g.
+// .../compass-api/v1); the proxy appends the protocol-specific path (/messages
+// for anthropic, /responses or /chat/completions for openai) when forwarding.
+type Provider struct {
+	APIKey  string                    `yaml:"apiKey"`   // PROXY_MANAGED or a real key
+	BaseURL string                    `yaml:"baseURL"`
+	Auth    string                    `yaml:"auth"`     // cqp | codex_oauth | static | none
+	Headers map[string]string         `yaml:"headers"`  // extra headers (optional)
+	Models  map[string]ProviderModel  `yaml:"models"`
 }
 
-// ModelRoute is one per-model routing entry within a Route.
-type ModelRoute struct {
-	Models   []string          `yaml:"models"`
-	Upstream string            `yaml:"upstream"`
-	Auth     string            `yaml:"auth"` // cqp | codex_oauth | static | none
-	ModelMap map[string]string `yaml:"model_map"`
+type ProviderModel struct {
+	Context    int64              `yaml:"context"`
+	Output     int                `yaml:"output"`
+	Modalities ProviderModalities `yaml:"modalities"`
+}
+
+type ProviderModalities struct {
+	Input  []string `yaml:"input"`
+	Output []string `yaml:"output"`
+}
+
+// ProtocolRoute maps exposed model names to "provider/model" for one protocol.
+// The protocol determines the path the proxy listens on and forwards to:
+//   anthropic → /v1/messages (client) → provider /messages
+//   openai    → /v1/responses, /v1/chat/completions (client) → provider same
+type ProtocolRoute struct {
+	Models map[string]string `yaml:"models"` // exposed name → "provider/model"
 }
 
 type Takeover struct {
@@ -132,7 +148,6 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	cfg := &Config{}
-	// Decode into a temp struct first, then process routes.
 	type rawConfig struct {
 		Listen   string         `yaml:"listen"`
 		LogLevel string         `yaml:"log_level"`
@@ -140,8 +155,9 @@ func LoadConfig(path string) (*Config, error) {
 		ModelsCacheFile       string `yaml:"models_cache_file"`
 		ModelsRefreshInterval string `yaml:"models_refresh_interval"`
 		Auth     AuthCfg        `yaml:"auth"`
-		Routes   map[string]Route `yaml:"routes"`
-		Takeover Takeover       `yaml:"takeover"`
+		Providers map[string]Provider      `yaml:"providers"`
+		Routes    map[string]ProtocolRoute `yaml:"routes"`
+		Takeover  Takeover                 `yaml:"takeover"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
@@ -156,13 +172,9 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.ModelsCacheFile = raw.ModelsCacheFile
 	cfg.ModelsRefreshInterval = raw.ModelsRefreshInterval
 	cfg.Auth = raw.Auth
+	cfg.Providers = raw.Providers
+	cfg.Routes = raw.Routes
 	cfg.Takeover = raw.Takeover
-
-	// Convert routes from a named map into a slice.
-	for name, r := range raw.Routes {
-		r.Name = name
-		cfg.Routes = append(cfg.Routes, r)
-	}
 
 	// Expand auth paths.
 	cfg.Auth.SSOCookieFile = expandPath(cfg.Auth.SSOCookieFile)
@@ -175,9 +187,7 @@ func LoadConfig(path string) (*Config, error) {
 	t.OpencodeFile = expandPath(t.OpencodeFile)
 	t.CodexFile = expandPath(t.CodexFile)
 	t.PiFile = expandPath(t.PiFile)
-	// If proxy_url is unset, derive it from `listen` so changing the port only
-	// requires editing `listen` (a common footgun: proxy_url pointing at the old
-	// default port while listen moved). An explicit proxy_url always wins.
+	// If proxy_url is unset, derive it from `listen`.
 	if t.ProxyURL == "" && cfg.Listen != "" {
 		t.ProxyURL = "http://" + cfg.Listen
 	}
@@ -192,30 +202,40 @@ func (c *Config) validate() error {
 	if c.Listen == "" {
 		return fmt.Errorf("listen is empty")
 	}
-	for i := range c.Routes {
-		r := &c.Routes[i]
-		if r.Upstream == "" {
-			return fmt.Errorf("route %s: upstream is empty", r.Name)
+	if len(c.Providers) == 0 {
+		return fmt.Errorf("no providers configured")
+	}
+	for name, p := range c.Providers {
+		if p.BaseURL == "" {
+			return fmt.Errorf("provider %s: baseURL is empty", name)
 		}
-		if len(r.PathPrefixes) == 0 {
-			return fmt.Errorf("route %s: no path_prefixes", r.Name)
+		if p.Auth == "" {
+			return fmt.Errorf("provider %s: auth is empty", name)
+		}
+	}
+	for proto, route := range c.Routes {
+		for exposed, target := range route.Models {
+			parts := strings.SplitN(target, "/", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("route %s: model %s → %q must be provider/model", proto, exposed, target)
+			}
+			if _, ok := c.Providers[parts[0]]; !ok {
+				return fmt.Errorf("route %s: model %s references unknown provider %q", proto, exposed, parts[0])
+			}
 		}
 	}
 	return nil
 }
 
-// findRoute longest-prefix match.
-func (c *Config) findRoute(path string) *Route {
-	var best *Route
-	bestLen := -1
-	for i := range c.Routes {
-		r := &c.Routes[i]
-		for _, p := range r.PathPrefixes {
-			if strings.HasPrefix(path, p) && len(p) > bestLen {
-				best = r
-				bestLen = len(p)
-			}
-		}
+// protocolForPath returns the protocol name (anthropic|openai) for a request
+// path, or "" if no route matches.
+func protocolForPath(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/v1/messages"):
+		return "anthropic"
+	case strings.HasPrefix(path, "/v1/chat/completions"),
+		strings.HasPrefix(path, "/v1/responses"):
+		return "openai"
 	}
-	return best
+	return ""
 }

@@ -26,7 +26,7 @@ func TestFetchModels(t *testing.T) {
 
 	cfg := &Config{
 		Auth: AuthCfg{StaticKey: "test-key"},
-		Routes: []Route{{Name: "claude", PathPrefixes: []string{"/v1/messages"}, Upstream: up.URL, Auth: "cqp"}},
+		Providers: map[string]Provider{"compass": {BaseURL: up.URL, Auth: "cqp"}},
 	}
 	entries, err := fetchModels(cfg)
 	if err != nil {
@@ -44,7 +44,7 @@ func TestFetchModels(t *testing.T) {
 }
 
 func TestFetchModels_NoCQPRoute(t *testing.T) {
-	cfg := &Config{Routes: []Route{{Name: "g", Auth: "static", Upstream: "http://x"}}}
+	cfg := &Config{Providers: map[string]Provider{"g": {BaseURL: "http://x", Auth: "static"}}}
 	if _, err := fetchModels(cfg); err == nil {
 		t.Error("expected error for no cqp route")
 	}
@@ -129,7 +129,7 @@ func TestRefreshModelsCache(t *testing.T) {
 		w.Write([]byte(`{"object":"list","data":[{"id":"x","object":"model","owned_by":"MaaS","context_window":1024}]}`))
 	}))
 	defer up.Close()
-	cfg := &Config{Auth: AuthCfg{StaticKey: "k"}, Routes: []Route{{Name: "c", Upstream: up.URL, Auth: "cqp"}}}
+	cfg := &Config{Auth: AuthCfg{StaticKey: "k"}, Providers: map[string]Provider{"c": {BaseURL: up.URL, Auth: "cqp"}}}
 	path := filepath.Join(t.TempDir(), "m.json")
 	entries, err := refreshModelsCache(cfg, path)
 	if err != nil {

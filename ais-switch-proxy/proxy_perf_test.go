@@ -29,16 +29,22 @@ func newUpstream(h http.HandlerFunc) *httptest.Server {
 
 // newProxyServer wraps a Proxy with the given auth + model_map and returns a hitable httptest server.
 func newProxyServer(upstreamURL, auth string, modelMap map[string]string) *httptest.Server {
+	// Build provider models from the model_map (alias→real).
+	provModels := map[string]ProviderModel{}
+	routeModels := map[string]string{}
+	for alias, real := range modelMap {
+		provModels[real] = ProviderModel{Context: 200000, Output: 32768}
+		routeModels[alias] = "t/" + real
+	}
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Auth:   AuthCfg{StaticKey: "perf-static-key"},
-		Routes: []Route{{
-			Name:         "t",
-			PathPrefixes: []string{"/v1/messages"},
-			Upstream:     upstreamURL,
-			Auth:         auth,
-			ModelMap:     modelMap,
-		}},
+		Providers: map[string]Provider{
+			"t": {BaseURL: upstreamURL, Auth: auth, Models: provModels},
+		},
+		Routes: map[string]ProtocolRoute{
+			"anthropic": {Models: routeModels},
+		},
 	}
 	p := NewProxy(cfg)
 	return httptest.NewServer(http.HandlerFunc(p.handler))

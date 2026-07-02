@@ -122,18 +122,13 @@ func configPath(args []string) string {
 
 func routeNames(cfg *Config) string {
 	out := ""
-	for i, r := range cfg.Routes {
-		if i > 0 {
+	first := true
+	for proto := range cfg.Routes {
+		if !first {
 			out += ", "
 		}
-		out += r.Name + "("
-		for j, p := range r.PathPrefixes {
-			if j > 0 {
-				out += "|"
-			}
-			out += p
-		}
-		out += ")"
+		first = false
+		out += proto
 	}
 	return out
 }
@@ -245,8 +240,11 @@ func cmdConfig(args []string) {
 		}
 		fmt.Printf("listen: %s\n", cfg.Listen)
 		fmt.Printf("auth: cqp_mint_url=%s sso_cookie_file=%s\n", cfg.Auth.CQPMintURL, cfg.Auth.SSOCookieFile)
-		for _, r := range cfg.Routes {
-			fmt.Printf("route %s: %v → %s (auth=%s, %d model maps)\n", r.Name, r.PathPrefixes, r.Upstream, r.Auth, len(r.ModelMap))
+		for name, prov := range cfg.Providers {
+			fmt.Printf("provider %s: baseURL=%s auth=%s (%d models)\n", name, prov.BaseURL, prov.Auth, len(prov.Models))
+		}
+		for proto, route := range cfg.Routes {
+			fmt.Printf("route %s: %d model maps\n", proto, len(route.Models))
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])

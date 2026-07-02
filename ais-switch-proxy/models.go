@@ -60,11 +60,11 @@ func modelsCachePath(cfg *Config) string {
 	return "ais-switch-proxy-models.json"
 }
 
-// cqpUpstream returns the upstream base of the first cqp-authed route, or "".
+// cqpUpstream returns the baseURL of the first cqp-authed provider, or "".
 func cqpUpstream(cfg *Config) string {
-	for _, r := range cfg.Routes {
-		if r.Auth == "cqp" {
-			return r.Upstream
+	for _, prov := range cfg.Providers {
+		if prov.Auth == "cqp" {
+			return prov.BaseURL
 		}
 	}
 	return ""
