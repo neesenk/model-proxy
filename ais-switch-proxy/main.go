@@ -287,7 +287,7 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	p := newCodexOAuthProvider(expandPath(authFile))
 	tok, acct, err := p.token()
 	if err != nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("ais-switch-proxy codex-login"))
+		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("ais-switch-proxy login codex"))
 		return
 	}
 	req, _ := http.NewRequest("GET", prov.BaseURL+"/wham/usage", nil)

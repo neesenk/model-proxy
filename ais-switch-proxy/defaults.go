@@ -19,7 +19,7 @@ log_level: info            # debug | info | warn | error
 auth:
   sso_cookie_file: ~/.ais-switch/google_oauth_auth.json
   cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
-  codex_auth_file: ~/.ais-switch/codex_oauth_auth.json   # proxy own codex OAuth tokens (via codex-login), NOT codex CLI auth.json
+  codex_auth_file: ~/.ais-switch/codex_oauth_auth.json   # proxy own codex OAuth tokens (via login codex), NOT codex CLI auth.json
   # static_key: "..."
 
 # Layer 1: providers — upstream backend definitions (baseURL + auth + models).

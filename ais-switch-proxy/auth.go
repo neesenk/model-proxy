@@ -171,7 +171,7 @@ const (
 
 // CodexOAuthProvider reads the proxy's OWN codex OAuth tokens (from
 // cfg.Auth.CodexAuthFile, default ~/.ais-switch/codex_oauth_auth.json — obtained
-// via `ais-switch-proxy codex-login`, NOT shared with codex CLI's ~/.codex/auth.json)
+// via `ais-switch-proxy login codex`, NOT shared with codex CLI's ~/.codex/auth.json)
 // and injects the access_token as Bearer for the chatgpt.com/backend-api/codex
 // backend. On 401 it refreshes via refresh_token and writes new tokens back.
 type CodexOAuthProvider struct {
@@ -239,7 +239,7 @@ func (p *CodexOAuthProvider) token() (string, string, error) {
 	}
 	// Need refresh.
 	if af.Tokens.RefreshToken == "" {
-		return "", "", fmt.Errorf("codex auth has no refresh_token; run `ais-switch-proxy codex-login`")
+		return "", "", fmt.Errorf("codex auth has no refresh_token; run `ais-switch-proxy login codex`")
 	}
 	if err := p.refreshLocked(af); err != nil {
 		return "", "", err
@@ -256,7 +256,7 @@ func (p *CodexOAuthProvider) Refresh() error {
 		return fmt.Errorf("read codex auth: %w", err)
 	}
 	if af.Tokens.RefreshToken == "" {
-		return fmt.Errorf("codex auth has no refresh_token; run `ais-switch-proxy codex-login`")
+		return fmt.Errorf("codex auth has no refresh_token; run `ais-switch-proxy login codex`")
 	}
 	return p.refreshLocked(af)
 }
