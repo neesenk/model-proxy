@@ -334,8 +334,11 @@ func showCodexUsage(cfg *Config, prov Provider) {
 		SpendControl *struct {
 			Reached          bool `json:"reached"`
 			IndividualLimit  *struct {
-				UsedPercent  int `json:"used_percent"`
-				LimitUSD     any `json:"limit_usd"`
+				Used         string `json:"used"`
+				Limit        string `json:"limit"`
+				Remaining    string `json:"remaining"`
+				UsedPercent  int    `json:"used_percent"`
+				ResetAfter   int    `json:"reset_after_seconds"`
 			} `json:"individual_limit"`
 		} `json:"spend_control"`
 	}
@@ -381,7 +384,16 @@ func showCodexUsage(cfg *Config, prov Provider) {
 		if u.SpendControl.Reached {
 			fmt.Printf("%s %s\n", cDim("Spend:     "), cRed("limit reached"))
 		} else if u.SpendControl.IndividualLimit != nil {
-			fmt.Printf("%s %d%% used\n", cDim("Spend:     "), u.SpendControl.IndividualLimit.UsedPercent)
+			il := u.SpendControl.IndividualLimit
+			used := formatCredits(il.Used)
+			limit := formatCredits(il.Limit)
+			pct := il.UsedPercent
+			info := fmt.Sprintf("%s of %s credits used (%d%%)", used, limit, pct)
+			if il.ResetAfter > 0 {
+				info += fmt.Sprintf(", resets in %s", formatDuration(il.ResetAfter))
+			}
+			fmt.Printf("%s %s\n", cDim("Spend:     "),
+				usageRatioColor(float64(100-pct), 100, info))
 		}
 	}
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cGray("codex (chatgpt.com)"))
@@ -410,6 +422,26 @@ func formatDuration(secs int) string {
 	default:
 		return fmt.Sprintf("%dm", m)
 	}
+}
+
+// formatCredits formats a credit amount string (e.g. "330.258..." → "330",
+// "22500" → "22,500"). Truncates decimals, adds thousands separators.
+func formatCredits(s string) string {
+	f := 0.0
+	fmt.Sscanf(s, "%f", &f)
+	return formatWithCommas(int(f))
+}
+
+// formatWithCommas adds thousands separators to an integer.
+func formatWithCommas(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if n < 0 {
+		return "-" + formatWithCommas(-n)
+	}
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // money formats v as $X.XX
