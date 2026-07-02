@@ -12,31 +12,47 @@ import (
 	"time"
 )
 
-const usage = `ais-switch-proxy — standalone, portable reimplementation of the AIS Switch local proxy
+const usage = `ais-switch-proxy — standalone portable proxy for AIS Switch LLM gateway
 
-Usage:
-  ais-switch-proxy serve   [--config config.yaml] [--daemon] [--log-file FILE]  Start the local proxy
-    --daemon        Run detached (supervisor/worker): supervisor monitors the worker
-                    and auto-restarts it on crash. Logs go to the configured log file.
-    --log-file FILE Override the log file path (default: log_file from config).
-  ais-switch-proxy stop    [--config config.yaml] [--log-file FILE]  Stop a running --daemon (SIGTERM the supervisor)
-  ais-switch-proxy takeover [--config config.yaml] [client]  Rewrite client config to point at the proxy
-  ais-switch-proxy restore  [--config config.yaml] [client]  Restore client config from backup
-  ais-switch-proxy login <provider> [--config config.yaml] [--import]  Login (compass: SSO, codex: device flow)
-  ais-switch-proxy logout <provider> [--config config.yaml]  Logout (clear provider credentials)
-  ais-switch-proxy usage <provider> [--config config.yaml]  Show usage for a provider (compass | codex)
-  ais-switch-proxy mint-key [--config config.yaml]       Mint and print a CQP key (for direct mode)
-  ais-switch-proxy models  [--config config.yaml] [--refresh]  List gateway models (cached, refreshes on schedule)
-  ais-switch-proxy import-pricing [--config config.yaml] [--db FILE]  Export pricing from AIS Switch's cc-switch.db
-  ais-switch-proxy config init                            Generate a config.yaml template
-  ais-switch-proxy config print [--config config.yaml]   Print the effective config
+USAGE
+  ais-switch-proxy <command> [options]
 
-client: claude | opencode | codex | pi | all (default all)
+COMMANDS
+  serve [--daemon] [--log-file F]    Start the proxy server
+    --daemon                           Run in background (auto-restart on crash)
+    --log-file F                       Log file path (default: $TMPDIR/ais-switch-proxy.log)
 
-Config lookup order: --config PATH > ~/.ais-switch/config.yaml > ./config.yaml
+  stop                               Stop a running --daemon
 
-Environment:
-  AIS_SSO_COOKIE    Full SSO cookie string (overrides sso_cookie_file, handy on Linux)
+  takeover <client>                  Rewrite client config to point at the proxy
+    client: claude | opencode | codex | pi | all
+
+  restore <client>                   Restore client config from backup
+
+  login <provider> [--import]        Login to a provider
+    compass                            SSO browser login (or --import from desktop app)
+    codex                              OAuth device flow
+
+  logout <provider>                  Clear provider credentials
+
+  usage <provider>                   Show usage / credits for a provider
+    compass                            Account, monthly usage, balance
+    codex                              Credits, rate limits, spend
+
+  mint-key                           Mint and print a CQP key
+
+  models [--refresh]                 List available models
+
+  import-pricing [--db FILE]         Export pricing table from AIS Switch's DB
+
+  config init                        Generate a config.yaml template
+  config print                       Print the effective config
+
+COMMON OPTIONS
+  --config PATH                      Config file (default lookup: ~/.ais-switch/config.yaml > ./config.yaml)
+
+ENVIRONMENT
+  AIS_SSO_COOKIE                     Override sso_cookie_file
 `
 
 func main() {
@@ -259,7 +275,7 @@ func showCompassUsage(cfg *Config) {
 		log.Fatal(err)
 	}
 	if a == nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("ais-switch-proxy login"))
+		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("ais-switch-proxy login compass"))
 		return
 	}
 	c := newCompassClient(path)

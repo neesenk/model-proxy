@@ -38,8 +38,8 @@ GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
 ### Linux 上无 AIS Switch 怎么拿 SSO cookie？
 
 `auth.sso_cookie_file` 指向的 JSON 含 `sso_session_cookie` 字段。Linux 上可：
-- 直接 `ais-switch-proxy login` 走 Compass SSO 浏览器登录（本地有浏览器即可；SSH 远程时浏览器跳不回本机，按终端提示按回车也能完成）；或
-- 从 Mac 拷贝 `~/.ais-switch/google_oauth_auth.json` 过来，再 `ais-switch-proxy login --import` 导入验证；或
+- 直接 `ais-switch-proxy login compass` 走 Compass SSO 浏览器登录（本地有浏览器即可；SSH 远程时浏览器跳不回本机，按终端提示按回车也能完成）；或
+- 从 Mac 拷贝 `~/.ais-switch/google_oauth_auth.json` 过来，再 `ais-switch-proxy login compass --import` 导入验证；或
 - 设环境变量 `AIS_SSO_COOKIE` 为整串 cookie（含 `SSO_C=` 前缀），并配 `static_key` 或让程序读 env；或
 - 直接配 `auth.static_key`（一把已换好的 CQP key），跳过换取。
 
@@ -47,8 +47,8 @@ GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
 
 ```bash
 # 0. 首次登录
-./ais-switch-proxy login --config config.yaml            # Compass SSO 浏览器登录，写入 sso_cookie_file
-./ais-switch-proxy login --import --config config.yaml   # 或从 AIS Switch 桌面端导入已有 SSO cookie
+./ais-switch-proxy login compass --config config.yaml            # Compass SSO 浏览器登录，写入 sso_cookie_file
+./ais-switch-proxy login compass --import --config config.yaml   # 或从 AIS Switch 桌面端导入已有 SSO cookie
 
 # 1. 启动代理
 ./ais-switch-proxy serve --config config.yaml
@@ -76,9 +76,9 @@ opencode run -m anthropic/claude-opus-4-7 "..."
 ./ais-switch-proxy models --refresh       # 强制刷新后再打印
 
 # 查看登录账号 / 月度用量
-./ais-switch-proxy status
+./ais-switch-proxy usage compass
 # 登出（清除 sso_cookie_file）
-./ais-switch-proxy logout
+./ais-switch-proxy logout compass
 ```
 
 ## 通过代理使用（客户端配置）
@@ -195,32 +195,21 @@ ais-switch-proxy import-pricing --db /path/to/cc-switch.db  # 指定 DB
 
 > 注：定价表里没有的模型（如较新的 `glm-5.2`）在 `models` 输出中显示 `—`。
 
-### `login` —— Compass SSO 登录
+### `login <provider>` —— 登录
 
-复刻 AIS Switch（ais-switch-cli）的 GoogleGateway 登录流程，写入 `sso_cookie_file`（与 AIS Switch 的 `~/.ais-switch/google_oauth_auth.json` 同格式，可互换）。认证逻辑迁移自 `ais-switch-cli/internal/gateway/`。
+按 provider 分发：
+- `login compass` — Compass SSO 浏览器登录（Bootstrap → loopback → 轮询 auth/info → 持久化 SSO cookie）
+- `login compass --import` — 从 AIS Switch 桌面端导入已有 SSO cookie
+- `login codex` — codex OAuth device flow（独立 token，不共享 codex CLI 的 auth.json）
 
-完整流程：
+写入各自的凭据文件（`sso_cookie_file` / `codex_auth_file`）。不带 provider 参数时列出可用 provider。
 
-1. **Bootstrap** — `GET /compass-api/v1/auth/login` → 后端返回 401 + `result` 字段里的 `soup.shopee.io` 登录 URL，同时种下 `SSO_A` 引导 cookie（由 CLI 的 cookie jar 保留）。
-2. **Loopback server** — 本地随机端口监听 `/company-gateway/login-complete`，把它的 URL 作为登录 URL 的 `next` 参数；打开浏览器。
-3. **等登录完成信号** — 用户在 `soup.shopee.io` 完成 Google 登录。两条路径任一即完成：浏览器跳回本地 loopback（**本地场景**），或用户在终端按回车（**远程/SSH 场景**，浏览器到不了本机端口）。信号本身不携带 cookie —— `SSO_A` 全程留在 CLI 的 jar 里。
-4. **轮询会话** — 用 jar 里的 `SSO_A` 每 2s 轮询 `/auth/info`（最长 3 分钟），认证成功后 200 响应种下 `SSO_C` 会话 cookie，由 jar 捕获。
-5. **签发托管 key + 补全身份** — `POST /api/v1/cqp/ccswitch/api_key/get_or_generate`（cookie 鉴权）返回完整身份（`api_key`+`project_id`+`employee_*`），用其 `project_id`/`email` 填充账号。
-6. **持久化** — 写入 `sso_cookie_file`（`account_id`/`email`/`project_id`/`sso_session_cookie`/时间戳，明文 JSON `0600`）。**托管 CQP key 仅内存缓存，不落盘**（与 AIS Switch 一致）。
+### `usage <provider>` / `logout <provider>`
 
-> 与旧版的区别：旧版试图直接拼 `accounts.google.com` OAuth URL 并从浏览器跨进程捕获 `SSO_C`，受 soup 的 nonce/session 校验所阻（不可用）。新版改走 Compass 的 bootstrap 端点，靠 cookie jar 内部的 `SSO_A → SSO_C` 升级解决，无需 cookie 跨进程回传。
-
-### `login --import` —— 从 AIS Switch 桌面端导入
-
-读取桌面端 `~/.ais-switch/google_oauth_auth.json`（已完成浏览器 SSO），拷贝其 `sso_session_cookie` 到本工具的 `sso_cookie_file`，并立即调 `get_or_generate` 验证可换取托管 CQP key。适合：有 AIS Switch 的机器上登录后、或把 cookie 拷到 Linux 机器后快速接入。
-
-### `status` / `logout`
-
-- `status` — 读 `sso_cookie_file` 打印账号 / `project_id` / 月度用量（`/monthly_usage`，cookie 鉴权）/ 脱敏 SSO cookie。未登录则提示 `login`。
-- `logout` — 删除 `sso_cookie_file`。
-
-环境变量：
-- `AIS_SSO_COOKIE` — SSO cookie 整串（覆盖 `sso_cookie_file`，便于 Linux）
+- `usage compass` — 读 SSO cookie 打印账号 / project_id / 月度用量（`/monthly_usage`，cookie 鉴权）
+- `usage codex` — 读 codex OAuth token 打印 credits / rate limits / spend（`/wham/usage`）
+- `logout compass` — 删除 SSO cookie 文件
+- `logout codex` — 删除 codex OAuth token 文件
 
 ### `serve --daemon` —— 守护进程模式
 
@@ -275,7 +264,9 @@ log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log   # 自定义日志 + p
 - ✅ claude 路由 + CQP 认证 + 模型映射 + 流式转发：端到端实测（`/v1/messages` + FAKE key → 200 + `model=glm-5.2`）
 - ✅ OpenAI 兼容路由 `/v1/chat/completions`：代理转发 + CQP 鉴权注入工作正常（上游对 `gpt-5.5` 返回 401 是网关侧 project scope/鉴权问题，非代理故障）
 - ✅ `mint-key`：输出 64 字符 CQP key
-- ✅ `login`：完整 SSO 流程（bootstrap 拿登录 URL + SSO_A → loopback/回车信号 → 轮询 auth/info 升级 SSO_C → fetchAPIKey 补全身份）由 mock 后端全流程测试覆盖；`login --import` + `status` + `logout` 用真实后端端到端实测（导入真实 SSO cookie → `get_or_generate` 真实换取 64 字符托管 CQP key）✓。浏览器交互需本地实测。
+- ✅ `login compass`：完整 SSO 流程由 mock 后端全流程测试覆盖；`login compass --import` + `usage compass` + `logout compass` 用真实后端端到端实测 ✓。浏览器交互需本地实测。
+- ✅ `login codex`：device flow 由 mock 测试覆盖；真实 `auth.openai.com` usercode + pending 轮询实测通过。
+- ✅ `usage codex`：credits / rate limits / spend 从 `/wham/usage` 实测通过。
 - ✅ takeover/restore：claude/codex/opencode/pi 配置改写与还原往返正确
 - ⚠️ codex/gemini 路由的**上游鉴权**未在本机完全实测（codex 可能需 OAuth/project scope 而非 CQP，gemini 需 `GEMINI_API_KEY`）。鉴权策略可配置，不通时按 config 调 `auth` 字段。
 
