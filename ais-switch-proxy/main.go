@@ -47,12 +47,99 @@ Options:
           Print this message
 `
 
+// cmdHelp returns the short help for a command, or "" if unknown.
+var cmdHelp = map[string]string{
+	"serve": `serve [subcommand] [--config PATH] [--log-file PATH]
+
+  Start the proxy server.
+
+Subcommands:
+  (none)    Run in foreground.
+  daemon    Run in background (auto-restart on crash).
+  stop      Stop a running daemon.
+  reload    Hot-reload config (sends SIGHUP to the running daemon).
+
+Options:
+  --config PATH     Config file (default lookup: ~/.ais-switch/config.yaml > ./config.yaml)
+  --log-file PATH   Log file path (overrides config log_file)`,
+
+	"takeover": `takeover <client> [--config PATH]
+
+  Rewrite a client's config to point at the proxy (backs up the original).
+
+Clients:
+  claude | opencode | codex | pi | all`,
+
+	"restore": `restore <client> [--config PATH]
+
+  Restore a client's config from the backup created by takeover.
+
+Clients:
+  claude | opencode | codex | pi | all`,
+
+	"login": `login <provider> [--config PATH]
+
+  Authenticate with a provider.
+
+Providers:
+  compass    Compass SSO browser login.
+  codex      codex OAuth device flow.`,
+
+	"logout": `logout <provider> [--config PATH]
+
+  Clear stored credentials for a provider.
+
+Providers:
+  compass    Deletes the SSO cookie file.
+  codex      Deletes the codex OAuth token file.`,
+
+	"usage": `usage <provider> [--config PATH]
+
+  Show usage / credits for a provider.
+
+Providers:
+  compass    Account, project ID, monthly usage, balance.
+  codex      Credits, rate limits, spend control.`,
+
+	"models": `models <subcommand> [--config PATH]
+
+  List or refresh available models.
+
+Subcommands:
+  list      List models from cache (default).
+  refresh   Force-refresh the cache from the gateway.`,
+
+	"config": `config <subcommand> [--config PATH]
+
+  Manage config files.
+
+Subcommands:
+  init      Generate a config.yaml template in the current directory.
+  print     Print the effective config.
+  check     Validate the config and print a summary.`,
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Print(usage)
 		os.Exit(1)
 	}
-	switch os.Args[1] {
+	cmd := os.Args[1]
+	// Top-level help.
+	if cmd == "-h" || cmd == "--help" || cmd == "help" {
+		fmt.Print(usage)
+		return
+	}
+	// Per-command help: if any arg is -h/--help, print that command's help.
+	if help, ok := cmdHelp[cmd]; ok {
+		for _, a := range os.Args[2:] {
+			if a == "-h" || a == "--help" {
+				fmt.Println(help)
+				return
+			}
+		}
+	}
+	switch cmd {
 	case "serve":
 		cmdServe(os.Args[2:])
 	case "takeover":
@@ -69,10 +156,8 @@ func main() {
 		cmdModels(os.Args[2:])
 	case "config":
 		cmdConfig(os.Args[2:])
-	case "-h", "--help", "help":
-		fmt.Print(usage)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		fmt.Print(usage)
 		os.Exit(1)
 	}
