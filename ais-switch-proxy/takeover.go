@@ -11,17 +11,17 @@ import (
 	"time"
 )
 
-// Backup suffix.
-const bakSuffix = ".ais-switch-proxy.bak"
-
-// backup copies file verbatim to file.ais-switch-proxy.bak (a clean copy, easy to restore
-// directly), and writes meta to file.ais-switch-proxy.bak.meta. An existing bak is not
-// overwritten → idempotent.
-func backup(file string) error {
+// backup copies file verbatim into bakDir/<name>.bak (a clean copy, easy to
+// restore), and writes meta to bakDir/<name>.bak.meta. An existing backup is
+// not overwritten → idempotent.
+func backup(file, bakDir, name string) error {
 	if _, err := os.Stat(file); err != nil {
 		return fmt.Errorf("config file %s: %w", file, err)
 	}
-	bak := file + bakSuffix
+	if err := os.MkdirAll(bakDir, 0o700); err != nil {
+		return fmt.Errorf("create backup dir %s: %w", bakDir, err)
+	}
+	bak := filepath.Join(bakDir, name+".bak")
 	if _, err := os.Stat(bak); err != nil {
 		data, err := os.ReadFile(file)
 		if err != nil {
@@ -41,12 +41,12 @@ func backup(file string) error {
 	return nil
 }
 
-// restore copies file.ais-switch-proxy.bak verbatim back to file.
-func restore(file string) error {
-	bak := file + bakSuffix
+// restore copies bakDir/<name>.bak verbatim back to file.
+func restore(file, bakDir, name string) error {
+	bak := filepath.Join(bakDir, name+".bak")
 	data, err := os.ReadFile(bak)
 	if err != nil {
-		return fmt.Errorf("no backup for %s: %w", file, err)
+		return fmt.Errorf("no backup for %s in %s: %w", name, bakDir, err)
 	}
 	return os.WriteFile(file, data, 0o644)
 }
@@ -56,13 +56,18 @@ func sha256hex(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+// backupDir returns the backup directory: <configDir>/.ais-switch-proxy/
+func backupDir(configPath string) string {
+	return filepath.Join(filepath.Dir(configPath), ".ais-switch-proxy")
+}
+
 // ---- top-level dispatch ----
 
-func runTakeover(cfg *Config, which string) error {
+func runTakeover(cfg *Config, which, bakDir string) error {
 	clients := listClients(cfg, which)
 	for _, c := range clients {
-		log.Printf("takeover %s: %s", c.name, c.file)
-		if err := backup(c.file); err != nil {
+		log.Printf("takeover %s: %s (backup → %s/)", c.name, c.file, bakDir)
+		if err := backup(c.file, bakDir, c.name); err != nil {
 			return fmt.Errorf("%s backup: %w", c.name, err)
 		}
 		if err := c.rewrite(cfg); err != nil {
@@ -73,11 +78,11 @@ func runTakeover(cfg *Config, which string) error {
 	return nil
 }
 
-func runRestore(cfg *Config, which string) error {
+func runRestore(cfg *Config, which, bakDir string) error {
 	clients := listClients(cfg, which)
 	for _, c := range clients {
-		log.Printf("restore %s: %s", c.name, c.file)
-		if err := restore(c.file); err != nil {
+		log.Printf("restore %s: %s (from %s/)", c.name, c.file, bakDir)
+		if err := restore(c.file, bakDir, c.name); err != nil {
 			return fmt.Errorf("%s restore: %w", c.name, err)
 		}
 		log.Printf("  ✓ %s restored", c.name)

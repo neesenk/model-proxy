@@ -219,23 +219,25 @@ func routeNames(cfg *Config) string {
 }
 
 func cmdTakeover(args []string) {
-	cfg, err := LoadConfig(configPath(args))
+	cp := configPath(args)
+	cfg, err := LoadConfig(cp)
 	if err != nil {
 		log.Fatal(err)
 	}
 	which := positional(args)
-	if err := runTakeover(cfg, which); err != nil {
+	if err := runTakeover(cfg, which, backupDir(cp)); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func cmdRestore(args []string) {
-	cfg, err := LoadConfig(configPath(args))
+	cp := configPath(args)
+	cfg, err := LoadConfig(cp)
 	if err != nil {
 		log.Fatal(err)
 	}
 	which := positional(args)
-	if err := runRestore(cfg, which); err != nil {
+	if err := runRestore(cfg, which, backupDir(cp)); err != nil {
 		log.Fatal(err)
 	}
 }
