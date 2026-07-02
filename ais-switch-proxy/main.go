@@ -312,10 +312,78 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	var u struct {
 		Email    string `json:"email"`
 		PlanType string `json:"plan_type"`
+		Credits  *struct {
+			HasCredits bool    `json:"has_credits"`
+			Unlimited  bool    `json:"unlimited"`
+			Balance    *string `json:"balance"`
+		} `json:"credits"`
+		RateLimit *struct {
+			Allowed       bool `json:"allowed"`
+			LimitReached  bool `json:"limit_reached"`
+			PrimaryWindow *struct {
+				UsedPercent       int   `json:"used_percent"`
+				LimitWindowSecs   int   `json:"limit_window_seconds"`
+				ResetAfterSecs    int   `json:"reset_after_seconds"`
+			} `json:"primary_window"`
+			SecondaryWindow *struct {
+				UsedPercent     int   `json:"used_percent"`
+				LimitWindowSecs int   `json:"limit_window_seconds"`
+				ResetAfterSecs  int   `json:"reset_after_seconds"`
+			} `json:"secondary_window"`
+		} `json:"rate_limit"`
+		SpendControl *struct {
+			Reached          bool `json:"reached"`
+			IndividualLimit  *struct {
+				UsedPercent  int `json:"used_percent"`
+				LimitUSD     any `json:"limit_usd"`
+			} `json:"individual_limit"`
+		} `json:"spend_control"`
 	}
 	json.Unmarshal(body, &u)
 	fmt.Printf("%s %s\n", cDim("Account:   "), cBold(cCyan(or(u.Email, "(unknown)"))))
 	fmt.Printf("%s %s\n", cDim("Plan:      "), cMagenta(or(u.PlanType, "(unknown)")))
+	// Credits
+	if u.Credits != nil {
+		if u.Credits.Unlimited {
+			fmt.Printf("%s %s\n", cDim("Credits:   "), cGreen("unlimited"))
+		} else if u.Credits.HasCredits {
+			bal := "available"
+			if u.Credits.Balance != nil && *u.Credits.Balance != "" {
+				bal = *u.Credits.Balance
+			}
+			fmt.Printf("%s %s\n", cDim("Credits:   "), cGreen("has credits ("+bal+")"))
+		} else {
+			fmt.Printf("%s %s\n", cDim("Credits:   "), cRed("none"))
+		}
+	}
+	// Rate limit windows
+	if u.RateLimit != nil {
+		status := cGreen("allowed")
+		if u.RateLimit.LimitReached {
+			status = cRed("limit reached")
+		} else if !u.RateLimit.Allowed {
+			status = cYellow("not allowed")
+		}
+		fmt.Printf("%s %s\n", cDim("Rate Limit:"), status)
+		if u.RateLimit.PrimaryWindow != nil {
+			pw := u.RateLimit.PrimaryWindow
+			fmt.Printf("%s %s\n", cDim("  primary:  "),
+				usageRatioColor(float64(100-pw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", pw.UsedPercent, formatDuration(pw.ResetAfterSecs))))
+		}
+		if u.RateLimit.SecondaryWindow != nil {
+			sw := u.RateLimit.SecondaryWindow
+			fmt.Printf("%s %s\n", cDim("  weekly:   "),
+				usageRatioColor(float64(100-sw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", sw.UsedPercent, formatDuration(sw.ResetAfterSecs))))
+		}
+	}
+	// Spend control
+	if u.SpendControl != nil {
+		if u.SpendControl.Reached {
+			fmt.Printf("%s %s\n", cDim("Spend:     "), cRed("limit reached"))
+		} else if u.SpendControl.IndividualLimit != nil {
+			fmt.Printf("%s %d%% used\n", cDim("Spend:     "), u.SpendControl.IndividualLimit.UsedPercent)
+		}
+	}
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cGray("codex (chatgpt.com)"))
 }
 
@@ -324,6 +392,24 @@ func or(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// formatDuration converts seconds to a compact human-readable string (e.g. "5h", "7d3h").
+func formatDuration(secs int) string {
+	if secs <= 0 {
+		return "—"
+	}
+	d := secs / 86400
+	h := (secs % 86400) / 3600
+	m := (secs % 3600) / 60
+	switch {
+	case d > 0:
+		return fmt.Sprintf("%dd%dh", d, h)
+	case h > 0:
+		return fmt.Sprintf("%dh%dm", h, m)
+	default:
+		return fmt.Sprintf("%dm", m)
+	}
 }
 
 // money formats v as $X.XX
