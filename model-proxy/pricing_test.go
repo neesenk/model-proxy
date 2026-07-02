@@ -58,10 +58,3 @@ func TestLoadPricingTable_LocalOverride(t *testing.T) {
 	}
 	_ = rows
 }
-
-func TestExportPricingFromDB_MissingFile(t *testing.T) {
-	_, err := exportPricingFromDB("/nonexistent/path.db")
-	if err == nil {
-		t.Error("expected error for missing db")
-	}
-}

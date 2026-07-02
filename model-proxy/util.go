@@ -38,3 +38,8 @@ func mask(s string) string {
 	}
 	return s[:2] + "…" + s[len(s)-2:]
 }
+
+func homeDir() string {
+	h, _ := os.UserHomeDir()
+	return h
+}

@@ -3,7 +3,6 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -99,35 +98,4 @@ func pricingDataPath(cfg *Config) string {
 		return filepath.Join(home, ".model-proxy", "models_pricing.json")
 	}
 	return "models_pricing.json"
-}
-
-// cmdImportPricing exports model_pricing from AIS Switch's cc-switch.db into a
-// local JSON file, so model-proxy stays self-contained at runtime.
-func cmdImportPricing(args []string) {
-	cfg, err := LoadConfig(configPath(args))
-	if err != nil {
-		log.Fatal(err)
-	}
-	// Locate cc-switch.db: ~/.model-proxy/cc-switch.db (override via --db flag).
-	dbPath := filepath.Join(homeDir(), ".model-proxy", "cc-switch.db")
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--db" && i+1 < len(args) {
-			dbPath = expandPath(args[i+1])
-		}
-	}
-	rows, err := exportPricingFromDB(dbPath)
-	if err != nil {
-		log.Fatalf("export from %s: %v\n(is AIS Switch installed and logged in? override with --db)", dbPath, err)
-	}
-	out := pricingDataPath(cfg)
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-		log.Fatal(err)
-	}
-	b, _ := json.MarshalIndent(rows, "", "  ")
-	if err := os.WriteFile(out, b, 0o644); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Imported %d pricing rows → %s\n", len(rows), out)
-	fmt.Printf("  source: %s\n", dbPath)
-	fmt.Printf("  runtime picks this file up automatically (no DB dependency, no rebuild needed).\n")
 }

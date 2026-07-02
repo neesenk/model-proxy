@@ -3,14 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -140,50 +138,6 @@ After logging in, the browser will try to redirect back to this machine:
 	fmt.Printf("%s login complete: %s (project=%s)\n", cGreen("[GoogleGateway]"), cBold(cCyan(a.Email)), cGray(a.ProjectID))
 	fmt.Printf("  %s %s\n", cDim("store:"), cGray(storePath))
 	fmt.Printf("\n%s You can now run `%s` or `%s`.\n", cGreen("Login complete."), cCyan("model-proxy mint-key"), cCyan("model-proxy serve"))
-	return nil
-}
-
-// importLogin reads SSO_C from the AIS Switch desktop app's store (which has
-// already completed browser SSO), saves it to this tool's store, and verifies
-// it can mint a managed CQP key.
-func importLogin(cfg *Config) error {
-	storePath := cfg.Auth.SSOCookieFile
-	if storePath == "" {
-		return fmt.Errorf("auth.sso_cookie_file not set in config")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	src := filepath.Join(home, ".ais-switch", "google_oauth_auth.json")
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return fmt.Errorf("desktop app not logged in at %s: %w", src, err)
-	}
-	var a AccountData
-	if err := json.Unmarshal(b, &a); err != nil {
-		return fmt.Errorf("parse desktop store: %w", err)
-	}
-	if a.SSOSessionCookie == "" {
-		return fmt.Errorf("desktop store has no sso_session_cookie")
-	}
-	if err := saveAccount(storePath, &a); err != nil {
-		return err
-	}
-	fmt.Printf("%s\n", cBold("Imported gateway credentials from desktop app:"))
-	fmt.Printf("  %s %s\n", cDim("account:   "), cCyan(a.Email))
-	fmt.Printf("  %s %s\n", cDim("project_id:"), cGray(a.ProjectID))
-	fmt.Printf("  %s %s\n", cDim("store:     "), cGray(storePath))
-	fmt.Printf("\nVerifying (fetching managed CQP key via get_or_generate)...\n")
-	c := newCompassClient(storePath)
-	// jar is empty, so fetchAPIKey falls back to the SSO cookie just saved in the store.
-	key, err := c.GetManagedKey()
-	if err != nil {
-		return fmt.Errorf("verification failed: %w", err)
-	}
-	fmt.Printf("  %s %s%s%s (len %d) %s\n",
-		cDim("managed CQP key:"), cCyan(key[:6]), cGray("…"), cCyan(key[len(key)-4:]), len(key), cGreen("✓"))
-	fmt.Printf("\n%s %s\n", cGreen("Login complete"), cDim("(real SSO_C imported). Ready:")+cCyan(" model-proxy serve"))
 	return nil
 }
 

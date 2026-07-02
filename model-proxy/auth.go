@@ -120,17 +120,7 @@ func (p *CQPProvider) keyLocked() (string, error) {
 	return p.cached, nil
 }
 
-// MintKeyWithMeta mints a CQP key and returns key + project_id (used by login).
-func (p *CQPProvider) MintKeyWithMeta() (key, projectID string, err error) {
-	if err := p.Refresh(); err != nil {
-		return "", "", err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.cached, p.projectID, nil
-}
-
-// readSSOCookie reads sso_session_cookie from AIS Switch's google_oauth_auth.json.
+// readSSOCookie reads sso_session_cookie from the configured store file.
 func readSSOCookie(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("sso_cookie_file not set")
