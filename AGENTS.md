@@ -180,3 +180,116 @@ CQP key 在 SSO cookie 失效后过期，重跑 `get_or_generate` 即可重换�
 
 > 复核方法：`strings -a /Applications/AIS\ Switch.app/Contents/MacOS/ais-switch | grep <端点/字段>`，配合 `sqlite3 ~/.ais-switch/cc-switch.db` 查 `providers.settings_config` 与 `proxy_request_logs`。若 AIS Switch 跨大版本升级，按上表重新核对四项契约。
 
+---
+
+## ais-switch-proxy 实现经验
+
+以下经验来自 `ais-switch-proxy/` 的完整开发过程（2026-06-29 ~ 07-02），记录关键契约、踩过的坑和架构决策。
+
+### 架构：两层 providers + routes
+
+```
+providers:          # 第一层：provider 定义（baseURL + auth + models）
+  compass:          # Shopee 网关
+    baseURL: https://compass.llm.shopee.io/compass-api/v1
+    auth: cqp       # SSO cookie → CQP key
+  codex:            # OpenAI codex 后端
+    baseURL: https://chatgpt.com/backend-api/codex
+    auth: codex_oauth  # 独立 OAuth device flow
+
+routes:             # 第二层：按协议对外
+  anthropic:        # POST /v1/messages
+    models:
+      claude-opus-4-7: compass/glm-5.2   # 对别名 → provider/真实名
+  openai:           # POST /v1/responses, /v1/chat/completions
+    models:
+      gpt-5.5: codex/gpt-5.5
+      glm-5.2: compass/glm-5.2
+```
+
+对外协议 = 转发协议（不做协议转换）。compass 两协议都支持；codex 只支持 openai。
+
+### compass 网关契约（实测）
+
+| 端点 | 方法 | 鉴权 | 路径 |
+|---|---|---|---|
+| CQP key 签发 | POST | SSO cookie | `/api/v1/cqp/ccswitch/api_key/get_or_generate` body `{}` |
+| 模型列表 | GET | CQP Bearer | `/compass-api/v1/models` |
+| 消息（anthropic） | POST | CQP Bearer | `/compass-api/v1/messages` |
+| 响应（openai） | POST | CQP Bearer | `/compass-api/v1/responses` |
+| 月度用量 | POST | SSO cookie | `/api/v1/cqp/ccswitch/monthly_usage` body `{"project_id":"..."}` |
+
+- CQP key 有效期长，缓存 50min
+- SSO cookie 值已含 `SSO_C=` 前缀，直接作 Cookie 头值
+- `/v1/messages` 走 cqp 时代理需加 `?beta=true`、`anthropic-version: 2023-06-01`、`x-compass-request-id`(UUID)
+- 转发头用白名单（不透传客户端 Cookie/Authorization）
+
+### codex 后端契约（实测）
+
+| 端点 | 方法 | 鉴权 | 备注 |
+|---|---|---|---|
+| responses | POST | codex OAuth Bearer | `/backend-api/codex/responses`，需 `store:false` + `stream:true`，不接受 `max_tokens` |
+| usage | GET | codex OAuth Bearer | `/backend-api/wham/usage`（注意：不在 `/codex/` 子路径下） |
+| originator | header | — | `originator: codex_cli_rs` 必须设，否则 403 |
+| ChatGPT-Account-Id | header | — | 从 id_token JWT 解析 |
+
+### codex OAuth device flow（从 codex-rs 源码确认）
+
+```
+issuer = https://auth.openai.com
+client_id = app_EMoamEEZ73f0CkXaXp7hrann   # codex CLI 公开 client_id
+
+1. POST /api/accounts/deviceauth/usercode  {"client_id":...}
+   → {device_auth_id, user_code, interval}  # interval 是字符串 "5"
+
+2. 用户访问 https://auth.openai.com/codex/device 输入 user_code
+
+3. POST /api/accounts/deviceauth/token  {"device_auth_id":..., "user_code":...}
+   轮询，错误码：
+   - deviceauth_authorization_pending → 继续轮询
+   - deviceauth_slow_down → 加 5s 间隔
+   成功 → {authorization_code, code_challenge, code_verifier}
+
+4. POST /oauth/token  form: grant_type=authorization_code&code=...&redirect_uri={issuer}/deviceauth/callback&client_id=...&code_verifier=...
+   → {access_token, refresh_token, id_token}
+```
+
+刷新：`POST /oauth/token` + `grant_type=refresh_token&refresh_token=...&client_id=...` → 新 token 轮换。
+
+**关键决策**：代理用独立 OAuth（不读 codex CLI 的 `~/.codex/auth.json`），避免 refresh_token 轮换竞争导致互相破坏。
+
+### 踩过的坑
+
+1. **路径双 `/v1`**：provider baseURL 已含 `/compass-api/v1`，client path `/v1/messages` 拼接后变 `/compass-api/v1/v1/messages`。需剥 client 的 `/v1` 前缀。网关对 `/v1/v1/messages` 容忍（200），但 `/v1/v1/responses` 不容忍（401）。
+
+2. **codex 后端请求体要求**：`store:false`（否则 400）+ `stream:true`（否则 400）+ 无 `max_tokens`（否则 400 "Unsupported parameter"）。代理自动注入 `store:false`。
+
+3. **monthly_usage 端点**：不是 GET，是 **POST**，需 `project_id` 入参。字段名 `total_amount`/`usage`/`balance`/`plan`（非 `totalAmount`）。
+
+4. **wham/usage 路径**：`/backend-api/wham/usage`，不是 `/backend-api/codex/wham/usage`（后者 403 Cloudflare）。
+
+5. **gpt-5.4 等模型**：codex 路由默认上游应为 chatgpt.com（所有 codex 原生模型自动走这），只有网关模型（glm-5.2 等）才 model_routing 到 compass。
+
+6. **日志掩码**：SSO cookie（SSO_A/SSO_C）在日志中必须 `mask()`（首2…尾2），不能打印全值。auth/info 响应体只记长度（含 email/userid），不记内容。
+
+7. **文件日志无色**：`--log-file` 镜像到文件时，`logColorEnabled` 必须置 `false`，否则 ANSI 转义码污染日志文件。
+
+### CLI 命令统一为 `<provider>` 参数
+
+```
+login <provider>     # compass: SSO浏览器 / codex: device flow
+logout <provider>    # compass: 删sso_cookie / codex: 删oauth token
+usage <provider>     # compass: monthly_usage / codex: wham/usage(credits/spend)
+```
+
+不再有 `codex-login`、`status` 等特例化命令。
+
+### opencode/pi takeover 配置
+
+| 客户端 | baseURL 格式 | 关键差异 |
+|---|---|---|
+| opencode | `http://<proxy>/v1` | `@ai-sdk/anthropic` 拼 `baseURL+/messages`，baseURL 要带 `/v1` |
+| pi | `http://<proxy>` | pi 的 `anthropic-messages` 自己拼 `/v1/messages`，baseURL 不带 `/v1`（否则 `/v1/v1/messages` → 502） |
+
+provider_id 统一为一个配置项（默认 `ais-switch-proxy`），opencode/pi/codex 共用。
+
