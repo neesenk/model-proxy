@@ -90,6 +90,7 @@ func cGreen(s string) string  { return c(ansiGreen, s) }
 func cYellow(s string) string { return c(ansiYellow, s) }
 func cRed(s string) string    { return c(ansiRed, s) }
 func cCyan(s string) string   { return c(ansiCyan, s) }
+func cBlue(s string) string   { return c(ansiBlue, s) }
 func cMagenta(s string) string { return c(ansiMagenta, s) }
 func cGray(s string) string   { return c(ansiGray, s) }
 

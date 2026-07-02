@@ -379,7 +379,7 @@ func showCodexUsage(cfg *Config, prov Provider) {
 				usageRatioColor(float64(100-sw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", sw.UsedPercent, formatDuration(sw.ResetAfterSecs))))
 		}
 	}
-	// Spend control
+	// Spend control (distinct color from credits — blue body, highlighted pct)
 	if u.SpendControl != nil {
 		if u.SpendControl.Reached {
 			fmt.Printf("%s %s\n", cDim("Spend:     "), cRed("limit reached"))
@@ -388,12 +388,14 @@ func showCodexUsage(cfg *Config, prov Provider) {
 			used := formatCredits(il.Used)
 			limit := formatCredits(il.Limit)
 			pct := il.UsedPercent
-			info := fmt.Sprintf("%s of %s credits used (%d%%)", used, limit, pct)
+			// Build with distinct colors: blue body, ratio-colored percentage, gray reset.
+			body := cBlue(fmt.Sprintf("%s of %s credits used", used, limit))
+			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("(%d%%)", pct))
+			resetStr := ""
 			if il.ResetAfter > 0 {
-				info += fmt.Sprintf(", resets in %s", formatDuration(il.ResetAfter))
+				resetStr = cGray(fmt.Sprintf(", resets in %s", formatDuration(il.ResetAfter)))
 			}
-			fmt.Printf("%s %s\n", cDim("Spend:     "),
-				usageRatioColor(float64(100-pct), 100, info))
+			fmt.Printf("%s %s%s%s\n", cDim("Spend:     "), body, pctStr, resetStr)
 		}
 	}
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cGray("codex (chatgpt.com)"))
