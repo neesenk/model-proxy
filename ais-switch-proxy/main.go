@@ -53,10 +53,6 @@ Options:
 
   -h, --help
           Print this message
-
-Environment:
-  AIS_SSO_COOKIE
-          Override sso_cookie_file with a raw SSO cookie string
 `
 
 func main() {

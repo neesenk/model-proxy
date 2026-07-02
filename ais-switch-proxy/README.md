@@ -40,7 +40,6 @@ GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
 `auth.sso_cookie_file` 指向的 JSON 含 `sso_session_cookie` 字段。Linux 上可：
 - 直接 `ais-switch-proxy login compass` 走 Compass SSO 浏览器登录（本地有浏览器即可；SSH 远程时浏览器跳不回本机，按终端提示按回车也能完成）；或
 - 从 Mac 拷贝 `~/.ais-switch/google_oauth_auth.json` 过来，再 `ais-switch-proxy login compass --import` 导入验证；或
-- 设环境变量 `AIS_SSO_COOKIE` 为整串 cookie（含 `SSO_C=` 前缀），并配 `static_key` 或让程序读 env；或
 - 直接配 `auth.static_key`（一把已换好的 CQP key），跳过换取。
 
 ## 用法
