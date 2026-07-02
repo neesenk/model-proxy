@@ -23,12 +23,12 @@ func rewriteClaude(cfg *Config) error {
 	return writeJSONConfig(file, v)
 }
 
-// providerID returns the configured provider id (default "ais-switch-proxy").
+// providerID returns the configured provider id (default "model-proxy").
 func providerID(cfg *Config) string {
 	if cfg.Takeover.ProviderID != "" {
 		return cfg.Takeover.ProviderID
 	}
-	return "ais-switch-proxy"
+	return "model-proxy"
 }
 
 // exposedModels returns all exposed model names across all protocol routes,

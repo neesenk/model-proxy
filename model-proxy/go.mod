@@ -1,4 +1,4 @@
-module ais-switch-proxy
+module model-proxy
 
 go 1.26.4
 

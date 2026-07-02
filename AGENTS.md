@@ -166,7 +166,7 @@ CQP key 在 SSO cookie 失效后过期，重跑 `get_or_generate` 即可重换�
 
 ## 版本兼容（0.1.8 → 0.1.12）
 
-本文件所有契约最初逆向自 **v0.1.8**，AIS Switch 于 2026-06-25 更新至 **v0.1.12**（CQP 检查 `latest_version=0.1.12 force_update=false`，已是最新）。逐项复核，**四项契约均未变，两种接入方式与 `ais-switch-proxy` 均兼容，无需改动**：
+本文件所有契约最初逆向自 **v0.1.8**，AIS Switch 于 2026-06-25 更新至 **v0.1.12**（CQP 检查 `latest_version=0.1.12 force_update=false`，已是最新）。逐项复核，**四项契约均未变，两种接入方式与 `model-proxy` 均兼容，无需改动**：
 
 | 契约 | 0.1.12 现状 |
 |---|---|
@@ -182,9 +182,9 @@ CQP key 在 SSO cookie 失效后过期，重跑 `get_or_generate` 即可重换�
 
 ---
 
-## ais-switch-proxy 实现经验
+## model-proxy 实现经验
 
-以下经验来自 `ais-switch-proxy/` 的完整开发过程（2026-06-29 ~ 07-02），记录关键契约、踩过的坑和架构决策。
+以下经验来自 `model-proxy/` 的完整开发过程（2026-06-29 ~ 07-02），记录关键契约、踩过的坑和架构决策。
 
 ### 架构：两层 providers + routes
 
@@ -291,5 +291,5 @@ usage <provider>     # compass: monthly_usage / codex: wham/usage(credits/spend)
 | opencode | `http://<proxy>/v1` | `@ai-sdk/anthropic` 拼 `baseURL+/messages`，baseURL 要带 `/v1` |
 | pi | `http://<proxy>` | pi 的 `anthropic-messages` 自己拼 `/v1/messages`，baseURL 不带 `/v1`（否则 `/v1/v1/messages` → 502） |
 
-provider_id 统一为一个配置项（默认 `ais-switch-proxy`），opencode/pi/codex 共用。
+provider_id 统一为一个配置项（默认 `model-proxy`），opencode/pi/codex 共用。
 

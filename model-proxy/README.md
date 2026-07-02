@@ -1,4 +1,4 @@
-# ais-switch-proxy
+# model-proxy
 
 AIS Switch 本地代理的**独立、可移植**实现。把 AIS Switch（Mac-only Tauri 应用）内嵌代理的四个能力抽成单二进制程序，可交叉编译到 Linux：
 
@@ -12,17 +12,17 @@ AIS Switch 本地代理的**独立、可移植**实现。把 AIS Switch（Mac-on
 ## 构建
 
 ```bash
-cd ais-switch-proxy
-go build -o ais-switch-proxy .
+cd model-proxy
+go build -o model-proxy .
 
 # 交叉编译 Linux
-GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
-# 或 arm64: GOOS=linux GOARCH=arm64 go build -o ais-switch-proxy-linux-arm64 .
+GOOS=linux GOARCH=amd64 go build -o model-proxy-linux .
+# 或 arm64: GOOS=linux GOARCH=arm64 go build -o model-proxy-linux-arm64 .
 ```
 
 ## 配置
 
-`config.yaml`（可用 `ais-switch-proxy config init` 生成模板）。路径支持 `~` 展开与 `env:VAR`。
+`config.yaml`（可用 `model-proxy config init` 生成模板）。路径支持 `~` 展开与 `env:VAR`。
 
 配置文件查找顺序（首个存在的文件生效）：
 1. `--config PATH` flag（显式指定）
@@ -30,7 +30,7 @@ GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
 3. `./config.yaml`（当前目录）
 
 关键段：
-- 顶层: `listen`(监听地址)、`log_level`、`log_file`(运行时日志 + pid 文件;不配则默认 `$TMPDIR/ais-switch-proxy.log`/`/tmp/ais-switch-proxy.log`,pid 同目录 `.pid`。`serve --daemon` 写入此文件,前台配了也会镜像)
+- 顶层: `listen`(监听地址)、`log_level`、`log_file`(运行时日志 + pid 文件;不配则默认 `$TMPDIR/model-proxy.log`/`/tmp/model-proxy.log`,pid 同目录 `.pid`。`serve --daemon` 写入此文件,前台配了也会镜像)
 - `auth`: SSO cookie 文件路径、CQP 换取端点、可选 `static_key`（跳过换取）、gemini key env
 - `routes`: 每条路由 = `path_prefixes` + `upstream` + `auth`(cqp/gemini_key/static/none) + `model_map`(别名→真实模型名)
 - `takeover`: `proxy_url` + 各客户端配置文件路径
@@ -38,46 +38,46 @@ GOOS=linux GOARCH=amd64 go build -o ais-switch-proxy-linux .
 ### Linux 上无 AIS Switch 怎么拿 SSO cookie？
 
 `auth.sso_cookie_file` 指向的 JSON 含 `sso_session_cookie` 字段。Linux 上可：
-- 直接 `ais-switch-proxy login compass` 走 Compass SSO 浏览器登录（本地有浏览器即可；SSH 远程时浏览器跳不回本机，按终端提示按回车也能完成）；或
-- 从 Mac 拷贝 `~/.ais-switch/google_oauth_auth.json` 过来，再 `ais-switch-proxy login compass --import` 导入验证；或
+- 直接 `model-proxy login compass` 走 Compass SSO 浏览器登录（本地有浏览器即可；SSH 远程时浏览器跳不回本机，按终端提示按回车也能完成）；或
+- 从 Mac 拷贝 `~/.ais-switch/google_oauth_auth.json` 过来，再 `model-proxy login compass --import` 导入验证；或
 - 直接配 `auth.static_key`（一把已换好的 CQP key），跳过换取。
 
 ## 用法
 
 ```bash
 # 0. 首次登录
-./ais-switch-proxy login compass --config config.yaml            # Compass SSO 浏览器登录，写入 sso_cookie_file
-./ais-switch-proxy login compass --import --config config.yaml   # 或从 AIS Switch 桌面端导入已有 SSO cookie
+./model-proxy login compass --config config.yaml            # Compass SSO 浏览器登录，写入 sso_cookie_file
+./model-proxy login compass --import --config config.yaml   # 或从 AIS Switch 桌面端导入已有 SSO cookie
 
 # 1. 启动代理
-./ais-switch-proxy serve --config config.yaml
+./model-proxy serve --config config.yaml
 
 # 1b. 守护进程模式（父子进程，崩溃自动拉起，日志写文件）
-./ais-switch-proxy serve --daemon --config config.yaml
+./model-proxy serve --daemon --config config.yaml
 # 停止：
-./ais-switch-proxy stop --config config.yaml   # 或 kill -TERM $(cat <log_file 同目录的 .pid>)
+./model-proxy stop --config config.yaml   # 或 kill -TERM $(cat <log_file 同目录的 .pid>)
 
 # 2. 改写客户端配置指向代理（先自动备份）
-./ais-switch-proxy takeover opencode      # 单个: claude|opencode|codex|pi
-./ais-switch-proxy takeover all           # 全部
+./model-proxy takeover opencode      # 单个: claude|opencode|codex|pi
+./model-proxy takeover all           # 全部
 
 # 3. 用客户端（以 opencode 为例）
 opencode run -m anthropic/claude-opus-4-7 "..."
 
 # 4. 还原客户端配置
-./ais-switch-proxy restore opencode
+./model-proxy restore opencode
 
 # 直连场景：只换 CQP key
-./ais-switch-proxy mint-key
+./model-proxy mint-key
 
 # 列出网关模型（缓存到文件，serve 时后台定时刷新）
-./ais-switch-proxy models                 # 打印缓存（过期则刷新）
-./ais-switch-proxy models --refresh       # 强制刷新后再打印
+./model-proxy models                 # 打印缓存（过期则刷新）
+./model-proxy models --refresh       # 强制刷新后再打印
 
 # 查看登录账号 / 月度用量
-./ais-switch-proxy usage compass
+./model-proxy usage compass
 # 登出（清除 sso_cookie_file）
-./ais-switch-proxy logout compass
+./model-proxy logout compass
 ```
 
 ## 通过代理使用（客户端配置）
@@ -94,7 +94,7 @@ opencode run -m anthropic/claude-opus-4-7 "..."
 
 ```bash
 # 1. 启动代理
-./ais-switch-proxy serve --config config.yaml
+./model-proxy serve --config config.yaml
 
 # 2. 跑 demo（默认 prompt "reply with exactly: pong"，model 别名 claude-haiku-4-5）
 python3 examples/demo.py
@@ -144,21 +144,21 @@ client.chat.completions.create(model="gpt-5.5", messages=[{"role":"user","conten
 
 - **model 改写**：请求体 `model` 字段按 `config.yaml` 的 `model_map` 改写（如 `claude-haiku-4-5` → `deepseek-v4-flash`）。客户端发的模型名是别名，上游收到的是真实模型名。
 - **apiKey 占位**：客户端填任意值（约定 `PROXY_MANAGED`），代理注入真实 CQP key，原占位 token 不会泄漏到上游。
-- **可用模型**：`ais-switch-proxy models` 查看网关实际支持的模型列表。
+- **可用模型**：`model-proxy models` 查看网关实际支持的模型列表。
 
 ### 一键接管客户端
 
 `takeover` 自动改写客户端配置文件指向代理（先备份）：
 
 ```bash
-./ais-switch-proxy takeover all        # claude | opencode | codex | pi | all
-./ais-switch-proxy restore all         # 还原
+./model-proxy takeover all        # claude | opencode | codex | pi | all
+./model-proxy restore all         # 还原
 ```
 
 - **claude**: `~/.claude/settings.json` 设 `env.ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED`（走 Anthropic 协议）
 - **opencode**: `~/.config/opencode/opencode.json` 的 `provider.anthropic.options.{baseURL,apiKey}`；模型用 anthropic 内置白名单别名
 - **codex**: `~/.codex/config.toml` 注入 `[model_providers.ais_switch_proxy]` + 顶层 `model_provider`（走 OpenAI responses 协议）
-- **pi**: `~/.pi/agent/models.json` 的 `providers.ais-switch-proxy`，`api: anthropic-messages`，`baseUrl` 指代理 `/v1`
+- **pi**: `~/.pi/agent/models.json` 的 `providers.model-proxy`，`api: anthropic-messages`，`baseUrl` 指代理 `/v1`
 
 > 自定义客户端（不在 takeover 列表里）：直接把它的 baseURL 指向 `http://127.0.0.1:15721`、apiKey 填任意值即可走 Anthropic 协议。
 
@@ -166,14 +166,14 @@ client.chat.completions.create(model="gpt-5.5", messages=[{"role":"user","conten
 
 `models` 列出 Compass 网关的真实模型（经 CQP key 调 `<upstream>/models`）。模型列表**缓存到文件**，避免每次都打网关：
 
-- 缓存文件：`models_cache_file`（默认 `~/.ais-switch/ais-switch-proxy-models.json`，即 `sso_cookie_file` 同目录）
+- 缓存文件：`models_cache_file`（默认 `~/.ais-switch/model-proxy-models.json`，即 `sso_cookie_file` 同目录）
 - 刷新间隔：`models_refresh_interval`（默认 `1h`，支持 `30m`/`2h` 等 Go duration）
 - `serve` 启动时后台 goroutine **立即刷新一次**（预热缓存），之后按间隔定时刷新
 - `models` 命令：缓存新鲜（< 间隔）则直接打印缓存；过期则拉取并更新；`--refresh` 强制刷新
 
 配置（`config.yaml`，均可选）：
 ```yaml
-# models_cache_file: ~/.ais-switch/ais-switch-proxy-models.json
+# models_cache_file: ~/.ais-switch/model-proxy-models.json
 # models_refresh_interval: 1h
 ```
 
@@ -184,8 +184,8 @@ client.chat.completions.create(model="gpt-5.5", messages=[{"role":"user","conten
 定价数据源自 AIS Switch 桌面端（它在 schema 初始化时从二进制内嵌数据播种 147 条到 `model_pricing` 表，无远程端点）。`import-pricing` 把这张表导出成本地 JSON，运行时优先读取：
 
 ```bash
-ais-switch-proxy import-pricing                  # 从 ~/.ais-switch/cc-switch.db 导出
-ais-switch-proxy import-pricing --db /path/to/cc-switch.db  # 指定 DB
+model-proxy import-pricing                  # 从 ~/.ais-switch/cc-switch.db 导出
+model-proxy import-pricing --db /path/to/cc-switch.db  # 指定 DB
 ```
 
 - 写入 `~/.ais-switch/models_pricing.json`（运行时自动读取，无需重建二进制）
@@ -218,18 +218,18 @@ ais-switch-proxy import-pricing --db /path/to/cc-switch.db  # 指定 DB
 - supervisor 写 pid 文件，spawn 一个 **worker**（子进程）真正跑 `http.ListenAndServe`。
 - supervisor 监控 worker 存活状态：worker 退出（崩溃）即**自动拉起**，指数退避（1s→2s→…→30s 封顶，存活超 30s 重置退避），避免快速死循环打满 CPU。
 - 收到 `SIGTERM`/`SIGINT`：supervisor 转发给 worker 优雅停止（10s 超时后 `SIGKILL`），清理 pid 文件后退出。
-- **日志写文件**：`log_file`（配置）或 `--log-file`（flag 覆盖）；都不配则默认 `$TMPDIR/ais-switch-proxy.log`（Linux `/tmp/ais-switch-proxy.log`，pid 文件 `/tmp/ais-switch-proxy.pid`）。运行时产物按惯例进 `/tmp`，不污染配置目录。daemon 模式必用文件；前台模式若配了 `log_file` 也会同时镜像到文件。因 stderr 是普通文件，色彩自动关闭 → 文件日志无 ANSI 转义码。
+- **日志写文件**：`log_file`（配置）或 `--log-file`（flag 覆盖）；都不配则默认 `$TMPDIR/model-proxy.log`（Linux `/tmp/model-proxy.log`，pid 文件 `/tmp/model-proxy.pid`）。运行时产物按惯例进 `/tmp`，不污染配置目录。daemon 模式必用文件；前台模式若配了 `log_file` 也会同时镜像到文件。因 stderr 是普通文件，色彩自动关闭 → 文件日志无 ANSI 转义码。
 
 ```bash
-./ais-switch-proxy serve --daemon --config config.yaml
-# ais-switch-proxy daemonized: supervisor pid=12345 log=/tmp/ais-switch-proxy.log pidfile=/tmp/ais-switch-proxy.pid
-#   stop with: kill -TERM 12345  (or kill -TERM $(cat /tmp/ais-switch-proxy.pid))
+./model-proxy serve --daemon --config config.yaml
+# model-proxy daemonized: supervisor pid=12345 log=/tmp/model-proxy.log pidfile=/tmp/model-proxy.pid
+#   stop with: kill -TERM 12345  (or kill -TERM $(cat /tmp/model-proxy.pid))
 ```
 
 配置（`config.yaml`）：默认无需设置（运行时产物进 `/tmp`）。如需自定义：
 ```yaml
-# 默认（不配）：$TMPDIR/ais-switch-proxy.log + $TMPDIR/ais-switch-proxy.pid
-log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log   # 自定义日志 + pid 目录
+# 默认（不配）：$TMPDIR/model-proxy.log + $TMPDIR/model-proxy.pid
+log_file: /var/log/model-proxy/model-proxy.log   # 自定义日志 + pid 目录
 ```
 
 > 限制：`setsid` 仅 Unix；Windows 上 supervisor 不脱离控制台（仍可监控/拉起）。`go build ./...` 会写出主二进制，交叉编译后记得用对应平台二进制运行。
@@ -237,7 +237,7 @@ log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log   # 自定义日志 + p
 ### `stop` —— 停止 daemon
 
 ```bash
-./ais-switch-proxy stop --config config.yaml
+./model-proxy stop --config config.yaml
 ```
 
 读 pid 文件（与 `serve --daemon` 同路径），向 supervisor 发 `SIGTERM`：supervisor 转发给 worker 优雅退出、清理 pid 文件。等最多 15s，超时 `SIGKILL` 兜底。无 daemon 运行时友好提示，并清理 stale pid 文件。`--config`/`--log-file` 须与启动时一致（用来定位 pid 文件）。
@@ -256,7 +256,7 @@ log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log   # 自定义日志 + p
 
 ## 客户端接管说明
 
-`takeover` 改写的各客户端配置文件细节见上文[通过代理使用 → 一键接管客户端](#一键接管客户端)。备份文件：`<原文件>.ais-switch-proxy.bak`（纯净副本）+ `.ais-switch-proxy.bak.meta`。
+`takeover` 改写的各客户端配置文件细节见上文[通过代理使用 → 一键接管客户端](#一键接管客户端)。备份文件：`<原文件>.model-proxy.bak`（纯净副本）+ `.model-proxy.bak.meta`。
 
 ## 验证状态
 

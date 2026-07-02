@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""ais-switch-proxy 直接调用 demo（流式渐进输出，支持 Anthropic + codex 协议）。
+"""model-proxy 直接调用 demo（流式渐进输出，支持 Anthropic + codex 协议）。
 
 前置：
-  1. 已登录（ais-switch-proxy login 或 --import），或 config 配了 static_key
-  2. 代理在跑：ais-switch-proxy serve --config config.yaml
-  3. 用 codex 协议 + gpt-5.5：先 ais-switch-proxy login codex（拿独立 OAuth token）
+  1. 已登录（model-proxy login 或 --import），或 config 配了 static_key
+  2. 代理在跑：model-proxy serve --config config.yaml
+  3. 用 codex 协议 + gpt-5.5：先 model-proxy login codex（拿独立 OAuth token）
 
 代理监听 http://127.0.0.1:15721，按 URL 路径前缀路由：
   --protocol anthropic  → POST /v1/messages   (claude 路由 → compass 网关, CQP key)
@@ -151,7 +151,7 @@ def stream_codex(base: str, model: str, prompt: str, max_tokens: int, effort: st
 
 
 def main():
-    ap = argparse.ArgumentParser(description="ais-switch-proxy 流式 demo")
+    ap = argparse.ArgumentParser(description="model-proxy 流式 demo")
     ap.add_argument("prompt", nargs="?", default="reply with exactly: pong")
     ap.add_argument("model", nargs="?", default=None,
                     help="模型别名或真实名（默认：anthropic→claude-haiku-4-5, codex→gpt-5.5）")
@@ -217,7 +217,7 @@ def main():
         sys.exit(1)
     except urllib.error.URLError as e:
         print(f"\n✗ 连不上代理 {base}：{e}", file=sys.stderr)
-        print("  先启动：ais-switch-proxy serve --config config.yaml", file=sys.stderr)
+        print("  先启动：model-proxy serve --config config.yaml", file=sys.stderr)
         sys.exit(1)
 
     if in_thinking:

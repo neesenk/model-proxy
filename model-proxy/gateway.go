@@ -405,7 +405,7 @@ func (c *CompassClient) MonthlyUsage() (*MonthlyProjectUsage, error) {
 		return nil, fmt.Errorf("not logged in")
 	}
 	if a.ProjectID == "" {
-		return nil, fmt.Errorf("no project_id in store; run `ais-switch-proxy login compass` (or --import) to populate it")
+		return nil, fmt.Errorf("no project_id in store; run `model-proxy login compass` (or --import) to populate it")
 	}
 	payload, _ := json.Marshal(map[string]string{"project_id": a.ProjectID})
 	req, _ := http.NewRequest(http.MethodPost, compassMonthlyUsage, bytes.NewReader(payload))

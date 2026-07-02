@@ -106,7 +106,7 @@ func TestModelsRefreshInterval(t *testing.T) {
 func TestModelsCachePath_Default(t *testing.T) {
 	cfg := &Config{Auth: AuthCfg{SSOCookieFile: "/home/u/.ais-switch/google_oauth_auth.json"}}
 	got := modelsCachePath(cfg)
-	want := "/home/u/.ais-switch/ais-switch-proxy-models.json"
+	want := "/home/u/.ais-switch/model-proxy-models.json"
 	if got != want {
 		t.Errorf("got %q want %q", got, want)
 	}

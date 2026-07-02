@@ -56,9 +56,9 @@ func sha256hex(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-// backupDir returns the backup directory: <configDir>/.ais-switch-proxy/
+// backupDir returns the backup directory: <configDir>/.model-proxy/
 func backupDir(configPath string) string {
-	return filepath.Join(filepath.Dir(configPath), ".ais-switch-proxy")
+	return filepath.Join(filepath.Dir(configPath), ".model-proxy")
 }
 
 // ---- top-level dispatch ----

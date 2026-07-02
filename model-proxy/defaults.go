@@ -1,19 +1,19 @@
 package main
 
-// defaultConfigYAML is the template written by `ais-switch-proxy config init`; matches the repo's config.yaml.
-const defaultConfigYAML = `# ais-switch-proxy config — standalone from AIS Switch, portable to Linux.
+// defaultConfigYAML is the template written by `model-proxy config init`; matches the repo's config.yaml.
+const defaultConfigYAML = `# model-proxy config — standalone from AIS Switch, portable to Linux.
 # Paths support ~ expansion. env:ENV_VAR reads an environment variable.
 
 listen: 127.0.0.1:15721
 log_level: info            # debug | info | warn | error
-# Runtime log + pid file. Default when unset: /tmp/ais-switch-proxy.log (pid: /tmp/ais-switch-proxy.pid).
+# Runtime log + pid file. Default when unset: /tmp/model-proxy.log (pid: /tmp/model-proxy.pid).
 # Uncomment to override:
-# log_file: /var/log/ais-switch-proxy/ais-switch-proxy.log
+# log_file: /var/log/model-proxy/model-proxy.log
 
 # Gateway model-list cache + scheduled refresh (used by serve and the models command).
-# Default cache file: next to sso_cookie_file (ais-switch-proxy-models.json).
+# Default cache file: next to sso_cookie_file (model-proxy-models.json).
 # Default refresh interval: 1h. Uncomment to override:
-# models_cache_file: ~/.ais-switch/ais-switch-proxy-models.json
+# models_cache_file: ~/.ais-switch/model-proxy-models.json
 # models_refresh_interval: 1h
 
 auth:
@@ -67,5 +67,5 @@ takeover:
   pi_file: ~/.pi/agent/models.json
   # provider_id is the single identifier used by takeover for every agent that
   # takes one (opencode, pi, codex, future agents). claude doesn't use it.
-  provider_id: ais-switch-proxy
+  provider_id: model-proxy
 `

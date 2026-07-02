@@ -50,14 +50,14 @@ func modelsCachePath(cfg *Config) string {
 	}
 	for _, base := range []string{cfg.Auth.SSOCookieFile, cfg.LogFile} {
 		if base != "" {
-			return filepath.Join(filepath.Dir(base), "ais-switch-proxy-models.json")
+			return filepath.Join(filepath.Dir(base), "model-proxy-models.json")
 		}
 	}
 	abs, err := filepath.Abs("config.yaml")
 	if err == nil {
-		return filepath.Join(filepath.Dir(abs), "ais-switch-proxy-models.json")
+		return filepath.Join(filepath.Dir(abs), "model-proxy-models.json")
 	}
-	return "ais-switch-proxy-models.json"
+	return "model-proxy-models.json"
 }
 
 // cqpUpstream returns the baseURL of the first cqp-authed provider, or "".

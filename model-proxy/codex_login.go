@@ -151,7 +151,7 @@ func pollForToken(opts *codexLoginServerOptions, deviceAuthID, userCode string, 
 		case "deviceauth_slow_down", "slow_down":
 			interval += 5
 		case "deviceauth_authorization_expired", "expired_token":
-			return nil, fmt.Errorf("device code expired; run `ais-switch-proxy login codex` again")
+			return nil, fmt.Errorf("device code expired; run `model-proxy login codex` again")
 		case "deviceauth_authorization_denied", "access_denied":
 			return nil, fmt.Errorf("user denied the authorization")
 		default:

@@ -76,7 +76,7 @@ type Takeover struct {
 	PiFile       string                `yaml:"pi_file"`
 	// ProviderID is the single provider identifier used by takeover for every
 	// agent that takes one (opencode, pi, codex, and future agents). claude
-	// doesn't use it (it writes env vars). Default "ais-switch-proxy".
+	// doesn't use it (it writes env vars). Default "model-proxy".
 	ProviderID   string                `yaml:"provider_id"`
 }
 

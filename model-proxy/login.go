@@ -33,7 +33,7 @@ func cmdLogin(args []string) {
 	}
 	provName := positional(args)
 	if provName == "" {
-		fmt.Println("usage: ais-switch-proxy login <provider>")
+		fmt.Println("usage: model-proxy login <provider>")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
 			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
@@ -139,7 +139,7 @@ After logging in, the browser will try to redirect back to this machine:
 
 	fmt.Printf("%s login complete: %s (project=%s)\n", cGreen("[GoogleGateway]"), cBold(cCyan(a.Email)), cGray(a.ProjectID))
 	fmt.Printf("  %s %s\n", cDim("store:"), cGray(storePath))
-	fmt.Printf("\n%s You can now run `%s` or `%s`.\n", cGreen("Login complete."), cCyan("ais-switch-proxy mint-key"), cCyan("ais-switch-proxy serve"))
+	fmt.Printf("\n%s You can now run `%s` or `%s`.\n", cGreen("Login complete."), cCyan("model-proxy mint-key"), cCyan("model-proxy serve"))
 	return nil
 }
 
@@ -183,7 +183,7 @@ func importLogin(cfg *Config) error {
 	}
 	fmt.Printf("  %s %s%s%s (len %d) %s\n",
 		cDim("managed CQP key:"), cCyan(key[:6]), cGray("…"), cCyan(key[len(key)-4:]), len(key), cGreen("✓"))
-	fmt.Printf("\n%s %s\n", cGreen("Login complete"), cDim("(real SSO_C imported). Ready:")+cCyan(" ais-switch-proxy serve"))
+	fmt.Printf("\n%s %s\n", cGreen("Login complete"), cDim("(real SSO_C imported). Ready:")+cCyan(" model-proxy serve"))
 	return nil
 }
 
@@ -376,7 +376,7 @@ func validateOrigin(r *http.Request) error {
 }
 
 const successHTML = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>ais-switch-proxy</title>
+<html><head><meta charset="utf-8"><title>model-proxy</title>
 <style>body{font-family:system-ui,sans-serif;text-align:center;padding:3rem}h1{color:#16a34a}</style>
 </head><body><h1>✓ Login successful</h1>
 <p>You can close this window and return to the terminal.</p>

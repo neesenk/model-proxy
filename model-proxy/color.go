@@ -28,7 +28,7 @@ var colorEnabled = decideColor(os.Stdout)
 
 // logColorEnabled controls whether runtime logs on stderr (log package, proxy
 // request logs) get color. Separate from colorEnabled: when stderr alone is
-// redirected to a file (e.g. ais-switch-proxy serve 2>proxy.log), only log color is
+// redirected to a file (e.g. model-proxy serve 2>proxy.log), only log color is
 // disabled, leaving stdout status output unaffected. Files are never colored.
 var logColorEnabled = decideColor(os.Stderr)
 

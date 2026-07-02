@@ -64,21 +64,21 @@ func TestConfigPath_LookupOrder(t *testing.T) {
 
 func TestResolveLogFile(t *testing.T) {
 	cfg := &Config{LogFile: "/from/config.log"}
-	sa := serveArgs{config: "/etc/ais-switch-proxy/config.yaml"}
+	sa := serveArgs{config: "/etc/model-proxy/config.yaml"}
 
 	// config used
 	if got := resolveLogFile(sa, cfg); got != "/from/config.log" {
 		t.Errorf("config: got %q", got)
 	}
 	// default: the OS temp dir (runtime artifacts), e.g. /tmp on Linux, $TMPDIR on macOS
-	wantDefault := filepath.Join(os.TempDir(), "ais-switch-proxy.log")
-	if got := resolveLogFile(serveArgs{config: "/etc/ais-switch-proxy/config.yaml"}, &Config{}); got != wantDefault {
+	wantDefault := filepath.Join(os.TempDir(), "model-proxy.log")
+	if got := resolveLogFile(serveArgs{config: "/etc/model-proxy/config.yaml"}, &Config{}); got != wantDefault {
 		t.Errorf("default: got %q want %q", got, wantDefault)
 	}
 }
 
 func TestPidFilePath(t *testing.T) {
-	if got := pidFilePath("/var/log/ais-switch-proxy.log"); got != "/var/log/ais-switch-proxy.pid" {
+	if got := pidFilePath("/var/log/model-proxy.log"); got != "/var/log/model-proxy.pid" {
 		t.Errorf("got %q", got)
 	}
 	if got := pidFilePath("/var/log/agent"); got != "/var/log/agent.pid" {

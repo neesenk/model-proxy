@@ -22,7 +22,7 @@ type ModelPricing struct {
 // embeddedPricing is the default pricing table shipped with the binary, exported
 // from AIS Switch's cc-switch.db model_pricing table (147 default rows seeded by
 // the desktop app at schema init). Runtime does NOT read cc-switch.db; refresh it
-// with `ais-switch-proxy import-pricing`.
+// with `model-proxy import-pricing`.
 //
 //go:embed data/models_pricing.json
 var embeddedPricing []byte
@@ -102,7 +102,7 @@ func pricingDataPath(cfg *Config) string {
 }
 
 // cmdImportPricing exports model_pricing from AIS Switch's cc-switch.db into a
-// local JSON file, so ais-switch-proxy stays self-contained at runtime.
+// local JSON file, so model-proxy stays self-contained at runtime.
 func cmdImportPricing(args []string) {
 	cfg, err := LoadConfig(configPath(args))
 	if err != nil {

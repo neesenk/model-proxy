@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-const usage = `ais-switch-proxy — standalone portable proxy for AIS Switch LLM gateway
+const usage = `model-proxy — standalone portable proxy for AIS Switch LLM gateway
 
-Usage: ais-switch-proxy <COMMAND> [SUBCOMMAND] [OPTIONS]
+Usage: model-proxy <COMMAND> [SUBCOMMAND] [OPTIONS]
 
 Commands:
   serve                Start the proxy server
@@ -249,7 +249,7 @@ func cmdLogout(args []string) {
 	}
 	provName := positional(args)
 	if provName == "" {
-		fmt.Println("usage: ais-switch-proxy logout <provider>")
+		fmt.Println("usage: model-proxy logout <provider>")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
 			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
@@ -294,7 +294,7 @@ func cmdUsage(args []string) {
 	provName := positional(args)
 	if provName == "" {
 		// List available providers.
-		fmt.Println("usage: ais-switch-proxy usage <provider>")
+		fmt.Println("usage: model-proxy usage <provider>")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
 			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
@@ -333,7 +333,7 @@ func showCompassUsage(cfg *Config) {
 		log.Fatal(err)
 	}
 	if a == nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("ais-switch-proxy login compass"))
+		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login compass"))
 		return
 	}
 	c := newCompassClient(path)
@@ -361,7 +361,7 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	p := newCodexOAuthProvider(expandPath(authFile))
 	tok, acct, err := p.token()
 	if err != nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("ais-switch-proxy login codex"))
+		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login codex"))
 		return
 	}
 	// Usage endpoint is at /backend-api/wham/usage, NOT under the codex base
@@ -549,7 +549,7 @@ func money(v float64) string {
 
 func cmdConfig(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: ais-switch-proxy config [init|print|check]")
+		fmt.Println("usage: model-proxy config [init|print|check]")
 		os.Exit(1)
 	}
 	switch args[0] {

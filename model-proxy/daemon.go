@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Daemon (supervisor/worker) model for `ais-switch-proxy serve --daemon`.
+// Daemon (supervisor/worker) model for `model-proxy serve --daemon`.
 //
 // Roles are selected by the AIS_SWITCH_PROXY_ROLE env var so no new subcommand is needed:
 //   - (unset)  foreground invocation. With --daemon it launches a detached
@@ -138,7 +138,7 @@ func runProxy(sa serveArgs) {
 	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", p.handler)
-	log.Printf("ais-switch-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
+	log.Printf("model-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
 	if err := http.ListenAndServe(cfg.Listen, mux); err != nil {
 		log.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func daemonize(sa serveArgs) error {
 	_ = cmd.Process.Release()
 	lf.Close()
 
-	fmt.Printf("ais-switch-proxy daemonized: supervisor pid=%d log=%s pidfile=%s\n",
+	fmt.Printf("model-proxy daemonized: supervisor pid=%d log=%s pidfile=%s\n",
 		pid, logFile, pidFilePath(logFile))
 	fmt.Printf("  stop with: kill -TERM %d  (or kill -TERM $(cat %s))\n", pid, pidFilePath(logFile))
 	return nil
@@ -309,7 +309,7 @@ func cmdStop(args []string) {
 		return
 	}
 
-	fmt.Printf("Stopping ais-switch-proxy daemon (pid=%d)...\n", pid)
+	fmt.Printf("Stopping model-proxy daemon (pid=%d)...\n", pid)
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		log.Fatalf("send SIGTERM to %d: %v", pid, err)
 	}
@@ -366,7 +366,7 @@ func cmdReload(args []string) {
 		fmt.Println(cYellow("Daemon not running.") + " (removed stale pid file)")
 		return
 	}
-	fmt.Printf("Reloading ais-switch-proxy daemon (pid=%d)...\n", pid)
+	fmt.Printf("Reloading model-proxy daemon (pid=%d)...\n", pid)
 	if err := proc.Signal(syscall.SIGHUP); err != nil {
 		log.Fatalf("send SIGHUP to %d: %v", pid, err)
 	}
@@ -399,7 +399,7 @@ func resolveLogFile(sa serveArgs, cfg *Config) string {
 		return cfg.LogFile
 	}
 	// Default: the OS temp dir (runtime artifacts: logs + pid), per Unix convention.
-	return filepath.Join(os.TempDir(), "ais-switch-proxy.log")
+	return filepath.Join(os.TempDir(), "model-proxy.log")
 }
 
 // openLogFile opens (creating parent dirs) a log file for append.
