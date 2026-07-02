@@ -290,7 +290,11 @@ func showCodexUsage(cfg *Config, prov Provider) {
 		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("ais-switch-proxy login codex"))
 		return
 	}
-	req, _ := http.NewRequest("GET", prov.BaseURL+"/wham/usage", nil)
+	// Usage endpoint is at /backend-api/wham/usage, NOT under the codex base
+	// (/backend-api/codex/wham/usage returns 403). Derive the backend-api root
+	// from the provider baseURL by stripping the trailing /codex segment.
+	usageURL := strings.TrimSuffix(prov.BaseURL, "/codex") + "/wham/usage"
+	req, _ := http.NewRequest("GET", usageURL, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("originator", "codex_cli_rs")
 	if acct != "" {
