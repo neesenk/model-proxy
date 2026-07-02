@@ -36,11 +36,24 @@ const (
 
 // serveArgs holds parsed `serve` flags.
 type serveArgs struct {
-	config string
+	config  string
+	logFile string // --log-file override
 }
 
 func parseServeArgs(args []string) serveArgs {
 	sa := serveArgs{config: configPath(args)}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--log-file":
+			if i+1 < len(args) {
+				sa.logFile = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(a, "--log-file="):
+			sa.logFile = strings.TrimPrefix(a, "--log-file=")
+		}
+	}
 	return sa
 }
 
@@ -311,10 +324,13 @@ func spawnWorker(sa serveArgs) *exec.Cmd {
 	return cmd
 }
 
-// resolveLogFile picks the log file path: config log_file > default
+// resolveLogFile picks the log file path: --log-file flag > config log_file > default
 // (the OS temp dir, e.g. /tmp on Linux, $TMPDIR on macOS — runtime artifacts belong
 // there, not under the config dir). Returns "" only if the temp dir can't be resolved.
 func resolveLogFile(sa serveArgs, cfg *Config) string {
+	if sa.logFile != "" {
+		return expandPath(sa.logFile)
+	}
 	if cfg.LogFile != "" {
 		return cfg.LogFile
 	}

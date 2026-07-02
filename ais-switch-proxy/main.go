@@ -36,6 +36,9 @@ Options:
           Config file path
           Lookup order: explicit path > ~/.ais-switch/config.yaml > ./config.yaml
 
+  --log-file <PATH>
+          Log file path (for 'serve': overrides config log_file)
+
   -h, --help
           Print this message
 `
