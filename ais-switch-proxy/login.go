@@ -31,18 +31,42 @@ func cmdLogin(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// `login --import` reads SSO_C from the desktop app's store (which has already
-	// completed browser SSO) instead of driving the browser flow.
+	provName := positional(args)
+	if provName == "" {
+		fmt.Println("usage: ais-switch-proxy login <provider> [--import]")
+		fmt.Println("available providers:")
+		for name, p := range cfg.Providers {
+			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
+		}
+		return
+	}
+	prov, ok := cfg.Providers[provName]
+	if !ok {
+		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
+	}
+	// `--import` reads SSO_C from the desktop app's store instead of driving the
+	// browser flow. Only meaningful for compass (cqp auth).
+	importFlag := false
 	for _, a := range args {
 		if a == "--import" {
+			importFlag = true
+		}
+	}
+	switch prov.Auth {
+	case "cqp":
+		if importFlag {
 			if err := importLogin(cfg); err != nil {
 				log.Fatal(err)
 			}
-			return
+		} else {
+			if err := runLogin(cfg); err != nil {
+				log.Fatalf("login failed: %v", err)
+			}
 		}
-	}
-	if err := runLogin(cfg); err != nil {
-		log.Fatalf("login failed: %v", err)
+	case "codex_oauth":
+		cmdCodexLogin(args)
+	default:
+		log.Fatalf("login not supported for provider %q (auth=%s)", provName, prov.Auth)
 	}
 }
 

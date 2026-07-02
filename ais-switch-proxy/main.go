@@ -22,10 +22,8 @@ Usage:
   ais-switch-proxy stop    [--config config.yaml] [--log-file FILE]  Stop a running --daemon (SIGTERM the supervisor)
   ais-switch-proxy takeover [--config config.yaml] [client]  Rewrite client config to point at the proxy
   ais-switch-proxy restore  [--config config.yaml] [client]  Restore client config from backup
-  ais-switch-proxy login    [--config config.yaml]       Compass SSO login, writes sso_cookie_file
-  ais-switch-proxy codex-login [--config config.yaml]   codex OAuth device flow (independent tokens, for the chatgpt.com backend)
-  ais-switch-proxy login --import [--config config.yaml] Import SSO cookie from the AIS Switch desktop app
-  ais-switch-proxy logout   [--config config.yaml]       Clear sso_cookie_file (log out)
+  ais-switch-proxy login <provider> [--config config.yaml] [--import]  Login (compass: SSO, codex: device flow)
+  ais-switch-proxy logout <provider> [--config config.yaml]  Logout (clear provider credentials)
   ais-switch-proxy usage <provider> [--config config.yaml]  Show usage for a provider (compass | codex)
   ais-switch-proxy mint-key [--config config.yaml]       Mint and print a CQP key (for direct mode)
   ais-switch-proxy models  [--config config.yaml] [--refresh]  List gateway models (cached, refreshes on schedule)
@@ -57,8 +55,6 @@ func main() {
 		cmdRestore(os.Args[2:])
 	case "login":
 		cmdLogin(os.Args[2:])
-	case "codex-login":
-		cmdCodexLogin(os.Args[2:])
 	case "logout":
 		cmdLogout(os.Args[2:])
 	case "usage":
@@ -177,14 +173,42 @@ func cmdLogout(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	path := cfg.Auth.SSOCookieFile
-	if path == "" {
-		log.Fatal("auth.sso_cookie_file not set in config")
+	provName := positional(args)
+	if provName == "" {
+		fmt.Println("usage: ais-switch-proxy logout <provider>")
+		fmt.Println("available providers:")
+		for name, p := range cfg.Providers {
+			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
+		}
+		return
 	}
-	if err := clearAccount(path); err != nil {
-		log.Fatal(err)
+	prov, ok := cfg.Providers[provName]
+	if !ok {
+		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
+	switch prov.Auth {
+	case "cqp":
+		path := cfg.Auth.SSOCookieFile
+		if path == "" {
+			log.Fatal("auth.sso_cookie_file not set in config")
+		}
+		if err := clearAccount(path); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
+	case "codex_oauth":
+		path := cfg.Auth.CodexAuthFile
+		if path == "" {
+			path = "~/.ais-switch/codex_oauth_auth.json"
+		}
+		path = expandPath(path)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.Fatal(err)
+		}
+		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
+	default:
+		log.Fatalf("logout not supported for provider %q (auth=%s)", provName, prov.Auth)
+	}
 }
 
 func cmdUsage(args []string) {
