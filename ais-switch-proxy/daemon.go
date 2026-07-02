@@ -86,6 +86,8 @@ func cmdServe(args []string) {
 		}
 	case "stop":
 		cmdStop(args)
+	case "reload":
+		cmdReload(args)
 	default:
 		// No subcommand — foreground serve.
 		sa := parseServeArgs(args)
@@ -120,6 +122,20 @@ func runProxy(sa serveArgs) {
 	// Start the background model-list refresher (cache to file on a schedule).
 	startModelsRefresher(cfg)
 	p := NewProxy(cfg)
+	// SIGHUP → hot reload config.
+	go func() {
+		hupCh := make(chan os.Signal, 1)
+		signal.Notify(hupCh, syscall.SIGHUP)
+		for range hupCh {
+			log.Printf("[reload] SIGHUP received, reloading config from %s", sa.config)
+			if err := p.reload(sa.config); err != nil {
+				log.Printf("[reload] FAILED: %v (keeping old config)", err)
+			} else {
+				log.Printf("[reload] config reloaded successfully (providers: %s, routes: %s)",
+					providerNames(p.cfg), routeNames(p.cfg))
+			}
+		}
+	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", p.handler)
 	log.Printf("ais-switch-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
@@ -186,7 +202,7 @@ func runSupervisor(sa serveArgs) {
 	log.Printf("[supervisor] started pid=%d log=%s", os.Getpid(), logFile)
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
@@ -208,6 +224,12 @@ func runSupervisor(sa serveArgs) {
 
 		select {
 		case sig := <-sigCh:
+			if sig == syscall.SIGHUP {
+				// Forward reload to the worker.
+				log.Printf("[supervisor] received SIGHUP, forwarding to worker pid=%d", worker.Process.Pid)
+				_ = worker.Process.Signal(syscall.SIGHUP)
+				continue
+			}
 			// Graceful shutdown: forward SIGTERM, wait up to 10s, then SIGKILL.
 			log.Printf("[supervisor] received %v, stopping worker pid=%d", sig, worker.Process.Pid)
 			_ = worker.Process.Signal(syscall.SIGTERM)
@@ -307,6 +329,48 @@ func cmdStop(args []string) {
 	_ = proc.Kill()
 	os.Remove(pidPath)
 	fmt.Println(cGreen("✓ Killed."))
+}
+
+// cmdReload sends SIGHUP to a running daemon's supervisor, which forwards it
+// to the worker for hot config reload.
+func cmdReload(args []string) {
+	sa := parseServeArgs(args)
+	cfg, err := LoadConfig(sa.config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logFile := resolveLogFile(sa, cfg)
+	pidPath := pidFilePath(logFile)
+
+	pidStr, err := os.ReadFile(pidPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println(cYellow("No daemon running.") + " (pid file not found: " + cGray(pidPath) + ")")
+			return
+		}
+		log.Fatal(err)
+	}
+	var pid int
+	for _, c := range pidStr {
+		if c < '0' || c > '9' {
+			break
+		}
+		pid = pid*10 + int(c-'0')
+	}
+	if pid <= 0 {
+		log.Fatalf("invalid pid in %s: %q", pidPath, string(pidStr))
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil || proc.Signal(syscall.Signal(0)) != nil {
+		os.Remove(pidPath)
+		fmt.Println(cYellow("Daemon not running.") + " (removed stale pid file)")
+		return
+	}
+	fmt.Printf("Reloading ais-switch-proxy daemon (pid=%d)...\n", pid)
+	if err := proc.Signal(syscall.SIGHUP); err != nil {
+		log.Fatalf("send SIGHUP to %d: %v", pid, err)
+	}
+	fmt.Println(cGreen("✓ Reload signal sent.") + " Check logs for [reload] lines.")
 }
 
 // spawnWorker starts a worker process whose stdio is the supervisor's (the log file).

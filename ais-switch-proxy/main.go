@@ -20,6 +20,7 @@ Commands:
   serve           Start the proxy server (foreground)
     serve daemon    Run in background (auto-restart on crash)
     serve stop      Stop a running daemon
+    serve reload    Hot-reload config (SIGHUP the running daemon)
   takeover        Rewrite client config to point at the proxy
   restore         Restore client config from backup
   login           Login to a provider (compass | codex)
@@ -28,7 +29,10 @@ Commands:
   models          List or refresh models
     models list     List available models (from cache)
     models refresh  Force-refresh model cache from the gateway
-  config          Generate or print config
+  config          Generate, print, or check config
+    config init     Generate a config.yaml template
+    config print    Print the effective config
+    config check    Validate config and print a summary
   help            Print this message
 
 Options:
@@ -460,7 +464,7 @@ func money(v float64) string {
 
 func cmdConfig(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: ais-switch-proxy config [init|print]")
+		fmt.Println("usage: ais-switch-proxy config [init|print|check]")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -481,6 +485,23 @@ func cmdConfig(args []string) {
 		}
 		for proto, route := range cfg.Routes {
 			fmt.Printf("route %s: %d model maps\n", proto, len(route.Models))
+		}
+	case "check":
+		cfg, err := LoadConfig(configPath(args[1:]))
+		if err != nil {
+			fmt.Println(cRed("✗ config invalid") + ": " + err.Error())
+			os.Exit(1)
+		}
+		fmt.Println(cGreen("✓ config valid"))
+		fmt.Printf("  listen:    %s\n", cfg.Listen)
+		fmt.Printf("  log_file:  %s\n", cfg.LogFile)
+		fmt.Printf("  providers: %d\n", len(cfg.Providers))
+		for name, prov := range cfg.Providers {
+			fmt.Printf("    %s: %s (%s, %d models)\n", name, prov.BaseURL, prov.Auth, len(prov.Models))
+		}
+		fmt.Printf("  routes:    %d\n", len(cfg.Routes))
+		for proto, route := range cfg.Routes {
+			fmt.Printf("    %s: %d models\n", proto, len(route.Models))
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])

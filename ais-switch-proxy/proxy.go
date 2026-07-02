@@ -9,11 +9,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Proxy holds the compiled provider auth instances + the config.
 type Proxy struct {
+	mu        sync.RWMutex
 	cfg       *Config
 	authCache map[string]AuthProvider // provider name → AuthProvider (shared)
 	client    *http.Client
@@ -32,7 +34,27 @@ func NewProxy(cfg *Config) *Proxy {
 	return p
 }
 
+// reload re-reads the config file and atomically swaps cfg + authCache.
+// Called on SIGHUP (serve reload).
+func (p *Proxy) reload(configPath string) error {
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	authCache := map[string]AuthProvider{}
+	for name, prov := range cfg.Providers {
+		authCache[name] = newAuthProvider(prov.Auth, cfg)
+	}
+	p.mu.Lock()
+	p.cfg = cfg
+	p.authCache = authCache
+	p.mu.Unlock()
+	return nil
+}
+
 func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	if r.URL.Path == "/health/status" || r.URL.Path == "/health" {
 		w.WriteHeader(200)
 		return
