@@ -78,50 +78,6 @@ type Takeover struct {
 	// agent that takes one (opencode, pi, codex, and future agents). claude
 	// doesn't use it (it writes env vars). Default "ais-switch-proxy".
 	ProviderID   string                `yaml:"provider_id"`
-	PiModels     []string              `yaml:"pi_models"`
-	// ModelLimits holds per-model output limits (max output tokens, modalities).
-	// Keyed by model id. Used by takeover when writing client configs. Models not
-	// listed fall back to DefaultOutputTokens / default modalities. This keeps
-	// model-specific values in config, not hardcoded in client-rewrite code.
-	ModelLimits         map[string]ModelLimit `yaml:"model_limits"`
-}
-
-// ModelLimit is per-model metadata takeover writes into client configs.
-// Context is optional; when 0, the value from the gateway models cache is used
-// (and if that's missing too, the field is omitted).
-type ModelLimit struct {
-	Context      int64    `yaml:"context"`
-	OutputTokens int      `yaml:"output_tokens"`
-	Input        []string `yaml:"input"`
-	Output       []string `yaml:"output"`
-}
-
-// defaultModelLimit is the fallback when a model isn't in ModelLimits.
-var defaultModelLimit = ModelLimit{
-	OutputTokens: 4096,
-	Input:        []string{"text"},
-	Output:       []string{"text"},
-}
-
-// modelLimit returns the limit for a model, applying config overrides on top of
-// the default (so partial config still fills the gaps).
-func (t *Takeover) modelLimit(modelID string) ModelLimit {
-	m := defaultModelLimit
-	if ml, ok := t.ModelLimits[modelID]; ok {
-		if ml.OutputTokens > 0 {
-			m.OutputTokens = ml.OutputTokens
-		}
-		if len(ml.Input) > 0 {
-			m.Input = ml.Input
-		}
-		if len(ml.Output) > 0 {
-			m.Output = ml.Output
-		}
-		if ml.Context > 0 {
-			m.Context = ml.Context
-		}
-	}
-	return m
 }
 
 // expandPath expands ~ and the env: prefix.

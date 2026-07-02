@@ -72,24 +72,3 @@ takeover:
   # provider_id is the single identifier used by takeover for every agent that
   # takes one (opencode, pi, codex, future agents). claude doesn't use it.
   provider_id: ais-switch-proxy
-  # pi_models: when unset, takeover writes the real gateway model IDs from the
-  # models cache (glm-5.2 / deepseek-v4-pro / deepseek-v4-flash). Uncomment to
-  # override with a custom list (e.g. aliases, if you also configure model_map).
-  # pi_models: ["glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash"]
-  # Per-model output limits written into client configs (opencode limit.output,
-  # pi maxTokens) and modalities. context_window comes from the gateway models
-  # cache. Models not listed here fall back to defaults (output_tokens: 4096,
-  # input/output: [text]). Edit per model as needed.
-  model_limits:
-    glm-5.2:
-      output_tokens: 4096
-      input: ["text"]
-      output: ["text"]
-    deepseek-v4-pro:
-      output_tokens: 4096
-      input: ["text"]
-      output: ["text"]
-    deepseek-v4-flash:
-      output_tokens: 4096
-      input: ["text"]
-      output: ["text"]
