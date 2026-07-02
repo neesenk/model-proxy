@@ -26,8 +26,9 @@ Commands:
   login <provider>     Login to a provider (compass | codex)
   logout <provider>    Clear provider credentials
   usage <provider>     Show usage / credits for a provider
-  models               List available models (from cache)
-  models refresh       Force-refresh model cache from the gateway
+  models               List models from all providers (from config)
+  models <provider>    List models for one provider
+  models refresh <provider>  Fetch live model list from a provider
   config init          Generate a config.yaml template
   config print         Print the effective config
   config check         Validate config and print a summary
@@ -99,13 +100,14 @@ Providers:
   compass    Account, project ID, monthly usage, balance.
   codex      Credits, rate limits, spend control.`,
 
-	"models": `models <subcommand> [--config PATH]
+	"models": `models [subcommand] [provider] [--config PATH]
 
-  List or refresh available models.
+  List or refresh models.
 
-Subcommands:
-  list      List models from cache (default).
-  refresh   Force-refresh the cache from the gateway.`,
+Usage:
+  models              List all models from all providers (from config).
+  models <provider>   List models for one provider.
+  models refresh <provider>  Fetch live model list from a provider's server.`,
 
 	"config": `config <subcommand> [--config PATH]
 

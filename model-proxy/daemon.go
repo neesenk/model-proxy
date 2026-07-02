@@ -119,8 +119,6 @@ func runProxy(sa serveArgs) {
 		}
 	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	// Start the background model-list refresher (cache to file on a schedule).
-	startModelsRefresher(cfg)
 	p := NewProxy(cfg)
 	// SIGHUP → hot reload config.
 	go func() {
