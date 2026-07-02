@@ -21,17 +21,17 @@ Commands:
   serve daemon    Run in background (auto-restart on crash)
   serve stop      Stop a running daemon
   serve reload    Hot-reload config (SIGHUP the running daemon)
-  takeover        Rewrite client config to point at the proxy
-  restore         Restore client config from backup
-  login           Login to a provider (compass | codex)
-  logout          Clear provider credentials
-  usage           Show usage / credits for a provider
-  models          List available models (from cache)
-  models refresh  Force-refresh model cache from the gateway
-  config init     Generate a config.yaml template
-  config print    Print the effective config
-  config check    Validate config and print a summary
-  help            Print this message
+  takeover <client>     Rewrite client config to point at the proxy
+  restore <client>      Restore client config from backup
+  login <provider>      Login to a provider (compass | codex)
+  logout <provider>      Clear provider credentials
+  usage <provider>       Show usage / credits for a provider
+  models            List available models (from cache)
+  models refresh    Force-refresh model cache from the gateway
+  config init       Generate a config.yaml template
+  config print      Print the effective config
+  config check      Validate config and print a summary
+  help              Print this message
 
 Options:
   --config <PATH>
