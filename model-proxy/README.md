@@ -26,7 +26,7 @@ GOOS=linux GOARCH=amd64 go build -o model-proxy-linux .
 
 配置文件查找顺序（首个存在的文件生效）：
 1. `--config PATH` flag（显式指定）
-2. `~/.ais-switch/config.yaml`（用户级，跨目录共享）
+2. `~/.model-proxy/config.yaml`（用户级，跨目录共享）
 3. `./config.yaml`（当前目录）
 
 关键段：
@@ -39,7 +39,7 @@ GOOS=linux GOARCH=amd64 go build -o model-proxy-linux .
 
 `auth.sso_cookie_file` 指向的 JSON 含 `sso_session_cookie` 字段。Linux 上可：
 - 直接 `model-proxy login compass` 走 Compass SSO 浏览器登录（本地有浏览器即可；SSH 远程时浏览器跳不回本机，按终端提示按回车也能完成）；或
-- 从 Mac 拷贝 `~/.ais-switch/google_oauth_auth.json` 过来，再 `model-proxy login compass --import` 导入验证；或
+- 从 Mac 拷贝 `~/.model-proxy/google_oauth_auth.json` 过来，再 `model-proxy login compass --import` 导入验证；或
 - 直接配 `auth.static_key`（一把已换好的 CQP key），跳过换取。
 
 ## 用法
@@ -157,7 +157,7 @@ client.chat.completions.create(model="gpt-5.5", messages=[{"role":"user","conten
 
 - **claude**: `~/.claude/settings.json` 设 `env.ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED`（走 Anthropic 协议）
 - **opencode**: `~/.config/opencode/opencode.json` 的 `provider.anthropic.options.{baseURL,apiKey}`；模型用 anthropic 内置白名单别名
-- **codex**: `~/.codex/config.toml` 注入 `[model_providers.ais_switch_proxy]` + 顶层 `model_provider`（走 OpenAI responses 协议）
+- **codex**: `~/.codex/config.toml` 注入 `[model_providers.model_proxy]` + 顶层 `model_provider`（走 OpenAI responses 协议）
 - **pi**: `~/.pi/agent/models.json` 的 `providers.model-proxy`，`api: anthropic-messages`，`baseUrl` 指代理 `/v1`
 
 > 自定义客户端（不在 takeover 列表里）：直接把它的 baseURL 指向 `http://127.0.0.1:15721`、apiKey 填任意值即可走 Anthropic 协议。
@@ -166,31 +166,26 @@ client.chat.completions.create(model="gpt-5.5", messages=[{"role":"user","conten
 
 `models` 列出 Compass 网关的真实模型（经 CQP key 调 `<upstream>/models`）。模型列表**缓存到文件**，避免每次都打网关：
 
-- 缓存文件：`models_cache_file`（默认 `~/.ais-switch/model-proxy-models.json`，即 `sso_cookie_file` 同目录）
+- 缓存文件：`models_cache_file`（默认 `~/.model-proxy/model-proxy-models.json`，即 `sso_cookie_file` 同目录）
 - 刷新间隔：`models_refresh_interval`（默认 `1h`，支持 `30m`/`2h` 等 Go duration）
 - `serve` 启动时后台 goroutine **立即刷新一次**（预热缓存），之后按间隔定时刷新
 - `models` 命令：缓存新鲜（< 间隔）则直接打印缓存；过期则拉取并更新；`--refresh` 强制刷新
 
 配置（`config.yaml`，均可选）：
 ```yaml
-# models_cache_file: ~/.ais-switch/model-proxy-models.json
+# models_cache_file: ~/.model-proxy/model-proxy-models.json
 # models_refresh_interval: 1h
 ```
 
 `models` 输出还合并了**定价元数据**（显示名、输入/输出每百万 token 价格），来自一份内置的定价表（147 条，导出自 AIS Switch 的 `cc-switch.db` `model_pricing` 表）。运行时**不依赖** `cc-switch.db`。
 
-### `import-pricing` —— 刷新定价表
 
-定价数据源自 AIS Switch 桌面端（它在 schema 初始化时从二进制内嵌数据播种 147 条到 `model_pricing` 表，无远程端点）。`import-pricing` 把这张表导出成本地 JSON，运行时优先读取：
 
 ```bash
-model-proxy import-pricing                  # 从 ~/.ais-switch/cc-switch.db 导出
-model-proxy import-pricing --db /path/to/cc-switch.db  # 指定 DB
 ```
 
-- 写入 `~/.ais-switch/models_pricing.json`（运行时自动读取，无需重建二进制）
+- 写入 `~/.model-proxy/models_pricing.json`（运行时自动读取，无需重建二进制）
 - 无此文件时退化到二进制内嵌的默认定价表（`data/models_pricing.json`，随仓库分发）
-- AIS Switch 升级带新定价后，重跑 `import-pricing` 即可刷新
 
 > 注：定价表里没有的模型（如较新的 `glm-5.2`）在 `models` 输出中显示 `—`。
 

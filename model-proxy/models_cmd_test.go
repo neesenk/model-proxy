@@ -104,9 +104,9 @@ func TestModelsRefreshInterval(t *testing.T) {
 
 // TestModelsCachePath_Default verifies the default lands next to the SSO cookie file.
 func TestModelsCachePath_Default(t *testing.T) {
-	cfg := &Config{Auth: AuthCfg{SSOCookieFile: "/home/u/.ais-switch/google_oauth_auth.json"}}
+	cfg := &Config{Auth: AuthCfg{SSOCookieFile: "/home/u/.model-proxy/google_oauth_auth.json"}}
 	got := modelsCachePath(cfg)
-	want := "/home/u/.ais-switch/model-proxy-models.json"
+	want := "/home/u/.model-proxy/model-proxy-models.json"
 	if got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
