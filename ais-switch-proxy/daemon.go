@@ -36,56 +36,48 @@ const (
 
 // serveArgs holds parsed `serve` flags.
 type serveArgs struct {
-	config  string
-	daemon  bool
-	logFile string // --log-file override
+	config string
 }
 
 func parseServeArgs(args []string) serveArgs {
 	sa := serveArgs{config: configPath(args)}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--daemon" || a == "-d":
-			sa.daemon = true
-		case a == "--config" || a == "-config":
-			if i+1 < len(args) {
-				sa.config = args[i+1]
-				i++
-			}
-		case strings.HasPrefix(a, "--config="):
-			sa.config = strings.TrimPrefix(a, "--config=")
-		case a == "--log-file":
-			if i+1 < len(args) {
-				sa.logFile = args[i+1]
-				i++
-			}
-		case strings.HasPrefix(a, "--log-file="):
-			sa.logFile = strings.TrimPrefix(a, "--log-file=")
-		}
-	}
 	return sa
 }
 
-// cmdServe dispatches by role: supervisor / worker run their loops; an unset
-// role with --daemon launches a detached supervisor; otherwise serve inline.
+// cmdServe dispatches by role and subcommand:
+//   - no subcommand: foreground proxy (or supervisor/worker if env role set)
+//   - "daemon": launch a detached supervisor
+//   - "stop": SIGTERM a running daemon
 func cmdServe(args []string) {
-	sa := parseServeArgs(args)
-	switch os.Getenv(envRole) {
-	case roleSupervisor:
+	// Worker/supervisor processes have envRole set — they always run their loop
+	// regardless of subcommand (the subcommand was consumed by the parent).
+	role := os.Getenv(envRole)
+	if role == roleSupervisor {
+		sa := parseServeArgs(args)
 		runSupervisor(sa)
 		return
-	case roleWorker:
+	}
+	if role == roleWorker {
+		sa := parseServeArgs(args)
 		runProxy(sa)
 		return
 	}
-	if sa.daemon {
+
+	// Check for subcommand (daemon | stop).
+	sub := positional(args)
+	switch sub {
+	case "daemon":
+		sa := parseServeArgs(args)
 		if err := daemonize(sa); err != nil {
 			log.Fatal(err)
 		}
-		return
+	case "stop":
+		cmdStop(args)
+	default:
+		// No subcommand — foreground serve.
+		sa := parseServeArgs(args)
+		runProxy(sa)
 	}
-	runProxy(sa)
 }
 
 // runProxy loads the config and runs the proxy inline (used by the worker and by
@@ -96,10 +88,10 @@ func runProxy(sa serveArgs) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// In true foreground mode (no role, no --daemon), mirror logs to the configured
-	// file too. The worker's stdio is already the log file (set by the supervisor),
-	// so it must NOT reopen/mirror — that would double every line.
-	if os.Getenv(envRole) == "" && !sa.daemon {
+	// In true foreground mode (no role env), mirror logs to the configured file.
+	// The worker's stdio is already the log file (set by the supervisor), so it
+	// must NOT reopen/mirror — that would double every line.
+	if os.Getenv(envRole) == "" {
 		if lf := resolveLogFile(sa, cfg); lf != "" {
 			if f, err := openLogFile(lf); err == nil {
 				log.SetOutput(io.MultiWriter(os.Stderr, f))
@@ -319,13 +311,10 @@ func spawnWorker(sa serveArgs) *exec.Cmd {
 	return cmd
 }
 
-// resolveLogFile picks the log file path: --log-file flag > config log_file > default
+// resolveLogFile picks the log file path: config log_file > default
 // (the OS temp dir, e.g. /tmp on Linux, $TMPDIR on macOS — runtime artifacts belong
 // there, not under the config dir). Returns "" only if the temp dir can't be resolved.
 func resolveLogFile(sa serveArgs, cfg *Config) string {
-	if sa.logFile != "" {
-		return expandPath(sa.logFile)
-	}
 	if cfg.LogFile != "" {
 		return cfg.LogFile
 	}

@@ -174,17 +174,15 @@ func startModelsRefresher(cfg *Config) {
 // cmdModels prints the gateway model list. If the cache is fresh (younger than
 // the refresh interval), prints the cache; otherwise fetches fresh, updates the
 // cache, and prints. --refresh forces a fresh fetch.
+// cmdModels handles subcommands: list (default) and refresh.
 func cmdModels(args []string) {
 	cfg, err := LoadConfig(configPath(args))
 	if err != nil {
 		log.Fatal(err)
 	}
-	force := false
-	for _, a := range args {
-		if a == "--refresh" {
-			force = true
-		}
-	}
+	sub := positional(args)
+	force := sub == "refresh"
+
 	path := modelsCachePath(cfg)
 	interval := modelsRefreshInterval(cfg)
 

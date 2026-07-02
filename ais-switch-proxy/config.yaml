@@ -16,7 +16,7 @@ log_level: info            # debug | info | warn | error
 auth:
   sso_cookie_file: ~/.ais-switch/google_oauth_auth.json
   cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
-  codex_auth_file: ~/.ais-switch/codex_oauth_auth.json   # proxy's own codex OAuth tokens (via `codex-login`), NOT codex CLI's auth.json
+  codex_auth_file: ~/.ais-switch/codex_oauth_auth.json   # proxy's own codex OAuth tokens (via `login codex`), NOT codex CLI's auth.json
   # static_key: "..."
 
 # Layer 1: providers — upstream backend definitions (baseURL + auth + models).
@@ -30,9 +30,9 @@ providers:
     baseURL: https://compass.llm.shopee.io/compass-api/v1
     auth: cqp
     models:
-      glm-5.2:           {context: 1048576, output: 4096, modalities: {input: [text], output: [text]}}
-      deepseek-v4-pro:   {context: 1048576, output: 4096, modalities: {input: [text], output: [text]}}
-      deepseek-v4-flash: {context: 1048576, output: 4096, modalities: {input: [text], output: [text]}}
+      glm-5.2:           {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
+      deepseek-v4-pro:   {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
+      deepseek-v4-flash: {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
   codex:
     apiKey: PROXY_MANAGED
     baseURL: https://chatgpt.com/backend-api/codex

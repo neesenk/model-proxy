@@ -4,7 +4,7 @@
 前置：
   1. 已登录（ais-switch-proxy login 或 --import），或 config 配了 static_key
   2. 代理在跑：ais-switch-proxy serve --config config.yaml
-  3. 用 codex 协议 + gpt-5.5：先 ais-switch-proxy codex-login（拿独立 OAuth token）
+  3. 用 codex 协议 + gpt-5.5：先 ais-switch-proxy login codex（拿独立 OAuth token）
 
 代理监听 http://127.0.0.1:15721，按 URL 路径前缀路由：
   --protocol anthropic  → POST /v1/messages   (claude 路由 → compass 网关, CQP key)

@@ -14,42 +14,27 @@ import (
 
 const usage = `ais-switch-proxy — standalone portable proxy for AIS Switch LLM gateway
 
-Usage: ais-switch-proxy <COMMAND> [OPTIONS]
+Usage: ais-switch-proxy <COMMAND> [SUBCOMMAND] [OPTIONS]
 
 Commands:
-  serve          Start the proxy server
-  stop           Stop a running --daemon
-  takeover       Rewrite client config to point at the proxy
-  restore        Restore client config from backup
-  login          Login to a provider (compass | codex)
-  logout         Clear provider credentials
-  usage          Show usage / credits for a provider
-  mint-key       Mint and print a CQP key
-  models         List available models
-  import-pricing Export pricing table from AIS Switch's DB
-  config         Generate or print config
-  help           Print this message
+  serve           Start the proxy server (foreground)
+    serve daemon    Run in background (auto-restart on crash)
+    serve stop      Stop a running daemon
+  takeover        Rewrite client config to point at the proxy
+  restore         Restore client config from backup
+  login           Login to a provider (compass | codex)
+  logout          Clear provider credentials
+  usage           Show usage / credits for a provider
+  models          List or refresh models
+    models list     List available models (from cache)
+    models refresh  Force-refresh model cache from the gateway
+  config          Generate or print config
+  help            Print this message
 
 Options:
   --config <PATH>
           Config file path
           Lookup order: explicit path > ~/.ais-switch/config.yaml > ./config.yaml
-
-  --daemon
-          Run serve in background (supervisor/worker, auto-restart on crash)
-
-  --log-file <PATH>
-          Log file path (default: $TMPDIR/ais-switch-proxy.log)
-
-  --import
-          For 'login compass': import SSO cookie from AIS Switch desktop app
-          instead of driving the browser flow
-
-  --refresh
-          For 'models': force-refresh the cache before printing
-
-  --db <PATH>
-          For 'import-pricing': path to cc-switch.db (default: ~/.ais-switch/cc-switch.db)
 
   -h, --help
           Print this message
@@ -63,8 +48,6 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		cmdServe(os.Args[2:])
-	case "stop":
-		cmdStop(os.Args[2:])
 	case "takeover":
 		cmdTakeover(os.Args[2:])
 	case "restore":
@@ -75,12 +58,8 @@ func main() {
 		cmdLogout(os.Args[2:])
 	case "usage":
 		cmdUsage(os.Args[2:])
-	case "mint-key":
-		cmdMintKey(os.Args[2:])
 	case "models":
 		cmdModels(os.Args[2:])
-	case "import-pricing":
-		cmdImportPricing(os.Args[2:])
 	case "config":
 		cmdConfig(os.Args[2:])
 	case "-h", "--help", "help":
@@ -169,19 +148,6 @@ func cmdRestore(args []string) {
 	if err := runRestore(cfg, which); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func cmdMintKey(args []string) {
-	cfg, err := LoadConfig(configPath(args))
-	if err != nil {
-		log.Fatal(err)
-	}
-	p := newCQPProvider(cfg.Auth)
-	key, err := p.key()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(cCyan(key))
 }
 
 func cmdLogout(args []string) {
