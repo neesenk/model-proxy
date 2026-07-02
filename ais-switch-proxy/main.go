@@ -379,23 +379,23 @@ func showCodexUsage(cfg *Config, prov Provider) {
 				usageRatioColor(float64(100-sw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", sw.UsedPercent, formatDuration(sw.ResetAfterSecs))))
 		}
 	}
-	// Spend control (distinct color from credits — blue body, highlighted pct)
+	// Spend control — progress bar + numbers
 	if u.SpendControl != nil {
 		if u.SpendControl.Reached {
 			fmt.Printf("%s %s\n", cDim("Spend:     "), cRed("limit reached"))
 		} else if u.SpendControl.IndividualLimit != nil {
 			il := u.SpendControl.IndividualLimit
-			used := formatCredits(il.Used)
-			limit := formatCredits(il.Limit)
 			pct := il.UsedPercent
-			// Build with distinct colors: blue body, ratio-colored percentage, gray reset.
-			body := cBlue(fmt.Sprintf("%s of %s credits used", used, limit))
-			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("(%d%%)", pct))
+			bar := progressBar(pct, 20)
+			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%%", pct))
 			resetStr := ""
 			if il.ResetAfter > 0 {
-				resetStr = cGray(fmt.Sprintf(", resets in %s", formatDuration(il.ResetAfter)))
+				resetStr = cGray(" · resets " + formatDuration(il.ResetAfter))
 			}
-			fmt.Printf("%s %s%s%s\n", cDim("Spend:     "), body, pctStr, resetStr)
+			fmt.Printf("%s %s / %s credits  %s  %s%s\n",
+				cDim("Spend:     "),
+				cBold(formatCredits(il.Used)), cGray(formatCredits(il.Limit)),
+				bar, pctStr, resetStr)
 		}
 	}
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cGray("codex (chatgpt.com)"))
@@ -444,6 +444,28 @@ func formatWithCommas(n int) string {
 		s = s[:i] + "," + s[i:]
 	}
 	return s
+}
+
+// progressBar renders a [██░░░] bar of given width, colored by remaining ratio.
+// pct is the used percentage (0-100). The filled portion uses ratio coloring
+// (green < 50%, yellow < 80%, red >= 80%), empty portion is dim.
+func progressBar(pct, width int) string {
+	if width < 4 {
+		width = 4
+	}
+	filled := pct * width / 100
+	if filled > width {
+		filled = width
+	}
+	bar := ""
+	for i := 0; i < width; i++ {
+		if i < filled {
+			bar += "█"
+		} else {
+			bar += "░"
+		}
+	}
+	return usageRatioColor(float64(100-pct), 100, "["+bar+"]")
 }
 
 // money formats v as $X.XX
