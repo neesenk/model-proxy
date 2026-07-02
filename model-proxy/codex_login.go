@@ -210,7 +210,7 @@ func cmdCodexLogin(args []string) {
 	}
 	authFile := cfg.Auth.CodexAuthFile
 	if authFile == "" {
-		authFile = expandPath("~/.ais-switch/codex_oauth_auth.json")
+		authFile = expandPath("~/.model-proxy/codex_oauth_auth.json")
 	}
 	opts := &codexLoginServerOptions{}
 	opts.defaults()

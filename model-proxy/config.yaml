@@ -10,13 +10,13 @@ log_level: info            # debug | info | warn | error
 # Gateway model-list cache + scheduled refresh (used by serve and the models command).
 # Default cache file: next to sso_cookie_file (model-proxy-models.json).
 # Default refresh interval: 1h. Uncomment to override:
-# models_cache_file: ~/.ais-switch/model-proxy-models.json
+# models_cache_file: ~/.model-proxy/model-proxy-models.json
 # models_refresh_interval: 1h
 
 auth:
-  sso_cookie_file: ~/.ais-switch/google_oauth_auth.json
+  sso_cookie_file: ~/.model-proxy/google_oauth_auth.json
   cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
-  codex_auth_file: ~/.ais-switch/codex_oauth_auth.json   # proxy's own codex OAuth tokens (via `login codex`), NOT codex CLI's auth.json
+  codex_auth_file: ~/.model-proxy/codex_oauth_auth.json   # proxy's own codex OAuth tokens (via `login codex`), NOT codex CLI's auth.json
   # static_key: "..."
 
 # Layer 1: providers — upstream backend definitions (baseURL + auth + models).

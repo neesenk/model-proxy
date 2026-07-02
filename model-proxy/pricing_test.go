@@ -37,11 +37,11 @@ func TestLoadPricingTable_LocalOverride(t *testing.T) {
 	if err := os.WriteFile(overridePath, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Swap HOME so homeDir() → dir/.ais-switch? No: candidates use ~/.ais-switch.
-	// Simpler: write to the exact path the loader checks under a temp HOME.
-	aisDir := filepath.Join(dir, ".ais-switch")
-	os.MkdirAll(aisDir, 0o755)
-	target := filepath.Join(aisDir, "models_pricing.json")
+	// Swap HOME so homeDir() → dir/.model-proxy. Write to the exact path the
+	// loader checks under a temp HOME.
+	proxyDir := filepath.Join(dir, ".model-proxy")
+	os.MkdirAll(proxyDir, 0o755)
+	target := filepath.Join(proxyDir, "models_pricing.json")
 	os.WriteFile(target, b, 0o644)
 
 	old := os.Getenv("HOME")

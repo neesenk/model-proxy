@@ -36,7 +36,7 @@ Commands:
 Options:
   --config <PATH>
           Config file path
-          Lookup order: explicit path > ~/.ais-switch/config.yaml > ./config.yaml
+          Lookup order: explicit path > ~/.model-proxy/config.yaml > ./config.yaml
 
   --log-file <PATH>
           Log file path (for 'serve': overrides config log_file)
@@ -58,7 +58,7 @@ Subcommands:
   reload    Hot-reload config (sends SIGHUP to the running daemon).
 
 Options:
-  --config PATH     Config file (default lookup: ~/.ais-switch/config.yaml > ./config.yaml)
+  --config PATH     Config file (default lookup: ~/.model-proxy/config.yaml > ./config.yaml)
   --log-file PATH   Log file path (overrides config log_file)`,
 
 	"takeover": `takeover <client> [--config PATH]
@@ -170,7 +170,7 @@ var homeDirForTest = ""
 // unknown ones like login's --import). Lookup order:
 //
 //	1. --config PATH flag            (explicit)
-//	2. ~/.ais-switch/config.yaml   (user-level, shared across CWDs)
+//	2. ~/.model-proxy/config.yaml   (user-level, shared across CWDs)
 //	3. ./config.yaml                 (current directory)
 //
 // The first existing file wins. If none exists, "./config.yaml" is returned so
@@ -188,7 +188,7 @@ func configPath(args []string) string {
 			return strings.TrimPrefix(a, "--config=")
 		}
 	}
-	// 2. user-level config under ~/.ais-switch/
+	// 2. user-level config under ~/.model-proxy/
 	home := homeDirForTest
 	if home == "" {
 		if h, err := os.UserHomeDir(); err == nil {
@@ -196,7 +196,7 @@ func configPath(args []string) string {
 		}
 	}
 	if home != "" {
-		p := filepath.Join(home, ".ais-switch", "config.yaml")
+		p := filepath.Join(home, ".model-proxy", "config.yaml")
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
@@ -273,7 +273,7 @@ func cmdLogout(args []string) {
 	case "codex_oauth":
 		path := cfg.Auth.CodexAuthFile
 		if path == "" {
-			path = "~/.ais-switch/codex_oauth_auth.json"
+			path = "~/.model-proxy/codex_oauth_auth.json"
 		}
 		path = expandPath(path)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -356,7 +356,7 @@ func showCompassUsage(cfg *Config) {
 func showCodexUsage(cfg *Config, prov Provider) {
 	authFile := cfg.Auth.CodexAuthFile
 	if authFile == "" {
-		authFile = "~/.ais-switch/codex_oauth_auth.json"
+		authFile = "~/.model-proxy/codex_oauth_auth.json"
 	}
 	p := newCodexOAuthProvider(expandPath(authFile))
 	tok, acct, err := p.token()

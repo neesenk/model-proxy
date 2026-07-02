@@ -70,7 +70,7 @@ func localPricingCandidates() []string {
 	var out []string
 	home := homeDir()
 	if home != "" {
-		out = append(out, filepath.Join(home, ".ais-switch", "models_pricing.json"))
+		out = append(out, filepath.Join(home, ".model-proxy", "models_pricing.json"))
 	}
 	// Next to the config file (secondary).
 	if abs, err := filepath.Abs("config.yaml"); err == nil {
@@ -96,7 +96,7 @@ func pricingDataPath(cfg *Config) string {
 	}
 	home := homeDir()
 	if home != "" {
-		return filepath.Join(home, ".ais-switch", "models_pricing.json")
+		return filepath.Join(home, ".model-proxy", "models_pricing.json")
 	}
 	return "models_pricing.json"
 }
@@ -108,8 +108,8 @@ func cmdImportPricing(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Locate cc-switch.db: ~/.ais-switch/cc-switch.db (override via --db flag).
-	dbPath := filepath.Join(homeDir(), ".ais-switch", "cc-switch.db")
+	// Locate cc-switch.db: ~/.model-proxy/cc-switch.db (override via --db flag).
+	dbPath := filepath.Join(homeDir(), ".model-proxy", "cc-switch.db")
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--db" && i+1 < len(args) {
 			dbPath = expandPath(args[i+1])

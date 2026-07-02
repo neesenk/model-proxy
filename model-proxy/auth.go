@@ -170,7 +170,7 @@ const (
 )
 
 // CodexOAuthProvider reads the proxy's OWN codex OAuth tokens (from
-// cfg.Auth.CodexAuthFile, default ~/.ais-switch/codex_oauth_auth.json — obtained
+// cfg.Auth.CodexAuthFile, default ~/.model-proxy/codex_oauth_auth.json — obtained
 // via `model-proxy login codex`, NOT shared with codex CLI's ~/.codex/auth.json)
 // and injects the access_token as Bearer for the chatgpt.com/backend-api/codex
 // backend. On 401 it refreshes via refresh_token and writes new tokens back.
@@ -405,7 +405,7 @@ func newAuthProvider(authName string, cfg *Config) AuthProvider {
 	case "codex_oauth":
 		f := cfg.Auth.CodexAuthFile
 		if f == "" {
-			f = "~/.ais-switch/codex_oauth_auth.json"
+			f = "~/.model-proxy/codex_oauth_auth.json"
 		}
 		return newCodexOAuthProvider(expandPath(f))
 	case "static":
