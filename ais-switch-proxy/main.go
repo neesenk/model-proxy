@@ -17,22 +17,20 @@ const usage = `ais-switch-proxy — standalone portable proxy for AIS Switch LLM
 Usage: ais-switch-proxy <COMMAND> [SUBCOMMAND] [OPTIONS]
 
 Commands:
-  serve           Start the proxy server (foreground)
-    serve daemon    Run in background (auto-restart on crash)
-    serve stop      Stop a running daemon
-    serve reload    Hot-reload config (SIGHUP the running daemon)
+  serve           Start the proxy server
+  serve daemon    Run in background (auto-restart on crash)
+  serve stop      Stop a running daemon
+  serve reload    Hot-reload config (SIGHUP the running daemon)
   takeover        Rewrite client config to point at the proxy
   restore         Restore client config from backup
   login           Login to a provider (compass | codex)
   logout          Clear provider credentials
   usage           Show usage / credits for a provider
-  models          List or refresh models
-    models list     List available models (from cache)
-    models refresh  Force-refresh model cache from the gateway
-  config          Generate, print, or check config
-    config init     Generate a config.yaml template
-    config print    Print the effective config
-    config check    Validate config and print a summary
+  models          List available models (from cache)
+  models refresh  Force-refresh model cache from the gateway
+  config init     Generate a config.yaml template
+  config print    Print the effective config
+  config check    Validate config and print a summary
   help            Print this message
 
 Options:
@@ -44,7 +42,7 @@ Options:
           Log file path (for 'serve': overrides config log_file)
 
   -h, --help
-          Print this message
+          Print this message (or per-command help: <command> -h)
 `
 
 // cmdHelp returns the short help for a command, or "" if unknown.
