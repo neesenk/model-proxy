@@ -1,11 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const usage = `ais-switch-proxy — standalone, portable reimplementation of the AIS Switch local proxy
@@ -22,7 +26,7 @@ Usage:
   ais-switch-proxy codex-login [--config config.yaml]   codex OAuth device flow (independent tokens, for the chatgpt.com backend)
   ais-switch-proxy login --import [--config config.yaml] Import SSO cookie from the AIS Switch desktop app
   ais-switch-proxy logout   [--config config.yaml]       Clear sso_cookie_file (log out)
-  ais-switch-proxy status   [--config config.yaml]       Show logged-in account / monthly usage
+  ais-switch-proxy usage <provider> [--config config.yaml]  Show usage for a provider (compass | codex)
   ais-switch-proxy mint-key [--config config.yaml]       Mint and print a CQP key (for direct mode)
   ais-switch-proxy models  [--config config.yaml] [--refresh]  List gateway models (cached, refreshes on schedule)
   ais-switch-proxy import-pricing [--config config.yaml] [--db FILE]  Export pricing from AIS Switch's cc-switch.db
@@ -57,8 +61,8 @@ func main() {
 		cmdCodexLogin(os.Args[2:])
 	case "logout":
 		cmdLogout(os.Args[2:])
-	case "status":
-		cmdStatus(os.Args[2:])
+	case "usage":
+		cmdUsage(os.Args[2:])
 	case "mint-key":
 		cmdMintKey(os.Args[2:])
 	case "models":
@@ -183,11 +187,45 @@ func cmdLogout(args []string) {
 	fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
 }
 
-func cmdStatus(args []string) {
+func cmdUsage(args []string) {
 	cfg, err := LoadConfig(configPath(args))
 	if err != nil {
 		log.Fatal(err)
 	}
+	// First positional arg is the provider name.
+	provName := positional(args)
+	if provName == "" {
+		// List available providers.
+		fmt.Println("usage: ais-switch-proxy usage <provider>")
+		fmt.Println("available providers:")
+		for name, p := range cfg.Providers {
+			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
+		}
+		return
+	}
+	prov, ok := cfg.Providers[provName]
+	if !ok {
+		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
+	}
+	switch prov.Auth {
+	case "cqp":
+		showCompassUsage(cfg)
+	case "codex_oauth":
+		showCodexUsage(cfg, prov)
+	default:
+		log.Fatalf("usage not supported for provider %q (auth=%s)", provName, prov.Auth)
+	}
+}
+
+func providerNames(cfg *Config) string {
+	names := []string{}
+	for n := range cfg.Providers {
+		names = append(names, n)
+	}
+	return strings.Join(names, ", ")
+}
+
+func showCompassUsage(cfg *Config) {
 	path := cfg.Auth.SSOCookieFile
 	if path == "" {
 		log.Fatal("auth.sso_cookie_file not set in config")
@@ -215,6 +253,49 @@ func cmdStatus(args []string) {
 			cMagenta(mu.Plan), mu.SelectedYear, mu.SelectedMonth)
 	}
 	fmt.Printf("%s %s\n", cDim("Store:      "), cGray(path))
+}
+
+func showCodexUsage(cfg *Config, prov Provider) {
+	authFile := cfg.Auth.CodexAuthFile
+	if authFile == "" {
+		authFile = "~/.ais-switch/codex_oauth_auth.json"
+	}
+	p := newCodexOAuthProvider(expandPath(authFile))
+	tok, acct, err := p.token()
+	if err != nil {
+		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("ais-switch-proxy codex-login"))
+		return
+	}
+	req, _ := http.NewRequest("GET", prov.BaseURL+"/wham/usage", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("originator", "codex_cli_rs")
+	if acct != "" {
+		req.Header.Set("ChatGPT-Account-Id", acct)
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		log.Fatalf("usage request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		log.Fatalf("usage HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+	}
+	var u struct {
+		Email    string `json:"email"`
+		PlanType string `json:"plan_type"`
+	}
+	json.Unmarshal(body, &u)
+	fmt.Printf("%s %s\n", cDim("Account:   "), cBold(cCyan(or(u.Email, "(unknown)"))))
+	fmt.Printf("%s %s\n", cDim("Plan:      "), cMagenta(or(u.PlanType, "(unknown)")))
+	fmt.Printf("%s %s\n", cDim("Provider:  "), cGray("codex (chatgpt.com)"))
+}
+
+func or(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }
 
 // money formats v as $X.XX
