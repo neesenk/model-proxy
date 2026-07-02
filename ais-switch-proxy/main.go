@@ -14,45 +14,49 @@ import (
 
 const usage = `ais-switch-proxy — standalone portable proxy for AIS Switch LLM gateway
 
-USAGE
-  ais-switch-proxy <command> [options]
+Usage: ais-switch-proxy <COMMAND> [OPTIONS]
 
-COMMANDS
-  serve [--daemon] [--log-file F]    Start the proxy server
-    --daemon                           Run in background (auto-restart on crash)
-    --log-file F                       Log file path (default: $TMPDIR/ais-switch-proxy.log)
+Commands:
+  serve          Start the proxy server
+  stop           Stop a running --daemon
+  takeover       Rewrite client config to point at the proxy
+  restore        Restore client config from backup
+  login          Login to a provider (compass | codex)
+  logout         Clear provider credentials
+  usage          Show usage / credits for a provider
+  mint-key       Mint and print a CQP key
+  models         List available models
+  import-pricing Export pricing table from AIS Switch's DB
+  config         Generate or print config
+  help           Print this message
 
-  stop                               Stop a running --daemon
+Options:
+  --config <PATH>
+          Config file path
+          Lookup order: explicit path > ~/.ais-switch/config.yaml > ./config.yaml
 
-  takeover <client>                  Rewrite client config to point at the proxy
-    client: claude | opencode | codex | pi | all
+  --daemon
+          Run serve in background (supervisor/worker, auto-restart on crash)
 
-  restore <client>                   Restore client config from backup
+  --log-file <PATH>
+          Log file path (default: $TMPDIR/ais-switch-proxy.log)
 
-  login <provider> [--import]        Login to a provider
-    compass                            SSO browser login (or --import from desktop app)
-    codex                              OAuth device flow
+  --import
+          For 'login compass': import SSO cookie from AIS Switch desktop app
+          instead of driving the browser flow
 
-  logout <provider>                  Clear provider credentials
+  --refresh
+          For 'models': force-refresh the cache before printing
 
-  usage <provider>                   Show usage / credits for a provider
-    compass                            Account, monthly usage, balance
-    codex                              Credits, rate limits, spend
+  --db <PATH>
+          For 'import-pricing': path to cc-switch.db (default: ~/.ais-switch/cc-switch.db)
 
-  mint-key                           Mint and print a CQP key
+  -h, --help
+          Print this message
 
-  models [--refresh]                 List available models
-
-  import-pricing [--db FILE]         Export pricing table from AIS Switch's DB
-
-  config init                        Generate a config.yaml template
-  config print                       Print the effective config
-
-COMMON OPTIONS
-  --config PATH                      Config file (default lookup: ~/.ais-switch/config.yaml > ./config.yaml)
-
-ENVIRONMENT
-  AIS_SSO_COOKIE                     Override sso_cookie_file
+Environment:
+  AIS_SSO_COOKIE
+          Override sso_cookie_file with a raw SSO cookie string
 `
 
 func main() {
