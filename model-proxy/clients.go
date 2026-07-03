@@ -66,12 +66,9 @@ func exposedModels(cfg *Config) []exposedModel {
 	return out
 }
 
-// displayName returns a human-readable name for a model: prefer pricing table
-// display_name, else the exposed name.
+// displayName returns a human-readable name for a model.
+// Currently just returns the ID; can be extended later.
 func displayName(id string) string {
-	if p := lookupPricing(id); p != nil && p.DisplayName != "" {
-		return p.DisplayName
-	}
 	return id
 }
 

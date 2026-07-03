@@ -529,9 +529,6 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 		fmt.Printf("%s %d models available\n", cDim("Models:    "), len(ml.Data))
 		for _, m := range ml.Data {
 			name := m.ID
-			if p := lookupPricing(m.ID); p != nil && p.DisplayName != "" {
-				name = p.DisplayName
-			}
 			fmt.Printf("  %s  %s\n", cCyan(pad(m.ID, 22)), cGray(name))
 		}
 		return

@@ -11,24 +11,24 @@ log_level: info            # debug | info | warn | error
 # at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).
 providers:
   compass:
-    baseURL: https://compass.llm.shopee.io/compass-api/v1
     provider_id: compass
+    baseURL: https://compass.llm.shopee.io/compass-api/v1
     cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     models:
       glm-5.2:           {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
       deepseek-v4-pro:   {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
       deepseek-v4-flash: {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
   codex:
-    baseURL: https://chatgpt.com/backend-api/codex
     provider_id: codex
+    baseURL: https://chatgpt.com/backend-api/codex
     models:
       gpt-5.5: {context: 200000, output: 32768, modalities: {input: [text, image], output: [text]}}
   # External provider (Zhipu BigModel — API key via `login zhipu`)
   # /models endpoint only lists 8 chat models; multimodal models exist but
   # must be added manually here (they use different API paths).
   zhipu:
-    baseURL: https://open.bigmodel.cn/api/paas/v4
     provider_id: zhipu
+    baseURL: https://open.bigmodel.cn/api/paas/v4
     usageURL: https://open.bigmodel.cn/api/paas/v4/models
     models:
       glm-5.2:     {context: 128000, output: 4096, modalities: {input: [text], output: [text]}}
@@ -64,6 +64,9 @@ routes:
       glm-5.2: compass/glm-5.2
 
 takeover:
+  # provider_id is the single identifier used by takeover for every agent that
+  # takes one (opencode, pi, codex, future agents). claude doesn't use it.
+  provider_id: model-proxy
   # proxy_url defaults to http://<listen> when unset — leave it commented so
   # changing `listen` above is enough. Uncomment to override.
   # proxy_url: http://127.0.0.1:15721
@@ -71,6 +74,3 @@ takeover:
   opencode_file: ~/.config/opencode/opencode.json
   codex_file: ~/.codex/config.toml
   pi_file: ~/.pi/agent/models.json
-  # provider_id is the single identifier used by takeover for every agent that
-  # takes one (opencode, pi, codex, future agents). claude doesn't use it.
-  provider_id: model-proxy

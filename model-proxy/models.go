@@ -89,9 +89,6 @@ func printAllModels(cfg *Config, provFilter string) {
 		for _, mid := range modelIDs {
 			m := prov.Models[mid]
 			name := mid
-			if p := lookupPricing(mid); p != nil && p.DisplayName != "" {
-				name = p.DisplayName
-			}
 			ctx := "—"
 			if m.Context > 0 {
 				ctx = fmt.Sprintf("%d", m.Context)
@@ -124,9 +121,6 @@ func printProviderModels(provName string, entries []ModelEntry) {
 		cDim(pad("CTX", 10)), cDim(pad("OWNED BY", 12)))
 	for _, m := range entries {
 		name := m.ID
-		if p := lookupPricing(m.ID); p != nil && p.DisplayName != "" {
-			name = p.DisplayName
-		}
 		ctx := "—"
 		if m.ContextWindow > 0 {
 			ctx = fmt.Sprintf("%d", m.ContextWindow)
