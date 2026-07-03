@@ -75,6 +75,8 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) {
 	}
 
 	// Validate by calling the usage endpoint if configured.
+	// 401/403 = key invalid; anything else (200, 404, etc.) = key accepted
+	// (the endpoint may not exist, but the key itself was not rejected).
 	if prov.UsageURL != "" {
 		fmt.Fprintf(os.Stderr, "Validating API key...\n")
 		req, _ := http.NewRequest("GET", prov.UsageURL, nil)
@@ -85,7 +87,7 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode != 200 {
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
 			log.Fatalf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
 		}
 	}

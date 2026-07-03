@@ -44,7 +44,7 @@ providers:
     apiKey: PROXY_MANAGED
     baseURL: https://open.bigmodel.cn/api/paas/v4
     auth: apikey
-    usageURL: https://open.bigmodel.cn/api/paas/v4/users/usage
+    usageURL: https://open.bigmodel.cn/api/paas/v4/models
     models:
       glm-4-plus: {context: 128000, output: 4096, modalities: {input: [text], output: [text]}}
 

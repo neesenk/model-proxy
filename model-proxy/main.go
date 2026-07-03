@@ -490,7 +490,8 @@ func showCodexUsage(cfg *Config, prov Provider) {
 
 // showGenericUsage fetches and displays usage from a provider's usageURL.
 // Works with any provider that has usageURL set (e.g. Zhipu BigModel).
-// Tries to parse common fields from the JSON response.
+// If the response is a model list (OpenAI-style {object:"list", data:[...]}),
+// prints the model list; otherwise prints JSON fields.
 func showGenericUsage(cfg *Config, provName string, prov Provider) {
 	auth := newAuthProvider(prov.Auth, provName, cfg)
 	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
@@ -510,14 +511,31 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 	if resp.StatusCode != 200 {
 		log.Fatalf("usage HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
-	// Parse and display common usage fields from the response.
+	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
+	// Check if it's a model list (OpenAI-style).
+	var ml struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(body, &ml) == nil && ml.Object == "list" {
+		fmt.Printf("%s %d models available\n", cDim("Models:    "), len(ml.Data))
+		for _, m := range ml.Data {
+			name := m.ID
+			if p := lookupPricing(m.ID); p != nil && p.DisplayName != "" {
+				name = p.DisplayName
+			}
+			fmt.Printf("  %s  %s\n", cCyan(pad(m.ID, 22)), cGray(name))
+		}
+		return
+	}
+	// Otherwise parse and display common usage fields.
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		log.Fatalf("parse usage response: %v", err)
 	}
-	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
-	// Zhipu BigModel: {"success":true,"data":{"totalBalance":"...","gifBalance":"...","giftExpireAt":"..."}}
-	// Try nested data first, then flat.
 	data := raw
 	if d, ok := raw["data"].(map[string]any); ok {
 		data = d
