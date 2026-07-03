@@ -489,9 +489,9 @@ func showCodexUsage(cfg *Config, prov Provider) {
 }
 
 // showGenericUsage fetches and displays usage from a provider's usageURL.
-// Works with any provider that has usageURL set (e.g. Zhipu BigModel).
-// If the response is a model list (OpenAI-style {object:"list", data:[...]}),
-// prints the model list; otherwise prints JSON fields.
+// Handles Zhipu BigModel's /api/monitor/usage/quota/limit format:
+//   {data:{limits:[{type:"TOKENS_LIMIT",unit,percentage,nextResetTime}, ...], level}}
+// unit: 3=5h window, 6=weekly window, 5=monthly time limit.
 func showGenericUsage(cfg *Config, provName string, prov Provider) {
 	auth := newAuthProvider(prov.Auth, provName, cfg)
 	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
@@ -512,7 +512,53 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 		log.Fatalf("usage HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
-	// Check if it's a model list (OpenAI-style).
+
+	// Try Zhipu BigModel format: {data:{limits:[...], level:"..."}}
+	var zhipu struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Limits []struct {
+				Type          string `json:"type"`
+				Unit          int    `json:"unit"`
+				Number        int    `json:"number"`
+				Percentage    int    `json:"percentage"`
+				NextResetTime int64  `json:"nextResetTime"`
+				Usage         *int   `json:"usage"`
+				CurrentValue  *int   `json:"currentValue"`
+				Remaining     *int   `json:"remaining"`
+			} `json:"limits"`
+			Level string `json:"level"`
+		} `json:"data"`
+		Success bool `json:"success"`
+	}
+	if json.Unmarshal(body, &zhipu) == nil && zhipu.Success && len(zhipu.Data.Limits) > 0 {
+		if zhipu.Data.Level != "" {
+			fmt.Printf("%s %s\n", cDim("Level:     "), cMagenta(zhipu.Data.Level))
+		}
+		for _, l := range zhipu.Data.Limits {
+			label := zhipuLimitLabel(l.Type, l.Unit)
+			pct := l.Percentage
+			bar := progressBar(pct, 16)
+			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%%", pct))
+			resetStr := ""
+			if l.NextResetTime > 0 {
+				resetStr = cGray(" · resets " + formatDuration(int((l.NextResetTime-time.Now().UnixMilli())/1000)))
+			}
+			fmt.Printf("%s %s  %s  %s%s\n", cDim(pad(label+":", 18)), bar, pctStr, cGray(""), resetStr)
+			// Show token/time usage details if present.
+			if l.Usage != nil {
+				fmt.Printf("%s %d used", cDim("    tokens:"), *l.Usage)
+				if l.Remaining != nil {
+					fmt.Printf(" / %d total (%d remaining)", *l.CurrentValue+*l.Remaining, *l.Remaining)
+				}
+				fmt.Println()
+			}
+		}
+		return
+	}
+
+	// Fallback: check if it's a model list (OpenAI-style).
 	var ml struct {
 		Object string `json:"object"`
 		Data   []struct {
@@ -531,7 +577,8 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 		}
 		return
 	}
-	// Otherwise parse and display common usage fields.
+
+	// Last resort: print raw JSON fields.
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		log.Fatalf("parse usage response: %v", err)
@@ -541,6 +588,27 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 		data = d
 	}
 	printUsageFields(data, 1)
+}
+
+// zhipuLimitLabel converts Zhipu's type+unit to a human-readable label.
+func zhipuLimitLabel(typ string, unit int) string {
+	switch typ {
+	case "TOKENS_LIMIT":
+		switch unit {
+		case 3:
+			return "5h tokens"
+		case 6:
+			return "Weekly tokens"
+		}
+		return fmt.Sprintf("Tokens (unit=%d)", unit)
+	case "TIME_LIMIT":
+		switch unit {
+		case 5:
+			return "Monthly time"
+		}
+		return fmt.Sprintf("Time (unit=%d)", unit)
+	}
+	return fmt.Sprintf("%s (unit=%d)", typ, unit)
 }
 
 // printUsageFields recursively prints JSON fields with indentation.
