@@ -38,7 +38,7 @@ func cmdLogin(args []string) {
 		fmt.Println("usage: model-proxy login <provider>")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
-			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
+			fmt.Printf("  %s (provider=%s)\n", name, p.Provider)
 		}
 		return
 	}
@@ -46,17 +46,17 @@ func cmdLogin(args []string) {
 	if !ok {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	switch prov.Auth {
-	case "cqp":
+	switch prov.Provider {
+	case "compass":
 		if err := runLogin(cfg); err != nil {
 			log.Fatalf("login failed: %v", err)
 		}
-	case "codex_oauth":
+	case "codex":
 		cmdCodexLogin(args)
 	case "apikey":
 		runApiKeyLogin(cfg, provName, prov)
 	default:
-		log.Fatalf("login not supported for provider %q (auth=%s)", provName, prov.Auth)
+		log.Fatalf("login not supported for provider %q (provider=%s)", provName, prov.Provider)
 	}
 }
 

@@ -25,26 +25,23 @@ auth:
 # Layer 1: providers — upstream backend definitions (baseURL + auth + models).
 providers:
   compass:
-    apiKey: PROXY_MANAGED
     baseURL: https://compass.llm.shopee.io/compass-api/v1
-    auth: cqp
+    provider_id: compass
     models:
       glm-5.2:           {context: 1048576, output: 4096, modalities: {input: [text], output: [text]}}
       deepseek-v4-pro:   {context: 1048576, output: 4096, modalities: {input: [text], output: [text]}}
       deepseek-v4-flash: {context: 1048576, output: 4096, modalities: {input: [text], output: [text]}}
   codex:
-    apiKey: PROXY_MANAGED
     baseURL: https://chatgpt.com/backend-api/codex
-    auth: codex_oauth
+    provider_id: codex
     models:
       gpt-5.5: {context: 200000, output: 32768, modalities: {input: [text, image], output: [text]}}
   # External provider (Zhipu BigModel — API key via login zhipu)
   # /models endpoint only lists 8 chat models; multimodal models exist but
   # must be added manually here (they use different API paths).
   zhipu:
-    apiKey: PROXY_MANAGED
     baseURL: https://open.bigmodel.cn/api/paas/v4
-    auth: apikey
+    provider_id: zhipu
     usageURL: https://open.bigmodel.cn/api/paas/v4/models
     models:
       glm-5.2:     {context: 128000, output: 4096, modalities: {input: [text], output: [text]}}

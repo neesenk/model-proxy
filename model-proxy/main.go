@@ -255,7 +255,7 @@ func cmdLogout(args []string) {
 		fmt.Println("usage: model-proxy logout <provider>")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
-			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
+			fmt.Printf("  %s (provider=%s)\n", name, p.Provider)
 		}
 		return
 	}
@@ -263,8 +263,8 @@ func cmdLogout(args []string) {
 	if !ok {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	switch prov.Auth {
-	case "cqp":
+	switch prov.Provider {
+	case "compass":
 		path := cfg.Auth.SSOCookieFile
 		if path == "" {
 			log.Fatal("auth.sso_cookie_file not set in config")
@@ -273,7 +273,7 @@ func cmdLogout(args []string) {
 			log.Fatal(err)
 		}
 		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
-	case "codex_oauth":
+	case "codex":
 		path := cfg.Auth.CodexAuthFile
 		if path == "" {
 			path = "~/.model-proxy/codex_oauth_auth.json"
@@ -290,7 +290,7 @@ func cmdLogout(args []string) {
 		}
 		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
 	default:
-		log.Fatalf("logout not supported for provider %q (auth=%s)", provName, prov.Auth)
+		log.Fatalf("logout not supported for provider %q (provider=%s)", provName, prov.Provider)
 	}
 }
 
@@ -306,7 +306,7 @@ func cmdUsage(args []string) {
 		fmt.Println("usage: model-proxy usage <provider>")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
-			fmt.Printf("  %s (auth=%s)\n", name, p.Auth)
+			fmt.Printf("  %s (provider=%s)\n", name, p.Provider)
 		}
 		return
 	}
@@ -315,16 +315,16 @@ func cmdUsage(args []string) {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
 	switch {
-	case prov.Auth == "cqp":
+	case prov.Provider == "compass":
 		showCompassUsage(cfg)
-	case prov.Auth == "codex_oauth":
+	case prov.Provider == "codex":
 		showCodexUsage(cfg, prov)
-	case prov.Auth == "apikey" && prov.UsageURL != "":
+	case prov.Provider == "apikey" && prov.UsageURL != "":
 		showGenericUsage(cfg, provName, prov)
 	case prov.UsageURL != "":
 		showGenericUsage(cfg, provName, prov)
 	default:
-		log.Fatalf("usage not supported for provider %q (auth=%s); set usageURL in config", provName, prov.Auth)
+		log.Fatalf("usage not supported for provider %q (provider=%s); set usageURL in config", provName, prov.Provider)
 	}
 }
 
@@ -493,7 +493,7 @@ func showCodexUsage(cfg *Config, prov Provider) {
 //   {data:{limits:[{type:"TOKENS_LIMIT",unit,percentage,nextResetTime}, ...], level}}
 // unit: 3=5h window, 6=weekly window, 5=monthly time limit.
 func showGenericUsage(cfg *Config, provName string, prov Provider) {
-	auth := newAuthProvider(prov.Auth, provName, cfg)
+	auth := newAuthProvider(prov.Provider, provName, cfg)
 	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
 	if err := auth.Inject(req); err != nil {
 		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login "+provName))
@@ -729,7 +729,7 @@ func cmdConfig(args []string) {
 		fmt.Printf("listen: %s\n", cfg.Listen)
 		fmt.Printf("auth: cqp_mint_url=%s sso_cookie_file=%s\n", cfg.Auth.CQPMintURL, cfg.Auth.SSOCookieFile)
 		for name, prov := range cfg.Providers {
-			fmt.Printf("provider %s: baseURL=%s auth=%s (%d models)\n", name, prov.BaseURL, prov.Auth, len(prov.Models))
+			fmt.Printf("provider %s: baseURL=%s auth=%s (%d models)\n", name, prov.BaseURL, prov.Provider, len(prov.Models))
 		}
 		for proto, route := range cfg.Routes {
 			fmt.Printf("route %s: %d model maps\n", proto, len(route.Models))
@@ -745,7 +745,7 @@ func cmdConfig(args []string) {
 		fmt.Printf("  log_file:  %s\n", cfg.LogFile)
 		fmt.Printf("  providers: %d\n", len(cfg.Providers))
 		for name, prov := range cfg.Providers {
-			fmt.Printf("    %s: %s (%s, %d models)\n", name, prov.BaseURL, prov.Auth, len(prov.Models))
+			fmt.Printf("    %s: %s (%s, %d models)\n", name, prov.BaseURL, prov.Provider, len(prov.Models))
 		}
 		fmt.Printf("  routes:    %d\n", len(cfg.Routes))
 		for proto, route := range cfg.Routes {

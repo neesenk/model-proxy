@@ -29,7 +29,7 @@ func NewProxy(cfg *Config) *Proxy {
 	}
 	// Build one AuthProvider per provider (shared across requests).
 	for name, prov := range cfg.Providers {
-		p.authCache[name] = newAuthProvider(prov.Auth, name, cfg)
+		p.authCache[name] = newAuthProvider(prov.Provider, name, cfg)
 	}
 	return p
 }
@@ -43,7 +43,7 @@ func (p *Proxy) reload(configPath string) error {
 	}
 	authCache := map[string]AuthProvider{}
 	for name, prov := range cfg.Providers {
-		authCache[name] = newAuthProvider(prov.Auth, name, cfg)
+		authCache[name] = newAuthProvider(prov.Provider, name, cfg)
 	}
 	p.mu.Lock()
 	p.cfg = cfg
@@ -159,7 +159,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// codex backend requires store:false.
-	if prov.Auth == "codex_oauth" {
+	if prov.Provider == "codex" {
 		body = ensureJSONField(body, "store", false)
 	}
 
@@ -174,7 +174,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	for attempt := 0; attempt < 2; attempt++ {
 		targetURL := strings.TrimRight(prov.BaseURL, "/") + upPath
 		// compass + anthropic /messages needs ?beta=true.
-		if prov.Auth == "cqp" && strings.Contains(upPath, "/messages") && !strings.Contains(targetURL, "beta=") {
+		if prov.Provider == "compass" && strings.Contains(upPath, "/messages") && !strings.Contains(targetURL, "beta=") {
 			if r.URL.RawQuery != "" {
 				targetURL += "?" + r.URL.RawQuery + "&beta=true"
 			} else {
@@ -206,7 +206,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		// Compass-specific headers.
 		if strings.Contains(prov.BaseURL, "compass") {
 			req.Header.Set("anthropic-version", "2023-06-01")
-			if prov.Auth == "cqp" {
+			if prov.Provider == "compass" {
 				req.Header.Set("x-compass-request-id", newRequestID())
 			}
 		}

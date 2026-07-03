@@ -27,8 +27,8 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	cfg := &Config{
 		Auth: AuthCfg{StaticKey: "gw-key"},
 		Providers: map[string]Provider{
-			"codex":    {BaseURL: codexUp.URL, Auth: "static", APIKey: "codex-token"},
-			"compass":  {BaseURL: gwUp.URL, Auth: "static"},
+			"codex":    {BaseURL: codexUp.URL, Provider: "static"},
+			"compass":  {BaseURL: gwUp.URL, Provider: "static"},
 		},
 		Routes: map[string]ProtocolRoute{
 			"openai": {Models: map[string]string{
@@ -80,7 +80,7 @@ func TestForward_UnknownModel(t *testing.T) {
 	cfg := &Config{
 		Auth: AuthCfg{StaticKey: "k"},
 		Providers: map[string]Provider{
-			"compass": {BaseURL: gwUp.URL, Auth: "static"},
+			"compass": {BaseURL: gwUp.URL, Provider: "static"},
 		},
 		Routes: map[string]ProtocolRoute{
 			"openai": {Models: map[string]string{"gpt-5.5": "compass/gpt-5.5"}},

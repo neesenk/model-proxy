@@ -15,7 +15,7 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 		Listen: "127.0.0.1:0",
 		Auth:   AuthCfg{StaticKey: "test-cqp-key"},
 		Providers: map[string]Provider{
-			"compass": {BaseURL: "http://x", Auth: "cqp",
+			"compass": {BaseURL: "http://x", Provider: "compass",
 				Models: map[string]ProviderModel{"glm-5.2": {Context: 1048576}}},
 		},
 		Routes: map[string]ProtocolRoute{
@@ -64,7 +64,7 @@ func TestServeModels_NoCQPRouteFallsBackToEmpty(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"other": {BaseURL: "http://x", Auth: "static"},
+			"other": {BaseURL: "http://x", Provider: "static"},
 		},
 		Routes: map[string]ProtocolRoute{
 			"anthropic": {Models: map[string]string{}},

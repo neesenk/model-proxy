@@ -391,9 +391,9 @@ func jwtExpiry(jwt string) time.Time {
 // provName is used to derive per-provider auth file paths (e.g. apikey auth).
 func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
 	switch authName {
-	case "cqp":
+	case "compass":
 		return newCQPProvider(cfg.Auth)
-	case "codex_oauth":
+	case "codex":
 		f := cfg.Auth.CodexAuthFile
 		if f == "" {
 			f = "~/.model-proxy/codex_oauth_auth.json"
@@ -403,10 +403,6 @@ func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
 		authFile := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
 		return newApiKeyProvider(authFile)
 	case "static":
-		// Use the provider's own apiKey if set; else fall back to global static_key.
-		if prov, ok := cfg.Providers[provName]; ok && prov.APIKey != "" && prov.APIKey != "PROXY_MANAGED" {
-			return &StaticProvider{key: prov.APIKey}
-		}
 		return &StaticProvider{key: cfg.Auth.StaticKey}
 	default:
 		return &StaticProvider{key: ""} // none

@@ -42,11 +42,10 @@ type AuthCfg struct {
 // .../compass-api/v1); the proxy appends the protocol-specific path (/messages
 // for anthropic, /responses or /chat/completions for openai) when forwarding.
 type Provider struct {
-	APIKey   string                   `yaml:"apiKey"`   // PROXY_MANAGED or a real key
 	BaseURL  string                   `yaml:"baseURL"`
-	Auth     string                   `yaml:"auth"`     // cqp | codex_oauth | static | none
-	Headers  map[string]string        `yaml:"headers"`  // extra headers (optional)
-	UsageURL string                   `yaml:"usageURL"` // usage/balance API endpoint (optional)
+	Provider string                   `yaml:"provider_id"` // compass | codex | zhipu | deepseek | apikey
+	Headers  map[string]string        `yaml:"headers"`
+	UsageURL string                   `yaml:"usageURL"`
 	Models   map[string]ProviderModel `yaml:"models"`
 }
 
@@ -166,7 +165,7 @@ func (c *Config) validate() error {
 		if p.BaseURL == "" {
 			return fmt.Errorf("provider %s: baseURL is empty", name)
 		}
-		if p.Auth == "" {
+		if p.Provider == "" {
 			return fmt.Errorf("provider %s: auth is empty", name)
 		}
 	}

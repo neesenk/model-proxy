@@ -40,7 +40,7 @@ func newProxyServer(upstreamURL, auth string, modelMap map[string]string) *httpt
 		Listen: "127.0.0.1:0",
 		Auth:   AuthCfg{StaticKey: "perf-static-key"},
 		Providers: map[string]Provider{
-			"t": {BaseURL: upstreamURL, Auth: auth, Models: provModels},
+			"t": {BaseURL: upstreamURL, Provider: "static", Models: provModels},
 		},
 		Routes: map[string]ProtocolRoute{
 			"anthropic": {Models: routeModels},
