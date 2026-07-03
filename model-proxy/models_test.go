@@ -13,7 +13,6 @@ import (
 func TestServeModels_ListsExposedModels(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
-		Auth:   AuthCfg{StaticKey: "test-cqp-key"},
 		Providers: map[string]Provider{
 			"compass": {BaseURL: "http://x", Provider: "compass",
 				Models: map[string]ProviderModel{"glm-5.2": {Context: 1048576}}},

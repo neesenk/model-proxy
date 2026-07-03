@@ -40,7 +40,7 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 		switch prov.Provider {
 		case "compass":
 			pcfg.LoginFn = func() error { return runLogin(cfg) }
-			pcfg.LogoutFn = func() error { return clearAccount(cfg.Auth.SSOCookieFile) }
+			pcfg.LogoutFn = func() error { return clearAccount(authFilePath("compass", "oauth_auth")) }
 			pcfg.UsageFn = func() (any, error) { return showCompassUsageData(cfg) }
 		case "codex":
 			pcfg.LoginFn = func() error { return runCodexLogin(cfg) }

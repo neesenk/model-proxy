@@ -38,7 +38,6 @@ func newProxyServer(upstreamURL, auth string, modelMap map[string]string) *httpt
 	}
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
-		Auth:   AuthCfg{StaticKey: "perf-static-key"},
 		Providers: map[string]Provider{
 			"t": {BaseURL: upstreamURL, Provider: "static", Models: provModels},
 		},
@@ -190,7 +189,7 @@ func BenchmarkProxy_Forward_SSE(b *testing.B) {
 // BenchmarkAuthInject_CQP_Static: CQP provider static-key injection (the proxy's per-request hot path).
 func BenchmarkAuthInject_CQP_Static(b *testing.B) {
 	silenceLog()
-	p := newCQPProvider(AuthCfg{StaticKey: "perf-static-key"})
+	p := newCQPProvider("", "")
 	req, _ := http.NewRequest(http.MethodPost, "http://up/v1/messages", bytes.NewReader(smallBody()))
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -218,10 +217,7 @@ func BenchmarkAuthInject_CQP_Cached(b *testing.B) {
 	if err := writeFile(cookiePath, []byte(cookieFile), 0o600); err != nil {
 		b.Fatal(err)
 	}
-	p := newCQPProvider(AuthCfg{
-		CQPMintURL:    mint.URL,
-		SSOCookieFile: cookiePath,
-	})
+	p := newCQPProvider(mint.URL, cookiePath)
 	// Warm up: mint once to fill the cache.
 	if err := p.Refresh(); err != nil {
 		b.Fatal(err)

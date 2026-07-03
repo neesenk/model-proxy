@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 )
 
@@ -42,4 +43,10 @@ func mask(s string) string {
 func homeDir() string {
 	h, _ := os.UserHomeDir()
 	return h
+}
+
+// authFilePath returns the credential file path for a provider name.
+// OAuth providers use <name>_oauth_auth.json; apikey providers use <name>_apikey.json.
+func authFilePath(providerName, suffix string) string {
+	return filepath.Join(homeDir(), ".model-proxy", providerName+"_"+suffix+".json")
 }

@@ -20,11 +20,7 @@ func runCodexLogin(cfg *Config) error {
 }
 
 func clearCodexAuth(cfg *Config) error {
-	path := cfg.Auth.CodexAuthFile
-	if path == "" {
-		path = expandPath("~/.model-proxy/codex_oauth_auth.json")
-	}
-	path = expandPath(path)
+	path := authFilePath("codex", "oauth_auth")
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err

@@ -27,7 +27,7 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	defer gwUp.Close()
 
 	cfg := &Config{
-		Auth: AuthCfg{StaticKey: "gw-key"},
+		
 		Providers: map[string]Provider{
 			"codex":    {BaseURL: codexUp.URL, Provider: "static"},
 			"compass":  {BaseURL: gwUp.URL, Provider: "static"},
@@ -40,8 +40,9 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 		},
 	}
 	p := NewProxy(cfg)
-	// Override the codex provider auth with a known token for deterministic test.
+	// Override both providers' auth with known tokens for deterministic test.
 	p.providers["codex"] = &testProv{key: "codex-token"}
+	p.providers["compass"] = &testProv{key: "gw-key"}
 
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -80,7 +81,7 @@ func TestForward_UnknownModel(t *testing.T) {
 	}))
 	defer gwUp.Close()
 	cfg := &Config{
-		Auth: AuthCfg{StaticKey: "k"},
+		
 		Providers: map[string]Provider{
 			"compass": {BaseURL: gwUp.URL, Provider: "static"},
 		},

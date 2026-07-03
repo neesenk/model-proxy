@@ -208,10 +208,8 @@ func cmdCodexLogin(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	authFile := cfg.Auth.CodexAuthFile
-	if authFile == "" {
-		authFile = expandPath("~/.model-proxy/codex_oauth_auth.json")
-	}
+	_ = cfg // config loaded but authFile is derived from provider name
+	authFile := authFilePath("codex", "oauth_auth")
 	opts := &codexLoginServerOptions{}
 	opts.defaults()
 

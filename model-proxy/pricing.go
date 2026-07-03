@@ -90,8 +90,8 @@ func lookupPricing(modelID string) *ModelPricing {
 func pricingDataPath(cfg *Config) string {
 	// Write next to the models cache (same dir as sso_cookie_file by default),
 	// so loadPricingTable picks it up at runtime.
-	if cfg != nil && cfg.ModelsCacheFile != "" {
-		return filepath.Join(filepath.Dir(expandPath(cfg.ModelsCacheFile)), "models_pricing.json")
+	if cfg != nil && cfg.LogFile != "" {
+		return filepath.Join(filepath.Dir(expandPath(cfg.LogFile)), "models_pricing.json")
 	}
 	home := homeDir()
 	if home != "" {

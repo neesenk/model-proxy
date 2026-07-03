@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,9 +25,8 @@ type AuthProvider interface {
 // ---- CQP key provider ----
 
 type CQPProvider struct {
-	mintURL      string
-	ssoCookieFile string
-	staticKey    string
+	mintURL  string
+	authFile string
 
 	mu       sync.Mutex
 	cached   string
@@ -36,12 +34,8 @@ type CQPProvider struct {
 	mintedAt time.Time
 }
 
-func newCQPProvider(cfg AuthCfg) *CQPProvider {
-	return &CQPProvider{
-		mintURL:       cfg.CQPMintURL,
-		ssoCookieFile: cfg.SSOCookieFile,
-		staticKey:     cfg.StaticKey,
-	}
+func newCQPProvider(mintURL, authFile string) *CQPProvider {
+	return &CQPProvider{mintURL: mintURL, authFile: authFile}
 }
 
 func (p *CQPProvider) Inject(req *http.Request) error {
@@ -65,9 +59,6 @@ func (p *CQPProvider) Refresh() error {
 }
 
 func (p *CQPProvider) key() (string, error) {
-	if p.staticKey != "" {
-		return p.staticKey, nil
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.keyLocked()
@@ -78,7 +69,7 @@ func (p *CQPProvider) keyLocked() (string, error) {
 	if p.cached != "" && time.Since(p.mintedAt) < 50*time.Minute {
 		return p.cached, nil
 	}
-	cookie, err := readSSOCookie(p.ssoCookieFile)
+	cookie, err := readSSOCookie(p.authFile)
 	if err != nil {
 		return "", fmt.Errorf("read sso cookie: %w", err)
 	}
@@ -390,20 +381,16 @@ func jwtExpiry(jwt string) time.Time {
 // newAuthProvider builds an AuthProvider for a given auth strategy + provider name.
 // provName is used to derive per-provider auth file paths (e.g. apikey auth).
 func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
+	prov := cfg.Providers[provName]
 	switch authName {
 	case "compass":
-		return newCQPProvider(cfg.Auth)
+		return newCQPProvider(prov.CQPMintURL, authFilePath(provName, "oauth_auth"))
 	case "codex":
-		f := cfg.Auth.CodexAuthFile
-		if f == "" {
-			f = "~/.model-proxy/codex_oauth_auth.json"
-		}
-		return newCodexOAuthProvider(expandPath(f))
+		return newCodexOAuthProvider(authFilePath(provName, "oauth_auth"))
 	case "apikey":
-		authFile := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
-		return newApiKeyProvider(authFile)
+		return newApiKeyProvider(authFilePath(provName, "apikey"))
 	case "static":
-		return &StaticProvider{key: cfg.Auth.StaticKey}
+		return &StaticProvider{key: ""}
 	default:
 		return &StaticProvider{key: ""} // none
 	}

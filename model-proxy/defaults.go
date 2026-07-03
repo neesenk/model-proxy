@@ -1,7 +1,7 @@
 package main
 
 // defaultConfigYAML is the template written by `model-proxy config init`; matches the repo's config.yaml.
-const defaultConfigYAML = `# model-proxy config — standalone from AIS Switch, portable to Linux.
+const defaultConfigYAML = `# model-proxy config — standalone, portable to Linux.
 # Paths support ~ expansion. env:ENV_VAR reads an environment variable.
 
 listen: 127.0.0.1:15721
@@ -10,23 +10,13 @@ log_level: info            # debug | info | warn | error
 # Uncomment to override:
 # log_file: /var/log/model-proxy/model-proxy.log
 
-# Gateway model-list cache + scheduled refresh (used by serve and the models command).
-# Default cache file: next to sso_cookie_file (model-proxy-models.json).
-# Default refresh interval: 1h. Uncomment to override:
-# models_cache_file: ~/.model-proxy/model-proxy-models.json
-# models_refresh_interval: 1h
-
-auth:
-  sso_cookie_file: ~/.model-proxy/google_oauth_auth.json
-  cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
-  codex_auth_file: ~/.model-proxy/codex_oauth_auth.json   # proxy own codex OAuth tokens (via login codex), NOT codex CLI auth.json
-  # static_key: "..."
-
-# Layer 1: providers — upstream backend definitions (baseURL + auth + models).
+# Providers — upstream backends. Token files are auto-managed by login/logout
+# at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).
 providers:
   compass:
     baseURL: https://compass.llm.shopee.io/compass-api/v1
     provider_id: compass
+    cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     models:
       glm-5.2:           {context: 1048576, output: 4096, modalities: {input: [text], output: [text]}}
       deepseek-v4-pro:   {context: 1048576, output: 4096, modalities: {input: [text], output: [text]}}

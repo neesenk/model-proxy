@@ -302,10 +302,7 @@ func providerNames(cfg *Config) string {
 }
 
 func showCompassUsage(cfg *Config) {
-	path := cfg.Auth.SSOCookieFile
-	if path == "" {
-		log.Fatal("auth.sso_cookie_file not set in config")
-	}
+	path := authFilePath("compass", "oauth_auth")
 	a, err := loadAccount(path)
 	if err != nil {
 		log.Fatal(err)
@@ -332,11 +329,8 @@ func showCompassUsage(cfg *Config) {
 }
 
 func showCodexUsage(cfg *Config, prov Provider) {
-	authFile := cfg.Auth.CodexAuthFile
-	if authFile == "" {
-		authFile = "~/.model-proxy/codex_oauth_auth.json"
-	}
-	p := newCodexOAuthProvider(expandPath(authFile))
+	authFile := authFilePath("codex", "oauth_auth")
+	p := newCodexOAuthProvider(authFile)
 	tok, acct, err := p.token()
 	if err != nil {
 		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login codex"))
@@ -692,9 +686,8 @@ func cmdConfig(args []string) {
 			log.Fatal(err)
 		}
 		fmt.Printf("listen: %s\n", cfg.Listen)
-		fmt.Printf("auth: cqp_mint_url=%s sso_cookie_file=%s\n", cfg.Auth.CQPMintURL, cfg.Auth.SSOCookieFile)
 		for name, prov := range cfg.Providers {
-			fmt.Printf("provider %s: baseURL=%s auth=%s (%d models)\n", name, prov.BaseURL, prov.Provider, len(prov.Models))
+			fmt.Printf("provider %s: baseURL=%s provider_id=%s (%d models)\n", name, prov.BaseURL, prov.Provider, len(prov.Models))
 		}
 		for proto, route := range cfg.Routes {
 			fmt.Printf("route %s: %d model maps\n", proto, len(route.Models))

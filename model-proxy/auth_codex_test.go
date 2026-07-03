@@ -111,7 +111,7 @@ func TestJwtExpiry(t *testing.T) {
 }
 
 func TestNewAuthProvider_CodexOAuth(t *testing.T) {
-	cfg := &Config{Auth: AuthCfg{CodexAuthFile: "~/.codex/auth.json"}}
+	cfg := &Config{}
 	p := newAuthProvider("codex", "codex", cfg)
 	if _, ok := p.(*CodexOAuthProvider); !ok {
 		t.Errorf("expected *CodexOAuthProvider, got %T", p)

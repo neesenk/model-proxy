@@ -96,10 +96,7 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) {
 }
 
 func runLogin(cfg *Config) error {
-	storePath := cfg.Auth.SSOCookieFile
-	if storePath == "" {
-		return fmt.Errorf("auth.sso_cookie_file not set in config")
-	}
+	storePath := authFilePath("compass", "oauth_auth")
 	c := newCompassClient(storePath)
 
 	// 1. Bootstrap: get the login URL + SSO_A cookie.

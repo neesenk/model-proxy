@@ -13,40 +13,18 @@ type Config struct {
 	Listen   string   `yaml:"listen"`
 	LogLevel string   `yaml:"log_level"`
 	LogFile  string   `yaml:"log_file"`
-	ModelsCacheFile        string `yaml:"models_cache_file"`
-	ModelsRefreshInterval  string `yaml:"models_refresh_interval"`
-	Auth     AuthCfg  `yaml:"auth"`
-	// Providers defines upstream backends (baseURL + auth + models). Referenced
-	// by name from routes. Supports external providers (static apiKey) and
-	// managed ones (PROXY_MANAGED → proxy injects real credentials).
 	Providers map[string]Provider `yaml:"providers"`
-	// Routes maps protocol name (anthropic | openai) to its model→provider/model
-	// mapping. The proxy exposes each protocol at its standard path
-	// (/v1/messages for anthropic, /v1/chat/completions + /v1/responses for
-	// openai) and forwards to the provider using the SAME protocol (no conversion).
 	Routes   map[string]ProtocolRoute `yaml:"routes"`
 	Takeover Takeover `yaml:"takeover"`
 }
 
-type AuthCfg struct {
-	SSOCookieFile string `yaml:"sso_cookie_file"`
-	CQPMintURL    string `yaml:"cqp_mint_url"`
-	StaticKey     string `yaml:"static_key"`
-	// CodexAuthFile is read by the codex_oauth auth provider to get the ChatGPT
-	// access/refresh tokens for the codex native backend.
-	CodexAuthFile string `yaml:"codex_auth_file"`
-}
-
-// Provider is an upstream backend definition: baseURL + auth + models.
-// Referenced by name from routes. A provider's baseURL is the API base (e.g.
-// .../compass-api/v1); the proxy appends the protocol-specific path (/messages
-// for anthropic, /responses or /chat/completions for openai) when forwarding.
 type Provider struct {
-	BaseURL  string                   `yaml:"baseURL"`
-	Provider string                   `yaml:"provider_id"` // compass | codex | zhipu | deepseek | apikey
-	Headers  map[string]string        `yaml:"headers"`
-	UsageURL string                   `yaml:"usageURL"`
-	Models   map[string]ProviderModel `yaml:"models"`
+	BaseURL    string                   `yaml:"baseURL"`
+	Provider   string                   `yaml:"provider_id"`
+	CQPMintURL string                   `yaml:"cqp_mint_url"` // compass only
+	Headers    map[string]string        `yaml:"headers"`
+	UsageURL   string                   `yaml:"usageURL"`
+	Models     map[string]ProviderModel `yaml:"models"`
 }
 
 type ProviderModel struct {
@@ -108,9 +86,6 @@ func LoadConfig(path string) (*Config, error) {
 		Listen   string         `yaml:"listen"`
 		LogLevel string         `yaml:"log_level"`
 		LogFile  string         `yaml:"log_file"`
-		ModelsCacheFile       string `yaml:"models_cache_file"`
-		ModelsRefreshInterval string `yaml:"models_refresh_interval"`
-		Auth     AuthCfg        `yaml:"auth"`
 		Providers map[string]Provider      `yaml:"providers"`
 		Routes    map[string]ProtocolRoute `yaml:"routes"`
 		Takeover  Takeover                 `yaml:"takeover"`
@@ -125,16 +100,10 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.Listen = raw.Listen
 	cfg.LogLevel = raw.LogLevel
 	cfg.LogFile = raw.LogFile
-	cfg.ModelsCacheFile = raw.ModelsCacheFile
-	cfg.ModelsRefreshInterval = raw.ModelsRefreshInterval
-	cfg.Auth = raw.Auth
 	cfg.Providers = raw.Providers
 	cfg.Routes = raw.Routes
 	cfg.Takeover = raw.Takeover
 
-	// Expand auth paths.
-	cfg.Auth.SSOCookieFile = expandPath(cfg.Auth.SSOCookieFile)
-	cfg.Auth.CodexAuthFile = expandPath(cfg.Auth.CodexAuthFile)
 	// Expand log path.
 	cfg.LogFile = expandPath(cfg.LogFile)
 	// Expand takeover paths.
