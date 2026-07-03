@@ -187,7 +187,7 @@ After logging in, the browser will try to redirect back to this machine:
 
 	fmt.Printf("%s login complete: %s (project=%s)\n", cGreen("[GoogleGateway]"), cBold(cCyan(a.Email)), cGray(a.ProjectID))
 	fmt.Printf("  %s %s\n", cDim("store:"), cGray(storePath))
-	fmt.Printf("\n%s You can now run `%s` or `%s`.\n", cGreen("Login complete."), cCyan("model-proxy mint-key"), cCyan("model-proxy serve"))
+	fmt.Printf("\n%s You can now run `%s`.\n", cGreen("Login complete."), cCyan("model-proxy serve"))
 	return nil
 }
 
