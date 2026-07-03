@@ -11,43 +11,80 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"model-proxy/provider"
 )
 
-// Proxy holds the compiled provider auth instances + the config.
+// Proxy holds the compiled provider instances + the config.
 type Proxy struct {
 	mu        sync.RWMutex
 	cfg       *Config
-	authCache map[string]AuthProvider // provider name → AuthProvider (shared)
+	providers map[string]provider.Provider // provider name → Provider (shared)
 	client    *http.Client
 }
+
+// buildProviders creates provider.Provider instances from config, wiring the
+// main package's existing AuthProvider/Login/Logout/Usage functions as callbacks.
+func buildProviders(cfg *Config) map[string]provider.Provider {
+	m := map[string]provider.Provider{}
+	for name, prov := range cfg.Providers {
+		auth := newAuthProvider(prov.Provider, name, cfg)
+		pcfg := &provider.Config{
+			ProviderID: prov.Provider,
+			BaseURL:    prov.BaseURL,
+			Headers:    prov.Headers,
+			UsageURL:   prov.UsageURL,
+			Auth:       authAdapter{auth},
+		}
+		// Wire callbacks by provider type.
+		switch prov.Provider {
+		case "compass":
+			pcfg.LoginFn = func() error { return runLogin(cfg) }
+			pcfg.LogoutFn = func() error { return clearAccount(cfg.Auth.SSOCookieFile) }
+			pcfg.UsageFn = func() (any, error) { return showCompassUsageData(cfg) }
+		case "codex":
+			pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
+			pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
+			pcfg.UsageFn = func() (any, error) { return showCodexUsageData(cfg, prov) }
+		case "zhipu":
+			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
+			pcfg.LogoutFn = func() error { return clearApiKey(name) }
+			pcfg.UsageFn = func() (any, error) { return showZhipuUsageData(cfg, name, prov) }
+		}
+		p, err := provider.New(pcfg, name)
+		if err != nil {
+			log.Printf("[proxy] failed to build provider %s: %v (using auth-only)", name, err)
+			continue
+		}
+		m[name] = p
+	}
+	return m
+}
+
+// authAdapter bridges main.AuthProvider → provider.Authenticator.
+type authAdapter struct{ inner AuthProvider }
+
+func (a authAdapter) Inject(req *http.Request) error  { return a.inner.Inject(req) }
+func (a authAdapter) Refresh() error                    { return a.inner.Refresh() }
 
 func NewProxy(cfg *Config) *Proxy {
 	p := &Proxy{
 		cfg:       cfg,
-		authCache: map[string]AuthProvider{},
-		client:    &http.Client{Timeout: 0}, // no overall timeout for streaming
-	}
-	// Build one AuthProvider per provider (shared across requests).
-	for name, prov := range cfg.Providers {
-		p.authCache[name] = newAuthProvider(prov.Provider, name, cfg)
+		providers: buildProviders(cfg),
+		client:    &http.Client{Timeout: 0},
 	}
 	return p
 }
 
-// reload re-reads the config file and atomically swaps cfg + authCache.
-// Called on SIGHUP (serve reload).
 func (p *Proxy) reload(configPath string) error {
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		return err
 	}
-	authCache := map[string]AuthProvider{}
-	for name, prov := range cfg.Providers {
-		authCache[name] = newAuthProvider(prov.Provider, name, cfg)
-	}
+	newProviders := buildProviders(cfg)
 	p.mu.Lock()
 	p.cfg = cfg
-	p.authCache = authCache
+	p.providers = newProviders
 	p.mu.Unlock()
 	return nil
 }
@@ -151,7 +188,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("unknown provider %q", provName), http.StatusBadGateway)
 		return
 	}
-	auth := p.authCache[provName]
+	provImpl := p.providers[provName]
 
 	// Rewrite model to the real name if different.
 	if realModel != model {
@@ -195,7 +232,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			"prompt_cache_key", "x-anthropic-billing-header", "anthropic-beta", "accept-language")
 		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
-		if err := auth.Inject(req); err != nil {
+		if err := provImpl.AuthHeaders(req); err != nil {
 			http.Error(w, "auth: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
@@ -222,7 +259,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			resp.Body.Close()
 			log.Printf("[proto=%s provider=%s] %s",
 				proto, provName, cl(ansiYellow, "401, refreshing auth and retrying"))
-			if rerr := auth.Refresh(); rerr != nil {
+			if rerr := provImpl.Refresh(); rerr != nil {
 				http.Error(w, "auth refresh: "+rerr.Error(), http.StatusUnauthorized)
 				return
 			}

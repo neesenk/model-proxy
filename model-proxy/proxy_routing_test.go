@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"model-proxy/provider"
 )
 
 // TestForward_ProviderRouting_SplitsByModel verifies that the proxy routes
@@ -39,7 +41,7 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	}
 	p := NewProxy(cfg)
 	// Override the codex provider auth with a known token for deterministic test.
-	p.authCache["codex"] = &StaticProvider{key: "codex-token"}
+	p.providers["codex"] = &testProv{key: "codex-token"}
 
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -136,3 +138,21 @@ func (r *stringReaderImpl) Read(p []byte) (int, error) {
 	r.pos += n
 	return n, nil
 }
+
+// testProv implements provider.Provider for deterministic tests.
+type testProv struct {
+	key string
+}
+
+func (t *testProv) AuthHeaders(req *http.Request) error {
+	req.Header.Set("Authorization", "Bearer "+t.key)
+	req.Header.Del("x-api-key")
+	return nil
+}
+func (t *testProv) Refresh() error                                                  { return nil }
+func (t *testProv) RewriteRequest(url string, body []byte, path string) (string, []byte) { return url, body }
+func (t *testProv) Login() error                                                    { return nil }
+func (t *testProv) Logout() error                                                   { return nil }
+func (t *testProv) Usage() (any, error)                                             { return nil, nil }
+
+var _ provider.Provider = (*testProv)(nil)
