@@ -216,6 +216,24 @@ func runSupervisor(sa serveArgs) {
 		}
 
 		worker := spawnWorker(sa)
+		if worker == nil {
+			// Spawn failed — treat as immediate exit, backoff and retry.
+			log.Printf("[supervisor] worker spawn failed, retrying in %s", backoff)
+			select {
+			case sig := <-sigCh:
+				if sig == syscall.SIGHUP {
+					continue // ignore reload during spawn-failure backoff
+				}
+				log.Printf("[supervisor] received %v, exiting", sig)
+				return
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
 		started := time.Now()
 		exitCh := make(chan error, 1)
 		go func() { exitCh <- worker.Wait() }()
@@ -372,6 +390,7 @@ func cmdReload(args []string) {
 }
 
 // spawnWorker starts a worker process whose stdio is the supervisor's (the log file).
+// Returns nil if the process could not be started.
 func spawnWorker(sa serveArgs) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], "serve", "--config", sa.config)
 	cmd.Env = append(os.Environ(), envRole+"="+roleWorker)
@@ -380,7 +399,7 @@ func spawnWorker(sa serveArgs) *exec.Cmd {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		log.Printf("[supervisor] failed to spawn worker: %v", err)
-		return cmd
+		return nil
 	}
 	log.Printf("[supervisor] spawned worker pid=%d", cmd.Process.Pid)
 	return cmd
