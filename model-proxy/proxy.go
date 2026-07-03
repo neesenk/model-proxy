@@ -184,7 +184,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			targetURL += "?" + r.URL.RawQuery
 		}
 
-		req, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
 		if err != nil {
 			http.Error(w, "build upstream req: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -247,13 +247,18 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 }
 
 // flushCopy reads, writes, and flushes per chunk, supporting SSE streaming.
+// Stops immediately if the client disconnects (write error), so the proxy
+// doesn't keep pulling the upstream stream after the client is gone.
 func flushCopy(w http.ResponseWriter, rc io.ReadCloser) {
 	fl, _ := w.(http.Flusher)
 	buf := make([]byte, 4096)
 	for {
 		n, err := rc.Read(buf)
 		if n > 0 {
-			w.Write(buf[:n])
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				// Client disconnected — stop reading upstream.
+				break
+			}
 			if fl != nil {
 				fl.Flush()
 			}
