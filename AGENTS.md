@@ -184,30 +184,62 @@ CQP key 在 SSO cookie 失效后过期，重跑 `get_or_generate` 即可重换�
 
 ## model-proxy 实现经验
 
-以下经验来自 `model-proxy/` 的完整开发过程（2026-06-29 ~ 07-02），记录关键契约、踩过的坑和架构决策。
+以下经验来自 `model-proxy/` 的完整开发过程（2026-06-29 ~ 07-03），记录关键契约、踩过的坑和架构决策。
 
-### 架构：两层 providers + routes
+### 架构：Provider 抽象 + 协议路由
 
 ```
-providers:          # 第一层：provider 定义（baseURL + auth + models）
-  compass:          # Shopee 网关
-    baseURL: https://compass.llm.shopee.io/compass-api/v1
-    auth: cqp       # SSO cookie → CQP key
-  codex:            # OpenAI codex 后端
-    baseURL: https://chatgpt.com/backend-api/codex
-    auth: codex_oauth  # 独立 OAuth device flow
+provider/                    # Provider 实现（每个上游一个文件）
+  provider.go                # 接口 + 注册 + New()
+  apikey.go                  # ApiKeyBase（共享 auth file + Bearer 注入）
+  compass.go                 # compass: SSO + CQP + monthly_usage + ?beta + headers
+  codex.go                   # codex: OAuth device flow + wham/usage + store:false
+  zhipu.go                   # zhipu: API key prompt + /models 校验 + 模型列表
 
-routes:             # 第二层：按协议对外
-  anthropic:        # POST /v1/messages
-    models:
-      claude-opus-4-7: compass/glm-5.2   # 对别名 → provider/真实名
-  openai:           # POST /v1/responses, /v1/chat/completions
-    models:
-      gpt-5.5: codex/gpt-5.5
-      glm-5.2: compass/glm-5.2
+config.yaml:
+  providers:                 # provider 定义（baseURL + provider_id + models）
+    compass:
+      provider_id: compass   # 路由到 provider/compass.go
+      baseURL: ...
+      cqp_mint_url: ...      # compass 专属
+    zhipu:
+      provider_id: zhipu     # 路由到 provider/zhipu.go
+      baseURL: ...
+      usageURL: ...          # zhipu 专属
+  routes:                    # 按协议对外
+    anthropic:               # POST /v1/messages
+      models:
+        claude-opus-4-7: compass/glm-5.2   # 对别名 → provider/真实名
+    openai:                  # POST /v1/responses, /v1/chat/completions
+      models:
+        gpt-5.5: codex/gpt-5.5
+        glm-5.2: compass/glm-5.2
 ```
 
-对外协议 = 转发协议（不做协议转换）。compass 两协议都支持；codex 只支持 openai。
+对外协议 = 转发协议（不做转换）。凭据由 `login <provider>` 管理，存储在 `~/.model-proxy/<name>_<suffix>.json`，不落 config。
+
+### Token 文件命名
+
+| provider_id | suffix | 文件名 |
+|---|---|---|
+| compass | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
+| codex | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
+| zhipu | apikey | `~/.model-proxy/<name>_apikey.json` |
+
+路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `zhipu-work`）。
+
+### CLI 命令
+
+```
+login <provider>          # compass: SSO / codex: device flow / zhipu: 输入 key
+logout <provider>         # 删凭据文件
+usage <provider>          # compass: monthly_usage / codex: wham/usage / zhipu: /models
+models [provider]         # 从 config 列模型
+models refresh <provider> # 从服务端刷新
+serve [daemon|stop|reload]
+takeover/restore <client>
+config init|print|check
+```
 
 ### compass 网关契约（实测）
 
@@ -237,52 +269,39 @@ routes:             # 第二层：按协议对外
 
 ```
 issuer = https://auth.openai.com
-client_id = app_EMoamEEZ73f0CkXaXp7hrann   # codex CLI 公开 client_id
+client_id = app_EMoamEEZ73f0CkXaXp7hrann
 
 1. POST /api/accounts/deviceauth/usercode  {"client_id":...}
    → {device_auth_id, user_code, interval}  # interval 是字符串 "5"
-
 2. 用户访问 https://auth.openai.com/codex/device 输入 user_code
-
 3. POST /api/accounts/deviceauth/token  {"device_auth_id":..., "user_code":...}
-   轮询，错误码：
-   - deviceauth_authorization_pending → 继续轮询
-   - deviceauth_slow_down → 加 5s 间隔
+   轮询，错误码：deviceauth_authorization_pending / deviceauth_slow_down
    成功 → {authorization_code, code_challenge, code_verifier}
-
-4. POST /oauth/token  form: grant_type=authorization_code&code=...&redirect_uri={issuer}/deviceauth/callback&client_id=...&code_verifier=...
-   → {access_token, refresh_token, id_token}
+4. POST /oauth/token  grant_type=authorization_code → {access_token, refresh_token, id_token}
 ```
 
-刷新：`POST /oauth/token` + `grant_type=refresh_token&refresh_token=...&client_id=...` → 新 token 轮换。
+刷新：`POST /oauth/token` + `grant_type=refresh_token` → 新 token 轮换。
 
-**关键决策**：代理用独立 OAuth（不读 codex CLI 的 `~/.codex/auth.json`），避免 refresh_token 轮换竞争导致互相破坏。
+**关键决策**：代理用独立 OAuth（不读 codex CLI 的 `~/.codex/auth.json`），避免 refresh_token 轮换竞争。
+
+### Zhipu BigModel 契约
+
+- API base: `https://open.bigmodel.cn/api/paas/v4`
+- 鉴权: `Authorization: Bearer <api_key>`（用户输入，存 `~/.model-proxy/<name>_apikey.json`）
+- `/models` 端点只返回 8 个文本对话模型；多模态模型（glm-4v-plus/cogview-4-plus）不列在其中，需手动加到 config
+- Zhipu 没有 public balance API；`/users/balance` 和 `/users/usage` 都 404
 
 ### 踩过的坑
 
-1. **路径双 `/v1`**：provider baseURL 已含 `/compass-api/v1`，client path `/v1/messages` 拼接后变 `/compass-api/v1/v1/messages`。需剥 client 的 `/v1` 前缀。网关对 `/v1/v1/messages` 容忍（200），但 `/v1/v1/responses` 不容忍（401）。
-
-2. **codex 后端请求体要求**：`store:false`（否则 400）+ `stream:true`（否则 400）+ 无 `max_tokens`（否则 400 "Unsupported parameter"）。代理自动注入 `store:false`。
-
-3. **monthly_usage 端点**：不是 GET，是 **POST**，需 `project_id` 入参。字段名 `total_amount`/`usage`/`balance`/`plan`（非 `totalAmount`）。
-
-4. **wham/usage 路径**：`/backend-api/wham/usage`，不是 `/backend-api/codex/wham/usage`（后者 403 Cloudflare）。
-
-5. **gpt-5.4 等模型**：codex 路由默认上游应为 chatgpt.com（所有 codex 原生模型自动走这），只有网关模型（glm-5.2 等）才 model_routing 到 compass。
-
-6. **日志掩码**：SSO cookie（SSO_A/SSO_C）在日志中必须 `mask()`（首2…尾2），不能打印全值。auth/info 响应体只记长度（含 email/userid），不记内容。
-
-7. **文件日志无色**：`--log-file` 镜像到文件时，`logColorEnabled` 必须置 `false`，否则 ANSI 转义码污染日志文件。
-
-### CLI 命令统一为 `<provider>` 参数
-
-```
-login <provider>     # compass: SSO浏览器 / codex: device flow
-logout <provider>    # compass: 删sso_cookie / codex: 删oauth token
-usage <provider>     # compass: monthly_usage / codex: wham/usage(credits/spend)
-```
-
-不再有 `codex-login`、`status` 等特例化命令。
+1. **路径双 `/v1`**：provider baseURL 已含 `/compass-api/v1`，client path `/v1/messages` 拼接后变双 `/v1`。需剥 client 的 `/v1` 前缀。
+2. **codex 后端请求体**：`store:false`（否则 400）+ `stream:true`（否则 400）+ 无 `max_tokens`（否则 400）。代理在 RewriteRequest 自动注入 `store:false`。
+3. **monthly_usage**：POST 非 GET，需 `project_id` 入参。字段名 `total_amount`/`usage`/`balance`/`plan`（非 `totalAmount`）。
+4. **wham/usage 路径**：`/backend-api/wham/usage`，不是 `/backend-api/codex/wham/usage`（后者 403）。
+5. **日志掩码**：SSO cookie 必须用 `mask()`（首2…尾2），auth/info 响应体只记长度。
+6. **文件日志无色**：`--log-file` 时 `logColorEnabled` 置 `false`，否则 ANSI 污染日志文件。
+7. **flushCopy 写错误**：客户端断开后 `w.Write` 返回错误须立即 break，否则代理继续拉上游流浪费 compute。
+8. **context 传播**：用 `http.NewRequestWithContext(r.Context(), ...)` 让客户端取消传播到上游。
+9. **supervisor nil panic**：`spawnWorker` 失败时返回 nil，`runSupervisor` 需检查再处理。
 
 ### opencode/pi takeover 配置
 
@@ -291,5 +310,5 @@ usage <provider>     # compass: monthly_usage / codex: wham/usage(credits/spend)
 | opencode | `http://<proxy>/v1` | `@ai-sdk/anthropic` 拼 `baseURL+/messages`，baseURL 要带 `/v1` |
 | pi | `http://<proxy>` | pi 的 `anthropic-messages` 自己拼 `/v1/messages`，baseURL 不带 `/v1`（否则 `/v1/v1/messages` → 502） |
 
-provider_id 统一为一个配置项（默认 `model-proxy`），opencode/pi/codex 共用。
+provider_id 统一为一个配置项（默认 `model-proxy`），opencode/pi/codex 共用。备份文件存 `<configDir>/.model-proxy/<client>.bak`。
 

@@ -1,13 +1,22 @@
 # model-proxy
 
-AIS Switch 本地代理的**独立、可移植**实现。把 AIS Switch（Mac-only Tauri 应用）内嵌代理的四个能力抽成单二进制程序，可交叉编译到 Linux：
+多 Provider LLM 代理 — 统一管理 Compass/codex/Zhipu 等上游后端，按协议（Anthropic/OpenAI）对外暴露，自动处理鉴权、模型映射、流式转发。
 
-1. **认证** — Compass SSO 登录（`GET /auth/login` 拿登录 URL + `SSO_A` cookie，轮询 `/auth/info` 升级为 `SSO_C`）→ 用 SSO cookie 向 Compass 网关换取 CQP API key
-2. **token** — 内存缓存 key + 上游 401 时自动刷新重试
-3. **配置更新** — `takeover`/`restore` 改写客户端配置文件指向代理（claude / opencode / codex / pi）
-4. **本地路由** — 按 URL 路径路由 + 模型别名映射 + 鉴权注入 + SSE 流式转发
+## 架构
 
-不依赖 AIS Switch 应用、不依赖它的 SQLite DB，纯配置驱动。
+```
+┌─────────────┐     ┌───────────────────────────────────┐     ┌──────────────┐
+│  客户端      │────▶│  model-proxy                      │────▶│  Provider    │
+│  claude/     │     │  ┌─────────┐  ┌────────────────┐ │     │  compass     │
+│  opencode/   │     │  │ routes  │→│ provider (auth) │ │     │  codex       │
+│  codex/      │     │  │ (proto) │  │ RewriteRequest  │ │     │  zhipu       │
+│  curl/SDK    │     │  └─────────┘  └────────────────┘ │     │  ...         │
+└─────────────┘     └───────────────────────────────────┘     └──────────────┘
+```
+
+- **Provider 层**（`provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
+- **Routes 层**：按协议（anthropic/openai）对外暴露模型，映射到 `provider/realModel`
+- 凭据由 `login <provider>` 管理，存储在 `~/.model-proxy/<name>_<suffix>.json`，不落 config
 
 ## 构建
 
@@ -17,253 +26,143 @@ go build -o model-proxy .
 
 # 交叉编译 Linux
 GOOS=linux GOARCH=amd64 go build -o model-proxy-linux .
-# 或 arm64: GOOS=linux GOARCH=arm64 go build -o model-proxy-linux-arm64 .
 ```
 
 ## 配置
 
-`config.yaml`（可用 `model-proxy config init` 生成模板）。路径支持 `~` 展开与 `env:VAR`。
+`config.yaml`（`model-proxy config init` 生成模板）。查找顺序：`--config PATH` > `~/.model-proxy/config.yaml` > `./config.yaml`。
 
-配置文件查找顺序（首个存在的文件生效）：
-1. `--config PATH` flag（显式指定）
-2. `~/.model-proxy/config.yaml`（用户级，跨目录共享）
-3. `./config.yaml`（当前目录）
+```yaml
+listen: 127.0.0.1:15721
+log_level: info
 
-关键段：
-- 顶层: `listen`(监听地址)、`log_level`、`log_file`(运行时日志 + pid 文件;不配则默认 `$TMPDIR/model-proxy.log`/`/tmp/model-proxy.log`,pid 同目录 `.pid`。`serve --daemon` 写入此文件,前台配了也会镜像)
-- `auth`: SSO cookie 文件路径、CQP 换取端点、可选 `static_key`（跳过换取）、gemini key env
-- `routes`: 每条路由 = `path_prefixes` + `upstream` + `auth`(cqp/gemini_key/static/none) + `model_map`(别名→真实模型名)
-- `takeover`: `proxy_url` + 各客户端配置文件路径
+providers:
+  compass:
+    provider_id: compass
+    baseURL: https://compass.llm.shopee.io/compass-api/v1
+    cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
+    models:
+      glm-5.2: {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
+  codex:
+    provider_id: codex
+    baseURL: https://chatgpt.com/backend-api/codex
+    models:
+      gpt-5.5: {context: 200000, output: 32768, modalities: {input: [text, image], output: [text]}}
+  zhipu:
+    provider_id: zhipu
+    baseURL: https://open.bigmodel.cn/api/paas/v4
+    usageURL: https://open.bigmodel.cn/api/paas/v4/models
+    models:
+      glm-5.2: {context: 128000, output: 4096, modalities: {input: [text], output: [text]}}
 
-### Linux 上无 AIS Switch 怎么拿 SSO cookie？
+routes:
+  anthropic:
+    models:
+      claude-opus-4-7: compass/glm-5.2
+      glm-5.2: compass/glm-5.2
+  openai:
+    models:
+      gpt-5.5: codex/gpt-5.5
+      glm-5.2: compass/glm-5.2
 
-`auth.sso_cookie_file` 指向的 JSON 含 `sso_session_cookie` 字段。Linux 上可：
-- 直接 `model-proxy login compass` 走 Compass SSO 浏览器登录（本地有浏览器即可；SSH 远程时浏览器跳不回本机，按终端提示按回车也能完成）；或
-- 从 Mac 拷贝 `~/.model-proxy/google_oauth_auth.json` 过来，再 `model-proxy login compass --import` 导入验证；或
-- 直接配 `auth.static_key`（一把已换好的 CQP key），跳过换取。
+takeover:
+  claude_file: ~/.claude/settings.json
+  opencode_file: ~/.config/opencode/opencode.json
+  codex_file: ~/.codex/config.toml
+  pi_file: ~/.pi/agent/models.json
+  provider_id: model-proxy
+```
 
 ## 用法
 
 ```bash
-# 0. 首次登录
-./model-proxy login compass --config config.yaml            # Compass SSO 浏览器登录，写入 sso_cookie_file
-./model-proxy login compass --import --config config.yaml   # 或从 AIS Switch 桌面端导入已有 SSO cookie
+# 登录（凭据存储在 ~/.model-proxy/<name>_<suffix>.json）
+model-proxy login compass          # Compass SSO 浏览器登录
+model-proxy login codex            # codex OAuth device flow
+model-proxy login zhipu            # 输入 Zhipu API key
 
-# 1. 启动代理
-./model-proxy serve --config config.yaml
+# 启动代理
+model-proxy serve                  # 前台
+model-proxy serve daemon           # 后台（自动重启）
+model-proxy serve stop             # 停止 daemon
+model-proxy serve reload           # 热加载配置（SIGHUP）
 
-# 1b. 守护进程模式（父子进程，崩溃自动拉起，日志写文件）
-./model-proxy serve --daemon --config config.yaml
-# 停止：
-./model-proxy stop --config config.yaml   # 或 kill -TERM $(cat <log_file 同目录的 .pid>)
+# 查看用量
+model-proxy usage compass          # 月度用量/余额
+model-proxy usage codex            # credits/spend/rate limits
+model-proxy usage zhipu            # 可用模型列表
 
-# 2. 改写客户端配置指向代理（先自动备份）
-./model-proxy takeover opencode      # 单个: claude|opencode|codex|pi
-./model-proxy takeover all           # 全部
+# 登出
+model-proxy logout compass         # 清除凭据文件
 
-# 3. 用客户端（以 opencode 为例）
-opencode run -m anthropic/claude-opus-4-7 "..."
+# 模型列表
+model-proxy models                 # 所有 provider 的模型（从 config）
+model-proxy models compass         # 单个 provider
+model-proxy models refresh zhipu   # 从服务端刷新
 
-# 4. 还原客户端配置
-./model-proxy restore opencode
+# 接管客户端配置
+model-proxy takeover opencode      # claude|opencode|codex|pi|all
+model-proxy restore opencode
 
-# 直连场景：只换 CQP key
-./model-proxy mint-key
-
-# 列出网关模型（缓存到文件，serve 时后台定时刷新）
-./model-proxy models                 # 打印缓存（过期则刷新）
-./model-proxy models --refresh       # 强制刷新后再打印
-
-# 查看登录账号 / 月度用量
-./model-proxy usage compass
-# 登出（清除 sso_cookie_file）
-./model-proxy logout compass
+# 配置管理
+model-proxy config init            # 生成模板
+model-proxy config print           # 打印生效配置
+model-proxy config check           # 校验配置
 ```
 
-## 通过代理使用（客户端配置）
+## Token 文件
 
-代理监听 `http://127.0.0.1:15721`（`config.yaml` 的 `listen`），按 URL 路径前缀同时支持三种协议：
+凭据由 `login` 管理，按 provider name 派生路径，不落 config：
 
-- **Anthropic `/v1/messages`** —— 实测可用（claude code / opencode 等走这个；下面的 Python demo 也用它）
-- **OpenAI 兼容 `/v1/chat/completions`、`/v1/responses`** —— 代理转发 + CQP 注入正常，但网关侧当前对 Bearer key 返回 401（需 SSO cookie 鉴权，见 `AGENTS.md` 的 codex 路由说明）
-- **Gemini `/v1beta/*`** —— 需 `GEMINI_API_KEY`
+| Provider | Token 文件 | 内容 |
+|---|---|---|
+| compass | `~/.model-proxy/compass_oauth_auth.json` | SSO cookie + account data |
+| codex | `~/.model-proxy/codex_oauth_auth.json` | OAuth access/refresh/id token |
+| zhipu | `~/.model-proxy/zhipu_apikey.json` | API key |
 
-### 快速 demo（Python，零依赖）
+多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件。
 
-`examples/demo.py` 直接调 `/v1/messages`，不依赖任何 SDK：
+## 协议
+
+代理按 URL 路径前缀路由，对外协议 = 转发协议（不做转换）：
+
+| 协议 | 端点 | 转发到 |
+|---|---|---|
+| Anthropic | `POST /v1/messages` | provider 的 `/messages` |
+| OpenAI | `POST /v1/responses`, `/v1/chat/completions` | provider 的同路径 |
+| 模型列表 | `GET /v1/models` | 合并所有 routes 的模型 |
+
+## 添加新 Provider
+
+1. 建 `provider/xxx.go`，实现 Provider 接口（或 embed `ApiKeyBase`）
+2. `init()` 里 `Register("xxx", constructor)`
+3. config 加 `provider_id: xxx`
+
+不改 proxy/login/logout/usage 的代码。
+
+## Demo
 
 ```bash
-# 1. 启动代理
-./model-proxy serve --config config.yaml
-
-# 2. 跑 demo（默认 prompt "reply with exactly: pong"，model 别名 claude-haiku-4-5）
-python3 examples/demo.py
-python3 examples/demo.py "What is 2+2? one word" claude-haiku-4-5
+model-proxy serve
+python3 examples/demo.py --port 15721 "hello" glm-5.2
+python3 examples/demo.py --port 15721 --protocol codex "hello" gpt-5.5
 ```
 
-代理把别名 `claude-haiku-4-5` 映射成网关真实模型 `deepseek-v4-flash`，注入真实 CQP key，返回结果。
+## 加载新 Provider 示例
 
-### Anthropic 接口（实测可用）
+config.yaml 加一个新 provider（如 DeepSeek）：
 
-客户端把 baseURL 指向 `http://127.0.0.1:15721`，apiKey 任意（代理用 CQP key 替换）：
-
-```bash
-curl http://127.0.0.1:15721/v1/messages \
-  -H "content-type: application/json" \
-  -H "Authorization: Bearer ANY" \
-  -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"claude-haiku-4-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}'
-```
-
-### OpenAI 兼容接口
-
-客户端把 baseURL 指向 `http://127.0.0.1:15721/v1`，apiKey 任意：
-
-```bash
-curl http://127.0.0.1:15721/v1/chat/completions \
-  -H "content-type: application/json" \
-  -H "Authorization: Bearer ANY" \
-  -d '{"model":"gpt-5.5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}'
-```
-
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:15721/v1", api_key="ANY")
-client.chat.completions.create(model="gpt-5.5", messages=[{"role":"user","content":"hi"}])
-```
-
-> ⚠️ OpenAI 路由 `/v1/chat/completions` 当前上游 401（网关需 SSO cookie 鉴权）。若你的网关 account 支持，可配 `auth.static_key` 或调整路由鉴权；否则用上面的 Anthropic `/v1/messages`。
-
-### 三种协议对照
-
-| 客户端协议 | 端点 | 路由 | 上游 | 鉴权 | 状态 |
-|---|---|---|---|---|---|
-| Anthropic | `/v1/messages` | claude | compass 网关 | CQP key (Bearer) | ✅ 实测可用 |
-| OpenAI 兼容 | `/v1/chat/completions`、`/v1/responses` | codex | compass 网关 | CQP key (Bearer) | ⚠️ 上游 401 |
-| Gemini | `/v1beta/*` | gemini | googleapis | x-goog-api-key | 需 GEMINI_API_KEY |
-
-- **model 改写**：请求体 `model` 字段按 `config.yaml` 的 `model_map` 改写（如 `claude-haiku-4-5` → `deepseek-v4-flash`）。客户端发的模型名是别名，上游收到的是真实模型名。
-- **apiKey 占位**：客户端填任意值（约定 `PROXY_MANAGED`），代理注入真实 CQP key，原占位 token 不会泄漏到上游。
-- **可用模型**：`model-proxy models` 查看网关实际支持的模型列表。
-
-### 一键接管客户端
-
-`takeover` 自动改写客户端配置文件指向代理（先备份）：
-
-```bash
-./model-proxy takeover all        # claude | opencode | codex | pi | all
-./model-proxy restore all         # 还原
-```
-
-- **claude**: `~/.claude/settings.json` 设 `env.ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN=PROXY_MANAGED`（走 Anthropic 协议）
-- **opencode**: `~/.config/opencode/opencode.json` 的 `provider.anthropic.options.{baseURL,apiKey}`；模型用 anthropic 内置白名单别名
-- **codex**: `~/.codex/config.toml` 注入 `[model_providers.model_proxy]` + 顶层 `model_provider`（走 OpenAI responses 协议）
-- **pi**: `~/.pi/agent/models.json` 的 `providers.model-proxy`，`api: anthropic-messages`，`baseUrl` 指代理 `/v1`
-
-> 自定义客户端（不在 takeover 列表里）：直接把它的 baseURL 指向 `http://127.0.0.1:15721`、apiKey 填任意值即可走 Anthropic 协议。
-
-### `models` —— 网关模型列表（缓存 + 定时刷新）
-
-`models` 列出 Compass 网关的真实模型（经 CQP key 调 `<upstream>/models`）。模型列表**缓存到文件**，避免每次都打网关：
-
-- 缓存文件：`models_cache_file`（默认 `~/.model-proxy/model-proxy-models.json`，即 `sso_cookie_file` 同目录）
-- 刷新间隔：`models_refresh_interval`（默认 `1h`，支持 `30m`/`2h` 等 Go duration）
-- `serve` 启动时后台 goroutine **立即刷新一次**（预热缓存），之后按间隔定时刷新
-- `models` 命令：缓存新鲜（< 间隔）则直接打印缓存；过期则拉取并更新；`--refresh` 强制刷新
-
-配置（`config.yaml`，均可选）：
 ```yaml
-# models_cache_file: ~/.model-proxy/model-proxy-models.json
-# models_refresh_interval: 1h
+providers:
+  deepseek:
+    provider_id: zhipu  # 复用 zhipu 实现（apikey + /models 校验）
+    baseURL: https://api.deepseek.com/v1
+    usageURL: https://api.deepseek.com/user/balance
+    models:
+      deepseek-chat: {context: 64000, output: 8192, modalities: {input: [text], output: [text]}}
 ```
-
-`models` 输出还合并了**定价元数据**（显示名、输入/输出每百万 token 价格），来自一份内置的定价表（147 条，导出自 AIS Switch 的 `cc-switch.db` `model_pricing` 表）。运行时**不依赖** `cc-switch.db`。
-
-
 
 ```bash
+model-proxy login deepseek        # 输入 DeepSeek API key
+model-proxy usage deepseek        # 查余额
 ```
-
-- 写入 `~/.model-proxy/models_pricing.json`（运行时自动读取，无需重建二进制）
-- 无此文件时退化到二进制内嵌的默认定价表（`data/models_pricing.json`，随仓库分发）
-
-> 注：定价表里没有的模型（如较新的 `glm-5.2`）在 `models` 输出中显示 `—`。
-
-### `login <provider>` —— 登录
-
-按 provider 分发：
-- `login compass` — Compass SSO 浏览器登录（Bootstrap → loopback → 轮询 auth/info → 持久化 SSO cookie）
-- `login compass --import` — 从 AIS Switch 桌面端导入已有 SSO cookie
-- `login codex` — codex OAuth device flow（独立 token，不共享 codex CLI 的 auth.json）
-
-写入各自的凭据文件（`sso_cookie_file` / `codex_auth_file`）。不带 provider 参数时列出可用 provider。
-
-### `usage <provider>` / `logout <provider>`
-
-- `usage compass` — 读 SSO cookie 打印账号 / project_id / 月度用量（`/monthly_usage`，cookie 鉴权）
-- `usage codex` — 读 codex OAuth token 打印 credits / rate limits / spend（`/wham/usage`）
-- `logout compass` — 删除 SSO cookie 文件
-- `logout codex` — 删除 codex OAuth token 文件
-
-### `serve --daemon` —— 守护进程模式
-
-`--daemon` 让代理以**父子进程**模式后台运行：
-
-- 前台命令启动一个**脱离终端**（setsid）的 **supervisor**（父进程）后立即返回，打印 `supervisor pid` / `log` / `pidfile`。
-- supervisor 写 pid 文件，spawn 一个 **worker**（子进程）真正跑 `http.ListenAndServe`。
-- supervisor 监控 worker 存活状态：worker 退出（崩溃）即**自动拉起**，指数退避（1s→2s→…→30s 封顶，存活超 30s 重置退避），避免快速死循环打满 CPU。
-- 收到 `SIGTERM`/`SIGINT`：supervisor 转发给 worker 优雅停止（10s 超时后 `SIGKILL`），清理 pid 文件后退出。
-- **日志写文件**：`log_file`（配置）或 `--log-file`（flag 覆盖）；都不配则默认 `$TMPDIR/model-proxy.log`（Linux `/tmp/model-proxy.log`，pid 文件 `/tmp/model-proxy.pid`）。运行时产物按惯例进 `/tmp`，不污染配置目录。daemon 模式必用文件；前台模式若配了 `log_file` 也会同时镜像到文件。因 stderr 是普通文件，色彩自动关闭 → 文件日志无 ANSI 转义码。
-
-```bash
-./model-proxy serve --daemon --config config.yaml
-# model-proxy daemonized: supervisor pid=12345 log=/tmp/model-proxy.log pidfile=/tmp/model-proxy.pid
-#   stop with: kill -TERM 12345  (or kill -TERM $(cat /tmp/model-proxy.pid))
-```
-
-配置（`config.yaml`）：默认无需设置（运行时产物进 `/tmp`）。如需自定义：
-```yaml
-# 默认（不配）：$TMPDIR/model-proxy.log + $TMPDIR/model-proxy.pid
-log_file: /var/log/model-proxy/model-proxy.log   # 自定义日志 + pid 目录
-```
-
-> 限制：`setsid` 仅 Unix；Windows 上 supervisor 不脱离控制台（仍可监控/拉起）。`go build ./...` 会写出主二进制，交叉编译后记得用对应平台二进制运行。
-
-### `stop` —— 停止 daemon
-
-```bash
-./model-proxy stop --config config.yaml
-```
-
-读 pid 文件（与 `serve --daemon` 同路径），向 supervisor 发 `SIGTERM`：supervisor 转发给 worker 优雅退出、清理 pid 文件。等最多 15s，超时 `SIGKILL` 兜底。无 daemon 运行时友好提示，并清理 stale pid 文件。`--config`/`--log-file` 须与启动时一致（用来定位 pid 文件）。
-
-## 路由与模型映射
-
-代理按 URL 路径前缀（最长匹配）路由：
-
-| 路径前缀 | 路由 | 上游 | 鉴权 |
-|---|---|---|---|
-| `/v1/messages` | claude | compass 网关 | CQP key (Bearer) |
-| `/v1/chat/completions`、`/v1/responses` | codex | compass 网关 | CQP key (Bearer) |
-| `/v1beta/*` | gemini | googleapis | x-goog-api-key |
-
-请求体的 `model` 字段按 `model_map` 改写（如 `claude-opus-4-7` → `glm-5.2`），客户端原占位 token 被替换为真实凭据。
-
-## 客户端接管说明
-
-`takeover` 改写的各客户端配置文件细节见上文[通过代理使用 → 一键接管客户端](#一键接管客户端)。备份文件：`<原文件>.model-proxy.bak`（纯净副本）+ `.model-proxy.bak.meta`。
-
-## 验证状态
-
-- ✅ claude 路由 + CQP 认证 + 模型映射 + 流式转发：端到端实测（`/v1/messages` + FAKE key → 200 + `model=glm-5.2`）
-- ✅ OpenAI 兼容路由 `/v1/chat/completions`：代理转发 + CQP 鉴权注入工作正常（上游对 `gpt-5.5` 返回 401 是网关侧 project scope/鉴权问题，非代理故障）
-- ✅ `mint-key`：输出 64 字符 CQP key
-- ✅ `login compass`：完整 SSO 流程由 mock 后端全流程测试覆盖；`login compass --import` + `usage compass` + `logout compass` 用真实后端端到端实测 ✓。浏览器交互需本地实测。
-- ✅ `login codex`：device flow 由 mock 测试覆盖；真实 `auth.openai.com` usercode + pending 轮询实测通过。
-- ✅ `usage codex`：credits / rate limits / spend 从 `/wham/usage` 实测通过。
-- ✅ takeover/restore：claude/codex/opencode/pi 配置改写与还原往返正确
-- ⚠️ codex/gemini 路由的**上游鉴权**未在本机完全实测（codex 可能需 OAuth/project scope 而非 CQP，gemini 需 `GEMINI_API_KEY`）。鉴权策略可配置，不通时按 config 调 `auth` 字段。
-
-## 与 AIS Switch 代理的关系
-
-两者协议一致（同 mint 端点、同 cookie 字段、同路由前缀、同模型映射）。本程序可在 Linux 上替代 AIS Switch 的代理；在 Mac 上若与 AIS Switch 同时运行，注意 `listen` 端口不要冲突（AIS Switch 默认占 15721）。
