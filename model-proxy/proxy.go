@@ -29,7 +29,7 @@ func NewProxy(cfg *Config) *Proxy {
 	}
 	// Build one AuthProvider per provider (shared across requests).
 	for name, prov := range cfg.Providers {
-		p.authCache[name] = newAuthProvider(prov.Auth, cfg)
+		p.authCache[name] = newAuthProvider(prov.Auth, name, cfg)
 	}
 	return p
 }
@@ -43,7 +43,7 @@ func (p *Proxy) reload(configPath string) error {
 	}
 	authCache := map[string]AuthProvider{}
 	for name, prov := range cfg.Providers {
-		authCache[name] = newAuthProvider(prov.Auth, cfg)
+		authCache[name] = newAuthProvider(prov.Auth, name, cfg)
 	}
 	p.mu.Lock()
 	p.cfg = cfg

@@ -42,11 +42,12 @@ type AuthCfg struct {
 // .../compass-api/v1); the proxy appends the protocol-specific path (/messages
 // for anthropic, /responses or /chat/completions for openai) when forwarding.
 type Provider struct {
-	APIKey  string                    `yaml:"apiKey"`   // PROXY_MANAGED or a real key
-	BaseURL string                    `yaml:"baseURL"`
-	Auth    string                    `yaml:"auth"`     // cqp | codex_oauth | static | none
-	Headers map[string]string         `yaml:"headers"`  // extra headers (optional)
-	Models  map[string]ProviderModel  `yaml:"models"`
+	APIKey   string                   `yaml:"apiKey"`   // PROXY_MANAGED or a real key
+	BaseURL  string                   `yaml:"baseURL"`
+	Auth     string                   `yaml:"auth"`     // cqp | codex_oauth | static | none
+	Headers  map[string]string        `yaml:"headers"`  // extra headers (optional)
+	UsageURL string                   `yaml:"usageURL"` // usage/balance API endpoint (optional)
+	Models   map[string]ProviderModel `yaml:"models"`
 }
 
 type ProviderModel struct {

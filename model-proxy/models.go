@@ -144,7 +144,7 @@ func fetchProviderModels(cfg *Config, provName string) ([]ModelEntry, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	auth := newAuthProvider(prov.Auth, cfg)
+	auth := newAuthProvider(prov.Auth, provName, cfg)
 	url := strings.TrimRight(prov.BaseURL, "/") + "/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {

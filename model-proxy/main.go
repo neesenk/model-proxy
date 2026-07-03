@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -282,6 +283,12 @@ func cmdLogout(args []string) {
 			log.Fatal(err)
 		}
 		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
+	case "apikey":
+		path := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.Fatal(err)
+		}
+		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
 	default:
 		log.Fatalf("logout not supported for provider %q (auth=%s)", provName, prov.Auth)
 	}
@@ -307,13 +314,17 @@ func cmdUsage(args []string) {
 	if !ok {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	switch prov.Auth {
-	case "cqp":
+	switch {
+	case prov.Auth == "cqp":
 		showCompassUsage(cfg)
-	case "codex_oauth":
+	case prov.Auth == "codex_oauth":
 		showCodexUsage(cfg, prov)
+	case prov.Auth == "apikey" && prov.UsageURL != "":
+		showGenericUsage(cfg, provName, prov)
+	case prov.UsageURL != "":
+		showGenericUsage(cfg, provName, prov)
 	default:
-		log.Fatalf("usage not supported for provider %q (auth=%s)", provName, prov.Auth)
+		log.Fatalf("usage not supported for provider %q (auth=%s); set usageURL in config", provName, prov.Auth)
 	}
 }
 
@@ -475,6 +486,70 @@ func showCodexUsage(cfg *Config, prov Provider) {
 		}
 	}
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cGray("codex (chatgpt.com)"))
+}
+
+// showGenericUsage fetches and displays usage from a provider's usageURL.
+// Works with any provider that has usageURL set (e.g. Zhipu BigModel).
+// Tries to parse common fields from the JSON response.
+func showGenericUsage(cfg *Config, provName string, prov Provider) {
+	auth := newAuthProvider(prov.Auth, provName, cfg)
+	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
+	if err := auth.Inject(req); err != nil {
+		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login "+provName))
+		return
+	}
+	for k, v := range prov.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		log.Fatalf("usage request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		log.Fatalf("usage HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+	}
+	// Parse and display common usage fields from the response.
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		log.Fatalf("parse usage response: %v", err)
+	}
+	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
+	// Zhipu BigModel: {"success":true,"data":{"totalBalance":"...","gifBalance":"...","giftExpireAt":"..."}}
+	// Try nested data first, then flat.
+	data := raw
+	if d, ok := raw["data"].(map[string]any); ok {
+		data = d
+	}
+	printUsageFields(data, 1)
+}
+
+// printUsageFields recursively prints JSON fields with indentation.
+func printUsageFields(m map[string]any, indent int) {
+	prefix := strings.Repeat("  ", indent)
+	// Collect and sort keys for stable output.
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := m[k]
+		switch val := v.(type) {
+		case string:
+			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cGray(val))
+		case float64:
+			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cCyan(fmt.Sprintf("%v", val)))
+		case bool:
+			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cCyan(fmt.Sprintf("%v", val)))
+		case map[string]any:
+			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cBold(""))
+			printUsageFields(val, indent+1)
+		default:
+			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cGray(fmt.Sprintf("%v", val)))
+		}
+	}
 }
 
 func or(s, fallback string) string {

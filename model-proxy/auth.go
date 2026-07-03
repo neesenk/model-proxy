@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -386,9 +387,9 @@ func jwtExpiry(jwt string) time.Time {
 
 // ---- factory ----
 
-// newAuthProvider builds an AuthProvider for a given auth strategy name.
-// Used both for top-level route auth and per-model model_routing entries.
-func newAuthProvider(authName string, cfg *Config) AuthProvider {
+// newAuthProvider builds an AuthProvider for a given auth strategy + provider name.
+// provName is used to derive per-provider auth file paths (e.g. apikey auth).
+func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
 	switch authName {
 	case "cqp":
 		return newCQPProvider(cfg.Auth)
@@ -398,9 +399,69 @@ func newAuthProvider(authName string, cfg *Config) AuthProvider {
 			f = "~/.model-proxy/codex_oauth_auth.json"
 		}
 		return newCodexOAuthProvider(expandPath(f))
+	case "apikey":
+		authFile := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
+		return newApiKeyProvider(authFile)
 	case "static":
+		// Use the provider's own apiKey if set; else fall back to global static_key.
+		if prov, ok := cfg.Providers[provName]; ok && prov.APIKey != "" && prov.APIKey != "PROXY_MANAGED" {
+			return &StaticProvider{key: prov.APIKey}
+		}
 		return &StaticProvider{key: cfg.Auth.StaticKey}
 	default:
 		return &StaticProvider{key: ""} // none
 	}
+}
+
+// ---- API key provider (reads key from auth file, e.g. for Zhipu) ----
+
+type ApiKeyProvider struct {
+	authFile string
+
+	mu     sync.Mutex
+	cached string
+}
+
+func newApiKeyProvider(authFile string) *ApiKeyProvider {
+	return &ApiKeyProvider{authFile: authFile}
+}
+
+func (p *ApiKeyProvider) Inject(req *http.Request) error {
+	key, err := p.key()
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Del("x-api-key")
+	return nil
+}
+
+func (p *ApiKeyProvider) key() (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cached != "" {
+		return p.cached, nil
+	}
+	data, err := os.ReadFile(p.authFile)
+	if err != nil {
+		return "", fmt.Errorf("not logged in; run `model-proxy login <provider>`")
+	}
+	var v struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return "", fmt.Errorf("parse %s: %w", p.authFile, err)
+	}
+	if v.APIKey == "" {
+		return "", fmt.Errorf("no api_key in %s; run `model-proxy login <provider>`", p.authFile)
+	}
+	p.cached = v.APIKey
+	return p.cached, nil
+}
+
+func (p *ApiKeyProvider) Refresh() error {
+	p.mu.Lock()
+	p.cached = ""
+	p.mu.Unlock()
+	return nil
 }

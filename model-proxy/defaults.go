@@ -38,6 +38,14 @@ providers:
     auth: codex_oauth
     models:
       gpt-5.5: {context: 200000, output: 32768, modalities: {input: [text, image], output: [text]}}
+  # External provider example (Zhipu BigModel — API key via login zhipu)
+  zhipu:
+    apiKey: PROXY_MANAGED
+    baseURL: https://open.bigmodel.cn/api/paas/v4
+    auth: apikey
+    usageURL: https://open.bigmodel.cn/api/paas/v4/users/usage
+    models:
+      glm-4-plus: {context: 128000, output: 4096, modalities: {input: [text], output: [text]}}
 
 # Layer 2: routes — by protocol. Exposed model → provider/realModel.
 routes:

@@ -3,12 +3,16 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -49,9 +53,53 @@ func cmdLogin(args []string) {
 		}
 	case "codex_oauth":
 		cmdCodexLogin(args)
+	case "apikey":
+		runApiKeyLogin(cfg, provName, prov)
 	default:
 		log.Fatalf("login not supported for provider %q (auth=%s)", provName, prov.Auth)
 	}
+}
+
+// runApiKeyLogin prompts for an API key, validates it against the provider's
+// usageURL (if configured), and saves it to ~/.model-proxy/<provider>_apikey.json.
+func runApiKeyLogin(cfg *Config, provName string, prov Provider) {
+	fmt.Printf("Enter API key for %s: ", provName)
+	reader := bufio.NewReader(os.Stdin)
+	key, err := reader.ReadString('\n')
+	if err != nil {
+		log.Fatal(err)
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		log.Fatal("empty API key")
+	}
+
+	// Validate by calling the usage endpoint if configured.
+	if prov.UsageURL != "" {
+		fmt.Fprintf(os.Stderr, "Validating API key...\n")
+		req, _ := http.NewRequest("GET", prov.UsageURL, nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+		if err != nil {
+			log.Fatalf("validation failed: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			log.Fatalf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+		}
+	}
+
+	// Save to auth file.
+	authFile := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
+	if err := os.MkdirAll(filepath.Dir(authFile), 0o700); err != nil {
+		log.Fatal(err)
+	}
+	b, _ := json.MarshalIndent(map[string]string{"api_key": key}, "", "  ")
+	if err := os.WriteFile(authFile, b, 0o600); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(cGreen("✓ API key saved to ") + cGray(authFile))
 }
 
 func runLogin(cfg *Config) error {
