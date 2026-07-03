@@ -42,21 +42,12 @@ func cmdLogin(args []string) {
 		}
 		return
 	}
-	prov, ok := cfg.Providers[provName]
-	if !ok {
+	p := buildProviders(cfg)[provName]
+	if p == nil {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	switch prov.Provider {
-	case "compass":
-		if err := runLogin(cfg); err != nil {
-			log.Fatalf("login failed: %v", err)
-		}
-	case "codex":
-		cmdCodexLogin(args)
-	case "apikey":
-		runApiKeyLogin(cfg, provName, prov)
-	default:
-		log.Fatalf("login not supported for provider %q (provider=%s)", provName, prov.Provider)
+	if err := p.Login(); err != nil {
+		log.Fatalf("login failed: %v", err)
 	}
 }
 

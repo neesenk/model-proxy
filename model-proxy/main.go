@@ -259,39 +259,14 @@ func cmdLogout(args []string) {
 		}
 		return
 	}
-	prov, ok := cfg.Providers[provName]
-	if !ok {
+	p := buildProviders(cfg)[provName]
+	if p == nil {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	switch prov.Provider {
-	case "compass":
-		path := cfg.Auth.SSOCookieFile
-		if path == "" {
-			log.Fatal("auth.sso_cookie_file not set in config")
-		}
-		if err := clearAccount(path); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
-	case "codex":
-		path := cfg.Auth.CodexAuthFile
-		if path == "" {
-			path = "~/.model-proxy/codex_oauth_auth.json"
-		}
-		path = expandPath(path)
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Fatal(err)
-		}
-		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
-	case "apikey":
-		path := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Fatal(err)
-		}
-		fmt.Println(cGreen("Logged out") + " (cleared " + cGray(path) + ").")
-	default:
-		log.Fatalf("logout not supported for provider %q (provider=%s)", provName, prov.Provider)
+	if err := p.Logout(); err != nil {
+		log.Fatalf("logout failed: %v", err)
 	}
+	fmt.Println(cGreen("✓ Logged out"))
 }
 
 func cmdUsage(args []string) {
@@ -302,7 +277,6 @@ func cmdUsage(args []string) {
 	// First positional arg is the provider name.
 	provName := positional(args)
 	if provName == "" {
-		// List available providers.
 		fmt.Println("usage: model-proxy usage <provider>")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
@@ -310,21 +284,12 @@ func cmdUsage(args []string) {
 		}
 		return
 	}
-	prov, ok := cfg.Providers[provName]
-	if !ok {
+	p := buildProviders(cfg)[provName]
+	if p == nil {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	switch {
-	case prov.Provider == "compass":
-		showCompassUsage(cfg)
-	case prov.Provider == "codex":
-		showCodexUsage(cfg, prov)
-	case prov.Provider == "apikey" && prov.UsageURL != "":
-		showGenericUsage(cfg, provName, prov)
-	case prov.UsageURL != "":
-		showGenericUsage(cfg, provName, prov)
-	default:
-		log.Fatalf("usage not supported for provider %q (provider=%s); set usageURL in config", provName, prov.Provider)
+	if _, err := p.Usage(); err != nil {
+		log.Fatalf("usage failed: %v", err)
 	}
 }
 

@@ -195,11 +195,6 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		body = rewriteModel(body, realModel)
 	}
 
-	// codex backend requires store:false.
-	if prov.Provider == "codex" {
-		body = ensureJSONField(body, "store", false)
-	}
-
 	// Determine the upstream path from the client path (same protocol, no
 	// conversion). Strip /v1 prefix since the provider baseURL already has
 	// the version (e.g. .../compass-api/v1).
@@ -210,15 +205,13 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 
 	for attempt := 0; attempt < 2; attempt++ {
 		targetURL := strings.TrimRight(prov.BaseURL, "/") + upPath
-		// compass + anthropic /messages needs ?beta=true.
-		if prov.Provider == "compass" && strings.Contains(upPath, "/messages") && !strings.Contains(targetURL, "beta=") {
-			if r.URL.RawQuery != "" {
-				targetURL += "?" + r.URL.RawQuery + "&beta=true"
-			} else {
-				targetURL += "?beta=true"
-			}
-		} else if r.URL.RawQuery != "" {
+		if r.URL.RawQuery != "" {
 			targetURL += "?" + r.URL.RawQuery
+		}
+
+		// Let the provider rewrite URL + body (store:false, ?beta=true, etc.)
+		if provImpl != nil {
+			targetURL, body = provImpl.RewriteRequest(targetURL, body, upPath)
 		}
 
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
@@ -232,9 +225,11 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			"prompt_cache_key", "x-anthropic-billing-header", "anthropic-beta", "accept-language")
 		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 
-		if err := provImpl.AuthHeaders(req); err != nil {
-			http.Error(w, "auth: "+err.Error(), http.StatusUnauthorized)
-			return
+		if provImpl != nil {
+			if err := provImpl.AuthHeaders(req); err != nil {
+				http.Error(w, "auth: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
 		}
 		// Extra provider-specific headers from config.
 		for k, v := range prov.Headers {

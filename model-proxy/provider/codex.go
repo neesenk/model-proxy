@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"net/http"
 )
 
@@ -22,11 +23,27 @@ func (p *CodexProvider) Refresh() error {
 	return p.cfg.Auth.Refresh()
 }
 func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
-	// codex backend requires store:false (injected by main package's ensureJSONField).
-	// The main package already handles this in forward(); we return body as-is here
-	// to avoid double-processing. TODO: move ensureJSONField into provider/.
+	// codex backend requires store:false in the request body.
+	body = ensureJSONField(body, "store", false)
 	return targetURL, body
 }
 func (p *CodexProvider) Login() error       { return p.cfg.LoginFn() }
 func (p *CodexProvider) Logout() error       { return p.cfg.LogoutFn() }
 func (p *CodexProvider) Usage() (any, error) { return p.cfg.UsageFn() }
+
+// ensureJSONField sets body[key] = val if the key is absent.
+func ensureJSONField(body []byte, key string, val any) []byte {
+	var v map[string]any
+	if err := json.Unmarshal(body, &v); err != nil {
+		return body
+	}
+	if _, ok := v[key]; !ok {
+		v[key] = val
+		out, err := json.Marshal(v)
+		if err != nil {
+			return body
+		}
+		return out
+	}
+	return body
+}
