@@ -28,10 +28,10 @@ type CQPProvider struct {
 	mintURL  string
 	authFile string
 
-	mu       sync.Mutex
-	cached   string
+	mu        sync.Mutex
+	cached    string
 	projectID string
-	mintedAt time.Time
+	mintedAt  time.Time
 }
 
 func newCQPProvider(mintURL, authFile string) *CQPProvider {
@@ -92,7 +92,7 @@ func (p *CQPProvider) keyLocked() (string, error) {
 		return "", fmt.Errorf("mint cqp key: HTTP %d: %s", resp.StatusCode, string(rb))
 	}
 	var parsed struct {
-		Retcode int    `json:"retcode"`
+		Retcode int `json:"retcode"`
 		Data    struct {
 			APIKey    string `json:"api_key"`
 			ProjectID string `json:"project_id"`
@@ -157,8 +157,8 @@ const (
 // and injects the access_token as Bearer for the chatgpt.com/backend-api/codex
 // backend. On 401 it refreshes via refresh_token and writes new tokens back.
 type CodexOAuthProvider struct {
-	authFile  string
-	tokenURL  string // override for tests; defaults to codexOAuthTokenURL
+	authFile string
+	tokenURL string // override for tests; defaults to codexOAuthTokenURL
 
 	mu        sync.Mutex
 	cached    string    // access_token
@@ -388,6 +388,8 @@ func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
 	case "codex":
 		return newCodexOAuthProvider(authFilePath(provName, "oauth_auth"))
 	case "apikey":
+		return newApiKeyProvider(authFilePath(provName, "apikey"))
+	case "zhipu", "deepseek", "volcengine":
 		return newApiKeyProvider(authFilePath(provName, "apikey"))
 	case "static":
 		return &StaticProvider{key: ""}

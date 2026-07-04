@@ -15,7 +15,7 @@
 ```
 
 - **Provider 层**（`provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
-- **Routes 层**：按协议（anthropic/openai）对外暴露模型，映射到 `provider/realModel`
+- **Routes 层**：对外暴露模型名 → 一组 `provider/model` 目标。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由
 - 凭据由 `login <provider>` 管理，存储在 `~/.model-proxy/<name>_<suffix>.json`，不落 config
 
 ## 构建
@@ -39,37 +39,38 @@ log_level: info
 providers:
   compass:
     provider_id: compass
-    baseURL: https://compass.llm.shopee.io/compass-api/v1
+    openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     models:
       glm-5.2: {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
   codex:
     provider_id: codex
-    baseURL: https://chatgpt.com/backend-api/codex
+    openai_base_url: https://chatgpt.com/backend-api/codex
     models:
       gpt-5.5: {context: 200000, output: 32768, modalities: {input: [text, image], output: [text]}}
   zhipu:
     provider_id: zhipu
-    baseURL: https://open.bigmodel.cn/api/paas/v4
-    usageURL: https://open.bigmodel.cn/api/paas/v4/models
+    openai_base_url: https://open.bigmodel.cn/api/paas/v4
+    usage_url: https://open.bigmodel.cn/api/paas/v4/models
     models:
       glm-5.2: {context: 128000, output: 4096, modalities: {input: [text], output: [text]}}
 
+claude_mapping:
+  claude-opus-4-7: glm-5.2          # anthropic-only: claude 别名 → 对外模型名
+  claude-sonnet-4-6: deepseek-v4-pro
+
 routes:
-  anthropic:
-    models:
-      claude-opus-4-7: compass/glm-5.2
-      glm-5.2: compass/glm-5.2
-  openai:
-    models:
-      gpt-5.5: codex/gpt-5.5
-      glm-5.2: compass/glm-5.2
+  glm-5.2:
+    - {provider: compass, model: glm-5.2, priority: 1}
+    - {provider: zhipu,   model: glm-5.2, priority: 2}   # failover 备选
+  gpt-5.5:
+    - {provider: codex, model: gpt-5.5, priority: 1}
 
 takeover:
-  claude_file: ~/.claude/settings.json
-  opencode_file: ~/.config/opencode/opencode.json
-  codex_file: ~/.codex/config.toml
-  pi_file: ~/.pi/agent/models.json
+  claude: ~/.claude/settings.json
+  opencode: ~/.config/opencode/opencode.json
+  codex: ~/.codex/config.toml
+  pi: ~/.pi/agent/models.json
   provider_id: model-proxy
 ```
 
@@ -80,6 +81,8 @@ takeover:
 model-proxy login compass          # Compass SSO 浏览器登录
 model-proxy login codex            # codex OAuth device flow
 model-proxy login zhipu            # 输入 Zhipu API key
+model-proxy login deepseek         # 输入 DeepSeek API key
+model-proxy login volcengine       # 输入火山方舟（Agent Plan）API key
 
 # 启动代理
 model-proxy serve                  # 前台
@@ -90,7 +93,9 @@ model-proxy serve reload           # 热加载配置（SIGHUP）
 # 查看用量
 model-proxy usage compass          # 月度用量/余额
 model-proxy usage codex            # credits/spend/rate limits
-model-proxy usage zhipu            # 可用模型列表
+model-proxy usage zhipu            # 5h/周/月配额 + token 消耗
+model-proxy usage deepseek         # 账户余额（is_available + 各币种）
+model-proxy usage volcengine       # 模型列表（Agent Plan 无简单余额 API）
 
 # 登出
 model-proxy logout compass         # 清除凭据文件
@@ -119,6 +124,8 @@ model-proxy config check           # 校验配置
 | compass | `~/.model-proxy/compass_oauth_auth.json` | SSO cookie + account data |
 | codex | `~/.model-proxy/codex_oauth_auth.json` | OAuth access/refresh/id token |
 | zhipu | `~/.model-proxy/zhipu_apikey.json` | API key |
+| deepseek | `~/.model-proxy/deepseek_apikey.json` | API key |
+| volcengine | `~/.model-proxy/volcengine_apikey.json` | API key（火山方舟） |
 
 多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件。
 
@@ -131,6 +138,26 @@ model-proxy config check           # 校验配置
 | Anthropic | `POST /v1/messages` | provider 的 `/messages` |
 | OpenAI | `POST /v1/responses`, `/v1/chat/completions` | provider 的同路径 |
 | 模型列表 | `GET /v1/models` | 合并所有 routes 的模型 |
+
+**按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。注意代理会剥掉客户端的 `/v1` 前缀，故 base URL 须自带版本段（如 `…/v1`、`…/anthropic/v1`）。
+
+## 调度与熔断（`scheduling`）
+
+每个对外模型可配多个 `provider/model` 目标。代理按下面的规则选目标、失败逐一 failover，并对持续出错的 provider 熔断，避免每请求都去撞一个挂掉的上游：
+
+- **熔断**（超时 / 5xx / 连接错误 / 401 刷新后仍失败）：连续 `circuit_threshold`（默认 3）次 → 开路 `circuit_cooldown`（默认 10m），后半开放 1 个探针请求，成功关、失败再开。开路期间该 provider 被跳过。
+- **限频跳过**（429）：按 `Retry-After` 头（秒或 HTTP 日期）跳过，没有头则用 `rate_limit_backoff`（默认 60s）。不计入熔断。覆盖 5 小时/周配额窗口和秒级频率限制——时长来自响应。
+- **粘性驻留**（`sticky_dwell`，默认 10m）：每个路由「停」在一个 provider 上，在驻留窗口内优先用它（保 prompt cache，不为已恢复的高优先 provider 频繁回切）；只有它熔断/限频或驻留到期才换。10m ≈ 2× 缓存 TTL（~5m）：够保住活跃会话缓存、扛过短暂抖动，又能在有限时间内回到首选 provider。
+- **上游超时**（`upstream_timeout`，默认 30s）：每个上游请求带超时，挂起的上游会快速失败进入熔断/failover，而不是无限拖住请求。
+
+```yaml
+scheduling:
+  circuit_threshold: 3
+  circuit_cooldown: 10m
+  rate_limit_backoff: 60s
+  upstream_timeout: 30s
+  sticky_dwell: 10m
+```
 
 ## 添加新 Provider
 
@@ -148,21 +175,59 @@ python3 examples/demo.py --port 15721 "hello" glm-5.2
 python3 examples/demo.py --port 15721 --protocol codex "hello" gpt-5.5
 ```
 
-## 加载新 Provider 示例
+## DeepSeek（内置，双协议）
 
-config.yaml 加一个新 provider（如 DeepSeek）：
+DeepSeek 已内置（`provider_id: deepseek`），一个 API key 同时服务 OpenAI 与 Anthropic 协议。两个 endpoint 用 `openai_base_url`（OpenAI base）和 `anthropic_base_url`（Anthropic base，须含 `/v1`，因代理会剥掉客户端的 `/v1`）分别配置；代理按调用协议转发到对应 endpoint。默认 config 含 provider 定义但**不含 routes**——按需添加：
 
 ```yaml
 providers:
   deepseek:
-    provider_id: zhipu  # 复用 zhipu 实现（apikey + /models 校验）
-    baseURL: https://api.deepseek.com/v1
-    usageURL: https://api.deepseek.com/user/balance
+    provider_id: deepseek
+    openai_base_url: https://api.deepseek.com
+    anthropic_base_url: https://api.deepseek.com/anthropic/v1
+    usage_url: https://api.deepseek.com/user/balance
     models:
-      deepseek-chat: {context: 64000, output: 8192, modalities: {input: [text], output: [text]}}
+      deepseek-v4-pro:   {context: 1000000, output: 65536, modalities: {input: [text], output: [text]}}
+      deepseek-v4-flash: {context: 1000000, output: 65536, modalities: {input: [text], output: [text]}}
+
+claude_mapping:
+  claude-opus-4-8: deepseek-v4-pro   # DeepSeek 服务端也会自动映射 claude-opus*→v4-pro
+
+routes:
+  deepseek-v4-pro:
+    - {provider: deepseek, model: deepseek-v4-pro, priority: 1}
 ```
 
 ```bash
 model-proxy login deepseek        # 输入 DeepSeek API key
-model-proxy usage deepseek        # 查余额
+model-proxy usage deepseek        # 查余额（is_available + 各币种 total/granted/topped-up）
 ```
+
+## 火山方舟 Volcengine（含 Agent Plan，双协议）
+
+火山方舟（Ark）已内置（`provider_id: volcengine`），一个 API key 同时服务 OpenAI 与 Anthropic 协议；两个 endpoint 用 `openai_base_url` 与 `anthropic_base_url` 分别配置（须含 `/v1`，代理会剥掉客户端的 `/v1`）。**Agent Plan** 套餐用独立的 plan base（`/api/plan/v3`、`/api/plan/compatible/v1`）。
+
+```yaml
+providers:
+  volcengine:
+    provider_id: volcengine
+    openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
+    anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan/compatible/v1
+    usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
+    models:
+      doubao-seed-1-8-251228: {context: 256000, output: 32768, modalities: {input: [text], output: [text]}}
+
+routes:
+  doubao-seed-1-8-251228:
+    - {provider: volcengine, model: doubao-seed-1-8-251228, priority: 1}
+```
+
+```bash
+model-proxy login volcengine        # 依次输入：Ark API Key（对话）+ AccessKey/SecretKey（GetAFPUsage 用，IAM 密钥）
+model-proxy usage volcengine        # Agent Plan 的 5h/每日/周/月 AFP 额度（GetAFPUsage，需 AK/SK）
+```
+
+鉴权双写（`Authorization: Bearer` + `x-api-key`）：OpenAI 端点用 Bearer，Anthropic-compatible 端点用 x-api-key，一个 key 两种协议都能用。
+
+> **用量（GetAFPUsage）**：Agent Plan 的 5h/每日/周/月额度在 `GetAFPUsage`——火山引擎**签名 OpenAPI**（`Action=GetAFPUsage&Version=2024-01-01`，HMAC-SHA256/V4，需 **AccessKey/SecretKey**），Ark API Key（Bearer，仅对话）调不了。`login volcengine` 会同时收 Ark API Key + AK/SK；`usage volcengine` 用 V4 签名调 GetAFPUsage 显示各窗口 Quota/Used/Remaining/ResetTime。未配 AK/SK 时退化为列 config 模型。
+

@@ -84,15 +84,15 @@ func statusColor(status int, s string) string {
 }
 
 // Semantic helpers.
-func cDim(s string) string    { return c(ansiDim, s) }
-func cBold(s string) string   { return c(ansiBold, s) }
-func cGreen(s string) string  { return c(ansiGreen, s) }
-func cYellow(s string) string { return c(ansiYellow, s) }
-func cRed(s string) string    { return c(ansiRed, s) }
-func cCyan(s string) string   { return c(ansiCyan, s) }
-func cBlue(s string) string   { return c(ansiBlue, s) }
+func cDim(s string) string     { return c(ansiDim, s) }
+func cBold(s string) string    { return c(ansiBold, s) }
+func cGreen(s string) string   { return c(ansiGreen, s) }
+func cYellow(s string) string  { return c(ansiYellow, s) }
+func cRed(s string) string     { return c(ansiRed, s) }
+func cCyan(s string) string    { return c(ansiCyan, s) }
+func cBlue(s string) string    { return c(ansiBlue, s) }
 func cMagenta(s string) string { return c(ansiMagenta, s) }
-func cGray(s string) string   { return c(ansiGray, s) }
+func cGray(s string) string    { return c(ansiGray, s) }
 
 // usageRatioColor colors text by balance ratio: >=50% green, >=20% yellow, else red.
 func usageRatioColor(balance, total float64, s string) string {

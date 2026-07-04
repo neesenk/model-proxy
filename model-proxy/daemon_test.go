@@ -99,4 +99,3 @@ func TestWriteReadPidFile(t *testing.T) {
 		t.Errorf("got %q", string(b))
 	}
 }
-

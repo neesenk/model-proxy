@@ -27,16 +27,14 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	defer gwUp.Close()
 
 	cfg := &Config{
-		
+
 		Providers: map[string]Provider{
-			"codex":    {BaseURL: codexUp.URL, Provider: "static"},
-			"compass":  {BaseURL: gwUp.URL, Provider: "static"},
+			"codex":   {OpenAIBaseURL: codexUp.URL, Provider: "static"},
+			"compass": {OpenAIBaseURL: gwUp.URL, Provider: "static"},
 		},
-		Routes: map[string]ProtocolRoute{
-			"openai": {Models: map[string]string{
-				"gpt-5.5": "codex/gpt-5.5",
-				"glm-5.2": "compass/glm-5.2",
-			}},
+		Routes: map[string][]RouteTarget{
+			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
+			"glm-5.2": {{Provider: "compass", Model: "glm-5.2"}},
 		},
 	}
 	p := NewProxy(cfg)
@@ -81,12 +79,12 @@ func TestForward_UnknownModel(t *testing.T) {
 	}))
 	defer gwUp.Close()
 	cfg := &Config{
-		
+
 		Providers: map[string]Provider{
-			"compass": {BaseURL: gwUp.URL, Provider: "static"},
+			"compass": {OpenAIBaseURL: gwUp.URL, Provider: "static"},
 		},
-		Routes: map[string]ProtocolRoute{
-			"openai": {Models: map[string]string{"gpt-5.5": "compass/gpt-5.5"}},
+		Routes: map[string][]RouteTarget{
+			"gpt-5.5": {{Provider: "compass", Model: "gpt-5.5"}},
 		},
 	}
 	p := NewProxy(cfg)
@@ -150,10 +148,13 @@ func (t *testProv) AuthHeaders(req *http.Request) error {
 	req.Header.Del("x-api-key")
 	return nil
 }
-func (t *testProv) Refresh() error                                                  { return nil }
-func (t *testProv) RewriteRequest(url string, body []byte, path string) (string, []byte) { return url, body }
-func (t *testProv) Login() error                                                    { return nil }
-func (t *testProv) Logout() error                                                   { return nil }
-func (t *testProv) Usage() (any, error)                                             { return nil, nil }
+func (t *testProv) Refresh() error { return nil }
+func (t *testProv) RewriteRequest(url string, body []byte, path string) (string, []byte) {
+	return url, body
+}
+func (t *testProv) Login() error                   { return nil }
+func (t *testProv) Logout() error                  { return nil }
+func (t *testProv) Usage() (any, error)            { return nil, nil }
+func (t *testProv) FetchModels() ([]string, error) { return nil, nil }
 
 var _ provider.Provider = (*testProv)(nil)

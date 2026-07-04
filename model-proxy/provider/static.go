@@ -33,6 +33,7 @@ func (p *StaticProvider) Logout() error {
 func (p *StaticProvider) Usage() (any, error) {
 	return nil, errNotSupported
 }
+func (p *StaticProvider) FetchModels() ([]string, error) { return nil, errNotSupported }
 
 var errNotSupported = &notSupportedErr{}
 

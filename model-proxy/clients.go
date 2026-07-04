@@ -8,7 +8,7 @@ import (
 // rewriteClaude: ~/.claude/settings.json
 // Sets env.ANTHROPIC_BASE_URL → proxy, env.ANTHROPIC_AUTH_TOKEN → PROXY_MANAGED.
 func rewriteClaude(cfg *Config) error {
-	file := cfg.Takeover.ClaudeFile
+	file := cfg.Takeover.Claude
 	v, err := readJSONConfig(file)
 	if err != nil {
 		return err
@@ -43,25 +43,29 @@ type exposedModel struct {
 
 func exposedModels(cfg *Config) []exposedModel {
 	var out []exposedModel
-	for _, route := range cfg.Routes {
-		for exposed, target := range route.Models {
-			parts := strings.SplitN(target, "/", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			provName, realModel := parts[0], parts[1]
-			prov, ok := cfg.Providers[provName]
-			if !ok {
-				continue
-			}
-			pm := prov.Models[realModel]
-			out = append(out, exposedModel{
-				exposed:   exposed,
-				provider:  provName,
-				realModel: realModel,
-				pm:        pm,
-			})
+	for exposed, targets := range cfg.Routes {
+		if len(targets) == 0 {
+			continue
 		}
+		// Use the highest-priority target's provider/model for metadata.
+		// Sort by priority (same logic as schedule, minus peak/circuit filtering).
+		best := targets[0]
+		for _, t := range targets[1:] {
+			if t.Priority < best.Priority {
+				best = t
+			}
+		}
+		t := best
+		prov, ok := cfg.Providers[t.Provider]
+		if !ok {
+			continue
+		}
+		out = append(out, exposedModel{
+			exposed:   exposed,
+			provider:  t.Provider,
+			realModel: t.Model,
+			pm:        prov.Models[t.Model],
+		})
 	}
 	return out
 }
@@ -76,7 +80,7 @@ func displayName(id string) string {
 // Writes a provider entry pointing at the proxy, with all exposed models from
 // the config's routes + provider model metadata (context/output/modalities).
 func rewriteOpencode(cfg *Config) error {
-	file := cfg.Takeover.OpencodeFile
+	file := cfg.Takeover.Opencode
 	pid := providerID(cfg)
 	v, err := readJSONConfig(file)
 	if err != nil {
@@ -90,8 +94,8 @@ func rewriteOpencode(cfg *Config) error {
 	// ends with /v1 (→ <proxy>/v1/messages). Needs npm for non-built-in id.
 	baseURL := strings.TrimRight(cfg.Takeover.ProxyURL, "/") + "/v1"
 	prov[pid] = map[string]any{
-		"name":  "AIS Switch",
-		"npm":   "@ai-sdk/anthropic",
+		"name": "AIS Switch",
+		"npm":  "@ai-sdk/anthropic",
 		"options": map[string]any{
 			"apiKey":  "PROXY_MANAGED",
 			"baseURL": baseURL,
@@ -141,7 +145,7 @@ func opencodeModels(cfg *Config) map[string]any {
 // providers.<name> = { baseUrl, api: anthropic-messages, apiKey: PROXY_MANAGED,
 // models:[{id, name, contextWindow, input, maxTokens}] }
 func rewritePi(cfg *Config) error {
-	file := cfg.Takeover.PiFile
+	file := cfg.Takeover.Pi
 	name := providerID(cfg)
 	v, err := readJSONConfig(file)
 	if err != nil {
@@ -189,7 +193,7 @@ func rewritePi(cfg *Config) error {
 // rewriteCodex: ~/.codex/config.toml
 // Text edit: set top-level model_provider=<id> and inject a [model_providers."<id>"] section.
 func rewriteCodex(cfg *Config) error {
-	file := cfg.Takeover.CodexFile
+	file := cfg.Takeover.Codex
 	data, err := readFile(file)
 	if err != nil {
 		return err

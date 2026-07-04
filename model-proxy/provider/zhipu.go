@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -61,29 +60,9 @@ func (p *ZhipuProvider) Logout() error {
 }
 
 func (p *ZhipuProvider) Usage() (any, error) {
-	key, err := p.LoadKey()
-	if err != nil {
-		return nil, err
-	}
-	// Fetch /models
-	url := p.cfg.UsageURL
-	if url == "" {
-		url = p.cfg.BaseURL + "/models"
-	}
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer "+key)
-	resp, err := (&http.Client{Timeout: 30e9}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var result struct {
-		Object string `json:"object"`
-		Data   []struct {
-			ID      string `json:"id"`
-			OwnedBy string `json:"owned_by"`
-		} `json:"data"`
-	}
-	json.NewDecoder(resp.Body).Decode(&result)
-	return result, nil
+	// Delegate to the main-package UsageFn (showGenericUsage), which fetches
+	// /models and prints the list. Matches compass/codex/deepseek.
+	return p.cfg.UsageFn()
 }
+
+func (p *ZhipuProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }

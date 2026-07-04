@@ -53,16 +53,16 @@ func cmdLogin(args []string) {
 
 // runApiKeyLogin prompts for an API key, validates it against the provider's
 // usageURL (if configured), and saves it to ~/.model-proxy/<provider>_apikey.json.
-func runApiKeyLogin(cfg *Config, provName string, prov Provider) {
+func runApiKeyLogin(cfg *Config, provName string, prov Provider) error {
 	fmt.Printf("Enter API key for %s: ", provName)
 	reader := bufio.NewReader(os.Stdin)
 	key, err := reader.ReadString('\n')
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("read API key: %w", err)
 	}
 	key = strings.TrimSpace(key)
 	if key == "" {
-		log.Fatal("empty API key")
+		return fmt.Errorf("empty API key")
 	}
 
 	// Validate by calling the usage endpoint if configured.
@@ -74,25 +74,26 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) {
 		req.Header.Set("Authorization", "Bearer "+key)
 		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
 		if err != nil {
-			log.Fatalf("validation failed: %v", err)
+			return fmt.Errorf("validation failed: %w", err)
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			log.Fatalf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+			return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
 		}
 	}
 
 	// Save to auth file.
 	authFile := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
 	if err := os.MkdirAll(filepath.Dir(authFile), 0o700); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("create auth dir: %w", err)
 	}
 	b, _ := json.MarshalIndent(map[string]string{"api_key": key}, "", "  ")
 	if err := os.WriteFile(authFile, b, 0o600); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("save API key: %w", err)
 	}
 	fmt.Println(cGreen("✓ API key saved to ") + cGray(authFile))
+	return nil
 }
 
 func runLogin(cfg *Config) error {

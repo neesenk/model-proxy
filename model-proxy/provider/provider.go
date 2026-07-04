@@ -14,8 +14,13 @@ type Authenticator interface {
 }
 
 // Provider encapsulates all behavior for an upstream backend: auth, request
-// rewriting, login, logout, and usage queries. Each provider implementation
-// registers itself via Register() in init().
+// rewriting, login, logout, usage queries, and model listing. Each provider
+// implementation registers itself via Register() in init().
+//
+// Conventions for Usage(): the display function MUST print "Provider: <name>"
+// as the FIRST line (via the UsageFn callback wired in buildProviders), so
+// `usage` (no provider arg) produces consistent output across all providers.
+// Other fields (Account, Plan, quota bars, etc.) follow after it.
 type Provider interface {
 	AuthHeaders(req *http.Request) error
 	Refresh() error
@@ -23,15 +28,16 @@ type Provider interface {
 	Login() error
 	Logout() error
 	Usage() (any, error)
+	FetchModels() ([]string, error)
 }
 
 // Config is the provider-level config data passed to constructors.
 type Config struct {
-	ProviderID  string
-	BaseURL     string
-	Headers     map[string]string
-	UsageURL    string
-	Models      map[string]any
+	ProviderID    string
+	OpenAIBaseURL string
+	Headers       map[string]string
+	UsageURL      string
+	Models        map[string]any
 
 	// Auth-specific fields (only relevant to certain providers).
 	SSOCookieFile string // compass
@@ -39,10 +45,11 @@ type Config struct {
 
 	// Callbacks: main package wires its existing functions here so provider/
 	// doesn't need to re-implement CQP minting, SSO flow, OAuth, etc.
-	Auth     Authenticator        // for AuthHeaders/Refresh (compass, codex, apikey)
-	LoginFn  func() error         // for Login (compass: SSO, codex: device flow, zhipu: prompt)
-	LogoutFn func() error         // for Logout
-	UsageFn  func() (any, error)  // for Usage
+	Auth          Authenticator            // for AuthHeaders/Refresh (compass, codex, apikey)
+	LoginFn       func() error             // for Login (compass: SSO, codex: device flow, zhipu: prompt)
+	LogoutFn      func() error             // for Logout
+	UsageFn       func() (any, error)      // for Usage
+	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
 }
 
 // Constructor builds a Provider instance from config.

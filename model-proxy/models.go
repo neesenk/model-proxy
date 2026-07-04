@@ -132,38 +132,60 @@ func printProviderModels(provName string, entries []ModelEntry) {
 	fmt.Printf("\n%s %s: %d models\n", cDim("provider:"), provName, len(entries))
 }
 
-// fetchProviderModels fetches the live model list from a specific provider.
+// fetchProviderModels fetches the live model list from a provider. Delegates to
+// the provider's FetchModels() implementation (which lives in the provider/ layer).
 func fetchProviderModels(cfg *Config, provName string) ([]ModelEntry, error) {
-	prov, ok := cfg.Providers[provName]
-	if !ok {
+	p := buildProviders(cfg)[provName]
+	if p == nil {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	auth := newAuthProvider(prov.Provider, provName, cfg)
-	url := strings.TrimRight(prov.BaseURL, "/") + "/models"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	ids, err := p.FetchModels()
 	if err != nil {
 		return nil, err
 	}
-	if err := auth.Inject(req); err != nil {
-		return nil, fmt.Errorf("auth: %w", err)
+	entries := make([]ModelEntry, 0, len(ids))
+	for _, id := range ids {
+		entries = append(entries, ModelEntry{ID: id, Object: "model", OwnedBy: provName})
+	}
+	return entries, nil
+}
+
+// listArkAgentPlanModelIDs calls the Volcengine signed OpenAPI ListArkAgentPlanModel
+// via the provider's stored AK/SK and returns the Agent Plan's supported model IDs.
+func listArkAgentPlanModelIDs(provName string) ([]string, error) {
+	creds, err := loadVolcengineCreds(provName)
+	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
+		return nil, fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
+	}
+	req, err := volcengineGet("ListArkAgentPlanModel", "2024-01-01", creds.AccessKey, creds.SecretKey, time.Now(), "")
+	if err != nil {
+		return nil, err
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch models: %w", err)
+		return nil, fmt.Errorf("ListArkAgentPlanModel: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("fetch models: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+		return nil, fmt.Errorf("ListArkAgentPlanModel HTTP %d: %s", resp.StatusCode, truncate(string(body), 300))
 	}
-	var v struct {
-		Object string      `json:"object"`
-		Data   []ModelEntry `json:"data"`
+	var wrap struct {
+		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`
+		Result           struct {
+			Datas []struct {
+				ModelID string `json:"ModelID"`
+			} `json:"Datas"`
+		} `json:"Result"`
 	}
-	if err := json.Unmarshal(body, &v); err != nil {
-		return nil, fmt.Errorf("parse models response: %w", err)
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return nil, fmt.Errorf("parse ListArkAgentPlanModel: %w", err)
 	}
-	return v.Data, nil
+	ids := make([]string, 0, len(wrap.Result.Datas))
+	for _, d := range wrap.Result.Datas {
+		ids = append(ids, d.ModelID)
+	}
+	return ids, nil
 }
 
 // nonFlagArgs returns positional args (skipping --config and its value).

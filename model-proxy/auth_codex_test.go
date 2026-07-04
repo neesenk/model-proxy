@@ -53,7 +53,7 @@ func TestCodexOAuth_RefreshRotatesToken(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"access_token":  "head." + payload + ".sig",
 			"refresh_token": "rt-new",
-			"expires_in":     3600,
+			"expires_in":    3600,
 		})
 	}))
 	defer srv.Close()

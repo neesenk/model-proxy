@@ -31,19 +31,17 @@ func newUpstream(h http.HandlerFunc) *httptest.Server {
 func newProxyServer(upstreamURL, auth string, modelMap map[string]string) *httptest.Server {
 	// Build provider models from the model_map (alias→real).
 	provModels := map[string]ProviderModel{}
-	routeModels := map[string]string{}
+	routes := map[string][]RouteTarget{}
 	for alias, real := range modelMap {
 		provModels[real] = ProviderModel{Context: 200000, Output: 32768}
-		routeModels[alias] = "t/" + real
+		routes[alias] = []RouteTarget{{Provider: "t", Model: real}}
 	}
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"t": {BaseURL: upstreamURL, Provider: "static", Models: provModels},
+			"t": {OpenAIBaseURL: upstreamURL, Provider: "static", Models: provModels},
 		},
-		Routes: map[string]ProtocolRoute{
-			"anthropic": {Models: routeModels},
-		},
+		Routes: routes,
 	}
 	p := NewProxy(cfg)
 	return httptest.NewServer(http.HandlerFunc(p.handler))

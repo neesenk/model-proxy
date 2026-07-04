@@ -27,9 +27,16 @@ func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path strin
 	body = ensureJSONField(body, "store", false)
 	return targetURL, body
 }
-func (p *CodexProvider) Login() error       { return p.cfg.LoginFn() }
+func (p *CodexProvider) Login() error        { return p.cfg.LoginFn() }
 func (p *CodexProvider) Logout() error       { return p.cfg.LogoutFn() }
 func (p *CodexProvider) Usage() (any, error) { return p.cfg.UsageFn() }
+
+// FetchModels returns the codex backend's known models. The codex backend's /models
+// endpoint requires a client_version query param and is not a standard OpenAI-style
+// list, so we hardcode the single model the backend serves.
+func (p *CodexProvider) FetchModels() ([]string, error) {
+	return []string{"gpt-5.5"}, nil
+}
 
 // ensureJSONField sets body[key] = val if the key is absent.
 func ensureJSONField(body []byte, key string, val any) []byte {

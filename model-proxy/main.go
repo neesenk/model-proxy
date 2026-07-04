@@ -79,27 +79,15 @@ Clients:
 
 	"login": `login <provider> [--config PATH]
 
-  Authenticate with a provider.
-
-Providers:
-  compass    Compass SSO browser login.
-  codex      codex OAuth device flow.`,
+  Authenticate with a provider.`,
 
 	"logout": `logout <provider> [--config PATH]
 
-  Clear stored credentials for a provider.
-
-Providers:
-  compass    Deletes the SSO cookie file.
-  codex      Deletes the codex OAuth token file.`,
+  Clear stored credentials for a provider.`,
 
 	"usage": `usage <provider> [--config PATH]
 
-  Show usage / credits for a provider.
-
-Providers:
-  compass    Account, project ID, monthly usage, balance.
-  codex      Credits, rate limits, spend control.`,
+  Show usage / credits for a provider.`,
 
 	"models": `models [subcommand] [provider] [--config PATH]
 
@@ -136,6 +124,9 @@ func main() {
 		for _, a := range os.Args[2:] {
 			if a == "-h" || a == "--help" {
 				fmt.Println(help)
+				if takesProvider(cmd) {
+					printConfigProviders(os.Args[2:])
+				}
 				return
 			}
 		}
@@ -172,9 +163,9 @@ var homeDirForTest = ""
 // --config= manually (ignoring other flags so flag.Parse doesn't choke on
 // unknown ones like login's --import). Lookup order:
 //
-//	1. --config PATH flag            (explicit)
-//	2. ~/.model-proxy/config.yaml   (user-level, shared across CWDs)
-//	3. ./config.yaml                 (current directory)
+//  1. --config PATH flag            (explicit)
+//  2. ~/.model-proxy/config.yaml   (user-level, shared across CWDs)
+//  3. ./config.yaml                 (current directory)
 //
 // The first existing file wins. If none exists, "./config.yaml" is returned so
 // LoadConfig reports a clear "not found" error.
@@ -209,16 +200,12 @@ func configPath(args []string) string {
 }
 
 func routeNames(cfg *Config) string {
-	out := ""
-	first := true
-	for proto := range cfg.Routes {
-		if !first {
-			out += ", "
-		}
-		first = false
-		out += proto
+	names := make([]string, 0, len(cfg.Routes))
+	for n := range cfg.Routes {
+		names = append(names, n)
 	}
-	return out
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 func cmdTakeover(args []string) {
@@ -274,13 +261,25 @@ func cmdUsage(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// First positional arg is the provider name.
 	provName := positional(args)
 	if provName == "" {
-		fmt.Println("usage: model-proxy usage <provider>")
-		fmt.Println("available providers:")
-		for name, p := range cfg.Providers {
-			fmt.Printf("  %s (provider=%s)\n", name, p.Provider)
+		// No provider specified → show usage for all logged-in providers.
+		pv := buildProviders(cfg)
+		names := make([]string, 0, len(cfg.Providers))
+		for n := range cfg.Providers {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			p := pv[n]
+			if p == nil {
+				continue
+			}
+			fmt.Println(cDim("────────────────────────────────────────"))
+			if _, err := p.Usage(); err != nil {
+				fmt.Println(cYellow("  (usage unavailable: " + err.Error() + ")"))
+			}
+			fmt.Println()
 		}
 		return
 	}
@@ -302,10 +301,12 @@ func providerNames(cfg *Config) string {
 }
 
 func showCompassUsage(cfg *Config) {
+	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue("compass")))
 	path := authFilePath("compass", "oauth_auth")
 	a, err := loadAccount(path)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(cRed("Error: " + err.Error()))
+		return
 	}
 	if a == nil {
 		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login compass"))
@@ -329,6 +330,7 @@ func showCompassUsage(cfg *Config) {
 }
 
 func showCodexUsage(cfg *Config, prov Provider) {
+	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue("codex")))
 	authFile := authFilePath("codex", "oauth_auth")
 	p := newCodexOAuthProvider(authFile)
 	tok, acct, err := p.token()
@@ -338,8 +340,8 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	}
 	// Usage endpoint is at /backend-api/wham/usage, NOT under the codex base
 	// (/backend-api/codex/wham/usage returns 403). Derive the backend-api root
-	// from the provider baseURL by stripping the trailing /codex segment.
-	usageURL := strings.TrimSuffix(prov.BaseURL, "/codex") + "/wham/usage"
+	// from the provider openai_base_url by stripping the trailing /codex segment.
+	usageURL := strings.TrimSuffix(prov.OpenAIBaseURL, "/codex") + "/wham/usage"
 	req, _ := http.NewRequest("GET", usageURL, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("originator", "codex_cli_rs")
@@ -348,12 +350,14 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		log.Fatalf("usage request: %v", err)
+		fmt.Println(cRed("Error: usage request: " + err.Error()))
+		return
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		log.Fatalf("usage HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+		fmt.Printf("%s HTTP %d: %s\n", cRed("Error:"), resp.StatusCode, truncate(string(body), 200))
+		return
 	}
 	var u struct {
 		Email    string `json:"email"`
@@ -367,24 +371,24 @@ func showCodexUsage(cfg *Config, prov Provider) {
 			Allowed       bool `json:"allowed"`
 			LimitReached  bool `json:"limit_reached"`
 			PrimaryWindow *struct {
-				UsedPercent       int   `json:"used_percent"`
-				LimitWindowSecs   int   `json:"limit_window_seconds"`
-				ResetAfterSecs    int   `json:"reset_after_seconds"`
+				UsedPercent     int `json:"used_percent"`
+				LimitWindowSecs int `json:"limit_window_seconds"`
+				ResetAfterSecs  int `json:"reset_after_seconds"`
 			} `json:"primary_window"`
 			SecondaryWindow *struct {
-				UsedPercent     int   `json:"used_percent"`
-				LimitWindowSecs int   `json:"limit_window_seconds"`
-				ResetAfterSecs  int   `json:"reset_after_seconds"`
+				UsedPercent     int `json:"used_percent"`
+				LimitWindowSecs int `json:"limit_window_seconds"`
+				ResetAfterSecs  int `json:"reset_after_seconds"`
 			} `json:"secondary_window"`
 		} `json:"rate_limit"`
 		SpendControl *struct {
-			Reached          bool `json:"reached"`
-			IndividualLimit  *struct {
-				Used         string `json:"used"`
-				Limit        string `json:"limit"`
-				Remaining    string `json:"remaining"`
-				UsedPercent  int    `json:"used_percent"`
-				ResetAfter   int    `json:"reset_after_seconds"`
+			Reached         bool `json:"reached"`
+			IndividualLimit *struct {
+				Used        string `json:"used"`
+				Limit       string `json:"limit"`
+				Remaining   string `json:"remaining"`
+				UsedPercent int    `json:"used_percent"`
+				ResetAfter  int    `json:"reset_after_seconds"`
 			} `json:"individual_limit"`
 		} `json:"spend_control"`
 	}
@@ -444,12 +448,13 @@ func showCodexUsage(cfg *Config, prov Provider) {
 				bar, pctStr, resetStr)
 		}
 	}
-	fmt.Printf("%s %s\n", cDim("Provider:  "), cGray("codex (chatgpt.com)"))
 }
 
 // showGenericUsage fetches and displays usage from a provider's usageURL.
 // Handles Zhipu BigModel's /api/monitor/usage/quota/limit format:
-//   {data:{limits:[{type:"TOKENS_LIMIT",unit,percentage,nextResetTime}, ...], level}}
+//
+//	{data:{limits:[{type:"TOKENS_LIMIT",unit,percentage,nextResetTime}, ...], level}}
+//
 // unit: 3=5h window, 6=weekly window, 5=monthly time limit.
 func showGenericUsage(cfg *Config, provName string, prov Provider) {
 	auth := newAuthProvider(prov.Provider, provName, cfg)
@@ -463,16 +468,21 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		log.Fatalf("usage request: %v", err)
+		fmt.Println(cRed("Error: usage request: " + err.Error()))
+		return
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		log.Fatalf("usage HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+		fmt.Printf("%s HTTP %d: %s\n", cRed("Error:"), resp.StatusCode, truncate(string(body), 200))
+		return
 	}
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
 
-	// Try Zhipu BigModel format: {data:{limits:[...], level:"..."}}
+	// Try Zhipu BigModel quota format (usageURL → /api/monitor/usage/quota/limit):
+	//   {code, msg, success, data:{limits:[{type,unit,number,percentage,nextResetTime,
+	//     usage(=total), currentValue(=used), remaining, usageDetails:[{modelCode,usage}]}, ...], level}}
+	// type: TOKENS_LIMIT | TIME_LIMIT; unit: 3=5h, 6=weekly (tokens), 5=monthly (time).
 	var zhipu struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
@@ -486,6 +496,10 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 				Usage         *int   `json:"usage"`
 				CurrentValue  *int   `json:"currentValue"`
 				Remaining     *int   `json:"remaining"`
+				UsageDetails  []struct {
+					ModelCode string `json:"modelCode"`
+					Usage     int    `json:"usage"`
+				} `json:"usageDetails"`
 			} `json:"limits"`
 			Level string `json:"level"`
 		} `json:"data"`
@@ -499,19 +513,36 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 			label := zhipuLimitLabel(l.Type, l.Unit)
 			pct := l.Percentage
 			bar := progressBar(pct, 16)
-			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%%", pct))
+			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%% used", pct))
 			resetStr := ""
 			if l.NextResetTime > 0 {
-				resetStr = cGray(" · resets " + formatDuration(int((l.NextResetTime-time.Now().UnixMilli())/1000)))
+				dur := formatDuration(int((l.NextResetTime - time.Now().UnixMilli()) / 1000))
+				resetStr = cGray(" · resets " + dur + "(at " + formatResetAt(l.NextResetTime) + ")")
 			}
-			fmt.Printf("%s %s  %s  %s%s\n", cDim(pad(label+":", 18)), bar, pctStr, cGray(""), resetStr)
-			// Show token/time usage details if present.
-			if l.Usage != nil {
-				fmt.Printf("%s %d used", cDim("    tokens:"), *l.Usage)
-				if l.Remaining != nil {
-					fmt.Printf(" / %d total (%d remaining)", *l.CurrentValue+*l.Remaining, *l.Remaining)
+			fmt.Printf("%s %s  %s%s\n", cDim(pad(label+":", 18)), bar, pctStr, resetStr)
+			// Usage detail: currentValue = used this period, remaining = left,
+			// total = currentValue + remaining (== usage).
+			// TIME_LIMIT is the tool / value-added-service quota, consumed by MCP tools
+			// (search-prime, web-reader, zread, ...) — label it as tool usage. TOKENS_LIMIT
+			// is LLM token usage, broken down by model.
+			detailLabel := "Usage"
+			breakdownLabel := "By model"
+			if l.Type == "TIME_LIMIT" {
+				detailLabel = "Tool usage"
+				breakdownLabel = "By MCP tool"
+			}
+			if l.CurrentValue != nil && l.Remaining != nil {
+				total := *l.CurrentValue + *l.Remaining
+				fmt.Printf("%s %d used / %d total (%d remaining)\n",
+					cDim(pad(detailLabel+":", 18)), *l.CurrentValue, total, *l.Remaining)
+			}
+			// Per-item consumption breakdown, when the API provides it.
+			if len(l.UsageDetails) > 0 {
+				parts := make([]string, 0, len(l.UsageDetails))
+				for _, ud := range l.UsageDetails {
+					parts = append(parts, fmt.Sprintf("%s: %d", ud.ModelCode, ud.Usage))
 				}
-				fmt.Println()
+				fmt.Printf("%s %s\n", cDim(pad(breakdownLabel+":", 18)), cGray(strings.Join(parts, " · ")))
 			}
 		}
 		return
@@ -537,13 +568,212 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 	// Last resort: print raw JSON fields.
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
-		log.Fatalf("parse usage response: %v", err)
+		fmt.Println(cRed("Error: parse usage response: " + err.Error()))
+		return
 	}
 	data := raw
 	if d, ok := raw["data"].(map[string]any); ok {
 		data = d
 	}
 	printUsageFields(data, 1)
+}
+
+// runVolcengineLogin prompts for the Ark API Key (chat) AND the Volcengine
+// AccessKey/SecretKey (for GetAFPUsage), saving all three to the apikey file.
+func runVolcengineLogin(cfg *Config, provName string, prov Provider) error {
+	fmt.Printf("Ark API Key (对话用，控制台创建): ")
+	var apiKey string
+	fmt.Scanln(&apiKey)
+	fmt.Printf("Volcengine Access Key ID (GetAFPUsage 用，IAM 密钥): ")
+	var ak string
+	fmt.Scanln(&ak)
+	fmt.Printf("Volcengine Secret Access Key: ")
+	var sk string
+	fmt.Scanln(&sk)
+	if apiKey == "" {
+		return fmt.Errorf("API key is required")
+	}
+	data, _ := json.Marshal(map[string]string{
+		"api_key":    apiKey,
+		"access_key": ak,
+		"secret_key": sk,
+	})
+	path := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+// volcengineCreds is the on-disk format of the volcengine apikey file: the Ark
+// API Key (chat) plus the Volcengine AK/SK (GetAFPUsage).
+type volcengineCreds struct {
+	APIKey    string `json:"api_key"`
+	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+}
+
+func loadVolcengineCreds(provName string) (*volcengineCreds, error) {
+	path := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var c volcengineCreds
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// afpWindow is one Agent Plan AFP quota window (5h/daily/weekly/monthly).
+type afpWindow struct {
+	Quota     float64 `json:"Quota"`
+	Used      float64 `json:"Used"`
+	ResetTime int64   `json:"ResetTime"` // epoch ms
+}
+
+type afpUsage struct {
+	PlanType    string    `json:"PlanType"`
+	AFPFiveHour afpWindow `json:"AFPFiveHour"`
+	AFPDaily    afpWindow `json:"AFPDaily"`
+	AFPWeekly   afpWindow `json:"AFPWeekly"`
+	AFPMonthly  afpWindow `json:"AFPMonthly"`
+}
+
+// getAFPUsage calls the Volcengine signed OpenAPI GetAFPUsage and returns the
+// 5h/daily/weekly/monthly AFP quota windows.
+func getAFPUsage(ak, sk string) (*afpUsage, error) {
+	req, err := volcengineGet("GetAFPUsage", "2024-01-01", ak, sk, time.Now(), "")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GetAFPUsage: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GetAFPUsage HTTP %d: %s", resp.StatusCode, truncate(string(body), 300))
+	}
+	var wrap struct {
+		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`
+		Result           afpUsage        `json:"Result"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return nil, fmt.Errorf("parse GetAFPUsage: %w", err)
+	}
+	return &wrap.Result, nil
+}
+
+// showVolcengineUsage shows the Agent Plan's 5h/daily/weekly/monthly AFP quota
+// via GetAFPUsage (needs AK/SK + V4 signing). Falls back to config models if
+// AK/SK aren't configured or the call fails.
+func showVolcengineUsage(cfg *Config, provName string, prov Provider) {
+	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
+	creds, err := loadVolcengineCreds(provName)
+	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
+		fmt.Printf("%s Agent Plan 5h/周/月额度需经 GetAFPUsage（火山引擎签名 OpenAPI，AccessKey/SecretKey + V4）。\n", cDim("Note:       "))
+		fmt.Printf("%s 用 `model-proxy login %s` 配置 AK/SK（IAM 密钥，非 Ark API Key）后可查询。\n", cDim("            "), provName)
+		listConfigModels(prov)
+		return
+	}
+	u, err := getAFPUsage(creds.AccessKey, creds.SecretKey)
+	if err != nil {
+		fmt.Printf("%s GetAFPUsage failed: %v\n", cDim("Error:      "), err)
+		listConfigModels(prov)
+		return
+	}
+	if u.PlanType != "" {
+		fmt.Printf("%s %s\n", cDim("Plan:      "), cMagenta(u.PlanType))
+	}
+	printAFPWindow("5h", u.AFPFiveHour)
+	printAFPWindow("Daily", u.AFPDaily)
+	printAFPWindow("Weekly", u.AFPWeekly)
+	printAFPWindow("Monthly", u.AFPMonthly)
+}
+
+func printAFPWindow(label string, w afpWindow) {
+	remaining := w.Quota - w.Used
+	pct := 0
+	if w.Quota > 0 {
+		pct = int(w.Used / w.Quota * 100)
+	}
+	bar := progressBar(pct, 16)
+	pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%% used", pct))
+	reset := "—"
+	if w.ResetTime > 0 {
+		dur := formatDuration(int((w.ResetTime - time.Now().UnixMilli()) / 1000))
+		reset = dur + "(at " + formatResetAt(w.ResetTime) + ")"
+	}
+	fmt.Printf("%s %s  %s · resets %s  (%.1f used / %.1f quota, %.1f remaining)\n",
+		cDim(pad(label+":", 12)), bar, pctStr, cGray(reset), w.Used, w.Quota, remaining)
+}
+
+func listConfigModels(prov Provider) {
+	ids := make([]string, 0, len(prov.Models))
+	for id := range prov.Models {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	fmt.Printf("%s %d models (from config)\n", cDim("Models:     "), len(ids))
+	for _, id := range ids {
+		fmt.Printf("  %s\n", cCyan(id))
+	}
+}
+
+// showDeepseekUsage fetches and displays the DeepSeek account balance from
+// /user/balance: {is_available, balance_infos:[{currency, total_balance,
+// granted_balance, topped_up_balance}]}. Auth is Bearer (the balance endpoint is
+// OpenAI-style, under the OpenAI base).
+func showDeepseekUsage(cfg *Config, provName string, prov Provider) {
+	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
+	auth := newAuthProvider(prov.Provider, provName, cfg)
+	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
+	if err := auth.Inject(req); err != nil {
+		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login "+provName))
+		return
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		fmt.Println(cRed("Error: usage request: " + err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		fmt.Printf("%s HTTP %d: %s\n", cRed("Error:"), resp.StatusCode, truncate(string(body), 200))
+		return
+	}
+	var u struct {
+		IsAvailable  bool `json:"is_available"`
+		BalanceInfos []struct {
+			Currency        string `json:"currency"`
+			TotalBalance    string `json:"total_balance"`
+			GrantedBalance  string `json:"granted_balance"`
+			ToppedUpBalance string `json:"topped_up_balance"`
+		} `json:"balance_infos"`
+	}
+	if err := json.Unmarshal(body, &u); err != nil {
+		fmt.Println(cRed("Error: parse usage response: " + err.Error()))
+		return
+	}
+	if u.IsAvailable {
+		fmt.Printf("%s %s\n", cDim("Available:  "), cGreen("yes"))
+	} else {
+		fmt.Printf("%s %s\n", cDim("Available:  "), cRed("no (insufficient balance)"))
+	}
+	for _, b := range u.BalanceInfos {
+		cur := b.Currency
+		if cur == "" {
+			cur = "Balance"
+		}
+		fmt.Printf("%s %s  %s\n",
+			cDim(pad(cur+":", 12)),
+			cBold(cCyan(b.TotalBalance)),
+			cGray("(granted "+b.GrantedBalance+", topped-up "+b.ToppedUpBalance+")"))
+	}
 }
 
 // zhipuLimitLabel converts Zhipu's type+unit to a human-readable label.
@@ -619,6 +849,16 @@ func formatDuration(secs int) string {
 	}
 }
 
+// formatResetAt formats a reset time (epoch ms) for display: if it falls on
+// today's date, only HH:MM; otherwise MM-DD HH:MM.
+func formatResetAt(resetMs int64) string {
+	t := time.UnixMilli(resetMs).Local()
+	if t.Format("20060102") == time.Now().Format("20060102") {
+		return t.Format("15:04")
+	}
+	return t.Format("01-02 15:04")
+}
+
 // formatCredits formats a credit amount string (e.g. "330.258..." → "330",
 // "22500" → "22,500"). Truncates decimals, adds thousands separators.
 func formatCredits(s string) string {
@@ -684,10 +924,13 @@ func cmdConfig(args []string) {
 		}
 		fmt.Printf("listen: %s\n", cfg.Listen)
 		for name, prov := range cfg.Providers {
-			fmt.Printf("provider %s: baseURL=%s provider_id=%s (%d models)\n", name, prov.BaseURL, prov.Provider, len(prov.Models))
+			fmt.Printf("provider %s: openai_base_url=%s provider_id=%s (%d models)\n", name, prov.OpenAIBaseURL, prov.Provider, len(prov.Models))
 		}
-		for proto, route := range cfg.Routes {
-			fmt.Printf("route %s: %d model maps\n", proto, len(route.Models))
+		for exposed, targets := range cfg.Routes {
+			fmt.Printf("route %s: %d targets\n", exposed, len(targets))
+		}
+		if len(cfg.ClaudeMapping) > 0 {
+			fmt.Printf("claude_mapping: %d aliases\n", len(cfg.ClaudeMapping))
 		}
 	case "check":
 		cfg, err := LoadConfig(configPath(args[1:]))
@@ -700,12 +943,16 @@ func cmdConfig(args []string) {
 		fmt.Printf("  log_file:  %s\n", cfg.LogFile)
 		fmt.Printf("  providers: %d\n", len(cfg.Providers))
 		for name, prov := range cfg.Providers {
-			fmt.Printf("    %s: %s (%s, %d models)\n", name, prov.BaseURL, prov.Provider, len(prov.Models))
+			fmt.Printf("    %s: %s (%s, %d models)\n", name, prov.OpenAIBaseURL, prov.Provider, len(prov.Models))
 		}
 		fmt.Printf("  routes:    %d\n", len(cfg.Routes))
-		for proto, route := range cfg.Routes {
-			fmt.Printf("    %s: %d models\n", proto, len(route.Models))
+		for exposed, targets := range cfg.Routes {
+			fmt.Printf("    %s: %d targets\n", exposed, len(targets))
 		}
+		fmt.Printf("  claude_mapping: %d\n", len(cfg.ClaudeMapping))
+		s := cfg.Scheduling
+		fmt.Printf("  scheduling: threshold=%d cooldown=%s rate_backoff=%s timeout=%s dwell=%s\n",
+			s.threshold(), s.cooldown(), s.rateBackoff(), s.timeout(), s.dwell())
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
 		os.Exit(1)
@@ -729,4 +976,34 @@ func positional(args []string) string {
 		return a
 	}
 	return ""
+}
+
+// takesProvider reports whether the command requires a <provider> argument
+// whose -h help should list the providers defined in config.yaml.
+func takesProvider(cmd string) bool {
+	switch cmd {
+	case "login", "logout", "usage":
+		return true
+	}
+	return false
+}
+
+// printConfigProviders loads the config (best-effort) and lists the providers
+// defined under providers:, so the user knows what to pass as <provider>.
+// Silently skips if no config is available or it has no providers.
+func printConfigProviders(args []string) {
+	cfg, err := LoadConfig(configPath(args))
+	if err != nil || len(cfg.Providers) == 0 {
+		return
+	}
+	names := make([]string, 0, len(cfg.Providers))
+	for n := range cfg.Providers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	fmt.Println("\nProviders (from config):")
+	for _, n := range names {
+		p := cfg.Providers[n]
+		fmt.Printf("  %s  provider=%s  %s\n", pad(n, 14), pad(p.Provider, 12), p.OpenAIBaseURL)
+	}
 }

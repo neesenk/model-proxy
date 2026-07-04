@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"

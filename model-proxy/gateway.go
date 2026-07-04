@@ -24,14 +24,14 @@ import (
 // ---- Endpoints / constants (match ais-switch-cli/internal/consts) ----
 
 const (
-	compassBase      = "https://compass.llm.shopee.io"
-	compassAuthLogin = compassBase + "/compass-api/v1/auth/login" // bootstrap: 401 + SSO_A + result URL
-	compassAuthInfo  = compassBase + "/compass-api/v1/auth/info"  // session poll: 200 + SSO_C when authed
+	compassBase         = "https://compass.llm.shopee.io"
+	compassAuthLogin    = compassBase + "/compass-api/v1/auth/login" // bootstrap: 401 + SSO_A + result URL
+	compassAuthInfo     = compassBase + "/compass-api/v1/auth/info"  // session poll: 200 + SSO_C when authed
 	compassAPIKeyGetGen = compassBase + "/api/v1/cqp/ccswitch/api_key/get_or_generate"
 	compassMonthlyUsage = compassBase + "/api/v1/cqp/ccswitch/monthly_usage"
 
-	ssoCookieName      = "SSO_C"                       // actual cookie name (verified against the real store)
-	loginCompletePath  = "/company-gateway/login-complete"
+	ssoCookieName       = "SSO_C" // actual cookie name (verified against the real store)
+	loginCompletePath   = "/company-gateway/login-complete"
 	googleOAuthAuthFile = "google_oauth_auth.json"
 )
 
@@ -97,8 +97,8 @@ func clearAccount(path string) error {
 // flow so the SSO_A bootstrap cookie and the SSO_C session cookie (set by the
 // auth/info poll's 200 after login) are retained.
 type CompassClient struct {
-	HTTP  *http.Client
-	Jar   http.CookieJar
+	HTTP      *http.Client
+	Jar       http.CookieJar
 	storePath string
 
 	mu        sync.Mutex
@@ -387,13 +387,13 @@ func extractLoginURL(body string) string {
 // MonthlyProjectUsage mirrors monthly_usage's data payload (7 fields, matching the
 // binary's struct MonthlyProjectUsage). Method POST, requires project_id input.
 type MonthlyProjectUsage struct {
-	ProjectID    string  `json:"project_id"`
-	SelectedYear int     `json:"selected_year"`
-	SelectedMonth int    `json:"selected_month"`
-	TotalAmount  float64 `json:"total_amount"`
-	Usage        float64 `json:"usage"`
-	Balance      float64 `json:"balance"`
-	Plan         string  `json:"plan"`
+	ProjectID     string  `json:"project_id"`
+	SelectedYear  int     `json:"selected_year"`
+	SelectedMonth int     `json:"selected_month"`
+	TotalAmount   float64 `json:"total_amount"`
+	Usage         float64 `json:"usage"`
+	Balance       float64 `json:"balance"`
+	Plan          string  `json:"plan"`
 }
 
 // MonthlyUsage fetches monthly_usage with the persisted SSO cookie (cookie-authed,

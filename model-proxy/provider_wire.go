@@ -42,16 +42,31 @@ func clearApiKey(providerName string) error {
 	return nil
 }
 
+// runVolcengineLoginErr wraps runVolcengineLogin (which prompts for API key +
+// AK/SK) for the provider callback interface.
+func runVolcengineLoginErr(cfg *Config, provName string, prov Provider) error {
+	return runVolcengineLogin(cfg, provName, prov)
+}
+
 func showZhipuUsageData(cfg *Config, providerName string, prov Provider) (any, error) {
 	showGenericUsage(cfg, providerName, prov)
 	return nil, nil
 }
 
-// runApiKeyLoginErr wraps runApiKeyLogin (which calls log.Fatal) to return error.
+func showDeepseekUsageData(cfg *Config, providerName string, prov Provider) (any, error) {
+	showDeepseekUsage(cfg, providerName, prov)
+	return nil, nil
+}
+
+// showVolcengineUsageData shows the Agent Plan state (configured models + a note
+// that GetAFPUsage needs AK/SK + V4 signing). See showVolcengineUsage.
+func showVolcengineUsageData(cfg *Config, providerName string, prov Provider) (any, error) {
+	showVolcengineUsage(cfg, providerName, prov)
+	return nil, nil
+}
+
+// runApiKeyLoginErr wraps runApiKeyLogin (now returns error) for the provider
+// callback interface.
 func runApiKeyLoginErr(cfg *Config, provName string, prov Provider) error {
-	// runApiKeyLogin calls log.Fatal on error, so it never returns.
-	// We recover from the fatal to convert it to an error.
-	defer func() {}()
-	runApiKeyLogin(cfg, provName, prov)
-	return nil
+	return runApiKeyLogin(cfg, provName, prov)
 }

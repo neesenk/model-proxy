@@ -15,13 +15,14 @@ import (
 
 // codex OAuth device flow (independent tokens, not shared with codex CLI).
 // Contract from codex-rs/login source:
-//   issuer = https://auth.openai.com, client_id = app_EMoamEEZ73f0CkXaXp7hrann
-//   1. POST {issuer}/api/accounts/deviceauth/usercode  {client_id} → {device_auth_id, user_code, interval}
-//   2. user visits {issuer}/codex/device and enters user_code
-//   3. POST {issuer}/api/accounts/deviceauth/token  {device_auth_id, user_code} (poll every interval)
-//      → {authorization_code, code_challenge, code_verifier}  (or pending/slow_down)
-//   4. POST {issuer}/oauth/token  form: grant_type=authorization_code&code=&redirect_uri={issuer}/deviceauth/callback&client_id=&code_verifier=
-//      → {id_token, access_token, refresh_token}
+//
+//	issuer = https://auth.openai.com, client_id = app_EMoamEEZ73f0CkXaXp7hrann
+//	1. POST {issuer}/api/accounts/deviceauth/usercode  {client_id} → {device_auth_id, user_code, interval}
+//	2. user visits {issuer}/codex/device and enters user_code
+//	3. POST {issuer}/api/accounts/deviceauth/token  {device_auth_id, user_code} (poll every interval)
+//	   → {authorization_code, code_challenge, code_verifier}  (or pending/slow_down)
+//	4. POST {issuer}/oauth/token  form: grant_type=authorization_code&code=&redirect_uri={issuer}/deviceauth/callback&client_id=&code_verifier=
+//	   → {id_token, access_token, refresh_token}
 const (
 	codexOAuthIssuer    = "https://auth.openai.com"
 	codexOAuthUsercode  = codexOAuthIssuer + "/api/accounts/deviceauth/usercode"

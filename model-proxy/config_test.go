@@ -1,0 +1,244 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestConfig_ProviderBaseURLs validates each provider's base URLs produce the
+// correct upstream path for both protocols. This catches:
+//   - openai_base_url missing its version segment (proxy strips /v1 → double path)
+//   - anthropic_base_url including /v1 (proxy keeps /v1/messages → double /v1)
+//   - wrong base URL patterns
+func TestConfig_ProviderBaseURLs(t *testing.T) {
+	cfg, err := LoadConfig("config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	for name, prov := range cfg.Providers {
+		t.Run(name+"/openai", func(t *testing.T) {
+			if prov.OpenAIBaseURL == "" {
+				t.Fatalf("openai_base_url is empty")
+			}
+			// Openai: proxy strips /v1 from client path, appends remainder.
+			// Simulate: client sends /v1/chat/completions → stripped to /chat/completions
+			upstream := strings.TrimRight(prov.OpenAIBaseURL, "/") + "/chat/completions"
+			// Should not have double /v1
+			if strings.Contains(upstream, "/v1/v1") {
+				t.Errorf("openai URL has double /v1: %s (openai_base_url should NOT end with /v1)", upstream)
+			}
+		})
+
+		if prov.AnthropicBaseURL != "" {
+			t.Run(name+"/anthropic", func(t *testing.T) {
+				// Anthropic: proxy keeps the client's /v1/messages path.
+				// Simulate: client sends /v1/messages → path stays /v1/messages
+				upstream := strings.TrimRight(prov.AnthropicBaseURL, "/") + "/v1/messages"
+				// Should not have double /v1
+				if strings.Contains(upstream, "/v1/v1") {
+					t.Errorf("anthropic URL has double /v1: %s (anthropic_base_url should NOT end with /v1)", upstream)
+				}
+				// Should end with .../v1/messages
+				if !strings.HasSuffix(upstream, "/v1/messages") {
+					t.Errorf("anthropic URL doesn't end with /v1/messages: %s", upstream)
+				}
+			})
+		}
+	}
+}
+
+// TestConfig_ModelSpecs checks that model metadata (context/output) is reasonable:
+//   - context > 0 and output > 0 (unless it's a special model like cogview)
+//   - output <= context (output can't exceed context)
+//   - context is a "reasonable" size (>= 4096 for text models)
+func TestConfig_ModelSpecs(t *testing.T) {
+	cfg, err := LoadConfig("config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	for provName, prov := range cfg.Providers {
+		for modelID, m := range prov.Models {
+			t.Run(provName+"/"+modelID, func(t *testing.T) {
+				// Skip special models (image generation, embedding)
+				isImageOutput := len(m.Modalities.Output) == 1 && m.Modalities.Output[0] == "image"
+				if isImageOutput {
+					return // cogview etc. have context=0, output=0
+				}
+				if m.Context <= 0 {
+					t.Errorf("context = %d, want > 0", m.Context)
+				}
+				if m.Output <= 0 {
+					t.Errorf("output = %d, want > 0", m.Output)
+				}
+				if m.Context > 0 && int64(m.Output) > m.Context {
+					t.Errorf("output (%d) > context (%d)", m.Output, m.Context)
+				}
+				if m.Context > 0 && m.Context < 4096 {
+					t.Errorf("context = %d, seems too small (>= 4096 expected for text models)", m.Context)
+				}
+			})
+		}
+	}
+}
+
+// TestConfig_RouteTargets verifies every route target references an existing
+// provider and has a non-empty model name.
+func TestConfig_RouteTargets(t *testing.T) {
+	cfg, err := LoadConfig("config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Routes) == 0 {
+		t.Fatal("no routes configured")
+	}
+	for exposed, targets := range cfg.Routes {
+		if len(targets) == 0 {
+			t.Errorf("route %q has no targets", exposed)
+			continue
+		}
+		for i, target := range targets {
+			if target.Provider == "" {
+				t.Errorf("route %q target %d: provider is empty", exposed, i)
+			}
+			if target.Model == "" {
+				t.Errorf("route %q target %d: model is empty", exposed, i)
+			}
+			if _, ok := cfg.Providers[target.Provider]; !ok {
+				t.Errorf("route %q target %d: provider %q not in providers", exposed, i, target.Provider)
+			}
+		}
+	}
+}
+
+// TestConfig_ClaudeMapping verifies claude_mapping values reference existing routes.
+func TestConfig_ClaudeMapping(t *testing.T) {
+	cfg, err := LoadConfig("config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	for claude, exposed := range cfg.ClaudeMapping {
+		if exposed == "" {
+			t.Errorf("claude_mapping %q → empty target", claude)
+		}
+		if _, ok := cfg.Routes[exposed]; !ok {
+			t.Errorf("claude_mapping %q → %q: target not in routes", claude, exposed)
+		}
+	}
+}
+
+// TestConfig_UpstreamURLPreview prints the exact upstream URLs the proxy would
+// build for each provider×protocol. Useful for manual review — run with -v.
+func TestConfig_UpstreamURLPreview(t *testing.T) {
+	cfg, err := LoadConfig("config.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	for name, prov := range cfg.Providers {
+		// Openai: strip /v1, append /chat/completions
+		openaiURL := strings.TrimRight(prov.OpenAIBaseURL, "/") + "/chat/completions"
+		t.Logf("[openai]    %s → %s", name, openaiURL)
+		// /models
+		modelsURL := strings.TrimRight(prov.OpenAIBaseURL, "/") + "/models"
+		t.Logf("[models]    %s → %s", name, modelsURL)
+
+		if prov.AnthropicBaseURL != "" {
+			// Anthropic: keep /v1/messages
+			anthropicURL := strings.TrimRight(prov.AnthropicBaseURL, "/") + "/v1/messages"
+			t.Logf("[anthropic] %s → %s", name, anthropicURL)
+		} else {
+			t.Logf("[anthropic] %s → (falls back to openai_base_url + /v1/messages = %s)", name,
+				strings.TrimRight(prov.OpenAIBaseURL, "/")+"/v1/messages")
+		}
+	}
+}
+
+// TestConfig_ValidateErrors checks that each validation rule produces a clear
+// error message with a fix hint.
+func TestConfig_ValidateErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     *Config
+		wantSub string // substring the error message should contain
+	}{
+		{
+			name:    "empty listen",
+			cfg:     &Config{Providers: map[string]Provider{"x": {OpenAIBaseURL: "https://x", Provider: "zhipu"}}},
+			wantSub: "listen is empty",
+		},
+		{
+			name: "empty openai_base_url",
+			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+				"x": {Provider: "zhipu"},
+			}},
+			wantSub: "openai_base_url is empty",
+		},
+		{
+			name: "empty provider_id",
+			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+				"x": {OpenAIBaseURL: "https://x", Provider: ""},
+			}},
+			wantSub: "provider_id is empty",
+		},
+		{
+			name: "unknown provider_id",
+			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+				"x": {OpenAIBaseURL: "https://x", Provider: "unknown-typo"},
+			}},
+			wantSub: "unknown provider_id",
+		},
+		{
+			name: "anthropic_base_url ends with /v1",
+			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+				"x": {OpenAIBaseURL: "https://x/v3", AnthropicBaseURL: "https://x/anthropic/v1", Provider: "zhipu"},
+			}},
+			wantSub: "anthropic_base_url ends with /v1",
+		},
+		{
+			name: "route references unknown provider",
+			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
+			}, Routes: map[string][]RouteTarget{
+				"m": {{Provider: "nonexistent", Model: "m", Priority: 1}},
+			}},
+			wantSub: "provider \"nonexistent\" not defined",
+		},
+		{
+			name: "claude_mapping bad target",
+			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
+			}, Routes: map[string][]RouteTarget{
+				"m": {{Provider: "a", Model: "m", Priority: 1}},
+			}, ClaudeMapping: map[string]string{
+				"claude-x": "no-such-route",
+			}},
+			wantSub: "target \"no-such-route\" not found in routes",
+		},
+		{
+			name: "duplicate priorities",
+			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
+				"b": {OpenAIBaseURL: "https://y", Provider: "zhipu"},
+			}, Routes: map[string][]RouteTarget{
+				"m": {
+					{Provider: "a", Model: "m", Priority: 1},
+					{Provider: "b", Model: "m", Priority: 1},
+				},
+			}},
+			wantSub: "duplicate priority 1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.validate()
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}

@@ -197,24 +197,35 @@ provider/                    # Provider 实现（每个上游一个文件）
   zhipu.go                   # zhipu: API key prompt + /models 校验 + 模型列表
 
 config.yaml:
-  providers:                 # provider 定义（baseURL + provider_id + models）
+  providers:                 # provider 定义（openai_base_url + provider_id + models）
     compass:
       provider_id: compass   # 路由到 provider/compass.go
-      baseURL: ...
+      openai_base_url: ...
       cqp_mint_url: ...      # compass 专属
     zhipu:
       provider_id: zhipu     # 路由到 provider/zhipu.go
-      baseURL: ...
-      usageURL: ...          # zhipu 专属
-  routes:                    # 按协议对外
-    anthropic:               # POST /v1/messages
-      models:
-        claude-opus-4-7: compass/glm-5.2   # 对别名 → provider/真实名
-    openai:                  # POST /v1/responses, /v1/chat/completions
-      models:
-        gpt-5.5: codex/gpt-5.5
-        glm-5.2: compass/glm-5.2
+      openai_base_url: ...
+      usage_url: ...          # zhipu 专属
+  claude_mapping:              # anthropic-only：claude 别名 → 对外模型名（路由前先翻译）
+    claude-opus-4-7: glm-5.2
+    claude-sonnet-4-6: deepseek-v4-pro
+  routes:                      # 对外模型名 → provider/真实名 目标列表（不按协议）
+    # 调度：先看非高峰（provider 的 peak_hours），再看 priority，失败逐一 failover
+    glm-5.2:
+      - {provider: compass, model: glm-5.2, priority: 1}
+      - {provider: zhipu,   model: glm-5.2, priority: 2}   # failover 备选
+    gpt-5.5:
+      - {provider: codex, model: gpt-5.5, priority: 1}
+
+  scheduling:                 # 调度/熔断（durations 用字符串）
+    circuit_threshold: 3      # 连续失败 → 熔断
+    circuit_cooldown: 10m     # 开路时长，后半开 1 个探针
+    rate_limit_backoff: 60s   # 429 无 Retry-After 时的默认退避
+    upstream_timeout: 30s     # 每个上游请求超时
+    sticky_dwell: 10m         # 切到某 provider 后最少用多久（≈2× 缓存 TTL）
 ```
+
+熔断/限频/粘性状态在 `Proxy.health`（`healthMu`，与 reload 的 `mu` 分开，避免与 `handler` 的 RLock 死锁）。`schedule` 跳过开路/限频 provider；`tryTarget` 在超时/5xx/conn-error 计熔断、429 记限频（Retry-After 或默认退避）、成功清零；半开用 `halfOpenInFlight` 单飞。粘性：每路由记一个 current provider + since，驻留窗口内优先它（保 cache、不频繁回切）。
 
 对外协议 = 转发协议（不做转换）。凭据由 `login <provider>` 管理，存储在 `~/.model-proxy/<name>_<suffix>.json`，不落 config。
 
@@ -286,14 +297,36 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 
 ### Zhipu BigModel 契约
 
-- API base: `https://open.bigmodel.cn/api/paas/v4`
-- 鉴权: `Authorization: Bearer <api_key>`（用户输入，存 `~/.model-proxy/<name>_apikey.json`）
+- API base (OpenAI): `https://open.bigmodel.cn/api/paas/v4`（`/chat/completions`、`/models` 等）
+- Anthropic base: `https://open.bigmodel.cn/api/anthropic/v1`（`/v1/messages`，Bearer 鉴权，返回标准 Anthropic `message` 响应；实测 200）。config 里用 `openai_base_url` + `anthropic_base_url` 分别配置，代理按协议转发
+- 鉴权: `Authorization: Bearer <api_key>`（用户输入，存 `~/.model-proxy/<name>_apikey.json`）；OpenAI 与 Anthropic 端点都用 Bearer（不像 DeepSeek 需要 x-api-key）
 - `/models` 端点只返回 8 个文本对话模型；多模态模型（glm-4v-plus/cogview-4-plus）不列在其中，需手动加到 config
-- Zhipu 没有 public balance API；`/users/balance` 和 `/users/usage` 都 404
+- 配额端点 `GET https://open.bigmodel.cn/api/monitor/usage/quota/limit`（Bearer api_key 鉴权）→ `{success, data:{limits:[{type,unit,number,percentage,nextResetTime,usage,currentValue,remaining,usageDetails:[{modelCode,usage}]}], level}}`；`type`=TOKENS_LIMIT|TIME_LIMIT，`unit` 3=5h/6=weekly/5=monthly。**`currentValue`=已用、`remaining`=剩余、`usage`=总额**（不要把 `usage` 当已用——它是总额，等于 currentValue+remaining）。`/users/balance` 和 `/users/usage` 都 404
+- `usageDetails` 拆分：`TIME_LIMIT`（月度）按 **MCP 工具**拆分（search-prime/web-reader/zread 等，是工具调用消耗而非模型 token）；`TOKENS_LIMIT` 按**模型**拆分。显示时前者标 `by MCP tool`、后者标 `by model`
+
+### DeepSeek 契约（双协议，一个 key）
+
+- OpenAI base: `https://api.deepseek.com`（`/chat/completions`、`/responses`、`/models`、`/user/balance`，Bearer 鉴权）
+- Anthropic base: `https://api.deepseek.com/anthropic`（`/v1/messages`，`x-api-key` 鉴权；`anthropic-version`/`anthropic-beta` 被忽略）
+- **关键**：Anthropic SDK 打 `/anthropic/v1/messages`（base + `/v1/messages`）。代理剥掉客户端的 `/v1`，故 `anthropic_base_url` 须自带 `/v1`（`https://api.deepseek.com/anthropic/v1`），代理按协议转发：anthropic→`anthropic_base_url`、openai→`openai_base_url`。`RewriteRequest` 不再改 URL（no-op），URL 选择在 `proxy.forward` 按 protocol 完成
+- 鉴权双写：每个请求同时设 `Authorization: Bearer` 和 `x-api-key`，一个 config 服务两种协议
+- 服务端模型自动映射（Anthropic）：`claude-opus*`→`deepseek-v4-pro`；`claude-sonnet*`/`claude-haiku*`→`deepseek-v4-flash`
+- `/user/balance` → `{is_available, balance_infos:[{currency, total_balance, granted_balance, topped_up_balance}]}`（注意是 `balance_infos` 非 `wallets`）
+- `/models` → OpenAI 风格 `{object:"list", data:[{id,object,owned_by}]}`；当前模型 `deepseek-v4-pro`/`deepseek-v4-flash`（1M ctx，384K max output）。旧名 `deepseek-chat`/`reasoner` 2026-07-24 弃用
+- 凭据存 `~/.model-proxy/<name>_apikey.json`
+
+### 火山方舟 Volcengine Ark 契约（双协议，含 Agent Plan，一个 key）
+
+- OpenAI base: `https://ark.cn-beijing.volces.com/api/plan/v3`（Agent Plan 套餐；标准 Ark 是 `/api/v3`）。`/chat/completions`、`/responses`、`/models`，Bearer 鉴权
+- Anthropic base: `https://ark.cn-beijing.volces.com/api/plan/compatible/v1`（Anthropic-compatible，供 Claude Code；标准 Ark 是 `/api/compatible`）。`/v1/messages`，`x-api-key` 鉴权。代理按协议转发：anthropic→`anthropic_base_url`、openai→`openai_base_url`。`anthropic_base_url` 须自带 `/v1`（代理剥掉客户端 `/v1`）
+- 鉴权双写：每请求同时设 `Authorization: Bearer` 和 `x-api-key`（OpenAI 端点用 Bearer，Anthropic 端点用 x-api-key），一个 key 服务两种协议（实现同 DeepSeek，`provider/volcengine.go`）
+- Agent Plan 的 5h/每日/周/月额度在 **GetAFPUsage**（火山引擎签名 OpenAPI：`Action=GetAFPUsage&Version=2024-01-01&serviceCode=ark`，管控面、HMAC-SHA256/V4 签名，需 AccessKey/SecretKey）—— Ark API Key（Bearer，仅对话）调不了（实测 `/api/v3/models`→401、`/api/plan/v3/models`→404）。**已实现**：`volcengine_sign.go` 做 V4 签名（CredentialScope `{date}/cn-beijing/ark/request`，signing key 链 SK→kDate→kRegion→kService→kSigning，**末项 `"request"` 非 `"volcengine_request"`**；签名头仅 `host;x-date`，**不含 `x-content-sha256`**）。`login volcengine` 同时收 Ark API Key + AK/SK。`usage volcengine` 调 GetAFPUsage 解析 `Result.{AFPFiveHour,AFPDaily,AFPWeekly,AFPMonthly}`（各含 `Quota/Used/ResetTime`，Remaining=Quota−Used）。`models refresh volcengine` 调 **ListArkAgentPlanModel**（同理 V4 签名）解析 `Result.Datas[].ModelID`（当前 17 个模型，含 doubao/glm-5.2/kimi/minimax/deepseek）。未配 AK/SK 时退化为列 config 模型
+- 模型 ID 是模型名（如 `doubao-seed-1-8-251228`、`doubao-seed-2-0-code`），非推理接入点 endpoint id（标准 Ark 按量计费才用 endpoint id）
+- 凭据存 `~/.model-proxy/<name>_apikey.json`
 
 ### 踩过的坑
 
-1. **路径双 `/v1`**：provider baseURL 已含 `/compass-api/v1`，client path `/v1/messages` 拼接后变双 `/v1`。需剥 client 的 `/v1` 前缀。
+1. **路径双 `/v1`**：provider openai_base_url 已含 `/compass-api/v1`，client path `/v1/messages` 拼接后变双 `/v1`。需剥 client 的 `/v1` 前缀。
 2. **codex 后端请求体**：`store:false`（否则 400）+ `stream:true`（否则 400）+ 无 `max_tokens`（否则 400）。代理在 RewriteRequest 自动注入 `store:false`。
 3. **monthly_usage**：POST 非 GET，需 `project_id` 入参。字段名 `total_amount`/`usage`/`balance`/`plan`（非 `totalAmount`）。
 4. **wham/usage 路径**：`/backend-api/wham/usage`，不是 `/backend-api/codex/wham/usage`（后者 403）。

@@ -98,10 +98,10 @@ type clientSpec struct {
 
 func listClients(cfg *Config, which string) []clientSpec {
 	all := []clientSpec{
-		{name: "claude", file: cfg.Takeover.ClaudeFile, rewrite: func(c *Config) error { return rewriteClaude(c) }},
-		{name: "opencode", file: cfg.Takeover.OpencodeFile, rewrite: func(c *Config) error { return rewriteOpencode(c) }},
-		{name: "codex", file: cfg.Takeover.CodexFile, rewrite: func(c *Config) error { return rewriteCodex(c) }},
-		{name: "pi", file: cfg.Takeover.PiFile, rewrite: func(c *Config) error { return rewritePi(c) }},
+		{name: "claude", file: cfg.Takeover.Claude, rewrite: func(c *Config) error { return rewriteClaude(c) }},
+		{name: "opencode", file: cfg.Takeover.Opencode, rewrite: func(c *Config) error { return rewriteOpencode(c) }},
+		{name: "codex", file: cfg.Takeover.Codex, rewrite: func(c *Config) error { return rewriteCodex(c) }},
+		{name: "pi", file: cfg.Takeover.Pi, rewrite: func(c *Config) error { return rewritePi(c) }},
 	}
 	if which == "" || which == "all" {
 		return all

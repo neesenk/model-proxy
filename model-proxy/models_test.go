@@ -8,20 +8,21 @@ import (
 	"testing"
 )
 
-// TestServeModels_ListsExposedModels verifies /v1/models lists the exposed model
-// names from routes (not upstream forwarding — the proxy lists what it exposes).
+// TestServeModels_ListsExposedModels verifies /v1/models lists exposed model
+// names (routes' keys) plus claude_mapping aliases.
 func TestServeModels_ListsExposedModels(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"compass": {BaseURL: "http://x", Provider: "compass",
+			"compass": {OpenAIBaseURL: "http://x", Provider: "compass",
 				Models: map[string]ProviderModel{"glm-5.2": {Context: 1048576}}},
 		},
-		Routes: map[string]ProtocolRoute{
-			"anthropic": {Models: map[string]string{
-				"claude-opus-4-7": "compass/glm-5.2",
-				"claude-haiku-4-5": "compass/glm-5.2",
-			}},
+		Routes: map[string][]RouteTarget{
+			"glm-5.2": {{Provider: "compass", Model: "glm-5.2"}},
+		},
+		ClaudeMapping: map[string]string{
+			"claude-opus-4-7":  "glm-5.2",
+			"claude-haiku-4-5": "glm-5.2",
 		},
 	}
 	p := NewProxy(cfg)
@@ -44,30 +45,29 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 	if err := json.Unmarshal(body, &list); err != nil {
 		t.Fatalf("parse: %v body=%s", err, string(body))
 	}
-	if list.Object != "list" || len(list.Data) != 2 {
-		t.Errorf("expected 2 exposed models, got %+v", list)
+	if list.Object != "list" || len(list.Data) != 3 {
+		t.Errorf("expected 3 models (1 route + 2 claude aliases), got %+v", list)
 	}
-	// Check both exposed names are present.
 	ids := map[string]bool{}
 	for _, m := range list.Data {
 		ids[m.ID] = true
 	}
-	if !ids["claude-opus-4-7"] || !ids["claude-haiku-4-5"] {
-		t.Errorf("expected claude-opus-4-7 + claude-haiku-4-5, got %v", ids)
+	for _, want := range []string{"glm-5.2", "claude-opus-4-7", "claude-haiku-4-5"} {
+		if !ids[want] {
+			t.Errorf("expected %s in %v", want, ids)
+		}
 	}
 }
 
-// TestServeModels_NoCQPRouteFallsBackToEmpty verifies that with no cqp route,
-// /v1/models returns an empty list when no routes have models.
-func TestServeModels_NoCQPRouteFallsBackToEmpty(t *testing.T) {
+// TestServeModels_NoRoutesReturnsEmpty verifies /v1/models returns an empty list
+// when there are no routes.
+func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"other": {BaseURL: "http://x", Provider: "static"},
+			"other": {OpenAIBaseURL: "http://x", Provider: "static"},
 		},
-		Routes: map[string]ProtocolRoute{
-			"anthropic": {Models: map[string]string{}},
-		},
+		Routes: map[string][]RouteTarget{},
 	}
 	p := NewProxy(cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
