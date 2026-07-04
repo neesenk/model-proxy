@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestConfig_ProviderBaseURLs validates each provider's base URLs produce the
@@ -240,5 +243,71 @@ func TestConfig_ValidateErrors(t *testing.T) {
 				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantSub)
 			}
 		})
+	}
+}
+
+func TestPeakConfig_Unmarshal(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want []PeakSegment
+	}{
+		{"single string", `peak_hours: "09:00-18:00"`, []PeakSegment{{Window: "09:00-18:00"}}},
+		{"list of strings", "peak_hours:\n  - \"09:00-12:00\"\n  - \"14:00-18:00\"", []PeakSegment{{Window: "09:00-12:00"}, {Window: "14:00-18:00"}}},
+		{"list of maps", "peak_hours:\n  - {window: \"09:00-12:00\", multiplier: 2}\n  - {window: \"14:00-18:00\", multiplier: 3}", []PeakSegment{{Window: "09:00-12:00", Multiplier: 2}, {Window: "14:00-18:00", Multiplier: 3}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var wrap struct {
+				PeakHours PeakConfig `yaml:"peak_hours"`
+			}
+			if err := yaml.Unmarshal([]byte(tc.yaml), &wrap); err != nil {
+				t.Fatalf("yaml.Unmarshal: %v", err)
+			}
+			if len(wrap.PeakHours) != len(tc.want) {
+				t.Fatalf("got %d segments, want %d", len(wrap.PeakHours), len(tc.want))
+			}
+			for i, want := range tc.want {
+				got := wrap.PeakHours[i]
+				if got.Window != want.Window {
+					t.Errorf("seg %d Window: got %q, want %q", i, got.Window, want.Window)
+				}
+				if want.Multiplier != 0 && got.Multiplier != want.Multiplier {
+					t.Errorf("seg %d Multiplier: got %v, want %v", i, got.Multiplier, want.Multiplier)
+				}
+			}
+		})
+	}
+}
+
+func TestProvider_PeakMultiplier(t *testing.T) {
+	p := Provider{PeakHours: PeakConfig{
+		{Window: "09:00-12:00", Multiplier: 2},
+		{Window: "14:00-18:00", Multiplier: 3},
+	}}
+	parseHHMMRange("09:00-12:00") // ensure parser initialized
+	at := func(h, m int) time.Time { return time.Date(2026, 7, 5, h, m, 0, 0, time.Local) }
+	if got := p.peakMultiplier(at(10, 0)); got != 2 {
+		t.Errorf("10:00 (in 09-12) mult=%v, want 2", got)
+	}
+	if got := p.peakMultiplier(at(15, 0)); got != 3 {
+		t.Errorf("15:00 (in 14-18) mult=%v, want 3", got)
+	}
+	if got := p.peakMultiplier(at(13, 0)); got != 1 {
+		t.Errorf("13:00 (no segment) mult=%v, want 1", got)
+	}
+}
+
+func TestScheduling_QuotaDefaults(t *testing.T) {
+	var s Scheduling
+	if s.pollInterval() != 5*time.Minute {
+		t.Errorf("default pollInterval=%v, want 5m", s.pollInterval())
+	}
+	if s.switchMargin() != 0.15 {
+		t.Errorf("default switchMargin=%v, want 0.15", s.switchMargin())
+	}
+	s.QuotaSwitchMargin = 20
+	if s.switchMargin() != 0.20 {
+		t.Errorf("switchMargin(20)=%v, want 0.20", s.switchMargin())
 	}
 }

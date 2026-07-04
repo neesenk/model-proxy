@@ -577,25 +577,6 @@ func (t RouteTarget) inPeak(providers map[string]Provider, now time.Time) bool {
 	return p.inPeak(now)
 }
 
-// inPeak reports whether now (local time) falls inside the provider's peak_hours
-// window "HH:MM-HH:MM". Returns false if peak_hours is unset or malformed.
-// Supports wrap-around windows (e.g. "22:00-06:00").
-func (p Provider) inPeak(now time.Time) bool {
-	if p.PeakHours == "" {
-		return false
-	}
-	start, end, ok := parseHHMMRange(p.PeakHours)
-	if !ok {
-		return false
-	}
-	now = now.Local()
-	m := now.Hour()*60 + now.Minute()
-	if start <= end {
-		return m >= start && m < end
-	}
-	return m >= start || m < end
-}
-
 func parseHHMMRange(s string) (start, end int, ok bool) {
 	parts := strings.Split(s, "-")
 	if len(parts) != 2 {

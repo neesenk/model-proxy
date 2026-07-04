@@ -126,7 +126,7 @@ func TestForward_PeakHours(t *testing.T) {
 	defer normalUp.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"peak":   {OpenAIBaseURL: peakUp.URL, Provider: "static", PeakHours: "00:00-23:59"}, // always in peak → deprioritized
+			"peak":   {OpenAIBaseURL: peakUp.URL, Provider: "static", PeakHours: PeakConfig{{Window: "00:00-23:59"}}}, // always in peak → deprioritized
 			"normal": {OpenAIBaseURL: normalUp.URL, Provider: "static"},
 		},
 		Routes: map[string][]RouteTarget{
@@ -158,7 +158,7 @@ func TestForward_PeakGrouping(t *testing.T) {
 	defer normalUp.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"peak":   {OpenAIBaseURL: peakUp.URL, Provider: "static", PeakHours: "00:00-23:59"},
+			"peak":   {OpenAIBaseURL: peakUp.URL, Provider: "static", PeakHours: PeakConfig{{Window: "00:00-23:59"}}},
 			"normal": {OpenAIBaseURL: normalUp.URL, Provider: "static"},
 		},
 		Routes: map[string][]RouteTarget{

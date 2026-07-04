@@ -34,7 +34,9 @@ providers:
     provider_id: zhipu
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
-    peak_hours: "14:00-18:00"
+    peak_hours:
+      - {window: "09:00-12:00", multiplier: 2}
+      - {window: "14:00-18:00", multiplier: 2}
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit  # `usage zhipu`: 5h/weekly/monthly quota + token consumption
     models:
       glm-5.2:     {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
@@ -55,6 +57,7 @@ providers:
   # claude-sonnet*/claude-haiku*→deepseek-v4-flash server-side.
   deepseek:
     provider_id: deepseek
+    billing: pay-as-you-go
     openai_base_url: https://api.deepseek.com
     anthropic_base_url: https://api.deepseek.com/anthropic
     usage_url: https://api.deepseek.com/user/balance
@@ -116,6 +119,8 @@ scheduling:
   rate_limit_backoff: 60s     # 429 with no Retry-After: skip this long, then probe
   upstream_timeout: 30s       # per-upstream-request timeout
   sticky_dwell: 10m           # min time on the chosen provider before re-evaluating
+  quota_poll_interval: 5m     # background quota poll cadence
+  quota_switch_margin: 15     # switch provider if another's effective remaining beats current by ≥ this many pct points
 
 takeover:
   # provider_id is the single identifier used by takeover for every agent that

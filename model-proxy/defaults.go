@@ -18,7 +18,9 @@ providers:
     anthropic_base_url: https://compass.llm.shopee.io/compass-api  # same base without /v1; proxy keeps the client /v1/messages path
     provider_id: compass
     cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
-    # peak_hours: "09:00-18:00"  # optional: route scheduling deprioritizes compass during its peak window
+    # peak_hours:                       # multi-segment, per-segment multiplier
+    #   - {window: "09:00-12:00", multiplier: 2}
+    #   - {window: "14:00-18:00", multiplier: 2}
     models:
       glm-5.2:           {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
       deepseek-v4-pro:   {context: 1048576, output: 65536, modalities: {input: [text], output: [text]}}
@@ -57,6 +59,7 @@ providers:
     openai_base_url: https://api.deepseek.com
     anthropic_base_url: https://api.deepseek.com/anthropic
     provider_id: deepseek
+    billing: pay-as-you-go
     usage_url: https://api.deepseek.com/user/balance
     models:
       deepseek-v4-pro:   {context: 1000000, output: 65536, modalities: {input: [text], output: [text]}}
@@ -113,6 +116,8 @@ scheduling:
   rate_limit_backoff: 60s     # 429 with no Retry-After: skip this long, then probe
   upstream_timeout: 30s       # per-upstream-request timeout
   sticky_dwell: 10m           # min time on the chosen provider before re-evaluating
+  quota_poll_interval: 5m     # background quota poll cadence
+  quota_switch_margin: 15     # switch provider if another's effective remaining beats current by ≥ this many pct points
 
 takeover:
   # proxy_url defaults to http://<listen> when unset — leave it commented so

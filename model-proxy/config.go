@@ -30,6 +30,8 @@ type Scheduling struct {
 	RateLimitBackoff string `yaml:"rate_limit_backoff"` // 429 with no Retry-After: skip this long, then probe (default 60s)
 	UpstreamTimeout  string `yaml:"upstream_timeout"`   // per-upstream-request timeout (default 30s)
 	StickyDwell      string `yaml:"sticky_dwell"`       // min time on the chosen provider before re-evaluating (default 10m)
+	QuotaPollInterval string `yaml:"quota_poll_interval"` // background poll cadence (default 5m)
+	QuotaSwitchMargin int    `yaml:"quota_switch_margin"`  // switch if another plan provider's effective remaining beats current by ≥ this many pct points (default 15)
 }
 
 func (s Scheduling) threshold() int {
@@ -62,6 +64,18 @@ func (s Scheduling) dwell() time.Duration {
 	}
 	return 10 * time.Minute
 }
+func (s Scheduling) pollInterval() time.Duration {
+	if d, err := time.ParseDuration(s.QuotaPollInterval); err == nil {
+		return d
+	}
+	return 5 * time.Minute
+}
+func (s Scheduling) switchMargin() float64 {
+	if s.QuotaSwitchMargin > 0 {
+		return float64(s.QuotaSwitchMargin) / 100.0
+	}
+	return 0.15
+}
 
 type Provider struct {
 	// OpenAIBaseURL is the default upstream base — used for the OpenAI protocol
@@ -76,11 +90,86 @@ type Provider struct {
 	Headers          map[string]string        `yaml:"headers"`
 	UsageURL         string                   `yaml:"usage_url"`
 	Models           map[string]ProviderModel `yaml:"models"`
-	// PeakHours is this provider's peak window "HH:MM-HH:MM" (local time). Route
-	// scheduling tries non-peak providers first (by priority), then peak ones —
-	// so a provider in its peak window is deprioritized (高峰期扣减更多 → 少用).
-	PeakHours string `yaml:"peak_hours"`
+	// PeakHours is this provider's set of peak segments (each "HH:MM-HH:MM" in
+	// local time). Route scheduling tries non-peak providers first (by priority),
+	// then peak ones — so a provider in a peak window is deprioritized. The
+	// multiplier discounts effective remaining quota during that segment.
+	PeakHours PeakConfig `yaml:"peak_hours"`
+	// Billing is "plan" (default, quota-bound) or "pay-as-you-go" (strict
+	// last-resort: used only when all plan providers are unavailable).
+	Billing string `yaml:"billing"`
 }
+
+// PeakSegment is one peak-hours window with its consumption multiplier.
+type PeakSegment struct {
+	Window     string  `yaml:"window"`
+	Multiplier float64 `yaml:"multiplier"` // 0 → default (2.0) at validate time
+}
+
+// PeakConfig is a provider's set of peak segments. It unmarshals from three
+// YAML shapes: a single string ("09:00-18:00"), a list of strings, or a list
+// of {window, multiplier} maps.
+type PeakConfig []PeakSegment
+
+func (p *PeakConfig) UnmarshalYAML(value *yaml.Node) error {
+	// Case 1: single string.
+	var single string
+	if value.Decode(&single) == nil && single != "" {
+		*p = PeakConfig{{Window: single}}
+		return nil
+	}
+	// Case 2/3: a sequence.
+	var seq []yaml.Node
+	if err := value.Decode(&seq); err != nil {
+		return err
+	}
+	out := make(PeakConfig, 0, len(seq))
+	for _, el := range seq {
+		var s string
+		if el.Decode(&s) == nil && s != "" {
+			out = append(out, PeakSegment{Window: s})
+			continue
+		}
+		var seg PeakSegment
+		if err := el.Decode(&seg); err != nil {
+			return err
+		}
+		out = append(out, seg)
+	}
+	*p = out
+	return nil
+}
+
+// peakMultiplier returns the multiplier of whichever peak segment `now` falls
+// into (1.0 if none / no segments). Used to discount effective remaining quota.
+func (p Provider) peakMultiplier(now time.Time) float64 {
+	now = now.Local()
+	m := now.Hour()*60 + now.Minute()
+	for _, seg := range p.PeakHours {
+		start, end, ok := parseHHMMRange(seg.Window)
+		if !ok {
+			continue
+		}
+		var inside bool
+		if start <= end {
+			inside = m >= start && m < end
+		} else {
+			inside = m >= start || m < end // wrap-around
+		}
+		if inside {
+			if seg.Multiplier > 0 {
+				return seg.Multiplier
+			}
+			return defaultPeakMultiplier
+		}
+	}
+	return 1.0
+}
+
+// inPeak reports whether the provider is currently in any peak segment.
+func (p Provider) inPeak(now time.Time) bool { return p.peakMultiplier(now) > 1.0 }
+
+const defaultPeakMultiplier = 2.0
 
 type ProviderModel struct {
 	Context    int64              `yaml:"context"`
@@ -212,15 +301,22 @@ func (c *Config) validate() error {
 		if p.UsageURL != "" && !strings.HasPrefix(p.UsageURL, "https://") && !strings.HasPrefix(p.UsageURL, "http://") {
 			return fmt.Errorf("provider %q: usage_url %q is not a valid URL", name, p.UsageURL)
 		}
-		// peak_hours should be a valid "HH:MM-HH:MM" window with start != end.
-		if p.PeakHours != "" {
-			start, end, ok := parseHHMMRange(p.PeakHours)
+		// peak_hours: each segment window must be a valid HH:MM-HH:MM range.
+		for i, seg := range p.PeakHours {
+			start, end, ok := parseHHMMRange(seg.Window)
 			if !ok {
-				return fmt.Errorf("provider %q: peak_hours %q is malformed — expected \"HH:MM-HH:MM\"", name, p.PeakHours)
+				return fmt.Errorf("provider %q: peak_hours segment %d %q is malformed — expected \"HH:MM-HH:MM\"", name, i, seg.Window)
 			}
 			if start == end {
-				return fmt.Errorf("provider %q: peak_hours %q has zero-width window (start == end)", name, p.PeakHours)
+				return fmt.Errorf("provider %q: peak_hours segment %d %q has zero-width window", name, i, seg.Window)
 			}
+			if seg.Multiplier < 0 {
+				return fmt.Errorf("provider %q: peak_hours segment %d multiplier %v must be > 0", name, i, seg.Multiplier)
+			}
+		}
+		// billing: only known values.
+		if p.Billing != "" && p.Billing != "plan" && p.Billing != "pay-as-you-go" {
+			return fmt.Errorf("provider %q: billing %q invalid — use \"plan\" or \"pay-as-you-go\"", name, p.Billing)
 		}
 	}
 	for exposed, targets := range c.Routes {
