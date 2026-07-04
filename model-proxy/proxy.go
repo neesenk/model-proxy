@@ -71,6 +71,7 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }
 			pcfg.UsageFn = func() (any, error) { return showZhipuUsageData(cfg, name, prov) }
+			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchZhipuQuota(cfg, name, prov) }
 		case "deepseek":
 			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }

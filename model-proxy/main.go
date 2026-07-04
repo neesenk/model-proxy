@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"model-proxy/provider"
 )
 
 const usage = `model-proxy — standalone portable proxy for AIS Switch LLM gateway
@@ -450,6 +452,142 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	}
 }
 
+// parseZhipuQuota parses Zhipu BigModel's /api/monitor/usage/quota/limit body into
+// a QuotaSnapshot. Returns (nil, nil) if the body isn't the zhipu quota format
+// (caller falls back to the OpenAI model-list display). TIME_LIMIT windows are
+// included for display but EXCLUDED from the binding RemainingPct (they're MCP
+// tool quota, not LLM tokens).
+//
+// Zhipu's `percentage` field is the USED percentage (0..100): the existing
+// pre-refactor display fed it straight to progressBar/`%d%% used`, and the
+// quota/limit fixture corroborates (percentage=40 ⇔ currentValue=40000 /
+// usage=100000). We convert to RemainingPct = (100 - percentage) / 100.
+func parseZhipuQuota(body []byte, account string) (*provider.QuotaSnapshot, error) {
+	var z struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Limits []struct {
+				Type          string `json:"type"`
+				Unit          int    `json:"unit"`
+				Number        int    `json:"number"`
+				Percentage    int    `json:"percentage"`
+				NextResetTime int64  `json:"nextResetTime"`
+				Usage         *int   `json:"usage"`
+				CurrentValue  *int   `json:"currentValue"`
+				Remaining     *int   `json:"remaining"`
+				UsageDetails  []struct {
+					ModelCode string `json:"modelCode"`
+					Usage     int    `json:"usage"`
+				} `json:"usageDetails"`
+			} `json:"limits"`
+			Level string `json:"level"`
+		} `json:"data"`
+		Success bool `json:"success"`
+	}
+	if err := json.Unmarshal(body, &z); err != nil {
+		return nil, nil
+	}
+	if !z.Success || len(z.Data.Limits) == 0 {
+		return nil, nil
+	}
+	s := &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan,
+		Account: account,
+		Level:   z.Data.Level,
+		Plan:    z.Data.Level,
+		AsOf:    time.Now(),
+	}
+	var binding []provider.QuotaWindow // only TOKENS_LIMIT contribute to the binding min
+	for _, l := range z.Data.Limits {
+		w := provider.QuotaWindow{
+			Label:        zhipuLimitLabel(l.Type, l.Unit),
+			RemainingPct: (100.0 - float64(l.Percentage)) / 100.0,
+		}
+		if l.Type == "TIME_LIMIT" {
+			w.Kind = "time"
+			w.DetailLabel = "By MCP tool"
+		} else {
+			w.Kind = "tokens"
+			w.DetailLabel = "By model"
+		}
+		if l.CurrentValue != nil && l.Remaining != nil {
+			w.Used = float64(*l.CurrentValue)
+			w.Total = float64(*l.CurrentValue + *l.Remaining)
+		}
+		if l.NextResetTime > 0 {
+			w.ResetsAt = time.UnixMilli(l.NextResetTime)
+		}
+		for _, ud := range l.UsageDetails {
+			w.Details = append(w.Details, provider.QuotaDetail{Label: ud.ModelCode, Used: float64(ud.Usage)})
+		}
+		s.Windows = append(s.Windows, w)
+		if l.Type == "TOKENS_LIMIT" {
+			binding = append(binding, w)
+		}
+	}
+	s.RemainingPct = provider.BindingRemaining(binding)
+	return s, nil
+}
+
+// fetchZhipuQuota GETs the zhipu usage_url and returns the parsed snapshot.
+func fetchZhipuQuota(cfg *Config, name string, prov Provider) (*provider.QuotaSnapshot, error) {
+	auth := newAuthProvider(prov.Provider, name, cfg)
+	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
+	if err := auth.Inject(req); err != nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	}
+	for k, v := range prov.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	}
+	s, _ := parseZhipuQuota(body, "")
+	if s == nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "not zhipu quota format"}, nil
+	}
+	return s, nil
+}
+
+// printQuotaSnapshot renders a QuotaSnapshot for the `usage` CLI. Output mirrors
+// the pre-refactor per-provider formatters (same bars, percentages, reset
+// strings, "By model"/"By MCP tool" detail labels).
+func printQuotaSnapshot(s *provider.QuotaSnapshot) {
+	for _, w := range s.Windows {
+		pct := int(w.RemainingPct * 100)
+		usedPct := 100 - pct
+		bar := progressBar(usedPct, 16)
+		pctStr := usageRatioColor(w.RemainingPct, 1, fmt.Sprintf("%d%% used", usedPct))
+		resetStr := ""
+		if !w.ResetsAt.IsZero() {
+			dur := formatDuration(int(time.Until(w.ResetsAt) / time.Second))
+			resetStr = cGray(" · resets " + dur + "(at " + formatResetAt(w.ResetsAt.UnixMilli()) + ")")
+		}
+		fmt.Printf("%s %s  %s%s\n", cDim(pad(w.Label+":", 18)), bar, pctStr, resetStr)
+		if w.Total > 0 {
+			fmt.Printf("%s %.0f used / %.0f total (%.0f remaining)\n",
+				cDim(pad("Usage:", 18)), w.Used, w.Total, w.Total-w.Used)
+		}
+		if len(w.Details) > 0 && w.DetailLabel != "" {
+			parts := make([]string, 0, len(w.Details))
+			for _, d := range w.Details {
+				parts = append(parts, fmt.Sprintf("%s: %.0f", d.Label, d.Used))
+			}
+			fmt.Printf("%s %s\n", cDim(pad(w.DetailLabel+":", 18)), cGray(strings.Join(parts, " · ")))
+		}
+	}
+	for _, n := range s.Notes {
+		fmt.Println(cDim(pad("", 18)) + n)
+	}
+}
+
 // showGenericUsage fetches and displays usage from a provider's usageURL.
 // Handles Zhipu BigModel's /api/monitor/usage/quota/limit format:
 //
@@ -479,72 +617,10 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 	}
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
 
-	// Try Zhipu BigModel quota format (usageURL → /api/monitor/usage/quota/limit):
-	//   {code, msg, success, data:{limits:[{type,unit,number,percentage,nextResetTime,
-	//     usage(=total), currentValue(=used), remaining, usageDetails:[{modelCode,usage}]}, ...], level}}
-	// type: TOKENS_LIMIT | TIME_LIMIT; unit: 3=5h, 6=weekly (tokens), 5=monthly (time).
-	var zhipu struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			Limits []struct {
-				Type          string `json:"type"`
-				Unit          int    `json:"unit"`
-				Number        int    `json:"number"`
-				Percentage    int    `json:"percentage"`
-				NextResetTime int64  `json:"nextResetTime"`
-				Usage         *int   `json:"usage"`
-				CurrentValue  *int   `json:"currentValue"`
-				Remaining     *int   `json:"remaining"`
-				UsageDetails  []struct {
-					ModelCode string `json:"modelCode"`
-					Usage     int    `json:"usage"`
-				} `json:"usageDetails"`
-			} `json:"limits"`
-			Level string `json:"level"`
-		} `json:"data"`
-		Success bool `json:"success"`
-	}
-	if json.Unmarshal(body, &zhipu) == nil && zhipu.Success && len(zhipu.Data.Limits) > 0 {
-		if zhipu.Data.Level != "" {
-			fmt.Printf("%s %s\n", cDim("Level:     "), cMagenta(zhipu.Data.Level))
-		}
-		for _, l := range zhipu.Data.Limits {
-			label := zhipuLimitLabel(l.Type, l.Unit)
-			pct := l.Percentage
-			bar := progressBar(pct, 16)
-			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%% used", pct))
-			resetStr := ""
-			if l.NextResetTime > 0 {
-				dur := formatDuration(int((l.NextResetTime - time.Now().UnixMilli()) / 1000))
-				resetStr = cGray(" · resets " + dur + "(at " + formatResetAt(l.NextResetTime) + ")")
-			}
-			fmt.Printf("%s %s  %s%s\n", cDim(pad(label+":", 18)), bar, pctStr, resetStr)
-			// Usage detail: currentValue = used this period, remaining = left,
-			// total = currentValue + remaining (== usage).
-			// TIME_LIMIT is the tool / value-added-service quota, consumed by MCP tools
-			// (search-prime, web-reader, zread, ...) — label it as tool usage. TOKENS_LIMIT
-			// is LLM token usage, broken down by model.
-			detailLabel := "Usage"
-			breakdownLabel := "By model"
-			if l.Type == "TIME_LIMIT" {
-				detailLabel = "Tool usage"
-				breakdownLabel = "By MCP tool"
-			}
-			if l.CurrentValue != nil && l.Remaining != nil {
-				total := *l.CurrentValue + *l.Remaining
-				fmt.Printf("%s %d used / %d total (%d remaining)\n",
-					cDim(pad(detailLabel+":", 18)), *l.CurrentValue, total, *l.Remaining)
-			}
-			// Per-item consumption breakdown, when the API provides it.
-			if len(l.UsageDetails) > 0 {
-				parts := make([]string, 0, len(l.UsageDetails))
-				for _, ud := range l.UsageDetails {
-					parts = append(parts, fmt.Sprintf("%s: %d", ud.ModelCode, ud.Usage))
-				}
-				fmt.Printf("%s %s\n", cDim(pad(breakdownLabel+":", 18)), cGray(strings.Join(parts, " · ")))
-			}
-		}
+	// Try Zhipu BigModel quota format (parseZhipuQuota); if not zhipu, fall
+	// through to the OpenAI model-list / raw-JSON fallback below.
+	if s, _ := parseZhipuQuota(body, ""); s != nil {
+		printQuotaSnapshot(s)
 		return
 	}
 
