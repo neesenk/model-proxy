@@ -30,6 +30,7 @@ func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path strin
 func (p *CodexProvider) Login() error        { return p.cfg.LoginFn() }
 func (p *CodexProvider) Logout() error       { return p.cfg.LogoutFn() }
 func (p *CodexProvider) Usage() (any, error) { return p.cfg.UsageFn() }
+func (p *CodexProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
 
 // FetchModels returns the codex backend's known models. The codex backend's /models
 // endpoint requires a client_version query param and is not a standard OpenAI-style

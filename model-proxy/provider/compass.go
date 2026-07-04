@@ -36,3 +36,4 @@ func (p *CompassProvider) Login() error                   { return p.cfg.LoginFn
 func (p *CompassProvider) Logout() error                  { return p.cfg.LogoutFn() }
 func (p *CompassProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *CompassProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
+func (p *CompassProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }

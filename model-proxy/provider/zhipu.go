@@ -66,3 +66,4 @@ func (p *ZhipuProvider) Usage() (any, error) {
 }
 
 func (p *ZhipuProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
+func (p *ZhipuProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }

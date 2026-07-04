@@ -34,6 +34,7 @@ func (p *StaticProvider) Usage() (any, error) {
 	return nil, errNotSupported
 }
 func (p *StaticProvider) FetchModels() ([]string, error) { return nil, errNotSupported }
+func (p *StaticProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
 
 var errNotSupported = &notSupportedErr{}
 

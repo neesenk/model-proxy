@@ -57,3 +57,4 @@ func (p *DeepSeekProvider) Login() error                   { return p.cfg.LoginF
 func (p *DeepSeekProvider) Logout() error                  { return p.cfg.LogoutFn() }
 func (p *DeepSeekProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *DeepSeekProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
+func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
