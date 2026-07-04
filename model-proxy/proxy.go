@@ -82,6 +82,7 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }
 			pcfg.UsageFn = func() (any, error) { return showVolcengineUsageData(cfg, name, prov) }
 			pcfg.FetchModelsFn = func() ([]string, error) { return listArkAgentPlanModelIDs(name) }
+			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchVolcengineQuota(name) }
 		}
 		p, err := provider.New(pcfg, name)
 		if err != nil {

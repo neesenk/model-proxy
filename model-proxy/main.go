@@ -899,6 +899,45 @@ func printAFPWindow(label string, w afpWindow) {
 		cDim(pad(label+":", 12)), bar, pctStr, cGray(reset), w.Used, w.Quota, remaining)
 }
 
+// parseVolcengineQuota converts the GetAFPUsage result into a QuotaSnapshot.
+func parseVolcengineQuota(u *afpUsage) *provider.QuotaSnapshot {
+	s := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Plan: u.PlanType, AsOf: time.Now()}
+	add := func(label string, w afpWindow) {
+		rem := -1.0
+		if w.Quota > 0 {
+			rem = (w.Quota - w.Used) / w.Quota
+		}
+		var reset time.Time
+		if w.ResetTime > 0 {
+			reset = time.UnixMilli(w.ResetTime)
+		}
+		s.Windows = append(s.Windows, provider.QuotaWindow{
+			Label: label, Kind: "tokens",
+			Used: w.Used, Total: w.Quota, RemainingPct: rem, ResetsAt: reset,
+		})
+	}
+	add("5h", u.AFPFiveHour)
+	add("daily", u.AFPDaily)
+	add("weekly", u.AFPWeekly)
+	add("monthly", u.AFPMonthly)
+	s.RemainingPct = provider.BindingRemaining(s.Windows)
+	return s
+}
+
+// fetchVolcengineQuota calls GetAFPUsage (signed, AK/SK). Returns BillingUnknown
+// if AK/SK aren't configured or the call fails.
+func fetchVolcengineQuota(name string) (*provider.QuotaSnapshot, error) {
+	creds, err := loadVolcengineCreds(name)
+	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "AK/SK not configured"}, nil
+	}
+	u, err := getAFPUsage(creds.AccessKey, creds.SecretKey)
+	if err != nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	}
+	return parseVolcengineQuota(u), nil
+}
+
 func listConfigModels(prov Provider) {
 	ids := make([]string, 0, len(prov.Models))
 	for id := range prov.Models {

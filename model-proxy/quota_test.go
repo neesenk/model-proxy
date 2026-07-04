@@ -69,3 +69,23 @@ func TestParseCodexQuota(t *testing.T) {
 		t.Errorf("RemainingPct=%v, want 0.4 (weekly binding)", s.RemainingPct)
 	}
 }
+
+func TestParseVolcengineQuota(t *testing.T) {
+	u := &afpUsage{
+		PlanType:    "agent-plan",
+		AFPFiveHour: afpWindow{Quota: 100, Used: 80, ResetTime: 1750000000000},
+		AFPWeekly:   afpWindow{Quota: 100, Used: 30, ResetTime: 1750000000000},
+		AFPMonthly:  afpWindow{Quota: 100, Used: 10, ResetTime: 1750000000000},
+	}
+	s := parseVolcengineQuota(u)
+	if s.Billing != provider.BillingPlan {
+		t.Errorf("Billing=%v, want Plan", s.Billing)
+	}
+	// binding = min(5h rem 0.2, weekly rem 0.7, monthly rem 0.9) = 0.2
+	if s.RemainingPct != 0.2 {
+		t.Errorf("RemainingPct=%v, want 0.2 (5h binding)", s.RemainingPct)
+	}
+	if s.Plan != "agent-plan" {
+		t.Errorf("Plan=%q", s.Plan)
+	}
+}
