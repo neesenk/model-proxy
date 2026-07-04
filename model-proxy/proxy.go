@@ -67,6 +67,7 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 			pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
 			pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
 			pcfg.UsageFn = func() (any, error) { return showCodexUsageData(cfg, prov) }
+			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchCodexQuota(cfg, prov) }
 		case "zhipu":
 			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }

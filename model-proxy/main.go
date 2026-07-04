@@ -452,6 +452,118 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	}
 }
 
+// parseCodexQuota parses codex /backend-api/wham/usage into a QuotaSnapshot.
+// Windows: primary(5h) + secondary(weekly) + spend(monthly $). Credits/rate-limit
+// status go to Notes for display.
+func parseCodexQuota(body []byte, account, plan string) (*provider.QuotaSnapshot, error) {
+	var u struct {
+		Email    string `json:"email"`
+		PlanType string `json:"plan_type"`
+		Credits  *struct {
+			HasCredits bool    `json:"has_credits"`
+			Unlimited  bool    `json:"unlimited"`
+			Balance    *string `json:"balance"`
+		} `json:"credits"`
+		RateLimit *struct {
+			Allowed      bool `json:"allowed"`
+			LimitReached bool `json:"limit_reached"`
+			PrimaryWindow *struct {
+				UsedPercent     int `json:"used_percent"`
+				LimitWindowSecs int `json:"limit_window_seconds"`
+				ResetAfterSecs  int `json:"reset_after_seconds"`
+			} `json:"primary_window"`
+			SecondaryWindow *struct {
+				UsedPercent     int `json:"used_percent"`
+				LimitWindowSecs int `json:"limit_window_seconds"`
+				ResetAfterSecs  int `json:"reset_after_seconds"`
+			} `json:"secondary_window"`
+		} `json:"rate_limit"`
+		SpendControl *struct {
+			Reached         bool `json:"reached"`
+			IndividualLimit *struct {
+				Used        string `json:"used"`
+				Limit       string `json:"limit"`
+				Remaining   string `json:"remaining"`
+				UsedPercent int    `json:"used_percent"`
+				ResetAfter  int    `json:"reset_after_seconds"`
+			} `json:"individual_limit"`
+		} `json:"spend_control"`
+	}
+	if err := json.Unmarshal(body, &u); err != nil {
+		return nil, err
+	}
+	s := &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan,
+		Account: or(u.Email, account),
+		Plan:    or(u.PlanType, plan),
+		AsOf:    time.Now(),
+	}
+	now := time.Now()
+	if u.RateLimit != nil {
+		status := "allowed"
+		if u.RateLimit.LimitReached {
+			status = "limit reached"
+		} else if !u.RateLimit.Allowed {
+			status = "not allowed"
+		}
+		s.Notes = append(s.Notes, "Rate Limit: "+status)
+		if pw := u.RateLimit.PrimaryWindow; pw != nil {
+			s.Windows = append(s.Windows, provider.QuotaWindow{
+				Label:        "primary (5h)",
+				Kind:         "tokens",
+				RemainingPct: float64(100-pw.UsedPercent) / 100.0,
+				ResetsAt:     now.Add(time.Duration(pw.ResetAfterSecs) * time.Second),
+			})
+		}
+		if sw := u.RateLimit.SecondaryWindow; sw != nil {
+			s.Windows = append(s.Windows, provider.QuotaWindow{
+				Label:        "weekly",
+				Kind:         "tokens",
+				RemainingPct: float64(100-sw.UsedPercent) / 100.0,
+				ResetsAt:     now.Add(time.Duration(sw.ResetAfterSecs) * time.Second),
+			})
+		}
+	}
+	if sc := u.SpendControl; sc != nil && sc.IndividualLimit != nil {
+		il := sc.IndividualLimit
+		s.Windows = append(s.Windows, provider.QuotaWindow{
+			Label:        "Spend",
+			Kind:         "money",
+			RemainingPct: float64(100-il.UsedPercent) / 100.0,
+			ResetsAt:     now.Add(time.Duration(il.ResetAfter) * time.Second),
+		})
+	}
+	s.RemainingPct = provider.BindingRemaining(s.Windows)
+	return s, nil
+}
+
+// fetchCodexQuota GETs /backend-api/wham/usage with Bearer + originator.
+func fetchCodexQuota(cfg *Config, prov Provider) (*provider.QuotaSnapshot, error) {
+	authFile := authFilePath("codex", "oauth_auth")
+	p := newCodexOAuthProvider(authFile)
+	tok, acct, err := p.token()
+	if err != nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	}
+	usageURL := strings.TrimSuffix(prov.OpenAIBaseURL, "/codex") + "/wham/usage"
+	req, _ := http.NewRequest("GET", usageURL, nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("originator", "codex_cli_rs")
+	if acct != "" {
+		req.Header.Set("ChatGPT-Account-Id", acct)
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	}
+	return parseCodexQuota(body, acct, "")
+}
+
 // parseZhipuQuota parses Zhipu BigModel's /api/monitor/usage/quota/limit body into
 // a QuotaSnapshot. Returns (nil, nil) if the body isn't the zhipu quota format
 // (caller falls back to the OpenAI model-list display). TIME_LIMIT windows are

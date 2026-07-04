@@ -48,3 +48,24 @@ func TestParseZhipuQuota_NotZhipu(t *testing.T) {
 		t.Fatalf("expected nil snapshot for non-zhipu body, got %+v", s)
 	}
 }
+
+func TestParseCodexQuota(t *testing.T) {
+	body := []byte(`{"email":"a@b.com","plan_type":"pro","rate_limit":{"allowed":true,"limit_reached":false,
+		"primary_window":{"used_percent":30,"limit_window_seconds":18000,"reset_after_seconds":12000},
+		"secondary_window":{"used_percent":60,"limit_window_seconds":604800,"reset_after_seconds":300000}},
+		"spend_control":{"reached":false,"individual_limit":{"used":"5","limit":"20","remaining":"15","used_percent":25,"reset_after_seconds":2500000}}}`)
+	s, err := parseCodexQuota(body, "a@b.com", "pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Billing != provider.BillingPlan {
+		t.Errorf("Billing=%v, want Plan", s.Billing)
+	}
+	if s.Account != "a@b.com" || s.Plan != "pro" {
+		t.Errorf("Account/Plan=%q/%q", s.Account, s.Plan)
+	}
+	// binding = min(primary rem 0.7, weekly rem 0.4, spend rem 0.75) = 0.4
+	if s.RemainingPct != 0.4 {
+		t.Errorf("RemainingPct=%v, want 0.4 (weekly binding)", s.RemainingPct)
+	}
+}
