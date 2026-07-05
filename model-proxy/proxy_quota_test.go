@@ -190,3 +190,65 @@ func TestSchedule_PlanBeforeUnknown(t *testing.T) {
 		t.Errorf("first=%q, want planprov (plan tier ranks ahead of unknown)", got)
 	}
 }
+
+// TestSchedule_PeakDiscountsEffectiveRemaining: at equal raw remaining, a
+// provider inside a peak window (multiplier 2) has its effective remaining
+// halved, so a non-peak peer ranks ahead. (Peak is folded into effective
+// remaining, not a separate sort tier.)
+func TestSchedule_PeakDiscountsEffectiveRemaining(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{
+			"plain": {},
+			"peak":  {PeakHours: PeakConfig{{Window: "00:00-23:59", Multiplier: 2}}},
+		},
+		map[string][]RouteTarget{"m": {{Provider: "plain"}, {Provider: "peak"}}})
+	staticQuota(p, "plain", 0.5)
+	staticQuota(p, "peak", 0.5) // same raw remaining, but peak → effective 0.25
+	if got := firstProvider(p, "m"); got != "plain" {
+		t.Errorf("first=%q, want plain (peak provider's effective remaining is discounted)", got)
+	}
+}
+
+// TestSchedule_SwitchesOnPriorityAfterDwell: after dwell, with quota equal
+// (sub-margin), the best provider wins on priority — the "return to the
+// preferred provider" branch (proxy.go keepSticky priority arm).
+func TestSchedule_SwitchesOnPriorityAfterDwell(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{"a": {}, "b": {}},
+		map[string][]RouteTarget{"m": {
+			{Provider: "a", Priority: 1},
+			{Provider: "b", Priority: 2},
+		}})
+	p.cfg.Scheduling.StickyDwell = "1ms"
+	staticQuota(p, "a", 0.5)
+	staticQuota(p, "b", 0.5) // equal remaining → sub-margin; priority decides
+	p.sticky["m"] = routeSticky{provider: "b", since: time.Now().Add(-time.Second)}
+	time.Sleep(2 * time.Millisecond) // dwell expired
+	if got := firstProvider(p, "m"); got != "a" {
+		t.Errorf("after dwell: first=%q, want a (better priority wins on sub-margin quota)", got)
+	}
+}
+
+// TestSchedule_PayGOrderByPriority: among multiple pay-as-you-go providers
+// (same tier, no quota data), priority orders them; the higher-priority one
+// serves, and the next serves when it's unavailable.
+func TestSchedule_PayGOrderByPriority(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{
+			"paygA": {Billing: "pay-as-you-go"},
+			"paygB": {Billing: "pay-as-you-go"},
+		},
+		map[string][]RouteTarget{"m": {
+			{Provider: "paygA", Priority: 1},
+			{Provider: "paygB", Priority: 2},
+		}})
+	if got := firstProvider(p, "m"); got != "paygA" {
+		t.Errorf("first=%q, want paygA (priority 1 within payg tier)", got)
+	}
+	p.healthMu.Lock()
+	p.health["paygA"] = &providerHealth{rateLimitedUntil: time.Now().Add(time.Hour)}
+	p.healthMu.Unlock()
+	if got := firstProvider(p, "m"); got != "paygB" {
+		t.Errorf("paygA unavailable: first=%q, want paygB", got)
+	}
+}

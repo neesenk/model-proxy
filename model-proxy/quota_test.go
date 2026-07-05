@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -135,11 +137,30 @@ func TestQuotaTracker_PersistAndLoad(t *testing.T) {
 	}
 }
 
-func TestQuotaTracker_StaleIsUnknown(t *testing.T) {
-	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"), func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
-	tr.setSnapshot("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now().Add(-30 * time.Minute)})
-	if c := tr.effectiveBilling("zhipu", 5*time.Minute); c != provider.BillingUnknown {
-		t.Errorf("stale snapshot billing=%v, want Unknown", c)
+func TestClassifyBilling(t *testing.T) {
+	fresh := &provider.QuotaSnapshot{Billing: provider.BillingPlan, AsOf: time.Now()}
+	stale := &provider.QuotaSnapshot{Billing: provider.BillingPlan, AsOf: time.Now().Add(-30 * time.Minute)}
+	errSnap := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Err: "boom", AsOf: time.Now()}
+	unknownSnap := &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: time.Now()}
+	cases := []struct {
+		name       string
+		snap       *provider.QuotaSnapshot
+		billingCfg string
+		want       provider.BillingClass
+	}{
+		{"fresh plan", fresh, "", provider.BillingPlan},
+		{"stale→unknown", stale, "", provider.BillingUnknown},
+		{"err→unknown", errSnap, "", provider.BillingUnknown},
+		{"nil→unknown", nil, "", provider.BillingUnknown},
+		{"unknown-snap→unknown", unknownSnap, "", provider.BillingUnknown},
+		{"payg override", fresh, "pay-as-you-go", provider.BillingPayG},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyBilling(tc.snap, tc.billingCfg, 5*time.Minute); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -169,4 +190,56 @@ func (s *snapshotProv) Usage() (any, error)                                    {
 func (s *snapshotProv) FetchModels() ([]string, error)                         { return nil, nil }
 func (s *snapshotProv) Quota() (*provider.QuotaSnapshot, error) {
 	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: s.rem, AsOf: time.Now()}, nil
+}
+
+// quotaCallProv wraps snapshotProv, counting Quota() calls (with an optional
+// delay so concurrent refreshOne calls overlap and hit the in-flight guard).
+type quotaCallProv struct {
+	snapshotProv
+	calls *atomic.Int32
+	delay time.Duration
+}
+
+func (q *quotaCallProv) Quota() (*provider.QuotaSnapshot, error) {
+	q.calls.Add(1)
+	if q.delay > 0 {
+		time.Sleep(q.delay)
+	}
+	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now()}, nil
+}
+
+// TestQuotaTracker_RefreshOneCoalescesConcurrent: many concurrent refreshOne
+// calls for one provider collapse to a single Quota() call (in-flight guard).
+func TestQuotaTracker_RefreshOneCoalescesConcurrent(t *testing.T) {
+	var calls atomic.Int32
+	prov := &quotaCallProv{calls: &calls, delay: 30 * time.Millisecond}
+	cfg := &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}}
+	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
+		func() *Config { return cfg },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); tr.refreshOne("x") }()
+	}
+	wg.Wait()
+	if got := calls.Load(); got > 2 {
+		t.Errorf("concurrent refreshOne: Quota() called %d times, want ≤ 2 (coalesced)", got)
+	}
+}
+
+// TestQuotaTracker_RefreshOneDebouncesSequential: a second refreshOne within
+// pollInterval/2 of the first is dropped (debounce).
+func TestQuotaTracker_RefreshOneDebouncesSequential(t *testing.T) {
+	var calls atomic.Int32
+	prov := &quotaCallProv{calls: &calls} // pollInterval default 5m → half 2.5m
+	cfg := &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}}
+	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
+		func() *Config { return cfg },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
+	tr.refreshOne("x") // calls=1, sets last
+	tr.refreshOne("x") // within 2.5m → debounced
+	if got := calls.Load(); got != 1 {
+		t.Errorf("sequential refreshOne: Quota() called %d times, want 1 (debounced)", got)
+	}
 }

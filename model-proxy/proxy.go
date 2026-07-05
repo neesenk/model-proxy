@@ -558,17 +558,7 @@ func (p *Proxy) schedule(cfg *Config, exposed string, targets []RouteTarget) []R
 // guard and the pay-as-you-go config override. A snapshot older than 3× the poll
 // interval, or one carrying an error, is treated as Unknown.
 func (p *Proxy) billingClass(cfg *Config, name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
-	if cfg.Providers[name].Billing == "pay-as-you-go" {
-		return provider.BillingPayG
-	}
-	s := qs[name]
-	if s == nil || s.Billing == provider.BillingUnknown || s.Err != "" {
-		return provider.BillingUnknown
-	}
-	if time.Since(s.AsOf) > 3*cfg.Scheduling.pollInterval() {
-		return provider.BillingUnknown
-	}
-	return s.Billing
+	return classifyBilling(qs[name], cfg.Providers[name].Billing, cfg.Scheduling.pollInterval())
 }
 
 // effectiveRemaining discounts remaining quota by the active peak multiplier.

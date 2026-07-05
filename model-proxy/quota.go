@@ -25,15 +25,26 @@ type quotaTracker struct {
 	// refreshHook, if set, replaces refreshOne's real poll — used by tests to
 	// observe refreshes without hitting a network. If nil, the real poll runs.
 	refreshHook func(name string)
+	// refreshGuard dedupes 429-triggered refreshes per provider (inFlight
+	// coalesces concurrent ones; last debounces ones that just ran), so a 429
+	// storm doesn't fire N upstream Quota() calls + N persists. Guarded by mu.
+	refreshGuard map[string]*refreshState
+}
+
+// refreshState tracks per-provider refresh dedup state (guarded by quotaTracker.mu).
+type refreshState struct {
+	last     time.Time
+	inFlight bool
 }
 
 func newQuotaTracker(path string, cfg func() *Config, provs func() map[string]provider.Provider) *quotaTracker {
 	return &quotaTracker{
-		state:  map[string]*provider.QuotaSnapshot{},
-		path:   path,
-		cfg:    cfg,
-		provs:  provs,
-		stopCh: make(chan struct{}),
+		state:        map[string]*provider.QuotaSnapshot{},
+		refreshGuard: map[string]*refreshState{},
+		path:         path,
+		cfg:          cfg,
+		provs:        provs,
+		stopCh:       make(chan struct{}),
 	}
 }
 
@@ -60,8 +71,11 @@ func (t *quotaTracker) stop() { t.stopOnce.Do(func() { close(t.stopCh) }) }
 
 func (t *quotaTracker) pollAfter(d time.Duration) {
 	go func() {
-		time.Sleep(d)
-		t.pollAll(time.Now())
+		select {
+		case <-time.After(d):
+			t.pollAll(time.Now())
+		case <-t.stopCh:
+		}
 	}()
 }
 
@@ -71,7 +85,6 @@ func (t *quotaTracker) pollAll(now time.Time) {
 	cfg := t.cfg()
 	provs := t.provs()
 	var wg sync.WaitGroup
-	var mu sync.Mutex
 	names := make([]string, 0, len(cfg.Providers))
 	for name := range cfg.Providers {
 		names = append(names, name)
@@ -85,8 +98,6 @@ func (t *quotaTracker) pollAll(now time.Time) {
 		go func(n string, p provider.Provider) {
 			defer wg.Done()
 			s, err := p.Quota()
-			mu.Lock()
-			defer mu.Unlock()
 			if err != nil || s == nil {
 				s = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: now}
 				if err != nil {
@@ -94,7 +105,7 @@ func (t *quotaTracker) pollAll(now time.Time) {
 				}
 			}
 			s.AsOf = now
-			t.setSnapshot(n, s)
+			t.setSnapshot(n, s) // setSnapshot takes t.mu — no extra guard needed
 		}(name, provImpl)
 	}
 	wg.Wait()
@@ -102,27 +113,51 @@ func (t *quotaTracker) pollAll(now time.Time) {
 }
 
 // refreshOne re-polls a single provider (called after a 429). If a refreshHook
-// is installed it replaces the real poll (used by tests).
+// is installed it replaces the real poll (used by tests). Otherwise the call is
+// deduped: a concurrent refresh (inFlight) or one that ran less than
+// pollInterval/2 ago (last) is dropped, so a 429 storm doesn't fire N upstream
+// Quota() calls + N persists for the same provider.
 func (t *quotaTracker) refreshOne(name string) {
 	if t.refreshHook != nil {
 		t.refreshHook(name)
 		return
 	}
-	provs := t.provs()
-	p := provs[name]
-	if p == nil {
-		return
+	now := time.Now()
+	half := t.cfg().Scheduling.pollInterval() / 2
+	t.mu.Lock()
+	g := t.refreshGuard[name]
+	if g == nil {
+		g = &refreshState{}
+		t.refreshGuard[name] = g
 	}
-	s, err := p.Quota()
-	if err != nil || s == nil {
-		s = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: time.Now()}
-		if err != nil {
-			s.Err = err.Error()
+	if g.inFlight || now.Sub(g.last) < half {
+		t.mu.Unlock()
+		return // coalesced/debounced — a covering refresh already ran or is running
+	}
+	g.inFlight = true
+	t.mu.Unlock()
+
+	refreshed := false
+	if p := t.provs()[name]; p != nil {
+		s, err := p.Quota()
+		if err != nil || s == nil {
+			s = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: time.Now()}
+			if err != nil {
+				s.Err = err.Error()
+			}
 		}
+		s.AsOf = time.Now()
+		t.setSnapshot(name, s)
+		t.persist()
+		refreshed = true
 	}
-	s.AsOf = time.Now()
-	t.setSnapshot(name, s)
-	t.persist()
+
+	t.mu.Lock()
+	g.inFlight = false
+	if refreshed {
+		g.last = time.Now()
+	}
+	t.mu.Unlock()
 }
 
 func (t *quotaTracker) setSnapshot(name string, s *provider.QuotaSnapshot) {
@@ -147,18 +182,15 @@ func (t *quotaTracker) allSnapshots() map[string]*provider.QuotaSnapshot {
 	return out
 }
 
-// effectiveBilling applies the staleness guard: a snapshot older than 3× the poll
-// interval is treated as Unknown. Pay-as-you-go config intent is honored here too.
-func (t *quotaTracker) effectiveBilling(name string, interval time.Duration) provider.BillingClass {
-	cfg := t.cfg()
-	if cfg.Providers[name].Billing == "pay-as-you-go" {
+// classifyBilling applies the pay-as-you-go config override, the error guard,
+// and the staleness guard (a snapshot older than 3× the poll interval, or one
+// carrying an error, is treated as Unknown). Pure; shared by Proxy.billingClass
+// so the scheduling-tier logic lives in one place.
+func classifyBilling(s *provider.QuotaSnapshot, billingCfg string, interval time.Duration) provider.BillingClass {
+	if billingCfg == "pay-as-you-go" {
 		return provider.BillingPayG
 	}
-	s := t.snapshot(name)
-	if s == nil {
-		return provider.BillingUnknown
-	}
-	if s.Billing == provider.BillingUnknown || s.Err != "" {
+	if s == nil || s.Billing == provider.BillingUnknown || s.Err != "" {
 		return provider.BillingUnknown
 	}
 	if time.Since(s.AsOf) > 3*interval {
