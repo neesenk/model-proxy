@@ -120,7 +120,17 @@ func NewProxy(cfg *Config) *Proxy {
 	p.quota = newQuotaTracker(qpath,
 		func() *Config { return p.cfgSnapshot() },
 		func() map[string]provider.Provider { return p.providerSnapshot() })
+	p.quota.stickySnapshot = p.snapshotSticky
 	p.quota.start()
+	// Restore the per-route sticky selections persisted before the last restart,
+	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
+	if loaded := p.quota.LoadedSticky; len(loaded) > 0 {
+		p.healthMu.Lock()
+		for k, v := range loaded {
+			p.sticky[k] = v
+		}
+		p.healthMu.Unlock()
+	}
 	return p
 }
 
@@ -137,6 +147,18 @@ func (p *Proxy) providerSnapshot() map[string]provider.Provider {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.providers
+}
+
+// snapshotSticky returns a copy of the per-route sticky map under healthMu, for
+// persistence by the quota tracker (restored on boot — see NewProxy).
+func (p *Proxy) snapshotSticky() map[string]routeSticky {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	out := make(map[string]routeSticky, len(p.sticky))
+	for k, v := range p.sticky {
+		out[k] = v
+	}
+	return out
 }
 
 func (p *Proxy) reload(configPath string) error {
@@ -173,12 +195,117 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 		p.serveModels(w, r)
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/debug/schedule" {
+		w.Header().Set("content-type", "application/json")
+		w.Write(p.scheduleStatus())
+		return
+	}
 	proto := protocolForPath(r.URL.Path)
 	if proto == "" {
 		http.Error(w, fmt.Sprintf("no route for path %s", r.URL.Path), http.StatusBadGateway)
 		return
 	}
 	p.forward(proto, w, r)
+}
+
+// scheduleStatus builds a read-only JSON snapshot of what each route would
+// schedule right now: the first-choice provider, the full ordered list (with
+// tier/surplus/availability/peak per provider), and the current sticky selection
+// (+ dwell remaining). Used by the /debug/schedule endpoint. It does NOT mutate
+// sticky — it peeks via decideOrder.
+func (p *Proxy) scheduleStatus() []byte {
+	now := time.Now()
+	p.mu.RLock()
+	cfg := p.cfg
+	provs := p.providers
+	p.mu.RUnlock()
+	qs := p.quota.allSnapshots()
+
+	// Snapshot health + sticky once (per-provider info + sticky display).
+	p.healthMu.Lock()
+	healthCopy := make(map[string]providerHealth, len(p.health))
+	for k, v := range p.health {
+		healthCopy[k] = *v
+	}
+	stickyCopy := make(map[string]routeSticky, len(p.sticky))
+	for k, v := range p.sticky {
+		stickyCopy[k] = v
+	}
+	p.healthMu.Unlock()
+
+	avail := func(name string) bool {
+		h := healthCopy[name]
+		return h.available(now)
+	}
+	surplusOf := func(name string) float64 {
+		peakMult := cfg.Providers[name].peakMultiplier(now)
+		if peakMult < 1 {
+			peakMult = 1
+		}
+		snap := qs[name]
+		if impl := provs[name]; impl != nil {
+			return impl.Surplus(snap, now, peakMult)
+		}
+		if snap == nil {
+			return 0
+		}
+		return snap.Surplus(now, peakMult)
+	}
+
+	type provInfo struct {
+		Provider  string  `json:"provider"`
+		Priority  int     `json:"priority"`
+		Tier      string  `json:"tier"`
+		Surplus   float64 `json:"surplus"`
+		Available bool    `json:"available"`
+		Peak      bool    `json:"peak"`
+	}
+	type routeInfo struct {
+		First    string     `json:"first"`
+		Ordered  []provInfo `json:"ordered"`
+		Sticky   string     `json:"sticky,omitempty"`
+		DwellRem float64    `json:"sticky_dwell_remaining_sec,omitempty"`
+	}
+
+	models := map[string]routeInfo{}
+	for exposed, targets := range cfg.Routes {
+		ordered, _ := p.decideOrder(cfg, provs, exposed, targets, now)
+		ri := routeInfo{}
+		if len(ordered) > 0 {
+			ri.First = ordered[0].Provider
+		}
+		for _, t := range ordered {
+			ri.Ordered = append(ri.Ordered, provInfo{
+				Provider:  t.Provider,
+				Priority:  t.Priority,
+				Tier:      billingClassName(p.billingClass(cfg, t.Provider, qs)),
+				Surplus:   surplusOf(t.Provider),
+				Available: avail(t.Provider),
+				Peak:      cfg.Providers[t.Provider].peakMultiplier(now) > 1,
+			})
+		}
+		if cur := stickyCopy[exposed]; cur.provider != "" {
+			ri.Sticky = cur.provider
+			if rem := cfg.Scheduling.dwell() - now.Sub(cur.since); rem > 0 {
+				ri.DwellRem = rem.Seconds()
+			}
+		}
+		models[exposed] = ri
+	}
+	out, _ := json.Marshal(map[string]any{"models": models})
+	return out
+}
+
+// billingClassName renders a BillingClass for the /debug/schedule + doctor output.
+func billingClassName(b provider.BillingClass) string {
+	switch b {
+	case provider.BillingPlan:
+		return "plan"
+	case provider.BillingPayG:
+		return "pay-as-you-go"
+	default:
+		return "unknown"
+	}
 }
 
 // serveModels lists all exposed models (from routes) merged with provider
@@ -454,6 +581,20 @@ func tierRank(b provider.BillingClass) int {
 // then re-selects the best unless the best's only edge is a sub-margin surplus gain.
 func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, exposed string, targets []RouteTarget) []RouteTarget {
 	now := time.Now()
+	ordered, stickyToSet := p.decideOrder(cfg, provs, exposed, targets, now)
+	if stickyToSet != "" {
+		p.healthMu.Lock()
+		p.sticky[exposed] = routeSticky{provider: stickyToSet, since: now}
+		p.healthMu.Unlock()
+	}
+	return ordered
+}
+
+// decideOrder computes the try-order for targets and the provider to park sticky
+// on ("" = leave the current sticky untouched), WITHOUT mutating p.sticky.
+// schedule() commits the sticky; scheduleStatus() (the /debug/schedule endpoint)
+// uses this for a read-only peek.
+func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exposed string, targets []RouteTarget, now time.Time) (ordered []RouteTarget, stickyToSet string) {
 	sched := cfg.Scheduling
 	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
 	// or while taking healthMu below.
@@ -491,8 +632,7 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, expose
 	}
 
 	sort.SliceStable(availTargets, func(i, j int) bool {
-		bi, bj := billingOf(availTargets[i].Provider), billingOf(availTargets[j].Provider)
-		ri, rj := tierRank(bi), tierRank(bj)
+		ri, rj := tierRank(billingOf(availTargets[i].Provider)), tierRank(billingOf(availTargets[j].Provider))
 		if ri != rj {
 			return ri < rj
 		}
@@ -528,8 +668,7 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, expose
 			if best.Provider == cur.provider {
 				keepSticky = true // current is already the best
 			} else {
-				bb, cb := billingOf(best.Provider), billingOf(cur.provider)
-				rb, rc := tierRank(bb), tierRank(cb)
+				rb, rc := tierRank(billingOf(best.Provider)), tierRank(billingOf(cur.provider))
 				switch {
 				case rb < rc:
 					keepSticky = false // best has a better billing tier
@@ -546,9 +685,8 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, expose
 		}
 	}
 
-	var ordered []RouteTarget
 	if keepSticky {
-		p.sticky[exposed] = cur
+		// leave p.sticky untouched (stickyToSet stays "" = keep current)
 		for _, t := range availTargets {
 			if t.Provider == cur.provider {
 				ordered = append(ordered, t)
@@ -556,7 +694,7 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, expose
 			}
 		}
 	} else if len(availTargets) > 0 {
-		p.sticky[exposed] = routeSticky{provider: availTargets[0].Provider, since: now}
+		stickyToSet = availTargets[0].Provider
 	}
 	for _, t := range availTargets {
 		if len(ordered) > 0 && t.Provider == ordered[0].Provider {
@@ -564,7 +702,7 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, expose
 		}
 		ordered = append(ordered, t)
 	}
-	return ordered
+	return ordered, stickyToSet
 }
 
 // billingClass returns the effective scheduling tier, applying the staleness

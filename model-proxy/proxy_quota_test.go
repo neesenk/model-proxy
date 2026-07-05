@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -276,5 +278,72 @@ func TestSchedule_PayGOrderByPriority(t *testing.T) {
 	p.healthMu.Unlock()
 	if got := firstProvider(p, "m"); got != "paygB" {
 		t.Errorf("paygA unavailable: first=%q, want paygB", got)
+	}
+}
+
+// TestScheduleStatus: the /debug/schedule payload reports the first-choice
+// provider + ordered list with tiers, read-only (no sticky mutation).
+func TestScheduleStatus(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{"a": {}, "b": {}},
+		map[string][]RouteTarget{"m": {{Provider: "a", Priority: 1}, {Provider: "b", Priority: 2}}})
+	staticSurplus(p, "a", 0.5, 0)   // surplus +0.5 (waste risk)
+	staticSurplus(p, "b", 0.5, 0.5) // surplus 0
+	var st struct {
+		Models map[string]struct {
+			First   string `json:"first"`
+			Ordered []struct {
+				Provider string `json:"provider"`
+				Tier     string `json:"tier"`
+			} `json:"ordered"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := st.Models["m"]
+	if !ok {
+		t.Fatal("no model m in status")
+	}
+	if m.First != "a" {
+		t.Errorf("first=%q, want a (higher surplus)", m.First)
+	}
+	if len(m.Ordered) != 2 || m.Ordered[0].Provider != "a" || m.Ordered[1].Provider != "b" {
+		t.Errorf("ordered=%+v, want [a, b]", m.Ordered)
+	}
+	if m.Ordered[0].Tier != "plan" {
+		t.Errorf("tier=%q, want plan", m.Ordered[0].Tier)
+	}
+}
+
+// TestDryRunOrder: offline order is tier (plan before payg) then priority asc.
+func TestDryRunOrder(t *testing.T) {
+	cfg := &Config{Providers: map[string]Provider{
+		"plana": {}, "planb": {}, "payg": {Billing: "pay-as-you-go"},
+	}}
+	targets := []RouteTarget{
+		{Provider: "payg", Priority: 1},
+		{Provider: "planb", Priority: 3},
+		{Provider: "plana", Priority: 2},
+	}
+	got := dryRunOrder(cfg, targets)
+	want := []string{"plana", "planb", "payg"}
+	for i, w := range want {
+		if i >= len(got) || got[i].Provider != w {
+			t.Errorf("pos %d: got %+v, want %q", i, got, w)
+		}
+	}
+}
+
+func TestPeakSummary(t *testing.T) {
+	if got := peakSummary(nil); got != "-" {
+		t.Errorf("empty peakSummary=%q, want -", got)
+	}
+	got := peakSummary(PeakConfig{{Window: "09:00-12:00", Multiplier: 2}})
+	if !strings.Contains(got, "09:00-12:00") || !strings.Contains(got, "×2") {
+		t.Errorf("peakSummary=%q, want window + mult", got)
+	}
+	if got := peakSummary(PeakConfig{{Window: "09:00-12:00"}}); !strings.Contains(got, "×2") {
+		t.Errorf("default multiplier: %q, want ×2", got)
 	}
 }

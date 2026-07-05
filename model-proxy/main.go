@@ -36,6 +36,8 @@ Commands:
   config init          Generate a config.yaml template
   config print         Print the effective config
   config check         Validate config and print a summary
+  schedule             Show current per-model provider (queries the running daemon)
+  doctor               Offline scheduling diagnostic (config only, no daemon)
   help                 Print this message
 
 Options:
@@ -109,6 +111,19 @@ Subcommands:
   init      Generate a config.yaml template in the current directory.
   print     Print the effective config.
   check     Validate the config and print a summary.`,
+
+	"schedule": `schedule [--config PATH]
+
+  Query the running daemon's /debug/schedule endpoint and print which provider
+  each model is currently scheduled to (first-choice + ordered list + sticky
+  state). The daemon (` + "`model-proxy serve`" + `) must be running.`,
+
+	"doctor": `doctor [--config PATH]
+
+  Offline scheduling diagnostic from config alone (no daemon needed): per-provider
+  tier/quota source/peak_hours, per-route dry-run order (no live quota → tier then
+  priority), and warnings (route with no plan provider, plan provider that will be
+  unknown at runtime).`,
 }
 
 func main() {
@@ -151,6 +166,10 @@ func main() {
 		cmdModels(os.Args[2:])
 	case "config":
 		cmdConfig(os.Args[2:])
+	case "schedule":
+		cmdSchedule(os.Args[2:])
+	case "doctor":
+		cmdDoctor(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		fmt.Print(usage)
@@ -1297,6 +1316,200 @@ func cmdConfig(args []string) {
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
 		os.Exit(1)
 	}
+}
+
+// cmdSchedule queries the running daemon's /debug/schedule endpoint and prints
+// which provider each model is currently scheduled to (first-choice + ordered
+// list + sticky state). The daemon (`model-proxy serve`) must be running.
+func cmdSchedule(args []string) {
+	cfg, err := LoadConfig(configPath(args))
+	if err != nil {
+		log.Fatal(err)
+	}
+	resp, err := http.Get("http://" + cfg.Listen + "/debug/schedule")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n",
+			cRed("✗"), cfg.Listen, err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		fmt.Fprintf(os.Stderr, "%s daemon returned HTTP %d: %s\n", cRed("✗"), resp.StatusCode, truncate(string(body), 200))
+		os.Exit(1)
+	}
+	var st struct {
+		Models map[string]struct {
+			First   string `json:"first"`
+			Ordered []struct {
+				Provider  string  `json:"provider"`
+				Priority  int     `json:"priority"`
+				Tier      string  `json:"tier"`
+				Surplus   float64 `json:"surplus"`
+				Available bool    `json:"available"`
+				Peak      bool    `json:"peak"`
+			} `json:"ordered"`
+			Sticky   string  `json:"sticky"`
+			DwellRem float64 `json:"sticky_dwell_remaining_sec"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &st); err != nil {
+		fmt.Fprintf(os.Stderr, "%s parse schedule response: %v\n", cRed("✗"), err)
+		os.Exit(1)
+	}
+	names := make([]string, 0, len(st.Models))
+	for n := range st.Models {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		fmt.Println("(no routes)")
+		return
+	}
+	for _, m := range names {
+		ri := st.Models[m]
+		fmt.Printf("%s → %s\n", cBold(m), cGreen(ri.First))
+		for _, t := range ri.Ordered {
+			extra := ""
+			if !t.Available {
+				extra += " " + cRed("(unavailable)")
+			}
+			if t.Peak {
+				extra += " " + cYellow("peak")
+			}
+			fmt.Printf("    %s %s  surplus %+.2f  p%d%s\n", pad(t.Provider, 14), cGray(pad(t.Tier, 13)), t.Surplus, t.Priority, extra)
+		}
+		if ri.Sticky != "" {
+			dwell := ""
+			if ri.DwellRem > 0 {
+				dwell = fmt.Sprintf(", %.0fs dwell left", ri.DwellRem)
+			}
+			fmt.Printf("    %s%s%s\n", cDim("sticky: "), ri.Sticky, cDim(dwell))
+		}
+		fmt.Println()
+	}
+}
+
+// cmdDoctor runs an OFFLINE diagnostic of the scheduling setup from config (no
+// daemon needed): per-provider tier/quota source/peak_hours, per-route dry-run
+// order (no live quota → all unknown → tier then priority), and warnings.
+func cmdDoctor(args []string) {
+	cfg, err := LoadConfig(configPath(args))
+	if err != nil {
+		fmt.Println(cRed("✗ config invalid: ") + err.Error())
+		os.Exit(1)
+	}
+	fmt.Println(cGreen("✓ config valid"))
+
+	fmt.Printf("\n%s\n", cBold("Providers"))
+	pnames := make([]string, 0, len(cfg.Providers))
+	for n := range cfg.Providers {
+		pnames = append(pnames, n)
+	}
+	sort.Strings(pnames)
+	for _, name := range pnames {
+		prov := cfg.Providers[name]
+		tier := "plan"
+		if prov.Billing == "pay-as-you-go" {
+			tier = "pay-as-you-go"
+		}
+		fmt.Printf("  %s %s  quota=%s  peak=%s\n",
+			pad(name, 12), cCyan(pad(tier, 13)), cGray(quotaSourceLabel(prov.Provider)), peakSummary(prov.PeakHours))
+	}
+
+	fmt.Printf("\n%s\n", cBold("Routes (dry-run: no live quota → tier then priority)"))
+	warns := 0
+	rnames := make([]string, 0, len(cfg.Routes))
+	for n := range cfg.Routes {
+		rnames = append(rnames, n)
+	}
+	sort.Strings(rnames)
+	for _, exposed := range rnames {
+		targets := cfg.Routes[exposed]
+		fmt.Printf("  %s\n", exposed)
+		hasPlan := false
+		for _, t := range dryRunOrder(cfg, targets) {
+			prov := cfg.Providers[t.Provider]
+			tier := "plan"
+			if prov.Billing == "pay-as-you-go" {
+				tier = "pay-as-you-go"
+			}
+			if tier == "plan" {
+				hasPlan = true
+			}
+			fmt.Printf("    %s %s  p%d\n", pad(t.Provider, 12), cCyan(pad(tier, 13)), t.Priority)
+		}
+		if !hasPlan {
+			fmt.Printf("    %s no plan provider — only pay-as-you-go\n", cYellow("⚠"))
+			warns++
+		}
+	}
+
+	s := cfg.Scheduling
+	fmt.Printf("\n%s\n", cBold("Scheduling"))
+	fmt.Printf("  sticky_dwell=%s  quota_poll_interval=%s  quota_switch_margin=%d pts  circuit=(threshold %d, cooldown %s)\n",
+		s.dwell(), s.pollInterval(), s.QuotaSwitchMargin, s.threshold(), s.cooldown())
+	if warns > 0 {
+		fmt.Printf("\n%s %d warning(s)\n", cYellow("⚠"), warns)
+	} else {
+		fmt.Printf("\n%s no warnings\n", cGreen("✓"))
+	}
+}
+
+// quotaSourceLabel returns a short label for where a provider's quota comes from
+// (by provider_id), or "(none → unknown at runtime)" for ids without a Quota parser.
+func quotaSourceLabel(providerID string) string {
+	switch providerID {
+	case "compass":
+		return "monthly_usage"
+	case "codex":
+		return "wham/usage"
+	case "zhipu":
+		return "quota/limit"
+	case "volcengine":
+		return "GetAFPUsage (AK/SK)"
+	case "deepseek":
+		return "user/balance"
+	default:
+		return "(none → unknown at runtime)"
+	}
+}
+
+// peakSummary renders a PeakConfig as "09:00-12:00(×2), 14:00-18:00(×2)" or "-".
+func peakSummary(ph PeakConfig) string {
+	if len(ph) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(ph))
+	for _, seg := range ph {
+		mult := seg.Multiplier
+		if mult == 0 {
+			mult = defaultPeakMultiplier
+		}
+		parts = append(parts, fmt.Sprintf("%s(×%g)", seg.Window, mult))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// dryRunOrder sorts targets by the offline schedule order: billing tier (plan
+// before pay-as-you-go), then priority asc. With no live quota all plan-intent
+// providers are equal-surplus, so tier + priority decide.
+func dryRunOrder(cfg *Config, targets []RouteTarget) []RouteTarget {
+	out := append([]RouteTarget(nil), targets...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ti, tj := 0, 0
+		if cfg.Providers[out[i].Provider].Billing == "pay-as-you-go" {
+			ti = 1
+		}
+		if cfg.Providers[out[j].Provider].Billing == "pay-as-you-go" {
+			tj = 1
+		}
+		if ti != tj {
+			return ti < tj
+		}
+		return out[i].Priority < out[j].Priority
+	})
+	return out
 }
 
 // positional returns the first non-flag positional arg (skipping --config xxx).

@@ -29,6 +29,13 @@ type quotaTracker struct {
 	// coalesces concurrent ones; last debounces ones that just ran), so a 429
 	// storm doesn't fire N upstream Quota() calls + N persists. Guarded by mu.
 	refreshGuard map[string]*refreshState
+	// stickySnapshot, if set, returns the current per-route sticky map for
+	// persistence — restored on boot so the proxy resumes parking on the same
+	// providers (prompt-cache-friendly across restarts, and gives visibility into
+	// the previous selection).
+	stickySnapshot func() map[string]routeSticky
+	// LoadedSticky is populated by load() on boot; NewProxy applies it to p.sticky.
+	LoadedSticky map[string]routeSticky
 }
 
 // refreshState tracks per-provider refresh dedup state (guarded by quotaTracker.mu).
@@ -207,6 +214,11 @@ type persistedSnapshot struct {
 	Err          string                 `json:"err,omitempty"`
 }
 
+type persistedSticky struct {
+	Provider string    `json:"provider"`
+	Since    time.Time `json:"since"`
+}
+
 func (t *quotaTracker) persist() {
 	t.mu.RLock()
 	out := make(map[string]persistedSnapshot, len(t.state))
@@ -217,7 +229,16 @@ func (t *quotaTracker) persist() {
 		}
 	}
 	t.mu.RUnlock()
-	data, err := json.MarshalIndent(map[string]any{"providers": out}, "", "  ")
+	wrap := map[string]any{"providers": out}
+	if t.stickySnapshot != nil {
+		sm := t.stickySnapshot()
+		sticky := make(map[string]persistedSticky, len(sm))
+		for k, v := range sm {
+			sticky[k] = persistedSticky{Provider: v.provider, Since: v.since}
+		}
+		wrap["sticky"] = sticky
+	}
+	data, err := json.MarshalIndent(wrap, "", "  ")
 	if err != nil {
 		return
 	}
@@ -240,6 +261,7 @@ func (t *quotaTracker) load() {
 	}
 	var wrap struct {
 		Providers map[string]persistedSnapshot `json:"providers"`
+		Sticky    map[string]persistedSticky   `json:"sticky"`
 	}
 	if err := json.Unmarshal(data, &wrap); err != nil {
 		return
@@ -251,5 +273,9 @@ func (t *quotaTracker) load() {
 			Billing: v.Billing, RemainingPct: v.RemainingPct,
 			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
 		}
+	}
+	t.LoadedSticky = make(map[string]routeSticky, len(wrap.Sticky))
+	for k, v := range wrap.Sticky {
+		t.LoadedSticky[k] = routeSticky{provider: v.Provider, since: v.Since}
 	}
 }

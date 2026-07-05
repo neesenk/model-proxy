@@ -246,3 +246,23 @@ func TestQuotaTracker_RefreshOneDebouncesSequential(t *testing.T) {
 		t.Errorf("sequential refreshOne: Quota() called %d times, want 1 (debounced)", got)
 	}
 }
+
+// TestQuotaTracker_StickyPersistLoad: persist() writes the sticky map (via
+// stickySnapshot) and load() restores it into LoadedSticky — so the proxy
+// resumes parking on the same providers after a restart.
+func TestQuotaTracker_StickyPersistLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "quota_state.json")
+	tr := newQuotaTracker(path, func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
+	since := time.Unix(123, 0)
+	tr.stickySnapshot = func() map[string]routeSticky {
+		return map[string]routeSticky{"glm-5.2": {provider: "zhipu", since: since}}
+	}
+	tr.persist()
+
+	tr2 := newQuotaTracker(path, func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
+	tr2.load()
+	got := tr2.LoadedSticky["glm-5.2"]
+	if got.provider != "zhipu" || !got.since.Equal(since) {
+		t.Fatalf("sticky not restored: %+v", got)
+	}
+}
