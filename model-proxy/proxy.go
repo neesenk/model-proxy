@@ -428,14 +428,18 @@ func (p *Proxy) tryTarget(proto, calledModel string, t RouteTarget, prov Provide
 	return false
 }
 
-// schedule returns targets in try-order: the route's sticky provider first if
-// it's available and within its sticky_dwell window, then the remaining available
-// targets by (non-peak, priority). Providers with an open circuit or active
-// rate-limit are skipped. When the sticky provider is unavailable or its dwell
-// has expired, the best available target becomes the new sticky (dwell resets).
+// schedule returns targets in try-order using quota-aware ranking:
+//   tier: plan < unknown < payg (pay-as-you-go is strict last-resort)
+//   within tier: effective_remaining desc (peak-discounted), then priority asc.
+// Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
+// then re-selects the best unless the best's only edge is a sub-margin quota gain.
 func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
 	now := time.Now()
 	sched := p.cfg.Scheduling
+	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
+	// or while taking healthMu below.
+	qs := p.quota.allSnapshots()
+
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
 
@@ -444,27 +448,73 @@ func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
 		return h == nil || h.available(now)
 	}
 
-	// Available targets, sorted by (non-peak, priority), stable for ties.
 	var availTargets []RouteTarget
 	for _, t := range targets {
 		if avail(t.Provider) {
 			availTargets = append(availTargets, t)
 		}
 	}
+
+	billingOf := func(name string) provider.BillingClass { return p.billingClass(name, qs) }
+	effOf := func(name string) float64 { return p.effectiveRemaining(name, qs, now) }
+
 	sort.SliceStable(availTargets, func(i, j int) bool {
-		ei := availTargets[i].inPeak(p.cfg.Providers, now)
-		ej := availTargets[j].inPeak(p.cfg.Providers, now)
-		if ei != ej {
-			return !ei // non-peak first
+		bi, bj := billingOf(availTargets[i].Provider), billingOf(availTargets[j].Provider)
+		if bi != bj {
+			return bi < bj
+		}
+		ri, rj := effOf(availTargets[i].Provider), effOf(availTargets[j].Provider)
+		if ri != rj {
+			return ri > rj
 		}
 		return availTargets[i].Priority < availTargets[j].Priority
 	})
 
+	margin := sched.switchMargin()
 	cur := p.sticky[exposed]
-	stickyActive := cur.provider != "" && avail(cur.provider) && now.Sub(cur.since) < sched.dwell()
+
+	// Find cur's priority + whether it's still in the available set.
+	curPrio := 0
+	curInAvail := false
+	for _, t := range availTargets {
+		if t.Provider == cur.provider {
+			curInAvail = true
+			curPrio = t.Priority
+			break
+		}
+	}
+
+	keepSticky := false
+	if cur.provider != "" && curInAvail {
+		if now.Sub(cur.since) < sched.dwell() {
+			keepSticky = true // within dwell: preserve cache
+		} else if len(availTargets) == 0 {
+			keepSticky = true
+		} else {
+			best := availTargets[0]
+			if best.Provider == cur.provider {
+				keepSticky = true // current is already the best
+			} else {
+				bb, cb := billingOf(best.Provider), billingOf(cur.provider)
+				switch {
+				case bb < cb:
+					keepSticky = false // best has a better billing tier
+				case bb > cb:
+					keepSticky = true // current has a better tier
+				case effOf(best.Provider)-effOf(cur.provider) >= margin:
+					keepSticky = false // best ahead by quota margin (quota wins over priority)
+				case best.Priority < curPrio:
+					keepSticky = false // quota ~equal; best has better priority → return to preferred
+				default:
+					keepSticky = true // same tier, sub-margin quota edge, priority not better → preserve cache
+				}
+			}
+		}
+	}
 
 	var ordered []RouteTarget
-	if stickyActive {
+	if keepSticky {
+		p.sticky[exposed] = cur
 		for _, t := range availTargets {
 			if t.Provider == cur.provider {
 				ordered = append(ordered, t)
@@ -472,9 +522,6 @@ func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
 			}
 		}
 	} else if len(availTargets) > 0 {
-		// Re-select: best available becomes the new sticky. Note: availTargets is
-		// already filtered by availability (circuit/rate-limit) and sorted by
-		// (non-peak, priority), so the sticky candidate is peak-aware.
 		p.sticky[exposed] = routeSticky{provider: availTargets[0].Provider, since: now}
 	}
 	for _, t := range availTargets {
@@ -484,6 +531,42 @@ func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
 		ordered = append(ordered, t)
 	}
 	return ordered
+}
+
+// billingClass returns the effective scheduling tier, applying the staleness
+// guard and the pay-as-you-go config override. A snapshot older than 3× the poll
+// interval, or one carrying an error, is treated as Unknown.
+func (p *Proxy) billingClass(name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
+	if p.cfg.Providers[name].Billing == "pay-as-you-go" {
+		return provider.BillingPayG
+	}
+	s := qs[name]
+	if s == nil || s.Billing == provider.BillingUnknown || s.Err != "" {
+		return provider.BillingUnknown
+	}
+	if time.Since(s.AsOf) > 3*p.cfg.Scheduling.pollInterval() {
+		return provider.BillingUnknown
+	}
+	return s.Billing
+}
+
+// effectiveRemaining discounts remaining quota by the active peak multiplier.
+// Only meaningful for plan providers; a nil / unknown-billing / unmeasured
+// snapshot yields the neutral value 1.0 (still peak-discounted, so a peak
+// provider with no quota data is deprioritized relative to a non-peak one —
+// peak describes consumption rate, which applies regardless of whether we
+// know the exact quota). This keeps priority as the tiebreak among equally
+// unknown providers, matching the old inPeak+priority ordering.
+func (p *Proxy) effectiveRemaining(name string, qs map[string]*provider.QuotaSnapshot, now time.Time) float64 {
+	mult := p.cfg.Providers[name].peakMultiplier(now)
+	if mult < 1 {
+		mult = 1
+	}
+	s := qs[name]
+	if s == nil || s.Billing == provider.BillingUnknown || s.RemainingPct < 0 {
+		return 1.0 / mult
+	}
+	return s.RemainingPct / mult
 }
 
 // available reports whether a provider may be tried: not rate-limited, and
@@ -608,16 +691,6 @@ func (p *Proxy) parseRateLimit(resp *http.Response, now time.Time, sched Schedul
 		}
 	}
 	return now.Add(sched.rateBackoff())
-}
-
-// inPeak reports whether this target's provider is currently in its peak_hours
-// window (so the target is deprioritized to the peak group).
-func (t RouteTarget) inPeak(providers map[string]Provider, now time.Time) bool {
-	p, ok := providers[t.Provider]
-	if !ok {
-		return false
-	}
-	return p.inPeak(now)
 }
 
 func parseHHMMRange(s string) (start, end int, ok bool) {

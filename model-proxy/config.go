@@ -166,9 +166,6 @@ func (p Provider) peakMultiplier(now time.Time) float64 {
 	return 1.0
 }
 
-// inPeak reports whether the provider is currently in any peak segment.
-func (p Provider) inPeak(now time.Time) bool { return p.peakMultiplier(now) > 1.0 }
-
 const defaultPeakMultiplier = 2.0
 
 type ProviderModel struct {
