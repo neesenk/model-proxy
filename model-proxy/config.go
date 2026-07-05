@@ -25,13 +25,13 @@ type Config struct {
 // sticky routing. Durations are parsed from strings (e.g. "10m", "60s") via
 // time.ParseDuration; unset/invalid values fall back to the defaults shown below.
 type Scheduling struct {
-	CircuitThreshold int    `yaml:"circuit_threshold"`  // consecutive failures → open circuit (default 3)
-	CircuitCooldown  string `yaml:"circuit_cooldown"`   // circuit open duration, then half-open 1 probe (default 10m)
-	RateLimitBackoff string `yaml:"rate_limit_backoff"` // 429 with no Retry-After: skip this long, then probe (default 60s)
-	UpstreamTimeout  string `yaml:"upstream_timeout"`   // per-upstream-request timeout (default 30s)
-	StickyDwell      string `yaml:"sticky_dwell"`       // min time on the chosen provider before re-evaluating (default 10m)
+	CircuitThreshold  int    `yaml:"circuit_threshold"`   // consecutive failures → open circuit (default 3)
+	CircuitCooldown   string `yaml:"circuit_cooldown"`    // circuit open duration, then half-open 1 probe (default 10m)
+	RateLimitBackoff  string `yaml:"rate_limit_backoff"`  // 429 with no Retry-After: skip this long, then probe (default 60s)
+	UpstreamTimeout   string `yaml:"upstream_timeout"`    // per-upstream-request timeout (default 30s)
+	StickyDwell       string `yaml:"sticky_dwell"`        // min time on the chosen provider before re-evaluating (default 10m)
 	QuotaPollInterval string `yaml:"quota_poll_interval"` // background poll cadence (default 5m)
-	QuotaSwitchMargin int    `yaml:"quota_switch_margin"`  // switch if another plan provider's effective remaining beats current by ≥ this many pct points (default 15)
+	QuotaSwitchMargin int    `yaml:"quota_switch_margin"` // switch if another plan provider's effective remaining beats current by ≥ this many pct points (default 15)
 }
 
 func (s Scheduling) threshold() int {
@@ -91,9 +91,10 @@ type Provider struct {
 	UsageURL         string                   `yaml:"usage_url"`
 	Models           map[string]ProviderModel `yaml:"models"`
 	// PeakHours is this provider's set of peak segments (each "HH:MM-HH:MM" in
-	// local time). Route scheduling tries non-peak providers first (by priority),
-	// then peak ones — so a provider in a peak window is deprioritized. The
-	// multiplier discounts effective remaining quota during that segment.
+	// local time). Peak is folded into effective remaining quota: the per-segment
+	// multiplier discounts a provider's remaining quota while it is inside a peak
+	// window, so a peak provider is deprioritized (scheduled later within its
+	// tier/quota band) rather than tried in a separate group.
 	PeakHours PeakConfig `yaml:"peak_hours"`
 	// Billing is "plan" (default, quota-bound) or "pay-as-you-go" (strict
 	// last-resort: used only when all plan providers are unavailable).
@@ -181,11 +182,12 @@ type ProviderModalities struct {
 
 // RouteTarget is one upstream destination for an exposed model name. A route maps
 // an exposed name to an ordered list of targets; the proxy picks one by scheduling
-// (non-peak providers first, then by priority) and fails over to the next on error.
+// (by tier/quota band, peak folded into effective remaining) and fails over to the
+// next on error.
 type RouteTarget struct {
 	Provider string `yaml:"provider"` // config providers[] key
 	Model    string `yaml:"model"`    // real model name at that provider
-	Priority int    `yaml:"priority"` // lower = tried first within a peak group (default 0)
+	Priority int    `yaml:"priority"` // lower = tried first within a tier/quota band (default 0)
 }
 
 type Takeover struct {

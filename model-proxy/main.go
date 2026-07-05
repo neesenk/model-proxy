@@ -466,8 +466,8 @@ func parseCodexQuota(body []byte, account, plan string) (*provider.QuotaSnapshot
 			Balance    *string `json:"balance"`
 		} `json:"credits"`
 		RateLimit *struct {
-			Allowed      bool `json:"allowed"`
-			LimitReached bool `json:"limit_reached"`
+			Allowed       bool `json:"allowed"`
+			LimitReached  bool `json:"limit_reached"`
 			PrimaryWindow *struct {
 				UsedPercent     int `json:"used_percent"`
 				LimitWindowSecs int `json:"limit_window_seconds"`
@@ -733,6 +733,9 @@ func showGenericUsage(cfg *Config, provName string, prov Provider) {
 	// Try Zhipu BigModel quota format (parseZhipuQuota); if not zhipu, fall
 	// through to the OpenAI model-list / raw-JSON fallback below.
 	if s, _ := parseZhipuQuota(body, ""); s != nil {
+		if s.Level != "" {
+			fmt.Printf("%s %s\n", cDim("Level:     "), cMagenta(s.Level))
+		}
 		printQuotaSnapshot(s)
 		return
 	}

@@ -443,8 +443,10 @@ func tierRank(b provider.BillingClass) int {
 }
 
 // schedule returns targets in try-order using quota-aware ranking:
-//   tier: plan < unknown < payg (pay-as-you-go is strict last-resort)
-//   within tier: effective_remaining desc (peak-discounted), then priority asc.
+//
+//	tier: plan < unknown < payg (pay-as-you-go is strict last-resort)
+//	within tier: effective_remaining desc (peak-discounted), then priority asc.
+//
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin quota gain.
 func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {

@@ -24,14 +24,14 @@ type QuotaDetail struct {
 
 // QuotaWindow is one normalized quota window (5h / weekly / monthly / spend / balance).
 type QuotaWindow struct {
-	Label        string        // "5h tokens", "Weekly tokens", "Monthly time", "Spend", "Balance"
-	Kind         string        // "tokens" | "time" | "money"
+	Label        string // "5h tokens", "Weekly tokens", "Monthly time", "Spend", "Balance"
+	Kind         string // "tokens" | "time" | "money"
 	Used         float64
 	Total        float64
-	RemainingPct float64       // 0..1; -1 if unmeasured (e.g. balance-only)
-	ResetsAt     time.Time     // zero if unknown
+	RemainingPct float64   // 0..1; -1 if unmeasured (e.g. balance-only)
+	ResetsAt     time.Time // zero if unknown
 	Details      []QuotaDetail
-	DetailLabel  string        // breakdown header for display ("By model", "By MCP tool"); "" omits
+	DetailLabel  string // breakdown header for display ("By model", "By MCP tool"); "" omits
 }
 
 // QuotaSnapshot is the normalized, polled quota for one provider. It carries
@@ -105,11 +105,11 @@ type Config struct {
 
 	// Callbacks: main package wires its existing functions here so provider/
 	// doesn't need to re-implement CQP minting, SSO flow, OAuth, etc.
-	Auth          Authenticator            // for AuthHeaders/Refresh (compass, codex, apikey)
-	LoginFn       func() error             // for Login (compass: SSO, codex: device flow, zhipu: prompt)
-	LogoutFn      func() error             // for Logout
-	UsageFn       func() (any, error)      // for Usage
-	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
+	Auth          Authenticator                  // for AuthHeaders/Refresh (compass, codex, apikey)
+	LoginFn       func() error                   // for Login (compass: SSO, codex: device flow, zhipu: prompt)
+	LogoutFn      func() error                   // for Logout
+	UsageFn       func() (any, error)            // for Usage
+	FetchModelsFn func() ([]string, error)       // for FetchModels (volcengine: V4-signed OpenAPI)
 	QuotaFn       func() (*QuotaSnapshot, error) // for Quota (structured quota for scheduling + display)
 }
 

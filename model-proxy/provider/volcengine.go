@@ -50,9 +50,9 @@ func (p *VolcengineProvider) RewriteRequest(targetURL string, body []byte, path 
 	return targetURL, body
 }
 
-func (p *VolcengineProvider) Login() error        { return p.cfg.LoginFn() }
-func (p *VolcengineProvider) Logout() error       { return p.cfg.LogoutFn() }
-func (p *VolcengineProvider) Usage() (any, error) { return p.cfg.UsageFn() }
+func (p *VolcengineProvider) Login() error                   { return p.cfg.LoginFn() }
+func (p *VolcengineProvider) Logout() error                  { return p.cfg.LogoutFn() }
+func (p *VolcengineProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *VolcengineProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
 func (p *VolcengineProvider) FetchModels() ([]string, error) {
 	if p.cfg.FetchModelsFn != nil {

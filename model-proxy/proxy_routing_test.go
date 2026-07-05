@@ -152,10 +152,10 @@ func (t *testProv) Refresh() error { return nil }
 func (t *testProv) RewriteRequest(url string, body []byte, path string) (string, []byte) {
 	return url, body
 }
-func (t *testProv) Login() error                   { return nil }
-func (t *testProv) Logout() error                  { return nil }
-func (t *testProv) Usage() (any, error)            { return nil, nil }
-func (t *testProv) FetchModels() ([]string, error) { return nil, nil }
+func (t *testProv) Login() error                            { return nil }
+func (t *testProv) Logout() error                           { return nil }
+func (t *testProv) Usage() (any, error)                     { return nil, nil }
+func (t *testProv) FetchModels() ([]string, error)          { return nil, nil }
 func (t *testProv) Quota() (*provider.QuotaSnapshot, error) { return nil, nil }
 
 var _ provider.Provider = (*testProv)(nil)

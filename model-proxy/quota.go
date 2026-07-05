@@ -15,12 +15,12 @@ import (
 // memory + a file (~/.model-proxy/quota_state.json), and serves them to the
 // scheduler. It has its own mutex (quotaMu), independent of healthMu / reload mu.
 type quotaTracker struct {
-	mu     sync.RWMutex
-	state  map[string]*provider.QuotaSnapshot
-	path   string
-	cfg    func() *Config
-	provs  func() map[string]provider.Provider
-	stopCh chan struct{}
+	mu       sync.RWMutex
+	state    map[string]*provider.QuotaSnapshot
+	path     string
+	cfg      func() *Config
+	provs    func() map[string]provider.Provider
+	stopCh   chan struct{}
 	stopOnce sync.Once
 	// refreshHook, if set, replaces refreshOne's real poll — used by tests to
 	// observe refreshes without hitting a network. If nil, the real poll runs.
