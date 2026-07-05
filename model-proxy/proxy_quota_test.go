@@ -176,3 +176,17 @@ func TestSchedule_PayGStrictLastResort(t *testing.T) {
 		t.Errorf("when plan unavailable: first=%q, want payg (last resort)", got)
 	}
 }
+
+// TestSchedule_PlanBeforeUnknown: a measurable Plan provider ranks ahead of an
+// unmeasurable Unknown one (tier order: plan < unknown < payg), even when the
+// Plan provider's remaining quota is low.
+func TestSchedule_PlanBeforeUnknown(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{"planprov": {}, "unkprov": {}},
+		map[string][]RouteTarget{"m": {{Provider: "planprov"}, {Provider: "unkprov"}}})
+	staticQuota(p, "planprov", 0.05) // low but known
+	// unkprov: no snapshot → BillingUnknown
+	if got := firstProvider(p, "m"); got != "planprov" {
+		t.Errorf("first=%q, want planprov (plan tier ranks ahead of unknown)", got)
+	}
+}

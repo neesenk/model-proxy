@@ -428,6 +428,20 @@ func (p *Proxy) tryTarget(proto, calledModel string, t RouteTarget, prov Provide
 	return false
 }
 
+// tierRank maps a BillingClass to the scheduling tier order: plan(0) < unknown(1) < payg(2).
+// (BillingClass iota values are Unknown=0,Plan=1,PayG=2, which is NOT the scheduling order,
+// so rank through this map instead of comparing the raw constants.)
+func tierRank(b provider.BillingClass) int {
+	switch b {
+	case provider.BillingPlan:
+		return 0
+	case provider.BillingPayG:
+		return 2
+	default:
+		return 1 // BillingUnknown or anything else
+	}
+}
+
 // schedule returns targets in try-order using quota-aware ranking:
 //   tier: plan < unknown < payg (pay-as-you-go is strict last-resort)
 //   within tier: effective_remaining desc (peak-discounted), then priority asc.
@@ -460,12 +474,13 @@ func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
 
 	sort.SliceStable(availTargets, func(i, j int) bool {
 		bi, bj := billingOf(availTargets[i].Provider), billingOf(availTargets[j].Provider)
-		if bi != bj {
-			return bi < bj
-		}
-		ri, rj := effOf(availTargets[i].Provider), effOf(availTargets[j].Provider)
+		ri, rj := tierRank(bi), tierRank(bj)
 		if ri != rj {
-			return ri > rj
+			return ri < rj
+		}
+		ei, ej := effOf(availTargets[i].Provider), effOf(availTargets[j].Provider)
+		if ei != ej {
+			return ei > ej
 		}
 		return availTargets[i].Priority < availTargets[j].Priority
 	})
@@ -496,10 +511,11 @@ func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
 				keepSticky = true // current is already the best
 			} else {
 				bb, cb := billingOf(best.Provider), billingOf(cur.provider)
+				rb, rc := tierRank(bb), tierRank(cb)
 				switch {
-				case bb < cb:
+				case rb < rc:
 					keepSticky = false // best has a better billing tier
-				case bb > cb:
+				case rb > rc:
 					keepSticky = true // current has a better tier
 				case effOf(best.Provider)-effOf(cur.provider) >= margin:
 					keepSticky = false // best ahead by quota margin (quota wins over priority)
