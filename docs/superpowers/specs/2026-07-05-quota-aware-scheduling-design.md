@@ -442,11 +442,12 @@ Implemented tests (`go test ./...`, 72 passing, `-race` clean):
   (stale wording; the code is correct).
 - `PeakConfig.UnmarshalYAML` rejects an explicit `peak_hours: ""` (convention is to
   omit the key, which works).
-- `persist()` uses a fixed tmp path; a 429-`refreshOne` racing a tick/reload
-  `pollAll` could in principle interleave bytes (in-memory state is safe; only the
-  persisted baseline is at risk across a restart). Optional: unique tmp name or a
-  persist mutex.
-- `pollAfter`'s bootstrap poll isn't selectable on `stopCh` (no production caller of
-  `stop()`; harmless).
-- `p.cfg` is read without `p.mu` in `schedule`/`billingClass`/`effectiveRemaining`
-  (preexisting pattern; `-race` clean since no test exercises reload-during-request).
+- `persist()` uses a fixed tmp path; a `refreshOne` racing a tick/reload `pollAll`
+  could in principle interleave bytes (in-memory state is safe; only the persisted
+  baseline is at risk across a restart). The 429-storm window is closed by
+  `refreshOne` dedup, but a persist mutex / unique tmp name would fully eliminate it.
+- `schedule` holds `healthMu.Lock()` for its whole duration. Fine at low RPS
+  (target counts are small); if concurrency grows, split into an RLock read path +
+  a separate write lock.
+- The per-route `sticky` map is only cleared on reload; entries for removed routes
+  linger otherwise (negligible memory; reload resets it consistently).
