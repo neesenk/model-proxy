@@ -192,6 +192,9 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 // names (routes' keys) plus the claude_mapping keys (so anthropic clients can
 // discover claude-* aliases too).
 func (p *Proxy) exposedModelsJSON() []byte {
+	p.mu.RLock()
+	cfg := p.cfg
+	p.mu.RUnlock()
 	type m struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
@@ -206,10 +209,10 @@ func (p *Proxy) exposedModelsJSON() []byte {
 		seen[id] = true
 		models = append(models, m{ID: id, Object: "model"})
 	}
-	for exposed := range p.cfg.Routes {
+	for exposed := range cfg.Routes {
 		add(exposed)
 	}
-	for claude := range p.cfg.ClaudeMapping {
+	for claude := range cfg.ClaudeMapping {
 		add(claude)
 	}
 	out, _ := json.Marshal(map[string]any{"object": "list", "data": models})
@@ -282,7 +285,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		upPath = strings.TrimPrefix(upPath, "/v1")
 	}
 
-	ordered := p.schedule(exposed, targets)
+	ordered := p.schedule(cfg, exposed, targets)
 
 	for ti, t := range ordered {
 		prov, ok := cfg.Providers[t.Provider]
@@ -304,7 +307,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			baseURL = prov.AnthropicBaseURL
 		}
 
-		if p.tryTarget(proto, calledModel, t, prov, provImpl, baseURL, upPath, body, w, r) {
+		if p.tryTarget(cfg, proto, calledModel, t, prov, provImpl, baseURL, upPath, body, w, r) {
 			return // committed: response written to the client
 		}
 		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
@@ -318,8 +321,8 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 // timeout, 401 after refresh, 5xx, 429, or a build/auth error). It updates the
 // provider's health on success/failure/rate-limit and enforces half-open
 // single-flight. Failover only happens before any bytes are written to w.
-func (p *Proxy) tryTarget(proto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request) bool {
-	sched := p.cfg.Scheduling
+func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request) bool {
+	sched := cfg.Scheduling
 	// Re-check availability and reserve the half-open probe slot if needed.
 	if !p.takeHalfOpenSlot(t.Provider) {
 		return false
@@ -370,7 +373,7 @@ func (p *Proxy) tryTarget(proto, calledModel string, t RouteTarget, prov Provide
 		resp, err := p.client.Do(req)
 		if err != nil {
 			log.Printf("[proto=%s provider=%s] upstream error: %v", proto, t.Provider, err)
-			p.recordFailure(t.Provider) // connection error / timeout → circuit
+			p.recordFailure(t.Provider, sched) // connection error / timeout → circuit
 			return false
 		}
 
@@ -385,7 +388,7 @@ func (p *Proxy) tryTarget(proto, calledModel string, t RouteTarget, prov Provide
 					continue
 				}
 			}
-			p.recordFailure(t.Provider)
+			p.recordFailure(t.Provider, sched)
 			return false
 		}
 		// Rate limit (429): skip this provider until Retry-After / default backoff.
@@ -399,7 +402,7 @@ func (p *Proxy) tryTarget(proto, calledModel string, t RouteTarget, prov Provide
 		// Transient upstream errors → circuit + failover.
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
-			p.recordFailure(t.Provider)
+			p.recordFailure(t.Provider, sched)
 			return false
 		}
 
@@ -449,9 +452,9 @@ func tierRank(b provider.BillingClass) int {
 //
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin quota gain.
-func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
+func (p *Proxy) schedule(cfg *Config, exposed string, targets []RouteTarget) []RouteTarget {
 	now := time.Now()
-	sched := p.cfg.Scheduling
+	sched := cfg.Scheduling
 	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
 	// or while taking healthMu below.
 	qs := p.quota.allSnapshots()
@@ -471,8 +474,8 @@ func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
 		}
 	}
 
-	billingOf := func(name string) provider.BillingClass { return p.billingClass(name, qs) }
-	effOf := func(name string) float64 { return p.effectiveRemaining(name, qs, now) }
+	billingOf := func(name string) provider.BillingClass { return p.billingClass(cfg, name, qs) }
+	effOf := func(name string) float64 { return p.effectiveRemaining(cfg, name, qs, now) }
 
 	sort.SliceStable(availTargets, func(i, j int) bool {
 		bi, bj := billingOf(availTargets[i].Provider), billingOf(availTargets[j].Provider)
@@ -554,15 +557,15 @@ func (p *Proxy) schedule(exposed string, targets []RouteTarget) []RouteTarget {
 // billingClass returns the effective scheduling tier, applying the staleness
 // guard and the pay-as-you-go config override. A snapshot older than 3× the poll
 // interval, or one carrying an error, is treated as Unknown.
-func (p *Proxy) billingClass(name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
-	if p.cfg.Providers[name].Billing == "pay-as-you-go" {
+func (p *Proxy) billingClass(cfg *Config, name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
+	if cfg.Providers[name].Billing == "pay-as-you-go" {
 		return provider.BillingPayG
 	}
 	s := qs[name]
 	if s == nil || s.Billing == provider.BillingUnknown || s.Err != "" {
 		return provider.BillingUnknown
 	}
-	if time.Since(s.AsOf) > 3*p.cfg.Scheduling.pollInterval() {
+	if time.Since(s.AsOf) > 3*cfg.Scheduling.pollInterval() {
 		return provider.BillingUnknown
 	}
 	return s.Billing
@@ -575,8 +578,8 @@ func (p *Proxy) billingClass(name string, qs map[string]*provider.QuotaSnapshot)
 // peak describes consumption rate, which applies regardless of whether we
 // know the exact quota). This keeps priority as the tiebreak among equally
 // unknown providers, matching the old inPeak+priority ordering.
-func (p *Proxy) effectiveRemaining(name string, qs map[string]*provider.QuotaSnapshot, now time.Time) float64 {
-	mult := p.cfg.Providers[name].peakMultiplier(now)
+func (p *Proxy) effectiveRemaining(cfg *Config, name string, qs map[string]*provider.QuotaSnapshot, now time.Time) float64 {
+	mult := cfg.Providers[name].peakMultiplier(now)
 	if mult < 1 {
 		mult = 1
 	}
@@ -652,9 +655,8 @@ func (p *Proxy) recordSuccess(name string) {
 
 // recordFailure increments a provider's consecutive failures and opens the
 // circuit (for cooldown) once the threshold is reached. Clears any half-open slot.
-func (p *Proxy) recordFailure(name string) {
+func (p *Proxy) recordFailure(name string, sched Scheduling) {
 	now := time.Now()
-	sched := p.cfg.Scheduling
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
 	h := p.health[name]
