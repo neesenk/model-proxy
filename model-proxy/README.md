@@ -113,6 +113,10 @@ model-proxy restore opencode
 model-proxy config init            # 生成模板
 model-proxy config print           # 打印生效配置
 model-proxy config check           # 校验配置
+
+# 调度诊断
+model-proxy schedule               # 查询运行中的 daemon：每 model 当前调度到哪个 provider（GET /debug/schedule）
+model-proxy doctor                 # 离线 config 调度诊断（tier/quota/peak + dry-run 顺序 + warning）
 ```
 
 ## Token 文件
@@ -163,11 +167,12 @@ scheduling:
 
 ## 配额感知调度（quota-aware scheduling）
 
-代理后台轮询每个 provider 的剩余配额（`Provider.Quota()`，每 `quota_poll_interval` 默认 5m 一次），缓存到 `~/.model-proxy/quota_state.json`（启动时作为基线加载），并据此排序路由目标：
+代理后台轮询每个 provider 的剩余配额（`Provider.Quota()`，每 `quota_poll_interval` 默认 5m 一次），缓存到 `~/.model-proxy/quota_state.json`（启动时作为基线加载，**并携带每路由 `sticky` 选择，重启后恢复 → 保 prompt cache**），并据此排序路由目标：
 
-- **三层 tier**：`plan`（默认，按剩余配额排）< `unknown`（按 priority 排）< `pay-as-you-go`（严格兜底，仅当所有 plan provider 都不可用）。在 provider 上设 `billing: pay-as-you-go` 即把它标为兜底（如 DeepSeek）。
-- **有效剩余 = `RemainingPct / peak_multiplier`**：高峰时段（`peak_hours`）的 provider 配额按段 multiplier 折扣（高峰消费更快 → 排序靠后）。`peak_hours` 支持多段、每段独立 multiplier。
-- **粘性切换**：路由停在一个 provider 至少 `sticky_dwell`（保 prompt cache）；到期后仅当另一 provider 在 **tier / quota 边际（`quota_switch_margin`，默认 15 pts）/ priority** 任一更优时才换 —— 既能短暂抖动后回首选，也能在他人明显领先时切换。
+- **调度分 = surplus**（provider 接口方法 `Provider.Surplus`）：`surplus = (最终窗口.remaining − 短窗口.remaining × (短窗口配额/最终窗口配额) × (peakMult−1)) − 时间剩余比例`。surplus>0 = 落后节奏（不用就浪费 → 优先用）；<0 = 超前（会提前耗尽 → 回避）。最终窗口（总预算）：zhipu=周、volcengine/codex/compass=月、deepseek=按量（无窗口）。
+- **三层 tier**：`plan`（按 surplus 排）< `unknown`（按 priority 排）< `pay-as-you-go`（严格兜底，仅当所有 plan provider 都不可用）。设 `billing: pay-as-you-go` 即兜底（如 DeepSeek）。排序 `(tier, surplus desc, priority asc)`。
+- **peak 只烧短窗口**：`peak_hours` 的 multiplier 只折算 provider 的短 rate-cap 窗口（5h 等）；没有短窗口的 provider（codex/compass、未轮询的）高峰不打折。`peak_hours` 支持多段、每段独立 multiplier；multiplier=1 关闭。
+- **粘性切换**：路由停在一个 provider 至少 `sticky_dwell`（保 prompt cache）；到期后仅当另一 provider 在 **tier / surplus 边际（`quota_switch_margin`，默认 15 pts）/ priority** 任一更优时才换 —— 既能短暂抖动后回首选，也能在他人明显领先时切换。
 
 ```yaml
 providers:
@@ -189,6 +194,8 @@ scheduling:
 ```
 
 `Quota()` 来源：zhipu/codex/volcengine/compass → plan tier；deepseek → pay-as-you-go。volcengine 的 `GetAFPUsage` 需 AccessKey/SecretKey（Ark API Key 调不了），未配时该 provider 退化为 `unknown`。
+
+**查看调度**：`model-proxy schedule` 查询运行中的 daemon，显示每个 model 当前调度到哪个 provider（后台接口 `GET /debug/schedule`，含 ordered 列表/sticky 状态）；`model-proxy doctor` 离线诊断 config 的调度设置（每 provider tier/quota/peak + 每路由 dry-run 顺序 + warning，不需 daemon）。
 
 ## 添加新 Provider
 

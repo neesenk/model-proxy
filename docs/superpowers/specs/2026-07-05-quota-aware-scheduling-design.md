@@ -1,9 +1,17 @@
 # Quota-Aware Scheduling — Design
 
-**Date:** 2026-07-05
-**Status:** Implemented on branch `quota-aware-scheduling` (merge-base `d40c8b4`). This
-document reflects the **as-built** implementation. The "As-built deviations" section
-below records where the build diverged from the original draft and why.
+**Date:** 2026-07-05 (last revised 2026-07-06)
+**Status:** Implemented on branch `quota-aware-scheduling` (merge-base `d40c8b4`).
+**Canonical docs:** `CLAUDE.md` / `AGENTS.md` (deep-dive) / `model-proxy/README.md`
+are the source of truth — read those first. This design doc describes the original
+design + the first as-built revision; **the scheduling score has since evolved from
+`effective_remaining = RemainingPct/peak_mult` to the surplus model**
+(`surplus = (ultimate.rem − short.rem×share×(peakMult−1)) − fLeft`, exposed as a
+`Provider.Surplus` interface method; ranking is `(tier, surplus desc, priority)`;
+peak now only burns the short rate-cap window; sticky is persisted in
+`quota_state.json`; `GET /debug/schedule` + `schedule`/`doctor` commands added).
+The surplus-specific sections below are updated; where this doc still says
+`effective_remaining`, defer to the canonical docs.
 **Scope:** `model-proxy/` Go module
 
 ## Problem
@@ -83,10 +91,11 @@ Everything else in this document matches the build.
 
 | Concern | Decision |
 |---|---|
-| Scheduling goal | **Quota-aware sticky** — sticky per conversation; pick the *starting* provider by remaining quota; switch off when another is meaningfully ahead. |
-| Quota source | **Periodic background polling** of existing usage/quota endpoints; **persisted to file** (survives restart/reload). No response-usage parsing in v1. |
-| Switch trigger | **After `sticky_dwell` (≈10m), switch to the best provider when it wins on tier → quota-margin → priority** (only stay when the best's sole edge is a sub-margin quota difference). No hard floor; reactive 429 remains the ultimate backstop. |
-| Peak formula | `effective_remaining = RemainingPct / peak_multiplier`; for unknown/no-data snapshots, `1.0/mult` (neutral but peak still discounts). Peak = "budget drains N× faster, remaining worth 1/N". |
+| Scheduling goal | **Quota-aware sticky** — sticky per conversation; rank by **surplus** (use-it-or-lose-it pace score); switch off when another is meaningfully ahead. |
+| Quota source | **Periodic background polling** of existing usage/quota endpoints; **persisted to file** (survives restart/reload, **including the per-route sticky map**). No response-usage parsing in v1. |
+| Scheduling score | **surplus** (a `Provider.Surplus(snap, now, peakMult)` interface method delegating to `(*QuotaSnapshot).Surplus`): `surplus = (ultimate.remaining − short.remaining × (short.total/ultimate.total) × (peakMult−1)) − fLeft`, where `fLeft = clamp((ultimate.reset−now)/ultimate.duration, 0,1)`. `RemainingPct` = the **ultimate** window's remaining (zhipu=weekly, volcengine/codex/compass=monthly, deepseek=payg). surplus>0 = under pace → prioritize; <0 = over pace → avoid. Ranking: `(tier: plan<unknown<payg, surplus desc, priority asc)`. |
+| Switch trigger | **After `sticky_dwell` (≈10m), switch to the best provider when it wins on tier → surplus-margin (`quota_switch_margin`, 15 pts) → priority** (only stay when the best's sole edge is a sub-margin surplus difference). No hard floor; reactive 429 remains the ultimate backstop. |
+| Peak formula | `peakMult` only burns the **short rate-cap window** (the `×(peakMult−1)` term in surplus). Providers without a same-unit short window (codex/compass money-ultimate; not-yet-polled) get **no peak discount** — peak is no longer a blanket `RemainingPct/mult` latency cut. Multiplier=1 disables. |
 | Peak config | **Multi-segment, per-segment multiplier**, with shorthand forms (single string / list-of-strings use a default multiplier of 2.0). |
 | Pay-as-you-go | Strict last-resort, designated by an explicit `billing: pay-as-you-go` config flag. |
 | Display scope | zhipu uses the shared `printQuotaSnapshot` renderer; the other four providers keep byte-identical custom display. Parsers are shared by the scheduler only. |
@@ -257,43 +266,44 @@ Behavior:
 
 ### 4. `schedule()` — ranking + switch rule (in `proxy.go`)
 
-`schedule` calls `p.quota.allSnapshots()` **before** taking `healthMu` (lock order
-`healthMu → quotaMu`, never reversed), filters available targets (circuit/rate-limit,
-unchanged), then sorts and applies the sticky rule. Sort key (primary → secondary):
+`schedule` is split into a non-mutating `decideOrder()` (returns the ordered
+targets + the provider to park sticky on) + a thin `schedule()` that commits the
+sticky. `decideOrder` calls `p.quota.allSnapshots()` **before** taking `healthMu`
+(lock order `healthMu → quotaMu`, never reversed), filters available targets
+(circuit/rate-limit, unchanged), then sorts and applies the sticky rule.
+
+Sort key (primary → secondary):
 
 ```
 1. tierRank(billing):  plan(0) < unknown(1) < payg(2)   ← payg strict last-resort
-2. effective_remaining desc                              ← quota balance, peak-folded
-3. priority asc                                          ← existing, final tie-breaker
+2. surplus desc                                         ← pace score (use it or lose it)
+3. priority asc                                         ← existing, final tie-breaker
 ```
+
+`surplus` comes from `provs[name].Surplus(snap, now, peakMult)` (a `Provider`
+interface method; each impl delegates to `(*QuotaSnapshot).Surplus`, the shared
+formula in `provider/`):
 
 ```go
-func tierRank(b BillingClass) int // Plan→0, Unknown→1, PayG→2 (decouples from iota)
-
-func effectiveRemaining(name, qs, now) float64 {
-    mult := peakMultiplier(now); if mult < 1 { mult = 1 }
-    s := qs[name]
-    if s == nil || s.Billing == BillingUnknown || s.RemainingPct < 0 {
-        return 1.0 / mult          // neutral; peak still discounts
-    }
-    return s.RemainingPct / mult
-}
-
-func billingClass(name, qs) BillingClass {
-    if cfg.Providers[name].Billing == "pay-as-you-go" { return BillingPayG }
-    s := qs[name]
-    if s == nil || s.Billing == BillingUnknown || s.Err != "" { return BillingUnknown }
-    if time.Since(s.AsOf) > 3*pollInterval() { return BillingUnknown }
-    return s.Billing
-}
+// (*QuotaSnapshot).Surplus(now, peakMult)
+remaining := ultimate.remaining
+if peakMult > 1 { remaining -= short.remaining * (short.total/ultimate.total) * (peakMult - 1) }
+fLeft   := clamp((ultimate.reset - now)/ultimate.duration, 0, 1)
+surplus := remaining - fLeft     // >0: under pace (prioritize); <0: over pace (avoid)
+// nil/unknown/no-ultimate/no-reset → 0 (neutral)
 ```
 
-**`peak_hours` is no longer a sort tier** (it used to be the primary group); it lives
-entirely inside `effective_remaining` via the multiplier. Set a segment's multiplier
-to 1.0 to disable peak for that window.
+`billingClass` (tier) is `classifyBilling(snap, billingCfg, pollInterval)` —
+pay-as-you-go config → PayG; nil/`BillingUnknown`/`Err`/stale(>3×interval) → Unknown;
+else the snapshot's Billing. `tierRank` maps that to plan(0)<unknown(1)<payg(2) (the
+`BillingClass` iota order differs, hence `tierRank`).
+
+**peak_hours only burns the short window** (the `×(peakMult−1)` term). Providers
+without a same-unit short window (codex/compass money-ultimate; not-yet-polled) get
+no peak discount — peak is no longer a blanket sort-tier or `/mult`. Multiplier=1 disables.
 
 **Sticky-switch rule** (after dwell, switch to the best provider unless its only edge
-is a sub-margin quota gain):
+is a sub-margin surplus gain):
 
 ```
 keep the current sticky provider if:
@@ -302,15 +312,20 @@ keep the current sticky provider if:
     now − sticky.since < sticky_dwell                       ← min dwell (preserve cache)
     OR (after dwell) the best provider (availTargets[0]) does NOT win on:
          tierRank(best) < tierRank(cur)                     ← better billing tier → switch
-         effective_remaining(best) − effective_remaining(cur) ≥ quota_switch_margin
-                                                             ← ahead by margin → switch
+         surplus(best) − surplus(cur) ≥ quota_switch_margin ← ahead by surplus margin → switch
          priority(best) < priority(cur)                     ← better priority (return-to-preferred) → switch
-       (i.e. stay only when same tier + sub-margin quota edge + priority not better)
+       (i.e. stay only when same tier + sub-margin surplus + priority not better)
 ```
 
 If the keep-condition fails, re-pick = `availTargets[0]`. The returned `ordered`
 slice is `[chosen] + [rest in sorted order]`, so failover walks next-best → … → payg
-last. Circuit / rate-limit / half-open filtering happens first (unchanged).
+last. The per-route sticky map is persisted in `quota_state.json` and restored on boot.
+Circuit / rate-limit / half-open filtering happens first (unchanged).
+
+**Visibility** (read-only): `GET /debug/schedule` peeks via `decideOrder` (no sticky
+mutation) and returns per route the first-choice provider + ordered list
+(tier/surplus/available/peak) + sticky state. `model-proxy schedule` queries it
+(daemon must run); `model-proxy doctor` is an offline config diagnostic.
 
 Note: because the switch compares *effective* remaining, a sticky provider that
 enters its peak window (halved at mult=2) will commonly meet the margin against a
@@ -361,7 +376,7 @@ providers:
 
 scheduling:
   quota_poll_interval: 5m         # NEW. background poll cadence. default 5m.
-  quota_switch_margin: 15         # NEW. switch if another provider's effective remaining
+  quota_switch_margin: 15         # NEW. switch if another provider's surplus
                                   #      beats the sticky one by ≥ this many percentage
                                   #      points. default 15 (= 0.15 fraction internally).
   # unchanged: circuit_threshold, circuit_cooldown, rate_limit_backoff,
@@ -381,7 +396,7 @@ scheduling:
 4. Request arrives → `forward` → `schedule(exposed, targets)`:
    - snapshot quota via `allSnapshots()` (quotaMu RLock, brief);
    - `healthMu.Lock()`; filter available targets (circuit/rate-limit/half-open);
-   - sort by `(tierRank, effective_remaining desc, priority asc)`;
+   - sort by `(tierRank, surplus desc, priority asc)`;
    - apply sticky-switch rule → pick `chosen`, build `ordered`.
 5. For each target in `ordered`, `tryTarget` (unchanged); on 429, `recordRateLimit`
    (releases `healthMu`) + **async `refreshOne`** of that provider.
