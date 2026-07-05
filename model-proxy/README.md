@@ -157,13 +157,45 @@ scheduling:
   rate_limit_backoff: 60s
   upstream_timeout: 30s
   sticky_dwell: 10m
+  quota_poll_interval: 5m   # 后台 Quota() 轮询周期
+  quota_switch_margin: 15   # 切换 provider 的 quota 边际（百分点）
 ```
+
+## 配额感知调度（quota-aware scheduling）
+
+代理后台轮询每个 provider 的剩余配额（`Provider.Quota()`，每 `quota_poll_interval` 默认 5m 一次），缓存到 `~/.model-proxy/quota_state.json`（启动时作为基线加载），并据此排序路由目标：
+
+- **三层 tier**：`plan`（默认，按剩余配额排）< `unknown`（按 priority 排）< `pay-as-you-go`（严格兜底，仅当所有 plan provider 都不可用）。在 provider 上设 `billing: pay-as-you-go` 即把它标为兜底（如 DeepSeek）。
+- **有效剩余 = `RemainingPct / peak_multiplier`**：高峰时段（`peak_hours`）的 provider 配额按段 multiplier 折扣（高峰消费更快 → 排序靠后）。`peak_hours` 支持多段、每段独立 multiplier。
+- **粘性切换**：路由停在一个 provider 至少 `sticky_dwell`（保 prompt cache）；到期后仅当另一 provider 在 **tier / quota 边际（`quota_switch_margin`，默认 15 pts）/ priority** 任一更优时才换 —— 既能短暂抖动后回首选，也能在他人明显领先时切换。
+
+```yaml
+providers:
+  deepseek:
+    provider_id: deepseek
+    billing: pay-as-you-go          # 严格兜底（仅当所有 plan provider 不可用）
+    # ...
+  zhipu:
+    provider_id: zhipu
+    billing: plan                   # 默认；显式写也可
+    peak_hours:                     # 三种写法都支持
+      - {window: "09:00-12:00", multiplier: 2.0}
+      - {window: "14:00-18:00", multiplier: 1.5}
+    # ...
+
+scheduling:
+  quota_poll_interval: 5m
+  quota_switch_margin: 15
+```
+
+`Quota()` 来源：zhipu/codex/volcengine/compass → plan tier；deepseek → pay-as-you-go。volcengine 的 `GetAFPUsage` 需 AccessKey/SecretKey（Ark API Key 调不了），未配时该 provider 退化为 `unknown`。
 
 ## 添加新 Provider
 
 1. 建 `provider/xxx.go`，实现 Provider 接口（或 embed `ApiKeyBase`）
 2. `init()` 里 `Register("xxx", constructor)`
 3. config 加 `provider_id: xxx`
+4. plan 类 provider 还应实现 `Quota()`（在 `buildProviders` 里 wire `QuotaFn`），否则会被当作 `unknown`（按 priority 排）；按量计费的设 `billing: pay-as-you-go`
 
 不改 proxy/login/logout/usage 的代码。
 

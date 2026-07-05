@@ -223,11 +223,37 @@ config.yaml:
     rate_limit_backoff: 60s   # 429 无 Retry-After 时的默认退避
     upstream_timeout: 30s     # 每个上游请求超时
     sticky_dwell: 10m         # 切到某 provider 后最少用多久（≈2× 缓存 TTL）
+    quota_poll_interval: 5m   # 后台 Quota() 轮询周期
+    quota_switch_margin: 15   # 切换 provider 的 quota 边际（百分点）
 ```
 
 熔断/限频/粘性状态在 `Proxy.health`（`healthMu`，与 reload 的 `mu` 分开，避免与 `handler` 的 RLock 死锁）。`schedule` 跳过开路/限频 provider；`tryTarget` 在超时/5xx/conn-error 计熔断、429 记限频（Retry-After 或默认退避）、成功清零；半开用 `halfOpenInFlight` 单飞。粘性：每路由记一个 current provider + since，驻留窗口内优先它（保 cache、不频繁回切）。
 
 对外协议 = 转发协议（不做转换）。凭据由 `login <provider>` 管理，存储在 `~/.model-proxy/<name>_<suffix>.json`，不落 config。
+
+### 配额感知调度（quota-aware scheduling）
+
+`Provider.Quota()`（接口方法，镜像 `UsageFn` 由 `QuotaFn` 回调注入）把每个上游的用量端点解析成归一化的 `provider.QuotaSnapshot{Billing, RemainingPct, Windows, ...}`。各 provider 来源：
+
+| provider_id | 来源端点 | Billing |
+|---|---|---|
+| zhipu | `quota/limit`（5h/周 token + 月度时间） | plan |
+| codex | `wham/usage`（primary/weekly 窗口 + spend） | plan |
+| volcengine | `GetAFPUsage`（V4 签名，需 AK/SK） | plan |
+| compass | `monthly_usage`（月度 ratio/balance） | plan |
+| deepseek | `/user/balance`（按量余额） | pay-as-you-go |
+
+`RemainingPct` = 窗口内 `min(remaining%)`（`BindingRemaining`）；zhipu 的 `TIME_LIMIT`（MCP 工具配额）不参与 binding（只展示）。
+
+**`quotaTracker`**（`quota.go`）：后台 goroutine 每 `scheduling.quota_poll_interval`（默认 5m）并行轮询所有 provider 的 `Quota()`，结果缓存在内存 + 原子落盘到 `~/.model-proxy/quota_state.json`（启动时作为基线加载，避免冷启动无数据）。`NewProxy` 启动它；`reload` 不重建（通过 cfg/providers 快照闭包读取新配置），只 kick 一次 `pollAll` 让新加 provider 立即出现；429 触发该 provider 的异步 `refreshOne`，让限频窗口结束后配额已是最新。陈旧保护：snapshot 老于 `3×poll_interval` 视为 `BillingUnknown`。自带锁 `quotaMu`（独立于 `healthMu` 和 reload `mu`）。**锁顺序：`healthMu` → `quotaMu`**（`schedule` 里 `allSnapshots()` 在 `healthMu.Lock()` 之前调用，绝不反向嵌套）。
+
+**`schedule()` 排序**（`proxy.go` 核心）：可用目标（熔断/限频过滤不变）按 `(tierRank, effective_remaining desc, priority asc)` 排序：
+
+- **`tierRank`**：**plan(0) < unknown(1) < payg(2)** —— 注意 `BillingClass` 的 iota（`Unknown=0, Plan=1, PayG=2`）**不等于**调度顺序，故 `tierRank` 单独映射；pay-as-you-go（`billing: pay-as-you-go`）严格兜底。
+- **`effective_remaining = RemainingPct / peak_multiplier`**；unknown/无数据为 `1.0/mult`（中性，但高峰仍打折）。`peak_multiplier` 来自 provider 的 `peak_hours` 段（多段、每段独立 multiplier）——**高峰折进有效剩余**，不再是独立排序层。
+- **粘性切换**（cache 友好）：路由停在 current provider 一个 `sticky_dwell`（默认 10m）；到期后仅当最优者在 **tier → quota 边际（`scheduling.quota_switch_margin`，默认 15 pts）→ priority** 任一更优时才换 —— 最优者只是 sub-margin 的 quota 微差则保留 cache。「短暂抖动后回首选」和「他人明显领先时切换」两者兼得。
+
+**新配置**：provider 级 `billing: pay-as-you-go`（默认 `plan`）；多段 `peak_hours`（单字符串 / 字符串列表 / `{window, multiplier}` 列表）；`scheduling.quota_poll_interval`（5m）；`scheduling.quota_switch_margin`（15）。`sticky_dwell` 同时充当「切换前的最小驻留」。
 
 ### Token 文件命名
 
@@ -335,6 +361,10 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 7. **flushCopy 写错误**：客户端断开后 `w.Write` 返回错误须立即 break，否则代理继续拉上游流浪费 compute。
 8. **context 传播**：用 `http.NewRequestWithContext(r.Context(), ...)` 让客户端取消传播到上游。
 9. **supervisor nil panic**：`spawnWorker` 失败时返回 nil，`runSupervisor` 需检查再处理。
+10. **配额陈旧保护**：snapshot 老于 `3×quota_poll_interval` 一律视为 `BillingUnknown`（不再相信缓存值）。`Quota()` 失败的 provider 也是 `BillingUnknown`（按 priority 排，**绝不**当 payg）。
+11. **volcengine 配额需 AK/SK**：`GetAFPUsage` 是火山引擎签名 OpenAPI（管控面），Ark API Key（Bearer，仅对话）调不了；`login volcengine` 必须同时收 AK/SK 才能产 quota。
+12. **锁顺序 `healthMu` → `quotaMu`**：`schedule` 先 `allSnapshots()`（quotaMu RLock）拿到快照，再 `healthMu.Lock()`；绝不在持 `healthMu` 时回调 quota 接口，否则与 `refreshOne`/`pollAll` 反向嵌套死锁。
+13. **`BillingClass` iota ≠ 调度序**：`Unknown=0, Plan=1, PayG=2`，但调度序是 `Plan < Unknown < PayG`，故 `tierRank` 单独映射（不要直接比较 `BillingClass` 常量）。
 
 ### opencode/pi takeover 配置
 
