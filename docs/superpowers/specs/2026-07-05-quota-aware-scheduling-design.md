@@ -1,7 +1,9 @@
 # Quota-Aware Scheduling — Design
 
 **Date:** 2026-07-05
-**Status:** Draft, pending review
+**Status:** Implemented on branch `quota-aware-scheduling` (merge-base `d40c8b4`). This
+document reflects the **as-built** implementation. The "As-built deviations" section
+below records where the build diverged from the original draft and why.
 **Scope:** `model-proxy/` Go module
 
 ## Problem
@@ -11,16 +13,17 @@
 window, a weekly window, a monthly window (zhipu, codex, volcengine, compass).
 One (deepseek) is **pay-as-you-go** (balance, no window).
 
-Today's scheduler (`proxy.go:schedule`) is purely *reactive* about quota:
+Before this change, the scheduler (`proxy.go:schedule`) was purely *reactive* about
+quota:
 
-- It ranks targets by `peak_hours` then static `priority`, keeps a per-route
-  *sticky* provider for `sticky_dwell` (≈10m, partially cache-friendly), and
-  only learns a provider is out of quota when it returns **429** — by which
-  point it's already depleted.
-- It has no visibility into *remaining* quota, so it cannot keep providers
-  balanced: one gets ridden into the wall while others sit idle.
-- Pay-as-you-go is only "last" by virtue of static `priority`, not enforced.
-- Cache warmth (which directly affects token/quota burn) is preserved only
+- It ranked targets by `peak_hours` then static `priority`, kept a per-route
+  *sticky* provider for `sticky_dwell` (≈10m, partially cache-friendly), and only
+  learned a provider was out of quota when it returned **429** — by which point it
+  was already depleted.
+- It had no visibility into *remaining* quota, so it could not keep providers
+  balanced: one got ridden into the wall while others sat idle.
+- Pay-as-you-go was only "last" by virtue of static `priority`, not enforced.
+- Cache warmth (which directly affects token/quota burn) was preserved only
   indirectly via sticky dwell.
 
 ## Goal
@@ -28,15 +31,53 @@ Today's scheduler (`proxy.go:schedule`) is purely *reactive* about quota:
 A scheduler that:
 
 1. **Balances quota** across plan providers — prefer the one with the most
-   remaining quota in its binding window, so no provider is overused while
-   others idle.
-2. **Minimizes pay-as-you-go** — strict last-resort, never chosen while any
-   plan provider has usable quota.
-3. **Preserves cache** — stay sticky within a conversation (a switch breaks
-   the prompt cache and *increases* token burn), switching providers only
-   when another is meaningfully ahead *and* the minimum dwell has elapsed.
-4. **Folds `peak_hours` into the score** — peak is no longer a separate sort
-   tier; it discounts effective remaining via a per-segment multiplier.
+   remaining quota in its binding window, so no provider is overused while others
+   idle.
+2. **Minimizes pay-as-you-go** — strict last-resort, never chosen while any plan
+   provider has usable quota.
+3. **Preserves cache** — stay sticky within a conversation (a switch breaks the
+   prompt cache and *increases* token burn), switching providers only when
+   another is meaningfully ahead *and* the minimum dwell has elapsed.
+4. **Folds `peak_hours` into the score** — peak is no longer a separate sort tier;
+   it discounts effective remaining via a per-segment multiplier.
+
+## As-built deviations from the original draft
+
+The build deviated from the first draft in five places. Each was caught during
+implementation/review and is the authoritative behavior now:
+
+1. **`tierRank` indirection for billing order.** `BillingClass` is declared
+   `BillingUnknown=0, BillingPlan=1, BillingPayG=2` (iota), which does **not**
+   match the scheduling order `plan < unknown < payg`. Sorting on the raw
+   constants would rank *unknown ahead of plan*. The build adds a
+   `tierRank(BillingClass) int` map (`plan→0, unknown→1, payg→2`) used in both
+   the `schedule()` sort and the sticky-switch tier comparison. (Found by the
+   Task 9 review; locked in by `TestSchedule_PlanBeforeUnknown`.)
+2. **`effective_remaining = 1.0/mult` for unknown (not bare `1.0`).** Unknown
+   snapshots carry `RemainingPct: 0` (Go zero value), so the draft's "return 1.0
+   only when snapshot is nil" check would have ranked them as eff=0 (last). The
+   build returns `1.0/mult` for nil/`BillingUnknown`/`RemainingPct<0`, which both
+   keeps unknown neutral **and** lets `peak_multiplier` still discount a provider
+   that has no quota data (so peak deprioritization works without polling).
+3. **Sticky-switch rule is tier → quota-margin → priority.** The draft's "switch
+   only when another plan provider is ahead by ≥ quota margin" would, with
+   all-unknown quota (eff equal), never switch after dwell — regressing the
+   pre-existing "return to the priority-1 provider after a blip" behavior. The
+   build switches to the best provider (`availTargets[0]`) after dwell when the
+   best wins on **billing tier, then quota margin, then priority** — only staying
+   when the best's sole edge is a sub-margin quota difference.
+4. **Display refactor is zhipu-only.** The draft proposed unifying all providers'
+   `usage` display onto a shared `printQuotaSnapshot` renderer. The build applies
+   that only to zhipu (simple windows); codex/volcengine/deepseek/compass keep
+   their byte-identical custom display, and the new `fetch*Quota` parsers feed the
+   scheduler only. Accepted DRY cost (each rich provider's JSON is parsed in two
+   places) to preserve display fidelity.
+5. **`stop()` hardened with `sync.Once`.** `quotaTracker.stop()` closes a channel
+   and would panic on a double-close; the build wraps it in `stopOnce` (carried
+   from a Task 7 review finding). `stop()` currently has no production caller —
+   the tracker lives for the process lifetime — but the guard is cheap insurance.
+
+Everything else in this document matches the build.
 
 ## Decisions (locked)
 
@@ -44,17 +85,11 @@ A scheduler that:
 |---|---|
 | Scheduling goal | **Quota-aware sticky** — sticky per conversation; pick the *starting* provider by remaining quota; switch off when another is meaningfully ahead. |
 | Quota source | **Periodic background polling** of existing usage/quota endpoints; **persisted to file** (survives restart/reload). No response-usage parsing in v1. |
-| Switch trigger | **Switch when another plan provider's *effective* remaining beats the current by ≥ margin, but only after `sticky_dwell` (≈10m)** has elapsed. No hard floor; reactive 429 remains the ultimate backstop. |
-| Peak formula | `effective_remaining = RemainingPct / peak_multiplier` (1.0 when not in peak). Peak = "budget drains N× faster, remaining worth 1/N". |
-| Peak config | **Multi-segment, per-segment multiplier**, with shorthand forms (single string / list-of-strings use a default multiplier). |
+| Switch trigger | **After `sticky_dwell` (≈10m), switch to the best provider when it wins on tier → quota-margin → priority** (only stay when the best's sole edge is a sub-margin quota difference). No hard floor; reactive 429 remains the ultimate backstop. |
+| Peak formula | `effective_remaining = RemainingPct / peak_multiplier`; for unknown/no-data snapshots, `1.0/mult` (neutral but peak still discounts). Peak = "budget drains N× faster, remaining worth 1/N". |
+| Peak config | **Multi-segment, per-segment multiplier**, with shorthand forms (single string / list-of-strings use a default multiplier of 2.0). |
 | Pay-as-you-go | Strict last-resort, designated by an explicit `billing: pay-as-you-go` config flag. |
-
-Two calls left to the implementer's judgement, correct at review:
-
-- **Parse sharing (unified)** — `Quota()` and the `usage` display path share one
-  parse function per provider. *Alternative if de-risking v1:* `Quota()` ships
-  its own parse (small duplication), display untouched; unify later.
-- **No hard floor** on remaining% — rely on margin-switch + reactive 429.
+| Display scope | zhipu uses the shared `printQuotaSnapshot` renderer; the other four providers keep byte-identical custom display. Parsers are shared by the scheduler only. |
 
 ## Architecture
 
@@ -63,44 +98,44 @@ machinery. Nothing about circuit-breaker / rate-limit / half-open / failover
 changes.
 
 ```
-proxy.go (Proxy)  ──holds──►  quotaTracker            (quota.go, NEW)
+proxy.go (Proxy)  ──holds──►  quotaTracker                 (quota.go, NEW)
                                   │ poll loop goroutine, started in NewProxy
                                   ▼
-                         ~/.model-proxy/quota_state.json   (persisted, atomic)
+                         ~/.model-proxy/quota_state.json    (persisted, atomic, 0600)
                                   │ loaded at boot (baseline before first poll)
                                   ▲
 provider.Provider  ──new method──►  Quota() (*QuotaSnapshot, error)
                                   ▲ wired via cfg.QuotaFn callback (mirrors UsageFn)
                                   │
-schedule()  ──reads──►  quotaTracker.snapshot()  under quotaMu.RLock
+schedule()  ──reads──►  quotaTracker.allSnapshots()  (quotaMu RLock, brief,
+                            called BEFORE healthMu.Lock — lock order healthMu→quotaMu)
 ```
 
 New / changed files:
 
-- **`quota.go`** (NEW, `package main`) — `QuotaSnapshot` model, `quotaTracker`
-  (state + mutex + poll loop + persistence).
-- **`provider/provider.go`** — add `Quota() (*QuotaSnapshot, error)` to the
-  `Provider` interface; add `QuotaFn func() (*QuotaSnapshot, error)` to
-  `provider.Config`. Define `QuotaSnapshot` / `QuotaWindow` / `BillingClass`
-  here (exported, since providers return them).
-- **`provider/*.go`** — each provider gains a one-liner
-  `Quota() { return p.cfg.QuotaFn() }`.
+- **`quota.go`** (NEW, `package main`) — `quotaTracker` (state + `quotaMu` RWMutex
+  + poll loop + atomic persistence + boot load + staleness + `refreshOne`).
+- **`provider/provider.go`** — `QuotaSnapshot` / `QuotaWindow` / `QuotaDetail` /
+  `BillingClass` types; `Quota()` on the `Provider` interface; `QuotaFn` +
+  `QuotaOrUnknown()` on `provider.Config`; `BindingRemaining` helper.
+- **`provider/*.go`** — each provider gains `Quota() { return p.cfg.QuotaOrUnknown() }`.
 - **`proxy.go`** — `Proxy` holds `quota *quotaTracker`; `NewProxy` starts it;
-  `reload` keeps it alive (tracker re-reads `cfg` each cycle); `schedule()`
-  consults it.
-- **`provider_wire.go`** — wire `QuotaFn` per provider in `buildProviders`.
-- **`config.go`** — new `Scheduling` fields, new per-provider `Billing` +
-  multi-segment `PeakHours`; extend `validate()`.
-- **`main.go`** — new `fetch*Quota` parse functions (shared with display);
-  refactor `show*Usage` to consume them.
-- **`defaults.go`** — update the embedded template + comments.
+  `reload` keeps it and kicks `pollAll`; `recordRateLimit` triggers async
+  `refreshOne`; `schedule()` + `billingClass` + `effectiveRemaining` + `tierRank`.
+- **`main.go`** — `parse*Quota` + `fetch*Quota` per provider; `printQuotaSnapshot`
+  generic renderer (zhipu display); `showGenericUsage` zhipu branch refactored.
+- **`config.go`** — `Scheduling.QuotaPollInterval`/`QuotaSwitchMargin` + accessors;
+  per-provider `Billing`; `PeakSegment`/`PeakConfig` (custom unmarshal) +
+  `Provider.peakMultiplier(now)`; `validate()`.
+- **`defaults.go`** / **`config.yaml`** — deepseek `billing: pay-as-you-go`,
+  multi-segment zhipu `peak_hours`, two new `scheduling` fields.
 
-No new CLI subcommand. `usage` keeps working (and, under the unified-parse
-choice, is refactored to call the shared parser — output must stay identical).
+No new CLI subcommand. `usage` keeps working; zhipu output is essentially unchanged
+(the `Level:` line is preserved); the other four are byte-identical.
 
 ## Components
 
-### 1. Quota model — `QuotaSnapshot`
+### 1. Quota model — `QuotaSnapshot` (in `provider/provider.go`)
 
 Normalized, provider-agnostic snapshot of one provider's polled quota:
 
@@ -111,161 +146,187 @@ const (
     BillingPlan                        // Coding/Agent Plan: windowed quotas
     BillingPayG                        // pay-as-you-go: strict last-resort
 )
+// NOTE: the iota order (Unknown=0,Plan=1,PayG=2) is NOT the scheduling order.
+// schedule() routes billing comparisons through tierRank() — see §4.
+
+type QuotaDetail struct { Label string; Used float64 }
 
 type QuotaWindow struct {
-    Label        string    // "5h", "weekly", "monthly", "spend"
-    RemainingPct float64   // 0..1
-    ResetsAt     time.Time // zero if unknown
+    Label        string        // "5h tokens", "Weekly tokens", "Monthly time", "Spend", "Balance"
+    Kind         string        // "tokens" | "time" | "money"
+    Used, Total  float64
+    RemainingPct float64       // 0..1; -1 if unmeasured (e.g. balance-only)
+    ResetsAt     time.Time     // zero if unknown
+    Details      []QuotaDetail // per-model / per-tool breakdown (display)
+    DetailLabel  string        // breakdown header for display ("By model"/"By MCP tool")
 }
 
 type QuotaSnapshot struct {
     Billing      BillingClass
-    RemainingPct float64    // binding constraint = min over windows; -1 if unknown
+    RemainingPct float64    // binding min over windows; -1 if unknown
+    Account, Plan, Level string
     Windows      []QuotaWindow
-    AsOf         time.Time  // when polled
-    Err          string     // last poll error, "" if ok
+    Notes        []string   // provider-specific status lines (display)
+    AsOf         time.Time
+    Err          string
 }
 ```
 
-`RemainingPct` = **min remaining% across that provider's windows** (the binding
-constraint). Per-provider mapping:
+`RemainingPct` = **min remaining% across that provider's windows** via
+`BindingRemaining` (which skips `RemainingPct < 0`). Per-provider mapping:
 
 | Provider | Source endpoint | Windows | Billing |
 |---|---|---|---|
-| compass | `monthly_usage` (POST, SSO cookie) | monthly $ budget → 1 window (`RemainingPct = Balance/TotalAmount`, i.e. `(total−usage)/total`) | plan |
+| compass | `monthly_usage` (POST, SSO cookie) | monthly $ budget → 1 window (`RemainingPct = Balance/TotalAmount`; zero-guard) | plan |
 | codex | `wham/usage` (GET, Bearer) | primary(5h) + secondary(weekly) + spend-control(monthly $) | plan |
 | zhipu | `quota/limit` (GET, Bearer) | TOKENS_LIMIT unit=3 (5h) + unit=6 (weekly). `TIME_LIMIT` (monthly, MCP tools) is **excluded** from `min()` — it's tool quota, not LLM tokens. | plan |
 | volcengine | `GetAFPUsage` (signed OpenAPI, AK/SK) | 5h / daily / weekly / monthly AFP | plan (→ unknown if no AK/SK) |
 | deepseek | `user/balance` (GET, Bearer) | balance only (no window) | **payg** |
 
-For compass/codex **spend** windows that are money (not a % of a hard cap),
-`RemainingPct` is computed as `(limit − used) / limit`; the window `Kind` is
-`money` for display, but it still participates in the `min()` so a provider
-nearing its monthly $ cap ranks low.
+For compass/codex **spend** windows that are money, `RemainingPct = (limit−used)/limit`;
+they still participate in the `min()` so a provider nearing its monthly $ cap ranks
+low. zhipu's `percentage` field is the **used** %, so per-window `RemainingPct =
+(100−percentage)/100`.
 
-### 2. Provider quota adapters — `Quota()` + shared parse
+### 2. Provider quota adapters — `Quota()` + parse
 
-Add `Quota() (*QuotaSnapshot, error)` to the `Provider` interface, wired through
-`cfg.QuotaFn` exactly like `UsageFn`. Each provider implements it as
-`return p.cfg.QuotaFn()`. `buildProviders` wires `QuotaFn` per `provider_id` to
-a main-package function:
+`Quota()` is added to the `Provider` interface, wired through `cfg.QuotaFn`
+exactly like `UsageFn`; each provider implements it as
+`return p.cfg.QuotaOrUnknown()` (nil `QuotaFn` → `BillingUnknown`, never panics).
+`buildProviders` wires `QuotaFn` per `provider_id` to a main-package function:
 
 ```go
+func parseZhipuQuota(body []byte, account string) (*QuotaSnapshot, error)  // pure; nil if not-zhipu body
 func fetchZhipuQuota(cfg *Config, name string, prov Provider) (*QuotaSnapshot, error)
+func parseCodexQuota(body []byte, account, plan string) (*QuotaSnapshot, error)
 func fetchCodexQuota(cfg *Config, prov Provider) (*QuotaSnapshot, error)
+func parseVolcengineQuota(u *afpUsage) *QuotaSnapshot
 func fetchVolcengineQuota(name string) (*QuotaSnapshot, error)
+func parseDeepseekQuota(body []byte) *QuotaSnapshot
 func fetchDeepseekQuota(cfg *Config, name string, prov Provider) (*QuotaSnapshot, error)
+func parseCompassQuota(mu *MonthlyProjectUsage, account string) *QuotaSnapshot
 func fetchCompassQuota(cfg *Config) (*QuotaSnapshot, error)
 ```
 
-**Unified parse (recommended):** each `fetch*Quota` owns the endpoint fetch +
-JSON parse and returns a `QuotaSnapshot`; the corresponding `show*Usage` is
-refactored to call the same function and *format* the result for the terminal.
-One parser, two consumers; no second source of truth for "what does zhipu's
-quota JSON mean". Terminal output is byte-identical to today (verified by
-snapshot test).
+`fetch*Quota` degrades to `BillingUnknown + Err` (never a hard Go error on
+auth/network/non-200 paths) so a poll failure can't crash the poller. deepseek
+returns `BillingPayG` with `RemainingPct: -1`.
 
-Pay-as-you-go / no-window providers (deepseek) still fetch balance for
-display, but return `Billing: BillingPayG` with `RemainingPct: -1` (unmeasured)
-— their rank is fixed by the billing tier, not by remaining.
+**Display (zhipu only):** `showGenericUsage`'s zhipu branch calls
+`parseZhipuQuota`, prints the `Level:` line, then the generic
+`printQuotaSnapshot(s)` renderer (bars / `% used` / reset strings / `By model` /
+`By MCP tool` labels). codex/volcengine/deepseek/compass displays are unchanged.
 
-### 3. `quotaTracker` — poll loop + persistence
+### 3. `quotaTracker` — poll loop + persistence (in `quota.go`)
 
 ```go
 type quotaTracker struct {
-    mu    sync.RWMutex
-    state map[string]*QuotaSnapshot // provider name → snapshot
-    cfg   func() *Config            // read fresh cfg each cycle (reload-safe)
-    provs func() map[string]provider.Provider
-    path  string                    // ~/.model-proxy/quota_state.json
-    stop  chan struct{}
+    mu        sync.RWMutex
+    state     map[string]*provider.QuotaSnapshot
+    path      string                    // ~/.model-proxy/quota_state.json
+    cfg       func() *Config            // RLock-brief snapshots (reload-safe)
+    provs     func() map[string]provider.Provider
+    stopCh    chan struct{}
+    stopOnce  sync.Once
+    refreshHook func(name string)       // test override for refreshOne
 }
 ```
 
 Behavior:
 
 - **Cadence** `quota_poll_interval` (default **5m**). Plus:
-  - a **bootstrap poll** ~10s after start (so data exists before the first
-    scheduling decision that needs it);
-  - an **immediate re-poll of a provider after it 429s** (`recordRateLimit`
-    kicks an async refresh), so remaining is fresh when its rate-limit clears.
+  - a **bootstrap poll** ~10s after start;
+  - an **immediate re-poll of a provider after it 429s** — `recordRateLimit`
+    spawns `go p.quota.refreshOne(name)` (after releasing `healthMu`).
+- **`pollAll`** snapshots cfg/providers via the closures, spawns one goroutine per
+  provider calling `Quota()` (no lock held during the call), records results under
+  `mu`, and `persist()`s once at the end. `refreshOne` polls a single provider.
 - **Persistence** → `~/.model-proxy/quota_state.json`, written atomically
-  (temp + `rename`) after each successful poll. **Loaded at boot** so there's a
-  baseline before the first poll completes (survives daemon restart / hot
-  reload — the explicit requirement). Format: `{ "<provider>": {billing, remaining_pct, windows, as_of, err} }`.
-- **Reload-safe:** each cycle snapshots `cfg.Providers` names via the `cfg`/`provs`
-  closures; `Proxy.reload` swaps `cfg`/`providers` atomically under `mu`; the
-  tracker picks up added providers next cycle and drops removed ones. The
-  tracker has its own `quotaMu`, separate from `healthMu` and reload `mu`.
+  (`path+".tmp"` → `os.Rename`, `MkdirAll(dir, 0o700)`, file `0o600`) after each
+  poll. **Loaded at boot** so there's a baseline before the first poll completes.
+- **Reload-safe:** `Proxy.reload` keeps the tracker (doesn't stop/recreate it) and
+  kicks `go p.quota.pollAll(time.Now())` so added/removed providers are picked up
+  immediately. The tracker reads fresh cfg/providers each cycle through closures
+  that briefly `RLock` the reload `mu`.
 - **Graceful degradation:** on `Quota()` failure (volcengine without AK/SK, not
-  logged in, network), record `Billing: BillingUnknown` + `Err`, keep the last
-  known snapshot, retry next cycle. The poller never crashes the proxy.
-- **Staleness guard:** if `AsOf` is older than `3 × quota_poll_interval`, treat
-  the snapshot as `BillingUnknown` (fall back to priority ordering) — don't act
-  on badly stale data.
+  logged in, network), record `BillingUnknown + Err`, keep the last known
+  snapshot, retry next cycle. The poller never crashes the proxy.
+- **Staleness guard:** if `AsOf` is older than `3 × quota_poll_interval`, treat the
+  snapshot as `BillingUnknown` (fall back to priority ordering).
+- Owns `quotaMu` only — independent of `healthMu` and the reload `mu`.
 
-### 4. `schedule()` — new ranking + switch rule
+### 4. `schedule()` — ranking + switch rule (in `proxy.go`)
 
-Sort key (primary → secondary):
-
-```
-1. billing tier:   plan(0)  <  unknown(1)  <  payg(2)     ← payg strict last-resort
-2. effective_remaining desc                       ← quota balance, peak-folded
-3. priority asc                                       ← existing, now final tie-breaker
-```
-
-Where:
+`schedule` calls `p.quota.allSnapshots()` **before** taking `healthMu` (lock order
+`healthMu → quotaMu`, never reversed), filters available targets (circuit/rate-limit,
+unchanged), then sorts and applies the sticky rule. Sort key (primary → secondary):
 
 ```
-effective_remaining(prov, now) =
-    RemainingPct / activePeakMultiplier(prov, now)      if Billing == plan and RemainingPct known
-    1.0                                                 if Billing == unknown   (ranked by priority only, tier 1)
-    (unused)                                            if Billing == payg       (tier 2, always last)
+1. tierRank(billing):  plan(0) < unknown(1) < payg(2)   ← payg strict last-resort
+2. effective_remaining desc                              ← quota balance, peak-folded
+3. priority asc                                          ← existing, final tie-breaker
 ```
 
-and `activePeakMultiplier` returns the multiplier of whichever peak segment
-`now` falls into (1.0 if none) — see §5.
+```go
+func tierRank(b BillingClass) int // Plan→0, Unknown→1, PayG→2 (decouples from iota)
 
-**`peak_hours` is no longer a sort tier** (today it is the primary group); it
-now lives entirely inside `effective_remaining` via the multiplier. This is a
-deliberate behavior change: a provider at 5% remaining is a real exhaustion
-risk regardless of peak, and peak is a soft, tunable latency heuristic. Set the
-multiplier to 1.0 to disable peak's effect for a provider.
+func effectiveRemaining(name, qs, now) float64 {
+    mult := peakMultiplier(now); if mult < 1 { mult = 1 }
+    s := qs[name]
+    if s == nil || s.Billing == BillingUnknown || s.RemainingPct < 0 {
+        return 1.0 / mult          // neutral; peak still discounts
+    }
+    return s.RemainingPct / mult
+}
 
-**Sticky-switch rule** (the chosen "switch when ahead, after min dwell"):
+func billingClass(name, qs) BillingClass {
+    if cfg.Providers[name].Billing == "pay-as-you-go" { return BillingPayG }
+    s := qs[name]
+    if s == nil || s.Billing == BillingUnknown || s.Err != "" { return BillingUnknown }
+    if time.Since(s.AsOf) > 3*pollInterval() { return BillingUnknown }
+    return s.Billing
+}
+```
+
+**`peak_hours` is no longer a sort tier** (it used to be the primary group); it lives
+entirely inside `effective_remaining` via the multiplier. Set a segment's multiplier
+to 1.0 to disable peak for that window.
+
+**Sticky-switch rule** (after dwell, switch to the best provider unless its only edge
+is a sub-margin quota gain):
 
 ```
 keep the current sticky provider if:
-    it is available (circuit closed, not rate-limited, not half-open-busy)
+    cur.provider != "" AND cur is in the available set (curInAvail)
   AND
-    ( now − sticky.since  <  sticky_dwell )                         ← 10m min dwell
-    OR no other *plan* provider has effective_remaining exceeding
-       the current's by ≥ quota_switch_margin                       ← "ahead by margin"
-       (config integer, percentage points; default 15 → 0.15 fraction
-        internally; comparison `eff_other − eff_current ≥ margin/100`)
+    now − sticky.since < sticky_dwell                       ← min dwell (preserve cache)
+    OR (after dwell) the best provider (availTargets[0]) does NOT win on:
+         tierRank(best) < tierRank(cur)                     ← better billing tier → switch
+         effective_remaining(best) − effective_remaining(cur) ≥ quota_switch_margin
+                                                             ← ahead by margin → switch
+         priority(best) < priority(cur)                     ← better priority (return-to-preferred) → switch
+       (i.e. stay only when same tier + sub-margin quota edge + priority not better)
 ```
 
-If the keep-condition fails, re-pick = top of the effective-remaining-sorted
-plan tier (else unknown tier, else payg). The returned `ordered` slice is
-`[chosen] + [rest in tier order]`, so failover walks next-best → … → payg last.
-Circuit / rate-limit / half-open filtering happens first (unchanged), so
-unavailable providers never enter the ranking.
+If the keep-condition fails, re-pick = `availTargets[0]`. The returned `ordered`
+slice is `[chosen] + [rest in sorted order]`, so failover walks next-best → … → payg
+last. Circuit / rate-limit / half-open filtering happens first (unchanged).
 
-Note on peak + switch interaction: because the switch compares
-*effective* remaining, a sticky provider that enters its peak window
-(effectively halved at mult=2) will commonly meet the margin against a non-peak
-peer after dwell and get switched off — exactly the desired "avoid the
-congested provider" behavior.
+Note: because the switch compares *effective* remaining, a sticky provider that
+enters its peak window (halved at mult=2) will commonly meet the margin against a
+non-peak peer after dwell and get switched off — the desired "avoid the congested
+provider" behavior. The priority arm preserves the pre-existing "return to the
+priority-1 provider after a blip, in bounded time" behavior when quota is unknown.
 
-### 5. Peak config — multi-segment, per-segment multiplier
+### 5. Peak config — multi-segment, per-segment multiplier (in `config.go`)
 
-`peak_hours` moves from a single `string` to a custom type accepting three
-forms (backward-compatible with today's single string):
+`peak_hours` is a custom type accepting three forms (backward-compatible with the
+legacy single string):
 
 ```go
 type PeakSegment struct {
     Window     string  `yaml:"window"`     // "HH:MM-HH:MM", supports wrap-around
-    Multiplier float64 `yaml:"multiplier"` // > 0; 0 → default (2.0) at validate time
+    Multiplier float64 `yaml:"multiplier"` // 0 → default (2.0); must be >= 0
 }
 type PeakConfig []PeakSegment   // custom UnmarshalYAML: string | []string | []map
 ```
@@ -273,23 +334,17 @@ type PeakConfig []PeakSegment   // custom UnmarshalYAML: string | []string | []m
 Accepted YAML shapes:
 
 ```yaml
-# legacy single string → 1 segment, default multiplier
-peak_hours: "09:00-18:00"
-
-# list of windows → N segments, default multiplier each
-peak_hours: ["09:00-12:00", "14:00-18:00"]
-
-# explicit per-segment multipliers
+peak_hours: "09:00-18:00"                                   # legacy → 1 segment, default mult
+peak_hours: ["09:00-12:00", "14:00-18:00"]                  # → N segments, default mult
 peak_hours:
-  - {window: "09:00-12:00", multiplier: 2}
+  - {window: "09:00-12:00", multiplier: 2}                  # explicit per-segment
   - {window: "14:00-18:00", multiplier: 3}
 ```
 
-`activePeakMultiplier(prov, now)` iterates segments; returns the first
-containing segment's multiplier, else 1.0. The existing `parseHHMMRange` /
-wrap-around logic is reused; `Provider.inPeak(now) bool` is replaced by
-`Provider.peakMultiplier(now) float64`. Default multiplier (when a segment
-omits it) is **2.0**.
+`Provider.peakMultiplier(now)` iterates segments; returns the first containing
+segment's multiplier (default **2.0** when omitted), else 1.0. `parseHHMMRange` /
+wrap-around logic reused. The old `Provider.inPeak` / `RouteTarget.inPeak` were
+removed (unused after the rewrite).
 
 ## Config schema (new fields)
 
@@ -298,19 +353,17 @@ providers:
   deepseek:
     provider_id: deepseek
     billing: pay-as-you-go        # NEW. default: plan. payg = strict last-resort.
-    # ...
   zhipu:
     provider_id: zhipu
     peak_hours:                   # NEW shape (multi-segment). legacy single string still valid.
       - {window: "09:00-12:00", multiplier: 2}
       - {window: "14:00-18:00", multiplier: 2}
-    # ...
 
 scheduling:
   quota_poll_interval: 5m         # NEW. background poll cadence. default 5m.
-  quota_switch_margin: 15         # NEW. switch if another plan provider's effective
-                                  #      remaining beats the sticky one by ≥ this many
-                                  #      percentage points. default 15.
+  quota_switch_margin: 15         # NEW. switch if another provider's effective remaining
+                                  #      beats the sticky one by ≥ this many percentage
+                                  #      points. default 15 (= 0.15 fraction internally).
   # unchanged: circuit_threshold, circuit_cooldown, rate_limit_backoff,
   # upstream_timeout, sticky_dwell (sticky_dwell doubles as the min-dwell-before-switch)
 ```
@@ -319,81 +372,81 @@ scheduling:
 
 ## Data flow
 
-1. Boot: `NewProxy` builds providers, **loads `quota_state.json`** into the
-   tracker (baseline), starts the poll goroutine.
+1. Boot: `NewProxy` builds providers, **loads `quota_state.json`** into the tracker
+   (baseline), starts the poll goroutine.
 2. ~10s later: bootstrap poll refreshes all providers' snapshots; file rewritten.
-3. Every `quota_poll_interval`: poll each provider in parallel (bounded), update
-   `state`, rewrite file atomically. Failed/stale → `BillingUnknown`.
+3. Every `quota_poll_interval`: `pollAll` polls each provider in parallel (no lock
+   held during `Quota()`), updates `state`, rewrites the file atomically.
+   Failed/stale → `BillingUnknown`.
 4. Request arrives → `forward` → `schedule(exposed, targets)`:
-   - filter available targets (circuit/rate-limit/half-open — unchanged);
-   - read `quotaTracker.snapshot()` (RLock);
-   - compute `effective_remaining` per target;
+   - snapshot quota via `allSnapshots()` (quotaMu RLock, brief);
+   - `healthMu.Lock()`; filter available targets (circuit/rate-limit/half-open);
+   - sort by `(tierRank, effective_remaining desc, priority asc)`;
    - apply sticky-switch rule → pick `chosen`, build `ordered`.
-5. For each target in `ordered`, `tryTarget` (unchanged); on 429,
-   `recordRateLimit` + **async re-poll** of that provider.
+5. For each target in `ordered`, `tryTarget` (unchanged); on 429, `recordRateLimit`
+   (releases `healthMu`) + **async `refreshOne`** of that provider.
 6. Hot reload (`SIGHUP`): `Proxy.reload` swaps `cfg`/`providers`; tracker keeps
-   running, picks up new providers next cycle.
+   running, kicks `pollAll`, picks up new providers immediately.
 
 ## Error handling / edge cases
 
-- **Poll failure** → log (masked, like existing logging hygiene), keep last
-  snapshot, mark `Err`, retry next cycle. Poller never crashes.
-- **Unknown quota** (volcengine no AK/SK, not logged in, poll failed) →
+- **Poll failure** → keep last snapshot, mark `Err`, retry next cycle. Poller never
+  crashes.
+- **Unknown quota** (volcengine no AK/SK, not logged in, poll failed, stale) →
   `BillingUnknown`; ranked by priority in tier 1, between plan and payg. Never
   treated as payg.
 - **Stale snapshot** (> 3× interval) → treated as unknown; fall back to priority.
 - **All plan/unknown providers unavailable** → payg tier used (the safety net).
-- **Reload race** → tracker snapshots cfg names per cycle; atomic cfg swap;
-  removed providers' entries are harmless (rebuild next cycle).
-- **First request before first poll** → uses persisted baseline; if no file,
-  unknown → priority ordering (today's behavior).
-- **volcengine without AK/SK** → `usage` already shows the note; `Quota()`
-  returns `BillingUnknown` + a sentinel error; scheduler skips it for quota
-  ranking.
-- **Concurrency** → `quotaMu` (tracker) is independent of `healthMu`
-  (circuit/rate-limit) and reload `mu`; `schedule` takes only a brief RLock on
-  the tracker.
+- **Reload race** → tracker snapshots cfg names per cycle; atomic cfg swap; removed
+  providers' entries drop next cycle.
+- **First request before first poll** → uses persisted baseline; if no file, unknown
+  → priority ordering (today's behavior).
+- **volcengine without AK/SK** → `Quota()` returns `BillingUnknown + Err`;
+  scheduler ranks it by priority.
+- **Concurrency** → `quotaMu` (tracker) independent of `healthMu` and reload `mu`;
+  `schedule` takes only a brief quotaMu RLock (via `allSnapshots()`) before
+  `healthMu`. `recordRateLimit` releases `healthMu` before spawning `refreshOne`.
 
 ## Testing (white-box, stdlib only — matches the repo)
 
-- `fetch*Quota` parsers: feed sample JSON → assert `RemainingPct` + binding
-  window. Edge cases per provider: missing window, zero quota, reset-time
-  day-wrap, spend (money) window.
-- `activePeakMultiplier` / `PeakConfig.UnmarshalYAML`: single string, list of
-  strings, list of maps, wrap-around windows, default multiplier.
-- `effective_remaining`: plan/unknown/payg × in-peak/not × known/unknown.
-- `schedule` with an injected `quotaTracker`:
-  - initial pick = highest effective-remaining plan provider;
-  - sticky kept within `sticky_dwell` even if another is ahead;
-  - after dwell, switches when ahead by ≥ margin; does *not* switch when ahead
-    by < margin;
-  - peak discount correctly forces a switch off a peak sticky after dwell;
-  - payg used iff no plan/unknown provider is available;
-  - unknown-quota provider ranked by priority in tier 1;
-  - a 429 triggers an async re-poll (assert the refresh call happens).
-- Persistence: write `quota_state.json` → new tracker → assert baseline loaded;
-  stale snapshot → unknown fallback.
-- Display regression: snapshot test asserting `usage` output is byte-identical
-  before/after the parse refactor.
+Implemented tests (`go test ./...`, 72 passing, `-race` clean):
+
+- `provider/quota_test.go` — `BindingRemaining` (skip-`-1`, min) + `QuotaOrUnknown`
+  nil-guard.
+- `config_test.go` — `PeakConfig.UnmarshalYAML` (single string / list of strings /
+  list of maps), `peakMultiplier` (in/out/wrap), `Scheduling` quota defaults.
+- `quota_test.go` — `parse*Quota` for all five providers (binding math, billing,
+  windows); `quotaTracker` persistence round-trip, staleness → Unknown,
+  `pollAll`→`Quota`.
+- `proxy_quota_test.go` — `TestProxy_QuotaRefreshOnRateLimit` (429 → refreshOne);
+  `TestSchedule_PicksMostRemaining`, `_StickyHoldsWithinDwell`,
+  `_SwitchesAfterDwellByMargin`, `_NoSwitchBelowMargin`, `_PayGStrictLastResort`,
+  `_PlanBeforeUnknown` (the tier-order regression test).
 
 ## Out of scope (v1) / future
 
 - **Per-response token/cache accounting** (the deferred "hybrid" path): parsing
-  `usage` from streaming responses to compute per-provider burn rate and
-  cache-hit rate. Would enable projected-time-to-empty ranking (Approach B)
-  and direct cache-hit-as-a-signal. Deferred — polling alone covers the goal.
-- **Weighted-random fair-share** (Approach C): only matters under high
-  concurrency / thundering-herd; the deterministic ranking suffices for a
-  single-developer proxy.
-- **Unifying `usage` display fully onto `QuotaSnapshot`** beyond parse sharing
-  (e.g. a single renderer) — optional follow-up.
-- **Per-route quota overrides** (e.g. reserve a provider for a specific model)
-  — not needed yet.
+  `usage` from streaming responses to compute per-provider burn rate and cache-hit
+  rate. Would enable projected-time-to-empty ranking and cache-hit-as-a-signal.
+  Deferred — polling alone covers the goal.
+- **Weighted-random fair-share** — only matters under high concurrency /
+  thundering-herd; the deterministic ranking suffices for a single-developer proxy.
+- **Full display unification** — route codex/volcengine/deepseek/compass displays
+  through `printQuotaSnapshot` too (currently zhipu-only), eliminating the accepted
+  dual-parse DRY cost.
+- **Per-route quota overrides** — not needed yet.
 
-## Open decisions (implementer's call — correct at review)
+## Known follow-ups (accepted Minors, not blocking)
 
-1. **Parse sharing = unified** (recommended). Fallback: scoped parse for v1
-   (duplicate the JSON structs in `fetch*Quota`, leave `show*Usage` untouched,
-   unify in a follow-up).
-2. **No hard floor** on remaining%. A floor could be added later if the
-   margin-switch proves too lenient when *all* providers are low.
+- `config.yaml`'s routes comment still says "schedules non-peak providers first"
+  (stale wording; the code is correct).
+- `PeakConfig.UnmarshalYAML` rejects an explicit `peak_hours: ""` (convention is to
+  omit the key, which works).
+- `persist()` uses a fixed tmp path; a 429-`refreshOne` racing a tick/reload
+  `pollAll` could in principle interleave bytes (in-memory state is safe; only the
+  persisted baseline is at risk across a restart). Optional: unique tmp name or a
+  persist mutex.
+- `pollAfter`'s bootstrap poll isn't selectable on `stopCh` (no production caller of
+  `stop()`; harmless).
+- `p.cfg` is read without `p.mu` in `schedule`/`billingClass`/`effectiveRemaining`
+  (preexisting pattern; `-race` clean since no test exercises reload-during-request).
