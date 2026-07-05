@@ -2,6 +2,7 @@ package provider
 
 import (
 	"net/http"
+	"time"
 )
 
 // DeepSeekProvider implements the DeepSeek API provider. A single API key
@@ -58,3 +59,6 @@ func (p *DeepSeekProvider) Logout() error                  { return p.cfg.Logout
 func (p *DeepSeekProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *DeepSeekProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
 func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+func (p *DeepSeekProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
+	return snap.Surplus(now, peakMult)
+}

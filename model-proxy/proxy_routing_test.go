@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"model-proxy/provider"
 )
@@ -157,5 +158,8 @@ func (t *testProv) Logout() error                           { return nil }
 func (t *testProv) Usage() (any, error)                     { return nil, nil }
 func (t *testProv) FetchModels() ([]string, error)          { return nil, nil }
 func (t *testProv) Quota() (*provider.QuotaSnapshot, error) { return nil, nil }
+func (t *testProv) Surplus(snap *provider.QuotaSnapshot, now time.Time, peakMult float64) float64 {
+	return snap.Surplus(now, peakMult)
+}
 
 var _ provider.Provider = (*testProv)(nil)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 )
 
 // ZhipuProvider implements the Zhipu BigModel provider using an API key
@@ -67,3 +68,6 @@ func (p *ZhipuProvider) Usage() (any, error) {
 
 func (p *ZhipuProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
 func (p *ZhipuProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+func (p *ZhipuProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
+	return snap.Surplus(now, peakMult)
+}

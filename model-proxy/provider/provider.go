@@ -28,10 +28,14 @@ type QuotaWindow struct {
 	Kind         string // "tokens" | "time" | "money"
 	Used         float64
 	Total        float64
-	RemainingPct float64   // 0..1; -1 if unmeasured (e.g. balance-only)
-	ResetsAt     time.Time // zero if unknown
+	RemainingPct float64 // 0..1; -1 if unmeasured (e.g. balance-only)
+	ResetsAt     time.Time
 	Details      []QuotaDetail
 	DetailLabel  string // breakdown header for display ("By model", "By MCP tool"); "" omits
+	// Scheduling markers, set by the provider parser:
+	Ultimate bool          // total-budget window — scheduling base + pace source
+	Short    bool          // immediate rate-cap window — peak-burn numerator
+	Duration time.Duration // nominal reset cycle (5h / 24h / 7d / 30d) for pace (f_left)
 }
 
 // QuotaSnapshot is the normalized, polled quota for one provider. It carries
@@ -39,7 +43,7 @@ type QuotaWindow struct {
 // display (Account, Plan, Level, Windows, Notes).
 type QuotaSnapshot struct {
 	Billing      BillingClass
-	RemainingPct float64 // binding min over windows; -1 if unknown
+	RemainingPct float64 // ultimate (total-budget) window remaining; -1 if unknown
 	Account      string
 	Plan         string
 	Level        string
@@ -49,19 +53,42 @@ type QuotaSnapshot struct {
 	Err          string
 }
 
-// BindingRemaining returns the minimum RemainingPct across windows whose
-// RemainingPct >= 0 (the binding constraint). Returns -1 if none measured.
-func BindingRemaining(windows []QuotaWindow) float64 {
-	min := -1.0
-	for _, w := range windows {
-		if w.RemainingPct < 0 {
-			continue
-		}
-		if min < 0 || w.RemainingPct < min {
-			min = w.RemainingPct
+// Surplus is the scheduling pace-score derived from this snapshot:
+//
+//	remaining = ultimate.remaining − short.remaining × (short.total / ultimate.total) × (peakMult − 1)
+//	fLeft     = clamp((ultimate.reset − now) / ultimate.duration, 0, 1)   // window time-left fraction
+//	surplus   = remaining − fLeft
+//
+// surplus > 0: under pace (budget would be wasted at reset → prioritize);
+// surplus < 0: over pace (will exhaust before reset → avoid);
+// surplus ≈ 0: on pace. Higher surplus sorts first. Returns 0 (neutral) when the
+// snapshot isn't a measured plan, or the ultimate window's reset cycle is unknown.
+func (s *QuotaSnapshot) Surplus(now time.Time, peakMult float64) float64 {
+	if s == nil || s.Billing != BillingPlan || s.RemainingPct < 0 {
+		return 0
+	}
+	var ult, short *QuotaWindow
+	for i := range s.Windows {
+		if s.Windows[i].Ultimate {
+			ult = &s.Windows[i]
+		} else if s.Windows[i].Short {
+			short = &s.Windows[i]
 		}
 	}
-	return min
+	if ult == nil || ult.RemainingPct < 0 || ult.Duration <= 0 || ult.ResetsAt.IsZero() {
+		return 0
+	}
+	remaining := ult.RemainingPct
+	if peakMult > 1 && short != nil && short.RemainingPct >= 0 && ult.Total > 0 && short.Total > 0 {
+		remaining -= short.RemainingPct * (short.Total / ult.Total) * (peakMult - 1)
+	}
+	fLeft := ult.ResetsAt.Sub(now).Seconds() / ult.Duration.Seconds()
+	if fLeft < 0 {
+		fLeft = 0
+	} else if fLeft > 1 {
+		fLeft = 1
+	}
+	return remaining - fLeft
 }
 
 // Authenticator is the auth-injection interface (matches main.AuthProvider).
@@ -89,6 +116,7 @@ type Provider interface {
 	Usage() (any, error)
 	FetchModels() ([]string, error)
 	Quota() (*QuotaSnapshot, error)
+	Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64
 }
 
 // Config is the provider-level config data passed to constructors.

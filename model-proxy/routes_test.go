@@ -117,65 +117,8 @@ func TestForward_Failover(t *testing.T) {
 	}
 }
 
-// TestForward_PeakHours: a target inside its peak_hours window is deprioritized
-// (effective priority increased), so a same-priority non-peak target is tried first.
-func TestForward_PeakHours(t *testing.T) {
-	peakUp, peakSeen := newCaptureUpstream(200, `{"from":"peak"}`)
-	defer peakUp.Close()
-	normalUp, normalSeen := newCaptureUpstream(200, `{"from":"normal"}`)
-	defer normalUp.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"peak":   {OpenAIBaseURL: peakUp.URL, Provider: "static", PeakHours: PeakConfig{{Window: "00:00-23:59"}}}, // always in peak → deprioritized
-			"normal": {OpenAIBaseURL: normalUp.URL, Provider: "static"},
-		},
-		Routes: map[string][]RouteTarget{
-			"m1": {
-				{Provider: "peak", Model: "m1", Priority: 0},
-				{Provider: "normal", Model: "m1", Priority: 0}, // same priority, but non-peak → tried first
-			},
-		},
-	}
-	p := NewProxy(cfg)
-	p.providers["peak"] = &testProv{key: "p"}
-	p.providers["normal"] = &testProv{key: "n"}
-	px := httptest.NewServer(http.HandlerFunc(p.handler))
-	defer px.Close()
-
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
-	if len(*normalSeen) != 1 || len(*peakSeen) != 0 {
-		t.Errorf("peak deprioritization: normal=%d peak=%d, want normal=1 peak=0", len(*normalSeen), len(*peakSeen))
-	}
-}
-
-// TestForward_PeakGrouping: non-peak targets are tried before peak targets even
-// when the peak target has a lower (better) priority — the schedule groups by
-// peak-status first, then priority.
-func TestForward_PeakGrouping(t *testing.T) {
-	peakUp, peakSeen := newCaptureUpstream(200, `{}`)
-	defer peakUp.Close()
-	normalUp, normalSeen := newCaptureUpstream(200, `{}`)
-	defer normalUp.Close()
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"peak":   {OpenAIBaseURL: peakUp.URL, Provider: "static", PeakHours: PeakConfig{{Window: "00:00-23:59"}}},
-			"normal": {OpenAIBaseURL: normalUp.URL, Provider: "static"},
-		},
-		Routes: map[string][]RouteTarget{
-			"m1": {
-				{Provider: "peak", Model: "m1", Priority: 0},   // peak group, best priority
-				{Provider: "normal", Model: "m1", Priority: 9}, // non-peak group, worse priority — but non-peak wins
-			},
-		},
-	}
-	p := NewProxy(cfg)
-	p.providers["peak"] = &testProv{key: "p"}
-	p.providers["normal"] = &testProv{key: "n"}
-	px := httptest.NewServer(http.HandlerFunc(p.handler))
-	defer px.Close()
-
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
-	if len(*normalSeen) != 1 || len(*peakSeen) != 0 {
-		t.Errorf("non-peak grouping: normal=%d peak=%d, want normal=1 peak=0 (non-peak before peak regardless of priority)", len(*normalSeen), len(*peakSeen))
-	}
-}
+// (Peak-as-a-latency-discount forward tests removed: under the surplus model,
+// peak_hours only bites via the short-window burn formula (providers need real
+// quota data). That behavior is covered at the schedule level by
+// TestSchedule_PeakBurnsShortWindow + provider.TestSurplus "peak burns short
+// window". For static/no-quota providers peak is now inert.)

@@ -66,8 +66,26 @@ func (q *quotaCountProv) Quota() (*provider.QuotaSnapshot, error) {
 }
 
 // staticQuota sets the tracker's snapshot for a provider (plan, given remaining%).
+// No windows → surplus 0 (neutral); use when only the billing tier matters.
 func staticQuota(p *Proxy, name string, rem float64) {
 	p.quota.setSnapshot(name, &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: rem, AsOf: time.Now()})
+}
+
+// staticSurplus sets a plan snapshot whose single ultimate window has the given
+// remaining and time-left fraction (reset = now + fLeft×7d). Its surplus is
+// remaining − fLeft. No short window → no peak-burn deduction.
+func staticSurplus(p *Proxy, name string, remaining, fLeft float64) {
+	now := time.Now()
+	const dur = 7 * 24 * time.Hour
+	p.quota.setSnapshot(name, &provider.QuotaSnapshot{
+		Billing:      provider.BillingPlan,
+		RemainingPct: remaining,
+		Windows: []provider.QuotaWindow{{
+			Ultimate: true, Kind: "tokens", RemainingPct: remaining, Total: 200,
+			Duration: dur, ResetsAt: now.Add(time.Duration(fLeft * float64(dur))),
+		}},
+		AsOf: now,
+	})
 }
 
 // newQuotaProxy builds a Proxy wired with a hand-built quotaTracker (no polling),
@@ -98,22 +116,22 @@ func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]
 
 // firstProvider returns the provider the scheduler tries first for a model.
 func firstProvider(p *Proxy, model string) string {
-	ordered := p.schedule(p.cfg, model, p.cfg.Routes[model])
+	ordered := p.schedule(p.cfg, p.providers, model, p.cfg.Routes[model])
 	if len(ordered) == 0 {
 		return ""
 	}
 	return ordered[0].Provider
 }
 
-func TestSchedule_PicksMostRemaining(t *testing.T) {
+func TestSchedule_PicksHighestSurplus(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]Provider{"a": {}, "b": {}, "c": {}},
 		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}, {Provider: "c"}}})
-	staticQuota(p, "a", 0.2)
-	staticQuota(p, "b", 0.8)
-	staticQuota(p, "c", 0.5)
+	staticSurplus(p, "a", 0.5, 0.5) // surplus 0 (on pace)
+	staticSurplus(p, "b", 0.5, 0)   // surplus 0.5 (waste risk → use it or lose it)
+	staticSurplus(p, "c", 0.1, 0.9) // surplus -0.8 (over pace → avoid)
 	if got := firstProvider(p, "m"); got != "b" {
-		t.Errorf("first=%q, want b (highest remaining)", got)
+		t.Errorf("first=%q, want b (highest surplus)", got)
 	}
 }
 
@@ -122,12 +140,12 @@ func TestSchedule_StickyHoldsWithinDwell(t *testing.T) {
 		map[string]Provider{"a": {}, "b": {}},
 		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
 	p.cfg.Scheduling.StickyDwell = "10m"
-	staticQuota(p, "a", 0.2) // current sticky (low)
-	staticQuota(p, "b", 0.9) // much higher
+	staticSurplus(p, "a", 0.5, 0.5) // surplus 0 (current sticky)
+	staticSurplus(p, "b", 0.5, 0)   // surplus 0.5 (higher)
 	// seed sticky on 'a'
 	p.sticky["m"] = routeSticky{provider: "a", since: time.Now()}
 	if got := firstProvider(p, "m"); got != "a" {
-		t.Errorf("within dwell: first=%q, want a (sticky despite lower remaining)", got)
+		t.Errorf("within dwell: first=%q, want a (sticky despite lower surplus)", got)
 	}
 }
 
@@ -136,8 +154,8 @@ func TestSchedule_SwitchesAfterDwellByMargin(t *testing.T) {
 		map[string]Provider{"a": {}, "b": {}},
 		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
 	p.cfg.Scheduling.StickyDwell = "1ms"
-	staticQuota(p, "a", 0.4)
-	staticQuota(p, "b", 0.8) // ahead by 0.4 ≥ 0.15 margin
+	staticSurplus(p, "a", 0.5, 0.5) // surplus 0
+	staticSurplus(p, "b", 0.5, 0)   // surplus 0.5 — ahead by 0.5 ≥ 0.15 margin
 	p.sticky["m"] = routeSticky{provider: "a", since: time.Now().Add(-time.Second)}
 	time.Sleep(2 * time.Millisecond) // dwell expired
 	if got := firstProvider(p, "m"); got != "b" {
@@ -150,8 +168,8 @@ func TestSchedule_NoSwitchBelowMargin(t *testing.T) {
 		map[string]Provider{"a": {}, "b": {}},
 		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
 	p.cfg.Scheduling.StickyDwell = "1ms"
-	staticQuota(p, "a", 0.5)
-	staticQuota(p, "b", 0.6) // ahead by 0.1 < 0.15 margin
+	staticSurplus(p, "a", 0.5, 0.2)  // surplus 0.3
+	staticSurplus(p, "b", 0.5, 0.15) // surplus 0.35 — ahead by 0.05 < 0.15 margin
 	p.sticky["m"] = routeSticky{provider: "a", since: time.Now().Add(-time.Second)}
 	time.Sleep(2 * time.Millisecond)
 	if got := firstProvider(p, "m"); got != "a" {
@@ -191,21 +209,29 @@ func TestSchedule_PlanBeforeUnknown(t *testing.T) {
 	}
 }
 
-// TestSchedule_PeakDiscountsEffectiveRemaining: at equal raw remaining, a
-// provider inside a peak window (multiplier 2) has its effective remaining
-// halved, so a non-peak peer ranks ahead. (Peak is folded into effective
-// remaining, not a separate sort tier.)
-func TestSchedule_PeakDiscountsEffectiveRemaining(t *testing.T) {
+// TestSchedule_PeakBurnsShortWindow: a provider in peak (multiplier 2) with a
+// short rate-cap window has its surplus reduced by the peak-burn deduction, so a
+// non-peak peer (same ultimate remaining + time-left) ranks ahead.
+func TestSchedule_PeakBurnsShortWindow(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]Provider{
 			"plain": {},
 			"peak":  {PeakHours: PeakConfig{{Window: "00:00-23:59", Multiplier: 2}}},
 		},
 		map[string][]RouteTarget{"m": {{Provider: "plain"}, {Provider: "peak"}}})
-	staticQuota(p, "plain", 0.5)
-	staticQuota(p, "peak", 0.5) // same raw remaining, but peak → effective 0.25
+	now := time.Now()
+	const dur = 7 * 24 * time.Hour
+	ult := provider.QuotaWindow{Ultimate: true, Kind: "tokens", RemainingPct: 0.5, Total: 200,
+		Duration: dur, ResetsAt: now.Add(dur / 2)} // fLeft 0.5
+	// plain: ultimate only → surplus 0.5 − 0.5 = 0.
+	p.quota.setSnapshot("plain", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5,
+		Windows: []provider.QuotaWindow{ult}, AsOf: now})
+	// peak: ultimate + short (rem 0.6, total 100 → share 0.5); peak mult 2 →
+	// remaining = 0.5 − 0.6×0.5×1 = 0.2 → surplus 0.2 − 0.5 = −0.3.
+	p.quota.setSnapshot("peak", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5,
+		Windows: []provider.QuotaWindow{ult, {Short: true, Kind: "tokens", RemainingPct: 0.6, Total: 100}}, AsOf: now})
 	if got := firstProvider(p, "m"); got != "plain" {
-		t.Errorf("first=%q, want plain (peak provider's effective remaining is discounted)", got)
+		t.Errorf("first=%q, want plain (peak provider's surplus reduced by short-window burn)", got)
 	}
 }
 

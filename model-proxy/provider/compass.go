@@ -3,6 +3,7 @@ package provider
 import (
 	"net/http"
 	"strings"
+	"time"
 )
 
 // CompassProvider wraps the main package's CQP auth + SSO login + monthly_usage.
@@ -37,3 +38,6 @@ func (p *CompassProvider) Logout() error                  { return p.cfg.LogoutF
 func (p *CompassProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *CompassProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
 func (p *CompassProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+func (p *CompassProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
+	return snap.Surplus(now, peakMult)
+}

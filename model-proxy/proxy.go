@@ -285,7 +285,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		upPath = strings.TrimPrefix(upPath, "/v1")
 	}
 
-	ordered := p.schedule(cfg, exposed, targets)
+	ordered := p.schedule(cfg, provs, exposed, targets)
 
 	for ti, t := range ordered {
 		prov, ok := cfg.Providers[t.Provider]
@@ -448,11 +448,11 @@ func tierRank(b provider.BillingClass) int {
 // schedule returns targets in try-order using quota-aware ranking:
 //
 //	tier: plan < unknown < payg (pay-as-you-go is strict last-resort)
-//	within tier: effective_remaining desc (peak-discounted), then priority asc.
+//	within tier: surplus desc (peak-adjusted remaining vs window time-left), then priority asc.
 //
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
-// then re-selects the best unless the best's only edge is a sub-margin quota gain.
-func (p *Proxy) schedule(cfg *Config, exposed string, targets []RouteTarget) []RouteTarget {
+// then re-selects the best unless the best's only edge is a sub-margin surplus gain.
+func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, exposed string, targets []RouteTarget) []RouteTarget {
 	now := time.Now()
 	sched := cfg.Scheduling
 	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
@@ -475,7 +475,20 @@ func (p *Proxy) schedule(cfg *Config, exposed string, targets []RouteTarget) []R
 	}
 
 	billingOf := func(name string) provider.BillingClass { return p.billingClass(cfg, name, qs) }
-	effOf := func(name string) float64 { return p.effectiveRemaining(cfg, name, qs, now) }
+	surplusOf := func(name string) float64 {
+		peakMult := cfg.Providers[name].peakMultiplier(now)
+		if peakMult < 1 {
+			peakMult = 1
+		}
+		snap := qs[name]
+		if impl := provs[name]; impl != nil {
+			return impl.Surplus(snap, now, peakMult) // provider-owned (delegates to snap.Surplus)
+		}
+		if snap == nil {
+			return 0
+		}
+		return snap.Surplus(now, peakMult)
+	}
 
 	sort.SliceStable(availTargets, func(i, j int) bool {
 		bi, bj := billingOf(availTargets[i].Provider), billingOf(availTargets[j].Provider)
@@ -483,9 +496,9 @@ func (p *Proxy) schedule(cfg *Config, exposed string, targets []RouteTarget) []R
 		if ri != rj {
 			return ri < rj
 		}
-		ei, ej := effOf(availTargets[i].Provider), effOf(availTargets[j].Provider)
-		if ei != ej {
-			return ei > ej
+		si, sj := surplusOf(availTargets[i].Provider), surplusOf(availTargets[j].Provider)
+		if si != sj {
+			return si > sj // higher surplus first (use it or lose it)
 		}
 		return availTargets[i].Priority < availTargets[j].Priority
 	})
@@ -522,12 +535,12 @@ func (p *Proxy) schedule(cfg *Config, exposed string, targets []RouteTarget) []R
 					keepSticky = false // best has a better billing tier
 				case rb > rc:
 					keepSticky = true // current has a better tier
-				case effOf(best.Provider)-effOf(cur.provider) >= margin:
-					keepSticky = false // best ahead by quota margin (quota wins over priority)
+				case surplusOf(best.Provider)-surplusOf(cur.provider) >= margin:
+					keepSticky = false // best ahead by surplus margin
 				case best.Priority < curPrio:
-					keepSticky = false // quota ~equal; best has better priority → return to preferred
+					keepSticky = false // surplus ~equal; best has better priority → return to preferred
 				default:
-					keepSticky = true // same tier, sub-margin quota edge, priority not better → preserve cache
+					keepSticky = true // same tier, sub-margin surplus, priority not better → preserve cache
 				}
 			}
 		}
@@ -559,25 +572,6 @@ func (p *Proxy) schedule(cfg *Config, exposed string, targets []RouteTarget) []R
 // interval, or one carrying an error, is treated as Unknown.
 func (p *Proxy) billingClass(cfg *Config, name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
 	return classifyBilling(qs[name], cfg.Providers[name].Billing, cfg.Scheduling.pollInterval())
-}
-
-// effectiveRemaining discounts remaining quota by the active peak multiplier.
-// Only meaningful for plan providers; a nil / unknown-billing / unmeasured
-// snapshot yields the neutral value 1.0 (still peak-discounted, so a peak
-// provider with no quota data is deprioritized relative to a non-peak one —
-// peak describes consumption rate, which applies regardless of whether we
-// know the exact quota). This keeps priority as the tiebreak among equally
-// unknown providers, matching the old inPeak+priority ordering.
-func (p *Proxy) effectiveRemaining(cfg *Config, name string, qs map[string]*provider.QuotaSnapshot, now time.Time) float64 {
-	mult := cfg.Providers[name].peakMultiplier(now)
-	if mult < 1 {
-		mult = 1
-	}
-	s := qs[name]
-	if s == nil || s.Billing == provider.BillingUnknown || s.RemainingPct < 0 {
-		return 1.0 / mult
-	}
-	return s.RemainingPct / mult
 }
 
 // available reports whether a provider may be tried: not rate-limited, and

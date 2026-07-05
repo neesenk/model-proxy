@@ -456,6 +456,17 @@ func showCodexUsage(cfg *Config, prov Provider) {
 // parseCodexQuota parses codex /backend-api/wham/usage into a QuotaSnapshot.
 // Windows: primary(5h) + secondary(weekly) + spend(monthly $). Credits/rate-limit
 // status go to Notes for display.
+// ultimateRemaining returns the RemainingPct of the window marked Ultimate,
+// or -1 if there is none (the parser then can't derive a scheduling base).
+func ultimateRemaining(windows []provider.QuotaWindow) float64 {
+	for _, w := range windows {
+		if w.Ultimate {
+			return w.RemainingPct
+		}
+	}
+	return -1
+}
+
 func parseCodexQuota(body []byte, account, plan string) (*provider.QuotaSnapshot, error) {
 	var u struct {
 		Email    string `json:"email"`
@@ -532,9 +543,14 @@ func parseCodexQuota(body []byte, account, plan string) (*provider.QuotaSnapshot
 			Kind:         "money",
 			RemainingPct: float64(100-il.UsedPercent) / 100.0,
 			ResetsAt:     now.Add(time.Duration(il.ResetAfter) * time.Second),
+			Ultimate:     true,
+			Duration:     30 * 24 * time.Hour,
 		})
 	}
-	s.RemainingPct = provider.BindingRemaining(s.Windows)
+	// primary(5h)/secondary(weekly) are token rate-caps of a different unit than
+	// the $ spend budget, so they're not marked Short (peak-burn share undefined);
+	// their exhaustion is handled reactively via 429. Ultimate = monthly spend.
+	s.RemainingPct = ultimateRemaining(s.Windows)
 	return s, nil
 }
 
@@ -611,7 +627,6 @@ func parseZhipuQuota(body []byte, account string) (*provider.QuotaSnapshot, erro
 		Plan:    z.Data.Level,
 		AsOf:    time.Now(),
 	}
-	var binding []provider.QuotaWindow // only TOKENS_LIMIT contribute to the binding min
 	for _, l := range z.Data.Limits {
 		w := provider.QuotaWindow{
 			Label:        zhipuLimitLabel(l.Type, l.Unit),
@@ -623,6 +638,15 @@ func parseZhipuQuota(body []byte, account string) (*provider.QuotaSnapshot, erro
 		} else {
 			w.Kind = "tokens"
 			w.DetailLabel = "By model"
+			// TOKENS_LIMIT windows: unit 3 = 5h (immediate rate cap), unit 6 = weekly (total budget).
+			switch l.Unit {
+			case 3:
+				w.Short = true
+				w.Duration = 5 * time.Hour
+			case 6:
+				w.Ultimate = true
+				w.Duration = 7 * 24 * time.Hour
+			}
 		}
 		if l.CurrentValue != nil && l.Remaining != nil {
 			w.Used = float64(*l.CurrentValue)
@@ -635,11 +659,8 @@ func parseZhipuQuota(body []byte, account string) (*provider.QuotaSnapshot, erro
 			w.Details = append(w.Details, provider.QuotaDetail{Label: ud.ModelCode, Used: float64(ud.Usage)})
 		}
 		s.Windows = append(s.Windows, w)
-		if l.Type == "TOKENS_LIMIT" {
-			binding = append(binding, w)
-		}
 	}
-	s.RemainingPct = provider.BindingRemaining(binding)
+	s.RemainingPct = ultimateRemaining(s.Windows)
 	return s, nil
 }
 
@@ -906,7 +927,7 @@ func printAFPWindow(label string, w afpWindow) {
 // parseVolcengineQuota converts the GetAFPUsage result into a QuotaSnapshot.
 func parseVolcengineQuota(u *afpUsage) *provider.QuotaSnapshot {
 	s := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Plan: u.PlanType, AsOf: time.Now()}
-	add := func(label string, w afpWindow) {
+	add := func(label string, w afpWindow, ultimate, short bool, dur time.Duration) {
 		rem := -1.0
 		if w.Quota > 0 {
 			rem = (w.Quota - w.Used) / w.Quota
@@ -918,13 +939,14 @@ func parseVolcengineQuota(u *afpUsage) *provider.QuotaSnapshot {
 		s.Windows = append(s.Windows, provider.QuotaWindow{
 			Label: label, Kind: "tokens",
 			Used: w.Used, Total: w.Quota, RemainingPct: rem, ResetsAt: reset,
+			Ultimate: ultimate, Short: short, Duration: dur,
 		})
 	}
-	add("5h", u.AFPFiveHour)
-	add("daily", u.AFPDaily)
-	add("weekly", u.AFPWeekly)
-	add("monthly", u.AFPMonthly)
-	s.RemainingPct = provider.BindingRemaining(s.Windows)
+	add("5h", u.AFPFiveHour, false, true, 5*time.Hour)
+	add("daily", u.AFPDaily, false, false, 24*time.Hour)
+	add("weekly", u.AFPWeekly, false, false, 7*24*time.Hour)
+	add("monthly", u.AFPMonthly, true, false, 30*24*time.Hour)
+	s.RemainingPct = ultimateRemaining(s.Windows)
 	return s
 }
 
@@ -1007,6 +1029,7 @@ func parseCompassQuota(mu *MonthlyProjectUsage, account string) *provider.QuotaS
 	s.Windows = append(s.Windows, provider.QuotaWindow{
 		Label: "Monthly", Kind: "money",
 		Used: mu.Usage, Total: mu.TotalAmount, RemainingPct: rem,
+		Ultimate: true, Duration: 30 * 24 * time.Hour,
 	})
 	s.RemainingPct = rem
 	return s

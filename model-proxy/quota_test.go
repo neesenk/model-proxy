@@ -69,9 +69,9 @@ func TestParseCodexQuota(t *testing.T) {
 	if s.Account != "a@b.com" || s.Plan != "pro" {
 		t.Errorf("Account/Plan=%q/%q", s.Account, s.Plan)
 	}
-	// binding = min(primary rem 0.7, weekly rem 0.4, spend rem 0.75) = 0.4
-	if s.RemainingPct != 0.4 {
-		t.Errorf("RemainingPct=%v, want 0.4 (weekly binding)", s.RemainingPct)
+	// ultimate = monthly spend → RemainingPct = 0.75 (primary/weekly are token rate-caps, not ultimate).
+	if s.RemainingPct != 0.75 {
+		t.Errorf("RemainingPct=%v, want 0.75 (spend ultimate)", s.RemainingPct)
 	}
 }
 
@@ -86,9 +86,9 @@ func TestParseVolcengineQuota(t *testing.T) {
 	if s.Billing != provider.BillingPlan {
 		t.Errorf("Billing=%v, want Plan", s.Billing)
 	}
-	// binding = min(5h rem 0.2, weekly rem 0.7, monthly rem 0.9) = 0.2
-	if s.RemainingPct != 0.2 {
-		t.Errorf("RemainingPct=%v, want 0.2 (5h binding)", s.RemainingPct)
+	// ultimate = monthly → RemainingPct = 0.9 (5h is the short rate-cap).
+	if s.RemainingPct != 0.9 {
+		t.Errorf("RemainingPct=%v, want 0.9 (monthly ultimate)", s.RemainingPct)
 	}
 	if s.Plan != "agent-plan" {
 		t.Errorf("Plan=%q", s.Plan)
@@ -190,6 +190,9 @@ func (s *snapshotProv) Usage() (any, error)                                    {
 func (s *snapshotProv) FetchModels() ([]string, error)                         { return nil, nil }
 func (s *snapshotProv) Quota() (*provider.QuotaSnapshot, error) {
 	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: s.rem, AsOf: time.Now()}, nil
+}
+func (s *snapshotProv) Surplus(snap *provider.QuotaSnapshot, now time.Time, peakMult float64) float64 {
+	return snap.Surplus(now, peakMult)
 }
 
 // quotaCallProv wraps snapshotProv, counting Quota() calls (with an optional

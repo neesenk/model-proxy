@@ -3,6 +3,7 @@ package provider
 import (
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // VolcengineProvider implements the Volcengine Ark (火山方舟) provider, including
@@ -54,6 +55,9 @@ func (p *VolcengineProvider) Login() error                   { return p.cfg.Logi
 func (p *VolcengineProvider) Logout() error                  { return p.cfg.LogoutFn() }
 func (p *VolcengineProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *VolcengineProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+func (p *VolcengineProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
+	return snap.Surplus(now, peakMult)
+}
 func (p *VolcengineProvider) FetchModels() ([]string, error) {
 	if p.cfg.FetchModelsFn != nil {
 		return p.cfg.FetchModelsFn()

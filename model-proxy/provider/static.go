@@ -2,6 +2,7 @@ package provider
 
 import (
 	"net/http"
+	"time"
 )
 
 // StaticProvider is for providers with a static key in config (no login/usage).
@@ -35,6 +36,9 @@ func (p *StaticProvider) Usage() (any, error) {
 }
 func (p *StaticProvider) FetchModels() ([]string, error) { return nil, errNotSupported }
 func (p *StaticProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+func (p *StaticProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
+	return snap.Surplus(now, peakMult)
+}
 
 var errNotSupported = &notSupportedErr{}
 

@@ -100,8 +100,8 @@ claude_mapping:
 # its peak window.
 routes:
   glm-5.2:
-    - {provider: compass, model: glm-5.2, priority: 1}
-    - {provider: zhipu,   model: glm-5.2, priority: 2}
+    - {provider: zhipu,   model: glm-5.2, priority: 1}
+    - {provider: compass, model: glm-5.2, priority: 2}
   deepseek-v4-pro:
     - {provider: compass,  model: deepseek-v4-pro, priority: 1}
     - {provider: deepseek, model: deepseek-v4-pro, priority: 2}
