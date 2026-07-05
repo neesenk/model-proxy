@@ -21,6 +21,10 @@ type quotaTracker struct {
 	cfg    func() *Config
 	provs  func() map[string]provider.Provider
 	stopCh chan struct{}
+	stopOnce sync.Once
+	// refreshHook, if set, replaces refreshOne's real poll — used by tests to
+	// observe refreshes without hitting a network. If nil, the real poll runs.
+	refreshHook func(name string)
 }
 
 func newQuotaTracker(path string, cfg func() *Config, provs func() map[string]provider.Provider) *quotaTracker {
@@ -52,7 +56,7 @@ func (t *quotaTracker) start() {
 	}()
 }
 
-func (t *quotaTracker) stop() { close(t.stopCh) }
+func (t *quotaTracker) stop() { t.stopOnce.Do(func() { close(t.stopCh) }) }
 
 func (t *quotaTracker) pollAfter(d time.Duration) {
 	go func() {
@@ -97,8 +101,13 @@ func (t *quotaTracker) pollAll(now time.Time) {
 	t.persist()
 }
 
-// refreshOne re-polls a single provider (called after a 429).
+// refreshOne re-polls a single provider (called after a 429). If a refreshHook
+// is installed it replaces the real poll (used by tests).
 func (t *quotaTracker) refreshOne(name string) {
+	if t.refreshHook != nil {
+		t.refreshHook(name)
+		return
+	}
 	provs := t.provs()
 	p := provs[name]
 	if p == nil {

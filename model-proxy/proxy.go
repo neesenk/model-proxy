@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +29,7 @@ type Proxy struct {
 	client    *http.Client
 	health    map[string]*providerHealth // provider name → circuit/rate-limit state
 	sticky    map[string]routeSticky     // exposed model → current provider + since
+	quota     *quotaTracker              // background quota poller; nil only in degenerate tests
 }
 
 // providerHealth tracks a provider's circuit-breaker and rate-limit state.
@@ -110,7 +113,30 @@ func NewProxy(cfg *Config) *Proxy {
 		health:    map[string]*providerHealth{},
 		sticky:    map[string]routeSticky{},
 	}
+	// The tracker reads cfg/providers asynchronously via the snapshot closures
+	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
+	home, _ := os.UserHomeDir()
+	qpath := filepath.Join(home, ".model-proxy", "quota_state.json")
+	p.quota = newQuotaTracker(qpath,
+		func() *Config { return p.cfgSnapshot() },
+		func() map[string]provider.Provider { return p.providerSnapshot() })
+	p.quota.start()
 	return p
+}
+
+// cfgSnapshot returns the current config under a brief read lock. Used by the
+// quota tracker (which reads cfg asynchronously from its poll goroutine).
+func (p *Proxy) cfgSnapshot() *Config {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cfg
+}
+
+// providerSnapshot returns the current provider map under a brief read lock.
+func (p *Proxy) providerSnapshot() map[string]provider.Provider {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.providers
 }
 
 func (p *Proxy) reload(configPath string) error {
@@ -129,6 +155,12 @@ func (p *Proxy) reload(configPath string) error {
 	p.health = map[string]*providerHealth{}
 	p.sticky = map[string]routeSticky{}
 	p.healthMu.Unlock()
+	// The tracker reads the new cfg/providers via its snapshot closures, so it
+	// is NOT stopped/recreated on reload. Kick an immediate poll so newly added
+	// providers show up at once (removed ones simply go stale and age out).
+	if p.quota != nil {
+		go p.quota.pollAll(time.Now())
+	}
 	return nil
 }
 
@@ -537,10 +569,12 @@ func (p *Proxy) recordFailure(name string) {
 }
 
 // recordRateLimit marks a provider rate-limited until `until` (extends if later)
-// and clears any half-open slot. Does not count toward the circuit.
+// and clears any half-open slot. Does not count toward the circuit. It then
+// triggers an async quota refresh of the provider so its snapshot is fresh when
+// the rate-limit clears. healthMu is released BEFORE spawning refreshOne —
+// refreshOne takes quotaMu internally and we never nest the two locks.
 func (p *Proxy) recordRateLimit(name string, until time.Time) {
 	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
 	h := p.health[name]
 	if h == nil {
 		h = &providerHealth{}
@@ -549,6 +583,10 @@ func (p *Proxy) recordRateLimit(name string, until time.Time) {
 	h.halfOpenInFlight = false
 	if until.After(h.rateLimitedUntil) {
 		h.rateLimitedUntil = until
+	}
+	p.healthMu.Unlock()
+	if p.quota != nil {
+		go p.quota.refreshOne(name)
 	}
 }
 
