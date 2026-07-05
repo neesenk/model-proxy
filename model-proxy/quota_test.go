@@ -1,7 +1,10 @@
 package main
 
 import (
+	"net/http"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"model-proxy/provider"
 )
@@ -114,4 +117,56 @@ func TestParseCompassQuota(t *testing.T) {
 	if s.RemainingPct != 0.7 {
 		t.Errorf("RemainingPct=%v, want 0.7", s.RemainingPct)
 	}
+}
+
+func TestQuotaTracker_PersistAndLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quota_state.json")
+	cfg := func() *Config { return &Config{} }
+	provs := func() map[string]provider.Provider { return nil }
+	tr := newQuotaTracker(path, cfg, provs)
+	tr.setSnapshot("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.42, AsOf: time.Now()})
+	tr.persist()
+
+	tr2 := newQuotaTracker(path, cfg, provs)
+	tr2.load()
+	if s := tr2.snapshot("zhipu"); s == nil || s.RemainingPct != 0.42 {
+		t.Fatalf("after reload: %+v", s)
+	}
+}
+
+func TestQuotaTracker_StaleIsUnknown(t *testing.T) {
+	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"), func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
+	tr.setSnapshot("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now().Add(-30 * time.Minute)})
+	if c := tr.effectiveBilling("zhipu", 5*time.Minute); c != provider.BillingUnknown {
+		t.Errorf("stale snapshot billing=%v, want Unknown", c)
+	}
+}
+
+func TestQuotaTracker_PollAllCallsQuota(t *testing.T) {
+	dir := t.TempDir()
+	tr := newQuotaTracker(filepath.Join(dir, "q.json"),
+		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}} },
+		func() map[string]provider.Provider {
+			return map[string]provider.Provider{"x": &snapshotProv{rem: 0.77}}
+		},
+	)
+	tr.pollAll(time.Now())
+	if s := tr.snapshot("x"); s == nil || s.RemainingPct != 0.77 {
+		t.Fatalf("pollAll did not populate: %+v", s)
+	}
+}
+
+// snapshotProv is a test Provider returning a fixed snapshot.
+type snapshotProv struct{ rem float64 }
+
+func (s *snapshotProv) AuthHeaders(*http.Request) error                        { return nil }
+func (s *snapshotProv) Refresh() error                                         { return nil }
+func (s *snapshotProv) RewriteRequest(string, []byte, string) (string, []byte) { return "", nil }
+func (s *snapshotProv) Login() error                                           { return nil }
+func (s *snapshotProv) Logout() error                                          { return nil }
+func (s *snapshotProv) Usage() (any, error)                                    { return nil, nil }
+func (s *snapshotProv) FetchModels() ([]string, error)                         { return nil, nil }
+func (s *snapshotProv) Quota() (*provider.QuotaSnapshot, error) {
+	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: s.rem, AsOf: time.Now()}, nil
 }
