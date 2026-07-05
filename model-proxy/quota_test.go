@@ -89,3 +89,29 @@ func TestParseVolcengineQuota(t *testing.T) {
 		t.Errorf("Plan=%q", s.Plan)
 	}
 }
+
+func TestParseDeepseekQuota(t *testing.T) {
+	body := []byte(`{"is_available":true,"balance_infos":[
+		{"currency":"CNY","total_balance":"10.50","granted_balance":"8.00","topped_up_balance":"2.50"}]}`)
+	s := parseDeepseekQuota(body)
+	if s.Billing != provider.BillingPayG {
+		t.Errorf("Billing=%v, want PayG", s.Billing)
+	}
+	if s.RemainingPct != -1 {
+		t.Errorf("RemainingPct=%v, want -1 (balance has no window)", s.RemainingPct)
+	}
+	if len(s.Windows) != 1 || s.Windows[0].Total != 10.5 {
+		t.Errorf("balance window: %+v", s.Windows)
+	}
+}
+
+func TestParseCompassQuota(t *testing.T) {
+	mu := &MonthlyProjectUsage{TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
+	s := parseCompassQuota(mu, "alice@example.com")
+	if s.Billing != provider.BillingPlan {
+		t.Errorf("Billing=%v, want Plan", s.Billing)
+	}
+	if s.RemainingPct != 0.7 {
+		t.Errorf("RemainingPct=%v, want 0.7", s.RemainingPct)
+	}
+}

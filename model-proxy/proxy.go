@@ -63,6 +63,7 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 			pcfg.LoginFn = func() error { return runLogin(cfg) }
 			pcfg.LogoutFn = func() error { return clearAccount(authFilePath("compass", "oauth_auth")) }
 			pcfg.UsageFn = func() (any, error) { return showCompassUsageData(cfg) }
+			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchCompassQuota(cfg) }
 		case "codex":
 			pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
 			pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
@@ -77,6 +78,7 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }
 			pcfg.UsageFn = func() (any, error) { return showDeepseekUsageData(cfg, name, prov) }
+			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchDeepseekQuota(cfg, name, prov) }
 		case "volcengine":
 			pcfg.LoginFn = func() error { return runVolcengineLoginErr(cfg, name, prov) }
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }

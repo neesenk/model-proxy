@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -936,6 +937,92 @@ func fetchVolcengineQuota(name string) (*provider.QuotaSnapshot, error) {
 		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
 	}
 	return parseVolcengineQuota(u), nil
+}
+
+// parseDeepseekQuota parses /user/balance. deepseek is pay-as-you-go: no window,
+// RemainingPct unmeasured (-1). Balance kept as a single window for display.
+func parseDeepseekQuota(body []byte) *provider.QuotaSnapshot {
+	var u struct {
+		IsAvailable  bool `json:"is_available"`
+		BalanceInfos []struct {
+			Currency        string `json:"currency"`
+			TotalBalance    string `json:"total_balance"`
+			GrantedBalance  string `json:"granted_balance"`
+			ToppedUpBalance string `json:"topped_up_balance"`
+		} `json:"balance_infos"`
+	}
+	s := &provider.QuotaSnapshot{Billing: provider.BillingPayG, RemainingPct: -1, AsOf: time.Now()}
+	if err := json.Unmarshal(body, &u); err != nil {
+		s.Err = err.Error()
+		return s
+	}
+	if !u.IsAvailable {
+		s.Notes = append(s.Notes, "insufficient balance")
+	}
+	for _, b := range u.BalanceInfos {
+		total, _ := strconv.ParseFloat(b.TotalBalance, 64)
+		s.Windows = append(s.Windows, provider.QuotaWindow{
+			Label: or(b.Currency, "Balance"), Kind: "money",
+			Total: total, RemainingPct: -1,
+			Details: []provider.QuotaDetail{
+				{Label: "granted", Used: atof(b.GrantedBalance)},
+				{Label: "topped-up", Used: atof(b.ToppedUpBalance)},
+			},
+		})
+	}
+	return s
+}
+
+func atof(s string) float64 { f, _ := strconv.ParseFloat(s, 64); return f }
+
+// fetchDeepseekQuota GETs /user/balance.
+func fetchDeepseekQuota(cfg *Config, name string, prov Provider) (*provider.QuotaSnapshot, error) {
+	auth := newAuthProvider(prov.Provider, name, cfg)
+	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
+	if err := auth.Inject(req); err != nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	}
+	return parseDeepseekQuota(body), nil
+}
+
+// parseCompassQuota converts monthly_usage into a single-window plan snapshot.
+func parseCompassQuota(mu *MonthlyProjectUsage, account string) *provider.QuotaSnapshot {
+	s := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Account: account, Plan: mu.Plan, AsOf: time.Now()}
+	rem := -1.0
+	if mu.TotalAmount > 0 {
+		rem = mu.Balance / mu.TotalAmount
+	}
+	s.Windows = append(s.Windows, provider.QuotaWindow{
+		Label: "Monthly", Kind: "money",
+		Used: mu.Usage, Total: mu.TotalAmount, RemainingPct: rem,
+	})
+	s.RemainingPct = rem
+	return s
+}
+
+// fetchCompassQuota mints the CQP key + POSTs monthly_usage.
+func fetchCompassQuota(cfg *Config) (*provider.QuotaSnapshot, error) {
+	path := authFilePath("compass", "oauth_auth")
+	a, _ := loadAccount(path)
+	c := newCompassClient(path)
+	mu, err := c.MonthlyUsage()
+	if err != nil {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	}
+	acct := ""
+	if a != nil {
+		acct = a.Email
+	}
+	return parseCompassQuota(mu, acct), nil
 }
 
 func listConfigModels(prov Provider) {
