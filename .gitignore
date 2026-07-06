@@ -22,3 +22,4 @@ yarn-error.log*
 
 # Agent/IDE session state
 .omx/
+*.swp
