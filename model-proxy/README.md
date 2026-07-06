@@ -184,8 +184,7 @@ providers:
     provider_id: zhipu
     billing: plan                   # 默认；显式写也可
     peak_hours:                     # 三种写法都支持
-      - {window: "09:00-12:00", multiplier: 2.0}
-      - {window: "14:00-18:00", multiplier: 1.5}
+      - {window: "14:00-18:00", multiplier: 2}
     # ...
 
 scheduling:

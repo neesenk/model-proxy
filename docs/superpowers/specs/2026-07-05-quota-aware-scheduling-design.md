@@ -371,7 +371,6 @@ providers:
   zhipu:
     provider_id: zhipu
     peak_hours:                   # NEW shape (multi-segment). legacy single string still valid.
-      - {window: "09:00-12:00", multiplier: 2}
       - {window: "14:00-18:00", multiplier: 2}
 
 scheduling:

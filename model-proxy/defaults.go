@@ -19,7 +19,6 @@ providers:
     provider_id: compass
     cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     # peak_hours:                       # multi-segment, per-segment multiplier
-    #   - {window: "09:00-12:00", multiplier: 2}
     #   - {window: "14:00-18:00", multiplier: 2}
     models:
       glm-5.2:           {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
