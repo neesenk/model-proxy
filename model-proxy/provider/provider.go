@@ -67,20 +67,29 @@ func (s *QuotaSnapshot) Surplus(now time.Time, peakMult float64) float64 {
 	if s == nil || s.Billing != BillingPlan || s.RemainingPct < 0 {
 		return 0
 	}
-	var ult, short *QuotaWindow
+	var ult *QuotaWindow
+	var shorts []QuotaWindow
 	for i := range s.Windows {
 		if s.Windows[i].Ultimate {
 			ult = &s.Windows[i]
 		} else if s.Windows[i].Short {
-			short = &s.Windows[i]
+			shorts = append(shorts, s.Windows[i])
 		}
 	}
 	if ult == nil || ult.RemainingPct < 0 || ult.Duration <= 0 || ult.ResetsAt.IsZero() {
 		return 0
 	}
 	remaining := ult.RemainingPct
-	if peakMult > 1 && short != nil && short.RemainingPct >= 0 && ult.Total > 0 && short.Total > 0 {
-		remaining -= short.RemainingPct * (short.Total / ult.Total) * (peakMult - 1)
+	if peakMult > 1 && ult.Total > 0 {
+		// Peak burns each short rate-cap window's remaining, scaled to the total
+		// budget. Multiple shorts sum (independent rate caps); windows that are
+		// neither Ultimate nor Short (e.g. volcengine daily/weekly intermediates)
+		// are ignored.
+		for _, sh := range shorts {
+			if sh.RemainingPct >= 0 && sh.Total > 0 {
+				remaining -= sh.RemainingPct * (sh.Total / ult.Total) * (peakMult - 1)
+			}
+		}
 	}
 	fLeft := ult.ResetsAt.Sub(now).Seconds() / ult.Duration.Seconds()
 	if fLeft < 0 {

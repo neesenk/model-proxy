@@ -347,3 +347,48 @@ func TestPeakSummary(t *testing.T) {
 		t.Errorf("default multiplier: %q, want ×2", got)
 	}
 }
+
+// TestSchedule_SurplusComparableAcrossPeriods: surplus is normalized to a pace
+// fraction (fLeft = time-left/duration), so a weekly and a monthly window are
+// directly comparable — a weekly provider near reset (waste risk) outranks a
+// monthly one on pace, even though their absolute cycle lengths differ.
+func TestSchedule_SurplusComparableAcrossPeriods(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{"weekly": {}, "monthly": {}},
+		map[string][]RouteTarget{"m": {{Provider: "weekly"}, {Provider: "monthly"}}})
+	now := time.Now()
+	setWin := func(name string, rem, fLeft, days float64) {
+		dur := time.Duration(days * 24 * float64(time.Hour))
+		p.quota.setSnapshot(name, &provider.QuotaSnapshot{
+			Billing: provider.BillingPlan, RemainingPct: rem,
+			Windows: []provider.QuotaWindow{{
+				Ultimate: true, Kind: "tokens", RemainingPct: rem, Total: 100,
+				Duration: dur, ResetsAt: now.Add(time.Duration(fLeft * float64(dur))),
+			}},
+			AsOf: now,
+		})
+	}
+	setWin("weekly", 0.5, 0, 7)     // near reset → surplus +0.5 (use it or lose it)
+	setWin("monthly", 0.5, 0.5, 30) // mid-cycle → surplus 0 (on pace)
+	if got := firstProvider(p, "m"); got != "weekly" {
+		t.Errorf("first=%q, want weekly (waste-risk surplus +0.5 > monthly on-pace 0, across periods)", got)
+	}
+}
+
+// TestSchedule_RestoredStickyReevaluatesWhenDwellExpired: a sticky selection
+// restored from quota_state.json with a stale `since` (restart took longer than
+// sticky_dwell) is re-evaluated immediately — the next request picks the best
+// surplus provider rather than honoring the stale park.
+func TestSchedule_RestoredStickyReevaluatesWhenDwellExpired(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{"a": {}, "b": {}},
+		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
+	p.cfg.Scheduling.StickyDwell = "10m"
+	staticSurplus(p, "a", 0.5, 0)   // surplus +0.5 (best)
+	staticSurplus(p, "b", 0.5, 0.5) // surplus 0
+	// Simulate a sticky restored from disk whose since is well past dwell.
+	p.sticky["m"] = routeSticky{provider: "b", since: time.Now().Add(-1 * time.Hour)}
+	if got := firstProvider(p, "m"); got != "a" {
+		t.Errorf("restored sticky with expired dwell: first=%q, want a (re-evaluated to best surplus)", got)
+	}
+}

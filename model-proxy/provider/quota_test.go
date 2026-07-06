@@ -27,6 +27,8 @@ func TestSurplus(t *testing.T) {
 		{"waste risk (last moment)", &QuotaSnapshot{Billing: BillingPlan, RemainingPct: 0.5, Windows: []QuotaWindow{ult(0.5, 0)}}, 1, 0.5},
 		{"over pace (early, low remaining)", &QuotaSnapshot{Billing: BillingPlan, RemainingPct: 0.1, Windows: []QuotaWindow{ult(0.1, 0.9)}}, 1, -0.8},
 		{"peak burns short window", &QuotaSnapshot{Billing: BillingPlan, RemainingPct: 0.5, Windows: []QuotaWindow{ult(0.5, 0.5), short}}, 2, -0.3},
+		{"intermediate window ignored", &QuotaSnapshot{Billing: BillingPlan, RemainingPct: 0.5, Windows: []QuotaWindow{ult(0.5, 0.5), {RemainingPct: 0.1, Total: 999}}}, 1, 0},
+		{"multiple shorts sum", &QuotaSnapshot{Billing: BillingPlan, RemainingPct: 0.5, Windows: []QuotaWindow{ult(0.5, 0.5), {Short: true, RemainingPct: 0.6, Total: 100}, {Short: true, RemainingPct: 0.4, Total: 50}}}, 2, -0.4},
 		{"no reset → can't pace", &QuotaSnapshot{Billing: BillingPlan, RemainingPct: 0.5,
 			Windows: []QuotaWindow{{Ultimate: true, RemainingPct: 0.5, Total: 200, Duration: dur}}}, 1, 0},
 	}
