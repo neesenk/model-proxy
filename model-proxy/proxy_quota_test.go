@@ -375,6 +375,39 @@ func TestSchedule_SurplusComparableAcrossPeriods(t *testing.T) {
 	}
 }
 
+// TestSchedule_PriorityBeatsSurplus: within the same tier, a higher-priority
+// provider ranks ahead even when its surplus is much lower (priority was moved
+// before surplus). surplus only breaks ties at equal priority.
+func TestSchedule_PriorityBeatsSurplus(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{"a": {}, "b": {}},
+		map[string][]RouteTarget{"m": {
+			{Provider: "a", Priority: 1},
+			{Provider: "b", Priority: 2},
+		}})
+	staticSurplus(p, "a", 0.1, 0.9) // priority 1, surplus −0.8 (over pace, near exhaust)
+	staticSurplus(p, "b", 0.5, 0)   // priority 2, surplus +0.5 (waste risk)
+	if got := firstProvider(p, "m"); got != "a" {
+		t.Errorf("first=%q, want a (priority 1 beats higher-surplus priority 2)", got)
+	}
+}
+
+// TestSchedule_SurplusBreaksPriorityTie: at equal priority, surplus decides
+// (waste-risk first) — the only place surplus now affects ordering.
+func TestSchedule_SurplusBreaksPriorityTie(t *testing.T) {
+	p := newQuotaProxy(t,
+		map[string]Provider{"a": {}, "b": {}},
+		map[string][]RouteTarget{"m": {
+			{Provider: "a", Priority: 1},
+			{Provider: "b", Priority: 1},
+		}})
+	staticSurplus(p, "a", 0.5, 0)   // surplus +0.5 (waste risk)
+	staticSurplus(p, "b", 0.5, 0.5) // surplus 0 (on pace)
+	if got := firstProvider(p, "m"); got != "a" {
+		t.Errorf("first=%q, want a (equal priority → higher surplus first)", got)
+	}
+}
+
 // TestSchedule_RestoredStickyReevaluatesWhenDwellExpired: a sticky selection
 // restored from quota_state.json with a stale `since` (restart took longer than
 // sticky_dwell) is re-evaluated immediately — the next request picks the best

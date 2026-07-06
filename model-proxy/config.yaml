@@ -35,7 +35,6 @@ providers:
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     peak_hours:
-      - {window: "09:00-12:00", multiplier: 2}
       - {window: "14:00-18:00", multiplier: 2}
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit  # `usage zhipu`: 5h/weekly/monthly quota + token consumption
     models:

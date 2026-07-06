@@ -247,11 +247,11 @@ config.yaml:
 
 **`quotaTracker`**（`quota.go`）：后台 goroutine 每 `scheduling.quota_poll_interval`（默认 5m）并行轮询所有 provider 的 `Quota()`，结果缓存在内存 + 原子落盘到 `~/.model-proxy/quota_state.json`（启动时作为基线加载，避免冷启动无数据；**现在还携带每路由 `sticky` map，重启后恢复 → 保 prompt cache + 可见上次选择**）。`NewProxy` 启动它；`reload` 不重建（通过 cfg/providers 快照闭包读取新配置），只 kick 一次 `pollAll` 让新加 provider 立即出现；429 触发该 provider 的异步 `refreshOne`，让限频窗口结束后配额已是最新。陈旧保护：snapshot 老于 `3×poll_interval` 视为 `BillingUnknown`。自带锁 `quotaMu`（独立于 `healthMu` 和 reload `mu`）。**锁顺序：`healthMu` → `quotaMu`**（`schedule` 里 `allSnapshots()` 在 `healthMu.Lock()` 之前调用，绝不反向嵌套）。
 
-**调度分 = surplus**（`Provider` 接口方法 `Surplus(snap, now, peakMult)`，各 provider 委托给共享公式 `(*QuotaSnapshot).Surplus`，位于 `provider/` 包）：`surplus = (ultimate.remaining − short.remaining × (short.total/ultimate.total) × (peakMult−1)) − clamp((ultimate.reset−now)/ultimate.duration, 0, 1)`。surplus>0 = 落后节奏（不用就浪费 → 优先用）；<0 = 超前节奏（会提前耗尽 → 回避）。`schedule()`（拆成不写 sticky 的 `decideOrder()` + 提交 sticky）把可用目标（熔断/限频过滤不变）按 `(tierRank, surplus desc, priority asc)` 排序：
+**调度分 = surplus**（`Provider` 接口方法 `Surplus(snap, now, peakMult)`，各 provider 委托给共享公式 `(*QuotaSnapshot).Surplus`，位于 `provider/` 包）：`surplus = (ultimate.remaining − short.remaining × (short.total/ultimate.total) × (peakMult−1)) − clamp((ultimate.reset−now)/ultimate.duration, 0, 1)`。surplus>0 = 落后节奏（不用就浪费 → 优先用）；<0 = 超前节奏（会提前耗尽 → 回避）。`schedule()`（拆成不写 sticky 的 `decideOrder()` + 提交 sticky）把可用目标（熔断/限频过滤不变）按 `(tierRank, priority asc, surplus desc)` 排序 —— **priority（config）压过 surplus，surplus 只在同 priority 之间打破平局**：
 
 - **`tierRank`**：**plan(0) < unknown(1) < payg(2)** —— 注意 `BillingClass` 的 iota（`Unknown=0, Plan=1, PayG=2`）**不等于**调度顺序，故 `tierRank` 单独映射；pay-as-you-go（`billing: pay-as-you-go`）严格兜底。
 - **peak 只走短窗口折算**：`peakMult` 只烧短窗口（公式里的 `×(peakMult−1)` 项）。没有同单位短窗口的 provider（codex/compass 是 money ultimate；未轮询的）**高峰不打折** —— peak 不再是整份 latency 折扣。multiplier=1 关闭。
-- **粘性切换**（cache 友好）：路由停在 current provider 一个 `sticky_dwell`（默认 10m）；到期后仅当最优者在 **tier → surplus 边际（`scheduling.quota_switch_margin`，默认 15 pts）→ priority** 任一更优时才换 —— 最优者只是 sub-margin 的 surplus 微差则保留 cache。
+- **粘性切换**（cache 友好）：路由停在 current provider 一个 `sticky_dwell`（默认 10m）；到期后仅当最优者在 **tier → priority → surplus 边际（`scheduling.quota_switch_margin`，默认 15 pts）** 任一更优时才换 —— 最优者只是同 priority 下 sub-margin 的 surplus 微差则保留 cache。
 
 **可见性**：`GET /debug/schedule`（只读，经 `decideOrder` peek，不改 sticky）返回每路由首选 provider + ordered 列表（tier/surplus/可用/peak）+ sticky 状态。`model-proxy schedule`（CLI，查询该接口，需 daemon 在跑）；`model-proxy doctor`（离线 config 诊断：每 provider 的 tier/quota/peak、每路由 dry-run 顺序（无 live 配额→tier 再 priority）、warning）。
 

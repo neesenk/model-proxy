@@ -575,10 +575,11 @@ func tierRank(b provider.BillingClass) int {
 // schedule returns targets in try-order using quota-aware ranking:
 //
 //	tier: plan < unknown < payg (pay-as-you-go is strict last-resort)
-//	within tier: surplus desc (peak-adjusted remaining vs window time-left), then priority asc.
+//	within tier: priority asc (config), then surplus desc (breaks priority ties)
 //
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
-// then re-selects the best unless the best's only edge is a sub-margin surplus gain.
+// then re-selects the best unless the best's only edge is a sub-margin surplus gain
+// (priority beats surplus; surplus only matters at equal priority).
 func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, exposed string, targets []RouteTarget) []RouteTarget {
 	now := time.Now()
 	ordered, stickyToSet := p.decideOrder(cfg, provs, exposed, targets, now)
@@ -634,13 +635,12 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exp
 	sort.SliceStable(availTargets, func(i, j int) bool {
 		ri, rj := tierRank(billingOf(availTargets[i].Provider)), tierRank(billingOf(availTargets[j].Provider))
 		if ri != rj {
-			return ri < rj
+			return ri < rj // tier: plan < unknown < payg
 		}
-		si, sj := surplusOf(availTargets[i].Provider), surplusOf(availTargets[j].Provider)
-		if si != sj {
-			return si > sj // higher surplus first (use it or lose it)
+		if pi, pj := availTargets[i].Priority, availTargets[j].Priority; pi != pj {
+			return pi < pj // priority (config) decides before surplus
 		}
-		return availTargets[i].Priority < availTargets[j].Priority
+		return surplusOf(availTargets[i].Provider) > surplusOf(availTargets[j].Provider) // surplus only breaks priority ties
 	})
 
 	margin := sched.switchMargin()
@@ -674,12 +674,14 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exp
 					keepSticky = false // best has a better billing tier
 				case rb > rc:
 					keepSticky = true // current has a better tier
-				case surplusOf(best.Provider)-surplusOf(cur.provider) >= margin:
-					keepSticky = false // best ahead by surplus margin
 				case best.Priority < curPrio:
-					keepSticky = false // surplus ~equal; best has better priority → return to preferred
+					keepSticky = false // same tier; best has better priority → switch (priority beats surplus)
+				case best.Priority > curPrio:
+					keepSticky = true // current has better priority → keep
+				case surplusOf(best.Provider)-surplusOf(cur.provider) >= margin:
+					keepSticky = false // same tier + same priority; best ahead by surplus margin → switch
 				default:
-					keepSticky = true // same tier, sub-margin surplus, priority not better → preserve cache
+					keepSticky = true // same tier + same priority, sub-margin surplus → preserve cache
 				}
 			}
 		}

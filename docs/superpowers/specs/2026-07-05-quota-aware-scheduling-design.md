@@ -7,7 +7,7 @@ are the source of truth — read those first. This design doc describes the orig
 design + the first as-built revision; **the scheduling score has since evolved from
 `effective_remaining = RemainingPct/peak_mult` to the surplus model**
 (`surplus = (ultimate.rem − short.rem×share×(peakMult−1)) − fLeft`, exposed as a
-`Provider.Surplus` interface method; ranking is `(tier, surplus desc, priority)`;
+`Provider.Surplus` interface method; ranking is `(tier, priority asc, surplus desc)` — priority (config) beats surplus;
 peak now only burns the short rate-cap window; sticky is persisted in
 `quota_state.json`; `GET /debug/schedule` + `schedule`/`doctor` commands added).
 The surplus-specific sections below are updated; where this doc still says
@@ -93,8 +93,8 @@ Everything else in this document matches the build.
 |---|---|
 | Scheduling goal | **Quota-aware sticky** — sticky per conversation; rank by **surplus** (use-it-or-lose-it pace score); switch off when another is meaningfully ahead. |
 | Quota source | **Periodic background polling** of existing usage/quota endpoints; **persisted to file** (survives restart/reload, **including the per-route sticky map**). No response-usage parsing in v1. |
-| Scheduling score | **surplus** (a `Provider.Surplus(snap, now, peakMult)` interface method delegating to `(*QuotaSnapshot).Surplus`): `surplus = (ultimate.remaining − short.remaining × (short.total/ultimate.total) × (peakMult−1)) − fLeft`, where `fLeft = clamp((ultimate.reset−now)/ultimate.duration, 0,1)`. `RemainingPct` = the **ultimate** window's remaining (zhipu=weekly, volcengine/codex/compass=monthly, deepseek=payg). surplus>0 = under pace → prioritize; <0 = over pace → avoid. Ranking: `(tier: plan<unknown<payg, surplus desc, priority asc)`. |
-| Switch trigger | **After `sticky_dwell` (≈10m), switch to the best provider when it wins on tier → surplus-margin (`quota_switch_margin`, 15 pts) → priority** (only stay when the best's sole edge is a sub-margin surplus difference). No hard floor; reactive 429 remains the ultimate backstop. |
+| Scheduling score | **surplus** (a `Provider.Surplus(snap, now, peakMult)` interface method delegating to `(*QuotaSnapshot).Surplus`): `surplus = (ultimate.remaining − short.remaining × (short.total/ultimate.total) × (peakMult−1)) − fLeft`, where `fLeft = clamp((ultimate.reset−now)/ultimate.duration, 0,1)`. `RemainingPct` = the **ultimate** window's remaining (zhipu=weekly, volcengine/codex/compass=monthly, deepseek=payg). surplus>0 = under pace → prioritize; <0 = over pace → avoid. Ranking: `(tier: plan<unknown<payg, priority asc, surplus desc)` — **priority (config) beats surplus; surplus only breaks priority ties**. |
+| Switch trigger | **After `sticky_dwell` (≈10m), switch to the best provider when it wins on tier → priority → surplus-margin (`quota_switch_margin`, 15 pts)** (only stay when the best's sole edge is a sub-margin surplus difference at equal priority). No hard floor; reactive 429 remains the ultimate backstop. |
 | Peak formula | `peakMult` only burns the **short rate-cap window** (the `×(peakMult−1)` term in surplus). Providers without a same-unit short window (codex/compass money-ultimate; not-yet-polled) get **no peak discount** — peak is no longer a blanket `RemainingPct/mult` latency cut. Multiplier=1 disables. |
 | Peak config | **Multi-segment, per-segment multiplier**, with shorthand forms (single string / list-of-strings use a default multiplier of 2.0). |
 | Pay-as-you-go | Strict last-resort, designated by an explicit `billing: pay-as-you-go` config flag. |
@@ -276,8 +276,8 @@ Sort key (primary → secondary):
 
 ```
 1. tierRank(billing):  plan(0) < unknown(1) < payg(2)   ← payg strict last-resort
-2. surplus desc                                         ← pace score (use it or lose it)
-3. priority asc                                         ← existing, final tie-breaker
+2. priority asc                                         ← config; beats surplus
+3. surplus desc                                         ← breaks priority ties (use it or lose it)
 ```
 
 `surplus` comes from `provs[name].Surplus(snap, now, peakMult)` (a `Provider`
@@ -312,9 +312,9 @@ keep the current sticky provider if:
     now − sticky.since < sticky_dwell                       ← min dwell (preserve cache)
     OR (after dwell) the best provider (availTargets[0]) does NOT win on:
          tierRank(best) < tierRank(cur)                     ← better billing tier → switch
-         surplus(best) − surplus(cur) ≥ quota_switch_margin ← ahead by surplus margin → switch
-         priority(best) < priority(cur)                     ← better priority (return-to-preferred) → switch
-       (i.e. stay only when same tier + sub-margin surplus + priority not better)
+         priority(best) < priority(cur)                      ← better priority → switch (priority beats surplus)
+         surplus(best) − surplus(cur) ≥ quota_switch_margin ← ahead by surplus margin (equal priority) → switch
+       (i.e. stay only when same tier + same priority + sub-margin surplus)
 ```
 
 If the keep-condition fails, re-pick = `availTargets[0]`. The returned `ordered`
@@ -396,7 +396,7 @@ scheduling:
 4. Request arrives → `forward` → `schedule(exposed, targets)`:
    - snapshot quota via `allSnapshots()` (quotaMu RLock, brief);
    - `healthMu.Lock()`; filter available targets (circuit/rate-limit/half-open);
-   - sort by `(tierRank, surplus desc, priority asc)`;
+   - sort by `(tierRank, priority asc, surplus desc)`;
    - apply sticky-switch rule → pick `chosen`, build `ordered`.
 5. For each target in `ordered`, `tryTarget` (unchanged); on 429, `recordRateLimit`
    (releases `healthMu`) + **async `refreshOne`** of that provider.
