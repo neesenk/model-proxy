@@ -30,6 +30,10 @@ type Proxy struct {
 	health    map[string]*providerHealth // provider name → circuit/rate-limit state
 	sticky    map[string]routeSticky     // exposed model → current provider + since
 	quota     *quotaTracker              // background quota poller; nil only in degenerate tests
+
+	// scheduleHook is a test-only hook fired in forward right after schedule(),
+	// capturing the threaded sessionKey. Nil in production.
+	scheduleHook func(sessionKey string)
 }
 
 // providerHealth tracks a provider's circuit-breaker and rate-limit state.
@@ -272,7 +276,7 @@ func (p *Proxy) scheduleStatus() []byte {
 
 	models := map[string]routeInfo{}
 	for exposed, targets := range cfg.Routes {
-		ordered, _ := p.decideOrder(cfg, provs, exposed, targets, now)
+		ordered, _ := p.decideOrder(cfg, provs, exposed, "", targets, now)
 		ri := routeInfo{}
 		if len(ordered) > 0 {
 			ri.First = ordered[0].Provider
@@ -415,7 +419,11 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		upPath = strings.TrimPrefix(upPath, "/v1")
 	}
 
-	ordered := p.schedule(cfg, provs, exposed, targets)
+	sessionKey := r.Header.Get("x-claude-code-session-id")
+	ordered := p.schedule(cfg, provs, exposed, sessionKey, targets)
+	if p.scheduleHook != nil {
+		p.scheduleHook(sessionKey)
+	}
 
 	for ti, t := range ordered {
 		prov, ok := cfg.Providers[t.Provider]
@@ -583,9 +591,9 @@ func tierRank(b provider.BillingClass) int {
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin surplus gain
 // (priority beats surplus; surplus only matters at equal priority).
-func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, exposed string, targets []RouteTarget) []RouteTarget {
+func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, exposed, sessionKey string, targets []RouteTarget) []RouteTarget {
 	now := time.Now()
-	ordered, stickyToSet := p.decideOrder(cfg, provs, exposed, targets, now)
+	ordered, stickyToSet := p.decideOrder(cfg, provs, exposed, sessionKey, targets, now)
 	if stickyToSet != "" {
 		p.healthMu.Lock()
 		p.sticky[exposed] = routeSticky{provider: stickyToSet, since: now}
@@ -598,7 +606,8 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, expose
 // on ("" = leave the current sticky untouched), WITHOUT mutating p.sticky.
 // schedule() commits the sticky; scheduleStatus() (the /debug/schedule endpoint)
 // uses this for a read-only peek.
-func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exposed string, targets []RouteTarget, now time.Time) (ordered []RouteTarget, stickyToSet string) {
+func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exposed, sessionKey string, targets []RouteTarget, now time.Time) (ordered []RouteTarget, stickyToSet string) {
+	_ = sessionKey // used in Task 6
 	sched := cfg.Scheduling
 	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
 	// or while taking healthMu below.
