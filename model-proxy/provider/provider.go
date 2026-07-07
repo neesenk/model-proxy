@@ -101,7 +101,7 @@ func (s *QuotaSnapshot) Surplus(now time.Time, peakMult float64) float64 {
 }
 
 // Authenticator is the auth-injection interface (matches main.AuthProvider).
-// Main package passes its existing CQPProvider/CodexOAuthProvider/ApiKeyProvider
+// Main package passes its existing AqpKeyProvider/CodexOAuthProvider/ApiKeyProvider
 // via this interface, so provider/ doesn't need to re-implement them.
 type Authenticator interface {
 	Inject(req *http.Request) error
@@ -137,13 +137,13 @@ type Config struct {
 	Models        map[string]any
 
 	// Auth-specific fields (only relevant to certain providers).
-	SSOCookieFile string // compass
-	CQPMintURL    string // compass
+	SSOCookieFile string // aqp
+	AqpMintURL    string // aqp
 
 	// Callbacks: main package wires its existing functions here so provider/
-	// doesn't need to re-implement CQP minting, SSO flow, OAuth, etc.
-	Auth          Authenticator                  // for AuthHeaders/Refresh (compass, codex, apikey)
-	LoginFn       func() error                   // for Login (compass: SSO, codex: device flow, zhipu: prompt)
+	// doesn't need to re-implement AQP minting, SSO flow, OAuth, etc.
+	Auth          Authenticator                  // for AuthHeaders/Refresh (aqp, codex, apikey)
+	LoginFn       func() error                   // for Login (aqp: SSO, codex: device flow, zhipu: prompt)
 	LogoutFn      func() error                   // for Logout
 	UsageFn       func() (any, error)            // for Usage
 	FetchModelsFn func() ([]string, error)       // for FetchModels (volcengine: V4-signed OpenAPI)

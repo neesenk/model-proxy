@@ -86,7 +86,7 @@ type Provider struct {
 	OpenAIBaseURL    string                   `yaml:"openai_base_url"`
 	AnthropicBaseURL string                   `yaml:"anthropic_base_url"`
 	Provider         string                   `yaml:"provider_id"`
-	CQPMintURL       string                   `yaml:"cqp_mint_url"` // compass only
+	AqpMintURL       string                   `yaml:"aqp_mint_url"` // aqp only
 	Headers          map[string]string        `yaml:"headers"`
 	UsageURL         string                   `yaml:"usage_url"`
 	Models           map[string]ProviderModel `yaml:"models"`
@@ -295,12 +295,12 @@ func (c *Config) validate() error {
 			return fmt.Errorf("provider %q: openai_base_url is empty — set it under providers.%s", name, name)
 		}
 		if p.Provider == "" {
-			return fmt.Errorf("provider %q: provider_id is empty — set `provider_id:` (e.g. zhipu, compass, codex, deepseek, volcengine)", name)
+			return fmt.Errorf("provider %q: provider_id is empty — set `provider_id:` (e.g. zhipu, aqp, codex, deepseek, volcengine)", name)
 		}
 		// Check for known provider_id typos.
-		known := map[string]bool{"compass": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "apikey": true, "static": true}
+		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "apikey": true, "static": true}
 		if !known[p.Provider] {
-			return fmt.Errorf("provider %q: unknown provider_id %q — valid: compass, codex, zhipu, deepseek, volcengine", name, p.Provider)
+			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine", name, p.Provider)
 		}
 		// anthropic_base_url should NOT end with /v1 (proxy keeps client's /v1 for anthropic).
 		if p.AnthropicBaseURL != "" && (strings.HasSuffix(p.AnthropicBaseURL, "/v1") || strings.HasSuffix(p.AnthropicBaseURL, "/v1/")) {

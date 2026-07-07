@@ -22,9 +22,9 @@ type AuthProvider interface {
 	Refresh() error
 }
 
-// ---- CQP key provider ----
+// ---- AQP key provider ----
 
-type CQPProvider struct {
+type AqpKeyProvider struct {
 	mintURL  string
 	authFile string
 
@@ -34,11 +34,11 @@ type CQPProvider struct {
 	mintedAt  time.Time
 }
 
-func newCQPProvider(mintURL, authFile string) *CQPProvider {
-	return &CQPProvider{mintURL: mintURL, authFile: authFile}
+func newAqpKeyProvider(mintURL, authFile string) *AqpKeyProvider {
+	return &AqpKeyProvider{mintURL: mintURL, authFile: authFile}
 }
 
-func (p *CQPProvider) Inject(req *http.Request) error {
+func (p *AqpKeyProvider) Inject(req *http.Request) error {
 	key, err := p.key()
 	if err != nil {
 		return err
@@ -49,7 +49,7 @@ func (p *CQPProvider) Inject(req *http.Request) error {
 	return nil
 }
 
-func (p *CQPProvider) Refresh() error {
+func (p *AqpKeyProvider) Refresh() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cached = ""
@@ -58,14 +58,14 @@ func (p *CQPProvider) Refresh() error {
 	return err
 }
 
-func (p *CQPProvider) key() (string, error) {
+func (p *AqpKeyProvider) key() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.keyLocked()
 }
 
-func (p *CQPProvider) keyLocked() (string, error) {
-	// Cache for 50 minutes (CQP keys are generally long-lived; 50m is conservative).
+func (p *AqpKeyProvider) keyLocked() (string, error) {
+	// Cache for 50 minutes (AQP keys are generally long-lived; 50m is conservative).
 	if p.cached != "" && time.Since(p.mintedAt) < 50*time.Minute {
 		return p.cached, nil
 	}
@@ -84,12 +84,12 @@ func (p *CQPProvider) keyLocked() (string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("mint cqp key: %w", err)
+		return "", fmt.Errorf("mint aqp key: %w", err)
 	}
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("mint cqp key: HTTP %d: %s", resp.StatusCode, string(rb))
+		return "", fmt.Errorf("mint aqp key: HTTP %d: %s", resp.StatusCode, string(rb))
 	}
 	var parsed struct {
 		Retcode int `json:"retcode"`
@@ -101,10 +101,10 @@ func (p *CQPProvider) keyLocked() (string, error) {
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(rb, &parsed); err != nil {
-		return "", fmt.Errorf("parse cqp response: %w", err)
+		return "", fmt.Errorf("parse aqp response: %w", err)
 	}
 	if parsed.Retcode != 0 || parsed.Data.APIKey == "" {
-		return "", fmt.Errorf("mint cqp key: retcode=%d msg=%s", parsed.Retcode, parsed.Message)
+		return "", fmt.Errorf("mint aqp key: retcode=%d msg=%s", parsed.Retcode, parsed.Message)
 	}
 	p.cached = parsed.Data.APIKey
 	p.mintedAt = time.Now()
@@ -383,8 +383,8 @@ func jwtExpiry(jwt string) time.Time {
 func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
 	prov := cfg.Providers[provName]
 	switch authName {
-	case "compass":
-		return newCQPProvider(prov.CQPMintURL, authFilePath(provName, "oauth_auth"))
+	case "aqp":
+		return newAqpKeyProvider(prov.AqpMintURL, authFilePath(provName, "oauth_auth"))
 	case "codex":
 		return newCodexOAuthProvider(authFilePath(provName, "oauth_auth"))
 	case "apikey":

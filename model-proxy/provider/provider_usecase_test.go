@@ -25,10 +25,10 @@ func (a fakeAuth) Inject(req *http.Request) error {
 }
 func (a fakeAuth) Refresh() error { return nil }
 
-// --- P1: compass RewriteRequest adds ?beta=true to /messages ---
+// --- P1: aqp RewriteRequest adds ?beta=true to /messages ---
 
-func TestCompassRewrite_AddsBetaToMessages(t *testing.T) {
-	p := &CompassProvider{cfg: &Config{Auth: fakeAuth{key: "k"}}}
+func TestAqpRewrite_AddsBetaToMessages(t *testing.T) {
+	p := &AqpProvider{cfg: &Config{Auth: fakeAuth{key: "k"}}}
 	for _, tc := range []struct {
 		name     string
 		url      string
@@ -54,10 +54,10 @@ func TestCompassRewrite_AddsBetaToMessages(t *testing.T) {
 	}
 }
 
-// --- P2: compass AuthHeaders delegates to cfg.Auth ---
+// --- P2: aqp AuthHeaders delegates to cfg.Auth ---
 
-func TestCompassAuthHeaders_Delegates(t *testing.T) {
-	p := &CompassProvider{cfg: &Config{Auth: fakeAuth{key: "ck"}}}
+func TestAqpAuthHeaders_Delegates(t *testing.T) {
+	p := &AqpProvider{cfg: &Config{Auth: fakeAuth{key: "ck"}}}
 	req, _ := http.NewRequest("GET", "https://x", nil)
 	if err := p.AuthHeaders(req); err != nil {
 		t.Fatal(err)
@@ -295,7 +295,7 @@ func mustMarshal(v any) []byte {
 	return b
 }
 
-// --- P17: codex/compass/deepseek/zhipu delegate Login/Logout/Usage/Quota to cfg callbacks ---
+// --- P17: codex/aqp/deepseek/zhipu delegate Login/Logout/Usage/Quota to cfg callbacks ---
 
 func TestProviderDelegates_Callbacks(t *testing.T) {
 	loginCalled := false
@@ -326,10 +326,10 @@ func TestProviderDelegates_Callbacks(t *testing.T) {
 		t.Errorf("codex delegate missed: login=%v logout=%v usage=%v quota=%v", loginCalled, logoutCalled, usageCalled, quotaCalled)
 	}
 
-	// compass: FetchModels delegated to fetchModelsBearer (tested in P13); Quota via QuotaOrUnknown.
-	compass := &CompassProvider{cfg: cfg}
-	if q, err := compass.Quota(); err != nil || q.RemainingPct != 0.5 {
-		t.Errorf("compass Quota=%v err=%v want 0.5", q, err)
+	// aqp: FetchModels delegated to fetchModelsBearer (tested in P13); Quota via QuotaOrUnknown.
+	aqp := &AqpProvider{cfg: cfg}
+	if q, err := aqp.Quota(); err != nil || q.RemainingPct != 0.5 {
+		t.Errorf("aqp Quota=%v err=%v want 0.5", q, err)
 	}
 
 	// deepseek with a temp auth file so LoadKey works.
@@ -473,9 +473,9 @@ func TestCodexAuthRefresh_Delegate(t *testing.T) {
 	}
 }
 
-// --- P24: compass Refresh/Login/Logout/Usage/FetchModels/Surplus delegation ---
+// --- P24: aqp Refresh/Login/Logout/Usage/FetchModels/Surplus delegation ---
 
-func TestCompassProvider_Delegates(t *testing.T) {
+func TestAqpProvider_Delegates(t *testing.T) {
 	loginCalled, logoutCalled, usageCalled := false, false, false
 	cfg := &Config{
 		Auth:     fakeAuth{key: "k"},
@@ -483,7 +483,7 @@ func TestCompassProvider_Delegates(t *testing.T) {
 		LogoutFn: func() error { logoutCalled = true; return nil },
 		UsageFn:  func() (any, error) { usageCalled = true; return nil, nil },
 	}
-	p := &CompassProvider{cfg: cfg}
+	p := &AqpProvider{cfg: cfg}
 	mustNoErr(t, p.Refresh())
 	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
@@ -491,10 +491,10 @@ func TestCompassProvider_Delegates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !loginCalled || !logoutCalled || !usageCalled {
-		t.Errorf("compass delegate: login=%v logout=%v usage=%v", loginCalled, logoutCalled, usageCalled)
+		t.Errorf("aqp delegate: login=%v logout=%v usage=%v", loginCalled, logoutCalled, usageCalled)
 	}
 	if s := p.Surplus(nil, time.Now(), 1); s != 0 {
-		t.Errorf("compass Surplus(nil)=%v want 0", s)
+		t.Errorf("aqp Surplus(nil)=%v want 0", s)
 	}
 }
 

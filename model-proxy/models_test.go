@@ -14,11 +14,11 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"compass": {OpenAIBaseURL: "http://x", Provider: "compass",
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp",
 				Models: map[string]ProviderModel{"glm-5.2": {Context: 1048576}}},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "compass", Model: "glm-5.2"}},
+			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 		ClaudeMapping: map[string]string{
 			"claude-opus-4-7":  "glm-5.2",

@@ -60,15 +60,15 @@ func TestZhipuLimitLabel(t *testing.T) {
 // --- SessionCookie: returns "SSO_C=val" when the jar has one, "" otherwise ---
 
 func TestSessionCookie_Empty(t *testing.T) {
-	c := newCompassClient("/tmp/nope.json")
+	c := newAqpClient("/tmp/nope.json")
 	if got := c.SessionCookie(); got != "" {
 		t.Errorf("SessionCookie with empty jar=%q want empty", got)
 	}
 }
 
 func TestSessionCookie_WithCookie(t *testing.T) {
-	c := newCompassClient("/tmp/nope.json")
-	u, _ := url.Parse(compassBase)
+	c := newAqpClient("/tmp/nope.json")
+	u, _ := url.Parse(aqpBase)
 	c.Jar.SetCookies(u, []*http.Cookie{{Name: ssoCookieName, Value: "val123"}})
 	got := c.SessionCookie()
 	want := "SSO_C=val123"

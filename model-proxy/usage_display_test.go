@@ -289,56 +289,56 @@ func TestFetchDeepseekQuota_NotLoggedIn(t *testing.T) {
 	}
 }
 
-// --- showCompassUsage ---
+// --- showAqpUsage ---
 
-// TestShowCompassUsage_NotLoggedIn: no cred file → "Not logged in.".
-func TestShowCompassUsage_NotLoggedIn(t *testing.T) {
+// TestShowAqpUsage_NotLoggedIn: no cred file → "Not logged in.".
+func TestShowAqpUsage_NotLoggedIn(t *testing.T) {
 	useTempHome(t) // no cred file
-	out := captureStdout(t, func() { showCompassUsage(&Config{}) })
+	out := captureStdout(t, func() { showAqpUsage(&Config{}) })
 	if !strings.Contains(out, "Not logged in") {
 		t.Errorf("missing 'Not logged in':\n%s", out)
 	}
-	if !strings.Contains(out, "compass") {
+	if !strings.Contains(out, "aqp") {
 		t.Errorf("missing provider name:\n%s", out)
 	}
 }
 
-// TestShowCompassUsage_BadStore: cred file exists but isn't valid JSON → loadAccount
+// TestShowAqpUsage_BadStore: cred file exists but isn't valid JSON → loadAccount
 // returns an error → "Error:" branch.
-func TestShowCompassUsage_BadStore(t *testing.T) {
+func TestShowAqpUsage_BadStore(t *testing.T) {
 	home := useTempHome(t)
-	writeCred(t, home, "compass", "oauth_auth", []byte(`not-json`))
-	out := captureStdout(t, func() { showCompassUsage(&Config{}) })
+	writeCred(t, home, "aqp", "oauth_auth", []byte(`not-json`))
+	out := captureStdout(t, func() { showAqpUsage(&Config{}) })
 	if !strings.Contains(out, "Error:") {
 		t.Errorf("missing 'Error:' for bad store:\n%s", out)
 	}
 }
 
-// TestShowCompassUsage_MonthlyUsageError: account present but project_id empty →
+// TestShowAqpUsage_MonthlyUsageError: account present but project_id empty →
 // monthlyUsageAt rejects it ("no project_id in store") WITHOUT a network call.
-// showCompassUsage prints account + Project ID + the "unavailable" line + store path.
-// (The success branch needs the hardcoded compassMonthlyUsage URL — can't redirect
+// showAqpUsage prints account + Project ID + the "unavailable" line + store path.
+// (The success branch needs the hardcoded aqpMonthlyUsage URL — can't redirect
 // without product-code changes, so it stays uncovered.)
-func TestShowCompassUsage_MonthlyUsageError(t *testing.T) {
+func TestShowAqpUsage_MonthlyUsageError(t *testing.T) {
 	home := useTempHome(t)
-	writeCred(t, home, "compass", "oauth_auth", mustMarshalT(map[string]any{
+	writeCred(t, home, "aqp", "oauth_auth", mustMarshalT(map[string]any{
 		"email":              "alice@example.com",
 		"sso_session_cookie": "SSO_C=abc",
 		"project_id":         "", // triggers "no project_id" error in MonthlyUsage
 	}))
-	out := captureStdout(t, func() { showCompassUsage(&Config{}) })
-	for _, want := range []string{"compass", "alice@example.com", "unavailable", "no project_id"} {
+	out := captureStdout(t, func() { showAqpUsage(&Config{}) })
+	for _, want := range []string{"aqp", "alice@example.com", "unavailable", "no project_id"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
 	}
 }
 
-// --- fetchCompassQuota ---
+// --- fetchAqpQuota ---
 
-func TestFetchCompassQuota_NotLoggedIn(t *testing.T) {
+func TestFetchAqpQuota_NotLoggedIn(t *testing.T) {
 	useTempHome(t)
-	s, err := fetchCompassQuota(&Config{})
+	s, err := fetchAqpQuota(&Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,16 +347,16 @@ func TestFetchCompassQuota_NotLoggedIn(t *testing.T) {
 	}
 }
 
-// TestFetchCompassQuota_NoProjectID: account present but no project_id → MonthlyUsage
+// TestFetchAqpQuota_NoProjectID: account present but no project_id → MonthlyUsage
 // errors without a network call → BillingUnknown.
-func TestFetchCompassQuota_NoProjectID(t *testing.T) {
+func TestFetchAqpQuota_NoProjectID(t *testing.T) {
 	home := useTempHome(t)
-	writeCred(t, home, "compass", "oauth_auth", mustMarshalT(map[string]any{
+	writeCred(t, home, "aqp", "oauth_auth", mustMarshalT(map[string]any{
 		"email":              "alice@example.com",
 		"sso_session_cookie": "SSO_C=abc",
 		"project_id":         "",
 	}))
-	s, err := fetchCompassQuota(&Config{})
+	s, err := fetchAqpQuota(&Config{})
 	if err != nil {
 		t.Fatal(err)
 	}

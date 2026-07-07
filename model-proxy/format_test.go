@@ -139,16 +139,16 @@ func TestRouteNames(t *testing.T) {
 func TestProviderNames(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"zhipu":   {},
-			"compass": {},
-			"codex":   {},
+			"zhipu": {},
+			"aqp":   {},
+			"codex": {},
 		},
 	}
 	got := providerNames(cfg)
 	// providerNames does NOT sort (unlike routeNames); collect + sort for stable check.
 	parts := strings.Split(got, ", ")
 	sort.Strings(parts)
-	want := []string{"codex", "compass", "zhipu"}
+	want := []string{"aqp", "codex", "zhipu"}
 	if len(parts) != len(want) {
 		t.Fatalf("providerNames()=%q want 3 providers", got)
 	}

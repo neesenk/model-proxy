@@ -20,7 +20,7 @@ func TestCLI_LoginNoProvider(t *testing.T) {
 	if code != 0 {
 		t.Errorf("login (no provider): exit=%d want 0", code)
 	}
-	if !strings.Contains(stdout, "usage:") || !strings.Contains(stdout, "compass") {
+	if !strings.Contains(stdout, "usage:") || !strings.Contains(stdout, "aqp") {
 		t.Errorf("login no provider missing usage/providers:\n%s", stdout)
 	}
 }

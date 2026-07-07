@@ -62,11 +62,11 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 		}
 		// Wire callbacks by provider type.
 		switch prov.Provider {
-		case "compass":
+		case "aqp":
 			pcfg.LoginFn = func() error { return runLogin(cfg) }
-			pcfg.LogoutFn = func() error { return clearAccount(authFilePath("compass", "oauth_auth")) }
-			pcfg.UsageFn = func() (any, error) { return showCompassUsageData(cfg) }
-			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchCompassQuota(cfg) }
+			pcfg.LogoutFn = func() error { return clearAccount(authFilePath("aqp", "oauth_auth")) }
+			pcfg.UsageFn = func() (any, error) { return showAqpUsageData(cfg) }
+			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchAqpQuota(cfg) }
 		case "codex":
 			pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
 			pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
@@ -494,7 +494,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		for k, v := range prov.Headers {
 			req.Header.Set(k, v)
 		}
-		if prov.Provider == "compass" {
+		if prov.Provider == "aqp" {
 			req.Header.Set("anthropic-version", "2023-06-01")
 			req.Header.Set("x-compass-request-id", newRequestID())
 		}

@@ -208,9 +208,9 @@ func TestParseDeepseekQuota(t *testing.T) {
 	}
 }
 
-func TestParseCompassQuota(t *testing.T) {
+func TestParseAqpQuota(t *testing.T) {
 	mu := &MonthlyProjectUsage{SelectedYear: 2026, SelectedMonth: 7, TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
-	s := parseCompassQuota(mu, "alice@example.com")
+	s := parseAqpQuota(mu, "alice@example.com")
 	if s.Billing != provider.BillingPlan {
 		t.Errorf("Billing=%v, want Plan", s.Billing)
 	}
@@ -240,11 +240,11 @@ func TestParseCompassQuota(t *testing.T) {
 	}
 }
 
-func TestParseCompassQuota_ZeroMonthFallback(t *testing.T) {
+func TestParseAqpQuota_ZeroMonthFallback(t *testing.T) {
 	// When the API omits SelectedYear/SelectedMonth, fall back to the current
 	// month so ResetsAt is still non-zero (surplus still works).
 	mu := &MonthlyProjectUsage{TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
-	s := parseCompassQuota(mu, "")
+	s := parseAqpQuota(mu, "")
 	if s.Windows[0].ResetsAt.IsZero() {
 		t.Fatal("fallback ResetsAt is zero — should default to current month end")
 	}

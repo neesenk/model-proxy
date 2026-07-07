@@ -9,8 +9,8 @@ import (
 // These wrap existing main-package functions so provider.Provider can call them
 // via the callback interface without importing package main.
 
-func showCompassUsageData(cfg *Config) (any, error) {
-	showCompassUsage(cfg)
+func showAqpUsageData(cfg *Config) (any, error) {
+	showAqpUsage(cfg)
 	return nil, nil
 }
 

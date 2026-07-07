@@ -2,6 +2,8 @@
 
 本文件记录如何让 opencode 使用 AIS Switch 的 LLM Gateway 模型（glm-5.2 / deepseek-v4-pro / deepseek-v4-flash）。有两种方式：**走本地代理**（`127.0.0.1:15721`）和**直连网关**（绕过代理）。所有内容均已在 2026-06-20 实测验证。
 
+> **命名说明**：model-proxy 内部将该 provider 重命名为 `aqp`（config 的 `provider_id`、凭据文件 `aqp_oauth_auth.json`、字段 `aqp_mint_url`）；上游服务本身仍是 `compass.llm.shopee.io`，故本文件保留 “compass / CQP” 称谓以匹配逆向出的真实后端契约。
+
 ---
 
 ## 背景：代理做了什么

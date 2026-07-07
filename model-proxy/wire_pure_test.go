@@ -51,7 +51,7 @@ func TestQuotaSourceLabel(t *testing.T) {
 		id   string
 		want string
 	}{
-		{"compass", "monthly_usage"},
+		{"aqp", "monthly_usage"},
 		{"codex", "wham/usage"},
 		{"zhipu", "quota/limit"},
 		{"volcengine", "GetAFPUsage (AK/SK)"},
@@ -146,12 +146,12 @@ func TestProviderWire_Wrappers(t *testing.T) {
 	if !strings.Contains(out, "deepseek") && !strings.Contains(out, "Not logged in") && !strings.Contains(out, "Error:") {
 		t.Errorf("showZhipuUsageData output missing marker:\n%s", out)
 	}
-	// compass wrapper
+	// aqp wrapper
 	out = captureStdout(t, func() {
-		_, _ = showCompassUsageData(cfg)
+		_, _ = showAqpUsageData(cfg)
 	})
-	if !strings.Contains(out, "compass") && !strings.Contains(out, "Not logged in") {
-		t.Errorf("showCompassUsageData output missing marker:\n%s", out)
+	if !strings.Contains(out, "aqp") && !strings.Contains(out, "Not logged in") {
+		t.Errorf("showAqpUsageData output missing marker:\n%s", out)
 	}
 	// codex wrapper
 	out = captureStdout(t, func() {

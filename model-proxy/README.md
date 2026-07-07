@@ -1,13 +1,13 @@
 # model-proxy
 
-多 Provider LLM 代理 — 统一管理 Compass/codex/Zhipu 等上游后端，按协议（Anthropic/OpenAI）对外暴露，自动处理鉴权、模型映射、流式转发。
+多 Provider LLM 代理 — 统一管理 AQP/codex/Zhipu 等上游后端，按协议（Anthropic/OpenAI）对外暴露，自动处理鉴权、模型映射、流式转发。
 
 ## 架构
 
 ```
 ┌─────────────┐     ┌───────────────────────────────────┐     ┌──────────────┐
 │  客户端      │────▶│  model-proxy                      │────▶│  Provider    │
-│  claude/     │     │  ┌─────────┐  ┌────────────────┐ │     │  compass     │
+│  claude/     │     │  ┌─────────┐  ┌────────────────┐ │     │  aqp         │
 │  opencode/   │     │  │ routes  │→│ provider (auth) │ │     │  codex       │
 │  codex/      │     │  │ (proto) │  │ RewriteRequest  │ │     │  zhipu       │
 │  curl/SDK    │     │  └─────────┘  └────────────────┘ │     │  ...         │
@@ -37,10 +37,10 @@ listen: 127.0.0.1:15721
 log_level: info
 
 providers:
-  compass:
-    provider_id: compass
+  aqp:
+    provider_id: aqp
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
-    cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
+    aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     models:
       glm-5.2: {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
   codex:
@@ -61,7 +61,7 @@ claude_mapping:
 
 routes:
   glm-5.2:
-    - {provider: compass, model: glm-5.2, priority: 1}
+    - {provider: aqp, model: glm-5.2, priority: 1}
     - {provider: zhipu,   model: glm-5.2, priority: 2}   # failover 备选
   gpt-5.5:
     - {provider: codex, model: gpt-5.5, priority: 1}
@@ -78,7 +78,7 @@ takeover:
 
 ```bash
 # 登录（凭据存储在 ~/.model-proxy/<name>_<suffix>.json）
-model-proxy login compass          # Compass SSO 浏览器登录
+model-proxy login aqp          # AQP SSO 浏览器登录
 model-proxy login codex            # codex OAuth device flow
 model-proxy login zhipu            # 输入 Zhipu API key
 model-proxy login deepseek         # 输入 DeepSeek API key
@@ -91,18 +91,18 @@ model-proxy serve stop             # 停止 daemon
 model-proxy serve reload           # 热加载配置（SIGHUP）
 
 # 查看用量
-model-proxy usage compass          # 月度用量/余额
+model-proxy usage aqp          # 月度用量/余额
 model-proxy usage codex            # credits/spend/rate limits
 model-proxy usage zhipu            # 5h/周/月配额 + token 消耗
 model-proxy usage deepseek         # 账户余额（is_available + 各币种）
 model-proxy usage volcengine       # 模型列表（Agent Plan 无简单余额 API）
 
 # 登出
-model-proxy logout compass         # 清除凭据文件
+model-proxy logout aqp         # 清除凭据文件
 
 # 模型列表
 model-proxy models                 # 所有 provider 的模型（从 config）
-model-proxy models compass         # 单个 provider
+model-proxy models aqp         # 单个 provider
 model-proxy models refresh zhipu   # 从服务端刷新
 
 # 接管客户端配置
@@ -125,7 +125,7 @@ model-proxy doctor                 # 离线 config 调度诊断（tier/quota/pea
 
 | Provider | Token 文件 | 内容 |
 |---|---|---|
-| compass | `~/.model-proxy/compass_oauth_auth.json` | SSO cookie + account data |
+| aqp | `~/.model-proxy/aqp_oauth_auth.json` | SSO cookie + account data |
 | codex | `~/.model-proxy/codex_oauth_auth.json` | OAuth access/refresh/id token |
 | zhipu | `~/.model-proxy/zhipu_apikey.json` | API key |
 | deepseek | `~/.model-proxy/deepseek_apikey.json` | API key |
@@ -169,9 +169,9 @@ scheduling:
 
 代理后台轮询每个 provider 的剩余配额（`Provider.Quota()`，每 `quota_poll_interval` 默认 5m 一次），缓存到 `~/.model-proxy/quota_state.json`（启动时作为基线加载，**并携带每路由 `sticky` 选择，重启后恢复 → 保 prompt cache**），并据此排序路由目标：
 
-- **调度分 = surplus**（provider 接口方法 `Provider.Surplus`）：`surplus = (最终窗口.remaining − 短窗口.remaining × (短窗口配额/最终窗口配额) × (peakMult−1)) − 时间剩余比例`。surplus>0 = 落后节奏（不用就浪费 → 优先用）；<0 = 超前（会提前耗尽 → 回避）。最终窗口（总预算）：zhipu=周、volcengine/codex/compass=月、deepseek=按量（无窗口）。
+- **调度分 = surplus**（provider 接口方法 `Provider.Surplus`）：`surplus = (最终窗口.remaining − 短窗口.remaining × (短窗口配额/最终窗口配额) × (peakMult−1)) − 时间剩余比例`。surplus>0 = 落后节奏（不用就浪费 → 优先用）；<0 = 超前（会提前耗尽 → 回避）。最终窗口（总预算）：zhipu=周、volcengine/codex/aqp=月、deepseek=按量（无窗口）。
 - **三层 tier**：`plan`（按 surplus 排）< `unknown`（按 priority 排）< `pay-as-you-go`（严格兜底，仅当所有 plan provider 都不可用）。设 `billing: pay-as-you-go` 即兜底（如 DeepSeek）。排序 `(tier, priority asc, surplus desc)` —— **priority 压过 surplus，surplus 只在同 priority 间决定**。
-- **peak 只烧短窗口**：`peak_hours` 的 multiplier 只折算 provider 的短 rate-cap 窗口（5h 等）；没有短窗口的 provider（codex/compass、未轮询的）高峰不打折。`peak_hours` 支持多段、每段独立 multiplier；multiplier=1 关闭。
+- **peak 只烧短窗口**：`peak_hours` 的 multiplier 只折算 provider 的短 rate-cap 窗口（5h 等）；没有短窗口的 provider（codex/aqp、未轮询的）高峰不打折。`peak_hours` 支持多段、每段独立 multiplier；multiplier=1 关闭。
 - **粘性切换**：路由停在一个 provider 至少 `sticky_dwell`（保 prompt cache）；到期后仅当另一 provider 在 **tier / priority / surplus 边际（`quota_switch_margin`，默认 15 pts）** 任一更优时才换 —— 既能短暂抖动后回首选，也能在他人明显领先时切换。
 
 ```yaml
@@ -192,7 +192,7 @@ scheduling:
   quota_switch_margin: 15
 ```
 
-`Quota()` 来源：zhipu/codex/volcengine/compass → plan tier；deepseek → pay-as-you-go。volcengine 的 `GetAFPUsage` 需 AccessKey/SecretKey（Ark API Key 调不了），未配时该 provider 退化为 `unknown`。
+`Quota()` 来源：zhipu/codex/volcengine/aqp → plan tier；deepseek → pay-as-you-go。volcengine 的 `GetAFPUsage` 需 AccessKey/SecretKey（Ark API Key 调不了），未配时该 provider 退化为 `unknown`。
 
 **查看调度**：`model-proxy schedule` 查询运行中的 daemon，显示每个 model 当前调度到哪个 provider（后台接口 `GET /debug/schedule`，含 ordered 列表/sticky 状态）；`model-proxy doctor` 离线诊断 config 的调度设置（每 provider tier/quota/peak + 每路由 dry-run 顺序 + warning，不需 daemon）。
 

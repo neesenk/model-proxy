@@ -119,16 +119,16 @@ takeover:
   proxy_url: http://127.0.0.1:15721
   claude: %s
 providers:
-  compass:
+  aqp:
     openai_base_url: https://example.invalid/compass-api/v1
     anthropic_base_url: https://example.invalid/compass-api
-    provider_id: compass
-    cqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
+    provider_id: aqp
+    aqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
     models:
       glm-5.2: {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
 routes:
   glm-5.2:
-    - {provider: compass, model: glm-5.2, priority: 1}
+    - {provider: aqp, model: glm-5.2, priority: 1}
 `, claudeFile)
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
@@ -199,8 +199,8 @@ func TestCLI_LogoutNoProvider(t *testing.T) {
 	if !strings.Contains(stdout, "usage: model-proxy logout") {
 		t.Errorf("logout (no provider) stdout missing usage line:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "compass") {
-		t.Errorf("logout (no provider) stdout missing provider list entry compass:\n%s", stdout)
+	if !strings.Contains(stdout, "aqp") {
+		t.Errorf("logout (no provider) stdout missing provider list entry aqp:\n%s", stdout)
 	}
 }
 
@@ -221,13 +221,13 @@ func TestCLI_UsageUnknownProvider(t *testing.T) {
 
 func TestCLI_UsageNotLoggedIn(t *testing.T) {
 	cfg := writeTempConfig(t, minimalConfig)
-	// HOME is isolated by runCLI → no compass_oauth_auth.json exists.
-	stdout, _, code := runCLI(t, "usage", cfg, "compass")
+	// HOME is isolated by runCLI → no aqp_oauth_auth.json exists.
+	stdout, _, code := runCLI(t, "usage", cfg, "aqp")
 	if code != 0 {
-		t.Fatalf("usage compass (not logged in) exit=%d want 0", code)
+		t.Fatalf("usage aqp (not logged in) exit=%d want 0", code)
 	}
 	if !strings.Contains(stdout, "Not logged in") {
-		t.Errorf("usage compass stdout missing 'Not logged in':\n%s", stdout)
+		t.Errorf("usage aqp stdout missing 'Not logged in':\n%s", stdout)
 	}
 }
 
@@ -283,9 +283,9 @@ func writeDaemonConfig(t *testing.T) string {
 	body := fmt.Sprintf(`listen: 127.0.0.1:15721
 log_file: %s/mp.log
 providers:
-  compass:
+  aqp:
     openai_base_url: https://example.invalid/compass-api/v1
-    provider_id: compass
+    provider_id: aqp
     models:
       glm-5.2: {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
 `, dir)

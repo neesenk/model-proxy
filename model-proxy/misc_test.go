@@ -114,7 +114,7 @@ func TestPrintConfigProviders_NoConfig(t *testing.T) {
 }
 
 // --- PollSession via pollAt with a mock (covers PollSession's 1-line delegate) ---
-// PollSession() calls pollAt(compassAuthInfo, ...) — the real URL. We can't
+// PollSession() calls pollAt(aqpAuthInfo, ...) — the real URL. We can't
 // redirect it (no URL-param variant on PollSession). Instead cover pollAt +
 // checkSessionAt directly (already 72.7%/83.3%), and exercise the timeout
 // path of pollAt with a mock that always fails.
@@ -127,7 +127,7 @@ func TestPollAt_TimesOut(t *testing.T) {
 		w.Write([]byte(`{"retcode":1,"message":"pending"}`))
 	}))
 	defer srv.Close()
-	c := newCompassClient(filepath.Join(t.TempDir(), "store.json"))
+	c := newAqpClient(filepath.Join(t.TempDir(), "store.json"))
 	_, err := c.pollAt(srv.URL, 1*time.Millisecond)
 	if err == nil {
 		t.Error("pollAt always-401: want error, got nil")

@@ -16,7 +16,7 @@ import (
 )
 
 // Performance tests: isolate proxy forwarding overhead with a mock upstream, no
-// dependency on the real Compass gateway. auth uses static_key (CQPProvider
+// dependency on the real AQP gateway. auth uses static_key (AqpKeyProvider
 // static path makes no network call), testing proxy logic purely.
 
 // silenceLog mutes forward's per-request log so the bench isn't slowed/spammed by log IO.
@@ -184,10 +184,10 @@ func BenchmarkProxy_Forward_SSE(b *testing.B) {
 	}
 }
 
-// BenchmarkAuthInject_CQP_Static: CQP provider static-key injection (the proxy's per-request hot path).
-func BenchmarkAuthInject_CQP_Static(b *testing.B) {
+// BenchmarkAuthInject_AQP_Static: AQP provider static-key injection (the proxy's per-request hot path).
+func BenchmarkAuthInject_AQP_Static(b *testing.B) {
 	silenceLog()
-	p := newCQPProvider("", "")
+	p := newAqpKeyProvider("", "")
 	req, _ := http.NewRequest(http.MethodPost, "http://up/v1/messages", bytes.NewReader(smallBody()))
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -199,9 +199,9 @@ func BenchmarkAuthInject_CQP_Static(b *testing.B) {
 	}
 }
 
-// BenchmarkAuthInject_CQP_Cached: CQP provider cache hit (goes through the mutex).
+// BenchmarkAuthInject_AQP_Cached: AQP provider cache hit (goes through the mutex).
 // Uses a mock mint server + a temp cookie file; Refresh once, then bench Inject (cache hit).
-func BenchmarkAuthInject_CQP_Cached(b *testing.B) {
+func BenchmarkAuthInject_AQP_Cached(b *testing.B) {
 	silenceLog()
 	mint := newUpstream(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -215,7 +215,7 @@ func BenchmarkAuthInject_CQP_Cached(b *testing.B) {
 	if err := writeFile(cookiePath, []byte(cookieFile), 0o600); err != nil {
 		b.Fatal(err)
 	}
-	p := newCQPProvider(mint.URL, cookiePath)
+	p := newAqpKeyProvider(mint.URL, cookiePath)
 	// Warm up: mint once to fill the cache.
 	if err := p.Refresh(); err != nil {
 		b.Fatal(err)

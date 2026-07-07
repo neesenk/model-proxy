@@ -80,7 +80,7 @@ func newProxyWithStatic(cfg *Config, keys map[string]string) *Proxy {
 }
 
 // fakeAuth is a provider.Authenticator that injects a Bearer key, for building
-// real provider implementations (CompassProvider/CodexProvider) in tests
+// real provider implementations (AqpProvider/CodexProvider) in tests
 // without reading auth files.
 type fakeAuth struct{ key string }
 
@@ -120,14 +120,14 @@ func TestUC_AnthropicMappingAndPathKept(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"compass": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "compass"},
+			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "aqp"},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "compass", Model: "glm-5.2"}},
+			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 		ClaudeMapping: map[string]string{"claude-opus-4-8": "glm-5.2"},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"compass": "k"})
+	p := newProxyWithStatic(cfg, map[string]string{"aqp": "k"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -503,11 +503,11 @@ func TestUC_AllTargetsFailReturns502(t *testing.T) {
 func TestUC_ModelsEndpointUnion(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"compass": {OpenAIBaseURL: "http://x", Provider: "static"},
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "static"},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2":         {{Provider: "compass", Model: "glm-5.2"}},
-			"deepseek-v4-pro": {{Provider: "compass", Model: "deepseek-v4-pro"}},
+			"glm-5.2":         {{Provider: "aqp", Model: "glm-5.2"}},
+			"deepseek-v4-pro": {{Provider: "aqp", Model: "deepseek-v4-pro"}},
 		},
 		ClaudeMapping: map[string]string{
 			"claude-opus-4-8":   "glm-5.2",
@@ -644,9 +644,9 @@ func TestUC_StickySameProvider(t *testing.T) {
 	}
 }
 
-// --- UC13: compass /messages gets ?beta=true + anthropic-version + x-compass-request-id ---
+// --- UC13: aqp /messages gets ?beta=true + anthropic-version + x-compass-request-id ---
 
-func TestUC_CompassBetaAndHeaders(t *testing.T) {
+func TestUC_AqpBetaAndHeaders(t *testing.T) {
 	var gotURL, gotAV, gotRID string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotURL = r.URL.String()
@@ -657,17 +657,17 @@ func TestUC_CompassBetaAndHeaders(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"compass": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "compass"},
+			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "aqp"},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "compass", Model: "glm-5.2"}},
+			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
 	p := NewProxy(cfg)
-	// Build a REAL CompassProvider (so RewriteRequest adds ?beta) with a fake
+	// Build a REAL AqpProvider (so RewriteRequest adds ?beta) with a fake
 	// Authenticator, so no auth file is read.
-	p.providers["compass"] = mustRealProvider(t, "compass", &provider.Config{
-		ProviderID:    "compass",
+	p.providers["aqp"] = mustRealProvider(t, "aqp", &provider.Config{
+		ProviderID:    "aqp",
 		OpenAIBaseURL: up.URL,
 		Auth:          fakeAuth{key: "k"},
 	})
@@ -677,13 +677,13 @@ func TestUC_CompassBetaAndHeaders(t *testing.T) {
 	post(t, px.URL+"/v1/messages", `{"model":"glm-5.2","messages":[]}`)
 
 	if !strings.Contains(gotURL, "beta=true") {
-		t.Errorf("upstream URL=%q missing beta=true (compass /messages needs it)", gotURL)
+		t.Errorf("upstream URL=%q missing beta=true (aqp /messages needs it)", gotURL)
 	}
 	if gotAV != "2023-06-01" {
 		t.Errorf("anthropic-version=%q want 2023-06-01", gotAV)
 	}
 	if gotRID == "" {
-		t.Error("x-compass-request-id empty (compass requests must set a UUID)")
+		t.Error("x-compass-request-id empty (aqp requests must set a UUID)")
 	}
 }
 

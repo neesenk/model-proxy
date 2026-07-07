@@ -16,7 +16,7 @@ func TestBuildProviders_AllProviderIDs(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"compass":    {OpenAIBaseURL: "http://x", Provider: "compass", CQPMintURL: "http://x/mint"},
+			"aqp":        {OpenAIBaseURL: "http://x", Provider: "aqp", AqpMintURL: "http://x/mint"},
 			"codex":      {OpenAIBaseURL: "http://x", Provider: "codex"},
 			"zhipu":      {OpenAIBaseURL: "http://x", Provider: "zhipu", UsageURL: "http://x/u"},
 			"deepseek":   {OpenAIBaseURL: "http://x", Provider: "deepseek", UsageURL: "http://x/u", Billing: "pay-as-you-go"},
@@ -26,13 +26,13 @@ func TestBuildProviders_AllProviderIDs(t *testing.T) {
 	m := buildProviders(cfg)
 	// P1-3: not just nil-check — also verify the concrete type matches the
 	// expected provider_id (catches a bug where all providers instantiate as zhipu).
-	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
+	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
 		if m[name] == nil {
 			t.Errorf("buildProviders: %s is nil", name)
 		}
 	}
 	// Verify QuotaFn is wired for each (non-nil Quota() returns a snapshot, not error)
-	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
+	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
 		snap, err := m[name].Quota()
 		if err != nil {
 			t.Errorf("%s Quota() returned error (QuotaFn not wired?): %v", name, err)
@@ -50,7 +50,7 @@ func TestBuildProviders_LogoutWired(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"compass":    {OpenAIBaseURL: "http://x", Provider: "compass", CQPMintURL: "http://x/mint"},
+			"aqp":        {OpenAIBaseURL: "http://x", Provider: "aqp", AqpMintURL: "http://x/mint"},
 			"codex":      {OpenAIBaseURL: "http://x", Provider: "codex"},
 			"zhipu":      {OpenAIBaseURL: "http://x", Provider: "zhipu"},
 			"deepseek":   {OpenAIBaseURL: "http://x", Provider: "deepseek"},
@@ -58,7 +58,7 @@ func TestBuildProviders_LogoutWired(t *testing.T) {
 		},
 	}
 	m := buildProviders(cfg)
-	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
+	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
 		if err := m[name].Logout(); err != nil {
 			t.Errorf("%s Logout: %v", name, err)
 		}
@@ -91,7 +91,7 @@ func TestBuildProviders_QuotaFnWired(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"compass":    {OpenAIBaseURL: "http://x", Provider: "compass", CQPMintURL: "http://x/mint"},
+			"aqp":        {OpenAIBaseURL: "http://x", Provider: "aqp", AqpMintURL: "http://x/mint"},
 			"codex":      {OpenAIBaseURL: "http://x", Provider: "codex"},
 			"zhipu":      {OpenAIBaseURL: "http://x", Provider: "zhipu", UsageURL: "http://127.0.0.1:1/u"},
 			"deepseek":   {OpenAIBaseURL: "http://x", Provider: "deepseek", UsageURL: "http://127.0.0.1:1/u"},
@@ -99,9 +99,9 @@ func TestBuildProviders_QuotaFnWired(t *testing.T) {
 		},
 	}
 	m := buildProviders(cfg)
-	// compass Quota → fetchCompassQuota (no cred → BillingUnknown, no error).
+	// aqp Quota → fetchAqpQuota (no cred → BillingUnknown, no error).
 	// (provider.Quota delegates to cfg.QuotaOrUnknown → QuotaFn.)
-	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
+	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
 		if _, err := m[name].Quota(); err != nil {
 			// Quota returns (snapshot, nil) even on failure (Err set in snapshot).
 			t.Errorf("%s Quota: %v", name, err)

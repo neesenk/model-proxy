@@ -16,18 +16,18 @@ import (
 	"time"
 )
 
-// Core of Compass SSO: a single cookie jar carried across the whole login flow. Both the
+// Core of AQP SSO: a single cookie jar carried across the whole login flow. Both the
 // SSO_A bootstrap cookie and the SSO_C session cookie (set by the auth/info poll's 200)
 // are retained in the jar.
 
 // ---- Endpoints / constants ----
 
 const (
-	compassBase         = "https://compass.llm.shopee.io"
-	compassAuthLogin    = compassBase + "/compass-api/v1/auth/login" // bootstrap: 401 + SSO_A + result URL
-	compassAuthInfo     = compassBase + "/compass-api/v1/auth/info"  // session poll: 200 + SSO_C when authed
-	compassAPIKeyGetGen = compassBase + "/api/v1/cqp/ccswitch/api_key/get_or_generate"
-	compassMonthlyUsage = compassBase + "/api/v1/cqp/ccswitch/monthly_usage"
+	aqpBase         = "https://compass.llm.shopee.io"
+	aqpAuthLogin    = aqpBase + "/compass-api/v1/auth/login" // bootstrap: 401 + SSO_A + result URL
+	aqpAuthInfo     = aqpBase + "/compass-api/v1/auth/info"  // session poll: 200 + SSO_C when authed
+	aqpAPIKeyGetGen = aqpBase + "/api/v1/cqp/ccswitch/api_key/get_or_generate"
+	aqpMonthlyUsage = aqpBase + "/api/v1/cqp/ccswitch/monthly_usage"
 
 	ssoCookieName       = "SSO_C" // actual cookie name (verified against the real store)
 	loginCompletePath   = "/company-gateway/login-complete"
@@ -36,7 +36,7 @@ const (
 
 // ---- Account persistence (google_oauth_auth.json) ----
 
-// AccountData mirrors google_oauth_auth.json. 6 fields; the managed CQP key is NOT persisted
+// AccountData mirrors google_oauth_auth.json. 6 fields; the managed AQP key is NOT persisted
 // (fetched on demand, cached in memory only).
 type AccountData struct {
 	AccountID        string `json:"account_id"`
@@ -90,12 +90,12 @@ func clearAccount(path string) error {
 	return nil
 }
 
-// ---- Compass client (with cookie jar) ----
+// ---- AQP client (with cookie jar) ----
 
-// CompassClient talks to the Compass backend. It keeps a cookie jar across the SSO
+// AqpClient talks to the AQP backend. It keeps a cookie jar across the SSO
 // flow so the SSO_A bootstrap cookie and the SSO_C session cookie (set by the
 // auth/info poll's 200 after login) are retained.
-type CompassClient struct {
+type AqpClient struct {
 	HTTP      *http.Client
 	Jar       http.CookieJar
 	storePath string
@@ -104,10 +104,10 @@ type CompassClient struct {
 	cachedKey string
 }
 
-// newCompassClient builds a Compass client backed by the given store file.
-func newCompassClient(storePath string) *CompassClient {
+// newAqpClient builds a AQP client backed by the given store file.
+func newAqpClient(storePath string) *AqpClient {
 	jar, _ := cookiejar.New(nil)
-	return &CompassClient{
+	return &AqpClient{
 		HTTP:      &http.Client{Timeout: 30 * time.Second, Jar: jar},
 		Jar:       jar,
 		storePath: storePath,
@@ -115,7 +115,7 @@ func newCompassClient(storePath string) *CompassClient {
 }
 
 // GetManagedKey returns the cached managed key; fetches via get_or_generate if none is cached.
-func (c *CompassClient) GetManagedKey() (string, error) {
+func (c *AqpClient) GetManagedKey() (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cachedKey != "" {
@@ -130,7 +130,7 @@ func (c *CompassClient) GetManagedKey() (string, error) {
 }
 
 // InvalidateKey clears the in-memory managed key (called before a 401 retry).
-func (c *CompassClient) InvalidateKey() {
+func (c *AqpClient) InvalidateKey() {
 	c.mu.Lock()
 	c.cachedKey = ""
 	c.mu.Unlock()
@@ -173,17 +173,17 @@ type AuthInfoData struct {
 
 // BootstrapLoginURL hits auth/login expecting 401, extracts the login URL from
 // the `result` field, and retains the SSO_A cookie in the jar.
-func (c *CompassClient) BootstrapLoginURL() (string, error) {
-	return c.bootstrapAt(compassAuthLogin)
+func (c *AqpClient) BootstrapLoginURL() (string, error) {
+	return c.bootstrapAt(aqpAuthLogin)
 }
 
 // bootstrapAt is the URL-parametrized core, used by tests with a mock server.
-func (c *CompassClient) bootstrapAt(endpoint string) (string, error) {
+func (c *AqpClient) bootstrapAt(endpoint string) (string, error) {
 	req, _ := http.NewRequest(http.MethodGet, endpoint, nil)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("compass sso bootstrap: %w", err)
+		return "", fmt.Errorf("aqp sso bootstrap: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -191,7 +191,7 @@ func (c *CompassClient) bootstrapAt(endpoint string) (string, error) {
 	// login URL (and sets the SSO_A cookie, retained by the jar).
 	loginURL := extractLoginURL(string(body))
 	if loginURL == "" {
-		return "", fmt.Errorf("compass sso bootstrap missing login URL: status=%d, body=%s",
+		return "", fmt.Errorf("aqp sso bootstrap missing login URL: status=%d, body=%s",
 			resp.StatusCode, truncate(string(body), 300))
 	}
 	for _, ck := range c.PublicCookies() {
@@ -202,11 +202,11 @@ func (c *CompassClient) bootstrapAt(endpoint string) (string, error) {
 
 // PollSession polls auth/info (using the jar's cookies) until retcode==0 && hasAccess.
 // After a successful login the response sets the SSO_C cookie, captured by the jar.
-func (c *CompassClient) PollSession(timeout time.Duration) (*AuthInfoData, error) {
-	return c.pollAt(compassAuthInfo, timeout)
+func (c *AqpClient) PollSession(timeout time.Duration) (*AuthInfoData, error) {
+	return c.pollAt(aqpAuthInfo, timeout)
 }
 
-func (c *CompassClient) pollAt(endpoint string, timeout time.Duration) (*AuthInfoData, error) {
+func (c *AqpClient) pollAt(endpoint string, timeout time.Duration) (*AuthInfoData, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -218,12 +218,12 @@ func (c *CompassClient) pollAt(endpoint string, timeout time.Duration) (*AuthInf
 		time.Sleep(2 * time.Second)
 	}
 	if lastErr != nil {
-		return nil, fmt.Errorf("compass sso session check failed: %w", lastErr)
+		return nil, fmt.Errorf("aqp sso session check failed: %w", lastErr)
 	}
-	return nil, fmt.Errorf("compass sso session check timed out")
+	return nil, fmt.Errorf("aqp sso session check timed out")
 }
 
-func (c *CompassClient) checkSessionAt(endpoint string) (*AuthInfoData, error) {
+func (c *AqpClient) checkSessionAt(endpoint string) (*AuthInfoData, error) {
 	req, _ := http.NewRequest(http.MethodGet, endpoint, nil)
 	req.Header.Set("Accept", "application/json")
 	if c.Jar != nil {
@@ -236,7 +236,7 @@ func (c *CompassClient) checkSessionAt(endpoint string) (*AuthInfoData, error) {
 	}
 	resp, err := c.HTTP.Do(req) // jar sends SSO_A/SSO_C automatically
 	if err != nil {
-		return nil, fmt.Errorf("compass sso session check failed: %w", err)
+		return nil, fmt.Errorf("aqp sso session check failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -245,19 +245,19 @@ func (c *CompassClient) checkSessionAt(endpoint string) (*AuthInfoData, error) {
 	// body for diagnosis since it surfaces to the caller on failure, not routine logs.
 	logf("[GoogleGateway] auth/info status=%d body=%dB", resp.StatusCode, len(body))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("compass sso session check failed: status=%d body=%s",
+		return nil, fmt.Errorf("aqp sso session check failed: status=%d body=%s",
 			resp.StatusCode, truncate(string(body), 200))
 	}
 	var air AuthInfoResponse
 	if err := json.Unmarshal(body, &air); err != nil {
-		return nil, fmt.Errorf("compass auth info response parse failed: %w", err)
+		return nil, fmt.Errorf("aqp auth info response parse failed: %w", err)
 	}
 	if air.Retcode != 0 {
-		return nil, fmt.Errorf("compass sso session rejected: retcode=%d message=%s", air.Retcode, air.Message)
+		return nil, fmt.Errorf("aqp sso session rejected: retcode=%d message=%s", air.Retcode, air.Message)
 	}
 	var d AuthInfoData
 	if err := json.Unmarshal(air.Data, &d); err != nil {
-		return nil, fmt.Errorf("compass auth info data parse failed: %w", err)
+		return nil, fmt.Errorf("aqp auth info data parse failed: %w", err)
 	}
 	d.HasAccess = d.User.Active
 	d.EmployeeEmail = d.User.Email
@@ -270,11 +270,11 @@ func (c *CompassClient) checkSessionAt(endpoint string) (*AuthInfoData, error) {
 
 // SessionCookie returns the SSO_C cookie value from the jar (set by auth/info
 // after a successful login), or "" if absent.
-func (c *CompassClient) SessionCookie() string {
+func (c *AqpClient) SessionCookie() string {
 	if c.Jar == nil {
 		return ""
 	}
-	u, _ := url.Parse(compassBase)
+	u, _ := url.Parse(aqpBase)
 	for _, ck := range c.Jar.Cookies(u) {
 		if ck.Name == ssoCookieName {
 			return fmt.Sprintf("%s=%s", ck.Name, ck.Value)
@@ -283,12 +283,12 @@ func (c *CompassClient) SessionCookie() string {
 	return ""
 }
 
-// PublicCookies returns the jar's cookies for the compass host (for debugging).
-func (c *CompassClient) PublicCookies() []*http.Cookie {
+// PublicCookies returns the jar's cookies for the aqp host (for debugging).
+func (c *AqpClient) PublicCookies() []*http.Cookie {
 	if c.Jar == nil {
 		return nil
 	}
-	u, _ := url.Parse(compassBase)
+	u, _ := url.Parse(aqpBase)
 	return c.Jar.Cookies(u)
 }
 
@@ -314,12 +314,12 @@ type APIKeyData struct {
 
 // fetchAPIKey calls get_or_generate with the persisted/jar SSO cookie.
 // Returns the full APIKeyData (api_key + project_id + employee identity).
-func (c *CompassClient) fetchAPIKey() (*APIKeyData, error) {
-	return c.fetchAPIKeyAt(compassAPIKeyGetGen)
+func (c *AqpClient) fetchAPIKey() (*APIKeyData, error) {
+	return c.fetchAPIKeyAt(aqpAPIKeyGetGen)
 }
 
 // fetchAPIKeyAt is the URL-parametrized core, used by tests with a mock server.
-func (c *CompassClient) fetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
+func (c *AqpClient) fetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
 	a, _ := loadAccount(c.storePath) // absent file is non-fatal: post-login uses the jar
 	cookie := c.SessionCookie()
 	if a == nil {
@@ -331,7 +331,7 @@ func (c *CompassClient) fetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
 	if cookie == "" {
 		return nil, fmt.Errorf("not logged in. Please login with your company Google account first.")
 	}
-	// The Compass endpoint returns the full identity without needing project_id
+	// The AQP endpoint returns the full identity without needing project_id
 	// input; send an empty JSON object (form-encoded is rejected).
 	payload, _ := json.Marshal(map[string]string{})
 	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
@@ -339,30 +339,30 @@ func (c *CompassClient) fetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("cqp api key request failed: %w", err)
+		return nil, fmt.Errorf("aqp api key request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var ar APIKeyResponse
 	if err := json.Unmarshal(body, &ar); err != nil {
-		return nil, fmt.Errorf("cqp api key response parse failed: %w", err)
+		return nil, fmt.Errorf("aqp api key response parse failed: %w", err)
 	}
 	if ar.Retcode != 0 {
-		return nil, fmt.Errorf("cqp api key response retcode=%d message=%s", ar.Retcode, ar.Message)
+		return nil, fmt.Errorf("aqp api key response retcode=%d message=%s", ar.Retcode, ar.Message)
 	}
 	var d APIKeyData
 	if err := json.Unmarshal(ar.Data, &d); err != nil {
-		return nil, fmt.Errorf("cqp api key response missing data")
+		return nil, fmt.Errorf("aqp api key response missing data")
 	}
 	if d.APIKey == "" {
-		return nil, fmt.Errorf("cqp api key response missing api_key")
+		return nil, fmt.Errorf("aqp api key response missing api_key")
 	}
 	// Managed key is cached in memory only (the desktop app does not persist it).
 	c.cachedKey = d.APIKey
 	return &d, nil
 }
 
-// extractLoginURL finds the login URL in the auth/login 401 body. The Compass
+// extractLoginURL finds the login URL in the auth/login 401 body. The Aqp
 // backend returns it in the `result` field (and may also set a Location header).
 func extractLoginURL(body string) string {
 	var m map[string]any
@@ -398,20 +398,20 @@ type MonthlyProjectUsage struct {
 // MonthlyUsage fetches monthly_usage with the persisted SSO cookie (cookie-authed,
 // not the managed key). NOTE: the endpoint is POST and requires project_id input
 // (taken from the store's AccountData.ProjectID).
-func (c *CompassClient) MonthlyUsage() (*MonthlyProjectUsage, error) {
-	return c.monthlyUsageAt(compassMonthlyUsage)
+func (c *AqpClient) MonthlyUsage() (*MonthlyProjectUsage, error) {
+	return c.monthlyUsageAt(aqpMonthlyUsage)
 }
 
 // monthlyUsageAt is the URL-parametrized core, used by tests with a mock server
 // (mirrors fetchAPIKeyAt). It POSTs project_id (cookie-authed) and parses the
 // {retcode, data:{...MonthlyProjectUsage}} envelope.
-func (c *CompassClient) monthlyUsageAt(endpoint string) (*MonthlyProjectUsage, error) {
+func (c *AqpClient) monthlyUsageAt(endpoint string) (*MonthlyProjectUsage, error) {
 	a, err := loadAccount(c.storePath)
 	if err != nil || a == nil || a.SSOSessionCookie == "" {
 		return nil, fmt.Errorf("not logged in")
 	}
 	if a.ProjectID == "" {
-		return nil, fmt.Errorf("no project_id in store; run `model-proxy login compass` (or --import) to populate it")
+		return nil, fmt.Errorf("no project_id in store; run `model-proxy login aqp` (or --import) to populate it")
 	}
 	payload, _ := json.Marshal(map[string]string{"project_id": a.ProjectID})
 	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))

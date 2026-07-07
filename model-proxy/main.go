@@ -27,7 +27,7 @@ Commands:
   serve reload         Hot-reload config (SIGHUP the running daemon)
   takeover <client>    Rewrite client config to point at the proxy
   restore <client>     Restore client config from backup
-  login <provider>     Login to a provider (compass | codex)
+  login <provider>     Login to a provider (aqp | codex)
   logout <provider>    Clear provider credentials
   usage <provider>     Show usage / credits for a provider
   models               List models from all providers (from config)
@@ -322,19 +322,19 @@ func providerNames(cfg *Config) string {
 	return strings.Join(names, ", ")
 }
 
-func showCompassUsage(cfg *Config) {
-	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue("compass")))
-	path := authFilePath("compass", "oauth_auth")
+func showAqpUsage(cfg *Config) {
+	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue("aqp")))
+	path := authFilePath("aqp", "oauth_auth")
 	a, err := loadAccount(path)
 	if err != nil {
 		fmt.Println(cRed("Error: " + err.Error()))
 		return
 	}
 	if a == nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login compass"))
+		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login aqp"))
 		return
 	}
-	c := newCompassClient(path)
+	c := newAqpClient(path)
 	fmt.Printf("%s %s\n", cDim("Account:    "), cBold(cCyan(a.Email)))
 	fmt.Printf("%s %s\n", cDim("Project ID: "), cGray(a.ProjectID))
 	mu, err := c.MonthlyUsage()
@@ -1056,15 +1056,15 @@ func fetchDeepseekQuota(cfg *Config, name string, prov Provider) (*provider.Quot
 	return parseDeepseekQuota(body), nil
 }
 
-// parseCompassQuota converts monthly_usage into a single-window plan snapshot.
-// compassMonthlyReset derives the monthly quota reset time (last second of the
+// parseAqpQuota converts monthly_usage into a single-window plan snapshot.
+// aqpMonthlyReset derives the monthly quota reset time (last second of the
 // selected month, local time) and the nominal cycle duration from the
 // SelectedYear/SelectedMonth the monthly_usage endpoint returns. Falls back to
 // the current month when the API omits them (zero values). The reset time is
 // required: without it the surplus guard in provider.QuotaSnapshot.Surplus()
-// (ult.ResetsAt.IsZero()) short-circuits to 0, so compass could never be
+// (ult.ResetsAt.IsZero()) short-circuits to 0, so aqp could never be
 // prioritized for being under pace — it would only beat over-pace providers.
-func compassMonthlyReset(year, month int) (resetsAt time.Time, duration time.Duration) {
+func aqpMonthlyReset(year, month int) (resetsAt time.Time, duration time.Duration) {
 	if year == 0 || month == 0 {
 		now := time.Now()
 		if year == 0 {
@@ -1080,13 +1080,13 @@ func compassMonthlyReset(year, month int) (resetsAt time.Time, duration time.Dur
 	return resetsAt, resetsAt.Sub(cycleStart)
 }
 
-func parseCompassQuota(mu *MonthlyProjectUsage, account string) *provider.QuotaSnapshot {
+func parseAqpQuota(mu *MonthlyProjectUsage, account string) *provider.QuotaSnapshot {
 	s := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Account: account, Plan: mu.Plan, AsOf: time.Now()}
 	rem := -1.0
 	if mu.TotalAmount > 0 {
 		rem = mu.Balance / mu.TotalAmount
 	}
-	resetsAt, dur := compassMonthlyReset(mu.SelectedYear, mu.SelectedMonth)
+	resetsAt, dur := aqpMonthlyReset(mu.SelectedYear, mu.SelectedMonth)
 	s.Windows = append(s.Windows, provider.QuotaWindow{
 		Label: "Monthly", Kind: "money",
 		Used: mu.Usage, Total: mu.TotalAmount, RemainingPct: rem,
@@ -1096,11 +1096,11 @@ func parseCompassQuota(mu *MonthlyProjectUsage, account string) *provider.QuotaS
 	return s
 }
 
-// fetchCompassQuota mints the CQP key + POSTs monthly_usage.
-func fetchCompassQuota(cfg *Config) (*provider.QuotaSnapshot, error) {
-	path := authFilePath("compass", "oauth_auth")
+// fetchAqpQuota mints the AQP key + POSTs monthly_usage.
+func fetchAqpQuota(cfg *Config) (*provider.QuotaSnapshot, error) {
+	path := authFilePath("aqp", "oauth_auth")
 	a, _ := loadAccount(path)
-	c := newCompassClient(path)
+	c := newAqpClient(path)
 	mu, err := c.MonthlyUsage()
 	if err != nil {
 		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
@@ -1109,7 +1109,7 @@ func fetchCompassQuota(cfg *Config) (*provider.QuotaSnapshot, error) {
 	if a != nil {
 		acct = a.Email
 	}
-	return parseCompassQuota(mu, acct), nil
+	return parseAqpQuota(mu, acct), nil
 }
 
 func listConfigModels(prov Provider) {
@@ -1502,7 +1502,7 @@ func cmdDoctor(args []string) {
 // (by provider_id), or "(none → unknown at runtime)" for ids without a Quota parser.
 func quotaSourceLabel(providerID string) string {
 	switch providerID {
-	case "compass":
+	case "aqp":
 		return "monthly_usage"
 	case "codex":
 		return "wham/usage"

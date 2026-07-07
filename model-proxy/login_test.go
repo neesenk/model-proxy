@@ -10,14 +10,14 @@ import (
 	"time"
 )
 
-// TestLogin_FullFlowWithMockCompass drives the entire real SSO flow shape
-// (bootstrap → loopback signal → poll → get_or_generate) against a mock Compass
+// TestLogin_FullFlowWithMockAQP drives the entire real SSO flow shape
+// (bootstrap → loopback signal → poll → get_or_generate) against a mock Aqp
 // backend that mimics the real /auth/login 401 + /auth/info 200 contract.
-func TestLogin_FullFlowWithMockCompass(t *testing.T) {
+func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	cookieVal := "fake-sso-c-cookie-value"
 
 	var infoCalls int
-	compass := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	aqp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/compass-api/v1/auth/login":
 			// Bootstrap: 401 + SSO_A cookie + result login URL.
@@ -45,23 +45,23 @@ func TestLogin_FullFlowWithMockCompass(t *testing.T) {
 			fmt.Fprint(w, `{"retcode":0,"message":"ok","data":{"user":{"userid":1,"email":"tester@shopee.io","is_active":true}}}`)
 		case "/api/v1/cqp/ccswitch/api_key/get_or_generate":
 			w.Header().Set("content-type", "application/json")
-			fmt.Fprint(w, `{"retcode":0,"data":{"generated":true,"api_key":"managed-cqp-key-xyz","quota_type":"enterprise","project_id":"proj-123","employee_email":"tester@shopee.io","employee_user_id":"1","employee_role":"engineer","business_name":"Shopee"}}`)
+			fmt.Fprint(w, `{"retcode":0,"data":{"generated":true,"api_key":"managed-aqp-key-xyz","quota_type":"enterprise","project_id":"proj-123","employee_email":"tester@shopee.io","employee_user_id":"1","employee_role":"engineer","business_name":"Shopee"}}`)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
-	defer compass.Close()
+	defer aqp.Close()
 
 	storePath := t.TempDir() + "/google_oauth_auth.json"
 	jar, _ := cookiejar.New(nil)
-	c := &CompassClient{
+	c := &AqpClient{
 		HTTP:      &http.Client{Jar: jar},
 		Jar:       jar,
 		storePath: storePath,
 	}
 
 	// 1. Bootstrap: get the login URL (401 + result).
-	loginURL, err := c.bootstrapAt(compass.URL + "/compass-api/v1/auth/login")
+	loginURL, err := c.bootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestLogin_FullFlowWithMockCompass(t *testing.T) {
 	}
 
 	// 3. Poll session (jar carries SSO_A; mock upgrades to SSO_C).
-	data, err := c.pollAt(compass.URL+"/compass-api/v1/auth/info", 10*time.Second)
+	data, err := c.pollAt(aqp.URL+"/compass-api/v1/auth/info", 10*time.Second)
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -109,11 +109,11 @@ func TestLogin_FullFlowWithMockCompass(t *testing.T) {
 	if err := saveAccount(storePath, a); err != nil {
 		t.Fatal(err)
 	}
-	key, err := c.fetchAPIKeyAt(compass.URL + "/api/v1/cqp/ccswitch/api_key/get_or_generate")
+	key, err := c.fetchAPIKeyAt(aqp.URL + "/api/v1/cqp/ccswitch/api_key/get_or_generate")
 	if err != nil {
 		t.Fatalf("fetch key: %v", err)
 	}
-	if key.APIKey != "managed-cqp-key-xyz" {
+	if key.APIKey != "managed-aqp-key-xyz" {
 		t.Errorf("key=%v", key.APIKey)
 	}
 	if key.ProjectID != "proj-123" {
@@ -129,14 +129,14 @@ func TestLogin_FullFlowWithMockCompass(t *testing.T) {
 
 // TestBootstrap_MissingLoginURL verifies the error when the body has no result.
 func TestBootstrap_MissingLoginURL(t *testing.T) {
-	compass := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	aqp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprint(w, `{"something":"else"}`)
 	}))
-	defer compass.Close()
+	defer aqp.Close()
 	jar, _ := cookiejar.New(nil)
-	c := &CompassClient{HTTP: &http.Client{Jar: jar}, Jar: jar, storePath: t.TempDir() + "/g.json"}
-	_, err := c.bootstrapAt(compass.URL + "/compass-api/v1/auth/login")
+	c := &AqpClient{HTTP: &http.Client{Jar: jar}, Jar: jar, storePath: t.TempDir() + "/g.json"}
+	_, err := c.bootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "missing login url") {
 		t.Errorf("err=%v", err)
 	}

@@ -31,18 +31,18 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	cfg := &Config{
 
 		Providers: map[string]Provider{
-			"codex":   {OpenAIBaseURL: codexUp.URL, Provider: "static"},
-			"compass": {OpenAIBaseURL: gwUp.URL, Provider: "static"},
+			"codex": {OpenAIBaseURL: codexUp.URL, Provider: "static"},
+			"aqp":   {OpenAIBaseURL: gwUp.URL, Provider: "static"},
 		},
 		Routes: map[string][]RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
-			"glm-5.2": {{Provider: "compass", Model: "glm-5.2"}},
+			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
 	p := NewProxy(cfg)
 	// Override both providers' auth with known tokens for deterministic test.
 	p.providers["codex"] = &testProv{key: "codex-token"}
-	p.providers["compass"] = &testProv{key: "gw-key"}
+	p.providers["aqp"] = &testProv{key: "gw-key"}
 
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -54,7 +54,7 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 		t.Error("gpt-5.5: expected to hit codex backend")
 	}
 	if gwHit.path != "" {
-		t.Error("gpt-5.5: should not hit compass backend")
+		t.Error("gpt-5.5: should not hit aqp backend")
 	}
 	if codexHit.auth != "Bearer codex-token" {
 		t.Errorf("gpt-5.5 auth=%q want Bearer codex-token", codexHit.auth)
@@ -64,11 +64,11 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 		t.Errorf("gpt-5.5 model rewrite: upstream model=%q want gpt-5.5", codexHit.model)
 	}
 
-	// 2) glm-5.2 → compass provider
+	// 2) glm-5.2 → aqp provider
 	codexHit, gwHit = requestHit{}, requestHit{}
 	post(t, px.URL+"/v1/responses", `{"model":"glm-5.2","input":[]}`)
 	if gwHit.path == "" {
-		t.Error("glm-5.2: expected to hit compass backend")
+		t.Error("glm-5.2: expected to hit aqp backend")
 	}
 	if codexHit.path != "" {
 		t.Error("glm-5.2: should not hit codex backend")
@@ -91,10 +91,10 @@ func TestForward_UnknownModel(t *testing.T) {
 	cfg := &Config{
 
 		Providers: map[string]Provider{
-			"compass": {OpenAIBaseURL: gwUp.URL, Provider: "static"},
+			"aqp": {OpenAIBaseURL: gwUp.URL, Provider: "static"},
 		},
 		Routes: map[string][]RouteTarget{
-			"gpt-5.5": {{Provider: "compass", Model: "gpt-5.5"}},
+			"gpt-5.5": {{Provider: "aqp", Model: "gpt-5.5"}},
 		},
 	}
 	p := NewProxy(cfg)

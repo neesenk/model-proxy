@@ -131,8 +131,8 @@ func TestNewAuthProvider_ApiKeyProviders(t *testing.T) {
 			t.Errorf("provider_id %q: want *ApiKeyProvider, got %T", pid, auth)
 		}
 	}
-	// Sanity: compass uses a different auth strategy.
-	if _, ok := newAuthProvider("compass", "compass", cfg).(*ApiKeyProvider); ok {
-		t.Error("compass should not be an *ApiKeyProvider")
+	// Sanity: aqp uses a different auth strategy.
+	if _, ok := newAuthProvider("aqp", "aqp", cfg).(*ApiKeyProvider); ok {
+		t.Error("aqp should not be an *ApiKeyProvider")
 	}
 }

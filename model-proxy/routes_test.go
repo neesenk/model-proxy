@@ -36,17 +36,17 @@ func TestForward_ClaudeMapping(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"compass": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "static"},
+			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "static"},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "compass", Model: "glm-5.2"}},
+			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 		ClaudeMapping: map[string]string{
 			"claude-sonnet-4-6": "glm-5.2",
 		},
 	}
 	p := NewProxy(cfg)
-	p.providers["compass"] = &testProv{key: "k"}
+	p.providers["aqp"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 

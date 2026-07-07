@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// Compass SSO login flow:
+// AQP SSO login flow:
 //  1. GET auth/login → 401 + SSO_A cookie (in jar) + result login URL
 //  2. Set next=<loopback callback> on the login URL, open browser
 //  3. User completes Google login on soup.shopee.io; wait for EITHER the loopback
@@ -97,8 +97,8 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) error {
 }
 
 func runLogin(cfg *Config) error {
-	storePath := authFilePath("compass", "oauth_auth")
-	c := newCompassClient(storePath)
+	storePath := authFilePath("aqp", "oauth_auth")
+	c := newAqpClient(storePath)
 
 	// 1. Bootstrap: get the login URL + SSO_A cookie.
 	loginURL, err := c.BootstrapLoginURL()
@@ -144,8 +144,8 @@ After logging in, the browser will try to redirect back to this machine:
 	if err := waitForLoginSignal(ls, 5*time.Minute); err != nil {
 		return err
 	}
-	fmt.Println("[GoogleGateway] Received login-complete signal, checking Compass session")
-	fmt.Println("[GoogleGateway] Ignoring OAuth callback code/state (Compass Soup SSO flow)")
+	fmt.Println("[GoogleGateway] Received login-complete signal, checking AQP session")
+	fmt.Println("[GoogleGateway] Ignoring OAuth callback code/state (AQP Soup SSO flow)")
 
 	// 4. Poll auth/info until retcode==0 && hasAccess. The jar (with SSO_A) is
 	//    upgraded to SSO_C by the 200's Set-Cookie.
@@ -289,9 +289,9 @@ func (l *LoopbackServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The loopback callback is the terminal step of the SSO redirect chain.
-	// After Google login: soup.shopee.io -> compass (sets SSO_C) -> here, the
+	// After Google login: soup.shopee.io -> aqp (sets SSO_C) -> here, the
 	// browser carries SSO_A/SSO_C cookies on this request. Capture whichever is
-	// present (preferring SSO_C). Ignore code/state (Compass Soup SSO flow).
+	// present (preferring SSO_C). Ignore code/state (AQP Soup SSO flow).
 	var ssoC, ssoA string
 	for _, c := range r.Cookies() {
 		switch c.Name {
@@ -304,7 +304,7 @@ func (l *LoopbackServer) handle(w http.ResponseWriter, r *http.Request) {
 	if ssoC == "" {
 		ssoC = r.URL.Query().Get(ssoCookieName)
 	}
-	fmt.Printf("[GoogleGateway] Received SSO callback signal; checking Compass session (SSO_C=%v SSO_A=%v)\n",
+	fmt.Printf("[GoogleGateway] Received SSO callback signal; checking AQP session (SSO_C=%v SSO_A=%v)\n",
 		ssoC != "", ssoA != "")
 
 	// Respond with the success page.

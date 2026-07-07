@@ -134,16 +134,16 @@ func writeTempConfig(t *testing.T, body string) string {
 
 const minimalConfig = `listen: 127.0.0.1:15721
 providers:
-  compass:
+  aqp:
     openai_base_url: https://example.invalid/compass-api/v1
     anthropic_base_url: https://example.invalid/compass-api
-    provider_id: compass
-    cqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
+    provider_id: aqp
+    aqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
     models:
       glm-5.2: {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
 routes:
   glm-5.2:
-    - {provider: compass, model: glm-5.2, priority: 1}
+    - {provider: aqp, model: glm-5.2, priority: 1}
 `
 
 // -- C1: `models` lists all exposed models from config ---
@@ -157,8 +157,8 @@ func TestCLI_ModelsListsAll(t *testing.T) {
 	if !strings.Contains(stdout, "glm-5.2") {
 		t.Errorf("models output missing glm-5.2:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "compass") {
-		t.Errorf("models output missing provider name compass:\n%s", stdout)
+	if !strings.Contains(stdout, "aqp") {
+		t.Errorf("models output missing provider name aqp:\n%s", stdout)
 	}
 }
 
@@ -166,12 +166,12 @@ func TestCLI_ModelsListsAll(t *testing.T) {
 
 func TestCLI_ModelsOneProvider(t *testing.T) {
 	cfg := writeTempConfig(t, minimalConfig)
-	stdout, _, code := runCLI(t, "models", cfg, "compass")
+	stdout, _, code := runCLI(t, "models", cfg, "aqp")
 	if code != 0 {
-		t.Fatalf("models compass exit=%d want 0", code)
+		t.Fatalf("models aqp exit=%d want 0", code)
 	}
 	if !strings.Contains(stdout, "glm-5.2") {
-		t.Errorf("models compass output missing glm-5.2:\n%s", stdout)
+		t.Errorf("models aqp output missing glm-5.2:\n%s", stdout)
 	}
 }
 
@@ -206,9 +206,9 @@ func TestCLI_DoctorValidConfig(t *testing.T) {
 func TestCLI_DoctorInvalidConfig(t *testing.T) {
 	bad := `listen: 127.0.0.1:15721
 providers:
-  compass:
+  aqp:
     openai_base_url: https://x
-    provider_id: compass
+    provider_id: aqp
     anthropic_base_url: https://x/v1   # invalid: ends with /v1
     models: {}
 routes: {}
@@ -227,7 +227,7 @@ routes: {}
 
 func TestCLI_ScheduleNoDaemon(t *testing.T) {
 	// Use a port nothing is listening on to guarantee "cannot reach daemon".
-	cfg := writeTempConfig(t, "listen: 127.0.0.1:1\nproviders:\n  compass:\n    openai_base_url: https://x\n    provider_id: compass\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: compass, model: m}\n")
+	cfg := writeTempConfig(t, "listen: 127.0.0.1:1\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
 	_, stderr, code := runCLI(t, "schedule", cfg)
 	if code == 0 {
 		t.Error("schedule no daemon: exit=0 want non-zero")
@@ -247,8 +247,8 @@ func TestCLI_ConfigCheck(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("config check exit=%d want 0", code)
 	}
-	if !strings.Contains(stdout, "compass") {
-		t.Errorf("config check output missing provider compass:\n%s", stdout)
+	if !strings.Contains(stdout, "aqp") {
+		t.Errorf("config check output missing provider aqp:\n%s", stdout)
 	}
 }
 

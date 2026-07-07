@@ -150,11 +150,11 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"compass": {OpenAIBaseURL: "http://x", Provider: "compass", Models: map[string]ProviderModel{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: map[string]ProviderModel{
 				"glm-5.2": {Context: 1000, Output: 2000, Modalities: ProviderModalities{Input: []string{"text"}, Output: []string{"text"}}},
 			}},
 		},
-		Routes:   map[string][]RouteTarget{"glm-5.2": {{Provider: "compass", Model: "glm-5.2"}}},
+		Routes:   map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
 		Takeover: Takeover{ProxyURL: "http://127.0.0.1:15721", Claude: filepath.Join(dir, "claude.json")},
 	}
 	bakDir := filepath.Join(dir, ".mp")

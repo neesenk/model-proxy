@@ -62,7 +62,7 @@ func (p *ZhipuProvider) Logout() error {
 
 func (p *ZhipuProvider) Usage() (any, error) {
 	// Delegate to the main-package UsageFn (showGenericUsage), which fetches
-	// /models and prints the list. Matches compass/codex/deepseek.
+	// /models and prints the list. Matches aqp/codex/deepseek.
 	return p.cfg.UsageFn()
 }
 

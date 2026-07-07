@@ -10,7 +10,7 @@ import (
 )
 
 // fetchModelsBearer is a shared helper for providers that expose an OpenAI-style
-// /models endpoint with Bearer auth. Returns the model IDs. Used by compass,
+// /models endpoint with Bearer auth. Returns the model IDs. Used by aqp,
 // codex, zhipu, deepseek — any provider whose Auth (cfg.Auth) injects a Bearer
 // token and whose openai_base_url serves /models.
 func fetchModelsBearer(cfg *Config) ([]string, error) {

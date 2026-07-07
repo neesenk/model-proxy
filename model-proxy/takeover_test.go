@@ -16,15 +16,15 @@ import (
 func testTakeoverConfig(t *testing.T, dir string) *Config {
 	return &Config{
 		Providers: map[string]Provider{
-			"compass": {
-				OpenAIBaseURL: "http://x", Provider: "compass",
+			"aqp": {
+				OpenAIBaseURL: "http://x", Provider: "aqp",
 				Models: map[string]ProviderModel{
 					"glm-5.2": {Context: 1048576, Output: 131072, Modalities: ProviderModalities{Input: []string{"text"}, Output: []string{"text"}}},
 				},
 			},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "compass", Model: "glm-5.2", Priority: 1}},
+			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2", Priority: 1}},
 		},
 		Takeover: Takeover{
 			ProxyURL:   "http://127.0.0.1:15721",

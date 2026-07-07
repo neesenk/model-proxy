@@ -13,11 +13,11 @@ log_level: info            # debug | info | warn | error
 # Providers — upstream backends. Token files are auto-managed by login/logout
 # at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).
 providers:
-  compass:
+  aqp:
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     anthropic_base_url: https://compass.llm.shopee.io/compass-api  # same base without /v1; proxy keeps the client /v1/messages path
-    provider_id: compass
-    cqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
+    provider_id: aqp
+    aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     # peak_hours:                       # multi-segment, per-segment multiplier
     #   - {window: "14:00-18:00", multiplier: 2}
     models:
@@ -96,13 +96,13 @@ claude_mapping:
 # its peak window.
 routes:
   glm-5.2:
-    - {provider: compass, model: glm-5.2, priority: 1}
+    - {provider: aqp, model: glm-5.2, priority: 1}
     - {provider: zhipu,   model: glm-5.2, priority: 2}
   deepseek-v4-pro:
-    - {provider: compass,  model: deepseek-v4-pro, priority: 1}
+    - {provider: aqp,  model: deepseek-v4-pro, priority: 1}
     - {provider: deepseek, model: deepseek-v4-pro, priority: 2}
   deepseek-v4-flash:
-    - {provider: compass,  model: deepseek-v4-flash, priority: 1}
+    - {provider: aqp,  model: deepseek-v4-flash, priority: 1}
     - {provider: deepseek, model: deepseek-v4-flash, priority: 2}
   gpt-5.5:
     - {provider: codex, model: gpt-5.5, priority: 1}
