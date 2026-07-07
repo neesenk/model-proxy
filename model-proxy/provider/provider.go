@@ -136,6 +136,14 @@ type Config struct {
 	UsageURL      string
 	Models        map[string]any
 
+	// BoundAPIKey binds an in-memory API key for apikey providers (zhipu,
+	// deepseek, volcengine) when unrolled from a credential-pool entry. When
+	// non-empty, the constructor builds an ApiKeyBase bound to this key (file
+	// reads/writes skipped) — this is the FORWARD path binding (AuthHeaders
+	// reads the key via the embedded ApiKeyBase, NOT via Auth). Empty = legacy
+	// file-backed behavior.
+	BoundAPIKey string
+
 	// Auth-specific fields (only relevant to certain providers).
 	SSOCookieFile string // aqp
 	AqpMintURL    string // aqp

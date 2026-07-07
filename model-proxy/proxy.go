@@ -31,6 +31,16 @@ type Proxy struct {
 	sticky    map[string]routeSticky     // exposed model → current provider + since
 	quota     *quotaTracker              // background quota poller; nil only in degenerate tests
 
+	// Credential-pool unrolling (buildProviders). For a multi-account parent,
+	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
+	// the inverse. Single-account / not-logged-in providers appear in neither
+	// map (their id == the plain name). Guards: same as the struct — poolIndex
+	// and parentOf are rebuilt on reload under p.mu; spreadCtr under healthMu.
+	poolIndex      map[string][]string      // parent name → sorted virtual ids (only multi-account parents)
+	parentOf       map[string]string        // virtual id → parent name
+	spreadCtr      map[string]uint64        // parent name → session-assignment round-robin counter (healthMu)
+	expandedRoutes map[string][]RouteTarget // exposed model → expanded targets (Task 5 fills this)
+
 	// scheduleHook is a test-only hook fired in forward right after schedule(),
 	// capturing the threaded sessionKey. Nil in production.
 	scheduleHook func(sessionKey string)
@@ -53,54 +63,112 @@ type routeSticky struct {
 
 // buildProviders creates provider.Provider instances from config, wiring the
 // main package's existing AuthProvider/Login/Logout/Usage functions as callbacks.
+//
+// A provider whose credential pool (loadPool) has ≥2 accounts is UNROLLED into
+// one virtual provider per account, keyed "name#<accountID>"; the parent name
+// is NOT a key (only the virtuals are). A pool of size 1 (or no pool / not
+// logged in) returns the plain name unchanged (legacy single-account path).
 func buildProviders(cfg *Config) map[string]provider.Provider {
 	m := map[string]provider.Provider{}
 	for name, prov := range cfg.Providers {
-		auth := newAuthProvider(prov.Provider, name, cfg, nil)
-		pcfg := &provider.Config{
-			ProviderID:    prov.Provider,
-			OpenAIBaseURL: prov.OpenAIBaseURL,
-			Headers:       prov.Headers,
-			UsageURL:      prov.UsageURL,
-			Auth:          authAdapter{auth},
-		}
-		// Wire callbacks by provider type.
-		switch prov.Provider {
-		case "aqp":
-			pcfg.LoginFn = func() error { return runLogin(cfg) }
-			pcfg.LogoutFn = func() error { return clearAccount(authFilePath("aqp", "oauth_auth")) }
-			pcfg.UsageFn = func() (any, error) { return showAqpUsageData(cfg) }
-			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchAqpQuota(cfg) }
-		case "codex":
-			pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
-			pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
-			pcfg.UsageFn = func() (any, error) { return showCodexUsageData(cfg, prov) }
-			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchCodexQuota(cfg, prov) }
-		case "zhipu":
-			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
-			pcfg.LogoutFn = func() error { return clearApiKey(name) }
-			pcfg.UsageFn = func() (any, error) { return showZhipuUsageData(cfg, name, prov, nil) }
-			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchZhipuQuota(cfg, name, prov, nil) }
-		case "deepseek":
-			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
-			pcfg.LogoutFn = func() error { return clearApiKey(name) }
-			pcfg.UsageFn = func() (any, error) { return showDeepseekUsageData(cfg, name, prov, nil) }
-			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchDeepseekQuota(cfg, name, prov, nil) }
-		case "volcengine":
-			pcfg.LoginFn = func() error { return runVolcengineLoginErr(cfg, name, prov) }
-			pcfg.LogoutFn = func() error { return clearApiKey(name) }
-			pcfg.UsageFn = func() (any, error) { return showVolcengineUsageData(cfg, name, prov, nil) }
-			pcfg.FetchModelsFn = func() ([]string, error) { return listArkAgentPlanModelIDs(name) }
-			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchVolcengineQuota(name) }
-		}
-		p, err := provider.New(pcfg, name)
-		if err != nil {
-			log.Printf("[proxy] failed to build provider %s: %v (using auth-only)", name, err)
+		pool, _ := loadPool(name, prov.Provider)
+		if len(pool.Accounts) <= 1 {
+			// single-account / legacy / not-logged-in: original path, cred=nil.
+			// Empty cred keeps the embedded ApiKeyBase + pcfg.Auth file-backed
+			// (Logout then deletes the on-disk file, etc.) — the legacy singular
+			// <name>_apikey.json falls into this branch via loadPool's fallback,
+			// so its behavior is byte-for-byte unchanged. A 1-entry PLURAL pool is
+			// also treated as single-account (plain name, no virtuals).
+			if p := buildOne(cfg, name, prov, accountCred{}); p != nil {
+				m[name] = p
+			}
 			continue
 		}
-		m[name] = p
+		for _, a := range pool.Accounts {
+			vid := name + "#" + a.ID
+			if p := buildOne(cfg, name, prov, a.cred()); p != nil {
+				m[vid] = p
+			}
+		}
 	}
 	return m
+}
+
+// credOrNil returns a pointer to c when it carries an API key, else nil. Used
+// to thread an account credential through the auth + Usage/Quota closures: nil
+// means "read from the auth file" (legacy single-account), non-nil means "bound
+// to this in-memory key" (credential-pool virtual).
+func credOrNil(c accountCred) *accountCred {
+	if c.APIKey == "" && c.AccessKey == "" && c.SecretKey == "" {
+		return nil
+	}
+	return &c
+}
+
+// buildOne constructs a single provider instance (a real provider for the
+// single-account path, or a virtual for one credential-pool entry) bound to
+// cred. When cred is non-empty the key is bound in THREE places, all required
+// for a correct virtual:
+//  1. Embedded ApiKeyBase (the FORWARD path) — via pcfg.BoundAPIKey; the
+//     apikey constructors (zhipu/deepseek/volcengine) build a bound base whose
+//     LoadKey/AuthHeaders use the in-memory key. This is the load-bearing
+//     binding: deepseek/volcengine DEFINE their own AuthHeaders (dual Bearer +
+//     x-api-key) sourcing from the embedded ApiKeyBase, NOT from cfg.Auth.
+//  2. pcfg.Auth (the FetchModels path) — newAuthProvider with cred produces a
+//     bound ApiKeyProvider so fetchModelsBearer (cfg.Auth.Inject) uses the key.
+//  3. Usage/Quota closures — cred is passed through so per-account usage/quota
+//     queries are scoped to this account.
+//
+// When cred is empty all three fall back to the legacy file-backed behavior
+// (identical to the pre-pool buildProviders).
+func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provider.Provider {
+	credPtr := credOrNil(cred)
+	auth := newAuthProvider(prov.Provider, name, cfg, credPtr)
+	pcfg := &provider.Config{
+		ProviderID:    prov.Provider,
+		OpenAIBaseURL: prov.OpenAIBaseURL,
+		Headers:       prov.Headers,
+		UsageURL:      prov.UsageURL,
+		Auth:          authAdapter{auth},
+		BoundAPIKey:   cred.APIKey, // binding point #1 (forward path)
+	}
+	// Wire callbacks by provider type.
+	switch prov.Provider {
+	case "aqp":
+		pcfg.LoginFn = func() error { return runLogin(cfg) }
+		pcfg.LogoutFn = func() error { return clearAccount(authFilePath("aqp", "oauth_auth")) }
+		pcfg.UsageFn = func() (any, error) { return showAqpUsageData(cfg) }
+		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchAqpQuota(cfg) }
+	case "codex":
+		pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
+		pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
+		pcfg.UsageFn = func() (any, error) { return showCodexUsageData(cfg, prov) }
+		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchCodexQuota(cfg, prov) }
+	case "zhipu":
+		pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
+		pcfg.LogoutFn = func() error { return clearApiKey(name) }
+		pcfg.UsageFn = func() (any, error) { return showZhipuUsageData(cfg, name, prov, credPtr) }
+		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchZhipuQuota(cfg, name, prov, credPtr) }
+	case "deepseek":
+		pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
+		pcfg.LogoutFn = func() error { return clearApiKey(name) }
+		pcfg.UsageFn = func() (any, error) { return showDeepseekUsageData(cfg, name, prov, credPtr) }
+		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchDeepseekQuota(cfg, name, prov, credPtr) }
+	case "volcengine":
+		pcfg.LoginFn = func() error { return runVolcengineLoginErr(cfg, name, prov) }
+		pcfg.LogoutFn = func() error { return clearApiKey(name) }
+		pcfg.UsageFn = func() (any, error) { return showVolcengineUsageData(cfg, name, prov, credPtr) }
+		pcfg.FetchModelsFn = func() ([]string, error) { return listArkAgentPlanModelIDs(name) }
+		// Volcengine quota is V4-signed with AK/SK; per-account cred binding is
+		// added in Task 10. Until then, pass the existing file-reading fetch.
+		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchVolcengineQuota(name) }
+	}
+	p, err := provider.New(pcfg, name)
+	if err != nil {
+		log.Printf("[proxy] failed to build provider %s: %v (using auth-only)", name, err)
+		return nil
+	}
+	return p
 }
 
 // authAdapter bridges main.AuthProvider → provider.Authenticator.
@@ -116,7 +184,11 @@ func NewProxy(cfg *Config) *Proxy {
 		client:    &http.Client{Timeout: 0},
 		health:    map[string]*providerHealth{},
 		sticky:    map[string]routeSticky{},
+		spreadCtr: map[string]uint64{},
+		poolIndex: map[string][]string{},
+		parentOf:  map[string]string{},
 	}
+	p.buildPoolIndex()
 	// The tracker reads cfg/providers asynchronously via the snapshot closures
 	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
 	home, _ := os.UserHomeDir()
@@ -174,12 +246,19 @@ func (p *Proxy) reload(configPath string) error {
 	p.mu.Lock()
 	p.cfg = cfg
 	p.providers = newProviders
+	// Rebuild the pool index from the freshly loaded pools. buildPoolIndex reads
+	// p.cfg and writes poolIndex/parentOf; do it under the write lock so the
+	// request path (which reads them under the read lock) sees a consistent pair.
+	p.poolIndex = map[string][]string{}
+	p.parentOf = map[string]string{}
+	p.buildPoolIndex()
 	p.mu.Unlock()
 	// Reset health + sticky state — a reload is the operator's way to clear
 	// stuck circuit-open / rate-limited / sticky-dwell state.
 	p.healthMu.Lock()
 	p.health = map[string]*providerHealth{}
 	p.sticky = map[string]routeSticky{}
+	p.spreadCtr = map[string]uint64{}
 	p.healthMu.Unlock()
 	// The tracker reads the new cfg/providers via its snapshot closures, so it
 	// is NOT stopped/recreated on reload. Kick an immediate poll so newly added
@@ -188,6 +267,37 @@ func (p *Proxy) reload(configPath string) error {
 		go p.quota.pollAll(time.Now())
 	}
 	return nil
+}
+
+// buildPoolIndex populates poolIndex/parentOf from the credential pools of the
+// current config: for each provider whose pool has ≥2 accounts it records the
+// sorted virtual ids ("name#<accountID>") under the parent name and the reverse
+// mapping. Single-account / not-logged-in providers appear in neither map.
+//
+// Caller holds p.mu (write) — in NewProxy (no concurrent access yet) or reload.
+// spreadCtr is NOT touched here (it lives under healthMu); it is initialized as
+// an empty map and lazily populated per-parent by Task 6's session assignment.
+func (p *Proxy) buildPoolIndex() {
+	if p.poolIndex == nil {
+		p.poolIndex = map[string][]string{}
+	}
+	if p.parentOf == nil {
+		p.parentOf = map[string]string{}
+	}
+	for name, prov := range p.cfg.Providers {
+		pool, _ := loadPool(name, prov.Provider)
+		if len(pool.Accounts) < 2 {
+			continue
+		}
+		vids := make([]string, 0, len(pool.Accounts))
+		for _, a := range pool.Accounts {
+			vid := name + "#" + a.ID
+			vids = append(vids, vid)
+			p.parentOf[vid] = name
+		}
+		sort.Strings(vids)
+		p.poolIndex[name] = vids
+	}
 }
 
 func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {

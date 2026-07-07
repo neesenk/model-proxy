@@ -28,7 +28,7 @@ type DeepSeekProvider struct {
 func init() {
 	Register("deepseek", func(cfg *Config, providerName string) (Provider, error) {
 		return &DeepSeekProvider{
-			ApiKeyBase: NewApiKeyBase(providerName),
+			ApiKeyBase: newApiKeyBaseBound(cfg, providerName),
 			cfg:        cfg,
 		}, nil
 	})

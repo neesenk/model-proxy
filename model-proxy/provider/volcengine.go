@@ -27,7 +27,7 @@ type VolcengineProvider struct {
 func init() {
 	Register("volcengine", func(cfg *Config, providerName string) (Provider, error) {
 		return &VolcengineProvider{
-			ApiKeyBase: NewApiKeyBase(providerName),
+			ApiKeyBase: newApiKeyBaseBound(cfg, providerName),
 			cfg:        cfg,
 		}, nil
 	})

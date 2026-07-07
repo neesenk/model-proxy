@@ -18,11 +18,21 @@ type ZhipuProvider struct {
 func init() {
 	Register("zhipu", func(cfg *Config, providerName string) (Provider, error) {
 		return &ZhipuProvider{
-			ApiKeyBase:   NewApiKeyBase(providerName),
+			ApiKeyBase:   newApiKeyBaseBound(cfg, providerName),
 			cfg:          cfg,
 			providerName: providerName,
 		}, nil
 	})
+}
+
+// newApiKeyBaseBound returns a bound ApiKeyBase (in-memory key) when cfg has a
+// BoundAPIKey (credential-pool virtual), otherwise the legacy file-backed base.
+// Shared by zhipu/deepseek/volcengine constructors.
+func newApiKeyBaseBound(cfg *Config, providerName string) *ApiKeyBase {
+	if cfg.BoundAPIKey != "" {
+		return NewApiKeyBaseWithKey(providerName, cfg.BoundAPIKey)
+	}
+	return NewApiKeyBase(providerName)
 }
 
 func (p *ZhipuProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
