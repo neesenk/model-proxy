@@ -13,7 +13,6 @@ import (
 // TestLogin_FullFlowWithMockCompass drives the entire real SSO flow shape
 // (bootstrap → loopback signal → poll → get_or_generate) against a mock Compass
 // backend that mimics the real /auth/login 401 + /auth/info 200 contract.
-// Ported from ais-switch-cli/internal/gateway/login_test.go.
 func TestLogin_FullFlowWithMockCompass(t *testing.T) {
 	cookieVal := "fake-sso-c-cookie-value"
 

@@ -16,12 +16,11 @@ import (
 	"time"
 )
 
-// This file is ported from ais-switch-cli/internal/gateway (client.go + store.go + consts.go).
 // Core of Compass SSO: a single cookie jar carried across the whole login flow. Both the
 // SSO_A bootstrap cookie and the SSO_C session cookie (set by the auth/info poll's 200)
 // are retained in the jar.
 
-// ---- Endpoints / constants (match ais-switch-cli/internal/consts) ----
+// ---- Endpoints / constants ----
 
 const (
 	compassBase         = "https://compass.llm.shopee.io"
@@ -35,7 +34,7 @@ const (
 	googleOAuthAuthFile = "google_oauth_auth.json"
 )
 
-// ---- Account persistence (google_oauth_auth.json, same format as AIS Switch desktop v0.1.8) ----
+// ---- Account persistence (google_oauth_auth.json) ----
 
 // AccountData mirrors google_oauth_auth.json. 6 fields; the managed CQP key is NOT persisted
 // (fetched on demand, cached in memory only).
@@ -400,6 +399,13 @@ type MonthlyProjectUsage struct {
 // not the managed key). NOTE: the endpoint is POST and requires project_id input
 // (taken from the store's AccountData.ProjectID).
 func (c *CompassClient) MonthlyUsage() (*MonthlyProjectUsage, error) {
+	return c.monthlyUsageAt(compassMonthlyUsage)
+}
+
+// monthlyUsageAt is the URL-parametrized core, used by tests with a mock server
+// (mirrors fetchAPIKeyAt). It POSTs project_id (cookie-authed) and parses the
+// {retcode, data:{...MonthlyProjectUsage}} envelope.
+func (c *CompassClient) monthlyUsageAt(endpoint string) (*MonthlyProjectUsage, error) {
 	a, err := loadAccount(c.storePath)
 	if err != nil || a == nil || a.SSOSessionCookie == "" {
 		return nil, fmt.Errorf("not logged in")
@@ -408,7 +414,7 @@ func (c *CompassClient) MonthlyUsage() (*MonthlyProjectUsage, error) {
 		return nil, fmt.Errorf("no project_id in store; run `model-proxy login compass` (or --import) to populate it")
 	}
 	payload, _ := json.Marshal(map[string]string{"project_id": a.ProjectID})
-	req, _ := http.NewRequest(http.MethodPost, compassMonthlyUsage, bytes.NewReader(payload))
+	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
 	req.Header.Set("Cookie", cookieHeader(a.SSOSessionCookie))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)

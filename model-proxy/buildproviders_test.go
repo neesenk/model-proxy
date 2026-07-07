@@ -1,0 +1,116 @@
+package main
+
+import (
+	"testing"
+
+	"model-proxy/provider"
+)
+
+// buildproviders_test.go covers buildProviders' per-provider switch branches
+// by constructing each provider_id and invoking a callback (Logout) that
+// exercises the wired closure. Uses temp HOME so cred-file removals are safe.
+
+func TestBuildProviders_AllProviderIDs(t *testing.T) {
+	// Temp HOME so clearApiKey/clearCodexAuth/clearAccount target a temp dir.
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"compass":    {OpenAIBaseURL: "http://x", Provider: "compass", CQPMintURL: "http://x/mint"},
+			"codex":      {OpenAIBaseURL: "http://x", Provider: "codex"},
+			"zhipu":      {OpenAIBaseURL: "http://x", Provider: "zhipu", UsageURL: "http://x/u"},
+			"deepseek":   {OpenAIBaseURL: "http://x", Provider: "deepseek", UsageURL: "http://x/u", Billing: "pay-as-you-go"},
+			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
+		},
+	}
+	m := buildProviders(cfg)
+	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
+		if m[name] == nil {
+			t.Errorf("buildProviders: %s is nil", name)
+		}
+	}
+}
+
+// TestBuildProviders_LogoutWired exercises each provider's LogoutFn closure
+// (covers the switch-case lines that wire them). Logout on each is safe with
+// temp HOME (cred files absent → idempotent remove).
+func TestBuildProviders_LogoutWired(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"compass":    {OpenAIBaseURL: "http://x", Provider: "compass", CQPMintURL: "http://x/mint"},
+			"codex":      {OpenAIBaseURL: "http://x", Provider: "codex"},
+			"zhipu":      {OpenAIBaseURL: "http://x", Provider: "zhipu"},
+			"deepseek":   {OpenAIBaseURL: "http://x", Provider: "deepseek"},
+			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
+		},
+	}
+	m := buildProviders(cfg)
+	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
+		if err := m[name].Logout(); err != nil {
+			t.Errorf("%s Logout: %v", name, err)
+		}
+	}
+}
+
+// TestBuildProviders_UnknownProviderSkipped: a provider with an unsupported
+// provider_id fails provider.New → logged + skipped (not in the map).
+func TestBuildProviders_UnknownProviderSkipped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"good": {OpenAIBaseURL: "http://x", Provider: "zhipu"},
+			"bad":  {OpenAIBaseURL: "http://x", Provider: "nope-id"},
+		},
+	}
+	m := buildProviders(cfg)
+	if m["good"] == nil {
+		t.Error("good provider should be built")
+	}
+	if m["bad"] != nil {
+		t.Error("bad provider should be skipped (nil)")
+	}
+}
+
+// TestBuildProviders_QuotaFnWired: each plan provider's QuotaFn closure can be
+// invoked. For providers whose Quota needs network/creds, the error path still
+// exercises the wiring (covers the QuotaFn = ... lines).
+func TestBuildProviders_QuotaFnWired(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"compass":    {OpenAIBaseURL: "http://x", Provider: "compass", CQPMintURL: "http://x/mint"},
+			"codex":      {OpenAIBaseURL: "http://x", Provider: "codex"},
+			"zhipu":      {OpenAIBaseURL: "http://x", Provider: "zhipu", UsageURL: "http://127.0.0.1:1/u"},
+			"deepseek":   {OpenAIBaseURL: "http://x", Provider: "deepseek", UsageURL: "http://127.0.0.1:1/u"},
+			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
+		},
+	}
+	m := buildProviders(cfg)
+	// compass Quota → fetchCompassQuota (no cred → BillingUnknown, no error).
+	// (provider.Quota delegates to cfg.QuotaOrUnknown → QuotaFn.)
+	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
+		if _, err := m[name].Quota(); err != nil {
+			// Quota returns (snapshot, nil) even on failure (Err set in snapshot).
+			t.Errorf("%s Quota: %v", name, err)
+		}
+	}
+}
+
+// TestBuildProviders_FetchModelsWired: volcengine's FetchModelsFn closure
+// (ListArkAgentPlanModelIDs) errors cleanly without AK/SK (temp HOME).
+func TestBuildProviders_FetchModelsWired(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
+		},
+	}
+	m := buildProviders(cfg)
+	if _, err := m["volcengine"].FetchModels(); err == nil {
+		t.Error("volcengine FetchModels without AK/SK: want error, got nil")
+	}
+}
+
+// keep provider import referenced.
+var _ = provider.New

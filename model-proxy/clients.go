@@ -94,7 +94,7 @@ func rewriteOpencode(cfg *Config) error {
 	// ends with /v1 (→ <proxy>/v1/messages). Needs npm for non-built-in id.
 	baseURL := strings.TrimRight(cfg.Takeover.ProxyURL, "/") + "/v1"
 	prov[pid] = map[string]any{
-		"name": "AIS Switch",
+		"name": "model-proxy",
 		"npm":  "@ai-sdk/anthropic",
 		"options": map[string]any{
 			"apiKey":  "PROXY_MANAGED",
@@ -204,7 +204,7 @@ func rewriteCodex(cfg *Config) error {
 
 	section := fmt.Sprintf(`
 [model_providers."%s"]
-name = "AIS Switch Proxy"
+name = "model-proxy"
 base_url = "%s"
 wire_api = "responses"
 requires_openai_auth = true

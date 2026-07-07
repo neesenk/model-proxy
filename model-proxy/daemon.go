@@ -16,7 +16,7 @@ import (
 
 // Daemon (supervisor/worker) model for `model-proxy serve --daemon`.
 //
-// Roles are selected by the AIS_SWITCH_PROXY_ROLE env var so no new subcommand is needed:
+// Roles are selected by the MODEL_PROXY_ROLE env var so no new subcommand is needed:
 //   - (unset)  foreground invocation. With --daemon it launches a detached
 //               supervisor and returns; otherwise it runs the proxy inline.
 //   - supervisor: detaches from the terminal, redirects stdio to the log file,
@@ -29,7 +29,7 @@ import (
 //               → file logs stay escape-free.
 
 const (
-	envRole        = "AIS_SWITCH_PROXY_ROLE"
+	envRole        = "MODEL_PROXY_ROLE"
 	roleSupervisor = "supervisor"
 	roleWorker     = "worker"
 )

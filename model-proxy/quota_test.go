@@ -111,13 +111,47 @@ func TestParseDeepseekQuota(t *testing.T) {
 }
 
 func TestParseCompassQuota(t *testing.T) {
-	mu := &MonthlyProjectUsage{TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
+	mu := &MonthlyProjectUsage{SelectedYear: 2026, SelectedMonth: 7, TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
 	s := parseCompassQuota(mu, "alice@example.com")
 	if s.Billing != provider.BillingPlan {
 		t.Errorf("Billing=%v, want Plan", s.Billing)
 	}
 	if s.RemainingPct != 0.7 {
 		t.Errorf("RemainingPct=%v, want 0.7", s.RemainingPct)
+	}
+	if len(s.Windows) != 1 {
+		t.Fatalf("Windows len=%d want 1", len(s.Windows))
+	}
+	w := s.Windows[0]
+	// ResetsAt must be set — without it provider.Surplus() returns 0 (the bug).
+	if w.ResetsAt.IsZero() {
+		t.Fatal("Ultimate window ResetsAt is zero — surplus would always be 0")
+	}
+	wantReset := time.Date(2026, 8, 0, 23, 59, 59, 0, time.Local) // day 0 of Aug = Jul 31
+	if !w.ResetsAt.Equal(wantReset) {
+		t.Errorf("ResetsAt=%v want %v (last second of selected month)", w.ResetsAt, wantReset)
+	}
+	if w.Duration <= 0 {
+		t.Errorf("Duration=%v want >0", w.Duration)
+	}
+	// With 70% remaining and >30% of the month elapsed, surplus > 0 (under pace).
+	// Pre-fix this returned 0 because ResetsAt was zero — the regression guard.
+	midMonth := time.Date(2026, 7, 15, 12, 0, 0, 0, time.Local)
+	if got := s.Surplus(midMonth, 1); got <= 0 {
+		t.Errorf("Surplus at mid-month (70%% remaining) = %v, want >0 (under pace)", got)
+	}
+}
+
+func TestParseCompassQuota_ZeroMonthFallback(t *testing.T) {
+	// When the API omits SelectedYear/SelectedMonth, fall back to the current
+	// month so ResetsAt is still non-zero (surplus still works).
+	mu := &MonthlyProjectUsage{TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
+	s := parseCompassQuota(mu, "")
+	if s.Windows[0].ResetsAt.IsZero() {
+		t.Fatal("fallback ResetsAt is zero — should default to current month end")
+	}
+	if s.Windows[0].Duration <= 0 {
+		t.Errorf("fallback Duration=%v want >0", s.Windows[0].Duration)
 	}
 }
 

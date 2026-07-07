@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// Compass SSO login flow (ported from ais-switch-cli/internal/gateway/login.go + loopback.go):
+// Compass SSO login flow:
 //  1. GET auth/login → 401 + SSO_A cookie (in jar) + result login URL
 //  2. Set next=<loopback callback> on the login URL, open browser
 //  3. User completes Google login on soup.shopee.io; wait for EITHER the loopback
@@ -226,7 +226,7 @@ func waitForLoginSignal(ls *LoopbackServer, timeout time.Duration) error {
 	}
 }
 
-// ---- LoopbackServer (ported from ais-switch-cli/internal/gateway/loopback.go) ----
+// ---- LoopbackServer ----
 
 // LoopbackServer runs the local /company-gateway/login-complete callback server.
 // It captures the SSO_A cookie from the browser redirect.

@@ -16,7 +16,7 @@ import (
 	"model-proxy/provider"
 )
 
-const usage = `model-proxy — standalone portable proxy for AIS Switch LLM gateway
+const usage = `model-proxy — standalone portable multi-provider LLM proxy
 
 Usage: model-proxy <COMMAND> [SUBCOMMAND] [OPTIONS]
 
@@ -1039,16 +1039,40 @@ func fetchDeepseekQuota(cfg *Config, name string, prov Provider) (*provider.Quot
 }
 
 // parseCompassQuota converts monthly_usage into a single-window plan snapshot.
+// compassMonthlyReset derives the monthly quota reset time (last second of the
+// selected month, local time) and the nominal cycle duration from the
+// SelectedYear/SelectedMonth the monthly_usage endpoint returns. Falls back to
+// the current month when the API omits them (zero values). The reset time is
+// required: without it the surplus guard in provider.QuotaSnapshot.Surplus()
+// (ult.ResetsAt.IsZero()) short-circuits to 0, so compass could never be
+// prioritized for being under pace — it would only beat over-pace providers.
+func compassMonthlyReset(year, month int) (resetsAt time.Time, duration time.Duration) {
+	if year == 0 || month == 0 {
+		now := time.Now()
+		if year == 0 {
+			year = now.Year()
+		}
+		if month == 0 {
+			month = int(now.Month())
+		}
+	}
+	cycleStart := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.Local)
+	// Day 0 of next month = last day of this month, at 23:59:59 local.
+	resetsAt = time.Date(year, time.Month(month)+1, 0, 23, 59, 59, 0, time.Local)
+	return resetsAt, resetsAt.Sub(cycleStart)
+}
+
 func parseCompassQuota(mu *MonthlyProjectUsage, account string) *provider.QuotaSnapshot {
 	s := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Account: account, Plan: mu.Plan, AsOf: time.Now()}
 	rem := -1.0
 	if mu.TotalAmount > 0 {
 		rem = mu.Balance / mu.TotalAmount
 	}
+	resetsAt, dur := compassMonthlyReset(mu.SelectedYear, mu.SelectedMonth)
 	s.Windows = append(s.Windows, provider.QuotaWindow{
 		Label: "Monthly", Kind: "money",
 		Used: mu.Usage, Total: mu.TotalAmount, RemainingPct: rem,
-		Ultimate: true, Duration: 30 * 24 * time.Hour,
+		Ultimate: true, Duration: dur, ResetsAt: resetsAt,
 	})
 	s.RemainingPct = rem
 	return s

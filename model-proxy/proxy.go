@@ -672,12 +672,11 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exp
 				switch {
 				case rb < rc:
 					keepSticky = false // best has a better billing tier
-				case rb > rc:
-					keepSticky = true // current has a better tier
+				// rb > rc is unreachable: best is availTargets[0] (sorted tier→priority→surplus),
+				// and cur is in availTargets, so best can never rank worse than cur on tier.
 				case best.Priority < curPrio:
 					keepSticky = false // same tier; best has better priority → switch (priority beats surplus)
-				case best.Priority > curPrio:
-					keepSticky = true // current has better priority → keep
+				// best.Priority > curPrio is unreachable for the same reason (best sorts first).
 				case surplusOf(best.Provider)-surplusOf(cur.provider) >= margin:
 					keepSticky = false // same tier + same priority; best ahead by surplus margin → switch
 				default:

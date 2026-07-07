@@ -20,6 +20,10 @@ yarn-error.log*
 /model-proxy/model-proxy-linux-*
 /model-proxy/model-proxy.exe
 
+# Coverage artifacts from scripts/cover.sh
+/model-proxy/cov.out
+/model-proxy/coverage.html
+
 # Agent/IDE session state
 .omx/
 *.swp
