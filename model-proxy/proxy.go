@@ -414,7 +414,10 @@ func (p *Proxy) scheduleStatus() []byte {
 
 	models := map[string]routeInfo{}
 	for exposed, targets := range expanded {
-		ordered, _ := p.decideOrder(cfg, provs, parentOf, exposed, "", targets, now)
+		// commit=false: scheduleStatus is a read-only peek — it must NOT bump the
+		// round-robin counter or set sticky. (Expired-entry eviction inside
+		// decideOrder is safe in the peek — dropping stale keys is idempotent.)
+		ordered, _ := p.decideOrder(cfg, provs, parentOf, exposed, "", targets, now, false)
 		ri := routeInfo{}
 		if len(ordered) > 0 {
 			ri.First = ordered[0].Provider
@@ -738,23 +741,39 @@ func tierRank(b provider.BillingClass) int {
 // (priority beats surplus; surplus only matters at equal priority).
 func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget) []RouteTarget {
 	now := time.Now()
-	ordered, stickyToSet := p.decideOrder(cfg, provs, parentOf, exposed, sessionKey, targets, now)
+	ordered, stickyToSet := p.decideOrder(cfg, provs, parentOf, exposed, sessionKey, targets, now, true)
 	if stickyToSet != "" {
+		// Commit sticky on the SESSION key (fallback to the exposed model for
+		// non-session clients), so one conversation parks on one provider and
+		// distinct conversations spread across the pool.
+		sk := sessionKey
+		if sk == "" {
+			sk = exposed
+		}
 		p.healthMu.Lock()
-		p.sticky[exposed] = routeSticky{provider: stickyToSet, since: now}
+		p.sticky[sk] = routeSticky{provider: stickyToSet, since: now}
 		p.healthMu.Unlock()
 	}
 	return ordered
 }
 
 // decideOrder computes the try-order for targets and the provider to park sticky
-// on ("" = leave the current sticky untouched), WITHOUT mutating p.sticky.
-// schedule() commits the sticky; scheduleStatus() (the /debug/schedule endpoint)
-// uses this for a read-only peek. parentOf resolves pooled virtual ids to their
-// parent's config (billing/peak are parent-level, not per-account).
-func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time) (ordered []RouteTarget, stickyToSet string) {
-	_ = sessionKey // used in Task 6
+// on ("" = leave the current sticky untouched), WITHOUT mutating p.sticky (the
+// counter bump when commit=true is the one exception — it advances the per-parent
+// round-robin, not sticky). schedule() commits the sticky on the SESSION key;
+// scheduleStatus() (the /debug/schedule endpoint) calls this with commit=false for
+// a read-only peek. parentOf resolves pooled virtual ids to their parent's config
+// (billing/peak are parent-level, not per-account) AND drives per-parent
+// round-robin assignment of new sessions.
+func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool) (ordered []RouteTarget, stickyToSet string) {
 	sched := cfg.Scheduling
+	// (a) Re-key sticky on the session. Non-session clients (sessionKey=="")
+	// fall back to the exposed model → identical to the pre-session path, so the
+	// existing model-keyed sticky tests stay green.
+	sk := sessionKey
+	if sk == "" {
+		sk = exposed
+	}
 	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
 	// or while taking healthMu below.
 	var qs map[string]*provider.QuotaSnapshot
@@ -764,6 +783,25 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, par
 
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+
+	// (b) Evict expired SESSION entries to bound the sticky map. Per-session
+	// keying adds one entry per distinct session id; without eviction a
+	// long-running daemon would grow without bound between reloads. Only
+	// session-id keys (not present in cfg.Routes) are evicted: model/route keys
+	// are few (one per route) and MUST be preserved so the non-session path
+	// stays byte-identical to pre-Task-6 (the after-dwell margin re-evaluation
+	// reads them — evicting at dwell would silently delete the seeded entries
+	// those tests rely on and re-pick on every call). Active sessions don't age
+	// out: keepSticky refreshes their `since` each call (see below). Safe in the
+	// read-only peek (commit=false) — idempotent deletion of stale keys.
+	for k, v := range p.sticky {
+		if _, isRoute := cfg.Routes[k]; isRoute {
+			continue
+		}
+		if now.Sub(v.since) > sched.dwell() {
+			delete(p.sticky, k)
+		}
+	}
 
 	avail := func(name string) bool {
 		h := p.health[name]
@@ -806,7 +844,7 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, par
 	})
 
 	margin := sched.switchMargin()
-	cur := p.sticky[exposed]
+	cur := p.sticky[sk]
 
 	// Find cur's priority + whether it's still in the available set.
 	curPrio := 0
@@ -856,8 +894,41 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, par
 				break
 			}
 		}
+		// For a SESSION key, refresh `since` (return the current provider as
+		// stickyToSet so schedule re-writes the entry with now) — an active
+		// conversation then never ages out past the eviction horizon and stays
+		// on one account (cache-warm) for its whole lifetime. Model-keyed
+		// clients (sk == exposed) skip this: leaving the entry untouched keeps
+		// the pre-Task-6 after-dwell re-evaluate-every-call behavior, so the
+		// existing model-keyed sticky tests stay byte-identical.
+		if sk != exposed {
+			stickyToSet = cur.provider
+		}
 	} else if len(availTargets) > 0 {
-		stickyToSet = availTargets[0].Provider
+		// (c) Assign a fresh account. For a pooled route, round-robin over the
+		// available band of the pool (id-sorted → deterministic) via the
+		// per-parent counter so distinct sessions land on distinct accounts;
+		// for a non-pooled route, keep the prior best-first (sorted) pick. The
+		// counter advance is commit-gated so the read-only /debug/schedule peek
+		// doesn't perturb assignment order for real traffic.
+		pick := availTargets[0].Provider
+		if parent, pooled := routePoolParent(parentOf, availTargets); pooled {
+			band := poolBandByID(parentOf, availTargets, parent)
+			start := int(p.spreadCtr[parent]) % len(band)
+			if commit {
+				p.spreadCtr[parent]++
+			}
+			pick = band[start].Provider
+			// Move pick to the front of ordered (same move-to-front the
+			// keepSticky branch uses for cur) so forward() tries it first.
+			for _, t := range availTargets {
+				if t.Provider == pick {
+					ordered = append(ordered, t)
+					break
+				}
+			}
+		}
+		stickyToSet = pick
 	}
 	for _, t := range availTargets {
 		if len(ordered) > 0 && t.Provider == ordered[0].Provider {
@@ -866,6 +937,33 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, par
 		ordered = append(ordered, t)
 	}
 	return ordered, stickyToSet
+}
+
+// routePoolParent reports whether any available target belongs to a credential
+// pool, returning that pool's parent name. A route is pooled if at least one
+// available target's provider is a virtual id present in parentOf. Used by
+// decideOrder to decide whether to round-robin-assign a new session.
+func routePoolParent(parentOf map[string]string, avail []RouteTarget) (string, bool) {
+	for _, t := range avail {
+		if parent, ok := parentOf[t.Provider]; ok {
+			return parent, true
+		}
+	}
+	return "", false
+}
+
+// poolBandByID returns the available virtuals of `parent`, sorted by virtual id
+// (stable account-id order → deterministic round-robin across schedule calls and
+// across restarts, since account ids derive from the keys, not insertion order).
+func poolBandByID(parentOf map[string]string, avail []RouteTarget, parent string) []RouteTarget {
+	var band []RouteTarget
+	for _, t := range avail {
+		if parentOf[t.Provider] == parent {
+			band = append(band, t)
+		}
+	}
+	sort.SliceStable(band, func(i, j int) bool { return band[i].Provider < band[j].Provider })
+	return band
 }
 
 // providerConfig resolves the Provider config for name, resolving a

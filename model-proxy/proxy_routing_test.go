@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -239,6 +240,130 @@ func TestRouteExpansionFansOutPool(t *testing.T) {
 	got2 := p2.expandedRoutes["m"]
 	if len(got2) != 1 || got2[0].Provider != "z" || got2[0].Model != "m" {
 		t.Fatalf("non-pooled target should pass through unchanged: got %v", got2)
+	}
+}
+
+// scheduleFirst returns the provider the scheduler tries first for an exposed
+// model + session, via the live schedule() path (commits sticky). Used by the
+// session-sticky tests to assert per-session round-robin assignment.
+func scheduleFirst(p *Proxy, exposed, sessionKey string) string {
+	ordered := p.schedule(p.cfg, p.providers, p.parentOf, exposed, sessionKey, p.expandedRoutes[exposed])
+	if len(ordered) == 0 {
+		return ""
+	}
+	return ordered[0].Provider
+}
+
+// TestSessionStickySpreadsSessions verifies that distinct session ids land on
+// distinct pool accounts via per-parent round-robin assignment (the heart of
+// session-sticky: different conversations → different accounts for concurrency).
+//
+// The round-robin band is the parent's virtual ids SORTED by id (stable), and
+// spreadCtr starts at 0, so the assignment is deterministic: 1st new session →
+// band[0], 2nd → band[1], 3rd → band[2]. Assert the EXACT account each session
+// lands on — a count-only check would pass even if round-robin handed two
+// sessions the same account and skipped a third (a real green-signal risk).
+func TestSessionStickySpreadsSessions(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
+	cfg := &Config{Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	p := NewProxy(cfg)
+	sortedVids := append([]string(nil), p.poolIndex["zhipu"]...)
+	sort.Strings(sortedVids)
+	want := map[string]string{
+		"s1": sortedVids[0],
+		"s2": sortedVids[1],
+		"s3": sortedVids[2],
+	}
+	for _, sid := range []string{"s1", "s2", "s3"} {
+		got := scheduleFirst(p, "glm-5", sid)
+		if got != want[sid] {
+			t.Fatalf("session %s landed on %s, want %s (sorted band %v)", sid, got, want[sid], sortedVids)
+		}
+	}
+}
+
+// TestSessionStickyReusesWithinDwell verifies that the SAME session id reuses
+// its parked account within the dwell window (cache-friendly: one conversation
+// stays on one account so its prompt cache stays warm).
+func TestSessionStickyReusesWithinDwell(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
+	cfg := &Config{Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	p := NewProxy(cfg)
+	first := scheduleFirst(p, "glm-5", "s1")
+	if first == "" {
+		t.Fatal("first schedule returned no provider")
+	}
+	for i := 0; i < 3; i++ {
+		if got := scheduleFirst(p, "glm-5", "s1"); got != first {
+			t.Fatalf("same session drifted: first=%s got=%s", first, got)
+		}
+	}
+}
+
+// TestSessionStickyFallsBackWithoutHeader verifies that a client WITHOUT a
+// session header falls back to the model-keyed sticky path (all its requests
+// pin to one account) — the pre-session behavior must be preserved.
+func TestSessionStickyFallsBackWithoutHeader(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
+	cfg := &Config{Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	p := NewProxy(cfg)
+	got := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		got[scheduleFirst(p, "glm-5", "")] = true
+	}
+	if len(got) != 1 {
+		t.Fatalf("no session header should pin to one account, got %v", got)
+	}
+}
+
+// TestSessionStickySkipsCircuitOpen verifies that a circuit-opened account is
+// skipped when assigning new sessions: the round-robin band is built from
+// AVAILABLE targets only, so a blocked account is never handed out.
+//
+// Deterministic: blocked is the id-sorted first virtual, so the available band
+// is [sortedVids[1], sortedVids[2]]; spreadCtr starts at 0 → s1 lands on
+// sortedVids[1], s2 on sortedVids[2]. Assert exact accounts (not just a count)
+// and that the blocked one is never picked.
+func TestSessionStickySkipsCircuitOpen(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
+	cfg := &Config{Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	p := NewProxy(cfg)
+	// Block the id-sorted first virtual for an hour.
+	sortedVids := append([]string(nil), p.poolIndex["zhipu"]...)
+	sort.Strings(sortedVids)
+	blocked := sortedVids[0]
+	p.healthMu.Lock()
+	p.health[blocked] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
+	p.healthMu.Unlock()
+	// Available band = sortedVids minus blocked = [sortedVids[1], sortedVids[2]].
+	want := map[string]string{
+		"s1": sortedVids[1],
+		"s2": sortedVids[2],
+	}
+	for _, sid := range []string{"s1", "s2"} {
+		got := scheduleFirst(p, "glm-5", sid)
+		if got == blocked {
+			t.Fatalf("session %s landed on blocked account %s", sid, blocked)
+		}
+		if got != want[sid] {
+			t.Fatalf("session %s landed on %s, want %s (blocked=%s, sortedVids=%v)", sid, got, want[sid], blocked, sortedVids)
+		}
 	}
 }
 
