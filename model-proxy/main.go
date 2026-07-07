@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -254,6 +255,15 @@ func cmdRestore(args []string) {
 	}
 }
 
+// hasPoolFile reports whether the plural credential pool file
+// (<name>_apikeys.json) exists. Used to dispatch logout between the pool-aware
+// path (operate on the pool) and the singular path (legacy single-file removal,
+// including aqp/codex oauth files).
+func hasPoolFile(name string) bool {
+	_, err := os.Stat(poolPath(name))
+	return err == nil
+}
+
 func cmdLogout(args []string) {
 	cfg, err := LoadConfig(configPath(args))
 	if err != nil {
@@ -261,22 +271,98 @@ func cmdLogout(args []string) {
 	}
 	provName := positional(args)
 	if provName == "" {
-		fmt.Println("usage: model-proxy logout <provider>")
+		fmt.Println("usage: model-proxy logout <provider> [--label <name>] [--all]")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
 			fmt.Printf("  %s (provider=%s)\n", name, p.Provider)
 		}
 		return
 	}
-	provMap, _, _ := buildProviders(cfg)
-	p := provMap[provName]
-	if p == nil {
+	prov, ok := cfg.Providers[provName]
+	if !ok {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	if err := p.Logout(); err != nil {
+	providerID := prov.Provider
+
+	// aqp/codex keep their existing single-file logout (oauth_auth.json). An
+	// apikey provider with NO plural pool file but a legacy singular file also
+	// goes through the singular removal path (backward compat: the legacy
+	// singular <name>_apikey.json is removed by clearApiKey).
+	if providerID == "aqp" || providerID == "codex" || !hasPoolFile(provName) {
+		provMap, _, _ := buildProviders(cfg)
+		p := provMap[provName]
+		if p == nil {
+			log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
+		}
+		if err := p.Logout(); err != nil {
+			log.Fatalf("logout failed: %v", err)
+		}
+		fmt.Println(cGreen("✓ Logged out"))
+		return
+	}
+
+	// Pool-aware path: the plural pool file (<name>_apikeys.json) exists.
+	pool, err := loadPool(provName, providerID)
+	if err != nil {
 		log.Fatalf("logout failed: %v", err)
 	}
-	fmt.Println(cGreen("✓ Logged out"))
+	if len(pool.Accounts) == 0 {
+		// Pool file exists but is empty — remove it and report not-logged-in.
+		_ = os.Remove(poolPath(provName))
+		fmt.Println(cYellow("Not logged in."))
+		return
+	}
+
+	label := flagStringValue(args, "--label")
+	all := hasFlagValue(args, "--all")
+	var rmID string
+	switch {
+	case all:
+		pool.Accounts = nil
+	case label != "":
+		idx := -1
+		for i, a := range pool.Accounts {
+			if a.Label == label {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			log.Fatalf("no account labeled %q in %s", label, provName)
+		}
+		rmID = pool.Accounts[idx].ID
+		pool.Accounts = append(pool.Accounts[:idx], pool.Accounts[idx+1:]...)
+	default:
+		// Interactive: list + pick a number.
+		fmt.Printf("Accounts for %s:\n", provName)
+		for i, a := range pool.Accounts {
+			fmt.Printf("  %d) %s  (#%s  added %s)\n", i+1, a.Label, mask(a.ID), a.AddedAt)
+		}
+		fmt.Print("Remove which (number)? ")
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		n, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil || n < 1 || n > len(pool.Accounts) {
+			log.Fatal("invalid selection")
+		}
+		rmID = pool.Accounts[n-1].ID
+		pool.Accounts = append(pool.Accounts[:n-1], pool.Accounts[n:]...)
+	}
+	if len(pool.Accounts) == 0 {
+		if err := os.Remove(poolPath(provName)); err != nil && !os.IsNotExist(err) {
+			log.Fatalf("remove pool file: %v", err)
+		}
+	} else {
+		if err := savePool(provName, pool); err != nil {
+			log.Fatalf("save pool: %v", err)
+		}
+	}
+	if all {
+		fmt.Println(cGreen("✓ Removed all accounts from " + provName))
+	} else {
+		fmt.Println(cGreen("✓ Removed account " + mask(rmID)))
+	}
+	maybeReloadDaemon(args)
 }
 
 func cmdUsage(args []string) {
@@ -286,33 +372,69 @@ func cmdUsage(args []string) {
 	}
 	provName := positional(args)
 	if provName == "" {
-		// No provider specified → show usage for all logged-in providers.
-		pv, _, _ := buildProviders(cfg)
+		// No provider specified → show usage for all configured providers.
+		// printProviderUsage handles pool iteration for pooled parents (which
+		// are absent from the buildProviders map under their plain name).
 		names := make([]string, 0, len(cfg.Providers))
 		for n := range cfg.Providers {
 			names = append(names, n)
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			p := pv[n]
-			if p == nil {
-				continue
-			}
-			fmt.Println(cDim("────────────────────────────────────────"))
-			if _, err := p.Usage(); err != nil {
-				fmt.Println(cYellow("  (usage unavailable: " + err.Error() + ")"))
-			}
+			printProviderUsage(cfg, n)
 			fmt.Println()
 		}
 		return
 	}
+	if _, ok := cfg.Providers[provName]; !ok {
+		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
+	}
+	printProviderUsage(cfg, provName)
+}
+
+// printProviderUsage prints the usage for one provider entry, handling the
+// credential-pool case (≥2 accounts): each account gets its own divider +
+// per-account header (label + masked id) and the per-account usage fetch is
+// dispatched with THAT account's cred. Single-account / non-pooled / aqp /
+// codex go through the existing path (buildProviders → p.Usage).
+//
+// This does NOT use NewProxy — that would start the quota tracker (goroutines
+// + HTTP polls), wasteful for a one-shot CLI. Pool accounts are iterated
+// directly via loadPool, and the bound usage function is called per account.
+func printProviderUsage(cfg *Config, provName string) {
+	prov, ok := cfg.Providers[provName]
+	if !ok {
+		return
+	}
+	providerID := prov.Provider
+	pool, _ := loadPool(provName, providerID)
+	if len(pool.Accounts) >= 2 {
+		for _, a := range pool.Accounts {
+			fmt.Println(cDim("────────────────────────────────────────"))
+			fmt.Printf("%s (%s)\n", cBold(cCyan(a.Label)), mask(a.ID))
+			cred := a.cred()
+			switch providerID {
+			case "deepseek":
+				showDeepseekUsage(cfg, provName, prov, &cred)
+			case "volcengine":
+				showVolcengineUsage(cfg, provName, prov, &cred)
+			default:
+				// zhipu + future apikey providers use the generic BigModel /
+				// OpenAI-style usage display.
+				showGenericUsage(cfg, provName, prov, &cred)
+			}
+		}
+		return
+	}
+	// Single-account / non-pooled / aqp / codex: existing path.
 	provMap, _, _ := buildProviders(cfg)
 	p := provMap[provName]
 	if p == nil {
-		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
+		return
 	}
+	fmt.Println(cDim("────────────────────────────────────────"))
 	if _, err := p.Usage(); err != nil {
-		log.Fatalf("usage failed: %v", err)
+		fmt.Println(cYellow("  (usage unavailable: " + err.Error() + ")"))
 	}
 }
 
