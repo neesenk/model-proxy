@@ -47,10 +47,10 @@ func cmdLogin(args []string) {
 	label := flagStringValue(args, "--label")
 	replace := hasFlagValue(args, "--replace")
 
-	// Dispatch by provider_id. aqp/codex/volcengine have specialized interactive
-	// flows (SSO, OAuth, AK/SK prompts) that don't go through the apikey pool —
-	// they keep their existing paths. zhipu/deepseek (and any future apikey
-	// provider without a specialized flow) go through the pool-aware path.
+	// Dispatch by provider_id. aqp/codex have specialized interactive flows
+	// (SSO, OAuth) that don't go through the apikey pool — they keep their
+	// existing paths. zhipu/deepseek (apikey pool) and volcengine (triple-aware
+	// pool: api_key + AK/SK) go through the pool-aware path.
 	switch prov.Provider {
 	case "aqp":
 		if err := runLogin(cfg); err != nil {
@@ -60,12 +60,16 @@ func cmdLogin(args []string) {
 		if err := runCodexLogin(cfg); err != nil {
 			log.Fatalf("login failed: %v", err)
 		}
-	case "volcengine":
-		if err := runVolcengineLogin(cfg, provName, prov); err != nil {
-			log.Fatalf("login failed: %v", err)
-		}
 	default:
-		if err := runApiKeyLoginWithInput(cfg, provName, prov, "", label, replace); err != nil {
+		// zhipu/deepseek (single api_key) or volcengine (api_key + AK/SK
+		// triple). Both write the plural pool; volcengine keys by AccessKey.
+		var err error
+		if prov.Provider == "volcengine" {
+			err = runVolcengineLoginWithInput(cfg, provName, prov, "", "", "", label, replace)
+		} else {
+			err = runApiKeyLoginWithInput(cfg, provName, prov, "", label, replace)
+		}
+		if err != nil {
 			log.Fatalf("login failed: %v", err)
 		}
 		// Signal a running daemon to hot-reload so the new account is live

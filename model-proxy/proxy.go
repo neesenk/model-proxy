@@ -185,9 +185,9 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 		pcfg.LogoutFn = func() error { return clearApiKey(name) }
 		pcfg.UsageFn = func() (any, error) { return showVolcengineUsageData(cfg, name, prov, credPtr) }
 		pcfg.FetchModelsFn = func() ([]string, error) { return listArkAgentPlanModelIDs(name) }
-		// Volcengine quota is V4-signed with AK/SK; per-account cred binding is
-		// added in Task 10. Until then, pass the existing file-reading fetch.
-		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchVolcengineQuota(name) }
+		// GetAFPUsage is V4-signed with the virtual's OWN AK/SK (bound via
+		// credPtr) so each pooled account queries its own Agent Plan quota.
+		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchVolcengineQuota(name, credPtr) }
 	}
 	p, err := provider.New(pcfg, name)
 	if err != nil {

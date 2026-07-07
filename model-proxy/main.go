@@ -949,31 +949,89 @@ func showGenericUsage(cfg *Config, provName string, prov Provider, cred *account
 	printUsageFields(data, 1)
 }
 
-// runVolcengineLogin prompts for the Ark API Key (chat) AND the Volcengine
-// AccessKey/SecretKey (for GetAFPUsage), saving all three to the apikey file.
+// runVolcengineLogin is the thin wrapper retained for the provider-callback path
+// (LoginFn → runVolcengineLoginErr). It prompts the triple on stdin. The real
+// implementation lives in runVolcengineLoginWithInput, which writes the plural
+// credential pool (<name>_apikeys.json) so repeated logins accumulate accounts,
+// each carrying its OWN Ark API Key (Bearer chat) + Volcengine AK/SK
+// (V4-signed GetAFPUsage). The account id is the AccessKey (account-level).
 func runVolcengineLogin(cfg *Config, provName string, prov Provider) error {
-	fmt.Printf("Ark API Key (对话用，控制台创建): ")
-	var apiKey string
-	fmt.Scanln(&apiKey)
-	fmt.Printf("Volcengine Access Key ID (GetAFPUsage 用，IAM 密钥): ")
-	var ak string
-	fmt.Scanln(&ak)
-	fmt.Printf("Volcengine Secret Access Key: ")
-	var sk string
-	fmt.Scanln(&sk)
+	return runVolcengineLoginWithInput(cfg, provName, prov, "", "", "", "", false)
+}
+
+// runVolcengineLoginWithInput performs a pool-aware volcengine login. The
+// triple (api_key + access_key + secret_key) may be passed directly (tests) or,
+// when any is empty, prompted on stdin. The account is deduped by id
+// (accountIDFor → AccessKey for volcengine): a new id appends; an existing id
+// with replace=true (or an interactive `y` on stdin when replace=false)
+// overwrites the entry's triple/label in place; an existing id without
+// confirmation aborts with "login cancelled". The entry's label defaults to the
+// id when not supplied. The pool is written to ~/.model-proxy/<name>_apikeys.json
+// via savePool — the legacy singular <name>_apikey.json is no longer written.
+func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, inKey, inAK, inSK, label string, replace bool) error {
+	apiKey := strings.TrimSpace(inKey)
+	if apiKey == "" {
+		fmt.Printf("Ark API Key (对话用，控制台创建): ")
+		fmt.Scanln(&apiKey)
+	}
+	ak := strings.TrimSpace(inAK)
+	if ak == "" {
+		fmt.Printf("Volcengine Access Key ID (GetAFPUsage 用，IAM 密钥): ")
+		fmt.Scanln(&ak)
+	}
+	sk := strings.TrimSpace(inSK)
+	if sk == "" {
+		fmt.Printf("Volcengine Secret Access Key: ")
+		fmt.Scanln(&sk)
+	}
 	if apiKey == "" {
 		return fmt.Errorf("API key is required")
 	}
-	data, _ := json.Marshal(map[string]string{
-		"api_key":    apiKey,
-		"access_key": ak,
-		"secret_key": sk,
-	})
-	path := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+
+	// Pool dedup by account id (= AccessKey for volcengine).
+	pool, err := loadPool(provName, prov.Provider)
+	if err != nil {
+		return fmt.Errorf("load pool: %w", err)
 	}
-	return os.WriteFile(path, data, 0o600)
+	id := accountIDFor(prov.Provider, accountCred{APIKey: apiKey, AccessKey: ak})
+	now := nowTS()
+	idx := -1
+	for i, a := range pool.Accounts {
+		if a.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx >= 0 {
+		if !replace {
+			fmt.Printf("Account %q is already logged in. Replace its key? [y/N] ", pool.Accounts[idx].Label)
+			reader := bufio.NewReader(os.Stdin)
+			ans, _ := reader.ReadString('\n')
+			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
+				return fmt.Errorf("login cancelled")
+			}
+		}
+		pool.Accounts[idx].APIKey = apiKey
+		pool.Accounts[idx].AccessKey = ak
+		pool.Accounts[idx].SecretKey = sk
+		if label != "" {
+			pool.Accounts[idx].Label = label
+		}
+		pool.Accounts[idx].AddedAt = now
+	} else {
+		lbl := label
+		if lbl == "" {
+			lbl = id
+		}
+		pool.Accounts = append(pool.Accounts, poolAccount{
+			ID: id, Label: lbl, APIKey: apiKey, AccessKey: ak, SecretKey: sk, AddedAt: now,
+		})
+	}
+	if err := savePool(provName, pool); err != nil {
+		return fmt.Errorf("save pool: %w", err)
+	}
+	fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
+	return nil
 }
 
 // volcengineCreds is the on-disk format of the volcengine apikey file: the Ark
@@ -1039,18 +1097,19 @@ func getAFPUsage(ak, sk string) (*afpUsage, error) {
 }
 
 // showVolcengineUsage shows the Agent Plan's 5h/daily/weekly/monthly AFP quota
-// via GetAFPUsage (needs AK/SK + V4 signing). Falls back to config models if
-// AK/SK aren't configured or the call fails.
+// via GetAFPUsage (needs AK/SK + V4 signing). When cred is non-nil the virtual's
+// own AK/SK are used (per-account); otherwise the legacy file is read. Falls
+// back to config models if AK/SK aren't configured or the call fails.
 func showVolcengineUsage(cfg *Config, provName string, prov Provider, cred *accountCred) {
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
-	creds, err := loadVolcengineCreds(provName)
-	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
+	ak, sk, err := resolveVolcengineAKSK(provName, cred)
+	if err != nil {
 		fmt.Printf("%s Agent Plan 5h/周/月额度需经 GetAFPUsage（火山引擎签名 OpenAPI，AccessKey/SecretKey + V4）。\n", cDim("Note:       "))
 		fmt.Printf("%s 用 `model-proxy login %s` 配置 AK/SK（IAM 密钥，非 Ark API Key）后可查询。\n", cDim("            "), provName)
 		listConfigModels(prov)
 		return
 	}
-	u, err := getAFPUsage(creds.AccessKey, creds.SecretKey)
+	u, err := getAFPUsage(ak, sk)
 	if err != nil {
 		fmt.Printf("%s GetAFPUsage failed: %v\n", cDim("Error:      "), err)
 		listConfigModels(prov)
@@ -1111,14 +1170,36 @@ func parseVolcengineQuota(u *afpUsage) *provider.QuotaSnapshot {
 	return s
 }
 
-// fetchVolcengineQuota calls GetAFPUsage (signed, AK/SK). Returns BillingUnknown
-// if AK/SK aren't configured or the call fails.
-func fetchVolcengineQuota(name string) (*provider.QuotaSnapshot, error) {
-	creds, err := loadVolcengineCreds(name)
-	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
+// resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
+// When a cred is supplied (the pool-bound path), its AK/SK are used EXCLUSIVELY
+// — the on-disk file is never consulted, preserving per-account isolation (a
+// sibling virtual's file must not leak into this account's quota call). An
+// incomplete cred returns an error rather than falling back to the file. When
+// cred is nil (the single-account / pre-pool path), the legacy
+// <name>_apikey.json is read for backward compatibility.
+func resolveVolcengineAKSK(name string, cred *accountCred) (ak, sk string, err error) {
+	if cred != nil {
+		if cred.AccessKey != "" && cred.SecretKey != "" {
+			return cred.AccessKey, cred.SecretKey, nil
+		}
+		return "", "", fmt.Errorf("AK/SK not configured")
+	}
+	c, err := loadVolcengineCreds(name)
+	if err != nil || c.AccessKey == "" || c.SecretKey == "" {
+		return "", "", fmt.Errorf("AK/SK not configured")
+	}
+	return c.AccessKey, c.SecretKey, nil
+}
+
+// fetchVolcengineQuota calls GetAFPUsage (signed, AK/SK). When cred is non-nil
+// the virtual's own AK/SK are used (per-account); otherwise the legacy file is
+// read. Returns BillingUnknown if AK/SK aren't configured or the call fails.
+func fetchVolcengineQuota(name string, cred *accountCred) (*provider.QuotaSnapshot, error) {
+	ak, sk, err := resolveVolcengineAKSK(name, cred)
+	if err != nil {
 		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "AK/SK not configured"}, nil
 	}
-	u, err := getAFPUsage(creds.AccessKey, creds.SecretKey)
+	u, err := getAFPUsage(ak, sk)
 	if err != nil {
 		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
 	}

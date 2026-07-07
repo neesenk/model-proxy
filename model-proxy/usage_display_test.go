@@ -725,10 +725,10 @@ func TestShowVolcengineUsage_GetAFPFailsFallsBack(t *testing.T) {
 	}
 }
 
-// TestFetchVolcengineQuota_NoCreds: no cred file → BillingUnknown "AK/SK not configured".
+// TestFetchVolcengineQuota_NoCreds: no cred file, nil cred → BillingUnknown "AK/SK not configured".
 func TestFetchVolcengineQuota_NoCreds(t *testing.T) {
 	useTempHome(t)
-	s, err := fetchVolcengineQuota("volcengine")
+	s, err := fetchVolcengineQuota("volcengine", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,9 +737,9 @@ func TestFetchVolcengineQuota_NoCreds(t *testing.T) {
 	}
 }
 
-// TestFetchVolcengineQuota_GetAFPFails: AK/SK configured but GetAFPUsage can't reach
-// the real host (dead proxy) → BillingUnknown with the wrapped error. Exercises
-// getAFPUsage's error path through fetchVolcengineQuota.
+// TestFetchVolcengineQuota_GetAFPFails: AK/SK configured (file), nil cred →
+// GetAFPUsage can't reach the real host (dead proxy) → BillingUnknown with the
+// wrapped error. Exercises getAFPUsage's error path through fetchVolcengineQuota.
 func TestFetchVolcengineQuota_GetAFPFails(t *testing.T) {
 	home := useTempHome(t)
 	t.Setenv("HTTPS_PROXY", deadProxyURL(t))
@@ -749,7 +749,7 @@ func TestFetchVolcengineQuota_GetAFPFails(t *testing.T) {
 		"access_key": "AKtest",
 		"secret_key": "SKtest",
 	}))
-	s, err := fetchVolcengineQuota("volcengine")
+	s, err := fetchVolcengineQuota("volcengine", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
