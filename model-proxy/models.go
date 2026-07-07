@@ -135,7 +135,8 @@ func printProviderModels(provName string, entries []ModelEntry) {
 // fetchProviderModels fetches the live model list from a provider. Delegates to
 // the provider's FetchModels() implementation (which lives in the provider/ layer).
 func fetchProviderModels(cfg *Config, provName string) ([]ModelEntry, error) {
-	p := buildProviders(cfg)[provName]
+	provMap, _, _ := buildProviders(cfg)
+	p := provMap[provName]
 	if p == nil {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}

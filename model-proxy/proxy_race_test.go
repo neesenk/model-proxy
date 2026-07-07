@@ -47,13 +47,19 @@ func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	providers, poolIndex, parentOf := buildProviders(cfg)
 	p := &Proxy{
 		cfg:       cfg,
-		providers: buildProviders(cfg),
+		providers: providers,
+		poolIndex: poolIndex,
+		parentOf:  parentOf,
 		client:    &http.Client{},
 		health:    map[string]*providerHealth{},
 		sticky:    map[string]routeSticky{},
 	}
+	// Build expanded routes the same way NewProxy does, so reload's rebuild
+	// (which also calls buildExpandedRoutes) races against readers consistently.
+	p.expandedRoutes = p.buildExpandedRoutes()
 	// Tracker at a temp path (don't touch the real ~/.model-proxy/); not started.
 	p.quota = newQuotaTracker(filepath.Join(dir, "quota_state.json"), p.cfgSnapshot, p.providerSnapshot)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))

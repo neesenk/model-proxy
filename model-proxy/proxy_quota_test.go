@@ -119,7 +119,10 @@ func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]
 		client:    &http.Client{Timeout: 0},
 		health:    map[string]*providerHealth{},
 		sticky:    map[string]routeSticky{},
+		poolIndex: map[string][]string{},
+		parentOf:  map[string]string{},
 	}
+	p.expandedRoutes = p.buildExpandedRoutes()
 	p.quota = &quotaTracker{state: map[string]*provider.QuotaSnapshot{}, cfg: func() *Config { return cfg }, provs: func() map[string]provider.Provider { return p.providers }}
 	for name := range provs {
 		p.providers[name] = &testProv{key: name}
@@ -129,7 +132,7 @@ func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]
 
 // firstProvider returns the provider the scheduler tries first for a model.
 func firstProvider(p *Proxy, model string) string {
-	ordered := p.schedule(p.cfg, p.providers, model, "", p.cfg.Routes[model])
+	ordered := p.schedule(p.cfg, p.providers, p.parentOf, model, "", p.cfg.Routes[model])
 	if len(ordered) == 0 {
 		return ""
 	}

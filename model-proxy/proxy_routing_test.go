@@ -176,3 +176,134 @@ func (t *testProv) Surplus(snap *provider.QuotaSnapshot, now time.Time, peakMult
 }
 
 var _ provider.Provider = (*testProv)(nil)
+
+// TestRouteExpansionFansOutPool verifies that a route target naming a pooled
+// parent is fanned out to its N virtual children at build time: each expanded
+// target carries the SAME Model + Priority as the original target, and its
+// Provider is a virtual id present in poolIndex (parentOf[vid] == parent). A
+// non-pooled provider passes through unchanged.
+//
+// This is the load-bearing routing test for the credential-pool feature: if
+// expansion silently dropped targets, forwarded the parent name, or lost the
+// Model/Priority, conversations would hit the wrong upstream or 404.
+func TestRouteExpansionFansOutPool(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
+
+	cfg := &Config{
+		Listen:    "127.0.0.1:1",
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5", Priority: 7}}},
+	}
+	p := NewProxy(cfg)
+	got := p.expandedRoutes["glm-5"]
+	if len(got) != 2 {
+		t.Fatalf("expanded len = %d, want 2 (%v)", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, tg := range got {
+		if tg.Model != "glm-5" {
+			t.Fatalf("expanded model = %q, want glm-5", tg.Model)
+		}
+		if tg.Priority != 7 {
+			t.Fatalf("expanded priority = %d, want 7 (must be preserved from parent target)", tg.Priority)
+		}
+		parent := p.parentOf[tg.Provider]
+		if parent != "zhipu" {
+			t.Fatalf("expanded target provider %q not a zhipu virtual (parentOf=%q)", tg.Provider, parent)
+		}
+		if !p.poolIndexHas("zhipu", tg.Provider) {
+			t.Fatalf("expanded target %q not listed in poolIndex[zhipu]=%v", tg.Provider, p.poolIndex["zhipu"])
+		}
+		if seen[tg.Provider] {
+			t.Fatalf("virtual %q appears twice in expansion (dedup broken)", tg.Provider)
+		}
+		seen[tg.Provider] = true
+	}
+	// The parent name itself must NOT appear as a runnable target after expansion.
+	for _, tg := range got {
+		if tg.Provider == "zhipu" {
+			t.Fatalf("parent name %q leaked into expanded targets: %v", "zhipu", got)
+		}
+	}
+
+	// Non-pooled provider passes through unchanged (single-account / not-logged-in
+	// → loadPool returns 0 accounts → not in poolIndex → passthrough).
+	cfg2 := &Config{
+		Listen:    "127.0.0.1:1",
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"m": {{Provider: "z", Model: "m"}}},
+	}
+	p2 := NewProxy(cfg2)
+	got2 := p2.expandedRoutes["m"]
+	if len(got2) != 1 || got2[0].Provider != "z" || got2[0].Model != "m" {
+		t.Fatalf("non-pooled target should pass through unchanged: got %v", got2)
+	}
+}
+
+// poolIndexHas reports whether vid is listed under parent in poolIndex.
+func (p *Proxy) poolIndexHas(parent, vid string) bool {
+	for _, v := range p.poolIndex[parent] {
+		if v == vid {
+			return true
+		}
+	}
+	return false
+}
+
+// TestForward_ExpandedPooledRouteHitsVirtual verifies the end-to-end path:
+// forward() must read expandedRoutes (not cfg.Routes), so a route targeting a
+// pooled parent actually dispatches to one of its virtuals. This catches a bug
+// where buildExpandedRoutes is correct but forward still reads the raw config.
+func TestForward_ExpandedPooledRouteHitsVirtual(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
+
+	var hits []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, r.Header.Get("Authorization"))
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"zhipu": {OpenAIBaseURL: up.URL, Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm-5": {{Provider: "zhipu", Model: "glm-5"}},
+		},
+	}
+	p := NewProxy(cfg)
+	// Sanity: the route was expanded to virtuals.
+	if len(p.expandedRoutes["glm-5"]) != 2 {
+		t.Fatalf("precondition: expanded len = %d, want 2", len(p.expandedRoutes["glm-5"]))
+	}
+	// Parent name must not be a runnable provider key.
+	if _, ok := p.providers["zhipu"]; ok {
+		t.Fatal("parent zhipu should not be in providers map (it's pooled)")
+	}
+
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	// Send a few requests; each must be served by a zhipu virtual (Bearer KEY-A
+	// or KEY-B). The parent name "zhipu" would produce no upstream hit at all
+	// (not in providers → provImpl nil → no auth → upstream rejects), so seeing
+	// either virtual token proves forward used expandedRoutes.
+	for i := 0; i < 4; i++ {
+		post(t, px.URL+"/v1/responses", `{"model":"glm-5","input":[]}`)
+	}
+	if len(hits) == 0 {
+		t.Fatal("no upstream hits — forward did not route to a virtual")
+	}
+	for _, h := range hits {
+		if h != "Bearer KEY-A" && h != "Bearer KEY-B" {
+			t.Fatalf("upstream auth = %q, want Bearer KEY-A or KEY-B (a pooled virtual)", h)
+		}
+	}
+}

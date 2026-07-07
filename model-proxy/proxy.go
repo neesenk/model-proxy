@@ -68,8 +68,21 @@ type routeSticky struct {
 // one virtual provider per account, keyed "name#<accountID>"; the parent name
 // is NOT a key (only the virtuals are). A pool of size 1 (or no pool / not
 // logged in) returns the plain name unchanged (legacy single-account path).
-func buildProviders(cfg *Config) map[string]provider.Provider {
+//
+// It also derives the credential-pool index maps in the SAME pass:
+//   - poolIndex[parent] = its sorted virtual ids ("name#<accountID>")
+//   - parentOf[vid]    = the parent name
+//
+// Loading the pool once (rather than separately in buildPoolIndex) closes a
+// TOCTOU window across reload and guarantees the index only references virtual
+// ids that actually exist in the returned providers map: a virtual whose
+// buildOne returned nil (provider.New error) is skipped in BOTH the providers
+// map AND the index. Single-account / not-logged-in providers appear in
+// neither index map (their id == the plain name).
+func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]string, map[string]string) {
 	m := map[string]provider.Provider{}
+	poolIndex := map[string][]string{}
+	parentOf := map[string]string{}
 	for name, prov := range cfg.Providers {
 		pool, _ := loadPool(name, prov.Provider)
 		if len(pool.Accounts) <= 1 {
@@ -84,14 +97,27 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 			}
 			continue
 		}
+		vids := make([]string, 0, len(pool.Accounts))
 		for _, a := range pool.Accounts {
 			vid := name + "#" + a.ID
-			if p := buildOne(cfg, name, prov, a.cred()); p != nil {
-				m[vid] = p
+			p := buildOne(cfg, name, prov, a.cred())
+			if p == nil {
+				// provider.New failed for this account — skip it in BOTH the
+				// providers map and the index, so poolIndex never lists an id
+				// that isn't runnable (which would make expandedRoutes produce
+				// a target that forward can't serve).
+				continue
 			}
+			m[vid] = p
+			vids = append(vids, vid)
+			parentOf[vid] = name
+		}
+		if len(vids) > 0 {
+			sort.Strings(vids)
+			poolIndex[name] = vids
 		}
 	}
-	return m
+	return m, poolIndex, parentOf
 }
 
 // credOrNil returns a pointer to c when it carries an API key, else nil. Used
@@ -178,17 +204,18 @@ func (a authAdapter) Inject(req *http.Request) error { return a.inner.Inject(req
 func (a authAdapter) Refresh() error                 { return a.inner.Refresh() }
 
 func NewProxy(cfg *Config) *Proxy {
+	providers, poolIndex, parentOf := buildProviders(cfg)
 	p := &Proxy{
 		cfg:       cfg,
-		providers: buildProviders(cfg),
+		providers: providers,
 		client:    &http.Client{Timeout: 0},
 		health:    map[string]*providerHealth{},
 		sticky:    map[string]routeSticky{},
 		spreadCtr: map[string]uint64{},
-		poolIndex: map[string][]string{},
-		parentOf:  map[string]string{},
+		poolIndex: poolIndex,
+		parentOf:  parentOf,
 	}
-	p.buildPoolIndex()
+	p.expandedRoutes = p.buildExpandedRoutes()
 	// The tracker reads cfg/providers asynchronously via the snapshot closures
 	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
 	home, _ := os.UserHomeDir()
@@ -242,16 +269,16 @@ func (p *Proxy) reload(configPath string) error {
 	if err != nil {
 		return err
 	}
-	newProviders := buildProviders(cfg)
+	newProviders, newPoolIndex, newParentOf := buildProviders(cfg)
 	p.mu.Lock()
 	p.cfg = cfg
 	p.providers = newProviders
-	// Rebuild the pool index from the freshly loaded pools. buildPoolIndex reads
-	// p.cfg and writes poolIndex/parentOf; do it under the write lock so the
-	// request path (which reads them under the read lock) sees a consistent pair.
-	p.poolIndex = map[string][]string{}
-	p.parentOf = map[string]string{}
-	p.buildPoolIndex()
+	// Rebuild the pool index + expanded routes from the single buildProviders
+	// pass. Doing this under the write lock means request readers (which take
+	// the read lock) see a consistent cfg/providers/poolIndex/expandedRoutes.
+	p.poolIndex = newPoolIndex
+	p.parentOf = newParentOf
+	p.expandedRoutes = p.buildExpandedRoutes()
 	p.mu.Unlock()
 	// Reset health + sticky state — a reload is the operator's way to clear
 	// stuck circuit-open / rate-limited / sticky-dwell state.
@@ -269,35 +296,33 @@ func (p *Proxy) reload(configPath string) error {
 	return nil
 }
 
-// buildPoolIndex populates poolIndex/parentOf from the credential pools of the
-// current config: for each provider whose pool has ≥2 accounts it records the
-// sorted virtual ids ("name#<accountID>") under the parent name and the reverse
-// mapping. Single-account / not-logged-in providers appear in neither map.
+// buildExpandedRoutes returns routes with pooled targets fanned out to their
+// virtual children: a target whose provider is a pooled parent (key present in
+// poolIndex) is replaced by its N virtuals, each with the SAME Model + Priority
+// as the original; non-pooled targets pass through unchanged. Routes with no
+// pooled targets are returned as-is (same slice contents).
 //
-// Caller holds p.mu (write) — in NewProxy (no concurrent access yet) or reload.
-// spreadCtr is NOT touched here (it lives under healthMu); it is initialized as
-// an empty map and lazily populated per-parent by Task 6's session assignment.
-func (p *Proxy) buildPoolIndex() {
-	if p.poolIndex == nil {
-		p.poolIndex = map[string][]string{}
-	}
-	if p.parentOf == nil {
-		p.parentOf = map[string]string{}
-	}
-	for name, prov := range p.cfg.Providers {
-		pool, _ := loadPool(name, prov.Provider)
-		if len(pool.Accounts) < 2 {
-			continue
+// Caller holds p.mu (write) — in NewProxy / reload, after buildProviders has
+// populated poolIndex. forward + scheduleStatus read the result via the
+// expandedRoutes field instead of cfg.Routes, so the fan-out is transparent to
+// the scheduling/circuit code (which operates on provider names).
+func (p *Proxy) buildExpandedRoutes() map[string][]RouteTarget {
+	out := make(map[string][]RouteTarget, len(p.cfg.Routes))
+	for exposed, targets := range p.cfg.Routes {
+		var exp []RouteTarget
+		for _, t := range targets {
+			vids, pooled := p.poolIndex[t.Provider]
+			if !pooled {
+				exp = append(exp, t)
+				continue
+			}
+			for _, vid := range vids {
+				exp = append(exp, RouteTarget{Provider: vid, Model: t.Model, Priority: t.Priority})
+			}
 		}
-		vids := make([]string, 0, len(pool.Accounts))
-		for _, a := range pool.Accounts {
-			vid := name + "#" + a.ID
-			vids = append(vids, vid)
-			p.parentOf[vid] = name
-		}
-		sort.Strings(vids)
-		p.poolIndex[name] = vids
+		out[exposed] = exp
 	}
+	return out
 }
 
 func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
@@ -332,6 +357,8 @@ func (p *Proxy) scheduleStatus() []byte {
 	p.mu.RLock()
 	cfg := p.cfg
 	provs := p.providers
+	expanded := p.expandedRoutes
+	parentOf := p.parentOf
 	p.mu.RUnlock()
 	var qs map[string]*provider.QuotaSnapshot
 	if p.quota != nil {
@@ -355,7 +382,8 @@ func (p *Proxy) scheduleStatus() []byte {
 		return h.available(now)
 	}
 	surplusOf := func(name string) float64 {
-		peakMult := cfg.Providers[name].peakMultiplier(now)
+		pconf, _ := providerConfig(cfg, parentOf, name)
+		peakMult := pconf.peakMultiplier(now)
 		if peakMult < 1 {
 			peakMult = 1
 		}
@@ -385,20 +413,21 @@ func (p *Proxy) scheduleStatus() []byte {
 	}
 
 	models := map[string]routeInfo{}
-	for exposed, targets := range cfg.Routes {
-		ordered, _ := p.decideOrder(cfg, provs, exposed, "", targets, now)
+	for exposed, targets := range expanded {
+		ordered, _ := p.decideOrder(cfg, provs, parentOf, exposed, "", targets, now)
 		ri := routeInfo{}
 		if len(ordered) > 0 {
 			ri.First = ordered[0].Provider
 		}
 		for _, t := range ordered {
+			pconf, _ := providerConfig(cfg, parentOf, t.Provider)
 			ri.Ordered = append(ri.Ordered, provInfo{
 				Provider:  t.Provider,
 				Priority:  t.Priority,
-				Tier:      billingClassName(p.billingClass(cfg, t.Provider, qs)),
+				Tier:      billingClassName(p.billingClass(cfg, parentOf, t.Provider, qs)),
 				Surplus:   surplusOf(t.Provider),
 				Available: avail(t.Provider),
-				Peak:      cfg.Providers[t.Provider].peakMultiplier(now) > 1,
+				Peak:      pconf.peakMultiplier(now) > 1,
 			})
 		}
 		if cur := stickyCopy[exposed]; cur.provider != "" {
@@ -491,6 +520,8 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	p.mu.RLock()
 	cfg := p.cfg
 	provs := p.providers
+	expanded := p.expandedRoutes
+	parentOf := p.parentOf
 	p.mu.RUnlock()
 
 	origBody, err := io.ReadAll(r.Body)
@@ -514,7 +545,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			exposed = mapped
 		}
 	}
-	targets, ok := cfg.Routes[exposed]
+	targets, ok := expanded[exposed]
 	if !ok || len(targets) == 0 {
 		http.Error(w, fmt.Sprintf("model %q not found in routes", exposed), http.StatusBadGateway)
 		return
@@ -530,13 +561,17 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionKey := r.Header.Get("x-claude-code-session-id")
-	ordered := p.schedule(cfg, provs, exposed, sessionKey, targets)
+	ordered := p.schedule(cfg, provs, parentOf, exposed, sessionKey, targets)
 	if p.scheduleHook != nil {
 		p.scheduleHook(sessionKey)
 	}
 
 	for ti, t := range ordered {
-		prov, ok := cfg.Providers[t.Provider]
+		// Resolve the provider CONFIG. For a pooled virtual ("name#<id>") the
+		// config lives under the parent name in cfg.Providers; providerConfig
+		// resolves it via parentOf. The provider IMPLEMENTATION (provImpl) is
+		// keyed by the virtual id in provs.
+		prov, ok := providerConfig(cfg, parentOf, t.Provider)
 		if !ok {
 			log.Printf("[proto=%s model=%s] target %d: unknown provider %q, skipping", proto, exposed, ti, t.Provider)
 			continue
@@ -701,9 +736,9 @@ func tierRank(b provider.BillingClass) int {
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin surplus gain
 // (priority beats surplus; surplus only matters at equal priority).
-func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, exposed, sessionKey string, targets []RouteTarget) []RouteTarget {
+func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget) []RouteTarget {
 	now := time.Now()
-	ordered, stickyToSet := p.decideOrder(cfg, provs, exposed, sessionKey, targets, now)
+	ordered, stickyToSet := p.decideOrder(cfg, provs, parentOf, exposed, sessionKey, targets, now)
 	if stickyToSet != "" {
 		p.healthMu.Lock()
 		p.sticky[exposed] = routeSticky{provider: stickyToSet, since: now}
@@ -715,8 +750,9 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, expose
 // decideOrder computes the try-order for targets and the provider to park sticky
 // on ("" = leave the current sticky untouched), WITHOUT mutating p.sticky.
 // schedule() commits the sticky; scheduleStatus() (the /debug/schedule endpoint)
-// uses this for a read-only peek.
-func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exposed, sessionKey string, targets []RouteTarget, now time.Time) (ordered []RouteTarget, stickyToSet string) {
+// uses this for a read-only peek. parentOf resolves pooled virtual ids to their
+// parent's config (billing/peak are parent-level, not per-account).
+func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time) (ordered []RouteTarget, stickyToSet string) {
 	_ = sessionKey // used in Task 6
 	sched := cfg.Scheduling
 	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
@@ -741,9 +777,10 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exp
 		}
 	}
 
-	billingOf := func(name string) provider.BillingClass { return p.billingClass(cfg, name, qs) }
+	billingOf := func(name string) provider.BillingClass { return p.billingClass(cfg, parentOf, name, qs) }
 	surplusOf := func(name string) float64 {
-		peakMult := cfg.Providers[name].peakMultiplier(now)
+		pconf, _ := providerConfig(cfg, parentOf, name)
+		peakMult := pconf.peakMultiplier(now)
 		if peakMult < 1 {
 			peakMult = 1
 		}
@@ -831,11 +868,28 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exp
 	return ordered, stickyToSet
 }
 
+// providerConfig resolves the Provider config for name, resolving a
+// credential-pool virtual id ("name#<accountID>") back to its parent. parentOf
+// is the snapshot taken under p.mu alongside cfg; for a non-virtual name (incl.
+// single-account providers), parentOf[name] is "" and the config is read
+// directly. Returns the zero Provider (ok=false) if neither name nor a parent
+// is found — callers treat that as an unknown provider.
+func providerConfig(cfg *Config, parentOf map[string]string, name string) (Provider, bool) {
+	if parent := parentOf[name]; parent != "" {
+		name = parent
+	}
+	p, ok := cfg.Providers[name]
+	return p, ok
+}
+
 // billingClass returns the effective scheduling tier, applying the staleness
 // guard and the pay-as-you-go config override. A snapshot older than 3× the poll
-// interval, or one carrying an error, is treated as Unknown.
-func (p *Proxy) billingClass(cfg *Config, name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
-	return classifyBilling(qs[name], cfg.Providers[name].Billing, cfg.Scheduling.pollInterval())
+// interval, or one carrying an error, is treated as Unknown. parentOf resolves
+// virtual ids to their parent's billing config (pay-as-you-go / plan is set on
+// the parent, not per-account).
+func (p *Proxy) billingClass(cfg *Config, parentOf map[string]string, name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
+	pconf, _ := providerConfig(cfg, parentOf, name)
+	return classifyBilling(qs[name], pconf.Billing, cfg.Scheduling.pollInterval())
 }
 
 // available reports whether a provider may be tried: not rate-limited, and

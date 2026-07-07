@@ -42,7 +42,8 @@ func cmdLogin(args []string) {
 		}
 		return
 	}
-	p := buildProviders(cfg)[provName]
+	provMap, _, _ := buildProviders(cfg)
+	p := provMap[provName]
 	if p == nil {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}

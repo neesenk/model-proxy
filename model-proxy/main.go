@@ -268,7 +268,8 @@ func cmdLogout(args []string) {
 		}
 		return
 	}
-	p := buildProviders(cfg)[provName]
+	provMap, _, _ := buildProviders(cfg)
+	p := provMap[provName]
 	if p == nil {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
@@ -286,7 +287,7 @@ func cmdUsage(args []string) {
 	provName := positional(args)
 	if provName == "" {
 		// No provider specified → show usage for all logged-in providers.
-		pv := buildProviders(cfg)
+		pv, _, _ := buildProviders(cfg)
 		names := make([]string, 0, len(cfg.Providers))
 		for n := range cfg.Providers {
 			names = append(names, n)
@@ -305,7 +306,8 @@ func cmdUsage(args []string) {
 		}
 		return
 	}
-	p := buildProviders(cfg)[provName]
+	provMap, _, _ := buildProviders(cfg)
+	p := provMap[provName]
 	if p == nil {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
