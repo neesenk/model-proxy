@@ -38,13 +38,19 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 	p.providers["primary"] = &quotaCountProv{}
 	p.providers["fallback"] = &testProv{key: "f"}
 	var refreshes atomic.Int32
+	var refreshedName atomic.Value // string
 	p.quota = &quotaTracker{
 		state: map[string]*provider.QuotaSnapshot{},
 		cfg:   func() *Config { return cfg },
 		provs: func() map[string]provider.Provider { return p.providers },
 	}
-	// refreshHook lets the test count refreshes without running a real poll.
-	p.quota.refreshHook = func(name string) { refreshes.Add(1) }
+	// refreshHook lets the test count refreshes + capture WHICH provider was
+	// refreshed — not just how many (P0-3: if the bug fires on fallback instead
+	// of the rate-limited primary, a count-only assertion would miss it).
+	p.quota.refreshHook = func(name string) {
+		refreshes.Add(1)
+		refreshedName.Store(name)
+	}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
@@ -57,6 +63,11 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 	}
 	if got := refreshes.Load(); got != 1 {
 		t.Errorf("expected 1 quota refresh after 429, got %d", got)
+	}
+	// P0-3: assert the refresh fired on the RATE-LIMITED provider (primary),
+	// not the fallback — a count-only assertion would miss a wrong-provider bug.
+	if name, ok := refreshedName.Load().(string); !ok || name != "primary" {
+		t.Errorf("refreshed provider=%v, want primary (the one that 429'd)", name)
 	}
 }
 

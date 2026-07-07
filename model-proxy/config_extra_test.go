@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -208,8 +209,9 @@ func TestExpandPath(t *testing.T) {
 	}
 	// ~/ expands to home.
 	home := homeDir()
-	if got := expandPath("~/foo"); got != home+"/foo" && !strings.HasSuffix(got, "/foo") {
-		t.Errorf("expandPath(~/foo)=%q want %s/foo", got, home)
+	want := filepath.Join(home, "foo")
+	if got := expandPath("~/foo"); got != want {
+		t.Errorf("expandPath(~/foo)=%q want %q", got, want)
 	}
 }
 
@@ -227,11 +229,17 @@ func TestPeakConfig_UnmarshalListOfStrings(t *testing.T) {
 }
 
 func TestPeakConfig_UnmarshalInvalid(t *testing.T) {
+	// A sequence of non-string, non-map elements (integers) must error or
+	// produce empty segments — it must NOT silently produce bogus windows.
 	var pc PeakConfig
-	// A sequence of non-string, non-map elements (integers) should error.
 	if err := yaml.Unmarshal([]byte(`[1, 2, 3]`), &pc); err == nil {
-		// Some YAML libs coerce; if it didn't error, just ensure nothing panicked.
-		t.Logf("unmarshal of ints: pc=%+v err=nil (acceptable)", pc)
+		// If no error, every segment must have an empty Window (the int was
+		// skipped). If any has a non-empty Window, that's a silent data corruption.
+		for i, seg := range pc {
+			if seg.Window != "" {
+				t.Errorf("segment %d has Window=%q from an integer element (silent corruption)", i, seg.Window)
+			}
+		}
 	}
 }
 

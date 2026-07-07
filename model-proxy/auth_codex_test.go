@@ -36,8 +36,16 @@ func TestCodexOAuth_InjectValidToken(t *testing.T) {
 	if err := p.Inject(req); err != nil {
 		t.Fatal(err)
 	}
-	if v := req.Header.Get("Authorization"); v == "" || v == "Bearer " {
-		t.Errorf("missing/empty Authorization: %q", v)
+	jwt := "head." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, time.Now().Add(time.Hour).Unix()))) + ".sig"
+	// P0-1: assert exact values, not just "non-empty" — originator + Account-Id + exact Bearer
+	if got := req.Header.Get("Authorization"); got != "Bearer "+jwt {
+		t.Errorf("Authorization=%q, want %q", got, "Bearer "+jwt)
+	}
+	if got := req.Header.Get("originator"); got != "codex_cli_rs" {
+		t.Errorf("originator=%q, want codex_cli_rs", got)
+	}
+	if got := req.Header.Get("ChatGPT-Account-Id"); got != "acct-1" {
+		t.Errorf("ChatGPT-Account-Id=%q, want acct-1", got)
 	}
 	if req.Header.Get("x-api-key") != "" {
 		t.Error("x-api-key not cleared")

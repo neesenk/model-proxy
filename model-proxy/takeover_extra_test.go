@@ -288,14 +288,15 @@ func TestAuthFilePath(t *testing.T) {
 
 func TestColorHelpers_NoColorPassthrough(t *testing.T) {
 	// colorEnabled reflects os.Stdout at init. In tests stdout is not a tty
-	// (and NO_COLOR may be set), so color helpers return the input unchanged.
-	// Assert the no-color branch is exercised and returns the string verbatim.
-	for _, s := range []string{"x", "hello"} {
-		if got := cYellow(s); got != s && !strings.Contains(got, s) {
-			t.Errorf("cYellow(%q)=%q lost input", s, got)
+	// (and NO_COLOR may be set), so color helpers return the input verbatim
+	// (no ANSI escape codes). Assert the EXACT string — not Contains (which
+	// would pass even with ANSI codes wrapping the input).
+	for _, s := range []string{"x", "hello", "test-123"} {
+		if got := cYellow(s); got != s {
+			t.Errorf("cYellow(%q)=%q, want exact %q (no ANSI in test env)", s, got, s)
 		}
-		if got := cMagenta(s); got != s && !strings.Contains(got, s) {
-			t.Errorf("cMagenta(%q)=%q lost input", s, got)
+		if got := cMagenta(s); got != s {
+			t.Errorf("cMagenta(%q)=%q, want exact %q", s, got, s)
 		}
 	}
 }

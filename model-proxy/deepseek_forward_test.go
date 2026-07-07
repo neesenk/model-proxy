@@ -110,6 +110,13 @@ func TestForward_DeepSeekRoutesByProtocol(t *testing.T) {
 	if openaiHit.path != "/chat/completions" {
 		t.Errorf("openai upstream path: got %q, want /chat/completions", openaiHit.path)
 	}
+	// P0-1: assert exact auth values on the openai path too
+	if openaiHit.auth != "Bearer sk-test-ds" {
+		t.Errorf("openai Authorization: got %q, want Bearer sk-test-ds", openaiHit.auth)
+	}
+	if openaiHit.xkey != "sk-test-ds" {
+		t.Errorf("openai x-api-key: got %q, want sk-test-ds", openaiHit.xkey)
+	}
 }
 
 // Regression guard: apikey-type provider_ids (zhipu, deepseek) must map to

@@ -138,21 +138,23 @@ func TestConfig_UpstreamURLPreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
+	if len(cfg.Providers) == 0 {
+		t.Fatal("no providers configured")
+	}
 	for name, prov := range cfg.Providers {
-		// Openai: strip /v1, append /chat/completions
+		// P1-2: assert no double /v1 (real assertion, not just t.Logf)
 		openaiURL := strings.TrimRight(prov.OpenAIBaseURL, "/") + "/chat/completions"
-		t.Logf("[openai]    %s → %s", name, openaiURL)
-		// /models
-		modelsURL := strings.TrimRight(prov.OpenAIBaseURL, "/") + "/models"
-		t.Logf("[models]    %s → %s", name, modelsURL)
-
+		if strings.Contains(openaiURL, "/v1/v1") {
+			t.Errorf("provider %s: openai URL has double /v1: %s", name, openaiURL)
+		}
 		if prov.AnthropicBaseURL != "" {
-			// Anthropic: keep /v1/messages
 			anthropicURL := strings.TrimRight(prov.AnthropicBaseURL, "/") + "/v1/messages"
-			t.Logf("[anthropic] %s → %s", name, anthropicURL)
-		} else {
-			t.Logf("[anthropic] %s → (falls back to openai_base_url + /v1/messages = %s)", name,
-				strings.TrimRight(prov.OpenAIBaseURL, "/")+"/v1/messages")
+			if strings.Contains(anthropicURL, "/v1/v1") {
+				t.Errorf("provider %s: anthropic URL has double /v1: %s", name, anthropicURL)
+			}
+			if !strings.HasSuffix(anthropicURL, "/v1/messages") {
+				t.Errorf("provider %s: anthropic URL doesn't end with /v1/messages: %s", name, anthropicURL)
+			}
 		}
 	}
 }

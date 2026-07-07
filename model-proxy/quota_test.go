@@ -44,6 +44,32 @@ func TestParseZhipuQuota(t *testing.T) {
 	if w5h == nil || len(w5h.Details) != 2 {
 		t.Errorf("5h window details: %+v", w5h)
 	}
+	// P0-2: assert Ultimate/Short markers — getting these wrong silently
+	// breaks peak-burn, pacing, and sticky-switch.
+	if !w5h.Short || w5h.Ultimate {
+		t.Errorf("5h window: Short=%v Ultimate=%v, want Short=true Ultimate=false", w5h.Short, w5h.Ultimate)
+	}
+	if w5h.Duration != 5*time.Hour {
+		t.Errorf("5h Duration=%v, want 5h", w5h.Duration)
+	}
+	if !w5h.ResetsAt.Equal(time.UnixMilli(1750000000000)) {
+		t.Errorf("5h ResetsAt=%v, want 1750000000000ms", w5h.ResetsAt)
+	}
+	var wWeekly *provider.QuotaWindow
+	for i := range s.Windows {
+		if s.Windows[i].Label == "Weekly tokens" {
+			wWeekly = &s.Windows[i]
+		}
+	}
+	if wWeekly == nil {
+		t.Fatal("weekly window not found")
+	}
+	if !wWeekly.Ultimate || wWeekly.Short {
+		t.Errorf("weekly: Ultimate=%v Short=%v, want Ultimate=true Short=false", wWeekly.Ultimate, wWeekly.Short)
+	}
+	if wWeekly.Duration != 7*24*time.Hour {
+		t.Errorf("weekly Duration=%v, want 7d", wWeekly.Duration)
+	}
 }
 
 func TestParseZhipuQuota_NotZhipu(t *testing.T) {
@@ -72,6 +98,23 @@ func TestParseCodexQuota(t *testing.T) {
 	// ultimate = monthly spend → RemainingPct = 0.75 (primary/weekly are token rate-caps, not ultimate).
 	if s.RemainingPct != 0.75 {
 		t.Errorf("RemainingPct=%v, want 0.75 (spend ultimate)", s.RemainingPct)
+	}
+	// P0-2: assert Ultimate marker on the spend window, and that primary/weekly
+	// are NOT Ultimate/Short (different unit — money vs tokens).
+	for _, w := range s.Windows {
+		switch w.Label {
+		case "Spend":
+			if !w.Ultimate {
+				t.Error("spend window must be Ultimate=true")
+			}
+			if w.Duration != 30*24*time.Hour {
+				t.Errorf("spend Duration=%v, want 30d", w.Duration)
+			}
+		case "primary (5h)", "weekly":
+			if w.Ultimate || w.Short {
+				t.Errorf("%s: Ultimate=%v Short=%v — codex token windows must NOT be Ultimate/Short (money ultimate)", w.Label, w.Ultimate, w.Short)
+			}
+		}
 	}
 }
 
@@ -108,6 +151,29 @@ func TestParseVolcengineQuota(t *testing.T) {
 	}
 	if s.Plan != "agent-plan" {
 		t.Errorf("Plan=%q", s.Plan)
+	}
+	// P0-2: assert Ultimate/Short markers on volcengine windows.
+	for _, w := range s.Windows {
+		switch w.Label {
+		case "5h":
+			if !w.Short || w.Ultimate {
+				t.Errorf("5h: Short=%v Ultimate=%v, want Short=true Ultimate=false", w.Short, w.Ultimate)
+			}
+			if w.Duration != 5*time.Hour {
+				t.Errorf("5h Duration=%v, want 5h", w.Duration)
+			}
+		case "monthly":
+			if !w.Ultimate || w.Short {
+				t.Errorf("monthly: Ultimate=%v Short=%v, want Ultimate=true Short=false", w.Ultimate, w.Short)
+			}
+			if w.Duration != 30*24*time.Hour {
+				t.Errorf("monthly Duration=%v, want 30d", w.Duration)
+			}
+		case "daily", "weekly":
+			if w.Ultimate || w.Short {
+				t.Errorf("%s: Ultimate=%v Short=%v — intermediate windows must be neither", w.Label, w.Ultimate, w.Short)
+			}
+		}
 	}
 }
 

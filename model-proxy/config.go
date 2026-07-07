@@ -126,16 +126,26 @@ func (p *PeakConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	out := make(PeakConfig, 0, len(seq))
 	for _, el := range seq {
+		// Only accept string scalars ("09:00-18:00") or mapping nodes
+		// ({window, multiplier}). Reject integers/floats/bools — yaml.v3
+		// silently coerces int→string, which would create bogus windows.
+		if el.Kind == yaml.ScalarNode && el.Tag != "!!str" && el.Tag != "" {
+			return fmt.Errorf("peak_hours element %q: must be a string \"HH:MM-HH:MM\" or a {window, multiplier} map (got %s)", el.Value, el.Tag)
+		}
 		var s string
 		if el.Decode(&s) == nil && s != "" {
 			out = append(out, PeakSegment{Window: s})
 			continue
 		}
-		var seg PeakSegment
-		if err := el.Decode(&seg); err != nil {
-			return err
+		if el.Kind == yaml.MappingNode {
+			var seg PeakSegment
+			if err := el.Decode(&seg); err != nil {
+				return err
+			}
+			out = append(out, seg)
+			continue
 		}
-		out = append(out, seg)
+		return fmt.Errorf("peak_hours element %q: must be a string \"HH:MM-HH:MM\" or a {window, multiplier} map", el.Value)
 	}
 	*p = out
 	return nil
