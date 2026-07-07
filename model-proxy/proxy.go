@@ -352,6 +352,12 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 // tier/surplus/availability/peak per provider), and the current sticky selection
 // (+ dwell remaining). Used by the /debug/schedule endpoint. It does NOT mutate
 // sticky — it peeks via decideOrder.
+//
+// Credential pools are surfaced (Task 9 observability): each virtual in `ordered`
+// carries its `pool_parent`, and each route whose targets share a pool carries a
+// `pools` summary (parent + total accounts + how many are currently available).
+// Existing fields are unchanged — consumers that don't read the new fields see
+// the same shape as before.
 func (p *Proxy) scheduleStatus() []byte {
 	now := time.Now()
 	p.mu.RLock()
@@ -359,6 +365,7 @@ func (p *Proxy) scheduleStatus() []byte {
 	provs := p.providers
 	expanded := p.expandedRoutes
 	parentOf := p.parentOf
+	poolIndex := p.poolIndex
 	p.mu.RUnlock()
 	var qs map[string]*provider.QuotaSnapshot
 	if p.quota != nil {
@@ -398,18 +405,25 @@ func (p *Proxy) scheduleStatus() []byte {
 	}
 
 	type provInfo struct {
-		Provider  string  `json:"provider"`
-		Priority  int     `json:"priority"`
-		Tier      string  `json:"tier"`
-		Surplus   float64 `json:"surplus"`
-		Available bool    `json:"available"`
-		Peak      bool    `json:"peak"`
+		Provider   string  `json:"provider"`
+		PoolParent string  `json:"pool_parent,omitempty"`
+		Priority   int     `json:"priority"`
+		Tier       string  `json:"tier"`
+		Surplus    float64 `json:"surplus"`
+		Available  bool    `json:"available"`
+		Peak       bool    `json:"peak"`
+	}
+	type poolInfo struct {
+		Parent    string `json:"parent"`
+		Accounts  int    `json:"accounts"`
+		Available int    `json:"available"`
 	}
 	type routeInfo struct {
 		First    string     `json:"first"`
 		Ordered  []provInfo `json:"ordered"`
 		Sticky   string     `json:"sticky,omitempty"`
 		DwellRem float64    `json:"sticky_dwell_remaining_sec,omitempty"`
+		Pools    []poolInfo `json:"pools,omitempty"`
 	}
 
 	models := map[string]routeInfo{}
@@ -422,16 +436,46 @@ func (p *Proxy) scheduleStatus() []byte {
 		if len(ordered) > 0 {
 			ri.First = ordered[0].Provider
 		}
+		// Track which parents appear in `ordered` so the route-level `pools`
+		// summary can be emitted. A parent may have more accounts in poolIndex
+		// than are currently in `ordered` (some unavailable) — Accounts uses
+		// poolIndex (total), Available counts only those in `ordered`.
+		parentSeen := map[string]bool{}
 		for _, t := range ordered {
 			pconf, _ := providerConfig(cfg, parentOf, t.Provider)
+			parent := parentOf[t.Provider]
+			if parent != "" {
+				parentSeen[parent] = true
+			}
 			ri.Ordered = append(ri.Ordered, provInfo{
-				Provider:  t.Provider,
-				Priority:  t.Priority,
-				Tier:      billingClassName(p.billingClass(cfg, parentOf, t.Provider, qs)),
-				Surplus:   surplusOf(t.Provider),
-				Available: avail(t.Provider),
-				Peak:      pconf.peakMultiplier(now) > 1,
+				Provider:   t.Provider,
+				PoolParent: parent,
+				Priority:   t.Priority,
+				Tier:       billingClassName(p.billingClass(cfg, parentOf, t.Provider, qs)),
+				Surplus:    surplusOf(t.Provider),
+				Available:  avail(t.Provider),
+				Peak:       pconf.peakMultiplier(now) > 1,
 			})
+		}
+		if len(parentSeen) > 0 {
+			parents := make([]string, 0, len(parentSeen))
+			for pp := range parentSeen {
+				parents = append(parents, pp)
+			}
+			sort.Strings(parents)
+			for _, parent := range parents {
+				availCount := 0
+				for _, t := range ordered {
+					if parentOf[t.Provider] == parent && avail(t.Provider) {
+						availCount++
+					}
+				}
+				ri.Pools = append(ri.Pools, poolInfo{
+					Parent:    parent,
+					Accounts:  len(poolIndex[parent]),
+					Available: availCount,
+				})
+			}
 		}
 		if cur := stickyCopy[exposed]; cur.provider != "" {
 			ri.Sticky = cur.provider

@@ -1508,15 +1508,21 @@ func cmdSchedule(args []string) {
 		Models map[string]struct {
 			First   string `json:"first"`
 			Ordered []struct {
-				Provider  string  `json:"provider"`
-				Priority  int     `json:"priority"`
-				Tier      string  `json:"tier"`
-				Surplus   float64 `json:"surplus"`
-				Available bool    `json:"available"`
-				Peak      bool    `json:"peak"`
+				Provider   string  `json:"provider"`
+				PoolParent string  `json:"pool_parent"`
+				Priority   int     `json:"priority"`
+				Tier       string  `json:"tier"`
+				Surplus    float64 `json:"surplus"`
+				Available  bool    `json:"available"`
+				Peak       bool    `json:"peak"`
 			} `json:"ordered"`
 			Sticky   string  `json:"sticky"`
 			DwellRem float64 `json:"sticky_dwell_remaining_sec"`
+			Pools    []struct {
+				Parent    string `json:"parent"`
+				Accounts  int    `json:"accounts"`
+				Available int    `json:"available"`
+			} `json:"pools"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &st); err != nil {
@@ -1535,6 +1541,13 @@ func cmdSchedule(args []string) {
 	for _, m := range names {
 		ri := st.Models[m]
 		fmt.Printf("%s → %s\n", cBold(m), cGreen(ri.First))
+		// Pool header: when a route carries a pools[] summary, render it before
+		// the per-provider lines so a human sees "this route is pooled" at a
+		// glance, with the parent name + total/available account counts.
+		for _, pool := range ri.Pools {
+			fmt.Printf("    %s %s (%d accounts, %d available)\n",
+				cDim("pool:"), cBold(pool.Parent), pool.Accounts, pool.Available)
+		}
 		for _, t := range ri.Ordered {
 			extra := ""
 			if !t.Available {
@@ -1559,12 +1572,23 @@ func cmdSchedule(args []string) {
 // cmdDoctor runs an OFFLINE diagnostic of the scheduling setup from config (no
 // daemon needed): per-provider tier/quota source/peak_hours, per-route dry-run
 // order (no live quota → all unknown → tier then priority), and warnings.
+// Credential pools (≥2 accounts) are expanded inline: the parent is shown with
+// its account count + the per-account virtual ids, plus a note that new sessions
+// round-robin across the pool (offline: no live quota → falls back to priority).
 func cmdDoctor(args []string) {
 	cfg, err := LoadConfig(configPath(args))
 	if err != nil {
 		fmt.Println(cRed("✗ config invalid: ") + err.Error())
 		os.Exit(1)
 	}
+	doctorWithCfg(cfg)
+}
+
+// doctorWithCfg renders the doctor diagnostic for an already-loaded config.
+// Extracted from cmdDoctor so tests can drive it in-process with a hand-built
+// Config (no temp config file needed). Writes to stdout; returns the warning
+// count.
+func doctorWithCfg(cfg *Config) int {
 	fmt.Println(cGreen("✓ config valid"))
 
 	fmt.Printf("\n%s\n", cBold("Providers"))
@@ -1579,8 +1603,12 @@ func cmdDoctor(args []string) {
 		if prov.Billing == "pay-as-you-go" {
 			tier = "pay-as-you-go"
 		}
-		fmt.Printf("  %s %s  quota=%s  peak=%s\n",
-			pad(name, 12), cCyan(pad(tier, 13)), cGray(quotaSourceLabel(prov.Provider)), peakSummary(prov.PeakHours))
+		extra := ""
+		if vids, pooled := poolVirtuals(cfg, name); pooled {
+			extra = fmt.Sprintf("  pool: %d accounts", len(vids))
+		}
+		fmt.Printf("  %s %s  quota=%s  peak=%s%s\n",
+			pad(name, 12), cCyan(pad(tier, 13)), cGray(quotaSourceLabel(prov.Provider)), peakSummary(prov.PeakHours), extra)
 	}
 
 	fmt.Printf("\n%s\n", cBold("Routes (dry-run: no live quota → tier then priority)"))
@@ -1604,6 +1632,17 @@ func cmdDoctor(args []string) {
 				hasPlan = true
 			}
 			fmt.Printf("    %s %s  p%d\n", pad(t.Provider, 12), cCyan(pad(tier, 13)), t.Priority)
+			// Expand a pooled parent inline: show its account count + the
+			// per-account virtual ids. Offline (no live quota) so we can't show
+			// per-account surplus — note the session-sticky round-robin so an
+			// operator understands how traffic spreads at runtime.
+			if vids, pooled := poolVirtuals(cfg, t.Provider); pooled {
+				fmt.Printf("        %s %d accounts (round-robin session-sticky; no live quota → falls back to priority)\n",
+					cDim("pool:"), len(vids))
+				for _, vid := range vids {
+					fmt.Printf("        %s\n", cGray(vid))
+				}
+			}
 		}
 		if !hasPlan {
 			fmt.Printf("    %s no plan provider — only pay-as-you-go\n", cYellow("⚠"))
@@ -1620,6 +1659,7 @@ func cmdDoctor(args []string) {
 	} else {
 		fmt.Printf("\n%s no warnings\n", cGreen("✓"))
 	}
+	return warns
 }
 
 // quotaSourceLabel returns a short label for where a provider's quota comes from

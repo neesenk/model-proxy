@@ -135,12 +135,7 @@ func printProviderModels(provName string, entries []ModelEntry) {
 // fetchProviderModels fetches the live model list from a provider. Delegates to
 // the provider's FetchModels() implementation (which lives in the provider/ layer).
 func fetchProviderModels(cfg *Config, provName string) ([]ModelEntry, error) {
-	provMap, _, _ := buildProviders(cfg)
-	p := provMap[provName]
-	if p == nil {
-		return nil, fmt.Errorf("unknown provider %q", provName)
-	}
-	ids, err := p.FetchModels()
+	ids, err := refreshProviderModels(cfg, provName)
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +144,54 @@ func fetchProviderModels(cfg *Config, provName string) ([]ModelEntry, error) {
 		entries = append(entries, ModelEntry{ID: id, Object: "model", OwnedBy: provName})
 	}
 	return entries, nil
+}
+
+// refreshProviderModels fetches the live model list for a provider exactly once.
+// If `provName` is a pooled parent (≥2 accounts in its credential pool) it uses
+// the pool's first virtual by account-id order; else it uses the plain provider
+// name. The model list is per-upstream, not per-account, so one fetch is correct
+// and sufficient — fanning out across the pool would multiply upstream calls
+// without changing the result.
+//
+// Returns the raw model IDs; callers that need ModelEntry wrapping (e.g. the
+// `models refresh` CLI display) use fetchProviderModels, which delegates here.
+func refreshProviderModels(cfg *Config, provName string) ([]string, error) {
+	if _, ok := cfg.Providers[provName]; !ok {
+		return nil, fmt.Errorf("unknown provider %q", provName)
+	}
+	provMap, _, _ := buildProviders(cfg)
+	target := provName
+	if vids, pooled := poolVirtuals(cfg, provName); pooled {
+		target = vids[0] // first virtual by account-id order
+	}
+	impl, ok := provMap[target]
+	if !ok || impl == nil {
+		return nil, fmt.Errorf("provider %q not available (not logged in?)", provName)
+	}
+	return impl.FetchModels()
+}
+
+// poolVirtuals returns the sorted virtual ids ("name#<accountID>") for a pooled
+// parent and true when the provider has ≥2 accounts in its credential pool; or
+// (nil, false) for a single-account / not-logged-in / unknown provider. It reads
+// the pool file directly via loadPool (no Proxy required) so `models refresh`
+// and `doctor` can resolve the pool without a running daemon. The returned ids
+// are sorted so callers can deterministically pick the "first" virtual.
+func poolVirtuals(cfg *Config, name string) ([]string, bool) {
+	prov, ok := cfg.Providers[name]
+	if !ok {
+		return nil, false
+	}
+	pool, _ := loadPool(name, prov.Provider)
+	if len(pool.Accounts) < 2 {
+		return nil, false
+	}
+	vids := make([]string, 0, len(pool.Accounts))
+	for _, a := range pool.Accounts {
+		vids = append(vids, name+"#"+a.ID)
+	}
+	sort.Strings(vids)
+	return vids, true
 }
 
 // listArkAgentPlanModelIDs calls the Volcengine signed OpenAPI ListArkAgentPlanModel
