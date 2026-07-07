@@ -121,3 +121,21 @@ You should **not** need to edit `proxy.go`, `login.go`, `logout`, `usage`, or `m
 - **Logging hygiene**: mask SSO cookies with `mask()` (first2…last2); log `auth/info` response bodies by length only (they carry identity). When logs go to a file, color must be off.
 - **supervisor nil panic**: `spawnWorker` can return nil on failure — `runSupervisor` checks before using the result.
 - **Volcengine V4 signing** (`volcengine_sign.go`): the credential-scope terminator is **`request`** (not `volcengine_request` — the official signing demo is authoritative). Signed headers are `host;x-date` only — do NOT sign or send `x-content-sha256` for GET (it causes "Invalid Authorization"). The signing-key chain: `HMAC(sk→date→region→service→"request")`. The Agent Plan's `GetAFPUsage` needs AK/SK (not the Ark API Key); the Ark API Key is Bearer chat-only.
+
+## Testing contract & conventions
+
+Tests are white-box (`package main` / `package provider`), stdlib `testing` + `httptest` only — **no testify**. Run from `model-proxy/`: `go test ./...` (~30s), `go test -race ./...`, `go vet ./...`, `gofmt -l .` must all be clean.
+
+**Coverage baseline: 80% per package.** Enforced by `scripts/cover.sh` (exits non-zero if any package drops below 80%). Run `scripts/cover.sh` before committing. Current: main ~80%, provider ~81%. The ~20% gap is intentional — daemon process management (`cmdServe`/`runSupervisor`/`daemonize`), SSO/OAuth browser flows (`runLogin`/`BootstrapLoginURL`/`PollSession`), interactive stdin login, and live upstream `FetchModels` are external I/O / process-level paths not unit-tested by convention.
+
+**Test contracts (what a test MUST assert — green-signal bugs are the failure mode this codebase guards against):**
+
+- **Auth headers — assert exact values, not "non-empty".** codex `Inject` must assert `Bearer <exact-token>` + `originator == "codex_cli_rs"` + `ChatGPT-Account-Id == "<acct>"`. deepseek/volcengine must assert `Bearer <key>` AND `x-api-key == <key>` on both protocol paths. Deleting any header-set line must turn the test red.
+- **Quota window markers — assert Ultimate/Short/Duration/ResetsAt.** Every `parse*Quota` test must verify which window is `Ultimate` (total budget) and which is `Short` (rate-cap), plus `Duration` (nominal cycle) and `ResetsAt`. Getting these wrong silently breaks surplus/peak/pacing — `RemainingPct` alone won't catch it.
+- **429 refresh — assert WHICH provider, not just count.** `refreshHook` must capture the provider name; assert it's the rate-limited one (a count-only check misses a wrong-provider bug).
+- **No fake tests.** A test with `t.Logf` only, inverted `&&`/`||` logic, or `Contains(x) || Contains(y)` that a panic stack passes — is a defect. Assert precise values or structural fields. `strings.Contains` with `||` is a smell; prefer exact match or parsed-structure assertion.
+- **Route side-effects — assert model rewrite + response status.** Forward tests must capture the upstream request's `model` JSON field (verifies `rewriteModel`) and the client-facing status/body, not just "hit the right upstream".
+- **Concurrency — race-clean AND a functional invariant.** `-race` clean is necessary but not sufficient; a reload-during-request test must also assert post-reload requests hit the new config.
+
+`scripts/cover.sh [threshold] [--no-enforce]` writes `cov.out` + `coverage.html`, lists functions below `threshold` (default 60), and gates on the 80% baseline unless `--no-enforce`.
+
