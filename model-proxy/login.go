@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -11,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -35,33 +33,77 @@ func cmdLogin(args []string) {
 	}
 	provName := positional(args)
 	if provName == "" {
-		fmt.Println("usage: model-proxy login <provider>")
+		fmt.Println("usage: model-proxy login <provider> [--label <name>] [--replace]")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
 			fmt.Printf("  %s (provider=%s)\n", name, p.Provider)
 		}
 		return
 	}
-	provMap, _, _ := buildProviders(cfg)
-	p := provMap[provName]
-	if p == nil {
+	prov, ok := cfg.Providers[provName]
+	if !ok {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	if err := p.Login(); err != nil {
-		log.Fatalf("login failed: %v", err)
+	label := flagStringValue(args, "--label")
+	replace := hasFlagValue(args, "--replace")
+
+	// Dispatch by provider_id. aqp/codex/volcengine have specialized interactive
+	// flows (SSO, OAuth, AK/SK prompts) that don't go through the apikey pool —
+	// they keep their existing paths. zhipu/deepseek (and any future apikey
+	// provider without a specialized flow) go through the pool-aware path.
+	switch prov.Provider {
+	case "aqp":
+		if err := runLogin(cfg); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+	case "codex":
+		if err := runCodexLogin(cfg); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+	case "volcengine":
+		if err := runVolcengineLogin(cfg, provName, prov); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+	default:
+		if err := runApiKeyLoginWithInput(cfg, provName, prov, "", label, replace); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+		// Signal a running daemon to hot-reload so the new account is live
+		// without a restart. No-op when no daemon/pid file is present
+		// (foreground/test case).
+		maybeReloadDaemon(args)
 	}
 }
 
-// runApiKeyLogin prompts for an API key, validates it against the provider's
-// usageURL (if configured), and saves it to ~/.model-proxy/<provider>_apikey.json.
+// runApiKeyLogin is the legacy single-key login retained as a thin wrapper so
+// the provider-callback path (LoginFn → runApiKeyLoginErr) still compiles and
+// behaves the same as before (no label, no replace, prompts on stdin). The real
+// implementation now lives in runApiKeyLoginWithInput, which writes the plural
+// credential pool (<name>_apikeys.json) so repeated logins accumulate accounts.
 func runApiKeyLogin(cfg *Config, provName string, prov Provider) error {
-	fmt.Printf("Enter API key for %s: ", provName)
-	reader := bufio.NewReader(os.Stdin)
-	key, err := reader.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("read API key: %w", err)
+	return runApiKeyLoginWithInput(cfg, provName, prov, "", "", false)
+}
+
+// runApiKeyLoginWithInput performs a pool-aware apikey login. The key may be
+// passed directly (tests, or a future --key flag) or, when empty, prompted on
+// stdin. The key is validated against the provider's usage_url if configured
+// (401/403 rejects). The account is deduped by id (accountIDFor): a new id
+// appends; an existing id with replace=true (or an interactive `y` on stdin
+// when replace=false) overwrites the entry's key/label in place; an existing
+// id without confirmation aborts with "login cancelled". The entry's label
+// defaults to the id when not supplied. The pool is written to
+// ~/.model-proxy/<name>_apikeys.json via savePool.
+func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, label string, replace bool) error {
+	key := strings.TrimSpace(in)
+	if key == "" {
+		fmt.Printf("Enter API key for %s: ", provName)
+		reader := bufio.NewReader(os.Stdin)
+		line, err := reader.ReadString('\n')
+		if err != nil && line == "" {
+			return fmt.Errorf("read API key: %w", err)
+		}
+		key = strings.TrimSpace(line)
 	}
-	key = strings.TrimSpace(key)
 	if key == "" {
 		return fmt.Errorf("empty API key")
 	}
@@ -84,17 +126,59 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) error {
 		}
 	}
 
-	// Save to auth file.
-	authFile := filepath.Join(homeDir(), ".model-proxy", provName+"_apikey.json")
-	if err := os.MkdirAll(filepath.Dir(authFile), 0o700); err != nil {
-		return fmt.Errorf("create auth dir: %w", err)
+	// Pool dedup by account id.
+	pool, err := loadPool(provName, prov.Provider)
+	if err != nil {
+		return fmt.Errorf("load pool: %w", err)
 	}
-	b, _ := json.MarshalIndent(map[string]string{"api_key": key}, "", "  ")
-	if err := os.WriteFile(authFile, b, 0o600); err != nil {
-		return fmt.Errorf("save API key: %w", err)
+	id := accountIDFor(prov.Provider, accountCred{APIKey: key})
+	now := nowTS()
+	idx := -1
+	for i, a := range pool.Accounts {
+		if a.ID == id {
+			idx = i
+			break
+		}
 	}
-	fmt.Println(cGreen("✓ API key saved to ") + cGray(authFile))
+	if idx >= 0 {
+		if !replace {
+			fmt.Printf("Account %q is already logged in. Replace its key? [y/N] ", pool.Accounts[idx].Label)
+			reader := bufio.NewReader(os.Stdin)
+			ans, _ := reader.ReadString('\n')
+			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
+				return fmt.Errorf("login cancelled")
+			}
+		}
+		pool.Accounts[idx].APIKey = key
+		if label != "" {
+			pool.Accounts[idx].Label = label
+		}
+		pool.Accounts[idx].AddedAt = now
+	} else {
+		lbl := label
+		if lbl == "" {
+			lbl = id
+		}
+		pool.Accounts = append(pool.Accounts, poolAccount{ID: id, Label: lbl, APIKey: key, AddedAt: now})
+	}
+	if err := savePool(provName, pool); err != nil {
+		return fmt.Errorf("save pool: %w", err)
+	}
+	// Reload the in-memory label (savePool may re-sort, so look up by id).
+	fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
 	return nil
+}
+
+// labelFor returns the label of the pool entry with the given id, or the id
+// itself when not found. Used for the post-save confirmation printout (the
+// pool may have been re-sorted by savePool, so we look up by id).
+func labelFor(pool credentialPool, id string) string {
+	for _, a := range pool.Accounts {
+		if a.ID == id {
+			return a.Label
+		}
+	}
+	return id
 }
 
 func runLogin(cfg *Config) error {

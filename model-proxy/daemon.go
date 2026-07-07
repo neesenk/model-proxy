@@ -389,6 +389,51 @@ func cmdReload(args []string) {
 	fmt.Println(cGreen("✓ Reload signal sent.") + " Check logs for [reload] lines.")
 }
 
+// maybeReloadDaemon sends SIGHUP to a running daemon's supervisor (which
+// forwards to the worker for hot config reload) so newly added credentials are
+// picked up without a restart. It is a NO-OP (no error, no fatal) when:
+//   - the config can't be loaded,
+//   - no pid file exists (foreground / test case),
+//   - the pid file is stale (the process is gone),
+//   - or the signal can't be delivered.
+//
+// Used by cmdLogin after a successful apikey login. Mirrors cmdReload's pid
+// resolution but swallows all errors silently — callers that want errors should
+// use `model-proxy reload` directly.
+func maybeReloadDaemon(args []string) {
+	sa := parseServeArgs(args)
+	cfg, err := LoadConfig(sa.config)
+	if err != nil {
+		return
+	}
+	logFile := resolveLogFile(sa, cfg)
+	pidPath := pidFilePath(logFile)
+	pidStr, err := os.ReadFile(pidPath)
+	if err != nil {
+		return // no pid file → no daemon running
+	}
+	var pid int
+	for _, c := range pidStr {
+		if c < '0' || c > '9' {
+			break
+		}
+		pid = pid*10 + int(c-'0')
+	}
+	if pid <= 0 {
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		// Stale pid file — clean it up so the next start isn't confused.
+		os.Remove(pidPath)
+		return
+	}
+	_ = proc.Signal(syscall.SIGHUP)
+}
+
 // spawnWorker starts a worker process whose stdio is the supervisor's (the log file).
 // Returns nil if the process could not be started.
 func spawnWorker(sa serveArgs) *exec.Cmd {

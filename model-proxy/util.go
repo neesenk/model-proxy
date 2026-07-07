@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 func readFile(path string) ([]byte, error) {
@@ -49,4 +50,35 @@ func homeDir() string {
 // OAuth providers use <name>_oauth_auth.json; apikey providers use <name>_apikey.json.
 func authFilePath(providerName, suffix string) string {
 	return filepath.Join(homeDir(), ".model-proxy", providerName+"_"+suffix+".json")
+}
+
+// flagStringValue scans args for a `--name value` or `--name=value` flag and
+// returns its value ("" if absent, or if the flag is the last arg with no
+// value). Used by cmdLogin for --label. Mirrors parseServeArgs' scanning style.
+func flagStringValue(args []string, flag string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == flag {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if strings.HasPrefix(a, flag+"=") {
+			return strings.TrimPrefix(a, flag+"=")
+		}
+	}
+	return ""
+}
+
+// hasFlagValue reports whether the boolean flag is present anywhere in args.
+// Used by cmdLogin for --replace. Unlike flagStringValue, the flag need not be
+// at a specific position; presence is enough.
+func hasFlagValue(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag || strings.HasPrefix(a, flag+"=") {
+			return true
+		}
+	}
+	return false
 }
