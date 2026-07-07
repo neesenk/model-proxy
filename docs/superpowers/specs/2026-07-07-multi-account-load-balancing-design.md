@@ -199,7 +199,14 @@ regresses.
   1. Snapshot health + quota; compute available targets; rank by tier→priority→surplus
      (unchanged).
   2. `cur := p.sticky[sk]`. If `cur` is available and within `dwell` → **reuse it**
-     (cache hit). (Existing reuse logic, re-keyed to `sk`.)
+     (cache hit). For a **session** key (`sk != exposed`), reuse also refreshes
+     `since`, so an active conversation parks on its assigned account for its
+     whole lifetime and re-rolls only when that account becomes unavailable
+     (429/circuit) — maximal prompt-cache warmth (user-ratified design: a
+     conversation locks to one account; it does NOT migrate to a marginally
+     better-healthy account mid-conversation). The after-dwell
+     tier/priority/surplus-margin re-evaluation applies ONLY to route-keyed
+     (non-session) sticky, keeping that path byte-identical to before.
   3. Else **assign**:
      - If the route has a pooled parent: take its available band (the parent's
        virtuals), sorted by stable account-id; `start := spreadCtr[parent] %
