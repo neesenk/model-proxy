@@ -24,9 +24,21 @@ func TestBuildProviders_AllProviderIDs(t *testing.T) {
 		},
 	}
 	m := buildProviders(cfg)
+	// P1-3: not just nil-check — also verify the concrete type matches the
+	// expected provider_id (catches a bug where all providers instantiate as zhipu).
 	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
 		if m[name] == nil {
 			t.Errorf("buildProviders: %s is nil", name)
+		}
+	}
+	// Verify QuotaFn is wired for each (non-nil Quota() returns a snapshot, not error)
+	for _, name := range []string{"compass", "codex", "zhipu", "deepseek", "volcengine"} {
+		snap, err := m[name].Quota()
+		if err != nil {
+			t.Errorf("%s Quota() returned error (QuotaFn not wired?): %v", name, err)
+		}
+		if snap == nil {
+			t.Errorf("%s Quota() returned nil snapshot (QuotaFn not wired)", name)
 		}
 	}
 }

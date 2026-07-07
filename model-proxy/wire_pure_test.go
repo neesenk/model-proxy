@@ -124,35 +124,48 @@ func TestClearApiKey(t *testing.T) {
 // --- provider_wire delegation wrappers (cover them via direct call) ---
 
 func TestProviderWire_Wrappers(t *testing.T) {
-	// showCompassUsageData / showCodexUsageData / showZhipuUsageData /
-	// showDeepseekUsageData / showVolcengineUsageData all call their showXxxUsage
-	// and return (nil, nil). They print to stdout; just assert the return.
-	// Point usage_url at a dead URL so they fail fast without hanging.
+	// showXxxUsageData wrappers call their showXxxUsage, print to stdout, return
+	// (nil,nil). Capture stdout and assert each prints a recognizable marker —
+	// not just "returned nil" (which would pass even if delegated to the wrong func).
 	cfg := &Config{
 		Providers: map[string]Provider{
 			"deepseek": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "deepseek", UsageURL: "http://127.0.0.1:1/balance"},
 		},
 	}
-	// showDeepseekUsageData: not logged in → prints "Not logged in", returns (nil,nil).
-	if _, err := showDeepseekUsageData(cfg, "deepseek", cfg.Providers["deepseek"]); err != nil {
-		t.Errorf("showDeepseekUsageData: %v", err)
+	// deepseek wrapper → prints "Provider:" + "deepseek" or "Not logged in"
+	out := captureStdout(t, func() {
+		_, _ = showDeepseekUsageData(cfg, "deepseek", cfg.Providers["deepseek"])
+	})
+	if !strings.Contains(out, "deepseek") && !strings.Contains(out, "Not logged in") {
+		t.Errorf("showDeepseekUsageData output missing deepseek/Not logged in:\n%s", out)
 	}
-	// showZhipuUsageData: delegates to showGenericUsage. With no cred file →
-	// prints not-logged-in message, returns (nil,nil).
-	if _, err := showZhipuUsageData(cfg, "deepseek", cfg.Providers["deepseek"]); err != nil {
-		t.Errorf("showZhipuUsageData: %v", err)
+	// zhipu wrapper → delegates to showGenericUsage → fetchZhipuQuota → dead URL → error
+	out = captureStdout(t, func() {
+		_, _ = showZhipuUsageData(cfg, "deepseek", cfg.Providers["deepseek"])
+	})
+	if !strings.Contains(out, "deepseek") && !strings.Contains(out, "Not logged in") && !strings.Contains(out, "Error:") {
+		t.Errorf("showZhipuUsageData output missing marker:\n%s", out)
 	}
-	// showCompassUsageData: delegates to showCompassUsage (no cred → prints not logged in).
-	if _, err := showCompassUsageData(cfg); err != nil {
-		t.Errorf("showCompassUsageData: %v", err)
+	// compass wrapper
+	out = captureStdout(t, func() {
+		_, _ = showCompassUsageData(cfg)
+	})
+	if !strings.Contains(out, "compass") && !strings.Contains(out, "Not logged in") {
+		t.Errorf("showCompassUsageData output missing marker:\n%s", out)
 	}
-	// showCodexUsageData: delegates to showCodexUsage (no cred → prints not logged in).
-	if _, err := showCodexUsageData(cfg, cfg.Providers["deepseek"]); err != nil {
-		t.Errorf("showCodexUsageData: %v", err)
+	// codex wrapper
+	out = captureStdout(t, func() {
+		_, _ = showCodexUsageData(cfg, cfg.Providers["deepseek"])
+	})
+	if !strings.Contains(out, "codex") && !strings.Contains(out, "Not logged in") {
+		t.Errorf("showCodexUsageData output missing marker:\n%s", out)
 	}
-	// showVolcengineUsageData: prints configured models + AK/SK note.
-	if _, err := showVolcengineUsageData(cfg, "deepseek", cfg.Providers["deepseek"]); err != nil {
-		t.Errorf("showVolcengineUsageData: %v", err)
+	// volcengine wrapper
+	out = captureStdout(t, func() {
+		_, _ = showVolcengineUsageData(cfg, "deepseek", cfg.Providers["deepseek"])
+	})
+	if !strings.Contains(out, "volcengine") && !strings.Contains(out, "Note:") {
+		t.Errorf("showVolcengineUsageData output missing marker:\n%s", out)
 	}
 }
 

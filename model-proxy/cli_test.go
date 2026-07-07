@@ -232,9 +232,10 @@ func TestCLI_ScheduleNoDaemon(t *testing.T) {
 	if code == 0 {
 		t.Error("schedule no daemon: exit=0 want non-zero")
 	}
-	// Either a connection refused message or the "is serve running" hint.
-	if !strings.Contains(stderr, "daemon") && !strings.Contains(stderr, "serve") && !strings.Contains(stderr, "reach") {
-		t.Errorf("schedule no-daemon stderr missing reach hint:\n%s", stderr)
+	// Assert the specific "cannot reach" message (not a 3-way OR that a panic
+	// stack trace would pass).
+	if !strings.Contains(stderr, "cannot reach") {
+		t.Errorf("schedule no-daemon stderr missing 'cannot reach':\n%s", stderr)
 	}
 }
 

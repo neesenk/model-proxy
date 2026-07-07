@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -58,6 +59,10 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	if codexHit.auth != "Bearer codex-token" {
 		t.Errorf("gpt-5.5 auth=%q want Bearer codex-token", codexHit.auth)
 	}
+	// P2-1: assert the model field was rewritten to the upstream model name
+	if codexHit.model != "gpt-5.5" {
+		t.Errorf("gpt-5.5 model rewrite: upstream model=%q want gpt-5.5", codexHit.model)
+	}
 
 	// 2) glm-5.2 → compass provider
 	codexHit, gwHit = requestHit{}, requestHit{}
@@ -70,6 +75,10 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	}
 	if gwHit.auth != "Bearer gw-key" {
 		t.Errorf("glm-5.2 auth=%q want Bearer gw-key", gwHit.auth)
+	}
+	// P2-1: assert model rewrite
+	if gwHit.model != "glm-5.2" {
+		t.Errorf("glm-5.2 model rewrite: upstream model=%q want glm-5.2", gwHit.model)
 	}
 }
 
@@ -102,15 +111,19 @@ func TestForward_UnknownModel(t *testing.T) {
 }
 
 type requestHit struct {
-	path string
-	auth string
+	path  string
+	auth  string
+	model string
 }
 
 func captureHit(r *http.Request) requestHit {
 	body, _ := io.ReadAll(r.Body)
 	r.Body.Close()
-	_ = body
-	return requestHit{path: r.URL.Path, auth: r.Header.Get("Authorization")}
+	var v struct {
+		Model string `json:"model"`
+	}
+	json.Unmarshal(body, &v)
+	return requestHit{path: r.URL.Path, auth: r.Header.Get("Authorization"), model: v.Model}
 }
 
 func post(t *testing.T, url, body string) {
