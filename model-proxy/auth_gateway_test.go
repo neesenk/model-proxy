@@ -114,7 +114,7 @@ func TestNewAuthProvider_Factory(t *testing.T) {
 		},
 	}
 	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine", "static", "unknown"} {
-		if p := newAuthProvider(cfg.Providers[name].Provider, name, cfg); p == nil {
+		if p := newAuthProvider(cfg.Providers[name].Provider, name, cfg, nil); p == nil {
 			t.Errorf("newAuthProvider(%s): nil provider", name)
 		}
 	}

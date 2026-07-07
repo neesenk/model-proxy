@@ -134,14 +134,14 @@ func TestProviderWire_Wrappers(t *testing.T) {
 	}
 	// deepseek wrapper → prints "Provider:" + "deepseek" or "Not logged in"
 	out := captureStdout(t, func() {
-		_, _ = showDeepseekUsageData(cfg, "deepseek", cfg.Providers["deepseek"])
+		_, _ = showDeepseekUsageData(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "deepseek") && !strings.Contains(out, "Not logged in") {
 		t.Errorf("showDeepseekUsageData output missing deepseek/Not logged in:\n%s", out)
 	}
 	// zhipu wrapper → delegates to showGenericUsage → fetchZhipuQuota → dead URL → error
 	out = captureStdout(t, func() {
-		_, _ = showZhipuUsageData(cfg, "deepseek", cfg.Providers["deepseek"])
+		_, _ = showZhipuUsageData(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "deepseek") && !strings.Contains(out, "Not logged in") && !strings.Contains(out, "Error:") {
 		t.Errorf("showZhipuUsageData output missing marker:\n%s", out)
@@ -162,7 +162,7 @@ func TestProviderWire_Wrappers(t *testing.T) {
 	}
 	// volcengine wrapper
 	out = captureStdout(t, func() {
-		_, _ = showVolcengineUsageData(cfg, "deepseek", cfg.Providers["deepseek"])
+		_, _ = showVolcengineUsageData(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "volcengine") && !strings.Contains(out, "Note:") {
 		t.Errorf("showVolcengineUsageData output missing marker:\n%s", out)

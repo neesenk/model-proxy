@@ -380,7 +380,9 @@ func jwtExpiry(jwt string) time.Time {
 
 // newAuthProvider builds an AuthProvider for a given auth strategy + provider name.
 // provName is used to derive per-provider auth file paths (e.g. apikey auth).
-func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
+// cred is non-nil when binding an in-memory credential-pool key (virtual provider);
+// nil means read from the auth file on disk (single-account / legacy path).
+func newAuthProvider(authName, provName string, cfg *Config, cred *accountCred) AuthProvider {
 	prov := cfg.Providers[provName]
 	switch authName {
 	case "aqp":
@@ -390,7 +392,11 @@ func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
 	case "apikey":
 		return newApiKeyProvider(authFilePath(provName, "apikey"))
 	case "zhipu", "deepseek", "volcengine":
-		return newApiKeyProvider(authFilePath(provName, "apikey"))
+		path := authFilePath(provName, "apikey")
+		if cred != nil && cred.APIKey != "" {
+			return newApiKeyProviderWithKey(path, cred.APIKey)
+		}
+		return newApiKeyProvider(path)
 	case "static":
 		return &StaticProvider{key: ""}
 	default:
@@ -402,6 +408,7 @@ func newAuthProvider(authName, provName string, cfg *Config) AuthProvider {
 
 type ApiKeyProvider struct {
 	authFile string
+	bound    bool // true → use cached key, never touch the file (pool-bound)
 
 	mu     sync.Mutex
 	cached string
@@ -409,6 +416,13 @@ type ApiKeyProvider struct {
 
 func newApiKeyProvider(authFile string) *ApiKeyProvider {
 	return &ApiKeyProvider{authFile: authFile}
+}
+
+// newApiKeyProviderWithKey builds an apikey AuthProvider bound to an in-memory
+// key (a credential-pool entry) instead of reading the auth file. The auth file
+// path is still recorded for logging/debugging but is never read or written.
+func newApiKeyProviderWithKey(authFile, key string) *ApiKeyProvider {
+	return &ApiKeyProvider{authFile: authFile, bound: true, cached: key}
 }
 
 func (p *ApiKeyProvider) Inject(req *http.Request) error {
@@ -424,7 +438,7 @@ func (p *ApiKeyProvider) Inject(req *http.Request) error {
 func (p *ApiKeyProvider) key() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.cached != "" {
+	if p.bound || p.cached != "" {
 		return p.cached, nil
 	}
 	data, err := os.ReadFile(p.authFile)
@@ -445,6 +459,10 @@ func (p *ApiKeyProvider) key() (string, error) {
 }
 
 func (p *ApiKeyProvider) Refresh() error {
+	// A bound provider has no file to re-read and its key is immutable → no-op.
+	if p.bound {
+		return nil
+	}
 	p.mu.Lock()
 	p.cached = ""
 	p.mu.Unlock()

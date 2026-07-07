@@ -56,7 +56,7 @@ type routeSticky struct {
 func buildProviders(cfg *Config) map[string]provider.Provider {
 	m := map[string]provider.Provider{}
 	for name, prov := range cfg.Providers {
-		auth := newAuthProvider(prov.Provider, name, cfg)
+		auth := newAuthProvider(prov.Provider, name, cfg, nil)
 		pcfg := &provider.Config{
 			ProviderID:    prov.Provider,
 			OpenAIBaseURL: prov.OpenAIBaseURL,
@@ -79,17 +79,17 @@ func buildProviders(cfg *Config) map[string]provider.Provider {
 		case "zhipu":
 			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }
-			pcfg.UsageFn = func() (any, error) { return showZhipuUsageData(cfg, name, prov) }
-			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchZhipuQuota(cfg, name, prov) }
+			pcfg.UsageFn = func() (any, error) { return showZhipuUsageData(cfg, name, prov, nil) }
+			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchZhipuQuota(cfg, name, prov, nil) }
 		case "deepseek":
 			pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }
-			pcfg.UsageFn = func() (any, error) { return showDeepseekUsageData(cfg, name, prov) }
-			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchDeepseekQuota(cfg, name, prov) }
+			pcfg.UsageFn = func() (any, error) { return showDeepseekUsageData(cfg, name, prov, nil) }
+			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchDeepseekQuota(cfg, name, prov, nil) }
 		case "volcengine":
 			pcfg.LoginFn = func() error { return runVolcengineLoginErr(cfg, name, prov) }
 			pcfg.LogoutFn = func() error { return clearApiKey(name) }
-			pcfg.UsageFn = func() (any, error) { return showVolcengineUsageData(cfg, name, prov) }
+			pcfg.UsageFn = func() (any, error) { return showVolcengineUsageData(cfg, name, prov, nil) }
 			pcfg.FetchModelsFn = func() ([]string, error) { return listArkAgentPlanModelIDs(name) }
 			pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchVolcengineQuota(name) }
 		}

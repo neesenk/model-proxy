@@ -693,8 +693,8 @@ func parseZhipuQuota(body []byte, account string) (*provider.QuotaSnapshot, erro
 }
 
 // fetchZhipuQuota GETs the zhipu usage_url and returns the parsed snapshot.
-func fetchZhipuQuota(cfg *Config, name string, prov Provider) (*provider.QuotaSnapshot, error) {
-	auth := newAuthProvider(prov.Provider, name, cfg)
+func fetchZhipuQuota(cfg *Config, name string, prov Provider, cred *accountCred) (*provider.QuotaSnapshot, error) {
+	auth := newAuthProvider(prov.Provider, name, cfg, cred)
 	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
 	if err := auth.Inject(req); err != nil {
 		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
@@ -762,8 +762,8 @@ func printQuotaSnapshot(s *provider.QuotaSnapshot) {
 //	{data:{limits:[{type:"TOKENS_LIMIT",unit,percentage,nextResetTime}, ...], level}}
 //
 // unit: 3=5h window, 6=weekly window, 5=monthly time limit.
-func showGenericUsage(cfg *Config, provName string, prov Provider) {
-	auth := newAuthProvider(prov.Provider, provName, cfg)
+func showGenericUsage(cfg *Config, provName string, prov Provider, cred *accountCred) {
+	auth := newAuthProvider(prov.Provider, provName, cfg, cred)
 	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
 	if err := auth.Inject(req); err != nil {
 		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login "+provName))
@@ -917,7 +917,7 @@ func getAFPUsage(ak, sk string) (*afpUsage, error) {
 // showVolcengineUsage shows the Agent Plan's 5h/daily/weekly/monthly AFP quota
 // via GetAFPUsage (needs AK/SK + V4 signing). Falls back to config models if
 // AK/SK aren't configured or the call fails.
-func showVolcengineUsage(cfg *Config, provName string, prov Provider) {
+func showVolcengineUsage(cfg *Config, provName string, prov Provider, cred *accountCred) {
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
 	creds, err := loadVolcengineCreds(provName)
 	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
@@ -1038,8 +1038,8 @@ func parseDeepseekQuota(body []byte) *provider.QuotaSnapshot {
 func atof(s string) float64 { f, _ := strconv.ParseFloat(s, 64); return f }
 
 // fetchDeepseekQuota GETs /user/balance.
-func fetchDeepseekQuota(cfg *Config, name string, prov Provider) (*provider.QuotaSnapshot, error) {
-	auth := newAuthProvider(prov.Provider, name, cfg)
+func fetchDeepseekQuota(cfg *Config, name string, prov Provider, cred *accountCred) (*provider.QuotaSnapshot, error) {
+	auth := newAuthProvider(prov.Provider, name, cfg, cred)
 	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
 	if err := auth.Inject(req); err != nil {
 		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
@@ -1128,9 +1128,9 @@ func listConfigModels(prov Provider) {
 // /user/balance: {is_available, balance_infos:[{currency, total_balance,
 // granted_balance, topped_up_balance}]}. Auth is Bearer (the balance endpoint is
 // OpenAI-style, under the OpenAI base).
-func showDeepseekUsage(cfg *Config, provName string, prov Provider) {
+func showDeepseekUsage(cfg *Config, provName string, prov Provider, cred *accountCred) {
 	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
-	auth := newAuthProvider(prov.Provider, provName, cfg)
+	auth := newAuthProvider(prov.Provider, provName, cfg, cred)
 	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
 	if err := auth.Inject(req); err != nil {
 		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login "+provName))

@@ -61,7 +61,7 @@ func TestShowVolcengineUsage_NoAKSK(t *testing.T) {
 		},
 	}
 	out := grabStdout(t, func() {
-		showVolcengineUsage(cfg, "volcengine", cfg.Providers["volcengine"])
+		showVolcengineUsage(cfg, "volcengine", cfg.Providers["volcengine"], nil)
 	})
 	if !contains(out, "doubao-seed-2-0-code") {
 		t.Errorf("showVolcengineUsage missing configured model:\n%s", out)

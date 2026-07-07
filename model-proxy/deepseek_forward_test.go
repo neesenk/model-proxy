@@ -126,13 +126,51 @@ func TestForward_DeepSeekRoutesByProtocol(t *testing.T) {
 func TestNewAuthProvider_ApiKeyProviders(t *testing.T) {
 	cfg := &Config{}
 	for _, pid := range []string{"zhipu", "deepseek", "volcengine"} {
-		auth := newAuthProvider(pid, pid, cfg)
+		auth := newAuthProvider(pid, pid, cfg, nil)
 		if _, ok := auth.(*ApiKeyProvider); !ok {
 			t.Errorf("provider_id %q: want *ApiKeyProvider, got %T", pid, auth)
 		}
 	}
 	// Sanity: aqp uses a different auth strategy.
-	if _, ok := newAuthProvider("aqp", "aqp", cfg).(*ApiKeyProvider); ok {
+	if _, ok := newAuthProvider("aqp", "aqp", cfg, nil).(*ApiKeyProvider); ok {
 		t.Error("aqp should not be an *ApiKeyProvider")
+	}
+}
+
+// TestNewAuthProvider_BoundCredInjectsKey verifies that when a non-nil accountCred
+// is passed, newAuthProvider binds the in-memory APIKey and never reads the auth
+// file. The injected Authorization must be exactly "Bearer <bound-key>".
+func TestNewAuthProvider_BoundCredInjectsKey(t *testing.T) {
+	cfg := &Config{}
+	for _, pid := range []string{"zhipu", "deepseek", "volcengine"} {
+		cred := &accountCred{APIKey: "BOUND-" + pid}
+		auth := newAuthProvider(pid, pid, cfg, cred)
+		req := httptest.NewRequest(http.MethodGet, "https://x/v1/m", nil)
+		if err := auth.Inject(req); err != nil {
+			t.Fatalf("%s Inject: %v", pid, err)
+		}
+		want := "Bearer BOUND-" + pid
+		if got := req.Header.Get("Authorization"); got != want {
+			t.Errorf("%s Authorization = %q, want %q", pid, got, want)
+		}
+		if req.Header.Get("x-api-key") != "" {
+			t.Errorf("%s x-api-key should be deleted, got %q", pid, req.Header.Get("x-api-key"))
+		}
+	}
+}
+
+// TestNewAuthProvider_NilCredIsFileBacked verifies the legacy path: nil cred
+// still produces a file-backed ApiKeyProvider (bound=false).
+func TestNewAuthProvider_NilCredIsFileBacked(t *testing.T) {
+	cfg := &Config{}
+	for _, pid := range []string{"zhipu", "deepseek", "volcengine"} {
+		auth := newAuthProvider(pid, pid, cfg, nil)
+		p, ok := auth.(*ApiKeyProvider)
+		if !ok {
+			t.Fatalf("%s: want *ApiKeyProvider, got %T", pid, auth)
+		}
+		if p.bound {
+			t.Errorf("%s: nil cred should not produce a bound provider", pid)
+		}
 	}
 }

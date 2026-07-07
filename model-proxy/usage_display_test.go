@@ -150,7 +150,7 @@ func TestShowDeepseekUsage_BalanceParsed(t *testing.T) {
 		"deepseek": {Provider: "deepseek", UsageURL: srv.URL + "/user/balance"},
 	}}
 	out := captureStdout(t, func() {
-		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"])
+		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	for _, want := range []string{"deepseek", "Available:", "yes", "CNY", "10.50", "USD", "5.00", "granted", "topped-up"} {
 		if !strings.Contains(out, want) {
@@ -171,7 +171,7 @@ func TestShowDeepseekUsage_Unavailable(t *testing.T) {
 		"deepseek": {Provider: "deepseek", UsageURL: srv.URL},
 	}}
 	out := captureStdout(t, func() {
-		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"])
+		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "insufficient balance") {
 		t.Errorf("missing 'insufficient balance':\n%s", out)
@@ -185,7 +185,7 @@ func TestShowDeepseekUsage_NotLoggedIn(t *testing.T) {
 		"deepseek": {Provider: "deepseek", UsageURL: "https://x.invalid/user/balance"},
 	}}
 	out := captureStdout(t, func() {
-		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"])
+		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "Not logged in") {
 		t.Errorf("missing 'Not logged in':\n%s", out)
@@ -205,7 +205,7 @@ func TestShowDeepseekUsage_HTTPError(t *testing.T) {
 		"deepseek": {Provider: "deepseek", UsageURL: srv.URL},
 	}}
 	out := captureStdout(t, func() {
-		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"])
+		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "HTTP 500") {
 		t.Errorf("missing 'HTTP 500':\n%s", out)
@@ -224,7 +224,7 @@ func TestShowDeepseekUsage_BadJSON(t *testing.T) {
 		"deepseek": {Provider: "deepseek", UsageURL: srv.URL},
 	}}
 	out := captureStdout(t, func() {
-		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"])
+		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "parse usage response") {
 		t.Errorf("missing 'parse usage response':\n%s", out)
@@ -244,7 +244,7 @@ func TestFetchDeepseekQuota_BalanceParsed(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"deepseek": {Provider: "deepseek", UsageURL: srv.URL},
 	}}
-	s, err := fetchDeepseekQuota(cfg, "deepseek", cfg.Providers["deepseek"])
+	s, err := fetchDeepseekQuota(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestFetchDeepseekQuota_HTTPError(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"deepseek": {Provider: "deepseek", UsageURL: srv.URL},
 	}}
-	s, err := fetchDeepseekQuota(cfg, "deepseek", cfg.Providers["deepseek"])
+	s, err := fetchDeepseekQuota(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestFetchDeepseekQuota_NotLoggedIn(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"deepseek": {Provider: "deepseek", UsageURL: "https://x.invalid"},
 	}}
-	s, _ := fetchDeepseekQuota(cfg, "deepseek", cfg.Providers["deepseek"])
+	s, _ := fetchDeepseekQuota(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	if s.Billing != provider.BillingUnknown {
 		t.Errorf("got %+v want BillingUnknown", s)
 	}
@@ -513,7 +513,7 @@ func TestShowGenericUsage_ZhipuQuota(t *testing.T) {
 		"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 	}}
 	out := captureStdout(t, func() {
-		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"])
+		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	})
 	for _, want := range []string{"zhipu", "GLM Coding Plan", "5h tokens", "Weekly tokens", "Monthly time", "By model"} {
 		if !strings.Contains(out, want) {
@@ -529,7 +529,7 @@ func TestShowGenericUsage_NotLoggedIn(t *testing.T) {
 		"zhipu": {Provider: "zhipu", UsageURL: "https://x.invalid"},
 	}}
 	out := captureStdout(t, func() {
-		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"])
+		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	})
 	if !strings.Contains(out, "Not logged in") {
 		t.Errorf("missing 'Not logged in':\n%s", out)
@@ -549,7 +549,7 @@ func TestShowGenericUsage_HTTPError(t *testing.T) {
 		"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 	}}
 	out := captureStdout(t, func() {
-		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"])
+		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	})
 	if !strings.Contains(out, "HTTP 500") {
 		t.Errorf("missing 'HTTP 500':\n%s", out)
@@ -569,7 +569,7 @@ func TestShowGenericUsage_FallbackModelList(t *testing.T) {
 		"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 	}}
 	out := captureStdout(t, func() {
-		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"])
+		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	})
 	for _, want := range []string{"zhipu", "2 models available", "gpt-4", "gpt-3.5"} {
 		if !strings.Contains(out, want) {
@@ -591,7 +591,7 @@ func TestShowGenericUsage_FallbackRawJSON(t *testing.T) {
 		"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 	}}
 	out := captureStdout(t, func() {
-		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"])
+		showGenericUsage(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	})
 	// printUsageFields prints sorted keys: count, nested, status.
 	for _, want := range []string{"count", "42", "nested", "status", "ok"} {
@@ -613,7 +613,7 @@ func TestFetchZhipuQuota_Parsed(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 	}}
-	s, err := fetchZhipuQuota(cfg, "zhipu", cfg.Providers["zhipu"])
+	s, err := fetchZhipuQuota(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +634,7 @@ func TestFetchZhipuQuota_NotLoggedIn(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"zhipu": {Provider: "zhipu", UsageURL: "https://x.invalid"},
 	}}
-	s, _ := fetchZhipuQuota(cfg, "zhipu", cfg.Providers["zhipu"])
+	s, _ := fetchZhipuQuota(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	if s.Billing != provider.BillingUnknown {
 		t.Errorf("got %+v want BillingUnknown", s)
 	}
@@ -650,7 +650,7 @@ func TestFetchZhipuQuota_HTTPError(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 	}}
-	s, _ := fetchZhipuQuota(cfg, "zhipu", cfg.Providers["zhipu"])
+	s, _ := fetchZhipuQuota(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	if s.Billing != provider.BillingUnknown || s.Err != "HTTP 500" {
 		t.Errorf("got %+v want BillingUnknown/HTTP 500", s)
 	}
@@ -668,7 +668,7 @@ func TestFetchZhipuQuota_NotZhipuFormat(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 	}}
-	s, _ := fetchZhipuQuota(cfg, "zhipu", cfg.Providers["zhipu"])
+	s, _ := fetchZhipuQuota(cfg, "zhipu", cfg.Providers["zhipu"], nil)
 	if s.Billing != provider.BillingUnknown || s.Err != "not zhipu quota format" {
 		t.Errorf("got %+v want BillingUnknown/not-zhipu-format", s)
 	}
@@ -689,7 +689,7 @@ func TestShowVolcengineUsage_NoCredsFallsBack(t *testing.T) {
 		},
 	}
 	cfg := &Config{Providers: map[string]Provider{"volcengine": prov}}
-	out := captureStdout(t, func() { showVolcengineUsage(cfg, "volcengine", prov) })
+	out := captureStdout(t, func() { showVolcengineUsage(cfg, "volcengine", prov, nil) })
 	for _, want := range []string{"volcengine", "GetAFPUsage", "AK/SK", "2 models", "doubao", "glm-5.2"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("volcengine fallback missing %q:\n%s", want, out)
@@ -716,7 +716,7 @@ func TestShowVolcengineUsage_GetAFPFailsFallsBack(t *testing.T) {
 		Models:   map[string]ProviderModel{"doubao": {Context: 1, Output: 1}},
 	}
 	cfg := &Config{Providers: map[string]Provider{"volcengine": prov}}
-	out := captureStdout(t, func() { showVolcengineUsage(cfg, "volcengine", prov) })
+	out := captureStdout(t, func() { showVolcengineUsage(cfg, "volcengine", prov, nil) })
 	if !strings.Contains(out, "GetAFPUsage failed") {
 		t.Errorf("missing 'GetAFPUsage failed':\n%s", out)
 	}

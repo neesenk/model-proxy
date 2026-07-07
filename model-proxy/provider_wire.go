@@ -48,20 +48,20 @@ func runVolcengineLoginErr(cfg *Config, provName string, prov Provider) error {
 	return runVolcengineLogin(cfg, provName, prov)
 }
 
-func showZhipuUsageData(cfg *Config, providerName string, prov Provider) (any, error) {
-	showGenericUsage(cfg, providerName, prov)
+func showZhipuUsageData(cfg *Config, providerName string, prov Provider, cred *accountCred) (any, error) {
+	showGenericUsage(cfg, providerName, prov, cred)
 	return nil, nil
 }
 
-func showDeepseekUsageData(cfg *Config, providerName string, prov Provider) (any, error) {
-	showDeepseekUsage(cfg, providerName, prov)
+func showDeepseekUsageData(cfg *Config, providerName string, prov Provider, cred *accountCred) (any, error) {
+	showDeepseekUsage(cfg, providerName, prov, cred)
 	return nil, nil
 }
 
 // showVolcengineUsageData shows the Agent Plan state (configured models + a note
 // that GetAFPUsage needs AK/SK + V4 signing). See showVolcengineUsage.
-func showVolcengineUsageData(cfg *Config, providerName string, prov Provider) (any, error) {
-	showVolcengineUsage(cfg, providerName, prov)
+func showVolcengineUsageData(cfg *Config, providerName string, prov Provider, cred *accountCred) (any, error) {
+	showVolcengineUsage(cfg, providerName, prov, cred)
 	return nil, nil
 }
 
