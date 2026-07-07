@@ -66,8 +66,11 @@ type routeSticky struct {
 //
 // A provider whose credential pool (loadPool) has ≥2 accounts is UNROLLED into
 // one virtual provider per account, keyed "name#<accountID>"; the parent name
-// is NOT a key (only the virtuals are). A pool of size 1 (or no pool / not
-// logged in) returns the plain name unchanged (legacy single-account path).
+// is NOT a key (only the virtuals are). A 1-entry PLURAL pool (the file `login`
+// writes) is bound in-memory under the plain name. Only the no-plural-file /
+// not-logged-in case stays file-backed (reading the legacy singular
+// <name>_apikey.json via loadPool's fallback) — binding the cred there would
+// break the embedded ApiKeyBase, which reads the (non-existent) singular file.
 //
 // It also derives the credential-pool index maps in the SAME pass:
 //   - poolIndex[parent] = its sorted virtual ids ("name#<accountID>")
@@ -84,15 +87,37 @@ func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]str
 	poolIndex := map[string][]string{}
 	parentOf := map[string]string{}
 	for name, prov := range cfg.Providers {
-		pool, _ := loadPool(name, prov.Provider)
-		if len(pool.Accounts) <= 1 {
-			// single-account / legacy / not-logged-in: original path, cred=nil.
-			// Empty cred keeps the embedded ApiKeyBase + pcfg.Auth file-backed
-			// (Logout then deletes the on-disk file, etc.) — the legacy singular
-			// <name>_apikey.json falls into this branch via loadPool's fallback,
-			// so its behavior is byte-for-byte unchanged. A 1-entry PLURAL pool is
-			// also treated as single-account (plain name, no virtuals).
+		// Surface a corrupt pool file instead of silently dropping the provider —
+		// treat as empty (not-logged-in) but log the diagnostic so a 502 isn't
+		// mute. loadPool already wraps the parse error with the file path.
+		pool, poolErr := loadPool(name, prov.Provider)
+		if poolErr != nil {
+			log.Printf("[proxy] pool %s unreadable: %v; treating as not-logged-in", name, poolErr)
+			pool = credentialPool{}
+		}
+		// Distinguish a 1-entry PLURAL pool (written by `login` via savePool) from
+		// the legacy singular fallback / not-logged-in case. The plural file
+		// carries its own key on disk; the legacy path must stay file-backed
+		// (reading <name>_apikey.json) so Login/Logout file semantics are
+		// byte-for-byte unchanged. stat-ing the plural path — not loadPool's
+		// result — is what tells the two apart: loadPool wraps a legacy singular
+		// as a 1-entry pool, which would otherwise mis-route it to the bind path.
+		_, statErr := os.Stat(poolPath(name))
+		pluralExists := statErr == nil
+		if !pluralExists || len(pool.Accounts) == 0 {
+			// no plural pool → legacy singular fallback OR not logged in:
+			// cred=nil keeps ApiKeyBase + pcfg.Auth file-backed (pre-pool path).
 			if p := buildOne(cfg, name, prov, accountCred{}); p != nil {
+				m[name] = p
+			}
+			continue
+		}
+		if len(pool.Accounts) == 1 {
+			// 1-entry PLURAL pool (from `login`): bind the account's cred under
+			// the plain name, no virtuals. The singular file does not exist in
+			// this case, so binding in-memory is required for the provider to
+			// authenticate at all.
+			if p := buildOne(cfg, name, prov, pool.Accounts[0].cred()); p != nil {
 				m[name] = p
 			}
 			continue
@@ -253,12 +278,21 @@ func (p *Proxy) providerSnapshot() map[string]provider.Provider {
 }
 
 // snapshotSticky returns a copy of the per-route sticky map under healthMu, for
-// persistence by the quota tracker (restored on boot — see NewProxy).
+// persistence by the quota tracker (restored on boot — see NewProxy). Only
+// ROUTE-keyed entries (keys present in cfg.Routes) are persisted: per-session
+// entries (keyed by x-claude-code-session-id) matter only within a running
+// daemon's dwell window and self-heal on the next request, so writing them to
+// quota_state.json would just accumulate client conversation IDs on disk.
 func (p *Proxy) snapshotSticky() map[string]routeSticky {
+	cfg := p.cfgSnapshot()
+	routes := cfg.Routes
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
 	out := make(map[string]routeSticky, len(p.sticky))
 	for k, v := range p.sticky {
+		if _, isRoute := routes[k]; !isRoute {
+			continue // session-keyed — don't persist
+		}
 		out[k] = v
 	}
 	return out
@@ -958,7 +992,10 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, par
 		pick := availTargets[0].Provider
 		if parent, pooled := routePoolParent(parentOf, availTargets); pooled {
 			band := poolBandByID(parentOf, availTargets, parent)
-			start := int(p.spreadCtr[parent]) % len(band)
+			// Modulo the uint64 counter BEFORE the int cast: on 32-bit the cast
+			// of a counter past ~2³¹ would go negative and index band out of
+			// range. Modulo-uint64 keeps start in [0, len(band)).
+			start := int(p.spreadCtr[parent] % uint64(len(band)))
 			if commit {
 				p.spreadCtr[parent]++
 			}

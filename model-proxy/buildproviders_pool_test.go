@@ -190,3 +190,59 @@ func keysOf(m map[string]provider.Provider) []string {
 	}
 	return out
 }
+
+// TestBuildProvidersSingleEntryPluralPoolBindsKey is the C1 regression: a
+// fresh `login zhipu` writes ONLY the plural <name>_apikeys.json (via savePool)
+// — the legacy singular <name>_apikey.json is NOT created. The 1-entry plural
+// pool must bind the account's key in-memory under the plain name so a forward
+// actually authenticates; before the fix, buildOne got an EMPTY cred, the
+// embedded ApiKeyBase stayed file-backed reading the (non-existent) singular,
+// and every request 502'd with "not logged in". Drives a real forward through
+// an httptest upstream and asserts the exact Bearer token it receives.
+func TestBuildProvidersSingleEntryPluralPoolBindsKey(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "ONLY")
+	// Sanity: the plural file exists and the singular does NOT — this is the
+	// post-`login` state the regression guards.
+	if _, err := os.Stat(filepath.Join(dir, ".model-proxy", "zhipu_apikey.json")); !os.IsNotExist(err) {
+		t.Fatalf("precondition: singular zhipu_apikey.json should not exist (stat err=%v)", err)
+	}
+
+	var upstreamHit requestHit
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = captureHit(r)
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"zhipu": {OpenAIBaseURL: up.URL, Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm-4.6": {{Provider: "zhipu", Model: "glm-4.6"}},
+		},
+	}
+	p := NewProxy(cfg)
+	// Plain name is the runnable provider; no virtuals.
+	if _, ok := p.providers["zhipu"]; !ok {
+		t.Fatal("1-entry plural pool must keep plain name zhipu")
+	}
+	if len(p.poolIndex) != 0 || len(p.parentOf) != 0 {
+		t.Fatalf("1-entry pool should not populate poolIndex/parentOf, got %v / %v", p.poolIndex, p.parentOf)
+	}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	post(t, px.URL+"/v1/chat/completions", `{"model":"glm-4.6","messages":[]}`)
+
+	if upstreamHit.auth != "Bearer ONLY" {
+		t.Fatalf("upstream Authorization = %q, want Bearer ONLY (the bound pool key)", upstreamHit.auth)
+	}
+	if upstreamHit.model != "glm-4.6" {
+		t.Fatalf("upstream model = %q, want glm-4.6 (rewriteModel)", upstreamHit.model)
+	}
+}
