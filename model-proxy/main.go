@@ -539,32 +539,41 @@ func parseCodexQuota(body []byte, account, plan string) (*provider.QuotaSnapshot
 		}
 		s.Notes = append(s.Notes, "Rate Limit: "+status)
 		if pw := u.RateLimit.PrimaryWindow; pw != nil {
-			s.Windows = append(s.Windows, provider.QuotaWindow{
+			w := provider.QuotaWindow{
 				Label:        "primary (5h)",
 				Kind:         "tokens",
 				RemainingPct: float64(100-pw.UsedPercent) / 100.0,
-				ResetsAt:     now.Add(time.Duration(pw.ResetAfterSecs) * time.Second),
-			})
+			}
+			if pw.ResetAfterSecs > 0 {
+				w.ResetsAt = now.Add(time.Duration(pw.ResetAfterSecs) * time.Second)
+			}
+			s.Windows = append(s.Windows, w)
 		}
 		if sw := u.RateLimit.SecondaryWindow; sw != nil {
-			s.Windows = append(s.Windows, provider.QuotaWindow{
+			w := provider.QuotaWindow{
 				Label:        "weekly",
 				Kind:         "tokens",
 				RemainingPct: float64(100-sw.UsedPercent) / 100.0,
-				ResetsAt:     now.Add(time.Duration(sw.ResetAfterSecs) * time.Second),
-			})
+			}
+			if sw.ResetAfterSecs > 0 {
+				w.ResetsAt = now.Add(time.Duration(sw.ResetAfterSecs) * time.Second)
+			}
+			s.Windows = append(s.Windows, w)
 		}
 	}
 	if sc := u.SpendControl; sc != nil && sc.IndividualLimit != nil {
 		il := sc.IndividualLimit
-		s.Windows = append(s.Windows, provider.QuotaWindow{
+		w := provider.QuotaWindow{
 			Label:        "Spend",
 			Kind:         "money",
 			RemainingPct: float64(100-il.UsedPercent) / 100.0,
-			ResetsAt:     now.Add(time.Duration(il.ResetAfter) * time.Second),
 			Ultimate:     true,
 			Duration:     30 * 24 * time.Hour,
-		})
+		}
+		if il.ResetAfter > 0 {
+			w.ResetsAt = now.Add(time.Duration(il.ResetAfter) * time.Second)
+		}
+		s.Windows = append(s.Windows, w)
 	}
 	// primary(5h)/secondary(weekly) are token rate-caps of a different unit than
 	// the $ spend budget, so they're not marked Short (peak-burn share undefined);
@@ -714,10 +723,16 @@ func fetchZhipuQuota(cfg *Config, name string, prov Provider) (*provider.QuotaSn
 // strings, "By model"/"By MCP tool" detail labels).
 func printQuotaSnapshot(s *provider.QuotaSnapshot) {
 	for _, w := range s.Windows {
-		pct := int(w.RemainingPct * 100)
-		usedPct := 100 - pct
-		bar := progressBar(usedPct, 16)
-		pctStr := usageRatioColor(w.RemainingPct, 1, fmt.Sprintf("%d%% used", usedPct))
+		var bar, pctStr string
+		if w.RemainingPct < 0 {
+			bar = cGray("n/a")
+			pctStr = cGray("unmeasured")
+		} else {
+			pct := int(w.RemainingPct * 100)
+			usedPct := 100 - pct
+			bar = progressBar(usedPct, 16)
+			pctStr = usageRatioColor(w.RemainingPct, 1, fmt.Sprintf("%d%% used", usedPct))
+		}
 		resetStr := ""
 		if !w.ResetsAt.IsZero() {
 			dur := formatDuration(int(time.Until(w.ResetsAt) / time.Second))
@@ -950,6 +965,9 @@ func parseVolcengineQuota(u *afpUsage) *provider.QuotaSnapshot {
 		rem := -1.0
 		if w.Quota > 0 {
 			rem = (w.Quota - w.Used) / w.Quota
+			if rem < 0 {
+				rem = 0 // over-quota → exhausted (0), not a negative that'd read as "unmeasured"
+			}
 		}
 		var reset time.Time
 		if w.ResetTime > 0 {

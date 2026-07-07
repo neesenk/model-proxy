@@ -219,7 +219,10 @@ func (p *Proxy) scheduleStatus() []byte {
 	cfg := p.cfg
 	provs := p.providers
 	p.mu.RUnlock()
-	qs := p.quota.allSnapshots()
+	var qs map[string]*provider.QuotaSnapshot
+	if p.quota != nil {
+		qs = p.quota.allSnapshots()
+	}
 
 	// Snapshot health + sticky once (per-provider info + sticky display).
 	p.healthMu.Lock()
@@ -286,7 +289,7 @@ func (p *Proxy) scheduleStatus() []byte {
 		}
 		if cur := stickyCopy[exposed]; cur.provider != "" {
 			ri.Sticky = cur.provider
-			if rem := cfg.Scheduling.dwell() - now.Sub(cur.since); rem > 0 {
+			if rem := cfg.Scheduling.dwell() - now.Sub(cur.since); rem > 0 && rem < cfg.Scheduling.dwell() {
 				ri.DwellRem = rem.Seconds()
 			}
 		}
@@ -599,7 +602,10 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exp
 	sched := cfg.Scheduling
 	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
 	// or while taking healthMu below.
-	qs := p.quota.allSnapshots()
+	var qs map[string]*provider.QuotaSnapshot
+	if p.quota != nil {
+		qs = p.quota.allSnapshots()
+	}
 
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()

@@ -785,6 +785,25 @@ func TestPrintQuotaSnapshot(t *testing.T) {
 	}
 }
 
+// TestPrintQuotaSnapshot_UnmeasuredWindow: a window with RemainingPct == -1
+// (the "unmeasured" sentinel) must render as "n/a"/"unmeasured", NOT as
+// "200% used" (which is what the naive 100-(-100) math would produce).
+func TestPrintQuotaSnapshot_UnmeasuredWindow(t *testing.T) {
+	s := &provider.QuotaSnapshot{
+		Billing: provider.BillingPayG,
+		Windows: []provider.QuotaWindow{
+			{Label: "Balance", Kind: "money", Total: 10.5, RemainingPct: -1},
+		},
+	}
+	out := captureStdout(t, func() { printQuotaSnapshot(s) })
+	if strings.Contains(out, "200% used") {
+		t.Errorf("unmeasured window rendered as '200%% used':\n%s", out)
+	}
+	if !strings.Contains(out, "unmeasured") {
+		t.Errorf("unmeasured window missing 'unmeasured' label:\n%s", out)
+	}
+}
+
 // TestPrintAFPWindow: a normal window prints label, used%, and the used/quota/remaining line.
 func TestPrintAFPWindow(t *testing.T) {
 	w := afpWindow{Quota: 100, Used: 30, ResetTime: time.Now().Add(2 * time.Hour).UnixMilli()}

@@ -231,6 +231,9 @@ func (t *quotaTracker) persist() {
 	t.mu.RUnlock()
 	wrap := map[string]any{"providers": out}
 	if t.stickySnapshot != nil {
+		// stickySnapshot takes healthMu (proxy.go). It MUST be called outside
+		// quotaMu — calling it inside the RLock above would invert the lock
+		// order (healthMu → quotaMu is the rule; reverse = deadlock risk).
 		sm := t.stickySnapshot()
 		sticky := make(map[string]persistedSticky, len(sm))
 		for k, v := range sm {

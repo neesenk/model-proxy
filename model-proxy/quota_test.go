@@ -75,6 +75,22 @@ func TestParseCodexQuota(t *testing.T) {
 	}
 }
 
+// TestParseCodexQuota_ZeroResetAfter: when reset_after_seconds is 0 (absent),
+// ResetsAt must stay zero (not now), so it isn't misread as "just reset".
+func TestParseCodexQuota_ZeroResetAfter(t *testing.T) {
+	body := []byte(`{"email":"a@b.com","rate_limit":{"primary_window":{"used_percent":30,"reset_after_seconds":0}},
+		"spend_control":{"individual_limit":{"used":"5","limit":"20","used_percent":25,"reset_after_seconds":0}}}`)
+	s, err := parseCodexQuota(body, "a@b.com", "pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range s.Windows {
+		if !w.ResetsAt.IsZero() {
+			t.Errorf("window %q ResetsAt=%v, want zero (reset_after=0 should leave it unset)", w.Label, w.ResetsAt)
+		}
+	}
+}
+
 func TestParseVolcengineQuota(t *testing.T) {
 	u := &afpUsage{
 		PlanType:    "agent-plan",
@@ -92,6 +108,22 @@ func TestParseVolcengineQuota(t *testing.T) {
 	}
 	if s.Plan != "agent-plan" {
 		t.Errorf("Plan=%q", s.Plan)
+	}
+}
+
+// TestParseVolcengineQuota_OverQuotaClampsToZero: when Used > Quota (over-quota),
+// RemainingPct must clamp to 0 (exhausted), not go negative — a negative would
+// read as the "unmeasured" sentinel and give the provider a neutral surplus.
+func TestParseVolcengineQuota_OverQuotaClampsToZero(t *testing.T) {
+	u := &afpUsage{
+		AFPFiveHour: afpWindow{Quota: 100, Used: 120, ResetTime: 1750000000000}, // 120% used
+		AFPMonthly:  afpWindow{Quota: 100, Used: 10, ResetTime: 1750000000000},
+	}
+	s := parseVolcengineQuota(u)
+	for _, w := range s.Windows {
+		if w.Total > 0 && w.RemainingPct < 0 { // only windows with a real quota
+			t.Errorf("window %q RemainingPct=%v, want >= 0 (over-quota clamped to 0, not negative)", w.Label, w.RemainingPct)
+		}
 	}
 }
 
