@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let one config provider (e.g. `zhipu`) hold multiple accounts added via repeated `login`, and actively spread requests across them (round-robin) while keeping per-account quota/circuit/429 isolation.
+**Goal:** Let one config provider (e.g. `zhipu`) hold multiple accounts added via repeated `login`, and **session-sticky** route across them: each Claude Code conversation parks on one account (prompt-cache-warm) while different conversations round-robin onto different accounts (concurrent spread). Per-account quota/circuit/429 isolation throughout.
 
-**Architecture:** A credential pool per provider is unrolled at `buildProviders` time into N virtual providers (`name#<accountID>`, or plain `name` when single) that share one config entry but bind distinct credentials. The existing schedule/health/quota/sticky machinery is unchanged — virtuals are ordinary provider names to it. A new `strategy: spread` adds a localized round-robin branch in `decideOrder`; default `sticky` needs no scheduling change.
+**Architecture:** A credential pool per provider is unrolled at `buildProviders` time into N virtual providers (`name#<accountID>`, or plain `name` when single) that share one config entry but bind distinct credentials. The schedule/health/quota machinery is unchanged — virtuals are ordinary provider names to it. The only scheduling change is **session-keyed sticky**: the sticky map key moves from the route name to the request's `x-claude-code-session-id` (fallback: route name), and new sessions are assigned to pool accounts via a per-parent round-robin counter. Same conversation → same account (cache-warm); different conversations → different accounts (spread). No `strategy` config field.
 
 **Tech Stack:** Go 1.x, module in `model-proxy/`, stdlib `net/http` + `gopkg.in/yaml.v3`. Tests white-box (`package main` / `package provider`), stdlib `testing` + `httptest` only.
 
@@ -28,8 +28,8 @@
 **Modify:**
 - `model-proxy/provider/apikey.go` — `NewApiKeyBaseWithKey` (in-memory bound key; skips file read).
 - `model-proxy/auth.go` — `newAuthProvider` gains a `*accountCred` binding param; `newApiKeyProviderWithKey`.
-- `model-proxy/config.go` — `Strategy` field on `Provider` + validation.
-- `model-proxy/proxy.go` — `buildProviders` unrolling + `poolIndex`/`parentOf`/`spreadParents`; `Proxy.spreadCtr` + `expandedRoutes`; `decideOrder` spread branch + `commit` param; `forward`/`scheduleStatus` use expanded routes.
+- `model-proxy/config.go` — (no change; session-sticky needs no config field).
+- `model-proxy/proxy.go` — `buildProviders` unrolling + `poolIndex`/`parentOf`; `Proxy.spreadCtr` (session-assignment counter) + `expandedRoutes`; `decideOrder` session-sticky + `commit` param; `forward` reads `x-claude-code-session-id` and threads it to `schedule`; `scheduleStatus` uses expanded routes.
 - `model-proxy/provider_wire.go` — thread `*accountCred` through `showZhipuUsageData`/`showDeepseekUsageData`/`showVolcengineUsageData`.
 - `model-proxy/main.go` — `showGenericUsage`/`fetchZhipuQuota`/`fetchDeepseekQuota` take `*accountCred`; `cmdUsage` + `cmdLogout` pool-aware.
 - `model-proxy/login.go` — `runApiKeyLogin` pool-aware (dedup, `--label`, `--replace`, reload signal).
@@ -292,70 +292,100 @@ git commit -m "feat(pool): credential pool storage, accountID, singular fallback
 
 ---
 
-## Task 2: Config `strategy` field + validation
+## Task 2: Thread `x-claude-code-session-id` through the scheduler
+
+Plumbing only — read the header in `forward`, add a `sessionKey` param to `schedule`/`decideOrder`. Behavior is **unchanged** here (decideOrder still keys sticky on `exposed`); Task 6 switches the key and adds round-robin assignment. No config field needed.
 
 **Files:**
-- Modify: `model-proxy/config.go` (add field to `Provider`, validate in `validate()`)
-- Modify: `model-proxy/config_test.go`
+- Modify: `model-proxy/proxy.go` (`forward` reads the header; `schedule` + `decideOrder` gain a `sessionKey` param; `scheduleStatus` passes `""`)
+- Create: `model-proxy/session_test.go`
 
 **Interfaces:**
-- Produces: `Provider.Strategy string` (`""`/`"sticky"`/`"spread"`). Consumed by Task 6's `isSpreadRoute`.
+- Produces: `forward` calls `schedule(cfg, provs, exposed, sessionKey, targets)` where `sessionKey := r.Header.Get("x-claude-code-session-id")`; `decideOrder(..., sessionKey string, ..., commit bool)`.
 
-- [ ] **Step 1: Write the failing test** (append to `config_test.go`)
+- [ ] **Step 1: Write the failing test** (`session_test.go`) — single account (no pool), so no Task 4 dependency. The header value reaches the scheduler via a test hook; forward completes against an httptest server.
 
 ```go
-func TestProviderStrategyValidate(t *testing.T) {
-	cases := []struct {
-		strat string
-		ok    bool
-	}{
-		{"", true}, {"sticky", true}, {"spread", true},
-		{"round-robin", false}, {"ROUND_ROBIN", false},
-	}
-	for _, tc := range cases {
-		cfg := &Config{
-			Listen: "127.0.0.1:1",
-			Providers: map[string]Provider{
-				"z": {OpenAIBaseURL: "https://x", Provider: "zhipu", Strategy: tc.strat},
-			},
-		}
-		err := cfg.validate()
-		if tc.ok && err != nil {
-			t.Fatalf("strat %q should be valid: %v", tc.strat, err)
-		}
-		if !tc.ok && err == nil {
-			t.Fatalf("strat %q should be rejected", tc.strat)
-		}
+package main
+
+import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestForwardThreadsSessionID(t *testing.T) {
+	dir := t.TempDir()
+	setHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A") // single account: no pool, behavior unchanged
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	cfg := &Config{Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	p := NewProxy(cfg)
+
+	var captured string
+	p.scheduleHook = func(sessionKey string) { captured = sessionKey }
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"glm-5"}`)))
+	req.Header.Set("x-claude-code-session-id", "sess-XYZ")
+	p.forward("openai", httptest.NewRecorder(), req)
+
+	if captured != "sess-XYZ" {
+		t.Fatalf("sessionKey threaded = %q, want sess-XYZ", captured)
 	}
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL** — `Provider.Strategy` undefined.
+- [ ] **Step 2: Run, expect FAIL** — `schedule`/`decideOrder` have no `sessionKey` param; `scheduleHook` undefined.
 
-- [ ] **Step 3: Implement** — add field to the `Provider` struct in `config.go` (after `Billing`):
+- [ ] **Step 3: Implement the plumbing.**
 
-```go
-	// Strategy is "sticky" (default; park on one account + failover) or "spread"
-	// (round-robin across the credential pool's accounts). Only affects providers
-	// with a multi-account pool.
-	Strategy string `yaml:"strategy"`
-```
-
-Add to `validate()`, inside the `for name, p := range c.Providers` loop (after the billing check):
+Add the test-only hook to `Proxy`:
 
 ```go
-		if p.Strategy != "" && p.Strategy != "sticky" && p.Strategy != "spread" {
-			return fmt.Errorf("provider %q: strategy %q invalid — use \"sticky\" or \"spread\"", name, p.Strategy)
-		}
+	scheduleHook func(sessionKey string) // test-only; nil in production
 ```
 
-- [ ] **Step 4: Run, expect PASS**: `cd model-proxy && go test -run TestProviderStrategyValidate .`
+In `forward`, extract the session and pass it to `schedule` (insert right before the `ordered := p.schedule(...)` call):
+
+```go
+	sessionKey := r.Header.Get("x-claude-code-session-id")
+	ordered := p.schedule(cfg, provs, exposed, sessionKey, targets)
+	if p.scheduleHook != nil {
+		p.scheduleHook(sessionKey)
+	}
+```
+
+Change `schedule` + `decideOrder` signatures to carry `sessionKey` (bodies unchanged for now — `decideOrder` still reads `p.sticky[exposed]`; Task 6 switches to `sessionKey`):
+
+```go
+func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, exposed, sessionKey string, targets []RouteTarget) []RouteTarget {
+	now := time.Now()
+	ordered, stickyToSet := p.decideOrder(cfg, provs, exposed, sessionKey, targets, now, true)
+	// ... existing stickyToSet commit, unchanged ...
+	return ordered
+}
+
+func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool) (ordered []RouteTarget, stickyToSet string) {
+	_ = sessionKey // used in Task 6
+	// ... existing body, unchanged (still keys on p.sticky[exposed]) ...
+}
+```
+
+In `scheduleStatus`, pass `""`: `p.decideOrder(cfg, provs, exposed, "", targets, now, false)`.
+
+- [ ] **Step 4: Run, expect PASS**: `cd model-proxy && go test -run TestForwardThreadsSessionID .`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add model-proxy/config.go model-proxy/config_test.go
-git commit -m "feat(config): provider strategy field (sticky|spread)"
+git add model-proxy/
+git commit -m "feat(proxy): thread x-claude-code-session-id through schedule"
 ```
 
 ---
@@ -570,7 +600,7 @@ git commit -m "feat(auth): bind ApiKeyBase to in-memory key; thread accountCred"
 - Test: `model-proxy/proxy_routing_test.go` (extend) or new `buildproviders_pool_test.go`
 
 **Interfaces:**
-- Produces: `Proxy.poolIndex map[string][]string` (parent → sorted virtual ids), `Proxy.parentOf map[string]string` (virtual → parent), `Proxy.spreadParents map[string]bool`. `buildProviders` returns the map of virtual ids; when a provider's pool has ≥2 accounts, the parent name is NOT a key (only virtuals are).
+- Produces: `Proxy.poolIndex map[string][]string` (parent → sorted virtual ids), `Proxy.parentOf map[string]string` (virtual → parent). `buildProviders` returns the map of virtual ids; when a provider's pool has ≥2 accounts, the parent name is NOT a key (only virtuals are).
 
 - [ ] **Step 1: Write the failing test** (`buildproviders_pool_test.go`)
 
@@ -682,13 +712,12 @@ type Proxy struct {
 	quota        *quotaTracker
 	poolIndex    map[string][]string // parent → sorted virtual ids (only multi-account parents)
 	parentOf     map[string]string   // virtual id → parent
-	spreadParents map[string]bool
-	spreadCtr    map[string]uint64 // parent → round-robin counter (healthMu)
+	spreadCtr    map[string]uint64 // parent → session-assignment round-robin counter (healthMu)
 	expandedRoutes map[string][]RouteTarget // exposed → expanded targets
 }
 ```
 
-Rewrite `buildProviders` to unroll. It must also build `poolIndex`/`parentOf`/`spreadParents` — since those are on `Proxy`, move pool loading + index building into a method called by `NewProxy`/`reload` after `buildProviders`. Concretely, split:
+Rewrite `buildProviders` to unroll. It must also build `poolIndex`/`parentOf` — since those are on `Proxy`, move pool loading + index building into a method called by `NewProxy`/`reload` after `buildProviders`. Concretely, split:
 
 ```go
 // buildProviders builds virtual provider instances. For a provider whose
@@ -764,7 +793,6 @@ Add the index builder (called in `NewProxy` + `reload`):
 func (p *Proxy) buildPoolIndex() {
 	p.poolIndex = map[string][]string{}
 	p.parentOf = map[string]string{}
-	p.spreadParents = map[string]bool{}
 	for name, prov := range p.cfg.Providers {
 		pool, _ := loadPool(name, prov.Provider)
 		if len(pool.Accounts) < 2 {
@@ -778,9 +806,6 @@ func (p *Proxy) buildPoolIndex() {
 		}
 		sort.Strings(vids)
 		p.poolIndex[name] = vids
-		if prov.Strategy == "spread" {
-			p.spreadParents[name] = true
-		}
 	}
 }
 ```
@@ -911,237 +936,204 @@ git commit -m "feat(proxy): expand pooled route targets to virtual children"
 
 ---
 
-## Task 6: `decideOrder` spread branch + `spreadCtr` + `commit`
+## Task 6: Session-sticky scheduling in `decideOrder`
+
+This is where the pool actually spreads. The sticky key moves from the route name to the session id (Task 2 plumbed `sessionKey` through); new sessions are round-robin-assigned to pool accounts; existing sessions reuse their parked account within dwell.
 
 **Files:**
-- Modify: `model-proxy/proxy.go` (`decideOrder`, `schedule`, `scheduleStatus`)
-- Test: `model-proxy/proxy_routing_test.go` (extend) — round-robin + circuit-skip + sticky regression.
+- Modify: `model-proxy/proxy.go` (`decideOrder` body, `schedule` commits on session key, `Proxy.spreadCtr` lifecycle, eviction)
+- Test: `model-proxy/proxy_routing_test.go` (extend)
 
 **Interfaces:**
-- Consumes: `Proxy.spreadParents`, `Proxy.parentOf`, `Proxy.spreadCtr`, `cfg.Providers[*].Strategy` (via Task 2).
-- Produces: `decideOrder(..., commit bool)`; spread routes order their band by stable account-id rotated by a per-parent counter (bumped only when `commit`), and skip sticky parking.
+- Consumes: `Proxy.parentOf`, `Proxy.poolIndex`, `Proxy.spreadCtr` (built in Task 4), `sessionKey` (Task 2).
+- Produces: `decideOrder` keys `p.sticky` on `sk` (= `sessionKey`, fallback `exposed`); assigns new sessions via per-parent round-robin over the pool band.
 
-- [ ] **Step 1: Write the failing test** (round-robin distribution)
-
-```go
-func TestSpreadRoundRobinEven(t *testing.T) {
-	dir := t.TempDir()
-	setHome(t, dir)
-	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
-	cfg := &Config{
-		Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu", Strategy: "spread"}},
-		Routes: map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}},
-	}
-	p := NewProxy(cfg)
-	// 6 scheduled orders → each account is first exactly twice.
-	counts := map[string]int{}
-	for i := 0; i < 6; i++ {
-		ordered := p.schedule(cfg, p.providers, "glm-5", p.expandedRoutes["glm-5"])
-		if len(ordered) == 0 {
-			t.Fatal("empty order")
-		}
-		counts[p.parentOf[ordered[0].Provider]+"#"+ordered[0].Provider]++
-	}
-	if len(counts) != 3 {
-		t.Fatalf("want 3 distinct first-picks, got %v", counts)
-	}
-	for k, n := range counts {
-		if n != 2 {
-			t.Fatalf("account %s served %d times as first, want 2", k, n)
-		}
-	}
-}
-```
-
-Add the circuit-skip test:
+- [ ] **Step 1: Write the failing tests** (session-sticky assignment)
 
 ```go
-func TestSpreadSkipsCircuitOpenAccount(t *testing.T) {
+// distinct sessions → distinct accounts (round-robin assignment)
+func TestSessionStickySpreadsSessions(t *testing.T) {
 	dir := t.TempDir()
 	setHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
 	cfg := &Config{Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu", Strategy: "spread"}},
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
 	p := NewProxy(cfg)
-	// Force one virtual's circuit open.
-	var blocked string
-	for _, vid := range p.poolIndex["zhipu"] {
-		blocked = vid
-		break
+	got := map[string]bool{}
+	for _, sid := range []string{"s1", "s2", "s3"} {
+		first := p.schedule(cfg, p.providers, "glm-5", sid, p.expandedRoutes["glm-5"])[0].Provider
+		got[first] = true
 	}
-	p.healthMu.Lock()
-	p.health[blocked] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
-	p.healthMu.Unlock()
-	// 6 schedules: blocked account never first; other two split.
-	counts := map[string]int{}
-	for i := 0; i < 6; i++ {
-		ordered := p.schedule(cfg, p.providers, "glm-5", p.expandedRoutes["glm-5"])
-		counts[ordered[0].Provider]++
-	}
-	if counts[blocked] != 0 {
-		t.Fatalf("blocked account was first %d times", counts[blocked])
-	}
-	if len(counts) != 2 {
-		t.Fatalf("want 2 active accounts, got %v", counts)
+	if len(got) != 3 {
+		t.Fatalf("3 sessions should land on 3 distinct accounts, got %v", got)
 	}
 }
-```
 
-Add a sticky regression test (default strategy unchanged):
-
-```go
-func TestStickyParksOnOneAccount(t *testing.T) {
+// same session within dwell → same account (cache hit)
+func TestSessionStickyReusesWithinDwell(t *testing.T) {
 	dir := t.TempDir()
 	setHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
 	cfg := &Config{Listen: "127.0.0.1:1",
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}}, // no strategy → sticky
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
 	p := NewProxy(cfg)
-	first := p.schedule(cfg, p.providers, "glm-5", p.expandedRoutes["glm-5"])[0].Provider
+	first := p.schedule(cfg, p.providers, "glm-5", "s1", p.expandedRoutes["glm-5"])[0].Provider
 	for i := 0; i < 3; i++ {
-		got := p.schedule(cfg, p.providers, "glm-5", p.expandedRoutes["glm-5"])[0].Provider
+		got := p.schedule(cfg, p.providers, "glm-5", "s1", p.expandedRoutes["glm-5"])[0].Provider
 		if got != first {
-			t.Fatalf("sticky drifted: first=%s got=%s", first, got)
+			t.Fatalf("same session drifted: first=%s got=%s", first, got)
 		}
+	}
+}
+
+// no session header → model-keyed fallback (all requests to one account)
+func TestSessionStickyFallsBackWithoutHeader(t *testing.T) {
+	dir := t.TempDir()
+	setHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
+	cfg := &Config{Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	p := NewProxy(cfg)
+	got := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		got[p.schedule(cfg, p.providers, "glm-5", "", p.expandedRoutes["glm-5"])[0].Provider] = true
+	}
+	if len(got) != 1 {
+		t.Fatalf("no session header should pin to one account, got %v", got)
+	}
+}
+
+// circuit-opened account is skipped when assigning new sessions
+func TestSessionStickySkipsCircuitOpen(t *testing.T) {
+	dir := t.TempDir()
+	setHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B", "KEY-C")
+	cfg := &Config{Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
+		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
+	p := NewProxy(cfg)
+	blocked := p.poolIndex["zhipu"][0]
+	p.healthMu.Lock()
+	p.health[blocked] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
+	p.healthMu.Unlock()
+	got := map[string]bool{}
+	for _, sid := range []string{"s1", "s2"} {
+		got[p.schedule(cfg, p.providers, "glm-5", sid, p.expandedRoutes["glm-5"])[0].Provider] = true
+	}
+	if got[blocked] {
+		t.Fatalf("blocked account %s was assigned", blocked)
+	}
+	if len(got) != 2 {
+		t.Fatalf("2 sessions should spread over the 2 open accounts, got %v", got)
 	}
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL** — spread doesn't round-robin yet.
+- [ ] **Step 2: Run, expect FAIL** — sessions don't yet spread (decideOrder still keys on `exposed`).
 
-- [ ] **Step 3: Implement.** Change `schedule` to pass `commit=true`:
+- [ ] **Step 3: Implement session-sticky.** `schedule`'s signature already carries `sessionKey` (Task 2); it now commits the sticky on the session key (replace the `p.sticky[exposed] = ...` line):
 
 ```go
-func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, exposed string, targets []RouteTarget) []RouteTarget {
-	now := time.Now()
-	ordered, stickyToSet := p.decideOrder(cfg, provs, exposed, targets, now, true)
 	if stickyToSet != "" {
+		sk := sessionKey
+		if sk == "" {
+			sk = exposed
+		}
 		p.healthMu.Lock()
-		p.sticky[exposed] = routeSticky{provider: stickyToSet, since: now}
+		p.sticky[sk] = routeSticky{provider: stickyToSet, since: now}
 		p.healthMu.Unlock()
 	}
-	return ordered
-}
 ```
 
-Change `scheduleStatus` to pass `commit=false` (peek): `p.decideOrder(cfg, provs, exposed, targets, now, false)`.
+Then three changes inside `decideOrder` (signature unchanged from Task 2; existing body is `proxy.go:601-713`):
 
-Rewrite `decideOrder` with the spread branch + `commit`:
+**(a) Re-key sticky on the session.** Compute `sk := sessionKey; if sk == "" { sk = exposed }` at the top, and replace every `p.sticky[exposed]` / `cur := p.sticky[exposed]` with `p.sticky[sk]` / `cur := p.sticky[sk]`. The within-dwell reuse (keepSticky) and the after-dwell switch-margin test now operate per-session. For non-session clients `sk == exposed` → identical to today.
+
+**(b) Evict expired entries** at the top of the locked section (per-session keying is unbounded without this):
 
 ```go
-func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, exposed string, targets []RouteTarget, now time.Time, commit bool) (ordered []RouteTarget, stickyToSet string) {
-	sched := cfg.Scheduling
-	var qs map[string]*provider.QuotaSnapshot
-	if p.quota != nil {
-		qs = p.quota.allSnapshots()
-	}
-
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-
-	avail := func(name string) bool {
-		h := p.health[name]
-		return h == nil || h.available(now)
-	}
-	var availTargets []RouteTarget
-	for _, t := range targets {
-		if avail(t.Provider) {
-			availTargets = append(availTargets, t)
+	for k, v := range p.sticky {
+		if now.Sub(v.since) > sched.dwell() {
+			delete(p.sticky, k)
 		}
 	}
+```
 
-	// ---- spread path ----
-	if p.isSpreadRoute(targets) {
-		return p.spreadOrder(cfg, availTargets, qs, now, commit), ""
-	}
+**(c) Round-robin-assign new sessions.** In the `else if len(availTargets) > 0` branch (which today sets `stickyToSet = availTargets[0].Provider`), pick via the per-parent counter when the route is pooled:
 
-	// ---- existing sticky path (unchanged) ----
-	billingOf := func(name string) provider.BillingClass { return p.billingClass(cfg, name, qs) }
-	surplusOf := func(name string) float64 { /* unchanged */ }
-	sort.SliceStable(availTargets, func(i, j int) bool { /* unchanged tier→priority→surplus */ })
-	margin := sched.switchMargin()
-	cur := p.sticky[exposed]
-	// ... (existing cur/keepSticky logic, byte-for-byte) ...
-	return ordered, stickyToSet
-}
-
-// isSpreadRoute reports whether any target's parent provider has strategy: spread.
-func (p *Proxy) isSpreadRoute(targets []RouteTarget) bool {
-	for _, t := range targets {
-		if parent, ok := p.parentOf[t.Provider]; ok && p.spreadParents[parent] {
-			return true
+```go
+	} else if len(availTargets) > 0 {
+		pick := availTargets[0].Provider
+		if parent, pooled := routePoolParent(p.parentOf, availTargets); pooled {
+			band := poolBandByID(p.parentOf, availTargets, parent)
+			start := int(p.spreadCtr[parent]) % len(band)
+			if commit {
+				p.spreadCtr[parent]++
+			}
+			pick = band[start].Provider
 		}
+		stickyToSet = pick
 	}
-	return false
-}
+```
 
-// spreadOrder orders available targets for a spread route: each spread parent's
-// virtuals are ordered by stable virtual id and rotated by a per-parent counter
-// (bumped when commit); non-spread targets keep tier→priority→surplus order and
-// merge by tier. Round-robin is over available members only.
-func (p *Proxy) spreadOrder(cfg *Config, avail []RouteTarget, qs map[string]*provider.QuotaSnapshot, now time.Time, commit bool) []RouteTarget {
-	// Split into spread bands (per parent) and the rest.
-	type band struct{ parent string; members []RouteTarget }
-	bands := map[string][]RouteTarget{}
-	var rest []RouteTarget
+When pooled, `pick` is the rr account; build `ordered` with `pick` moved to the front (same move-to-front the keepSticky branch uses for `cur`).
+
+Add the helpers:
+
+```go
+// routePoolParent returns the pooled parent (true) if any available target is one
+// of that parent's virtuals; "" / false otherwise.
+func routePoolParent(parentOf map[string]string, avail []RouteTarget) (string, bool) {
 	for _, t := range avail {
-		parent, ok := p.parentOf[t.Provider]
-		if ok && p.spreadParents[parent] {
-			bands[parent] = append(bands[parent], t)
-		} else {
-			rest = append(rest, t)
+		if parent, ok := parentOf[t.Provider]; ok {
+			return parent, true
 		}
 	}
-	// Rest ranks by tier→priority→surplus (existing comparator).
-	sort.SliceStable(rest, func(i, j int) bool {
-		ri, rj := tierRank(p.billingClass(cfg, rest[i].Provider, qs)), tierRank(p.billingClass(cfg, rest[j].Provider, qs))
-		if ri != rj { return ri < rj }
-		if rest[i].Priority != rest[j].Priority { return rest[i].Priority < rest[j].Priority }
-		return surplusCompare(p, cfg, qs, rest[i].Provider, rest[j].Provider)
-	})
-	// Each spread band: stable id order, rotated by counter.
-	var ordered []RouteTarget
-	for parent, members := range bands {
-		sort.SliceStable(members, func(i, j int) bool { return members[i].Provider < members[j].Provider })
-		start := int(p.spreadCtr[parent]) % len(members)
-		if commit {
-			p.spreadCtr[parent]++
-		}
-		for i := 0; i < len(members); i++ {
-			ordered = append(ordered, members[(start+i)%len(members)])
+	return "", false
+}
+
+// poolBandByID returns the available virtuals of `parent`, sorted by virtual id
+// (stable account-id order → deterministic round-robin).
+func poolBandByID(parentOf map[string]string, avail []RouteTarget, parent string) []RouteTarget {
+	var band []RouteTarget
+	for _, t := range avail {
+		if parentOf[t.Provider] == parent {
+			band = append(band, t)
 		}
 	}
-	// Merge: spread bands are plan tier (rank 0); interleave by tier with rest.
-	all := append(ordered, rest...)
-	sort.SliceStable(all, func(i, j int) bool {
-		return tierRank(p.billingClass(cfg, all[i].Provider, qs)) < tierRank(p.billingClass(cfg, all[j].Provider, qs))
-	})
-	return all
+	sort.SliceStable(band, func(i, j int) bool { return band[i].Provider < band[j].Provider })
+	return band
+}
+
+// orderWithFirst returns avail with `first` moved to the front (rest keep order).
+func (p *Proxy) orderWithFirst(avail []RouteTarget, first string) []RouteTarget {
+	out := make([]RouteTarget, 0, len(avail))
+	for _, t := range avail {
+		if t.Provider == first {
+			out = append(out, t)
+		}
+	}
+	for _, t := range avail {
+		if t.Provider != first {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 ```
 
-Extract the surplus comparator used by both paths:
+Update `scheduleStatus` to pass `commit=false` (session already `""` from Task 2): `p.decideOrder(cfg, provs, exposed, "", targets, now, false)`.
 
-```go
-func surplusCompare(p *Proxy, cfg *Config, qs map[string]*provider.QuotaSnapshot, a, b string) bool {
-	sa := p.surplusOf(cfg, qs, a, time.Now())
-	sb := p.surplusOf(cfg, qs, b, time.Now())
-	return sa > sb
-}
-```
-
-(Factor the existing `surplusOf` closure in `decideOrder` into a method `p.surplusOf(cfg, qs, name, now)` so both `decideOrder` and `spreadOrder` share it — DRY. Move its body verbatim.)
-
-- [ ] **Step 4: Run, expect PASS**: `cd model-proxy && go test -run 'TestSpread|TestStickyParks' . -race`
+- [ ] **Step 4: Run, expect PASS**: `cd model-proxy && go test -run TestSessionSticky . -race`
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add model-proxy/
-git commit -m "feat(sched): strategy:spread round-robin in decideOrder (peek/commit)"
+git commit -m "feat(sched): session-sticky — per-session round-robin assignment"
 ```
 
 ---
@@ -1598,12 +1590,12 @@ scripts/cover.sh    # ≥80% per package
 
 - [ ] **Manual smoke** (document in `docs/superpowers/specs/2026-07-07-multi-account-load-balancing-design.md` or AGENTS.md):
   - `model-proxy login zhipu` twice with two real keys → `usage zhipu` shows both.
-  - Set `strategy: spread` → under concurrent requests both accounts serve.
+  - Open 2 Claude Code sessions (distinct `x-claude-code-session-id`) → they park on DIFFERENT accounts; repeat requests in one session stay on the same account (cache-warm).
   - `logout zhipu` interactive removes one.
 
-- [ ] **Update CLAUDE.md / AGENTS.md** — add the pool concept, `strategy: spread`, plural pool file convention, and the `zhipu#acctN` virtual naming to the provider/credentials sections.
+- [ ] **Update CLAUDE.md / AGENTS.md** — add the pool concept, session-sticky routing (keyed on `x-claude-code-session-id`), the plural pool file convention, and the `zhipu#acctN` virtual naming to the provider/credentials sections.
 
 ```bash
 git add docs/ model-proxy/ CLAUDE.md AGENTS.md
-git commit -m "docs: multi-account credential pool + strategy:spread"
+git commit -m "docs: multi-account credential pool + session-sticky routing"
 ```

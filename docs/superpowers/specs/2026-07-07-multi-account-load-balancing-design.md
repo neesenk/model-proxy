@@ -26,8 +26,9 @@ offer to update rather than duplicate.
 - Cross-provider load balancing (already handled by routes + scheduling).
 - Changing the existing surplus/tier/priority scheduling model for non-pooled
   providers. Single-account behavior is byte-for-byte unchanged.
-- Per-account prompt-cache awareness (spreading trades cache hits for even load;
-  that is the accepted trade-off for `strategy: spread`).
+- Per-request rotation (a `spread` mode). Deliberately out of scope: session-sticky
+  keeps the prompt cache warm within a conversation while spreading across
+  conversations; pure per-request rotation is cache-hostile and not needed (YAGNI).
 - Phase-1 does not pool `codex` / `aqp`. Their OAuth token bundles + refresh/rotation
   semantics make pooling materially more complex; the architecture generalises, but
   MVP scopes to **apikey-type providers** (`zhipu`, `deepseek`, `volcengine`). See §14.
@@ -45,7 +46,7 @@ login:    zhipu × 3  →  pool file with 3 accounts
 build:    providers map = { zhipu#acct1, zhipu#acct2, zhipu#acct3 }   (virtual)
 routes:   glm-5.2: [{zhipu, glm-5.2}]  → expanded at schedule time to
           [{zhipu#acct1,...}, {zhipu#acct2,...}, {zhipu#acct3,...}]    (equal priority)
-schedule: ranks the 3 virtuals by tier→priority→surplus (or round-robin if spread)
+schedule: session-sticky — each conversation (x-claude-code-session-id) parks on one account (cache-warm); new conversations are round-robin-assigned across the pool (concurrent spread)
 runtime:  each virtual has its OWN circuit / 429-skip / quota snapshot / auth
 ```
 
@@ -157,75 +158,99 @@ out to its N virtual children (same `model` + `priority`).
 No change to `RouteTarget` schema, `schedule`, `decideOrder`, or the failover loop:
 they already operate on a flat `[]RouteTarget`.
 
-## 9. strategy: spread vs sticky
+## 9. Session-sticky scheduling (the unified mechanism)
 
-New optional provider field:
+The pool's load-balancing behavior is **session-level sticky** — it unifies
+prompt-cache friendliness with concurrent distribution:
 
-```yaml
-providers:
-  zhipu:
-    provider_id: zhipu
-    strategy: spread   # omit = "sticky" (default, current behavior)
-```
+- **One Claude Code conversation** (one `x-claude-code-session-id`) parks on ONE
+  account for `sticky_dwell` → consecutive turns hit the same account → the Anthropic
+  prompt cache (TTL ~5m) stays warm. `sticky_dwell` (10m ≈ 2× TTL) is unchanged.
+- **Different conversations** are assigned to DIFFERENT accounts on first contact →
+  concurrent sessions spread across the pool naturally.
 
-### sticky (default) — zero new scheduling code
+There is **no `strategy` config field** — session-sticky is the only pool behavior
+(YAGNI on per-request `spread`). A client without `x-claude-code-session-id`
+(non-Claude) falls back to model-keyed sticky (today's behavior), so nothing
+regresses.
 
-After unrolling, `zhipu#acct1` etc. are ordinary providers, and the existing
-`decideOrder` sticky logic (`proxy.go:652-705`) keys entirely on provider name. So a
-pooled provider under `sticky` parks on one account's virtual id for `sticky_dwell`,
-and fails over to the next account on 429 — with **no change to `decideOrder`**. This
-is the "pool gives failover but not proactive spreading" mode.
+### The key change + the one necessary complement
 
-### spread — a localized branch in decideOrder
+1. **Sticky map keyed by session, not model.** Today `p.sticky[exposed]` (key = route
+   name). Change to `p.sticky[sessionKey]` where `sessionKey` = the request's
+   `x-claude-code-session-id` if present, else `exposed` (fallback). `forward` reads
+   the header and threads it through `schedule` → `decideOrder`.
+2. **Round-robin assignment for new sessions (the complement — without this it does
+   NOT spread).** Naively re-keying by session is insufficient: a new session picks
+   "highest surplus", and all pool accounts start at equal surplus, so concurrent new
+   sessions would ALL pile on the first account (list-order tiebreak). So when
+   **assigning** a new session (no sticky entry, or dwell expired), pick the pool's
+   next account via a **per-parent round-robin counter** instead of "best surplus".
+   The counter advances only at assignment, not per request.
 
-`spread` is the only place that touches scheduling logic. Changes, all in
-`proxy.go`:
+### Mechanics (all in `proxy.go`)
 
-- **New state:** `Proxy.spreadCtr map[string]uint64` (parent → counter), guarded by
-  `healthMu`, reset on `reload` alongside `health`/`sticky`. Per-parent granularity.
-  Ephemeral (restart-zeroed is fine — only affects "who is first" after restart).
-- **New helpers from `buildProviders`:** `parentOf map[string]string` (virtual id →
-  parent) and `spreadParents map[string]bool`. `isSpreadRoute(targets)` = any target's
-  parent is in `spreadParents`.
-- **`decideOrder` gains a `commit bool` param** and a leading branch:
-  - **peek vs commit:** `decideOrder` is called by `schedule` (commit, `proxy.go:586`)
-    and `scheduleStatus` (peek, `proxy.go:275`). When `commit` and spread, it reads
-    `start := spreadCtr[parent]` **and bumps it**, both inside its single `healthMu`
-    critical section → atomic read+bump (no window where two concurrent requests read
-    the same `start`). Peek reads without bumping.
-  - **spread branch:** skip the sticky block entirely (`stickyToSet = ""`); order the
-    spread parent's available band by **stable account-id** (the `#id` suffix) rotated
-    by `start`; non-spread targets (e.g. a `payg` deepseek) still rank by
-    tier→priority→surplus and merge in by tier.
-  - **band ordering uses account-id, not surplus** — round-robin must be predictable
-    (the "6 requests → 2 each" test is deterministic). Surplus is still computed for
-    display only.
+- **Sticky key:** `decideOrder` gains `sessionKey string`; `sk := sessionKey`; if
+  `sk == ""` → `sk = exposed`.
+- **New state:** `Proxy.spreadCtr map[string]uint64` (parent → assignment counter),
+  guarded by `healthMu`, reset on `reload`. Advanced only when a new session is
+  assigned.
+- **`decideOrder` flow:**
+  1. Snapshot health + quota; compute available targets; rank by tier→priority→surplus
+     (unchanged).
+  2. `cur := p.sticky[sk]`. If `cur` is available and within `dwell` → **reuse it**
+     (cache hit). (Existing reuse logic, re-keyed to `sk`.)
+  3. Else **assign**:
+     - If the route has a pooled parent: take its available band (the parent's
+       virtuals), sorted by stable account-id; `start := spreadCtr[parent] %
+       len(band)`; if `commit`, `spreadCtr[parent]++`; pick `band[start]`; set
+       `sticky[sk] = pick`. (A `plan` pool still beats a `payg` provider by tier.)
+     - If not pooled: existing best-surplus + switch-margin assignment, keyed by `sk`.
+- **peek vs commit:** `decideOrder` is called by `schedule` (commit) and
+  `scheduleStatus` (peek, no request → `sessionKey=""`). The counter advances only on
+  `commit`, so `/debug/schedule` doesn't disturb live assignments.
+- **Eviction:** keying by session makes `p.sticky` unbounded over time. Evict expired
+  entries opportunistically on each `schedule` (drop entries whose `since + dwell <
+  now`). Per-session entries are **not** persisted across restart (a restarted proxy
+  breaks active SSE streams; sessions reconnect as new anyway) — `quota_state.json`
+  keeps the non-session (model-keyed) entries best-effort.
 
 ```go
 // sketch
-func (p *Proxy) decideOrder(..., commit bool) (ordered, stickyToSet) {
+func (p *Proxy) decideOrder(..., sessionKey string, commit bool) (ordered, stickyToSet string) {
     p.healthMu.Lock(); defer p.healthMu.Unlock()
+    sk := sessionKey; if sk == "" { sk = exposed }
     avail := filterAvailable(targets)
-    if p.isSpreadRoute(targets) {
-        band, rest := splitSpreadBand(avail)        // band = this parent's virtuals
-        start := p.spreadCtr[parent]
-        if commit { p.spreadCtr[parent]++ }         // atomic w/ the read (same lock)
-        return mergeByTierPriority(rest, rotateByID(band, start)), ""
+    if cur := p.sticky[sk]; cur.available && now.Sub(cur.since) < dwell {
+        return orderWithFirst(avail, cur.provider), ""   // reuse (cache hit)
     }
-    // ---- existing sticky path, byte-for-byte unchanged (proxy.go:641-705) ----
+    if parent, pooled := routePoolParent(targets); pooled {
+        band := poolBandSortedByID(avail, parent)
+        start := int(p.spreadCtr[parent]) % len(band)
+        if commit { p.spreadCtr[parent]++ }
+        pick := band[start]
+        return orderWithFirst(avail, pick.Provider), pick.Provider   // assign (round-robin)
+    }
+    // ---- non-pooled: existing tier→priority→surplus best-pick + switch-margin ----
 }
 ```
 
+### Why this beats the two naive options
+
+| mode | prompt cache | concurrent spread |
+|---|---|---|
+| sticky by model (today) | warm | none — every session piles on one account |
+| per-request round-robin | dead — every turn switches account | even, but cache-hostile |
+| **session-sticky (this design)** | **warm within a conversation** | **different conversations → different accounts** |
+
 ### Interaction guarantees
 
-- Failover: `decideOrder` still returns the full ordered list; the round-robin pick is
-  placed first, the rest follow. The existing failover loop iterates them unchanged.
-- Tier/priority still rule first — `spread` only reorders within an equal band, so a
-  `plan` spread-pool still beats a `payg` provider; payg stays last-resort.
-- Prompt-cache: `spread` intentionally forfeits per-account stickiness — the accepted
-  trade-off for even concurrent distribution.
-- A route that mixes a spread pool and non-spread providers: the spread band
-  round-robins internally; non-spread members keep tier/priority/surplus ordering.
+- Failover: unchanged — if the parked account 429s/errors, the request fails over to
+  the next target; the next request for that session re-assigns (parked account now
+  unavailable).
+- Tier/priority still rule first — assignment picks within the top tier's pool band.
+- A single session firing parallel tool calls still parks on one account (cache
+  requires it). Per-request rotation is deliberately NOT supported (YAGNI).
 
 ## 10. Observability
 
@@ -233,7 +258,7 @@ func (p *Proxy) decideOrder(..., commit bool) (ordered, stickyToSet) {
 |---|---|
 | `quotaTracker` (background poll) | **None.** Iterates the providers map; virtuals are already in it → each account polled independently, snapshotted, persisted. |
 | `GET /debug/schedule` + `model-proxy schedule` | Logic unchanged (keyed by provider name = virtual id). **Display:** group virtuals under their parent (`zhipu (3 accounts)` with the children indented) using `poolIndex`, so a 3-account pool reads as one logical provider with per-account surplus/availability/peak. |
-| `model-proxy doctor` | Same grouping. Dry-run order shows the round-robin/surplus order within a spread pool. |
+| `model-proxy doctor` | Same grouping. Dry-run order shows the session-sticky assignment (new sessions round-robin across accounts; no live quota → falls back to priority). |
 | `usage` | Per-account blocks (§6). |
 | `quota_state.json` | Keys become virtual ids when pooled (stable across restart because `accountID` is stable). A leftover orphan key (e.g. after an account is removed) is harmless — it ages out / is ignored. |
 
@@ -278,10 +303,11 @@ func (p *Proxy) decideOrder(..., commit bool) (ordered, stickyToSet) {
 - **Route expansion:** route `{zhipu, glm-5.2}` with a 3-pool → `expandedRoutes`
   yields 3 targets, same model + priority; a forward test captures the upstream
   `model` rewrite and asserts which account served it.
-- **Spread round-robin:** `strategy: spread`, 3 accounts, 6 sequential requests →
-  assert each account serves exactly 2 (capture provider per request via the
-  existing `refreshHook`-style capture). One account circuit-opened → it gets 0,
-  the other two split 3/3.
+- **Session-sticky assignment:** 3 accounts, 3 distinct `x-claude-code-session-id`
+  headers → each session lands on a DISTINCT account (round-robin assignment).
+  Same session id repeated within `sticky_dwell` → same account every time (cache
+  hit). No session header → falls back to one account for all requests (model-keyed).
+  One account circuit-opened → new sessions skip it and round-robin over the rest.
 - **Failover still works under pool:** account A 429s → next request routes to B
   (assert the rate-limited provider name, not just a count — per the 429-refresh
   contract).
@@ -289,15 +315,16 @@ func (p *Proxy) decideOrder(..., commit bool) (ordered, stickyToSet) {
   virtual's `Surplus` is independent.
 - **`usage`/`logout` pool CLI:** assert `usage zhipu` prints N blocks (count + label
   headers); `logout zhipu --label home` removes exactly that entry.
-- Race-clean (`go test -race`): concurrent spread requests + a reload that adds an
-  account → no race; post-reload requests can hit the new account.
+- Race-clean (`go test -race`): concurrent requests with distinct sessions (each
+  round-robin-assigned) + a reload that adds an account → no race; post-reload
+  requests can hit the new account.
 - Coverage: maintain the 80% `scripts/cover.sh` gate.
 
 ## 14. Phasing
 
 - **Phase 1 (this plan):** pool storage + migration; accountID + dedup; login/logout/
   usage pool CLI; virtual unrolling + credential binding; route expansion;
-  `strategy: spread`; observability grouping. Scoped to **apikey providers**
+  session-sticky assignment; observability grouping. Scoped to **apikey providers**
   (`zhipu`, `deepseek`, `volcengine`).
 - **Phase 2 (follow-up spec):** extend pooling to `codex` and `aqp` — their OAuth
   token bundles (refresh tokens, JWT-derived account id, SSO cookies) need
@@ -306,9 +333,9 @@ func (p *Proxy) decideOrder(..., commit bool) (ordered, stickyToSet) {
 
 ## 15. Open questions (to resolve before/while writing the plan)
 
-1. **`strategy` default when pooled?** Design says `sticky` default (opt into
-   `spread`). Alternative: pooling implies `spread` unless `strategy: sticky`. Lean
-   keep-default-sticky for predictability; confirm.
+1. **~~`strategy` default when pooled?~~** Resolved: there is no `strategy` field —
+   session-sticky is the only pool behavior (see §9). Dropped per-request `spread`
+   (YAGNI).
 2. **`--label` uniqueness** — enforce unique labels within a pool (reject duplicate),
    or allow duplicates and disambiguate by `#id`? Lean: enforce unique.
 3. **Round-robin scope** — counter per parent, or per (route × parent)? Per-parent is
