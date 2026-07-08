@@ -151,6 +151,10 @@ func runProxy(sa serveArgs) {
 	}()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", p.handler)
+	if cfg.Web.Enabled {
+		web := newWebServer(p, sa.config)
+		web.register(mux)
+	}
 	log.Printf("model-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
 	if err := http.ListenAndServe(cfg.Listen, mux); err != nil {
 		log.Fatal(err)
