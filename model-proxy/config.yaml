@@ -9,6 +9,12 @@ log_level: info            # debug | info | warn | error
 
 # Providers — upstream backends. Token files are auto-managed by login/logout
 # at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).
+# Multi-account: for apikey providers (zhipu/deepseek/volcengine), repeat
+# `login <provider>` to add more accounts into a credential pool
+# (~/.model-proxy/<name>_apikeys.json). At runtime each pool is unrolled into
+# per-account virtual providers; Claude Code conversations are spread across
+# them (session-sticky) while staying cache-warm within a conversation. No
+# config change needed — just `login` again. aqp/codex stay single-account.
 providers:
   aqp:
     provider_id: aqp
@@ -92,11 +98,13 @@ claude_mapping:
   sonnet: deepseek-v4-pro
 
 # routes: exposed model name → ordered list of provider/model targets. The proxy
-# schedules non-peak providers first, then by priority (lower wins), and fails
-# over to the next on error. Either protocol may reach any exposed model; the
-# protocol (from the request path) only selects the upstream path + base URL.
-# Set peak_hours on a provider (see providers above) to deprioritize it during
-# its peak window.
+# orders targets by billing tier (plan < unknown < pay-as-you-go), then priority
+# (lower wins), then quota surplus; applies session-sticky routing + circuit-
+# breaker filtering; fails over to the next on error. Either protocol may reach
+# any exposed model; the protocol (from the request path) only selects the
+# upstream path + base URL. A pooled provider (multiple `login`s) fans a target
+# out to its accounts, round-robin across conversations. Set peak_hours on a
+# provider (see providers above) to deprioritize it during its peak window.
 routes:
   glm-5.2:
     - {provider: zhipu,   model: glm-5.2, priority: 1}

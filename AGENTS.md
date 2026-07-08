@@ -259,22 +259,33 @@ config.yaml:
 
 **新配置**：provider 级 `billing: pay-as-you-go`（默认 `plan`）；多段 `peak_hours`（单字符串 / 字符串列表 / `{window, multiplier}` 列表）；`scheduling.quota_poll_interval`（5m）；`scheduling.quota_switch_margin`（15）。`sticky_dwell` 同时充当「切换前的最小驻留」。
 
+### 多账号凭据池（credential pool）+ session-sticky 路由
+
+一个 config provider 可挂**多个账号**（`login <provider>` 重复录入）。账号存于**复数池** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`）；旧的单数 `<name>_apikey.json` 是只读 fallback（包成 1 条池）。`accountIDFor`（`pool.go`）派生稳定 id —— volcengine = `access_key`，其余 apikey = `sha256(api_key)[:16]` —— 用于去重 + 虚拟名后缀。`login` 按 id 去重（`--replace` 或交互确认；`--label` 命名；写完 SIGHUP 热重载 daemon）。**aqp/codex 不池化**（单 OAuth 凭据），只有 zhipu/deepseek/volcengine 池化。
+
+**构建期展开成虚拟 provider**（`buildProviders`）：≥2 账号的池展开成 N 个虚拟 provider，key = `name#<accountID>`（单账号时仍是 `name`，行为与之前逐字一致）。每个虚拟共享父 config（base_url/models/billing/peak），但**三处**绑各自凭据：① 内嵌 `ApiKeyBase`（forward `AuthHeaders`，经 `provider.Config.BoundAPIKey` —— zhipu/deepseek/volcengine 的 forward key 来自这里，**不是 `cfg.Auth`**）；② `cfg.Auth`（FetchModels 走 `fetchModelsBearer`）；③ Usage/Quota 闭包（透传 `*accountCred`）。路由 target 命名池父 → `buildExpandedRoutes` 展开成 N 个虚拟（同 model+priority）；`forward`/`scheduleStatus`/`doctor` 读展开表。**因为虚拟名就是普通 provider 名，per-account 熔断 / 429 跳过 / 配额快照 / failover 全白送。**
+
+**池内路由 = session-sticky**：sticky map 的 key 从「路由名」换成请求的 `x-claude-code-session-id`（无该头则退回路由名 → 行为不变）。新 session 由 per-parent 计数器（`spreadCtr`，`commit` 时才 +1）**轮询分配**到一个池账号；之后该对话**整场停在这个账号**（只在 429/熔断时重选，**不会中途迁到边际更优的账号**）—— 保 prompt cache；不同对话落到不同账号 → 并发分流。**无 `strategy` 配置项**。session-keyed sticky **不落盘**（`snapshotSticky` 只持久化路由名 key），`quota_state.json` 不存会话 id。
+
+**踩过的坑**：① forward 鉴权读内嵌 `ApiKeyBase`（文件名 = providerName），虚拟必须经 `BoundAPIKey` 绑内存 key，否则会去读不存在的 `<name#id>_apikey.json` → 502；② `Refresh()` 在 bound 实例上是 no-op（bound key 不可变，清缓存会注入空 Bearer）；③ `login` 写的是复数池，故 **1 条池（单账号）也必须 bind**（不能走 file-backed 读单数文件，否则 `login` 后 502 —— 这是 buildProviders 用 `os.Stat(poolPath)` 区分「复数池存在」与「单数 fallback」的原因）；④ volcengine 每账号要完整 `{api_key, access_key, secret_key}`（`GetAFPUsage` 签名用 AK/SK），`resolveVolcengineAKSK` 对非 nil cred **排他**（不回落文件，防泄漏兄弟账号 AK/SK）；⑤ volcengine 的 `FetchModels`（`ListArkAgentPlanModel`）暂未按账号绑 —— 池化时 `models refresh volcengine` 优雅退回 config 模型。
+
 ### Token 文件命名
 
 | provider_id | suffix | 文件名 |
 |---|---|---|
 | compass | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
 | codex | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
-| zhipu | apikey | `~/.model-proxy/<name>_apikey.json` |
+| zhipu / deepseek | apikey | `~/.model-proxy/<name>_apikey.json`（单数，只读 fallback）|
+| volcengine | apikey | `~/.model-proxy/<name>_apikey.json` —— `{api_key, access_key, secret_key}`（API Key 聊天 + AK/SK 签 `GetAFPUsage`）|
 
-路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `zhipu-work`）。
+路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `zhipu-work`）。**多账号**：zhipu/deepseek/volcengine 重复 `login` 写**复数池** `~/.model-proxy/<name>_apikeys.json`（见上「多账号凭据池 + session-sticky 路由」），单数文件是其 fallback；aqp/codex 不池化。
 
 ### CLI 命令
 
 ```
-login <provider>          # compass: SSO / codex: device flow / zhipu: 输入 key
-logout <provider>         # 删凭据文件
-usage <provider>          # compass: monthly_usage / codex: wham/usage / zhipu: /models
+login <provider> [--label NAME] [--replace]   # compass: SSO / codex: device flow / apikey 类: 输入 key（可重复录入 → 多账号池，按 id 去重；写完热重载）
+logout <provider> [--label NAME | --all]       # 删一个账号（默认交互式选择）/ 清空池
+usage <provider>          # 池化时默认逐账号展示全部账号用量（--label 看某一个）
 models [provider]         # 从 config 列模型
 models refresh <provider> # 从服务端刷新
 serve [daemon|stop|reload]
