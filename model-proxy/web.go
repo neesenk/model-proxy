@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed web_assets/*
@@ -81,6 +84,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleConfigGet(resp, r)
 	case path == "/api/config" && r.Method == http.MethodPost:
 		w.handleConfigPut(resp, r)
+	case path == "/api/config/edit" && r.Method == http.MethodPost:
+		w.handleConfigEdit(resp, r)
 	default:
 		writeJSONErr(resp, http.StatusNotFound, "no api route for "+path)
 	}
@@ -321,4 +326,176 @@ func (w *webServer) handleConfigPut(resp http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "reloaded"})
+}
+
+// --- Structured (form-based) config edits (Task 8: general + scheduling) ---
+//
+// Structured edits mutate the config's yaml.Node tree (not a decoded struct) so
+// comments and key ordering survive a round-trip — a struct decode→re-encode
+// would strip every comment in the file. Each editor applies a targeted change
+// to the node tree, re-encodes with yaml.NewEncoder (SetIndent 2), and funnels
+// the bytes through saveAndReload (validate→backup→atomicWrite→reload).
+// provider/route/claude_mapping kinds land in Task 9 (editStructured); until
+// then they return 400 so this file compiles standalone.
+
+// loadConfigNode parses the file into a yaml.Node root (preserving
+// comments/order). The root is a document node whose Content[0] is the
+// top-level mapping.
+func loadConfigNode(path string) (*yaml.Node, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+	return &root, nil
+}
+
+// mapNode returns the mapping node at root.Content[0] (the top-level document
+// mapping). Returns nil if the document is empty or not a mapping.
+func mapNode(root *yaml.Node) *yaml.Node {
+	if root == nil || len(root.Content) == 0 {
+		return nil
+	}
+	return root.Content[0]
+}
+
+// scalarNode builds a plain string scalar node.
+func scalarNode(v string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v}
+}
+
+// setScalar sets a top-level key -> scalar value (creating the key if absent).
+// On update only Value is touched: yaml.v3 auto-detects the scalar tag (!int /
+// !!str / !!bool) on unmarshal, so re-tagging would corrupt typed fields (a
+// !!str "5" fails to decode into an int). New keys default to !!str.
+func setScalar(root *yaml.Node, key, value string) {
+	m := mapNode(root)
+	if m == nil {
+		return
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			m.Content[i+1].Value = value
+			return
+		}
+	}
+	m.Content = append(m.Content, scalarNode(key), scalarNode(value))
+}
+
+// childMap returns the mapping node under key, creating it (as an empty
+// mapping) at the end of the top-level mapping if absent.
+func childMap(root *yaml.Node, key string) *yaml.Node {
+	m := mapNode(root)
+	if m == nil {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key && m.Content[i+1].Kind == yaml.MappingNode {
+			return m.Content[i+1]
+		}
+	}
+	child := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	m.Content = append(m.Content, scalarNode(key), child)
+	return child
+}
+
+// setChildScalar sets key -> value under parentMap (creating the key if
+// absent). Like setScalar, it does not re-tag an existing node (yaml.v3's
+// auto-detected tag round-trips correctly for both int and string fields).
+func setChildScalar(parent *yaml.Node, key, value string) {
+	if parent == nil {
+		return
+	}
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Value == key {
+			parent.Content[i+1].Value = value
+			return
+		}
+	}
+	parent.Content = append(parent.Content, scalarNode(key), scalarNode(value))
+}
+
+// editConfigNode loads the config node tree, applies mutate to the root, then
+// re-encodes (SetIndent 2) and runs saveAndReload. Structured edits preserve
+// comments/order via the Node API; the whole mutation funnels through the same
+// validate→backup→write→reload pipeline as the raw YAML editor.
+func (w *webServer) editConfigNode(mutate func(root *yaml.Node)) error {
+	root, err := loadConfigNode(w.configFile)
+	if err != nil {
+		return err
+	}
+	if mapNode(root) == nil {
+		return fmt.Errorf("config is not a YAML mapping")
+	}
+	mutate(root)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	enc.Close()
+	return w.saveAndReload(buf.Bytes())
+}
+
+// handleConfigEdit dispatches a structured edit by kind. general + scheduling
+// are implemented here; provider/route/claude_mapping (Task 9) return 400 until
+// editStructured lands.
+func (w *webServer) handleConfigEdit(resp http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Kind string         `json:"kind"`
+		Name string         `json:"name"`
+		Data map[string]any `json:"data"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(resp, http.StatusBadRequest, err.Error())
+		return
+	}
+	var err error
+	switch req.Kind {
+	case "general":
+		err = w.editGeneral(req.Data)
+	case "scheduling":
+		err = w.editScheduling(req.Data)
+	case "provider", "route", "claude_mapping":
+		// Task 9 wires these via editStructured(kind, name, data).
+		writeJSONErr(resp, http.StatusBadRequest, "edit kind not yet implemented: "+req.Kind)
+		return
+	default:
+		writeJSONErr(resp, http.StatusBadRequest, "unknown edit kind: "+req.Kind)
+		return
+	}
+	if err != nil {
+		writeJSONErr(resp, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(resp, http.StatusOK, map[string]string{"status": "reloaded"})
+}
+
+// editGeneral applies scalar general-settings edits (listen, log_level,
+// log_file) to the top-level mapping.
+func (w *webServer) editGeneral(d map[string]any) error {
+	return w.editConfigNode(func(root *yaml.Node) {
+		for _, k := range []string{"listen", "log_level", "log_file"} {
+			if v, ok := d[k]; ok {
+				setScalar(root, k, fmt.Sprint(v))
+			}
+		}
+	})
+}
+
+// editScheduling applies scalar scheduling edits under the `scheduling` block,
+// creating it if absent.
+func (w *webServer) editScheduling(d map[string]any) error {
+	return w.editConfigNode(func(root *yaml.Node) {
+		s := childMap(root, "scheduling")
+		for _, k := range []string{"circuit_threshold", "circuit_cooldown", "rate_limit_backoff", "upstream_timeout", "sticky_dwell", "quota_poll_interval", "quota_switch_margin"} {
+			if v, ok := d[k]; ok {
+				setChildScalar(s, k, fmt.Sprint(v))
+			}
+		}
+	})
 }

@@ -235,3 +235,64 @@ func TestAPILogs(t *testing.T) {
 		t.Errorf("tail=2 should drop line1: %q", got)
 	}
 }
+
+func TestConfigEditPreservesComments(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	original := []byte("# top comment\nlisten: 127.0.0.1:17000 # inline\n# scheduling block\nscheduling:\n  circuit_threshold: 3\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n")
+	os.WriteFile(cfgPath, original, 0o644)
+	w, p := newTestWeb(t)
+	w.configFile = cfgPath
+
+	rec := httptest.NewRecorder()
+	body := `{"kind":"scheduling","data":{"circuit_threshold":5}}`
+	w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	gs := string(got)
+	if !strings.Contains(gs, "# top comment") {
+		t.Errorf("top comment lost:\n%s", gs)
+	}
+	if !strings.Contains(gs, "# scheduling block") {
+		t.Errorf("scheduling comment lost:\n%s", gs)
+	}
+	if !strings.Contains(gs, "circuit_threshold: 5") {
+		t.Errorf("threshold not updated to 5:\n%s", gs)
+	}
+	if p.cfg.Scheduling.CircuitThreshold != 5 {
+		t.Errorf("reload did not apply threshold 5: %d", p.cfg.Scheduling.CircuitThreshold)
+	}
+}
+
+func TestConfigEditGeneral(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:17000\nlog_level: info\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n"), 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	rec := httptest.NewRecorder()
+	w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(`{"kind":"general","data":{"listen":"127.0.0.1:18000"}}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(got), "listen: 127.0.0.1:18000") {
+		t.Errorf("listen not updated:\n%s", got)
+	}
+}
+
+// TestConfigEditUnknownKind asserts unmapped kinds (provider/route/claude_mapping
+// — Task 9's domain) and bogus kinds both return 400, not 500 or a panic.
+func TestConfigEditUnknownKind(t *testing.T) {
+	w, _ := newTestWeb(t)
+	for _, kind := range []string{"provider", "route", "claude_mapping", "bogus"} {
+		rec := httptest.NewRecorder()
+		body := `{"kind":"` + kind + `","name":"x","data":{}}`
+		w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
+		if rec.Code != 400 {
+			t.Errorf("kind=%s status=%d want 400 body=%s", kind, rec.Code, rec.Body.String())
+		}
+	}
+}
