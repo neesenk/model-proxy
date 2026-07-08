@@ -104,6 +104,15 @@ func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]str
 		// as a 1-entry pool, which would otherwise mis-route it to the bind path.
 		_, statErr := os.Stat(poolPath(name))
 		pluralExists := statErr == nil
+		// Distinguish "plural pool file exists but is empty" (cleared by
+		// `logout --all` or truncated by a crashed/corrupt write) from "provider
+		// was never logged in". With atomic savePool (#1) this is near-unreachable
+		// in practice, but a distinct diagnostic means a 502 isn't mute if it does
+		// happen. Only emitted when the pool read back OK — an unreadable pool is
+		// already covered by the "unreadable" log above.
+		if pluralExists && len(pool.Accounts) == 0 && poolErr == nil {
+			log.Printf("[proxy] pool %s exists but has 0 accounts (cleared or corrupt); treating as not logged in", name)
+		}
 		if !pluralExists || len(pool.Accounts) == 0 {
 			// no plural pool → legacy singular fallback OR not logged in:
 			// cred=nil keeps ApiKeyBase + pcfg.Auth file-backed (pre-pool path).
@@ -463,8 +472,8 @@ func (p *Proxy) scheduleStatus() []byte {
 	models := map[string]routeInfo{}
 	for exposed, targets := range expanded {
 		// commit=false: scheduleStatus is a read-only peek — it must NOT bump the
-		// round-robin counter or set sticky. (Expired-entry eviction inside
-		// decideOrder is safe in the peek — dropping stale keys is idempotent.)
+		// round-robin counter, set sticky, or evict sticky entries. decideOrder
+		// gates all sticky mutation on commit, so the peek is side-effect-free.
 		ordered, _ := p.decideOrder(cfg, provs, parentOf, exposed, "", targets, now, false)
 		ri := routeInfo{}
 		if len(ordered) > 0 {
@@ -870,14 +879,17 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, par
 	// stays byte-identical to pre-Task-6 (the after-dwell margin re-evaluation
 	// reads them — evicting at dwell would silently delete the seeded entries
 	// those tests rely on and re-pick on every call). Active sessions don't age
-	// out: keepSticky refreshes their `since` each call (see below). Safe in the
-	// read-only peek (commit=false) — idempotent deletion of stale keys.
-	for k, v := range p.sticky {
-		if _, isRoute := cfg.Routes[k]; isRoute {
-			continue
-		}
-		if now.Sub(v.since) > sched.dwell() {
-			delete(p.sticky, k)
+	// out: keepSticky refreshes their `since` each call (see below). Eviction is
+	// commit-gated (schedule path only) so the /debug/schedule peek
+	// (commit=false) never mutates sticky — a genuinely read-only snapshot.
+	if commit {
+		for k, v := range p.sticky {
+			if _, isRoute := cfg.Routes[k]; isRoute {
+				continue
+			}
+			if now.Sub(v.since) > sched.dwell() {
+				delete(p.sticky, k)
+			}
 		}
 	}
 

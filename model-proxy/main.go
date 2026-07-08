@@ -302,23 +302,50 @@ func cmdLogout(args []string) {
 	}
 
 	// Pool-aware path: the plural pool file (<name>_apikeys.json) exists.
+	//
+	// Locking: the interactive/label/all SELECTION (read pool, list accounts,
+	// prompt for a number) runs OUTSIDE the cross-process lock; it captures the
+	// selected account's ID (not index) from the displayed list. The mutation
+	// (re-load under the lock → remove by id → save / os.Remove) runs INSIDE
+	// withPoolLock. Removing by id re-resolved under the lock is correct even if
+	// the pool changed between display and lock: a concurrently-removed target is
+	// a no-op save; a concurrently-added account is preserved.
 	pool, err := loadPool(provName, providerID)
 	if err != nil {
 		log.Fatalf("logout failed: %v", err)
 	}
 	if len(pool.Accounts) == 0 {
 		// Pool file exists but is empty — remove it and report not-logged-in.
-		_ = os.Remove(poolPath(provName))
+		// Re-resolve under the cross-process lock so a concurrent `login` can't
+		// append an account between the unlocked read above and the remove; if
+		// the pool is still empty under the lock, drop the file. Mirrors the
+		// in-lock remove-by-id path below.
+		if err := withPoolLock(provName, func() error {
+			cur, err := loadPool(provName, providerID)
+			if err != nil {
+				return err
+			}
+			if len(cur.Accounts) == 0 {
+				if err := os.Remove(poolPath(provName)); err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("remove pool file: %w", err)
+				}
+			}
+			return nil
+		}); err != nil {
+			log.Fatalf("logout failed: %v", err)
+		}
 		fmt.Println(cYellow("Not logged in."))
 		return
 	}
 
 	label := flagStringValue(args, "--label")
 	all := hasFlagValue(args, "--all")
+	// removeAll: --all clears every account. rmID: specific account id to drop.
 	var rmID string
+	removeAll := false
 	switch {
 	case all:
-		pool.Accounts = nil
+		removeAll = true
 	case label != "":
 		idx := -1
 		for i, a := range pool.Accounts {
@@ -331,7 +358,6 @@ func cmdLogout(args []string) {
 			log.Fatalf("no account labeled %q in %s", label, provName)
 		}
 		rmID = pool.Accounts[idx].ID
-		pool.Accounts = append(pool.Accounts[:idx], pool.Accounts[idx+1:]...)
 	default:
 		// Interactive: list + pick a number.
 		fmt.Printf("Accounts for %s:\n", provName)
@@ -346,17 +372,39 @@ func cmdLogout(args []string) {
 			log.Fatal("invalid selection")
 		}
 		rmID = pool.Accounts[n-1].ID
-		pool.Accounts = append(pool.Accounts[:n-1], pool.Accounts[n:]...)
 	}
-	if len(pool.Accounts) == 0 {
-		if err := os.Remove(poolPath(provName)); err != nil && !os.IsNotExist(err) {
-			log.Fatalf("remove pool file: %v", err)
+
+	if err := withPoolLock(provName, func() error {
+		cur, err := loadPool(provName, providerID)
+		if err != nil {
+			return err
 		}
-	} else {
-		if err := savePool(provName, pool); err != nil {
-			log.Fatalf("save pool: %v", err)
+		if removeAll {
+			cur.Accounts = nil
+		} else {
+			out := make([]poolAccount, 0, len(cur.Accounts))
+			for _, a := range cur.Accounts {
+				if a.ID == rmID {
+					continue // drop the selected id
+				}
+				out = append(out, a)
+			}
+			cur.Accounts = out
 		}
+		if len(cur.Accounts) == 0 {
+			if err := os.Remove(poolPath(provName)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove pool file: %w", err)
+			}
+		} else {
+			if err := savePool(provName, cur); err != nil {
+				return fmt.Errorf("save pool: %w", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		log.Fatalf("logout failed: %v", err)
 	}
+
 	if all {
 		fmt.Println(cGreen("✓ Removed all accounts from " + provName))
 	} else {
@@ -968,7 +1016,13 @@ func runVolcengineLogin(cfg *Config, provName string, prov Provider) error {
 // confirmation aborts with "login cancelled". The entry's label defaults to the
 // id when not supplied. The pool is written to ~/.model-proxy/<name>_apikeys.json
 // via savePool — the legacy singular <name>_apikey.json is no longer written.
+//
+// Locking: ALL stdin (triple prompts + replace confirmation) happens BEFORE the
+// cross-process lock — same invariant as runApiKeyLoginWithInput. The replace
+// confirmation is resolved with a read-only loadPool; the authoritative
+// load→dedup→save then runs under withPoolLock.
 func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, inKey, inAK, inSK, label string, replace bool) error {
+	// === BEFORE LOCK: apikey + AK + SK prompts ===
 	apiKey := strings.TrimSpace(inKey)
 	if apiKey == "" {
 		fmt.Printf("Ark API Key (对话用，控制台创建): ")
@@ -988,50 +1042,66 @@ func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, in
 		return fmt.Errorf("API key is required")
 	}
 
-	// Pool dedup by account id (= AccessKey for volcengine).
-	pool, err := loadPool(provName, prov.Provider)
-	if err != nil {
-		return fmt.Errorf("load pool: %w", err)
-	}
 	id := accountIDFor(prov.Provider, accountCred{APIKey: apiKey, AccessKey: ak})
-	now := nowTS()
-	idx := -1
-	for i, a := range pool.Accounts {
-		if a.ID == id {
-			idx = i
-			break
+
+	// Resolve replace confirmation BEFORE the lock (stdin must never block the
+	// cross-process lock).
+	if !replace {
+		existing, err := loadPool(provName, prov.Provider)
+		if err != nil {
+			return fmt.Errorf("load pool: %w", err)
 		}
-	}
-	if idx >= 0 {
-		if !replace {
-			fmt.Printf("Account %q is already logged in. Replace its key? [y/N] ", pool.Accounts[idx].Label)
-			reader := bufio.NewReader(os.Stdin)
-			ans, _ := reader.ReadString('\n')
-			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
-				return fmt.Errorf("login cancelled")
+		for _, a := range existing.Accounts {
+			if a.ID == id {
+				fmt.Printf("Account %q is already logged in. Replace its key? [y/N] ", a.Label)
+				reader := bufio.NewReader(os.Stdin)
+				ans, _ := reader.ReadString('\n')
+				if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
+					return fmt.Errorf("login cancelled")
+				}
+				break
 			}
 		}
-		pool.Accounts[idx].APIKey = apiKey
-		pool.Accounts[idx].AccessKey = ak
-		pool.Accounts[idx].SecretKey = sk
-		if label != "" {
-			pool.Accounts[idx].Label = label
-		}
-		pool.Accounts[idx].AddedAt = now
-	} else {
-		lbl := label
-		if lbl == "" {
-			lbl = id
-		}
-		pool.Accounts = append(pool.Accounts, poolAccount{
-			ID: id, Label: lbl, APIKey: apiKey, AccessKey: ak, SecretKey: sk, AddedAt: now,
-		})
 	}
-	if err := savePool(provName, pool); err != nil {
-		return fmt.Errorf("save pool: %w", err)
-	}
-	fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
-	return nil
+
+	// === INSIDE LOCK: load → dedup/append → save ===
+	return withPoolLock(provName, func() error {
+		// Pool dedup by account id (= AccessKey for volcengine).
+		pool, err := loadPool(provName, prov.Provider)
+		if err != nil {
+			return fmt.Errorf("load pool: %w", err)
+		}
+		now := nowTS()
+		idx := -1
+		for i, a := range pool.Accounts {
+			if a.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			pool.Accounts[idx].APIKey = apiKey
+			pool.Accounts[idx].AccessKey = ak
+			pool.Accounts[idx].SecretKey = sk
+			if label != "" {
+				pool.Accounts[idx].Label = label
+			}
+			pool.Accounts[idx].AddedAt = now
+		} else {
+			lbl := label
+			if lbl == "" {
+				lbl = id
+			}
+			pool.Accounts = append(pool.Accounts, poolAccount{
+				ID: id, Label: lbl, APIKey: apiKey, AccessKey: ak, SecretKey: sk, AddedAt: now,
+			})
+		}
+		if err := savePool(provName, pool); err != nil {
+			return fmt.Errorf("save pool: %w", err)
+		}
+		fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
+		return nil
+	})
 }
 
 // volcengineCreds is the on-disk format of the volcengine apikey file: the Ark

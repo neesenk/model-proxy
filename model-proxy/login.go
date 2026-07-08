@@ -97,7 +97,17 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) error {
 // id without confirmation aborts with "login cancelled". The entry's label
 // defaults to the id when not supplied. The pool is written to
 // ~/.model-proxy/<name>_apikeys.json via savePool.
+//
+// Locking: ALL stdin (key prompt + replace confirmation) and the usage-URL
+// validation happen BEFORE the cross-process lock — a holder who walks away
+// mid-prompt would otherwise stall every other login/logout for the 60s stale
+// window. The replace confirmation is resolved with a read-only loadPool before
+// the lock; the authoritative load→dedup→save then runs under withPoolLock. The
+// read-twice is safe: the inside-lock load re-finds the entry by id (which may
+// have changed between the two loads), so a concurrent mutation is reconciled
+// rather than clobbered.
 func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, label string, replace bool) error {
+	// === BEFORE LOCK: key prompt + usage-URL validation + accountIDFor ===
 	key := strings.TrimSpace(in)
 	if key == "" {
 		fmt.Printf("Enter API key for %s: ", provName)
@@ -130,47 +140,63 @@ func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, la
 		}
 	}
 
-	// Pool dedup by account id.
-	pool, err := loadPool(provName, prov.Provider)
-	if err != nil {
-		return fmt.Errorf("load pool: %w", err)
-	}
 	id := accountIDFor(prov.Provider, accountCred{APIKey: key})
-	now := nowTS()
-	idx := -1
-	for i, a := range pool.Accounts {
-		if a.ID == id {
-			idx = i
-			break
+
+	// Resolve the replace confirmation BEFORE the lock (stdin must never block
+	// the cross-process lock). A read-only loadPool + scan for the id decides
+	// whether to prompt; if the user declines, abort without acquiring the lock.
+	if !replace {
+		existing, err := loadPool(provName, prov.Provider)
+		if err != nil {
+			return fmt.Errorf("load pool: %w", err)
 		}
-	}
-	if idx >= 0 {
-		if !replace {
-			fmt.Printf("Account %q is already logged in. Replace its key? [y/N] ", pool.Accounts[idx].Label)
-			reader := bufio.NewReader(os.Stdin)
-			ans, _ := reader.ReadString('\n')
-			if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
-				return fmt.Errorf("login cancelled")
+		for _, a := range existing.Accounts {
+			if a.ID == id {
+				fmt.Printf("Account %q is already logged in. Replace its key? [y/N] ", a.Label)
+				reader := bufio.NewReader(os.Stdin)
+				ans, _ := reader.ReadString('\n')
+				if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y") {
+					return fmt.Errorf("login cancelled")
+				}
+				break
 			}
 		}
-		pool.Accounts[idx].APIKey = key
-		if label != "" {
-			pool.Accounts[idx].Label = label
-		}
-		pool.Accounts[idx].AddedAt = now
-	} else {
-		lbl := label
-		if lbl == "" {
-			lbl = id
-		}
-		pool.Accounts = append(pool.Accounts, poolAccount{ID: id, Label: lbl, APIKey: key, AddedAt: now})
 	}
-	if err := savePool(provName, pool); err != nil {
-		return fmt.Errorf("save pool: %w", err)
-	}
-	// Reload the in-memory label (savePool may re-sort, so look up by id).
-	fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
-	return nil
+
+	// === INSIDE LOCK: load → dedup/append → save ===
+	return withPoolLock(provName, func() error {
+		pool, err := loadPool(provName, prov.Provider)
+		if err != nil {
+			return fmt.Errorf("load pool: %w", err)
+		}
+		now := nowTS()
+		idx := -1
+		for i, a := range pool.Accounts {
+			if a.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			pool.Accounts[idx].APIKey = key
+			if label != "" {
+				pool.Accounts[idx].Label = label
+			}
+			pool.Accounts[idx].AddedAt = now
+		} else {
+			lbl := label
+			if lbl == "" {
+				lbl = id
+			}
+			pool.Accounts = append(pool.Accounts, poolAccount{ID: id, Label: lbl, APIKey: key, AddedAt: now})
+		}
+		if err := savePool(provName, pool); err != nil {
+			return fmt.Errorf("save pool: %w", err)
+		}
+		// Reload the in-memory label (savePool may re-sort, so look up by id).
+		fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
+		return nil
+	})
 }
 
 // labelFor returns the label of the pool entry with the given id, or the id
