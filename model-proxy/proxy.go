@@ -30,6 +30,7 @@ type Proxy struct {
 	health    map[string]*providerHealth // provider name → circuit/rate-limit state
 	sticky    map[string]routeSticky     // exposed model → current provider + since
 	quota     *quotaTracker              // background quota poller; nil only in degenerate tests
+	metrics   *metricsStore              // request counters (atomic); nil only in degenerate tests
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -259,6 +260,7 @@ func NewProxy(cfg *Config) *Proxy {
 		func() map[string]provider.Provider { return p.providerSnapshot() })
 	p.quota.stickySnapshot = p.snapshotSticky
 	p.quota.start()
+	p.metrics = newMetricsStore()
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
 	if loaded := p.quota.LoadedSticky; len(loaded) > 0 {
@@ -657,6 +659,9 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	}
 
 	for ti, t := range ordered {
+		if p.metrics != nil {
+			p.metrics.inc(t.Provider, evRequests)
+		}
 		// Resolve the provider CONFIG. For a pooled virtual ("name#<id>") the
 		// config lives under the parent name in cfg.Providers; providerConfig
 		// resolves it via parentOf. The provider IMPLEMENTATION (provImpl) is
@@ -747,6 +752,10 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		if err != nil {
 			log.Printf("[proto=%s provider=%s] upstream error: %v", proto, t.Provider, err)
 			p.recordFailure(t.Provider, sched) // connection error / timeout → circuit
+			if p.metrics != nil {
+				p.metrics.inc(t.Provider, evFailures)
+				p.metrics.inc(t.Provider, evFailovers)
+			}
 			return false
 		}
 
@@ -762,6 +771,9 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 				}
 			}
 			p.recordFailure(t.Provider, sched)
+			if p.metrics != nil {
+				p.metrics.inc(t.Provider, evFailovers)
+			}
 			return false
 		}
 		// Rate limit (429): skip this provider until Retry-After / default backoff.
@@ -770,12 +782,20 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			until := p.parseRateLimit(resp, time.Now(), sched)
 			resp.Body.Close()
 			p.recordRateLimit(t.Provider, until)
+			if p.metrics != nil {
+				p.metrics.inc(t.Provider, evRateLimited429)
+				p.metrics.inc(t.Provider, evFailovers)
+			}
 			return false
 		}
 		// Transient upstream errors → circuit + failover.
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
 			p.recordFailure(t.Provider, sched)
+			if p.metrics != nil {
+				p.metrics.inc(t.Provider, evFailures)
+				p.metrics.inc(t.Provider, evFailovers)
+			}
 			return false
 		}
 
@@ -801,6 +821,9 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 	}
 	// 401-retry exhausted without resolution — release the slot.
 	p.releaseHalfOpenSlot(t.Provider)
+	if p.metrics != nil {
+		p.metrics.inc(t.Provider, evFailovers)
+	}
 	return false
 }
 
