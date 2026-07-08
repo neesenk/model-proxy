@@ -847,12 +847,22 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		// (anthropic message_start/message_delta, openai usage) accrue to the
 		// (provider, model) counter. Non-SSE responses pass through unscanned
 		// (no overhead). Nil-guard like metrics for degenerate tests.
+		//
+		// Bind the (possibly wrapped) body to a variable and close THAT: on a
+		// client disconnect mid-stream, flushCopy returns after a write error
+		// without reaching EOF, so the scanner's Read-err commit path is never
+		// hit. Closing the scanner explicitly fires its Close → commit, so
+		// usage already observed (notably input_tokens from message_start,
+		// which arrives at the START of the stream before any cancel) is not
+		// silently dropped. On normal EOF the scanner's Read already set
+		// done=true and committed, so Close is a harmless no-op (no double
+		// count). Non-SSE: body == resp.Body, equivalent to before.
+		body := resp.Body
 		if p.tokens != nil && isSSE(resp.Header) {
-			flushCopy(w, newUsageScanner(resp.Body, tokenKey{Provider: t.Provider, Model: t.Model}, p.tokens))
-		} else {
-			flushCopy(w, resp.Body)
+			body = newUsageScanner(resp.Body, tokenKey{Provider: t.Provider, Model: t.Model}, p.tokens)
 		}
-		resp.Body.Close()
+		flushCopy(w, body)
+		body.Close()
 		return true
 	}
 	// 401-retry exhausted without resolution — release the slot.

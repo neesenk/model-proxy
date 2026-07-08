@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -233,5 +234,74 @@ func TestForwardDoesNotScanNonSSE(t *testing.T) {
 	got := p.tokens.snapshot()[tokenKey{Provider: "zhipu", Model: "glm-5"}]
 	if got.Input != 0 || got.Output != 0 || got.Requests != 0 {
 		t.Errorf("non-SSE tokens = %+v, want zero (non-SSE must not be scanned)", got)
+	}
+}
+
+// disconnectWriter wraps an httptest.ResponseRecorder and fails every Write,
+// simulating a client that has already gone away (broken pipe). flushCopy must
+// stop reading the upstream stream on the first failed write.
+type disconnectWriter struct {
+	*httptest.ResponseRecorder
+}
+
+func (disconnectWriter) Write([]byte) (int, error) {
+	return 0, errors.New("client disconnected: broken pipe")
+}
+
+// TestForwardCommitsOnDisconnect verifies that when a client disconnects
+// mid-stream (flushCopy's w.Write returns an error after the upstream has
+// already delivered usage events), usage observed BEFORE the disconnect —
+// notably input_tokens from message_start, which arrives at the START of the
+// stream before any cancel — is still committed.
+//
+// Previously the inline usageScanner passed to flushCopy was never assigned,
+// so resp.Body.Close() closed the underlying body and bypassed the scanner's
+// Close → commit path, silently dropping observed usage. With the fix the
+// wrapped body is bound to a variable and closed explicitly, firing the
+// commit. On a normal (EOF) stream the scanner's Read already committed, so
+// the explicit Close is a harmless no-op (no double-count) — covered by
+// TestForwardCountsTokens above.
+func TestForwardCommitsOnDisconnect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "zhipu_apikey.json"), []byte(`{"api_key":"sk-test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Upstream delivers both usage events, then HOLDS the stream open (err==nil
+	// on the proxy's first Read) to simulate ongoing generation the client
+	// cancels. This is the critical precondition: the scanner's Read-err commit
+	// path must NOT fire (no error yet), so the only commit path is the
+	// explicit body.Close() the fix adds.
+	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":8}}\n\n")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write(stream)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done() // hold open until the proxy closes the body (disconnect)
+	}))
+	defer up.Close()
+	cfg, err := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	p := NewProxy(cfg)
+	rec := &disconnectWriter{ResponseRecorder: httptest.NewRecorder()}
+	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
+	got := p.tokens.snapshot()[tokenKey{Provider: "zhipu", Model: "glm-5"}]
+	if got.Input != 42 {
+		t.Errorf("input tokens after disconnect = %d, want 42 (observed usage must commit on client-cancel, not be silently dropped)", got.Input)
+	}
+	if got.Output != 8 {
+		t.Errorf("output tokens after disconnect = %d, want 8", got.Output)
+	}
+	if got.Requests != 1 {
+		t.Errorf("requests after disconnect = %d, want 1", got.Requests)
 	}
 }
