@@ -168,7 +168,7 @@ for (const b of tabBtns) {
 function showMsg(target, kind, msg) {
   // kind: 'ok' | 'err'
   if (!target) return;
-  target.innerHTML = `<div class="msg ${kind}">${esc(msg)}</div>`;
+  target.innerHTML = `<div class="msg ${esc(kind)}">${esc(msg)}</div>`;
 }
 function clearMsg(target) {
   if (target) target.innerHTML = '';
@@ -334,30 +334,30 @@ function renderQuotaCard(st) {
   let rows = '';
   for (const name of names) {
     const snap = quota[name];
-    if (!snap || snap.err) {
+    if (!snap || snap.Err) {
       rows += `<div class="bar-row"><div class="bar-label">
         <span class="name">${esc(name)}</span>
-        <span class="pct">${snap && snap.err ? esc(snap.err) : 'no data'}</span>
+        <span class="pct">${snap && snap.Err ? esc(snap.Err) : 'no data'}</span>
       </div></div>`;
       continue;
     }
-    const windows = snap.windows || [];
+    const windows = snap.Windows || [];
     let subBlock = '';
     for (const w of windows) {
-      const p = (w.remaining_pct != null && w.remaining_pct >= 0) ? w.remaining_pct : null;
+      const p = (w.RemainingPct != null && w.RemainingPct >= 0) ? w.RemainingPct : null;
       const fillCls = p == null ? '' : (p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err'));
-      const ulg = w.ultimate ? ' · ultimate' : (w.short ? ' · short' : '');
-      const reset = w.resets_at ? `resets ${esc(fmtTime(w.resets_at))}` : '';
+      const ulg = w.Ultimate ? ' · ultimate' : (w.Short ? ' · short' : '');
+      const reset = w.ResetsAt ? `resets ${esc(fmtTime(w.ResetsAt))}` : '';
       subBlock += `<div class="bar-row">
         <div class="bar-label">
-          <span class="name">${esc(w.label || 'quota')}${esc(ulg)}</span>
+          <span class="name">${esc(w.Label || 'quota')}${esc(ulg)}</span>
           <span class="pct">${p == null ? '—' : (p * 100).toFixed(1) + '%'}</span>
         </div>
         <div class="bar-track"><div class="bar-fill ${fillCls}" style="width:${p == null ? 0 : Math.max(0, Math.min(1, p)) * 100}%"></div></div>
         ${reset ? `<div class="bar-meta">${reset}</div>` : ''}
       </div>`;
     }
-    const head = `${esc(name)}${snap.account ? ' · ' + esc(snap.account) : ''}${snap.plan ? ' · ' + esc(snap.plan) : ''}`;
+    const head = `${esc(name)}${snap.Account ? ' · ' + esc(snap.Account) : ''}${snap.Plan ? ' · ' + esc(snap.Plan) : ''}`;
     if (windows.length === 0) {
       rows += `<div class="bar-row"><div class="bar-label">
         <span class="name"><strong>${esc(head)}</strong></span>
