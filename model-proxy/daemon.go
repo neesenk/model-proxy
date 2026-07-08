@@ -116,6 +116,21 @@ func runProxy(sa serveArgs) {
 				// to both, and files must stay escape-free).
 				logColorEnabled = false
 			}
+			// Write a pid file so `login`/`logout` can SIGHUP this foreground
+			// serve to hot-reload new credentials. The daemon supervisor writes
+			// its own pid file; the worker skips this block (envRole is set), so
+			// there's no double-write. Remove it on SIGINT/SIGTERM so it doesn't
+			// go stale (the reload path self-heals stale pids too, via Signal(0)).
+			pidPath := pidFilePath(lf)
+			if err := writePidFile(pidPath, os.Getpid()); err == nil {
+				go func() {
+					sigCh := make(chan os.Signal, 1)
+					signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+					<-sigCh
+					os.Remove(pidPath)
+					os.Exit(0)
+				}()
+			}
 		}
 	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -431,7 +446,9 @@ func maybeReloadDaemon(args []string) {
 		os.Remove(pidPath)
 		return
 	}
-	_ = proc.Signal(syscall.SIGHUP)
+	if err := proc.Signal(syscall.SIGHUP); err == nil {
+		fmt.Println("  " + cGray(fmt.Sprintf("(signaled serve to reload: pid=%d)", pid)))
+	}
 }
 
 // spawnWorker starts a worker process whose stdio is the supervisor's (the log file).

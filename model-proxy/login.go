@@ -72,11 +72,11 @@ func cmdLogin(args []string) {
 		if err != nil {
 			log.Fatalf("login failed: %v", err)
 		}
-		// Signal a running daemon to hot-reload so the new account is live
-		// without a restart. No-op when no daemon/pid file is present
-		// (foreground/test case).
-		maybeReloadDaemon(args)
 	}
+	// After ANY successful login, signal a running serve to hot-reload so the
+	// new credential is live without a restart. No-op (no error) when no serve
+	// is running / no pid file — covers both `serve daemon` and foreground `serve`.
+	maybeReloadDaemon(args)
 }
 
 // runApiKeyLogin is the legacy single-key login retained as a thin wrapper so
