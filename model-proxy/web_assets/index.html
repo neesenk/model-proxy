@@ -1,5 +1,46 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>model-proxy</title>
-<link rel="stylesheet" href="styles.css"></head>
-<body><main id="app">model-proxy web UI (loading…)</main>
-<script type="module" src="app.js"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>model-proxy</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-row">
+      <div class="brand">
+        <span class="live-dot" id="live-dot" aria-hidden="true"></span>
+        <span class="brand-name">model-proxy</span>
+        <span class="brand-meta" id="brand-meta" aria-live="polite">connecting…</span>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button data-tab="status"  class="tab active" role="tab" aria-selected="true">Status</button>
+        <button data-tab="config"  class="tab"        role="tab" aria-selected="false">Config</button>
+        <button data-tab="accounts" class="tab"       role="tab" aria-selected="false">Accounts</button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section id="tab-status"   class="tab-panel active" role="tabpanel" aria-label="Status"></section>
+    <section id="tab-config"   class="tab-panel"        role="tabpanel" aria-label="Config"></section>
+    <section id="tab-accounts" class="tab-panel"        role="tabpanel" aria-label="Accounts"></section>
+  </main>
+
+  <dialog id="login-modal" aria-labelledby="login-title">
+    <form method="dialog" id="login-form">
+      <header class="modal-head">
+        <h2 id="login-title">Sign in</h2>
+        <button type="button" id="login-cancel" class="link-btn" aria-label="Close">Close</button>
+      </header>
+      <div id="login-body" class="modal-body" live-state="pending"></div>
+    </form>
+  </dialog>
+
+  <dialog id="add-modal" aria-labelledby="add-title"></dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
