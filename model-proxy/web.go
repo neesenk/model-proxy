@@ -35,12 +35,22 @@ type webServer struct {
 	p          *Proxy
 	configFile string
 	logFile    string // resolved at runProxy time; "" → fall back to cfg.LogFile
+	sessions   *loginSessionStore
 }
 
 // newWebServer builds a webServer bound to a proxy (for live state) and the
 // on-disk config path (for validate-before-write + saveAndReload).
 func newWebServer(p *Proxy, configFile string) *webServer {
-	return &webServer{p: p, configFile: configFile}
+	return &webServer{p: p, configFile: configFile, sessions: newLoginSessionStore()}
+}
+
+// webGC periodically drops stale login sessions. It runs as a goroutine
+// started by runProxy; the ticker lives for the process lifetime.
+func webGC(s *loginSessionStore) {
+	t := time.NewTicker(5 * time.Minute)
+	for range t.C {
+		s.gc()
+	}
 }
 
 // register mounts /ui/ (static assets) and /api/ (JSON) on the mux.

@@ -155,6 +155,7 @@ func runProxy(sa serveArgs) {
 		web := newWebServer(p, sa.config)
 		web.logFile = resolveLogFile(sa, cfg)
 		web.register(mux)
+		go webGC(web.sessions)
 	}
 	log.Printf("model-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
 	if err := http.ListenAndServe(cfg.Listen, mux); err != nil {
