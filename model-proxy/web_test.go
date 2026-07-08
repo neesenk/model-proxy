@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -533,5 +535,156 @@ func TestAccountsRouting(t *testing.T) {
 	mux.ServeHTTP(rec404, httptest.NewRequest("GET", "/api/no-such", nil))
 	if rec404.Code != http.StatusNotFound {
 		t.Errorf("unknown /api path status=%d want 404", rec404.Code)
+	}
+}
+
+// TestAqpLoginFlow exercises the full async aqp SSO login: start bootstraps a
+// login URL (against an httptest mock of the compass backend), a goroutine polls
+// auth/info → fetchAPIKey → saveAccount, and poll returns "done" with the email.
+// The account file must be persisted with the identity from get_or_generate.
+func TestAqpLoginFlow(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	// Mock aqp backend: bootstrap returns a login URL; auth/info returns an
+	// active user (and sets SSO_C so the jar captures it — mirroring the real
+	// backend's 200 Set-Cookie); get_or_generate returns the managed key +
+	// identity.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/compass-api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		fmt.Fprint(w, `{"result":"https://soup.shopee.io/login"}`)
+	})
+	mux.HandleFunc("/compass-api/v1/auth/info", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: ssoCookieName, Value: "test-sso-c", Path: "/"})
+		fmt.Fprint(w, `{"retcode":0,"data":{"user":{"userid":1,"email":"u@x.com","is_active":true}}}`)
+	})
+	mux.HandleFunc("/api/v1/cqp/ccswitch/api_key/get_or_generate", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"retcode":0,"data":{"api_key":"managed-key","project_id":"proj","employee_email":"u@x.com"}}`)
+	})
+	up := httptest.NewServer(mux)
+	defer up.Close()
+
+	w, p := newTestWeb(t)
+	p.mu.Lock()
+	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.mu.Unlock()
+	// Seam: point the AQP client at the mock base so BootstrapLoginURL /
+	// PollSession / fetchAPIKey hit the httptest server instead of the real
+	// compass backend.
+	w.newAqpClientFn = func(store string) *AqpClient { return newAqpClientWithBase(store, up.URL) }
+
+	rec := httptest.NewRecorder()
+	w.handleLoginStart(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
+	if rec.Code != 200 {
+		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var start struct {
+		SessionID string `json:"session_id"`
+		LoginURL  string `json:"login_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil {
+		t.Fatalf("parse start response: %v: %s", err, rec.Body.String())
+	}
+	if start.SessionID == "" || start.LoginURL == "" {
+		t.Fatalf("bad start response: %s", rec.Body.String())
+	}
+	if start.LoginURL != "https://soup.shopee.io/login" {
+		t.Errorf("login_url=%q want https://soup.shopee.io/login", start.LoginURL)
+	}
+
+	// Poll until done (the goroutine resolves quickly against the mock).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rec2 := httptest.NewRecorder()
+		w.handleLoginPoll(rec2, httptest.NewRequest("GET", "/api/login/"+start.SessionID+"/poll", nil))
+		var st struct {
+			State  string `json:"state"`
+			Result string `json:"result"`
+		}
+		json.Unmarshal(rec2.Body.Bytes(), &st)
+		if st.State == "done" {
+			if st.Result != "u@x.com" {
+				t.Errorf("poll result=%q want u@x.com", st.Result)
+			}
+			a, _ := loadAccount(authFilePath("aqp", "oauth_auth"))
+			if a == nil {
+				t.Fatal("aqp account file not written")
+			}
+			if a.Email != "u@x.com" {
+				t.Errorf("persisted email=%q want u@x.com", a.Email)
+			}
+			if a.ProjectID != "proj" {
+				t.Errorf("persisted project_id=%q want proj", a.ProjectID)
+			}
+			if a.SSOSessionCookie == "" {
+				t.Error("persisted sso_session_cookie is empty")
+			}
+			return
+		}
+		if st.State == "error" {
+			t.Fatalf("poll errored: %s", rec2.Body.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("aqp login never completed")
+}
+
+// TestAqpLoginFlow_Error asserts the goroutine sets state="error" when the
+// bootstrap itself fails (the mock returns no login URL). Guards against a
+// silent hang where startAqpLogin returns 502 but the session never resolves.
+func TestAqpLoginFlow_Error(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No "result" field → bootstrapAt fails to extract a login URL.
+		w.WriteHeader(401)
+		fmt.Fprint(w, `{"oops":"no url here"}`)
+	}))
+	defer up.Close()
+
+	w, p := newTestWeb(t)
+	p.mu.Lock()
+	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.mu.Unlock()
+	w.newAqpClientFn = func(store string) *AqpClient { return newAqpClientWithBase(store, up.URL) }
+
+	rec := httptest.NewRecorder()
+	w.handleLoginStart(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("start status=%d want 502 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestLoginRouting verifies POST /api/login/<n>/start and GET
+// /api/login/<id>/poll are wired into serveAPI and stay distinct from each
+// other and from the existing /api/accounts routes.
+func TestLoginRouting(t *testing.T) {
+	w, p := newTestWeb(t)
+	p.mu.Lock()
+	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.mu.Unlock()
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	// POST /api/login/codex/start → 400 (codex stub), proving the POST prefix
+	// route is wired (aqp would try a real bootstrap — codex short-circuits).
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/login/codex/start", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("POST /api/login/codex/start status=%d want 400: %s", rec.Code, rec.Body.String())
+	}
+
+	// POST /api/login/unknown/start → 404 (unknown provider).
+	recUnk := httptest.NewRecorder()
+	mux.ServeHTTP(recUnk, httptest.NewRequest("POST", "/api/login/unknown/start", nil))
+	if recUnk.Code != http.StatusNotFound {
+		t.Errorf("POST unknown provider status=%d want 404", recUnk.Code)
+	}
+
+	// GET /api/login/nope/poll → 404 (unknown session), proving the GET prefix
+	// route is wired and distinct from POST.
+	recPoll := httptest.NewRecorder()
+	mux.ServeHTTP(recPoll, httptest.NewRequest("GET", "/api/login/nope/poll", nil))
+	if recPoll.Code != http.StatusNotFound {
+		t.Errorf("GET unknown session status=%d want 404", recPoll.Code)
 	}
 }

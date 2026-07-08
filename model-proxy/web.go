@@ -36,12 +36,21 @@ type webServer struct {
 	configFile string
 	logFile    string // resolved at runProxy time; "" → fall back to cfg.LogFile
 	sessions   *loginSessionStore
+	// newAqpClientFn builds the AQP client used by the async login flow. In
+	// production this is newAqpClient (base = aqpBase); tests override it with
+	// newAqpClientWithBase to point at an httptest mock of the compass backend.
+	newAqpClientFn func(storePath string) *AqpClient
 }
 
 // newWebServer builds a webServer bound to a proxy (for live state) and the
 // on-disk config path (for validate-before-write + saveAndReload).
 func newWebServer(p *Proxy, configFile string) *webServer {
-	return &webServer{p: p, configFile: configFile, sessions: newLoginSessionStore()}
+	return &webServer{
+		p:              p,
+		configFile:     configFile,
+		sessions:       newLoginSessionStore(),
+		newAqpClientFn: newAqpClient,
+	}
 }
 
 // webGC periodically drops stale login sessions. It runs as a goroutine
@@ -102,6 +111,10 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleAccountAdd(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodDelete:
 		w.handleAccountRemove(resp, r)
+	case strings.HasPrefix(path, "/api/login/") && r.Method == http.MethodPost:
+		w.handleLoginStart(resp, r)
+	case strings.HasPrefix(path, "/api/login/") && r.Method == http.MethodGet:
+		w.handleLoginPoll(resp, r)
 	default:
 		writeJSONErr(resp, http.StatusNotFound, "no api route for "+path)
 	}
@@ -379,6 +392,118 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 	}
 	_ = w.p.reload(w.configFile)
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "removed"})
+}
+
+// --- Async login endpoints (Task 14: aqp; Task 15 will add codex) ---
+//
+// The async login flow is a 3-step dance over HTTP:
+//  1. POST /api/login/<provider>/start — bootstraps the login URL, stashes the
+//     in-flight AqpClient (cookie jar) in a session, and launches a goroutine
+//     that polls until the user completes login. Returns {session_id, login_url}.
+//  2. The user opens the login_url in a browser and authenticates.
+//  3. GET /api/login/<session>/poll — returns the session state ("pending" →
+//     "done" / "error"). The polling goroutine resolves the session: on success
+//     it mints the managed key, persists the account, and hot-reloads.
+
+// handleLoginStart dispatches an async login start by provider. aqp bootstraps
+// the SSO URL + launches the poll goroutine; codex is Task 15. The provider must
+// exist in config (guards against typos).
+func (w *webServer) handleLoginStart(resp http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/login/")
+	provider := strings.TrimSuffix(rest, "/start")
+	w.p.mu.RLock()
+	_, ok := w.p.cfg.Providers[provider]
+	w.p.mu.RUnlock()
+	if !ok {
+		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+provider)
+		return
+	}
+	switch provider {
+	case "aqp":
+		w.startAqpLogin(resp, r)
+	case "codex":
+		// Task 15 wires the codex device-flow poll. Return 400 until then.
+		writeJSONErr(resp, http.StatusBadRequest, "codex async login not yet implemented")
+	default:
+		writeJSONErr(resp, http.StatusBadRequest, provider+" has no async login flow")
+	}
+}
+
+// startAqpLogin bootstraps the SSO login URL against the aqp backend, stashes
+// the AqpClient (with its cookie jar) in a session, kicks the poll goroutine,
+// and returns the session id + login URL. The goroutine resolves the session
+// to "done" (mint+save+reload) or "error".
+func (w *webServer) startAqpLogin(resp http.ResponseWriter, r *http.Request) {
+	sess := w.sessions.create("aqp")
+	sess.aqpClient = w.newAqpClientFn(authFilePath("aqp", "oauth_auth"))
+	loginURL, err := sess.aqpClient.BootstrapLoginURL()
+	if err != nil {
+		sess.setState("error", err.Error())
+		writeJSONErr(resp, http.StatusBadGateway, err.Error())
+		return
+	}
+	// Stash the login_url as the session detail (re-surfaced by poll so the UI
+	// can recover it). Written under the session mutex to stay race-clean with
+	// the poll goroutine's setState calls.
+	sess.mu.Lock()
+	sess.detail = loginURL
+	sess.mu.Unlock()
+	go w.runAqpPoll(sess)
+	writeJSON(resp, http.StatusOK, map[string]string{
+		"session_id": sess.id,
+		"login_url":  loginURL,
+	})
+}
+
+// runAqpPoll is the goroutine that resolves an aqp login session: poll auth/info
+// (the jar carries SSO_A → the 200 sets SSO_C) → fetchAPIKey (mints the managed
+// key + identity) → saveAccount → hot-reload. Every failure path sets state to
+// "error" so the poll endpoint surfaces it; there is no retry — the user starts
+// a fresh session.
+func (w *webServer) runAqpPoll(sess *loginSession) {
+	if _, err := sess.aqpClient.PollSession(3 * time.Minute); err != nil {
+		sess.setState("error", err.Error())
+		return
+	}
+	keyData, err := sess.aqpClient.fetchAPIKey()
+	if err != nil {
+		sess.setState("error", "api key provisioning: "+err.Error())
+		return
+	}
+	a := &AccountData{
+		AccountID:        keyData.EmployeeEmail,
+		Email:            keyData.EmployeeEmail,
+		ProjectID:        keyData.ProjectID,
+		SSOSessionCookie: sess.aqpClient.SessionCookie(),
+		LastRefreshAt:    time.Now().Unix(),
+	}
+	if err := saveAccount(authFilePath("aqp", "oauth_auth"), a); err != nil {
+		sess.setState("error", err.Error())
+		return
+	}
+	_ = w.p.reload(w.configFile) // best-effort: account is already persisted
+	sess.setState("done", a.Email)
+}
+
+// handleLoginPoll returns the current state of an async login session
+// ("pending" / "done" / "error") plus the detail (login_url or error msg) and
+// result (email on success). A missing session yields 404 (expired or unknown).
+func (w *webServer) handleLoginPoll(resp http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/login/")
+	id := strings.TrimSuffix(rest, "/poll")
+	sess, ok := w.sessions.get(id)
+	if !ok {
+		writeJSONErr(resp, http.StatusNotFound, "unknown or expired session")
+		return
+	}
+	sess.mu.Lock()
+	state, detail, result := sess.state, sess.detail, sess.result
+	sess.mu.Unlock()
+	writeJSON(resp, http.StatusOK, map[string]string{
+		"state":  state,
+		"detail": detail,
+		"result": result,
+	})
 }
 
 // contentTypeFor maps an asset filename to its Content-Type.

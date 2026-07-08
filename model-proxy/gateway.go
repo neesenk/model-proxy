@@ -23,11 +23,11 @@ import (
 // ---- Endpoints / constants ----
 
 const (
-	aqpBase         = "https://compass.llm.shopee.io"
-	aqpAuthLogin    = aqpBase + "/compass-api/v1/auth/login" // bootstrap: 401 + SSO_A + result URL
-	aqpAuthInfo     = aqpBase + "/compass-api/v1/auth/info"  // session poll: 200 + SSO_C when authed
-	aqpAPIKeyGetGen = aqpBase + "/api/v1/cqp/ccswitch/api_key/get_or_generate"
-	aqpMonthlyUsage = aqpBase + "/api/v1/cqp/ccswitch/monthly_usage"
+	aqpBase             = "https://compass.llm.shopee.io"
+	aqpAuthLoginPath    = "/compass-api/v1/auth/login" // bootstrap: 401 + SSO_A + result URL
+	aqpAuthInfoPath     = "/compass-api/v1/auth/info"  // session poll: 200 + SSO_C when authed
+	aqpAPIKeyGetGenPath = "/api/v1/cqp/ccswitch/api_key/get_or_generate"
+	aqpMonthlyUsagePath = "/api/v1/cqp/ccswitch/monthly_usage"
 
 	ssoCookieName       = "SSO_C" // actual cookie name (verified against the real store)
 	loginCompletePath   = "/company-gateway/login-complete"
@@ -99,6 +99,7 @@ type AqpClient struct {
 	HTTP      *http.Client
 	Jar       http.CookieJar
 	storePath string
+	base      string // base URL (aqpBase in production; overridable for tests)
 
 	mu        sync.Mutex
 	cachedKey string
@@ -111,7 +112,17 @@ func newAqpClient(storePath string) *AqpClient {
 		HTTP:      &http.Client{Timeout: 30 * time.Second, Jar: jar},
 		Jar:       jar,
 		storePath: storePath,
+		base:      aqpBase,
 	}
+}
+
+// newAqpClientWithBase builds an AQP client pointing at an arbitrary base URL.
+// Used by the web login flow's test seam (httptest mock); production callers use
+// newAqpClient (base = aqpBase, identical to pre-seam behavior).
+func newAqpClientWithBase(storePath, base string) *AqpClient {
+	c := newAqpClient(storePath)
+	c.base = base
+	return c
 }
 
 // GetManagedKey returns the cached managed key; fetches via get_or_generate if none is cached.
@@ -174,7 +185,7 @@ type AuthInfoData struct {
 // BootstrapLoginURL hits auth/login expecting 401, extracts the login URL from
 // the `result` field, and retains the SSO_A cookie in the jar.
 func (c *AqpClient) BootstrapLoginURL() (string, error) {
-	return c.bootstrapAt(aqpAuthLogin)
+	return c.bootstrapAt(c.base + aqpAuthLoginPath)
 }
 
 // bootstrapAt is the URL-parametrized core, used by tests with a mock server.
@@ -203,7 +214,7 @@ func (c *AqpClient) bootstrapAt(endpoint string) (string, error) {
 // PollSession polls auth/info (using the jar's cookies) until retcode==0 && hasAccess.
 // After a successful login the response sets the SSO_C cookie, captured by the jar.
 func (c *AqpClient) PollSession(timeout time.Duration) (*AuthInfoData, error) {
-	return c.pollAt(aqpAuthInfo, timeout)
+	return c.pollAt(c.base+aqpAuthInfoPath, timeout)
 }
 
 func (c *AqpClient) pollAt(endpoint string, timeout time.Duration) (*AuthInfoData, error) {
@@ -274,7 +285,7 @@ func (c *AqpClient) SessionCookie() string {
 	if c.Jar == nil {
 		return ""
 	}
-	u, _ := url.Parse(aqpBase)
+	u, _ := url.Parse(c.base)
 	for _, ck := range c.Jar.Cookies(u) {
 		if ck.Name == ssoCookieName {
 			return fmt.Sprintf("%s=%s", ck.Name, ck.Value)
@@ -288,7 +299,7 @@ func (c *AqpClient) PublicCookies() []*http.Cookie {
 	if c.Jar == nil {
 		return nil
 	}
-	u, _ := url.Parse(aqpBase)
+	u, _ := url.Parse(c.base)
 	return c.Jar.Cookies(u)
 }
 
@@ -315,7 +326,7 @@ type APIKeyData struct {
 // fetchAPIKey calls get_or_generate with the persisted/jar SSO cookie.
 // Returns the full APIKeyData (api_key + project_id + employee identity).
 func (c *AqpClient) fetchAPIKey() (*APIKeyData, error) {
-	return c.fetchAPIKeyAt(aqpAPIKeyGetGen)
+	return c.fetchAPIKeyAt(c.base + aqpAPIKeyGetGenPath)
 }
 
 // fetchAPIKeyAt is the URL-parametrized core, used by tests with a mock server.
@@ -399,7 +410,7 @@ type MonthlyProjectUsage struct {
 // not the managed key). NOTE: the endpoint is POST and requires project_id input
 // (taken from the store's AccountData.ProjectID).
 func (c *AqpClient) MonthlyUsage() (*MonthlyProjectUsage, error) {
-	return c.monthlyUsageAt(aqpMonthlyUsage)
+	return c.monthlyUsageAt(c.base + aqpMonthlyUsagePath)
 }
 
 // monthlyUsageAt is the URL-parametrized core, used by tests with a mock server
