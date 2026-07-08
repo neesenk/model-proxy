@@ -281,6 +281,20 @@ func (p *Proxy) cfgSnapshot() *Config {
 	return p.cfg
 }
 
+// snapshotConfig returns a shallow copy of the current config under a brief
+// read lock. Used by the web account-add flow, which passes the snapshot to the
+// add cores (addApikeyAccount/addVolcengineAccount) so they see a consistent cfg
+// without holding p.mu during their network validation call (usage_url probe).
+// The Providers/Routes maps are shared with the live cfg (shallow copy) — that's
+// safe because the cores only READ them; a concurrent reload swaps p.cfg to a
+// brand-new *Config, it never mutates the maps in place.
+func (p *Proxy) snapshotConfig() *Config {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	c := *p.cfg
+	return &c
+}
+
 // providerSnapshot returns the current provider map under a brief read lock.
 func (p *Proxy) providerSnapshot() map[string]provider.Provider {
 	p.mu.RLock()

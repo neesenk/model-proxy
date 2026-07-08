@@ -88,6 +88,10 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleConfigEdit(resp, r)
 	case path == "/api/accounts" && r.Method == http.MethodGet:
 		w.handleAccountsList(resp, r)
+	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodPost:
+		w.handleAccountAdd(resp, r)
+	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodDelete:
+		w.handleAccountRemove(resp, r)
 	default:
 		writeJSONErr(resp, http.StatusNotFound, "no api route for "+path)
 	}
@@ -255,6 +259,116 @@ func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request
 		out = append(out, p)
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{"providers": out})
+}
+
+// handleAccountAdd adds an account to a provider's credential pool. For apikey
+// providers (zhipu/deepseek/volcengine) it runs the non-printing add core
+// (validate-against-usage_url → dedup → save to pool file); for volcengine it
+// uses addVolcengineAccount (AK/SK triple, no usage_url probe). For aqp/codex it
+// returns 400 pointing at the async login flow (POST /api/login/<n>/start —
+// Tasks 14/15): those providers use SSO/OAuth and cannot be added by a bare API
+// key POST. After a successful save it triggers a best-effort reload so the new
+// virtual provider is picked up; the reload error is ignored because the
+// account was already persisted to the pool file (a later reload/next request
+// will see it).
+//
+// The cfg passed to the cores is a snapshot copy taken under RLock — the cores
+// never hold p.mu during their network validation call (usage_url probe), so a
+// concurrent request isn't blocked on a 15s upstream timeout.
+func (w *webServer) handleAccountAdd(resp http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
+	w.p.mu.RLock()
+	prov, ok := w.p.cfg.Providers[name]
+	w.p.mu.RUnlock()
+	if !ok {
+		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
+		return
+	}
+	switch prov.Provider {
+	case "aqp", "codex":
+		writeJSONErr(resp, http.StatusBadRequest,
+			name+" uses the async login flow: POST /api/login/"+name+"/start")
+		return
+	}
+	var req struct {
+		APIKey    string `json:"api_key"`
+		AccessKey string `json:"access_key"`
+		SecretKey string `json:"secret_key"`
+		Label     string `json:"label"`
+		Replace   bool   `json:"replace"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(resp, http.StatusBadRequest, err.Error())
+		return
+	}
+	cred := accountCred{APIKey: req.APIKey, AccessKey: req.AccessKey, SecretKey: req.SecretKey}
+	cfg := w.p.snapshotConfig()
+	var (
+		id  string
+		err error
+	)
+	if prov.Provider == "volcengine" {
+		id, err = addVolcengineAccount(cfg, name, prov, cred, req.Label, req.Replace)
+	} else {
+		id, err = addApikeyAccount(cfg, name, prov, cred, req.Label, req.Replace)
+	}
+	if err != nil {
+		writeJSONErr(resp, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Best-effort: if reload fails the account is still saved to the pool file;
+	// the next reload/request will pick it up. Surface success regardless.
+	_ = w.p.reload(w.configFile)
+	writeJSON(resp, http.StatusOK, map[string]string{"id": id, "status": "added"})
+}
+
+// handleAccountRemove removes an account. For apikey providers it delegates to
+// removeApikeyAccount (pool file rewrite); for aqp it calls clearAccount on the
+// oauth_auth file (logout semantics — aqp is single-credential); for codex it
+// os.Removes the oauth_auth file (codex is single-credential too — using Remove
+// directly because clearAccount's not-exist tolerance is equivalent here, but
+// the explicit Remove mirrors the codex logout path). All paths trigger a
+// best-effort reload so the removed virtual provider is dropped from routing.
+//
+// Path shape: /api/accounts/<provider>/<id>. A missing id segment yields 400
+// (not a 405/panic); an unknown provider yields 404.
+func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		writeJSONErr(resp, http.StatusBadRequest, "expected /api/accounts/<provider>/<id>")
+		return
+	}
+	name, id := parts[0], parts[1]
+	w.p.mu.RLock()
+	prov, ok := w.p.cfg.Providers[name]
+	w.p.mu.RUnlock()
+	if !ok {
+		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
+		return
+	}
+	switch prov.Provider {
+	case "aqp":
+		if err := clearAccount(authFilePath(name, "oauth_auth")); err != nil {
+			writeJSONErr(resp, http.StatusInternalServerError, err.Error())
+			return
+		}
+	case "codex":
+		// codex is single-credential; remove the auth file outright. os.Remove
+		// returns an error if the file is already gone — treat that as success
+		// (idempotent remove, matching aqp's clearAccount not-exist tolerance).
+		if err := os.Remove(authFilePath(name, "oauth_auth")); err != nil && !os.IsNotExist(err) {
+			writeJSONErr(resp, http.StatusInternalServerError, err.Error())
+			return
+		}
+	default:
+		if err := removeApikeyAccount(name, prov.Provider, id); err != nil {
+			writeJSONErr(resp, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	_ = w.p.reload(w.configFile)
+	writeJSON(resp, http.StatusOK, map[string]string{"status": "removed"})
 }
 
 // contentTypeFor maps an asset filename to its Content-Type.
