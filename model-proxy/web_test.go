@@ -829,3 +829,88 @@ func TestCodexLoginFlow(t *testing.T) {
 	}
 	t.Fatal("codex login never completed")
 }
+
+// TestLoginStartByProviderID asserts handleLoginStart dispatches on the RESOLVED
+// provider_id (prov.Provider), NOT the raw URL name. A config entry named
+// "aqp-alt" with provider_id: aqp must reach the aqp flow (200 with a login URL),
+// not 400 ("aqp-alt has no async login flow"). Before the fix the switch was on
+// the URL name and "aqp-alt" fell through to default → 400.
+//
+// RED-before evidence: with the old switch-on-URL-name code, this test fails at
+// the status check (got 400, want 200). After the fix (switch on prov.Provider),
+// "aqp-alt" resolves to provider_id "aqp" and dispatches to startAqpLogin.
+func TestLoginStartByProviderID(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	// Mock aqp backend: bootstrap returns a login URL (mirrors TestAqpLoginFlow).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/compass-api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		fmt.Fprint(w, `{"result":"https://soup.shopee.io/login"}`)
+	})
+	up := httptest.NewServer(mux)
+	defer up.Close()
+
+	w, p := newTestWeb(t)
+	// Custom-named provider whose provider_id is aqp. Before the fix this name
+	// was switched on directly and fell through to default (400).
+	p.mu.Lock()
+	p.cfg.Providers["aqp-alt"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.mu.Unlock()
+	w.newAqpClientFn = func(store string) *AqpClient { return newAqpClientWithBase(store, up.URL) }
+
+	rec := httptest.NewRecorder()
+	w.handleLoginStart(rec, httptest.NewRequest("POST", "/api/login/aqp-alt/start", nil))
+	if rec.Code != 200 {
+		t.Fatalf("start status=%d want 200 (must dispatch by provider_id, not URL name): %s", rec.Code, rec.Body.String())
+	}
+	var start struct {
+		SessionID string `json:"session_id"`
+		LoginURL  string `json:"login_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil {
+		t.Fatalf("parse start response: %v: %s", err, rec.Body.String())
+	}
+	if start.LoginURL != "https://soup.shopee.io/login" {
+		t.Errorf("login_url=%q want https://soup.shopee.io/login", start.LoginURL)
+	}
+	if start.SessionID == "" {
+		t.Error("session_id empty")
+	}
+}
+
+// TestConfigEditSchedulingNewIntKey asserts that a structured edit which ADDS a
+// brand-new int key (circuit_threshold) to a config with NO scheduling block
+// produces a value node whose tag yaml.v3 infers as int (not an explicit !!str).
+// Before the scalarNode fix, the new node was !!str "5", yaml.v3 emitted the
+// explicit tag, and reload failed "cannot unmarshal !!str 5 into int" (400).
+//
+// RED-before evidence: with the old scalarNode (Tag: "!!str"), this test fails
+// at the status check (got 400 with "cannot unmarshal !!str", want 200) and the
+// threshold assertion never runs. After the fix (Tag: ""), yaml.v3 infers int
+// from "5" and reload succeeds with CircuitThreshold == 5.
+func TestConfigEditSchedulingNewIntKey(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	// Config with NO scheduling block — editScheduling must create both the
+	// block and the circuit_threshold key from scratch.
+	original := []byte("listen: 127.0.0.1:17000\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n")
+	os.WriteFile(cfgPath, original, 0o644)
+	w, p := newTestWeb(t)
+	w.configFile = cfgPath
+
+	rec := httptest.NewRecorder()
+	body := `{"kind":"scheduling","data":{"circuit_threshold":5}}`
+	w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	// Reload must have decoded the new int key correctly.
+	if p.cfg.Scheduling.CircuitThreshold != 5 {
+		t.Errorf("reload did not apply threshold 5: %d", p.cfg.Scheduling.CircuitThreshold)
+	}
+	// The emitted YAML must NOT carry an explicit !!str tag on the value.
+	got, _ := os.ReadFile(cfgPath)
+	if strings.Contains(string(got), "!!str") {
+		t.Errorf("emitted YAML has explicit !!str tag (should infer int):\n%s", got)
+	}
+}

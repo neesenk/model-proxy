@@ -207,7 +207,12 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 func (w *webServer) handleLogs(resp http.ResponseWriter, r *http.Request) {
 	path := w.logFile
 	if path == "" {
+		// Snapshot cfg under RLock — w.p.cfg is swapped by reload and reading
+		// it unlocked would race (production always sets w.logFile so this
+		// branch is rarely hit, but -race must stay clean).
+		w.p.mu.RLock()
 		path = w.p.cfg.LogFile
+		w.p.mu.RUnlock()
 	}
 	if path == "" {
 		writeJSONErr(resp, http.StatusNotFound, "no log_file configured")
@@ -455,34 +460,40 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 // handleLoginStart dispatches an async login start by provider. aqp bootstraps
 // the SSO URL + launches the poll goroutine; codex bootstraps the device-flow
 // user code + launches the device-flow poll goroutine. The provider must exist
-// in config (guards against typos).
+// in config (guards against typos). The switch is on the RESOLVED provider_id
+// (prov.Provider), NOT the URL name: a config entry can be named anything
+// (e.g. aqp-alt: {provider_id: aqp}), and we must dispatch aqp-alt → the aqp
+// flow. The name is passed through to the start/poll functions so credentials
+// are saved to the right file (<name>_oauth_auth.json).
 func (w *webServer) handleLoginStart(resp http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/login/")
-	provider := strings.TrimSuffix(rest, "/start")
+	name := strings.TrimSuffix(rest, "/start")
 	w.p.mu.RLock()
-	_, ok := w.p.cfg.Providers[provider]
+	prov, ok := w.p.cfg.Providers[name]
 	w.p.mu.RUnlock()
 	if !ok {
-		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+provider)
+		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
 		return
 	}
-	switch provider {
+	switch prov.Provider {
 	case "aqp":
-		w.startAqpLogin(resp, r)
+		w.startAqpLogin(resp, r, name)
 	case "codex":
-		w.startCodexLogin(resp, r)
+		w.startCodexLogin(resp, r, name)
 	default:
-		writeJSONErr(resp, http.StatusBadRequest, provider+" has no async login flow")
+		writeJSONErr(resp, http.StatusBadRequest, name+" has no async login flow")
 	}
 }
 
 // startAqpLogin bootstraps the SSO login URL against the aqp backend, stashes
 // the AqpClient (with its cookie jar) in a session, kicks the poll goroutine,
 // and returns the session id + login URL. The goroutine resolves the session
-// to "done" (mint+save+reload) or "error".
-func (w *webServer) startAqpLogin(resp http.ResponseWriter, r *http.Request) {
+// to "done" (mint+save+reload) or "error". name is the config key (not the
+// provider_id) so credentials land in <name>_oauth_auth.json — matching what
+// buildProviders/newAuthProvider reads.
+func (w *webServer) startAqpLogin(resp http.ResponseWriter, r *http.Request, name string) {
 	sess := w.sessions.create("aqp")
-	sess.aqpClient = w.newAqpClientFn(authFilePath("aqp", "oauth_auth"))
+	sess.aqpClient = w.newAqpClientFn(authFilePath(name, "oauth_auth"))
 	loginURL, err := sess.aqpClient.BootstrapLoginURL()
 	if err != nil {
 		sess.setState("error", err.Error())
@@ -495,7 +506,7 @@ func (w *webServer) startAqpLogin(resp http.ResponseWriter, r *http.Request) {
 	sess.mu.Lock()
 	sess.detail = loginURL
 	sess.mu.Unlock()
-	go w.runAqpPoll(sess)
+	go w.runAqpPoll(sess, name)
 	writeJSON(resp, http.StatusOK, map[string]string{
 		"session_id": sess.id,
 		"login_url":  loginURL,
@@ -506,8 +517,8 @@ func (w *webServer) startAqpLogin(resp http.ResponseWriter, r *http.Request) {
 // (the jar carries SSO_A → the 200 sets SSO_C) → fetchAPIKey (mints the managed
 // key + identity) → saveAccount → hot-reload. Every failure path sets state to
 // "error" so the poll endpoint surfaces it; there is no retry — the user starts
-// a fresh session.
-func (w *webServer) runAqpPoll(sess *loginSession) {
+// a fresh session. name is the config key so saveAccount writes the right file.
+func (w *webServer) runAqpPoll(sess *loginSession, name string) {
 	if _, err := sess.aqpClient.PollSession(3 * time.Minute); err != nil {
 		sess.setState("error", err.Error())
 		return
@@ -524,7 +535,7 @@ func (w *webServer) runAqpPoll(sess *loginSession) {
 		SSOSessionCookie: sess.aqpClient.SessionCookie(),
 		LastRefreshAt:    time.Now().Unix(),
 	}
-	if err := saveAccount(authFilePath("aqp", "oauth_auth"), a); err != nil {
+	if err := saveAccount(authFilePath(name, "oauth_auth"), a); err != nil {
 		sess.setState("error", err.Error())
 		return
 	}
@@ -535,8 +546,9 @@ func (w *webServer) runAqpPoll(sess *loginSession) {
 // startCodexLogin bootstraps the OAuth device flow: requestUserCode → stash the
 // device_auth_id + user_code + poll interval + options in a session → kick the
 // poll goroutine → return {session_id, verify_url, user_code}. The goroutine
-// resolves the session to "done" (exchange+save+reload) or "error".
-func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request) {
+// resolves the session to "done" (exchange+save+reload) or "error". name is the
+// config key so the auth file is written to <name>_oauth_auth.json.
+func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request, name string) {
 	opts := w.newCodexOptions()
 	uc, err := requestUserCode(opts, codexOAuthClientID)
 	if err != nil {
@@ -557,7 +569,7 @@ func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request) {
 	sess.mu.Lock()
 	sess.detail = codexOAuthVerifyURL + "  code: " + uc.UserCode
 	sess.mu.Unlock()
-	go w.runCodexPoll(sess)
+	go w.runCodexPoll(sess, name)
 	writeJSON(resp, http.StatusOK, map[string]string{
 		"session_id": sess.id,
 		"verify_url": codexOAuthVerifyURL,
@@ -570,7 +582,8 @@ func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request) {
 // (trade the auth code for access/refresh/id tokens) → write the codex auth
 // file 0600 → hot-reload. Every failure path sets state to "error" so the poll
 // endpoint surfaces it; there is no retry — the user starts a fresh session.
-func (w *webServer) runCodexPoll(sess *loginSession) {
+// name is the config key so the auth file is written to <name>_oauth_auth.json.
+func (w *webServer) runCodexPoll(sess *loginSession, name string) {
 	cs := sess.codex
 	authCode, err := pollForToken(cs.opts, cs.deviceAuthID, cs.userCode, cs.interval)
 	if err != nil {
@@ -582,7 +595,7 @@ func (w *webServer) runCodexPoll(sess *loginSession) {
 		sess.setState("error", err.Error())
 		return
 	}
-	path := authFilePath("codex", "oauth_auth")
+	path := authFilePath(name, "oauth_auth")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		sess.setState("error", err.Error())
 		return
@@ -781,15 +794,22 @@ func mapNode(root *yaml.Node) *yaml.Node {
 	return root.Content[0]
 }
 
-// scalarNode builds a plain string scalar node.
+// scalarNode builds a plain scalar node. Tag is left empty so yaml.v3 infers
+// the type per-value when encoding: "5" → int, "plan" → string,
+// "127.0.0.1:18000" → string. This matters for NEW keys: a newly-added int key
+// (e.g. circuit_threshold on a config with no scheduling block) must NOT carry
+// an explicit !!str tag, or reload fails ("cannot unmarshal !!str 5 into int").
+// For existing-key edits only .Value is touched (setScalar/setChildScalar),
+// preserving the node's original tag — so this default only affects new keys.
 func scalarNode(v string) *yaml.Node {
-	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v}
+	return &yaml.Node{Kind: yaml.ScalarNode, Value: v}
 }
 
 // setScalar sets a top-level key -> scalar value (creating the key if absent).
 // On update only Value is touched: yaml.v3 auto-detects the scalar tag (!int /
 // !!str / !!bool) on unmarshal, so re-tagging would corrupt typed fields (a
-// !!str "5" fails to decode into an int). New keys default to !!str.
+// !!str "5" fails to decode into an int). New keys use scalarNode whose Tag is
+// empty, so yaml.v3 infers the type per-value at encode time.
 func setScalar(root *yaml.Node, key, value string) {
 	m := mapNode(root)
 	if m == nil {
