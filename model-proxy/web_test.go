@@ -59,6 +59,37 @@ func TestAPIStatusUnknown404(t *testing.T) {
 	}
 }
 
+// TestAPITokens verifies /api/tokens returns the snapshot and /api/tokens/reset
+// zeros it. The snapshot key shape is {provider, model} → {input, output, ...}.
+func TestAPITokens(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	w, p := newTestWeb(t)
+	p.tokens.commit(tokenKey{Provider: "zhipu", Model: "glm-5"}, tokenUsage{Input: 30, Output: 12})
+
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	// GET /api/tokens returns the committed usage.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/tokens", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"input":30`) || !strings.Contains(rec.Body.String(), `"output":12`) {
+		t.Errorf("tokens body missing committed usage: %s", rec.Body.String())
+	}
+
+	// POST /api/tokens/reset clears the counter.
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/api/tokens/reset", nil))
+	if rec2.Code != 200 {
+		t.Fatalf("reset status=%d want 200", rec2.Code)
+	}
+	if len(p.tokens.snapshot()) != 0 {
+		t.Errorf("after reset, snapshot non-empty: %+v", p.tokens.snapshot())
+	}
+}
+
 func TestWebServesUI(t *testing.T) {
 	w, _ := newTestWeb(t)
 	mux := http.NewServeMux()

@@ -31,6 +31,7 @@ type Proxy struct {
 	sticky    map[string]routeSticky     // exposed model → current provider + since
 	quota     *quotaTracker              // background quota poller; nil only in degenerate tests
 	metrics   *metricsStore              // request counters (atomic); nil only in degenerate tests
+	tokens    *tokenCounter              // SSE-scanned token usage; nil only in degenerate tests
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -261,6 +262,13 @@ func NewProxy(cfg *Config) *Proxy {
 	p.quota.stickySnapshot = p.snapshotSticky
 	p.quota.start()
 	p.metrics = newMetricsStore()
+	// SSE token counter: load the persisted baseline so usage accrues across
+	// restarts. A missing file is not an error (first run). Failure to load
+	// only logs — the proxy still works, just without the baseline.
+	p.tokens = newTokenCounter(tokenStatePath())
+	if err := p.tokens.load(); err != nil {
+		log.Printf("[tokens] load baseline failed: %v", err)
+	}
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
 	if loaded := p.quota.LoadedSticky; len(loaded) > 0 {
@@ -835,7 +843,15 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		flushCopy(w, resp.Body)
+		// Wrap SSE 2xx responses in a usageScanner so observed usage events
+		// (anthropic message_start/message_delta, openai usage) accrue to the
+		// (provider, model) counter. Non-SSE responses pass through unscanned
+		// (no overhead). Nil-guard like metrics for degenerate tests.
+		if p.tokens != nil && isSSE(resp.Header) {
+			flushCopy(w, newUsageScanner(resp.Body, tokenKey{Provider: t.Provider, Model: t.Model}, p.tokens))
+		} else {
+			flushCopy(w, resp.Body)
+		}
 		resp.Body.Close()
 		return true
 	}
@@ -1276,6 +1292,18 @@ func parseHHMM(s string) (int, bool) {
 		return 0, false
 	}
 	return h*60 + m, true
+}
+
+// isSSE reports whether the response is an SSE stream (content-type
+// text/event-stream). Only such responses are wrapped by the usage scanner —
+// plain JSON / chunked-but-not-SSE bodies pay no scanner overhead.
+func isSSE(h http.Header) bool {
+	for _, ct := range h.Values("content-type") {
+		if strings.Contains(ct, "text/event-stream") {
+			return true
+		}
+	}
+	return false
 }
 
 // flushCopy reads, writes, and flushes per chunk, supporting SSE streaming.

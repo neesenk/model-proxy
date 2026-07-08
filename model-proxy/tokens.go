@@ -5,8 +5,16 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 )
+
+// tokenStatePath returns the persisted token-usage path (~/.model-proxy/token_usage.json).
+// Mirrors the quota_state.json / cred-file convention: all model-proxy state lives
+// under ~/.model-proxy/.
+func tokenStatePath() string {
+	return filepath.Join(homeDir(), ".model-proxy", "token_usage.json")
+}
 
 type tokenKey struct {
 	Provider string `json:"provider"`

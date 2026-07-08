@@ -135,6 +135,9 @@ func runProxy(sa serveArgs) {
 	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	p := NewProxy(cfg)
+	// Periodically persist the in-memory token counter so observed usage
+	// survives a restart. The counter loads its baseline in NewProxy.
+	go persistTokensLoop(p.tokens)
 	// SIGHUP → hot reload config.
 	go func() {
 		hupCh := make(chan os.Signal, 1)
@@ -160,6 +163,22 @@ func runProxy(sa serveArgs) {
 	log.Printf("model-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
 	if err := http.ListenAndServe(cfg.Listen, mux); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// persistTokensLoop periodically saves the in-memory token counter to disk so
+// observed usage survives a restart. Mirrors the quota poller's lifecycle: the
+// counter is created and baseline-loaded in NewProxy; this loop only writes.
+// Nil-safe so degenerate tests / a nil counter are a no-op.
+func persistTokensLoop(tc *tokenCounter) {
+	if tc == nil {
+		return
+	}
+	t := time.NewTicker(5 * time.Minute)
+	for range t.C {
+		if err := tc.save(); err != nil {
+			log.Printf("[tokens] persist failed: %v", err)
+		}
 	}
 }
 

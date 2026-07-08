@@ -3,6 +3,11 @@ package main
 import (
 	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -157,5 +162,76 @@ func TestTokenCounterConcurrent(t *testing.T) {
 	}
 	if got.Requests != committers {
 		t.Errorf("Requests = %d, want %d", got.Requests, committers)
+	}
+}
+
+// TestForwardCountsTokens verifies the proxy forward hot path wraps SSE response
+// bodies in a usageScanner keyed by the chosen (provider, model), committing
+// observed anthropic usage (input_tokens from message_start, output_tokens from
+// message_delta) to the shared tokenCounter. Non-SSE responses are not scanned.
+// HOME is pinned to a temp dir (with a dummy zhipu apikey) so NewProxy's
+// baseline load can't pick up the developer's real ~/.model-proxy/token_usage.json
+// and the provider can authenticate against the mock upstream.
+func TestForwardCountsTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "zhipu_apikey.json"), []byte(`{"api_key":"sk-test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":8}}\n\n")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write(stream)
+	}))
+	defer up.Close()
+	cfg, err := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	p := NewProxy(cfg)
+	rec := httptest.NewRecorder()
+	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
+	io.Copy(io.Discard, rec.Result().Body)
+	rec.Result().Body.Close()
+	got := p.tokens.snapshot()[tokenKey{Provider: "zhipu", Model: "glm-5"}]
+	if got.Input != 42 || got.Output != 8 {
+		t.Errorf("tokens = %+v, want in=42 out=8", got)
+	}
+	if got.Requests != 1 {
+		t.Errorf("requests = %d, want 1", got.Requests)
+	}
+}
+
+// TestForwardDoesNotScanNonSSE verifies a non-SSE 2xx response is NOT wrapped:
+// the counter must stay zero (no scanner overhead, no commit) for plain JSON.
+func TestForwardDoesNotScanNonSSE(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "zhipu_apikey.json"), []byte(`{"api_key":"sk-test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer up.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	p := NewProxy(cfg)
+	rec := httptest.NewRecorder()
+	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)))
+	io.Copy(io.Discard, rec.Result().Body)
+	rec.Result().Body.Close()
+	got := p.tokens.snapshot()[tokenKey{Provider: "zhipu", Model: "glm-5"}]
+	if got.Input != 0 || got.Output != 0 || got.Requests != 0 {
+		t.Errorf("non-SSE tokens = %+v, want zero (non-SSE must not be scanned)", got)
 	}
 }

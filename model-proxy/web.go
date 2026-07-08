@@ -119,6 +119,10 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleConfigEdit(resp, r)
 	case path == "/api/accounts" && r.Method == http.MethodGet:
 		w.handleAccountsList(resp, r)
+	case path == "/api/tokens" && r.Method == http.MethodGet:
+		w.handleTokens(resp, r)
+	case path == "/api/tokens/reset" && r.Method == http.MethodPost:
+		w.handleTokensReset(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodPost:
 		w.handleAccountAdd(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodDelete:
@@ -294,6 +298,35 @@ func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request
 		out = append(out, p)
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{"providers": out})
+}
+
+// handleTokens returns the per-(provider, model) token-usage snapshot accrued
+// from observed SSE streams. Nil-guarded so a degenerate Proxy (no tokens) still
+// answers with an empty list. The map[tokenKey]tokenUsage snapshot is flattened
+// to a JSON-friendly slice (JSON object keys must be strings; tokenKey is a struct).
+func (w *webServer) handleTokens(resp http.ResponseWriter, r *http.Request) {
+	type entry struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		tokenUsage
+	}
+	out := []entry{}
+	if w.p.tokens != nil {
+		for k, u := range w.p.tokens.snapshot() {
+			out = append(out, entry{Provider: k.Provider, Model: k.Model, tokenUsage: u})
+		}
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{"usage": out})
+}
+
+// handleTokensReset zeroes the in-memory token counters. Does not delete the
+// persisted file; the next persist loop tick will overwrite it with the empty
+// snapshot.
+func (w *webServer) handleTokensReset(resp http.ResponseWriter, r *http.Request) {
+	if w.p.tokens != nil {
+		w.p.tokens.reset()
+	}
+	writeJSON(resp, http.StatusOK, map[string]string{"status": "reset"})
 }
 
 // handleAccountAdd adds an account to a provider's credential pool. For apikey
