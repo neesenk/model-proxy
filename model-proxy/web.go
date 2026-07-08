@@ -446,9 +446,9 @@ func (w *webServer) editConfigNode(mutate func(root *yaml.Node)) error {
 	return w.saveAndReload(buf.Bytes())
 }
 
-// handleConfigEdit dispatches a structured edit by kind. general + scheduling
-// are implemented here; provider/route/claude_mapping (Task 9) return 400 until
-// editStructured lands.
+// handleConfigEdit dispatches a structured edit by kind. All five kinds are
+// handled: general + scheduling apply scalar patches; provider/route/claude_mapping
+// (Task 9) flow through editStructured for nested CRUD. Unknown kinds return 400.
 func (w *webServer) handleConfigEdit(resp http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Kind string         `json:"kind"`
@@ -557,18 +557,6 @@ func (w *webServer) editStructured(kind, name string, d map[string]any) error {
 			}
 		}
 	})
-}
-
-// kindKey returns the top-level config section a kind lives under. It is
-// reserved for callers that route by kind generically; editStructured inlines
-// its switch explicitly so the dispatch is co-located with the mutation, but
-// kindKey is kept as a utility for future callers (e.g. a generic delete).
-func kindKey(kind, name string) string {
-	switch kind {
-	case "provider":
-		return "providers"
-	}
-	return name
 }
 
 // deleteKey removes a key (and its value) from a mapping node in place. It
