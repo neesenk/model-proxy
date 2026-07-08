@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +30,7 @@ var webFS fs.FS = webAssets
 type webServer struct {
 	p          *Proxy
 	configFile string
+	logFile    string // resolved at runProxy time; "" → fall back to cfg.LogFile
 }
 
 // newWebServer builds a webServer bound to a proxy (for live state) and the
@@ -71,6 +74,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/api/status" && r.Method == http.MethodGet:
 		w.handleStatus(resp, r)
+	case path == "/api/logs" && r.Method == http.MethodGet:
+		w.handleLogs(resp, r)
 	default:
 		writeJSONErr(resp, http.StatusNotFound, "no api route for "+path)
 	}
@@ -137,6 +142,50 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 		"schedule": json.RawMessage(w.p.scheduleStatus()),
 		"counters": w.p.metrics.snapshot(),
 	})
+}
+
+// contentTypeFor maps an asset filename to its Content-Type.
+
+// handleLogs returns the last N lines of the daemon's log file. tail defaults to
+// 200 and is capped at 1000. The log path is set at runProxy time; if unset the
+// handler falls back to cfg.LogFile, or 404 if neither is configured.
+func (w *webServer) handleLogs(resp http.ResponseWriter, r *http.Request) {
+	path := w.logFile
+	if path == "" {
+		path = w.p.cfg.LogFile
+	}
+	if path == "" {
+		writeJSONErr(resp, http.StatusNotFound, "no log_file configured")
+		return
+	}
+	n := 200
+	if q := r.URL.Query().Get("tail"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 {
+			n = v
+		}
+	}
+	if n > 1000 {
+		n = 1000
+	}
+	lines, err := tailFile(path, n)
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{"lines": lines})
+}
+
+// tailFile returns the last n lines of path (fewer if the file is shorter).
+func tailFile(path string, n int) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	all := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(all) > n {
+		all = all[len(all)-n:]
+	}
+	return all, nil
 }
 
 // contentTypeFor maps an asset filename to its Content-Type.

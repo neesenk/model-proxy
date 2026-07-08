@@ -153,6 +153,7 @@ func runProxy(sa serveArgs) {
 	mux.HandleFunc("/", p.handler)
 	if cfg.Web.Enabled {
 		web := newWebServer(p, sa.config)
+		web.logFile = resolveLogFile(sa, cfg)
 		web.register(mux)
 	}
 	log.Printf("model-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))

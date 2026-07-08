@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -154,3 +155,29 @@ func (fi fakeFileInfo) Mode() fs.FileMode  { return 0444 }
 func (fi fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (fi fakeFileInfo) IsDir() bool        { return false }
 func (fi fakeFileInfo) Sys() any           { return nil }
+
+func TestAPILogs(t *testing.T) {
+	tmp := t.TempDir() + "/model-proxy.log"
+	logContent := "line1\nline2\nline3\nline4\nline5\n"
+	if err := os.WriteFile(tmp, []byte(logContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := newTestWeb(t)
+	w.logFile = tmp // override hook for tests
+
+	rec := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	w.register(mux)
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/logs?tail=2", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200", rec.Code)
+	}
+	got := rec.Body.String()
+	// last 2 lines
+	if !strings.Contains(got, "line4") || !strings.Contains(got, "line5") {
+		t.Errorf("tail=2 missing last lines: %q", got)
+	}
+	if strings.Contains(got, "line1") {
+		t.Errorf("tail=2 should drop line1: %q", got)
+	}
+}
