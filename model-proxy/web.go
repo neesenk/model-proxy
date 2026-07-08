@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +77,10 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleStatus(resp, r)
 	case path == "/api/logs" && r.Method == http.MethodGet:
 		w.handleLogs(resp, r)
+	case path == "/api/config" && r.Method == http.MethodGet:
+		w.handleConfigGet(resp, r)
+	case path == "/api/config" && r.Method == http.MethodPost:
+		w.handleConfigPut(resp, r)
 	default:
 		writeJSONErr(resp, http.StatusNotFound, "no api route for "+path)
 	}
@@ -222,4 +227,98 @@ func jsonMust(v any) string {
 		panic(fmt.Sprintf("jsonMust: %v", err))
 	}
 	return string(b)
+}
+
+// backupConfig copies path to bak (overwriting any prior backup). Best-effort:
+// a backup failure is silent (the live config is the source of truth and can be
+// reconstructed from the UI); if path does not yet exist nothing is written.
+// (Named backupConfig to avoid a clash with takeover.go's backup.)
+func backupConfig(path, bak string) {
+	in, err := os.ReadFile(path)
+	if err != nil {
+		return // nothing to back up (first write)
+	}
+	os.WriteFile(bak, in, 0o644)
+}
+
+// atomicWrite writes data to path via a temp file + rename, mirroring savePool
+// (pool.go) and persist (quota.go): Rename is a same-directory atomic move, so
+// the on-disk file appears whole or not at all — a crash mid-write never leaves
+// a truncated config. The temp file lives next to the target (MkdirAll on its
+// dir) so rename stays within one directory.
+func atomicWrite(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// saveAndReload is the load-bearing config-mutation pipeline (Tasks 8–9 funnel
+// structured edits through it too): validate bytes WITHOUT touching disk →
+// back up the current file → write atomically → hot-reload the proxy. On
+// validation failure nothing is written and no backup is created. On reload
+// failure (defensive — should not happen post-validate) the backup is restored.
+func (w *webServer) saveAndReload(data []byte) error {
+	if _, err := LoadConfigFromBytes(w.configFile, data); err != nil {
+		return err
+	}
+	bak := w.configFile + ".bak"
+	backupConfig(w.configFile, bak)
+	if err := atomicWrite(w.configFile, data); err != nil {
+		return err
+	}
+	if err := w.p.reload(w.configFile); err != nil {
+		// Defensive: reload shouldn't fail post-validate; restore from backup.
+		if rb, rerr := os.ReadFile(bak); rerr == nil {
+			atomicWrite(w.configFile, rb)
+		}
+		return err
+	}
+	return nil
+}
+
+// handleConfigGet returns the raw config YAML plus a small summary (listen
+// address + provider/route counts). The YAML is returned verbatim so the UI's
+// editor round-trips byte-identically with saveAndReload.
+func (w *webServer) handleConfigGet(resp http.ResponseWriter, r *http.Request) {
+	data, err := os.ReadFile(w.configFile)
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, err.Error())
+		return
+	}
+	cfg, err := LoadConfigFromBytes(w.configFile, data)
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"yaml": string(data),
+		"summary": map[string]any{
+			"listen":         cfg.Listen,
+			"provider_count": len(cfg.Providers),
+			"route_count":    len(cfg.Routes),
+		},
+	})
+}
+
+// handleConfigPut accepts a {"yaml": "..."} body, validates it, and runs the
+// saveAndReload pipeline. A validation/reload error yields 400 with the error
+// message; success yields 200 {"status":"reloaded"}.
+func (w *webServer) handleConfigPut(resp http.ResponseWriter, r *http.Request) {
+	var req struct {
+		YAML string `json:"yaml"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(resp, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if err := w.saveAndReload([]byte(req.YAML)); err != nil {
+		writeJSONErr(resp, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(resp, http.StatusOK, map[string]string{"status": "reloaded"})
 }

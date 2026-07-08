@@ -156,6 +156,60 @@ func (fi fakeFileInfo) ModTime() time.Time { return time.Time{} }
 func (fi fakeFileInfo) IsDir() bool        { return false }
 func (fi fakeFileInfo) Sys() any           { return nil }
 
+func TestConfigPutValid(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	original := []byte("listen: 127.0.0.1:17000\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n")
+	os.WriteFile(cfgPath, original, 0o644)
+
+	w, p := newTestWeb(t)
+	w.configFile = cfgPath
+	edited := []byte("listen: 127.0.0.1:17001\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n")
+	rec := httptest.NewRecorder()
+	body := `{"yaml":"` + strings.ReplaceAll(strings.ReplaceAll(string(edited), "\n", "\\n"), `"`, `\"`) + `"}`
+	w.handleConfigPut(rec, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	if !bytes.Equal(got, edited) {
+		t.Errorf("config not written; got %q want %q", got, edited)
+	}
+	bak, _ := os.ReadFile(cfgPath + ".bak")
+	if !bytes.Equal(bak, original) {
+		t.Errorf("backup not original; got %q", bak)
+	}
+	// reload happened: p.cfg.Listen updated.
+	if p.cfg.Listen != "127.0.0.1:17001" {
+		t.Errorf("reload did not apply: listen=%q", p.cfg.Listen)
+	}
+}
+
+func TestConfigPutInvalidNoWrite(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	original := []byte("listen: 127.0.0.1:17000\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n")
+	os.WriteFile(cfgPath, original, 0o644)
+
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	// invalid: route references a missing provider
+	bad := []byte("listen: 127.0.0.1:17000\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\nroutes:\n  m: [{provider: ghost, model: m}]\n")
+	rec := httptest.NewRecorder()
+	body := `{"yaml":"` + strings.ReplaceAll(strings.ReplaceAll(string(bad), "\n", "\\n"), `"`, `\"`) + `"}`
+	w.handleConfigPut(rec, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
+	if rec.Code != 400 {
+		t.Fatalf("status=%d want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	if !bytes.Equal(got, original) {
+		t.Errorf("invalid write should not touch config; got %q", got)
+	}
+	if _, err := os.Stat(cfgPath + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("invalid write should not create a backup")
+	}
+}
+
 func TestAPILogs(t *testing.T) {
 	tmp := t.TempDir() + "/model-proxy.log"
 	logContent := "line1\nline2\nline3\nline4\nline5\n"
