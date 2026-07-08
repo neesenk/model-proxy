@@ -102,12 +102,16 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) error {
 // validation happen BEFORE the cross-process lock — a holder who walks away
 // mid-prompt would otherwise stall every other login/logout for the 60s stale
 // window. The replace confirmation is resolved with a read-only loadPool before
-// the lock; the authoritative load→dedup→save then runs under withPoolLock. The
-// read-twice is safe: the inside-lock load re-finds the entry by id (which may
-// have changed between the two loads), so a concurrent mutation is reconciled
-// rather than clobbered.
+// the lock; the authoritative load→dedup→save then runs under withPoolLock (in
+// addApikeyAccount). The read-twice is safe: the inside-lock load re-finds the
+// entry by id (which may have changed between the two loads), so a concurrent
+// mutation is reconciled rather than clobbered.
+//
+// This is the CLI wrapper: it owns stdin prompting + stdout printing, then
+// delegates the validate→dedup→save core to addApikeyAccount (reused by the
+// web layer, Task 12).
 func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, label string, replace bool) error {
-	// === BEFORE LOCK: key prompt + usage-URL validation + accountIDFor ===
+	// === BEFORE LOCK: key prompt ===
 	key := strings.TrimSpace(in)
 	if key == "" {
 		fmt.Printf("Enter API key for %s: ", provName)
@@ -121,30 +125,14 @@ func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, la
 	if key == "" {
 		return fmt.Errorf("empty API key")
 	}
-
-	// Validate by calling the usage endpoint if configured.
-	// 401/403 = key invalid; anything else (200, 404, etc.) = key accepted
-	// (the endpoint may not exist, but the key itself was not rejected).
 	if prov.UsageURL != "" {
 		fmt.Fprintf(os.Stderr, "Validating API key...\n")
-		req, _ := http.NewRequest("GET", prov.UsageURL, nil)
-		req.Header.Set("Authorization", "Bearer "+key)
-		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
-		if err != nil {
-			return fmt.Errorf("validation failed: %w", err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
-		}
 	}
-
-	id := accountIDFor(prov.Provider, accountCred{APIKey: key})
 
 	// Resolve the replace confirmation BEFORE the lock (stdin must never block
 	// the cross-process lock). A read-only loadPool + scan for the id decides
 	// whether to prompt; if the user declines, abort without acquiring the lock.
+	id := accountIDFor(prov.Provider, accountCred{APIKey: key})
 	if !replace {
 		existing, err := loadPool(provName, prov.Provider)
 		if err != nil {
@@ -161,11 +149,52 @@ func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, la
 				break
 			}
 		}
+		replace = true // user confirmed; tell the core to overwrite
 	}
 
-	// === INSIDE LOCK: load → dedup/append → save ===
-	return withPoolLock(provName, func() error {
-		pool, err := loadPool(provName, prov.Provider)
+	if _, err := addApikeyAccount(cfg, provName, prov, accountCred{APIKey: key}, label, replace); err != nil {
+		return err
+	}
+	// Print the confirmation line (label resolved from the freshly-saved pool,
+	// which may have been re-sorted by savePool).
+	pool, _ := loadPool(provName, prov.Provider)
+	fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
+	return nil
+}
+
+// addApikeyAccount is the non-printing core extracted from
+// runApiKeyLoginWithInput: it validates the key against usage_url (if set),
+// dedups by id under the cross-process lock, and writes the pool. Returns the
+// account id. No stdin, no stdout — the CLI wrapper (or the web layer) handles
+// UX. Callers decide replace semantics: the CLI resolves it via an interactive
+// prompt BEFORE calling this; the web layer passes the client's choice.
+//
+// replace=false on an existing id returns "login cancelled" without modifying
+// the pool — callers surface that error as appropriate (CLI prints, web 409s).
+func addApikeyAccount(cfg *Config, name string, prov Provider, cred accountCred, label string, replace bool) (string, error) {
+	key := strings.TrimSpace(cred.APIKey)
+	if key == "" {
+		return "", fmt.Errorf("empty API key")
+	}
+	// Validate against the usage endpoint if configured. 401/403 = key invalid;
+	// anything else (200, 404, etc.) = key accepted (the endpoint may not exist,
+	// but the key itself was not rejected).
+	if prov.UsageURL != "" {
+		req, _ := http.NewRequest("GET", prov.UsageURL, nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+		if err != nil {
+			return "", fmt.Errorf("validation failed: %w", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			return "", fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+		}
+	}
+	id := accountIDFor(prov.Provider, accountCred{APIKey: key})
+	return id, withPoolLock(name, func() error {
+		pool, err := loadPool(name, prov.Provider)
 		if err != nil {
 			return fmt.Errorf("load pool: %w", err)
 		}
@@ -178,6 +207,9 @@ func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, la
 			}
 		}
 		if idx >= 0 {
+			if !replace {
+				return fmt.Errorf("login cancelled")
+			}
 			pool.Accounts[idx].APIKey = key
 			if label != "" {
 				pool.Accounts[idx].Label = label
@@ -190,12 +222,27 @@ func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, la
 			}
 			pool.Accounts = append(pool.Accounts, poolAccount{ID: id, Label: lbl, APIKey: key, AddedAt: now})
 		}
-		if err := savePool(provName, pool); err != nil {
-			return fmt.Errorf("save pool: %w", err)
+		return savePool(name, pool)
+	})
+}
+
+// removeApikeyAccount removes the account with the given id from the named
+// pool under the cross-process lock. No-op if the id is absent (no error). No
+// stdin, no stdout — symmetric with addApikeyAccount, reused by the web layer.
+func removeApikeyAccount(name, providerID, id string) error {
+	return withPoolLock(name, func() error {
+		pool, err := loadPool(name, providerID)
+		if err != nil {
+			return fmt.Errorf("load pool: %w", err)
 		}
-		// Reload the in-memory label (savePool may re-sort, so look up by id).
-		fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
-		return nil
+		out := pool.Accounts[:0]
+		for _, a := range pool.Accounts {
+			if a.ID != id {
+				out = append(out, a)
+			}
+		}
+		pool.Accounts = out
+		return savePool(name, pool)
 	})
 }
 

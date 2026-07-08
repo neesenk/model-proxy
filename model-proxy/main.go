@@ -1020,7 +1020,11 @@ func runVolcengineLogin(cfg *Config, provName string, prov Provider) error {
 // Locking: ALL stdin (triple prompts + replace confirmation) happens BEFORE the
 // cross-process lock — same invariant as runApiKeyLoginWithInput. The replace
 // confirmation is resolved with a read-only loadPool; the authoritative
-// load→dedup→save then runs under withPoolLock.
+// load→dedup→save then runs under withPoolLock (in addVolcengineAccount).
+//
+// This is the CLI wrapper: it owns stdin prompting + stdout printing, then
+// delegates the dedup→save core to addVolcengineAccount (reused by the web
+// layer, Task 12).
 func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, inKey, inAK, inSK, label string, replace bool) error {
 	// === BEFORE LOCK: apikey + AK + SK prompts ===
 	apiKey := strings.TrimSpace(inKey)
@@ -1062,12 +1066,37 @@ func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, in
 				break
 			}
 		}
+		replace = true // user confirmed; tell the core to overwrite
 	}
 
-	// === INSIDE LOCK: load → dedup/append → save ===
-	return withPoolLock(provName, func() error {
-		// Pool dedup by account id (= AccessKey for volcengine).
-		pool, err := loadPool(provName, prov.Provider)
+	if _, err := addVolcengineAccount(cfg, provName, prov, accountCred{APIKey: apiKey, AccessKey: ak, SecretKey: sk}, label, replace); err != nil {
+		return err
+	}
+	// Print the confirmation line (label resolved from the freshly-saved pool,
+	// which may have been re-sorted by savePool).
+	pool, _ := loadPool(provName, prov.Provider)
+	fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
+	return nil
+}
+
+// addVolcengineAccount is the non-printing core for volcengine's AK/SK triple:
+// it dedups by id (= AccessKey for volcengine) under the cross-process lock and
+// writes the pool. Returns the account id. No stdin, no stdout — symmetric with
+// addApikeyAccount; reused by the web layer (Task 12). Volcengine has no
+// usage_url validation step (the Ark API Key is validated implicitly by the
+// first chat request; the AK/SK are validated lazily by GetAFPUsage on the next
+// quota poll). replace=false on an existing id returns "login cancelled" without
+// modifying the pool.
+func addVolcengineAccount(cfg *Config, name string, prov Provider, cred accountCred, label string, replace bool) (string, error) {
+	apiKey := strings.TrimSpace(cred.APIKey)
+	ak := strings.TrimSpace(cred.AccessKey)
+	sk := strings.TrimSpace(cred.SecretKey)
+	if apiKey == "" {
+		return "", fmt.Errorf("API key is required")
+	}
+	id := accountIDFor(prov.Provider, accountCred{APIKey: apiKey, AccessKey: ak})
+	return id, withPoolLock(name, func() error {
+		pool, err := loadPool(name, prov.Provider)
 		if err != nil {
 			return fmt.Errorf("load pool: %w", err)
 		}
@@ -1080,6 +1109,9 @@ func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, in
 			}
 		}
 		if idx >= 0 {
+			if !replace {
+				return fmt.Errorf("login cancelled")
+			}
 			pool.Accounts[idx].APIKey = apiKey
 			pool.Accounts[idx].AccessKey = ak
 			pool.Accounts[idx].SecretKey = sk
@@ -1096,11 +1128,7 @@ func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, in
 				ID: id, Label: lbl, APIKey: apiKey, AccessKey: ak, SecretKey: sk, AddedAt: now,
 			})
 		}
-		if err := savePool(provName, pool); err != nil {
-			return fmt.Errorf("save pool: %w", err)
-		}
-		fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
-		return nil
+		return savePool(name, pool)
 	})
 }
 

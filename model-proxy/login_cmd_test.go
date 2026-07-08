@@ -256,6 +256,122 @@ func TestRunApiKeyLoginWithInput_NoLabel_DefaultsToID(t *testing.T) {
 	}
 }
 
+// --- non-printing account cores (add/remove) ---
+
+// TestAddApikeyAccountCore exercises the non-printing core extracted from
+// runApiKeyLoginWithInput: validate + dedup + savePool under the lock, plus
+// the symmetric removeApikeyAccount. No stdin, no printing — the web layer
+// (Task 12) reuses this same path.
+func TestAddApikeyAccountCore(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer up.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
+	prov := cfg.Providers["zhipu"]
+	id, err := addApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "my-label", false)
+	if err != nil {
+		t.Fatalf("addApikeyAccount: %v", err)
+	}
+	if id == "" {
+		t.Fatal("empty id")
+	}
+	// ID must match the sha256[:16] of the key (non-volcengine).
+	wantID := accountIDFor("zhipu", accountCred{APIKey: "sk-test-1234567890"})
+	if id != wantID {
+		t.Fatalf("id = %q, want %q", id, wantID)
+	}
+	pool, _ := loadPool("zhipu", "zhipu")
+	if len(pool.Accounts) != 1 || pool.Accounts[0].Label != "my-label" {
+		t.Fatalf("pool not written: %+v", pool.Accounts)
+	}
+	// Replace path: same id, new label, replace=true overwrites in place.
+	if _, err := addApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "renamed", true); err != nil {
+		t.Fatalf("replace addApikeyAccount: %v", err)
+	}
+	pool2, _ := loadPool("zhipu", "zhipu")
+	if len(pool2.Accounts) != 1 || pool2.Accounts[0].Label != "renamed" {
+		t.Fatalf("replace should keep size 1 + update label: %+v", pool2.Accounts)
+	}
+	// Replace path with replace=false on an existing id aborts without prompting
+	// (no stdin in core) and leaves the pool untouched.
+	if _, err := addApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "ignored", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("dup-no-replace should error 'cancelled', got %v", err)
+	}
+	// Remove: pool empties.
+	if err := removeApikeyAccount("zhipu", "zhipu", id); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	pool3, _ := loadPool("zhipu", "zhipu")
+	if len(pool3.Accounts) != 0 {
+		t.Fatalf("pool not emptied: %+v", pool3.Accounts)
+	}
+}
+
+// TestAddApikeyAccountCore_ValidationFail verifies the core rejects a 401 from
+// the usage endpoint (no save).
+func TestAddApikeyAccountCore_ValidationFail(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`unauthorized`))
+	}))
+	defer srv.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
+	prov := cfg.Providers["zhipu"]
+	_, err := addApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "bad"}, "", false)
+	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+		t.Fatalf("expected 'validation failed', got %v", err)
+	}
+	pool, _ := loadPool("zhipu", "zhipu")
+	if len(pool.Accounts) != 0 {
+		t.Fatalf("401 should not save: %+v", pool.Accounts)
+	}
+}
+
+// TestAddVolcengineAccountCore verifies the AK/SK core: dedup by AccessKey,
+// triple save, label, remove.
+func TestAddVolcengineAccountCore(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n"))
+	prov := cfg.Providers["vol"]
+	cred := accountCred{APIKey: "ark-key", AccessKey: "AK9XYZ", SecretKey: "SK9"}
+	id, err := addVolcengineAccount(cfg, "vol", prov, cred, "volc-label", false)
+	if err != nil {
+		t.Fatalf("addVolcengineAccount: %v", err)
+	}
+	if id != "AK9XYZ" {
+		t.Fatalf("volcengine id = %q, want AK9XYZ", id)
+	}
+	pool, _ := loadPool("vol", "volcengine")
+	if len(pool.Accounts) != 1 || pool.Accounts[0].Label != "volc-label" {
+		t.Fatalf("pool not written: %+v", pool.Accounts)
+	}
+	if pool.Accounts[0].AccessKey != "AK9XYZ" || pool.Accounts[0].SecretKey != "SK9" || pool.Accounts[0].APIKey != "ark-key" {
+		t.Fatalf("triple not saved: %+v", pool.Accounts[0])
+	}
+	// Same AccessKey with replace=false aborts; with replace=true overwrites the triple.
+	if _, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("dup-no-replace should error 'cancelled', got %v", err)
+	}
+	if _, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "renamed", true); err != nil {
+		t.Fatalf("replace addVolcengineAccount: %v", err)
+	}
+	pool2, _ := loadPool("vol", "volcengine")
+	if len(pool2.Accounts) != 1 {
+		t.Fatalf("replace should keep size 1: %+v", pool2.Accounts)
+	}
+	if pool2.Accounts[0].APIKey != "ark2" || pool2.Accounts[0].SecretKey != "SK-new" || pool2.Accounts[0].Label != "renamed" {
+		t.Fatalf("replace did not overwrite triple/label: %+v", pool2.Accounts[0])
+	}
+	if err := removeApikeyAccount("vol", "volcengine", id); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	pool3, _ := loadPool("vol", "volcengine")
+	if len(pool3.Accounts) != 0 {
+		t.Fatalf("pool not emptied: %+v", pool3.Accounts)
+	}
+}
+
 // --- flag parsing helpers ---
 
 func TestFlagStringValue(t *testing.T) {
