@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"sync"
 	"testing"
 )
 
@@ -103,4 +104,58 @@ func (r *oneByteReader) Read(p []byte) (int, error) {
 	p[0] = r.b[r.off]
 	r.off++
 	return 1, nil
+}
+
+// TestTokenCounterConcurrent would race under -race before the fix (the old
+// commit mutated *tokenUsage fields after releasing tc.mu inside entry()). It
+// spawns 50 concurrent committers to the SAME key plus a concurrent snapshot
+// reader; after the fix every increment lands (no lost updates) and -race is
+// clean. Final Input/Output must equal exactly the number of committers.
+func TestTokenCounterConcurrent(t *testing.T) {
+	tc := newTokenCounter(t.TempDir() + "/tokens.json")
+	key := tokenKey{Provider: "p", Model: "m"}
+	const committers = 50
+
+	var snapDone sync.WaitGroup
+	snapDone.Add(1)
+	stopSnap := make(chan struct{})
+	// Concurrent reader: hammers snapshot during commits. Before the fix this
+	// read *tokenUsage fields while commit mutated them unlocked -> -race.
+	go func() {
+		defer snapDone.Done()
+		for {
+			select {
+			case <-stopSnap:
+				return
+			default:
+				_ = tc.snapshot()
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(committers)
+	start := make(chan struct{})
+	for i := 0; i < committers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			tc.commit(key, tokenUsage{Input: 1, Output: 1})
+		}()
+	}
+	close(start) // release all committers together to maximize contention
+	wg.Wait()
+	close(stopSnap)
+	snapDone.Wait()
+
+	got := tc.snapshot()[key]
+	if got.Input != committers {
+		t.Errorf("Input = %d, want %d (lost increments)", got.Input, committers)
+	}
+	if got.Output != committers {
+		t.Errorf("Output = %d, want %d (lost increments)", got.Output, committers)
+	}
+	if got.Requests != committers {
+		t.Errorf("Requests = %d, want %d", got.Requests, committers)
+	}
 }

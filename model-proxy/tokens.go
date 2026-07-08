@@ -31,7 +31,11 @@ func newTokenCounter(path string) *tokenCounter {
 	return &tokenCounter{path: path, m: map[tokenKey]*tokenUsage{}}
 }
 
-func (tc *tokenCounter) entry(k tokenKey) *tokenUsage {
+// commit records one observed usage payload under the (provider, model) key.
+// All reads and writes of a *tokenUsage's fields happen under tc.mu: the
+// get-or-create and the read-modify-write are a single critical section so two
+// concurrent scanners committing to the same key cannot lose increments.
+func (tc *tokenCounter) commit(k tokenKey, add tokenUsage) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	u := tc.m[k]
@@ -39,11 +43,6 @@ func (tc *tokenCounter) entry(k tokenKey) *tokenUsage {
 		u = &tokenUsage{}
 		tc.m[k] = u
 	}
-	return u
-}
-
-func (tc *tokenCounter) commit(k tokenKey, add tokenUsage) {
-	u := tc.entry(k)
 	u.Input += add.Input
 	u.Output += add.Output
 	u.CacheCreation += add.CacheCreation
@@ -53,6 +52,8 @@ func (tc *tokenCounter) commit(k tokenKey, add tokenUsage) {
 	}
 }
 
+// snapshot returns a detached copy of all counters. Every field is copied under
+// tc.mu; callers may read the returned map without holding the lock.
 func (tc *tokenCounter) snapshot() map[tokenKey]tokenUsage {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -63,13 +64,17 @@ func (tc *tokenCounter) snapshot() map[tokenKey]tokenUsage {
 	return out
 }
 
+// save serializes a detached snapshot to disk. The flat map is built under tc.mu
+// (the only step that touches shared *tokenUsage fields), then the lock is
+// released and the MarshalIndent + WriteFile + Rename I/O happens on the
+// snapshot outside the lock.
 func (tc *tokenCounter) save() error {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
 	flat := map[string]tokenUsage{}
+	tc.mu.Lock()
 	for k, v := range tc.m {
 		flat[k.Provider+"\x00"+k.Model] = *v
 	}
+	tc.mu.Unlock()
 	data, err := json.MarshalIndent(flat, "", "  ")
 	if err != nil {
 		return err
