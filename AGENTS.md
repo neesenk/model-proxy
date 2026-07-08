@@ -295,6 +295,34 @@ schedule                   # 查询运行中的 daemon：每个 model 当前调�
 doctor                     # 离线 config 调度诊断（每 provider tier/quota/peak + 每路由 dry-run 顺序 + warning）
 ```
 
+### Web UI + `/api/*` 接口契约
+
+`web.enabled`（默认 true）时，daemon 在同一个 mux 上挂 `/ui/`（嵌入式静态资源，`web_assets/` 经 `go:embed`）和 `/api/`（JSON）。**仅 loopback、无鉴权**（信任来自「本地」）。`/api/*` 路由表：
+
+| 方法 | 路径 | 请求 body | 响应 shape | 备注 |
+|---|---|---|---|---|
+| GET | `/api/status` | — | `{uptime, version, listen, health{<prov>:{circuit_state, available, [circuit_until], [rate_limited_until]}}, quota{<prov>: <QuotaSnapshot 原样, PascalCase 键>}, schedule: {models:[…]}(来自 /debug/schedule), counters{<prov>:{requests, failovers, rate_limited_429, failures, last_request_at}}}` | 锁：`p.mu`(RLock) → `healthMu` → `quotaMu`(经 allSnapshots) **顺序获取不嵌套**。`quota` 字段是 provider 包的 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**：`RemainingPct`/`Windows`/`Billing`…） |
+| GET | `/api/logs?tail=N` | — | `{lines:[…]}` | 读 log 文件末尾 N 行（默认 200，上限 1000）。路径取 `web.logFile`（runProxy 时解析）回落 `cfg.LogFile`，都没配 → 404 |
+| GET | `/api/config` | — | `{yaml: "<原文件 verbatim>", summary:{listen, provider_count, route_count}}` | 原文件 round-trip（saveAndReload 保证 byte-identical 落盘） |
+| POST | `/api/config` | `{yaml:"…"}` | `{status:"reloaded"}` 或 400 `{error}` | 走 `saveAndReload`：validate(`LoadConfigFromBytes`, 不动盘) → backup `<file>.bak` → `atomicWrite`(tmp+rename) → `proxy.reload`。校验失败不落盘、不建 .bak；reload 失败（防御性，post-validate 不应发生）从 .bak 回滚 |
+| POST | `/api/config/edit` | `{kind, name, data}` | `{status:"reloaded"}` 或 400 | 结构化编辑（`kind ∈ {general, scheduling, provider, route, claude_mapping}`），改 `yaml.Node` 树（**保留注释与键序**）→ 重编码 SetIndent(2) → 经 `saveAndReload`。`data.delete:true` 删除具名实体（claude_mapping 用 `data.alias` 定位）。route targets 经 `mustEncode`（JSON 值 → yaml.Node 内层）。**坑**：新 int 键默认 `!!str`（yaml.v3 unmarshal 时自动识别既有 int 字段；目前无新建 int 键的路径） |
+| GET | `/api/accounts` | — | `{providers:[{name, provider_id, billing, accounts:[{id, label, added_at, [email}]}]}` | **响应结构里根本没有 key 字段** —— 即使 builder 出 bug 也无法泄漏 api_key/SSO cookie/access_key/secret_key。id **不掩码**（UI 要用它来删除） |
+| POST | `/api/accounts/<provider>` | `{api_key, access_key?, secret_key?, label?, replace?}` | `{id, status:"added"}` | 仅 apikey 类（zhipu/deepseek/volcengine）。aqp/codex 返 400 指向 async login。volcengine 走 `addVolcengineAccount`（AK/SK 三元组，不探 usage_url）；其余走 `addApikeyAccount`（探 usage_url 校验）。落盘后 best-effort reload（账号已存盘，reload 失败也返回成功） |
+| DELETE | `/api/accounts/<provider>/<id>` | — | `{status:"removed"}` | apikey 类走 `removeApikeyAccount`；aqp = `clearAccount`（oauth_auth，logout 语义）；codex = `os.Remove`（单凭据）。best-effort reload |
+| GET | `/api/tokens` | — | `{usage:[{provider, model, input, output, cache_creation, cache_read, requests}]}` | 由 SSE 扫描器累计的观测用量（见下）。flat 数组（map[tokenKey]tokenUsage 摊平，JSON 对象 key 必须是 string） |
+| POST | `/api/tokens/reset` | — | `{status:"reset"}` | 清空内存计数；不动盘（下一次 persist tick 用空快照覆盖 `~/.model-proxy/token_usage.json`） |
+| POST | `/api/login/<provider>/start` | — | `{session_id, login_url}`(aqp) 或 `{session_id, verify_url, user_code}`(codex) | 异步登录启动。aqp：`BootstrapLoginURL` + 建 cookie-jar `AqpClient` + 起 poll goroutine；codex：`requestUserCode`（device flow）+ 起 poll goroutine。unknown provider → 404；非 aqp/codex → 400 |
+| GET | `/api/login/<session>/poll` | — | `{state:"pending"|"done"|"error", detail, result}` | poll 异步登录。`detail` = login_url/verify_url+user_code（pending，UI 可恢复）/ error msg（error）；`result` = email/account_id（done）。unknown/expired session → 404 |
+
+#### SSE token 扫描器契约（`tokens.go`，`forward` 2xx 提交处接入）
+
+- **Pass-through only**：`usageScanner` 是个 `io.ReadCloser`，包在 `resp.Body` 外**仅当 `isSSE(resp.Header)`**。读到的字节原样返回给客户端 —— **不修改、不缓冲流、不阻塞客户端**。失败静默（不记 usage）。
+- **bounded 64KB 行缓冲**（`scanLineCap = 64 * 1024`）：`observe` 按 `\n` 切完整行喂给 `parseLine`；不完整行的字节存进 `s.line`（cap 到 64KB，超出则丢弃该字节 —— 字节仍会 pass through，只是超长行不解析）。防 OOM。
+- **commit-on-EOF/close（含客户端断开）**：`Read` 见到 err 且 `!done` → `tc.commit(key, acc)`；`Close` 若 `!done` 也 commit。`forward` 在 `flushCopy` 后显式 `body.Close()` —— 客户端中途断开（`flushCopy` 写错即 break，未达 EOF）时也能记下已观测的 input tokens（`message_start` 在流首、cancel 前到达）。正常 EOF 时 `Read` 已置 `done=true` 并 commit，`Close` 是 no-op（**不重复计数**）。
+- **解析**：仅看 `data:` 前缀 + 首字符 `{` 的行。先试 anthropic shape（`message_start` → input/cache_creation/cache_read；`message_delta` → output），再试 openai shape（`usage.prompt_tokens`/`completion_tokens`）。OpenAI token 计数是 **best-effort**：`usage` 仅当客户端发 `stream_options.include_usage`（且上游愿给）时才有 —— 扫描器宁可啥也不记也不 zero-fill。
+- **持久化**：`persistTokensLoop`（daemon.go）周期 `tc.save()` 到 `~/.model-proxy/token_usage.json`（原子 tmp+rename，0600）。key 摊平用 `provider\x00model`（NUL 分隔，避免 `model` 里含 `/`）。启动时 `tc.load()` 作为基线（文件不存在视为空，不报错）。
+- **锁**：`tokenMu` 是**独立叶子锁**，与 `p.mu`/`healthMu`/`quotaMu` 互不嵌套。`commit`/`snapshot`/`save` 的 `*tokenUsage` 字段读写都在 `tc.mu` 下。
+
 ### compass 网关契约（实测）
 
 | 端点 | 方法 | 鉴权 | 路径 |

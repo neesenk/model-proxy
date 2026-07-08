@@ -119,6 +119,23 @@ model-proxy schedule               # 查询运行中的 daemon：每 model 当�
 model-proxy doctor                 # 离线 config 调度诊断（tier/quota/peak + dry-run 顺序 + warning）
 ```
 
+## Web UI
+
+代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启，仅在 loopback 监听，无鉴权**（本地可信）。三个标签页：
+
+- **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择（来自 `GET /debug/schedule`）、请求计数器（requests/failovers/429/failures）、观测到的 token 用量（按 provider×model）。
+- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
+- **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider（zhipu/deepseek/volcengine）可在 UI 添加/删除账号；aqp/codex 走**异步登录**（点 "Add account" 弹模态框 → 浏览器完成 SSO / OAuth device flow → UI 轮询 `/api/login/<session>/poll` 直到 `done`/`error`）。
+
+关闭 UI：
+
+```yaml
+web:
+  enabled: false
+```
+
+JSON 接口在 `/api/*`（`status` / `logs?tail=N` / `config` GET·POST / `config/edit` / `accounts` GET·POST·DELETE / `tokens` / `tokens/reset` / `login/<provider>/start` + `login/<session>/poll`）；底层契约（请求/响应 shape、SSE token 扫描器语义）见 `AGENTS.md` 的「Web UI + /api/* 接口契约」一节。前端是嵌入式的静态资源（`web_assets/`，`go:embed`），无独立构建步骤。
+
 ## Token 文件
 
 凭据由 `login` 管理，按 provider name 派生路径，不落 config：
