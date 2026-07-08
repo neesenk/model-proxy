@@ -313,3 +313,37 @@ func TestScheduling_QuotaDefaults(t *testing.T) {
 		t.Errorf("switchMargin(20)=%v, want 0.20", s.switchMargin())
 	}
 }
+
+func TestConfigWebField(t *testing.T) {
+	cfg, err := LoadConfigFromBytes("test", []byte(`
+listen: 127.0.0.1:16000
+providers:
+  zhipu:
+    provider_id: zhipu
+    openai_base_url: https://open.bigmodel.cn/api/paas/v4
+web:
+  enabled: false
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Web.Enabled {
+		t.Fatalf("expected Web.Enabled=false, got true")
+	}
+}
+
+func TestConfigWebDefaultTrue(t *testing.T) {
+	cfg, err := LoadConfigFromBytes("test", []byte(`
+listen: 127.0.0.1:16000
+providers:
+  zhipu:
+    provider_id: zhipu
+    openai_base_url: https://open.bigmodel.cn/api/paas/v4
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Web.Enabled {
+		t.Fatalf("expected Web.Enabled default true, got false")
+	}
+}

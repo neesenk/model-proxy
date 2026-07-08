@@ -19,6 +19,12 @@ type Config struct {
 	ClaudeMapping map[string]string        `yaml:"claude_mapping"`
 	Scheduling    Scheduling               `yaml:"scheduling"`
 	Takeover      Takeover                 `yaml:"takeover"`
+	Web           WebConfig                `yaml:"web"`
+}
+
+// WebConfig toggles the admin UI (/ui + /api). Defaults to enabled.
+type WebConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // Scheduling configures failover health (circuit breaker, rate-limit skip) and
@@ -234,7 +240,13 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
+	return LoadConfigFromBytes(path, data)
+}
 
+// LoadConfigFromBytes parses + validates config bytes (path is used for error
+// messages + relative-path resolution only). Shared by LoadConfig (disk) and
+// the web layer's validate-before-write (in-memory YAML edit).
+func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg := &Config{}
 	type rawConfig struct {
 		Listen        string                   `yaml:"listen"`
@@ -245,10 +257,12 @@ func LoadConfig(path string) (*Config, error) {
 		ClaudeMapping map[string]string        `yaml:"claude_mapping"`
 		Scheduling    Scheduling               `yaml:"scheduling"`
 		Takeover      Takeover                 `yaml:"takeover"`
+		Web           WebConfig                `yaml:"web"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
 		LogLevel: "info",
+		Web:      WebConfig{Enabled: true},
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse yaml: %w", err)
@@ -261,20 +275,16 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.ClaudeMapping = raw.ClaudeMapping
 	cfg.Scheduling = raw.Scheduling
 	cfg.Takeover = raw.Takeover
-
-	// Expand log path.
+	cfg.Web = raw.Web
 	cfg.LogFile = expandPath(cfg.LogFile)
-	// Expand takeover paths.
 	t := &cfg.Takeover
 	t.Claude = expandPath(t.Claude)
 	t.Opencode = expandPath(t.Opencode)
 	t.Codex = expandPath(t.Codex)
 	t.Pi = expandPath(t.Pi)
-	// If proxy_url is unset, derive it from `listen`.
 	if t.ProxyURL == "" && cfg.Listen != "" {
 		t.ProxyURL = "http://" + cfg.Listen
 	}
-
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
