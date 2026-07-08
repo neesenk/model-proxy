@@ -21,6 +21,40 @@ providers:
 	return newWebServer(p, "test-config.yaml"), p
 }
 
+func TestAPIStatus(t *testing.T) {
+	w, _ := newTestWeb(t)
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	// Exact structural fields must be present (shape check on key presence).
+	for _, want := range []string{`"uptime"`, `"version"`, `"listen"`, `"health"`, `"schedule"`, `"counters"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("status body missing %s: %s", want, body)
+		}
+	}
+}
+
+// TestAPIStatusUnknown404 asserts the catch-all still 404s for unknown /api paths
+// once the first real route (/api/status) is wired. Guards against a future
+// router change silently swallowing unknown paths.
+func TestAPIStatusUnknown404(t *testing.T) {
+	w, _ := newTestWeb(t)
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/no-such-route", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown /api path status=%d want 404", rec.Code)
+	}
+}
+
 func TestWebServesUI(t *testing.T) {
 	w, _ := newTestWeb(t)
 	mux := http.NewServeMux()

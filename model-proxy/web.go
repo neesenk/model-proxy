@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"time"
 )
 
 //go:embed web_assets/*
@@ -62,9 +63,80 @@ func (w *webServer) serveUI(resp http.ResponseWriter, r *http.Request) {
 	resp.Write(data)
 }
 
-// serveAPI is a catch-all for /api/ until Task 5 wires the real router.
+// serveAPI routes /api/ requests to their handlers. Only /api/status is wired
+// today; later tasks add their own cases. Unknown /api paths fall through to a
+// 404 JSON error.
 func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
-	writeJSONErr(resp, http.StatusNotFound, "no api route for "+r.URL.Path)
+	path := r.URL.Path
+	switch {
+	case path == "/api/status" && r.Method == http.MethodGet:
+		w.handleStatus(resp, r)
+	default:
+		writeJSONErr(resp, http.StatusNotFound, "no api route for "+path)
+	}
+}
+
+// handleStatus returns a dashboard snapshot: uptime, version, listen address,
+// per-provider circuit/rate-limit health, quota snapshots, the current
+// schedule (per-route ordered providers), and request counters.
+//
+// Lock discipline: each store is acquired and released in sequence — never
+// nested. Mirrors scheduleStatus() (proxy.go): (1) p.mu.RLock for cfg, (2)
+// p.healthMu.Lock to copy p.health, (3) p.quota.allSnapshots() takes its own
+// RLock internally. Lock ordering is healthMu → quotaMu; acquiring them
+// sequentially (not nested) keeps that order trivially correct.
+func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
+	w.p.mu.RLock()
+	cfg := w.p.cfg
+	w.p.mu.RUnlock()
+
+	now := time.Now()
+	w.p.healthMu.Lock()
+	health := map[string]any{}
+	for name, h := range w.p.health {
+		state := "closed"
+		switch {
+		case now.Before(h.circuitOpenUntil):
+			state = "open"
+		case h.halfOpenInFlight:
+			state = "half_open"
+		}
+		entry := map[string]any{
+			"circuit_state": state,
+			"available":     h.available(now),
+		}
+		if now.Before(h.circuitOpenUntil) {
+			entry["circuit_until"] = h.circuitOpenUntil.UTC().Format(time.RFC3339)
+		}
+		if now.Before(h.rateLimitedUntil) {
+			entry["rate_limited_until"] = h.rateLimitedUntil.UTC().Format(time.RFC3339)
+		}
+		health[name] = entry
+	}
+	w.p.healthMu.Unlock()
+
+	// allSnapshots takes quotaMu.RLock internally and returns a fresh map; we
+	// hand it out verbatim (the shape is provider-defined). nil → omit.
+	var quota map[string]any
+	if qs := w.p.quota.allSnapshots(); qs != nil {
+		quota = make(map[string]any, len(qs))
+		for k, v := range qs {
+			quota[k] = v
+		}
+	}
+
+	// scheduleStatus() returns []byte that is already a JSON object
+	// {"models":…}. Embed it verbatim via json.RawMessage so writeJSON doesn't
+	// double-encode it.
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"uptime":   time.Since(w.p.metrics.startedAt()).String(),
+		"version":  version,
+		"listen":   cfg.Listen,
+		"health":   health,
+		"quota":    quota,
+		"schedule": json.RawMessage(w.p.scheduleStatus()),
+		"counters": w.p.metrics.snapshot(),
+	})
 }
 
 // contentTypeFor maps an asset filename to its Content-Type.
