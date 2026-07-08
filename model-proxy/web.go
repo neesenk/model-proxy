@@ -386,10 +386,15 @@ func setScalar(root *yaml.Node, key, value string) {
 }
 
 // childMap returns the mapping node under key, creating it (as an empty
-// mapping) at the end of the top-level mapping if absent.
+// mapping) at the end of the parent mapping if absent. Accepts either the
+// document root (whose Content[0] is the top-level mapping) or a mapping node
+// directly, so it composes for nested access: childMap(childMap(root, "a"), "b").
 func childMap(root *yaml.Node, key string) *yaml.Node {
-	m := mapNode(root)
-	if m == nil {
+	m := root
+	if root != nil && root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		m = root.Content[0]
+	}
+	if m == nil || m.Kind != yaml.MappingNode {
 		return nil
 	}
 	for i := 0; i+1 < len(m.Content); i += 2 {
@@ -461,9 +466,8 @@ func (w *webServer) handleConfigEdit(resp http.ResponseWriter, r *http.Request) 
 	case "scheduling":
 		err = w.editScheduling(req.Data)
 	case "provider", "route", "claude_mapping":
-		// Task 9 wires these via editStructured(kind, name, data).
-		writeJSONErr(resp, http.StatusBadRequest, "edit kind not yet implemented: "+req.Kind)
-		return
+		// Task 9: structured CRUD via editStructured.
+		err = w.editStructured(req.Kind, req.Name, req.Data)
 	default:
 		writeJSONErr(resp, http.StatusBadRequest, "unknown edit kind: "+req.Kind)
 		return
@@ -498,4 +502,125 @@ func (w *webServer) editScheduling(d map[string]any) error {
 			}
 		}
 	})
+}
+
+// --- Structured edits for provider / route / claude_mapping (Task 9) ---
+//
+// These kinds mutate nested mappings or graft sequence nodes (route targets,
+// model lists). Like the general/scheduling editors they funnel through
+// editConfigNode → saveAndReload so comments/order survive and the same
+// validate→backup→write→reload pipeline runs.
+//
+// Provider scalars (base URLs, usage_url, billing) set fields under
+// `providers.<name>`. Route targets replace the whole `routes.<name>` sequence
+// (encoded via mustEncode so the client sends a plain JSON array). Claude
+// mapping add sets `claude_mapping.<alias> → <route>`; delete removes the alias.
+
+// editStructured applies a structured edit for the given kind. Provider scalar
+// fields + billing live under providers.<name>; route targets replace the
+// routes.<name> sequence; claude_mapping add/delete works on the alias. A
+// `{"delete": true}` payload removes the named entity (provider, route, or —
+// keyed by data.alias — claude_mapping alias).
+func (w *webServer) editStructured(kind, name string, d map[string]any) error {
+	if d["delete"] == true {
+		return w.editConfigNode(func(root *yaml.Node) {
+			switch kind {
+			case "provider":
+				deleteKey(childMap(root, "providers"), name)
+			case "route":
+				deleteKey(childMap(root, "routes"), name)
+			case "claude_mapping":
+				if alias, ok := d["alias"].(string); ok {
+					deleteKey(childMap(root, "claude_mapping"), alias)
+				}
+			}
+		})
+	}
+	return w.editConfigNode(func(root *yaml.Node) {
+		switch kind {
+		case "provider":
+			p := childMap(childMap(root, "providers"), name)
+			for _, k := range []string{"openai_base_url", "anthropic_base_url", "usage_url", "billing"} {
+				if v, ok := d[k]; ok {
+					setChildScalar(p, k, fmt.Sprint(v))
+				}
+			}
+		case "route":
+			if raw, ok := d["targets"]; ok {
+				setChildNode(childMap(root, "routes"), name, mustEncode(raw))
+			}
+		case "claude_mapping":
+			if alias, ok := d["alias"].(string); ok {
+				if rt, ok := d["route"].(string); ok {
+					setChildScalar(childMap(root, "claude_mapping"), alias, rt)
+				}
+			}
+		}
+	})
+}
+
+// kindKey returns the top-level config section a kind lives under. It is
+// reserved for callers that route by kind generically; editStructured inlines
+// its switch explicitly so the dispatch is co-located with the mutation, but
+// kindKey is kept as a utility for future callers (e.g. a generic delete).
+func kindKey(kind, name string) string {
+	switch kind {
+	case "provider":
+		return "providers"
+	}
+	return name
+}
+
+// deleteKey removes a key (and its value) from a mapping node in place. It
+// rewrites m.Content with a compacting pass: pairs whose key matches `key` are
+// dropped, all others are preserved in order. The m.Content[:0] alias is safe
+// because we read m.Content[i] and m.Content[i+1] before overwriting them via
+// `out` (which shares the backing array but always lags behind i).
+func deleteKey(m *yaml.Node, key string) {
+	if m == nil {
+		return
+	}
+	out := m.Content[:0]
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			continue // drop pair
+		}
+		out = append(out, m.Content[i], m.Content[i+1])
+	}
+	m.Content = out
+}
+
+// setChildNode sets key → valueNode under parent (replacing an existing value
+// node in place, or appending a new key+value pair when absent). Used for
+// sequence grafts (route targets) where the value is a pre-built yaml.Node
+// rather than a scalar.
+func setChildNode(parent *yaml.Node, key string, valueNode *yaml.Node) {
+	if parent == nil {
+		return
+	}
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Value == key {
+			parent.Content[i+1] = valueNode
+			return
+		}
+	}
+	parent.Content = append(parent.Content, scalarNode(key), valueNode)
+}
+
+// mustEncode marshals a Go value (typically decoded from JSON, e.g.
+// []any of map[string]any for route targets) to a yaml.Node and returns the
+// inner content node (the document wrapper's single child). This is used to
+// graft sequence/mapping values into the config tree without hand-rolling
+// node construction. Errors are ignored: yaml.Marshal cannot fail for the
+// basic types JSON decoding produces (string/bool/float64/[]any/map[string]any).
+// On an empty result (a nil input), returns a !!null scalar so the key still
+// writes something coherent.
+func mustEncode(v any) *yaml.Node {
+	b, _ := yaml.Marshal(v)
+	var n yaml.Node
+	yaml.Unmarshal(b, &n)
+	if len(n.Content) > 0 {
+		return n.Content[0]
+	}
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null"}
 }

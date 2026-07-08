@@ -283,16 +283,54 @@ func TestConfigEditGeneral(t *testing.T) {
 	}
 }
 
-// TestConfigEditUnknownKind asserts unmapped kinds (provider/route/claude_mapping
-// — Task 9's domain) and bogus kinds both return 400, not 500 or a panic.
+// TestConfigEditUnknownKind asserts a bogus kind returns 400, not 500 or a
+// panic. provider/route/claude_mapping are valid kinds as of Task 9
+// (covered by TestConfigEditProviderBilling / TestConfigEditRouteCRUD), so this
+// test now only covers the genuinely unknown case.
 func TestConfigEditUnknownKind(t *testing.T) {
 	w, _ := newTestWeb(t)
-	for _, kind := range []string{"provider", "route", "claude_mapping", "bogus"} {
+	for _, kind := range []string{"bogus"} {
 		rec := httptest.NewRecorder()
 		body := `{"kind":"` + kind + `","name":"x","data":{}}`
 		w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
 		if rec.Code != 400 {
 			t.Errorf("kind=%s status=%d want 400 body=%s", kind, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestConfigEditProviderBilling(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	os.WriteFile(cfgPath, []byte("providers:\n  deepseek:\n    provider_id: deepseek\n    openai_base_url: https://api.deepseek.com\n"), 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	rec := httptest.NewRecorder()
+	w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit",
+		strings.NewReader(`{"kind":"provider","name":"deepseek","data":{"billing":"plan"}}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(got), "billing: plan") {
+		t.Errorf("billing not set:\n%s", got)
+	}
+}
+
+func TestConfigEditRouteCRUD(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	os.WriteFile(cfgPath, []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\nroutes:\n  m: [{provider: zhipu, model: m}]\n"), 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	rec := httptest.NewRecorder()
+	w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit",
+		strings.NewReader(`{"kind":"route","name":"m","data":{"targets":[{"provider":"zhipu","model":"m","priority":1}]}}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(got), "priority: 1") {
+		t.Errorf("route target not updated:\n%s", got)
 	}
 }
