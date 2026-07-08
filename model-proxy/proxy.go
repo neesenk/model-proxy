@@ -724,6 +724,9 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		if err != nil {
 			log.Printf("[proto=%s provider=%s] build upstream req: %v", proto, t.Provider, err)
 			p.releaseHalfOpenSlot(t.Provider)
+			if p.metrics != nil {
+				p.metrics.inc(t.Provider, evFailovers)
+			}
 			return false
 		}
 		copyHeaderWhitelist(req.Header, r.Header,
@@ -736,6 +739,9 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			if err := provImpl.AuthHeaders(req); err != nil {
 				log.Printf("[proto=%s provider=%s] auth error: %v", proto, t.Provider, err)
 				p.releaseHalfOpenSlot(t.Provider)
+				if p.metrics != nil {
+					p.metrics.inc(t.Provider, evFailovers)
+				}
 				return false
 			}
 		}
@@ -820,6 +826,8 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		return true
 	}
 	// 401-retry exhausted without resolution — release the slot.
+	// Defensive guard: unreachable in normal flow (the 401 branch above always
+	// returns or continues on attempt 0), kept for safety.
 	p.releaseHalfOpenSlot(t.Provider)
 	if p.metrics != nil {
 		p.metrics.inc(t.Provider, evFailovers)
