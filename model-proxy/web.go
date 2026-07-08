@@ -4,12 +4,21 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"strings"
 )
 
 //go:embed web_assets/*
 var webAssets embed.FS
+
+// webFS is the file system used by serveUI to read assets. It defaults to the
+// embedded assets, but is a package-level variable (typed as fs.FS) so that
+// tests can substitute a fake FS. This lets the path-traversal guard be tested
+// in isolation — embed.FS itself rejects ".." via fs.ValidPath, so without
+// this seam a test cannot prove the guard (not embed.FS) is what blocks a
+// traversal request.
+var webFS fs.FS = webAssets
 
 // webServer serves the admin UI (/ui/) and the JSON API (/api/). It is created
 // by runProxy when cfg.Web.Enabled and registered on the same mux as the proxy
@@ -44,7 +53,7 @@ func (w *webServer) serveUI(resp http.ResponseWriter, r *http.Request) {
 		http.NotFound(resp, r)
 		return
 	}
-	data, err := webAssets.ReadFile("web_assets/" + name)
+	data, err := fs.ReadFile(webFS, "web_assets/"+name)
 	if err != nil {
 		http.NotFound(resp, r)
 		return
