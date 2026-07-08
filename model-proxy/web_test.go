@@ -317,6 +317,50 @@ func TestConfigEditProviderBilling(t *testing.T) {
 	}
 }
 
+// TestAccountsListMasked asserts /api/accounts NEVER serializes any secret
+// (api_key / access_key / secret_key / SSO cookie) while still emitting the
+// real account id (the UI needs it to remove accounts). The acct struct has no
+// field for any secret — by construction they can't be serialized — and the
+// test verifies the raw api_key string is absent from the body AND the real id
+// is present.
+func TestAccountsListMasked(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	if err := savePool("zhipu", credentialPool{
+		Version: 1,
+		Accounts: []poolAccount{{
+			ID:        "abc1234567890def",
+			Label:     "work",
+			APIKey:    "sk-secret-key-1234567890",
+			AccessKey: "AK-LEAK-12345",
+			SecretKey: "SK-LEAK-67890",
+			AddedAt:   "2026-01-01T00:00:00Z",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w, _ := newTestWeb(t)
+	rec := httptest.NewRecorder()
+	w.handleAccountsList(rec, httptest.NewRequest("GET", "/api/accounts", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// No raw secret may appear anywhere in the response.
+	for _, secret := range []string{"sk-secret-key-1234567890", "AK-LEAK-12345", "SK-LEAK-67890"} {
+		if strings.Contains(body, secret) {
+			t.Errorf("raw secret leaked (%s):\n%s", secret, body)
+		}
+	}
+	// The real account id MUST be present (unmasked) — the UI sends it back on
+	// remove, so masking it would break deletion.
+	if !strings.Contains(body, `"id":"abc1234567890def"`) {
+		t.Errorf("real id (for removal) missing:\n%s", body)
+	}
+	if !strings.Contains(body, `"label":"work"`) {
+		t.Errorf("label missing:\n%s", body)
+	}
+}
+
 func TestConfigEditRouteCRUD(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"

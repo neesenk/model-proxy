@@ -86,6 +86,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleConfigPut(resp, r)
 	case path == "/api/config/edit" && r.Method == http.MethodPost:
 		w.handleConfigEdit(resp, r)
+	case path == "/api/accounts" && r.Method == http.MethodGet:
+		w.handleAccountsList(resp, r)
 	default:
 		writeJSONErr(resp, http.StatusNotFound, "no api route for "+path)
 	}
@@ -196,6 +198,63 @@ func tailFile(path string, n int) ([]string, error) {
 		all = all[len(all)-n:]
 	}
 	return all, nil
+}
+
+// handleAccountsList returns the per-provider account list with secrets
+// stripped. By construction the response cannot leak a credential: the acct
+// struct has NO field for api_key / access_key / secret_key / SSO cookie, so
+// even a programming mistake in the builder can't serialize one. The account
+// id is emitted UNMASKED — the UI needs the real id to remove an account
+// (masking would break deletion). For aqp/codex (oauth_auth.json, AccountData
+// shape) we surface email + account_id; for pooled apikey providers we surface
+// {id, label, added_at} from the pool.
+func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request) {
+	w.p.mu.RLock()
+	providers := w.p.cfg.Providers
+	w.p.mu.RUnlock()
+
+	type acct struct {
+		ID      string `json:"id"`
+		Label   string `json:"label"`
+		AddedAt string `json:"added_at"`
+		Email   string `json:"email,omitempty"` // aqp/codex only
+	}
+	type prov struct {
+		Name       string `json:"name"`
+		ProviderID string `json:"provider_id"`
+		Billing    string `json:"billing"`
+		Accounts   []acct `json:"accounts"`
+	}
+	out := []prov{}
+	for name, pcfg := range providers {
+		p := prov{Name: name, ProviderID: pcfg.Provider, Billing: pcfg.Billing, Accounts: []acct{}}
+		switch pcfg.Provider {
+		case "aqp", "codex":
+			// oauth_auth.json holds AccountData (email + account_id + SSO cookie).
+			// Only email + account_id are surfaced — the SSO cookie is never copied
+			// into the response struct. Guard against empty AccountID so a
+			// differently-shaped codex file doesn't yield a bogus empty entry.
+			a, _ := loadAccount(authFilePath(name, "oauth_auth"))
+			if a != nil && a.AccountID != "" {
+				p.Accounts = []acct{{
+					ID:      a.AccountID,
+					Label:   a.Email,
+					AddedAt: time.Unix(a.CreatedAt, 0).UTC().Format(time.RFC3339),
+					Email:   a.Email,
+				}}
+			}
+		default:
+			// Plural pool (<name>_apikeys.json) or legacy singular (<name>_apikey.json).
+			// Only id/label/added_at are copied — APIKey/AccessKey/SecretKey have no
+			// field on `acct` and so cannot leak.
+			pool, _ := loadPool(name, pcfg.Provider)
+			for _, a := range pool.Accounts {
+				p.Accounts = append(p.Accounts, acct{ID: a.ID, Label: a.Label, AddedAt: a.AddedAt})
+			}
+		}
+		out = append(out, p)
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{"providers": out})
 }
 
 // contentTypeFor maps an asset filename to its Content-Type.
