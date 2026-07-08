@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -665,12 +666,21 @@ func TestLoginRouting(t *testing.T) {
 	mux := http.NewServeMux()
 	w.register(mux)
 
-	// POST /api/login/codex/start → 400 (codex stub), proving the POST prefix
-	// route is wired (aqp would try a real bootstrap — codex short-circuits).
+	// POST /api/login/codex/start → 502 (requestUserCode fails against a dead
+	// server), proving the POST prefix route is wired AND dispatches to the
+	// codex branch (aqp would likewise try a real bootstrap). Forcing a dead
+	// server keeps it deterministic — no real network dependency.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	dead.Close()
+	w.newCodexOptions = func() *codexLoginServerOptions {
+		o := &codexLoginServerOptions{usercodeURL: dead.URL + "/usercode"}
+		o.defaults()
+		return o
+	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/login/codex/start", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("POST /api/login/codex/start status=%d want 400: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("POST /api/login/codex/start status=%d want 502: %s", rec.Code, rec.Body.String())
 	}
 
 	// POST /api/login/unknown/start → 404 (unknown provider).
@@ -687,4 +697,104 @@ func TestLoginRouting(t *testing.T) {
 	if recPoll.Code != http.StatusNotFound {
 		t.Errorf("GET unknown session status=%d want 404", recPoll.Code)
 	}
+}
+
+// TestCodexLoginFlow exercises the full async codex OAuth device-flow login:
+// start requests a user code (against an httptest mock of the OpenAI deviceauth
+// endpoints), a goroutine polls deviceauth/token → exchanges the code → writes
+// the codex auth file 0600 → hot-reloads, and poll returns "done" with the
+// account id parsed from the fake id_token JWT. Mirrors TestAqpLoginFlow's
+// shape; the newCodexOptions seam points requestUserCode / pollForToken /
+// exchangeCodeForTokens at the httptest mock's 3 endpoints.
+func TestCodexLoginFlow(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	// Build a fake id_token JWT with a chatgpt_account_id claim (signature is
+	// dummy — exchangeCodeForTokens only parses the payload claim, it doesn't
+	// verify the sig). Replicates codex_login_test.go:127-128 inline.
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-1"}}`))
+	fakeIDToken := "h." + payload + ".s"
+	// Mock the 3 codex OAuth endpoints (usercode → devtok → tok).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/usercode", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"device_auth_id":"daid","user_code":"CODE","interval":"1"}`)
+	})
+	mux.HandleFunc("/devtok", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"authorization_code":"ac","code_challenge":"cc","code_verifier":"cv"}`)
+	})
+	mux.HandleFunc("/tok", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"access_token":"at","refresh_token":"rt","id_token":"`+fakeIDToken+`"}`)
+	})
+	up := httptest.NewServer(mux)
+	defer up.Close()
+
+	w, p := newTestWeb(t)
+	p.mu.Lock()
+	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.mu.Unlock()
+	// Seam: point codex options at the mock so requestUserCode / pollForToken /
+	// exchangeCodeForTokens hit the httptest server instead of the real OpenAI
+	// deviceauth endpoints.
+	w.newCodexOptions = func() *codexLoginServerOptions {
+		o := &codexLoginServerOptions{}
+		o.defaults()
+		o.usercodeURL = up.URL + "/usercode"
+		o.deviceTokURL = up.URL + "/devtok"
+		o.tokenURL = up.URL + "/tok"
+		return o
+	}
+
+	rec := httptest.NewRecorder()
+	w.handleLoginStart(rec, httptest.NewRequest("POST", "/api/login/codex/start", nil))
+	if rec.Code != 200 {
+		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var start struct {
+		SessionID string `json:"session_id"`
+		UserCode  string `json:"user_code"`
+		VerifyURL string `json:"verify_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil {
+		t.Fatalf("parse start response: %v: %s", err, rec.Body.String())
+	}
+	if start.UserCode != "CODE" {
+		t.Fatalf("user_code=%q want CODE: %s", start.UserCode, rec.Body.String())
+	}
+	if start.VerifyURL != codexOAuthVerifyURL {
+		t.Errorf("verify_url=%q want %q", start.VerifyURL, codexOAuthVerifyURL)
+	}
+	if start.SessionID == "" {
+		t.Fatal("session_id empty")
+	}
+
+	// Poll until done (the goroutine resolves quickly against the mock).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		rec2 := httptest.NewRecorder()
+		w.handleLoginPoll(rec2, httptest.NewRequest("GET", "/api/login/"+start.SessionID+"/poll", nil))
+		var st struct {
+			State  string `json:"state"`
+			Result string `json:"result"`
+		}
+		json.Unmarshal(rec2.Body.Bytes(), &st)
+		if st.State == "done" {
+			if st.Result != "acct-1" {
+				t.Errorf("poll result=%q want acct-1", st.Result)
+			}
+			// codex auth file must exist (written 0600 by the goroutine).
+			path := authFilePath("codex", "oauth_auth")
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("codex auth file not written: %v", err)
+			}
+			if perm := info.Mode().Perm(); perm != 0o600 {
+				t.Errorf("codex auth file perm=%o want 0600", perm)
+			}
+			return
+		}
+		if st.State == "error" {
+			t.Fatalf("poll errored: %s", rec2.Body.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("codex login never completed")
 }

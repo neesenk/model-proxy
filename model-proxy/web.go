@@ -40,17 +40,29 @@ type webServer struct {
 	// production this is newAqpClient (base = aqpBase); tests override it with
 	// newAqpClientWithBase to point at an httptest mock of the compass backend.
 	newAqpClientFn func(storePath string) *AqpClient
+	// newCodexOptions builds the codexLoginServerOptions used by the async
+	// codex device-flow login. In production this returns the real OpenAI
+	// deviceauth endpoints (via defaults()); tests override it to point opts at
+	// an httptest mock of the 3 endpoints so requestUserCode / pollForToken /
+	// exchangeCodeForTokens are fully exercised end-to-end.
+	newCodexOptions func() *codexLoginServerOptions
 }
 
 // newWebServer builds a webServer bound to a proxy (for live state) and the
 // on-disk config path (for validate-before-write + saveAndReload).
 func newWebServer(p *Proxy, configFile string) *webServer {
-	return &webServer{
+	w := &webServer{
 		p:              p,
 		configFile:     configFile,
 		sessions:       newLoginSessionStore(),
 		newAqpClientFn: newAqpClient,
 	}
+	w.newCodexOptions = func() *codexLoginServerOptions {
+		o := &codexLoginServerOptions{}
+		o.defaults()
+		return o
+	}
+	return w
 }
 
 // webGC periodically drops stale login sessions. It runs as a goroutine
@@ -394,20 +406,23 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "removed"})
 }
 
-// --- Async login endpoints (Task 14: aqp; Task 15 will add codex) ---
+// --- Async login endpoints (Task 14: aqp; Task 15: codex) ---
 //
 // The async login flow is a 3-step dance over HTTP:
-//  1. POST /api/login/<provider>/start — bootstraps the login URL, stashes the
-//     in-flight AqpClient (cookie jar) in a session, and launches a goroutine
-//     that polls until the user completes login. Returns {session_id, login_url}.
-//  2. The user opens the login_url in a browser and authenticates.
+//  1. POST /api/login/<provider>/start — bootstraps the login (aqp: SSO URL +
+//     cookie-jar client; codex: device-flow user code), stashes the in-flight
+//     state in a session, and launches a goroutine that polls until the user
+//     completes login. Returns {session_id, login_url} (aqp) or {session_id,
+//     verify_url, user_code} (codex).
+//  2. The user opens the login_url / verify_url in a browser and authenticates.
 //  3. GET /api/login/<session>/poll — returns the session state ("pending" →
 //     "done" / "error"). The polling goroutine resolves the session: on success
-//     it mints the managed key, persists the account, and hot-reloads.
+//     it persists the credential and hot-reloads.
 
 // handleLoginStart dispatches an async login start by provider. aqp bootstraps
-// the SSO URL + launches the poll goroutine; codex is Task 15. The provider must
-// exist in config (guards against typos).
+// the SSO URL + launches the poll goroutine; codex bootstraps the device-flow
+// user code + launches the device-flow poll goroutine. The provider must exist
+// in config (guards against typos).
 func (w *webServer) handleLoginStart(resp http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/login/")
 	provider := strings.TrimSuffix(rest, "/start")
@@ -422,8 +437,7 @@ func (w *webServer) handleLoginStart(resp http.ResponseWriter, r *http.Request) 
 	case "aqp":
 		w.startAqpLogin(resp, r)
 	case "codex":
-		// Task 15 wires the codex device-flow poll. Return 400 until then.
-		writeJSONErr(resp, http.StatusBadRequest, "codex async login not yet implemented")
+		w.startCodexLogin(resp, r)
 	default:
 		writeJSONErr(resp, http.StatusBadRequest, provider+" has no async login flow")
 	}
@@ -483,6 +497,70 @@ func (w *webServer) runAqpPoll(sess *loginSession) {
 	}
 	_ = w.p.reload(w.configFile) // best-effort: account is already persisted
 	sess.setState("done", a.Email)
+}
+
+// startCodexLogin bootstraps the OAuth device flow: requestUserCode → stash the
+// device_auth_id + user_code + poll interval + options in a session → kick the
+// poll goroutine → return {session_id, verify_url, user_code}. The goroutine
+// resolves the session to "done" (exchange+save+reload) or "error".
+func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request) {
+	opts := w.newCodexOptions()
+	uc, err := requestUserCode(opts, codexOAuthClientID)
+	if err != nil {
+		writeJSONErr(resp, http.StatusBadGateway, err.Error())
+		return
+	}
+	sess := w.sessions.create("codex")
+	interval, _ := strconv.Atoi(uc.Interval)
+	sess.codex = &codexLoginState{
+		deviceAuthID: uc.DeviceAuthID,
+		userCode:     uc.UserCode,
+		interval:     interval,
+		opts:         opts,
+	}
+	// Stash verify_url+user_code as the session detail (re-surfaced by poll so
+	// the UI can recover them). Written under the session mutex to stay
+	// race-clean with the poll goroutine's setState calls.
+	sess.mu.Lock()
+	sess.detail = codexOAuthVerifyURL + "  code: " + uc.UserCode
+	sess.mu.Unlock()
+	go w.runCodexPoll(sess)
+	writeJSON(resp, http.StatusOK, map[string]string{
+		"session_id": sess.id,
+		"verify_url": codexOAuthVerifyURL,
+		"user_code":  uc.UserCode,
+	})
+}
+
+// runCodexPoll is the goroutine that resolves a codex device-flow session:
+// pollForToken (the user authorizes in the browser) → exchangeCodeForTokens
+// (trade the auth code for access/refresh/id tokens) → write the codex auth
+// file 0600 → hot-reload. Every failure path sets state to "error" so the poll
+// endpoint surfaces it; there is no retry — the user starts a fresh session.
+func (w *webServer) runCodexPoll(sess *loginSession) {
+	cs := sess.codex
+	authCode, err := pollForToken(cs.opts, cs.deviceAuthID, cs.userCode, cs.interval)
+	if err != nil {
+		sess.setState("error", err.Error())
+		return
+	}
+	af, err := exchangeCodeForTokens(cs.opts, codexOAuthClientID, authCode.AuthorizationCode, authCode.CodeVerifier)
+	if err != nil {
+		sess.setState("error", err.Error())
+		return
+	}
+	path := authFilePath("codex", "oauth_auth")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		sess.setState("error", err.Error())
+		return
+	}
+	b, _ := json.MarshalIndent(af, "", "  ")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		sess.setState("error", err.Error())
+		return
+	}
+	_ = w.p.reload(w.configFile) // best-effort: tokens are already persisted
+	sess.setState("done", af.Tokens.AccountID)
 }
 
 // handleLoginPoll returns the current state of an async login session
