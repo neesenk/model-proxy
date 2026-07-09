@@ -208,3 +208,58 @@ func healthLabel(h statusHealth) (string, func(string) string) {
 		return "unavailable", cDim
 	}
 }
+
+// renderScheduleRoutes renders the per-route provider chains. ind is the indent
+// for each route's name line; detail lines use ind + 4 spaces. Shared by the
+// `schedule` command (ind "") and the serve-status Schedule section (ind "  "),
+// so the two views never drift. Output ends with a trailing blank line, matching
+// the original `schedule` command.
+func renderScheduleRoutes(models map[string]statusRoute, ind string) string {
+	names := make([]string, 0, len(models))
+	for n := range models {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, m := range names {
+		ri := models[m]
+		fmt.Fprintf(&b, "%s%s → %s\n", ind, cBold(m), cGreen(ri.First))
+		for _, pool := range ri.Pools {
+			fmt.Fprintf(&b, "%s    %s %s (%d accounts, %d available)\n",
+				ind, cDim("pool:"), cBold(pool.Parent), pool.Accounts, pool.Available)
+		}
+		for _, t := range ri.Ordered {
+			extra := ""
+			if !t.Available {
+				extra += " " + cRed("(unavailable)")
+			}
+			if t.Peak {
+				extra += " " + cYellow("peak")
+			}
+			fmt.Fprintf(&b, "%s    %s %s  surplus %+.2f  p%d%s\n",
+				ind, pad(t.Provider, 14), cGray(pad(t.Tier, 13)), t.Surplus, t.Priority, extra)
+		}
+		if ri.Sticky != "" {
+			dwell := ""
+			if ri.DwellRem > 0 {
+				dwell = fmt.Sprintf(", %.0fs dwell left", ri.DwellRem)
+			}
+			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, cDim("sticky: "), ri.Sticky, cDim(dwell))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderSchedule renders the serve-status Schedule section: header + the shared
+// per-route renderer at 2-space indent. Trailing blank line trimmed so the
+// section ends with a single newline (appendSection adds the separator).
+func renderSchedule(st *statusResp) string {
+	if len(st.Schedule.Models) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%d %s)\n", cBold("Schedule"), len(st.Schedule.Models), plural(len(st.Schedule.Models), "route", "routes"))
+	b.WriteString(renderScheduleRoutes(st.Schedule.Models, "  "))
+	return strings.TrimRight(b.String(), "\n") + "\n"
+}

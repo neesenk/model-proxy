@@ -98,3 +98,65 @@ func TestRenderProviders(t *testing.T) {
 		t.Errorf("want 'rate-limited' label, got:\n%s", out)
 	}
 }
+
+func TestRenderScheduleRoutes(t *testing.T) {
+	models := map[string]statusRoute{
+		"claude-sonnet": {
+			First: "aqp",
+			Ordered: []statusOrdered{
+				{Provider: "aqp", Priority: 1, Tier: "plan", Surplus: 12.3, Available: true},
+				{Provider: "codex", Priority: 1, Tier: "plan", Surplus: 8.1, Available: false},
+			},
+			Sticky:   "aqp",
+			DwellRem: 320,
+		},
+	}
+	// ind="" reproduces the `schedule` command layout (route at col 0, details +4);
+	// ind="  " is used by the serve-status section (route +2, details +6).
+	cases := []struct{ ind, routePfx, detailPfx string }{
+		{"", "claude-sonnet → aqp\n", "    aqp"},
+		{"  ", "  claude-sonnet → aqp\n", "      aqp"},
+	}
+	for _, tc := range cases {
+		out := renderScheduleRoutes(models, tc.ind)
+		if !strings.HasPrefix(out, tc.routePfx) {
+			t.Errorf("ind=%q: want prefix %q, got:\n%s", tc.ind, tc.routePfx, out)
+		}
+		foundDetail := false
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "surplus +12.30") {
+				foundDetail = true
+				if !strings.HasPrefix(line, tc.detailPfx) {
+					t.Errorf("ind=%q: detail line %q want prefix %q", tc.ind, line, tc.detailPfx)
+				}
+			}
+		}
+		if !foundDetail {
+			t.Errorf("ind=%q: missing surplus detail line", tc.ind)
+		}
+		for _, want := range []string{"surplus +12.30", "surplus +8.10", "(unavailable)", "sticky: aqp, 320s dwell left"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("ind=%q: missing %q in:\n%s", tc.ind, want, out)
+			}
+		}
+	}
+}
+
+func TestRenderSchedule(t *testing.T) {
+	st := &statusResp{Schedule: statusSchedule{Models: map[string]statusRoute{
+		"gpt-5.5": {First: "codex"},
+	}}}
+	out := renderSchedule(st)
+	if !strings.HasPrefix(out, "Schedule (1 route)\n") {
+		t.Errorf("header wrong, got:\n%s", out)
+	}
+	if !strings.Contains(out, "  gpt-5.5 → codex\n") {
+		t.Errorf("route should be indented 2 under the section, got:\n%s", out)
+	}
+}
+
+func TestRenderScheduleEmpty(t *testing.T) {
+	if got := renderSchedule(&statusResp{}); got != "" {
+		t.Errorf("empty schedule should render nothing, got %q", got)
+	}
+}

@@ -1683,69 +1683,16 @@ func cmdSchedule(args []string) {
 		fmt.Fprintf(os.Stderr, "%s daemon returned HTTP %d: %s\n", cRed("✗"), resp.StatusCode, truncate(string(body), 200))
 		os.Exit(1)
 	}
-	var st struct {
-		Models map[string]struct {
-			First   string `json:"first"`
-			Ordered []struct {
-				Provider   string  `json:"provider"`
-				PoolParent string  `json:"pool_parent"`
-				Priority   int     `json:"priority"`
-				Tier       string  `json:"tier"`
-				Surplus    float64 `json:"surplus"`
-				Available  bool    `json:"available"`
-				Peak       bool    `json:"peak"`
-			} `json:"ordered"`
-			Sticky   string  `json:"sticky"`
-			DwellRem float64 `json:"sticky_dwell_remaining_sec"`
-			Pools    []struct {
-				Parent    string `json:"parent"`
-				Accounts  int    `json:"accounts"`
-				Available int    `json:"available"`
-			} `json:"pools"`
-		} `json:"models"`
-	}
+	var st statusSchedule
 	if err := json.Unmarshal(body, &st); err != nil {
 		fmt.Fprintf(os.Stderr, "%s parse schedule response: %v\n", cRed("✗"), err)
 		os.Exit(1)
 	}
-	names := make([]string, 0, len(st.Models))
-	for n := range st.Models {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
+	if len(st.Models) == 0 {
 		fmt.Println("(no routes)")
 		return
 	}
-	for _, m := range names {
-		ri := st.Models[m]
-		fmt.Printf("%s → %s\n", cBold(m), cGreen(ri.First))
-		// Pool header: when a route carries a pools[] summary, render it before
-		// the per-provider lines so a human sees "this route is pooled" at a
-		// glance, with the parent name + total/available account counts.
-		for _, pool := range ri.Pools {
-			fmt.Printf("    %s %s (%d accounts, %d available)\n",
-				cDim("pool:"), cBold(pool.Parent), pool.Accounts, pool.Available)
-		}
-		for _, t := range ri.Ordered {
-			extra := ""
-			if !t.Available {
-				extra += " " + cRed("(unavailable)")
-			}
-			if t.Peak {
-				extra += " " + cYellow("peak")
-			}
-			fmt.Printf("    %s %s  surplus %+.2f  p%d%s\n", pad(t.Provider, 14), cGray(pad(t.Tier, 13)), t.Surplus, t.Priority, extra)
-		}
-		if ri.Sticky != "" {
-			dwell := ""
-			if ri.DwellRem > 0 {
-				dwell = fmt.Sprintf(", %.0fs dwell left", ri.DwellRem)
-			}
-			fmt.Printf("    %s%s%s\n", cDim("sticky: "), ri.Sticky, cDim(dwell))
-		}
-		fmt.Println()
-	}
+	fmt.Print(renderScheduleRoutes(st.Models, ""))
 }
 
 // cmdDoctor runs an OFFLINE diagnostic of the scheduling setup from config (no
