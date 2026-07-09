@@ -89,6 +89,7 @@ model-proxy serve                  # 前台
 model-proxy serve daemon           # 后台（自动重启）
 model-proxy serve stop             # 停止 daemon
 model-proxy serve reload           # 热加载配置（SIGHUP）
+model-proxy serve status           # 运行状态（providers/路由/配额/token）
 
 # 查看用量
 model-proxy usage aqp          # 月度用量/余额

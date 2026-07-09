@@ -76,7 +76,7 @@ func cmdServe(args []string) {
 		return
 	}
 
-	// Check for subcommand (daemon | stop).
+	// Check for subcommand (daemon | stop | reload | status).
 	sub := positional(args)
 	switch sub {
 	case "daemon":
@@ -88,6 +88,8 @@ func cmdServe(args []string) {
 		cmdStop(args)
 	case "reload":
 		cmdReload(args)
+	case "status":
+		cmdServeStatus(args)
 	default:
 		// No subcommand — foreground serve.
 		sa := parseServeArgs(args)

@@ -26,6 +26,7 @@ Commands:
   serve daemon         Run in background (auto-restart on crash)
   serve stop           Stop a running daemon
   serve reload         Hot-reload config (SIGHUP the running daemon)
+  serve status         Show running daemon status (providers/schedule/quota/tokens)
   takeover <client>    Rewrite client config to point at the proxy
   restore <client>     Restore client config from backup
   login <provider>     Login to a provider (aqp | codex)
@@ -64,6 +65,7 @@ Subcommands:
   daemon    Run in background (auto-restart on crash).
   stop      Stop a running daemon.
   reload    Hot-reload config (sends SIGHUP to the running daemon).
+  status    Show running daemon status (providers, schedule, quota, tokens).
 
 Options:
   --config PATH     Config file (default lookup: ~/.model-proxy/config.yaml > ./config.yaml)

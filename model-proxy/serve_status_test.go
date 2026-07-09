@@ -329,3 +329,27 @@ func TestRenderStatusWebDisabled(t *testing.T) {
 		t.Fatalf("want web.enabled error, got %v", err)
 	}
 }
+
+func TestParseStatusFlags(t *testing.T) {
+	o := parseStatusFlags([]string{})
+	if o.Logs || o.JSON || o.LogsN != 20 {
+		t.Errorf("defaults wrong: %+v", o)
+	}
+	o = parseStatusFlags([]string{"--logs"})
+	if !o.Logs || o.LogsN != 20 {
+		t.Errorf("--logs default N wrong: %+v", o)
+	}
+	o = parseStatusFlags([]string{"--logs", "50"})
+	if !o.Logs || o.LogsN != 50 {
+		t.Errorf("--logs 50 wrong: %+v", o)
+	}
+	o = parseStatusFlags([]string{"--json"})
+	if !o.JSON {
+		t.Errorf("--json not set")
+	}
+	// --config must be skipped (configPath handles it) and not swallow --logs
+	o = parseStatusFlags([]string{"--config", "x.yaml", "--logs"})
+	if !o.Logs {
+		t.Errorf("--config swallowed --logs: %+v", o)
+	}
+}

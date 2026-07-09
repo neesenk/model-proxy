@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -441,4 +443,43 @@ func appendSection(b *strings.Builder, s string) {
 		b.WriteByte('\n')
 	}
 	b.WriteByte('\n')
+}
+
+// cmdServeStatus prints a terminal-optimized snapshot of the running daemon's
+// state — the same data the Web UI's Status tab shows: providers health +
+// counters, schedule, quota, tokens, and optionally recent logs. One-shot.
+func cmdServeStatus(args []string) {
+	opts := parseStatusFlags(args)
+	cfg, err := LoadConfig(configPath(args))
+	if err != nil {
+		log.Fatal(err)
+	}
+	out, err := renderStatus(cfg.Listen, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err.Error())
+		os.Exit(1)
+	}
+	fmt.Print(out)
+}
+
+// parseStatusFlags scans serve-status args for --json and --logs [N] (default
+// N=20). --config is intentionally ignored here — configPath handles it.
+func parseStatusFlags(args []string) statusOpts {
+	o := statusOpts{LogsN: 20}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--json":
+			o.JSON = true
+		case a == "--logs":
+			o.Logs = true
+			if i+1 < len(args) {
+				if n, err := strconv.Atoi(args[i+1]); err == nil && n > 0 {
+					o.LogsN = n
+					i++
+				}
+			}
+		}
+	}
+	return o
 }
