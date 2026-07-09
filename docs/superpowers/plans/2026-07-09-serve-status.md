@@ -25,7 +25,7 @@
 - **Create** `model-proxy/serve_status.go` — one focused file: response structs, `statusOpts`, pure helpers (`compactNum`, `formatClock`, `formatClockTime`, `plural`), section renderers (`renderProviders`, `renderSchedule`, `renderQuota`, `renderTokens`, `renderLogs`), `appendSection`, `statusGet`, `renderStatus`, `parseStatusFlags`, `cmdServeStatus`.
 - **Create** `model-proxy/serve_status_test.go` — white-box tests for every pure/renderer function + `renderStatus` integration (httptest) + error paths + flag parsing.
 - **Modify** `model-proxy/daemon.go` — one `case "status":` in the `cmdServe` switch.
-- **Modify** `model-proxy/main.go` — `usage` const + `cmdHelp["serve"]` text.
+- **Modify** `model-proxy/main.go` — Task 3: refactor `cmdSchedule` to call the shared `renderScheduleRoutes`; Task 7: `usage` const + `cmdHelp["serve"]` text.
 - **Modify** `model-proxy/README.md` — one line under the serve commands block.
 
 ---
@@ -419,40 +419,73 @@ git commit -m "feat(serve-status): render providers health + counters table"
 
 ---
 
-## Task 3: `renderSchedule` — per-route provider chains
+## Task 3: `renderSchedule` — shared renderer + `cmdSchedule` refactor
 
 **Files:**
 - Modify: `model-proxy/serve_status.go`
 - Modify: `model-proxy/serve_status_test.go`
+- Modify: `model-proxy/main.go` (refactor `cmdSchedule` to share the renderer)
 
 **Interfaces:**
-- Consumes: `statusResp`, `statusRoute` (Task 1); `pad`, `cBold`/`cGreen`/`cRed`/`cYellow`/`cGray`/`cDim`; `plural` (Task 1).
-- Produces: `func renderSchedule(st *statusResp) string`.
+- Consumes: `statusResp`, `statusSchedule`, `statusRoute`, `statusOrdered`, `statusPool` (Task 1); `pad`, `cBold`/`cGreen`/`cRed`/`cYellow`/`cGray`/`cDim`; `plural` (Task 1). `sort` is already imported in `serve_status.go` (added in Task 2).
+- Produces: `func renderScheduleRoutes(models map[string]statusRoute, ind string) string` (shared), `func renderSchedule(st *statusResp) string`. `cmdSchedule` now decodes into `statusSchedule` and prints `renderScheduleRoutes(models, "")` — byte-identical to the original.
 
-- [ ] **Step 1: Write the failing test** (append to `serve_status_test.go`)
+- [ ] **Step 1: Write the failing tests** (append to `serve_status_test.go`)
 
 ```go
-func TestRenderSchedule(t *testing.T) {
-	st := &statusResp{
-		Schedule: statusSchedule{
-			Models: map[string]statusRoute{
-				"claude-sonnet": {
-					First: "aqp",
-					Ordered: []statusOrdered{
-						{Provider: "aqp", Priority: 1, Tier: "plan", Surplus: 12.3, Available: true},
-						{Provider: "codex", Priority: 1, Tier: "plan", Surplus: 8.1, Available: false},
-					},
-					Sticky:   "aqp",
-					DwellRem: 320,
-				},
+func TestRenderScheduleRoutes(t *testing.T) {
+	models := map[string]statusRoute{
+		"claude-sonnet": {
+			First: "aqp",
+			Ordered: []statusOrdered{
+				{Provider: "aqp", Priority: 1, Tier: "plan", Surplus: 12.3, Available: true},
+				{Provider: "codex", Priority: 1, Tier: "plan", Surplus: 8.1, Available: false},
 			},
+			Sticky:   "aqp",
+			DwellRem: 320,
 		},
 	}
-	out := renderSchedule(st)
-	for _, want := range []string{"Schedule", "claude-sonnet", "aqp", "codex", "surplus +12.30", "p1", "(unavailable)", "sticky:", "320s dwell left"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q in:\n%s", want, out)
+	// ind="" reproduces the `schedule` command layout (route at col 0, details +4);
+	// ind="  " is used by the serve-status section (route +2, details +6).
+	cases := []struct{ ind, routePfx, detailPfx string }{
+		{"", "claude-sonnet → aqp\n", "    aqp"},
+		{"  ", "  claude-sonnet → aqp\n", "      aqp"},
+	}
+	for _, tc := range cases {
+		out := renderScheduleRoutes(models, tc.ind)
+		if !strings.HasPrefix(out, tc.routePfx) {
+			t.Errorf("ind=%q: want prefix %q, got:\n%s", tc.ind, tc.routePfx, out)
 		}
+		foundDetail := false
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "surplus +12.30") {
+				foundDetail = true
+				if !strings.HasPrefix(line, tc.detailPfx) {
+					t.Errorf("ind=%q: detail line %q want prefix %q", tc.ind, line, tc.detailPfx)
+				}
+			}
+		}
+		if !foundDetail {
+			t.Errorf("ind=%q: missing surplus detail line", tc.ind)
+		}
+		for _, want := range []string{"surplus +12.30", "surplus +8.10", "(unavailable)", "sticky: aqp, 320s dwell left"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("ind=%q: missing %q in:\n%s", tc.ind, want, out)
+			}
+		}
+	}
+}
+
+func TestRenderSchedule(t *testing.T) {
+	st := &statusResp{Schedule: statusSchedule{Models: map[string]statusRoute{
+		"gpt-5.5": {First: "codex"},
+	}}}
+	out := renderSchedule(st)
+	if !strings.HasPrefix(out, "Schedule (1 route)\n") {
+		t.Errorf("header wrong, got:\n%s", out)
+	}
+	if !strings.Contains(out, "  gpt-5.5 → codex\n") {
+		t.Errorf("route should be indented 2 under the section, got:\n%s", out)
 	}
 }
 
@@ -463,34 +496,32 @@ func TestRenderScheduleEmpty(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd model-proxy && go test -run 'TestRenderSchedule' .`
-Expected: FAIL — `undefined: renderSchedule`.
+Expected: FAIL — `undefined: renderScheduleRoutes` / `renderSchedule`.
 
-- [ ] **Step 3: Implement** (append to `serve_status.go`)
+- [ ] **Step 3: Implement the shared renderer + section** (append to `serve_status.go`)
 
 ```go
-// renderSchedule renders the per-route provider chains. Mirrors the standalone
-// `schedule` command's output (first-choice, ordered list, sticky, pools).
-func renderSchedule(st *statusResp) string {
-	models := st.Schedule.Models
+// renderScheduleRoutes renders the per-route provider chains. ind is the indent
+// for each route's name line; detail lines use ind + 4 spaces. Shared by the
+// `schedule` command (ind "") and the serve-status Schedule section (ind "  "),
+// so the two views never drift. Output ends with a trailing blank line, matching
+// the original `schedule` command.
+func renderScheduleRoutes(models map[string]statusRoute, ind string) string {
 	names := make([]string, 0, len(models))
 	for n := range models {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	if len(names) == 0 {
-		return ""
-	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (%d %s)\n", cBold("Schedule"), len(names), plural(len(names), "route", "routes"))
 	for _, m := range names {
 		ri := models[m]
-		fmt.Fprintf(&b, "  %s → %s\n", cBold(m), cGreen(ri.First))
+		fmt.Fprintf(&b, "%s%s → %s\n", ind, cBold(m), cGreen(ri.First))
 		for _, pool := range ri.Pools {
-			fmt.Fprintf(&b, "      %s %s (%d accounts, %d available)\n",
-				cDim("pool:"), cBold(pool.Parent), pool.Accounts, pool.Available)
+			fmt.Fprintf(&b, "%s    %s %s (%d accounts, %d available)\n",
+				ind, cDim("pool:"), cBold(pool.Parent), pool.Accounts, pool.Available)
 		}
 		for _, t := range ri.Ordered {
 			extra := ""
@@ -500,33 +531,68 @@ func renderSchedule(st *statusResp) string {
 			if t.Peak {
 				extra += " " + cYellow("peak")
 			}
-			fmt.Fprintf(&b, "      %s %s  surplus %+.2f  p%d%s\n",
-				pad(t.Provider, 14), cGray(pad(t.Tier, 13)), t.Surplus, t.Priority, extra)
+			fmt.Fprintf(&b, "%s    %s %s  surplus %+.2f  p%d%s\n",
+				ind, pad(t.Provider, 14), cGray(pad(t.Tier, 13)), t.Surplus, t.Priority, extra)
 		}
 		if ri.Sticky != "" {
 			dwell := ""
 			if ri.DwellRem > 0 {
 				dwell = fmt.Sprintf(", %.0fs dwell left", ri.DwellRem)
 			}
-			fmt.Fprintf(&b, "      %s%s%s\n", cDim("sticky: "), ri.Sticky, cDim(dwell))
+			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, cDim("sticky: "), ri.Sticky, cDim(dwell))
 		}
 		b.WriteString("\n")
 	}
 	return b.String()
 }
+
+// renderSchedule renders the serve-status Schedule section: header + the shared
+// per-route renderer at 2-space indent. Trailing blank line trimmed so the
+// section ends with a single newline (appendSection adds the separator).
+func renderSchedule(st *statusResp) string {
+	if len(st.Schedule.Models) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%d %s)\n", cBold("Schedule"), len(st.Schedule.Models), plural(len(st.Schedule.Models), "route", "routes"))
+	b.WriteString(renderScheduleRoutes(st.Schedule.Models, "  "))
+	return strings.TrimRight(b.String(), "\n") + "\n"
+}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd model-proxy && go test -run 'TestRenderSchedule' .`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Refactor `cmdSchedule` to share the renderer** (`main.go`)
+
+`cmdSchedule` currently decodes `/debug/schedule` into an anonymous struct and renders the per-route loop inline. Replace the anonymous-struct decode AND the inline `for _, m := range names` rendering loop with a decode into `statusSchedule` + a single `renderScheduleRoutes` call. The fetch + transport/HTTP error handling above it stays unchanged. The refactored tail becomes:
+
+```go
+	var st statusSchedule
+	if err := json.Unmarshal(body, &st); err != nil {
+		fmt.Fprintf(os.Stderr, "%s parse schedule response: %v\n", cRed("✗"), err)
+		os.Exit(1)
+	}
+	if len(st.Models) == 0 {
+		fmt.Println("(no routes)")
+		return
+	}
+	fmt.Print(renderScheduleRoutes(st.Models, ""))
+```
+
+This is a pure refactor — `renderScheduleRoutes(models, "")` reproduces the original output byte-for-byte (route name at column 0, details at 4 spaces, blank line after each route). Verify after editing:
+
+Run: `cd model-proxy && go build ./... && go test ./...`
+Expected: build OK; all tests PASS. If `go build` reports `sort` imported and not used in `main.go`, remove `sort` from main.go's import block (the inline `sort.Strings` moved into `renderScheduleRoutes`); otherwise leave it.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-cd model-proxy && gofmt -w serve_status.go serve_status_test.go
-git add serve_status.go serve_status_test.go
-git commit -m "feat(serve-status): render schedule provider chains"
+cd model-proxy && gofmt -w serve_status.go serve_status_test.go main.go
+git add serve_status.go serve_status_test.go main.go
+git commit -m "feat(serve-status): shared schedule renderer; refactor cmdSchedule to use it"
 ```
 
 ---
@@ -1169,7 +1235,7 @@ With a daemon running (`model-proxy serve daemon`):
 
 ## Self-Review notes
 
-- Spec coverage: header/Providers/Schedule/Quota/Tokens/Logs → Tasks 2-5 + 6. Flags `--logs [N]`/`--json`/`--config` → Task 7. Error paths (down / web-disabled / non-200 / parse) → Task 6. Dispatch + help + README → Task 7. No spec section unaddressed.
-- Type consistency: `statusOpts{Logs, LogsN, JSON}` used identically in Tasks 6 & 7; `renderStatus(listen, statusOpts)` signature matches between Task 6 (defines) and Task 7 (calls via `cfg.Listen`); `appendSection` defined and used in Task 6 only.
+- Spec coverage: header/Providers/Schedule/Quota/Tokens/Logs → Tasks 2-5 + 6. Flags `--logs [N]`/`--json`/`--config` → Task 7. Error paths (down / web-disabled / non-200 / parse) → Task 6. Dispatch + help + README → Task 7. Schedule DRY: Task 3 extracts `renderScheduleRoutes` shared by `renderStatus` and a refactored `cmdSchedule` (byte-identical). No spec section unaddressed.
+- Type consistency: `statusOpts{Logs, LogsN, JSON}` used identically in Tasks 6 & 7; `renderStatus(listen, statusOpts)` signature matches between Task 6 (defines) and Task 7 (calls via `cfg.Listen`); `appendSection` defined and used in Task 6 only; `renderScheduleRoutes(map[string]statusRoute, string)` defined in Task 3 and consumed by `renderSchedule` (Task 3) and `cmdSchedule` (Task 3 refactor).
 - **Import blocks are per-task exact** (Go fails on unused imports): Task 1 = `fmt, strconv, strings, time`; Task 2 adds `sort` (go) + `strings` (test); Task 6 adds `encoding/json, io, net/http` (go) + `encoding/json, fmt, net, net/http, net/http/httptest` (test); Task 7 adds `log, os` (go). Each task's step states the resulting block.
 - No placeholders; every code step shows complete code; every command shows expected output.
