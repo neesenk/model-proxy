@@ -127,6 +127,8 @@ model-proxy doctor                 # 离线 config 调度诊断（tier/quota/pea
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider（zhipu/deepseek/volcengine）可在 UI 添加/删除账号；aqp/codex 走**异步登录**（点 "Add account" 弹模态框 → 浏览器完成 SSO / OAuth device flow → UI 轮询 `/api/login/<session>/poll` 直到 `done`/`error`）。
 
+**所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态，所以 UI 改动也是"给卡住的 provider 复位"的手段。
+
 关闭 UI：
 
 ```yaml

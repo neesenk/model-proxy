@@ -314,6 +314,8 @@ doctor                     # 离线 config 调度诊断（每 provider tier/quot
 | POST | `/api/login/<provider>/start` | — | `{session_id, login_url}`(aqp) 或 `{session_id, verify_url, user_code}`(codex) | 异步登录启动。aqp：`BootstrapLoginURL` + 建 cookie-jar `AqpClient` + 起 poll goroutine；codex：`requestUserCode`（device flow）+ 起 poll goroutine。unknown provider → 404；非 aqp/codex → 400 |
 | GET | `/api/login/<session>/poll` | — | `{state:"pending"|"done"|"error", detail, result}` | poll 异步登录。`detail` = login_url/verify_url+user_code（pending，UI 可恢复）/ error msg（error）；`result` = email/account_id（done）。unknown/expired session → 404 |
 
+**写操作统一热重载**：上表所有 mutation（`POST /api/config`、`/api/config/edit`、`POST/DELETE /api/accounts/*`、aqp/codex 登录 goroutine 完成）落盘后都触发进程内 `proxy.reload(configFile)` —— **同一个 worker 进程原地换 cfg/providers，不重启**，改动即时生效。账号增删虽不改 `config.yaml`，但 `reload → buildProviders(cfg) → loadPool` 会重读每个 provider 的池文件，新加/删除的账号随即（取消）展开成虚拟 provider，路由立即看到。账号类 reload 是 best-effort（凭据已先落盘，reload 失败由下次 reload/请求兜底）；config 类是严格流水线（validate-before-write + reload 失败从 `.bak` 回滚）。reload 还会清空 `health`/`sticky`/`spreadCtr`（复位卡住的熔断/限频/粘性）并 kick 一次 `quota.pollAll`。注意：这是**进程内** reload（UI 与被重载的 worker 同进程）；与 `serve reload`（给独立进程发 SIGHUP）不同。
+
 #### SSE token 扫描器契约（`tokens.go`，`forward` 2xx 提交处接入）
 
 - **Pass-through only**：`usageScanner` 是个 `io.ReadCloser`，包在 `resp.Body` 外**仅当 `isSSE(resp.Header)`**。读到的字节原样返回给客户端 —— **不修改、不缓冲流、不阻塞客户端**。失败静默（不记 usage）。
