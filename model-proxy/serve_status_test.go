@@ -194,3 +194,44 @@ func TestRenderQuotaEmpty(t *testing.T) {
 		t.Errorf("empty quota should render nothing, got %q", got)
 	}
 }
+
+func TestRenderTokens(t *testing.T) {
+	tok := &tokensResp{Usage: []tokenEntry{
+		{Provider: "zhipu", Model: "glm-4.6", Input: 1000, Output: 500, Requests: 1},
+		{Provider: "aqp", Model: "claude-sonnet", Input: 1200000, Output: 450000, CacheCreation: 200000, CacheRead: 1100000, Requests: 1234},
+	}}
+	out := renderTokens(tok)
+	// sorted by provider then model: aqp before zhipu
+	if i, j := strings.Index(out, "aqp"), strings.Index(out, "zhipu"); !(i >= 0 && j > i) {
+		t.Errorf("want aqp before zhipu, got aqp@%d zhipu@%d", i, j)
+	}
+	for _, want := range []string{"INPUT", "OUTPUT", "CACHE-CR", "CACHE-RD", "REQUESTS", "1.2M", "2 models"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderTokensEmpty(t *testing.T) {
+	if got := renderTokens(&tokensResp{}); got != "" {
+		t.Errorf("empty tokens should render nothing, got %q", got)
+	}
+}
+
+func TestRenderLogs(t *testing.T) {
+	out := renderLogs(&logsResp{Lines: []string{"line one", "line two"}})
+	if !strings.Contains(out, "Logs (last 2)") {
+		t.Errorf("want header, got:\n%s", out)
+	}
+	for _, want := range []string{"line one", "line two"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderLogsEmpty(t *testing.T) {
+	if got := renderLogs(&logsResp{}); got != "" {
+		t.Errorf("empty logs should render nothing, got %q", got)
+	}
+}

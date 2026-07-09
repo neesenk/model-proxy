@@ -264,6 +264,51 @@ func renderSchedule(st *statusResp) string {
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
+// renderTokens renders the per provider/model token-usage table, sorted by
+// provider then model, with totals in the header.
+func renderTokens(t *tokensResp) string {
+	if len(t.Usage) == 0 {
+		return ""
+	}
+	sort.Slice(t.Usage, func(i, j int) bool {
+		if t.Usage[i].Provider != t.Usage[j].Provider {
+			return t.Usage[i].Provider < t.Usage[j].Provider
+		}
+		return t.Usage[i].Model < t.Usage[j].Model
+	})
+	var totalReqs uint64
+	for _, e := range t.Usage {
+		totalReqs += e.Requests
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%d %s · %s requests)\n",
+		cBold("Tokens"), len(t.Usage), plural(len(t.Usage), "model", "models"), compactNum(totalReqs))
+	hdr := fmt.Sprintf("  %-14s %-22s %10s %10s %10s %10s %10s",
+		"PROVIDER", "MODEL", "INPUT", "OUTPUT", "CACHE-CR", "CACHE-RD", "REQUESTS")
+	fmt.Fprintln(&b, cDim(hdr))
+	for _, e := range t.Usage {
+		fmt.Fprintf(&b, "  %-14s %-22s %10s %10s %10s %10s %10s\n",
+			e.Provider, e.Model,
+			compactNum(e.Input), compactNum(e.Output),
+			compactNum(e.CacheCreation), compactNum(e.CacheRead),
+			compactNum(e.Requests))
+	}
+	return b.String()
+}
+
+// renderLogs renders the recent log lines (only with --logs).
+func renderLogs(l *logsResp) string {
+	if len(l.Lines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (last %d)\n", cBold("Logs"), len(l.Lines))
+	for _, line := range l.Lines {
+		fmt.Fprintf(&b, "  %s\n", line)
+	}
+	return b.String()
+}
+
 // renderQuota renders per-provider quota windows as label + tag + % + bar + reset.
 func renderQuota(st *statusResp) string {
 	names := make([]string, 0, len(st.Quota))
