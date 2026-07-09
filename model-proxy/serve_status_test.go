@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,5 +60,41 @@ func TestPlural(t *testing.T) {
 	}
 	if got := plural(3, "route", "routes"); got != "routes" {
 		t.Errorf("plural(3) = %q, want routes", got)
+	}
+}
+
+func TestRenderProviders(t *testing.T) {
+	st := &statusResp{
+		Health: map[string]statusHealth{
+			"aqp":   {CircuitState: "closed", Available: true},
+			"codex": {CircuitState: "open"},
+			"zhipu": {CircuitState: "closed", RateLimitedUntil: "2099-01-01T00:00:00Z"},
+		},
+		Counters: map[string]statusCounters{
+			"aqp":   {Requests: 1234, Failovers: 12, RateLimited: 3, Failures: 5, LastRequestAt: 1700000000},
+			"codex": {Requests: 567, Failovers: 45, RateLimited: 8, Failures: 20, LastRequestAt: 0},
+		},
+	}
+	out := renderProviders(st)
+	for _, want := range []string{"PROVIDER", "HEALTH", "REQS", "FAILOVERS", "429", "FAILURES", "LAST"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("header missing %q in:\n%s", want, out)
+		}
+	}
+	// sorted rows: aqp before codex before zhipu
+	if i, j := strings.Index(out, "aqp"), strings.Index(out, "codex"); !(i >= 0 && j > i) {
+		t.Errorf("want aqp before codex, got aqp@%d codex@%d", i, j)
+	}
+	if !strings.Contains(out, "1.2k") {
+		t.Errorf("want aqp reqs compact 1.2k, got:\n%s", out)
+	}
+	if !strings.Contains(out, "available") {
+		t.Errorf("want 'available' label, got:\n%s", out)
+	}
+	if !strings.Contains(out, "circuit open") {
+		t.Errorf("want 'circuit open' label, got:\n%s", out)
+	}
+	if !strings.Contains(out, "rate-limited") {
+		t.Errorf("want 'rate-limited' label, got:\n%s", out)
 	}
 }

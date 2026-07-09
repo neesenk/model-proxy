@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -158,4 +159,52 @@ func plural(n int, sing, plur string) string {
 		return sing
 	}
 	return plur
+}
+
+// renderProviders renders the Providers table: one row per health entry (sorted),
+// with counters looked up by name. The API only emits circuit_until /
+// rate_limited_until when they are in the future, so field presence ⇒ active.
+func renderProviders(st *statusResp) string {
+	names := make([]string, 0, len(st.Health))
+	for n := range st.Health {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%d)\n", cBold("Providers"), len(names))
+	hdr := fmt.Sprintf("  %s  %s  %8s  %9s  %5s  %8s  %s",
+		pad("PROVIDER", 16), pad("HEALTH", 13), "REQS", "FAILOVERS", "429", "FAILURES", "LAST")
+	fmt.Fprintln(&b, cDim(hdr))
+	for _, name := range names {
+		label, color := healthLabel(st.Health[name])
+		c := st.Counters[name]
+		fmt.Fprintf(&b, "  %s  %s  %8s  %9s  %5s  %8s  %s\n",
+			pad(name, 16),
+			color(pad(label, 13)),
+			compactNum(c.Requests),
+			compactNum(c.Failovers),
+			compactNum(c.RateLimited),
+			compactNum(c.Failures),
+			formatClock(c.LastRequestAt))
+	}
+	return b.String()
+}
+
+// healthLabel returns the visible label + color func for a provider's health cell.
+func healthLabel(h statusHealth) (string, func(string) string) {
+	switch {
+	case h.CircuitState == "open":
+		return "circuit open", cRed
+	case h.CircuitState == "half_open":
+		return "half-open", cRed
+	case h.RateLimitedUntil != "":
+		return "rate-limited", cYellow
+	case h.Available:
+		return "available", cGreen
+	default:
+		return "unavailable", cDim
+	}
 }
