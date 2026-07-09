@@ -349,7 +349,7 @@ func renderQuota(st *statusResp) string {
 			usedPct := 0
 			if w.RemainingPct >= 0 {
 				pctStr = fmt.Sprintf("%.0f%%", w.RemainingPct*100)
-				usedPct = int((1 - w.RemainingPct) * 100)
+				usedPct = 100 - int(w.RemainingPct*100)
 			}
 			resets := ""
 			if !w.ResetsAt.IsZero() {
@@ -362,10 +362,14 @@ func renderQuota(st *statusResp) string {
 	return b.String()
 }
 
+// statusHTTPClient caps each daemon request so a wedged listener fails fast
+// instead of hanging the status command indefinitely.
+var statusHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // statusGet fetches base+path and returns the body, HTTP status, and transport
 // error (if any). A non-2xx status is NOT an error here — the caller inspects it.
 func statusGet(base, path string) (body []byte, status int, err error) {
-	resp, err := http.Get(base + path)
+	resp, err := statusHTTPClient.Get(base + path)
 	if err != nil {
 		return nil, 0, err
 	}
