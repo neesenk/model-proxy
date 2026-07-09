@@ -288,11 +288,12 @@ logout <provider> [--label NAME | --all]       # 删一个账号（默认交互�
 usage <provider>          # 池化时默认逐账号展示全部账号用量（--label 看某一个）
 models [provider]         # 从 config 列模型
 models refresh <provider> # 从服务端刷新
-serve [daemon|stop|reload]
+serve [daemon|stop|reload|status]
 takeover/restore <client>
 config init|print|check
 schedule                   # 查询运行中的 daemon：每个 model 当前调度到哪个 provider（GET /debug/schedule）
 doctor                     # 离线 config 调度诊断（每 provider tier/quota/peak + 每路由 dry-run 顺序 + warning）
+serve status               # 终端状态面板（= Web UI Status 标签页）：拉 /api/status + /api/tokens（--logs 再加 /api/logs），终端优化输出；--logs [N] / --json / --config
 ```
 
 ### Web UI + `/api/*` 接口契约
@@ -315,6 +316,8 @@ doctor                     # 离线 config 调度诊断（每 provider tier/quot
 | GET | `/api/login/<session>/poll` | — | `{state:"pending"|"done"|"error", detail, result}` | poll 异步登录。`detail` = login_url/verify_url+user_code（pending，UI 可恢复）/ error msg（error）；`result` = email/account_id（done）。unknown/expired session → 404 |
 
 **写操作统一热重载**：上表所有 mutation（`POST /api/config`、`/api/config/edit`、`POST/DELETE /api/accounts/*`、aqp/codex 登录 goroutine 完成）落盘后都触发进程内 `proxy.reload(configFile)` —— **同一个 worker 进程原地换 cfg/providers，不重启**，改动即时生效。账号增删虽不改 `config.yaml`，但 `reload → buildProviders(cfg) → loadPool` 会重读每个 provider 的池文件，新加/删除的账号随即（取消）展开成虚拟 provider，路由立即看到。账号类 reload 是 best-effort（凭据已先落盘，reload 失败由下次 reload/请求兜底）；config 类是严格流水线（validate-before-write + reload 失败从 `.bak` 回滚）。reload 还会清空 `health`/`sticky`/`spreadCtr`（复位卡住的熔断/限频/粘性）并 kick 一次 `quota.pollAll`。注意：这是**进程内** reload（UI 与被重载的 worker 同进程）；与 `serve reload`（给独立进程发 SIGHUP）不同。
+
+`serve status`（CLI，`serve_status.go`）是上表 `GET /api/status` + `/api/tokens`（带 `--logs` 再加 `/api/logs`）的终端消费者——一次性拉取、终端优化输出（列对齐 / 着色 / 紧凑数字 `compactNum`），内容与 Status 标签页一致（头部 version/uptime/listen + Providers 健康/计数器 + Schedule + Quota + Tokens，可选 Logs）。结构：纯 `renderStatus(listen, opts) (string, error)` 核心（`renderProviders`/`renderSchedule`/`renderQuota`/`renderTokens`/`renderLogs` 各段，httptest 可测）+ 薄 `cmdServeStatus` 包装（不单测，同 `cmdSchedule` 惯例）；`parseStatusFlags` 解析 `--logs [N]`(默认 20)/`--json`/`--config`（`--config` 仍交给 `configPath`，不被吞掉）。`statusGet` 用 10s 超时的 `http.Client`（卡死快速失败，错误同 `cmdSchedule` 风格：transport/404-web.enabled/非200/解析）。`--json` 原样合并 `{status, tokens[, logs]}`（`json.RawMessage` 透传，便于 jq）。`renderScheduleRoutes` 与 `cmdSchedule` 共享（重构后 `model-proxy schedule` 输出逐字不变）。需要 `web.enabled`（默认 true）；`/api/status` 返 404 → 提示开启 Web UI。
 
 #### SSE token 扫描器契约（`tokens.go`，`forward` 2xx 提交处接入）
 

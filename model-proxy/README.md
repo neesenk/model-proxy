@@ -139,6 +139,29 @@ web:
 
 JSON 接口在 `/api/*`（`status` / `logs?tail=N` / `config` GET·POST / `config/edit` / `accounts` GET·POST·DELETE / `tokens` / `tokens/reset` / `login/<provider>/start` + `login/<session>/poll`）；底层契约（请求/响应 shape、SSE token 扫描器语义）见 `AGENTS.md` 的「Web UI + /api/* 接口契约」一节。前端是嵌入式的静态资源（`web_assets/`，`go:embed`），无独立构建步骤。
 
+## `serve status`（终端状态面板）
+
+`model-proxy serve status` 是 Web UI **Status 标签页的终端等价物**——一次性拉取运行中 daemon 的 `/api/status` + `/api/tokens`（带 `--logs` 时再加 `/api/logs`），按终端优化输出（列对齐 / 着色 / 紧凑数字）。需要 daemon 在跑、且 `web.enabled`（默认 true）。
+
+```bash
+model-proxy serve status            # 头部 + Providers + Schedule + Quota + Tokens
+model-proxy serve status --logs     # ……再加最近 20 行日志
+model-proxy serve status --logs 5   # ……最近 5 行
+model-proxy serve status --json     # 合并的原始 JSON（{status, tokens[, logs]}，方便 jq）
+model-proxy serve status --config /path/to/config.yaml   # 指定 config（从而选 listen 地址）
+```
+
+显示内容（与 Status 标签页一致）：
+
+- **头部**：`v<version> · <uptime> · <listen>`
+- **Providers**：每个 provider 的健康状态（`available` / `circuit open` / `rate-limited` / `unavailable`）+ 计数器（reqs / failovers / 429 / failures / 最后请求时间）
+- **Schedule**：每路由首选 provider + ordered 列表（tier / surplus / priority / 可用 / peak）+ sticky 驻留
+- **Quota**：每 provider 的配额窗口（ultimate / short）+ 剩余百分比 + 进度条 + 重置时间
+- **Tokens**：按 provider × model 的观测用量（input / output / cache）
+- **Logs**（仅 `--logs`）：最近 N 行日志
+
+错误处理：daemon 没在跑 → `✗ cannot reach daemon at <listen>: … is 'model-proxy serve' running?`；`web.enabled: false`（`/api/status` 返 404）→ 提示开启 Web UI。每次请求带 10s 超时，daemon 卡死会快速失败而不是一直挂起。`--json` 适合脚本，如 `model-proxy serve status --json | jq .status.quota`。
+
 ## Token 文件
 
 凭据由 `login` 管理，按 provider name 派生路径，不落 config：
