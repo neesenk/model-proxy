@@ -160,3 +160,37 @@ func TestRenderScheduleEmpty(t *testing.T) {
 		t.Errorf("empty schedule should render nothing, got %q", got)
 	}
 }
+
+func TestRenderQuota(t *testing.T) {
+	st := &statusResp{
+		Quota: map[string]statusQuota{
+			"aqp": {
+				Account: "work", Plan: "plan",
+				Windows: []statusWindow{
+					{Label: "Monthly", RemainingPct: 0.62, Ultimate: true, ResetsAt: time.Now().Add(time.Hour)},
+					{Label: "5h tokens", RemainingPct: 0.88, Short: true},
+				},
+			},
+			"codex": {Err: "rate limited"},
+		},
+	}
+	out := renderQuota(st)
+	// sorted: aqp before codex
+	if i, j := strings.Index(out, "aqp"), strings.Index(out, "codex"); !(i >= 0 && j > i) {
+		t.Errorf("want aqp before codex, got aqp@%d codex@%d", i, j)
+	}
+	for _, want := range []string{"work", "plan", "Monthly (ultimate)", "62%", "5h tokens (short)", "88%", "resets"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "no data") {
+		t.Errorf("want 'no data' for codex error, got:\n%s", out)
+	}
+}
+
+func TestRenderQuotaEmpty(t *testing.T) {
+	if got := renderQuota(&statusResp{}); got != "" {
+		t.Errorf("empty quota should render nothing, got %q", got)
+	}
+}

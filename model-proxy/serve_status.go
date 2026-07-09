@@ -263,3 +263,51 @@ func renderSchedule(st *statusResp) string {
 	b.WriteString(renderScheduleRoutes(st.Schedule.Models, "  "))
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
+
+// renderQuota renders per-provider quota windows as label + tag + % + bar + reset.
+func renderQuota(st *statusResp) string {
+	names := make([]string, 0, len(st.Quota))
+	for n := range st.Quota {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s (%d)\n", cBold("Quota"), len(names))
+	for _, name := range names {
+		q := st.Quota[name]
+		header := name
+		if q.Account != "" {
+			header += " · " + q.Account
+		}
+		if q.Plan != "" {
+			header += " · " + q.Plan
+		}
+		fmt.Fprintf(&b, "  %s\n", cBold(header))
+		if q.Err != "" {
+			fmt.Fprintf(&b, "      %s\n", cDim("no data ("+q.Err+")"))
+			continue
+		}
+		for _, w := range q.Windows {
+			tag := "short"
+			if w.Ultimate {
+				tag = "ultimate"
+			}
+			pctStr := "—"
+			usedPct := 0
+			if w.RemainingPct >= 0 {
+				pctStr = fmt.Sprintf("%.0f%%", w.RemainingPct*100)
+				usedPct = int((1 - w.RemainingPct) * 100)
+			}
+			resets := ""
+			if !w.ResetsAt.IsZero() {
+				resets = cDim("  resets " + formatClockTime(w.ResetsAt))
+			}
+			fmt.Fprintf(&b, "      %s  %5s  %s%s\n",
+				pad(w.Label+" ("+tag+")", 22), pctStr, progressBar(usedPct, 16), resets)
+		}
+	}
+	return b.String()
+}
