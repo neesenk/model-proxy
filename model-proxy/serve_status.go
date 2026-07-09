@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -355,4 +358,87 @@ func renderQuota(st *statusResp) string {
 		}
 	}
 	return b.String()
+}
+
+// statusGet fetches base+path and returns the body, HTTP status, and transport
+// error (if any). A non-2xx status is NOT an error here — the caller inspects it.
+func statusGet(base, path string) (body []byte, status int, err error) {
+	resp, err := http.Get(base + path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, _ = io.ReadAll(resp.Body)
+	return body, resp.StatusCode, nil
+}
+
+// renderStatus fetches the daemon's status endpoints and returns either the
+// rendered terminal view or the merged JSON (opts.JSON). listen is the daemon's
+// "host:port" (cfg.Listen); the http:// scheme is added here. Fetch plan:
+// /api/status always; /api/tokens always; /api/logs?tail=N only when opts.Logs.
+func renderStatus(listen string, opts statusOpts) (string, error) {
+	base := "http://" + listen
+	statusBody, status, err := statusGet(base, "/api/status")
+	if err != nil {
+		return "", fmt.Errorf("cannot reach daemon at %s: %v\nis `model-proxy serve` running?", listen, err)
+	}
+	if status == 404 {
+		return "", fmt.Errorf("web UI endpoints not available — is web.enabled true on the daemon?")
+	}
+	if status != 200 {
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(statusBody), 200))
+	}
+
+	tokensBody, _, _ := statusGet(base, "/api/tokens") // non-fatal; absence just hides the section
+
+	if opts.JSON {
+		merged := map[string]json.RawMessage{"status": json.RawMessage(statusBody)}
+		if len(tokensBody) > 0 {
+			merged["tokens"] = json.RawMessage(tokensBody)
+		}
+		if opts.Logs {
+			if lb, _, e := statusGet(base, "/api/logs?tail="+strconv.Itoa(opts.LogsN)); e == nil {
+				merged["logs"] = json.RawMessage(lb)
+			}
+		}
+		enc, _ := json.MarshalIndent(merged, "", "  ")
+		return string(enc), nil
+	}
+
+	var st statusResp
+	if err := json.Unmarshal(statusBody, &st); err != nil {
+		return "", fmt.Errorf("parse status response: %v", err)
+	}
+	var tok tokensResp
+	if len(tokensBody) > 0 {
+		json.Unmarshal(tokensBody, &tok)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s  %s · %s · %s\n\n",
+		cBold("model-proxy"), cDim("v"+st.Version), cDim(st.Uptime), cDim(st.Listen))
+	appendSection(&b, renderProviders(&st))
+	appendSection(&b, renderSchedule(&st))
+	appendSection(&b, renderQuota(&st))
+	appendSection(&b, renderTokens(&tok))
+	if opts.Logs {
+		var lg logsResp
+		if lb, ls, e := statusGet(base, "/api/logs?tail="+strconv.Itoa(opts.LogsN)); e == nil && ls == 200 {
+			json.Unmarshal(lb, &lg)
+		}
+		appendSection(&b, renderLogs(&lg))
+	}
+	return b.String(), nil
+}
+
+// appendSection writes a non-empty section followed by one blank separator line.
+func appendSection(b *strings.Builder, s string) {
+	if strings.TrimSpace(s) == "" {
+		return
+	}
+	b.WriteString(s)
+	if !strings.HasSuffix(s, "\n") {
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
 }

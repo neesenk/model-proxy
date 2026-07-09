@@ -1,6 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -233,5 +238,94 @@ func TestRenderLogs(t *testing.T) {
 func TestRenderLogsEmpty(t *testing.T) {
 	if got := renderLogs(&logsResp{}); got != "" {
 		t.Errorf("empty logs should render nothing, got %q", got)
+	}
+}
+
+func TestRenderStatusIntegration(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{
+		  "uptime":"2h15m3s","version":"0.4.2","listen":"127.0.0.1:15721",
+		  "health":{"aqp":{"circuit_state":"closed","available":true}},
+		  "counters":{"aqp":{"requests":1234,"failovers":0,"rate_limited_429":0,"failures":0,"last_request_at":1700000000}},
+		  "quota":{"aqp":{"Account":"work","Plan":"plan","RemainingPct":0.62,"Windows":[{"Label":"Monthly","RemainingPct":0.62,"Ultimate":true,"ResetsAt":"2099-01-01T09:00:00Z"}]}},
+		  "schedule":{"models":{"claude-sonnet":{"first":"aqp","ordered":[{"provider":"aqp","priority":1,"tier":"plan","surplus":12.3,"available":true}]}}}
+		}`)
+	})
+	mux.HandleFunc("/api/tokens", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"usage":[{"provider":"aqp","model":"claude-sonnet","input":1200000,"output":450000,"cache_creation":200000,"cache_read":1100000,"requests":1234}]}`)
+	})
+	mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"lines":["line one","line two"]}`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	listen := ts.Listener.Addr().String()
+
+	out, err := renderStatus(listen, statusOpts{})
+	if err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	for _, want := range []string{"model-proxy", "0.4.2", "2h15m3s", "aqp", "available", "claude-sonnet", "Monthly (ultimate)", "62%", "1.2M"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+
+	// default: no logs section
+	if strings.Contains(out, "line one") {
+		t.Errorf("logs should be hidden by default")
+	}
+
+	// --logs includes a log line
+	outLogs, err := renderStatus(listen, statusOpts{Logs: true, LogsN: 20})
+	if err != nil {
+		t.Fatalf("renderStatus logs: %v", err)
+	}
+	if !strings.Contains(outLogs, "line one") {
+		t.Errorf("logs missing 'line one'")
+	}
+
+	// --json: valid merged object with status + tokens (+ logs when requested)
+	outJSON, err := renderStatus(listen, statusOpts{JSON: true, Logs: true, LogsN: 2})
+	if err != nil {
+		t.Fatalf("renderStatus json: %v", err)
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(outJSON), &merged); err != nil {
+		t.Fatalf("json output invalid: %v\n%s", err, outJSON)
+	}
+	for _, k := range []string{"status", "tokens", "logs"} {
+		if _, ok := merged[k]; !ok {
+			t.Errorf("json missing key %q", k)
+		}
+	}
+}
+
+func TestRenderStatusDaemonDown(t *testing.T) {
+	// bind then close → guaranteed connection refused
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	_, err = renderStatus(addr, statusOpts{})
+	if err == nil {
+		t.Fatal("want error for unreachable daemon")
+	}
+	if !strings.Contains(err.Error(), "cannot reach daemon") {
+		t.Errorf("want 'cannot reach daemon', got %v", err)
+	}
+}
+
+func TestRenderStatusWebDisabled(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+	_, err := renderStatus(ts.Listener.Addr().String(), statusOpts{})
+	if err == nil || !strings.Contains(err.Error(), "web.enabled") {
+		t.Fatalf("want web.enabled error, got %v", err)
 	}
 }
