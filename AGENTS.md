@@ -412,6 +412,13 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 - **覆盖盲区**：models.dev **没有** aqp/compass、codex/ChatGPT、volcengine 这几个 provider；codex `gpt-5.5`、volcengine `doubao-*` 等未命中→走 default（`ctx=200000 out=16384 text-only`），`takeover` 对 opencode/pi 发 stderr 警告（claude/codex 不写每模型元数据，不警告）
 - **作用域**：仅 `models`/`takeover` CLI 路径调 `ensureCatalogFresh`+`hydrateModels`（hydrate 只改内存 cfg，**不进** `LoadConfig`/daemon）；代理热路径、`GET /v1/models`、quota 均不受影响。`models pull` 强制刷新 catalog 缓存；`MP_MODELSDEV_URL` 覆盖端点（测试/镜像）。`models` 显示新增 `SRC` 列（`models.dev`/`default`）
 
+### 隐式路由（implicit routes，实测）
+
+- **无 route 的 model 不再直接 502**：若某个 **已 login** 的 provider 的 `models:` 列表里有这个名字，`synthesizeImplicitRoutes`（在 `NewProxy`/`reload` 里跑——此时 `loadPool` 的 login 状态已知）自动合成一条单目标 route `{首个按字母序的已登录 provider, model, priority 1}`，merge 进 `expandedRoutes`（显式 route 永远优先）。`forward`/`/debug/schedule`/`/api/status.schedule`/serve-status 自动看到；`GET /v1/models` 也列出（可调 ⇒ 可列）
+- **多 provider 歧义**：同一名字被 >1 个已登录 provider 提供且无显式 route → 只用首个，其余忽略，发 **歧义警告**，出现在 `model-proxy models`（stderr `⚠`）和 `/api/status` 的 `warnings`（Status 卡 + `serve status`）。单 provider 的隐式路由静默
+- **login 判定**：`loggedInProviders(cfg)` 用 `loadPool(name, provID).Accounts > 0`（plural pool 或 legacy 单文件都算）。`buildProviders` 不返回 login 状态（无凭据的 provider 仍被 file-backed 构建进 map），所以 login 要单独算
+- **作用域**：隐式路由只在 daemon 侧（`expandedRoutes`）生效；`doctor` 离线、不知道 login，仍只看显式 `cfg.Routes`。`snapshotSticky` 读 `cfg.Routes`，隐式路由的 sticky 不持久化（单 provider 无需 sticky）
+
 ### 踩过的坑
 
 1. **路径双 `/v1`**：provider openai_base_url 已含 `/compass-api/v1`，client path `/v1/messages` 拼接后变双 `/v1`。需剥 client 的 `/v1` 前缀。
