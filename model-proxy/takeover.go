@@ -64,12 +64,12 @@ func backupDir(configPath string) string {
 // ---- top-level dispatch ----
 
 func runTakeover(cfg *Config, which, bakDir string) error {
-	// Hydrate model metadata from models.dev (config > models.dev > default) so
-	// takeover writes real context/output/modalities. Warn about models that fell
-	// back to defaults (unmatched in config + catalog). config.yaml is untouched.
+	// Hydrate model metadata from models.dev (config carries only names; metadata
+	// is runtime-sourced) so takeover writes real context/output/modalities. Warn
+	// about models that fell back to defaults. config.yaml is untouched.
 	cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
-	sources := hydrateModels(cfg, cat)
-	emitTakeoverWarnings(cfg, which, sources)
+	meta, sources := hydrateModels(cfg, cat)
+	emitTakeoverWarnings(cfg, which, meta, sources)
 
 	clients := listClients(cfg, which)
 	for _, c := range clients {
@@ -77,7 +77,7 @@ func runTakeover(cfg *Config, which, bakDir string) error {
 		if err := backup(c.file, bakDir, c.name); err != nil {
 			return fmt.Errorf("%s backup: %w", c.name, err)
 		}
-		if err := c.rewrite(cfg); err != nil {
+		if err := c.rewrite(cfg, meta); err != nil {
 			return fmt.Errorf("%s rewrite: %w", c.name, err)
 		}
 		log.Printf("  ✓ %s done", c.name)
@@ -88,7 +88,7 @@ func runTakeover(cfg *Config, which, bakDir string) error {
 // emitTakeoverWarnings prints a stderr warning for each default-sourced model
 // that a metadata-writing client (opencode, pi) in this takeover set will emit.
 // claude/codex don't write per-model metadata, so they are skipped to avoid noise.
-func emitTakeoverWarnings(cfg *Config, which string, sources map[string]map[string]modelSource) {
+func emitTakeoverWarnings(cfg *Config, which string, meta map[string]map[string]ProviderModel, sources map[string]map[string]modelSource) {
 	clients := listClients(cfg, which)
 	writesMetadata := false
 	for _, c := range clients {
@@ -100,7 +100,7 @@ func emitTakeoverWarnings(cfg *Config, which string, sources map[string]map[stri
 	if !writesMetadata {
 		return
 	}
-	for _, m := range exposedModels(cfg) {
+	for _, m := range exposedModels(cfg, meta) {
 		if sources[m.provider] != nil && sources[m.provider][m.realModel] == srcDefault {
 			fmt.Fprintf(os.Stderr, "warning: model %s at %s: no models.dev metadata — wrote defaults (ctx=%d out=%d text-only)\n",
 				m.realModel, m.provider, defaultProviderModel.Context, defaultProviderModel.Output)
@@ -123,15 +123,15 @@ func runRestore(cfg *Config, which, bakDir string) error {
 type clientSpec struct {
 	name    string
 	file    string
-	rewrite func(cfg *Config) error
+	rewrite func(cfg *Config, meta map[string]map[string]ProviderModel) error
 }
 
 func listClients(cfg *Config, which string) []clientSpec {
 	all := []clientSpec{
-		{name: "claude", file: cfg.Takeover.Claude, rewrite: func(c *Config) error { return rewriteClaude(c) }},
-		{name: "opencode", file: cfg.Takeover.Opencode, rewrite: func(c *Config) error { return rewriteOpencode(c) }},
-		{name: "codex", file: cfg.Takeover.Codex, rewrite: func(c *Config) error { return rewriteCodex(c) }},
-		{name: "pi", file: cfg.Takeover.Pi, rewrite: func(c *Config) error { return rewritePi(c) }},
+		{name: "claude", file: cfg.Takeover.Claude, rewrite: func(c *Config, _ map[string]map[string]ProviderModel) error { return rewriteClaude(c) }},
+		{name: "opencode", file: cfg.Takeover.Opencode, rewrite: func(c *Config, m map[string]map[string]ProviderModel) error { return rewriteOpencode(c, m) }},
+		{name: "codex", file: cfg.Takeover.Codex, rewrite: func(c *Config, _ map[string]map[string]ProviderModel) error { return rewriteCodex(c) }},
+		{name: "pi", file: cfg.Takeover.Pi, rewrite: func(c *Config, m map[string]map[string]ProviderModel) error { return rewritePi(c, m) }},
 	}
 	if which == "" || which == "all" {
 		return all

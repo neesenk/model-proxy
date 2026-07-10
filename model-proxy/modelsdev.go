@@ -49,12 +49,12 @@ type modelsDevCatalog struct {
 	ByEndpoint map[string][]string       `json:"by_endpoint"`
 }
 
-// modelSource records where a model's effective metadata came from.
+// modelSource records where a model's effective metadata came from (config now
+// carries only names, so there is no srcConfig — metadata is always runtime).
 type modelSource int
 
 const (
-	srcConfig    modelSource = iota // present in config models: block
-	srcModelsDev                    // matched in the models.dev catalog
+	srcModelsDev modelSource = iota // matched in the models.dev catalog
 	srcDefault                      // unmatched → defaultProviderModel
 )
 
@@ -306,51 +306,53 @@ func ageString(t time.Time) string {
 	}
 }
 
-// hydrateModels makes cfg.Providers[*].Models "effective": every model already
-// in config is authoritative (srcConfig); every model referenced in routes but
-// missing from config is added from the catalog (srcModelsDev) or set to defaults
-// (srcDefault). It mutates cfg in place and returns the per-(provider,model)
-// source map. config.yaml is never touched — only the in-memory cfg.
-func hydrateModels(cfg *Config, cat *modelsDevCatalog) map[string]map[string]modelSource {
-	sources := map[string]map[string]modelSource{}
-	ensure := func(prov string) map[string]modelSource {
-		if sources[prov] == nil {
+// hydrateModels computes the effective metadata for every model a provider serves
+// — the union of the config `Models` name list and any model named in `routes` —
+// resolving context/output/modalities from the models.dev catalog (srcModelsDev)
+// or conservative defaults (srcDefault). Config carries only names now, so there
+// is no "config metadata" source. Returns two parallel maps keyed provider→model.
+// cfg and config.yaml are not mutated.
+func hydrateModels(cfg *Config, cat *modelsDevCatalog) (meta map[string]map[string]ProviderModel, sources map[string]map[string]modelSource) {
+	meta = map[string]map[string]ProviderModel{}
+	sources = map[string]map[string]modelSource{}
+	ensure := func(prov string) (map[string]ProviderModel, map[string]modelSource) {
+		if meta[prov] == nil {
+			meta[prov] = map[string]ProviderModel{}
 			sources[prov] = map[string]modelSource{}
 		}
-		return sources[prov]
+		return meta[prov], sources[prov]
 	}
-	// 1. seed: existing config models are authoritative.
+	resolve := func(prov Provider, name string) (ProviderModel, modelSource) {
+		if md, ok := cat.lookup([]string{prov.OpenAIBaseURL, prov.AnthropicBaseURL}, name); ok {
+			return md.toProviderModel(), srcModelsDev
+		}
+		return defaultProviderModel, srcDefault
+	}
+	// 1. config name list.
 	for provName, prov := range cfg.Providers {
-		s := ensure(provName)
-		for mid := range prov.Models {
-			s[mid] = srcConfig
+		m, s := ensure(provName)
+		for _, name := range prov.Models {
+			if _, dup := m[name]; dup {
+				continue
+			}
+			m[name], s[name] = resolve(prov, name)
 		}
 	}
-	// 2. add route models missing from config (config ∪ routes).
+	// 2. route model names not already covered (config ∪ routes).
 	for _, targets := range cfg.Routes {
 		for _, t := range targets {
 			prov, ok := cfg.Providers[t.Provider]
 			if !ok {
 				continue
 			}
-			if _, exists := prov.Models[t.Model]; exists {
-				continue // config wins
+			m, s := ensure(t.Provider)
+			if _, exists := m[t.Model]; exists {
+				continue
 			}
-			if prov.Models == nil {
-				prov.Models = map[string]ProviderModel{}
-			}
-			s := ensure(t.Provider)
-			if md, ok := cat.lookup([]string{prov.OpenAIBaseURL, prov.AnthropicBaseURL}, t.Model); ok {
-				prov.Models[t.Model] = md.toProviderModel()
-				s[t.Model] = srcModelsDev
-			} else {
-				prov.Models[t.Model] = defaultProviderModel
-				s[t.Model] = srcDefault
-			}
-			cfg.Providers[t.Provider] = prov // map value copy: write back
+			m[t.Model], s[t.Model] = resolve(prov, t.Model)
 		}
 	}
-	return sources
+	return meta, sources
 }
 
 // lookup resolves a model's metadata given the provider's base URLs (openai +

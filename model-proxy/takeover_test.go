@@ -18,9 +18,7 @@ func testTakeoverConfig(t *testing.T, dir string) *Config {
 		Providers: map[string]Provider{
 			"aqp": {
 				OpenAIBaseURL: "http://x", Provider: "aqp",
-				Models: map[string]ProviderModel{
-					"glm-5.2": {Context: 1048576, Output: 131072, Modalities: ProviderModalities{Input: []string{"text"}, Output: []string{"text"}}},
-				},
+				Models: []string{"glm-5.2"},
 			},
 		},
 		Routes: map[string][]RouteTarget{
@@ -92,7 +90,7 @@ func TestRewriteOpencode(t *testing.T) {
 	cfg := testTakeoverConfig(t, dir)
 	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
 
-	if err := rewriteOpencode(cfg); err != nil {
+	if err := rewriteOpencode(cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
@@ -124,7 +122,7 @@ func TestRewritePi(t *testing.T) {
 	cfg := testTakeoverConfig(t, dir)
 	os.WriteFile(cfg.Takeover.Pi, []byte(`{}`), 0o644)
 
-	if err := rewritePi(cfg); err != nil {
+	if err := rewritePi(cfg, nil); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
@@ -266,12 +264,8 @@ new = "y"
 func TestExposedModels_PicksBestPriority(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {Provider: "static", Models: map[string]ProviderModel{
-				"m1": {Context: 1000, Output: 2000},
-			}},
-			"b": {Provider: "static", Models: map[string]ProviderModel{
-				"m1": {Context: 3000, Output: 4000},
-			}},
+			"a": {Provider: "static", Models: []string{"m1"}},
+			"b": {Provider: "static", Models: []string{"m1"}},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -280,7 +274,12 @@ func TestExposedModels_PicksBestPriority(t *testing.T) {
 			},
 		},
 	}
-	got := exposedModels(cfg)
+	// Metadata is now runtime-sourced (models.dev); build the hydrated map directly.
+	meta := map[string]map[string]ProviderModel{
+		"a": {"m1": {Context: 1000, Output: 2000}},
+		"b": {"m1": {Context: 3000, Output: 4000}},
+	}
+	got := exposedModels(cfg, meta)
 	if len(got) != 1 {
 		t.Fatalf("exposedModels len=%d want 1", len(got))
 	}

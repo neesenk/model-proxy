@@ -89,14 +89,18 @@ type Provider struct {
 	// optionally overrides it for anthropic (/v1/messages) requests; if unset,
 	// OpenAIBaseURL serves both protocols. Both must include their version segment
 	// (e.g. .../v1, .../anthropic/v1) since the proxy strips the client's /v1.
-	OpenAIBaseURL    string                   `yaml:"openai_base_url"`
-	AnthropicBaseURL string                   `yaml:"anthropic_base_url"`
-	Provider         string                   `yaml:"provider_id"`
-	AqpMintURL       string                   `yaml:"aqp_mint_url"` // aqp only
-	ClientVersion    string                   `yaml:"client_version,omitempty"`
-	Headers          map[string]string        `yaml:"headers"`
-	UsageURL         string                   `yaml:"usage_url"`
-	Models           map[string]ProviderModel `yaml:"models"`
+	OpenAIBaseURL    string            `yaml:"openai_base_url"`
+	AnthropicBaseURL string            `yaml:"anthropic_base_url"`
+	Provider         string            `yaml:"provider_id"`
+	AqpMintURL       string            `yaml:"aqp_mint_url"` // aqp only
+	ClientVersion    string            `yaml:"client_version,omitempty"`
+	Headers          map[string]string `yaml:"headers"`
+	UsageURL         string            `yaml:"usage_url"`
+	// Models is the list of real model names this provider serves — a managed
+	// whitelist (kept in sync by `models refresh`). Metadata (context/output/
+	// modalities) is NOT stored here; it is sourced at runtime from models.dev
+	// (or conservative defaults) by hydrateModels.
+	Models []string `yaml:"models"`
 	// PeakHours is this provider's set of peak segments (each "HH:MM-HH:MM" in
 	// local time). Peak is folded into effective remaining quota: the per-segment
 	// multiplier discounts a provider's remaining quota while it is inside a peak

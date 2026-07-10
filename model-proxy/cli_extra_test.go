@@ -125,7 +125,7 @@ providers:
     provider_id: aqp
     aqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
     models:
-      glm-5.2: {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
+      - glm-5.2
 routes:
   glm-5.2:
     - {provider: aqp, model: glm-5.2, priority: 1}
@@ -161,7 +161,7 @@ providers:
     provider_id: zhipu
     usage_url: https://example.invalid/api/monitor/usage/quota/limit
     models:
-      glm-5.2: {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
+      - glm-5.2
 routes:
   glm-5.2:
     - {provider: zhipu, model: glm-5.2, priority: 1}
@@ -287,7 +287,7 @@ providers:
     openai_base_url: https://example.invalid/compass-api/v1
     provider_id: aqp
     models:
-      glm-5.2: {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
+      - glm-5.2
 `, dir)
 	path := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {

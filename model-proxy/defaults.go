@@ -21,34 +21,35 @@ providers:
     # peak_hours:                       # multi-segment, per-segment multiplier
     #   - {window: "14:00-18:00", multiplier: 2}
     models:
-      glm-5.2:           {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
-      deepseek-v4-pro:   {context: 1048576, output: 65536, modalities: {input: [text], output: [text]}}
-      deepseek-v4-flash: {context: 1048576, output: 65536, modalities: {input: [text], output: [text]}}
+      - glm-5.2
+      - deepseek-v4-pro
+      - deepseek-v4-flash
   codex:
     openai_base_url: https://chatgpt.com/backend-api/codex
     # client_version: "0.144.1"   # optional; auto-detected from codex CLI if omitted
     provider_id: codex
     models:
-      gpt-5.5: {context: 400000, output: 128000, modalities: {input: [text, image], output: [text]}}
+      - gpt-5.5
   # External provider (Zhipu BigModel — API key via login zhipu)
   # /models endpoint only lists 8 chat models; multimodal models exist but
-  # must be added manually here (they use different API paths).
+  # must be added manually here (they use different API paths). Metadata
+  # (context/output/modalities) is auto-sourced from models.dev at runtime.
   zhipu:
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     provider_id: zhipu
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit  # usage zhipu: 5h/weekly/monthly quota + token consumption
     models:
-      glm-5.2:     {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
-      glm-5.1:     {context: 200000, output: 131072, modalities: {input: [text], output: [text]}}
-      glm-5:       {context: 204800, output: 131072, modalities: {input: [text], output: [text]}}
-      glm-5-turbo: {context: 200000, output: 131072, modalities: {input: [text], output: [text]}}
-      glm-4.7:     {context: 204800, output: 131072, modalities: {input: [text], output: [text]}}
-      glm-4.6:     {context: 204800, output: 131072, modalities: {input: [text], output: [text]}}
-      glm-4.5:     {context: 131072, output: 98304, modalities: {input: [text], output: [text]}}
-      glm-4.5-air: {context: 131072, output: 98304, modalities: {input: [text], output: [text]}}
-      glm-4v-plus: {context: 8192, output: 4096, modalities: {input: [text, image], output: [text]}}
-      cogview-4-plus: {context: 0, output: 0, modalities: {input: [text], output: [image]}}
+      - glm-5.2
+      - glm-5.1
+      - glm-5
+      - glm-5-turbo
+      - glm-4.7
+      - glm-4.6
+      - glm-4.5
+      - glm-4.5-air
+      - glm-4v-plus
+      - cogview-4-plus
   # DeepSeek (API key via 'login deepseek'). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
@@ -62,8 +63,8 @@ providers:
     billing: pay-as-you-go
     usage_url: https://api.deepseek.com/user/balance
     models:
-      deepseek-v4-pro:   {context: 1000000, output: 65536, modalities: {input: [text], output: [text]}}
-      deepseek-v4-flash: {context: 1000000, output: 65536, modalities: {input: [text], output: [text]}}
+      - deepseek-v4-pro
+      - deepseek-v4-flash
 
   # Volcengine Ark (火山方舟, including 'Agent Plan'). API key via 'login volcengine'.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
@@ -73,10 +74,10 @@ providers:
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
     models:
-      doubao-seed-1-8-251228:     {context: 262144, output: 32768, modalities: {input: [text, image], output: [text]}}
-      doubao-seed-2-0-code:       {context: 262144, output: 32768, modalities: {input: [text, image], output: [text]}}
-      doubao-seed-1-6-251015:     {context: 262144, output: 32768, modalities: {input: [text, image], output: [text]}}
-      doubao-seed-2-0-lite-260428: {context: 262144, output: 32768, modalities: {input: [text, image], output: [text]}}
+      - doubao-seed-1-8-251228
+      - doubao-seed-2-0-code
+      - doubao-seed-1-6-251015
+      - doubao-seed-2-0-lite-260428
 
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called

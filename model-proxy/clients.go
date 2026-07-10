@@ -41,7 +41,7 @@ type exposedModel struct {
 	pm        ProviderModel
 }
 
-func exposedModels(cfg *Config) []exposedModel {
+func exposedModels(cfg *Config, meta map[string]map[string]ProviderModel) []exposedModel {
 	var out []exposedModel
 	for exposed, targets := range cfg.Routes {
 		if len(targets) == 0 {
@@ -56,15 +56,18 @@ func exposedModels(cfg *Config) []exposedModel {
 			}
 		}
 		t := best
-		prov, ok := cfg.Providers[t.Provider]
-		if !ok {
+		if _, ok := cfg.Providers[t.Provider]; !ok {
 			continue
+		}
+		var pm ProviderModel
+		if meta[t.Provider] != nil {
+			pm = meta[t.Provider][t.Model]
 		}
 		out = append(out, exposedModel{
 			exposed:   exposed,
 			provider:  t.Provider,
 			realModel: t.Model,
-			pm:        prov.Models[t.Model],
+			pm:        pm,
 		})
 	}
 	return out
@@ -79,7 +82,7 @@ func displayName(id string) string {
 // rewriteOpencode: ~/.config/opencode/opencode.json
 // Writes a provider entry pointing at the proxy, with all exposed models from
 // the config's routes + provider model metadata (context/output/modalities).
-func rewriteOpencode(cfg *Config) error {
+func rewriteOpencode(cfg *Config, meta map[string]map[string]ProviderModel) error {
 	file := cfg.Takeover.Opencode
 	pid := providerID(cfg)
 	v, err := readJSONConfig(file)
@@ -100,17 +103,17 @@ func rewriteOpencode(cfg *Config) error {
 			"apiKey":  "PROXY_MANAGED",
 			"baseURL": baseURL,
 		},
-		"models": opencodeModels(cfg),
+		"models": opencodeModels(cfg, meta),
 	}
 	v["provider"] = prov
 	return writeJSONConfig(file, v)
 }
 
 // opencodeModels builds the opencode model map from the config's exposed
-// models (routes + provider metadata). Each model gets name, limit.{context,
+// models (routes + hydrated metadata). Each model gets name, limit.{context,
 // output}, modalities.{input,output}.
-func opencodeModels(cfg *Config) map[string]any {
-	models := exposedModels(cfg)
+func opencodeModels(cfg *Config, meta map[string]map[string]ProviderModel) map[string]any {
+	models := exposedModels(cfg, meta)
 	out := make(map[string]any, len(models))
 	for _, m := range models {
 		name := displayName(m.exposed)
@@ -144,7 +147,7 @@ func opencodeModels(cfg *Config) map[string]any {
 // rewritePi: ~/.pi/agent/models.json
 // providers.<name> = { baseUrl, api: anthropic-messages, apiKey: PROXY_MANAGED,
 // models:[{id, name, contextWindow, input, maxTokens}] }
-func rewritePi(cfg *Config) error {
+func rewritePi(cfg *Config, meta map[string]map[string]ProviderModel) error {
 	file := cfg.Takeover.Pi
 	name := providerID(cfg)
 	v, err := readJSONConfig(file)
@@ -155,7 +158,7 @@ func rewritePi(cfg *Config) error {
 	if prov == nil {
 		prov = map[string]any{}
 	}
-	models := exposedModels(cfg)
+	models := exposedModels(cfg, meta)
 	piModels := []map[string]any{}
 	for _, m := range models {
 		entry := map[string]any{

@@ -683,10 +683,7 @@ func TestShowVolcengineUsage_NoCredsFallsBack(t *testing.T) {
 	useTempHome(t) // no cred file
 	prov := Provider{
 		Provider: "volcengine",
-		Models: map[string]ProviderModel{
-			"doubao":  {Context: 1, Output: 1},
-			"glm-5.2": {Context: 1, Output: 1},
-		},
+		Models:   []string{"doubao", "glm-5.2"},
 	}
 	cfg := &Config{Providers: map[string]Provider{"volcengine": prov}}
 	out := captureStdout(t, func() { showVolcengineUsage(cfg, "volcengine", prov, nil) })
@@ -713,7 +710,7 @@ func TestShowVolcengineUsage_GetAFPFailsFallsBack(t *testing.T) {
 	}))
 	prov := Provider{
 		Provider: "volcengine",
-		Models:   map[string]ProviderModel{"doubao": {Context: 1, Output: 1}},
+		Models:   []string{"doubao"},
 	}
 	cfg := &Config{Providers: map[string]Provider{"volcengine": prov}}
 	out := captureStdout(t, func() { showVolcengineUsage(cfg, "volcengine", prov, nil) })
@@ -845,11 +842,7 @@ func TestPrintUsageFields(t *testing.T) {
 // TestListConfigModels: a Provider with 3 models → "3 models (from config)" + each id sorted.
 func TestListConfigModels(t *testing.T) {
 	prov := Provider{
-		Models: map[string]ProviderModel{
-			"doubao":  {Context: 1, Output: 1},
-			"glm-5.2": {Context: 1, Output: 1},
-			"kimi":    {Context: 1, Output: 1},
-		},
+		Models: []string{"doubao", "glm-5.2", "kimi"},
 	}
 	out := captureStdout(t, func() { listConfigModels(prov) })
 	if !strings.Contains(out, "3 models (from config)") {

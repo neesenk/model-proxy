@@ -51,41 +51,6 @@ func TestConfig_ProviderBaseURLs(t *testing.T) {
 	}
 }
 
-// TestConfig_ModelSpecs checks that model metadata (context/output) is reasonable:
-//   - context > 0 and output > 0 (unless it's a special model like cogview)
-//   - output <= context (output can't exceed context)
-//   - context is a "reasonable" size (>= 4096 for text models)
-func TestConfig_ModelSpecs(t *testing.T) {
-	cfg, err := LoadConfig("config.yaml")
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-
-	for provName, prov := range cfg.Providers {
-		for modelID, m := range prov.Models {
-			t.Run(provName+"/"+modelID, func(t *testing.T) {
-				// Skip special models (image generation, embedding)
-				isImageOutput := len(m.Modalities.Output) == 1 && m.Modalities.Output[0] == "image"
-				if isImageOutput {
-					return // cogview etc. have context=0, output=0
-				}
-				if m.Context <= 0 {
-					t.Errorf("context = %d, want > 0", m.Context)
-				}
-				if m.Output <= 0 {
-					t.Errorf("output = %d, want > 0", m.Output)
-				}
-				if m.Context > 0 && int64(m.Output) > m.Context {
-					t.Errorf("output (%d) > context (%d)", m.Output, m.Context)
-				}
-				if m.Context > 0 && m.Context < 4096 {
-					t.Errorf("context = %d, seems too small (>= 4096 expected for text models)", m.Context)
-				}
-			})
-		}
-	}
-}
-
 // TestConfig_RouteTargets verifies every route target references an existing
 // provider and has a non-empty model name.
 func TestConfig_RouteTargets(t *testing.T) {

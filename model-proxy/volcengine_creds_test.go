@@ -59,9 +59,7 @@ func TestShowVolcengineUsage_NoAKSK(t *testing.T) {
 		Providers: map[string]Provider{
 			"volcengine": {
 				OpenAIBaseURL: "http://x", Provider: "volcengine",
-				Models: map[string]ProviderModel{
-					"doubao-seed-2-0-code": {Context: 262144, Output: 32768, Modalities: ProviderModalities{Input: []string{"text"}, Output: []string{"text"}}},
-				},
+				Models: []string{"doubao-seed-2-0-code"},
 			},
 		},
 	}

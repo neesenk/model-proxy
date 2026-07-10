@@ -21,7 +21,7 @@ func TestCLI_StopStalePidFile(t *testing.T) {
 	// Write a pid that definitely isn't running (999999 is unlikely to exist).
 	os.WriteFile(pidPath, []byte("999999\n"), 0o644)
 
-	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
+	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - m\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
 	cfgPath := writeTempConfig(t, cfgBody)
 	// Use a HOME whose .model-proxy won't be touched; pass the config via --config.
 	stdout, _, code := runCLI(t, "stop", cfgPath)
@@ -43,7 +43,7 @@ func TestCLI_StopInvalidPid(t *testing.T) {
 	pidPath := filepath.Join(dir, "mp.pid")
 	os.WriteFile(pidPath, []byte("not-a-pid\n"), 0o644)
 
-	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
+	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - m\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
 	cfgPath := writeTempConfig(t, cfgBody)
 	_, stderr, code := runCLI(t, "stop", cfgPath)
 	if code == 0 {
@@ -62,7 +62,7 @@ func TestCLI_ReloadStalePidFile(t *testing.T) {
 	pidPath := filepath.Join(dir, "mp.pid")
 	os.WriteFile(pidPath, []byte("999999\n"), 0o644)
 
-	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
+	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - m\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
 	cfgPath := writeTempConfig(t, cfgBody)
 	stdout, _, _ := runCLI(t, "reload", cfgPath)
 	if !strings.Contains(stdout, "not running") && !strings.Contains(stdout, "stale") {

@@ -88,7 +88,7 @@ providers:
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     provider_id: zhipu
     models:
-      glm-5.2: {context: 1000, output: 1000, modalities: {input: [text], output: [text]}}
+      - glm-5.2
 routes:
   glm-5.2:
     - {provider: zhipu, model: glm-5.2}

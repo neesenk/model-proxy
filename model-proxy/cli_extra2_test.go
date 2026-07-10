@@ -86,7 +86,7 @@ func TestCmdSchedule_ParsesDaemonResponse(t *testing.T) {
 	defer mock.Close()
 
 	// Write a config whose listen matches the mock.
-	cfgPath := writeTempConfig(t, "listen: "+mock.listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      glm-5.2: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n")
+	cfgPath := writeTempConfig(t, "listen: "+mock.listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n")
 
 	// cmdSchedule reads configPath(args) and hits the daemon. In-process.
 	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
@@ -158,7 +158,7 @@ func TestCmdSchedule_NoRoutes(t *testing.T) {
 	}))
 	defer srv.Close()
 	listen := strings.TrimPrefix(srv.URL, "http://")
-	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
+	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - m\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
 	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "no routes") {
 		t.Errorf("schedule empty models: want '(no routes)':\n%s", out)
@@ -174,7 +174,7 @@ func TestCmdSchedule_DaemonError(t *testing.T) {
 	}))
 	defer srv.Close()
 	listen := strings.TrimPrefix(srv.URL, "http://")
-	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
+	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - m\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
 	// cmdSchedule os.Exit(1) on non-200 — run in subprocess.
 	_, stderr, code := runCLI(t, "schedule", cfgPath)
 	if code == 0 {
@@ -191,7 +191,7 @@ func TestCLI_TakeoverOpencode(t *testing.T) {
 	dir := t.TempDir()
 	opencodeFile := filepath.Join(dir, "opencode.json")
 	os.WriteFile(opencodeFile, []byte(`{}`), 0o644)
-	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  opencode: %s\n  provider_id: model-proxy\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      glm-5.2: {context: 1000, output: 1000, modalities: {input: [text], output: [text]}}\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", opencodeFile)
+	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  opencode: %s\n  provider_id: model-proxy\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", opencodeFile)
 	cfgPath := writeTempConfig(t, cfgBody)
 	_, _, code := runCLI(t, "takeover", cfgPath, "opencode")
 	if code != 0 {
@@ -210,7 +210,7 @@ func TestCLI_RestoreClaudeRoundTrip(t *testing.T) {
 	claudeFile := filepath.Join(dir, "claude.json")
 	os.WriteFile(claudeFile, []byte(`{"env":{"ORIGINAL":"1"}}`), 0o644)
 	// backupDir = <configDir>/.model-proxy — config lives in dir, so backup in dir/.model-proxy.
-	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  claude: %s\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      glm-5.2: {context: 1000, output: 1000, modalities: {input: [text], output: [text]}}\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", claudeFile)
+	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  claude: %s\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", claudeFile)
 	cfgPath := writeTempConfig(t, cfgBody)
 	// First takeover (creates backup + rewrites), then restore.
 	if _, _, code := runCLI(t, "takeover", cfgPath, "claude"); code != 0 {
@@ -236,7 +236,7 @@ func TestCLI_ModelsRefreshZhipuMock(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  zhipu:\n    openai_base_url: " + srv.URL + "\n    provider_id: zhipu\n    models:\n      glm-5.2: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  glm-5.2:\n    - {provider: zhipu, model: glm-5.2}\n"
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  zhipu:\n    openai_base_url: " + srv.URL + "\n    provider_id: zhipu\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: zhipu, model: glm-5.2}\n"
 	cfgPath := writeTempConfig(t, cfgBody)
 
 	home := t.TempDir()

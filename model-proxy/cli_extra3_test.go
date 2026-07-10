@@ -31,7 +31,7 @@ providers:
     openai_base_url: https://zhipu.invalid/api/paas/v4
     provider_id: zhipu
     models:
-      glm-5.2: {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
+      - glm-5.2
 routes:
   glm-5.2:
     - {provider: zhipu, model: glm-5.2, priority: 1}
@@ -96,7 +96,7 @@ func TestCmdSchedule_PoolGrouping(t *testing.T) {
 	}))
 	defer srv.Close()
 	listen := strings.TrimPrefix(srv.URL, "http://")
-	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      glm-5.2: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  glm-5.2:\n    - {provider: zhipu, model: glm-5.2}\n")
+	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: zhipu, model: glm-5.2}\n")
 
 	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "glm-5.2") {
@@ -129,7 +129,7 @@ func TestCmdSchedule_NonPooledUnchanged(t *testing.T) {
 	}))
 	defer srv.Close()
 	listen := strings.TrimPrefix(srv.URL, "http://")
-	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
+	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - m\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
 	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "aqp") {
 		t.Errorf("schedule output missing provider aqp:\n%s", out)

@@ -1418,10 +1418,7 @@ func fetchAqpQuota(cfg *Config) (*provider.QuotaSnapshot, error) {
 }
 
 func listConfigModels(prov Provider) {
-	ids := make([]string, 0, len(prov.Models))
-	for id := range prov.Models {
-		ids = append(ids, id)
-	}
+	ids := append([]string(nil), prov.Models...)
 	sort.Strings(ids)
 	fmt.Printf("%s %d models (from config)\n", cDim("Models:     "), len(ids))
 	for _, id := range ids {

@@ -143,7 +143,7 @@ providers:
     provider_id: aqp
     aqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
     models:
-      glm-5.2: {context: 1048576, output: 131072, modalities: {input: [text], output: [text]}}
+      - glm-5.2
 routes:
   glm-5.2:
     - {provider: aqp, model: glm-5.2, priority: 1}
@@ -213,7 +213,7 @@ providers:
     openai_base_url: https://x
     provider_id: aqp
     anthropic_base_url: https://x/v1   # invalid: ends with /v1
-    models: {}
+    models: []
 routes: {}
 `
 	cfg := writeTempConfig(t, bad)
@@ -230,7 +230,7 @@ routes: {}
 
 func TestCLI_ScheduleNoDaemon(t *testing.T) {
 	// Use a port nothing is listening on to guarantee "cannot reach daemon".
-	cfg := writeTempConfig(t, "listen: 127.0.0.1:1\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      m: {context: 1, output: 1, modalities: {input: [text], output: [text]}}\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
+	cfg := writeTempConfig(t, "listen: 127.0.0.1:1\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - m\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
 	_, stderr, code := runCLI(t, "schedule", cfg)
 	if code == 0 {
 		t.Error("schedule no daemon: exit=0 want non-zero")

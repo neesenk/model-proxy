@@ -72,13 +72,14 @@ func cmdModels(args []string) {
 		}
 	}
 	cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
-	sources := hydrateModels(cfg, cat)
-	printAllModels(cfg, provFilter, sources)
+	meta, sources := hydrateModels(cfg, cat)
+	printAllModels(cfg, provFilter, meta, sources)
 }
 
-// printAllModels prints all models from the (possibly hydrated) config. `sources`
-// (nil in legacy callers) drives a trailing SRC tag: config / models.dev / default.
-func printAllModels(cfg *Config, provFilter string, sources map[string]map[string]modelSource) {
+// printAllModels prints all models with their hydrated metadata. `meta` maps
+// provider→model→metadata (nil in legacy callers → names shown without ctx/out).
+// `sources` drives a trailing SRC tag: models.dev / default.
+func printAllModels(cfg *Config, provFilter string, meta map[string]map[string]ProviderModel, sources map[string]map[string]modelSource) {
 	names := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
 		if provFilter != "" && n != provFilter {
@@ -93,14 +94,27 @@ func printAllModels(cfg *Config, provFilter string, sources map[string]map[strin
 		cDim(pad("NAME", 20)), cDim(pad("CTX", 10)),
 		cDim(pad("OUTPUT", 8)), cDim(pad("MODALITIES", 16)), cDim(pad("SRC", 10)))
 	for _, pn := range names {
-		prov := cfg.Providers[pn]
-		modelIDs := make([]string, 0, len(prov.Models))
-		for mid := range prov.Models {
+		// Effective model set: hydrated metadata keys ∪ the config name list
+		// (config names show even when meta is nil — e.g. legacy callers).
+		idSet := map[string]bool{}
+		if meta != nil && meta[pn] != nil {
+			for mid := range meta[pn] {
+				idSet[mid] = true
+			}
+		}
+		for _, mid := range cfg.Providers[pn].Models {
+			idSet[mid] = true
+		}
+		modelIDs := make([]string, 0, len(idSet))
+		for mid := range idSet {
 			modelIDs = append(modelIDs, mid)
 		}
 		sort.Strings(modelIDs)
 		for _, mid := range modelIDs {
-			m := prov.Models[mid]
+			var m ProviderModel
+			if meta != nil && meta[pn] != nil {
+				m = meta[pn][mid]
+			}
 			name := mid
 			ctx := "—"
 			if m.Context > 0 {
@@ -117,8 +131,6 @@ func printAllModels(cfg *Config, provFilter string, sources map[string]map[strin
 			src := ""
 			if sources != nil {
 				switch sources[pn][mid] {
-				case srcConfig:
-					src = "config"
 				case srcModelsDev:
 					src = "models.dev"
 				case srcDefault:

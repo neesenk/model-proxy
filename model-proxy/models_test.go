@@ -15,7 +15,7 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp",
-				Models: map[string]ProviderModel{"glm-5.2": {Context: 1048576}}},
+				Models: []string{"glm-5.2"}},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},

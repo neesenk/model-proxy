@@ -41,13 +41,10 @@ func grabStdout(t *testing.T, fn func()) string {
 func TestPrintAllModels_AllProviders(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"zhipu": {Provider: "zhipu", Models: map[string]ProviderModel{
-				"glm-5.2": {Context: 1048576, Output: 131072, Modalities: ProviderModalities{Input: []string{"text"}, Output: []string{"text"}}},
-				"glm-4.5": {Context: 131072, Output: 98304, Modalities: ProviderModalities{Input: []string{"text"}, Output: []string{"text"}}},
-			}},
+			"zhipu": {Provider: "zhipu", Models: []string{"glm-5.2", "glm-4.5"}},
 		},
 	}
-	out := grabStdout(t, func() { printAllModels(cfg, "", nil) })
+	out := grabStdout(t, func() { printAllModels(cfg, "", nil, nil) })
 	if !strings.Contains(out, "zhipu") || !strings.Contains(out, "glm-5.2") || !strings.Contains(out, "glm-4.5") {
 		t.Errorf("printAllModels missing content:\n%s", out)
 	}
@@ -56,11 +53,11 @@ func TestPrintAllModels_AllProviders(t *testing.T) {
 func TestPrintAllModels_Filter(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {Provider: "static", Models: map[string]ProviderModel{"m1": {Context: 1000, Modalities: ProviderModalities{Input: []string{"text"}}}}},
-			"b": {Provider: "static", Models: map[string]ProviderModel{"m2": {Context: 2000, Modalities: ProviderModalities{Input: []string{"text"}}}}},
+			"a": {Provider: "static", Models: []string{"m1"}},
+			"b": {Provider: "static", Models: []string{"m2"}},
 		},
 	}
-	out := grabStdout(t, func() { printAllModels(cfg, "a", nil) })
+	out := grabStdout(t, func() { printAllModels(cfg, "a", nil, nil) })
 	if strings.Contains(out, "m2") {
 		t.Errorf("filter should exclude m2:\n%s", out)
 	}
@@ -72,12 +69,12 @@ func TestPrintAllModels_Filter(t *testing.T) {
 func TestPrintAllModels_EmptyContext(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {Provider: "static", Models: map[string]ProviderModel{"m1": {}}}, // Context 0, Output 0
+			"a": {Provider: "static", Models: []string{"m1"}}, // no meta → ctx/out shown as —
 		},
 	}
-	out := grabStdout(t, func() { printAllModels(cfg, "", nil) })
+	out := grabStdout(t, func() { printAllModels(cfg, "", nil, nil) })
 	if !strings.Contains(out, "—") {
-		t.Errorf("zero context/output should show as —:\n%s", out)
+		t.Errorf("no metadata should show ctx/out as —:\n%s", out)
 	}
 }
 
