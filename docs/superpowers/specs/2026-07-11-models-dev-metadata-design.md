@@ -51,9 +51,12 @@ Provider-keyed (155 providers, 244 models, ~tens of KB). Each provider:
 (`ark.cn-beijing.volces.com`). It also lacks some model families volcengine serves (e.g. `doubao-*`).
 So we cannot map each model-proxy provider to one models.dev provider. Matching must be tolerant.
 
-HTTP: ships `ETag` + `cache-control: public, max-age=0, must-revalidate` → conditional GET (`If-None-Match`
-→ `304`) is supported and free. `catalog.json` (combined) and `models.json` (provider-agnostic) exist
-but `api.json` alone has everything needed (provider `api` + per-model limits/modalities).
+**Size (measured):** `api.json` is **3.05 MB raw** — 5,478 provider×model pairs, heavily duplicated
+(every reseller re-lists every model; only 244 unique models). It is **~286 KB gzipped** (Go's transport
+requests gzip transparently) and `If-None-Match`→`304` returns **0 bytes** when unchanged (verified).
+`catalog.json` (3.25 MB combined) and `models.json` (201 KB / 244 deduped models, but provider-agnostic —
+no `api`) also exist; `api.json` alone has everything needed (provider `api` + per-model limits/modalities)
+and its cost is bounded by gzip + ETag.
 
 ## Design
 
@@ -92,20 +95,38 @@ Given `(provider, modelName)` with no config entry:
    so a reseller (`openrouter/deepseek-chat`) does not shadow the canonical metadata.
 3. **Unmatched.** No catalog hit → defaults apply (see below). `takeover` warns.
 
-### Catalog cache
+### Catalog cache (size-aware — stores a slim projection, never the raw blob)
 
-- File: `~/.model-proxy/models_cache.json` → `{ "fetched_at": <RFC3339>, "etag": "...", "catalog": <api.json blob> }`.
-- TTL **24h**. `ensureCatalogFresh()`:
-  - cache present + age < 24h → load blob, build indexes in memory.
-  - else conditional GET `api.json` with `If-None-Match: <etag>`:
-    - `304` → keep blob, update `fetched_at` only (free refresh).
-    - `200` → replace blob + etag + fetched_at, atomic tmp+rename (mirrors `persist`/`savePool`).
-    - non-2xx / network error → if stale cache exists, use it + stderr note ("models.dev unreachable,
-      using catalog cached <age> ago"); if no cache, proceed with empty catalog (every model → default).
-- In-memory indexes built once from the blob: `byEndpoint` (normalized URL → provider's models map)
-  and `byName` (model-name suffix → metadata + owning provider key).
-- HTTP client: 10s timeout (mirrors codex `FetchModels`). Gated behind an injectable fetch func for tests
-  (httptest server + fixture), never a live network call in unit tests.
+`api.json` is 3.05 MB raw but ~286 KB gzipped and `304` is 0 bytes — so the network cost is bounded
+(one ~286 KB transfer on first cache / content change; free 304s thereafter). To keep **disk + per-
+invocation parse** light, we cache only a slim, **deduplicated** projection (the full-blob parse runs
+solely on a `200` refresh, never on the load path).
+
+- File `~/.model-proxy/models_cache.json`, atomic tmp+rename (mirrors `persist`/`savePool`):
+  ```json
+  {
+    "fetched_at": "<RFC3339>",
+    "etag": "\"9287e5…\"",
+    "by_endpoint": {"https://open.bigmodel.cn/api/paas/v4": ["glm-4.6", "glm-5.2"]},
+    "by_name":     {"glm-4.6": {"c": 204800, "o": 131072, "i": ["text"], "oo": ["text"]}}
+  }
+  ```
+  - `by_name` — deduplicated (244 unique models, ~30 KB); reseller duplication collapsed. On a name
+    collision the canonical owner wins (`zhipuai` for `glm-*`, `deepseek` for `deepseek-*`, `openai`
+    for `gpt-*`, `moonshotai` for `kimi-*`).
+  - `by_endpoint` — each models.dev provider's normalized `api` URL → its model-name list (endpoint
+    scoping for the first match step).
+  - Total ~150 KB on disk (not 3 MB); load + unmarshal ≈ 2–4 ms per CLI invocation.
+- TTL **24h** (gates the *check*, not the download). `ensureCatalogFresh()`:
+  - cache present + age < 24h → load projection, build in-memory indexes (**no network**).
+  - else conditional GET `api.json` with `Accept-Encoding: gzip` (automatic) + `If-None-Match: <etag>`:
+    - `304` → keep projection, update `fetched_at` only (0 bytes).
+    - `200` → gunzip+parse body → rebuild `by_endpoint` + `by_name` → rewrite cache + etag + fetched_at.
+    - non-2xx / network error → stale cache: use it + stderr note ("models.dev unreachable, using
+      catalog cached <age> ago"); no cache: proceed with empty catalog (every model → default) so the
+      command still runs.
+- HTTP client: 10s timeout (mirrors codex `FetchModels`). Injectable fetch func for tests (httptest
+  server + fixture, honors `If-None-Match`); no live network in unit tests.
 
 ### Defaults (unmatched models)
 
@@ -169,9 +190,11 @@ warning: model gpt-5.5 at codex: no models.dev metadata — wrote defaults (ctx=
 
 Per the repo's exact-value contract — assert precise values, not "non-empty".
 
-- **Catalog fetch + cache** — httptest server serving a fixture `api.json` + honoring `If-None-Match`:
-  assert cache file written with `etag` + `fetched_at`; `304` path updates `fetched_at` only (blob
-  unchanged); `200` replaces blob. 10s timeout respected.
+- **Catalog fetch + cache** — httptest server serving a fixture `api.json` (gzip + honoring
+  `If-None-Match`): assert the cache file holds the **slim projection** (`by_endpoint` + `by_name`), not
+  the raw blob; `304` updates `fetched_at` only (projection byte-identical); `200` rebuilds it. Assert
+  **dedup**: a fixture with the same model under two providers yields one `by_name` entry. Assert
+  `etag`/`fetched_at` round-trip. 10s timeout respected.
 - **Endpoint match** — cfg zhipu provider (`open.bigmodel.cn/api/paas/v4`) + fixture with `zhipuai`
   having the same `api`: assert `glm-5.2` metadata sourced from `zhipuai` (exact-URL hit), exact
   `context`/`output` values. deepseek provider likewise (`api.deepseek.com` → `deepseek`).
