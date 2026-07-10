@@ -253,6 +253,76 @@ func TestCLI_ModelsRefreshZhipuMock(t *testing.T) {
 	}
 }
 
+// --- models refresh: persists newly-discovered models into config.yaml ---
+
+func TestCLI_ModelsRefresh_PersistsNewModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2","object":"model"},{"id":"glm-new-model","object":"model"}]}`))
+	}))
+	defer srv.Close()
+
+	// Config lists only glm-5.2; glm-new-model is new.
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  zhipu:\n    openai_base_url: " + srv.URL + "\n    provider_id: zhipu\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: zhipu, model: glm-5.2}\n"
+	cfgPath := writeTempConfig(t, cfgBody)
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"test-key"}`), 0o600)
+
+	_, stderr, code := runCLIWithHome(t, home, "models", cfgPath, "refresh", "zhipu")
+	if code != 0 {
+		t.Fatalf("models refresh exit=%d", code)
+	}
+	if !strings.Contains(stderr, "glm-new-model") || !strings.Contains(stderr, "added") {
+		t.Errorf("refresh should report the new model:\n%s", stderr)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := string(data)
+	if !strings.Contains(cfg, "- glm-new-model") {
+		t.Errorf("config should now list glm-new-model:\n%s", cfg)
+	}
+	// existing model + routes + the comment-free structure preserved
+	if !strings.Contains(cfg, "- glm-5.2") || !strings.Contains(cfg, "routes:") {
+		t.Errorf("config lost existing model or routes:\n%s", cfg)
+	}
+}
+
+// --- models refresh: idempotent when nothing new (no write) ---
+
+func TestCLI_ModelsRefresh_IdempotentNothingNew(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2","object":"model"}]}`))
+	}))
+	defer srv.Close()
+
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  zhipu:\n    openai_base_url: " + srv.URL + "\n    provider_id: zhipu\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: zhipu, model: glm-5.2}\n"
+	cfgPath := writeTempConfig(t, cfgBody)
+	before, _ := os.ReadFile(cfgPath)
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"test-key"}`), 0o600)
+
+	_, stderr, code := runCLIWithHome(t, home, "models", cfgPath, "refresh", "zhipu")
+	if code != 0 {
+		t.Fatalf("models refresh exit=%d", code)
+	}
+	if strings.Contains(stderr, "added") {
+		t.Errorf("should not report new models when nothing new:\n%s", stderr)
+	}
+	after, _ := os.ReadFile(cfgPath)
+	if string(before) != string(after) {
+		t.Errorf("config should be unchanged when nothing new:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
 // --- models pull: force-refresh from a mocked models.dev endpoint ---
 
 func TestCLI_ModelsPull_MockedEndpoint(t *testing.T) {

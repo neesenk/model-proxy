@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Model entry as returned by the gateway's /models endpoint (OpenAI-style).
@@ -59,6 +62,28 @@ func cmdModels(args []string) {
 		entries, err := fetchProviderModels(cfg, provName)
 		if err != nil {
 			log.Fatal(err)
+		}
+		// Persist any newly-discovered model names into config.yaml (append-only;
+		// never removes — the operator may have hand-added models). Metadata is
+		// runtime-sourced from models.dev, so only names are written.
+		existing := cfg.Providers[provName].Models
+		have := make(map[string]bool, len(existing))
+		for _, n := range existing {
+			have[n] = true
+		}
+		var added []string
+		for _, e := range entries {
+			if !have[e.ID] {
+				added = append(added, e.ID)
+			}
+		}
+		if len(added) > 0 {
+			sort.Strings(added)
+			updated := append(append([]string{}, existing...), added...)
+			if err := writeProviderModels(configPath(args), provName, updated); err != nil {
+				log.Fatalf("writing new models to config: %v", err)
+			}
+			fmt.Fprintf(os.Stderr, "added %d new model(s) to config: %v\n", len(added), added)
 		}
 		printProviderModels(provName, entries)
 		return
@@ -180,6 +205,36 @@ func fetchProviderModels(cfg *Config, provName string) ([]ModelEntry, error) {
 		entries = append(entries, ModelEntry{ID: id, Object: "model", OwnedBy: provName})
 	}
 	return entries, nil
+}
+
+// writeProviderModels rewrites providers.<provName>.models to `names` in
+// configFile, preserving comments/order elsewhere via a yaml.Node round-trip
+// (only the models sequence is re-encoded). Validates the result before writing
+// and takes a best-effort .bak. CLI-safe (no daemon reload — `models` is not on
+// the proxy hot path, so a running daemon picks up the list on its next reload).
+func writeProviderModels(configFile, provName string, names []string) error {
+	root, err := loadConfigNode(configFile)
+	if err != nil {
+		return err
+	}
+	p := childMap(childMap(root, "providers"), provName)
+	if p == nil {
+		return fmt.Errorf("provider %q not found in %s", provName, configFile)
+	}
+	setChildNode(p, "models", mustEncode(names))
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	enc.Close()
+	data := buf.Bytes()
+	if _, err := LoadConfigFromBytes(configFile, data); err != nil {
+		return fmt.Errorf("rewritten config invalid: %w", err)
+	}
+	backupConfig(configFile, configFile+".bak")
+	return atomicWrite(configFile, data)
 }
 
 // refreshProviderModels fetches the live model list for a provider exactly once.
