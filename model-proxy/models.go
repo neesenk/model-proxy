@@ -22,8 +22,9 @@ type ModelEntry struct {
 
 // cmdModels handles:
 //
-//	models              — list all models from all providers (from config)
+//	models              — list all models from all providers (config + models.dev supplement)
 //	models <provider>   — list models for one provider
+//	models pull         — force-refresh the models.dev catalog cache
 //	models refresh <provider> — fetch live model list from a provider's server
 func cmdModels(args []string) {
 	cfg, err := LoadConfig(configPath(args))
@@ -31,6 +32,15 @@ func cmdModels(args []string) {
 		log.Fatal(err)
 	}
 	rest := nonFlagArgs(args)
+	if len(rest) > 0 && rest[0] == "pull" {
+		// models pull — force-refresh the global models.dev catalog cache.
+		cat, ferr := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, true)
+		if ferr != nil {
+			log.Fatal(ferr)
+		}
+		fmt.Printf("models.dev catalog refreshed: %d unique models, etag %s\n", len(cat.ByName), cat.Etag)
+		return
+	}
 	if len(rest) > 0 && rest[0] == "refresh" {
 		// models refresh <provider>
 		if len(rest) < 2 {
@@ -53,7 +63,7 @@ func cmdModels(args []string) {
 		printProviderModels(provName, entries)
 		return
 	}
-	// models [provider] — list from config
+	// models [provider] — config + models.dev supplement
 	provFilter := ""
 	if len(rest) > 0 {
 		provFilter = rest[0]
@@ -61,11 +71,14 @@ func cmdModels(args []string) {
 			log.Fatalf("unknown provider %q; available: %s", provFilter, providerNames(cfg))
 		}
 	}
-	printAllModels(cfg, provFilter)
+	cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
+	sources := hydrateModels(cfg, cat)
+	printAllModels(cfg, provFilter, sources)
 }
 
-// printAllModels prints all models from config (optionally filtered by provider).
-func printAllModels(cfg *Config, provFilter string) {
+// printAllModels prints all models from the (possibly hydrated) config. `sources`
+// (nil in legacy callers) drives a trailing SRC tag: config / models.dev / default.
+func printAllModels(cfg *Config, provFilter string, sources map[string]map[string]modelSource) {
 	names := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
 		if provFilter != "" && n != provFilter {
@@ -75,10 +88,10 @@ func printAllModels(cfg *Config, provFilter string) {
 	}
 	sort.Strings(names)
 
-	fmt.Printf("%s  %s  %s  %s  %s  %s\n",
+	fmt.Printf("%s  %s  %s  %s  %s  %s  %s\n",
 		cDim(pad("PROVIDER", 12)), cDim(pad("MODEL ID", 22)),
 		cDim(pad("NAME", 20)), cDim(pad("CTX", 10)),
-		cDim(pad("OUTPUT", 8)), cDim(pad("MODALITIES", 16)))
+		cDim(pad("OUTPUT", 8)), cDim(pad("MODALITIES", 16)), cDim(pad("SRC", 10)))
 	for _, pn := range names {
 		prov := cfg.Providers[pn]
 		modelIDs := make([]string, 0, len(prov.Models))
@@ -101,10 +114,21 @@ func printAllModels(cfg *Config, provFilter string) {
 			if len(m.Modalities.Input) > 0 {
 				mod = strings.Join(m.Modalities.Input, "/")
 			}
-			fmt.Printf("%s  %s  %s  %s  %s  %s\n",
+			src := ""
+			if sources != nil {
+				switch sources[pn][mid] {
+				case srcConfig:
+					src = "config"
+				case srcModelsDev:
+					src = "models.dev"
+				case srcDefault:
+					src = "default"
+				}
+			}
+			fmt.Printf("%s  %s  %s  %s  %s  %s  %s\n",
 				cBlue(pad(pn, 12)), cCyan(pad(mid, 22)),
 				cGreen(pad(name, 20)), cGray(pad(ctx, 10)),
-				cGray(pad(out, 8)), cGray(pad(mod, 16)))
+				cGray(pad(out, 8)), cGray(pad(mod, 16)), cGray(pad(src, 10)))
 		}
 	}
 }

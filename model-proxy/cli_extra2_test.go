@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // cli_extra2_test.go covers cmdConfig init/print, cmdSchedule's JSON-parse
@@ -249,5 +250,71 @@ func TestCLI_ModelsRefreshZhipuMock(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "glm-5.2") || !strings.Contains(stdout, "glm-4.5") {
 		t.Errorf("models refresh zhipu missing models:\n%s", stdout)
+	}
+}
+
+// --- models pull: force-refresh from a mocked models.dev endpoint ---
+
+func TestCLI_ModelsPull_MockedEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if etag := r.Header.Get("If-None-Match"); etag != "" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Write([]byte(`{"zhipuai":{"api":"https://open.bigmodel.cn/api/paas/v4","models":{"glm-4.6":{"limit":{"context":204800,"output":131072},"modalities":{"input":["text"],"output":["text"]}}}}}`))
+	}))
+	defer srv.Close()
+
+	cfgPath := writeTempConfig(t, minimalConfig)
+	t.Setenv("MP_MODELSDEV_URL", srv.URL)
+	home := t.TempDir()
+	stdout, _, code := runCLIWithHome(t, home, "models", cfgPath, "pull")
+	if code != 0 {
+		t.Fatalf("models pull exit=%d", code)
+	}
+	if !strings.Contains(stdout, "models.dev catalog refreshed") || !strings.Contains(stdout, "1 unique models") {
+		t.Errorf("models pull output unexpected:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".model-proxy", "models_cache.json")); err != nil {
+		t.Errorf("cache file not created: %v", err)
+	}
+}
+
+// --- models display: hydrates from a fresh pre-seeded cache (no network) ---
+
+func TestCLI_ModelsDisplay_HydratesFromCache(t *testing.T) {
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://open.bigmodel.cn/api/paas/v4\nroutes:\n  glm-4.6:\n    - {provider: zhipu, model: glm-4.6}\n"
+	cfgPath := writeTempConfig(t, cfgBody)
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	// pre-seed a FRESH cache (within TTL) so no fetch happens
+	cache := `{"fetched_at":"` + time.Now().Format(time.RFC3339) + `","etag":"\"v1\"","by_name":{"glm-4.6":{"ctx":204800,"out":131072,"in":["text"],"out_mod":["text"]}},"by_endpoint":{"https://open.bigmodel.cn/api/paas/v4":["glm-4.6"]}}`
+	os.WriteFile(filepath.Join(credDir, "models_cache.json"), []byte(cache), 0o600)
+
+	// endpoint that FAILS if contacted (proves the fresh cache was used instead)
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(500)
+	}))
+	defer srv.Close()
+	t.Setenv("MP_MODELSDEV_URL", srv.URL)
+
+	stdout, _, code := runCLIWithHome(t, home, "models", cfgPath)
+	if code != 0 {
+		t.Fatalf("models display exit=%d", code)
+	}
+	if called {
+		t.Error("fresh cache should NOT have fetched from endpoint")
+	}
+	if !strings.Contains(stdout, "glm-4.6") || !strings.Contains(stdout, "models.dev") {
+		t.Errorf("display should show glm-4.6 with models.dev source:\n%s", stdout)
+	}
+	// ctx 204800 came from the cache, not config (config had no models:)
+	if !strings.Contains(stdout, "204800") {
+		t.Errorf("display should show cached context 204800:\n%s", stdout)
 	}
 }

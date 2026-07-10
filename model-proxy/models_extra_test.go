@@ -47,7 +47,7 @@ func TestPrintAllModels_AllProviders(t *testing.T) {
 			}},
 		},
 	}
-	out := grabStdout(t, func() { printAllModels(cfg, "") })
+	out := grabStdout(t, func() { printAllModels(cfg, "", nil) })
 	if !strings.Contains(out, "zhipu") || !strings.Contains(out, "glm-5.2") || !strings.Contains(out, "glm-4.5") {
 		t.Errorf("printAllModels missing content:\n%s", out)
 	}
@@ -60,7 +60,7 @@ func TestPrintAllModels_Filter(t *testing.T) {
 			"b": {Provider: "static", Models: map[string]ProviderModel{"m2": {Context: 2000, Modalities: ProviderModalities{Input: []string{"text"}}}}},
 		},
 	}
-	out := grabStdout(t, func() { printAllModels(cfg, "a") })
+	out := grabStdout(t, func() { printAllModels(cfg, "a", nil) })
 	if strings.Contains(out, "m2") {
 		t.Errorf("filter should exclude m2:\n%s", out)
 	}
@@ -75,7 +75,7 @@ func TestPrintAllModels_EmptyContext(t *testing.T) {
 			"a": {Provider: "static", Models: map[string]ProviderModel{"m1": {}}}, // Context 0, Output 0
 		},
 	}
-	out := grabStdout(t, func() { printAllModels(cfg, "") })
+	out := grabStdout(t, func() { printAllModels(cfg, "", nil) })
 	if !strings.Contains(out, "—") {
 		t.Errorf("zero context/output should show as —:\n%s", out)
 	}
