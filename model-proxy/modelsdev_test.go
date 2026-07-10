@@ -96,3 +96,34 @@ var (
 	_ = filepath.Join
 	_ = time.Now
 )
+
+func TestCatalogLookup(t *testing.T) {
+	cat := parseModelsDevAPI([]byte(fixtureAPI))
+
+	// 1. Endpoint match: zhipu base URL → zhipuai provider → glm-4.6 (canonical).
+	md, ok := cat.lookup([]string{"https://open.bigmodel.cn/api/paas/v4"}, "glm-4.6")
+	if !ok || md.Context != 204800 {
+		t.Errorf("endpoint match glm-4.6: ok=%v ctx=%d", ok, md.Context)
+	}
+	// 2. Name fallback: aqp endpoint has no models.dev entry; deepseek-v4-pro
+	//    still resolves globally.
+	md, ok = cat.lookup([]string{"https://compass.llm.shopee.io/compass-api/v1"}, "deepseek-v4-pro")
+	if !ok || md.Context != 1000000 {
+		t.Errorf("name fallback deepseek-v4-pro: ok=%v ctx=%d", ok, md.Context)
+	}
+	// 3. Name fallback returns canonical value even without an endpoint hit
+	//    (reseller's 999 must not leak through global lookup).
+	md, ok = cat.lookup(nil, "glm-4.6")
+	if !ok || md.Context != 204800 {
+		t.Errorf("global name lookup should give canonical: ok=%v ctx=%d", ok, md.Context)
+	}
+	// 4. Unmatched (no endpoint, no global name) → ok=false.
+	if _, ok := cat.lookup([]string{"https://chatgpt.com/backend-api/codex"}, "gpt-5.5"); ok {
+		t.Error("gpt-5.5 should be unmatched")
+	}
+	// 5. nil catalog never panics.
+	var nilCat *modelsDevCatalog
+	if _, ok := nilCat.lookup([]string{"http://x"}, "m"); ok {
+		t.Error("nil catalog lookup should return false")
+	}
+}

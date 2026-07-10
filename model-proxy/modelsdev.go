@@ -163,3 +163,35 @@ func appendUnique(dst, add []string) []string {
 func emptyCatalog() *modelsDevCatalog {
 	return &modelsDevCatalog{ByName: map[string]modelsDevModel{}, ByEndpoint: map[string][]string{}}
 }
+
+// lookup resolves a model's metadata given the provider's base URLs (openai +
+// anthropic). It tries endpoint-scoped matching first (full URL, then host) so a
+// provider's own models.dev entry wins; then falls back to a global name match
+// (rescuing models a provider borrows from another vendor). ok=false if neither.
+func (cat *modelsDevCatalog) lookup(endpoints []string, model string) (modelsDevModel, bool) {
+	if cat == nil {
+		return modelsDevModel{}, false
+	}
+	for _, e := range endpoints {
+		ne := normalizeEndpoint(e)
+		for _, key := range []string{ne, hostOf(ne)} {
+			if key == "" {
+				continue
+			}
+			names, ok := cat.ByEndpoint[key]
+			if !ok {
+				continue
+			}
+			for _, n := range names {
+				if n == model {
+					md, ok := cat.ByName[model]
+					return md, ok // endpoint-scoped hit
+				}
+			}
+		}
+	}
+	if md, ok := cat.ByName[model]; ok {
+		return md, true // global name fallback
+	}
+	return modelsDevModel{}, false
+}
