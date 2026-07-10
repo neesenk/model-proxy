@@ -26,6 +26,11 @@ func TestCompactNum(t *testing.T) {
 		{1200000, "1.2M"},
 		{1000000000, "1B"},
 		{5600000000, "5.6B"},
+		{999, "999"},
+		{950000, "950k"},
+		{999949, "999.9k"},
+		{999999, "1M"},
+		{999999999, "1B"},
 	}
 	for _, c := range cases {
 		if got := compactNum(c.in); got != c.want {
@@ -44,18 +49,6 @@ func TestFormatClock(t *testing.T) {
 	want := time.Unix(1700000000, 0).Local().Format("15:04:05")
 	if got := formatClock(1700000000); got != want {
 		t.Errorf("formatClock(1700000000) = %q, want %q", got, want)
-	}
-}
-
-func TestFormatClockTime(t *testing.T) {
-	now := time.Now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 9, 30, 0, 0, now.Location())
-	if got := formatClockTime(today); got != "09:30" {
-		t.Errorf("today = %q, want 09:30", got)
-	}
-	other := time.Date(2024, 1, 2, 9, 30, 0, 0, now.Location())
-	if got := formatClockTime(other); got != "01-02 09:30" {
-		t.Errorf("other-day = %q, want 01-02 09:30", got)
 	}
 }
 
@@ -174,6 +167,7 @@ func TestRenderQuota(t *testing.T) {
 				Windows: []statusWindow{
 					{Label: "Monthly", RemainingPct: 0.62, Ultimate: true, ResetsAt: time.Now().Add(time.Hour)},
 					{Label: "5h tokens", RemainingPct: 0.88, Short: true},
+					{Label: "daily", RemainingPct: 0.5}, // neither Ultimate nor Short → no tag
 				},
 			},
 			"codex": {Err: "rate limited"},
@@ -184,10 +178,14 @@ func TestRenderQuota(t *testing.T) {
 	if i, j := strings.Index(out, "aqp"), strings.Index(out, "codex"); !(i >= 0 && j > i) {
 		t.Errorf("want aqp before codex, got aqp@%d codex@%d", i, j)
 	}
-	for _, want := range []string{"work", "plan", "Monthly (ultimate)", "62%", "5h tokens (short)", "88%", "resets"} {
+	for _, want := range []string{"work", "plan", "Monthly (ultimate)", "62%", "5h tokens (short)", "88%", "resets", "daily"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
+	}
+	// an intermediate window (neither Ultimate nor Short) must NOT be mislabeled "(short)"
+	if strings.Contains(out, "daily (short)") || strings.Contains(out, "daily (ultimate)") {
+		t.Errorf("intermediate window mislabeled with a tag, got:\n%s", out)
 	}
 	if !strings.Contains(out, "no data") {
 		t.Errorf("want 'no data' for codex error, got:\n%s", out)
@@ -330,6 +328,51 @@ func TestRenderStatusWebDisabled(t *testing.T) {
 	}
 }
 
+func TestRenderStatusJSONLogsError(t *testing.T) {
+	// /api/logs returns non-200 with a JSON error body (e.g. no log_file configured).
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"uptime":"1s","version":"x","listen":"127.0.0.1:1","health":{},"schedule":{"models":{}}}`)
+	})
+	mux.HandleFunc("/api/tokens", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"usage":[]}`)
+	})
+	mux.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":"no log_file configured"}`)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// --json: the 404 error body must NOT be embedded as the "logs" field.
+	outJSON, err := renderStatus(ts.Listener.Addr().String(), statusOpts{JSON: true, Logs: true, LogsN: 5})
+	if err != nil {
+		t.Fatalf("renderStatus json: %v", err)
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(outJSON), &merged); err != nil {
+		t.Fatalf("json invalid: %v\n%s", err, outJSON)
+	}
+	if logs, ok := merged["logs"]; ok {
+		t.Errorf("--json must omit logs when /api/logs is non-200, got logs=%s", logs)
+	}
+	if _, ok := merged["status"]; !ok {
+		t.Errorf("status key missing from --json output")
+	}
+
+	// rendered path: the error body must not leak and the Logs section is omitted.
+	out, err := renderStatus(ts.Listener.Addr().String(), statusOpts{Logs: true, LogsN: 5})
+	if err != nil {
+		t.Fatalf("renderStatus: %v", err)
+	}
+	if strings.Contains(out, "no log_file configured") {
+		t.Errorf("error body leaked into rendered output:\n%s", out)
+	}
+	if strings.Contains(out, "Logs (last") {
+		t.Errorf("Logs section should be omitted on non-200 /api/logs:\n%s", out)
+	}
+}
+
 func TestParseStatusFlags(t *testing.T) {
 	o := parseStatusFlags([]string{})
 	if o.Logs || o.JSON || o.LogsN != 20 {
@@ -346,6 +389,14 @@ func TestParseStatusFlags(t *testing.T) {
 	o = parseStatusFlags([]string{"--json"})
 	if !o.JSON {
 		t.Errorf("--json not set")
+	}
+	o = parseStatusFlags([]string{"--logs=50"})
+	if !o.Logs || o.LogsN != 50 {
+		t.Errorf("--logs=50 wrong: %+v", o)
+	}
+	o = parseStatusFlags([]string{"--logs=0"})
+	if !o.Logs || o.LogsN != 20 { // non-positive value falls back to the default
+		t.Errorf("--logs=0 should keep default N=20: %+v", o)
 	}
 	// --config must be skipped (configPath handles it) and not swallow --logs
 	o = parseStatusFlags([]string{"--config", "x.yaml", "--logs"})

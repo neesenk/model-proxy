@@ -21,11 +21,13 @@ type statusOpts struct {
 }
 
 // --- /api/status decoded shapes ---
+// Only fields a renderer actually reads are decoded. The --json path bypasses
+// these structs entirely (raw json.RawMessage), and JSON decode ignores any
+// extra upstream fields, so unused fields are omitted rather than maintained.
 
 type statusHealth struct {
 	CircuitState     string `json:"circuit_state"` // closed | open | half_open
 	Available        bool   `json:"available"`
-	CircuitUntil     string `json:"circuit_until,omitempty"`      // RFC3339, only when in the future
 	RateLimitedUntil string `json:"rate_limited_until,omitempty"` // RFC3339, only when in the future
 }
 
@@ -40,9 +42,6 @@ type statusCounters struct {
 // Quota windows come from *provider.QuotaSnapshot: PascalCase, no json tags upstream.
 type statusWindow struct {
 	Label        string    `json:"Label"`
-	Kind         string    `json:"Kind"`
-	Used         float64   `json:"Used"`
-	Total        float64   `json:"Total"`
 	RemainingPct float64   `json:"RemainingPct"` // 0..1, -1 if unknown
 	ResetsAt     time.Time `json:"ResetsAt"`
 	Ultimate     bool      `json:"Ultimate"`
@@ -50,24 +49,19 @@ type statusWindow struct {
 }
 
 type statusQuota struct {
-	Billing      int            `json:"Billing"`
-	RemainingPct float64        `json:"RemainingPct"`
-	Account      string         `json:"Account"`
-	Plan         string         `json:"Plan"`
-	Level        string         `json:"Level"`
-	Windows      []statusWindow `json:"Windows"`
-	Notes        []string       `json:"Notes"`
-	Err          string         `json:"Err"`
+	Account string         `json:"Account"`
+	Plan    string         `json:"Plan"`
+	Windows []statusWindow `json:"Windows"`
+	Err     string         `json:"Err"`
 }
 
 type statusOrdered struct {
-	Provider   string  `json:"provider"`
-	PoolParent string  `json:"pool_parent"`
-	Priority   int     `json:"priority"`
-	Tier       string  `json:"tier"`
-	Surplus    float64 `json:"surplus"`
-	Available  bool    `json:"available"`
-	Peak       bool    `json:"peak"`
+	Provider  string  `json:"provider"`
+	Priority  int     `json:"priority"`
+	Tier      string  `json:"tier"`
+	Surplus   float64 `json:"surplus"`
+	Available bool    `json:"available"`
+	Peak      bool    `json:"peak"`
 }
 
 type statusPool struct {
@@ -121,16 +115,32 @@ type logsResp struct {
 }
 
 // compactNum renders a count compactly: 0, 5, 567, 1k, 1.2k, 450k, 1.2M, 5.6B.
+// Rounding that would carry a value up to 1000 of its unit promotes to the next
+// unit instead (e.g. 999999 → "1M", not "1000k").
 func compactNum(n uint64) string {
 	switch {
 	case n >= 1_000_000_000:
-		return trimNumZero(fmt.Sprintf("%.1f", float64(n)/1e9)) + "B"
+		return scaleNum(float64(n)/1e9, "B", "")
 	case n >= 1_000_000:
-		return trimNumZero(fmt.Sprintf("%.1f", float64(n)/1e6)) + "M"
+		return scaleNum(float64(n)/1e6, "M", "B")
 	case n >= 1_000:
-		return trimNumZero(fmt.Sprintf("%.1f", float64(n)/1e3)) + "k"
+		return scaleNum(float64(n)/1e3, "k", "M")
 	}
 	return strconv.FormatUint(n, 10)
+}
+
+// scaleNum formats v (already divided into unit suf) to one decimal with a
+// trailing ".0" stripped. If v rounds up to 1000 of this unit, promote to
+// "1"+next instead ("1M" rather than "1000k"). next=="" at the top unit (B).
+func scaleNum(v float64, suf, next string) string {
+	r := int64(v*10 + 0.5) // rounded tenths
+	if r >= 10000 {        // 1000.0 of this unit — carry to the next unit
+		if next != "" {
+			return "1" + next
+		}
+		return "1000" + suf // top unit (B): no larger unit to promote to
+	}
+	return trimNumZero(fmt.Sprintf("%.1f", float64(r)/10)) + suf
 }
 
 // trimNumZero strips a trailing ".0" from a "%.1f" number string.
@@ -147,15 +157,6 @@ func formatClock(unixSec int64) string {
 		return "—"
 	}
 	return time.Unix(unixSec, 0).Local().Format("15:04:05")
-}
-
-// formatClockTime renders a time as HH:MM if today, else MM-DD HH:MM.
-func formatClockTime(t time.Time) string {
-	t = t.Local()
-	if t.Format("20060102") == time.Now().Format("20060102") {
-		return t.Format("15:04")
-	}
-	return t.Format("01-02 15:04")
 }
 
 // plural returns sing for n==1 else plur.
@@ -257,8 +258,8 @@ func renderScheduleRoutes(models map[string]statusRoute, ind string) string {
 }
 
 // renderSchedule renders the serve-status Schedule section: header + the shared
-// per-route renderer at 2-space indent. Trailing blank line trimmed so the
-// section ends with a single newline (appendSection adds the separator).
+// per-route renderer at 2-space indent. (Trailing-newline normalization is
+// handled once by appendSection.)
 func renderSchedule(st *statusResp) string {
 	if len(st.Schedule.Models) == 0 {
 		return ""
@@ -266,7 +267,7 @@ func renderSchedule(st *statusResp) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s (%d %s)\n", cBold("Schedule"), len(st.Schedule.Models), plural(len(st.Schedule.Models), "route", "routes"))
 	b.WriteString(renderScheduleRoutes(st.Schedule.Models, "  "))
-	return strings.TrimRight(b.String(), "\n") + "\n"
+	return b.String()
 }
 
 // renderTokens renders the per provider/model token-usage table, sorted by
@@ -314,7 +315,10 @@ func renderLogs(l *logsResp) string {
 	return b.String()
 }
 
-// renderQuota renders per-provider quota windows as label + tag + % + bar + reset.
+// renderQuota renders per-provider quota windows as label (+ ultimate/short tag)
+// + remaining % + bar + reset time. A window that is neither Ultimate nor Short
+// (e.g. volcengine daily/weekly, codex primary/weekly, zhipu TIME_LIMIT) gets no
+// tag rather than being mislabeled "(short)".
 func renderQuota(st *statusResp) string {
 	names := make([]string, 0, len(st.Quota))
 	for n := range st.Quota {
@@ -341,35 +345,39 @@ func renderQuota(st *statusResp) string {
 			continue
 		}
 		for _, w := range q.Windows {
-			tag := "short"
-			if w.Ultimate {
-				tag = "ultimate"
+			label := w.Label
+			switch {
+			case w.Ultimate:
+				label += " (ultimate)"
+			case w.Short:
+				label += " (short)"
 			}
 			pctStr := "—"
 			usedPct := 0
 			if w.RemainingPct >= 0 {
-				pctStr = fmt.Sprintf("%.0f%%", w.RemainingPct*100)
-				usedPct = 100 - int(w.RemainingPct*100)
+				pct := int(w.RemainingPct*100 + 0.5) // round to nearest %; text and bar share it
+				pctStr = fmt.Sprintf("%d%%", pct)
+				usedPct = 100 - pct
 			}
 			resets := ""
 			if !w.ResetsAt.IsZero() {
-				resets = cDim("  resets " + formatClockTime(w.ResetsAt))
+				resets = cDim("  resets " + formatResetAt(w.ResetsAt.UnixMilli()))
 			}
 			fmt.Fprintf(&b, "      %s  %5s  %s%s\n",
-				pad(w.Label+" ("+tag+")", 22), pctStr, progressBar(usedPct, 16), resets)
+				pad(label, 22), pctStr, progressBar(usedPct, 16), resets)
 		}
 	}
 	return b.String()
 }
 
-// statusHTTPClient caps each daemon request so a wedged listener fails fast
-// instead of hanging the status command indefinitely.
-var statusHTTPClient = &http.Client{Timeout: 10 * time.Second}
+// daemonHTTPClient caps each request to the running daemon (used by serve status
+// and schedule) so a wedged listener fails fast instead of hanging the command.
+var daemonHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 // statusGet fetches base+path and returns the body, HTTP status, and transport
 // error (if any). A non-2xx status is NOT an error here — the caller inspects it.
 func statusGet(base, path string) (body []byte, status int, err error) {
-	resp, err := statusHTTPClient.Get(base + path)
+	resp, err := daemonHTTPClient.Get(base + path)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -381,7 +389,9 @@ func statusGet(base, path string) (body []byte, status int, err error) {
 // renderStatus fetches the daemon's status endpoints and returns either the
 // rendered terminal view or the merged JSON (opts.JSON). listen is the daemon's
 // "host:port" (cfg.Listen); the http:// scheme is added here. Fetch plan:
-// /api/status always; /api/tokens always; /api/logs?tail=N only when opts.Logs.
+// /api/status always; /api/tokens always; /api/logs?tail=N once, only when
+// opts.Logs (shared by the JSON and render paths; a non-200 is "no logs", not
+// embedded as data).
 func renderStatus(listen string, opts statusOpts) (string, error) {
 	base := "http://" + listen
 	statusBody, status, err := statusGet(base, "/api/status")
@@ -397,15 +407,20 @@ func renderStatus(listen string, opts statusOpts) (string, error) {
 
 	tokensBody, _, _ := statusGet(base, "/api/tokens") // non-fatal; absence just hides the section
 
+	var logsBody []byte
+	logsOK := false
+	if opts.Logs {
+		lb, ls, e := statusGet(base, "/api/logs?tail="+strconv.Itoa(opts.LogsN))
+		logsBody, logsOK = lb, (e == nil && ls == 200)
+	}
+
 	if opts.JSON {
 		merged := map[string]json.RawMessage{"status": json.RawMessage(statusBody)}
 		if len(tokensBody) > 0 {
 			merged["tokens"] = json.RawMessage(tokensBody)
 		}
-		if opts.Logs {
-			if lb, _, e := statusGet(base, "/api/logs?tail="+strconv.Itoa(opts.LogsN)); e == nil {
-				merged["logs"] = json.RawMessage(lb)
-			}
+		if logsOK {
+			merged["logs"] = json.RawMessage(logsBody)
 		}
 		enc, _ := json.MarshalIndent(merged, "", "  ")
 		return string(enc), nil
@@ -427,26 +442,24 @@ func renderStatus(listen string, opts statusOpts) (string, error) {
 	appendSection(&b, renderSchedule(&st))
 	appendSection(&b, renderQuota(&st))
 	appendSection(&b, renderTokens(&tok))
-	if opts.Logs {
+	if logsOK {
 		var lg logsResp
-		if lb, ls, e := statusGet(base, "/api/logs?tail="+strconv.Itoa(opts.LogsN)); e == nil && ls == 200 {
-			json.Unmarshal(lb, &lg)
-		}
+		json.Unmarshal(logsBody, &lg)
 		appendSection(&b, renderLogs(&lg))
 	}
 	return b.String(), nil
 }
 
 // appendSection writes a non-empty section followed by one blank separator line.
+// Trailing newlines are normalized away so each renderer need not worry about
+// its exact trailing whitespace.
 func appendSection(b *strings.Builder, s string) {
-	if strings.TrimSpace(s) == "" {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
 		return
 	}
 	b.WriteString(s)
-	if !strings.HasSuffix(s, "\n") {
-		b.WriteByte('\n')
-	}
-	b.WriteByte('\n')
+	b.WriteString("\n\n")
 }
 
 // cmdServeStatus prints a terminal-optimized snapshot of the running daemon's
@@ -467,7 +480,8 @@ func cmdServeStatus(args []string) {
 }
 
 // parseStatusFlags scans serve-status args for --json and --logs [N] (default
-// N=20). --config is intentionally ignored here — configPath handles it.
+// N=20). Both "--logs 50" and "--logs=50" are accepted. --config is intentionally
+// ignored here — configPath handles it.
 func parseStatusFlags(args []string) statusOpts {
 	o := statusOpts{LogsN: 20}
 	for i := 0; i < len(args); i++ {
@@ -482,6 +496,11 @@ func parseStatusFlags(args []string) statusOpts {
 					o.LogsN = n
 					i++
 				}
+			}
+		case strings.HasPrefix(a, "--logs="):
+			o.Logs = true
+			if n, err := strconv.Atoi(strings.TrimPrefix(a, "--logs=")); err == nil && n > 0 {
+				o.LogsN = n
 			}
 		}
 	}

@@ -1673,7 +1673,7 @@ func cmdSchedule(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	resp, err := http.Get("http://" + cfg.Listen + "/debug/schedule")
+	resp, err := daemonHTTPClient.Get("http://" + cfg.Listen + "/debug/schedule")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n",
 			cRed("✗"), cfg.Listen, err)
