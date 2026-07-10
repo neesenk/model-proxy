@@ -653,6 +653,7 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) exposedModelsJSON() []byte {
 	p.mu.RLock()
 	cfg := p.cfg
+	implicit := p.implicitRoutes
 	p.mu.RUnlock()
 	type m struct {
 		ID      string `json:"id"`
@@ -669,6 +670,9 @@ func (p *Proxy) exposedModelsJSON() []byte {
 		models = append(models, m{ID: id, Object: "model"})
 	}
 	for exposed := range cfg.Routes {
+		add(exposed)
+	}
+	for exposed := range implicit { // implicitly-routable models are callable → listable
 		add(exposed)
 	}
 	for claude := range cfg.ClaudeMapping {

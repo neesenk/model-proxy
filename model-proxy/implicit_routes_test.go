@@ -157,3 +157,40 @@ func TestImplicitRoute_ForwardsUnroutedLoggedInModel(t *testing.T) {
 		t.Errorf("scheduleStatus should list implicit route glm-4.6: %s", st)
 	}
 }
+
+// TestImplicitRoute_ListedInV1Models: implicitly-routable models appear in
+// GET /v1/models so clients can discover them.
+func TestImplicitRoute_ListedInV1Models(t *testing.T) {
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"k"}`), 0o600)
+	prev := os.Getenv("HOME")
+	os.Setenv("HOME", home)
+	defer os.Setenv("HOME", prev)
+
+	cfg := &Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-5.2", "glm-4.6"}},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}},
+		},
+	}
+	p := NewProxy(cfg)
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+	resp, err := http.Get(px.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "glm-4.6") {
+		t.Errorf("/v1/models should list implicit route glm-4.6: %s", body)
+	}
+	if !strings.Contains(string(body), "glm-5.2") {
+		t.Errorf("/v1/models should still list explicit glm-5.2: %s", body)
+	}
+}
