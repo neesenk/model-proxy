@@ -26,6 +26,7 @@ providers:
       deepseek-v4-flash: {context: 1048576, output: 65536, modalities: {input: [text], output: [text]}}
   codex:
     openai_base_url: https://chatgpt.com/backend-api/codex
+    # client_version: "0.144.1"   # optional; auto-detected from codex CLI if omitted
     provider_id: codex
     models:
       gpt-5.5: {context: 400000, output: 128000, modalities: {input: [text, image], output: [text]}}

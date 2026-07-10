@@ -349,6 +349,7 @@ serve status               # 终端状态面板（= Web UI Status 标签页）�
 |---|---|---|---|
 | responses | POST | codex OAuth Bearer | `/backend-api/codex/responses`，需 `store:false` + `stream:true`，不接受 `max_tokens` |
 | usage | GET | codex OAuth Bearer | `/backend-api/wham/usage`（注意：不在 `/codex/` 子路径下） |
+| models | GET | codex OAuth Bearer | `/backend-api/codex/models?client_version=<ver>`，返回 `{"models":[{slug,visibility,...}]}`，仅取 `visibility=="list"`；`client_version` 决定可见模型（过低则新模型不返回） |
 | originator | header | — | `originator: codex_cli_rs` 必须设，否则 403 |
 | ChatGPT-Account-Id | header | — | 从 id_token JWT 解析 |
 
@@ -409,6 +410,7 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 5. **日志掩码**：SSO cookie 必须用 `mask()`（首2…尾2），auth/info 响应体只记长度。
 6. **文件日志无色**：`--log-file` 时 `logColorEnabled` 置 `false`，否则 ANSI 污染日志文件。
 7. **flushCopy 写错误**：客户端断开后 `w.Write` 返回错误须立即 break，否则代理继续拉上游流浪费 compute。
+8. **codex /models 的 client_version 闸门**：`/backend-api/codex/models` 必须带 `client_version` 查询参数；后端据此决定返回哪些模型，版本过旧则新模型（如 gpt-5.6）不返回。model-proxy 的解析顺序：config `client_version` → `codex --version` → `~/.codex/models_cache.json` → 内置常量。
 8. **context 传播**：用 `http.NewRequestWithContext(r.Context(), ...)` 让客户端取消传播到上游。
 9. **supervisor nil panic**：`spawnWorker` 失败时返回 nil，`runSupervisor` 需检查再处理。
 10. **配额陈旧保护**：snapshot 老于 `3×quota_poll_interval` 一律视为 `BillingUnknown`（不再相信缓存值）。`Quota()` 失败的 provider 也是 `BillingUnknown`（按 priority 排，**绝不**当 payg）。
