@@ -103,16 +103,61 @@ func TestEnsureJSONField_NonJSON(t *testing.T) {
 	}
 }
 
-// --- P6: codex FetchModels returns the hardcoded model ---
+// --- P6: codex FetchModels queries /models live and keeps visibility=="list" ---
 
-func TestCodexFetchModels_Hardcoded(t *testing.T) {
-	p := &CodexProvider{cfg: &Config{Auth: fakeAuth{key: "k"}}}
-	got, err := p.FetchModels()
+func TestCodexFetchModels_LiveQuery(t *testing.T) {
+	var gotURL, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL = r.URL.String()
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"models":[
+			{"slug":"gpt-5.6-sol","visibility":"list"},
+			{"slug":"gpt-5.5","visibility":"list"},
+			{"slug":"codex-auto-review","visibility":"hide"},
+			{"slug":"gpt-5.4","visibility":"none"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	p := &CodexProvider{cfg: &Config{
+		OpenAIBaseURL: srv.URL + "/backend-api/codex",
+		ClientVersion: "0.144.1",
+		Auth:          fakeAuth{key: "tok-abc"},
+	}}
+	ids, err := p.FetchModels()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("FetchModels: %v", err)
 	}
-	if len(got) != 1 || got[0] != "gpt-5.5" {
-		t.Errorf("FetchModels()=%v want [gpt-5.5]", got)
+	// Server order preserved; only visibility=="list" slugs kept.
+	if len(ids) != 2 || ids[0] != "gpt-5.6-sol" || ids[1] != "gpt-5.5" {
+		t.Errorf("ids: got %v want [gpt-5.6-sol gpt-5.5]", ids)
+	}
+	if gotURL != "/backend-api/codex/models?client_version=0.144.1" {
+		t.Errorf("URL: got %q, want /backend-api/codex/models?client_version=0.144.1", gotURL)
+	}
+	if gotAuth != "Bearer tok-abc" {
+		t.Errorf("Authorization: got %q, want Bearer tok-abc", gotAuth)
+	}
+}
+
+// --- P6b: codex FetchModels surfaces non-200 as an error (no silent fallback) ---
+
+func TestCodexFetchModels_ErrorOnNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer srv.Close()
+	p := &CodexProvider{cfg: &Config{
+		OpenAIBaseURL: srv.URL + "/codex",
+		ClientVersion: "0.144.1",
+		Auth:          fakeAuth{key: "k"},
+	}}
+	_, err := p.FetchModels()
+	if err == nil {
+		t.Fatal("expected error on HTTP 403, got nil")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Errorf("error should mention status 403, got %q", err.Error())
 	}
 }
 

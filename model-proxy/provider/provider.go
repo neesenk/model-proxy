@@ -136,6 +136,11 @@ type Config struct {
 	UsageURL      string
 	Models        map[string]any
 
+	// ClientVersion is the codex /models client_version query param, resolved
+	// by the main package (config > codex CLI > ~/.codex cache > constant) and
+	// passed in via buildOne. Unused by other providers.
+	ClientVersion string
+
 	// BoundAPIKey binds an in-memory API key for apikey providers (zhipu,
 	// deepseek, volcengine) when unrolled from a credential-pool entry. When
 	// non-empty, the constructor builds an ApiKeyBase bound to this key (file
