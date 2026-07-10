@@ -323,6 +323,34 @@ func TestCLI_ModelsRefresh_IdempotentNothingNew(t *testing.T) {
 	}
 }
 
+// --- models: implicit-route ambiguity warning (model in 2 logged-in providers, no route) ---
+
+func TestCLI_ModelsImplicitRouteAmbiguityWarning(t *testing.T) {
+	// deepseek + zhipu both list "shared-model"; no routes. Both logged in.
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  deepseek:\n    provider_id: deepseek\n    openai_base_url: http://x\n    models:\n      - shared-model\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: http://x\n    models:\n      - shared-model\n"
+	cfgPath := writeTempConfig(t, cfgBody)
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"k"}`), 0o600)
+	os.WriteFile(filepath.Join(credDir, "deepseek_apikey.json"), []byte(`{"api_key":"k"}`), 0o600)
+
+	// models.dev endpoint that fails fast (display degrades to defaults; unrelated to the warning).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer srv.Close()
+	t.Setenv("MP_MODELSDEV_URL", srv.URL)
+
+	_, stderr, code := runCLIWithHome(t, home, "models", cfgPath)
+	if code != 0 {
+		t.Fatalf("models exit=%d", code)
+	}
+	// deepseek < zhipu alphabetically → auto-route to deepseek; warning names both.
+	if !strings.Contains(stderr, "shared-model") || !strings.Contains(stderr, "deepseek") || !strings.Contains(stderr, "zhipu") {
+		t.Errorf("stderr should warn about shared-model ambiguity naming deepseek+zhipu:\n%s", stderr)
+	}
+}
+
 // --- models pull: force-refresh from a mocked models.dev endpoint ---
 
 func TestCLI_ModelsPull_MockedEndpoint(t *testing.T) {

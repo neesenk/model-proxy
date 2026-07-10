@@ -99,6 +99,14 @@ func cmdModels(args []string) {
 	cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
 	meta, sources := hydrateModels(cfg, cat)
 	printAllModels(cfg, provFilter, meta, sources)
+	// Warn about unrouted models auto-routed to one of several logged-in providers
+	// (ambiguity). Single-provider implicit routes are silent.
+	if _, warnings := synthesizeImplicitRoutes(cfg); len(warnings) > 0 {
+		fmt.Fprintf(os.Stderr, "\n%s implicit-route warnings:\n", cYellow("⚠"))
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "  %s\n", w)
+		}
+	}
 }
 
 // printAllModels prints all models with their hydrated metadata. `meta` maps
