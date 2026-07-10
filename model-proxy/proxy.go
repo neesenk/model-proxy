@@ -393,6 +393,57 @@ func (p *Proxy) buildExpandedRoutes() map[string][]RouteTarget {
 	return out
 }
 
+// loggedInProviders returns the set of provider names (parents) that have ≥1
+// stored credential (plural pool OR legacy singular file). Used to decide which
+// providers can actually serve an implicit (auto) route. buildProviders builds
+// all configured providers (logged-in or not, file-backed), so its result map
+// can't answer "logged in?" — this does, via the same loadPool it uses.
+func loggedInProviders(cfg *Config) map[string]bool {
+	out := map[string]bool{}
+	for name, prov := range cfg.Providers {
+		if pool, _ := loadPool(name, prov.Provider); len(pool.Accounts) > 0 {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// synthesizeImplicitRoutesFrom is the pure, testable core. For each model name
+// that is NOT already an explicit route key AND is served by ≥1 logged-in
+// provider, it creates a single-target implicit route to the alphabetically-first
+// logged-in provider that serves it; if >1 logged-in provider serves it, the
+// others are dropped and a warning is emitted. Explicit routes always win.
+func synthesizeImplicitRoutesFrom(cfg *Config, loggedIn map[string]bool) (implicit map[string]RouteTarget, warnings []string) {
+	// model → sorted list of logged-in providers that serve it
+	claims := map[string][]string{}
+	for name, prov := range cfg.Providers {
+		if !loggedIn[name] {
+			continue
+		}
+		for _, m := range prov.Models {
+			claims[m] = append(claims[m], name)
+		}
+	}
+	implicit = map[string]RouteTarget{}
+	for model, provs := range claims {
+		if _, explicit := cfg.Routes[model]; explicit {
+			continue // explicit route wins
+		}
+		sort.Strings(provs)
+		implicit[model] = RouteTarget{Provider: provs[0], Model: model, Priority: 1}
+		if len(provs) > 1 {
+			warnings = append(warnings, fmt.Sprintf("model %q served by %d logged-in providers (%s); auto-routing to %s — add an explicit route to choose",
+				model, len(provs), strings.Join(provs, ", "), provs[0]))
+		}
+	}
+	return implicit, warnings
+}
+
+// synthesizeImplicitRoutes derives login status then delegates to the pure core.
+func synthesizeImplicitRoutes(cfg *Config) (map[string]RouteTarget, []string) {
+	return synthesizeImplicitRoutesFrom(cfg, loggedInProviders(cfg))
+}
+
 func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/health/status" || r.URL.Path == "/health" {
 		w.WriteHeader(200)
