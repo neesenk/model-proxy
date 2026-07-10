@@ -2,7 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -162,6 +167,143 @@ func appendUnique(dst, add []string) []string {
 
 func emptyCatalog() *modelsDevCatalog {
 	return &modelsDevCatalog{ByName: map[string]modelsDevModel{}, ByEndpoint: map[string][]string{}}
+}
+
+const catalogTTL = 24 * time.Hour
+
+const defaultModelsDevEndpoint = "https://models.dev/api.json"
+
+// modelsDevEndpoint returns the catalog endpoint, overridable via MP_MODELSDEV_URL
+// (tests / self-hosted mirrors).
+func modelsDevEndpoint() string {
+	if v := envOrEmpty("MP_MODELSDEV_URL"); v != "" {
+		return v
+	}
+	return defaultModelsDevEndpoint
+}
+
+// cachePath is the on-disk catalog cache location.
+func cachePath() string {
+	return filepath.Join(homeDir(), ".model-proxy", "models_cache.json")
+}
+
+// catalogFetchFunc fetches the catalog given an endpoint + last-known etag.
+// Returns HTTP status, body (nil on 304), the response etag, and any error.
+type catalogFetchFunc func(endpoint, etag string) (status int, body []byte, newEtag string, err error)
+
+// realModelsDevFetch is the production fetch. Do NOT set Accept-Encoding manually
+// — Go's Transport auto-requests gzip and transparently decompresses (a manual
+// header disables auto-decompress), so the 3 MB body transfers as ~286 KB.
+// If-None-Match yields a free 304 when the catalog is unchanged.
+var realModelsDevFetch catalogFetchFunc = func(endpoint, etag string) (int, []byte, string, error) {
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	defer resp.Body.Close()
+	newEtag := resp.Header.Get("ETag")
+	if resp.StatusCode == http.StatusNotModified {
+		return http.StatusNotModified, nil, newEtag, nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, newEtag, err
+	}
+	return resp.StatusCode, body, newEtag, nil
+}
+
+// loadCachedCatalog reads the cache file; returns (nil, nil) if absent.
+func loadCachedCatalog(path string) (*modelsDevCatalog, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var cat modelsDevCatalog
+	if err := json.Unmarshal(data, &cat); err != nil {
+		return nil, err
+	}
+	if cat.ByName == nil {
+		cat.ByName = map[string]modelsDevModel{}
+	}
+	if cat.ByEndpoint == nil {
+		cat.ByEndpoint = map[string][]string{}
+	}
+	return &cat, nil
+}
+
+// saveCachedCatalog atomically writes the cache.
+func saveCachedCatalog(path string, cat *modelsDevCatalog) error {
+	data, err := json.Marshal(cat)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, data)
+}
+
+// ensureCatalogFresh returns a usable catalog, fetching from models.dev only when
+// the cache is missing/stale (or force=true). 304 refreshes fetched_at only;
+// 200 rebuilds + persists; a fetch error falls back to a stale cache (logged to
+// stderr) or an empty catalog so the calling command still runs.
+func ensureCatalogFresh(cacheFile, endpoint string, fetch catalogFetchFunc, force bool) (*modelsDevCatalog, error) {
+	cached, _ := loadCachedCatalog(cacheFile)
+	if !force && cached != nil && time.Since(cached.FetchedAt) < catalogTTL {
+		return cached, nil
+	}
+	etag := ""
+	if cached != nil {
+		etag = cached.Etag
+	}
+	status, body, newEtag, err := fetch(endpoint, etag)
+	if err != nil {
+		if cached != nil {
+			fmt.Fprintf(os.Stderr, "model-proxy: models.dev unreachable (%v); using catalog cached %s ago\n", err, ageString(cached.FetchedAt))
+			return cached, nil
+		}
+		return emptyCatalog(), nil
+	}
+	switch status {
+	case http.StatusNotModified:
+		cached.FetchedAt = time.Now()
+		if newEtag != "" {
+			cached.Etag = newEtag
+		}
+		_ = saveCachedCatalog(cacheFile, cached)
+		return cached, nil
+	case http.StatusOK:
+		cat := parseModelsDevAPI(body)
+		cat.FetchedAt = time.Now()
+		cat.Etag = newEtag
+		_ = saveCachedCatalog(cacheFile, cat)
+		return cat, nil
+	default:
+		if cached != nil {
+			return cached, nil
+		}
+		return emptyCatalog(), nil
+	}
+}
+
+// ageString renders a duration since t as e.g. "5h" / "3m" / "just now".
+func ageString(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
 }
 
 // lookup resolves a model's metadata given the provider's base URLs (openai +

@@ -127,3 +127,134 @@ func TestCatalogLookup(t *testing.T) {
 		t.Error("nil catalog lookup should return false")
 	}
 }
+
+func TestCacheRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	cat := &modelsDevCatalog{
+		FetchedAt:  time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC),
+		Etag:       `"abc"`,
+		ByName:     map[string]modelsDevModel{"glm-4.6": {Context: 204800, Output: 131072, Input: []string{"text"}, OutMods: []string{"text"}}},
+		ByEndpoint: map[string][]string{"https://open.bigmodel.cn/api/paas/v4": {"glm-4.6"}},
+	}
+	if err := saveCachedCatalog(path, cat); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadCachedCatalog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Etag != `"abc"` || loaded.ByName["glm-4.6"].Context != 204800 {
+		t.Errorf("round-trip lost data: %+v", loaded)
+	}
+	// nonexistent → nil catalog, no error
+	none, err := loadCachedCatalog(filepath.Join(t.TempDir(), "missing.json"))
+	if err != nil || none != nil {
+		t.Errorf("missing cache should yield (nil,nil); got (%+v,%v)", none, err)
+	}
+}
+
+// fakeFetch returns a scripted fetch func.
+func fakeFetch(status int, body []byte, etag string) catalogFetchFunc {
+	return func(endpoint, inEtag string) (int, []byte, string, error) {
+		if status == 304 {
+			return 304, nil, etag, nil
+		}
+		return status, body, etag, nil
+	}
+}
+
+func TestEnsureCatalogFresh_304(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	seed := &modelsDevCatalog{FetchedAt: time.Now().Add(-2 * catalogTTL), Etag: `"old"`,
+		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}, ByEndpoint: map[string][]string{}}
+	saveCachedCatalog(path, seed)
+	cat, err := ensureCatalogFresh(path, "http://x", fakeFetch(304, nil, `"old"`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.ByName["glm-4.6"].Context != 204800 {
+		t.Errorf("304 should preserve data: %+v", cat.ByName["glm-4.6"])
+	}
+	if time.Since(cat.FetchedAt) > 5*time.Second {
+		t.Errorf("304 should refresh fetched_at: %v", cat.FetchedAt)
+	}
+}
+
+func TestEnsureCatalogFresh_200(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	cat, err := ensureCatalogFresh(path, "http://x", fakeFetch(200, []byte(fixtureAPI), `"newetag"`), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.Etag != `"newetag"` || cat.ByName["glm-4.6"].Context != 204800 {
+		t.Errorf("200 should rebuild catalog: etag=%s %+v", cat.Etag, cat.ByName["glm-4.6"])
+	}
+	loaded, _ := loadCachedCatalog(path)
+	if loaded == nil || loaded.Etag != `"newetag"` {
+		t.Errorf("200 should persist cache: %+v", loaded)
+	}
+}
+
+func TestEnsureCatalogFresh_TTLHitNoFetch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	fresh := &modelsDevCatalog{FetchedAt: time.Now(), Etag: `"e"`,
+		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}, ByEndpoint: map[string][]string{}}
+	saveCachedCatalog(path, fresh)
+	var called bool
+	errFetch := func(endpoint, etag string) (int, []byte, string, error) { called = true; return 0, nil, "", nil }
+	cat, err := ensureCatalogFresh(path, "http://x", errFetch, false)
+	if err != nil || called {
+		t.Errorf("fresh cache should not fetch: err=%v called=%v", err, called)
+	}
+	if cat.ByName["glm-4.6"].Context != 204800 {
+		t.Errorf("fresh cache should return cached data: %+v", cat.ByName["glm-4.6"])
+	}
+}
+
+func TestEnsureCatalogFresh_ForceBypassesTTL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	fresh := &modelsDevCatalog{FetchedAt: time.Now(), Etag: `"old"`,
+		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 1}}, ByEndpoint: map[string][]string{}}
+	saveCachedCatalog(path, fresh)
+	cat, err := ensureCatalogFresh(path, "http://x", fakeFetch(200, []byte(fixtureAPI), `"new"`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat.ByName["glm-4.6"].Context != 204800 {
+		t.Errorf("force should re-fetch + rebuild: %+v", cat.ByName["glm-4.6"])
+	}
+}
+
+func TestEnsureCatalogFresh_FetchErrorFallsBackToStale(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	stale := &modelsDevCatalog{FetchedAt: time.Now().Add(-2 * catalogTTL), Etag: `"e"`,
+		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}, ByEndpoint: map[string][]string{}}
+	saveCachedCatalog(path, stale)
+	errFetch := func(endpoint, etag string) (int, []byte, string, error) { return 0, nil, "", os.ErrNotExist }
+	cat, err := ensureCatalogFresh(path, "http://x", errFetch, false)
+	if err != nil {
+		t.Fatalf("fetch error with stale cache should not error: %v", err)
+	}
+	if cat.ByName["glm-4.6"].Context != 204800 {
+		t.Errorf("should fall back to stale cache: %+v", cat.ByName["glm-4.6"])
+	}
+}
+
+func TestEnsureCatalogFresh_NoCacheNoFetchEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	errFetch := func(endpoint, etag string) (int, []byte, string, error) { return 0, nil, "", os.ErrNotExist }
+	cat, err := ensureCatalogFresh(path, "http://x", errFetch, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.ByName) != 0 {
+		t.Errorf("no cache + fetch error → empty catalog, got %+v", cat.ByName)
+	}
+}
+
+func TestModelsDevEndpoint_EnvOverride(t *testing.T) {
+	t.Setenv("MP_MODELSDEV_URL", "http://example.test/api.json")
+	if got := modelsDevEndpoint(); got != "http://example.test/api.json" {
+		t.Errorf("env override ignored: got %q", got)
+	}
+}
