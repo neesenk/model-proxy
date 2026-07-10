@@ -41,7 +41,9 @@ type Proxy struct {
 	poolIndex      map[string][]string      // parent name → sorted virtual ids (only multi-account parents)
 	parentOf       map[string]string        // virtual id → parent name
 	spreadCtr      map[string]uint64        // parent name → session-assignment round-robin counter (healthMu)
-	expandedRoutes map[string][]RouteTarget // exposed model → expanded targets (Task 5 fills this)
+	expandedRoutes map[string][]RouteTarget // exposed model → expanded targets (explicit + implicit)
+	implicitRoutes map[string]RouteTarget   // exposed model → single target auto-derived from logged-in providers' model lists (for models not in cfg.Routes)
+	routeWarnings  []string                 // ambiguity warnings for implicit routes (multi-provider); surfaced in `models` CLI + /api/status
 
 	// scheduleHook is a test-only hook fired in forward right after schedule(),
 	// capturing the threaded sessionKey. Nil in production.
@@ -252,6 +254,7 @@ func NewProxy(cfg *Config) *Proxy {
 		poolIndex: poolIndex,
 		parentOf:  parentOf,
 	}
+	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutes(cfg)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	// The tracker reads cfg/providers asynchronously via the snapshot closures
 	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
@@ -346,6 +349,7 @@ func (p *Proxy) reload(configPath string) error {
 	// the read lock) see a consistent cfg/providers/poolIndex/expandedRoutes.
 	p.poolIndex = newPoolIndex
 	p.parentOf = newParentOf
+	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutes(cfg)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.mu.Unlock()
 	// Reset health + sticky state — a reload is the operator's way to clear
@@ -379,16 +383,32 @@ func (p *Proxy) buildExpandedRoutes() map[string][]RouteTarget {
 	for exposed, targets := range p.cfg.Routes {
 		var exp []RouteTarget
 		for _, t := range targets {
-			vids, pooled := p.poolIndex[t.Provider]
-			if !pooled {
-				exp = append(exp, t)
-				continue
-			}
-			for _, vid := range vids {
-				exp = append(exp, RouteTarget{Provider: vid, Model: t.Model, Priority: t.Priority})
-			}
+			exp = append(exp, p.expandTarget(t)...)
 		}
 		out[exposed] = exp
+	}
+	// Merge implicit routes (auto-derived for unrouted models served by a logged-in
+	// provider). Explicit routes win; implicit targets the parent so pool fan-out
+	// applies via expandTarget too.
+	for exposed, t := range p.implicitRoutes {
+		if _, explicit := out[exposed]; explicit {
+			continue
+		}
+		out[exposed] = p.expandTarget(t)
+	}
+	return out
+}
+
+// expandTarget fans a single route target out across a pooled provider's virtuals
+// (same Model/Priority); non-pooled targets pass through unchanged.
+func (p *Proxy) expandTarget(t RouteTarget) []RouteTarget {
+	vids, pooled := p.poolIndex[t.Provider]
+	if !pooled {
+		return []RouteTarget{t}
+	}
+	out := make([]RouteTarget, 0, len(vids))
+	for _, vid := range vids {
+		out = append(out, RouteTarget{Provider: vid, Model: t.Model, Priority: t.Priority})
 	}
 	return out
 }

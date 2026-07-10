@@ -1,6 +1,11 @@
 package main
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -40,7 +45,7 @@ func TestSynthesizeImplicitRoutes_SingleProviderAutoRoute(t *testing.T) {
 func TestSynthesizeImplicitRoutes_MultipleProvidersWarnsAndPicksFirst(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"aqp":   {Provider: "aqp", Models: []string{"foo"}},     // alphabetically first
+			"aqp":   {Provider: "aqp", Models: []string{"foo"}}, // alphabetically first
 			"zhipu": {Provider: "zhipu", Models: []string{"foo"}},
 		},
 	}
@@ -78,8 +83,8 @@ func TestSynthesizeImplicitRoutes_SkipsNotLoggedIn(t *testing.T) {
 func TestSynthesizeImplicitRoutes_PrefersLoggedInAmongMultiple(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"aqp":   {Provider: "aqp", Models: []string{"foo"}},     // not logged in
-			"zhipu": {Provider: "zhipu", Models: []string{"foo"}},   // logged in
+			"aqp":   {Provider: "aqp", Models: []string{"foo"}},   // not logged in
+			"zhipu": {Provider: "zhipu", Models: []string{"foo"}}, // logged in
 		},
 	}
 	// Only zhipu logged in → route to zhipu, single candidate → no warning.
@@ -90,5 +95,65 @@ func TestSynthesizeImplicitRoutes_PrefersLoggedInAmongMultiple(t *testing.T) {
 	}
 	if len(warnings) != 0 {
 		t.Errorf("single logged-in candidate → no warning, got %v", warnings)
+	}
+}
+
+// TestImplicitRoute_ForwardsUnroutedLoggedInModel: an end-to-end check that a
+// model NOT in routes but in a logged-in provider's models list is forwarded
+// (was 502 before implicit routes). Uses a zhipu apikey provider + a mock
+// upstream /chat/completions, with a real cred file under a temp HOME.
+func TestImplicitRoute_ForwardsUnroutedLoggedInModel(t *testing.T) {
+	// upstream records the model name it receives.
+	var gotModel string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotModel = extractModel(b)
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	}))
+	defer up.Close()
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"k"}`), 0o600)
+	prev := os.Getenv("HOME")
+	os.Setenv("HOME", home)
+	defer os.Setenv("HOME", prev)
+
+	cfg := &Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: up.URL, Models: []string{"glm-5.2", "glm-4.6"}},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}}, // explicit; glm-4.6 is NOT routed
+		},
+	}
+	p := NewProxy(cfg)
+	// glm-4.6 should have been auto-routed to zhipu.
+	if _, ok := p.implicitRoutes["glm-4.6"]; !ok {
+		t.Fatalf("expected implicit route for glm-4.6, got implicit=%v", p.implicitRoutes)
+	}
+
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("glm-4.6 (implicit route) status=%d want 200", resp.StatusCode)
+	}
+	if gotModel != "glm-4.6" {
+		t.Errorf("upstream received model=%q want glm-4.6", gotModel)
+	}
+
+	// scheduleStatus should list the implicit route.
+	st := string(p.scheduleStatus())
+	if !strings.Contains(st, "glm-4.6") {
+		t.Errorf("scheduleStatus should list implicit route glm-4.6: %s", st)
 	}
 }
