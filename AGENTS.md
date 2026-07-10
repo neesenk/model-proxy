@@ -401,6 +401,16 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 - 模型 ID 是模型名（如 `doubao-seed-1-8-251228`、`doubao-seed-2-0-code`），非推理接入点 endpoint id（标准 Ark 按量计费才用 endpoint id）
 - 凭据存 `~/.model-proxy/<name>_apikey.json`
 
+### models.dev 元数据补充契约（`modelsdev.go`，实测）
+
+- 数据源 `GET https://models.dev/api.json`：`{providerKey: {api, models: {modelId: {limit:{context,output}, modalities:{input,output}, cost, …}}}}`。155 providers / 244 去重模型，**raw 3.05 MB**（5478 个 provider×model 对，reseller 大量重复）
+- **体积优化（实测）**：gzip 后 **~286 KB**（Go Transport 自动加 `Accept-Encoding: gzip` 并透明解压——**勿手动设该 header**，否则关掉自动解压）；`If-None-Match`→**304 返回 0 字节**（已验证）。磁盘缓存只存**去重 slim 投影**（`by_name` 244 项 + `by_endpoint`，~150 KB），**绝不存 3 MB 原始 blob**；全量解析只在 `200` 刷新时发生
+- 缓存：`~/.model-proxy/models_cache.json`，TTL **24h**，atomic tmp+rename。`ensureCatalogFresh`：fresh→直接用；stale/force→conditional GET（304 仅刷新 `fetched_at`，200 重建+落盘）；fetch 失败+有旧缓存→用旧缓存+stderr 提示；无缓存→空 catalog（命令照跑，所有模型走 default）
+- **匹配优先级**：① endpoint 命中（provider 的 `openai_base_url`/`anthropic_base_url` 归一化后比对 models.dev provider 的 `api`，全 URL → 再 host）→ 在该 provider 的模型列表里查；② 全局模型名后缀匹配（救 aqp 借的 `glm-*`/`deepseek-*`）；③ 未命中→default。`by_name` 去重时 canonical owner 胜（`zhipuai`/`deepseek`/`openai`/`moonshotai`/… rank 0，reseller rank 1）
+- **优先级**：config > models.dev > default。config 的 `models:` 每模型权威，models.dev 只补 config 没有但 routes 引用的模型。**config.yaml 永不写入**。effective 集合 = config `models:` ∪ routes 引用的模型
+- **覆盖盲区**：models.dev **没有** aqp/compass、codex/ChatGPT、volcengine 这几个 provider；codex `gpt-5.5`、volcengine `doubao-*` 等未命中→走 default（`ctx=200000 out=16384 text-only`），`takeover` 对 opencode/pi 发 stderr 警告（claude/codex 不写每模型元数据，不警告）
+- **作用域**：仅 `models`/`takeover` CLI 路径调 `ensureCatalogFresh`+`hydrateModels`（hydrate 只改内存 cfg，**不进** `LoadConfig`/daemon）；代理热路径、`GET /v1/models`、quota 均不受影响。`models pull` 强制刷新；`MP_MODELSDEV_URL` 覆盖端点（测试/镜像）。`models` 显示新增 `SRC` 列（`config`/`models.dev`/`default`）
+
 ### 踩过的坑
 
 1. **路径双 `/v1`**：provider openai_base_url 已含 `/compass-api/v1`，client path `/v1/messages` 拼接后变双 `/v1`。需剥 client 的 `/v1` 前缀。
