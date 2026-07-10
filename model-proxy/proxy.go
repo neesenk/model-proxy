@@ -202,6 +202,7 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 		pcfg.UsageFn = func() (any, error) { return showAqpUsageData(cfg) }
 		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchAqpQuota(cfg) }
 	case "codex":
+		pcfg.ClientVersion = resolveCodexClientVersion(prov.ClientVersion, codexCLIVersion, codexCacheVersion)
 		pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
 		pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
 		pcfg.UsageFn = func() (any, error) { return showCodexUsageData(cfg, prov) }

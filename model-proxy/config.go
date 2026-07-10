@@ -93,6 +93,7 @@ type Provider struct {
 	AnthropicBaseURL string                   `yaml:"anthropic_base_url"`
 	Provider         string                   `yaml:"provider_id"`
 	AqpMintURL       string                   `yaml:"aqp_mint_url"` // aqp only
+	ClientVersion    string                   `yaml:"client_version,omitempty"`
 	Headers          map[string]string        `yaml:"headers"`
 	UsageURL         string                   `yaml:"usage_url"`
 	Models           map[string]ProviderModel `yaml:"models"`
