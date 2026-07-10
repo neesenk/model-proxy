@@ -2,7 +2,7 @@
 # Paths support ~ expansion. env:ENV_VAR reads an environment variable.
 
 listen: 127.0.0.1:15722
-log_level: info # debug | info | warn | error
+log_level: info            # debug | info | warn | error
 # Runtime log + pid file. Default when unset: /tmp/model-proxy.log (pid: /tmp/model-proxy.pid).
 # Uncomment to override:
 # log_file: /var/log/model-proxy/model-proxy.log
@@ -19,23 +19,20 @@ providers:
   aqp:
     provider_id: aqp
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
-    anthropic_base_url: https://compass.llm.shopee.io/compass-api # same base without /v1; proxy keeps the client /v1/messages path
+    anthropic_base_url: https://compass.llm.shopee.io/compass-api  # same base without /v1; proxy keeps the client /v1/messages path
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     # peak_hours: "09:00-18:00"  # optional: route scheduling deprioritizes aqp during its peak window
     models:
       - glm-5.2
       - deepseek-v4-pro
       - deepseek-v4-flash
+
   codex:
     provider_id: codex
     openai_base_url: https://chatgpt.com/backend-api/codex
     models:
       - gpt-5.5
-      - gpt-5.4
-      - gpt-5.4-mini
-      - gpt-5.6-luna
-      - gpt-5.6-sol
-      - gpt-5.6-terra
+
   # External provider (Zhipu BigModel — API key via `login zhipu`)
   # /models endpoint only lists 8 chat models; multimodal models exist but
   # must be added manually here (they use different API paths). Metadata
@@ -46,7 +43,7 @@ providers:
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     peak_hours:
       - {window: "14:00-18:00", multiplier: 2}
-    usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zhipu`: 5h/weekly/monthly quota + token consumption
+    usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit  # `usage zhipu`: 5h/weekly/monthly quota + token consumption
     models:
       - glm-5.2
       - glm-5.1
@@ -57,6 +54,7 @@ providers:
       - glm-4.5
       - glm-4.5-air
       - glm-4v-plus
+
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
@@ -72,6 +70,7 @@ providers:
     models:
       - deepseek-v4-pro
       - deepseek-v4-flash
+
   # Volcengine Ark (火山方舟, including "Agent Plan"). API key via `login volcengine`.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
   # Ark Anthropic-compatible base (no /v1; proxy keeps /v1/messages).
@@ -87,6 +86,7 @@ providers:
       - doubao-seed-2-0-code
       - doubao-seed-1-6-251015
       - doubao-seed-2-0-lite-260428
+
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called
 # anthropic model isn't listed, the called name is used as the exposed name.
@@ -97,6 +97,7 @@ claude_mapping:
   claude-haiku-4-5: deepseek-v4-flash
   opus: glm-5.2
   sonnet: deepseek-v4-pro
+
 # routes: exposed model name → ordered list of provider/model targets. The proxy
 # orders targets by billing tier (plan < unknown < pay-as-you-go), then priority
 # (lower wins), then quota surplus; applies session-sticky routing + circuit-
@@ -107,28 +108,28 @@ claude_mapping:
 # provider (see providers above) to deprioritize it during its peak window.
 routes:
   glm-5.2:
-    - {provider: zhipu, model: glm-5.2, priority: 1}
+    - {provider: zhipu,   model: glm-5.2, priority: 1}
     - {provider: aqp, model: glm-5.2, priority: 2}
   deepseek-v4-pro:
-    - {provider: aqp, model: deepseek-v4-pro, priority: 1}
+    - {provider: aqp,  model: deepseek-v4-pro, priority: 1}
     - {provider: deepseek, model: deepseek-v4-pro, priority: 2}
   deepseek-v4-flash:
-    - {provider: aqp, model: deepseek-v4-flash, priority: 1}
+    - {provider: aqp,  model: deepseek-v4-flash, priority: 1}
     - {provider: deepseek, model: deepseek-v4-flash, priority: 2}
   gpt-5.5:
     - {provider: codex, model: gpt-5.5, priority: 1}
-  gpt-5.4:
-    - {provider: codex, model: gpt-5.4, priority: 1}
+
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
 # Durations are strings (e.g. "10m", "60s"). Unset fields use the defaults shown.
 scheduling:
-  circuit_threshold: 3 # consecutive failover-eligible failures → open circuit
-  circuit_cooldown: 10m # circuit open duration, then half-open (1 probe)
-  rate_limit_backoff: 60s # 429 with no Retry-After: skip this long, then probe
-  upstream_timeout: 30s # per-upstream-request timeout
-  sticky_dwell: 10m # min time on the chosen provider before re-evaluating
-  quota_poll_interval: 5m # background quota poll cadence
-  quota_switch_margin: 15 # switch provider if another's effective remaining beats current by ≥ this many pct points
+  circuit_threshold: 3        # consecutive failover-eligible failures → open circuit
+  circuit_cooldown: 10m       # circuit open duration, then half-open (1 probe)
+  rate_limit_backoff: 60s     # 429 with no Retry-After: skip this long, then probe
+  upstream_timeout: 30s       # per-upstream-request timeout
+  sticky_dwell: 10m           # min time on the chosen provider before re-evaluating
+  quota_poll_interval: 5m     # background quota poll cadence
+  quota_switch_margin: 15     # switch provider if another's effective remaining beats current by ≥ this many pct points
+
 takeover:
   # provider_id is the single identifier used by takeover for every agent that
   # takes one (opencode, pi, codex, future agents). claude doesn't use it.

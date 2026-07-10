@@ -364,8 +364,9 @@ textarea.yaml {
 .link-btn:hover { color: var(--text); background: var(--surface-2); }
 
 .msg { font-size: 12px; margin-top: 8px; min-height: 16px; font-family: var(--mono); }
-.msg.ok  { color: var(--ok-fg); }
-.msg.err { color: var(--err-fg); }
+.msg.ok   { color: var(--ok-fg); }
+.msg.err  { color: var(--err-fg); }
+.msg.warn { color: var(--warn-fg); }
 
 details.editor {
   border: 1px solid var(--border);

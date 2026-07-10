@@ -90,6 +90,7 @@ type statusResp struct {
 	Quota    map[string]statusQuota    `json:"quota"`
 	Schedule statusSchedule            `json:"schedule"`
 	Counters map[string]statusCounters `json:"counters"`
+	Warnings []string                  `json:"warnings"`
 }
 
 // --- /api/tokens decoded shape ---
@@ -441,6 +442,9 @@ func renderStatus(listen string, opts statusOpts) (string, error) {
 	appendSection(&b, renderProviders(&st))
 	appendSection(&b, renderSchedule(&st))
 	appendSection(&b, renderQuota(&st))
+	if len(st.Warnings) > 0 {
+		appendSection(&b, renderWarnings(&st))
+	}
 	appendSection(&b, renderTokens(&tok))
 	if logsOK {
 		var lg logsResp
@@ -460,6 +464,20 @@ func appendSection(b *strings.Builder, s string) {
 	}
 	b.WriteString(s)
 	b.WriteString("\n\n")
+}
+
+// renderWarnings renders the implicit-route ambiguity warnings (a model served
+// by >1 logged-in provider with no explicit route). Mirrors the `models` CLI.
+func renderWarnings(st *statusResp) string {
+	if len(st.Warnings) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s  implicit-route warnings\n", cYellow("⚠"))
+	for _, w := range st.Warnings {
+		fmt.Fprintf(&b, "  %s\n", w)
+	}
+	return b.String()
 }
 
 // cmdServeStatus prints a terminal-optimized snapshot of the running daemon's

@@ -44,6 +44,39 @@ func TestAPIStatus(t *testing.T) {
 	}
 }
 
+func TestAPIStatus_IncludesRouteWarnings(t *testing.T) {
+	// Two logged-in apikey providers share an unrated model → ambiguity warning.
+	home := t.TempDir()
+	credDir := home + "/.model-proxy"
+	os.MkdirAll(credDir, 0o700)
+	for _, n := range []string{"zhipu", "deepseek"} {
+		os.WriteFile(credDir+"/"+n+"_apikey.json", []byte(`{"api_key":"k"}`), 0o600)
+	}
+	prev := os.Getenv("HOME")
+	os.Setenv("HOME", home)
+	defer os.Setenv("HOME", prev)
+
+	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x, models: [shared-model]}
+  deepseek: {provider_id: deepseek, openai_base_url: https://x, models: [shared-model]}
+`))
+	p := NewProxy(cfg)
+	if len(p.routeWarnings) == 0 {
+		t.Fatalf("expected routeWarnings, got none (implicit=%v)", p.implicitRoutes)
+	}
+	w := newWebServer(p, "test-config.yaml")
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `"warnings"`) || !strings.Contains(body, "shared-model") {
+		t.Errorf("/api/status should include warnings with shared-model: %s", body)
+	}
+}
+
 // TestAPIStatusUnknown404 asserts the catch-all still 404s for unknown /api paths
 // once the first real route (/api/status) is wired. Guards against a future
 // router change silently swallowing unknown paths.

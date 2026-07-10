@@ -148,6 +148,7 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 	w.p.mu.RLock()
 	cfg := w.p.cfg
+	routeWarnings := w.p.routeWarnings
 	w.p.mu.RUnlock()
 
 	now := time.Now()
@@ -196,6 +197,7 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 		"quota":    quota,
 		"schedule": json.RawMessage(w.p.scheduleStatus()),
 		"counters": w.p.metrics.snapshot(),
+		"warnings": routeWarnings,
 	})
 }
 

@@ -198,6 +198,20 @@ func TestRenderQuotaEmpty(t *testing.T) {
 	}
 }
 
+func TestRenderWarnings(t *testing.T) {
+	if got := renderWarnings(&statusResp{}); got != "" {
+		t.Errorf("empty warnings should render nothing, got %q", got)
+	}
+	out := renderWarnings(&statusResp{Warnings: []string{
+		`model "foo" served by 2 logged-in providers (aqp, zhipu); auto-routing to aqp`,
+	}})
+	for _, want := range []string{"implicit-route warnings", "foo", "aqp", "zhipu"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warnings render missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderTokens(t *testing.T) {
 	tok := &tokensResp{Usage: []tokenEntry{
 		{Provider: "zhipu", Model: "glm-4.6", Input: 1000, Output: 500, Requests: 1},

@@ -201,6 +201,7 @@ async function renderStatusTab() {
     panels.status.innerHTML = '';
     renderProvidersCard(st);
     renderScheduleCard(st);
+    renderWarningsCard(st);
     renderQuotaCard(st);
     renderTokensCard(tok.usage || []);
     renderLogsCard(logs.lines || []);
@@ -224,6 +225,15 @@ function buildCard(title, meta, bodyHTML, extraBodyClass = '') {
     <header class="card-head"><h2>${esc(title)}</h2>${meta ? `<span class="meta">${esc(meta)}</span>` : ''}</header>
     <div class="card-body ${extraBodyClass}">${bodyHTML}</div>
   </section>`;
+}
+
+// renderWarningsCard surfaces implicit-route ambiguity warnings (a model served
+// by >1 logged-in provider with no explicit route). Hidden when none.
+function renderWarningsCard(st) {
+  const ws = st.warnings || [];
+  if (!ws.length) return;
+  const items = ws.map(w => `<div class="msg warn">⚠ ${esc(w)}</div>`).join('');
+  panels.status.insertAdjacentHTML('beforeend', buildCard('Warnings', `${ws.length}`, items));
 }
 
 // healthPill renders a status pill reflecting circuit + rate-limit state.
