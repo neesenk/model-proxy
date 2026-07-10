@@ -64,6 +64,13 @@ func backupDir(configPath string) string {
 // ---- top-level dispatch ----
 
 func runTakeover(cfg *Config, which, bakDir string) error {
+	// Hydrate model metadata from models.dev (config > models.dev > default) so
+	// takeover writes real context/output/modalities. Warn about models that fell
+	// back to defaults (unmatched in config + catalog). config.yaml is untouched.
+	cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
+	sources := hydrateModels(cfg, cat)
+	emitTakeoverWarnings(cfg, which, sources)
+
 	clients := listClients(cfg, which)
 	for _, c := range clients {
 		log.Printf("takeover %s: %s (backup → %s/)", c.name, c.file, bakDir)
@@ -76,6 +83,29 @@ func runTakeover(cfg *Config, which, bakDir string) error {
 		log.Printf("  ✓ %s done", c.name)
 	}
 	return nil
+}
+
+// emitTakeoverWarnings prints a stderr warning for each default-sourced model
+// that a metadata-writing client (opencode, pi) in this takeover set will emit.
+// claude/codex don't write per-model metadata, so they are skipped to avoid noise.
+func emitTakeoverWarnings(cfg *Config, which string, sources map[string]map[string]modelSource) {
+	clients := listClients(cfg, which)
+	writesMetadata := false
+	for _, c := range clients {
+		if c.name == "opencode" || c.name == "pi" {
+			writesMetadata = true
+			break
+		}
+	}
+	if !writesMetadata {
+		return
+	}
+	for _, m := range exposedModels(cfg) {
+		if sources[m.provider] != nil && sources[m.provider][m.realModel] == srcDefault {
+			fmt.Fprintf(os.Stderr, "warning: model %s at %s: no models.dev metadata — wrote defaults (ctx=%d out=%d text-only)\n",
+				m.realModel, m.provider, defaultProviderModel.Context, defaultProviderModel.Output)
+		}
+	}
 }
 
 func runRestore(cfg *Config, which, bakDir string) error {

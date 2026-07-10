@@ -318,3 +318,40 @@ func TestCLI_ModelsDisplay_HydratesFromCache(t *testing.T) {
 		t.Errorf("display should show cached context 204800:\n%s", stdout)
 	}
 }
+
+// --- takeover opencode: warns on default-sourced models ---
+
+func TestCLI_TakeoverOpencode_WarnsDefault(t *testing.T) {
+	ocPath := filepath.Join(t.TempDir(), "oc.json")
+	os.WriteFile(ocPath, []byte(`{}`), 0o644) // takeover backs up the target first; it must exist
+	cfgBody := "listen: 127.0.0.1:15721\ntakeover:\n  provider_id: model-proxy\n  opencode: " + ocPath + "\nproviders:\n  codex:\n    provider_id: codex\n    openai_base_url: https://chatgpt.com/backend-api/codex\nroutes:\n  gpt-5.5:\n    - {provider: codex, model: gpt-5.5}\n"
+	cfgPath := writeTempConfig(t, cfgBody)
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	// fresh EMPTY cache (no models) → gpt-5.5 unmatched → default
+	cache := `{"fetched_at":"` + time.Now().Format(time.RFC3339) + `","etag":"","by_name":{},"by_endpoint":{}}`
+	os.WriteFile(filepath.Join(credDir, "models_cache.json"), []byte(cache), 0o600)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer srv.Close()
+	t.Setenv("MP_MODELSDEV_URL", srv.URL)
+
+	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "opencode")
+	if code != 0 {
+		t.Fatalf("takeover exit=%d", code)
+	}
+	if !strings.Contains(stderr, "gpt-5.5") || !strings.Contains(stderr, "default") {
+		t.Errorf("takeover should warn about gpt-5.5 default:\n%s", stderr)
+	}
+	// opencode config written with default ctx 200000 (proves defaults were written, not omitted)
+	b, err := os.ReadFile(ocPath)
+	if err != nil {
+		t.Fatalf("opencode config not written: %v", err)
+	}
+	oc := string(b)
+	if !strings.Contains(oc, "200000") {
+		t.Errorf("opencode config should contain default ctx 200000:\n%s", oc)
+	}
+}
