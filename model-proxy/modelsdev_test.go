@@ -258,3 +258,51 @@ func TestModelsDevEndpoint_EnvOverride(t *testing.T) {
 		t.Errorf("env override ignored: got %q", got)
 	}
 }
+
+func TestHydrateModels(t *testing.T) {
+	cat := parseModelsDevAPI([]byte(fixtureAPI))
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"zhipu": {OpenAIBaseURL: "https://open.bigmodel.cn/api/paas/v4",
+				Models: map[string]ProviderModel{"glm-4.6": {Context: 999, Output: 999}}}, // config override wins
+			"aqp":   {OpenAIBaseURL: "https://compass.llm.shopee.io/compass-api/v1"},
+			"codex": {OpenAIBaseURL: "https://chatgpt.com/backend-api/codex"},
+			"volcengine": {Models: map[string]ProviderModel{"doubao-x": {Context: 262144}}}, // config-only, no routes
+		},
+		Routes: map[string][]RouteTarget{
+			"glm-4.6":         {{Provider: "zhipu", Model: "glm-4.6", Priority: 1}},
+			"deepseek-v4-pro": {{Provider: "aqp", Model: "deepseek-v4-pro", Priority: 1}},
+			"gpt-5.5":         {{Provider: "codex", Model: "gpt-5.5", Priority: 1}},
+		},
+	}
+	src := hydrateModels(cfg, cat)
+
+	// config wins for zhipu/glm-4.6 (999, not catalog 204800)
+	if cfg.Providers["zhipu"].Models["glm-4.6"].Context != 999 {
+		t.Errorf("config override lost: %d", cfg.Providers["zhipu"].Models["glm-4.6"].Context)
+	}
+	if src["zhipu"]["glm-4.6"] != srcConfig {
+		t.Errorf("zhipu/glm-4.6 source = %v, want srcConfig", src["zhipu"]["glm-4.6"])
+	}
+	// aqp/deepseek-v4-pro: name-fallback match → catalog values + srcModelsDev
+	if pm := cfg.Providers["aqp"].Models["deepseek-v4-pro"]; pm.Context != 1000000 || pm.Output != 65536 {
+		t.Errorf("aqp/deepseek-v4-pro should be catalog-sourced: %+v", pm)
+	}
+	if src["aqp"]["deepseek-v4-pro"] != srcModelsDev {
+		t.Errorf("aqp/deepseek-v4-pro source = %v, want srcModelsDev", src["aqp"]["deepseek-v4-pro"])
+	}
+	// codex/gpt-5.5: unmatched → defaults + srcDefault
+	if pm := cfg.Providers["codex"].Models["gpt-5.5"]; pm.Context != 200000 || pm.Output != 16384 {
+		t.Errorf("codex/gpt-5.5 should be default: %+v", pm)
+	}
+	if src["codex"]["gpt-5.5"] != srcDefault {
+		t.Errorf("codex/gpt-5.5 source = %v, want srcDefault", src["codex"]["gpt-5.5"])
+	}
+	// volcengine config-only model preserved (no route), source = config
+	if cfg.Providers["volcengine"].Models["doubao-x"].Context != 262144 {
+		t.Errorf("volcengine config-only model lost: %+v", cfg.Providers["volcengine"].Models["doubao-x"])
+	}
+	if src["volcengine"]["doubao-x"] != srcConfig {
+		t.Errorf("volcengine/doubao-x source = %v, want srcConfig", src["volcengine"]["doubao-x"])
+	}
+}
