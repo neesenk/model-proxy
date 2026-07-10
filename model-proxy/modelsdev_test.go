@@ -265,8 +265,8 @@ func TestHydrateModels(t *testing.T) {
 		Providers: map[string]Provider{
 			"zhipu": {OpenAIBaseURL: "https://open.bigmodel.cn/api/paas/v4",
 				Models: map[string]ProviderModel{"glm-4.6": {Context: 999, Output: 999}}}, // config override wins
-			"aqp":   {OpenAIBaseURL: "https://compass.llm.shopee.io/compass-api/v1"},
-			"codex": {OpenAIBaseURL: "https://chatgpt.com/backend-api/codex"},
+			"aqp":        {OpenAIBaseURL: "https://compass.llm.shopee.io/compass-api/v1"},
+			"codex":      {OpenAIBaseURL: "https://chatgpt.com/backend-api/codex"},
 			"volcengine": {Models: map[string]ProviderModel{"doubao-x": {Context: 262144}}}, // config-only, no routes
 		},
 		Routes: map[string][]RouteTarget{
