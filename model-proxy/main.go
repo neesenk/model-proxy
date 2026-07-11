@@ -430,9 +430,11 @@ func cmdUsage(args []string) {
 			names = append(names, n)
 		}
 		sort.Strings(names)
-		for _, n := range names {
+		for i, n := range names {
+			if i > 0 {
+				fmt.Println(cDim(usageDivider))
+			}
 			printProviderUsage(cfg, n)
-			fmt.Println()
 		}
 		return
 	}
@@ -459,8 +461,10 @@ func printProviderUsage(cfg *Config, provName string) {
 	providerID := prov.Provider
 	pool, _ := loadPool(provName, providerID)
 	if len(pool.Accounts) >= 2 {
-		for _, a := range pool.Accounts {
-			fmt.Println(cDim("────────────────────────────────────────"))
+		for ai, a := range pool.Accounts {
+			if ai > 0 {
+				fmt.Println(cDim(usageDivider))
+			}
 			fmt.Printf("%s (%s)\n", cBold(cCyan(a.Label)), mask(a.ID))
 			cred := a.cred()
 			switch providerID {
@@ -482,11 +486,15 @@ func printProviderUsage(cfg *Config, provName string) {
 	if p == nil {
 		return
 	}
-	fmt.Println(cDim("────────────────────────────────────────"))
 	if _, err := p.Usage(); err != nil {
 		fmt.Println(cYellow("  (usage unavailable: " + err.Error() + ")"))
 	}
 }
+
+// usageDivider separates multiple usage blocks (providers in `usage` with no
+// arg, or accounts within a pooled provider). Printed between blocks only —
+// never before the first or after the last.
+const usageDivider = "────────────────────────────────────────"
 
 func providerNames(cfg *Config) string {
 	names := []string{}

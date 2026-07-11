@@ -242,9 +242,29 @@ func TestCLI_UsageAllNotLoggedIn(t *testing.T) {
 	if !strings.Contains(stdout, "Not logged in") {
 		t.Errorf("usage (all) stdout missing 'Not logged in':\n%s", stdout)
 	}
-	// The all-providers view prints a divider before each provider.
-	if !strings.Contains(stdout, "────────") {
-		t.Errorf("usage (all) stdout missing divider line:\n%s", stdout)
+	// minimalConfig has a single provider → NO divider (dividers separate
+	// multiple blocks; never before the first/only).
+	if strings.Contains(stdout, "────────") {
+		t.Errorf("single-provider usage should have no divider:\n%s", stdout)
+	}
+}
+
+// TestCLI_UsageAllDividersBetweenOnly: `usage` (no arg) with N providers prints
+// a divider BETWEEN blocks only — exactly N-1 dividers, none at the very start.
+func TestCLI_UsageAllDividersBetweenOnly(t *testing.T) {
+	body := "listen: 127.0.0.1:0\nproviders:\n  alpha:\n    provider_id: zhipu\n    openai_base_url: http://x\n  beta:\n    provider_id: deepseek\n    openai_base_url: http://x\n"
+	cfg := writeTempConfig(t, body)
+	stdout, _, code := runCLI(t, "usage", cfg)
+	if code != 0 {
+		t.Fatalf("usage (all) exit=%d", code)
+	}
+	// Two providers, neither logged in → exactly 1 divider between them.
+	if c := strings.Count(stdout, usageDivider); c != 1 {
+		t.Errorf("want exactly 1 divider between 2 providers, got %d:\n%s", c, stdout)
+	}
+	// Must not start with the divider.
+	if strings.HasPrefix(strings.TrimLeft(stdout, "\n"), usageDivider) {
+		t.Errorf("usage output should not start with a divider:\n%s", stdout)
 	}
 }
 
