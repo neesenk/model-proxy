@@ -41,19 +41,19 @@ providers:
     provider_id: aqp
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
-    models:
-      glm-5.2: {context: 1024000, output: 4096, modalities: {input: [text], output: [text]}}
+    models:                       # 只填模型名；元数据(context/output/modalities)运行时从 models.dev 自动补
+      - glm-5.2
   codex:
     provider_id: codex
     openai_base_url: https://chatgpt.com/backend-api/codex
     models:
-      gpt-5.5: {context: 200000, output: 32768, modalities: {input: [text, image], output: [text]}}
+      - gpt-5.5
   zhipu:
     provider_id: zhipu
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     usage_url: https://open.bigmodel.cn/api/paas/v4/models
     models:
-      glm-5.2: {context: 128000, output: 4096, modalities: {input: [text], output: [text]}}
+      - glm-5.2
 
 claude_mapping:
   claude-opus-4-7: glm-5.2          # anthropic-only: claude 别名 → 对外模型名
@@ -73,6 +73,10 @@ takeover:
   pi: ~/.pi/agent/models.json
   provider_id: model-proxy
 ```
+
+> **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL；`models pull` 强制刷新）。匹配不到的模型走保守默认值并在 `takeover` 时告警。
+>
+> **隐式路由**：某个模型即使没在 `routes` 里配，只要某个**已登录** provider 的 `models:` 列了它，代理会自动按模型名路由到（字母序）首个 provider。若多个已登录 provider 都提供且无显式 route，只用首个并在 `models` 命令 / Web UI 发出歧义告警。显式 `routes` 永远优先（要做 failover/优先级控制仍需显式配置）。
 
 ## 用法
 
@@ -102,9 +106,10 @@ model-proxy usage volcengine       # 模型列表（Agent Plan 无简单余额 A
 model-proxy logout aqp         # 清除凭据文件
 
 # 模型列表
-model-proxy models                 # 所有 provider 的模型（从 config）
-model-proxy models aqp         # 单个 provider
-model-proxy models refresh zhipu   # 从服务端刷新
+model-proxy models                 # 所有 provider 的模型（元数据从 models.dev 自动补；SRC 列标来源）
+model-proxy models aqp             # 单个 provider
+model-proxy models refresh zhipu   # 从服务端拉取，新模型自动追加进 config 的 models 列表
+model-proxy models pull            # 强制刷新 models.dev 元数据缓存
 
 # 接管客户端配置
 model-proxy takeover opencode      # claude|opencode|codex|pi|all
@@ -184,7 +189,7 @@ model-proxy serve status --config /path/to/config.yaml   # 指定 config（从�
 |---|---|---|
 | Anthropic | `POST /v1/messages` | provider 的 `/messages` |
 | OpenAI | `POST /v1/responses`, `/v1/chat/completions` | provider 的同路径 |
-| 模型列表 | `GET /v1/models` | 合并所有 routes 的模型 |
+| 模型列表 | `GET /v1/models` | 合并 routes + 隐式路由 + claude_mapping 的模型名 |
 
 **按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。注意代理会剥掉客户端的 `/v1` 前缀，故 base URL 须自带版本段（如 `…/v1`、`…/anthropic/v1`）。
 
@@ -267,14 +272,14 @@ providers:
     openai_base_url: https://api.deepseek.com
     anthropic_base_url: https://api.deepseek.com/anthropic/v1
     usage_url: https://api.deepseek.com/user/balance
-    models:
-      deepseek-v4-pro:   {context: 1000000, output: 65536, modalities: {input: [text], output: [text]}}
-      deepseek-v4-flash: {context: 1000000, output: 65536, modalities: {input: [text], output: [text]}}
+    models:                 # 只填模型名；元数据从 models.dev 自动补
+      - deepseek-v4-pro
+      - deepseek-v4-flash
 
 claude_mapping:
   claude-opus-4-8: deepseek-v4-pro   # DeepSeek 服务端也会自动映射 claude-opus*→v4-pro
 
-routes:
+routes:                     # 可选：不配 routes 时，models 里且已 login 的模型会自动隐式路由
   deepseek-v4-pro:
     - {provider: deepseek, model: deepseek-v4-pro, priority: 1}
 ```
@@ -296,7 +301,7 @@ providers:
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan/compatible/v1
     usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
     models:
-      doubao-seed-1-8-251228: {context: 256000, output: 32768, modalities: {input: [text], output: [text]}}
+      - doubao-seed-1-8-251228
 
 routes:
   doubao-seed-1-8-251228:
