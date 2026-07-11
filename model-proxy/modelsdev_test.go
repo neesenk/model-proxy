@@ -32,7 +32,7 @@ const fixtureAPI = `{
   }
 }`
 
-func TestParseModelsDevAPI_DedupAndEndpoints(t *testing.T) {
+func TestParseModelsDevAPI_DedupCanonicalOwner(t *testing.T) {
 	cat := parseModelsDevAPI([]byte(fixtureAPI))
 	// ByName: glm-4.6 deduped — canonical owner zhipuai wins (ctx 204800, not 999).
 	md, ok := cat.ByName["glm-4.6"]
@@ -49,27 +49,6 @@ func TestParseModelsDevAPI_DedupAndEndpoints(t *testing.T) {
 	if md2 := cat.ByName["deepseek-v4-pro"]; md2.Context != 1000000 || md2.Output != 65536 {
 		t.Errorf("deepseek-v4-pro metadata wrong: %+v", md2)
 	}
-	// ByEndpoint: zhipu's exact URL + host key both index glm-4.6.
-	zhipuURL := normalizeEndpoint("https://open.bigmodel.cn/api/paas/v4")
-	if names, ok := cat.ByEndpoint[zhipuURL]; !ok || !sliceContains(names, "glm-4.6") {
-		t.Errorf("ByEndpoint[%s] missing glm-4.6: %v", zhipuURL, names)
-	}
-	if names, ok := cat.ByEndpoint["open.bigmodel.cn"]; !ok || !sliceContains(names, "glm-4.6") {
-		t.Errorf("host-only endpoint key missing glm-4.6: %v", names)
-	}
-}
-
-func TestNormalizeEndpoint(t *testing.T) {
-	cases := map[string]string{
-		"https://open.bigmodel.cn/api/paas/v4": "https://open.bigmodel.cn/api/paas/v4",
-		"https://API.DeepSeek.com/":            "https://api.deepseek.com",
-		"":                                     "",
-	}
-	for in, want := range cases {
-		if got := normalizeEndpoint(in); got != want {
-			t.Errorf("normalizeEndpoint(%q) = %q, want %q", in, got, want)
-		}
-	}
 }
 
 // helpers
@@ -79,15 +58,6 @@ func catalogKeys(m map[string]modelsDevModel) []string {
 		out = append(out, k)
 	}
 	return out
-}
-
-func sliceContains(s []string, v string) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 // keep imports used by later-appended tests honest.
@@ -101,29 +71,29 @@ func TestCatalogLookup(t *testing.T) {
 	cat := parseModelsDevAPI([]byte(fixtureAPI))
 
 	// 1. Endpoint match: zhipu base URL → zhipuai provider → glm-4.6 (canonical).
-	md, ok := cat.lookup([]string{"https://open.bigmodel.cn/api/paas/v4"}, "glm-4.6")
+	md, ok := cat.lookup("glm-4.6")
 	if !ok || md.Context != 204800 {
-		t.Errorf("endpoint match glm-4.6: ok=%v ctx=%d", ok, md.Context)
+		t.Errorf("glm-4.6 lookup: ok=%v ctx=%d", ok, md.Context)
 	}
 	// 2. Name fallback: aqp endpoint has no models.dev entry; deepseek-v4-pro
 	//    still resolves globally.
-	md, ok = cat.lookup([]string{"https://compass.llm.shopee.io/compass-api/v1"}, "deepseek-v4-pro")
+	md, ok = cat.lookup("deepseek-v4-pro")
 	if !ok || md.Context != 1000000 {
-		t.Errorf("name fallback deepseek-v4-pro: ok=%v ctx=%d", ok, md.Context)
+		t.Errorf("deepseek-v4-pro lookup: ok=%v ctx=%d", ok, md.Context)
 	}
 	// 3. Name fallback returns canonical value even without an endpoint hit
 	//    (reseller's 999 must not leak through global lookup).
-	md, ok = cat.lookup(nil, "glm-4.6")
+	md, ok = cat.lookup("glm-4.6")
 	if !ok || md.Context != 204800 {
 		t.Errorf("global name lookup should give canonical: ok=%v ctx=%d", ok, md.Context)
 	}
 	// 4. Unmatched (no endpoint, no global name) → ok=false.
-	if _, ok := cat.lookup([]string{"https://chatgpt.com/backend-api/codex"}, "gpt-5.5"); ok {
+	if _, ok := cat.lookup("gpt-5.5"); ok {
 		t.Error("gpt-5.5 should be unmatched")
 	}
 	// 5. nil catalog never panics.
 	var nilCat *modelsDevCatalog
-	if _, ok := nilCat.lookup([]string{"http://x"}, "m"); ok {
+	if _, ok := nilCat.lookup("m"); ok {
 		t.Error("nil catalog lookup should return false")
 	}
 }
@@ -131,10 +101,9 @@ func TestCatalogLookup(t *testing.T) {
 func TestCacheRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")
 	cat := &modelsDevCatalog{
-		FetchedAt:  time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC),
-		Etag:       `"abc"`,
-		ByName:     map[string]modelsDevModel{"glm-4.6": {Context: 204800, Output: 131072, Input: []string{"text"}, OutMods: []string{"text"}}},
-		ByEndpoint: map[string][]string{"https://open.bigmodel.cn/api/paas/v4": {"glm-4.6"}},
+		FetchedAt: time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC),
+		Etag:      `"abc"`,
+		ByName:    map[string]modelsDevModel{"glm-4.6": {Context: 204800, Output: 131072, Input: []string{"text"}, OutMods: []string{"text"}}},
 	}
 	if err := saveCachedCatalog(path, cat); err != nil {
 		t.Fatal(err)
@@ -166,7 +135,7 @@ func fakeFetch(status int, body []byte, etag string) catalogFetchFunc {
 func TestEnsureCatalogFresh_304(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")
 	seed := &modelsDevCatalog{FetchedAt: time.Now().Add(-2 * catalogTTL), Etag: `"old"`,
-		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}, ByEndpoint: map[string][]string{}}
+		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}}
 	saveCachedCatalog(path, seed)
 	cat, err := ensureCatalogFresh(path, "http://x", fakeFetch(304, nil, `"old"`), false)
 	if err != nil {
@@ -198,7 +167,7 @@ func TestEnsureCatalogFresh_200(t *testing.T) {
 func TestEnsureCatalogFresh_TTLHitNoFetch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")
 	fresh := &modelsDevCatalog{FetchedAt: time.Now(), Etag: `"e"`,
-		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}, ByEndpoint: map[string][]string{}}
+		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}}
 	saveCachedCatalog(path, fresh)
 	var called bool
 	errFetch := func(endpoint, etag string) (int, []byte, string, error) { called = true; return 0, nil, "", nil }
@@ -214,7 +183,7 @@ func TestEnsureCatalogFresh_TTLHitNoFetch(t *testing.T) {
 func TestEnsureCatalogFresh_ForceBypassesTTL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")
 	fresh := &modelsDevCatalog{FetchedAt: time.Now(), Etag: `"old"`,
-		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 1}}, ByEndpoint: map[string][]string{}}
+		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 1}}}
 	saveCachedCatalog(path, fresh)
 	cat, err := ensureCatalogFresh(path, "http://x", fakeFetch(200, []byte(fixtureAPI), `"new"`), true)
 	if err != nil {
@@ -228,7 +197,7 @@ func TestEnsureCatalogFresh_ForceBypassesTTL(t *testing.T) {
 func TestEnsureCatalogFresh_FetchErrorFallsBackToStale(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")
 	stale := &modelsDevCatalog{FetchedAt: time.Now().Add(-2 * catalogTTL), Etag: `"e"`,
-		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}, ByEndpoint: map[string][]string{}}
+		ByName: map[string]modelsDevModel{"glm-4.6": {Context: 204800}}}
 	saveCachedCatalog(path, stale)
 	errFetch := func(endpoint, etag string) (int, []byte, string, error) { return 0, nil, "", os.ErrNotExist }
 	cat, err := ensureCatalogFresh(path, "http://x", errFetch, false)

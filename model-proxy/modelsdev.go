@@ -5,11 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 	"time"
 )
 
@@ -43,10 +40,9 @@ func (m modelsDevModel) toProviderModel() ProviderModel {
 // modelsDevCatalog is the on-disk + in-memory cache: a deduplicated name→metadata
 // index plus an endpoint→model-names index for endpoint-scoped matching.
 type modelsDevCatalog struct {
-	FetchedAt  time.Time                 `json:"fetched_at"`
-	Etag       string                    `json:"etag"`
-	ByName     map[string]modelsDevModel `json:"by_name"`
-	ByEndpoint map[string][]string       `json:"by_endpoint"`
+	FetchedAt time.Time                 `json:"fetched_at"`
+	Etag      string                    `json:"etag"`
+	ByName    map[string]modelsDevModel `json:"by_name"`
 }
 
 // modelSource records where a model's effective metadata came from (config now
@@ -83,25 +79,8 @@ func ownerRank(providerKey string) int {
 	return 1
 }
 
-// normalizeEndpoint lowercases and strips a trailing slash for stable matching.
-func normalizeEndpoint(raw string) string {
-	raw = strings.TrimSpace(raw)
-	raw = strings.TrimRight(raw, "/")
-	return strings.ToLower(raw)
-}
-
-// hostOf returns the lowercased host of a URL string, or "" if unparseable.
-func hostOf(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return ""
-	}
-	return strings.ToLower(u.Host)
-}
-
 // parseModelsDevAPI parses a models.dev/api.json blob into a deduplicated catalog.
-// Canonical owners win on name collisions. Each provider's models are indexed
-// under both the full-normalized api URL and its host.
+// Canonical owners win on name collisions.
 func parseModelsDevAPI(blob []byte) *modelsDevCatalog {
 	var raw map[string]struct {
 		API    string `json:"api"`
@@ -119,15 +98,11 @@ func parseModelsDevAPI(blob []byte) *modelsDevCatalog {
 	if err := json.Unmarshal(blob, &raw); err != nil {
 		return emptyCatalog()
 	}
-	cat := &modelsDevCatalog{ByName: map[string]modelsDevModel{}, ByEndpoint: map[string][]string{}}
+	cat := &modelsDevCatalog{ByName: map[string]modelsDevModel{}}
 	rank := map[string]int{} // modelName → current owner rank (lower wins)
 	for provKey, p := range raw {
 		r := ownerRank(provKey)
-		epFull := normalizeEndpoint(p.API)
-		epHost := hostOf(epFull)
-		names := make([]string, 0, len(p.Models))
 		for modelName, m := range p.Models {
-			names = append(names, modelName)
 			md := modelsDevModel{
 				Context: m.Limit.Context,
 				Output:  int(m.Limit.Output),
@@ -139,34 +114,12 @@ func parseModelsDevAPI(blob []byte) *modelsDevCatalog {
 				rank[modelName] = r
 			}
 		}
-		sort.Strings(names)
-		if epFull != "" {
-			cat.ByEndpoint[epFull] = appendUnique(cat.ByEndpoint[epFull], names)
-		}
-		if epHost != "" && epHost != epFull {
-			cat.ByEndpoint[epHost] = appendUnique(cat.ByEndpoint[epHost], names)
-		}
 	}
 	return cat
 }
 
-// appendUnique appends names not already present in dst.
-func appendUnique(dst, add []string) []string {
-	seen := make(map[string]bool, len(dst))
-	for _, x := range dst {
-		seen[x] = true
-	}
-	for _, x := range add {
-		if !seen[x] {
-			dst = append(dst, x)
-			seen[x] = true
-		}
-	}
-	return dst
-}
-
 func emptyCatalog() *modelsDevCatalog {
-	return &modelsDevCatalog{ByName: map[string]modelsDevModel{}, ByEndpoint: map[string][]string{}}
+	return &modelsDevCatalog{ByName: map[string]modelsDevModel{}}
 }
 
 const catalogTTL = 24 * time.Hour
@@ -234,9 +187,6 @@ func loadCachedCatalog(path string) (*modelsDevCatalog, error) {
 	}
 	if cat.ByName == nil {
 		cat.ByName = map[string]modelsDevModel{}
-	}
-	if cat.ByEndpoint == nil {
-		cat.ByEndpoint = map[string][]string{}
 	}
 	return &cat, nil
 }
@@ -332,7 +282,7 @@ func hydrateModels(cfg *Config, cat *modelsDevCatalog) (meta map[string]map[stri
 		return meta[prov], sources[prov]
 	}
 	resolve := func(prov Provider, name string) (ProviderModel, modelSource) {
-		if md, ok := cat.lookup([]string{prov.OpenAIBaseURL, prov.AnthropicBaseURL}, name); ok {
+		if md, ok := cat.lookup(name); ok {
 			return md.toProviderModel(), srcModelsDev
 		}
 		return defaultProviderModel, srcDefault
@@ -364,34 +314,15 @@ func hydrateModels(cfg *Config, cat *modelsDevCatalog) (meta map[string]map[stri
 	return meta, sources
 }
 
-// lookup resolves a model's metadata given the provider's base URLs (openai +
-// anthropic). It tries endpoint-scoped matching first (full URL, then host) so a
-// provider's own models.dev entry wins; then falls back to a global name match
-// (rescuing models a provider borrows from another vendor). ok=false if neither.
-func (cat *modelsDevCatalog) lookup(endpoints []string, model string) (modelsDevModel, bool) {
+// lookup resolves a model's metadata from the deduplicated catalog. ByName
+// already holds the canonical owner's entry (canonical-owner dedup at parse
+// time), so this is a plain global name lookup; a provider borrowing another
+// vendor's model name still resolves to the canonical metadata. ok=false if
+// the name isn't in the catalog.
+func (cat *modelsDevCatalog) lookup(model string) (modelsDevModel, bool) {
 	if cat == nil {
 		return modelsDevModel{}, false
 	}
-	for _, e := range endpoints {
-		ne := normalizeEndpoint(e)
-		for _, key := range []string{ne, hostOf(ne)} {
-			if key == "" {
-				continue
-			}
-			names, ok := cat.ByEndpoint[key]
-			if !ok {
-				continue
-			}
-			for _, n := range names {
-				if n == model {
-					md, ok := cat.ByName[model]
-					return md, ok // endpoint-scoped hit
-				}
-			}
-		}
-	}
-	if md, ok := cat.ByName[model]; ok {
-		return md, true // global name fallback
-	}
-	return modelsDevModel{}, false
+	md, ok := cat.ByName[model]
+	return md, ok
 }
