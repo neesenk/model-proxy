@@ -15,6 +15,11 @@
 # windows). The version is stamped from git (tag -> describe -> short sha, with
 # a -dirty suffix) via -ldflags, overriding the "dev" default in version.go.
 #
+# When the host target is built, the binary is also copied to ./model-proxy (the
+# source root, a sibling of outdir/) so it's runnable in place - matching the
+# `go build -o model-proxy .` dev convention. Cross-compiled binaries are NOT
+# copied there (they wouldn't run on the host). ./model-proxy is gitignored.
+#
 # Flags:
 #   --version <ver>   override the git-derived version string
 #   --out <dir>       output directory (default: dist), created if missing
@@ -89,6 +94,11 @@ resolve_version() {
 
 version="$(resolve_version)"
 
+# The host GOOS/GOARCH, captured once. build_one copies a host build to
+# ./model-proxy (runnable in place); cross builds skip that copy.
+host_goos="$(go env GOOS)"
+host_goarch="$(go env GOARCH)"
+
 # Translate `all` / `host` into concrete GOOS/GOARCH lists.
 expanded=()
 for t in "${targets[@]:-}"; do
@@ -145,6 +155,15 @@ build_one() {
 			info="$(du -h "$out" | cut -f1)"
 		fi
 		printf '%-18s -> %s  (%s, %s)\n' "$goos/$goarch" "$out" "$info" "v$version"
+		# Host build: also drop a runnable copy at the source root (sibling of
+		# outdir/), named model-proxy - matches the `go build -o model-proxy .`
+		# dev convention. Cross builds are skipped (won't run locally). gitignored.
+		if [ "$goos" = "$host_goos" ] && [ "$goarch" = "$host_goarch" ]; then
+			local root_bin="model-proxy"
+			[ "$goos" = "windows" ] && root_bin="model-proxy.exe"
+			cp "$out" "$root_bin"
+			printf '%-18s -> %s  (host run copy, sibling of %s/)\n' "" "$root_bin" "$outdir"
+		fi
 	else
 		echo "✗ build failed: $goos/$goarch" >&2
 		return 1
