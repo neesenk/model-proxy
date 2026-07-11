@@ -8,12 +8,25 @@ The git repo root (`/Users/zhiyong.liu/model-proxy`) contains docs (`AGENTS.md`,
 
 ```bash
 cd model-proxy
-go build -o model-proxy .                          # build
-GOOS=linux GOARCH=amd64 go build -o model-proxy-linux .   # cross-compile Linux
+go build -o model-proxy .                          # build (host)
 go test ./...                                      # run all tests (~24s)
 go test -run TestForward_ProviderRouting .         # run one test (white-box, package main)
 go vet ./...                                       # lint
+scripts/build.sh                                   # build host -> dist/ + ./model-proxy
+scripts/build.sh linux/amd64                       # cross-compile one target -> dist/
+scripts/build.sh --strip all                       # full matrix (linux/darwin/windows)
 ```
+
+`scripts/build.sh` compiles one or more GOOS/GOARCH targets (pure-Go
+`modernc.org/sqlite` => every build is `CGO_ENABLED=0`, fully static, no
+cross-toolchain). Each target writes `dist/model-proxy-<goos>-<goarch>` (.exe on
+windows); the version is stamped from `git describe --tags --always --dirty` via
+`-ldflags -X main.version` (overriding the `dev` default in `version.go`, surfaced
+in `serve status` / `/api/status`). A successful **host** build additionally
+copies the binary to `./model-proxy` (sibling of `dist/`, runnable in place -
+matches `go build -o model-proxy .`; cross builds skip this). Flags:
+`--version <v>`, `--out <dir>` (default `dist`), `--strip` (`-s -w`), `-v`. Both
+`dist/` and `./model-proxy` are gitignored.
 
 Tests are white-box (`package main`) using only the stdlib `testing` + `httptest` — no testify. The `provider/` package has test files for deepseek + volcengine (auth + rewrite); other providers are tested through the proxy in `package main`.
 
@@ -169,6 +182,7 @@ Tests are white-box (`package main` / `package provider`), stdlib `testing` + `h
 - **429 refresh — assert WHICH provider, not just count.** `refreshHook` must capture the provider name; assert it's the rate-limited one (a count-only check misses a wrong-provider bug).
 - **No fake tests.** A test with `t.Logf` only, inverted `&&`/`||` logic, or `Contains(x) || Contains(y)` that a panic stack passes — is a defect. Assert precise values or structural fields. `strings.Contains` with `||` is a smell; prefer exact match or parsed-structure assertion.
 - **Route side-effects — assert model rewrite + response status.** Forward tests must capture the upstream request's `model` JSON field (verifies `rewriteModel`) and the client-facing status/body, not just "hit the right upstream".
+- **Stats buckets - assert SUM/MAX + bucket-start + lossless storage.** A `queryRange` aggregation test must insert known 1-minute rows, query at a wider `bucketSecs`, and assert the `SUM` of each counter, `MAX(last_request_at)`, and that the bucket `minute` is the window **start** (floor), then re-query at `bucket=60` to prove storage stayed 1-minute (lossless). The bucket edge must align to a `bucketSecs` boundary in the test data: `time.Now()/60*60` only aligns to the minute, not to 10m, so the aggregation key `(minute/B)*B` splits rows that aren't on a B-boundary (align test base with `/B*B`). A wrong SUM or a stray extra row here is a silent aggregation bug.
 - **Concurrency — race-clean AND a functional invariant.** `-race` clean is necessary but not sufficient; a reload-during-request test must also assert post-reload requests hit the new config.
 
 `scripts/cover.sh [threshold] [--no-enforce]` writes `cov.out` + `coverage.html`, lists functions below `threshold` (default 60), and gates on the 80% baseline unless `--no-enforce`.
