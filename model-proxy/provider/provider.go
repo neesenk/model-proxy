@@ -134,7 +134,6 @@ type Config struct {
 	OpenAIBaseURL string
 	Headers       map[string]string
 	UsageURL      string
-	Models        map[string]any
 
 	// ClientVersion is the codex /models client_version query param, resolved
 	// by the main package (config > codex CLI > ~/.codex cache > constant) and
