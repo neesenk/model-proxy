@@ -244,11 +244,26 @@ func TestEnsureCatalogFresh_NoCacheNoFetchEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models_cache.json")
 	errFetch := func(endpoint, etag string) (int, []byte, string, error) { return 0, nil, "", os.ErrNotExist }
 	cat, err := ensureCatalogFresh(path, "http://x", errFetch, false)
-	if err != nil {
-		t.Fatal(err)
+	// Total failure (no cache + unreachable) now surfaces an error so `models
+	// pull` doesn't print a false success; the catalog is still a usable empty.
+	if err == nil {
+		t.Error("no cache + fetch error should return a non-nil error")
 	}
-	if len(cat.ByName) != 0 {
-		t.Errorf("no cache + fetch error → empty catalog, got %+v", cat.ByName)
+	if cat == nil || len(cat.ByName) != 0 {
+		t.Errorf("no cache + fetch error → empty (non-nil) catalog, got %+v", cat)
+	}
+}
+
+// 304 with no cache must not nil-deref (anomalous intermediary response).
+func TestEnsureCatalogFresh_304NoCacheNoPanic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models_cache.json")
+	fetch := func(endpoint, etag string) (int, []byte, string, error) { return 304, nil, `"e"`, nil }
+	cat, err := ensureCatalogFresh(path, "http://x", fetch, true)
+	if err != nil {
+		t.Fatalf("304-no-cache should not error: %v", err)
+	}
+	if cat == nil || len(cat.ByName) != 0 {
+		t.Errorf("304-no-cache → empty catalog, got %+v", cat)
 	}
 }
 

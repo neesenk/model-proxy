@@ -269,10 +269,19 @@ func ensureCatalogFresh(cacheFile, endpoint string, fetch catalogFetchFunc, forc
 			fmt.Fprintf(os.Stderr, "model-proxy: models.dev unreachable (%v); using catalog cached %s ago\n", err, ageString(cached.FetchedAt))
 			return cached, nil
 		}
-		return emptyCatalog(), nil
+		// Total failure: no cache + unreachable. Return an error so `models pull`
+		// surfaces it instead of printing a false "refreshed: 0 unique models".
+		// Callers that only need a best-effort catalog (models/takeover display)
+		// discard the error and fall back to the empty catalog.
+		return emptyCatalog(), fmt.Errorf("models.dev unreachable and no cached catalog: %w", err)
 	}
 	switch status {
 	case http.StatusNotModified:
+		// 304 requires a prior cache (we sent its etag). A 304 with no cache is an
+		// anomalous intermediary response — don't deref nil; fall back to empty.
+		if cached == nil {
+			return emptyCatalog(), nil
+		}
 		cached.FetchedAt = time.Now()
 		if newEtag != "" {
 			cached.Etag = newEtag

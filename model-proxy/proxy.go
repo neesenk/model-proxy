@@ -323,12 +323,19 @@ func (p *Proxy) providerSnapshot() map[string]provider.Provider {
 func (p *Proxy) snapshotSticky() map[string]routeSticky {
 	cfg := p.cfgSnapshot()
 	routes := cfg.Routes
+	// Implicit-route names aren't in cfg.Routes but should persist too — snapshot
+	// them under the same RLock as cfg (they're mutated on reload under p.mu).
+	p.mu.RLock()
+	implicit := p.implicitRoutes
+	p.mu.RUnlock()
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
 	out := make(map[string]routeSticky, len(p.sticky))
 	for k, v := range p.sticky {
 		if _, isRoute := routes[k]; !isRoute {
-			continue // session-keyed — don't persist
+			if _, isImplicit := implicit[k]; !isImplicit {
+				continue // session-keyed — don't persist
+			}
 		}
 		out[k] = v
 	}
@@ -566,11 +573,15 @@ func (p *Proxy) scheduleStatus() []byte {
 	}
 
 	models := map[string]routeInfo{}
+	routeKeys := make(map[string]bool, len(expanded))
+	for k := range expanded {
+		routeKeys[k] = true
+	}
 	for exposed, targets := range expanded {
 		// commit=false: scheduleStatus is a read-only peek — it must NOT bump the
 		// round-robin counter, set sticky, or evict sticky entries. decideOrder
 		// gates all sticky mutation on commit, so the peek is side-effect-free.
-		ordered, _ := p.decideOrder(cfg, provs, parentOf, exposed, "", targets, now, false)
+		ordered, _ := p.decideOrder(cfg, provs, parentOf, exposed, "", targets, now, false, routeKeys)
 		ri := routeInfo{}
 		if len(ordered) > 0 {
 			ri.First = ordered[0].Provider
@@ -751,7 +762,14 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionKey := r.Header.Get("x-claude-code-session-id")
-	ordered := p.schedule(cfg, provs, parentOf, exposed, sessionKey, targets)
+	// routeKeys = all callable route names (explicit ∪ implicit) — used by
+	// decideOrder to tell route-name sticky keys (preserve) from session-id keys
+	// (evict after dwell). Built from the expanded map so implicit routes count.
+	routeKeys := make(map[string]bool, len(expanded))
+	for k := range expanded {
+		routeKeys[k] = true
+	}
+	ordered := p.schedule(cfg, provs, parentOf, exposed, sessionKey, targets, routeKeys)
 	if p.scheduleHook != nil {
 		p.scheduleHook(sessionKey)
 	}
@@ -973,9 +991,9 @@ func tierRank(b provider.BillingClass) int {
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin surplus gain
 // (priority beats surplus; surplus only matters at equal priority).
-func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget) []RouteTarget {
+func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool) []RouteTarget {
 	now := time.Now()
-	ordered, stickyToSet := p.decideOrder(cfg, provs, parentOf, exposed, sessionKey, targets, now, true)
+	ordered, stickyToSet := p.decideOrder(cfg, provs, parentOf, exposed, sessionKey, targets, now, true, routeKeys)
 	if stickyToSet != "" {
 		// Commit sticky on the SESSION key (fallback to the exposed model for
 		// non-session clients), so one conversation parks on one provider and
@@ -999,7 +1017,7 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, parent
 // a read-only peek. parentOf resolves pooled virtual ids to their parent's config
 // (billing/peak are parent-level, not per-account) AND drives per-parent
 // round-robin assignment of new sessions.
-func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool) (ordered []RouteTarget, stickyToSet string) {
+func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool, routeKeys map[string]bool) (ordered []RouteTarget, stickyToSet string) {
 	sched := cfg.Scheduling
 	// (a) Re-key sticky on the session. Non-session clients (sessionKey=="")
 	// fall back to the exposed model → identical to the pre-session path, so the
@@ -1031,8 +1049,8 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, par
 	// (commit=false) never mutates sticky — a genuinely read-only snapshot.
 	if commit {
 		for k, v := range p.sticky {
-			if _, isRoute := cfg.Routes[k]; isRoute {
-				continue
+			if routeKeys[k] {
+				continue // route name (explicit OR implicit) — preserve
 			}
 			if now.Sub(v.since) > sched.dwell() {
 				delete(p.sticky, k)

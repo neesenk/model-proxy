@@ -132,7 +132,11 @@ func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]
 
 // firstProvider returns the provider the scheduler tries first for a model.
 func firstProvider(p *Proxy, model string) string {
-	ordered := p.schedule(p.cfg, p.providers, p.parentOf, model, "", p.cfg.Routes[model])
+	routeKeys := map[string]bool{}
+	for k := range p.cfg.Routes {
+		routeKeys[k] = true
+	}
+	ordered := p.schedule(p.cfg, p.providers, p.parentOf, model, "", p.cfg.Routes[model], routeKeys)
 	if len(ordered) == 0 {
 		return ""
 	}

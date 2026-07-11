@@ -247,7 +247,11 @@ func TestRouteExpansionFansOutPool(t *testing.T) {
 // model + session, via the live schedule() path (commits sticky). Used by the
 // session-sticky tests to assert per-session round-robin assignment.
 func scheduleFirst(p *Proxy, exposed, sessionKey string) string {
-	ordered := p.schedule(p.cfg, p.providers, p.parentOf, exposed, sessionKey, p.expandedRoutes[exposed])
+	routeKeys := make(map[string]bool, len(p.expandedRoutes))
+	for k := range p.expandedRoutes {
+		routeKeys[k] = true
+	}
+	ordered := p.schedule(p.cfg, p.providers, p.parentOf, exposed, sessionKey, p.expandedRoutes[exposed], routeKeys)
 	if len(ordered) == 0 {
 		return ""
 	}
