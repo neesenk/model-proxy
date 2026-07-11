@@ -348,6 +348,10 @@ func (p *Proxy) reload(configPath string) error {
 		return err
 	}
 	newProviders, newPoolIndex, newParentOf := buildProviders(cfg)
+	// synthesizeImplicitRoutes does per-provider loadPool file I/O — compute it
+	// BEFORE taking the write lock so in-flight forward handlers (RLock) aren't
+	// stalled behind N credential-file reads on every reload.
+	newImplicit, newWarnings := synthesizeImplicitRoutes(cfg)
 	p.mu.Lock()
 	p.cfg = cfg
 	p.providers = newProviders
@@ -356,7 +360,8 @@ func (p *Proxy) reload(configPath string) error {
 	// the read lock) see a consistent cfg/providers/poolIndex/expandedRoutes.
 	p.poolIndex = newPoolIndex
 	p.parentOf = newParentOf
-	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutes(cfg)
+	p.implicitRoutes = newImplicit
+	p.routeWarnings = newWarnings
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.mu.Unlock()
 	// Reset health + sticky state — a reload is the operator's way to clear

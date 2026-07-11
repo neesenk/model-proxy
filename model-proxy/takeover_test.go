@@ -90,7 +90,7 @@ func TestRewriteOpencode(t *testing.T) {
 	cfg := testTakeoverConfig(t, dir)
 	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
 
-	if err := rewriteOpencode(cfg, nil); err != nil {
+	if err := rewriteOpencode(cfg, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
@@ -122,7 +122,7 @@ func TestRewritePi(t *testing.T) {
 	cfg := testTakeoverConfig(t, dir)
 	os.WriteFile(cfg.Takeover.Pi, []byte(`{}`), 0o644)
 
-	if err := rewritePi(cfg, nil); err != nil {
+	if err := rewritePi(cfg, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
@@ -279,7 +279,7 @@ func TestExposedModels_PicksBestPriority(t *testing.T) {
 		"a": {"m1": {Context: 1000, Output: 2000}},
 		"b": {"m1": {Context: 3000, Output: 4000}},
 	}
-	got := exposedModels(cfg, meta)
+	got := exposedModels(cfg, meta, nil)
 	if len(got) != 1 {
 		t.Fatalf("exposedModels len=%d want 1", len(got))
 	}

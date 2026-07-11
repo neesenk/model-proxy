@@ -84,6 +84,10 @@ func cmdModels(args []string) {
 				log.Fatalf("writing new models to config: %v", err)
 			}
 			fmt.Fprintf(os.Stderr, "added %d new model(s) to config: %v\n", len(added), added)
+			// Hot-reload a running daemon so the new model names take effect for
+			// implicit routing (and refresh the display) without a manual
+			// `serve reload`. No-op if no daemon is running. Mirrors login/logout.
+			maybeReloadDaemon(args)
 		}
 		printProviderModels(provName, entries)
 		return
@@ -218,8 +222,9 @@ func fetchProviderModels(cfg *Config, provName string) ([]ModelEntry, error) {
 // writeProviderModels rewrites providers.<provName>.models to `names` in
 // configFile, preserving comments/order elsewhere via a yaml.Node round-trip
 // (only the models sequence is re-encoded). Validates the result before writing
-// and takes a best-effort .bak. CLI-safe (no daemon reload — `models` is not on
-// the proxy hot path, so a running daemon picks up the list on its next reload).
+// and takes a best-effort .bak. The caller (cmdModels refresh) hot-reloads a
+// running daemon via maybeReloadDaemon so the new names take effect for implicit
+// routing without a manual `serve reload`.
 func writeProviderModels(configFile, provName string, names []string) error {
 	root, err := loadConfigNode(configFile)
 	if err != nil {

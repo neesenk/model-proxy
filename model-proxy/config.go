@@ -270,6 +270,13 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Web:      WebConfig{Enabled: true},
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
+		// The most common breakage: a providers' `models:` block still in the
+		// old map form (glm-5.2: {context, output, modalities}) after the switch
+		// to a name list. The raw yaml error ("cannot unmarshal !!map into
+		// []string") is opaque — add a hint pointing at the fix.
+		if strings.Contains(err.Error(), "!!map") && strings.Contains(err.Error(), "[]string") {
+			return nil, fmt.Errorf("parse yaml: %w\nhint: a 'models:' block must be a list of model names, e.g.\n  models:\n    - glm-5.2\n    - glm-4.6\nThe old map form (name: {context, output, modalities}) is no longer supported — metadata is now auto-sourced from models.dev at runtime", err)
+		}
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
 	cfg.Listen = raw.Listen

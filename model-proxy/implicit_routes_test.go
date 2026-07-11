@@ -158,6 +158,30 @@ func TestImplicitRoute_ForwardsUnroutedLoggedInModel(t *testing.T) {
 	}
 }
 
+// TestTakeover_IncludesImplicitRoutes: a model served only via an implicit
+// route must appear in the opencode takeover config (parity with /v1/models).
+func TestTakeover_IncludesImplicitRoutes(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-5.2", "glm-4.6"}},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}}, // explicit; glm-4.6 implicit-only
+		},
+		Takeover: Takeover{Opencode: filepath.Join(dir, "oc.json"), ProxyURL: "http://x", ProviderID: "model-proxy"},
+	}
+	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
+	implicit := map[string]RouteTarget{"glm-4.6": {Provider: "zhipu", Model: "glm-4.6", Priority: 1}}
+	if err := rewriteOpencode(cfg, nil, implicit); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(cfg.Takeover.Opencode)
+	if !strings.Contains(string(b), "glm-4.6") {
+		t.Errorf("opencode config should include implicit-route model glm-4.6:\n%s", b)
+	}
+}
+
 // TestImplicitRoute_ListedInV1Models: implicitly-routable models appear in
 // GET /v1/models so clients can discover them.
 func TestImplicitRoute_ListedInV1Models(t *testing.T) {

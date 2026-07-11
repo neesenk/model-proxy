@@ -41,8 +41,23 @@ type exposedModel struct {
 	pm        ProviderModel
 }
 
-func exposedModels(cfg *Config, meta map[string]map[string]ProviderModel) []exposedModel {
+func exposedModels(cfg *Config, meta map[string]map[string]ProviderModel, implicit map[string]RouteTarget) []exposedModel {
 	var out []exposedModel
+	add := func(exposed string, t RouteTarget) {
+		if _, ok := cfg.Providers[t.Provider]; !ok {
+			return
+		}
+		var pm ProviderModel
+		if meta[t.Provider] != nil {
+			pm = meta[t.Provider][t.Model]
+		}
+		out = append(out, exposedModel{
+			exposed:   exposed,
+			provider:  t.Provider,
+			realModel: t.Model,
+			pm:        pm,
+		})
+	}
 	for exposed, targets := range cfg.Routes {
 		if len(targets) == 0 {
 			continue
@@ -55,20 +70,16 @@ func exposedModels(cfg *Config, meta map[string]map[string]ProviderModel) []expo
 				best = t
 			}
 		}
-		t := best
-		if _, ok := cfg.Providers[t.Provider]; !ok {
+		add(exposed, best)
+	}
+	// Implicit routes (auto-derived from logged-in providers' model lists) are
+	// callable through the proxy and listed in /v1/models — include them so the
+	// takeover client config matches. Explicit routes win on name collision.
+	for exposed, t := range implicit {
+		if _, explicit := cfg.Routes[exposed]; explicit {
 			continue
 		}
-		var pm ProviderModel
-		if meta[t.Provider] != nil {
-			pm = meta[t.Provider][t.Model]
-		}
-		out = append(out, exposedModel{
-			exposed:   exposed,
-			provider:  t.Provider,
-			realModel: t.Model,
-			pm:        pm,
-		})
+		add(exposed, t)
 	}
 	return out
 }
@@ -82,7 +93,7 @@ func displayName(id string) string {
 // rewriteOpencode: ~/.config/opencode/opencode.json
 // Writes a provider entry pointing at the proxy, with all exposed models from
 // the config's routes + provider model metadata (context/output/modalities).
-func rewriteOpencode(cfg *Config, meta map[string]map[string]ProviderModel) error {
+func rewriteOpencode(cfg *Config, meta map[string]map[string]ProviderModel, implicit map[string]RouteTarget) error {
 	file := cfg.Takeover.Opencode
 	pid := providerID(cfg)
 	v, err := readJSONConfig(file)
@@ -103,7 +114,7 @@ func rewriteOpencode(cfg *Config, meta map[string]map[string]ProviderModel) erro
 			"apiKey":  "PROXY_MANAGED",
 			"baseURL": baseURL,
 		},
-		"models": opencodeModels(cfg, meta),
+		"models": opencodeModels(cfg, meta, implicit),
 	}
 	v["provider"] = prov
 	return writeJSONConfig(file, v)
@@ -112,8 +123,8 @@ func rewriteOpencode(cfg *Config, meta map[string]map[string]ProviderModel) erro
 // opencodeModels builds the opencode model map from the config's exposed
 // models (routes + hydrated metadata). Each model gets name, limit.{context,
 // output}, modalities.{input,output}.
-func opencodeModels(cfg *Config, meta map[string]map[string]ProviderModel) map[string]any {
-	models := exposedModels(cfg, meta)
+func opencodeModels(cfg *Config, meta map[string]map[string]ProviderModel, implicit map[string]RouteTarget) map[string]any {
+	models := exposedModels(cfg, meta, implicit)
 	out := make(map[string]any, len(models))
 	for _, m := range models {
 		name := displayName(m.exposed)
@@ -147,7 +158,7 @@ func opencodeModels(cfg *Config, meta map[string]map[string]ProviderModel) map[s
 // rewritePi: ~/.pi/agent/models.json
 // providers.<name> = { baseUrl, api: anthropic-messages, apiKey: PROXY_MANAGED,
 // models:[{id, name, contextWindow, input, maxTokens}] }
-func rewritePi(cfg *Config, meta map[string]map[string]ProviderModel) error {
+func rewritePi(cfg *Config, meta map[string]map[string]ProviderModel, implicit map[string]RouteTarget) error {
 	file := cfg.Takeover.Pi
 	name := providerID(cfg)
 	v, err := readJSONConfig(file)
@@ -158,7 +169,7 @@ func rewritePi(cfg *Config, meta map[string]map[string]ProviderModel) error {
 	if prov == nil {
 		prov = map[string]any{}
 	}
-	models := exposedModels(cfg, meta)
+	models := exposedModels(cfg, meta, implicit)
 	piModels := []map[string]any{}
 	for _, m := range models {
 		entry := map[string]any{
