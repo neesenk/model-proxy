@@ -32,6 +32,8 @@ type Proxy struct {
 	quota     *quotaTracker              // background quota poller; nil only in degenerate tests
 	metrics   *metricsStore              // request counters (atomic); nil only in degenerate tests
 	tokens    *tokenCounter              // SSE-scanned token usage; nil only in degenerate tests
+	stats     *statsStore                // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
+	flusher   *statsFlusher              // per-minute diff loop; nil in tests (runProxy starts it)
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -266,13 +268,10 @@ func NewProxy(cfg *Config) *Proxy {
 	p.quota.stickySnapshot = p.snapshotSticky
 	p.quota.start()
 	p.metrics = newMetricsStore()
-	// SSE token counter: load the persisted baseline so usage accrues across
-	// restarts. A missing file is not an error (first run). Failure to load
-	// only logs — the proxy still works, just without the baseline.
-	p.tokens = newTokenCounter(tokenStatePath())
-	if err := p.tokens.load(); err != nil {
-		log.Printf("[tokens] load baseline failed: %v", err)
-	}
+	// SSE token counter. Persistence (baseline restore + per-minute flush) is
+	// owned by statsStore/flusher, opened in runProxy so direct-NewProxy tests
+	// stay in-memory and don't touch ~/.model-proxy/.
+	p.tokens = newTokenCounter()
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
 	if loaded := p.quota.LoadedSticky; len(loaded) > 0 {
@@ -283,6 +282,27 @@ func NewProxy(cfg *Config) *Proxy {
 		p.healthMu.Unlock()
 	}
 	return p
+}
+
+// resetStats zeroes all call-statistics state: the in-memory metrics + token
+// counters, the persisted SQLite bucket history, and the flusher's diff
+// baseline (so the next flush sees zero delta rather than zero-minus-old
+// negatives). Drives POST /api/tokens/reset ("reset counters").
+func (p *Proxy) resetStats() {
+	if p.metrics != nil {
+		p.metrics.reset()
+	}
+	if p.tokens != nil {
+		p.tokens.reset()
+	}
+	if p.stats != nil {
+		if err := p.stats.resetAll(); err != nil {
+			log.Printf("[stats] resetAll failed: %v", err)
+		}
+	}
+	if p.flusher != nil {
+		p.flusher.resetPrev()
+	}
 }
 
 // cfgSnapshot returns the current config under a brief read lock. Used by the
@@ -781,7 +801,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 
 	for ti, t := range ordered {
 		if p.metrics != nil {
-			p.metrics.inc(t.Provider, evRequests)
+			p.metrics.inc(t.Provider, t.Model, evRequests)
 		}
 		// Resolve the provider CONFIG. For a pooled virtual ("name#<id>") the
 		// config lives under the parent name in cfg.Providers; providerConfig
@@ -846,7 +866,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			log.Printf("[proto=%s provider=%s] build upstream req: %v", proto, t.Provider, err)
 			p.releaseHalfOpenSlot(t.Provider)
 			if p.metrics != nil {
-				p.metrics.inc(t.Provider, evFailovers)
+				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
 			return false
 		}
@@ -861,7 +881,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 				log.Printf("[proto=%s provider=%s] auth error: %v", proto, t.Provider, err)
 				p.releaseHalfOpenSlot(t.Provider)
 				if p.metrics != nil {
-					p.metrics.inc(t.Provider, evFailovers)
+					p.metrics.inc(t.Provider, t.Model, evFailovers)
 				}
 				return false
 			}
@@ -880,8 +900,8 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			log.Printf("[proto=%s provider=%s] upstream error: %v", proto, t.Provider, err)
 			p.recordFailure(t.Provider, sched) // connection error / timeout → circuit
 			if p.metrics != nil {
-				p.metrics.inc(t.Provider, evFailures)
-				p.metrics.inc(t.Provider, evFailovers)
+				p.metrics.inc(t.Provider, t.Model, evFailures)
+				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
 			return false
 		}
@@ -899,7 +919,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			}
 			p.recordFailure(t.Provider, sched)
 			if p.metrics != nil {
-				p.metrics.inc(t.Provider, evFailovers)
+				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
 			return false
 		}
@@ -910,8 +930,8 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			resp.Body.Close()
 			p.recordRateLimit(t.Provider, until)
 			if p.metrics != nil {
-				p.metrics.inc(t.Provider, evRateLimited429)
-				p.metrics.inc(t.Provider, evFailovers)
+				p.metrics.inc(t.Provider, t.Model, evRateLimited429)
+				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
 			return false
 		}
@@ -920,8 +940,8 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			resp.Body.Close()
 			p.recordFailure(t.Provider, sched)
 			if p.metrics != nil {
-				p.metrics.inc(t.Provider, evFailures)
-				p.metrics.inc(t.Provider, evFailovers)
+				p.metrics.inc(t.Provider, t.Model, evFailures)
+				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
 			return false
 		}
@@ -969,7 +989,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 	// returns or continues on attempt 0), kept for safety.
 	p.releaseHalfOpenSlot(t.Provider)
 	if p.metrics != nil {
-		p.metrics.inc(t.Provider, evFailovers)
+		p.metrics.inc(t.Provider, t.Model, evFailovers)
 	}
 	return false
 }

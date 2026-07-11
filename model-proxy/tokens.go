@@ -4,22 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"os"
-	"path/filepath"
 	"sync"
 )
 
-// tokenStatePath returns the persisted token-usage path (~/.model-proxy/token_usage.json).
-// Mirrors the quota_state.json / cred-file convention: all model-proxy state lives
-// under ~/.model-proxy/.
-func tokenStatePath() string {
-	return filepath.Join(homeDir(), ".model-proxy", "token_usage.json")
-}
-
-type tokenKey struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-}
+// tokenKey aliases the shared (provider, model) key so existing call sites
+// (scanner, tests) read naturally. Persistence is handled by statsStore
+// (SQLite); the JSON file format is gone.
+type tokenKey = pmKey
 
 type tokenUsage struct {
 	Input         uint64 `json:"input"`
@@ -30,13 +21,12 @@ type tokenUsage struct {
 }
 
 type tokenCounter struct {
-	path string
-	mu   sync.Mutex
-	m    map[tokenKey]*tokenUsage
+	mu sync.Mutex
+	m  map[tokenKey]*tokenUsage
 }
 
-func newTokenCounter(path string) *tokenCounter {
-	return &tokenCounter{path: path, m: map[tokenKey]*tokenUsage{}}
+func newTokenCounter() *tokenCounter {
+	return &tokenCounter{m: map[tokenKey]*tokenUsage{}}
 }
 
 // commit records one observed usage payload under the (provider, model) key.
@@ -72,57 +62,12 @@ func (tc *tokenCounter) snapshot() map[tokenKey]tokenUsage {
 	return out
 }
 
-// save serializes a detached snapshot to disk. The flat map is built under tc.mu
-// (the only step that touches shared *tokenUsage fields), then the lock is
-// released and the MarshalIndent + WriteFile + Rename I/O happens on the
-// snapshot outside the lock.
-func (tc *tokenCounter) save() error {
-	flat := map[string]tokenUsage{}
-	tc.mu.Lock()
-	for k, v := range tc.m {
-		flat[k.Provider+"\x00"+k.Model] = *v
-	}
-	tc.mu.Unlock()
-	data, err := json.MarshalIndent(flat, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := tc.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, tc.path)
-}
-
-func (tc *tokenCounter) load() error {
-	data, err := os.ReadFile(tc.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	var flat map[string]tokenUsage
-	if err := json.Unmarshal(data, &flat); err != nil {
-		return err
-	}
+// seed sets a (provider, model) entry to a baseline (boot restore from SQLite).
+func (tc *tokenCounter) seed(k tokenKey, u tokenUsage) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	for k, v := range flat {
-		prov, mod := splitKey(k)
-		u := v
-		tc.m[tokenKey{prov, mod}] = &u
-	}
-	return nil
-}
-
-func splitKey(k string) (string, string) {
-	for i := 0; i < len(k); i++ {
-		if k[i] == 0 {
-			return k[:i], k[i+1:]
-		}
-	}
-	return k, ""
+	v := u
+	tc.m[k] = &v
 }
 
 func (tc *tokenCounter) reset() {
@@ -182,7 +127,7 @@ func (s *usageScanner) observe(chunk []byte) {
 		if len(s.line) < scanLineCap {
 			s.line = append(s.line, b)
 		}
-		// else: drop the byte (oversized line) — still passed through via p.
+		// else: drop the byte (oversized line) - still passed through via p.
 	}
 }
 

@@ -6,6 +6,14 @@ import (
 	"time"
 )
 
+// pmKey is the (provider, model) key shared by metrics and token counters.
+// For pooled providers Provider is the virtual id ("name#<accountID>"); Model is
+// the rewrite-target upstream model name (not the exposed/client name).
+type pmKey struct {
+	Provider string
+	Model    string
+}
+
 // metricsEvent identifies a counter to bump on the forward hot path.
 type metricsEvent string
 
@@ -36,33 +44,36 @@ type providerMetricsSnapshot struct {
 type metricsStore struct {
 	started time.Time
 	// mu guards the map only. Increments acquire mu briefly to get-or-create
-	// the per-provider entry, then do an atomic add; snapshots acquire mu to
-	// iterate the map.
+	// the per-(provider,model) entry, then do an atomic add; snapshots acquire mu
+	// to iterate the map.
 	mu sync.Mutex
-	m  map[string]*providerMetrics
+	m  map[pmKey]*providerMetrics
 }
 
 func newMetricsStore() *metricsStore {
-	return &metricsStore{started: time.Now(), m: map[string]*providerMetrics{}}
+	return &metricsStore{started: time.Now(), m: map[pmKey]*providerMetrics{}}
 }
 
 func (s *metricsStore) startedAt() time.Time { return s.started }
 
-// entry returns the per-provider metrics, creating it if absent.
-func (s *metricsStore) entry(provider string) *providerMetrics {
+// entry returns the per-(provider,model) metrics, creating it if absent.
+func (s *metricsStore) entry(k pmKey) *providerMetrics {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pm := s.m[provider]
+	pm := s.m[k]
 	if pm == nil {
 		pm = &providerMetrics{}
-		s.m[provider] = pm
+		s.m[k] = pm
 	}
 	return pm
 }
 
-// inc bumps one counter for a provider (hot path: one atomic add + map lookup).
-func (s *metricsStore) inc(provider string, ev metricsEvent) {
-	pm := s.entry(provider)
+// inc bumps one counter for a (provider, model) (hot path: one atomic add + map
+// lookup). Model is the rewrite-target upstream model (t.Model on the forward
+// path), so failovers/429/failures are attributed to the same model the request
+// was sent to.
+func (s *metricsStore) inc(provider, model string, ev metricsEvent) {
+	pm := s.entry(pmKey{Provider: provider, Model: model})
 	switch ev {
 	case evRequests:
 		pm.Requests.Add(1)
@@ -76,17 +87,19 @@ func (s *metricsStore) inc(provider string, ev metricsEvent) {
 	}
 }
 
-func (s *metricsStore) snapshot() map[string]providerMetricsSnapshot {
+// snapshot returns a detached per-(provider,model) copy. Callers may read the
+// returned map without holding the lock.
+func (s *metricsStore) snapshot() map[pmKey]providerMetricsSnapshot {
 	s.mu.Lock()
-	ids := make([]string, 0, len(s.m))
+	keys := make([]pmKey, 0, len(s.m))
 	for k := range s.m {
-		ids = append(ids, k)
+		keys = append(keys, k)
 	}
 	s.mu.Unlock()
-	out := map[string]providerMetricsSnapshot{}
-	for _, id := range ids {
-		pm := s.entry(id)
-		out[id] = providerMetricsSnapshot{
+	out := map[pmKey]providerMetricsSnapshot{}
+	for _, k := range keys {
+		pm := s.entry(k)
+		out[k] = providerMetricsSnapshot{
 			Requests:       pm.Requests.Load(),
 			Failovers:      pm.Failovers.Load(),
 			RateLimited429: pm.RateLimited429.Load(),
@@ -95,4 +108,45 @@ func (s *metricsStore) snapshot() map[string]providerMetricsSnapshot {
 		}
 	}
 	return out
+}
+
+// aggregateByProvider collapses the per-(provider,model) counters to per-provider
+// totals (summing across models). Used by /api/status so the existing
+// provider-keyed "counters" shape (and the Web UI Providers card) is unchanged
+// despite the store now being model-aware.
+func (s *metricsStore) aggregateByProvider() map[string]providerMetricsSnapshot {
+	per := map[string]providerMetricsSnapshot{}
+	for k, snap := range s.snapshot() {
+		cur := per[k.Provider]
+		cur.Requests += snap.Requests
+		cur.Failovers += snap.Failovers
+		cur.RateLimited429 += snap.RateLimited429
+		cur.Failures += snap.Failures
+		if snap.LastRequestAt > cur.LastRequestAt {
+			cur.LastRequestAt = snap.LastRequestAt
+		}
+		per[k.Provider] = cur
+	}
+	return per
+}
+
+// seed sets a (provider,model) entry's counters to a baseline value (used on
+// boot to restore cumulative totals persisted in SQLite). Seeds are rare
+// (boot-only), so the per-key Lock/entry overhead is fine.
+func (s *metricsStore) seed(k pmKey, snap providerMetricsSnapshot) {
+	pm := s.entry(k)
+	pm.Requests.Store(snap.Requests)
+	pm.Failovers.Store(snap.Failovers)
+	pm.RateLimited429.Store(snap.RateLimited429)
+	pm.Failures.Store(snap.Failures)
+	pm.LastRequestAt.Store(snap.LastRequestAt)
+}
+
+// reset zeroes every counter (in-memory). The SQLite history is cleared
+// separately by statsStore.resetAll; the two are called together by
+// Proxy.resetStats so "reset counters" zeroes both.
+func (s *metricsStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m = map[pmKey]*providerMetrics{}
 }

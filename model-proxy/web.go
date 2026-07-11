@@ -123,6 +123,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleTokens(resp, r)
 	case path == "/api/tokens/reset" && r.Method == http.MethodPost:
 		w.handleTokensReset(resp, r)
+	case path == "/api/stats" && r.Method == http.MethodGet:
+		w.handleStats(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodPost:
 		w.handleAccountAdd(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodDelete:
@@ -196,7 +198,7 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 		"health":   health,
 		"quota":    quota,
 		"schedule": json.RawMessage(w.p.scheduleStatus()),
-		"counters": w.p.metrics.snapshot(),
+		"counters": w.p.metrics.aggregateByProvider(),
 		"warnings": routeWarnings,
 	})
 }
@@ -326,14 +328,65 @@ func (w *webServer) handleTokens(resp http.ResponseWriter, r *http.Request) {
 	writeJSON(resp, http.StatusOK, map[string]any{"usage": out})
 }
 
-// handleTokensReset zeroes the in-memory token counters. Does not delete the
-// persisted file; the next persist loop tick will overwrite it with the empty
-// snapshot.
+// handleTokensReset zeroes all call-statistics state: the in-memory metrics +
+// token counters, the persisted SQLite bucket history, and the flusher baseline
+// (so the next flush sees zero delta). The next persist tick overwrites the DB
+// with the empty snapshot.
 func (w *webServer) handleTokensReset(resp http.ResponseWriter, r *http.Request) {
-	if w.p.tokens != nil {
-		w.p.tokens.reset()
-	}
+	w.p.resetStats()
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "reset"})
+}
+
+// handleStats returns per-(provider, model) bucket rows from the SQLite store
+// over a time range, for the `stats` CLI / time-series queries. Query params:
+// from, to (unix seconds or RFC3339; default last 60 minutes), optional
+// provider/model filters, and bucket (display granularity, e.g. "10m"/"1h";
+// default "1m" = raw 1-minute rows; storage is always 1-minute, so widening the
+// bucket only reduces returned rows via SQL aggregation). Nil-safe: a Proxy
+// without a stats store (tests) answers with an empty list.
+func (w *webServer) handleStats(resp http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	from := now.Add(-time.Hour).Unix()
+	to := now.Unix()
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			from = t
+		}
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			to = t
+		}
+	}
+	provider := r.URL.Query().Get("provider")
+	model := r.URL.Query().Get("model")
+	bucketSecs := normalizeBucket(r.URL.Query().Get("bucket"))
+	buckets := []statsBucket{}
+	if w.p.stats != nil {
+		got, err := w.p.stats.queryRange(from, to, provider, model, bucketSecs)
+		if err != nil {
+			writeJSONErr(resp, http.StatusInternalServerError, "stats query: "+err.Error())
+			return
+		}
+		buckets = got
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"from":    from,
+		"to":      to,
+		"bucket":  bucketSecs,
+		"buckets": buckets,
+	})
+}
+
+// parseStatsTime parses a stats time param as unix seconds (integer) or RFC3339.
+func parseStatsTime(v string) (int64, bool) {
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return n, true
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.Unix(), true
+	}
+	return 0, false
 }
 
 // handleAccountAdd adds an account to a provider's credential pool. For apikey

@@ -11,27 +11,39 @@ import (
 
 func TestMetricsCounters(t *testing.T) {
 	m := newMetricsStore()
-	m.inc("zhipu", "requests")
-	m.inc("zhipu", "requests")
-	m.inc("zhipu", "failures")
-	m.inc("deepseek", "rate_limited_429")
-	m.inc("zhipu", "failovers")
+	m.inc("zhipu", "m", evRequests)
+	m.inc("zhipu", "m", evRequests)
+	m.inc("zhipu", "m", evFailures)
+	m.inc("deepseek", "d", evRateLimited429)
+	m.inc("zhipu", "m", evFailovers)
 
 	snap := m.snapshot()
-	if snap["zhipu"].Requests != 2 {
-		t.Errorf("zhipu requests = %d, want 2", snap["zhipu"].Requests)
+	zk := pmKey{Provider: "zhipu", Model: "m"}
+	if snap[zk].Requests != 2 {
+		t.Errorf("zhipu/m requests = %d, want 2", snap[zk].Requests)
 	}
-	if snap["zhipu"].Failures != 1 {
-		t.Errorf("zhipu failures = %d, want 1", snap["zhipu"].Failures)
+	if snap[zk].Failures != 1 {
+		t.Errorf("zhipu/m failures = %d, want 1", snap[zk].Failures)
 	}
-	if snap["zhipu"].Failovers != 1 {
-		t.Errorf("zhipu failovers = %d, want 1", snap["zhipu"].Failovers)
+	if snap[zk].Failovers != 1 {
+		t.Errorf("zhipu/m failovers = %d, want 1", snap[zk].Failovers)
 	}
-	if snap["deepseek"].RateLimited429 != 1 {
-		t.Errorf("deepseek 429 = %d, want 1", snap["deepseek"].RateLimited429)
+	dk := pmKey{Provider: "deepseek", Model: "d"}
+	if snap[dk].RateLimited429 != 1 {
+		t.Errorf("deepseek/d 429 = %d, want 1", snap[dk].RateLimited429)
 	}
-	if snap["missing"].Requests != 0 { // unseen provider → zero value
-		t.Errorf("missing provider should be zero-valued")
+	if snap[pmKey{Provider: "missing", Model: "x"}].Requests != 0 { // unseen -> zero value
+		t.Errorf("missing key should be zero-valued")
+	}
+
+	// aggregateByProvider collapses the model dimension: zhipu has both metrics
+	// under model "m", deepseek under "d".
+	agg := m.aggregateByProvider()
+	if agg["zhipu"].Requests != 2 || agg["zhipu"].Failures != 1 || agg["zhipu"].Failovers != 1 {
+		t.Errorf("aggregate zhipu = %+v, want reqs=2 fail=1 failover=1", agg["zhipu"])
+	}
+	if agg["deepseek"].RateLimited429 != 1 {
+		t.Errorf("aggregate deepseek 429 = %d, want 1", agg["deepseek"].RateLimited429)
 	}
 }
 
@@ -45,9 +57,10 @@ func TestMetricsStartedAt(t *testing.T) {
 }
 
 // TestMetricsForwardWiring verifies the forward hot path bumps the right
-// counters. Each scenario uses a fresh Proxy so prior cases don't leave
-// scheduling state (a 429 marks the provider rate-limited for ~60s, which
-// would make a later 500 case skip the provider and never bump Failures).
+// counters, attributed to (provider, model). Each scenario uses a fresh Proxy so
+// prior cases don't leave scheduling state (a 429 marks the provider
+// rate-limited for ~60s, which would make a later 500 case skip the provider and
+// never bump Failures).
 func TestMetricsForwardWiring(t *testing.T) {
 	const cfgYAML = `
 listen: 127.0.0.1:0
@@ -56,7 +69,7 @@ providers:
     provider_id: zhipu
     openai_base_url: %s
 routes:
-  m: [{provider: zhipu, model: m}]
+  m: [{provider: zhipu, model: glm-5}]
 `
 	makeProxy := func(upURL string) *Proxy {
 		cfg, err := LoadConfigFromBytes("test", []byte(strings.Replace(cfgYAML, "%s", upURL, 1)))
@@ -73,6 +86,7 @@ routes:
 		io.Copy(io.Discard, rec.Result().Body)
 		rec.Result().Body.Close()
 	}
+	zk := pmKey{Provider: "zhipu", Model: "glm-5"}
 
 	t.Run("2xx bumps Requests", func(t *testing.T) {
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +96,7 @@ routes:
 		defer up.Close()
 		p := makeProxy(up.URL)
 		doRequest(p)
-		got := p.metrics.snapshot()["zhipu"].Requests
+		got := p.metrics.snapshot()[zk].Requests
 		if got != 1 {
 			t.Fatalf("after 2xx, requests=%d want 1", got)
 		}
@@ -96,7 +110,7 @@ routes:
 		defer up.Close()
 		p := makeProxy(up.URL)
 		doRequest(p)
-		snap := p.metrics.snapshot()["zhipu"]
+		snap := p.metrics.snapshot()[zk]
 		if snap.RateLimited429 != 1 {
 			t.Fatalf("after 429, rate_limited_429=%d want 1", snap.RateLimited429)
 		}
@@ -116,7 +130,7 @@ routes:
 		defer up.Close()
 		p := makeProxy(up.URL)
 		doRequest(p)
-		snap := p.metrics.snapshot()["zhipu"]
+		snap := p.metrics.snapshot()[zk]
 		if snap.Failures != 1 {
 			t.Fatalf("after 500, failures=%d want 1", snap.Failures)
 		}
@@ -141,7 +155,7 @@ routes:
 		defer up.Close()
 		p := makeProxy(up.URL)
 		doRequest(p)
-		snap := p.metrics.snapshot()["zhipu"]
+		snap := p.metrics.snapshot()[zk]
 		if snap.Failures != 1 {
 			t.Fatalf("after conn error, failures=%d want 1", snap.Failures)
 		}

@@ -20,11 +20,40 @@ type Config struct {
 	Scheduling    Scheduling               `yaml:"scheduling"`
 	Takeover      Takeover                 `yaml:"takeover"`
 	Web           WebConfig                `yaml:"web"`
+	Stats         StatsConfig              `yaml:"stats"`
 }
 
 // WebConfig toggles the admin UI (/ui + /api). Defaults to enabled.
 type WebConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+// StatsConfig configures SQLite-backed call-statistics persistence (per
+// provider x model x minute buckets). Defaults: db_path ~/.model-proxy/stats.db,
+// retention 720h (30 days); retention 0 keeps history forever.
+type StatsConfig struct {
+	DBPath    string `yaml:"db_path"`
+	Retention string `yaml:"retention"`
+}
+
+// dbPath returns the SQLite stats DB path, defaulting to ~/.model-proxy/stats.db.
+func (s StatsConfig) dbPath() string {
+	if s.DBPath != "" {
+		return expandPath(s.DBPath)
+	}
+	return filepath.Join(homeDir(), ".model-proxy", "stats.db")
+}
+
+// retention returns the bucket retention duration, defaulting to 30 days.
+// 0 or "0" keeps history forever.
+func (s StatsConfig) retention() time.Duration {
+	if s.Retention == "" {
+		return 720 * time.Hour
+	}
+	if d, err := time.ParseDuration(s.Retention); err == nil {
+		return d
+	}
+	return 720 * time.Hour
 }
 
 // Scheduling configures failover health (circuit breaker, rate-limit skip) and
@@ -263,6 +292,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Scheduling    Scheduling               `yaml:"scheduling"`
 		Takeover      Takeover                 `yaml:"takeover"`
 		Web           WebConfig                `yaml:"web"`
+		Stats         StatsConfig              `yaml:"stats"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
@@ -288,6 +318,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Scheduling = raw.Scheduling
 	cfg.Takeover = raw.Takeover
 	cfg.Web = raw.Web
+	cfg.Stats = raw.Stats
 	cfg.LogFile = expandPath(cfg.LogFile)
 	t := &cfg.Takeover
 	t.Claude = expandPath(t.Claude)

@@ -39,6 +39,7 @@ Commands:
   config print         Print the effective config
   config check         Validate config and print a summary
   schedule             Show current per-model provider (queries the running daemon)
+  stats                Show per-(provider, model) call statistics (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
   help                 Print this message
 
@@ -127,6 +128,21 @@ Subcommands:
   tier/quota source/peak_hours, per-route dry-run order (no live quota → tier then
   priority), and warnings (route with no plan provider, plan provider that will be
   unknown at runtime).`,
+
+	"stats": `stats [flags] [--config PATH]
+
+  Query the running daemon's /api/stats endpoint and print per-(provider, model)
+  call statistics from the SQLite store. The daemon (` + "`model-proxy serve`" + `)
+  must be running.
+
+Flags:
+  --from TIME    range start (unix seconds or RFC3339; default: 60 min ago)
+  --to TIME      range end (default: now)
+  --provider P   filter to one provider
+  --model M      filter to one model
+  --bucket DUR   display granularity (1m/5m/10m/1h/1d; default 1m = raw rows;
+                 storage is always 1-minute, so this only widens the view)
+  --json         raw /api/stats JSON for jq`,
 }
 
 func main() {
@@ -171,6 +187,8 @@ func main() {
 		cmdConfig(os.Args[2:])
 	case "schedule":
 		cmdSchedule(os.Args[2:])
+	case "stats":
+		cmdStats(os.Args[2:])
 	case "doctor":
 		cmdDoctor(os.Args[2:])
 	default:

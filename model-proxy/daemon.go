@@ -105,6 +105,7 @@ func runProxy(sa serveArgs) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	pidPath := "" // foreground-only pid file (login/logout SIGHUP); removed on exit
 	// In true foreground mode (no role env), mirror logs to the configured file.
 	// The worker's stdio is already the log file (set by the supervisor), so it
 	// must NOT reopen/mirror — that would double every line.
@@ -123,23 +124,35 @@ func runProxy(sa serveArgs) {
 			// its own pid file; the worker skips this block (envRole is set), so
 			// there's no double-write. Remove it on SIGINT/SIGTERM so it doesn't
 			// go stale (the reload path self-heals stale pids too, via Signal(0)).
-			pidPath := pidFilePath(lf)
-			if err := writePidFile(pidPath, os.Getpid()); err == nil {
-				go func() {
-					sigCh := make(chan os.Signal, 1)
-					signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-					<-sigCh
-					os.Remove(pidPath)
-					os.Exit(0)
-				}()
+			pidPath = pidFilePath(lf)
+			if err := writePidFile(pidPath, os.Getpid()); err != nil {
+				pidPath = "" // failed to write -> don't try to remove on exit
 			}
 		}
 	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	p := NewProxy(cfg)
-	// Periodically persist the in-memory token counter so observed usage
-	// survives a restart. The counter loads its baseline in NewProxy.
-	go persistTokensLoop(p.tokens)
+	// Open the SQLite stats store, import legacy token_usage.json once, restore
+	// the cumulative baseline (metrics + tokens survive restart), and start the
+	// per-minute flush loop. Best-effort: on failure the proxy runs without
+	// persisted stats (in-memory counters still work).
+	p.initStats(cfg.Stats)
+	go p.statsFlushLoop()
+	// Graceful shutdown: flush pending deltas on SIGINT/SIGTERM so ~1 minute of
+	// stats isn't lost, then remove the foreground pid file. The supervisor
+	// forwards SIGTERM to the worker, so this covers both roles.
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		if p.flusher != nil {
+			p.flusher.flush(time.Now())
+		}
+		if pidPath != "" {
+			os.Remove(pidPath)
+		}
+		os.Exit(0)
+	}()
 	// SIGHUP → hot reload config.
 	go func() {
 		hupCh := make(chan os.Signal, 1)
@@ -168,21 +181,8 @@ func runProxy(sa serveArgs) {
 	}
 }
 
-// persistTokensLoop periodically saves the in-memory token counter to disk so
-// observed usage survives a restart. Mirrors the quota poller's lifecycle: the
-// counter is created and baseline-loaded in NewProxy; this loop only writes.
-// Nil-safe so degenerate tests / a nil counter are a no-op.
-func persistTokensLoop(tc *tokenCounter) {
-	if tc == nil {
-		return
-	}
-	t := time.NewTicker(5 * time.Minute)
-	for range t.C {
-		if err := tc.save(); err != nil {
-			log.Printf("[tokens] persist failed: %v", err)
-		}
-	}
-}
+// persistTokensLoop has been removed; per-minute stats persistence is now owned
+// by statsStore + statsFlushLoop (stats.go), started in runProxy.
 
 // daemonize launches a detached supervisor (new session, stdio → log file) and
 // returns, so the invoking shell gets its prompt back.

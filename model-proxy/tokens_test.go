@@ -11,12 +11,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestUsageScannerAnthropic(t *testing.T) {
 	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":50,\"cache_read_input_tokens\":10}}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":200}}\n\n")
-	tc := newTokenCounter(t.TempDir() + "/tokens.json")
+	tc := newTokenCounter()
 	key := tokenKey{Provider: "zhipu", Model: "glm-5"}
 	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc)
 	io.Copy(io.Discard, sc)
@@ -29,7 +30,7 @@ func TestUsageScannerAnthropic(t *testing.T) {
 
 func TestUsageScannerOpenAI(t *testing.T) {
 	stream := []byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13}}\n\n")
-	tc := newTokenCounter(t.TempDir() + "/tokens.json")
+	tc := newTokenCounter()
 	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "deepseek", Model: "d"}, tc)
 	io.Copy(io.Discard, sc)
 	got := tc.snapshot()[tokenKey{Provider: "deepseek", Model: "d"}]
@@ -42,7 +43,7 @@ func TestUsageScannerOpenAI(t *testing.T) {
 // arbitrarily small reads.
 func TestUsageScannerSplitBoundaries(t *testing.T) {
 	payload := []byte("data: {\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":99}}\n\n")
-	tc := newTokenCounter(t.TempDir() + "/tokens.json")
+	tc := newTokenCounter()
 	sc := newUsageScanner(io.NopCloser(&oneByteReader{b: payload}), tokenKey{Provider: "p", Model: "m"}, tc)
 	io.Copy(io.Discard, sc)
 	got := tc.snapshot()[tokenKey{Provider: "p", Model: "m"}]
@@ -55,7 +56,7 @@ func TestUsageScannerSplitBoundaries(t *testing.T) {
 func TestUsageScannerPassthrough(t *testing.T) {
 	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\ndata: garbage\n\n")
 	var sink bytes.Buffer
-	tc := newTokenCounter(t.TempDir() + "/tokens.json")
+	tc := newTokenCounter()
 	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "p", Model: "m"}, tc)
 	io.Copy(&sink, sc)
 	if !bytes.Equal(sink.Bytes(), stream) {
@@ -68,7 +69,7 @@ func TestUsageScannerOversizedLine(t *testing.T) {
 	huge := bytes.Repeat([]byte("x"), 80_000)
 	stream := append([]byte("data: "), huge...)
 	stream = append(stream, []byte("\n\ndata: {\"usage\":{\"prompt_tokens\":3}}\n\n")...)
-	tc := newTokenCounter(t.TempDir() + "/tokens.json")
+	tc := newTokenCounter()
 	var sink bytes.Buffer
 	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "p", Model: "m"}, tc)
 	io.Copy(&sink, sc)
@@ -81,19 +82,45 @@ func TestUsageScannerOversizedLine(t *testing.T) {
 }
 
 func TestTokenCounterPersist(t *testing.T) {
-	path := t.TempDir() + "/tokens.json"
-	tc := newTokenCounter(path)
+	// Persistence now lives in statsStore (SQLite), not a JSON file. Verify the
+	// flusher round-trip: commit tokens + bump metrics -> flush -> reopen the DB
+	// -> loadCumulative returns the exact same values (the boot restore path).
+	path := filepath.Join(t.TempDir(), "stats.db")
+	ss, err := openStatsStore(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	m := newMetricsStore()
+	tc := newTokenCounter()
+	f := newStatsFlusher(ss, m, tc, map[pmKey]statsCounters{})
+
 	tc.commit(tokenKey{Provider: "z", Model: "m"}, tokenUsage{Input: 10, Output: 20, Requests: 1})
-	if err := tc.save(); err != nil {
+	m.inc("z", "m", evRequests)
+	m.inc("z", "m", evFailovers)
+	if !f.flush(time.Now()) {
+		t.Fatal("flush reported no deltas despite pending commits")
+	}
+
+	// Reopen the same DB file (simulates a restart) and load the cumulative totals.
+	ss2, err := openStatsStore(path, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	tc2 := newTokenCounter(path)
-	if err := tc2.load(); err != nil {
+	defer ss2.Close()
+	base, err := ss2.loadCumulative()
+	if err != nil {
 		t.Fatal(err)
 	}
-	got := tc2.snapshot()[tokenKey{Provider: "z", Model: "m"}]
-	if got.Input != 10 || got.Output != 20 || got.Requests != 1 {
-		t.Errorf("persist round-trip failed: %+v", got)
+	if len(base) != 1 {
+		t.Fatalf("loadCumulative = %d keys, want 1", len(base))
+	}
+	got := base[pmKey{Provider: "z", Model: "m"}]
+	if got.Input != 10 || got.Output != 20 || got.TokenRequests != 1 {
+		t.Errorf("token round-trip = %+v, want in=10 out=20 token_reqs=1", got)
+	}
+	if got.Requests != 1 || got.Failovers != 1 {
+		t.Errorf("metrics round-trip = %+v, want reqs=1 failovers=1", got)
 	}
 }
 
@@ -118,7 +145,7 @@ func (r *oneByteReader) Read(p []byte) (int, error) {
 // reader; after the fix every increment lands (no lost updates) and -race is
 // clean. Final Input/Output must equal exactly the number of committers.
 func TestTokenCounterConcurrent(t *testing.T) {
-	tc := newTokenCounter(t.TempDir() + "/tokens.json")
+	tc := newTokenCounter()
 	key := tokenKey{Provider: "p", Model: "m"}
 	const committers = 50
 
