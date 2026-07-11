@@ -696,18 +696,31 @@ func atomicWrite(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
+// writeConfigValidated is the shared validate->backup->atomic-write tail used by
+// both the web UI's saveAndReload (which adds a reload) and the CLI's
+// models-refresh writeProviderModels (which reloads separately). On validation
+// failure nothing is written and no backup is created. Returns the backup path
+// so callers that reload can restore on reload failure.
+func writeConfigValidated(configFile, data string) (bak string, err error) {
+	if _, err := LoadConfigFromBytes(configFile, []byte(data)); err != nil {
+		return "", err
+	}
+	bak = configFile + ".bak"
+	backupConfig(configFile, bak)
+	if err := atomicWrite(configFile, []byte(data)); err != nil {
+		return bak, err
+	}
+	return bak, nil
+}
+
 // saveAndReload is the load-bearing config-mutation pipeline (Tasks 8–9 funnel
 // structured edits through it too): validate bytes WITHOUT touching disk →
 // back up the current file → write atomically → hot-reload the proxy. On
 // validation failure nothing is written and no backup is created. On reload
 // failure (defensive — should not happen post-validate) the backup is restored.
 func (w *webServer) saveAndReload(data []byte) error {
-	if _, err := LoadConfigFromBytes(w.configFile, data); err != nil {
-		return err
-	}
-	bak := w.configFile + ".bak"
-	backupConfig(w.configFile, bak)
-	if err := atomicWrite(w.configFile, data); err != nil {
+	bak, err := writeConfigValidated(w.configFile, string(data))
+	if err != nil {
 		return err
 	}
 	if err := w.p.reload(w.configFile); err != nil {

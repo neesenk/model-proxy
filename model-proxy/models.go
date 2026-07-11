@@ -242,12 +242,10 @@ func writeProviderModels(configFile, provName string, names []string) error {
 		return err
 	}
 	enc.Close()
-	data := buf.Bytes()
-	if _, err := LoadConfigFromBytes(configFile, data); err != nil {
-		return fmt.Errorf("rewritten config invalid: %w", err)
+	if _, err := writeConfigValidated(configFile, buf.String()); err != nil {
+		return fmt.Errorf("writing config: %w", err)
 	}
-	backupConfig(configFile, configFile+".bak")
-	return atomicWrite(configFile, data)
+	return nil
 }
 
 // refreshProviderModels fetches the live model list for a provider exactly once.
