@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -242,7 +244,7 @@ func TestConfigPutValid(t *testing.T) {
 	if !bytes.Equal(got, edited) {
 		t.Errorf("config not written; got %q want %q", got, edited)
 	}
-	bak, _ := os.ReadFile(cfgPath + ".bak")
+	bak := readLatestBackup(t, cfgPath)
 	if !bytes.Equal(bak, original) {
 		t.Errorf("backup not original; got %q", bak)
 	}
@@ -272,9 +274,36 @@ func TestConfigPutInvalidNoWrite(t *testing.T) {
 	if !bytes.Equal(got, original) {
 		t.Errorf("invalid write should not touch config; got %q", got)
 	}
-	if _, err := os.Stat(cfgPath + ".bak"); !os.IsNotExist(err) {
-		t.Errorf("invalid write should not create a backup")
+	if entries, _ := os.ReadDir(filepath.Join(filepath.Dir(cfgPath), "back")); len(entries) != 0 {
+		t.Errorf("invalid write should not create a backup; back/ has %d entries", len(entries))
 	}
+}
+
+// readLatestBackup returns the contents of the most recent backup in the `back/`
+// directory sibling of cfgPath (timestamped names sort lexically = chronologically).
+// Fails the test if no backup exists.
+func readLatestBackup(t *testing.T, cfgPath string) []byte {
+	t.Helper()
+	dir := filepath.Join(filepath.Dir(cfgPath), "back")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("no backup dir %s: %v", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		t.Fatalf("no backup in %s", dir)
+	}
+	sort.Strings(names)
+	b, err := os.ReadFile(filepath.Join(dir, names[len(names)-1]))
+	if err != nil {
+		t.Fatalf("read backup %s: %v", names[len(names)-1], err)
+	}
+	return b
 }
 
 func TestAPILogs(t *testing.T) {

@@ -150,7 +150,7 @@ model-proxy stats --json           # 原始 JSON（便于 jq）
 代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启，仅在 loopback 监听，无鉴权**（本地可信）。三个标签页：
 
 - **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择（来自 `GET /debug/schedule`）、请求计数器（requests/failovers/429/failures）、观测到的 token 用量（按 provider×model）。
-- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
+- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider（zhipu/deepseek/volcengine）可在 UI 添加/删除账号；aqp/codex 走**异步登录**（点 "Add account" 弹模态框 → 浏览器完成 SSO / OAuth device flow → UI 轮询 `/api/login/<session>/poll` 直到 `done`/`error`）。
 
 **所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态，所以 UI 改动也是"给卡住的 provider 复位"的手段。

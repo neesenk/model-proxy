@@ -721,15 +721,17 @@ func jsonMust(v any) string {
 	return string(b)
 }
 
-// backupConfig copies path to bak (overwriting any prior backup). Best-effort:
-// a backup failure is silent (the live config is the source of truth and can be
-// reconstructed from the UI); if path does not yet exist nothing is written.
+// backupConfig copies path to bak (overwriting any prior backup at that exact
+// path). Best-effort: a backup failure is silent (the live config is the source
+// of truth and can be reconstructed from the UI); if path does not yet exist
+// nothing is written. The bak directory (e.g. `back/`) is created on demand.
 // (Named backupConfig to avoid a clash with takeover.go's backup.)
 func backupConfig(path, bak string) {
 	in, err := os.ReadFile(path)
 	if err != nil {
 		return // nothing to back up (first write)
 	}
+	os.MkdirAll(filepath.Dir(bak), 0o755)
 	os.WriteFile(bak, in, 0o644)
 }
 
@@ -754,16 +756,34 @@ func atomicWrite(path string, data []byte) error {
 // models-refresh writeProviderModels (which reloads separately). On validation
 // failure nothing is written and no backup is created. Returns the backup path
 // so callers that reload can restore on reload failure.
+//
+// The backup is written to a `back/` directory (sibling of the config file) with
+// a timestamped name (`config.yaml.20060102-150405.bak`), so each write keeps its
+// own backup instead of overwriting the previous one. `back/` is created on
+// demand (best-effort, like the backup itself).
 func writeConfigValidated(configFile, data string) (bak string, err error) {
 	if _, err := LoadConfigFromBytes(configFile, []byte(data)); err != nil {
 		return "", err
 	}
-	bak = configFile + ".bak"
+	bak = backupConfigPath(configFile)
 	backupConfig(configFile, bak)
 	if err := atomicWrite(configFile, []byte(data)); err != nil {
 		return bak, err
 	}
 	return bak, nil
+}
+
+// backupConfigPath returns the timestamped backup path for a config file: a
+// `back/` directory sibling of `configFile`, with a name of
+// `<base>.<YYYYMMDD-HHMMSS>.bak`. Each call (within the same second) yields a
+// distinct path only if the second differs; two writes in the same second
+// collide on the same name (the later overwrites the earlier) - acceptable
+// since sub-second backup granularity is not meaningful.
+func backupConfigPath(configFile string) string {
+	dir := filepath.Dir(configFile)
+	base := filepath.Base(configFile)
+	stamp := time.Now().Format("20060102-150405")
+	return filepath.Join(dir, "back", base+"."+stamp+".bak")
 }
 
 // saveAndReload is the load-bearing config-mutation pipeline (Tasks 8–9 funnel
