@@ -1,192 +1,8 @@
-# AIS Switch → opencode：接入本地代理 / 直连网关 配置指南
+# AGENTS.md - model-proxy 架构与后端契约参考
 
-本文件记录如何让 opencode 使用 AIS Switch 的 LLM Gateway 模型（glm-5.2 / deepseek-v4-pro / deepseek-v4-flash）。有两种方式：**走本地代理**（`127.0.0.1:15721`）和**直连网关**（绕过代理）。所有内容均已在 2026-06-20 实测验证。
-
-> **命名说明**：model-proxy 内部将该 provider 重命名为 `aqp`（config 的 `provider_id`、凭据文件 `aqp_oauth_auth.json`、字段 `aqp_mint_url`）；上游服务本身仍是 `compass.llm.shopee.io`，故本文件保留 “compass / CQP” 称谓以匹配逆向出的真实后端契约。
-
----
-
-## 背景：代理做了什么
-
-AIS Switch（Shopee fork of cc-switch，`io.shopee.aisswitch`，v0.1.8）内嵌一个 Rust 反向代理，监听 `127.0.0.1:15721`。对 claude app_type，它透明地做三件事：
-
-1. **改写 baseURL** → 真实上游 `https://compass.llm.shopee.io/compass-api/v1`
-2. **注入鉴权** → 用 SSO cookie 运行时换取 CQP API key，替换请求里的占位 token
-3. **模型别名映射** → `opus`/`claude-opus-4-*` → `glm-5.2`；`sonnet`/`claude-sonnet-4-6` → `deepseek-v4-pro`；`claude-haiku-4-5` → `deepseek-v4-flash`
-
-**路由按 URL 路径固定**：`/v1/messages` → claude provider；`/v1/chat/completions`、`/v1/responses` → codex provider（需 Codex OAuth）；`/v1beta/*` → gemini。opencode 必须走 **Anthropic 协议**（`/v1/messages`）才能命中 claude 的网关 provider。opencode **不在** `proxy_config` 白名单里，AIS Switch 不接管 opencode 配置——只能手动配。
-
-## 模型映射表
-
-| opencode 别名（须在 anthropic 内置白名单） | 网关真实模型名（`id` 字段 / 直连时发送） |
-|---|---|
-| `claude-opus-4-7` / `claude-opus-4-8` | `glm-5.2` |
-| `claude-sonnet-4-6` | `deepseek-v4-pro` |
-| `claude-haiku-4-5` | `deepseek-v4-flash` |
-
----
-
-## 方式 A：走本地代理（`127.0.0.1:15721`）
-
-依赖 AIS Switch 在运行、且 claude 的 live-takeover 处于激活状态（`proxy_config.enabled=1`，默认开）。代理负责鉴权与模型映射，opencode 侧 apiKey 随便填。
-
-### 配置（项目级 `.opencode.json` 或合并进 `~/.config/opencode/opencode.json` 的 `provider.anthropic` 段）
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "anthropic": {
-      "name": "AIS Switch Proxy (Claude→glm-5.2)",
-      "options": {
-        "baseURL": "http://127.0.0.1:15721/v1",
-        "apiKey": "PROXY_MANAGED"
-      },
-      "models": {
-        "claude-opus-4-7":   { "name": "glm-5.2 (opus)",           "limit": { "context": 200000, "output": 32768 } },
-        "claude-sonnet-4-6": { "name": "deepseek-v4-pro (sonnet)",  "limit": { "context": 200000, "output": 32768 } },
-        "claude-haiku-4-5":  { "name": "deepseek-v4-flash (haiku)", "limit": { "context": 200000, "output": 32768 } }
-      }
-    }
-  }
-}
-```
-
-### 使用
-
-```bash
-opencode run -m anthropic/claude-opus-4-7 "..."
-```
-
-或顶层默认模型：`"model": "anthropic/claude-opus-4-7"`。
-
-### 校验
-
-- `curl http://127.0.0.1:15721/health/status` 应有响应；`GET /v1/models` 返回 200。
-- `curl -X POST http://127.0.0.1:15721/v1/messages -H "x-api-key: FAKE" -d '{"model":"claude-haiku-4-5",...}'` 应返回 200 + 上游 `model=deepseek/deepseek-v4-flash...`（证明代理替换了鉴权 + 做了映射；incoming key 写什么都行）。
-- 代理日志 `~/.ais-switch/logs/ais-switch.log` 出现 `[ProxyRequest] 发送上游请求 ... url=.../compass-api/v1/messages ... (model=glm-5.2)`。
-
-### 注意
-
-- `baseURL` 必须带 `/v1`：opencode 内置 anthropic provider 会拼 `baseURL + /messages`，得到 `http://127.0.0.1:15721/v1/messages` 正好命中代理路由。
-- 走 OpenAI 协议（`/v1/chat/completions`）会落到 codex 路由，返回 401 `cc_switch_auth_error`（要 Codex OAuth）——不要用。
-- 代理停了 opencode 就连不上；无明文 key 落盘；有用量统计/熔断/failover。
-
----
-
-## 方式 B：直连网关（绕过代理）
-
-不依赖 AIS Switch 运行，但需手动补齐代理做的三件事：真实 baseURL、CQP key、真实模型名。
-
-### 第 1 步：换 CQP API key
-
-CQP key 不在 DB 里持久化，用 SSO cookie 现换：
-
-```bash
-COOKIE=$(python3 -c "import json;print(json.load(open('/Users/zhiyong.liu/.ais-switch/google_oauth_auth.json'))['sso_session_cookie'])")
-curl -s -X POST "https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate" \
-  -H "content-type: application/json" -H "Cookie: $COOKIE" -d '{}'
-# → {"retcode":0,"data":{"api_key":"<64-hex>","quota_type":"CQP","project_id":"ae0ef3655e8c4a889373fef1a36e0b26", ...}}
-```
-
-**陷阱**：`sso_session_cookie` 的值已含 `SSO_C=` 前缀，直接作为整个 `Cookie:` 头的值传入，**不要**再拼 `SSO_C=`（否则 HTTP 000 / 认证失败）。
-
-> 这把 key（project `ae0ef3655e...`，"Supply Chain"）才有 glm-5.2 权限。opencode.json 里另一把 `41997e0d...` 是别的 project scope，调 glm-5.2 返回 `403 glm-5.2 is not enabled for this project`——不要混用。
-
-### 第 2 步：raw curl 校验（证明 key + 模型名可用）
-
-```bash
-curl -s -X POST "https://compass.llm.shopee.io/compass-api/v1/messages" \
-  -H "content-type: application/json" -H "anthropic-version: 2023-06-01" \
-  -H "Authorization: Bearer <CQPKEY>" \
-  -d '{"model":"glm-5.2","max_tokens":200,"messages":[{"role":"user","content":"reply with exactly: pong-direct"}]}'
-# 期望 200，content 含 type:text "pong-direct"
-# 注意：glm-5.2 先吐 thinking 块，max_tokens 太小（如 20）会把预算全花在 thinking 上、text 为空，用 >=~100
-```
-
-### 第 3 步：opencode 配置（直连）
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "anthropic": {
-      "name": "Shopee Compass direct",
-      "options": {
-        "baseURL": "https://compass.llm.shopee.io/compass-api/v1",
-        "apiKey": "<CQPKEY>"
-      },
-      "models": {
-        "claude-opus-4-7":   { "id": "glm-5.2",           "name": "glm-5.2",           "limit": { "context": 200000, "output": 32768 } },
-        "claude-sonnet-4-6": { "id": "deepseek-v4-pro",   "name": "deepseek-v4-pro",   "limit": { "context": 200000, "output": 32768 } },
-        "claude-haiku-4-5":  { "id": "deepseek-v4-flash", "name": "deepseek-v4-flash", "limit": { "context": 200000, "output": 32768 } }
-      }
-    }
-  }
-}
-```
-
-### 使用
-
-```bash
-opencode run -m anthropic/claude-opus-4-7 "..."
-```
-
-opencode 发出的请求 `model` 字段为 `glm-5.2`（因 `id` 覆盖），直连网关 200。
-
-### opencode 配置坑（均已踩过并规避）
-
-1. **必须用内置 `anthropic` provider id**（覆盖其 `options`）。自定义 provider id 需 `npm: "@ai-sdk/anthropic"`，而该包未安装（`~/.config/opencode/node_modules` 无 `@ai-sdk/*`）→ opencode 静默卡死。不支持无 npm 的自定义 provider。
-2. **model 的 key 必须在 opencode 的 anthropic 内置白名单里**（如 `claude-opus-4-7`、`claude-sonnet-4-6`、`claude-haiku-4-5`）。任意 key（如直接用 `glm-5.2`）→ `Model not found`。
-3. **`id` 字段是发给 API 的真实模型名**，map 的 key 只是显示别名。所以 `claude-opus-4-7: {id:"glm-5.2"}` 会向网关发 `model:"glm-5.2"`——这就是直连时替代代理「模型别名映射」的手段。
-4. **title 生成**用 opencode 内置默认 haiku（`claude-haiku-4-5-20251001`，无 `id` 覆盖）→ 以原名打网关 → 日志报 404 stream error。不影响主请求；要消除，给 haiku 别名也加 `id` 映射。
-5. opencode `--format json` 的 run 若在 `run_in_background` 命令里带尾部 `&`，会丢失重定向（输出文件空）。别加 `&`，交给 Bash tool 后台化。
-
----
-
-## 两种方式对比
-
-| | 走代理 (15721) | 直连网关 |
-|---|---|---|
-| 依赖 AIS Switch 运行 | 是 | 否 |
-| apiKey 落盘 | 否（`PROXY_MANAGED`） | 是（明文 CQP key） |
-| 用量统计 / 熔断 / failover | 有 | 无 |
-| key 自动刷新 | 代理管 | SSO cookie 过期需重换 key |
-| 配置复杂度 | 低 | 中（换 key + `id` 映射） |
-
-CQP key 在 SSO cookie 失效后过期，重跑 `get_or_generate` 即可重换（AIS Switch 登录时刷新该 cookie 文件）。
-
----
-
-## 逆向锚点（便于后续深挖）
-
-- **DB** `~/.ais-switch/cc-switch.db`：`providers`（PK `id,app_type`；`settings_config` JSON）、`proxy_config`（CHECK `app_type IN ('claude','codex','gemini')`，opencode 不在内）、`proxy_live_backup`、`proxy_request_logs`（有 `request_model` vs 真实 `model`，证明别名映射）、`provider_health`。
-- **二进制** `/Applications/AIS Switch.app/Contents/MacOS/ais-switch`：`strings` 可挖出路由前缀、CQP 端点、`cc_switch_lib::proxy::*` 模块名。
-- **SSO cookie** `~/.ais-switch/google_oauth_auth.json` 的 `sso_session_cookie` 字段——换 CQP key 的唯一依赖。
-
----
-
-## 版本兼容（0.1.8 → 0.1.12）
-
-本文件所有契约最初逆向自 **v0.1.8**，AIS Switch 于 2026-06-25 更新至 **v0.1.12**（CQP 检查 `latest_version=0.1.12 force_update=false`，已是最新）。逐项复核，**四项契约均未变，两种接入方式与 `model-proxy` 均兼容，无需改动**：
-
-| 契约 | 0.1.12 现状 |
-|---|---|
-| CQP mint 端点 `…/api/v1/cqp/ccswitch/api_key/get_or_generate` | 一致 |
-| `sso_session_cookie` 字段（`google_oauth_auth.json`） | 一致 |
-| 路由前缀 `/v1/messages`、`/v1/chat/completions`、`/v1/responses`、`/v1beta/*` | 一致 |
-| 模型映射 opus→glm-5.2、sonnet→deepseek-v4-pro、haiku→deepseek-v4-flash | 一致（请求日志实证 `claude-opus-4-8`→`z-ai/glm-5.2-20260616` 等未变） |
-| `proxy_config` CHECK 仍 `('claude','codex','gemini')`，不含 opencode | 一致 |
-
-0.1.12 的新增均为附加功能，不破坏既有契约：codex_desktop / codex-vscode 安装路径探测、Copilot `copilot_model_map`、CQP `force_below_version`/`team_id` 字段、oh-my-openagent 团队配置同步。
-
-> 复核方法：`strings -a /Applications/AIS\ Switch.app/Contents/MacOS/ais-switch | grep <端点/字段>`，配合 `sqlite3 ~/.ais-switch/cc-switch.db` 查 `providers.settings_config` 与 `proxy_request_logs`。若 AIS Switch 跨大版本升级，按上表重新核对四项契约。
-
----
+本文件是 model-proxy 的架构/契约权威参考：关键设计、各后端契约（逆向实测）、踩过的坑。CLAUDE.md 指向此处。改了实现就同步更新本文件。
 
 ## model-proxy 实现经验
-
-以下经验来自 `model-proxy/` 的完整开发过程（2026-06-29 ~ 07-03），记录关键契约、踩过的坑和架构决策。
 
 ### 架构：Provider 抽象 + 协议路由
 
@@ -194,16 +10,18 @@ CQP key 在 SSO cookie 失效后过期，重跑 `get_or_generate` 即可重换�
 provider/                    # Provider 实现（每个上游一个文件）
   provider.go                # 接口 + 注册 + New()
   apikey.go                  # ApiKeyBase（共享 auth file + Bearer 注入）
-  compass.go                 # compass: SSO + CQP + monthly_usage + ?beta + headers
+  fetch_models.go            # fetchModelsBearer（OpenAI 风格 /models 的共享 helper）
+  probe.go                   # baseProbe（ProbeRequest/ExtraHeaders/FilterModelIDs 默认实现）+ body 构造 + newRequestID
+  aqp.go                     # aqp: SSO + CQP + monthly_usage + ?beta + anthropic headers
   codex.go                   # codex: OAuth device flow + wham/usage + store:false
-  zhipu.go                   # zhipu: API key prompt + /models 校验 + 模型列表
+  zhipu.go / deepseek.go / volcengine.go / static.go  # 其余 provider
 
 config.yaml:
   providers:                 # provider 定义（openai_base_url + provider_id + models）
-    compass:
-      provider_id: compass   # 路由到 provider/compass.go
+    aqp:
+      provider_id: aqp       # 路由到 provider/aqp.go
       openai_base_url: ...
-      cqp_mint_url: ...      # compass 专属
+      aqp_mint_url: ...      # aqp 专属
     zhipu:
       provider_id: zhipu     # 路由到 provider/zhipu.go
       openai_base_url: ...
@@ -214,7 +32,7 @@ config.yaml:
   routes:                      # 对外模型名 → provider/真实名 目标列表（不按协议）
     # 调度：先看非高峰（provider 的 peak_hours），再看 priority，失败逐一 failover
     glm-5.2:
-      - {provider: compass, model: glm-5.2, priority: 1}
+      - {provider: aqp, model: glm-5.2, priority: 1}
       - {provider: zhipu,   model: glm-5.2, priority: 2}   # failover 备选
     gpt-5.5:
       - {provider: codex, model: gpt-5.5, priority: 1}
@@ -233,6 +51,13 @@ config.yaml:
 
 对外协议 = 转发协议（不做转换）。凭据由 `login <provider>` 管理，存储在 `~/.model-proxy/<name>_<suffix>.json`，不落 config。
 
+**Provider 接口**（`provider/provider.go`）：`AuthHeaders` / `Refresh` / `RewriteRequest` / `Login` / `Logout` / `Usage` / `FetchModels` / `Quota` / `Surplus` / `ProbeRequest` / `ExtraHeaders` / `FilterModelIDs`。后三者承载 provider 专属的探测/过滤/请求头知识，**绝不放在 main 包的 `if prov.Provider == ...` 分支**。默认实现集中在 `baseProbe`（`provider/probe.go`，每个 provider embed）：
+- `ProbeRequest(modelID)` -- `models refresh` 探测的最小请求（method/path/body）。默认 OpenAI `POST /chat/completions`；aqp override `/v1/messages`+anthropic body，codex override `/responses`+Responses API body（`input` 列表、`stream:true`、无 `max_tokens`）。
+- `ExtraHeaders(req, path)` -- 每次请求（forward + 探测）都要的专属头。默认 no-op；aqp override 设 `anthropic-version` + UUID `x-compass-request-id`（forward 与 probe 共用此实现，消除旧的两处重复分支）。
+- `FilterModelIDs(ids)` -- `models refresh` 的静态策略过滤（policy pass）。默认透传；volcengine override 剔除 `*-latest`/`doubao-seed-1-*`/lite/mini。
+
+main 包通过回调注入（`Config.Auth` / `LoginFn`/`LogoutFn`/`UsageFn`/`FetchModelsFn`/`QuotaFn`，在 `proxy.go:buildProviders`）把现有 auth/登录/用量函数接入，`provider/` 包不重新实现这些。
+
 ### 配额感知调度（quota-aware scheduling）
 
 `Provider.Quota()`（接口方法，镜像 `UsageFn` 由 `QuotaFn` 回调注入）把每个上游的用量端点解析成归一化的 `provider.QuotaSnapshot{Billing, RemainingPct, Windows, ...}`。各 provider 来源：
@@ -242,10 +67,10 @@ config.yaml:
 | zhipu | `quota/limit`（5h/周 token + 月度时间） | plan |
 | codex | `wham/usage`（primary/weekly 窗口 + spend） | plan |
 | volcengine | `GetAFPUsage`（V4 签名，需 AK/SK） | plan |
-| compass | `monthly_usage`（月度 ratio/balance） | plan |
+| aqp | `monthly_usage`（月度 ratio/balance） | plan |
 | deepseek | `/user/balance`（按量余额） | pay-as-you-go |
 
-`RemainingPct` = 该 provider **最终窗口**（总预算）的 remaining%：zhipu=周、volcengine=月、codex=月度 spend、compass=月、deepseek=payg（无窗口）。`QuotaWindow` 带 `Ultimate`/`Short` 标记 + `Duration`（名义周期），由各 parser 设置。短窗口（5h 等）是 rate-cap，**不参与 min**（用满即 429，反应式跳过）；zhipu 的 `TIME_LIMIT`（MCP 工具配额）不参与（只展示）。
+`RemainingPct` = 该 provider **最终窗口**（总预算）的 remaining%：zhipu=周、volcengine=月、codex=月度 spend、aqp=月、deepseek=payg（无窗口）。`QuotaWindow` 带 `Ultimate`/`Short` 标记 + `Duration`（名义周期），由各 parser 设置。短窗口（5h 等）是 rate-cap，**不参与 min**（用满即 429，反应式跳过）；zhipu 的 `TIME_LIMIT`（MCP 工具配额）不参与（只展示）。
 
 **`quotaTracker`**（`quota.go`）：后台 goroutine 每 `scheduling.quota_poll_interval`（默认 5m）并行轮询所有 provider 的 `Quota()`，结果缓存在内存 + 原子落盘到 `~/.model-proxy/quota_state.json`（启动时作为基线加载，避免冷启动无数据；**现在还携带每路由 `sticky` map，重启后恢复 → 保 prompt cache + 可见上次选择**）。`NewProxy` 启动它；`reload` 不重建（通过 cfg/providers 快照闭包读取新配置），只 kick 一次 `pollAll` 让新加 provider 立即出现；429 触发该 provider 的异步 `refreshOne`，让限频窗口结束后配额已是最新。陈旧保护：snapshot 老于 `3×poll_interval` 视为 `BillingUnknown`。自带锁 `quotaMu`（独立于 `healthMu` 和 reload `mu`）。**锁顺序：`healthMu` → `quotaMu`**（`schedule` 里 `allSnapshots()` 在 `healthMu.Lock()` 之前调用，绝不反向嵌套）。
 
@@ -273,7 +98,7 @@ config.yaml:
 
 | provider_id | suffix | 文件名 |
 |---|---|---|
-| compass | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
+| aqp | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
 | codex | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
 | zhipu / deepseek | apikey | `~/.model-proxy/<name>_apikey.json`（单数，只读 fallback）|
 | volcengine | apikey | `~/.model-proxy/<name>_apikey.json` —— `{api_key, access_key, secret_key}`（API Key 聊天 + AK/SK 签 `GetAFPUsage`）|
@@ -283,17 +108,19 @@ config.yaml:
 ### CLI 命令
 
 ```
-login <provider> [--label NAME] [--replace]   # compass: SSO / codex: device flow / apikey 类: 输入 key（可重复录入 → 多账号池，按 id 去重；写完热重载）
+login <provider> [--label NAME] [--replace]   # aqp: SSO / codex: device flow / apikey 类: 输入 key（可重复录入 → 多账号池，按 id 去重；写完热重载）
 logout <provider> [--label NAME | --all]       # 删一个账号（默认交互式选择）/ 清空池
 usage <provider>          # 池化时默认逐账号展示全部账号用量（--label 看某一个）
 models [provider]         # 从 config 列模型
-models refresh <provider> # 从服务端刷新
+models refresh <provider> # 从服务端刷新；无 /models 端点时回退探测路由模型 + 现有 config 模型
+models pull               # 强制刷新 models.dev 元数据缓存
 serve [daemon|stop|reload|status]
 takeover/restore <client>
 config init|print|check
 schedule                   # 查询运行中的 daemon：每个 model 当前调度到哪个 provider（GET /debug/schedule）
 doctor                     # 离线 config 调度诊断（每 provider tier/quota/peak + 每路由 dry-run 顺序 + warning）
 serve status               # 终端状态面板（= Web UI Status 标签页）：拉 /api/status + /api/tokens（--logs 再加 /api/logs），终端优化输出；--logs [N] / --json / --config
+stats                      # per-(provider,model) 调用统计（SQLite）；--from/--to/--provider/--model/--bucket/--json
 ```
 
 ### Web UI + `/api/*` 接口契约
@@ -311,7 +138,8 @@ serve status               # 终端状态面板（= Web UI Status 标签页）�
 | POST | `/api/accounts/<provider>` | `{api_key, access_key?, secret_key?, label?, replace?}` | `{id, status:"added"}` | 仅 apikey 类（zhipu/deepseek/volcengine）。aqp/codex 返 400 指向 async login。volcengine 走 `addVolcengineAccount`（AK/SK 三元组，不探 usage_url）；其余走 `addApikeyAccount`（探 usage_url 校验）。落盘后 best-effort reload（账号已存盘，reload 失败也返回成功） |
 | DELETE | `/api/accounts/<provider>/<id>` | — | `{status:"removed"}` | apikey 类走 `removeApikeyAccount`；aqp = `clearAccount`（oauth_auth，logout 语义）；codex = `os.Remove`（单凭据）。best-effort reload |
 | GET | `/api/tokens` | — | `{usage:[{provider, model, input, output, cache_creation, cache_read, requests}]}` | 由 SSE 扫描器累计的观测用量（见下）。flat 数组（map[tokenKey]tokenUsage 摊平，JSON 对象 key 必须是 string） |
-| POST | `/api/tokens/reset` | — | `{status:"reset"}` | 清空内存计数；不动盘（下一次 persist tick 用空快照覆盖 `~/.model-proxy/token_usage.json`） |
+| POST | `/api/tokens/reset` | - | `{status:"reset"}` | 清零内存计数 + SQLite `stats.db` + flusher 基线（`Proxy.resetStats`） |
+| GET | `/api/stats?from=&to=&provider=&model=&bucket=` | - | `{from,to,bucket,buckets:[{provider,model,minute,requests,failovers,rate_limited_429,failures,input,output}]}` | per-(provider,model,minute) 调用统计，存储恒为 1 分钟桶；`bucket`（如 `10m`/`1h`）仅展示聚合（SQL GROUP BY）。由 `statsFlusher` 每分钟从内存 metrics+tokens diff 落盘 |
 | POST | `/api/login/<provider>/start` | — | `{session_id, login_url}`(aqp) 或 `{session_id, verify_url, user_code}`(codex) | 异步登录启动。aqp：`BootstrapLoginURL` + 建 cookie-jar `AqpClient` + 起 poll goroutine；codex：`requestUserCode`（device flow）+ 起 poll goroutine。unknown provider → 404；非 aqp/codex → 400 |
 | GET | `/api/login/<session>/poll` | — | `{state:"pending"|"done"|"error", detail, result}` | poll 异步登录。`detail` = login_url/verify_url+user_code（pending，UI 可恢复）/ error msg（error）；`result` = email/account_id（done）。unknown/expired session → 404 |
 
@@ -325,10 +153,22 @@ serve status               # 终端状态面板（= Web UI Status 标签页）�
 - **bounded 64KB 行缓冲**（`scanLineCap = 64 * 1024`）：`observe` 按 `\n` 切完整行喂给 `parseLine`；不完整行的字节存进 `s.line`（cap 到 64KB，超出则丢弃该字节 —— 字节仍会 pass through，只是超长行不解析）。防 OOM。
 - **commit-on-EOF/close（含客户端断开）**：`Read` 见到 err 且 `!done` → `tc.commit(key, acc)`；`Close` 若 `!done` 也 commit。`forward` 在 `flushCopy` 后显式 `body.Close()` —— 客户端中途断开（`flushCopy` 写错即 break，未达 EOF）时也能记下已观测的 input tokens（`message_start` 在流首、cancel 前到达）。正常 EOF 时 `Read` 已置 `done=true` 并 commit，`Close` 是 no-op（**不重复计数**）。
 - **解析**：仅看 `data:` 前缀 + 首字符 `{` 的行。先试 anthropic shape（`message_start` → input/cache_creation/cache_read；`message_delta` → output），再试 openai shape（`usage.prompt_tokens`/`completion_tokens`）。OpenAI token 计数是 **best-effort**：`usage` 仅当客户端发 `stream_options.include_usage`（且上游愿给）时才有 —— 扫描器宁可啥也不记也不 zero-fill。
-- **持久化**：`persistTokensLoop`（daemon.go）周期 `tc.save()` 到 `~/.model-proxy/token_usage.json`（原子 tmp+rename，0600）。key 摊平用 `provider\x00model`（NUL 分隔，避免 `model` 里含 `/`）。启动时 `tc.load()` 作为基线（文件不存在视为空，不报错）。
-- **锁**：`tokenMu` 是**独立叶子锁**，与 `p.mu`/`healthMu`/`quotaMu` 互不嵌套。`commit`/`snapshot`/`save` 的 `*tokenUsage` 字段读写都在 `tc.mu` 下。
+- **持久化**：`tokenCounter` 本身**纯内存**（`commit`/`snapshot`/`reset`，不落盘）；持久化由 SQLite stats 接管（见下「调用统计持久化」）。`tokenMu` 是**独立叶子锁**，`commit`/`snapshot` 的 `*tokenUsage` 字段读写都在 `tc.mu` 下，与 `p.mu`/`healthMu`/`quotaMu` 互不嵌套。
+
+#### 调用统计持久化（`stats.go`，SQLite 单一来源）
+
+`metricsStore`（per-(provider,model) 原子计数器，`requests`/`failovers`/`rate_limited_429`/`failures`/`last_request_at`）+ `tokenCounter` 都在 hot path 纯内存操作（一次原子 add + 短暂 map mutex），**hot path 不碰 SQLite**。一个 `statsFlusher` goroutine（`runProxy` 启动，按墙钟分钟边界 tick）快照两者、与上次快照 **diff**、把非零 delta 作为分钟桶 upsert 到 `~/.model-proxy/stats.db`（`minute_buckets` 表，key `(provider,model,minute)`，`ON CONFLICT DO UPDATE` 加法累加，`last_request_at` 用 `MAX`）。
+
+- **启动**：`initStats`（`runProxy` 里调，非 `NewProxy` -- 直接 `NewProxy` 的测试保持纯内存、不碰 `~/.model-proxy/`）开 DB、在 DB 空时**一次性导入** legacy `~/.model-proxy/token_usage.json`、`loadCumulative()`（全表 `SUM`/`MAX`）seed 内存计数器、设定 flusher 的 diff 基线（首次 flush 只写启动后 delta，不重复计数）。
+- **驱动**：`modernc.org/sqlite` 纯 Go，`CGO_ENABLED=0`，交叉编译安全。`config.stats.{db_path, retention}`（默认 `~/.model-proxy/stats.db`，30d；`0`=永久），每 tick 跑 `prune`。
+- **优雅退出**：SIGINT/SIGTERM 触发最终 flush + pid 清理（覆盖 supervisor 转发的 worker SIGTERM）。
+- **查询**：`GET /api/stats?from=&to=&provider=&model=&bucket=`（`bucket` 如 `10m`/`1h`，默认 `1m`）按 SQL `GROUP BY` 聚合到宽桶展示（存储恒 1 分钟，聚合只减行不丢精度）；`model-proxy stats` CLI 渲染（`--bucket`/`--json`）。`POST /api/tokens/reset` -> `Proxy.resetStats` 清零内存 + SQLite + flusher 基线。
+- **锁纪律**：metrics 用原子 + 短暂 `metrics.mu`（map get-or-create）；token 用 `tokenMu`；stats DB 自己的锁 -- 都是**独立叶子锁**，不与 `p.mu`/`healthMu`/`quotaMu` 嵌套。
 
 ### compass 网关契约（实测）
+
+> **命名说明**：model-proxy 内部将该 provider 命名为 `aqp`（config 的 `provider_id`、凭据文件 `aqp_oauth_auth.json`、字段 `aqp_mint_url`）；上游服务本身是 `compass.llm.shopee.io`，故本节保留 "compass / CQP" 称谓以匹配逆向出的真实后端契约。
+
 
 | 端点 | 方法 | 鉴权 | 路径 |
 |---|---|---|---|
@@ -429,12 +269,12 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 6. **文件日志无色**：`--log-file` 时 `logColorEnabled` 置 `false`，否则 ANSI 污染日志文件。
 7. **flushCopy 写错误**：客户端断开后 `w.Write` 返回错误须立即 break，否则代理继续拉上游流浪费 compute。
 8. **codex /models 的 client_version 闸门**：`/backend-api/codex/models` 必须带 `client_version` 查询参数；后端据此决定返回哪些模型，版本过旧则新模型（如 gpt-5.6）不返回。model-proxy 的解析顺序：config `client_version` → `codex --version` → `~/.codex/models_cache.json` → 内置常量。
-8. **context 传播**：用 `http.NewRequestWithContext(r.Context(), ...)` 让客户端取消传播到上游。
-9. **supervisor nil panic**：`spawnWorker` 失败时返回 nil，`runSupervisor` 需检查再处理。
-10. **配额陈旧保护**：snapshot 老于 `3×quota_poll_interval` 一律视为 `BillingUnknown`（不再相信缓存值）。`Quota()` 失败的 provider 也是 `BillingUnknown`（按 priority 排，**绝不**当 payg）。
-11. **volcengine 配额需 AK/SK**：`GetAFPUsage` 是火山引擎签名 OpenAPI（管控面），Ark API Key（Bearer，仅对话）调不了；`login volcengine` 必须同时收 AK/SK 才能产 quota。
-12. **锁顺序 `healthMu` → `quotaMu`**：`schedule` 先 `allSnapshots()`（quotaMu RLock）拿到快照，再 `healthMu.Lock()`；绝不在持 `healthMu` 时回调 quota 接口，否则与 `refreshOne`/`pollAll` 反向嵌套死锁。
-13. **`BillingClass` iota ≠ 调度序**：`Unknown=0, Plan=1, PayG=2`，但调度序是 `Plan < Unknown < PayG`，故 `tierRank` 单独映射（不要直接比较 `BillingClass` 常量）。
+9. **context 传播**：用 `http.NewRequestWithContext(r.Context(), ...)` 让客户端取消传播到上游。
+10. **supervisor nil panic**：`spawnWorker` 失败时返回 nil，`runSupervisor` 需检查再处理。
+11. **配额陈旧保护**：snapshot 老于 `3×quota_poll_interval` 一律视为 `BillingUnknown`（不再相信缓存值）。`Quota()` 失败的 provider 也是 `BillingUnknown`（按 priority 排，**绝不**当 payg）。
+12. **volcengine 配额需 AK/SK**：`GetAFPUsage` 是火山引擎签名 OpenAPI（管控面），Ark API Key（Bearer，仅对话）调不了；`login volcengine` 必须同时收 AK/SK 才能产 quota。
+13. **锁顺序 `healthMu` → `quotaMu`**：`schedule` 先 `allSnapshots()`（quotaMu RLock）拿到快照，再 `healthMu.Lock()`；绝不在持 `healthMu` 时回调 quota 接口，否则与 `refreshOne`/`pollAll` 反向嵌套死锁。
+14. **`BillingClass` iota ≠ 调度序**：`Unknown=0, Plan=1, PayG=2`，但调度序是 `Plan < Unknown < PayG`，故 `tierRank` 单独映射（不要直接比较 `BillingClass` 常量）。
 
 ### opencode/pi takeover 配置
 
