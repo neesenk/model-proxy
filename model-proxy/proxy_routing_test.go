@@ -176,6 +176,19 @@ func (t *testProv) Surplus(snap *provider.QuotaSnapshot, now time.Time, peakMult
 	return snap.Surplus(now, peakMult)
 }
 
+// ProbeRequest/ExtraHeaders/FilterModelIDs: testProv uses OpenAI-style defaults
+// (matches baseProbe). Inlined rather than embedding baseProbe so the test stub
+// stays self-contained and readable.
+func (t *testProv) ProbeRequest(modelID string) provider.ProbeRequest {
+	return provider.ProbeRequest{
+		Method: http.MethodPost,
+		Path:   "/chat/completions",
+		Body:   []byte(`{"model":"` + modelID + `","messages":[{"role":"user","content":"hi"}],"max_tokens":1}`),
+	}
+}
+func (t *testProv) ExtraHeaders(req *http.Request, path string)          {}
+func (t *testProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
+
 var _ provider.Provider = (*testProv)(nil)
 
 // TestRouteExpansionFansOutPool verifies that a route target naming a pooled

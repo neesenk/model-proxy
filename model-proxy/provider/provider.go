@@ -126,6 +126,36 @@ type Provider interface {
 	FetchModels() ([]string, error)
 	Quota() (*QuotaSnapshot, error)
 	Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64
+
+	// ProbeRequest returns the minimal request pieces to probe whether `modelID`
+	// is callable on this provider's own endpoint - used by `models refresh`'s
+	// endpoint probe. The caller selects the base URL by protocol (anthropic vs
+	// openai) and appends Path. Embed baseProbe for the default (OpenAI
+	// /chat/completions + a minimal body); override for providers whose probe
+	// path/body differ (codex /responses, aqp /v1/messages).
+	ProbeRequest(modelID string) ProbeRequest
+
+	// ExtraHeaders sets provider-specific headers that EVERY upstream request
+	// needs (forward + probe paths) - e.g. aqp's anthropic-version +
+	// x-compass-request-id. Default (baseProbe) is a no-op. Called after
+	// AuthHeaders + prov.Headers so providers can layer on top.
+	ExtraHeaders(req *http.Request, path string)
+
+	// FilterModelIDs applies provider-specific static policy filters (regex
+	// rules) to a candidate model-id list, returning (kept, dropped). This is
+	// the "policy" pass in `models refresh` (before the endpoint probe). Default
+	// (baseProbe) passes through; volcengine overrides to drop *-latest /
+	// doubao-seed-1-* / lite / mini.
+	FilterModelIDs(ids []string) (kept, dropped []string)
+}
+
+// ProbeRequest is the minimal request pieces for probing one model's
+// callability on a provider's endpoint. The caller builds base+Path, sets
+// Content-Type/Content-Length/Accept, calls AuthHeaders + ExtraHeaders, then Do.
+type ProbeRequest struct {
+	Method string // http.Method (default POST)
+	Path   string // path relative to the selected base URL, e.g. "/chat/completions"
+	Body   []byte // minimal request body for this provider's chat shape
 }
 
 // Config is the provider-level config data passed to constructors.

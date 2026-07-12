@@ -11,6 +11,7 @@ import (
 
 // CodexProvider wraps the main package's codex OAuth + device flow + wham/usage.
 type CodexProvider struct {
+	baseProbe
 	cfg *Config
 }
 
@@ -37,6 +38,18 @@ func (p *CodexProvider) Usage() (any, error)            { return p.cfg.UsageFn()
 func (p *CodexProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
 func (p *CodexProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
+}
+
+// ProbeRequest overrides the OpenAI default: codex's backend speaks the OpenAI
+// Responses API (/responses), NOT /chat/completions. The body uses `input` (a
+// list, not `messages`), requires stream:true, and rejects max_tokens.
+// store:false is injected by RewriteRequest (as on the forward path).
+func (p *CodexProvider) ProbeRequest(modelID string) ProbeRequest {
+	return ProbeRequest{
+		Method: http.MethodPost,
+		Path:   "/responses",
+		Body:   codexProbeBody(modelID),
+	}
 }
 
 // FetchModels queries the codex backend's /models endpoint and returns the

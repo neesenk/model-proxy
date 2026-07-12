@@ -326,6 +326,11 @@ func (s *snapshotProv) Quota() (*provider.QuotaSnapshot, error) {
 func (s *snapshotProv) Surplus(snap *provider.QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
 }
+func (s *snapshotProv) ProbeRequest(modelID string) provider.ProbeRequest {
+	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}
+}
+func (s *snapshotProv) ExtraHeaders(*http.Request, string)                   {}
+func (s *snapshotProv) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
 
 // quotaCallProv wraps snapshotProv, counting Quota() calls (with an optional
 // delay so concurrent refreshOne calls overlap and hit the in-flight guard).

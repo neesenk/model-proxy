@@ -22,15 +22,19 @@
 
 ```bash
 cd model-proxy
-go build -o model-proxy .
+go build -o model-proxy .          # 原生编译（host）
 
-# 交叉编译 Linux
-GOOS=linux GOARCH=amd64 go build -o model-proxy-linux .
+# 交叉编译（纯 Go，CGO_ENABLED=0，全静态，无需交叉工具链）
+scripts/build.sh                   # 编译 host -> dist/ + ./model-proxy
+scripts/build.sh linux/amd64       # 交叉编译单个目标 -> dist/
+scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w 去符号
 ```
+
+`scripts/build.sh` 从 `git describe --tags --always --dirty` 注入版本号（`-ldflags -X main.version`，覆盖 `version.go` 的 `dev` 默认值，显示在 `serve status` / `/api/status`）。每个目标写 `dist/model-proxy-<goos>-<goarch>`（windows 加 `.exe`）；host 构建额外复制到 `./model-proxy`（可原地运行）。Flag：`--version <v>`、`--out <dir>`（默认 `dist`）、`--strip`（`-s -w`）、`-v`。`dist/` 和 `./model-proxy` 都在 .gitignore 里。
 
 ## 配置
 
-`config.yaml`（`model-proxy config init` 生成模板）。查找顺序：`--config PATH` > `~/.model-proxy/config.yaml` > `./config.yaml`。
+`config.yaml`（`model-proxy config init` 生成模板）。查找顺序：`--config PATH` > `~/.model-proxy/config.yaml` > `./config.yaml`。路径字段支持 `~/` 展开 和 `env:ENV_VAR` 前缀（从环境变量读值，如 `log_file: env:MP_LOG_FILE`）。
 
 ```yaml
 listen: 127.0.0.1:15721
@@ -72,21 +76,28 @@ takeover:
   codex: ~/.codex/config.toml
   pi: ~/.pi/agent/models.json
   provider_id: model-proxy
+
+# web:                      # 管理后台（默认开启，仅 loopback，无鉴权）
+#   enabled: true
+# stats:                    # 调用统计持久化（SQLite，默认开启，30 天保留）
+#   db_path: ~/.model-proxy/stats.db
+#   retention: 30d          # 0 = 永久
 ```
 
-> **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL；`models pull` 强制刷新）。匹配不到的模型走保守默认值并在 `takeover` 时告警。
+> **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。匹配不到的模型走保守默认值并在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
 >
 > **隐式路由**：某个模型即使没在 `routes` 里配，只要某个**已登录** provider 的 `models:` 列了它，代理会自动按模型名路由到（字母序）首个 provider。若多个已登录 provider 都提供且无显式 route，只用首个并在 `models` 命令 / Web UI 发出歧义告警。显式 `routes` 永远优先（要做 failover/优先级控制仍需显式配置）。
 
 ## 用法
 
 ```bash
-# 登录（凭据存储在 ~/.model-proxy/<name>_<suffix>.json）
+# 登录（凭据存储在 ~/.model-proxy/<name>_<suffix>.json；apikey 类重复 login 累积多账号池）
 model-proxy login aqp          # AQP SSO 浏览器登录
 model-proxy login codex            # codex OAuth device flow
-model-proxy login zhipu            # 输入 Zhipu API key
-model-proxy login deepseek         # 输入 DeepSeek API key
-model-proxy login volcengine       # 输入火山方舟（Agent Plan）API key
+model-proxy login zhipu            # 输入 Zhipu API key（--label NAME 命名；重复 login 加进池）
+model-proxy login deepseek         # 输入 DeepSeek API key（可重复 -> 多账号）
+model-proxy login volcengine       # Ark API Key + AccessKey/SecretKey（可重复 -> 多账号）
+model-proxy login zhipu --label work --replace   # 命名账号 / 覆盖已存在的同 id 账号
 
 # 启动代理
 model-proxy serve                  # 前台
@@ -94,21 +105,24 @@ model-proxy serve daemon           # 后台（自动重启）
 model-proxy serve stop             # 停止 daemon
 model-proxy serve reload           # 热加载配置（SIGHUP）
 model-proxy serve status           # 运行状态（providers/路由/配额/token）
+# serve 通用 flag：--config <PATH>、--log-file <PATH>（覆盖 config 的 log_file）
 
 # 查看用量
 model-proxy usage aqp          # 月度用量/余额
 model-proxy usage codex            # credits/spend/rate limits
-model-proxy usage zhipu            # 5h/周/月配额 + token 消耗
+model-proxy usage zhipu            # 5h/周/月配额 + token 消耗（池化时逐账号展示全部账号）
 model-proxy usage deepseek         # 账户余额（is_available + 各币种）
-model-proxy usage volcengine       # 模型列表（Agent Plan 无简单余额 API）
+model-proxy usage volcengine       # Agent Plan 5h/日/周/月额度（需 AK/SK；否则列 config 模型）
 
 # 登出
 model-proxy logout aqp         # 清除凭据文件
+model-proxy logout zhipu --label work   # 删指定账号（apikey 类池）
+model-proxy logout zhipu --all          # 清空整个池
 
 # 模型列表
 model-proxy models                 # 所有 provider 的模型（元数据从 models.dev 自动补；SRC 列标来源）
 model-proxy models aqp             # 单个 provider
-model-proxy models refresh zhipu   # 从服务端拉取，新模型自动追加进 config 的 models 列表
+model-proxy models refresh zhipu   # 从服务端拉取模型，逐个探测校验后覆盖写回 config（无 /models 端点时回退探测路由模型）
 model-proxy models pull            # 强制刷新 models.dev 元数据缓存
 
 # 接管客户端配置
@@ -123,6 +137,12 @@ model-proxy config check           # 校验配置
 # 调度诊断
 model-proxy schedule               # 查询运行中的 daemon：每 model 当前调度到哪个 provider（GET /debug/schedule）
 model-proxy doctor                 # 离线 config 调度诊断（tier/quota/peak + dry-run 顺序 + warning）
+
+# 调用统计（需 daemon + web.enabled）
+model-proxy stats                  # 最近 60min 的 per-(provider,model) 调用统计（reqs/failover/429/fail/input/output）
+model-proxy stats --bucket 1h      # 按小时聚合展示
+model-proxy stats --from 1h --to now --provider zhipu   # 时间范围 + 过滤
+model-proxy stats --json           # 原始 JSON（便于 jq）
 ```
 
 ## Web UI
@@ -167,19 +187,35 @@ model-proxy serve status --config /path/to/config.yaml   # 指定 config（从�
 
 错误处理：daemon 没在跑 → `✗ cannot reach daemon at <listen>: … is 'model-proxy serve' running?`；`web.enabled: false`（`/api/status` 返 404）→ 提示开启 Web UI。每次请求带 10s 超时，daemon 卡死会快速失败而不是一直挂起。`--json` 适合脚本，如 `model-proxy serve status --json | jq .status.quota`。
 
+## `stats`（调用统计）
+
+`model-proxy stats` 从 daemon 的 `/api/stats` 拉取 SQLite 存储的 per-(provider, model) 调用统计并按终端表格输出。需 daemon 在跑 + `web.enabled`（默认 true）。统计在 hot path 只更新内存计数器，由后台每分钟 flush 到 `~/.model-proxy/stats.db`（重启不丢；SIGINT/SIGTERM 触发最后一次 flush）。
+
+```bash
+model-proxy stats                             # 最近 60min（默认），1 分钟桶
+model-proxy stats --bucket 10m                # 按 10 分钟桶聚合展示（存储恒为 1 分钟，聚合仅展示）
+model-proxy stats --from 2h --to now          # 时间范围（unix 秒或 RFC3339；默认 60min 前..now）
+model-proxy stats --provider zhipu --model glm-5.2   # 过滤
+model-proxy stats --json                      # 原始 JSON（便于 jq）
+```
+
+输出列：`provider · model · <bucket> · reqs · failover · 429 · fail · input · output`（紧凑数字）。空结果 -> `(no stats in range <FROM> .. <TO>, bucket <BUCKET>)`。`POST /api/tokens/reset`（或 Web UI）可清零内存 + SQLite + flush 基线。配置：`config.stats.{db_path, retention}`（默认 `~/.model-proxy/stats.db`，30 天；`0` = 永久）。
+
 ## Token 文件
 
 凭据由 `login` 管理，按 provider name 派生路径，不落 config：
 
 | Provider | Token 文件 | 内容 |
 |---|---|---|
-| aqp | `~/.model-proxy/aqp_oauth_auth.json` | SSO cookie + account data |
-| codex | `~/.model-proxy/codex_oauth_auth.json` | OAuth access/refresh/id token |
-| zhipu | `~/.model-proxy/zhipu_apikey.json` | API key |
-| deepseek | `~/.model-proxy/deepseek_apikey.json` | API key |
-| volcengine | `~/.model-proxy/volcengine_apikey.json` | API key（火山方舟） |
+| aqp | `~/.model-proxy/aqp_oauth_auth.json` | SSO cookie + account data（单账号） |
+| codex | `~/.model-proxy/codex_oauth_auth.json` | OAuth access/refresh/id token（单账号） |
+| zhipu | `~/.model-proxy/zhipu_apikey.json` | API key（单账号遗留文件，只读回退） |
+| deepseek | `~/.model-proxy/deepseek_apikey.json` | API key（同上） |
+| volcengine | `~/.model-proxy/volcengine_apikey.json` | `{api_key, access_key, secret_key}`（同上） |
 
-多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件。
+**多账号凭据池**：apikey 类 provider（zhipu/deepseek/volcengine）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine=access_key，其余=sha256(api_key)[:16]）去重。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
+
+多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件/池。
 
 ## 协议
 
@@ -246,12 +282,15 @@ scheduling:
 
 ## 添加新 Provider
 
-1. 建 `provider/xxx.go`，实现 Provider 接口（或 embed `ApiKeyBase`）
+1. 建 `provider/xxx.go`，实现 Provider 接口（embed `ApiKeyBase`（文件存 API key）+ `baseProbe`（默认探测/过滤行为））。`baseProbe` 默认：探测走 OpenAI `POST /chat/completions`、无专属请求头、候选模型透传。仅当 provider 与此不符时才 override：
+   - `ProbeRequest(modelID)` -- 探测请求的 path/body（如 codex 的 `/responses` + Responses API body、aqp 的 `/v1/messages`）
+   - `ExtraHeaders(req, path)` -- 每次请求（转发 + 探测）都要的专属头（如 aqp 的 `anthropic-version` + `x-compass-request-id`）
+   - `FilterModelIDs(ids)` -- `models refresh` 的静态策略过滤（如 volcengine 剔除 `*-latest`/lite/mini）
 2. `init()` 里 `Register("xxx", constructor)`
 3. config 加 `provider_id: xxx`
 4. plan 类 provider 还应实现 `Quota()`（在 `buildProviders` 里 wire `QuotaFn`），否则会被当作 `unknown`（按 priority 排）；按量计费的设 `billing: pay-as-you-go`
 
-不改 proxy/login/logout/usage 的代码。
+provider 专属的探测/过滤/请求头知识全部收敛在 `provider/xxx.go`，不写进 main 包的 switch/if。不改 proxy/login/logout/usage/models 的代码。
 
 ## Demo
 

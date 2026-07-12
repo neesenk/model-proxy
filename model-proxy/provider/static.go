@@ -7,6 +7,7 @@ import (
 
 // StaticProvider is for providers with a static key in config (no login/usage).
 type StaticProvider struct {
+	baseProbe
 	cfg *Config
 }
 

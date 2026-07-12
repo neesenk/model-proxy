@@ -11,6 +11,7 @@ import (
 // stored in ~/.model-proxy/<providerName>_apikey.json.
 type ZhipuProvider struct {
 	*ApiKeyBase
+	baseProbe
 	cfg          *Config
 	providerName string
 }

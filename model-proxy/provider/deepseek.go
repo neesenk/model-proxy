@@ -22,6 +22,7 @@ import (
 // anthropic-version/anthropic-beta and reads x-api-key).
 type DeepSeekProvider struct {
 	*ApiKeyBase
+	baseProbe
 	cfg *Config
 }
 

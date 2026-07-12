@@ -3,6 +3,7 @@ package provider
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"time"
 )
 
@@ -21,6 +22,7 @@ import (
 // ignores x-api-key; the Anthropic-compatible endpoint reads x-api-key).
 type VolcengineProvider struct {
 	*ApiKeyBase
+	baseProbe
 	cfg *Config
 }
 
@@ -63,4 +65,53 @@ func (p *VolcengineProvider) FetchModels() ([]string, error) {
 		return p.cfg.FetchModelsFn()
 	}
 	return nil, fmt.Errorf("FetchModelsFn not configured")
+}
+
+// volcengineModelFilterRegexps are the model-id exclusion rules applied to the
+// ListArkAgentPlanModel result. Each is a compiled regexp; a model id is dropped
+// when ANY rule matches. Rules are case-insensitive. Add a line here to extend
+// coverage - this array is the single place to grow the filter.
+//
+// The Agent Plan endpoint (…/api/plan/v3) speaks family aliases; these ids are
+// dropped because they are redundant or uncallable on that endpoint:
+//   - *-latest            : rolling aliases redundant with the concrete family name
+//   - doubao-seed-1-*     : standard-Ark "1.x + date-version" ids the plan endpoint
+//     rejects (it only takes plan-scope aliases like 2.0)
+//   - doubao-seed-*-lite  : small / low-latency "lite" tier (suffix or mid-segment)
+//   - doubao-seed-*-mini  : small / low-latency "mini" tier
+//
+// The doubao-seed- rules do not match doubao-seedance-* / doubao-seedream-*
+// (the char after "doubao-seed" is "a", not "-"); those are filtered separately
+// by the endpoint probe since they are non-chat models.
+var volcengineModelFilterRegexps = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)-latest$`),
+	regexp.MustCompile(`(?i)^doubao-seed-1-`),
+	regexp.MustCompile(`(?i)^doubao-seed-.*-lite($|-)`),
+	regexp.MustCompile(`(?i)^doubao-seed-.*-mini$`),
+}
+
+// FilterModelIDs applies volcengine's static policy rules: drops ids matching
+// volcengineModelFilterRegexps (*-latest / doubao-seed-1-* / lite / mini). This
+// is the "policy" pass of `models refresh`; the endpoint probe is the separate
+// callability pass. Overrides baseProbe's passthrough.
+func (p *VolcengineProvider) FilterModelIDs(ids []string) (kept, dropped []string) {
+	for _, id := range ids {
+		if isVolcengineModelFiltered(id) {
+			dropped = append(dropped, id)
+		} else {
+			kept = append(kept, id)
+		}
+	}
+	return kept, dropped
+}
+
+// isVolcengineModelFiltered reports whether a model id should be excluded by the
+// static regex rules.
+func isVolcengineModelFiltered(id string) bool {
+	for _, re := range volcengineModelFilterRegexps {
+		if re.MatchString(id) {
+			return true
+		}
+	}
+	return false
 }

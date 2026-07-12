@@ -168,6 +168,10 @@ func TestRouteNames_Sorted(t *testing.T) {
 // file references it only via grabStdout otherwise).
 var _ = strings.HasPrefix
 
+// --- isVolcengineModelFiltered: moved to provider/probe_test.go
+// (TestVolcengineFilterModelIDs) - the filter rules now live with the
+// VolcengineProvider implementation, tested there directly. ---
+
 // --- refreshProviderModels: pool must fetch ONCE (not per-account) ---
 
 // TestRefreshProviderModelsOnceForPool verifies that refreshing a pooled parent

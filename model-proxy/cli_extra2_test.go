@@ -292,6 +292,82 @@ func TestCLI_ModelsRefresh_PersistsNewModels(t *testing.T) {
 	}
 }
 
+// --- models refresh: FetchModels unavailable -> route-probe fallback ---
+//
+// When the provider has no /models endpoint (FetchModels 404s), refresh falls
+// back to probing route-configured models + existing config models against the
+// provider's own chat endpoint. Callable 2xx models are written to models:;
+// non-callable ones are dropped. Mirrors the FetchModels path's write semantics.
+
+func TestCLI_ModelsRefreshFallback_RouteProbe(t *testing.T) {
+	callable := map[string]bool{"keep-a": true, "route-c": true}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			// No /models endpoint -> fetchModelsBearer errors -> fallback triggers.
+			w.WriteHeader(404)
+			w.Write([]byte(`{"error":{"code":"NotFound","message":"no models endpoint"}}`))
+			return
+		}
+		// /chat/completions probe: 2xx for callable models, 404 (+ error body) otherwise.
+		model := extractModel(readAll(r.Body))
+		if callable[model] {
+			w.WriteHeader(200)
+			w.Write([]byte(`{}`))
+			return
+		}
+		w.WriteHeader(404)
+		w.Write([]byte(`{"error":{"code":"UnsupportedModel","message":"model not served"}}`))
+	}))
+	defer srv.Close()
+
+	// Config lists keep-a + drop-b; a route adds route-c (route-only candidate).
+	// Candidates probed = {keep-a, drop-b} (config) ∪ {route-c} (route).
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  zhipu:\n    openai_base_url: " + srv.URL + "\n    provider_id: zhipu\n    models:\n      - keep-a\n      - drop-b\nroutes:\n  keep-a:\n    - {provider: zhipu, model: keep-a}\n  route-c:\n    - {provider: zhipu, model: route-c}\n"
+	cfgPath := writeTempConfig(t, cfgBody)
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"test-key"}`), 0o600)
+	// Fresh empty models.dev cache so hydrateModels doesn't hit the network.
+	os.WriteFile(filepath.Join(credDir, "models_cache.json"),
+		[]byte(`{"fetched_at":"`+time.Now().Format(time.RFC3339)+`","etag":"","by_name":{},"by_endpoint":{}}`), 0o600)
+	// Safety net: if the cache is somehow bypassed, the endpoint MUST fail
+	// (proves no network dependency) rather than silently succeed.
+	mdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer mdSrv.Close()
+	t.Setenv("MP_MODELSDEV_URL", mdSrv.URL)
+
+	_, stderr, code := runCLIWithHome(t, home, "models", cfgPath, "refresh", "zhipu")
+	if code != 0 {
+		t.Fatalf("models refresh fallback: exit=%d want 0\n--- stderr ---\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "models endpoint unavailable for zhipu") || !strings.Contains(stderr, "probing route-configured models") {
+		t.Errorf("stderr should announce the route-probe fallback:\n%s", stderr)
+	}
+	// The diff lines prove the write happened with the right delta.
+	if !strings.Contains(stderr, "config: added 1 -> [route-c]") {
+		t.Errorf("stderr should report route-c added:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "config: removed 1 -> [drop-b]") {
+		t.Errorf("stderr should report drop-b removed:\n%s", stderr)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := string(data)
+	if !strings.Contains(cfg, "- keep-a") || !strings.Contains(cfg, "- route-c") {
+		t.Errorf("config should list the callable subset (keep-a, route-c):\n%s", cfg)
+	}
+	if strings.Contains(cfg, "- drop-b") {
+		t.Errorf("config should have dropped non-callable drop-b:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, "routes:") {
+		t.Errorf("config should preserve routes + structure:\n%s", cfg)
+	}
+}
+
 // --- models refresh: idempotent when nothing new (no write) ---
 
 func TestCLI_ModelsRefresh_IdempotentNothingNew(t *testing.T) {

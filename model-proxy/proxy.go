@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -889,9 +888,11 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		for k, v := range prov.Headers {
 			req.Header.Set(k, v)
 		}
-		if prov.Provider == "aqp" {
-			req.Header.Set("anthropic-version", "2023-06-01")
-			req.Header.Set("x-compass-request-id", newRequestID())
+		// Provider-specific per-request headers (aqp: anthropic-version +
+		// x-compass-request-id). Same method the probe path calls - one impl,
+		// no duplicated aqp branch.
+		if provImpl != nil {
+			provImpl.ExtraHeaders(req, upPath)
 		}
 
 		start := time.Now()
@@ -1464,16 +1465,6 @@ func copyHeaderWhitelist(dst, src http.Header, keys ...string) {
 			dst.Set(k, v)
 		}
 	}
-}
-
-func newRequestID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())
-	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func extractModel(body []byte) string {

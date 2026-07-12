@@ -267,7 +267,7 @@ config.yaml:
 
 **池内路由 = session-sticky**：sticky map 的 key 从「路由名」换成请求的 `x-claude-code-session-id`（无该头则退回路由名 → 行为不变）。新 session 由 per-parent 计数器（`spreadCtr`，`commit` 时才 +1）**轮询分配**到一个池账号；之后该对话**整场停在这个账号**（只在 429/熔断时重选，**不会中途迁到边际更优的账号**）—— 保 prompt cache；不同对话落到不同账号 → 并发分流。**无 `strategy` 配置项**。session-keyed sticky **不落盘**（`snapshotSticky` 只持久化路由名 key），`quota_state.json` 不存会话 id。
 
-**踩过的坑**：① forward 鉴权读内嵌 `ApiKeyBase`（文件名 = providerName），虚拟必须经 `BoundAPIKey` 绑内存 key，否则会去读不存在的 `<name#id>_apikey.json` → 502；② `Refresh()` 在 bound 实例上是 no-op（bound key 不可变，清缓存会注入空 Bearer）；③ `login` 写的是复数池，故 **1 条池（单账号）也必须 bind**（不能走 file-backed 读单数文件，否则 `login` 后 502 —— 这是 buildProviders 用 `os.Stat(poolPath)` 区分「复数池存在」与「单数 fallback」的原因）；④ volcengine 每账号要完整 `{api_key, access_key, secret_key}`（`GetAFPUsage` 签名用 AK/SK），`resolveVolcengineAKSK` 对非 nil cred **排他**（不回落文件，防泄漏兄弟账号 AK/SK）；⑤ volcengine 的 `FetchModels`（`ListArkAgentPlanModel`）暂未按账号绑 —— 池化时 `models refresh volcengine` 优雅退回 config 模型。
+**踩过的坑**：① forward 鉴权读内嵌 `ApiKeyBase`（文件名 = providerName），虚拟必须经 `BoundAPIKey` 绑内存 key，否则会去读不存在的 `<name#id>_apikey.json` → 502；② `Refresh()` 在 bound 实例上是 no-op（bound key 不可变，清缓存会注入空 Bearer）；③ `login` 写的是复数池，故 **1 条池（单账号）也必须 bind**（不能走 file-backed 读单数文件，否则 `login` 后 502 —— 这是 buildProviders 用 `os.Stat(poolPath)` 区分「复数池存在」与「单数 fallback」的原因）；④ volcengine 每账号要完整 `{api_key, access_key, secret_key}`（`GetAFPUsage` 签名用 AK/SK），`resolveVolcengineAKSK` 对非 nil cred **排他**（不回落文件，防泄漏兄弟账号 AK/SK）；⑤ volcengine 的 `FetchModels`（`ListArkAgentPlanModel`）暂未按账号绑 -- 池化时 `models refresh volcengine` 的探测复用 `poolVirtuals` 选首个 virtual 的 bound 凭据；endpoint 探测全部失败时退回合并集不写空。
 
 ### Token 文件命名
 
@@ -347,7 +347,7 @@ serve status               # 终端状态面板（= Web UI Status 标签页）�
 
 | 端点 | 方法 | 鉴权 | 备注 |
 |---|---|---|---|
-| responses | POST | codex OAuth Bearer | `/backend-api/codex/responses`，需 `store:false` + `stream:true`，不接受 `max_tokens` |
+| responses | POST | codex OAuth Bearer | `/backend-api/codex/responses`，需 `store:false` + `stream:true`，不接受 `max_tokens`；body 用 Responses API 的 `input`（**必须是 list**，字符串被拒 `Input must be a list`；不能用 `messages`，被拒 `Unsupported parameter: messages`） |
 | usage | GET | codex OAuth Bearer | `/backend-api/wham/usage`（注意：不在 `/codex/` 子路径下） |
 | models | GET | codex OAuth Bearer | `/backend-api/codex/models?client_version=<ver>`，返回 `{"models":[{slug,visibility,...}]}`，仅取 `visibility=="list"`；`client_version` 决定可见模型（过低则新模型不返回） |
 | originator | header | — | `originator: codex_cli_rs` 必须设，否则 403 |
@@ -397,7 +397,7 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 - OpenAI base: `https://ark.cn-beijing.volces.com/api/plan/v3`（Agent Plan 套餐；标准 Ark 是 `/api/v3`）。`/chat/completions`、`/responses`、`/models`，Bearer 鉴权
 - Anthropic base: `https://ark.cn-beijing.volces.com/api/plan/compatible/v1`（Anthropic-compatible，供 Claude Code；标准 Ark 是 `/api/compatible`）。`/v1/messages`，`x-api-key` 鉴权。代理按协议转发：anthropic→`anthropic_base_url`、openai→`openai_base_url`。`anthropic_base_url` 须自带 `/v1`（代理剥掉客户端 `/v1`）
 - 鉴权双写：每请求同时设 `Authorization: Bearer` 和 `x-api-key`（OpenAI 端点用 Bearer，Anthropic 端点用 x-api-key），一个 key 服务两种协议（实现同 DeepSeek，`provider/volcengine.go`）
-- Agent Plan 的 5h/每日/周/月额度在 **GetAFPUsage**（火山引擎签名 OpenAPI：`Action=GetAFPUsage&Version=2024-01-01&serviceCode=ark`，管控面、HMAC-SHA256/V4 签名，需 AccessKey/SecretKey）—— Ark API Key（Bearer，仅对话）调不了（实测 `/api/v3/models`→401、`/api/plan/v3/models`→404）。**已实现**：`volcengine_sign.go` 做 V4 签名（CredentialScope `{date}/cn-beijing/ark/request`，signing key 链 SK→kDate→kRegion→kService→kSigning，**末项 `"request"` 非 `"volcengine_request"`**；签名头仅 `host;x-date`，**不含 `x-content-sha256`**）。`login volcengine` 同时收 Ark API Key + AK/SK。`usage volcengine` 调 GetAFPUsage 解析 `Result.{AFPFiveHour,AFPDaily,AFPWeekly,AFPMonthly}`（各含 `Quota/Used/ResetTime`，Remaining=Quota−Used）。`models refresh volcengine` 调 **ListArkAgentPlanModel**（同理 V4 签名）解析 `Result.Datas[].ModelID`（当前 17 个模型，含 doubao/glm-5.2/kimi/minimax/deepseek）。未配 AK/SK 时退化为列 config 模型
+- Agent Plan 的 5h/每日/周/月额度在 **GetAFPUsage**（火山引擎签名 OpenAPI：`Action=GetAFPUsage&Version=2024-01-01&serviceCode=ark`，管控面、HMAC-SHA256/V4 签名，需 AccessKey/SecretKey）—— Ark API Key（Bearer，仅对话）调不了（实测 `/api/v3/models`→401、`/api/plan/v3/models`→404）。**已实现**：`volcengine_sign.go` 做 V4 签名（CredentialScope `{date}/cn-beijing/ark/request`，signing key 链 SK→kDate→kRegion→kService→kSigning，**末项 `"request"` 非 `"volcengine_request"`**；签名头仅 `host;x-date`，**不含 `x-content-sha256`**）。`login volcengine` 同时收 Ark API Key + AK/SK。`usage volcengine` 调 GetAFPUsage 解析 `Result.{AFPFiveHour,AFPDaily,AFPWeekly,AFPMonthly}`（各含 `Quota/Used/ResetTime`，Remaining=Quota−Used）。`models refresh volcengine` 调 **ListArkAgentPlanModel**（同理 V4 签名）解析 `Result.Datas[].ModelID`（当前 21 个原始 ID，含 doubao/glm-5.2/kimi/minimax/deepseek + 5 个非对话模型；`models refresh` 经正则过滤 `*-latest`/`doubao-seed-1-*`/lite/mini + endpoint 探测剔除非对话模型后写入）。未配 AK/SK 时退化为列 config 模型
 - 模型 ID 是模型名（如 `doubao-seed-1-8-251228`、`doubao-seed-2-0-code`），非推理接入点 endpoint id（标准 Ark 按量计费才用 endpoint id）
 - 凭据存 `~/.model-proxy/<name>_apikey.json`
 
@@ -408,7 +408,7 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 - 缓存：`~/.model-proxy/models_cache.json`，TTL **24h**，atomic tmp+rename。`ensureCatalogFresh`：fresh→直接用；stale/force→conditional GET（304 仅刷新 `fetched_at`，200 重建+落盘）；fetch 失败+有旧缓存→用旧缓存+stderr 提示；无缓存→空 catalog（命令照跑，所有模型走 default）
 - **匹配优先级**：① endpoint 命中（provider 的 `openai_base_url`/`anthropic_base_url` 归一化后比对 models.dev provider 的 `api`，全 URL → 再 host）→ 在该 provider 的模型列表里查；② 全局模型名后缀匹配（救 aqp 借的 `glm-*`/`deepseek-*`）；③ 未命中→default。`by_name` 去重时 canonical owner 胜（`zhipuai`/`deepseek`/`openai`/`moonshotai`/… rank 0，reseller rank 1）
 - **`models:` 只配名字；元数据全来自 models.dev**：config 字段 `Provider.Models []string`（名字列表，`- glm-5.2` 形式），**不存元数据**。元数据（context/output/modalities）运行时由 models.dev 补（`hydrateModels` 返回 `meta`+`sources`），匹配失败→default。effective 集合 = config 名字列表 ∪ routes 引用的模型
-- **`models refresh <provider>` 写 config**：拉取 upstream `/models`，把 config 里没有的新模型名**追加**到 `models:` 列表（只增不删——运维可能手工加过）。写是保注释的 yaml.Node 往返（`writeProviderModels`：`loadConfigNode`→`setChildNode`/`mustEncode`→`LoadConfigFromBytes` 校验→`backupConfig`→`atomicWrite`），只重编码 `models:` 序列。无需 daemon reload（models 列表仅元数据，不在热路径）。**只有 `models refresh` 写 config.yaml；`models`/`takeover` 显示永不写**
+- **`models refresh <provider>` 写 config**：拉取 upstream 模型列表，与 config 现有 `models:` 合并去重，再**逐个 endpoint 探测**（`models_check.go:checkProviderModels`->`probeModelCallable`，复刻 `forward` 的 base/path/RewriteRequest/AuthHeaders 按协议调用 provider 自己的 `base_url`，发最小请求）——仅 **2xx** 的保留，其余丢弃并在 stderr 输出模型名+原因。保留集**覆盖写**回 `models:`（非 append-only——既有不可调项与新拉取失败项一并删除）。provider 专属的静态策略过滤在 provider 实现的 `FilterModelIDs`（volcengine 剔除 `*-latest`/`doubao-seed-1-*`/lite/mini；其余透传）。安全网：探测 infra 不可用->写未校验合并集；**全部**探测失败（疑似未登录/断网）->保留 config 不清空并告警。写是保注释的 yaml.Node 往返（`writeProviderModels`：`loadConfigNode`->`setChildNode`/`mustEncode`->`LoadConfigFromBytes` 校验->`backupConfig`->`atomicWrite`），只重编码 `models:` 序列。写后热重载 daemon。**只有 `models refresh` 写 config.yaml；`models`/`takeover` 显示永不写**
 - **覆盖盲区**：models.dev **没有** aqp/compass、codex/ChatGPT、volcengine 这几个 provider；codex `gpt-5.5`、volcengine `doubao-*` 等未命中→走 default（`ctx=200000 out=16384 text-only`），`takeover` 对 opencode/pi 发 stderr 警告（claude/codex 不写每模型元数据，不警告）
 - **作用域**：仅 `models`/`takeover` CLI 路径调 `ensureCatalogFresh`+`hydrateModels`（hydrate 只改内存 cfg，**不进** `LoadConfig`/daemon）；代理热路径、`GET /v1/models`、quota 均不受影响。`models pull` 强制刷新 catalog 缓存；`MP_MODELSDEV_URL` 覆盖端点（测试/镜像）。`models` 显示新增 `SRC` 列（`models.dev`/`default`）
 
@@ -422,7 +422,7 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 ### 踩过的坑
 
 1. **路径双 `/v1`**：provider openai_base_url 已含 `/compass-api/v1`，client path `/v1/messages` 拼接后变双 `/v1`。需剥 client 的 `/v1` 前缀。
-2. **codex 后端请求体**：`store:false`（否则 400）+ `stream:true`（否则 400）+ 无 `max_tokens`（否则 400）。代理在 RewriteRequest 自动注入 `store:false`。
+2. **codex 后端请求体**：`store:false`（否则 400）+ `stream:true`（否则 400）+ 无 `max_tokens`（否则 400）。代理在 RewriteRequest 自动注入 `store:false`。**body 是 Responses API 形状**：用户输入在 `input` 字段且**必须是 list**（字符串 -> `Input must be a list`；用 `messages` -> `Unsupported parameter: messages`）。`models refresh codex` 的探测据此构造 body。
 3. **monthly_usage**：POST 非 GET，需 `project_id` 入参。字段名 `total_amount`/`usage`/`balance`/`plan`（非 `totalAmount`）。
 4. **wham/usage 路径**：`/backend-api/wham/usage`，不是 `/backend-api/codex/wham/usage`（后者 403）。
 5. **日志掩码**：SSO cookie 必须用 `mask()`（首2…尾2），auth/info 响应体只记长度。

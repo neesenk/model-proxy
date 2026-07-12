@@ -59,37 +59,34 @@ func cmdModels(args []string) {
 			log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 		}
 		fmt.Fprintf(os.Stderr, "Refreshing models from %s...\n", provName)
-		entries, err := fetchProviderModels(cfg, provName)
-		if err != nil {
-			log.Fatal(err)
-		}
-		// Persist any newly-discovered model names into config.yaml (append-only;
-		// never removes — the operator may have hand-added models). Metadata is
-		// runtime-sourced from models.dev, so only names are written.
 		existing := cfg.Providers[provName].Models
-		have := make(map[string]bool, len(existing))
-		for _, n := range existing {
-			have[n] = true
-		}
-		var added []string
-		for _, e := range entries {
-			if !have[e.ID] {
-				added = append(added, e.ID)
+		entries, err := fetchProviderModels(cfg, provName)
+		var merged []string
+		if err != nil {
+			// FetchModels unavailable (the provider has no /models endpoint, is
+			// not logged in, or the network is down). Fall back to route-based
+			// probing: candidates = route models targeting this provider + the
+			// existing config models. The endpoint probe then validates each
+			// candidate against the provider's own chat endpoint, and the
+			// callable subset is written back via the same tail as the
+			// FetchModels path. Safety nets (all-probe-failed, probe-infra-
+			// unavailable) keep config intact on a total outage, so a
+			// down/not-logged-in provider never wipes models:.
+			fmt.Fprintf(os.Stderr, "models endpoint unavailable for %s (%v); probing route-configured models instead\n", provName, err)
+			merged = mergeStringIDs(existing, routeModelsForProvider(cfg, provName))
+			if len(merged) == 0 {
+				fmt.Fprintf(os.Stderr, "no models to probe for %s (no /models endpoint and no routes target it); add routes targeting %s first\n", provName, provName)
 			}
+		} else {
+			// Merge the config's existing model list with the freshly-fetched ids
+			// (existing first, then new ids in fetch order, deduped). The endpoint
+			// probe below validates the merged set and writes only the callable
+			// subset back - so refresh both adds newly-discovered models AND
+			// removes ids that fail a live 2xx check (e.g. non-chat models the
+			// upstream's /models lists but its chat endpoint rejects).
+			merged = mergeModelIDs(existing, entries)
 		}
-		if len(added) > 0 {
-			sort.Strings(added)
-			updated := append(append([]string{}, existing...), added...)
-			if err := writeProviderModels(configPath(args), provName, updated); err != nil {
-				log.Fatalf("writing new models to config: %v", err)
-			}
-			fmt.Fprintf(os.Stderr, "added %d new model(s) to config: %v\n", len(added), added)
-			// Hot-reload a running daemon so the new model names take effect for
-			// implicit routing (and refresh the display) without a manual
-			// `serve reload`. No-op if no daemon is running. Mirrors login/logout.
-			maybeReloadDaemon(args)
-		}
-		printProviderModels(provName, entries)
+		probeAndWriteModels(cfg, provName, merged, existing, args)
 		return
 	}
 	// models [provider] — config + models.dev supplement
@@ -219,6 +216,80 @@ func fetchProviderModels(cfg *Config, provName string) ([]ModelEntry, error) {
 	return entries, nil
 }
 
+// probeAndWriteModels runs the shared policy-filter + endpoint-probe + display +
+// write-back tail used by `models refresh`. `merged` is the candidate id list
+// (already deduped with the provider's existing config ids - from FetchModels on
+// the normal path, or from routes on the no-/models fallback); `existing` is the
+// provider's current config models (for the change-diff + skip-write-if-unchanged).
+//
+// It policy-filters the candidates, probes each against the provider's own
+// base_url, prints the kept list + a drop summary, and overwrites `models:` with
+// the callable subset (hot-reloading a running daemon) when it changed.
+//
+// Safety nets: if the probe infra is unavailable (perr != nil) or EVERY probe
+// failed (allProbeFailed - likely not-logged-in / network), the candidate set is
+// kept unvalidated rather than wiping `models:`; the latter still surfaces the
+// failures as a warning via printFilterSummary.
+func probeAndWriteModels(cfg *Config, provName string, merged, existing []string, args []string) {
+	// Policy filter (provider-specific static rules via the provider impl's
+	// FilterModelIDs, applied to BOTH pre-existing config ids and freshly-fetched
+	// ones so a stale config is cleaned up too). Currently volcengine drops
+	// *-latest / doubao-seed-1-* / lite / mini by policy regardless of
+	// callability. The endpoint probe below is the second, general pass
+	// (callable on the provider base_url?).
+	policyKept, policyDropped := applyProviderModelFilter(cfg, provName, merged)
+	kept, dropped, perr := checkProviderModels(cfg, provName, policyKept)
+	allProbeFailed := perr == nil && len(policyKept) > 0 && len(kept) == 0
+	if perr != nil {
+		// Probe infra unavailable (e.g. provider not logged in). Fall back to
+		// the policy-filtered set unvalidated rather than silently dropping
+		// everything.
+		kept = policyKept
+		dropped = nil
+	} else if allProbeFailed {
+		// Every model failed the probe. This usually means the provider is
+		// not logged in (auth fails on every request) or the network is down
+		// - not that all models are genuinely uncallable. Don't wipe config:
+		// fall back to the policy-filtered set unvalidated. `dropped` is kept
+		// so printFilterSummary can surface the failures as a warning.
+		kept = policyKept
+	}
+	sort.Strings(kept)
+
+	// Hydrate metadata (context/output/modalities) from models.dev for the
+	// kept list, so the refresh table matches `model-proxy models`. Update
+	// the in-memory cfg's model list first - hydrateModels keys off it.
+	provCfg := cfg.Providers[provName]
+	provCfg.Models = kept
+	cfg.Providers[provName] = provCfg
+	cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
+	meta, sources := hydrateModels(cfg, cat)
+
+	// Output order: final list FIRST, then the filter summary with reasons.
+	printKeptModels(provName, kept, meta, sources)
+	printFilterSummary(policyDropped, dropped, perr, allProbeFailed)
+
+	// Write the validated list (overwrite, not append-only). writeProviderModels
+	// re-encodes the whole models: sequence, so ids absent from `kept` (both
+	// pre-existing uncallable ones and freshly-fetched failures) are removed.
+	if !sameStringSet(kept, existing) {
+		if err := writeProviderModels(configPath(args), provName, kept); err != nil {
+			log.Fatalf("writing models to config: %v", err)
+		}
+		added, removed := diffStringSets(existing, kept)
+		if len(added) > 0 {
+			fmt.Fprintf(os.Stderr, "config: added %d -> %v\n", len(added), added)
+		}
+		if len(removed) > 0 {
+			fmt.Fprintf(os.Stderr, "config: removed %d -> %v\n", len(removed), removed)
+		}
+		// Hot-reload a running daemon so the new model set takes effect for
+		// implicit routing (and refresh the display) without a manual
+		// `serve reload`. No-op if no daemon is running. Mirrors login/logout.
+		maybeReloadDaemon(args)
+	}
+}
+
 // writeProviderModels rewrites providers.<provName>.models to `names` in
 // configFile, preserving comments/order elsewhere via a yaml.Node round-trip
 // (only the models sequence is re-encoded). Validates the result before writing
@@ -333,6 +404,10 @@ func listArkAgentPlanModelIDs(provName string) ([]string, error) {
 	}
 	return ids, nil
 }
+
+// volcengineModelFilterRegexps and isVolcengineModelFiltered moved to
+// provider/volcengine.go (FilterModelIDs override) - provider-specific policy
+// rules live with the provider implementation, not in the main package.
 
 // nonFlagArgs returns positional args (skipping --config and its value).
 func nonFlagArgs(args []string) []string {
