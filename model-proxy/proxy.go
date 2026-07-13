@@ -67,8 +67,10 @@ type routeSticky struct {
 	since    time.Time
 }
 
-// buildProviders creates provider.Provider instances from config, wiring the
-// main package's existing AuthProvider/Login/Logout/Usage functions as callbacks.
+// buildProviders creates provider.Provider instances from config. Each provider
+// owns its auth/usage/quota/logout (Phase 1-5); buildOne only wires the two
+// remaining callbacks (LoginFn: interactive login flow; FetchModelsFn:
+// volcengine's V4-signed ListArkAgentPlanModel) + the per-provider config fields.
 //
 // A provider whose credential pool (loadPool) has ≥2 accounts is UNROLLED into
 // one virtual provider per account, keyed "name#<accountID>"; the parent name
@@ -120,8 +122,8 @@ func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]str
 			log.Printf("[proxy] pool %s exists but has 0 accounts (cleared or corrupt); treating as not logged in", name)
 		}
 		if !pluralExists || len(pool.Accounts) == 0 {
-			// no plural pool → legacy singular fallback OR not logged in:
-			// cred=nil keeps ApiKeyBase + pcfg.Auth file-backed (pre-pool path).
+			// no plural pool -> legacy singular fallback OR not logged in:
+			// cred=nil keeps ApiKeyBase file-backed (pre-pool path).
 			if p := buildOne(cfg, name, prov, accountCred{}); p != nil {
 				m[name] = p
 			}
@@ -173,17 +175,11 @@ func credOrNil(c accountCred) *accountCred {
 
 // buildOne constructs a single provider instance (a real provider for the
 // single-account path, or a virtual for one credential-pool entry) bound to
-// cred. When cred is non-empty the key is bound in THREE places, all required
-// for a correct virtual:
-//  1. Embedded ApiKeyBase (the FORWARD path) — via pcfg.BoundAPIKey; the
-//     apikey constructors (zhipu/deepseek/volcengine) build a bound base whose
-//     LoadKey/AuthHeaders use the in-memory key. This is the load-bearing
-//     binding: deepseek/volcengine DEFINE their own AuthHeaders (dual Bearer +
-//     x-api-key) sourcing from the embedded ApiKeyBase, NOT from cfg.Auth.
-//  2. pcfg.Auth (the FetchModels path) — newAuthProvider with cred produces a
-//     bound ApiKeyProvider so fetchModelsBearer (cfg.Auth.Inject) uses the key.
-//  3. Usage/Quota closures — cred is passed through so per-account usage/quota
-//     queries are scoped to this account.
+// cred. When cred is non-empty the key is bound via pcfg.BoundAPIKey, which the
+// apikey constructors (zhipu/deepseek/volcengine) feed into a bound ApiKeyBase
+// whose LoadKey/AuthHeaders use the in-memory key. This covers all three paths
+// (forward AuthHeaders, FetchModels via p.AuthHeaders, and Usage/Quota fetches
+// which call p.AuthHeaders) - one binding point, no separate cfg.Auth needed.
 //
 // When cred is empty all three fall back to the legacy file-backed behavior
 // (identical to the pre-pool buildProviders).

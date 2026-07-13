@@ -56,11 +56,16 @@ config.yaml:
 - `ExtraHeaders(req, path)` -- 每次请求（forward + 探测）都要的专属头。默认 no-op；aqp override 设 `anthropic-version` + UUID `x-compass-request-id`（forward 与 probe 共用此实现，消除旧的两处重复分支）。
 - `FilterModelIDs(ids)` -- `models refresh` 的静态策略过滤（policy pass）。默认透传；volcengine override 剔除 `*-latest`/`doubao-seed-1-*`/lite/mini。
 
-main 包通过回调注入（`Config.Auth` / `LoginFn`/`LogoutFn`/`UsageFn`/`FetchModelsFn`/`QuotaFn`，在 `proxy.go:buildProviders`）把现有 auth/登录/用量函数接入，`provider/` 包不重新实现这些。
+**provider 自实现**（Phase 1-5 重构后）：`Auth`/`Usage`/`Quota`/`Logout` 都是 provider struct 直接实现，**不是 main 回调**：
+- Auth: `provider/auth.go` -- `AqpKeyProvider`（SSO cookie → mint key）/ `CodexOAuthProvider`（OAuth JWT + 刷新）/ `ApiKeyBase`（apikey 文件）。每个 provider struct embed/持有其 auth injector；`AuthHeaders`/`Refresh` 直接调它。颜色/格式 helper 在 `provider/display.go`。
+- Usage: `provider/usage_display.go` -- 每个 provider 的 `Usage()` 打印（首行 `Provider: <name>` 契约）。
+- Quota: 每个 provider 的 `Quota()` 直接 fetch+parse（parser 在 `provider/*.go`）。
+- Logout: provider 直接删凭据文件（aqp/codex 删 oauth_auth.json；apikey 用 `ApiKeyBase.DeleteKey`）。
+- main 只剩两个**窄回调**：`LoginFn`（cmdLogin 直接调 `run*` 交互流程——SSO/device/stdin，不走 provider 实例；`p.Login()` 生产不用）+ `FetchModelsFn`（volcengine 的 V4 签名 `ListArkAgentPlanModel`）。`buildOne`（`proxy.go`）的 switch 只剩这两个回调的 wiring。交互 login 流程是 CLI/IO 编排（浏览器/stdin/loopback/池写入），属 main 的 `login` 命令实现。
 
 ### 配额感知调度（quota-aware scheduling）
 
-`Provider.Quota()`（接口方法，镜像 `UsageFn` 由 `QuotaFn` 回调注入）把每个上游的用量端点解析成归一化的 `provider.QuotaSnapshot{Billing, RemainingPct, Windows, ...}`。各 provider 来源：
+`Provider.Quota()`（接口方法，Phase 2 起 provider 直接实现）把每个上游的用量端点解析成归一化的 `provider.QuotaSnapshot{Billing, RemainingPct, Windows, ...}`。各 provider 来源：
 
 | provider_id | 来源端点 | Billing |
 |---|---|---|
