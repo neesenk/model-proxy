@@ -1,0 +1,472 @@
+package main
+
+import (
+	"bytes"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// forwardLogCtx carries per-forward log context from forward() into tryTarget(),
+// where the upstream response (and thus the capture point) lives. requestID
+// groups one client request's failover attempts; attempt is the 0-based index
+// in the failover chain; exposed is the route name (post claude_mapping).
+type forwardLogCtx struct {
+	requestID string
+	attempt   int
+	exposed   string
+}
+
+// requestLogRecord is one line in the JSONL request log. Written as one JSON
+// object per line; request_body/response_body are JSON-escaped so newlines in
+// the bodies don't break the one-record-per-line format.
+type requestLogRecord struct {
+	Ts              string `json:"ts"` // RFC3339, UTC
+	RequestID       string `json:"request_id"`
+	SessionID       string `json:"session_id"`
+	Protocol        string `json:"protocol"`
+	Method          string `json:"method"`
+	Path            string `json:"path"`
+	CalledModel     string `json:"called_model"`
+	UpstreamModel   string `json:"upstream_model"`
+	Exposed         string `json:"exposed"`
+	Provider        string `json:"provider"`
+	Attempt         int    `json:"attempt"`
+	Status          int    `json:"status"`
+	LatencyMs       int64  `json:"latency_ms"`
+	RequestSize     int    `json:"request_size"`
+	ResponseSize    int64  `json:"response_size"`
+	RequestBody     string `json:"request_body"`
+	ResponseBody    string `json:"response_body"`
+	ResponseHeaders string `json:"response_headers,omitempty"`
+}
+
+// fileTimeLayout is the timestamp format embedded in log file names:
+//
+//	requests-20260713-150405.log                       (active)
+//	requests-20260713-150405--20260714-090000-1.log    (rotated: start--end-seq)
+const fileTimeLayout = "20060102-150405"
+
+// logFileMode is the mode for request-log files. The bodies contain user code
+// and prompts (sensitive), so files are owner-only read/write (0o600), matching
+// the sibling credential files under ~/.model-proxy/.
+const logFileMode = 0o600
+
+// requestFileWriter owns the current log file and the size/day rotation policy.
+// It is NOT goroutine-safe - only the logger's single background goroutine
+// touches it. `now` is passed into each method so rotation (notably the
+// day-boundary check) is unit-testable without sleeping.
+type requestFileWriter struct {
+	dir       string
+	maxSize   int64
+	f         *os.File
+	curPath   string
+	curStart  time.Time
+	curDay    string // "2006-01-02" of curStart; day change triggers rotation
+	curSize   int64
+	rotateSeq uint64 // monotonic counter disambiguating same-second archives
+}
+
+// open starts a new active file (requests-<now>.log). If a same-named file
+// already exists (restart within the same second) it appends.
+func (w *requestFileWriter) open(now time.Time) {
+	w.curStart = now
+	w.curDay = now.Format("2006-01-02")
+	w.curPath = filepath.Join(w.dir, fmt.Sprintf("requests-%s.log", now.Format(fileTimeLayout)))
+	f, err := os.OpenFile(w.curPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, logFileMode)
+	if err != nil {
+		log.Printf("[request_log] open %s: %v", w.curPath, err)
+		w.f = nil
+		return
+	}
+	w.f = f
+	if fi, err := f.Stat(); err == nil {
+		w.curSize = fi.Size()
+	} else {
+		w.curSize = 0
+	}
+}
+
+// rotate closes the current file and rolls over to a fresh active file. If the
+// current file has content, it is renamed to an archive
+// (requests-<start>--<now>-<seq>.log); if it is empty, it is removed (no empty
+// archives). The seq suffix disambiguates archives rotated within the same
+// wall-clock second (a size rotation immediately followed by a day rotation, or
+// a burst), so a same-second rename never overwrites a prior archive.
+func (w *requestFileWriter) rotate(now time.Time) {
+	if w.f != nil {
+		w.f.Close()
+		w.f = nil
+		if w.curSize > 0 {
+			w.rotateSeq++
+			archived := filepath.Join(w.dir, fmt.Sprintf("requests-%s--%s-%d.log",
+				w.curStart.Format(fileTimeLayout), now.Format(fileTimeLayout), w.rotateSeq))
+			if err := os.Rename(w.curPath, archived); err != nil {
+				log.Printf("[request_log] rename %s -> %s: %v", w.curPath, archived, err)
+			}
+		} else {
+			// Empty file (e.g. day changed before any record landed): drop it so
+			// the dir isn't littered with 0-byte files.
+			if err := os.Remove(w.curPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("[request_log] remove empty %s: %v", w.curPath, err)
+			}
+		}
+	}
+	w.open(now)
+}
+
+// write appends one record as a JSON line, rotating first if the line would
+// exceed maxSize or the calendar day has changed since the file was opened.
+// A record larger than maxSize is still written (to the current file when it's
+// empty, else to a fresh file) rather than dropped - better an over-size file
+// than a lost record.
+func (w *requestFileWriter) write(rec *requestLogRecord, now time.Time) error {
+	if w.f == nil {
+		w.open(now)
+		if w.f == nil {
+			return fmt.Errorf("request_log: no open file")
+		}
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	line = append(line, '\n')
+	// Rotate when the file already has content AND the next line would exceed
+	// maxSize, OR the calendar day changed. The curSize>0 guard on the size
+	// check avoids archiving an empty file just because a single record is
+	// larger than maxSize (the record is written to the empty file instead);
+	// rotate() additionally drops empty files on day change, so neither path
+	// produces a 0-byte archive.
+	dayChanged := now.Format("2006-01-02") != w.curDay
+	if (w.curSize > 0 && w.curSize+int64(len(line)) > w.maxSize) || dayChanged {
+		w.rotate(now)
+		if w.f == nil {
+			return fmt.Errorf("request_log: no file after rotate")
+		}
+	}
+	n, err := w.f.Write(line)
+	w.curSize += int64(n)
+	return err
+}
+
+func (w *requestFileWriter) close() {
+	if w.f != nil {
+		w.f.Close()
+		w.f = nil
+	}
+}
+
+// --- logger: buffered channel + background file writer ---
+
+// sweepInterval is how often the retention sweep runs in loop(). Bounded so an
+// idle logger still reclaims old files without waiting for the next record.
+const sweepInterval = time.Hour
+
+// requestLogger owns the in-flight capture pipeline. The hot path only calls
+// record() (non-blocking); a background goroutine drains the channel and writes
+// JSON lines to a rotating file. A nil *requestLogger = disabled (zero
+// overhead: tryTarget does not even wrap resp.Body).
+type requestLogger struct {
+	dir         string
+	maxSize     int64
+	maxBody     int
+	retention   time.Duration // 0 = keep forever (no sweep)
+	ch          chan *requestLogRecord
+	done        chan struct{} // closed by shutdown to signal loop to drain + exit
+	closed      chan struct{} // closed by loop when it has fully exited
+	dropped     uint64        // atomic; records dropped because the channel was full
+	writeErrors uint64        // atomic; records lost to a file-write/marshal error
+	dead        uint32        // atomic; 1 once the loop exited due to a fatal setup error (mkdir)
+	stopOnce    sync.Once
+}
+
+func newRequestLogger(dir string, maxSize int64, maxBody int, retention time.Duration) *requestLogger {
+	return &requestLogger{
+		dir:       dir,
+		maxSize:   maxSize,
+		maxBody:   maxBody,
+		retention: retention,
+		ch:        make(chan *requestLogRecord, 2048),
+		done:      make(chan struct{}),
+		closed:    make(chan struct{}),
+	}
+}
+
+// record enqueues one record. Non-blocking: if the channel is full the record
+// is dropped and `dropped` is incremented so the hot path never blocks on disk.
+func (l *requestLogger) record(r *requestLogRecord) {
+	if l == nil {
+		return
+	}
+	select {
+	case l.ch <- r:
+	default:
+		n := atomic.AddUint64(&l.dropped, 1)
+		if n == 1 || n%1000 == 0 {
+			if atomic.LoadUint32(&l.dead) == 1 {
+				log.Printf("[request_log] logger is dead (setup failed); dropped %d records total", n)
+			} else {
+				log.Printf("[request_log] channel full, dropped %d records total", n)
+			}
+		}
+	}
+}
+
+// noteWriteError bumps the write-error counter and logs at a throttled cadence
+// so a sustained disk failure is visible without flooding the log.
+func (l *requestLogger) noteWriteError(err error) {
+	n := atomic.AddUint64(&l.writeErrors, 1)
+	if n == 1 || n%1000 == 0 {
+		log.Printf("[request_log] write failed (lost %d records total): %v", n, err)
+	}
+}
+
+// loop drains the channel, writing each record to the rotating file. Exits when
+// done is closed: it drains anything left, then returns. Nil-safe. On a fatal
+// setup error (mkdir) it logs and returns immediately; the hot path's record()
+// keeps dropping into the dead channel (visible via `dropped`).
+func (l *requestLogger) loop() {
+	if l == nil {
+		return
+	}
+	defer close(l.closed)
+	if err := os.MkdirAll(l.dir, 0o700); err != nil {
+		log.Printf("[request_log] mkdir %s: %v - logging disabled", l.dir, err)
+		atomic.StoreUint32(&l.dead, 1)
+		return
+	}
+	w := &requestFileWriter{dir: l.dir, maxSize: l.maxSize}
+	defer w.close()
+	w.open(time.Now())
+	sweepTick := time.NewTicker(sweepInterval)
+	defer sweepTick.Stop()
+	// Sweep once at startup so a long-stopped daemon reclaims old files promptly.
+	l.sweep(time.Now())
+	for {
+		select {
+		case r := <-l.ch:
+			if r != nil {
+				if err := w.write(r, time.Now()); err != nil {
+					l.noteWriteError(err)
+				}
+			}
+		case <-sweepTick.C:
+			l.sweep(time.Now())
+		case <-l.done:
+		drain:
+			for {
+				select {
+				case r := <-l.ch:
+					if r != nil {
+						if err := w.write(r, time.Now()); err != nil {
+							l.noteWriteError(err)
+						}
+					}
+				default:
+					break drain
+				}
+			}
+			// Final sweep on shutdown so a clean exit also reclaims.
+			l.sweep(time.Now())
+			return
+		}
+	}
+}
+
+// sweep deletes rotated archive files (requests-*--*-*.log) whose modification
+// time is older than retention. The active file (requests-<ts>.log, no --) is
+// never deleted. No-op when retention <= 0. Best-effort: errors are logged but
+// don't stop the loop.
+func (l *requestLogger) sweep(now time.Time) {
+	if l.retention <= 0 {
+		return
+	}
+	cutoff := now.Add(-l.retention)
+	entries, err := os.ReadDir(l.dir)
+	if err != nil {
+		log.Printf("[request_log] sweep readdir %s: %v", l.dir, err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// Only rotated archives match "requests-<start>--<end>-<seq>.log".
+		// The active file has no "--" and is always kept.
+		if !strings.HasPrefix(name, "requests-") || !strings.Contains(name, "--") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if fi.ModTime().Before(cutoff) {
+			if err := os.Remove(filepath.Join(l.dir, name)); err != nil {
+				log.Printf("[request_log] sweep remove %s: %v", name, err)
+			}
+		}
+	}
+}
+
+// shutdown signals loop to drain + close, then waits for it to finish.
+func (l *requestLogger) shutdown() {
+	if l == nil {
+		return
+	}
+	l.stopOnce.Do(func() { close(l.done) })
+	<-l.closed
+}
+
+// --- captureReader: bounded tee that captures response bytes in-flight ---
+
+// captureReader is a pass-through io.ReadCloser that tees bytes read from src
+// into a bounded buffer (up to max bytes; past that, capturing stops but bytes
+// keep flowing to the client and truncated is set). `total` always reflects the
+// full response size. On the first Close it calls onClose once, then closes src.
+type captureReader struct {
+	src       io.ReadCloser
+	buf       bytes.Buffer
+	total     int64
+	max       int
+	truncated bool
+	onClose   func(captured []byte, total int64, truncated bool)
+	closeOnce sync.Once
+}
+
+func newCaptureReader(src io.ReadCloser, max int, onClose func(captured []byte, total int64, truncated bool)) *captureReader {
+	return &captureReader{src: src, max: max, onClose: onClose}
+}
+
+func (c *captureReader) Read(p []byte) (int, error) {
+	n, err := c.src.Read(p)
+	if n > 0 {
+		c.total += int64(n)
+		// Tee into the buffer while under cap. Once over cap, stop capturing
+		// (bytes still pass through to the client) and mark truncated.
+		if c.buf.Len() < c.max {
+			room := c.max - c.buf.Len()
+			if n <= room {
+				c.buf.Write(p[:n])
+			} else {
+				c.buf.Write(p[:room])
+				c.truncated = true
+			}
+		}
+	}
+	return n, err
+}
+
+func (c *captureReader) Close() error {
+	var firstErr error
+	c.closeOnce.Do(func() {
+		if c.onClose != nil {
+			c.onClose(c.buf.Bytes(), c.total, c.truncated)
+		}
+		firstErr = c.src.Close()
+	})
+	return firstErr
+}
+
+// newRequestID returns a 32-char hex id from crypto/rand, used to group one
+// client request's failover attempts.
+func newRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%016x", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", b[:])
+}
+
+// truncMarker is appended to a captured body that exceeded maxBodyBytes so the
+// stored record is self-describing about data loss.
+const truncMarker = "\n...[truncated by model-proxy request_log max_body_bytes]"
+
+// recordInputs bundles the values needed to build a requestLogRecord, keeping
+// the buildRecord signature stable as fields evolve.
+type recordInputs struct {
+	flc         forwardLogCtx
+	r           *http.Request
+	proto       string
+	calledModel string
+	t           RouteTarget
+	resp        *http.Response
+	start       time.Time
+	requestBody []byte
+	captured    []byte
+	total       int64
+	truncated   bool
+}
+
+// buildRecord assembles a requestLogRecord. The request body is capped to
+// maxBody (with a truncation marker); the response body is already bounded by
+// the captureReader (marker appended if truncated). ResponseSize is the true
+// total (accurate even when the body was truncated).
+func (l *requestLogger) buildRecord(in recordInputs) *requestLogRecord {
+	rec := &requestLogRecord{
+		Ts:            time.Now().UTC().Format(time.RFC3339),
+		RequestID:     in.flc.requestID,
+		SessionID:     in.r.Header.Get("x-claude-code-session-id"),
+		Protocol:      in.proto,
+		Method:        in.r.Method,
+		Path:          in.r.URL.Path,
+		CalledModel:   in.calledModel,
+		UpstreamModel: in.t.Model,
+		Exposed:       in.flc.exposed,
+		Provider:      in.t.Provider,
+		Attempt:       in.flc.attempt,
+		Status:        in.resp.StatusCode,
+		LatencyMs:     time.Since(in.start).Milliseconds(),
+		ResponseSize:  in.total,
+	}
+	rec.RequestSize = len(in.requestBody)
+	if len(in.requestBody) > l.maxBody {
+		rec.RequestBody = string(in.requestBody[:l.maxBody]) + truncMarker
+	} else {
+		rec.RequestBody = string(in.requestBody)
+	}
+	if in.truncated {
+		rec.ResponseBody = string(in.captured) + truncMarker
+	} else {
+		rec.ResponseBody = string(in.captured)
+	}
+	hdrs := map[string]string{}
+	if ct := in.resp.Header.Get("content-type"); ct != "" {
+		hdrs["content-type"] = ct
+	}
+	if rid := in.resp.Header.Get("x-request-id"); rid != "" {
+		hdrs["x-request-id"] = rid
+	}
+	if rr := in.resp.Header.Get("retry-after"); rr != "" {
+		hdrs["retry-after"] = rr
+	}
+	if len(hdrs) > 0 {
+		if hb, err := json.Marshal(hdrs); err == nil {
+			rec.ResponseHeaders = string(hb)
+		}
+	}
+	return rec
+}
+
+// initRequestLog constructs the file-based request logger (does NOT start the
+// loop - runProxy does `go p.reqLog.loop()`). Best-effort: on failure leaves
+// p.reqLog nil. Called from runProxy only - direct NewProxy callers (tests)
+// stay in-memory.
+func (p *Proxy) initRequestLog(rlc RequestLogConfig) {
+	if !rlc.Enabled {
+		return
+	}
+	p.reqLog = newRequestLogger(rlc.dir(), rlc.maxFileSize(), rlc.maxBodyBytes(), rlc.retention())
+	log.Printf("[request_log] enabled -> %s (max_file_size %d bytes, max_body %d bytes, retention %s)",
+		rlc.dir(), rlc.maxFileSize(), rlc.maxBodyBytes(), rlc.retention())
+}

@@ -29,7 +29,13 @@ func newUpstream(h http.HandlerFunc) *httptest.Server {
 
 // newProxyServer wraps a Proxy with the given auth + model_map and returns a hitable httptest server.
 func newProxyServer(upstreamURL, auth string, modelMap map[string]string) *httptest.Server {
-	// Build provider model names from the model_map (alias→real), deduped.
+	_, px := newProxyServerP(upstreamURL, auth, modelMap)
+	return px
+}
+
+// newProxyServerP is newProxyServer but also returns the *Proxy, so callers can
+// wire extra state (e.g. a request logger) onto it for benchmarking.
+func newProxyServerP(upstreamURL, auth string, modelMap map[string]string) (*Proxy, *httptest.Server) {
 	seen := map[string]bool{}
 	var provModels []string
 	routes := map[string][]RouteTarget{}
@@ -48,7 +54,7 @@ func newProxyServer(upstreamURL, auth string, modelMap map[string]string) *httpt
 		Routes: routes,
 	}
 	p := NewProxy(cfg)
-	return httptest.NewServer(http.HandlerFunc(p.handler))
+	return p, httptest.NewServer(http.HandlerFunc(p.handler))
 }
 
 // --- mock upstream handlers ---
@@ -175,6 +181,104 @@ func BenchmarkProxy_Forward_SSE(b *testing.B) {
 	defer px.Close()
 	body := smallBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := cli.Post(px.URL+"/v1/messages", "application/json", bytes.NewReader(body))
+		if err != nil {
+			b.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
+// BenchmarkProxy_Forward_RequestLog_SmallBody measures the hot-path overhead of
+// per-request access logging on a small non-streaming response: captureReader
+// tee + buildRecord + non-blocking enqueue. The logger writes to a temp dir
+// with a running loop, so the full pipeline (capture -> channel -> file write)
+// is exercised. Compare against BenchmarkProxy_Forward_NoMap (logging disabled)
+// to size the cost.
+func BenchmarkProxy_Forward_RequestLog_SmallBody(b *testing.B) {
+	silenceLog()
+	up := newUpstream(jsonOK)
+	defer up.Close()
+	pxp, px := newProxyServerP(up.URL, "static", nil)
+	defer px.Close()
+	// Wire a file-based request logger (running loop) onto the proxy.
+	dir := b.TempDir()
+	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
+	go l.loop()
+	defer l.shutdown()
+	pxp.reqLog = l
+	body := smallBody()
+	cli := &http.Client{Timeout: 10 * time.Second}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := cli.Post(px.URL+"/v1/messages", "application/json", bytes.NewReader(body))
+		if err != nil {
+			b.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
+// BenchmarkProxy_Forward_RequestLog_LargeBody measures logging overhead with a
+// large response body, where the captureReader tee cost (per-byte memory copy
+// into the bounded buffer) dominates. The upstream returns a ~64KB body.
+func BenchmarkProxy_Forward_RequestLog_LargeBody(b *testing.B) {
+	silenceLog()
+	up := newUpstream(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write(bytes.Repeat([]byte("y"), 64*1024))
+	})
+	defer up.Close()
+	pxp, px := newProxyServerP(up.URL, "static", nil)
+	defer px.Close()
+	dir := b.TempDir()
+	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
+	go l.loop()
+	defer l.shutdown()
+	pxp.reqLog = l
+	body := smallBody()
+	cli := &http.Client{Timeout: 10 * time.Second}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := cli.Post(px.URL+"/v1/messages", "application/json", bytes.NewReader(body))
+		if err != nil {
+			b.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
+// BenchmarkProxy_Forward_RequestLog_1MB measures logging overhead at the
+// max_body_bytes scale (1MB response): the captureReader tee copies 1MB into
+// the bounded buffer per request. Sizes the per-byte copy cost that dominates
+// for large streaming responses.
+func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
+	silenceLog()
+	up := newUpstream(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write(bytes.Repeat([]byte("y"), 1024*1024))
+	})
+	defer up.Close()
+	pxp, px := newProxyServerP(up.URL, "static", nil)
+	defer px.Close()
+	dir := b.TempDir()
+	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
+	go l.loop()
+	defer l.shutdown()
+	pxp.reqLog = l
+	body := smallBody()
+	cli := &http.Client{Timeout: 30 * time.Second}
 
 	b.ReportAllocs()
 	b.ResetTimer()

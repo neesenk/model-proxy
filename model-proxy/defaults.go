@@ -131,4 +131,16 @@ takeover:
   # provider_id is the single identifier used by takeover for every agent that
   # takes one (opencode, pi, codex, future agents). claude doesn't use it.
   provider_id: model-proxy
+
+# Per-request access log: writes the full request + response body of each
+# committed upstream call as one JSONL line to a rotating file under dir, for
+# offline analysis (prompt replay, failure debugging, agent behavior). Disabled
+# by default (zero hot-path overhead). Restart the daemon after changing these
+# (reload is not enough). Uncomment to enable:
+# request_log:
+#   enabled: true                       # default false
+#   dir: ~/.model-proxy/requests        # default
+#   max_file_size: 1073741824           # 1G per file (rotate on size or day)
+#   max_body_bytes: 5242880             # 5MB cap per body (truncates past it)
+#   retention: 720h                     # 30d; delete rotated files older than this; 0 = forever
 `

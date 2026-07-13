@@ -185,19 +185,6 @@ func TestConfig_ValidateErrors(t *testing.T) {
 			}},
 			wantSub: "target \"no-such-route\" not found in routes",
 		},
-		{
-			name: "duplicate priorities",
-			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
-				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
-				"b": {OpenAIBaseURL: "https://y", Provider: "zhipu"},
-			}, Routes: map[string][]RouteTarget{
-				"m": {
-					{Provider: "a", Model: "m", Priority: 1},
-					{Provider: "b", Model: "m", Priority: 1},
-				},
-			}},
-			wantSub: "duplicate priority 1",
-		},
 	}
 
 	for _, tc := range cases {
@@ -210,6 +197,25 @@ func TestConfig_ValidateErrors(t *testing.T) {
 				t.Errorf("error = %q, want substring %q", err.Error(), tc.wantSub)
 			}
 		})
+	}
+}
+
+// TestConfig_ValidateAcceptsDuplicatePriorities verifies that targets sharing
+// the same priority within a route are ACCEPTED - the scheduler ranks same-
+// priority targets by surplus (tier -> priority -> surplus), so duplicates are
+// a feature (a surplus-competed pool), not a config error.
+func TestConfig_ValidateAcceptsDuplicatePriorities(t *testing.T) {
+	cfg := &Config{Listen: ":1", Providers: map[string]Provider{
+		"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
+		"b": {OpenAIBaseURL: "https://y", Provider: "zhipu"},
+	}, Routes: map[string][]RouteTarget{
+		"m": {
+			{Provider: "a", Model: "m", Priority: 1},
+			{Provider: "b", Model: "m", Priority: 1},
+		},
+	}}
+	if err := cfg.validate(); err != nil {
+		t.Errorf("duplicate priority should be accepted (surplus-competed pool), got error: %v", err)
 	}
 }
 

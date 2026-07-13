@@ -79,6 +79,7 @@ main 包通过回调注入（`Config.Auth` / `LoginFn`/`LogoutFn`/`UsageFn`/`Fet
 - **`tierRank`**：**plan(0) < unknown(1) < payg(2)** —— 注意 `BillingClass` 的 iota（`Unknown=0, Plan=1, PayG=2`）**不等于**调度顺序，故 `tierRank` 单独映射；pay-as-you-go（`billing: pay-as-you-go`）严格兜底。
 - **peak 只走短窗口折算**：`peakMult` 只烧短窗口（公式里的 `×(peakMult−1)` 项）。没有同单位短窗口的 provider（codex/compass 是 money ultimate；未轮询的）**高峰不打折** —— peak 不再是整份 latency 折扣。multiplier=1 关闭。
 - **粘性切换**（cache 友好）：路由停在 current provider 一个 `sticky_dwell`（默认 10m）；到期后仅当最优者在 **tier → priority → surplus 边际（`scheduling.quota_switch_margin`，默认 15 pts）** 任一更优时才换 —— 最优者只是同 priority 下 sub-margin 的 surplus 微差则保留 cache。
+- **重复 priority 合法**：同一路由多个 target 用相同 `priority` 是**设计支持的**（不是配置错误）--它们构成一个 surplus 竞争池（高 surplus 者胜，仅在边际更优时切换）。`config.go:validate` **不**拒绝重复 priority（曾有过的 duplicate-priority 校验是 surplus 契约引入前的遗留，已移除）。
 
 **可见性**：`GET /debug/schedule`（只读，经 `decideOrder` peek，不改 sticky）返回每路由首选 provider + ordered 列表（tier/surplus/可用/peak）+ sticky 状态。`model-proxy schedule`（CLI，查询该接口，需 daemon 在跑）；`model-proxy doctor`（离线 config 诊断：每 provider 的 tier/quota/peak、每路由 dry-run 顺序（无 live 配额→tier 再 priority）、warning）。
 
@@ -164,6 +165,17 @@ stats                      # per-(provider,model) 调用统计（SQLite）；--f
 - **优雅退出**：SIGINT/SIGTERM 触发最终 flush + pid 清理（覆盖 supervisor 转发的 worker SIGTERM）。
 - **查询**：`GET /api/stats?from=&to=&provider=&model=&bucket=`（`bucket` 如 `10m`/`1h`，默认 `1m`）按 SQL `GROUP BY` 聚合到宽桶展示（存储恒 1 分钟，聚合只减行不丢精度）；`model-proxy stats` CLI 渲染（`--bucket`/`--json`）。`POST /api/tokens/reset` -> `Proxy.resetStats` 清零内存 + SQLite + flusher 基线。
 - **锁纪律**：metrics 用原子 + 短暂 `metrics.mu`（map get-or-create）；token 用 `tokenMu`；stats DB 自己的锁 -- 都是**独立叶子锁**，不与 `p.mu`/`healthMu`/`quotaMu` 嵌套。
+
+#### 请求访问日志（`request_log.go`，JSONL 文件，默认关闭）
+
+逐请求明细层，与 stats.go（per-minute 聚合）互补：记录每个 commit 到客户端的 upstream 调用的**完整 request body + response body** + 元数据，每条一行 JSON（JSONL）写入轮转文件，供离线分析 / 改进 coding agent（prompt 复盘、失败调试，用 `jq`/`grep` 处理）。**默认 `request_log.enabled: false`**（零开销：不 wrap、不开文件、不起 goroutine）；改 `enabled` 需**重启**（reload 不重建 logger）。
+
+- **热路径**（`proxy.go:tryTarget` commit 分支）：`p.reqLog != nil` 时把 `resp.Body` 包进 `captureReader`（有界 tee，`max_body_bytes` 封顶，超限停捕获 + 截断标记，**字节仍透传客户端**）；`usageScanner`（SSE 时）包在其外（pass-through，字节相同）。`body.Close()` -> `captureReader.Close`（幂等，回调一次）-> 组装 `requestLogRecord` -> **非阻塞** `select` enqueue 到 buffered chan（cap 2048，满则 `atomic` 计 `dropped` + 降频 log，**绝不阻塞 forward**）。`tokens.go` 路径**不变**（累计计数器照常；per-request token 不单独解析，raw body 自带 usage 事件）。`request_id`（crypto/rand hex）**仅在 `p.reqLog != nil` 时生成**（禁用时不调 `crypto/rand`，零开销）。
+- **后台写文件**（`requestLogger.loop` -> `requestFileWriter`）：单 goroutine drain chan，每条 `json.Marshal` + `\n` 追加写当前文件。**写失败**（磁盘满/open 失败/marshal 失败）不再静默：`atomic` 计 `writeErrors` + 降频 log（`[request_log] write failed (lost N records total)`）；启动期 `MkdirAll` 失败置 `dead` 标志，之后 drop 的记录 log 会标 `logger is dead`。**轮转**：当前文件已有内容且下一行将超过 `max_file_size`（默认 1G）**或** 自然日变更时，关闭当前文件、归档为 `requests-<开始>--<结束>-<seq>.log`（`20060102-150405` 格式 + 单调 `seq` 后缀防同秒覆盖），开新 `requests-<now>.log`；空文件（日变更前无记录）直接删除不归档。故"一天少于 1G 也一天一个文件"由日变更轮转保证。**retention**（默认 `720h`=30d，`0`=永久）：`loop` 每小时 + 启动 + shutdown 跑 `sweep`，按 mtime 删除超过 retention 的**归档文件**（`requests-...--...-N.log`），**活跃文件永不删**。SIGINT/SIGTERM 的 `shutdown()` 排空 chan + 写完 + 最终 sweep + 关文件（不丢 in-flight）。`forward` 顶部生成 `request_id` + `attempt` 序号经 `forwardLogCtx` 传入 `tryTarget`，聚合同次 failover 尝试。
+- **文件权限**：日志含用户代码/prompt，文件 `0o600`（owner-only），目录 `0o700`，对齐 `~/.model-proxy/` 凭据文件。
+- **配置** `config.request_log.{enabled, dir, max_file_size, max_body_bytes, retention}`（默认 `~/.model-proxy/requests/`、`1G`、`5MiB`、`720h`）。accessor 在 `config.go`。**reload 不重建 logger**：SIGHUP 改 `enabled` 不会生效，`reload` 检测到 `enabled:true && p.reqLog==nil` 会 log 警告提示重启。
+- **记录范围**：只记 commit 到客户端的响应（2xx + 非 failover 4xx，即 `tryTarget` 走到 `flushCopy` 的分支）。failover 中间尝试（401/429/5xx）与 all-failed 502 不记（其聚合在 stats.go 计数器）。`request_id`+`attempt` 字段为未来"记全部尝试"预留。
+- **无 API / 无 CLI**：纯文件输出，用户用 `jq`/`grep`/编辑器直接读 `dir` 下的 `.log` 文件。
 
 ### compass 网关契约（实测）
 

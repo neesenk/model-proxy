@@ -138,6 +138,13 @@ func runProxy(sa serveArgs) {
 	// persisted stats (in-memory counters still work).
 	p.initStats(cfg.Stats)
 	go p.statsFlushLoop()
+	// Open the per-request access log (full request+response bodies written as
+	// JSONL to a rotating file) if enabled in config (default off). Best-effort:
+	// on failure p.reqLog stays nil and the proxy runs without request logging
+	// (zero overhead). Mirrors initStats: constructs the logger here, the write
+	// loop is started below.
+	p.initRequestLog(cfg.RequestLog)
+	go p.reqLog.loop()
 	// Graceful shutdown: flush pending deltas on SIGINT/SIGTERM so ~1 minute of
 	// stats isn't lost, then remove the foreground pid file. The supervisor
 	// forwards SIGTERM to the worker, so this covers both roles.
@@ -148,6 +155,9 @@ func runProxy(sa serveArgs) {
 		if p.flusher != nil {
 			p.flusher.flush(time.Now())
 		}
+		// Drain the request-log channel + final write so in-flight records
+		// aren't lost. Nil-safe (disabled / init failure).
+		p.reqLog.shutdown()
 		if pidPath != "" {
 			os.Remove(pidPath)
 		}

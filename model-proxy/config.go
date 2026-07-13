@@ -21,6 +21,7 @@ type Config struct {
 	Takeover      Takeover                 `yaml:"takeover"`
 	Web           WebConfig                `yaml:"web"`
 	Stats         StatsConfig              `yaml:"stats"`
+	RequestLog    RequestLogConfig         `yaml:"request_log"`
 }
 
 // WebConfig toggles the admin UI (/ui + /api). Defaults to enabled.
@@ -51,6 +52,66 @@ func (s StatsConfig) retention() time.Duration {
 		return 720 * time.Hour
 	}
 	if d, err := time.ParseDuration(s.Retention); err == nil {
+		return d
+	}
+	return 720 * time.Hour
+}
+
+// RequestLogConfig configures per-request access logging: the full request +
+// response bodies of each committed upstream call are written as JSONL lines to
+// a rotating file under dir for offline analysis (prompt replay, failure
+// debugging, agent behavior). Defaults to DISABLED (zero hot-path overhead).
+// Changing enabled requires a restart (reload does not rebuild the logger).
+//
+// Rotation: a file is closed (and renamed requests-<start>--<end>.log) when the
+// next line would exceed max_file_size (default 1 GiB) OR the calendar day
+// changes since the file was opened - so even a quiet day yields at most one
+// file per day. max_body_bytes (default 5 MiB) caps each captured body, marking
+// truncation past it to bound memory. retention (default 720h = 30 days; "0" =
+// keep forever) controls a periodic sweep that deletes rotated files older
+// than the window; the active file is never deleted.
+type RequestLogConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	Dir          string `yaml:"dir"`
+	MaxFileSize  int64  `yaml:"max_file_size"`
+	MaxBodyBytes int    `yaml:"max_body_bytes"`
+	Retention    string `yaml:"retention"`
+}
+
+// dir returns the request-log directory, defaulting to
+// ~/.model-proxy/requests.
+func (r RequestLogConfig) dir() string {
+	if r.Dir != "" {
+		return expandPath(r.Dir)
+	}
+	return filepath.Join(homeDir(), ".model-proxy", "requests")
+}
+
+// maxFileSize returns the per-file rotation cap in bytes, defaulting to 1 GiB.
+// Values <= 0 fall back to the default.
+func (r RequestLogConfig) maxFileSize() int64 {
+	if r.MaxFileSize > 0 {
+		return r.MaxFileSize
+	}
+	return 1 << 30 // 1 GiB
+}
+
+// maxBodyBytes returns the per-body capture cap in bytes, defaulting to 5 MiB.
+// Values <= 0 fall back to the default.
+func (r RequestLogConfig) maxBodyBytes() int {
+	if r.MaxBodyBytes > 0 {
+		return r.MaxBodyBytes
+	}
+	return 5 * 1024 * 1024
+}
+
+// retention returns the rotated-file retention duration, defaulting to 30 days.
+// "0" or a zero duration means keep forever (no sweep).
+func (r RequestLogConfig) retention() time.Duration {
+	if r.Retention == "" {
+		return 720 * time.Hour
+	}
+	if d, err := time.ParseDuration(r.Retention); err == nil {
 		return d
 	}
 	return 720 * time.Hour
@@ -293,6 +354,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Takeover      Takeover                 `yaml:"takeover"`
 		Web           WebConfig                `yaml:"web"`
 		Stats         StatsConfig              `yaml:"stats"`
+		RequestLog    RequestLogConfig         `yaml:"request_log"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
@@ -319,6 +381,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Takeover = raw.Takeover
 	cfg.Web = raw.Web
 	cfg.Stats = raw.Stats
+	cfg.RequestLog = raw.RequestLog
 	cfg.LogFile = expandPath(cfg.LogFile)
 	t := &cfg.Takeover
 	t.Claude = expandPath(t.Claude)
@@ -406,17 +469,12 @@ func (c *Config) validate() error {
 			return fmt.Errorf("claude_mapping %q → %q: target %q not found in routes — add a route named %q or fix the mapping", claude, exposed, exposed, exposed)
 		}
 	}
-	// Check for duplicate priorities within the same route (warn but don't fail —
-	// ties are resolved by list order, but duplicate priorities are likely a mistake).
-	for exposed, targets := range c.Routes {
-		seen := map[int]bool{}
-		for _, t := range targets {
-			if seen[t.Priority] && t.Priority != 0 {
-				return fmt.Errorf("route %q: duplicate priority %d — targets with the same priority are ambiguous; use distinct priorities", exposed, t.Priority)
-			}
-			seen[t.Priority] = true
-		}
-	}
+	// NOTE: duplicate priorities within a route are intentionally allowed. The
+	// scheduler (proxy.go decideOrder) ranks by tier -> priority -> surplus, so
+	// same-priority targets form a surplus-competed pool (higher-surplus wins;
+	// sticky switching only on a margin edge). Do NOT re-add a duplicate-priority
+	// rejection here - it contradicts the scheduling contract (AGENTS.md
+	// "quota-aware scheduling").
 	return nil
 }
 

@@ -26,6 +26,7 @@ providers:
       - glm-5.2
       - deepseek-v4-pro
       - deepseek-v4-flash
+
   codex:
     provider_id: codex
     openai_base_url: https://chatgpt.com/backend-api/codex
@@ -35,6 +36,7 @@ providers:
       - gpt-5.5
       - gpt-5.6-sol
       - gpt-5.6-terra
+
   # External provider (Zhipu BigModel — API key via `login zhipu`)
   # /models endpoint only lists 8 chat models; multimodal models exist but
   # must be added manually here (they use different API paths). Metadata
@@ -44,7 +46,7 @@ providers:
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     peak_hours:
-      - {window: "14:00-18:00", multiplier: 2}
+      - {window: "14:00-18:00", multiplier: 4}
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zhipu`: 5h/weekly/monthly quota + token consumption
     models:
       - glm-4.5
@@ -55,6 +57,7 @@ providers:
       - glm-5-turbo
       - glm-5.1
       - glm-5.2
+
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
@@ -90,6 +93,7 @@ providers:
       - kimi-k2.7-code
       - minimax-m2.7
       - minimax-m3
+
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called
 # anthropic model isn't listed, the called name is used as the exposed name.
@@ -100,6 +104,8 @@ claude_mapping:
   claude-haiku-4-5: deepseek-v4-flash
   opus: glm-5.2
   sonnet: deepseek-v4-pro
+
+
 # routes: exposed model name → ordered list of provider/model targets. The proxy
 # orders targets by billing tier (plan < unknown < pay-as-you-go), then priority
 # (lower wins), then quota surplus; applies session-sticky routing + circuit-
@@ -111,17 +117,21 @@ claude_mapping:
 routes:
   glm-5.2:
     - {provider: zhipu, model: glm-5.2, priority: 1}
+    - {provider: volcengine, model: glm-5.2, priority: 1}
     - {provider: aqp, model: glm-5.2, priority: 2}
   deepseek-v4-pro:
+    - {provider: volcengine, model: deepseek-v4-pro, priority: 1}
     - {provider: aqp, model: deepseek-v4-pro, priority: 1}
     - {provider: deepseek, model: deepseek-v4-pro, priority: 2}
   deepseek-v4-flash:
+    - {provider: volcengine, model: deepseek-v4-flash, priority: 1}
     - {provider: aqp, model: deepseek-v4-flash, priority: 1}
     - {provider: deepseek, model: deepseek-v4-flash, priority: 2}
   gpt-5.5:
     - {provider: codex, model: gpt-5.5, priority: 1}
   gpt-5.4:
     - {provider: codex, model: gpt-5.4, priority: 1}
+
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
 # Durations are strings (e.g. "10m", "60s"). Unset fields use the defaults shown.
 scheduling:
@@ -132,6 +142,7 @@ scheduling:
   sticky_dwell: 10m # min time on the chosen provider before re-evaluating
   quota_poll_interval: 5m # background quota poll cadence
   quota_switch_margin: 15 # switch provider if another's effective remaining beats current by ≥ this many pct points
+
 takeover:
   # provider_id is the single identifier used by takeover for every agent that
   # takes one (opencode, pi, codex, future agents). claude doesn't use it.
@@ -143,3 +154,15 @@ takeover:
   opencode: ~/.config/opencode/opencode.json
   codex: ~/.codex/config.toml
   pi: ~/.pi/agent/models.json
+
+# Per-request access log: writes the full request + response body of each
+# committed upstream call as one JSONL line to a rotating file under dir, for
+# offline analysis (prompt replay, failure debugging, agent behavior). Disabled
+# by default (zero hot-path overhead). Restart the daemon after changing these
+# (reload is not enough). Uncomment to enable:
+# request_log:
+#   enabled: true                       # default false
+#   dir: ~/.model-proxy/requests        # default
+#   max_file_size: 1073741824           # 1G per file (rotate on size or day)
+#   max_body_bytes: 5242880             # 5MB cap per body (truncates past it)
+#   retention: 720h                     # 30d; delete rotated files older than this; 0 = forever

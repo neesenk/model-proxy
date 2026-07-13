@@ -33,6 +33,7 @@ type Proxy struct {
 	tokens    *tokenCounter              // SSE-scanned token usage; nil only in degenerate tests
 	stats     *statsStore                // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
 	flusher   *statsFlusher              // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog    *requestLogger             // per-request access log (full bodies); nil = disabled (default) or init failure
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -395,6 +396,14 @@ func (p *Proxy) reload(configPath string) error {
 	// providers show up at once (removed ones simply go stale and age out).
 	if p.quota != nil {
 		go p.quota.pollAll(time.Now())
+	}
+	// request_log is NOT rebuilt on reload (the logger owns a background
+	// goroutine + open file; restarting it mid-flight needs careful drain). So
+	// a config that enables/tunes request_log via SIGHUP won't take effect until
+	// restart. Warn when the operator clearly expects logging but it isn't
+	// active, so this isn't a silent no-op.
+	if cfg.RequestLog.Enabled && p.reqLog == nil {
+		log.Printf("[reload] request_log.enabled is true but logging is not active (reload cannot start it); restart the daemon to enable request logging")
 	}
 	return nil
 }
@@ -798,6 +807,16 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		p.scheduleHook(sessionKey)
 	}
 
+	// requestID groups this client request's failover attempts in the per-request
+	// access log (one row per committed target). Generated once per forward, but
+	// ONLY when request logging is enabled - newRequestID() does a crypto/rand
+	// syscall, so skip it entirely when the logger is off (the default) to keep
+	// the disabled path zero-overhead.
+	var requestID string
+	if p.reqLog != nil {
+		requestID = newRequestID()
+	}
+
 	for ti, t := range ordered {
 		if p.metrics != nil {
 			p.metrics.inc(t.Provider, t.Model, evRequests)
@@ -825,7 +844,8 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			baseURL = prov.AnthropicBaseURL
 		}
 
-		if p.tryTarget(cfg, proto, calledModel, t, prov, provImpl, baseURL, upPath, body, w, r) {
+		flc := forwardLogCtx{requestID: requestID, attempt: ti, exposed: exposed}
+		if p.tryTarget(cfg, proto, calledModel, t, prov, provImpl, baseURL, upPath, body, w, r, flc) {
 			return // committed: response written to the client
 		}
 		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
@@ -839,7 +859,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 // timeout, 401 after refresh, 5xx, 429, or a build/auth error). It updates the
 // provider's health on success/failure/rate-limit and enforces half-open
 // single-flight. Failover only happens before any bytes are written to w.
-func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request) bool {
+func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, flc forwardLogCtx) bool {
 	sched := cfg.Scheduling
 	// Re-check availability and reserve the half-open probe slot if needed.
 	if !p.takeHalfOpenSlot(t.Provider) {
@@ -977,9 +997,36 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		// silently dropped. On normal EOF the scanner's Read already set
 		// done=true and committed, so Close is a harmless no-op (no double
 		// count). Non-SSE: body == resp.Body, equivalent to before.
+		//
+		// When request logging is enabled, wrap resp.Body in a captureReader
+		// (innermost) so the full response body is tee'd to a bounded buffer as
+		// it streams to the client; on Close it enqueues a requestLogRecord.
+		// The usageScanner wraps the captureReader (pass-through, so it sees the
+		// same bytes); scanner.Close -> captureReader.Close -> enqueue, then
+		// resp.Body.Close. The token path is unchanged (cumulative counters
+		// only); request logging never touches it.
+		reqBytes := body // request bytes sent upstream (post-rewrite); capture before body is shadowed
+		logger := p.reqLog
 		body := resp.Body
+		if logger != nil {
+			body = newCaptureReader(resp.Body, logger.maxBody, func(captured []byte, total int64, truncated bool) {
+				logger.record(logger.buildRecord(recordInputs{
+					flc:         flc,
+					r:           r,
+					proto:       proto,
+					calledModel: calledModel,
+					t:           t,
+					resp:        resp,
+					start:       start,
+					requestBody: reqBytes,
+					captured:    captured,
+					total:       total,
+					truncated:   truncated,
+				}))
+			})
+		}
 		if p.tokens != nil && isSSE(resp.Header) {
-			body = newUsageScanner(resp.Body, tokenKey{Provider: t.Provider, Model: t.Model}, p.tokens)
+			body = newUsageScanner(body, tokenKey{Provider: t.Provider, Model: t.Model}, p.tokens)
 		}
 		flushCopy(w, body)
 		body.Close()
