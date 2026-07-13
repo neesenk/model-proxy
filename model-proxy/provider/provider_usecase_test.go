@@ -346,63 +346,40 @@ func TestProviderDelegates_Callbacks(t *testing.T) {
 	loginCalled := false
 	logoutCalled := false
 	usageCalled := false
-	quotaCalled := false
 	cfg := &Config{
 		Auth:     fakeAuth{key: "k"},
 		LoginFn:  func() error { loginCalled = true; return nil },
 		LogoutFn: func() error { logoutCalled = true; return nil },
 		UsageFn:  func() (any, error) { usageCalled = true; return "u", nil },
-		QuotaFn: func() (*QuotaSnapshot, error) {
-			quotaCalled = true
-			return &QuotaSnapshot{Billing: BillingPlan, RemainingPct: 0.5}, nil
-		},
 	}
-	// codex (no ApiKeyBase; Login/Logout/Usage all delegated).
+	// codex: Login/Logout/Usage delegated to callbacks; Quota() is now a direct
+	// implementation (no QuotaFn callback since Phase 2) - exercised separately
+	// by the parser + fetch tests, not here.
 	codex := &CodexProvider{cfg: cfg}
 	mustNoErr(t, codex.Login())
 	mustNoErr(t, codex.Logout())
 	if _, err := codex.Usage(); err != nil {
 		t.Fatal(err)
 	}
-	if q, err := codex.Quota(); err != nil || q.Billing != BillingPlan {
-		t.Errorf("codex Quota=%v err=%v", q, err)
-	}
-	if !loginCalled || !logoutCalled || !usageCalled || !quotaCalled {
-		t.Errorf("codex delegate missed: login=%v logout=%v usage=%v quota=%v", loginCalled, logoutCalled, usageCalled, quotaCalled)
+	if !loginCalled || !logoutCalled || !usageCalled {
+		t.Errorf("codex delegate missed: login=%v logout=%v usage=%v", loginCalled, logoutCalled, usageCalled)
 	}
 
-	// aqp: FetchModels delegated to fetchModelsBearer (tested in P13); Quota via QuotaOrUnknown.
-	aqp := &AqpProvider{cfg: cfg}
-	if q, err := aqp.Quota(); err != nil || q.RemainingPct != 0.5 {
-		t.Errorf("aqp Quota=%v err=%v want 0.5", q, err)
-	}
-
-	// deepseek with a temp auth file so LoadKey works.
+	// deepseek with a temp auth file so LoadKey works; Quota() is a direct
+	// implementation (asserted via the parser tests, not here).
 	dir := t.TempDir()
 	authFile := filepath.Join(dir, "ds.json")
 	os.WriteFile(authFile, mustMarshal(map[string]string{"api_key": "k"}), 0o600)
 	ds := &DeepSeekProvider{ApiKeyBase: &ApiKeyBase{authFile: authFile}, cfg: cfg}
-	if q, err := ds.Quota(); err != nil || q.RemainingPct != 0.5 {
-		t.Errorf("deepseek Quota=%v err=%v", q, err)
-	}
 	// Surplus delegates to snap.Surplus.
 	if s := ds.Surplus(nil, time.Now(), 1); s != 0 {
 		t.Errorf("deepseek Surplus(nil)=%v want 0", s)
 	}
 }
 
-// --- P18: QuotaOrUnknown returns BillingUnknown when QuotaFn is nil ---
-
-func TestQuotaOrUnknown_NilFn(t *testing.T) {
-	cfg := &Config{Auth: fakeAuth{key: "k"}} // QuotaFn unset
-	q, err := cfg.QuotaOrUnknown()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if q.Billing != BillingUnknown {
-		t.Errorf("QuotaOrUnknown (nil fn) Billing=%v want BillingUnknown", q.Billing)
-	}
-}
+// --- P18: deleted in Phase 2 (QuotaOrUnknown/QuotaFn removed; each provider
+// implements Quota() directly - see TestStaticProviderQuota_Unknown in
+// quota_test.go for the BillingUnknown path). ---
 
 // --- P19: NewApiKeyBase + AuthFilePath ---
 
@@ -480,10 +457,10 @@ func TestStaticProvider_FullSurface(t *testing.T) {
 	if err := p.Logout(); err == nil {
 		t.Error("static Logout: want errNotSupported, got nil")
 	}
-	// Quota with nil QuotaFn → BillingUnknown (no panic).
+	// Quota -> BillingUnknown (static provider has no measurable quota).
 	q, err := p.Quota()
 	if err != nil || q.Billing != BillingUnknown {
-		t.Errorf("static Quota (nil fn)=%v err=%v want BillingUnknown", q, err)
+		t.Errorf("static Quota=%v err=%v want BillingUnknown", q, err)
 	}
 	if s := p.Surplus(nil, time.Now(), 1); s != 0 {
 		t.Errorf("static Surplus(nil)=%v want 0", s)

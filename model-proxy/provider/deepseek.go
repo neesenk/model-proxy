@@ -2,6 +2,8 @@ package provider
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -61,7 +63,26 @@ func (p *DeepSeekProvider) Login() error                   { return p.cfg.LoginF
 func (p *DeepSeekProvider) Logout() error                  { return p.cfg.LogoutFn() }
 func (p *DeepSeekProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *DeepSeekProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
-func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+
+// Quota GETs /user/balance and parses the per-currency balance windows.
+// DeepSeek is pay-as-you-go: no windowed budget (RemainingPct=-1). On any
+// failure returns a BillingUnknown snapshot carrying the error.
+func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) {
+	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
+	if err := p.cfg.Auth.Inject(req); err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	}
+	return ParseDeepseekQuota(body), nil
+}
 func (p *DeepSeekProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
 }

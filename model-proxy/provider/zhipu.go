@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -79,7 +80,33 @@ func (p *ZhipuProvider) Usage() (any, error) {
 }
 
 func (p *ZhipuProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
-func (p *ZhipuProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+
+// Quota GETs the zhipu usage_url and parses the BigModel quota envelope. On any
+// failure (auth, HTTP, non-zhipu body) returns a BillingUnknown snapshot
+// carrying the error (never a non-nil error) so the poll stays alive.
+func (p *ZhipuProvider) Quota() (*QuotaSnapshot, error) {
+	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
+	if err := p.cfg.Auth.Inject(req); err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
+	}
+	for k, v := range p.cfg.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	}
+	s, _ := ParseZhipuQuota(body, "")
+	if s == nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not zhipu quota format"}, nil
+	}
+	return s, nil
+}
 func (p *ZhipuProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
 }

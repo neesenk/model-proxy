@@ -675,3 +675,31 @@ func TestBucketLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestParseStatsFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want statsOpts
+	}{
+		{"empty", nil, statsOpts{}},
+		{"space-separated", []string{"--from", "2026-01-01", "--to", "2026-02-01",
+			"--provider", "zhipu", "--model", "glm-5.2", "--bucket", "5m", "--json"},
+			statsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
+				Model: "glm-5.2", Bucket: "5m", JSON: true}},
+		{"equals form", []string{"--from=2026-01-01", "--to=2026-02-01",
+			"--provider=zhipu", "--model=glm-5.2", "--bucket=5m"},
+			statsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
+				Model: "glm-5.2", Bucket: "5m"}},
+		{"value at end without arg", []string{"--from"}, statsOpts{}},
+		{"unknown flag ignored", []string{"--bogus", "x"}, statsOpts{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseStatsFlags(tc.args)
+			if got != tc.want {
+				t.Errorf("parseStatsFlags(%v) = %+v, want %+v", tc.args, got, tc.want)
+			}
+		})
+	}
+}

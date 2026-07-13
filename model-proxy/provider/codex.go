@@ -32,10 +32,32 @@ func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path strin
 	body = ensureJSONField(body, "store", false)
 	return targetURL, body
 }
-func (p *CodexProvider) Login() error                   { return p.cfg.LoginFn() }
-func (p *CodexProvider) Logout() error                  { return p.cfg.LogoutFn() }
-func (p *CodexProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
-func (p *CodexProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+func (p *CodexProvider) Login() error        { return p.cfg.LoginFn() }
+func (p *CodexProvider) Logout() error       { return p.cfg.LogoutFn() }
+func (p *CodexProvider) Usage() (any, error) { return p.cfg.UsageFn() }
+
+// Quota GETs /backend-api/wham/usage (derived from OpenAIBaseURL by stripping
+// the trailing /codex) with Bearer + originator + account-id (set by
+// AuthHeaders). On any failure returns a BillingUnknown snapshot carrying the
+// error string (never a non-nil error) so the scheduler treats codex as
+// unmeasured rather than crashing the poll.
+func (p *CodexProvider) Quota() (*QuotaSnapshot, error) {
+	usageURL := strings.TrimSuffix(p.cfg.OpenAIBaseURL, "/codex") + "/wham/usage"
+	req, _ := http.NewRequest("GET", usageURL, nil)
+	if err := p.AuthHeaders(req); err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
+	}
+	return ParseCodexQuota(body, "", "")
+}
 func (p *CodexProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
 }

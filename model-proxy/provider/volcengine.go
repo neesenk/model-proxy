@@ -1,8 +1,11 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"time"
 )
@@ -53,10 +56,9 @@ func (p *VolcengineProvider) RewriteRequest(targetURL string, body []byte, path 
 	return targetURL, body
 }
 
-func (p *VolcengineProvider) Login() error                   { return p.cfg.LoginFn() }
-func (p *VolcengineProvider) Logout() error                  { return p.cfg.LogoutFn() }
-func (p *VolcengineProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
-func (p *VolcengineProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+func (p *VolcengineProvider) Login() error        { return p.cfg.LoginFn() }
+func (p *VolcengineProvider) Logout() error       { return p.cfg.LogoutFn() }
+func (p *VolcengineProvider) Usage() (any, error) { return p.cfg.UsageFn() }
 func (p *VolcengineProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
 }
@@ -163,4 +165,78 @@ func ParseVolcengineQuota(u *AfpUsage) *QuotaSnapshot {
 	add("monthly", u.AFPMonthly, true, false, 30*24*time.Hour)
 	s.RemainingPct = ultimateRemaining(s.Windows)
 	return s
+}
+
+// volcengineCredsFile mirrors the legacy <name>_apikey.json contents: the Ark
+// API Key (chat) plus the Volcengine AK/SK (GetAFPUsage).
+type volcengineCredsFile struct {
+	APIKey    string `json:"api_key"`
+	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+}
+
+// getAFPUsage calls the Volcengine signed OpenAPI GetAFPUsage and returns the
+// 5h/daily/weekly/monthly AFP quota windows.
+func getAFPUsage(ak, sk string) (*AfpUsage, error) {
+	req, err := volcengineGet("GetAFPUsage", "2024-01-01", ak, sk, time.Now(), "")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GetAFPUsage: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GetAFPUsage HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 300))
+	}
+	var wrap struct {
+		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`
+		Result           AfpUsage        `json:"Result"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return nil, fmt.Errorf("parse GetAFPUsage: %w", err)
+	}
+	return &wrap.Result, nil
+}
+
+// resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
+// Bound keys (cfg.AccessKey/SecretKey, the pool-bound path) are used EXCLUSIVELY
+// - the on-disk file is never consulted, preserving per-account isolation (a
+// sibling virtual's file must not leak into this account's quota call). When
+// unbound (the single-account / pre-pool path), the legacy file at
+// cfg.VolcengineCredFile is read for backward compatibility.
+func (p *VolcengineProvider) resolveAKSK() (ak, sk string, err error) {
+	if p.cfg.AccessKey != "" && p.cfg.SecretKey != "" {
+		return p.cfg.AccessKey, p.cfg.SecretKey, nil
+	}
+	if p.cfg.VolcengineCredFile == "" {
+		return "", "", fmt.Errorf("AK/SK not configured")
+	}
+	b, err := os.ReadFile(p.cfg.VolcengineCredFile)
+	if err != nil {
+		return "", "", fmt.Errorf("AK/SK not configured")
+	}
+	var c volcengineCredsFile
+	if err := json.Unmarshal(b, &c); err != nil || c.AccessKey == "" || c.SecretKey == "" {
+		return "", "", fmt.Errorf("AK/SK not configured")
+	}
+	return c.AccessKey, c.SecretKey, nil
+}
+
+// Quota calls GetAFPUsage (signed, AK/SK) and parses the AFP windows. When
+// bound (pool virtual) the virtual's own AK/SK are used; otherwise the legacy
+// file is read. Returns BillingUnknown if AK/SK aren't configured or the call
+// fails (never a non-nil error).
+func (p *VolcengineProvider) Quota() (*QuotaSnapshot, error) {
+	ak, sk, err := p.resolveAKSK()
+	if err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: "AK/SK not configured"}, nil
+	}
+	u, err := getAFPUsage(ak, sk)
+	if err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
+	}
+	return ParseVolcengineQuota(u), nil
 }

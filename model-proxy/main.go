@@ -689,37 +689,11 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	}
 }
 
-// parseCodexQuota forwards to provider.ParseCodexQuota (impl moved to the codex
-// provider). Temporary shim; removed when fetchCodexQuota moves in Phase 2.
-func parseCodexQuota(body []byte, account, plan string) (*provider.QuotaSnapshot, error) {
-	return provider.ParseCodexQuota(body, account, plan)
-}
-
-// fetchCodexQuota GETs /backend-api/wham/usage with Bearer + originator.
+// fetchCodexQuota delegates to the codex provider's Quota() via buildOne (the
+// provider now owns the fetch + parse). Kept as a shim for the usage-display
+// path + tests; the quotaTracker calls p.Quota() directly.
 func fetchCodexQuota(cfg *Config, prov Provider) (*provider.QuotaSnapshot, error) {
-	authFile := authFilePath("codex", "oauth_auth")
-	p := newCodexOAuthProvider(authFile)
-	tok, acct, err := p.token()
-	if err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
-	}
-	usageURL := strings.TrimSuffix(prov.OpenAIBaseURL, "/codex") + "/wham/usage"
-	req, _ := http.NewRequest("GET", usageURL, nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("originator", "codex_cli_rs")
-	if acct != "" {
-		req.Header.Set("ChatGPT-Account-Id", acct)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
-	}
-	return parseCodexQuota(body, acct, "")
+	return buildOne(cfg, "codex", prov, accountCred{}).Quota()
 }
 
 // parseZhipuQuota forwards to provider.ParseZhipuQuota (impl moved to the zhipu
@@ -728,30 +702,14 @@ func parseZhipuQuota(body []byte, account string) (*provider.QuotaSnapshot, erro
 	return provider.ParseZhipuQuota(body, account)
 }
 
-// fetchZhipuQuota GETs the zhipu usage_url and returns the parsed snapshot.
+// fetchZhipuQuota delegates to the zhipu provider's Quota() via buildOne. Kept
+// as a shim for the usage-display path + tests; the quotaTracker calls p.Quota().
 func fetchZhipuQuota(cfg *Config, name string, prov Provider, cred *accountCred) (*provider.QuotaSnapshot, error) {
-	auth := newAuthProvider(prov.Provider, name, cfg, cred)
-	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
-	if err := auth.Inject(req); err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	c := accountCred{}
+	if cred != nil {
+		c = *cred
 	}
-	for k, v := range prov.Headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
-	}
-	s, _ := parseZhipuQuota(body, "")
-	if s == nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "not zhipu quota format"}, nil
-	}
-	return s, nil
+	return buildOne(cfg, name, prov, c).Quota()
 }
 
 // printQuotaSnapshot renders a QuotaSnapshot for the `usage` CLI. Output mirrors
@@ -1020,7 +978,7 @@ func loadVolcengineCreds(provName string) (*volcengineCreds, error) {
 // getAFPUsage calls the Volcengine signed OpenAPI GetAFPUsage and returns the
 // 5h/daily/weekly/monthly AFP quota windows.
 func getAFPUsage(ak, sk string) (*provider.AfpUsage, error) {
-	req, err := volcengineGet("GetAFPUsage", "2024-01-01", ak, sk, time.Now(), "")
+	req, err := provider.VolcengineSignedGet("GetAFPUsage", "2024-01-01", ak, sk, time.Now(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -1088,13 +1046,6 @@ func printAFPWindow(label string, w provider.AfpWindow) {
 		cDim(pad(label+":", 12)), bar, pctStr, cGray(reset), w.Used, w.Quota, remaining)
 }
 
-// parseVolcengineQuota forwards to provider.ParseVolcengineQuota (impl moved to
-// the volcengine provider). Temporary shim; removed when fetchVolcengineQuota
-// moves in Phase 2.
-func parseVolcengineQuota(u *provider.AfpUsage) *provider.QuotaSnapshot {
-	return provider.ParseVolcengineQuota(u)
-}
-
 // resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
 // When a cred is supplied (the pool-bound path), its AK/SK are used EXCLUSIVELY
 // — the on-disk file is never consulted, preserving per-account isolation (a
@@ -1118,7 +1069,7 @@ func resolveVolcengineAKSK(name string, cred *accountCred) (ak, sk string, err e
 
 // fetchVolcengineQuota calls GetAFPUsage (signed, AK/SK). When cred is non-nil
 // the virtual's own AK/SK are used (per-account); otherwise the legacy file is
-// read. Returns BillingUnknown if AK/SK aren't configured or the call fails.
+// read. Delegates parsing to provider.ParseVolcengineQuota. Kept for tests.
 func fetchVolcengineQuota(name string, cred *accountCred) (*provider.QuotaSnapshot, error) {
 	ak, sk, err := resolveVolcengineAKSK(name, cred)
 	if err != nil {
@@ -1128,58 +1079,29 @@ func fetchVolcengineQuota(name string, cred *accountCred) (*provider.QuotaSnapsh
 	if err != nil {
 		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
 	}
-	return parseVolcengineQuota(u), nil
+	return provider.ParseVolcengineQuota(u), nil
 }
 
 // parseDeepseekQuota parses /user/balance. deepseek is pay-as-you-go: no window,
 // RemainingPct unmeasured (-1). Balance kept as a single window for display.
-// parseDeepseekQuota forwards to provider.ParseDeepseekQuota (impl moved to the
-// deepseek provider). Temporary shim; removed when fetchDeepseekQuota moves in
-// Phase 2.
-func parseDeepseekQuota(body []byte) *provider.QuotaSnapshot {
-	return provider.ParseDeepseekQuota(body)
-}
-
-// fetchDeepseekQuota GETs /user/balance.
+// fetchDeepseekQuota delegates to the deepseek provider's Quota() via buildOne.
+// Kept as a shim for tests; the quotaTracker calls p.Quota() directly.
 func fetchDeepseekQuota(cfg *Config, name string, prov Provider, cred *accountCred) (*provider.QuotaSnapshot, error) {
-	auth := newAuthProvider(prov.Provider, name, cfg, cred)
-	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
-	if err := auth.Inject(req); err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	c := accountCred{}
+	if cred != nil {
+		c = *cred
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
-	}
-	return parseDeepseekQuota(body), nil
+	return buildOne(cfg, name, prov, c).Quota()
 }
 
-// parseAqpQuota forwards to provider.ParseAqpQuota (impl + aqpMonthlyReset moved
-// to the aqp provider). Temporary shim; removed when fetchAqpQuota moves in
-// Phase 2.
-func parseAqpQuota(mu *provider.MonthlyProjectUsage, account string) *provider.QuotaSnapshot {
-	return provider.ParseAqpQuota(mu, account)
-}
-
-// fetchAqpQuota mints the AQP key + POSTs monthly_usage.
+// fetchAqpQuota delegates to the aqp provider's Quota() via buildOne. Kept as a
+// shim for tests; the quotaTracker calls p.Quota() directly.
 func fetchAqpQuota(cfg *Config) (*provider.QuotaSnapshot, error) {
-	path := authFilePath("aqp", "oauth_auth")
-	a, _ := loadAccount(path)
-	c := newAqpClient(path)
-	mu, err := c.MonthlyUsage()
-	if err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
+	prov := cfg.Providers["aqp"]
+	if prov.Provider == "" {
+		prov = Provider{Provider: "aqp"}
 	}
-	acct := ""
-	if a != nil {
-		acct = a.Email
-	}
-	return parseAqpQuota(mu, acct), nil
+	return buildOne(cfg, "aqp", prov, accountCred{}).Quota()
 }
 
 func listConfigModels(prov Provider) {

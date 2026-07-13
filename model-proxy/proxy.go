@@ -204,31 +204,34 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 		pcfg.LoginFn = func() error { return runLogin(cfg) }
 		pcfg.LogoutFn = func() error { return clearAccount(authFilePath("aqp", "oauth_auth")) }
 		pcfg.UsageFn = func() (any, error) { return showAqpUsageData(cfg) }
-		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchAqpQuota(cfg) }
+		// Quota: inject the SSO-cookie-authed AqpClient's MonthlyUsage as a
+		// fetcher (shared with login/web). The provider owns the parse.
+		aqpClient := newAqpClient(authFilePath("aqp", "oauth_auth"))
+		pcfg.AqpMonthlyUsage = aqpClient.MonthlyUsage
 	case "codex":
 		pcfg.ClientVersion = resolveCodexClientVersion(prov.ClientVersion, codexCLIVersion, codexCacheVersion)
 		pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
 		pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
 		pcfg.UsageFn = func() (any, error) { return showCodexUsageData(cfg, prov) }
-		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchCodexQuota(cfg, prov) }
 	case "zhipu":
 		pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 		pcfg.LogoutFn = func() error { return clearApiKey(name) }
 		pcfg.UsageFn = func() (any, error) { return showZhipuUsageData(cfg, name, prov, credPtr) }
-		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchZhipuQuota(cfg, name, prov, credPtr) }
 	case "deepseek":
 		pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 		pcfg.LogoutFn = func() error { return clearApiKey(name) }
 		pcfg.UsageFn = func() (any, error) { return showDeepseekUsageData(cfg, name, prov, credPtr) }
-		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchDeepseekQuota(cfg, name, prov, credPtr) }
 	case "volcengine":
 		pcfg.LoginFn = func() error { return runVolcengineLoginErr(cfg, name, prov) }
 		pcfg.LogoutFn = func() error { return clearApiKey(name) }
 		pcfg.UsageFn = func() (any, error) { return showVolcengineUsageData(cfg, name, prov, credPtr) }
 		pcfg.FetchModelsFn = func() ([]string, error) { return listArkAgentPlanModelIDs(name) }
-		// GetAFPUsage is V4-signed with the virtual's OWN AK/SK (bound via
-		// credPtr) so each pooled account queries its own Agent Plan quota.
-		pcfg.QuotaFn = func() (*provider.QuotaSnapshot, error) { return fetchVolcengineQuota(name, credPtr) }
+		// GetAFPUsage is V4-signed with the virtual's own AK/SK (bound here so
+		// each pooled account queries its own Agent Plan quota); falls back to
+		// the legacy <name>_apikey.json when unbound (single-account path).
+		pcfg.AccessKey = cred.AccessKey
+		pcfg.SecretKey = cred.SecretKey
+		pcfg.VolcengineCredFile = filepath.Join(homeDir(), ".model-proxy", name+"_apikey.json")
 	}
 	p, err := provider.New(pcfg, name)
 	if err != nil {

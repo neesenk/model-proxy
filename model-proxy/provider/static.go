@@ -36,7 +36,11 @@ func (p *StaticProvider) Usage() (any, error) {
 	return nil, errNotSupported
 }
 func (p *StaticProvider) FetchModels() ([]string, error) { return nil, errNotSupported }
-func (p *StaticProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+
+// Quota: static providers have no measurable quota - always BillingUnknown.
+func (p *StaticProvider) Quota() (*QuotaSnapshot, error) {
+	return &QuotaSnapshot{Billing: BillingUnknown}, nil
+}
 func (p *StaticProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
 }

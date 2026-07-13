@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"crypto/hmac"
@@ -12,13 +12,13 @@ import (
 )
 
 // Volcengine OpenAPI (control-plane) request signing (signature V4 / HMAC-SHA256).
-// Used for GetAFPUsage (Agent Plan AFP quota) — the Ark API Key (Bearer) can't
+// Used for GetAFPUsage (Agent Plan AFP quota) - the Ark API Key (Bearer) can't
 // reach these signed APIs; they need the Volcengine AccessKey/SecretKey.
 //
 // See https://www.volcengine.com/docs/6369/67268 (公共参数) + 67270 (签名过程).
 // Credential scope: {YYYYMMDD}/{Region}/{Service}/request
-// Signing key: HMAC chain SK → kDate → kRegion → kService → kSigning (final
-// term "request", NOT "volcengine_request" — per the official signing demo).
+// Signing key: HMAC chain SK -> kDate -> kRegion -> kService -> kSigning (final
+// term "request", NOT "volcengine_request" - per the official signing demo).
 
 // volcengineSignV4 computes the X-Date and Authorization header values for a
 // Volcengine OpenAPI request. canonicalQuery is the sorted, RFC3986-escaped query
@@ -30,7 +30,7 @@ func volcengineSignV4(method, host, path, canonicalQuery string, body []byte, no
 
 	// Signed headers: host + x-date only. (The payload hash is still the 6th
 	// canonical-request component, but Volcengine does NOT sign x-content-sha256
-	// as a header — per the official signing demo. Sending/signing it causes
+	// as a header - per the official signing demo. Sending/signing it causes
 	// "Invalid Authorization".)
 	headers := [][2]string{
 		{"host", host},
@@ -85,6 +85,14 @@ func volcengineGet(action, version, ak, sk string, now time.Time, extraQuery str
 	return req, nil
 }
 
+// VolcengineSignedGet builds a signed GET request to the Volcengine OpenAPI for
+// the given Action/Version (AK/SK auth). Exported so the main package's model-list
+// path (ListArkAgentPlanModel, wired as FetchModelsFn until Phase 5) can reuse the
+// provider's signing without re-implementing it.
+func VolcengineSignedGet(action, version, ak, sk string, now time.Time, extraQuery string) (*http.Request, error) {
+	return volcengineGet(action, version, ak, sk, now, extraQuery)
+}
+
 func deriveSigningKey(sk, shortDate, region, service string) []byte {
 	kDate := hmacSHA256([]byte(sk), shortDate)
 	kRegion := hmacSHA256(kDate, region)
@@ -116,7 +124,7 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
-// volcEscape applies RFC 3986 percent-encoding (space → %20), matching Volcengine's
+// volcEscape applies RFC 3986 percent-encoding (space -> %20), matching Volcengine's
 // canonical-query-string encoding.
 func volcEscape(s string) string {
 	var b strings.Builder

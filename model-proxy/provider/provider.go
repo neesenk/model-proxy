@@ -182,23 +182,28 @@ type Config struct {
 	SSOCookieFile string // aqp
 	AqpMintURL    string // aqp
 
+	// Volcengine signing keys for GetAFPUsage (the Agent Plan quota endpoint,
+	// V4-signed, needs AK/SK not the Bearer chat key). Bound per virtual from
+	// the credential pool's cred entry in buildOne. Empty = not configured.
+	AccessKey string
+	SecretKey string
+	// VolcengineCredFile is the legacy <name>_apikey.json path, read for AK/SK
+	// when AccessKey/SecretKey are empty (the single-account / pre-pool path).
+	// The file read stays in the provider package (it's pure file I/O).
+	VolcengineCredFile string
+
+	// AqpMonthlyUsage fetches the monthly_usage payload (SSO-cookie POST,
+	// project_id-scoped). Wired in buildOne from the main-package AqpClient
+	// (shared with the login/web flows). nil for non-aqp providers.
+	AqpMonthlyUsage func() (*MonthlyProjectUsage, error)
+
 	// Callbacks: main package wires its existing functions here so provider/
 	// doesn't need to re-implement AQP minting, SSO flow, OAuth, etc.
-	Auth          Authenticator                  // for AuthHeaders/Refresh (aqp, codex, apikey)
-	LoginFn       func() error                   // for Login (aqp: SSO, codex: device flow, zhipu: prompt)
-	LogoutFn      func() error                   // for Logout
-	UsageFn       func() (any, error)            // for Usage
-	FetchModelsFn func() ([]string, error)       // for FetchModels (volcengine: V4-signed OpenAPI)
-	QuotaFn       func() (*QuotaSnapshot, error) // for Quota (structured quota for scheduling + display)
-}
-
-// QuotaOrUnknown returns cfg.QuotaFn()'s snapshot, or a BillingUnknown snapshot
-// when QuotaFn is unset (static / not-yet-wired providers) — never panics.
-func (c *Config) QuotaOrUnknown() (*QuotaSnapshot, error) {
-	if c.QuotaFn == nil {
-		return &QuotaSnapshot{Billing: BillingUnknown}, nil
-	}
-	return c.QuotaFn()
+	Auth          Authenticator            // for AuthHeaders/Refresh (aqp, codex, apikey)
+	LoginFn       func() error             // for Login (aqp: SSO, codex: device flow, zhipu: prompt)
+	LogoutFn      func() error             // for Logout
+	UsageFn       func() (any, error)      // for Usage
+	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
 }
 
 // Constructor builds a Provider instance from config.

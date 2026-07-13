@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"model-proxy/provider"
 )
 
 // Model entry as returned by the gateway's /models endpoint (OpenAI-style).
@@ -374,7 +376,7 @@ func listArkAgentPlanModelIDs(provName string) ([]string, error) {
 	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
 		return nil, fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
 	}
-	req, err := volcengineGet("ListArkAgentPlanModel", "2024-01-01", creds.AccessKey, creds.SecretKey, time.Now(), "")
+	req, err := provider.VolcengineSignedGet("ListArkAgentPlanModel", "2024-01-01", creds.AccessKey, creds.SecretKey, time.Now(), "")
 	if err != nil {
 		return nil, err
 	}

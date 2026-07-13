@@ -38,7 +38,21 @@ func (p *AqpProvider) Login() error                   { return p.cfg.LoginFn() }
 func (p *AqpProvider) Logout() error                  { return p.cfg.LogoutFn() }
 func (p *AqpProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *AqpProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
-func (p *AqpProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
+
+// Quota POSTs monthly_usage (via the injected AqpMonthlyUsage fetcher, which
+// is the SSO-cookie-authed AqpClient shared with login/web) and parses it into
+// a single monthly Ultimate window. On any failure returns BillingUnknown
+// carrying the error (never a non-nil error).
+func (p *AqpProvider) Quota() (*QuotaSnapshot, error) {
+	if p.cfg.AqpMonthlyUsage == nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: "monthly usage not configured"}, nil
+	}
+	mu, err := p.cfg.AqpMonthlyUsage()
+	if err != nil {
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
+	}
+	return ParseAqpQuota(mu, ""), nil
+}
 func (p *AqpProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
 }
