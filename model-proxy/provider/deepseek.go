@@ -1,7 +1,9 @@
 package provider
 
 import (
+	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -62,4 +64,39 @@ func (p *DeepSeekProvider) FetchModels() ([]string, error) { return fetchModelsB
 func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) { return p.cfg.QuotaOrUnknown() }
 func (p *DeepSeekProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
 	return snap.Surplus(now, peakMult)
+}
+
+// ParseDeepseekQuota parses DeepSeek /user/balance into a pay-as-you-go snapshot:
+// per-currency balance windows (unmeasured, RemainingPct=-1) with granted /
+// topped-up breakdown. BillingPayG (no windowed budget -> -1 binding).
+func ParseDeepseekQuota(body []byte) *QuotaSnapshot {
+	var u struct {
+		IsAvailable  bool `json:"is_available"`
+		BalanceInfos []struct {
+			Currency        string `json:"currency"`
+			TotalBalance    string `json:"total_balance"`
+			GrantedBalance  string `json:"granted_balance"`
+			ToppedUpBalance string `json:"topped_up_balance"`
+		} `json:"balance_infos"`
+	}
+	s := &QuotaSnapshot{Billing: BillingPayG, RemainingPct: -1, AsOf: time.Now()}
+	if err := json.Unmarshal(body, &u); err != nil {
+		s.Err = err.Error()
+		return s
+	}
+	if !u.IsAvailable {
+		s.Notes = append(s.Notes, "insufficient balance")
+	}
+	for _, b := range u.BalanceInfos {
+		total, _ := strconv.ParseFloat(b.TotalBalance, 64)
+		s.Windows = append(s.Windows, QuotaWindow{
+			Label: or(b.Currency, "Balance"), Kind: "money",
+			Total: total, RemainingPct: -1,
+			Details: []QuotaDetail{
+				{Label: "granted", Used: atof(b.GrantedBalance)},
+				{Label: "topped-up", Used: atof(b.ToppedUpBalance)},
+			},
+		})
+	}
+	return s
 }

@@ -340,7 +340,7 @@ func TestShowAqpUsage_MonthlyUsageError(t *testing.T) {
 // uses the hardcoded aqp base URL), so the extracted formatter is asserted
 // directly with color forced off.
 func TestAqpUsageLine(t *testing.T) {
-	mu := &MonthlyProjectUsage{SelectedYear: 2026, SelectedMonth: 7,
+	mu := &provider.MonthlyProjectUsage{SelectedYear: 2026, SelectedMonth: 7,
 		TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
 	var line string
 	captureStdout(t, func() { line = aqpUsageLine(mu) })
@@ -830,7 +830,7 @@ func TestPrintQuotaSnapshot_UnmeasuredWindow(t *testing.T) {
 
 // TestPrintAFPWindow: a normal window prints label, used%, and the used/quota/remaining line.
 func TestPrintAFPWindow(t *testing.T) {
-	w := afpWindow{Quota: 100, Used: 30, ResetTime: time.Now().Add(2 * time.Hour).UnixMilli()}
+	w := provider.AfpWindow{Quota: 100, Used: 30, ResetTime: time.Now().Add(2 * time.Hour).UnixMilli()}
 	out := captureStdout(t, func() { printAFPWindow("5h", w) })
 	for _, want := range []string{"5h", "30% used", "30.0 used / 100.0 quota", "70.0 remaining"} {
 		if !strings.Contains(out, want) {
@@ -838,7 +838,7 @@ func TestPrintAFPWindow(t *testing.T) {
 		}
 	}
 	// Zero quota → pct 0 (no division), remaining 0.
-	out2 := captureStdout(t, func() { printAFPWindow("daily", afpWindow{}) })
+	out2 := captureStdout(t, func() { printAFPWindow("daily", provider.AfpWindow{}) })
 	if !strings.Contains(out2, "0% used") {
 		t.Errorf("printAFPWindow zero-quota missing '0%% used':\n%s", out2)
 	}

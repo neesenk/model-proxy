@@ -5,13 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"model-proxy/provider"
 )
 
 // wire_pure_test.go covers the provider_wire.go delegation wrappers
 // (clearCodexAuth/clearApiKey) and the small pure helpers in main.go
-// (or, ultimateRemaining, quotaSourceLabel, truncate).
+// (or, quotaSourceLabel, truncate). ultimateRemaining moved to the provider
+// package in Phase 1 (provider/quota_parse_test.go).
 
 // --- or ---
 
@@ -24,25 +23,7 @@ func TestOr(t *testing.T) {
 	}
 }
 
-// --- ultimateRemaining ---
-
-func TestUltimateRemaining(t *testing.T) {
-	if got := ultimateRemaining(nil); got != -1 {
-		t.Errorf("ultimateRemaining(nil)=%v want -1", got)
-	}
-	ws := []provider.QuotaWindow{
-		{Label: "5h", RemainingPct: 0.5},
-		{Label: "Monthly", RemainingPct: 0.8, Ultimate: true},
-	}
-	if got := ultimateRemaining(ws); got != 0.8 {
-		t.Errorf("ultimateRemaining=%v want 0.8", got)
-	}
-	// No ultimate window → -1.
-	ws2 := []provider.QuotaWindow{{Label: "5h", RemainingPct: 0.5}}
-	if got := ultimateRemaining(ws2); got != -1 {
-		t.Errorf("ultimateRemaining(no ultimate)=%v want -1", got)
-	}
-}
+// --- ultimateRemaining: moved to provider/quota_parse_test.go (Phase 1) ---
 
 // --- quotaSourceLabel ---
 
@@ -125,21 +106,21 @@ func TestClearApiKey(t *testing.T) {
 
 func TestProviderWire_Wrappers(t *testing.T) {
 	// showXxxUsageData wrappers call their showXxxUsage, print to stdout, return
-	// (nil,nil). Capture stdout and assert each prints a recognizable marker —
+	// (nil,nil). Capture stdout and assert each prints a recognizable marker -
 	// not just "returned nil" (which would pass even if delegated to the wrong func).
 	cfg := &Config{
 		Providers: map[string]Provider{
 			"deepseek": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "deepseek", UsageURL: "http://127.0.0.1:1/balance"},
 		},
 	}
-	// deepseek wrapper → prints "Provider:" + "deepseek" or "Not logged in"
+	// deepseek wrapper -> prints "Provider:" + "deepseek" or "Not logged in"
 	out := captureStdout(t, func() {
 		_, _ = showDeepseekUsageData(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "deepseek") && !strings.Contains(out, "Not logged in") {
 		t.Errorf("showDeepseekUsageData output missing deepseek/Not logged in:\n%s", out)
 	}
-	// zhipu wrapper → delegates to showGenericUsage → fetchZhipuQuota → dead URL → error
+	// zhipu wrapper -> delegates to showGenericUsage -> fetchZhipuQuota -> dead URL -> error
 	out = captureStdout(t, func() {
 		_, _ = showZhipuUsageData(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
@@ -170,15 +151,15 @@ func TestProviderWire_Wrappers(t *testing.T) {
 }
 
 // --- runCodexLogin / runVolcengineLoginErr / runApiKeyLoginErr wrappers ---
-// These delegate to interactive login functions (stdin/browser) — not safe to
+// These delegate to interactive login functions (stdin/browser) - not safe to
 // call in tests. They're thin wrappers; the underlying functions need real
 // network/browser. Skip (documented as not covered).
 
 func TestProviderWire_LoginWrappers(t *testing.T) {
 	// runCodexLogin calls cmdCodexLogin([]string{}) which starts the device flow
 	// (network). runVolcengineLoginErr/runApiKeyLoginErr prompt on stdin. All
-	// unsafe to call here — covered by their function-level tests where feasible.
-	t.Skip("login wrappers require interactive network/stdin — covered elsewhere")
+	// unsafe to call here - covered by their function-level tests where feasible.
+	t.Skip("login wrappers require interactive network/stdin - covered elsewhere")
 }
 
 // keep strings referenced.

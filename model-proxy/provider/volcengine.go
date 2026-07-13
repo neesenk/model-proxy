@@ -115,3 +115,52 @@ func isVolcengineModelFiltered(id string) bool {
 	}
 	return false
 }
+
+// AfpWindow is one Agent Plan AFP quota window (5h/daily/weekly/monthly).
+type AfpWindow struct {
+	Quota     float64 `json:"Quota"`
+	Used      float64 `json:"Used"`
+	ResetTime int64   `json:"ResetTime"` // epoch ms
+}
+
+// AfpUsage is the Result payload of Volcengine GetAFPUsage: the 5h/daily/weekly/
+// monthly AFP quota windows + the plan type.
+type AfpUsage struct {
+	PlanType    string    `json:"PlanType"`
+	AFPFiveHour AfpWindow `json:"AFPFiveHour"`
+	AFPDaily    AfpWindow `json:"AFPDaily"`
+	AFPWeekly   AfpWindow `json:"AFPWeekly"`
+	AFPMonthly  AfpWindow `json:"AFPMonthly"`
+}
+
+// ParseVolcengineQuota converts a GetAFPUsage result into a QuotaSnapshot. The
+// monthly window is Ultimate (total budget); the 5h window is Short (rate cap);
+// daily/weekly are intermediate display-only windows. Over-quota windows clamp
+// to 0 remaining (not a negative that'd read as "unmeasured").
+func ParseVolcengineQuota(u *AfpUsage) *QuotaSnapshot {
+	s := &QuotaSnapshot{Billing: BillingPlan, Plan: u.PlanType, AsOf: time.Now()}
+	add := func(label string, w AfpWindow, ultimate, short bool, dur time.Duration) {
+		rem := -1.0
+		if w.Quota > 0 {
+			rem = (w.Quota - w.Used) / w.Quota
+			if rem < 0 {
+				rem = 0 // over-quota -> exhausted (0), not a negative that'd read as "unmeasured"
+			}
+		}
+		var reset time.Time
+		if w.ResetTime > 0 {
+			reset = time.UnixMilli(w.ResetTime)
+		}
+		s.Windows = append(s.Windows, QuotaWindow{
+			Label: label, Kind: "tokens",
+			Used: w.Used, Total: w.Quota, RemainingPct: rem, ResetsAt: reset,
+			Ultimate: ultimate, Short: short, Duration: dur,
+		})
+	}
+	add("5h", u.AFPFiveHour, false, true, 5*time.Hour)
+	add("daily", u.AFPDaily, false, false, 24*time.Hour)
+	add("weekly", u.AFPWeekly, false, false, 7*24*time.Hour)
+	add("monthly", u.AFPMonthly, true, false, 30*24*time.Hour)
+	s.RemainingPct = ultimateRemaining(s.Windows)
+	return s
+}

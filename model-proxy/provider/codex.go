@@ -98,6 +98,106 @@ func (p *CodexProvider) FetchModels() ([]string, error) {
 	return ids, nil
 }
 
+// ParseCodexQuota parses codex /backend-api/wham/usage into a QuotaSnapshot.
+// Windows: primary(5h) + secondary(weekly) + spend(monthly $). Credits/rate-limit
+// status go to Notes for display.
+//
+// primary(5h)/secondary(weekly) are token rate-caps of a different unit than
+// the $ spend budget, so they're not marked Short (peak-burn share undefined);
+// their exhaustion is handled reactively via 429. Ultimate = monthly spend.
+func ParseCodexQuota(body []byte, account, plan string) (*QuotaSnapshot, error) {
+	var u struct {
+		Email    string `json:"email"`
+		PlanType string `json:"plan_type"`
+		Credits  *struct {
+			HasCredits bool    `json:"has_credits"`
+			Unlimited  bool    `json:"unlimited"`
+			Balance    *string `json:"balance"`
+		} `json:"credits"`
+		RateLimit *struct {
+			Allowed       bool `json:"allowed"`
+			LimitReached  bool `json:"limit_reached"`
+			PrimaryWindow *struct {
+				UsedPercent     int `json:"used_percent"`
+				LimitWindowSecs int `json:"limit_window_seconds"`
+				ResetAfterSecs  int `json:"reset_after_seconds"`
+			} `json:"primary_window"`
+			SecondaryWindow *struct {
+				UsedPercent     int `json:"used_percent"`
+				LimitWindowSecs int `json:"limit_window_seconds"`
+				ResetAfterSecs  int `json:"reset_after_seconds"`
+			} `json:"secondary_window"`
+		} `json:"rate_limit"`
+		SpendControl *struct {
+			Reached         bool `json:"reached"`
+			IndividualLimit *struct {
+				Used        string `json:"used"`
+				Limit       string `json:"limit"`
+				Remaining   string `json:"remaining"`
+				UsedPercent int    `json:"used_percent"`
+				ResetAfter  int    `json:"reset_after_seconds"`
+			} `json:"individual_limit"`
+		} `json:"spend_control"`
+	}
+	if err := json.Unmarshal(body, &u); err != nil {
+		return nil, err
+	}
+	s := &QuotaSnapshot{
+		Billing: BillingPlan,
+		Account: or(u.Email, account),
+		Plan:    or(u.PlanType, plan),
+		AsOf:    time.Now(),
+	}
+	now := time.Now()
+	if u.RateLimit != nil {
+		status := "allowed"
+		if u.RateLimit.LimitReached {
+			status = "limit reached"
+		} else if !u.RateLimit.Allowed {
+			status = "not allowed"
+		}
+		s.Notes = append(s.Notes, "Rate Limit: "+status)
+		if pw := u.RateLimit.PrimaryWindow; pw != nil {
+			w := QuotaWindow{
+				Label:        "primary (5h)",
+				Kind:         "tokens",
+				RemainingPct: float64(100-pw.UsedPercent) / 100.0,
+			}
+			if pw.ResetAfterSecs > 0 {
+				w.ResetsAt = now.Add(time.Duration(pw.ResetAfterSecs) * time.Second)
+			}
+			s.Windows = append(s.Windows, w)
+		}
+		if sw := u.RateLimit.SecondaryWindow; sw != nil {
+			w := QuotaWindow{
+				Label:        "weekly",
+				Kind:         "tokens",
+				RemainingPct: float64(100-sw.UsedPercent) / 100.0,
+			}
+			if sw.ResetAfterSecs > 0 {
+				w.ResetsAt = now.Add(time.Duration(sw.ResetAfterSecs) * time.Second)
+			}
+			s.Windows = append(s.Windows, w)
+		}
+	}
+	if sc := u.SpendControl; sc != nil && sc.IndividualLimit != nil {
+		il := sc.IndividualLimit
+		w := QuotaWindow{
+			Label:        "Spend",
+			Kind:         "money",
+			RemainingPct: float64(100-il.UsedPercent) / 100.0,
+			Ultimate:     true,
+			Duration:     30 * 24 * time.Hour,
+		}
+		if il.ResetAfter > 0 {
+			w.ResetsAt = now.Add(time.Duration(il.ResetAfter) * time.Second)
+		}
+		s.Windows = append(s.Windows, w)
+	}
+	s.RemainingPct = ultimateRemaining(s.Windows)
+	return s, nil
+}
+
 // ensureJSONField sets body[key] = val if the key is absent.
 func ensureJSONField(body []byte, key string, val any) []byte {
 	var v map[string]any

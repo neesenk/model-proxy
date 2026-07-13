@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"model-proxy/provider"
 )
 
 // Core of AQP SSO: a single cookie jar carried across the whole login flow. Both the
@@ -394,29 +396,20 @@ func extractLoginURL(body string) string {
 	return ""
 }
 
-// MonthlyProjectUsage mirrors monthly_usage's data payload (7 fields, matching the
-// binary's struct MonthlyProjectUsage). Method POST, requires project_id input.
-type MonthlyProjectUsage struct {
-	ProjectID     string  `json:"project_id"`
-	SelectedYear  int     `json:"selected_year"`
-	SelectedMonth int     `json:"selected_month"`
-	TotalAmount   float64 `json:"total_amount"`
-	Usage         float64 `json:"usage"`
-	Balance       float64 `json:"balance"`
-	Plan          string  `json:"plan"`
-}
+// MonthlyProjectUsage lives in the provider package (provider/aqp.go); the aqp
+// provider owns its quota parser + DTO. AqpClient.MonthlyUsage returns it.
 
 // MonthlyUsage fetches monthly_usage with the persisted SSO cookie (cookie-authed,
 // not the managed key). NOTE: the endpoint is POST and requires project_id input
 // (taken from the store's AccountData.ProjectID).
-func (c *AqpClient) MonthlyUsage() (*MonthlyProjectUsage, error) {
+func (c *AqpClient) MonthlyUsage() (*provider.MonthlyProjectUsage, error) {
 	return c.monthlyUsageAt(c.base + aqpMonthlyUsagePath)
 }
 
 // monthlyUsageAt is the URL-parametrized core, used by tests with a mock server
 // (mirrors fetchAPIKeyAt). It POSTs project_id (cookie-authed) and parses the
 // {retcode, data:{...MonthlyProjectUsage}} envelope.
-func (c *AqpClient) monthlyUsageAt(endpoint string) (*MonthlyProjectUsage, error) {
+func (c *AqpClient) monthlyUsageAt(endpoint string) (*provider.MonthlyProjectUsage, error) {
 	a, err := loadAccount(c.storePath)
 	if err != nil || a == nil || a.SSOSessionCookie == "" {
 		return nil, fmt.Errorf("not logged in")
@@ -448,7 +441,7 @@ func (c *AqpClient) monthlyUsageAt(endpoint string) (*MonthlyProjectUsage, error
 	if len(wrap.Data) == 0 {
 		return nil, fmt.Errorf("monthly usage response missing data")
 	}
-	var mu MonthlyProjectUsage
+	var mu provider.MonthlyProjectUsage
 	if err := json.Unmarshal(wrap.Data, &mu); err != nil {
 		return nil, fmt.Errorf("monthly usage data parse failed: %w", err)
 	}

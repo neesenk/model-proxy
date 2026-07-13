@@ -37,25 +37,7 @@ func TestParseServeArgs_Extra(t *testing.T) {
 	}
 }
 
-// --- zhipuLimitLabel ---
-
-func TestZhipuLimitLabel(t *testing.T) {
-	for _, tc := range []struct {
-		typ, want string
-		unit      int
-	}{
-		{"TOKENS_LIMIT", "5h tokens", 3},
-		{"TOKENS_LIMIT", "Weekly tokens", 6},
-		{"TOKENS_LIMIT", "Tokens (unit=9)", 9},
-		{"TIME_LIMIT", "Monthly time", 5},
-		{"TIME_LIMIT", "Time (unit=7)", 7},
-		{"OTHER", "OTHER (unit=1)", 1},
-	} {
-		if got := zhipuLimitLabel(tc.typ, tc.unit); got != tc.want {
-			t.Errorf("zhipuLimitLabel(%q,%d)=%q want %q", tc.typ, tc.unit, got, tc.want)
-		}
-	}
-}
+// --- zhipuLimitLabel: moved to provider/quota_parse_test.go (Phase 1) ---
 
 // --- SessionCookie: returns "SSO_C=val" when the jar has one, "" otherwise ---
 

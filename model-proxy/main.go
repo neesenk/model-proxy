@@ -552,7 +552,7 @@ func showAqpUsage(cfg *Config) {
 // usageRatioColor convention (green/yellow/red by remaining ratio) shared with
 // progressBar. Extracted so the success-branch format is unit-testable without
 // the live monthly_usage endpoint (showAqpUsage uses the hardcoded aqp base URL).
-func aqpUsageLine(mu *MonthlyProjectUsage) string {
+func aqpUsageLine(mu *provider.MonthlyProjectUsage) string {
 	pct := 0
 	if mu.TotalAmount > 0 {
 		pct = int((mu.Usage/mu.TotalAmount)*100 + 0.5)
@@ -689,114 +689,10 @@ func showCodexUsage(cfg *Config, prov Provider) {
 	}
 }
 
-// parseCodexQuota parses codex /backend-api/wham/usage into a QuotaSnapshot.
-// Windows: primary(5h) + secondary(weekly) + spend(monthly $). Credits/rate-limit
-// status go to Notes for display.
-// ultimateRemaining returns the RemainingPct of the window marked Ultimate,
-// or -1 if there is none (the parser then can't derive a scheduling base).
-func ultimateRemaining(windows []provider.QuotaWindow) float64 {
-	for _, w := range windows {
-		if w.Ultimate {
-			return w.RemainingPct
-		}
-	}
-	return -1
-}
-
+// parseCodexQuota forwards to provider.ParseCodexQuota (impl moved to the codex
+// provider). Temporary shim; removed when fetchCodexQuota moves in Phase 2.
 func parseCodexQuota(body []byte, account, plan string) (*provider.QuotaSnapshot, error) {
-	var u struct {
-		Email    string `json:"email"`
-		PlanType string `json:"plan_type"`
-		Credits  *struct {
-			HasCredits bool    `json:"has_credits"`
-			Unlimited  bool    `json:"unlimited"`
-			Balance    *string `json:"balance"`
-		} `json:"credits"`
-		RateLimit *struct {
-			Allowed       bool `json:"allowed"`
-			LimitReached  bool `json:"limit_reached"`
-			PrimaryWindow *struct {
-				UsedPercent     int `json:"used_percent"`
-				LimitWindowSecs int `json:"limit_window_seconds"`
-				ResetAfterSecs  int `json:"reset_after_seconds"`
-			} `json:"primary_window"`
-			SecondaryWindow *struct {
-				UsedPercent     int `json:"used_percent"`
-				LimitWindowSecs int `json:"limit_window_seconds"`
-				ResetAfterSecs  int `json:"reset_after_seconds"`
-			} `json:"secondary_window"`
-		} `json:"rate_limit"`
-		SpendControl *struct {
-			Reached         bool `json:"reached"`
-			IndividualLimit *struct {
-				Used        string `json:"used"`
-				Limit       string `json:"limit"`
-				Remaining   string `json:"remaining"`
-				UsedPercent int    `json:"used_percent"`
-				ResetAfter  int    `json:"reset_after_seconds"`
-			} `json:"individual_limit"`
-		} `json:"spend_control"`
-	}
-	if err := json.Unmarshal(body, &u); err != nil {
-		return nil, err
-	}
-	s := &provider.QuotaSnapshot{
-		Billing: provider.BillingPlan,
-		Account: or(u.Email, account),
-		Plan:    or(u.PlanType, plan),
-		AsOf:    time.Now(),
-	}
-	now := time.Now()
-	if u.RateLimit != nil {
-		status := "allowed"
-		if u.RateLimit.LimitReached {
-			status = "limit reached"
-		} else if !u.RateLimit.Allowed {
-			status = "not allowed"
-		}
-		s.Notes = append(s.Notes, "Rate Limit: "+status)
-		if pw := u.RateLimit.PrimaryWindow; pw != nil {
-			w := provider.QuotaWindow{
-				Label:        "primary (5h)",
-				Kind:         "tokens",
-				RemainingPct: float64(100-pw.UsedPercent) / 100.0,
-			}
-			if pw.ResetAfterSecs > 0 {
-				w.ResetsAt = now.Add(time.Duration(pw.ResetAfterSecs) * time.Second)
-			}
-			s.Windows = append(s.Windows, w)
-		}
-		if sw := u.RateLimit.SecondaryWindow; sw != nil {
-			w := provider.QuotaWindow{
-				Label:        "weekly",
-				Kind:         "tokens",
-				RemainingPct: float64(100-sw.UsedPercent) / 100.0,
-			}
-			if sw.ResetAfterSecs > 0 {
-				w.ResetsAt = now.Add(time.Duration(sw.ResetAfterSecs) * time.Second)
-			}
-			s.Windows = append(s.Windows, w)
-		}
-	}
-	if sc := u.SpendControl; sc != nil && sc.IndividualLimit != nil {
-		il := sc.IndividualLimit
-		w := provider.QuotaWindow{
-			Label:        "Spend",
-			Kind:         "money",
-			RemainingPct: float64(100-il.UsedPercent) / 100.0,
-			Ultimate:     true,
-			Duration:     30 * 24 * time.Hour,
-		}
-		if il.ResetAfter > 0 {
-			w.ResetsAt = now.Add(time.Duration(il.ResetAfter) * time.Second)
-		}
-		s.Windows = append(s.Windows, w)
-	}
-	// primary(5h)/secondary(weekly) are token rate-caps of a different unit than
-	// the $ spend budget, so they're not marked Short (peak-burn share undefined);
-	// their exhaustion is handled reactively via 429. Ultimate = monthly spend.
-	s.RemainingPct = ultimateRemaining(s.Windows)
-	return s, nil
+	return provider.ParseCodexQuota(body, account, plan)
 }
 
 // fetchCodexQuota GETs /backend-api/wham/usage with Bearer + originator.
@@ -826,87 +722,10 @@ func fetchCodexQuota(cfg *Config, prov Provider) (*provider.QuotaSnapshot, error
 	return parseCodexQuota(body, acct, "")
 }
 
-// parseZhipuQuota parses Zhipu BigModel's /api/monitor/usage/quota/limit body into
-// a QuotaSnapshot. Returns (nil, nil) if the body isn't the zhipu quota format
-// (caller falls back to the OpenAI model-list display). TIME_LIMIT windows are
-// included for display but EXCLUDED from the binding RemainingPct (they're MCP
-// tool quota, not LLM tokens).
-//
-// Zhipu's `percentage` field is the USED percentage (0..100): the existing
-// pre-refactor display fed it straight to progressBar/`%d%% used`, and the
-// quota/limit fixture corroborates (percentage=40 ⇔ currentValue=40000 /
-// usage=100000). We convert to RemainingPct = (100 - percentage) / 100.
+// parseZhipuQuota forwards to provider.ParseZhipuQuota (impl moved to the zhipu
+// provider). Temporary shim; removed when fetchZhipuQuota moves in Phase 2.
 func parseZhipuQuota(body []byte, account string) (*provider.QuotaSnapshot, error) {
-	var z struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			Limits []struct {
-				Type          string `json:"type"`
-				Unit          int    `json:"unit"`
-				Number        int    `json:"number"`
-				Percentage    int    `json:"percentage"`
-				NextResetTime int64  `json:"nextResetTime"`
-				Usage         *int   `json:"usage"`
-				CurrentValue  *int   `json:"currentValue"`
-				Remaining     *int   `json:"remaining"`
-				UsageDetails  []struct {
-					ModelCode string `json:"modelCode"`
-					Usage     int    `json:"usage"`
-				} `json:"usageDetails"`
-			} `json:"limits"`
-			Level string `json:"level"`
-		} `json:"data"`
-		Success bool `json:"success"`
-	}
-	if err := json.Unmarshal(body, &z); err != nil {
-		return nil, nil
-	}
-	if !z.Success || len(z.Data.Limits) == 0 {
-		return nil, nil
-	}
-	s := &provider.QuotaSnapshot{
-		Billing: provider.BillingPlan,
-		Account: account,
-		Level:   z.Data.Level,
-		Plan:    z.Data.Level,
-		AsOf:    time.Now(),
-	}
-	for _, l := range z.Data.Limits {
-		w := provider.QuotaWindow{
-			Label:        zhipuLimitLabel(l.Type, l.Unit),
-			RemainingPct: (100.0 - float64(l.Percentage)) / 100.0,
-		}
-		if l.Type == "TIME_LIMIT" {
-			w.Kind = "time"
-			w.DetailLabel = "By MCP tool"
-		} else {
-			w.Kind = "tokens"
-			w.DetailLabel = "By model"
-			// TOKENS_LIMIT windows: unit 3 = 5h (immediate rate cap), unit 6 = weekly (total budget).
-			switch l.Unit {
-			case 3:
-				w.Short = true
-				w.Duration = 5 * time.Hour
-			case 6:
-				w.Ultimate = true
-				w.Duration = 7 * 24 * time.Hour
-			}
-		}
-		if l.CurrentValue != nil && l.Remaining != nil {
-			w.Used = float64(*l.CurrentValue)
-			w.Total = float64(*l.CurrentValue + *l.Remaining)
-		}
-		if l.NextResetTime > 0 {
-			w.ResetsAt = time.UnixMilli(l.NextResetTime)
-		}
-		for _, ud := range l.UsageDetails {
-			w.Details = append(w.Details, provider.QuotaDetail{Label: ud.ModelCode, Used: float64(ud.Usage)})
-		}
-		s.Windows = append(s.Windows, w)
-	}
-	s.RemainingPct = ultimateRemaining(s.Windows)
-	return s, nil
+	return provider.ParseZhipuQuota(body, account)
 }
 
 // fetchZhipuQuota GETs the zhipu usage_url and returns the parsed snapshot.
@@ -1198,24 +1017,9 @@ func loadVolcengineCreds(provName string) (*volcengineCreds, error) {
 	return &c, nil
 }
 
-// afpWindow is one Agent Plan AFP quota window (5h/daily/weekly/monthly).
-type afpWindow struct {
-	Quota     float64 `json:"Quota"`
-	Used      float64 `json:"Used"`
-	ResetTime int64   `json:"ResetTime"` // epoch ms
-}
-
-type afpUsage struct {
-	PlanType    string    `json:"PlanType"`
-	AFPFiveHour afpWindow `json:"AFPFiveHour"`
-	AFPDaily    afpWindow `json:"AFPDaily"`
-	AFPWeekly   afpWindow `json:"AFPWeekly"`
-	AFPMonthly  afpWindow `json:"AFPMonthly"`
-}
-
 // getAFPUsage calls the Volcengine signed OpenAPI GetAFPUsage and returns the
 // 5h/daily/weekly/monthly AFP quota windows.
-func getAFPUsage(ak, sk string) (*afpUsage, error) {
+func getAFPUsage(ak, sk string) (*provider.AfpUsage, error) {
 	req, err := volcengineGet("GetAFPUsage", "2024-01-01", ak, sk, time.Now(), "")
 	if err != nil {
 		return nil, err
@@ -1230,8 +1034,8 @@ func getAFPUsage(ak, sk string) (*afpUsage, error) {
 		return nil, fmt.Errorf("GetAFPUsage HTTP %d: %s", resp.StatusCode, truncate(string(body), 300))
 	}
 	var wrap struct {
-		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`
-		Result           afpUsage        `json:"Result"`
+		ResponseMetadata json.RawMessage   `json:"ResponseMetadata"`
+		Result           provider.AfpUsage `json:"Result"`
 	}
 	if err := json.Unmarshal(body, &wrap); err != nil {
 		return nil, fmt.Errorf("parse GetAFPUsage: %w", err)
@@ -1267,7 +1071,7 @@ func showVolcengineUsage(cfg *Config, provName string, prov Provider, cred *acco
 	printAFPWindow("Monthly", u.AFPMonthly)
 }
 
-func printAFPWindow(label string, w afpWindow) {
+func printAFPWindow(label string, w provider.AfpWindow) {
 	remaining := w.Quota - w.Used
 	pct := 0
 	if w.Quota > 0 {
@@ -1284,33 +1088,11 @@ func printAFPWindow(label string, w afpWindow) {
 		cDim(pad(label+":", 12)), bar, pctStr, cGray(reset), w.Used, w.Quota, remaining)
 }
 
-// parseVolcengineQuota converts the GetAFPUsage result into a QuotaSnapshot.
-func parseVolcengineQuota(u *afpUsage) *provider.QuotaSnapshot {
-	s := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Plan: u.PlanType, AsOf: time.Now()}
-	add := func(label string, w afpWindow, ultimate, short bool, dur time.Duration) {
-		rem := -1.0
-		if w.Quota > 0 {
-			rem = (w.Quota - w.Used) / w.Quota
-			if rem < 0 {
-				rem = 0 // over-quota → exhausted (0), not a negative that'd read as "unmeasured"
-			}
-		}
-		var reset time.Time
-		if w.ResetTime > 0 {
-			reset = time.UnixMilli(w.ResetTime)
-		}
-		s.Windows = append(s.Windows, provider.QuotaWindow{
-			Label: label, Kind: "tokens",
-			Used: w.Used, Total: w.Quota, RemainingPct: rem, ResetsAt: reset,
-			Ultimate: ultimate, Short: short, Duration: dur,
-		})
-	}
-	add("5h", u.AFPFiveHour, false, true, 5*time.Hour)
-	add("daily", u.AFPDaily, false, false, 24*time.Hour)
-	add("weekly", u.AFPWeekly, false, false, 7*24*time.Hour)
-	add("monthly", u.AFPMonthly, true, false, 30*24*time.Hour)
-	s.RemainingPct = ultimateRemaining(s.Windows)
-	return s
+// parseVolcengineQuota forwards to provider.ParseVolcengineQuota (impl moved to
+// the volcengine provider). Temporary shim; removed when fetchVolcengineQuota
+// moves in Phase 2.
+func parseVolcengineQuota(u *provider.AfpUsage) *provider.QuotaSnapshot {
+	return provider.ParseVolcengineQuota(u)
 }
 
 // resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
@@ -1351,39 +1133,12 @@ func fetchVolcengineQuota(name string, cred *accountCred) (*provider.QuotaSnapsh
 
 // parseDeepseekQuota parses /user/balance. deepseek is pay-as-you-go: no window,
 // RemainingPct unmeasured (-1). Balance kept as a single window for display.
+// parseDeepseekQuota forwards to provider.ParseDeepseekQuota (impl moved to the
+// deepseek provider). Temporary shim; removed when fetchDeepseekQuota moves in
+// Phase 2.
 func parseDeepseekQuota(body []byte) *provider.QuotaSnapshot {
-	var u struct {
-		IsAvailable  bool `json:"is_available"`
-		BalanceInfos []struct {
-			Currency        string `json:"currency"`
-			TotalBalance    string `json:"total_balance"`
-			GrantedBalance  string `json:"granted_balance"`
-			ToppedUpBalance string `json:"topped_up_balance"`
-		} `json:"balance_infos"`
-	}
-	s := &provider.QuotaSnapshot{Billing: provider.BillingPayG, RemainingPct: -1, AsOf: time.Now()}
-	if err := json.Unmarshal(body, &u); err != nil {
-		s.Err = err.Error()
-		return s
-	}
-	if !u.IsAvailable {
-		s.Notes = append(s.Notes, "insufficient balance")
-	}
-	for _, b := range u.BalanceInfos {
-		total, _ := strconv.ParseFloat(b.TotalBalance, 64)
-		s.Windows = append(s.Windows, provider.QuotaWindow{
-			Label: or(b.Currency, "Balance"), Kind: "money",
-			Total: total, RemainingPct: -1,
-			Details: []provider.QuotaDetail{
-				{Label: "granted", Used: atof(b.GrantedBalance)},
-				{Label: "topped-up", Used: atof(b.ToppedUpBalance)},
-			},
-		})
-	}
-	return s
+	return provider.ParseDeepseekQuota(body)
 }
-
-func atof(s string) float64 { f, _ := strconv.ParseFloat(s, 64); return f }
 
 // fetchDeepseekQuota GETs /user/balance.
 func fetchDeepseekQuota(cfg *Config, name string, prov Provider, cred *accountCred) (*provider.QuotaSnapshot, error) {
@@ -1404,44 +1159,11 @@ func fetchDeepseekQuota(cfg *Config, name string, prov Provider, cred *accountCr
 	return parseDeepseekQuota(body), nil
 }
 
-// parseAqpQuota converts monthly_usage into a single-window plan snapshot.
-// aqpMonthlyReset derives the monthly quota reset time (last second of the
-// selected month, local time) and the nominal cycle duration from the
-// SelectedYear/SelectedMonth the monthly_usage endpoint returns. Falls back to
-// the current month when the API omits them (zero values). The reset time is
-// required: without it the surplus guard in provider.QuotaSnapshot.Surplus()
-// (ult.ResetsAt.IsZero()) short-circuits to 0, so aqp could never be
-// prioritized for being under pace — it would only beat over-pace providers.
-func aqpMonthlyReset(year, month int) (resetsAt time.Time, duration time.Duration) {
-	if year == 0 || month == 0 {
-		now := time.Now()
-		if year == 0 {
-			year = now.Year()
-		}
-		if month == 0 {
-			month = int(now.Month())
-		}
-	}
-	cycleStart := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.Local)
-	// Day 0 of next month = last day of this month, at 23:59:59 local.
-	resetsAt = time.Date(year, time.Month(month)+1, 0, 23, 59, 59, 0, time.Local)
-	return resetsAt, resetsAt.Sub(cycleStart)
-}
-
-func parseAqpQuota(mu *MonthlyProjectUsage, account string) *provider.QuotaSnapshot {
-	s := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Account: account, Plan: mu.Plan, AsOf: time.Now()}
-	rem := -1.0
-	if mu.TotalAmount > 0 {
-		rem = mu.Balance / mu.TotalAmount
-	}
-	resetsAt, dur := aqpMonthlyReset(mu.SelectedYear, mu.SelectedMonth)
-	s.Windows = append(s.Windows, provider.QuotaWindow{
-		Label: "Monthly", Kind: "money",
-		Used: mu.Usage, Total: mu.TotalAmount, RemainingPct: rem,
-		Ultimate: true, Duration: dur, ResetsAt: resetsAt,
-	})
-	s.RemainingPct = rem
-	return s
+// parseAqpQuota forwards to provider.ParseAqpQuota (impl + aqpMonthlyReset moved
+// to the aqp provider). Temporary shim; removed when fetchAqpQuota moves in
+// Phase 2.
+func parseAqpQuota(mu *provider.MonthlyProjectUsage, account string) *provider.QuotaSnapshot {
+	return provider.ParseAqpQuota(mu, account)
 }
 
 // fetchAqpQuota mints the AQP key + POSTs monthly_usage.
@@ -1520,27 +1242,6 @@ func showDeepseekUsage(cfg *Config, provName string, prov Provider, cred *accoun
 			cBold(cCyan(b.TotalBalance)),
 			cGray("(granted "+b.GrantedBalance+", topped-up "+b.ToppedUpBalance+")"))
 	}
-}
-
-// zhipuLimitLabel converts Zhipu's type+unit to a human-readable label.
-func zhipuLimitLabel(typ string, unit int) string {
-	switch typ {
-	case "TOKENS_LIMIT":
-		switch unit {
-		case 3:
-			return "5h tokens"
-		case 6:
-			return "Weekly tokens"
-		}
-		return fmt.Sprintf("Tokens (unit=%d)", unit)
-	case "TIME_LIMIT":
-		switch unit {
-		case 5:
-			return "Monthly time"
-		}
-		return fmt.Sprintf("Time (unit=%d)", unit)
-	}
-	return fmt.Sprintf("%s (unit=%d)", typ, unit)
 }
 
 // printUsageFields recursively prints JSON fields with indentation.
