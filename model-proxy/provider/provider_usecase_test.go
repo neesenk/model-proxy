@@ -345,24 +345,19 @@ func mustMarshal(v any) []byte {
 func TestProviderDelegates_Callbacks(t *testing.T) {
 	loginCalled := false
 	logoutCalled := false
-	usageCalled := false
 	cfg := &Config{
 		Auth:     fakeAuth{key: "k"},
 		LoginFn:  func() error { loginCalled = true; return nil },
 		LogoutFn: func() error { logoutCalled = true; return nil },
-		UsageFn:  func() (any, error) { usageCalled = true; return "u", nil },
 	}
-	// codex: Login/Logout/Usage delegated to callbacks; Quota() is now a direct
-	// implementation (no QuotaFn callback since Phase 2) - exercised separately
-	// by the parser + fetch tests, not here.
+	// codex: Login/Logout delegated to callbacks; Usage()/Quota() are now direct
+	// implementations (no UsageFn/QuotaFn callbacks since Phase 2/3) - exercised
+	// by the fetch + display tests, not here.
 	codex := &CodexProvider{cfg: cfg}
 	mustNoErr(t, codex.Login())
 	mustNoErr(t, codex.Logout())
-	if _, err := codex.Usage(); err != nil {
-		t.Fatal(err)
-	}
-	if !loginCalled || !logoutCalled || !usageCalled {
-		t.Errorf("codex delegate missed: login=%v logout=%v usage=%v", loginCalled, logoutCalled, usageCalled)
+	if !loginCalled || !logoutCalled {
+		t.Errorf("codex delegate missed: login=%v logout=%v", loginCalled, logoutCalled)
 	}
 
 	// deepseek with a temp auth file so LoadKey works; Quota() is a direct
@@ -498,22 +493,19 @@ func TestCodexAuthRefresh_Delegate(t *testing.T) {
 // --- P24: aqp Refresh/Login/Logout/Usage/FetchModels/Surplus delegation ---
 
 func TestAqpProvider_Delegates(t *testing.T) {
-	loginCalled, logoutCalled, usageCalled := false, false, false
+	loginCalled, logoutCalled := false, false
 	cfg := &Config{
 		Auth:     fakeAuth{key: "k"},
 		LoginFn:  func() error { loginCalled = true; return nil },
 		LogoutFn: func() error { logoutCalled = true; return nil },
-		UsageFn:  func() (any, error) { usageCalled = true; return nil, nil },
 	}
 	p := &AqpProvider{cfg: cfg}
 	mustNoErr(t, p.Refresh())
 	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
-	if _, err := p.Usage(); err != nil {
-		t.Fatal(err)
-	}
-	if !loginCalled || !logoutCalled || !usageCalled {
-		t.Errorf("aqp delegate: login=%v logout=%v usage=%v", loginCalled, logoutCalled, usageCalled)
+	// Usage()/Quota() are direct implementations (network); tested elsewhere.
+	if !loginCalled || !logoutCalled {
+		t.Errorf("aqp delegate: login=%v logout=%v", loginCalled, logoutCalled)
 	}
 	if s := p.Surplus(nil, time.Now(), 1); s != 0 {
 		t.Errorf("aqp Surplus(nil)=%v want 0", s)
@@ -527,7 +519,6 @@ func TestDeepSeekProvider_Delegates(t *testing.T) {
 		Auth:     fakeAuth{key: "k"},
 		LoginFn:  func() error { return nil },
 		LogoutFn: func() error { return nil },
-		UsageFn:  func() (any, error) { return nil, nil },
 	}
 	dir := t.TempDir()
 	authFile := filepath.Join(dir, "ds.json")
@@ -535,9 +526,6 @@ func TestDeepSeekProvider_Delegates(t *testing.T) {
 	p := &DeepSeekProvider{ApiKeyBase: &ApiKeyBase{authFile: authFile}, cfg: cfg}
 	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
-	if _, err := p.Usage(); err != nil {
-		t.Fatal(err)
-	}
 	// zhipu RewriteRequest is a no-op passthrough. (Login reads stdin, so it's
 	// not exercised here — its validation path needs a mock usage_url + stdin.)
 	zp := &ZhipuProvider{ApiKeyBase: &ApiKeyBase{authFile: authFile}, cfg: cfg}
@@ -545,9 +533,6 @@ func TestDeepSeekProvider_Delegates(t *testing.T) {
 		t.Errorf("zhipu RewriteRequest=(%q,%q) want passthrough", url, body)
 	}
 	mustNoErr(t, zp.Logout())
-	if _, err := zp.Usage(); err != nil {
-		t.Fatal(err)
-	}
 	if q, err := zp.Quota(); err != nil || q.Billing != BillingUnknown {
 		t.Errorf("zhipu Quota (nil fn)=%v err=%v", q, err)
 	}
@@ -564,7 +549,6 @@ func TestVolcengineProvider_Delegates(t *testing.T) {
 		Auth:          fakeAuth{key: "k"},
 		LoginFn:       func() error { return nil },
 		LogoutFn:      func() error { return nil },
-		UsageFn:       func() (any, error) { return nil, nil },
 		FetchModelsFn: func() ([]string, error) { fetchCalled = true; return []string{"m"}, nil },
 	}
 	dir := t.TempDir()
@@ -573,9 +557,6 @@ func TestVolcengineProvider_Delegates(t *testing.T) {
 	p := &VolcengineProvider{ApiKeyBase: &ApiKeyBase{authFile: authFile}, cfg: cfg}
 	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
-	if _, err := p.Usage(); err != nil {
-		t.Fatal(err)
-	}
 	got, err := p.FetchModels()
 	if err != nil || !fetchCalled || len(got) != 1 {
 		t.Errorf("volcengine FetchModels got=%v err=%v called=%v", got, err, fetchCalled)

@@ -451,10 +451,3 @@ func (c *AqpClient) monthlyUsageAt(endpoint string) (*provider.MonthlyProjectUsa
 // ---- helpers ----
 
 func logf(format string, args ...any) { log.Printf(format, args...) }
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}

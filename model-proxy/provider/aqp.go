@@ -36,7 +36,6 @@ func (p *AqpProvider) RewriteRequest(targetURL string, body []byte, path string)
 }
 func (p *AqpProvider) Login() error                   { return p.cfg.LoginFn() }
 func (p *AqpProvider) Logout() error                  { return p.cfg.LogoutFn() }
-func (p *AqpProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *AqpProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
 
 // Quota POSTs monthly_usage (via the injected AqpMonthlyUsage fetcher, which

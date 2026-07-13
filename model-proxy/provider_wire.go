@@ -6,13 +6,10 @@ import (
 )
 
 // ---- Provider callback wrappers ----
-// These wrap existing main-package functions so provider.Provider can call them
-// via the callback interface without importing package main.
-
-func showAqpUsageData(cfg *Config) (any, error) {
-	showAqpUsage(cfg)
-	return nil, nil
-}
+// Login/Logout wrappers for the provider callback interface (LoginFn/LogoutFn),
+// kept until Phase 5 moves login/logout into the provider structs. The Usage
+// display moved to the provider's Usage() method in Phase 3, so the show*UsageData
+// wrappers are gone.
 
 func runCodexLogin(cfg *Config) error {
 	cmdCodexLogin([]string{})
@@ -28,11 +25,6 @@ func clearCodexAuth(cfg *Config) error {
 	return nil
 }
 
-func showCodexUsageData(cfg *Config, prov Provider) (any, error) {
-	showCodexUsage(cfg, prov)
-	return nil, nil
-}
-
 func clearApiKey(providerName string) error {
 	path := filepath.Join(homeDir(), ".model-proxy", providerName+"_apikey.json")
 	err := os.Remove(path)
@@ -46,23 +38,6 @@ func clearApiKey(providerName string) error {
 // AK/SK) for the provider callback interface.
 func runVolcengineLoginErr(cfg *Config, provName string, prov Provider) error {
 	return runVolcengineLogin(cfg, provName, prov)
-}
-
-func showZhipuUsageData(cfg *Config, providerName string, prov Provider, cred *accountCred) (any, error) {
-	showGenericUsage(cfg, providerName, prov, cred)
-	return nil, nil
-}
-
-func showDeepseekUsageData(cfg *Config, providerName string, prov Provider, cred *accountCred) (any, error) {
-	showDeepseekUsage(cfg, providerName, prov, cred)
-	return nil, nil
-}
-
-// showVolcengineUsageData shows the Agent Plan state (configured models + a note
-// that GetAFPUsage needs AK/SK + V4 signing). See showVolcengineUsage.
-func showVolcengineUsageData(cfg *Config, providerName string, prov Provider, cred *accountCred) (any, error) {
-	showVolcengineUsage(cfg, providerName, prov, cred)
-	return nil, nil
 }
 
 // runApiKeyLoginErr wraps runApiKeyLogin (now returns error) for the provider

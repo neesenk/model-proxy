@@ -73,12 +73,6 @@ func (p *ZhipuProvider) Logout() error {
 	return p.DeleteKey()
 }
 
-func (p *ZhipuProvider) Usage() (any, error) {
-	// Delegate to the main-package UsageFn (showGenericUsage), which fetches
-	// /models and prints the list. Matches aqp/codex/deepseek.
-	return p.cfg.UsageFn()
-}
-
 func (p *ZhipuProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
 
 // Quota GETs the zhipu usage_url and parses the BigModel quota envelope. On any

@@ -102,52 +102,54 @@ func TestClearApiKey(t *testing.T) {
 	}
 }
 
-// --- provider_wire delegation wrappers (cover them via direct call) ---
+// --- show*Usage dispatch shims (cover them via direct call) ---
+// These are 1-line buildOne().Usage() dispatchers (the display logic lives in
+// provider/usage_display.go since Phase 3). Capture stdout and assert each
+// prints a recognizable marker - not just "returned nil".
 
-func TestProviderWire_Wrappers(t *testing.T) {
-	// showXxxUsageData wrappers call their showXxxUsage, print to stdout, return
-	// (nil,nil). Capture stdout and assert each prints a recognizable marker -
-	// not just "returned nil" (which would pass even if delegated to the wrong func).
+func TestShowUsageShims(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"deepseek": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "deepseek", UsageURL: "http://127.0.0.1:1/balance"},
+			"deepseek":   {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "deepseek", UsageURL: "http://127.0.0.1:1/balance"},
+			"volcengine": {Provider: "volcengine", Models: []string{"doubao"}},
 		},
 	}
-	// deepseek wrapper -> prints "Provider:" + "deepseek" or "Not logged in"
+	// deepseek shim -> prints "Provider:" + "deepseek" or "Not logged in"
 	out := captureStdout(t, func() {
-		_, _ = showDeepseekUsageData(cfg, "deepseek", cfg.Providers["deepseek"], nil)
+		showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "deepseek") && !strings.Contains(out, "Not logged in") {
-		t.Errorf("showDeepseekUsageData output missing deepseek/Not logged in:\n%s", out)
+		t.Errorf("showDeepseekUsage output missing deepseek/Not logged in:\n%s", out)
 	}
-	// zhipu wrapper -> delegates to showGenericUsage -> fetchZhipuQuota -> dead URL -> error
+	// zhipu shim (via showGenericUsage) -> dead URL -> error or Not logged in
 	out = captureStdout(t, func() {
-		_, _ = showZhipuUsageData(cfg, "deepseek", cfg.Providers["deepseek"], nil)
+		showGenericUsage(cfg, "deepseek", cfg.Providers["deepseek"], nil)
 	})
 	if !strings.Contains(out, "deepseek") && !strings.Contains(out, "Not logged in") && !strings.Contains(out, "Error:") {
-		t.Errorf("showZhipuUsageData output missing marker:\n%s", out)
+		t.Errorf("showGenericUsage output missing marker:\n%s", out)
 	}
-	// aqp wrapper
-	out = captureStdout(t, func() {
-		_, _ = showAqpUsageData(cfg)
-	})
+	// aqp shim
+	out = captureStdout(t, func() { showAqpUsage(cfg) })
 	if !strings.Contains(out, "aqp") && !strings.Contains(out, "Not logged in") {
-		t.Errorf("showAqpUsageData output missing marker:\n%s", out)
+		t.Errorf("showAqpUsage output missing marker:\n%s", out)
 	}
-	// codex wrapper
-	out = captureStdout(t, func() {
-		_, _ = showCodexUsageData(cfg, cfg.Providers["deepseek"])
-	})
+	// codex shim
+	out = captureStdout(t, func() { showCodexUsage(cfg, cfg.Providers["deepseek"]) })
 	if !strings.Contains(out, "codex") && !strings.Contains(out, "Not logged in") {
-		t.Errorf("showCodexUsageData output missing marker:\n%s", out)
+		t.Errorf("showCodexUsage output missing marker:\n%s", out)
 	}
-	// volcengine wrapper
+	// volcengine shim -> no AK/SK -> Note + config models
 	out = captureStdout(t, func() {
-		_, _ = showVolcengineUsageData(cfg, "deepseek", cfg.Providers["deepseek"], nil)
+		showVolcengineUsage(cfg, "volcengine", cfg.Providers["volcengine"], nil)
 	})
 	if !strings.Contains(out, "volcengine") && !strings.Contains(out, "Note:") {
-		t.Errorf("showVolcengineUsageData output missing marker:\n%s", out)
+		t.Errorf("showVolcengineUsage output missing marker:\n%s", out)
 	}
+	// Unknown provider id -> buildOne returns nil -> shim must not panic.
+	showDeepseekUsage(cfg, "x", Provider{Provider: "unknown-id"}, nil)
+	// Non-nil cred path (bound key) through the shim.
+	cred := accountCred{APIKey: "k"}
+	showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"], &cred)
 }
 
 // --- runCodexLogin / runVolcengineLoginErr / runApiKeyLoginErr wrappers ---

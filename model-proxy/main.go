@@ -476,8 +476,7 @@ func printProviderUsage(cfg *Config, provName string) {
 	if !ok {
 		return
 	}
-	providerID := prov.Provider
-	pool, _ := loadPool(provName, providerID)
+	pool, _ := loadPool(provName, prov.Provider)
 	if len(pool.Accounts) >= 2 {
 		for ai, a := range pool.Accounts {
 			if ai > 0 {
@@ -485,20 +484,15 @@ func printProviderUsage(cfg *Config, provName string) {
 			}
 			fmt.Printf("%s (%s)\n", cBold(cCyan(a.Label)), mask(a.ID))
 			cred := a.cred()
-			switch providerID {
-			case "deepseek":
-				showDeepseekUsage(cfg, provName, prov, &cred)
-			case "volcengine":
-				showVolcengineUsage(cfg, provName, prov, &cred)
-			default:
-				// zhipu + future apikey providers use the generic BigModel /
-				// OpenAI-style usage display.
-				showGenericUsage(cfg, provName, prov, &cred)
+			if p := buildOne(cfg, provName, prov, cred); p != nil {
+				if _, err := p.Usage(); err != nil {
+					fmt.Println(cYellow("  (usage unavailable: " + err.Error() + ")"))
+				}
 			}
 		}
 		return
 	}
-	// Single-account / non-pooled / aqp / codex: existing path.
+	// Single-account / non-pooled / aqp / codex: build one provider + call Usage.
 	provMap, _, _ := buildProviders(cfg)
 	p := provMap[provName]
 	if p == nil {
@@ -522,184 +516,11 @@ func providerNames(cfg *Config) string {
 	return strings.Join(names, ", ")
 }
 
-func showAqpUsage(cfg *Config) {
-	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue("aqp")))
-	path := authFilePath("aqp", "oauth_auth")
-	a, err := loadAccount(path)
-	if err != nil {
-		fmt.Println(cRed("Error: " + err.Error()))
-		return
-	}
-	if a == nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login aqp"))
-		return
-	}
-	c := newAqpClient(path)
-	fmt.Printf("%s %s\n", cDim("Account:    "), cBold(cCyan(a.Email)))
-	fmt.Printf("%s %s\n", cDim("Project ID: "), cGray(a.ProjectID))
-	mu, err := c.MonthlyUsage()
-	if err != nil {
-		fmt.Printf("%s %s\n", cDim("Usage:      "), cRed("(unavailable: "+err.Error()+")"))
-	} else {
-		fmt.Printf("%s %s\n", cDim("Usage:      "), aqpUsageLine(mu))
-	}
-	fmt.Printf("%s %s\n", cDim("Store:      "), cGray(path))
-}
-
-// aqpUsageLine renders the aqp monthly-usage line (the content after the
-// "Usage:" label): a progress bar + "<PCT>% used" prefix, then the existing
-// usage/total and balance/plan/date parenthetical. Color follows the
-// usageRatioColor convention (green/yellow/red by remaining ratio) shared with
-// progressBar. Extracted so the success-branch format is unit-testable without
-// the live monthly_usage endpoint (showAqpUsage uses the hardcoded aqp base URL).
-func aqpUsageLine(mu *provider.MonthlyProjectUsage) string {
-	pct := 0
-	if mu.TotalAmount > 0 {
-		pct = int((mu.Usage/mu.TotalAmount)*100 + 0.5)
-	}
-	bar := progressBar(pct, 10)
-	pctStr := usageRatioColor(mu.Balance, mu.TotalAmount, fmt.Sprintf("%d%% used", pct))
-	return fmt.Sprintf("%s %s · %s / %s  (%s %s, %s, %d-%02d)",
-		bar, pctStr,
-		usageRatioColor(mu.Balance, mu.TotalAmount, money(mu.Usage)),
-		cGray(money(mu.TotalAmount)),
-		cDim("balance"), usageRatioColor(mu.Balance, mu.TotalAmount, money(mu.Balance)),
-		cMagenta(mu.Plan), mu.SelectedYear, mu.SelectedMonth)
-}
-
-func showCodexUsage(cfg *Config, prov Provider) {
-	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue("codex")))
-	authFile := authFilePath("codex", "oauth_auth")
-	p := newCodexOAuthProvider(authFile)
-	tok, acct, err := p.token()
-	if err != nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login codex"))
-		return
-	}
-	// Usage endpoint is at /backend-api/wham/usage, NOT under the codex base
-	// (/backend-api/codex/wham/usage returns 403). Derive the backend-api root
-	// from the provider openai_base_url by stripping the trailing /codex segment.
-	usageURL := strings.TrimSuffix(prov.OpenAIBaseURL, "/codex") + "/wham/usage"
-	req, _ := http.NewRequest("GET", usageURL, nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("originator", "codex_cli_rs")
-	if acct != "" {
-		req.Header.Set("ChatGPT-Account-Id", acct)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		fmt.Println(cRed("Error: usage request: " + err.Error()))
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		fmt.Printf("%s HTTP %d: %s\n", cRed("Error:"), resp.StatusCode, truncate(string(body), 200))
-		return
-	}
-	var u struct {
-		Email    string `json:"email"`
-		PlanType string `json:"plan_type"`
-		Credits  *struct {
-			HasCredits bool    `json:"has_credits"`
-			Unlimited  bool    `json:"unlimited"`
-			Balance    *string `json:"balance"`
-		} `json:"credits"`
-		RateLimit *struct {
-			Allowed       bool `json:"allowed"`
-			LimitReached  bool `json:"limit_reached"`
-			PrimaryWindow *struct {
-				UsedPercent     int `json:"used_percent"`
-				LimitWindowSecs int `json:"limit_window_seconds"`
-				ResetAfterSecs  int `json:"reset_after_seconds"`
-			} `json:"primary_window"`
-			SecondaryWindow *struct {
-				UsedPercent     int `json:"used_percent"`
-				LimitWindowSecs int `json:"limit_window_seconds"`
-				ResetAfterSecs  int `json:"reset_after_seconds"`
-			} `json:"secondary_window"`
-		} `json:"rate_limit"`
-		SpendControl *struct {
-			Reached         bool `json:"reached"`
-			IndividualLimit *struct {
-				Used        string `json:"used"`
-				Limit       string `json:"limit"`
-				Remaining   string `json:"remaining"`
-				UsedPercent int    `json:"used_percent"`
-				ResetAfter  int    `json:"reset_after_seconds"`
-			} `json:"individual_limit"`
-		} `json:"spend_control"`
-	}
-	json.Unmarshal(body, &u)
-	fmt.Printf("%s %s\n", cDim("Account:   "), cBold(cCyan(or(u.Email, "(unknown)"))))
-	fmt.Printf("%s %s\n", cDim("Plan:      "), cMagenta(or(u.PlanType, "(unknown)")))
-	// Credits
-	if u.Credits != nil {
-		if u.Credits.Unlimited {
-			fmt.Printf("%s %s\n", cDim("Credits:   "), cGreen("unlimited"))
-		} else if u.Credits.HasCredits {
-			bal := "available"
-			if u.Credits.Balance != nil && *u.Credits.Balance != "" {
-				bal = *u.Credits.Balance
-			}
-			fmt.Printf("%s %s\n", cDim("Credits:   "), cGreen("has credits ("+bal+")"))
-		} else {
-			fmt.Printf("%s %s\n", cDim("Credits:   "), cRed("none"))
-		}
-	}
-	// Rate limit windows
-	if u.RateLimit != nil {
-		status := cGreen("allowed")
-		if u.RateLimit.LimitReached {
-			status = cRed("limit reached")
-		} else if !u.RateLimit.Allowed {
-			status = cYellow("not allowed")
-		}
-		fmt.Printf("%s %s\n", cDim("Rate Limit:"), status)
-		if u.RateLimit.PrimaryWindow != nil {
-			pw := u.RateLimit.PrimaryWindow
-			fmt.Printf("%s %s\n", cDim("  primary:  "),
-				usageRatioColor(float64(100-pw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", pw.UsedPercent, formatDuration(pw.ResetAfterSecs))))
-		}
-		if u.RateLimit.SecondaryWindow != nil {
-			sw := u.RateLimit.SecondaryWindow
-			fmt.Printf("%s %s\n", cDim("  weekly:   "),
-				usageRatioColor(float64(100-sw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", sw.UsedPercent, formatDuration(sw.ResetAfterSecs))))
-		}
-	}
-	// Spend control — progress bar + numbers (label is "Usage:" to match aqp).
-	if u.SpendControl != nil {
-		if u.SpendControl.Reached {
-			fmt.Printf("%s %s\n", cDim("Usage:     "), cRed("limit reached"))
-		} else if u.SpendControl.IndividualLimit != nil {
-			il := u.SpendControl.IndividualLimit
-			pct := il.UsedPercent
-			bar := progressBar(pct, 10)
-			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%% used", pct))
-			resetStr := ""
-			if il.ResetAfter > 0 {
-				resetStr = cGray(", resets " + formatDuration(il.ResetAfter))
-			}
-			fmt.Printf("%s %s %s · %s / %s credits%s\n",
-				cDim("Usage:     "),
-				bar, pctStr,
-				cBold(formatCredits(il.Used)), cGray(formatCredits(il.Limit)),
-				resetStr)
-		}
-	}
-}
-
 // fetchCodexQuota delegates to the codex provider's Quota() via buildOne (the
 // provider now owns the fetch + parse). Kept as a shim for the usage-display
 // path + tests; the quotaTracker calls p.Quota() directly.
 func fetchCodexQuota(cfg *Config, prov Provider) (*provider.QuotaSnapshot, error) {
 	return buildOne(cfg, "codex", prov, accountCred{}).Quota()
-}
-
-// parseZhipuQuota forwards to provider.ParseZhipuQuota (impl moved to the zhipu
-// provider). Temporary shim; removed when fetchZhipuQuota moves in Phase 2.
-func parseZhipuQuota(body []byte, account string) (*provider.QuotaSnapshot, error) {
-	return provider.ParseZhipuQuota(body, account)
 }
 
 // fetchZhipuQuota delegates to the zhipu provider's Quota() via buildOne. Kept
@@ -710,113 +531,6 @@ func fetchZhipuQuota(cfg *Config, name string, prov Provider, cred *accountCred)
 		c = *cred
 	}
 	return buildOne(cfg, name, prov, c).Quota()
-}
-
-// printQuotaSnapshot renders a QuotaSnapshot for the `usage` CLI. Output mirrors
-// the pre-refactor per-provider formatters (same bars, percentages, reset
-// strings, "By model"/"By MCP tool" detail labels).
-func printQuotaSnapshot(s *provider.QuotaSnapshot) {
-	for _, w := range s.Windows {
-		var bar, pctStr string
-		if w.RemainingPct < 0 {
-			bar = cGray("n/a")
-			pctStr = cGray("unmeasured")
-		} else {
-			pct := int(w.RemainingPct * 100)
-			usedPct := 100 - pct
-			bar = progressBar(usedPct, 16)
-			pctStr = usageRatioColor(w.RemainingPct, 1, fmt.Sprintf("%d%% used", usedPct))
-		}
-		resetStr := ""
-		if !w.ResetsAt.IsZero() {
-			dur := formatDuration(int(time.Until(w.ResetsAt) / time.Second))
-			resetStr = cGray(" · resets " + dur + "(at " + formatResetAt(w.ResetsAt.UnixMilli()) + ")")
-		}
-		fmt.Printf("%s %s  %s%s\n", cDim(pad(w.Label+":", 18)), bar, pctStr, resetStr)
-		if w.Total > 0 {
-			fmt.Printf("%s %.0f used / %.0f total (%.0f remaining)\n",
-				cDim(pad("Usage:", 18)), w.Used, w.Total, w.Total-w.Used)
-		}
-		if len(w.Details) > 0 && w.DetailLabel != "" {
-			parts := make([]string, 0, len(w.Details))
-			for _, d := range w.Details {
-				parts = append(parts, fmt.Sprintf("%s: %.0f", d.Label, d.Used))
-			}
-			fmt.Printf("%s %s\n", cDim(pad(w.DetailLabel+":", 18)), cGray(strings.Join(parts, " · ")))
-		}
-	}
-	for _, n := range s.Notes {
-		fmt.Println(cDim(pad("", 18)) + n)
-	}
-}
-
-// showGenericUsage fetches and displays usage from a provider's usageURL.
-// Handles Zhipu BigModel's /api/monitor/usage/quota/limit format:
-//
-//	{data:{limits:[{type:"TOKENS_LIMIT",unit,percentage,nextResetTime}, ...], level}}
-//
-// unit: 3=5h window, 6=weekly window, 5=monthly time limit.
-func showGenericUsage(cfg *Config, provName string, prov Provider, cred *accountCred) {
-	auth := newAuthProvider(prov.Provider, provName, cfg, cred)
-	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
-	if err := auth.Inject(req); err != nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login "+provName))
-		return
-	}
-	for k, v := range prov.Headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		fmt.Println(cRed("Error: usage request: " + err.Error()))
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		fmt.Printf("%s HTTP %d: %s\n", cRed("Error:"), resp.StatusCode, truncate(string(body), 200))
-		return
-	}
-	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
-
-	// Try Zhipu BigModel quota format (parseZhipuQuota); if not zhipu, fall
-	// through to the OpenAI model-list / raw-JSON fallback below.
-	if s, _ := parseZhipuQuota(body, ""); s != nil {
-		if s.Level != "" {
-			fmt.Printf("%s %s\n", cDim("Level:     "), cMagenta(s.Level))
-		}
-		printQuotaSnapshot(s)
-		return
-	}
-
-	// Fallback: check if it's a model list (OpenAI-style).
-	var ml struct {
-		Object string `json:"object"`
-		Data   []struct {
-			ID      string `json:"id"`
-			OwnedBy string `json:"owned_by"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(body, &ml) == nil && ml.Object == "list" {
-		fmt.Printf("%s %d models available\n", cDim("Models:    "), len(ml.Data))
-		for _, m := range ml.Data {
-			name := m.ID
-			fmt.Printf("  %s  %s\n", cCyan(pad(m.ID, 22)), cGray(name))
-		}
-		return
-	}
-
-	// Last resort: print raw JSON fields.
-	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
-		fmt.Println(cRed("Error: parse usage response: " + err.Error()))
-		return
-	}
-	data := raw
-	if d, ok := raw["data"].(map[string]any); ok {
-		data = d
-	}
-	printUsageFields(data, 1)
 }
 
 // runVolcengineLogin is the thin wrapper retained for the provider-callback path
@@ -1001,51 +715,6 @@ func getAFPUsage(ak, sk string) (*provider.AfpUsage, error) {
 	return &wrap.Result, nil
 }
 
-// showVolcengineUsage shows the Agent Plan's 5h/daily/weekly/monthly AFP quota
-// via GetAFPUsage (needs AK/SK + V4 signing). When cred is non-nil the virtual's
-// own AK/SK are used (per-account); otherwise the legacy file is read. Falls
-// back to config models if AK/SK aren't configured or the call fails.
-func showVolcengineUsage(cfg *Config, provName string, prov Provider, cred *accountCred) {
-	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
-	ak, sk, err := resolveVolcengineAKSK(provName, cred)
-	if err != nil {
-		fmt.Printf("%s Agent Plan 5h/周/月额度需经 GetAFPUsage（火山引擎签名 OpenAPI，AccessKey/SecretKey + V4）。\n", cDim("Note:       "))
-		fmt.Printf("%s 用 `model-proxy login %s` 配置 AK/SK（IAM 密钥，非 Ark API Key）后可查询。\n", cDim("            "), provName)
-		listConfigModels(prov)
-		return
-	}
-	u, err := getAFPUsage(ak, sk)
-	if err != nil {
-		fmt.Printf("%s GetAFPUsage failed: %v\n", cDim("Error:      "), err)
-		listConfigModels(prov)
-		return
-	}
-	if u.PlanType != "" {
-		fmt.Printf("%s %s\n", cDim("Plan:      "), cMagenta(u.PlanType))
-	}
-	printAFPWindow("5h", u.AFPFiveHour)
-	printAFPWindow("Daily", u.AFPDaily)
-	printAFPWindow("Weekly", u.AFPWeekly)
-	printAFPWindow("Monthly", u.AFPMonthly)
-}
-
-func printAFPWindow(label string, w provider.AfpWindow) {
-	remaining := w.Quota - w.Used
-	pct := 0
-	if w.Quota > 0 {
-		pct = int(w.Used / w.Quota * 100)
-	}
-	bar := progressBar(pct, 16)
-	pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%% used", pct))
-	reset := "—"
-	if w.ResetTime > 0 {
-		dur := formatDuration(int((w.ResetTime - time.Now().UnixMilli()) / 1000))
-		reset = dur + "(at " + formatResetAt(w.ResetTime) + ")"
-	}
-	fmt.Printf("%s %s  %s · resets %s  (%.1f used / %.1f quota, %.1f remaining)\n",
-		cDim(pad(label+":", 12)), bar, pctStr, cGray(reset), w.Used, w.Quota, remaining)
-}
-
 // resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
 // When a cred is supplied (the pool-bound path), its AK/SK are used EXCLUSIVELY
 // — the on-disk file is never consulted, preserving per-account isolation (a
@@ -1104,175 +773,35 @@ func fetchAqpQuota(cfg *Config) (*provider.QuotaSnapshot, error) {
 	return buildOne(cfg, "aqp", prov, accountCred{}).Quota()
 }
 
-func listConfigModels(prov Provider) {
-	ids := append([]string(nil), prov.Models...)
-	sort.Strings(ids)
-	fmt.Printf("%s %d models (from config)\n", cDim("Models:     "), len(ids))
-	for _, id := range ids {
-		fmt.Printf("  %s\n", cCyan(id))
+// show*Usage are 1-line dispatch shims to the provider's Usage() display method
+// (the display logic lives in provider/usage_display.go since Phase 3). Kept for
+// the usage-display tests; production goes through printProviderUsage ->
+// buildOne -> p.Usage() directly.
+func showAqpUsage(cfg *Config) {
+	prov := cfg.Providers["aqp"]
+	if prov.Provider == "" {
+		prov = Provider{Provider: "aqp"}
 	}
+	buildOne(cfg, "aqp", prov, accountCred{}).Usage()
 }
-
-// showDeepseekUsage fetches and displays the DeepSeek account balance from
-// /user/balance: {is_available, balance_infos:[{currency, total_balance,
-// granted_balance, topped_up_balance}]}. Auth is Bearer (the balance endpoint is
-// OpenAI-style, under the OpenAI base).
-func showDeepseekUsage(cfg *Config, provName string, prov Provider, cred *accountCred) {
-	fmt.Printf("%s %s\n", cDim("Provider:  "), cBold(cBlue(provName)))
-	auth := newAuthProvider(prov.Provider, provName, cfg, cred)
-	req, _ := http.NewRequest("GET", prov.UsageURL, nil)
-	if err := auth.Inject(req); err != nil {
-		fmt.Println(cYellow("Not logged in.") + " Run: " + cCyan("model-proxy login "+provName))
-		return
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		fmt.Println(cRed("Error: usage request: " + err.Error()))
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		fmt.Printf("%s HTTP %d: %s\n", cRed("Error:"), resp.StatusCode, truncate(string(body), 200))
-		return
-	}
-	var u struct {
-		IsAvailable  bool `json:"is_available"`
-		BalanceInfos []struct {
-			Currency        string `json:"currency"`
-			TotalBalance    string `json:"total_balance"`
-			GrantedBalance  string `json:"granted_balance"`
-			ToppedUpBalance string `json:"topped_up_balance"`
-		} `json:"balance_infos"`
-	}
-	if err := json.Unmarshal(body, &u); err != nil {
-		fmt.Println(cRed("Error: parse usage response: " + err.Error()))
-		return
-	}
-	if u.IsAvailable {
-		fmt.Printf("%s %s\n", cDim("Available:  "), cGreen("yes"))
-	} else {
-		fmt.Printf("%s %s\n", cDim("Available:  "), cRed("no (insufficient balance)"))
-	}
-	for _, b := range u.BalanceInfos {
-		cur := b.Currency
-		if cur == "" {
-			cur = "Balance"
-		}
-		fmt.Printf("%s %s  %s\n",
-			cDim(pad(cur+":", 12)),
-			cBold(cCyan(b.TotalBalance)),
-			cGray("(granted "+b.GrantedBalance+", topped-up "+b.ToppedUpBalance+")"))
-	}
+func showCodexUsage(cfg *Config, prov Provider) { buildOne(cfg, "codex", prov, accountCred{}).Usage() }
+func showGenericUsage(cfg *Config, name string, prov Provider, cred *accountCred) {
+	showApiKeyUsage(cfg, name, prov, cred)
 }
-
-// printUsageFields recursively prints JSON fields with indentation.
-func printUsageFields(m map[string]any, indent int) {
-	prefix := strings.Repeat("  ", indent)
-	// Collect and sort keys for stable output.
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		v := m[k]
-		switch val := v.(type) {
-		case string:
-			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cGray(val))
-		case float64:
-			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cCyan(fmt.Sprintf("%v", val)))
-		case bool:
-			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cCyan(fmt.Sprintf("%v", val)))
-		case map[string]any:
-			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cBold(""))
-			printUsageFields(val, indent+1)
-		default:
-			fmt.Printf("%s%s %s\n", cDim(pad(k+":", 18)), prefix, cGray(fmt.Sprintf("%v", val)))
-		}
-	}
+func showDeepseekUsage(cfg *Config, name string, prov Provider, cred *accountCred) {
+	showApiKeyUsage(cfg, name, prov, cred)
 }
-
-func or(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return s
+func showVolcengineUsage(cfg *Config, name string, prov Provider, cred *accountCred) {
+	showApiKeyUsage(cfg, name, prov, cred)
 }
-
-// formatDuration converts seconds to a compact human-readable string (e.g. "5h", "7d3h").
-func formatDuration(secs int) string {
-	if secs <= 0 {
-		return "—"
+func showApiKeyUsage(cfg *Config, name string, prov Provider, cred *accountCred) {
+	c := accountCred{}
+	if cred != nil {
+		c = *cred
 	}
-	d := secs / 86400
-	h := (secs % 86400) / 3600
-	m := (secs % 3600) / 60
-	switch {
-	case d > 0:
-		return fmt.Sprintf("%dd%dh", d, h)
-	case h > 0:
-		return fmt.Sprintf("%dh%dm", h, m)
-	default:
-		return fmt.Sprintf("%dm", m)
+	if p := buildOne(cfg, name, prov, c); p != nil {
+		p.Usage()
 	}
-}
-
-// formatResetAt formats a reset time (epoch ms) for display: if it falls on
-// today's date, only HH:MM; otherwise MM-DD HH:MM.
-func formatResetAt(resetMs int64) string {
-	t := time.UnixMilli(resetMs).Local()
-	if t.Format("20060102") == time.Now().Format("20060102") {
-		return t.Format("15:04")
-	}
-	return t.Format("01-02 15:04")
-}
-
-// formatCredits formats a credit amount string (e.g. "330.258..." → "330",
-// "22500" → "22,500"). Truncates decimals, adds thousands separators.
-func formatCredits(s string) string {
-	f := 0.0
-	fmt.Sscanf(s, "%f", &f)
-	return formatWithCommas(int(f))
-}
-
-// formatWithCommas adds thousands separators to an integer.
-func formatWithCommas(n int) string {
-	s := fmt.Sprintf("%d", n)
-	if n < 0 {
-		return "-" + formatWithCommas(-n)
-	}
-	for i := len(s) - 3; i > 0; i -= 3 {
-		s = s[:i] + "," + s[i:]
-	}
-	return s
-}
-
-// progressBar renders a [██░░░] bar of given width, colored by remaining ratio.
-// pct is the used percentage (0-100). The filled portion uses ratio coloring
-// (green < 50%, yellow < 80%, red >= 80%), empty portion is dim.
-func progressBar(pct, width int) string {
-	if width < 4 {
-		width = 4
-	}
-	filled := pct * width / 100
-	if filled > width {
-		filled = width
-	}
-	bar := ""
-	for i := 0; i < width; i++ {
-		if i < filled {
-			bar += "█"
-		} else {
-			bar += "░"
-		}
-	}
-	return usageRatioColor(float64(100-pct), 100, "["+bar+"]")
-}
-
-// money formats v as $X.XX
-func money(v float64) string {
-	return fmt.Sprintf("$%.2f", v)
 }
 
 func cmdConfig(args []string) {

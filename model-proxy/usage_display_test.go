@@ -31,7 +31,12 @@ func captureStdout(t *testing.T, fn func()) string {
 	oldOut := os.Stdout
 	oldColor := colorEnabled
 	colorEnabled = false
-	defer func() { os.Stdout = oldOut; colorEnabled = oldColor }()
+	syncColorEnabled() // mirror into provider.ColorEnabled (display helpers)
+	defer func() {
+		os.Stdout = oldOut
+		colorEnabled = oldColor
+		syncColorEnabled()
+	}()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -331,28 +336,6 @@ func TestShowAqpUsage_MonthlyUsageError(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q:\n%s", want, out)
 		}
-	}
-}
-
-// TestAqpUsageLine: the success-branch Usage line carries a progress bar +
-// "<PCT>% used" prefix ahead of the usage/total + balance/plan/date
-// parenthetical. The success branch itself can't be exercised (showAqpUsage
-// uses the hardcoded aqp base URL), so the extracted formatter is asserted
-// directly with color forced off.
-func TestAqpUsageLine(t *testing.T) {
-	mu := &provider.MonthlyProjectUsage{SelectedYear: 2026, SelectedMonth: 7,
-		TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
-	var line string
-	captureStdout(t, func() { line = aqpUsageLine(mu) })
-	for _, want := range []string{"[", "]", "30% used", "$30.00 / $100.00",
-		"balance $70.00", "CQP", "2026-07"} {
-		if !strings.Contains(line, want) {
-			t.Errorf("aqpUsageLine missing %q: %s", want, line)
-		}
-	}
-	// Order + separator: bar+pct precede usage/total.
-	if !strings.Contains(line, "30% used · $30.00 / $100.00") {
-		t.Errorf("aqpUsageLine order/separator wrong: %s", line)
 	}
 }
 
@@ -782,107 +765,46 @@ func TestFetchVolcengineQuota_GetAFPFails(t *testing.T) {
 	}
 }
 
-// --- print-only functions ---
-
-// TestPrintQuotaSnapshot: a snapshot with two windows (one with details) + a note
-// → printQuotaSnapshot prints labels, the used/total line, the detail line, and notes.
-func TestPrintQuotaSnapshot(t *testing.T) {
-	s := &provider.QuotaSnapshot{
-		Billing: provider.BillingPlan,
-		Account: "a@b.com",
-		Plan:    "pro",
-		Windows: []provider.QuotaWindow{
-			{Label: "5h tokens", Kind: "tokens", Used: 40, Total: 100, RemainingPct: 0.6,
-				DetailLabel: "By model",
-				Details:     []provider.QuotaDetail{{Label: "glm-5.2", Used: 30000}},
-				ResetsAt:    time.Now().Add(1 * time.Hour)},
-			{Label: "Weekly tokens", Kind: "tokens", Used: 70, Total: 100, RemainingPct: 0.3},
-		},
-		Notes: []string{"Rate Limit: allowed"},
-	}
-	out := captureStdout(t, func() { printQuotaSnapshot(s) })
-	for _, want := range []string{"5h tokens", "Weekly tokens", "40 used / 100 total",
-		"By model", "glm-5.2", "Rate Limit: allowed", "40% used"} {
+// TestPrintProviderUsage_Single: the `usage <provider>` dispatch path for a
+// single-account provider builds the provider and calls Usage(). Asserts the
+// deepseek display is printed (covers printProviderUsage's single-account branch).
+func TestPrintProviderUsage_Single(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"is_available":true,"balance_infos":[` +
+			`{"currency":"CNY","total_balance":"10.50","granted_balance":"8.00","topped_up_balance":"2.50"}]}`))
+	}))
+	defer srv.Close()
+	home := useTempHome(t)
+	writeCred(t, home, "deepseek", "apikey", mustMarshalT(map[string]string{"api_key": "dk"}))
+	cfg := &Config{Providers: map[string]Provider{
+		"deepseek": {Provider: "deepseek", UsageURL: srv.URL},
+	}}
+	out := captureStdout(t, func() { printProviderUsage(cfg, "deepseek") })
+	for _, want := range []string{"deepseek", "Available:", "CNY", "10.50"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("printQuotaSnapshot missing %q:\n%s", want, out)
+			t.Errorf("printProviderUsage missing %q:\n%s", want, out)
 		}
 	}
 }
 
-// TestPrintQuotaSnapshot_UnmeasuredWindow: a window with RemainingPct == -1
-// (the "unmeasured" sentinel) must render as "n/a"/"unmeasured", NOT as
-// "200% used" (which is what the naive 100-(-100) math would produce).
-func TestPrintQuotaSnapshot_UnmeasuredWindow(t *testing.T) {
-	s := &provider.QuotaSnapshot{
-		Billing: provider.BillingPayG,
-		Windows: []provider.QuotaWindow{
-			{Label: "Balance", Kind: "money", Total: 10.5, RemainingPct: -1},
-		},
+// TestFetchDeepseekQuota_BoundCred: non-nil cred path through the shim (covers
+// the `if cred != nil` true branch in fetchDeepseekQuota/fetchZhipuQuota).
+func TestFetchDeepseekQuota_BoundCred(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"5.00","granted_balance":"4.00","topped_up_balance":"1.00"}]}`))
+	}))
+	defer srv.Close()
+	home := useTempHome(t)
+	writeCred(t, home, "deepseek", "apikey", mustMarshalT(map[string]string{"api_key": "dk"}))
+	cfg := &Config{Providers: map[string]Provider{
+		"deepseek": {Provider: "deepseek", UsageURL: srv.URL},
+	}}
+	cred := accountCred{APIKey: "dk"}
+	s, err := fetchDeepseekQuota(cfg, "deepseek", cfg.Providers["deepseek"], &cred)
+	if err != nil {
+		t.Fatal(err)
 	}
-	out := captureStdout(t, func() { printQuotaSnapshot(s) })
-	if strings.Contains(out, "200% used") {
-		t.Errorf("unmeasured window rendered as '200%% used':\n%s", out)
-	}
-	if !strings.Contains(out, "unmeasured") {
-		t.Errorf("unmeasured window missing 'unmeasured' label:\n%s", out)
-	}
-}
-
-// TestPrintAFPWindow: a normal window prints label, used%, and the used/quota/remaining line.
-func TestPrintAFPWindow(t *testing.T) {
-	w := provider.AfpWindow{Quota: 100, Used: 30, ResetTime: time.Now().Add(2 * time.Hour).UnixMilli()}
-	out := captureStdout(t, func() { printAFPWindow("5h", w) })
-	for _, want := range []string{"5h", "30% used", "30.0 used / 100.0 quota", "70.0 remaining"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("printAFPWindow missing %q:\n%s", want, out)
-		}
-	}
-	// Zero quota → pct 0 (no division), remaining 0.
-	out2 := captureStdout(t, func() { printAFPWindow("daily", provider.AfpWindow{}) })
-	if !strings.Contains(out2, "0% used") {
-		t.Errorf("printAFPWindow zero-quota missing '0%% used':\n%s", out2)
-	}
-	if !strings.Contains(out2, "0.0 used / 0.0 quota, 0.0 remaining") {
-		t.Errorf("printAFPWindow zero-quota missing zero line:\n%s", out2)
-	}
-}
-
-// TestPrintUsageFields: each JSON value type (string, float64, bool, nested map,
-// fallback default) prints its key.
-func TestPrintUsageFields(t *testing.T) {
-	m := map[string]any{
-		"str":   "hello",
-		"num":   float64(42),
-		"flag":  true,
-		"obj":   map[string]any{"x": float64(1)},
-		"other": []any{1, 2},
-	}
-	out := captureStdout(t, func() { printUsageFields(m, 0) })
-	// Keys are sorted: flag, num, obj, other, str.
-	for _, want := range []string{"str", "hello", "num", "42", "flag", "true", "obj", "other"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("printUsageFields missing %q:\n%s", want, out)
-		}
-	}
-}
-
-// TestListConfigModels: a Provider with 3 models → "3 models (from config)" + each id sorted.
-func TestListConfigModels(t *testing.T) {
-	prov := Provider{
-		Models: []string{"doubao", "glm-5.2", "kimi"},
-	}
-	out := captureStdout(t, func() { listConfigModels(prov) })
-	if !strings.Contains(out, "3 models (from config)") {
-		t.Errorf("missing count line:\n%s", out)
-	}
-	// Sorted: doubao, glm-5.2, kimi.
-	idxD := strings.Index(out, "doubao")
-	idxG := strings.Index(out, "glm-5.2")
-	idxK := strings.Index(out, "kimi")
-	if idxD < 0 || idxG < 0 || idxK < 0 {
-		t.Fatalf("missing a model id:\n%s", out)
-	}
-	if !(idxD < idxG && idxG < idxK) {
-		t.Errorf("models not in sorted order: doubao=%d glm-5.2=%d kimi=%d", idxD, idxG, idxK)
+	if s.Billing != provider.BillingPayG || len(s.Windows) != 1 || s.Windows[0].Total != 5.0 {
+		t.Errorf("bound-cred fetch got %+v", s)
 	}
 }

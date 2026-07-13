@@ -61,7 +61,6 @@ func (p *DeepSeekProvider) RewriteRequest(targetURL string, body []byte, path st
 
 func (p *DeepSeekProvider) Login() error                   { return p.cfg.LoginFn() }
 func (p *DeepSeekProvider) Logout() error                  { return p.cfg.LogoutFn() }
-func (p *DeepSeekProvider) Usage() (any, error)            { return p.cfg.UsageFn() }
 func (p *DeepSeekProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
 
 // Quota GETs /user/balance and parses the per-currency balance windows.

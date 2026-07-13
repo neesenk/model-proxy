@@ -161,6 +161,7 @@ type ProbeRequest struct {
 // Config is the provider-level config data passed to constructors.
 type Config struct {
 	ProviderID    string
+	ProviderName  string // the config top-level key (for display "Provider: <name>")
 	OpenAIBaseURL string
 	Headers       map[string]string
 	UsageURL      string
@@ -197,12 +198,21 @@ type Config struct {
 	// (shared with the login/web flows). nil for non-aqp providers.
 	AqpMonthlyUsage func() (*MonthlyProjectUsage, error)
 
+	// AqpAccount returns the logged-in account's email, project_id, and store
+	// file path (for the aqp usage display header). nil/err for non-aqp or when
+	// not logged in. Wired in buildOne from the main-package loadAccount.
+	AqpAccount func() (email, projectID, storePath string, err error)
+
+	// Models is the config model-id list, used by the usage display's fallback
+	// (listConfigModels) when a provider can't fetch a structured quota
+	// (e.g. volcengine without AK/SK).
+	Models []string
+
 	// Callbacks: main package wires its existing functions here so provider/
 	// doesn't need to re-implement AQP minting, SSO flow, OAuth, etc.
 	Auth          Authenticator            // for AuthHeaders/Refresh (aqp, codex, apikey)
 	LoginFn       func() error             // for Login (aqp: SSO, codex: device flow, zhipu: prompt)
 	LogoutFn      func() error             // for Logout
-	UsageFn       func() (any, error)      // for Usage
 	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
 }
 

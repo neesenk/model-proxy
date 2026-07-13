@@ -430,10 +430,3 @@ func nonFlagArgs(args []string) []string {
 	}
 	return out
 }
-
-func pad(s string, n int) string {
-	if len(s) >= n {
-		return s
-	}
-	return s + strings.Repeat(" ", n-len(s))
-}
