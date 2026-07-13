@@ -272,8 +272,8 @@ Provider:   <PROVNAME>
 
 | provider | 关键行（首行之后） |
 |---|---|
-| aqp (`showAqpUsage`) | `Account:    <EMAIL>`；plan / balance / usage ratio |
-| codex (`showCodexUsage`) | `Account:   <EMAIL|"(unknown)">`；`Plan:      <PLAN_TYPE>`；`Credits:   unlimited`/`has credits (<BAL>)`/`none`；`Rate Limit:` 状态；`Spend:` `limit reached` 或 `<USED> / <TOTAL> credits  <BAR>  <PCT>%<...>` |
+| aqp (`showAqpUsage`) | `Account:    <EMAIL>`；`Project ID: <ID>`；`Usage:      [<BAR>] <PCT>% used · $<USAGE> / $<TOTAL>  (balance $<BAL>, <PLAN>, <YEAR>-<MONTH>)`；`Store:      <PATH>` |
+| codex (`showCodexUsage`) | `Account:   <EMAIL|"(unknown)">`；`Plan:      <PLAN_TYPE>`；`Credits:   unlimited`/`has credits (<BAL>)`/`none`；`Rate Limit:` 状态；`Usage:` `limit reached` 或 `[<BAR>] <PCT>% used · <USED> / <TOTAL> credits, resets <DUR>` |
 | zhipu (`showGenericUsage`) | 5h/weekly token 限额 + 月度时间限额（带进度条）；`TIME_LIMIT` 按 MCP 工具（search-prime/web-reader/zread）分解；回退：OpenAI 风格模型列表 |
 | deepseek (`showDeepseekUsage`) | `Available:  no (insufficient balance)`（余额不足时）；各币种 `total/granted/topped-up` 余额 |
 | volcengine (`showVolcengineUsage`) | 无 AK/SK：`Note:` 说明 + 列 config 模型；有 AK/SK：`Plan: <PLAN_TYPE>` + `AFPFiveHour/Daily/Weekly/Monthly` 各窗口 Quota/Used/Remaining/ResetTime |

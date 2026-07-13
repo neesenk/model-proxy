@@ -541,14 +541,30 @@ func showAqpUsage(cfg *Config) {
 	if err != nil {
 		fmt.Printf("%s %s\n", cDim("Usage:      "), cRed("(unavailable: "+err.Error()+")"))
 	} else {
-		fmt.Printf("%s %s / %s  (%s %s, %s, %d-%02d)\n",
-			cDim("Usage:      "),
-			usageRatioColor(mu.Balance, mu.TotalAmount, money(mu.Usage)),
-			cGray(money(mu.TotalAmount)),
-			cDim("balance"), usageRatioColor(mu.Balance, mu.TotalAmount, money(mu.Balance)),
-			cMagenta(mu.Plan), mu.SelectedYear, mu.SelectedMonth)
+		fmt.Printf("%s %s\n", cDim("Usage:      "), aqpUsageLine(mu))
 	}
 	fmt.Printf("%s %s\n", cDim("Store:      "), cGray(path))
+}
+
+// aqpUsageLine renders the aqp monthly-usage line (the content after the
+// "Usage:" label): a progress bar + "<PCT>% used" prefix, then the existing
+// usage/total and balance/plan/date parenthetical. Color follows the
+// usageRatioColor convention (green/yellow/red by remaining ratio) shared with
+// progressBar. Extracted so the success-branch format is unit-testable without
+// the live monthly_usage endpoint (showAqpUsage uses the hardcoded aqp base URL).
+func aqpUsageLine(mu *MonthlyProjectUsage) string {
+	pct := 0
+	if mu.TotalAmount > 0 {
+		pct = int((mu.Usage/mu.TotalAmount)*100 + 0.5)
+	}
+	bar := progressBar(pct, 10)
+	pctStr := usageRatioColor(mu.Balance, mu.TotalAmount, fmt.Sprintf("%d%% used", pct))
+	return fmt.Sprintf("%s %s · %s / %s  (%s %s, %s, %d-%02d)",
+		bar, pctStr,
+		usageRatioColor(mu.Balance, mu.TotalAmount, money(mu.Usage)),
+		cGray(money(mu.TotalAmount)),
+		cDim("balance"), usageRatioColor(mu.Balance, mu.TotalAmount, money(mu.Balance)),
+		cMagenta(mu.Plan), mu.SelectedYear, mu.SelectedMonth)
 }
 
 func showCodexUsage(cfg *Config, prov Provider) {
@@ -651,23 +667,24 @@ func showCodexUsage(cfg *Config, prov Provider) {
 				usageRatioColor(float64(100-sw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", sw.UsedPercent, formatDuration(sw.ResetAfterSecs))))
 		}
 	}
-	// Spend control — progress bar + numbers
+	// Spend control — progress bar + numbers (label is "Usage:" to match aqp).
 	if u.SpendControl != nil {
 		if u.SpendControl.Reached {
-			fmt.Printf("%s %s\n", cDim("Spend:     "), cRed("limit reached"))
+			fmt.Printf("%s %s\n", cDim("Usage:     "), cRed("limit reached"))
 		} else if u.SpendControl.IndividualLimit != nil {
 			il := u.SpendControl.IndividualLimit
 			pct := il.UsedPercent
-			bar := progressBar(pct, 20)
-			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%%", pct))
+			bar := progressBar(pct, 10)
+			pctStr := usageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%% used", pct))
 			resetStr := ""
 			if il.ResetAfter > 0 {
-				resetStr = cGray(" · resets " + formatDuration(il.ResetAfter))
+				resetStr = cGray(", resets " + formatDuration(il.ResetAfter))
 			}
-			fmt.Printf("%s %s / %s credits  %s  %s%s\n",
-				cDim("Spend:     "),
+			fmt.Printf("%s %s %s · %s / %s credits%s\n",
+				cDim("Usage:     "),
+				bar, pctStr,
 				cBold(formatCredits(il.Used)), cGray(formatCredits(il.Limit)),
-				bar, pctStr, resetStr)
+				resetStr)
 		}
 	}
 }

@@ -334,6 +334,28 @@ func TestShowAqpUsage_MonthlyUsageError(t *testing.T) {
 	}
 }
 
+// TestAqpUsageLine: the success-branch Usage line carries a progress bar +
+// "<PCT>% used" prefix ahead of the usage/total + balance/plan/date
+// parenthetical. The success branch itself can't be exercised (showAqpUsage
+// uses the hardcoded aqp base URL), so the extracted formatter is asserted
+// directly with color forced off.
+func TestAqpUsageLine(t *testing.T) {
+	mu := &MonthlyProjectUsage{SelectedYear: 2026, SelectedMonth: 7,
+		TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
+	var line string
+	captureStdout(t, func() { line = aqpUsageLine(mu) })
+	for _, want := range []string{"[", "]", "30% used", "$30.00 / $100.00",
+		"balance $70.00", "CQP", "2026-07"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("aqpUsageLine missing %q: %s", want, line)
+		}
+	}
+	// Order + separator: bar+pct precede usage/total.
+	if !strings.Contains(line, "30% used · $30.00 / $100.00") {
+		t.Errorf("aqpUsageLine order/separator wrong: %s", line)
+	}
+}
+
 // --- fetchAqpQuota ---
 
 func TestFetchAqpQuota_NotLoggedIn(t *testing.T) {
@@ -401,10 +423,15 @@ func TestShowCodexUsage_UsageParsed(t *testing.T) {
 	}}
 	out := captureStdout(t, func() { showCodexUsage(cfg, cfg.Providers["codex"]) })
 	for _, want := range []string{"codex", "a@b.com", "pro", "Credits:", "has credits",
-		"Rate Limit:", "allowed", "primary:", "weekly:", "Spend:"} {
+		"Rate Limit:", "allowed", "primary:", "weekly:", "Usage:"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("codex usage missing %q:\n%s", want, out)
 		}
+	}
+	// New format: "[<BAR>] <PCT>% used · <USED> / <TOTAL> credits, resets <DUR>"
+	// (fixture: used=5, limit=20, used_percent=25, reset_after=2500000s -> 28d22h).
+	if !strings.Contains(out, "25% used · 5 / 20 credits, resets 28d22h") {
+		t.Errorf("codex usage line format wrong:\n%s", out)
 	}
 }
 
