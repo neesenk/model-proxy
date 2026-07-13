@@ -27,6 +27,15 @@ type authInjector interface {
 	Refresh() error
 }
 
+// removeAuthFile deletes a credential/auth file, treating "not exist" as success
+// (idempotent logout). Used by aqp/codex Logout (the oauth_auth.json store).
+func removeAuthFile(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // ---- AQP key provider ----
 
 // AqpKeyProvider mints an AQP API key from the persisted SSO cookie (the

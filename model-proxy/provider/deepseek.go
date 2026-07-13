@@ -60,7 +60,7 @@ func (p *DeepSeekProvider) RewriteRequest(targetURL string, body []byte, path st
 }
 
 func (p *DeepSeekProvider) Login() error  { return p.cfg.LoginFn() }
-func (p *DeepSeekProvider) Logout() error { return p.cfg.LogoutFn() }
+func (p *DeepSeekProvider) Logout() error { return p.DeleteKey() }
 func (p *DeepSeekProvider) FetchModels() ([]string, error) {
 	return fetchModelsBearer(p.cfg, p.AuthHeaders)
 }

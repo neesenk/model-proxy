@@ -59,46 +59,56 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
-// --- clearCodexAuth: removes codex oauth file, idempotent ---
+// --- codex Logout removes the oauth file (provider-owned since Phase 5) ---
 
-func TestClearCodexAuth(t *testing.T) {
+func TestCodexProvider_Logout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	credDir := filepath.Join(home, ".model-proxy")
-	os.MkdirAll(credDir, 0o700)
-	cred := filepath.Join(credDir, "codex_oauth_auth.json")
+	cred := authFilePath("codex", "oauth_auth")
+	os.MkdirAll(filepath.Dir(cred), 0o700)
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 
-	if err := clearCodexAuth(&Config{}); err != nil {
-		t.Fatalf("clearCodexAuth existing: %v", err)
+	cfg := &Config{Providers: map[string]Provider{"codex": {Provider: "codex"}}}
+	p := buildOne(cfg, "codex", cfg.Providers["codex"], accountCred{})
+	if p == nil {
+		t.Fatal("buildOne codex returned nil")
+	}
+	if err := p.Logout(); err != nil {
+		t.Fatalf("codex Logout: %v", err)
 	}
 	if _, err := os.Stat(cred); !os.IsNotExist(err) {
-		t.Error("clearCodexAuth did not remove the file")
+		t.Error("codex Logout did not remove the oauth_auth file")
 	}
 	// Idempotent: missing file is not an error.
-	if err := clearCodexAuth(&Config{}); err != nil {
-		t.Errorf("clearCodexAuth missing: want nil, got %v", err)
+	if err := p.Logout(); err != nil {
+		t.Errorf("codex Logout (missing): want nil, got %v", err)
 	}
 }
 
-// --- clearApiKey: removes <name>_apikey.json, idempotent ---
+// --- apikey Logout removes <name>_apikey.json (provider-owned since Phase 5) ---
 
-func TestClearApiKey(t *testing.T) {
+func TestApiKeyProvider_Logout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	credDir := filepath.Join(home, ".model-proxy")
-	os.MkdirAll(credDir, 0o700)
-	cred := filepath.Join(credDir, "zhipu-work_apikey.json")
+	cred := filepath.Join(home, ".model-proxy", "zhipu-work_apikey.json")
+	os.MkdirAll(filepath.Dir(cred), 0o700)
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 
-	if err := clearApiKey("zhipu-work"); err != nil {
-		t.Fatalf("clearApiKey existing: %v", err)
+	cfg := &Config{Providers: map[string]Provider{
+		"zhipu-work": {Provider: "zhipu"},
+	}}
+	p := buildOne(cfg, "zhipu-work", cfg.Providers["zhipu-work"], accountCred{})
+	if p == nil {
+		t.Fatal("buildOne zhipu-work returned nil")
+	}
+	if err := p.Logout(); err != nil {
+		t.Fatalf("apikey Logout: %v", err)
 	}
 	if _, err := os.Stat(cred); !os.IsNotExist(err) {
-		t.Error("clearApiKey did not remove the file")
+		t.Error("apikey Logout did not remove the file")
 	}
-	if err := clearApiKey("zhipu-work"); err != nil {
-		t.Errorf("clearApiKey missing: want nil, got %v", err)
+	if err := p.Logout(); err != nil {
+		t.Errorf("apikey Logout (missing): want nil, got %v", err)
 	}
 }
 
@@ -166,3 +176,38 @@ func TestProviderWire_LoginWrappers(t *testing.T) {
 
 // keep strings referenced.
 var _ = strings.HasPrefix
+
+// --- aqp Logout removes the oauth_auth file (provider-owned since Phase 5) ---
+
+func TestAqpProvider_Logout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cred := authFilePath("aqp", "oauth_auth")
+	os.MkdirAll(filepath.Dir(cred), 0o700)
+	os.WriteFile(cred, []byte(`{}`), 0o600)
+	cfg := &Config{Providers: map[string]Provider{"aqp": {Provider: "aqp"}}}
+	p := buildOne(cfg, "aqp", cfg.Providers["aqp"], accountCred{})
+	if p == nil {
+		t.Fatal("buildOne aqp returned nil")
+	}
+	if err := p.Logout(); err != nil {
+		t.Fatalf("aqp Logout: %v", err)
+	}
+	if _, err := os.Stat(cred); !os.IsNotExist(err) {
+		t.Error("aqp Logout did not remove the oauth_auth file")
+	}
+}
+
+func TestDirOf(t *testing.T) {
+	cases := map[string]string{
+		"/a/b/c":    "/a/b",
+		"/root":     "",
+		"nopath":    ".",
+		"a/b/c.txt": "a/b",
+	}
+	for in, want := range cases {
+		if got := dirOf(in); got != want {
+			t.Errorf("dirOf(%q)=%q want %q", in, got, want)
+		}
+	}
+}

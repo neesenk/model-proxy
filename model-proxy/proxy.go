@@ -204,7 +204,6 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 	switch prov.Provider {
 	case "aqp":
 		pcfg.LoginFn = func() error { return runLogin(cfg) }
-		pcfg.LogoutFn = func() error { return clearAccount(authFilePath("aqp", "oauth_auth")) }
 		// Quota + Usage share the SSO-cookie-authed AqpClient (MonthlyUsage) and
 		// the account store (email/project_id/path). The provider owns display.
 		aqpPath := authFilePath("aqp", "oauth_auth")
@@ -220,16 +219,12 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 	case "codex":
 		pcfg.ClientVersion = resolveCodexClientVersion(prov.ClientVersion, codexCLIVersion, codexCacheVersion)
 		pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
-		pcfg.LogoutFn = func() error { return clearCodexAuth(cfg) }
 	case "zhipu":
 		pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
-		pcfg.LogoutFn = func() error { return clearApiKey(name) }
 	case "deepseek":
 		pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
-		pcfg.LogoutFn = func() error { return clearApiKey(name) }
 	case "volcengine":
 		pcfg.LoginFn = func() error { return runVolcengineLoginErr(cfg, name, prov) }
-		pcfg.LogoutFn = func() error { return clearApiKey(name) }
 		pcfg.FetchModelsFn = func() ([]string, error) { return listArkAgentPlanModelIDs(name) }
 		// GetAFPUsage is V4-signed with the virtual's own AK/SK (bound here so
 		// each pooled account queries its own Agent Plan quota); falls back to

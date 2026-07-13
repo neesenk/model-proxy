@@ -1,36 +1,12 @@
 package main
 
-import (
-	"os"
-	"path/filepath"
-)
-
 // ---- Provider callback wrappers ----
-// Login/Logout wrappers for the provider callback interface (LoginFn/LogoutFn),
-// kept until Phase 5 moves login/logout into the provider structs. The Usage
-// display moved to the provider's Usage() method in Phase 3, so the show*UsageData
-// wrappers are gone.
+// Login-flow wrappers for the LoginFn callback (cmdLogin calls the run* flows
+// directly; these adapt them to the cfg.LoginFn signature). Logout is
+// provider-owned (file removal) since Phase 5, so the clear* wrappers are gone.
 
 func runCodexLogin(cfg *Config) error {
 	cmdCodexLogin([]string{})
-	return nil
-}
-
-func clearCodexAuth(cfg *Config) error {
-	path := authFilePath("codex", "oauth_auth")
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-func clearApiKey(providerName string) error {
-	path := filepath.Join(homeDir(), ".model-proxy", providerName+"_apikey.json")
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
 	return nil
 }
 

@@ -34,7 +34,7 @@ func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path strin
 	return targetURL, body
 }
 func (p *CodexProvider) Login() error  { return p.cfg.LoginFn() }
-func (p *CodexProvider) Logout() error { return p.cfg.LogoutFn() }
+func (p *CodexProvider) Logout() error { return removeAuthFile(p.cfg.OAuthAuthFile) }
 
 // Quota GETs /backend-api/wham/usage (derived from OpenAIBaseURL by stripping
 // the trailing /codex) with Bearer + originator + account-id (set by

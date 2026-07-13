@@ -200,11 +200,10 @@ type Config struct {
 	// (e.g. volcengine without AK/SK).
 	Models []string
 
-	// Callbacks: main package wires its login functions here so provider/
-	// doesn't need to re-implement AQP SSO flow, codex device flow, etc.
-	// (Auth is provider-owned since Phase 4; Usage/Quota are direct impls.)
+	// Callbacks: main wires the interactive login flow (cmdLogin calls run*
+	// directly, not via the provider instance) + volcengine's V4-signed
+	// FetchModels here. Logout is provider-owned (file removal) since Phase 5.
 	LoginFn       func() error             // for Login (aqp: SSO, codex: device flow, zhipu: prompt)
-	LogoutFn      func() error             // for Logout
 	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
 
 	// Auth is an optional auth-injector override (TEST SEAM): when set, the aqp/

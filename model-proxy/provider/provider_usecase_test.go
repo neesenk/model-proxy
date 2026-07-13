@@ -342,19 +342,17 @@ func mustMarshal(v any) []byte {
 
 func TestProviderDelegates_Callbacks(t *testing.T) {
 	loginCalled := false
-	logoutCalled := false
 	cfg := &Config{
-		LoginFn:  func() error { loginCalled = true; return nil },
-		LogoutFn: func() error { logoutCalled = true; return nil },
+		LoginFn: func() error { loginCalled = true; return nil },
 	}
-	// codex: Login/Logout delegated to callbacks; Usage()/Quota() are now direct
-	// implementations (no UsageFn/QuotaFn callbacks since Phase 2/3) - exercised
-	// by the fetch + display tests, not here.
+	// codex: Login delegates to LoginFn; Logout is provider-owned (file removal,
+	// Phase 5); Usage()/Quota() are direct impls - exercised by the fetch/display
+	// tests, not here.
 	codex := &CodexProvider{cfg: cfg}
 	mustNoErr(t, codex.Login())
 	mustNoErr(t, codex.Logout())
-	if !loginCalled || !logoutCalled {
-		t.Errorf("codex delegate missed: login=%v logout=%v", loginCalled, logoutCalled)
+	if !loginCalled {
+		t.Errorf("codex delegate missed: login=%v", loginCalled)
 	}
 
 	// deepseek with a temp auth file so LoadKey works; Quota() is a direct
@@ -489,18 +487,17 @@ func TestCodexAuthRefresh_Delegate(t *testing.T) {
 // --- P24: aqp Refresh/Login/Logout/Usage/FetchModels/Surplus delegation ---
 
 func TestAqpProvider_Delegates(t *testing.T) {
-	loginCalled, logoutCalled := false, false
+	loginCalled := false
 	cfg := &Config{
-		LoginFn:  func() error { loginCalled = true; return nil },
-		LogoutFn: func() error { logoutCalled = true; return nil },
+		LoginFn: func() error { loginCalled = true; return nil },
 	}
 	p := &AqpProvider{cfg: cfg, auth: fakeAuth{key: "k"}}
 	mustNoErr(t, p.Refresh())
 	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
 	// Usage()/Quota() are direct implementations (network); tested elsewhere.
-	if !loginCalled || !logoutCalled {
-		t.Errorf("aqp delegate: login=%v logout=%v", loginCalled, logoutCalled)
+	if !loginCalled {
+		t.Errorf("aqp delegate: login=%v", loginCalled)
 	}
 	if s := p.Surplus(nil, time.Now(), 1); s != 0 {
 		t.Errorf("aqp Surplus(nil)=%v want 0", s)
@@ -511,8 +508,7 @@ func TestAqpProvider_Delegates(t *testing.T) {
 
 func TestDeepSeekProvider_Delegates(t *testing.T) {
 	cfg := &Config{
-		LoginFn:  func() error { return nil },
-		LogoutFn: func() error { return nil },
+		LoginFn: func() error { return nil },
 	}
 	dir := t.TempDir()
 	authFile := filepath.Join(dir, "ds.json")
@@ -541,7 +537,6 @@ func TestVolcengineProvider_Delegates(t *testing.T) {
 	fetchCalled := false
 	cfg := &Config{
 		LoginFn:       func() error { return nil },
-		LogoutFn:      func() error { return nil },
 		FetchModelsFn: func() ([]string, error) { fetchCalled = true; return []string{"m"}, nil },
 	}
 	dir := t.TempDir()
