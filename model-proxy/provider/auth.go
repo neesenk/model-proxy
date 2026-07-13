@@ -1,4 +1,4 @@
-package main
+package provider
 
 import (
 	"bytes"
@@ -14,16 +14,23 @@ import (
 	"time"
 )
 
-// AuthProvider injects auth headers per-route auth strategy and supports 401 refresh retry.
-type AuthProvider interface {
-	// Inject adds auth headers to the upstream request, clearing the client's placeholder token.
+// auth.go holds the provider-owned auth injectors (aqp key minting, codex OAuth,
+// SSO cookie read, JWT helpers), moved from main's auth.go in Phase 4. Each
+// provider struct owns its auth injector (the auth field) and AuthHeaders/Refresh
+// delegate to it directly (no cfg.Auth callback).
+
+// authInjector is the internal contract a provider's auth field satisfies. The
+// concrete types (AqpKeyProvider, CodexOAuthProvider) implement it; tests inject
+// fakes (fakeAuth/errAuth). The constructor wires the real injector.
+type authInjector interface {
 	Inject(req *http.Request) error
-	// Refresh re-mints / re-reads credentials (called on 401).
 	Refresh() error
 }
 
 // ---- AQP key provider ----
 
+// AqpKeyProvider mints an AQP API key from the persisted SSO cookie (the
+// compass /api_key/get_or_generate endpoint), caching it for 50 minutes.
 type AqpKeyProvider struct {
 	mintURL  string
 	authFile string
@@ -34,7 +41,8 @@ type AqpKeyProvider struct {
 	mintedAt  time.Time
 }
 
-func newAqpKeyProvider(mintURL, authFile string) *AqpKeyProvider {
+// NewAqpKeyProvider builds an AqpKeyProvider from the mint URL + SSO store path.
+func NewAqpKeyProvider(mintURL, authFile string) *AqpKeyProvider {
 	return &AqpKeyProvider{mintURL: mintURL, authFile: authFile}
 }
 
@@ -44,7 +52,6 @@ func (p *AqpKeyProvider) Inject(req *http.Request) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
-	// Clear the client's placeholder token
 	req.Header.Del("x-api-key")
 	return nil
 }
@@ -69,7 +76,7 @@ func (p *AqpKeyProvider) keyLocked() (string, error) {
 	if p.cached != "" && time.Since(p.mintedAt) < 50*time.Minute {
 		return p.cached, nil
 	}
-	cookie, err := readSSOCookie(p.authFile)
+	cookie, err := ReadSSOCookie(p.authFile)
 	if err != nil {
 		return "", fmt.Errorf("read sso cookie: %w", err)
 	}
@@ -112,12 +119,12 @@ func (p *AqpKeyProvider) keyLocked() (string, error) {
 	return p.cached, nil
 }
 
-// readSSOCookie reads sso_session_cookie from the configured store file.
-func readSSOCookie(path string) (string, error) {
+// ReadSSOCookie reads sso_session_cookie from the configured store file.
+func ReadSSOCookie(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("sso_cookie_file not set")
 	}
-	data, err := readFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -133,32 +140,23 @@ func readSSOCookie(path string) (string, error) {
 	return v.SSOSessionCookie, nil
 }
 
-// ---- static key provider ----
-
-type StaticProvider struct{ key string }
-
-func (s *StaticProvider) Inject(req *http.Request) error {
-	req.Header.Set("Authorization", "Bearer "+s.key)
-	req.Header.Del("x-api-key")
-	return nil
-}
-func (s *StaticProvider) Refresh() error { return nil }
-
 // ---- codex OAuth provider (chatgpt.com backend) ----
 
 const (
-	codexOAuthTokenURL = "https://auth.openai.com/oauth/token"
-	codexOAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+	// CodexOAuthTokenURL is the OpenAI token endpoint for codex OAuth refresh.
+	CodexOAuthTokenURL = "https://auth.openai.com/oauth/token"
+	// CodexOAuthClientID is the codex CLI's OAuth client id.
+	CodexOAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 )
 
-// CodexOAuthProvider reads the proxy's OWN codex OAuth tokens (from
-// cfg.Auth.CodexAuthFile, default ~/.model-proxy/codex_oauth_auth.json — obtained
-// via `model-proxy login codex`, NOT shared with codex CLI's ~/.codex/auth.json)
-// and injects the access_token as Bearer for the chatgpt.com/backend-api/codex
-// backend. On 401 it refreshes via refresh_token and writes new tokens back.
+// CodexOAuthProvider reads the proxy's OWN codex OAuth tokens (from the
+// codex_oauth_auth.json store - obtained via `model-proxy login codex`, NOT
+// shared with codex CLI's ~/.codex/auth.json) and injects the access_token as
+// Bearer for the chatgpt.com/backend-api/codex backend. On 401 it refreshes via
+// refresh_token and writes new tokens back.
 type CodexOAuthProvider struct {
 	authFile string
-	tokenURL string // override for tests; defaults to codexOAuthTokenURL
+	tokenURL string // override for tests; defaults to CodexOAuthTokenURL
 
 	mu        sync.Mutex
 	cached    string    // access_token
@@ -166,12 +164,13 @@ type CodexOAuthProvider struct {
 	accountID string    // chatgpt account_id (parsed from id_token JWT)
 }
 
-func newCodexOAuthProvider(authFile string) *CodexOAuthProvider {
-	return &CodexOAuthProvider{authFile: authFile, tokenURL: codexOAuthTokenURL}
+// NewCodexOAuthProvider builds a CodexOAuthProvider reading the given auth file.
+func NewCodexOAuthProvider(authFile string) *CodexOAuthProvider {
+	return &CodexOAuthProvider{authFile: authFile, tokenURL: CodexOAuthTokenURL}
 }
 
-// codexAuthFile is the on-disk format of the proxy's codex_oauth_auth.json.
-type codexAuthFile struct {
+// CodexAuthFile is the on-disk format of codex_oauth_auth.json.
+type CodexAuthFile struct {
 	AuthMode string `json:"auth_mode"`
 	Tokens   struct {
 		AccessToken  string `json:"access_token"`
@@ -198,8 +197,12 @@ func (p *CodexOAuthProvider) Inject(req *http.Request) error {
 	return nil
 }
 
-// token returns a valid access_token and the chatgpt account_id, refreshing if
+// Token returns a valid access_token and the chatgpt account_id, refreshing if
 // cached is missing/expired.
+func (p *CodexOAuthProvider) Token() (string, string, error) {
+	return p.token()
+}
+
 func (p *CodexOAuthProvider) token() (string, string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -207,19 +210,16 @@ func (p *CodexOAuthProvider) token() (string, string, error) {
 	if p.cached != "" && (p.exp.IsZero() || time.Until(p.exp) > 5*time.Minute) {
 		return p.cached, p.accountID, nil
 	}
-	// Load from file.
 	af, err := p.load()
 	if err != nil {
 		return "", "", fmt.Errorf("read codex auth: %w", err)
 	}
-	exp := jwtExpiry(af.Tokens.AccessToken)
-	acct := accountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID)
-	// If file token still valid, cache and use it.
+	exp := JwtExpiry(af.Tokens.AccessToken)
+	acct := AccountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID)
 	if af.Tokens.AccessToken != "" && (exp.IsZero() || time.Until(exp) > 5*time.Minute) {
 		p.cached, p.exp, p.accountID = af.Tokens.AccessToken, exp, acct
 		return p.cached, p.accountID, nil
 	}
-	// Need refresh.
 	if af.Tokens.RefreshToken == "" {
 		return "", "", fmt.Errorf("codex auth has no refresh_token; run `model-proxy login codex`")
 	}
@@ -243,9 +243,9 @@ func (p *CodexOAuthProvider) Refresh() error {
 	return p.refreshLocked(af)
 }
 
-// accountIDFromTokens returns the chatgpt account_id: prefer the stored field,
+// AccountIDFromTokens returns the chatgpt account_id: prefer the stored field,
 // else parse it from the id_token JWT's https://api.openai.com/auth.chatgpt_account_id claim.
-func accountIDFromTokens(idToken, stored string) string {
+func AccountIDFromTokens(idToken, stored string) string {
 	if stored != "" {
 		return stored
 	}
@@ -275,12 +275,12 @@ func accountIDFromTokens(idToken, stored string) string {
 	return c.Auth.AccountID
 }
 
-func (p *CodexOAuthProvider) load() (*codexAuthFile, error) {
-	data, err := readFile(p.authFile)
+func (p *CodexOAuthProvider) load() (*CodexAuthFile, error) {
+	data, err := os.ReadFile(p.authFile)
 	if err != nil {
 		return nil, err
 	}
-	var af codexAuthFile
+	var af CodexAuthFile
 	if err := json.Unmarshal(data, &af); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", p.authFile, err)
 	}
@@ -289,18 +289,18 @@ func (p *CodexOAuthProvider) load() (*codexAuthFile, error) {
 
 // refreshLocked exchanges refresh_token for a new access_token and writes it
 // back to auth.json. Caller holds p.mu.
-func (p *CodexOAuthProvider) refreshLocked(af *codexAuthFile) error {
+func (p *CodexOAuthProvider) refreshLocked(af *CodexAuthFile) error {
 	body := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {af.Tokens.RefreshToken},
-		"client_id":     {codexOAuthClientID},
+		"client_id":     {CodexOAuthClientID},
 		"scope":         {"openid profile email"},
 	}.Encode()
-	url := p.tokenURL
-	if url == "" {
-		url = codexOAuthTokenURL
+	u := p.tokenURL
+	if u == "" {
+		u = CodexOAuthTokenURL
 	}
-	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, u, strings.NewReader(body))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
@@ -309,7 +309,7 @@ func (p *CodexOAuthProvider) refreshLocked(af *codexAuthFile) error {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("codex oauth refresh: HTTP %d: %s", resp.StatusCode, truncate(string(rb), 200))
+		return fmt.Errorf("codex oauth refresh: HTTP %d: %s", resp.StatusCode, Truncate(string(rb), 200))
 	}
 	var tok struct {
 		AccessToken  string `json:"access_token"`
@@ -323,7 +323,6 @@ func (p *CodexOAuthProvider) refreshLocked(af *codexAuthFile) error {
 	if tok.AccessToken == "" {
 		return fmt.Errorf("codex oauth response missing access_token")
 	}
-	// Update the auth file (rotate refresh_token if a new one was returned).
 	af.Tokens.AccessToken = tok.AccessToken
 	if tok.RefreshToken != "" {
 		af.Tokens.RefreshToken = tok.RefreshToken
@@ -335,12 +334,12 @@ func (p *CodexOAuthProvider) refreshLocked(af *codexAuthFile) error {
 	if err := p.save(af); err != nil {
 		return fmt.Errorf("write codex auth: %w", err)
 	}
-	p.cached, p.exp = tok.AccessToken, jwtExpiry(tok.AccessToken)
-	p.accountID = accountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID)
+	p.cached, p.exp = tok.AccessToken, JwtExpiry(tok.AccessToken)
+	p.accountID = AccountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID)
 	return nil
 }
 
-func (p *CodexOAuthProvider) save(af *codexAuthFile) error {
+func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
 	b, err := json.MarshalIndent(af, "", "  ")
 	if err != nil {
 		return err
@@ -348,15 +347,14 @@ func (p *CodexOAuthProvider) save(af *codexAuthFile) error {
 	return os.WriteFile(p.authFile, b, 0o600)
 }
 
-// jwtExpiry extracts the `exp` claim from a JWT without validating it.
-// Returns zero time on any error (treated as "unknown expiry" → use token).
-func jwtExpiry(jwt string) time.Time {
+// JwtExpiry extracts the `exp` claim from a JWT without validating it.
+// Returns zero time on any error (treated as "unknown expiry" -> use token).
+func JwtExpiry(jwt string) time.Time {
 	parts := strings.Split(jwt, ".")
 	if len(parts) < 2 {
 		return time.Time{}
 	}
 	payload := parts[1]
-	// base64url pad to length 4.
 	if pad := len(payload) % 4; pad != 0 {
 		payload += strings.Repeat("=", 4-pad)
 	}
@@ -374,97 +372,4 @@ func jwtExpiry(jwt string) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(c.Exp, 0)
-}
-
-// ---- factory ----
-
-// newAuthProvider builds an AuthProvider for a given auth strategy + provider name.
-// provName is used to derive per-provider auth file paths (e.g. apikey auth).
-// cred is non-nil when binding an in-memory credential-pool key (virtual provider);
-// nil means read from the auth file on disk (single-account / legacy path).
-func newAuthProvider(authName, provName string, cfg *Config, cred *accountCred) AuthProvider {
-	prov := cfg.Providers[provName]
-	switch authName {
-	case "aqp":
-		return newAqpKeyProvider(prov.AqpMintURL, authFilePath(provName, "oauth_auth"))
-	case "codex":
-		return newCodexOAuthProvider(authFilePath(provName, "oauth_auth"))
-	case "apikey":
-		return newApiKeyProvider(authFilePath(provName, "apikey"))
-	case "zhipu", "deepseek", "volcengine":
-		path := authFilePath(provName, "apikey")
-		if cred != nil && cred.APIKey != "" {
-			return newApiKeyProviderWithKey(path, cred.APIKey)
-		}
-		return newApiKeyProvider(path)
-	case "static":
-		return &StaticProvider{key: ""}
-	default:
-		return &StaticProvider{key: ""} // none
-	}
-}
-
-// ---- API key provider (reads key from auth file, e.g. for Zhipu) ----
-
-type ApiKeyProvider struct {
-	authFile string
-	bound    bool // true → use cached key, never touch the file (pool-bound)
-
-	mu     sync.Mutex
-	cached string
-}
-
-func newApiKeyProvider(authFile string) *ApiKeyProvider {
-	return &ApiKeyProvider{authFile: authFile}
-}
-
-// newApiKeyProviderWithKey builds an apikey AuthProvider bound to an in-memory
-// key (a credential-pool entry) instead of reading the auth file. The auth file
-// path is still recorded for logging/debugging but is never read or written.
-func newApiKeyProviderWithKey(authFile, key string) *ApiKeyProvider {
-	return &ApiKeyProvider{authFile: authFile, bound: true, cached: key}
-}
-
-func (p *ApiKeyProvider) Inject(req *http.Request) error {
-	key, err := p.key()
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Del("x-api-key")
-	return nil
-}
-
-func (p *ApiKeyProvider) key() (string, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.bound || p.cached != "" {
-		return p.cached, nil
-	}
-	data, err := os.ReadFile(p.authFile)
-	if err != nil {
-		return "", fmt.Errorf("not logged in; run `model-proxy login <provider>`")
-	}
-	var v struct {
-		APIKey string `json:"api_key"`
-	}
-	if err := json.Unmarshal(data, &v); err != nil {
-		return "", fmt.Errorf("parse %s: %w", p.authFile, err)
-	}
-	if v.APIKey == "" {
-		return "", fmt.Errorf("no api_key in %s; run `model-proxy login <provider>`", p.authFile)
-	}
-	p.cached = v.APIKey
-	return p.cached, nil
-}
-
-func (p *ApiKeyProvider) Refresh() error {
-	// A bound provider has no file to re-read and its key is immutable → no-op.
-	if p.bound {
-		return nil
-	}
-	p.mu.Lock()
-	p.cached = ""
-	p.mu.Unlock()
-	return nil
 }

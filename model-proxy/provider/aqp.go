@@ -6,23 +6,25 @@ import (
 	"time"
 )
 
-// AqpProvider wraps the main package's AQP auth + SSO login + monthly_usage.
+// AqpProvider wraps the AQP auth (key minting from SSO cookie) + SSO login +
+// monthly_usage.
 type AqpProvider struct {
 	baseProbe
-	cfg *Config
+	cfg  *Config
+	auth authInjector
 }
 
 func init() {
 	Register("aqp", func(cfg *Config, providerName string) (Provider, error) {
-		return &AqpProvider{cfg: cfg}, nil
+		return &AqpProvider{cfg: cfg, auth: cfg.authOrDefault(NewAqpKeyProvider(cfg.AqpMintURL, cfg.OAuthAuthFile))}, nil
 	})
 }
 
 func (p *AqpProvider) AuthHeaders(req *http.Request) error {
-	return p.cfg.Auth.Inject(req)
+	return p.auth.Inject(req)
 }
 func (p *AqpProvider) Refresh() error {
-	return p.cfg.Auth.Refresh()
+	return p.auth.Refresh()
 }
 func (p *AqpProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
 	if strings.Contains(path, "/messages") && !strings.Contains(targetURL, "beta=") {
@@ -36,7 +38,7 @@ func (p *AqpProvider) RewriteRequest(targetURL string, body []byte, path string)
 }
 func (p *AqpProvider) Login() error                   { return p.cfg.LoginFn() }
 func (p *AqpProvider) Logout() error                  { return p.cfg.LogoutFn() }
-func (p *AqpProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
+func (p *AqpProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg, p.AuthHeaders) }
 
 // Quota POSTs monthly_usage (via the injected AqpMonthlyUsage fetcher, which
 // is the SSO-cookie-authed AqpClient shared with login/web) and parses it into

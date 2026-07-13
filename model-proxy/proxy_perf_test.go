@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"model-proxy/provider"
 )
 
 // Performance tests: isolate proxy forwarding overhead with a mock upstream, no
@@ -295,7 +297,7 @@ func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
 // BenchmarkAuthInject_AQP_Static: AQP provider static-key injection (the proxy's per-request hot path).
 func BenchmarkAuthInject_AQP_Static(b *testing.B) {
 	silenceLog()
-	p := newAqpKeyProvider("", "")
+	p := provider.NewAqpKeyProvider("", "")
 	req, _ := http.NewRequest(http.MethodPost, "http://up/v1/messages", bytes.NewReader(smallBody()))
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -323,7 +325,7 @@ func BenchmarkAuthInject_AQP_Cached(b *testing.B) {
 	if err := writeFile(cookiePath, []byte(cookieFile), 0o600); err != nil {
 		b.Fatal(err)
 	}
-	p := newAqpKeyProvider(mint.URL, cookiePath)
+	p := provider.NewAqpKeyProvider(mint.URL, cookiePath)
 	// Warm up: mint once to fill the cache.
 	if err := p.Refresh(); err != nil {
 		b.Fatal(err)

@@ -6,11 +6,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // newTestStatsStore opens a fresh statsStore in a temp dir with no retention.
@@ -757,5 +760,138 @@ func TestFormatStatsTable(t *testing.T) {
 	out = formatStatsTable(resp)
 	if !strings.Contains(out, "provider") || !strings.Contains(out, "zhipu") || !strings.Contains(out, "glm-5.2") {
 		t.Errorf("formatStatsTable rows missing marker:\n%s", out)
+	}
+}
+
+func TestClearAccount(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "acct.json")
+	os.WriteFile(p, []byte("{}"), 0o600)
+	if err := clearAccount(p); err != nil {
+		t.Fatalf("clearAccount existing: %v", err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Error("clearAccount did not remove the file")
+	}
+	// Idempotent: missing file is not an error.
+	if err := clearAccount(p); err != nil {
+		t.Errorf("clearAccount missing: want nil, got %v", err)
+	}
+}
+
+func TestContentTypeFor(t *testing.T) {
+	cases := map[string]string{
+		"page.html": "text/html; charset=utf-8",
+		"app.js":    "text/javascript; charset=utf-8",
+		"style.css": "text/css; charset=utf-8",
+		"logo.png":  "application/octet-stream",
+		"":          "application/octet-stream",
+	}
+	for name, want := range cases {
+		if got := contentTypeFor(name); got != want {
+			t.Errorf("contentTypeFor(%q)=%q want %q", name, got, want)
+		}
+	}
+}
+
+func TestAtomicWrite(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := atomicWrite(p, []byte("hello")); err != nil {
+		t.Fatalf("atomicWrite: %v", err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != "hello" {
+		t.Errorf("atomicWrite content=%q want hello", b)
+	}
+}
+
+func TestListArkAgentPlanModelIDs_DeadProxy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	os.WriteFile(filepath.Join(credDir, "volcengine_apikey.json"),
+		[]byte(`{"api_key":"ark","access_key":"AK","secret_key":"SK"}`), 0o600)
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	addr := dead.Listener.Addr().String()
+	dead.Close()
+	t.Setenv("HTTPS_PROXY", "http://"+addr)
+	t.Setenv("HTTP_PROXY", "http://"+addr)
+	_, err := listArkAgentPlanModelIDs("volcengine")
+	if err == nil {
+		t.Error("listArkAgentPlanModelIDs (dead proxy): want error, got nil")
+	}
+}
+
+func TestPublicCookies(t *testing.T) {
+	// nil jar -> nil.
+	c := newAqpClient("/tmp/nope.json")
+	if got := c.PublicCookies(); got != nil {
+		t.Errorf("PublicCookies(nil jar)=%v want nil", got)
+	}
+	// With a cookie set on the jar for c.base.
+	u, _ := url.Parse(aqpBase)
+	c2 := newAqpClient("/tmp/nope.json")
+	c2.Jar.SetCookies(u, []*http.Cookie{{Name: ssoCookieName, Value: "v"}})
+	got := c2.PublicCookies()
+	if len(got) != 1 || got[0].Name != ssoCookieName {
+		t.Errorf("PublicCookies=%+v want [%s=v]", got, ssoCookieName)
+	}
+}
+
+func TestParseStatsTime(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"1700000000", 1700000000, true},
+		{"2023-11-14T22:13:20Z", 1700000000, true},
+		{"bogus", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := parseStatsTime(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("parseStatsTime(%q)=(%d,%v) want (%d,%v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestHealthLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		h    statusHealth
+		want string
+	}{
+		{"open", statusHealth{CircuitState: "open"}, "circuit open"},
+		{"half", statusHealth{CircuitState: "half_open"}, "half-open"},
+		{"rate", statusHealth{RateLimitedUntil: "x"}, "rate-limited"},
+		{"avail", statusHealth{Available: true}, "available"},
+		{"unavail", statusHealth{}, "unavailable"},
+	}
+	for _, c := range cases {
+		got, _ := healthLabel(c.h)
+		if got != c.want {
+			t.Errorf("healthLabel(%s)=%q want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSetChildNode(t *testing.T) {
+	s := func(v string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: v} }
+	// nil parent is a no-op.
+	setChildNode(nil, "k", s("v"))
+	// Update an existing key.
+	parent := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{s("a"), s("1"), s("b"), s("2")}}
+	setChildNode(parent, "a", s("9"))
+	if parent.Content[1].Value != "9" {
+		t.Errorf("setChildNode update: a=%q want 9", parent.Content[1].Value)
+	}
+	// Append a missing key.
+	setChildNode(parent, "c", s("3"))
+	if parent.Content[len(parent.Content)-1].Value != "3" {
+		t.Errorf("setChildNode append: last=%q want 3", parent.Content[len(parent.Content)-1].Value)
 	}
 }

@@ -78,18 +78,15 @@ func statusColor(status int, s string) string {
 }
 
 // Stdout color helpers (delegate to provider/display.go).
-func cDim(s string) string     { return provider.Dim(s) }
-func cBold(s string) string    { return provider.Bold(s) }
-func cGreen(s string) string   { return provider.Green(s) }
-func cYellow(s string) string  { return provider.Yellow(s) }
-func cRed(s string) string     { return provider.Red(s) }
-func cCyan(s string) string    { return provider.Cyan(s) }
-func cBlue(s string) string    { return provider.Blue(s) }
-func cMagenta(s string) string { return provider.Magenta(s) }
-func cGray(s string) string    { return provider.Gray(s) }
-func usageRatioColor(balance, total float64, s string) string {
-	return provider.UsageRatioColor(balance, total, s)
-}
+func cDim(s string) string              { return provider.Dim(s) }
+func cBold(s string) string             { return provider.Bold(s) }
+func cGreen(s string) string            { return provider.Green(s) }
+func cYellow(s string) string           { return provider.Yellow(s) }
+func cRed(s string) string              { return provider.Red(s) }
+func cCyan(s string) string             { return provider.Cyan(s) }
+func cBlue(s string) string             { return provider.Blue(s) }
+func cMagenta(s string) string          { return provider.Magenta(s) }
+func cGray(s string) string             { return provider.Gray(s) }
 func progressBar(pct, width int) string { return provider.ProgressBar(pct, width) }
 
 // Format helpers (delegate to provider/display.go).

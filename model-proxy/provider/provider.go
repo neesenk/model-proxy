@@ -100,22 +100,13 @@ func (s *QuotaSnapshot) Surplus(now time.Time, peakMult float64) float64 {
 	return remaining - fLeft
 }
 
-// Authenticator is the auth-injection interface (matches main.AuthProvider).
-// Main package passes its existing AqpKeyProvider/CodexOAuthProvider/ApiKeyProvider
-// via this interface, so provider/ doesn't need to re-implement them.
-type Authenticator interface {
-	Inject(req *http.Request) error
-	Refresh() error
-}
-
 // Provider encapsulates all behavior for an upstream backend: auth, request
 // rewriting, login, logout, usage queries, and model listing. Each provider
 // implementation registers itself via Register() in init().
 //
-// Conventions for Usage(): the display function MUST print "Provider: <name>"
-// as the FIRST line (via the UsageFn callback wired in buildProviders), so
-// `usage` (no provider arg) produces consistent output across all providers.
-// Other fields (Account, Plan, quota bars, etc.) follow after it.
+// Conventions for Usage(): the display method MUST print "Provider: <name>"
+// as the FIRST line, so `usage` (no provider arg) produces consistent output
+// across all providers. Other fields (Account, Plan, quota bars, etc.) follow.
 type Provider interface {
 	AuthHeaders(req *http.Request) error
 	Refresh() error
@@ -180,8 +171,9 @@ type Config struct {
 	BoundAPIKey string
 
 	// Auth-specific fields (only relevant to certain providers).
-	SSOCookieFile string // aqp
-	AqpMintURL    string // aqp
+	OAuthAuthFile string // aqp/codex: the <name>_oauth_auth.json store path
+	AqpMintURL    string // aqp: the api_key/get_or_generate endpoint
+	StaticKey     string // static: a config static key (no login)
 
 	// Volcengine signing keys for GetAFPUsage (the Agent Plan quota endpoint,
 	// V4-signed, needs AK/SK not the Bearer chat key). Bound per virtual from
@@ -208,12 +200,27 @@ type Config struct {
 	// (e.g. volcengine without AK/SK).
 	Models []string
 
-	// Callbacks: main package wires its existing functions here so provider/
-	// doesn't need to re-implement AQP minting, SSO flow, OAuth, etc.
-	Auth          Authenticator            // for AuthHeaders/Refresh (aqp, codex, apikey)
+	// Callbacks: main package wires its login functions here so provider/
+	// doesn't need to re-implement AQP SSO flow, codex device flow, etc.
+	// (Auth is provider-owned since Phase 4; Usage/Quota are direct impls.)
 	LoginFn       func() error             // for Login (aqp: SSO, codex: device flow, zhipu: prompt)
 	LogoutFn      func() error             // for Logout
 	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
+
+	// Auth is an optional auth-injector override (TEST SEAM): when set, the aqp/
+	// codex constructors use it instead of building their real AqpKeyProvider /
+	// CodexOAuthProvider. Production (buildOne) leaves it nil so the real
+	// provider-owned auth is used; forward-path integration tests set a fake.
+	Auth authInjector
+}
+
+// authOrDefault returns the cfg.Auth override when set (test seam), else the
+// real provider-owned auth injector passed in.
+func (c *Config) authOrDefault(real authInjector) authInjector {
+	if c.Auth != nil {
+		return c.Auth
+	}
+	return real
 }
 
 // Constructor builds a Provider instance from config.

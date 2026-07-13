@@ -17,11 +17,15 @@ func init() {
 	})
 }
 
+// AuthHeaders injects the static key as Bearer (a static provider has no
+// login/refresh; the key comes from config, default empty).
 func (p *StaticProvider) AuthHeaders(req *http.Request) error {
-	return p.cfg.Auth.Inject(req)
+	req.Header.Set("Authorization", "Bearer "+p.cfg.StaticKey)
+	req.Header.Del("x-api-key")
+	return nil
 }
 func (p *StaticProvider) Refresh() error {
-	return p.cfg.Auth.Refresh()
+	return nil
 }
 func (p *StaticProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
 	return targetURL, body

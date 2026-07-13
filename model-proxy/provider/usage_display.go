@@ -270,7 +270,7 @@ func (p *CodexProvider) Usage() (any, error) {
 func (p *ZhipuProvider) Usage() (any, error) {
 	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue(p.providerName)))
 	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.cfg.Auth.Inject(req); err != nil {
+	if err := p.AuthHeaders(req); err != nil {
 		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login "+p.providerName))
 		return nil, nil
 	}
@@ -325,7 +325,7 @@ func (p *ZhipuProvider) Usage() (any, error) {
 func (p *DeepSeekProvider) Usage() (any, error) {
 	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue(p.cfg.ProviderName)))
 	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.cfg.Auth.Inject(req); err != nil {
+	if err := p.AuthHeaders(req); err != nil {
 		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login "+p.cfg.ProviderName))
 		return nil, nil
 	}

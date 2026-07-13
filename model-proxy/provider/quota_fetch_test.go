@@ -31,7 +31,7 @@ func TestCodexProvider_Quota_Parsed(t *testing.T) {
 		w.Write([]byte(body))
 	}))
 	defer srv.Close()
-	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex", Auth: fakeAuth{key: "k"}}}
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
 	s, err := p.Quota()
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestCodexProvider_Quota_HTTPError(t *testing.T) {
 		w.WriteHeader(502)
 	}))
 	defer srv.Close()
-	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex", Auth: fakeAuth{key: "k"}}}
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
 	s, err := p.Quota()
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestZhipuProvider_Quota_Parsed(t *testing.T) {
 			`{"type":"TOKENS_LIMIT","unit":6,"percentage":70,"nextResetTime":1750000000000,"usage":200000,"currentValue":140000,"remaining":60000}]}}`))
 	}))
 	defer srv.Close()
-	p := &ZhipuProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}}}
+	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}}
 	s, err := p.Quota()
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +88,7 @@ func TestZhipuProvider_Quota_NotZhipuFormat(t *testing.T) {
 		w.Write([]byte(`{"object":"list","data":[]}`))
 	}))
 	defer srv.Close()
-	p := &ZhipuProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}}}
+	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}}
 	s, _ := p.Quota()
 	if s.Billing != BillingUnknown || s.Err != "not zhipu quota format" {
 		t.Errorf("got %+v want BillingUnknown/not-zhipu-format", s)
@@ -100,7 +100,7 @@ func TestZhipuProvider_Quota_HTTPError(t *testing.T) {
 		w.WriteHeader(500)
 	}))
 	defer srv.Close()
-	p := &ZhipuProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}}}
+	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}}
 	s, _ := p.Quota()
 	if s.Billing != BillingUnknown || s.Err != "HTTP 500" {
 		t.Errorf("got %+v want BillingUnknown/HTTP 500", s)
@@ -115,7 +115,7 @@ func TestDeepSeekProvider_Quota_Parsed(t *testing.T) {
 			`{"currency":"CNY","total_balance":"10.50","granted_balance":"8.00","topped_up_balance":"2.50"}]}`))
 	}))
 	defer srv.Close()
-	p := &DeepSeekProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}}}
+	p := &DeepSeekProvider{ApiKeyBase: NewApiKeyBaseWithKey("deepseek", "k"), cfg: &Config{UsageURL: srv.URL}}
 	s, err := p.Quota()
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestDeepSeekProvider_Quota_HTTPError(t *testing.T) {
 		w.WriteHeader(503)
 	}))
 	defer srv.Close()
-	p := &DeepSeekProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}}}
+	p := &DeepSeekProvider{ApiKeyBase: NewApiKeyBaseWithKey("deepseek", "k"), cfg: &Config{UsageURL: srv.URL}}
 	s, _ := p.Quota()
 	if s.Billing != BillingUnknown || s.Err != "HTTP 503" {
 		t.Errorf("got %+v want BillingUnknown/HTTP 503", s)

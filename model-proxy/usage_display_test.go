@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,15 @@ import (
 
 	"model-proxy/provider"
 )
+
+// mustMarshalT json-marshals v (test helper, panics on error - never happens for maps).
+func mustMarshalT(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
 
 // usage_display_test.go covers the usage-display + quota-fetch/print functions in
 // main.go that were previously 0% covered. Network-mocked functions use

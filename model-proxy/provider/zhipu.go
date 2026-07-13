@@ -73,14 +73,16 @@ func (p *ZhipuProvider) Logout() error {
 	return p.DeleteKey()
 }
 
-func (p *ZhipuProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
+func (p *ZhipuProvider) FetchModels() ([]string, error) {
+	return fetchModelsBearer(p.cfg, p.AuthHeaders)
+}
 
 // Quota GETs the zhipu usage_url and parses the BigModel quota envelope. On any
 // failure (auth, HTTP, non-zhipu body) returns a BillingUnknown snapshot
 // carrying the error (never a non-nil error) so the poll stays alive.
 func (p *ZhipuProvider) Quota() (*QuotaSnapshot, error) {
 	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.cfg.Auth.Inject(req); err != nil {
+	if err := p.AuthHeaders(req); err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}
 	for k, v := range p.cfg.Headers {

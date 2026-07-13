@@ -59,16 +59,18 @@ func (p *DeepSeekProvider) RewriteRequest(targetURL string, body []byte, path st
 	return targetURL, body
 }
 
-func (p *DeepSeekProvider) Login() error                   { return p.cfg.LoginFn() }
-func (p *DeepSeekProvider) Logout() error                  { return p.cfg.LogoutFn() }
-func (p *DeepSeekProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg) }
+func (p *DeepSeekProvider) Login() error  { return p.cfg.LoginFn() }
+func (p *DeepSeekProvider) Logout() error { return p.cfg.LogoutFn() }
+func (p *DeepSeekProvider) FetchModels() ([]string, error) {
+	return fetchModelsBearer(p.cfg, p.AuthHeaders)
+}
 
 // Quota GETs /user/balance and parses the per-currency balance windows.
 // DeepSeek is pay-as-you-go: no windowed budget (RemainingPct=-1). On any
 // failure returns a BillingUnknown snapshot carrying the error.
 func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) {
 	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-	if err := p.cfg.Auth.Inject(req); err != nil {
+	if err := p.AuthHeaders(req); err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)

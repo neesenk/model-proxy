@@ -11,15 +11,15 @@ import (
 
 // fetchModelsBearer is a shared helper for providers that expose an OpenAI-style
 // /models endpoint with Bearer auth. Returns the model IDs. Used by aqp,
-// codex, zhipu, deepseek — any provider whose Auth (cfg.Auth) injects a Bearer
-// token and whose openai_base_url serves /models.
-func fetchModelsBearer(cfg *Config) ([]string, error) {
+// zhipu, deepseek — any provider whose AuthHeaders injects a Bearer token and
+// whose openai_base_url serves /models.
+func fetchModelsBearer(cfg *Config, auth func(*http.Request) error) ([]string, error) {
 	url := strings.TrimRight(cfg.OpenAIBaseURL, "/") + "/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := cfg.Auth.Inject(req); err != nil {
+	if err := auth(req); err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)

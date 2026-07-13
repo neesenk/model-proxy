@@ -189,16 +189,16 @@ func credOrNil(c accountCred) *accountCred {
 // (identical to the pre-pool buildProviders).
 func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provider.Provider {
 	credPtr := credOrNil(cred)
-	auth := newAuthProvider(prov.Provider, name, cfg, credPtr)
+	_ = credPtr
 	pcfg := &provider.Config{
 		ProviderID:    prov.Provider,
 		ProviderName:  name,
 		OpenAIBaseURL: prov.OpenAIBaseURL,
 		Headers:       prov.Headers,
 		UsageURL:      prov.UsageURL,
-		Auth:          authAdapter{auth},
 		BoundAPIKey:   cred.APIKey, // binding point #1 (forward path)
 		Models:        prov.Models, // for the usage-display fallback (listConfigModels)
+		OAuthAuthFile: authFilePath(name, "oauth_auth"),
 	}
 	// Wire callbacks by provider type.
 	switch prov.Provider {
@@ -245,13 +245,6 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 	}
 	return p
 }
-
-// authAdapter bridges main.AuthProvider → provider.Authenticator.
-type authAdapter struct{ inner AuthProvider }
-
-func (a authAdapter) Inject(req *http.Request) error { return a.inner.Inject(req) }
-func (a authAdapter) Refresh() error                 { return a.inner.Refresh() }
-
 func NewProxy(cfg *Config) *Proxy {
 	providers, poolIndex, parentOf := buildProviders(cfg)
 	p := &Proxy{

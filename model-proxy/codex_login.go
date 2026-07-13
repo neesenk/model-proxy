@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"model-proxy/provider"
 )
 
 // codex OAuth device flow (independent tokens, not shared with codex CLI).
@@ -47,7 +49,7 @@ func (o *codexLoginServerOptions) defaults() {
 		o.deviceTokURL = codexOAuthDeviceTok
 	}
 	if o.tokenURL == "" {
-		o.tokenURL = codexOAuthTokenURL
+		o.tokenURL = provider.CodexOAuthTokenURL
 	}
 	if o.httpClient == nil {
 		o.httpClient = &http.Client{Timeout: 30 * time.Second}
@@ -164,7 +166,7 @@ func pollForToken(opts *codexLoginServerOptions, deviceAuthID, userCode string, 
 }
 
 // exchangeCodeForTokens trades the authorization_code for access/refresh/id tokens.
-func exchangeCodeForTokens(opts *codexLoginServerOptions, clientID, authCode, codeVerifier string) (*codexAuthFile, error) {
+func exchangeCodeForTokens(opts *codexLoginServerOptions, clientID, authCode, codeVerifier string) (*provider.CodexAuthFile, error) {
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {authCode},
@@ -194,11 +196,11 @@ func exchangeCodeForTokens(opts *codexLoginServerOptions, clientID, authCode, co
 	if tok.AccessToken == "" {
 		return nil, fmt.Errorf("token response missing access_token: %s", truncate(string(rb), 200))
 	}
-	af := &codexAuthFile{AuthMode: "chatgpt"}
+	af := &provider.CodexAuthFile{AuthMode: "chatgpt"}
 	af.Tokens.AccessToken = tok.AccessToken
 	af.Tokens.RefreshToken = tok.RefreshToken
 	af.Tokens.IDToken = tok.IDToken
-	af.Tokens.AccountID = accountIDFromTokens(tok.IDToken, "")
+	af.Tokens.AccountID = provider.AccountIDFromTokens(tok.IDToken, "")
 	af.LastRefresh = time.Now().UTC().Format(time.RFC3339Nano)
 	return af, nil
 }
@@ -215,7 +217,7 @@ func cmdCodexLogin(args []string) {
 	opts.defaults()
 
 	fmt.Println("Requesting device code from OpenAI...")
-	uc, err := requestUserCode(opts, codexOAuthClientID)
+	uc, err := requestUserCode(opts, provider.CodexOAuthClientID)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -229,7 +231,7 @@ func cmdCodexLogin(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Println("Authorized. Exchanging code for tokens...")
-	af, err := exchangeCodeForTokens(opts, codexOAuthClientID, cs.AuthorizationCode, cs.CodeVerifier)
+	af, err := exchangeCodeForTokens(opts, provider.CodexOAuthClientID, cs.AuthorizationCode, cs.CodeVerifier)
 	if err != nil {
 		log.Fatal(err)
 	}

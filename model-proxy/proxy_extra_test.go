@@ -113,23 +113,6 @@ func TestTakeHalfOpenSlot_RateLimited(t *testing.T) {
 	}
 }
 
-// --- authAdapter.Refresh delegates ---
-
-func TestAuthAdapter_Refresh(t *testing.T) {
-	a := authAdapter{inner: &stubAuthProvider{}}
-	if err := a.Refresh(); err != nil {
-		t.Errorf("authAdapter.Refresh: %v", err)
-	}
-	if err := a.Inject(&http.Request{}); err != nil {
-		t.Errorf("authAdapter.Inject: %v", err)
-	}
-}
-
-type stubAuthProvider struct{}
-
-func (s *stubAuthProvider) Inject(req *http.Request) error { return nil }
-func (s *stubAuthProvider) Refresh() error                 { return nil }
-
 // --- quotaTracker.stop / pollAfter ---
 
 func TestQuotaTracker_Stop(t *testing.T) {

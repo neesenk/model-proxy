@@ -28,7 +28,7 @@ func (a fakeAuth) Refresh() error { return nil }
 // --- P1: aqp RewriteRequest adds ?beta=true to /messages ---
 
 func TestAqpRewrite_AddsBetaToMessages(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{Auth: fakeAuth{key: "k"}}}
+	p := &AqpProvider{cfg: &Config{}, auth: fakeAuth{key: "k"}}
 	for _, tc := range []struct {
 		name     string
 		url      string
@@ -57,7 +57,7 @@ func TestAqpRewrite_AddsBetaToMessages(t *testing.T) {
 // --- P2: aqp AuthHeaders delegates to cfg.Auth ---
 
 func TestAqpAuthHeaders_Delegates(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{Auth: fakeAuth{key: "ck"}}}
+	p := &AqpProvider{cfg: &Config{}, auth: fakeAuth{key: "ck"}}
 	req, _ := http.NewRequest("GET", "https://x", nil)
 	if err := p.AuthHeaders(req); err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestAqpAuthHeaders_Delegates(t *testing.T) {
 // --- P3: codex RewriteRequest injects store:false when absent ---
 
 func TestCodexRewrite_InjectsStoreFalse(t *testing.T) {
-	p := &CodexProvider{cfg: &Config{Auth: fakeAuth{key: "k"}}}
+	p := &CodexProvider{cfg: &Config{}, auth: fakeAuth{key: "k"}}
 	_, body := p.RewriteRequest("https://x/responses", []byte(`{"model":"gpt-5.5"}`), "/v1/responses")
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
@@ -84,7 +84,7 @@ func TestCodexRewrite_InjectsStoreFalse(t *testing.T) {
 // --- P4: codex RewriteRequest leaves an explicit store:true untouched ---
 
 func TestCodexRewrite_RespectsExistingStore(t *testing.T) {
-	p := &CodexProvider{cfg: &Config{Auth: fakeAuth{key: "k"}}}
+	p := &CodexProvider{cfg: &Config{}, auth: fakeAuth{key: "k"}}
 	_, body := p.RewriteRequest("https://x", []byte(`{"model":"gpt-5.5","store":true}`), "/v1/responses")
 	var m map[string]any
 	json.Unmarshal(body, &m)
@@ -122,8 +122,7 @@ func TestCodexFetchModels_LiveQuery(t *testing.T) {
 	p := &CodexProvider{cfg: &Config{
 		OpenAIBaseURL: srv.URL + "/backend-api/codex",
 		ClientVersion: "0.144.1",
-		Auth:          fakeAuth{key: "tok-abc"},
-	}}
+	}, auth: fakeAuth{key: "tok-abc"}}
 	ids, err := p.FetchModels()
 	if err != nil {
 		t.Fatalf("FetchModels: %v", err)
@@ -150,8 +149,7 @@ func TestCodexFetchModels_ErrorOnNon200(t *testing.T) {
 	p := &CodexProvider{cfg: &Config{
 		OpenAIBaseURL: srv.URL + "/codex",
 		ClientVersion: "0.144.1",
-		Auth:          fakeAuth{key: "k"},
-	}}
+	}, auth: fakeAuth{key: "k"}}
 	_, err := p.FetchModels()
 	if err == nil {
 		t.Fatal("expected error on HTTP 403, got nil")
@@ -240,7 +238,7 @@ func TestDeepSeekAuthHeaders_DualScheme(t *testing.T) {
 	os.WriteFile(authFile, mustMarshal(map[string]string{"api_key": "ds-key"}), 0o600)
 	p := &DeepSeekProvider{
 		ApiKeyBase: &ApiKeyBase{authFile: authFile},
-		cfg:        &Config{Auth: fakeAuth{key: "k"}},
+		cfg:        &Config{},
 	}
 	req, _ := http.NewRequest("GET", "https://x", nil)
 	if err := p.AuthHeaders(req); err != nil {
@@ -262,7 +260,7 @@ func TestVolcengineAuthHeaders_DualScheme(t *testing.T) {
 	os.WriteFile(authFile, mustMarshal(map[string]string{"api_key": "vol-key"}), 0o600)
 	p := &VolcengineProvider{
 		ApiKeyBase: &ApiKeyBase{authFile: authFile},
-		cfg:        &Config{Auth: fakeAuth{key: "k"}},
+		cfg:        &Config{},
 	}
 	req, _ := http.NewRequest("GET", "https://x", nil)
 	if err := p.AuthHeaders(req); err != nil {
@@ -287,8 +285,8 @@ func TestZhipuFetchModels_FromEndpoint(t *testing.T) {
 	}))
 	defer srv.Close()
 	p := &ZhipuProvider{
-		ApiKeyBase: &ApiKeyBase{},
-		cfg:        &Config{Auth: fakeAuth{key: "zk"}, OpenAIBaseURL: srv.URL},
+		ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "zk"),
+		cfg:        &Config{OpenAIBaseURL: srv.URL},
 	}
 	got, err := p.FetchModels()
 	if err != nil {
@@ -311,7 +309,7 @@ func TestNew_UnknownProviderID(t *testing.T) {
 // --- P15: StaticProvider returns errNotSupported for Login/Usage/FetchModels ---
 
 func TestStaticProvider_NotSupported(t *testing.T) {
-	p := &StaticProvider{cfg: &Config{Auth: fakeAuth{key: "k"}}}
+	p := &StaticProvider{cfg: &Config{StaticKey: "k"}}
 	if err := p.Login(); err == nil {
 		t.Error("StaticProvider.Login: want error, got nil")
 	}
@@ -346,7 +344,6 @@ func TestProviderDelegates_Callbacks(t *testing.T) {
 	loginCalled := false
 	logoutCalled := false
 	cfg := &Config{
-		Auth:     fakeAuth{key: "k"},
 		LoginFn:  func() error { loginCalled = true; return nil },
 		LogoutFn: func() error { logoutCalled = true; return nil },
 	}
@@ -397,7 +394,7 @@ func TestFetchModelsBearer_Errors(t *testing.T) {
 		w.Write([]byte(`unauthorized`))
 	}))
 	defer srv.Close()
-	_, err := fetchModelsBearer(&Config{Auth: fakeAuth{key: "k"}, OpenAIBaseURL: srv.URL})
+	_, err := fetchModelsBearer(&Config{OpenAIBaseURL: srv.URL}, fakeAuth{key: "k"}.Inject)
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("fetchModelsBearer 401: err=%v want HTTP 401", err)
 	}
@@ -407,7 +404,7 @@ func TestFetchModelsBearer_Errors(t *testing.T) {
 		w.Write([]byte(`not-json`))
 	}))
 	defer srv2.Close()
-	_, err = fetchModelsBearer(&Config{Auth: fakeAuth{key: "k"}, OpenAIBaseURL: srv2.URL})
+	_, err = fetchModelsBearer(&Config{OpenAIBaseURL: srv2.URL}, fakeAuth{key: "k"}.Inject)
 	if err == nil {
 		t.Error("fetchModelsBearer non-JSON: want parse error, got nil")
 	}
@@ -434,8 +431,7 @@ func mustNoErr(t *testing.T, err error) {
 // --- P22: static provider full surface ---
 
 func TestStaticProvider_FullSurface(t *testing.T) {
-	auth := fakeAuth{key: "sk"}
-	p := &StaticProvider{cfg: &Config{Auth: auth}}
+	p := &StaticProvider{cfg: &Config{StaticKey: "sk"}}
 	req, _ := http.NewRequest("GET", "https://x", nil)
 	if err := p.AuthHeaders(req); err != nil {
 		t.Fatal(err)
@@ -470,7 +466,7 @@ func TestStaticProvider_FullSurface(t *testing.T) {
 
 func TestCodexAuthRefresh_Delegate(t *testing.T) {
 	auth := &countingAuth{}
-	p := &CodexProvider{cfg: &Config{Auth: auth}}
+	p := &CodexProvider{cfg: &Config{}, auth: auth}
 	req, _ := http.NewRequest("GET", "https://x", nil)
 	if err := p.AuthHeaders(req); err != nil {
 		t.Fatal(err)
@@ -495,11 +491,10 @@ func TestCodexAuthRefresh_Delegate(t *testing.T) {
 func TestAqpProvider_Delegates(t *testing.T) {
 	loginCalled, logoutCalled := false, false
 	cfg := &Config{
-		Auth:     fakeAuth{key: "k"},
 		LoginFn:  func() error { loginCalled = true; return nil },
 		LogoutFn: func() error { logoutCalled = true; return nil },
 	}
-	p := &AqpProvider{cfg: cfg}
+	p := &AqpProvider{cfg: cfg, auth: fakeAuth{key: "k"}}
 	mustNoErr(t, p.Refresh())
 	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
@@ -516,7 +511,6 @@ func TestAqpProvider_Delegates(t *testing.T) {
 
 func TestDeepSeekProvider_Delegates(t *testing.T) {
 	cfg := &Config{
-		Auth:     fakeAuth{key: "k"},
 		LoginFn:  func() error { return nil },
 		LogoutFn: func() error { return nil },
 	}
@@ -546,7 +540,6 @@ func TestDeepSeekProvider_Delegates(t *testing.T) {
 func TestVolcengineProvider_Delegates(t *testing.T) {
 	fetchCalled := false
 	cfg := &Config{
-		Auth:          fakeAuth{key: "k"},
 		LoginFn:       func() error { return nil },
 		LogoutFn:      func() error { return nil },
 		FetchModelsFn: func() ([]string, error) { fetchCalled = true; return []string{"m"}, nil },

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"model-proxy/provider"
 )
 
 // TestRequestUserCode verifies the usercode request format + response parsing.
@@ -23,7 +25,7 @@ func TestRequestUserCode(t *testing.T) {
 	}))
 	defer srv.Close()
 	opts := &codexLoginServerOptions{usercodeURL: srv.URL, httpClient: &http.Client{Timeout: 5 * time.Second}}
-	uc, err := requestUserCode(opts, codexOAuthClientID)
+	uc, err := requestUserCode(opts, provider.CodexOAuthClientID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +36,7 @@ func TestRequestUserCode(t *testing.T) {
 		ClientID string `json:"client_id"`
 	}
 	json.Unmarshal([]byte(gotBody), &req)
-	if req.ClientID != codexOAuthClientID {
+	if req.ClientID != provider.CodexOAuthClientID {
 		t.Errorf("client_id=%q", req.ClientID)
 	}
 }
@@ -109,11 +111,11 @@ func TestExchangeCodeForTokens(t *testing.T) {
 	}))
 	defer srv.Close()
 	opts := &codexLoginServerOptions{tokenURL: srv.URL, httpClient: &http.Client{Timeout: 5 * time.Second}}
-	af, err := exchangeCodeForTokens(opts, codexOAuthClientID, "authcode", "verifier")
+	af, err := exchangeCodeForTokens(opts, provider.CodexOAuthClientID, "authcode", "verifier")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "authorization_code|authcode|" + codexOAuthCallback + "|" + codexOAuthClientID + "|verifier"
+	want := "authorization_code|authcode|" + codexOAuthCallback + "|" + provider.CodexOAuthClientID + "|verifier"
 	if gotForm != want {
 		t.Errorf("form=%q want %q", gotForm, want)
 	}
@@ -126,16 +128,16 @@ func TestExchangeCodeForTokens(t *testing.T) {
 func TestAccountIDFromTokens(t *testing.T) {
 	// build a fake id_token JWT with the chatgpt_account_id claim
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-xyz"}}`))
-	got := accountIDFromTokens("h."+payload+".s", "")
+	got := provider.AccountIDFromTokens("h."+payload+".s", "")
 	if got != "acct-xyz" {
 		t.Errorf("got %q", got)
 	}
 	// stored field wins
-	if got := accountIDFromTokens("h."+payload+".s", "stored"); got != "stored" {
+	if got := provider.AccountIDFromTokens("h."+payload+".s", "stored"); got != "stored" {
 		t.Errorf("stored should win, got %q", got)
 	}
 	// empty
-	if got := accountIDFromTokens("", ""); got != "" {
+	if got := provider.AccountIDFromTokens("", ""); got != "" {
 		t.Errorf("empty should give empty, got %q", got)
 	}
 }

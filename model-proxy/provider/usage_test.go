@@ -84,7 +84,7 @@ func TestCodexUsage_Parsed(t *testing.T) {
 		w.Write([]byte(codexUsageBody))
 	}))
 	defer srv.Close()
-	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex", Auth: fakeAuth{key: "k"}}}
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	for _, want := range []string{"codex", "a@b.com", "pro", "has credits", "Rate Limit:", "25% used", "5 / 20 credits"} {
 		if !contains(out, want) {
@@ -94,7 +94,7 @@ func TestCodexUsage_Parsed(t *testing.T) {
 }
 
 func TestCodexUsage_NotLoggedIn(t *testing.T) {
-	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: "http://x.invalid/codex", Auth: errAuth{}}}
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: "http://x.invalid/codex"}, auth: errAuth{}}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	if !contains(out, "Not logged in") {
 		t.Errorf("codex usage not-logged-in missing marker:\n%s", out)
@@ -107,7 +107,7 @@ func TestCodexUsage_HTTPError(t *testing.T) {
 		w.Write([]byte(`boom`))
 	}))
 	defer srv.Close()
-	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex", Auth: fakeAuth{key: "k"}}}
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	if !contains(out, "HTTP 500") {
 		t.Errorf("codex usage HTTP error missing 'HTTP 500':\n%s", out)
@@ -122,7 +122,7 @@ func TestZhipuUsage_Quota(t *testing.T) {
 			`{"type":"TOKENS_LIMIT","unit":3,"percentage":40,"nextResetTime":1750000000000,"usage":100000,"currentValue":40000,"remaining":60000}]}}`))
 	}))
 	defer srv.Close()
-	p := &ZhipuProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}}, providerName: "zhipu"}
+	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}, providerName: "zhipu"}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	for _, want := range []string{"zhipu", "GLM Coding Plan", "5h tokens", "40% used"} {
 		if !contains(out, want) {
@@ -136,7 +136,7 @@ func TestZhipuUsage_FallbackModelList(t *testing.T) {
 		w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4","owned_by":"x"}]}`))
 	}))
 	defer srv.Close()
-	p := &ZhipuProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}}, providerName: "zhipu"}
+	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}, providerName: "zhipu"}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	if !contains(out, "1 models available") || !contains(out, "gpt-4") {
 		t.Errorf("zhipu usage model-list fallback missing marker:\n%s", out)
@@ -148,7 +148,7 @@ func TestZhipuUsage_FallbackRawJSON(t *testing.T) {
 		w.Write([]byte(`{"status":"ok","count":42}`))
 	}))
 	defer srv.Close()
-	p := &ZhipuProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}}, providerName: "zhipu"}
+	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}, providerName: "zhipu"}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	if !contains(out, "count") || !contains(out, "42") {
 		t.Errorf("zhipu usage raw-JSON fallback missing marker:\n%s", out)
@@ -156,7 +156,7 @@ func TestZhipuUsage_FallbackRawJSON(t *testing.T) {
 }
 
 func TestZhipuUsage_NotLoggedIn(t *testing.T) {
-	p := &ZhipuProvider{cfg: &Config{UsageURL: "http://x.invalid", Auth: errAuth{}}, providerName: "zhipu"}
+	p := &ZhipuProvider{ApiKeyBase: &ApiKeyBase{}, cfg: &Config{UsageURL: "http://x.invalid"}, providerName: "zhipu"}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	if !contains(out, "Not logged in") {
 		t.Errorf("zhipu usage not-logged-in missing marker:\n%s", out)
@@ -171,7 +171,7 @@ func TestDeepseekUsage_Balance(t *testing.T) {
 			`{"currency":"CNY","total_balance":"10.50","granted_balance":"8.00","topped_up_balance":"2.50"}]}`))
 	}))
 	defer srv.Close()
-	p := &DeepSeekProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}, ProviderName: "deepseek"}}
+	p := &DeepSeekProvider{ApiKeyBase: NewApiKeyBaseWithKey("deepseek", "k"), cfg: &Config{UsageURL: srv.URL, ProviderName: "deepseek"}}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	for _, want := range []string{"deepseek", "Available:", "yes", "CNY", "10.50", "granted"} {
 		if !contains(out, want) {
@@ -185,7 +185,7 @@ func TestDeepseekUsage_Unavailable(t *testing.T) {
 		w.Write([]byte(`{"is_available":false,"balance_infos":[]}`))
 	}))
 	defer srv.Close()
-	p := &DeepSeekProvider{cfg: &Config{UsageURL: srv.URL, Auth: fakeAuth{key: "k"}, ProviderName: "deepseek"}}
+	p := &DeepSeekProvider{ApiKeyBase: NewApiKeyBaseWithKey("deepseek", "k"), cfg: &Config{UsageURL: srv.URL, ProviderName: "deepseek"}}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	if !contains(out, "insufficient balance") {
 		t.Errorf("deepseek usage unavailable missing marker:\n%s", out)
@@ -193,7 +193,7 @@ func TestDeepseekUsage_Unavailable(t *testing.T) {
 }
 
 func TestDeepseekUsage_NotLoggedIn(t *testing.T) {
-	p := &DeepSeekProvider{cfg: &Config{UsageURL: "http://x.invalid", Auth: errAuth{}, ProviderName: "deepseek"}}
+	p := &DeepSeekProvider{ApiKeyBase: &ApiKeyBase{}, cfg: &Config{UsageURL: "http://x.invalid", ProviderName: "deepseek"}}
 	out := captureStdoutProvider(func() { _, _ = p.Usage() })
 	if !contains(out, "Not logged in") {
 		t.Errorf("deepseek usage not-logged-in missing marker:\n%s", out)

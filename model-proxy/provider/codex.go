@@ -9,23 +9,24 @@ import (
 	"time"
 )
 
-// CodexProvider wraps the main package's codex OAuth + device flow + wham/usage.
+// CodexProvider wraps codex OAuth (chatgpt.com backend) + device flow + wham/usage.
 type CodexProvider struct {
 	baseProbe
-	cfg *Config
+	cfg  *Config
+	auth authInjector
 }
 
 func init() {
 	Register("codex", func(cfg *Config, providerName string) (Provider, error) {
-		return &CodexProvider{cfg: cfg}, nil
+		return &CodexProvider{cfg: cfg, auth: cfg.authOrDefault(NewCodexOAuthProvider(cfg.OAuthAuthFile))}, nil
 	})
 }
 
 func (p *CodexProvider) AuthHeaders(req *http.Request) error {
-	return p.cfg.Auth.Inject(req)
+	return p.auth.Inject(req)
 }
 func (p *CodexProvider) Refresh() error {
-	return p.cfg.Auth.Refresh()
+	return p.auth.Refresh()
 }
 func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
 	// codex backend requires store:false in the request body.
@@ -89,7 +90,7 @@ func (p *CodexProvider) FetchModels() ([]string, error) {
 	q := req.URL.Query()
 	q.Set("client_version", p.cfg.ClientVersion)
 	req.URL.RawQuery = q.Encode()
-	if err := p.cfg.Auth.Inject(req); err != nil {
+	if err := p.AuthHeaders(req); err != nil {
 		return nil, fmt.Errorf("codex models auth: %w", err)
 	}
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)

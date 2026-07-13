@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"model-proxy/provider"
 )
 
 //go:embed web_assets/*
@@ -605,7 +607,7 @@ func (w *webServer) runAqpPoll(sess *loginSession, name string) {
 // config key so the auth file is written to <name>_oauth_auth.json.
 func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request, name string) {
 	opts := w.newCodexOptions()
-	uc, err := requestUserCode(opts, codexOAuthClientID)
+	uc, err := requestUserCode(opts, provider.CodexOAuthClientID)
 	if err != nil {
 		writeJSONErr(resp, http.StatusBadGateway, err.Error())
 		return
@@ -645,7 +647,7 @@ func (w *webServer) runCodexPoll(sess *loginSession, name string) {
 		sess.setState("error", err.Error())
 		return
 	}
-	af, err := exchangeCodeForTokens(cs.opts, codexOAuthClientID, authCode.AuthorizationCode, authCode.CodeVerifier)
+	af, err := exchangeCodeForTokens(cs.opts, provider.CodexOAuthClientID, authCode.AuthorizationCode, authCode.CodeVerifier)
 	if err != nil {
 		sess.setState("error", err.Error())
 		return

@@ -127,28 +127,6 @@ func newAqpClientWithBase(storePath, base string) *AqpClient {
 	return c
 }
 
-// GetManagedKey returns the cached managed key; fetches via get_or_generate if none is cached.
-func (c *AqpClient) GetManagedKey() (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cachedKey != "" {
-		return c.cachedKey, nil
-	}
-	key, err := c.fetchAPIKey()
-	if err != nil {
-		return "", err
-	}
-	c.cachedKey = key.APIKey
-	return c.cachedKey, nil
-}
-
-// InvalidateKey clears the in-memory managed key (called before a 401 retry).
-func (c *AqpClient) InvalidateKey() {
-	c.mu.Lock()
-	c.cachedKey = ""
-	c.mu.Unlock()
-}
-
 // cookieHeader builds a Cookie header value from the stored sso_session_cookie.
 // The stored value may be the full "SSO_C=<value>" pair or just the raw value.
 func cookieHeader(stored string) string {
