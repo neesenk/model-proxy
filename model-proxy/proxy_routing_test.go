@@ -167,14 +167,10 @@ func (t *testProv) Refresh() error { return nil }
 func (t *testProv) RewriteRequest(url string, body []byte, path string) (string, []byte) {
 	return url, body
 }
-func (t *testProv) Login() error                            { return nil }
 func (t *testProv) Logout() error                           { return nil }
-func (t *testProv) Usage() (any, error)                     { return nil, nil }
+func (t *testProv) Usage() error                            { return nil }
 func (t *testProv) FetchModels() ([]string, error)          { return nil, nil }
 func (t *testProv) Quota() (*provider.QuotaSnapshot, error) { return nil, nil }
-func (t *testProv) Surplus(snap *provider.QuotaSnapshot, now time.Time, peakMult float64) float64 {
-	return snap.Surplus(now, peakMult)
-}
 
 // ProbeRequest/ExtraHeaders/FilterModelIDs: testProv uses OpenAI-style defaults
 // (matches baseProbe). Inlined rather than embedding baseProbe so the test stub
@@ -264,7 +260,7 @@ func scheduleFirst(p *Proxy, exposed, sessionKey string) string {
 	for k := range p.expandedRoutes {
 		routeKeys[k] = true
 	}
-	ordered := p.schedule(p.cfg, p.providers, p.parentOf, exposed, sessionKey, p.expandedRoutes[exposed], routeKeys)
+	ordered := p.schedule(p.cfg, p.parentOf, exposed, sessionKey, p.expandedRoutes[exposed], routeKeys)
 	if len(ordered) == 0 {
 		return ""
 	}

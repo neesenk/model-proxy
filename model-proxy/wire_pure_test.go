@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// wire_pure_test.go covers the provider_wire.go delegation wrappers
-// (clearCodexAuth/clearApiKey) and the small pure helpers in main.go
-// (or, quotaSourceLabel, truncate). ultimateRemaining moved to the provider
+// wire_pure_test.go covers the small pure helpers in main.go (or,
+// quotaSourceLabel, truncate) and the codex/apikey/aqp Logout paths
+// (provider-owned since Phase 5). ultimateRemaining moved to the provider
 // package in Phase 1 (provider/quota_parse_test.go).
 
 // --- or ---
@@ -160,18 +160,6 @@ func TestShowUsageShims(t *testing.T) {
 	// Non-nil cred path (bound key) through the shim.
 	cred := accountCred{APIKey: "k"}
 	showDeepseekUsage(cfg, "deepseek", cfg.Providers["deepseek"], &cred)
-}
-
-// --- runCodexLogin / runVolcengineLoginErr / runApiKeyLoginErr wrappers ---
-// These delegate to interactive login functions (stdin/browser) - not safe to
-// call in tests. They're thin wrappers; the underlying functions need real
-// network/browser. Skip (documented as not covered).
-
-func TestProviderWire_LoginWrappers(t *testing.T) {
-	// runCodexLogin calls cmdCodexLogin([]string{}) which starts the device flow
-	// (network). runVolcengineLoginErr/runApiKeyLoginErr prompt on stdin. All
-	// unsafe to call here - covered by their function-level tests where feasible.
-	t.Skip("login wrappers require interactive network/stdin - covered elsewhere")
 }
 
 // keep strings referenced.

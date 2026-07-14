@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,6 +60,29 @@ func TestCodexProvider_Quota_HTTPError(t *testing.T) {
 	}
 	if s.Billing != BillingUnknown || s.Err != "HTTP 502" {
 		t.Errorf("got %+v want BillingUnknown/HTTP 502", s)
+	}
+}
+
+// TestCodexProvider_Quota_MalformedBody: a 200 wham/usage with an unparseable
+// body must yield BillingUnknown, never a non-nil error, so the quota poll
+// survives a bad upstream response. Regression guard: ParseCodexQuota returns
+// (nil, err) on json failure and Quota() used to propagate that error verbatim,
+// breaking the "never a non-nil error" contract shared with the other providers.
+func TestCodexProvider_Quota_MalformedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`not-json`))
+	}))
+	defer srv.Close()
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota() returned non-nil error %v (contract: never a non-nil error)", err)
+	}
+	if s == nil || s.Billing != BillingUnknown {
+		t.Fatalf("got %+v want BillingUnknown snapshot", s)
+	}
+	if !strings.HasPrefix(s.Err, "parse wham/usage") {
+		t.Errorf("Err=%q want prefix %q", s.Err, "parse wham/usage")
 	}
 }
 

@@ -57,9 +57,7 @@ func cmdLogin(args []string) {
 			log.Fatalf("login failed: %v", err)
 		}
 	case "codex":
-		if err := runCodexLogin(cfg); err != nil {
-			log.Fatalf("login failed: %v", err)
-		}
+		cmdCodexLogin([]string{})
 	default:
 		// zhipu/deepseek (single api_key) or volcengine (api_key + AK/SK
 		// triple). Both write the plural pool; volcengine keys by AccessKey.
@@ -79,11 +77,10 @@ func cmdLogin(args []string) {
 	maybeReloadDaemon(args)
 }
 
-// runApiKeyLogin is the legacy single-key login retained as a thin wrapper so
-// the provider-callback path (LoginFn → runApiKeyLoginErr) still compiles and
-// behaves the same as before (no label, no replace, prompts on stdin). The real
-// implementation now lives in runApiKeyLoginWithInput, which writes the plural
-// credential pool (<name>_apikeys.json) so repeated logins accumulate accounts.
+// runApiKeyLogin is a no-label/no-replace convenience wrapper over
+// runApiKeyLoginWithInput (prompts on stdin, writes the plural credential pool
+// <name>_apikeys.json so repeated logins accumulate accounts). Kept for the
+// login_cmd tests; the `login` CLI calls runApiKeyLoginWithInput directly.
 func runApiKeyLogin(cfg *Config, provName string, prov Provider) error {
 	return runApiKeyLoginWithInput(cfg, provName, prov, "", "", false)
 }

@@ -129,20 +129,20 @@ func printUsageFields(m map[string]any, indent int) {
 
 // --- per-provider Usage() ---
 
-func (p *AqpProvider) Usage() (any, error) {
+func (p *AqpProvider) Usage() error {
 	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue("aqp")))
 	if p.cfg.AqpAccount == nil {
 		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login aqp"))
-		return nil, nil
+		return nil
 	}
 	email, projectID, storePath, err := p.cfg.AqpAccount()
 	if err != nil {
 		fmt.Println(Red("Error: " + err.Error()))
-		return nil, nil
+		return nil
 	}
 	if email == "" {
 		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login aqp"))
-		return nil, nil
+		return nil
 	}
 	fmt.Printf("%s %s\n", Dim("Account:    "), Bold(Cyan(email)))
 	fmt.Printf("%s %s\n", Dim("Project ID: "), Gray(projectID))
@@ -155,27 +155,27 @@ func (p *AqpProvider) Usage() (any, error) {
 		}
 	}
 	fmt.Printf("%s %s\n", Dim("Store:      "), Gray(storePath))
-	return nil, nil
+	return nil
 }
 
-func (p *CodexProvider) Usage() (any, error) {
+func (p *CodexProvider) Usage() error {
 	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue("codex")))
 	usageURL := strings.TrimSuffix(p.cfg.OpenAIBaseURL, "/codex") + "/wham/usage"
 	req, _ := http.NewRequest("GET", usageURL, nil)
 	if err := p.AuthHeaders(req); err != nil {
 		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login codex"))
-		return nil, nil
+		return nil
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		fmt.Println(Red("Error: usage request: " + err.Error()))
-		return nil, nil
+		return nil
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		fmt.Printf("%s HTTP %d: %s\n", Red("Error:"), resp.StatusCode, Truncate(string(body), 200))
-		return nil, nil
+		return nil
 	}
 	var u struct {
 		Email    string `json:"email"`
@@ -264,15 +264,15 @@ func (p *CodexProvider) Usage() (any, error) {
 				resetStr)
 		}
 	}
-	return nil, nil
+	return nil
 }
 
-func (p *ZhipuProvider) Usage() (any, error) {
+func (p *ZhipuProvider) Usage() error {
 	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue(p.providerName)))
 	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
 	if err := p.AuthHeaders(req); err != nil {
 		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login "+p.providerName))
-		return nil, nil
+		return nil
 	}
 	for k, v := range p.cfg.Headers {
 		req.Header.Set(k, v)
@@ -280,20 +280,20 @@ func (p *ZhipuProvider) Usage() (any, error) {
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		fmt.Println(Red("Error: usage request: " + err.Error()))
-		return nil, nil
+		return nil
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		fmt.Printf("%s HTTP %d: %s\n", Red("Error:"), resp.StatusCode, Truncate(string(body), 200))
-		return nil, nil
+		return nil
 	}
 	if s, _ := ParseZhipuQuota(body, ""); s != nil {
 		if s.Level != "" {
 			fmt.Printf("%s %s\n", Dim("Level:     "), Magenta(s.Level))
 		}
 		printQuotaSnapshot(s)
-		return nil, nil
+		return nil
 	}
 	var ml struct {
 		Object string `json:"object"`
@@ -307,38 +307,38 @@ func (p *ZhipuProvider) Usage() (any, error) {
 		for _, m := range ml.Data {
 			fmt.Printf("  %s  %s\n", Cyan(Pad(m.ID, 22)), Gray(m.ID))
 		}
-		return nil, nil
+		return nil
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
 		fmt.Println(Red("Error: parse usage response: " + err.Error()))
-		return nil, nil
+		return nil
 	}
 	data := raw
 	if d, ok := raw["data"].(map[string]any); ok {
 		data = d
 	}
 	printUsageFields(data, 1)
-	return nil, nil
+	return nil
 }
 
-func (p *DeepSeekProvider) Usage() (any, error) {
+func (p *DeepSeekProvider) Usage() error {
 	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue(p.cfg.ProviderName)))
 	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
 	if err := p.AuthHeaders(req); err != nil {
 		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login "+p.cfg.ProviderName))
-		return nil, nil
+		return nil
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		fmt.Println(Red("Error: usage request: " + err.Error()))
-		return nil, nil
+		return nil
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
 		fmt.Printf("%s HTTP %d: %s\n", Red("Error:"), resp.StatusCode, Truncate(string(body), 200))
-		return nil, nil
+		return nil
 	}
 	var u struct {
 		IsAvailable  bool `json:"is_available"`
@@ -351,7 +351,7 @@ func (p *DeepSeekProvider) Usage() (any, error) {
 	}
 	if err := json.Unmarshal(body, &u); err != nil {
 		fmt.Println(Red("Error: parse usage response: " + err.Error()))
-		return nil, nil
+		return nil
 	}
 	if u.IsAvailable {
 		fmt.Printf("%s %s\n", Dim("Available:  "), Green("yes"))
@@ -368,23 +368,23 @@ func (p *DeepSeekProvider) Usage() (any, error) {
 			Bold(Cyan(b.TotalBalance)),
 			Gray("(granted "+b.GrantedBalance+", topped-up "+b.ToppedUpBalance+")"))
 	}
-	return nil, nil
+	return nil
 }
 
-func (p *VolcengineProvider) Usage() (any, error) {
+func (p *VolcengineProvider) Usage() error {
 	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue(p.cfg.ProviderName)))
 	ak, sk, err := p.resolveAKSK()
 	if err != nil {
 		fmt.Printf("%s Agent Plan 5h/周/月额度需经 GetAFPUsage（火山引擎签名 OpenAPI，AccessKey/SecretKey + V4）。\n", Dim("Note:       "))
 		fmt.Printf("%s 用 `model-proxy login %s` 配置 AK/SK（IAM 密钥，非 Ark API Key）后可查询。\n", Dim("            "), p.cfg.ProviderName)
 		listConfigModels(p.cfg.Models)
-		return nil, nil
+		return nil
 	}
 	u, err := getAFPUsage(ak, sk)
 	if err != nil {
 		fmt.Printf("%s GetAFPUsage failed: %v\n", Dim("Error:      "), err)
 		listConfigModels(p.cfg.Models)
-		return nil, nil
+		return nil
 	}
 	if u.PlanType != "" {
 		fmt.Printf("%s %s\n", Dim("Plan:      "), Magenta(u.PlanType))
@@ -393,5 +393,5 @@ func (p *VolcengineProvider) Usage() (any, error) {
 	printAFPWindow("Daily", u.AFPDaily)
 	printAFPWindow("Weekly", u.AFPWeekly)
 	printAFPWindow("Monthly", u.AFPMonthly)
-	return nil, nil
+	return nil
 }

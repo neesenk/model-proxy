@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"model-proxy/provider"
 )
@@ -39,15 +38,11 @@ func (f *fakeProviderImpl) RewriteRequest(targetURL string, body []byte, path st
 	return targetURL, body
 }
 func (f *fakeProviderImpl) Refresh() error                 { return nil }
-func (f *fakeProviderImpl) Login() error                   { return nil }
 func (f *fakeProviderImpl) Logout() error                  { return nil }
-func (f *fakeProviderImpl) Usage() (any, error)            { return nil, nil }
+func (f *fakeProviderImpl) Usage() error                   { return nil }
 func (f *fakeProviderImpl) FetchModels() ([]string, error) { return nil, nil }
 func (f *fakeProviderImpl) Quota() (*provider.QuotaSnapshot, error) {
 	return &provider.QuotaSnapshot{Billing: provider.BillingUnknown}, nil
-}
-func (f *fakeProviderImpl) Surplus(s *provider.QuotaSnapshot, _ time.Time, _ float64) float64 {
-	return 0
 }
 func (f *fakeProviderImpl) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{

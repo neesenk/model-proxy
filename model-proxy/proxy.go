@@ -68,9 +68,10 @@ type routeSticky struct {
 }
 
 // buildProviders creates provider.Provider instances from config. Each provider
-// owns its auth/usage/quota/logout (Phase 1-5); buildOne only wires the two
-// remaining callbacks (LoginFn: interactive login flow; FetchModelsFn:
-// volcengine's V4-signed ListArkAgentPlanModel) + the per-provider config fields.
+// owns its auth/usage/quota/logout (Phase 1-5); buildOne only wires the
+// remaining callbacks (FetchModelsFn: volcengine's V4-signed
+// ListArkAgentPlanModel; aqp's AqpMonthlyUsage/AqpAccount) + the per-provider
+// config fields.
 //
 // A provider whose credential pool (loadPool) has ≥2 accounts is UNROLLED into
 // one virtual provider per account, keyed "name#<accountID>"; the parent name
@@ -162,17 +163,6 @@ func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]str
 	return m, poolIndex, parentOf
 }
 
-// credOrNil returns a pointer to c when it carries an API key, else nil. Used
-// to thread an account credential through the auth + Usage/Quota closures: nil
-// means "read from the auth file" (legacy single-account), non-nil means "bound
-// to this in-memory key" (credential-pool virtual).
-func credOrNil(c accountCred) *accountCred {
-	if c.APIKey == "" && c.AccessKey == "" && c.SecretKey == "" {
-		return nil
-	}
-	return &c
-}
-
 // buildOne constructs a single provider instance (a real provider for the
 // single-account path, or a virtual for one credential-pool entry) bound to
 // cred. When cred is non-empty the key is bound via pcfg.BoundAPIKey, which the
@@ -184,8 +174,6 @@ func credOrNil(c accountCred) *accountCred {
 // When cred is empty all three fall back to the legacy file-backed behavior
 // (identical to the pre-pool buildProviders).
 func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provider.Provider {
-	credPtr := credOrNil(cred)
-	_ = credPtr
 	pcfg := &provider.Config{
 		ProviderID:    prov.Provider,
 		ProviderName:  name,
@@ -199,7 +187,6 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 	// Wire callbacks by provider type.
 	switch prov.Provider {
 	case "aqp":
-		pcfg.LoginFn = func() error { return runLogin(cfg) }
 		// Quota + Usage share the SSO-cookie-authed AqpClient (MonthlyUsage) and
 		// the account store (email/project_id/path). The provider owns display.
 		aqpPath := authFilePath("aqp", "oauth_auth")
@@ -214,13 +201,7 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 		}
 	case "codex":
 		pcfg.ClientVersion = resolveCodexClientVersion(prov.ClientVersion, codexCLIVersion, codexCacheVersion)
-		pcfg.LoginFn = func() error { return runCodexLogin(cfg) }
-	case "zhipu":
-		pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
-	case "deepseek":
-		pcfg.LoginFn = func() error { return runApiKeyLoginErr(cfg, name, prov) }
 	case "volcengine":
-		pcfg.LoginFn = func() error { return runVolcengineLoginErr(cfg, name, prov) }
 		pcfg.FetchModelsFn = func() ([]string, error) { return listArkAgentPlanModelIDs(name) }
 		// GetAFPUsage is V4-signed with the virtual's own AK/SK (bound here so
 		// each pooled account queries its own Agent Plan quota); falls back to
@@ -533,7 +514,6 @@ func (p *Proxy) scheduleStatus() []byte {
 	now := time.Now()
 	p.mu.RLock()
 	cfg := p.cfg
-	provs := p.providers
 	expanded := p.expandedRoutes
 	parentOf := p.parentOf
 	poolIndex := p.poolIndex
@@ -559,21 +539,7 @@ func (p *Proxy) scheduleStatus() []byte {
 		h := healthCopy[name]
 		return h.available(now)
 	}
-	surplusOf := func(name string) float64 {
-		pconf, _ := providerConfig(cfg, parentOf, name)
-		peakMult := pconf.peakMultiplier(now)
-		if peakMult < 1 {
-			peakMult = 1
-		}
-		snap := qs[name]
-		if impl := provs[name]; impl != nil {
-			return impl.Surplus(snap, now, peakMult)
-		}
-		if snap == nil {
-			return 0
-		}
-		return snap.Surplus(now, peakMult)
-	}
+	surplusOf := func(name string) float64 { return computeSurplus(cfg, parentOf, qs, name, now) }
 
 	type provInfo struct {
 		Provider   string  `json:"provider"`
@@ -606,7 +572,7 @@ func (p *Proxy) scheduleStatus() []byte {
 		// commit=false: scheduleStatus is a read-only peek — it must NOT bump the
 		// round-robin counter, set sticky, or evict sticky entries. decideOrder
 		// gates all sticky mutation on commit, so the peek is side-effect-free.
-		ordered, _ := p.decideOrder(cfg, provs, parentOf, exposed, "", targets, now, false, routeKeys)
+		ordered, _ := p.decideOrder(cfg, parentOf, exposed, "", targets, now, false, routeKeys)
 		ri := routeInfo{}
 		if len(ordered) > 0 {
 			ri.First = ordered[0].Provider
@@ -794,7 +760,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	for k := range expanded {
 		routeKeys[k] = true
 	}
-	ordered := p.schedule(cfg, provs, parentOf, exposed, sessionKey, targets, routeKeys)
+	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys)
 	if p.scheduleHook != nil {
 		p.scheduleHook(sessionKey)
 	}
@@ -1056,9 +1022,9 @@ func tierRank(b provider.BillingClass) int {
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin surplus gain
 // (priority beats surplus; surplus only matters at equal priority).
-func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool) []RouteTarget {
+func (p *Proxy) schedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool) []RouteTarget {
 	now := time.Now()
-	ordered, stickyToSet := p.decideOrder(cfg, provs, parentOf, exposed, sessionKey, targets, now, true, routeKeys)
+	ordered, stickyToSet := p.decideOrder(cfg, parentOf, exposed, sessionKey, targets, now, true, routeKeys)
 	if stickyToSet != "" {
 		// Commit sticky on the SESSION key (fallback to the exposed model for
 		// non-session clients), so one conversation parks on one provider and
@@ -1082,7 +1048,7 @@ func (p *Proxy) schedule(cfg *Config, provs map[string]provider.Provider, parent
 // a read-only peek. parentOf resolves pooled virtual ids to their parent's config
 // (billing/peak are parent-level, not per-account) AND drives per-parent
 // round-robin assignment of new sessions.
-func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool, routeKeys map[string]bool) (ordered []RouteTarget, stickyToSet string) {
+func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool, routeKeys map[string]bool) (ordered []RouteTarget, stickyToSet string) {
 	sched := cfg.Scheduling
 	// (a) Re-key sticky on the session. Non-session clients (sessionKey=="")
 	// fall back to the exposed model → identical to the pre-session path, so the
@@ -1136,21 +1102,7 @@ func (p *Proxy) decideOrder(cfg *Config, provs map[string]provider.Provider, par
 	}
 
 	billingOf := func(name string) provider.BillingClass { return p.billingClass(cfg, parentOf, name, qs) }
-	surplusOf := func(name string) float64 {
-		pconf, _ := providerConfig(cfg, parentOf, name)
-		peakMult := pconf.peakMultiplier(now)
-		if peakMult < 1 {
-			peakMult = 1
-		}
-		snap := qs[name]
-		if impl := provs[name]; impl != nil {
-			return impl.Surplus(snap, now, peakMult) // provider-owned (delegates to snap.Surplus)
-		}
-		if snap == nil {
-			return 0
-		}
-		return snap.Surplus(now, peakMult)
-	}
+	surplusOf := func(name string) float64 { return computeSurplus(cfg, parentOf, qs, name, now) }
 
 	sort.SliceStable(availTargets, func(i, j int) bool {
 		ri, rj := tierRank(billingOf(availTargets[i].Provider)), tierRank(billingOf(availTargets[j].Provider))
@@ -1311,6 +1263,24 @@ func providerConfig(cfg *Config, parentOf map[string]string, name string) (Provi
 func (p *Proxy) billingClass(cfg *Config, parentOf map[string]string, name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
 	pconf, _ := providerConfig(cfg, parentOf, name)
 	return classifyBilling(qs[name], pconf.Billing, cfg.Scheduling.pollInterval())
+}
+
+// computeSurplus is the shared scheduling pace-score for one provider, used by
+// both scheduleStatus (the /debug/schedule peek) and decideOrder (the commit
+// path). It resolves the provider's peak multiplier, fetches its quota snapshot,
+// and delegates to QuotaSnapshot.Surplus. Returns 0 for an unknown/unmeasured
+// provider (nil snapshot).
+func computeSurplus(cfg *Config, parentOf map[string]string, qs map[string]*provider.QuotaSnapshot, name string, now time.Time) float64 {
+	pconf, _ := providerConfig(cfg, parentOf, name)
+	peakMult := pconf.peakMultiplier(now)
+	if peakMult < 1 {
+		peakMult = 1
+	}
+	snap := qs[name]
+	if snap == nil {
+		return 0
+	}
+	return snap.Surplus(now, peakMult)
 }
 
 // available reports whether a provider may be tried: not rate-limited, and

@@ -173,7 +173,7 @@ Once you've finished logging in (or the redirect above succeeded), come back her
 Login complete. You can now run `model-proxy serve`.
 ```
 
-### codex（OAuth device flow，`codex_login.go:207` `runCodexLogin`）
+### codex（OAuth device flow，`codex_login.go` `cmdCodexLogin`）
 
 stdout：
 ```

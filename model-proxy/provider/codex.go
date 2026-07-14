@@ -33,7 +33,6 @@ func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path strin
 	body = ensureJSONField(body, "store", false)
 	return targetURL, body
 }
-func (p *CodexProvider) Login() error  { return p.cfg.LoginFn() }
 func (p *CodexProvider) Logout() error { return removeAuthFile(p.cfg.OAuthAuthFile) }
 
 // Quota GETs /backend-api/wham/usage (derived from OpenAIBaseURL by stripping
@@ -56,10 +55,19 @@ func (p *CodexProvider) Quota() (*QuotaSnapshot, error) {
 	if resp.StatusCode != 200 {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
 	}
-	return ParseCodexQuota(body, "", "")
-}
-func (p *CodexProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
-	return snap.Surplus(now, peakMult)
+	s, parseErr := ParseCodexQuota(body, "", "")
+	if parseErr != nil || s == nil {
+		// A malformed wham/usage body must not crash the quota poll: wrap the
+		// parse failure into a BillingUnknown snapshot. Quota()'s contract is
+		// "never a non-nil error" (see the auth/HTTP/4xx branches above), so the
+		// scheduler treats codex as unmeasured rather than aborting the poll.
+		msg := "parse wham/usage failed"
+		if parseErr != nil {
+			msg = "parse wham/usage: " + parseErr.Error()
+		}
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: msg}, nil
+	}
+	return s, nil
 }
 
 // ProbeRequest overrides the OpenAI default: codex's backend speaks the OpenAI
@@ -166,8 +174,8 @@ func ParseCodexQuota(body []byte, account, plan string) (*QuotaSnapshot, error) 
 	}
 	s := &QuotaSnapshot{
 		Billing: BillingPlan,
-		Account: or(u.Email, account),
-		Plan:    or(u.PlanType, plan),
+		Account: Or(u.Email, account),
+		Plan:    Or(u.PlanType, plan),
 		AsOf:    time.Now(),
 	}
 	now := time.Now()

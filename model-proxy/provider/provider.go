@@ -101,8 +101,12 @@ func (s *QuotaSnapshot) Surplus(now time.Time, peakMult float64) float64 {
 }
 
 // Provider encapsulates all behavior for an upstream backend: auth, request
-// rewriting, login, logout, usage queries, and model listing. Each provider
+// rewriting, logout, usage queries, and model listing. Each provider
 // implementation registers itself via Register() in init().
+//
+// Login is NOT on this interface: the interactive login flow (SSO / OAuth /
+// stdin) is CLI/IO orchestration owned by main's `login` command (cmdLogin ->
+// run*), which never goes through a provider instance.
 //
 // Conventions for Usage(): the display method MUST print "Provider: <name>"
 // as the FIRST line, so `usage` (no provider arg) produces consistent output
@@ -111,12 +115,10 @@ type Provider interface {
 	AuthHeaders(req *http.Request) error
 	Refresh() error
 	RewriteRequest(targetURL string, body []byte, path string) (string, []byte)
-	Login() error
 	Logout() error
-	Usage() (any, error)
+	Usage() error
 	FetchModels() ([]string, error)
 	Quota() (*QuotaSnapshot, error)
-	Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64
 
 	// ProbeRequest returns the minimal request pieces to probe whether `modelID`
 	// is callable on this provider's own endpoint - used by `models refresh`'s
@@ -200,10 +202,11 @@ type Config struct {
 	// (e.g. volcengine without AK/SK).
 	Models []string
 
-	// Callbacks: main wires the interactive login flow (cmdLogin calls run*
-	// directly, not via the provider instance) + volcengine's V4-signed
-	// FetchModels here. Logout is provider-owned (file removal) since Phase 5.
-	LoginFn       func() error             // for Login (aqp: SSO, codex: device flow, zhipu: prompt)
+	// Callbacks: main wires volcengine's V4-signed FetchModels here, plus aqp's
+	// SSO-cookie monthly_usage fetcher (AqpMonthlyUsage) and account reader
+	// (AqpAccount). The interactive login flow is NOT a callback - cmdLogin
+	// calls the run* flows directly. Logout is provider-owned (file removal)
+	// since Phase 5.
 	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
 
 	// Auth is an optional auth-injector override (TEST SEAM): when set, the aqp/

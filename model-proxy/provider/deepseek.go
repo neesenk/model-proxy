@@ -59,7 +59,6 @@ func (p *DeepSeekProvider) RewriteRequest(targetURL string, body []byte, path st
 	return targetURL, body
 }
 
-func (p *DeepSeekProvider) Login() error  { return p.cfg.LoginFn() }
 func (p *DeepSeekProvider) Logout() error { return p.DeleteKey() }
 func (p *DeepSeekProvider) FetchModels() ([]string, error) {
 	return fetchModelsBearer(p.cfg, p.AuthHeaders)
@@ -83,9 +82,6 @@ func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: fmt.Sprintf("HTTP %d", resp.StatusCode)}, nil
 	}
 	return ParseDeepseekQuota(body), nil
-}
-func (p *DeepSeekProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
-	return snap.Surplus(now, peakMult)
 }
 
 // ParseDeepseekQuota parses DeepSeek /user/balance into a pay-as-you-go snapshot:
@@ -112,7 +108,7 @@ func ParseDeepseekQuota(body []byte) *QuotaSnapshot {
 	for _, b := range u.BalanceInfos {
 		total, _ := strconv.ParseFloat(b.TotalBalance, 64)
 		s.Windows = append(s.Windows, QuotaWindow{
-			Label: or(b.Currency, "Balance"), Kind: "money",
+			Label: Or(b.Currency, "Balance"), Kind: "money",
 			Total: total, RemainingPct: -1,
 			Details: []QuotaDetail{
 				{Label: "granted", Used: atof(b.GrantedBalance)},

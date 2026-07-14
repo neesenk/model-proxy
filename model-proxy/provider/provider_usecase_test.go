@@ -306,14 +306,11 @@ func TestNew_UnknownProviderID(t *testing.T) {
 	}
 }
 
-// --- P15: StaticProvider returns errNotSupported for Login/Usage/FetchModels ---
+// --- P15: StaticProvider returns errNotSupported for Usage/FetchModels ---
 
 func TestStaticProvider_NotSupported(t *testing.T) {
 	p := &StaticProvider{cfg: &Config{StaticKey: "k"}}
-	if err := p.Login(); err == nil {
-		t.Error("StaticProvider.Login: want error, got nil")
-	}
-	if _, err := p.Usage(); err == nil {
+	if err := p.Usage(); err == nil {
 		t.Error("StaticProvider.Usage: want error, got nil")
 	}
 	if _, err := p.FetchModels(); err == nil {
@@ -338,33 +335,15 @@ func mustMarshal(v any) []byte {
 	return b
 }
 
-// --- P17: codex/aqp/deepseek/zhipu delegate Login/Logout/Usage/Quota to cfg callbacks ---
+// --- P17: codex/deepseek Logout/Surplus (Login was removed from the interface;
+// Usage()/Quota() are direct impls exercised by the fetch/display tests) ---
 
 func TestProviderDelegates_Callbacks(t *testing.T) {
-	loginCalled := false
-	cfg := &Config{
-		LoginFn: func() error { loginCalled = true; return nil },
-	}
-	// codex: Login delegates to LoginFn; Logout is provider-owned (file removal,
-	// Phase 5); Usage()/Quota() are direct impls - exercised by the fetch/display
-	// tests, not here.
+	cfg := &Config{}
+	// codex: Logout is provider-owned (file removal, Phase 5); Usage()/Quota()
+	// are direct impls - exercised by the fetch/display tests, not here.
 	codex := &CodexProvider{cfg: cfg}
-	mustNoErr(t, codex.Login())
 	mustNoErr(t, codex.Logout())
-	if !loginCalled {
-		t.Errorf("codex delegate missed: login=%v", loginCalled)
-	}
-
-	// deepseek with a temp auth file so LoadKey works; Quota() is a direct
-	// implementation (asserted via the parser tests, not here).
-	dir := t.TempDir()
-	authFile := filepath.Join(dir, "ds.json")
-	os.WriteFile(authFile, mustMarshal(map[string]string{"api_key": "k"}), 0o600)
-	ds := &DeepSeekProvider{ApiKeyBase: &ApiKeyBase{authFile: authFile}, cfg: cfg}
-	// Surplus delegates to snap.Surplus.
-	if s := ds.Surplus(nil, time.Now(), 1); s != 0 {
-		t.Errorf("deepseek Surplus(nil)=%v want 0", s)
-	}
 }
 
 // --- P18: deleted in Phase 2 (QuotaOrUnknown/QuotaFn removed; each provider
@@ -451,9 +430,6 @@ func TestStaticProvider_FullSurface(t *testing.T) {
 	if err != nil || q.Billing != BillingUnknown {
 		t.Errorf("static Quota=%v err=%v want BillingUnknown", q, err)
 	}
-	if s := p.Surplus(nil, time.Now(), 1); s != 0 {
-		t.Errorf("static Surplus(nil)=%v want 0", s)
-	}
 	// errNotSupported.Error() string.
 	if e := (&notSupportedErr{}).Error(); e == "" {
 		t.Error("notSupportedErr.Error() empty")
@@ -478,46 +454,28 @@ func TestCodexAuthRefresh_Delegate(t *testing.T) {
 	if auth.refreshes != 1 {
 		t.Errorf("codex Refresh refreshes=%d want 1", auth.refreshes)
 	}
-	// Surplus delegates to snap.Surplus (nil snap → 0).
-	if s := p.Surplus(nil, time.Now(), 1); s != 0 {
-		t.Errorf("codex Surplus(nil)=%v want 0", s)
-	}
 }
 
-// --- P24: aqp Refresh/Login/Logout/Usage/FetchModels/Surplus delegation ---
+// --- P24: aqp Refresh/Logout/Surplus delegation (Login removed from interface;
+// Usage()/Quota() are direct implementations, network-tested elsewhere) ---
 
 func TestAqpProvider_Delegates(t *testing.T) {
-	loginCalled := false
-	cfg := &Config{
-		LoginFn: func() error { loginCalled = true; return nil },
-	}
+	cfg := &Config{}
 	p := &AqpProvider{cfg: cfg, auth: fakeAuth{key: "k"}}
 	mustNoErr(t, p.Refresh())
-	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
-	// Usage()/Quota() are direct implementations (network); tested elsewhere.
-	if !loginCalled {
-		t.Errorf("aqp delegate: login=%v", loginCalled)
-	}
-	if s := p.Surplus(nil, time.Now(), 1); s != 0 {
-		t.Errorf("aqp Surplus(nil)=%v want 0", s)
-	}
 }
 
-// --- P25: deepseek/zhipu/volcengine Login/Logout/Usage delegation ---
+// --- P25: deepseek/zhipu Logout/Quota/Surplus (Login removed from interface) ---
 
 func TestDeepSeekProvider_Delegates(t *testing.T) {
-	cfg := &Config{
-		LoginFn: func() error { return nil },
-	}
+	cfg := &Config{}
 	dir := t.TempDir()
 	authFile := filepath.Join(dir, "ds.json")
 	os.WriteFile(authFile, mustMarshal(map[string]string{"api_key": "k"}), 0o600)
 	p := &DeepSeekProvider{ApiKeyBase: &ApiKeyBase{authFile: authFile}, cfg: cfg}
-	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
-	// zhipu RewriteRequest is a no-op passthrough. (Login reads stdin, so it's
-	// not exercised here — its validation path needs a mock usage_url + stdin.)
+	// zhipu RewriteRequest is a no-op passthrough.
 	zp := &ZhipuProvider{ApiKeyBase: &ApiKeyBase{authFile: authFile}, cfg: cfg}
 	if url, body := zp.RewriteRequest("https://x/m", []byte(`b`), "/m"); url != "https://x/m" || string(body) != "b" {
 		t.Errorf("zhipu RewriteRequest=(%q,%q) want passthrough", url, body)
@@ -526,9 +484,6 @@ func TestDeepSeekProvider_Delegates(t *testing.T) {
 	if q, err := zp.Quota(); err != nil || q.Billing != BillingUnknown {
 		t.Errorf("zhipu Quota (nil fn)=%v err=%v", q, err)
 	}
-	if s := zp.Surplus(nil, time.Now(), 1); s != 0 {
-		t.Errorf("zhipu Surplus(nil)=%v want 0", s)
-	}
 }
 
 // --- P26: volcengine delegation ---
@@ -536,14 +491,12 @@ func TestDeepSeekProvider_Delegates(t *testing.T) {
 func TestVolcengineProvider_Delegates(t *testing.T) {
 	fetchCalled := false
 	cfg := &Config{
-		LoginFn:       func() error { return nil },
 		FetchModelsFn: func() ([]string, error) { fetchCalled = true; return []string{"m"}, nil },
 	}
 	dir := t.TempDir()
 	authFile := filepath.Join(dir, "v.json")
 	os.WriteFile(authFile, mustMarshal(map[string]string{"api_key": "k"}), 0o600)
 	p := &VolcengineProvider{ApiKeyBase: &ApiKeyBase{authFile: authFile}, cfg: cfg}
-	mustNoErr(t, p.Login())
 	mustNoErr(t, p.Logout())
 	got, err := p.FetchModels()
 	if err != nil || !fetchCalled || len(got) != 1 {
@@ -551,9 +504,6 @@ func TestVolcengineProvider_Delegates(t *testing.T) {
 	}
 	if q, err := p.Quota(); err != nil || q.Billing != BillingUnknown {
 		t.Errorf("volcengine Quota=%v err=%v", q, err)
-	}
-	if s := p.Surplus(nil, time.Now(), 1); s != 0 {
-		t.Errorf("volcengine Surplus(nil)=%v want 0", s)
 	}
 }
 

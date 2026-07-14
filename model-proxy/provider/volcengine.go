@@ -56,11 +56,7 @@ func (p *VolcengineProvider) RewriteRequest(targetURL string, body []byte, path 
 	return targetURL, body
 }
 
-func (p *VolcengineProvider) Login() error  { return p.cfg.LoginFn() }
 func (p *VolcengineProvider) Logout() error { return p.DeleteKey() }
-func (p *VolcengineProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
-	return snap.Surplus(now, peakMult)
-}
 func (p *VolcengineProvider) FetchModels() ([]string, error) {
 	if p.cfg.FetchModelsFn != nil {
 		return p.cfg.FetchModelsFn()

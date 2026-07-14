@@ -136,7 +136,7 @@ func firstProvider(p *Proxy, model string) string {
 	for k := range p.cfg.Routes {
 		routeKeys[k] = true
 	}
-	ordered := p.schedule(p.cfg, p.providers, p.parentOf, model, "", p.cfg.Routes[model], routeKeys)
+	ordered := p.schedule(p.cfg, p.parentOf, model, "", p.cfg.Routes[model], routeKeys)
 	if len(ordered) == 0 {
 		return ""
 	}

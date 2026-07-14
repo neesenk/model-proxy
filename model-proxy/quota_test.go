@@ -78,15 +78,11 @@ type snapshotProv struct{ rem float64 }
 func (s *snapshotProv) AuthHeaders(*http.Request) error                        { return nil }
 func (s *snapshotProv) Refresh() error                                         { return nil }
 func (s *snapshotProv) RewriteRequest(string, []byte, string) (string, []byte) { return "", nil }
-func (s *snapshotProv) Login() error                                           { return nil }
 func (s *snapshotProv) Logout() error                                          { return nil }
-func (s *snapshotProv) Usage() (any, error)                                    { return nil, nil }
+func (s *snapshotProv) Usage() error                                           { return nil }
 func (s *snapshotProv) FetchModels() ([]string, error)                         { return nil, nil }
 func (s *snapshotProv) Quota() (*provider.QuotaSnapshot, error) {
 	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: s.rem, AsOf: time.Now()}, nil
-}
-func (s *snapshotProv) Surplus(snap *provider.QuotaSnapshot, now time.Time, peakMult float64) float64 {
-	return snap.Surplus(now, peakMult)
 }
 func (s *snapshotProv) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}

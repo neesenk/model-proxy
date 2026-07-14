@@ -36,7 +36,6 @@ func (p *AqpProvider) RewriteRequest(targetURL string, body []byte, path string)
 	}
 	return targetURL, body
 }
-func (p *AqpProvider) Login() error                   { return p.cfg.LoginFn() }
 func (p *AqpProvider) Logout() error                  { return removeAuthFile(p.cfg.OAuthAuthFile) }
 func (p *AqpProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg, p.AuthHeaders) }
 
@@ -53,9 +52,6 @@ func (p *AqpProvider) Quota() (*QuotaSnapshot, error) {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}
 	return ParseAqpQuota(mu, ""), nil
-}
-func (p *AqpProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
-	return snap.Surplus(now, peakMult)
 }
 
 // ProbeRequest overrides the OpenAI default: aqp speaks the Anthropic messages

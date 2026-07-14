@@ -2,7 +2,6 @@ package provider
 
 import (
 	"net/http"
-	"time"
 )
 
 // StaticProvider is for providers with a static key in config (no login/usage).
@@ -30,23 +29,17 @@ func (p *StaticProvider) Refresh() error {
 func (p *StaticProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
 	return targetURL, body
 }
-func (p *StaticProvider) Login() error {
-	return errNotSupported
-}
 func (p *StaticProvider) Logout() error {
 	return errNotSupported
 }
-func (p *StaticProvider) Usage() (any, error) {
-	return nil, errNotSupported
+func (p *StaticProvider) Usage() error {
+	return errNotSupported
 }
 func (p *StaticProvider) FetchModels() ([]string, error) { return nil, errNotSupported }
 
 // Quota: static providers have no measurable quota - always BillingUnknown.
 func (p *StaticProvider) Quota() (*QuotaSnapshot, error) {
 	return &QuotaSnapshot{Billing: BillingUnknown}, nil
-}
-func (p *StaticProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
-	return snap.Surplus(now, peakMult)
 }
 
 var errNotSupported = &notSupportedErr{}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"time"
 )
 
@@ -42,33 +41,6 @@ func (p *ZhipuProvider) RewriteRequest(targetURL string, body []byte, path strin
 	return targetURL, body // no special rewriting
 }
 
-func (p *ZhipuProvider) Login() error {
-	// Read API key from stdin.
-	fmt.Printf("Enter API key for %s: ", p.providerName)
-	var key string
-	fmt.Scanln(&key)
-	if key == "" {
-		return fmt.Errorf("empty API key")
-	}
-
-	// Validate via /models endpoint.
-	if p.cfg.UsageURL != "" {
-		fmt.Fprintln(os.Stderr, "Validating API key...")
-		req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
-		req.Header.Set("Authorization", "Bearer "+key)
-		resp, err := (&http.Client{Timeout: 15e9}).Do(req)
-		if err != nil {
-			return fmt.Errorf("validation failed: %w", err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return fmt.Errorf("validation failed: HTTP %d", resp.StatusCode)
-		}
-	}
-
-	return p.SaveKey(key)
-}
-
 func (p *ZhipuProvider) Logout() error {
 	return p.DeleteKey()
 }
@@ -102,9 +74,6 @@ func (p *ZhipuProvider) Quota() (*QuotaSnapshot, error) {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: "not zhipu quota format"}, nil
 	}
 	return s, nil
-}
-func (p *ZhipuProvider) Surplus(snap *QuotaSnapshot, now time.Time, peakMult float64) float64 {
-	return snap.Surplus(now, peakMult)
 }
 
 // ParseZhipuQuota parses Zhipu BigModel's /api/monitor/usage/quota/limit body into
