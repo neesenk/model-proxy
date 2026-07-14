@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"model-proxy/provider"
 )
 
 // TestLogin_FullFlowWithMockAQP drives the entire real SSO flow shape
@@ -101,12 +103,12 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	}
 
 	// 4. Persist + fetch API key.
-	a := &AccountData{
+	a := &provider.AqpAccountData{
 		AccountID:        data.EmployeeEmail,
 		Email:            data.EmployeeEmail,
 		SSOSessionCookie: "SSO_C=" + cookieVal,
 	}
-	if err := saveAccount(storePath, a); err != nil {
+	if err := provider.SaveAqpAccount(storePath, a); err != nil {
 		t.Fatal(err)
 	}
 	key, err := c.fetchAPIKeyAt(aqp.URL + "/api/v1/cqp/ccswitch/api_key/get_or_generate")
@@ -121,7 +123,7 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	}
 
 	// 5. Managed key is NOT persisted; the store keeps the 6 account fields.
-	loaded, _ := loadAccount(storePath)
+	loaded, _ := provider.LoadAqpAccount(storePath)
 	if loaded.Email != "tester@shopee.io" {
 		t.Errorf("persisted email=%q", loaded.Email)
 	}
@@ -160,13 +162,13 @@ func TestExtractLoginURL_Coverage(t *testing.T) {
 
 // TestCookieHeader verifies both the raw-value and prefixed storage forms.
 func TestCookieHeader(t *testing.T) {
-	if got := cookieHeader("abc"); got != "SSO_C=abc" {
+	if got := provider.CookieHeader("abc"); got != "SSO_C=abc" {
 		t.Errorf("bare value: got %q", got)
 	}
-	if got := cookieHeader("SSO_C=abc"); got != "SSO_C=abc" {
+	if got := provider.CookieHeader("SSO_C=abc"); got != "SSO_C=abc" {
 		t.Errorf("prefixed: got %q", got)
 	}
-	if got := cookieHeader(""); got != "" {
+	if got := provider.CookieHeader(""); got != "" {
 		t.Errorf("empty: got %q", got)
 	}
 }

@@ -187,26 +187,22 @@ type Config struct {
 	// The file read stays in the provider package (it's pure file I/O).
 	VolcengineCredFile string
 
-	// AqpMonthlyUsage fetches the monthly_usage payload (SSO-cookie POST,
-	// project_id-scoped). Wired in buildOne from the main-package AqpClient
-	// (shared with the login/web flows). nil for non-aqp providers.
-	AqpMonthlyUsage func() (*MonthlyProjectUsage, error)
-
-	// AqpAccount returns the logged-in account's email, project_id, and store
-	// file path (for the aqp usage display header). nil/err for non-aqp or when
-	// not logged in. Wired in buildOne from the main-package loadAccount.
-	AqpAccount func() (email, projectID, storePath string, err error)
+	// AqpBaseURL overrides the aqp (compass) backend base URL for the
+	// monthly_usage quota fetch (AqpProvider.Quota/Usage). Empty -> AqpBase
+	// (production). Tests point it at an httptest mock. The aqp account store
+	// path is OAuthAuthFile (read via LoadAqpAccount).
+	AqpBaseURL string
 
 	// Models is the config model-id list, used by the usage display's fallback
 	// (listConfigModels) when a provider can't fetch a structured quota
 	// (e.g. volcengine without AK/SK).
 	Models []string
 
-	// Callbacks: main wires volcengine's V4-signed FetchModels here, plus aqp's
-	// SSO-cookie monthly_usage fetcher (AqpMonthlyUsage) and account reader
-	// (AqpAccount). The interactive login flow is NOT a callback - cmdLogin
-	// calls the run* flows directly. Logout is provider-owned (file removal)
-	// since Phase 5.
+	// Callbacks: main wires volcengine's V4-signed FetchModels here. The aqp
+	// monthly_usage fetch is provider-owned (AqpProvider.fetchMonthlyUsage reads
+	// the SSO-cookie store + POSTs directly, like the other providers). The
+	// interactive login flow is NOT a callback - cmdLogin calls the run* flows
+	// directly. Logout is provider-owned (file removal) since Phase 5.
 	FetchModelsFn func() ([]string, error) // for FetchModels (volcengine: V4-signed OpenAPI)
 
 	// Auth is an optional auth-injector override (TEST SEAM): when set, the aqp/

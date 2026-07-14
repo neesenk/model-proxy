@@ -169,32 +169,74 @@ func TestDeepSeekProvider_Quota_HTTPError(t *testing.T) {
 
 // --- aqp ---
 
-func TestAqpProvider_Quota_NilFetcher(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{}} // AqpMonthlyUsage unset
+// writeAqpStore writes an aqp account store (SSO cookie + project_id) for the
+// fetch tests. Returns the store path.
+func writeAqpStore(t *testing.T, path, projectID string) {
+	t.Helper()
+	if err := SaveAqpAccount(path, &AqpAccountData{
+		Email:            "a@b.com",
+		ProjectID:        projectID,
+		SSOSessionCookie: "SSO_C=fake",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAqpProvider_Quota_NotLoggedIn: no store file -> BillingUnknown "not logged in".
+func TestAqpProvider_Quota_NotLoggedIn(t *testing.T) {
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: filepath.Join(t.TempDir(), "nope.json")}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Billing != BillingUnknown || s.Err != "not logged in" {
+		t.Errorf("got %+v want BillingUnknown/not logged in", s)
+	}
+}
+
+// TestAqpProvider_Quota_NoProjectID: store present but project_id empty ->
+// BillingUnknown "no project_id" (no network call).
+func TestAqpProvider_Quota_NoProjectID(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "aqp_oauth_auth.json")
+	writeAqpStore(t, store, "")
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store}}
+	s, _ := p.Quota()
+	if s.Billing != BillingUnknown || s.Err == "" {
+		t.Errorf("got %+v want BillingUnknown with non-empty Err", s)
+	}
+}
+
+// TestAqpProvider_Quota_HTTPError: store ok, but the monthly_usage endpoint
+// returns a non-zero retcode -> BillingUnknown carrying the wrapped error.
+func TestAqpProvider_Quota_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"retcode":1,"message":"denied"}`))
+	}))
+	defer srv.Close()
+	store := filepath.Join(t.TempDir(), "aqp_oauth_auth.json")
+	writeAqpStore(t, store, "proj-1")
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store, AqpBaseURL: srv.URL}}
 	s, err := p.Quota()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s.Billing != BillingUnknown || s.Err == "" {
-		t.Errorf("got %+v want BillingUnknown with Err", s)
+		t.Errorf("got %+v want BillingUnknown with non-empty Err", s)
 	}
 }
 
-func TestAqpProvider_Quota_FetchError(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{AqpMonthlyUsage: func() (*MonthlyProjectUsage, error) {
-		return nil, errFoo
-	}}}
-	s, _ := p.Quota()
-	if s.Billing != BillingUnknown || s.Err != errFoo.Error() {
-		t.Errorf("got %+v want BillingUnknown/"+errFoo.Error(), s)
-	}
-}
-
+// TestAqpProvider_Quota_Parsed: store + mock monthly_usage -> parsed plan snapshot.
 func TestAqpProvider_Quota_Parsed(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{AqpMonthlyUsage: func() (*MonthlyProjectUsage, error) {
-		return &MonthlyProjectUsage{SelectedYear: 2026, SelectedMonth: 7,
-			TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}, nil
-	}}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != aqpMonthlyUsagePath || r.Method != http.MethodPost {
+			t.Errorf("aqp monthly_usage: %s %s, want POST %s", r.Method, r.URL.Path, aqpMonthlyUsagePath)
+		}
+		w.Write([]byte(`{"retcode":0,"data":{"project_id":"proj-1","selected_year":2026,"selected_month":7,"total_amount":100,"usage":30,"balance":70,"plan":"CQP"}}`))
+	}))
+	defer srv.Close()
+	store := filepath.Join(t.TempDir(), "aqp_oauth_auth.json")
+	writeAqpStore(t, store, "proj-1")
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store, AqpBaseURL: srv.URL}}
 	s, err := p.Quota()
 	if err != nil {
 		t.Fatal(err)
@@ -203,12 +245,6 @@ func TestAqpProvider_Quota_Parsed(t *testing.T) {
 		t.Errorf("got %+v want Plan/0.7", s)
 	}
 }
-
-var errFoo = &fooErr{}
-
-type fooErr struct{}
-
-func (e *fooErr) Error() string { return "fetch failed" }
 
 // --- volcengine ---
 

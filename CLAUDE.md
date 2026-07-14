@@ -48,7 +48,7 @@ Credentials are managed by `login`/`logout`, stored at `~/.model-proxy/<provider
 
 A new **plan** provider's `Quota()` should return `*provider.QuotaSnapshot` (Billing=`BillingPlan`; mark one window `Ultimate` + its `Duration`, optionally a `Short` rate-cap window for peak burn; set `RemainingPct` = the ultimate window's remaining). A pay-as-you-go upstream instead sets `billing: pay-as-you-go` in config (no `Quota()` needed).
 
-You should **not** need to edit `proxy.go`, `login.go`, `usage`, or `models.go` - the routing/auth/CLI/model-list are provider-agnostic. The interactive login flow (`runXxxLogin`) stays in main as the `login` CLI command's implementation (CLI/IO orchestration: browser/stdin/loopback/pool writes); wire it via `cfg.LoginFn` in `buildOne`.
+You should **not** need to edit `proxy.go`, `login.go`, `usage`, or `models.go` - the routing/auth/CLI/model-list are provider-agnostic. The interactive login flow (`runXxxLogin`) stays in main as the `login` CLI command's implementation (CLI/IO orchestration: browser/stdin/loopback/pool writes); `cmdLogin` dispatches to it directly by `provider_id` (Login is NOT on the Provider interface - no `buildOne` wiring needed). The one remaining `buildOne` callback is `FetchModelsFn` (volcengine's V4-signed `ListArkAgentPlanModel`); aqp's quota/usage fetch its SSO-cookie store directly (`provider.LoadAqpAccount` + POST), no callback.
 
 ## Cross-cutting gotchas (CLAUDE.md-specific)
 

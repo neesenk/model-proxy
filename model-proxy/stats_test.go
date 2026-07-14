@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"model-proxy/provider"
 )
 
 // newTestStatsStore opens a fresh statsStore in a temp dir with no retention.
@@ -767,14 +769,14 @@ func TestClearAccount(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "acct.json")
 	os.WriteFile(p, []byte("{}"), 0o600)
-	if err := clearAccount(p); err != nil {
+	if err := provider.ClearAqpAccount(p); err != nil {
 		t.Fatalf("clearAccount existing: %v", err)
 	}
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
 		t.Error("clearAccount did not remove the file")
 	}
 	// Idempotent: missing file is not an error.
-	if err := clearAccount(p); err != nil {
+	if err := provider.ClearAqpAccount(p); err != nil {
 		t.Errorf("clearAccount missing: want nil, got %v", err)
 	}
 }
@@ -831,12 +833,12 @@ func TestPublicCookies(t *testing.T) {
 		t.Errorf("PublicCookies(nil jar)=%v want nil", got)
 	}
 	// With a cookie set on the jar for c.base.
-	u, _ := url.Parse(aqpBase)
+	u, _ := url.Parse(provider.AqpBase)
 	c2 := newAqpClient("/tmp/nope.json")
-	c2.Jar.SetCookies(u, []*http.Cookie{{Name: ssoCookieName, Value: "v"}})
+	c2.Jar.SetCookies(u, []*http.Cookie{{Name: provider.SsoCookieName, Value: "v"}})
 	got := c2.PublicCookies()
-	if len(got) != 1 || got[0].Name != ssoCookieName {
-		t.Errorf("PublicCookies=%+v want [%s=v]", got, ssoCookieName)
+	if len(got) != 1 || got[0].Name != provider.SsoCookieName {
+		t.Errorf("PublicCookies=%+v want [%s=v]", got, provider.SsoCookieName)
 	}
 }
 

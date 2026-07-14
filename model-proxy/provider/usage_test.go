@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -21,7 +23,8 @@ func (errAuth) Refresh() error             { return nil }
 // --- aqp ---
 
 func TestAqpUsage_NotLoggedIn(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{}} // AqpAccount nil
+	// No store file at OAuthAuthFile -> LoadAqpAccount returns nil -> "Not logged in".
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: filepath.Join(t.TempDir(), "nope.json")}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	if !contains(out, "Not logged in") || !contains(out, "aqp") {
 		t.Errorf("aqp usage not-logged-in missing marker:\n%s", out)
@@ -29,9 +32,10 @@ func TestAqpUsage_NotLoggedIn(t *testing.T) {
 }
 
 func TestAqpUsage_AccountError(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{AqpAccount: func() (string, string, string, error) {
-		return "", "", "", errors.New("bad store")
-	}}}
+	// Store file exists but isn't valid JSON -> LoadAqpAccount errors -> "Error:".
+	store := filepath.Join(t.TempDir(), "aqp_oauth_auth.json")
+	os.WriteFile(store, []byte(`not-json`), 0o600)
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	if !contains(out, "Error:") {
 		t.Errorf("aqp usage account-error missing 'Error:':\n%s", out)
@@ -39,17 +43,15 @@ func TestAqpUsage_AccountError(t *testing.T) {
 }
 
 func TestAqpUsage_Parsed(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{
-		AqpAccount: func() (string, string, string, error) {
-			return "alice@example.com", "proj-1", "/path/aqp_oauth_auth.json", nil
-		},
-		AqpMonthlyUsage: func() (*MonthlyProjectUsage, error) {
-			return &MonthlyProjectUsage{SelectedYear: 2026, SelectedMonth: 7,
-				TotalAmount: 250, Usage: 141.93, Balance: 108.07, Plan: "cqp"}, nil
-		},
-	}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"retcode":0,"data":{"project_id":"proj-1","selected_year":2026,"selected_month":7,"total_amount":250,"usage":141.93,"balance":108.07,"plan":"cqp"}}`))
+	}))
+	defer srv.Close()
+	store := filepath.Join(t.TempDir(), "aqp_oauth_auth.json")
+	writeAqpStore(t, store, "proj-1")
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store, AqpBaseURL: srv.URL}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
-	for _, want := range []string{"aqp", "alice@example.com", "proj-1", "57% used", "$141.93", "cqp", "2026-07", "/path/aqp_oauth_auth.json"} {
+	for _, want := range []string{"aqp", "a@b.com", "proj-1", "57% used", "$141.93", "cqp", "2026-07"} {
 		if !contains(out, want) {
 			t.Errorf("aqp usage parsed missing %q:\n%s", want, out)
 		}
@@ -57,10 +59,11 @@ func TestAqpUsage_Parsed(t *testing.T) {
 }
 
 func TestAqpUsage_MonthlyError(t *testing.T) {
-	p := &AqpProvider{cfg: &Config{
-		AqpAccount:      func() (string, string, string, error) { return "a@b.com", "p", "/s", nil },
-		AqpMonthlyUsage: func() (*MonthlyProjectUsage, error) { return nil, errors.New("no project_id") },
-	}}
+	// Store present but project_id empty -> fetchMonthlyUsage returns
+	// "no project_id" (no network call) -> "(unavailable: ...)".
+	store := filepath.Join(t.TempDir(), "aqp_oauth_auth.json")
+	writeAqpStore(t, store, "")
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	if !contains(out, "unavailable") || !contains(out, "no project_id") {
 		t.Errorf("aqp usage monthly-error missing marker:\n%s", out)

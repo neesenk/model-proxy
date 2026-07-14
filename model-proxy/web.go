@@ -39,7 +39,7 @@ type webServer struct {
 	logFile    string // resolved at runProxy time; "" → fall back to cfg.LogFile
 	sessions   *loginSessionStore
 	// newAqpClientFn builds the AQP client used by the async login flow. In
-	// production this is newAqpClient (base = aqpBase); tests override it with
+	// production this is newAqpClient (base = provider.AqpBase); tests override it with
 	// newAqpClientWithBase to point at an httptest mock of the compass backend.
 	newAqpClientFn func(storePath string) *AqpClient
 	// newCodexOptions builds the codexLoginServerOptions used by the async
@@ -288,7 +288,7 @@ func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request
 			// Only email + account_id are surfaced — the SSO cookie is never copied
 			// into the response struct. Guard against empty AccountID so a
 			// differently-shaped codex file doesn't yield a bogus empty entry.
-			a, _ := loadAccount(authFilePath(name, "oauth_auth"))
+			a, _ := provider.LoadAqpAccount(authFilePath(name, "oauth_auth"))
 			if a != nil && a.AccountID != "" {
 				p.Accounts = []acct{{
 					ID:      a.AccountID,
@@ -479,7 +479,7 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 	}
 	switch prov.Provider {
 	case "aqp":
-		if err := clearAccount(authFilePath(name, "oauth_auth")); err != nil {
+		if err := provider.ClearAqpAccount(authFilePath(name, "oauth_auth")); err != nil {
 			writeJSONErr(resp, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -585,14 +585,14 @@ func (w *webServer) runAqpPoll(sess *loginSession, name string) {
 		sess.setState("error", "api key provisioning: "+err.Error())
 		return
 	}
-	a := &AccountData{
+	a := &provider.AqpAccountData{
 		AccountID:        keyData.EmployeeEmail,
 		Email:            keyData.EmployeeEmail,
 		ProjectID:        keyData.ProjectID,
 		SSOSessionCookie: sess.aqpClient.SessionCookie(),
 		LastRefreshAt:    time.Now().Unix(),
 	}
-	if err := saveAccount(authFilePath(name, "oauth_auth"), a); err != nil {
+	if err := provider.SaveAqpAccount(authFilePath(name, "oauth_auth"), a); err != nil {
 		sess.setState("error", err.Error())
 		return
 	}

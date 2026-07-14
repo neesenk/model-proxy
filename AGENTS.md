@@ -56,12 +56,12 @@ config.yaml:
 - `ExtraHeaders(req, path)` -- 每次请求（forward + 探测）都要的专属头。默认 no-op；aqp override 设 `anthropic-version` + UUID `x-compass-request-id`（forward 与 probe 共用此实现，消除旧的两处重复分支）。
 - `FilterModelIDs(ids)` -- `models refresh` 的静态策略过滤（policy pass）。默认透传；volcengine override 剔除 `*-latest`/`doubao-seed-1-*`/lite/mini。
 
-**provider 自实现**（Phase 1-5 重构后）：`Auth`/`Logout`/`Usage`/`Quota` 都由 provider struct 承载；其中 `Usage`/`Quota` 的 fetch+parse 多数在 provider 内直接完成（aqp 的 SSO-cookie monthly_usage 抓取经 main 注入的 `AqpMonthlyUsage`/`AqpAccount`，见下）：
+**provider 自实现**（Phase 1-5 + aqp-fetch 迁移后）：`Auth`/`Logout`/`Usage`/`Quota` 都由 provider struct 承载，fetch+parse 全部在 provider 内直接完成（aqp 的 SSO-cookie monthly_usage 抓取也由 `AqpProvider.fetchMonthlyUsage` 直接读 `~/.model-proxy/<name>_oauth_auth.json` 经 `provider.LoadAqpAccount` + POST，不再经 main 回调）：
 - Auth: `provider/auth.go` -- `AqpKeyProvider`（SSO cookie → mint key）/ `CodexOAuthProvider`（OAuth JWT + 刷新）/ `ApiKeyBase`（apikey 文件）。每个 provider struct embed/持有其 auth injector；`AuthHeaders`/`Refresh` 直接调它。颜色/格式 helper 在 `provider/display.go`。
 - Usage: `provider/usage_display.go` -- 每个 provider 的 `Usage()` 打印（首行 `Provider: <name>` 契约）。
 - Quota: 每个 provider 的 `Quota()` 直接 fetch+parse（parser 在 `provider/*.go`）。
 - Logout: provider 直接删凭据文件（aqp/codex 删 oauth_auth.json；apikey 用 `ApiKeyBase.DeleteKey`）。
-- main 的窄回调：`FetchModelsFn`（volcengine 的 V4 签名 `ListArkAgentPlanModel`）；aqp 额外注入 `AqpMonthlyUsage`（SSO-cookie monthly_usage 抓取，Quota/Usage 共用）+ `AqpAccount`（usage 头部 email/project_id）。`buildOne`（`proxy.go`）的 switch wiring 这些回调 + per-provider 配置字段。`login`/`logout` 由 `cmdLogin`/`cmdLogout` 直接调 `run*`/`Logout()`，不经 provider 实例（Login 已从接口移除）。交互 login 流程是 CLI/IO 编排（浏览器/stdin/loopback/池写入），属 main 的 `login` 命令实现。
+- main 只剩一个**窄回调**：`FetchModelsFn`（volcengine 的 V4 签名 `ListArkAgentPlanModel`）。`buildOne`（`proxy.go`）的 switch 只剩这一个回调的 wiring + per-provider 配置字段。aqp 的 account store（`AccountData`/`LoadAccount`/`SaveAccount`/`ClearAccount`/`CookieHeader`/`SsoCookieName`/`AqpBase`）已移入 provider 包（`provider/aqp_store.go`），main 的 `AqpClient`（SSO login/web 编排，cookie jar）经 `provider.*` 访问 store。`login`/`logout` 由 `cmdLogin`/`cmdLogout` 直接调 `run*`/`Logout()`，不经 provider 实例（Login 已从接口移除）。交互 login 流程是 CLI/IO 编排（浏览器/stdin/loopback/池写入），属 main 的 `login` 命令实现。
 
 ### 配额感知调度（quota-aware scheduling）
 

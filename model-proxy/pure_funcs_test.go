@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+
+	"model-proxy/provider"
 )
 
 // pure_funcs_test.go covers small pure/simple functions still under 70%:
@@ -50,8 +52,8 @@ func TestSessionCookie_Empty(t *testing.T) {
 
 func TestSessionCookie_WithCookie(t *testing.T) {
 	c := newAqpClient("/tmp/nope.json")
-	u, _ := url.Parse(aqpBase)
-	c.Jar.SetCookies(u, []*http.Cookie{{Name: ssoCookieName, Value: "val123"}})
+	u, _ := url.Parse(provider.AqpBase)
+	c.Jar.SetCookies(u, []*http.Cookie{{Name: provider.SsoCookieName, Value: "val123"}})
 	got := c.SessionCookie()
 	want := "SSO_C=val123"
 	if got != want {

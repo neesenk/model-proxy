@@ -1,6 +1,10 @@
 package provider
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -39,15 +43,67 @@ func (p *AqpProvider) RewriteRequest(targetURL string, body []byte, path string)
 func (p *AqpProvider) Logout() error                  { return removeAuthFile(p.cfg.OAuthAuthFile) }
 func (p *AqpProvider) FetchModels() ([]string, error) { return fetchModelsBearer(p.cfg, p.AuthHeaders) }
 
-// Quota POSTs monthly_usage (via the injected AqpMonthlyUsage fetcher, which
-// is the SSO-cookie-authed AqpClient shared with login/web) and parses it into
-// a single monthly Ultimate window. On any failure returns BillingUnknown
-// carrying the error (never a non-nil error).
-func (p *AqpProvider) Quota() (*QuotaSnapshot, error) {
-	if p.cfg.AqpMonthlyUsage == nil {
-		return &QuotaSnapshot{Billing: BillingUnknown, Err: "monthly usage not configured"}, nil
+// aqpBaseURL returns the compass backend base URL for the monthly_usage fetch:
+// cfg.AqpBaseURL when set (tests), else the production AqpBase constant.
+func (p *AqpProvider) aqpBaseURL() string {
+	if p.cfg.AqpBaseURL != "" {
+		return p.cfg.AqpBaseURL
 	}
-	mu, err := p.cfg.AqpMonthlyUsage()
+	return AqpBase
+}
+
+// fetchMonthlyUsage POSTs monthly_usage with the persisted SSO cookie +
+// project_id (cookie-authed, not the managed key) and parses the
+// {retcode, data:{...MonthlyProjectUsage}} envelope. The endpoint is POST and
+// requires project_id input (taken from the store's AqpAccountData.ProjectID).
+// Owned by the provider since Stage 2 of the aqp-fetch migration (was a main
+// callback AqpMonthlyUsage wired to AqpClient.MonthlyUsage).
+func (p *AqpProvider) fetchMonthlyUsage() (*MonthlyProjectUsage, error) {
+	a, err := LoadAqpAccount(p.cfg.OAuthAuthFile)
+	if err != nil || a == nil || a.SSOSessionCookie == "" {
+		return nil, fmt.Errorf("not logged in")
+	}
+	if a.ProjectID == "" {
+		return nil, fmt.Errorf("no project_id in store; run `model-proxy login aqp` (or --import) to populate it")
+	}
+	endpoint := strings.TrimRight(p.aqpBaseURL(), "/") + aqpMonthlyUsagePath
+	payload, _ := json.Marshal(map[string]string{"project_id": a.ProjectID})
+	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+	req.Header.Set("Cookie", CookieHeader(a.SSOSessionCookie))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("monthly usage request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var wrap struct {
+		Retcode int             `json:"retcode"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return nil, fmt.Errorf("monthly usage response parse failed: %w", err)
+	}
+	if wrap.Retcode != 0 {
+		return nil, fmt.Errorf("monthly usage retcode=%d message=%s", wrap.Retcode, wrap.Message)
+	}
+	if len(wrap.Data) == 0 {
+		return nil, fmt.Errorf("monthly usage response missing data")
+	}
+	var mu MonthlyProjectUsage
+	if err := json.Unmarshal(wrap.Data, &mu); err != nil {
+		return nil, fmt.Errorf("monthly usage data parse failed: %w", err)
+	}
+	return &mu, nil
+}
+
+// Quota fetches monthly_usage (SSO-cookie POST, project_id-scoped) directly and
+// parses it into a single monthly Ultimate window. On any failure returns
+// BillingUnknown carrying the error (never a non-nil error) so the scheduler
+// treats aqp as unmeasured rather than crashing the poll.
+func (p *AqpProvider) Quota() (*QuotaSnapshot, error) {
+	mu, err := p.fetchMonthlyUsage()
 	if err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}

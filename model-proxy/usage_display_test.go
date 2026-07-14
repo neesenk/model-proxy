@@ -694,7 +694,7 @@ func TestFetchZhipuQuota_NotZhipuFormat(t *testing.T) {
 	}
 }
 
-// --- showVolcengineUsage / fetchVolcengineQuota ---
+// --- showVolcengineUsage ---
 
 // TestShowVolcengineUsage_NoCredsFallsBack: no AK/SK cred file → showVolcengineUsage
 // prints the GetAFPUsage note and falls back to listConfigModels. (The success
@@ -739,39 +739,6 @@ func TestShowVolcengineUsage_GetAFPFailsFallsBack(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 models") {
 		t.Errorf("missing fallback model list:\n%s", out)
-	}
-}
-
-// TestFetchVolcengineQuota_NoCreds: no cred file, nil cred → BillingUnknown "AK/SK not configured".
-func TestFetchVolcengineQuota_NoCreds(t *testing.T) {
-	useTempHome(t)
-	s, err := fetchVolcengineQuota("volcengine", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Billing != provider.BillingUnknown || s.Err != "AK/SK not configured" {
-		t.Errorf("got %+v want BillingUnknown/AK/SK not configured", s)
-	}
-}
-
-// TestFetchVolcengineQuota_GetAFPFails: AK/SK configured (file), nil cred →
-// GetAFPUsage can't reach the real host (dead proxy) → BillingUnknown with the
-// wrapped error. Exercises getAFPUsage's error path through fetchVolcengineQuota.
-func TestFetchVolcengineQuota_GetAFPFails(t *testing.T) {
-	home := useTempHome(t)
-	t.Setenv("HTTPS_PROXY", deadProxyURL(t))
-	t.Setenv("HTTP_PROXY", deadProxyURL(t))
-	writeCred(t, home, "volcengine", "apikey", mustMarshalT(map[string]string{
-		"api_key":    "ark-key",
-		"access_key": "AKtest",
-		"secret_key": "SKtest",
-	}))
-	s, err := fetchVolcengineQuota("volcengine", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Billing != provider.BillingUnknown || s.Err == "" {
-		t.Errorf("got %+v want BillingUnknown with non-empty Err", s)
 	}
 }
 

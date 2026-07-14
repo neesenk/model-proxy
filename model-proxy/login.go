@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"model-proxy/provider"
 )
 
 // AQP SSO login flow:
@@ -322,14 +324,14 @@ After logging in, the browser will try to redirect back to this machine:
 	}
 
 	// 6. Persist the account.
-	a := &AccountData{
+	a := &provider.AqpAccountData{
 		AccountID:        keyData.EmployeeEmail,
 		Email:            keyData.EmployeeEmail,
 		ProjectID:        keyData.ProjectID,
 		SSOSessionCookie: ssoCookie,
 		LastRefreshAt:    time.Now().Unix(),
 	}
-	if err := saveAccount(storePath, a); err != nil {
+	if err := provider.SaveAqpAccount(storePath, a); err != nil {
 		return fmt.Errorf("failed to persist account: %w", err)
 	}
 
@@ -454,14 +456,14 @@ func (l *LoopbackServer) handle(w http.ResponseWriter, r *http.Request) {
 	var ssoC, ssoA string
 	for _, c := range r.Cookies() {
 		switch c.Name {
-		case ssoCookieName: // SSO_C
+		case provider.SsoCookieName: // SSO_C
 			ssoC = c.Value
 		case "SSO_A":
 			ssoA = c.Value
 		}
 	}
 	if ssoC == "" {
-		ssoC = r.URL.Query().Get(ssoCookieName)
+		ssoC = r.URL.Query().Get(provider.SsoCookieName)
 	}
 	fmt.Printf("[GoogleGateway] Received SSO callback signal; checking AQP session (SSO_C=%v SSO_A=%v)\n",
 		ssoC != "", ssoA != "")

@@ -5,82 +5,17 @@ package main
 // main.go but had no production callers (production goes through printProviderUsage
 // -> buildOne -> p.Usage(), and the quotaTracker calls p.Quota() directly).
 // Relocating them here keeps them out of the production binary while leaving the
-// tests' call sites unchanged. The volcengine cluster (getAFPUsage /
-// resolveVolcengineAKSK / fetchVolcengineQuota) duplicates the provider package's
-// own resolveAKSK + Quota(); it remains here as a test seam until those tests are
-// rewritten against the provider path directly.
+// tests' call sites unchanged.
+//
+// Each is a thin buildOne().Usage() / .Quota() dispatcher; the fetch + parse
+// logic lives in the provider package. The volcengine cluster (getAFPUsage /
+// resolveVolcengineAKSK / fetchVolcengineQuota) that used to live here was
+// removed - it duplicated provider/volcengine.go's getAFPUsage/resolveAKSK/Quota,
+// and its tests were redundant with provider/quota_fetch_test.go.
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"time"
-
 	"model-proxy/provider"
 )
-
-// getAFPUsage calls the Volcengine signed OpenAPI GetAFPUsage and returns the
-// 5h/daily/weekly/monthly AFP quota windows.
-func getAFPUsage(ak, sk string) (*provider.AfpUsage, error) {
-	req, err := provider.VolcengineSignedGet("GetAFPUsage", "2024-01-01", ak, sk, time.Now(), "")
-	if err != nil {
-		return nil, err
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GetAFPUsage: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GetAFPUsage HTTP %d: %s", resp.StatusCode, truncate(string(body), 300))
-	}
-	var wrap struct {
-		ResponseMetadata json.RawMessage   `json:"ResponseMetadata"`
-		Result           provider.AfpUsage `json:"Result"`
-	}
-	if err := json.Unmarshal(body, &wrap); err != nil {
-		return nil, fmt.Errorf("parse GetAFPUsage: %w", err)
-	}
-	return &wrap.Result, nil
-}
-
-// resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
-// When a cred is supplied (the pool-bound path), its AK/SK are used EXCLUSIVELY
-// - the on-disk file is never consulted, preserving per-account isolation (a
-// sibling virtual's file must not leak into this account's quota call). An
-// incomplete cred returns an error rather than falling back to the file. When
-// cred is nil (the single-account / pre-pool path), the legacy
-// <name>_apikey.json is read for backward compatibility.
-func resolveVolcengineAKSK(name string, cred *accountCred) (ak, sk string, err error) {
-	if cred != nil {
-		if cred.AccessKey != "" && cred.SecretKey != "" {
-			return cred.AccessKey, cred.SecretKey, nil
-		}
-		return "", "", fmt.Errorf("AK/SK not configured")
-	}
-	c, err := loadVolcengineCreds(name)
-	if err != nil || c.AccessKey == "" || c.SecretKey == "" {
-		return "", "", fmt.Errorf("AK/SK not configured")
-	}
-	return c.AccessKey, c.SecretKey, nil
-}
-
-// fetchVolcengineQuota calls GetAFPUsage (signed, AK/SK). When cred is non-nil
-// the virtual's own AK/SK are used (per-account); otherwise the legacy file is
-// read. Delegates parsing to provider.ParseVolcengineQuota.
-func fetchVolcengineQuota(name string, cred *accountCred) (*provider.QuotaSnapshot, error) {
-	ak, sk, err := resolveVolcengineAKSK(name, cred)
-	if err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: "AK/SK not configured"}, nil
-	}
-	u, err := getAFPUsage(ak, sk)
-	if err != nil {
-		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: err.Error()}, nil
-	}
-	return provider.ParseVolcengineQuota(u), nil
-}
 
 // fetchCodexQuota delegates to the codex provider's Quota() via buildOne (the
 // provider now owns the fetch + parse).

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"model-proxy/provider"
 )
 
 func newTestWeb(t *testing.T) (*webServer, *Proxy) {
@@ -648,7 +650,7 @@ func TestAqpLoginFlow(t *testing.T) {
 		fmt.Fprint(w, `{"result":"https://soup.shopee.io/login"}`)
 	})
 	mux.HandleFunc("/compass-api/v1/auth/info", func(w http.ResponseWriter, r *http.Request) {
-		http.SetCookie(w, &http.Cookie{Name: ssoCookieName, Value: "test-sso-c", Path: "/"})
+		http.SetCookie(w, &http.Cookie{Name: provider.SsoCookieName, Value: "test-sso-c", Path: "/"})
 		fmt.Fprint(w, `{"retcode":0,"data":{"user":{"userid":1,"email":"u@x.com","is_active":true}}}`)
 	})
 	mux.HandleFunc("/api/v1/cqp/ccswitch/api_key/get_or_generate", func(w http.ResponseWriter, r *http.Request) {
@@ -699,7 +701,7 @@ func TestAqpLoginFlow(t *testing.T) {
 			if st.Result != "u@x.com" {
 				t.Errorf("poll result=%q want u@x.com", st.Result)
 			}
-			a, _ := loadAccount(authFilePath("aqp", "oauth_auth"))
+			a, _ := provider.LoadAqpAccount(authFilePath("aqp", "oauth_auth"))
 			if a == nil {
 				t.Fatal("aqp account file not written")
 			}

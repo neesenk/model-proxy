@@ -5,14 +5,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"model-proxy/provider"
 )
 
 // volcengine_creds_test.go covers loadVolcengineCreds + showVolcengineUsage's
-// no-AK/SK fallback path (prints configured models + a note), PLUS the Task-10
-// per-account AK/SK cred threading (pool login, resolveVolcengineAKSK,
-// fetchVolcengineQuota/showVolcengineUsage bound to the virtual's own cred).
+// no-AK/SK fallback path (prints configured models + a note), PLUS the pool
+// login (runVolcengineLoginWithInput: writes the {api_key, access_key,
+// secret_key} triple, dedup by AccessKey). The AK/SK resolution + GetAFPUsage
+// fetch are tested directly in the provider package (provider/quota_fetch_test.go).
 
 // --- loadVolcengineCreds: reads {api_key, access_key, secret_key} ---
 
@@ -112,95 +111,6 @@ func TestVolcenginePoolPerAccountAK(t *testing.T) {
 		if !want[vid] {
 			t.Fatalf("unexpected virtual %q (want one of volcengine#AK1/AK2)", vid)
 		}
-	}
-}
-
-// --- resolveVolcengineAKSK: cred wins, file fallback, neither → error ---
-
-// TestResolveVolcengineAKSK_CredWins pins the load-bearing isolation rule: when
-// a cred with AK/SK is passed, it is used EXCLUSIVELY — the on-disk file (which
-// may belong to a DIFFERENT account) is never consulted. Deleting the cred-read
-// branch or swapping it to read the file first makes this test red.
-func TestResolveVolcengineAKSK_CredWins(t *testing.T) {
-	dir := t.TempDir()
-	setPoolHome(t, dir)
-	// On-disk file holds a DIFFERENT account's AK/SK — must be ignored.
-	os.WriteFile(filepath.Join(dir, ".model-proxy", "volcengine_apikey.json"),
-		[]byte(`{"api_key":"file-key","access_key":"FILE-AK","secret_key":"FILE-SK"}`), 0o600)
-	cred := &accountCred{APIKey: "k1", AccessKey: "CRED-AK", SecretKey: "CRED-SK"}
-	ak, sk, err := resolveVolcengineAKSK("volcengine", cred)
-	if err != nil {
-		t.Fatalf("cred non-empty: want no error, got %v", err)
-	}
-	if ak != "CRED-AK" || sk != "CRED-SK" {
-		t.Errorf("resolveVolcengineAKSK cred = (%q,%q), want (CRED-AK,CRED-SK) — cred must win over file", ak, sk)
-	}
-}
-
-// TestResolveVolcengineAKSK_FileFallback: cred is nil → read the legacy file.
-// (single-account / pre-pool path; backward compatible).
-func TestResolveVolcengineAKSK_FileFallback(t *testing.T) {
-	dir := t.TempDir()
-	setPoolHome(t, dir)
-	os.WriteFile(filepath.Join(dir, ".model-proxy", "volcengine_apikey.json"),
-		[]byte(`{"api_key":"ark","access_key":"FILE-AK","secret_key":"FILE-SK"}`), 0o600)
-	ak, sk, err := resolveVolcengineAKSK("volcengine", nil)
-	if err != nil {
-		t.Fatalf("nil cred with file: want no error, got %v", err)
-	}
-	if ak != "FILE-AK" || sk != "FILE-SK" {
-		t.Errorf("resolveVolcengineAKSK file = (%q,%q), want (FILE-AK,FILE-SK)", ak, sk)
-	}
-}
-
-// TestResolveVolcengineAKSK_CredIncomplete_NoFileFallback: a non-nil cred with
-// empty AK/SK must NOT fall back to the file (that would break per-account
-// isolation by reading a sibling account's key). It returns an error instead.
-func TestResolveVolcengineAKSK_CredIncomplete_NoFileFallback(t *testing.T) {
-	dir := t.TempDir()
-	setPoolHome(t, dir)
-	os.WriteFile(filepath.Join(dir, ".model-proxy", "volcengine_apikey.json"),
-		[]byte(`{"api_key":"file-key","access_key":"FILE-AK","secret_key":"FILE-SK"}`), 0o600)
-	cred := &accountCred{APIKey: "k1"} // AK/SK empty
-	_, _, err := resolveVolcengineAKSK("volcengine", cred)
-	if err == nil {
-		t.Fatal("incomplete cred should error, not fall back to file")
-	}
-}
-
-// TestResolveVolcengineAKSK_NeitherMissing: nil cred + no file → error.
-func TestResolveVolcengineAKSK_NeitherMissing(t *testing.T) {
-	setPoolHome(t, t.TempDir())
-	_, _, err := resolveVolcengineAKSK("volcengine", nil)
-	if err == nil {
-		t.Fatal("nil cred + no file: want error, got nil")
-	}
-}
-
-// TestFetchVolcengineQuota_BoundCredUsesCredAK: when a cred with AK/SK is
-// passed, fetchVolcengineQuota uses it (not the file). We assert the cred path
-// is taken by writing a file with EMPTY AK/SK — if the function consulted the
-// file it would return "AK/SK not configured"; with the cred it instead
-// attempts a real GetAFPUsage (which fails on a dead proxy → non-empty Err that
-// is NOT "AK/SK not configured"). This proves cred-first resolution.
-func TestFetchVolcengineQuota_BoundCredUsesCredAK(t *testing.T) {
-	dir := t.TempDir()
-	setPoolHome(t, dir)
-	t.Setenv("HTTPS_PROXY", deadProxyURL(t))
-	t.Setenv("HTTP_PROXY", deadProxyURL(t))
-	// File has NO AK/SK — would yield "AK/SK not configured" if consulted.
-	os.WriteFile(filepath.Join(dir, ".model-proxy", "volcengine_apikey.json"),
-		[]byte(`{"api_key":"ark"}`), 0o600)
-	cred := &accountCred{APIKey: "k1", AccessKey: "CRED-AK", SecretKey: "CRED-SK"}
-	s, err := fetchVolcengineQuota("volcengine", cred)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Billing != provider.BillingUnknown {
-		t.Fatalf("Billing = %v, want BillingUnknown (call failed on dead proxy)", s.Billing)
-	}
-	if s.Err == "" || s.Err == "AK/SK not configured" {
-		t.Fatalf("Err = %q — cred path NOT taken (would be 'AK/SK not configured' only if file were consulted); want a GetAFPUsage transport error", s.Err)
 	}
 }
 

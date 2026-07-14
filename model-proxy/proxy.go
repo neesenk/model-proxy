@@ -68,10 +68,9 @@ type routeSticky struct {
 }
 
 // buildProviders creates provider.Provider instances from config. Each provider
-// owns its auth/usage/quota/logout (Phase 1-5); buildOne only wires the
-// remaining callbacks (FetchModelsFn: volcengine's V4-signed
-// ListArkAgentPlanModel; aqp's AqpMonthlyUsage/AqpAccount) + the per-provider
-// config fields.
+// owns its auth/usage/quota/logout (Phase 1-5 + aqp-fetch migration); buildOne
+// only wires the remaining callback (FetchModelsFn: volcengine's V4-signed
+// ListArkAgentPlanModel) + the per-provider config fields.
 //
 // A provider whose credential pool (loadPool) has ≥2 accounts is UNROLLED into
 // one virtual provider per account, keyed "name#<accountID>"; the parent name
@@ -184,21 +183,10 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 		Models:        prov.Models, // for the usage-display fallback (listConfigModels)
 		OAuthAuthFile: authFilePath(name, "oauth_auth"),
 	}
-	// Wire callbacks by provider type.
+	// Wire callbacks by provider type. aqp needs none: its Quota/Usage fetch
+	// monthly_usage directly (AqpProvider.fetchMonthlyUsage reads the SSO-cookie
+	// store at OAuthAuthFile + POSTs), like the other providers.
 	switch prov.Provider {
-	case "aqp":
-		// Quota + Usage share the SSO-cookie-authed AqpClient (MonthlyUsage) and
-		// the account store (email/project_id/path). The provider owns display.
-		aqpPath := authFilePath("aqp", "oauth_auth")
-		aqpClient := newAqpClient(aqpPath)
-		pcfg.AqpMonthlyUsage = aqpClient.MonthlyUsage
-		pcfg.AqpAccount = func() (email, projectID, storePath string, err error) {
-			a, err := loadAccount(aqpPath)
-			if err != nil || a == nil {
-				return "", "", aqpPath, err
-			}
-			return a.Email, a.ProjectID, aqpPath, nil
-		}
 	case "codex":
 		pcfg.ClientVersion = resolveCodexClientVersion(prov.ClientVersion, codexCLIVersion, codexCacheVersion)
 	case "volcengine":

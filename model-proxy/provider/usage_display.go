@@ -131,30 +131,24 @@ func printUsageFields(m map[string]any, indent int) {
 
 func (p *AqpProvider) Usage() error {
 	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue("aqp")))
-	if p.cfg.AqpAccount == nil {
-		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login aqp"))
-		return nil
-	}
-	email, projectID, storePath, err := p.cfg.AqpAccount()
+	a, err := LoadAqpAccount(p.cfg.OAuthAuthFile)
 	if err != nil {
 		fmt.Println(Red("Error: " + err.Error()))
 		return nil
 	}
-	if email == "" {
+	if a == nil || a.Email == "" {
 		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login aqp"))
 		return nil
 	}
-	fmt.Printf("%s %s\n", Dim("Account:    "), Bold(Cyan(email)))
-	fmt.Printf("%s %s\n", Dim("Project ID: "), Gray(projectID))
-	if p.cfg.AqpMonthlyUsage != nil {
-		mu, err := p.cfg.AqpMonthlyUsage()
-		if err != nil {
-			fmt.Printf("%s %s\n", Dim("Usage:      "), Red("(unavailable: "+err.Error()+")"))
-		} else {
-			fmt.Printf("%s %s\n", Dim("Usage:      "), aqpUsageLine(mu))
-		}
+	fmt.Printf("%s %s\n", Dim("Account:    "), Bold(Cyan(a.Email)))
+	fmt.Printf("%s %s\n", Dim("Project ID: "), Gray(a.ProjectID))
+	mu, err := p.fetchMonthlyUsage()
+	if err != nil {
+		fmt.Printf("%s %s\n", Dim("Usage:      "), Red("(unavailable: "+err.Error()+")"))
+	} else {
+		fmt.Printf("%s %s\n", Dim("Usage:      "), aqpUsageLine(mu))
 	}
-	fmt.Printf("%s %s\n", Dim("Store:      "), Gray(storePath))
+	fmt.Printf("%s %s\n", Dim("Store:      "), Gray(p.cfg.OAuthAuthFile))
 	return nil
 }
 

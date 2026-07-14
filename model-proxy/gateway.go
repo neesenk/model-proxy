@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,72 +23,18 @@ import (
 // ---- Endpoints / constants ----
 
 const (
-	aqpBase             = "https://compass.llm.shopee.io"
 	aqpAuthLoginPath    = "/compass-api/v1/auth/login" // bootstrap: 401 + SSO_A + result URL
 	aqpAuthInfoPath     = "/compass-api/v1/auth/info"  // session poll: 200 + SSO_C when authed
 	aqpAPIKeyGetGenPath = "/api/v1/cqp/ccswitch/api_key/get_or_generate"
-	aqpMonthlyUsagePath = "/api/v1/cqp/ccswitch/monthly_usage"
 
-	ssoCookieName       = "SSO_C" // actual cookie name (verified against the real store)
-	loginCompletePath   = "/company-gateway/login-complete"
-	googleOAuthAuthFile = "google_oauth_auth.json"
+	loginCompletePath = "/company-gateway/login-complete"
 )
 
 // ---- Account persistence (google_oauth_auth.json) ----
-
-// AccountData mirrors google_oauth_auth.json. 6 fields; the managed AQP key is NOT persisted
-// (fetched on demand, cached in memory only).
-type AccountData struct {
-	AccountID        string `json:"account_id"`
-	CreatedAt        int64  `json:"created_at"`
-	Email            string `json:"email"`
-	LastRefreshAt    int64  `json:"last_refresh_at"`
-	ProjectID        string `json:"project_id"`
-	SSOSessionCookie string `json:"sso_session_cookie"` // full "SSO_C=<value>" or raw value
-}
-
-// loadAccount reads account data; returns nil, nil if the file is absent.
-func loadAccount(path string) (*AccountData, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var a AccountData
-	if err := json.Unmarshal(b, &a); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", googleOAuthAuthFile, err)
-	}
-	return &a, nil
-}
-
-// saveAccount writes account data (0600, parent dir 0700), filling in timestamps.
-func saveAccount(path string, a *AccountData) error {
-	if a.CreatedAt == 0 {
-		a.CreatedAt = time.Now().Unix()
-	}
-	if a.LastRefreshAt == 0 {
-		a.LastRefreshAt = time.Now().Unix()
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(a, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, b, 0o600)
-}
-
-// clearAccount removes the account file (logout).
-func clearAccount(path string) error {
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
+// AccountData / loadAccount / saveAccount / clearAccount / cookieHeader /
+// ssoCookieName / aqpBase / aqpMonthlyUsagePath moved to the provider package
+// (provider/aqp_store.go) in Stage 1 of the aqp-fetch migration. The provider
+// owns the aqp auth store end-to-end; this file uses provider.* for store access.
 
 // ---- AQP client (with cookie jar) ----
 
@@ -114,30 +58,20 @@ func newAqpClient(storePath string) *AqpClient {
 		HTTP:      &http.Client{Timeout: 30 * time.Second, Jar: jar},
 		Jar:       jar,
 		storePath: storePath,
-		base:      aqpBase,
+		base:      provider.AqpBase,
 	}
 }
 
 // newAqpClientWithBase builds an AQP client pointing at an arbitrary base URL.
 // Used by the web login flow's test seam (httptest mock); production callers use
-// newAqpClient (base = aqpBase, identical to pre-seam behavior).
+// newAqpClient (base = provider.AqpBase, identical to pre-seam behavior).
 func newAqpClientWithBase(storePath, base string) *AqpClient {
 	c := newAqpClient(storePath)
 	c.base = base
 	return c
 }
 
-// cookieHeader builds a Cookie header value from the stored sso_session_cookie.
-// The stored value may be the full "SSO_C=<value>" pair or just the raw value.
-func cookieHeader(stored string) string {
-	if stored == "" {
-		return ""
-	}
-	if strings.Contains(stored, "=") {
-		return stored
-	}
-	return fmt.Sprintf("%s=%s", ssoCookieName, stored)
-}
+// cookieHeader moved to the provider package (provider.CookieHeader).
 
 // AuthInfoResponse mirrors compass-api/v1/auth/info.
 type AuthInfoResponse struct {
@@ -267,7 +201,7 @@ func (c *AqpClient) SessionCookie() string {
 	}
 	u, _ := url.Parse(c.base)
 	for _, ck := range c.Jar.Cookies(u) {
-		if ck.Name == ssoCookieName {
+		if ck.Name == provider.SsoCookieName {
 			return fmt.Sprintf("%s=%s", ck.Name, ck.Value)
 		}
 	}
@@ -311,10 +245,10 @@ func (c *AqpClient) fetchAPIKey() (*APIKeyData, error) {
 
 // fetchAPIKeyAt is the URL-parametrized core, used by tests with a mock server.
 func (c *AqpClient) fetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
-	a, _ := loadAccount(c.storePath) // absent file is non-fatal: post-login uses the jar
+	a, _ := provider.LoadAqpAccount(c.storePath) // absent file is non-fatal: post-login uses the jar
 	cookie := c.SessionCookie()
 	if a == nil {
-		a = &AccountData{}
+		a = &provider.AqpAccountData{}
 	}
 	if cookie == "" {
 		cookie = a.SSOSessionCookie
@@ -326,7 +260,7 @@ func (c *AqpClient) fetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
 	// input; send an empty JSON object (form-encoded is rejected).
 	payload, _ := json.Marshal(map[string]string{})
 	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
-	req.Header.Set("Cookie", cookieHeader(cookie))
+	req.Header.Set("Cookie", provider.CookieHeader(cookie))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -372,58 +306,6 @@ func extractLoginURL(body string) string {
 		}
 	}
 	return ""
-}
-
-// MonthlyProjectUsage lives in the provider package (provider/aqp.go); the aqp
-// provider owns its quota parser + DTO. AqpClient.MonthlyUsage returns it.
-
-// MonthlyUsage fetches monthly_usage with the persisted SSO cookie (cookie-authed,
-// not the managed key). NOTE: the endpoint is POST and requires project_id input
-// (taken from the store's AccountData.ProjectID).
-func (c *AqpClient) MonthlyUsage() (*provider.MonthlyProjectUsage, error) {
-	return c.monthlyUsageAt(c.base + aqpMonthlyUsagePath)
-}
-
-// monthlyUsageAt is the URL-parametrized core, used by tests with a mock server
-// (mirrors fetchAPIKeyAt). It POSTs project_id (cookie-authed) and parses the
-// {retcode, data:{...MonthlyProjectUsage}} envelope.
-func (c *AqpClient) monthlyUsageAt(endpoint string) (*provider.MonthlyProjectUsage, error) {
-	a, err := loadAccount(c.storePath)
-	if err != nil || a == nil || a.SSOSessionCookie == "" {
-		return nil, fmt.Errorf("not logged in")
-	}
-	if a.ProjectID == "" {
-		return nil, fmt.Errorf("no project_id in store; run `model-proxy login aqp` (or --import) to populate it")
-	}
-	payload, _ := json.Marshal(map[string]string{"project_id": a.ProjectID})
-	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
-	req.Header.Set("Cookie", cookieHeader(a.SSOSessionCookie))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("monthly usage request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var wrap struct {
-		Retcode int             `json:"retcode"`
-		Message string          `json:"message"`
-		Data    json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(body, &wrap); err != nil {
-		return nil, fmt.Errorf("monthly usage response parse failed: %w", err)
-	}
-	if wrap.Retcode != 0 {
-		return nil, fmt.Errorf("monthly usage retcode=%d message=%s", wrap.Retcode, wrap.Message)
-	}
-	if len(wrap.Data) == 0 {
-		return nil, fmt.Errorf("monthly usage response missing data")
-	}
-	var mu provider.MonthlyProjectUsage
-	if err := json.Unmarshal(wrap.Data, &mu); err != nil {
-		return nil, fmt.Errorf("monthly usage data parse failed: %w", err)
-	}
-	return &mu, nil
 }
 
 // ---- helpers ----
