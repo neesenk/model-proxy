@@ -37,14 +37,15 @@ config.yaml:
     gpt-5.5:
       - {provider: codex, model: gpt-5.5, priority: 1}
 
-  scheduling:                 # 调度/熔断（durations 用字符串）
-    circuit_threshold: 3      # 连续失败 → 熔断
-    circuit_cooldown: 10m     # 开路时长，后半开 1 个探针
-    rate_limit_backoff: 60s   # 429 无 Retry-After 时的默认退避
-    upstream_timeout: 30s     # 每个上游请求超时
-    sticky_dwell: 10m         # 切到某 provider 后最少用多久（≈2× 缓存 TTL）
-    quota_poll_interval: 5m   # 后台 Quota() 轮询周期
-    quota_switch_margin: 15   # 切换 provider 的 quota 边际（百分点）
+  # scheduling:                 # 调度/熔断（durations 用字符串）。整块可选：
+  #   circuit_threshold: 3      # (default 3)  连续失败 → 熔断
+  #   circuit_cooldown: 10m     # (default 10m) 开路时长，后半开 1 个探针
+  #   rate_limit_backoff: 60s   # (default 60s) 429 无 Retry-After 时的默认退避
+  #   upstream_timeout: 30s     # (default 30s) 每个上游请求超时
+  #   sticky_dwell: 10m         # (default 10m) 切到某 provider 后最少用多久（≈2× 缓存 TTL）
+  #   quota_poll_interval: 5m   # (default 5m)  后台 Quota() 轮询周期
+  #   quota_switch_margin: 15   # (default 15)  切换 provider 的 quota 边限（百分点）
+  # （未配时用 config.go accessor 的代码默认；config init/config.yaml 里整块默认注释掉，需覆盖时取消注释）
 ```
 
 熔断/限频/粘性状态在 `Proxy.health`（`healthMu`，与 reload 的 `mu` 分开，避免与 `handler` 的 RLock 死锁）。`schedule` 跳过开路/限频 provider；`tryTarget` 在超时/5xx/conn-error 计熔断、429 记限频（Retry-After 或默认退避）、成功清零；半开用 `halfOpenInFlight` 单飞。粘性：每路由记一个 current provider + since，驻留窗口内优先它（保 cache、不频繁回切）。
@@ -300,5 +301,5 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 | opencode | `http://<proxy>/v1` | `@ai-sdk/anthropic` 拼 `baseURL+/messages`，baseURL 要带 `/v1` |
 | pi | `http://<proxy>` | pi 的 `anthropic-messages` 自己拼 `/v1/messages`，baseURL 不带 `/v1`（否则 `/v1/v1/messages` → 502） |
 
-provider_id 统一为一个配置项（默认 `model-proxy`），opencode/pi/codex 共用。备份文件存 `<configDir>/.model-proxy/<client>.bak`。
+provider_id 统一为一个配置项（默认 `model-proxy`），opencode/pi/codex 共用。备份文件存 `<configDir>/.model-proxy/<client>.bak`。`takeover:` 块整个可省略--四个 client 路径（claude/opencode/codex/pi）+ provider_id 在 `LoadConfigFromBytes` 里都有代码默认值（`~/.claude/settings.json` 等，`~` 经 `expandPath` 展开），与 `proxy_url` 的"unset 走默认"同一模式；只有覆盖某项才需写进 config。`takeover all`/`restore all` 遇到**不存在**的 client 配置文件（agent 没装）会 `~ <client> skipped (config not present: ...)` 跳过并继续其余，而非中止整批；单 client（`takeover <client>`）缺文件仍是硬错误。
 

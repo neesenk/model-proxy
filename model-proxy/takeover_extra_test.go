@@ -300,3 +300,159 @@ func TestColorHelpers_NoColorPassthrough(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// --- takeover defaults: omitting the block fills standard paths + provider_id ---
+
+func TestTakeoverDefaults_OmitBlock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home) // expandPath expands ~ against $HOME
+	cfg, err := LoadConfigFromBytes("test", []byte(`
+listen: 127.0.0.1:15721
+providers:
+  aqp:
+    provider_id: aqp
+    openai_base_url: https://example.invalid/compass-api/v1
+    models:
+      - glm-5.2
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// All four paths default to each client's standard location, ~ expanded.
+	if cfg.Takeover.Claude != filepath.Join(home, ".claude/settings.json") {
+		t.Errorf("claude default=%q want %s", cfg.Takeover.Claude, filepath.Join(home, ".claude/settings.json"))
+	}
+	if cfg.Takeover.Opencode != filepath.Join(home, ".config/opencode/opencode.json") {
+		t.Errorf("opencode default=%q want under $HOME/.config/opencode", cfg.Takeover.Opencode)
+	}
+	if cfg.Takeover.Codex != filepath.Join(home, ".codex/config.toml") {
+		t.Errorf("codex default=%q want under $HOME/.codex", cfg.Takeover.Codex)
+	}
+	if cfg.Takeover.Pi != filepath.Join(home, ".pi/agent/models.json") {
+		t.Errorf("pi default=%q want under $HOME/.pi/agent", cfg.Takeover.Pi)
+	}
+	if cfg.Takeover.ProviderID != "model-proxy" {
+		t.Errorf("provider_id default=%q want model-proxy", cfg.Takeover.ProviderID)
+	}
+	// proxy_url still defaults from listen (existing behavior, unchanged).
+	if cfg.Takeover.ProxyURL != "http://127.0.0.1:15721" {
+		t.Errorf("proxy_url default=%q want http://127.0.0.1:15721", cfg.Takeover.ProxyURL)
+	}
+}
+
+// --- takeover defaults: an explicit value wins over the default ---
+
+func TestTakeoverDefaults_ExplicitOverride(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "my-claude.json")
+	cfg, err := LoadConfigFromBytes("test", []byte(`
+listen: 127.0.0.1:15721
+takeover:
+  claude: `+custom+`
+  provider_id: custom-id
+providers:
+  aqp:
+    provider_id: aqp
+    openai_base_url: https://example.invalid/compass-api/v1
+    models:
+      - glm-5.2
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Takeover.Claude != custom {
+		t.Errorf("claude=%q want explicit %q", cfg.Takeover.Claude, custom)
+	}
+	if cfg.Takeover.ProviderID != "custom-id" {
+		t.Errorf("provider_id=%q want custom-id", cfg.Takeover.ProviderID)
+	}
+	// Non-overridden fields still get defaults (here: opencode path).
+	if cfg.Takeover.Opencode == "" {
+		t.Errorf("opencode should default when only claude is overridden")
+	}
+}
+
+// --- runTakeover all: skips a client whose config file is absent ---
+
+func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
+	dir := t.TempDir()
+	bakDir := filepath.Join(dir, ".mp")
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
+		},
+		Routes: map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
+		// Only claude exists; opencode/codex/pi point at non-existent paths.
+		Takeover: Takeover{
+			ProxyURL: "http://127.0.0.1:15721",
+			Claude:   filepath.Join(dir, "claude.json"),
+			Opencode: filepath.Join(dir, "opencode.json"),
+			Codex:    filepath.Join(dir, "codex.toml"),
+			Pi:       filepath.Join(dir, "pi.json"),
+		},
+	}
+	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644)
+
+	if err := runTakeover(cfg, "all", bakDir); err != nil {
+		t.Fatalf("runTakeover all with missing files: want nil, got %v", err)
+	}
+	// claude was rewritten (backup + rewrite succeeded).
+	b, _ := os.ReadFile(cfg.Takeover.Claude)
+	if !contains(string(b), "ANTHROPIC_BASE_URL") {
+		t.Errorf("claude not rewritten: %s", b)
+	}
+	// Missing clients' files were NOT created (skipped, not rewritten to defaults).
+	for _, p := range []string{cfg.Takeover.Opencode, cfg.Takeover.Codex, cfg.Takeover.Pi} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("missing client file %s should not have been created", p)
+		}
+	}
+}
+
+// --- runTakeover single named client: missing file is a hard error (not skipped) ---
+
+func TestRunTakeover_SingleMissingFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
+		},
+		Routes: map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
+		Takeover: Takeover{
+			ProxyURL: "http://127.0.0.1:15721",
+			Pi:       filepath.Join(dir, "nonexistent.json"),
+		},
+	}
+	if err := runTakeover(cfg, "pi", dir); err == nil {
+		t.Error("runTakeover pi with missing file: want error, got nil (single client must not be skipped)")
+	}
+}
+
+// --- runRestore all: skips a client with no backup (symmetric with takeover) ---
+
+func TestRunRestore_AllSkipsMissingBackup(t *testing.T) {
+	dir := t.TempDir()
+	bakDir := filepath.Join(dir, ".mp")
+	os.MkdirAll(bakDir, 0o700)
+	// Only a claude backup exists.
+	os.WriteFile(filepath.Join(bakDir, "claude.bak"), []byte(`{"env":{"OLD":"1"}}`), 0o600)
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
+		},
+		Routes: map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
+		Takeover: Takeover{
+			ProxyURL: "http://127.0.0.1:15721",
+			Claude:   filepath.Join(dir, "claude.json"),
+			Opencode: filepath.Join(dir, "opencode.json"),
+			Codex:    filepath.Join(dir, "codex.toml"),
+			Pi:       filepath.Join(dir, "pi.json"),
+		},
+	}
+	if err := runRestore(cfg, "all", bakDir); err != nil {
+		t.Fatalf("runRestore all with missing backups: want nil, got %v", err)
+	}
+	b, _ := os.ReadFile(cfg.Takeover.Claude)
+	if !contains(string(b), "OLD") {
+		t.Errorf("claude not restored from backup: %s", b)
+	}
+}

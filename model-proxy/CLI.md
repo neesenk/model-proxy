@@ -122,12 +122,17 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, all}
     ✓ <client> done
   ```
   `restore` 对应：`restore <client>: <FILE> (from <BAKDIR>/)` -> `  ✓ <client> restored`。
+- **stderr 跳过**（仅 `all`：某客户端配置文件不存在 -> agent 未安装时，跳过该客户端继续其余）：
+  ```
+    ~ <client> skipped (config not present: <FILE>)
+  ```
+  `restore all` 对应：`  ~ <client> skipped (no backup in <BAKDIR>/)`。单客户端（`takeover <client>`）缺文件仍是硬错误。
 - **stderr 告警**（仅 opencode/pi，某个模型无 models.dev 元数据时，每个模型一行）：
   ```
   warning: model <MODEL> at <PROVIDER>: no models.dev metadata - wrote defaults (ctx=200000 out=16384 text-only)
   ```
 
-失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 备份失败 / 改写失败）。`client` 不在集合内由 `listClients` 决定（`all` 展开全部；未知名通常导致空集，静默返回 0）。
+失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 备份失败 / 改写失败）。`client` 不在集合内由 `listClients` 决定（`all` 展开全部；未知名通常导致空集，静默返回 0）。`takeover:` 块整个可省略--四个 client 路径 + provider_id 有代码默认值，只有覆盖某项才需写。
 
 ---
 
@@ -359,6 +364,8 @@ config init|print|check
 ### `config init`
 
 写 `config.yaml` 到 **CWD**（`os.WriteFile("config.yaml", defaultConfigYAML, 0o644)`）。stdout：`wrote config.yaml`。失败 -> stderr + exit 1。
+
+模板里的 `scheduling:` 整块默认是注释掉的（每行带 `(default N)`）：所有字段都有代码默认（`config.go` 的 accessor），不写即用默认，需覆盖时取消注释对应行。`config check` 的 `scheduling:` 摘要行始终打印**生效值**（已覆盖则显覆盖值，未配则显代码默认）。
 
 ### `config print`
 

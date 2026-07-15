@@ -384,6 +384,25 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.RequestLog = raw.RequestLog
 	cfg.LogFile = expandPath(cfg.LogFile)
 	t := &cfg.Takeover
+	// Takeover paths default to each client's standard config location (and
+	// provider_id to "model-proxy"), so config.yaml can omit the entire
+	// `takeover:` block unless overriding one. Set before expandPath so the
+	// `~` in the defaults is expanded (same as explicitly-configured paths).
+	if t.ProviderID == "" {
+		t.ProviderID = "model-proxy"
+	}
+	if t.Claude == "" {
+		t.Claude = "~/.claude/settings.json"
+	}
+	if t.Opencode == "" {
+		t.Opencode = "~/.config/opencode/opencode.json"
+	}
+	if t.Codex == "" {
+		t.Codex = "~/.codex/config.toml"
+	}
+	if t.Pi == "" {
+		t.Pi = "~/.pi/agent/models.json"
+	}
 	t.Claude = expandPath(t.Claude)
 	t.Opencode = expandPath(t.Opencode)
 	t.Codex = expandPath(t.Codex)

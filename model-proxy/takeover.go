@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -11,11 +12,20 @@ import (
 	"time"
 )
 
+// errTakeoverNoFile signals that a takeover client's config file is absent.
+// runTakeover treats this as a skip (warn + continue) for `all`/`""`, but as a
+// hard error for a single named client.
+var errTakeoverNoFile = errors.New("takeover: client config file not present")
+
 // backup copies file verbatim into bakDir/<name>.bak (a clean copy, easy to
 // restore), and writes meta to bakDir/<name>.bak.meta. An existing backup is
-// not overwritten → idempotent.
+// not overwritten → idempotent. A missing source file returns errTakeoverNoFile
+// so runTakeover can skip the client (for `all`) rather than abort the batch.
 func backup(file, bakDir, name string) error {
 	if _, err := os.Stat(file); err != nil {
+		if os.IsNotExist(err) {
+			return errTakeoverNoFile
+		}
 		return fmt.Errorf("config file %s: %w", file, err)
 	}
 	if err := os.MkdirAll(bakDir, 0o700); err != nil {
@@ -41,11 +51,16 @@ func backup(file, bakDir, name string) error {
 	return nil
 }
 
-// restore copies bakDir/<name>.bak verbatim back to file.
+// restore copies bakDir/<name>.bak verbatim back to file. A missing backup
+// returns errTakeoverNoFile so runRestore can skip it (for `all`) symmetrically
+// with runTakeover's skip of a client whose config was never present.
 func restore(file, bakDir, name string) error {
 	bak := filepath.Join(bakDir, name+".bak")
 	data, err := os.ReadFile(bak)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return errTakeoverNoFile
+		}
 		return fmt.Errorf("no backup for %s in %s: %w", name, bakDir, err)
 	}
 	return os.WriteFile(file, data, 0o644)
@@ -79,9 +94,19 @@ func runTakeover(cfg *Config, which, bakDir string) error {
 	}
 	emitTakeoverWarnings(clients, cfg, meta, sources, implicit)
 
+	// `all`/`""` expands to every client; a client whose config file isn't
+	// present (e.g. that agent isn't installed) is skipped with a warning
+	// rather than aborting the whole batch. A single named client still errors
+	// - the user asked for that one specifically.
+	batch := which == "" || which == "all"
+
 	for _, c := range clients {
-		log.Printf("takeover %s: %s (backup → %s/)", c.name, c.file, bakDir)
+		log.Printf("takeover %s: %s (backup -> %s/)", c.name, c.file, bakDir)
 		if err := backup(c.file, bakDir, c.name); err != nil {
+			if batch && errors.Is(err, errTakeoverNoFile) {
+				log.Printf("  ~ %s skipped (config not present: %s)", c.name, c.file)
+				continue
+			}
 			return fmt.Errorf("%s backup: %w", c.name, err)
 		}
 		if err := c.rewrite(cfg, meta, implicit); err != nil {
@@ -109,9 +134,14 @@ func emitTakeoverWarnings(clients []clientSpec, cfg *Config, meta map[string]map
 
 func runRestore(cfg *Config, which, bakDir string) error {
 	clients := listClients(cfg, which)
+	batch := which == "" || which == "all"
 	for _, c := range clients {
 		log.Printf("restore %s: %s (from %s/)", c.name, c.file, bakDir)
 		if err := restore(c.file, bakDir, c.name); err != nil {
+			if batch && errors.Is(err, errTakeoverNoFile) {
+				log.Printf("  ~ %s skipped (no backup in %s/)", c.name, bakDir)
+				continue
+			}
 			return fmt.Errorf("%s restore: %w", c.name, err)
 		}
 		log.Printf("  ✓ %s restored", c.name)

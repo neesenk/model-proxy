@@ -132,16 +132,16 @@ routes:
   gpt-5.4:
     - {provider: codex, model: gpt-5.4, priority: 1}
 
-# Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
-# Durations are strings (e.g. "10m", "60s"). Unset fields use the defaults shown.
-scheduling:
-  circuit_threshold: 3 # consecutive failover-eligible failures → open circuit
-  circuit_cooldown: 10m # circuit open duration, then half-open (1 probe)
-  rate_limit_backoff: 60s # 429 with no Retry-After: skip this long, then probe
-  upstream_timeout: 30s # per-upstream-request timeout
-  sticky_dwell: 10m # min time on the chosen provider before re-evaluating
-  quota_poll_interval: 5m # background quota poll cadence
-  quota_switch_margin: 15 # switch provider if another's effective remaining beats current by ≥ this many pct points
+# Scheduling: every field has a code default (config.go accessors), so this
+# block can be omitted entirely. Uncomment a line to override.
+# scheduling:
+#   circuit_threshold: 3 # (default 3) consecutive failover-eligible failures -> open circuit
+#   circuit_cooldown: 10m # (default 10m) circuit open duration, then half-open (1 probe)
+#   rate_limit_backoff: 60s # (default 60s) 429 with no Retry-After: skip this long, then probe
+#   upstream_timeout: 30s # (default 30s) per-upstream-request timeout
+#   sticky_dwell: 10m # (default 10m) min time on the chosen provider before re-evaluating
+#   quota_poll_interval: 5m # (default 5m) background quota poll cadence
+#   quota_switch_margin: 15 # (default 15) switch provider if another's effective remaining beats current by >= this many pct points
 
 takeover:
   # provider_id is the single identifier used by takeover for every agent that

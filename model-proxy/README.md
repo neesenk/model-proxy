@@ -70,12 +70,12 @@ routes:
   gpt-5.5:
     - {provider: codex, model: gpt-5.5, priority: 1}
 
-takeover:
-  claude: ~/.claude/settings.json
-  opencode: ~/.config/opencode/opencode.json
-  codex: ~/.codex/config.toml
-  pi: ~/.pi/agent/models.json
-  provider_id: model-proxy
+# takeover:              # 接管客户端配置（全部字段有默认值，可省略整块）
+#   claude: ~/.claude/settings.json
+#   opencode: ~/.config/opencode/opencode.json
+#   codex: ~/.codex/config.toml
+#   pi: ~/.pi/agent/models.json
+#   provider_id: model-proxy
 
 # web:                      # 管理后台（默认开启，仅 loopback，无鉴权）
 #   enabled: true

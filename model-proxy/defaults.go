@@ -110,27 +110,31 @@ routes:
     - {provider: codex, model: gpt-5.5, priority: 1}
 
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
-# Durations are strings (e.g. "10m", "60s"). Unset fields use the defaults shown.
-scheduling:
-  circuit_threshold: 3        # consecutive failover-eligible failures → open circuit
-  circuit_cooldown: 10m       # circuit open duration, then half-open (1 probe)
-  rate_limit_backoff: 60s     # 429 with no Retry-After: skip this long, then probe
-  upstream_timeout: 30s       # per-upstream-request timeout
-  sticky_dwell: 10m           # min time on the chosen provider before re-evaluating
-  quota_poll_interval: 5m     # background quota poll cadence
-  quota_switch_margin: 15     # switch provider if another's effective remaining beats current by ≥ this many pct points
+# Every field has a code default (the accessors in config.go), so this entire
+# block can be omitted - the values below are listed commented-out for reference.
+# Durations are strings (e.g. "10m", "60s"). Uncomment a line to override.
+# scheduling:
+#   circuit_threshold: 3        # (default 3)  consecutive failover-eligible failures -> open circuit
+#   circuit_cooldown: 10m       # (default 10m) circuit open duration, then half-open (1 probe)
+#   rate_limit_backoff: 60s     # (default 60s) 429 with no Retry-After: skip this long, then probe
+#   upstream_timeout: 30s       # (default 30s) per-upstream-request timeout
+#   sticky_dwell: 10m           # (default 10m) min time on the chosen provider before re-evaluating
+#   quota_poll_interval: 5m     # (default 5m)  background quota poll cadence
+#   quota_switch_margin: 15     # (default 15)  switch provider if another's effective remaining beats current by >= this many pct points
 
 takeover:
-  # proxy_url defaults to http://<listen> when unset — leave it commented so
-  # changing the listen port above is enough. Uncomment to override.
+  # All takeover fields default to standard client config locations when unset
+  # (claude/opencode/codex/pi paths + provider_id "model-proxy"), so you can
+  # omit this entire block unless overriding one. proxy_url defaults to
+  # http://<listen>. Uncomment any line to override.
   # proxy_url: http://127.0.0.1:15721
-  claude: ~/.claude/settings.json
-  opencode: ~/.config/opencode/opencode.json
-  codex: ~/.codex/config.toml
-  pi: ~/.pi/agent/models.json
+  # claude: ~/.claude/settings.json
+  # opencode: ~/.config/opencode/opencode.json
+  # codex: ~/.codex/config.toml
+  # pi: ~/.pi/agent/models.json
   # provider_id is the single identifier used by takeover for every agent that
   # takes one (opencode, pi, codex, future agents). claude doesn't use it.
-  provider_id: model-proxy
+  # provider_id: model-proxy
 
 # Per-request access log: writes the full request + response body of each
 # committed upstream call as one JSONL line to a rotating file under dir, for
