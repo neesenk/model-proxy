@@ -175,7 +175,6 @@ type Config struct {
 	// Auth-specific fields (only relevant to certain providers).
 	OAuthAuthFile string // aqp/codex: the <name>_oauth_auth.json store path
 	AqpMintURL    string // aqp: the api_key/get_or_generate endpoint
-	StaticKey     string // static: a config static key (no login)
 
 	// Volcengine signing keys for GetAFPUsage (the Agent Plan quota endpoint,
 	// V4-signed, needs AK/SK not the Bearer chat key). Bound per virtual from

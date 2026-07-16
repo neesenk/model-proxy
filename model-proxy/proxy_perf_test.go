@@ -18,8 +18,8 @@ import (
 )
 
 // Performance tests: isolate proxy forwarding overhead with a mock upstream, no
-// dependency on the real AQP gateway. auth uses static_key (AqpKeyProvider
-// static path makes no network call), testing proxy logic purely.
+// dependency on the real AQP gateway. auth uses a stubbed AqpKeyProvider (empty
+// mint URL -> no network call), testing proxy logic purely.
 
 // silenceLog mutes forward's per-request log so the bench isn't slowed/spammed by log IO.
 func silenceLog() { log.SetOutput(io.Discard) }

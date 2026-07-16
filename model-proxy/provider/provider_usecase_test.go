@@ -309,7 +309,7 @@ func TestNew_UnknownProviderID(t *testing.T) {
 // --- P15: StaticProvider returns errNotSupported for Usage/FetchModels ---
 
 func TestStaticProvider_NotSupported(t *testing.T) {
-	p := &StaticProvider{cfg: &Config{StaticKey: "k"}}
+	p := &StaticProvider{cfg: &Config{}}
 	if err := p.Usage(); err == nil {
 		t.Error("StaticProvider.Usage: want error, got nil")
 	}
@@ -408,7 +408,7 @@ func mustNoErr(t *testing.T, err error) {
 // --- P22: static provider full surface ---
 
 func TestStaticProvider_FullSurface(t *testing.T) {
-	p := &StaticProvider{cfg: &Config{StaticKey: "sk"}}
+	p := &StaticProvider{cfg: &Config{BoundAPIKey: "sk"}}
 	req, _ := http.NewRequest("GET", "https://x", nil)
 	if err := p.AuthHeaders(req); err != nil {
 		t.Fatal(err)

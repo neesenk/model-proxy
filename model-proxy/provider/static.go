@@ -4,7 +4,10 @@ import (
 	"net/http"
 )
 
-// StaticProvider is for providers with a static key in config (no login/usage).
+// StaticProvider authenticates with a credential-pool API key (the
+// <name>_apikeys.json pool written by `login`, bound into cfg.BoundAPIKey at
+// build time). It has no login/refresh/usage/quota of its own — no key is ever
+// stored in config.yaml.
 type StaticProvider struct {
 	baseProbe
 	cfg *Config
@@ -16,10 +19,11 @@ func init() {
 	})
 }
 
-// AuthHeaders injects the static key as Bearer (a static provider has no
-// login/refresh; the key comes from config, default empty).
+// AuthHeaders injects the pool-bound API key as Bearer. The key comes from the
+// credential pool (written by `login`), bound into cfg.BoundAPIKey at build
+// time; config.yaml never holds a key.
 func (p *StaticProvider) AuthHeaders(req *http.Request) error {
-	req.Header.Set("Authorization", "Bearer "+p.cfg.StaticKey)
+	req.Header.Set("Authorization", "Bearer "+p.cfg.BoundAPIKey)
 	req.Header.Del("x-api-key")
 	return nil
 }
