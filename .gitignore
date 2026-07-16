@@ -14,6 +14,7 @@ yarn-error.log*
 .cache/
 .env
 .env.*
+.playwright-mcp
 
 # Build artifacts (Go binaries built inside the source dir). The dir shares the
 # project name, so anchor each binary by relative path to avoid matching the dir.
