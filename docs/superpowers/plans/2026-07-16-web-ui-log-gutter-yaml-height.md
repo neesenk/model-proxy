@@ -12,7 +12,7 @@
 
 - Do not change backend handlers or `/api/*` response shapes.
 - Preserve unrelated working-tree changes in `model-proxy/config.yaml`, `model-proxy/web_assets/app.js`, `model-proxy/web_assets/styles.css`, and the supplied screenshots.
-- The preferred Raw YAML baseline is 480px, but viewport containment wins when less space is visible.
+- Raw YAML has a hard 480px minimum; a short viewport scrolls the page instead of collapsing the editor.
 - A log row becomes selected by a click; native text selection and copying remain unchanged.
 - Update `AGENTS.md` whenever implementation behavior changes.
 
@@ -86,7 +86,7 @@ Use a gutter-width custom property and grid rows:
 
 ```css
 .log-pre {
-  --log-gutter-width: calc(3.5ch + 24px);
+  --log-gutter-width: calc(3.5ch + 16px);
   padding: 12px 14px 12px 0;
   background: linear-gradient(to right,
     var(--lognum-bg) 0,
@@ -97,10 +97,12 @@ Use a gutter-width custom property and grid rows:
 .log-line {
   display: grid;
   grid-template-columns: var(--log-gutter-width) minmax(0, 1fr);
+  column-gap: 10px;
 }
+.log-line:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .log-line::before {
   box-sizing: border-box;
-  padding: 0 10px 0 14px;
+  padding: 0 2px 0 14px;
   border-right: 1px solid var(--border-2);
   background: transparent;
 }
@@ -167,8 +169,8 @@ func TestWebAssetsYAMLVisibleHeightContract(t *testing.T) {
     if strings.Contains(css, "height: calc(100vh - 230px)") {
         t.Error("styles.css still uses the fixed Raw YAML viewport offset")
     }
-    if !strings.Contains(css, "height: 480px") {
-        t.Error("styles.css missing the 480px pre-measurement baseline")
+    if got := strings.Count(css, "min-height: 480px"); got < 2 {
+        t.Errorf("styles.css has %d Raw YAML 480px min-height rules, want at least 2", got)
     }
 }
 ```
@@ -186,8 +188,13 @@ Add state and helpers near `yamlEditor`:
 ```js
 let yamlResizeFrame = 0;
 
+const YAML_EDITOR_MIN_HEIGHT = 480;
+
 function visibleYamlEditorHeight(viewportHeight, editorTop, spaceBelow) {
-  return Math.max(1, Math.floor(viewportHeight - editorTop - spaceBelow));
+  return Math.max(
+    YAML_EDITOR_MIN_HEIGHT,
+    Math.floor(viewportHeight - editorTop - spaceBelow),
+  );
 }
 
 function resizeYamlEditor() {
@@ -218,20 +225,20 @@ function scheduleYamlEditorResize() {
 
 Register the resize listener once at module initialization. Call `scheduleYamlEditorResize()` after `initYamlEditor()`, after `loadConfigAll()` has rebuilt the Summary/forms and set YAML, and after `setYamlValue()`.
 
-- [ ] **Step 4: Replace the fixed CSS offset with a 480px pre-measurement baseline**
+- [ ] **Step 4: Replace the fixed CSS offset with a hard 480px minimum**
 
 ```css
 textarea.yaml {
   height: 480px;
-  min-height: 0;
+  min-height: 480px;
 }
 #tab-config .yaml-cm-host .CodeMirror {
   height: 480px;
-  min-height: 0;
+  min-height: 480px;
 }
 ```
 
-JavaScript runs before/at the next animation frame and caps the actual rendered editor to the measured visible space; the baseline avoids a collapsed editor before measurement.
+JavaScript runs before/at the next animation frame and grows the editor to the measured visible space, while the hard minimum prevents a short viewport from collapsing it.
 
 - [ ] **Step 5: Run focused tests and verify GREEN**
 
@@ -251,7 +258,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Document the two UI contracts**
 
-Add a concise paragraph under Web UI describing that Status log entries use a continuous full-height gutter, wrapped text aligns to the message column, click selection changes the number foreground, and Raw YAML is measured from its actual viewport position with a preferred 480px baseline and viewport cap.
+Add a concise paragraph under Web UI describing that Status log entries use a continuous full-height gutter, wrapped text aligns to the message column, click selection changes the number foreground, and Raw YAML is measured from its actual viewport position with a hard 480px minimum.
 
 - [ ] **Step 2: Run formatting and static checks**
 
@@ -274,7 +281,7 @@ Verify at a wide viewport and a short viewport:
 1. Open Status → Logs and confirm a wrapped log's continuation aligns with its message text, while the gutter background spans the whole number column and full logical-row height.
 2. Click two different log rows and confirm only the most recently clicked row's number uses the selected foreground.
 3. Open Config and confirm Raw YAML ends above the viewport bottom on first render.
-4. Resize taller and confirm it fills the extra space; resize below the 480px preference and confirm it shrinks rather than overflowing.
+4. Resize taller and confirm it fills the extra space; resize to a short viewport and confirm the editor stays 480px while the page scrolls vertically.
 
 - [ ] **Step 5: Review the final diff without committing unrelated files**
 

@@ -134,6 +134,8 @@ stats                      # per-(provider,model) 调用统计（SQLite）；--f
 
 `web.enabled`（默认 true）时，daemon 在同一个 mux 上挂 `/ui/`（嵌入式静态资源，`web_assets/` 经 `go:embed`）和 `/api/`（JSON）。**仅 loopback、无鉴权**（信任来自「本地」）。`/api/*` 路由表：
 
+**前端布局契约**：Status → Logs 的每条日志是「行号 gutter + 正文」两列网格；行号数字与 gutter 右边框保留 2px 内间距，gutter 背景只覆盖行号列（不覆盖与正文之间的 10px 间距）和换行后的完整逻辑行高度，正文续行与首行正文对齐。鼠标悬停以轻量强调色背景标出整条逻辑日志行；单击只选中该行，并改变其行号前景色（不干预浏览器原生文本选择/复制）。Config → Raw YAML 的**硬最小高度为 480px**，首次挂载、内容加载完成和窗口 resize 后按编辑器实际 viewport top + 卡片下方 chrome 重新计算高度；可见空间大于 480px 时铺满，空间不足时仍保持 480px 并允许页面纵向滚动，绝不把编辑器压缩到不可用高度，也不靠固定 `100vh - 常量` 推测。
+
 | 方法 | 路径 | 请求 body | 响应 shape | 备注 |
 |---|---|---|---|---|
 | GET | `/api/status` | — | `{uptime, version, listen, health{<prov>:{circuit_state, available, [circuit_until], [rate_limited_until]}}, quota{<prov>: <QuotaSnapshot 原样, PascalCase 键>}, schedule: {models:[…]}(来自 /debug/schedule), counters{<prov>:{requests, failovers, rate_limited_429, failures, last_request_at}}}` | 锁：`p.mu`(RLock) → `healthMu` → `quotaMu`(经 allSnapshots) **顺序获取不嵌套**。`quota` 字段是 provider 包的 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**：`RemainingPct`/`Windows`/`Billing`…） |
@@ -302,4 +304,3 @@ client_id = app_EMoamEEZ73f0CkXaXp7hrann
 | pi | `http://<proxy>` | pi 的 `anthropic-messages` 自己拼 `/v1/messages`，baseURL 不带 `/v1`（否则 `/v1/v1/messages` → 502） |
 
 provider_id 统一为一个配置项（默认 `model-proxy`），opencode/pi/codex 共用。备份文件存 `<configDir>/.model-proxy/<client>.bak`。`takeover:` 块整个可省略--四个 client 路径（claude/opencode/codex/pi）+ provider_id 在 `LoadConfigFromBytes` 里都有代码默认值（`~/.claude/settings.json` 等，`~` 经 `expandPath` 展开），与 `proxy_url` 的"unset 走默认"同一模式；只有覆盖某项才需写进 config。`takeover all`/`restore all` 遇到**不存在**的 client 配置文件（agent 没装）会 `~ <client> skipped (config not present: ...)` 跳过并继续其余，而非中止整批；单 client（`takeover <client>`）缺文件仍是硬错误。
-

@@ -22,6 +22,15 @@
   --warn-fg:   #9a6700;
   --err-fg:    #cf222e;
 
+  /* Per-account tint slots (cycled within a provider's account list). */
+  --acct-c0-bg: #eef3fb; --acct-c0-bd: #446b9e;
+  --acct-c1-bg: #f1ecfa; --acct-c1-bd: #6b4a9e;
+  --acct-c2-bg: #ecf6ee; --acct-c2-bd: #3a7a44;
+  --acct-c3-bg: #fbf0e8; --acct-c3-bd: #9a6b3a;
+
+  /* Logs: line-number gutter background (distinct from .log-pre surface). */
+  --lognum-bg: #eef0f3;
+
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
@@ -51,6 +60,16 @@
     --ok-fg:     #3fb950;
     --warn-fg:   #d29922;
     --err-fg:    #f85149;
+
+    /* Per-account tint slots, dark variants. */
+    --acct-c0-bg: #1a2330; --acct-c0-bd: #3b5d8a;
+    --acct-c1-bg: #221a2e; --acct-c1-bd: #5a3d8a;
+    --acct-c2-bg: #18241c; --acct-c2-bd: #2f6b3a;
+    --acct-c3-bg: #2a1f15; --acct-c3-bd: #8a6332;
+
+    /* Logs: line-number gutter background (distinct from .log-pre surface). */
+    --lognum-bg: #1b2129;
+
     --shadow:    none;
   }
 }
@@ -274,19 +293,56 @@ main {
 
 /* ---------- logs ---------- */
 .log-pre {
+  --log-gutter-width: calc(3.5ch + 16px);
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.45;
   margin: 0;
-  padding: 12px 14px;
+  padding: 12px 14px 12px 0;
+  /* Default: capped height. The Status logs section adds .status-logs-active
+     on the pane, under which .log-pre flex-grows to fill the viewport. */
   max-height: 340px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text);
-  background: var(--surface-2);
+  background: linear-gradient(to right,
+    var(--lognum-bg) 0,
+    var(--lognum-bg) var(--log-gutter-width),
+    var(--surface-2) var(--log-gutter-width),
+    var(--surface-2) 100%);
+  counter-reset: logline;
 }
-.log-line { display: block; }
+.log-line {
+  display: grid;
+  grid-template-columns: var(--log-gutter-width) minmax(0, 1fr);
+  column-gap: 10px;
+}
+.log-line:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+/* Per-line line numbers via CSS counter (1..N in display order, oldest first).
+   user-select:none so copying a line doesn't grab its number. The pseudo-element
+   is the first grid cell and therefore stretches to the full logical-row height;
+   wrapped message text stays in the second column. The .log-pre gradient paints
+   only the number column continuously, including its top/bottom padding; the
+   10px column-gap between the gutter and message keeps the normal log background. */
+.log-line::before {
+  counter-increment: logline;
+  content: counter(logline);
+  display: block;
+  box-sizing: border-box;
+  padding: 0 2px 0 14px;
+  text-align: right;
+  color: var(--muted);
+  opacity: .65;
+  user-select: none;
+  background: transparent;
+  border-right: 1px solid var(--border-2);
+}
+.log-line.selected::before {
+  color: var(--accent-ink);
+  opacity: 1;
+  font-weight: 600;
+}
 .log-empty { color: var(--muted); font-style: italic; }
 
 /* ---------- forms ---------- */
@@ -313,7 +369,8 @@ main {
 
 textarea.yaml {
   width: 100%;
-  min-height: 460px;
+  height: 480px;
+  min-height: 480px;
   font-family: var(--mono);
   font-size: 12.5px;
   line-height: 1.55;
@@ -331,11 +388,15 @@ textarea.yaml {
    CM instance; .CodeMirror is CM's own root. Token colors (yaml mode) mapped to
    the instrument-panel palette so it reads as one system in light + dark. */
 .yaml-cm-host { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
-.yaml-cm-host .CodeMirror {
+/* 480px is both the pre-measurement baseline and the hard minimum. app.js grows
+   the editor to fill extra viewport space; short viewports scroll the page
+   instead of collapsing the editor below a usable height. */
+#tab-config .yaml-cm-host .CodeMirror {
   font-family: var(--mono);
   font-size: 12.5px;
   line-height: 1.55;
-  height: 460px;
+  height: 480px;
+  min-height: 480px;
   background: var(--surface-2);
   color: var(--text);
 }
@@ -564,14 +625,6 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
   max-height: calc(100vh - 84px);
   overflow: auto;
 }
-.status-nav-title {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--muted);
-  padding: 4px 8px 8px;
-  font-weight: 500;
-}
 .status-nav-item {
   appearance: none;
   width: 100%;
@@ -595,6 +648,41 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
   font-weight: 500;
 }
 .status-nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; }
+
+/* Logs section: make the log <pre> fill the viewport height (auto-adapting to
+   the window) instead of capping at .log-pre's default 340px. The pane gets
+   .status-logs-active (set in renderStatusSection) only for the logs section;
+   other sections size to content. A definite height (not min-height) is what
+   caps the pre so it scrolls internally rather than growing to fit all lines. */
+.status-main.status-logs-active .log-pre {
+  height: calc(100vh - 150px);
+  max-height: none;
+  min-height: 200px;
+}
+
+/* Providers card: per-account expanded list (sub-row under each provider). */
+.prov-accounts-row > td { padding: 0 12px 10px !important; border-bottom: 1px solid var(--border-2); }
+.prov-accounts { display: grid; gap: 4px; padding-left: 4px; }
+.prov-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border-left: 2px solid transparent;
+}
+.prov-account .prov-acct-label { font-family: var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov-account .prov-acct-label.muted { color: var(--muted); font-style: italic; }
+/* Per-account background tints: cycled within a provider so multiple accounts
+   in one pool are visually distinguishable. Slots 0..3, each a subtle bg + a
+   matching left accent stripe. */
+.prov-account.prov-acct-c0 { background: var(--acct-c0-bg); border-left-color: var(--acct-c0-bd); }
+.prov-account.prov-acct-c1 { background: var(--acct-c1-bg); border-left-color: var(--acct-c1-bd); }
+.prov-account.prov-acct-c2 { background: var(--acct-c2-bg); border-left-color: var(--acct-c2-bd); }
+.prov-account.prov-acct-c3 { background: var(--acct-c3-bg); border-left-color: var(--acct-c3-bd); }
+.prov-accounts-row + tr > td { border-top: none; }
 @media (max-width: 720px) {
   .status-layout { grid-template-columns: 1fr; }
   .status-nav {
@@ -605,7 +693,6 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
     gap: 4px;
     padding: 8px;
   }
-  .status-nav-title { width: 100%; padding: 0 4px 4px; }
   .status-nav-item { width: auto; flex: 1 1 auto; }
 }
 .acct-toolbar {

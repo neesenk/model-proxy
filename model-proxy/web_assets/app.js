@@ -322,11 +322,10 @@ const LOG_SNAP_THRESHOLD = 4; // px — "at the bottom" within sub-pixel roundin
 const STATUS_SECTIONS = [
   { key: 'schedule', label: 'Schedule' },
   { key: 'providers', label: 'Providers' },
-  { key: 'quota', label: 'Quota' },
   { key: 'tokens', label: 'Token Usage' },
   { key: 'logs', label: 'Logs' },
 ];
-let statusCache = { st: null, tok: [], logs: [] };
+let statusCache = { st: null, tok: [], logs: [], accounts: [] };
 let statusSelected = 'schedule';
 
 function stopStatusRefresh() {
@@ -348,23 +347,24 @@ async function refreshConnIndicator() {
   }
 }
 
-// renderStatusTab fetches the dashboard snapshot (status + tokens + logs),
-// caches it, and renders the Status panel: a Warnings banner (only when
-// warnings exist) + an Accounts-style sidebar+detail layout. Only the active
-// section's pane re-renders on each 5s tick; section switches render from the
-// cache with no extra fetch. Auto-refreshes every 5s while the Status tab is
-// active; the timer is cleared when the user leaves the tab.
+// renderStatusTab fetches the dashboard snapshot (status + tokens + logs +
+// accounts), caches it, and renders the Status panel: a Warnings banner (only
+// when warnings exist) + a sidebar+detail layout. Only the active section's
+// pane re-renders on each 5s tick; section switches render from the cache with
+// no extra fetch. Auto-refreshes every 5s while the Status tab is active; the
+// timer is cleared when the user leaves the tab.
 async function renderStatusTab() {
   if (statusInflight) return;
   statusInflight = true;
   try {
-    const [st, tok, logs] = await Promise.all([
+    const [st, tok, logs, acc] = await Promise.all([
       apiGet('/api/status'),
       apiGet('/api/tokens').catch(() => ({ usage: [] })),
       apiGet('/api/logs?tail=200').catch(() => ({ lines: [] })),
+      apiGet('/api/accounts').catch(() => ({ providers: [] })),
     ]);
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '—'} · ${st.listen || ''}`);
-    statusCache = { st, tok: tok.usage || [], logs: logs.lines || [] };
+    statusCache = { st, tok: tok.usage || [], logs: logs.lines || [], accounts: acc.providers || [] };
     renderStatusPanel();
   } catch (e) {
     setConn('err', 'connection lost');
@@ -422,7 +422,6 @@ function renderStatusPanel() {
     layout = document.createElement('div');
     layout.className = 'status-layout';
     layout.innerHTML = `<nav class="status-nav" aria-label="Status sections">
-        <div class="status-nav-title">Sections</div>
         ${navItems}
       </nav>
       <div class="status-main"></div>`;
@@ -448,6 +447,10 @@ function renderStatusSection(key) {
   const main = document.querySelector('.status-main');
   if (!main) return;
   const st = statusCache.st;
+  // status-logs-active makes the Logs pane fill the viewport height (the log
+  // <pre> flex-grows). Only set for the logs section; other sections are short
+  // and should size to content.
+  main.classList.toggle('status-logs-active', key === 'logs');
   switch (key) {
     case 'schedule':
       main.innerHTML = '';
@@ -456,10 +459,6 @@ function renderStatusSection(key) {
     case 'providers':
       main.innerHTML = '';
       if (st) renderProvidersCard(main, st);
-      break;
-    case 'quota':
-      main.innerHTML = '';
-      if (st) renderQuotaCard(main, st);
       break;
     case 'tokens':
       main.innerHTML = '';
@@ -539,7 +538,36 @@ function healthPill(h) {
   return `<span class="pill muted"><span class="dot"></span>unavailable</span>`;
 }
 
-// renderProvidersCard draws the per-provider health + request-counter table.
+// accountRemainingPill renders a compact pill summarizing one account's quota
+// snapshot — the "remaining amount" surfacing the old Quota card's data inline
+// per account. Mirrors the Accounts tab's collapsed hint:
+//   session-expired / not-logged-in / error  → err pill
+//   ultimate window RemainingPct             → "X% left" (ok/warn/err by threshold)
+//   otherwise (plan / no ultimate window)    → muted plan / "available"
+// `snap` is a raw provider.QuotaSnapshot (PascalCase) from /api/status.quota,
+// keyed by accountProviderKey(p, a); null when the account has no snapshot yet.
+function accountRemainingPill(snap) {
+  if (!snap) return `<span class="pill muted"><span class="dot"></span>no data</span>`;
+  if (snap.Err) {
+    const k = quotaErrKind(snap);
+    const lbl = k === 'session-expired' ? 'session expired'
+      : k === 'not-logged-in' ? 'not logged in' : 'error';
+    return `<span class="pill err"><span class="dot"></span>${esc(lbl)}</span>`;
+  }
+  const ult = (snap.Windows || []).find((w) => w.Ultimate);
+  if (ult && ult.RemainingPct != null && ult.RemainingPct >= 0) {
+    const p = ult.RemainingPct;
+    const cls = p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err');
+    return `<span class="pill ${cls}"><span class="dot"></span>${(p * 100).toFixed(1)}% left</span>`;
+  }
+  if (snap.Plan) return `<span class="pill muted"><span class="dot"></span>${esc(snap.Plan)}</span>`;
+  return `<span class="pill ok"><span class="dot"></span>available</span>`;
+}
+
+// renderProvidersCard draws the per-provider health + request-counter table,
+// with each provider's accounts listed inline beneath its row (one sub-row per
+// account showing label/email + a remaining-amount pill). This replaces the
+// standalone Quota section: the per-account remaining quota now lives here.
 //
 // Provider names are enumerated from the SCHEDULE (the union of every route's
 // ordered chain), NOT from `health`: a health entry is only created lazily when
@@ -547,10 +575,11 @@ function healthPill(h) {
 // providers) has health={} and the old health-only enumeration rendered nothing.
 // Schedule is the authoritative source of "which providers are configured".
 // `health` (may be absent → neutral "—") and `counters` (absent → 0) are joined
-// per name.
+// per name; accounts come from /api/accounts (statusCache.accounts).
 function renderProvidersCard(target, st) {
   const health = st.health || {};
   const counters = st.counters || {};
+  const quota = st.quota || {};
   const models = (st.schedule && st.schedule.models) || {};
   const nameSet = new Set();
   for (const route of Object.keys(models)) {
@@ -560,6 +589,9 @@ function renderProvidersCard(target, st) {
   }
   const names = Array.from(nameSet).sort();
   if (names.length === 0) return;
+  // Index /api/accounts by provider name so each row can look up its accounts.
+  const acctByName = {};
+  for (const p of (statusCache.accounts || [])) acctByName[p.name] = p;
   let rows = '';
   for (const name of names) {
     const c = counters[name] || {};
@@ -572,9 +604,33 @@ function renderProvidersCard(target, st) {
       <td class="num">${fmtNum(c.failures)}</td>
       <td class="num subdue">${esc(fmtUnix(c.last_request_at))}</td>
     </tr>`;
+    // Per-account expanded list: one sub-row spanning all columns, showing each
+    // account's label/email + remaining-amount pill.
+    const p = acctByName[name];
+    const accs = (p && p.accounts) || [];
+    if (accs.length) {
+      const isOAuth = p.provider_id === 'aqp' || p.provider_id === 'codex';
+      const items = accs.map((a, i) => {
+        const key = accountProviderKey(p, a);
+        // OAuth accounts (aqp/codex) are SSO logins identified by email;
+        // apikey accounts (zhipu/deepseek/volcengine) have no email, so they
+        // are identified by `id: <id>` (with an optional label suffix).
+        const ident = isOAuth
+          ? (a.email || a.label || a.id)
+          : `id: ${a.id || '-'}${a.label ? ' · ' + a.label : ''}`;
+        const slot = i % 4;
+        return `<div class="prov-account prov-acct-c${slot}">
+          <span class="prov-acct-label">${esc(ident)}</span>
+          ${accountRemainingPill(quota[key])}
+        </div>`;
+      }).join('');
+      rows += `<tr class="prov-accounts-row"><td colspan="7"><div class="prov-accounts">${items}</div></td></tr>`;
+    } else {
+      rows += `<tr class="prov-accounts-row"><td colspan="7"><div class="prov-accounts"><div class="prov-account"><span class="prov-acct-label muted">no accounts</span></div></div></td></tr>`;
+    }
   }
   const html = buildCard('Providers', `${names.length} configured`, `
-      <table class="table">
+      <table class="table prov-table">
         <thead><tr>
           <th>provider</th><th>health</th>
           <th class="num">reqs</th><th class="num">failovers</th>
@@ -634,63 +690,6 @@ function renderScheduleCard(target, st) {
     </div>`;
   }
   const html = buildCard('Schedule', `${names.length} routes`, blocks, 'flush');
-  target.insertAdjacentHTML('beforeend', html);
-}
-
-// renderQuotaCard draws per-provider quota bars (ultimate window + short windows).
-function renderQuotaCard(target, st) {
-  const quota = st.quota || {};
-  const names = Object.keys(quota).sort();
-  if (names.length === 0) return;
-  let rows = '';
-  for (const name of names) {
-    const snap = quota[name];
-    if (!snap || snap.Err) {
-      // Collapse the (often CLI-shaped, long) provider error to a scan-friendly
-      // label here - the Accounts tab carries the actionable detail + Re-login.
-      let lbl = 'no data';
-      if (snap && snap.Err) {
-        const k = quotaErrKind(snap);
-        lbl = k === 'session-expired' ? 'session expired'
-          : k === 'not-logged-in' ? 'not logged in' : 'error';
-      }
-      rows += `<div class="bar-row"><div class="bar-label">
-        <span class="name">${esc(name)}</span>
-        <span class="pct">${esc(lbl)}</span>
-      </div></div>`;
-      continue;
-    }
-    const windows = snap.Windows || [];
-    let subBlock = '';
-    for (const w of windows) {
-      const p = (w.RemainingPct != null && w.RemainingPct >= 0) ? w.RemainingPct : null;
-      const fillCls = p == null ? '' : (p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err'));
-      const ulg = w.Ultimate ? ' · ultimate' : (w.Short ? ' · short' : '');
-      const reset = hasReset(w.ResetsAt) ? `resets ${esc(fmtReset(w.ResetsAt))}` : '';
-      subBlock += `<div class="bar-row">
-        <div class="bar-label">
-          <span class="name">${esc(w.Label || 'quota')}${esc(ulg)}</span>
-          <span class="pct">${p == null ? '—' : (p * 100).toFixed(1) + '%'}</span>
-        </div>
-        <div class="bar-track"><div class="bar-fill ${fillCls}" style="width:${p == null ? 0 : Math.max(0, Math.min(1, p)) * 100}%"></div></div>
-        ${reset ? `<div class="bar-meta">${reset}</div>` : ''}
-      </div>`;
-    }
-    const head = `${esc(name)}${snap.Account ? ' · ' + esc(snap.Account) : ''}${snap.Plan ? ' · ' + esc(snap.Plan) : ''}`;
-    if (windows.length === 0) {
-      rows += `<div class="bar-row"><div class="bar-label">
-        <span class="name"><strong>${esc(head)}</strong></span>
-      </div></div>`;
-    } else {
-      rows += `<div class="bar-row">
-        <div class="bar-label"><span class="name"><strong>${esc(head)}</strong></span></div>
-        <div style="grid-column:1/-1; padding-left: 10px; border-left: 2px solid var(--border-2); margin-bottom: 6px;">
-          ${subBlock}
-        </div>
-      </div>`;
-    }
-  }
-  const html = buildCard('Quota', `${names.length} providers`, rows);
   target.insertAdjacentHTML('beforeend', html);
 }
 
@@ -766,6 +765,21 @@ function renderLogsCard(target, lines) {
   target.insertAdjacentHTML('beforeend', html);
 }
 
+// bindLogSelection makes a clicked log entry the sole selected row. Selection
+// is visual only: native text selection/copying remains untouched, while the
+// selected class lets CSS emphasize the row's generated line number.
+function bindLogSelection(pre) {
+  if (!pre) return;
+  pre.addEventListener('click', (event) => {
+    const line = event.target.closest('.log-line');
+    if (!line || !pre.contains(line)) return;
+    pre.querySelectorAll('.log-line.selected').forEach((el) => {
+      if (el !== line) el.classList.remove('selected');
+    });
+    line.classList.add('selected');
+  });
+}
+
 // renderLogsInto renders the Logs card into `target` with scroll-preserving
 // behavior. Called by the Status section dispatcher on each 5s tick.
 //
@@ -798,6 +812,7 @@ function renderLogsInto(target, lines) {
   logsPrevKey = key;
   logsPre = target.querySelector('.log-pre');
   if (!logsPre) return;
+  bindLogSelection(logsPre);
   if (wasAtBottom) {
     logsPre.scrollTop = logsPre.scrollHeight;
   } else {
@@ -815,6 +830,50 @@ let configCache = null; // last /api/config response {yaml, summary, provider_mo
 // initYamlEditor per Config-tab render). Null outside the tab or if CodeMirror
 // failed to load.
 let yamlEditor = null;
+let yamlResizeFrame = 0;
+const YAML_EDITOR_MIN_HEIGHT = 480;
+
+// visibleYamlEditorHeight returns the positive space left for the editor after
+// accounting for its actual viewport position and the card chrome below it.
+// When the editor starts above the viewport (for example after a manual scroll),
+// clamp its top to zero so a resize cannot make it taller than the viewport.
+function visibleYamlEditorHeight(viewportHeight, editorTop, spaceBelow) {
+  return Math.max(YAML_EDITOR_MIN_HEIGHT,
+    Math.floor(viewportHeight - Math.max(0, editorTop) - spaceBelow),
+  );
+}
+
+// resizeYamlEditor measures the rendered Config layout instead of guessing a
+// fixed top offset. cardRect.bottom - targetRect.bottom captures the action row,
+// message area, and card padding beneath the editor; page spacing is added when
+// filling a tall viewport. On short viewports the 480px hard minimum wins and
+// the page scrolls vertically.
+function resizeYamlEditor() {
+  yamlResizeFrame = 0;
+  const host = document.getElementById('yaml-editor');
+  const card = document.getElementById('yaml-card');
+  const target = yamlEditor ? yamlEditor.getWrapperElement()
+    : document.getElementById('yaml-editor-fallback');
+  if (!host || !card || !target || !host.offsetParent) return;
+
+  const hostRect = host.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const main = card.closest('main');
+  const cardMargin = parseFloat(getComputedStyle(card).marginBottom) || 0;
+  const mainPadding = main ? (parseFloat(getComputedStyle(main).paddingBottom) || 0) : 0;
+  const spaceBelow = Math.max(0, cardRect.bottom - targetRect.bottom) + cardMargin + mainPadding;
+  const height = visibleYamlEditorHeight(window.innerHeight, hostRect.top, spaceBelow);
+  if (yamlEditor) yamlEditor.setSize(null, height);
+  else target.style.height = `${height}px`;
+}
+
+function scheduleYamlEditorResize() {
+  if (yamlResizeFrame) cancelAnimationFrame(yamlResizeFrame);
+  yamlResizeFrame = requestAnimationFrame(resizeYamlEditor);
+}
+
+window.addEventListener('resize', scheduleYamlEditorResize);
 
 // initYamlEditor mounts CodeMirror on the #yaml-editor host div. CodeMirror 5 is
 // a UMD global loaded via <script> in index.html; if it's missing (vendor file
@@ -867,10 +926,14 @@ function setYamlValue(v) {
   if (yamlEditor) {
     yamlEditor.setValue(v || '');
     yamlEditor.refresh();
+    scheduleYamlEditorResize();
     return;
   }
   const fb = document.getElementById('yaml-editor-fallback');
-  if (fb) fb.value = v || '';
+  if (fb) {
+    fb.value = v || '';
+    scheduleYamlEditorResize();
+  }
 }
 
 async function renderConfigTab() {
@@ -879,7 +942,7 @@ async function renderConfigTab() {
     `<div id="config-summary" class="card"><div class="card-body"><span class="msg">loading…</span></div></div>
      <details class="editor" id="ed-provider"><summary>Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-route"><summary>Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
-     <div class="card">
+     <div class="card" id="yaml-card">
        <header class="card-head"><h2>Raw YAML</h2><span class="meta" id="yaml-meta"></span></header>
        <div class="card-body">
          <div id="yaml-editor" class="yaml-cm-host"></div>
@@ -896,6 +959,7 @@ async function renderConfigTab() {
   // by the time this module runs. Created once per Config-tab render; the
   // instance is held in yamlEditor for setValue/getValue in load/save.
   initYamlEditor();
+  scheduleYamlEditorResize();
   document.getElementById('btn-yaml-reload').addEventListener('click', loadConfigYAML);
   document.getElementById('btn-yaml-save').addEventListener('click', saveConfigYAML);
 
@@ -923,12 +987,7 @@ async function loadConfigAll() {
          </dl>
        </div>
      </div>`;
-  const ta = document.getElementById('yaml-editor');
-  if (yamlEditor) {
-    yamlEditor.setValue(cfg.yaml || '');
-  } else if (ta) {
-    ta.value = cfg.yaml || '';
-  }
+  setYamlValue(cfg.yaml || '');
   const meta = document.getElementById('yaml-meta');
   if (meta) meta.textContent = `${(cfg.yaml || '').length} bytes`;
 
@@ -937,6 +996,7 @@ async function loadConfigAll() {
 
   // Route form
   buildRouteForm('ed-route');
+  scheduleYamlEditorResize();
 }
 
 // buildProviderForm: choose a provider → edit base URLs / usage_url / billing, or delete.
@@ -1412,21 +1472,21 @@ function selectProviderSilent(name) {
   const main = document.querySelector('.acct-main');
   if (!main) return;
   if (!p) { main.innerHTML = ''; return; }
-  // Capture which <details> sections are open BEFORE the re-render wipes them,
-  // so we can restore the open state after (e.g. a Refresh-usage click re-renders
-  // the pane - an expanded Usage section should stay expanded, not collapse).
-  const openSecs = new Set();
-  main.querySelectorAll('details.acct-section[open]').forEach((d) => {
-    openSecs.add((d.dataset.acct || '') + '/' + (d.dataset.sec || ''));
+  // Capture each <details> section's open/closed state BEFORE the re-render
+  // wipes them, so we can restore it after (e.g. a Refresh-usage click re-renders
+  // the pane - a collapsed Usage section should stay collapsed, an expanded one
+  // stay expanded). Both sections default to open (the <details open> attribute
+  // in accountUsageDetails/accountTokensDetails); this restore only kicks in for
+  // a re-render where the user changed a section's state.
+  const secOpen = {};
+  main.querySelectorAll('details.acct-section').forEach((d) => {
+    secOpen[(d.dataset.acct || '') + '/' + (d.dataset.sec || '')] = d.open;
   });
   main.innerHTML = renderProviderDetail(p, accountsQuota, accountsTokens);
-  if (openSecs.size) {
-    main.querySelectorAll('details.acct-section').forEach((d) => {
-      if (openSecs.has((d.dataset.acct || '') + '/' + (d.dataset.sec || ''))) {
-        d.open = true;
-      }
-    });
-  }
+  main.querySelectorAll('details.acct-section').forEach((d) => {
+    const k = (d.dataset.acct || '') + '/' + (d.dataset.sec || '');
+    if (k in secOpen) d.open = secOpen[k];
+  });
   const add = main.querySelector('[data-add]');
   if (add) add.addEventListener('click', () => openAddFor(p));
   main.querySelectorAll('[data-remove]').forEach((b) => {
@@ -1486,6 +1546,11 @@ function accountCard(p, a, quota, tokens) {
   const mail = a.email ? `<div class="acct-mail">${esc(a.email)}</div>` : '';
   const snap = quota ? quota[key] : null;
   const tokRows = (tokens || []).filter((t) => t.provider === key);
+  // pay-as-you-go providers have no Quota() to poll, so the Refresh-usage button
+  // (which re-polls quota) is meaningless for them — hide it. Plan/quota
+  // providers keep it.
+  const refreshBtn = p.billing === 'pay-as-you-go' ? ''
+    : `<button class="btn small" data-refresh="${esc(key)}" title="Re-poll this account's quota now">Refresh usage</button>`;
   return `<section class="card acct-card">
     <div class="account-row acct-card-head">
       <div>
@@ -1494,7 +1559,7 @@ function accountCard(p, a, quota, tokens) {
         ${mail}
       </div>
       <div class="row-actions">
-        <button class="btn small" data-refresh="${esc(key)}" title="Re-poll this account's quota now">Refresh usage</button>
+        ${refreshBtn}
         <button class="btn danger small" data-remove="${esc(a.id)}"
                 data-provider="${esc(p.name)}" data-label="${esc(label)}">Remove</button>
       </div>
@@ -1528,7 +1593,7 @@ function accountUsageDetails(p, snap, acctKey) {
       hint = 'available';
     }
   }
-  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="usage">
+  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="usage" open>
     <summary>Usage<span class="acct-hint">${esc(hint)}</span></summary>
     <div class="acct-section-body">${renderAccountUsage(p, snap)}</div>
   </details>`;
@@ -1542,7 +1607,7 @@ function accountTokensDetails(rows, acctKey) {
   const hint = rows.length
     ? `${rows.length} model${rows.length > 1 ? 's' : ''} · ${fmtNum(totalReqs)} req`
     : 'no usage';
-  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="tokens">
+  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="tokens" open>
     <summary>Token usage<span class="acct-hint">${esc(hint)}</span></summary>
     <div class="acct-section-body">${renderAccountTokens(rows)}</div>
   </details>`;
