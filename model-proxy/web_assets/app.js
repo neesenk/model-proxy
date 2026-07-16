@@ -187,8 +187,10 @@ function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [tab, ...rest] = raw.split('/');
   if (tab === 'config' || tab === 'accounts' || tab === 'status') {
-    // decodeURIComponent so provider names with special chars round-trip; a
-    // malformed sequence decodes to "" (treated as "no sub" -> first provider).
+    // decodeURIComponent so provider/section names with special chars
+    // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
+    // first provider / default section). For #status/<section>, sub is the
+    // section key read by selectStatusSectionSilent.
     let sub = '';
     try { sub = decodeURIComponent(rest.join('/')); } catch (_) { sub = ''; }
     return { tab, sub };
@@ -238,8 +240,10 @@ function activateTab(name) {
   if (name === 'accounts') renderAccountsTab();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
   // to Back out of, so push a history entry. Accounts adds its provider segment
-  // in selectProvider (replaceState - same tab, finer-grained).
-  if (name !== 'accounts') setHash(tabHash(name), true);
+  // in selectProvider (replaceState - same tab, finer-grained). Status includes
+  // its active section so a refresh lands on the same view.
+  if (name === 'status') setHash('#status/' + statusSelected, true);
+  else if (name !== 'accounts') setHash(tabHash(name), true);
 }
 
 for (const b of tabBtns) {
@@ -255,6 +259,9 @@ window.addEventListener('hashchange', () => {
   }
   if (tab === 'accounts' && sub) {
     selectProviderSilent(sub);
+  }
+  if (tab === 'status' && sub) {
+    selectStatusSectionSilent(sub);
   }
 });
 
@@ -296,6 +303,32 @@ function clearMsg(target) {
 let statusTimer = null;
 let statusInflight = false;
 
+// ---------- logs scroll state ----------
+//
+// The Logs card auto-snaps to the bottom (newest line visible) by default, but
+// if the user has scrolled up we freeze the visible content: new lines append
+// below the fold without moving what's on screen. `logsPre` is the last .log-pre
+// element we rendered; `logsPrevKey` is the joined previous lines so a no-op
+// refresh (no new lines) skips the DOM write entirely (no flicker, no scroll
+// disruption). `logsPrevScrollTop` is restored when the user was scrolled up.
+let logsPre = null;
+let logsPrevKey = '';
+let logsPrevScrollTop = 0;
+const LOG_SNAP_THRESHOLD = 4; // px — "at the bottom" within sub-pixel rounding
+
+// Status sub-sections, in sidebar order. `key` is the hash segment + the
+// statusSelected value; `label` is the nav button text. First (schedule) is the
+// default selection.
+const STATUS_SECTIONS = [
+  { key: 'schedule', label: 'Schedule' },
+  { key: 'providers', label: 'Providers' },
+  { key: 'quota', label: 'Quota' },
+  { key: 'tokens', label: 'Token Usage' },
+  { key: 'logs', label: 'Logs' },
+];
+let statusCache = { st: null, tok: [], logs: [] };
+let statusSelected = 'schedule';
+
 function stopStatusRefresh() {
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 }
@@ -315,8 +348,11 @@ async function refreshConnIndicator() {
   }
 }
 
-// renderStatusTab fetches the dashboard snapshot (status + tokens + logs) and
-// re-renders the Status panel. Auto-refreshes every 5s while the Status tab is
+// renderStatusTab fetches the dashboard snapshot (status + tokens + logs),
+// caches it, and renders the Status panel: a Warnings banner (only when
+// warnings exist) + an Accounts-style sidebar+detail layout. Only the active
+// section's pane re-renders on each 5s tick; section switches render from the
+// cache with no extra fetch. Auto-refreshes every 5s while the Status tab is
 // active; the timer is cleared when the user leaves the tab.
 async function renderStatusTab() {
   if (statusInflight) return;
@@ -328,13 +364,8 @@ async function renderStatusTab() {
       apiGet('/api/logs?tail=200').catch(() => ({ lines: [] })),
     ]);
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '—'} · ${st.listen || ''}`);
-    panels.status.innerHTML = '';
-    renderProvidersCard(st);
-    renderScheduleCard(st);
-    renderWarningsCard(st);
-    renderQuotaCard(st);
-    renderTokensCard(tok.usage || []);
-    renderLogsCard(logs.lines || []);
+    statusCache = { st, tok: tok.usage || [], logs: logs.lines || [] };
+    renderStatusPanel();
   } catch (e) {
     setConn('err', 'connection lost');
     if (panels.status) {
@@ -349,6 +380,127 @@ async function renderStatusTab() {
   }
 }
 
+// renderStatusPanel draws the Warnings banner (if any) + the sidebar+detail
+// layout, then renders the active section. Called after each fetch. The sidebar
+// is built only when it isn't already present, so a 5s tick that finds the
+// layout in place just refreshes the warnings + re-renders the active section,
+// preserving scroll position (e.g. Logs scrolled up) in the pane.
+function renderStatusPanel() {
+  const panel = panels.status;
+  if (!panel || !statusCache.st) return;
+  const st = statusCache.st;
+  const ws = st.warnings || [];
+
+  // Warnings banner: render when present, remove when absent. It lives above the
+  // layout so it doesn't disrupt the detail pane.
+  let banner = panel.querySelector('.status-warnings');
+  if (ws.length) {
+    const items = ws.map((w) => `<div class="msg warn">⚠ ${esc(w)}</div>`).join('');
+    const html = `<div class="status-warnings" style="margin-bottom:12px;">${items}</div>`;
+    if (banner) banner.outerHTML = html;
+    else panel.insertAdjacentHTML('afterbegin', html);
+  } else if (banner) {
+    banner.remove();
+  }
+
+  // Build the sidebar+detail layout once; on later ticks it's already there.
+  let layout = panel.querySelector('.status-layout');
+  if (!layout) {
+    // panel may still hold a stale banner/error from before — rebuild cleanly,
+    // then re-add the warnings banner if it existed (innerHTML='' wipes it).
+    panel.innerHTML = '';
+    if (ws.length) {
+      const items = ws.map((w) => `<div class="msg warn">⚠ ${esc(w)}</div>`).join('');
+      panel.insertAdjacentHTML('afterbegin', `<div class="status-warnings" style="margin-bottom:12px;">${items}</div>`);
+    }
+    const navItems = STATUS_SECTIONS.map((s) => {
+      const active = s.key === statusSelected ? ' active' : '';
+      return `<button class="acct-nav-item status-nav-item${active}" data-section="${esc(s.key)}">
+        <span class="acct-nav-name">${esc(s.label)}</span>
+      </button>`;
+    }).join('');
+    layout = document.createElement('div');
+    layout.className = 'accounts-layout status-layout';
+    layout.innerHTML = `<nav class="acct-nav" aria-label="Status sections">
+        <div class="acct-nav-title">Sections</div>
+        ${navItems}
+      </nav>
+      <div class="status-main"></div>`;
+    panel.appendChild(layout);
+    layout.querySelectorAll('.status-nav-item').forEach((b) => {
+      b.addEventListener('click', () => selectStatusSection(b.dataset.section));
+    });
+  } else {
+    // Layout exists: refresh the nav highlight in case statusSelected changed
+    // (e.g. via hashchange) since the layout was built.
+    layout.querySelectorAll('.status-nav-item').forEach((b) => {
+      b.classList.toggle('active', b.dataset.section === statusSelected);
+    });
+  }
+  renderStatusSection(statusSelected);
+}
+
+// renderStatusSection renders the named section's card(s) into .status-main
+// from statusCache. Only the active section re-renders each 5s tick, so the
+// Logs scroll position (and any open <details>) in other sections is never
+// disturbed by a refresh of the visible section.
+function renderStatusSection(key) {
+  const main = document.querySelector('.status-main');
+  if (!main) return;
+  const st = statusCache.st;
+  switch (key) {
+    case 'schedule':
+      main.innerHTML = '';
+      if (st) renderScheduleCard(main, st);
+      break;
+    case 'providers':
+      main.innerHTML = '';
+      if (st) renderProvidersCard(main, st);
+      break;
+    case 'quota':
+      main.innerHTML = '';
+      if (st) renderQuotaCard(main, st);
+      break;
+    case 'tokens':
+      main.innerHTML = '';
+      renderTokensCard(main, statusCache.tok || []);
+      break;
+    case 'logs':
+      // Don't clear here — renderLogsInto captures the existing scroll position
+      // from the current .log-pre BEFORE wiping the container, so it can restore
+      // it (freeze-on-scroll-up). Clearing here first would detach the old
+      // .log-pre and defeat the capture.
+      renderLogsInto(main, statusCache.logs || []);
+      break;
+  }
+}
+
+// selectStatusSection highlights the sidebar item, renders the section, and
+// pins it in the URL hash (#status/<section>). push=true adds a history entry
+// (a section click the user may Back out of); false replaces (used by the
+// hashchange listener + boot, where the hash already reflects the target).
+function selectStatusSection(name, push = true) {
+  if (!STATUS_SECTIONS.some((s) => s.key === name)) name = 'schedule';
+  selectStatusSectionSilent(name);
+  if (push) setHash('#status/' + name, true);
+}
+
+// selectStatusSectionSilent renders without touching the hash (used by the
+// hashchange listener + boot, where the hash already reflects the target).
+function selectStatusSectionSilent(name) {
+  if (!STATUS_SECTIONS.some((s) => s.key === name)) name = 'schedule';
+  statusSelected = name;
+  document.querySelectorAll('.status-nav-item').forEach((b) => {
+    b.classList.toggle('active', b.dataset.section === name);
+  });
+  // Reset logs scroll state so switching back to Logs re-snaps to the bottom
+  // (the previous .log-pre is gone; a fresh render should not try to restore a
+  // stale scrollTop against a new element).
+  logsPre = null;
+  logsPrevKey = '';
+  renderStatusSection(name);
+}
+
 // buildCard wraps a title + body in the .card/.card-head/.card-body shell.
 function buildCard(title, meta, bodyHTML, extraBodyClass = '') {
   return `<section class="card">
@@ -359,11 +511,11 @@ function buildCard(title, meta, bodyHTML, extraBodyClass = '') {
 
 // renderWarningsCard surfaces implicit-route ambiguity warnings (a model served
 // by >1 logged-in provider with no explicit route). Hidden when none.
-function renderWarningsCard(st) {
+function renderWarningsCard(target, st) {
   const ws = st.warnings || [];
   if (!ws.length) return;
   const items = ws.map(w => `<div class="msg warn">⚠ ${esc(w)}</div>`).join('');
-  panels.status.insertAdjacentHTML('beforeend', buildCard('Warnings', `${ws.length}`, items));
+  target.insertAdjacentHTML('beforeend', buildCard('Warnings', `${ws.length}`, items));
 }
 
 // healthPill renders a status pill reflecting circuit + rate-limit state.
@@ -384,7 +536,7 @@ function healthPill(h) {
   return `<span class="pill muted"><span class="dot"></span>unavailable</span>`;
 }
 
-function renderProvidersCard(st) {
+function renderProvidersCard(target, st) {
   const health = st.health || {};
   const counters = st.counters || {};
   const names = Object.keys(health).sort();
@@ -412,13 +564,13 @@ function renderProvidersCard(st) {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`, 'flush');
-  panels.status.insertAdjacentHTML('beforeend', html);
+  target.insertAdjacentHTML('beforeend', html);
 }
 
 // renderScheduleCard builds the per-route schedule view: each route shows its
 // ordered provider chain with the first choice highlighted, sticky marker, and
 // pool summary.
-function renderScheduleCard(st) {
+function renderScheduleCard(target, st) {
   const models = (st.schedule && st.schedule.models) || {};
   const names = Object.keys(models).sort();
   if (names.length === 0) return;
@@ -463,11 +615,11 @@ function renderScheduleCard(st) {
     </div>`;
   }
   const html = buildCard('Schedule', `${names.length} routes`, blocks, 'flush');
-  panels.status.insertAdjacentHTML('beforeend', html);
+  target.insertAdjacentHTML('beforeend', html);
 }
 
 // renderQuotaCard draws per-provider quota bars (ultimate window + short windows).
-function renderQuotaCard(st) {
+function renderQuotaCard(target, st) {
   const quota = st.quota || {};
   const names = Object.keys(quota).sort();
   if (names.length === 0) return;
@@ -520,15 +672,15 @@ function renderQuotaCard(st) {
     }
   }
   const html = buildCard('Quota', `${names.length} providers`, rows);
-  panels.status.insertAdjacentHTML('beforeend', html);
+  target.insertAdjacentHTML('beforeend', html);
 }
 
 // renderTokensCard draws the per-(provider, model) token usage table.
-function renderTokensCard(usage) {
+function renderTokensCard(target, usage) {
   if (!usage || usage.length === 0) {
     const html = buildCard('Token usage', '0',
       `<div class="empty-state">No observed usage yet. Counts accrue as the proxy streams SSE responses.</div>`);
-    panels.status.insertAdjacentHTML('beforeend', html);
+    target.insertAdjacentHTML('beforeend', html);
     return;
   }
   const sorted = usage.slice().sort((a, b) =>
@@ -561,7 +713,7 @@ function renderTokensCard(usage) {
         <span class="spacer"></span>
         <button class="btn small" id="btn-tokens-reset">Reset counters</button>
       </div>`, 'flush');
-  panels.status.insertAdjacentHTML('beforeend', html);
+  target.insertAdjacentHTML('beforeend', html);
   const btn = document.getElementById('btn-tokens-reset');
   if (btn) btn.addEventListener('click', resetTokens);
 }
@@ -578,17 +730,60 @@ async function resetTokens() {
   }
 }
 
-// renderLogsCard renders the tail of the daemon log.
-function renderLogsCard(lines) {
+// renderLogsCard renders the tail of the daemon log into `target`. Entries are
+// joined with no separator: each .log-line is display:block (styles.css), so
+// they stack one-per-line without a blank gap (the old '\n' join inside a
+// pre-wrap <pre> produced a blank line between entries). Order is preserved
+// server-side (oldest first, newest at the bottom) — no client-side reversal.
+function renderLogsCard(target, lines) {
   let body;
   if (!lines || lines.length === 0) {
     body = `<pre class="log-pre"><span class="log-empty">log is empty or unavailable</span></pre>`;
   } else {
-    const rendered = lines.map((l) => `<span class="log-line">${esc(l)}</span>`).join('\n');
+    const rendered = lines.map((l) => `<span class="log-line">${esc(l)}</span>`).join('');
     body = `<pre class="log-pre">${rendered}</pre>`;
   }
   const html = buildCard('Logs', lines ? `${lines.length} lines` : '', body, 'flush');
-  panels.status.insertAdjacentHTML('beforeend', html);
+  target.insertAdjacentHTML('beforeend', html);
+}
+
+// renderLogsInto renders the Logs card into `target` with scroll-preserving
+// behavior. Called by the Status section dispatcher on each 5s tick.
+//
+// - No-op skip: if `lines` is unchanged since the last render (joined-string
+//   compare), do nothing — avoids flicker and leaves scrollTop untouched.
+// - Snap to bottom: if the user was at (or within LOG_SNAP_THRESHOLD of) the
+//   bottom, re-render then set scrollTop = scrollHeight so the newest line
+//   stays visible. This is the default on first render and while parked at
+//   the bottom.
+// - Freeze on scroll-up: if the user had scrolled up away from the bottom,
+//   capture scrollTop before re-render and restore it after — newly appended
+//   lines land below the fold and the visible content stays put. Snapping
+//   resumes only when the user scrolls back to the bottom.
+function renderLogsInto(target, lines) {
+  const arr = lines || [];
+  const key = arr.join('\n');
+  if (logsPre && key === logsPrevKey && document.body.contains(logsPre)) {
+    // unchanged — leave the DOM and scroll position exactly as they are
+    return;
+  }
+  // Capture bottom-distance on the existing <pre> before we wipe it.
+  let wasAtBottom = true;
+  if (logsPre && document.body.contains(logsPre)) {
+    const bottomDist = logsPre.scrollHeight - logsPre.scrollTop - logsPre.clientHeight;
+    wasAtBottom = bottomDist <= LOG_SNAP_THRESHOLD;
+    if (!wasAtBottom) logsPrevScrollTop = logsPre.scrollTop;
+  }
+  target.innerHTML = '';
+  renderLogsCard(target, arr);
+  logsPrevKey = key;
+  logsPre = target.querySelector('.log-pre');
+  if (!logsPre) return;
+  if (wasAtBottom) {
+    logsPre.scrollTop = logsPre.scrollHeight;
+  } else {
+    logsPre.scrollTop = logsPrevScrollTop;
+  }
 }
 
 // ===========================================================================
@@ -1683,6 +1878,9 @@ if (loginCancelStatic) loginCancelStatic.addEventListener('click', closeLoginMod
 const { tab: bootTab, sub: bootSub } = parseHash();
 if (bootTab === 'accounts' && bootSub) {
   accountsSelectedProvider = bootSub;
+}
+if (bootTab === 'status' && bootSub && STATUS_SECTIONS.some((s) => s.key === bootSub)) {
+  statusSelected = bootSub;
 }
 if (bootTab === 'config') {
   activateTabSilent('config');

@@ -540,6 +540,8 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
 
 /* right pane: toolbar + account list */
 .acct-main { min-width: 0; }
+/* status detail pane (mirrors .acct-main; the sidebar reuses .acct-nav) */
+.status-main { min-width: 0; }
 .acct-toolbar {
   display: flex;
   align-items: center;
