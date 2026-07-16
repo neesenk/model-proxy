@@ -258,19 +258,8 @@ func AccountIDFromTokens(idToken, stored string) string {
 	if stored != "" {
 		return stored
 	}
-	if idToken == "" {
-		return ""
-	}
-	parts := strings.Split(idToken, ".")
-	if len(parts) < 2 {
-		return ""
-	}
-	payload := parts[1]
-	if pad := len(payload) % 4; pad != 0 {
-		payload += strings.Repeat("=", 4-pad)
-	}
-	b, err := base64.URLEncoding.DecodeString(payload)
-	if err != nil {
+	b := decodeJWTPayload(idToken)
+	if b == nil {
 		return ""
 	}
 	var c struct {
@@ -282,6 +271,24 @@ func AccountIDFromTokens(idToken, stored string) string {
 		return ""
 	}
 	return c.Auth.AccountID
+}
+
+// emailFromIDToken parses the `email` claim from an id_token JWT (best-effort,
+// no validation). The codex device flow requests the `openid profile email`
+// scope, so the id_token carries the user's email - used as the account label
+// in the Web UI (codex does not persist email at the top level like aqp does).
+func emailFromIDToken(idToken string) string {
+	b := decodeJWTPayload(idToken)
+	if b == nil {
+		return ""
+	}
+	var c struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		return ""
+	}
+	return c.Email
 }
 
 func (p *CodexOAuthProvider) load() (*CodexAuthFile, error) {
@@ -356,12 +363,49 @@ func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
 	return os.WriteFile(p.authFile, b, 0o600)
 }
 
-// JwtExpiry extracts the `exp` claim from a JWT without validating it.
-// Returns zero time on any error (treated as "unknown expiry" -> use token).
-func JwtExpiry(jwt string) time.Time {
+// CodexAccountInfo is the Web-UI display projection of a codex OAuth auth
+// file: the chatgpt account_id (the identifier the UI sends back on remove)
+// and the email parsed from the id_token JWT (codex's account label). Unlike
+// aqp, codex does not persist email or a created_at timestamp at the top
+// level - the email lives in the id_token's `email` claim, and there is no
+// added-at timestamp (only last_refresh, a different semantic, which is not
+// surfaced here). Only these two fields are projected; the access/refresh/id
+// tokens never leave the provider package.
+type CodexAccountInfo struct {
+	AccountID string
+	Email     string
+}
+
+// LoadCodexAccount reads the codex OAuth auth file (<name>_oauth_auth.json) and
+// projects it to CodexAccountInfo for the Web UI account list. Returns nil, nil
+// if the file is absent. The account_id is tokens.account_id (stored) else
+// parsed from the id_token JWT; the email is parsed from the id_token JWT.
+func LoadCodexAccount(path string) (*CodexAccountInfo, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var af CodexAuthFile
+	if err := json.Unmarshal(b, &af); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return &CodexAccountInfo{
+		AccountID: AccountIDFromTokens(af.Tokens.IDToken, af.Tokens.AccountID),
+		Email:     emailFromIDToken(af.Tokens.IDToken),
+	}, nil
+}
+
+// decodeJWTPayload base64-decodes the middle segment of a JWT (no validation).
+// Returns nil on any error (malformed, missing segment, bad base64). Shared by
+// JwtExpiry, AccountIDFromTokens, and emailFromIDToken so the payload-decode
+// logic isn't triplicated.
+func decodeJWTPayload(jwt string) []byte {
 	parts := strings.Split(jwt, ".")
 	if len(parts) < 2 {
-		return time.Time{}
+		return nil
 	}
 	payload := parts[1]
 	if pad := len(payload) % 4; pad != 0 {
@@ -369,6 +413,16 @@ func JwtExpiry(jwt string) time.Time {
 	}
 	b, err := base64.URLEncoding.DecodeString(payload)
 	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// JwtExpiry extracts the `exp` claim from a JWT without validating it.
+// Returns zero time on any error (treated as "unknown expiry" -> use token).
+func JwtExpiry(jwt string) time.Time {
+	b := decodeJWTPayload(jwt)
+	if b == nil {
 		return time.Time{}
 	}
 	var c struct {

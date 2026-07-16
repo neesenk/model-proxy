@@ -153,6 +153,11 @@ func TestDeepSeekProvider_Quota_Parsed(t *testing.T) {
 	if len(s.Windows) != 1 || s.Windows[0].Total != 10.5 {
 		t.Errorf("windows=%+v", s.Windows)
 	}
+	// No breakdown in the UI - DetailLabel must stay empty (renderAccountUsage
+	// gates the Details section on a non-empty DetailLabel).
+	if s.Windows[0].DetailLabel != "" {
+		t.Errorf("DetailLabel=%q want empty (no breakdown in UI)", s.Windows[0].DetailLabel)
+	}
 }
 
 func TestDeepSeekProvider_Quota_HTTPError(t *testing.T) {
@@ -222,6 +227,41 @@ func TestAqpProvider_Quota_HTTPError(t *testing.T) {
 	}
 	if s.Billing != BillingUnknown || s.Err == "" {
 		t.Errorf("got %+v want BillingUnknown with non-empty Err", s)
+	}
+}
+
+// TestAqpProvider_Quota_SessionExpired: a 401 "Session expired" (aged-out SSO
+// cookie) returns an envelope with no retcode/data. Pre-fix this fell through to
+// the misleading "monthly usage response missing data"; now it must surface a
+// clear session-expired + re-login error. Asserts the exact markers so a
+// regression that drops the status check turns the test red.
+func TestAqpProvider_Quota_SessionExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"Session expired"}`))
+	}))
+	defer srv.Close()
+	store := filepath.Join(t.TempDir(), "aqp_oauth_auth.json")
+	writeAqpStore(t, store, "proj-1")
+	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store, AqpBaseURL: srv.URL}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Billing != BillingUnknown {
+		t.Errorf("Billing=%v want BillingUnknown", s.Billing)
+	}
+	if s.Err == "" {
+		t.Fatal("Err is empty - 401 should produce a non-empty error")
+	}
+	for _, want := range []string{"session expired", "401", "re-login"} {
+		if !strings.Contains(s.Err, want) {
+			t.Errorf("Err=%q missing %q", s.Err, want)
+		}
+	}
+	// Must NOT be the pre-fix misleading message.
+	if strings.Contains(s.Err, "missing data") {
+		t.Errorf("Err=%q should not be the misleading 'missing data' message", s.Err)
 	}
 }
 

@@ -48,6 +48,35 @@ function fmtTime(s) {
   if (isNaN(d.getTime())) return String(s);
   return d.toLocaleTimeString('en-US', { hour12: false });
 }
+
+// hasReset reports whether s is a real reset time. Go's zero time.Time
+// serializes as "0001-01-01T00:00:00Z" - a truthy string, so a bare truthiness
+// check would render a bogus "resets …" for windows that never set ResetsAt
+// (e.g. deepseek's pay-as-you-go balance, which only has remaining quota).
+// Treat null/empty/invalid/year-1 (the zero sentinel) as "no reset".
+function hasReset(s) {
+  if (!s) return false;
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return false;
+  return d.getUTCFullYear() > 1;
+}
+
+// fmtReset renders a reset timestamp for the Usage "resets …" line. A reset can
+// be minutes, days, or weeks away, so a time-only format (HH:MM:SS) is wrong for
+// anything beyond today - it drops the date and looks like "today 23:59:59".
+// Mirrors the CLI's FormatResetAt: today -> "HH:MM", another day -> "MM-DD HH:MM".
+// Includes the remaining duration ("in 6d 3h") so a far reset is unambiguous.
+function fmtReset(s, now = Date.now()) {
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return String(s);
+  const sameDay = d.toLocaleDateString('en-CA') === new Date(now).toLocaleDateString('en-CA');
+  const abs = sameDay
+    ? d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
+    : `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })}`;
+  const ms = d.getTime() - now;
+  const dur = ms > 0 ? ` (in ${fmtDur(ms / 1000)})` : '';
+  return `${abs}${dur}`;
+}
 function fmtUnix(sec) {
   if (!sec) return '—';
   const d = new Date(sec * 1000);
@@ -345,9 +374,17 @@ function renderQuotaCard(st) {
   for (const name of names) {
     const snap = quota[name];
     if (!snap || snap.Err) {
+      // Collapse the (often CLI-shaped, long) provider error to a scan-friendly
+      // label here - the Accounts tab carries the actionable detail + Re-login.
+      let lbl = 'no data';
+      if (snap && snap.Err) {
+        const k = quotaErrKind(snap);
+        lbl = k === 'session-expired' ? 'session expired'
+          : k === 'not-logged-in' ? 'not logged in' : 'error';
+      }
       rows += `<div class="bar-row"><div class="bar-label">
         <span class="name">${esc(name)}</span>
-        <span class="pct">${snap && snap.Err ? esc(snap.Err) : 'no data'}</span>
+        <span class="pct">${esc(lbl)}</span>
       </div></div>`;
       continue;
     }
@@ -357,7 +394,7 @@ function renderQuotaCard(st) {
       const p = (w.RemainingPct != null && w.RemainingPct >= 0) ? w.RemainingPct : null;
       const fillCls = p == null ? '' : (p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err'));
       const ulg = w.Ultimate ? ' · ultimate' : (w.Short ? ' · short' : '');
-      const reset = w.ResetsAt ? `resets ${esc(fmtTime(w.ResetsAt))}` : '';
+      const reset = hasReset(w.ResetsAt) ? `resets ${esc(fmtReset(w.ResetsAt))}` : '';
       subBlock += `<div class="bar-row">
         <div class="bar-label">
           <span class="name">${esc(w.Label || 'quota')}${esc(ulg)}</span>
@@ -457,7 +494,7 @@ function renderLogsCard(lines) {
 // CONFIG TAB
 // ===========================================================================
 
-let configCache = null; // last /api/config response {yaml, summary}
+let configCache = null; // last /api/config response {yaml, summary, provider_models}
 
 async function renderConfigTab() {
   const panel = panels.config;
@@ -600,6 +637,19 @@ function buildProviderForm(editorId) {
        <datalist id="prov-list"></datalist>
        <span class="hint">Pick an existing provider to edit, or type a new name to add one.</span>
      </div>
+     <div class="field">
+       <label for="fld-provider_id">provider_id</label>
+       <select id="fld-provider_id" name="provider_id">
+         <option value=""></option>
+         <option value="aqp">aqp</option>
+         <option value="codex">codex</option>
+         <option value="zhipu">zhipu</option>
+         <option value="deepseek">deepseek</option>
+         <option value="volcengine">volcengine</option>
+         <option value="static">static</option>
+       </select>
+       <span class="hint">Required for a new provider. Selects the auth/rewrite implementation. static = no login (put the key in \`headers\` in the YAML editor).</span>
+     </div>
      <div class="field"><label for="fld-openai_base_url">openai_base_url</label><input id="fld-openai_base_url" name="openai_base_url" type="text"></div>
      <div class="field"><label for="fld-anthropic_base_url">anthropic_base_url</label><input id="fld-anthropic_base_url" name="anthropic_base_url" type="text" placeholder="optional override for /v1/messages"></div>
      <div class="field"><label for="fld-usage_url">usage_url</label><input id="fld-usage_url" name="usage_url" type="text"></div>
@@ -608,6 +658,10 @@ function buildProviderForm(editorId) {
          <option value="plan">plan</option>
          <option value="pay-as-you-go">pay-as-you-go</option>
        </select>
+     </div>
+     <div class="field"><label for="fld-models">models</label>
+       <textarea id="fld-models" name="models" rows="4" placeholder="one model per line (the upstream's real model id)&#10;e.g. glm-4.6&#10;glm-4.5-air"></textarea>
+       <span class="hint">The provider's model whitelist (matches \`models:\` in config). Empty = leave unchanged. Prefer \`models refresh <provider>\` to auto-fetch.</span>
      </div>
      <div class="row-actions">
        <button class="btn danger small" id="btn-prov-delete">Delete provider</button>
@@ -620,18 +674,58 @@ function buildProviderForm(editorId) {
   document.getElementById('btn-prov-delete').addEventListener('click', deleteProvider);
 }
 
+// providerAccounts caches /api/accounts providers so the provider form can
+// (a) detect an existing vs. new name and (b) prefill provider_id/billing when
+// editing. Refreshed by populateProviderDatalist on each form build.
+let providerAccounts = [];
+
 async function populateProviderDatalist() {
   try {
     const [st, acc] = await Promise.all([
       apiGet('/api/status').catch(() => null),
       apiGet('/api/accounts').catch(() => null),
     ]);
+    providerAccounts = (acc && acc.providers) || [];
     const names = new Set();
     if (st && st.health) Object.keys(st.health).forEach((n) => names.add(n));
-    if (acc && acc.providers) acc.providers.forEach((p) => names.add(p.name));
+    providerAccounts.forEach((p) => names.add(p.name));
     const dl = document.getElementById('prov-list');
     if (dl) dl.innerHTML = Array.from(names).sort().map((n) => `<option value="${esc(n)}">`).join('');
+    // Prefill provider_id/billing when the name input already matches an
+    // existing provider (e.g. the datalist was picked). Fires on every keystroke
+    // so the fields track the selected name.
+    const nameInp = document.getElementById('prov-name');
+    if (nameInp && !nameInp.dataset.wired) {
+      nameInp.dataset.wired = '1';
+      nameInp.addEventListener('input', prefillProviderForm);
+    }
+    prefillProviderForm();
   } catch (_) { /* best-effort */ }
+}
+
+// providerExists reports whether `name` is a configured provider (per the cached
+// /api/accounts list). Used to decide whether provider_id is required.
+function providerExists(name) {
+  return providerAccounts.some((p) => p.name === name);
+}
+
+// prefillProviderForm loads an existing provider's provider_id + billing + models
+// into the form fields when its name is entered, and clears them for a new name
+// so the user must pick a provider_id. Base URLs / usage_url aren't exposed by
+// /api/accounts, so those stay manual (the YAML editor covers full edits).
+// models come from /api/config's provider_models (cached in configCache).
+function prefillProviderForm() {
+  const name = (document.getElementById('prov-name').value || '').trim();
+  const p = providerAccounts.find((x) => x.name === name);
+  const pidSel = document.getElementById('fld-provider_id');
+  const billSel = document.getElementById('fld-billing');
+  const modelsInp = document.getElementById('fld-models');
+  if (pidSel) pidSel.value = p ? (p.provider_id || '') : '';
+  if (billSel) billSel.value = p ? (p.billing || 'plan') : 'plan';
+  if (modelsInp) {
+    const list = (configCache && configCache.provider_models && configCache.provider_models[name]) || [];
+    modelsInp.value = list.join('\n');
+  }
 }
 
 async function applyProviderEdit() {
@@ -640,10 +734,30 @@ async function applyProviderEdit() {
   const name = (document.getElementById('prov-name').value || '').trim();
   if (!name) { showMsg(msg, 'err', 'provider name required'); return; }
   const data = {};
+  // provider_id (select) + scalar text/select fields. provider_id is required
+  // for a new provider (config.validate rejects an empty provider_id); for an
+  // existing one it can be left unchanged, so we only send it when set.
+  const pidInp = document.getElementById('fld-provider_id');
+  const pid = (pidInp ? pidInp.value : '').trim();
+  if (pid) data.provider_id = pid;
+  const isNew = !providerExists(name);
+  if (isNew && !pid) {
+    showMsg(msg, 'err', 'provider_id is required for a new provider');
+    return;
+  }
   for (const fld of ['openai_base_url', 'anthropic_base_url', 'usage_url', 'billing']) {
     const inp = document.getElementById('fld-' + fld);
     const v = (inp ? inp.value : '').trim();
     if (v) data[fld] = v;
+  }
+  // models: textarea -> string array (one per line, blanks dropped). Only sent
+  // when non-empty so an untouched/blank field leaves the existing list intact
+  // (the prefill loads the current list, so editing is non-destructive). To
+  // clear a provider's models, use the YAML editor.
+  const modelsInp = document.getElementById('fld-models');
+  if (modelsInp) {
+    const models = modelsInp.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (models.length) data.models = models;
   }
   btn.disabled = true;
   showMsg(msg, 'ok', 'saving…');
@@ -836,87 +950,358 @@ async function saveConfigYAML() {
 // ACCOUNTS TAB
 // ===========================================================================
 
+// accountsData holds the last fetched snapshot backing the Accounts tab:
+//   providers - /api/accounts response (per-provider account list)
+//   quota     - /api/status .quota map, keyed by provider name (aqp/codex and
+//               1-entry pools) or virtual id "name#<accountId>" (multi-entry pools)
+//   tokens    - /api/tokens .usage array, keyed the same way per (provider, model)
+// accountsSelectedProvider is the sidebar selection, preserved across re-renders
+// (add/remove/tab-switch) so the user doesn't snap back to the first provider.
 let accountsCache = null;
+let accountsQuota = null;
+let accountsTokens = null;
+let accountsSelectedProvider = null;
 
+// renderAccountsTab fetches the account list + the quota + token snapshots in
+// parallel, then renders the provider sidebar + the selected provider's detail.
+// /api/status and /api/tokens are best-effort (a young daemon may have neither):
+// a failure degrades to "no usage data" / "no token usage" per account rather
+// than breaking the whole tab.
 async function renderAccountsTab() {
   const panel = panels.accounts;
-  panel.innerHTML = `<div id="acc-msg"></div><div class="grid cols-2" id="acc-grid"><div class="card-body"><span class="msg">loading…</span></div></div>`;
+  panel.innerHTML = `<div class="acct-tab-head"><div id="acc-msg"></div></div>
+    <div class="accounts-layout">
+    <nav class="acct-nav" aria-label="Providers"><span class="msg">loading…</span></nav>
+    <div class="acct-main"></div>
+  </div>`;
   try {
-    const acc = await apiGet('/api/accounts');
+    const [acc, st, tok] = await Promise.all([
+      apiGet('/api/accounts'),
+      apiGet('/api/status').catch(() => null),
+      apiGet('/api/tokens').catch(() => ({ usage: [] })),
+    ]);
     accountsCache = acc;
-    renderAccountsGrid(acc.providers || []);
+    accountsQuota = (st && st.quota) || {};
+    accountsTokens = (tok && tok.usage) || [];
+    renderAccountsNav(acc.providers || []);
   } catch (e) {
     setConn('err');
     showMsg(document.getElementById('acc-msg'), 'err', e.message);
   }
 }
 
-function renderAccountsGrid(providers) {
-  const grid = document.getElementById('acc-grid');
-  if (!grid) return;
+// refreshAccountUsage re-polls ONE account's quota (POST /api/quota/refresh
+// {provider: <key>} -> pollOne, which retries transient errors) then re-fetches
+// /api/status and re-renders the selected provider's detail so the Usage
+// section shows the fresh snapshot. The clicked button is disabled + shows a
+// spinner while the poll runs (it blocks until that provider responds).
+async function refreshAccountUsage(btn, p) {
+  const key = btn.dataset.refresh;
+  if (!key) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'refreshing…';
+  try {
+    await apiPost('/api/quota/refresh', { provider: key });
+    const st = await apiGet('/api/status').catch(() => null);
+    if (st && st.quota) accountsQuota = st.quota;
+    // Re-render the detail pane with the fresh snapshot (keeps the same
+    // provider selected; selectProvider re-wires the buttons with a fresh,
+    // enabled Refresh button - so no manual reset is needed on success).
+    selectProvider(accountsSelectedProvider);
+  } catch (e) {
+    // On failure the pane was NOT re-rendered, so reset the clicked button.
+    btn.disabled = false;
+    btn.textContent = orig;
+    showMsg(document.getElementById('acc-msg'), 'err', 'refresh failed: ' + e.message);
+  }
+}
+
+// renderAccountsNav builds the left sidebar (sorted providers + account-count
+// badges) and wires selection. If the previously selected provider is gone
+// (e.g. removed), falls back to the first.
+function renderAccountsNav(providers) {
+  const nav = document.querySelector('.acct-nav');
+  if (!nav) return;
   const sorted = providers.slice().sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  const main = document.querySelector('.acct-main');
   if (sorted.length === 0) {
-    grid.innerHTML = `<div class="card"><div class="empty-state">No providers configured. Add one in <code>config.yaml</code> first.</div></div>`;
+    nav.innerHTML = `<div class="acct-nav-title">Providers</div>
+      <div class="acct-empty">No providers configured. Add one in <code>config.yaml</code> first.</div>`;
+    if (main) main.innerHTML = '';
+    accountsSelectedProvider = null;
     return;
   }
-  grid.innerHTML = sorted.map(providerAccountsCard).join('');
-  // Wire Add buttons.
-  for (const p of sorted) {
-    const add = document.getElementById(`add-${cssEscape(p.name)}`);
-    if (add) add.addEventListener('click', () => openAddFor(p));
+  nav.innerHTML = `<div class="acct-nav-title">Providers</div>` +
+    sorted.map((p) => {
+      const n = (p.accounts || []).length;
+      const active = p.name === accountsSelectedProvider ? ' active' : '';
+      return `<button class="acct-nav-item${active}" data-provider="${esc(p.name)}">
+        <span class="acct-nav-name">${esc(p.name)}</span>
+        <span class="badge ${n === 0 ? 'muted' : ''}">${n}</span>
+      </button>`;
+    }).join('');
+  nav.querySelectorAll('.acct-nav-item').forEach((b) => {
+    b.addEventListener('click', () => selectProvider(b.dataset.provider));
+  });
+  if (!accountsSelectedProvider || !sorted.some((p) => p.name === accountsSelectedProvider)) {
+    accountsSelectedProvider = sorted[0].name;
   }
-  // Wire Remove buttons.
-  document.querySelectorAll('[data-remove]').forEach((b) => {
+  selectProvider(accountsSelectedProvider);
+}
+
+// selectProvider highlights the sidebar item and renders that provider's
+// account list (toolbar with Add + per-account cards). Only the .acct-main pane
+// is re-rendered, so the sidebar stays wired and the scroll position is reset
+// only for the detail.
+function selectProvider(name) {
+  accountsSelectedProvider = name;
+  document.querySelectorAll('.acct-nav-item').forEach((b) => {
+    b.classList.toggle('active', b.dataset.provider === name);
+  });
+  const providers = (accountsCache && accountsCache.providers) || [];
+  const p = providers.find((x) => x.name === name);
+  const main = document.querySelector('.acct-main');
+  if (!main) return;
+  if (!p) { main.innerHTML = ''; return; }
+  // Capture which <details> sections are open BEFORE the re-render wipes them,
+  // so we can restore the open state after (e.g. a Refresh-usage click re-renders
+  // the pane - an expanded Usage section should stay expanded, not collapse).
+  const openSecs = new Set();
+  main.querySelectorAll('details.acct-section[open]').forEach((d) => {
+    openSecs.add((d.dataset.acct || '') + '/' + (d.dataset.sec || ''));
+  });
+  main.innerHTML = renderProviderDetail(p, accountsQuota, accountsTokens);
+  if (openSecs.size) {
+    main.querySelectorAll('details.acct-section').forEach((d) => {
+      if (openSecs.has((d.dataset.acct || '') + '/' + (d.dataset.sec || ''))) {
+        d.open = true;
+      }
+    });
+  }
+  const add = main.querySelector('[data-add]');
+  if (add) add.addEventListener('click', () => openAddFor(p));
+  main.querySelectorAll('[data-remove]').forEach((b) => {
     b.addEventListener('click', () => removeAccount(b.dataset.provider, b.dataset.remove, b.dataset.label));
+  });
+  // Per-account "Refresh usage" - re-polls just this account's provider key
+  // (a config name or "name#<accountID>") and re-renders the detail pane.
+  main.querySelectorAll('[data-refresh]').forEach((b) => {
+    b.addEventListener('click', () => refreshAccountUsage(b, p));
+  });
+  // Re-login buttons appear on session-expired / not-logged-in aqp/codex
+  // accounts - they reuse the same async login flow as Add account (aqp is
+  // single-credential, so re-login overwrites the stale SSO cookie in place).
+  main.querySelectorAll('[data-relogin]').forEach((b) => {
+    b.addEventListener('click', () => startAsyncLogin(p.name, p.provider_id));
   });
 }
 
-// cssEscape is a tiny id sanitizer (provider names are config keys: usually
-// [a-z0-9_-]+). We use this to build unique button ids without depending on
-// the CSS.escape API.
-function cssEscape(s) {
-  return String(s).replace(/[^a-zA-Z0-9_-]/g, '_');
+// renderProviderDetail builds the right pane: a toolbar (provider name + meta +
+// Add button) and the list of account cards (or an empty-state prompt).
+function renderProviderDetail(p, quota, tokens) {
+  const meta = `${esc(p.provider_id || '?')}${p.billing ? ' · ' + esc(p.billing) : ''}`;
+  const accounts = p.accounts || [];
+  const body = accounts.length === 0
+    ? `<div class="empty-state">No account configured. Click <strong>Add</strong> to sign in.</div>`
+    : accounts.map((a) => accountCard(p, a, quota, tokens)).join('');
+  return `<div class="acct-toolbar">
+      <div class="acct-toolbar-title">
+        <h2>${esc(p.name)}</h2>
+        <span class="meta">${meta}</span>
+      </div>
+      <button class="btn small" data-add data-provider="${esc(p.name)}">+ Add account</button>
+    </div>
+    <div class="acct-list">${body}</div>`;
 }
 
-function providerAccountsCard(p) {
-  const id = cssEscape(p.name);
-  const isOauth = p.provider_id === 'aqp' || p.provider_id === 'codex';
-  let rows = '';
-  if (!p.accounts || p.accounts.length === 0) {
-    rows = `<div class="empty-state">No account configured. Click <strong>Add</strong> to sign in.</div>`;
-  } else {
-    for (const a of p.accounts) {
-      const label = a.label || a.id;
-      const sub = `id: ${a.id || '—'}`;
-      const added = a.added_at ? ` · added ${esc(fmtTime(a.added_at))}` : '';
-      const mail = a.email ? `<div class="acct-mail">${esc(a.email)}</div>` : '';
-      rows += `<div class="account-row">
-        <div>
-          <div class="acct-label">${esc(label)}</div>
-          <div class="acct-sub">${esc(sub)}${added}</div>
-          ${mail}
-        </div>
-        <div class="row-actions">
-          <button class="btn danger small" data-remove="${esc(a.id)}"
-                  data-provider="${esc(p.name)}" data-label="${esc(label)}">Remove</button>
-        </div>
+// accountProviderKey maps an account to the provider key under which its quota
+// (status.quota) and token usage (/api/tokens) are recorded. aqp/codex are
+// single-credential (plain name); a pooled provider with >=2 accounts keys each
+// as "name#<accountId>" (virtual id); a 1-entry pool uses the plain name.
+// Mirrors buildProviders (proxy.go) + the token-commit key (t.Provider).
+function accountProviderKey(p, a) {
+  const pooled = p.provider_id !== 'aqp' && p.provider_id !== 'codex';
+  if (pooled && (p.accounts || []).length >= 2) return p.name + '#' + a.id;
+  return p.name;
+}
+
+// accountCard renders one account: the existing info row (label / id / added /
+// email / Remove) plus two collapsible <details> sections - Usage (the polled
+// quota snapshot) and Token usage (per-model counters) - both scoped to this
+// account's provider key.
+function accountCard(p, a, quota, tokens) {
+  const key = accountProviderKey(p, a);
+  const label = a.label || a.id;
+  const sub = `id: ${a.id || '-'}`;
+  const added = a.added_at ? ` · added ${esc(fmtTime(a.added_at))}` : '';
+  const mail = a.email ? `<div class="acct-mail">${esc(a.email)}</div>` : '';
+  const snap = quota ? quota[key] : null;
+  const tokRows = (tokens || []).filter((t) => t.provider === key);
+  return `<section class="card acct-card">
+    <div class="account-row acct-card-head">
+      <div>
+        <div class="acct-label">${esc(label)}</div>
+        <div class="acct-sub">${esc(sub)}${added}</div>
+        ${mail}
+      </div>
+      <div class="row-actions">
+        <button class="btn small" data-refresh="${esc(key)}" title="Re-poll this account's quota now">Refresh usage</button>
+        <button class="btn danger small" data-remove="${esc(a.id)}"
+                data-provider="${esc(p.name)}" data-label="${esc(label)}">Remove</button>
+      </div>
+    </div>
+    <div class="acct-sections">
+      ${accountUsageDetails(p, snap, key)}
+      ${accountTokensDetails(tokRows, key)}
+    </div>
+  </section>`;
+}
+
+// accountUsageDetails wraps the per-account quota snapshot in a collapsible
+// section. The summary hint previews the state (remaining %, plan, or "no data")
+// so the user can scan without expanding.
+function accountUsageDetails(p, snap, acctKey) {
+  let hint = 'no data';
+  if (snap && snap.Err) {
+    const k = quotaErrKind(snap);
+    hint = k === 'session-expired' ? 'session expired'
+      : k === 'not-logged-in' ? 'not logged in' : 'error';
+  } else if (snap) {
+    const ult = (snap.Windows || []).find((w) => w.Ultimate);
+    if (ult && ult.RemainingPct != null && ult.RemainingPct >= 0) {
+      // Same 1-decimal precision as the expanded window's pct (renderAccountUsage)
+      // so the collapsed hint and the expanded bar agree (e.g. both "48.6%", not
+      // "49%" vs "48.6%").
+      hint = (ult.RemainingPct * 100).toFixed(1) + '% left';
+    } else if (snap.Plan) {
+      hint = snap.Plan;
+    } else {
+      hint = 'available';
+    }
+  }
+  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="usage">
+    <summary>Usage<span class="acct-hint">${esc(hint)}</span></summary>
+    <div class="acct-section-body">${renderAccountUsage(p, snap)}</div>
+  </details>`;
+}
+
+// accountTokensDetails wraps the per-account token counters in a collapsible
+// section. The summary hint previews the model count + request total.
+function accountTokensDetails(rows, acctKey) {
+  let totalReqs = 0;
+  for (const r of rows) totalReqs += Number(r.requests || 0);
+  const hint = rows.length
+    ? `${rows.length} model${rows.length > 1 ? 's' : ''} · ${fmtNum(totalReqs)} req`
+    : 'no usage';
+  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="tokens">
+    <summary>Token usage<span class="acct-hint">${esc(hint)}</span></summary>
+    <div class="acct-section-body">${renderAccountTokens(rows)}</div>
+  </details>`;
+}
+
+// renderAccountUsage renders the quota snapshot body: account/plan/level head,
+// provider notes, and each window as a bar-row (reusing the Status tab's quota
+// bar rendering). An absent snapshot (pay-as-you-go / not polled) or an Err
+// yields a graceful inline message. Per-window Details (e.g. volcengine
+// by-model spend) are shown compactly when present.
+//
+// For SSO/OAuth providers (aqp/codex) a session-expired or not-logged-in error
+// renders a Re-login button instead of the bare error text (the Web UI runs its
+// own login flow via startAsyncLogin; the CLI-shaped error hint is useless in a
+// browser). p may be null when the provider context is unavailable (Status tab
+// reuses the bar rendering without an account context) - then the bare error is
+// shown.
+function quotaErrKind(snap) {
+  if (!snap || !snap.Err) return '';
+  const e = snap.Err.toLowerCase();
+  if (e.includes('session expired')) return 'session-expired';
+  if (e.includes('not logged in')) return 'not-logged-in';
+  return 'error';
+}
+
+function renderAccountUsage(p, snap) {
+  if (!snap) return `<div class="acct-empty">no usage data</div>`;
+  if (snap.Err) {
+    const canRelogin = p && (p.provider_id === 'aqp' || p.provider_id === 'codex');
+    const k = quotaErrKind(snap);
+    if (canRelogin && (k === 'session-expired' || k === 'not-logged-in')) {
+      const label = k === 'session-expired' ? 'Session expired' : 'Not logged in';
+      const verb = k === 'session-expired' ? 'Re-login' : 'Sign in';
+      return `<div class="acct-empty acct-err">${label} - <button type="button" class="link-btn" data-relogin>${verb}</button></div>`;
+    }
+    return `<div class="acct-empty acct-err">${esc(snap.Err)}</div>`;
+  }
+  const bits = [];
+  if (snap.Account) bits.push(esc(snap.Account));
+  if (snap.Plan) bits.push(esc(snap.Plan));
+  if (snap.Level) bits.push(esc(snap.Level));
+  const head = bits.length ? `<div class="acct-quota-head">${bits.join(' · ')}</div>` : '';
+  let notes = '';
+  if (snap.Notes && snap.Notes.length) {
+    notes = `<div class="acct-notes">${snap.Notes.map((n) => `<div>${esc(n)}</div>`).join('')}</div>`;
+  }
+  const windows = snap.Windows || [];
+  let bars = '';
+  for (const w of windows) {
+    const p = (w.RemainingPct != null && w.RemainingPct >= 0) ? w.RemainingPct : null;
+    const fillCls = p == null ? '' : (p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err'));
+    const ulg = w.Ultimate ? ' · ultimate' : (w.Short ? ' · short' : '');
+    const reset = hasReset(w.ResetsAt) ? `resets ${esc(fmtReset(w.ResetsAt))}` : '';
+    bars += `<div class="bar-row">
+      <div class="bar-label">
+        <span class="name">${esc(w.Label || 'quota')}${esc(ulg)}</span>
+        <span class="pct">${p == null ? (w.Total > 0 ? fmtNum(w.Total) : '-') : (p * 100).toFixed(1) + '%'}</span>
+      </div>
+      <div class="bar-track"><div class="bar-fill ${fillCls}" style="width:${p == null ? 0 : Math.max(0, Math.min(1, p)) * 100}%"></div></div>
+      ${reset ? `<div class="bar-meta">${reset}</div>` : ''}
+    </div>`;
+    if (w.Details && w.Details.length && w.DetailLabel) {
+      bars += `<div class="acct-detail">
+        <div class="acct-detail-label">${esc(w.DetailLabel)}</div>
+        ${w.Details.map((d) => `<div class="acct-detail-row"><span>${esc(d.Label)}</span><span class="mono">${fmtNum(d.Used)}</span></div>`).join('')}
       </div>`;
     }
   }
-  const addKind = isOauth ? 'oauth' : 'apikey';
-  return `<section class="card">
-    <header class="card-head">
-      <h2>${esc(p.name)}</h2>
-      <span class="meta">${esc(p.provider_id || '?')}${p.billing ? ' · ' + esc(p.billing) : ''}</span>
-    </header>
-    <div class="card-body flush">
-      ${rows}
-      <div class="row-actions" style="padding: 10px 14px;">
-        <span class="spacer"></span>
-        <button class="btn small" id="add-${esc(id)}" data-add-kind="${addKind}" data-provider="${esc(p.name)}" data-provider-id="${esc(p.provider_id || '')}">Add account</button>
-      </div>
-    </div>
-  </section>`;
+  if (!bars) bars = `<div class="acct-empty">no quota windows</div>`;
+  return head + notes + bars;
+}
+
+// renderAccountTokens renders the per-account token table (sorted by model)
+// with a totals row. Empty -> inline message.
+function renderAccountTokens(rows) {
+  if (!rows || rows.length === 0) return `<div class="acct-empty">no token usage observed</div>`;
+  const sorted = rows.slice().sort((a, b) => (a.model || '').localeCompare(b.model || ''));
+  let tIn = 0, tOut = 0, tCC = 0, tCR = 0, tReq = 0;
+  let trs = '';
+  for (const r of sorted) {
+    tIn += Number(r.input || 0); tOut += Number(r.output || 0);
+    tCC += Number(r.cache_creation || 0); tCR += Number(r.cache_read || 0);
+    tReq += Number(r.requests || 0);
+    trs += `<tr>
+      <td class="mono">${esc(r.model || '-')}</td>
+      <td class="num">${fmtNum(r.input)}</td>
+      <td class="num">${fmtNum(r.output)}</td>
+      <td class="num">${fmtNum(r.cache_creation)}</td>
+      <td class="num">${fmtNum(r.cache_read)}</td>
+      <td class="num">${fmtNum(r.requests)}</td>
+    </tr>`;
+  }
+  trs += `<tr class="acct-totals">
+    <td>total</td>
+    <td class="num">${fmtNum(tIn)}</td>
+    <td class="num">${fmtNum(tOut)}</td>
+    <td class="num">${fmtNum(tCC)}</td>
+    <td class="num">${fmtNum(tCR)}</td>
+    <td class="num">${fmtNum(tReq)}</td>
+  </tr>`;
+  return `<table class="table acct-tokens">
+    <thead><tr>
+      <th>model</th><th class="num">input</th><th class="num">output</th>
+      <th class="num">cache create</th><th class="num">cache read</th><th class="num">requests</th>
+    </tr></thead>
+    <tbody>${trs}</tbody>
+  </table>`;
 }
 
 // removeAccount confirms then DELETEs /api/accounts/<provider>/<id>.

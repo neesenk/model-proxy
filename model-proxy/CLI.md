@@ -76,7 +76,12 @@ model-proxy daemonized: supervisor pid=<PID> log=<LOGFILE> pidfile=<PIDFILE>
   stop with: kill -TERM <PID>  (or kill -TERM $(cat <PIDFILE>))
 ```
 
-失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 无 log_file / 启动 supervisor 失败）。
+失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 无 log_file / 启动 supervisor 失败 / **已有 daemon 在运行**）。
+
+已有 daemon 在运行（pid 文件指向活进程）时拒绝启动，避免第二个 supervisor 覆盖 pid 文件后 `serve stop` 停错进程、原 daemon 变孤儿：
+```
+model-proxy is already running (supervisor pid=<PID>); use `serve stop` first, or `serve status` to inspect
+```
 
 ### `serve stop` 输出
 
@@ -279,6 +284,8 @@ Provider:   <PROVNAME>
 |---|---|
 | aqp (`showAqpUsage`) | `Account:    <EMAIL>`；`Project ID: <ID>`；`Usage:      [<BAR>] <PCT>% used · $<USAGE> / $<TOTAL>  (balance $<BAL>, <PLAN>, <YEAR>-<MONTH>)`；`Store:      <PATH>` |
 | codex (`showCodexUsage`) | `Account:   <EMAIL|"(unknown)">`；`Plan:      <PLAN_TYPE>`；`Credits:   unlimited`/`has credits (<BAL>)`/`none`；`Rate Limit:` 状态；`Usage:` `limit reached` 或 `[<BAR>] <PCT>% used · <USED> / <TOTAL> credits, resets <DUR>` |
+
+> `<PCT>` 为已用百分比，统一保留小数点后一位（如 `56.8%`、`25.0%`）。
 | zhipu (`showGenericUsage`) | 5h/weekly token 限额 + 月度时间限额（带进度条）；`TIME_LIMIT` 按 MCP 工具（search-prime/web-reader/zread）分解；回退：OpenAI 风格模型列表 |
 | deepseek (`showDeepseekUsage`) | `Available:  no (insufficient balance)`（余额不足时）；各币种 `total/granted/topped-up` 余额 |
 | volcengine (`showVolcengineUsage`) | 无 AK/SK：`Note:` 说明 + 列 config 模型；有 AK/SK：`Plan: <PLAN_TYPE>` + `AFPFiveHour/Daily/Weekly/Monthly` 各窗口 Quota/Used/Remaining/ResetTime |
@@ -493,7 +500,7 @@ model-proxy  v<VERSION> · <UPTIME> · <LISTEN>
   <NAME>[ · <ACCOUNT>][ · <PLAN>]
       <LABEL>[(ultimate)|(short)]  <PCT%|->  <BAR(16)>  resets <RESET_AT>
 ```
-`q.Err` 非空 -> `      no data (<ERR>)`(dim)。`<BAR>` = `progressBar(usedPct, 16)`。`resets` 仅当 `ResetsAt` 非零（`formatResetAt`）。
+`q.Err` 非空 -> `      no data (<ERR>)`(dim)。`<BAR>` = `progressBar(usedPct, 16)`。`<PCT>` 为已用百分比，保留小数点后一位（如 `40.0%`）。`resets` 仅当 `ResetsAt` 非零（`formatResetAt`）。
 
 **implicit-route warnings**（仅当有 `st.Warnings`）：
 ```

@@ -77,6 +77,24 @@ func (p *AqpProvider) fetchMonthlyUsage() (*MonthlyProjectUsage, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	// A non-200 (e.g. 401 "Session expired" when the SSO cookie has aged out)
+	// returns an envelope with no retcode/data - without this check it falls
+	// through to the misleading "missing data" error. Surface the real cause +
+	// a re-login hint so both `usage aqp` and the scheduler's Quota() poll
+	// report an expired session correctly instead of a confusing "no data".
+	if resp.StatusCode != 200 {
+		var e struct {
+			Message string `json:"message"`
+		}
+		msg := Truncate(string(body), 120)
+		if json.Unmarshal(body, &e) == nil && e.Message != "" {
+			msg = e.Message
+		}
+		if resp.StatusCode == 401 || strings.Contains(strings.ToLower(msg), "session") {
+			return nil, fmt.Errorf("session expired (HTTP %d): %s - re-login: `model-proxy login aqp`", resp.StatusCode, msg)
+		}
+		return nil, fmt.Errorf("monthly usage HTTP %d: %s", resp.StatusCode, msg)
+	}
 	var wrap struct {
 		Retcode int             `json:"retcode"`
 		Message string          `json:"message"`

@@ -51,7 +51,7 @@ func TestAqpUsage_Parsed(t *testing.T) {
 	writeAqpStore(t, store, "proj-1")
 	p := &AqpProvider{cfg: &Config{OAuthAuthFile: store, AqpBaseURL: srv.URL}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
-	for _, want := range []string{"aqp", "a@b.com", "proj-1", "57% used", "$141.93", "cqp", "2026-07"} {
+	for _, want := range []string{"aqp", "a@b.com", "proj-1", "56.8% used", "$141.93", "cqp", "2026-07"} {
 		if !contains(out, want) {
 			t.Errorf("aqp usage parsed missing %q:\n%s", want, out)
 		}
@@ -89,7 +89,7 @@ func TestCodexUsage_Parsed(t *testing.T) {
 	defer srv.Close()
 	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
-	for _, want := range []string{"codex", "a@b.com", "pro", "has credits", "Rate Limit:", "25% used", "5 / 20 credits"} {
+	for _, want := range []string{"codex", "a@b.com", "pro", "has credits", "Rate Limit:", "25.0% used", "5 / 20 credits"} {
 		if !contains(out, want) {
 			t.Errorf("codex usage missing %q:\n%s", want, out)
 		}
@@ -127,7 +127,7 @@ func TestZhipuUsage_Quota(t *testing.T) {
 	defer srv.Close()
 	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}, providerName: "zhipu"}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
-	for _, want := range []string{"zhipu", "GLM Coding Plan", "5h tokens", "40% used"} {
+	for _, want := range []string{"zhipu", "GLM Coding Plan", "5h tokens", "40.0% used"} {
 		if !contains(out, want) {
 			t.Errorf("zhipu usage missing %q:\n%s", want, out)
 		}

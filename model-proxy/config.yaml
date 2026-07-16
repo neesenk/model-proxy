@@ -26,7 +26,6 @@ providers:
       - glm-5.2
       - deepseek-v4-pro
       - deepseek-v4-flash
-
   codex:
     provider_id: codex
     openai_base_url: https://chatgpt.com/backend-api/codex
@@ -36,7 +35,6 @@ providers:
       - gpt-5.5
       - gpt-5.6-sol
       - gpt-5.6-terra
-
   # External provider (Zhipu BigModel — API key via `login zhipu`)
   # /models endpoint only lists 8 chat models; multimodal models exist but
   # must be added manually here (they use different API paths). Metadata
@@ -57,7 +55,6 @@ providers:
       - glm-5-turbo
       - glm-5.1
       - glm-5.2
-
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
@@ -93,6 +90,18 @@ providers:
       - kimi-k2.7-code
       - minimax-m2.7
       - minimax-m3
+  shopee:
+    provider_id: static
+    openai_base_url: https://compass.llm.shopee.io/compass-api/v1
+    billing: pay-as-you-go
+    models:
+      - deepseek-v4-flash
+      - deepseek-v4-pro
+      - glm-5.1
+      - glm-5.2
+      - kimi-k2.7-code
+      - kimi-k2.6
+      - minimax-m3
 
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called
@@ -104,8 +113,6 @@ claude_mapping:
   claude-haiku-4-5: deepseek-v4-flash
   opus: glm-5.2
   sonnet: deepseek-v4-pro
-
-
 # routes: exposed model name → ordered list of provider/model targets. The proxy
 # orders targets by billing tier (plan < unknown < pay-as-you-go), then priority
 # (lower wins), then quota surplus; applies session-sticky routing + circuit-
@@ -119,19 +126,33 @@ routes:
     - {provider: zhipu, model: glm-5.2, priority: 1}
     - {provider: volcengine, model: glm-5.2, priority: 1}
     - {provider: aqp, model: glm-5.2, priority: 2}
+    - {provider: shopee, model: glm-5.2, priority: 3}
+  glm-5.1:
+    - {provider: zhipu, model: glm-5.1, priority: 1}
+    - {provider: shopee, model: glm-5.1, priority: 3}
   deepseek-v4-pro:
     - {provider: volcengine, model: deepseek-v4-pro, priority: 1}
     - {provider: aqp, model: deepseek-v4-pro, priority: 1}
-    - {provider: deepseek, model: deepseek-v4-pro, priority: 2}
+    - {provider: shopee, model: deepseek-v4-pro, priority: 2}
+    - {provider: deepseek, model: deepseek-v4-pro, priority: 3}
   deepseek-v4-flash:
     - {provider: volcengine, model: deepseek-v4-flash, priority: 1}
     - {provider: aqp, model: deepseek-v4-flash, priority: 1}
-    - {provider: deepseek, model: deepseek-v4-flash, priority: 2}
+    - {provider: shopee, model: deepseek-v4-flash, priority: 2}
+    - {provider: deepseek, model: deepseek-v4-flash, priority: 3}
+  kimi-k2.7-code:
+    - {provider: volcengine, model: kimi-k2.7-code, priority: 1}
+    - {provider: shopee, model: kimi-k2.7-code, priority: 3}
+  kimi-k2.6:
+    - {provider: volcengine, model: kimi-k2.6, priority: 1}
+    - {provider: shopee, model: kimi-k2.6, priority: 3}
+  minimax-m3:
+    - {provider: volcengine, model: minimax-m3, priority: 1}
+    - {provider: shopee, model: minimax-m3, priority: 3}
   gpt-5.5:
     - {provider: codex, model: gpt-5.5, priority: 1}
   gpt-5.4:
     - {provider: codex, model: gpt-5.4, priority: 1}
-
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.
 # scheduling:
@@ -142,7 +163,6 @@ routes:
 #   sticky_dwell: 10m # (default 10m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m # (default 5m) background quota poll cadence
 #   quota_switch_margin: 15 # (default 15) switch provider if another's effective remaining beats current by >= this many pct points
-
 takeover:
   # provider_id is the single identifier used by takeover for every agent that
   # takes one (opencode, pi, codex, future agents). claude doesn't use it.

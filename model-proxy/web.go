@@ -125,6 +125,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleTokens(resp, r)
 	case path == "/api/tokens/reset" && r.Method == http.MethodPost:
 		w.handleTokensReset(resp, r)
+	case path == "/api/quota/refresh" && r.Method == http.MethodPost:
+		w.handleQuotaRefresh(resp, r)
 	case path == "/api/stats" && r.Method == http.MethodGet:
 		w.handleStats(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodPost:
@@ -259,9 +261,11 @@ func tailFile(path string, n int) ([]string, error) {
 // struct has NO field for api_key / access_key / secret_key / SSO cookie, so
 // even a programming mistake in the builder can't serialize one. The account
 // id is emitted UNMASKED — the UI needs the real id to remove an account
-// (masking would break deletion). For aqp/codex (oauth_auth.json, AccountData
-// shape) we surface email + account_id; for pooled apikey providers we surface
-// {id, label, added_at} from the pool.
+// (masking would break deletion). aqp (oauth_auth.json, AqpAccountData shape)
+// surfaces email + account_id + created_at; codex (oauth_auth.json,
+// CodexAuthFile shape - tokens.account_id + id_token JWT, NO top-level email)
+// surfaces account_id + email parsed from the id_token; pooled apikey
+// providers surface {id, label, added_at} from the pool.
 func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request) {
 	w.p.mu.RLock()
 	providers := w.p.cfg.Providers
@@ -283,11 +287,10 @@ func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request
 	for name, pcfg := range providers {
 		p := prov{Name: name, ProviderID: pcfg.Provider, Billing: pcfg.Billing, Accounts: []acct{}}
 		switch pcfg.Provider {
-		case "aqp", "codex":
-			// oauth_auth.json holds AccountData (email + account_id + SSO cookie).
-			// Only email + account_id are surfaced — the SSO cookie is never copied
-			// into the response struct. Guard against empty AccountID so a
-			// differently-shaped codex file doesn't yield a bogus empty entry.
+		case "aqp":
+			// oauth_auth.json holds AqpAccountData (email + account_id + SSO
+			// cookie). Only email + account_id + created_at are surfaced - the
+			// SSO cookie is never copied into the response struct.
 			a, _ := provider.LoadAqpAccount(authFilePath(name, "oauth_auth"))
 			if a != nil && a.AccountID != "" {
 				p.Accounts = []acct{{
@@ -295,6 +298,21 @@ func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request
 					Label:   a.Email,
 					AddedAt: time.Unix(a.CreatedAt, 0).UTC().Format(time.RFC3339),
 					Email:   a.Email,
+				}}
+			}
+		case "codex":
+			// codex_oauth_auth.json holds CodexAuthFile (tokens.account_id +
+			// id_token JWT). account_id + email are parsed from the file
+			// (email from the id_token's `email` claim); access/refresh/id
+			// tokens have no field on `acct` and so cannot leak. Guard against
+			// an empty AccountID (no stored field AND no parseable id_token)
+			// so a degenerate file doesn't yield a bogus empty entry.
+			c, _ := provider.LoadCodexAccount(authFilePath(name, "oauth_auth"))
+			if c != nil && c.AccountID != "" {
+				p.Accounts = []acct{{
+					ID:    c.AccountID,
+					Label: c.Email,
+					Email: c.Email,
 				}}
 			}
 		default:
@@ -337,6 +355,37 @@ func (w *webServer) handleTokens(resp http.ResponseWriter, r *http.Request) {
 func (w *webServer) handleTokensReset(resp http.ResponseWriter, r *http.Request) {
 	w.p.resetStats()
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "reset"})
+}
+
+// handleQuotaRefresh triggers an immediate quota re-poll so the Web UI's Usage
+// sections can be refreshed on demand instead of waiting for the next poll
+// interval. With an empty body it polls every provider (pollAll); with a
+// {"provider":"<key>"} body it polls just that one account's provider key
+// (pollOne) - the key is a config name or a pooled-account virtual id
+// "name#<accountID>" (mirrors accountProviderKey / the quota snapshot map). The
+// poll runs synchronously - fetchQuota blocks until Quota() returns (including
+// transient-error retries) and persists - so the caller can re-fetch
+// /api/status right after and see the fresh snapshot. A nil quota tracker
+// (degenerate test Proxy) is a no-op 200. An unknown provider key is a 404.
+func (w *webServer) handleQuotaRefresh(resp http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider,omitempty"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // empty body is valid -> refresh all
+	if w.p.quota == nil {
+		writeJSON(resp, http.StatusOK, map[string]string{"status": "refreshed"})
+		return
+	}
+	if req.Provider != "" {
+		if !w.p.quota.pollOne(req.Provider) {
+			writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+req.Provider)
+			return
+		}
+		writeJSON(resp, http.StatusOK, map[string]string{"status": "refreshed", "provider": req.Provider})
+		return
+	}
+	w.p.quota.pollAll(time.Now())
+	writeJSON(resp, http.StatusOK, map[string]string{"status": "refreshed"})
 }
 
 // handleStats returns per-(provider, model) bucket rows from the SQLite store
@@ -822,6 +871,13 @@ func (w *webServer) handleConfigGet(resp http.ResponseWriter, r *http.Request) {
 		writeJSONErr(resp, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// provider_models: name -> models list, so the Provider form can prefill +
+	// edit each provider's models sequence (the raw yaml round-trip is the only
+	// other place models are visible). Built from the already-parsed cfg.
+	provModels := make(map[string][]string, len(cfg.Providers))
+	for name, p := range cfg.Providers {
+		provModels[name] = p.Models
+	}
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"yaml": string(data),
 		"summary": map[string]any{
@@ -829,6 +885,7 @@ func (w *webServer) handleConfigGet(resp http.ResponseWriter, r *http.Request) {
 			"provider_count": len(cfg.Providers),
 			"route_count":    len(cfg.Routes),
 		},
+		"provider_models": provModels,
 	})
 }
 
@@ -1069,10 +1126,19 @@ func (w *webServer) editStructured(kind, name string, d map[string]any) error {
 		switch kind {
 		case "provider":
 			p := childMap(childMap(root, "providers"), name)
-			for _, k := range []string{"openai_base_url", "anthropic_base_url", "usage_url", "billing"} {
+			// provider_id first so a freshly-added provider block validates
+			// (config.validate requires it) - without it the Web UI's "add
+			// provider" flow always 400s with "provider_id is empty".
+			for _, k := range []string{"provider_id", "openai_base_url", "anthropic_base_url", "usage_url", "billing"} {
 				if v, ok := d[k]; ok {
 					setChildScalar(p, k, fmt.Sprint(v))
 				}
+			}
+			// models is a sequence (list of real model names), not a scalar.
+			// The client sends it as a JSON array; graft it via mustEncode so
+			// comments/order elsewhere survive (same path as route targets).
+			if v, ok := d["models"]; ok {
+				setChildNode(p, "models", mustEncode(v))
 			}
 		case "route":
 			if raw, ok := d["targets"]; ok {

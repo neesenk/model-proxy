@@ -196,6 +196,39 @@ func runProxy(sa serveArgs) {
 
 // daemonize launches a detached supervisor (new session, stdio → log file) and
 // returns, so the invoking shell gets its prompt back.
+// aliveDaemonPid reads the pid file derived from logFile and returns the pid of
+// the live daemon (supervisor) it names, or 0 if no pid file exists, the pid is
+// invalid, or the process is gone (a stale pid file is removed in the latter
+// case). Shared by daemonize's pre-start guard and the stop/reload commands so
+// the "is a daemon already running?" check is one implementation.
+func aliveDaemonPid(logFile string) int {
+	pidPath := pidFilePath(logFile)
+	pidStr, err := os.ReadFile(pidPath)
+	if err != nil {
+		return 0
+	}
+	var pid int
+	for _, c := range pidStr {
+		if c < '0' || c > '9' {
+			break
+		}
+		pid = pid*10 + int(c-'0')
+	}
+	if pid <= 0 {
+		return 0
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return 0
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		// Stale pid file - clean it up so the next start isn't confused.
+		os.Remove(pidPath)
+		return 0
+	}
+	return pid
+}
+
 func daemonize(sa serveArgs) error {
 	cfg, err := LoadConfig(sa.config)
 	if err != nil {
@@ -205,6 +238,14 @@ func daemonize(sa serveArgs) error {
 	// resolveLogFile always falls back to the OS temp dir, so this is defensive.
 	if logFile == "" {
 		return fmt.Errorf("no log_file resolved (set log_file in config or pass --log-file)")
+	}
+	// Pre-start guard: refuse to launch a second supervisor over a running one.
+	// Without this a second `serve daemon` overwrites the pid file, its worker
+	// fails to bind (port in use) and enters a restart loop, and `serve stop`
+	// then stops the wrong supervisor - leaving the original orphaned with no pid
+	// file. If a daemon is already running, point the user at it instead.
+	if pid := aliveDaemonPid(logFile); pid > 0 {
+		return fmt.Errorf("model-proxy is already running (supervisor pid=%d); use `serve stop` first, or `serve status` to inspect", pid)
 	}
 	lf, err := openLogFile(logFile)
 	if err != nil {

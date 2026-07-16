@@ -241,6 +241,21 @@ func TestParseDeepseekQuota(t *testing.T) {
 	if len(s.Windows) != 1 || s.Windows[0].Total != 10.5 {
 		t.Errorf("balance window: %+v", s.Windows)
 	}
+	w := s.Windows[0]
+	if w.RemainingPct != -1 {
+		t.Errorf("window RemainingPct=%v want -1 (balance has no percentage)", w.RemainingPct)
+	}
+	// The Web UI must show ONLY the remaining balance, not a granted/topped-up
+	// breakdown (it's redundant: total = granted + topped-up). DetailLabel empty
+	// + no Details is what suppresses the breakdown section in renderAccountUsage
+	// (which gates Details on a non-empty DetailLabel). Assert both stay empty so
+	// a regression that re-adds the breakdown turns the test red.
+	if w.DetailLabel != "" {
+		t.Errorf("DetailLabel=%q want empty (no breakdown in UI)", w.DetailLabel)
+	}
+	if len(w.Details) != 0 {
+		t.Errorf("Details=%+v want none (no breakdown in UI)", w.Details)
+	}
 }
 
 func TestParseAqpQuota(t *testing.T) {

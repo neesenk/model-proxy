@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,6 +125,86 @@ func TestAPITokens(t *testing.T) {
 	}
 	if len(p.tokens.snapshot()) != 0 {
 		t.Errorf("after reset, snapshot non-empty: %+v", p.tokens.snapshot())
+	}
+}
+
+// TestAPIQuotaRefresh verifies POST /api/quota/refresh triggers an immediate
+// quota poll of every provider (so the Web UI's "Refresh usage" button re-polls
+// on demand instead of waiting for the next interval). A counting provider
+// asserts Quota() was actually invoked - a 200-only check would miss a no-op.
+func TestAPIQuotaRefresh(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	w, p := newTestWeb(t)
+	// Inject a counting provider; the background poll goroutine is debounced by
+	// its 10s bootstrap delay, so calls here are from the refresh endpoint.
+	var calls atomic.Int32
+	prov := &quotaCallProv{calls: &calls}
+	p.providers["zhipu"] = prov
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/quota/refresh", nil))
+	if rec.Code != 200 {
+		t.Fatalf("refresh status=%d want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "refreshed") {
+		t.Errorf("body=%s want refreshed", rec.Body.String())
+	}
+	// The endpoint runs pollAll synchronously, so the Quota() call has landed by
+	// the time the response returns.
+	if got := calls.Load(); got < 1 {
+		t.Errorf("refresh did not poll: Quota() called %d times, want >=1", got)
+	}
+	// The snapshot is populated (proves the poll result was stored).
+	if s := p.quota.snapshot("zhipu"); s == nil || s.RemainingPct != 0.5 {
+		t.Errorf("after refresh, snapshot=%+v want RemainingPct 0.5", s)
+	}
+}
+
+// TestAPIQuotaRefreshOne verifies POST /api/quota/refresh {"provider":"<key>"}
+// polls ONLY that one account's provider (not every provider). Mirrors the
+// per-account "Refresh usage" button: the provider key is a config name or a
+// pooled-account virtual id. Asserts the named provider was polled AND another
+// was not - a 200-only check would miss a "poll all" regression. An unknown key
+// is a 404.
+func TestAPIQuotaRefreshOne(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	w, p := newTestWeb(t)
+	var zhipuCalls, deepseekCalls atomic.Int32
+	p.providers["zhipu"] = &quotaCallProv{calls: &zhipuCalls}
+	p.providers["deepseek"] = &quotaCallProv{calls: &deepseekCalls}
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	// Poll just zhipu.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/quota/refresh",
+		strings.NewReader(`{"provider":"zhipu"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("refresh-one status=%d want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"provider":"zhipu"`) {
+		t.Errorf("body=%s want provider echo", rec.Body.String())
+	}
+	if got := zhipuCalls.Load(); got != 1 {
+		t.Errorf("zhipu Quota() called %d times, want 1", got)
+	}
+	// deepseek must NOT have been polled - this is the single-account contract.
+	if got := deepseekCalls.Load(); got != 0 {
+		t.Errorf("deepseek Quota() called %d times, want 0 (single-account refresh)", got)
+	}
+
+	// Unknown provider key -> 404, nothing polled.
+	before := zhipuCalls.Load()
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/api/quota/refresh",
+		strings.NewReader(`{"provider":"ghost"}`)))
+	if rec2.Code != 404 {
+		t.Errorf("unknown provider status=%d want 404, body=%s", rec2.Code, rec2.Body.String())
+	}
+	if got := zhipuCalls.Load(); got != before {
+		t.Errorf("unknown-provider refresh polled zhipu %d extra times", got-before)
 	}
 }
 
@@ -415,6 +496,130 @@ func TestConfigEditProviderBilling(t *testing.T) {
 	}
 }
 
+// TestConfigEditProviderModels asserts the provider form's models field writes a
+// models: sequence (one entry per array element) under providers.<name>, and
+// that an absent models key leaves an existing list untouched.
+func TestConfigEditProviderModels(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	os.WriteFile(cfgPath, []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    models:\n      - glm-4.5\n"), 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+
+	// Set models to a new list -> the old entry is replaced, order preserved.
+	rec := httptest.NewRecorder()
+	w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit",
+		strings.NewReader(`{"kind":"provider","name":"zhipu","data":{"models":["glm-4.6","glm-4.5-air"]}}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	gs := string(got)
+	// Both new models present, the dropped one gone.
+	for _, want := range []string{"- glm-4.6", "- glm-4.5-air"} {
+		if !strings.Contains(gs, want) {
+			t.Errorf("models missing %q:\n%s", want, gs)
+		}
+	}
+	if strings.Contains(gs, "glm-4.5\n") && !strings.Contains(gs, "glm-4.5-air") {
+		t.Errorf("old model glm-4.5 should have been replaced:\n%s", gs)
+	}
+
+	// An edit WITHOUT models must leave the list intact (non-destructive).
+	rec2 := httptest.NewRecorder()
+	w.handleConfigEdit(rec2, httptest.NewRequest("POST", "/api/config/edit",
+		strings.NewReader(`{"kind":"provider","name":"zhipu","data":{"billing":"plan"}}`)))
+	if rec2.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+	got2, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(got2), "- glm-4.6") {
+		t.Errorf("models dropped by a models-less edit:\n%s", got2)
+	}
+}
+
+// TestConfigGetProviderModels asserts /api/config surfaces provider_models
+// (name -> models list) so the Provider form can prefill.
+func TestConfigGetProviderModels(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    models:\n      - glm-4.5\n      - glm-4.6\n"), 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	rec := httptest.NewRecorder()
+	w.handleConfigGet(rec, httptest.NewRequest("GET", "/api/config", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ProviderModels map[string][]string `json:"provider_models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+	}
+	got := resp.ProviderModels["zhipu"]
+	want := []string{"glm-4.5", "glm-4.6"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("provider_models[zhipu] = %v, want %v", got, want)
+	}
+}
+
+// TestConfigEditProviderAddWithProviderID asserts the "add provider" flow
+// succeeds: a new provider block must carry provider_id (config.validate
+// rejects an empty one) and openai_base_url. Pre-fix editStructured never wrote
+// provider_id, so adding a provider always 400'd with "provider_id is empty".
+func TestConfigEditProviderAddWithProviderID(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	// Minimal valid config: one existing provider + listen.
+	os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:17000\nproviders:\n  deepseek:\n    provider_id: deepseek\n    openai_base_url: https://api.deepseek.com\n"), 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	rec := httptest.NewRecorder()
+	w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit",
+		strings.NewReader(`{"kind":"provider","name":"zhipu-work","data":{"provider_id":"zhipu","openai_base_url":"https://open.bigmodel.cn/api/paas/v4","billing":"plan"}}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	gs := string(got)
+	// The new provider block must set provider_id + openai_base_url (validates).
+	for _, want := range []string{"zhipu-work:", "provider_id: zhipu", "openai_base_url: https://open.bigmodel.cn/api/paas/v4", "billing: plan"} {
+		if !strings.Contains(gs, want) {
+			t.Errorf("config missing %q:\n%s", want, gs)
+		}
+	}
+	// The existing provider must survive.
+	if !strings.Contains(gs, "deepseek:") {
+		t.Errorf("existing provider dropped:\n%s", gs)
+	}
+}
+
+// TestConfigEditProviderAddMissingProviderID asserts that adding a provider
+// WITHOUT provider_id still fails validation (the guard the Web UI relies on),
+// and that the on-disk config is unchanged.
+func TestConfigEditProviderAddMissingProviderID(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	original := []byte("listen: 127.0.0.1:17000\nproviders:\n  deepseek:\n    provider_id: deepseek\n    openai_base_url: https://api.deepseek.com\n")
+	os.WriteFile(cfgPath, original, 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	rec := httptest.NewRecorder()
+	w.handleConfigEdit(rec, httptest.NewRequest("POST", "/api/config/edit",
+		strings.NewReader(`{"kind":"provider","name":"ghost","data":{"openai_base_url":"https://x"}}`)))
+	if rec.Code != 400 {
+		t.Fatalf("status=%d want 400 (provider_id missing), body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "provider_id is empty") {
+		t.Errorf("error should mention provider_id, got: %s", rec.Body.String())
+	}
+	got, _ := os.ReadFile(cfgPath)
+	if !bytes.Equal(got, original) {
+		t.Errorf("config changed on a failed validate - should be unchanged:\n%s", got)
+	}
+}
+
 // TestAccountsListMasked asserts /api/accounts NEVER serializes any secret
 // (api_key / access_key / secret_key / SSO cookie) while still emitting the
 // real account id (the UI needs it to remove accounts). The acct struct has no
@@ -456,6 +661,77 @@ func TestAccountsListMasked(t *testing.T) {
 	}
 	if !strings.Contains(body, `"label":"work"`) {
 		t.Errorf("label missing:\n%s", body)
+	}
+}
+
+// TestAccountsListCodex is the regression test for the bug where the account
+// tab showed codex as "No account configured" despite being logged in.
+// handleAccountsList used LoadAqpAccount (the wrong on-disk shape) for codex,
+// so every field mapped to empty and the AccountID guard dropped the entry.
+// Now codex uses LoadCodexAccount (CodexAuthFile shape) and surfaces account_id
+// + email parsed from the id_token. Asserts the real account_id + email are
+// present AND no token (access/refresh/id) leaks.
+func TestAccountsListCodex(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	// Build a codex auth file: a stored account_id, an id_token JWT carrying
+	// email + chatgpt_account_id, and secret access/refresh tokens that must
+	// never appear in the response.
+	idPayload := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"email":"coder@openai.com","https://api.openai.com/auth":{"chatgpt_account_id":"acct-codex-42"}}`))
+	af := provider.CodexAuthFile{AuthMode: "chatgpt"}
+	af.Tokens.AccessToken = "atk-TOPSECRET-codex"
+	af.Tokens.RefreshToken = "rtk-TOPSECRET-codex"
+	af.Tokens.IDToken = "head." + idPayload + ".sig"
+	af.Tokens.AccountID = "acct-codex-42"
+	ab, _ := json.MarshalIndent(af, "", "  ")
+	if err := os.WriteFile(authFilePath("codex", "oauth_auth"), ab, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w, p := newTestWeb(t)
+	p.mu.Lock()
+	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	w.handleAccountsList(rec, httptest.NewRequest("GET", "/api/accounts", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	// The account_id (used by the UI for removal) + email label must appear.
+	if !strings.Contains(body, `"id":"acct-codex-42"`) {
+		t.Errorf("account_id missing:\n%s", body)
+	}
+	if !strings.Contains(body, `"email":"coder@openai.com"`) {
+		t.Errorf("email (label) missing:\n%s", body)
+	}
+	// No token may leak - the acct struct has no field for any of them.
+	for _, secret := range []string{"atk-TOPSECRET-codex", "rtk-TOPSECRET-codex", idPayload} {
+		if strings.Contains(body, secret) {
+			t.Errorf("token leaked (%s):\n%s", secret, body)
+		}
+	}
+	// The codex provider card must carry one account (not the empty state).
+	var resp struct {
+		Providers []struct {
+			Name     string `json:"name"`
+			Accounts []struct {
+				ID string `json:"id"`
+			} `json:"accounts"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v: %s", err, body)
+	}
+	var n int
+	for _, pr := range resp.Providers {
+		if pr.Name == "codex" {
+			n = len(pr.Accounts)
+		}
+	}
+	if n != 1 {
+		t.Errorf("codex accounts=%d want 1 (was 0 before the fix)", n)
 	}
 }
 

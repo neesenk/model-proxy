@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,10 @@ type quotaTracker struct {
 	provs    func() map[string]provider.Provider
 	stopCh   chan struct{}
 	stopOnce sync.Once
+	// retryAttempts/retryBackoff tune fetchQuota's transient-error retry.
+	// Defaults (3 / 1s) are set in newQuotaTracker; tests shrink them to stay fast.
+	retryAttempts int
+	retryBackoff  time.Duration
 	// refreshHook, if set, replaces refreshOne's real poll — used by tests to
 	// observe refreshes without hitting a network. If nil, the real poll runs.
 	refreshHook func(name string)
@@ -46,12 +51,14 @@ type refreshState struct {
 
 func newQuotaTracker(path string, cfg func() *Config, provs func() map[string]provider.Provider) *quotaTracker {
 	return &quotaTracker{
-		state:        map[string]*provider.QuotaSnapshot{},
-		refreshGuard: map[string]*refreshState{},
-		path:         path,
-		cfg:          cfg,
-		provs:        provs,
-		stopCh:       make(chan struct{}),
+		state:         map[string]*provider.QuotaSnapshot{},
+		refreshGuard:  map[string]*refreshState{},
+		path:          path,
+		cfg:           cfg,
+		provs:         provs,
+		stopCh:        make(chan struct{}),
+		retryAttempts: 3,
+		retryBackoff:  time.Second,
 	}
 }
 
@@ -104,19 +111,26 @@ func (t *quotaTracker) pollAll(now time.Time) {
 		wg.Add(1)
 		go func(n string, p provider.Provider) {
 			defer wg.Done()
-			s, err := p.Quota()
-			if err != nil || s == nil {
-				s = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: now}
-				if err != nil {
-					s.Err = err.Error()
-				}
-			}
-			s.AsOf = now
-			t.setSnapshot(n, s) // setSnapshot takes t.mu — no extra guard needed
+			t.setSnapshot(n, t.fetchQuota(p, now)) // fetchQuota retries transient errors
 		}(name, provImpl)
 	}
 	wg.Wait()
 	t.persist()
+}
+
+// pollOne re-polls a single provider by its quota key (a config name or a
+// pooled-account virtual id "name#<accountID>") and persists. Used by the Web
+// UI's per-account "Refresh usage" - unlike refreshOne it is NOT debounced
+// (a manual click should always re-poll) and runs synchronously so the caller
+// sees the fresh snapshot. Returns false if the key isn't a live provider.
+func (t *quotaTracker) pollOne(key string) bool {
+	p := t.provs()[key]
+	if p == nil {
+		return false
+	}
+	t.setSnapshot(key, t.fetchQuota(p, time.Now()))
+	t.persist()
+	return true
 }
 
 // refreshOne re-polls a single provider (called after a 429). If a refreshHook
@@ -146,14 +160,7 @@ func (t *quotaTracker) refreshOne(name string) {
 
 	refreshed := false
 	if p := t.provs()[name]; p != nil {
-		s, err := p.Quota()
-		if err != nil || s == nil {
-			s = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: time.Now()}
-			if err != nil {
-				s.Err = err.Error()
-			}
-		}
-		s.AsOf = time.Now()
+		s := t.fetchQuota(p, time.Now())
 		t.setSnapshot(name, s)
 		t.persist()
 		refreshed = true
@@ -165,6 +172,56 @@ func (t *quotaTracker) refreshOne(name string) {
 		g.last = time.Now()
 	}
 	t.mu.Unlock()
+}
+
+// fetchQuota polls a provider's Quota(), retrying transient errors (DNS "no
+// such host", connection refused, timeout, 5xx) a few times with backoff so a
+// brief network blip doesn't fail the whole poll cycle and leave the UI stuck
+// on the error until the next interval. Non-transient errors (auth, retcode,
+// 4xx, missing credentials) return immediately - retrying those just wastes
+// time. Returns the final snapshot (Err set if all attempts failed); never nil.
+func (t *quotaTracker) fetchQuota(p provider.Provider, now time.Time) *provider.QuotaSnapshot {
+	var s *provider.QuotaSnapshot
+	for attempt := 0; attempt < t.retryAttempts; attempt++ {
+		s, _ = p.Quota()
+		if s == nil {
+			s = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: now}
+		}
+		if s.Err == "" || !isTransientQuotaErr(s.Err) {
+			break // success, or a non-transient error - don't retry
+		}
+		if attempt < t.retryAttempts-1 {
+			// backoff: b, 2b, 4b ... (1s, 2s by default). Respects stop so a
+			// shutting-down daemon isn't held by a retry sleep.
+			select {
+			case <-time.After(t.retryBackoff << uint(attempt)):
+			case <-t.stopCh:
+			}
+		}
+	}
+	s.AsOf = now
+	return s
+}
+
+// isTransientQuotaErr reports whether a quota-fetch error is worth retrying.
+// Network blips often clear within seconds; auth/config/rejection errors won't,
+// so retrying those just burns time. Unrecognized errors default to transient so
+// a new failure shape still gets retried (and recovers) rather than sticking for
+// a whole poll interval.
+func isTransientQuotaErr(err string) bool {
+	e := strings.ToLower(err)
+	// Permanent: auth, config, or upstream-rejected - retry won't help.
+	for _, m := range []string{
+		"not logged in", "no project_id", "session expired", "retcode=",
+		"ak/sk not configured", "api key provisioning", "unknown provider",
+		"http 400", "http 401", "http 403", "http 404", "http 422",
+		"not zhipu quota format",
+	} {
+		if strings.Contains(e, m) {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *quotaTracker) setSnapshot(name string, s *provider.QuotaSnapshot) {

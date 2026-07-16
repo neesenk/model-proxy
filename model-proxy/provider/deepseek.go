@@ -85,16 +85,20 @@ func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) {
 }
 
 // ParseDeepseekQuota parses DeepSeek /user/balance into a pay-as-you-go snapshot:
-// per-currency balance windows (unmeasured, RemainingPct=-1) with granted /
-// topped-up breakdown. BillingPayG (no windowed budget -> -1 binding).
+// one unmeasured (RemainingPct=-1) window per currency carrying the remaining
+// balance as Total. DeepSeek is pay-as-you-go with no windowed budget, so only
+// the remaining balance is surfaced to the Web UI - the granted/topped-up split
+// is NOT shown here (it's redundant: total = granted + topped-up, and the user
+// only cares about the amount left); the CLI `usage deepseek` still prints it
+// compactly via its own struct. BillingPayG (no windowed budget -> -1 binding);
+// TotalBalance is the absolute amount left, not a quota ceiling, so the UI
+// renders Total directly rather than a used/total percentage.
 func ParseDeepseekQuota(body []byte) *QuotaSnapshot {
 	var u struct {
 		IsAvailable  bool `json:"is_available"`
 		BalanceInfos []struct {
-			Currency        string `json:"currency"`
-			TotalBalance    string `json:"total_balance"`
-			GrantedBalance  string `json:"granted_balance"`
-			ToppedUpBalance string `json:"topped_up_balance"`
+			Currency     string `json:"currency"`
+			TotalBalance string `json:"total_balance"`
 		} `json:"balance_infos"`
 	}
 	s := &QuotaSnapshot{Billing: BillingPayG, RemainingPct: -1, AsOf: time.Now()}
@@ -110,10 +114,6 @@ func ParseDeepseekQuota(body []byte) *QuotaSnapshot {
 		s.Windows = append(s.Windows, QuotaWindow{
 			Label: Or(b.Currency, "Balance"), Kind: "money",
 			Total: total, RemainingPct: -1,
-			Details: []QuotaDetail{
-				{Label: "granted", Used: atof(b.GrantedBalance)},
-				{Label: "topped-up", Used: atof(b.ToppedUpBalance)},
-			},
 		})
 	}
 	return s

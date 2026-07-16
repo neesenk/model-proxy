@@ -124,6 +124,106 @@ func TestJwtExpiry(t *testing.T) {
 	}
 }
 
+// idTokenWithEmail builds a fake id_token JWT carrying the `email` claim and the
+// chatgpt_account_id claim under https://api.openai.com/auth (the two claims
+// LoadCodexAccount + emailFromIDToken read).
+func idTokenWithEmail(t *testing.T, email, accountID string) string {
+	t.Helper()
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(
+		`{"email":%q,"https://api.openai.com/auth":{"chatgpt_account_id":%q}}`,
+		email, accountID)))
+	return "head." + payload + ".sig"
+}
+
+// TestLoadCodexAccount verifies the Web-UI account projection reads the codex
+// auth file (CodexAuthFile shape) and surfaces account_id + email, NOT any
+// token. account_id prefers the stored tokens.account_id, else parses the
+// id_token JWT; email is parsed from the id_token's `email` claim. This is the
+// regression guard for the bug where the account list used LoadAqpAccount (the
+// wrong shape) and so always showed codex as "No account configured".
+func TestLoadCodexAccount(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex_oauth_auth.json")
+
+	// Case 1: stored account_id wins; email parsed from id_token.
+	af := CodexAuthFile{AuthMode: "chatgpt"}
+	af.Tokens.AccessToken = "atk-secret"
+	af.Tokens.RefreshToken = "rtk-secret"
+	af.Tokens.IDToken = idTokenWithEmail(t, "u@x.com", "acct-from-jwt")
+	af.Tokens.AccountID = "acct-stored"
+	b, _ := json.MarshalIndent(af, "", "  ")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadCodexAccount(path)
+	if err != nil || got == nil {
+		t.Fatalf("LoadCodexAccount=%v,%v", got, err)
+	}
+	if got.AccountID != "acct-stored" {
+		t.Errorf("AccountID=%q want acct-stored (stored must win)", got.AccountID)
+	}
+	if got.Email != "u@x.com" {
+		t.Errorf("Email=%q want u@x.com", got.Email)
+	}
+
+	// Case 2: no stored account_id -> fall back to parsing the id_token JWT.
+	af.Tokens.AccountID = ""
+	b, _ = json.MarshalIndent(af, "", "  ")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = LoadCodexAccount(path)
+	if err != nil || got == nil {
+		t.Fatalf("LoadCodexAccount=%v,%v", got, err)
+	}
+	if got.AccountID != "acct-from-jwt" {
+		t.Errorf("AccountID=%q want acct-from-jwt (parsed from id_token)", got.AccountID)
+	}
+	if got.Email != "u@x.com" {
+		t.Errorf("Email=%q want u@x.com", got.Email)
+	}
+
+	// Case 3: absent file -> nil, nil (not an error).
+	got, err = LoadCodexAccount(filepath.Join(dir, "missing.json"))
+	if err != nil || got != nil {
+		t.Errorf("absent file: got=%v,err=%v want nil,nil", got, err)
+	}
+
+	// Case 4: no id_token AND no stored account_id -> empty AccountID (the
+	// caller's guard skips emitting a bogus empty entry).
+	af.Tokens.IDToken = ""
+	af.Tokens.AccountID = ""
+	b, _ = json.MarshalIndent(af, "", "  ")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = LoadCodexAccount(path)
+	if err != nil || got == nil {
+		t.Fatalf("LoadCodexAccount=%v,%v", got, err)
+	}
+	if got.AccountID != "" || got.Email != "" {
+		t.Errorf("degenerate file: AccountID=%q Email=%q want empty", got.AccountID, got.Email)
+	}
+}
+
+// TestEmailFromIDToken covers the email-claim parser directly: present claim,
+// absent claim, and malformed JWT.
+func TestEmailFromIDToken(t *testing.T) {
+	if got := emailFromIDToken(idTokenWithEmail(t, "a@b.com", "x")); got != "a@b.com" {
+		t.Errorf("got %q want a@b.com", got)
+	}
+	noEmail := "head." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"s"}`)) + ".sig"
+	if got := emailFromIDToken(noEmail); got != "" {
+		t.Errorf("absent email: got %q want empty", got)
+	}
+	if got := emailFromIDToken("not-a-jwt"); got != "" {
+		t.Errorf("malformed: got %q want empty", got)
+	}
+	if got := emailFromIDToken(""); got != "" {
+		t.Errorf("empty: got %q want empty", got)
+	}
+}
+
 // --- aqp key minting ---
 
 // writeSSOCookie writes a store file with an sso_session_cookie.

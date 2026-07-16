@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -97,5 +99,75 @@ func TestWriteReadPidFile(t *testing.T) {
 	}
 	if string(b) != "4242\n" {
 		t.Errorf("got %q", string(b))
+	}
+}
+
+// TestAliveDaemonPid covers the three branches of the pre-start guard's helper:
+// no pid file -> 0; a live pid (this test process) -> that pid; a stale pid
+// (process gone) -> 0 AND the pid file is removed so the next start isn't
+// confused. This is the check daemonize uses to refuse a second `serve daemon`.
+func TestAliveDaemonPid(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "mp.log")
+	pidPath := pidFilePath(logFile)
+
+	// No pid file -> 0.
+	if got := aliveDaemonPid(logFile); got != 0 {
+		t.Errorf("no pid file: got %d want 0", got)
+	}
+
+	// Live pid (this test process) -> returned, pid file untouched.
+	if err := writePidFile(pidPath, os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	if got := aliveDaemonPid(logFile); got != os.Getpid() {
+		t.Errorf("live pid: got %d want %d", got, os.Getpid())
+	}
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Error("live pid: pid file should still exist")
+	}
+
+	// Stale pid (a pid that surely isn't running) -> 0, and the pid file removed.
+	if err := writePidFile(pidPath, 999999); err != nil {
+		t.Fatal(err)
+	}
+	if got := aliveDaemonPid(logFile); got != 0 {
+		t.Errorf("stale pid: got %d want 0", got)
+	}
+	if _, err := os.Stat(pidPath); err == nil {
+		t.Error("stale pid: pid file should have been removed")
+	}
+}
+
+// TestDaemonizeRefusesSecondDaemon asserts the pre-start guard: when a pid file
+// names a live process, `serve daemon` must refuse (non-zero exit + "already
+// running" message) rather than launching a second supervisor that overwrites
+// the pid file and orphans the first. The "live" pid is this test process, so
+// no real daemon is spawned.
+func TestDaemonizeRefusesSecondDaemon(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "mp.log")
+	// Pretend a daemon is running: pid file names THIS test process (alive).
+	if err := writePidFile(pidFilePath(logFile), os.Getpid()); err != nil {
+		t.Fatal(err)
+	}
+	cfgBody := fmt.Sprintf("listen: 127.0.0.1:0\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - m\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
+	cfgPath := writeTempConfig(t, cfgBody)
+
+	_, stderr, code := runCLI(t, "serve", cfgPath, "daemon")
+	if code == 0 {
+		t.Error("second daemon: exit=0 want non-zero (should refuse)")
+	}
+	if !strings.Contains(stderr, "already running") {
+		t.Errorf("second daemon stderr missing 'already running':\n%s", stderr)
+	}
+	// The pid file must be intact (not overwritten) so the real daemon is still
+	// reachable by `serve stop`.
+	b, err := os.ReadFile(pidFilePath(logFile))
+	if err != nil {
+		t.Fatalf("pid file removed/missing: %v", err)
+	}
+	if strings.TrimSpace(string(b)) != fmt.Sprintf("%d", os.Getpid()) {
+		t.Errorf("pid file overwritten: got %q want %d", string(b), os.Getpid())
 	}
 }

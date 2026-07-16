@@ -423,7 +423,8 @@ func TestShowCodexUsage_UsageParsed(t *testing.T) {
 	}
 	// New format: "[<BAR>] <PCT>% used · <USED> / <TOTAL> credits, resets <DUR>"
 	// (fixture: used=5, limit=20, used_percent=25, reset_after=2500000s -> 28d22h).
-	if !strings.Contains(out, "25% used · 5 / 20 credits, resets 28d22h") {
+	// <PCT> renders with 1-decimal precision (25.0%).
+	if !strings.Contains(out, "25.0% used · 5 / 20 credits, resets 28d22h") {
 		t.Errorf("codex usage line format wrong:\n%s", out)
 	}
 }

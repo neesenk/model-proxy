@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -106,6 +107,24 @@ func (q *quotaCallProv) Quota() (*provider.QuotaSnapshot, error) {
 	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now()}, nil
 }
 
+// flakyProv fails Quota() the first `fails` calls with err (a transient or
+// permanent error string), then returns a good snapshot. Counts calls. Used to
+// exercise fetchQuota's transient-error retry + the no-retry-for-permanent rule.
+type flakyProv struct {
+	snapshotProv
+	fails int
+	err   string
+	calls *atomic.Int32
+}
+
+func (f *flakyProv) Quota() (*provider.QuotaSnapshot, error) {
+	n := int(f.calls.Add(1))
+	if n <= f.fails {
+		return &provider.QuotaSnapshot{Billing: provider.BillingUnknown, Err: f.err, AsOf: time.Now()}, nil
+	}
+	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now()}, nil
+}
+
 // TestQuotaTracker_RefreshOneCoalescesConcurrent: many concurrent refreshOne
 // calls for one provider collapse to a single Quota() call (in-flight guard).
 func TestQuotaTracker_RefreshOneCoalescesConcurrent(t *testing.T) {
@@ -159,5 +178,157 @@ func TestQuotaTracker_StickyPersistLoad(t *testing.T) {
 	got := tr2.LoadedSticky["glm-5.2"]
 	if got.provider != "zhipu" || !got.since.Equal(since) {
 		t.Fatalf("sticky not restored: %+v", got)
+	}
+}
+
+// TestIsTransientQuotaErr: network/DNS/timeout/5xx errors are retry-worthy;
+// auth/config/retcode/4xx errors are permanent (retry won't help). The DNS
+// "no such host" error the user hit on zhipu must classify transient.
+func TestIsTransientQuotaErr(t *testing.T) {
+	cases := []struct {
+		err  string
+		want bool
+	}{
+		{`Get "https://open.bigmodel.cn/x": dial tcp: lookup open.bigmodel.cn: no such host`, true},
+		{`Post "https://x": dial tcp 1.2.3.4:443: connect: connection refused`, true},
+		{"context deadline exceeded", true},
+		{"read tcp 1.2.3.4:443: read: connection reset by peer", true},
+		{"EOF", true},
+		{"HTTP 500", true},
+		{"HTTP 503", true},
+		{"HTTP 429", true}, // rate-limited -> retry
+		{"session expired (HTTP 401): Session expired - re-login", false},
+		{"not logged in", false},
+		{"no project_id in store", false},
+		{"monthly usage retcode=1 message=denied", false},
+		{"AK/SK not configured", false},
+		{"HTTP 400", false},
+		{"HTTP 403", false},
+		{"HTTP 404", false},
+	}
+	for _, tc := range cases {
+		if got := isTransientQuotaErr(tc.err); got != tc.want {
+			t.Errorf("isTransientQuotaErr(%q)=%v want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+// TestQuotaTracker_FetchQuotaRetriesTransient: a provider that fails twice
+// with a transient DNS error then succeeds must be retried until it recovers -
+// the fix for "usage error doesn't retry, keeps showing no such host". Asserts
+// the exact call count (2 fails + 1 success = 3) so a regression that drops
+// retry turns the test red.
+func TestQuotaTracker_FetchQuotaRetriesTransient(t *testing.T) {
+	var calls atomic.Int32
+	prov := &flakyProv{
+		fails: 2,
+		err:   `Get "https://x": dial tcp: lookup x: no such host`,
+		calls: &calls,
+	}
+	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
+		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}} },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
+	tr.retryBackoff = time.Millisecond // fast
+	s := tr.fetchQuota(prov, time.Now())
+	if s.Err != "" {
+		t.Fatalf("expected recovery after retry, got Err=%q", s.Err)
+	}
+	if s.RemainingPct != 0.5 {
+		t.Errorf("RemainingPct=%v want 0.5", s.RemainingPct)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("Quota() called %d times, want 3 (2 transient fails + 1 success)", got)
+	}
+}
+
+// TestQuotaTracker_FetchQuotaNoRetryPermanent: a permanent error (session
+// expired) must NOT be retried - one call, Err preserved. Retrying auth errors
+// would just burn time (they won't self-heal).
+func TestQuotaTracker_FetchQuotaNoRetryPermanent(t *testing.T) {
+	var calls atomic.Int32
+	prov := &flakyProv{
+		fails: 5, // would "recover" if retried, but permanent err must short-circuit
+		err:   "session expired (HTTP 401): re-login",
+		calls: &calls,
+	}
+	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
+		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "aqp"}}} },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
+	tr.retryBackoff = time.Millisecond
+	s := tr.fetchQuota(prov, time.Now())
+	if s.Err == "" {
+		t.Fatalf("expected permanent error preserved, got success")
+	}
+	if !strings.Contains(s.Err, "session expired") {
+		t.Errorf("Err=%q want session expired", s.Err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("Quota() called %d times, want 1 (no retry for permanent error)", got)
+	}
+}
+
+// TestQuotaTracker_PollAllRetriesTransientError: at the pollAll level, a
+// transient flaky provider recovers within one poll cycle (the snapshot stored
+// is the good one, not the error). Guards the wiring from pollAll -> fetchQuota.
+func TestQuotaTracker_PollAllRetriesTransientError(t *testing.T) {
+	var calls atomic.Int32
+	prov := &flakyProv{
+		fails: 2,
+		err:   `dial tcp: lookup x: no such host`,
+		calls: &calls,
+	}
+	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
+		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}} },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
+	tr.retryBackoff = time.Millisecond
+	tr.pollAll(time.Now())
+	s := tr.snapshot("x")
+	if s == nil || s.Err != "" {
+		t.Fatalf("pollAll should have recovered via retry, got %+v", s)
+	}
+	if s.RemainingPct != 0.5 {
+		t.Errorf("RemainingPct=%v want 0.5", s.RemainingPct)
+	}
+}
+
+// TestQuotaTracker_PollOneSingleAccount: pollOne refreshes ONLY the named key
+// (a config name or a pooled-account virtual id "name#<id>"), not every
+// provider. This is the per-account "Refresh usage" contract: clicking it on
+// one account must not re-poll the others. Asserts the named provider was
+// polled and a sibling was not.
+func TestQuotaTracker_PollOneSingleAccount(t *testing.T) {
+	var aCalls, bCalls atomic.Int32
+	aProv := &quotaCallProv{calls: &aCalls}
+	bProv := &quotaCallProv{calls: &bCalls}
+	provs := map[string]provider.Provider{
+		"zhipu":            aProv,
+		"zhipu#account-id": bProv, // pooled-account virtual id
+	}
+	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
+		func() *Config { return &Config{Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}} },
+		func() map[string]provider.Provider { return provs })
+
+	// Poll just the virtual-id account.
+	if ok := tr.pollOne("zhipu#account-id"); !ok {
+		t.Fatal("pollOne returned false for a live virtual id")
+	}
+	if got := bCalls.Load(); got != 1 {
+		t.Errorf("virtual-id Quota() called %d times, want 1", got)
+	}
+	if got := aCalls.Load(); got != 0 {
+		t.Errorf("parent zhipu Quota() called %d times, want 0 (pollOne is single-account)", got)
+	}
+	// Snapshot stored under the polled key.
+	if s := tr.snapshot("zhipu#account-id"); s == nil || s.RemainingPct != 0.5 {
+		t.Errorf("virtual-id snapshot=%+v want 0.5", s)
+	}
+
+	// Unknown key -> false, no poll.
+	before := bCalls.Load()
+	if ok := tr.pollOne("ghost"); ok {
+		t.Error("pollOne returned true for an unknown key")
+	}
+	if got := bCalls.Load(); got != before {
+		t.Errorf("unknown-key pollOne polled %d extra times", got-before)
 	}
 }

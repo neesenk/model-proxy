@@ -26,10 +26,9 @@ func printQuotaSnapshot(s *QuotaSnapshot) {
 			bar = Gray("n/a")
 			pctStr = Gray("unmeasured")
 		} else {
-			pct := int(w.RemainingPct * 100)
-			usedPct := 100 - pct
-			bar = ProgressBar(usedPct, 16)
-			pctStr = UsageRatioColor(w.RemainingPct, 1, fmt.Sprintf("%d%% used", usedPct))
+			usedPct := (1 - w.RemainingPct) * 100
+			bar = ProgressBar(int(usedPct), 16)
+			pctStr = UsageRatioColor(w.RemainingPct, 1, fmt.Sprintf("%.1f%% used", usedPct))
 		}
 		resetStr := ""
 		if !w.ResetsAt.IsZero() {
@@ -57,12 +56,12 @@ func printQuotaSnapshot(s *QuotaSnapshot) {
 // printAFPWindow renders one Volcengine AFP quota window.
 func printAFPWindow(label string, w AfpWindow) {
 	remaining := w.Quota - w.Used
-	pct := 0
+	pct := 0.0
 	if w.Quota > 0 {
-		pct = int(w.Used / w.Quota * 100)
+		pct = w.Used / w.Quota * 100
 	}
-	bar := ProgressBar(pct, 16)
-	pctStr := UsageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%% used", pct))
+	bar := ProgressBar(int(pct), 16)
+	pctStr := UsageRatioColor(float64(100-pct), 100, fmt.Sprintf("%.1f%% used", pct))
 	reset := "-"
 	if w.ResetTime > 0 {
 		dur := FormatDuration(int((w.ResetTime - time.Now().UnixMilli()) / 1000))
@@ -75,12 +74,12 @@ func printAFPWindow(label string, w AfpWindow) {
 // aqpUsageLine renders the aqp monthly-usage line (content after "Usage:"):
 // a progress bar + "<PCT>% used" prefix, then usage/total + balance/plan/date.
 func aqpUsageLine(mu *MonthlyProjectUsage) string {
-	pct := 0
+	pct := 0.0
 	if mu.TotalAmount > 0 {
-		pct = int((mu.Usage/mu.TotalAmount)*100 + 0.5)
+		pct = (mu.Usage / mu.TotalAmount) * 100
 	}
-	bar := ProgressBar(pct, 10)
-	pctStr := UsageRatioColor(mu.Balance, mu.TotalAmount, fmt.Sprintf("%d%% used", pct))
+	bar := ProgressBar(int(pct), 10)
+	pctStr := UsageRatioColor(mu.Balance, mu.TotalAmount, fmt.Sprintf("%.1f%% used", pct))
 	return fmt.Sprintf("%s %s · %s / %s  (%s %s, %s, %d-%02d)",
 		bar, pctStr,
 		UsageRatioColor(mu.Balance, mu.TotalAmount, Money(mu.Usage)),
@@ -231,12 +230,12 @@ func (p *CodexProvider) Usage() error {
 		if u.RateLimit.PrimaryWindow != nil {
 			pw := u.RateLimit.PrimaryWindow
 			fmt.Printf("%s %s\n", Dim("  primary:  "),
-				UsageRatioColor(float64(100-pw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", pw.UsedPercent, FormatDuration(pw.ResetAfterSecs))))
+				UsageRatioColor(float64(100-pw.UsedPercent), 100, fmt.Sprintf("%.1f%% used (resets in %s)", float64(pw.UsedPercent), FormatDuration(pw.ResetAfterSecs))))
 		}
 		if u.RateLimit.SecondaryWindow != nil {
 			sw := u.RateLimit.SecondaryWindow
 			fmt.Printf("%s %s\n", Dim("  weekly:   "),
-				UsageRatioColor(float64(100-sw.UsedPercent), 100, fmt.Sprintf("%d%% used (resets in %s)", sw.UsedPercent, FormatDuration(sw.ResetAfterSecs))))
+				UsageRatioColor(float64(100-sw.UsedPercent), 100, fmt.Sprintf("%.1f%% used (resets in %s)", float64(sw.UsedPercent), FormatDuration(sw.ResetAfterSecs))))
 		}
 	}
 	if u.SpendControl != nil {
@@ -246,7 +245,7 @@ func (p *CodexProvider) Usage() error {
 			il := u.SpendControl.IndividualLimit
 			pct := il.UsedPercent
 			bar := ProgressBar(pct, 10)
-			pctStr := UsageRatioColor(float64(100-pct), 100, fmt.Sprintf("%d%% used", pct))
+			pctStr := UsageRatioColor(float64(100-pct), 100, fmt.Sprintf("%.1f%% used", float64(pct)))
 			resetStr := ""
 			if il.ResetAfter > 0 {
 				resetStr = Gray(", resets " + FormatDuration(il.ResetAfter))

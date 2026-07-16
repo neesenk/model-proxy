@@ -31,7 +31,7 @@ func TestPrintQuotaSnapshot(t *testing.T) {
 	}
 	out := captureProv(t, func() { printQuotaSnapshot(s) })
 	for _, want := range []string{"5h tokens", "Weekly tokens", "40 used / 100 total",
-		"By model", "glm-5.2", "Rate Limit: allowed", "40% used"} {
+		"By model", "glm-5.2", "Rate Limit: allowed", "40.0% used"} {
 		if !contains(out, want) {
 			t.Errorf("printQuotaSnapshot missing %q:\n%s", want, out)
 		}
@@ -57,14 +57,14 @@ func TestPrintQuotaSnapshot_UnmeasuredWindow(t *testing.T) {
 func TestPrintAFPWindow(t *testing.T) {
 	w := AfpWindow{Quota: 100, Used: 30, ResetTime: time.Now().Add(2 * time.Hour).UnixMilli()}
 	out := captureProv(t, func() { printAFPWindow("5h", w) })
-	for _, want := range []string{"5h", "30% used", "30.0 used / 100.0 quota", "70.0 remaining"} {
+	for _, want := range []string{"5h", "30.0% used", "30.0 used / 100.0 quota", "70.0 remaining"} {
 		if !contains(out, want) {
 			t.Errorf("printAFPWindow missing %q:\n%s", want, out)
 		}
 	}
 	out2 := captureProv(t, func() { printAFPWindow("daily", AfpWindow{}) })
-	if !contains(out2, "0% used") {
-		t.Errorf("printAFPWindow zero-quota missing '0%% used':\n%s", out2)
+	if !contains(out2, "0.0% used") {
+		t.Errorf("printAFPWindow zero-quota missing '0.0%% used':\n%s", out2)
 	}
 	if !contains(out2, "0.0 used / 0.0 quota, 0.0 remaining") {
 		t.Errorf("printAFPWindow zero-quota missing zero line:\n%s", out2)
@@ -76,13 +76,13 @@ func TestAqpUsageLine(t *testing.T) {
 		TotalAmount: 100, Usage: 30, Balance: 70, Plan: "CQP"}
 	var line string
 	captureProv(t, func() { line = aqpUsageLine(mu) })
-	for _, want := range []string{"[", "]", "30% used", "$30.00 / $100.00",
+	for _, want := range []string{"[", "]", "30.0% used", "$30.00 / $100.00",
 		"balance $70.00", "CQP", "2026-07"} {
 		if !contains(line, want) {
 			t.Errorf("aqpUsageLine missing %q: %s", want, line)
 		}
 	}
-	if !contains(line, "30% used · $30.00 / $100.00") {
+	if !contains(line, "30.0% used · $30.00 / $100.00") {
 		t.Errorf("aqpUsageLine order/separator wrong: %s", line)
 	}
 }

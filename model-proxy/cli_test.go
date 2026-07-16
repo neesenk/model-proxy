@@ -61,6 +61,8 @@ func TestHelperProcess(t *testing.T) {
 		cmdReload(args)
 	case "login":
 		cmdLogin(args)
+	case "serve":
+		cmdServe(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown MP_SUBCMD %q\n", cmd)
 		os.Exit(2)
