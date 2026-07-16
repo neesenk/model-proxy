@@ -878,6 +878,22 @@ func (w *webServer) handleConfigGet(resp http.ResponseWriter, r *http.Request) {
 	for name, p := range cfg.Providers {
 		provModels[name] = p.Models
 	}
+	// routes: exposed model -> targets, so the Routes form can prefill + edit each
+	// route's target list as structured rows (provider/model/priority). Mirrors
+	// RouteTarget; priority is always emitted (0 when unset).
+	type routeTargetOut struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Priority int    `json:"priority"`
+	}
+	routesOut := make(map[string][]routeTargetOut, len(cfg.Routes))
+	for exposed, targets := range cfg.Routes {
+		row := make([]routeTargetOut, 0, len(targets))
+		for _, t := range targets {
+			row = append(row, routeTargetOut{Provider: t.Provider, Model: t.Model, Priority: t.Priority})
+		}
+		routesOut[exposed] = row
+	}
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"yaml": string(data),
 		"summary": map[string]any{
@@ -886,6 +902,7 @@ func (w *webServer) handleConfigGet(resp http.ResponseWriter, r *http.Request) {
 			"route_count":    len(cfg.Routes),
 		},
 		"provider_models": provModels,
+		"routes":          routesOut,
 	})
 }
 

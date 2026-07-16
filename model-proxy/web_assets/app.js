@@ -169,6 +169,56 @@ const panels = {
 };
 let activeTab = 'status';
 
+// ---------- URL hash routing ----------
+//
+// The hash pins the current view so a page refresh (or shared link) lands on
+// the same tab + (for Accounts) the same provider, instead of snapping back to
+// Status. Shapes:
+//   #status
+//   #config
+//   #accounts
+//   #accounts/<provider>   (Accounts tab with a provider selected)
+//
+// activateTab/selectProvider push the hash; a hashchange listener (browser
+// back/forward) re-activates without pushing, so the two stay in sync without a
+// feedback loop. An unrecognized/empty hash defaults to #status.
+
+function parseHash() {
+  const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
+  const [tab, ...rest] = raw.split('/');
+  if (tab === 'config' || tab === 'accounts' || tab === 'status') {
+    // decodeURIComponent so provider names with special chars round-trip; a
+    // malformed sequence decodes to "" (treated as "no sub" -> first provider).
+    let sub = '';
+    try { sub = decodeURIComponent(rest.join('/')); } catch (_) { sub = ''; }
+    return { tab, sub };
+  }
+  return { tab: 'status', sub: '' };
+}
+
+// pushHash sets the hash without re-triggering the hashchange listener (the
+// caller already applied the view). Uses history.replaceState when possible so
+// tab/provider switches don't each add a back-history entry (refresh/back still
+// land on the current view); falls back to location.hash assignment.
+// setHash updates the URL hash. `push` true adds a browser-history entry (so
+// Back navigates between tabs); false replaces the current entry (for in-tab
+// sub-navigation like picking a provider, which shouldn't spam history). Uses
+// history API so no hashchange event fires (the caller already applied the
+// view) - avoiding a feedback loop. Falls back to location.hash assignment.
+function setHash(hash, push) {
+  if (location.hash === hash) return;
+  if (window.history && (push ? history.pushState : history.replaceState)) {
+    if (push) history.pushState(null, '', hash || '#status');
+    else history.replaceState(null, '', hash || '#status');
+  } else {
+    location.hash = hash;
+  }
+}
+
+function tabHash(tab) {
+  return '#' + tab;
+}
+
 function activateTab(name) {
   activeTab = name;
   for (const b of tabBtns) {
@@ -186,10 +236,46 @@ function activateTab(name) {
   }
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
+  // Reflect the tab in the URL. A tab switch is a navigation the user may want
+  // to Back out of, so push a history entry. Accounts adds its provider segment
+  // in selectProvider (replaceState - same tab, finer-grained).
+  if (name !== 'accounts') setHash(tabHash(name), true);
 }
 
 for (const b of tabBtns) {
   b.addEventListener('click', () => activateTab(b.dataset.tab));
+}
+
+// hashchange: browser back/forward (or manual hash edit) drives the view. Apply
+// the hash's tab + (Accounts) provider WITHOUT pushing back, avoiding a loop.
+window.addEventListener('hashchange', () => {
+  const { tab, sub } = parseHash();
+  if (tab !== activeTab) {
+    activateTabSilent(tab);
+  }
+  if (tab === 'accounts' && sub) {
+    selectProviderSilent(sub);
+  }
+});
+
+// activateTab without the hash push (called from hashchange).
+function activateTabSilent(name) {
+  activeTab = name;
+  for (const b of tabBtns) {
+    const on = b.dataset.tab === name;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+  for (const [k, p] of Object.entries(panels)) {
+    if (p) p.classList.toggle('active', k === name);
+  }
+  if (name === 'status') {
+    renderStatusTab();
+  } else {
+    stopStatusRefresh();
+  }
+  if (name === 'config') renderConfigTab();
+  if (name === 'accounts') renderAccountsTab();
 }
 
 // ---------- inline message helpers ----------
@@ -212,6 +298,21 @@ let statusInflight = false;
 
 function stopStatusRefresh() {
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+}
+
+// refreshConnIndicator does a lightweight /api/status fetch solely to update
+// the header connection dot + brand-meta (ok/err), independent of which tab is
+// active. Called at boot so a refresh landing on #config or #accounts still
+// shows the daemon's reachability (otherwise the header stays stuck on the
+// initial "connecting…" - setConn('ok') otherwise only runs inside
+// renderStatusTab, which the non-Status boot path skips).
+async function refreshConnIndicator() {
+  try {
+    const st = await apiGet('/api/status');
+    setConn('ok', `v${st.version || '?'} · ${st.uptime || '-'} · ${st.listen || ''}`);
+  } catch (e) {
+    setConn('err', 'connection lost');
+  }
 }
 
 // renderStatusTab fetches the dashboard snapshot (status + tokens + logs) and
@@ -494,21 +595,80 @@ function renderLogsCard(lines) {
 // CONFIG TAB
 // ===========================================================================
 
-let configCache = null; // last /api/config response {yaml, summary, provider_models}
+let configCache = null; // last /api/config response {yaml, summary, provider_models, routes}
+
+// yamlEditor holds the CodeMirror instance for the Raw YAML editor (created in
+// initYamlEditor per Config-tab render). Null outside the tab or if CodeMirror
+// failed to load.
+let yamlEditor = null;
+
+// initYamlEditor mounts CodeMirror on the #yaml-editor host div. CodeMirror 5 is
+// a UMD global loaded via <script> in index.html; if it's missing (vendor file
+// absent / blocked) we degrade to a plain textarea so the editor still works.
+function initYamlEditor() {
+  yamlEditor = null;
+  const host = document.getElementById('yaml-editor');
+  if (!host) return;
+  if (typeof CodeMirror === 'undefined') {
+    host.innerHTML = `<textarea class="yaml" id="yaml-editor-fallback" spellcheck="false" autocomplete="off"></textarea>`;
+    return;
+  }
+  host.innerHTML = '';
+  yamlEditor = CodeMirror(host, {
+    mode: 'yaml',
+    lineNumbers: true,
+    tabSize: 2,
+    indentUnit: 2,
+    indentWithTabs: false,
+    matchBrackets: true,
+    autoCloseBrackets: true,
+    lineWrapping: false,
+    extraKeys: {
+      'Tab': (cm) => cm.replaceSelection('  ', 'end'),
+      'Shift-Tab': (cm) => {
+        // outdent: remove up to 2 leading spaces on the current line
+        const cur = cm.getCursor();
+        const line = cm.getLine(cur.line);
+        const cut = line.startsWith('  ') ? 2 : (line.startsWith(' ') ? 1 : 0);
+        if (cut) cm.replaceRange('', { line: cur.line, ch: 0 }, { line: cur.line, ch: cut });
+      },
+    },
+  });
+  // Refresh after the host is visible (CM measures size; a freshly-rendered
+  // details/panel can have zero height at mount, leaving the editor blank).
+  setTimeout(() => { if (yamlEditor) yamlEditor.refresh(); }, 0);
+}
+
+// getYamlValue returns the editor's text (CodeMirror or fallback textarea), or
+// null if no editor is mounted.
+function getYamlValue() {
+  if (yamlEditor) return yamlEditor.getValue();
+  const fb = document.getElementById('yaml-editor-fallback');
+  return fb ? fb.value : null;
+}
+
+// setYamlValue writes text into the editor and refreshes (CM needs a refresh
+// when shown in a previously-hidden container).
+function setYamlValue(v) {
+  if (yamlEditor) {
+    yamlEditor.setValue(v || '');
+    yamlEditor.refresh();
+    return;
+  }
+  const fb = document.getElementById('yaml-editor-fallback');
+  if (fb) fb.value = v || '';
+}
 
 async function renderConfigTab() {
   const panel = panels.config;
   panel.innerHTML =
     `<div id="config-summary" class="card"><div class="card-body"><span class="msg">loading…</span></div></div>
-     <details class="editor" id="ed-general"><summary>General</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
-     <details class="editor" id="ed-scheduling"><summary>Scheduling</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-provider"><summary>Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-route"><summary>Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
-     <details class="editor" id="ed-claude"><summary>Claude mapping</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <div class="card">
        <header class="card-head"><h2>Raw YAML</h2><span class="meta" id="yaml-meta"></span></header>
        <div class="card-body">
-         <textarea class="yaml" id="yaml-editor" spellcheck="false" autocomplete="off"></textarea>
+         <div id="yaml-editor" class="yaml-cm-host"></div>
          <div class="row-actions" style="margin-top: 10px;">
            <span class="spacer"></span>
            <button class="btn small" id="btn-yaml-reload">Reload from disk</button>
@@ -517,6 +677,11 @@ async function renderConfigTab() {
          <div id="yaml-msg"></div>
        </div>
      </div>`;
+  // Mount the CodeMirror YAML editor on the host div. CodeMirror 5 is loaded as
+  // a plain <script> in index.html (UMD global), so window.CodeMirror is defined
+  // by the time this module runs. Created once per Config-tab render; the
+  // instance is held in yamlEditor for setValue/getValue in load/save.
+  initYamlEditor();
   document.getElementById('btn-yaml-reload').addEventListener('click', loadConfigYAML);
   document.getElementById('btn-yaml-save').addEventListener('click', saveConfigYAML);
 
@@ -545,84 +710,19 @@ async function loadConfigAll() {
        </div>
      </div>`;
   const ta = document.getElementById('yaml-editor');
-  if (ta) ta.value = cfg.yaml || '';
+  if (yamlEditor) {
+    yamlEditor.setValue(cfg.yaml || '');
+  } else if (ta) {
+    ta.value = cfg.yaml || '';
+  }
   const meta = document.getElementById('yaml-meta');
   if (meta) meta.textContent = `${(cfg.yaml || '').length} bytes`;
-
-  // General form
-  buildForm('ed-general', 'General', [
-    { name: 'listen',     label: 'listen address', hint: 'e.g. 127.0.0.1:8787' },
-    { name: 'log_level',  label: 'log level',      hint: 'debug / info / warn / error' },
-    { name: 'log_file',   label: 'log file',       hint: 'path to daemon log (optional)' },
-  ], 'general');
-
-  // Scheduling form
-  buildForm('ed-scheduling', 'Scheduling', [
-    { name: 'circuit_threshold',     label: 'circuit threshold',     hint: 'failures to open (default 3)' },
-    { name: 'circuit_cooldown',      label: 'circuit cooldown',      hint: 'Go duration, e.g. 10m' },
-    { name: 'rate_limit_backoff',    label: 'rate-limit backoff',    hint: 'default Retry-After, e.g. 60s' },
-    { name: 'upstream_timeout',       label: 'upstream timeout',      hint: 'e.g. 5m' },
-    { name: 'sticky_dwell',          label: 'sticky dwell',          hint: 'e.g. 10m' },
-    { name: 'quota_poll_interval',   label: 'quota poll interval',   hint: 'e.g. 5m' },
-    { name: 'quota_switch_margin',   label: 'quota switch margin',   hint: 'points, e.g. 15' },
-  ], 'scheduling');
 
   // Provider scalars form
   buildProviderForm('ed-provider');
 
   // Route form
   buildRouteForm('ed-route');
-
-  // Claude mapping form
-  buildClaudeForm('ed-claude');
-}
-
-// buildForm renders a flat key→scalar form bound to a kind (general/scheduling).
-function buildForm(editorId, title, fields, kind) {
-  const ed = document.getElementById(editorId);
-  if (!ed) return;
-  let body = `<div class="section-title">${esc(title)}</div>`;
-  for (const f of fields) {
-    body += `<div class="field">
-      <label for="fld-${esc(f.name)}">${esc(f.label)}</label>
-      <input id="fld-${esc(f.name)}" name="${esc(f.name)}" type="text" autocomplete="off">
-      ${f.hint ? `<span class="hint">${esc(f.hint)}</span>` : ''}
-    </div>`;
-  }
-  body += `<div class="row-actions">
-    <span class="spacer"></span>
-    <button class="btn primary small" data-save="${esc(kind)}">Apply</button>
-  </div>
-  <div class="msg" data-msg="${esc(kind)}"></div>`;
-  ed.querySelector('.editor-body').innerHTML = body;
-  const btn = ed.querySelector(`[data-save="${kind}"]`);
-  btn.addEventListener('click', () => applyScalarForm(ed, kind, fields));
-}
-
-async function applyScalarForm(ed, kind, fields) {
-  const msg = ed.querySelector(`[data-msg="${kind}"]`);
-  const btn = ed.querySelector(`[data-save="${kind}"]`);
-  const data = {};
-  for (const f of fields) {
-    const inp = ed.querySelector(`[name="${f.name}"]`);
-    const v = inp ? inp.value.trim() : '';
-    if (v) data[f.name] = v;
-  }
-  if (Object.keys(data).length === 0) {
-    showMsg(msg, 'err', 'no fields filled');
-    return;
-  }
-  btn.disabled = true;
-  showMsg(msg, 'ok', 'saving…');
-  try {
-    await apiPost('/api/config/edit', { kind, data });
-    await loadConfigAll();
-    showMsg(msg, 'ok', 'saved & reloaded');
-  } catch (e) {
-    showMsg(msg, 'err', e.message);
-  } finally {
-    btn.disabled = false;
-  }
 }
 
 // buildProviderForm: choose a provider → edit base URLs / usage_url / billing, or delete.
@@ -786,43 +886,122 @@ async function deleteProvider() {
   }
 }
 
-// buildRouteForm: name + targets (newline- or comma-separated) → replace sequence.
+// buildRouteForm: pick an existing route (or type a new name) → edit its targets
+// as structured rows [provider ▾ | model ▾ | priority]. Replaces the old free-text
+// "provider/model per line" textarea. Provider options = configured providers
+// (keys of provider_models); model options = that provider's models list.
 function buildRouteForm(editorId) {
   const ed = document.getElementById(editorId);
   if (!ed) return;
+  const routeNames = Object.keys((configCache && configCache.routes) || {}).sort();
   ed.querySelector('.editor-body').innerHTML =
     `<div class="section-title">Routes</div>
-     <div class="field"><label for="route-name">exposed model name</label><input id="route-name" name="name" type="text" placeholder="e.g. sonnet"></div>
-     <div class="field"><label for="route-targets">targets</label>
-       <textarea id="route-targets" name="targets" rows="3" placeholder="provider/model, one per line (priority ascending)&#10;e.g. zhipu/glm-4.6&#10;deepseek/deepseek-chat"></textarea>
-       <span class="hint">Each non-empty line is one target: &lt;provider&gt;/&lt;model&gt;[:priority]. Order = failover priority.</span>
+     <div class="field"><label for="route-name">exposed model name</label>
+       <input id="route-name" name="name" type="text" list="route-list" autocomplete="off" placeholder="e.g. glm-4.6 (pick existing or type new)">
+       <datalist id="route-list">${routeNames.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+       <span class="hint">Pick an existing route to edit, or type a new name to create one.</span>
+     </div>
+     <div class="field"><label>targets</label>
+       <div class="route-targets" id="route-targets"></div>
+       <span class="hint">Each row is one failover target. Provider options come from configured providers; model options from that provider's models. Priority lower = tried first; empty = 0.</span>
      </div>
      <div class="row-actions">
-       <button class="btn danger small" id="btn-route-delete">Delete route</button>
+       <button class="btn small" id="btn-route-addrow" type="button">+ add target</button>
        <span class="spacer"></span>
+       <button class="btn danger small" id="btn-route-delete">Delete route</button>
        <button class="btn primary small" id="btn-route-save">Apply</button>
      </div>
      <div class="msg" id="route-msg"></div>`;
+  // When the route name matches an existing route, load its targets as rows.
+  const nameInp = document.getElementById('route-name');
+  nameInp.addEventListener('input', () => syncRouteRowsFromConfig(nameInp.value.trim()));
+  document.getElementById('btn-route-addrow').addEventListener('click', () => addRouteTargetRow({ provider: '', model: '', priority: '' }));
   document.getElementById('btn-route-save').addEventListener('click', applyRouteEdit);
   document.getElementById('btn-route-delete').addEventListener('click', deleteRoute);
+  // Prefill for an existing route (or one empty row if none).
+  syncRouteRowsFromConfig(nameInp.value.trim());
+  if (!document.getElementById('route-targets').children.length) {
+    addRouteTargetRow({ provider: '', model: '', priority: '' });
+  }
 }
 
-function parseRouteTargets(raw) {
-  // Returns [{provider, model, priority?}] or throws on a malformed line.
-  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
-  // Also support comma-separated single-line input.
-  const flat = lines.length === 1 && lines[0].includes(',')
-    ? lines[0].split(',').map((s) => s.trim()).filter(Boolean)
-    : lines;
+// providerOptions / modelsForProvider read the cached config so every row shares
+// one source of truth (provider_models from /api/config).
+function providerOptions() {
+  return Object.keys((configCache && configCache.provider_models) || {}).sort();
+}
+function modelsForProvider(provider) {
+  const pm = (configCache && configCache.provider_models) || {};
+  return pm[provider] || [];
+}
+
+// addRouteTargetRow appends one editable target row to #route-targets. `t` is
+// {provider, model, priority}. The model select includes the provider's known
+// models PLUS the current value (so a route referencing an unlisted model isn't
+// silently dropped on edit).
+function addRouteTargetRow(t) {
+  const box = document.getElementById('route-targets');
+  if (!box) return;
+  const row = document.createElement('div');
+  row.className = 'route-target-row';
+  const provs = providerOptions();
+  const provOpts = provs.map((p) => `<option value="${esc(p)}"${p === t.provider ? ' selected' : ''}>${esc(p)}</option>`).join('');
+  const models = modelsForProvider(t.provider);
+  // ensure the current model is selectable even if not in the provider's list
+  const modelSet = models.includes(t.model) ? models : [...models, t.model];
+  const modelOpts = modelSet.map((m) => `<option value="${esc(m)}"${m === t.model ? ' selected' : ''}>${esc(m)}</option>`).join('');
+  row.innerHTML =
+    `<select class="rt-provider" autocomplete="off">${provOpts}</select>
+     <select class="rt-model" autocomplete="off">${modelOpts}</select>
+     <input class="rt-priority" type="number" min="0" inputmode="numeric" placeholder="0" value="${t.priority ? esc(String(t.priority)) : ''}">
+     <button class="btn small danger" type="button" title="remove target" aria-label="remove target">×</button>`;
+  // provider change → repopulate this row's model select (keep current value if
+  // it's still valid for the new provider, else clear).
+  const provSel = row.querySelector('.rt-provider');
+  const modelSel = row.querySelector('.rt-model');
+  provSel.addEventListener('change', () => {
+    const cur = modelSel.value;
+    const ms = modelsForProvider(provSel.value);
+    modelSel.innerHTML = ms.map((m) => `<option value="${esc(m)}">`).join('');
+    if (ms.includes(cur)) modelSel.value = cur;
+  });
+  row.querySelector('button').addEventListener('click', () => { row.remove(); });
+  box.appendChild(row);
+}
+
+// syncRouteRowsFromConfig clears the rows and rebuilds them for the named route
+// if it exists in the cached config; otherwise leaves the current rows alone
+// (so typing a new name doesn't wipe in-progress edits — except on first load).
+function syncRouteRowsFromConfig(name) {
+  const box = document.getElementById('route-targets');
+  if (!box) return;
+  const routes = (configCache && configCache.routes) || {};
+  const targets = routes[name];
+  if (!targets || !targets.length) return; // not an existing route
+  box.innerHTML = '';
+  for (const t of targets) addRouteTargetRow(t);
+}
+
+// collectRouteTargets reads #route-targets rows into [{provider,model,priority?}].
+// Skips fully-empty rows; requires provider+model on partial rows. Throws on a
+// row missing provider or model.
+function collectRouteTargets() {
+  const box = document.getElementById('route-targets');
+  if (!box) throw new Error('no target rows');
   const out = [];
-  for (const line of flat) {
-    const m = line.match(/^([^\/\s]+)\/([^\s:]+)(?::(\d+))?$/);
-    if (!m) throw new Error(`bad target "${line}" — expected provider/model[:priority]`);
-    const t = { provider: m[1], model: m[2] };
-    if (m[3]) t.priority = parseInt(m[3], 10);
+  const rows = box.querySelectorAll('.route-target-row');
+  for (const row of rows) {
+    const provider = row.querySelector('.rt-provider').value.trim();
+    const model = row.querySelector('.rt-model').value.trim();
+    const pr = row.querySelector('.rt-priority').value.trim();
+    if (!provider && !model && !pr) continue; // blank row - skip
+    if (!provider) throw new Error('every target needs a provider');
+    if (!model) throw new Error('every target needs a model');
+    const t = { provider, model };
+    if (pr !== '') t.priority = parseInt(pr, 10);
     out.push(t);
   }
-  if (out.length === 0) throw new Error('no targets given');
+  if (out.length === 0) throw new Error('add at least one target');
   return out;
 }
 
@@ -830,10 +1009,9 @@ async function applyRouteEdit() {
   const msg = document.getElementById('route-msg');
   const btn = document.getElementById('btn-route-save');
   const name = (document.getElementById('route-name').value || '').trim();
-  const raw = document.getElementById('route-targets').value;
   if (!name) { showMsg(msg, 'err', 'route name required'); return; }
   let targets;
-  try { targets = parseRouteTargets(raw); }
+  try { targets = collectRouteTargets(); }
   catch (e) { showMsg(msg, 'err', e.message); return; }
   btn.disabled = true;
   showMsg(msg, 'ok', 'saving…');
@@ -862,65 +1040,13 @@ async function deleteRoute() {
   }
 }
 
-// buildClaudeForm: alias + route → set; delete by alias.
-function buildClaudeForm(editorId) {
-  const ed = document.getElementById(editorId);
-  if (!ed) return;
-  ed.querySelector('.editor-body').innerHTML =
-    `<div class="section-title">Claude mapping</div>
-     <div class="field"><label for="cm-alias">anthropic alias</label><input id="cm-alias" name="alias" type="text" placeholder="e.g. claude-sonnet-4-5"></div>
-     <div class="field"><label for="cm-route">exposed route</label><input id="cm-route" name="route" type="text" placeholder="exposed model name from routes"></div>
-     <div class="row-actions">
-       <button class="btn danger small" id="btn-cm-delete">Delete alias</button>
-       <span class="spacer"></span>
-       <button class="btn primary small" id="btn-cm-save">Apply</button>
-     </div>
-     <div class="msg" id="cm-msg"></div>`;
-  document.getElementById('btn-cm-save').addEventListener('click', applyClaudeMap);
-  document.getElementById('btn-cm-delete').addEventListener('click', deleteClaudeMap);
-}
-
-async function applyClaudeMap() {
-  const msg = document.getElementById('cm-msg');
-  const btn = document.getElementById('btn-cm-save');
-  const alias = (document.getElementById('cm-alias').value || '').trim();
-  const route = (document.getElementById('cm-route').value || '').trim();
-  if (!alias || !route) { showMsg(msg, 'err', 'alias and route required'); return; }
-  btn.disabled = true;
-  showMsg(msg, 'ok', 'saving…');
-  try {
-    await apiPost('/api/config/edit', { kind: 'claude_mapping', data: { alias, route } });
-    await loadConfigAll();
-    showMsg(msg, 'ok', 'saved & reloaded');
-  } catch (e) {
-    showMsg(msg, 'err', e.message);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function deleteClaudeMap() {
-  const msg = document.getElementById('cm-msg');
-  const alias = (document.getElementById('cm-alias').value || '').trim();
-  if (!alias) { showMsg(msg, 'err', 'alias required'); return; }
-  if (!window.confirm(`Delete claude_mapping alias "${alias}"?`)) return;
-  try {
-    await apiPost('/api/config/edit', { kind: 'claude_mapping', data: { alias, delete: true } });
-    await loadConfigAll();
-    showMsg(msg, 'ok', `deleted ${alias}`);
-  } catch (e) {
-    showMsg(msg, 'err', e.message);
-  }
-}
-
 async function loadConfigYAML() {
-  const ta = document.getElementById('yaml-editor');
   const meta = document.getElementById('yaml-meta');
   const msg = document.getElementById('yaml-msg');
   try {
     const cfg = await apiGet('/api/config');
     configCache = cfg;
-    if (ta) ta.value = cfg.yaml || '';
+    setYamlValue(cfg.yaml || '');
     if (meta) meta.textContent = `${(cfg.yaml || '').length} bytes`;
     if (msg) showMsg(msg, 'ok', 'reloaded from disk');
   } catch (e) {
@@ -929,14 +1055,14 @@ async function loadConfigYAML() {
 }
 
 async function saveConfigYAML() {
-  const ta = document.getElementById('yaml-editor');
   const msg = document.getElementById('yaml-msg');
   const btn = document.getElementById('btn-yaml-save');
-  if (!ta) return;
+  const yaml = getYamlValue();
+  if (yaml === null) return; // no editor mounted
   btn.disabled = true;
   showMsg(msg, 'ok', 'validating + reloading…');
   try {
-    await apiPost('/api/config', { yaml: ta.value });
+    await apiPost('/api/config', { yaml });
     showMsg(msg, 'ok', 'saved & reloaded');
     await loadConfigAll();
   } catch (e) {
@@ -1053,8 +1179,16 @@ function renderAccountsNav(providers) {
 // selectProvider highlights the sidebar item and renders that provider's
 // account list (toolbar with Add + per-account cards). Only the .acct-main pane
 // is re-rendered, so the sidebar stays wired and the scroll position is reset
-// only for the detail.
+// only for the detail. Also pins the provider in the URL hash
+// (#accounts/<provider>) so a refresh lands on the same provider.
 function selectProvider(name) {
+  selectProviderSilent(name);
+  if (name) setHash('#accounts/' + encodeURIComponent(name), false);
+}
+
+// selectProviderSilent renders without touching the hash (used by the hashchange
+// listener + the initial boot, where the hash already reflects the target).
+function selectProviderSilent(name) {
   accountsSelectedProvider = name;
   document.querySelectorAll('.acct-nav-item').forEach((b) => {
     b.classList.toggle('active', b.dataset.provider === name);
@@ -1543,5 +1677,22 @@ function pollLogin(sessionId) {
 const loginCancelStatic = document.getElementById('login-cancel');
 if (loginCancelStatic) loginCancelStatic.addEventListener('click', closeLoginModal);
 
-// Initial render: status tab is active by default.
-renderStatusTab();
+// Initial render: activate the tab the URL hash names (so a refresh or shared
+// link lands on the same view), defaulting to Status. For #accounts/<provider>,
+// preset the selection so renderAccountsNav lands on it after the fetch.
+const { tab: bootTab, sub: bootSub } = parseHash();
+if (bootTab === 'accounts' && bootSub) {
+  accountsSelectedProvider = bootSub;
+}
+if (bootTab === 'config') {
+  activateTabSilent('config');
+} else if (bootTab === 'accounts') {
+  activateTabSilent('accounts');
+} else {
+  activateTabSilent('status');
+}
+// Update the header connection indicator regardless of the landing tab. The
+// Status tab sets it via renderStatusTab, but #config/#accounts skip that, so
+// without this the header would stay on "connecting…" until the user opens
+// Status.
+refreshConnIndicator();

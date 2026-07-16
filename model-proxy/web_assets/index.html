@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>model-proxy</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="vendor/codemirror.min.css">
 </head>
 <body>
   <header class="topbar">
@@ -41,6 +42,13 @@
 
   <dialog id="add-modal" aria-labelledby="add-title"></dialog>
 
+  <!-- CodeMirror 5 (UMD globals) for the Raw YAML editor. Plain scripts, loaded
+       before the deferred app.js module so window.CodeMirror is defined when the
+       module runs. Vendored offline (no CDN) under web_assets/vendor/. -->
+  <script src="vendor/codemirror.min.js"></script>
+  <script src="vendor/yaml.min.js"></script>
+  <script src="vendor/matchbrackets.min.js"></script>
+  <script src="vendor/closebrackets.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

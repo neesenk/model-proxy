@@ -564,6 +564,44 @@ func TestConfigGetProviderModels(t *testing.T) {
 	}
 }
 
+// TestConfigGetRoutes asserts /api/config surfaces structured routes
+// (exposed -> [{provider, model, priority}]) so the Routes form can prefill +
+// edit each route's targets as provider/model/priority rows. Priority is always
+// emitted (0 when unset in config).
+func TestConfigGetRoutes(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n  deepseek:\n    provider_id: deepseek\n    openai_base_url: https://y\nroutes:\n  glm-4.6:\n    - {provider: zhipu, model: glm-4.6, priority: 1}\n    - {provider: deepseek, model: deepseek-chat}\n"), 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	rec := httptest.NewRecorder()
+	w.handleConfigGet(rec, httptest.NewRequest("GET", "/api/config", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Routes map[string][]struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			Priority int    `json:"priority"`
+		} `json:"routes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+	}
+	got := resp.Routes["glm-4.6"]
+	if len(got) != 2 {
+		t.Fatalf("routes[glm-4.6] = %d targets, want 2", len(got))
+	}
+	// First target carries an explicit priority; second omits it -> 0.
+	if got[0].Provider != "zhipu" || got[0].Model != "glm-4.6" || got[0].Priority != 1 {
+		t.Errorf("target[0] = %+v, want zhipu/glm-4.6/priority 1", got[0])
+	}
+	if got[1].Provider != "deepseek" || got[1].Model != "deepseek-chat" || got[1].Priority != 0 {
+		t.Errorf("target[1] = %+v, want deepseek/deepseek-chat/priority 0 (unset)", got[1])
+	}
+}
+
 // TestConfigEditProviderAddWithProviderID asserts the "add provider" flow
 // succeeds: a new provider block must carry provider_id (config.validate
 // rejects an empty one) and openai_base_url. Pre-fix editStructured never wrote

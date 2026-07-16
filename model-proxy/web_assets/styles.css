@@ -321,6 +321,66 @@ textarea.yaml {
   resize: vertical;
 }
 
+/* ---------- CodeMirror (Raw YAML editor) ----------
+   Theme CodeMirror to the app palette + dark mode. The .yaml-cm-host wraps the
+   CM instance; .CodeMirror is CM's own root. Token colors (yaml mode) mapped to
+   the instrument-panel palette so it reads as one system in light + dark. */
+.yaml-cm-host { border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
+.yaml-cm-host .CodeMirror {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  height: 460px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+.yaml-cm-host .CodeMirror-gutters { background: var(--surface-2); border-right: 1px solid var(--border-2); }
+.yaml-cm-host .CodeMirror-linenumber { color: var(--muted); }
+.yaml-cm-host .CodeMirror-cursor { border-left: 1px solid var(--accent); }
+.yaml-cm-host .CodeMirror-selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.yaml-cm-host .CodeMirror-focused .CodeMirror-selected { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+/* yaml-mode tokens. .CodeMirror in the selector raises specificity above CM's
+   `.cm-s-default .cm-X` (which is 0,2,0 and loads later), so our palette wins. */
+.yaml-cm-host .CodeMirror .cm-string, .yaml-cm-host .CodeMirror .cm-string-2 { color: var(--ok-fg); }
+.yaml-cm-host .CodeMirror .cm-atom, .yaml-cm-host .CodeMirror .cm-bool { color: var(--warn-fg); font-weight: 500; }
+.yaml-cm-host .CodeMirror .cm-comment { color: var(--muted); font-style: italic; }
+.yaml-cm-host .CodeMirror .cm-qualifier, .yaml-cm-host .CodeMirror .cm-builtin { color: var(--accent-ink); } /* keys */
+.yaml-cm-host .CodeMirror .cm-number { color: var(--warn-fg); }
+.yaml-cm-host .CodeMirror .cm-def, .yaml-cm-host .CodeMirror .cm-keyword { color: var(--accent-ink); }
+.yaml-cm-host .CodeMirror-matchingbracket { color: var(--accent-ink); font-weight: 700; outline: 1px solid var(--accent); }
+
+/* ---------- route-target rows ---------- */
+.route-targets { display: grid; gap: 8px; }
+.route-target-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 90px auto;
+  gap: 8px;
+  align-items: center;
+}
+.route-target-row select,
+.route-target-row input {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+.route-target-row select:focus,
+.route-target-row input:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+.route-target-row input.rt-priority { font-family: var(--mono); }
+.route-target-row .btn.danger { padding: 6px 10px; line-height: 1; }
+@media (max-width: 560px) {
+  .route-target-row { grid-template-columns: 1fr 1fr; }
+  .route-target-row input.rt-priority { grid-column: 1; }
+  .route-target-row .btn.danger { grid-column: 2; justify-self: end; }
+}
+
 .btn {
   appearance: none;
   border: 1px solid var(--border);
