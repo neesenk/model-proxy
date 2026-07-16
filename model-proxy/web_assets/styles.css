@@ -176,6 +176,11 @@ main {
 .card-body.flush { padding: 0; }
 .card-body.tight { padding: 8px 14px; }
 
+/* Config tab: the Summary card sits flush against the first editor below it
+   (cards have no margin; only details.editor does). Give it (and the Raw YAML
+   card) bottom spacing so the vertical rhythm is even. */
+#tab-config > .card { margin-bottom: 14px; }
+
 /* ---------- status pills ---------- */
 .pill {
   display: inline-flex;
