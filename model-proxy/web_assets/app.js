@@ -519,8 +519,11 @@ function renderWarningsCard(target, st) {
 }
 
 // healthPill renders a status pill reflecting circuit + rate-limit state.
+// healthPill renders a status pill reflecting circuit + rate-limit state. A
+// provider with no health record (never failed / never rate-limited; health is
+// created lazily on first failure) shows a neutral "—" rather than "unknown".
 function healthPill(h) {
-  if (!h) return `<span class="pill muted"><span class="dot"></span>unknown</span>`;
+  if (!h) return `<span class="pill muted"><span class="dot"></span>—</span>`;
   const now = Date.now();
   const rlUntil = h.rate_limited_until ? new Date(h.rate_limited_until).getTime() : 0;
   if (h.circuit_state === 'open' || h.circuit_state === 'half_open') {
@@ -536,10 +539,26 @@ function healthPill(h) {
   return `<span class="pill muted"><span class="dot"></span>unavailable</span>`;
 }
 
+// renderProvidersCard draws the per-provider health + request-counter table.
+//
+// Provider names are enumerated from the SCHEDULE (the union of every route's
+// ordered chain), NOT from `health`: a health entry is only created lazily when
+// a provider fails or gets rate-limited, so a fresh daemon (or all-healthy
+// providers) has health={} and the old health-only enumeration rendered nothing.
+// Schedule is the authoritative source of "which providers are configured".
+// `health` (may be absent → neutral "—") and `counters` (absent → 0) are joined
+// per name.
 function renderProvidersCard(target, st) {
   const health = st.health || {};
   const counters = st.counters || {};
-  const names = Object.keys(health).sort();
+  const models = (st.schedule && st.schedule.models) || {};
+  const nameSet = new Set();
+  for (const route of Object.keys(models)) {
+    for (const p of (models[route].ordered || [])) {
+      if (p && p.provider) nameSet.add(p.provider);
+    }
+  }
+  const names = Array.from(nameSet).sort();
   if (names.length === 0) return;
   let rows = '';
   for (const name of names) {
