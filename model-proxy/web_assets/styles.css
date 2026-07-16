@@ -542,6 +542,72 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
 .acct-main { min-width: 0; }
 /* status detail pane (mirrors .acct-main; the sidebar reuses .acct-nav) */
 .status-main { min-width: 0; }
+
+/* status sidebar — visually identical to .acct-nav but a DISTINCT class so the
+   Accounts tab's global querySelector('.acct-nav' / '.acct-nav-item') can never
+   match the (persisted, display:none) Status sidebar when both tabs' DOM is in
+   the document. Without this isolation the two sidebars cross-contaminate. */
+.status-layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.status-nav {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  padding: 8px;
+  position: sticky;
+  top: 64px;
+  max-height: calc(100vh - 84px);
+  overflow: auto;
+}
+.status-nav-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  padding: 4px 8px 8px;
+  font-weight: 500;
+}
+.status-nav-item {
+  appearance: none;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-card);
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+}
+.status-nav-item:hover { background: var(--surface-2); }
+.status-nav-item.active {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+.status-nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; }
+@media (max-width: 720px) {
+  .status-layout { grid-template-columns: 1fr; }
+  .status-nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 8px;
+  }
+  .status-nav-title { width: 100%; padding: 0 4px 4px; }
+  .status-nav-item { width: auto; flex: 1 1 auto; }
+}
 .acct-toolbar {
   display: flex;
   align-items: center;

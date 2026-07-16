@@ -415,14 +415,14 @@ function renderStatusPanel() {
     }
     const navItems = STATUS_SECTIONS.map((s) => {
       const active = s.key === statusSelected ? ' active' : '';
-      return `<button class="acct-nav-item status-nav-item${active}" data-section="${esc(s.key)}">
-        <span class="acct-nav-name">${esc(s.label)}</span>
+      return `<button class="status-nav-item${active}" data-section="${esc(s.key)}">
+        <span class="status-nav-name">${esc(s.label)}</span>
       </button>`;
     }).join('');
     layout = document.createElement('div');
-    layout.className = 'accounts-layout status-layout';
-    layout.innerHTML = `<nav class="acct-nav" aria-label="Status sections">
-        <div class="acct-nav-title">Sections</div>
+    layout.className = 'status-layout';
+    layout.innerHTML = `<nav class="status-nav" aria-label="Status sections">
+        <div class="status-nav-title">Sections</div>
         ${navItems}
       </nav>
       <div class="status-main"></div>`;
