@@ -33,6 +33,7 @@ providers:
       - gpt-5.4
       - gpt-5.4-mini
       - gpt-5.5
+      - gpt-5.6-luna
       - gpt-5.6-sol
       - gpt-5.6-terra
   # External provider (Zhipu BigModel — API key via `login zhipu`)
@@ -102,7 +103,6 @@ providers:
       - kimi-k2.7-code
       - kimi-k2.6
       - minimax-m3
-
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called
 # anthropic model isn't listed, the called name is used as the exposed name.
