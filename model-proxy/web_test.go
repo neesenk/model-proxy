@@ -1315,10 +1315,57 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 		t.Fatalf("status=%d want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`"granularity":"day"`, `"deepseek"`, `"deepseek-v4-pro"`, `"input":1000`, `"requests":3`, `"price_coverage"`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("analytics body missing %s: %s", want, body)
+	var got struct {
+		Granularity string `json:"granularity"`
+		Series      []struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			Points   []struct {
+				Requests uint64   `json:"requests"`
+				Input    uint64   `json:"input"`
+				Cost     *float64 `json:"cost"`
+				Priced   bool     `json:"priced"`
+			} `json:"points"`
+		} `json:"series"`
+		PriceCoverage struct {
+			Priced   []string `json:"priced"`
+			Unpriced []string `json:"unpriced"`
+		} `json:"price_coverage"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("unmarshal analytics: %v\n%s", err, body)
+	}
+	if got.Granularity != "day" {
+		t.Errorf("granularity = %q, want day", got.Granularity)
+	}
+	if len(got.Series) != 1 || got.Series[0].Provider != "deepseek" || got.Series[0].Model != "deepseek-v4-pro" {
+		t.Fatalf("series = %+v, want one deepseek/deepseek-v4-pro", got.Series)
+	}
+	pts := got.Series[0].Points
+	if len(pts) != 1 || pts[0].Requests != 3 || pts[0].Input != 1000 {
+		t.Errorf("point = %+v, want reqs=3 input=1000", pts)
+	}
+	// Never-fabricate: no catalog + no override on the test Proxy → unpriced.
+	// If resolvePrice ever returned ok=true for an unknown model with a nil
+	// catalog, Priced would flip to true and the handler would have fabricated
+	// a cost — these assertions pin that contract.
+	if pts[0].Priced {
+		t.Errorf("point must be unpriced (no catalog); got priced=true → fabricated a price")
+	}
+	if pts[0].Cost != nil {
+		t.Errorf("unpriced point cost must be nil, got %v", *pts[0].Cost)
+	}
+	found := false
+	for _, m := range got.PriceCoverage.Unpriced {
+		if m == "deepseek-v4-pro" {
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("price_coverage.unpriced must list deepseek-v4-pro: %+v", got.PriceCoverage.Unpriced)
+	}
+	if len(got.PriceCoverage.Priced) != 0 {
+		t.Errorf("price_coverage.priced must be empty, got %+v", got.PriceCoverage.Priced)
 	}
 
 	// Bad granularity → 400.

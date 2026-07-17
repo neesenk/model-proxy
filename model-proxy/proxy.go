@@ -34,8 +34,7 @@ type Proxy struct {
 	stats     *statsStore                // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
 	flusher   *statsFlusher              // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog    *requestLogger             // per-request access log (full bodies); nil = disabled (default) or init failure
-	pricing   *pricingCatalog            // equivalent-cost price catalog (analytics); nil-safe
-	pricingMu sync.Mutex                 // guards pricing during refresh
+	pricingMu sync.Mutex                 // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -294,7 +293,6 @@ func (p *Proxy) pricingSnapshot() *pricingCatalog {
 	if err != nil || cat == nil {
 		return emptyPricingCatalog()
 	}
-	p.pricing = cat
 	return cat
 }
 
