@@ -241,3 +241,34 @@ func ensurePricingFresh(cacheFile, endpoint string, fetch pricingFetchFunc, forc
 		return emptyPricingCatalog(), nil
 	}
 }
+
+// costResult is the computed equivalent cost over one bucket's token totals.
+// Priced=false means no price was known; Cost should be rendered as n/a (null).
+type costResult struct {
+	Cost   float64
+	Priced bool
+}
+
+// resolvePrice returns the effective USD/token price for a model: config
+// `prices:` override (÷1e6 from $/M) wins, else the catalog. ok=false if neither.
+func resolvePrice(prices map[string]PriceConfig, cat *pricingCatalog, model string) (pricingEntry, bool) {
+	if pc, ok := prices[model]; ok {
+		return pricingEntry{
+			Prompt:     pc.Input / 1e6,
+			Completion: pc.Output / 1e6,
+			CacheRead:  pc.CacheRead / 1e6,
+			CacheWrite: pc.CacheWrite / 1e6,
+		}, true
+	}
+	return cat.lookup(model)
+}
+
+// computeCost prices a bucket's token totals. cache_creation is priced only via
+// CacheWrite (0 → contributes nothing); input/output priced → Priced=true.
+func computeCost(input, output, cacheRead, cacheCreation uint64, e pricingEntry) costResult {
+	cost := float64(input)*e.Prompt +
+		float64(output)*e.Completion +
+		float64(cacheRead)*e.CacheRead +
+		float64(cacheCreation)*e.CacheWrite
+	return costResult{Cost: cost, Priced: true}
+}

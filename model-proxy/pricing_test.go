@@ -203,3 +203,37 @@ func TestEnsurePricingFresh_NoCacheNoFetchEmpty(t *testing.T) {
 		t.Errorf("no cache + fetch error → empty (non-nil) catalog, got %+v", cat)
 	}
 }
+
+func TestResolvePrice_OverrideBeatsCatalog(t *testing.T) {
+	cat := parsePricingAPI([]byte(fixtureOR))                              // glm-4.6 prompt 0.9e-6
+	prices := map[string]PriceConfig{"glm-4.6": {Input: 9.0, Output: 9.0}} // $9/M = 9e-6/token
+	e, ok := resolvePrice(prices, cat, "glm-4.6")
+	if !ok || e.Prompt != 9e-6 {
+		t.Errorf("override should win: ok=%v prompt=%v", ok, e.Prompt)
+	}
+	// No override → catalog.
+	e2, ok2 := resolvePrice(prices, cat, "deepseek-v4-pro")
+	if !ok2 || e2.Prompt != 1.1e-6 {
+		t.Errorf("catalog fallback wrong: ok=%v prompt=%v", ok2, e2.Prompt)
+	}
+	// Neither → unpriced.
+	if _, ok3 := resolvePrice(prices, cat, "doubao-seed-1-8"); ok3 {
+		t.Error("unknown model must be unpriced")
+	}
+}
+
+func TestComputeCost_Exact(t *testing.T) {
+	// 1,000,000 input @ $1.1/M (1.1e-6/token) = $1.1
+	//   500,000 output @ $2.8/M = $1.4 ; total $2.5
+	e := pricingEntry{Prompt: 1.1e-6, Completion: 2.8e-6}
+	r := computeCost(1_000_000, 500_000, 0, 0, e)
+	if !r.Priced || r.Cost < 2.499 || r.Cost > 2.501 {
+		t.Errorf("cost = %v priced=%v, want ~2.5 priced=true", r.Cost, r.Priced)
+	}
+	// cache_read priced, cache_creation unpriced (CacheWrite 0 → contributes 0).
+	e2 := pricingEntry{Prompt: 1e-6, Completion: 2e-6, CacheRead: 1e-7}
+	r2 := computeCost(0, 0, 200_000, 100_000, e2)
+	if !r2.Priced || r2.Cost < 0.0199 || r2.Cost > 0.0201 { // 200000*1e-7 = 0.02
+		t.Errorf("cache cost = %v, want ~0.02", r2.Cost)
+	}
+}
