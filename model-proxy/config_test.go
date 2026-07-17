@@ -318,3 +318,43 @@ providers:
 		t.Fatalf("expected Web.Enabled default true, got false")
 	}
 }
+
+func TestPricingConfigDefaults(t *testing.T) {
+	cfg, err := LoadConfigFromBytes("x", []byte("listen: 127.0.0.1:1\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://example.com/api/v1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Pricing.enabled() {
+		t.Error("pricing should default to enabled")
+	}
+	if cfg.Pricing.ttl() != 24*time.Hour {
+		t.Errorf("default ttl = %v, want 24h", cfg.Pricing.ttl())
+	}
+	if cfg.Pricing.sourceURL() != "https://openrouter.ai/api/v1/models" {
+		t.Errorf("default source = %q", cfg.Pricing.sourceURL())
+	}
+	if cfg.Prices != nil && len(cfg.Prices) != 0 {
+		t.Errorf("prices should default empty, got %v", cfg.Prices)
+	}
+}
+
+func TestPricesParseAndUnits(t *testing.T) {
+	yaml := `prices:
+  glm-4.6: {input: 0.9, output: 0.9, cache_read: 0.09}
+  doubao-seed-1-8-251228: {input: 0.5, output: 1.5}
+providers:
+  zhipu:
+    provider_id: zhipu
+    openai_base_url: https://example.com/api/v1
+`
+	cfg, err := LoadConfigFromBytes("x", []byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Prices) != 2 {
+		t.Fatalf("prices = %d entries, want 2", len(cfg.Prices))
+	}
+	if cfg.Prices["glm-4.6"].Input != 0.9 || cfg.Prices["glm-4.6"].CacheRead != 0.09 {
+		t.Errorf("glm-4.6 parsed wrong: %+v", cfg.Prices["glm-4.6"])
+	}
+}

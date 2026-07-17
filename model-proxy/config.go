@@ -22,6 +22,8 @@ type Config struct {
 	Web           WebConfig                `yaml:"web"`
 	Stats         StatsConfig              `yaml:"stats"`
 	RequestLog    RequestLogConfig         `yaml:"request_log"`
+	Pricing       PricingConfig            `yaml:"pricing"`
+	Prices        map[string]PriceConfig   `yaml:"prices"`
 }
 
 // WebConfig toggles the admin UI (/ui + /api). Defaults to enabled.
@@ -55,6 +57,46 @@ func (s StatsConfig) retention() time.Duration {
 		return d
 	}
 	return 720 * time.Hour
+}
+
+// PricingConfig configures the analytics equivalent-cost pricing source
+// (OpenRouter catalog, cached). Defaults: enabled, 24h TTL, the OpenRouter
+// endpoint. enabled=false → no fetch; cost shows n/a everywhere.
+type PricingConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	TTL       string `yaml:"ttl"`
+	SourceURL string `yaml:"source_url"`
+}
+
+func (p PricingConfig) enabled() bool { return p.Enabled }
+
+// ttl returns the catalog cache TTL, defaulting to 24h.
+func (p PricingConfig) ttl() time.Duration {
+	if p.TTL == "" {
+		return 24 * time.Hour
+	}
+	if d, err := time.ParseDuration(p.TTL); err == nil {
+		return d
+	}
+	return 24 * time.Hour
+}
+
+// sourceURL returns the pricing endpoint, defaulting to OpenRouter.
+func (p PricingConfig) sourceURL() string {
+	if p.SourceURL != "" {
+		return p.SourceURL
+	}
+	return defaultPricingEndpoint
+}
+
+// PriceConfig is a per-model price override in USD per MILLION tokens (human
+// units); converted to USD/token at lookup (÷ 1e6). cache_read/cache_write
+// default to 0.
+type PriceConfig struct {
+	Input      float64 `yaml:"input"`
+	Output     float64 `yaml:"output"`
+	CacheRead  float64 `yaml:"cache_read"`
+	CacheWrite float64 `yaml:"cache_write"`
 }
 
 // RequestLogConfig configures per-request access logging: the full request +
@@ -355,11 +397,14 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Web           WebConfig                `yaml:"web"`
 		Stats         StatsConfig              `yaml:"stats"`
 		RequestLog    RequestLogConfig         `yaml:"request_log"`
+		Pricing       PricingConfig            `yaml:"pricing"`
+		Prices        map[string]PriceConfig   `yaml:"prices"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
 		LogLevel: "info",
 		Web:      WebConfig{Enabled: true},
+		Pricing:  PricingConfig{Enabled: true},
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		// The most common breakage: a providers' `models:` block still in the
@@ -382,6 +427,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Web = raw.Web
 	cfg.Stats = raw.Stats
 	cfg.RequestLog = raw.RequestLog
+	cfg.Pricing = raw.Pricing
+	cfg.Prices = raw.Prices
 	cfg.LogFile = expandPath(cfg.LogFile)
 	t := &cfg.Takeover
 	// Takeover paths default to each client's standard config location (and
