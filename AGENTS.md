@@ -98,7 +98,7 @@ config init|print|check
 schedule                   # 查 daemon：每 model 当前调度（GET /debug/schedule）
 doctor                     # 离线 config 调度诊断
 serve status               # 终端状态面板（= Web UI Status 标签页）；--logs [N]/--json/--config
-stats                      # per-(provider,model) 调用统计（SQLite）；--from/--to/--provider/--model/--bucket/--json
+stats                      # per-(provider,model) 调用统计（SQLite）；--from/--to/--provider/--model/--bucket/--json；--granularity day|month|--cost 改走 /api/analytics（见下）
 ```
 
 ### Web UI + `/api/*` 接口契约
@@ -120,6 +120,7 @@ stats                      # per-(provider,model) 调用统计（SQLite）；--f
 | GET | `/api/tokens` | — | `{usage:[{provider,model,input,output,cache_creation,cache_read,requests}]}` | SSE 扫描器累计的观测用量（flat 数组） |
 | POST | `/api/tokens/reset` | — | `{status:"reset"}` | 清零内存 + SQLite + flusher 基线 |
 | GET | `/api/stats?from=&to=&provider=&model=&bucket=` | — | `{from,to,bucket,buckets:[...]}` | 存储 1 分钟桶；`bucket` 仅展示聚合（SQL GROUP BY） |
+| GET | `/api/analytics?from=&to=&provider=&model=&granularity=day\|month` | — | `{granularity,from,to,series:[{provider,model,points:[{bucket,requests,input,output,cache_creation,cache_read,cost,priced}]}],totals:{input,output,cost},price_coverage:{priced:[],unpriced:[]}}` | 日历日/月聚合（存储恒 1 分钟）+ **服务端现算等价 payg 成本**（price×tokens，不落盘、不伪造；未知价 `cost:null,priced:false`）。价格优先级：config `prices:` > OpenRouter 缓存目录（bare-name 精确匹配）。见下「Analytics 等价成本」 |
 | POST | `/api/quota/refresh` | 空 body 或 `{"provider":key}` | `{status:"refreshed"[,provider]}` / 404 | 同步刷新配额缓存（可立即重查 `/api/status`）：空 → `pollAll`，指定 → `pollOne`（key 即 `name` 或 `name#accountID`），未知 key 404 |
 | POST/GET | `/api/login/<provider>/start`、`/api/login/<session>/poll` | — | `{session_id,...}` / `{state, detail, result}` | 异步登录（aqp SSO URL / codex device flow）；poll 状态 pending/done/error |
 
@@ -134,6 +135,26 @@ stats                      # per-(provider,model) 调用统计（SQLite）；--f
 #### 调用统计持久化（`stats.go`，SQLite 单一来源）
 
 `metricsStore`（per-(provider,model) 原子计数器）+ `tokenCounter` 在 hot path 纯内存，**hot path 不碰 SQLite**。`statsFlusher` 按墙钟分钟边界 tick，快照两者与上次 diff，非零 delta 作分钟桶 upsert 到 `~/.model-proxy/stats.db`（`minute_buckets` 表，`ON CONFLICT DO UPDATE` 累加，`last_request_at` 用 `MAX`）。`modernc.org/sqlite` 纯 Go（`CGO_ENABLED=0`）；`config.stats.{db_path, retention}`（默认 30d）。SIGINT/SIGTERM 最终 flush + pid 清理。查询 `GET /api/stats`（`bucket` 聚合，存储恒 1 分钟）+ `model-proxy stats` CLI。锁纪律：metrics/token/stats 都是独立叶子锁，不与其它嵌套。
+
+#### Analytics 等价成本（`pricing.go` + `web.go:handleAnalytics`，默认开启）
+
+`GET /api/analytics?from=&to=&provider=&model=&granularity=day|month` 在 SQLite stats 之上做**日历日/月聚合**（存储恒 1 分钟）：`queryAnalytics` 用 SQL `date(minute,'unixepoch','localtime','start of day'/'start of month')` GROUP BY；bucket = 本地时区自然日/月初的 unix instant，由 `localDayStart` 经 `time.ParseInLocation(...,time.Local)` 转——不用 `strftime('%s',…)`（会把本地日期误读为 UTC 当天 0 点，偏移一个时区）。每个 point 现算**等价 payg 成本**：price × tokens，**不落盘、不伪造**；未知价 → `cost:null, priced:false`。响应：`{granularity, from, to, series:[{provider, model, points:[…]}], totals:{input, output, cost}, price_coverage:{priced:[], unpriced:[]}}`。
+
+**价格优先级**（`resolvePrice`）：config `prices:`（USD/M tokens，查询时 ÷1e6 转 USD/token）> `pricingCache`（OpenRouter 目录，bare-name 精确匹配，无 endpoint/后缀模糊匹配）。OpenRouter 目录在 parse 期按 vendor rank 去重（`canonicalORVendors` rank 0 胜出，如 `deepseek/deepseek-v4-pro` 击败 `openrouter/deepseek-v4-pro`；tilde 别名 `~openai/gpt-5.6-luna` 剥成 bare 名 `gpt-5.6-luna`）。`computeCost`：`input×Prompt + output×Completion + cacheRead×CacheRead + cacheCreation×CacheWrite`。
+
+**新配置**（`config.go`）：
+- 顶层 `pricing:{enabled, ttl, source_url}` — 默认 `enabled:true` / TTL `24h` / `source_url` 默认 `https://openrouter.ai/api/v1/models`（`defaultPricingEndpoint`）。`enabled:false` → `pricingSnapshot` 返回 nil，cost 恒 n/a（不抓取）。
+- 顶层 `prices:` map — per-model override，单位 **USD per MILLION tokens**（人类单位）；字段 `input`/`output`/`cache_read`/`cache_write`（后两者默认 0）。命中即盖过目录。
+
+**缓存**（`pricing.go`，镜像 models.dev 模式）：`~/.model-proxy/pricing_cache.json`，TTL 24h（`pricingTTL`，可被 `pricing.ttl` 覆盖），atomic tmp+rename。`ensurePricingFresh`：fresh → 用；stale → conditional GET（带 `If-None-Match`）；304 → 只刷 `fetched_at` + 持久化；200 → 重建 + 持久化。抓取失败：有旧 → 用旧 + stderr 告警；无 → 空 catalog（未知价显示 n/a，不阻塞 UI）。
+
+**环境变量 `MP_PRICING_URL`**：由 `pricingEndpoint()` 读取，**镜像 `MP_MODELSDEV_URL` 命名**，但当前**生产路径 `Proxy.pricingSnapshot`（`proxy.go`）走 `cfg.Pricing.sourceURL()`，不读该 env**——即 env override 暂未通到运行时，仅 `pricingEndpoint()` 自身及单测 `TestPricingEndpoint_EnvOverride` 用。要换目录端点请配 `pricing.source_url`（待修：把 `pricingEndpoint()` 接回 `pricingSnapshot`，与 `MP_MODELSDEV_URL` 行为对齐）。
+
+**Web UI**：`/ui/` Analytics 标签页（`web_assets/`）消费 `/api/analytics`，渲染 token + 等价成本趋势（uPlot）。未定价模型（如 `doubao-*`）显示 `n/a` + UI 提示。
+
+**CLI**：`stats --granularity day|month` 或 `--cost` 任一 → `renderAnalytics` 改打 `/api/analytics`（`formatAnalyticsTable`：每 (provider,model) 一行 = 窗口内 SUM，`--cost` 才出 cost 列，未定价 `n/a`；`--json` 原样）。两者都省略 → 走 `/api/stats`，输出与原 `stats` **字节一致**（CLI 契约不变，append-only）。
+
+**锁纪律**：`Proxy.pricingMu` 独立叶子锁；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入。无 stats store → `series:[]`（nil-safe）。
 
 #### 请求访问日志（`request_log.go`，JSONL 文件，默认关闭）
 
