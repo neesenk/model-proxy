@@ -1,8 +1,9 @@
 // model-proxy admin SPA. Vanilla JS module — no framework, no CDN.
 //
-// Drives the three tabs (#tab-status / #tab-config / #tab-accounts) and two
-// modals (#login-modal for async aqp/codex login, #add-modal for apikey add)
-// defined in index.html. All backend calls go to same-origin /api/* endpoints.
+// Drives the four tabs (#tab-status / #tab-config / #tab-accounts /
+// #tab-analytics) and two modals (#login-modal for async aqp/codex login,
+// #add-modal for apikey add) defined in index.html. All backend calls go to
+// same-origin /api/* endpoints.
 //
 // Security posture: every value interpolated into innerHTML is run through
 // esc() first. We prefer textContent (inherently safe) wherever no markup is
@@ -166,6 +167,7 @@ const panels = {
   status: document.getElementById('tab-status'),
   config: document.getElementById('tab-config'),
   accounts: document.getElementById('tab-accounts'),
+  analytics: document.getElementById('tab-analytics'),
 };
 let activeTab = 'status';
 
@@ -186,7 +188,7 @@ let activeTab = 'status';
 function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [tab, ...rest] = raw.split('/');
-  if (tab === 'config' || tab === 'accounts' || tab === 'status') {
+  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
@@ -238,6 +240,7 @@ function activateTab(name) {
   }
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
+  if (name === 'analytics') renderAnalyticsTab();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
   // to Back out of, so push a history entry. Accounts adds its provider segment
   // in selectProvider (replaceState - same tab, finer-grained). Status includes
@@ -283,6 +286,7 @@ function activateTabSilent(name) {
   }
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
+  if (name === 'analytics') renderAnalyticsTab();
 }
 
 // ---------- inline message helpers ----------
@@ -1949,6 +1953,190 @@ function pollLogin(sessionId) {
 }
 
 // ===========================================================================
+// ANALYTICS TAB
+// ===========================================================================
+//
+// Renders the Analytics tab: range/granularity/provider/model controls, then
+// fetches /api/analytics and draws two uPlot trend charts (tokens + equivalent
+// cost), a per-(provider,model) summary table, and an unpriced-models hint when
+// some series have no configured price. The chart data binding matches the
+// /api/analytics JSON shape:
+//   series[].points[].{bucket,requests,input,output,cache_creation,cache_read,cost,priced}
+//   price_coverage.{priced,unpriced}
+// Control selections persist to localStorage so a refresh keeps the view.
+
+// analyticsState reads the tab's control selections from localStorage (with
+// sane defaults). Returns {range, gran, provider, model}.
+function analyticsState() {
+  return {
+    range: localStorage.getItem('an-range') || '30',
+    gran: localStorage.getItem('an-gran') || 'day',
+    provider: localStorage.getItem('an-provider') || '',
+    model: localStorage.getItem('an-model') || '',
+  };
+}
+
+// analyticsSave persists one control value. Wrap in try/catch so private-mode
+// browsers (where localStorage throws) don't break the tab.
+function analyticsSave(name, val) {
+  try { localStorage.setItem('an-' + name, val); } catch (_) { /* ignore */ }
+}
+
+// renderAnalyticsTab fetches /api/analytics and renders token + equivalent-cost
+// trend charts (uPlot), a summary table, and an unpriced-models hint.
+async function renderAnalyticsTab() {
+  const panel = panels.analytics;
+  if (!panel) return;
+  const state = analyticsState();
+  panel.innerHTML = `
+    <div class="analytics-controls">
+      <label>Range
+        <select id="an-range">
+          <option value="7">7d</option><option value="30">30d</option>
+          <option value="90">90d</option><option value="365">all</option>
+        </select>
+      </label>
+      <label>Granularity
+        <select id="an-gran">
+          <option value="day">Day</option><option value="month">Month</option>
+        </select>
+      </label>
+      <label>Provider
+        <input id="an-provider" placeholder="provider" list="an-provider-list" />
+      </label>
+      <datalist id="an-provider-list"></datalist>
+      <label>Model
+        <input id="an-model" placeholder="model" />
+      </label>
+      <button id="an-refresh" class="btn small" type="button">Refresh</button>
+    </div>
+    <div id="an-unpriced" class="an-hint" hidden></div>
+    <div class="an-charts">
+      <div id="an-token-chart" class="an-chart"></div>
+      <div id="an-cost-chart" class="an-chart"></div>
+    </div>
+    <pre id="an-table" class="an-table"></pre>`;
+  const elRange = panel.querySelector('#an-range');
+  const elGran = panel.querySelector('#an-gran');
+  const elProvider = panel.querySelector('#an-provider');
+  const elModel = panel.querySelector('#an-model');
+  elRange.value = state.range;
+  elGran.value = state.gran;
+  elProvider.value = state.provider;
+  elModel.value = state.model;
+  // Persist on change + re-render so the new selection takes effect immediately.
+  elRange.onchange = () => { analyticsSave('range', elRange.value); renderAnalyticsTab(); };
+  elGran.onchange = () => { analyticsSave('gran', elGran.value); renderAnalyticsTab(); };
+  elProvider.onchange = () => { analyticsSave('provider', elProvider.value); renderAnalyticsTab(); };
+  elModel.onchange = () => { analyticsSave('model', elModel.value); renderAnalyticsTab(); };
+  panel.querySelector('#an-refresh').onclick = () => { renderAnalyticsTab(); };
+
+  const from = Math.floor((Date.now() - Number(state.range) * 86400 * 1000) / 1000);
+  const to = Math.floor(Date.now() / 1000);
+  const q = new URLSearchParams({ from: String(from), to: String(to), granularity: state.gran });
+  if (state.provider) q.set('provider', state.provider);
+  if (state.model) q.set('model', state.model);
+  let resp;
+  try {
+    resp = await apiGet('/api/analytics?' + q.toString());
+  } catch (e) {
+    panel.querySelector('#an-table').textContent = 'analytics unavailable: ' + e.message;
+    return;
+  }
+  analyticsRenderHints(panel, resp);
+  analyticsRenderCharts(panel, resp);
+  analyticsRenderTable(panel, resp);
+}
+
+// analyticsRenderHints surfaces the unpriced-models hint when /api/analytics
+// reports models with no configured price. The hint nudges the operator toward
+// adding a `prices:` entry, since equivalent-cost totals silently exclude
+// unpriced series.
+function analyticsRenderHints(panel, resp) {
+  const el = panel.querySelector('#an-unpriced');
+  if (!el) return;
+  const un = (resp && resp.price_coverage && resp.price_coverage.unpriced) || [];
+  if (un.length) {
+    el.hidden = false;
+    el.textContent = un.length + ' model(s) unpriced (no equivalent cost): ' + un.join(', ') +
+      '. Add a `prices:` entry in config to price them.';
+  } else {
+    el.hidden = true;
+    el.textContent = '';
+  }
+}
+
+// analyticsRenderCharts draws the token + equivalent-cost trend charts with
+// uPlot. Each (provider,model) series becomes one line. The x-axis is the
+// sorted union of bucket timestamps across all series; missing buckets for a
+// given series render as 0 tokens / null cost (uPlot gap).
+function analyticsRenderCharts(panel, resp) {
+  if (typeof uPlot === 'undefined') return; // vendored script failed to load
+  const series = (resp && resp.series) || [];
+  const tokenHost = panel.querySelector('#an-token-chart');
+  const costHost = panel.querySelector('#an-cost-chart');
+  if (!tokenHost || !costHost) return;
+  // Clear any previous chart DOM (re-render path).
+  tokenHost.innerHTML = '';
+  costHost.innerHTML = '';
+  const xs = Array.from(new Set(series.flatMap((s) => s.points.map((p) => p.bucket)))).sort((a, b) => a - b);
+  const xMs = xs.map((t) => t * 1000); // uPlot expects ms timestamps for time scales
+  const tokenData = [xMs];
+  const costData = [xMs];
+  const tokenSeries = [{ label: 'time' }];
+  const costSeries = [{ label: 'time' }];
+  for (const s of series) {
+    const key = s.provider + '/' + s.model;
+    const byTs = Object.fromEntries(s.points.map((p) => [p.bucket, p]));
+    tokenData.push(xs.map((t) => {
+      const p = byTs[t];
+      return p ? (p.input || 0) + (p.output || 0) : 0;
+    }));
+    tokenSeries.push({ label: key, points: { show: false } });
+    costData.push(xs.map((t) => {
+      const p = byTs[t];
+      return p && p.cost != null ? p.cost : null;
+    }));
+    costSeries.push({ label: key, points: { show: false } });
+  }
+  const baseOpts = (title, yLabel) => ({
+    title,
+    width: Math.max(tokenHost.clientWidth || 600, 320),
+    height: 220,
+    series: [],
+    scales: { x: { time: true } },
+    axes: [{}, { label: yLabel, size: 60 }],
+    legend: { show: true, live: false },
+  });
+  const tokenOpts = baseOpts('Tokens (input + output)', 'tokens');
+  tokenOpts.series = tokenSeries;
+  try { new uPlot(tokenOpts, tokenData, tokenHost); } catch (_) { /* malformed data */ }
+  const costOpts = baseOpts('Equivalent cost (USD)', 'USD');
+  costOpts.series = costSeries;
+  try { new uPlot(costOpts, costData, costHost); } catch (_) { /* malformed data */ }
+}
+
+// analyticsRenderTable renders the per-(provider,model) summary as a plain
+// preformatted table. Aggregates requests/input/output across all buckets and
+// sums cost only over priced buckets; unpriced series show "n/a".
+function analyticsRenderTable(panel, resp) {
+  const series = (resp && resp.series) || [];
+  const rows = series.map((s) => {
+    let reqs = 0, input = 0, output = 0, cost = null;
+    for (const p of s.points) {
+      reqs += p.requests || 0;
+      input += p.input || 0;
+      output += p.output || 0;
+      if (p.cost != null) { cost = (cost || 0) + p.cost; }
+    }
+    const costStr = cost == null ? 'n/a' : '$' + cost.toFixed(2);
+    return [s.provider, s.model, reqs, input, output, costStr].join('\t');
+  });
+  panel.querySelector('#an-table').textContent =
+    ['provider\tmodel\treqs\tinput\toutput\tcost'].concat(rows).join('\n');
+}
+
+// ===========================================================================
 // boot
 // ===========================================================================
 
@@ -1970,6 +2158,8 @@ if (bootTab === 'config') {
   activateTabSilent('config');
 } else if (bootTab === 'accounts') {
   activateTabSilent('accounts');
+} else if (bootTab === 'analytics') {
+  activateTabSilent('analytics');
 } else {
   activateTabSilent('status');
 }

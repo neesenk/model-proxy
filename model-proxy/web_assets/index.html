@@ -7,6 +7,7 @@
   <title>model-proxy</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="vendor/codemirror.min.css">
+  <link rel="stylesheet" href="vendor/uPlot.min.css">
 </head>
 <body>
   <header class="topbar">
@@ -20,6 +21,7 @@
         <button data-tab="status"  class="tab active" role="tab" aria-selected="true">Status</button>
         <button data-tab="config"  class="tab"        role="tab" aria-selected="false">Config</button>
         <button data-tab="accounts" class="tab"       role="tab" aria-selected="false">Accounts</button>
+        <button data-tab="analytics" class="tab"      role="tab" aria-selected="false">Analytics</button>
       </nav>
     </div>
   </header>
@@ -28,6 +30,7 @@
     <section id="tab-status"   class="tab-panel active" role="tabpanel" aria-label="Status"></section>
     <section id="tab-config"   class="tab-panel"        role="tabpanel" aria-label="Config"></section>
     <section id="tab-accounts" class="tab-panel"        role="tabpanel" aria-label="Accounts"></section>
+    <section id="tab-analytics" class="tab-panel"       role="tabpanel" aria-label="Analytics"></section>
   </main>
 
   <dialog id="login-modal" aria-labelledby="login-title">
@@ -49,6 +52,10 @@
   <script src="vendor/yaml.min.js"></script>
   <script src="vendor/matchbrackets.min.js"></script>
   <script src="vendor/closebrackets.min.js"></script>
+  <!-- uPlot (IIFE global) for the Analytics tab's trend charts. Same pattern:
+       plain script, loaded before the deferred app.js module so the uPlot
+       global is defined when the module runs. Vendored offline (no CDN). -->
+  <script src="vendor/uPlot.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

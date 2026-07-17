@@ -63,3 +63,58 @@ func TestWebAssetsYAMLVisibleHeightContract(t *testing.T) {
 		t.Errorf("styles.css has %d Raw YAML 480px min-height rules, want at least 2", got)
 	}
 }
+
+// TestWebAssetsAnalyticsTabContract pins the Analytics tab's presence in the
+// admin UI: the tab button + panel in index.html, the vendored uPlot asset
+// references (loaded before app.js, same pattern as CodeMirror), and the
+// renderAnalyticsTab wiring in app.js. Mirrors the existing contract tests'
+// plain strings.Contains pattern.
+func TestWebAssetsAnalyticsTabContract(t *testing.T) {
+	indexHTML := mustWebAsset(t, "index.html")
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		`data-tab="analytics"`,
+		`id="tab-analytics"`,
+		`href="vendor/uPlot.min.css"`,
+		`src="vendor/uPlot.min.js"`,
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("index.html missing %q", want)
+		}
+	}
+	// The uPlot script must load before the deferred app.js module so the
+	// uPlot global exists when renderAnalyticsTab runs.
+	if !strings.Contains(indexHTML, `src="vendor/uPlot.min.js"`) ||
+		strings.Index(indexHTML, `src="vendor/uPlot.min.js"`) >
+			strings.Index(indexHTML, `type="module" src="app.js"`) {
+		t.Error("index.html: uPlot script must come before the deferred app.js module")
+	}
+	for _, want := range []string{
+		"async function renderAnalyticsTab()",
+		"function analyticsState()",
+		"function analyticsSave(name, val)",
+		"function analyticsRenderHints(panel, resp)",
+		"function analyticsRenderCharts(panel, resp)",
+		"function analyticsRenderTable(panel, resp)",
+		"if (name === 'analytics') renderAnalyticsTab();",
+		"apiGet('/api/analytics?'",
+		"price_coverage",
+		"new uPlot(",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	// The vendored uPlot assets themselves must be embedded and non-trivial.
+	jsMin := mustWebAsset(t, "vendor/uPlot.min.js")
+	cssMin := mustWebAsset(t, "vendor/uPlot.min.css")
+	if !strings.Contains(jsMin, "uPlot") {
+		t.Error("vendor/uPlot.min.js does not look like uPlot (no 'uPlot' token)")
+	}
+	if len(jsMin) < 10000 {
+		t.Errorf("vendor/uPlot.min.js is suspiciously small (%d bytes)", len(jsMin))
+	}
+	if !strings.Contains(cssMin, ".uplot") {
+		t.Error("vendor/uPlot.min.css does not look like uPlot's stylesheet")
+	}
+}
