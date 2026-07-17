@@ -64,18 +64,26 @@ func volcengineSignV4(method, host, path, canonicalQuery string, body []byte, no
 	return
 }
 
+// volcengineOpenAPIBase is the Volcengine OpenAPI base URL used by volcengineGet
+// (GetAFPUsage, ListArkAgentPlanModel). Package-level so provider tests can point
+// it at an httptest server (the host is derived for signing); production leaves
+// it at the real endpoint. Test-only mutation — not safe under t.Parallel or
+// while a concurrent getAFPUsage (e.g. a Quota poll) runs in the same process.
+var volcengineOpenAPIBase = "https://open.volcengineapi.com"
+
 // volcengineGet builds a signed GET request to the Volcengine OpenAPI
 // (open.volcengineapi.com) for the given Action/Version. extraQuery is optional
 // additional query params (key=value pairs, already escaped) appended after Version.
 func volcengineGet(action, version, ak, sk string, now time.Time, extraQuery string) (*http.Request, error) {
-	host := "open.volcengineapi.com"
+	base := volcengineOpenAPIBase
+	host := strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 	canonicalQuery := "Action=" + volcEscape(action) + "&Version=" + volcEscape(version)
 	if extraQuery != "" {
 		canonicalQuery += "&" + extraQuery
 	}
 	body := []byte("") // GET, no body
 	xDate, authz := volcengineSignV4("GET", host, "/", canonicalQuery, body, now, ak, sk, "cn-beijing", "ark")
-	req, err := http.NewRequest("GET", "https://"+host+"/?"+canonicalQuery, nil)
+	req, err := http.NewRequest("GET", base+"/?"+canonicalQuery, nil)
 	if err != nil {
 		return nil, err
 	}

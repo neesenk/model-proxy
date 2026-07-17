@@ -441,19 +441,20 @@ func parseStatsTime(v string) (int64, bool) {
 }
 
 // handleAccountAdd adds an account to a provider's credential pool. For apikey
-// providers (zhipu/deepseek/volcengine) it runs the non-printing add core
-// (validate-against-usage_url → dedup → save to pool file); for volcengine it
-// uses addVolcengineAccount (AK/SK triple, no usage_url probe). For aqp/codex it
-// returns 400 pointing at the async login flow (POST /api/login/<n>/start —
-// Tasks 14/15): those providers use SSO/OAuth and cannot be added by a bare API
-// key POST. After a successful save it triggers a best-effort reload so the new
-// virtual provider is picked up; the reload error is ignored because the
-// account was already persisted to the pool file (a later reload/next request
-// will see it).
+// providers it runs the non-printing add core (validate → dedup → save to pool
+// file): addApikeyAccount for zhipu/deepseek/kimi-code (validate against
+// usage_url), addVolcengineAccount for volcengine (validate the Ark API Key via
+// usage_url, a Bearer GET to /models, and — when AK/SK are supplied — the signed
+// GetAFPUsage). For aqp/codex it returns 400 pointing at the async login flow
+// (POST /api/login/<n>/start — Tasks 14/15): those providers use SSO/OAuth and
+// cannot be added by a bare API key POST. After a successful save it triggers a
+// best-effort reload so the new virtual provider is picked up; the reload error
+// is ignored because the account was already persisted to the pool file (a
+// later reload/next request will see it).
 //
 // The cfg passed to the cores is a snapshot copy taken under RLock — the cores
-// never hold p.mu during their network validation call (usage_url probe), so a
-// concurrent request isn't blocked on a 15s upstream timeout.
+// never hold p.mu during their network validation call (usage_url / GetAFPUsage
+// probe), so a concurrent request isn't blocked on the upstream timeout.
 func (w *webServer) handleAccountAdd(resp http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
 	w.p.mu.RLock()

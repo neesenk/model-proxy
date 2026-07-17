@@ -55,11 +55,11 @@ func cmdLogin(args []string) {
 	// pool: api_key + AK/SK) go through the pool-aware path.
 	switch prov.Provider {
 	case "aqp":
-		if err := runLogin(cfg); err != nil {
+		if err := runLogin(cfg, provName); err != nil {
 			log.Fatalf("login failed: %v", err)
 		}
 	case "codex":
-		cmdCodexLogin([]string{})
+		cmdCodexLogin(provName)
 	default:
 		// zhipu/deepseek (single api_key) or volcengine (api_key + AK/SK
 		// triple). Both write the plural pool; volcengine keys by AccessKey.
@@ -178,18 +178,8 @@ func addApikeyAccount(cfg *Config, name string, prov Provider, cred accountCred,
 	// Validate against the usage endpoint if configured. 401/403 = key invalid;
 	// anything else (200, 404, etc.) = key accepted (the endpoint may not exist,
 	// but the key itself was not rejected).
-	if prov.UsageURL != "" {
-		req, _ := http.NewRequest("GET", prov.UsageURL, nil)
-		req.Header.Set("Authorization", "Bearer "+key)
-		resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
-		if err != nil {
-			return "", fmt.Errorf("validation failed: %w", err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return "", fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
-		}
+	if err := validateKeyBearerGET(prov.UsageURL, key); err != nil {
+		return "", err
 	}
 	id := accountIDFor(prov.Provider, accountCred{APIKey: key})
 	return id, withPoolLock(name, func() error {
@@ -225,6 +215,34 @@ func addApikeyAccount(cfg *Config, name string, prov Provider, cred accountCred,
 	})
 }
 
+// validateKeyBearerGET validates an API key by GET-ing url with Authorization:
+// Bearer <key>. A network error or HTTP 401/403 is treated as "key invalid" and
+// returns an error; any other status (200, 404, …) means the key itself was not
+// rejected → nil (the endpoint may be absent, but the key authenticated). A no-op
+// when url is "". Shared by addApikeyAccount (zhipu/deepseek/kimi-code usage_url)
+// and addVolcengineAccount (Ark API Key via /models), so the two cores apply
+// identical key-validation semantics.
+func validateKeyBearerGET(url, key string) error {
+	if url == "" {
+		return nil
+	}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+	}
+	return nil
+}
+
 // removeApikeyAccount removes the account with the given id from the named
 // pool under the cross-process lock. No-op if the id is absent (no error). No
 // stdin, no stdout — symmetric with addApikeyAccount, reused by the web layer.
@@ -257,8 +275,8 @@ func labelFor(pool credentialPool, id string) string {
 	return id
 }
 
-func runLogin(cfg *Config) error {
-	storePath := authFilePath("aqp", "oauth_auth")
+func runLogin(cfg *Config, provName string) error {
+	storePath := authFilePath(provName, "oauth_auth")
 	c := newAqpClient(storePath)
 
 	// 1. Bootstrap: get the login URL + SSO_A cookie.

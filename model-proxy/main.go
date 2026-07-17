@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"model-proxy/provider"
 )
 
 const usage = `model-proxy — standalone portable multi-provider LLM proxy
@@ -574,6 +576,14 @@ func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, in
 		replace = true // user confirmed; tell the core to overwrite
 	}
 
+	// Announce validation (UX parity with the apikey login's "Validating API
+	// key..." line). One line covering whatever addVolcengineAccount will probe
+	// (Ark key via usage_url and/or the AK/SK pair) — the AK/SK step is not
+	// pre-announced separately because it only runs if the Ark-key probe passes.
+	if prov.UsageURL != "" || (ak != "" && sk != "") {
+		fmt.Fprintf(os.Stderr, "Validating credentials...\n")
+	}
+
 	if _, err := addVolcengineAccount(cfg, provName, prov, accountCred{APIKey: apiKey, AccessKey: ak, SecretKey: sk}, label, replace); err != nil {
 		return err
 	}
@@ -584,20 +594,47 @@ func runVolcengineLoginWithInput(cfg *Config, provName string, prov Provider, in
 	return nil
 }
 
+// volcengineAKSKValidator validates a Volcengine AccessKey/SecretKey pair. It
+// defaults to provider.ValidateVolcengineAKSK (the signed GetAFPUsage control-
+// plane call); login_cmd tests override it to assert addVolcengineAccount's
+// decision logic without hitting the real Volcengine API. Package-level var
+// (process-wide invariant, not per-provider config).
+var volcengineAKSKValidator = provider.ValidateVolcengineAKSK
+
 // addVolcengineAccount is the non-printing core for volcengine's AK/SK triple:
-// it dedups by id (= AccessKey for volcengine) under the cross-process lock and
+// it validates the Ark API Key (via usage_url, a Bearer GET to /models) and, when
+// both AK and SK are present, the AK/SK pair (via the signed GetAFPUsage); then
+// dedups by id (= AccessKey for volcengine) under the cross-process lock and
 // writes the pool. Returns the account id. No stdin, no stdout — symmetric with
-// addApikeyAccount; reused by the web layer (Task 12). Volcengine has no
-// usage_url validation step (the Ark API Key is validated implicitly by the
-// first chat request; the AK/SK are validated lazily by GetAFPUsage on the next
-// quota poll). replace=false on an existing id returns "login cancelled" without
-// modifying the pool.
+// addApikeyAccount; reused by the web layer (Task 12). Validation happens BEFORE
+// the lock (a slow probe must not hold the cross-process lock). AK/SK are
+// optional — chat-only accounts skip that check. replace=false on an existing id
+// returns "login cancelled" without modifying the pool.
 func addVolcengineAccount(cfg *Config, name string, prov Provider, cred accountCred, label string, replace bool) (string, error) {
 	apiKey := strings.TrimSpace(cred.APIKey)
 	ak := strings.TrimSpace(cred.AccessKey)
 	sk := strings.TrimSpace(cred.SecretKey)
 	if apiKey == "" {
 		return "", fmt.Errorf("API key is required")
+	}
+	// Validate the Ark API Key via usage_url (GET /models with Bearer), mirroring
+	// addApikeyAccount's usage_url gate: 401/403 or a network error = bad key →
+	// reject before save. No-op when usage_url is unset.
+	if err := validateKeyBearerGET(prov.UsageURL, apiKey); err != nil {
+		return "", err
+	}
+	// AK/SK are optional (chat-only accounts omit them entirely), but they must
+	// be BOTH set or BOTH empty: a lone AK or SK can't sign GetAFPUsage
+	// (resolveAKSK requires both), yet before this guard it saved silently and
+	// degraded to BillingUnknown at runtime with no login-time signal. Reject
+	// the partial pair up front.
+	if (ak == "") != (sk == "") {
+		return "", fmt.Errorf("AccessKey and SecretKey must both be set, or both be empty for a chat-only account")
+	}
+	if ak != "" && sk != "" {
+		if err := volcengineAKSKValidator(ak, sk); err != nil {
+			return "", fmt.Errorf("validation failed: %w", err)
+		}
 	}
 	id := accountIDFor(prov.Provider, accountCred{APIKey: apiKey, AccessKey: ak})
 	return id, withPoolLock(name, func() error {
@@ -850,6 +887,8 @@ func quotaSourceLabel(providerID string) string {
 		return "GetAFPUsage (AK/SK)"
 	case "deepseek":
 		return "user/balance"
+	case "kimi-code":
+		return "usages"
 	default:
 		return "(none → unknown at runtime)"
 	}

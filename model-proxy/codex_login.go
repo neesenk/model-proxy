@@ -205,14 +205,13 @@ func exchangeCodeForTokens(opts *codexLoginServerOptions, clientID, authCode, co
 	return af, nil
 }
 
-// cmdCodexLogin runs the device flow and stores the resulting tokens.
-func cmdCodexLogin(args []string) {
-	cfg, err := LoadConfig(configPath(args))
-	if err != nil {
-		log.Fatal(err)
-	}
-	_ = cfg // config loaded but authFile is derived from provider name
-	authFile := authFilePath("codex", "oauth_auth")
+// cmdCodexLogin runs the codex OAuth device flow and stores the resulting
+// tokens. provName is the config top-level key (NOT the provider_id "codex"),
+// so credentials land in <provName>_oauth_auth.json — the same path the forward
+// path / web UI / logout read. A renamed instance (e.g. "codex-work") thus
+// writes codex-work_oauth_auth.json, not codex_oauth_auth.json.
+func cmdCodexLogin(provName string) {
+	authFile := authFilePath(provName, "oauth_auth")
 	opts := &codexLoginServerOptions{}
 	opts.defaults()
 

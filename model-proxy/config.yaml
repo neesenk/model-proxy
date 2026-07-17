@@ -79,8 +79,11 @@ providers:
     provider_id: volcengine
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
-    # No usage_url: the Agent Plan's 5h/周/月 quota needs GetAFPUsage (signed OpenAPI,
-    # AK/SK + V4), unreachable with the API Key. `usage volcengine` lists config models.
+    # usage_url is the login-time key-validation endpoint: `login volcengine` GETs it
+    # with Authorization: Bearer <Ark API Key> and rejects on 401/403. The Agent Plan
+    # base exposes /models over Bearer (unlike the signed GetAFPUsage, which needs
+    # AK/SK). Runtime `usage volcengine` still uses GetAFPUsage (AK/SK), not this URL.
+    usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
@@ -103,6 +106,24 @@ providers:
       - kimi-k2.7-code
       - kimi-k2.6
       - minimax-m3
+  # Kimi Code (Moonshot membership coding plan — NOT the pay-as-you-go 开放平台).
+  # API key via `login kimi-code` (from https://www.kimi.com/code/console).
+  # Two protocol bases under the same gateway: openai_base_url = .../coding/v1
+  # (chat/completions, /responses, /models, /usages), anthropic_base_url =
+  # .../coding (no /v1; proxy keeps /v1/messages). usage_url is both the login-time
+  # key-validation endpoint (GET with Bearer; 401/403 rejects) and the runtime
+  # quota poll target (Quota GETs /usages). If you override openai_base_url (e.g.
+  # to a mirror), update usage_url to match — it does NOT auto-derive at runtime
+  # (same static-usage_url property as zhipu/deepseek). Poolable (repeat `login`).
+  kimi-code:
+    provider_id: kimi-code
+    openai_base_url: https://api.kimi.com/coding/v1
+    anthropic_base_url: https://api.kimi.com/coding
+    usage_url: https://api.kimi.com/coding/v1/usages
+    models:
+      - kimi-for-coding
+      - kimi-for-coding-highspeed
+      - k3
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called
 # anthropic model isn't listed, the called name is used as the exposed name.
@@ -153,6 +174,12 @@ routes:
     - {provider: codex, model: gpt-5.5, priority: 1}
   gpt-5.4:
     - {provider: codex, model: gpt-5.4, priority: 1}
+  kimi-for-coding:
+    - {provider: kimi-code, model: kimi-for-coding, priority: 1}
+  kimi-for-coding-highspeed:
+    - {provider: kimi-code, model: kimi-for-coding-highspeed, priority: 1}
+  k3:
+    - {provider: kimi-code, model: k3, priority: 1}
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.
 # scheduling:

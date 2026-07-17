@@ -196,6 +196,16 @@ func getAFPUsage(ak, sk string) (*AfpUsage, error) {
 	return &wrap.Result, nil
 }
 
+// ValidateVolcengineAKSK verifies a Volcengine AccessKey/SecretKey pair by calling
+// the signed GetAFPUsage control-plane API. nil means the pair signs correctly and
+// the control plane accepts them; a non-nil error means they are invalid (or the
+// endpoint unreachable). Used by `login volcengine` to validate the AK/SK half of
+// the triple before saving (the Ark API Key is validated separately via /models).
+func ValidateVolcengineAKSK(ak, sk string) error {
+	_, err := getAFPUsage(ak, sk)
+	return err
+}
+
 // resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
 // Bound keys (cfg.AccessKey/SecretKey, the pool-bound path) are used EXCLUSIVELY
 // - the on-disk file is never consulted, preserving per-account isolation (a

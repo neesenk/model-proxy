@@ -21,21 +21,7 @@ import (
 // the per-provider formatters (bars, percentages, reset strings, detail labels).
 func printQuotaSnapshot(s *QuotaSnapshot) {
 	for _, w := range s.Windows {
-		var bar, pctStr string
-		if w.RemainingPct < 0 {
-			bar = Gray("n/a")
-			pctStr = Gray("unmeasured")
-		} else {
-			usedPct := (1 - w.RemainingPct) * 100
-			bar = ProgressBar(int(usedPct), 16)
-			pctStr = UsageRatioColor(w.RemainingPct, 1, fmt.Sprintf("%.1f%% used", usedPct))
-		}
-		resetStr := ""
-		if !w.ResetsAt.IsZero() {
-			dur := FormatDuration(int(time.Until(w.ResetsAt) / time.Second))
-			resetStr = Gray(" · resets " + dur + "(at " + FormatResetAt(w.ResetsAt.UnixMilli()) + ")")
-		}
-		fmt.Printf("%s %s  %s%s\n", Dim(Pad(w.Label+":", 18)), bar, pctStr, resetStr)
+		fmt.Println(formatQuotaWindowLine(w))
 		if w.Total > 0 {
 			fmt.Printf("%s %.0f used / %.0f total (%.0f remaining)\n",
 				Dim(Pad("Usage:", 18)), w.Used, w.Total, w.Total-w.Used)
@@ -51,6 +37,29 @@ func printQuotaSnapshot(s *QuotaSnapshot) {
 	for _, n := range s.Notes {
 		fmt.Println(Dim(Pad("", 18)) + n)
 	}
+}
+
+// formatQuotaWindowLine renders the shared "<label>: [<bar>] <pct> · resets
+// <dur>(at <time>)" line used by every provider's usage display. Returns the
+// full line without a trailing newline. Shared so kimi-code (which omits the
+// absolute Usage line for its 0-100 token windows) renders the bar identically
+// to printQuotaSnapshot.
+func formatQuotaWindowLine(w QuotaWindow) string {
+	var bar, pctStr string
+	if w.RemainingPct < 0 {
+		bar = Gray("n/a")
+		pctStr = Gray("unmeasured")
+	} else {
+		usedPct := (1 - w.RemainingPct) * 100
+		bar = ProgressBar(int(usedPct), 16)
+		pctStr = UsageRatioColor(w.RemainingPct, 1, fmt.Sprintf("%.1f%% used", usedPct))
+	}
+	resetStr := ""
+	if !w.ResetsAt.IsZero() {
+		dur := FormatDuration(int(time.Until(w.ResetsAt) / time.Second))
+		resetStr = Gray(" · resets " + dur + "(at " + FormatResetAt(w.ResetsAt.UnixMilli()) + ")")
+	}
+	return fmt.Sprintf("%s %s  %s%s", Dim(Pad(w.Label+":", 18)), bar, pctStr, resetStr)
 }
 
 // printAFPWindow renders one Volcengine AFP quota window.

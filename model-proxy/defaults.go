@@ -68,16 +68,35 @@ providers:
 
   # Volcengine Ark (火山方舟, including 'Agent Plan'). API key via 'login volcengine'.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
-  # Ark Anthropic-compatible base (no /v1; proxy keeps /v1/messages).
+  # Ark Anthropic-compatible base (no /v1; proxy keeps /v1/messages). usage_url is the
+  # login-time key-validation endpoint (GET /models with Bearer; 401/403 rejects).
   volcengine:
     provider_id: volcengine
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
+    usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
     models:
       - doubao-seed-1-8-251228
       - doubao-seed-2-0-code
       - doubao-seed-1-6-251015
       - doubao-seed-2-0-lite-260428
+
+  # Kimi Code (Moonshot membership coding plan). API key via 'login kimi-code'
+  # (from https://www.kimi.com/code/console). Two protocol bases under one
+  # gateway: openai_base_url = .../coding/v1, anthropic_base_url = .../coding
+  # (no /v1; proxy keeps /v1/messages). usage_url is both the login-time
+  # key-validation endpoint and the runtime quota poll target (GET /usages).
+  # If you override openai_base_url, update usage_url to match (it does not
+  # auto-derive at runtime). Poolable (repeat 'login').
+  kimi-code:
+    provider_id: kimi-code
+    openai_base_url: https://api.kimi.com/coding/v1
+    anthropic_base_url: https://api.kimi.com/coding
+    usage_url: https://api.kimi.com/coding/v1/usages
+    models:
+      - kimi-for-coding
+      - kimi-for-coding-highspeed
+      - k3
 
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called

@@ -13,6 +13,17 @@ import (
 // secret_key} triple, dedup by AccessKey). The AK/SK resolution + GetAFPUsage
 // fetch are tested directly in the provider package (provider/quota_fetch_test.go).
 
+// stubVolcengineValidator replaces volcengineAKSKValidator with a no-op success
+// for the runVolcengineLoginWithInput tests below, which exercise pool dedup/
+// save logic (not key validation). The validation decision itself is tested in
+// login_cmd_test.go (TestAddVolcengineAccountCore_AKSK*). Restored on test end.
+func stubVolcengineValidator(t *testing.T) {
+	t.Helper()
+	orig := volcengineAKSKValidator
+	volcengineAKSKValidator = func(string, string) error { return nil }
+	t.Cleanup(func() { volcengineAKSKValidator = orig })
+}
+
 // --- loadVolcengineCreds: reads {api_key, access_key, secret_key} ---
 
 func TestLoadVolcengineCreds(t *testing.T) {
@@ -124,6 +135,7 @@ func TestVolcenginePoolPerAccountAK(t *testing.T) {
 func TestRunVolcengineLoginWithInput_WritesPoolTriple(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
+	stubVolcengineValidator(t)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
 	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
@@ -160,6 +172,7 @@ func TestRunVolcengineLoginWithInput_WritesPoolTriple(t *testing.T) {
 func TestRunVolcengineLoginWithInput_DedupByAccessKey(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
+	stubVolcengineValidator(t)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
 	// Seed an account with AccessKey=AK9.
@@ -190,6 +203,7 @@ func TestRunVolcengineLoginWithInput_DedupByAccessKey(t *testing.T) {
 func TestRunVolcengineLoginWithInput_DedupNoReplace_Aborts(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
+	stubVolcengineValidator(t)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
 	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
@@ -221,6 +235,7 @@ func TestRunVolcengineLoginWithInput_DedupNoReplace_Aborts(t *testing.T) {
 func TestRunVolcengineLoginWithInput_DifferentAccessKeyAppends(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
+	stubVolcengineValidator(t)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
 	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,

@@ -38,7 +38,7 @@ func (m modelsDevModel) toProviderModel() ProviderModel {
 }
 
 // modelsDevCatalog is the on-disk + in-memory cache: a deduplicated name→metadata
-// index plus an endpoint→model-names index for endpoint-scoped matching.
+// index (canonical-owner dedup at parse time resolves cross-provider name clashes).
 type modelsDevCatalog struct {
 	FetchedAt time.Time                 `json:"fetched_at"`
 	Etag      string                    `json:"etag"`

@@ -157,7 +157,7 @@ restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 login <provider> [--label <name>] [--replace]
 ```
 
-逻辑（`login.go:29` `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、zhipu/deepseek=apikey 池、volcengine=apikey+AK/SK 三元组池。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
+逻辑（`login.go:29` `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、zhipu/deepseek/kimi-code=apikey 池、volcengine=apikey+AK/SK 三元组池。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
 
 ### 通用
 
@@ -200,10 +200,10 @@ Authorized. Exchanging code for tokens...
 You can now use codex-native models (gpt-5.5) through the proxy.
 ```
 
-### apikey 类（zhipu/deepseek，`runApiKeyLoginWithInput`）
+### apikey 类（zhipu/deepseek/kimi-code，`runApiKeyLoginWithInput`）
 
 - stdout 提示：`Enter API key for <PROVNAME>: `（stdin 读 key）。
-- stderr（当 provider 配了 `usage_url`）：`Validating API key...`
+- stderr（当 provider 配了 `usage_url`，zhipu/deepseek/**kimi-code** 均配）：`Validating API key...`。校验 = GET `usage_url` with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。
 - 重复 id 且非 `--replace` -> stdout 提示 `Account "<LABEL>" is already logged in. Replace its key? [y/N] `；答非 y -> `login cancelled`（exit 1）。
 - 成功 stdout：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
 
@@ -215,7 +215,9 @@ Ark API Key (对话用，控制台创建):
 Volcengine Access Key ID (GetAFPUsage 用，IAM 密钥): 
 Volcengine Secret Access Key: 
 ```
-成功同 apikey：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
+- stderr（配了 `usage_url` 或填了 AK/SK）：`Validating credentials...`。校验在 `addVolcengineAccount` 内顺序执行：先 GET `/api/plan/v3/models` with `Authorization: Bearer <Ark key>`（**401/403 或网络错误** → `login failed: validation failed: ...`，exit 1，**不落盘**）；通过后，若 AK/SK 都非空，再签名 GetAFPUsage（失败 → 同上 exit 1，不落盘）。
+- AK/SK 可缺省（仅 chat 账号），但**必须成对**：只填 AK 不填 SK（或反之）→ `login failed: AccessKey and SecretKey must both be set, or both be empty for a chat-only account`（exit 1，不落盘）。
+- 成功同 apikey：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
 
 ---
 
@@ -289,6 +291,7 @@ Provider:   <PROVNAME>
 | zhipu (`showGenericUsage`) | 5h/weekly token 限额 + 月度时间限额（带进度条）；`TIME_LIMIT` 按 MCP 工具（search-prime/web-reader/zread）分解；回退：OpenAI 风格模型列表 |
 | deepseek (`showDeepseekUsage`) | `Available:  no (insufficient balance)`（余额不足时）；各币种 `total/granted/topped-up` 余额 |
 | volcengine (`showVolcengineUsage`) | 无 AK/SK：`Note:` 说明 + 列 config 模型；有 AK/SK：`Plan: <PLAN_TYPE>` + `AFPFiveHour/Daily/Weekly/Monthly` 各窗口 Quota/Used/Remaining/ResetTime |
+| kimi-code (`showGenericUsage`) | `Plan:       Kimi Code membership`；`Weekly limit`（Ultimate，7d）+ `5h limit`（Short，5h）+ 其他限额窗口（带进度条/重置时间）+ `Extra usage`/`Monthly cap` 钱包窗口（`n/a`）。取自 `/usages`。拉取失败：`Usage:      (unavailable: <ERR>)` + 控制台提示 + 列 config 模型 |
 
 重置时间格式：`<duration>(at <time>)`；`formatResetAt`：今天显示 `HH:MM`，否则 `MM-DD HH:MM`。
 
@@ -557,7 +560,7 @@ Scheduling
 <⚠ N warning(s) | ✓ no warnings>
 ```
 - `<TIER>` = `plan` / `pay-as-you-go`。
-- `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、其他=`(none -> unknown at runtime)`。
+- `<SOURCE>` = `quotaSourceLabel(provider_id)`：aqp=`monthly_usage`、codex=`wham/usage`、zhipu=`quota/limit`、volcengine=`GetAFPUsage (AK/SK)`、deepseek=`user/balance`、kimi-code=`usages`、其他=`(none -> unknown at runtime)`。
 - `<PEAK>` = `peakSummary`：`09:00-12:00(×2), 14:00-18:00(×2)` 或 `-`。
 - 末行：`⚠ <N> warning(s)`（黄）或 `✓ no warnings`（绿）。返回值 = warning 数。
 

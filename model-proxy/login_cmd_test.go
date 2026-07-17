@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -332,6 +333,7 @@ func TestAddApikeyAccountCore_ValidationFail(t *testing.T) {
 // triple save, label, remove.
 func TestAddVolcengineAccountCore(t *testing.T) {
 	setPoolHome(t, t.TempDir())
+	stubVolcengineValidator(t) // pool dedup/save logic; AK/SK validation tested elsewhere
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n"))
 	prov := cfg.Providers["vol"]
 	cred := accountCred{APIKey: "ark-key", AccessKey: "AK9XYZ", SecretKey: "SK9"}
@@ -425,4 +427,269 @@ func TestMaybeReloadDaemon_NoOpWithoutPidFile(t *testing.T) {
 		}
 	}()
 	maybeReloadDaemon(nil)
+}
+
+// --- aqp/codex CLI login path-key regression ---
+//
+// Bug: cmdCodexLogin/runLogin previously hardcoded authFilePath("aqp"/"codex",
+// "oauth_auth"), so a renamed instance (provider_id=codex, name=codex-work)
+// wrote codex_oauth_auth.json — a file the forward path (buildOne, which uses
+// the config name) never read → 401/502 after login. The fix threads provName
+// through. These flows are interactive (browser/device-flow) and not unit-run
+// by convention, so this test guards the fix at the source level: the login
+// functions MUST resolve the auth file from provName, not the provider_id.
+func TestAqpCodexLogin_UsesConfigNameForAuthFile(t *testing.T) {
+	src, err := os.ReadFile("login.go")
+	if err != nil {
+		t.Skip("source not readable:", err)
+	}
+	if !strings.Contains(string(src), `authFilePath(provName, "oauth_auth")`) {
+		t.Errorf("login.go runLogin must use authFilePath(provName, \"oauth_auth\"), not the hardcoded provider_id")
+	}
+	csrc, err := os.ReadFile("codex_login.go")
+	if err != nil {
+		t.Skip("source not readable:", err)
+	}
+	if !strings.Contains(string(csrc), `authFilePath(provName, "oauth_auth")`) {
+		t.Errorf("codex_login.go cmdCodexLogin must use authFilePath(provName, \"oauth_auth\"), not the hardcoded provider_id")
+	}
+	// And the hardcoded forms must be GONE (the bug).
+	for _, bad := range []string{`authFilePath("aqp", "oauth_auth")`, `authFilePath("codex", "oauth_auth")`} {
+		if strings.Contains(string(src), bad) || strings.Contains(string(csrc), bad) {
+			t.Errorf("hardcoded provider_id auth path %q still present (the bug)", bad)
+		}
+	}
+}
+
+// --- login validates API keys for kimi-code and volcengine ---
+
+// TestValidateKeyBearerGET pins the shared key-validation gate's semantics: a
+// no-op on empty url, nil on 200, an error on 401/403 (the two statuses that
+// mean "key rejected"). Green-signal guard: getting the accept/reject boundary
+// wrong would silently pass bad keys or reject valid ones.
+func TestValidateKeyBearerGET(t *testing.T) {
+	if err := validateKeyBearerGET("", "k"); err != nil {
+		t.Errorf("empty url: want nil, got %v", err)
+	}
+	statusCase := func(code int) {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		defer srv.Close()
+		err := validateKeyBearerGET(srv.URL, "k")
+		switch code {
+		case 200:
+			if err != nil {
+				t.Errorf("HTTP %d: want nil, got %v", code, err)
+			}
+		case 401, 403:
+			if err == nil || !strings.Contains(err.Error(), "validation failed") {
+				t.Errorf("HTTP %d: want 'validation failed', got %v", code, err)
+			}
+		}
+	}
+	statusCase(200)
+	statusCase(401)
+	statusCase(403)
+}
+
+// TestRunApiKeyLogin_KimiCode_Validation401 pins that kimi-code login now
+// validates the key (it routes through the generic addApikeyAccount, which gates
+// on usage_url). A 401 from the usage endpoint rejects before the pool is written.
+func TestRunApiKeyLogin_KimiCode_Validation401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`unauthorized`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("HOME", t.TempDir())
+	orig := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	defer func() { os.Stdin = orig }()
+	w.Write([]byte("bad-key\n"))
+	w.Close()
+
+	cfg := &Config{Providers: map[string]Provider{"kimi-code": {Provider: "kimi-code", UsageURL: srv.URL}}}
+	err := runApiKeyLogin(cfg, "kimi-code", cfg.Providers["kimi-code"])
+	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+		t.Errorf("kimi-code 401: err=%v want 'validation failed'", err)
+	}
+	pool, _ := loadPool("kimi-code", "kimi-code")
+	if len(pool.Accounts) != 0 {
+		t.Errorf("kimi-code 401 should not save: %+v", pool.Accounts)
+	}
+}
+
+// TestAddVolcengineAccountCore_ArkKeyValidation401 pins that volcengine login
+// validates the Ark API Key via usage_url (a Bearer GET to /models): a 401
+// rejects before the triple is saved.
+func TestAddVolcengineAccountCore_ArkKeyValidation401(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer bad-ark" {
+			t.Errorf("validation sent Authorization=%q, want Bearer bad-ark", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(401)
+		w.Write([]byte(`unauthorized`))
+	}))
+	defer srv.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
+	prov := cfg.Providers["vol"]
+	// No AK/SK — isolates the Ark-key path.
+	_, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "bad-ark"}, "", false)
+	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+		t.Fatalf("Ark 401: err=%v want 'validation failed'", err)
+	}
+	pool, _ := loadPool("vol", "volcengine")
+	if len(pool.Accounts) != 0 {
+		t.Fatalf("Ark 401 should not save: %+v", pool.Accounts)
+	}
+}
+
+// TestAddVolcengineAccountCore_ArkKeyValid pins that a 200 from /models accepts
+// the Ark key and saves the triple (chat-only, no AK/SK).
+func TestAddVolcengineAccountCore_ArkKeyValid(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer srv.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
+	prov := cfg.Providers["vol"]
+	id, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "lbl", false)
+	if err != nil {
+		t.Fatalf("Ark 200: %v", err)
+	}
+	if id == "" {
+		t.Fatal("empty id")
+	}
+	pool, _ := loadPool("vol", "volcengine")
+	if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "good-ark" || pool.Accounts[0].Label != "lbl" {
+		t.Fatalf("Ark 200 should save triple: %+v", pool.Accounts)
+	}
+}
+
+// TestAddVolcengineAccountCore_AKSKValidationFail pins that the AK/SK pair is
+// validated (via the volcengineAKSKValidator seam, stubbed here to fail) when
+// both are present, and that a failure rejects before save. Asserts the stub WAS
+// called — a count-only check would miss a "never validated" bug.
+func TestAddVolcengineAccountCore_AKSKValidationFail(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer up.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
+	prov := cfg.Providers["vol"]
+
+	orig := volcengineAKSKValidator
+	defer func() { volcengineAKSKValidator = orig }()
+	called := false
+	volcengineAKSKValidator = func(ak, sk string) error {
+		called = true
+		if ak != "AK9" || sk != "SK9" {
+			t.Errorf("validator got ak=%q sk=%q, want AK9/SK9", ak, sk)
+		}
+		return fmt.Errorf("GetAFPUsage HTTP 401: signature mismatch")
+	}
+
+	_, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark", AccessKey: "AK9", SecretKey: "SK9"}, "", false)
+	if err == nil || !strings.Contains(err.Error(), "validation failed") {
+		t.Fatalf("AK/SK fail: err=%v want 'validation failed'", err)
+	}
+	if !called {
+		t.Fatal("AK/SK validator was not called")
+	}
+	pool, _ := loadPool("vol", "volcengine")
+	if len(pool.Accounts) != 0 {
+		t.Fatalf("AK/SK fail should not save: %+v", pool.Accounts)
+	}
+}
+
+// TestAddVolcengineAccountCore_AKSKEmptySkips pins the optional-AK/SK rule:
+// when AK/SK are absent (chat-only), the validator is NOT called and a valid Ark
+// key is saved. A sentinel stub fails the test if invoked.
+func TestAddVolcengineAccountCore_AKSKEmptySkips(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer up.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
+	prov := cfg.Providers["vol"]
+
+	orig := volcengineAKSKValidator
+	defer func() { volcengineAKSKValidator = orig }()
+	volcengineAKSKValidator = func(ak, sk string) error {
+		t.Fatal("validator must not be called when AK/SK absent")
+		return nil
+	}
+
+	if _, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "", false); err != nil {
+		t.Fatalf("chat-only login should succeed: %v", err)
+	}
+	pool, _ := loadPool("vol", "volcengine")
+	if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "good-ark" {
+		t.Fatalf("chat-only should save: %+v", pool.Accounts)
+	}
+}
+
+// TestAddVolcengineAccountCore_PartialAKSKRejected pins the both-or-neither rule:
+// a lone AccessKey or lone SecretKey is rejected up front with "both be set"
+// (a partial pair can't sign GetAFPUsage yet previously saved silently and
+// degraded to BillingUnknown). Neither-set still succeeds (chat-only). A sentinel
+// stub also proves the validator never runs for partial or empty pairs.
+func TestAddVolcengineAccountCore_PartialAKSKRejected(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer up.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
+	prov := cfg.Providers["vol"]
+
+	orig := volcengineAKSKValidator
+	defer func() { volcengineAKSKValidator = orig }()
+	volcengineAKSKValidator = func(string, string) error {
+		t.Error("validator must not run for a partial or empty AK/SK pair")
+		return nil
+	}
+
+	for _, cred := range []accountCred{
+		{APIKey: "good-ark", AccessKey: "AK9"}, // lone AK
+		{APIKey: "good-ark", SecretKey: "SK9"}, // lone SK
+	} {
+		_, err := addVolcengineAccount(cfg, "vol", prov, cred, "", false)
+		if err == nil || !strings.Contains(err.Error(), "both be set") {
+			t.Errorf("partial %+v: err=%v want 'both be set'", cred, err)
+		}
+		pool, _ := loadPool("vol", "volcengine")
+		if len(pool.Accounts) != 0 {
+			t.Errorf("partial pair must not save: %+v", pool.Accounts)
+		}
+	}
+
+	// Neither set → chat-only success; pool written.
+	if _, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "", false); err != nil {
+		t.Fatalf("chat-only (no AK/SK): %v", err)
+	}
+	pool, _ := loadPool("vol", "volcengine")
+	if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "good-ark" {
+		t.Fatalf("chat-only should save: %+v", pool.Accounts)
+	}
+}
+
+// TestDefaultsHaveValidationURLs is a source-level guard: kimi-code and
+// volcengine MUST carry a usage_url in both the repo config.yaml and the
+// `config init` template (defaults.go), or login silently skips validation for
+// them (the gap this change closes). Pattern of TestAqpCodexLogin_UsesConfigNameForAuthFile.
+func TestDefaultsHaveValidationURLs(t *testing.T) {
+	for _, file := range []string{"config.yaml", "defaults.go"} {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Skipf("%s not readable: %v", file, err)
+		}
+		s := string(src)
+		if !strings.Contains(s, "usage_url: https://api.kimi.com/coding/v1/usages") {
+			t.Errorf("%s: kimi-code usage_url missing (login would skip validation)", file)
+		}
+		if !strings.Contains(s, "usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models") {
+			t.Errorf("%s: volcengine usage_url missing (login would skip validation)", file)
+		}
+	}
 }
