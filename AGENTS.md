@@ -148,7 +148,7 @@ stats                      # per-(provider,model) 调用统计（SQLite）；--f
 
 **缓存**（`pricing.go`，镜像 models.dev 模式）：`~/.model-proxy/pricing_cache.json`，TTL 24h（`pricingTTL`，可被 `pricing.ttl` 覆盖），atomic tmp+rename。`ensurePricingFresh`：fresh → 用；stale → conditional GET（带 `If-None-Match`）；304 → 只刷 `fetched_at` + 持久化；200 → 重建 + 持久化。抓取失败：有旧 → 用旧 + stderr 告警；无 → 空 catalog（未知价显示 n/a，不阻塞 UI）。
 
-**环境变量 `MP_PRICING_URL`**：由 `pricingEndpoint()` 读取，**镜像 `MP_MODELSDEV_URL` 命名**，但当前**生产路径 `Proxy.pricingSnapshot`（`proxy.go`）走 `cfg.Pricing.sourceURL()`，不读该 env**——即 env override 暂未通到运行时，仅 `pricingEndpoint()` 自身及单测 `TestPricingEndpoint_EnvOverride` 用。要换目录端点请配 `pricing.source_url`（待修：把 `pricingEndpoint()` 接回 `pricingSnapshot`，与 `MP_MODELSDEV_URL` 行为对齐）。
+**环境变量 `MP_PRICING_URL`**：pricing 端点解析优先级 **config `pricing.source_url` > `MP_PRICING_URL` env > OpenRouter 默认**（`defaultPricingEndpoint`）。`PricingConfig.sourceURL()`（`config.go`）在 config 未设时回落到 env 感知的 `pricingEndpoint()`（`pricing.go`，读 `MP_PRICING_URL`，**镜像 `MP_MODELSDEV_URL`** 的 test/mirror override 语义），生产路径 `Proxy.pricingSnapshot`（`proxy.go`）经此生效。单测：`TestPricingEndpoint_EnvOverride`（`pricing_test.go`）+ `TestPricingConfigSourceURL_Precedence`（`config_test.go`，钉死 config > env > default 三级优先级）。
 
 **Web UI**：`/ui/` Analytics 标签页（`web_assets/`）消费 `/api/analytics`，渲染 token + 等价成本趋势（uPlot）。未定价模型（如 `doubao-*`）显示 `n/a` + UI 提示。
 

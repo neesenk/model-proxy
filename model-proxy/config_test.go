@@ -358,3 +358,35 @@ providers:
 		t.Errorf("glm-4.6 parsed wrong: %+v", cfg.Prices["glm-4.6"])
 	}
 }
+
+// TestPricingConfigSourceURL_Precedence pins the pricing endpoint resolution
+// order: config `source_url` > MP_PRICING_URL env (mirrors MP_MODELSDEV_URL) >
+// OpenRouter default. Each case runs as a subtest so t.Setenv is called exactly
+// once per scope.
+func TestPricingConfigSourceURL_Precedence(t *testing.T) {
+	const def = "https://openrouter.ai/api/v1/models"
+
+	t.Run("config_wins_over_env", func(t *testing.T) {
+		t.Setenv("MP_PRICING_URL", "http://env.example/models")
+		got := (PricingConfig{SourceURL: "http://cfg.example/m"}).sourceURL()
+		if got != "http://cfg.example/m" {
+			t.Errorf("config should win over env: got %q", got)
+		}
+	})
+
+	t.Run("env_when_config_unset", func(t *testing.T) {
+		t.Setenv("MP_PRICING_URL", "http://env.example/models")
+		got := (PricingConfig{}).sourceURL()
+		if got != "http://env.example/models" {
+			t.Errorf("env fallback wrong: got %q, want %q", got, "http://env.example/models")
+		}
+	})
+
+	t.Run("default_when_neither_set", func(t *testing.T) {
+		t.Setenv("MP_PRICING_URL", "")
+		got := (PricingConfig{}).sourceURL()
+		if got != def {
+			t.Errorf("default wrong: got %q, want %q", got, def)
+		}
+	})
+}

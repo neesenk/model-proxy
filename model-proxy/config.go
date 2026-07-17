@@ -81,12 +81,13 @@ func (p PricingConfig) ttl() time.Duration {
 	return 24 * time.Hour
 }
 
-// sourceURL returns the pricing endpoint, defaulting to OpenRouter.
+// sourceURL returns the pricing endpoint. Precedence: config `source_url` >
+// MP_PRICING_URL env (mirrors MP_MODELSDEV_URL) > OpenRouter default.
 func (p PricingConfig) sourceURL() string {
 	if p.SourceURL != "" {
 		return p.SourceURL
 	}
-	return defaultPricingEndpoint
+	return pricingEndpoint() // MP_PRICING_URL env, else OpenRouter default
 }
 
 // PriceConfig is a per-model price override in USD per MILLION tokens (human
