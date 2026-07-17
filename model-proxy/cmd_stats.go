@@ -153,7 +153,6 @@ type analyticsResp struct {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 		Points   []struct {
-			Bucket   int64    `json:"bucket"`
 			Requests uint64   `json:"requests"`
 			Input    uint64   `json:"input"`
 			Output   uint64   `json:"output"`

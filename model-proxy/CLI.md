@@ -477,12 +477,14 @@ provider         model               <day|month>     reqs      input    output  
 
 每行 = 一个 (provider, model) 在窗口内的 SUM（reqs/input/output）；`cost` 列仅 `--cost` 时出现，已定价 = `$X.XX`（点相加），未定价 = `n/a`。`--json` -> stdout 原始 `/api/analytics` 响应（`analyticsResp`）。两者都省略 = 走 `/api/stats`，输出与原 `stats` 完全一致。
 
+> 解析失败时，analytics 路径的报错为 `parse analytics response: <ERR>`（与 `/api/stats` 路径的 `parse stats response: <ERR>` 对应，见下节）。
+
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
 - 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
 - 404：`web UI endpoints not available - is web.enabled true on the daemon?`
 - 非 200：`daemon returned HTTP <CODE>: <BODY_TRUNC_200>`
-- 解析失败：`parse stats response: <ERR>`（或 `parse analytics response: <ERR>`）
+- 解析失败：`parse stats response: <ERR>`
 
 ---
 

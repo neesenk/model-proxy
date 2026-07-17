@@ -1083,7 +1083,6 @@ func TestFormatAnalyticsTable(t *testing.T) {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
 		Points   []struct {
-			Bucket   int64    `json:"bucket"`
 			Requests uint64   `json:"requests"`
 			Input    uint64   `json:"input"`
 			Output   uint64   `json:"output"`
@@ -1091,23 +1090,21 @@ func TestFormatAnalyticsTable(t *testing.T) {
 		} `json:"points"`
 	}{
 		{Provider: "deepseek", Model: "deepseek-chat", Points: []struct {
-			Bucket   int64    `json:"bucket"`
 			Requests uint64   `json:"requests"`
 			Input    uint64   `json:"input"`
 			Output   uint64   `json:"output"`
 			Cost     *float64 `json:"cost"`
 		}{
-			{Bucket: 1, Requests: 3, Input: 500, Output: 100, Cost: &cost},
-			{Bucket: 2, Requests: 2, Input: 500, Output: 100, Cost: &cost},
+			{Requests: 3, Input: 500, Output: 100, Cost: &cost},
+			{Requests: 2, Input: 500, Output: 100, Cost: &cost},
 		}},
 		{Provider: "zhipu", Model: "glm-5", Points: []struct {
-			Bucket   int64    `json:"bucket"`
 			Requests uint64   `json:"requests"`
 			Input    uint64   `json:"input"`
 			Output   uint64   `json:"output"`
 			Cost     *float64 `json:"cost"`
 		}{
-			{Bucket: 1, Requests: 1, Input: 10, Output: 5, Cost: nil},
+			{Requests: 1, Input: 10, Output: 5, Cost: nil},
 		}},
 	}
 
