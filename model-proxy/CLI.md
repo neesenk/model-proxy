@@ -448,10 +448,12 @@ schedule   # 查询运行中 daemon 的 GET /debug/schedule
 ## 10. `stats` — 调用统计（需 daemon + web.enabled）
 
 ```
-stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--json]
+stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--granularity day|month] [--cost] [--json]
 ```
 
 逻辑（`cmd_stats.go:75` `cmdStats` -> `renderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
+
+> `--granularity day|month` 或 `--cost` 任一存在时，改走 `/api/analytics`（按自然日/月聚合，存储恒为 1 分钟），表格头与列由 `formatAnalyticsTable` 渲染（见下）。两者都省略时输出与原 `stats` 完全一致。
 
 ### stdout（表格，`formatStatsTable`）
 
@@ -465,12 +467,22 @@ provider         model               <BUCKET>      reqs failover     429     fai
 
 `--json` -> stdout 原始 JSON（`statsResp`）。
 
+### `--granularity` / `--cost`（`renderAnalytics` -> `/api/analytics`）
+
+任一存在时改走 `/api/analytics`：`--granularity day|month`（仅 `--cost` 时默认 `day`）按自然日/月聚合（存储恒为 1 分钟）；`--cost` 额外追加等价成本列（未知价格 = `n/a`）。表格（`formatAnalyticsTable`）：
+
+```
+provider         model               <day|month>     reqs      input    output      cost
+```
+
+每行 = 一个 (provider, model) 在窗口内的 SUM（reqs/input/output）；`cost` 列仅 `--cost` 时出现，已定价 = `$X.XX`（点相加），未定价 = `n/a`。`--json` -> stdout 原始 `/api/analytics` 响应（`analyticsResp`）。两者都省略 = 走 `/api/stats`，输出与原 `stats` 完全一致。
+
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
 - 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
 - 404：`web UI endpoints not available - is web.enabled true on the daemon?`
 - 非 200：`daemon returned HTTP <CODE>: <BODY_TRUNC_200>`
-- 解析失败：`parse stats response: <ERR>`
+- 解析失败：`parse stats response: <ERR>`（或 `parse analytics response: <ERR>`）
 
 ---
 

@@ -961,3 +961,179 @@ func TestQueryAnalytics_BadGranularity(t *testing.T) {
 		t.Error("hour granularity should error")
 	}
 }
+
+// TestStatsFlags_GranularityCost_Parsed verifies --granularity and --cost parse
+// into statsOpts (the new analytics-routing flags).
+func TestStatsFlags_GranularityCost_Parsed(t *testing.T) {
+	o := parseStatsFlags([]string{"--granularity", "month", "--cost", "--provider", "deepseek"})
+	if o.Granularity != "month" || !o.Cost || o.Provider != "deepseek" {
+		t.Errorf("parsed = %+v, want granularity=month cost=true provider=deepseek", o)
+	}
+}
+
+// TestStatsFlags_GranularityCost_DefaultOff verifies the new flags default off
+// (the CLI display contract: no behavioral change without flags).
+func TestStatsFlags_GranularityCost_DefaultOff(t *testing.T) {
+	o := parseStatsFlags([]string{"--from", "1", "--bucket", "1h"})
+	if o.Granularity != "" || o.Cost {
+		t.Errorf("new flags should default off: %+v", o)
+	}
+}
+
+// TestStatsFlags_GranularityCost_EqualsForm verifies --granularity=value parses.
+func TestStatsFlags_GranularityCost_EqualsForm(t *testing.T) {
+	o := parseStatsFlags([]string{"--granularity=day", "--cost"})
+	if o.Granularity != "day" || !o.Cost {
+		t.Errorf("equals form: parsed = %+v, want granularity=day cost=true", o)
+	}
+}
+
+// TestRenderStatsCLI_AnalyticsPath verifies --granularity/--cost route to
+// /api/analytics (not /api/stats) and the table renders provider/model/cost.
+// The table shape comes from formatAnalyticsTable; the cost column appears only
+// when --cost is set. The classic /api/stats path is still covered by
+// TestRenderStatsCLI above (byte-identity guard).
+func TestRenderStatsCLI_AnalyticsPath(t *testing.T) {
+	// granularity=month, two series, one with cost and one without (n/a).
+	body := `{"granularity":"month","from":1700000000,"to":1700000000,` +
+		`"series":[` +
+		`{"provider":"deepseek","model":"deepseek-chat","points":[` +
+		`{"bucket":1700000000,"requests":5,"input":1000,"output":500,"cost":0.12,"priced":true}]},` +
+		`{"provider":"zhipu","model":"glm-5","points":[` +
+		`{"bucket":1700000000,"requests":3,"input":200,"output":80,"cost":null,"priced":false}]}` +
+		`],"totals":{"input":1200,"output":580,"cost":0.12},` +
+		`"price_coverage":{"priced":["deepseek-chat"],"unpriced":["glm-5"]}}`
+
+	var sawAnalytics, sawStats bool
+	var lastQuery string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/analytics" {
+			sawAnalytics = true
+			lastQuery = r.URL.RawQuery
+			io.WriteString(w, body)
+			return
+		}
+		if r.URL.Path == "/api/stats" {
+			sawStats = true
+		}
+		http.NotFound(w, r)
+	}))
+	defer up.Close()
+	listen := strings.TrimPrefix(up.URL, "http://")
+
+	// --granularity month --cost: routes to /api/analytics, table has a cost
+	// column with the summed cost ($0.12) and n/a for the unpriced series.
+	out, err := renderStats(listen, statsOpts{Granularity: "month", Cost: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawAnalytics {
+		t.Error("expected request to /api/analytics")
+	}
+	if sawStats {
+		t.Error("did not expect request to /api/stats when granularity/cost set")
+	}
+	if !strings.Contains(lastQuery, "granularity=month") {
+		t.Errorf("query missing granularity=month: %q", lastQuery)
+	}
+	for _, want := range []string{"deepseek", "deepseek-chat", "$0.12", "n/a", "month"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("analytics table missing %q:\n%s", want, out)
+		}
+	}
+
+	// --cost only (no granularity): defaults to day in the query string.
+	sawAnalytics = false
+	if _, err := renderStats(listen, statsOpts{Cost: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !sawAnalytics {
+		t.Error("--cost alone should still route to /api/analytics")
+	}
+	if !strings.Contains(lastQuery, "granularity=day") {
+		t.Errorf("--cost alone should default granularity=day in query: %q", lastQuery)
+	}
+}
+
+// TestRenderStatsCLI_AnalyticsJSON verifies --json passes the analytics body
+// through unchanged.
+func TestRenderStatsCLI_AnalyticsJSON(t *testing.T) {
+	body := `{"granularity":"day","series":[],"price_coverage":{"priced":[],"unpriced":[]}}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	defer up.Close()
+	listen := strings.TrimPrefix(up.URL, "http://")
+	out, err := renderStats(listen, statsOpts{Granularity: "day", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != body {
+		t.Errorf("analytics --json passthrough mismatch:\ngot:  %s\nwant: %s", out, body)
+	}
+}
+
+// TestFormatAnalyticsTable verifies the table renderer directly: header label
+// reflects granularity, cost column appears only with withCost, and per-series
+// cost sums correctly ( priced: $X.XX ; unpriced: n/a ).
+func TestFormatAnalyticsTable(t *testing.T) {
+	cost := 0.12
+	resp := analyticsResp{Granularity: "month"}
+	resp.Series = []struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Points   []struct {
+			Bucket   int64    `json:"bucket"`
+			Requests uint64   `json:"requests"`
+			Input    uint64   `json:"input"`
+			Output   uint64   `json:"output"`
+			Cost     *float64 `json:"cost"`
+		} `json:"points"`
+	}{
+		{Provider: "deepseek", Model: "deepseek-chat", Points: []struct {
+			Bucket   int64    `json:"bucket"`
+			Requests uint64   `json:"requests"`
+			Input    uint64   `json:"input"`
+			Output   uint64   `json:"output"`
+			Cost     *float64 `json:"cost"`
+		}{
+			{Bucket: 1, Requests: 3, Input: 500, Output: 100, Cost: &cost},
+			{Bucket: 2, Requests: 2, Input: 500, Output: 100, Cost: &cost},
+		}},
+		{Provider: "zhipu", Model: "glm-5", Points: []struct {
+			Bucket   int64    `json:"bucket"`
+			Requests uint64   `json:"requests"`
+			Input    uint64   `json:"input"`
+			Output   uint64   `json:"output"`
+			Cost     *float64 `json:"cost"`
+		}{
+			{Bucket: 1, Requests: 1, Input: 10, Output: 5, Cost: nil},
+		}},
+	}
+
+	// Without cost: 6-column table, no "cost" header, no $ values.
+	out := formatAnalyticsTable(resp, false)
+	if !strings.Contains(out, "month") || !strings.Contains(out, "deepseek") {
+		t.Errorf("table missing markers:\n%s", out)
+	}
+	if strings.Contains(out, "cost") || strings.Contains(out, "$") {
+		t.Errorf("without --cost, table should not mention cost/$:\n%s", out)
+	}
+	// Series totals are sums across points.
+	if !strings.Contains(out, compactNum(5)) { // 3+2 requests
+		t.Errorf("month-1 requests sum missing:\n%s", out)
+	}
+
+	// With cost: 7-column table; priced series shows $0.24 (0.12+0.12),
+	// unpriced shows n/a.
+	out = formatAnalyticsTable(resp, true)
+	if !strings.Contains(out, "cost") {
+		t.Errorf("with --cost, table should have a cost header:\n%s", out)
+	}
+	if !strings.Contains(out, "$0.24") {
+		t.Errorf("priced series cost should sum to $0.24:\n%s", out)
+	}
+	if !strings.Contains(out, "n/a") {
+		t.Errorf("unpriced series should show n/a:\n%s", out)
+	}
+}
