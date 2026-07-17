@@ -230,10 +230,12 @@ func TestComputeCost_Exact(t *testing.T) {
 	if !r.Priced || r.Cost < 2.499 || r.Cost > 2.501 {
 		t.Errorf("cost = %v priced=%v, want ~2.5 priced=true", r.Cost, r.Priced)
 	}
-	// cache_read priced, cache_creation unpriced (CacheWrite 0 → contributes 0).
-	e2 := pricingEntry{Prompt: 1e-6, Completion: 2e-6, CacheRead: 1e-7}
+	// cache_read + cache_creation both priced: 200000*1e-7 + 100000*1e-7 = 0.03.
+	// CacheWrite must be non-zero so the cacheCreation·e.CacheWrite term is
+	// exercised — dropping that term from computeCost must turn this red.
+	e2 := pricingEntry{Prompt: 1e-6, Completion: 2e-6, CacheRead: 1e-7, CacheWrite: 1e-7}
 	r2 := computeCost(0, 0, 200_000, 100_000, e2)
-	if !r2.Priced || r2.Cost < 0.0199 || r2.Cost > 0.0201 { // 200000*1e-7 = 0.02
-		t.Errorf("cache cost = %v, want ~0.02", r2.Cost)
+	if !r2.Priced || r2.Cost < 0.029 || r2.Cost > 0.031 { // 0.02 + 0.01 = 0.03
+		t.Errorf("cache cost = %v, want ~0.03", r2.Cost)
 	}
 }

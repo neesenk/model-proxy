@@ -1323,6 +1323,7 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 			Points   []struct {
 				Requests uint64   `json:"requests"`
 				Input    uint64   `json:"input"`
+				Output   uint64   `json:"output"`
 				Cost     *float64 `json:"cost"`
 				Priced   bool     `json:"priced"`
 			} `json:"points"`
@@ -1342,8 +1343,8 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 		t.Fatalf("series = %+v, want one deepseek/deepseek-v4-pro", got.Series)
 	}
 	pts := got.Series[0].Points
-	if len(pts) != 1 || pts[0].Requests != 3 || pts[0].Input != 1000 {
-		t.Errorf("point = %+v, want reqs=3 input=1000", pts)
+	if len(pts) != 1 || pts[0].Requests != 3 || pts[0].Input != 1000 || pts[0].Output != 200 {
+		t.Errorf("point = %+v, want reqs=3 input=1000 output=200", pts)
 	}
 	// Never-fabricate: no catalog + no override on the test Proxy → unpriced.
 	// If resolvePrice ever returned ok=true for an unknown model with a nil
