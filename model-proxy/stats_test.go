@@ -897,3 +897,67 @@ func TestSetChildNode(t *testing.T) {
 		t.Errorf("setChildNode append: last=%q want 3", parent.Content[len(parent.Content)-1].Value)
 	}
 }
+
+// TestQueryAnalytics_DayBuckets verifies calendar-day grouping: minutes in the
+// same local day collapse to one bucket whose start is local midnight; minutes
+// spanning a day boundary split; storage stays 1-minute (lossless).
+func TestQueryAnalytics_DayBuckets(t *testing.T) {
+	ss := newTestStatsStore(t)
+	// Anchor to local midnight so the day boundary is deterministic on any host
+	// timezone (the SQL uses SQLite 'localtime'). d1m1/d1m2 share a local day;
+	// d2m1 is the next local day.
+	now := time.Now().In(time.Local)
+	twoDaysAgoStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).Add(-48 * time.Hour)
+	d1m1 := twoDaysAgoStart.Add(1*time.Hour).Unix() / 60 * 60
+	d1m2 := twoDaysAgoStart.Add(2*time.Hour).Unix() / 60 * 60
+	d2m1 := twoDaysAgoStart.Add(25*time.Hour).Unix() / 60 * 60 // next local day
+	_ = ss.flushDeltas(d1m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 1, Input: 100}})
+	_ = ss.flushDeltas(d1m2, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 2, Input: 200}})
+	_ = ss.flushDeltas(d2m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 4, Input: 400}})
+
+	got, err := ss.queryAnalytics(d1m1-60, d2m1+60, "", "", "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 day-buckets, got %d: %+v", len(got), got)
+	}
+	// Day 1 sums the two minutes (reqs 3, input 300); bucket == local midnight.
+	day1 := got[0]
+	if day1.Requests != 3 || day1.Input != 300 {
+		t.Errorf("day1 sum wrong: %+v", day1)
+	}
+	if wantStart := twoDaysAgoStart.Unix(); day1.Bucket != wantStart {
+		t.Errorf("day1 bucket = %d, want local-midnight %d", day1.Bucket, wantStart)
+	}
+	// Storage lossless: re-query raw 1-minute rows still see 3 rows.
+	raw, _ := ss.queryRange(d1m1-60, d2m1+60, "", "", 60)
+	if len(raw) != 3 {
+		t.Errorf("storage not lossless: %d raw rows, want 3", len(raw))
+	}
+}
+
+func TestQueryAnalytics_MonthBuckets(t *testing.T) {
+	ss := newTestStatsStore(t)
+	now := time.Now().In(time.Local)
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
+	m1 := monthStart.Add(48*time.Hour).Unix() / 60 * 60 // same local month
+	_ = ss.flushDeltas(m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 5, Input: 50}})
+	got, err := ss.queryAnalytics(m1-60, m1+60, "", "", "month")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Requests != 5 {
+		t.Errorf("month bucket wrong: %+v", got)
+	}
+	if wantStart := monthStart.Unix(); got[0].Bucket != wantStart {
+		t.Errorf("month bucket start = %d, want first-of-month %d", got[0].Bucket, wantStart)
+	}
+}
+
+func TestQueryAnalytics_BadGranularity(t *testing.T) {
+	ss := newTestStatsStore(t)
+	if _, err := ss.queryAnalytics(0, 1, "", "", "hour"); err == nil {
+		t.Error("hour granularity should error")
+	}
+}

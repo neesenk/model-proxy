@@ -374,6 +374,90 @@ func (s *statsStore) queryRange(from, to int64, provider, model string, bucketSe
 	return out, rows.Err()
 }
 
+// analyticsBucket is one persisted calendar-day/month aggregate row for the
+// analytics dashboard. Bucket = unix start of the local calendar day/month.
+type analyticsBucket struct {
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	Bucket        int64  `json:"bucket"`
+	Requests      uint64 `json:"requests"`
+	Input         uint64 `json:"input"`
+	Output        uint64 `json:"output"`
+	CacheCreation uint64 `json:"cache_creation"`
+	CacheRead     uint64 `json:"cache_read"`
+	LastRequestAt int64  `json:"last_request_at"`
+}
+
+// queryAnalytics returns calendar-day or calendar-month aggregates (local tz)
+// in [from, to]. Storage stays 1-minute (lossless); only the view widens via
+// SQL GROUP BY on date(minute,'unixepoch','localtime',<trunc>). The bucket is
+// the true local-midnight/first-of-month unix instant: SQL returns the local
+// date STRING, Go converts it via time.ParseInLocation(...,time.Local) (not
+// strftime('%s',…), which would misread the local date as UTC midnight and shift
+// the label by the tz offset). granularity must be "day" or "month". Ordered by
+// provider, model, date.
+func (s *statsStore) queryAnalytics(from, to int64, provider, model, granularity string) ([]analyticsBucket, error) {
+	if granularity != "day" && granularity != "month" {
+		return nil, fmt.Errorf("granularity must be day or month, got %q", granularity)
+	}
+	trunc := "start of day"
+	if granularity == "month" {
+		trunc = "start of month"
+	}
+	q := `SELECT provider, model,
+		date(minute,'unixepoch','localtime',?) AS d,
+		SUM(requests), SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read),
+		MAX(last_request_at)
+		FROM minute_buckets WHERE minute >= ? AND minute <= ?`
+	args := []any{trunc, from, to}
+	if provider != "" {
+		q += ` AND provider = ?`
+		args = append(args, provider)
+	}
+	if model != "" {
+		q += ` AND model = ?`
+		args = append(args, model)
+	}
+	q += ` GROUP BY provider, model, date(minute,'unixepoch','localtime',?) ORDER BY provider, model, d`
+	args = append(args, trunc)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []analyticsBucket
+	for rows.Next() {
+		var b analyticsBucket
+		var d string
+		if err := rows.Scan(&b.Provider, &b.Model, &d,
+			&b.Requests, &b.Input, &b.Output, &b.CacheCreation, &b.CacheRead,
+			&b.LastRequestAt); err != nil {
+			return nil, err
+		}
+		b.Bucket = localDayStart(d, granularity)
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// localDayStart converts a SQLite local date string to the unix start of that
+// local calendar day/month, in the host timezone (mirrors SQLite 'localtime').
+// SQLite date() always returns "YYYY-MM-DD" even with 'start of month' (which
+// truncates to day 1 but does not shorten the string), so for month we slice
+// the year-month prefix before parsing. 0 on a parse failure.
+func localDayStart(d, granularity string) int64 {
+	layout := "2006-01-02"
+	if granularity == "month" {
+		d = d[:7]
+		layout = "2006-01"
+	}
+	t, err := time.ParseInLocation(layout, d, time.Local)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
+}
+
 // normalizeBucket parses a bucket-granularity spec into seconds, a multiple of
 // 60. Accepted forms: "1m"/"10m"/"1h"/"1d" (time.Duration), a bare integer
 // (seconds), "" or "0" (-> 60, raw 1-minute rows). Values < 60 clamp up to 60
