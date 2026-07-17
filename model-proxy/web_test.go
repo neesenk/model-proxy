@@ -1292,3 +1292,39 @@ func TestConfigEditSchedulingNewIntKey(t *testing.T) {
 		t.Errorf("emitted YAML has explicit !!str tag (should infer int):\n%s", got)
 	}
 }
+
+func TestAPIAnalyticsHandler(t *testing.T) {
+	p := &Proxy{
+		metrics: newMetricsStore(),
+		tokens:  newTokenCounter(),
+		stats:   newTestStatsStore(t),
+		// pricing: nil → resolver falls back to unpriced (cost null), proving the
+		// handler never fabricates a price and never panics on a nil catalog.
+	}
+	minute := time.Now().Unix() / 60 * 60
+	_ = p.stats.flushDeltas(minute, map[pmKey]statsCounters{
+		{Provider: "deepseek", Model: "deepseek-v4-pro"}: {Requests: 3, Input: 1000, Output: 200},
+	})
+	w := newWebServer(p, "test-config.yaml")
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/analytics?granularity=day", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`"granularity":"day"`, `"deepseek"`, `"deepseek-v4-pro"`, `"input":1000`, `"requests":3`, `"price_coverage"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("analytics body missing %s: %s", want, body)
+		}
+	}
+
+	// Bad granularity → 400.
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("GET", "/api/analytics?granularity=hour", nil))
+	if rec2.Code != 400 {
+		t.Errorf("bad granularity status=%d want 400", rec2.Code)
+	}
+}

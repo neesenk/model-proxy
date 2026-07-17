@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -129,6 +130,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleQuotaRefresh(resp, r)
 	case path == "/api/stats" && r.Method == http.MethodGet:
 		w.handleStats(resp, r)
+	case path == "/api/analytics" && r.Method == http.MethodGet:
+		w.handleAnalytics(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodPost:
 		w.handleAccountAdd(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodDelete:
@@ -427,6 +430,125 @@ func (w *webServer) handleStats(resp http.ResponseWriter, r *http.Request) {
 		"bucket":  bucketSecs,
 		"buckets": buckets,
 	})
+}
+
+// handleAnalytics returns per-(provider, model) calendar day/month aggregates
+// with server-computed equivalent-payg cost. Cost is price × tokens, never
+// stored or fabricated; unknown prices yield cost=null + priced=false. Query
+// params: from/to (unix or RFC3339; default last 30d), provider/model filters,
+// granularity=day|month (default day). Nil-safe: no stats store → empty series.
+func (w *webServer) handleAnalytics(resp http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	from := now.Add(-30 * 24 * time.Hour).Unix()
+	to := now.Unix()
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			from = t
+		}
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			to = t
+		}
+	}
+	provider := r.URL.Query().Get("provider")
+	model := r.URL.Query().Get("model")
+	granularity := r.URL.Query().Get("granularity")
+	if granularity == "" {
+		granularity = "day"
+	}
+	if granularity != "day" && granularity != "month" {
+		writeJSONErr(resp, http.StatusBadRequest, "granularity must be day or month")
+		return
+	}
+
+	type point struct {
+		Bucket        int64    `json:"bucket"`
+		Requests      uint64   `json:"requests"`
+		Input         uint64   `json:"input"`
+		Output        uint64   `json:"output"`
+		CacheCreation uint64   `json:"cache_creation"`
+		CacheRead     uint64   `json:"cache_read"`
+		Cost          *float64 `json:"cost"`
+		Priced        bool     `json:"priced"`
+	}
+	type series struct {
+		Provider string  `json:"provider"`
+		Model    string  `json:"model"`
+		Points   []point `json:"points"`
+	}
+
+	buckets := []analyticsBucket{}
+	if w.p.stats != nil {
+		got, err := w.p.stats.queryAnalytics(from, to, provider, model, granularity)
+		if err != nil {
+			writeJSONErr(resp, http.StatusInternalServerError, "analytics query: "+err.Error())
+			return
+		}
+		buckets = got
+	}
+	cat := w.p.pricingSnapshot()
+	prices := w.p.priceOverrides()
+
+	byKey := map[string]*series{}
+	var keys []string
+	priced, unpriced := map[string]bool{}, map[string]bool{}
+	var totInput, totOutput uint64
+	var totCost *float64
+	for _, b := range buckets {
+		k := b.Provider + "\x00" + b.Model
+		s, ok := byKey[k]
+		if !ok {
+			s = &series{Provider: b.Provider, Model: b.Model}
+			byKey[k] = s
+			keys = append(keys, k)
+		}
+		e, ok := resolvePrice(prices, cat, b.Model)
+		var cost *float64
+		if ok {
+			cr := computeCost(b.Input, b.Output, b.CacheRead, b.CacheCreation, e)
+			cost = &cr.Cost
+			priced[b.Model] = true
+			if totCost == nil {
+				totCost = new(float64)
+			}
+			*totCost += cr.Cost
+		} else {
+			unpriced[b.Model] = true
+		}
+		s.Points = append(s.Points, point{
+			Bucket: b.Bucket, Requests: b.Requests, Input: b.Input, Output: b.Output,
+			CacheCreation: b.CacheCreation, CacheRead: b.CacheRead, Cost: cost, Priced: ok,
+		})
+		totInput += b.Input
+		totOutput += b.Output
+	}
+	out := []series{}
+	for _, k := range keys {
+		out = append(out, *byKey[k])
+	}
+	coverage := map[string]any{"priced": mapKeys(priced), "unpriced": mapKeys(unpriced)}
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"granularity":    granularity,
+		"from":           from,
+		"to":             to,
+		"series":         out,
+		"totals":         map[string]any{"input": totInput, "output": totOutput, "cost": totCost},
+		"price_coverage": coverage,
+	})
+}
+
+// mapKeys returns the sorted keys of a set map (stable JSON output).
+func mapKeys(m map[string]bool) []string {
+	if len(m) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // parseStatsTime parses a stats time param as unix seconds (integer) or RFC3339.

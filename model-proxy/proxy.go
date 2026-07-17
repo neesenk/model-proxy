@@ -34,6 +34,8 @@ type Proxy struct {
 	stats     *statsStore                // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
 	flusher   *statsFlusher              // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog    *requestLogger             // per-request access log (full bodies); nil = disabled (default) or init failure
+	pricing   *pricingCatalog            // equivalent-cost price catalog (analytics); nil-safe
+	pricingMu sync.Mutex                 // guards pricing during refresh
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -272,6 +274,37 @@ func (p *Proxy) cfgSnapshot() *Config {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.cfg
+}
+
+// pricingSnapshot returns a usable price catalog, refreshing the cache when
+// stale (best-effort; offline falls back to the stale cache). Nil-safe (including
+// a nil cfg, as in degenerate tests) and thundering-herd-safe. Returns nil when
+// pricing is disabled.
+func (p *Proxy) pricingSnapshot() *pricingCatalog {
+	if p == nil {
+		return nil
+	}
+	cfg := p.cfgSnapshot()
+	if cfg == nil || !cfg.Pricing.enabled() {
+		return nil
+	}
+	p.pricingMu.Lock()
+	defer p.pricingMu.Unlock()
+	cat, err := ensurePricingFresh(pricingCachePath(), cfg.Pricing.sourceURL(), realPricingFetch, false, cfg.Pricing.ttl())
+	if err != nil || cat == nil {
+		return emptyPricingCatalog()
+	}
+	p.pricing = cat
+	return cat
+}
+
+// priceOverrides returns the current config `prices:` overrides for the handler.
+func (p *Proxy) priceOverrides() map[string]PriceConfig {
+	cfg := p.cfgSnapshot()
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Prices
 }
 
 // snapshotConfig returns a shallow copy of the current config under a brief
