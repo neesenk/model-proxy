@@ -146,7 +146,7 @@ func pricingCachePath() string {
 type pricingFetchFunc func(endpoint, etag string) (status int, body []byte, newEtag string, err error)
 
 // realPricingFetch is the production fetch. Do NOT set Accept-Encoding manually
-// (Go Transport auto-gzipes + decompresses).
+// (Go Transport auto-gzips + decompresses).
 var realPricingFetch pricingFetchFunc = func(endpoint, etag string) (int, []byte, string, error) {
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {

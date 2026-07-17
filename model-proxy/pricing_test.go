@@ -92,10 +92,6 @@ func pricingKeys(m map[string]pricingEntry) []string {
 	return out
 }
 
-var (
-	_ = os.ErrNotExist
-)
-
 func pricingFakeFetch(status int, body []byte, etag string) pricingFetchFunc {
 	return func(endpoint, inEtag string) (int, []byte, string, error) {
 		if status == 304 {
@@ -148,5 +144,62 @@ func TestEnsurePricingFresh_FetchErrorFallsBackToStale(t *testing.T) {
 	}
 	if cat.ByModel["glm-4.6"].Prompt != 0.9e-6 {
 		t.Errorf("should fall back to stale: %+v", cat.ByModel["glm-4.6"])
+	}
+}
+
+func TestEnsurePricingFresh_304(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pricing_cache.json")
+	stale := &pricingCatalog{FetchedAt: time.Now().Add(-2 * pricingTTL), Etag: `"old"`,
+		ByModel: map[string]pricingEntry{"glm-4.6": {Prompt: 0.9e-6}}}
+	saveCachedPricing(path, stale)
+	before := stale.FetchedAt
+	cat, err := ensurePricingFresh(path, "http://x", pricingFakeFetch(304, nil, `"new"`), false, pricingTTL)
+	if err != nil {
+		t.Fatalf("304 should refresh the cached catalog in place: err=%v", err)
+	}
+	if !cat.FetchedAt.After(before) {
+		t.Error("304 should advance fetched_at")
+	}
+	if cat.Etag != `"new"` {
+		t.Errorf("304 should update etag: %q", cat.Etag)
+	}
+	if cat.ByModel["glm-4.6"].Prompt != 0.9e-6 {
+		t.Error("304 should not rebuild ByModel")
+	}
+	persisted, _ := loadCachedPricing(path)
+	if persisted == nil || !persisted.FetchedAt.After(before) {
+		t.Errorf("304 should persist the refreshed fetched_at: %+v", persisted)
+	}
+}
+
+func TestEnsurePricingFresh_ForceBypassesTTL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pricing_cache.json")
+	fresh := &pricingCatalog{FetchedAt: time.Now(), Etag: `"old"`,
+		ByModel: map[string]pricingEntry{"glm-4.6": {Prompt: 1.0e-6}}}
+	saveCachedPricing(path, fresh)
+	cat, err := ensurePricingFresh(path, "http://x", pricingFakeFetch(200, []byte(fixtureOR), `"new"`), true, pricingTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// fixtureOR's z-ai/glm-4.6 prompt is 0.9e-6; force should rebuild despite fresh cache.
+	if cat.ByModel["glm-4.6"].Prompt != 0.9e-6 {
+		t.Errorf("force should re-fetch + rebuild: %+v", cat.ByModel["glm-4.6"])
+	}
+	if cat.Etag != `"new"` {
+		t.Errorf("force should update etag: %q", cat.Etag)
+	}
+}
+
+func TestEnsurePricingFresh_NoCacheNoFetchEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pricing_cache.json")
+	errFetch := func(endpoint, etag string) (int, []byte, string, error) { return 0, nil, "", os.ErrNotExist }
+	cat, err := ensurePricingFresh(path, "http://x", errFetch, false, pricingTTL)
+	// Total failure (no cache + unreachable) surfaces an error; the catalog is
+	// still a usable empty so callers can render unpriced rather than crash.
+	if err == nil {
+		t.Error("no cache + fetch error should return a non-nil error")
+	}
+	if cat == nil || len(cat.ByModel) != 0 {
+		t.Errorf("no cache + fetch error → empty (non-nil) catalog, got %+v", cat)
 	}
 }
