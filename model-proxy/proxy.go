@@ -881,6 +881,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	provs := p.providers
 	expanded := p.expandedRoutes
 	parentOf := p.parentOf
+	cache := p.cache
 	p.mu.RUnlock()
 
 	origBody, err := io.ReadAll(r.Body)
@@ -924,9 +925,9 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	// a fresh 2xx commit. SKIPPED entirely when a force-provider override OR a pin
 	// is in effect — both mean "send to THIS backend", not a stale cached answer.
 	var cacheKey string
-	if p.cache != nil && forceProvider(r) == "" && !force {
+	if cache != nil && forceProvider(r) == "" && !force {
 		cacheKey = cacheKeyOf(r.Method, r.URL.Path, origBody)
-		if e, ok := p.cache.get(cacheKey, time.Now()); ok {
+		if e, ok := cache.get(cacheKey, time.Now()); ok {
 			// Live monitor (#6): a cache hit skips the normal start/end flow, so
 			// emit an end event explicitly — otherwise the live view is blind to
 			// these (e.g. a retry-looping agent served from cache stays invisible).
@@ -1059,7 +1060,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		}
 
 		flc := forwardLogCtx{requestID: requestID, attempt: ti, exposed: exposed, origBody: origBody}
-		if p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, flc) {
+		if p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc) {
 			return // committed: response written to the client
 		}
 		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
@@ -1092,7 +1093,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 // timeout, 401 after refresh, 5xx, 429, or a build/auth error). It updates the
 // provider's health on success/failure/rate-limit and enforces half-open
 // single-flight. Failover only happens before any bytes are written to w.
-func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, flc forwardLogCtx) bool {
+func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx) bool {
 	// Wrap the client writer to capture time-to-first-token for latency stats.
 	// All writes below go through tw; ttft is read on the commit path.
 	tw := newTimingResponseWriter(w)
@@ -1326,8 +1327,8 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// (pass-through wrappers below it don't alter bytes). Only when the cache
 		// is on, this is a cacheable 2xx, and a key was computed in forward.
 		var crec *cacheRecorder
-		if p.cache != nil && cacheKey != "" && resp.StatusCode < 300 {
-			crec = newCacheRecorder(body, p.cache.maxBody)
+		if cache != nil && cacheKey != "" && resp.StatusCode < 300 {
+			crec = newCacheRecorder(body, cache.maxBody)
 			body = crec
 		}
 		flushCopy(w, body)
@@ -1367,7 +1368,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				hdr.Del("Content-Length")
 				hdr.Del("Transfer-Encoding")
 			}
-			p.cache.put(cacheKey, &cacheEntry{
+			cache.put(cacheKey, &cacheEntry{
 				status: resp.StatusCode,
 				header: hdr,
 				body:   crec.buf,
