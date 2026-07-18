@@ -215,6 +215,11 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 	// scheduleStatus() returns []byte that is already a JSON object
 	// {"models":…}. Embed it verbatim via json.RawMessage so writeJSON doesn't
 	// double-encode it.
+	// Cache observability: hits/misses/entries.
+	cacheInfo := map[string]any{"enabled": false}
+	if h, m, e := w.p.cache.stats(); e > 0 || h > 0 || w.p.cache != nil {
+		cacheInfo = map[string]any{"enabled": true, "hits": h, "misses": m, "entries": e}
+	}
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"uptime":   time.Since(w.p.metrics.startedAt()).String(),
 		"version":  version,
@@ -223,6 +228,7 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 		"quota":    quota,
 		"schedule": json.RawMessage(w.p.scheduleStatus()),
 		"counters": w.p.metrics.aggregateByProvider(),
+		"cache":    cacheInfo,
 		"warnings": routeWarnings,
 	})
 }

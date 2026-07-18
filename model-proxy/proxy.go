@@ -15,10 +15,23 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"model-proxy/provider"
 )
+
+// reqIDPrefix is a per-process 8-hex-char nonce (generated once from crypto/rand
+// at package init via newRequestID). Combined with an atomic counter, this gives
+// each request a unique id with ONE atomic add (no crypto/rand syscall per
+// request). Always generated — even when request_log is off — so live start↔end
+// event pairing + Live↔Requests cross-page linking work.
+var reqIDPrefix = newRequestID()[:8]
+var reqIDCounter atomic.Uint64
+
+func nextRequestID() string {
+	return fmt.Sprintf("%s-%010d", reqIDPrefix, reqIDCounter.Add(1))
+}
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
@@ -285,9 +298,9 @@ func NewProxy(cfg *Config) *Proxy {
 	}
 	p.shadowSem = make(chan struct{}, maxConc)
 	p.shadowClient = &http.Client{Timeout: cfg.Scheduling.timeout()}
-	p.shadowSampRate = cfg.ShadowSampleRate
-	if p.shadowSampRate == 0 {
-		p.shadowSampRate = 1.0 // default: shadow all requests
+	p.shadowSampRate = 1.0 // default; nil ShadowSampleRate = all requests
+	if cfg.ShadowSampleRate != nil {
+		p.shadowSampRate = *cfg.ShadowSampleRate // explicit 0.0 = off
 	}
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
@@ -470,6 +483,10 @@ func (p *Proxy) reload(configPath string) error {
 	p.implicitRoutes = newImplicit
 	p.routeWarnings = newWarnings
 	p.expandedRoutes = p.buildExpandedRoutes()
+	// Rebuild the cache from the new config (pure in-memory, no goroutine/file
+	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now
+	// takes effect immediately.
+	p.cache = newResponseCache(cfg.Cache)
 	p.mu.Unlock()
 	// Reset health + sticky state — a reload is the operator's way to clear
 	// stuck circuit-open / rate-limited / sticky-dwell state.
@@ -922,6 +939,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 				Provider: "(cache)",
 				Status:   e.status,
 			})
+			w.Header().Set("x-mp-cache", "hit")
 			replayCached(w, e)
 			return
 		}
@@ -976,14 +994,9 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// requestID groups this client request's failover attempts in the per-request
-	// access log (one row per committed target). Generated once per forward, but
-	// ONLY when request logging is enabled - newRequestID() does a crypto/rand
-	// syscall, so skip it entirely when the logger is off (the default) to keep
-	// the disabled path zero-overhead.
-	var requestID string
-	if p.reqLog != nil {
-		requestID = newRequestID()
-	}
+	// access log + live events. Always generated (cheap: one atomic add) so live
+	// start↔end pairing works even when request logging is off.
+	requestID := nextRequestID()
 
 	// Detect the calling agent once (from the UA / known headers); attributed to
 	// whichever target commits, in the parallel agent-stats pipeline.

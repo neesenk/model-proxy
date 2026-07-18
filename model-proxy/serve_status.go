@@ -37,6 +37,8 @@ type statusCounters struct {
 	RateLimited   uint64 `json:"rate_limited_429"`
 	Failures      uint64 `json:"failures"`
 	LastRequestAt int64  `json:"last_request_at"` // unix seconds
+	LatencySum    uint64 `json:"latency_ms_sum"`
+	TTFTSum       uint64 `json:"ttft_ms_sum"`
 }
 
 // Quota windows come from *provider.QuotaSnapshot: PascalCase, no json tags upstream.
@@ -154,6 +156,15 @@ func trimNumZero(s string) string {
 	return s
 }
 
+// renderAvgMs returns the average latency/ttft in ms (sum/requests) as a display
+// string, or "—" when no requests were served.
+func renderAvgMs(sum, reqs uint64) string {
+	if reqs == 0 {
+		return "—"
+	}
+	return compactNum(sum / reqs)
+}
+
 // formatClock renders a unix-seconds timestamp as local HH:MM:SS, or "—" when ≤0.
 func formatClock(unixSec int64) string {
 	if unixSec <= 0 {
@@ -184,19 +195,21 @@ func renderProviders(st *statusResp) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s (%d)\n", cBold("Providers"), len(names))
-	hdr := fmt.Sprintf("  %s  %s  %8s  %9s  %5s  %8s  %s",
-		pad("PROVIDER", 16), pad("HEALTH", 13), "REQS", "FAILOVERS", "429", "FAILURES", "LAST")
+	hdr := fmt.Sprintf("  %s  %s  %8s  %9s  %5s  %8s  %6s  %6s  %s",
+		pad("PROVIDER", 16), pad("HEALTH", 13), "REQS", "FAILOVERS", "429", "FAILURES", "LAT", "TTFT", "LAST")
 	fmt.Fprintln(&b, cDim(hdr))
 	for _, name := range names {
 		label, color := healthLabel(st.Health[name])
 		c := st.Counters[name]
-		fmt.Fprintf(&b, "  %s  %s  %8s  %9s  %5s  %8s  %s\n",
+		fmt.Fprintf(&b, "  %s  %s  %8s  %9s  %5s  %8s  %6s  %6s  %s\n",
 			pad(name, 16),
 			color(pad(label, 13)),
 			compactNum(c.Requests),
 			compactNum(c.Failovers),
 			compactNum(c.RateLimited),
 			compactNum(c.Failures),
+			renderAvgMs(c.LatencySum, c.Requests),
+			renderAvgMs(c.TTFTSum, c.Requests),
 			formatClock(c.LastRequestAt))
 	}
 	return b.String()

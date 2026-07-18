@@ -140,6 +140,16 @@ func (c *responseCache) reset() {
 	c.hits, c.misses = 0, 0
 }
 
+// stats returns (hits, misses, entries) under one lock, for /api/status observability.
+func (c *responseCache) stats() (hits, misses, entries uint64) {
+	if c == nil {
+		return 0, 0, 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hits, c.misses, uint64(len(c.m))
+}
+
 // cacheKeyOf returns the exact-match key for a request: SHA-256 of the method,
 // path, and full request body. The body carries the model + messages + system +
 // tools, so two requests cache-share only when byte-identical (true exact match).

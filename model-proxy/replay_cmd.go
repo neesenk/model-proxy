@@ -62,6 +62,7 @@ func doReplay(base, id, provider string) ([]byte, error) {
 	}
 	var got struct {
 		Records []struct {
+			RequestID   string `json:"request_id"`
 			Method      string `json:"method"`
 			Path        string `json:"path"`
 			RequestBody string `json:"request_body"`
@@ -74,6 +75,15 @@ func doReplay(base, id, provider string) ([]byte, error) {
 		return nil, fmt.Errorf("no record for id %s", id)
 	}
 	rec := got.Records[0]
+	// Guard: shadow records can't be replayed (they're fire-and-forget logs of
+	// a candidate backend, not a real client request with a route to re-enter).
+	if strings.HasPrefix(rec.RequestID, "shadow-") {
+		return nil, fmt.Errorf("record %s is a shadow evaluation record — shadow records cannot be replayed", id)
+	}
+	// Guard: the path must be a chat-completion path the proxy can forward.
+	if !strings.HasPrefix(rec.Path, "/v1/") {
+		return nil, fmt.Errorf("record %s path %q is not under /v1/ — cannot replay", id, rec.Path)
+	}
 	if rec.RequestBody == "" {
 		return nil, fmt.Errorf("record %s has no captured request body", id)
 	}

@@ -30,10 +30,9 @@ type Config struct {
 	// result is NOT returned to the client. Empty/missing = off. Requires
 	// request_log to record shadow results.
 	Shadow map[string]ShadowTarget `yaml:"shadow"`
-	// ShadowSampleRate (0-1) controls what fraction of committed requests get
-	// shadowed. Default 1.0 (all). Under high QPS, set <1 to avoid doubling
-	// quota burn. 0 disables shadowing entirely.
-	ShadowSampleRate float64 `yaml:"shadow_sample_rate"`
+	// ShadowSampleRate (*float64): nil = default 1.0 (all requests); explicit
+	// 0.0 = shadowing OFF (distinguishes "unset" from "disabled"); 0.5 = half.
+	ShadowSampleRate *float64 `yaml:"shadow_sample_rate"`
 	// ShadowMaxConcurrent caps the number of in-flight shadow goroutines.
 	// Default 4. Additional shadows are silently dropped (best-effort) when the
 	// cap is reached, preventing goroutine explosion under high QPS.
@@ -618,6 +617,27 @@ func (c *Config) validate() error {
 		if _, ok := c.Routes[exposed]; !ok {
 			return fmt.Errorf("claude_mapping %q → %q: target %q not found in routes — add a route named %q or fix the mapping", claude, exposed, exposed, exposed)
 		}
+	}
+	// Shadow validation: each entry references a real route + provider + valid
+	// protocol; sample rate in [0,1]; max_concurrent >= 0.
+	for route, sh := range c.Shadow {
+		if _, ok := c.Routes[route]; !ok {
+			return fmt.Errorf("shadow %q: route not found in routes: — add a route named %q", route, route)
+		}
+		if _, ok := c.Providers[sh.Provider]; !ok {
+			return fmt.Errorf("shadow %q: provider %q not defined under providers:", route, sh.Provider)
+		}
+		if sh.Protocol != "" && sh.Protocol != "anthropic" && sh.Protocol != "openai" {
+			return fmt.Errorf("shadow %q: protocol %q invalid — use \"anthropic\" or \"openai\"", route, sh.Protocol)
+		}
+	}
+	if c.ShadowSampleRate != nil {
+		if r := *c.ShadowSampleRate; r < 0 || r > 1 {
+			return fmt.Errorf("shadow_sample_rate %v out of range [0, 1]", r)
+		}
+	}
+	if c.ShadowMaxConcurrent < 0 {
+		return fmt.Errorf("shadow_max_concurrent %d must be >= 0", c.ShadowMaxConcurrent)
 	}
 	// NOTE: duplicate priorities within a route are intentionally allowed. The
 	// scheduler (proxy.go decideOrder) ranks by tier -> priority -> surplus, so

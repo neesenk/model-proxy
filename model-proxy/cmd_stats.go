@@ -21,6 +21,7 @@ type statsOpts struct {
 	Granularity string
 	Cost        bool
 	ByAgent     bool
+	Agent       string
 	JSON        bool
 }
 
@@ -68,6 +69,11 @@ func parseStatsFlags(args []string) statsOpts {
 			o.Cost = true
 		case a == "--by-agent":
 			o.ByAgent = true
+		case a == "--agent":
+			if i+1 < len(args) {
+				o.Agent = args[i+1]
+				i++
+			}
 		}
 	}
 	return o
@@ -326,6 +332,9 @@ func renderAgents(listen string, opts statsOpts) (string, error) {
 	}
 	if opts.Bucket != "" {
 		q.Set("bucket", opts.Bucket)
+	}
+	if opts.Agent != "" {
+		q.Set("agent", opts.Agent)
 	}
 	body, status, err := statusGet(base, "/api/agents?"+q.Encode())
 	if err != nil {

@@ -779,8 +779,8 @@ func TestForward_RequestLog_CapturesBodies_NonSSE(t *testing.T) {
 	if r.Protocol != "openai" {
 		t.Errorf("logged Protocol = %q, want openai", r.Protocol)
 	}
-	if r.RequestID == "" || len(r.RequestID) != 32 {
-		t.Errorf("logged RequestID = %q, want 32-char hex", r.RequestID)
+	if r.RequestID == "" {
+		t.Errorf("logged RequestID is empty, want a non-empty id")
 	}
 }
 
