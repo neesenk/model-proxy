@@ -19,7 +19,7 @@ func TestUsageScannerAnthropic(t *testing.T) {
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":200}}\n\n")
 	tc := newTokenCounter()
 	key := tokenKey{Provider: "zhipu", Model: "glm-5"}
-	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc)
+	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
 	io.Copy(io.Discard, sc)
 
 	got := tc.snapshot()[key]
@@ -31,7 +31,7 @@ func TestUsageScannerAnthropic(t *testing.T) {
 func TestUsageScannerOpenAI(t *testing.T) {
 	stream := []byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13}}\n\n")
 	tc := newTokenCounter()
-	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "deepseek", Model: "d"}, tc)
+	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "deepseek", Model: "d"}, tc, nil)
 	io.Copy(io.Discard, sc)
 	got := tc.snapshot()[tokenKey{Provider: "deepseek", Model: "d"}]
 	if got.Input != 7 || got.Output != 13 {
@@ -44,7 +44,7 @@ func TestUsageScannerOpenAI(t *testing.T) {
 func TestUsageScannerSplitBoundaries(t *testing.T) {
 	payload := []byte("data: {\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":99}}\n\n")
 	tc := newTokenCounter()
-	sc := newUsageScanner(io.NopCloser(&oneByteReader{b: payload}), tokenKey{Provider: "p", Model: "m"}, tc)
+	sc := newUsageScanner(io.NopCloser(&oneByteReader{b: payload}), tokenKey{Provider: "p", Model: "m"}, tc, nil)
 	io.Copy(io.Discard, sc)
 	got := tc.snapshot()[tokenKey{Provider: "p", Model: "m"}]
 	if got.Input != 42 || got.Output != 99 {
@@ -57,7 +57,7 @@ func TestUsageScannerPassthrough(t *testing.T) {
 	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\ndata: garbage\n\n")
 	var sink bytes.Buffer
 	tc := newTokenCounter()
-	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "p", Model: "m"}, tc)
+	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "p", Model: "m"}, tc, nil)
 	io.Copy(&sink, sc)
 	if !bytes.Equal(sink.Bytes(), stream) {
 		t.Errorf("passthrough not byte-identical:\nwant %q\ngot  %q", stream, sink.Bytes())
@@ -71,7 +71,7 @@ func TestUsageScannerOversizedLine(t *testing.T) {
 	stream = append(stream, []byte("\n\ndata: {\"usage\":{\"prompt_tokens\":3}}\n\n")...)
 	tc := newTokenCounter()
 	var sink bytes.Buffer
-	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "p", Model: "m"}, tc)
+	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "p", Model: "m"}, tc, nil)
 	io.Copy(&sink, sc)
 	if !bytes.Equal(sink.Bytes(), stream) {
 		t.Error("oversized passthrough mismatch")
@@ -93,7 +93,7 @@ func TestTokenCounterPersist(t *testing.T) {
 	defer ss.Close()
 	m := newMetricsStore()
 	tc := newTokenCounter()
-	f := newStatsFlusher(ss, m, tc, map[pmKey]statsCounters{})
+	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[pmKey]statsCounters{})
 
 	tc.commit(tokenKey{Provider: "z", Model: "m"}, tokenUsage{Input: 10, Output: 20, Requests: 1})
 	m.inc("z", "m", evRequests)

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -19,6 +20,7 @@ type statsOpts struct {
 	Bucket      string
 	Granularity string
 	Cost        bool
+	ByAgent     bool
 	JSON        bool
 }
 
@@ -64,6 +66,8 @@ func parseStatsFlags(args []string) statsOpts {
 			o.JSON = true
 		case a == "--cost":
 			o.Cost = true
+		case a == "--by-agent":
+			o.ByAgent = true
 		}
 	}
 	return o
@@ -102,6 +106,9 @@ func cmdStats(args []string) {
 // neither flag set, behavior is byte-identical to the legacy /api/stats path
 // (the CLI display contract).
 func renderStats(listen string, opts statsOpts) (string, error) {
+	if opts.ByAgent {
+		return renderAgents(listen, opts)
+	}
 	if opts.Granularity != "" || opts.Cost {
 		return renderAnalytics(listen, opts)
 	}
@@ -269,16 +276,17 @@ func formatStatsTable(resp statsResp) string {
 		to := time.Unix(resp.To, 0).Format("01-02 15:04")
 		return fmt.Sprintf("(no stats in range %s .. %s, bucket %s)\n", from, to, bucketLabel)
 	}
-	hdr := fmt.Sprintf("%-16s %-18s %-12s %8s %8s %8s %8s %10s %10s\n",
-		"provider", "model", bucketLabel, "reqs", "failover", "429", "fail", "input", "output")
+	hdr := fmt.Sprintf("%-16s %-18s %-12s %8s %8s %8s %8s %10s %10s %8s %8s\n",
+		"provider", "model", bucketLabel, "reqs", "failover", "429", "fail", "input", "output", "lat(ms)", "ttft(ms)")
 	out := hdr
 	for _, b := range resp.Buckets {
-		out += fmt.Sprintf("%-16.16s %-18.18s %-12s %8s %8s %8s %8s %10s %10s\n",
+		out += fmt.Sprintf("%-16.16s %-18.18s %-12s %8s %8s %8s %8s %10s %10s %8s %8s\n",
 			b.Provider, b.Model,
 			time.Unix(b.Minute, 0).Format("01-02 15:04"),
 			compactNum(b.Requests), compactNum(b.Failovers),
 			compactNum(b.RateLimited429), compactNum(b.Failures),
-			compactNum(b.Input), compactNum(b.Output))
+			compactNum(b.Input), compactNum(b.Output),
+			compactNum(uint64(b.AvgLatencyMs+0.5)), compactNum(uint64(b.AvgTtftMs+0.5)))
 	}
 	return out
 }
@@ -293,4 +301,93 @@ func bucketLabel(secs int64) string {
 		return fmt.Sprintf("%dh", secs/3600)
 	}
 	return fmt.Sprintf("%dm", secs/60)
+}
+
+// agentResp is the decoded /api/agents shape (mirrors the statsResp envelope,
+// with agent-dimension buckets).
+type agentResp struct {
+	From    int64         `json:"from"`
+	To      int64         `json:"to"`
+	Bucket  int64         `json:"bucket"`
+	Buckets []agentBucket `json:"buckets"`
+}
+
+// renderAgents fetches /api/agents and renders a per-agent summary ("who is
+// burning my quota"): buckets are collapsed by agent, summing requests +
+// input/output tokens. --json passes the raw /api/agents response through.
+func renderAgents(listen string, opts statsOpts) (string, error) {
+	base := "http://" + listen
+	q := url.Values{}
+	if opts.From != "" {
+		q.Set("from", opts.From)
+	}
+	if opts.To != "" {
+		q.Set("to", opts.To)
+	}
+	if opts.Bucket != "" {
+		q.Set("bucket", opts.Bucket)
+	}
+	body, status, err := statusGet(base, "/api/agents?"+q.Encode())
+	if err != nil {
+		return "", fmt.Errorf("cannot reach daemon at %s: %v\nis `model-proxy serve` running?", listen, err)
+	}
+	if status == 404 {
+		return "", fmt.Errorf("web UI endpoints not available - is web.enabled true on the daemon?")
+	}
+	if status != 200 {
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(body), 200))
+	}
+	if opts.JSON {
+		return string(body), nil
+	}
+	var resp agentResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("parse agents response: %w", err)
+	}
+	return formatAgentsTable(resp), nil
+}
+
+// formatAgentsTable collapses agent-dimension buckets into one row per agent
+// (SUM of requests/input/output across providers, models, and minutes in range),
+// sorted by total tokens desc so the heaviest agent is on top.
+func formatAgentsTable(resp agentResp) string {
+	if len(resp.Buckets) == 0 {
+		from := time.Unix(resp.From, 0).Format("01-02 15:04")
+		to := time.Unix(resp.To, 0).Format("01-02 15:04")
+		return fmt.Sprintf("(no agent stats in range %s .. %s)\n", from, to)
+	}
+	type agentTotals struct {
+		Requests uint64
+		Input    uint64
+		Output   uint64
+	}
+	per := map[string]*agentTotals{}
+	for _, b := range resp.Buckets {
+		t := per[b.Agent]
+		if t == nil {
+			t = &agentTotals{}
+			per[b.Agent] = t
+		}
+		t.Requests += b.Requests
+		t.Input += b.Input
+		t.Output += b.Output
+	}
+	agents := make([]string, 0, len(per))
+	for a := range per {
+		agents = append(agents, a)
+	}
+	sort.Slice(agents, func(i, j int) bool {
+		ti := per[agents[i]].Input + per[agents[i]].Output
+		tj := per[agents[j]].Input + per[agents[j]].Output
+		if ti != tj {
+			return ti > tj
+		}
+		return agents[i] < agents[j]
+	})
+	out := fmt.Sprintf("%-16s %10s %12s %12s\n", "agent", "reqs", "input", "output")
+	for _, a := range agents {
+		t := per[a]
+		out += fmt.Sprintf("%-16.16s %10s %12s %12s\n", a, compactNum(t.Requests), compactNum(t.Input), compactNum(t.Output))
+	}
+	return out
 }

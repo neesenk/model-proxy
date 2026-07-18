@@ -83,16 +83,17 @@ const scanLineCap = 64 * 1024
 // modifies, buffers the stream, or blocks the client. Failures are silent (no
 // usage recorded). commit happens once on EOF.
 type usageScanner struct {
-	src  io.ReadCloser
-	key  tokenKey
-	tc   *tokenCounter
-	line []byte // current incomplete line (bounded by scanLineCap)
-	acc  tokenUsage
-	done bool
+	src     io.ReadCloser
+	key     tokenKey
+	tc      *tokenCounter
+	onAgent func(tokenUsage) // optional: attribute the same usage to an agent (parallel agent pipeline)
+	line    []byte           // current incomplete line (bounded by scanLineCap)
+	acc     tokenUsage
+	done    bool
 }
 
-func newUsageScanner(src io.ReadCloser, key tokenKey, tc *tokenCounter) *usageScanner {
-	return &usageScanner{src: src, key: key, tc: tc}
+func newUsageScanner(src io.ReadCloser, key tokenKey, tc *tokenCounter, onAgent func(tokenUsage)) *usageScanner {
+	return &usageScanner{src: src, key: key, tc: tc, onAgent: onAgent}
 }
 
 func (s *usageScanner) Read(p []byte) (int, error) {
@@ -102,7 +103,7 @@ func (s *usageScanner) Read(p []byte) (int, error) {
 	}
 	if err != nil && !s.done {
 		s.done = true
-		s.tc.commit(s.key, s.acc)
+		s.commit()
 	}
 	return n, err
 }
@@ -110,9 +111,19 @@ func (s *usageScanner) Read(p []byte) (int, error) {
 func (s *usageScanner) Close() error {
 	if !s.done {
 		s.done = true
-		s.tc.commit(s.key, s.acc)
+		s.commit()
 	}
 	return s.src.Close()
+}
+
+// commit flushes the accumulated usage to the (provider, model) token counter
+// and, if an agent sink is wired, to the agent pipeline too (same bytes, so
+// per-agent token totals reconcile with the per-model totals).
+func (s *usageScanner) commit() {
+	s.tc.commit(s.key, s.acc)
+	if s.onAgent != nil && (s.acc.Input > 0 || s.acc.Output > 0) {
+		s.onAgent(s.acc)
+	}
 }
 
 // observe scans a chunk for complete lines, extracting usage. Partial line bytes
@@ -152,6 +163,7 @@ func (s *usageScanner) parseLine(line []byte) {
 			} `json:"usage"`
 		} `json:"message"`
 		Usage struct {
+			InputTokens  uint64 `json:"input_tokens"`
 			OutputTokens uint64 `json:"output_tokens"`
 		} `json:"usage"`
 	}
@@ -163,6 +175,12 @@ func (s *usageScanner) parseLine(line []byte) {
 		}
 		if anth.Type == "message_delta" {
 			s.acc.Output += anth.Usage.OutputTokens
+			// A native anthropic stream carries only output_tokens here, but the
+			// protocol-conversion transformer (openai→anthropic) emits input_tokens
+			// in message_delta too (openai delivers prompt_tokens at the trailing
+			// chunk, after message_start fired). Read it here so converted routes
+			// attribute input tokens (otherwise they'd be permanently 0).
+			s.acc.Input += anth.Usage.InputTokens
 		}
 	}
 	var oai struct {

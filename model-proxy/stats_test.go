@@ -72,7 +72,7 @@ func TestStatsFlushTwoMinutes(t *testing.T) {
 	ss := newTestStatsStore(t)
 	m := newMetricsStore()
 	tc := newTokenCounter()
-	f := newStatsFlusher(ss, m, tc, map[pmKey]statsCounters{})
+	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[pmKey]statsCounters{})
 
 	// Minute 1: 1 request, 1 failover.
 	m.inc("z", "m", evRequests)
@@ -129,7 +129,7 @@ func TestStatsRestoreOnBoot(t *testing.T) {
 	}
 	m := newMetricsStore()
 	tc := newTokenCounter()
-	f := newStatsFlusher(ss, m, tc, map[pmKey]statsCounters{})
+	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[pmKey]statsCounters{})
 	m.inc("a", "x", evRequests)
 	m.inc("a", "x", evRequests)
 	m.inc("a", "x", evFailures)
@@ -270,7 +270,7 @@ func TestStatsFlusherResetPrev(t *testing.T) {
 	ss := newTestStatsStore(t)
 	m := newMetricsStore()
 	tc := newTokenCounter()
-	f := newStatsFlusher(ss, m, tc, map[pmKey]statsCounters{})
+	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[pmKey]statsCounters{})
 	m.inc("z", "m", evRequests)
 	f.flush(time.Now())
 
@@ -357,7 +357,7 @@ func TestRenderStatsCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"zhipu", "glm-5", "7", "1m"} {
+	for _, want := range []string{"zhipu", "glm-5", "7", "1m", "lat(ms)", "ttft(ms)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered table missing %q:\n%s", want, out)
 		}
@@ -423,7 +423,7 @@ func TestLegacyTokensPath(t *testing.T) {
 // reports false (the idle-proxy path).
 func TestStatsFlushEmptyIsNoop(t *testing.T) {
 	ss := newTestStatsStore(t)
-	f := newStatsFlusher(ss, newMetricsStore(), newTokenCounter(), map[pmKey]statsCounters{})
+	f := newStatsFlusher(ss, newMetricsStore(), newTokenCounter(), newAgentCounter(), map[pmKey]statsCounters{})
 	if f.flush(time.Now()) {
 		t.Error("flush with no deltas should report false")
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,10 @@ type statsCounters struct {
 	CacheRead      uint64
 	TokenRequests  uint64
 	LastRequestAt  int64
+	// LatencySum/TTFTSum: cumulative ms over committed responses (avg = sum /
+	// requests at query time). Additive counters, like the token sums.
+	LatencySum uint64
+	TTFTSum    uint64
 }
 
 // statsBucket is one persisted row: a (provider, model, minute) + the counter
@@ -49,6 +54,12 @@ type statsBucket struct {
 	CacheRead      uint64 `json:"cache_read"`
 	TokenRequests  uint64 `json:"token_requests"`
 	LastRequestAt  int64  `json:"last_request_at"`
+	// LatencySum/TTFTSum are the raw additive sums (what is stored); the derived
+	// Avg* fields are filled in at query time (SUM / requests, 0 when no reqs).
+	LatencySum   uint64  `json:"latency_ms_sum"`
+	TTFTSum      uint64  `json:"ttft_ms_sum"`
+	AvgLatencyMs float64 `json:"avg_latency_ms"`
+	AvgTtftMs    float64 `json:"avg_ttft_ms"`
 }
 
 // statsStore is the SQLite persistence layer for call statistics. It owns one
@@ -111,13 +122,78 @@ func (s *statsStore) migrate() error {
 		cache_read  INTEGER NOT NULL DEFAULT 0,
 		token_requests INTEGER NOT NULL DEFAULT 0,
 		last_request_at INTEGER NOT NULL DEFAULT 0,
+		latency_ms_sum  INTEGER NOT NULL DEFAULT 0,
+		ttft_ms_sum     INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (provider, model, minute)
 	);
-	CREATE INDEX IF NOT EXISTS idx_minute ON minute_buckets(minute);`)
+	CREATE INDEX IF NOT EXISTS idx_minute ON minute_buckets(minute);
+
+CREATE TABLE IF NOT EXISTS agent_buckets (
+	agent     TEXT NOT NULL,
+	provider  TEXT NOT NULL,
+	model     TEXT NOT NULL,
+	minute    INTEGER NOT NULL,
+	requests  INTEGER NOT NULL DEFAULT 0,
+	input     INTEGER NOT NULL DEFAULT 0,
+	output    INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (agent, provider, model, minute)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_minute ON agent_buckets(minute);`)
 	if err != nil {
 		return fmt.Errorf("migrate stats schema: %w", err)
 	}
+	// Additive migration for DBs created before latency columns existed: CREATE
+	// TABLE IF NOT EXISTS only shapes a fresh DB, so ALTER missing columns in
+	// place. Harmless on a fresh DB (columns already present → skipped).
+	if err := s.ensureColumns("minute_buckets", [][2]string{
+		{"latency_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
+		{"ttft_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return fmt.Errorf("migrate stats schema: %w", err)
+	}
 	return nil
+}
+
+// ensureColumns adds any (column, type-def) pairs missing from table via ALTER
+// TABLE ADD COLUMN. Used for additive migrations on pre-existing DBs (CREATE
+// TABLE IF NOT EXISTS does not add columns to an existing table). A column that
+// already exists is skipped.
+func (s *statsStore) ensureColumns(table string, cols [][2]string) error {
+	present, err := s.columnSet(table)
+	if err != nil {
+		return err
+	}
+	for _, c := range cols {
+		if present[c[0]] {
+			continue
+		}
+		if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, c[0], c[1])); err != nil {
+			return fmt.Errorf("add %s.%s: %w", table, c[0], err)
+		}
+	}
+	return nil
+}
+
+// columnSet returns the set of column names currently on a table (PRAGMA
+// table_info). Names are lower-cased by SQLite, so keys are matched as-is.
+func (s *statsStore) columnSet(table string) (map[string]bool, error) {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
 }
 
 func (s *statsStore) Close() error {
@@ -210,7 +286,7 @@ func (s *statsStore) loadCumulative() (map[pmKey]statsCounters, error) {
 	rows, err := s.db.Query(`SELECT provider, model,
 		SUM(requests), SUM(failovers), SUM(rate_limited_429), SUM(failures),
 		SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), SUM(token_requests),
-		MAX(last_request_at)
+		MAX(last_request_at), SUM(latency_ms_sum), SUM(ttft_ms_sum)
 		FROM minute_buckets GROUP BY provider, model`)
 	if err != nil {
 		return nil, err
@@ -223,7 +299,7 @@ func (s *statsStore) loadCumulative() (map[pmKey]statsCounters, error) {
 		if err := rows.Scan(&k.Provider, &k.Model,
 			&c.Requests, &c.Failovers, &c.RateLimited429, &c.Failures,
 			&c.Input, &c.Output, &c.CacheCreation, &c.CacheRead, &c.TokenRequests,
-			&c.LastRequestAt); err != nil {
+			&c.LastRequestAt, &c.LatencySum, &c.TTFTSum); err != nil {
 			return nil, err
 		}
 		out[k] = c
@@ -244,8 +320,9 @@ func (s *statsStore) flushDeltas(minute int64, deltas map[pmKey]statsCounters) e
 	defer tx.Rollback() //nolint:errcheck
 	stmt, err := tx.Prepare(`INSERT INTO minute_buckets
 		(provider, model, minute, requests, failovers, rate_limited_429, failures,
-		 input, output, cache_creation, cache_read, token_requests, last_request_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 input, output, cache_creation, cache_read, token_requests, last_request_at,
+		 latency_ms_sum, ttft_ms_sum)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(provider, model, minute) DO UPDATE SET
 			requests = requests + excluded.requests,
 			failovers = failovers + excluded.failovers,
@@ -256,7 +333,9 @@ func (s *statsStore) flushDeltas(minute int64, deltas map[pmKey]statsCounters) e
 			cache_creation = cache_creation + excluded.cache_creation,
 			cache_read = cache_read + excluded.cache_read,
 			token_requests = token_requests + excluded.token_requests,
-			last_request_at = MAX(last_request_at, excluded.last_request_at)`)
+			last_request_at = MAX(last_request_at, excluded.last_request_at),
+			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
+			ttft_ms_sum = ttft_ms_sum + excluded.ttft_ms_sum`)
 	if err != nil {
 		return err
 	}
@@ -265,7 +344,7 @@ func (s *statsStore) flushDeltas(minute int64, deltas map[pmKey]statsCounters) e
 		if _, err := stmt.Exec(k.Provider, k.Model, minute,
 			d.Requests, d.Failovers, d.RateLimited429, d.Failures,
 			d.Input, d.Output, d.CacheCreation, d.CacheRead, d.TokenRequests,
-			d.LastRequestAt); err != nil {
+			d.LastRequestAt, d.LatencySum, d.TTFTSum); err != nil {
 			return err
 		}
 	}
@@ -286,7 +365,10 @@ func (s *statsStore) prune(now time.Time) error {
 // resetAll deletes all bucket history. Called together with the in-memory
 // resets by Proxy.resetStats so "reset counters" zeroes both layers.
 func (s *statsStore) resetAll() error {
-	_, err := s.db.Exec(`DELETE FROM minute_buckets`)
+	if _, err := s.db.Exec(`DELETE FROM minute_buckets`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM agent_buckets`)
 	return err
 }
 
@@ -305,7 +387,8 @@ func (s *statsStore) queryRange(from, to int64, provider, model string, bucketSe
 	if bucketSecs <= 60 {
 		// Raw 1-minute rows: the original path, unchanged shape/order.
 		q := `SELECT provider, model, minute, requests, failovers, rate_limited_429, failures,
-			input, output, cache_creation, cache_read, token_requests, last_request_at
+			input, output, cache_creation, cache_read, token_requests, last_request_at,
+			latency_ms_sum, ttft_ms_sum
 			FROM minute_buckets WHERE minute >= ? AND minute <= ?`
 		args := []any{from, to}
 		if provider != "" {
@@ -328,9 +411,11 @@ func (s *statsStore) queryRange(from, to int64, provider, model string, bucketSe
 			if err := rows.Scan(&b.Provider, &b.Model, &b.Minute,
 				&b.Requests, &b.Failovers, &b.RateLimited429, &b.Failures,
 				&b.Input, &b.Output, &b.CacheCreation, &b.CacheRead, &b.TokenRequests,
-				&b.LastRequestAt); err != nil {
+				&b.LastRequestAt, &b.LatencySum, &b.TTFTSum); err != nil {
 				return nil, err
 			}
+			b.AvgLatencyMs = avgMs(b.LatencySum, b.Requests)
+			b.AvgTtftMs = avgMs(b.TTFTSum, b.Requests)
 			out = append(out, b)
 		}
 		return out, rows.Err()
@@ -342,7 +427,7 @@ func (s *statsStore) queryRange(from, to int64, provider, model string, bucketSe
 		(minute / ?) * ? AS minute,
 		SUM(requests), SUM(failovers), SUM(rate_limited_429), SUM(failures),
 		SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), SUM(token_requests),
-		MAX(last_request_at)
+		MAX(last_request_at), SUM(latency_ms_sum), SUM(ttft_ms_sum)
 		FROM minute_buckets WHERE minute >= ? AND minute <= ?`
 	args := []any{bucketSecs, bucketSecs, from, to}
 	if provider != "" {
@@ -366,12 +451,25 @@ func (s *statsStore) queryRange(from, to int64, provider, model string, bucketSe
 		if err := rows.Scan(&b.Provider, &b.Model, &b.Minute,
 			&b.Requests, &b.Failovers, &b.RateLimited429, &b.Failures,
 			&b.Input, &b.Output, &b.CacheCreation, &b.CacheRead, &b.TokenRequests,
-			&b.LastRequestAt); err != nil {
+			&b.LastRequestAt, &b.LatencySum, &b.TTFTSum); err != nil {
 			return nil, err
 		}
+		b.AvgLatencyMs = avgMs(b.LatencySum, b.Requests)
+		b.AvgTtftMs = avgMs(b.TTFTSum, b.Requests)
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// avgMs returns the per-request average of a millisecond sum (0 when there are
+// no requests, instead of NaN). Rounded to 1 decimal place — latencies are
+// observability, not billing.
+func avgMs(sum, requests uint64) float64 {
+	if requests == 0 {
+		return 0
+	}
+	v := float64(sum) / float64(requests)
+	return math.Round(v*10) / 10
 }
 
 // analyticsBucket is one persisted calendar-day/month aggregate row for the
@@ -458,6 +556,109 @@ func localDayStart(d, granularity string) int64 {
 	return t.Unix()
 }
 
+// agentBucket is one persisted agent-dimension row: a (agent, provider, model,
+// minute) + that minute's request count and observed input/output tokens.
+// Returned by queryAgentRange for /api/agents and the `stats --by-agent` CLI.
+type agentBucket struct {
+	Agent    string `json:"agent"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Minute   int64  `json:"minute"`
+	Requests uint64 `json:"requests"`
+	Input    uint64 `json:"input"`
+	Output   uint64 `json:"output"`
+}
+
+// flushAgentDeltas upserts per-minute agent deltas (additive counters). Mirrors
+// flushDeltas but for the parallel agent_buckets table.
+func (s *statsStore) flushAgentDeltas(minute int64, deltas map[agentKey]agentCount) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	stmt, err := tx.Prepare(`INSERT INTO agent_buckets
+		(agent, provider, model, minute, requests, input, output)
+		VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(agent, provider, model, minute) DO UPDATE SET
+			requests = requests + excluded.requests,
+			input = input + excluded.input,
+			output = output + excluded.output`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for k, d := range deltas {
+		if _, err := stmt.Exec(k.Agent, k.Provider, k.Model, minute, d.Requests, d.Input, d.Output); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// queryAgentRange returns agent-dimension buckets in [from, to]. Optional agent/
+// provider/model filters. bucketSecs widens the display bucket exactly like
+// queryRange (1-minute storage is lossless). Ordered by agent, provider, model,
+// minute.
+func (s *statsStore) queryAgentRange(from, to int64, agent, provider, model string, bucketSecs int64) ([]agentBucket, error) {
+	selectCols := "agent, provider, model, minute, requests, input, output"
+	groupCols := ""
+	if bucketSecs > 60 {
+		selectCols = "agent, provider, model, (minute / ?) * ? AS minute, SUM(requests), SUM(input), SUM(output)"
+		groupCols = ", (minute / ?) * ?"
+	}
+	q := "SELECT " + selectCols + " FROM agent_buckets WHERE minute >= ? AND minute <= ?"
+	args := []any{}
+	if bucketSecs > 60 {
+		args = append(args, bucketSecs, bucketSecs)
+	}
+	args = append(args, from, to)
+	if agent != "" {
+		q += " AND agent = ?"
+		args = append(args, agent)
+	}
+	if provider != "" {
+		q += " AND provider = ?"
+		args = append(args, provider)
+	}
+	if model != "" {
+		q += " AND model = ?"
+		args = append(args, model)
+	}
+	q += " GROUP BY agent, provider, model" + groupCols + " ORDER BY agent, provider, model, minute"
+	if bucketSecs > 60 {
+		args = append(args, bucketSecs, bucketSecs)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []agentBucket
+	for rows.Next() {
+		var b agentBucket
+		if err := rows.Scan(&b.Agent, &b.Provider, &b.Model, &b.Minute, &b.Requests, &b.Input, &b.Output); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// pruneAgent deletes agent buckets older than the retention window (no-op when
+// retention is 0). Run alongside the minute-bucket prune.
+func (s *statsStore) pruneAgent(now time.Time) error {
+	if s.retention <= 0 {
+		return nil
+	}
+	cutoff := now.Add(-s.retention).Unix() / 60 * 60
+	_, err := s.db.Exec(`DELETE FROM agent_buckets WHERE minute < ?`, cutoff)
+	return err
+}
+
 // normalizeBucket parses a bucket-granularity spec into seconds, a multiple of
 // 60. Accepted forms: "1m"/"10m"/"1h"/"1d" (time.Duration), a bare integer
 // (seconds), "" or "0" (-> 60, raw 1-minute rows). Values < 60 clamp up to 60
@@ -495,14 +696,16 @@ type statsFlusher struct {
 	stats   *statsStore
 	metrics *metricsStore
 	tokens  *tokenCounter
+	agents  *agentCounter
 
 	mu         sync.Mutex
 	prev       map[pmKey]statsCounters
+	agentPrev  map[agentKey]agentCount
 	lastBucket int64 // last minute written; guards against jitter double-writes
 }
 
-func newStatsFlusher(stats *statsStore, metrics *metricsStore, tokens *tokenCounter, baseline map[pmKey]statsCounters) *statsFlusher {
-	return &statsFlusher{stats: stats, metrics: metrics, tokens: tokens, prev: baseline}
+func newStatsFlusher(stats *statsStore, metrics *metricsStore, tokens *tokenCounter, agents *agentCounter, baseline map[pmKey]statsCounters) *statsFlusher {
+	return &statsFlusher{stats: stats, metrics: metrics, tokens: tokens, agents: agents, prev: baseline}
 }
 
 // collect merges the current metrics + token snapshots into one cumulative map.
@@ -517,6 +720,8 @@ func (f *statsFlusher) collect() map[pmKey]statsCounters {
 		c.RateLimited429 = m.RateLimited429
 		c.Failures = m.Failures
 		c.LastRequestAt = m.LastRequestAt
+		c.LatencySum = m.LatencySum
+		c.TTFTSum = m.TTFTSum
 		out[k] = c
 	}
 	for k, u := range f.tokens.snapshot() {
@@ -550,9 +755,12 @@ func diffCounters(cur, prev map[pmKey]statsCounters) map[pmKey]statsCounters {
 			CacheRead:      sub(c.CacheRead, p.CacheRead),
 			TokenRequests:  sub(c.TokenRequests, p.TokenRequests),
 			LastRequestAt:  c.LastRequestAt,
+			LatencySum:     sub(c.LatencySum, p.LatencySum),
+			TTFTSum:        sub(c.TTFTSum, p.TTFTSum),
 		}
 		if d.Requests == 0 && d.Failovers == 0 && d.RateLimited429 == 0 && d.Failures == 0 &&
-			d.Input == 0 && d.Output == 0 && d.CacheCreation == 0 && d.CacheRead == 0 && d.TokenRequests == 0 {
+			d.Input == 0 && d.Output == 0 && d.CacheCreation == 0 && d.CacheRead == 0 && d.TokenRequests == 0 &&
+			d.LatencySum == 0 && d.TTFTSum == 0 {
 			continue
 		}
 		out[k] = d
@@ -575,7 +783,20 @@ func (f *statsFlusher) flush(now time.Time) bool {
 	f.prev = cur
 	f.mu.Unlock()
 	deltas := diffCounters(cur, prev)
-	if len(deltas) == 0 {
+
+	// Agent pipeline: diff the cumulative agent snapshot the same way. agentPrev
+	// starts nil, so the first flush writes only post-boot activity (no baseline
+	// restore needed — the agent counter starts empty on boot).
+	var agentDeltas map[agentKey]agentCount
+	if f.agents != nil {
+		ac := f.agents.snapshot()
+		agentDeltas = diffAgent(ac, f.agentPrev)
+		f.mu.Lock()
+		f.agentPrev = ac
+		f.mu.Unlock()
+	}
+
+	if len(deltas) == 0 && len(agentDeltas) == 0 {
 		// Still prune occasionally even when idle? No - prune only when there's
 		// activity to avoid needless DELETEs every minute on an idle proxy.
 		return false
@@ -591,13 +812,42 @@ func (f *statsFlusher) flush(now time.Time) bool {
 	}
 	f.lastBucket = minute
 	f.mu.Unlock()
-	if err := f.stats.flushDeltas(minute, deltas); err != nil {
-		log.Printf("[stats] flush failed: %v", err)
+	if len(deltas) > 0 {
+		if err := f.stats.flushDeltas(minute, deltas); err != nil {
+			log.Printf("[stats] flush failed: %v", err)
+		}
+	}
+	if len(agentDeltas) > 0 {
+		if err := f.stats.flushAgentDeltas(minute, agentDeltas); err != nil {
+			log.Printf("[stats] agent flush failed: %v", err)
+		}
 	}
 	if err := f.stats.prune(now); err != nil {
 		log.Printf("[stats] prune failed: %v", err)
 	}
+	if err := f.stats.pruneAgent(now); err != nil {
+		log.Printf("[stats] agent prune failed: %v", err)
+	}
 	return true
+}
+
+// diffAgent returns per-key agent deltas (cur - prev), clamped at 0. Keys with no
+// change are omitted. Mirrors diffCounters for the parallel agent pipeline.
+func diffAgent(cur, prev map[agentKey]agentCount) map[agentKey]agentCount {
+	out := map[agentKey]agentCount{}
+	for k, c := range cur {
+		p := prev[k]
+		d := agentCount{
+			Requests: sub(c.Requests, p.Requests),
+			Input:    sub(c.Input, p.Input),
+			Output:   sub(c.Output, p.Output),
+		}
+		if d.Requests == 0 && d.Input == 0 && d.Output == 0 {
+			continue
+		}
+		out[k] = d
+	}
+	return out
 }
 
 // resetPrev resets the diff baseline to the current in-memory snapshot. Called
@@ -606,6 +856,7 @@ func (f *statsFlusher) flush(now time.Time) bool {
 func (f *statsFlusher) resetPrev() {
 	f.mu.Lock()
 	f.prev = f.collect()
+	f.agentPrev = nil
 	f.lastBucket = 0
 	f.mu.Unlock()
 }
@@ -673,6 +924,8 @@ func (p *Proxy) initStats(sc StatsConfig) {
 			RateLimited429: c.RateLimited429,
 			Failures:       c.Failures,
 			LastRequestAt:  c.LastRequestAt,
+			LatencySum:     c.LatencySum,
+			TTFTSum:        c.TTFTSum,
 		})
 		p.tokens.seed(k, tokenUsage{
 			Input:         c.Input,
@@ -682,5 +935,5 @@ func (p *Proxy) initStats(sc StatsConfig) {
 			Requests:      c.TokenRequests,
 		})
 	}
-	p.flusher = newStatsFlusher(ss, p.metrics, p.tokens, baseline)
+	p.flusher = newStatsFlusher(ss, p.metrics, p.tokens, p.agents, baseline)
 }

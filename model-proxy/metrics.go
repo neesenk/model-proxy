@@ -30,6 +30,11 @@ type providerMetrics struct {
 	RateLimited429 atomic.Uint64
 	Failures       atomic.Uint64
 	LastRequestAt  atomic.Int64 // unix seconds
+	// LatencySum/TTFTSum are cumulative millisecond sums over COMMITTED (served)
+	// responses; avg = sum/requests. Latency = full request wall-clock (send →
+	// end of streamed body); TTFT = send → first byte written to the client.
+	LatencySum atomic.Uint64
+	TTFTSum    atomic.Uint64
 }
 
 // providerMetricsSnapshot is the JSON-friendly, lock-acquired copy.
@@ -39,6 +44,8 @@ type providerMetricsSnapshot struct {
 	RateLimited429 uint64 `json:"rate_limited_429"`
 	Failures       uint64 `json:"failures"`
 	LastRequestAt  int64  `json:"last_request_at"`
+	LatencySum     uint64 `json:"latency_ms_sum"`
+	TTFTSum        uint64 `json:"ttft_ms_sum"`
 }
 
 type metricsStore struct {
@@ -87,6 +94,15 @@ func (s *metricsStore) inc(provider, model string, ev metricsEvent) {
 	}
 }
 
+// addLatency records one served response's wall-clock latency and time-to-first-
+// token (milliseconds) for a (provider, model), accumulating into the sums the
+// flusher diffs. Called once per committed target on the forward hot path.
+func (s *metricsStore) addLatency(provider, model string, latencyMs, ttftMs uint64) {
+	pm := s.entry(pmKey{Provider: provider, Model: model})
+	pm.LatencySum.Add(latencyMs)
+	pm.TTFTSum.Add(ttftMs)
+}
+
 // snapshot returns a detached per-(provider,model) copy. Callers may read the
 // returned map without holding the lock.
 func (s *metricsStore) snapshot() map[pmKey]providerMetricsSnapshot {
@@ -105,6 +121,8 @@ func (s *metricsStore) snapshot() map[pmKey]providerMetricsSnapshot {
 			RateLimited429: pm.RateLimited429.Load(),
 			Failures:       pm.Failures.Load(),
 			LastRequestAt:  pm.LastRequestAt.Load(),
+			LatencySum:     pm.LatencySum.Load(),
+			TTFTSum:        pm.TTFTSum.Load(),
 		}
 	}
 	return out
@@ -122,6 +140,8 @@ func (s *metricsStore) aggregateByProvider() map[string]providerMetricsSnapshot 
 		cur.Failovers += snap.Failovers
 		cur.RateLimited429 += snap.RateLimited429
 		cur.Failures += snap.Failures
+		cur.LatencySum += snap.LatencySum
+		cur.TTFTSum += snap.TTFTSum
 		if snap.LastRequestAt > cur.LastRequestAt {
 			cur.LastRequestAt = snap.LastRequestAt
 		}
@@ -140,6 +160,8 @@ func (s *metricsStore) seed(k pmKey, snap providerMetricsSnapshot) {
 	pm.RateLimited429.Store(snap.RateLimited429)
 	pm.Failures.Store(snap.Failures)
 	pm.LastRequestAt.Store(snap.LastRequestAt)
+	pm.LatencySum.Store(snap.LatencySum)
+	pm.TTFTSum.Store(snap.TTFTSum)
 }
 
 // reset zeroes every counter (in-memory). The SQLite history is cleared
