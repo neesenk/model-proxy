@@ -353,6 +353,7 @@ type ProviderModel struct {
 	Context    int64              `yaml:"context"`
 	Output     int                `yaml:"output"`
 	Modalities ProviderModalities `yaml:"modalities"`
+	ToolCall   bool               `yaml:"tool_call"`
 }
 
 type ProviderModalities struct {

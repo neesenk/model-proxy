@@ -22,18 +22,19 @@ import (
 // models.dev/api.json (only the fields model-proxy uses). Compact json keys keep
 // the cache file small.
 type modelsDevModel struct {
-	Context int64    `json:"ctx"`
-	Output  int      `json:"out"`
-	Input   []string `json:"in"`
-	OutMods []string `json:"out_mod"`
+	Context  int64    `json:"ctx"`
+	Output   int      `json:"out"`
+	Input    []string `json:"in"`
+	OutMods  []string `json:"out_mod"`
+	ToolCall bool     `json:"tool_call"`
 }
 
-// toProviderModel converts the slim projection into a config ProviderModel.
 func (m modelsDevModel) toProviderModel() ProviderModel {
 	return ProviderModel{
 		Context:    m.Context,
 		Output:     m.Output,
 		Modalities: ProviderModalities{Input: m.Input, Output: m.OutMods},
+		ToolCall:   m.ToolCall,
 	}
 }
 
@@ -93,6 +94,9 @@ func parseModelsDevAPI(blob []byte) *modelsDevCatalog {
 				Input  []string `json:"input"`
 				Output []string `json:"output"`
 			} `json:"modalities"`
+			Features struct {
+				ToolCall *bool `json:"tool_call"`
+			} `json:"features"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(blob, &raw); err != nil {
@@ -104,10 +108,11 @@ func parseModelsDevAPI(blob []byte) *modelsDevCatalog {
 		r := ownerRank(provKey)
 		for modelName, m := range p.Models {
 			md := modelsDevModel{
-				Context: m.Limit.Context,
-				Output:  int(m.Limit.Output),
-				Input:   m.Modalities.Input,
-				OutMods: m.Modalities.Output,
+				Context:  m.Limit.Context,
+				Output:   int(m.Limit.Output),
+				Input:    m.Modalities.Input,
+				OutMods:  m.Modalities.Output,
+				ToolCall: m.Features.ToolCall != nil && *m.Features.ToolCall,
 			}
 			if cur, ok := rank[modelName]; !ok || r < cur {
 				cat.ByName[modelName] = md

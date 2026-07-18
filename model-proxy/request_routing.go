@@ -51,11 +51,16 @@ func estimateInputTokens(body []byte) int64 {
 // markers, so hoisting it out of the per-target loop avoids N full-body scans.
 type requestProfile struct {
 	hasImage bool
+	hasTools bool
 	est      int64
 }
 
 func profileRequest(body []byte) requestProfile {
-	return requestProfile{hasImage: requestHasImage(body), est: estimateInputTokens(body)}
+	return requestProfile{
+		hasImage: requestHasImage(body),
+		hasTools: requestHasTools(body),
+		est:      estimateInputTokens(body),
+	}
 }
 
 // modelFits is the per-target predicate (given a precomputed request profile): a
@@ -70,6 +75,12 @@ func modelFits(cat *modelsDevCatalog, model string, prof requestProfile) bool {
 	if prof.hasImage {
 		m, ok := lookupModelMeta(cat, model)
 		if !ok || !supportsImage(m) {
+			return false
+		}
+	}
+	if prof.hasTools {
+		m, ok := lookupModelMeta(cat, model)
+		if !ok || !m.ToolCall {
 			return false
 		}
 	}
@@ -110,6 +121,16 @@ func requestHasImage(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// requestHasTools reports whether the request body carries a tools definition
+// (a top-level "tools" JSON array — function tools the client wants the model to
+// use). Heuristic: a `"tools":[` or `"tools": [` substring. A false positive
+// (text mentioning "tools") only narrows to tool-capable models (which also handle
+// text), so the cost is nil.
+func requestHasTools(body []byte) bool {
+	return bytes.Contains(body, []byte(`"tools":[`)) ||
+		bytes.Contains(body, []byte(`"tools": [`))
 }
 
 // supportsImage reports whether a model's modalities accept image input. Models
