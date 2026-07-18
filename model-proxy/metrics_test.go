@@ -114,8 +114,8 @@ routes:
 		if snap.RateLimited429 != 1 {
 			t.Fatalf("after 429, rate_limited_429=%d want 1", snap.RateLimited429)
 		}
-		if snap.Requests != 1 {
-			t.Errorf("after 429, requests=%d want 1", snap.Requests)
+		if snap.Requests != 0 {
+			t.Errorf("after 429, requests=%d want 0 (commit-only: failed target never served)", snap.Requests)
 		}
 		if snap.Failovers != 1 {
 			t.Errorf("after 429, failovers=%d want 1 (429 abandons target)", snap.Failovers)
@@ -137,8 +137,8 @@ routes:
 		if snap.Failovers != 1 {
 			t.Errorf("after 500, failovers=%d want 1 (5xx abandons target)", snap.Failovers)
 		}
-		if snap.Requests != 1 {
-			t.Errorf("after 500, requests=%d want 1", snap.Requests)
+		if snap.Requests != 0 {
+			t.Errorf("after 500, requests=%d want 0 (commit-only: failed target never served)", snap.Requests)
 		}
 	})
 

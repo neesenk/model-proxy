@@ -1001,9 +1001,6 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	})
 
 	for ti, t := range ordered {
-		if p.metrics != nil {
-			p.metrics.inc(t.Provider, t.Model, evRequests)
-		}
 		// Resolve the provider CONFIG. For a pooled virtual ("name#<id>") the
 		// config lives under the parent name in cfg.Providers; providerConfig
 		// resolves it via parentOf. The provider IMPLEMENTATION (provImpl) is
@@ -1321,6 +1318,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// written, e.g. an empty body).
 		latencyMs := time.Since(start).Milliseconds()
 		if p.metrics != nil {
+			p.metrics.inc(t.Provider, t.Model, evRequests) // commit-only: failed attempts don't dilute latency avg
 			ttftMs := latencyMs
 			if tw.hasFirstByte {
 				ttftMs = tw.firstByte.Sub(start).Milliseconds()
