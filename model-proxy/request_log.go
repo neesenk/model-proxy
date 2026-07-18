@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
@@ -403,13 +404,18 @@ func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error)
 	sort.Strings(names)
 	var out []requestLogRecord
 	// Read newest file first so a Limit cuts early; names sort oldest→first, so
-	// iterate in reverse. We still scan older files fully only when needed.
+	// iterate in reverse. STREAM each file via bufio.Scanner (not os.ReadFile)
+	// so a 1 GiB log file doesn't peak at 1 GiB of heap — memory is bounded to
+	// one line at a time (up to 8 MiB for oversized lines).
 	for i := len(names) - 1; i >= 0; i-- {
-		data, err := os.ReadFile(filepath.Join(dir, names[i]))
+		file, err := os.Open(filepath.Join(dir, names[i]))
 		if err != nil {
 			continue
 		}
-		for _, line := range bytes.Split(data, []byte("\n")) {
+		sc := bufio.NewScanner(file)
+		sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+		for sc.Scan() {
+			line := sc.Bytes()
 			if len(line) == 0 {
 				continue
 			}
@@ -421,6 +427,7 @@ func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error)
 				out = append(out, r)
 			}
 		}
+		file.Close()
 		if f.Limit > 0 && len(out) >= f.Limit {
 			break
 		}
