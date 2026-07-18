@@ -585,9 +585,12 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 	// same-role messages (concatenate their content blocks) so the converted
 	// request doesn't 400.
 	msgs = mergeConsecutiveAnthropicRoles(msgs)
+	// Anthropic requires the first message to be role:user. If the converted list
+	// starts with something else, insert a minimal user placeholder to prevent a 400
+	// (was a convertWarn — now actively fixes it).
 	if len(msgs) > 0 {
 		if r, _ := msgs[0]["role"].(string); r != "user" {
-			convertWarn("first anthropic message (after system) is not role:user — anthropic may reject it")
+			msgs = append([]map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "."}}}}, msgs...)
 		}
 	}
 	out["messages"] = msgs

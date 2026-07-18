@@ -282,7 +282,19 @@ func TestRoundTrip_AnthropicOpenAIAnthropic(t *testing.T) {
 	}
 	b := mustJSON(t, back)
 	msgs := objOf(t, b, "messages").([]any)
-	blocks := objOf(t, msgs[0], "content").([]any)
+	// First message may be a user placeholder (anthropic requires first=user when
+	// the original starts with assistant). Find the assistant message.
+	var assistant map[string]any
+	for _, m := range msgs {
+		if objOf(t, m, "role") == "assistant" {
+			assistant = m.(map[string]any)
+			break
+		}
+	}
+	if assistant == nil {
+		t.Fatal("no assistant message found in round-trip result")
+	}
+	blocks := objOf(t, assistant, "content").([]any)
 	tu := blocks[0].(map[string]any)
 	if tu["name"] != "f" || tu["id"] != "t1" {
 		t.Errorf("round-trip tool_use identity lost: %+v", tu)
