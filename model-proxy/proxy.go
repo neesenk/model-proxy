@@ -1048,7 +1048,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			effPath = backendPath(backendProto)
 		}
 
-		flc := forwardLogCtx{requestID: requestID, attempt: ti, exposed: exposed}
+		flc := forwardLogCtx{requestID: requestID, attempt: ti, exposed: exposed, origBody: origBody}
 		if p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, flc) {
 			return // committed: response written to the client
 		}
@@ -1141,6 +1141,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 
 		start := time.Now()
 		resp, err := p.client.Do(req)
+		upstreamMs := time.Since(start).Milliseconds() // upstream response time (headers received), NOT client-read-inclusive
 		if err != nil {
 			log.Printf("[proto=%s provider=%s] upstream error: %v", proto, t.Provider, err)
 			p.recordFailure(t.Provider, sched) // connection error / timeout → circuit
@@ -1324,7 +1325,9 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			if tw.hasFirstByte {
 				ttftMs = tw.firstByte.Sub(start).Milliseconds()
 			}
-			p.metrics.addLatency(t.Provider, t.Model, uint64(latencyMs), uint64(ttftMs))
+			// Stats use UPSTREAM response time (not client-read-inclusive total)
+			// so a slow client doesn't make a fast provider look slow.
+			p.metrics.addLatency(t.Provider, t.Model, uint64(upstreamMs), uint64(ttftMs))
 		}
 		// Attribute this served request to the calling agent (parallel pipeline).
 		if p.agents != nil && agent != "" {

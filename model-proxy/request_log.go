@@ -25,6 +25,7 @@ type forwardLogCtx struct {
 	requestID string
 	attempt   int
 	exposed   string
+	origBody  []byte // original client body (pre-rewrite, pre-convert) — for faithful replay
 }
 
 // requestLogRecord is one line in the JSONL request log. Written as one JSON
@@ -583,11 +584,18 @@ func (l *requestLogger) buildRecord(in recordInputs) *requestLogRecord {
 		LatencyMs:     time.Since(in.start).Milliseconds(),
 		ResponseSize:  in.total,
 	}
-	rec.RequestSize = len(in.requestBody)
-	if len(in.requestBody) > l.maxBody {
-		rec.RequestBody = string(in.requestBody[:l.maxBody]) + truncMarker
+	// Log the ORIGINAL client body (pre-rewrite, pre-convert) when available — so
+	// replay re-routes naturally (alias routes resolve; conversion re-applies).
+	// Shadow records have no origBody → fall back to the upstream body (sbody).
+	reqBody := in.flc.origBody
+	if len(reqBody) == 0 {
+		reqBody = in.requestBody
+	}
+	rec.RequestSize = len(reqBody)
+	if len(reqBody) > l.maxBody {
+		rec.RequestBody = string(reqBody[:l.maxBody]) + truncMarker
 	} else {
-		rec.RequestBody = string(in.requestBody)
+		rec.RequestBody = string(reqBody)
 	}
 	if in.truncated {
 		rec.ResponseBody = string(in.captured) + truncMarker
