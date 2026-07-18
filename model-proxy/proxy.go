@@ -1051,6 +1051,13 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
 	}
+	// Attribute the failed request to the calling agent so 502-only agents are
+	// visible in the Agents view (not just agents whose requests succeed). The
+	// first-tried target's provider/model is the attribution (the request WAS
+	// directed there — it just failed).
+	if p.agents != nil && agent != "" && len(ordered) > 0 {
+		p.agents.incRequests(agent, ordered[0].Provider, ordered[0].Model)
+	}
 	// Live monitor (#6): every target failed → emit an end event so the live view
 	// surfaces the 502 (otherwise a retry-looping agent that always 502s is
 	// invisible — only starts, never ends).
