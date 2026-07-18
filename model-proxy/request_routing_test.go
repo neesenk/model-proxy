@@ -72,7 +72,7 @@ func TestModelFitsRequest(t *testing.T) {
 
 // TestForward_ContextCrossRoute: a big request to a small-context route falls
 // back CROSS-ROUTE to a big-context model in another route, selected by the
-// normal scheduling policy — no context_fallback config.
+// normal scheduling policy (automatic — no config key needed).
 func TestForward_ContextCrossRoute(t *testing.T) {
 	var smallHit, bigHit bool
 	smallUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

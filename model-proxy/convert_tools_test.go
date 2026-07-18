@@ -196,8 +196,10 @@ func TestConvertResponse_NonStream_Tools(t *testing.T) {
 }
 
 // TestStreaming_OpenAIToolCallsToAnthropic: openai tool_calls delta stream →
-// anthropic tool_use content_block_start + input_json_delta + content_block_stop,
-// with the arguments fragments passed through verbatim as partial_json.
+// anthropic tool_use block. Tools are BUFFERED (anthropic content blocks are
+// sequential — can't represent openai's interleaved parallel-tool fragments), so
+// the argument fragments are concatenated and emitted as ONE input_json_delta in
+// a complete tool_use block at the end.
 func TestStreaming_OpenAIToolCallsToAnthropic(t *testing.T) {
 	stream := "data: {\"model\":\"gpt\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"t1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"ci\"}}]}}]}\n\n" +
 		"data: {\"model\":\"gpt\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ty\\\":\\\"SF\\\"}\"}}]}}]}\n\n" +
@@ -209,7 +211,7 @@ func TestStreaming_OpenAIToolCallsToAnthropic(t *testing.T) {
 	for _, want := range []string{
 		"event: message_start",
 		`"type":"tool_use"`, `"name":"get_weather"`, `"id":"t1"`,
-		`"type":"input_json_delta"`, `"partial_json":"{\"ci"`, `"partial_json":"ty\":\"SF\"}"`,
+		`"type":"input_json_delta"`, `"partial_json":"{\"city\":\"SF\"}"`, // fragments concatenated
 		"event: content_block_stop",
 		`"stop_reason":"tool_use"`,
 		`"input_tokens":5`, `"output_tokens":2`, // usage carried
@@ -289,6 +291,64 @@ func TestRoundTrip_AnthropicOpenAIAnthropic(t *testing.T) {
 	in := tu["input"].(map[string]any)
 	if in["a"] != float64(1) || objOf(t, in, "b", "c") != float64(2) {
 		t.Errorf("round-trip tool input not depth-equal: %+v", in)
+	}
+}
+
+// TestStreaming_OpenAIInterleavedParallelTools (#2 regression): interleaved
+// parallel tool fragments (tool 0, tool 1, tool 0 again) must NOT produce an
+// invalid anthropic sequence (input_json_delta for a stopped block). Tools are
+// buffered, so each tool_use block is emitted complete + sequential at the end —
+// both tools appear, each with its full concatenated arguments, in index order.
+func TestStreaming_OpenAIInterleavedParallelTools(t *testing.T) {
+	stream := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"x\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"y\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\":1}\"}},{\"index\":1,\"function\":{\"arguments\":\"\\\":2}\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+	out, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt"))
+	s := string(out)
+	// Both tools present, complete, in index order (fa before fb).
+	if strings.Index(s, `"name":"fa"`) < 0 || strings.Index(s, `"name":"fb"`) < 0 {
+		t.Errorf("missing a tool_use block:\n%s", s)
+	}
+	if strings.Index(s, `"name":"fa"`) > strings.Index(s, `"name":"fb"`) {
+		t.Errorf("tool blocks not in index order (fa should precede fb):\n%s", s)
+	}
+	// Each tool's arguments fully concatenated.
+	if !strings.Contains(s, `"partial_json":"{\"x\":1}"`) || !strings.Contains(s, `"partial_json":"{\"y\":2}"`) {
+		t.Errorf("interleaved args not concatenated per tool:\n%s", s)
+	}
+	// No content_block_stop should appear BEFORE the first content_block_start
+	// (the invalid resume sequence the buffer approach eliminates). Count: starts
+	// >= stops (each block starts before it stops).
+	if strings.Count(s, "content_block_start") < strings.Count(s, "content_block_stop") {
+		t.Errorf("a stop preceded its start (invalid sequence):\n%s", s)
+	}
+}
+
+// TestStreaming_AnthropicEmptyToolArgs (#3 regression): an anthropic tool_use
+// block with NO input_json_delta still yields valid openai arguments ("{}"),
+// not an empty string.
+func TestStreaming_AnthropicEmptyToolArgs(t *testing.T) {
+	stream := "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"f\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	out, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
+	if !strings.Contains(string(out), `"arguments":"{}"`) {
+		t.Errorf("empty-args tool_use did not get a {} arguments fallback:\n%s", string(out))
+	}
+}
+
+// TestStreaming_AnthropicDuplicateMessageDelta (#4 regression): a malformed
+// anthropic stream with two message_delta events emits exactly ONE openai finish
+// chunk (no duplicate).
+func TestStreaming_AnthropicDuplicateMessageDelta(t *testing.T) {
+	stream := "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	out, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
+	if n := strings.Count(string(out), `"finish_reason":"stop"`); n != 1 {
+		t.Errorf("duplicate message_delta produced %d finish chunks, want 1:\n%s", n, string(out))
 	}
 }
 

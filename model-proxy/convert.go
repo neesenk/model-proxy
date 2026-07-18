@@ -821,38 +821,44 @@ func convertResponse(body []byte, clientProto, targetProto string) ([]byte, erro
 const sseScanBuf = 8 * 1024 * 1024 // 8 MiB per line; oversized lines are warned + flushed
 
 // openaiSSEToAnthropicSSE converts an OpenAI chat.completion.chunk stream into an
-// Anthropic message event stream. It maintains a "current block" state machine so
-// text and tool_use blocks open in arrival order with incrementing indices:
-//   - delta.content → text content_block_delta (opens a text block on first use)
-//   - delta.tool_calls[i] (first sighting: id+name) → content_block_start
-//     {tool_use}; subsequent argument fragments → input_json_delta (partial_json
-//     carries the fragment verbatim — anthropic's delta is itself incremental JSON)
-//
-// usage from a trailing chunk (prompt+completion tokens) is carried into the
-// terminal message_delta.usage (both input and output).
+// Anthropic message event stream. Text streams live (content_block_delta as it
+// arrives). Tool calls are BUFFERED per openai index and emitted as complete,
+// sequential tool_use blocks at the end — because Anthropic's content_block model
+// is strictly sequential (one open block at a time, no resuming a stopped block),
+// it CANNOT represent OpenAI's interleaved parallel-tool fragment stream. Buffering
+// avoids emitting input_json_delta for an already-stopped block (an invalid
+// sequence) when tools interleave. usage from a trailing chunk (prompt+completion
+// tokens) is carried into the terminal message_delta.usage.
 type openaiSSEToAnthropicSSE struct {
-	sc      *bufio.Scanner
-	out     []byte
-	model   string
-	id      string
-	started bool
-	closed  bool
-	done    bool
-	errored bool
-	nextIdx int         // next anthropic content_block index
-	curKind string      // "" / "text" / "tool"
-	curIdx  int         // anthropic index of the open block
-	curTool int         // openai tool_call index of the open tool block
-	toolIdx map[int]int // openai tool index → anthropic block index
-	outTok  int         // completion_tokens from trailing usage
-	inTok   int         // prompt_tokens from trailing usage
-	stopRsn string      // finish_reason mapped to stop_reason
+	sc        *bufio.Scanner
+	out       []byte
+	model     string
+	id        string
+	started   bool
+	closed    bool
+	done      bool
+	errored   bool
+	nextIdx   int                   // next anthropic content_block index
+	curKind   string                // "" / "text" (tools are buffered, never "current")
+	curIdx    int                   // anthropic index of the open text block
+	tools     map[int]*streamedTool // openai tool index → buffered call
+	toolOrder []int                 // openai tool indices in first-seen order
+	outTok    int                   // completion_tokens from trailing usage
+	inTok     int                   // prompt_tokens from trailing usage
+	stopRsn   string                // finish_reason mapped to stop_reason
+}
+
+// streamedTool buffers one openai tool_call until the stream ends, so its
+// tool_use block can be emitted as a complete, sequential anthropic block.
+type streamedTool struct {
+	id, name string
+	args     []byte // accumulated arguments fragments (incremental JSON)
 }
 
 func newOpenAIToAnthropicSSE(r io.Reader, model string) *openaiSSEToAnthropicSSE {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &openaiSSEToAnthropicSSE{sc: sc, model: model, id: "msg_conv", toolIdx: map[int]int{}}
+	return &openaiSSEToAnthropicSSE{sc: sc, model: model, id: "msg_conv", tools: map[int]*streamedTool{}}
 }
 
 func (t *openaiSSEToAnthropicSSE) emit(event string, payload map[string]any) {
@@ -901,30 +907,26 @@ func (t *openaiSSEToAnthropicSSE) openText() {
 	})
 }
 
-// openTool opens (or resumes) the tool_use block for openai tool index i, emitting
-// the content_block_start on first sighting with id+name.
-func (t *openaiSSEToAnthropicSSE) openTool(i int, id, name string) {
-	if _, ok := t.toolIdx[i]; ok && t.curKind == "tool" && t.curTool == i {
-		return // already open
+// bufferTool accumulates an openai tool_call fragment (id+name on first sighting,
+// argument fragments appended). The tool_use block is emitted as a complete,
+// sequential block in finish() — never live — so interleaved parallel tools don't
+// produce an invalid resume sequence.
+func (t *openaiSSEToAnthropicSSE) bufferTool(i int, id, name, args string) {
+	tc, seen := t.tools[i]
+	if !seen {
+		tc = &streamedTool{}
+		t.tools[i] = tc
+		t.toolOrder = append(t.toolOrder, i)
 	}
-	if _, seen := t.toolIdx[i]; !seen {
-		t.closeBlock()
-		t.curKind = "tool"
-		t.curTool = i
-		t.curIdx = t.nextIdx
-		t.toolIdx[i] = t.curIdx
-		t.nextIdx++
-		t.emit("content_block_start", map[string]any{
-			"type": "content_block_start", "index": t.curIdx,
-			"content_block": map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}},
-		})
-		return
+	if id != "" {
+		tc.id = id
 	}
-	// resuming a previously-opened tool block: just switch current to it (no new start)
-	t.closeBlock()
-	t.curKind = "tool"
-	t.curTool = i
-	t.curIdx = t.toolIdx[i]
+	if name != "" {
+		tc.name = name
+	}
+	if args != "" {
+		tc.args = append(tc.args, args...)
+	}
 }
 
 func (t *openaiSSEToAnthropicSSE) finish() {
@@ -933,6 +935,29 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 	}
 	t.ensureStart()
 	t.closeBlock()
+	// Emit buffered tool_use blocks sequentially (one complete block each). Empty
+	// arguments → a "{}" input_json_delta so the tool_use has valid JSON input.
+	for _, i := range t.toolOrder {
+		tc := t.tools[i]
+		idx := t.nextIdx
+		t.nextIdx++
+		t.emit("content_block_start", map[string]any{
+			"type": "content_block_start", "index": idx,
+			"content_block": map[string]any{"type": "tool_use", "id": tc.id, "name": tc.name, "input": map[string]any{}},
+		})
+		args := string(tc.args)
+		if args == "" {
+			args = "{}"
+		}
+		t.emit("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": idx,
+			"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
+		})
+		t.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
+	}
+	if len(t.toolOrder) > 0 && t.stopRsn == "" {
+		t.stopRsn = "tool_use"
+	}
 	sr := t.stopRsn
 	if sr == "" {
 		sr = "end_turn"
@@ -1038,13 +1063,7 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 				})
 			}
 			for _, tc := range c.Delta.ToolCalls {
-				t.openTool(tc.Index, tc.ID, tc.Function.Name)
-				if tc.Function.Arguments != "" {
-					t.emit("content_block_delta", map[string]any{
-						"type": "content_block_delta", "index": t.curIdx,
-						"delta": map[string]any{"type": "input_json_delta", "partial_json": tc.Function.Arguments},
-					})
-				}
+				t.bufferTool(tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
 			}
 			if c.FinishReason != "" {
 				t.stopRsn = mapFinishToStopReason(c.FinishReason)
@@ -1071,9 +1090,10 @@ type anthropicSSEToOpenAISSE struct {
 	done         bool
 	finished     bool
 	doneSent     bool
-	curBlock     int         // anthropic block index currently open
-	curType      string      // "text" / "tool_use" / ""
-	toolOfBlk    map[int]int // anthropic block index → openai tool_call index
+	curBlock     int          // anthropic block index currently open
+	curType      string       // "text" / "tool_use" / ""
+	toolCallIdx  map[int]int  // anthropic block index → openai tool_call index
+	toolArgsSeen map[int]bool // anthropic block index → got ≥1 input_json_delta
 	nextTool     int
 	inputTokens  int
 	outputTokens int
@@ -1082,7 +1102,8 @@ type anthropicSSEToOpenAISSE struct {
 func newAnthropicToOpenAISSE(r io.Reader, model string) *anthropicSSEToOpenAISSE {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &anthropicSSEToOpenAISSE{sc: sc, model: model, id: "chatcmpl-conv", toolOfBlk: map[int]int{}}
+	return &anthropicSSEToOpenAISSE{sc: sc, model: model, id: "chatcmpl-conv",
+		toolCallIdx: map[int]int{}, toolArgsSeen: map[int]bool{}}
 }
 
 func (t *anthropicSSEToOpenAISSE) emitChunk(delta map[string]any, finish any, usage map[string]any) {
@@ -1197,7 +1218,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			if ev.ContentBlock.Type == "tool_use" {
 				tcIdx := t.nextTool
 				t.nextTool++
-				t.toolOfBlk[ev.Index] = tcIdx
+				t.toolCallIdx[ev.Index] = tcIdx
 				t.ensureRole()
 				t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
 					"index": tcIdx, "id": ev.ContentBlock.ID, "type": "function",
@@ -1213,7 +1234,8 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				}
 			case "input_json_delta":
 				if ev.Delta.PartialJSON != "" {
-					if tcIdx, ok := t.toolOfBlk[t.curBlock]; ok && t.curType == "tool_use" {
+					if tcIdx, ok := t.toolCallIdx[t.curBlock]; ok && t.curType == "tool_use" {
+						t.toolArgsSeen[t.curBlock] = true
 						t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
 							"index": tcIdx, "function": map[string]any{"arguments": ev.Delta.PartialJSON},
 						}}}, nil, nil)
@@ -1221,18 +1243,30 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				}
 			}
 		case "content_block_stop":
+			// Empty-args fallback: a tool_use block with no input_json_delta still
+			// gets a "{}" arguments fragment (openai requires valid JSON arguments).
+			if t.curType == "tool_use" {
+				if tcIdx, ok := t.toolCallIdx[t.curBlock]; ok && !t.toolArgsSeen[t.curBlock] {
+					t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
+						"index": tcIdx, "function": map[string]any{"arguments": "{}"},
+					}}}, nil, nil)
+				}
+			}
 			t.curType = ""
 		case "message_delta":
 			if ev.Usage.OutputTokens > 0 {
 				t.outputTokens = ev.Usage.OutputTokens
 			}
-			// The finish chunk carries usage (prompt from message_start + completion
-			// from here) so the OpenAI-protocol usage scanner attributes tokens.
-			t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), map[string]any{
-				"prompt_tokens": t.inputTokens, "completion_tokens": t.outputTokens,
-				"total_tokens": t.inputTokens + t.outputTokens,
-			})
-			t.finished = true
+			// The finish chunk carries usage so the OpenAI-protocol usage scanner
+			// attributes tokens. Guard: a malformed stream with >1 message_delta
+			// must not emit >1 finish chunk.
+			if !t.finished {
+				t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), map[string]any{
+					"prompt_tokens": t.inputTokens, "completion_tokens": t.outputTokens,
+					"total_tokens": t.inputTokens + t.outputTokens,
+				})
+				t.finished = true
+			}
 		case "message_stop":
 			t.done = true
 		}
