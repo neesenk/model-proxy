@@ -1404,7 +1404,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 					case p.shadowSem <- struct{}{}:
 						go func() {
 							defer func() { <-p.shadowSem }()
-							p.runShadow(proto, backendProto, calledModel, flc.exposed, sh, reqBytes)
+							p.runShadow(proto, backendProto, calledModel, flc.exposed, sh, reqBytes, flc.requestID)
 						}()
 					default:
 						// shadow concurrency cap reached → skip (best-effort)
@@ -1451,7 +1451,7 @@ func (p *Proxy) shouldShadow() bool {
 // reqBody may already be converted from the client's proto). The shadow backend's
 // own protocol is shadow.Protocol (defaulting to bodyProto); runShadow selects the
 // shadow base URL + path for THAT protocol and converts the body if it differs.
-func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow ShadowTarget, reqBody []byte) {
+func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow ShadowTarget, reqBody []byte, primaryReqID string) {
 	p.mu.RLock()
 	cfg := p.cfg
 	provs := p.providers
@@ -1528,7 +1528,7 @@ func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow 
 	cr := newCaptureReader(resp.Body, logger.maxBody, nil)
 	io.Copy(io.Discard, cr)
 	rec := logger.buildRecord(recordInputs{
-		flc:         forwardLogCtx{requestID: "shadow-" + newRequestID(), attempt: 0, exposed: exposed},
+		flc:         forwardLogCtx{requestID: "shadow-" + primaryReqID, attempt: 0, exposed: exposed},
 		r:           sreq,
 		proto:       proto,
 		calledModel: calledModel,

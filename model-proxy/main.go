@@ -43,6 +43,7 @@ Commands:
   doctor               Offline scheduling diagnostic (config only, no daemon)
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
   replay <id> --to P   Re-answer a logged request with a different backend
+  shadow report       Shadow-evaluation aggregation (primary vs shadow compare)
   help                 Print this message
 
 Options:
@@ -235,6 +236,8 @@ func main() {
 		cmdTest(os.Args[2:])
 	case "replay":
 		cmdReplay(os.Args[2:])
+	case "shadow":
+		cmdShadow(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		fmt.Print(usage)

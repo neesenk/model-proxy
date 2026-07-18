@@ -118,6 +118,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleRequestsList(resp, r)
 	case strings.HasPrefix(path, "/api/requests/") && r.Method == http.MethodGet:
 		w.handleRequestDetail(resp, r)
+	case path == "/api/shadow-report" && r.Method == http.MethodGet:
+		w.handleShadowReport(resp, r)
 	case path == "/api/config" && r.Method == http.MethodGet:
 		w.handleConfigGet(resp, r)
 	case path == "/api/config" && r.Method == http.MethodPost:
@@ -571,6 +573,36 @@ func (w *webServer) handleAgents(resp http.ResponseWriter, r *http.Request) {
 		"bucket":  bucketSecs,
 		"buckets": buckets,
 	})
+}
+
+// handleShadowReport returns the shadow-evaluation aggregation report (primary vs
+// shadow comparison, paired by request_id). Query params: from/to (unix or
+// RFC3339; default last 24h). Nil-safe: no request_log → enabled=false.
+func (w *webServer) handleShadowReport(resp http.ResponseWriter, r *http.Request) {
+	dir := w.p.reqLog.directory()
+	if dir == "" {
+		writeJSON(resp, http.StatusOK, map[string]any{"enabled": false, "entries": []any{}})
+		return
+	}
+	now := time.Now()
+	from := now.Add(-24 * time.Hour).Unix()
+	to := now.Unix()
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			from = t
+		}
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			to = t
+		}
+	}
+	entries, err := shadowReport(dir, recordFilter{From: time.Unix(from, 0), To: time.Unix(to, 0), Limit: 10000})
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, "shadow report: "+err.Error())
+		return
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{"enabled": true, "entries": entries})
 }
 
 // handlePinSet installs a manual route→provider pin (hot-switch). Body:

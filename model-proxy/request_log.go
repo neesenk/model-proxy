@@ -34,6 +34,7 @@ type forwardLogCtx struct {
 // the bodies don't break the one-record-per-line format.
 type requestLogRecord struct {
 	Ts              string `json:"ts"` // RFC3339, UTC
+	Shadow          bool   `json:"shadow,omitempty"`
 	RequestID       string `json:"request_id"`
 	SessionID       string `json:"session_id"`
 	Protocol        string `json:"protocol"`
@@ -481,6 +482,104 @@ func (l *requestLogger) directory() string {
 	return l.dir
 }
 
+// shadowReportEntry is one aggregated row of a shadow-evaluation comparison
+// report: for a given (route, primary provider, shadow provider) pair, how do
+// the primary and shadow compare over the sampled requests?
+type shadowReportEntry struct {
+	Route            string  `json:"route"`
+	PrimaryProvider  string  `json:"primary_provider"`
+	ShadowProvider   string  `json:"shadow_provider"`
+	Samples          int     `json:"samples"`
+	StatusMatchRate  float64 `json:"status_match_rate"`  // fraction where both 2xx or both non-2xx
+	PrimaryLatencyMs int64   `json:"primary_latency_ms"` // average
+	ShadowLatencyMs  int64   `json:"shadow_latency_ms"`  // average
+	LatencyDiffMs    int64   `json:"latency_diff_ms"`    // shadow - primary
+	PrimarySizeAvg   int64   `json:"primary_size_avg"`
+	ShadowSizeAvg    int64   `json:"shadow_size_avg"`
+}
+
+// shadowReport scans request_log, pairs each primary record with its shadow
+// counterpart (shadow-<primary-id>), and aggregates per (route, primary provider,
+// shadow provider): sample count, status-match rate, avg latency difference, avg
+// response-size ratio. Only paired records (both primary + shadow present) count.
+func shadowReport(dir string, f recordFilter) ([]shadowReportEntry, error) {
+	all, err := queryRequestRecords(dir, f)
+	if err != nil {
+		return nil, err
+	}
+	type pair struct{ primary, shadow *requestLogRecord }
+	pairs := map[string]*pair{}
+	for i := range all {
+		r := &all[i]
+		if r.Shadow {
+			pid := strings.TrimPrefix(r.RequestID, "shadow-")
+			p := pairs[pid]
+			if p == nil {
+				p = &pair{}
+				pairs[pid] = p
+			}
+			p.shadow = r
+		} else {
+			p := pairs[r.RequestID]
+			if p == nil {
+				p = &pair{}
+				pairs[r.RequestID] = p
+			}
+			p.primary = r
+		}
+	}
+	type aggKey struct{ route, primary, shadow string }
+	type aggVal struct {
+		count, match, primLat, shadLat, primSize, shadSize int64
+	}
+	aggs := map[aggKey]*aggVal{}
+	for _, p := range pairs {
+		if p.primary == nil || p.shadow == nil {
+			continue
+		}
+		k := aggKey{route: p.primary.Exposed, primary: p.primary.Provider, shadow: p.shadow.Provider}
+		a := aggs[k]
+		if a == nil {
+			a = &aggVal{}
+			aggs[k] = a
+		}
+		a.count++
+		if (p.primary.Status < 300) == (p.shadow.Status < 300) {
+			a.match++
+		}
+		a.primLat += p.primary.LatencyMs
+		a.shadLat += p.shadow.LatencyMs
+		a.primSize += p.primary.ResponseSize
+		a.shadSize += p.shadow.ResponseSize
+	}
+	var out []shadowReportEntry
+	for k, a := range aggs {
+		n := int64(a.count)
+		matchRate := 0.0
+		primAvg, shadAvg, primSizeAvg, shadSizeAvg := int64(0), int64(0), int64(0), int64(0)
+		if n > 0 {
+			matchRate = float64(a.match) / float64(n)
+			primAvg = a.primLat / n
+			shadAvg = a.shadLat / n
+			primSizeAvg = a.primSize / n
+			shadSizeAvg = a.shadSize / n
+		}
+		out = append(out, shadowReportEntry{
+			Route: k.route, PrimaryProvider: k.primary, ShadowProvider: k.shadow,
+			Samples: int(a.count), StatusMatchRate: matchRate,
+			PrimaryLatencyMs: primAvg, ShadowLatencyMs: shadAvg, LatencyDiffMs: shadAvg - primAvg,
+			PrimarySizeAvg: primSizeAvg, ShadowSizeAvg: shadSizeAvg,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Samples != out[j].Samples {
+			return out[i].Samples > out[j].Samples
+		}
+		return out[i].Route < out[j].Route
+	})
+	return out, nil
+}
+
 // shutdown signals loop to drain + close, then waits for it to finish.
 func (l *requestLogger) shutdown() {
 	if l == nil {
@@ -587,6 +686,7 @@ func (l *requestLogger) buildRecord(in recordInputs) *requestLogRecord {
 		Exposed:       in.flc.exposed,
 		Provider:      in.t.Provider,
 		Attempt:       in.flc.attempt,
+		Shadow:        strings.HasPrefix(in.flc.requestID, "shadow-"),
 		Status:        in.resp.StatusCode,
 		LatencyMs:     time.Since(in.start).Milliseconds(),
 		ResponseSize:  in.total,
