@@ -42,6 +42,16 @@ function fmtNum(n) {
   return Number(n).toLocaleString('en-US');
 }
 
+// avgLatencyMs derives the per-request average latency (ms) from the cumulative
+// counters a provider carries: latency_ms_sum / requests (0 when no requests).
+// Rounded — latencies are observability, not billing.
+function avgLatencyMs(c) {
+  if (!c) return 0;
+  const req = Number(c.requests || 0);
+  if (!req) return 0;
+  return Math.round(Number(c.latency_ms_sum || 0) / req);
+}
+
 // fmtTime renders an RFC3339 string as a local HH:MM:SS.
 function fmtTime(s) {
   if (!s) return '—';
@@ -168,6 +178,8 @@ const panels = {
   config: document.getElementById('tab-config'),
   accounts: document.getElementById('tab-accounts'),
   analytics: document.getElementById('tab-analytics'),
+  requests: document.getElementById('tab-requests'),
+  live: document.getElementById('tab-live'),
 };
 let activeTab = 'status';
 
@@ -188,7 +200,7 @@ let activeTab = 'status';
 function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [tab, ...rest] = raw.split('/');
-  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics') {
+  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'live') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
@@ -241,6 +253,9 @@ function activateTab(name) {
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
   if (name === 'analytics') renderAnalyticsTab();
+  if (name === 'requests') renderRequestsTab();
+  if (name === 'live') renderLiveTab();
+  else stopLiveEvents();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
   // to Back out of, so push a history entry. Accounts adds its provider segment
   // in selectProvider (replaceState - same tab, finer-grained). Status includes
@@ -287,6 +302,194 @@ function activateTabSilent(name) {
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
   if (name === 'analytics') renderAnalyticsTab();
+  if (name === 'requests') renderRequestsTab();
+  if (name === 'live') renderLiveTab();
+  else stopLiveEvents();
+}
+
+// ---------- Requests tab (request-log query UI) ----------
+
+// Per-tab filter state (model/provider substring + errors-only). Persists across
+// re-renders within a session so a refresh keeps the view.
+let requestsFilter = { model: '', provider: '', errors: false };
+
+// renderRequestsTab builds the request-log query view: a filter row + a table of
+// metadata-only summaries fetched from /api/requests, with click-to-expand rows
+// that load the full request/response bodies from /api/requests/<id>. On-demand
+// (no 5s poll) — fetch happens on tab entry and on Refresh.
+async function renderRequestsTab() {
+  const panel = panels.requests;
+  if (!panel) return;
+  panel.innerHTML = `<div class="card"><div class="card-body">
+    <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+      <input id="req-model" placeholder="model filter" value="${esc(requestsFilter.model)}" class="req-input"/>
+      <input id="req-provider" placeholder="provider filter" value="${esc(requestsFilter.provider)}" class="req-input"/>
+      <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> errors only</label>
+      <button id="req-refresh" class="btn">Refresh</button>
+    </div>
+    <div id="req-table"></div>
+    <div id="req-detail" style="margin-top:12px;"></div>
+  </div></div>`;
+  const refresh = () => {
+    requestsFilter.model = document.getElementById('req-model').value.trim();
+    requestsFilter.provider = document.getElementById('req-provider').value.trim();
+    requestsFilter.errors = document.getElementById('req-errors').checked;
+    loadRequests();
+  };
+  document.getElementById('req-refresh').onclick = refresh;
+  for (const id of ['req-model', 'req-provider']) {
+    document.getElementById(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') refresh(); });
+  }
+  loadRequests();
+}
+
+async function loadRequests() {
+  const tbl = document.getElementById('req-table');
+  const detail = document.getElementById('req-detail');
+  if (detail) detail.innerHTML = '';
+  if (tbl) tbl.innerHTML = '<span class="hint">loading…</span>';
+  const q = new URLSearchParams();
+  if (requestsFilter.model) q.set('model', requestsFilter.model);
+  if (requestsFilter.provider) q.set('provider', requestsFilter.provider);
+  if (requestsFilter.errors) q.set('errors', '1');
+  q.set('limit', '200');
+  let resp;
+  try {
+    resp = await apiGet('/api/requests?' + q.toString());
+  } catch (e) {
+    if (tbl) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    return;
+  }
+  if (!resp.enabled) {
+    if (tbl) tbl.innerHTML = '<div class="msg hint">Request logging is off. Enable <code>request_log.enabled</code> in config to capture request/response bodies for replay and debugging.</div>';
+    return;
+  }
+  const recs = resp.records || [];
+  if (!recs.length) {
+    if (tbl) tbl.innerHTML = '<div class="msg hint">No matching requests.</div>';
+    return;
+  }
+  let rows = '';
+  for (const r of recs) {
+    rows += `<tr class="req-row" data-id="${esc(r.request_id)}" style="cursor:pointer;">
+      <td class="mono">${esc(fmtTime(r.ts))}</td>
+      <td class="num ${r.status >= 400 ? 'err' : ''}">${r.status}</td>
+      <td>${esc(r.exposed || r.called_model)}</td>
+      <td class="mono">${esc(r.provider)}</td>
+      <td class="num">${fmtNum(r.latency_ms)}</td>
+      <td class="num">${fmtNum(r.request_size)}</td>
+      <td class="num">${fmtNum(r.response_size)}</td>
+    </tr>`;
+  }
+  if (tbl) tbl.innerHTML = `<table class="table">
+    <thead><tr><th>time</th><th>status</th><th>model</th><th>provider</th>
+    <th class="num">ms</th><th class="num">req bytes</th><th class="num">resp bytes</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  document.querySelectorAll('.req-row').forEach((tr) => {
+    tr.onclick = () => loadRequestDetail(tr.dataset.id);
+  });
+}
+
+async function loadRequestDetail(id) {
+  const detail = document.getElementById('req-detail');
+  if (!detail) return;
+  detail.innerHTML = '<span class="hint">loading…</span>';
+  let resp;
+  try {
+    resp = await apiGet('/api/requests/' + encodeURIComponent(id));
+  } catch (e) {
+    detail.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    return;
+  }
+  const recs = resp.records || [];
+  if (!recs.length) {
+    detail.innerHTML = '<div class="msg hint">no record</div>';
+    return;
+  }
+  let html = '';
+  for (const r of recs) {
+    html += `<div class="req-rec" style="border-top:1px solid var(--border,#333);padding-top:8px;margin-top:8px;">
+      <div class="hint">${esc(r.ts)} · ${esc(r.method)} ${esc(r.path)} · attempt ${r.attempt} · ${r.status} · ${r.latency_ms}ms · ${esc(r.provider)}/${esc(r.upstream_model)}</div>
+      <details><summary>request body (${fmtNum(r.request_size)} bytes)</summary><pre class="log-pre">${esc(r.request_body)}</pre></details>
+      <details><summary>response body (${fmtNum(r.response_size)} bytes)</summary><pre class="log-pre">${esc(r.response_body)}</pre></details>
+    </div>`;
+  }
+  detail.innerHTML = html;
+}
+
+// ---------- Live tab (real-time request monitor via SSE) ----------
+
+let liveES = null;       // the EventSource for /api/events (null when not connected)
+const liveRows = [];     // newest-first ring of rendered events (capped)
+
+// renderLiveTab opens an SSE connection to /api/events and prepends each event
+// as a row (newest on top). The connection is closed on leaving the tab
+// (stopLiveEvents). A start event (in-flight) is dimmed; an end event shows the
+// chosen provider, status, latency, and best-effort tokens.
+function renderLiveTab() {
+  const panel = panels.live;
+  if (!panel) return;
+  stopLiveEvents();
+  liveRows.length = 0;
+  panel.innerHTML = `<div class="card"><div class="card-body">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <span class="card-title">Live requests</span>
+      <span id="live-status" class="hint">connecting…</span>
+    </div>
+    <div id="live-table"></div>
+  </div></div>`;
+  try {
+    liveES = new EventSource('/api/events');
+  } catch (e) {
+    document.getElementById('live-status').textContent = 'SSE unsupported';
+    return;
+  }
+  liveES.onopen = () => {
+    const s = document.getElementById('live-status');
+    if (s) s.textContent = 'live';
+  };
+  liveES.onerror = () => {
+    const s = document.getElementById('live-status');
+    if (s) s.textContent = 'reconnecting…';
+  };
+  liveES.onmessage = (m) => {
+    let e;
+    try { e = JSON.parse(m.data); } catch (_) { return; }
+    addLiveRow(e);
+  };
+}
+
+function stopLiveEvents() {
+  if (liveES) {
+    liveES.close();
+    liveES = null;
+  }
+}
+
+function addLiveRow(e) {
+  liveRows.unshift(e);
+  if (liveRows.length > 100) liveRows.length = 100;
+  const tbl = document.getElementById('live-table');
+  if (!tbl) return;
+  tbl.innerHTML = `<table class="table"><thead><tr>
+    <th>time</th><th>agent</th><th>model</th><th>provider</th>
+    <th>status</th><th class="num">latency</th><th class="num">tokens</th></tr></thead>
+    <tbody>${liveRows.map((r) => {
+      const sc = r.status >= 400 ? 'err' : (r.type === 'start' ? 'subdue' : '');
+      const p = r.type === 'start' ? '…' : (r.provider || '—');
+      const st = r.type === 'start' ? '···' : (r.status || '');
+      const lt = r.type === 'start' ? '' : (r.latency_ms != null ? r.latency_ms + 'ms' : '');
+      const tk = (r.type === 'end' && (r.input || r.output)) ? `${fmtNum(r.input)}→${fmtNum(r.output)}` : '';
+      return `<tr>
+        <td class="mono">${esc(fmtTime(new Date(r.ts).toISOString()))}</td>
+        <td class="mono">${esc(r.agent || '—')}</td>
+        <td>${esc(r.exposed || '—')}</td>
+        <td class="mono">${esc(p)}</td>
+        <td class="num ${sc}">${st}</td>
+        <td class="num">${lt}</td>
+        <td class="num">${tk}</td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
 }
 
 // ---------- inline message helpers ----------
@@ -327,9 +530,10 @@ const STATUS_SECTIONS = [
   { key: 'schedule', label: 'Schedule' },
   { key: 'providers', label: 'Providers' },
   { key: 'tokens', label: 'Token Usage' },
+  { key: 'agents', label: 'Agents' },
   { key: 'logs', label: 'Logs' },
 ];
-let statusCache = { st: null, tok: [], logs: [], accounts: [] };
+let statusCache = { st: null, tok: [], logs: [], accounts: [], agents: [] };
 let statusSelected = 'schedule';
 
 function stopStatusRefresh() {
@@ -361,14 +565,15 @@ async function renderStatusTab() {
   if (statusInflight) return;
   statusInflight = true;
   try {
-    const [st, tok, logs, acc] = await Promise.all([
+    const [st, tok, logs, acc, agents] = await Promise.all([
       apiGet('/api/status'),
       apiGet('/api/tokens').catch(() => ({ usage: [] })),
       apiGet('/api/logs?tail=200').catch(() => ({ lines: [] })),
       apiGet('/api/accounts').catch(() => ({ providers: [] })),
+      apiGet('/api/agents').catch(() => ({ buckets: [] })),
     ]);
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '—'} · ${st.listen || ''}`);
-    statusCache = { st, tok: tok.usage || [], logs: logs.lines || [], accounts: acc.providers || [] };
+    statusCache = { st, tok: tok.usage || [], logs: logs.lines || [], accounts: acc.providers || [], agents: agents.buckets || [] };
     renderStatusPanel();
   } catch (e) {
     setConn('err', 'connection lost');
@@ -467,6 +672,10 @@ function renderStatusSection(key) {
     case 'tokens':
       main.innerHTML = '';
       renderTokensCard(main, statusCache.tok || []);
+      break;
+    case 'agents':
+      main.innerHTML = '';
+      renderAgentsCard(main, statusCache.agents || []);
       break;
     case 'logs':
       // Don't clear here — renderLogsInto captures the existing scroll position
@@ -606,6 +815,7 @@ function renderProvidersCard(target, st) {
       <td class="num">${fmtNum(c.failovers)}</td>
       <td class="num">${fmtNum(c.rate_limited_429)}</td>
       <td class="num">${fmtNum(c.failures)}</td>
+      <td class="num">${fmtNum(avgLatencyMs(c))}</td>
       <td class="num subdue">${esc(fmtUnix(c.last_request_at))}</td>
     </tr>`;
     // Per-account expanded list: one sub-row spanning all columns, showing each
@@ -628,9 +838,9 @@ function renderProvidersCard(target, st) {
           ${accountRemainingPill(quota[key])}
         </div>`;
       }).join('');
-      rows += `<tr class="prov-accounts-row"><td colspan="7"><div class="prov-accounts">${items}</div></td></tr>`;
+      rows += `<tr class="prov-accounts-row"><td colspan="8"><div class="prov-accounts">${items}</div></td></tr>`;
     } else {
-      rows += `<tr class="prov-accounts-row"><td colspan="7"><div class="prov-accounts"><div class="prov-account"><span class="prov-acct-label muted">no accounts</span></div></div></td></tr>`;
+      rows += `<tr class="prov-accounts-row"><td colspan="8"><div class="prov-accounts"><div class="prov-account"><span class="prov-acct-label muted">no accounts</span></div></div></td></tr>`;
     }
   }
   const html = buildCard('Providers', `${names.length} configured`, `
@@ -639,7 +849,7 @@ function renderProvidersCard(target, st) {
           <th>provider</th><th>health</th>
           <th class="num">reqs</th><th class="num">failovers</th>
           <th class="num">429</th><th class="num">failures</th>
-          <th class="num">last</th>
+          <th class="num">lat</th><th class="num">last</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`, 'flush');
@@ -738,6 +948,50 @@ function renderTokensCard(target, usage) {
   target.insertAdjacentHTML('beforeend', html);
   const btn = document.getElementById('btn-tokens-reset');
   if (btn) btn.addEventListener('click', resetTokens);
+}
+
+// renderAgentsCard draws the per-agent breakdown ("who is burning my quota"):
+// collapses /api/agents buckets by agent (summing requests + tokens over the
+// range), sorted by total tokens desc. The range mirrors the API default (last
+// 60 minutes); the meta line shows the active window.
+function renderAgentsCard(target, buckets) {
+  const per = {};
+  for (const b of (buckets || [])) {
+    const a = b.agent || 'unknown';
+    const cur = per[a] || { requests: 0, input: 0, output: 0 };
+    cur.requests += Number(b.requests || 0);
+    cur.input += Number(b.input || 0);
+    cur.output += Number(b.output || 0);
+    per[a] = cur;
+  }
+  const agents = Object.keys(per).sort((x, y) => {
+    const tx = per[x].input + per[x].output, ty = per[y].input + per[y].output;
+    return tx !== ty ? ty - tx : x.localeCompare(y);
+  });
+  if (!agents.length) {
+    target.insertAdjacentHTML('beforeend', buildCard('Agents', 'last 60 min',
+      `<div class="msg hint">No agent activity in the last 60 minutes. Agents are detected from the client User-Agent (claude-cli, codex, opencode, pi).</div>`));
+    return;
+  }
+  let rows = '';
+  for (const a of agents) {
+    const t = per[a];
+    rows += `<tr>
+      <td class="mono">${esc(a)}</td>
+      <td class="num">${fmtNum(t.requests)}</td>
+      <td class="num">${fmtNum(t.input)}</td>
+      <td class="num">${fmtNum(t.output)}</td>
+    </tr>`;
+  }
+  const html = buildCard('Agents', `${agents.length} active · last 60 min`, `
+      <table class="table">
+        <thead><tr>
+          <th>agent</th><th class="num">requests</th>
+          <th class="num">input</th><th class="num">output</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`, 'flush');
+  target.insertAdjacentHTML('beforeend', html);
 }
 
 async function resetTokens() {
@@ -1421,6 +1675,36 @@ async function refreshAccountUsage(btn, p) {
   }
 }
 
+// testAccount sends ONE real end-to-end probe through this account's credential
+// (POST /api/accounts/<provider>/<id>/test — the same probe `models refresh`
+// uses) and reports the result inline in #acc-msg. Read-only server-side (no
+// reload, no state change), so the pane is NOT re-rendered and the button is
+// simply restored when the call settles. The id is the same one the Remove
+// button passes (pool id; AccountID for aqp/codex).
+async function testAccount(btn, p) {
+  const id = btn.dataset.test;
+  if (!id) return;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'testing…';
+  const msg = document.getElementById('acc-msg');
+  try {
+    const r = await apiPost(`/api/accounts/${encodeURIComponent(p.name)}/${encodeURIComponent(id)}/test`);
+    if (r.status === 'ok') {
+      showMsg(msg, 'ok', `${p.name} — HTTP ${r.http_status} in ${r.latency_ms}ms (${r.model})`);
+    } else {
+      // http_status 0 = build/auth/network error (no upstream answer).
+      const head = r.http_status ? `HTTP ${r.http_status}: ` : '';
+      showMsg(msg, 'err', `${p.name} — ${head}${r.reason || 'probe failed'} (${r.model})`);
+    }
+  } catch (e) {
+    showMsg(msg, 'err', `${p.name} — test failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
 // renderAccountsNav builds the left sidebar (sorted providers + account-count
 // badges) and wires selection. If the previously selected provider is gone
 // (e.g. removed), falls back to the first.
@@ -1501,6 +1785,11 @@ function selectProviderSilent(name) {
   main.querySelectorAll('[data-refresh]').forEach((b) => {
     b.addEventListener('click', () => refreshAccountUsage(b, p));
   });
+  // Per-account "Test" - one real end-to-end probe through this account's
+  // credential; result reported inline (no re-render).
+  main.querySelectorAll('[data-test]').forEach((b) => {
+    b.addEventListener('click', () => testAccount(b, p));
+  });
   // Re-login buttons appear on session-expired / not-logged-in aqp/codex
   // accounts - they reuse the same async login flow as Add account (aqp is
   // single-credential, so re-login overwrites the stale SSO cookie in place).
@@ -1563,6 +1852,8 @@ function accountCard(p, a, quota, tokens) {
         ${mail}
       </div>
       <div class="row-actions">
+        <button class="btn small" data-test="${esc(a.id)}"
+                title="Send a real end-to-end probe request through this account">Test</button>
         ${refreshBtn}
         <button class="btn danger small" data-remove="${esc(a.id)}"
                 data-provider="${esc(p.name)}" data-label="${esc(label)}">Remove</button>

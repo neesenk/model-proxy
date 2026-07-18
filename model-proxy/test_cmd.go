@@ -1,0 +1,98 @@
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+	"sort"
+	"time"
+)
+
+// test_cmd.go implements `model-proxy test <model>` — an end-to-end link test:
+// resolve the model's route targets (explicit routes, then the implicit-route
+// fallback) and probe EACH once with probeModelCallable, the same minimal real
+// upstream call `models refresh` uses (per-provider base/path/auth wiring).
+// Exit status is 0 when at least one target answers 2xx, 1 when every target
+// fails (or the model has no route at all).
+
+func cmdTest(args []string) {
+	cfg, err := LoadConfig(configPath(args))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err)
+		os.Exit(1)
+	}
+	model := positional(args)
+	if model == "" {
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy test <model> [--config PATH]\n", cRed("✗"))
+		os.Exit(1)
+	}
+	// claude_mapping translates a claude alias to the exposed model name first,
+	// mirroring forward's routing order.
+	if mapped, ok := cfg.ClaudeMapping[model]; ok {
+		fmt.Printf("%s %s → %s\n", cDim("claude_mapping:"), model, mapped)
+		model = mapped
+	}
+	targets := testTargetsFor(cfg, model)
+	if len(targets) == 0 {
+		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", cRed("✗"), model, routeNames(cfg))
+		os.Exit(1)
+	}
+	client := &http.Client{Timeout: cfg.Scheduling.timeout()}
+	anyOK := false
+	for _, t := range targets {
+		ok, status, reason, latency := probeRouteTarget(client, cfg, t)
+		lat := latency.Round(time.Millisecond)
+		if ok {
+			anyOK = true
+			fmt.Printf("%s %s → %s (%s) — HTTP %d (%s)\n", cGreen("✓"), model, t.Provider, t.Model, status, lat)
+			continue
+		}
+		// status 0 = build/auth/network error (no upstream answer) — print the
+		// reason without a bogus "HTTP 0".
+		if status != 0 {
+			fmt.Printf("%s %s → %s (%s) — HTTP %d: %s (%s)\n", cRed("✗"), model, t.Provider, t.Model, status, truncate(reason, 120), lat)
+		} else {
+			fmt.Printf("%s %s → %s (%s) — %s (%s)\n", cRed("✗"), model, t.Provider, t.Model, truncate(reason, 120), lat)
+		}
+	}
+	if !anyOK {
+		os.Exit(1)
+	}
+}
+
+// testTargetsFor resolves the probe target list for an exposed model: explicit
+// routes sorted by priority asc (lower = tried first); when the model has no
+// explicit route, the implicit-route fallback (auto-derived from logged-in
+// providers' model lists, same as forward). Nil when no route covers the model.
+func testTargetsFor(cfg *Config, model string) []RouteTarget {
+	targets, ok := cfg.Routes[model]
+	if !ok {
+		implicit, _ := synthesizeImplicitRoutes(cfg)
+		t, found := implicit[model]
+		if !found {
+			return nil
+		}
+		targets = []RouteTarget{t}
+	}
+	out := append([]RouteTarget(nil), targets...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
+	return out
+}
+
+// probeRouteTarget probes one route target once and reports
+// (ok, httpStatus, reason, latency). The implementation comes from
+// providerImplFor — the first pooled virtual for a pooled provider, mirroring
+// the forward path's credential binding.
+func probeRouteTarget(client *http.Client, cfg *Config, t RouteTarget) (ok bool, status int, reason string, latency time.Duration) {
+	provCfg, ok := cfg.Providers[t.Provider]
+	if !ok {
+		return false, 0, "provider not in config", 0
+	}
+	impl, err := providerImplFor(cfg, t.Provider)
+	if err != nil {
+		return false, 0, err.Error(), 0
+	}
+	start := time.Now()
+	ok, status, reason = probeModelCallable(client, provCfg, impl, t.Model)
+	return ok, status, reason, time.Since(start)
+}

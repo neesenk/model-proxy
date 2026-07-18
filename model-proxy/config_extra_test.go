@@ -13,7 +13,7 @@ import (
 // expandPath / PeakConfig edges not exercised by config_test.go.
 
 func TestValidate_NoProviders(t *testing.T) {
-	err := (&Config{Listen: ":1"}).validate()
+	err := (&Config{Listen: "127.0.0.1:1"}).validate()
 	if err == nil || !strings.Contains(err.Error(), "no providers") {
 		t.Errorf("no-providers: err=%v", err)
 	}
@@ -21,7 +21,7 @@ func TestValidate_NoProviders(t *testing.T) {
 
 func TestValidate_UsageURLInvalid(t *testing.T) {
 	err := (&Config{
-		Listen: ":1",
+		Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{
 			"x": {OpenAIBaseURL: "https://x", Provider: "zhipu", UsageURL: "not-a-url"},
 		},
@@ -33,7 +33,7 @@ func TestValidate_UsageURLInvalid(t *testing.T) {
 
 func TestValidate_PeakHoursMalformed(t *testing.T) {
 	err := (&Config{
-		Listen: ":1",
+		Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{
 			"x": {OpenAIBaseURL: "https://x", Provider: "zhipu", PeakHours: PeakConfig{{Window: "not-a-range"}}},
 		},
@@ -45,7 +45,7 @@ func TestValidate_PeakHoursMalformed(t *testing.T) {
 
 func TestValidate_PeakHoursZeroWidth(t *testing.T) {
 	err := (&Config{
-		Listen: ":1",
+		Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{
 			"x": {OpenAIBaseURL: "https://x", Provider: "zhipu", PeakHours: PeakConfig{{Window: "09:00-09:00"}}},
 		},
@@ -57,7 +57,7 @@ func TestValidate_PeakHoursZeroWidth(t *testing.T) {
 
 func TestValidate_PeakHoursNegativeMultiplier(t *testing.T) {
 	err := (&Config{
-		Listen: ":1",
+		Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{
 			"x": {OpenAIBaseURL: "https://x", Provider: "zhipu", PeakHours: PeakConfig{{Window: "09:00-18:00", Multiplier: -1}}},
 		},
@@ -69,7 +69,7 @@ func TestValidate_PeakHoursNegativeMultiplier(t *testing.T) {
 
 func TestValidate_BillingInvalid(t *testing.T) {
 	err := (&Config{
-		Listen: ":1",
+		Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{
 			"x": {OpenAIBaseURL: "https://x", Provider: "zhipu", Billing: "free"},
 		},
@@ -81,7 +81,7 @@ func TestValidate_BillingInvalid(t *testing.T) {
 
 func TestValidate_RouteNoTargets(t *testing.T) {
 	err := (&Config{
-		Listen:    ":1",
+		Listen:    "127.0.0.1:1",
 		Providers: map[string]Provider{"x": {OpenAIBaseURL: "https://x", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"m": {}},
 	}).validate()
@@ -92,7 +92,7 @@ func TestValidate_RouteNoTargets(t *testing.T) {
 
 func TestValidate_RouteTargetEmptyProvider(t *testing.T) {
 	err := (&Config{
-		Listen:    ":1",
+		Listen:    "127.0.0.1:1",
 		Providers: map[string]Provider{"x": {OpenAIBaseURL: "https://x", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "", Model: "m"}}},
 	}).validate()
@@ -103,7 +103,7 @@ func TestValidate_RouteTargetEmptyProvider(t *testing.T) {
 
 func TestValidate_RouteTargetEmptyModel(t *testing.T) {
 	err := (&Config{
-		Listen:    ":1",
+		Listen:    "127.0.0.1:1",
 		Providers: map[string]Provider{"x": {OpenAIBaseURL: "https://x", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "x", Model: ""}}},
 	}).validate()
@@ -114,7 +114,7 @@ func TestValidate_RouteTargetEmptyModel(t *testing.T) {
 
 func TestValidate_ClaudeMappingEmptyTarget(t *testing.T) {
 	err := (&Config{
-		Listen:        ":1",
+		Listen:        "127.0.0.1:1",
 		Providers:     map[string]Provider{"x": {OpenAIBaseURL: "https://x", Provider: "zhipu"}},
 		Routes:        map[string][]RouteTarget{"m": {{Provider: "x", Model: "m"}}},
 		ClaudeMapping: map[string]string{"claude-x": ""},
@@ -127,7 +127,7 @@ func TestValidate_ClaudeMappingEmptyTarget(t *testing.T) {
 func TestValidate_ValidConfig(t *testing.T) {
 	// A minimal valid config returns nil.
 	err := (&Config{
-		Listen:    ":1",
+		Listen:    "127.0.0.1:1",
 		Providers: map[string]Provider{"x": {OpenAIBaseURL: "https://x", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "x", Model: "m", Priority: 1}}},
 	}).validate()

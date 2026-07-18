@@ -138,36 +138,36 @@ func TestConfig_ValidateErrors(t *testing.T) {
 			wantSub: "listen is empty",
 		},
 		{
-			name: "empty openai_base_url",
-			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+			name: "no base url at all",
+			cfg: &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
 				"x": {Provider: "zhipu"},
 			}},
-			wantSub: "openai_base_url is empty",
+			wantSub: "at least one of openai_base_url / anthropic_base_url",
 		},
 		{
 			name: "empty provider_id",
-			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+			cfg: &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
 				"x": {OpenAIBaseURL: "https://x", Provider: ""},
 			}},
 			wantSub: "provider_id is empty",
 		},
 		{
 			name: "unknown provider_id",
-			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+			cfg: &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
 				"x": {OpenAIBaseURL: "https://x", Provider: "unknown-typo"},
 			}},
 			wantSub: "unknown provider_id",
 		},
 		{
 			name: "anthropic_base_url ends with /v1",
-			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+			cfg: &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
 				"x": {OpenAIBaseURL: "https://x/v3", AnthropicBaseURL: "https://x/anthropic/v1", Provider: "zhipu"},
 			}},
 			wantSub: "anthropic_base_url ends with /v1",
 		},
 		{
 			name: "route references unknown provider",
-			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+			cfg: &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
 				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
 			}, Routes: map[string][]RouteTarget{
 				"m": {{Provider: "nonexistent", Model: "m", Priority: 1}},
@@ -176,7 +176,7 @@ func TestConfig_ValidateErrors(t *testing.T) {
 		},
 		{
 			name: "claude_mapping bad target",
-			cfg: &Config{Listen: ":1", Providers: map[string]Provider{
+			cfg: &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
 				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
 			}, Routes: map[string][]RouteTarget{
 				"m": {{Provider: "a", Model: "m", Priority: 1}},
@@ -205,7 +205,7 @@ func TestConfig_ValidateErrors(t *testing.T) {
 // priority targets by surplus (tier -> priority -> surplus), so duplicates are
 // a feature (a surplus-competed pool), not a config error.
 func TestConfig_ValidateAcceptsDuplicatePriorities(t *testing.T) {
-	cfg := &Config{Listen: ":1", Providers: map[string]Provider{
+	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
 		"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
 		"b": {OpenAIBaseURL: "https://y", Provider: "zhipu"},
 	}, Routes: map[string][]RouteTarget{
@@ -216,6 +216,32 @@ func TestConfig_ValidateAcceptsDuplicatePriorities(t *testing.T) {
 	}}
 	if err := cfg.validate(); err != nil {
 		t.Errorf("duplicate priority should be accepted (surplus-competed pool), got error: %v", err)
+	}
+}
+
+// TestConfig_ValidateListenLoopback enforces the loopback-only listen rule:
+// /api/* and /ui/ are unauthenticated, so binding to anything but loopback
+// (including the empty host form ":PORT", which binds all interfaces) is a
+// hard config error.
+func TestConfig_ValidateListenLoopback(t *testing.T) {
+	base := func(listen string) *Config {
+		return &Config{Listen: listen, Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
+		}}
+	}
+	for _, listen := range []string{"0.0.0.0:15721", ":15721", "[::]:15721", "192.168.1.10:15721", "example.com:15721"} {
+		err := base(listen).validate()
+		if err == nil || !strings.Contains(err.Error(), "not loopback") {
+			t.Errorf("listen %q: want 'not loopback' error, got %v", listen, err)
+		}
+	}
+	if err := base("127.0.0.1").validate(); err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Errorf("listen without port: want 'invalid' error, got %v", err)
+	}
+	for _, listen := range []string{"127.0.0.1:15721", "127.0.0.2:15721", "[::1]:15721", "localhost:15721"} {
+		if err := base(listen).validate(); err != nil {
+			t.Errorf("listen %q: loopback should be accepted, got %v", listen, err)
+		}
 	}
 }
 
@@ -335,6 +361,75 @@ func TestPricingConfigDefaults(t *testing.T) {
 	}
 	if cfg.Prices != nil && len(cfg.Prices) != 0 {
 		t.Errorf("prices should default empty, got %v", cfg.Prices)
+	}
+}
+
+// TestLoadCacheAndShadow guards F1: cache: and shadow: must load from yaml. The
+// rawConfig decode previously omitted them, so production configs got zero values
+// (silent no-op) while tests building Config directly stayed green.
+func TestLoadCacheAndShadow(t *testing.T) {
+	cfg, err := LoadConfigFromBytes("x", []byte(`
+listen: 127.0.0.1:1
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://example.com/api/v1}
+routes:
+  glm: [{provider: zhipu, model: glm-4}]
+cache:
+  enabled: true
+  ttl: 5m
+  max_entries: 50
+shadow:
+  glm:
+    provider: zhipu
+    model: glm-4-shadow
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Cache.Enabled {
+		t.Error("cache.enabled did not load from yaml")
+	}
+	if cfg.Cache.TTL != "5m" || cfg.Cache.MaxEntries != 50 {
+		t.Errorf("cache fields = %+v want ttl=5m max_entries=50", cfg.Cache)
+	}
+	if len(cfg.Shadow) != 1 || cfg.Shadow["glm"].Provider != "zhipu" || cfg.Shadow["glm"].Model != "glm-4-shadow" {
+		t.Errorf("shadow did not load: %+v", cfg.Shadow)
+	}
+}
+
+// TestValidate_ConversionBaseURL: a target declaring a backend protocol needs the
+// provider's matching base URL, else validate fails (the converted request would
+// have no upstream URL and 400 at runtime). protocol:anthropic → needs
+// anthropic_base_url; protocol:openai → needs openai_base_url; unknown protocol
+// → error; valid → OK.
+func TestValidate_ConversionBaseURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		prov    Provider
+		proto   string
+		wantSub string // empty = expect no error
+	}{
+		{"anthropic without anthropic_base_url", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "anthropic", "anthropic_base_url"},
+		{"openai without openai_base_url", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "openai", "openai_base_url"},
+		{"unknown protocol", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "weird", `not "anthropic" or "openai"`},
+		{"anthropic with anthropic_base_url (valid)", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "anthropic", ""},
+		{"openai with openai_base_url (valid)", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "openai", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := (&Config{
+				Listen:    "127.0.0.1:1",
+				Providers: map[string]Provider{"z": c.prov},
+				Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm", Protocol: c.proto}}},
+			}).validate()
+			if c.wantSub == "" {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), c.wantSub) {
+				t.Errorf("err=%v, want substring %q", err, c.wantSub)
+			}
+		})
 	}
 }
 

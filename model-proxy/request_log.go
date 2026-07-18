@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -251,7 +252,7 @@ func (l *requestLogger) loop() {
 	sweepTick := time.NewTicker(sweepInterval)
 	defer sweepTick.Stop()
 	// Sweep once at startup so a long-stopped daemon reclaims old files promptly.
-	l.sweep(time.Now())
+	l.sweep(time.Now(), w.curPath)
 	for {
 		select {
 		case r := <-l.ch:
@@ -261,7 +262,7 @@ func (l *requestLogger) loop() {
 				}
 			}
 		case <-sweepTick.C:
-			l.sweep(time.Now())
+			l.sweep(time.Now(), w.curPath)
 		case <-l.done:
 		drain:
 			for {
@@ -277,17 +278,19 @@ func (l *requestLogger) loop() {
 				}
 			}
 			// Final sweep on shutdown so a clean exit also reclaims.
-			l.sweep(time.Now())
+			l.sweep(time.Now(), w.curPath)
 			return
 		}
 	}
 }
 
-// sweep deletes rotated archive files (requests-*--*-*.log) whose modification
-// time is older than retention. The active file (requests-<ts>.log, no --) is
-// never deleted. No-op when retention <= 0. Best-effort: errors are logged but
-// don't stop the loop.
-func (l *requestLogger) sweep(now time.Time) {
+// sweep deletes request-log files older than retention: rotated archives
+// (requests-<start>--<end>-<seq>.log) AND orphaned active files
+// (requests-<ts>.log, no "--") left behind by a previous daemon run that never
+// rotated them. curActive (the writer's current active path) is always kept —
+// passing it lets sweep treat the prior run's active file as reclaimable.
+// No-op when retention <= 0. Best-effort: errors are logged but don't stop the loop.
+func (l *requestLogger) sweep(now time.Time, curActive string) {
 	if l.retention <= 0 {
 		return
 	}
@@ -302,9 +305,13 @@ func (l *requestLogger) sweep(now time.Time) {
 			continue
 		}
 		name := e.Name()
-		// Only rotated archives match "requests-<start>--<end>-<seq>.log".
-		// The active file has no "--" and is always kept.
-		if !strings.HasPrefix(name, "requests-") || !strings.Contains(name, "--") || !strings.HasSuffix(name, ".log") {
+		// Any request-log file (rotated archive OR active-style). The CURRENT
+		// active file is exempt so an in-flight run never deletes its own file.
+		if !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".log") {
+			continue
+		}
+		full := filepath.Join(l.dir, name)
+		if curActive != "" && full == curActive {
 			continue
 		}
 		fi, err := e.Info()
@@ -312,11 +319,158 @@ func (l *requestLogger) sweep(now time.Time) {
 			continue
 		}
 		if fi.ModTime().Before(cutoff) {
-			if err := os.Remove(filepath.Join(l.dir, name)); err != nil {
+			if err := os.Remove(full); err != nil {
 				log.Printf("[request_log] sweep remove %s: %v", name, err)
 			}
 		}
 	}
+}
+
+// recordFilter narrows a request-log query. Empty/zero fields mean "no filter".
+// Model/Provider match as case-insensitive substrings against the relevant
+// record fields; Status matches exactly (0 = any); From/To bound the record's
+// RFC3339 timestamp (zero = unbounded). Limit caps the result count (0 = no cap).
+type recordFilter struct {
+	Model      string
+	Provider   string
+	Status     int
+	ErrorsOnly bool
+	RequestID  string
+	From       time.Time
+	To         time.Time
+	Limit      int
+}
+
+// matches reports whether a record passes the filter.
+func (f recordFilter) matches(r requestLogRecord) bool {
+	if f.RequestID != "" && r.RequestID != f.RequestID {
+		return false
+	}
+	if f.Model != "" {
+		if !ciContains(r.CalledModel, f.Model) && !ciContains(r.UpstreamModel, f.Model) && !ciContains(r.Exposed, f.Model) {
+			return false
+		}
+	}
+	if f.Provider != "" && !ciContains(r.Provider, f.Provider) {
+		return false
+	}
+	if f.Status != 0 && r.Status != f.Status {
+		return false
+	}
+	if f.ErrorsOnly && r.Status < 400 {
+		return false
+	}
+	if !f.From.IsZero() || !f.To.IsZero() {
+		ts, err := time.Parse(time.RFC3339, r.Ts)
+		if err != nil {
+			return false // unparseable timestamp → exclude under a time filter
+		}
+		if !f.From.IsZero() && ts.Before(f.From) {
+			return false
+		}
+		if !f.To.IsZero() && ts.After(f.To) {
+			return false
+		}
+	}
+	return true
+}
+
+// ciContains reports whether s contains sub case-insensitively.
+func ciContains(s, sub string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+}
+
+// queryRequestRecords reads every requests-*.log file in dir (active + rotated),
+// parses each JSONL line, and returns records matching f, newest-first, capped at
+// f.Limit. Unparseable/partial lines (e.g. a line mid-write at read time) are
+// skipped silently. It reads files directly, independent of the logger goroutine.
+func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if strings.HasPrefix(n, "requests-") && strings.HasSuffix(n, ".log") {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	var out []requestLogRecord
+	// Read newest file first so a Limit cuts early; names sort oldest→first, so
+	// iterate in reverse. We still scan older files fully only when needed.
+	for i := len(names) - 1; i >= 0; i-- {
+		data, err := os.ReadFile(filepath.Join(dir, names[i]))
+		if err != nil {
+			continue
+		}
+		for _, line := range bytes.Split(data, []byte("\n")) {
+			if len(line) == 0 {
+				continue
+			}
+			var r requestLogRecord
+			if json.Unmarshal(line, &r) != nil {
+				continue // partial/garbled line
+			}
+			if f.matches(r) {
+				out = append(out, r)
+			}
+		}
+		if f.Limit > 0 && len(out) >= f.Limit {
+			break
+		}
+	}
+	// Records within a file are chronological; across files newest-file-first is
+	// already newest-first, but a single file's records are oldest-first, so sort
+	// the result by timestamp desc to be certain.
+	sort.Slice(out, func(i, j int) bool { return out[i].Ts > out[j].Ts })
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
+	}
+	return out, nil
+}
+
+// requestLogSummary is the metadata-only projection of a requestLogRecord for the
+// list API — request/response BODIES are omitted (large + sensitive); fetch a
+// single record by id for bodies.
+type requestLogSummary struct {
+	Ts            string `json:"ts"`
+	RequestID     string `json:"request_id"`
+	SessionID     string `json:"session_id"`
+	Protocol      string `json:"protocol"`
+	Method        string `json:"method"`
+	Path          string `json:"path"`
+	Exposed       string `json:"exposed"`
+	CalledModel   string `json:"called_model"`
+	UpstreamModel string `json:"upstream_model"`
+	Provider      string `json:"provider"`
+	Attempt       int    `json:"attempt"`
+	Status        int    `json:"status"`
+	LatencyMs     int64  `json:"latency_ms"`
+	RequestSize   int    `json:"request_size"`
+	ResponseSize  int64  `json:"response_size"`
+}
+
+func summarizeRecord(r requestLogRecord) requestLogSummary {
+	return requestLogSummary{
+		Ts: r.Ts, RequestID: r.RequestID, SessionID: r.SessionID, Protocol: r.Protocol,
+		Method: r.Method, Path: r.Path, Exposed: r.Exposed, CalledModel: r.CalledModel,
+		UpstreamModel: r.UpstreamModel, Provider: r.Provider, Attempt: r.Attempt,
+		Status: r.Status, LatencyMs: r.LatencyMs, RequestSize: r.RequestSize, ResponseSize: r.ResponseSize,
+	}
+}
+
+// directory returns the log directory ("" when logging is disabled / nil), used
+// by the /api/requests query handlers to read JSONL files.
+func (l *requestLogger) directory() string {
+	if l == nil {
+		return ""
+	}
+	return l.dir
 }
 
 // shutdown signals loop to drain + close, then waits for it to finish.

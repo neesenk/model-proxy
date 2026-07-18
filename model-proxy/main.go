@@ -37,8 +37,12 @@ Commands:
   config print         Print the effective config
   config check         Validate config and print a summary
   schedule             Show current per-model provider (queries the running daemon)
+  pin <route> <prov>   Temporarily force a route onto one provider (no failover)
+  unpin <route>        Remove a pin
   stats                Show per-(provider, model) call statistics (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
+  test <model>         End-to-end probe of a model's route targets (real upstream calls)
+  replay <id> --to P   Re-answer a logged request with a different backend
   help                 Print this message
 
 Options:
@@ -120,12 +124,44 @@ Subcommands:
   each model is currently scheduled to (first-choice + ordered list + sticky
   state). The daemon (` + "`model-proxy serve`" + `) must be running.`,
 
+	"pin": `pin [<route> <provider>] [--ttl DUR] [--config PATH]
+
+  Temporarily force a route onto ONE provider without editing config.yaml (a
+  runtime hot-switch). The pinned route skips failover — only the pinned
+  provider is tried, until the TTL expires, you ` + "`unpin`" + `, or the daemon
+  restarts (pins are in-memory). Pinning a pooled provider by its parent name
+  (e.g. "zhipu") pins every zhipu#<id> virtual. Use /debug/schedule (the
+  ` + "`schedule`" + ` command) to see the active pin. With no route/provider
+  args, lists active pins.
+
+  --ttl DUR   Go duration (1h, 30m, 2h45m); omit for no expiry.`,
+
+	"unpin": `unpin <route> [--config PATH]
+
+  Remove a manual pin (see ` + "`pin`" + `).`,
+
+	"replay": `replay <id> --to <provider> [--config PATH]
+
+  Re-answer a previously logged request with a DIFFERENT backend, so you can
+  compare answers side-by-side. Fetches the stored request (method/path/body)
+  from the daemon's /api/requests/<id> (request_log must be enabled), then
+  re-sends it to the proxy with a one-shot force-provider override pinning THIS
+  request to <provider> (no effect on other traffic). The new backend's response
+  is written to stdout. Requires a running daemon + request_log.enabled.`,
+
 	"doctor": `doctor [--config PATH]
 
   Offline scheduling diagnostic from config alone (no daemon needed): per-provider
   tier/quota source/peak_hours, per-route dry-run order (no live quota → tier then
   priority), and warnings (route with no plan provider, plan provider that will be
   unknown at runtime).`,
+
+	"test": `test <model> [--config PATH]
+
+  End-to-end link test: resolve the model's route targets (explicit routes,
+  then the implicit-route fallback; claude_mapping aliases are translated
+  first) and probe each target once with a real minimal upstream call.
+  Exit status is 0 when at least one target answers 2xx, 1 when all fail.`,
 
 	"stats": `stats [flags] [--config PATH]
 
@@ -140,6 +176,8 @@ Flags:
   --model M      filter to one model
   --bucket DUR   display granularity (1m/5m/10m/1h/1d; default 1m = raw rows;
                  storage is always 1-minute, so this only widens the view)
+  --by-agent    switch to the agent view: per-agent (claude-code/codex/...)
+                 request + token totals over the range, from /api/agents
   --json         raw /api/stats JSON for jq`,
 }
 
@@ -185,10 +223,18 @@ func main() {
 		cmdConfig(os.Args[2:])
 	case "schedule":
 		cmdSchedule(os.Args[2:])
+	case "pin":
+		cmdPin(os.Args[2:])
+	case "unpin":
+		cmdUnpin(os.Args[2:])
 	case "stats":
 		cmdStats(os.Args[2:])
 	case "doctor":
 		cmdDoctor(os.Args[2:])
+	case "test":
+		cmdTest(os.Args[2:])
+	case "replay":
+		cmdReplay(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		fmt.Print(usage)
@@ -843,6 +889,14 @@ func doctorWithCfg(cfg *Config) int {
 				hasPlan = true
 			}
 			fmt.Printf("    %s %s  p%d\n", pad(t.Provider, 12), cCyan(pad(tier, 13)), t.Priority)
+			// Protocol conversion (#11): a target declaring a backend protocol
+			// converts client↔backend when they differ. Surface it + the fixed set
+			// of fields conversion drops (so an operator wiring tools/images knows
+			// what's lossy before traffic flows).
+			if t.Protocol != "" {
+				fmt.Printf("        %s target protocol %s — converts when client protocol differs; lossy: thinking blocks, cache_control, server-side tools, tool_result images\n",
+					cYellow("↔"), t.Protocol)
+			}
 			// Expand a pooled parent inline: show its account count + the
 			// per-account virtual ids. Offline (no live quota) so we can't show
 			// per-account surplus — note the session-sticky round-robin so an

@@ -145,6 +145,11 @@ func runProxy(sa serveArgs) {
 	// loop is started below.
 	p.initRequestLog(cfg.RequestLog)
 	go p.reqLog.loop()
+	// Load the models.dev metadata catalog (context window + modalities) for
+	// request-aware routing (context-window fallback, capability routing).
+	// Best-effort: on failure p.catalog stays nil and those features degrade to
+	// a no-op (forward unchanged).
+	p.initCatalog()
 	// Graceful shutdown: flush pending deltas on SIGINT/SIGTERM so ~1 minute of
 	// stats isn't lost, then remove the foreground pid file. The supervisor
 	// forwards SIGTERM to the worker, so this covers both roles.

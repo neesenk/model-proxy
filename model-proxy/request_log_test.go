@@ -551,10 +551,12 @@ func TestRequestLogger_RetentionSweepDeletesOldArchives(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// retention 30d -> sweep should delete oldArch (40d) but keep recentArch (1d)
-	// and the active file.
+	// retention 30d -> sweep deletes oldArch (40d) AND the orphaned old active
+	// file (40d, left by a previous run — F6a: restart orphans are now reclaimed,
+	// not held forever). recentArch (1d) is kept; curActive is exempt even if old.
+	curActive := filepath.Join(dir, "requests-20990101-000000.log")
 	l := newRequestLogger(dir, 1<<30, 4096, 30*24*time.Hour)
-	l.sweep(time.Now())
+	l.sweep(time.Now(), curActive)
 
 	for _, tc := range []struct {
 		name string
@@ -563,7 +565,7 @@ func TestRequestLogger_RetentionSweepDeletesOldArchives(t *testing.T) {
 	}{
 		{"old archive", oldArch, false},
 		{"recent archive", recentArch, true},
-		{"active file (old)", oldActive, true},
+		{"orphaned active file (old)", oldActive, false},
 	} {
 		_, err := os.Stat(tc.path)
 		exists := !os.IsNotExist(err)
@@ -583,7 +585,7 @@ func TestRequestLogger_RetentionZeroKeepsAll(t *testing.T) {
 	os.Chtimes(oldArch, oldTime, oldTime)
 
 	l := newRequestLogger(dir, 1<<30, 4096, 0) // 0 = forever
-	l.sweep(time.Now())
+	l.sweep(time.Now(), "")
 	if _, err := os.Stat(oldArch); err != nil {
 		t.Errorf("retention 0 should keep old archive, got err: %v", err)
 	}

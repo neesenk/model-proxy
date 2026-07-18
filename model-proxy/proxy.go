@@ -28,12 +28,17 @@ type Proxy struct {
 	client    *http.Client
 	health    map[string]*providerHealth // provider name → circuit/rate-limit state
 	sticky    map[string]routeSticky     // exposed model → current provider + since
+	pins      map[string]pinEntry        // exposed model → manual pin (healthMu); hot-switch, overrides schedule
 	quota     *quotaTracker              // background quota poller; nil only in degenerate tests
 	metrics   *metricsStore              // request counters (atomic); nil only in degenerate tests
 	tokens    *tokenCounter              // SSE-scanned token usage; nil only in degenerate tests
+	agents    *agentCounter              // per-agent (UA) request/token counters; nil only in degenerate tests
 	stats     *statsStore                // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
 	flusher   *statsFlusher              // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog    *requestLogger             // per-request access log (full bodies); nil = disabled (default) or init failure
+	cache     *responseCache             // exact-match response cache (prompt-hash + TTL); nil = disabled
+	events    *eventHub                  // live request monitor fan-out hub (SSE /api/events); always non-nil
+	catalog   *modelsDevCatalog          // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
 	pricingMu sync.Mutex                 // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
@@ -66,6 +71,31 @@ type providerHealth struct {
 type routeSticky struct {
 	provider string
 	since    time.Time
+}
+
+// pinEntry is a manual route→provider pin (model-proxy pin <route> <provider>
+// --ttl). expiresAt zero = no expiry (until unpin). Guarded by healthMu.
+type pinEntry struct {
+	provider  string
+	expiresAt time.Time
+}
+
+// active reports whether the pin is still in effect at now (zero expiresAt =
+// never expires).
+func (e pinEntry) active(now time.Time) bool {
+	return e.expiresAt.IsZero() || now.Before(e.expiresAt)
+}
+
+// expiresLabel returns "" (no expiry), a "expires <relative>" hint, or "expired".
+func (e pinEntry) expiresLabel(now time.Time) string {
+	if e.expiresAt.IsZero() {
+		return ""
+	}
+	d := e.expiresAt.Sub(now)
+	if d <= 0 {
+		return "expired"
+	}
+	return "expires in " + d.Round(time.Second).String()
 }
 
 // buildProviders creates provider.Provider instances from config. Each provider
@@ -214,6 +244,7 @@ func NewProxy(cfg *Config) *Proxy {
 		client:    &http.Client{Timeout: 0},
 		health:    map[string]*providerHealth{},
 		sticky:    map[string]routeSticky{},
+		pins:      map[string]pinEntry{},
 		spreadCtr: map[string]uint64{},
 		poolIndex: poolIndex,
 		parentOf:  parentOf,
@@ -234,6 +265,15 @@ func NewProxy(cfg *Config) *Proxy {
 	// owned by statsStore/flusher, opened in runProxy so direct-NewProxy tests
 	// stay in-memory and don't touch ~/.model-proxy/.
 	p.tokens = newTokenCounter()
+	// Per-agent counters (detected from the client UA). Flushed alongside the
+	// minute buckets by the same flusher; nil-stats tests keep them in-memory.
+	p.agents = newAgentCounter()
+	// Exact-match response cache. nil unless cache.enabled is set in config, so
+	// the default (off) path and direct-NewProxy tests pay zero overhead.
+	p.cache = newResponseCache(cfg.Cache)
+	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
+	// UI client subscribes; publish is non-blocking so it never stalls forward.
+	p.events = newEventHub()
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
 	if loaded := p.quota.LoadedSticky; len(loaded) > 0 {
@@ -256,6 +296,12 @@ func (p *Proxy) resetStats() {
 	}
 	if p.tokens != nil {
 		p.tokens.reset()
+	}
+	if p.agents != nil {
+		p.agents.reset()
+	}
+	if p.cache != nil {
+		p.cache.reset()
 	}
 	if p.stats != nil {
 		if err := p.stats.resetAll(); err != nil {
@@ -317,6 +363,34 @@ func (p *Proxy) snapshotConfig() *Config {
 	defer p.mu.RUnlock()
 	c := *p.cfg
 	return &c
+}
+
+// catalogSnapshot returns the current models.dev catalog under a brief read lock,
+// or nil if unavailable (tests, or the best-effort load failed). Request-aware
+// routing (context-window fallback, capability routing) degrades to a no-op when
+// nil — the proxy forwards unchanged rather than guessing.
+func (p *Proxy) catalogSnapshot() *modelsDevCatalog {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.catalog
+}
+
+// initCatalog loads the models.dev metadata catalog best-effort (context window
+// + modalities for request-aware routing). On failure p.catalog stays nil and
+// the proxy runs without request-aware routing (forwards unchanged). Called from
+// runProxy only — direct NewProxy callers (tests) stay offline; tests that need
+// metadata set p.catalog directly.
+func (p *Proxy) initCatalog() {
+	cat, err := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
+	if err != nil || cat == nil {
+		if err != nil {
+			log.Printf("[models] catalog load failed: %v - running without request-aware routing", err)
+		}
+		return
+	}
+	p.mu.Lock()
+	p.catalog = cat
+	p.mu.Unlock()
 }
 
 // providerSnapshot returns the current provider map under a brief read lock.
@@ -389,6 +463,10 @@ func (p *Proxy) reload(configPath string) error {
 	if p.quota != nil {
 		go p.quota.pollAll(time.Now())
 	}
+	// Refresh the models.dev catalog best-effort so newly configured model names
+	// resolve their context window / modalities for request-aware routing. A
+	// failure leaves the previous catalog in place (never fails the reload).
+	go p.initCatalog()
 	// request_log is NOT rebuilt on reload (the logger owns a background
 	// goroutine + open file; restarting it mid-flight needs careful drain). So
 	// a config that enables/tunes request_log via SIGHUP won't take effect until
@@ -510,6 +588,10 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 		w.Write(p.scheduleStatus())
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/events" {
+		p.serveEvents(w, r)
+		return
+	}
 	proto := protocolForPath(r.URL.Path)
 	if proto == "" {
 		http.Error(w, fmt.Sprintf("no route for path %s", r.URL.Path), http.StatusBadGateway)
@@ -552,6 +634,10 @@ func (p *Proxy) scheduleStatus() []byte {
 	for k, v := range p.sticky {
 		stickyCopy[k] = v
 	}
+	pinsCopy := make(map[string]pinEntry, len(p.pins))
+	for k, v := range p.pins {
+		pinsCopy[k] = v
+	}
 	p.healthMu.Unlock()
 
 	avail := func(name string) bool {
@@ -575,11 +661,13 @@ func (p *Proxy) scheduleStatus() []byte {
 		Available int    `json:"available"`
 	}
 	type routeInfo struct {
-		First    string     `json:"first"`
-		Ordered  []provInfo `json:"ordered"`
-		Sticky   string     `json:"sticky,omitempty"`
-		DwellRem float64    `json:"sticky_dwell_remaining_sec,omitempty"`
-		Pools    []poolInfo `json:"pools,omitempty"`
+		First      string     `json:"first"`
+		Ordered    []provInfo `json:"ordered"`
+		Sticky     string     `json:"sticky,omitempty"`
+		DwellRem   float64    `json:"sticky_dwell_remaining_sec,omitempty"`
+		Pools      []poolInfo `json:"pools,omitempty"`
+		Pin        string     `json:"pin,omitempty"`
+		PinExpires string     `json:"pin_expires,omitempty"`
 	}
 
 	models := map[string]routeInfo{}
@@ -595,6 +683,13 @@ func (p *Proxy) scheduleStatus() []byte {
 		ri := routeInfo{}
 		if len(ordered) > 0 {
 			ri.First = ordered[0].Provider
+		}
+		// Surface an active manual pin (hot-switch) so /debug/schedule shows WHY a
+		// route is narrowed to one provider, plus its expiry. The pin's effect on
+		// `ordered` is already applied inside decideOrder; this just labels it.
+		if pe, ok := pinsCopy[exposed]; ok && pe.active(now) {
+			ri.Pin = pe.provider
+			ri.PinExpires = pe.expiresLabel(now)
 		}
 		// Track which parents appear in `ordered` so the route-level `pools`
 		// summary can be emitted. A parent may have more accounts in poolIndex
@@ -713,6 +808,21 @@ func writeModels(w http.ResponseWriter, data []byte) {
 	w.Write([]byte(`{"object":"list","data":[]}`))
 }
 
+// publishTerminalEvent emits a live "end" event for a request that ends before
+// the normal start/commit flow — a malformed body (400) or an unrouted model
+// (502). Without it, an agent retry-looping on a missing/removed model is
+// invisible to the live monitor, defeating the feature's core use case.
+func (p *Proxy) publishTerminalEvent(r *http.Request, proto, exposed string, status int) {
+	p.events.publish(liveEvent{
+		Type:     "end",
+		Ts:       time.Now().UnixMilli(),
+		Agent:    detectAgent(r),
+		Protocol: proto,
+		Exposed:  exposed,
+		Status:   status,
+	})
+}
+
 // forward proxies a request to the upstream selected by the route for the
 // requested model. Routing is two-step: for anthropic, the called model name is
 // first translated via claude_mapping (if the called name is mapped); openai
@@ -744,12 +854,14 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 
 	calledModel := extractModel(origBody)
 	if calledModel == "" {
+		p.publishTerminalEvent(r, proto, calledModel, http.StatusBadRequest)
 		http.Error(w, `missing or unparseable "model" field in request body`, http.StatusBadRequest)
 		return
 	}
 
 	// Two-step lookup: anthropic translates claude-* names via claude_mapping
-	// (if the called name is mapped); openai uses the called name as-is.
+	// (if the called name is mapped); openai uses the called name as-is. Computed
+	// early so the pin check (and cache bypass) can run before any upstream work.
 	exposed := calledModel
 	if proto == "anthropic" && cfg.ClaudeMapping != nil {
 		if mapped, ok := cfg.ClaudeMapping[calledModel]; ok && mapped != "" {
@@ -758,9 +870,56 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	}
 	targets, ok := expanded[exposed]
 	if !ok || len(targets) == 0 {
+		p.publishTerminalEvent(r, proto, exposed, http.StatusBadGateway)
 		http.Error(w, fmt.Sprintf("model %q not found in routes", exposed), http.StatusBadGateway)
 		return
 	}
+	// A pin on this route forces the pinned provider (exclusive) — compute early
+	// so the cache can bypass it (a pinned request must reach the pinned backend,
+	// not a stale cached answer from another provider — same rationale as the
+	// force-provider/replay bypass).
+	force := p.pinForces(exposed, targets, parentOf)
+
+	// Exact-match response cache (#10): a request byte-identical to a recently
+	// served one is replayed from cache with no upstream call. Computed before
+	// routing (the key is the raw request), threaded into tryTarget to store on
+	// a fresh 2xx commit. SKIPPED entirely when a force-provider override OR a pin
+	// is in effect — both mean "send to THIS backend", not a stale cached answer.
+	var cacheKey string
+	if p.cache != nil && forceProvider(r) == "" && !force {
+		cacheKey = cacheKeyOf(r.Method, r.URL.Path, origBody)
+		if e, ok := p.cache.get(cacheKey, time.Now()); ok {
+			// Live monitor (#6): a cache hit skips the normal start/end flow, so
+			// emit an end event explicitly — otherwise the live view is blind to
+			// these (e.g. a retry-looping agent served from cache stays invisible).
+			p.events.publish(liveEvent{
+				Type:     "end",
+				Ts:       time.Now().UnixMilli(),
+				Agent:    detectAgent(r),
+				Protocol: proto,
+				Exposed:  calledModel,
+				Provider: "(cache)",
+				Status:   e.status,
+			})
+			replayCached(w, e)
+			return
+		}
+	}
+
+	// One-shot force-provider override (x-mp-force-provider header / force_provider
+	// query): narrows this single request's targets to one provider (matches the
+	// parent name for pools). Used by `model-proxy replay` to re-answer with a
+	// chosen backend without a global pin. No effect when unset or unmatched.
+	if fp := forceProvider(r); fp != "" {
+		if narrowed := filterTargetsByProvider(targets, parentOf, fp); len(narrowed) > 0 {
+			targets = narrowed
+		}
+	}
+
+	// Snapshot the models.dev catalog for request-aware routing (#8/#9 unified):
+	// a target must support the request's capability (image) and fit its context
+	// window; if none in the route fit, fall back cross-route by scheduling policy.
+	cat := p.catalogSnapshot()
 
 	// For openai protocol, strip the client's /v1 prefix (provider openai_base_url
 	// includes its own version segment, e.g. .../v3, .../paas/v4).
@@ -780,6 +939,17 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		routeKeys[k] = true
 	}
 	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys)
+	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
+	// overrides request-aware routing (no cross-route reroute away from the pinned
+	// provider) and, via the `force` flag into tryTarget, bypasses the circuit
+	// breaker — the user explicitly asked for THIS backend, no failover.
+	if !force {
+		// Request-aware routing (#8 capability + #9 context, unified): keep targets
+		// that fit the request (image capability + context window); if none in the
+		// route fit, fall back to a cross-route capable+fitting pool ranked by the
+		// normal scheduling policy. No-op when everything already fits.
+		ordered = p.applyRequestAwareRouting(cfg, parentOf, cat, exposed, sessionKey, ordered, expanded, routeKeys, origBody)
+	}
 	if p.scheduleHook != nil {
 		p.scheduleHook(sessionKey)
 	}
@@ -793,6 +963,21 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	if p.reqLog != nil {
 		requestID = newRequestID()
 	}
+
+	// Detect the calling agent once (from the UA / known headers); attributed to
+	// whichever target commits, in the parallel agent-stats pipeline.
+	agent := detectAgent(r)
+
+	// Live request monitor (#6): announce the in-flight request so the Web UI's
+	// live view sees who is sending + where it routed, before the response lands.
+	p.events.publish(liveEvent{
+		Type:      "start",
+		Ts:        time.Now().UnixMilli(),
+		RequestID: requestID,
+		Agent:     agent,
+		Protocol:  proto,
+		Exposed:   exposed,
+	})
 
 	for ti, t := range ordered {
 		if p.metrics != nil {
@@ -809,24 +994,57 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		}
 		provImpl := provs[t.Provider]
 
-		// Rewrite the body's model to this target's real model (per target).
+		// Backend protocol (#11 conversion): the target's declared protocol, else
+		// the client's. When they differ, convert the request body + route to the
+		// backend's protocol; tryTarget converts the response back.
+		backendProto := t.Protocol
+		if backendProto == "" {
+			backendProto = proto
+		}
+		convert := needsConversion(proto, backendProto)
+
+		// Rewrite the body's model to this target's real model (per target), then
+		// convert the request to the backend protocol if needed.
 		body := origBody
 		if t.Model != calledModel {
 			body = rewriteModel(origBody, t.Model)
 		}
+		if convert {
+			if cb, err := convertRequest(body, proto, backendProto); err == nil {
+				body = cb
+			} else {
+				log.Printf("[convert] %s→%s request failed: %v", proto, backendProto, err)
+			}
+		}
 
-		// Select the upstream base URL for this provider + protocol.
+		// Select the upstream base URL + path for the BACKEND protocol.
 		baseURL := prov.OpenAIBaseURL
-		if proto == "anthropic" && prov.AnthropicBaseURL != "" {
+		if backendProto == "anthropic" && prov.AnthropicBaseURL != "" {
 			baseURL = prov.AnthropicBaseURL
+		}
+		effPath := upPath
+		if convert {
+			effPath = backendPath(backendProto)
 		}
 
 		flc := forwardLogCtx{requestID: requestID, attempt: ti, exposed: exposed}
-		if p.tryTarget(cfg, proto, calledModel, t, prov, provImpl, baseURL, upPath, body, w, r, flc) {
+		if p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, flc) {
 			return // committed: response written to the client
 		}
 		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
 	}
+	// Live monitor (#6): every target failed → emit an end event so the live view
+	// surfaces the 502 (otherwise a retry-looping agent that always 502s is
+	// invisible — only starts, never ends).
+	p.events.publish(liveEvent{
+		Type:      "end",
+		Ts:        time.Now().UnixMilli(),
+		RequestID: requestID,
+		Agent:     agent,
+		Protocol:  proto,
+		Exposed:   exposed,
+		Status:    http.StatusBadGateway,
+	})
 	http.Error(w, fmt.Sprintf("all targets failed for model %q", exposed), http.StatusBadGateway)
 }
 
@@ -836,13 +1054,21 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 // timeout, 401 after refresh, 5xx, 429, or a build/auth error). It updates the
 // provider's health on success/failure/rate-limit and enforces half-open
 // single-flight. Failover only happens before any bytes are written to w.
-func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, flc forwardLogCtx) bool {
+func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, flc forwardLogCtx) bool {
+	// Wrap the client writer to capture time-to-first-token for latency stats.
+	// All writes below go through tw; ttft is read on the commit path.
+	tw := newTimingResponseWriter(w)
+	w = tw
 	sched := cfg.Scheduling
-	// Re-check availability and reserve the half-open probe slot if needed.
-	if !p.takeHalfOpenSlot(t.Provider) {
+	// Re-check availability and reserve the half-open probe slot if needed. A pin
+	// (force) bypasses the circuit breaker — the user explicitly asked for THIS
+	// backend, so circuit-open state must not block it (and there's no failover
+	// target anyway). recordSuccess on a forced hit reopens the circuit.
+	if !force && !p.takeHalfOpenSlot(t.Provider) {
 		return false
 	}
-	// recordSuccess/Failure/RateLimit below release the slot.
+	// recordSuccess/Failure/RateLimit below release the slot (force never took
+	// one, so those releases are harmless no-ops).
 
 	ctx, cancel := context.WithTimeout(r.Context(), sched.timeout())
 	defer cancel()
@@ -954,7 +1180,15 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			proto, t.Provider, r.Method, r.URL.Path, calledModel, t.Model,
 			statusColor(resp.StatusCode, fmt.Sprintf("%d", resp.StatusCode)),
 			time.Since(start).Milliseconds(), len(body))
+		// Conversion flag: when the backend protocol differs from the client's,
+		// the response body is rewritten (#11), so its length changes — drop the
+		// backend's content-length / transfer-encoding (can't forward a length for
+		// a body we're about to transform; Go's server would reject the mismatch).
+		convert := needsConversion(proto, backendProto)
 		for k, vs := range resp.Header {
+			if convert && (strings.EqualFold(k, "content-length") || strings.EqualFold(k, "transfer-encoding")) {
+				continue
+			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}
@@ -984,9 +1218,41 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		// only); request logging never touches it.
 		reqBytes := body // request bytes sent upstream (post-rewrite); capture before body is shadowed
 		logger := p.reqLog
+		var endTokens tokenUsage // best-effort per-request usage for the live end event
 		body := resp.Body
+		// Protocol conversion (#11): translate the backend's response into the
+		// client's protocol. INNERMOST wrap so the logger/scanner/cache below all
+		// see client-protocol bytes. Streaming → stateful SSE transformer; non-
+		// streaming → buffer + convert the JSON body (best-effort pass-through on
+		// error so a conversion hiccup doesn't drop a successful upstream response).
+		if convert {
+			if isSSE(resp.Header) {
+				body = io.NopCloser(convertSSEReader(body, proto, backendProto, t.Model))
+			} else {
+				// 64 MiB cap: a non-stream LLM response larger than this is
+				// pathological (max_tokens bounds it); the cap prevents a
+				// misbehaving backend from OOMing the proxy via the buffered
+				// conversion path.
+				all, err := io.ReadAll(io.LimitReader(body, 64<<20))
+				body.Close()
+				if err != nil {
+					log.Printf("[convert] %s→%s read response failed: %v", backendProto, proto, err)
+				}
+				conv, cerr := convertResponse(all, proto, backendProto)
+				if cerr != nil {
+					log.Printf("[convert] %s→%s response failed: %v", backendProto, proto, cerr)
+					conv = all
+				}
+				body = io.NopCloser(bytes.NewReader(conv))
+			}
+		}
+		// request logging: tee the (possibly converted) body — `body`, NOT
+		// resp.Body. Wrapping resp.Body here would log/replay the backend's native
+		// bytes (e.g. openai SSE) instead of the client-protocol bytes the client
+		// received, and for a converted non-stream response resp.Body is already
+		// read+closed → an empty capture. `body` is exactly what flushCopy sends.
 		if logger != nil {
-			body = newCaptureReader(resp.Body, logger.maxBody, func(captured []byte, total int64, truncated bool) {
+			body = newCaptureReader(body, logger.maxBody, func(captured []byte, total int64, truncated bool) {
 				logger.record(logger.buildRecord(recordInputs{
 					flc:         flc,
 					r:           r,
@@ -1003,10 +1269,94 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 			})
 		}
 		if p.tokens != nil && isSSE(resp.Header) {
-			body = newUsageScanner(body, tokenKey{Provider: t.Provider, Model: t.Model}, p.tokens)
+			// Attribute the same observed usage to the calling agent (parallel
+			// agent pipeline) so per-agent token totals reconcile with per-model.
+			// Also stash into endTokens for the live-monitor end event (best-effort:
+			// non-SSE requests have no scanner → 0 tokens in the live event).
+			var agentSink func(tokenUsage)
+			ag, prov, mdl := agent, t.Provider, t.Model
+			if p.agents != nil && agent != "" {
+				agentSink = func(u tokenUsage) { p.agents.addTokens(ag, prov, mdl, u); endTokens = u }
+			} else {
+				agentSink = func(u tokenUsage) { endTokens = u }
+			}
+			body = newUsageScanner(body, tokenKey{Provider: t.Provider, Model: t.Model}, p.tokens, agentSink)
+		}
+		// Exact-match cache capture (#10): tee the streamed bytes into a bounded
+		// buffer so a 2xx response can be cached for replay. Placed outermost
+		// (pass-through wrappers below it don't alter bytes). Only when the cache
+		// is on, this is a cacheable 2xx, and a key was computed in forward.
+		var crec *cacheRecorder
+		if p.cache != nil && cacheKey != "" && resp.StatusCode < 300 {
+			crec = newCacheRecorder(body, p.cache.maxBody)
+			body = crec
 		}
 		flushCopy(w, body)
 		body.Close()
+		// Record latency for this committed (served) target: total wall-clock from
+		// upstream send to end of the streamed body, and TTFT from send to the
+		// first byte written to the client (falls back to total when nothing was
+		// written, e.g. an empty body).
+		latencyMs := time.Since(start).Milliseconds()
+		if p.metrics != nil {
+			ttftMs := latencyMs
+			if tw.hasFirstByte {
+				ttftMs = tw.firstByte.Sub(start).Milliseconds()
+			}
+			p.metrics.addLatency(t.Provider, t.Model, uint64(latencyMs), uint64(ttftMs))
+		}
+		// Attribute this served request to the calling agent (parallel pipeline).
+		if p.agents != nil && agent != "" {
+			p.agents.incRequests(agent, t.Provider, t.Model)
+		}
+		// Store the exact-match cache entry for this 2xx response — only when the
+		// capture is COMPLETE: not truncated by the size cap, AND sawEOF (the body
+		// streamed to a clean end). A client disconnect mid-stream leaves sawEOF
+		// false, so a half-read response is never cached as complete.
+		if crec != nil && crec.sawEOF && !crec.truncated && len(crec.buf) > 0 {
+			// For a converted response the cached body is the CLIENT-protocol body
+			// (different length than the backend's), so the backend's
+			// Content-Length / Transfer-Encoding must NOT be cached — replaying
+			// them with the converted body would corrupt the response. Strip them
+			// (same as the live forwarding path does); Go's server re-derives the
+			// length on replay.
+			hdr := resp.Header.Clone()
+			if convert {
+				hdr.Del("Content-Length")
+				hdr.Del("Transfer-Encoding")
+			}
+			p.cache.put(cacheKey, &cacheEntry{
+				status: resp.StatusCode,
+				header: hdr,
+				body:   crec.buf,
+			}, time.Now())
+		}
+		// Live request monitor (#6): announce the completed request (agent,
+		// route, chosen provider, status, latency, best-effort tokens).
+		p.events.publish(liveEvent{
+			Type:          "end",
+			Ts:            time.Now().UnixMilli(),
+			RequestID:     flc.requestID,
+			Agent:         agent,
+			Protocol:      proto,
+			Exposed:       flc.exposed,
+			Provider:      t.Provider,
+			UpstreamModel: t.Model,
+			Status:        resp.StatusCode,
+			LatencyMs:     latencyMs,
+			Input:         endTokens.Input,
+			Output:        endTokens.Output,
+		})
+		// Shadow evaluation (#12): for a route with a configured shadow backend,
+		// also send the same prompt to the candidate provider (fire-and-forget,
+		// best-effort) and log its result for offline comparison — the shadow
+		// response is NEVER returned to the client. Requires request logging to
+		// record the result; otherwise it's a no-op (nowhere to compare).
+		if p.reqLog != nil && len(cfg.Shadow) > 0 {
+			if sh, ok := cfg.Shadow[flc.exposed]; ok && sh.Provider != "" && sh.Provider != t.Provider {
+				go p.runShadow(proto, backendProto, calledModel, flc.exposed, sh, reqBytes)
+			}
+		}
 		return true
 	}
 	// 401-retry exhausted without resolution — release the slot.
@@ -1017,6 +1367,109 @@ func (p *Proxy) tryTarget(cfg *Config, proto, calledModel string, t RouteTarget,
 		p.metrics.inc(t.Provider, t.Model, evFailovers)
 	}
 	return false
+}
+
+// runShadow sends the same prompt to a candidate backend (shadow evaluation,
+// #12): fire-and-forget, the result is logged for offline comparison and NEVER
+// returned to the client. It mirrors tryTarget's request-building (auth, extra
+// headers, model rewrite) but is best-effort and bounded — any error is logged
+// and dropped (shadow must never affect the live request). Snapshots cfg/providers
+// from p so the goroutine is consistent with the commit that spawned it.
+//
+// `bodyProto` is the protocol of reqBody (the primary target's backend proto —
+// reqBody may already be converted from the client's proto). The shadow backend's
+// own protocol is shadow.Protocol (defaulting to bodyProto); runShadow selects the
+// shadow base URL + path for THAT protocol and converts the body if it differs.
+func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow ShadowTarget, reqBody []byte) {
+	p.mu.RLock()
+	cfg := p.cfg
+	provs := p.providers
+	parentOf := p.parentOf
+	p.mu.RUnlock()
+	logger := p.reqLog
+	if logger == nil {
+		return // nowhere to record → no point shadowing
+	}
+	provCfg, ok := providerConfig(cfg, parentOf, shadow.Provider)
+	if !ok {
+		log.Printf("[shadow] %s: unknown provider", shadow.Provider)
+		return
+	}
+	impl := provs[shadow.Provider]
+	if impl == nil {
+		log.Printf("[shadow] %s: provider not available", shadow.Provider)
+		return
+	}
+	// Shadow backend protocol: declared, else same as the body's. Route + convert
+	// accordingly so the shadow gets a request in the protocol IT speaks.
+	shadowProto := shadow.Protocol
+	if shadowProto == "" {
+		shadowProto = bodyProto
+	}
+	sbody := reqBody
+	if needsConversion(bodyProto, shadowProto) {
+		if cb, err := convertRequest(reqBody, bodyProto, shadowProto); err == nil {
+			sbody = cb
+		} else {
+			log.Printf("[shadow] %s: %s→%s convert failed: %v", shadow.Provider, bodyProto, shadowProto, err)
+		}
+	}
+	baseURL := provCfg.OpenAIBaseURL
+	if shadowProto == "anthropic" && provCfg.AnthropicBaseURL != "" {
+		baseURL = provCfg.AnthropicBaseURL
+	}
+	upPath := backendPath(shadowProto)
+	if shadow.Model != "" && shadow.Model != calledModel {
+		sbody = rewriteModel(sbody, shadow.Model)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Scheduling.timeout())
+	defer cancel()
+	targetURL := strings.TrimRight(baseURL, "/") + upPath
+	if impl != nil {
+		targetURL, sbody = impl.RewriteRequest(targetURL, sbody, upPath)
+	}
+	sreq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(sbody))
+	if err != nil {
+		log.Printf("[shadow] %s: build req: %v", shadow.Provider, err)
+		return
+	}
+	sreq.Header.Set("content-type", "application/json")
+	if impl != nil {
+		if err := impl.AuthHeaders(sreq); err != nil {
+			log.Printf("[shadow] %s: auth: %v", shadow.Provider, err)
+			return
+		}
+		impl.ExtraHeaders(sreq, upPath)
+	}
+	for k, v := range provCfg.Headers {
+		sreq.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: cfg.Scheduling.timeout()}
+	start := time.Now()
+	resp, err := client.Do(sreq)
+	if err != nil {
+		log.Printf("[shadow] %s/%s upstream error: %v", shadow.Provider, shadow.Model, err)
+		return
+	}
+	defer resp.Body.Close()
+	// Drain the shadow response into a bounded capture for the log. The reader
+	// passes all bytes through (drained to Discard) while teeing a capped copy.
+	cr := newCaptureReader(resp.Body, logger.maxBody, nil)
+	io.Copy(io.Discard, cr)
+	rec := logger.buildRecord(recordInputs{
+		flc:         forwardLogCtx{requestID: "shadow-" + newRequestID(), attempt: 0, exposed: exposed},
+		r:           sreq,
+		proto:       proto,
+		calledModel: calledModel,
+		t:           RouteTarget{Provider: shadow.Provider, Model: shadow.Model},
+		resp:        resp,
+		start:       start,
+		requestBody: sbody,
+		captured:    cr.buf.Bytes(),
+		total:       cr.total,
+		truncated:   cr.truncated,
+	})
+	logger.record(rec)
 }
 
 // tierRank maps a BillingClass to the scheduling tier order: plan(0) < unknown(1) < payg(2).
@@ -1057,6 +1510,82 @@ func (p *Proxy) schedule(cfg *Config, parentOf map[string]string, exposed, sessi
 		p.healthMu.Unlock()
 	}
 	return ordered
+}
+
+// setPin installs a manual route→provider pin (hot-switch). ttl <= 0 means no
+// expiry (pin until clearPin). The provider must be a target of the route (after
+// virtual/pool expansion) or setPin returns false — a pin to a provider the route
+// can't reach would silently do nothing, so reject it up front with a clear error.
+func (p *Proxy) setPin(route, provider string, ttl time.Duration) (pinEntry, bool) {
+	now := time.Now()
+	p.mu.RLock()
+	expanded := p.expandedRoutes
+	parentOf := p.parentOf
+	p.mu.RUnlock()
+	targets, ok := expanded[route]
+	if !ok {
+		return pinEntry{}, false
+	}
+	matches := false
+	for _, t := range targets {
+		if t.Provider == provider || parentOf[t.Provider] == provider {
+			matches = true
+			break
+		}
+	}
+	if !matches {
+		return pinEntry{}, false
+	}
+	pe := pinEntry{provider: provider}
+	if ttl > 0 {
+		pe.expiresAt = now.Add(ttl)
+	}
+	p.healthMu.Lock()
+	p.pins[route] = pe
+	p.healthMu.Unlock()
+	return pe, true
+}
+
+// clearPin removes a route's manual pin (no-op if none).
+func (p *Proxy) clearPin(route string) bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	_, ok := p.pins[route]
+	delete(p.pins, route)
+	return ok
+}
+
+// listPins returns the active pins (provider + expiry), dropping expired ones.
+func (p *Proxy) listPins() map[string]pinEntry {
+	now := time.Now()
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	out := make(map[string]pinEntry, len(p.pins))
+	for k, v := range p.pins {
+		if v.active(now) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// pinForces reports whether an active pin for `exposed` is in effect over the
+// given ordered targets (i.e. decideOrder narrowed to the pinned provider). When
+// true, forward treats the route as pinned-exclusive: request-aware routing is
+// skipped (no reroute away from the pin) and tryTarget bypasses the circuit.
+func (p *Proxy) pinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool {
+	p.healthMu.Lock()
+	pe, ok := p.pins[exposed]
+	p.healthMu.Unlock()
+	if !ok || !pe.active(time.Now()) {
+		return false
+	}
+	for _, t := range ordered {
+		if t.Provider == pe.provider || parentOf[t.Provider] == pe.provider {
+			return true
+		}
+	}
+	return false
 }
 
 // decideOrder computes the try-order for targets and the provider to park sticky
@@ -1108,7 +1637,31 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 		}
 	}
 
+	// Manual pin (model-proxy pin <route> <provider> --ttl): narrow to the pinned
+	// provider's targets UP FRONT and force them past the circuit breaker. A pin
+	// is an explicit "send to THIS backend, don't fail over" (debugging / A-B
+	// compare) — it must NOT silently fail to another provider when the pinned one
+	// is circuit-open. A pin whose provider isn't a route target is a no-op
+	// (pt empty → targets unchanged); expired pins are ignored (lazy). The pin's
+	// effect is visible in /debug/schedule via pinsCopy.
+	pinned := false
+	if pe, ok := p.pins[exposed]; ok && pe.active(now) {
+		var pt []RouteTarget
+		for _, t := range targets {
+			if t.Provider == pe.provider || parentOf[t.Provider] == pe.provider {
+				pt = append(pt, t)
+			}
+		}
+		if len(pt) > 0 {
+			targets = pt
+			pinned = true
+		}
+	}
+
 	avail := func(name string) bool {
+		if pinned {
+			return true // an active pin forces through circuit/rate-limit state
+		}
 		h := p.health[name]
 		return h == nil || h.available(now)
 	}
@@ -1484,6 +2037,42 @@ func flushCopy(w http.ResponseWriter, rc io.ReadCloser) {
 		if err != nil {
 			break
 		}
+	}
+}
+
+// timingResponseWriter wraps the client ResponseWriter to capture time-to-first-
+// token: the instant of the first response body byte written to the client
+// (the SSE first event, or the first byte of a buffered body). It delegates
+// Write/WriteHeader/Header unchanged and implements http.Flusher so SSE
+// flushing (flushCopy's w.(http.Flusher)) keeps working through the wrapper.
+// firstByte is zero until the first Write; callers treat a zero value as "no
+// byte was written" and fall back to the total latency as the TTFT.
+type timingResponseWriter struct {
+	http.ResponseWriter
+	firstByte    time.Time
+	hasFirstByte bool
+	flusher      http.Flusher // nil if the underlying writer isn't a Flusher
+}
+
+func newTimingResponseWriter(w http.ResponseWriter) *timingResponseWriter {
+	fl, _ := w.(http.Flusher)
+	return &timingResponseWriter{ResponseWriter: w, flusher: fl}
+}
+
+func (t *timingResponseWriter) Write(p []byte) (int, error) {
+	if !t.hasFirstByte {
+		t.hasFirstByte = true
+		t.firstByte = time.Now()
+	}
+	return t.ResponseWriter.Write(p)
+}
+
+// Flush delegates to the underlying writer's Flush so SSE chunk flushing through
+// the wrapper is a no-op change (flushCopy asserts http.Flusher; without this
+// the assertion would fail and SSE would not flush until the buffer filled).
+func (t *timingResponseWriter) Flush() {
+	if t.flusher != nil {
+		t.flusher.Flush()
 	}
 }
 

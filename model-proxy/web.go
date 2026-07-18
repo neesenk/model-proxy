@@ -114,6 +114,10 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleStatus(resp, r)
 	case path == "/api/logs" && r.Method == http.MethodGet:
 		w.handleLogs(resp, r)
+	case path == "/api/requests" && r.Method == http.MethodGet:
+		w.handleRequestsList(resp, r)
+	case strings.HasPrefix(path, "/api/requests/") && r.Method == http.MethodGet:
+		w.handleRequestDetail(resp, r)
 	case path == "/api/config" && r.Method == http.MethodGet:
 		w.handleConfigGet(resp, r)
 	case path == "/api/config" && r.Method == http.MethodPost:
@@ -130,8 +134,21 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleQuotaRefresh(resp, r)
 	case path == "/api/stats" && r.Method == http.MethodGet:
 		w.handleStats(resp, r)
+	case path == "/api/agents" && r.Method == http.MethodGet:
+		w.handleAgents(resp, r)
+	case path == "/api/pin" && r.Method == http.MethodGet:
+		w.handlePinList(resp, r)
+	case path == "/api/pin" && r.Method == http.MethodPost:
+		w.handlePinSet(resp, r)
+	case path == "/api/pin" && r.Method == http.MethodDelete:
+		w.handlePinClear(resp, r)
 	case path == "/api/analytics" && r.Method == http.MethodGet:
 		w.handleAnalytics(resp, r)
+	// The /test suffix must be matched BEFORE the bare /api/accounts/ POST
+	// prefix below, which would otherwise swallow it as an account-add for a
+	// provider named "<name>/<id>/test".
+	case strings.HasPrefix(path, "/api/accounts/") && strings.HasSuffix(path, "/test") && r.Method == http.MethodPost:
+		w.handleAccountTest(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodPost:
 		w.handleAccountAdd(resp, r)
 	case strings.HasPrefix(path, "/api/accounts/") && r.Method == http.MethodDelete:
@@ -244,6 +261,83 @@ func (w *webServer) handleLogs(resp http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{"lines": lines})
+}
+
+// handleRequestsList returns request-log records (metadata only — no bodies) for
+// the Requests UI tab, filtered by model/provider/status/time. Query params:
+// model, provider (substring, case-insensitive), status (exact int), errors
+// (any value → status>=400 only), from/to (unix or RFC3339), limit (default
+// 100, capped at 1000). enabled=false in the response when request logging is
+// off (the UI shows a hint instead of a table).
+func (w *webServer) handleRequestsList(resp http.ResponseWriter, r *http.Request) {
+	dir := w.p.reqLog.directory()
+	if dir == "" {
+		writeJSON(resp, http.StatusOK, map[string]any{"enabled": false, "records": []any{}})
+		return
+	}
+	q := r.URL.Query()
+	f := recordFilter{
+		Model:      q.Get("model"),
+		Provider:   q.Get("provider"),
+		ErrorsOnly: q.Get("errors") != "",
+		Limit:      100,
+	}
+	if v := q.Get("status"); v != "" {
+		if s, err := strconv.Atoi(v); err == nil {
+			f.Status = s
+		}
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			f.Limit = n
+		}
+	}
+	if f.Limit > 1000 {
+		f.Limit = 1000
+	}
+	if v := q.Get("from"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			f.From = time.Unix(t, 0)
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			f.To = time.Unix(t, 0)
+		}
+	}
+	recs, err := queryRequestRecords(dir, f)
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, "request query: "+err.Error())
+		return
+	}
+	summaries := make([]requestLogSummary, 0, len(recs))
+	for _, rec := range recs {
+		summaries = append(summaries, summarizeRecord(rec))
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{"enabled": true, "records": summaries})
+}
+
+// handleRequestDetail returns the FULL record(s) for one request id, including
+// request/response bodies (for the Requests UI detail drawer). Path:
+// /api/requests/<id>. 404 when logging is off or the id matches no record.
+func (w *webServer) handleRequestDetail(resp http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/requests/")
+	id = strings.Trim(id, "/")
+	dir := w.p.reqLog.directory()
+	if dir == "" || id == "" {
+		writeJSONErr(resp, http.StatusNotFound, "request logging is off or no id given")
+		return
+	}
+	recs, err := queryRequestRecords(dir, recordFilter{RequestID: id, Limit: 50})
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, "request query: "+err.Error())
+		return
+	}
+	if len(recs) == 0 {
+		writeJSONErr(resp, http.StatusNotFound, "no record for request id "+id)
+		return
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{"records": recs})
 }
 
 // tailFile returns the last n lines of path (fewer if the file is shorter).
@@ -430,6 +524,121 @@ func (w *webServer) handleStats(resp http.ResponseWriter, r *http.Request) {
 		"bucket":  bucketSecs,
 		"buckets": buckets,
 	})
+}
+
+// handleAgents returns agent-dimension buckets (which client made the request)
+// over a time range, for the `stats --by-agent` CLI / Web UI "who is burning my
+// quota" view. Query params mirror /api/stats: from, to (unix or RFC3339;
+// default last 60 minutes), optional agent/provider/model filters, and bucket
+// (display granularity; storage is always 1-minute). Nil-safe: no stats store
+// (tests) → empty list.
+func (w *webServer) handleAgents(resp http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	from := now.Add(-time.Hour).Unix()
+	to := now.Unix()
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			from = t
+		}
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, ok := parseStatsTime(v); ok {
+			to = t
+		}
+	}
+	agent := r.URL.Query().Get("agent")
+	provider := r.URL.Query().Get("provider")
+	model := r.URL.Query().Get("model")
+	bucketSecs := normalizeBucket(r.URL.Query().Get("bucket"))
+	buckets := []agentBucket{}
+	if w.p.stats != nil {
+		got, err := w.p.stats.queryAgentRange(from, to, agent, provider, model, bucketSecs)
+		if err != nil {
+			writeJSONErr(resp, http.StatusInternalServerError, "agent stats query: "+err.Error())
+			return
+		}
+		buckets = got
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"from":    from,
+		"to":      to,
+		"bucket":  bucketSecs,
+		"buckets": buckets,
+	})
+}
+
+// handlePinSet installs a manual route→provider pin (hot-switch). Body:
+// {"route": "<exposed>", "provider": "<name>", "ttl_seconds": 0}. ttl_seconds
+// <= 0 means no expiry. 200 {"route","provider","expires_at"} on success; 400 on
+// a missing/unknown route or a provider the route can't reach (the pin would be
+// a silent no-op, so reject it with a clear message).
+func (w *webServer) handlePinSet(resp http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Route      string `json:"route"`
+		Provider   string `json:"provider"`
+		TTLSeconds int64  `json:"ttl_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONErr(resp, http.StatusBadRequest, "parse pin body: "+err.Error())
+		return
+	}
+	if body.Route == "" || body.Provider == "" {
+		writeJSONErr(resp, http.StatusBadRequest, "route and provider are required")
+		return
+	}
+	ttl := time.Duration(0)
+	if body.TTLSeconds > 0 {
+		ttl = time.Duration(body.TTLSeconds) * time.Second
+	}
+	pe, ok := w.p.setPin(body.Route, body.Provider, ttl)
+	if !ok {
+		writeJSONErr(resp, http.StatusBadRequest, fmt.Sprintf(
+			"cannot pin %q to %q: no such route, or the route has no target for that provider", body.Route, body.Provider))
+		return
+	}
+	expires := ""
+	if !pe.expiresAt.IsZero() {
+		expires = pe.expiresAt.UTC().Format(time.RFC3339)
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"route":      body.Route,
+		"provider":   body.Provider,
+		"expires_at": expires,
+		"status":     "pinned",
+	})
+}
+
+// handlePinClear removes a pin. Query: ?route=<exposed>. 200 whether or not a pin
+// existed; the response reports removed=true/false so the CLI can distinguish.
+func (w *webServer) handlePinClear(resp http.ResponseWriter, r *http.Request) {
+	route := r.URL.Query().Get("route")
+	if route == "" {
+		writeJSONErr(resp, http.StatusBadRequest, "route query param is required")
+		return
+	}
+	removed := w.p.clearPin(route)
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"route":   route,
+		"removed": removed,
+	})
+}
+
+// handlePinList lists active pins (route → {provider, expires_at}).
+func (w *webServer) handlePinList(resp http.ResponseWriter, r *http.Request) {
+	pins := w.p.listPins()
+	out := make([]map[string]any, 0, len(pins))
+	for route, pe := range pins {
+		expires := ""
+		if !pe.expiresAt.IsZero() {
+			expires = pe.expiresAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, map[string]any{
+			"route":      route,
+			"provider":   pe.provider,
+			"expires_at": expires,
+		})
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{"pins": out})
 }
 
 // handleAnalytics returns per-(provider, model) calendar day/month aggregates
@@ -622,6 +831,110 @@ func (w *webServer) handleAccountAdd(resp http.ResponseWriter, r *http.Request) 
 	// the next reload/request will pick it up. Surface success regardless.
 	_ = w.p.reload(w.configFile)
 	writeJSON(resp, http.StatusOK, map[string]string{"id": id, "status": "added"})
+}
+
+// handleAccountTest runs a ONE-SHOT end-to-end probe through a single account:
+// it sends a minimal real chat request to the provider's upstream with that
+// account's credential (probeModelCallable — the same wiring `models refresh`
+// uses) and reports the outcome. Read-only: no reload, no health/sticky/quota
+// state is touched.
+//
+// Path shape: /api/accounts/<provider>/<id>/test. The id is the same account id
+// GET /api/accounts surfaces (pool id for apikey providers, AccountID for
+// aqp/codex); it selects the virtual provider key: "name#<id>" for a ≥2-account
+// pool, the plain name otherwise (mirrors buildProviders). An unknown provider
+// or an id matching no account is a 404; a provider with no probe-able model
+// (no route targets it AND an empty models: list) is a 400. The probe outcome
+// itself is always a 200 with {"status":"ok"|"failed", ...} — a failed probe is
+// a valid answer, not a server error.
+func (w *webServer) handleAccountTest(resp http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
+	rest = strings.TrimSuffix(rest, "/test")
+	parts := strings.SplitN(strings.Trim(rest, "/"), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeJSONErr(resp, http.StatusBadRequest, "expected /api/accounts/<provider>/<id>/test")
+		return
+	}
+	name, id := parts[0], parts[1]
+	cfg := w.p.snapshotConfig()
+	prov, ok := cfg.Providers[name]
+	if !ok {
+		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
+		return
+	}
+	// Resolve the account id to the virtual provider key. The id sources mirror
+	// handleAccountsList: aqp/codex read the oauth_auth file (single-credential,
+	// plain-name key), apikey providers read the credential pool (≥2 accounts →
+	// "name#<id>" virtual, 1 account → plain name).
+	key := name
+	switch prov.Provider {
+	case "aqp":
+		a, _ := provider.LoadAqpAccount(authFilePath(name, "oauth_auth"))
+		if a == nil || a.AccountID != id {
+			writeJSONErr(resp, http.StatusNotFound, "unknown account: "+id)
+			return
+		}
+	case "codex":
+		c, _ := provider.LoadCodexAccount(authFilePath(name, "oauth_auth"))
+		if c == nil || c.AccountID != id {
+			writeJSONErr(resp, http.StatusNotFound, "unknown account: "+id)
+			return
+		}
+	default:
+		pool, _ := loadPool(name, prov.Provider)
+		found := false
+		for _, a := range pool.Accounts {
+			if a.ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeJSONErr(resp, http.StatusNotFound, "unknown account: "+id)
+			return
+		}
+		if len(pool.Accounts) >= 2 {
+			key = name + "#" + id
+		}
+	}
+	// Pick a model to probe: prefer a model this provider serves in some route
+	// (sorted for determinism), else its first config model.
+	model := ""
+	if ms := routeModelsForProvider(cfg, name); len(ms) > 0 {
+		model = ms[0]
+	} else if len(prov.Models) > 0 {
+		model = prov.Models[0]
+	}
+	if model == "" {
+		writeJSONErr(resp, http.StatusBadRequest, name+" has no model to probe (no route targets it and its models: list is empty)")
+		return
+	}
+	w.p.mu.RLock()
+	impl := w.p.providers[key]
+	w.p.mu.RUnlock()
+	if impl == nil {
+		writeJSONErr(resp, http.StatusNotFound, "provider "+key+" not available (reload pending?)")
+		return
+	}
+	// The probe blocks on the upstream (up to the scheduling timeout) — run it
+	// WITHOUT holding p.mu so in-flight forwards aren't stalled.
+	client := &http.Client{Timeout: cfg.Scheduling.timeout()}
+	start := time.Now()
+	ok, status, reason := probeModelCallable(client, prov, impl, model)
+	out := map[string]any{
+		"http_status": status,
+		"latency_ms":  time.Since(start).Milliseconds(),
+		"provider":    name,
+		"account_id":  id,
+		"model":       model,
+	}
+	if ok {
+		out["status"] = "ok"
+	} else {
+		out["status"] = "failed"
+		out["reason"] = reason
+	}
+	writeJSON(resp, http.StatusOK, out)
 }
 
 // handleAccountRemove removes an account. For apikey providers it delegates to

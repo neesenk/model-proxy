@@ -43,6 +43,8 @@ func TestHelperProcess(t *testing.T) {
 		cmdModels(args)
 	case "doctor":
 		cmdDoctor(args)
+	case "test":
+		cmdTest(args)
 	case "schedule":
 		cmdSchedule(args)
 	case "config":

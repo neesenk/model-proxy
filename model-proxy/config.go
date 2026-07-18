@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,8 +23,26 @@ type Config struct {
 	Web           WebConfig                `yaml:"web"`
 	Stats         StatsConfig              `yaml:"stats"`
 	RequestLog    RequestLogConfig         `yaml:"request_log"`
-	Pricing       PricingConfig            `yaml:"pricing"`
-	Prices        map[string]PriceConfig   `yaml:"prices"`
+	Cache         CacheConfig              `yaml:"cache"`
+	// Shadow maps an exposed model to a candidate backend to evaluate: each
+	// committed request to the route is ALSO sent to the shadow provider (same
+	// prompt, the shadow's model), logged for quality/latency comparison, and the
+	// result is NOT returned to the client. Empty/missing = off. Requires
+	// request_log to record shadow results.
+	Shadow  map[string]ShadowTarget `yaml:"shadow"`
+	Pricing PricingConfig           `yaml:"pricing"`
+	Prices  map[string]PriceConfig  `yaml:"prices"`
+}
+
+// ShadowTarget names the candidate backend for shadow evaluation of a route.
+type ShadowTarget struct {
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+	// Protocol declares the shadow backend's protocol ("anthropic"|"openai"). Empty
+	// = same as the request body's protocol (the primary target's backend proto).
+	// Set it when the shadow backend speaks a different protocol than the body the
+	// shadow request is built from — runShadow converts + routes accordingly.
+	Protocol string `yaml:"protocol"`
 }
 
 // WebConfig toggles the admin UI (/ui + /api). Defaults to enabled.
@@ -342,6 +361,12 @@ type RouteTarget struct {
 	Provider string `yaml:"provider"` // config providers[] key
 	Model    string `yaml:"model"`    // real model name at that provider
 	Priority int    `yaml:"priority"` // lower = tried first within a tier/quota band (default 0)
+	// Protocol declares the backend's protocol ("anthropic" or "openai") for
+	// protocol CONVERSION (#11). Empty = same as the client (no conversion, the
+	// default). Set it when a backend speaks a different protocol than the client
+	// (e.g. Claude Code → an OpenAI backend). Conversion covers text/system/
+	// max_tokens/stream; see convert.go.
+	Protocol string `yaml:"protocol"`
 }
 
 type Takeover struct {
@@ -398,6 +423,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Web           WebConfig                `yaml:"web"`
 		Stats         StatsConfig              `yaml:"stats"`
 		RequestLog    RequestLogConfig         `yaml:"request_log"`
+		Cache         CacheConfig              `yaml:"cache"`
+		Shadow        map[string]ShadowTarget  `yaml:"shadow"`
 		Pricing       PricingConfig            `yaml:"pricing"`
 		Prices        map[string]PriceConfig   `yaml:"prices"`
 	}
@@ -428,6 +455,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Web = raw.Web
 	cfg.Stats = raw.Stats
 	cfg.RequestLog = raw.RequestLog
+	cfg.Cache = raw.Cache
+	cfg.Shadow = raw.Shadow
 	cfg.Pricing = raw.Pricing
 	cfg.Prices = raw.Prices
 	cfg.LogFile = expandPath(cfg.LogFile)
@@ -464,18 +493,43 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	return cfg, nil
 }
 
+// requireLoopbackListen rejects non-loopback listen addresses. /api/* and /ui/
+// are unauthenticated, so binding to anything but loopback exposes config
+// editing and account management to the whole network.
+func requireLoopbackListen(listen string) error {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("listen %q is invalid (%v) — use 127.0.0.1:PORT", listen, err)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("listen %q is not loopback — /api/* and /ui/ have no auth, refusing to expose them; use 127.0.0.1:PORT", listen)
+}
+
 // validate returns nil if the config is valid. On failure it returns an error
 // with a human-readable message including a hint for fixing the issue.
 func (c *Config) validate() error {
 	if c.Listen == "" {
 		return fmt.Errorf("listen is empty — set `listen: 127.0.0.1:PORT` in config")
 	}
+	if err := requireLoopbackListen(c.Listen); err != nil {
+		return err
+	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("no providers configured — add at least one under `providers:`")
 	}
 	for name, p := range c.Providers {
-		if p.OpenAIBaseURL == "" {
-			return fmt.Errorf("provider %q: openai_base_url is empty — set it under providers.%s", name, name)
+		// A provider needs at least one upstream base URL. openai_base_url is the
+		// default (same-protocol openai forwarding); anthropic_base_url is used by
+		// anthropic same-protocol forwarding AND protocol:anthropic conversion
+		// targets. Requiring openai_base_url specifically would force a dummy value
+		// on pure-anthropic backends, so accept either.
+		if p.OpenAIBaseURL == "" && p.AnthropicBaseURL == "" {
+			return fmt.Errorf("provider %q: set at least one of openai_base_url / anthropic_base_url", name)
 		}
 		if p.Provider == "" {
 			return fmt.Errorf("provider %q: provider_id is empty — set `provider_id:` (e.g. zhipu, aqp, codex, deepseek, volcengine)", name)
@@ -526,6 +580,25 @@ func (c *Config) validate() error {
 			}
 			if _, ok := c.Providers[t.Provider]; !ok {
 				return fmt.Errorf("route %q target %d: provider %q not defined under providers: — check spelling or add the provider", exposed, i, t.Provider)
+			}
+			// Protocol conversion (#11): a target declaring protocol:anthropic
+			// needs the provider's anthropic_base_url (and protocol:openai needs
+			// openai_base_url); without it the converted request has no upstream
+			// base URL and 400s at runtime. Catch it at validate time.
+			if t.Protocol != "" {
+				prov := c.Providers[t.Provider]
+				switch t.Protocol {
+				case "anthropic":
+					if prov.AnthropicBaseURL == "" {
+						return fmt.Errorf("route %q target %d: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", exposed, i, t.Provider)
+					}
+				case "openai":
+					if prov.OpenAIBaseURL == "" {
+						return fmt.Errorf("route %q target %d: protocol:openai but provider %q has no openai_base_url — conversion needs it", exposed, i, t.Provider)
+					}
+				default:
+					return fmt.Errorf("route %q target %d: protocol %q is not \"anthropic\" or \"openai\"", exposed, i, t.Protocol)
+				}
 			}
 		}
 	}

@@ -412,6 +412,29 @@ claude_mapping: <N> aliases      # 仅当 >0
 - 未知子命令 -> stderr `unknown config subcommand: <SUB>` + exit 1。
 - config 加载失败（`print`/`check`）-> `log.Fatal`（stderr）+ exit 1；但 `check` 的「无效 config」走 stdout + exit 1（见上，便于脚本区分）。
 
+### Route target 字段（`routes:` 下每个 target）
+
+```yaml
+routes:
+  <exposed>:
+    - {provider: <name>, model: <upstream-model>, priority: <int>, protocol: <anthropic|openai>}
+```
+
+- `provider` / `model`：必填。`model` 是该 provider 的真实上游模型名（请求转发时 rewrite 进 body）。
+- `priority`：可选，整数，低 = 优先（同 tier/quota band 内先试）；空 = 0。
+- `protocol`：可选，**协议转换** (#11)。声明该后端说的协议；与客户端协议不同时，proxy 双向转换（request+response+streaming，含 tools/tool_use/tool_result/image）。空 = 与客户端同协议（字节透传，默认）。
+  - `validate` 会校验：`protocol: anthropic` 的 target 其 provider 必须配 `anthropic_base_url`（`protocol: openai` 同理需 `openai_base_url`），否则报错。
+  - 转换有损项（dropped + warned，不静默）：thinking/redacted_thinking 块、`cache_control` 断点、服务端 tools（web_search/computer/...）、`tool_result` 内的图片。`doctor` 会列出哪些路由发生转换 + 有损清单。
+  - 纯 anthropic 后端可只配 `anthropic_base_url`（provider 校验已放宽为「至少一个 base URL」）。
+
+### `shadow:` （配置驱动，非 CLI）
+
+```yaml
+shadow:
+  <exposed>: {provider: <P>, model: <M>, protocol: <anthropic|openai>}
+```
+路由每次已交付请求**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget，只记录不返回，`request_id` 前缀 `shadow-`）。`protocol` 可选：声明影子后端的协议（默认与请求 body 的协议一致）；不同则 shadow 请求会做对应转换。需 `request_log.enabled`。`replay <id> --to <P>` 见 §15。
+
 ---
 
 ## 9. `schedule` — 调度查询（需 daemon）
@@ -459,9 +482,9 @@ stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--granu
 
 表头（`bucketLabel`：60->`1m`、3600 整除->`Nh`、否则`<min>m`）：
 ```
-provider         model               <BUCKET>      reqs failover     429     fail     input    output
+provider         model               <BUCKET>      reqs failover     429     fail     input    output   lat(ms)  ttft(ms)
 ```
-每行：`<PROVIDER(16)> <MODEL(18)> <MM-DD HH:MM(12)> <reqs(8)> <failover(8)> <429(8)> <fail(8)> <input(10)> <output(10)>`（`compactNum`）。
+每行：`<PROVIDER(16)> <MODEL(18)> <MM-DD HH:MM(12)> <reqs(8)> <failover(8)> <429(8)> <fail(8)> <input(10)> <output(10)> <lat(ms)(8)> <ttft(ms)(8)>`（`compactNum`）。`lat(ms)`/`ttft(ms)` = 该桶内已交付响应的平均总时延 / 平均首字时延（毫秒，`SUM/requests` 四舍五入；0 表示无已交付请求）。
 
 空结果 -> stdout `(no stats in range <FROM> .. <TO>, bucket <BUCKET>)` + 换行（`FROM`/`TO` = `MM-DD HH:MM`）。
 
@@ -476,6 +499,16 @@ provider         model               <day|month>     reqs      input    output  
 ```
 
 每行 = 一个 (provider, model) 在窗口内的 SUM（reqs/input/output）；`cost` 列仅 `--cost` 时出现，已定价 = `$X.XX`（点相加），未定价 = `n/a`。`--json` -> stdout 原始 `/api/analytics` 响应（`analyticsResp`）。两者都省略 = 走 `/api/stats`，输出与原 `stats` 完全一致。
+
+### `--by-agent`（`renderAgents` -> `/api/agents`）
+
+带 `--by-agent` 时改走 `/api/agents`（agent 维度：哪个客户端发的请求），把窗口内所有 (agent, provider, model, minute) 桶按 agent 折叠成「谁在烧我的配额」汇总表，按 input+output 总 token 降序：
+
+```
+agent                reqs        input       output
+```
+
+每行 = `<AGENT(16)> <reqs(10)> <input(12)> <output(12)>`（`compactNum`）。`--from`/`--to`/`--bucket` 仍适用；`--provider`/`--model` 过滤在此模式忽略。`--json` -> stdout 原始 `/api/agents` 响应（`agentResp`）。agent 识别见 `detectAgent`（claude-cli/x-claude-code-session-id -> `claude-code`，`codex` -> `codex`，`opencode` -> `opencode`，`pi/` -> `pi`，无 UA -> `unknown`，其余 -> `other`）。
 
 > 解析失败时，analytics 路径的报错为 `parse analytics response: <ERR>`（与 `/api/stats` 路径的 `parse stats response: <ERR>` 对应，见下节）。
 
@@ -581,6 +614,72 @@ Scheduling
 ### 失败
 
 config 无效 -> **stdout** `✗ config invalid:  <ERR>`（红）+ exit 1（注意：`doctor` 的无效路径走 stdout + exit 1，同 `config check`）。
+
+---
+
+## 13. `test <model>` — 端到端链路探测（不需 daemon）
+
+```
+test <model> [--config PATH]
+```
+
+逻辑（`test_cmd.go:18` `cmdTest`）：离线解析 `<model>` 的路由目标（claude_mapping 别名先翻译；显式 routes 按 priority 升序；无显式路由则回退隐式路由），对**每个**目标用 `probeModelCallable` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线，`test_cmd.go:86` `probeRouteTarget`）。不查询/不改动运行态。
+
+### stdout（每目标一行）
+
+成功：`✓ <MODEL> → <PROVIDER> (<UPSTREAM_MODEL>) — HTTP <CODE> (<LATENCY>)`（绿）。失败：`✗ <MODEL> → <PROVIDER> (<UPSTREAM_MODEL>) — HTTP <CODE>: <REASON> (<LATENCY>)`（红，有上游响应时）或 `✗ … — <REASON> (<LATENCY>)`（无上游响应，如 build/auth/网络错误，不显示伪造的 `HTTP 0`）。claude_mapping 命中时先打印 `claude_mapping: <ALIAS> → <EXPOSED>`。
+
+### 退出码
+
+0 = 至少一个目标 2xx；1 = 全部失败（或无路由）。无路由时 stderr `✗ no route for model "<MODEL>"; available routes: <ROUTE,…>` + exit 1。
+
+---
+
+## 14. `pin` / `unpin` — 手动钉住路由 provider（热切换，需 daemon + web.enabled）
+
+```
+pin [<route> <provider>] [--ttl DUR] [--config PATH]
+unpin <route> [--config PATH]
+```
+
+逻辑（`pin_cmd.go`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin`（`web.go` `handlePinSet`）写入 daemon 内存 `Proxy.pins`（`healthMu`）；`decideOrder` 末尾对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
+
+### stdout
+
+`pin <route> <provider>` 成功：`✓ pinned <ROUTE> → <PROVIDER> (<no expiry … | expires <RFC3339>>)`。`pin`（列表）：表头 `ROUTE PROVIDER EXPIRES` + 每行，或 `(no active pins)`。`unpin`：`✓ unpinned <ROUTE>` 或 `• no pin on <ROUTE>`（灰）。
+
+### 失败（stderr `✗ <ERR>` + exit 1）
+
+- 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
+- 路由/provider 无效（400）：`cannot pin "<ROUTE>" to "<PROVIDER>": no such route, or the route has no target for that provider`
+- `--ttl` 非法：`invalid --ttl "<V>" (use a Go duration like 1h, 30m, 2h45m)`
+
+---
+
+## 15. `replay` — 用另一后端重答（需 daemon + request_log）
+
+```
+replay <id> --to <provider> [--config PATH]
+```
+
+逻辑（`replay_cmd.go` `cmdReplay`）：从 daemon 的 `GET /api/requests/<id>` 取回原请求（method/path/body，需 `request_log.enabled`），再以 `x-mp-force-provider: <provider>` 头把同一 body 重发到 proxy（该头对**这一条请求**做一次性 provider 钉死，不动全局 pin），把新后端的响应写 stdout，用于并排对比。
+
+### stdout
+
+新后端的响应原文（raw body，SSE 则为原始事件流）。
+
+### stderr
+
+进度行：`• replay <ID> → <PROVIDER> (HTTP <CODE>)`（灰）。失败：`✗ <REASON>` + exit 1。
+
+### 失败（stderr `✗ <ERR>` + exit 1）
+
+- 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
+- 无日志：`no request log for id <ID> (is request_log.enabled on?)`（404）
+- 记录无 body：`record <ID> has no captured request body`
+- 上游 ≥400：`✗ <BODY_TRUNC_400>`
+
+> 影子评测（shadow，配置驱动，非 CLI）：`shadow: {<route>: {provider: <P>, model: <M>}}` 时，路由每次已交付请求会**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget），只记录（`request_id` 前缀 `shadow-`，provider 为影子 provider）不返回。在 Requests 页按 provider 过滤即可与主后端并排比较。需 `request_log.enabled`。
 
 ---
 

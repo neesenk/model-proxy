@@ -71,11 +71,13 @@ type statusPool struct {
 }
 
 type statusRoute struct {
-	First    string          `json:"first"`
-	Ordered  []statusOrdered `json:"ordered"`
-	Sticky   string          `json:"sticky"`
-	DwellRem float64         `json:"sticky_dwell_remaining_sec"`
-	Pools    []statusPool    `json:"pools"`
+	First      string          `json:"first"`
+	Ordered    []statusOrdered `json:"ordered"`
+	Sticky     string          `json:"sticky"`
+	DwellRem   float64         `json:"sticky_dwell_remaining_sec"`
+	Pools      []statusPool    `json:"pools"`
+	Pin        string          `json:"pin"`
+	PinExpires string          `json:"pin_expires"`
 }
 
 type statusSchedule struct {
@@ -231,6 +233,13 @@ func renderScheduleRoutes(models map[string]statusRoute, ind string) string {
 	for _, m := range names {
 		ri := models[m]
 		fmt.Fprintf(&b, "%s%s → %s\n", ind, cBold(m), cGreen(ri.First))
+		if ri.Pin != "" {
+			exp := ""
+			if ri.PinExpires != "" {
+				exp = cDim(" (" + ri.PinExpires + ")")
+			}
+			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, cYellow("pinned: "), ri.Pin, exp)
+		}
 		for _, pool := range ri.Pools {
 			fmt.Fprintf(&b, "%s    %s %s (%d accounts, %d available)\n",
 				ind, cDim("pool:"), cBold(pool.Parent), pool.Accounts, pool.Available)

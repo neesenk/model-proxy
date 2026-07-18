@@ -79,6 +79,37 @@ func TestCmdDoctor_SingleProviderNoPool(t *testing.T) {
 	}
 }
 
+// TestCmdDoctor_ConversionReport: a route target declaring a backend protocol is
+// surfaced in the doctor report with its protocol + the fixed lossy-items list.
+func TestCmdDoctor_ConversionReport(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(home+"/.model-proxy", 0o700)
+	cfgPath := writeTempConfig(t, `listen: 127.0.0.1:1
+providers:
+  oai:
+    openai_base_url: https://x.invalid
+    anthropic_base_url: https://x.invalid
+    provider_id: static
+routes:
+  claude-x:
+    - {provider: oai, model: gpt-x, priority: 1, protocol: openai}
+`)
+	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	if !strings.Contains(out, "converts when client protocol differs") {
+		t.Errorf("doctor missing conversion note:\n%s", out)
+	}
+	if !strings.Contains(out, "protocol openai") {
+		t.Errorf("doctor missing the declared protocol:\n%s", out)
+	}
+	// Lossy items list.
+	for _, want := range []string{"thinking blocks", "cache_control", "server-side tools", "tool_result images"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor missing lossy item %q:\n%s", want, out)
+		}
+	}
+}
+
 // --- schedule: live daemon payload rendered with pool grouping ---
 
 // TestCmdSchedule_PoolGrouping stands up a mock /debug/schedule daemon whose
