@@ -38,7 +38,7 @@ func TestModelFitsRequest(t *testing.T) {
 	})
 	img := []byte(`{"messages":[{"content":[{"type":"image"}]}]}`)
 	text := []byte(`{"messages":[{"content":"hi"}]}`)
-	big := []byte(`{"input":"` + strings.Repeat("x", 40000) + `"}`) // ~10k tokens
+	big := []byte(`{"input":"` + strings.Repeat("qwxz!", 8000) + `"}`) // ~10k tokens
 
 	if !modelFitsRequest(cat, "text", text) {
 		t.Error("text model + text request should fit")
@@ -108,7 +108,7 @@ func TestForward_ContextCrossRoute(t *testing.T) {
 
 	// ~10k estimated tokens > small's 8000 → in-route (small) doesn't fit →
 	// cross-route pool picks big → big-prov is hit, small-prov is not.
-	body := `{"model":"glm","input":"` + strings.Repeat("x", 40000) + `"}`
+	body := `{"model":"glm","input":"` + strings.Repeat("qwxz!", 8000) + `"}`
 	req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(body))
 	resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
 	if err != nil {

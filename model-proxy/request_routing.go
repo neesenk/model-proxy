@@ -35,15 +35,75 @@ func lookupModelMeta(cat *modelsDevCatalog, model string) (ProviderModel, bool) 
 }
 
 // estimateInputTokens returns a rough prompt-size estimate (input tokens) from
-// the raw request body. Without a tokenizer we use the standard chars/4 heuristic
-// on the whole JSON body — an OVER-estimate (JSON keys/structure inflate it),
-// which is the safe direction for a context check (better to fall back to the
-// big model than to 400). Returns 0 on an empty body.
+// the raw request body. It's rune-aware: CJK runes count ~1 token each (not
+// ~0.5 tokens like the old len/4 would give). Non-CJK bytes count at the standard
+// /4 rate. Base64 image data (long alphanumeric runs >100 chars) is excluded
+// entirely. One pass over the body — a few MB cost is negligible.
 func estimateInputTokens(body []byte) int64 {
 	if len(body) == 0 {
 		return 0
 	}
-	return int64(len(body)) / 4
+	var cjkRunes, otherBytes int64
+	i := 0
+	for i < len(body) {
+		if isBase64Run(body, i) {
+			for i < len(body) && isBase64Char(body[i]) {
+				i++
+			}
+			continue
+		}
+		r, size := decodeRune(body, i)
+		if isCJK(rune(r)) {
+			cjkRunes++
+		} else {
+			otherBytes += int64(size)
+		}
+		i += size
+	}
+	return cjkRunes + otherBytes/4
+}
+
+// decodeRune decodes a single UTF-8 rune starting at body[i]. Returns the rune
+// value (as int32) and the byte length. Falls back to (body[i], 1) on invalid
+// UTF-8.
+func decodeRune(body []byte, i int) (int32, int) {
+	b := body[i]
+	if b&0x80 == 0 {
+		return int32(b), 1
+	}
+	if b&0xE0 == 0xC0 && i+1 < len(body) {
+		return int32(b&0x1F)<<6 | int32(body[i+1]&0x3F), 2
+	}
+	if b&0xF0 == 0xE0 && i+2 < len(body) {
+		return int32(b&0x0F)<<12 | int32(body[i+1]&0x3F)<<6 | int32(body[i+2]&0x3F), 3
+	}
+	if b&0xF8 == 0xF0 && i+3 < len(body) {
+		return int32(b&0x07)<<18 | int32(body[i+1]&0x3F)<<12 | int32(body[i+2]&0x3F)<<6 | int32(body[i+3]&0x3F), 4
+	}
+	return int32(b), 1
+}
+
+// isCJK reports whether a rune is in a CJK Unicode block (approximates 1-token
+// density per rune).
+func isCJK(r rune) bool {
+	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
+		(r >= 0x3040 && r <= 0x30FF) || // Hiragana + Katakana
+		(r >= 0xAC00 && r <= 0xD7AF) // Hangul Syllables
+}
+
+// isBase64Char reports whether b is a valid base64 character.
+func isBase64Char(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') ||
+		(b >= '0' && b <= '9') || b == '+' || b == '/' || b == '='
+}
+
+// isBase64Run checks if a long base64 sequence starts at body[i] (>100 chars).
+func isBase64Run(body []byte, i int) bool {
+	j := i
+	for j < len(body) && j-i < 120 && isBase64Char(body[j]) {
+		j++
+	}
+	return j-i >= 100
 }
 
 // requestProfile captures the request-derived inputs to modelFits, computed ONCE
