@@ -29,9 +29,17 @@ type Config struct {
 	// prompt, the shadow's model), logged for quality/latency comparison, and the
 	// result is NOT returned to the client. Empty/missing = off. Requires
 	// request_log to record shadow results.
-	Shadow  map[string]ShadowTarget `yaml:"shadow"`
-	Pricing PricingConfig           `yaml:"pricing"`
-	Prices  map[string]PriceConfig  `yaml:"prices"`
+	Shadow map[string]ShadowTarget `yaml:"shadow"`
+	// ShadowSampleRate (0-1) controls what fraction of committed requests get
+	// shadowed. Default 1.0 (all). Under high QPS, set <1 to avoid doubling
+	// quota burn. 0 disables shadowing entirely.
+	ShadowSampleRate float64 `yaml:"shadow_sample_rate"`
+	// ShadowMaxConcurrent caps the number of in-flight shadow goroutines.
+	// Default 4. Additional shadows are silently dropped (best-effort) when the
+	// cap is reached, preventing goroutine explosion under high QPS.
+	ShadowMaxConcurrent int                    `yaml:"shadow_max_concurrent"`
+	Pricing             PricingConfig          `yaml:"pricing"`
+	Prices              map[string]PriceConfig `yaml:"prices"`
 }
 
 // ShadowTarget names the candidate backend for shadow evaluation of a route.

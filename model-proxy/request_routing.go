@@ -168,7 +168,15 @@ func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string
 	}
 	// Synthetic sticky key so the fallback's sticky entry doesn't collide with the
 	// route's own (and ages out as a non-route key under dwell eviction).
-	return p.schedule(cfg, parentOf, exposed+"#req", sessionKey, pool, routeKeys)
+	result := p.schedule(cfg, parentOf, exposed+"#req", sessionKey, pool, routeKeys)
+	if len(result) == 0 {
+		// All capable targets are unavailable (circuit-open/rate-limited). Fall
+		// back to the ORIGINAL ordered (which has available targets from the
+		// first schedule pass) — trying a capability-mismatched target is better
+		// than a guaranteed zero-attempt 502.
+		return ordered
+	}
+	return result
 }
 
 // forceProvider returns the one-shot provider override for a request, from the

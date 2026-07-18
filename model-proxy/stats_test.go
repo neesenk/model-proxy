@@ -274,11 +274,16 @@ func TestStatsFlusherResetPrev(t *testing.T) {
 	m.inc("z", "m", evRequests)
 	f.flush(time.Now())
 
-	// Simulate resetStats: zero in-memory + DB + flusher baseline.
+	// Simulate resetStats: zero in-memory + DB + flusher baseline (the prev-reset
+	// portion of flusher.resetAll, inlined here since the test has no *Proxy).
 	m.reset()
 	tc.reset()
 	ss.resetAll()
-	f.resetPrev()
+	f.mu.Lock()
+	f.prev = f.collect()
+	f.agentPrev = nil
+	f.lastBucket = 0
+	f.mu.Unlock()
 
 	// A flush with no new activity writes nothing.
 	if f.flush(time.Now()) {

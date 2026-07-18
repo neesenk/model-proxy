@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,25 +22,28 @@ import (
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
-	mu        sync.RWMutex // guards cfg/providers across reload (held by handler for the request)
-	healthMu  sync.Mutex   // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
-	cfg       *Config
-	providers map[string]provider.Provider // provider name → Provider (shared)
-	client    *http.Client
-	health    map[string]*providerHealth // provider name → circuit/rate-limit state
-	sticky    map[string]routeSticky     // exposed model → current provider + since
-	pins      map[string]pinEntry        // exposed model → manual pin (healthMu); hot-switch, overrides schedule
-	quota     *quotaTracker              // background quota poller; nil only in degenerate tests
-	metrics   *metricsStore              // request counters (atomic); nil only in degenerate tests
-	tokens    *tokenCounter              // SSE-scanned token usage; nil only in degenerate tests
-	agents    *agentCounter              // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats     *statsStore                // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
-	flusher   *statsFlusher              // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog    *requestLogger             // per-request access log (full bodies); nil = disabled (default) or init failure
-	cache     *responseCache             // exact-match response cache (prompt-hash + TTL); nil = disabled
-	events    *eventHub                  // live request monitor fan-out hub (SSE /api/events); always non-nil
-	catalog   *modelsDevCatalog          // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
-	pricingMu sync.Mutex                 // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
+	mu             sync.RWMutex // guards cfg/providers across reload (held by handler for the request)
+	healthMu       sync.Mutex   // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
+	cfg            *Config
+	providers      map[string]provider.Provider // provider name → Provider (shared)
+	client         *http.Client
+	health         map[string]*providerHealth // provider name → circuit/rate-limit state
+	sticky         map[string]routeSticky     // exposed model → current provider + since
+	pins           map[string]pinEntry        // exposed model → manual pin (healthMu); hot-switch, overrides schedule
+	quota          *quotaTracker              // background quota poller; nil only in degenerate tests
+	metrics        *metricsStore              // request counters (atomic); nil only in degenerate tests
+	tokens         *tokenCounter              // SSE-scanned token usage; nil only in degenerate tests
+	agents         *agentCounter              // per-agent (UA) request/token counters; nil only in degenerate tests
+	stats          *statsStore                // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
+	flusher        *statsFlusher              // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog         *requestLogger             // per-request access log (full bodies); nil = disabled (default) or init failure
+	cache          *responseCache             // exact-match response cache (prompt-hash + TTL); nil = disabled
+	events         *eventHub                  // live request monitor fan-out hub (SSE /api/events); always non-nil
+	catalog        *modelsDevCatalog          // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
+	shadowSem      chan struct{}              // concurrency gate for shadow goroutines (buffered = max concurrent)
+	shadowClient   *http.Client               // shared HTTP client for shadow requests (not per-request)
+	shadowSampRate float64                    // 0-1; fraction of requests to shadow (default 1.0)
+	pricingMu      sync.Mutex                 // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -274,6 +278,17 @@ func NewProxy(cfg *Config) *Proxy {
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
 	// UI client subscribes; publish is non-blocking so it never stalls forward.
 	p.events = newEventHub()
+	// Shadow concurrency gate + shared client + sample rate.
+	maxConc := cfg.ShadowMaxConcurrent
+	if maxConc <= 0 {
+		maxConc = 4
+	}
+	p.shadowSem = make(chan struct{}, maxConc)
+	p.shadowClient = &http.Client{Timeout: cfg.Scheduling.timeout()}
+	p.shadowSampRate = cfg.ShadowSampleRate
+	if p.shadowSampRate == 0 {
+		p.shadowSampRate = 1.0 // default: shadow all requests
+	}
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
 	if loaded := p.quota.LoadedSticky; len(loaded) > 0 {
@@ -291,6 +306,15 @@ func NewProxy(cfg *Config) *Proxy {
 // baseline (so the next flush sees zero delta rather than zero-minus-old
 // negatives). Drives POST /api/tokens/reset ("reset counters").
 func (p *Proxy) resetStats() {
+	// When a flusher exists, delegate to flusher.resetAll which does the full
+	// reset (counters + DB + baseline) UNDER the flusher's lock — preventing a
+	// concurrent per-minute flush from writing stale deltas to the just-cleared
+	// DB (the resetStats vs flush race).
+	if p.flusher != nil {
+		p.flusher.resetAll(p)
+		return
+	}
+	// Non-flusher path (degenerate tests): reset directly.
 	if p.metrics != nil {
 		p.metrics.reset()
 	}
@@ -307,9 +331,6 @@ func (p *Proxy) resetStats() {
 		if err := p.stats.resetAll(); err != nil {
 			log.Printf("[stats] resetAll failed: %v", err)
 		}
-	}
-	if p.flusher != nil {
-		p.flusher.resetPrev()
 	}
 }
 
@@ -1354,7 +1375,17 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// record the result; otherwise it's a no-op (nowhere to compare).
 		if p.reqLog != nil && len(cfg.Shadow) > 0 {
 			if sh, ok := cfg.Shadow[flc.exposed]; ok && sh.Provider != "" && sh.Provider != t.Provider {
-				go p.runShadow(proto, backendProto, calledModel, flc.exposed, sh, reqBytes)
+				if p.shouldShadow() {
+					select {
+					case p.shadowSem <- struct{}{}:
+						go func() {
+							defer func() { <-p.shadowSem }()
+							p.runShadow(proto, backendProto, calledModel, flc.exposed, sh, reqBytes)
+						}()
+					default:
+						// shadow concurrency cap reached → skip (best-effort)
+					}
+				}
 			}
 		}
 		return true
@@ -1367,6 +1398,22 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		p.metrics.inc(t.Provider, t.Model, evFailovers)
 	}
 	return false
+}
+
+// shouldShadow reports whether this request should be shadow-evaluated, based on
+// the configured sample rate (1.0 = all, 0.5 = half, 0 = none). Returns false if
+// shadow is not configured.
+func (p *Proxy) shouldShadow() bool {
+	if p.shadowSem == nil {
+		return false
+	}
+	if p.shadowSampRate >= 1 {
+		return true
+	}
+	if p.shadowSampRate <= 0 {
+		return false
+	}
+	return rand.Float64() < p.shadowSampRate
 }
 
 // runShadow sends the same prompt to a candidate backend (shadow evaluation,
@@ -1444,7 +1491,7 @@ func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow 
 	for k, v := range provCfg.Headers {
 		sreq.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: cfg.Scheduling.timeout()}
+	client := p.shadowClient // shared, not per-request
 	start := time.Now()
 	resp, err := client.Do(sreq)
 	if err != nil {

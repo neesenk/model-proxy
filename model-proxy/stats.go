@@ -776,42 +776,38 @@ func sub(a, b uint64) uint64 {
 }
 
 // flush performs one diff+upsert+prune cycle. Returns whether it wrote.
+//
+// Holds f.mu for the ENTIRE cycle (collect → diff → DB write → prune) so that
+// resetAll (the "reset counters" path) can't interleave: if reset ran between
+// the diff and the DB write, stale deltas would land in the just-cleared DB.
+// The lock is held during the SQLite write, but a flush writes ~20-200 rows in
+// <1ms, and it runs once per minute — the contention with resetAll is negligible.
 func (f *statsFlusher) flush(now time.Time) bool {
-	cur := f.collect()
 	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	cur := f.collect()
 	prev := f.prev
 	f.prev = cur
-	f.mu.Unlock()
-	deltas := diffCounters(cur, prev)
 
-	// Agent pipeline: diff the cumulative agent snapshot the same way. agentPrev
-	// starts nil, so the first flush writes only post-boot activity (no baseline
-	// restore needed — the agent counter starts empty on boot).
 	var agentDeltas map[agentKey]agentCount
 	if f.agents != nil {
 		ac := f.agents.snapshot()
 		agentDeltas = diffAgent(ac, f.agentPrev)
-		f.mu.Lock()
 		f.agentPrev = ac
-		f.mu.Unlock()
 	}
 
+	deltas := diffCounters(cur, prev)
 	if len(deltas) == 0 && len(agentDeltas) == 0 {
-		// Still prune occasionally even when idle? No - prune only when there's
-		// activity to avoid needless DELETEs every minute on an idle proxy.
 		return false
 	}
-	// Bucket = the minute that just elapsed (floor now to minute, back up one).
-	// Guard against jitter double-writing the same minute.
+
 	minute := now.Unix()/60*60 - 60
-	f.mu.Lock()
 	if minute <= f.lastBucket {
-		// Fall back to the next bucket so deltas aren't dropped; this only
-		// happens under sub-second alignment jitter.
 		minute = f.lastBucket + 60
 	}
 	f.lastBucket = minute
-	f.mu.Unlock()
+
 	if len(deltas) > 0 {
 		if err := f.stats.flushDeltas(minute, deltas); err != nil {
 			log.Printf("[stats] flush failed: %v", err)
@@ -829,6 +825,36 @@ func (f *statsFlusher) flush(now time.Time) bool {
 		log.Printf("[stats] agent prune failed: %v", err)
 	}
 	return true
+}
+
+// resetAll performs the full stats reset (in-memory counters + SQLite history +
+// the flusher's diff baseline) UNDER f.mu, preventing a concurrent flush from
+// writing stale deltas to the just-cleared DB. Proxy.resetStats delegates here
+// when a flusher exists; the non-flusher path (degenerate tests) resets directly.
+func (f *statsFlusher) resetAll(p *Proxy) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p.metrics != nil {
+		p.metrics.reset()
+	}
+	if p.tokens != nil {
+		p.tokens.reset()
+	}
+	if p.agents != nil {
+		p.agents.reset()
+	}
+	if p.cache != nil {
+		p.cache.reset()
+	}
+	if f.stats != nil {
+		if err := f.stats.resetAll(); err != nil {
+			log.Printf("[stats] resetAll failed: %v", err)
+		}
+	}
+	// Re-baseline prev to the now-zeroed counters so the next flush sees 0 delta.
+	f.prev = f.collect()
+	f.agentPrev = nil
+	f.lastBucket = 0
 }
 
 // diffAgent returns per-key agent deltas (cur - prev), clamped at 0. Keys with no
@@ -850,16 +876,7 @@ func diffAgent(cur, prev map[agentKey]agentCount) map[agentKey]agentCount {
 	return out
 }
 
-// resetPrev resets the diff baseline to the current in-memory snapshot. Called
-// after Proxy.resetStats zeroes the counters so the next flush sees zero delta
-// instead of (zero - old) negatives.
-func (f *statsFlusher) resetPrev() {
-	f.mu.Lock()
-	f.prev = f.collect()
-	f.agentPrev = nil
-	f.lastBucket = 0
-	f.mu.Unlock()
-}
+// (resetPrev removed — superseded by resetAll which does the full reset under mu.)
 
 // statsFlushLoop ticks at wall-clock minute boundaries, flushing per-minute
 // deltas to SQLite. Nil-safe so a Proxy without a flusher (degenerate tests) is
