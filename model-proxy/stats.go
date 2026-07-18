@@ -136,10 +136,19 @@ CREATE TABLE IF NOT EXISTS agent_buckets (
 	requests  INTEGER NOT NULL DEFAULT 0,
 	input     INTEGER NOT NULL DEFAULT 0,
 	output    INTEGER NOT NULL DEFAULT 0,
+	latency_ms_sum INTEGER NOT NULL DEFAULT 0,
+	failures  INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (agent, provider, model, minute)
 );
 CREATE INDEX IF NOT EXISTS idx_agent_minute ON agent_buckets(minute);`)
 	if err != nil {
+		return fmt.Errorf("migrate stats schema: %w", err)
+	}
+	// Additive migration for agent_buckets latency/failures columns.
+	if err := s.ensureColumns("agent_buckets", [][2]string{
+		{"latency_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
+		{"failures", "INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
 		return fmt.Errorf("migrate stats schema: %w", err)
 	}
 	// Additive migration for DBs created before latency columns existed: CREATE
@@ -560,13 +569,15 @@ func localDayStart(d, granularity string) int64 {
 // minute) + that minute's request count and observed input/output tokens.
 // Returned by queryAgentRange for /api/agents and the `stats --by-agent` CLI.
 type agentBucket struct {
-	Agent    string `json:"agent"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	Minute   int64  `json:"minute"`
-	Requests uint64 `json:"requests"`
-	Input    uint64 `json:"input"`
-	Output   uint64 `json:"output"`
+	Agent      string `json:"agent"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	Minute     int64  `json:"minute"`
+	Requests   uint64 `json:"requests"`
+	Input      uint64 `json:"input"`
+	Output     uint64 `json:"output"`
+	LatencySum uint64 `json:"latency_ms_sum"`
+	Failures   uint64 `json:"failures"`
 }
 
 // flushAgentDeltas upserts per-minute agent deltas (additive counters). Mirrors
@@ -581,18 +592,20 @@ func (s *statsStore) flushAgentDeltas(minute int64, deltas map[agentKey]agentCou
 	}
 	defer tx.Rollback() //nolint:errcheck
 	stmt, err := tx.Prepare(`INSERT INTO agent_buckets
-		(agent, provider, model, minute, requests, input, output)
-		VALUES (?,?,?,?,?,?,?)
+		(agent, provider, model, minute, requests, input, output, latency_ms_sum, failures)
+		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(agent, provider, model, minute) DO UPDATE SET
 			requests = requests + excluded.requests,
 			input = input + excluded.input,
-			output = output + excluded.output`)
+			output = output + excluded.output,
+			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
+			failures = failures + excluded.failures`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 	for k, d := range deltas {
-		if _, err := stmt.Exec(k.Agent, k.Provider, k.Model, minute, d.Requests, d.Input, d.Output); err != nil {
+		if _, err := stmt.Exec(k.Agent, k.Provider, k.Model, minute, d.Requests, d.Input, d.Output, d.LatencySum, d.Failures); err != nil {
 			return err
 		}
 	}
@@ -604,10 +617,10 @@ func (s *statsStore) flushAgentDeltas(minute int64, deltas map[agentKey]agentCou
 // queryRange (1-minute storage is lossless). Ordered by agent, provider, model,
 // minute.
 func (s *statsStore) queryAgentRange(from, to int64, agent, provider, model string, bucketSecs int64) ([]agentBucket, error) {
-	selectCols := "agent, provider, model, minute, requests, input, output"
+	selectCols := "agent, provider, model, minute, requests, input, output, latency_ms_sum, failures"
 	groupCols := ""
 	if bucketSecs > 60 {
-		selectCols = "agent, provider, model, (minute / ?) * ? AS minute, SUM(requests), SUM(input), SUM(output)"
+		selectCols = "agent, provider, model, (minute / ?) * ? AS minute, SUM(requests), SUM(input), SUM(output), SUM(latency_ms_sum), SUM(failures)"
 		groupCols = ", (minute / ?) * ?"
 	}
 	q := "SELECT " + selectCols + " FROM agent_buckets WHERE minute >= ? AND minute <= ?"
@@ -640,7 +653,7 @@ func (s *statsStore) queryAgentRange(from, to int64, agent, provider, model stri
 	var out []agentBucket
 	for rows.Next() {
 		var b agentBucket
-		if err := rows.Scan(&b.Agent, &b.Provider, &b.Model, &b.Minute, &b.Requests, &b.Input, &b.Output); err != nil {
+		if err := rows.Scan(&b.Agent, &b.Provider, &b.Model, &b.Minute, &b.Requests, &b.Input, &b.Output, &b.LatencySum, &b.Failures); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -864,11 +877,13 @@ func diffAgent(cur, prev map[agentKey]agentCount) map[agentKey]agentCount {
 	for k, c := range cur {
 		p := prev[k]
 		d := agentCount{
-			Requests: sub(c.Requests, p.Requests),
-			Input:    sub(c.Input, p.Input),
-			Output:   sub(c.Output, p.Output),
+			Requests:   sub(c.Requests, p.Requests),
+			Input:      sub(c.Input, p.Input),
+			Output:     sub(c.Output, p.Output),
+			LatencySum: sub(c.LatencySum, p.LatencySum),
+			Failures:   sub(c.Failures, p.Failures),
 		}
-		if d.Requests == 0 && d.Input == 0 && d.Output == 0 {
+		if d.Requests == 0 && d.Input == 0 && d.Output == 0 && d.LatencySum == 0 && d.Failures == 0 {
 			continue
 		}
 		out[k] = d

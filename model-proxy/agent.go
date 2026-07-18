@@ -56,9 +56,11 @@ type agentKey struct {
 // agentCounter.mu (get-or-create and read-modify-write are one critical section,
 // mirroring tokenCounter so two concurrent scanners can't lose an increment).
 type agentCount struct {
-	Requests uint64
-	Input    uint64
-	Output   uint64
+	Requests   uint64
+	Input      uint64
+	Output     uint64
+	LatencySum uint64 // cumulative upstream latency ms (commit-only)
+	Failures   uint64 // all-targets-failed 502 count
 }
 
 type agentCounter struct {
@@ -116,6 +118,39 @@ func (a *agentCounter) snapshot() map[agentKey]agentCount {
 		out[k] = *v
 	}
 	return out
+}
+
+// addLatency records the upstream response latency (ms) for one (agent,provider,
+// model) — called on commit alongside the metrics addLatency.
+func (a *agentCounter) addLatency(agent, provider, model string, ms uint64) {
+	if a == nil || agent == "" {
+		return
+	}
+	k := agentKey{Agent: agent, Provider: provider, Model: model}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c := a.m[k]
+	if c == nil {
+		c = &agentCount{}
+		a.m[k] = c
+	}
+	c.LatencySum += ms
+}
+
+// incFailure bumps the failure count (all-targets-failed 502) for an agent.
+func (a *agentCounter) incFailure(agent, provider, model string) {
+	if a == nil || agent == "" {
+		return
+	}
+	k := agentKey{Agent: agent, Provider: provider, Model: model}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c := a.m[k]
+	if c == nil {
+		c = &agentCount{}
+		a.m[k] = c
+	}
+	c.Failures++
 }
 
 func (a *agentCounter) reset() {

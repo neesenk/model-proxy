@@ -1071,6 +1071,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	// directed there — it just failed).
 	if p.agents != nil && agent != "" && len(ordered) > 0 {
 		p.agents.incRequests(agent, ordered[0].Provider, ordered[0].Model)
+		p.agents.incFailure(agent, ordered[0].Provider, ordered[0].Model)
 	}
 	// Live monitor (#6): every target failed → emit an end event so the live view
 	// surfaces the 502 (otherwise a retry-looping agent that always 502s is
@@ -1351,6 +1352,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// Attribute this served request to the calling agent (parallel pipeline).
 		if p.agents != nil && agent != "" {
 			p.agents.incRequests(agent, t.Provider, t.Model)
+			p.agents.addLatency(agent, t.Provider, t.Model, uint64(upstreamMs))
 		}
 		// Store the exact-match cache entry for this 2xx response — only when the
 		// capture is COMPLETE: not truncated by the size cap, AND sawEOF (the body

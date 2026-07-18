@@ -369,6 +369,8 @@ func formatAgentsTable(resp agentResp) string {
 		Requests uint64
 		Input    uint64
 		Output   uint64
+		Latency  uint64
+		Failures uint64
 	}
 	per := map[string]*agentTotals{}
 	for _, b := range resp.Buckets {
@@ -380,6 +382,8 @@ func formatAgentsTable(resp agentResp) string {
 		t.Requests += b.Requests
 		t.Input += b.Input
 		t.Output += b.Output
+		t.Latency += b.LatencySum
+		t.Failures += b.Failures
 	}
 	agents := make([]string, 0, len(per))
 	for a := range per {
@@ -393,10 +397,16 @@ func formatAgentsTable(resp agentResp) string {
 		}
 		return agents[i] < agents[j]
 	})
-	out := fmt.Sprintf("%-16s %10s %12s %12s\n", "agent", "reqs", "input", "output")
+	out := fmt.Sprintf("%-16s %10s %12s %12s %8s %8s\n", "agent", "reqs", "input", "output", "lat", "fail")
 	for _, a := range agents {
 		t := per[a]
-		out += fmt.Sprintf("%-16.16s %10s %12s %12s\n", a, compactNum(t.Requests), compactNum(t.Input), compactNum(t.Output))
+		avgLat := uint64(0)
+		if t.Requests > 0 {
+			avgLat = t.Latency / t.Requests
+		}
+		out += fmt.Sprintf("%-16.16s %10s %12s %12s %8s %8s\n",
+			a, compactNum(t.Requests), compactNum(t.Input), compactNum(t.Output),
+			compactNum(avgLat), compactNum(t.Failures))
 	}
 	return out
 }
