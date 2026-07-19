@@ -274,9 +274,10 @@ func (w *webServer) handleLogs(resp http.ResponseWriter, r *http.Request) {
 // handleRequestsList returns request-log records (metadata only — no bodies) for
 // the Requests UI tab, filtered by model/provider/status/time. Query params:
 // model, provider (substring, case-insensitive), status (exact int), errors
-// (any value → status>=400 only), from/to (unix or RFC3339), limit (default
-// 100, capped at 1000). enabled=false in the response when request logging is
-// off (the UI shows a hint instead of a table).
+// (any value → status>=400 only), shadow ("only" = shadow records only,
+// "exclude" = no shadow records; other values ignored), from/to (unix or
+// RFC3339), limit (default 100, capped at 1000). enabled=false in the response
+// when request logging is off (the UI shows a hint instead of a table).
 func (w *webServer) handleRequestsList(resp http.ResponseWriter, r *http.Request) {
 	dir := w.p.reqLog.directory()
 	if dir == "" {
@@ -289,6 +290,9 @@ func (w *webServer) handleRequestsList(resp http.ResponseWriter, r *http.Request
 		Provider:   q.Get("provider"),
 		ErrorsOnly: q.Get("errors") != "",
 		Limit:      100,
+	}
+	if v := q.Get("shadow"); v == "only" || v == "exclude" {
+		f.Shadow = v
 	}
 	if v := q.Get("status"); v != "" {
 		if s, err := strconv.Atoi(v); err == nil {

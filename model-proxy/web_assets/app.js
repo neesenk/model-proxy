@@ -309,9 +309,9 @@ function activateTabSilent(name) {
 
 // ---------- Requests tab (request-log query UI) ----------
 
-// Per-tab filter state (model/provider substring + errors-only). Persists across
-// re-renders within a session so a refresh keeps the view.
-let requestsFilter = { model: '', provider: '', errors: false };
+// Per-tab filter state (model/provider substring + errors-only + shadow tri-state).
+// Persists across re-renders within a session so a refresh keeps the view.
+let requestsFilter = { model: '', provider: '', errors: false, shadow: '' };
 
 // renderRequestsTab builds the request-log query view: a filter row + a table of
 // metadata-only summaries fetched from /api/requests, with click-to-expand rows
@@ -325,6 +325,11 @@ async function renderRequestsTab() {
       <input id="req-model" placeholder="model filter" value="${esc(requestsFilter.model)}" class="req-input"/>
       <input id="req-provider" placeholder="provider filter" value="${esc(requestsFilter.provider)}" class="req-input"/>
       <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> errors only</label>
+      <select id="req-shadow" class="req-input">
+        <option value="" ${requestsFilter.shadow === '' ? 'selected' : ''}>all</option>
+        <option value="only" ${requestsFilter.shadow === 'only' ? 'selected' : ''}>shadow only</option>
+        <option value="exclude" ${requestsFilter.shadow === 'exclude' ? 'selected' : ''}>no shadow</option>
+      </select>
       <button id="req-refresh" class="btn">Refresh</button>
     </div>
     <div id="req-table"></div>
@@ -334,9 +339,11 @@ async function renderRequestsTab() {
     requestsFilter.model = document.getElementById('req-model').value.trim();
     requestsFilter.provider = document.getElementById('req-provider').value.trim();
     requestsFilter.errors = document.getElementById('req-errors').checked;
+    requestsFilter.shadow = document.getElementById('req-shadow').value;
     loadRequests();
   };
   document.getElementById('req-refresh').onclick = refresh;
+  document.getElementById('req-shadow').onchange = refresh;
   for (const id of ['req-model', 'req-provider']) {
     document.getElementById(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') refresh(); });
   }
@@ -352,6 +359,7 @@ async function loadRequests() {
   if (requestsFilter.model) q.set('model', requestsFilter.model);
   if (requestsFilter.provider) q.set('provider', requestsFilter.provider);
   if (requestsFilter.errors) q.set('errors', '1');
+  if (requestsFilter.shadow) q.set('shadow', requestsFilter.shadow);
   q.set('limit', '200');
   let resp;
   try {
@@ -375,7 +383,7 @@ async function loadRequests() {
       <td class="mono">${esc(fmtTime(r.ts))}</td>
       <td class="num ${r.status >= 400 ? 'err' : ''}">${r.status}</td>
       <td>${esc(r.exposed || r.called_model)}</td>
-      <td class="mono">${esc(r.provider)}</td>
+      <td class="mono">${esc(r.provider)}${r.shadow ? ' <span class="badge muted">shadow</span>' : ''}</td>
       <td class="num">${fmtNum(r.latency_ms)}</td>
       <td class="num">${fmtNum(r.request_size)}</td>
       <td class="num">${fmtNum(r.response_size)}</td>

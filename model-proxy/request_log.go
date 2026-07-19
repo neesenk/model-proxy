@@ -333,12 +333,15 @@ func (l *requestLogger) sweep(now time.Time, curActive string) {
 // Model/Provider match as case-insensitive substrings against the relevant
 // record fields; Status matches exactly (0 = any); From/To bound the record's
 // RFC3339 timestamp (zero = unbounded). Limit caps the result count (0 = no cap).
+// Shadow is a tri-state: "only" keeps shadow records, "exclude" drops them,
+// "" keeps everything.
 type recordFilter struct {
 	Model      string
 	Provider   string
 	Status     int
 	ErrorsOnly bool
 	RequestID  string
+	Shadow     string
 	From       time.Time
 	To         time.Time
 	Limit      int
@@ -362,6 +365,16 @@ func (f recordFilter) matches(r requestLogRecord) bool {
 	}
 	if f.ErrorsOnly && r.Status < 400 {
 		return false
+	}
+	switch f.Shadow {
+	case "only":
+		if !r.Shadow {
+			return false
+		}
+	case "exclude":
+		if r.Shadow {
+			return false
+		}
 	}
 	if !f.From.IsZero() || !f.To.IsZero() {
 		ts, err := time.Parse(time.RFC3339, r.Ts)
@@ -462,6 +475,7 @@ type requestLogSummary struct {
 	LatencyMs     int64  `json:"latency_ms"`
 	RequestSize   int    `json:"request_size"`
 	ResponseSize  int64  `json:"response_size"`
+	Shadow        bool   `json:"shadow,omitempty"`
 }
 
 func summarizeRecord(r requestLogRecord) requestLogSummary {
@@ -470,6 +484,7 @@ func summarizeRecord(r requestLogRecord) requestLogSummary {
 		Method: r.Method, Path: r.Path, Exposed: r.Exposed, CalledModel: r.CalledModel,
 		UpstreamModel: r.UpstreamModel, Provider: r.Provider, Attempt: r.Attempt,
 		Status: r.Status, LatencyMs: r.LatencyMs, RequestSize: r.RequestSize, ResponseSize: r.ResponseSize,
+		Shadow: r.Shadow,
 	}
 }
 

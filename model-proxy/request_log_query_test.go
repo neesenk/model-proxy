@@ -85,6 +85,31 @@ func firstID(rs []requestLogRecord) string {
 	return rs[0].RequestID
 }
 
+// TestRecordFilterMatches_Shadow: the Shadow tri-state filters on the record's
+// Shadow bool ("" = all, "only" = shadow only, "exclude" = no shadow).
+func TestRecordFilterMatches_Shadow(t *testing.T) {
+	shadow := requestLogRecord{Ts: "2026-07-18T10:00:00Z", RequestID: "shadow-a", Shadow: true}
+	primary := requestLogRecord{Ts: "2026-07-18T10:00:00Z", RequestID: "a"}
+	cases := []struct {
+		name   string
+		filter string
+		rec    requestLogRecord
+		want   bool
+	}{
+		{"empty keeps shadow", "", shadow, true},
+		{"empty keeps primary", "", primary, true},
+		{"only keeps shadow", "only", shadow, true},
+		{"only drops primary", "only", primary, false},
+		{"exclude drops shadow", "exclude", shadow, false},
+		{"exclude keeps primary", "exclude", primary, true},
+	}
+	for _, c := range cases {
+		if got := (recordFilter{Shadow: c.filter}).matches(c.rec); got != c.want {
+			t.Errorf("%s: matches() = %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // TestHandleRequests_ListAndDetail: the /api/requests list omits bodies; the
 // /api/requests/<id> detail includes them; a missing id 404s; logging-off reports
 // enabled=false.
@@ -146,5 +171,60 @@ func TestHandleRequests_ListAndDetail(t *testing.T) {
 	mux2.ServeHTTP(rec4, httptest.NewRequest("GET", "/api/requests", nil))
 	if !strings.Contains(rec4.Body.String(), `"enabled":false`) {
 		t.Errorf("logging off should report enabled=false: %s", rec4.Body.String())
+	}
+}
+
+// TestHandleRequests_ShadowFilter: /api/requests?shadow=only returns only shadow
+// records, shadow=exclude drops them, and summaries carry the shadow flag.
+func TestHandleRequests_ShadowFilter(t *testing.T) {
+	dir := t.TempDir()
+	writeReqLog(t, dir, "requests-20260718-100000.log", []requestLogRecord{
+		{Ts: "2026-07-18T10:00:00Z", RequestID: "a", Exposed: "glm", Provider: "zhipu", Status: 200},
+		{Ts: "2026-07-18T10:00:01Z", RequestID: "shadow-a", Exposed: "glm", Provider: "deepseek", Status: 200, Shadow: true},
+	})
+
+	p := NewProxy(&Config{
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
+	})
+	p.reqLog = &requestLogger{dir: dir} // no goroutine; only .directory() is used
+	w := newWebServer(p, "test-config.yaml")
+	mux := http.NewServeMux()
+	w.register(mux)
+
+	get := func(query string) string {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/requests?"+query, nil))
+		if rec.Code != 200 {
+			t.Fatalf("list ?%s status=%d", query, rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	// No filter → both records; the shadow one carries "shadow":true.
+	body := get("")
+	if !strings.Contains(body, `"request_id":"a"`) || !strings.Contains(body, `"request_id":"shadow-a"`) {
+		t.Errorf("no-filter list missing records: %s", body)
+	}
+	if !strings.Contains(body, `"shadow":true`) {
+		t.Errorf("summary must mark shadow records: %s", body)
+	}
+
+	// shadow=only → only the shadow record.
+	body = get("shadow=only")
+	if !strings.Contains(body, `"request_id":"shadow-a"`) || strings.Contains(body, `"request_id":"a"`) {
+		t.Errorf("shadow=only = %s want only the shadow record", body)
+	}
+
+	// shadow=exclude → only the primary record.
+	body = get("shadow=exclude")
+	if !strings.Contains(body, `"request_id":"a"`) || strings.Contains(body, `"request_id":"shadow-a"`) {
+		t.Errorf("shadow=exclude = %s want only the primary record", body)
+	}
+
+	// Invalid value → ignored (both records).
+	body = get("shadow=bogus")
+	if !strings.Contains(body, `"request_id":"a"`) || !strings.Contains(body, `"request_id":"shadow-a"`) {
+		t.Errorf("shadow=bogus should be ignored (all records): %s", body)
 	}
 }
