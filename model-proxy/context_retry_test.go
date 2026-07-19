@@ -275,6 +275,64 @@ func TestForward_ContextOverflowRetry_NoBiggerTarget(t *testing.T) {
 // TestForward_ContextOverflowRetry_NoCatalog: without a catalog the feature is
 // a no-op — an overflow-shaped 400 commits unchanged (mirrors the proactive
 // routing degradation).
+// TestForward_ContextOverflowRetry_F3_UntriedTargets: a route has
+// [A(8k, p1), B(128k, p2)]. A overflows. Before the F3 fix, `tried := ordered`
+// captured BOTH targets (including untried B), so maxContext=128k and the
+// "strictly larger" filter found nothing → B was never tried. After the fix,
+// `alreadyTried := ordered[:ti+1]` captures only A → maxContext=8k → B(128k) >
+// 8k → retry succeeds on B.
+func TestForward_ContextOverflowRetry_F3_UntriedTargets(t *testing.T) {
+	var smallHits, bigHits int
+	smallUp := overflowServer(`{"error":{"code":"context_length_exceeded","message":"context length exceeded"}}`, &smallHits)
+	defer smallUp.Close()
+	bigUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bigHits++
+		w.Write([]byte(`{"from":"big"}`))
+	}))
+	defer bigUp.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
+			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: "static"},
+		},
+		Routes: map[string][]RouteTarget{
+			// SAME route: small (priority 1, tried first) + big (priority 2).
+			"glm": {
+				{Provider: "small-prov", Model: "small", Priority: 1},
+				{Provider: "big-prov", Model: "big", Priority: 2},
+			},
+		},
+	}
+	p := NewProxy(cfg)
+	p.providers["small-prov"] = &testProv{key: "s"}
+	p.providers["big-prov"] = &testProv{key: "b"}
+	p.catalog = testCatalog(map[string]struct {
+		Context int64
+		Input   []string
+	}{"small": {Context: 8000}, "big": {Context: 128000}})
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(`{"model":"glm","input":"hi"}`))
+	resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 || string(got) != `{"from":"big"}` {
+		t.Errorf("status=%d body=%s — big-prov (untried, larger context) should have been the retry target", resp.StatusCode, got)
+	}
+	if smallHits != 1 {
+		t.Errorf("small-prov hits=%d want 1 (tried first, overflowed)", smallHits)
+	}
+	if bigHits != 1 {
+		t.Errorf("big-prov hits=%d want 1 (retry target)", bigHits)
+	}
+}
+
 func TestForward_ContextOverflowRetry_NoCatalog(t *testing.T) {
 	var smallHits int
 	body := `{"err":"small-overflow","code":"context_length_exceeded"}`

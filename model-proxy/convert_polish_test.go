@@ -55,9 +55,12 @@ func TestSanitizeToolUseID(t *testing.T) {
 	if got := sanitizeToolUseID("a b/c.d:e"); got != "a_b_c_d_e" {
 		t.Errorf("mixed illegal chars = %q want a_b_c_d_e", got)
 	}
+	// F2 fix: two empty ids must produce DIFFERENT sanitized ids (unique counter),
+	// not the same sha256(nil) constant — a collision breaks tool_use↔tool_result
+	// pairing when a response has multiple empty-id tool calls.
 	e1, e2 := sanitizeToolUseID(""), sanitizeToolUseID("")
-	if e1 != e2 || !strings.HasPrefix(e1, "toolu_") || len(e1) != len("toolu_")+8 {
-		t.Errorf("empty id = %q/%q want identical toolu_<8 hash>", e1, e2)
+	if e1 == e2 || !strings.HasPrefix(e1, "toolu_empty_") || !strings.HasPrefix(e2, "toolu_empty_") {
+		t.Errorf("empty ids = %q/%q want distinct toolu_empty_<n>", e1, e2)
 	}
 	if sanitizeToolUseID("functions.Bash:0") != sanitizeToolUseID("functions.Bash:0") {
 		t.Error("same raw id must always map to the same sanitized id")
@@ -159,8 +162,8 @@ func TestConvertRequest_ParallelToolCalls(t *testing.T) {
 		t.Errorf("a→o parallel_tool_calls = %v want false", o.(map[string]any)["parallel_tool_calls"])
 	}
 
-	// openai → anthropic, with an existing tool_choice.
-	in2 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"tool_choice":"required","parallel_tool_calls":false}`)
+	// openai → anthropic, with an existing tool_choice AND tools.
+	in2 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"tool_choice":"required","parallel_tool_calls":false}`)
 	out2, err := convertOpenAIRequestToAnthropic(in2)
 	if err != nil {
 		t.Fatal(err)
@@ -170,8 +173,9 @@ func TestConvertRequest_ParallelToolCalls(t *testing.T) {
 		t.Errorf("o→a tool_choice = %+v want {type:any, disable_parallel_tool_use:true}", tc)
 	}
 
-	// openai → anthropic, NO client tool_choice → synthesized {type:auto}.
-	in3 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"parallel_tool_calls":false}`)
+	// openai → anthropic, NO client tool_choice but WITH tools → synthesized
+	// {type:auto} + disable_parallel_tool_use (F1 fix: tools must be present).
+	in3 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"parallel_tool_calls":false}`)
 	out3, err := convertOpenAIRequestToAnthropic(in3)
 	if err != nil {
 		t.Fatal(err)
@@ -181,9 +185,20 @@ func TestConvertRequest_ParallelToolCalls(t *testing.T) {
 		t.Errorf("o→a synthesized tool_choice = %+v want {type:auto, disable_parallel_tool_use:true}", tc3)
 	}
 
-	// openai → anthropic, tool_choice none must NOT carry the flag (anthropic
-	// rejects the combination).
-	in4 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"tool_choice":"none","parallel_tool_calls":false}`)
+	// F1 fix: parallel_tool_calls:false WITHOUT tools → no tool_choice synthesized
+	// (anthropic rejects a tool_choice with no tools).
+	in3b := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"parallel_tool_calls":false}`)
+	out3b, err := convertOpenAIRequestToAnthropic(in3b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, has := mustJSON(t, out3b).(map[string]any)["tool_choice"]; has {
+		t.Errorf("F1: parallel_tool_calls:false without tools should NOT synthesize tool_choice")
+	}
+
+	// openai → anthropic, tool_choice none WITH tools must NOT carry the flag
+	// (anthropic rejects the combination).
+	in4 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"tool_choice":"none","parallel_tool_calls":false}`)
 	out4, err := convertOpenAIRequestToAnthropic(in4)
 	if err != nil {
 		t.Fatal(err)

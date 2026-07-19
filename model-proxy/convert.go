@@ -2,13 +2,13 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // convert.go implements PROTOCOL CONVERSION (#11): let a client speak one protocol
@@ -476,13 +476,15 @@ func parseToolArgs(args string) any {
 
 // sanitizeToolUseID rewrites an openai tool_call id into anthropic's tool_use id
 // charset (^[a-zA-Z0-9_-]+$): illegal characters become "_" and an empty id gets
-// a stable placeholder (toolu_<sha256 prefix>) so a tool_use and its tool_result
-// stay joinable. Pure + deterministic — clients echo these ids back in history,
-// so the same raw id must always yield the same sanitized id.
+// a unique placeholder (toolu_empty_<counter>) so multiple empty-id tool calls in
+// one response don't collide. Within a single convertOpenAIRequestToAnthropic call,
+// the per-call idMap memo ensures the SAME original id always yields the SAME
+// sanitized id (clients echo these ids back in history).
+var emptyToolIDCounter atomic.Uint64
+
 func sanitizeToolUseID(id string) string {
 	if id == "" {
-		sum := sha256.Sum256(nil)
-		return "toolu_" + fmt.Sprintf("%x", sum)[:8]
+		return fmt.Sprintf("toolu_empty_%d", emptyToolIDCounter.Add(1))
 	}
 	return strings.Map(func(r rune) rune {
 		switch {
@@ -651,17 +653,19 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 			out["tool_choice"] = at
 		}
 	}
-	// parallel_tool_calls:false → disable_parallel_tool_use:true. Anthropic rejects
-	// the combination with tool_choice type:"none", so skip it there; with no
-	// tool_choice at all, synthesize {type:"auto"} to carry the flag.
+	// parallel_tool_calls:false → disable_parallel_tool_use:true. Only when the
+	// request actually has tools (otherwise Anthropic rejects a tool_choice with
+	// no tools). Skip when tool_choice is already type:"none" (incompatible).
 	if ptc, ok := src["parallel_tool_calls"].(bool); ok && !ptc {
-		atm := asMap(out["tool_choice"])
-		if atm == nil {
-			atm = map[string]any{"type": "auto"}
-		}
-		if atm["type"] != "none" {
-			atm["disable_parallel_tool_use"] = true
-			out["tool_choice"] = atm
+		if toolsArr, hasTools := src["tools"].([]any); hasTools && len(toolsArr) > 0 {
+			atm := asMap(out["tool_choice"])
+			if atm == nil {
+				atm = map[string]any{"type": "auto"}
+			}
+			if atm["type"] != "none" {
+				atm["disable_parallel_tool_use"] = true
+				out["tool_choice"] = atm
+			}
 		}
 	}
 	if stops, ok := src["stop"].([]any); ok && len(stops) > 0 {

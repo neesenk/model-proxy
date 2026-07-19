@@ -1078,9 +1078,13 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		// catalog (same no-op degradation as applyRequestAwareRouting).
 		var ctxRetry func() []RouteTarget
 		if !retriedForContext && !force && cat != nil {
-			tried := ordered
+			// Only capture targets ACTUALLY tried so far (through the current
+			// index), not the full ordered list — failover targets further down
+			// haven't been attempted yet and shouldn't anchor the "strictly larger
+			// context" threshold (they might be worth trying as the retry itself).
+			alreadyTried := ordered[:ti+1]
 			ctxRetry = func() []RouteTarget {
-				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, tried, expanded, routeKeys)
+				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys)
 			}
 		}
 		committed, retried := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry)
