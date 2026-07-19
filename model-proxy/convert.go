@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -335,6 +336,12 @@ func convertAnthropicRequestToOpenAI(body []byte) ([]byte, error) {
 		if oc := anthropicToolChoiceToOpenAI(tc); oc != nil {
 			out["tool_choice"] = oc
 		}
+		// disable_parallel_tool_use:true → parallel_tool_calls:false.
+		if tcm := asMap(tc); tcm != nil {
+			if dis, _ := tcm["disable_parallel_tool_use"].(bool); dis {
+				out["parallel_tool_calls"] = false
+			}
+		}
 	}
 	if stops, ok := src["stop_sequences"].([]any); ok && len(stops) > 0 {
 		out["stop"] = stops
@@ -467,6 +474,26 @@ func parseToolArgs(args string) any {
 	return map[string]any{}
 }
 
+// sanitizeToolUseID rewrites an openai tool_call id into anthropic's tool_use id
+// charset (^[a-zA-Z0-9_-]+$): illegal characters become "_" and an empty id gets
+// a stable placeholder (toolu_<sha256 prefix>) so a tool_use and its tool_result
+// stay joinable. Pure + deterministic — clients echo these ids back in history,
+// so the same raw id must always yield the same sanitized id.
+func sanitizeToolUseID(id string) string {
+	if id == "" {
+		sum := sha256.Sum256(nil)
+		return "toolu_" + fmt.Sprintf("%x", sum)[:8]
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			return r
+		default:
+			return '_'
+		}
+	}, id)
+}
+
 // mergeConsecutiveAnthropicRoles concatenates the content blocks of consecutive
 // same-role messages. Anthropic requires strictly alternating user/assistant
 // roles (after the first user); OpenAI permits consecutive same-role messages,
@@ -516,15 +543,28 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 	var systemText string
 	var pendingTool []map[string]any // consecutive role:"tool" → one user tool_result msg
 	raw, _ := src["messages"].([]any)
+	// Anthropic constrains tool_use ids to ^[a-zA-Z0-9_-]+$ while openai history
+	// may carry ids like "functions.Bash:0". Normalize with a per-call memo so a
+	// tool_use and its tool_result(s) map to the SAME sanitized id.
+	idMap := map[string]string{}
+	normID := func(id string) string {
+		if n, ok := idMap[id]; ok {
+			return n
+		}
+		n := sanitizeToolUseID(id)
+		idMap[id] = n
+		return n
+	}
 	flushPendingTool := func() {
 		if len(pendingTool) == 0 {
 			return
 		}
 		blocks := make([]map[string]any, 0, len(pendingTool))
 		for _, tm := range pendingTool {
+			tid, _ := tm["tool_call_id"].(string)
 			blocks = append(blocks, map[string]any{
 				"type":        "tool_result",
-				"tool_use_id": tm["tool_call_id"],
+				"tool_use_id": normID(tid),
 				"content":     strOf(tm["content"]),
 			})
 		}
@@ -570,13 +610,17 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 					args, _ := fn["arguments"].(string)
 					id, _ := tcm["id"].(string)
 					blocks = append(blocks, map[string]any{
-						"type": "tool_use", "id": id, "name": name, "input": parseToolArgs(args),
+						"type": "tool_use", "id": normID(id), "name": name, "input": parseToolArgs(args),
 					})
 				}
 			}
 			if len(blocks) > 0 {
 				msgs = append(msgs, map[string]any{"role": "assistant", "content": blocks})
 			}
+		default:
+			// developer/function/... have no anthropic equivalent — never silently
+			// swallow a message.
+			convertWarn("dropping message with unknown role: " + role)
 		}
 	}
 	flushPendingTool()
@@ -605,6 +649,19 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 	if tc, ok := src["tool_choice"]; ok {
 		if at := openaiToolChoiceToAnthropic(tc); at != nil {
 			out["tool_choice"] = at
+		}
+	}
+	// parallel_tool_calls:false → disable_parallel_tool_use:true. Anthropic rejects
+	// the combination with tool_choice type:"none", so skip it there; with no
+	// tool_choice at all, synthesize {type:"auto"} to carry the flag.
+	if ptc, ok := src["parallel_tool_calls"].(bool); ok && !ptc {
+		atm := asMap(out["tool_choice"])
+		if atm == nil {
+			atm = map[string]any{"type": "auto"}
+		}
+		if atm["type"] != "none" {
+			atm["disable_parallel_tool_use"] = true
+			out["tool_choice"] = atm
 		}
 	}
 	if stops, ok := src["stop"].([]any); ok && len(stops) > 0 {
@@ -675,7 +732,7 @@ func openaiToolCallsToAnthropic(toolCalls []any) []map[string]any {
 		args, _ := fn["arguments"].(string)
 		id, _ := tcm["id"].(string)
 		out = append(out, map[string]any{
-			"type": "tool_use", "id": id, "name": name, "input": parseToolArgs(args),
+			"type": "tool_use", "id": sanitizeToolUseID(id), "name": name, "input": parseToolArgs(args),
 		})
 	}
 	return out
@@ -698,6 +755,9 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		Usage struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
+			PromptDetails    struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &src); err != nil {
@@ -729,6 +789,17 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 	if content == nil {
 		content = []map[string]any{}
 	}
+	// openai counts cached tokens as a SUBSET of prompt_tokens; anthropic counts
+	// input_tokens excluding cache reads. Split them out (clamped ≥0).
+	cached := src.Usage.PromptDetails.CachedTokens
+	inTok := src.Usage.PromptTokens - cached
+	if inTok < 0 {
+		inTok = 0
+	}
+	usage := map[string]any{"input_tokens": inTok, "output_tokens": src.Usage.CompletionTokens}
+	if cached > 0 {
+		usage["cache_read_input_tokens"] = cached
+	}
 	out := map[string]any{
 		"id":          "msg_" + src.ID,
 		"type":        "message",
@@ -736,10 +807,7 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		"model":       src.Model,
 		"content":     content,
 		"stop_reason": stopReason,
-		"usage": map[string]any{
-			"input_tokens":  src.Usage.PromptTokens,
-			"output_tokens": src.Usage.CompletionTokens,
-		},
+		"usage":       usage,
 	}
 	return json.Marshal(out)
 }
@@ -759,8 +827,10 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &src); err != nil {
@@ -793,16 +863,23 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 			msg["content"] = nil
 		}
 	}
+	// anthropic counts cache reads/creation separately from input_tokens; openai
+	// folds them into prompt_tokens (cache reads surfaced via prompt_tokens_details).
+	promptTok := src.Usage.InputTokens + src.Usage.CacheReadInputTokens + src.Usage.CacheCreationInputTokens
+	usage := map[string]any{
+		"prompt_tokens":     promptTok,
+		"completion_tokens": src.Usage.OutputTokens,
+		"total_tokens":      promptTok + src.Usage.OutputTokens,
+	}
+	if src.Usage.CacheReadInputTokens > 0 {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": src.Usage.CacheReadInputTokens}
+	}
 	out := map[string]any{
 		"id":      strings.TrimPrefix(src.ID, "msg_"),
 		"object":  "chat.completion",
 		"model":   src.Model,
 		"choices": []map[string]any{{"index": 0, "message": msg, "finish_reason": mapStopReasonToFinish(src.StopReason)}},
-		"usage": map[string]any{
-			"prompt_tokens":     src.Usage.InputTokens,
-			"completion_tokens": src.Usage.OutputTokens,
-			"total_tokens":      src.Usage.InputTokens + src.Usage.OutputTokens,
-		},
+		"usage":   usage,
 	}
 	return json.Marshal(out)
 }
@@ -848,6 +925,7 @@ type openaiSSEToAnthropicSSE struct {
 	toolOrder []int                 // openai tool indices in first-seen order
 	outTok    int                   // completion_tokens from trailing usage
 	inTok     int                   // prompt_tokens from trailing usage
+	cachedTok int                   // prompt_tokens_details.cached_tokens from trailing usage
 	stopRsn   string                // finish_reason mapped to stop_reason
 }
 
@@ -946,7 +1024,7 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 		t.nextIdx++
 		t.emit("content_block_start", map[string]any{
 			"type": "content_block_start", "index": idx,
-			"content_block": map[string]any{"type": "tool_use", "id": tc.id, "name": tc.name, "input": map[string]any{}},
+			"content_block": map[string]any{"type": "tool_use", "id": sanitizeToolUseID(tc.id), "name": tc.name, "input": map[string]any{}},
 		})
 		args := string(tc.args)
 		if args == "" {
@@ -965,10 +1043,20 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 	if sr == "" {
 		sr = "end_turn"
 	}
+	// Same cache split as the non-streaming converter: openai's prompt_tokens
+	// INCLUDES cached tokens; anthropic's input_tokens excludes them (clamp ≥0).
+	inTok := t.inTok - t.cachedTok
+	if inTok < 0 {
+		inTok = 0
+	}
+	usage := map[string]any{"input_tokens": inTok, "output_tokens": t.outTok}
+	if t.cachedTok > 0 {
+		usage["cache_read_input_tokens"] = t.cachedTok
+	}
 	t.emit("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": sr, "stop_sequence": nil},
-		"usage": map[string]any{"input_tokens": t.inTok, "output_tokens": t.outTok},
+		"usage": usage,
 	})
 	t.emit("message_stop", map[string]any{"type": "message_stop"})
 	t.closed = true
@@ -1040,6 +1128,9 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			Usage *struct {
 				PromptTokens     int `json:"prompt_tokens"`
 				CompletionTokens int `json:"completion_tokens"`
+				PromptDetails    struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
 			} `json:"usage"`
 		}
 		if json.Unmarshal([]byte(payload), &chunk) != nil {
@@ -1054,6 +1145,7 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		if chunk.Usage != nil {
 			t.inTok = chunk.Usage.PromptTokens
 			t.outTok = chunk.Usage.CompletionTokens
+			t.cachedTok = chunk.Usage.PromptDetails.CachedTokens
 		}
 		t.ensureStart()
 		if len(chunk.Choices) > 0 {
@@ -1100,6 +1192,8 @@ type anthropicSSEToOpenAISSE struct {
 	nextTool     int
 	inputTokens  int
 	outputTokens int
+	cacheRead    int // cache_read_input_tokens from message_start
+	cacheCreate  int // cache_creation_input_tokens from message_start
 }
 
 func newAnthropicToOpenAISSE(r io.Reader, model string) *anthropicSSEToOpenAISSE {
@@ -1107,6 +1201,21 @@ func newAnthropicToOpenAISSE(r io.Reader, model string) *anthropicSSEToOpenAISSE
 	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
 	return &anthropicSSEToOpenAISSE{sc: sc, model: model, id: "chatcmpl-conv",
 		toolCallIdx: map[int]int{}, toolArgsSeen: map[int]bool{}}
+}
+
+// usagePayload builds the terminal chunk's usage: anthropic counts cache
+// reads/creation separately from input_tokens; openai folds them into
+// prompt_tokens (cache reads surfaced via prompt_tokens_details).
+func (t *anthropicSSEToOpenAISSE) usagePayload() map[string]any {
+	prompt := t.inputTokens + t.cacheRead + t.cacheCreate
+	u := map[string]any{
+		"prompt_tokens": prompt, "completion_tokens": t.outputTokens,
+		"total_tokens": prompt + t.outputTokens,
+	}
+	if t.cacheRead > 0 {
+		u["prompt_tokens_details"] = map[string]any{"cached_tokens": t.cacheRead}
+	}
+	return u
 }
 
 func (t *anthropicSSEToOpenAISSE) emitChunk(delta map[string]any, finish any, usage map[string]any) {
@@ -1134,10 +1243,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 	for len(t.out) == 0 {
 		if t.done {
 			if !t.finished {
-				t.emitChunk(map[string]any{}, "stop", map[string]any{
-					"prompt_tokens": t.inputTokens, "completion_tokens": t.outputTokens,
-					"total_tokens": t.inputTokens + t.outputTokens,
-				})
+				t.emitChunk(map[string]any{}, "stop", t.usagePayload())
 				t.finished = true
 			}
 			if !t.doneSent {
@@ -1180,6 +1286,8 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				Model string `json:"model"`
 				Usage struct {
 					InputTokens int `json:"input_tokens"`
+					CacheRead   int `json:"cache_read_input_tokens"`
+					CacheCreate int `json:"cache_creation_input_tokens"`
 				} `json:"usage"`
 			} `json:"message"`
 			Error struct {
@@ -1199,6 +1307,8 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 		switch ev.Type {
 		case "message_start":
 			t.inputTokens = ev.Message.Usage.InputTokens
+			t.cacheRead = ev.Message.Usage.CacheRead
+			t.cacheCreate = ev.Message.Usage.CacheCreate
 			if ev.Message.ID != "" {
 				t.id = ev.Message.ID // pass the upstream's real message id through
 			}
@@ -1244,6 +1354,11 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 						}}}, nil, nil)
 					}
 				}
+			default:
+				// thinking_delta/signature_delta/... have no openai equivalent.
+				if ev.Delta.Type != "" {
+					convertWarn("dropping " + ev.Delta.Type + " delta (no cross-protocol equivalent)")
+				}
 			}
 		case "content_block_stop":
 			// Empty-args fallback: a tool_use block with no input_json_delta still
@@ -1264,10 +1379,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			// attributes tokens. Guard: a malformed stream with >1 message_delta
 			// must not emit >1 finish chunk.
 			if !t.finished {
-				t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), map[string]any{
-					"prompt_tokens": t.inputTokens, "completion_tokens": t.outputTokens,
-					"total_tokens": t.inputTokens + t.outputTokens,
-				})
+				t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), t.usagePayload())
 				t.finished = true
 			}
 		case "message_stop":
