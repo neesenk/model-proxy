@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +132,93 @@ func TestForward_CacheHit(t *testing.T) {
 	do()
 	if hits != 2 {
 		t.Errorf("different body: upstream hits=%d want 2 (cache miss)", hits)
+	}
+}
+
+// TestForward_CacheHitHeader: a cache hit is marked with the `x-mp-cache: hit`
+// response header (proxy.go) so a client can tell a replayed response apart
+// from a fresh upstream one; the first (miss) response carries no such header.
+func TestForward_CacheHitHeader(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"msg_1","content":"hello"}`))
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	}
+	p := NewProxy(cfg)
+	p.providers["z"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	body := `{"model":"glm","input":[{"role":"user","content":"same"}]}`
+	do := func() http.Header {
+		req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := resp.Header
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return h
+	}
+	if h := do(); h.Get("x-mp-cache") != "" {
+		t.Errorf("first (miss) response x-mp-cache=%q want empty", h.Get("x-mp-cache"))
+	}
+	if h := do(); h.Get("x-mp-cache") != "hit" {
+		t.Errorf("second (cached) response x-mp-cache=%q want hit", h.Get("x-mp-cache"))
+	}
+}
+
+// TestReload_RebuildsCache: reload() swaps the cache from the NEW config
+// (proxy.go), so toggling cache.enabled via SIGHUP/web-edit takes effect
+// without a restart: enabled → disabled drops the cache entirely; re-enabling
+// builds a FRESH one (old entries/counters are not carried over).
+func TestReload_RebuildsCache(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	base := "listen: 127.0.0.1:0\n" +
+		"providers:\n  z:\n    openai_base_url: http://127.0.0.1:1\n    provider_id: static\n" +
+		"routes:\n  m:\n    - {provider: z, model: m}\n"
+	write := func(cacheBlock string) {
+		if err := os.WriteFile(cfgPath, []byte(base+cacheBlock), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("cache:\n  enabled: true\n")
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxy(cfg)
+	if p.cache == nil {
+		t.Fatal("cache not created despite cache.enabled")
+	}
+	p.cache.put("k", &cacheEntry{status: 200, body: []byte("x")}, time.Now())
+
+	// Disable via reload → cache gone.
+	write("")
+	if err := p.reload(cfgPath); err != nil {
+		t.Fatalf("reload (disable): %v", err)
+	}
+	if p.cache != nil {
+		t.Error("reload with cache disabled should drop the cache (p.cache != nil)")
+	}
+
+	// Re-enable via reload → a fresh, empty cache.
+	write("cache:\n  enabled: true\n")
+	if err := p.reload(cfgPath); err != nil {
+		t.Fatalf("reload (re-enable): %v", err)
+	}
+	if p.cache == nil {
+		t.Fatal("reload with cache re-enabled should create a cache")
+	}
+	if _, _, entries := p.cache.stats(); entries != 0 {
+		t.Errorf("rebuilt cache entries=%d want 0 (fresh, old entries not carried)", entries)
 	}
 }
 

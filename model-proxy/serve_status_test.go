@@ -61,6 +61,24 @@ func TestPlural(t *testing.T) {
 	}
 }
 
+func TestRenderAvgMs(t *testing.T) {
+	cases := []struct {
+		sum, reqs uint64
+		want      string
+	}{
+		{0, 0, "—"},     // no requests → em dash
+		{12345, 0, "—"}, // division by zero guard
+		{2000, 2, "1k"}, // 1000ms avg → compact
+		{500, 2, "250"}, // integer average
+		{1500000, 2, "750k"},
+	}
+	for _, c := range cases {
+		if got := renderAvgMs(c.sum, c.reqs); got != c.want {
+			t.Errorf("renderAvgMs(%d, %d) = %q, want %q", c.sum, c.reqs, got, c.want)
+		}
+	}
+}
+
 func TestRenderProviders(t *testing.T) {
 	st := &statusResp{
 		Health: map[string]statusHealth{
@@ -78,6 +96,18 @@ func TestRenderProviders(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("header missing %q in:\n%s", want, out)
 		}
+	}
+	// LAT/TTFT are separate columns (serve_status.go renderProviders). Assert
+	// them as whole fields on the header line — a substring check for "LAT"
+	// would be vacuous since "LAST" contains it.
+	hdrFields := strings.Fields(strings.SplitN(out, "\n", 3)[1])
+	lat, ttft := false, false
+	for _, f := range hdrFields {
+		lat = lat || f == "LAT"
+		ttft = ttft || f == "TTFT"
+	}
+	if !lat || !ttft {
+		t.Errorf("header missing LAT/TTFT columns (lat=%v ttft=%v): %q", lat, ttft, strings.SplitN(out, "\n", 3)[1])
 	}
 	// sorted rows: aqp before codex before zhipu
 	if i, j := strings.Index(out, "aqp"), strings.Index(out, "codex"); !(i >= 0 && j > i) {

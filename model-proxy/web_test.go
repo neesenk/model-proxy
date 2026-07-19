@@ -49,6 +49,64 @@ func TestAPIStatus(t *testing.T) {
 	}
 }
 
+// TestAPIStatusCacheField: /api/status exposes cache observability — with
+// cache.enabled on, the cache object carries enabled + hits/misses/entries;
+// with the cache off (default), it reports enabled:false.
+func TestAPIStatusCacheField(t *testing.T) {
+	// Disabled path (newTestWeb's config has no cache block).
+	w, _ := newTestWeb(t)
+	mux := http.NewServeMux()
+	w.register(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))
+	var off struct {
+		Cache struct {
+			Enabled bool `json:"enabled"`
+		} `json:"cache"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &off); err != nil {
+		t.Fatalf("parse status (off): %v", err)
+	}
+	if off.Cache.Enabled {
+		t.Errorf("cache.enabled=true want false (cache disabled): %s", rec.Body.String())
+	}
+
+	// Enabled path with one recorded hit + one stored entry.
+	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+cache: {enabled: true, ttl: 1h}
+`))
+	p := NewProxy(cfg)
+	if p.cache == nil {
+		t.Fatal("cache not created despite cache.enabled")
+	}
+	now := time.Now()
+	p.cache.put("k", &cacheEntry{status: 200, body: []byte("x")}, now)
+	if _, ok := p.cache.get("k", now); !ok {
+		t.Fatal("seeded cache entry should hit")
+	}
+	w2 := newWebServer(p, "test-config.yaml")
+	mux2 := http.NewServeMux()
+	w2.register(mux2)
+	rec2 := httptest.NewRecorder()
+	mux2.ServeHTTP(rec2, httptest.NewRequest("GET", "/api/status", nil))
+	var on struct {
+		Cache struct {
+			Enabled bool   `json:"enabled"`
+			Hits    uint64 `json:"hits"`
+			Misses  uint64 `json:"misses"`
+			Entries uint64 `json:"entries"`
+		} `json:"cache"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &on); err != nil {
+		t.Fatalf("parse status (on): %v", err)
+	}
+	if !on.Cache.Enabled || on.Cache.Hits != 1 || on.Cache.Entries != 1 {
+		t.Errorf("cache status = %+v want enabled=true hits=1 entries=1: %s", on.Cache, rec2.Body.String())
+	}
+}
+
 func TestAPIStatus_IncludesRouteWarnings(t *testing.T) {
 	// Two logged-in apikey providers share an unrated model → ambiguity warning.
 	home := t.TempDir()

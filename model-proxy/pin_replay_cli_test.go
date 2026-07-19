@@ -159,6 +159,39 @@ func TestDoReplay_TruncatedBody(t *testing.T) {
 	}
 }
 
+// TestDoReplay_RejectsShadowRecord: a shadow evaluation record (request_id
+// "shadow-...") is a fire-and-forget log of a candidate backend, not a real
+// client request with a route to re-enter — doReplay refuses it (replay_cmd.go
+// guard) instead of re-sending it upstream.
+func TestDoReplay_RejectsShadowRecord(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"records": []map[string]any{
+			{"request_id": "shadow-abc123", "path": "/v1/responses", "request_body": `{"model":"glm","input":[]}`},
+		}})
+	}))
+	defer srv.Close()
+	_, err := doReplay(srv.URL, "shadow-abc123", "zhipu")
+	if err == nil || !strings.Contains(err.Error(), "shadow") {
+		t.Errorf("shadow-record replay err=%v, want a shadow refusal", err)
+	}
+}
+
+// TestDoReplay_RejectsNonV1Path: a record whose path is not under /v1/ is not a
+// chat-completion path the proxy can forward — doReplay refuses it
+// (replay_cmd.go guard) instead of POSTing to a bogus path.
+func TestDoReplay_RejectsNonV1Path(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"records": []map[string]any{
+			{"request_id": "req-1", "path": "/api/status", "request_body": `{"model":"glm","input":[]}`},
+		}})
+	}))
+	defer srv.Close()
+	_, err := doReplay(srv.URL, "req-1", "zhipu")
+	if err == nil || !strings.Contains(err.Error(), "/v1/") {
+		t.Errorf("non-/v1/ path replay err=%v, want a /v1/ refusal", err)
+	}
+}
+
 // TestCmdPin_InProcess: the cmdPin/cmdUnpin success paths against an httptest
 // daemon via a temp config whose listen points at it. Covers the os.Exit-free
 // command wrappers (arg parse → do* → print).
