@@ -508,7 +508,7 @@ provider         model               <day|month>     reqs      input    output  
 agent                reqs        input       output
 ```
 
-每行 = `<AGENT(16)> <reqs(10)> <input(12)> <output(12)>`（`compactNum`）。`--from`/`--to`/`--bucket` 仍适用；`--provider`/`--model` 过滤在此模式忽略。`--json` -> stdout 原始 `/api/agents` 响应（`agentResp`）。agent 识别见 `detectAgent`（claude-cli/x-claude-code-session-id -> `claude-code`，`codex` -> `codex`，`opencode` -> `opencode`，`pi/` -> `pi`，无 UA -> `unknown`，其余 -> `other`）。
+每行 = `<AGENT(16)> <reqs(10)> <input(12)> <output(12)>`（`compactNum`）。`--from`/`--to`/`--bucket` 仍适用；`--provider`/`--model`/`--agent` 过滤在此模式同样生效（作为 query 参数传给 `/api/agents` 由服务端过滤）。`--json` -> stdout 原始 `/api/agents` 响应（`agentResp`）。agent 识别见 `detectAgent`（claude-cli/x-claude-code-session-id -> `claude-code`，`codex` -> `codex`，`opencode` -> `opencode`，`pi/` -> `pi`，无 UA -> `unknown`，其余 -> `other`）。
 
 > 解析失败时，analytics 路径的报错为 `parse analytics response: <ERR>`（与 `/api/stats` 路径的 `parse stats response: <ERR>` 对应，见下节）。
 
@@ -538,10 +538,10 @@ model-proxy  v<VERSION> · <UPTIME> · <LISTEN>
 
 **Providers (N)**（`renderProviders`）— 表头 + 每行：
 ```
-  PROVIDER          HEALTH        REQS  FAILOVERS   429  FAILURES  LAST
-  <NAME(16)>  <HEALTH(13)>  <reqs(8)>  <failover(9)>  <429(5)>  <fail(8)>  <CLOCK>
+  PROVIDER          HEALTH        REQS  FAILOVERS   429  FAILURES    LAT   TTFT  LAST
+  <NAME(16)>  <HEALTH(13)>  <reqs(8)>  <failover(9)>  <429(5)>  <fail(8)>  <lat(6)>  <ttft(6)>  <CLOCK>
 ```
-`HEALTH` ∈ `available`(绿) / `circuit open`(红) / `half-open`(红) / `rate-limited`(黄) / `unavailable`(dim)。`LAST` = `formatClock(LastRequestAt)`。
+`HEALTH` ∈ `available`(绿) / `circuit open`(红) / `half-open`(红) / `rate-limited`(黄) / `unavailable`(dim)。`LAT`/`TTFT` = 平均总时延/首字节时延（`renderAvgMs`，无样本显示 `—`）。`LAST` = `formatClock(LastRequestAt)`。
 
 **Schedule (N route[s])**（`renderSchedule`，2 空格缩进的 `renderScheduleRoutes`）— 同 §9。
 
@@ -679,7 +679,7 @@ replay <id> --to <provider> [--config PATH]
 - 记录无 body：`record <ID> has no captured request body`
 - 上游 ≥400：`✗ <BODY_TRUNC_400>`
 
-> 影子评测（shadow，配置驱动，非 CLI）：`shadow: {<route>: {provider: <P>, model: <M>}}` 时，路由每次已交付请求会**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget），只记录（`request_id` 前缀 `shadow-`，provider 为影子 provider）不返回。在 Requests 页按 provider 过滤即可与主后端并排比较。需 `request_log.enabled`。
+> 影子评测（shadow，配置驱动，非 CLI）：`shadow: {<route>: {provider: <P>, model: <M>}}` 时，路由每次已交付请求会**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget），只记录（`request_id` 前缀 `shadow-`，provider 为影子 provider）不返回。在 Requests 页按 provider 过滤即可与主后端并排比较；`GET /api/requests` 另有 `shadow=only|exclude` 参数（仅影子 / 排除影子，空=全部，其它值忽略），Requests 页过滤行有对应下拉，影子行 provider 名后带 `shadow` 徽标。需 `request_log.enabled`。
 
 ---
 

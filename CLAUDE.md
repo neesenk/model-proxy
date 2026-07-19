@@ -23,14 +23,16 @@ Tests are white-box (`package main` / `package provider`) using only the stdlib 
 
 ## Architecture
 
-`model-proxy` is a multi-provider LLM reverse proxy: clients speak Anthropic or OpenAI protocol; the proxy forwards using the **same protocol the client used (no conversion)**, swapping in real credentials and mapping model aliases to upstream model names.
+`model-proxy` is a multi-provider LLM reverse proxy: clients speak Anthropic or OpenAI protocol; by default the proxy forwards using the **same protocol the client used (byte-identical passthrough)**, swapping in real credentials and mapping model aliases to upstream model names. A route target may declare `protocol:` differing from the client's → opt-in conversion (Anthropic ↔ OpenAI, full tool-call support; see AGENTS.md "协议转换").
 
-**`AGENTS.md` (repo root) is the authoritative architecture/contract reference** - its "model-proxy 实现经验" section covers, in depth:
+**`AGENTS.md` (repo root) is the authoritative architecture reference** - its "model-proxy 实现经验" section covers, in depth:
 - Two-layer config (`providers` / `routes` / `claude_mapping`) and protocol routing (`/v1/messages` -> anthropic, `/v1/responses`+`/v1/chat/completions` -> openai; strip client `/v1`; per-protocol base URLs).
 - Provider abstraction (`provider/provider.go`): the interface (`AuthHeaders`/`Refresh`/`RewriteRequest`/`Logout`/`Usage`/`FetchModels`/`Quota`/`ProbeRequest`/`ExtraHeaders`/`FilterModelIDs`), the `baseProbe` default-impl pattern, and per-provider overrides.
 - Quota-aware scheduling (surplus formula, tier ranking `plan < unknown < payg`, peak via short window, sticky dwell), failover health (circuit breaker, rate-limit skip), multi-account credential pools + session-sticky routing.
-- Request flow (`proxy.go:forward`), daemon/supervisor, takeover, Web UI + `/api/*` contract table, SSE token scanner, SQLite stats.
-- Reverse-engineered backend contracts (aqp/compass, codex, Zhipu, DeepSeek, Volcengine incl. V4 signing), models.dev metadata, implicit routes, and a gotchas log.
+- Newer subsystems: protocol conversion (`convert.go`), request-aware routing (image/tools capability + context estimate + context-overflow 400 retry; provider-level `capabilities:` override), exact response cache, pin (runtime route pinning), live SSE monitor, shadow evaluation + replay.
+- Implicit routes and a gotchas log.
+
+**Two satellite references were split out of AGENTS.md (read on demand, not upfront):** `docs/backend-contracts.md` (reverse-engineered aqp/compass, codex, Zhipu, DeepSeek, Volcengine incl. V4 signing, models.dev, token-file naming — read before touching a provider) and `docs/web-api.md` (Web UI + `/api/*` contract table, SSE token scanner, SQLite stats/latency/agent dimensions, Analytics, request_log — read before touching web/API/stats).
 
 **Read AGENTS.md before touching provider auth, request rewriting, scheduling, or the Web UI.** The notes below are CLAUDE.md-specific (conventions + change-controlled contracts) not duplicated in AGENTS.md.
 
