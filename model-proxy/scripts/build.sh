@@ -19,6 +19,8 @@
 # source root, a sibling of outdir/) so it's runnable in place - matching the
 # `go build -o model-proxy .` dev convention. Cross-compiled binaries are NOT
 # copied there (they wouldn't run on the host). ./model-proxy is gitignored.
+# The host copy is replaced ATOMICALLY (temp + mv): overwriting an executing
+# binary in place makes macOS kill the process with "Code Signature Invalid".
 #
 # Flags:
 #   --version <ver>   override the git-derived version string
@@ -160,7 +162,14 @@ build_one() {
 		if [ "$goos" = "$host_goos" ] && [ "$goarch" = "$host_goarch" ]; then
 			local root_bin="model-proxy"
 			[ "$goos" = "windows" ] && root_bin="model-proxy.exe"
-			cp "$out" "$root_bin"
+			# ATOMIC replace: cp over an EXECUTING file (e.g. a running serve
+			# daemon) makes macOS SIGKILL the process (and any exec mid-overwrite)
+			# with "Code Signature Invalid / Invalid Page" - the kernel's page-in
+			# hash check sees torn pages. Write to a temp sibling + mv (rename)
+			# instead: the running process keeps the old inode, new execs pick up
+			# the new binary, and the path is never a half-written file.
+			local tmp_bin="${root_bin}.build-tmp"
+			cp "$out" "$tmp_bin" && mv -f "$tmp_bin" "$root_bin"
 			printf '%-18s -> %s  (host run copy, sibling of %s/)\n' "" "$root_bin" "$outdir"
 		fi
 	else
