@@ -204,3 +204,28 @@ func TestRenderAgentsCLI(t *testing.T) {
 		t.Errorf("heaviest agent not on top:\n%s", out)
 	}
 }
+
+// TestRenderAgents_ProviderModelFilter: --provider/--model are forwarded to
+// /api/agents as query params in --by-agent mode (the server side already
+// filters on them); previously the CLI silently dropped them here.
+func TestRenderAgents_ProviderModelFilter(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agents" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("provider"); got != "zhipu" {
+			t.Errorf("provider query=%q want zhipu", got)
+		}
+		if got := r.URL.Query().Get("model"); got != "glm-5.2" {
+			t.Errorf("model query=%q want glm-5.2", got)
+		}
+		io.WriteString(w, `{"from":1,"to":2,"bucket":60,"buckets":[]}`)
+	}))
+	defer up.Close()
+	listen := strings.TrimPrefix(up.URL, "http://")
+
+	if _, err := renderAgents(listen, statsOpts{ByAgent: true, Provider: "zhipu", Model: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+}

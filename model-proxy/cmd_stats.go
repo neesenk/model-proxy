@@ -336,6 +336,14 @@ func renderAgents(listen string, opts statsOpts) (string, error) {
 	if opts.Agent != "" {
 		q.Set("agent", opts.Agent)
 	}
+	// --provider/--model narrow the agent view server-side (/api/agents
+	// supports them) — forward them like the plain /api/stats path does.
+	if opts.Provider != "" {
+		q.Set("provider", opts.Provider)
+	}
+	if opts.Model != "" {
+		q.Set("model", opts.Model)
+	}
 	body, status, err := statusGet(base, "/api/agents?"+q.Encode())
 	if err != nil {
 		return "", fmt.Errorf("cannot reach daemon at %s: %v\nis `model-proxy serve` running?", listen, err)

@@ -110,6 +110,76 @@ routes:
 	}
 }
 
+// TestCmdDoctor_ShadowSection: a configured shadow block is surfaced in the
+// doctor report — one line per route with the candidate provider/model, the
+// backend protocol, and the global sample_rate / max_concurrent.
+func TestCmdDoctor_ShadowSection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(home+"/.model-proxy", 0o700)
+	cfgPath := writeTempConfig(t, `listen: 127.0.0.1:1
+providers:
+  zhipu:
+    openai_base_url: https://x.invalid
+    provider_id: zhipu
+  deepseek:
+    openai_base_url: https://x.invalid
+    provider_id: deepseek
+routes:
+  glm:
+    - {provider: zhipu, model: glm-5.2, priority: 1}
+shadow:
+  glm: {provider: deepseek, model: deepseek-v4-pro, protocol: openai}
+shadow_sample_rate: 0.5
+shadow_max_concurrent: 8
+`)
+	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	for _, want := range []string{"Shadow", "glm", "deepseek/deepseek-v4-pro", "protocol=openai", "sample_rate=0.5", "max_concurrent=8"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor shadow section missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestCmdDoctor_ShadowDefaults: without explicit shadow_sample_rate /
+// shadow_max_concurrent the section shows the runtime defaults (1 / 4), and an
+// entry without protocol renders as same-as-primary.
+func TestCmdDoctor_ShadowDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(home+"/.model-proxy", 0o700)
+	cfgPath := writeTempConfig(t, `listen: 127.0.0.1:1
+providers:
+  zhipu:
+    openai_base_url: https://x.invalid
+    provider_id: zhipu
+routes:
+  glm:
+    - {provider: zhipu, model: glm-5.2, priority: 1}
+shadow:
+  glm: {provider: zhipu, model: glm-4.5}
+`)
+	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	for _, want := range []string{"Shadow", "zhipu/glm-4.5", "protocol=same-as-primary", "sample_rate=1", "max_concurrent=4"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor shadow defaults missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestCmdDoctor_NoShadowSection: with no shadow configured the report has no
+// Shadow section at all.
+func TestCmdDoctor_NoShadowSection(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(home+"/.model-proxy", 0o700)
+	cfgPath := writeTempConfig(t, minimalConfig)
+	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	if strings.Contains(out, "Shadow") {
+		t.Errorf("doctor without shadow config should not show a Shadow section:\n%s", out)
+	}
+}
+
 // --- schedule: live daemon payload rendered with pool grouping ---
 
 // TestCmdSchedule_PoolGrouping stands up a mock /debug/schedule daemon whose

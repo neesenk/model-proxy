@@ -918,6 +918,34 @@ func doctorWithCfg(cfg *Config) int {
 		}
 	}
 
+	// Shadow evaluation: each route's candidate backend + the global sampling
+	// knobs. Omitted entirely when no shadow is configured.
+	if len(cfg.Shadow) > 0 {
+		fmt.Printf("\n%s\n", cBold("Shadow"))
+		rate := 1.0
+		if cfg.ShadowSampleRate != nil {
+			rate = *cfg.ShadowSampleRate
+		}
+		maxConc := cfg.ShadowMaxConcurrent
+		if maxConc <= 0 {
+			maxConc = 4
+		}
+		sroutes := make([]string, 0, len(cfg.Shadow))
+		for r := range cfg.Shadow {
+			sroutes = append(sroutes, r)
+		}
+		sort.Strings(sroutes)
+		for _, route := range sroutes {
+			sh := cfg.Shadow[route]
+			proto := sh.Protocol
+			if proto == "" {
+				proto = "same-as-primary"
+			}
+			fmt.Printf("  %s → %s/%s  protocol=%s  sample_rate=%s  max_concurrent=%d\n",
+				pad(route, 12), sh.Provider, sh.Model, proto, strconv.FormatFloat(rate, 'f', -1, 64), maxConc)
+		}
+	}
+
 	s := cfg.Scheduling
 	fmt.Printf("\n%s\n", cBold("Scheduling"))
 	fmt.Printf("  sticky_dwell=%s  quota_poll_interval=%s  quota_switch_margin=%d pts  circuit=(threshold %d, cooldown %s)\n",
