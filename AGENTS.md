@@ -142,6 +142,19 @@ schedule 之后按请求内容过滤/改道；catalog（models.dev context/modal
 
 `config.shadow.{<route>: {provider, model?, protocol?, sample_rate?, max_concurrent?}}`（validate 校验）。commit 后 fire-and-forget 重发候选后端：`sample_rate`（`*float64`：nil→1.0、显式 0=关闭）采样 + `shadowSem` 并发闸（默认 4，满则丢弃）+ 共享 `shadowClient`；按影子**自身 protocol** 选 baseURL（可跨协议影子）。**绝不污染生产**：不进熔断/stats/sticky/metrics。结果写 request_log（`shadow:true` + `shadow-<原id>` 配对）。聚合：`shadow report` / `GET /api/shadow-report`（成对样本 → 样本数/状态一致率/延迟差/大小比；judge 胜率未做）。replay：`replay <id> --to <provider>` 取 `orig_body`（原始客户端 body）+ 原 path 重发；拒绝 shadow 记录/非 `/v1` 路径/截断 body。对标：开源代理层无对应物（Envoy traffic mirroring 是 infra 层），评测报告是差异化。
 
+### 多模型编排（`fusion.go`，OpenRouter Fusion 式）
+
+顶层 `fusion:` 配置「配方」（panel 2..4 + synthesizer + 可选 `min_panel`），路由用 `{provider: fusion, model: <配方名>}` 引用；forward 目标循环在 providerConfig 查询前拦截 `t.Provider == "fusion"` 走编排引擎（`expandTarget` 对非池化名透传，provider 包零改动；`force_provider` 指定具体 provider 时跳过）。
+
+- **fan-out**：每成员一条 goroutine——fail-closed 构建门（无 impl 直接剔除）→ `takeHalfOpenSlot` 熔断门 → 按成员 `protocol:` 转换 + rewriteModel → **非流式**子调用（per-leg `upstream_timeout`）。草稿截断 24k 字符。成员全套走 `recordSuccess`/`recordFailure`/`recordRateLimit`（熔断/quota 语义与普通转发一致；**被 quorum/grace 砍掉的腿不算失败**——`ctx.Canceled` 不进熔断不计 metrics）。
+- **quorum + grace**：`min_panel`（默认 2）份候选达成即开合成，**再等 5s grace** 收留 straggler（`fusionGracePeriod` 包级 var，测试可缩）；quorum 永不可达（成功+在途 < quorum）→ 立即取消剩余腿。
+- **工具轮**：请求带 tools 时**草稿腿剥 `tools`/`tool_choice`**（纯文本分析），**合成腿带 tools**（tool_use 原样透传）；synthesizer 不支持 tools 则降级。
+- **合成**：`buildSynthesisBody`——anthropic 往 `system` 追加候选段 / openai 追加 user 消息（不动对话尾部），shuffle 防位置偏好，固定指令模板；合成腿**复用 `tryTarget`**（SSE 直通、metrics/latency/live/request_log/缓存录制全白拿）。客户端 TTFT = quorum 达成 + grace + 合成 TTFT。
+- **错误语义**：合成腿失败 = 硬终结（原样回客户端，不重试——重试是 N+1 次全套）；仅 quorum 不足 / synthesizer 不支持 tools / body 构建失败时降级「原始 body 直打 synthesizer」。
+- **观测**：草稿腿 request_log 记 `fusion-panel-<i>-<原id>`、live 事件标 `fusion-panel:<model>`；usage 分腿记 tokenCounter+agentSink（**客户端 usage 数值不改写**，与分腿记账避免重复）；stats 里编排成本 = 各成员正常计量（N+1 倍开销一目了然）。
+- **validate**：配方引用的 provider 存在、禁嵌套 fusion、protocol 值合法且有对应 base URL；routes 的 `provider: fusion` 特判 + 配方存在性；shadow 拒绝指向 fusion。`Fusion` 在 Config/rawConfig/拷贝段三处（踩坑 #16）。
+- **定位**：只给「困难问题要最好效果」的路由用（2× 延迟、N+1 倍成本），别当默认路由；多轮会话每轮都编排会放大成本，建议单发场景。学术/开源出处：MoA、LLM-Blender（v2 judge）、OpenSquilla B5（机制蓝本）。
+
 ### 隐式路由（implicit routes，实测）
 
 - 已 login provider 的 `models:` 里某个名字**无显式 route** 时，`synthesizeImplicitRoutes`（`NewProxy`/`reload` 跑，此时 login 状态已知）自动合成单目标 route `{首个按字母序已登录 provider, priority 1}`，merge 进 `expandedRoutes`（显式 route 优先）。`forward`/`/debug/schedule`/`/api/status.schedule`/serve-status/`GET /v1/models` 自动看到。

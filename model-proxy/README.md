@@ -9,6 +9,7 @@
 - **请求感知路由**：按图片/工具能力过滤目标、超长 prompt 自动改道大上下文模型、上游 400 溢出自动重试一次
 - **可观测性**：Web UI 六个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
 - **评测工具**：影子评测（真实负载双跑对比后端）、一键重放（replay）、端到端测活（`test` / UI 按钮）
+- **多模型编排（fusion）**：一条路由 fan-out 到多个后端并行作答，合成器融合成最终答案——困难问题要最好效果
 - **其他**：精确响应缓存、`pin` 运行期热切换、等价成本分析（OpenRouter 价格）
 
 ## 架构
@@ -328,6 +329,34 @@ model-proxy shadow report --from 7d
 ```
 
 影子请求不污染生产（不进熔断/统计/粘性）；Web UI Requests 页用「shadow only」过滤后点任意一条，可用 `replay` 继续深挖。评测维度目前是客观指标（状态/延迟/大小），LLM judge 胜率未做。
+
+## 多模型编排（fusion）
+
+OpenRouter Fusion 式编排：把一条路由的请求**并行发给多个后端（panel）各答一遍**，再由**合成器（synthesizer）融合候选答案**输出最终结果——中端面板打出接近旗舰的质量，成本只有旗舰的一半量级。对客户端完全透明（就是一次普通请求）。
+
+```yaml
+fusion:
+  hard-coding:                            # 配方名
+    panel:                                # 并行面板（2-4 个）
+      - {provider: zhipu, model: glm-5.2}
+      - {provider: deepseek, model: deepseek-v4-pro}
+      - {provider: kimi-code, model: kimi-k2}
+    synthesizer: {provider: zhipu, model: glm-5.2}   # 用你手里最强的模型做合成
+    min_panel: 2                          # 可选：至少 N 份候选才合成（默认 2）
+
+routes:
+  hard-question:
+    - {provider: fusion, model: hard-coding, priority: 1}
+    - {provider: zhipu, model: glm-5.2, priority: 2}   # 可叠普通 target 兜底
+```
+
+工作机制与语义：
+
+- **quorum + grace**：凑够 `min_panel` 份候选就开合成（再留 5 秒等差点完成的腿）；凑不齐就用原始请求直打合成器（降级，不报错）。成员挂掉不影响（该成员自己的熔断/限频语义照常）。
+- **工具轮**：带 tools 的请求照常编排——草稿腿只产出文本分析，合成器负责输出 tool 调用。
+- **跨协议面板**：成员可带 `protocol:`，请求自动转换（转换层的现成能力）。
+- **代价（要想清楚再用）**：一次请求 = N+1 次上游调用（面板 N + 合成 1），延迟 ≈ 面板等待 + 合成首字节。**只给困难路由用，别当默认路由**；多轮长会话每轮都编排会放大成本，建议单发困难问题。每家的消耗在 `stats` / Requests 页（`fusion-panel-*` 标记）里都看得见。
+- **验证收益**：给 fusion 路由配一条 `shadow:` 影子（或反过来），用你自己的真实负载对比「编排 vs 单模型」，别信普遍结论。
 
 ## 调度与熔断（`scheduling`）
 
