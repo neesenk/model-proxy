@@ -2,6 +2,15 @@
 
 多 Provider LLM 代理 — 统一管理 AQP/codex/Zhipu 等上游后端，按协议（Anthropic/OpenAI）对外暴露，自动处理鉴权、模型映射、流式转发。
 
+**特性一览**：
+
+- **多上游聚合 + 配额感知调度**：surplus 调度分 / 熔断 / 限频跳过 / 粘性驻留 / 多账号凭据池 + 会话粘性
+- **双协议转发 + 可选协议转换**：同协议字节级透传；路由目标声明 `protocol:` 即可跨协议（Anthropic ↔ OpenAI，tools 全链路）
+- **请求感知路由**：按图片/工具能力过滤目标、超长 prompt 自动改道大上下文模型、上游 400 溢出自动重试一次
+- **可观测性**：Web UI 六个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
+- **评测工具**：影子评测（真实负载双跑对比后端）、一键重放（replay）、端到端测活（`test` / UI 按钮）
+- **其他**：精确响应缓存、`pin` 运行期热切换、等价成本分析（OpenRouter 价格）
+
 ## 架构
 
 ```
@@ -15,7 +24,7 @@
 ```
 
 - **Provider 层**（`provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
-- **Routes 层**：对外暴露模型名 → 一组 `provider/model` 目标。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由
+- **Routes 层**：对外暴露模型名 → 一组 `provider/model` 目标。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由；目标可声明 `protocol:` 触发协议转换；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由
 - 凭据由 `login <provider>` 管理，存储在 `~/.model-proxy/<name>_<suffix>.json`，不落 config
 
 ## 构建
@@ -37,7 +46,7 @@ scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w
 `config.yaml`（`model-proxy config init` 生成模板）。查找顺序：`--config PATH` > `~/.model-proxy/config.yaml` > `./config.yaml`。路径字段支持 `~/` 展开 和 `env:ENV_VAR` 前缀（从环境变量读值，如 `log_file: env:MP_LOG_FILE`）。
 
 ```yaml
-listen: 127.0.0.1:15721
+listen: 127.0.0.1:15721    # 强制回环（0.0.0.0/内网 IP/域名会被 validate 拒绝——/api/* 无鉴权）
 log_level: info
 
 providers:
@@ -45,13 +54,15 @@ providers:
     provider_id: aqp
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
-    models:                       # 只填模型名；元数据(context/output/modalities)运行时从 models.dev 自动补
+    models:                       # 只填模型名；元数据(context/output/modalities/tool_call)运行时从 models.dev 自动补
       - glm-5.2
   codex:
     provider_id: codex
     openai_base_url: https://chatgpt.com/backend-api/codex
     models:
       - gpt-5.5
+    # capabilities:               # 可选：手动声明模型能力（models.dev 查不到时的逃生口，声明即权威）
+    #   gpt-5.5: [image, tools]
   zhipu:
     provider_id: zhipu
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
@@ -82,9 +93,17 @@ routes:
 # stats:                    # 调用统计持久化（SQLite，默认开启，30 天保留）
 #   db_path: ~/.model-proxy/stats.db
 #   retention: 30d          # 0 = 永久
+# cache:                    # 精确响应缓存（默认关；逐字节重复的请求直接命中，省上游配额）
+#   enabled: true
+#   ttl: 10m
+#   max_entries: 1000
+# shadow:                   # 影子评测：把某路由的请求异步镜像到候选后端做对比（需 request_log 开启）
+#   glm-5.2: {provider: kimi-code, sample_rate: 0.1, max_concurrent: 4}
+# request_log:              # 请求日志（完整 request/response body，默认关；Requests 页 + replay 的数据源）
+#   enabled: true
 ```
 
-> **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。匹配不到的模型走保守默认值并在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
+> **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities`/`tool_call` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。匹配不到的模型走保守默认值并在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
 >
 > **隐式路由**：某个模型即使没在 `routes` 里配，只要某个**已登录** provider 的 `models:` 列了它，代理会自动按模型名路由到（字母序）首个 provider。若多个已登录 provider 都提供且无显式 route，只用首个并在 `models` 命令 / Web UI 发出歧义告警。显式 `routes` 永远优先（要做 failover/优先级控制仍需显式配置）。
 
@@ -104,7 +123,7 @@ model-proxy serve                  # 前台
 model-proxy serve daemon           # 后台（自动重启）
 model-proxy serve stop             # 停止 daemon
 model-proxy serve reload           # 热加载配置（SIGHUP）
-model-proxy serve status           # 运行状态（providers/路由/配额/token）
+model-proxy serve status           # 运行状态（providers/路由/配额/token/延迟）
 # serve 通用 flag：--config <PATH>、--log-file <PATH>（覆盖 config 的 log_file）
 
 # 查看用量
@@ -125,6 +144,10 @@ model-proxy models aqp             # 单个 provider
 model-proxy models refresh zhipu   # 从服务端拉取模型，逐个探测校验后覆盖写回 config（无 /models 端点时回退探测路由模型）
 model-proxy models pull            # 强制刷新 models.dev 元数据缓存
 
+# 端到端测活
+model-proxy test glm-5.2           # 探测路由每个 target（路由 → 凭据 → 上游真实请求）；任一通则 exit 0
+# Web UI Accounts 页每个账号卡片还有 Test 按钮（POST /api/accounts/<p>/<id>/test），可测池化指定账号
+
 # 接管客户端配置
 model-proxy takeover opencode      # claude|opencode|codex|pi|all
 model-proxy restore opencode
@@ -136,24 +159,37 @@ model-proxy config check           # 校验配置
 
 # 调度诊断
 model-proxy schedule               # 查询运行中的 daemon：每 model 当前调度到哪个 provider（GET /debug/schedule）
-model-proxy doctor                 # 离线 config 调度诊断（tier/quota/peak + dry-run 顺序 + warning）
+model-proxy doctor                 # 离线 config 调度诊断（tier/quota/peak/shadow + dry-run 顺序 + warning）
+
+# 临时钉住路由（排查/对比用，不改 config）
+model-proxy pin glm-5.2 zhipu --ttl 1h   # 硬禁 failover：zhipu 挂了就 502，绝不逃别家
+model-proxy pin                          # 列出所有 pin
+model-proxy unpin glm-5.2
 
 # 调用统计（需 daemon + web.enabled）
-model-proxy stats                  # 最近 60min 的 per-(provider,model) 调用统计（reqs/failover/429/fail/input/output）
+model-proxy stats                  # 最近 60min 的 per-(provider,model) 调用统计（reqs/failover/429/fail/lat/ttft/input/output）
 model-proxy stats --bucket 1h      # 按小时聚合展示
 model-proxy stats --from 1h --to now --provider zhipu   # 时间范围 + 过滤
+model-proxy stats --by-agent       # 按 agent 维度（哪个客户端在烧配额；可叠 --agent/--provider/--model）
 model-proxy stats --json           # 原始 JSON（便于 jq）
+
+# 影子评测与重放（需 request_log.enabled）
+model-proxy shadow report          # 影子聚合对比：样本数/状态一致率/延迟差/大小比
+model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历史中任意一条请求
 ```
 
 ## Web UI
 
-代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启，仅在 loopback 监听，无鉴权**（本地可信）。三个标签页：
+代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；`listen` 由 validate 强制回环，无鉴权**（本地可信）。六个标签页：
 
-- **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择（来自 `GET /debug/schedule`）、请求计数器（requests/failovers/429/failures）、观测到的 token 用量（按 provider×model）。
+- **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
-- **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider（zhipu/deepseek/volcengine）可在 UI 添加/删除账号；aqp/codex 走**异步登录**（点 "Add account" 弹模态框 → 浏览器完成 SSO / OAuth device flow → UI 轮询 `/api/login/<session>/poll` 直到 `done`/`error`）。
+- **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
+- **Analytics** — token + 等价成本趋势（日历日/月聚合；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a`）。
+- **Requests** — 请求日志查询（需 `request_log.enabled`）：按 model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。
+- **Live** — 实时请求监视（SSE 推送）：哪个 agent 正在发请求、路由到哪个上游、状态/token/耗时——抓「疯狂重试的 agent」就靠它。
 
-**所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态，所以 UI 改动也是"给卡住的 provider 复位"的手段。
+**所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态并重建响应缓存，所以 UI 改动也是"给卡住的 provider 复位"的手段。
 
 关闭 UI：
 
@@ -162,7 +198,7 @@ web:
   enabled: false
 ```
 
-JSON 接口在 `/api/*`（`status` / `logs?tail=N` / `config` GET·POST / `config/edit` / `accounts` GET·POST·DELETE / `tokens` / `tokens/reset` / `login/<provider>/start` + `login/<session>/poll`）；底层契约（请求/响应 shape、SSE token 扫描器语义）见 `AGENTS.md` 的「Web UI + /api/* 接口契约」一节。前端是嵌入式的静态资源（`web_assets/`，`go:embed`），无独立构建步骤。
+JSON 接口在 `/api/*`（`status` / `logs` / `config` / `accounts`（含 `…/<id>/test`）/ `tokens` / `stats` / `agents` / `analytics` / `requests` / `shadow-report` / `events` / `pin` / `quota/refresh` / `login/*`）；底层契约（请求/响应 shape、stats 口径）见仓库根目录 `docs/web-api.md`。前端是嵌入式的静态资源（`web_assets/`，`go:embed`），无独立构建步骤。
 
 ## `serve status`（终端状态面板）
 
@@ -179,8 +215,8 @@ model-proxy serve status --config /path/to/config.yaml   # 指定 config（从�
 显示内容（与 Status 标签页一致）：
 
 - **头部**：`v<version> · <uptime> · <listen>`
-- **Providers**：每个 provider 的健康状态（`available` / `circuit open` / `rate-limited` / `unavailable`）+ 计数器（reqs / failovers / 429 / failures / 最后请求时间）
-- **Schedule**：每路由首选 provider + ordered 列表（tier / surplus / priority / 可用 / peak）+ sticky 驻留
+- **Providers**：每个 provider 的健康状态（`available` / `circuit open` / `rate-limited` / `unavailable`）+ 计数器（reqs / failovers / 429 / failures / **LAT / TTFT 平均延迟** / 最后请求时间）
+- **Schedule**：每路由首选 provider + ordered 列表（tier / surplus / priority / 可用 / peak）+ sticky 驻留 + pin 状态
 - **Quota**：每 provider 的配额窗口（ultimate / short）+ 剩余百分比 + 进度条 + 重置时间
 - **Tokens**：按 provider × model 的观测用量（input / output / cache）
 - **Logs**（仅 `--logs`）：最近 N 行日志
@@ -196,10 +232,13 @@ model-proxy stats                             # 最近 60min（默认），1 分
 model-proxy stats --bucket 10m                # 按 10 分钟桶聚合展示（存储恒为 1 分钟，聚合仅展示）
 model-proxy stats --from 2h --to now          # 时间范围（unix 秒或 RFC3339；默认 60min 前..now）
 model-proxy stats --provider zhipu --model glm-5.2   # 过滤
+model-proxy stats --by-agent                  # 按 agent 维度（claude-code/codex/opencode/pi/…）
+model-proxy stats --by-agent --agent codex    # 只看某个 agent（可叠 --provider/--model）
+model-proxy stats --granularity day --cost    # 日历日聚合 + 等价成本（走 /api/analytics）
 model-proxy stats --json                      # 原始 JSON（便于 jq）
 ```
 
-输出列：`provider · model · <bucket> · reqs · failover · 429 · fail · input · output`（紧凑数字）。空结果 -> `(no stats in range <FROM> .. <TO>, bucket <BUCKET>)`。`POST /api/tokens/reset`（或 Web UI）可清零内存 + SQLite + flush 基线。配置：`config.stats.{db_path, retention}`（默认 `~/.model-proxy/stats.db`，30 天；`0` = 永久）。
+输出列：`provider · model · <bucket> · reqs · failover · 429 · fail · lat(ms) · ttft(ms) · input · output`（紧凑数字；lat/ttft 是平均总时延/首字节时延，不含客户端慢读）。`--by-agent` 输出 `agent · provider · model · reqs · fail · lat · input · output`——回答「哪个 agent 在烧配额/哪个在疯狂失败」。空结果 -> `(no stats in range …)`。`POST /api/tokens/reset`（或 Web UI）可清零内存 + SQLite + flush 基线。配置：`config.stats.{db_path, retention}`（默认 `~/.model-proxy/stats.db`，30 天；`0` = 永久）。
 
 ## Token 文件
 
@@ -217,9 +256,9 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 
 多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件/池。
 
-## 协议
+## 协议与协议转换
 
-代理按 URL 路径前缀路由，对外协议 = 转发协议（不做转换）：
+代理按 URL 路径前缀路由。**默认「对外协议 = 转发协议」，同协议字节级透传**：
 
 | 协议 | 端点 | 转发到 |
 |---|---|---|
@@ -228,6 +267,67 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 | 模型列表 | `GET /v1/models` | 合并 routes + 隐式路由 + claude_mapping 的模型名 |
 
 **按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。注意代理会剥掉客户端的 `/v1` 前缀，故 base URL 须自带版本段（如 `…/v1`、`…/anthropic/v1`）。
+
+**协议转换（opt-in）**：路由目标声明 `protocol:` 且与客户端协议不同时，代理自动做 Anthropic ↔ OpenAI 双向转换（请求 + 响应 + 流式，**tools 全链路**：`tools`/`tool_choice`/`tool_use`/`tool_result` 结构映射、流式增量事件互转、usage/cache token 透传）——比如让 Claude Code（Anthropic 协议）直连只有 OpenAI 端点的后端：
+
+```yaml
+routes:
+  glm-5.2:
+    # 客户端说 anthropic，zhipu 这条走它的 openai 端点 → 自动转换
+    - {provider: zhipu, model: glm-5.2, priority: 1, protocol: openai}
+```
+
+转换是 per-target 的，同协议目标保持字节级透传不受影响。不可映射的字段（thinking 块、cache_control、server-side tools 等）会丢弃并在日志打一次性告警（不静默）。
+
+## 请求感知路由
+
+调度之后、转发之前，代理还会按**请求内容**微调目标（数据来自 models.dev 目录，目录不可用时全部跳过）：
+
+- **能力过滤**：请求带图片（`image` block / `image_url`）或带 `tools` 时，剔除不支持该能力的目标；全部不匹配则跨路由找支持的模型兜底。models.dev 查不到的 provider（codex/aqp/volcengine）默认按「不支持」保守处理——可用 provider 级 `capabilities:` 手动声明覆盖（见配置节）。
+- **上下文兜底（两道保险）**：① 主动——估算 prompt token（rune 感知，中文按字计、剔除 base64 图片），超过路由最大上下文时自动改道到更大上下文的模型；② 被动——上游返回 context-overflow 类 400 时识别错误形状，用更大上下文的目标**自动重试一次**（找不到更大目标才把 400 原样回给客户端）。
+
+## 响应缓存
+
+`cache.enabled` 开启后，对**逐字节相同**的请求（SHA-256(method+path+body)）直接重放缓存的原始响应字节（SSE 也逐字节一致），不发上游、不烧配额。命中时响应带 `x-mp-cache: hit` 头，`/api/status` 和 Web UI Status 页展示命中率；`x-mp-force-provider`/pin 生效的请求跳过缓存（保证 replay/pin 语义）。客户端断开的半截响应不会入库。改 `cache.*` 配置 reload 即生效。
+
+**定位是「重试/重复请求盾牌」**：多轮对话 body 逐轮变长，正常会话命中率≈0；前缀复用的经济性由上游 prompt caching 覆盖，精确缓存接住的是客户端原地重试、CI/脚本里的重复单发。
+
+## 调试工具：`test` / `pin` / `replay`
+
+```bash
+# test —— 端到端链路测活（路由解析 → 凭据 → 上游真实最小请求）
+model-proxy test glm-5.2        # 逐 target 打印 ✓/✗ + HTTP 状态 + 原因；任一通 exit 0
+
+# pin —— 运行期把路由钉到某 provider（排查「是不是这家后端的问题」）
+model-proxy pin glm-5.2 zhipu --ttl 1h
+# pin 是硬独占：被钉的 provider 挂了直接 502 也不 failover；重启即失效
+# 单次请求级覆盖：请求头 x-mp-force-provider: <provider>（replay 用的就是这个）
+
+# replay —— 从请求历史里挑一条，用另一个后端重答（需 request_log.enabled）
+model-proxy replay 3fa9c2-118 --to kimi-code
+# shadow 记录 / 非 /v1 路径 / 被截断的 body 会被明确拒绝
+```
+
+配合 Web UI 的 **Requests** 页（找 request_id）和 **Live** 页（实时盯着看），构成完整的本地调试闭环。
+
+## 影子评测
+
+新增后端时不靠猜：`shadow:` 把某路由的真实请求**异步镜像**一份到候选后端，客户端照常收主后端的响应，影子的结果落进请求日志供对比。
+
+```yaml
+shadow:
+  glm-5.2:
+    provider: kimi-code          # 候选后端（可跨协议，自动转换）
+    sample_rate: 0.1             # 采样率（0-1；省略=1.0 全量，显式 0=关闭）。影子烧候选方配额，务必控量
+    max_concurrent: 4            # 并发闸（省略=4）
+```
+
+```bash
+model-proxy shadow report        # 近 24h 聚合：每对 (路由, 主, 影子) 的样本数/状态一致率/平均延迟差/响应大小比
+model-proxy shadow report --from 7d
+```
+
+影子请求不污染生产（不进熔断/统计/粘性）；Web UI Requests 页用「shadow only」过滤后点任意一条，可用 `replay` 继续深挖。评测维度目前是客观指标（状态/延迟/大小），LLM judge 胜率未做。
 
 ## 调度与熔断（`scheduling`）
 
@@ -278,7 +378,7 @@ scheduling:
 
 `Quota()` 来源：zhipu/codex/volcengine/aqp → plan tier；deepseek → pay-as-you-go。volcengine 的 `GetAFPUsage` 需 AccessKey/SecretKey（Ark API Key 调不了），未配时该 provider 退化为 `unknown`。
 
-**查看调度**：`model-proxy schedule` 查询运行中的 daemon，显示每个 model 当前调度到哪个 provider（后台接口 `GET /debug/schedule`，含 ordered 列表/sticky 状态）；`model-proxy doctor` 离线诊断 config 的调度设置（每 provider tier/quota/peak + 每路由 dry-run 顺序 + warning，不需 daemon）。
+**查看调度**：`model-proxy schedule` 查询运行中的 daemon，显示每个 model 当前调度到哪个 provider（后台接口 `GET /debug/schedule`，含 ordered 列表/sticky 状态）；`model-proxy doctor` 离线诊断 config 的调度设置（每 provider tier/quota/peak + 每路由 dry-run 顺序 + shadow 配置 + warning，不需 daemon）。
 
 ## 添加新 Provider
 
@@ -355,4 +455,3 @@ model-proxy usage volcengine        # Agent Plan 的 5h/每日/周/月 AFP 额�
 鉴权双写（`Authorization: Bearer` + `x-api-key`）：OpenAI 端点用 Bearer，Anthropic-compatible 端点用 x-api-key，一个 key 两种协议都能用。
 
 > **用量（GetAFPUsage）**：Agent Plan 的 5h/每日/周/月额度在 `GetAFPUsage`——火山引擎**签名 OpenAPI**（`Action=GetAFPUsage&Version=2024-01-01`，HMAC-SHA256/V4，需 **AccessKey/SecretKey**），Ark API Key（Bearer，仅对话）调不了。`login volcengine` 会同时收 Ark API Key + AK/SK；`usage volcengine` 用 V4 签名调 GetAFPUsage 显示各窗口 Quota/Used/Remaining/ResetTime。未配 AK/SK 时退化为列 config 模型。
-

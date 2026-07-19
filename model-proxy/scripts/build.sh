@@ -67,13 +67,12 @@ while [ $# -gt 0 ]; do
 done
 
 # Default target matrix for `all`. Kept to the platforms model-proxy actually
-# runs on; add pairs here as needed.
+# runs on AND that sonic's assembly fast path covers (amd64 + arm64 only).
+# Add pairs here as needed; note that windows/386/etc. would fall back to
+# encoding/json (sonic degrades gracefully, but loses the performance gain).
 DEFAULT_TARGETS=(
 	linux/amd64
-	linux/arm64
-	darwin/amd64
 	darwin/arm64
-	windows/amd64
 )
 
 # Resolve the version string from git unless overridden. git describe prefers a

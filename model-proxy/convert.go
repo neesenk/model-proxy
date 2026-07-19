@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	sonic "github.com/bytedance/sonic"
 )
 
 // convert.go implements PROTOCOL CONVERSION (#11): let a client speak one protocol
@@ -61,7 +63,7 @@ func strOf(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	b, _ := json.Marshal(v)
+	b, _ := sonic.Marshal(v)
 	return strings.Trim(string(b), `"`)
 }
 
@@ -208,7 +210,7 @@ func anthropicMsgToOpenAIMsgs(m map[string]any) []map[string]any {
 				if blk["type"] == "tool_use" {
 					id, _ := blk["id"].(string)
 					name, _ := blk["name"].(string)
-					args, _ := json.Marshal(blk["input"]) // openai arguments is a JSON string
+					args, _ := sonic.Marshal(blk["input"]) // openai arguments is a JSON string
 					toolCalls = append(toolCalls, map[string]any{
 						"id": id, "type": "function",
 						"function": map[string]any{"name": name, "arguments": string(args)},
@@ -298,7 +300,7 @@ func anthropicToolResultText(content any) string {
 // an OpenAI /v1/chat/completions body (full tools support).
 func convertAnthropicRequestToOpenAI(body []byte) ([]byte, error) {
 	var src map[string]any
-	if err := json.Unmarshal(body, &src); err != nil {
+	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
 	}
 	out := map[string]any{}
@@ -346,7 +348,7 @@ func convertAnthropicRequestToOpenAI(body []byte) ([]byte, error) {
 	if stops, ok := src["stop_sequences"].([]any); ok && len(stops) > 0 {
 		out["stop"] = stops
 	}
-	return json.Marshal(out)
+	return sonic.Marshal(out)
 }
 
 // --- request: openai → anthropic ---
@@ -465,7 +467,7 @@ func parseToolArgs(args string) any {
 		return map[string]any{}
 	}
 	var obj any
-	if err := json.Unmarshal([]byte(args), &obj); err == nil {
+	if err := sonic.Unmarshal([]byte(args), &obj); err == nil {
 		if _, isObj := obj.(map[string]any); isObj {
 			return obj
 		}
@@ -523,7 +525,7 @@ func mergeConsecutiveAnthropicRoles(msgs []map[string]any) []map[string]any {
 // by Anthropic; if absent a generous default is injected.
 func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 	var src map[string]any
-	if err := json.Unmarshal(body, &src); err != nil {
+	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse openai request: %w", err)
 	}
 	out := map[string]any{}
@@ -671,7 +673,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 	if stops, ok := src["stop"].([]any); ok && len(stops) > 0 {
 		out["stop_sequences"] = stops
 	}
-	return json.Marshal(out)
+	return sonic.Marshal(out)
 }
 
 // convertRequest converts a request body from the client protocol to the target
@@ -764,7 +766,7 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal(body, &src); err != nil {
+	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse openai response: %w", err)
 	}
 	var content []map[string]any
@@ -774,7 +776,7 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		// content may be a string or null.
 		if len(c.Message.Content) > 0 && string(c.Message.Content) != "null" {
 			var cv any
-			json.Unmarshal(c.Message.Content, &cv)
+			sonic.Unmarshal(c.Message.Content, &cv)
 			if s, ok := cv.(string); ok {
 				content = append(content, map[string]any{"type": "text", "text": s})
 			} else if parts, ok := cv.([]any); ok {
@@ -813,7 +815,7 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		"stop_reason": stopReason,
 		"usage":       usage,
 	}
-	return json.Marshal(out)
+	return sonic.Marshal(out)
 }
 
 // convertAnthropicResponseToOpenAI transforms a non-streaming Anthropic
@@ -837,7 +839,7 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal(body, &src); err != nil {
+	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse anthropic response: %w", err)
 	}
 	var text string
@@ -885,7 +887,7 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 		"choices": []map[string]any{{"index": 0, "message": msg, "finish_reason": mapStopReasonToFinish(src.StopReason)}},
 		"usage":   usage,
 	}
-	return json.Marshal(out)
+	return sonic.Marshal(out)
 }
 
 // convertResponse converts a non-streaming response body from the target protocol
@@ -947,7 +949,7 @@ func newOpenAIToAnthropicSSE(r io.Reader, model string) *openaiSSEToAnthropicSSE
 }
 
 func (t *openaiSSEToAnthropicSSE) emit(event string, payload map[string]any) {
-	b, _ := json.Marshal(payload)
+	b, _ := sonic.Marshal(payload)
 	t.out = append(t.out, []byte("event: "+event+"\n")...)
 	t.out = append(t.out, []byte("data: ")...)
 	t.out = append(t.out, b...)
@@ -1099,7 +1101,7 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 				Type    string `json:"type"`
 			} `json:"error"`
 		}
-		if json.Unmarshal([]byte(payload), &errChunk) == nil && (errChunk.Error.Message != "" || errChunk.Error.Type != "") {
+		if sonic.Unmarshal([]byte(payload), &errChunk) == nil && (errChunk.Error.Message != "" || errChunk.Error.Type != "") {
 			t.ensureStart()
 			t.closeBlock()
 			et := errChunk.Error.Type
@@ -1137,7 +1139,7 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 				} `json:"prompt_tokens_details"`
 			} `json:"usage"`
 		}
-		if json.Unmarshal([]byte(payload), &chunk) != nil {
+		if sonic.Unmarshal([]byte(payload), &chunk) != nil {
 			continue
 		}
 		if chunk.ID != "" {
@@ -1230,7 +1232,7 @@ func (t *anthropicSSEToOpenAISSE) emitChunk(delta map[string]any, finish any, us
 	if usage != nil {
 		m["usage"] = usage
 	}
-	b, _ := json.Marshal(m)
+	b, _ := sonic.Marshal(m)
 	t.out = append(t.out, []byte("data: ")...)
 	t.out = append(t.out, b...)
 	t.out = append(t.out, []byte("\n\n")...)
@@ -1302,7 +1304,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				OutputTokens int `json:"output_tokens"`
 			} `json:"usage"`
 		}
-		if json.Unmarshal([]byte(payload), &ev) != nil {
+		if sonic.Unmarshal([]byte(payload), &ev) != nil {
 			continue
 		}
 		if ev.Message.Model != "" {
@@ -1323,7 +1325,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			if et == "" {
 				et = "api_error"
 			}
-			errObj, _ := json.Marshal(map[string]any{"message": ev.Error.Message, "type": et, "param": nil, "code": nil})
+			errObj, _ := sonic.Marshal(map[string]any{"message": ev.Error.Message, "type": et, "param": nil, "code": nil})
 			t.out = append(t.out, []byte("data: {\"error\":")...)
 			t.out = append(t.out, errObj...)
 			t.out = append(t.out, []byte("}\n\n")...)
