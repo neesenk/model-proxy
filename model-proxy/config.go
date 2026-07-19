@@ -260,6 +260,14 @@ type Provider struct {
 	// modalities) is NOT stored here; it is sourced at runtime from models.dev
 	// (or conservative defaults) by hydrateModels.
 	Models []string `yaml:"models"`
+	// Capabilities is a manual per-model capability override — the escape hatch
+	// for models the models.dev catalog doesn't know (codex/aqp/volcengine blind
+	// spots). Keys are model names (validate requires them to appear in Models);
+	// values are drawn from {image, tools}. For a DECLARED model the request-fit
+	// check follows this list exactly ([image] = image yes, tools no), ignoring
+	// the catalog; undeclared models keep catalog behavior. Context-window checks
+	// always come from the catalog (capabilities declare no window).
+	Capabilities map[string][]string `yaml:"capabilities"`
 	// PeakHours is this provider's set of peak segments (each "HH:MM-HH:MM" in
 	// local time). Peak is folded into effective remaining quota: the per-segment
 	// multiplier discounts a provider's remaining quota while it is inside a peak
@@ -433,8 +441,12 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		RequestLog    RequestLogConfig         `yaml:"request_log"`
 		Cache         CacheConfig              `yaml:"cache"`
 		Shadow        map[string]ShadowTarget  `yaml:"shadow"`
-		Pricing       PricingConfig            `yaml:"pricing"`
-		Prices        map[string]PriceConfig   `yaml:"prices"`
+		// Must mirror Config's shadow knobs — without these the file-loaded
+		// values are silently dropped (and validate's range checks never fire).
+		ShadowSampleRate    *float64               `yaml:"shadow_sample_rate"`
+		ShadowMaxConcurrent int                    `yaml:"shadow_max_concurrent"`
+		Pricing             PricingConfig          `yaml:"pricing"`
+		Prices              map[string]PriceConfig `yaml:"prices"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
@@ -465,6 +477,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.RequestLog = raw.RequestLog
 	cfg.Cache = raw.Cache
 	cfg.Shadow = raw.Shadow
+	cfg.ShadowSampleRate = raw.ShadowSampleRate
+	cfg.ShadowMaxConcurrent = raw.ShadowMaxConcurrent
 	cfg.Pricing = raw.Pricing
 	cfg.Prices = raw.Prices
 	cfg.LogFile = expandPath(cfg.LogFile)
@@ -573,6 +587,26 @@ func (c *Config) validate() error {
 		// billing: only known values.
 		if p.Billing != "" && p.Billing != "plan" && p.Billing != "pay-as-you-go" {
 			return fmt.Errorf("provider %q: billing %q invalid — use \"plan\" or \"pay-as-you-go\"", name, p.Billing)
+		}
+		// capabilities: keys must name a model in models: (anything else is
+		// almost certainly a typo that would silently never match); values must
+		// be known capability names.
+		for model, caps := range p.Capabilities {
+			inModels := false
+			for _, m := range p.Models {
+				if m == model {
+					inModels = true
+					break
+				}
+			}
+			if !inModels {
+				return fmt.Errorf("provider %q: capabilities key %q is not in its models: list — likely a typo; add the model to models: or fix the key", name, model)
+			}
+			for _, c := range caps {
+				if c != "image" && c != "tools" {
+					return fmt.Errorf("provider %q: capabilities[%q]: unknown capability %q — valid values: image, tools", name, model, c)
+				}
+			}
 		}
 	}
 	for exposed, targets := range c.Routes {

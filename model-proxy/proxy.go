@@ -869,7 +869,9 @@ func (p *Proxy) publishTerminalEvent(r *http.Request, proto, exposed string, sta
 // schedules the route's sticky provider first (within its dwell window), else the
 // best available by (non-peak, priority); providers with an open circuit or active
 // rate-limit are skipped. It fails over to the next on connection error /
-// 401-after-refresh / 5xx / 429. The protocol (from the request path) selects the
+// 401-after-refresh / 5xx / 429, and retries once on a strictly-larger-context
+// target when the upstream answers a context-overflow 400 (see
+// contextOverflowRetry). The protocol (from the request path) selects the
 // upstream path and base URL (anthropic_base_url vs openai_base_url); it does not
 // key the route.
 func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
@@ -1014,7 +1016,14 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		Exposed:   exposed,
 	})
 
-	for ti, t := range ordered {
+	// retriedForContext makes the context-overflow retry one-shot: the first
+	// overflow retargets onto strictly-larger-context models (ordered is swapped
+	// and the loop restarts); a second overflow from the retried list commits
+	// the upstream 400 to the client.
+	retriedForContext := false
+	attempt := 0 // monotonic tryTarget index for the request log (ti resets on a context retry)
+	for ti := 0; ti < len(ordered); ti++ {
+		t := ordered[ti]
 		// Resolve the provider CONFIG. For a pooled virtual ("name#<id>") the
 		// config lives under the parent name in cfg.Providers; providerConfig
 		// resolves it via parentOf. The provider IMPLEMENTATION (provImpl) is
@@ -1059,9 +1068,31 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			effPath = backendPath(backendProto)
 		}
 
-		flc := forwardLogCtx{requestID: requestID, attempt: ti, exposed: exposed, origBody: origBody}
-		if p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc) {
+		flc := forwardLogCtx{requestID: requestID, attempt: attempt, exposed: exposed, origBody: origBody}
+		attempt++
+		// One-shot larger-context retry: when this target answers a
+		// context-overflow 400, tryTarget calls ctxRetry for a strictly-larger-
+		// context replacement list (cross-route pool, scheduled) instead of
+		// committing. Nil — no peek, no retry — once the retry is spent, while a
+		// pin is in force (exclusive: no cross-route reroute), or without a
+		// catalog (same no-op degradation as applyRequestAwareRouting).
+		var ctxRetry func() []RouteTarget
+		if !retriedForContext && !force && cat != nil {
+			tried := ordered
+			ctxRetry = func() []RouteTarget {
+				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, tried, expanded, routeKeys)
+			}
+		}
+		committed, retried := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry)
+		if committed {
 			return // committed: response written to the client
+		}
+		if retried != nil {
+			retriedForContext = true
+			log.Printf("[proto=%s model=%s] target %d (%s/%s) context overflow; retrying with larger-context targets", proto, exposed, ti, t.Provider, t.Model)
+			ordered = retried
+			ti = -1 // restart at the first replacement target (post-statement ti++ → 0)
+			continue
 		}
 		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
 	}
@@ -1089,12 +1120,17 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 }
 
 // tryTarget sends the request to one target, with a 401-refresh retry and an
-// upstream timeout. It writes the response to w and returns true once committed
-// (2xx or non-failover 4xx). Returns false to signal failover (connection error,
-// timeout, 401 after refresh, 5xx, 429, or a build/auth error). It updates the
-// provider's health on success/failure/rate-limit and enforces half-open
-// single-flight. Failover only happens before any bytes are written to w.
-func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx) bool {
+// upstream timeout. It writes the response to w and returns committed=true once
+// committed (2xx or non-failover 4xx). committed=false signals failover
+// (connection error, timeout, 401 after refresh, 5xx, 429, or a build/auth
+// error). When ctxRetry is non-nil and the upstream answers a context-overflow
+// 400 (see isContextOverflow), tryTarget instead counts a failover and returns
+// ctxRetry()'s strictly-larger-context replacement targets as `retried` (nil
+// when no larger target exists → the peeked 400 commits unchanged). It updates
+// the provider's health on success/failure/rate-limit and enforces half-open
+// single-flight. Failover/retarget only happen before any bytes are written
+// to w.
+func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx, ctxRetry func() []RouteTarget) (committed bool, retried []RouteTarget) {
 	// Wrap the client writer to capture time-to-first-token for latency stats.
 	// All writes below go through tw; ttft is read on the commit path.
 	tw := newTimingResponseWriter(w)
@@ -1105,7 +1141,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 	// backend, so circuit-open state must not block it (and there's no failover
 	// target anyway). recordSuccess on a forced hit reopens the circuit.
 	if !force && !p.takeHalfOpenSlot(t.Provider) {
-		return false
+		return false, nil
 	}
 	// recordSuccess/Failure/RateLimit below release the slot (force never took
 	// one, so those releases are harmless no-ops).
@@ -1130,7 +1166,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false
+			return false, nil
 		}
 		copyHeaderWhitelist(req.Header, r.Header,
 			"content-type", "accept", "user-agent", "x-session-id",
@@ -1145,7 +1181,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				if p.metrics != nil {
 					p.metrics.inc(t.Provider, t.Model, evFailovers)
 				}
-				return false
+				return false, nil
 			}
 		}
 		for k, v := range prov.Headers {
@@ -1168,7 +1204,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				p.metrics.inc(t.Provider, t.Model, evFailures)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false
+			return false, nil
 		}
 
 		// 401: refresh + retry once on the same target; still 401 → failure + failover.
@@ -1186,7 +1222,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false
+			return false, nil
 		}
 		// Rate limit (429): skip this provider until Retry-After / default backoff.
 		// Does not count toward the circuit.
@@ -1198,7 +1234,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				p.metrics.inc(t.Provider, t.Model, evRateLimited429)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false
+			return false, nil
 		}
 		// Transient upstream errors → circuit + failover.
 		if resp.StatusCode >= 500 {
@@ -1208,7 +1244,31 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				p.metrics.inc(t.Provider, t.Model, evFailures)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false
+			return false, nil
+		}
+
+		// Context-overflow retry: a 4xx whose body matches an upstream "prompt
+		// exceeds the context window" error (peeked; bytes restored transparently)
+		// is NOT committed while this request still has its one retry — count a
+		// failover (NO circuit failure: the provider is healthy, the request just
+		// doesn't fit the model) and return the larger-context replacement list
+		// for forward to retarget. With no retry left or no larger target
+		// anywhere, fall through to the normal commit: the client receives the
+		// upstream's 400 unchanged (peeked bytes included).
+		if ctxRetry != nil && resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			peek := peekResponseBody(resp, contextOverflowPeek)
+			if isContextOverflow(resp.StatusCode, peek) {
+				if bigger := ctxRetry(); len(bigger) > 0 {
+					resp.Body.Close()
+					p.releaseHalfOpenSlot(t.Provider)
+					if p.metrics != nil {
+						p.metrics.inc(t.Provider, t.Model, evFailovers)
+					}
+					log.Printf("[proto=%s provider=%s] context overflow (status %d); retrying on a larger-context target",
+						proto, t.Provider, resp.StatusCode)
+					return false, bigger
+				}
+			}
 		}
 
 		// Commit: stream this response (2xx or non-failover 4xx).
@@ -1412,7 +1472,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				}
 			}
 		}
-		return true
+		return true, nil
 	}
 	// 401-retry exhausted without resolution — release the slot.
 	// Defensive guard: unreachable in normal flow (the 401 branch above always
@@ -1421,7 +1481,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 	if p.metrics != nil {
 		p.metrics.inc(t.Provider, t.Model, evFailovers)
 	}
-	return false
+	return false, nil
 }
 
 // shouldShadow reports whether this request should be shadow-evaluated, based on
@@ -2109,6 +2169,25 @@ func flushCopy(w http.ResponseWriter, rc io.ReadCloser) {
 			break
 		}
 	}
+}
+
+// contextOverflowPeek caps how far into a 4xx body tryTarget reads when
+// sniffing for a context-overflow error. 64 KiB is far beyond any error JSON.
+const contextOverflowPeek = 64 << 10
+
+// peekResponseBody reads up to n bytes from resp.Body and returns them, then
+// RESTORES resp.Body so the commit path re-reads the full body transparently
+// (MultiReader: peeked prefix + remaining stream; Close still reaches the
+// original body). Used to sniff a 4xx body for a context-overflow error without
+// consuming it; a read error is best-effort (peeked holds what was read, and no
+// byte is lost either way).
+func peekResponseBody(resp *http.Response, n int) []byte {
+	peeked, _ := io.ReadAll(io.LimitReader(resp.Body, int64(n)))
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(peeked), resp.Body), resp.Body}
+	return peeked
 }
 
 // timingResponseWriter wraps the client ResponseWriter to capture time-to-first-

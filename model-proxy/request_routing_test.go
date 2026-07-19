@@ -250,3 +250,182 @@ func TestForward_CapabilityFilter_E2E(t *testing.T) {
 		t.Errorf("text request: text=%v vision=%v, want text only", textHit, visionHit)
 	}
 }
+
+// TestModelFits_CapabilitiesOverride: a provider's `capabilities:` declaration is
+// authoritative for the image/tools fit of the models it names — the catalog is
+// ignored for them (the escape hatch for catalog blind spots). Undeclared models
+// keep catalog behavior (conservative on unknowns).
+func TestModelFits_CapabilitiesOverride(t *testing.T) {
+	cat := testCatalog(map[string]struct {
+		Context int64
+		Input   []string
+	}{
+		"text": {Context: 8000, Input: []string{"text"}},
+	})
+	caps := map[string][]string{
+		"blind":       {"image"}, // not in catalog; declared image-only
+		"blind-tools": {"tools"}, // not in catalog; declared tools-only
+		"empty":       {},        // declared with NO capabilities
+	}
+	img := profileRequest([]byte(`{"messages":[{"content":[{"type":"image"}]}]}`))
+	tools := profileRequest([]byte(`{"tools":[{"name":"x"}]}`))
+	text := profileRequest([]byte(`{"messages":[{"content":"hi"}]}`))
+
+	// ① Declared image → an image request fits even though the catalog doesn't
+	// know the model at all.
+	if !modelFits(cat, caps, "blind", img) {
+		t.Error("declared [image] blind model + image request should fit")
+	}
+	// ② [image] declares image ONLY — a tools request does NOT fit (the
+	// declaration is authoritative, not additive).
+	if modelFits(cat, caps, "blind", tools) {
+		t.Error("declared [image] model + tools request should NOT fit (tools not declared)")
+	}
+	if !modelFits(cat, caps, "blind-tools", tools) {
+		t.Error("declared [tools] blind model + tools request should fit")
+	}
+	if modelFits(cat, caps, "blind-tools", img) {
+		t.Error("declared [tools] model + image request should NOT fit (image not declared)")
+	}
+	if modelFits(cat, caps, "empty", img) || modelFits(cat, caps, "empty", tools) {
+		t.Error("declared [] model should fit neither image nor tools requests")
+	}
+	if !modelFits(cat, caps, "empty", text) {
+		t.Error("declared [] model + plain text request should fit (no capability demanded)")
+	}
+	// ③ Undeclared models keep catalog behavior.
+	if modelFits(cat, caps, "text", img) {
+		t.Error("undeclared text-only catalog model + image request should NOT fit")
+	}
+	if modelFits(cat, caps, "unknown", img) {
+		t.Error("undeclared unknown model + image request should NOT fit (catalog conservative)")
+	}
+	if !modelFits(cat, caps, "unknown", text) {
+		t.Error("undeclared unknown model + text request should fit")
+	}
+}
+
+// TestForward_CapabilitiesOverride_E2E: a model the catalog does NOT know (blind
+// spot) becomes routable for image requests once its provider declares
+// capabilities — an image request is routed to it; a text request still prefers
+// the priority-1 target.
+func TestForward_CapabilitiesOverride_E2E(t *testing.T) {
+	var textHit, blindHit bool
+	textUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		textHit = true
+		w.Write([]byte(`{}`))
+	}))
+	defer textUp.Close()
+	blindUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		blindHit = true
+		w.Write([]byte(`{}`))
+	}))
+	defer blindUp.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"text-p": {OpenAIBaseURL: textUp.URL, Provider: "static"},
+			// Blind-spot provider: "gpt-blind" is NOT in the models.dev catalog;
+			// without the capabilities declaration an image request would never
+			// route to it.
+			"blind-p": {OpenAIBaseURL: blindUp.URL, Provider: "static", Capabilities: map[string][]string{
+				"gpt-blind": {"image"},
+			}},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm": {
+				{Provider: "text-p", Model: "text", Priority: 1},
+				{Provider: "blind-p", Model: "gpt-blind", Priority: 2},
+			},
+		},
+	}
+	p := NewProxy(cfg)
+	p.providers["text-p"] = &testProv{key: "t"}
+	p.providers["blind-p"] = &testProv{key: "b"}
+	p.catalog = testCatalog(map[string]struct {
+		Context int64
+		Input   []string
+	}{
+		"text": {Context: 8000, Input: []string{"text"}},
+	})
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	post := func(body string) {
+		textHit, blindHit = false, false
+		req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+
+	// Image request → blind-p (declared image-capable; the only fitting target).
+	post(`{"model":"glm","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`)
+	if !blindHit || textHit {
+		t.Errorf("image request: text=%v blind=%v, want blind only (capabilities override)", textHit, blindHit)
+	}
+	// Text request → text-p (priority 1, no capability filtering).
+	post(`{"model":"glm","messages":[{"role":"user","content":"hi"}]}`)
+	if !textHit || blindHit {
+		t.Errorf("text request: text=%v blind=%v, want text only", textHit, blindHit)
+	}
+}
+
+// TestTargetCapabilities_PooledVirtual: a credential-pool virtual id
+// ("name#<accountID>") reads its PARENT provider's capabilities declaration.
+func TestTargetCapabilities_PooledVirtual(t *testing.T) {
+	cfg := &Config{Providers: map[string]Provider{
+		"zhipu": {Capabilities: map[string][]string{"glm-x": {"image"}}},
+	}}
+	parentOf := map[string]string{"zhipu#abc123": "zhipu"}
+	if caps := targetCapabilities(cfg, parentOf, RouteTarget{Provider: "zhipu#abc123", Model: "glm-x"}); !hasCapability(caps["glm-x"], "image") {
+		t.Error("pooled virtual should resolve capabilities from its parent provider config")
+	}
+	if caps := targetCapabilities(cfg, parentOf, RouteTarget{Provider: "zhipu", Model: "glm-x"}); !hasCapability(caps["glm-x"], "image") {
+		t.Error("non-virtual name should resolve capabilities directly")
+	}
+	if caps := targetCapabilities(cfg, parentOf, RouteTarget{Provider: "unknown", Model: "m"}); caps != nil {
+		t.Error("unknown provider should yield nil capabilities")
+	}
+}
+
+// TestValidate_Capabilities: capabilities values must be known capability names
+// (image|tools), and keys must name a model in the provider's models: list — an
+// unknown key is almost certainly a typo that would silently never match.
+func TestValidate_Capabilities(t *testing.T) {
+	newCfg := func(caps map[string][]string) *Config {
+		return &Config{
+			Listen: "127.0.0.1:1",
+			Providers: map[string]Provider{
+				"cx": {
+					OpenAIBaseURL: "https://x", Provider: "codex",
+					Models:       []string{"gpt-5.5"},
+					Capabilities: caps,
+				},
+			},
+			Routes: map[string][]RouteTarget{
+				"gpt": {{Provider: "cx", Model: "gpt-5.5"}},
+			},
+		}
+	}
+	if err := newCfg(map[string][]string{"gpt-5.5": {"image", "tools"}}).validate(); err != nil {
+		t.Errorf("valid capabilities should be accepted, got %v", err)
+	}
+	if err := newCfg(map[string][]string{"gpt-5.5": {}}).validate(); err != nil {
+		t.Errorf("empty capabilities list should be accepted (declares neither), got %v", err)
+	}
+	if err := newCfg(nil).validate(); err != nil {
+		t.Errorf("nil capabilities should be accepted, got %v", err)
+	}
+	err := newCfg(map[string][]string{"gpt-5.5": {"vision"}}).validate()
+	if err == nil || !strings.Contains(err.Error(), "unknown capability") {
+		t.Errorf("invalid capability value: want 'unknown capability' error, got %v", err)
+	}
+	err = newCfg(map[string][]string{"gpt-5.6": {"image"}}).validate()
+	if err == nil || !strings.Contains(err.Error(), "not in its models: list") {
+		t.Errorf("unknown capabilities key: want 'not in its models: list' error, got %v", err)
+	}
+}

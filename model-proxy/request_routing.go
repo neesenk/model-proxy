@@ -7,16 +7,20 @@ import (
 
 // request_routing.go implements request-aware routing decisions that need the
 // models.dev catalog (context window + modalities), loaded onto the Proxy at
-// startup (see initCatalog). Two features share this file:
+// startup (see initCatalog). Three features share this file:
 //
 //   - context-window fallback (#9): when a request's estimated prompt size
 //     exceeds the largest context window among a route's targets, reroute to a
 //     configured larger-context fallback route instead of letting the upstream
 //     return 400.
-//   - capability routing (#8): when a request carries an image, narrow a route's
-//     targets to those whose models.dev modalities accept image input.
+//   - capability routing (#8): when a request carries an image or tools, narrow a
+//     route's targets to those whose capabilities accept it — per models.dev
+//     metadata, overridden per-model by the provider's `capabilities:` config.
+//   - context-overflow retry: when the upstream rejects a request with a
+//     context-overflow 400 (the estimate said it fit; the upstream disagrees),
+//     retry ONCE on a strictly-larger-context target picked cross-route.
 //
-// Both degrade to a no-op (forward unchanged) when the catalog is unavailable or
+// All degrade to a no-op (forward unchanged) when the catalog is unavailable or
 // the relevant config/heuristic doesn't apply — the proxy never blocks on these.
 
 // lookupModelMeta resolves a model's metadata (context window + modalities) from
@@ -128,20 +132,32 @@ func profileRequest(body []byte) requestProfile {
 // context window holds the estimated prompt. Conservative on unknowns — a model
 // with no catalog entry is treated as NOT image-capable (don't route an image to
 // an unknown model) but context-OK (don't block a large request on an unknown limit).
-func modelFits(cat *modelsDevCatalog, model string, prof requestProfile) bool {
-	if cat == nil {
-		return true
-	}
-	if prof.hasImage {
-		m, ok := lookupModelMeta(cat, model)
-		if !ok || !supportsImage(m) {
+//
+// caps is the target provider's manual capabilities override (Provider.Capabilities;
+// nil when undeclared). A model DECLARED in caps is judged by that list exactly for
+// image/tools ([image] = image yes, tools no) — the catalog is ignored for those
+// checks. This is the escape hatch for catalog blind spots (codex/aqp/volcengine).
+// Context-window checks always consult the catalog (capabilities declare no window).
+func modelFits(cat *modelsDevCatalog, caps map[string][]string, model string, prof requestProfile) bool {
+	if declared, ok := caps[model]; ok {
+		if prof.hasImage && !hasCapability(declared, "image") {
 			return false
 		}
-	}
-	if prof.hasTools {
-		m, ok := lookupModelMeta(cat, model)
-		if !ok || !m.ToolCall {
+		if prof.hasTools && !hasCapability(declared, "tools") {
 			return false
+		}
+	} else if cat != nil {
+		if prof.hasImage {
+			m, ok := lookupModelMeta(cat, model)
+			if !ok || !supportsImage(m) {
+				return false
+			}
+		}
+		if prof.hasTools {
+			m, ok := lookupModelMeta(cat, model)
+			if !ok || !m.ToolCall {
+				return false
+			}
 		}
 	}
 	if prof.est > 0 {
@@ -152,9 +168,29 @@ func modelFits(cat *modelsDevCatalog, model string, prof requestProfile) bool {
 	return true
 }
 
-// modelFitsRequest is a convenience wrapper (profiles the body then checks fit).
+// modelFitsRequest is a convenience wrapper (profiles the body then checks fit,
+// without a capabilities override).
 func modelFitsRequest(cat *modelsDevCatalog, model string, body []byte) bool {
-	return modelFits(cat, model, profileRequest(body))
+	return modelFits(cat, nil, model, profileRequest(body))
+}
+
+// hasCapability reports whether a declared capabilities list contains want.
+func hasCapability(caps []string, want string) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
+// targetCapabilities returns the manual capabilities override of a target's
+// provider (nil when it declares none). A credential-pool virtual id
+// ("name#<accountID>") resolves to its parent's config — capabilities are
+// declared per provider, not per account.
+func targetCapabilities(cfg *Config, parentOf map[string]string, t RouteTarget) map[string][]string {
+	pconf, _ := providerConfig(cfg, parentOf, t.Provider)
+	return pconf.Capabilities
 }
 
 // imageMarkers are the JSON content-block shapes that indicate an image payload
@@ -221,7 +257,7 @@ func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string
 	// In-route: keep targets that fit the request's capability + context.
 	var inRoute []RouteTarget
 	for _, t := range ordered {
-		if modelFits(cat, t.Model, prof) {
+		if modelFits(cat, targetCapabilities(cfg, parentOf, t), t.Model, prof) {
 			inRoute = append(inRoute, t)
 		}
 	}
@@ -233,11 +269,33 @@ func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string
 	}
 	// Cross-route fallback: collect every fitting target across all routes
 	// (deduped by RouteTarget value), then let the normal scheduler rank them.
+	result := p.crossRoutePool(cfg, parentOf, exposed+"#req", sessionKey, expanded, routeKeys, func(t RouteTarget) bool {
+		return modelFits(cat, targetCapabilities(cfg, parentOf, t), t.Model, prof)
+	})
+	if len(result) == 0 {
+		// No model anywhere fits, or all capable targets are unavailable
+		// (circuit-open/rate-limited). Fall back to the ORIGINAL ordered (which
+		// has available targets from the first schedule pass) — trying a
+		// capability-mismatched target is better than a guaranteed zero-attempt
+		// 502.
+		return ordered
+	}
+	return result
+}
+
+// crossRoutePool collects the targets matching keep across ALL expanded routes
+// (deduped by RouteTarget value), then ranks them with the standard scheduler
+// under a synthetic sticky key (routeName: exposed+"#req"/"#ctx") so the
+// pooled sticky entry doesn't collide with the route's own and ages out as a
+// non-route key under dwell eviction. Returns nil when nothing matches or every
+// match is unavailable (circuit-open/rate-limited). Shared by the proactive
+// cross-route fallback and the reactive context-overflow retry.
+func (p *Proxy) crossRoutePool(cfg *Config, parentOf map[string]string, routeName, sessionKey string, expanded map[string][]RouteTarget, routeKeys map[string]bool, keep func(RouteTarget) bool) []RouteTarget {
 	seen := map[RouteTarget]bool{}
 	var pool []RouteTarget
 	for _, ts := range expanded {
 		for _, t := range ts {
-			if seen[t] || !modelFits(cat, t.Model, prof) {
+			if seen[t] || !keep(t) {
 				continue
 			}
 			pool = append(pool, t)
@@ -245,19 +303,65 @@ func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string
 		}
 	}
 	if len(pool) == 0 {
-		return ordered // no model anywhere fits → unchanged (let upstream respond)
+		return nil
 	}
-	// Synthetic sticky key so the fallback's sticky entry doesn't collide with the
-	// route's own (and ages out as a non-route key under dwell eviction).
-	result := p.schedule(cfg, parentOf, exposed+"#req", sessionKey, pool, routeKeys)
-	if len(result) == 0 {
-		// All capable targets are unavailable (circuit-open/rate-limited). Fall
-		// back to the ORIGINAL ordered (which has available targets from the
-		// first schedule pass) — trying a capability-mismatched target is better
-		// than a guaranteed zero-attempt 502.
-		return ordered
+	return p.schedule(cfg, parentOf, routeName, sessionKey, pool, routeKeys)
+}
+
+// contextOverflowRetry builds the replacement target list after an upstream
+// rejects a request with a context-overflow 400: every target across ALL routes
+// whose catalog context window is STRICTLY larger than the largest window among
+// the just-tried targets, ranked by the standard scheduler. Returns nil without
+// a catalog, when no tried model has a known window (can't establish "larger"),
+// or when nothing larger exists — forward then commits the upstream 400.
+func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, tried []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool) []RouteTarget {
+	if cat == nil {
+		return nil
 	}
-	return result
+	var maxContext int64
+	for _, t := range tried {
+		if m, ok := lookupModelMeta(cat, t.Model); ok && m.Context > maxContext {
+			maxContext = m.Context
+		}
+	}
+	if maxContext == 0 {
+		return nil
+	}
+	return p.crossRoutePool(cfg, parentOf, exposed+"#ctx", sessionKey, expanded, routeKeys, func(t RouteTarget) bool {
+		m, ok := lookupModelMeta(cat, t.Model)
+		return ok && m.Context > maxContext
+	})
+}
+
+// contextOverflowMarkers are conservative case-insensitive substrings matching
+// upstream "prompt exceeds the context window" error bodies across providers
+// (openai's context_length_exceeded code, deepseek/zhipu "maximum context
+// length" messages, anthropic "prompt is too long", ...). Deliberately specific
+// so an ordinary 400 (bad key, malformed request) never matches.
+var contextOverflowMarkers = [][]byte{
+	[]byte("context_length_exceeded"),
+	[]byte("maximum context length"),
+	[]byte("context window"),
+	[]byte("context length"),
+	[]byte("prompt is too long"),
+	[]byte("reduce the length"),
+	[]byte("too many tokens"),
+}
+
+// isContextOverflow reports whether a 4xx response body looks like a
+// context-window overflow error rather than an ordinary client error. status
+// must be 4xx; bodyPeek is the first ≤64KiB of the body (peekResponseBody).
+func isContextOverflow(status int, bodyPeek []byte) bool {
+	if status < 400 || status >= 500 || len(bodyPeek) == 0 {
+		return false
+	}
+	lower := bytes.ToLower(bodyPeek)
+	for _, m := range contextOverflowMarkers {
+		if bytes.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // forceProvider returns the one-shot provider override for a request, from the
