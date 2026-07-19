@@ -36,9 +36,25 @@ type Config struct {
 	// ShadowMaxConcurrent caps the number of in-flight shadow goroutines.
 	// Default 4. Additional shadows are silently dropped (best-effort) when the
 	// cap is reached, preventing goroutine explosion under high QPS.
-	ShadowMaxConcurrent int                    `yaml:"shadow_max_concurrent"`
-	Pricing             PricingConfig          `yaml:"pricing"`
-	Prices              map[string]PriceConfig `yaml:"prices"`
+	ShadowMaxConcurrent int `yaml:"shadow_max_concurrent"`
+	// Fusion holds named multi-model orchestration recipes (panel → synthesis).
+	// A route references one with {provider: fusion, model: <recipe name>}:
+	// the request fans out to the panel in parallel, and the synthesizer model
+	// answers the client from the collected drafts. Empty/missing = off.
+	Fusion  map[string]FusionConfig `yaml:"fusion"`
+	Pricing PricingConfig           `yaml:"pricing"`
+	Prices  map[string]PriceConfig  `yaml:"prices"`
+}
+
+// FusionConfig is one multi-model orchestration recipe: a panel of 2..4 draft
+// providers fanned out in parallel, plus a synthesizer that produces the final
+// answer from the collected drafts. MinPanel is the quorum — the minimum number
+// of drafts required before synthesis (default 2); below quorum the request
+// degrades to a plain direct call to the synthesizer with the original body.
+type FusionConfig struct {
+	Panel       []RouteTarget `yaml:"panel"`
+	Synthesizer RouteTarget   `yaml:"synthesizer"`
+	MinPanel    int           `yaml:"min_panel"`
 }
 
 // ShadowTarget names the candidate backend for shadow evaluation of a route.
@@ -443,10 +459,11 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Shadow        map[string]ShadowTarget  `yaml:"shadow"`
 		// Must mirror Config's shadow knobs — without these the file-loaded
 		// values are silently dropped (and validate's range checks never fire).
-		ShadowSampleRate    *float64               `yaml:"shadow_sample_rate"`
-		ShadowMaxConcurrent int                    `yaml:"shadow_max_concurrent"`
-		Pricing             PricingConfig          `yaml:"pricing"`
-		Prices              map[string]PriceConfig `yaml:"prices"`
+		ShadowSampleRate    *float64                `yaml:"shadow_sample_rate"`
+		ShadowMaxConcurrent int                     `yaml:"shadow_max_concurrent"`
+		Fusion              map[string]FusionConfig `yaml:"fusion"`
+		Pricing             PricingConfig           `yaml:"pricing"`
+		Prices              map[string]PriceConfig  `yaml:"prices"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
@@ -479,6 +496,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Shadow = raw.Shadow
 	cfg.ShadowSampleRate = raw.ShadowSampleRate
 	cfg.ShadowMaxConcurrent = raw.ShadowMaxConcurrent
+	cfg.Fusion = raw.Fusion
 	cfg.Pricing = raw.Pricing
 	cfg.Prices = raw.Prices
 	cfg.LogFile = expandPath(cfg.LogFile)
@@ -620,6 +638,18 @@ func (c *Config) validate() error {
 			if t.Model == "" {
 				return fmt.Errorf("route %q target %d: model is empty", exposed, i)
 			}
+			// provider "fusion" is not a real provider — it references a recipe
+			// under fusion: by recipe name (the target's model field). Checked here
+			// because the generic provider-exists check below would reject it.
+			if t.Provider == "fusion" {
+				if _, ok := c.Fusion[t.Model]; !ok {
+					return fmt.Errorf("route %q target %d: fusion recipe %q not defined under fusion: — add a `fusion: %s:` recipe or fix the model name", exposed, i, t.Model, t.Model)
+				}
+				if t.Protocol != "" {
+					return fmt.Errorf("route %q target %d: provider \"fusion\" takes no protocol — set protocol per panel member / synthesizer inside the recipe", exposed, i)
+				}
+				continue
+			}
 			if _, ok := c.Providers[t.Provider]; !ok {
 				return fmt.Errorf("route %q target %d: provider %q not defined under providers: — check spelling or add the provider", exposed, i, t.Provider)
 			}
@@ -659,11 +689,32 @@ func (c *Config) validate() error {
 		if _, ok := c.Routes[route]; !ok {
 			return fmt.Errorf("shadow %q: route not found in routes: — add a route named %q", route, route)
 		}
+		if sh.Provider == "fusion" {
+			return fmt.Errorf("shadow %q: provider \"fusion\" is not a valid shadow target — shadow a concrete provider", route)
+		}
 		if _, ok := c.Providers[sh.Provider]; !ok {
 			return fmt.Errorf("shadow %q: provider %q not defined under providers:", route, sh.Provider)
 		}
 		if sh.Protocol != "" && sh.Protocol != "anthropic" && sh.Protocol != "openai" {
 			return fmt.Errorf("shadow %q: protocol %q invalid — use \"anthropic\" or \"openai\"", route, sh.Protocol)
+		}
+	}
+	// Fusion validation: each recipe's panel/synthesizer reference real providers
+	// (no nesting), the panel has 2..4 members, and min_panel fits the panel.
+	for name, f := range c.Fusion {
+		if len(f.Panel) < 2 || len(f.Panel) > 4 {
+			return fmt.Errorf("fusion %q: panel must have 2..4 members (got %d)", name, len(f.Panel))
+		}
+		if f.MinPanel < 0 || f.MinPanel > len(f.Panel) {
+			return fmt.Errorf("fusion %q: min_panel %d out of range [0, %d] (panel size)", name, f.MinPanel, len(f.Panel))
+		}
+		for i, m := range f.Panel {
+			if err := c.checkFusionTarget(name, fmt.Sprintf("panel %d", i), m); err != nil {
+				return err
+			}
+		}
+		if err := c.checkFusionTarget(name, "synthesizer", f.Synthesizer); err != nil {
+			return err
 		}
 	}
 	if c.ShadowSampleRate != nil {
@@ -680,6 +731,41 @@ func (c *Config) validate() error {
 	// sticky switching only on a margin edge). Do NOT re-add a duplicate-priority
 	// rejection here - it contradicts the scheduling contract (AGENTS.md
 	// "quota-aware scheduling").
+	return nil
+}
+
+// checkFusionTarget validates one fusion recipe member (panel member or
+// synthesizer): the provider exists (and is not itself fusion — no nesting),
+// the model is set, and a declared protocol is servable by the provider's base
+// URLs (same rule as route targets).
+func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
+	what := fmt.Sprintf("fusion %q %s", recipe, where)
+	if t.Provider == "" {
+		return fmt.Errorf("%s: provider is empty", what)
+	}
+	if t.Provider == "fusion" {
+		return fmt.Errorf("%s: nested fusion recipes are not supported", what)
+	}
+	prov, ok := c.Providers[t.Provider]
+	if !ok {
+		return fmt.Errorf("%s: provider %q not defined under providers:", what, t.Provider)
+	}
+	if t.Model == "" {
+		return fmt.Errorf("%s: model is empty", what)
+	}
+	switch t.Protocol {
+	case "":
+	case "anthropic":
+		if prov.AnthropicBaseURL == "" {
+			return fmt.Errorf("%s: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", what, t.Provider)
+		}
+	case "openai":
+		if prov.OpenAIBaseURL == "" {
+			return fmt.Errorf("%s: protocol:openai but provider %q has no openai_base_url — conversion needs it", what, t.Provider)
+		}
+	default:
+		return fmt.Errorf("%s: protocol %q is not \"anthropic\" or \"openai\"", what, t.Protocol)
+	}
 	return nil
 }
 

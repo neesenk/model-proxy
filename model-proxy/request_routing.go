@@ -254,10 +254,13 @@ func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string
 		return ordered
 	}
 	prof := profileRequest(body)
-	// In-route: keep targets that fit the request's capability + context.
+	// In-route: keep targets that fit the request's capability + context. Fusion
+	// targets always "fit" — the recipe model name isn't a catalog model, and
+	// per-member fit is the engine's own concern (draft legs keep images; a
+	// tool-blind synthesizer degrades to a direct answer).
 	var inRoute []RouteTarget
 	for _, t := range ordered {
-		if modelFits(cat, targetCapabilities(cfg, parentOf, t), t.Model, prof) {
+		if t.Provider == "fusion" || modelFits(cat, targetCapabilities(cfg, parentOf, t), t.Model, prof) {
 			inRoute = append(inRoute, t)
 		}
 	}
@@ -295,7 +298,10 @@ func (p *Proxy) crossRoutePool(cfg *Config, parentOf map[string]string, routeNam
 	var pool []RouteTarget
 	for _, ts := range expanded {
 		for _, t := range ts {
-			if seen[t] || !keep(t) {
+			// Fusion recipes are opt-in per route — never drag one into another
+			// route's fallback pool (an N+1-cost orchestration as a silent
+			// fallback would be a costly surprise).
+			if seen[t] || t.Provider == "fusion" || !keep(t) {
 				continue
 			}
 			pool = append(pool, t)

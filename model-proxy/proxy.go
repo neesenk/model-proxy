@@ -1024,6 +1024,30 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	attempt := 0 // monotonic tryTarget index for the request log (ti resets on a context retry)
 	for ti := 0; ti < len(ordered); ti++ {
 		t := ordered[ti]
+		// Fusion orchestration: {provider: fusion, model: <recipe>} is NOT a
+		// provider — intercept before the providerConfig lookup and run the
+		// panel→synthesis engine (its synthesizer leg reuses tryTarget). A
+		// force-provider override (replay) targets one concrete backend, so it
+		// skips fusion entirely.
+		if t.Provider == "fusion" && forceProvider(r) == "" {
+			recipe, ok := cfg.Fusion[t.Model]
+			if !ok {
+				log.Printf("[proto=%s model=%s] target %d: fusion recipe %q not defined, skipping", proto, exposed, ti, t.Model)
+				continue
+			}
+			fc := fusionCtx{
+				cfg: cfg, provs: provs, parentOf: parentOf,
+				proto: proto, calledModel: calledModel, upPath: upPath, agent: agent,
+				origBody: origBody,
+				flc:      forwardLogCtx{requestID: requestID, attempt: attempt, exposed: exposed, origBody: origBody},
+			}
+			attempt++
+			if p.runFusion(fc, recipe, w, r, cacheKey, cache) {
+				return // committed: response written to the client
+			}
+			log.Printf("[proto=%s model=%s] target %d (fusion/%s) failed; trying next", proto, exposed, ti, t.Model)
+			continue
+		}
 		// Resolve the provider CONFIG. For a pooled virtual ("name#<id>") the
 		// config lives under the parent name in cfg.Providers; providerConfig
 		// resolves it via parentOf. The provider IMPLEMENTATION (provImpl) is
