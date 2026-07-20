@@ -317,10 +317,13 @@ func (p *Proxy) crossRoutePool(cfg *Config, parentOf map[string]string, routeNam
 // contextOverflowRetry builds the replacement target list after an upstream
 // rejects a request with a context-overflow 400: every target across ALL routes
 // whose catalog context window is STRICTLY larger than the largest window among
-// the just-tried targets, ranked by the standard scheduler. Returns nil without
-// a catalog, when no tried model has a known window (can't establish "larger"),
-// or when nothing larger exists — forward then commits the upstream 400.
-func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, tried []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool) []RouteTarget {
+// the just-tried targets AND still satisfies the request's image/tools
+// capability (modelFits), ranked by the standard scheduler. The capability
+// re-check is essential — a larger-context model that lacks image support would
+// just fail the same request again. Returns nil without a catalog, when no tried
+// model has a known window (can't establish "larger"), or when nothing larger
+// AND capable exists — forward then commits the upstream 400.
+func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, tried []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte) []RouteTarget {
 	if cat == nil {
 		return nil
 	}
@@ -333,9 +336,15 @@ func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, ca
 	if maxContext == 0 {
 		return nil
 	}
+	prof := profileRequest(body)
 	return p.crossRoutePool(cfg, parentOf, exposed+"#ctx", sessionKey, expanded, routeKeys, func(t RouteTarget) bool {
 		m, ok := lookupModelMeta(cat, t.Model)
-		return ok && m.Context > maxContext
+		if !ok || m.Context <= maxContext {
+			return false // not strictly larger than what was already tried
+		}
+		// Re-check capability + context-fit so the retry doesn't land on a
+		// larger window that still can't serve this request (e.g. no image).
+		return modelFits(cat, targetCapabilities(cfg, parentOf, t), t.Model, prof)
 	})
 }
 

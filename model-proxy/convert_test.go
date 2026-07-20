@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -150,6 +151,80 @@ func TestForward_AnthropicToOpenAI_NonStream(t *testing.T) {
 		if !strings.Contains(bs, want) {
 			t.Errorf("client response missing %q: %s", want, bs)
 		}
+	}
+}
+
+// TestForward_ConvertRequestFail_Closed (regression #9, request side): when a
+// cross-protocol request's conversion fails, the unconverted body must NOT be
+// sent to the backend (it would ship an Anthropic body to an OpenAI endpoint).
+// Pre-fix the conversion error was logged and the original body forwarded anyway.
+func TestForward_ConvertRequestFail_Closed(t *testing.T) {
+	var upstreamHits int
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer up.Close()
+	cfg := &Config{
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	}
+	p := NewProxy(cfg)
+	p.providers["oai"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	// extractModel returns "claude-x" (fast path reads 3 tokens, ignores the
+	// rest), but the full JSON is malformed so convertRequest fails.
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"claude-x","messages":[BAD`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if upstreamHits != 0 {
+		t.Errorf("upstream hit %d time(s), want 0 (conversion failed → must not send the Anthropic body to the OpenAI endpoint)", upstreamHits)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (fail-closed: no target served)", resp.StatusCode)
+	}
+}
+
+// TestForward_ConvertResponseFail_Closed (regression #9, response side): when a
+// cross-protocol response's conversion fails, the client must get a 502 — NOT the
+// backend's body in the wrong protocol behind the upstream's 2xx status. Pre-fix
+// the 2xx status was committed before conversion, then the raw body was passed
+// through ("best-effort").
+func TestForward_ConvertResponseFail_Closed(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{not valid json`)) // upstream 2xx, but unparseable body
+	}))
+	defer up.Close()
+	cfg := &Config{
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	}
+	p := NewProxy(cfg)
+	p.providers["oai"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json",
+		strings.NewReader(`{"model":"claude-x","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (conversion failed → must not return a wrong-protocol 2xx body)", resp.StatusCode)
+	}
+	if bytes.Contains(body, []byte("not valid json")) {
+		t.Errorf("client received the raw backend body (fail-open): %q", body)
 	}
 }
 

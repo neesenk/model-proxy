@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -55,7 +56,28 @@ type FusionConfig struct {
 	Panel       []RouteTarget `yaml:"panel"`
 	Synthesizer RouteTarget   `yaml:"synthesizer"`
 	MinPanel    int           `yaml:"min_panel"`
+	// MaxRunsPerDay caps ORCHESTRATED runs per local day (0 = unlimited); an
+	// over-budget request degrades to a plain direct synthesizer call
+	// (budget_exceeded). Runs degraded before fan-out never consume the budget.
+	MaxRunsPerDay int `yaml:"max_runs_per_day"`
+	// FirstTurnOnly restricts orchestration to the first conversation turn: a
+	// request body already carrying an assistant message goes straight to the
+	// synthesizer (multi_turn) — multi-turn sessions would otherwise fan out
+	// (and pay the N+1 cost) on every turn.
+	FirstTurnOnly bool `yaml:"first_turn_only"`
+	// Judge is an optional analysis step between quorum and synthesis: one
+	// non-streaming call reviewing the candidates (consensus / conflicts /
+	// omissions); its report is injected into the synthesis body. A judge
+	// failure skips the report without degrading the run. nil = off.
+	Judge *RouteTarget `yaml:"judge"`
+	// Instruction overrides the fixed synthesis preamble (rune-capped, see
+	// fusionInstructionMaxRunes). Empty = the built-in template.
+	Instruction string `yaml:"instruction"`
 }
+
+// fusionInstructionMaxRunes caps FusionConfig.Instruction (validate-enforced)
+// so a pasted essay can't silently bloat every synthesis prompt.
+const fusionInstructionMaxRunes = 4000
 
 // ShadowTarget names the candidate backend for shadow evaluation of a route.
 type ShadowTarget struct {
@@ -577,9 +599,9 @@ func (c *Config) validate() error {
 		// Check for known provider_id typos. apikey is a credential *category*
 		// (zhipu/deepseek/volcengine/kimi-code), not a registered provider_id;
 		// static is the no-login provider (auth via the per-provider `headers` map).
-		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true}
+		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true, "zcode": true}
 		if !known[p.Provider] {
-			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static", name, p.Provider)
+			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static, zcode", name, p.Provider)
 		}
 		// anthropic_base_url should NOT end with /v1 (proxy keeps client's /v1 for anthropic).
 		if p.AnthropicBaseURL != "" && (strings.HasSuffix(p.AnthropicBaseURL, "/v1") || strings.HasSuffix(p.AnthropicBaseURL, "/v1/")) {
@@ -708,6 +730,12 @@ func (c *Config) validate() error {
 		if f.MinPanel < 0 || f.MinPanel > len(f.Panel) {
 			return fmt.Errorf("fusion %q: min_panel %d out of range [0, %d] (panel size)", name, f.MinPanel, len(f.Panel))
 		}
+		if f.MaxRunsPerDay < 0 {
+			return fmt.Errorf("fusion %q: max_runs_per_day %d out of range (0 = unlimited)", name, f.MaxRunsPerDay)
+		}
+		if utf8.RuneCountInString(f.Instruction) > fusionInstructionMaxRunes {
+			return fmt.Errorf("fusion %q: instruction is %d runes, max %d", name, utf8.RuneCountInString(f.Instruction), fusionInstructionMaxRunes)
+		}
 		for i, m := range f.Panel {
 			if err := c.checkFusionTarget(name, fmt.Sprintf("panel %d", i), m); err != nil {
 				return err
@@ -715,6 +743,13 @@ func (c *Config) validate() error {
 		}
 		if err := c.checkFusionTarget(name, "synthesizer", f.Synthesizer); err != nil {
 			return err
+		}
+		// The judge follows the same member rules (real provider, no nesting —
+		// checkFusionTarget already rejects provider "fusion").
+		if f.Judge != nil {
+			if err := c.checkFusionTarget(name, "judge", *f.Judge); err != nil {
+				return err
+			}
 		}
 	}
 	if c.ShadowSampleRate != nil {

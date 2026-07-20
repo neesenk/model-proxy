@@ -90,6 +90,24 @@ func (h *eventHub) subscribe() (<-chan liveEvent, []liveEvent, func()) {
 	return ch, recent, cancel
 }
 
+// findEnd scans the recent ring (newest first) for the end event of requestID.
+// Used by the fusion engine to read back the synthesis leg's outcome — the
+// caller reads right after the committing call returns, so the event is still
+// in the ring.
+func (h *eventHub) findEnd(requestID string) (liveEvent, bool) {
+	if h == nil {
+		return liveEvent{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := len(h.recent) - 1; i >= 0; i-- {
+		if h.recent[i].Type == "end" && h.recent[i].RequestID == requestID {
+			return h.recent[i], true
+		}
+	}
+	return liveEvent{}, false
+}
+
 // serveEvents is the SSE handler for /api/events. It subscribes, writes the recent
 // ring as a burst, then streams new events as `data: {json}\n\n` until the client
 // disconnects. A periodic comment keepalive prevents idle proxies from closing the

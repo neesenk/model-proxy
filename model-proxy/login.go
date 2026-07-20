@@ -60,6 +60,16 @@ func cmdLogin(args []string) {
 		}
 	case "codex":
 		cmdCodexLogin(provName)
+	case "zcode":
+		// BigModel Coding Plan: open the login page so the user can grab a
+		// Coding Plan API key, then the standard apikey pool flow stores it.
+		fmt.Println("Opening BigModel login to fetch a Coding Plan API key…")
+		if err := openBrowser("https://bigmodel.cn/login"); err != nil {
+			fmt.Fprintf(os.Stderr, "(could not open browser: %v — open https://bigmodel.cn/login manually)\n", err)
+		}
+		if err := runApiKeyLoginWithInput(cfg, provName, prov, "", label, replace); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
 	default:
 		// zhipu/deepseek (single api_key) or volcengine (api_key + AK/SK
 		// triple). Both write the plural pool; volcengine keys by AccessKey.

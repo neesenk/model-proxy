@@ -35,28 +35,27 @@ func nextRequestID() string {
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
-	mu             sync.RWMutex // guards cfg/providers across reload (held by handler for the request)
-	healthMu       sync.Mutex   // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
-	cfg            *Config
-	providers      map[string]provider.Provider // provider name → Provider (shared)
-	client         *http.Client
-	health         map[string]*providerHealth // provider name → circuit/rate-limit state
-	sticky         map[string]routeSticky     // exposed model → current provider + since
-	pins           map[string]pinEntry        // exposed model → manual pin (healthMu); hot-switch, overrides schedule
-	quota          *quotaTracker              // background quota poller; nil only in degenerate tests
-	metrics        *metricsStore              // request counters (atomic); nil only in degenerate tests
-	tokens         *tokenCounter              // SSE-scanned token usage; nil only in degenerate tests
-	agents         *agentCounter              // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats          *statsStore                // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
-	flusher        *statsFlusher              // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog         *requestLogger             // per-request access log (full bodies); nil = disabled (default) or init failure
-	cache          *responseCache             // exact-match response cache (prompt-hash + TTL); nil = disabled
-	events         *eventHub                  // live request monitor fan-out hub (SSE /api/events); always non-nil
-	catalog        *modelsDevCatalog          // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
-	shadowSem      chan struct{}              // concurrency gate for shadow goroutines (buffered = max concurrent)
-	shadowClient   *http.Client               // shared HTTP client for shadow requests (not per-request)
-	shadowSampRate float64                    // 0-1; fraction of requests to shadow (default 1.0)
-	pricingMu      sync.Mutex                 // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
+	mu        sync.RWMutex // guards cfg/providers across reload (held by handler for the request)
+	healthMu  sync.Mutex   // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
+	cfg       *Config
+	providers map[string]provider.Provider // provider name → Provider (shared)
+	client    *http.Client
+	health    map[string]*providerHealth    // provider name → circuit/rate-limit state
+	sticky    map[string]routeSticky        // exposed model → current provider + since
+	pins      map[string]pinEntry           // exposed model → manual pin (healthMu); hot-switch, overrides schedule
+	quota     *quotaTracker                 // background quota poller; nil only in degenerate tests
+	metrics   *metricsStore                 // request counters (atomic); nil only in degenerate tests
+	tokens    *tokenCounter                 // SSE-scanned token usage; nil only in degenerate tests
+	agents    *agentCounter                 // per-agent (UA) request/token counters; nil only in degenerate tests
+	stats     *statsStore                   // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
+	flusher   *statsFlusher                 // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog    *requestLogger                // per-request access log (full bodies); nil = disabled (default) or init failure
+	cache     *responseCache                // exact-match response cache (prompt-hash + TTL); nil = disabled
+	events    *eventHub                     // live request monitor fan-out hub (SSE /api/events); always non-nil
+	fusionReg *fusionRegistry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
+	catalog   *modelsDevCatalog             // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
+	shadow    atomic.Pointer[shadowRuntime] // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
+	pricingMu sync.Mutex                    // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -291,17 +290,15 @@ func NewProxy(cfg *Config) *Proxy {
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
 	// UI client subscribes; publish is non-blocking so it never stalls forward.
 	p.events = newEventHub()
-	// Shadow concurrency gate + shared client + sample rate.
-	maxConc := cfg.ShadowMaxConcurrent
-	if maxConc <= 0 {
-		maxConc = 4
-	}
-	p.shadowSem = make(chan struct{}, maxConc)
-	p.shadowClient = &http.Client{Timeout: cfg.Scheduling.timeout()}
-	p.shadowSampRate = 1.0 // default; nil ShadowSampleRate = all requests
-	if cfg.ShadowSampleRate != nil {
-		p.shadowSampRate = *cfg.ShadowSampleRate // explicit 0.0 = off
-	}
+	// Fusion orchestration observability registry (recent runs + per-workflow
+	// aggregates + daily budget counters). Like the event hub, reload does NOT
+	// rebuild it — aggregates and today's budget survive config edits.
+	p.fusionReg = newFusionRegistry()
+	// Shadow dispatch state (sample rate, concurrency gate, shared client). Stored
+	// in an atomic pointer so reload can swap the whole bundle race-free; each
+	// dispatch loads it once and uses that snapshot, so in-flight shadow goroutines
+	// finish on the old bundle while new traffic follows the reloaded config.
+	p.shadow.Store(newShadowRuntime(cfg))
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
 	if loaded := p.quota.LoadedSticky; len(loaded) > 0 {
@@ -487,6 +484,11 @@ func (p *Proxy) reload(configPath string) error {
 	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now
 	// takes effect immediately.
 	p.cache = newResponseCache(cfg.Cache)
+	// Rebuild the shadow dispatch bundle so shadow_sample_rate /
+	// shadow_max_concurrent / client-timeout changes take effect at once — without
+	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until
+	// restart. Swapped atomically; in-flight shadow goroutines finish on the old bundle.
+	p.shadow.Store(newShadowRuntime(cfg))
 	p.mu.Unlock()
 	// Reset health + sticky state — a reload is the operator's way to clear
 	// stuck circuit-open / rate-limited / sticky-dwell state.
@@ -548,17 +550,11 @@ func (p *Proxy) buildExpandedRoutes() map[string][]RouteTarget {
 }
 
 // expandTarget fans a single route target out across a pooled provider's virtuals
-// (same Model/Priority); non-pooled targets pass through unchanged.
+// (same Model/Priority/Protocol); non-pooled targets pass through unchanged.
+// Thin wrapper over the unified resolver (resolve.go) so routing goes through
+// the same config-target → runnable-virtual front door as Fusion and Shadow.
 func (p *Proxy) expandTarget(t RouteTarget) []RouteTarget {
-	vids, pooled := p.poolIndex[t.Provider]
-	if !pooled {
-		return []RouteTarget{t}
-	}
-	out := make([]RouteTarget, 0, len(vids))
-	for _, vid := range vids {
-		out = append(out, RouteTarget{Provider: vid, Model: t.Model, Priority: t.Priority})
-	}
-	return out
+	return newResolver(p, p.providers, p.poolIndex).Expand(t)
 }
 
 // loggedInProviders returns the set of provider names (parents) that have ≥1
@@ -883,6 +879,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	provs := p.providers
 	expanded := p.expandedRoutes
 	parentOf := p.parentOf
+	poolIndex := p.poolIndex
 	cache := p.cache
 	p.mu.RUnlock()
 
@@ -928,7 +925,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	// is in effect — both mean "send to THIS backend", not a stale cached answer.
 	var cacheKey string
 	if cache != nil && forceProvider(r) == "" && !force {
-		cacheKey = cacheKeyOf(r.Method, r.URL.Path, origBody)
+		cacheKey = cacheKeyOf(r, origBody)
 		if e, ok := cache.get(cacheKey, time.Now()); ok {
 			// Live monitor (#6): a cache hit skips the normal start/end flow, so
 			// emit an end event explicitly — otherwise the live view is blind to
@@ -951,11 +948,18 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	// One-shot force-provider override (x-mp-force-provider header / force_provider
 	// query): narrows this single request's targets to one provider (matches the
 	// parent name for pools). Used by `model-proxy replay` to re-answer with a
-	// chosen backend without a global pin. No effect when unset or unmatched.
+	// chosen backend without a global pin. When set but the named provider is NOT
+	// a target of this route (typo, wrong name), HARD-FAIL (400): falling back to
+	// normal scheduling would let another provider answer while `replay --to`
+	// still reports the typo'd name, silently polluting comparison conclusions.
 	if fp := forceProvider(r); fp != "" {
-		if narrowed := filterTargetsByProvider(targets, parentOf, fp); len(narrowed) > 0 {
-			targets = narrowed
+		narrowed := filterTargetsByProvider(targets, parentOf, fp)
+		if len(narrowed) == 0 {
+			p.publishTerminalEvent(r, proto, exposed, http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("force-provider %q is not a target for model %q", fp, exposed), http.StatusBadRequest)
+			return
 		}
+		targets = narrowed
 	}
 
 	// Snapshot the models.dev catalog for request-aware routing (#8/#9 unified):
@@ -1036,13 +1040,13 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			fc := fusionCtx{
-				cfg: cfg, provs: provs, parentOf: parentOf,
+				cfg: cfg, provs: provs, parentOf: parentOf, poolIndex: poolIndex,
 				proto: proto, calledModel: calledModel, upPath: upPath, agent: agent,
 				origBody: origBody,
 				flc:      forwardLogCtx{requestID: requestID, attempt: attempt, exposed: exposed, origBody: origBody},
 			}
 			attempt++
-			if p.runFusion(fc, recipe, w, r, cacheKey, cache) {
+			if p.runFusion(fc, t.Model, recipe, w, r, cacheKey, cache) {
 				return // committed: response written to the client
 			}
 			log.Printf("[proto=%s model=%s] target %d (fusion/%s) failed; trying next", proto, exposed, ti, t.Model)
@@ -1075,11 +1079,17 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			body = rewriteModel(origBody, t.Model)
 		}
 		if convert {
-			if cb, err := convertRequest(body, proto, backendProto); err == nil {
-				body = cb
-			} else {
-				log.Printf("[convert] %s→%s request failed: %v", proto, backendProto, err)
+			cb, err := convertRequest(body, proto, backendProto)
+			if err != nil {
+				// Fail CLOSED: a conversion failure must NOT send the unconverted
+				// body to the backend (that ships an Anthropic body to an OpenAI
+				// endpoint, or vice versa). Skip this target and try the next; if
+				// none serve, the loop's all-targets-failed path returns a 502.
+				log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s request convert failed: %v — skipping",
+					proto, exposed, ti, t.Provider, t.Model, proto, backendProto, err)
+				continue
 			}
+			body = cb
 		}
 
 		// Select the upstream base URL + path for the BACKEND protocol.
@@ -1108,7 +1118,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			// context" threshold (they might be worth trying as the retry itself).
 			alreadyTried := ordered[:ti+1]
 			ctxRetry = func() []RouteTarget {
-				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys)
+				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody)
 			}
 		}
 		committed, retried := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry)
@@ -1314,6 +1324,34 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// backend's content-length / transfer-encoding (can't forward a length for
 		// a body we're about to transform; Go's server would reject the mismatch).
 		convert := needsConversion(proto, backendProto)
+		// Non-streaming conversion runs BEFORE we commit the status/headers so a
+		// conversion failure fails CLOSED (502 to the client) instead of sending
+		// the backend's body in the wrong protocol after the upstream's 2xx status.
+		// recordSuccess above already released the half-open slot and marked the
+		// provider healthy — the upstream DID succeed; a convert failure is ours,
+		// not the provider's. The streaming path converts lazily after WriteHeader
+		// (below); its errors surface mid-stream and can't be pre-empted.
+		var preconv []byte // converted non-stream body; nil unless pre-converted here
+		if convert && !isSSE(resp.Header) {
+			// 64 MiB cap: a non-stream LLM response larger than this is pathological
+			// (max_tokens bounds it); the cap bounds memory on the buffered convert.
+			all, rerr := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+			resp.Body.Close()
+			if rerr != nil {
+				log.Printf("[proto=%s provider=%s] %s→%s convert read failed: %v — failing closed",
+					proto, t.Provider, backendProto, proto, rerr)
+				http.Error(w, fmt.Sprintf("upstream response read failed during %s→%s conversion", backendProto, proto), http.StatusBadGateway)
+				return true, nil
+			}
+			conv, cerr := convertResponse(all, proto, backendProto)
+			if cerr != nil {
+				log.Printf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
+					proto, t.Provider, backendProto, proto, cerr)
+				http.Error(w, fmt.Sprintf("response conversion %s→%s failed", backendProto, proto), http.StatusBadGateway)
+				return true, nil
+			}
+			preconv = conv
+		}
 		for k, vs := range resp.Header {
 			if convert && (strings.EqualFold(k, "content-length") || strings.EqualFold(k, "transfer-encoding")) {
 				continue
@@ -1351,28 +1389,14 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		body := resp.Body
 		// Protocol conversion (#11): translate the backend's response into the
 		// client's protocol. INNERMOST wrap so the logger/scanner/cache below all
-		// see client-protocol bytes. Streaming → stateful SSE transformer; non-
-		// streaming → buffer + convert the JSON body (best-effort pass-through on
-		// error so a conversion hiccup doesn't drop a successful upstream response).
+		// see client-protocol bytes. Non-streaming bodies were already converted
+		// above (preconv, before WriteHeader, fail-closed on error); streaming is
+		// converted lazily here via a stateful SSE transformer.
 		if convert {
-			if isSSE(resp.Header) {
+			if preconv != nil {
+				body = io.NopCloser(bytes.NewReader(preconv))
+			} else if isSSE(resp.Header) {
 				body = io.NopCloser(convertSSEReader(body, proto, backendProto, t.Model))
-			} else {
-				// 64 MiB cap: a non-stream LLM response larger than this is
-				// pathological (max_tokens bounds it); the cap prevents a
-				// misbehaving backend from OOMing the proxy via the buffered
-				// conversion path.
-				all, err := io.ReadAll(io.LimitReader(body, 64<<20))
-				body.Close()
-				if err != nil {
-					log.Printf("[convert] %s→%s read response failed: %v", backendProto, proto, err)
-				}
-				conv, cerr := convertResponse(all, proto, backendProto)
-				if cerr != nil {
-					log.Printf("[convert] %s→%s response failed: %v", backendProto, proto, cerr)
-					conv = all
-				}
-				body = io.NopCloser(bytes.NewReader(conv))
 			}
 		}
 		// request logging: tee the (possibly converted) body — `body`, NOT
@@ -1487,11 +1511,12 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// record the result; otherwise it's a no-op (nowhere to compare).
 		if p.reqLog != nil && len(cfg.Shadow) > 0 {
 			if sh, ok := cfg.Shadow[flc.exposed]; ok && sh.Provider != "" && sh.Provider != t.Provider {
-				if p.shouldShadow() {
+				sr := p.shadow.Load() // reload-swappable; capture once so send+release use the same sem
+				if sr.shouldSample() {
 					select {
-					case p.shadowSem <- struct{}{}:
+					case sr.sem <- struct{}{}:
 						go func() {
-							defer func() { <-p.shadowSem }()
+							defer func() { <-sr.sem }()
 							p.runShadow(proto, backendProto, calledModel, flc.exposed, sh, reqBytes, flc.requestID)
 						}()
 					default:
@@ -1512,20 +1537,56 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 	return false, nil
 }
 
-// shouldShadow reports whether this request should be shadow-evaluated, based on
-// the configured sample rate (1.0 = all, 0.5 = half, 0 = none). Returns false if
-// shadow is not configured.
-func (p *Proxy) shouldShadow() bool {
-	if p.shadowSem == nil {
+// shadowRuntime is the reload-swappable shadow dispatch state. reload replaces
+// the whole bundle via an atomic store; each dispatch loads it once, so in-flight
+// goroutines finish on the bundle they started with (same sem/client) while new
+// traffic follows the reloaded sample rate / concurrency cap / client timeout.
+type shadowRuntime struct {
+	sem      chan struct{} // buffered concurrency gate (cap = max concurrent)
+	client   *http.Client  // shared HTTP client for shadow requests
+	sampRate float64       // 0-1; fraction of requests to shadow (1.0 = all, 0 = off)
+}
+
+// newShadowRuntime builds the shadow dispatch bundle from a config (used by both
+// NewProxy and reload so the two stay in sync).
+func newShadowRuntime(cfg *Config) *shadowRuntime {
+	maxConc := cfg.ShadowMaxConcurrent
+	if maxConc <= 0 {
+		maxConc = 4
+	}
+	sr := &shadowRuntime{
+		sem:      make(chan struct{}, maxConc),
+		client:   &http.Client{Timeout: cfg.Scheduling.timeout()},
+		sampRate: 1.0, // default; nil ShadowSampleRate = all requests
+	}
+	if cfg.ShadowSampleRate != nil {
+		sr.sampRate = *cfg.ShadowSampleRate // explicit 0.0 = off
+	}
+	return sr
+}
+
+// shouldSample reports whether this request should be shadow-evaluated, based on
+// the configured sample rate (1.0 = all, 0.5 = half, 0 = none). A nil sem means
+// shadowing is not configured.
+func (sr *shadowRuntime) shouldSample() bool {
+	if sr == nil || sr.sem == nil {
 		return false
 	}
-	if p.shadowSampRate >= 1 {
+	if sr.sampRate >= 1 {
 		return true
 	}
-	if p.shadowSampRate <= 0 {
+	if sr.sampRate <= 0 {
 		return false
 	}
-	return rand.Float64() < p.shadowSampRate
+	return rand.Float64() < sr.sampRate
+}
+
+// shouldShadow reports whether this request should be shadow-evaluated, based on
+// the currently-loaded shadow runtime's sample rate. Reload-aware: the runtime
+// pointer is swapped atomically, so a config change (e.g. sample_rate: 0) takes
+// effect immediately without a restart.
+func (p *Proxy) shouldShadow() bool {
+	return p.shadow.Load().shouldSample()
 }
 
 // runShadow sends the same prompt to a candidate backend (shadow evaluation,
@@ -1544,11 +1605,22 @@ func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow 
 	cfg := p.cfg
 	provs := p.providers
 	parentOf := p.parentOf
+	poolIndex := p.poolIndex
 	p.mu.RUnlock()
 	logger := p.reqLog
 	if logger == nil {
 		return // nowhere to record → no point shadowing
 	}
+	// Resolve the shadow target to a runnable virtual via the unified resolver
+	// (pooled parent → one account, round-robin). A pooled parent name has no
+	// runtime instance, so without this shadow silently stopped sampling the
+	// moment a second account was added.
+	picked, ok := newResolver(p, provs, poolIndex).Pick(RouteTarget{Provider: shadow.Provider, Model: shadow.Model, Protocol: shadow.Protocol})
+	if !ok {
+		log.Printf("[shadow] %s: provider not available (no runnable virtual)", shadow.Provider)
+		return
+	}
+	shadow.Provider = picked.target.Provider
 	provCfg, ok := providerConfig(cfg, parentOf, shadow.Provider)
 	if !ok {
 		log.Printf("[shadow] %s: unknown provider", shadow.Provider)
@@ -1603,7 +1675,7 @@ func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow 
 	for k, v := range provCfg.Headers {
 		sreq.Header.Set(k, v)
 	}
-	client := p.shadowClient // shared, not per-request
+	client := p.shadow.Load().client // shared, not per-request
 	start := time.Now()
 	resp, err := client.Do(sreq)
 	if err != nil {

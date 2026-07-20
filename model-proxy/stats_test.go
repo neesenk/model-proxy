@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1137,5 +1138,149 @@ func TestFormatAnalyticsTable(t *testing.T) {
 	}
 	if !strings.Contains(out, "n/a") {
 		t.Errorf("unpriced series should show n/a:\n%s", out)
+	}
+}
+
+// TestQueryAgentRange_DefaultBucketKeepsEachMinute (regression #3): the default
+// (bucketSecs<=60) agent query must return each stored 1-minute row losslessly.
+// It used to always GROUP BY (agent,provider,model) while selecting bare minute
+// + counters — SQLite then collapses all minutes for a key into ONE arbitrary
+// row, silently losing every other minute's data.
+func TestQueryAgentRange_DefaultBucketKeepsEachMinute(t *testing.T) {
+	ss := newTestStatsStore(t)
+	mk := func(req, in, out, lat, fail uint64) map[agentKey]agentCount {
+		return map[agentKey]agentCount{
+			{Agent: "codex", Provider: "zhipu", Model: "glm-5"}: {Requests: req, Input: in, Output: out, LatencySum: lat, Failures: fail},
+		}
+	}
+	// Two distinct minutes for the SAME (agent,provider,model), distinct counts.
+	if err := ss.flushAgentDeltas(0, mk(3, 100, 200, 1500, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ss.flushAgentDeltas(60, mk(5, 400, 800, 6000, 1)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ss.queryAgentRange(0, 60, "", "", "", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("queryAgentRange(bucket=60) returned %d rows, want 2 (one per minute; pre-fix collapsed multi-minute data): %+v", len(got), got)
+	}
+	byMin := map[int64]agentBucket{}
+	for _, b := range got {
+		byMin[b.Minute] = b
+	}
+	m0, ok0 := byMin[0]
+	m60, ok60 := byMin[60]
+	if !ok0 || !ok60 {
+		t.Fatalf("missing minute rows; got minutes %v", minuteKeys(byMin))
+	}
+	if m0.Requests != 3 || m0.Input != 100 || m0.Output != 200 || m0.LatencySum != 1500 || m0.Failures != 0 {
+		t.Errorf("minute 0 row = %+v, want Req=3 In=100 Out=200 Lat=1500 Fail=0", m0)
+	}
+	if m60.Requests != 5 || m60.Input != 400 || m60.Output != 800 || m60.LatencySum != 6000 || m60.Failures != 1 {
+		t.Errorf("minute 60 row = %+v, want Req=5 In=400 Out=800 Lat=6000 Fail=1", m60)
+	}
+}
+
+func minuteKeys(m map[int64]agentBucket) []int64 {
+	ks := make([]int64, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
+}
+
+// TestFlush_DefersBaselineOnFlushError (regression #5): on a transient flush
+// failure (disk full, SQLite busy), the diff baseline must NOT advance — the
+// next flush re-diffs from the old baseline, re-accumulating the lost period.
+// Pre-fix the baseline advanced before the SQLite write, permanently dropping
+// that period's counters.
+func TestFlush_DefersBaselineOnFlushError(t *testing.T) {
+	ss := newTestStatsStore(t)
+	metrics := newMetricsStore()
+	f := newStatsFlusher(ss, metrics, newTokenCounter(), newAgentCounter(), nil)
+
+	addReq := func(n int) {
+		for i := 0; i < n; i++ {
+			metrics.inc("zhipu", "glm-5", evRequests)
+		}
+	}
+
+	// Period 1: 10 requests → flush succeeds, baseline advances to 10.
+	addReq(10)
+	f.flush(time.Unix(60, 0))
+	if got := sumRequests(t, ss); got != 10 {
+		t.Fatalf("after flush1, DB total = %d, want 10", got)
+	}
+
+	// Period 2: +5 (cumulative 15). Force flush to FAIL by swapping in a closed
+	// DB handle, then restore it so the next flush + verification can proceed.
+	addReq(5)
+	goodDB := ss.db
+	badDB, _ := sql.Open(statsDriver, ":memory:")
+	badDB.Close() // closed pool → Begin() errors
+	ss.db = badDB
+	f.flush(time.Unix(120, 0)) // fails; pre-fix baseline still advances to 15
+	ss.db = goodDB
+
+	// Period 3: +3 (cumulative 18) → flush succeeds.
+	addReq(3)
+	f.flush(time.Unix(180, 0))
+
+	// Nothing lost: DB total must equal cumulative (18). Pre-fix the failed
+	// flush advanced the baseline, so period 2's 5 were dropped (total 13).
+	if got := sumRequests(t, ss); got != 18 {
+		t.Errorf("DB total = %d, want 18 (period 2's 5 requests lost when baseline advanced before flush success)", got)
+	}
+}
+
+func sumRequests(t *testing.T, ss *statsStore) uint64 {
+	rows, err := ss.db.Query(`SELECT requests FROM minute_buckets`)
+	if err != nil {
+		t.Fatalf("query minute_buckets: %v", err)
+	}
+	defer rows.Close()
+	var n uint64
+	for rows.Next() {
+		var r uint64
+		if err := rows.Scan(&r); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		n += r
+	}
+	return n
+}
+
+// TestQueryAgentRange_WiderBucketSumsAndFloors (companion to #3): the >60s path
+// must SUM the counters across minutes and floor the bucket to the window start.
+func TestQueryAgentRange_WiderBucketSumsAndFloors(t *testing.T) {
+	ss := newTestStatsStore(t)
+	mk := func(req, in, out, lat, fail uint64) map[agentKey]agentCount {
+		return map[agentKey]agentCount{
+			{Agent: "codex", Provider: "zhipu", Model: "glm-5"}: {Requests: req, Input: in, Output: out, LatencySum: lat, Failures: fail},
+		}
+	}
+	if err := ss.flushAgentDeltas(0, mk(3, 100, 200, 1500, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ss.flushAgentDeltas(60, mk(5, 400, 800, 6000, 1)); err != nil {
+		t.Fatal(err)
+	}
+	// 120s bucket spans both minutes (0..119) → one summed row, bucket start = 0.
+	got, err := ss.queryAgentRange(0, 60, "", "", "", 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("bucket=120 returned %d rows, want 1 (two minutes summed): %+v", len(got), got)
+	}
+	b := got[0]
+	if b.Minute != 0 {
+		t.Errorf("bucket start = %d, want 0 (floor to window start)", b.Minute)
+	}
+	if b.Requests != 8 || b.Input != 500 || b.Output != 1000 || b.LatencySum != 7500 || b.Failures != 1 {
+		t.Errorf("summed row = %+v, want Req=8 In=500 Out=1000 Lat=7500 Fail=1", b)
 	}
 }

@@ -166,6 +166,34 @@ func TestZhipuUsage_NotLoggedIn(t *testing.T) {
 	}
 }
 
+// --- zcode ---
+
+func TestZcodeUsage_Quota(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-api-key"); got != "k" {
+			t.Errorf("zcode usage GET x-api-key = %q, want k (ZCode sends both auth headers)", got)
+		}
+		w.Write([]byte(`{"success":true,"data":{"level":"GLM Coding Plan","limits":[` +
+			`{"type":"TOKENS_LIMIT","unit":3,"percentage":40,"nextResetTime":1750000000000,"usage":100000,"currentValue":40000,"remaining":60000}]}}`))
+	}))
+	defer srv.Close()
+	p := &ZCodeProvider{ApiKeyBase: NewApiKeyBaseWithKey("zcode", "k"), cfg: &Config{UsageURL: srv.URL}, providerName: "zcode"}
+	out := captureStdoutProvider(func() { _ = p.Usage() })
+	for _, want := range []string{"zcode", "GLM Coding Plan", "5h tokens", "40.0% used"} {
+		if !contains(out, want) {
+			t.Errorf("zcode usage missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestZcodeUsage_NotLoggedIn(t *testing.T) {
+	p := &ZCodeProvider{ApiKeyBase: &ApiKeyBase{}, cfg: &Config{UsageURL: "http://x.invalid"}, providerName: "zcode"}
+	out := captureStdoutProvider(func() { _ = p.Usage() })
+	if !contains(out, "Not logged in") {
+		t.Errorf("zcode usage not-logged-in missing marker:\n%s", out)
+	}
+}
+
 // --- deepseek ---
 
 func TestDeepseekUsage_Balance(t *testing.T) {

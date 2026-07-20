@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -354,19 +355,144 @@ func TestShouldShadow(t *testing.T) {
 	}
 	// rate >= 1 → always true.
 	p := NewProxy(cfg)
-	p.shadowSampRate = 1.0
+	p.shadow.Store(&shadowRuntime{sem: make(chan struct{}, 1), sampRate: 1.0})
 	if !p.shouldShadow() {
 		t.Error("rate=1.0 should return true")
 	}
 	// rate <= 0 → always false.
-	p.shadowSampRate = 0
+	p.shadow.Store(&shadowRuntime{sem: make(chan struct{}, 1), sampRate: 0})
 	if p.shouldShadow() {
 		t.Error("rate=0 should return false")
 	}
-	// nil sem → false.
-	p.shadowSem = nil
+	// nil runtime → false.
+	p.shadow.Store(nil)
 	if p.shouldShadow() {
-		t.Error("nil shadowSem should return false")
+		t.Error("nil shadow runtime should return false")
+	}
+}
+
+// TestReload_ShadowDisabledStopsFiring (regression #6): the shadow sample rate /
+// concurrency cap / client must update on reload. Disabling shadow via
+// shadow_sample_rate: 0 + reload must stop firing shadow requests immediately —
+// pre-fix the sample rate was cached at startup, so paid shadow requests kept
+// firing until restart.
+func TestReload_ShadowDisabledStopsFiring(t *testing.T) {
+	var candHits atomic.Int64
+	mainUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer mainUp.Close()
+	candUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		candHits.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer candUp.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	reqDir := filepath.Join(t.TempDir(), "requests")
+	base := fmt.Sprintf("listen: 127.0.0.1:0\n"+
+		"providers:\n"+
+		"  main:\n    openai_base_url: %s\n    provider_id: static\n"+
+		"  cand:\n    openai_base_url: %s\n    provider_id: static\n"+
+		"routes:\n  m:\n    - {provider: main, model: m}\n"+
+		"shadow:\n  m:\n    provider: cand\n    model: m\n"+
+		"request_log:\n  enabled: true\n  dir: %s\n", mainUp.URL, candUp.URL, reqDir)
+	write := func(extra string) {
+		if err := os.WriteFile(cfgPath, []byte(base+extra), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("shadow_sample_rate: 1.0\n")
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := NewProxy(cfg)
+	p.initRequestLog(cfg.RequestLog) // shadow only fires when reqLog is active
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	send := func() {
+		resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"m","input":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	// 1) shadow enabled → the candidate IS hit (fire-and-forget, so poll).
+	send()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && candHits.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if first := candHits.Load(); first != 1 {
+		t.Fatalf("shadow should have fired once after first send; candHits=%d", first)
+	}
+
+	// 2) disable shadow via reload (sample_rate: 0).
+	write("shadow_sample_rate: 0.0\n")
+	if err := p.reload(cfgPath); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	send()
+	// Give any stray shadow goroutine a moment, then assert NO new candidate hit.
+	time.Sleep(120 * time.Millisecond)
+	if got := candHits.Load(); got != 1 {
+		t.Errorf("after disabling shadow via reload, candHits=%d, want 1 (shadow kept firing — sample rate not reload-aware)", got)
+	}
+}
+
+// TestShadow_PooledProvider (regression for the unified resolver, #10): a shadow
+// target that names a POOLED parent must still be sampled. Pre-fix runShadow did
+// provs[shadow.Provider] (nil for a parent) → "provider not available" → shadow
+// silently stopped the moment a second account was added. After the fix the
+// resolver picks one of the parent's virtuals.
+func TestShadow_PooledProvider(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu-shadow", "zhipu", "SA", "SB")
+
+	var shadowHits atomic.Int64
+	mainUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer mainUp.Close()
+	shadowUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		shadowHits.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer shadowUp.Close()
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"main":         {OpenAIBaseURL: mainUp.URL, Provider: "static"},
+			"zhipu-shadow": {OpenAIBaseURL: shadowUp.URL, Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
+		Shadow: map[string]ShadowTarget{"m": {Provider: "zhipu-shadow", Model: "glm"}},
+	}
+	p := NewProxy(cfg)
+	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"m","input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// Shadow is fire-and-forget; poll for the hit.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && shadowHits.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if shadowHits.Load() == 0 {
+		t.Fatal("pooled shadow target (zhipu-shadow) never sampled — resolver did not resolve it to a virtual")
 	}
 }
 

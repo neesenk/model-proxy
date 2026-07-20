@@ -982,3 +982,37 @@ func TestReload_NoWarnWhenRequestLogDisabled(t *testing.T) {
 		t.Errorf("reload should NOT warn when request_log disabled, got:\n%s", buf.String())
 	}
 }
+
+// TestQueryRequestRecords_LargeLineDoesNotLoseTail (regression #4): a valid JSONL
+// line larger than bufio.Scanner's 8 MiB cap — the default 5 MiB body cap allows
+// ~10 MiB request+response lines — must not halt reading. The Scanner aborted at
+// the first oversized line and silently ignored the error, losing that record
+// AND every record after it in the file (unqueryable, unreplayable).
+func TestQueryRequestRecords_LargeLineDoesNotLoseTail(t *testing.T) {
+	dir := t.TempDir()
+	// One oversized (>8 MiB) but valid record, then one normal record after it.
+	oversized := requestLogRecord{RequestID: "oversized", RequestBody: strings.Repeat("x", 9*1024*1024)}
+	after := requestLogRecord{RequestID: "after", CalledModel: "glm-5"}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	for _, r := range []requestLogRecord{oversized, after} {
+		if err := enc.Encode(&r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260720-120000.log"), buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	recs, err := queryRequestRecords(dir, recordFilter{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range recs {
+		got[r.RequestID] = true
+	}
+	if !got["oversized"] || !got["after"] {
+		t.Errorf("missing records: got %v, want both oversized+after (oversized line halted the scanner, losing it + the tail)", got)
+	}
+}

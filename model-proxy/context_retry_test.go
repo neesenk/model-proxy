@@ -117,6 +117,63 @@ func TestForward_ContextOverflowRetry(t *testing.T) {
 	}
 }
 
+// TestForward_ContextOverflowRetry_RespectsCapability (regression #7): the
+// context-overflow retry must RE-CHECK image/tools capability, not only look for
+// a larger context window. An image request that overflows a small vision model
+// must NOT be retried onto a larger-context model that lacks image support
+// (that would just fail again). With no capable larger model, the 400 commits.
+func TestForward_ContextOverflowRetry_RespectsCapability(t *testing.T) {
+	var smallHits, bigTextHits int
+	smallUp := overflowServer(`{"error":{"code":"context_length_exceeded","message":"maximum context length is 8000 tokens"}}`, &smallHits)
+	defer smallUp.Close()
+	bigTextUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bigTextHits++
+		w.Write([]byte(`{"from":"big-text"}`))
+	}))
+	defer bigTextUp.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
+			"big-text":   {OpenAIBaseURL: bigTextUp.URL, Provider: "static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"vision": {{Provider: "small-prov", Model: "small-vision"}},
+			"text":   {{Provider: "big-text", Model: "big-text"}},
+		},
+	}
+	p := NewProxy(cfg)
+	p.providers["small-prov"] = &testProv{key: "s"}
+	p.providers["big-text"] = &testProv{key: "bt"}
+	p.catalog = testCatalog(map[string]struct {
+		Context int64
+		Input   []string
+	}{
+		"small-vision": {Context: 8000, Input: []string{"text", "image"}},
+		"big-text":     {Context: 128000, Input: []string{"text"}}, // larger ctx, NO image
+	})
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	// An IMAGE request large enough to overflow small-vision's 8000 window. The
+	// only larger-context model is big-text, which lacks image support — the
+	// retry must NOT send an image request to a text-only model.
+	body := `{"model":"vision","input":[{"type":"image","content":"` + strings.Repeat("qwxz!", 8000) + `"}]}`
+	req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if bigTextHits != 0 {
+		t.Errorf("big-text (no image support) hit %d time(s) by the overflow retry — capability was not re-checked", bigTextHits)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400 (overflow commits when no larger model supports the request's capability)", resp.StatusCode)
+	}
+}
+
 // TestForward_ContextOverflowRetry_OnlyOnce: the retry is one-shot — when the
 // retried (larger) target also overflows, its 400 commits to the client
 // byte-complete rather than triggering a second retarget to an even larger

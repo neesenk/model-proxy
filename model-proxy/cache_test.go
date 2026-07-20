@@ -14,18 +14,45 @@ import (
 
 func TestCacheKeyOf(t *testing.T) {
 	body := []byte(`{"model":"glm","input":[]}`)
-	k1 := cacheKeyOf("POST", "/v1/responses", body)
-	k2 := cacheKeyOf("POST", "/v1/responses", body)
-	if k1 != k2 {
+	mk := func(path, query string, headers map[string]string) *http.Request {
+		u := "http://x" + path
+		if query != "" {
+			u += "?" + query
+		}
+		req, _ := http.NewRequest("POST", u, nil)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		return req
+	}
+	k1 := cacheKeyOf(mk("/v1/responses", "", nil), body)
+	// identical → same key
+	if cacheKeyOf(mk("/v1/responses", "", nil), body) != k1 {
 		t.Error("identical requests must hash to the same key")
 	}
-	// Different body → different key.
-	if cacheKeyOf("POST", "/v1/responses", []byte(`{"model":"glm","input":[{"role":"user"}]}`)) == k1 {
+	// different body → different key
+	if cacheKeyOf(mk("/v1/responses", "", nil), []byte(`{"model":"glm","input":[{"role":"user"}]}`)) == k1 {
 		t.Error("different body hashed to same key")
 	}
-	// Different path → different key.
-	if cacheKeyOf("POST", "/v1/messages", body) == k1 {
+	// different path → different key
+	if cacheKeyOf(mk("/v1/messages", "", nil), body) == k1 {
 		t.Error("different path hashed to same key")
+	}
+	// different query → different key (regression #8)
+	if cacheKeyOf(mk("/v1/responses", "version=2", nil), body) == k1 {
+		t.Error("different query hashed to same key (cache collision)")
+	}
+	// different anthropic-beta → different key
+	if cacheKeyOf(mk("/v1/responses", "", map[string]string{"anthropic-beta": "output-128k-2025-02-19"}), body) == k1 {
+		t.Error("different anthropic-beta hashed to same key (response-affecting header ignored)")
+	}
+	// different accept-language → different key
+	if cacheKeyOf(mk("/v1/responses", "", map[string]string{"accept-language": "zh-CN"}), body) == k1 {
+		t.Error("different accept-language hashed to same key (response-affecting header ignored)")
+	}
+	// a NON-response-affecting header must NOT change the key (guard against over-folding)
+	if cacheKeyOf(mk("/v1/responses", "", map[string]string{"x-custom": "whatever"}), body) != k1 {
+		t.Error("non-response-affecting header changed the key (over-folding)")
 	}
 }
 
@@ -359,5 +386,72 @@ func TestForward_CacheBypassedByForceProvider(t *testing.T) {
 	}
 	if bHits != 1 {
 		t.Errorf("force-provider b: bHits=%d want 1", bHits)
+	}
+}
+
+// TestForward_ForceProvider_TypoHardFails (regression #2): when the force-provider
+// override names a provider that is NOT a target for the route (a `replay --to`
+// typo), the request must HARD-FAIL (400) instead of silently falling back to
+// normal scheduling. Pre-fix another provider answered while `replay --to typo`
+// still reported the typo'd name, polluting comparison conclusions.
+func TestForward_ForceProvider_TypoHardFails(t *testing.T) {
+	var aHits, bHits int
+	aUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		aHits++
+		w.Write([]byte(`{"from":"a"}`))
+	}))
+	defer aUp.Close()
+	bUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bHits++
+		w.Write([]byte(`{"from":"b"}`))
+	}))
+	defer bUp.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: aUp.URL, Provider: "static"},
+			"b": {OpenAIBaseURL: bUp.URL, Provider: "static"},
+		},
+		Routes: map[string][]RouteTarget{"glm": {
+			{Provider: "a", Model: "glm", Priority: 1},
+			{Provider: "b", Model: "glm", Priority: 2},
+		}},
+	}
+	p := NewProxy(cfg)
+	p.providers["a"] = &testProv{key: "a"}
+	p.providers["b"] = &testProv{key: "b"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	do := func(force string) (int, string) {
+		req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(`{"model":"glm","input":[]}`))
+		if force != "" {
+			req.Header.Set("x-mp-force-provider", force)
+		}
+		resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, string(b)
+	}
+
+	// Typo: "z" is not a target of route glm. Pre-fix this fell back to normal
+	// scheduling (a answered 200) while replay --to z claimed z served it.
+	status, body := do("z")
+	if status != http.StatusBadRequest {
+		t.Errorf("typo force-provider: status=%d body=%q, want 400 (hard-fail, not silent fallback)", status, body)
+	}
+	if aHits != 0 || bHits != 0 {
+		t.Errorf("typo force-provider was served anyway: aHits=%d bHits=%d, want 0/0", aHits, bHits)
+	}
+
+	// Sanity: a VALID force-provider still routes to that provider.
+	if status, _ := do("b"); status != http.StatusOK {
+		t.Errorf("valid force-provider b: status=%d, want 200 (hard-fail must not break the valid path)", status)
+	}
+	if bHits != 1 {
+		t.Errorf("valid force-provider b: bHits=%d want 1", bHits)
 	}
 }

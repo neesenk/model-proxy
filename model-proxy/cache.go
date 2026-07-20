@@ -150,15 +150,33 @@ func (c *responseCache) stats() (hits, misses, entries uint64) {
 	return c.hits, c.misses, uint64(len(c.m))
 }
 
+// cacheKeyHeaders are request headers that can change the response and so must
+// be part of the exact-match key — otherwise two requests differing only in one
+// of these could collide and return the wrong cached response. Canonical names;
+// r.Header.Get canonicalizes, so client casing doesn't matter.
+var cacheKeyHeaders = []string{"anthropic-beta", "accept-language"}
+
 // cacheKeyOf returns the exact-match key for a request: SHA-256 of the method,
-// path, and full request body. The body carries the model + messages + system +
-// tools, so two requests cache-share only when byte-identical (true exact match).
-func cacheKeyOf(method, path string, body []byte) string {
+// path, raw query, the response-affecting headers, and the full request body.
+// The body carries the model + messages + system + tools; the query string and
+// these headers (anthropic-beta output features, accept-language) can each
+// change the response, so two requests cache-share only when ALL of these match.
+func cacheKeyOf(r *http.Request, body []byte) string {
 	h := sha256.New()
-	h.Write([]byte(method))
+	h.Write([]byte(r.Method))
 	h.Write([]byte{0})
-	h.Write([]byte(path))
+	h.Write([]byte(r.URL.Path))
 	h.Write([]byte{0})
+	h.Write([]byte(r.URL.RawQuery))
+	h.Write([]byte{0})
+	for _, name := range cacheKeyHeaders {
+		if v := r.Header.Get(name); v != "" {
+			h.Write([]byte(name))
+			h.Write([]byte{':'})
+			h.Write([]byte(v))
+			h.Write([]byte{0})
+		}
+	}
 	h.Write(body)
 	return hex.EncodeToString(h.Sum(nil))
 }

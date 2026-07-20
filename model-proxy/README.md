@@ -9,7 +9,7 @@
 - **请求感知路由**：按图片/工具能力过滤目标、超长 prompt 自动改道大上下文模型、上游 400 溢出自动重试一次
 - **可观测性**：Web UI 六个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
 - **评测工具**：影子评测（真实负载双跑对比后端）、一键重放（replay）、端到端测活（`test` / UI 按钮）
-- **多模型编排（fusion）**：一条路由 fan-out 到多个后端并行作答，合成器融合成最终答案——困难问题要最好效果
+- **多模型编排（fusion）**：一条路由 fan-out 到多个后端并行生成候选答案，结果汇总模型融合成最终答案——困难问题要最好效果
 - **其他**：精确响应缓存、`pin` 运行期热切换、等价成本分析（OpenRouter 价格）
 
 ## 架构
@@ -332,17 +332,21 @@ model-proxy shadow report --from 7d
 
 ## 多模型编排（fusion）
 
-OpenRouter Fusion 式编排：把一条路由的请求**并行发给多个后端（panel）各答一遍**，再由**合成器（synthesizer）融合候选答案**输出最终结果——中端面板打出接近旗舰的质量，成本只有旗舰的一半量级。对客户端完全透明（就是一次普通请求）。
+OpenRouter Fusion 式编排：把一条路由的请求**并行发给多个后端（panel）各答一遍**，再由**结果汇总模型（synthesizer）融合候选答案**输出最终结果——中端面板打出接近旗舰的质量，成本只有旗舰的一半量级。对客户端完全透明（就是一次普通请求）。
 
 ```yaml
 fusion:
-  hard-coding:                            # 配方名
-    panel:                                # 并行面板（2-4 个）
+  hard-coding:                            # 工作流配置名
+    panel:                                # 候选答案生成成员（2-4 个，并行调用）
       - {provider: zhipu, model: glm-5.2}
       - {provider: deepseek, model: deepseek-v4-pro}
       - {provider: kimi-code, model: kimi-k2}
-    synthesizer: {provider: zhipu, model: glm-5.2}   # 用你手里最强的模型做合成
-    min_panel: 2                          # 可选：至少 N 份候选才合成（默认 2）
+    synthesizer: {provider: zhipu, model: glm-5.2}   # 用你手里最强的模型做结果汇总
+    min_panel: 2                          # 可选：至少 N 份候选答案才进入汇总（默认 2）
+    max_runs_per_day: 50                  # 可选：当日编排次数上限，超出→降级直打 synthesizer
+    first_turn_only: true                 # 可选：仅单轮会话（无 assistant 消息）才编排
+    judge: {provider: zhipu, model: glm-5.2}   # 可选：汇总前先出「共识/冲突/遗漏」评审报告
+    # instruction: "..."                  # 可选：覆盖内置的结果汇总指令模板
 
 routes:
   hard-question:
@@ -352,10 +356,12 @@ routes:
 
 工作机制与语义：
 
-- **quorum + grace**：凑够 `min_panel` 份候选就开合成（再留 5 秒等差点完成的腿）；凑不齐就用原始请求直打合成器（降级，不报错）。成员挂掉不影响（该成员自己的熔断/限频语义照常）。
-- **工具轮**：带 tools 的请求照常编排——草稿腿只产出文本分析，合成器负责输出 tool 调用。
+- **quorum + grace**：凑够 `min_panel` 份候选答案就进入结果汇总阶段（再留 5 秒等差点完成的调用分支）；凑不齐就用原始请求直打 synthesizer（降级，不报错）。成员挂掉不影响（该成员自己的熔断/限频语义照常）。
+- **工具轮**：带 tools 的请求照常编排——候选答案生成调用只产出文本分析（剥 `tools`/`tool_choice`），结果汇总调用保留 tools，由 synthesizer 输出 tool 调用。
 - **跨协议面板**：成员可带 `protocol:`，请求自动转换（转换层的现成能力）。
-- **代价（要想清楚再用）**：一次请求 = N+1 次上游调用（面板 N + 合成 1），延迟 ≈ 面板等待 + 合成首字节。**只给困难路由用，别当默认路由**；多轮长会话每轮都编排会放大成本，建议单发困难问题。每家的消耗在 `stats` / Requests 页（`fusion-panel-*` 标记）里都看得见。
+- **代价（要想清楚再用）**：一次请求 = N+1 次上游调用（panel N 次候选生成 + 1 次结果汇总），延迟 ≈ 候选等待 + 汇总首字节。**只给困难路由用，别当默认路由**；多轮长会话建议配 `first_turn_only`（多轮自动降级直打 synthesizer）和 `max_runs_per_day` 控制成本。每家的消耗在 `stats` / Requests 页（`fusion-panel-*` 标记）里都看得见。
+- **编排观测**：`GET /api/fusion?workflow=<名>` 返回按工作流配置的聚合（编排次数/quorum 达成率/按原因的降级计数/候选与汇总 token/放大系数）+ 最近 200 次运行明细（每条调用分支的状态/延迟/token）；`stats --provider fusion` 出时间序列（requests=编排次数，failovers=降级次数）。
+- **judge 评审（可选）**：配 `judge:` 后，结果汇总前先对候选答案做一次「共识/冲突/遗漏」分析，报告注入汇总提示词（LLM-Blender「先排后融」）；judge 调用失败不影响编排。
 - **验证收益**：给 fusion 路由配一条 `shadow:` 影子（或反过来），用你自己的真实负载对比「编排 vs 单模型」，别信普遍结论。
 
 ## 调度与熔断（`scheduling`）

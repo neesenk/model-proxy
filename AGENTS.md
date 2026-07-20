@@ -144,15 +144,18 @@ schedule 之后按请求内容过滤/改道；catalog（models.dev context/modal
 
 ### 多模型编排（`fusion.go`，OpenRouter Fusion 式）
 
-顶层 `fusion:` 配置「配方」（panel 2..4 + synthesizer + 可选 `min_panel`），路由用 `{provider: fusion, model: <配方名>}` 引用；forward 目标循环在 providerConfig 查询前拦截 `t.Provider == "fusion"` 走编排引擎（`expandTarget` 对非池化名透传，provider 包零改动；`force_provider` 指定具体 provider 时跳过）。
+顶层 `fusion:` 配置**工作流配置**（`Config.Fusion` map：panel 2..4 + synthesizer + 可选 `min_panel`），路由用 `{provider: fusion, model: <工作流配置名>}` 引用；forward 目标循环在 providerConfig 查询前拦截 `t.Provider == "fusion"` 走编排引擎 `runFusion`（`expandTarget` 对非池化名透传，provider 包零改动；`force_provider` 指定具体 provider 时跳过）。
 
-- **fan-out**：每成员一条 goroutine——fail-closed 构建门（无 impl 直接剔除）→ `takeHalfOpenSlot` 熔断门 → 按成员 `protocol:` 转换 + rewriteModel → **非流式**子调用（per-leg `upstream_timeout`）。草稿截断 24k 字符。成员全套走 `recordSuccess`/`recordFailure`/`recordRateLimit`（熔断/quota 语义与普通转发一致；**被 quorum/grace 砍掉的腿不算失败**——`ctx.Canceled` 不进熔断不计 metrics）。
-- **quorum + grace**：`min_panel`（默认 2）份候选达成即开合成，**再等 5s grace** 收留 straggler（`fusionGracePeriod` 包级 var，测试可缩）；quorum 永不可达（成功+在途 < quorum）→ 立即取消剩余腿。
-- **工具轮**：请求带 tools 时**草稿腿剥 `tools`/`tool_choice`**（纯文本分析），**合成腿带 tools**（tool_use 原样透传）；synthesizer 不支持 tools 则降级。
-- **合成**：`buildSynthesisBody`——anthropic 往 `system` 追加候选段 / openai 追加 user 消息（不动对话尾部），shuffle 防位置偏好，固定指令模板；合成腿**复用 `tryTarget`**（SSE 直通、metrics/latency/live/request_log/缓存录制全白拿）。客户端 TTFT = quorum 达成 + grace + 合成 TTFT。
-- **错误语义**：合成腿失败 = 硬终结（原样回客户端，不重试——重试是 N+1 次全套）；仅 quorum 不足 / synthesizer 不支持 tools / body 构建失败时降级「原始 body 直打 synthesizer」。
-- **观测**：草稿腿 request_log 记 `fusion-panel-<i>-<原id>`、live 事件标 `fusion-panel:<model>`；usage 分腿记 tokenCounter+agentSink（**客户端 usage 数值不改写**，与分腿记账避免重复）；stats 里编排成本 = 各成员正常计量（N+1 倍开销一目了然）。
-- **validate**：配方引用的 provider 存在、禁嵌套 fusion、protocol 值合法且有对应 base URL；routes 的 `provider: fusion` 特判 + 配方存在性；shadow 拒绝指向 fusion。`Fusion` 在 Config/rawConfig/拷贝段三处（踩坑 #16）。
+- **候选答案生成阶段（fan-out）**：panel 每成员一条 goroutine（`callFusionPanelMember`）——fail-closed 构建门（无 impl 直接剔除）→ `takeHalfOpenSlot` 熔断门 → 按成员 `protocol:` 转换 + rewriteModel → **非流式**子调用（每条调用分支独立 `upstream_timeout`）。候选答案截断 24k 字符。每条调用分支全套走 `recordSuccess`/`recordFailure`/`recordRateLimit`（熔断/quota 语义与普通转发一致；**被 quorum/grace 取消的调用分支不算失败**——`ctx.Canceled` 不进熔断不计 metrics）。
+- **quorum + grace**：`min_panel`（默认 2）份候选答案达成即进入结果汇总阶段，**再等 5s grace** 收留较慢响应（`fusionGracePeriod` 包级 var，测试可缩，`collectFusionResults`）；quorum 永不可达（成功+在途 < quorum）→ 立即取消剩余调用分支。
+- **工具轮**：请求带 tools 时**候选答案生成调用剥 `tools`/`tool_choice`**（纯文本分析，`stripFusionDraftFields`），**结果汇总调用带 tools**（tool_use 原样透传）；synthesizer 不支持 tools 则降级。
+- **结果汇总**：`buildSynthesisBody`——anthropic 往 `system` 追加候选段 / openai 追加 user 消息（不动对话尾部），shuffle 防位置偏好，固定指令模板；结果汇总调用 `callFusionSynthesizer` **复用 `tryTarget`**（SSE 直通、metrics/latency/live/request_log/缓存录制全白拿）。客户端 TTFT = quorum 达成 + grace + 汇总调用 TTFT。
+- **错误语义**：结果汇总调用失败 = 硬终结（原样回客户端，不重试——重试是 N+1 次全套）；仅 quorum 不足 / synthesizer 不支持 tools / body 构建失败时降级「原始 body 直打 synthesizer」。
+- **观测**：候选答案生成调用 request_log 记 `fusion-panel-<i>-<原id>`、live 事件标 `fusion-panel:<model>`；usage 按调用分支分别记 tokenCounter+agentSink（**客户端 usage 数值不改写**，与按分支记账避免重复）；stats 里编排成本 = 各成员正常计量（N+1 倍开销一目了然）。**运行注册表 `fusionRegistry`**（`fusion_obs.go`，200 条环形 + per-workflow 聚合，跨 reload 保留，独立叶子锁）：每次编排记 `fusionRun`（quorum/drafts_used/degraded 原因/每分支 status·latency·token·cut/judge_used/汇总 status·latency·token——汇总数据由 `finishFusion` 从 eventHub 按 RunID 回读，非 request_log join）。`GET /api/fusion[?workflow=]` 暴露聚合 + run 明细。metrics 按 `("fusion", <workflow>)` 计 `evFusionRuns`/`evFusionDegraded`——**列复用**：SQLite 分钟桶里该行的 requests=编排次数、failovers=降级次数（零 schema 变更）。
+- **降级原因枚举**（注册表/metrics 计数，不再只是日志）：`insufficient_proposers`（quorum 不足）/`tools_unsupported`（synthesizer 不支持 tools）/`body_build_failed`/`budget_exceeded`（超 `max_runs_per_day`）/`multi_turn`（`first_turn_only` 且多轮会话）。
+- **成本控制**：`max_runs_per_day`（按本地日界，注册表 `admit()` 门，fan-out 前；**降级运行不消耗预算**）、`first_turn_only`（body 里探测到 role=assistant 消息 → 跳过编排直打 synthesizer）。
+- **judge 阶段（可选 `judge:`）**：quorum 达成后、汇总前，一次非流式评审调用（与候选分支共用 `callFusionLeg` 管道，request_log id `fusion-judge-<原id>`）产出「共识/冲突/遗漏」报告，以 `<JUDGE_ANALYSIS>` 段注入汇总 body（候选段之前）；judge 失败只跳过报告，不降级整个编排。`instruction:` 覆盖固定汇总指令模板（≤4000 rune）。
+- **validate**：工作流配置引用的 provider 存在、禁嵌套 fusion（judge 同）、protocol 值合法且有对应 base URL；routes 的 `provider: fusion` 特判 + 配置存在性；shadow 拒绝指向 fusion；`max_runs_per_day>=0`、`instruction` 限长。`Fusion` 在 Config/rawConfig/拷贝段三处（踩坑 #16）；`FusionConfig` 新字段是 map 值内字段，自动解码不触发 #16。
 - **定位**：只给「困难问题要最好效果」的路由用（2× 延迟、N+1 倍成本），别当默认路由；多轮会话每轮都编排会放大成本，建议单发场景。学术/开源出处：MoA、LLM-Blender（v2 judge）、OpenSquilla B5（机制蓝本）。
 
 ### 隐式路由（implicit routes，实测）

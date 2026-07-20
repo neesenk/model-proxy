@@ -445,3 +445,45 @@ func TestForward_ExpandedPooledRouteHitsVirtual(t *testing.T) {
 		}
 	}
 }
+
+// TestExpandTarget_PreservesProtocol (regression #1): pool fan-out must copy
+// Protocol so a pooled provider's cross-protocol route still converts and uses
+// the backend's URL/path. expandTarget used to rebuild the RouteTarget with only
+// Provider/Model/Priority, dropping Protocol — so a pooled OpenAI backend behind
+// an Anthropic-exposed route lost its conversion and hit the wrong path.
+func TestExpandTarget_PreservesProtocol(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{
+			// Anthropic-exposed name routed to an OpenAI backend: needs conversion.
+			"claude": {{Provider: "zhipu", Model: "glm-5", Priority: 2, Protocol: "openai"}},
+		},
+	}
+	p := NewProxy(cfg)
+
+	got := p.expandedRoutes["claude"]
+	if len(got) != 2 {
+		t.Fatalf("expanded len = %d, want 2 (2-account pool)", len(got))
+	}
+	for i, tg := range got {
+		if tg.Protocol != "openai" {
+			t.Errorf("expanded[%d].Protocol = %q, want \"openai\" (dropped in fan-out → no conversion + wrong URL/path)", i, tg.Protocol)
+		}
+		if tg.Model != "glm-5" {
+			t.Errorf("expanded[%d].Model = %q, want glm-5", i, tg.Model)
+		}
+		if tg.Priority != 2 {
+			t.Errorf("expanded[%d].Priority = %d, want 2", i, tg.Priority)
+		}
+		if p.parentOf[tg.Provider] != "zhipu" {
+			t.Errorf("expanded[%d].Provider %q is not a zhipu virtual", i, tg.Provider)
+		}
+	}
+}

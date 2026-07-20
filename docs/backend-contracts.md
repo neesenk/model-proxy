@@ -39,16 +39,25 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 
 ## Zhipu BigModel 契约
 
-- OpenAI base `https://open.bigmodel.cn/api/paas/v4`（`/chat/completions`、`/models`）；Anthropic base `https://open.bigmodel.cn/api/anthropic/v1`（`/v1/messages`，Bearer）。代理按协议转发。
+- OpenAI base `https://open.bigmodel.cn/api/paas/v4`（`/chat/completions`、`/models`）；Anthropic base `https://open.bigmodel.cn/api/anthropic`（**不带 /v1**，代理保留客户端 `/v1/messages`；见 `config.go` 校验），Bearer。代理按协议转发。
 - 鉴权 `Authorization: Bearer <api_key>`（OpenAI 与 Anthropic 端点都用 Bearer，不像 DeepSeek 需 x-api-key）。
 - `/models` 只列 8 个文本对话模型；多模态（glm-4v-plus/cogview-4-plus）需手动加 config。
 - 配额 `GET .../api/monitor/usage/quota/limit`（Bearer）→ `{success, data:{limits:[{type,unit,number,percentage,nextResetTime,usage,currentValue,remaining,usageDetails}], level}}`；`type`=TOKENS_LIMIT|TIME_LIMIT，`unit` 3=5h/6=weekly/5=monthly。**`currentValue`=已用、`remaining`=剩余、`usage`=总额**（勿把 `usage` 当已用）。`/users/balance`、`/users/usage` 均 404。
 - `usageDetails`：`TIME_LIMIT`（月度）按 **MCP 工具**拆（search-prime/web-reader/zread，工具调用消耗非模型 token），`TOKENS_LIMIT` 按**模型**拆。
 
+## zcode 契约（BigModel Coding Plan + ZCode 指纹）
+
+`zcode` 是 BigModel 的 Coding Plan 变体（同一后端、同一配额信封），转发时附带 ZCode 桌面客户端指纹，使 Coding Plan API key 享受套餐配额（0.67 消耗系数 ≈ 1.5×）且不被当作通用 agent 降级。指纹值实测自 ZCode 3.3.6（`/Applications/ZCode.app` 的 ASAR + `model-providers/models_catalog_china_llm_zcode_*.json`），详见 `docs/superpowers/specs/2026-07-20-zcode-provider-design.md`。
+
+- 端点同 zhipu：OpenAI `https://open.bigmodel.cn/api/paas/v4`；Anthropic `https://open.bigmodel.cn/api/anthropic`（**不带 /v1**）。catalog 里 `bigmodel-coding-plan` 与普通 `bigmodel` 共用同一 baseURL + `paths.anthropic` —— Coding Plan 折扣由 key+端点决定，**无单独 coding base**。
+- 鉴权**双写**：每请求同时发 `Authorization: Bearer <key>` + `x-api-key: <key>`（ZCode 3.3.6 `buildAnthropicConnectivityAuthHeaders`；与 zhipu 只发 Bearer 不同）。
+- `ExtraHeaders` 注入 `anthropic-version: 2023-06-01` + ZCode 指纹（`buildZCodeSourceHeaders`）：`User-Agent: ZCode/3.3.6`、`HTTP-Referer: https://zcode.z.ai`、`X-Title: Z Code@electron`、`X-ZCode-App-Version: 3.3.6`、`X-Platform`（Node 名 `darwin|win32|linux`-`arm64|x64`）、`X-Release-Channel: production`、`X-Client-Language`/`X-Client-Timezone`（ASCII printable 否则 `unknown`）、`X-Os-Category`（`macos|windows|linux`）、`X-Os-Version`（best-effort，可缺省）。3.3.6 另有 `X-Device-Mid`（条件性，当前省略）。
+- `provider_id: zcode`；`login zcode` 开 `bigmodel.cn/login` + apikey 池（多账号）。配额/usage 复用 zhipu 的 `quota/limit` 解析（`ParseZhipuQuota`）。**未实现 OAuth/JWT 登录**（`zcode://oauth/callback` 自定义 scheme CLI 无法截获，且 apikey 路径已足够；OAuth 端点/双 client_id 经实测存在但不用）。
+
 ## DeepSeek 契约（双协议，一个 key）
 
-- OpenAI base `https://api.deepseek.com`（`/chat/completions`、`/responses`、`/models`、`/user/balance`，Bearer）；Anthropic base `https://api.deepseek.com/anthropic/v1`（`/v1/messages`，`x-api-key`，`anthropic-version`/`anthropic-beta` 被忽略）。
-- Anthropic SDK 打 `/anthropic/v1/messages`（base + `/v1/messages`）。代理剥客户端 `/v1`，故 `anthropic_base_url` 须自带 `/v1`。`RewriteRequest` no-op，URL 选择在 `proxy.forward` 按 protocol 完成。
+- OpenAI base `https://api.deepseek.com`（`/chat/completions`、`/responses`、`/models`、`/user/balance`，Bearer）；Anthropic base `https://api.deepseek.com/anthropic`（**不带 /v1**，代理保留客户端 `/v1/messages`；`x-api-key`，`anthropic-version`/`anthropic-beta` 被忽略）。
+- Anthropic SDK 打 `/anthropic/v1/messages`（base `/anthropic` + `/v1/messages`）。代理保留客户端的 `/v1/messages`（不剥），故 `anthropic_base_url` **不带 /v1**（`config.go` 校验拒绝尾部 `/v1`）。`RewriteRequest` no-op，URL 选择在 `proxy.forward` 按 protocol 完成。
 - 鉴权双写：每请求同时设 `Authorization: Bearer` + `x-api-key`，一个 config 服务两协议。
 - 服务端模型自动映射（Anthropic）：`claude-opus*`→`deepseek-v4-pro`；`claude-sonnet*`/`claude-haiku*`→`deepseek-v4-flash`。
 - `/user/balance` → `{is_available, balance_infos:[{currency, total_balance, granted_balance, topped_up_balance}]}`（注意 `balance_infos` 非 `wallets`）。`/models` → OpenAI 风格；当前 `deepseek-v4-pro`/`deepseek-v4-flash`，旧名 `deepseek-chat`/`reasoner` 2026-07-24 弃用。

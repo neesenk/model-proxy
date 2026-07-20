@@ -418,27 +418,32 @@ func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error)
 	sort.Strings(names)
 	var out []requestLogRecord
 	// Read newest file first so a Limit cuts early; names sort oldest→first, so
-	// iterate in reverse. STREAM each file via bufio.Scanner (not os.ReadFile)
-	// so a 1 GiB log file doesn't peak at 1 GiB of heap — memory is bounded to
-	// one line at a time (up to 8 MiB for oversized lines).
+	// iterate in reverse. STREAM each file one line at a time (not os.ReadFile)
+	// so a 1 GiB log file doesn't peak at 1 GiB of heap — memory is bounded to a
+	// single line. We use bufio.Reader.ReadBytes rather than bufio.Scanner: a
+	// Scanner caps token size (8 MiB) and HALTS at the first oversized line,
+	// silently dropping it plus every later record. Valid configs (default 5 MiB
+	// per body → ~10 MiB lines) exceed that cap. ReadBytes reads any line length,
+	// never aborts on size, and each line is inherently bounded to ~2×max_body
+	// (the writer caps both bodies) so memory stays one-line-at-a-time.
 	for i := len(names) - 1; i >= 0; i-- {
 		file, err := os.Open(filepath.Join(dir, names[i]))
 		if err != nil {
 			continue
 		}
-		sc := bufio.NewScanner(file)
-		sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-		for sc.Scan() {
-			line := sc.Bytes()
-			if len(line) == 0 {
-				continue
+		r := bufio.NewReaderSize(file, 64*1024)
+		for {
+			line, readErr := r.ReadBytes('\n')
+			if len(line) > 0 {
+				if l := bytes.TrimRight(line, "\n"); len(l) > 0 {
+					var rec requestLogRecord
+					if json.Unmarshal(l, &rec) == nil && f.matches(rec) {
+						out = append(out, rec)
+					}
+				}
 			}
-			var r requestLogRecord
-			if json.Unmarshal(line, &r) != nil {
-				continue // partial/garbled line
-			}
-			if f.matches(r) {
-				out = append(out, r)
+			if readErr != nil { // io.EOF or read error: stop this file
+				break
 			}
 		}
 		file.Close()

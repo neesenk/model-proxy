@@ -157,7 +157,7 @@ restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 login <provider> [--label <name>] [--replace]
 ```
 
-逻辑（`login.go:29` `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、zhipu/deepseek/kimi-code=apikey 池、volcengine=apikey+AK/SK 三元组池。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
+逻辑（`login.go:29` `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、zhipu/deepseek/kimi-code=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
 
 ### 通用
 
@@ -206,6 +206,17 @@ You can now use codex-native models (gpt-5.5) through the proxy.
 - stderr（当 provider 配了 `usage_url`，zhipu/deepseek/**kimi-code** 均配）：`Validating API key...`。校验 = GET `usage_url` with `Authorization: Bearer <key>`；**401/403 或网络错误** → `login failed: validation failed: HTTP <N>: <BODY>`（exit 1，**不写池**）；其余状态码（200/404 等）= key 通过（写池）。
 - 重复 id 且非 `--replace` -> stdout 提示 `Account "<LABEL>" is already logged in. Replace its key? [y/N] `；答非 y -> `login cancelled`（exit 1）。
 - 成功 stdout：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
+
+### zcode（BigModel Coding Plan，`case "zcode"` → `runApiKeyLoginWithInput`）
+
+stdout：
+```
+Opening BigModel login to fetch a Coding Plan API key…
+Enter API key for <PROVNAME>: <stdin>
+```
+- 开浏览器到 `https://bigmodel.cn/login`（`openBrowser`）；远程/SSH 打不开时 stderr `(could not open browser: <err> — open https://bigmodel.cn/login manually)`。用户登录后到 API Keys 拿 **Coding Plan API key** 粘贴。
+- 之后同 apikey 池流程：`Validating API key...`（stderr，配了 `usage_url`）→ `✓ Saved account <MASKED_ID> (<LABEL>)`。
+- 失败同 apikey：`login failed: <err>`（exit 1，不写池）。
 
 ### volcengine（`runVolcengineLoginWithInput`）
 

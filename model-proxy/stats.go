@@ -618,10 +618,13 @@ func (s *statsStore) flushAgentDeltas(minute int64, deltas map[agentKey]agentCou
 // minute.
 func (s *statsStore) queryAgentRange(from, to int64, agent, provider, model string, bucketSecs int64) ([]agentBucket, error) {
 	selectCols := "agent, provider, model, minute, requests, input, output, latency_ms_sum, failures"
-	groupCols := ""
+	groupClause := ""
 	if bucketSecs > 60 {
 		selectCols = "agent, provider, model, (minute / ?) * ? AS minute, SUM(requests), SUM(input), SUM(output), SUM(latency_ms_sum), SUM(failures)"
-		groupCols = ", (minute / ?) * ?"
+		// Only widen (GROUP + SUM) past 60s. At <=60 we return raw 1-minute rows
+		// losslessly — a GROUP BY here selects bare minute/counters, which SQLite
+		// collapses all minutes for a key into one arbitrary row (losing the rest).
+		groupClause = " GROUP BY agent, provider, model, (minute / ?) * ?"
 	}
 	q := "SELECT " + selectCols + " FROM agent_buckets WHERE minute >= ? AND minute <= ?"
 	args := []any{}
@@ -641,7 +644,7 @@ func (s *statsStore) queryAgentRange(from, to int64, agent, provider, model stri
 		q += " AND model = ?"
 		args = append(args, model)
 	}
-	q += " GROUP BY agent, provider, model" + groupCols + " ORDER BY agent, provider, model, minute"
+	q += groupClause + " ORDER BY agent, provider, model, minute"
 	if bucketSecs > 60 {
 		args = append(args, bucketSecs, bucketSecs)
 	}
@@ -800,18 +803,25 @@ func (f *statsFlusher) flush(now time.Time) bool {
 	defer f.mu.Unlock()
 
 	cur := f.collect()
-	prev := f.prev
-	f.prev = cur
+	// Diff against the CURRENT baseline; do NOT advance it yet. On a transient
+	// SQLite error (disk full, busy) the write below fails — if the baseline had
+	// advanced first, this period's counters would be silently dropped. Keeping
+	// the old baseline makes the next successful flush re-diff from it, i.e.
+	// re-accumulate the missed period instead of losing it.
+	deltas := diffCounters(cur, f.prev)
 
+	var agentSnap map[agentKey]agentCount
 	var agentDeltas map[agentKey]agentCount
 	if f.agents != nil {
-		ac := f.agents.snapshot()
-		agentDeltas = diffAgent(ac, f.agentPrev)
-		f.agentPrev = ac
+		agentSnap = f.agents.snapshot()
+		agentDeltas = diffAgent(agentSnap, f.agentPrev)
 	}
 
-	deltas := diffCounters(cur, prev)
 	if len(deltas) == 0 && len(agentDeltas) == 0 {
+		// Nothing to write — safe to advance baselines (no data to lose), and we
+		// must, or this no-op window would be re-diffed forever.
+		f.prev = cur
+		f.agentPrev = agentSnap
 		return false
 	}
 
@@ -821,15 +831,25 @@ func (f *statsFlusher) flush(now time.Time) bool {
 	}
 	f.lastBucket = minute
 
+	// Advance each baseline ONLY after its own flush succeeds. An empty delta
+	// (no counter change for that side) advances unconditionally — nothing to lose.
 	if len(deltas) > 0 {
 		if err := f.stats.flushDeltas(minute, deltas); err != nil {
-			log.Printf("[stats] flush failed: %v", err)
+			log.Printf("[stats] flush failed: %v (baseline deferred — next flush re-accumulates)", err)
+		} else {
+			f.prev = cur
 		}
+	} else {
+		f.prev = cur
 	}
 	if len(agentDeltas) > 0 {
 		if err := f.stats.flushAgentDeltas(minute, agentDeltas); err != nil {
-			log.Printf("[stats] agent flush failed: %v", err)
+			log.Printf("[stats] agent flush failed: %v (baseline deferred — next flush re-accumulates)", err)
+		} else {
+			f.agentPrev = agentSnap
 		}
+	} else {
+		f.agentPrev = agentSnap
 	}
 	if err := f.stats.prune(now); err != nil {
 		log.Printf("[stats] prune failed: %v", err)

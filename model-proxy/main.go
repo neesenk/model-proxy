@@ -27,7 +27,7 @@ Commands:
   serve status         Show running daemon status (providers/schedule/quota/tokens)
   takeover <client>    Rewrite client config to point at the proxy
   restore <client>     Restore client config from backup
-  login <provider>     Login to a provider (aqp | codex)
+  login <provider>     Login to a provider (aqp | codex | zcode)
   logout <provider>    Clear provider credentials
   usage <provider>     Show usage / credits for a provider
   models               List models from all providers (from config)
@@ -946,6 +946,44 @@ func doctorWithCfg(cfg *Config) int {
 		}
 	}
 
+	// Fusion orchestration: one line per recipe — panel size/quorum/synthesizer
+	// plus the cost knobs (budget, first_turn_only) and quality knobs (judge,
+	// custom instruction). Omitted entirely when no fusion recipe is configured.
+	if len(cfg.Fusion) > 0 {
+		fmt.Printf("\n%s\n", cBold("Fusion"))
+		fnames := make([]string, 0, len(cfg.Fusion))
+		for n := range cfg.Fusion {
+			fnames = append(fnames, n)
+		}
+		sort.Strings(fnames)
+		for _, name := range fnames {
+			f := cfg.Fusion[name]
+			quorum := f.MinPanel
+			if quorum <= 0 {
+				quorum = 2
+			}
+			if quorum > len(f.Panel) {
+				quorum = len(f.Panel)
+			}
+			budget := "unlimited"
+			if f.MaxRunsPerDay > 0 {
+				budget = strconv.Itoa(f.MaxRunsPerDay) + "/day"
+			}
+			extra := ""
+			if f.FirstTurnOnly {
+				extra += "  first_turn_only"
+			}
+			if f.Judge != nil {
+				extra += fmt.Sprintf("  judge=%s/%s", f.Judge.Provider, f.Judge.Model)
+			}
+			if f.Instruction != "" {
+				extra += "  custom instruction"
+			}
+			fmt.Printf("  %s panel=%d quorum=%d  synthesizer=%s/%s  budget=%s%s\n",
+				pad(name, 12), len(f.Panel), quorum, f.Synthesizer.Provider, f.Synthesizer.Model, budget, extra)
+		}
+	}
+
 	s := cfg.Scheduling
 	fmt.Printf("\n%s\n", cBold("Scheduling"))
 	fmt.Printf("  sticky_dwell=%s  quota_poll_interval=%s  quota_switch_margin=%d pts  circuit=(threshold %d, cooldown %s)\n",
@@ -974,6 +1012,8 @@ func quotaSourceLabel(providerID string) string {
 		return "user/balance"
 	case "kimi-code":
 		return "usages"
+	case "zcode":
+		return "quota/limit"
 	default:
 		return "(none → unknown at runtime)"
 	}

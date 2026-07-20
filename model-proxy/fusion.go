@@ -27,17 +27,25 @@ import (
 //
 // Error semantics: a failed synthesis leg is a hard endpoint (tryTarget's
 // answer, incl. upstream errors, goes to the client as-is — no re-orchestration;
-// a route-level failover target may still follow, as for any target). The only
-// in-engine degradation is quorum-shortfall: answer directly via the
-// synthesizer with the ORIGINAL body (half-finished drafts are discarded).
+// a route-level failover target may still follow, as for any target). The
+// in-engine degradations all answer directly via the synthesizer with the
+// ORIGINAL body (half-finished drafts are discarded): cost gates
+// (first_turn_only / max_runs_per_day), the tools gate, quorum-shortfall and
+// an unbuildable synthesis body. Every run — orchestrated or degraded — is
+// recorded in the fusion registry (fusion_obs.go).
 
 const (
 	// fusionCandidateMaxChars caps each draft fed into the synthesis body, so a
 	// runaway max_tokens on a panel member can't blow up the synthesizer prompt.
 	fusionCandidateMaxChars = 24000
-	// fusionInstruction is the fixed synthesizer preamble (do not mention the
+	// fusionInstruction is the default synthesizer preamble (do not mention the
 	// orchestration; answer directly; emit tool calls when action is needed).
-	fusionInstruction = "你是多模型融合的合成器。基于原对话和下列候选草稿，给出最强的最终答案；不要提及候选/编排过程；需要动作时直接输出工具调用。"
+	// FusionConfig.Instruction overrides it.
+	fusionInstruction = "你是多模型编排的结果汇总模型。基于原对话和下列候选答案，给出最强的最终答案；不要提及候选/编排过程；需要动作时直接输出工具调用。"
+	// fusionJudgeInstruction is the fixed judge preamble: review the candidates
+	// (consensus / conflicts / omissions) for the synthesizer — do NOT answer
+	// the original question.
+	fusionJudgeInstruction = "你是多模型编排的评审模型。基于原对话和下列候选答案，分析它们的共识、冲突与遗漏，输出简短的评审报告供结果汇总模型参考；不要回答原问题；不要提及候选/编排过程。"
 )
 
 // fusionGracePeriod is how long draft collection keeps waiting AFTER the quorum
@@ -56,7 +64,8 @@ type fusionCtx struct {
 	cfg         *Config
 	provs       map[string]provider.Provider
 	parentOf    map[string]string
-	proto       string // client protocol ("anthropic"|"openai")
+	poolIndex   map[string][]string // parent → virtual ids; lets Fusion resolve pooled members/synthesizer via the resolver
+	proto       string              // client protocol ("anthropic"|"openai")
 	calledModel string
 	upPath      string // client request path (/v1 stripped for openai)
 	agent       string
@@ -65,29 +74,53 @@ type fusionCtx struct {
 }
 
 // fusionLegResult is one panel member's outcome: the (truncated) draft text +
-// observed usage on success, or the failure reason.
+// observed usage on success, or the failure reason. status/latencyMs mirror
+// what the live end event carries (kept for the fusion registry observation).
 type fusionLegResult struct {
-	idx      int
-	provider string
-	model    string
-	text     string
-	usage    tokenUsage
-	err      error
+	idx       int
+	provider  string
+	model     string
+	text      string
+	usage     tokenUsage
+	status    int
+	latencyMs int64
+	err       error
 }
 
 // runFusion executes one fusion recipe for the client request. It returns true
 // when the synthesizer leg committed a response to the client (success or a
 // committed upstream error); false means "nothing committed — fail over to the
-// route's next target".
-func (p *Proxy) runFusion(fc fusionCtx, recipe FusionConfig, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
+// route's next target". workflow is the recipe name (registry/metrics key).
+func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
+	run := &fusionRun{
+		RunID: fc.flc.requestID, Ts: time.Now().UnixMilli(),
+		Route: fc.flc.exposed, Workflow: workflow, Agent: fc.agent, Proto: fc.proto,
+	}
+	// Cost gate: a first_turn_only recipe only orchestrates the FIRST turn —
+	// once the conversation carries an assistant message, answer directly.
+	if recipe.FirstTurnOnly && bodyHasAssistantTurn(fc.origBody) {
+		run.Degraded = fusionDegradedMultiTurn
+		log.Printf("[fusion] %s: workflow %s is first_turn_only and the conversation is multi-turn; answering directly (fusion_multi_turn)",
+			fc.flc.exposed, workflow)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+	}
 	// Tool round: drafts answer in plain text (tools stripped), the synthesizer
 	// carries the tools and may answer with a tool call directly. When the
 	// synthesizer itself can't do tools, orchestration adds nothing — answer
 	// directly (degrade, don't fail).
 	if requestHasTools(fc.origBody) && !p.fusionSynthesizerSupportsTools(fc, recipe.Synthesizer) {
+		run.Degraded = fusionDegradedTools
 		log.Printf("[fusion] %s: synthesizer %s/%s lacks tool support; answering directly (fusion_tools_unsupported)",
 			fc.flc.exposed, recipe.Synthesizer.Provider, recipe.Synthesizer.Model)
-		return p.callFusionSynthesizer(fc, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+	}
+	// Budget gate: cap orchestrated runs per local day; an over-budget request
+	// degrades to a plain direct call (only admitted runs consume the budget).
+	if !p.fusionReg.admit(workflow, recipe.MaxRunsPerDay, time.Now()) {
+		run.Degraded = fusionDegradedBudget
+		log.Printf("[fusion] %s: workflow %s daily orchestration budget exhausted (%d/day); answering directly (fusion_budget_exceeded)",
+			fc.flc.exposed, workflow, recipe.MaxRunsPerDay)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
 	}
 	quorum := recipe.MinPanel
 	if quorum <= 0 {
@@ -96,6 +129,7 @@ func (p *Proxy) runFusion(fc fusionCtx, recipe FusionConfig, w http.ResponseWrit
 	if quorum > len(recipe.Panel) {
 		quorum = len(recipe.Panel)
 	}
+	run.Quorum = quorum
 	// Fan out: one goroutine per panel member (panel is validate-capped at 4).
 	// Legs share the client request's context so a client disconnect cancels
 	// them; collectFusionResults cancels the rest on quorum-shortfall/grace.
@@ -103,33 +137,78 @@ func (p *Proxy) runFusion(fc fusionCtx, recipe FusionConfig, w http.ResponseWrit
 	defer cancel()
 	results := make(chan fusionLegResult, len(recipe.Panel)) // buffered: late sends never block after cancel
 	for i, m := range recipe.Panel {
-		go p.callFusionPanelMember(ctx, fc, i, m, results)
+		go p.callFusionLeg(ctx, fc, i, "fusion-panel", m, fc.origBody, results)
 	}
-	legs := collectFusionResults(results, len(recipe.Panel), quorum, cancel)
+	legs, received := collectFusionResults(results, len(recipe.Panel), quorum, cancel)
+	run.DraftsUsed = len(legs)
+	run.Legs = reconcileFusionLegs(recipe.Panel, received)
 	if len(legs) < quorum {
+		run.Degraded = fusionDegradedInsufficient
 		log.Printf("[fusion] %s: fusion_insufficient_proposers (%d/%d drafts, quorum %d); answering directly via synthesizer",
 			fc.flc.exposed, len(legs), len(recipe.Panel), quorum)
-		return p.callFusionSynthesizer(fc, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
 	}
 	candidates := make([]string, 0, len(legs))
 	for _, l := range legs {
 		candidates = append(candidates, l.text)
 	}
-	synthBody, ok := buildSynthesisBody(fc.origBody, fc.proto, candidates)
+	// Judge (optional): one non-streaming review of the candidates, injected
+	// into the synthesis body. Uses a FRESH context — the fan-out ctx above may
+	// already be cancelled by the collection. A judge failure only skips the
+	// report; it never degrades the run.
+	judgeReport := ""
+	if recipe.Judge != nil {
+		obs, report := p.runFusionJudge(r.Context(), fc, *recipe.Judge, candidates)
+		run.Legs = append(run.Legs, obs)
+		if report != "" {
+			judgeReport = report
+			run.JudgeUsed = true
+		}
+	}
+	synthBody, ok := buildSynthesisBody(fc.origBody, fc.proto, candidates, judgeReport, recipe.Instruction)
 	if !ok {
+		run.Degraded = fusionDegradedBodyBuild
 		log.Printf("[fusion] %s: cannot build synthesis body; answering directly via synthesizer", fc.flc.exposed)
-		return p.callFusionSynthesizer(fc, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
 	}
 	log.Printf("[fusion] %s: synthesizing from %d/%d drafts (quorum %d)", fc.flc.exposed, len(legs), len(recipe.Panel), quorum)
-	return p.callFusionSynthesizer(fc, recipe.Synthesizer, synthBody, w, r, cacheKey, cache)
+	return p.finishFusion(fc, run, recipe.Synthesizer, synthBody, w, r, cacheKey, cache)
+}
+
+// finishFusion runs the synthesis leg (direct original body, or the
+// synthesis-augmented one) and records the run. The synthesis leg's
+// status/latency/tokens are read back from the live-event hub's recent ring —
+// tryTarget publishes that end event on commit, just before returning, so it
+// is already visible here. The run then lands in the fusion registry and the
+// ("fusion", <workflow>) metrics counters.
+func (p *Proxy) finishFusion(fc fusionCtx, run *fusionRun, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
+	run.SynthCommitted = p.callFusionSynthesizer(fc, st, body, w, r, cacheKey, cache)
+	if run.SynthCommitted {
+		if ev, ok := p.events.findEnd(run.RunID); ok {
+			run.SynthStatus = ev.Status
+			run.SynthLatencyMs = ev.LatencyMs
+			run.SynthInput = ev.Input
+			run.SynthOutput = ev.Output
+		}
+	}
+	p.fusionReg.record(run)
+	if p.metrics != nil {
+		p.metrics.inc("fusion", run.Workflow, evFusionRuns)
+		if run.Degraded != "" {
+			p.metrics.inc("fusion", run.Workflow, evFusionDegraded)
+		}
+	}
+	return run.SynthCommitted
 }
 
 // collectFusionResults gathers panel-leg results until the quorum is met (plus
 // a grace window for stragglers) or the quorum becomes unreachable. It cancels
-// the remaining legs on an early exit and returns nil when fewer than quorum
-// drafts succeeded (caller degrades to a direct synthesizer call).
-func collectFusionResults(results <-chan fusionLegResult, launched, quorum int, cancel context.CancelFunc) []fusionLegResult {
-	var successes []fusionLegResult
+// the remaining legs on an early exit and returns the quorum-validated drafts
+// (nil when fewer than quorum succeeded — the caller degrades to a direct
+// synthesizer call) plus EVERY result received so far (successes + failures),
+// so the registry can report per-leg outcomes; legs still in flight at an
+// early exit are cut (their late results land in the buffered channel).
+func collectFusionResults(results <-chan fusionLegResult, launched, quorum int, cancel context.CancelFunc) (successes, received []fusionLegResult) {
 	var graceTimer *time.Timer
 	var grace <-chan time.Time
 	defer func() {
@@ -142,11 +221,12 @@ func collectFusionResults(results <-chan fusionLegResult, launched, quorum int, 
 		// Quorum unreachable even if every in-flight leg succeeds → cut losses.
 		if len(successes)+inFlight < quorum {
 			cancel()
-			return nil
+			return nil, received
 		}
 		select {
 		case res := <-results:
 			inFlight--
+			received = append(received, res)
 			if res.err == nil {
 				successes = append(successes, res)
 			}
@@ -159,13 +239,13 @@ func collectFusionResults(results <-chan fusionLegResult, launched, quorum int, 
 		case <-grace:
 			// Quorum already met (the timer only starts then) — cut stragglers.
 			cancel()
-			return successes
+			return successes, received
 		}
 	}
 	if len(successes) < quorum {
-		return nil
+		return nil, received
 	}
-	return successes
+	return successes, received
 }
 
 // fusionSynthesizerSupportsTools reports whether the synthesizer model handles
@@ -175,16 +255,33 @@ func (p *Proxy) fusionSynthesizerSupportsTools(fc fusionCtx, st RouteTarget) boo
 	return modelFits(p.catalogSnapshot(), targetCapabilities(fc.cfg, fc.parentOf, st), st.Model, requestProfile{hasTools: true})
 }
 
-// callFusionPanelMember runs one panel leg: build-gate (fail closed), circuit
-// gate, non-streaming tool-stripped sub-call, then records health/metrics/usage
-// and ships the result. It NEVER touches the client — results go to `out`.
-func (p *Proxy) callFusionPanelMember(ctx context.Context, fc fusionCtx, idx int, m RouteTarget, out chan<- fusionLegResult) {
+// callFusionLeg runs one non-streaming fusion sub-call: a panel member's
+// candidate branch (tag "fusion-panel", idx >= 0) or the judge analysis (tag
+// "fusion-judge", idx -1). Pipeline: build-gate (fail closed), circuit gate,
+// non-streaming tool-stripped sub-call on srcBody, then health/metrics/usage
+// recording and the request log — the leg NEVER touches the client; results
+// go to `out`. The tag shapes the request-log id ("fusion-panel-<i>-<parent>"
+// / "fusion-judge-<parent>") and the live-event provider marker
+// ("<tag>:<model>").
+func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag string, m RouteTarget, srcBody []byte, out chan<- fusionLegResult) {
+	// Resolve the member's provider to a runnable virtual via the unified resolver
+	// (pooled parent → one account, round-robin). A pooled parent name has no
+	// runtime instance, so without this a multi-account member was always dropped
+	// as "not available" the moment a second account was added. On !ok (unknown /
+	// not logged in) leave m as-is and let the build gate below report it.
+	if picked, ok := newResolver(p, fc.provs, fc.poolIndex).Pick(m); ok {
+		m = picked.target
+	}
 	res := fusionLegResult{idx: idx, provider: m.Provider, model: m.Model}
-	legID := fmt.Sprintf("fusion-panel-%d-%s", idx, fc.flc.requestID)
+	legID := tag + "-" + fc.flc.requestID
+	if idx >= 0 {
+		legID = fmt.Sprintf("%s-%d-%s", tag, idx, fc.flc.requestID)
+	}
+	marker := tag + ":" + m.Model
 	start := time.Now()
 	status := http.StatusBadGateway // pre-upstream failures report as 502
-	// Live monitor: panel legs are visible while they run (progressive reveal),
-	// marked "fusion-panel:<model>" to distinguish them from direct targets.
+	// Live monitor: fusion legs are visible while they run (progressive reveal),
+	// marked "<tag>:<model>" to distinguish them from direct targets.
 	p.events.publish(liveEvent{
 		Type:      "start",
 		Ts:        start.UnixMilli(),
@@ -192,9 +289,11 @@ func (p *Proxy) callFusionPanelMember(ctx context.Context, fc fusionCtx, idx int
 		Agent:     fc.agent,
 		Protocol:  fc.proto,
 		Exposed:   fc.flc.exposed,
-		Provider:  "fusion-panel:" + m.Model,
+		Provider:  marker,
 	})
 	defer func() {
+		res.status = status
+		res.latencyMs = time.Since(start).Milliseconds()
 		p.events.publish(liveEvent{
 			Type:          "end",
 			Ts:            time.Now().UnixMilli(),
@@ -202,10 +301,10 @@ func (p *Proxy) callFusionPanelMember(ctx context.Context, fc fusionCtx, idx int
 			Agent:         fc.agent,
 			Protocol:      fc.proto,
 			Exposed:       fc.flc.exposed,
-			Provider:      "fusion-panel:" + m.Model,
+			Provider:      marker,
 			UpstreamModel: m.Model,
 			Status:        status,
-			LatencyMs:     time.Since(start).Milliseconds(),
+			LatencyMs:     res.latencyMs,
 			Input:         res.usage.Input,
 			Output:        res.usage.Output,
 		})
@@ -238,7 +337,7 @@ func (p *Proxy) callFusionPanelMember(ctx context.Context, fc fusionCtx, idx int
 	if backendProto == "" {
 		backendProto = fc.proto
 	}
-	body := fc.origBody
+	body := srcBody
 	if m.Model != fc.calledModel {
 		body = rewriteModel(body, m.Model)
 	}
@@ -349,8 +448,9 @@ func (p *Proxy) callFusionPanelMember(ctx context.Context, fc fusionCtx, idx int
 		}
 		p.agents.addTokens(fc.agent, m.Provider, m.Model, res.usage)
 	}
-	// Request log: draft legs record under their own id (fusion-panel-<i>-<parent>)
-	// so per-member detail is filterable by prefix in the log / API.
+	// Request log: each leg records under its own id (fusion-panel-<i>-<parent>
+	// / fusion-judge-<parent>) so per-leg detail is filterable by prefix in the
+	// log / API.
 	if logger := p.reqLog; logger != nil {
 		logger.record(logger.buildRecord(recordInputs{
 			flc:         forwardLogCtx{requestID: legID, exposed: fc.flc.exposed},
@@ -371,6 +471,11 @@ func (p *Proxy) callFusionPanelMember(ctx context.Context, fc fusionCtx, idx int
 // synthesizer model through the normal tryTarget path — streaming, conversion,
 // auth, metrics, latency, live events, request log and cache all apply.
 func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
+	// Resolve to a runnable virtual (pooled parent → one account), same as the
+	// panel legs — otherwise a multi-account synthesizer has no impl and fails.
+	if picked, ok := newResolver(p, fc.provs, fc.poolIndex).Pick(st); ok {
+		st = picked.target
+	}
 	prov, ok := providerConfig(fc.cfg, fc.parentOf, st.Provider)
 	if !ok {
 		log.Printf("[fusion] %s: synthesizer provider %q unknown", fc.flc.exposed, st.Provider)
@@ -408,22 +513,73 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	return committed
 }
 
+// runFusionJudge runs the optional judge leg: one non-streaming review of the
+// original conversation + the collected candidates, through the same
+// build/circuit/metrics pipeline as the candidate branches (callFusionLeg).
+// It returns the leg observation (always recorded on the run) and the report
+// text — empty on any failure, in which case the synthesis simply proceeds
+// without it (a judge failure never degrades the run).
+func (p *Proxy) runFusionJudge(ctx context.Context, fc fusionCtx, jt RouteTarget, candidates []string) (fusionLegObs, string) {
+	body, ok := buildFusionJudgeBody(fc.origBody, fc.proto, candidates)
+	if !ok {
+		log.Printf("[fusion] %s: cannot build judge body; synthesizing without judge report", fc.flc.exposed)
+		return fusionLegObs{Provider: jt.Provider, Model: jt.Model, Kind: "judge", Err: "cannot build judge body"}, ""
+	}
+	out := make(chan fusionLegResult, 1) // synchronous use: one result, never blocks
+	p.callFusionLeg(ctx, fc, -1, "fusion-judge", jt, body, out)
+	res := <-out
+	obs := obsFromLegResult(res, "judge")
+	if res.err != nil {
+		log.Printf("[fusion] %s: judge %s/%s failed: %v; synthesizing without judge report",
+			fc.flc.exposed, jt.Provider, jt.Model, res.err)
+		return obs, ""
+	}
+	return obs, res.text
+}
+
 // buildSynthesisBody derives the synthesizer's request body from the original
-// client body: a fixed instruction + the candidate drafts (shuffled to avoid
-// position bias, each capped) are appended as a system section (anthropic) or
-// an extra trailing user message (openai), leaving the conversation untouched.
-// ok=false when the original body isn't usable JSON (caller degrades to direct).
-func buildSynthesisBody(origBody []byte, proto string, candidates []string) ([]byte, bool) {
+// client body: the instruction (recipe override, else the fixed template) +
+// the optional judge report (before the candidates) + the candidate drafts
+// (shuffled to avoid position bias, each capped) are appended as a system
+// section (anthropic) or an extra trailing user message (openai), leaving the
+// conversation untouched. ok=false when the original body isn't usable JSON
+// (caller degrades to direct).
+func buildSynthesisBody(origBody []byte, proto string, candidates []string, judgeReport, instruction string) ([]byte, bool) {
+	if instruction == "" {
+		instruction = fusionInstruction
+	}
+	var sb strings.Builder
+	sb.WriteString(instruction)
+	if judgeReport != "" {
+		fmt.Fprintf(&sb, "\n\n<JUDGE_ANALYSIS>\n%s\n</JUDGE_ANALYSIS>", judgeReport)
+	}
+	for i, ci := range rand.Perm(len(candidates)) {
+		fmt.Fprintf(&sb, "\n\n<CANDIDATE %d>\n%s\n</CANDIDATE %d>", i+1, candidates[ci], i+1)
+	}
+	return injectFusionSection(origBody, proto, sb.String())
+}
+
+// buildFusionJudgeBody derives the judge's request body from the original
+// client body: the fixed judge instruction + the candidates (in collection
+// order — the judge only reviews, no position-bias shuffle needed).
+func buildFusionJudgeBody(origBody []byte, proto string, candidates []string) ([]byte, bool) {
+	var sb strings.Builder
+	sb.WriteString(fusionJudgeInstruction)
+	for i, c := range candidates {
+		fmt.Fprintf(&sb, "\n\n<CANDIDATE %d>\n%s\n</CANDIDATE %d>", i+1, c, i+1)
+	}
+	return injectFusionSection(origBody, proto, sb.String())
+}
+
+// injectFusionSection appends section to the request body's system prompt
+// (anthropic) or as an extra trailing user message (openai), leaving the
+// conversation untouched. ok=false when the body isn't usable JSON (or has an
+// unexpected system shape).
+func injectFusionSection(origBody []byte, proto, section string) ([]byte, bool) {
 	var v map[string]any
 	if err := json.Unmarshal(origBody, &v); err != nil {
 		return nil, false
 	}
-	var sb strings.Builder
-	sb.WriteString(fusionInstruction)
-	for i, ci := range rand.Perm(len(candidates)) {
-		fmt.Fprintf(&sb, "\n\n<CANDIDATE %d>\n%s\n</CANDIDATE %d>", i+1, candidates[ci], i+1)
-	}
-	section := sb.String()
 	if proto == "anthropic" {
 		switch sys := v["system"].(type) {
 		case nil:

@@ -200,6 +200,15 @@ func TestConfig_ValidateErrors(t *testing.T) {
 	}
 }
 
+func TestValidate_AcceptsZcodeProviderID(t *testing.T) {
+	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
+		"zcode": {Provider: "zcode", AnthropicBaseURL: "https://open.bigmodel.cn/api/anthropic"},
+	}}
+	if err := c.validate(); err != nil {
+		t.Errorf("zcode provider_id rejected: %v", err)
+	}
+}
+
 // TestConfig_ValidateShadowErrors: shadow validation (config.go validate) —
 // each shadow entry must reference a real route + provider and a known
 // protocol; the global sample rate must be in [0,1] and max_concurrent >= 0.

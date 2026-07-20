@@ -127,6 +127,9 @@ func newFusionRig(t *testing.T, recipe FusionConfig, ups map[string]*fakeUpstrea
 		names[m.Provider] = m.Protocol
 	}
 	names[recipe.Synthesizer.Provider] = recipe.Synthesizer.Protocol
+	if recipe.Judge != nil {
+		names[recipe.Judge.Provider] = recipe.Judge.Protocol
+	}
 	providers := map[string]Provider{}
 	for name, proto := range names {
 		up := ups[name]
@@ -174,6 +177,51 @@ func recentLiveEvents(p *Proxy) []liveEvent {
 }
 
 const fusionClientBody = `{"model":"hard","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"solve X"}]}`
+
+// TestFusion_PooledParentMembers (regression for the unified resolver, #10): a
+// Fusion recipe whose panel member AND synthesizer name POOLED parents must still
+// run. Pre-fix the parent name had no runtime instance (only "name#<id>" virtuals
+// exist), so the member was dropped as "not available" and the synthesizer had no
+// impl — fusion broke the moment a second account was added. After the fix both
+// resolve to a virtual via the resolver and run.
+func TestFusion_PooledParentMembers(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	// Two pooled parents (same provider_id "zhipu", distinct names → distinct pool
+	// files + distinct upstreams) so the panel member and synthesizer are separate.
+	writePoolFile(t, "zhipu-draft", "zhipu", "ZA", "ZB")
+	writePoolFile(t, "zhipu-synth", "zhipu", "GA", "GB")
+
+	draftUp := newFakeUpstream(t, anthropicDraftResponder("draft-ok"))
+	synthUp := newFakeUpstream(t, anthropicSSEResponder("pooled synthesis ok"))
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"zhipu-draft": {AnthropicBaseURL: draftUp.srv.URL, Provider: "zhipu"},
+			"zhipu-synth": {AnthropicBaseURL: synthUp.srv.URL, Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{"hard": {{Provider: "fusion", Model: "recipe"}}},
+		Fusion: map[string]FusionConfig{"recipe": {
+			Panel:       []RouteTarget{{Provider: "zhipu-draft", Model: "zdraft"}},
+			Synthesizer: RouteTarget{Provider: "zhipu-synth", Model: "gsynth"},
+		}},
+	}
+	p := NewProxy(cfg)
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	out := postAnthropic(t, px, fusionClientBody)
+	if !strings.Contains(out, "pooled synthesis ok") {
+		t.Fatalf("client missing synthesis — pooled Fusion members not resolved to virtuals: %s", out)
+	}
+	if draftUp.hits() == 0 {
+		t.Error("pooled panel member (zhipu-draft) never hit — resolver did not resolve it to a virtual")
+	}
+	if synthUp.hits() == 0 {
+		t.Error("pooled synthesizer (zhipu-synth) never hit — resolver did not resolve it to a virtual")
+	}
+}
 
 // TestFusion_FanOutSynthesis (plan #1): all panel members succeed → the
 // synthesis body carries every candidate + the original question, the client
@@ -240,7 +288,7 @@ func TestFusion_FanOutSynthesis(t *testing.T) {
 	if synth.Model != "ms" {
 		t.Errorf("synthesis model = %q, want ms", synth.Model)
 	}
-	if !strings.Contains(synth.System, "合成器") {
+	if !strings.Contains(synth.System, "结果汇总模型") {
 		t.Errorf("synthesis system missing fixed instruction: %q", synth.System)
 	}
 	for _, d := range []string{"draft-A", "draft-B", "draft-C"} {

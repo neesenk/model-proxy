@@ -120,6 +120,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleRequestDetail(resp, r)
 	case path == "/api/shadow-report" && r.Method == http.MethodGet:
 		w.handleShadowReport(resp, r)
+	case path == "/api/fusion" && r.Method == http.MethodGet:
+		w.handleFusion(resp, r)
 	case path == "/api/config" && r.Method == http.MethodGet:
 		w.handleConfigGet(resp, r)
 	case path == "/api/config" && r.Method == http.MethodPost:
@@ -607,6 +609,21 @@ func (w *webServer) handleShadowReport(resp http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{"enabled": true, "entries": entries})
+}
+
+// handleFusion returns the fusion orchestration observability snapshot:
+// per-workflow cumulative aggregates (runs / quorum met / degrades by reason /
+// token totals / amplification / today's budget count) plus the recent run
+// records (newest first, capped at fusionRecentCap). Query param:
+// ?workflow=<name> to filter to one recipe. Sourced from the in-memory fusion
+// registry — no request_log dependency, nil-registry-safe (empty snapshot).
+func (w *webServer) handleFusion(resp http.ResponseWriter, r *http.Request) {
+	workflow := r.URL.Query().Get("workflow")
+	stats, runs := w.p.fusionReg.snapshot(workflow, time.Now())
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"workflows": stats,
+		"runs":      runs,
+	})
 }
 
 // handlePinSet installs a manual route→provider pin (hot-switch). Body:

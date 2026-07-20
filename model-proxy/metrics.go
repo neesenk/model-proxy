@@ -22,6 +22,14 @@ const (
 	evFailovers      metricsEvent = "failovers"
 	evRateLimited429 metricsEvent = "rate_limited_429"
 	evFailures       metricsEvent = "failures"
+	// Fusion observability reuses the generic per-minute buckets under the
+	// virtual key ("fusion", <workflow>): an orchestration run counts as a
+	// "request", a degraded run (answered directly instead of orchestrated)
+	// counts into the failovers column — the closest existing "fell back"
+	// semantic. /api/stats and the stats CLI thus get a fusion time series
+	// with zero schema change.
+	evFusionRuns     metricsEvent = "fusion_runs"
+	evFusionDegraded metricsEvent = "fusion_degraded"
 )
 
 type providerMetrics struct {
@@ -91,6 +99,11 @@ func (s *metricsStore) inc(provider, model string, ev metricsEvent) {
 		pm.RateLimited429.Add(1)
 	case evFailures:
 		pm.Failures.Add(1)
+	case evFusionRuns:
+		pm.Requests.Add(1)
+		pm.LastRequestAt.Store(time.Now().Unix())
+	case evFusionDegraded:
+		pm.Failovers.Add(1)
 	}
 }
 
