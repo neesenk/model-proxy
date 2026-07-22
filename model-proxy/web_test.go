@@ -579,7 +579,7 @@ func TestConfigEditProviderModels(t *testing.T) {
 			t.Errorf("models missing %q:\n%s", want, gs)
 		}
 	}
-	if strings.Contains(gs, "glm-4.5\n") && !strings.Contains(gs, "glm-4.5-air") {
+	if strings.Contains(gs, "- glm-4.5\n") {
 		t.Errorf("old model glm-4.5 should have been replaced:\n%s", gs)
 	}
 

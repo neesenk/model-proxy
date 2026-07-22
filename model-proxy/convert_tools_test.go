@@ -255,13 +255,37 @@ func TestStreaming_OpenAIByteBoundarySplit(t *testing.T) {
 	full := "data: {\"model\":\"gpt\",\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n" +
 		"data: {\"model\":\"gpt\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n" +
 		"data: [DONE]\n\n"
-	// Split at byte 30 (mid-line) — re-joined by the reader's line buffering.
-	r := newOpenAIToAnthropicSSE(strings.NewReader(full[:30]+full[30:]), "gpt")
-	out, _ := io.ReadAll(r)
+	// Deliver 30 bytes per Read (mid-line) — a transformer keyed on Read
+	// boundaries instead of reassembled lines would break here.
+	r := newOpenAIToAnthropicSSE(&fixedChunksReader{b: []byte(full), n: 30}, "gpt")
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read converted stream: %v", err)
+	}
 	s := string(out)
 	if !strings.Contains(s, `"text":"hel"`) || !strings.Contains(s, `"text":"lo"`) || !strings.Contains(s, "event: message_stop") {
 		t.Errorf("byte-boundary split conversion wrong:\n%s", s)
 	}
+}
+
+// fixedChunksReader returns at most n bytes per Read, simulating arbitrary
+// network fragmentation (SSE reassembly must not depend on Read boundaries).
+type fixedChunksReader struct {
+	b []byte
+	n int
+}
+
+func (r *fixedChunksReader) Read(p []byte) (int, error) {
+	if len(r.b) == 0 {
+		return 0, io.EOF
+	}
+	n := r.n
+	if len(r.b) < n {
+		n = len(r.b)
+	}
+	copy(p, r.b[:n])
+	r.b = r.b[n:]
+	return n, nil
 }
 
 // TestRoundTrip_AnthropicOpenAIAnthropic: a→o→a preserves tool structure (tool

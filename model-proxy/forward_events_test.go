@@ -34,14 +34,17 @@ routes:
 		p.events.recent = p.events.recent[:0]
 		return ids
 	}
-	do := func(body, path string) {
+	do := func(body, path string) int {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 		p.handler(rec, req)
+		return rec.Code
 	}
 
 	// Missing model field → 400 terminal end event with a non-empty request_id.
-	do(`{"stream":false}`, "/v1/chat/completions")
+	if code := do(`{"stream":false}`, "/v1/chat/completions"); code != http.StatusBadRequest {
+		t.Errorf("missing-model: status=%d, want 400", code)
+	}
 	ids := endEventIDs()
 	if len(ids) == 0 {
 		t.Fatalf("missing-model: expected an end event, got none")
@@ -53,8 +56,14 @@ routes:
 	}
 
 	// Model not in routes → 502 terminal end event with a non-empty request_id.
-	do(`{"model":"no-such-route","stream":false}`, "/v1/chat/completions")
-	for _, id := range endEventIDs() {
+	if code := do(`{"model":"no-such-route","stream":false}`, "/v1/chat/completions"); code != http.StatusBadGateway {
+		t.Errorf("model-not-found: status=%d, want 502", code)
+	}
+	ids = endEventIDs()
+	if len(ids) == 0 {
+		t.Fatalf("model-not-found: expected an end event, got none")
+	}
+	for _, id := range ids {
 		if id == "" {
 			t.Errorf("model-not-found end event has empty request_id")
 		}
@@ -62,7 +71,9 @@ routes:
 
 	// Unknown path (proto=="") → handler emits a terminal end event (502 终局也
 	// 必须产生 end) with a non-empty request_id. Previously: no event at all.
-	do(`{}`, "/v1/no-such-path")
+	if code := do(`{}`, "/v1/no-such-path"); code != http.StatusBadGateway {
+		t.Errorf("unknown-path: status=%d, want 502", code)
+	}
 	ids = endEventIDs()
 	if len(ids) == 0 {
 		t.Fatalf("unknown-path: expected a terminal end event, got none")

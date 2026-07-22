@@ -17,24 +17,29 @@ import (
 // --- statusColor: all branches ---
 
 func TestStatusColor_AllBranches(t *testing.T) {
-	// colorEnabled is off in tests (stdout not a tty), so statusColor returns s.
+	// Force log color on (it's off in tests: stderr is not a tty) so the
+	// status→ANSI mapping is actually exercised — including branch edges.
+	old := logColorEnabled
+	logColorEnabled = true
+	defer func() { logColorEnabled = old }()
+	for _, c := range []struct {
+		status int
+		code   string
+	}{
+		{200, logAnsiGreen}, {299, logAnsiGreen},
+		{300, logAnsiYellow}, {499, logAnsiYellow},
+		{500, logAnsiRed},
+		{100, logAnsiGray}, {0, logAnsiGray},
+	} {
+		want := c.code + "x" + logAnsiReset
+		if got := statusColor(c.status, "x"); got != want {
+			t.Errorf("statusColor(%d)=%q, want %q", c.status, got, want)
+		}
+	}
+	// Color off: identity passthrough.
+	logColorEnabled = false
 	if got := statusColor(200, "ok"); got != "ok" {
-		t.Errorf("statusColor(200)=%q want ok", got)
-	}
-	if got := statusColor(301, "redir"); got != "redir" {
-		t.Errorf("statusColor(301)=%q want redir", got)
-	}
-	if got := statusColor(404, "nf"); got != "nf" {
-		t.Errorf("statusColor(404)=%q want nf", got)
-	}
-	if got := statusColor(500, "err"); got != "err" {
-		t.Errorf("statusColor(500)=%q want err", got)
-	}
-	if got := statusColor(100, "info"); got != "info" {
-		t.Errorf("statusColor(100)=%q want info (default branch)", got)
-	}
-	if got := statusColor(0, "zero"); got != "zero" {
-		t.Errorf("statusColor(0)=%q want zero (default branch)", got)
+		t.Errorf("statusColor(200) with color off=%q, want ok", got)
 	}
 }
 

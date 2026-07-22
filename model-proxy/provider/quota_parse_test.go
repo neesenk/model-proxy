@@ -120,6 +120,7 @@ func TestParseCodexQuota(t *testing.T) {
 		"primary_window":{"used_percent":30,"limit_window_seconds":18000,"reset_after_seconds":12000},
 		"secondary_window":{"used_percent":60,"limit_window_seconds":604800,"reset_after_seconds":300000}},
 		"spend_control":{"reached":false,"individual_limit":{"used":"5","limit":"20","remaining":"15","used_percent":25,"reset_after_seconds":2500000}}}`)
+	before := time.Now()
 	s, err := ParseCodexQuota(body, "a@b.com", "pro")
 	if err != nil {
 		t.Fatal(err)
@@ -136,6 +137,13 @@ func TestParseCodexQuota(t *testing.T) {
 	}
 	// P0-2: assert Ultimate marker on the spend window, and that primary/weekly
 	// are NOT Ultimate/Short (different unit - money vs tokens).
+	// ResetsAt must come from reset_after_seconds: a dropped assignment leaves it
+	// zero, which silently zeroes Surplus() for scheduling.
+	resetAfter := map[string]time.Duration{
+		"Spend":        2500000 * time.Second,
+		"primary (5h)": 12000 * time.Second,
+		"weekly":       300000 * time.Second,
+	}
 	for _, w := range s.Windows {
 		switch w.Label {
 		case "Spend":
@@ -149,6 +157,14 @@ func TestParseCodexQuota(t *testing.T) {
 			if w.Ultimate || w.Short {
 				t.Errorf("%s: Ultimate=%v Short=%v - codex token windows must NOT be Ultimate/Short (money ultimate)", w.Label, w.Ultimate, w.Short)
 			}
+		}
+		want, ok := resetAfter[w.Label]
+		if !ok {
+			t.Errorf("unexpected window label %q", w.Label)
+			continue
+		}
+		if lo, hi := before.Add(want), time.Now().Add(want); w.ResetsAt.Before(lo) || w.ResetsAt.After(hi) {
+			t.Errorf("%s: ResetsAt=%v, want within [%v, %v] (reset_after_seconds=%v)", w.Label, w.ResetsAt, lo, hi, want)
 		}
 	}
 }
@@ -173,6 +189,7 @@ func TestParseVolcengineQuota(t *testing.T) {
 	u := &AfpUsage{
 		PlanType:    "agent-plan",
 		AFPFiveHour: AfpWindow{Quota: 100, Used: 80, ResetTime: 1750000000000},
+		AFPDaily:    AfpWindow{Quota: 100, Used: 50, ResetTime: 1760000000000},
 		AFPWeekly:   AfpWindow{Quota: 100, Used: 30, ResetTime: 1750000000000},
 		AFPMonthly:  AfpWindow{Quota: 100, Used: 10, ResetTime: 1750000000000},
 	}
@@ -187,7 +204,12 @@ func TestParseVolcengineQuota(t *testing.T) {
 	if s.Plan != "agent-plan" {
 		t.Errorf("Plan=%q", s.Plan)
 	}
-	// P0-2: assert Ultimate/Short markers on volcengine windows.
+	// P0-2: assert Ultimate/Short markers on volcengine windows, and that each
+	// window's ResetsAt comes from ITS OWN ResetTime (a dropped assignment
+	// leaves it zero, silently zeroing Surplus() for scheduling).
+	wantReset := map[string]int64{
+		"5h": 1750000000000, "daily": 1760000000000, "weekly": 1750000000000, "monthly": 1750000000000,
+	}
 	for _, w := range s.Windows {
 		switch w.Label {
 		case "5h":
@@ -208,6 +230,14 @@ func TestParseVolcengineQuota(t *testing.T) {
 			if w.Ultimate || w.Short {
 				t.Errorf("%s: Ultimate=%v Short=%v - intermediate windows must be neither", w.Label, w.Ultimate, w.Short)
 			}
+		}
+		ms, ok := wantReset[w.Label]
+		if !ok {
+			t.Errorf("unexpected window label %q", w.Label)
+			continue
+		}
+		if want := time.UnixMilli(ms); !w.ResetsAt.Equal(want) {
+			t.Errorf("%s: ResetsAt=%v, want %v (from its own ResetTime)", w.Label, w.ResetsAt, want)
 		}
 	}
 }

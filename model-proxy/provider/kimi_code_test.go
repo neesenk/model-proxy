@@ -464,20 +464,35 @@ func TestKimiCodeUsage_SuccessAndFallback(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestKimiCode(t)
+	p.cfg.ProviderName = "kimi-code"
 	p.cfg.UsageURL = srv.URL + "/usages"
 	p.cfg.Models = []string{"kimi-for-coding", "k3"}
 	if err := p.SaveKey("sk-kimi-9"); err != nil {
 		t.Fatalf("SaveKey: %v", err)
 	}
-	if err := p.Usage(); err != nil {
-		t.Fatalf("Usage: %v", err)
+	out := captureStdoutProvider(func() {
+		if err := p.Usage(); err != nil {
+			t.Fatalf("Usage: %v", err)
+		}
+	})
+	for _, want := range []string{"kimi-code", "Plan:", "Weekly limit", "5h limit"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage output missing %q:\n%s", want, out)
+		}
 	}
 
 	// Fallback path: no cred file → Quota fails → listConfigModels used.
 	p2 := newTestKimiCode(t)
 	p2.cfg.Models = []string{"k3"}
-	if err := p2.Usage(); err != nil {
-		t.Fatalf("Usage fallback: %v", err)
+	out2 := captureStdoutProvider(func() {
+		if err := p2.Usage(); err != nil {
+			t.Fatalf("Usage fallback: %v", err)
+		}
+	})
+	for _, want := range []string{"not logged in", "1 models", "k3"} {
+		if !strings.Contains(out2, want) {
+			t.Errorf("fallback output missing %q:\n%s", want, out2)
+		}
 	}
 }
 

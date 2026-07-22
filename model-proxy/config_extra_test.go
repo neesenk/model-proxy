@@ -262,6 +262,13 @@ func TestPeakMultiplier_WrapAround(t *testing.T) {
 	if got := p.peakMultiplier(noon); got != 1 {
 		t.Errorf("noon multiplier=%v want 1 (no peak)", got)
 	}
+	// Wrap window edges: start inclusive, end exclusive.
+	if got := p.peakMultiplier(timeAt(t, 22, 0)); got != 3 {
+		t.Errorf("wrap 22:00 (start, inclusive) multiplier=%v want 3", got)
+	}
+	if got := p.peakMultiplier(timeAt(t, 2, 0)); got != 1 {
+		t.Errorf("wrap 02:00 (end, exclusive) multiplier=%v want 1", got)
+	}
 }
 
 // --- peakMultiplier: default multiplier when 0/unset on the segment ---

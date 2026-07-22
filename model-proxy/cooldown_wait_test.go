@@ -187,6 +187,11 @@ func TestCooldownWait_RetriesExhausted(t *testing.T) {
 	if got := pHits.Load() + fHits.Load(); got < 4 {
 		t.Errorf("total hits = %d, want ≥ 4 (initial pass + retry rounds)", got)
 	}
+	// Upper bound: initial 2 hits + ≤2 retry rounds × 2 targets = ≤6. Catches a
+	// retry-budget off-by-one (e.g. round < 5) that the lower bound can't.
+	if got := pHits.Load() + fHits.Load(); got > 6 {
+		t.Errorf("total hits = %d, want ≤ 6 (initial pass + ≤2 retry rounds)", got)
+	}
 }
 
 // TestCooldownWait_RecoveredTargetGetsAChance (P0-5 TOCTOU): one target keeps

@@ -218,8 +218,8 @@ func TestUC_FailoverAndCircuitSkipsOpenProvider(t *testing.T) {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
-	if got := atomic.LoadInt32(&primaryHits); got > 3 {
-		t.Errorf("primary hits=%d, want ≤3 (circuit should open after 3 and skip it)", got)
+	if got := atomic.LoadInt32(&primaryHits); got != 3 {
+		t.Errorf("primary hits=%d, want exactly 3 (circuit opens AT the threshold, not before)", got)
 	}
 	if len(*fallbackSeen) != 2 {
 		t.Errorf("fallback hits=%d want 2 (open circuit routes straight to fallback)", len(*fallbackSeen))
@@ -289,7 +289,8 @@ func TestUC_401RefreshFailsFailover(t *testing.T) {
 		},
 	}
 	p := newTestProxy(t, cfg)
-	p.providers["primary"] = &recordingProv{testProv: testProv{key: "p"}}
+	rp := &recordingProv{testProv: testProv{key: "p"}}
+	p.providers["primary"] = rp
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -302,6 +303,9 @@ func TestUC_401RefreshFailsFailover(t *testing.T) {
 
 	if resp.StatusCode != 200 {
 		t.Errorf("status=%d want 200 (should failover after 401-refresh fails)", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&rp.refreshCalls); got != 1 {
+		t.Errorf("Refresh calls=%d want 1 (401 → refresh → retry before failover)", got)
 	}
 	if len(*fallbackSeen) != 1 {
 		t.Errorf("fallback hits=%d want 1 (failover target after repeated 401)", len(*fallbackSeen))

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -374,6 +377,15 @@ providers:
 // --- runTakeover all: skips a client whose config file is absent ---
 
 func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
+	// Keep the models.dev catalog fetch offline: runTakeover("all") refreshes
+	// the catalog for opencode/pi model metadata — point it at a local stub.
+	md := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer md.Close()
+	t.Setenv("MP_MODELSDEV_URL", md.URL)
+
 	dir := t.TempDir()
 	bakDir := filepath.Join(dir, ".mp")
 	cfg := &Config{

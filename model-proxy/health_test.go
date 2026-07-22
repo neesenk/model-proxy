@@ -82,7 +82,7 @@ func TestCircuit_OpensAfter3Failures(t *testing.T) {
 	defer px.Close()
 
 	for i := 0; i < 4; i++ {
-		post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+		postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	}
 	if got := pHits.Load(); got != 3 {
 		t.Errorf("primary hits after circuit open: got %d, want 3 (4th request should skip primary)", got)
@@ -127,11 +127,11 @@ func TestCircuit_HalfOpenClosesOnSuccess(t *testing.T) {
 	defer px.Close()
 
 	for i := 0; i < 3; i++ { // trip the circuit (3 failures)
-		post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+		postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	}
-	time.Sleep(80 * time.Millisecond)                                      // cooldown expires → half-open
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // probe: primary recovered → close
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary available again
+	time.Sleep(80 * time.Millisecond)                                        // cooldown expires → half-open
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // probe: primary recovered → close
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary available again
 
 	if got := pHits.Load(); got != 5 {
 		t.Errorf("primary hits: got %d, want 5 (3 failures + 2 successes after half-open close)", got)
@@ -171,8 +171,8 @@ func TestRateLimit_SkipsProvider(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // 429 → rate-limit primary
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary skipped
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // 429 → rate-limit primary
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary skipped
 
 	if got := pHits.Load(); got != 1 {
 		t.Errorf("primary hits: got %d, want 1 (rate-limited after the 429)", got)

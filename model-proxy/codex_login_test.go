@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,7 +50,9 @@ func TestPollForToken_PendingThenSuccess(t *testing.T) {
 		n := atomic.AddInt32(&n, 1)
 		if n < 3 {
 			w.WriteHeader(400)
-			fmt.Fprint(w, `{"error":"pending"}`)
+			// Production-real nested error shape (real OpenAI), not the flat
+			// test-mock one — exercises the nested parse branch.
+			fmt.Fprint(w, `{"error":{"code":"deviceauth_authorization_pending"}}`)
 			return
 		}
 		w.Header().Set("content-type", "application/json")
@@ -90,13 +93,15 @@ func TestPollForToken_SlowDownThenSuccess(t *testing.T) {
 func TestPollForToken_AccessDenied(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
-		fmt.Fprint(w, `{"error":"access_denied"}`)
+		// Production-real nested shape; the denial must surface as such (not a
+		// confused "expired" message — the two branches are easy to swap).
+		fmt.Fprint(w, `{"error":{"code":"deviceauth_authorization_denied"}}`)
 	}))
 	defer srv.Close()
 	opts := &codexLoginServerOptions{deviceTokURL: srv.URL, httpClient: &http.Client{Timeout: 5 * time.Second}}
 	_, err := pollForToken(opts, "d", "u", 0)
-	if err == nil {
-		t.Fatal("expected error for access_denied")
+	if err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("expected denial error, got %v", err)
 	}
 }
 
@@ -139,5 +144,30 @@ func TestAccountIDFromTokens(t *testing.T) {
 	// empty
 	if got := provider.AccountIDFromTokens("", ""); got != "" {
 		t.Errorf("empty should give empty, got %q", got)
+	}
+}
+
+// TestDevicePollErrorCode pins both error shapes: the production nested
+// {"error":{"code":...}} (what real OpenAI returns — every real first poll is a
+// nested "pending") and the flat {"error":"..."} kept for older mocks.
+func TestDevicePollErrorCode(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want string
+	}{
+		{`{"error":{"code":"deviceauth_authorization_pending","message":"Working..."}}`, "deviceauth_authorization_pending"},
+		{`{"error":{"code":"deviceauth_slow_down"}}`, "deviceauth_slow_down"},
+		{`{"error":{"code":"deviceauth_authorization_expired"}}`, "deviceauth_authorization_expired"},
+		{`{"error":{"code":"deviceauth_authorization_denied"}}`, "deviceauth_authorization_denied"},
+		{`{"error":"pending"}`, "pending"},
+		{`{"error":"slow_down"}`, "slow_down"},
+		{`{"error":"expired_token"}`, "expired_token"},
+		{`{"error":"access_denied"}`, "access_denied"},
+		{`{"error":{}}`, ""},
+		{`not json`, ""},
+	} {
+		if got := devicePollErrorCode([]byte(tc.body)); got != tc.want {
+			t.Errorf("devicePollErrorCode(%s)=%q, want %q", tc.body, got, tc.want)
+		}
 	}
 }

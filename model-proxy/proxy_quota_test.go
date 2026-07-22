@@ -48,7 +48,7 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 	}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	select {
 	case name := <-refreshed:
 		if name != "primary" {
@@ -196,7 +196,9 @@ func TestSchedule_NoSwitchBelowMargin(t *testing.T) {
 func TestSchedule_PayGStrictLastResort(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]Provider{"plan": {Billing: ""}, "payg": {Billing: "pay-as-you-go"}},
-		map[string][]RouteTarget{"m": {{Provider: "plan"}, {Provider: "payg"}}})
+		// payg listed first: with sort.SliceStable, a missing tier comparison
+		// would keep config order — the expected winner must not be first.
+		map[string][]RouteTarget{"m": {{Provider: "payg"}, {Provider: "plan"}}})
 	p.quota.setSnapshot("plan", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.05, AsOf: time.Now()})
 	p.quota.setSnapshot("payg", &provider.QuotaSnapshot{Billing: provider.BillingPayG, RemainingPct: -1, AsOf: time.Now()})
 	if got := firstProvider(p, "m"); got != "plan" {
@@ -217,7 +219,9 @@ func TestSchedule_PayGStrictLastResort(t *testing.T) {
 func TestSchedule_PlanBeforeUnknown(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]Provider{"planprov": {}, "unkprov": {}},
-		map[string][]RouteTarget{"m": {{Provider: "planprov"}, {Provider: "unkprov"}}})
+		// unkprov listed first: with sort.SliceStable, a missing tier comparison
+		// would keep config order — the expected winner must not be first.
+		map[string][]RouteTarget{"m": {{Provider: "unkprov"}, {Provider: "planprov"}}})
 	staticQuota(p, "planprov", 0.05) // low but known
 	// unkprov: no snapshot → BillingUnknown
 	if got := firstProvider(p, "m"); got != "planprov" {
@@ -234,7 +238,10 @@ func TestSchedule_PeakBurnsShortWindow(t *testing.T) {
 			"plain": {},
 			"peak":  {PeakHours: PeakConfig{{Window: "00:00-23:59", Multiplier: 2}}},
 		},
-		map[string][]RouteTarget{"m": {{Provider: "plain"}, {Provider: "peak"}}})
+		// peak listed first: a lost peak-burn deduction leaves both surpluses at
+		// 0, and sort.SliceStable would keep config order — the expected winner
+		// must not be first.
+		map[string][]RouteTarget{"m": {{Provider: "peak"}, {Provider: "plain"}}})
 	now := time.Now()
 	const dur = 7 * 24 * time.Hour
 	ult := provider.QuotaWindow{Ultimate: true, Kind: "tokens", RemainingPct: 0.5, Total: 200,
@@ -342,6 +349,9 @@ func TestDryRunOrder(t *testing.T) {
 	}
 	got := dryRunOrder(cfg, targets)
 	want := []string{"plana", "planb", "payg"}
+	if len(got) != len(want) {
+		t.Fatalf("len=%d, want %d: %+v", len(got), len(want), got)
+	}
 	for i, w := range want {
 		if i >= len(got) || got[i].Provider != w {
 			t.Errorf("pos %d: got %+v, want %q", i, got, w)
@@ -369,7 +379,9 @@ func TestPeakSummary(t *testing.T) {
 func TestSchedule_SurplusComparableAcrossPeriods(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]Provider{"weekly": {}, "monthly": {}},
-		map[string][]RouteTarget{"m": {{Provider: "weekly"}, {Provider: "monthly"}}})
+		// monthly listed first: without surplus normalization the stable sort
+		// would keep config order — the expected winner must not be first.
+		map[string][]RouteTarget{"m": {{Provider: "monthly"}, {Provider: "weekly"}}})
 	now := time.Now()
 	setWin := func(name string, rem, fLeft, days float64) {
 		dur := time.Duration(days * 24 * float64(time.Hour))
@@ -411,9 +423,11 @@ func TestSchedule_PriorityBeatsSurplus(t *testing.T) {
 func TestSchedule_SurplusBreaksPriorityTie(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]Provider{"a": {}, "b": {}},
+		// b listed first: without the surplus tiebreak the stable sort would
+		// keep config order — the expected winner must not be first.
 		map[string][]RouteTarget{"m": {
-			{Provider: "a", Priority: 1},
 			{Provider: "b", Priority: 1},
+			{Provider: "a", Priority: 1},
 		}})
 	staticSurplus(p, "a", 0.5, 0)   // surplus +0.5 (waste risk)
 	staticSurplus(p, "b", 0.5, 0.5) // surplus 0 (on pace)

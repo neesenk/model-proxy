@@ -10,14 +10,20 @@ import (
 )
 
 // testCatalog builds a models.dev catalog mapping model name → (context, input
-// modalities) for request-routing tests.
+// modalities) for request-routing tests. Names passed via tools are marked
+// ToolCall=true (catalog tool_call metadata).
 func testCatalog(entries map[string]struct {
 	Context int64
 	Input   []string
-}) *modelsDevCatalog {
+}, tools ...string) *modelsDevCatalog {
 	byName := map[string]modelsDevModel{}
 	for name, e := range entries {
 		byName[name] = modelsDevModel{Context: e.Context, Input: e.Input}
+	}
+	for _, name := range tools {
+		m := byName[name]
+		m.ToolCall = true
+		byName[name] = m
 	}
 	return &modelsDevCatalog{ByName: byName}
 }
@@ -35,10 +41,11 @@ func TestModelFitsRequest(t *testing.T) {
 		"text":   {Context: 8000, Input: []string{"text"}},
 		"vision": {Context: 8000, Input: []string{"text", "image"}},
 		"big":    {Context: 128000, Input: []string{"text"}},
-	})
+	}, "vision")
 	img := []byte(`{"messages":[{"content":[{"type":"image"}]}]}`)
 	text := []byte(`{"messages":[{"content":"hi"}]}`)
 	big := []byte(`{"input":"` + strings.Repeat("qwxz!", 8000) + `"}`) // ~10k tokens
+	tools := []byte(`{"messages":[{"content":"hi"}],"tools":[{"name":"f"}]}`)
 
 	if !modelFitsRequest(cat, "text", text) {
 		t.Error("text model + text request should fit")
@@ -57,6 +64,23 @@ func TestModelFitsRequest(t *testing.T) {
 	}
 	if !modelFitsRequest(cat, "big", big) {
 		t.Error("big model + big request should fit")
+	}
+	// Catalog-driven tools gate: a tools request only fits a model whose catalog
+	// entry records tool_call support; unknown models are rejected (conservative).
+	if !modelFitsRequest(cat, "vision", tools) {
+		t.Error("tools-capable model + tools request should fit")
+	}
+	if modelFitsRequest(cat, "text", tools) {
+		t.Error("tool-blind model + tools request should NOT fit")
+	}
+	if modelFitsRequest(cat, "unknown", tools) {
+		t.Error("unknown model + tools request should NOT fit (can't confirm tool support)")
+	}
+	// Context boundary: est == window still fits (only est > window is rejected).
+	// 10 + 31990 + 2 = 32002 non-CJK bytes → est = 32002/4 = 8000 exactly.
+	exact := []byte(`{"input":"` + strings.Repeat("qwxz!", 6398) + `"}`)
+	if !modelFitsRequest(cat, "text", exact) {
+		t.Error("est == context window should fit (boundary is inclusive)")
 	}
 	// Conservative unknowns.
 	if !modelFitsRequest(nil, "anything", img) {

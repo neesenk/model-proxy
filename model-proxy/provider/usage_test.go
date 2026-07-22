@@ -244,11 +244,17 @@ func TestVolcengineUsage_NoCredsFallsBack(t *testing.T) {
 }
 
 func TestVolcengineUsage_GetAFPFailsFallsBack(t *testing.T) {
-	deadSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	addr := deadSrv.Listener.Addr().String()
-	deadSrv.Close()
-	t.Setenv("HTTPS_PROXY", "http://"+addr)
-	t.Setenv("HTTP_PROXY", "http://"+addr)
+	// Inject the failure via the OpenAPI base (an HTTP 500 mock) — not via
+	// HTTP_PROXY env: http.ProxyFromEnvironment caches the proxy config
+	// process-wide, so env-based injection silently degrades into a REAL call
+	// to the production endpoint.
+	orig := volcengineOpenAPIBase
+	defer func() { volcengineOpenAPIBase = orig }()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer bad.Close()
+	volcengineOpenAPIBase = bad.URL
 	p := &VolcengineProvider{cfg: &Config{ProviderName: "volcengine", AccessKey: "AK", SecretKey: "SK", Models: []string{"doubao"}}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	if !contains(out, "GetAFPUsage failed") || !contains(out, "1 models") {

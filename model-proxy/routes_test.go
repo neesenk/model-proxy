@@ -109,6 +109,9 @@ func TestForward_Failover(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Errorf("failover: status=%d body=%s, want 200 from fallback", resp.StatusCode, body)
 	}
+	if string(body) != `{"ok":true}` {
+		t.Errorf("failover: client body=%s, want the fallback's {\"ok\":true}", body)
+	}
 	if len(*primarySeen) != 1 {
 		t.Errorf("primary should be tried once, got %d", len(*primarySeen))
 	}

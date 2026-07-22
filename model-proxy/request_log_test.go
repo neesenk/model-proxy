@@ -537,10 +537,20 @@ func TestRequestLogger_RetentionSweepDeletesOldArchives(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create the CURRENT active file (old mtime) — the sweep's curActive
+	// exemption must keep it even though it's past cutoff. Without a real file
+	// on disk the exemption branch is never exercised.
+	curActive := filepath.Join(dir, "requests-20990101-000000.log")
+	if err := os.WriteFile(curActive, []byte(`{"ts":"current"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(curActive, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
 	// retention 30d -> sweep deletes oldArch (40d) AND the orphaned old active
 	// file (40d, left by a previous run — F6a: restart orphans are now reclaimed,
 	// not held forever). recentArch (1d) is kept; curActive is exempt even if old.
-	curActive := filepath.Join(dir, "requests-20990101-000000.log")
 	l := newRequestLogger(dir, 1<<30, 4096, 30*24*time.Hour)
 	l.sweep(time.Now(), curActive)
 
@@ -552,6 +562,7 @@ func TestRequestLogger_RetentionSweepDeletesOldArchives(t *testing.T) {
 		{"old archive", oldArch, false},
 		{"recent archive", recentArch, true},
 		{"orphaned active file (old)", oldActive, false},
+		{"current active file (exempt)", curActive, true},
 	} {
 		_, err := os.Stat(tc.path)
 		exists := !os.IsNotExist(err)

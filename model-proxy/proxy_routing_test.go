@@ -127,14 +127,26 @@ func captureHit(r *http.Request) requestHit {
 	return requestHit{path: r.URL.Path, auth: r.Header.Get("Authorization"), model: v.Model}
 }
 
-func post(t *testing.T, url, body string) {
+func post(t *testing.T, url, body string) (int, string) {
 	t.Helper()
 	resp, err := http.Post(url, "application/json", stringReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.Copy(io.Discard, resp.Body)
+	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	return resp.StatusCode, string(b)
+}
+
+// postOK posts and requires the client-visible status to be 200 — forward tests
+// must assert the client outcome, not only upstream hit counts (testing.md
+// "Route side effects").
+func postOK(t *testing.T, url, body string) {
+	t.Helper()
+	code, respBody := post(t, url, body)
+	if code != http.StatusOK {
+		t.Fatalf("post %s: status=%d body=%s, want 200", url, code, respBody)
+	}
 }
 
 func stringReader(s string) io.Reader { return &stringReaderImpl{s: s} }

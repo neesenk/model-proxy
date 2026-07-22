@@ -46,6 +46,12 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 			w.Header().Set("content-type", "application/json")
 			fmt.Fprint(w, `{"retcode":0,"message":"ok","data":{"user":{"userid":1,"email":"tester@shopee.io","is_active":true}}}`)
 		case "/api/v1/cqp/ccswitch/api_key/get_or_generate":
+			// fetchAPIKeyAt must set the SSO cookie explicitly (the jar's cookies
+			// are scoped to /compass-api and don't match this path) — deleting
+			// that header would 401 in production.
+			if got := r.Header.Get("Cookie"); got != "SSO_C="+cookieVal {
+				t.Errorf("get_or_generate Cookie=%q, want %q", got, "SSO_C="+cookieVal)
+			}
 			w.Header().Set("content-type", "application/json")
 			fmt.Fprint(w, `{"retcode":0,"data":{"generated":true,"api_key":"managed-aqp-key-xyz","quota_type":"enterprise","project_id":"proj-123","employee_email":"tester@shopee.io","employee_user_id":"1","employee_role":"engineer","business_name":"Shopee"}}`)
 		default:
@@ -122,10 +128,13 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 		t.Errorf("project=%q", key.ProjectID)
 	}
 
-	// 5. Managed key is NOT persisted; the store keeps the 6 account fields.
-	loaded, _ := provider.LoadAqpAccount(storePath)
-	if loaded.Email != "tester@shopee.io" {
-		t.Errorf("persisted email=%q", loaded.Email)
+	// 5. Managed key is NOT persisted; the store keeps the account fields.
+	loaded, err := provider.LoadAqpAccount(storePath)
+	if err != nil {
+		t.Fatalf("reload account store: %v", err)
+	}
+	if loaded.Email != "tester@shopee.io" || loaded.SSOSessionCookie != "SSO_C="+cookieVal {
+		t.Errorf("persisted account fields: %+v", loaded)
 	}
 }
 
