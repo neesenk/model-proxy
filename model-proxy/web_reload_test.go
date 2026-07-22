@@ -16,10 +16,14 @@ import (
 // config.yaml is fixed + reloaded. The error is also logged for troubleshooting.
 func TestHandleAccountAdd_ReloadFailureWarning(t *testing.T) {
 	setPoolHome(t, t.TempDir())
-	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-`))
+	// openai_base_url with no usage_url now validates via the apiKeyValidationURL
+	// fallback (GET openai_base_url/models); point it at a reachable mock so the
+	// add succeeds and the reload-failure warning path is what's under test.
+	valSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer valSrv.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: "+valSrv.URL+"}\n"))
 	p := newTestProxy(t, cfg)
 	// configFile points at a non-existent path → reload's LoadConfig read fails.
 	w := newWebServer(p, "/no/such/config.yaml")
