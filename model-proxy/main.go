@@ -39,6 +39,7 @@ Commands:
   schedule             Show current per-model provider (queries the running daemon)
   pin <route> <prov>   Temporarily force a route onto one provider (no failover)
   unpin <route>        Remove a pin
+  unfreeze [provider]  Clear frozen provider state (circuit/rate-limit/model locks)
   stats                Show per-(provider, model) call statistics (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
@@ -180,6 +181,15 @@ Flags:
   --by-agent    switch to the agent view: per-agent (claude-code/codex/...)
                  request + token totals over the range, from /api/agents
   --json         raw /api/stats JSON for jq`,
+
+	"unfreeze": `unfreeze [provider] [--config PATH]
+
+  Clear frozen runtime provider state via the running daemon: circuit-open
+  cooldowns, rate-limit cooldowns (429), and model-level lockouts — the
+  provider is retried immediately instead of waiting out the cooldown.
+  With no argument, clears ALL providers. A pooled parent name clears all
+  its accounts. Sticky routes, pins, and learned parameter blocklists are
+  NOT cleared. Requires a running daemon.`,
 }
 
 func main() {
@@ -228,6 +238,8 @@ func main() {
 		cmdPin(os.Args[2:])
 	case "unpin":
 		cmdUnpin(os.Args[2:])
+	case "unfreeze":
+		cmdUnfreeze(os.Args[2:])
 	case "stats":
 		cmdStats(os.Args[2:])
 	case "doctor":
@@ -791,6 +803,11 @@ func cmdConfig(args []string) {
 		s := cfg.Scheduling
 		fmt.Printf("  scheduling: threshold=%d cooldown=%s rate_backoff=%s timeout=%s dwell=%s\n",
 			s.threshold(), s.cooldown(), s.rateBackoff(), s.timeout(), s.dwell())
+		// Config-time routing hazards (explicit routes only — implicit routes are
+		// a daemon-side concept; the daemon logs these at boot/reload).
+		for _, w := range configRoutingWarnings(cfg, cfg.Routes) {
+			fmt.Println(cYellow("  ⚠ " + w))
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
 		os.Exit(1)
@@ -892,13 +909,31 @@ func doctorWithCfg(cfg *Config) int {
 				hasPlan = true
 			}
 			fmt.Printf("    %s %s  p%d\n", pad(t.Provider, 12), cCyan(pad(tier, 13)), t.Priority)
-			// Protocol conversion (#11): a target declaring a backend protocol
-			// converts client↔backend when they differ. Surface it + the fixed set
-			// of fields conversion drops (so an operator wiring tools/images knows
-			// what's lossy before traffic flows).
-			if t.Protocol != "" {
+			// Wire-protocol note: a provider our 2-value system can't express
+			// (codex = OpenAI Responses) gets the HONEST marker — which client
+			// families can't be served — not a conversion suggestion.
+			if note := provider.WireProtocolNote(prov.Provider); note != "" {
+				fmt.Printf("        %s %s\n", cYellow("⚠"), note)
+				warns++
+			} else if t.Protocol != "" {
+				// Protocol conversion (#11): a target declaring a backend protocol
+				// converts client↔backend when they differ. Surface it + the fixed
+				// set of fields conversion drops (so an operator wiring tools/images
+				// knows what's lossy before traffic flows).
 				fmt.Printf("        %s target protocol %s — converts when client protocol differs; lossy: thinking blocks, cache_control, server-side tools, tool_result images\n",
 					cYellow("↔"), t.Protocol)
+				// Reasoning-replay marker (#9): for models that REQUIRE reasoning
+				// content echoed back, the dropped thinking/reasoning is fatal to
+				// multi-turn tool calls, not just lossy.
+				if reasoningReplayModel(t.Model) {
+					fmt.Printf("        %s reasoning-required model behind conversion — thinking/reasoning content is dropped today; multi-turn tool calls may 400 upstream (replay cache not implemented)\n",
+						cYellow("⚠"))
+					warns++
+				}
+			} else if hint := provider.ProtocolHint(prov.Provider, t.Model); hint != "" {
+				fmt.Printf("        %s no protocol: declared, but %s speaks %s — clients of the other protocol will send malformed bodies; add protocol: %s\n",
+					cYellow("⚠"), prov.Provider, hint, hint)
+				warns++
 			}
 			// Expand a pooled parent inline: show its account count + the
 			// per-account virtual ids. Offline (no live quota) so we can't show

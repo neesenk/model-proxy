@@ -69,6 +69,7 @@ type fusionCtx struct {
 	calledModel string
 	upPath      string // client request path (/v1 stripped for openai)
 	agent       string
+	sessionKey  string // client session id — makes pooled members/synthesizer session-sticky (cache-warm)
 	origBody    []byte
 	flc         forwardLogCtx // parent request id + exposed route
 }
@@ -265,12 +266,13 @@ func (p *Proxy) fusionSynthesizerSupportsTools(fc fusionCtx, st RouteTarget) boo
 // ("<tag>:<model>").
 func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag string, m RouteTarget, srcBody []byte, out chan<- fusionLegResult) {
 	// Resolve the member's provider to a runnable virtual via the unified resolver
-	// (pooled parent → one account, round-robin). A pooled parent name has no
-	// runtime instance, so without this a multi-account member was always dropped
-	// as "not available" the moment a second account was added. On !ok (unknown /
-	// not logged in) leave m as-is and let the build gate below report it.
-	if picked, ok := newResolver(p, fc.provs, fc.poolIndex).Pick(m); ok {
-		m = picked.target
+	// (pooled parent → one healthy account, session-sticky via fc.sessionKey with
+	// failover to a sibling). A pooled parent name has no runtime instance, so
+	// without this a multi-account member was always dropped as "not available" the
+	// moment a second account was added. On !ok (unknown / not logged in / all
+	// accounts unhealthy) leave m as-is and let the build gate below report it.
+	if picked, ok := newResolver(p, fc.provs, fc.poolIndex).Pick(m, fc.sessionKey); ok {
+		m = picked
 	}
 	res := fusionLegResult{idx: idx, provider: m.Provider, model: m.Model}
 	legID := tag + "-" + fc.flc.requestID
@@ -411,7 +413,12 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	}
 	switch {
 	case resp.StatusCode == 429:
-		p.recordRateLimit(m.Provider, p.parseRateLimit(resp, time.Now(), sched))
+		peek := respBody
+		if len(peek) > 8<<10 {
+			peek = peek[:8<<10]
+		}
+		until, kind := p.parseRateLimit(resp, peek, time.Now(), sched)
+		p.recordRateLimit(m.Provider, until, kind)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evRateLimited429)
 		}
@@ -435,7 +442,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		if res.text == "" {
 			res.err = errFusionEmptyDraft
 		}
-		p.recordSuccess(m.Provider)
+		p.recordSuccess(m.Provider, m.Model)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evRequests)
 			latencyMs := time.Since(start).Milliseconds()
@@ -471,17 +478,29 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 // synthesizer model through the normal tryTarget path — streaming, conversion,
 // auth, metrics, latency, live events, request log and cache all apply.
 func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
-	// Resolve to a runnable virtual (pooled parent → one account), same as the
-	// panel legs — otherwise a multi-account synthesizer has no impl and fails.
-	if picked, ok := newResolver(p, fc.provs, fc.poolIndex).Pick(st); ok {
-		st = picked.target
+	// Resolve to a runnable virtual (pooled parent → one healthy account,
+	// session-sticky so a conversation reuses one synthesizer account), same as
+	// the panel legs — otherwise a multi-account synthesizer has no impl and fails.
+	// FAIL CLOSED on resolver failure: proceeding with the unresolved (pooled
+	// parent) name would hand tryTarget a nil impl and ship an UNAUTHENTICATED
+	// request upstream (P0-1). Distinguish the causes in the log.
+	picked, ok := newResolver(p, fc.provs, fc.poolIndex).Pick(st, fc.sessionKey)
+	if !ok {
+		log.Printf("[fusion] %s: synthesizer %s/%s unavailable (unknown provider, not logged in, or no healthy pooled account) — aborting synthesis",
+			fc.flc.exposed, st.Provider, st.Model)
+		return false
 	}
+	st = picked
 	prov, ok := providerConfig(fc.cfg, fc.parentOf, st.Provider)
 	if !ok {
-		log.Printf("[fusion] %s: synthesizer provider %q unknown", fc.flc.exposed, st.Provider)
+		log.Printf("[fusion] %s: synthesizer provider %q unknown in config", fc.flc.exposed, st.Provider)
 		return false
 	}
 	impl := fc.provs[st.Provider]
+	if impl == nil {
+		log.Printf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
+		return false
+	}
 	backendProto := st.Protocol
 	if backendProto == "" {
 		backendProto = fc.proto
@@ -491,11 +510,16 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	}
 	convert := needsConversion(fc.proto, backendProto)
 	if convert {
-		if cb, err := convertRequest(body, fc.proto, backendProto); err == nil {
-			body = cb
-		} else {
-			log.Printf("[fusion] synthesizer %s→%s convert failed: %v", fc.proto, backendProto, err)
+		cb, err := convertRequest(body, fc.proto, backendProto)
+		if err != nil {
+			// Fail CLOSED: a conversion failure must not send the unconverted
+			// body to the backend (it would ship an Anthropic body to an OpenAI
+			// endpoint, or vice versa). Abort the synthesis; fusion degrades.
+			log.Printf("[fusion] synthesizer %s/%s %s→%s convert failed: %v — aborting synthesis",
+				st.Provider, st.Model, fc.proto, backendProto, err)
+			return false
 		}
+		body = cb
 	}
 	baseURL := prov.OpenAIBaseURL
 	if backendProto == "anthropic" && prov.AnthropicBaseURL != "" {
@@ -508,8 +532,8 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	// The log ctx carries NO origBody so the request log stores the actual
 	// synthesis body (with the candidate sections), not the client's original.
 	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed}
-	committed, _ := p.tryTarget(fc.cfg, fc.proto, backendProto, fc.calledModel, st, prov, impl, baseURL, effPath,
-		body, w, r, fc.agent, cacheKey, false, cache, flc, nil)
+	committed, _, _ := p.tryTarget(fc.cfg, fc.proto, backendProto, fc.calledModel, st, prov, impl, baseURL, effPath,
+		body, w, r, fc.agent, cacheKey, false, cache, flc, nil, true)
 	return committed
 }
 

@@ -294,24 +294,43 @@ func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string
 // match is unavailable (circuit-open/rate-limited). Shared by the proactive
 // cross-route fallback and the reactive context-overflow retry.
 func (p *Proxy) crossRoutePool(cfg *Config, parentOf map[string]string, routeName, sessionKey string, expanded map[string][]RouteTarget, routeKeys map[string]bool, keep func(RouteTarget) bool) []RouteTarget {
-	seen := map[RouteTarget]bool{}
-	var pool []RouteTarget
-	for _, ts := range expanded {
-		for _, t := range ts {
-			// Fusion recipes are opt-in per route — never drag one into another
-			// route's fallback pool (an N+1-cost orchestration as a silent
-			// fallback would be a costly surprise).
-			if seen[t] || t.Provider == "fusion" || !keep(t) {
-				continue
-			}
-			pool = append(pool, t)
-			seen[t] = true
-		}
-	}
+	pool := collectCrossRoute(expanded, keep)
 	if len(pool) == 0 {
 		return nil
 	}
 	return p.schedule(cfg, parentOf, routeName, sessionKey, pool, routeKeys)
+}
+
+// collectCrossRoute gathers the targets matching keep across ALL expanded routes,
+// deduped by {provider, model, protocol}. Priority does NOT distinguish a backend:
+// the same {provider, model, protocol} surfacing in two routes at different
+// priorities is ONE call, not two (previously the dedup key was the whole
+// RouteTarget value — which includes Priority — so the duplicate slipped through
+// and could be called twice). On a collision the best (lowest) priority is kept.
+// Fusion recipes are excluded (opt-in per route; never drag one into another
+// route's fallback pool). Pure — no scheduling — so the dedup is unit-testable.
+func collectCrossRoute(expanded map[string][]RouteTarget, keep func(RouteTarget) bool) []RouteTarget {
+	type dedupKey struct{ provider, model, protocol string }
+	best := map[dedupKey]RouteTarget{}
+	for _, ts := range expanded {
+		for _, t := range ts {
+			if t.Provider == "fusion" || !keep(t) {
+				continue
+			}
+			// For pooled providers t.Provider is already the virtual id, so two
+			// accounts of one parent (distinct virtual ids) are NOT collapsed —
+			// only a truly identical backend across routes is.
+			key := dedupKey{t.Provider, t.Model, t.Protocol}
+			if ex, ok := best[key]; !ok || t.Priority < ex.Priority {
+				best[key] = t
+			}
+		}
+	}
+	pool := make([]RouteTarget, 0, len(best))
+	for _, t := range best {
+		pool = append(pool, t)
+	}
+	return pool
 }
 
 // contextOverflowRetry builds the replacement target list after an upstream

@@ -230,7 +230,10 @@ func (r RequestLogConfig) retention() time.Duration {
 type Scheduling struct {
 	CircuitThreshold  int    `yaml:"circuit_threshold"`   // consecutive failures → open circuit (default 3)
 	CircuitCooldown   string `yaml:"circuit_cooldown"`    // circuit open duration, then half-open 1 probe (default 10m)
-	RateLimitBackoff  string `yaml:"rate_limit_backoff"`  // 429 with no Retry-After: skip this long, then probe (default 60s)
+	RateLimitBackoff  string `yaml:"rate_limit_backoff"`  // 429 with no Retry-After/hint, transient class: skip this long, then probe (default 60s)
+	QuotaCooldown     string `yaml:"quota_cooldown"`      // 429 classified quota-exhausted with no reset hint: skip this long (default 1h; daily class locks to midnight)
+	ModelLockout      string `yaml:"model_lockout"`       // model-level failure (404 / model-denied / empty 200): lock (provider,model) this long (default 10m)
+	RetryWait         string `yaml:"retry_wait"`          // all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×) instead of an immediate error (default 10s; "0" disables)
 	UpstreamTimeout   string `yaml:"upstream_timeout"`    // per-upstream-request timeout (default 30s)
 	StickyDwell       string `yaml:"sticky_dwell"`        // min time on the chosen provider before re-evaluating (default 10m)
 	QuotaPollInterval string `yaml:"quota_poll_interval"` // background poll cadence (default 5m)
@@ -254,6 +257,24 @@ func (s Scheduling) rateBackoff() time.Duration {
 		return d
 	}
 	return 60 * time.Second
+}
+func (s Scheduling) quotaCooldown() time.Duration {
+	if d, err := time.ParseDuration(s.QuotaCooldown); err == nil {
+		return d
+	}
+	return time.Hour
+}
+func (s Scheduling) modelLockout() time.Duration {
+	if d, err := time.ParseDuration(s.ModelLockout); err == nil {
+		return d
+	}
+	return 10 * time.Minute
+}
+func (s Scheduling) retryWait() time.Duration {
+	if d, err := time.ParseDuration(s.RetryWait); err == nil {
+		return d // "0" disables the cooldown wait-retry
+	}
+	return 10 * time.Second
 }
 func (s Scheduling) timeout() time.Duration {
 	if d, err := time.ParseDuration(s.UpstreamTimeout); err == nil {

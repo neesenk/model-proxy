@@ -791,3 +791,54 @@ providers:
 		})
 	}
 }
+
+// TestFusion_SynthesizerPoolExhaustedFailsClosed (P0-1): when the synthesizer's
+// pooled parent has NO healthy account, the synthesizer must fail CLOSED —
+// fusion returns false, the route's next target serves, and the synthesizer's
+// upstream sees ZERO requests (previously the unresolved pooled-parent name
+// fell through with a nil impl and shipped an UNAUTHENTICATED request).
+func TestFusion_SynthesizerPoolExhaustedFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu-draft", "zhipu", "ZA", "ZB")
+	writePoolFile(t, "zhipu-synth", "zhipu", "GA", "GB")
+
+	draftUp := newFakeUpstream(t, anthropicDraftResponder("draft-ok"))
+	synthUp := newFakeUpstream(t, anthropicSSEResponder("should never be sent"))
+	directUp := newFakeUpstream(t, anthropicSSEResponder("direct fallback ok"))
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"zhipu-draft": {AnthropicBaseURL: draftUp.srv.URL, Provider: "zhipu"},
+			"zhipu-synth": {AnthropicBaseURL: synthUp.srv.URL, Provider: "zhipu"},
+			"direct":      {AnthropicBaseURL: directUp.srv.URL, Provider: "static"},
+		},
+		Routes: map[string][]RouteTarget{"hard": {
+			{Provider: "fusion", Model: "recipe", Priority: 1},
+			{Provider: "direct", Model: "dfull", Priority: 2},
+		}},
+		Fusion: map[string]FusionConfig{"recipe": {
+			Panel:       []RouteTarget{{Provider: "zhipu-draft", Model: "zdraft"}},
+			Synthesizer: RouteTarget{Provider: "zhipu-synth", Model: "gsynth"},
+		}},
+	}
+	p := NewProxy(cfg)
+	// Rate-limit BOTH synthesizer accounts → the resolver finds no healthy virtual.
+	for _, vid := range p.poolIndex["zhipu-synth"] {
+		p.recordRateLimit(vid, time.Now().Add(time.Hour), rlTransient)
+	}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	out := postAnthropic(t, px, fusionClientBody)
+	if !strings.Contains(out, "direct fallback ok") {
+		t.Fatalf("expected route failover to the direct target, got: %s", out)
+	}
+	if synthUp.hits() != 0 {
+		t.Errorf("synthesizer upstream hit %d times — a bare unauthenticated request leaked", synthUp.hits())
+	}
+	if draftUp.hits() == 0 {
+		t.Error("panel member should still have been tried")
+	}
+}

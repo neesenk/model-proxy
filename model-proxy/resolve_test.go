@@ -6,9 +6,8 @@ import (
 )
 
 // TestResolver_ExpandAndPick: the unified provider resolver — pool expansion
-// (Expand) and sticky/round-robin single-virtual pick (Pick) with a health hint.
-// Non-pooled providers pass through; unknown / not-built providers yield no
-// runnable virtual.
+// (Expand), session-sticky + health-aware single-virtual pick (Pick). Non-pooled
+// providers pass through; unknown / not-built providers yield no runnable virtual.
 func TestResolver_ExpandAndPick(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
@@ -39,55 +38,77 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 		}
 	}
 
-	// Pick: one zhipu virtual, ok=true, Model preserved.
-	pick, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"})
+	// Pick with a session key is STICKY: the same key always lands on the same
+	// virtual (cache-warm for a conversation).
+	sessA, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
 	if !ok {
-		t.Fatal("Pick pooled: !ok, want ok")
+		t.Fatal("Pick pooled !ok")
 	}
-	if pick.target.Provider == "zhipu" {
-		t.Error("Pick returned the parent name, not a virtual")
-	}
-	if p.parentOf[pick.target.Provider] != "zhipu" {
+	if p.parentOf[sessA.Provider] != "zhipu" {
 		t.Error("Pick did not return a zhipu virtual")
 	}
-	if pick.target.Model != "glm" {
-		t.Error("Pick dropped Model")
-	}
-
-	// Pick round-robins across the pool (spreadCtr): 10 picks cover BOTH virtuals.
-	seen := map[string]bool{}
-	for i := 0; i < 10; i++ {
-		rt, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"})
-		if !ok {
-			t.Fatal("Pick !ok during round-robin")
+	for i := 0; i < 5; i++ {
+		pick, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
+		if !ok || pick.Provider != sessA.Provider {
+			t.Errorf("Pick session-A iter %d = %q, want stable %q (session-sticky)", i, pick.Provider, sessA.Provider)
 		}
-		seen[rt.target.Provider] = true
+	}
+	// A different session key lands on a (likely) different virtual — distinct
+	// sessions spread across the pool. With 2 accounts and a good hash, both
+	// appear across a handful of distinct keys.
+	seen := map[string]bool{sessA.Provider: true}
+	for _, key := range []string{"s1", "s2", "s3", "s4", "s5", "s6"} {
+		pick, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, key)
+		if !ok {
+			t.Fatalf("Pick %s !ok", key)
+		}
+		seen[pick.Provider] = true
 	}
 	if len(seen) != 2 {
-		t.Errorf("Pick round-robin covered %d virtuals, want 2 (%v)", len(seen), seen)
+		t.Errorf("distinct session keys covered %d virtuals, want 2 (%v)", len(seen), seen)
 	}
 
-	// Non-pooled provider: Expand passes through unchanged.
-	e := r.Expand(RouteTarget{Provider: "single", Model: "m"})
-	if len(e) != 1 || e[0].Provider != "single" {
+	// Non-pooled provider: Expand passes through; Pick on a built non-pooled name
+	// returns it, on a not-built name returns !ok.
+	p2 := NewProxy(&Config{
+		Listen:    "127.0.0.1:1",
+		Providers: map[string]Provider{"single": {OpenAIBaseURL: "https://x", Provider: "static"}},
+	})
+	r2 := newResolver(p2, p2.providers, p2.poolIndex)
+	if e := r2.Expand(RouteTarget{Provider: "single", Model: "m"}); len(e) != 1 || e[0].Provider != "single" {
 		t.Errorf("Expand non-pooled = %+v, want [{single}]", e)
 	}
-	// Pick on a non-pooled name with no built impl → !ok (not runnable). "single"
-	// isn't in p.providers (only the zhipu virtuals are), so it is not runnable.
-	if _, ok := r.Pick(RouteTarget{Provider: "single"}); ok {
-		t.Error("Pick on a non-pooled name with no built impl should be !ok")
+	// "single" is a file-backed static provider (built even when not logged in) →
+	// Pick returns it. A name with NO built impl (not in cfg.Providers at all) → !ok.
+	if pick, ok := r2.Pick(RouteTarget{Provider: "single"}, ""); !ok || pick.Provider != "single" {
+		t.Errorf("Pick built non-pooled = %+v ok=%v, want {single}/ok", pick, ok)
+	}
+	if _, ok := r2.Pick(RouteTarget{Provider: "does-not-exist"}, ""); ok {
+		t.Error("Pick on a name with no built impl should be !ok")
 	}
 
-	// Health hint: a nil-health virtual is available; a circuit-open one is not.
-	healthyVid := got[0].Provider
-	if h := r.hintFor(healthyVid); !h.available || h.circuitOpen || h.rateLimited {
-		t.Errorf("hintFor healthy virtual = %+v, want available", h)
-	}
-	openVid := got[1].Provider
+	// Health-aware failover: circuit-open the sticky account → Pick fails over to
+	// the healthy sibling instead of returning the dead one.
 	p.healthMu.Lock()
-	p.health[openVid] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
+	p.health[sessA.Provider] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
 	p.healthMu.Unlock()
-	if h := r.hintFor(openVid); h.available || !h.circuitOpen {
-		t.Errorf("hintFor circuit-open virtual = %+v, want !available+circuitOpen", h)
+	fallback, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
+	if !ok {
+		t.Fatal("Pick session-A with sticky account circuit-open should fail over, got !ok")
+	}
+	if fallback.Provider == sessA.Provider {
+		t.Errorf("Pick did not fail over from the circuit-open sticky account %q (still picked it)", sessA.Provider)
+	}
+	if p.parentOf[fallback.Provider] != "zhipu" {
+		t.Error("failover pick is not a zhipu virtual")
+	}
+
+	// All accounts circuit-open → Pick !ok (no healthy virtual).
+	other := fallback.Provider
+	p.healthMu.Lock()
+	p.health[other] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
+	p.healthMu.Unlock()
+	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A"); ok {
+		t.Error("Pick with ALL accounts circuit-open should be !ok")
 	}
 }

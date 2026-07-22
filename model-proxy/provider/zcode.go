@@ -7,7 +7,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -237,17 +236,4 @@ func resolveClientTimezone() string {
 		return v
 	}
 	return "unknown"
-}
-
-// osVersion returns the OS product version on darwin (kern.osproductversion),
-// else "" (the header is omitted — ZCode omits X-Os-Version when unavailable).
-func osVersion() string {
-	if runtime.GOOS != "darwin" {
-		return ""
-	}
-	v, err := syscall.Sysctl("kern.osproductversion")
-	if err != nil {
-		return ""
-	}
-	return printableASCII(v)
 }

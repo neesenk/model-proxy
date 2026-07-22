@@ -23,6 +23,11 @@ type quotaTracker struct {
 	provs    func() map[string]provider.Provider
 	stopCh   chan struct{}
 	stopOnce sync.Once
+	// persistMu serializes persist(): pollAll/pollOne/refreshOne run on
+	// independent goroutines and share one fixed .tmp sibling — without
+	// serialization a second writer's rename fails ENOENT (and interleaved
+	// writes could corrupt the file).
+	persistMu sync.Mutex
 	// retryAttempts/retryBackoff tune fetchQuota's transient-error retry.
 	// Defaults (3 / 1s) are set in newQuotaTracker; tests shrink them to stay fast.
 	retryAttempts int
@@ -41,6 +46,27 @@ type quotaTracker struct {
 	stickySnapshot func() map[string]routeSticky
 	// LoadedSticky is populated by load() on boot; NewProxy applies it to p.sticky.
 	LoadedSticky map[string]routeSticky
+	// healthSnapshot, if set, returns the frozen health state (rate-limit /
+	// circuit cooldowns, model lockouts, learned param blocklist) for
+	// persistence — restored on boot so long cooldowns (quota-exhausted, daily)
+	// survive a restart. Same healthMu-only lock discipline as stickySnapshot.
+	healthSnapshot func() map[string]persistedHealth
+	// LoadedHealth is populated by load() on boot; NewProxy applies it (future-
+	// dated entries only) to p.health / p.modelLocks / p.paramBlock.
+	LoadedHealth map[string]persistedHealth
+	// LoadedHealthFP is the config fingerprint the loaded health was frozen
+	// under; NewProxy restores ONLY when it matches the current config's
+	// fingerprint (see healthConfigFingerprint).
+	LoadedHealthFP string
+}
+
+// persistedHealth is the on-disk form of one provider's frozen runtime state.
+type persistedHealth struct {
+	RateLimitedUntil time.Time            `json:"rate_limited_until,omitempty"`
+	RateLimitKind    string               `json:"rate_limit_kind,omitempty"`
+	CircuitOpenUntil time.Time            `json:"circuit_open_until,omitempty"`
+	ModelLocks       map[string]time.Time `json:"model_locks,omitempty"` // model → lockedUntil
+	ParamBlock       map[string][]string  `json:"param_block,omitempty"` // model → learned unsupported top-level params
 }
 
 // refreshState tracks per-provider refresh dedup state (guarded by quotaTracker.mu).
@@ -115,7 +141,9 @@ func (t *quotaTracker) pollAll(now time.Time) {
 		}(name, provImpl)
 	}
 	wg.Wait()
-	t.persist()
+	if err := t.persist(); err != nil {
+		log.Printf("[quota] persist after pollAll failed: %v", err)
+	}
 }
 
 // pollOne re-polls a single provider by its quota key (a config name or a
@@ -129,7 +157,9 @@ func (t *quotaTracker) pollOne(key string) bool {
 		return false
 	}
 	t.setSnapshot(key, t.fetchQuota(p, time.Now()))
-	t.persist()
+	if err := t.persist(); err != nil {
+		log.Printf("[quota] persist after pollOne(%s) failed: %v", key, err)
+	}
 	return true
 }
 
@@ -162,7 +192,9 @@ func (t *quotaTracker) refreshOne(name string) {
 	if p := t.provs()[name]; p != nil {
 		s := t.fetchQuota(p, time.Now())
 		t.setSnapshot(name, s)
-		t.persist()
+		if err := t.persist(); err != nil {
+			log.Printf("[quota] persist after refreshOne(%s) failed: %v", name, err)
+		}
 		refreshed = true
 	}
 
@@ -276,7 +308,14 @@ type persistedSticky struct {
 	Since    time.Time `json:"since"`
 }
 
-func (t *quotaTracker) persist() {
+// persist writes the quota/sticky/health snapshot atomically (tmp + rename).
+// Returns the write error so synchronous callers (unfreeze API) can fail the
+// operation instead of reporting a false success; background callers log it.
+func (t *quotaTracker) persist() error {
+	// Serialize the whole write (snapshot → tmp → rename): concurrent persists
+	// from pollAll/pollOne/refreshOne share the fixed .tmp sibling.
+	t.persistMu.Lock()
+	defer t.persistMu.Unlock()
 	t.mu.RLock()
 	out := make(map[string]persistedSnapshot, len(t.state))
 	for k, v := range t.state {
@@ -298,20 +337,31 @@ func (t *quotaTracker) persist() {
 		}
 		wrap["sticky"] = sticky
 	}
+	if t.healthSnapshot != nil {
+		// Same lock discipline as stickySnapshot: healthMu only, never nested
+		// inside quotaMu. The fingerprint gates restore to the exact config the
+		// state was frozen under (health keys are provider names — without the
+		// gate, a different config's daemon/test reading this file would
+		// "restore" cooldowns onto unrelated same-named providers).
+		wrap["health"] = t.healthSnapshot()
+		wrap["health_fp"] = healthConfigFingerprint(t.cfg())
+	}
 	data, err := json.MarshalIndent(wrap, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(t.path), 0o700); err != nil {
-		return
+		return err
 	}
 	tmp := t.path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return
+		return err
 	}
 	if err := os.Rename(tmp, t.path); err != nil {
 		log.Printf("[quota] persist rename failed: %v", err)
+		return err
 	}
+	return nil
 }
 
 func (t *quotaTracker) load() {
@@ -322,6 +372,8 @@ func (t *quotaTracker) load() {
 	var wrap struct {
 		Providers map[string]persistedSnapshot `json:"providers"`
 		Sticky    map[string]persistedSticky   `json:"sticky"`
+		Health    map[string]persistedHealth   `json:"health"`
+		HealthFP  string                       `json:"health_fp"`
 	}
 	if err := json.Unmarshal(data, &wrap); err != nil {
 		return
@@ -338,4 +390,6 @@ func (t *quotaTracker) load() {
 	for k, v := range wrap.Sticky {
 		t.LoadedSticky[k] = routeSticky{provider: v.Provider, since: v.Since}
 	}
+	t.LoadedHealth = wrap.Health
+	t.LoadedHealthFP = wrap.HealthFP
 }

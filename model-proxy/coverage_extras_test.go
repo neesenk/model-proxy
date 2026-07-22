@@ -496,6 +496,55 @@ func TestShadow_PooledProvider(t *testing.T) {
 	}
 }
 
+// TestShadow_ConvertFail_Closed (regression #C): when a cross-protocol shadow
+// request's conversion fails, the shadow must be SKIPPED — not sent with the
+// unconverted body (which would ship an Anthropic body to an OpenAI endpoint or
+// vice versa). Pre-fix runShadow logged the error and forwarded the raw body.
+func TestShadow_ConvertFail_Closed(t *testing.T) {
+	var shadowHits atomic.Int64
+	mainUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`)) // primary 2xx so the shadow dispatch fires
+	}))
+	defer mainUp.Close()
+	shadowUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		shadowHits.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer shadowUp.Close()
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"main":        {OpenAIBaseURL: mainUp.URL, Provider: "static"},
+			"shadow-prov": {AnthropicBaseURL: shadowUp.URL, Provider: "static"}, // cross-proto (anthropic) shadow
+		},
+		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
+		Shadow: map[string]ShadowTarget{"m": {Provider: "shadow-prov", Model: "sm", Protocol: "anthropic"}},
+	}
+	p := NewProxy(cfg)
+	p.providers["main"] = &testProv{key: "main"}
+	p.providers["shadow-prov"] = &testProv{key: "shadow-prov"}
+	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	// extractModel returns "m" (fast path reads 3 tokens), but the full JSON is
+	// malformed → the shadow's openai→anthropic convertRequest fails.
+	resp, err := http.Post(px.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"m","input":[BAD`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// Give any stray shadow goroutine a moment, then assert it never landed.
+	time.Sleep(120 * time.Millisecond)
+	if got := shadowHits.Load(); got != 0 {
+		t.Errorf("shadow backend hit %d time(s) with an unconverted body after convert failure (fail-open); want 0", got)
+	}
+}
+
 // TestCmdShadowReport_InProcess: the `shadow report` CLI renders the daemon's
 // /api/shadow-report response. Covers cmdShadow + cmdShadowReport.
 func TestCmdShadowReport_InProcess(t *testing.T) {

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -400,6 +401,12 @@ func ciContains(s, sub string) bool {
 // parses each JSONL line, and returns records matching f, newest-first, capped at
 // f.Limit. Unparseable/partial lines (e.g. a line mid-write at read time) are
 // skipped silently. It reads files directly, independent of the logger goroutine.
+//
+// Memory is bounded to ~f.Limit records (not the whole matching set): matches are
+// streamed into a newest-Limit top-K (min-heap by timestamp) so a huge active log
+// with millions of records doesn't occupy near the whole file in memory when only
+// 100 are wanted. Per-line memory is one line at a time (bufio.Reader.ReadBytes,
+// not os.ReadFile; the writer caps both bodies so a line is ~2×max_body).
 func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -416,16 +423,16 @@ func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error)
 		}
 	}
 	sort.Strings(names)
-	var out []requestLogRecord
+	// top-K by timestamp (min-heap): retain only the newest f.Limit matches. When
+	// no limit is set, keep everything (append to a plain slice).
+	limit := f.Limit
+	var h *tsMinHeap
+	var all []requestLogRecord
+	if limit > 0 {
+		h = &tsMinHeap{}
+	}
 	// Read newest file first so a Limit cuts early; names sort oldest→first, so
-	// iterate in reverse. STREAM each file one line at a time (not os.ReadFile)
-	// so a 1 GiB log file doesn't peak at 1 GiB of heap — memory is bounded to a
-	// single line. We use bufio.Reader.ReadBytes rather than bufio.Scanner: a
-	// Scanner caps token size (8 MiB) and HALTS at the first oversized line,
-	// silently dropping it plus every later record. Valid configs (default 5 MiB
-	// per body → ~10 MiB lines) exceed that cap. ReadBytes reads any line length,
-	// never aborts on size, and each line is inherently bounded to ~2×max_body
-	// (the writer caps both bodies) so memory stays one-line-at-a-time.
+	// iterate in reverse. STREAM each file one line at a time (not os.ReadFile).
 	for i := len(names) - 1; i >= 0; i-- {
 		file, err := os.Open(filepath.Join(dir, names[i]))
 		if err != nil {
@@ -438,7 +445,14 @@ func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error)
 				if l := bytes.TrimRight(line, "\n"); len(l) > 0 {
 					var rec requestLogRecord
 					if json.Unmarshal(l, &rec) == nil && f.matches(rec) {
-						out = append(out, rec)
+						if h != nil {
+							heap.Push(h, rec)
+							if h.Len() > limit {
+								heap.Pop(h) // drop the oldest-Ts match; keeps the newest `limit`
+							}
+						} else {
+							all = append(all, rec)
+						}
 					}
 				}
 			}
@@ -447,18 +461,38 @@ func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error)
 			}
 		}
 		file.Close()
-		if f.Limit > 0 && len(out) >= f.Limit {
+		// Files are time-disjoint and read newest-first: once the heap holds `limit`
+		// records (all from the newest files), older files can only contribute older
+		// records that wouldn't make the top-`limit` — stop reading them.
+		if h != nil && h.Len() >= limit {
 			break
 		}
 	}
-	// Records within a file are chronological; across files newest-file-first is
-	// already newest-first, but a single file's records are oldest-first, so sort
-	// the result by timestamp desc to be certain.
-	sort.Slice(out, func(i, j int) bool { return out[i].Ts > out[j].Ts })
-	if f.Limit > 0 && len(out) > f.Limit {
-		out = out[:f.Limit]
+	out := all
+	if h != nil {
+		out = *h
 	}
+	// A single file's records are oldest-first; sort the result by timestamp desc.
+	sort.Slice(out, func(i, j int) bool { return out[i].Ts > out[j].Ts })
 	return out, nil
+}
+
+// tsMinHeap is a min-heap of requestLogRecord by timestamp, used to retain only
+// the newest N matches while streaming log files (top-K). Bounding the heap to N
+// bounds memory regardless of how many matches a file contains. Swapping copies
+// only string headers (the body bytes are shared), so it stays cheap.
+type tsMinHeap []requestLogRecord
+
+func (h tsMinHeap) Len() int           { return len(h) }
+func (h tsMinHeap) Less(i, j int) bool { return h[i].Ts < h[j].Ts }
+func (h tsMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *tsMinHeap) Push(x any)        { *h = append(*h, x.(requestLogRecord)) }
+func (h *tsMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
 }
 
 // requestLogSummary is the metadata-only projection of a requestLogRecord for the

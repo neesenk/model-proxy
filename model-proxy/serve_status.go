@@ -29,6 +29,7 @@ type statusHealth struct {
 	CircuitState     string `json:"circuit_state"` // closed | open | half_open
 	Available        bool   `json:"available"`
 	RateLimitedUntil string `json:"rate_limited_until,omitempty"` // RFC3339, only when in the future
+	RateLimitKind    string `json:"rate_limit_kind,omitempty"`    // transient | quota | daily (with rate_limited_until)
 }
 
 type statusCounters struct {
@@ -222,6 +223,10 @@ func healthLabel(h statusHealth) (string, func(string) string) {
 		return "circuit open", cRed
 	case h.CircuitState == "half_open":
 		return "half-open", cRed
+	case h.RateLimitedUntil != "" && h.RateLimitKind == "quota":
+		return "rl:quota", cYellow
+	case h.RateLimitedUntil != "" && h.RateLimitKind == "daily":
+		return "rl:daily", cYellow
 	case h.RateLimitedUntil != "":
 		return "rate-limited", cYellow
 	case h.Available:

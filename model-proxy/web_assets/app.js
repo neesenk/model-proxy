@@ -751,7 +751,8 @@ function healthPill(h) {
     return `<span class="pill err" title="circuit ${esc(h.circuit_state)}"><span class="dot"></span>circuit ${esc(h.circuit_state)}${esc(tail)}</span>`;
   }
   if (rlUntil && rlUntil > now) {
-    return `<span class="pill warn" title="rate-limited until ${esc(h.rate_limited_until)}"><span class="dot"></span>rate-limited${esc(untilHuman(h.rate_limited_until, now))}</span>`;
+    const kind = h.rate_limit_kind && h.rate_limit_kind !== 'transient' ? ` (${h.rate_limit_kind})` : '';
+    return `<span class="pill warn" title="rate-limited (${esc(h.rate_limit_kind || 'transient')}) until ${esc(h.rate_limited_until)}"><span class="dot"></span>rate-limited${esc(kind)}${esc(untilHuman(h.rate_limited_until, now))}</span>`;
   }
   if (h.available) {
     return `<span class="pill ok"><span class="dot"></span>available</span>`;
@@ -818,7 +819,7 @@ function renderProvidersCard(target, st) {
     const c = counters[name] || {};
     rows += `<tr>
       <td class="mono">${esc(name)}</td>
-      <td>${healthPill(health[name])}</td>
+      <td>${healthPill(health[name])}${unfreezeBtn(name, health[name])}</td>
       <td class="num">${fmtNum(c.requests)}</td>
       <td class="num">${fmtNum(c.failovers)}</td>
       <td class="num">${fmtNum(c.rate_limited_429)}</td>
@@ -860,8 +861,54 @@ function renderProvidersCard(target, st) {
           <th class="num">lat</th><th class="num">last</th>
         </tr></thead>
         <tbody>${rows}</tbody>
-      </table>`, 'flush');
+      </table>
+      <div class="row-actions" style="padding: 8px 12px;">
+        <span class="spacer"></span>
+        <button class="btn small" id="btn-unfreeze-all">Unfreeze all</button>
+      </div>`, 'flush');
   target.insertAdjacentHTML('beforeend', html);
+  const ubtn = document.getElementById('btn-unfreeze-all');
+  if (ubtn) ubtn.addEventListener('click', unfreezeAll);
+  for (const b of document.querySelectorAll('[data-unfreeze]')) {
+    b.addEventListener('click', () => unfreezeProvider(b.dataset.unfreeze, b));
+  }
+}
+
+// unfreezeBtn renders a small "unfreeze" button next to the health pill when
+// the provider is frozen (circuit open/half-open or inside a rate-limit
+// cooldown). Clicking clears the frozen state via POST /api/health/reset so
+// the provider is retried immediately — the operator escape hatch for abnormal
+// edge cases (account topped up, misclassified 429, window reset early).
+function unfreezeBtn(name, h) {
+  if (!h) return '';
+  const now = Date.now();
+  const rlUntil = h.rate_limited_until ? new Date(h.rate_limited_until).getTime() : 0;
+  const frozen = h.circuit_state === 'open' || h.circuit_state === 'half_open' || rlUntil > now;
+  if (!frozen) return '';
+  return ` <button class="btn small" data-unfreeze="${esc(name)}" title="clear circuit/rate-limit cooldowns + model locks">unfreeze</button>`;
+}
+
+async function unfreezeProvider(name, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'unfreezing…'; }
+  try {
+    await apiPost('/api/health/reset', { provider: name });
+    await renderStatusTab();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'unfreeze'; }
+    window.alert('unfreeze failed: ' + e.message);
+  }
+}
+
+async function unfreezeAll() {
+  const btn = document.getElementById('btn-unfreeze-all');
+  if (btn) { btn.disabled = true; btn.textContent = 'unfreezing…'; }
+  try {
+    await apiPost('/api/health/reset', {});
+    await renderStatusTab();
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Unfreeze all'; }
+    window.alert('unfreeze failed: ' + e.message);
+  }
 }
 
 // renderScheduleCard builds the per-route schedule view: each route shows its

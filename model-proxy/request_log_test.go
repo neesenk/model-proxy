@@ -1016,3 +1016,56 @@ func TestQueryRequestRecords_LargeLineDoesNotLoseTail(t *testing.T) {
 		t.Errorf("missing records: got %v, want both oversized+after (oversized line halted the scanner, losing it + the tail)", got)
 	}
 }
+
+// TestQueryRequestRecords_BoundedToNewestLimit (follow-up to #4): with a small
+// Limit and many matching records, the query returns exactly the newest Limit.
+// Guards the bounded top-K collector refactor's correctness (the memory bound —
+// retaining ~Limit records, not the whole matching set — is by construction via
+// the min-heap; this test proves it still returns the right records).
+func TestQueryRequestRecords_BoundedToNewestLimit(t *testing.T) {
+	dir := t.TempDir()
+	ts := func(sec int64) string { return time.Unix(sec, 0).UTC().Format(time.RFC3339) }
+	write := func(name string, count, baseTs int64) {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		for i := int64(0); i < count; i++ {
+			if err := enc.Encode(requestLogRecord{RequestID: name, Ts: ts(baseTs + i)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), buf.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Three time-disjoint files (names sort oldest→first; query reads newest-first).
+	// The newest (active) file has far more records than the Limit.
+	write("requests-20260701-000000.log", 50, 1000)   // oldest: sec 1000..1049
+	write("requests-20260702-000000.log", 50, 2000)   // mid:    sec 2000..2049
+	write("requests-20260703-000000.log", 5000, 3000) // newest:  sec 3000..7999
+
+	const limit = 100
+	recs, err := queryRequestRecords(dir, recordFilter{Limit: limit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != limit {
+		t.Fatalf("got %d records, want %d (the newest Limit)", len(recs), limit)
+	}
+	// The newest file's 5000 records swamp the Limit; the cross-file early break
+	// skips the older files. All kept records are the newest file's NEWEST `limit`,
+	// in descending Ts order (sec 7999 down to 7900).
+	for i, r := range recs {
+		if r.RequestID != "requests-20260703-000000.log" {
+			t.Errorf("rec[%d] from %s, want the newest file", i, r.RequestID)
+		}
+		if i > 0 && r.Ts >= recs[i-1].Ts {
+			t.Errorf("rec[%d] Ts=%q not strictly descending after rec[%d] Ts=%q", i, r.Ts, i-1, recs[i-1].Ts)
+		}
+	}
+	if recs[0].Ts != ts(7999) {
+		t.Errorf("newest rec Ts=%q, want %q", recs[0].Ts, ts(7999))
+	}
+	if recs[len(recs)-1].Ts != ts(7999-int64(limit)+1) {
+		t.Errorf("oldest kept Ts=%q, want %q (the Limit-th newest)", recs[len(recs)-1].Ts, ts(7999-int64(limit)+1))
+	}
+}

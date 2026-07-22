@@ -429,3 +429,35 @@ func TestValidate_Capabilities(t *testing.T) {
 		t.Errorf("unknown capabilities key: want 'not in its models: list' error, got %v", err)
 	}
 }
+
+// TestCollectCrossRoute_DedupIgnoresPriority: the same {provider, model, protocol}
+// appearing in multiple routes at DIFFERENT priorities is collected ONCE (the best
+// priority), not twice. Previously the dedup key was the whole RouteTarget value
+// (which includes Priority), so the duplicate slipped through and could be called
+// twice during a cross-route fallback. Pooled virtuals (distinct provider ids) are
+// NOT collapsed.
+func TestCollectCrossRoute_DedupIgnoresPriority(t *testing.T) {
+	expanded := map[string][]RouteTarget{
+		"routeA": {{Provider: "zhipu", Model: "glm", Protocol: "openai", Priority: 1}},
+		"routeB": {{Provider: "zhipu", Model: "glm", Protocol: "openai", Priority: 3}}, // same backend, diff priority
+		"routeC": {{Provider: "deepseek", Model: "ds", Protocol: "openai", Priority: 2}},
+		"routeD": {{Provider: "zhipu#acct-b", Model: "glm", Protocol: "openai", Priority: 1}}, // a sibling pool virtual — distinct
+	}
+	pool := collectCrossRoute(expanded, func(RouteTarget) bool { return true })
+	if len(pool) != 3 {
+		t.Fatalf("pool has %d targets, want 3 (zhipu/glm/openai deduped to one, deepseek/ds, zhipu#acct-b): %+v", len(pool), pool)
+	}
+	// The deduped zhipu/glm/openai keeps the BEST priority (1), not 3.
+	var zhipu *RouteTarget
+	for i := range pool {
+		if pool[i].Provider == "zhipu" && pool[i].Model == "glm" {
+			zhipu = &pool[i]
+		}
+	}
+	if zhipu == nil {
+		t.Fatal("zhipu/glm/openai missing from pool")
+	}
+	if zhipu.Priority != 1 {
+		t.Errorf("deduped zhipu priority = %d, want 1 (best priority kept)", zhipu.Priority)
+	}
+}

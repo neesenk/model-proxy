@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -136,6 +137,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 		w.handleTokensReset(resp, r)
 	case path == "/api/quota/refresh" && r.Method == http.MethodPost:
 		w.handleQuotaRefresh(resp, r)
+	case path == "/api/health/reset" && r.Method == http.MethodPost:
+		w.handleHealthReset(resp, r)
 	case path == "/api/stats" && r.Method == http.MethodGet:
 		w.handleStats(resp, r)
 	case path == "/api/agents" && r.Method == http.MethodGet:
@@ -201,6 +204,7 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 		}
 		if now.Before(h.rateLimitedUntil) {
 			entry["rate_limited_until"] = h.rateLimitedUntil.UTC().Format(time.RFC3339)
+			entry["rate_limit_kind"] = h.rateLimitKind.String()
 		}
 		health[name] = entry
 	}
@@ -497,6 +501,41 @@ func (w *webServer) handleQuotaRefresh(resp http.ResponseWriter, r *http.Request
 	}
 	w.p.quota.pollAll(time.Now())
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "refreshed"})
+}
+
+// handleHealthReset clears frozen runtime health state (circuit-open and
+// rate-limit cooldowns, plus model-level lockouts) so a provider is retried
+// immediately instead of waiting out a possibly hours-long cooldown
+// (quota-exhausted 429s freeze a provider for quota_cooldown / until midnight).
+// Empty body = all providers; {"provider":"<key>"} = one (a pooled parent
+// matches all its virtual accounts). Sticky routes, pins, and learned param
+// blocklists are NOT cleared. Operator escape hatch for abnormal edge cases
+// (account topped up, misclassified 429, upstream window reset early).
+func (w *webServer) handleHealthReset(resp http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider,omitempty"`
+	}
+	// Empty body is valid (= reset ALL). A MALFORMED body must not be read as
+	// empty — that would turn "unfreeze one provider" into "reset everything".
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeJSONErr(resp, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
+	cleared, locks := w.p.resetHealth(req.Provider)
+	// Durably persist the cleared state BEFORE answering (P1-3b): the next
+	// periodic persist is up to quota_poll_interval away, and a restart inside
+	// that window would resurrect the frozen state from disk. A persist failure
+	// is reported, not hidden behind a success response.
+	if w.p.quota != nil {
+		if err := w.p.quota.persist(); err != nil {
+			writeJSONErr(resp, http.StatusInternalServerError, "state cleared in memory but persist failed: "+err.Error())
+			return
+		}
+	}
+	writeJSON(resp, http.StatusOK, map[string]any{
+		"cleared":             cleared,
+		"model_locks_cleared": locks,
+	})
 }
 
 // handleStats returns per-(provider, model) bucket rows from the SQLite store

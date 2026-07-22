@@ -290,3 +290,69 @@ func TestUpstreamTimeout_Failover(t *testing.T) {
 		t.Errorf("fallback should serve after timeout, got %d", got)
 	}
 }
+
+// TestHalfOpen_4xxReleasesSlot (P0-4): a provider whose half-open probe gets a
+// 4xx (client error, committed) must NOT stay stuck — the probe slot is
+// released (failure history kept) and the provider is available for the next
+// request. Before the fix, halfOpenInFlight stayed true forever (starvation).
+func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
+	primary, pHits := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+		if c <= 3 {
+			return 500, `{"e":"broken"}`, nil, 0 // trip the circuit
+		}
+		return 400, `{"e":"bad request"}`, nil, 0 // half-open probe: client error
+	})
+	defer primary.Close()
+	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+		return 200, `{"ok":true}`, nil, 0
+	})
+	defer fallback.Close()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"m1": {
+				{Provider: "primary", Model: "m1", Priority: 1},
+				{Provider: "fallback", Model: "m1", Priority: 2},
+			},
+		},
+		Scheduling: schedCfg(3, "50ms", "10s", "5s", "0s"),
+	}
+	p := NewProxy(cfg)
+	p.providers["primary"] = &testProv{key: "p"}
+	p.providers["fallback"] = &testProv{key: "f"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	for i := 0; i < 3; i++ { // trip the circuit (3× 500)
+		post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	}
+	time.Sleep(80 * time.Millisecond) // cooldown expires → half-open
+	st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	if st != 400 {
+		t.Fatalf("half-open probe: status = %d, want 400 (committed client error)", st)
+	}
+	p.healthMu.Lock()
+	h := p.health["primary"]
+	p.healthMu.Unlock()
+	if h == nil {
+		t.Fatal("primary health missing")
+	}
+	if h.halfOpenInFlight {
+		t.Error("halfOpenInFlight stuck after 4xx commit — provider would starve")
+	}
+	if h.consecutiveFailures == 0 {
+		t.Error("4xx commit must NOT clear failure history (release-neutral)")
+	}
+	if !h.available(time.Now()) {
+		t.Error("primary must be available again after the 4xx probe released the slot")
+	}
+	// Next request reaches the primary again (single-flight freed).
+	before := pHits.Load()
+	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	if pHits.Load() != before+1 {
+		t.Errorf("primary not retried after slot release: hits %d → %d", before, pHits.Load())
+	}
+}

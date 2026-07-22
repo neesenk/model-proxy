@@ -154,14 +154,19 @@ func TestRecordRateLimit_Extends(t *testing.T) {
 	p := NewProxy(cfg)
 	now := time.Now()
 	first := now.Add(60 * time.Second)
-	p.recordRateLimit("a", first)
-	// A shorter until must NOT overwrite the longer one.
-	p.recordRateLimit("a", now.Add(10*time.Second))
+	p.recordRateLimit("a", first, rlQuota)
+	// A shorter until must NOT overwrite the longer one — and its kind must not
+	// overwrite the winning horizon's kind either.
+	p.recordRateLimit("a", now.Add(10*time.Second), rlTransient)
 	p.healthMu.Lock()
 	got := p.health["a"].rateLimitedUntil
+	kind := p.health["a"].rateLimitKind
 	p.healthMu.Unlock()
 	if !got.Equal(first) {
 		t.Errorf("recordRateLimit extended: got %v want %v (should keep the later)", got, first)
+	}
+	if kind != rlQuota {
+		t.Errorf("rateLimitKind = %v want rlQuota (kind follows the winning horizon)", kind)
 	}
 }
 
@@ -173,7 +178,7 @@ func TestRecordSuccess_ClearsCircuit(t *testing.T) {
 	p.healthMu.Lock()
 	p.health["a"] = &providerHealth{consecutiveFailures: 5, circuitOpenUntil: time.Now().Add(5 * time.Minute), halfOpenInFlight: true}
 	p.healthMu.Unlock()
-	p.recordSuccess("a")
+	p.recordSuccess("a", "m1")
 	p.healthMu.Lock()
 	h := p.health["a"]
 	p.healthMu.Unlock()
@@ -200,51 +205,84 @@ func TestRecordFailure_OpensCircuitAtThreshold(t *testing.T) {
 	}
 }
 
-// --- parseRateLimit: Retry-After seconds / HTTP-date / negative / missing ---
+// --- parseRateLimit: body hint > Retry-After > per-class default ---
 
 func TestParseRateLimit(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
 	p := NewProxy(cfg)
-	sched := Scheduling{RateLimitBackoff: "60s"}
+	sched := Scheduling{RateLimitBackoff: "60s", QuotaCooldown: "2h"}
 	now := time.Now()
 
 	// Seconds.
 	r := &http.Response{Header: http.Header{"Retry-After": []string{"120"}}}
-	got := p.parseRateLimit(r, now, sched)
+	got, kind := p.parseRateLimit(r, nil, now, sched)
 	if d := got.Sub(now); d < 119*time.Second || d > 121*time.Second {
 		t.Errorf("seconds Retry-After: got %v want ~120s", d)
 	}
+	if kind != rlTransient {
+		t.Errorf("no body: kind = %v want transient", kind)
+	}
 	// Negative seconds clamped to 0.
 	r = &http.Response{Header: http.Header{"Retry-After": []string{"-5"}}}
-	got = p.parseRateLimit(r, now, sched)
+	got, _ = p.parseRateLimit(r, nil, now, sched)
 	if got.Before(now) {
 		t.Errorf("negative Retry-After: got %v before now", got)
 	}
 	// HTTP-date.
 	future := now.Add(2 * time.Hour)
 	r = &http.Response{Header: http.Header{"Retry-After": []string{future.UTC().Format(http.TimeFormat)}}}
-	got = p.parseRateLimit(r, now, sched)
+	got, _ = p.parseRateLimit(r, nil, now, sched)
 	if got.Unix() != future.Unix() {
 		t.Errorf("HTTP-date Retry-After: got %v want %v", got, future)
 	}
 	// HTTP-date in the past → clamped to now.
 	past := now.Add(-1 * time.Hour)
 	r = &http.Response{Header: http.Header{"Retry-After": []string{past.UTC().Format(http.TimeFormat)}}}
-	got = p.parseRateLimit(r, now, sched)
+	got, _ = p.parseRateLimit(r, nil, now, sched)
 	if got.Before(now) {
 		t.Errorf("past HTTP-date: got %v before now", got)
 	}
 	// Missing Retry-After → default backoff.
 	r = &http.Response{Header: http.Header{}}
-	got = p.parseRateLimit(r, now, sched)
+	got, _ = p.parseRateLimit(r, nil, now, sched)
 	if d := got.Sub(now); d != 60*time.Second {
 		t.Errorf("missing Retry-After: got %v want 60s", d)
 	}
 	// Garbage Retry-After → default backoff.
 	r = &http.Response{Header: http.Header{"Retry-After": []string{"not-a-number-or-date"}}}
-	got = p.parseRateLimit(r, now, sched)
+	got, _ = p.parseRateLimit(r, nil, now, sched)
 	if d := got.Sub(now); d != 60*time.Second {
 		t.Errorf("garbage Retry-After: got %v want 60s", d)
+	}
+
+	// Body reset hint beats the Retry-After header.
+	r = &http.Response{Header: http.Header{"Retry-After": []string{"120"}}}
+	got, kind = p.parseRateLimit(r, []byte(`{"error":"quota exceeded, reset after 2h5m"}`), now, sched)
+	if d := got.Sub(now); d < 2*time.Hour+4*time.Minute || d > 2*time.Hour+6*time.Minute {
+		t.Errorf("body hint should win over header: got %v want ~2h5m", d)
+	}
+	if kind != rlQuota {
+		t.Errorf("quota body: kind = %v want rlQuota", kind)
+	}
+
+	// Quota class without any hint → quota_cooldown (2h here).
+	r = &http.Response{Header: http.Header{}}
+	got, kind = p.parseRateLimit(r, []byte(`{"error":"insufficient_quota"}`), now, sched)
+	if d := got.Sub(now); d != 2*time.Hour {
+		t.Errorf("quota class default: got %v want 2h", d)
+	}
+	if kind != rlQuota {
+		t.Errorf("kind = %v want rlQuota", kind)
+	}
+
+	// Daily class without any hint → next local midnight.
+	got, kind = p.parseRateLimit(r, []byte(`{"error":"today's quota exhausted"}`), now, sched)
+	if kind != rlDaily {
+		t.Errorf("kind = %v want rlDaily", kind)
+	}
+	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	if !got.Equal(midnight) {
+		t.Errorf("daily class: got %v want local midnight %v", got, midnight)
 	}
 }
 

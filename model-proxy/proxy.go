@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,27 +37,29 @@ func nextRequestID() string {
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
-	mu        sync.RWMutex // guards cfg/providers across reload (held by handler for the request)
-	healthMu  sync.Mutex   // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
-	cfg       *Config
-	providers map[string]provider.Provider // provider name → Provider (shared)
-	client    *http.Client
-	health    map[string]*providerHealth    // provider name → circuit/rate-limit state
-	sticky    map[string]routeSticky        // exposed model → current provider + since
-	pins      map[string]pinEntry           // exposed model → manual pin (healthMu); hot-switch, overrides schedule
-	quota     *quotaTracker                 // background quota poller; nil only in degenerate tests
-	metrics   *metricsStore                 // request counters (atomic); nil only in degenerate tests
-	tokens    *tokenCounter                 // SSE-scanned token usage; nil only in degenerate tests
-	agents    *agentCounter                 // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats     *statsStore                   // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
-	flusher   *statsFlusher                 // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog    *requestLogger                // per-request access log (full bodies); nil = disabled (default) or init failure
-	cache     *responseCache                // exact-match response cache (prompt-hash + TTL); nil = disabled
-	events    *eventHub                     // live request monitor fan-out hub (SSE /api/events); always non-nil
-	fusionReg *fusionRegistry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
-	catalog   *modelsDevCatalog             // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
-	shadow    atomic.Pointer[shadowRuntime] // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
-	pricingMu sync.Mutex                    // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
+	mu         sync.RWMutex // guards cfg/providers across reload (held by handler for the request)
+	healthMu   sync.Mutex   // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
+	cfg        *Config
+	providers  map[string]provider.Provider // provider name → Provider (shared)
+	client     *http.Client
+	health     map[string]*providerHealth       // provider name → circuit/rate-limit state
+	sticky     map[string]routeSticky           // exposed model → current provider + since
+	pins       map[string]pinEntry              // exposed model → manual pin (healthMu); hot-switch, overrides schedule
+	modelLocks map[modelLockKey]*modelLockEntry // (provider,model) → model-level failure lockout (healthMu); isolates a bad model without poisoning the account
+	paramBlock map[modelLockKey]map[string]bool // {provider,model} → learned unsupported top-level request params, stripped before send (healthMu)
+	quota      *quotaTracker                    // background quota poller; nil only in degenerate tests
+	metrics    *metricsStore                    // request counters (atomic); nil only in degenerate tests
+	tokens     *tokenCounter                    // SSE-scanned token usage; nil only in degenerate tests
+	agents     *agentCounter                    // per-agent (UA) request/token counters; nil only in degenerate tests
+	stats      *statsStore                      // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
+	flusher    *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog     *requestLogger                   // per-request access log (full bodies); nil = disabled (default) or init failure
+	cache      *responseCache                   // exact-match response cache (prompt-hash + TTL); nil = disabled
+	events     *eventHub                        // live request monitor fan-out hub (SSE /api/events); always non-nil
+	fusionReg  *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
+	catalog    *modelsDevCatalog                // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
+	shadow     atomic.Pointer[shadowRuntime]    // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
+	pricingMu  sync.Mutex                       // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -79,7 +83,8 @@ type providerHealth struct {
 	consecutiveFailures int
 	circuitOpenUntil    time.Time // zero = closed
 	rateLimitedUntil    time.Time // zero = not limited
-	halfOpenInFlight    bool      // a half-open probe is running
+	rateLimitKind       rateLimitKind
+	halfOpenInFlight    bool // a half-open probe is running
 }
 
 // routeSticky records the provider a route is currently parked on + when it was
@@ -87,6 +92,22 @@ type providerHealth struct {
 type routeSticky struct {
 	provider string
 	since    time.Time
+}
+
+// modelLockKey identifies a (provider, model) pair for model-level failure
+// isolation: a model removed upstream (404), denied on this account (400/403
+// model-denied), or returning empty 200s locks ONLY that pair — the account's
+// other models keep serving. Guarded by healthMu.
+type modelLockKey struct {
+	provider string
+	model    string
+}
+
+// modelLockEntry is the lockout state of one (provider, model): consecutive
+// model-level failures + the lockout horizon (zero = not locked).
+type modelLockEntry struct {
+	failures    int
+	lockedUntil time.Time
 }
 
 // pinEntry is a manual route→provider pin (model-proxy pin <route> <provider>
@@ -255,18 +276,30 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 func NewProxy(cfg *Config) *Proxy {
 	providers, poolIndex, parentOf := buildProviders(cfg)
 	p := &Proxy{
-		cfg:       cfg,
-		providers: providers,
-		client:    &http.Client{Timeout: 0},
-		health:    map[string]*providerHealth{},
-		sticky:    map[string]routeSticky{},
-		pins:      map[string]pinEntry{},
-		spreadCtr: map[string]uint64{},
-		poolIndex: poolIndex,
-		parentOf:  parentOf,
+		cfg:        cfg,
+		providers:  providers,
+		client:     &http.Client{Timeout: 0},
+		health:     map[string]*providerHealth{},
+		sticky:     map[string]routeSticky{},
+		modelLocks: map[modelLockKey]*modelLockEntry{},
+		paramBlock: map[modelLockKey]map[string]bool{},
+		pins:       map[string]pinEntry{},
+		spreadCtr:  map[string]uint64{},
+		poolIndex:  poolIndex,
+		parentOf:   parentOf,
 	}
 	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutes(cfg)
 	p.expandedRoutes = p.buildExpandedRoutes()
+	// Config-time routing hazards (reasoning-replay models behind conversion,
+	// missing protocol: on hint providers): appended to the warnings channel
+	// (/api/status + `models` CLI) AND logged — the operator should see them at
+	// boot, not only when they open the dashboard.
+	if hw := configRoutingWarnings(cfg, p.expandedRoutes); len(hw) > 0 {
+		p.routeWarnings = append(p.routeWarnings, hw...)
+		for _, w := range hw {
+			log.Printf("[startup] ⚠ %s", w)
+		}
+	}
 	// The tracker reads cfg/providers asynchronously via the snapshot closures
 	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
 	home, _ := os.UserHomeDir()
@@ -275,6 +308,7 @@ func NewProxy(cfg *Config) *Proxy {
 		func() *Config { return p.cfgSnapshot() },
 		func() map[string]provider.Provider { return p.providerSnapshot() })
 	p.quota.stickySnapshot = p.snapshotSticky
+	p.quota.healthSnapshot = p.snapshotHealth
 	p.quota.start()
 	p.metrics = newMetricsStore()
 	// SSE token counter. Persistence (baseline restore + per-minute flush) is
@@ -301,10 +335,64 @@ func NewProxy(cfg *Config) *Proxy {
 	p.shadow.Store(newShadowRuntime(cfg))
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
-	if loaded := p.quota.LoadedSticky; len(loaded) > 0 {
+	// Gated like the health restore below: a file with a MISMATCHING config
+	// fingerprint belongs to a different config (or a test binary sharing the
+	// state file) — its route→provider parks must not leak over (route names
+	// like "m1" collide across configs even when providers don't). Legacy
+	// files without a fingerprint keep the historical restore behavior.
+	fp := healthConfigFingerprint(cfg)
+	fpMatch := p.quota.LoadedHealthFP == "" || p.quota.LoadedHealthFP == fp
+	if loaded := p.quota.LoadedSticky; len(loaded) > 0 && fpMatch {
 		p.healthMu.Lock()
 		for k, v := range loaded {
 			p.sticky[k] = v
+		}
+		p.healthMu.Unlock()
+	}
+	// Restore frozen health state (rate-limit/circuit cooldowns, model lockouts,
+	// learned param blocklist) persisted before the last restart — ONLY when the
+	// file's config fingerprint matches the current config: health is keyed by
+	// provider name, so without the gate a different config (or a test binary
+	// sharing the state file) would inherit cooldowns onto unrelated same-named
+	// providers. Only future-dated cooldowns are applied — expired ones
+	// self-heal by being dropped. A restored circuit gets a full failure count
+	// so its next failure re-opens it immediately (same semantics as before).
+	if loaded := p.quota.LoadedHealth; len(loaded) > 0 && p.quota.LoadedHealthFP != "" && p.quota.LoadedHealthFP == fp {
+		now := time.Now()
+		threshold := cfg.Scheduling.threshold()
+		p.healthMu.Lock()
+		for name, ph := range loaded {
+			if now.Before(ph.RateLimitedUntil) || now.Before(ph.CircuitOpenUntil) {
+				h := p.health[name]
+				if h == nil {
+					h = &providerHealth{}
+					p.health[name] = h
+				}
+				if now.Before(ph.RateLimitedUntil) {
+					h.rateLimitedUntil = ph.RateLimitedUntil
+					h.rateLimitKind = rateLimitKindFromString(ph.RateLimitKind)
+				}
+				if now.Before(ph.CircuitOpenUntil) {
+					h.circuitOpenUntil = ph.CircuitOpenUntil
+					h.consecutiveFailures = threshold
+				}
+			}
+			for model, until := range ph.ModelLocks {
+				if now.Before(until) {
+					p.modelLocks[modelLockKey{provider: name, model: model}] = &modelLockEntry{failures: 1, lockedUntil: until}
+				}
+			}
+			for model, params := range ph.ParamBlock {
+				k := modelLockKey{provider: name, model: model}
+				m := p.paramBlock[k]
+				if m == nil {
+					m = map[string]bool{}
+					p.paramBlock[k] = m
+				}
+				for _, param := range params {
+					m[param] = true
+				}
+			}
 		}
 		p.healthMu.Unlock()
 	}
@@ -459,6 +547,87 @@ func (p *Proxy) snapshotSticky() map[string]routeSticky {
 	return out
 }
 
+// healthConfigFingerprint identifies the exact provider config that frozen
+// health state belongs to. Persisted cooldowns restore only on an exact match
+// — health is keyed by provider NAME, so without this gate a different config
+// (or a test binary sharing ~/.model-proxy/quota_state.json) would "restore"
+// cooldowns onto unrelated same-named providers.
+func healthConfigFingerprint(cfg *Config) string {
+	names := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		p := cfg.Providers[name]
+		fmt.Fprintf(h, "%s|%s|%s|%s\n", name, p.Provider, p.OpenAIBaseURL, p.AnthropicBaseURL)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// snapshotHealth returns the frozen runtime health state (rate-limit/circuit
+// cooldowns, model lockouts, learned param blocklist) for persistence by the
+// quota tracker (restored on boot — see NewProxy). Only entries carrying
+// actual state are included; healthy providers are omitted. Takes healthMu —
+// never call it while holding quotaMu (lock order healthMu → quotaMu).
+func (p *Proxy) snapshotHealth() map[string]persistedHealth {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	out := make(map[string]persistedHealth, len(p.health))
+	// Iterate the UNION of health ∪ paramBlock keys: a provider with only
+	// learned params (never failed) has no health entry — dropping it here
+	// would silently lose the blocklist on restart (P1-2d).
+	names := make(map[string]bool, len(p.health)+len(p.paramBlock))
+	for name := range p.health {
+		names[name] = true
+	}
+	for k := range p.paramBlock {
+		names[k.provider] = true
+	}
+	for name := range names {
+		ph := persistedHealth{}
+		if h := p.health[name]; h != nil {
+			ph.RateLimitedUntil = h.rateLimitedUntil
+			ph.CircuitOpenUntil = h.circuitOpenUntil
+			if now := time.Now(); now.Before(h.rateLimitedUntil) {
+				ph.RateLimitKind = h.rateLimitKind.String()
+			}
+		}
+		if ph.RateLimitedUntil.IsZero() && ph.CircuitOpenUntil.IsZero() && len(ph.ParamBlock) == 0 {
+			continue // healthy + nothing learned — omit
+		}
+		out[name] = ph
+	}
+	// Model lockouts + param blocklists fold into their provider's entry
+	// (creating one when the provider itself has no health record).
+	for k, e := range p.modelLocks {
+		ph := out[k.provider]
+		if ph.ModelLocks == nil {
+			ph.ModelLocks = map[string]time.Time{}
+		}
+		ph.ModelLocks[k.model] = e.lockedUntil
+		out[k.provider] = ph
+	}
+	for k, m := range p.paramBlock {
+		if len(m) == 0 {
+			continue
+		}
+		ph := out[k.provider]
+		if ph.ParamBlock == nil {
+			ph.ParamBlock = map[string][]string{}
+		}
+		params := make([]string, 0, len(m))
+		for param := range m {
+			params = append(params, param)
+		}
+		sort.Strings(params)
+		ph.ParamBlock[k.model] = params
+		out[k.provider] = ph
+	}
+	return out
+}
+
 func (p *Proxy) reload(configPath string) error {
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
@@ -478,8 +647,9 @@ func (p *Proxy) reload(configPath string) error {
 	p.poolIndex = newPoolIndex
 	p.parentOf = newParentOf
 	p.implicitRoutes = newImplicit
-	p.routeWarnings = newWarnings
 	p.expandedRoutes = p.buildExpandedRoutes()
+	hw := configRoutingWarnings(cfg, p.expandedRoutes)
+	p.routeWarnings = append(newWarnings, hw...)
 	// Rebuild the cache from the new config (pure in-memory, no goroutine/file
 	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now
 	// takes effect immediately.
@@ -490,12 +660,17 @@ func (p *Proxy) reload(configPath string) error {
 	// restart. Swapped atomically; in-flight shadow goroutines finish on the old bundle.
 	p.shadow.Store(newShadowRuntime(cfg))
 	p.mu.Unlock()
+	for _, w := range hw {
+		log.Printf("[reload] ⚠ %s", w)
+	}
 	// Reset health + sticky state — a reload is the operator's way to clear
 	// stuck circuit-open / rate-limited / sticky-dwell state.
 	p.healthMu.Lock()
 	p.health = map[string]*providerHealth{}
 	p.sticky = map[string]routeSticky{}
 	p.spreadCtr = map[string]uint64{}
+	p.modelLocks = map[modelLockKey]*modelLockEntry{}
+	p.paramBlock = map[modelLockKey]map[string]bool{}
 	p.healthMu.Unlock()
 	// The tracker reads the new cfg/providers via its snapshot closures, so it
 	// is NOT stopped/recreated on reload. Kick an immediate poll so newly added
@@ -594,7 +769,14 @@ func synthesizeImplicitRoutesFrom(cfg *Config, loggedIn map[string]bool) (implic
 			continue // explicit route wins
 		}
 		sort.Strings(provs)
-		implicit[model] = RouteTarget{Provider: provs[0], Model: model, Priority: 1}
+		tgt := RouteTarget{Provider: provs[0], Model: model, Priority: 1}
+		// Fill the wire-protocol hint for providers whose API shape differs from
+		// the client's (codex: openai) — without it an anthropic client would
+		// send an anthropic-shaped body to an openai-family upstream.
+		if hint := provider.ProtocolHint(cfg.Providers[provs[0]].Provider, model); hint != "" {
+			tgt.Protocol = hint
+		}
+		implicit[model] = tgt
 		if len(provs) > 1 {
 			warnings = append(warnings, fmt.Sprintf("model %q served by %d logged-in providers (%s); auto-routing to %s — add an explicit route to choose",
 				model, len(provs), strings.Join(provs, ", "), provs[0]))
@@ -984,22 +1166,6 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	for k := range expanded {
 		routeKeys[k] = true
 	}
-	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys)
-	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
-	// overrides request-aware routing (no cross-route reroute away from the pinned
-	// provider) and, via the `force` flag into tryTarget, bypasses the circuit
-	// breaker — the user explicitly asked for THIS backend, no failover.
-	if !force {
-		// Request-aware routing (#8 capability + #9 context, unified): keep targets
-		// that fit the request (image capability + context window); if none in the
-		// route fit, fall back to a cross-route capable+fitting pool ranked by the
-		// normal scheduling policy. No-op when everything already fits.
-		ordered = p.applyRequestAwareRouting(cfg, parentOf, cat, exposed, sessionKey, ordered, expanded, routeKeys, origBody)
-	}
-	if p.scheduleHook != nil {
-		p.scheduleHook(sessionKey)
-	}
-
 	// requestID groups this client request's failover attempts in the per-request
 	// access log + live events. Always generated (cheap: one atomic add) so live
 	// start↔end pairing works even when request logging is off.
@@ -1020,12 +1186,141 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		Exposed:   exposed,
 	})
 
-	// retriedForContext makes the context-overflow retry one-shot: the first
-	// overflow retargets onto strictly-larger-context models (ordered is swapped
-	// and the loop restarts); a second overflow from the retried list commits
-	// the upstream 400 to the client.
-	retriedForContext := false
-	attempt := 0 // monotonic tryTarget index for the request log (ti resets on a context retry)
+	// Cooldown-aware wait-retry (#6): when EVERY target is in a cooldown
+	// (rate-limit / circuit) and the earliest expiry is within retry_wait, sleep
+	// until it lapses and re-run the whole pass — a short silent wait beats an
+	// immediate error the agent would just retry anyway (with a fresh round-trip
+	// each time). Bounded: ≤2 retries, each wait ≤ retry_wait; a client
+	// disconnect aborts the wait. Skipped for one-shot force-provider overrides
+	// (replay wants the answer now).
+	retryWait := cfg.Scheduling.retryWait()
+	var st serveState
+	var sawHard, sawCool bool
+	for round := 0; ; round++ {
+		res := p.serveOnce(cfg, provs, poolIndex, parentOf, expanded, cat, proto, upPath, exposed, calledModel, sessionKey, targets, routeKeys, force, cache, cacheKey, w, r, agent, requestID, origBody, &st)
+		if res.committed {
+			return
+		}
+		sawHard = sawHard || res.sawHard
+		sawCool = sawCool || res.sawCooldown
+		now := time.Now()
+		allDown, allRateLimited, earliest := p.cooldownState(targets, now)
+		if forceProvider(r) == "" && retryWait > 0 && round < 2 {
+			if allDown {
+				if sleep := earliest.Sub(now); sleep > 0 && sleep <= retryWait {
+					log.Printf("[proto=%s model=%s] all targets cooling down; retry %d/2 in %s", proto, exposed, round+1, sleep.Round(time.Millisecond))
+					select {
+					case <-time.After(sleep):
+						continue
+					case <-r.Context().Done():
+						// Client gave up waiting — close the live event pair (499 =
+						// client closed request) and write nothing.
+						p.events.publish(liveEvent{
+							Type: "end", Ts: time.Now().UnixMilli(), RequestID: requestID,
+							Agent: agent, Protocol: proto, Exposed: exposed, Status: 499,
+						})
+						return
+					}
+				}
+			} else if p.hasRecoveredUntried(targets, res.tried, now) {
+				// TOCTOU (P0-5): a target recovered between scheduling and this
+				// terminal check but was never tried in the failed pass (its
+				// cooldown lapsed mid-pass while a sibling re-failed). Give it an
+				// immediate, zero-wait pass — still inside the round budget —
+				// instead of erroring out while a servable target exists.
+				log.Printf("[proto=%s model=%s] a cooled-down target recovered; retrying immediately (round %d/2)", proto, exposed, round+1)
+				continue
+			}
+		}
+		// Terminal: every target failed. The status is honest about the CLASS of
+		// failures seen ACROSS ALL PASSES (not a racy health re-read — a target
+		// whose cooldown lapsed mid-request without a retry must not flip the
+		// verdict): pure rate-limit → 429 + Retry-After (the upstreams' own
+		// answer, per RFC 9110); any hard failure → 502. Attribute the failure
+		// to the calling agent so failing-only agents stay visible (first-tried
+		// target = where the request WAS directed).
+		if p.agents != nil && agent != "" && res.firstTried.Provider != "" {
+			p.agents.incRequests(agent, res.firstTried.Provider, res.firstTried.Model)
+			p.agents.incFailure(agent, res.firstTried.Provider, res.firstTried.Model)
+		}
+		status := http.StatusBadGateway
+		msg := fmt.Sprintf("all targets failed for model %q", exposed)
+		if !sawHard && (sawCool || (allDown && allRateLimited)) {
+			d := time.Until(earliest)
+			if d <= 0 {
+				d = cfg.Scheduling.rateBackoff() // horizon already lapsed: use the transient default
+			}
+			secs := int(d / time.Second)
+			if d%time.Second != 0 {
+				secs++
+			}
+			if secs < 1 {
+				secs = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+			status = http.StatusTooManyRequests
+			msg = fmt.Sprintf("all providers for model %q are rate-limited; retry after %ds", exposed, secs)
+		}
+		// Live monitor (#6): every target failed → emit an end event so the live
+		// view surfaces the failure (a retry-looping agent that always errors is
+		// otherwise invisible — only starts, never ends).
+		p.events.publish(liveEvent{
+			Type:      "end",
+			Ts:        time.Now().UnixMilli(),
+			RequestID: requestID,
+			Agent:     agent,
+			Protocol:  proto,
+			Exposed:   exposed,
+			Status:    status,
+		})
+		http.Error(w, msg, status)
+		return
+	}
+}
+
+// serveState carries the two per-request pieces of state that must survive a
+// cooldown wait-retry round (serveOnce is otherwise re-entrant).
+type serveState struct {
+	retriedForContext bool // the larger-context retry is one-shot per request
+	attempt           int  // monotonic tryTarget index for the request log (ti resets on a context retry)
+}
+
+// serveResult is the outcome of one serveOnce pass: where the request was
+// first directed, who was actually tried, and the failure CLASS mix — the
+// terminal status derives from these (pure cooldown → 429; any hard → 502),
+// NOT from a racy health re-read at terminal time.
+type serveResult struct {
+	committed   bool
+	firstTried  RouteTarget
+	tried       map[string]bool // providers actually attempted this pass
+	sawHard     bool            // conn/timeout/5xx/401/build/model-denied-class failure
+	sawCooldown bool            // at least one 429 this pass
+}
+
+// serveOnce runs ONE full scheduling + failover pass: schedule → request-aware
+// routing → try each target in order (fusion recipes intercepted). forward
+// calls it in a wait-retry loop for all-cooldown situations.
+func (p *Proxy) serveOnce(cfg *Config, provs map[string]provider.Provider, poolIndex map[string][]string, parentOf map[string]string, expanded map[string][]RouteTarget, cat *modelsDevCatalog, proto, upPath, exposed, calledModel, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, force bool, cache *responseCache, cacheKey string, w http.ResponseWriter, r *http.Request, agent, requestID string, origBody []byte, st *serveState) serveResult {
+	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys)
+	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
+	// overrides request-aware routing (no cross-route reroute away from the pinned
+	// provider) and, via the `force` flag into tryTarget, bypasses the circuit
+	// breaker — the user explicitly asked for THIS backend, no failover.
+	if !force {
+		// Request-aware routing (#8 capability + #9 context, unified): keep targets
+		// that fit the request (image capability + context window); if none in the
+		// route fit, fall back to a cross-route capable+fitting pool ranked by the
+		// normal scheduling policy. No-op when everything already fits.
+		ordered = p.applyRequestAwareRouting(cfg, parentOf, cat, exposed, sessionKey, ordered, expanded, routeKeys, origBody)
+	}
+	if p.scheduleHook != nil {
+		p.scheduleHook(sessionKey)
+	}
+	var firstTried RouteTarget
+	if len(ordered) > 0 {
+		firstTried = ordered[0]
+	}
+	res := serveResult{firstTried: firstTried, tried: map[string]bool{}}
 	for ti := 0; ti < len(ordered); ti++ {
 		t := ordered[ti]
 		// Fusion orchestration: {provider: fusion, model: <recipe>} is NOT a
@@ -1042,13 +1337,17 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			fc := fusionCtx{
 				cfg: cfg, provs: provs, parentOf: parentOf, poolIndex: poolIndex,
 				proto: proto, calledModel: calledModel, upPath: upPath, agent: agent,
-				origBody: origBody,
-				flc:      forwardLogCtx{requestID: requestID, attempt: attempt, exposed: exposed, origBody: origBody},
+				sessionKey: sessionKey,
+				origBody:   origBody,
+				flc:        forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, origBody: origBody},
 			}
-			attempt++
+			st.attempt++
+			res.tried[t.Provider] = true
 			if p.runFusion(fc, t.Model, recipe, w, r, cacheKey, cache) {
-				return // committed: response written to the client
+				res.committed = true
+				return res // committed: response written to the client
 			}
+			res.sawHard = true // a failed fusion run is opaque → treat as hard
 			log.Printf("[proto=%s model=%s] target %d (fusion/%s) failed; trying next", proto, exposed, ti, t.Model)
 			continue
 		}
@@ -1102,8 +1401,8 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			effPath = backendPath(backendProto)
 		}
 
-		flc := forwardLogCtx{requestID: requestID, attempt: attempt, exposed: exposed, origBody: origBody}
-		attempt++
+		flc := forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, origBody: origBody}
+		st.attempt++
 		// One-shot larger-context retry: when this target answers a
 		// context-overflow 400, tryTarget calls ctxRetry for a strictly-larger-
 		// context replacement list (cross-route pool, scheduled) instead of
@@ -1111,7 +1410,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		// pin is in force (exclusive: no cross-route reroute), or without a
 		// catalog (same no-op degradation as applyRequestAwareRouting).
 		var ctxRetry func() []RouteTarget
-		if !retriedForContext && !force && cat != nil {
+		if !st.retriedForContext && !force && cat != nil {
 			// Only capture targets ACTUALLY tried so far (through the current
 			// index), not the full ordered list — failover targets further down
 			// haven't been attempted yet and shouldn't anchor the "strictly larger
@@ -1121,12 +1420,20 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody)
 			}
 		}
-		committed, retried := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry)
+		committed, retried, outcome := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry, ti == len(ordered)-1)
+		res.tried[t.Provider] = true
+		switch outcome {
+		case tryFailedHard:
+			res.sawHard = true
+		case tryRateLimited:
+			res.sawCooldown = true
+		}
 		if committed {
-			return // committed: response written to the client
+			res.committed = true
+			return res // committed: response written to the client
 		}
 		if retried != nil {
-			retriedForContext = true
+			st.retriedForContext = true
 			log.Printf("[proto=%s model=%s] target %d (%s/%s) context overflow; retrying with larger-context targets", proto, exposed, ti, t.Provider, t.Model)
 			ordered = retried
 			ti = -1 // restart at the first replacement target (post-statement ti++ → 0)
@@ -1134,27 +1441,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
 	}
-	// Attribute the failed request to the calling agent so 502-only agents are
-	// visible in the Agents view (not just agents whose requests succeed). The
-	// first-tried target's provider/model is the attribution (the request WAS
-	// directed there — it just failed).
-	if p.agents != nil && agent != "" && len(ordered) > 0 {
-		p.agents.incRequests(agent, ordered[0].Provider, ordered[0].Model)
-		p.agents.incFailure(agent, ordered[0].Provider, ordered[0].Model)
-	}
-	// Live monitor (#6): every target failed → emit an end event so the live view
-	// surfaces the 502 (otherwise a retry-looping agent that always 502s is
-	// invisible — only starts, never ends).
-	p.events.publish(liveEvent{
-		Type:      "end",
-		Ts:        time.Now().UnixMilli(),
-		RequestID: requestID,
-		Agent:     agent,
-		Protocol:  proto,
-		Exposed:   exposed,
-		Status:    http.StatusBadGateway,
-	})
-	http.Error(w, fmt.Sprintf("all targets failed for model %q", exposed), http.StatusBadGateway)
+	return res
 }
 
 // tryTarget sends the request to one target, with a 401-refresh retry and an
@@ -1168,18 +1455,47 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 // the provider's health on success/failure/rate-limit and enforces half-open
 // single-flight. Failover/retarget only happen before any bytes are written
 // to w.
-func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx, ctxRetry func() []RouteTarget) (committed bool, retried []RouteTarget) {
+// tryOutcome classifies a failed (non-committed) tryTarget attempt, for the
+// terminal-status decision in forward: a request whose failures are ALL
+// cooldown-flavored ends as 429 (+Retry-After); any hard failure makes it 502.
+type tryOutcome int
+
+const (
+	tryNone        tryOutcome = iota // not attempted (locked / unavailable / no info)
+	tryFailedHard                    // conn error / timeout / 401-after-refresh / 5xx / build / auth / model-denied class
+	tryRateLimited                   // 429
+)
+
+func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx, ctxRetry func() []RouteTarget, lastTarget bool) (committed bool, retried []RouteTarget, outcome tryOutcome) {
 	// Wrap the client writer to capture time-to-first-token for latency stats.
 	// All writes below go through tw; ttft is read on the commit path.
 	tw := newTimingResponseWriter(w)
 	w = tw
 	sched := cfg.Scheduling
+	// Fail CLOSED on a missing runtime implementation: nil impl would silently
+	// skip AuthHeaders/RewriteRequest and ship an UNAUTHENTICATED request
+	// upstream (pooled parent leaking through, provider not logged in). This is
+	// a build/config failure, not a provider failure — no circuit, no model lock.
+	if provImpl == nil {
+		log.Printf("[proto=%s provider=%s] no runtime provider implementation (not logged in / unresolved pooled parent) — failing closed", proto, t.Provider)
+		if p.metrics != nil {
+			p.metrics.inc(t.Provider, t.Model, evFailovers)
+		}
+		return false, nil, tryFailedHard
+	}
+	// Model-level lockout: schedule() already filters locked (provider, model)
+	// pairs; this is the race guard for locks recorded after scheduling. Checked
+	// BEFORE takeHalfOpenSlot so a locked model never burns the half-open probe.
+	// force (pin / x-mp-force-provider) bypasses — the user asked for THIS target.
+	if !force && p.modelLocked(t.Provider, t.Model, time.Now()) {
+		return false, nil, tryNone
+	}
 	// Re-check availability and reserve the half-open probe slot if needed. A pin
 	// (force) bypasses the circuit breaker — the user explicitly asked for THIS
 	// backend, so circuit-open state must not block it (and there's no failover
 	// target anyway). recordSuccess on a forced hit reopens the circuit.
 	if !force && !p.takeHalfOpenSlot(t.Provider) {
-		return false, nil
+		return false, nil, tryNone
 	}
 	// recordSuccess/Failure/RateLimit below release the slot (force never took
 	// one, so those releases are harmless no-ops).
@@ -1187,6 +1503,10 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 	ctx, cancel := context.WithTimeout(r.Context(), sched.timeout())
 	defer cancel()
 
+	// Two independent one-shot retries live in this loop: 401 → auth-refresh
+	// retry (attempt-gated), and 400 unsupported-parameter → strip-retry
+	// (flag-gated below, rewinds `attempt` so it never consumes the 401 slot).
+	strippedParam := false
 	for attempt := 0; attempt < 2; attempt++ {
 		targetURL := strings.TrimRight(baseURL, "/") + upPath
 		if r.URL.RawQuery != "" {
@@ -1196,6 +1516,9 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		if provImpl != nil {
 			targetURL, body = provImpl.RewriteRequest(targetURL, body, upPath)
 		}
+		// Strip previously learned unsupported top-level parameters (#4) —
+		// after RewriteRequest, before Content-Length is derived from the body.
+		body = p.applyParamBlock(t.Provider, t.Model, body)
 
 		req, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewReader(body))
 		if err != nil {
@@ -1204,7 +1527,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil
+			return false, nil, tryFailedHard
 		}
 		copyHeaderWhitelist(req.Header, r.Header,
 			"content-type", "accept", "user-agent", "x-session-id",
@@ -1219,7 +1542,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				if p.metrics != nil {
 					p.metrics.inc(t.Provider, t.Model, evFailovers)
 				}
-				return false, nil
+				return false, nil, tryFailedHard
 			}
 		}
 		for k, v := range prov.Headers {
@@ -1242,7 +1565,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				p.metrics.inc(t.Provider, t.Model, evFailures)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil
+			return false, nil, tryFailedHard
 		}
 
 		// 401: refresh + retry once on the same target; still 401 → failure + failover.
@@ -1260,19 +1583,24 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil
+			return false, nil, tryFailedHard
 		}
-		// Rate limit (429): skip this provider until Retry-After / default backoff.
-		// Does not count toward the circuit.
+		// Rate limit (429): skip this provider until the upstream's reset hint /
+		// Retry-After / per-class default backoff. Does not count toward the circuit.
+		// The body is peeked (≤8KiB) for classification only — 429s never commit.
 		if resp.StatusCode == 429 {
-			until := p.parseRateLimit(resp, time.Now(), sched)
+			peek := peekResponseBody(resp, 8<<10)
+			until, kind := p.parseRateLimit(resp, peek, time.Now(), sched)
 			resp.Body.Close()
-			p.recordRateLimit(t.Provider, until)
+			p.recordRateLimit(t.Provider, until, kind)
+			if kind != rlTransient {
+				log.Printf("[proto=%s provider=%s] 429 classified %s — skipped until %s", proto, t.Provider, kind, until.Format(time.RFC3339))
+			}
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evRateLimited429)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil
+			return false, nil, tryRateLimited
 		}
 		// Transient upstream errors → circuit + failover.
 		if resp.StatusCode >= 500 {
@@ -1282,20 +1610,25 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				p.metrics.inc(t.Provider, t.Model, evFailures)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil
+			return false, nil, tryFailedHard
 		}
 
-		// Context-overflow retry: a 4xx whose body matches an upstream "prompt
-		// exceeds the context window" error (peeked; bytes restored transparently)
-		// is NOT committed while this request still has its one retry — count a
-		// failover (NO circuit failure: the provider is healthy, the request just
-		// doesn't fit the model) and return the larger-context replacement list
-		// for forward to retarget. With no retry left or no larger target
-		// anywhere, fall through to the normal commit: the client receives the
-		// upstream's 400 unchanged (peeked bytes included).
-		if ctxRetry != nil && resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			peek := peekResponseBody(resp, contextOverflowPeek)
-			if isContextOverflow(resp.StatusCode, peek) {
+		// 4xx classification (ONE peek, ≤64KiB, bytes restored transparently):
+		// context-overflow → one-shot larger-context retry (ctxRetry); model-level
+		// failure → model lockout + failover. Everything else falls through to
+		// the normal commit: the client receives the upstream's 4xx unchanged
+		// (peeked bytes included).
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			var peek []byte
+			if ctxRetry != nil || resp.StatusCode == 400 || resp.StatusCode == 403 || resp.StatusCode == 404 {
+				peek = peekResponseBody(resp, contextOverflowPeek)
+			}
+			// Context-overflow retry: a 4xx whose body matches an upstream "prompt
+			// exceeds the context window" error is NOT committed while this request
+			// still has its one retry — count a failover (NO circuit failure: the
+			// provider is healthy, the request just doesn't fit the model) and
+			// return the larger-context replacement list for forward to retarget.
+			if ctxRetry != nil && isContextOverflow(resp.StatusCode, peek) {
 				if bigger := ctxRetry(); len(bigger) > 0 {
 					resp.Body.Close()
 					p.releaseHalfOpenSlot(t.Provider)
@@ -1304,8 +1637,77 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 					}
 					log.Printf("[proto=%s provider=%s] context overflow (status %d); retrying on a larger-context target",
 						proto, t.Provider, resp.StatusCode)
-					return false, bigger
+					return false, bigger, tryNone
 				}
+			}
+			// Model-level failure: any 404 (the proxy only forwards known LLM
+			// paths, so an upstream 404 means the model/path is gone) or a
+			// 400/403 model-denied body. Lock ONLY (provider, model) — the
+			// account may serve its other models fine. On the last target the
+			// error still commits unchanged (the client deserves the real
+			// 404/400, not an opaque 502), but the lock is recorded so the NEXT
+			// request fails over / skips immediately.
+			// INTENTIONAL — 404/4xx failover is deliberate, see
+			// AGENTS.md「会被误认为是 bug 的设计」#2/#3.
+			if resp.StatusCode == 404 || isModelDenied(resp.StatusCode, peek) {
+				p.recordModelFailure(t.Provider, t.Model, sched)
+				if !lastTarget {
+					resp.Body.Close()
+					p.releaseHalfOpenSlot(t.Provider)
+					if p.metrics != nil {
+						p.metrics.inc(t.Provider, t.Model, evFailovers)
+					}
+					log.Printf("[proto=%s provider=%s] model %s unavailable upstream (status %d) — model locked %s, failing over",
+						proto, t.Provider, t.Model, resp.StatusCode, sched.modelLockout())
+					return false, nil, tryFailedHard
+				}
+			}
+			// Unsupported-parameter learning: a 400 naming an offending top-level
+			// parameter teaches the provider's blocklist. When THIS request
+			// carries the parameter, strip it and retry the same target once
+			// immediately (rewinding `attempt` so the retry doesn't consume the
+			// 401 slot); otherwise just learn — the next request strips it
+			// preemptively via applyParamBlock.
+			// INTENTIONAL — mutating the client's request is deliberate and
+			// narrowly gated, see AGENTS.md「会被误认为是 bug 的设计」#4.
+			if resp.StatusCode == 400 && !strippedParam {
+				if param, ok := parseUnsupportedParam(peek); ok {
+					isNew := p.learnParamBlock(t.Provider, t.Model, param)
+					if nb, did := stripTopLevelParam(body, param); did {
+						resp.Body.Close()
+						strippedParam = true
+						body = nb
+						log.Printf("[proto=%s provider=%s] 400 unsupported parameter %q — stripped, retrying",
+							proto, t.Provider, param)
+						attempt--
+						continue
+					}
+					if isNew {
+						log.Printf("[proto=%s provider=%s] learned unsupported parameter %q (stripped on future requests)",
+							proto, t.Provider, param)
+					}
+				}
+			}
+		}
+
+		// Empty-200 preflight: a 2xx announcing a zero-length body is a broken
+		// upstream response (reverse-engineered gateways do this under load), not
+		// a client error — committing it would hang the agent's turn. Classified
+		// MODEL-level (the account may serve other models fine): fail over when
+		// another target remains; on the last target the response still commits.
+		// INTENTIONAL — treating success as failure here is deliberate, see
+		// AGENTS.md「会被误认为是 bug 的设计」#1.
+		if resp.StatusCode < 300 && resp.Header.Get("Content-Length") == "0" {
+			p.recordModelFailure(t.Provider, t.Model, sched)
+			if !lastTarget {
+				resp.Body.Close()
+				p.releaseHalfOpenSlot(t.Provider)
+				if p.metrics != nil {
+					p.metrics.inc(t.Provider, t.Model, evFailovers)
+				}
+				log.Printf("[proto=%s provider=%s] empty 200 (Content-Length: 0) — model locked %s, failing over",
+					proto, t.Provider, sched.modelLockout())
+				return false, nil, tryFailedHard
 			}
 		}
 
@@ -1313,7 +1715,13 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// recordSuccess only for 2xx — 4xx (400/403/404) are client errors that
 		// shouldn't reset the circuit breaker (a persistently-403 provider is broken).
 		if resp.StatusCode < 300 {
-			p.recordSuccess(t.Provider)
+			p.recordSuccess(t.Provider, t.Model)
+		} else {
+			// …but a 4xx commit still RELEASES the half-open probe slot
+			// (release-neutral: failure history untouched) — otherwise a provider
+			// whose half-open probe gets a 4xx keeps halfOpenInFlight=true
+			// FOREVER and starves (P0-4).
+			p.releaseHalfOpenSlot(t.Provider)
 		}
 		log.Printf("[proto=%s provider=%s] %s %s model=%s→%s status=%s %dms bytes=%d",
 			proto, t.Provider, r.Method, r.URL.Path, calledModel, t.Model,
@@ -1341,14 +1749,14 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				log.Printf("[proto=%s provider=%s] %s→%s convert read failed: %v — failing closed",
 					proto, t.Provider, backendProto, proto, rerr)
 				http.Error(w, fmt.Sprintf("upstream response read failed during %s→%s conversion", backendProto, proto), http.StatusBadGateway)
-				return true, nil
+				return true, nil, tryNone
 			}
 			conv, cerr := convertResponse(all, proto, backendProto)
 			if cerr != nil {
 				log.Printf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
 					proto, t.Provider, backendProto, proto, cerr)
 				http.Error(w, fmt.Sprintf("response conversion %s→%s failed", backendProto, proto), http.StatusBadGateway)
-				return true, nil
+				return true, nil, tryNone
 			}
 			preconv = conv
 		}
@@ -1444,8 +1852,22 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			crec = newCacheRecorder(body, cache.maxBody)
 			body = crec
 		}
-		flushCopy(w, body)
+		// Count streamed bytes for the empty-200 postmortem below.
+		// INTENTIONAL — recording a failure AFTER a committed 200 is deliberate,
+		// see AGENTS.md「会被误认为是 bug 的设计」#1.
+		counting := &countingReadCloser{rc: body}
+		body = counting
+		end := flushCopy(w, body)
 		body.Close()
+		// Only a CLEAN EOF with zero bytes — client still attached — proves an
+		// empty upstream body. A client disconnect (streamClientGone) or an
+		// upstream read error (streamUpstreamErr) also yields n==0 but is NOT a
+		// model failure (P1-1c).
+		if resp.StatusCode < 300 && counting.n == 0 && end == streamEOF && r.Context().Err() == nil {
+			p.recordModelFailure(t.Provider, t.Model, sched)
+			log.Printf("[proto=%s provider=%s] 200 with zero-byte body — model locked %s (post-commit; next request fails over)",
+				proto, t.Provider, sched.modelLockout())
+		}
 		// Record latency for this committed (served) target: total wall-clock from
 		// upstream send to end of the streamed body, and TTFT from send to the
 		// first byte written to the client (falls back to total when nothing was
@@ -1525,7 +1947,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				}
 			}
 		}
-		return true, nil
+		return true, nil, tryNone
 	}
 	// 401-retry exhausted without resolution — release the slot.
 	// Defensive guard: unreachable in normal flow (the 401 branch above always
@@ -1534,7 +1956,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 	if p.metrics != nil {
 		p.metrics.inc(t.Provider, t.Model, evFailovers)
 	}
-	return false, nil
+	return false, nil, tryFailedHard
 }
 
 // shadowRuntime is the reload-swappable shadow dispatch state. reload replaces
@@ -1612,15 +2034,16 @@ func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow 
 		return // nowhere to record → no point shadowing
 	}
 	// Resolve the shadow target to a runnable virtual via the unified resolver
-	// (pooled parent → one account, round-robin). A pooled parent name has no
-	// runtime instance, so without this shadow silently stopped sampling the
-	// moment a second account was added.
-	picked, ok := newResolver(p, provs, poolIndex).Pick(RouteTarget{Provider: shadow.Provider, Model: shadow.Model, Protocol: shadow.Protocol})
+	// (pooled parent → one healthy account; "" stickyKey → spread/round-robin since
+	// shadow is fire-and-forget). A pooled parent name has no runtime instance, so
+	// without this shadow silently stopped sampling the moment a second account was
+	// added.
+	picked, ok := newResolver(p, provs, poolIndex).Pick(RouteTarget{Provider: shadow.Provider, Model: shadow.Model, Protocol: shadow.Protocol}, "")
 	if !ok {
-		log.Printf("[shadow] %s: provider not available (no runnable virtual)", shadow.Provider)
+		log.Printf("[shadow] %s: provider not available (no runnable healthy virtual)", shadow.Provider)
 		return
 	}
-	shadow.Provider = picked.target.Provider
+	shadow.Provider = picked.Provider
 	provCfg, ok := providerConfig(cfg, parentOf, shadow.Provider)
 	if !ok {
 		log.Printf("[shadow] %s: unknown provider", shadow.Provider)
@@ -1639,11 +2062,15 @@ func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow 
 	}
 	sbody := reqBody
 	if needsConversion(bodyProto, shadowProto) {
-		if cb, err := convertRequest(reqBody, bodyProto, shadowProto); err == nil {
-			sbody = cb
-		} else {
-			log.Printf("[shadow] %s: %s→%s convert failed: %v", shadow.Provider, bodyProto, shadowProto, err)
+		cb, err := convertRequest(reqBody, bodyProto, shadowProto)
+		if err != nil {
+			// Fail CLOSED: don't send the unconverted body to the shadow backend
+			// (would ship an Anthropic body to an OpenAI endpoint). Skip this
+			// shadow; it's best-effort anyway.
+			log.Printf("[shadow] %s: %s→%s convert failed: %v — skipping", shadow.Provider, bodyProto, shadowProto, err)
+			return
 		}
+		sbody = cb
 	}
 	baseURL := provCfg.OpenAIBaseURL
 	if shadowProto == "anthropic" && provCfg.AnthropicBaseURL != "" {
@@ -1889,17 +2316,17 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 		}
 	}
 
-	avail := func(name string) bool {
+	avail := func(t RouteTarget) bool {
 		if pinned {
-			return true // an active pin forces through circuit/rate-limit state
+			return true // an active pin forces through circuit/rate-limit/lockout state
 		}
-		h := p.health[name]
-		return h == nil || h.available(now)
+		h := p.health[t.Provider]
+		return (h == nil || h.available(now)) && !p.modelLockedLocked(t.Provider, t.Model, now)
 	}
 
 	var availTargets []RouteTarget
 	for _, t := range targets {
-		if avail(t.Provider) {
+		if avail(t) {
 			availTargets = append(availTargets, t)
 		}
 	}
@@ -2137,16 +2564,16 @@ func (p *Proxy) releaseHalfOpenSlot(name string) {
 	}
 }
 
-func (p *Proxy) recordSuccess(name string) {
+func (p *Proxy) recordSuccess(name, model string) {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
-	h := p.health[name]
-	if h == nil {
-		return
+	if h := p.health[name]; h != nil {
+		h.consecutiveFailures = 0
+		h.circuitOpenUntil = time.Time{}
+		h.halfOpenInFlight = false
 	}
-	h.consecutiveFailures = 0
-	h.circuitOpenUntil = time.Time{}
-	h.halfOpenInFlight = false
+	// A served (provider, model) proves the model healthy — clear its lockout.
+	delete(p.modelLocks, modelLockKey{provider: name, model: model})
 }
 
 // recordFailure increments a provider's consecutive failures and opens the
@@ -2167,12 +2594,214 @@ func (p *Proxy) recordFailure(name string, sched Scheduling) {
 	}
 }
 
-// recordRateLimit marks a provider rate-limited until `until` (extends if later)
-// and clears any half-open slot. Does not count toward the circuit. It then
-// triggers an async quota refresh of the provider so its snapshot is fresh when
-// the rate-limit clears. healthMu is released BEFORE spawning refreshOne —
-// refreshOne takes quotaMu internally and we never nest the two locks.
-func (p *Proxy) recordRateLimit(name string, until time.Time) {
+// modelLockedLocked reports whether (provider, model) is inside its lockout
+// window. Caller must hold healthMu (decideOrder's avail closure does).
+func (p *Proxy) modelLockedLocked(provider, model string, now time.Time) bool {
+	e := p.modelLocks[modelLockKey{provider: provider, model: model}]
+	return e != nil && now.Before(e.lockedUntil)
+}
+
+// modelLocked is the lock-taking variant for tryTarget's entry check.
+func (p *Proxy) modelLocked(provider, model string, now time.Time) bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	return p.modelLockedLocked(provider, model, now)
+}
+
+// recordModelFailure locks (provider, model) for model_lockout. Model-level
+// failures (404 / model-denied / empty 200) never touch the account's circuit
+// breaker — the account may serve its other models fine.
+func (p *Proxy) recordModelFailure(provider, model string, sched Scheduling) {
+	now := time.Now()
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	k := modelLockKey{provider: provider, model: model}
+	e := p.modelLocks[k]
+	if e == nil {
+		e = &modelLockEntry{}
+		p.modelLocks[k] = e
+	}
+	e.failures++
+	e.lockedUntil = now.Add(sched.modelLockout())
+}
+
+// resetHealth clears frozen runtime health state (circuit-open cooldowns,
+// rate-limit cooldowns, model lockouts) so the named provider — or every
+// provider when name == "" — is retried immediately instead of waiting out a
+// possibly hours-long cooldown (quota-exhausted 429s). Learned param
+// blocklists, sticky routes, and pins are NOT cleared (request-shape
+// knowledge / routing decisions, not frozen health). A pooled parent name
+// matches all its virtual accounts (same matching as pins). Returns the
+// cleared provider names + the number of model locks removed.
+func (p *Proxy) resetHealth(name string) (cleared []string, locks int) {
+	// parentOf is reload-guarded (p.mu); grab the reference first — reload
+	// swaps maps, never mutates them in place. Lock order mu → healthMu.
+	p.mu.RLock()
+	parentOf := p.parentOf
+	p.mu.RUnlock()
+	match := func(provider string) bool {
+		return name == "" || provider == name || parentOf[provider] == name
+	}
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	for provider := range p.health {
+		if match(provider) {
+			delete(p.health, provider)
+			cleared = append(cleared, provider)
+		}
+	}
+	for k := range p.modelLocks {
+		if match(k.provider) {
+			delete(p.modelLocks, k)
+			locks++
+		}
+	}
+	sort.Strings(cleared)
+	return cleared, locks
+}
+
+// cooldownState inspects a route's target providers' health for the wait-retry
+// decision: allDown = EVERY target's provider is currently unavailable
+// (rate-limited or circuit-open / half-open probe in flight); allRateLimited =
+// none of the down providers is there for circuit reasons (pure rate-limit —
+// the honest terminal status is then 429, not 502); earliest = soonest
+// cooldown expiry (clamped to now for half-open probes, so callers don't wait
+// on a probe that's already deciding). Model-level locks are not consulted —
+// they make schedule drop the target, which leads here via the ordinary
+// all-failed path.
+func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time) (allDown, allRateLimited bool, earliest time.Time) {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if len(targets) == 0 {
+		return false, false, time.Time{}
+	}
+	for _, t := range targets {
+		h := p.health[t.Provider]
+		if h == nil || h.available(now) {
+			return false, false, time.Time{} // a servable target exists — not an all-cooldown situation
+		}
+	}
+	allDown, allRateLimited = true, true
+	for _, t := range targets {
+		h := p.health[t.Provider]
+		rl := now.Before(h.rateLimitedUntil)
+		co := !h.circuitOpenUntil.IsZero() && now.Before(h.circuitOpenUntil)
+		var until time.Time
+		switch {
+		case rl && co:
+			// Both frozen: the provider recovers only when BOTH lapsed (max),
+			// and a circuit component means the terminal is NOT pure rate-limit.
+			allRateLimited = false
+			until = h.rateLimitedUntil
+			if h.circuitOpenUntil.After(until) {
+				until = h.circuitOpenUntil
+			}
+		case rl:
+			until = h.rateLimitedUntil
+		case co:
+			allRateLimited = false
+			until = h.circuitOpenUntil
+		default:
+			// Half-open probe in flight (or stale state): unavailable to this
+			// request, but there is no horizon worth waiting on.
+			allRateLimited = false
+			until = now
+		}
+		if until.Before(now) {
+			until = now
+		}
+		if earliest.IsZero() || until.Before(earliest) {
+			earliest = until
+		}
+	}
+	return allDown, allRateLimited, earliest
+}
+
+// hasRecoveredUntried reports the TOCTOU case: at least one target is still
+// cooling, while another has become available but was NOT tried in the failed
+// pass (its cooldown lapsed mid-pass). The caller answers with an immediate
+// zero-wait re-schedule instead of a terminal error.
+func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time) bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	anyCooling := false
+	anyRecoveredUntried := false
+	for _, t := range targets {
+		h := p.health[t.Provider]
+		if h != nil && !h.available(now) {
+			anyCooling = true
+			continue
+		}
+		if !tried[t.Provider] {
+			anyRecoveredUntried = true
+		}
+	}
+	return anyCooling && anyRecoveredUntried
+}
+
+// learnParamBlock records an upstream-rejected top-level request parameter for
+// a (provider, model); subsequent requests strip it preemptively
+// (applyParamBlock). Scoped per MODEL: one model's quirk (e.g. reasoning
+// models rejecting temperature) must not strip params for its siblings.
+// Reports whether the parameter is newly learned (for log-once).
+func (p *Proxy) learnParamBlock(provider, model, param string) (isNew bool) {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	k := modelLockKey{provider: provider, model: model}
+	m := p.paramBlock[k]
+	if m == nil {
+		m = map[string]bool{}
+		p.paramBlock[k] = m
+	}
+	isNew = !m[param]
+	m[param] = true
+	return isNew
+}
+
+// applyParamBlock strips every learned-unsupported top-level parameter for the
+// (provider, model) from the outgoing body. Best-effort: a non-JSON body (or
+// one the params aren't in) passes through unchanged.
+func (p *Proxy) applyParamBlock(provider, model string, body []byte) []byte {
+	p.healthMu.Lock()
+	var params []string
+	for k := range p.paramBlock[modelLockKey{provider: provider, model: model}] {
+		params = append(params, k)
+	}
+	p.healthMu.Unlock()
+	for _, param := range params {
+		if nb, did := stripTopLevelParam(body, param); did {
+			body = nb
+		}
+	}
+	return body
+}
+
+// stripTopLevelParam removes one top-level key from a JSON object body.
+// Best-effort: non-JSON / non-object bodies, or bodies without the key, are
+// returned unchanged with did=false.
+func stripTopLevelParam(body []byte, param string) (out []byte, did bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body, false
+	}
+	if _, ok := obj[param]; !ok {
+		return body, false
+	}
+	delete(obj, param)
+	nb, err := json.Marshal(obj)
+	if err != nil {
+		return body, false
+	}
+	return nb, true
+}
+
+// recordRateLimit marks a provider rate-limited until `until` (extends if later),
+// records the exhaustion class for display, and clears any half-open slot. Does
+// not count toward the circuit. It then triggers an async quota refresh of the
+// provider so its snapshot is fresh when the rate-limit clears. healthMu is
+// released BEFORE spawning refreshOne — refreshOne takes quotaMu internally and
+// we never nest the two locks.
+func (p *Proxy) recordRateLimit(name string, until time.Time, kind rateLimitKind) {
 	p.healthMu.Lock()
 	h := p.health[name]
 	if h == nil {
@@ -2182,6 +2811,7 @@ func (p *Proxy) recordRateLimit(name string, until time.Time) {
 	h.halfOpenInFlight = false
 	if until.After(h.rateLimitedUntil) {
 		h.rateLimitedUntil = until
+		h.rateLimitKind = kind // the kind follows the WINNING horizon, not the latest 429
 	}
 	p.healthMu.Unlock()
 	if p.quota != nil {
@@ -2189,24 +2819,45 @@ func (p *Proxy) recordRateLimit(name string, until time.Time) {
 	}
 }
 
-// parseRateLimit derives the rate-limit-until time from a 429 response: the
-// Retry-After header (seconds or HTTP-date), else the default backoff.
-func (p *Proxy) parseRateLimit(resp *http.Response, now time.Time, sched Scheduling) time.Time {
+// parseRateLimit derives the rate-limit-until time from a 429 response, most
+// precise source first: an explicit reset hint in the error body ("reset after
+// 2h5m", "Resets in 164h", RFC3339 — clamped to maxResetHint), then the
+// Retry-After header (seconds or HTTP-date), then a per-class default: daily
+// quota locks to local midnight, quota-exhausted waits quota_cooldown, and a
+// plain transient rate limit waits rate_limit_backoff.
+func (p *Proxy) parseRateLimit(resp *http.Response, bodyPeek []byte, now time.Time, sched Scheduling) (time.Time, rateLimitKind) {
+	kind := classify429(bodyPeek)
+	if t, ok := parseResetHint(bodyPeek, now); ok {
+		return t, kind
+	}
 	if ra := resp.Header.Get("Retry-After"); ra != "" {
 		if secs, err := strconv.Atoi(ra); err == nil {
 			if secs < 0 {
 				secs = 0
 			}
-			return now.Add(time.Duration(secs) * time.Second)
+			return now.Add(time.Duration(secs) * time.Second), kind
 		}
 		if t, err := http.ParseTime(ra); err == nil {
 			if t.Before(now) {
-				return now
+				return now, kind
 			}
-			return t
+			return t, kind
 		}
 	}
-	return now.Add(sched.rateBackoff())
+	switch kind {
+	case rlDaily:
+		// Lock to the next LOCAL midnight — daily quotas reset on the provider's
+		// billing-day boundary, which for our providers tracks local time.
+		// INTENTIONAL — a day-long freeze from one 429 is deliberate (the
+		// upstream declared the window); `unfreeze` is the escape hatch, see
+		// AGENTS.md「会被误认为是 bug 的设计」#5.
+		midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+		return midnight, kind
+	case rlQuota:
+		return now.Add(sched.quotaCooldown()), kind
+	default:
+		return now.Add(sched.rateBackoff()), kind
+	}
 }
 
 func parseHHMMRange(s string) (start, end int, ok bool) {
@@ -2248,10 +2899,38 @@ func isSSE(h http.Header) bool {
 	return false
 }
 
+// countingReadCloser counts the bytes streamed through it, for the empty-200
+// postmortem in tryTarget (zero bytes on a committed 2xx → model-level failure).
+type countingReadCloser struct {
+	rc io.ReadCloser
+	n  int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error { return c.rc.Close() }
+
 // flushCopy reads, writes, and flushes per chunk, supporting SSE streaming.
 // Stops immediately if the client disconnects (write error), so the proxy
 // doesn't keep pulling the upstream stream after the client is gone.
-func flushCopy(w http.ResponseWriter, rc io.ReadCloser) {
+// streamEnd reports how flushCopy terminated (used by the empty-200 postmortem:
+// only a clean EOF with zero bytes proves an empty upstream body).
+type streamEnd int
+
+const (
+	streamEOF         streamEnd = iota // upstream body read to a clean EOF
+	streamClientGone                   // client write failed (disconnect) — upstream unread
+	streamUpstreamErr                  // upstream read error (not EOF)
+)
+
+// flushCopy reads, writes, and flushes per chunk, supporting SSE streaming.
+// Stops immediately if the client disconnects (write error), so the proxy
+// doesn't keep pulling the upstream stream after the client is gone.
+func flushCopy(w http.ResponseWriter, rc io.ReadCloser) streamEnd {
 	fl, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
 	for {
@@ -2259,14 +2938,17 @@ func flushCopy(w http.ResponseWriter, rc io.ReadCloser) {
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				// Client disconnected — stop reading upstream.
-				break
+				return streamClientGone
 			}
 			if fl != nil {
 				fl.Flush()
 			}
 		}
 		if err != nil {
-			break
+			if err == io.EOF {
+				return streamEOF
+			}
+			return streamUpstreamErr
 		}
 	}
 }
