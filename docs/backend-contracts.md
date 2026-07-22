@@ -7,7 +7,7 @@
 | provider_id | suffix | 文件名 |
 |---|---|---|
 | aqp / codex | oauth_auth | `~/.model-proxy/<name>_oauth_auth.json` |
-| zhipu / deepseek / kimi-code | apikey | `~/.model-proxy/<name>_apikey.json`（单一 `{api_key}`）|
+| zhipu / deepseek / kimi-code / qwen-plan | apikey | `~/.model-proxy/<name>_apikey.json`（单一 `{api_key}`）|
 | volcengine | apikey | `~/.model-proxy/<name>_apikey.json` — `{api_key, access_key, secret_key}` |
 
 路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `codex-work`）。多账号见 `docs/architecture/provider-pools.md`。所有路径（CLI `login`、`buildOne`、web 异步登录、`logout`）一律用 config name，**包括 aqp/codex**（`runLogin`/`cmdCodexLogin` 接收 `provName` → `authFilePath(provName, "oauth_auth")`）；曾有的「CLI login 硬编码 provider_id → 非同名实例读写错位」bug 已修，`TestAqpCodexLogin_UsesConfigNameForAuthFile` 守护。
@@ -61,6 +61,15 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 - 鉴权双写：每请求同时设 `Authorization: Bearer` + `x-api-key`，一个 config 服务两协议。
 - 服务端模型自动映射（Anthropic）：`claude-opus*`→`deepseek-v4-pro`；`claude-sonnet*`/`claude-haiku*`→`deepseek-v4-flash`。
 - `/user/balance` → `{is_available, balance_infos:[{currency, total_balance, granted_balance, topped_up_balance}]}`（注意 `balance_infos` 非 `wallets`）。`/models` → OpenAI 风格；当前 `deepseek-v4-pro`/`deepseek-v4-flash`，旧名 `deepseek-chat`/`reasoner` 2026-07-24 弃用。
+
+## 千问 Token Plan 个人版契约（实测 + 探测）
+
+- OpenAI base `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`（`/chat/completions`、`/responses`、`/models`，Bearer）；Anthropic base `https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic`（**不带 /v1**，代理保留客户端 `/v1/messages`，同 DeepSeek/zhipu）。代理按协议字节级透传，`RewriteRequest` no-op，URL 选择在 `proxy.forward` 按 protocol 完成。
+- 鉴权双写：每请求同时设 `Authorization: Bearer <sk-sp-key>` + `x-api-key: <key>`（同 DeepSeek/zcode，覆盖 Anthropic 网关偏好；OpenAI 端忽略 x-api-key）。key 为 `sk-sp-` 前缀的**套餐专属 key**，与通用 `sk-` key / `dashscope.aliyuncs.com` 域名**不可混用**（混用报鉴权错误）。
+- `/models` 为真实路由端点（无鉴权返回结构化 `{"code":"InvalidApiKey","message":"No API-key provided."}` 401，非 404）；但套餐可能不开放列表（Coding Plan FAQ 称「模型列表不支持通过接口查询」），故 `FetchModels` 失败时回退 config `models:`。个人版模型：`qwen3.8-max-preview`/`qwen3.7-max`/`qwen3.7-plus`/`qwen3.6-flash`/`glm-5.2`/`deepseek-v4-pro`（另有 `wan2.7-image`/`happyhorse-*` 走独立生成接口，不进 chat `models:`）。
+- **无公开用量/Credits 接口**：个人版 5h/7d Credits 用量仅在控制台「用量分析」页（文档「以控制台订阅页用量明细为准」）。`Quota()` 返回 `BillingUnknown` + `Notes`（含控制台 URL `https://platform.qianwenai.com/home/billing/subscription/token-plan-individual`），CLI `usage` 与 Web UI（`/api/status.quota` → app.js 渲染 `snap.Notes`）均展示该 URL。**有意不轮询/不抓控制台**（尊重平台「严禁 API 调用」条款，见 `docs/decisions/intentional-behaviors.md`）。
+- 配额窗口：5h = 700/3000/12000 Credits，7d = 2500/10000/40000 Credits（Lite/Standard/Pro）；每次消耗同时计入两层，任一层触顶暂停。429 `Allocated quota exceeded`（窗口耗尽）→ `failclass.go` 命中 `"quota exceeded"` → `rlQuota`（默认 1h 冷却或 body reset hint，上限 7d）→ 调度跳过并 failover；429 `Requests rate limit exceeded`（并发限频）→ `rlTransient`（60s）。
+- `login qwen-plan` 无 `usage_url`，走 `apiKeyValidationURL` 兜底：用 `openai_base_url/models`（Bearer GET，401/403 拒）验 key。`Logout` = `DeleteKey`。`baseProbe` 默认 probe/ExtraHeaders/FilterModelIDs，无覆盖；无 `ProtocolHint`/`WireProtocolNote`（双协议直通）。
 
 ## Volcengine Ark 契约（双协议，含 Agent Plan，一个 key）
 

@@ -117,6 +117,7 @@ model-proxy login codex            # codex OAuth device flow
 model-proxy login zhipu            # 输入 Zhipu API key（--label NAME 命名；重复 login 加进池）
 model-proxy login deepseek         # 输入 DeepSeek API key（可重复 -> 多账号）
 model-proxy login volcengine       # Ark API Key + AccessKey/SecretKey（可重复 -> 多账号）
+model-proxy login qwen-plan        # 千问 Token Plan 个人版 sk-sp- key（可重复 -> 多账号）
 model-proxy login zhipu --label work --replace   # 命名账号 / 覆盖已存在的同 id 账号
 
 # 启动代理
@@ -133,6 +134,7 @@ model-proxy usage codex            # credits/spend/rate limits
 model-proxy usage zhipu            # 5h/周/月配额 + token 消耗（池化时逐账号展示全部账号）
 model-proxy usage deepseek         # 账户余额（is_available + 各币种）
 model-proxy usage volcengine       # Agent Plan 5h/日/周/月额度（需 AK/SK；否则列 config 模型）
+model-proxy usage qwen-plan        # 个人版 Credits 仅控制台可见（输出订阅页 URL + 列模型）
 
 # 登出
 model-proxy logout aqp         # 清除凭据文件
@@ -257,7 +259,7 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 | deepseek | `~/.model-proxy/deepseek_apikey.json` | API key（同上） |
 | volcengine | `~/.model-proxy/volcengine_apikey.json` | `{api_key, access_key, secret_key}`（同上） |
 
-**多账号凭据池**：apikey 类 provider（zhipu/deepseek/volcengine）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine=access_key，其余=sha256(api_key)[:16]）去重。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
+**多账号凭据池**：apikey 类 provider（zhipu/deepseek/volcengine/kimi-code/qwen-plan）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine=access_key，其余=sha256(api_key)[:16]）去重。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
 
 多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件/池。
 

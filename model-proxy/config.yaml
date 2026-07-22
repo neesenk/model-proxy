@@ -127,6 +127,23 @@ providers:
       - kimi-for-coding
       - kimi-for-coding-highspeed
       - k3
+  # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
+  # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
+  # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
+  # = Anthropic-compatible base (no /v1; proxy keeps /v1/messages). No usage_url —
+  # personal-edition Credits usage (5h/7d windows) is console-only (no public
+  # API); `login qwen-plan` validates the key by probing openai_base_url/models.
+  qwen-plan:
+    provider_id: qwen-plan
+    openai_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    anthropic_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
+    models:
+      - qwen3.8-max-preview
+      - qwen3.7-max
+      - qwen3.7-plus
+      - qwen3.6-flash
+      - glm-5.2
+      - deepseek-v4-pro
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called
 # anthropic model isn't listed, the called name is used as the exposed name.
