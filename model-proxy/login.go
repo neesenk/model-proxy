@@ -134,7 +134,7 @@ func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, la
 	if key == "" {
 		return fmt.Errorf("empty API key")
 	}
-	if prov.UsageURL != "" {
+	if apiKeyValidationURL(prov) != "" {
 		fmt.Fprintf(os.Stderr, "Validating API key...\n")
 	}
 
@@ -171,6 +171,23 @@ func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, la
 	return nil
 }
 
+// apiKeyValidationURL returns the endpoint used to validate an API key at login:
+// prov.UsageURL when set, otherwise openai_base_url + "/models" (the natural
+// Bearer-GET probe), or "" when neither is set (login skips validation). It is
+// field-based (not provider_id-based): providers with a real usage API set
+// usage_url (zhipu/deepseek/volcengine/kimi-code → unchanged); providers without
+// one (qwen-plan) validate against openai_base_url/models. Shared by the
+// "Validating…" message gate and addApikeyAccount's validateKeyBearerGET call.
+func apiKeyValidationURL(prov Provider) string {
+	if prov.UsageURL != "" {
+		return prov.UsageURL
+	}
+	if prov.OpenAIBaseURL != "" {
+		return strings.TrimRight(prov.OpenAIBaseURL, "/") + "/models"
+	}
+	return ""
+}
+
 // addApikeyAccount is the non-printing core extracted from
 // runApiKeyLoginWithInput: it validates the key against usage_url (if set),
 // dedups by id under the cross-process lock, and writes the pool. Returns the
@@ -188,7 +205,7 @@ func addApikeyAccount(cfg *Config, name string, prov Provider, cred accountCred,
 	// Validate against the usage endpoint if configured. 401/403 = key invalid;
 	// anything else (200, 404, etc.) = key accepted (the endpoint may not exist,
 	// but the key itself was not rejected).
-	if err := validateKeyBearerGET(prov.UsageURL, key); err != nil {
+	if err := validateKeyBearerGET(apiKeyValidationURL(prov), key); err != nil {
 		return "", err
 	}
 	id := accountIDFor(prov.Provider, accountCred{APIKey: key})

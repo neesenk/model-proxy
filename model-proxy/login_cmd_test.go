@@ -693,3 +693,23 @@ func TestDefaultsHaveValidationURLs(t *testing.T) {
 		}
 	}
 }
+
+func TestApiKeyValidationURL_Fallback(t *testing.T) {
+	cases := []struct {
+		name string
+		prov Provider
+		want string
+	}{
+		{"usage_url wins", Provider{UsageURL: "https://x/balance", OpenAIBaseURL: "https://x/v1"}, "https://x/balance"},
+		{"openai_base_url/models when no usage_url", Provider{UsageURL: "", OpenAIBaseURL: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"}, "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models"},
+		{"trailing slash trimmed", Provider{UsageURL: "", OpenAIBaseURL: "https://x/v1/"}, "https://x/v1/models"},
+		{"empty when neither set", Provider{UsageURL: "", OpenAIBaseURL: ""}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := apiKeyValidationURL(c.prov); got != c.want {
+				t.Errorf("apiKeyValidationURL = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
