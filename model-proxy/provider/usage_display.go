@@ -397,3 +397,12 @@ func (p *VolcengineProvider) Usage() error {
 	printAFPWindow("Monthly", u.AFPMonthly)
 	return nil
 }
+
+func (p *QwenPlanProvider) Usage() error {
+	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue(p.providerName)))
+	fmt.Printf("%s Credits (5h + 7d windows; Lite/Standard/Pro — either hitting the cap pauses service)\n", Dim("Billing:    "))
+	fmt.Printf("%s %s\n", Dim("Usage:      "), Gray("(console-only; no public Credits API)"))
+	fmt.Printf("%s %s\n", Dim("Details:    "), Cyan(qwenPlanConsoleURL))
+	listConfigModels(p.cfg.Models)
+	return nil
+}
