@@ -104,3 +104,21 @@ func TestQwenPlan_Usage_PrintsConsoleURL(t *testing.T) {
 		t.Errorf("usage output missing provider name:\n%s", out)
 	}
 }
+
+func TestQwenPlan_RewriteRequest_Passthrough(t *testing.T) {
+	p := newQwenPlanForTest(t, nil)
+	const inURL = "https://up/chat/completions"
+	inBody := []byte(`{"model":"qwen3.7-max"}`)
+	outURL, outBody := p.RewriteRequest(inURL, inBody, "/chat/completions")
+	if outURL != inURL || string(outBody) != string(inBody) {
+		t.Errorf("RewriteRequest altered passthrough: url=%q body=%q", outURL, outBody)
+	}
+}
+
+func TestQwenPlan_Logout_BoundNoOp(t *testing.T) {
+	// Bound base (pool virtual) → DeleteKey is a no-op (never touches the file).
+	p := newQwenPlanForTest(t, nil)
+	if err := p.Logout(); err != nil {
+		t.Errorf("Logout: %v", err)
+	}
+}
