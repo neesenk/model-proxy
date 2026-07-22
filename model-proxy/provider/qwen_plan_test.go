@@ -122,3 +122,29 @@ func TestQwenPlan_Logout_BoundNoOp(t *testing.T) {
 		t.Errorf("Logout: %v", err)
 	}
 }
+
+// probeModelCallable selects the anthropic base when anthropic_base_url is set, so
+// qwen-plan is probed over the ANTHROPIC protocol. Its ProbeRequest must return
+// the anthropic /v1/messages path + body (not baseProbe's OpenAI /chat/completions,
+// which would hit .../apps/anthropic/chat/completions and 404 for every model).
+func TestQwenPlan_ProbeRequest_AnthropicShape(t *testing.T) {
+	p := newQwenPlanForTest(t, nil)
+	pr := p.ProbeRequest("qwen3.7-max")
+	if pr.Method != http.MethodPost || pr.Path != "/v1/messages" {
+		t.Errorf("ProbeRequest = %+v, want POST /v1/messages (anthropic; probe uses the anthropic base)", pr)
+	}
+	if !strings.Contains(string(pr.Body), `"messages"`) || strings.Contains(string(pr.Body), `"stream"`) {
+		t.Errorf("ProbeRequest.Body not the anthropic messages shape: %s", pr.Body)
+	}
+}
+
+// The anthropic-compatible endpoint requires anthropic-version; the probe has no
+// client request to inherit it from, so the provider must set it via ExtraHeaders.
+func TestQwenPlan_ExtraHeaders_AnthropicVersion(t *testing.T) {
+	p := newQwenPlanForTest(t, nil)
+	req := httptest.NewRequest(http.MethodPost, "https://x/apps/anthropic/v1/messages", nil)
+	p.ExtraHeaders(req, "/v1/messages")
+	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
+		t.Errorf("anthropic-version = %q, want 2023-06-01", got)
+	}
+}
