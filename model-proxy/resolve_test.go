@@ -112,3 +112,39 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 		t.Error("Pick with ALL accounts circuit-open should be !ok")
 	}
 }
+
+// TestResolver_PickSkipsModelLockedVirtual (bug 6): the resolver is the health
+// gate for Fusion panel/judge legs + Shadow. It used to check PROVIDER health
+// only (circuit/rate-limit), so a model the main routing path had already
+// locked (recordModelFailure) was still picked here — Fusion/Shadow kept
+// requesting a known-bad (provider, model) until the lockout expired. Pick must
+// treat a model-locked (virtual, model) as unavailable, like tryTarget does.
+func TestResolver_PickSkipsModelLockedVirtual(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
+	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
+		"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
+	}}
+	p := NewProxy(cfg)
+	defer p.Close()
+	r := newResolver(p, p.providers, p.poolIndex)
+
+	// Pre-lock: the model resolves to a healthy virtual.
+	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-1"); !ok {
+		t.Fatal("pre-lock Pick returned !ok; want a healthy virtual")
+	}
+
+	// Lock the model on EVERY virtual (the main routing path would skip them all).
+	for _, vid := range p.poolIndex["zhipu"] {
+		p.recordModelFailure(vid, "glm", Scheduling{ModelLockout: "1h"})
+	}
+	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-1"); ok {
+		t.Errorf("post-lock Pick returned ok for a fully model-locked pool; resolver must skip locked (provider,model)")
+	}
+
+	// A DIFFERENT model on the same pool is unaffected — the lock is model-specific.
+	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm-other"}, "session-1"); !ok {
+		t.Errorf("unlocked model on same pool should still resolve")
+	}
+}

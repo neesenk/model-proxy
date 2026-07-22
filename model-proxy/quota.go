@@ -23,10 +23,14 @@ type quotaTracker struct {
 	provs    func() map[string]provider.Provider
 	stopCh   chan struct{}
 	stopOnce sync.Once
-	// persistMu serializes persist(): pollAll/pollOne/refreshOne run on
-	// independent goroutines and share one fixed .tmp sibling — without
-	// serialization a second writer's rename fails ENOENT (and interleaved
-	// writes could corrupt the file).
+	// poller tracks the background poll goroutine(s) so stop can WAIT for them
+	// to drain (Proxy.Close / tests) rather than leaving a poll that fires a
+	// persist after the owner has torn down or moved to a new config generation.
+	poller sync.WaitGroup
+	// persistMu serializes persist() WITHIN one tracker. Cross-tracker
+	// contention (parallel test proxies, or the daemon vs a test) is handled by
+	// the unique temp file in persist() — the fixed ".tmp" name used to make a
+	// concurrent writer's rename fail ENOENT.
 	persistMu sync.Mutex
 	// retryAttempts/retryBackoff tune fetchQuota's transient-error retry.
 	// Defaults (3 / 1s) are set in newQuotaTracker; tests shrink them to stay fast.
@@ -90,14 +94,21 @@ func newQuotaTracker(path string, cfg func() *Config, provs func() map[string]pr
 
 func (t *quotaTracker) start() {
 	t.load() // baseline before first poll
+	t.poller.Add(1)
 	go func() {
-		// bootstrap poll shortly after start
-		t.pollAfter(10 * time.Second)
+		defer t.poller.Done()
 		interval := t.cfg().Scheduling.pollInterval()
+		// bootstrap poll shortly after start, as a one-shot timer in the same
+		// goroutine — keeps the lifecycle to a single tracked goroutine (the
+		// bootstrap used to spawn a second, untracked one via pollAfter).
+		bootstrap := time.NewTimer(10 * time.Second)
+		defer bootstrap.Stop()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {
+			case <-bootstrap.C:
+				t.pollAll(time.Now())
 			case <-ticker.C:
 				t.pollAll(time.Now())
 			case <-t.stopCh:
@@ -107,10 +118,21 @@ func (t *quotaTracker) start() {
 	}()
 }
 
-func (t *quotaTracker) stop() { t.stopOnce.Do(func() { close(t.stopCh) }) }
+// stop signals the poller goroutine(s) to exit and waits for them to drain, so
+// the owner (Proxy.Close / tests) releases the tracker deterministically —
+// without the wait a lingering poll could fire a persist after the owner has
+// torn down or moved to a new config generation. Idempotent via stopOnce.
+func (t *quotaTracker) stop() {
+	t.stopOnce.Do(func() {
+		close(t.stopCh)
+		t.poller.Wait()
+	})
+}
 
 func (t *quotaTracker) pollAfter(d time.Duration) {
+	t.poller.Add(1)
 	go func() {
+		defer t.poller.Done()
 		select {
 		case <-time.After(d):
 			t.pollAll(time.Now())
@@ -119,21 +141,19 @@ func (t *quotaTracker) pollAfter(d time.Duration) {
 	}()
 }
 
-// pollAll polls every configured provider in parallel (bounded by the runtime's
-// goroutine scheduling; provider count is small) and persists once at the end.
+// pollAll polls every runnable provider instance in parallel (bounded by the
+// runtime's goroutine scheduling; provider count is small) and persists once at
+// the end. It iterates the RUNTIME provider map — which holds the unrolled
+// "name#<accountID>" virtuals for multi-account pools plus the plain names of
+// single-account providers — NOT cfg.Providers: a pooled parent name is not a
+// runtime key (buildProviders unrolls it into virtuals), so iterating
+// cfg.Providers and looking the parent up by name found nil and skipped the
+// whole pool every cycle. Each virtual carries its own bound credentials
+// (buildOne binding point #1), so fetchQuota(p) queries the correct account.
 func (t *quotaTracker) pollAll(now time.Time) {
-	cfg := t.cfg()
 	provs := t.provs()
 	var wg sync.WaitGroup
-	names := make([]string, 0, len(cfg.Providers))
-	for name := range cfg.Providers {
-		names = append(names, name)
-	}
-	for _, name := range names {
-		provImpl := provs[name]
-		if provImpl == nil {
-			continue
-		}
+	for name, provImpl := range provs {
 		wg.Add(1)
 		go func(n string, p provider.Provider) {
 			defer wg.Done()
@@ -312,8 +332,13 @@ type persistedSticky struct {
 // Returns the write error so synchronous callers (unfreeze API) can fail the
 // operation instead of reporting a false success; background callers log it.
 func (t *quotaTracker) persist() error {
-	// Serialize the whole write (snapshot → tmp → rename): concurrent persists
-	// from pollAll/pollOne/refreshOne share the fixed .tmp sibling.
+	if t.path == "" {
+		return nil // in-memory tracker (direct-construct tests) has no file
+	}
+	// Serialize the whole write (snapshot → tmp → rename) WITHIN this tracker.
+	// Cross-tracker serialization is not needed: each write gets a UNIQUE temp
+	// file, so concurrent writers never contend on a shared ".tmp" (the old
+	// fixed name made a loser's rename fail ENOENT).
 	t.persistMu.Lock()
 	defer t.persistMu.Unlock()
 	t.mu.RLock()
@@ -350,15 +375,33 @@ func (t *quotaTracker) persist() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(t.path), 0o700); err != nil {
+	dir := filepath.Dir(t.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp := t.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// Unique temp file PER WRITE (same dir, so the rename is atomic on every
+	// platform): two trackers — or a tracker vs a synchronous caller — sharing
+	// one state file no longer race on a fixed ".tmp" name (loser's rename used
+	// to fail ENOENT, and interleaved writes could corrupt the file). Rename is
+	// atomic → last writer wins, the file is never half-written.
+	f, err := os.CreateTemp(dir, ".quota_state-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	remove := func() { os.Remove(tmp) }
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		remove()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		remove()
 		return err
 	}
 	if err := os.Rename(tmp, t.path); err != nil {
 		log.Printf("[quota] persist rename failed: %v", err)
+		remove()
 		return err
 	}
 	return nil

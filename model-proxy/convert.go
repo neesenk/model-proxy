@@ -528,6 +528,17 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse openai request: %w", err)
 	}
+	// This converter handles ONLY Chat Completions (`messages`). The OpenAI
+	// Responses API (/v1/responses) carries its payload in `input` (a list) and
+	// is labeled the same "openai" protocol, so a cross-protocol route feeds a
+	// Responses body in here. Rather than read only `messages`, find none, and
+	// silently emit an empty-messages Anthropic request (dropping the whole
+	// prompt), fail closed so the proxy skips the target. Per
+	// docs/architecture/protocol-conversion.md the `openai` flavor is Chat
+	// Completions, not Responses; real Responses↔Anthropic conversion is unimplemented.
+	if _, hasInput := src["input"]; hasInput {
+		return nil, fmt.Errorf("openai→anthropic conversion supports only Chat Completions (messages); got a Responses-style `input` body — not convertible")
+	}
 	out := map[string]any{}
 	for _, k := range []string{"model", "temperature", "top_p"} {
 		if v, ok := src[k]; ok {

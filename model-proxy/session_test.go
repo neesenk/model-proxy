@@ -37,7 +37,7 @@ func TestForwardThreadsSessionID(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"glm-5"}`)))
 	req.Header.Set("x-claude-code-session-id", "sess-XYZ")
-	p.forward("openai", httptest.NewRecorder(), req)
+	p.forward("openai", httptest.NewRecorder(), req, nextRequestID())
 
 	if captured != "sess-XYZ" {
 		t.Fatalf("sessionKey threaded = %q, want sess-XYZ", captured)

@@ -34,18 +34,15 @@ kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 
-当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → 固定 `.tmp` → rename，并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze 时写盘。
+当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze 时写盘。`Proxy.Close` 停止并等待 poller goroutine 后做 final flush；测试在隔离 HOME 下运行并在 cleanup 中 `Close`。
 
 ### 已知缺口与目标契约
 
 当前持久化还没有完全满足运行态 durability，后续修复应达到：
 
 - snapshot、fingerprint 必须属于同一 config generation；
-- 每次原子写使用唯一的同目录临时文件，不能让多个 tracker/process 争用固定 `.tmp`；
 - health/model lock/paramBlock mutation 应进入 debounce 单写者，而不是只依赖下次 quota poll；
-- reload 清空运行态后必须持久化空状态，防止重启复活旧冻结态；
-- `Proxy.Close` 应停止并等待后台 goroutine，完成 final flush；
-- 测试必须使用隔离 HOME/state path，并在 cleanup 中关闭 Proxy。
+- reload 清空运行态后必须持久化空状态，防止重启复活旧冻结态。
 
 恢复只采纳未过期条目，且 config fingerprint 必须匹配。恢复的 circuit failure count 置为 threshold，使下一次失败立即重新开路。
 

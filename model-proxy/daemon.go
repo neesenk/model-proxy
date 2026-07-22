@@ -163,6 +163,9 @@ func runProxy(sa serveArgs) {
 		// Drain the request-log channel + final write so in-flight records
 		// aren't lost. Nil-safe (disabled / init failure).
 		p.reqLog.shutdown()
+		// Stop the quota tracker + final state flush so quota/health/cooldown
+		// state mutated since the last periodic poll survives the process.
+		p.Close()
 		if pidPath != "" {
 			os.Remove(pidPath)
 		}

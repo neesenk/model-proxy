@@ -40,19 +40,12 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 
 ## Request log
 
-request log 是异步、非阻塞、owner-only 的 JSONL。当前查询使用完整 `requestLogRecord` top-K，并按文件名近似时间顺序提前停止。
+request log 是异步、非阻塞、owner-only 的 JSONL。查询分两条路径：
 
-### 已知缺口与目标契约
+- metadata 查询（list API、shadow report）置 `recordFilter.MetadataOnly`，在 top-K 保留前丢弃 request/response body，内存边界按 `limit × metadata` 计算，不是 `limit × max_body`；UI list 上限 1000、shadow report 上限 10000 均只保留 metadata。
+- detail/replay 才反序列化并保留完整 body。
 
-列表和聚合查询应满足：
-
-- metadata 查询不保留 request/response body；
-- detail/replay 才读取完整 body；
-- 内存边界按 metadata 条数计算，不能是 `limit × max_body`；
-- 不得假设文件名顺序等于 record timestamp 严格顺序；
-- 若没有可证明的 per-file max timestamp/index，应扫描全部文件并维护 metadata top-K；
-- 单行读取不能使用会因默认 token cap 丢失尾部记录的 Scanner；
-- UI list 上限和 shadow report 上限不能导致多 GiB heap。
+扫描全部 `requests-*.log`（不假设文件名顺序等于 record timestamp 严格顺序，孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。
 
 ## Fusion 工作流
 
@@ -62,11 +55,11 @@ request log 是异步、非阻塞、owner-only 的 JSONL。当前查询使用完
 
 每个成员独立 goroutine、独立 timeout。当前管道已经实现 resolver、runtime build gate、half-open gate、协议转换、provider rewrite、基本 429/5xx 记录、metrics、usage、live event 和 request log。
 
-当前 panel/judge leg 没有复用普通 `tryTarget` 的完整模型级策略：不会检查既有 model lock，也不会应用/学习 paramBlock、model-denied 或 empty-200。后续重构的目标顺序是：
+当前 panel/judge leg 没有复用普通 `tryTarget` 的完整模型级策略：resolver 的 `Pick` 已检查既有 model lock（与 tryTarget 同一规则，见 `resolve.go` `healthy`），但仍不会应用/学习 paramBlock、model-denied 或 empty-200。后续重构的目标顺序是：
 
-1. resolver 解析 pooled provider；
-2. runtime impl/build gate fail-closed；
-3. model lock / half-open gate；
+1. ~~resolver 解析 pooled provider~~（已完成）；
+2. ~~runtime impl/build gate fail-closed~~（已完成）；
+3. ~~model lock / half-open gate~~（已完成：resolver `Pick` 经 `healthy` 跳过 locked `(provider, model)`）；
 4. rewrite model、协议转换、provider rewrite、paramBlock；
 5. 剥除 tools/tool_choice，强制非流式；
 6. 使用与普通 tryTarget 一致的 429、5xx、model-denied、unsupported-param、empty-200 策略；

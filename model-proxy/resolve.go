@@ -86,7 +86,7 @@ func (r *resolver) Pick(t RouteTarget, stickyKey string) (RouteTarget, bool) {
 		return RouteTarget{}, false
 	}
 	if _, pooled := r.poolIndex[t.Provider]; !pooled {
-		if !r.built(vids[0]) || !r.healthy(vids[0]) {
+		if !r.built(vids[0]) || !r.healthy(vids[0], t.Model) {
 			return RouteTarget{}, false
 		}
 		rt := t
@@ -98,7 +98,7 @@ func (r *resolver) Pick(t RouteTarget, stickyKey string) (RouteTarget, bool) {
 	start := r.pickStart(t.Provider, len(vids), stickyKey)
 	for k := 0; k < len(vids); k++ {
 		vid := vids[(start+k)%len(vids)]
-		if r.built(vid) && r.healthy(vid) {
+		if r.built(vid) && r.healthy(vid, t.Model) {
 			rt := t
 			rt.Provider = vid
 			return rt, true
@@ -121,16 +121,21 @@ func (r *resolver) pickStart(parent string, n int, stickyKey string) int {
 	return start
 }
 
-// healthy reports whether a virtual may be tried — the SAME rule as
-// tryTarget's gate (circuit closed or half-open with no probe in flight, and
-// not rate-limited). The health fields are mutated under healthMu
-// (recordSuccess/Failure/RateLimit), so they are read under the same lock.
-func (r *resolver) healthy(virtual string) bool {
+// healthy reports whether a virtual may be tried for `model` — the SAME rule as
+// tryTarget's gate: circuit closed or half-open with no probe in flight, not
+// rate-limited, AND the (virtual, model) pair is not in its model-lockout window.
+// The model-lock check matters because Fusion panel/judge legs + Shadow route
+// through Pick (not tryTarget): without it they would keep requesting a model
+// the main path already locked (recordModelFailure) until the lockout expired.
+// The health fields are mutated under healthMu (recordSuccess/Failure/RateLimit),
+// so they are read under the same lock; modelLockedLocked is the lock-holding
+// variant that fits here.
+func (r *resolver) healthy(virtual, model string) bool {
 	now := time.Now()
 	r.p.healthMu.Lock()
 	defer r.p.healthMu.Unlock()
 	h := r.p.health[virtual]
-	return h == nil || h.available(now)
+	return (h == nil || h.available(now)) && !r.p.modelLockedLocked(virtual, model, now)
 }
 
 // built reports whether a virtual id has a runtime provider impl.

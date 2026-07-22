@@ -27,6 +27,7 @@ providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 `))
 	p := NewProxy(cfg)
+	t.Cleanup(func() { p.Close() }) // stop the tracker; don't leak a poller past the test
 	return newWebServer(p, "test-config.yaml"), p
 }
 

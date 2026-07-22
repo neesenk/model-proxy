@@ -22,6 +22,7 @@ type loginSession struct {
 	state     string // "pending" | "done" | "error"
 	detail    string // verify_url+user_code (codex) / login_url (aqp) / error msg
 	result    string // email or account id on done
+	warning   string // non-fatal warning surfaced via poll (e.g. reload failed post-login)
 	created   time.Time
 	aqpClient *AqpClient       // aqp
 	codex     *codexLoginState // codex
@@ -46,6 +47,17 @@ func (s *loginSession) setState(state, result string) {
 	if result != "" {
 		s.result = result
 	}
+}
+
+// setWarning records a non-fatal warning surfaced via the poll response — e.g.
+// the in-process reload failed after a successful async login, so credentials
+// are persisted but the runtime keeps the old set until config.yaml is fixed +
+// reloaded. The login itself still reports "done"; this lets the UI warn the
+// user rather than show a false success. Under the session mutex.
+func (s *loginSession) setWarning(warning string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.warning = warning
 }
 
 // loginSessionStore is the in-memory map of id → session. It is safe for

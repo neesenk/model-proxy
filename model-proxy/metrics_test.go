@@ -62,6 +62,13 @@ func TestMetricsStartedAt(t *testing.T) {
 // rate-limited for ~60s, which would make a later 500 case skip the provider and
 // never bump Failures).
 func TestMetricsForwardWiring(t *testing.T) {
+	// Isolate HOME and provision a zhipu pool account so buildProviders binds a
+	// real credential — without it the proxy can't build auth headers and the
+	// forward never reaches the metrics-recording commit path. (The fake upstream
+	// ignores auth, but the proxy must still be able to CONSTRUCT it.) This used
+	// to pass only because the real ~/.model-proxy had zhipu creds on the dev box.
+	setPoolHome(t, t.TempDir())
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A")
 	const cfgYAML = `
 listen: 127.0.0.1:0
 providers:

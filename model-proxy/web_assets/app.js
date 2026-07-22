@@ -2072,10 +2072,15 @@ async function removeAccount(provider, id, label) {
   if (!window.confirm(`Remove account "${label || id}" from ${provider}?`)) return;
   showMsg(document.getElementById('acc-msg'), 'ok', `removing ${label || id}…`);
   try {
-    await apiDel(`/api/accounts/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`);
-    showMsg(document.getElementById('acc-msg'), 'ok', 'removed — reloading');
+    const data = await apiDel(`/api/accounts/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`);
+    const accMsg = document.getElementById('acc-msg');
+    if (data && data.warning) {
+      showMsg(accMsg, 'warn', `Removed from disk, but not live yet: ${esc(data.warning)} — fix config.yaml and reload. See logs.`);
+    } else {
+      showMsg(accMsg, 'ok', 'removed — reloading');
+    }
     await renderAccountsTab();
-    clearMsg(document.getElementById('acc-msg'));
+    if (!(data && data.warning)) clearMsg(accMsg);
   } catch (e) {
     showMsg(document.getElementById('acc-msg'), 'err', e.message);
   }
@@ -2161,12 +2166,19 @@ async function submitAdd(providerName) {
   btn.disabled = true;
   showMsg(msg, 'ok', 'adding…');
   try {
-    await apiPost(`/api/accounts/${encodeURIComponent(providerName)}`, body);
-    showMsg(msg, 'ok', 'added — reloading');
+    const data = await apiPost(`/api/accounts/${encodeURIComponent(providerName)}`, body);
     // Clear secrets from the DOM immediately on success.
     document.getElementById('add-apikey').value = '';
     const ak = document.getElementById('add-accesskey'); if (ak) ak.value = '';
     const sk = document.getElementById('add-secretkey'); if (sk) sk.value = '';
+    if (data && data.warning) {
+      // Account saved to disk, but the in-process reload failed (config.yaml
+      // unreadable/invalid) — runtime keeps the old set until config is fixed +
+      // reloaded. Keep the modal open so the warning is read; see logs.
+      showMsg(msg, 'warn', `Saved, but not live yet: ${esc(data.warning)} — fix config.yaml and reload. See logs.`);
+      return;
+    }
+    showMsg(msg, 'ok', 'added — reloading');
     setTimeout(() => {
       const m = document.getElementById('add-modal');
       if (m && m.open) m.close();
@@ -2251,6 +2263,7 @@ function pollLogin(sessionId) {
         setLoginModal('done', `
           <p>Sign-in complete.</p>
           ${r.result ? `<p class="modal-status">account: ${esc(r.result)}</p>` : ''}
+          ${r.warning ? `<p class="modal-status err">Saved, but not live yet: ${esc(r.warning)} — fix config.yaml and reload. See logs.</p>` : ''}
           <div class="modal-actions">
             <button type="button" class="btn primary small" id="login-done">Done</button>
           </div>`);

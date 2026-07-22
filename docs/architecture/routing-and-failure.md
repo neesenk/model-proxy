@@ -83,15 +83,11 @@ body hint 支持 `retry after N s/m/h`、`reset after 2h5m`、`Resets in 164h` �
 - `x-mp-force-provider` 和已断开的客户端不等待；
 - 终局分类应基于跨轮实际失败类别：纯限频返回 429 和 `Retry-After`，出现硬失败返回 502。
 
-### 已知缺口
+### 等待层目标来源
 
-当前等待层仍可能回看原始 route targets。请求感知改道或 context overflow 替换目标后，等待、attempted 集合和 Retry-After 尚未完全基于实际 effective targets。
+等待层基于 `serveResult.effectiveTargets` —— `serveOnce` 实际考虑的目标集合（schedule 过滤冷却目标、request-aware 改道、context overflow 替换之后），而非原始 route targets。`forward` 用它计算 cooldown / Retry-After / TOCTOU；effective 为空（例如 schedule 因全部冷却而返回空）时回退到原始 targets。这避免「健康但被过滤的兄弟目标」让 `cooldownState` 误判仍有可用目标而跳过等待。
 
-修复时应由 `serveResult` 返回实际目标和失败 horizon。
-
-`hasRecoveredUntried` 当前还要求“至少仍有一个目标在冷却”。全部未尝试目标在终局检查前同时恢复时可能漏掉零等待重排。
-
-该条件应只依赖是否存在 recovered-untried，并由 round budget 防止无限循环。
+`hasRecoveredUntried` 只依赖「是否存在 available 但本 pass 未尝试的目标」：冷却中途恢复（TOCTOU）或全部目标同时恢复时给予零等待重排，由 forward 的 round budget（≤2）防止无限循环。不再要求「至少仍有一个目标在冷却」。
 
 ## 回归测试
 

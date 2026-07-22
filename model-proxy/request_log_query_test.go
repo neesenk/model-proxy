@@ -228,3 +228,62 @@ func TestHandleRequests_ShadowFilter(t *testing.T) {
 		t.Errorf("shadow=bogus should be ignored (all records): %s", body)
 	}
 }
+
+// TestQueryRequestRecords_MetadataOnlyDropsBodies (bug 5): the list API and
+// shadow report only need metadata, but queryRequestRecords used to retain the
+// FULL record (incl. both bodies) in its top-K — at cap 1000 (list) / 10000
+// (shadow) that is limit × 2 × max_body_bytes, i.e. multiple GiB. With
+// MetadataOnly the scanner drops bodies before retention; detail/replay keep them.
+func TestQueryRequestRecords_MetadataOnlyDropsBodies(t *testing.T) {
+	dir := t.TempDir()
+	writeReqLog(t, dir, "requests-20260718-100000.log", []requestLogRecord{
+		{Ts: "2026-07-18T10:00:00Z", RequestID: "r1", Provider: "zhipu", Status: 200, RequestBody: "BIG-REQ-1", ResponseBody: "BIG-RESP-1"},
+		{Ts: "2026-07-18T10:00:01Z", RequestID: "r2", Provider: "zhipu", Status: 200, RequestBody: "BIG-REQ-2", ResponseBody: "BIG-RESP-2"},
+	})
+
+	recs, err := queryRequestRecords(dir, recordFilter{Limit: 10, MetadataOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("got %d records, want 2", len(recs))
+	}
+	for _, r := range recs {
+		if r.RequestBody != "" || r.ResponseBody != "" {
+			t.Errorf("MetadataOnly retained bodies: request_body=%q response_body=%q", r.RequestBody, r.ResponseBody)
+		}
+	}
+
+	// Detail path (no MetadataOnly) must still return bodies.
+	full, err := queryRequestRecords(dir, recordFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full) != 2 || full[0].RequestBody == "" {
+		t.Errorf("detail query must retain bodies: %+v", full)
+	}
+}
+
+// TestQueryRequestRecords_CrossFileDisorderNoEarlyStop (bug 5): the scanner must
+// not assume filename order equals record-timestamp order. An older-NAMED file
+// can hold a NEWER-timestamp record (orphaned active file from a crashed run,
+// clock correction). The old filename-order early-stop could fill the heap from
+// the mis-ordered file and suppress the genuinely-newer record.
+func TestQueryRequestRecords_CrossFileDisorderNoEarlyStop(t *testing.T) {
+	dir := t.TempDir()
+	// Older-named file carries the NEWER record.
+	writeReqLog(t, dir, "requests-20260701-000000.log", []requestLogRecord{
+		{Ts: "2026-07-18T10:00:00Z", RequestID: "newer", Provider: "zhipu", Status: 200},
+	})
+	// Newer-named file carries the OLDER record.
+	writeReqLog(t, dir, "requests-20260718-120000.log", []requestLogRecord{
+		{Ts: "2026-07-01T00:00:00Z", RequestID: "older", Provider: "zhipu", Status: 200},
+	})
+	recs, err := queryRequestRecords(dir, recordFilter{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].RequestID != "newer" {
+		t.Errorf("top-1 by timestamp must be the newer-timestamp record regardless of file name; got %+v", recs)
+	}
+}

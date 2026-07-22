@@ -346,6 +346,12 @@ type recordFilter struct {
 	From       time.Time
 	To         time.Time
 	Limit      int
+	// MetadataOnly, when true, drops request/response BODIES from retained records.
+	// Callers that only need metadata (the list API, shadow report) set this so a
+	// top-K over many records bounds memory to ~limit × metadata size, NOT
+	// limit × 2 × max_body_bytes (which could be multiple GiB). Detail/replay
+	// callers leave it false to keep bodies.
+	MetadataOnly bool
 }
 
 // matches reports whether a record passes the filter.
@@ -402,11 +408,15 @@ func ciContains(s, sub string) bool {
 // f.Limit. Unparseable/partial lines (e.g. a line mid-write at read time) are
 // skipped silently. It reads files directly, independent of the logger goroutine.
 //
-// Memory is bounded to ~f.Limit records (not the whole matching set): matches are
-// streamed into a newest-Limit top-K (min-heap by timestamp) so a huge active log
-// with millions of records doesn't occupy near the whole file in memory when only
-// 100 are wanted. Per-line memory is one line at a time (bufio.Reader.ReadBytes,
-// not os.ReadFile; the writer caps both bodies so a line is ~2×max_body).
+// Memory is bounded to ~f.Limit retained records (not the whole matching set):
+// matches are streamed into a newest-Limit top-K (min-heap by timestamp) so a
+// huge active log with millions of records doesn't occupy near the whole file in
+// memory when only 100 are wanted. When f.MetadataOnly is set the retained
+// records drop their bodies, so the bound is ~limit × metadata size, not
+// limit × 2 × max_body_bytes (which at the list/shadow caps reaches multiple
+// GiB). Per-line memory is one line at a time (bufio.Reader.ReadBytes, not
+// os.ReadFile). All files are scanned — filename order is NOT assumed to equal
+// record-timestamp order (an orphaned/clock-skewed file can hold newer records).
 func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -445,6 +455,15 @@ func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error)
 				if l := bytes.TrimRight(line, "\n"); len(l) > 0 {
 					var rec requestLogRecord
 					if json.Unmarshal(l, &rec) == nil && f.matches(rec) {
+						if f.MetadataOnly {
+							// Drop large (and sensitive) bodies BEFORE retention so a
+							// top-K over many records bounds memory to ~limit × metadata
+							// size, NOT limit × 2 × max_body_bytes. Detail/replay callers
+							// leave MetadataOnly false to keep bodies.
+							rec.RequestBody = ""
+							rec.ResponseBody = ""
+							rec.ResponseHeaders = ""
+						}
 						if h != nil {
 							heap.Push(h, rec)
 							if h.Len() > limit {
@@ -461,12 +480,11 @@ func queryRequestRecords(dir string, f recordFilter) ([]requestLogRecord, error)
 			}
 		}
 		file.Close()
-		// Files are time-disjoint and read newest-first: once the heap holds `limit`
-		// records (all from the newest files), older files can only contribute older
-		// records that wouldn't make the top-`limit` — stop reading them.
-		if h != nil && h.Len() >= limit {
-			break
-		}
+		// Do NOT early-stop by filename order: a file's name is its OPEN time, not a
+		// bound on its newest record's timestamp (an orphaned active file from a
+		// crashed run, or a clock correction, can put newer records in an older-named
+		// file). Scanning every file keeps the top-K correct; metadata-mode retention
+		// keeps it cheap.
 	}
 	out := all
 	if h != nil {
@@ -557,6 +575,10 @@ type shadowReportEntry struct {
 // shadow provider): sample count, status-match rate, avg latency difference, avg
 // response-size ratio. Only paired records (both primary + shadow present) count.
 func shadowReport(dir string, f recordFilter) ([]shadowReportEntry, error) {
+	// The report only reads metadata fields (provider/status/latency/size/id/shadow),
+	// never bodies — drop them so a 10000-cap scan over MB-bodied records doesn't
+	// hold multiple GiB in the top-K.
+	f.MetadataOnly = true
 	all, err := queryRequestRecords(dir, f)
 	if err != nil {
 		return nil, err

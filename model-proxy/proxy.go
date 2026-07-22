@@ -399,6 +399,24 @@ func NewProxy(cfg *Config) *Proxy {
 	return p
 }
 
+// Close releases the proxy's background goroutines: it stops the quota tracker
+// and performs a final state flush so quota/health/cooldown state mutated since
+// the last periodic poll survives the process. Tests that build a Proxy via
+// NewProxy MUST defer this (or register it via t.Cleanup): without it the
+// poller goroutine outlives the test and can fire a persist from a stale
+// generation. No-op for directly-constructed Proxies whose tracker was never
+// started (newQuotaProxy) — stop is idempotent and the empty path skips flush.
+func (p *Proxy) Close() {
+	if p.quota != nil {
+		p.quota.stop()
+		if p.quota.path != "" {
+			if err := p.quota.persist(); err != nil {
+				log.Printf("[quota] final persist on close failed: %v", err)
+			}
+		}
+	}
+}
+
 // resetStats zeroes all call-statistics state: the in-memory metrics + token
 // counters, the persisted SQLite bucket history, and the flusher's diff
 // baseline (so the next flush sees zero delta rather than zero-minus-old
@@ -809,11 +827,18 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proto := protocolForPath(r.URL.Path)
+	// Generate the request id ONCE, here at the handler top, so EVERY downstream
+	// path — including the unknown-path 502 below, which returns before forward —
+	// can publish live events carrying a stable id (the contract: every start/end
+	// carries a stable request_id; cache-hit and 400/502 terminals must produce an
+	// end). Cheap: one atomic add, no data dependency.
+	requestID := nextRequestID()
 	if proto == "" {
+		p.publishTerminalEvent(requestID, r, "", r.URL.Path, http.StatusBadGateway)
 		http.Error(w, fmt.Sprintf("no route for path %s", r.URL.Path), http.StatusBadGateway)
 		return
 	}
-	p.forward(proto, w, r)
+	p.forward(proto, w, r, requestID)
 }
 
 // scheduleStatus builds a read-only JSON snapshot of what each route would
@@ -1027,15 +1052,19 @@ func writeModels(w http.ResponseWriter, data []byte) {
 // publishTerminalEvent emits a live "end" event for a request that ends before
 // the normal start/commit flow — a malformed body (400) or an unrouted model
 // (502). Without it, an agent retry-looping on a missing/removed model is
-// invisible to the live monitor, defeating the feature's core use case.
-func (p *Proxy) publishTerminalEvent(r *http.Request, proto, exposed string, status int) {
+// invisible to the live monitor, defeating the feature's core use case. The
+// requestID is generated at the handler top and threaded in so these terminal
+// events still pair with a stable id (the contract: 400/502 终局也必须产生 end
+// 且带稳定 request_id).
+func (p *Proxy) publishTerminalEvent(requestID string, r *http.Request, proto, exposed string, status int) {
 	p.events.publish(liveEvent{
-		Type:     "end",
-		Ts:       time.Now().UnixMilli(),
-		Agent:    detectAgent(r),
-		Protocol: proto,
-		Exposed:  exposed,
-		Status:   status,
+		Type:      "end",
+		Ts:        time.Now().UnixMilli(),
+		RequestID: requestID,
+		Agent:     detectAgent(r),
+		Protocol:  proto,
+		Exposed:   exposed,
+		Status:    status,
 	})
 }
 
@@ -1052,7 +1081,7 @@ func (p *Proxy) publishTerminalEvent(r *http.Request, proto, exposed string, sta
 // contextOverflowRetry). The protocol (from the request path) selects the
 // upstream path and base URL (anthropic_base_url vs openai_base_url); it does not
 // key the route.
-func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
+func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, requestID string) {
 	// Snapshot cfg + providers under a brief RLock, then release. The lock is NOT
 	// held during forwarding (which streams for minutes on SSE) — otherwise hot
 	// reload (Proxy.reload takes mu.Lock) blocks until all streams finish.
@@ -1074,7 +1103,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 
 	calledModel := extractModel(origBody)
 	if calledModel == "" {
-		p.publishTerminalEvent(r, proto, calledModel, http.StatusBadRequest)
+		p.publishTerminalEvent(requestID, r, proto, calledModel, http.StatusBadRequest)
 		http.Error(w, `missing or unparseable "model" field in request body`, http.StatusBadRequest)
 		return
 	}
@@ -1090,7 +1119,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	}
 	targets, ok := expanded[exposed]
 	if !ok || len(targets) == 0 {
-		p.publishTerminalEvent(r, proto, exposed, http.StatusBadGateway)
+		p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadGateway)
 		http.Error(w, fmt.Sprintf("model %q not found in routes", exposed), http.StatusBadGateway)
 		return
 	}
@@ -1113,13 +1142,14 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 			// emit an end event explicitly — otherwise the live view is blind to
 			// these (e.g. a retry-looping agent served from cache stays invisible).
 			p.events.publish(liveEvent{
-				Type:     "end",
-				Ts:       time.Now().UnixMilli(),
-				Agent:    detectAgent(r),
-				Protocol: proto,
-				Exposed:  calledModel,
-				Provider: "(cache)",
-				Status:   e.status,
+				Type:      "end",
+				Ts:        time.Now().UnixMilli(),
+				RequestID: requestID,
+				Agent:     detectAgent(r),
+				Protocol:  proto,
+				Exposed:   calledModel,
+				Provider:  "(cache)",
+				Status:    e.status,
 			})
 			w.Header().Set("x-mp-cache", "hit")
 			replayCached(w, e)
@@ -1137,7 +1167,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 	if fp := forceProvider(r); fp != "" {
 		narrowed := filterTargetsByProvider(targets, parentOf, fp)
 		if len(narrowed) == 0 {
-			p.publishTerminalEvent(r, proto, exposed, http.StatusBadRequest)
+			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
 			http.Error(w, fmt.Sprintf("force-provider %q is not a target for model %q", fp, exposed), http.StatusBadRequest)
 			return
 		}
@@ -1167,10 +1197,8 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		routeKeys[k] = true
 	}
 	// requestID groups this client request's failover attempts in the per-request
-	// access log + live events. Always generated (cheap: one atomic add) so live
-	// start↔end pairing works even when request logging is off.
-	requestID := nextRequestID()
-
+	// access log + live events. Generated once at the handler top (so early
+	// terminal/cache-hit paths share it) and passed in here.
 	// Detect the calling agent once (from the UA / known headers); attributed to
 	// whichever target commits, in the parallel agent-stats pipeline.
 	agent := detectAgent(r)
@@ -1203,8 +1231,19 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 		}
 		sawHard = sawHard || res.sawHard
 		sawCool = sawCool || res.sawCooldown
+		// Key cooldown/TOCTOU on the EFFECTIVE targets serveOnce actually
+		// considered (after scheduling/request-aware narrowing/context retry),
+		// not the original route targets — otherwise a healthy-but-filtered
+		// sibling (e.g. a target that doesn't fit the request's capability) makes
+		// cooldownState think a servable target exists and skips the wait. Fall
+		// back to the original targets when effective is empty (e.g. schedule
+		// dropped every target while cooling, then they all recovered — claim 2).
+		checkTargets := res.effectiveTargets
+		if len(checkTargets) == 0 {
+			checkTargets = targets
+		}
 		now := time.Now()
-		allDown, allRateLimited, earliest := p.cooldownState(targets, now)
+		allDown, allRateLimited, earliest := p.cooldownState(checkTargets, now)
 		if forceProvider(r) == "" && retryWait > 0 && round < 2 {
 			if allDown {
 				if sleep := earliest.Sub(now); sleep > 0 && sleep <= retryWait {
@@ -1222,7 +1261,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
-			} else if p.hasRecoveredUntried(targets, res.tried, now) {
+			} else if p.hasRecoveredUntried(checkTargets, res.tried, now) {
 				// TOCTOU (P0-5): a target recovered between scheduling and this
 				// terminal check but was never tried in the failed pass (its
 				// cooldown lapsed mid-pass while a sibling re-failed). Give it an
@@ -1295,6 +1334,15 @@ type serveResult struct {
 	tried       map[string]bool // providers actually attempted this pass
 	sawHard     bool            // conn/timeout/5xx/401/build/model-denied-class failure
 	sawCooldown bool            // at least one 429 this pass
+	// effectiveTargets is the target set serveOnce actually considered this pass
+	// (after scheduling drops cooling targets, request-aware routing narrows, or a
+	// context-overflow retry replaces it) — NOT necessarily the original route
+	// targets. forward keys its cooldown/TOCTOU decisions on this so it waits for
+	// / re-schedules the targets that were really in play, not a sibling that was
+	// filtered out and can't serve. Empty when the pass committed (forward
+	// returns immediately) or schedule produced nothing (forward falls back to
+	// the original targets).
+	effectiveTargets []RouteTarget
 }
 
 // serveOnce runs ONE full scheduling + failover pass: schedule → request-aware
@@ -1441,6 +1489,10 @@ func (p *Proxy) serveOnce(cfg *Config, provs map[string]provider.Provider, poolI
 		}
 		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
 	}
+	// Record the target set actually considered this pass (post scheduling /
+	// request-aware narrowing / context retry) so forward's cooldown + TOCTOU
+	// decisions key on what was really in play, not the original route targets.
+	res.effectiveTargets = ordered
 	return res
 }
 
@@ -2717,26 +2769,23 @@ func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time) (allDown, al
 	return allDown, allRateLimited, earliest
 }
 
-// hasRecoveredUntried reports the TOCTOU case: at least one target is still
-// cooling, while another has become available but was NOT tried in the failed
-// pass (its cooldown lapsed mid-pass). The caller answers with an immediate
-// zero-wait re-schedule instead of a terminal error.
+// hasRecoveredUntried reports the TOCTOU case: a target is available now but was
+// NOT tried in the failed pass — its cooldown lapsed mid-pass while a sibling
+// re-failed, OR every target recovered simultaneously after schedule dropped them
+// all. The caller answers with an immediate zero-wait re-schedule instead of a
+// terminal error. No "at least one other target still cooling" precondition: that
+// made the all-recover-simultaneously case terminally fail. The round budget in
+// forward (≤2 retries) bounds the loop.
 func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time) bool {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
-	anyCooling := false
-	anyRecoveredUntried := false
 	for _, t := range targets {
 		h := p.health[t.Provider]
-		if h != nil && !h.available(now) {
-			anyCooling = true
-			continue
-		}
-		if !tried[t.Provider] {
-			anyRecoveredUntried = true
+		if (h == nil || h.available(now)) && !tried[t.Provider] {
+			return true
 		}
 	}
-	return anyCooling && anyRecoveredUntried
+	return false
 }
 
 // learnParamBlock records an upstream-rejected top-level request parameter for

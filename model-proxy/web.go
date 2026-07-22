@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -323,6 +324,7 @@ func (w *webServer) handleRequestsList(resp http.ResponseWriter, r *http.Request
 			f.To = time.Unix(t, 0)
 		}
 	}
+	f.MetadataOnly = true // list API returns summaries only — don't retain large bodies in the top-K
 	recs, err := queryRequestRecords(dir, f)
 	if err != nil {
 		writeJSONErr(resp, http.StatusInternalServerError, "request query: "+err.Error())
@@ -925,10 +927,11 @@ func (w *webServer) handleAccountAdd(resp http.ResponseWriter, r *http.Request) 
 		writeJSONErr(resp, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Best-effort: if reload fails the account is still saved to the pool file;
-	// the next reload/request will pick it up. Surface success regardless.
-	_ = w.p.reload(w.configFile)
-	writeJSON(resp, http.StatusOK, map[string]string{"id": id, "status": "added"})
+	// Best-effort reload: the account is already saved to the pool file. If reload
+	// fails (config.yaml unreadable/invalid) the runtime stays stale until the
+	// next successful reload — surface a warning instead of a false success.
+	warning := w.reloadAfterMutation()
+	writeJSON(resp, http.StatusOK, map[string]string{"id": id, "status": "added", "warning": warning})
 }
 
 // handleAccountTest runs a ONE-SHOT end-to-end probe through a single account:
@@ -1080,8 +1083,8 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	_ = w.p.reload(w.configFile)
-	writeJSON(resp, http.StatusOK, map[string]string{"status": "removed"})
+	warning := w.reloadAfterMutation()
+	writeJSON(resp, http.StatusOK, map[string]string{"status": "removed", "warning": warning})
 }
 
 // --- Async login endpoints (Task 14: aqp; Task 15: codex) ---
@@ -1179,7 +1182,7 @@ func (w *webServer) runAqpPoll(sess *loginSession, name string) {
 		sess.setState("error", err.Error())
 		return
 	}
-	_ = w.p.reload(w.configFile) // best-effort: account is already persisted
+	sess.setWarning(w.reloadAfterMutation())
 	sess.setState("done", a.Email)
 }
 
@@ -1245,7 +1248,7 @@ func (w *webServer) runCodexPoll(sess *loginSession, name string) {
 		sess.setState("error", err.Error())
 		return
 	}
-	_ = w.p.reload(w.configFile) // best-effort: tokens are already persisted
+	sess.setWarning(w.reloadAfterMutation())
 	sess.setState("done", af.Tokens.AccountID)
 }
 
@@ -1261,12 +1264,13 @@ func (w *webServer) handleLoginPoll(resp http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess.mu.Lock()
-	state, detail, result := sess.state, sess.detail, sess.result
+	state, detail, result, warning := sess.state, sess.detail, sess.result, sess.warning
 	sess.mu.Unlock()
 	writeJSON(resp, http.StatusOK, map[string]string{
-		"state":  state,
-		"detail": detail,
-		"result": result,
+		"state":   state,
+		"detail":  detail,
+		"result":  result,
+		"warning": warning,
 	})
 }
 
@@ -1389,6 +1393,25 @@ func (w *webServer) saveAndReload(data []byte) error {
 		return err
 	}
 	return nil
+}
+
+// reloadAfterMutation runs a best-effort reload after a credential mutation
+// (account add/remove, async aqp/codex login) and returns the reload error
+// string ("" on success). The mutation is already persisted to its pool/oauth
+// file, so a reload failure does NOT undo it — but the runtime keeps the OLD
+// provider set until the next successful reload (a plain request never re-reads
+// pool files), so the caller surfaces the warning to the UI and we log it.
+//
+// Reload only fails when config.yaml itself is unreadable/invalid (the mutation
+// writes a pool file, never config.yaml), so this is rare — but when it happens
+// the operator must know, not see a silent success. Contrast saveAndReload
+// (config edits), which validates first and rolls back on failure.
+func (w *webServer) reloadAfterMutation() string {
+	if err := w.p.reload(w.configFile); err != nil {
+		log.Printf("[accounts] reload after mutation failed: %v — credentials persisted, but the runtime keeps the old set until config.yaml is fixed and reloaded", err)
+		return err.Error()
+	}
+	return ""
 }
 
 // handleConfigGet returns the raw config YAML plus a small summary (listen
