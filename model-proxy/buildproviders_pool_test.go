@@ -52,7 +52,7 @@ func TestBuildProvidersUnrollsPool(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 
 	// Parent is not a runnable provider; 3 virtuals are.
 	if _, ok := p.providers["zhipu"]; ok {
@@ -115,7 +115,7 @@ func TestBuildProvidersSingleAccountKeepsPlainName(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	if _, ok := p.providers["zhipu"]; !ok {
 		t.Fatal("single account must keep plain name zhipu")
 	}
@@ -153,7 +153,7 @@ func TestBuildProvidersUnrollsDeepseekDualAuth(t *testing.T) {
 			"deepseek": {OpenAIBaseURL: "https://ds", Provider: "deepseek"},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	if _, ok := p.providers["deepseek"]; ok {
 		t.Fatal("parent deepseek should not be in providers map when pooled")
 	}
@@ -226,7 +226,7 @@ func TestBuildProvidersSingleEntryPluralPoolBindsKey(t *testing.T) {
 			"glm-4.6": {{Provider: "zhipu", Model: "glm-4.6"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// Plain name is the runnable provider; no virtuals.
 	if _, ok := p.providers["zhipu"]; !ok {
 		t.Fatal("1-entry plural pool must keep plain name zhipu")

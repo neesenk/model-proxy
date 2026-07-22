@@ -221,7 +221,7 @@ func TestForwardCountsTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfigFromBytes: %v", err)
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	rec := httptest.NewRecorder()
 	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
 	io.Copy(io.Discard, rec.Result().Body)
@@ -253,7 +253,7 @@ func TestForwardDoesNotScanNonSSE(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg, _ := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	rec := httptest.NewRecorder()
 	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)))
 	io.Copy(io.Discard, rec.Result().Body)
@@ -318,7 +318,7 @@ func TestForwardCommitsOnDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfigFromBytes: %v", err)
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	rec := &disconnectWriter{ResponseRecorder: httptest.NewRecorder()}
 	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
 	got := p.tokens.snapshot()[tokenKey{Provider: "zhipu", Model: "glm-5"}]

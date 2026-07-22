@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -22,15 +23,51 @@ import (
 // here would clobber the per-test HOME the parent chose and the CLI could no
 // longer find the pool files the test wrote.
 func TestMain(m *testing.M) {
+	dir := ""
 	if os.Getenv("MP_CLI_HELPER") == "" {
-		dir, err := os.MkdirTemp("", "model-proxy-test-home")
+		var err error
+		dir, err = os.MkdirTemp("", "model-proxy-test-home")
 		if err != nil {
 			panic(err)
 		}
-		defer os.RemoveAll(dir)
 		os.Setenv("HOME", dir)
 	}
-	os.Exit(m.Run())
+	// os.Exit skips defers, so remove the temp HOME explicitly before exiting.
+	code := m.Run()
+	if dir != "" {
+		os.RemoveAll(dir)
+	}
+	os.Exit(code)
+}
+
+// newTestProxy is the default constructor for functional tests. It guarantees
+// every quota poller is stopped before its test TempDir/HOME is removed. The
+// production NewProxy wrapper has one explicit path-wiring contract test below.
+func newTestProxy(t testing.TB, cfg *Config) *Proxy {
+	t.Helper()
+	return newTestProxyAt(t, cfg, filepath.Join(t.TempDir(), "quota_state.json"))
+}
+
+func newTestProxyAt(t testing.TB, cfg *Config, statePath string) *Proxy {
+	t.Helper()
+	p := newProxyWithStatePath(cfg, statePath)
+	t.Cleanup(p.Close)
+	return p
+}
+
+// TestNewProxy_DefaultStatePath is the deliberate exception to the test-helper
+// rule: it covers the production wrapper's HOME resolution and default state
+// path wiring. All other tests inject an isolated path through newTestProxy.
+func TestNewProxy_DefaultStatePath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := &Config{Providers: map[string]Provider{}}
+	p := NewProxy(cfg)
+	t.Cleanup(p.Close)
+	want := filepath.Join(home, ".model-proxy", "quota_state.json")
+	if p.quota.path != want {
+		t.Fatalf("NewProxy quota path = %q, want %q", p.quota.path, want)
+	}
 }
 
 // TestQuotaPersist_ConcurrentTrackersNoRenameRace (bug 3): two+ trackers
@@ -78,7 +115,7 @@ func TestProxy_CloseStopsTracker(t *testing.T) {
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 `))
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	select {
 	case <-p.quota.stopCh:
 		t.Fatal("stopCh should be open before Close")

@@ -188,8 +188,7 @@ func TestLoopbackServer_RejectsForeignHost(t *testing.T) {
 	req.Host = "evil.example.com"
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
-		t.Logf("roundtrip err (expected, host not reachable): %v", err)
-		return
+		t.Fatalf("foreign Host request failed before callback validation: %v", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {

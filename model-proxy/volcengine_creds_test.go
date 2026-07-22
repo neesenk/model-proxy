@@ -113,7 +113,7 @@ func TestVolcenginePoolPerAccountAK(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "https://v", Provider: "volcengine"},
 		},
 	}
-	px := NewProxy(cfg)
+	px := newTestProxy(t, cfg)
 	if got := len(px.poolIndex["volcengine"]); got != 2 {
 		t.Fatalf("poolIndex[volcengine] len = %d, want 2 (%v)", got, px.poolIndex["volcengine"])
 	}

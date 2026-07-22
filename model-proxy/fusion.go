@@ -328,11 +328,11 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// Circuit gate (same availability rule as tryTarget): skip members the
 	// breaker has open. record* below all clear the half-open slot; the deferred
 	// release is idempotent and covers the paths that don't record.
-	if !p.takeHalfOpenSlot(m.Provider) {
+	if !p.takeHalfOpenSlot(m.Provider, fc.flc.generation) {
 		res.err = errFusionLegUnavailable
 		return
 	}
-	defer p.releaseHalfOpenSlot(m.Provider)
+	defer p.releaseHalfOpenSlot(m.Provider, fc.flc.generation)
 	sched := fc.cfg.Scheduling
 
 	backendProto := m.Protocol
@@ -393,7 +393,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			res.err = errFusionLegUnavailable
 			return
 		}
-		p.recordFailure(m.Provider, sched)
+		p.recordFailure(m.Provider, sched, fc.flc.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evFailures)
 		}
@@ -404,7 +404,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	status = resp.StatusCode
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		p.recordFailure(m.Provider, sched)
+		p.recordFailure(m.Provider, sched, fc.flc.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evFailures)
 		}
@@ -418,13 +418,13 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			peek = peek[:8<<10]
 		}
 		until, kind := p.parseRateLimit(resp, peek, time.Now(), sched)
-		p.recordRateLimit(m.Provider, until, kind)
+		p.recordRateLimit(m.Provider, until, kind, fc.flc.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evRateLimited429)
 		}
 		res.err = errFusionLegUnavailable
 	case resp.StatusCode >= 500:
-		p.recordFailure(m.Provider, sched)
+		p.recordFailure(m.Provider, sched, fc.flc.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evFailures)
 		}
@@ -442,7 +442,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		if res.text == "" {
 			res.err = errFusionEmptyDraft
 		}
-		p.recordSuccess(m.Provider, m.Model)
+		p.recordSuccess(m.Provider, m.Model, fc.flc.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evRequests)
 			latencyMs := time.Since(start).Milliseconds()
@@ -531,7 +531,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	}
 	// The log ctx carries NO origBody so the request log stores the actual
 	// synthesis body (with the candidate sections), not the client's original.
-	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed}
+	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed, generation: fc.flc.generation}
 	committed, _, _ := p.tryTarget(fc.cfg, fc.proto, backendProto, fc.calledModel, st, prov, impl, baseURL, effPath,
 		body, w, r, fc.agent, cacheKey, false, cache, flc, nil, true)
 	return committed

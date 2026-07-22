@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"io/fs"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -13,6 +15,19 @@ func mustWebAsset(t *testing.T, name string) string {
 		t.Fatalf("read embedded asset %s: %v", name, err)
 	}
 	return string(b)
+}
+
+func TestWebAssetsJavaScriptSyntax(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed; run the required node --check validation separately")
+	}
+	js := []byte(mustWebAsset(t, "app.js"))
+	cmd := exec.Command(node, "--check", "-")
+	cmd.Stdin = bytes.NewReader(js)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node --check web_assets/app.js: %v\n%s", err, out)
+	}
 }
 
 func TestWebAssetsLogGutterAndSelectionContract(t *testing.T) {

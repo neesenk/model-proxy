@@ -50,7 +50,7 @@ func TestServeOnce_EffectiveTargetsReflectsScheduledSet(t *testing.T) {
 	routeKeys := map[string]bool{"m": true}
 	targets := cfg.Routes["m"]
 	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
-	res := p.serveOnce(cfg, p.providers, p.poolIndex, p.parentOf, p.expandedRoutes, nil,
+	res := p.serveOnce(cfg, 0, p.providers, p.poolIndex, p.parentOf, p.expandedRoutes, nil,
 		"openai", "/chat/completions", "m", "m", "", targets, routeKeys, false, nil, "",
 		httptest.NewRecorder(), r, "", "req-1", nil, &serveState{})
 

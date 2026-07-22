@@ -37,29 +37,31 @@ func nextRequestID() string {
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
-	mu         sync.RWMutex // guards cfg/providers across reload (held by handler for the request)
-	healthMu   sync.Mutex   // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
-	cfg        *Config
-	providers  map[string]provider.Provider // provider name → Provider (shared)
-	client     *http.Client
-	health     map[string]*providerHealth       // provider name → circuit/rate-limit state
-	sticky     map[string]routeSticky           // exposed model → current provider + since
-	pins       map[string]pinEntry              // exposed model → manual pin (healthMu); hot-switch, overrides schedule
-	modelLocks map[modelLockKey]*modelLockEntry // (provider,model) → model-level failure lockout (healthMu); isolates a bad model without poisoning the account
-	paramBlock map[modelLockKey]map[string]bool // {provider,model} → learned unsupported top-level request params, stripped before send (healthMu)
-	quota      *quotaTracker                    // background quota poller; nil only in degenerate tests
-	metrics    *metricsStore                    // request counters (atomic); nil only in degenerate tests
-	tokens     *tokenCounter                    // SSE-scanned token usage; nil only in degenerate tests
-	agents     *agentCounter                    // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats      *statsStore                      // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
-	flusher    *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog     *requestLogger                   // per-request access log (full bodies); nil = disabled (default) or init failure
-	cache      *responseCache                   // exact-match response cache (prompt-hash + TTL); nil = disabled
-	events     *eventHub                        // live request monitor fan-out hub (SSE /api/events); always non-nil
-	fusionReg  *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
-	catalog    *modelsDevCatalog                // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
-	shadow     atomic.Pointer[shadowRuntime]    // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
-	pricingMu  sync.Mutex                       // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
+	mu                sync.RWMutex  // guards cfg/providers across reload (held by handler for the request)
+	healthMu          sync.Mutex    // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
+	configGeneration  atomic.Uint64 // incremented on every successful reload
+	runtimeGeneration uint64        // guarded by healthMu; rejects stale request mutations
+	cfg               *Config
+	providers         map[string]provider.Provider // provider name → Provider (shared)
+	client            *http.Client
+	health            map[string]*providerHealth       // provider name → circuit/rate-limit state
+	sticky            map[string]routeSticky           // exposed model → current provider + since
+	pins              map[string]pinEntry              // exposed model → manual pin (healthMu); hot-switch, overrides schedule
+	modelLocks        map[modelLockKey]*modelLockEntry // (provider,model) → model-level failure lockout (healthMu); isolates a bad model without poisoning the account
+	paramBlock        map[modelLockKey]map[string]bool // {provider,model} → learned unsupported top-level request params, stripped before send (healthMu)
+	quota             *quotaTracker                    // background quota poller; nil only in degenerate tests
+	metrics           *metricsStore                    // request counters (atomic); nil only in degenerate tests
+	tokens            *tokenCounter                    // SSE-scanned token usage; nil only in degenerate tests
+	agents            *agentCounter                    // per-agent (UA) request/token counters; nil only in degenerate tests
+	stats             *statsStore                      // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
+	flusher           *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog            *requestLogger                   // per-request access log (full bodies); nil = disabled (default) or init failure
+	cache             *responseCache                   // exact-match response cache (prompt-hash + TTL); nil = disabled
+	events            *eventHub                        // live request monitor fan-out hub (SSE /api/events); always non-nil
+	fusionReg         *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
+	catalog           *modelsDevCatalog                // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
+	shadow            atomic.Pointer[shadowRuntime]    // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
+	pricingMu         sync.Mutex                       // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -75,7 +77,8 @@ type Proxy struct {
 
 	// scheduleHook is a test-only hook fired in forward right after schedule(),
 	// capturing the threaded sessionKey. Nil in production.
-	scheduleHook func(sessionKey string)
+	scheduleHook        func(sessionKey string)
+	persistSnapshotHook func() // test-only: runs after p.mu.RLock, before health/quota locks
 }
 
 // providerHealth tracks a provider's circuit-breaker and rate-limit state.
@@ -274,6 +277,13 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 	return p
 }
 func NewProxy(cfg *Config) *Proxy {
+	home, _ := os.UserHomeDir()
+	return newProxyWithStatePath(cfg, filepath.Join(home, ".model-proxy", "quota_state.json"))
+}
+
+// newProxyWithStatePath is the injectable constructor used by tests so every
+// Proxy owns an isolated state file before the tracker loads or starts.
+func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	providers, poolIndex, parentOf := buildProviders(cfg)
 	p := &Proxy{
 		cfg:        cfg,
@@ -288,6 +298,8 @@ func NewProxy(cfg *Config) *Proxy {
 		poolIndex:  poolIndex,
 		parentOf:   parentOf,
 	}
+	p.configGeneration.Store(1)
+	p.runtimeGeneration = 1
 	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutes(cfg)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	// Config-time routing hazards (reasoning-replay models behind conversion,
@@ -302,13 +314,11 @@ func NewProxy(cfg *Config) *Proxy {
 	}
 	// The tracker reads cfg/providers asynchronously via the snapshot closures
 	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
-	home, _ := os.UserHomeDir()
-	qpath := filepath.Join(home, ".model-proxy", "quota_state.json")
 	p.quota = newQuotaTracker(qpath,
 		func() *Config { return p.cfgSnapshot() },
 		func() map[string]provider.Provider { return p.providerSnapshot() })
-	p.quota.stickySnapshot = p.snapshotSticky
-	p.quota.healthSnapshot = p.snapshotHealth
+	p.quota.generation = p.configGeneration.Load
+	p.quota.fullSnapshot = p.snapshotPersistedState
 	p.quota.start()
 	p.metrics = newMetricsStore()
 	// SSE token counter. Persistence (baseline restore + per-minute flush) is
@@ -342,6 +352,11 @@ func NewProxy(cfg *Config) *Proxy {
 	// files without a fingerprint keep the historical restore behavior.
 	fp := healthConfigFingerprint(cfg)
 	fpMatch := p.quota.LoadedHealthFP == "" || p.quota.LoadedHealthFP == fp
+	if p.quota.LoadedHealthFP != "" && !fpMatch {
+		// Quota snapshots are provider/account observations too. A changed provider
+		// identity or endpoint must not inherit the old file's scheduling tier.
+		p.quota.clearForGeneration(p.configGeneration.Load())
+	}
 	if loaded := p.quota.LoadedSticky; len(loaded) > 0 && fpMatch {
 		p.healthMu.Lock()
 		for k, v := range loaded {
@@ -544,15 +559,15 @@ func (p *Proxy) providerSnapshot() map[string]provider.Provider {
 // daemon's dwell window and self-heal on the next request, so writing them to
 // quota_state.json would just accumulate client conversation IDs on disk.
 func (p *Proxy) snapshotSticky() map[string]routeSticky {
-	cfg := p.cfgSnapshot()
-	routes := cfg.Routes
-	// Implicit-route names aren't in cfg.Routes but should persist too — snapshot
-	// them under the same RLock as cfg (they're mutated on reload under p.mu).
 	p.mu.RLock()
-	implicit := p.implicitRoutes
-	p.mu.RUnlock()
 	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
+	out := p.snapshotStickyLocked(p.cfg.Routes, p.implicitRoutes)
+	p.healthMu.Unlock()
+	p.mu.RUnlock()
+	return out
+}
+
+func (p *Proxy) snapshotStickyLocked(routes map[string][]RouteTarget, implicit map[string]RouteTarget) map[string]routeSticky {
 	out := make(map[string]routeSticky, len(p.sticky))
 	for k, v := range p.sticky {
 		if _, isRoute := routes[k]; !isRoute {
@@ -592,6 +607,10 @@ func healthConfigFingerprint(cfg *Config) string {
 func (p *Proxy) snapshotHealth() map[string]persistedHealth {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+	return p.snapshotHealthLocked()
+}
+
+func (p *Proxy) snapshotHealthLocked() map[string]persistedHealth {
 	out := make(map[string]persistedHealth, len(p.health))
 	// Iterate the UNION of health ∪ paramBlock keys: a provider with only
 	// learned params (never failed) has no health entry — dropping it here
@@ -646,6 +665,45 @@ func (p *Proxy) snapshotHealth() map[string]persistedHealth {
 	return out
 }
 
+// snapshotPersistedState takes the one authoritative persistence snapshot under
+// a single generation and the repository lock order p.mu -> healthMu ->
+// quotaMu. No reload or request-state mutation can interleave cfg fingerprint,
+// health/sticky, or quota snapshots.
+func (p *Proxy) snapshotPersistedState() persistedFullSnapshot {
+	p.mu.RLock()
+	if p.persistSnapshotHook != nil {
+		p.persistSnapshotHook()
+	}
+	p.healthMu.Lock()
+	p.quota.mu.RLock()
+	providers := make(map[string]persistedSnapshot, len(p.quota.state))
+	for k, v := range p.quota.state {
+		providers[k] = persistedSnapshot{
+			Billing: v.Billing, RemainingPct: v.RemainingPct,
+			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
+		}
+	}
+	s := persistedFullSnapshot{
+		Providers:  providers,
+		Sticky:     p.snapshotStickyLocked(p.cfg.Routes, p.implicitRoutes),
+		Health:     p.snapshotHealthLocked(),
+		HealthFP:   healthConfigFingerprint(p.cfg),
+		Generation: p.runtimeGeneration,
+	}
+	p.quota.mu.RUnlock()
+	p.healthMu.Unlock()
+	p.mu.RUnlock()
+	return s
+}
+
+// reloadAppliedWarning means the new config is already live, but a required
+// post-swap durability step failed. Callers must surface it without rolling the
+// config file back (which would diverge disk from the already-swapped runtime).
+type reloadAppliedWarning struct{ err error }
+
+func (e *reloadAppliedWarning) Error() string { return "reload applied with warning: " + e.err.Error() }
+func (e *reloadAppliedWarning) Unwrap() error { return e.err }
+
 func (p *Proxy) reload(configPath string) error {
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
@@ -656,7 +714,13 @@ func (p *Proxy) reload(configPath string) error {
 	// BEFORE taking the write lock so in-flight forward handlers (RLock) aren't
 	// stalled behind N credential-file reads on every reload.
 	newImplicit, newWarnings := synthesizeImplicitRoutes(cfg)
+	// Switch config and runtime state as one generation. Persist snapshots take
+	// the same lock order, and request mutations carry the generation captured by
+	// forward, so an old in-flight request cannot repopulate the cleared maps.
 	p.mu.Lock()
+	p.healthMu.Lock()
+	generation := p.configGeneration.Add(1)
+	p.runtimeGeneration = generation
 	p.cfg = cfg
 	p.providers = newProviders
 	// Rebuild the pool index + expanded routes from the single buildProviders
@@ -677,24 +741,31 @@ func (p *Proxy) reload(configPath string) error {
 	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until
 	// restart. Swapped atomically; in-flight shadow goroutines finish on the old bundle.
 	p.shadow.Store(newShadowRuntime(cfg))
-	p.mu.Unlock()
-	for _, w := range hw {
-		log.Printf("[reload] ⚠ %s", w)
-	}
-	// Reset health + sticky state — a reload is the operator's way to clear
-	// stuck circuit-open / rate-limited / sticky-dwell state.
-	p.healthMu.Lock()
 	p.health = map[string]*providerHealth{}
 	p.sticky = map[string]routeSticky{}
 	p.spreadCtr = map[string]uint64{}
 	p.modelLocks = map[modelLockKey]*modelLockEntry{}
 	p.paramBlock = map[modelLockKey]map[string]bool{}
-	p.healthMu.Unlock()
-	// The tracker reads the new cfg/providers via its snapshot closures, so it
-	// is NOT stopped/recreated on reload. Kick an immediate poll so newly added
-	// providers show up at once (removed ones simply go stale and age out).
 	if p.quota != nil {
-		go p.quota.pollAll(time.Now())
+		p.quota.clearForGeneration(generation)
+	}
+	p.healthMu.Unlock()
+	p.mu.Unlock()
+	for _, w := range hw {
+		log.Printf("[reload] ⚠ %s", w)
+	}
+	// Persist the cleared state synchronously so empty-health + the new
+	// fingerprint land on disk now (survives a crash right after reload — the
+	// documented contract). The async poll below refreshes quota snapshots for
+	// newly added providers; pollAsync is tracked + stop-aware so it can't
+	// outlive Close (no persist after the final flush).
+	var appliedWarning error
+	if p.quota != nil {
+		persistErr := p.quota.persist()
+		p.quota.pollAsync(time.Now())
+		if persistErr != nil {
+			appliedWarning = &reloadAppliedWarning{err: fmt.Errorf("persist cleared runtime state: %w", persistErr)}
+		}
 	}
 	// Refresh the models.dev catalog best-effort so newly configured model names
 	// resolve their context window / modalities for request-aware routing. A
@@ -708,7 +779,7 @@ func (p *Proxy) reload(configPath string) error {
 	if cfg.RequestLog.Enabled && p.reqLog == nil {
 		log.Printf("[reload] request_log.enabled is true but logging is not active (reload cannot start it); restart the daemon to enable request logging")
 	}
-	return nil
+	return appliedWarning
 }
 
 // buildExpandedRoutes returns routes with pooled targets fanned out to their
@@ -1087,6 +1158,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// reload (Proxy.reload takes mu.Lock) blocks until all streams finish.
 	p.mu.RLock()
 	cfg := p.cfg
+	generation := p.configGeneration.Load()
 	provs := p.providers
 	expanded := p.expandedRoutes
 	parentOf := p.parentOf
@@ -1225,7 +1297,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	var st serveState
 	var sawHard, sawCool bool
 	for round := 0; ; round++ {
-		res := p.serveOnce(cfg, provs, poolIndex, parentOf, expanded, cat, proto, upPath, exposed, calledModel, sessionKey, targets, routeKeys, force, cache, cacheKey, w, r, agent, requestID, origBody, &st)
+		res := p.serveOnce(cfg, generation, provs, poolIndex, parentOf, expanded, cat, proto, upPath, exposed, calledModel, sessionKey, targets, routeKeys, force, cache, cacheKey, w, r, agent, requestID, origBody, &st)
 		if res.committed {
 			return
 		}
@@ -1348,8 +1420,8 @@ type serveResult struct {
 // serveOnce runs ONE full scheduling + failover pass: schedule → request-aware
 // routing → try each target in order (fusion recipes intercepted). forward
 // calls it in a wait-retry loop for all-cooldown situations.
-func (p *Proxy) serveOnce(cfg *Config, provs map[string]provider.Provider, poolIndex map[string][]string, parentOf map[string]string, expanded map[string][]RouteTarget, cat *modelsDevCatalog, proto, upPath, exposed, calledModel, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, force bool, cache *responseCache, cacheKey string, w http.ResponseWriter, r *http.Request, agent, requestID string, origBody []byte, st *serveState) serveResult {
-	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys)
+func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provider.Provider, poolIndex map[string][]string, parentOf map[string]string, expanded map[string][]RouteTarget, cat *modelsDevCatalog, proto, upPath, exposed, calledModel, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, force bool, cache *responseCache, cacheKey string, w http.ResponseWriter, r *http.Request, agent, requestID string, origBody []byte, st *serveState) serveResult {
+	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
 	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
 	// overrides request-aware routing (no cross-route reroute away from the pinned
 	// provider) and, via the `force` flag into tryTarget, bypasses the circuit
@@ -1359,7 +1431,7 @@ func (p *Proxy) serveOnce(cfg *Config, provs map[string]provider.Provider, poolI
 		// that fit the request (image capability + context window); if none in the
 		// route fit, fall back to a cross-route capable+fitting pool ranked by the
 		// normal scheduling policy. No-op when everything already fits.
-		ordered = p.applyRequestAwareRouting(cfg, parentOf, cat, exposed, sessionKey, ordered, expanded, routeKeys, origBody)
+		ordered = p.applyRequestAwareRouting(cfg, parentOf, cat, exposed, sessionKey, ordered, expanded, routeKeys, origBody, generation)
 	}
 	if p.scheduleHook != nil {
 		p.scheduleHook(sessionKey)
@@ -1387,7 +1459,7 @@ func (p *Proxy) serveOnce(cfg *Config, provs map[string]provider.Provider, poolI
 				proto: proto, calledModel: calledModel, upPath: upPath, agent: agent,
 				sessionKey: sessionKey,
 				origBody:   origBody,
-				flc:        forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, origBody: origBody},
+				flc:        forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, generation: generation, origBody: origBody},
 			}
 			st.attempt++
 			res.tried[t.Provider] = true
@@ -1449,7 +1521,7 @@ func (p *Proxy) serveOnce(cfg *Config, provs map[string]provider.Provider, poolI
 			effPath = backendPath(backendProto)
 		}
 
-		flc := forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, origBody: origBody}
+		flc := forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, generation: generation, origBody: origBody}
 		st.attempt++
 		// One-shot larger-context retry: when this target answers a
 		// context-overflow 400, tryTarget calls ctxRetry for a strictly-larger-
@@ -1465,7 +1537,7 @@ func (p *Proxy) serveOnce(cfg *Config, provs map[string]provider.Provider, poolI
 			// context" threshold (they might be worth trying as the retry itself).
 			alreadyTried := ordered[:ti+1]
 			ctxRetry = func() []RouteTarget {
-				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody)
+				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody, generation)
 			}
 		}
 		committed, retried, outcome := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry, ti == len(ordered)-1)
@@ -1546,7 +1618,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 	// (force) bypasses the circuit breaker — the user explicitly asked for THIS
 	// backend, so circuit-open state must not block it (and there's no failover
 	// target anyway). recordSuccess on a forced hit reopens the circuit.
-	if !force && !p.takeHalfOpenSlot(t.Provider) {
+	if !force && !p.takeHalfOpenSlot(t.Provider, flc.generation) {
 		return false, nil, tryNone
 	}
 	// recordSuccess/Failure/RateLimit below release the slot (force never took
@@ -1575,7 +1647,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		req, err := http.NewRequestWithContext(ctx, r.Method, targetURL, bytes.NewReader(body))
 		if err != nil {
 			log.Printf("[proto=%s provider=%s] build upstream req: %v", proto, t.Provider, err)
-			p.releaseHalfOpenSlot(t.Provider)
+			p.releaseHalfOpenSlot(t.Provider, flc.generation)
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
@@ -1590,7 +1662,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		if provImpl != nil {
 			if err := provImpl.AuthHeaders(req); err != nil {
 				log.Printf("[proto=%s provider=%s] auth error: %v", proto, t.Provider, err)
-				p.releaseHalfOpenSlot(t.Provider)
+				p.releaseHalfOpenSlot(t.Provider, flc.generation)
 				if p.metrics != nil {
 					p.metrics.inc(t.Provider, t.Model, evFailovers)
 				}
@@ -1612,7 +1684,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		upstreamMs := time.Since(start).Milliseconds() // upstream response time (headers received), NOT client-read-inclusive
 		if err != nil {
 			log.Printf("[proto=%s provider=%s] upstream error: %v", proto, t.Provider, err)
-			p.recordFailure(t.Provider, sched) // connection error / timeout → circuit
+			p.recordFailure(t.Provider, sched, flc.generation) // connection error / timeout → circuit
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailures)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
@@ -1631,7 +1703,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 					continue
 				}
 			}
-			p.recordFailure(t.Provider, sched)
+			p.recordFailure(t.Provider, sched, flc.generation)
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
@@ -1644,7 +1716,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			peek := peekResponseBody(resp, 8<<10)
 			until, kind := p.parseRateLimit(resp, peek, time.Now(), sched)
 			resp.Body.Close()
-			p.recordRateLimit(t.Provider, until, kind)
+			p.recordRateLimit(t.Provider, until, kind, flc.generation)
 			if kind != rlTransient {
 				log.Printf("[proto=%s provider=%s] 429 classified %s — skipped until %s", proto, t.Provider, kind, until.Format(time.RFC3339))
 			}
@@ -1657,7 +1729,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// Transient upstream errors → circuit + failover.
 		if resp.StatusCode >= 500 {
 			resp.Body.Close()
-			p.recordFailure(t.Provider, sched)
+			p.recordFailure(t.Provider, sched, flc.generation)
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailures)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
@@ -1683,7 +1755,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			if ctxRetry != nil && isContextOverflow(resp.StatusCode, peek) {
 				if bigger := ctxRetry(); len(bigger) > 0 {
 					resp.Body.Close()
-					p.releaseHalfOpenSlot(t.Provider)
+					p.releaseHalfOpenSlot(t.Provider, flc.generation)
 					if p.metrics != nil {
 						p.metrics.inc(t.Provider, t.Model, evFailovers)
 					}
@@ -1702,10 +1774,10 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			// INTENTIONAL — 404/4xx failover is deliberate, see
 			// AGENTS.md「会被误认为是 bug 的设计」#2/#3.
 			if resp.StatusCode == 404 || isModelDenied(resp.StatusCode, peek) {
-				p.recordModelFailure(t.Provider, t.Model, sched)
+				p.recordModelFailure(t.Provider, t.Model, sched, flc.generation)
 				if !lastTarget {
 					resp.Body.Close()
-					p.releaseHalfOpenSlot(t.Provider)
+					p.releaseHalfOpenSlot(t.Provider, flc.generation)
 					if p.metrics != nil {
 						p.metrics.inc(t.Provider, t.Model, evFailovers)
 					}
@@ -1724,7 +1796,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			// narrowly gated, see AGENTS.md「会被误认为是 bug 的设计」#4.
 			if resp.StatusCode == 400 && !strippedParam {
 				if param, ok := parseUnsupportedParam(peek); ok {
-					isNew := p.learnParamBlock(t.Provider, t.Model, param)
+					isNew := p.learnParamBlock(t.Provider, t.Model, param, flc.generation)
 					if nb, did := stripTopLevelParam(body, param); did {
 						resp.Body.Close()
 						strippedParam = true
@@ -1750,10 +1822,10 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// INTENTIONAL — treating success as failure here is deliberate, see
 		// AGENTS.md「会被误认为是 bug 的设计」#1.
 		if resp.StatusCode < 300 && resp.Header.Get("Content-Length") == "0" {
-			p.recordModelFailure(t.Provider, t.Model, sched)
+			p.recordModelFailure(t.Provider, t.Model, sched, flc.generation)
 			if !lastTarget {
 				resp.Body.Close()
-				p.releaseHalfOpenSlot(t.Provider)
+				p.releaseHalfOpenSlot(t.Provider, flc.generation)
 				if p.metrics != nil {
 					p.metrics.inc(t.Provider, t.Model, evFailovers)
 				}
@@ -1767,13 +1839,13 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// recordSuccess only for 2xx — 4xx (400/403/404) are client errors that
 		// shouldn't reset the circuit breaker (a persistently-403 provider is broken).
 		if resp.StatusCode < 300 {
-			p.recordSuccess(t.Provider, t.Model)
+			p.recordSuccess(t.Provider, t.Model, flc.generation)
 		} else {
 			// …but a 4xx commit still RELEASES the half-open probe slot
 			// (release-neutral: failure history untouched) — otherwise a provider
 			// whose half-open probe gets a 4xx keeps halfOpenInFlight=true
 			// FOREVER and starves (P0-4).
-			p.releaseHalfOpenSlot(t.Provider)
+			p.releaseHalfOpenSlot(t.Provider, flc.generation)
 		}
 		log.Printf("[proto=%s provider=%s] %s %s model=%s→%s status=%s %dms bytes=%d",
 			proto, t.Provider, r.Method, r.URL.Path, calledModel, t.Model,
@@ -1916,7 +1988,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// upstream read error (streamUpstreamErr) also yields n==0 but is NOT a
 		// model failure (P1-1c).
 		if resp.StatusCode < 300 && counting.n == 0 && end == streamEOF && r.Context().Err() == nil {
-			p.recordModelFailure(t.Provider, t.Model, sched)
+			p.recordModelFailure(t.Provider, t.Model, sched, flc.generation)
 			log.Printf("[proto=%s provider=%s] 200 with zero-byte body — model locked %s (post-commit; next request fails over)",
 				proto, t.Provider, sched.modelLockout())
 		}
@@ -2004,7 +2076,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 	// 401-retry exhausted without resolution — release the slot.
 	// Defensive guard: unreachable in normal flow (the 401 branch above always
 	// returns or continues on attempt 0), kept for safety.
-	p.releaseHalfOpenSlot(t.Provider)
+	p.releaseHalfOpenSlot(t.Provider, flc.generation)
 	if p.metrics != nil {
 		p.metrics.inc(t.Provider, t.Model, evFailovers)
 	}
@@ -2204,9 +2276,9 @@ func tierRank(b provider.BillingClass) int {
 // Sticky routing keeps the current provider for sticky_dwell (cache-friendly),
 // then re-selects the best unless the best's only edge is a sub-margin surplus gain
 // (priority beats surplus; surplus only matters at equal priority).
-func (p *Proxy) schedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool) []RouteTarget {
+func (p *Proxy) schedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generations ...uint64) []RouteTarget {
 	now := time.Now()
-	ordered, stickyToSet := p.decideOrder(cfg, parentOf, exposed, sessionKey, targets, now, true, routeKeys)
+	ordered, stickyToSet := p.decideOrder(cfg, parentOf, exposed, sessionKey, targets, now, true, routeKeys, generations...)
 	if stickyToSet != "" {
 		// Commit sticky on the SESSION key (fallback to the exposed model for
 		// non-session clients), so one conversation parks on one provider and
@@ -2216,7 +2288,9 @@ func (p *Proxy) schedule(cfg *Config, parentOf map[string]string, exposed, sessi
 			sk = exposed
 		}
 		p.healthMu.Lock()
-		p.sticky[sk] = routeSticky{provider: stickyToSet, since: now}
+		if p.generationMatchesLocked(generations...) {
+			p.sticky[sk] = routeSticky{provider: stickyToSet, since: now}
+		}
 		p.healthMu.Unlock()
 	}
 	return ordered
@@ -2306,7 +2380,7 @@ func (p *Proxy) pinForces(exposed string, ordered []RouteTarget, parentOf map[st
 // a read-only peek. parentOf resolves pooled virtual ids to their parent's config
 // (billing/peak are parent-level, not per-account) AND drives per-parent
 // round-robin assignment of new sessions.
-func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool, routeKeys map[string]bool) (ordered []RouteTarget, stickyToSet string) {
+func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool, routeKeys map[string]bool, generations ...uint64) (ordered []RouteTarget, stickyToSet string) {
 	sched := cfg.Scheduling
 	// (a) Re-key sticky on the session. Non-session clients (sessionKey=="")
 	// fall back to the exposed model → identical to the pre-session path, so the
@@ -2324,6 +2398,7 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+	commit = commit && p.generationMatchesLocked(generations...)
 
 	// (b) Evict expired SESSION entries to bound the sticky map. Per-session
 	// keying adds one entry per distinct session id; without eviction a
@@ -2583,10 +2658,17 @@ func (h *providerHealth) available(now time.Time) bool {
 // takeHalfOpenSlot re-checks availability and, for a half-open provider, reserves
 // the single probe slot. Returns false if the provider should be skipped (circuit
 // open, rate-limited, or a half-open probe is already in flight).
-func (p *Proxy) takeHalfOpenSlot(name string) bool {
+func (p *Proxy) generationMatchesLocked(generations ...uint64) bool {
+	return len(generations) == 0 || generations[0] == 0 || generations[0] == p.runtimeGeneration
+}
+
+func (p *Proxy) takeHalfOpenSlot(name string, generations ...uint64) bool {
 	now := time.Now()
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+	if !p.generationMatchesLocked(generations...) {
+		return true // let the old request finish, but do not mutate the new generation
+	}
 	h := p.health[name]
 	if h == nil {
 		return true // no failures recorded → available, no slot needed
@@ -2608,17 +2690,23 @@ func (p *Proxy) takeHalfOpenSlot(name string) bool {
 	return true
 }
 
-func (p *Proxy) releaseHalfOpenSlot(name string) {
+func (p *Proxy) releaseHalfOpenSlot(name string, generations ...uint64) {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+	if !p.generationMatchesLocked(generations...) {
+		return
+	}
 	if h := p.health[name]; h != nil {
 		h.halfOpenInFlight = false
 	}
 }
 
-func (p *Proxy) recordSuccess(name, model string) {
+func (p *Proxy) recordSuccess(name, model string, generations ...uint64) {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+	if !p.generationMatchesLocked(generations...) {
+		return
+	}
 	if h := p.health[name]; h != nil {
 		h.consecutiveFailures = 0
 		h.circuitOpenUntil = time.Time{}
@@ -2630,10 +2718,13 @@ func (p *Proxy) recordSuccess(name, model string) {
 
 // recordFailure increments a provider's consecutive failures and opens the
 // circuit (for cooldown) once the threshold is reached. Clears any half-open slot.
-func (p *Proxy) recordFailure(name string, sched Scheduling) {
+func (p *Proxy) recordFailure(name string, sched Scheduling, generations ...uint64) {
 	now := time.Now()
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+	if !p.generationMatchesLocked(generations...) {
+		return
+	}
 	h := p.health[name]
 	if h == nil {
 		h = &providerHealth{}
@@ -2663,10 +2754,13 @@ func (p *Proxy) modelLocked(provider, model string, now time.Time) bool {
 // recordModelFailure locks (provider, model) for model_lockout. Model-level
 // failures (404 / model-denied / empty 200) never touch the account's circuit
 // breaker — the account may serve its other models fine.
-func (p *Proxy) recordModelFailure(provider, model string, sched Scheduling) {
+func (p *Proxy) recordModelFailure(provider, model string, sched Scheduling, generations ...uint64) {
 	now := time.Now()
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+	if !p.generationMatchesLocked(generations...) {
+		return
+	}
 	k := modelLockKey{provider: provider, model: model}
 	e := p.modelLocks[k]
 	if e == nil {
@@ -2793,9 +2887,12 @@ func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool
 // (applyParamBlock). Scoped per MODEL: one model's quirk (e.g. reasoning
 // models rejecting temperature) must not strip params for its siblings.
 // Reports whether the parameter is newly learned (for log-once).
-func (p *Proxy) learnParamBlock(provider, model, param string) (isNew bool) {
+func (p *Proxy) learnParamBlock(provider, model, param string, generations ...uint64) (isNew bool) {
 	p.healthMu.Lock()
 	defer p.healthMu.Unlock()
+	if !p.generationMatchesLocked(generations...) {
+		return false
+	}
 	k := modelLockKey{provider: provider, model: model}
 	m := p.paramBlock[k]
 	if m == nil {
@@ -2850,8 +2947,12 @@ func stripTopLevelParam(body []byte, param string) (out []byte, did bool) {
 // provider so its snapshot is fresh when the rate-limit clears. healthMu is
 // released BEFORE spawning refreshOne — refreshOne takes quotaMu internally and
 // we never nest the two locks.
-func (p *Proxy) recordRateLimit(name string, until time.Time, kind rateLimitKind) {
+func (p *Proxy) recordRateLimit(name string, until time.Time, kind rateLimitKind, generations ...uint64) {
 	p.healthMu.Lock()
+	if !p.generationMatchesLocked(generations...) {
+		p.healthMu.Unlock()
+		return
+	}
 	h := p.health[name]
 	if h == nil {
 		h = &providerHealth{}
@@ -2864,7 +2965,9 @@ func (p *Proxy) recordRateLimit(name string, until time.Time, kind rateLimitKind
 	}
 	p.healthMu.Unlock()
 	if p.quota != nil {
-		go p.quota.refreshOne(name)
+		// refreshAsync is tracked + stop-aware: a 429-triggered refresh can't
+		// outlive Proxy.Close (no persist after the final flush).
+		p.quota.refreshAsync(name, generations...)
 	}
 }
 

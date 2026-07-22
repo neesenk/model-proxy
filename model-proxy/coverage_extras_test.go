@@ -354,7 +354,7 @@ func TestShouldShadow(t *testing.T) {
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "z", Model: "m"}}},
 	}
 	// rate >= 1 → always true.
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.shadow.Store(&shadowRuntime{sem: make(chan struct{}, 1), sampRate: 1.0})
 	if !p.shouldShadow() {
 		t.Error("rate=1.0 should return true")
@@ -408,7 +408,7 @@ func TestReload_ShadowDisabledStopsFiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.initRequestLog(cfg.RequestLog) // shadow only fires when reqLog is active
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -437,8 +437,12 @@ func TestReload_ShadowDisabledStopsFiring(t *testing.T) {
 		t.Fatalf("reload: %v", err)
 	}
 	send()
-	// Give any stray shadow goroutine a moment, then assert NO new candidate hit.
-	time.Sleep(120 * time.Millisecond)
+	// Admission to the shadow semaphore happens synchronously before the
+	// fire-and-forget goroutine starts. An empty gate after send therefore proves
+	// this request was not admitted, without a timing-based absence assertion.
+	if inFlight := len(p.shadow.Load().sem); inFlight != 0 {
+		t.Fatalf("after disabling shadow via reload, in-flight shadow admissions=%d, want 0", inFlight)
+	}
 	if got := candHits.Load(); got != 1 {
 		t.Errorf("after disabling shadow via reload, candHits=%d, want 1 (shadow kept firing — sample rate not reload-aware)", got)
 	}
@@ -474,7 +478,7 @@ func TestShadow_PooledProvider(t *testing.T) {
 		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
 		Shadow: map[string]ShadowTarget{"m": {Provider: "zhipu-shadow", Model: "glm"}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -521,7 +525,7 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
 		Shadow: map[string]ShadowTarget{"m": {Provider: "shadow-prov", Model: "sm", Protocol: "anthropic"}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["main"] = &testProv{key: "main"}
 	p.providers["shadow-prov"] = &testProv{key: "shadow-prov"}
 	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
@@ -538,8 +542,15 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	// Give any stray shadow goroutine a moment, then assert it never landed.
-	time.Sleep(120 * time.Millisecond)
+	// Admission is synchronous; wait for the admitted conversion attempt to
+	// finish, then assert the fail-closed path never reached the backend.
+	deadline := time.Now().Add(time.Second)
+	for len(p.shadow.Load().sem) != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if inFlight := len(p.shadow.Load().sem); inFlight != 0 {
+		t.Fatalf("shadow conversion attempt did not finish before deadline; in-flight=%d", inFlight)
+	}
 	if got := shadowHits.Load(); got != 0 {
 		t.Errorf("shadow backend hit %d time(s) with an unconverted body after convert failure (fail-open); want 0", got)
 	}
@@ -623,7 +634,7 @@ func TestIsDaemonUnreachable(t *testing.T) {
 // enabled=false when request_log is off, and entries when on.
 func TestHandleShadowReport_API(t *testing.T) {
 	// Off → enabled=false.
-	w := newWebServer(NewProxy(&Config{
+	w := newWebServer(newTestProxy(t, &Config{
 		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}), "test-config.yaml")

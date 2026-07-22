@@ -150,7 +150,8 @@ func newFusionRig(t *testing.T, recipe FusionConfig, ups map[string]*fakeUpstrea
 		Routes:    map[string][]RouteTarget{"hard": {{Provider: "fusion", Model: "recipe", Priority: 1}}},
 		Fusion:    map[string]FusionConfig{"recipe": recipe},
 	}
-	proxy := NewProxy(cfg)
+	proxy := newTestProxy(t, cfg)
+	t.Cleanup(proxy.Close) // stop the quota tracker; don't leak a poller past the test
 	for name := range names {
 		proxy.providers[name] = &testProv{key: name}
 	}
@@ -207,7 +208,7 @@ func TestFusion_PooledParentMembers(t *testing.T) {
 			Synthesizer: RouteTarget{Provider: "zhipu-synth", Model: "gsynth"},
 		}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -823,7 +824,7 @@ func TestFusion_SynthesizerPoolExhaustedFailsClosed(t *testing.T) {
 			Synthesizer: RouteTarget{Provider: "zhipu-synth", Model: "gsynth"},
 		}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// Rate-limit BOTH synthesizer accounts → the resolver finds no healthy virtual.
 	for _, vid := range p.poolIndex["zhipu-synth"] {
 		p.recordRateLimit(vid, time.Now().Add(time.Hour), rlTransient)

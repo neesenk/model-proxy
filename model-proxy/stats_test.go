@@ -191,9 +191,18 @@ func TestStatsPrune(t *testing.T) {
 // TestStatsResetAll verifies resetAll wipes all buckets.
 func TestStatsResetAll(t *testing.T) {
 	ss := newTestStatsStore(t)
-	_ = ss.flushDeltas(time.Now().Unix()/60*60, map[pmKey]statsCounters{
+	if err := ss.flushDeltas(time.Now().Unix()/60*60, map[pmKey]statsCounters{
 		{Provider: "z", Model: "m"}: {Requests: 5},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ss.queryRange(0, time.Now().Unix()+3600, "", "", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 || before[0].Requests != 5 {
+		t.Fatalf("reset precondition = %+v, want one row with five requests", before)
+	}
 	if err := ss.resetAll(); err != nil {
 		t.Fatal(err)
 	}
@@ -210,11 +219,13 @@ func TestStatsResetAll(t *testing.T) {
 func TestStatsQueryRangeFilters(t *testing.T) {
 	ss := newTestStatsStore(t)
 	minute := time.Now().Unix() / 60 * 60
-	_ = ss.flushDeltas(minute, map[pmKey]statsCounters{
+	if err := ss.flushDeltas(minute, map[pmKey]statsCounters{
 		{Provider: "a", Model: "x"}: {Requests: 1},
 		{Provider: "a", Model: "y"}: {Requests: 2},
 		{Provider: "b", Model: "x"}: {Requests: 3},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	got, err := ss.queryRange(0, minute+60, "a", "x", 60)
 	if err != nil {
 		t.Fatal(err)
@@ -307,9 +318,11 @@ func TestAPIStatsHandler(t *testing.T) {
 		stats:   newTestStatsStore(t),
 	}
 	minute := time.Now().Unix() / 60 * 60
-	_ = p.stats.flushDeltas(minute, map[pmKey]statsCounters{
+	if err := p.stats.flushDeltas(minute, map[pmKey]statsCounters{
 		{Provider: "zhipu", Model: "glm-5"}: {Requests: 7, Input: 100},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	w := newWebServer(p, "test-config.yaml")
 	mux := http.NewServeMux()
 	w.register(mux)
@@ -462,9 +475,11 @@ func hasHeapScan(plan string) bool {
 func TestStatsQueryPlan(t *testing.T) {
 	ss := newTestStatsStore(t)
 	now := time.Now().Unix() / 60 * 60
-	_ = ss.flushDeltas(now, map[pmKey]statsCounters{
+	if err := ss.flushDeltas(now, map[pmKey]statsCounters{
 		{Provider: "z", Model: "m"}: {Requests: 1},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		name string
@@ -913,13 +928,19 @@ func TestQueryAnalytics_DayBuckets(t *testing.T) {
 	// timezone (the SQL uses SQLite 'localtime'). d1m1/d1m2 share a local day;
 	// d2m1 is the next local day.
 	now := time.Now().In(time.Local)
-	twoDaysAgoStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).Add(-48 * time.Hour)
+	twoDaysAgoStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, -2)
 	d1m1 := twoDaysAgoStart.Add(1*time.Hour).Unix() / 60 * 60
 	d1m2 := twoDaysAgoStart.Add(2*time.Hour).Unix() / 60 * 60
 	d2m1 := twoDaysAgoStart.Add(25*time.Hour).Unix() / 60 * 60 // next local day
-	_ = ss.flushDeltas(d1m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 1, Input: 100}})
-	_ = ss.flushDeltas(d1m2, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 2, Input: 200}})
-	_ = ss.flushDeltas(d2m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 4, Input: 400}})
+	if err := ss.flushDeltas(d1m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 1, Input: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ss.flushDeltas(d1m2, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 2, Input: 200}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ss.flushDeltas(d2m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 4, Input: 400}}); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := ss.queryAnalytics(d1m1-60, d2m1+60, "", "", "day")
 	if err != nil {
@@ -947,8 +968,10 @@ func TestQueryAnalytics_MonthBuckets(t *testing.T) {
 	ss := newTestStatsStore(t)
 	now := time.Now().In(time.Local)
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
-	m1 := monthStart.Add(48*time.Hour).Unix() / 60 * 60 // same local month
-	_ = ss.flushDeltas(m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 5, Input: 50}})
+	m1 := monthStart.AddDate(0, 0, 2).Unix() / 60 * 60 // same local month
+	if err := ss.flushDeltas(m1, map[pmKey]statsCounters{{Provider: "p", Model: "m"}: {Requests: 5, Input: 50}}); err != nil {
+		t.Fatal(err)
+	}
 	got, err := ss.queryAnalytics(m1-60, m1+60, "", "", "month")
 	if err != nil {
 		t.Fatal(err)

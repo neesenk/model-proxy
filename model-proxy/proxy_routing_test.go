@@ -40,7 +40,7 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// Override both providers' auth with known tokens for deterministic test.
 	p.providers["codex"] = &testProv{key: "codex-token"}
 	p.providers["aqp"] = &testProv{key: "gw-key"}
@@ -98,7 +98,7 @@ func TestForward_UnknownModel(t *testing.T) {
 			"gpt-5.5": {{Provider: "aqp", Model: "gpt-5.5"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 	resp, err := http.Post(px.URL+"/v1/responses", "application/json", stringReader(`{"model":"unknown"}`))
@@ -206,7 +206,7 @@ func TestRouteExpansionFansOutPool(t *testing.T) {
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5", Priority: 7}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	got := p.expandedRoutes["glm-5"]
 	if len(got) != 2 {
 		t.Fatalf("expanded len = %d, want 2 (%v)", len(got), got)
@@ -245,7 +245,7 @@ func TestRouteExpansionFansOutPool(t *testing.T) {
 		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "z", Model: "m"}}},
 	}
-	p2 := NewProxy(cfg2)
+	p2 := newTestProxy(t, cfg2)
 	got2 := p2.expandedRoutes["m"]
 	if len(got2) != 1 || got2[0].Provider != "z" || got2[0].Model != "m" {
 		t.Fatalf("non-pooled target should pass through unchanged: got %v", got2)
@@ -283,7 +283,7 @@ func TestSessionStickySpreadsSessions(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	sortedVids := append([]string(nil), p.poolIndex["zhipu"]...)
 	sort.Strings(sortedVids)
 	want := map[string]string{
@@ -309,7 +309,7 @@ func TestSessionStickyReusesWithinDwell(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	first := scheduleFirst(p, "glm-5", "s1")
 	if first == "" {
 		t.Fatal("first schedule returned no provider")
@@ -331,7 +331,7 @@ func TestSessionStickyFallsBackWithoutHeader(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	got := map[string]bool{}
 	for i := 0; i < 5; i++ {
 		got[scheduleFirst(p, "glm-5", "")] = true
@@ -356,7 +356,7 @@ func TestSessionStickySkipsCircuitOpen(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// Block the id-sorted first virtual for an hour.
 	sortedVids := append([]string(nil), p.poolIndex["zhipu"]...)
 	sort.Strings(sortedVids)
@@ -416,7 +416,7 @@ func TestForward_ExpandedPooledRouteHitsVirtual(t *testing.T) {
 			"glm-5": {{Provider: "zhipu", Model: "glm-5"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// Sanity: the route was expanded to virtuals.
 	if len(p.expandedRoutes["glm-5"]) != 2 {
 		t.Fatalf("precondition: expanded len = %d, want 2", len(p.expandedRoutes["glm-5"]))
@@ -466,7 +466,7 @@ func TestExpandTarget_PreservesProtocol(t *testing.T) {
 			"claude": {{Provider: "zhipu", Model: "glm-5", Priority: 2, Protocol: "openai"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 
 	got := p.expandedRoutes["claude"]
 	if len(got) != 2 {

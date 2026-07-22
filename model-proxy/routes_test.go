@@ -45,7 +45,7 @@ func TestForward_ClaudeMapping(t *testing.T) {
 			"claude-sonnet-4-6": "glm-5.2",
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["aqp"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -94,7 +94,7 @@ func TestForward_Failover(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))

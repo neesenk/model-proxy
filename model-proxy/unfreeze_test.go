@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +18,7 @@ func TestResetHealth(t *testing.T) {
 		"a": {OpenAIBaseURL: "http://x", Provider: "static"},
 		"b": {OpenAIBaseURL: "http://y", Provider: "static"},
 	}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.mu.Lock()
 	p.parentOf = map[string]string{"a#v1": "a", "a#v2": "a"}
 	p.mu.Unlock()
@@ -166,7 +165,7 @@ func TestHealthResetAPI_PersistsClearedState(t *testing.T) {
 	if err := p.quota.persist(); err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(os.Getenv("HOME"), ".model-proxy", "quota_state.json")
+	statePath := p.quota.path
 	if data, _ := os.ReadFile(statePath); !strings.Contains(string(data), "zhipu") {
 		t.Fatalf("precondition: frozen entry should be on disk: %s", data)
 	}

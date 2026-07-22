@@ -26,8 +26,7 @@ func newTestWeb(t *testing.T) (*webServer, *Proxy) {
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 `))
-	p := NewProxy(cfg)
-	t.Cleanup(func() { p.Close() }) // stop the tracker; don't leak a poller past the test
+	p := newTestProxy(t, cfg)
 	return newWebServer(p, "test-config.yaml"), p
 }
 
@@ -78,7 +77,7 @@ providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 cache: {enabled: true, ttl: 1h}
 `))
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	if p.cache == nil {
 		t.Fatal("cache not created despite cache.enabled")
 	}
@@ -125,7 +124,7 @@ providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x, models: [shared-model]}
   deepseek: {provider_id: deepseek, openai_base_url: https://x, models: [shared-model]}
 `))
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	if len(p.routeWarnings) == 0 {
 		t.Fatalf("expected routeWarnings, got none (implicit=%v)", p.implicitRoutes)
 	}

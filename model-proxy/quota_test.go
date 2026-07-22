@@ -23,7 +23,9 @@ func TestQuotaTracker_PersistAndLoad(t *testing.T) {
 	provs := func() map[string]provider.Provider { return nil }
 	tr := newQuotaTracker(path, cfg, provs)
 	tr.setSnapshot("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.42, AsOf: time.Now()})
-	tr.persist()
+	if err := tr.persist(); err != nil {
+		t.Fatal(err)
+	}
 
 	tr2 := newQuotaTracker(path, cfg, provs)
 	tr2.load()
@@ -99,6 +101,23 @@ type quotaCallProv struct {
 	delay time.Duration
 }
 
+type blockingQuotaProv struct {
+	snapshotProv
+	calls   atomic.Int32
+	started chan struct{}
+	release chan struct{}
+}
+
+func (q *blockingQuotaProv) AuthHeaders(*http.Request) error { return nil }
+func (q *blockingQuotaProv) Refresh() error                  { return nil }
+func (q *blockingQuotaProv) Quota() (*provider.QuotaSnapshot, error) {
+	if q.calls.Add(1) == 1 {
+		close(q.started)
+	}
+	<-q.release
+	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now()}, nil
+}
+
 func (q *quotaCallProv) Quota() (*provider.QuotaSnapshot, error) {
 	q.calls.Add(1)
 	if q.delay > 0 {
@@ -128,20 +147,29 @@ func (f *flakyProv) Quota() (*provider.QuotaSnapshot, error) {
 // TestQuotaTracker_RefreshOneCoalescesConcurrent: many concurrent refreshOne
 // calls for one provider collapse to a single Quota() call (in-flight guard).
 func TestQuotaTracker_RefreshOneCoalescesConcurrent(t *testing.T) {
-	var calls atomic.Int32
-	prov := &quotaCallProv{calls: &calls, delay: 30 * time.Millisecond}
+	prov := &blockingQuotaProv{started: make(chan struct{}), release: make(chan struct{})}
 	cfg := &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}}
 	tr := newQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
 		func() *Config { return cfg },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
-	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); tr.refreshOne("x") }()
+	var first sync.WaitGroup
+	first.Add(1)
+	go func() { defer first.Done(); tr.refreshOne("x") }()
+	<-prov.started
+
+	var coalesced sync.WaitGroup
+	for i := 0; i < 11; i++ {
+		coalesced.Add(1)
+		go func() { defer coalesced.Done(); tr.refreshOne("x") }()
 	}
-	wg.Wait()
-	if got := calls.Load(); got > 2 {
-		t.Errorf("concurrent refreshOne: Quota() called %d times, want ≤ 2 (coalesced)", got)
+	coalesced.Wait()
+	close(prov.release)
+	first.Wait()
+	if got := prov.calls.Load(); got != 1 {
+		t.Fatalf("concurrent refreshOne: Quota() called %d times, want exactly 1", got)
+	}
+	if got := tr.snapshot("x"); got == nil || got.RemainingPct != 0.5 {
+		t.Fatalf("coalesced refresh snapshot = %+v, want RemainingPct=0.5", got)
 	}
 }
 
@@ -171,7 +199,9 @@ func TestQuotaTracker_StickyPersistLoad(t *testing.T) {
 	tr.stickySnapshot = func() map[string]routeSticky {
 		return map[string]routeSticky{"glm-5.2": {provider: "zhipu", since: since}}
 	}
-	tr.persist()
+	if err := tr.persist(); err != nil {
+		t.Fatal(err)
+	}
 
 	tr2 := newQuotaTracker(path, func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
 	tr2.load()

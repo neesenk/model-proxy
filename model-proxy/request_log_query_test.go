@@ -119,7 +119,7 @@ func TestHandleRequests_ListAndDetail(t *testing.T) {
 		{Ts: "2026-07-18T10:00:00Z", RequestID: "a", Exposed: "glm", Provider: "zhipu", Status: 200, RequestBody: "SECRET-REQ", ResponseBody: "SECRET-RESP"},
 	})
 
-	p := NewProxy(&Config{
+	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	})
@@ -160,7 +160,7 @@ func TestHandleRequests_ListAndDetail(t *testing.T) {
 	}
 
 	// Logging off → enabled=false.
-	p2 := NewProxy(&Config{
+	p2 := newTestProxy(t, &Config{
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	})
@@ -183,7 +183,7 @@ func TestHandleRequests_ShadowFilter(t *testing.T) {
 		{Ts: "2026-07-18T10:00:01Z", RequestID: "shadow-a", Exposed: "glm", Provider: "deepseek", Status: 200, Shadow: true},
 	})
 
-	p := NewProxy(&Config{
+	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	})

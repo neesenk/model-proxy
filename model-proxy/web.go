@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1386,6 +1387,10 @@ func (w *webServer) saveAndReload(data []byte) error {
 		return err
 	}
 	if err := w.p.reload(w.configFile); err != nil {
+		var applied *reloadAppliedWarning
+		if errors.As(err, &applied) {
+			return err // config is already live; rolling the file back would diverge it
+		}
 		// Defensive: reload shouldn't fail post-validate; restore from backup.
 		if rb, rerr := os.ReadFile(bak); rerr == nil {
 			atomicWrite(w.configFile, rb)
@@ -1408,6 +1413,11 @@ func (w *webServer) saveAndReload(data []byte) error {
 // (config edits), which validates first and rolls back on failure.
 func (w *webServer) reloadAfterMutation() string {
 	if err := w.p.reload(w.configFile); err != nil {
+		var applied *reloadAppliedWarning
+		if errors.As(err, &applied) {
+			log.Printf("[accounts] %v — credentials and runtime config are live, but runtime-state durability is degraded", err)
+			return err.Error()
+		}
 		log.Printf("[accounts] reload after mutation failed: %v — credentials persisted, but the runtime keeps the old set until config.yaml is fixed and reloaded", err)
 		return err.Error()
 	}

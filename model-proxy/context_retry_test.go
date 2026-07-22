@@ -84,7 +84,7 @@ func TestForward_ContextOverflowRetry(t *testing.T) {
 			"glm-long": {{Provider: "big-prov", Model: "big"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["small-prov"] = &testProv{key: "s"}
 	p.providers["big-prov"] = &testProv{key: "b"}
 	p.catalog = testCatalog(map[string]struct {
@@ -142,7 +142,7 @@ func TestForward_ContextOverflowRetry_RespectsCapability(t *testing.T) {
 			"text":   {{Provider: "big-text", Model: "big-text"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["small-prov"] = &testProv{key: "s"}
 	p.providers["big-text"] = &testProv{key: "bt"}
 	p.catalog = testCatalog(map[string]struct {
@@ -203,7 +203,7 @@ func TestForward_ContextOverflowRetry_OnlyOnce(t *testing.T) {
 			"glm-xlong": {{Provider: "huge-prov", Model: "huge", Priority: 2}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["small-prov"] = &testProv{key: "s"}
 	p.providers["big-prov"] = &testProv{key: "b"}
 	p.providers["huge-prov"] = &testProv{key: "h"}
@@ -258,7 +258,7 @@ func TestForward_ContextOverflowRetry_Ordinary400(t *testing.T) {
 			"glm-long": {{Provider: "big-prov", Model: "big"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["small-prov"] = &testProv{key: "s"}
 	p.providers["big-prov"] = &testProv{key: "b"}
 	p.catalog = testCatalog(map[string]struct {
@@ -304,7 +304,7 @@ func TestForward_ContextOverflowRetry_NoBiggerTarget(t *testing.T) {
 			"glm": {{Provider: "small-prov", Model: "small"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["small-prov"] = &testProv{key: "s"}
 	p.catalog = testCatalog(map[string]struct {
 		Context int64
@@ -361,7 +361,7 @@ func TestForward_ContextOverflowRetry_F3_UntriedTargets(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["small-prov"] = &testProv{key: "s"}
 	p.providers["big-prov"] = &testProv{key: "b"}
 	p.catalog = testCatalog(map[string]struct {
@@ -404,7 +404,7 @@ func TestForward_ContextOverflowRetry_NoCatalog(t *testing.T) {
 			"glm": {{Provider: "small-prov", Model: "small"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["small-prov"] = &testProv{key: "s"}
 	// p.catalog left nil.
 	px := httptest.NewServer(http.HandlerFunc(p.handler))

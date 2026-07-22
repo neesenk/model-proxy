@@ -41,7 +41,7 @@ func TestEnsureJSONField_MainPkg(t *testing.T) {
 
 func TestReleaseHalfOpenSlot(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// No health entry yet → no-op (no panic).
 	p.releaseHalfOpenSlot("a")
 	// Set up a half-open slot, then release it.
@@ -62,7 +62,7 @@ func TestReleaseHalfOpenSlot(t *testing.T) {
 
 func TestTakeHalfOpenSlot_Lifecycle(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// Closed circuit → take succeeds, no slot reserved.
 	if !p.takeHalfOpenSlot("a") {
 		t.Error("takeHalfOpenSlot on closed circuit: want true")
@@ -91,7 +91,7 @@ func TestTakeHalfOpenSlot_Lifecycle(t *testing.T) {
 
 func TestTakeHalfOpenSlot_CircuitOpen(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.healthMu.Lock()
 	p.health["a"] = &providerHealth{circuitOpenUntil: time.Now().Add(5 * time.Minute)} // still open
 	p.healthMu.Unlock()
@@ -104,7 +104,7 @@ func TestTakeHalfOpenSlot_CircuitOpen(t *testing.T) {
 
 func TestTakeHalfOpenSlot_RateLimited(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.healthMu.Lock()
 	p.health["a"] = &providerHealth{rateLimitedUntil: time.Now().Add(5 * time.Minute)}
 	p.healthMu.Unlock()
@@ -151,7 +151,7 @@ func TestQuotaTracker_PollAfter(t *testing.T) {
 
 func TestRecordRateLimit_Extends(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	now := time.Now()
 	first := now.Add(60 * time.Second)
 	p.recordRateLimit("a", first, rlQuota)
@@ -174,7 +174,7 @@ func TestRecordRateLimit_Extends(t *testing.T) {
 
 func TestRecordSuccess_ClearsCircuit(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.healthMu.Lock()
 	p.health["a"] = &providerHealth{consecutiveFailures: 5, circuitOpenUntil: time.Now().Add(5 * time.Minute), halfOpenInFlight: true}
 	p.healthMu.Unlock()
@@ -191,7 +191,7 @@ func TestRecordSuccess_ClearsCircuit(t *testing.T) {
 
 func TestRecordFailure_OpensCircuitAtThreshold(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}, Scheduling: Scheduling{CircuitThreshold: 2, CircuitCooldown: "5m"}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.recordFailure("a", cfg.Scheduling)
 	p.recordFailure("a", cfg.Scheduling) // reaches threshold
 	p.healthMu.Lock()
@@ -209,7 +209,7 @@ func TestRecordFailure_OpensCircuitAtThreshold(t *testing.T) {
 
 func TestParseRateLimit(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	sched := Scheduling{RateLimitBackoff: "60s", QuotaCooldown: "2h"}
 	now := time.Now()
 
@@ -389,7 +389,7 @@ func TestScheduleStatus_PoolGrouping(t *testing.T) {
 			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	data := p.scheduleStatus()
 
 	var st struct {

@@ -249,7 +249,7 @@ func supportsImage(m ProviderModel) bool {
 // desc, + health/sticky/pool). No explicit fallback config is needed; the
 // scheduler picks the best-capable, best-ranked backend. No-op without a catalog
 // or when every in-route target already fits (the common case).
-func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, ordered []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte) []RouteTarget {
+func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, ordered []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte, generations ...uint64) []RouteTarget {
 	if cat == nil {
 		return ordered
 	}
@@ -274,7 +274,7 @@ func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string
 	// (deduped by RouteTarget value), then let the normal scheduler rank them.
 	result := p.crossRoutePool(cfg, parentOf, exposed+"#req", sessionKey, expanded, routeKeys, func(t RouteTarget) bool {
 		return modelFits(cat, targetCapabilities(cfg, parentOf, t), t.Model, prof)
-	})
+	}, generations...)
 	if len(result) == 0 {
 		// No model anywhere fits, or all capable targets are unavailable
 		// (circuit-open/rate-limited). Fall back to the ORIGINAL ordered (which
@@ -293,12 +293,12 @@ func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string
 // non-route key under dwell eviction. Returns nil when nothing matches or every
 // match is unavailable (circuit-open/rate-limited). Shared by the proactive
 // cross-route fallback and the reactive context-overflow retry.
-func (p *Proxy) crossRoutePool(cfg *Config, parentOf map[string]string, routeName, sessionKey string, expanded map[string][]RouteTarget, routeKeys map[string]bool, keep func(RouteTarget) bool) []RouteTarget {
+func (p *Proxy) crossRoutePool(cfg *Config, parentOf map[string]string, routeName, sessionKey string, expanded map[string][]RouteTarget, routeKeys map[string]bool, keep func(RouteTarget) bool, generations ...uint64) []RouteTarget {
 	pool := collectCrossRoute(expanded, keep)
 	if len(pool) == 0 {
 		return nil
 	}
-	return p.schedule(cfg, parentOf, routeName, sessionKey, pool, routeKeys)
+	return p.schedule(cfg, parentOf, routeName, sessionKey, pool, routeKeys, generations...)
 }
 
 // collectCrossRoute gathers the targets matching keep across ALL expanded routes,
@@ -342,7 +342,7 @@ func collectCrossRoute(expanded map[string][]RouteTarget, keep func(RouteTarget)
 // just fail the same request again. Returns nil without a catalog, when no tried
 // model has a known window (can't establish "larger"), or when nothing larger
 // AND capable exists — forward then commits the upstream 400.
-func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, tried []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte) []RouteTarget {
+func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, tried []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte, generations ...uint64) []RouteTarget {
 	if cat == nil {
 		return nil
 	}
@@ -364,7 +364,7 @@ func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, ca
 		// Re-check capability + context-fit so the retry doesn't land on a
 		// larger window that still can't serve this request (e.g. no image).
 		return modelFits(cat, targetCapabilities(cfg, parentOf, t), t.Model, prof)
-	})
+	}, generations...)
 }
 
 // contextOverflowMarkers are conservative case-insensitive substrings matching

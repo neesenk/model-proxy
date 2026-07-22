@@ -20,8 +20,7 @@ func TestHandleAccountAdd_ReloadFailureWarning(t *testing.T) {
 providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
 `))
-	p := NewProxy(cfg)
-	t.Cleanup(func() { p.Close() })
+	p := newTestProxy(t, cfg)
 	// configFile points at a non-existent path → reload's LoadConfig read fails.
 	w := newWebServer(p, "/no/such/config.yaml")
 	mux := http.NewServeMux()

@@ -83,7 +83,7 @@ routes:
 		if err != nil {
 			t.Fatalf("LoadConfigFromBytes: %v", err)
 		}
-		return NewProxy(cfg)
+		return newTestProxy(t, cfg)
 	}
 	doRequest := func(p *Proxy) {
 		body := []byte(`{"model":"m","stream":false}`)

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -488,38 +489,23 @@ func TestRequestLogger_LoopWritesAndShutdownDurability(t *testing.T) {
 	}
 }
 
-// TestRequestLogger_WriteErrorsCounted verifies that a write failure (writing
-// to a directory whose file can't be opened) increments writeErrors instead of
-// being silently swallowed. We force the failure by removing the dir after
-// loop() starts so open() inside write() fails.
+// TestRequestLogger_WriteErrorsCounted verifies that every write failure is
+// counted. The injected writer makes the failure deterministic across users,
+// filesystems, and platforms.
 func TestRequestLogger_WriteErrorsCounted(t *testing.T) {
 	dir := t.TempDir()
 	l := newRequestLogger(dir, 1<<30, 4096, 0)
-	go l.loop()
-	// Write one valid record to let the loop open its file.
-	l.record(&requestLogRecord{Ts: "t", RequestID: "r1", Provider: "a", Status: 200,
-		RequestBody: "q", ResponseBody: "a"})
-	time.Sleep(100 * time.Millisecond)
-	// Make the dir unreadable so the next open()/rotate() inside write fails.
-	if err := os.Chmod(dir, 0o000); err != nil {
-		// Some platforms (root) ignore chmod; skip the forced-failure part.
-		t.Skipf("chmod %s 0000: %v (cannot force write failure on this platform)", dir, err)
+	l.writeRecord = func(*requestLogRecord, time.Time) error {
+		return errors.New("injected write failure")
 	}
-	t.Cleanup(func() { os.Chmod(dir, 0o755) })
-	// Enqueue records; the loop's write -> rotate/open will fail under the
-	// unreadable dir. Give it time to attempt.
+	go l.loop()
 	for i := 0; i < 5; i++ {
 		l.record(&requestLogRecord{Ts: "t", RequestID: "r", Provider: "a", Status: 200,
 			RequestBody: "q", ResponseBody: "a"})
 	}
-	time.Sleep(200 * time.Millisecond)
-	// Restore so shutdown's drain can proceed.
-	os.Chmod(dir, 0o755)
 	l.shutdown()
-	if got := atomic.LoadUint64(&l.writeErrors); got == 0 {
-		// writeErrors may be 0 if the OS didn't actually block writes after chmod
-		// (e.g. running as root). Don't fail hard - but flag it.
-		t.Logf("writeErrors = 0 (chmod may not have blocked writes on this platform); dropped=%d", atomic.LoadUint64(&l.dropped))
+	if got := atomic.LoadUint64(&l.writeErrors); got != 5 {
+		t.Fatalf("writeErrors = %d, want 5", got)
 	}
 }
 
@@ -692,7 +678,7 @@ func TestBuildRecord_FieldsAndTruncation(t *testing.T) {
 // shutdown func (call after the request to flush).
 func newReqLogProxy(t *testing.T, cfg *Config) (*Proxy, string, func()) {
 	t.Helper()
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	dir := t.TempDir()
 	l := newRequestLogger(dir, 1<<30, 1<<20, 0) // 1MiB body cap, plenty for test bodies
 	go l.loop()
@@ -850,7 +836,7 @@ func TestForward_RequestLog_NilLoggerPassThrough(t *testing.T) {
 		Providers: map[string]Provider{"aqp": {OpenAIBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
 	}
-	p := NewProxy(cfg) // p.reqLog stays nil
+	p := newTestProxy(t, cfg) // p.reqLog stays nil
 	p.providers["aqp"] = &testProv{key: "tok"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -926,15 +912,8 @@ func TestReload_WarnsWhenRequestLogEnabledButInactive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	providers, poolIndex, parentOf := buildProviders(cfg)
-	p := &Proxy{
-		cfg:            cfg,
-		providers:      providers,
-		poolIndex:      poolIndex,
-		parentOf:       parentOf,
-		expandedRoutes: map[string][]RouteTarget{},
-		// p.reqLog stays nil -> reload should warn.
-	}
+	p := newTestProxy(t, cfg)
+	// p.reqLog stays nil -> reload should warn.
 	if err := p.reload(cfgPath); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -967,14 +946,7 @@ func TestReload_NoWarnWhenRequestLogDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	providers, poolIndex, parentOf := buildProviders(cfg)
-	p := &Proxy{
-		cfg:            cfg,
-		providers:      providers,
-		poolIndex:      poolIndex,
-		parentOf:       parentOf,
-		expandedRoutes: map[string][]RouteTarget{},
-	}
+	p := newTestProxy(t, cfg)
 	if err := p.reload(cfgPath); err != nil {
 		t.Fatalf("reload: %v", err)
 	}

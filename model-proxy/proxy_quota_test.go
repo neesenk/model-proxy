@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,40 +33,35 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 		}},
 		Scheduling: schedCfg(3, "50ms", "10s", "5s", "0s"),
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &quotaCountProv{}
 	p.providers["fallback"] = &testProv{key: "f"}
-	var refreshes atomic.Int32
-	var refreshedName atomic.Value // string
-	p.quota = &quotaTracker{
-		state: map[string]*provider.QuotaSnapshot{},
-		cfg:   func() *Config { return cfg },
-		provs: func() map[string]provider.Provider { return p.providers },
-	}
+	refreshed := make(chan string, 2)
+	p.quota.stop()
+	p.quota = newQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return p.providers })
+	p.quota.generation = p.configGeneration.Load
 	// refreshHook lets the test count refreshes + capture WHICH provider was
 	// refreshed — not just how many (P0-3: if the bug fires on fallback instead
 	// of the rate-limited primary, a count-only assertion would miss it).
 	p.quota.refreshHook = func(name string) {
-		refreshes.Add(1)
-		refreshedName.Store(name)
+		refreshed <- name
 	}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
-	// The refresh is launched as a goroutine from recordRateLimit; give it a
-	// brief moment to land before asserting (the failover HTTP round-trip to
-	// the fallback normally dominates, but poll briefly to stay deterministic).
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) && refreshes.Load() == 0 {
-		time.Sleep(2 * time.Millisecond)
+	select {
+	case name := <-refreshed:
+		if name != "primary" {
+			t.Errorf("refreshed provider=%q, want primary (the one that 429'd)", name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("quota refresh did not run after 429")
 	}
-	if got := refreshes.Load(); got != 1 {
-		t.Errorf("expected 1 quota refresh after 429, got %d", got)
-	}
-	// P0-3: assert the refresh fired on the RATE-LIMITED provider (primary),
-	// not the fallback — a count-only assertion would miss a wrong-provider bug.
-	if name, ok := refreshedName.Load().(string); !ok || name != "primary" {
-		t.Errorf("refreshed provider=%v, want primary (the one that 429'd)", name)
+	p.quota.stop() // drain every admitted refresh before asserting exact cardinality
+	select {
+	case name := <-refreshed:
+		t.Fatalf("unexpected duplicate quota refresh for %q", name)
+	default:
 	}
 }
 
@@ -123,7 +117,9 @@ func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]
 		parentOf:  map[string]string{},
 	}
 	p.expandedRoutes = p.buildExpandedRoutes()
-	p.quota = &quotaTracker{state: map[string]*provider.QuotaSnapshot{}, cfg: func() *Config { return cfg }, provs: func() map[string]provider.Provider { return p.providers }}
+	p.quota = newQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return p.providers })
+	p.quota.generation = p.configGeneration.Load
+	t.Cleanup(p.Close)
 	for name := range provs {
 		p.providers[name] = &testProv{key: name}
 	}

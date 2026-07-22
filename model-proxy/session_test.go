@@ -30,7 +30,7 @@ func TestForwardThreadsSessionID(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"}},
 		Routes:    map[string][]RouteTarget{"glm-5": {{Provider: "zhipu", Model: "glm-5"}}}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 
 	var captured string
 	p.scheduleHook = func(sessionKey string) { captured = sessionKey }

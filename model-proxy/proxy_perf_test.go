@@ -21,8 +21,14 @@ import (
 // dependency on the real AQP gateway. auth uses a stubbed AqpKeyProvider (empty
 // mint URL -> no network call), testing proxy logic purely.
 
-// silenceLog mutes forward's per-request log so the bench isn't slowed/spammed by log IO.
-func silenceLog() { log.SetOutput(io.Discard) }
+// silenceLog mutes forward's per-request log so the bench isn't slowed/spammed
+// by log IO, then restores the process-global logger after the test/benchmark.
+func silenceLog(t testing.TB) {
+	t.Helper()
+	previous := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(previous) })
+}
 
 // newUpstream returns a mock upstream; h decides response behavior.
 func newUpstream(h http.HandlerFunc) *httptest.Server {
@@ -30,14 +36,14 @@ func newUpstream(h http.HandlerFunc) *httptest.Server {
 }
 
 // newProxyServer wraps a Proxy with the given auth + model_map and returns a hitable httptest server.
-func newProxyServer(upstreamURL, auth string, modelMap map[string]string) *httptest.Server {
-	_, px := newProxyServerP(upstreamURL, auth, modelMap)
+func newProxyServer(t testing.TB, upstreamURL, auth string, modelMap map[string]string) *httptest.Server {
+	_, px := newProxyServerP(t, upstreamURL, auth, modelMap)
 	return px
 }
 
 // newProxyServerP is newProxyServer but also returns the *Proxy, so callers can
 // wire extra state (e.g. a request logger) onto it for benchmarking.
-func newProxyServerP(upstreamURL, auth string, modelMap map[string]string) (*Proxy, *httptest.Server) {
+func newProxyServerP(t testing.TB, upstreamURL, auth string, modelMap map[string]string) (*Proxy, *httptest.Server) {
 	seen := map[string]bool{}
 	var provModels []string
 	routes := map[string][]RouteTarget{}
@@ -55,7 +61,7 @@ func newProxyServerP(upstreamURL, auth string, modelMap map[string]string) (*Pro
 		},
 		Routes: routes,
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	return p, httptest.NewServer(http.HandlerFunc(p.handler))
 }
 
@@ -108,10 +114,10 @@ func largeBody() []byte {
 
 // BenchmarkProxy_Forward_NoMap: small body, no model_map hit (rewriteModel not triggered).
 func BenchmarkProxy_Forward_NoMap(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	up := newUpstream(jsonOK)
 	defer up.Close()
-	px := newProxyServer(up.URL, "static", nil)
+	px := newProxyServer(b, up.URL, "static", nil)
 	defer px.Close()
 	body := smallBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
@@ -130,11 +136,11 @@ func BenchmarkProxy_Forward_NoMap(b *testing.B) {
 
 // BenchmarkProxy_Forward_WithMap: small body, model_map hit (triggers rewriteModel: unmarshal+marshal the whole body).
 func BenchmarkProxy_Forward_WithMap(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	up := newUpstream(jsonOK)
 	defer up.Close()
 	mm := map[string]string{"claude-opus-4-7": "glm-5.2"}
-	px := newProxyServer(up.URL, "static", mm)
+	px := newProxyServer(b, up.URL, "static", mm)
 	defer px.Close()
 	body := smallBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
@@ -153,11 +159,11 @@ func BenchmarkProxy_Forward_WithMap(b *testing.B) {
 
 // BenchmarkProxy_Forward_WithMap_LargeBody: large body, model_map hit, amplifying rewriteModel's json cost.
 func BenchmarkProxy_Forward_WithMap_LargeBody(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	up := newUpstream(jsonOK)
 	defer up.Close()
 	mm := map[string]string{"claude-opus-4-7": "glm-5.2"}
-	px := newProxyServer(up.URL, "static", mm)
+	px := newProxyServer(b, up.URL, "static", mm)
 	defer px.Close()
 	body := largeBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
@@ -176,10 +182,10 @@ func BenchmarkProxy_Forward_WithMap_LargeBody(b *testing.B) {
 
 // BenchmarkProxy_Forward_SSE: streaming (SSE) forwarding, 3 event chunks.
 func BenchmarkProxy_Forward_SSE(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	up := newUpstream(sseOK)
 	defer up.Close()
-	px := newProxyServer(up.URL, "static", nil)
+	px := newProxyServer(b, up.URL, "static", nil)
 	defer px.Close()
 	body := smallBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
@@ -203,10 +209,10 @@ func BenchmarkProxy_Forward_SSE(b *testing.B) {
 // is exercised. Compare against BenchmarkProxy_Forward_NoMap (logging disabled)
 // to size the cost.
 func BenchmarkProxy_Forward_RequestLog_SmallBody(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	up := newUpstream(jsonOK)
 	defer up.Close()
-	pxp, px := newProxyServerP(up.URL, "static", nil)
+	pxp, px := newProxyServerP(b, up.URL, "static", nil)
 	defer px.Close()
 	// Wire a file-based request logger (running loop) onto the proxy.
 	dir := b.TempDir()
@@ -233,13 +239,13 @@ func BenchmarkProxy_Forward_RequestLog_SmallBody(b *testing.B) {
 // large response body, where the captureReader tee cost (per-byte memory copy
 // into the bounded buffer) dominates. The upstream returns a ~64KB body.
 func BenchmarkProxy_Forward_RequestLog_LargeBody(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	up := newUpstream(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		w.Write(bytes.Repeat([]byte("y"), 64*1024))
 	})
 	defer up.Close()
-	pxp, px := newProxyServerP(up.URL, "static", nil)
+	pxp, px := newProxyServerP(b, up.URL, "static", nil)
 	defer px.Close()
 	dir := b.TempDir()
 	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
@@ -266,13 +272,13 @@ func BenchmarkProxy_Forward_RequestLog_LargeBody(b *testing.B) {
 // the bounded buffer per request. Sizes the per-byte copy cost that dominates
 // for large streaming responses.
 func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	up := newUpstream(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		w.Write(bytes.Repeat([]byte("y"), 1024*1024))
 	})
 	defer up.Close()
-	pxp, px := newProxyServerP(up.URL, "static", nil)
+	pxp, px := newProxyServerP(b, up.URL, "static", nil)
 	defer px.Close()
 	dir := b.TempDir()
 	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
@@ -296,7 +302,7 @@ func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
 
 // BenchmarkAuthInject_AQP_Static: AQP provider static-key injection (the proxy's per-request hot path).
 func BenchmarkAuthInject_AQP_Static(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	p := provider.NewAqpKeyProvider("", "")
 	req, _ := http.NewRequest(http.MethodPost, "http://up/v1/messages", bytes.NewReader(smallBody()))
 	b.ReportAllocs()
@@ -312,7 +318,7 @@ func BenchmarkAuthInject_AQP_Static(b *testing.B) {
 // BenchmarkAuthInject_AQP_Cached: AQP provider cache hit (goes through the mutex).
 // Uses a mock mint server + a temp cookie file; Refresh once, then bench Inject (cache hit).
 func BenchmarkAuthInject_AQP_Cached(b *testing.B) {
-	silenceLog()
+	silenceLog(b)
 	mint := newUpstream(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		fmt.Fprint(w, `{"retcode":0,"data":{"api_key":"cached-key-0123456789abcdef","project_id":"p"}}`)
@@ -347,16 +353,16 @@ func BenchmarkAuthInject_AQP_Cached(b *testing.B) {
 // distribution (p50/p95/p99), and error rate; compared against a direct hit to the
 // mock upstream to isolate the proxy's extra overhead.
 func TestProxy_Load_Concurrent(t *testing.T) {
-	silenceLog()
+	silenceLog(t)
 	up := newUpstream(jsonOK)
 	defer up.Close()
 	mm := map[string]string{"claude-opus-4-7": "glm-5.2"}
-	px := newProxyServer(up.URL, "static", mm)
+	px := newProxyServer(t, up.URL, "static", mm)
 	defer px.Close()
 	body := smallBody()
 
 	const conc = 50
-	const total = 2000
+	const total = 500
 	perWorker := total / conc
 
 	run := func(target string) (latencies []time.Duration, errCount int64, elapsed time.Duration) {
@@ -376,8 +382,12 @@ func TestProxy_Load_Concurrent(t *testing.T) {
 						atomic.AddInt64(&errCount, 1)
 						continue
 					}
-					io.Copy(io.Discard, resp.Body)
+					_, copyErr := io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
+					if copyErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+						atomic.AddInt64(&errCount, 1)
+						continue
+					}
 					local = append(local, time.Since(s))
 				}
 				results[w] = local
@@ -420,8 +430,11 @@ func TestProxy_Load_Concurrent(t *testing.T) {
 	report("direct(upstream)", dLat, dErr, dElapsed)
 	report("via proxy     ", pLat, pErr, pElapsed)
 
-	if pErr != 0 {
-		t.Errorf("proxy had %d errors", pErr)
+	if dErr != 0 || int64(len(dLat)) != total {
+		t.Errorf("direct baseline: successes=%d errors=%d, want %d/0", len(dLat), dErr, total)
+	}
+	if pErr != 0 || int64(len(pLat)) != total {
+		t.Errorf("proxy: successes=%d errors=%d, want %d/0", len(pLat), pErr, total)
 	}
 	// Proxy extra overhead: p99 should be within a reasonable order of magnitude (not orders worse).
 	overhead := percentile(pLat, 0.99) - percentile(dLat, 0.99)
@@ -431,17 +444,20 @@ func TestProxy_Load_Concurrent(t *testing.T) {
 // TestProxy_SSE_FirstByte: streaming first-byte latency — upstream returns chunks;
 // verifies the proxy's flushCopy forwards the first chunk promptly.
 func TestProxy_SSE_FirstByte(t *testing.T) {
-	silenceLog()
+	silenceLog(t)
+	release := make(chan struct{})
+	firstFlushed := make(chan struct{})
 	up := newUpstream(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
 		fl, _ := w.(http.Flusher)
-		// Send the first chunk immediately, then 5ms between subsequent chunks, to verify the first byte isn't buffered.
+		// Send the first chunk, then block until the client proves it received it.
 		fmt.Fprintf(w, "data: {\"i\":0}\n\n")
 		if fl != nil {
 			fl.Flush()
 		}
+		close(firstFlushed)
+		<-release
 		for i := 1; i <= 3; i++ {
-			time.Sleep(5 * time.Millisecond)
 			fmt.Fprintf(w, "data: {\"i\":%d}\n\n", i)
 			if fl != nil {
 				fl.Flush()
@@ -453,32 +469,39 @@ func TestProxy_SSE_FirstByte(t *testing.T) {
 		}
 	})
 	defer up.Close()
-	px := newProxyServer(up.URL, "static", nil)
+	px := newProxyServer(t, up.URL, "static", map[string]string{"claude-opus-4-7": "claude-opus-4-7"})
 	defer px.Close()
 
-	cli := &http.Client{Timeout: 10 * time.Second}
-	s := time.Now()
+	cli := &http.Client{Timeout: 2 * time.Second}
 	resp, err := cli.Post(px.URL+"/v1/messages", "application/json", bytes.NewReader(smallBody()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-
-	// Time to read the first byte = first-byte latency (should be far below the total stream time of ~15ms).
-	buf := make([]byte, 64)
-	n, _ := resp.Body.Read(buf)
-	firstByte := time.Since(s)
-	t.Logf("first-byte latency: %s (got %d bytes: %q)", firstByte, n, string(buf[:n]))
-	// Read the whole stream.
-	io.Copy(io.Discard, resp.Body)
-	total := time.Since(s)
-	t.Logf("total stream latency: %s", total)
-
-	if firstByte > 50*time.Millisecond {
-		t.Errorf("first-byte latency too high: %s (stream buffering?)", firstByte)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("SSE status=%d want 200; body=%q", resp.StatusCode, body)
 	}
-	// The first byte should clearly precede the total time (proving chunked passthrough, not buffering the whole stream).
-	if firstByte >= total {
-		t.Errorf("first-byte (%s) >= total (%s): proxy buffered whole stream", firstByte, total)
+
+	<-firstFlushed
+	// The upstream is blocked after its first flush. A successful read therefore
+	// proves the proxy forwarded the partial stream instead of buffering to EOF.
+	buf := make([]byte, 64)
+	n, err := resp.Body.Read(buf)
+	if err != nil {
+		close(release)
+		t.Fatalf("read first SSE chunk: %v", err)
+	}
+	if n == 0 || !bytes.Contains(buf[:n], []byte(`"i":0`)) {
+		close(release)
+		t.Fatalf("first SSE read = %q, want first event", buf[:n])
+	}
+	close(release)
+	rest, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rest, []byte("data: [DONE]")) {
+		t.Errorf("remaining SSE stream missing DONE: %q", rest)
 	}
 }

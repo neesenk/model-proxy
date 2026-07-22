@@ -22,13 +22,23 @@ for a in "$@"; do [ "$a" = "--no-enforce" ] && enforce=0; done
 baseline=80
 
 echo "=== Building & running all tests with coverage ==="
-go test -coverprofile=cov.out -covermode=count ./... 2>&1 | grep -E "^(ok|FAIL|---)" || true
+test_output=$(mktemp)
+trap 'rm -f "$test_output"' EXIT
+set +e
+go test -coverprofile=cov.out -covermode=count ./... 2>&1 | tee "$test_output"
+test_status=${PIPESTATUS[0]}
+set -e
+if [ "$test_status" -ne 0 ]; then
+  echo ""
+  echo "✗ Tests failed; coverage report is not valid."
+  exit "$test_status"
+fi
 
 echo ""
 echo "=== Statement coverage by package ==="
 go tool cover -func=cov.out | awk '/^total:/ {print; next} /\t0\.0%$/ {next} {print}' | tail -1
 echo ""
-go test -cover ./... 2>&1 | grep -E "^(ok|FAIL)" || true
+grep -E '^ok[[:space:]]' "$test_output"
 
 echo ""
 echo "=== Functions below ${threshold}% coverage (branch-coverage proxy) ==="
@@ -52,17 +62,26 @@ if [ "$enforce" -eq 1 ]; then
   echo ""
   echo "=== Baseline gate (${baseline}% per package) ==="
   fail=0
+  expected=$(go list ./... | wc -l | tr -d ' ')
+  seen=$(awk '/^ok[[:space:]]/ {n++} END {print n+0}' "$test_output")
+  if [ "$seen" -ne "$expected" ]; then
+    echo "FAIL  coverage output contains ${seen}/${expected} expected packages"
+    fail=1
+  fi
   while IFS= read -r line; do
     # line like: "ok  	model-proxy	30.0s	coverage: 80.2% of statements"
     pct=$(echo "$line" | grep -oE 'coverage: [0-9.]+%' | grep -oE '[0-9.]+')
     pkg=$(echo "$line" | awk '{print $2}')
-    if [ -n "$pct" ] && awk "BEGIN{exit !($pct < $baseline)}"; then
+    if [ -z "$pct" ]; then
+      echo "FAIL  $pkg  missing coverage percentage"
+      fail=1
+    elif awk "BEGIN{exit !($pct < $baseline)}"; then
       echo "FAIL  $pkg  ${pct}% < ${baseline}% baseline"
       fail=1
     else
       echo "ok    $pkg  ${pct}%"
     fi
-  done < <(go test -cover ./... 2>&1 | grep -E '^ok')
+  done < <(grep -E '^ok[[:space:]]' "$test_output")
   if [ "$fail" -eq 1 ]; then
     echo ""
     echo "✗ Coverage below ${baseline}% baseline. Raise coverage or document the gap."

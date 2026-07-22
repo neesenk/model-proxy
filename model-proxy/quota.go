@@ -16,17 +16,23 @@ import (
 // memory + a file (~/.model-proxy/quota_state.json), and serves them to the
 // scheduler. It has its own mutex (quotaMu), independent of healthMu / reload mu.
 type quotaTracker struct {
-	mu       sync.RWMutex
-	state    map[string]*provider.QuotaSnapshot
-	path     string
-	cfg      func() *Config
-	provs    func() map[string]provider.Provider
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	mu        sync.RWMutex
+	state     map[string]*provider.QuotaSnapshot
+	path      string
+	cfg       func() *Config
+	provs     func() map[string]provider.Provider
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	lifeMu    sync.Mutex
+	accepting bool
 	// poller tracks the background poll goroutine(s) so stop can WAIT for them
 	// to drain (Proxy.Close / tests) rather than leaving a poll that fires a
 	// persist after the owner has torn down or moved to a new config generation.
 	poller sync.WaitGroup
+	// generation identifies the Proxy config generation that owns provider
+	// snapshots. A nil callback means a standalone/test tracker with generation 0.
+	generation      func() uint64
+	stateGeneration uint64
 	// persistMu serializes persist() WITHIN one tracker. Cross-tracker
 	// contention (parallel test proxies, or the daemon vs a test) is handled by
 	// the unique temp file in persist() — the fixed ".tmp" name used to make a
@@ -55,6 +61,11 @@ type quotaTracker struct {
 	// persistence — restored on boot so long cooldowns (quota-exhausted, daily)
 	// survive a restart. Same healthMu-only lock discipline as stickySnapshot.
 	healthSnapshot func() map[string]persistedHealth
+	// fullSnapshot is installed by Proxy and atomically snapshots config
+	// fingerprint + health/sticky + quota under the repository lock order. It
+	// supersedes the legacy stickySnapshot/healthSnapshot callbacks above, which
+	// remain for focused quotaTracker unit tests.
+	fullSnapshot func() persistedFullSnapshot
 	// LoadedHealth is populated by load() on boot; NewProxy applies it (future-
 	// dated entries only) to p.health / p.modelLocks / p.paramBlock.
 	LoadedHealth map[string]persistedHealth
@@ -73,6 +84,14 @@ type persistedHealth struct {
 	ParamBlock       map[string][]string  `json:"param_block,omitempty"` // model → learned unsupported top-level params
 }
 
+type persistedFullSnapshot struct {
+	Providers  map[string]persistedSnapshot
+	Sticky     map[string]routeSticky
+	Health     map[string]persistedHealth
+	HealthFP   string
+	Generation uint64
+}
+
 // refreshState tracks per-provider refresh dedup state (guarded by quotaTracker.mu).
 type refreshState struct {
 	last     time.Time
@@ -87,16 +106,40 @@ func newQuotaTracker(path string, cfg func() *Config, provs func() map[string]pr
 		cfg:           cfg,
 		provs:         provs,
 		stopCh:        make(chan struct{}),
+		accepting:     true,
 		retryAttempts: 3,
 		retryBackoff:  time.Second,
 	}
 }
 
-func (t *quotaTracker) start() {
-	t.load() // baseline before first poll
+func (t *quotaTracker) currentGeneration() uint64 {
+	if t.generation == nil {
+		return 0
+	}
+	return t.generation()
+}
+
+// launch admits a background task and increments the WaitGroup under the same
+// lifecycle mutex used by stop. This makes accepting+Add atomic with the
+// accepting=false transition, so Add can never race a zero-counter Wait.
+func (t *quotaTracker) launch(fn func()) bool {
+	t.lifeMu.Lock()
+	if !t.accepting {
+		t.lifeMu.Unlock()
+		return false
+	}
 	t.poller.Add(1)
+	t.lifeMu.Unlock()
 	go func() {
 		defer t.poller.Done()
+		fn()
+	}()
+	return true
+}
+
+func (t *quotaTracker) start() {
+	t.load() // baseline before first poll
+	t.launch(func() {
 		interval := t.cfg().Scheduling.pollInterval()
 		// bootstrap poll shortly after start, as a one-shot timer in the same
 		// goroutine — keeps the lifecycle to a single tracked goroutine (the
@@ -115,7 +158,7 @@ func (t *quotaTracker) start() {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // stop signals the poller goroutine(s) to exit and waits for them to drain, so
@@ -124,21 +167,64 @@ func (t *quotaTracker) start() {
 // torn down or moved to a new config generation. Idempotent via stopOnce.
 func (t *quotaTracker) stop() {
 	t.stopOnce.Do(func() {
-		close(t.stopCh)
+		t.lifeMu.Lock()
+		t.accepting = false
+		if t.stopCh != nil {
+			close(t.stopCh)
+		}
+		t.lifeMu.Unlock()
 		t.poller.Wait()
 	})
 }
 
 func (t *quotaTracker) pollAfter(d time.Duration) {
-	t.poller.Add(1)
-	go func() {
-		defer t.poller.Done()
+	t.launch(func() {
 		select {
 		case <-time.After(d):
 			t.pollAll(time.Now())
 		case <-t.stopCh:
 		}
-	}()
+	})
+}
+
+// stopped reports whether stop has been signaled (non-blocking). Used by the
+// async dispatchers to no-op a poll dispatched after Close.
+func (t *quotaTracker) stopped() bool {
+	select {
+	case <-t.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// pollAsync dispatches one pollAll on a tracked, stop-aware goroutine — the path
+// reload uses to "poll now". Tracked by poller so Proxy.Close waits for it, and
+// stop-aware so a dispatch after Close no-ops instead of firing a persist after
+// the final flush (the bug: reload's bare `go pollAll` bypassed the WaitGroup).
+func (t *quotaTracker) pollAsync(now time.Time) {
+	gen := t.currentGeneration()
+	t.launch(func() {
+		if t.stopped() {
+			return
+		}
+		t.pollAllGeneration(now, gen)
+	})
+}
+
+// refreshAsync dispatches one refreshOne on a tracked, stop-aware goroutine —
+// the 429 path. Same lifecycle as pollAsync; refreshOne keeps its own dedup.
+func (t *quotaTracker) refreshAsync(name string, generations ...uint64) {
+	gen := t.currentGeneration()
+	if len(generations) > 0 {
+		gen = generations[0]
+	}
+	t.launch(func() {
+		if t.stopped() {
+			return
+		}
+		t.refreshOne(name, gen)
+	})
 }
 
 // pollAll polls every runnable provider instance in parallel (bounded by the
@@ -151,19 +237,48 @@ func (t *quotaTracker) pollAfter(d time.Duration) {
 // whole pool every cycle. Each virtual carries its own bound credentials
 // (buildOne binding point #1), so fetchQuota(p) queries the correct account.
 func (t *quotaTracker) pollAll(now time.Time) {
+	t.pollAllGeneration(now, t.currentGeneration())
+}
+
+func (t *quotaTracker) pollAllGeneration(now time.Time, generation uint64) {
 	provs := t.provs()
 	var wg sync.WaitGroup
+	results := make(map[string]*provider.QuotaSnapshot, len(provs))
+	var resultsMu sync.Mutex
 	for name, provImpl := range provs {
 		wg.Add(1)
 		go func(n string, p provider.Provider) {
 			defer wg.Done()
-			t.setSnapshot(n, t.fetchQuota(p, now)) // fetchQuota retries transient errors
+			s := t.fetchQuota(p, now) // fetchQuota retries transient errors
+			resultsMu.Lock()
+			results[n] = s
+			resultsMu.Unlock()
 		}(name, provImpl)
 	}
 	wg.Wait()
+	t.mu.Lock()
+	if t.currentGeneration() != generation {
+		t.mu.Unlock()
+		return // reload happened while the upstream polls were in flight
+	}
+	for name, snapshot := range results {
+		t.state[name] = snapshot
+	}
+	t.stateGeneration = generation
+	t.mu.Unlock()
 	if err := t.persist(); err != nil {
 		log.Printf("[quota] persist after pollAll failed: %v", err)
 	}
+}
+
+// clearForGeneration drops quota snapshots owned by the previous config. The
+// caller changes Proxy generation first, then calls this while holding the
+// Proxy's config+health locks (lock order: p.mu -> healthMu -> quotaMu).
+func (t *quotaTracker) clearForGeneration(generation uint64) {
+	t.mu.Lock()
+	t.state = map[string]*provider.QuotaSnapshot{}
+	t.stateGeneration = generation
+	t.mu.Unlock()
 }
 
 // pollOne re-polls a single provider by its quota key (a config name or a
@@ -172,11 +287,14 @@ func (t *quotaTracker) pollAll(now time.Time) {
 // (a manual click should always re-poll) and runs synchronously so the caller
 // sees the fresh snapshot. Returns false if the key isn't a live provider.
 func (t *quotaTracker) pollOne(key string) bool {
+	generation := t.currentGeneration()
 	p := t.provs()[key]
 	if p == nil {
 		return false
 	}
-	t.setSnapshot(key, t.fetchQuota(p, time.Now()))
+	if !t.commitSnapshot(generation, key, t.fetchQuota(p, time.Now())) {
+		return false
+	}
 	if err := t.persist(); err != nil {
 		log.Printf("[quota] persist after pollOne(%s) failed: %v", key, err)
 	}
@@ -188,7 +306,14 @@ func (t *quotaTracker) pollOne(key string) bool {
 // deduped: a concurrent refresh (inFlight) or one that ran less than
 // pollInterval/2 ago (last) is dropped, so a 429 storm doesn't fire N upstream
 // Quota() calls + N persists for the same provider.
-func (t *quotaTracker) refreshOne(name string) {
+func (t *quotaTracker) refreshOne(name string, generations ...uint64) {
+	generation := t.currentGeneration()
+	if len(generations) > 0 {
+		generation = generations[0]
+	}
+	if t.currentGeneration() != generation {
+		return
+	}
 	if t.refreshHook != nil {
 		t.refreshHook(name)
 		return
@@ -211,11 +336,12 @@ func (t *quotaTracker) refreshOne(name string) {
 	refreshed := false
 	if p := t.provs()[name]; p != nil {
 		s := t.fetchQuota(p, time.Now())
-		t.setSnapshot(name, s)
-		if err := t.persist(); err != nil {
-			log.Printf("[quota] persist after refreshOne(%s) failed: %v", name, err)
+		if t.commitSnapshot(generation, name, s) {
+			if err := t.persist(); err != nil {
+				log.Printf("[quota] persist after refreshOne(%s) failed: %v", name, err)
+			}
+			refreshed = true
 		}
-		refreshed = true
 	}
 
 	t.mu.Lock()
@@ -224,6 +350,17 @@ func (t *quotaTracker) refreshOne(name string) {
 		g.last = time.Now()
 	}
 	t.mu.Unlock()
+}
+
+func (t *quotaTracker) commitSnapshot(generation uint64, name string, snapshot *provider.QuotaSnapshot) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.currentGeneration() != generation {
+		return false
+	}
+	t.state[name] = snapshot
+	t.stateGeneration = generation
+	return true
 }
 
 // fetchQuota polls a provider's Quota(), retrying transient errors (DNS "no
@@ -341,17 +478,30 @@ func (t *quotaTracker) persist() error {
 	// fixed name made a loser's rename fail ENOENT).
 	t.persistMu.Lock()
 	defer t.persistMu.Unlock()
-	t.mu.RLock()
-	out := make(map[string]persistedSnapshot, len(t.state))
-	for k, v := range t.state {
-		out[k] = persistedSnapshot{
-			Billing: v.Billing, RemainingPct: v.RemainingPct,
-			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
+	wrap := map[string]any{}
+	if t.fullSnapshot != nil {
+		s := t.fullSnapshot()
+		wrap["providers"] = s.Providers
+		sticky := make(map[string]persistedSticky, len(s.Sticky))
+		for k, v := range s.Sticky {
+			sticky[k] = persistedSticky{Provider: v.provider, Since: v.since}
 		}
+		wrap["sticky"] = sticky
+		wrap["health"] = s.Health
+		wrap["health_fp"] = s.HealthFP
+	} else {
+		t.mu.RLock()
+		out := make(map[string]persistedSnapshot, len(t.state))
+		for k, v := range t.state {
+			out[k] = persistedSnapshot{
+				Billing: v.Billing, RemainingPct: v.RemainingPct,
+				Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
+			}
+		}
+		t.mu.RUnlock()
+		wrap["providers"] = out
 	}
-	t.mu.RUnlock()
-	wrap := map[string]any{"providers": out}
-	if t.stickySnapshot != nil {
+	if t.fullSnapshot == nil && t.stickySnapshot != nil {
 		// stickySnapshot takes healthMu (proxy.go). It MUST be called outside
 		// quotaMu — calling it inside the RLock above would invert the lock
 		// order (healthMu → quotaMu is the rule; reverse = deadlock risk).
@@ -362,7 +512,7 @@ func (t *quotaTracker) persist() error {
 		}
 		wrap["sticky"] = sticky
 	}
-	if t.healthSnapshot != nil {
+	if t.fullSnapshot == nil && t.healthSnapshot != nil {
 		// Same lock discipline as stickySnapshot: healthMu only, never nested
 		// inside quotaMu. The fingerprint gates restore to the exact config the
 		// state was frozen under (health keys are provider names — without the
@@ -429,6 +579,7 @@ func (t *quotaTracker) load() {
 			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
 		}
 	}
+	t.stateGeneration = t.currentGeneration()
 	t.LoadedSticky = make(map[string]routeSticky, len(wrap.Sticky))
 	for k, v := range wrap.Sticky {
 		t.LoadedSticky[k] = routeSticky{provider: v.Provider, since: v.Since}

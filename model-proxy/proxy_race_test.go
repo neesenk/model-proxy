@@ -47,26 +47,14 @@ func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	providers, poolIndex, parentOf := buildProviders(cfg)
-	p := &Proxy{
-		cfg:       cfg,
-		providers: providers,
-		poolIndex: poolIndex,
-		parentOf:  parentOf,
-		client:    &http.Client{},
-		health:    map[string]*providerHealth{},
-		sticky:    map[string]routeSticky{},
-	}
-	// Build expanded routes the same way NewProxy does, so reload's rebuild
-	// (which also calls buildExpandedRoutes) races against readers consistently.
-	p.expandedRoutes = p.buildExpandedRoutes()
-	// Tracker at a temp path (don't touch the real ~/.model-proxy/); not started.
-	p.quota = newQuotaTracker(filepath.Join(dir, "quota_state.json"), p.cfgSnapshot, p.providerSnapshot)
+	p := newTestProxyAt(t, cfg, filepath.Join(dir, "quota_state.json"))
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
+	reloadErrs := make(chan error, 50)
+	var served, failed, unexpected, transportErrors atomic.Int64
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
 		go func() {
@@ -78,9 +66,19 @@ func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
 				default:
 				}
 				resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"m","messages":[]}`))
-				if err == nil {
-					io.Copy(io.Discard, resp.Body)
-					resp.Body.Close()
+				if err != nil {
+					transportErrors.Add(1)
+					continue
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				switch resp.StatusCode {
+				case http.StatusOK:
+					served.Add(1)
+				case http.StatusBadGateway:
+					failed.Add(1)
+				default:
+					unexpected.Add(1)
 				}
 			}
 		}()
@@ -90,7 +88,7 @@ func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
 			if err := p.reload(cfgPath); err != nil {
-				t.Logf("reload: %v", err)
+				reloadErrs <- err
 			}
 			time.Sleep(2 * time.Millisecond)
 		}
@@ -98,4 +96,20 @@ func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+	close(reloadErrs)
+	for err := range reloadErrs {
+		t.Errorf("reload: %v", err)
+	}
+	if got := transportErrors.Load(); got != 0 {
+		t.Errorf("request transport errors = %d, want 0", got)
+	}
+	if got := unexpected.Load(); got != 0 {
+		t.Errorf("unexpected HTTP statuses = %d, want 0", got)
+	}
+	if served.Load() == 0 || failed.Load() == 0 {
+		t.Errorf("completed requests 200=%d 502=%d, want both paths exercised during reload", served.Load(), failed.Load())
+	}
+	if got := hits.Load(); got == 0 {
+		t.Error("upstream received no requests; reload race test exercised no forwarding")
+	}
 }

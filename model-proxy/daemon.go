@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -178,7 +179,12 @@ func runProxy(sa serveArgs) {
 		for range hupCh {
 			log.Printf("[reload] SIGHUP received, reloading config from %s", sa.config)
 			if err := p.reload(sa.config); err != nil {
-				log.Printf("[reload] FAILED: %v (keeping old config)", err)
+				var applied *reloadAppliedWarning
+				if errors.As(err, &applied) {
+					log.Printf("[reload] WARNING: %v", err)
+				} else {
+					log.Printf("[reload] FAILED: %v (keeping old config)", err)
+				}
 			} else {
 				log.Printf("[reload] config reloaded successfully (providers: %s, routes: %s)",
 					providerNames(p.cfg), routeNames(p.cfg))

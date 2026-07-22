@@ -120,7 +120,7 @@ func TestForward_CacheHit(t *testing.T) {
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	if p.cache == nil {
 		t.Fatal("cache not created despite cache.enabled")
 	}
@@ -177,7 +177,7 @@ func TestForward_CacheHitHeader(t *testing.T) {
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -221,7 +221,7 @@ func TestReload_RebuildsCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	if p.cache == nil {
 		t.Fatal("cache not created despite cache.enabled")
 	}
@@ -293,7 +293,7 @@ func TestForward_CacheConvert_ReplayIntact(t *testing.T) {
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt", Protocol: "openai"}}},
 		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -346,7 +346,7 @@ func TestForward_CacheBypassedByForceProvider(t *testing.T) {
 		}},
 		Cache: CacheConfig{Enabled: true, TTL: "1h"},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["a"] = &testProv{key: "a"}
 	p.providers["b"] = &testProv{key: "b"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -417,7 +417,7 @@ func TestForward_ForceProvider_TypoHardFails(t *testing.T) {
 			{Provider: "b", Model: "glm", Priority: 2},
 		}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["a"] = &testProv{key: "a"}
 	p.providers["b"] = &testProv{key: "b"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))

@@ -49,7 +49,7 @@ func newDeepSeekTestProxy(t *testing.T, openaiURL, anthropicURL string) *httptes
 			"deepseek-v4-pro": {{Provider: "deepseek", Model: "deepseek-v4-pro"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	return httptest.NewServer(http.HandlerFunc(p.handler))
 }
 

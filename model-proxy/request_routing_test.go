@@ -96,7 +96,7 @@ func TestForward_ContextCrossRoute(t *testing.T) {
 			"glm-long": {{Provider: "big-prov", Model: "big"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["small-prov"] = &testProv{key: "s"}
 	p.providers["big-prov"] = &testProv{key: "b"}
 	p.catalog = testCatalog(map[string]struct {
@@ -151,7 +151,7 @@ func TestForward_CapabilityCrossRoute(t *testing.T) {
 			"glm-vision": {{Provider: "vision-p", Model: "vision"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["text-p"] = &testProv{key: "t"}
 	p.providers["vision-p"] = &testProv{key: "v"}
 	p.catalog = testCatalog(map[string]struct {
@@ -215,7 +215,7 @@ func TestForward_CapabilityFilter_E2E(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["text-p"] = &testProv{key: "t"}
 	p.providers["vision-p"] = &testProv{key: "v"}
 	p.catalog = testCatalog(map[string]struct {
@@ -339,7 +339,7 @@ func TestForward_CapabilitiesOverride_E2E(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["text-p"] = &testProv{key: "t"}
 	p.providers["blind-p"] = &testProv{key: "b"}
 	p.catalog = testCatalog(map[string]struct {

@@ -34,15 +34,17 @@ kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 
-当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze 时写盘。`Proxy.Close` 停止并等待 poller goroutine 后做 final flush；测试在隔离 HOME 下运行并在 cleanup 中 `Close`。
+当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze 时写盘。`Proxy.Close` 先通过 lifecycle gate 停止接收新任务，再等待 poller goroutine（含 reload 的 `pollAsync` 与 429 的 `refreshAsync`）后做 final flush；dispatch 的 accepting 检查与 `WaitGroup.Add` 在同一把锁内，不得与 shutdown 的 `Wait` 竞争。
+
+### config generation 一致性
+
+Proxy 为每次成功 reload 分配单调递增的 config generation。forward、Fusion 和 quota poll 都携带开始时的 generation；health/sticky/modelLock/paramBlock mutation 与 quota poll 提交前必须校验 generation，旧请求和慢 poll 的结果直接丢弃。
+
+reload 按 `p.mu → healthMu → quotaMu` 一次性切换 cfg/providers/routes generation，并清空旧 health、sticky、model lock、paramBlock 和 quota snapshot。`persist()` 按同一锁顺序一次性复制 quota + health + sticky + config fingerprint，不允许分别回调后拼装。reload 交换完成后同步写入「新 fingerprint + 空运行态」；写盘失败以“配置已生效但 durability 降级”的 warning 返回，调用方不得回滚已经与 runtime 分叉的 config 文件。
 
 ### 已知缺口与目标契约
 
-当前持久化还没有完全满足运行态 durability，后续修复应达到：
-
-- snapshot、fingerprint 必须属于同一 config generation；
-- health/model lock/paramBlock mutation 应进入 debounce 单写者，而不是只依赖下次 quota poll；
-- reload 清空运行态后必须持久化空状态，防止重启复活旧冻结态。
+- health/model lock/paramBlock mutation 应进入 debounce 单写者，而不是只依赖下次 quota poll。
 
 恢复只采纳未过期条目，且 config fingerprint 必须匹配。恢复的 circuit failure count 置为 threshold，使下一次失败立即重新开路。
 
@@ -111,5 +113,5 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 - stale/error quota 的 unknown 降级。
 - 并发 poll/manual refresh/429 refresh 的单写正确性。
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。
-- fingerprint mismatch、reload clear、mutation 后立即重启。
+- fingerprint mismatch、旧请求/慢 quota poll 跨 generation、reload clear、mutation 后立即重启。
 - pin、force、unfreeze 与 cache/failover 的交互。

@@ -135,7 +135,7 @@ func TestForward_RecordsAgent(t *testing.T) {
 			"claude-sonnet-4": {{Provider: "aqp", Model: "claude-sonnet-4"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["aqp"] = &testProv{key: "tok"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()

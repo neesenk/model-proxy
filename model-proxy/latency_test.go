@@ -207,7 +207,7 @@ func TestForward_RecordsLatency(t *testing.T) {
 			"glm": {{Provider: "z", Model: "glm-rt"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "z-key"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()

@@ -21,7 +21,7 @@ gofmt -l .
 scripts/cover.sh
 ```
 
-`scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate。
+`scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate。底层 `go test` 任一 package 失败、缺少预期 package 输出或缺少覆盖率百分比时，脚本必须非零退出，已有或不完整的 `cov.out` 不得形成假绿。
 
 daemon process、浏览器 OAuth/SSO、交互 stdin 和真实上游 FetchModels 属于外部 I/O 路径，可通过集成验证覆盖，不强制全部单元化。
 
@@ -76,6 +76,8 @@ forward 测试至少断言：
 
 race-clean 只是必要条件。并发测试还必须断言功能不变量，例如 reload 期间旧请求完成且后续请求命中新配置。
 
+异步测试优先使用 channel、barrier、context deadline 或可观察状态同步；不得以固定 `Sleep` 证明异步工作“已经完成”或“没有发生”。流式读取必须设置 deadline，并同时断言读取错误、字节数和内容。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；
@@ -104,6 +106,7 @@ race-clean 只是必要条件。并发测试还必须断言功能不变量，例
 - 测试不得写真实 `~/.model-proxy`。
 - state、credential、request log 使用 `t.TempDir()` 或显式注入 path。
 - 后台 owner 必须提供 stop/wait；测试通过 `t.Cleanup` 关闭。
+- 普通功能测试统一使用 `newTestProxy`；它在构造前注入独立 state path，并自动注册 `Proxy.Close`。需要验证重启恢复时使用 `newTestProxyAt` 显式共享同一个测试 state path，并在创建下一实例前关闭旧实例。仅验证生产构造器本身时可在隔离 HOME 下直接调用 `NewProxy`，并精确断言默认 state path。
 - 禁止在测试日志输出真实 token、cookie、prompt 或用户请求体。
 
 

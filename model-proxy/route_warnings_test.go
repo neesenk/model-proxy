@@ -80,7 +80,7 @@ func TestNewProxy_RouteWarningsAppended(t *testing.T) {
 	}, Routes: map[string][]RouteTarget{
 		"k2": {{Provider: "aqp", Model: "kimi-k2-thinking", Protocol: "openai"}},
 	}}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	found := false
 	for _, w := range p.routeWarnings {
 		if strings.Contains(w, "reasoning-required") {

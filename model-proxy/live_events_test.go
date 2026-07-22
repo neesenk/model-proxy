@@ -86,7 +86,7 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
 	ch, _, cancel := p.events.subscribe()
 	defer cancel()
@@ -139,14 +139,14 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 // TestServeEvents_SSE: the /api/events endpoint streams events as SSE `data:`
 // lines; a published event reaches an HTTP subscriber.
 func TestServeEvents_SSE(t *testing.T) {
-	p := NewProxy(&Config{
+	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	})
 	srv := httptest.NewServer(http.HandlerFunc(p.serveEvents))
 	defer srv.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -171,7 +171,7 @@ func TestServeEvents_SSE(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("did not receive the published SSE event; scan err=%v", sc.Err())
+		t.Fatalf("did not receive the published SSE event before deadline; scan err=%v context err=%v", sc.Err(), ctx.Err())
 	}
 }
 
@@ -184,7 +184,7 @@ func TestLiveEvents_EarlyFailures(t *testing.T) {
 		Providers: map[string]Provider{"z": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
 	ch, _, cancel := p.events.subscribe()
 	defer cancel()
@@ -233,7 +233,7 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 		if cache {
 			cfg.Cache = CacheConfig{Enabled: true, TTL: "1h"}
 		}
-		p := NewProxy(cfg)
+		p := newTestProxy(t, cfg)
 		p.providers["z"] = &testProv{key: "k"}
 		return p
 	}
@@ -264,7 +264,7 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 		Providers: map[string]Provider{"dead": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "dead", Model: "glm"}}},
 	}
-	pf2 := NewProxy(cfg)
+	pf2 := newTestProxy(t, cfg)
 	pf2.providers["dead"] = &testProv{key: "k"}
 	ch2, _, cancel2 := pf2.events.subscribe()
 	defer cancel2()

@@ -75,7 +75,7 @@ func TestCircuit_OpensAfter3Failures(t *testing.T) {
 		},
 		Scheduling: schedCfg(3, "50ms", "10s", "5s", "0s"),
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -120,7 +120,7 @@ func TestCircuit_HalfOpenClosesOnSuccess(t *testing.T) {
 		},
 		Scheduling: schedCfg(3, "50ms", "10s", "5s", "0s"),
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -165,7 +165,7 @@ func TestRateLimit_SkipsProvider(t *testing.T) {
 		},
 		Scheduling: schedCfg(3, "50ms", "10s", "5s", "0s"),
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -210,7 +210,7 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 		},
 		Scheduling: schedCfg(3, "50ms", "10s", "5s", "150ms"),
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -262,7 +262,7 @@ func TestUpstreamTimeout_Failover(t *testing.T) {
 		},
 		Scheduling: schedCfg(3, "50ms", "10s", "50ms", "0s"),
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -320,7 +320,7 @@ func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
 		},
 		Scheduling: schedCfg(3, "50ms", "10s", "5s", "0s"),
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))

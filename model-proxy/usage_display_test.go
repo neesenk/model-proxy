@@ -399,8 +399,8 @@ func TestShowCodexUsage_UsageParsed(t *testing.T) {
 		if got := r.Header.Get("originator"); got != "codex_cli_rs" {
 			t.Errorf("codex originator=%q want codex_cli_rs", got)
 		}
-		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
-			t.Errorf("codex Authorization=%q want Bearer ...", got)
+		if got, want := r.Header.Get("Authorization"), "Bearer "+codexAccessToken(); got != want {
+			t.Errorf("codex Authorization=%q want %q", got, want)
 		}
 		if got := r.Header.Get("ChatGPT-Account-Id"); got != "acct-test" {
 			t.Errorf("codex ChatGPT-Account-Id=%q want acct-test (parsed from id_token JWT)", got)

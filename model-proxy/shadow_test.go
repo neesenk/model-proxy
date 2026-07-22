@@ -39,7 +39,7 @@ func TestForceProvider_OverridesRouting(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["a"] = &testProv{key: "a"}
 	p.providers["b"] = &testProv{key: "b"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))

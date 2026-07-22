@@ -25,7 +25,7 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 			"claude-haiku-4-5": "glm-5.2",
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -69,7 +69,7 @@ func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
 		},
 		Routes: map[string][]RouteTarget{},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 

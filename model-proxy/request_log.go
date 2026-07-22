@@ -24,10 +24,11 @@ import (
 // groups one client request's failover attempts; attempt is the 0-based index
 // in the failover chain; exposed is the route name (post claude_mapping).
 type forwardLogCtx struct {
-	requestID string
-	attempt   int
-	exposed   string
-	origBody  []byte // original client body (pre-rewrite, pre-convert) — for faithful replay
+	requestID  string
+	attempt    int
+	exposed    string
+	generation uint64 // config generation captured with cfg/providers by forward
+	origBody   []byte // original client body (pre-rewrite, pre-convert) — for faithful replay
 }
 
 // requestLogRecord is one line in the JSONL request log. Written as one JSON
@@ -193,6 +194,16 @@ type requestLogger struct {
 	writeErrors uint64        // atomic; records lost to a file-write/marshal error
 	dead        uint32        // atomic; 1 once the loop exited due to a fatal setup error (mkdir)
 	stopOnce    sync.Once
+	// writeRecord is a test seam for deterministic disk-write failures. Production
+	// loggers leave it nil and always use requestFileWriter.write.
+	writeRecord func(*requestLogRecord, time.Time) error
+}
+
+func (l *requestLogger) write(w *requestFileWriter, r *requestLogRecord, now time.Time) error {
+	if l.writeRecord != nil {
+		return l.writeRecord(r, now)
+	}
+	return w.write(r, now)
 }
 
 func newRequestLogger(dir string, maxSize int64, maxBody int, retention time.Duration) *requestLogger {
@@ -261,7 +272,7 @@ func (l *requestLogger) loop() {
 		select {
 		case r := <-l.ch:
 			if r != nil {
-				if err := w.write(r, time.Now()); err != nil {
+				if err := l.write(w, r, time.Now()); err != nil {
 					l.noteWriteError(err)
 				}
 			}
@@ -273,7 +284,7 @@ func (l *requestLogger) loop() {
 				select {
 				case r := <-l.ch:
 					if r != nil {
-						if err := w.write(r, time.Now()); err != nil {
+						if err := l.write(w, r, time.Now()); err != nil {
 							l.noteWriteError(err)
 						}
 					}

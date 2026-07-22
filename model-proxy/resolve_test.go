@@ -18,7 +18,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	r := newResolver(p, p.providers, p.poolIndex)
 
 	// Expand: pooled parent → both virtuals, Model/Priority/Protocol preserved.
@@ -70,7 +70,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 
 	// Non-pooled provider: Expand passes through; Pick on a built non-pooled name
 	// returns it, on a not-built name returns !ok.
-	p2 := NewProxy(&Config{
+	p2 := newTestProxy(t, &Config{
 		Listen:    "127.0.0.1:1",
 		Providers: map[string]Provider{"single": {OpenAIBaseURL: "https://x", Provider: "static"}},
 	})
@@ -126,8 +126,7 @@ func TestResolver_PickSkipsModelLockedVirtual(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
 		"zhipu": {OpenAIBaseURL: "https://z", Provider: "zhipu"},
 	}}
-	p := NewProxy(cfg)
-	defer p.Close()
+	p := newTestProxy(t, cfg)
 	r := newResolver(p, p.providers, p.poolIndex)
 
 	// Pre-lock: the model resolves to a healthy virtual.

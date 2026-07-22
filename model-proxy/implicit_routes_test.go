@@ -130,7 +130,7 @@ func TestImplicitRoute_ForwardsUnroutedLoggedInModel(t *testing.T) {
 			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}}, // explicit; glm-4.6 is NOT routed
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// glm-4.6 should have been auto-routed to zhipu.
 	if _, ok := p.implicitRoutes["glm-4.6"]; !ok {
 		t.Fatalf("expected implicit route for glm-4.6, got implicit=%v", p.implicitRoutes)
@@ -202,7 +202,7 @@ func TestImplicitRoute_ListedInV1Models(t *testing.T) {
 			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 	resp, err := http.Get(px.URL + "/v1/models")

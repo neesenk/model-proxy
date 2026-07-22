@@ -71,8 +71,8 @@ func (p *recordingProv) Refresh() error {
 
 // newProxyWithStatic builds a Proxy whose providers are all testProv with the
 // given keys, so tests don't hit real auth files.
-func newProxyWithStatic(cfg *Config, keys map[string]string) *Proxy {
-	p := NewProxy(cfg)
+func newProxyWithStatic(t testing.TB, cfg *Config, keys map[string]string) *Proxy {
+	p := newTestProxy(t, cfg)
 	for name, key := range keys {
 		p.providers[name] = &testProv{key: key}
 	}
@@ -127,7 +127,7 @@ func TestUC_AnthropicMappingAndPathKept(t *testing.T) {
 		},
 		ClaudeMapping: map[string]string{"claude-opus-4-8": "glm-5.2"},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"aqp": "k"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"aqp": "k"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -158,7 +158,7 @@ func TestUC_OpenAIStripsV1Prefix(t *testing.T) {
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 		},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"codex": "k"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"codex": "k"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -195,7 +195,7 @@ func TestUC_FailoverAndCircuitSkipsOpenProvider(t *testing.T) {
 		},
 		Scheduling: Scheduling{CircuitThreshold: 3},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"primary": "p", "fallback": "f"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"primary": "p", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -244,7 +244,7 @@ func TestUC_401RefreshRetrySucceeds(t *testing.T) {
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	rp := &recordingProv{testProv: testProv{key: "k"}}
 	p.providers["codex"] = rp
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -288,7 +288,7 @@ func TestUC_401RefreshFailsFailover(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &recordingProv{testProv: testProv{key: "p"}}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -334,7 +334,7 @@ func TestUC_429RetryAfterSkipsProvider(t *testing.T) {
 			},
 		},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"primary": "p", "fallback": "f"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"primary": "p", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -382,7 +382,7 @@ func TestUC_UpstreamTimeoutFailover(t *testing.T) {
 		},
 		Scheduling: Scheduling{UpstreamTimeout: "200ms"},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"slow": "s", "fallback": "f"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"slow": "s", "fallback": "f"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -438,7 +438,7 @@ func TestUC_ClientDisconnectStopsUpstream(t *testing.T) {
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 		},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"codex": "k"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"codex": "k"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -484,7 +484,7 @@ func TestUC_AllTargetsFailReturns502(t *testing.T) {
 			},
 		},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"a": "a", "b": "b"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"a": "a", "b": "b"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -514,7 +514,7 @@ func TestUC_ModelsEndpointUnion(t *testing.T) {
 			"claude-sonnet-4-6": "deepseek-v4-pro",
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -558,7 +558,7 @@ func TestUC_DebugScheduleReportsSticky(t *testing.T) {
 			},
 		},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"a": "a", "b": "b"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"a": "a", "b": "b"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -625,7 +625,7 @@ func TestUC_StickySameProvider(t *testing.T) {
 			},
 		},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"a": "a-key", "b": "b-key"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"a": "a-key", "b": "b-key"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -663,7 +663,7 @@ func TestUC_AqpBetaAndHeaders(t *testing.T) {
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// Build a REAL AqpProvider (so RewriteRequest adds ?beta) with a fake
 	// Authenticator, so no auth file is read.
 	p.providers["aqp"] = mustRealProvider(t, "aqp", &provider.Config{
@@ -705,7 +705,7 @@ func TestUC_CodexStoreFalseInjected(t *testing.T) {
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// Build a REAL CodexProvider (so RewriteRequest injects store:false) with a
 	// fake Authenticator, so no auth file is read.
 	p.providers["codex"] = mustRealProvider(t, "codex", &provider.Config{
@@ -756,7 +756,7 @@ func TestUC_DeepSeekDualProtocolBaseURL(t *testing.T) {
 			"deepseek-v4-pro": {{Provider: "deepseek", Model: "deepseek-v4-pro"}},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	// deepseek provider sets both Bearer + x-api-key; use a key file via testProv override.
 	p.providers["deepseek"] = &testProv{key: "ds-key"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -783,7 +783,7 @@ func TestUC_UnknownPathAndHealth(t *testing.T) {
 		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -816,7 +816,7 @@ func TestUC_MissingModelField400(t *testing.T) {
 		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -834,7 +834,7 @@ func TestUC_UnparseableBody400(t *testing.T) {
 		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -858,7 +858,7 @@ func TestUC_ClientAuthNotForwarded(t *testing.T) {
 		Providers: map[string]Provider{"a": {OpenAIBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
-	p := newProxyWithStatic(cfg, map[string]string{"a": "proxy-key"})
+	p := newProxyWithStatic(t, cfg, map[string]string{"a": "proxy-key"})
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 

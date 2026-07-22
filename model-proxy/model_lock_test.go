@@ -48,7 +48,7 @@ func modelLockCfg(primary, fallback *httptest.Server) *Config {
 
 func newModelLockProxy(t *testing.T, cfg *Config) (*Proxy, *httptest.Server) {
 	t.Helper()
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["primary"] = &testProv{key: "p"}
 	p.providers["fallback"] = &testProv{key: "f"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))

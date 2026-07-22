@@ -20,8 +20,7 @@ providers:
 routes:
   glm: [{provider: zhipu, model: glm}]
 `))
-	p := NewProxy(cfg)
-	defer p.Close()
+	p := newTestProxy(t, cfg)
 
 	endEventIDs := func() []string {
 		p.events.mu.Lock()

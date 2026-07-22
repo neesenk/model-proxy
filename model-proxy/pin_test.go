@@ -47,7 +47,7 @@ func TestPin_ForcesProvider(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["zhipu"] = &testProv{key: "z"}
 	p.providers["deepseek"] = &testProv{key: "d"}
 	if !setPinForTest(p, "glm", "deepseek", 0) {
@@ -92,7 +92,7 @@ func TestPin_NoFailoverWhenPinned(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["zhipu"] = &testProv{key: "z"}
 	p.providers["deepseek"] = &testProv{key: "d"}
 	setPinForTest(p, "glm", "deepseek", 0)
@@ -119,7 +119,7 @@ func TestSetPin_Validation(t *testing.T) {
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	if setPinForTest(p, "ghost-route", "zhipu", 0) {
 		t.Error("setPin unknown route should fail")
 	}
@@ -146,7 +146,7 @@ func TestPin_TTLExpiry(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	routeKeys := map[string]bool{"glm": true}
 	// Active pin → only deepseek.
 	setPinForTest(p, "glm", "deepseek", time.Hour)
@@ -181,7 +181,7 @@ func TestScheduleStatus_ShowsPin(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	setPinForTest(p, "glm", "deepseek", time.Hour)
 	var st statusSchedule
 	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
@@ -206,7 +206,7 @@ func TestScheduleStatus_ShowsPin(t *testing.T) {
 // TestHandlePinAPI: POST /api/pin installs, GET /api/pin lists, DELETE removes;
 // POST to a bad provider is 400 with a clear message.
 func TestHandlePinAPI(t *testing.T) {
-	w := newWebServer(NewProxy(&Config{
+	w := newWebServer(newTestProxy(t, &Config{
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	}), "test-config.yaml")
@@ -283,7 +283,7 @@ func TestPin_BypassesCache(t *testing.T) {
 		}},
 		Cache: CacheConfig{Enabled: true, TTL: "1h"},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["a"] = &testProv{key: "a"}
 	p.providers["b"] = &testProv{key: "b"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -349,7 +349,7 @@ func TestPin_ForcesThroughCircuit(t *testing.T) {
 			},
 		},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["a"] = &testProv{key: "a"}
 	p.providers["b"] = &testProv{key: "b"}
 	if !setPinForTest(p, "glm", "b", 0) {

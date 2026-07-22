@@ -221,10 +221,22 @@ func TestParseVolcengineQuota_OverQuotaClampsToZero(t *testing.T) {
 		AFPMonthly:  AfpWindow{Quota: 100, Used: 10, ResetTime: 1750000000000},
 	}
 	s := ParseVolcengineQuota(u)
+	found := false
 	for _, w := range s.Windows {
-		if w.Total > 0 && w.RemainingPct < 0 { // only windows with a real quota
-			t.Errorf("window %q RemainingPct=%v, want >= 0 (over-quota clamped to 0, not negative)", w.Label, w.RemainingPct)
+		if w.Label == "5h" {
+			found = true
+			if w.RemainingPct != 0 {
+				t.Errorf("5h RemainingPct=%v, want exactly 0", w.RemainingPct)
+			}
 		}
+	}
+	if !found {
+		t.Fatal("5h quota window not found")
+	}
+	// Snapshot scheduling follows the Ultimate monthly window, not the short 5h
+	// rate cap; this separately pins the final RemainingPct source.
+	if s.RemainingPct != 0.9 {
+		t.Errorf("snapshot RemainingPct=%v, want monthly ultimate value 0.9", s.RemainingPct)
 	}
 }
 

@@ -148,7 +148,7 @@ func TestForward_AnthropicToOpenAI_NonStream(t *testing.T) {
 		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -189,7 +189,7 @@ func TestForward_ConvertRequestFail_Closed(t *testing.T) {
 		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -226,7 +226,7 @@ func TestForward_ConvertResponseFail_Closed(t *testing.T) {
 		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -262,7 +262,7 @@ func TestForward_AnthropicToOpenAI_Stream(t *testing.T) {
 		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -304,7 +304,7 @@ func TestForward_OpenAIToAnthropic_NonStream(t *testing.T) {
 		Providers: map[string]Provider{"ant": {AnthropicBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "ant", Model: "claude", Protocol: "anthropic"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["ant"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -346,7 +346,7 @@ func TestForward_OpenAIToAnthropic_Stream(t *testing.T) {
 		Providers: map[string]Provider{"ant": {AnthropicBaseURL: up.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "ant", Model: "claude", Protocol: "anthropic"}}},
 	}
-	p := NewProxy(cfg)
+	p := newTestProxy(t, cfg)
 	p.providers["ant"] = &testProv{key: "k"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -442,7 +442,7 @@ func TestForward_Convert_StreamingCountsTokens(t *testing.T) {
 		Providers: map[string]Provider{"oai": {OpenAIBaseURL: fwdUp.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
-	fp := NewProxy(fwdCfg)
+	fp := newTestProxy(t, fwdCfg)
 	fp.providers["oai"] = &testProv{key: "k"}
 	fpx := httptest.NewServer(http.HandlerFunc(fp.handler))
 	defer fpx.Close()
@@ -474,7 +474,7 @@ func TestForward_Convert_StreamingCountsTokens(t *testing.T) {
 		Providers: map[string]Provider{"ant": {AnthropicBaseURL: revUp.URL, Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "ant", Model: "claude", Protocol: "anthropic"}}},
 	}
-	rp := NewProxy(revCfg)
+	rp := newTestProxy(t, revCfg)
 	rp.providers["ant"] = &testProv{key: "k"}
 	rpx := httptest.NewServer(http.HandlerFunc(rp.handler))
 	defer rpx.Close()
