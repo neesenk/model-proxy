@@ -195,7 +195,10 @@ routes:
 # scheduling:
 #   circuit_threshold: 3 # (default 3) consecutive failover-eligible failures -> open circuit
 #   circuit_cooldown: 10m # (default 10m) circuit open duration, then half-open (1 probe)
-#   rate_limit_backoff: 60s # (default 60s) 429 with no Retry-After: skip this long, then probe
+#   rate_limit_backoff: 60s # (default 60s) transient 429 with no reset hint/Retry-After: skip this long, then probe
+#   quota_cooldown: 1h # (default 1h) 429 classified quota-exhausted (balance/plan window) with no reset hint
+#   model_lockout: 10m # (default 10m) model-level failure (404 / model-denied / empty 200): lock (provider,model)
+#   retry_wait: 10s # (default 10s; "0" disables) all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×)
 #   upstream_timeout: 30s # (default 30s) per-upstream-request timeout
 #   sticky_dwell: 10m # (default 10m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m # (default 5m) background quota poll cadence

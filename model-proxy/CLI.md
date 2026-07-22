@@ -1,6 +1,6 @@
 # CLI 契约（命令行逻辑 + 信息展示契约）
 
-本文档是 model-proxy CLI 的**对外行为契约**：每个子命令做什么、stdout/stderr 的精确格式与文案、退出码。`AGENTS.md` 的「CLI 命令」一节是速查表，本文档是精确规范。
+本文档是 model-proxy CLI 的**唯一对外行为契约**：每个子命令做什么、stdout/stderr 的精确格式与文案、退出码。根 `AGENTS.md` 只负责把 CLI 修改路由到本文档，不再维护重复命令表。
 
 > **变更控制**：本文档记录的 stdout/stderr 格式、文案、退出码是**稳定契约**，脚本和用户依赖它们。**修改这些契约前必须先与用户确认**（见 `CLAUDE.md` 的对应指令）。新增字段/列允许追加（向后兼容），但不得改动既有行的格式或删改既有文案。契约改动需同步更新本文档 + 相关测试（`*_test.go` 里的 `strings.Contains` 断言）。
 
@@ -552,7 +552,7 @@ model-proxy  v<VERSION> · <UPTIME> · <LISTEN>
   PROVIDER          HEALTH        REQS  FAILOVERS   429  FAILURES    LAT   TTFT  LAST
   <NAME(16)>  <HEALTH(13)>  <reqs(8)>  <failover(9)>  <429(5)>  <fail(8)>  <lat(6)>  <ttft(6)>  <CLOCK>
 ```
-`HEALTH` ∈ `available`(绿) / `circuit open`(红) / `half-open`(红) / `rate-limited`(黄) / `unavailable`(dim)。`LAT`/`TTFT` = 平均总时延/首字节时延（`renderAvgMs`，无样本显示 `—`）。`LAST` = `formatClock(LastRequestAt)`。
+`HEALTH` ∈ `available`(绿) / `circuit open`(红) / `half-open`(红) / `rate-limited`(黄) / `rl:quota`(黄) / `rl:daily`(黄) / `unavailable`(dim)（`rl:*` 是 429 分类为配额耗尽/日配额的限频，含冷却倒计时语义同 `rate-limited`）。`LAT`/`TTFT` = 平均总时延/首字节时延（`renderAvgMs`，无样本显示 `—`）。`LAST` = `formatClock(LastRequestAt)`。
 
 **Schedule (N route[s])**（`renderSchedule`，2 空格缩进的 `renderScheduleRoutes`）— 同 §9。
 
@@ -611,6 +611,10 @@ Routes (dry-run: no live quota -> tier then priority)
         pool: <N> accounts (round-robin session-sticky; no live quota -> falls back to priority)   # 池化时
         <VIRTUAL_ID>                                                                              # 每个虚拟 id
     ⚠ no plan provider - only pay-as-you-go                                                       # 该路由无 plan provider 时
+        ↔ target protocol <P> — converts when client protocol differs; lossy: …                    # target 声明 protocol: 时
+        ⚠ reasoning-required model behind conversion — … (replay cache not implemented)           # reasoning 模型 + 协议转换时（计入 warning 数）
+        ⚠ codex speaks the OpenAI Responses API … — only Responses-speaking clients …              # codex target（线协议说明，计入 warning 数）
+        ⚠ no protocol: declared, but <ID> speaks <P> — …; add protocol: <P>                        # 缺 protocol: 且 provider 有协议 hint 时（计入 warning 数）
 
 Scheduling
   sticky_dwell=<D>  quota_poll_interval=<D>  quota_switch_margin=<N> pts  circuit=(threshold <T>, cooldown <D>)
@@ -691,6 +695,26 @@ replay <id> --to <provider> [--config PATH]
 - 上游 ≥400：`✗ <BODY_TRUNC_400>`
 
 > 影子评测（shadow，配置驱动，非 CLI）：`shadow: {<route>: {provider: <P>, model: <M>}}` 时，路由每次已交付请求会**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget），只记录（`request_id` 前缀 `shadow-`，provider 为影子 provider）不返回。在 Requests 页按 provider 过滤即可与主后端并排比较；`GET /api/requests` 另有 `shadow=only|exclude` 参数（仅影子 / 排除影子，空=全部，其它值忽略），Requests 页过滤行有对应下拉，影子行 provider 名后带 `shadow` 徽标。需 `request_log.enabled`。
+
+---
+
+## 16. `unfreeze` — 清理冻结的 provider 状态（需 daemon + web.enabled）
+
+```
+unfreeze [provider] [--config PATH]
+```
+
+逻辑（`unfreeze_cmd.go` `cmdUnfreeze`）：经 `POST /api/health/reset`（`web.go` `handleHealthReset`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
+
+### stdout
+
+- 有清理：`✓ unfroze <all providers|PROVIDER>: <NAME(, NAME…)> (+<N> model lock(s))`（绿；NAME 为被清的 provider 冷却条目，无冷却仅有锁时显示 `(no provider cooldowns)`）
+- 无冻结态：`• no frozen state on <all providers|PROVIDER>`（灰）
+
+### 失败（stderr `✗ <ERR>` + exit 1）
+
+- 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
+- daemon 非 200：响应体截断 200 字符
 
 ---
 

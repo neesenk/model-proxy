@@ -167,6 +167,10 @@ model-proxy pin glm-5.2 zhipu --ttl 1h   # 硬禁 failover：zhipu 挂了就 502
 model-proxy pin                          # 列出所有 pin
 model-proxy unpin glm-5.2
 
+# 清理冻结的 provider 状态（熔断/429 冷却/模型锁），下次请求立即重试
+model-proxy unfreeze                     # 全部 provider
+model-proxy unfreeze zhipu               # 单个（池化父名 = 全部账号）
+
 # 调用统计（需 daemon + web.enabled）
 model-proxy stats                  # 最近 60min 的 per-(provider,model) 调用统计（reqs/failover/429/fail/lat/ttft/input/output）
 model-proxy stats --bucket 1h      # 按小时聚合展示
@@ -278,7 +282,7 @@ routes:
     - {provider: zhipu, model: glm-5.2, priority: 1, protocol: openai}
 ```
 
-转换是 per-target 的，同协议目标保持字节级透传不受影响。不可映射的字段（thinking 块、cache_control、server-side tools 等）会丢弃并在日志打一次性告警（不静默）。
+转换是 per-target 的，同协议目标保持字节级透传不受影响。不可映射的字段（thinking 块、cache_control、server-side tools 等）会丢弃并在日志打一次性告警（不静默）。两类配置风险会被**标记提醒**（daemon 启动/reload 日志 + `/api/status.warnings` + `doctor`/`config check`）：① 需要 reasoning 回放的模型（名字含 `reasoner`/`thinking`/`mimo`，如 Kimi k2-thinking / DeepSeek V4 thinking / MiMo）配在转换路径上——thinking/reasoning 内容被丢弃，多轮工具调用会在上游 400（回放缓存未实现，仅标记）；② **codex 的线协议说明**：codex 只讲 OpenAI Responses API（`/responses` + `input` list 体）——只有讲 Responses 的客户端（如 codex CLI）能用，anthropic/chat-completions 客户端需要尚不存在的转换（`protocol: openai` **不能**让 codex 被这类客户端使用，转换出的 chat 体会被 `Unsupported parameter: messages` 拒绝）。
 
 ## 请求感知路由
 
@@ -369,7 +373,11 @@ routes:
 每个对外模型可配多个 `provider/model` 目标。代理按下面的规则选目标、失败逐一 failover，并对持续出错的 provider 熔断，避免每请求都去撞一个挂掉的上游：
 
 - **熔断**（超时 / 5xx / 连接错误 / 401 刷新后仍失败）：连续 `circuit_threshold`（默认 3）次 → 开路 `circuit_cooldown`（默认 10m），后半开放 1 个探针请求，成功关、失败再开。开路期间该 provider 被跳过。
-- **限频跳过**（429）：按 `Retry-After` 头（秒或 HTTP 日期）跳过，没有头则用 `rate_limit_backoff`（默认 60s）。不计入熔断。覆盖 5 小时/周配额窗口和秒级频率限制——时长来自响应。
+- **限频跳过**（429，三维分类）：先采纳响应里的精确重置时间（body 文本 "reset after 2h5m"/"Resets in 164h"/RFC3339，上限 7 天），其次 `Retry-After` 头；都没有时按分类退避——日配额锁到本地次日 0 点、配额耗尽（余额/套餐窗口）等 `quota_cooldown`（默认 1h）、普通频率限制等 `rate_limit_backoff`（默认 60s）。不计入熔断。分类（transient/quota/daily）在 `serve status`（`rl:quota`/`rl:daily`）和 Web UI 健康 pill 上可见。
+- **模型级锁定**（`model_lockout`，默认 10m）：上游 404（模型被移除）、400/403「模型不可用/无权限」、空 200（`Content-Length: 0` 直接 failover；流式零字节本次难免、下次 failover）→ 只锁 `(provider, model)`，**不毒化整个账号**——同账号的其他模型照常服务。单目标路由的末 target 仍把上游原始错误（404/400）原样回给客户端。
+- **400 自动剥参**：上游 400 报「Unsupported parameter: 'xxx'」时，自动把该顶层参数记入 per-provider blocklist，当次剥离重试一次、后续请求预防性剥离（`model`/`messages` 等关键字段永不剥）。
+- **冻结态持久化 + unfreeze**：限频/熔断冷却、模型锁、剥参 blocklist 随 `quota_state.json` 落盘，重启后按 config 指纹匹配恢复（防串配置）。异常边界（账号已充值、429 误分类、上游提前重置）用 `model-proxy unfreeze [provider]` 或 Web UI Providers 卡的 unfreeze 按钮立即解冻重试。
+- **全冷却等待重试**（`retry_wait`，默认 10s，`"0"` 关闭）：当路由的**所有**目标都在冷却（限频/熔断）且最早到期 ≤ 预算时，代理静默等到期后整体重试，最多 2 次——代替立即报错让客户端走自己的重试循环；某目标在调度和终局之间恢复但本轮未被试，则**零等待立即重排**一次（仍在 2 次预算内）；客户端断开立即中止。重试耗尽或冷却超预算时按**跨轮失败类别**给出诚实终局：**纯限频 → 429 + `Retry-After`**，含硬失败/熔断成分 → 502（`x-mp-force-provider` 一次性覆盖不参与等待）。
 - **粘性驻留**（`sticky_dwell`，默认 10m）：每个路由「停」在一个 provider 上，在驻留窗口内优先用它（保 prompt cache，不为已恢复的高优先 provider 频繁回切）；只有它熔断/限频或驻留到期才换。10m ≈ 2× 缓存 TTL（~5m）：够保住活跃会话缓存、扛过短暂抖动，又能在有限时间内回到首选 provider。
 - **上游超时**（`upstream_timeout`，默认 30s）：每个上游请求带超时，挂起的上游会快速失败进入熔断/failover，而不是无限拖住请求。
 
@@ -378,6 +386,9 @@ scheduling:
   circuit_threshold: 3
   circuit_cooldown: 10m
   rate_limit_backoff: 60s
+  quota_cooldown: 1h          # 429 配额耗尽（无重置提示时）
+  model_lockout: 10m          # 模型级失败锁定时长
+  retry_wait: 10s             # 全冷却时等待重试预算（"0" 关闭）
   upstream_timeout: 30s
   sticky_dwell: 10m
   quota_poll_interval: 5m   # 后台 Quota() 轮询周期

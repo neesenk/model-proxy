@@ -1,0 +1,24 @@
+# 有意的失败与路由行为
+
+这些行为容易在评审中被误认为 bug。修改前必须同时检查实现中的 `INTENTIONAL` 注释和 `docs/architecture/routing-and-failure.md`。
+
+共同原则：客户端通常是无人值守 agent，明确失败并允许重试优于静默返回不可用结果。
+
+## 决策
+
+1. **空 200 视为模型失败**：LLM 端点没有合法的空成功响应，部分逆向网关会在过载时返回空 200。
+2. **404 failover 并锁模型**：proxy 只转发已知 LLM 路径，404 表示模型或上游路径不可用。
+3. **400/403 model-denied failover**：只有保守命中模型不可用语义才 failover；普通 4xx 原样 commit。
+4. **Unsupported parameter 自动剥离一次**：只处理顶层字段，受 never-strip 白名单保护，并按 `(provider, model)` 学习。
+5. **daily/quota 429 使用长冷却**：body reset hint 始终优先；没有 hint 时 daily 到午夜、quota 默认 1h；`unfreeze` 是人工逃生口。
+6. **冻结态恢复需要 config fingerprint**：防止不同配置或测试二进制把同名 provider 的旧状态恢复到当前实例。
+7. **最后一个 target 原样 commit 上游错误**：保留真实 404/400 信息，而不是统一改写成 502；学习到的模型锁仍保留。
+8. **Pin 是硬禁 failover**：即使 pinned provider 已熔断，仍返回失败，不自动逃到其他 provider。
+9. **请求感知二次 schedule 为空时回落原目标**：宁可尝试可能不匹配的目标，也不允许零尝试 502。
+
+## 修改要求
+
+- 改变任一决策必须同步更新本文件、实现注释和回归测试。
+- 扩大错误字符串匹配范围时必须增加至少一个正例和一个相邻语义负例。
+- 新的自动请求改写必须说明作用域、次数上限、never-mutate 字段和可见日志。
+
