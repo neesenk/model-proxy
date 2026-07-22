@@ -20,6 +20,15 @@ func TestClassify429(t *testing.T) {
 		{`{"msg":"每日限额已达上限"}`, rlDaily},
 		{`{"error":"rate limit reached, retry after 20s"}`, rlTransient},
 		{`{"error":"too many requests"}`, rlTransient},
+		// qwen-plan (Token Plan 个人版): "Allocated quota exceeded" = 5h/7d window
+		// exhausted (rlQuota — matches "quota exceeded"); "Requests rate limit
+		// exceeded" = concurrency rate-cap (rlTransient). No failclass code change.
+		{`{"code":"ArrearQuotaExceeded","message":"Allocated quota exceeded"}`, rlQuota},
+		{`{"message":"Requests rate limit exceeded"}`, rlTransient},
+		// Mixed case: matching is case-insensitive (body is lowercased first).
+		{`{"error":{"code":"Insufficient_Quota","message":"You Exceeded Your Current Quota"}}`, rlQuota},
+		{`{"error":"Daily Quota Exhausted"}`, rlDaily},
+		{`{"error":"Too Many Requests"}`, rlTransient},
 		{``, rlTransient},
 	}
 	for _, c := range cases {
@@ -85,6 +94,7 @@ func TestIsModelDenied(t *testing.T) {
 		{403, `{"error":"You do not have access to model glm-x"}`, true},
 		{400, `{"error":"model is not available in your region"}`, true},
 		{400, `{"msg":"模型不存在"}`, true},
+		{400, `{"error":"The Model 'gpt-x' Does Not Exist"}`, true}, // mixed case: matching is case-insensitive
 		{400, `{"error":"invalid api key"}`, false},
 		{400, `{"error":"max_tokens is too large"}`, false},
 		{400, ``, false},
