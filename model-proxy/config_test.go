@@ -209,6 +209,15 @@ func TestValidate_AcceptsZcodeProviderID(t *testing.T) {
 	}
 }
 
+func TestValidate_AcceptsQwenPlanProviderID(t *testing.T) {
+	c := &Config{Listen: "127.0.0.1:8787", Providers: map[string]Provider{
+		"qwen-plan": {Provider: "qwen-plan", OpenAIBaseURL: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"},
+	}}
+	if err := c.validate(); err != nil {
+		t.Errorf("qwen-plan provider_id rejected: %v", err)
+	}
+}
+
 // TestConfig_ValidateShadowErrors: shadow validation (config.go validate) —
 // each shadow entry must reference a real route + provider and a known
 // protocol; the global sample rate must be in [0,1] and max_concurrent >= 0.
@@ -396,6 +405,19 @@ func TestProvider_PeakMultiplier(t *testing.T) {
 	}
 	if got := p.peakMultiplier(at(13, 0)); got != 1 {
 		t.Errorf("13:00 (no segment) mult=%v, want 1", got)
+	}
+	// Window edges: start inclusive, end exclusive.
+	if got := p.peakMultiplier(at(9, 0)); got != 2 {
+		t.Errorf("09:00 (window start, inclusive) mult=%v, want 2", got)
+	}
+	if got := p.peakMultiplier(at(12, 0)); got != 1 {
+		t.Errorf("12:00 (window end, exclusive) mult=%v, want 1", got)
+	}
+	if got := p.peakMultiplier(at(14, 0)); got != 3 {
+		t.Errorf("14:00 (second window start, inclusive) mult=%v, want 3", got)
+	}
+	if got := p.peakMultiplier(at(18, 0)); got != 1 {
+		t.Errorf("18:00 (second window end, exclusive) mult=%v, want 1", got)
 	}
 }
 

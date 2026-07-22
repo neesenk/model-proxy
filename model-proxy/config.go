@@ -615,14 +615,14 @@ func (c *Config) validate() error {
 			return fmt.Errorf("provider %q: set at least one of openai_base_url / anthropic_base_url", name)
 		}
 		if p.Provider == "" {
-			return fmt.Errorf("provider %q: provider_id is empty — set `provider_id:` (e.g. zhipu, aqp, codex, deepseek, volcengine)", name)
+			return fmt.Errorf("provider %q: provider_id is empty — set `provider_id:` (e.g. zhipu, aqp, codex, deepseek, volcengine, qwen-plan)", name)
 		}
 		// Check for known provider_id typos. apikey is a credential *category*
 		// (zhipu/deepseek/volcengine/kimi-code), not a registered provider_id;
 		// static is the no-login provider (auth via the per-provider `headers` map).
-		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true, "zcode": true}
+		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true, "zcode": true, "qwen-plan": true}
 		if !known[p.Provider] {
-			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static, zcode", name, p.Provider)
+			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static, zcode, qwen-plan", name, p.Provider)
 		}
 		// anthropic_base_url should NOT end with /v1 (proxy keeps client's /v1 for anthropic).
 		if p.AnthropicBaseURL != "" && (strings.HasSuffix(p.AnthropicBaseURL, "/v1") || strings.HasSuffix(p.AnthropicBaseURL, "/v1/")) {
