@@ -458,8 +458,48 @@ func TestForward_AnthropicToResponses_NonStream(t *testing.T) {
 	}
 }
 
-// TestForward_OpenAIToResponses_NonStream: a chat client (POST /v1/chat/completions)
-// hitting a protocol:responses target gets converted to /responses and back.
+// TestForward_AnthropicToResponses_AutoResolve: option B — a codex target
+// WITHOUT an explicit protocol: declaration still converts, because the forward
+// path auto-resolves the backend protocol via ProtocolHint("codex")="responses".
+// No protocol: needed on the route.
+func TestForward_AnthropicToResponses_AutoResolve(t *testing.T) {
+	var gotReq string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("backend path=%q want /responses", r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		gotReq = string(b)
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","model":"gpt-x","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		// Provider id "codex" ⇒ ProtocolHint returns "responses" (auto-resolve).
+		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: "codex"}},
+		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x"}}}, // no Protocol
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["cdx"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"gpt-x","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Backend received a Responses body (input list) — conversion auto-activated.
+	if !strings.Contains(gotReq, `"input"`) || strings.Contains(gotReq, `"messages"`) {
+		t.Errorf("auto-resolve did not convert to responses; backend got: %s", gotReq)
+	}
+	if !strings.Contains(string(body), `"type":"message"`) {
+		t.Errorf("client did not get an anthropic response: %s", body)
+	}
+}
 func TestForward_OpenAIToResponses_NonStream(t *testing.T) {
 	var gotReq string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

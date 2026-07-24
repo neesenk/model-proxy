@@ -33,13 +33,15 @@ func reasoningReplayModel(model string) bool {
 // configRoutingWarnings inspects expanded (explicit ∪ implicit) routes for:
 //
 //  1. reasoning-replay models behind protocol conversion (target declares
-//     protocol:, so clients of the other protocol convert): the converter
-//     currently DROPS thinking/reasoning content — multi-turn tool
+//     protocol:, so clients of the other protocol convert): the anthropic↔chat
+//     converter currently DROPS thinking/reasoning content — multi-turn tool
 //     conversations will hard-400 upstream. Marker only until the reasoning
 //     replay cache exists (#9).
-//  2. explicit targets missing a protocol declaration on a provider whose
-//     wire protocol differs (provider.ProtocolHint): clients of the other
-//     protocol send malformed bodies.
+//
+// A target on a provider whose native wire differs from the client's but without
+// an explicit protocol: declaration (e.g. codex→responses) does NOT warn: the
+// forward path auto-resolves it via resolvedBackendProto/ProtocolHint, so it
+// converts without user action.
 func configRoutingWarnings(cfg *Config, expanded map[string][]RouteTarget) []string {
 	var out []string
 	routes := make([]string, 0, len(expanded))
@@ -69,10 +71,11 @@ func configRoutingWarnings(cfg *Config, expanded map[string][]RouteTarget) []str
 				}
 				continue
 			}
-			if hint := provider.ProtocolHint(provID, t.Model); hint != "" {
-				out = append(out, fmt.Sprintf("route %q target %s/%s: no protocol: declared, but %s speaks %s — clients of the other protocol will send malformed bodies; add protocol: %s",
-					exposed, t.Provider, t.Model, provID, hint, hint))
-			}
+			// t.Protocol == "": the forward path auto-resolves the backend
+			// protocol via ProtocolHint (resolvedBackendProto), so a target on a
+			// provider whose native wire differs from the client's (codex→
+			// responses) converts without an explicit protocol: declaration. No
+			// warning needed.
 		}
 	}
 	return out

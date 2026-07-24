@@ -41,10 +41,10 @@ func TestImplicitRoute_ProtocolHintFilled(t *testing.T) {
 	}
 }
 
-// TestConfigRoutingWarnings: the marker classes fire precisely — (1)
-// reasoning-replay model behind a declared protocol conversion, (2) an explicit
-// codex target missing its protocol: declaration (now a "add protocol: responses"
-// nudge, since codex is convertible when declared).
+// TestConfigRoutingWarnings: the reasoning-replay marker fires precisely for a
+// reasoning model behind a declared protocol conversion. A codex target WITHOUT
+// protocol: does NOT warn — the forward path auto-resolves it to responses
+// (resolvedBackendProto/ProtocolHint), so it converts without user action.
 func TestConfigRoutingWarnings(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"codex": {Provider: "codex", OpenAIBaseURL: "https://x"},
@@ -53,7 +53,7 @@ func TestConfigRoutingWarnings(t *testing.T) {
 	expanded := map[string][]RouteTarget{
 		"k2":        {{Provider: "aqp", Model: "kimi-k2-thinking", Protocol: "openai"}},
 		"plain":     {{Provider: "aqp", Model: "glm-5", Protocol: "openai"}},
-		"no-proto":  {{Provider: "codex", Model: "gpt-5.6"}},
+		"no-proto":  {{Provider: "codex", Model: "gpt-5.6"}}, // auto-resolves → no warning
 		"reason-ok": {{Provider: "aqp", Model: "deepseek-reasoner"}}, // no conversion → no warning
 	}
 	warns := configRoutingWarnings(cfg, expanded)
@@ -61,14 +61,14 @@ func TestConfigRoutingWarnings(t *testing.T) {
 	if !strings.Contains(joined, `route "k2"`) || !strings.Contains(joined, "reasoning-required") {
 		t.Errorf("missing reasoning marker, warns = %v", warns)
 	}
-	if !strings.Contains(joined, `route "no-proto"`) || !strings.Contains(joined, "add protocol: responses") {
-		t.Errorf("missing codex add-protocol nudge, warns = %v", warns)
+	if strings.Contains(joined, `route "no-proto"`) {
+		t.Errorf("codex auto-resolves (no protocol: needed) — must NOT warn, warns = %v", warns)
 	}
 	if strings.Contains(joined, `route "plain"`) || strings.Contains(joined, `route "reason-ok"`) {
 		t.Errorf("false positive, warns = %v", warns)
 	}
-	if len(warns) != 2 {
-		t.Errorf("len(warns) = %d, want 2: %v", len(warns), warns)
+	if len(warns) != 1 {
+		t.Errorf("len(warns) = %d, want 1 (only the k2 reasoning marker; codex auto-resolves): %v", len(warns), warns)
 	}
 }
 

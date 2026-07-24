@@ -16,7 +16,7 @@
 
 转换器为直连 pairwise（`convert.go` 的 anthropic↔openai 不动；`convert_responses.go` 新增 4 方向 × {请求, 响应, 流式}）。`needsConversion` 对任意两个不同的已知协议返回 true；未知协议值 fail-safe 不转换。
 
-Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`：隐式路由自动声明 `responses`，显式路由需用户写 `protocol: responses`（缺省时 `configRoutingWarnings` 提示 "add protocol: responses"）。codex 不再带 `WireProtocolNote`（已可转换）。 Responses 转换无状态：丢弃 `previous_response_id`，历史全部靠 `input` 列表显式携带（等价于 messages）。
+Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。codex 不再带 `WireProtocolNote`、不再告警。 Responses 转换无状态：丢弃 `previous_response_id`，历史全部靠 `input` 列表显式携带（等价于 messages）。
 
 ## 请求映射（Responses 方向）
 
@@ -106,5 +106,5 @@ reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔opena
 - 转换失败发生在 commit 前。
 - logger/cache 捕获客户端协议而非上游协议。
 - responses 方向：4 个请求 + 4 个响应 + 文本/工具流式转换（`convert_responses_test.go`），以及 anthropic/chat 客户端经 `protocol:responses` 目标的端到端（`TestForward_*ToResponses_NonStream`）。
-- codex 路由：`ProtocolHint("codex")=="responses"`、缺 protocol 的显式路由提示 "add protocol: responses"（不再生成 Chat Completions hint、不再带 WireProtocolNote）。
+- codex 路由：`ProtocolHint("codex")=="responses"`,转发路径经 `resolvedBackendProto` 自动回退到该 hint,所以缺 `protocol:` 的显式路由也会自动转换(不再告警、不再生成 Chat Completions hint、不再带 WireProtocolNote)。
 

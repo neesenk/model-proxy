@@ -335,10 +335,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	defer p.releaseHalfOpenSlot(m.Provider, fc.flc.generation)
 	sched := fc.cfg.Scheduling
 
-	backendProto := m.Protocol
-	if backendProto == "" {
-		backendProto = fc.proto
-	}
+	backendProto := resolvedBackendProto(m.Protocol, provCfg.Provider, m.Model, fc.proto)
 	body := srcBody
 	if m.Model != fc.calledModel {
 		body = rewriteModel(body, m.Model)
@@ -501,10 +498,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		log.Printf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
 		return false
 	}
-	backendProto := st.Protocol
-	if backendProto == "" {
-		backendProto = fc.proto
-	}
+	backendProto := resolvedBackendProto(st.Protocol, prov.Provider, st.Model, fc.proto)
 	if st.Model != fc.calledModel {
 		body = rewriteModel(body, st.Model)
 	}

@@ -874,6 +874,24 @@ func synthesizeImplicitRoutesFrom(cfg *Config, loggedIn map[string]bool) (implic
 	return implicit, warnings
 }
 
+// resolvedBackendProto determines the backend protocol for a route target (or a
+// fusion/shadow leg): the declared `protocol:`, else the provider's
+// ProtocolHint (auto-resolve — e.g. codex→responses, so a non-Responses client
+// is converted without the user declaring protocol: on every codex route), else
+// the client's protocol (byte-level passthrough). The proxy exposes all three
+// protocols (anthropic/chat/responses); a target that natively speaks only one
+// (or a subset) is bridged by conversion automatically. Used by forward,
+// fusion, and shadow so the resolution rule is one place.
+func resolvedBackendProto(declared, provID, model, clientProto string) string {
+	if declared != "" {
+		return declared
+	}
+	if hint := provider.ProtocolHint(provID, model); hint != "" {
+		return hint
+	}
+	return clientProto
+}
+
 // synthesizeImplicitRoutes derives login status then delegates to the pure core.
 func synthesizeImplicitRoutes(cfg *Config) (map[string]RouteTarget, []string) {
 	return synthesizeImplicitRoutesFrom(cfg, loggedInProviders(cfg))
@@ -1483,12 +1501,10 @@ func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provi
 		provImpl := provs[t.Provider]
 
 		// Backend protocol (#11 conversion): the target's declared protocol, else
-		// the client's. When they differ, convert the request body + route to the
-		// backend's protocol; tryTarget converts the response back.
-		backendProto := t.Protocol
-		if backendProto == "" {
-			backendProto = proto
-		}
+		// the provider's ProtocolHint (auto-resolve, e.g. codex→responses), else
+		// the client's. When it differs from the client's, convert the request
+		// body + route to the backend protocol; tryTarget converts the response back.
+		backendProto := resolvedBackendProto(t.Protocol, prov.Provider, t.Model, proto)
 		convert := needsConversion(proto, backendProto)
 
 		// Rewrite the body's model to this target's real model (per target), then
@@ -2178,12 +2194,10 @@ func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow 
 		log.Printf("[shadow] %s: provider not available", shadow.Provider)
 		return
 	}
-	// Shadow backend protocol: declared, else same as the body's. Route + convert
-	// accordingly so the shadow gets a request in the protocol IT speaks.
-	shadowProto := shadow.Protocol
-	if shadowProto == "" {
-		shadowProto = bodyProto
-	}
+	// Shadow backend protocol: declared, else the provider's ProtocolHint
+	// (auto-resolve, e.g. codex→responses), else same as the body's. Route +
+	// convert accordingly so the shadow gets a request in the protocol IT speaks.
+	shadowProto := resolvedBackendProto(shadow.Protocol, provCfg.Provider, shadow.Model, bodyProto)
 	sbody := reqBody
 	if needsConversion(bodyProto, shadowProto) {
 		cb, err := convertRequest(reqBody, bodyProto, shadowProto)
