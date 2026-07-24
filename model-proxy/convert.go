@@ -29,14 +29,23 @@ import (
 // (bash/edit/...) are ordinary function tools and convert normally.
 
 // needsConversion reports whether a client protocol and a target's declared
-// backend protocol differ (and thus conversion applies). Either empty = "same as
-// client" (no conversion).
+// backend protocol differ (and thus conversion applies). Any two distinct
+// protocols among {anthropic, openai-chat, responses} need conversion; either
+// empty = "same as client" (no conversion). Unknown protocols (shouldn't occur —
+// validate rejects them) are treated as non-convertible (passthrough) so a bad
+// value never triggers a no-op conversion path.
 func needsConversion(clientProto, targetProto string) bool {
 	if targetProto == "" || targetProto == clientProto {
 		return false
 	}
-	return (clientProto == "anthropic" && targetProto == "openai") ||
-		(clientProto == "openai" && targetProto == "anthropic")
+	for _, p := range []string{clientProto, targetProto} {
+		switch p {
+		case "anthropic", "openai", "responses":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // convertWarn logs a conversion warning once per process per message (rate-limited
@@ -529,15 +538,13 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parse openai request: %w", err)
 	}
 	// This converter handles ONLY Chat Completions (`messages`). The OpenAI
-	// Responses API (/v1/responses) carries its payload in `input` (a list) and
-	// is labeled the same "openai" protocol, so a cross-protocol route feeds a
-	// Responses body in here. Rather than read only `messages`, find none, and
-	// silently emit an empty-messages Anthropic request (dropping the whole
-	// prompt), fail closed so the proxy skips the target. Per
-	// docs/architecture/protocol-conversion.md the `openai` flavor is Chat
-	// Completions, not Responses; real Responses↔Anthropic conversion is unimplemented.
+	// Responses API (/v1/responses) is now its own "responses" protocol with
+	// dedicated converters in convert_responses.go, so a Responses body should
+	// never reach here via the dispatch. Keep this `input` guard as a fail-closed
+	// defense: if a chat-completions body is missing `messages` but carries an
+	// `input` list, fail rather than silently emit an empty-messages request.
 	if _, hasInput := src["input"]; hasInput {
-		return nil, fmt.Errorf("openai→anthropic conversion supports only Chat Completions (messages); got a Responses-style `input` body — not convertible")
+		return nil, fmt.Errorf("openai→anthropic conversion supports only Chat Completions (messages); got a Responses-style `input` body — route it as protocol: responses instead")
 	}
 	out := map[string]any{}
 	for _, k := range []string{"model", "temperature", "top_p"} {
@@ -693,10 +700,21 @@ func convertRequest(body []byte, clientProto, targetProto string) ([]byte, error
 	if !needsConversion(clientProto, targetProto) {
 		return body, nil
 	}
-	if clientProto == "anthropic" && targetProto == "openai" {
+	switch clientProto + "->" + targetProto {
+	case "anthropic->openai":
 		return convertAnthropicRequestToOpenAI(body)
+	case "openai->anthropic":
+		return convertOpenAIRequestToAnthropic(body)
+	case "anthropic->responses":
+		return convertAnthropicRequestToResponses(body)
+	case "openai->responses":
+		return convertOpenAIRequestToResponses(body)
+	case "responses->anthropic":
+		return convertResponsesRequestToAnthropic(body)
+	case "responses->openai":
+		return convertResponsesRequestToOpenAI(body)
 	}
-	return convertOpenAIRequestToAnthropic(body)
+	return body, nil
 }
 
 // --- response (non-streaming) ---
@@ -903,14 +921,29 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 
 // convertResponse converts a non-streaming response body from the target protocol
 // back to the client protocol.
+// convertResponse converts a BACKEND response body (in targetProto) back into the
+// CLIENT protocol (clientProto). The conversion direction is target→client (the
+// reverse of convertRequest), so the function chosen is the one named for that
+// direction, NOT the client->target key.
 func convertResponse(body []byte, clientProto, targetProto string) ([]byte, error) {
 	if !needsConversion(clientProto, targetProto) {
 		return body, nil
 	}
-	if targetProto == "openai" && clientProto == "anthropic" {
+	switch clientProto + "->" + targetProto {
+	case "anthropic->openai": // backend openai → client anthropic
 		return convertOpenAIResponseToAnthropic(body)
+	case "openai->anthropic": // backend anthropic → client openai
+		return convertAnthropicResponseToOpenAI(body)
+	case "anthropic->responses": // backend responses → client anthropic
+		return convertResponsesToAnthropic(body)
+	case "openai->responses": // backend responses → client openai
+		return convertResponsesToOpenAI(body)
+	case "responses->anthropic": // backend anthropic → client responses
+		return convertAnthropicResponseToResponses(body)
+	case "responses->openai": // backend openai → client responses
+		return convertOpenAIResponseToResponses(body)
 	}
-	return convertAnthropicResponseToOpenAI(body)
+	return body, nil
 }
 
 // --- streaming: openai chat chunk → anthropic message events ---
@@ -1411,17 +1444,34 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 // backendPath returns the upstream request path for a backend protocol (used when
 // converting — the path follows the BACKEND's protocol, not the client's).
 func backendPath(backendProto string) string {
-	if backendProto == "anthropic" {
+	switch backendProto {
+	case "anthropic":
 		return "/v1/messages"
+	case "responses":
+		return "/responses"
+	default: // "openai" (chat completions)
+		return "/chat/completions"
 	}
-	return "/chat/completions"
 }
 
 // convertSSEReader wraps an upstream SSE body reader with the right streaming
-// transformer for the conversion direction. Caller has verified needsConversion.
+// transformer for the conversion direction. The transformer reads the BACKEND
+// stream (targetProto) and emits the CLIENT stream (clientProto); caller has
+// verified needsConversion.
 func convertSSEReader(r io.Reader, clientProto, targetProto, model string) io.Reader {
-	if targetProto == "openai" && clientProto == "anthropic" {
+	switch targetProto + "->" + clientProto {
+	case "openai->anthropic":
 		return newOpenAIToAnthropicSSE(r, model)
+	case "anthropic->openai":
+		return newAnthropicToOpenAISSE(r, model)
+	case "responses->anthropic":
+		return newResponsesToAnthropicSSE(r, model)
+	case "responses->openai":
+		return newResponsesToOpenAISSE(r, model)
+	case "anthropic->responses":
+		return newAnthropicToResponsesSSE(r, model)
+	case "openai->responses":
+		return newOpenAIToResponsesSSE(r, model)
 	}
-	return newAnthropicToOpenAISSE(r, model)
+	return r
 }

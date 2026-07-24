@@ -773,8 +773,8 @@ func TestForward_RequestLog_CapturesBodies_NonSSE(t *testing.T) {
 	if r.Provider != "aqp" || r.CalledModel != "glm-5.2" || r.UpstreamModel != "glm-5.2" {
 		t.Errorf("logged Provider/Models = %q/%q/%q, want aqp/glm-5.2/glm-5.2", r.Provider, r.CalledModel, r.UpstreamModel)
 	}
-	if r.Protocol != "openai" {
-		t.Errorf("logged Protocol = %q, want openai", r.Protocol)
+	if r.Protocol != "responses" {
+		t.Errorf("logged Protocol = %q, want responses (/v1/responses path)", r.Protocol)
 	}
 	if r.RequestID == "" {
 		t.Errorf("logged RequestID is empty, want a non-empty id")

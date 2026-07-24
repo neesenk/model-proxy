@@ -8,33 +8,34 @@ package provider
 // ProtocolHint returns the protocol an implicit/explicit route target should
 // declare for this provider's model, or "" when the provider speaks whatever
 // the client speaks (no hint needed — the common case). Filled into implicit
-// routes by the daemon and surfaced by doctor/config check when an explicit
-// target is missing the declaration.
+// routes by the daemon (proxy.go / main.go) and surfaced by doctor/config check
+// when an explicit target is missing the declaration.
 //
 // `model` is accepted for future per-model rules (e.g. a suffix that forces a
 // different API shape on an otherwise uniform provider); no provider needs it
 // yet.
 //
-// NOTE: codex was REMOVED from this table (it used to hint "openai"). The hint
-// was wrong: our protocol converter produces CHAT COMPLETIONS bodies, which
-// codex's Responses-only backend rejects ("Unsupported parameter: messages") —
-// the hint turned an obvious failure into a misleading one. See
-// WireProtocolNote for the honest marker.
+// codex speaks the OpenAI Responses API, NOT chat completions. It is hinted
+// "responses" so an anthropic/chat client reaching a codex target is converted
+// to a Responses body (convert_responses.go) rather than passthrough'd into a
+// body codex rejects ("Unsupported parameter: messages"). This hint is only
+// correct because a real Responses converter exists; without it the hint would
+// turn an obvious failure into a misleading one (see git history).
 func ProtocolHint(providerID, model string) string {
 	_ = model
+	switch providerID {
+	case "codex":
+		return "responses"
+	}
 	return ""
 }
 
-// WireProtocolNote describes a provider whose wire protocol our 2-value
-// protocol system (anthropic / openai-chat) cannot express — emitted as an
-// honest marker ("this client family can't be served") instead of a wrong
-// conversion hint. "" when the provider's wire is covered by the 2-value
-// system.
+// WireProtocolNote describes a provider whose wire protocol our protocol system
+// cannot express AND cannot convert to — emitted as an honest marker ("this
+// client family can't be served") instead of a wrong conversion hint. "" when
+// the provider's wire is covered (passthrough or conversion). codex is now
+// covered (Responses converter), so it no longer carries a note.
 func WireProtocolNote(providerID string) string {
-	switch providerID {
-	case "codex":
-		return "codex speaks the OpenAI Responses API (/responses, input-list body) — only Responses-speaking clients (e.g. codex CLI) can use it; anthropic / chat-completions clients would need a conversion that does not exist yet"
-	default:
-		return ""
-	}
+	_ = providerID
+	return ""
 }

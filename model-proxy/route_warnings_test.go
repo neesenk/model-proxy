@@ -7,32 +7,34 @@ import (
 	"model-proxy/provider"
 )
 
-// TestProtocolHint: no provider currently hints (codex's wrong "openai" hint
-// was retracted); codex instead carries the honest wire-protocol note.
+// TestProtocolHint: codex hints "responses" (it speaks the OpenAI Responses API,
+// and a real converter now exists); no other provider hints. No provider carries
+// a WireProtocolNote today (codex is now convertible, not "unconvertible").
 func TestProtocolHint(t *testing.T) {
-	for _, id := range []string{"codex", "zhipu", "deepseek", "volcengine", "aqp", "kimi-code", "static", ""} {
+	if got := provider.ProtocolHint("codex", "gpt-5.6"); got != "responses" {
+		t.Errorf("ProtocolHint(codex) = %q, want \"responses\"", got)
+	}
+	for _, id := range []string{"zhipu", "deepseek", "volcengine", "aqp", "kimi-code", "static", ""} {
 		if got := provider.ProtocolHint(id, "m"); got != "" {
 			t.Errorf("ProtocolHint(%q) = %q, want \"\"", id, got)
 		}
 	}
-	if note := provider.WireProtocolNote("codex"); !strings.Contains(note, "Responses") {
-		t.Errorf("codex wire note = %q, want a Responses-API marker", note)
-	}
-	if note := provider.WireProtocolNote("zhipu"); note != "" {
-		t.Errorf("zhipu wire note = %q, want \"\"", note)
+	if note := provider.WireProtocolNote("codex"); note != "" {
+		t.Errorf("codex wire note = %q, want \"\" (codex is now convertible to responses)", note)
 	}
 }
 
-// TestImplicitRoute_ProtocolHintFilled: implicit routes get no protocol today
-// (codex's hint was retracted — a chat conversion does not make codex usable).
+// TestImplicitRoute_ProtocolHintFilled: implicit codex routes auto-declare
+// protocol:"responses" (so an anthropic/chat client is converted, not left to
+// send a body codex rejects); non-codex providers stay unset.
 func TestImplicitRoute_ProtocolHintFilled(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"codex": {Provider: "codex", OpenAIBaseURL: "https://x", Models: []string{"gpt-5.6"}},
 		"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://y", Models: []string{"glm-5"}},
 	}}
 	implicit, _ := synthesizeImplicitRoutesFrom(cfg, map[string]bool{"codex": true, "zhipu": true})
-	if got := implicit["gpt-5.6"].Protocol; got != "" {
-		t.Errorf("codex implicit protocol = %q, want unset (no valid hint)", got)
+	if got := implicit["gpt-5.6"].Protocol; got != "responses" {
+		t.Errorf("codex implicit protocol = %q, want \"responses\"", got)
 	}
 	if got := implicit["glm-5"].Protocol; got != "" {
 		t.Errorf("zhipu implicit protocol = %q, want unset", got)
@@ -40,8 +42,9 @@ func TestImplicitRoute_ProtocolHintFilled(t *testing.T) {
 }
 
 // TestConfigRoutingWarnings: the marker classes fire precisely — (1)
-// reasoning-replay model behind a declared protocol conversion, (2) the codex
-// wire-protocol note (honest marker, not a conversion suggestion).
+// reasoning-replay model behind a declared protocol conversion, (2) an explicit
+// codex target missing its protocol: declaration (now a "add protocol: responses"
+// nudge, since codex is convertible when declared).
 func TestConfigRoutingWarnings(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"codex": {Provider: "codex", OpenAIBaseURL: "https://x"},
@@ -58,11 +61,8 @@ func TestConfigRoutingWarnings(t *testing.T) {
 	if !strings.Contains(joined, `route "k2"`) || !strings.Contains(joined, "reasoning-required") {
 		t.Errorf("missing reasoning marker, warns = %v", warns)
 	}
-	if !strings.Contains(joined, `route "no-proto"`) || !strings.Contains(joined, "Responses") {
-		t.Errorf("missing codex wire note, warns = %v", warns)
-	}
-	if strings.Contains(joined, "add protocol:") {
-		t.Errorf("the retracted conversion suggestion must not appear, warns = %v", warns)
+	if !strings.Contains(joined, `route "no-proto"`) || !strings.Contains(joined, "add protocol: responses") {
+		t.Errorf("missing codex add-protocol nudge, warns = %v", warns)
 	}
 	if strings.Contains(joined, `route "plain"`) || strings.Contains(joined, `route "reason-ok"`) {
 		t.Errorf("false positive, warns = %v", warns)

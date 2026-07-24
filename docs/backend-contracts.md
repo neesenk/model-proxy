@@ -35,6 +35,8 @@ CQP key 长效，缓存 50min。SSO cookie 值已含 `SSO_C=` 前缀，直接作
 | models | GET | OAuth Bearer | `/backend-api/codex/models?client_version=<ver>`，`{"models":[{slug,visibility,...}]}`，仅取 `visibility=="list"`；`client_version` 决定可见模型 |
 | headers | — | — | `originator: codex_cli_rs` 必须（否则 403）；`ChatGPT-Account-Id` 从 id_token JWT 解析 |
 
+**协议归属**：codex 是 `responses` 协议（`/v1/responses`，`input` list）。`ProtocolHint("codex") = "responses"`——隐式路由自动声明 `responses`，显式路由需写 `protocol: responses`（缺省时 `configRoutingWarnings` 提示 "add protocol: responses"）。anthropic/chat 客户端经 `convert_responses.go` 的 Responses 转换器可达 codex（请求 anthropic/chat→responses，响应/流式 responses→anthropic/chat）；原生 responses 客户端（codex CLI / opencode Responses 模式）走透传。codex 不再带 `WireProtocolNote`（已可转换）。
+
 OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.com`，client_id `app_EMoamEEZ73f0CkXaXp7hrann`。`POST /api/accounts/deviceauth/usercode` → `{device_auth_id, user_code, interval}` → 用户访问 `https://auth.openai.com/codex/device` → 轮询 `POST /api/accounts/deviceauth/token`（错误码 `deviceauth_authorization_pending`/`deviceauth_slow_down`）→ `{authorization_code,...}` → `POST /oauth/token` grant_type=authorization_code → tokens。刷新：`POST /oauth/token` grant_type=refresh_token。**代理用独立 OAuth**（不读 codex CLI `~/.codex/auth.json`），避免 refresh_token 轮换竞争。
 
 ## Zhipu BigModel 契约

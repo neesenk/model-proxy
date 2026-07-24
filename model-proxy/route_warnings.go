@@ -53,10 +53,10 @@ func configRoutingWarnings(cfg *Config, expanded map[string][]RouteTarget) []str
 			if prov, ok := cfg.Providers[t.Provider]; ok {
 				provID = prov.Provider
 			}
-			// A provider whose wire protocol our 2-value system can't express
-			// (codex = OpenAI Responses): mark honestly which client families
-			// can't be served — regardless of any protocol: declaration (a chat
-			// conversion doesn't help either; codex rejects `messages`).
+			// A provider whose wire protocol our system can neither passthrough
+			// nor convert (none today — codex/Responses is now converted in
+			// convert_responses.go): mark honestly which client families can't be
+			// served. Inert until such a provider exists.
 			if note := provider.WireProtocolNote(provID); note != "" {
 				out = append(out, fmt.Sprintf("route %q target %s/%s: %s",
 					exposed, t.Provider, t.Model, note))

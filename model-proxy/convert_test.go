@@ -52,11 +52,12 @@ func TestConvertOpenAIRequestToAnthropic(t *testing.T) {
 
 // TestConvertOpenAIRequestToAnthropic_ResponsesInputFailsClosed (bug 2): the
 // OpenAI Responses API (/v1/responses) carries its payload in `input` (a list),
-// not Chat Completions' `messages`. It is labeled the same "openai" protocol, so
-// a cross-protocol route (openai→anthropic) feeds it to this chat-only
-// converter, which used to read only `messages`, find none, and silently emit an
-// empty-messages Anthropic request (dropping the whole prompt). It must instead
-// fail closed so the proxy skips the target (repo rule: conversion fail-closed).
+// not Chat Completions' `messages`. Responses is now its own "responses" protocol
+// (dispatched to convert_responses.go), so a Responses body should not reach this
+// chat-only converter via normal routing. The `input` guard remains a fail-closed
+// defense: if a chat-completions body lacks `messages` but carries `input`, fail
+// rather than silently emit an empty-messages Anthropic request (repo rule:
+// conversion fail-closed).
 func TestConvertOpenAIRequestToAnthropic_ResponsesInputFailsClosed(t *testing.T) {
 	respBody := []byte(`{"model":"gpt-x","input":[{"role":"user","content":"hi"}],"stream":true}`)
 	if out, err := convertOpenAIRequestToAnthropic(respBody); err == nil {

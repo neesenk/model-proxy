@@ -524,7 +524,8 @@ shadow:
 // TestValidate_ConversionBaseURL: a target declaring a backend protocol needs the
 // provider's matching base URL, else validate fails (the converted request would
 // have no upstream URL and 400 at runtime). protocol:anthropic → needs
-// anthropic_base_url; protocol:openai → needs openai_base_url; unknown protocol
+// anthropic_base_url; protocol:openai|responses → needs openai_base_url (responses
+// reuses the OpenAI base, e.g. codex's /responses endpoint); unknown protocol
 // → error; valid → OK.
 func TestValidate_ConversionBaseURL(t *testing.T) {
 	cases := []struct {
@@ -535,9 +536,11 @@ func TestValidate_ConversionBaseURL(t *testing.T) {
 	}{
 		{"anthropic without anthropic_base_url", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "anthropic", "anthropic_base_url"},
 		{"openai without openai_base_url", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "openai", "openai_base_url"},
-		{"unknown protocol", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "weird", `not "anthropic" or "openai"`},
+		{"responses without openai_base_url", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "responses", "openai_base_url"},
+		{"unknown protocol", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "weird", `not "anthropic", "openai", or "responses"`},
 		{"anthropic with anthropic_base_url (valid)", Provider{AnthropicBaseURL: "https://x", Provider: "static"}, "anthropic", ""},
 		{"openai with openai_base_url (valid)", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "openai", ""},
+		{"responses with openai_base_url (valid)", Provider{OpenAIBaseURL: "https://x", Provider: "static"}, "responses", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -697,9 +697,11 @@ func (c *Config) validate() error {
 				return fmt.Errorf("route %q target %d: provider %q not defined under providers: — check spelling or add the provider", exposed, i, t.Provider)
 			}
 			// Protocol conversion (#11): a target declaring protocol:anthropic
-			// needs the provider's anthropic_base_url (and protocol:openai needs
-			// openai_base_url); without it the converted request has no upstream
-			// base URL and 400s at runtime. Catch it at validate time.
+			// needs the provider's anthropic_base_url (and protocol:openai /
+			// protocol:responses need openai_base_url — responses reuses the
+			// OpenAI base, e.g. codex's openai_base_url is its /responses
+			// endpoint); without it the converted request has no upstream base
+			// URL and 400s at runtime. Catch it at validate time.
 			if t.Protocol != "" {
 				prov := c.Providers[t.Provider]
 				switch t.Protocol {
@@ -707,12 +709,12 @@ func (c *Config) validate() error {
 					if prov.AnthropicBaseURL == "" {
 						return fmt.Errorf("route %q target %d: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", exposed, i, t.Provider)
 					}
-				case "openai":
+				case "openai", "responses":
 					if prov.OpenAIBaseURL == "" {
-						return fmt.Errorf("route %q target %d: protocol:openai but provider %q has no openai_base_url — conversion needs it", exposed, i, t.Provider)
+						return fmt.Errorf("route %q target %d: protocol:%s but provider %q has no openai_base_url — conversion needs it", exposed, i, t.Protocol, t.Provider)
 					}
 				default:
-					return fmt.Errorf("route %q target %d: protocol %q is not \"anthropic\" or \"openai\"", exposed, i, t.Protocol)
+					return fmt.Errorf("route %q target %d: protocol %q is not \"anthropic\", \"openai\", or \"responses\"", exposed, i, t.Protocol)
 				}
 			}
 		}
@@ -738,8 +740,8 @@ func (c *Config) validate() error {
 		if _, ok := c.Providers[sh.Provider]; !ok {
 			return fmt.Errorf("shadow %q: provider %q not defined under providers:", route, sh.Provider)
 		}
-		if sh.Protocol != "" && sh.Protocol != "anthropic" && sh.Protocol != "openai" {
-			return fmt.Errorf("shadow %q: protocol %q invalid — use \"anthropic\" or \"openai\"", route, sh.Protocol)
+		if sh.Protocol != "" && sh.Protocol != "anthropic" && sh.Protocol != "openai" && sh.Protocol != "responses" {
+			return fmt.Errorf("shadow %q: protocol %q invalid — use \"anthropic\", \"openai\", or \"responses\"", route, sh.Protocol)
 		}
 	}
 	// Fusion validation: each recipe's panel/synthesizer reference real providers
@@ -815,25 +817,29 @@ func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
 		if prov.AnthropicBaseURL == "" {
 			return fmt.Errorf("%s: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", what, t.Provider)
 		}
-	case "openai":
+	case "openai", "responses":
 		if prov.OpenAIBaseURL == "" {
-			return fmt.Errorf("%s: protocol:openai but provider %q has no openai_base_url — conversion needs it", what, t.Provider)
+			return fmt.Errorf("%s: protocol:%s but provider %q has no openai_base_url — conversion needs it", what, t.Protocol, t.Provider)
 		}
 	default:
-		return fmt.Errorf("%s: protocol %q is not \"anthropic\" or \"openai\"", what, t.Protocol)
+		return fmt.Errorf("%s: protocol %q is not \"anthropic\", \"openai\", or \"responses\"", what, t.Protocol)
 	}
 	return nil
 }
 
-// protocolForPath returns the protocol name (anthropic|openai) for a request
-// path, or "" if no route matches.
+// protocolForPath returns the protocol name (anthropic|openai|responses) for a
+// request path, or "" if no route matches. "openai" = Chat Completions,
+// "responses" = OpenAI Responses API (/v1/responses, the codex wire). They are
+// distinct protocols: a /v1/responses body (input list) is NOT a chat body
+// (messages), so they must convert separately.
 func protocolForPath(path string) string {
 	switch {
 	case strings.HasPrefix(path, "/v1/messages"):
 		return "anthropic"
-	case strings.HasPrefix(path, "/v1/chat/completions"),
-		strings.HasPrefix(path, "/v1/responses"):
+	case strings.HasPrefix(path, "/v1/chat/completions"):
 		return "openai"
+	case strings.HasPrefix(path, "/v1/responses"):
+		return "responses"
 	}
 	return ""
 }

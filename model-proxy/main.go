@@ -927,9 +927,10 @@ func doctorWithCfg(cfg *Config) int {
 				hasPlan = true
 			}
 			fmt.Printf("    %s %s  p%d\n", pad(t.Provider, 12), cCyan(pad(tier, 13)), t.Priority)
-			// Wire-protocol note: a provider our 2-value system can't express
-			// (codex = OpenAI Responses) gets the HONEST marker — which client
-			// families can't be served — not a conversion suggestion.
+			// Wire-protocol note: a provider our protocol system can neither
+			// passthrough nor convert (none today — codex/Responses is now
+			// converted) would get the HONEST marker — which client families
+			// can't be served — not a conversion suggestion.
 			if note := provider.WireProtocolNote(prov.Provider); note != "" {
 				fmt.Printf("        %s %s\n", cYellow("⚠"), note)
 				warns++

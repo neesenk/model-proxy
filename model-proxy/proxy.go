@@ -860,8 +860,8 @@ func synthesizeImplicitRoutesFrom(cfg *Config, loggedIn map[string]bool) (implic
 		sort.Strings(provs)
 		tgt := RouteTarget{Provider: provs[0], Model: model, Priority: 1}
 		// Fill the wire-protocol hint for providers whose API shape differs from
-		// the client's (codex: openai) — without it an anthropic client would
-		// send an anthropic-shaped body to an openai-family upstream.
+		// the client's (codex: responses) — without it an anthropic/chat client
+		// would send an unconverted body to a responses-only upstream.
 		if hint := provider.ProtocolHint(cfg.Providers[provs[0]].Provider, model); hint != "" {
 			tgt.Protocol = hint
 		}
