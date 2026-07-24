@@ -13,7 +13,7 @@
 
 ## 转发契约
 
-- 同协议字节级透传；显式跨协议 target 才转换。
+- 同协议字节级透传；跨协议 target（显式声明 `protocol:`，或经 `resolvedBackendProto` 自动回退 `ProtocolHint`，如 codex→responses）才转换。
 - 上游请求必须继承客户端 context，并受 `upstream_timeout` 限制。
 - nil runtime impl、request conversion 和 response conversion 都 fail-closed。
 - 客户端断开后停止继续拉取上游流。
