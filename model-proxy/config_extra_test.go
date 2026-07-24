@@ -149,8 +149,8 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	if s.rateBackoff() != 60*time.Second {
 		t.Errorf("default rateBackoff=%v want 60s", s.rateBackoff())
 	}
-	if s.timeout() != 30*time.Second {
-		t.Errorf("default timeout=%v want 30s", s.timeout())
+	if s.timeout() != 1800*time.Second {
+		t.Errorf("default timeout=%v want 1800s", s.timeout())
 	}
 	if s.dwell() != 10*time.Minute {
 		t.Errorf("default dwell=%v want 10m", s.dwell())
@@ -170,8 +170,8 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	if bad.rateBackoff() != 60*time.Second {
 		t.Errorf("invalid rateBackoff fallback=%v want 60s", bad.rateBackoff())
 	}
-	if bad.timeout() != 30*time.Second {
-		t.Errorf("invalid timeout fallback=%v want 30s", bad.timeout())
+	if bad.timeout() != 1800*time.Second {
+		t.Errorf("invalid timeout fallback=%v want 1800s", bad.timeout())
 	}
 	if bad.dwell() != 10*time.Minute {
 		t.Errorf("invalid dwell fallback=%v want 10m", bad.dwell())

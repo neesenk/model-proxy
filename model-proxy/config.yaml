@@ -216,7 +216,7 @@ routes:
 #   quota_cooldown: 1h # (default 1h) 429 classified quota-exhausted (balance/plan window) with no reset hint
 #   model_lockout: 10m # (default 10m) model-level failure (404 / model-denied / empty 200): lock (provider,model)
 #   retry_wait: 10s # (default 10s; "0" disables) all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×)
-#   upstream_timeout: 30s # (default 30s) per-upstream-request timeout
+#   upstream_timeout: 1800s # (default 1800s) per-upstream-request timeout
 #   sticky_dwell: 10m # (default 10m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m # (default 5m) background quota poll cadence
 #   quota_switch_margin: 15 # (default 15) switch provider if another's effective remaining beats current by >= this many pct points

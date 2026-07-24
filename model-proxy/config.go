@@ -234,7 +234,7 @@ type Scheduling struct {
 	QuotaCooldown     string `yaml:"quota_cooldown"`      // 429 classified quota-exhausted with no reset hint: skip this long (default 1h; daily class locks to midnight)
 	ModelLockout      string `yaml:"model_lockout"`       // model-level failure (404 / model-denied / empty 200): lock (provider,model) this long (default 10m)
 	RetryWait         string `yaml:"retry_wait"`          // all targets cooling down: wait ≤ this for the earliest expiry and retry (≤2×) instead of an immediate error (default 10s; "0" disables)
-	UpstreamTimeout   string `yaml:"upstream_timeout"`    // per-upstream-request timeout (default 30s)
+	UpstreamTimeout   string `yaml:"upstream_timeout"`    // per-upstream-request timeout (default 1800s)
 	StickyDwell       string `yaml:"sticky_dwell"`        // min time on the chosen provider before re-evaluating (default 10m)
 	QuotaPollInterval string `yaml:"quota_poll_interval"` // background poll cadence (default 5m)
 	QuotaSwitchMargin int    `yaml:"quota_switch_margin"` // switch if another plan provider's effective remaining beats current by ≥ this many pct points (default 15)
@@ -280,7 +280,7 @@ func (s Scheduling) timeout() time.Duration {
 	if d, err := time.ParseDuration(s.UpstreamTimeout); err == nil {
 		return d
 	}
-	return 30 * time.Second
+	return 1800 * time.Second
 }
 func (s Scheduling) dwell() time.Duration {
 	if d, err := time.ParseDuration(s.StickyDwell); err == nil {
