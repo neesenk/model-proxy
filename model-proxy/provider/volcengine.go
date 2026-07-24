@@ -15,7 +15,7 @@ import (
 // protocols from one config entry:
 //   - openai_base_url (e.g. https://ark.cn-beijing.volces.com/api/plan/v3) →
 //     /chat/completions, /responses, /models — uses Authorization: Bearer.
-//   - anthropic_base_url (e.g. https://ark.cn-beijing.volces.com/api/plan/compatible)
+//   - anthropic_base_url (e.g. https://ark.cn-beijing.volces.com/api/plan)
 //     → /v1/messages (Anthropic-compatible, for Claude Code) — uses x-api-key.
 //
 // The proxy selects the upstream base by protocol (see proxy.forward). For
@@ -62,6 +62,26 @@ func (p *VolcengineProvider) FetchModels() ([]string, error) {
 		return p.cfg.FetchModelsFn()
 	}
 	return nil, fmt.Errorf("FetchModelsFn not configured")
+}
+
+// ProbeRequest returns the ANTHROPIC probe shape (/v1/messages), not baseProbe's
+// OpenAI /chat/completions. probeModelCallable selects the anthropic base URL
+// when anthropic_base_url is set (volcengine's primary path for Claude Code), so
+// the probe path MUST be anthropic — /chat/completions on the anthropic base
+// (.../api/plan/chat/completions) 404s for every model.
+func (p *VolcengineProvider) ProbeRequest(modelID string) ProbeRequest {
+	return ProbeRequest{
+		Method: http.MethodPost,
+		Path:   "/v1/messages",
+		Body:   anthropicProbeBody(modelID),
+	}
+}
+
+// ExtraHeaders sets anthropic-version on every upstream request (forward + probe).
+// The probe has no client request to inherit it from, and the anthropic-compatible
+// endpoint rejects requests without it.
+func (p *VolcengineProvider) ExtraHeaders(req *http.Request, path string) {
+	req.Header.Set("anthropic-version", "2023-06-01")
 }
 
 // volcengineModelFilterRegexps are the model-id exclusion rules applied to the

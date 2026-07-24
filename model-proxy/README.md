@@ -274,7 +274,7 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 | OpenAI | `POST /v1/responses`, `/v1/chat/completions` | provider 的同路径 |
 | 模型列表 | `GET /v1/models` | 合并 routes + 隐式路由 + claude_mapping 的模型名 |
 
-**按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。注意代理会剥掉客户端的 `/v1` 前缀，故 base URL 须自带版本段（如 `…/v1`、`…/anthropic/v1`）。
+**按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。两个协议对客户端 `/v1` 前缀的处理相反：OpenAI 协议会剥掉客户端的 `/v1`，故 `openai_base_url` 自带版本段（如 `…/v1`、`…/paas/v4`）；Anthropic 协议保留客户端的 `/v1/messages`，故 `anthropic_base_url` **不带** `/v1`（如 `…/anthropic`、`…/api/plan`）。
 
 **协议转换（opt-in）**：路由目标声明 `protocol:` 且与客户端协议不同时，代理自动做 Anthropic ↔ OpenAI 双向转换（请求 + 响应 + 流式，**tools 全链路**：`tools`/`tool_choice`/`tool_use`/`tool_result` 结构映射、流式增量事件互转、usage/cache token 透传）——比如让 Claude Code（Anthropic 协议）直连只有 OpenAI 端点的后端：
 
@@ -451,7 +451,7 @@ python3 examples/demo.py --port 15721 --protocol codex "hello" gpt-5.5
 
 ## DeepSeek（内置，双协议）
 
-DeepSeek 已内置（`provider_id: deepseek`），一个 API key 同时服务 OpenAI 与 Anthropic 协议。两个 endpoint 用 `openai_base_url`（OpenAI base）和 `anthropic_base_url`（Anthropic base，须含 `/v1`，因代理会剥掉客户端的 `/v1`）分别配置；代理按调用协议转发到对应 endpoint。默认 config 含 provider 定义但**不含 routes**——按需添加：
+DeepSeek 已内置（`provider_id: deepseek`），一个 API key 同时服务 OpenAI 与 Anthropic 协议。两个 endpoint 用 `openai_base_url`（OpenAI base）和 `anthropic_base_url`（Anthropic base，**不带 `/v1`**，代理保留客户端的 `/v1/messages`）分别配置；代理按调用协议转发到对应 endpoint。默认 config 含 provider 定义但**不含 routes**——按需添加：
 
 ```yaml
 providers:
@@ -479,14 +479,14 @@ model-proxy usage deepseek        # 查余额（is_available + 各币种 total/g
 
 ## 火山方舟 Volcengine（含 Agent Plan，双协议）
 
-火山方舟（Ark）已内置（`provider_id: volcengine`），一个 API key 同时服务 OpenAI 与 Anthropic 协议；两个 endpoint 用 `openai_base_url` 与 `anthropic_base_url` 分别配置（须含 `/v1`，代理会剥掉客户端的 `/v1`）。**Agent Plan** 套餐用独立的 plan base（`/api/plan/v3`、`/api/plan/compatible/v1`）。
+火山方舟（Ark）已内置（`provider_id: volcengine`），一个 API key 同时服务 OpenAI 与 Anthropic 协议；两个 endpoint 用 `openai_base_url`（OpenAI base，自带版本段，代理剥客户端 `/v1`）与 `anthropic_base_url`（**不带 `/v1`**，代理保留客户端 `/v1/messages`）分别配置。**Agent Plan** 套餐用独立的 plan base（OpenAI `/api/plan/v3`、Anthropic `/api/plan`）。
 
 ```yaml
 providers:
   volcengine:
     provider_id: volcengine
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
-    anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan/compatible/v1
+    anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
     usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
     models:
       - doubao-seed-1-8-251228

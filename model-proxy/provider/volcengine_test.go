@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -21,7 +22,7 @@ func newTestVolcengine(t *testing.T) *VolcengineProvider {
 func TestVolcengineRewriteRequest_NoOp(t *testing.T) {
 	p := newTestVolcengine(t)
 	for _, tc := range []struct{ url, path string }{
-		{"https://ark.cn-beijing.volces.com/api/plan/compatible/v1/messages", "/messages"},
+		{"https://ark.cn-beijing.volces.com/api/plan/v1/messages", "/messages"},
 		{"https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions", "/chat/completions"},
 	} {
 		if got, _ := p.RewriteRequest(tc.url, nil, tc.path); got != tc.url {
@@ -77,5 +78,31 @@ func TestValidateVolcengineAKSK(t *testing.T) {
 	volcengineOpenAPIBase = bad.URL
 	if err := ValidateVolcengineAKSK("AKtest", "SKtest"); err == nil {
 		t.Error("401: want error, got nil")
+	}
+}
+
+// probeModelCallable selects the anthropic base when anthropic_base_url is set, so
+// volcengine is probed over the ANTHROPIC protocol. Its ProbeRequest must return
+// the anthropic /v1/messages path + body (not baseProbe's OpenAI /chat/completions,
+// which would hit .../api/plan/chat/completions and 404 for every model).
+func TestVolcengineProbeRequest_AnthropicShape(t *testing.T) {
+	p := newTestVolcengine(t)
+	pr := p.ProbeRequest("doubao-seed-2.0-pro")
+	if pr.Method != http.MethodPost || pr.Path != "/v1/messages" {
+		t.Errorf("ProbeRequest = %+v, want POST /v1/messages (anthropic; probe uses the anthropic base)", pr)
+	}
+	if !strings.Contains(string(pr.Body), `"messages"`) || strings.Contains(string(pr.Body), `"stream"`) {
+		t.Errorf("ProbeRequest.Body not the anthropic messages shape: %s", pr.Body)
+	}
+}
+
+// The anthropic-compatible endpoint requires anthropic-version; the probe has no
+// client request to inherit it from, so the provider must set it via ExtraHeaders.
+func TestVolcengineExtraHeaders_AnthropicVersion(t *testing.T) {
+	p := newTestVolcengine(t)
+	req := httptest.NewRequest(http.MethodPost, "https://ark.cn-beijing.volces.com/api/plan/v1/messages", nil)
+	p.ExtraHeaders(req, "/v1/messages")
+	if got := req.Header.Get("anthropic-version"); got != "2023-06-01" {
+		t.Errorf("anthropic-version = %q, want 2023-06-01", got)
 	}
 }
