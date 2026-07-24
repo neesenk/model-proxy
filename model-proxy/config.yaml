@@ -46,7 +46,7 @@ providers:
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     # capabilities:                    # optional: per-model capability declaration for request-aware
     #   glm-4v-plus: [image, tools]    # routing (values: image, tools). A model listed here is
-                                       # authoritative — models.dev metadata is ignored for it.
+    # authoritative — models.dev metadata is ignored for it.
     peak_hours:
       - {window: "14:00-18:00", multiplier: 4}
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zhipu`: 5h/weekly/monthly quota + token consumption
@@ -90,11 +90,13 @@ providers:
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
+      - doubao-seed-2-1-turbo
       - doubao-seed-2.0-code
       - doubao-seed-2.0-pro
       - glm-5.2
       - kimi-k2.6
       - kimi-k2.7-code
+      - kimi-k3
       - minimax-m2.7
       - minimax-m3
   shopee:
