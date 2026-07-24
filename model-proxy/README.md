@@ -163,6 +163,7 @@ model-proxy config check           # 校验配置
 # 调度诊断
 model-proxy schedule               # 查询运行中的 daemon：每 model 当前调度到哪个 provider（GET /debug/schedule）
 model-proxy doctor                 # 离线 config 调度诊断（tier/quota/peak/shadow + dry-run 顺序 + warning）
+model-proxy doctor --live          # 实时诊断：连运行中的 daemon 回答“agent 为什么不动”（路由全灭+最早恢复时间 / pin / 配额将尽 / takeover 漂移 / 最近失败）
 
 # 临时钉住路由（排查/对比用，不改 config）
 model-proxy pin glm-5.2 zhipu --ttl 1h   # 硬禁 failover：zhipu 挂了就 502，绝不逃别家
@@ -426,7 +427,7 @@ scheduling:
 
 `Quota()` 来源：zhipu/codex/volcengine/aqp → plan tier；deepseek → pay-as-you-go。volcengine 的 `GetAFPUsage` 需 AccessKey/SecretKey（Ark API Key 调不了），未配时该 provider 退化为 `unknown`。
 
-**查看调度**：`model-proxy schedule` 查询运行中的 daemon，显示每个 model 当前调度到哪个 provider（后台接口 `GET /debug/schedule`，含 ordered 列表/sticky 状态）；`model-proxy doctor` 离线诊断 config 的调度设置（每 provider tier/quota/peak + 每路由 dry-run 顺序 + shadow 配置 + warning，不需 daemon）。
+**查看调度**：`model-proxy schedule` 查询运行中的 daemon，显示每个 model 当前调度到哪个 provider（后台接口 `GET /debug/schedule`，含 ordered 列表/sticky 状态）；`model-proxy doctor` 离线诊断 config 的调度设置（每 provider tier/quota/peak + 每路由 dry-run 顺序 + shadow 配置 + warning，不需 daemon）；agent 卡住时用 `model-proxy doctor --live` 连运行中的 daemon 做实时诊断（结论先行：路由全灭原因与最早恢复时间、pin、配额将尽、takeover 漂移、最近失败请求）。
 
 ## 添加新 Provider
 

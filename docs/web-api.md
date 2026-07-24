@@ -8,7 +8,7 @@
 
 | 方法 | 路径 | 请求 | 响应 | 备注 |
 |---|---|---|---|---|
-| GET | `/api/status` | — | `{uptime,version,listen,health{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | 锁 `p.mu`→`healthMu`→`quotaMu` 顺序不嵌套。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出） |
+| GET | `/api/status` | — | `{uptime,version,listen,health{...},model_locks{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | 锁 `p.mu`→`healthMu`→`quotaMu` 顺序不嵌套。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出）。`model_locks[provider]` = `[{model,until}]`（仅生效中的模型锁，与 health 同一 healthMu 快照，过期不输出；`doctor --live` 用它解释 route 全灭） |
 | GET | `/api/logs?tail=N` | — | `{lines:[…]}` | 读 log 文件末尾 N 行（默认 200，上限 1000）；无 log 路径 → 404 |
 | GET | `/api/config` | — | `{yaml, summary, provider_models, routes}` | 原文件 verbatim round-trip |
 | POST | `/api/config` | `{yaml}` | `{status:"reloaded"}` / 400 | `saveAndReload`：validate → backup `back/<base>.<ts>.bak` → atomicWrite → reload。校验失败不落盘；reload 失败从当次备份回滚 |

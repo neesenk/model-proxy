@@ -107,6 +107,43 @@ cache: {enabled: true, ttl: 1h}
 	}
 }
 
+// TestAPIStatusModelLocks: /api/status exposes ACTIVE model locks (provider →
+// [{model, until}]) so `doctor --live` can explain a route whose targets are
+// locked out. Expired locks are omitted — same future-only convention as
+// circuit_until / rate_limited_until.
+func TestAPIStatusModelLocks(t *testing.T) {
+	w, p := newTestWeb(t)
+	mux := http.NewServeMux()
+	w.register(mux)
+	p.recordModelFailure("zhipu", "glm-x", Scheduling{ModelLockout: "1h"})
+	p.healthMu.Lock()
+	p.modelLocks[modelLockKey{provider: "zhipu", model: "old"}] = &modelLockEntry{failures: 1, lockedUntil: time.Now().Add(-time.Minute)}
+	p.healthMu.Unlock()
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200", rec.Code)
+	}
+	var out struct {
+		ModelLocks map[string][]struct {
+			Model string `json:"model"`
+			Until string `json:"until"`
+		} `json:"model_locks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("parse status: %v", err)
+	}
+	locks := out.ModelLocks["zhipu"]
+	if len(locks) != 1 || locks[0].Model != "glm-x" {
+		t.Fatalf("model_locks = %+v, want exactly the active (zhipu, glm-x) lock", out.ModelLocks)
+	}
+	until, err := time.Parse(time.RFC3339, locks[0].Until)
+	if err != nil || !time.Now().Before(until) {
+		t.Errorf("until = %q, want a future RFC3339 time", locks[0].Until)
+	}
+}
+
 func TestAPIStatus_IncludesRouteWarnings(t *testing.T) {
 	// Two logged-in apikey providers share an unrated model → ambiguity warning.
 	home := t.TempDir()

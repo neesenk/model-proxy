@@ -151,12 +151,18 @@ Subcommands:
   request to <provider> (no effect on other traffic). The new backend's response
   is written to stdout. Requires a running daemon + request_log.enabled.`,
 
-	"doctor": `doctor [--config PATH]
+	"doctor": `doctor [--live] [--config PATH]
 
   Offline scheduling diagnostic from config alone (no daemon needed): per-provider
   tier/quota source/peak_hours, per-route dry-run order (no live quota → tier then
   priority), and warnings (route with no plan provider, plan provider that will be
-  unknown at runtime).`,
+  unknown at runtime).
+
+  --live   Live diagnosis against the running daemon instead — why an agent is
+           stuck right now: routes with all targets down (+ earliest recovery
+           time), active pins, first-choice quota nearly exhausted, daemon
+           warnings, takeover pointer drift, and recent failed requests
+           (request_log). Read-only.`,
 
 	"test": `test <model> [--config PATH]
 
@@ -857,6 +863,18 @@ func cmdDoctor(args []string) {
 	if err != nil {
 		fmt.Println(cRed("✗ config invalid: ") + err.Error())
 		os.Exit(1)
+	}
+	// --live replaces the offline report with the live daemon diagnosis; the
+	// two never print together (the live report re-derives everything from
+	// /api/status + local takeover state).
+	if doctorLive(args) {
+		out, err := renderDoctorLive(cfg, configPath(args))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err.Error())
+			os.Exit(1)
+		}
+		fmt.Print(out)
+		return
 	}
 	doctorWithCfg(cfg)
 }

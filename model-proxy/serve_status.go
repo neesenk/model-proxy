@@ -28,6 +28,7 @@ type statusOpts struct {
 type statusHealth struct {
 	CircuitState     string `json:"circuit_state"` // closed | open | half_open
 	Available        bool   `json:"available"`
+	CircuitUntil     string `json:"circuit_until,omitempty"`      // RFC3339, only when in the future
 	RateLimitedUntil string `json:"rate_limited_until,omitempty"` // RFC3339, only when in the future
 	RateLimitKind    string `json:"rate_limit_kind,omitempty"`    // transient | quota | daily (with rate_limited_until)
 }
@@ -52,10 +53,11 @@ type statusWindow struct {
 }
 
 type statusQuota struct {
-	Account string         `json:"Account"`
-	Plan    string         `json:"Plan"`
-	Windows []statusWindow `json:"Windows"`
-	Err     string         `json:"Err"`
+	Account      string         `json:"Account"`
+	Plan         string         `json:"Plan"`
+	RemainingPct float64        `json:"RemainingPct"` // ultimate window remaining, 0..1; -1 if unknown
+	Windows      []statusWindow `json:"Windows"`
+	Err          string         `json:"Err"`
 }
 
 type statusOrdered struct {
@@ -88,14 +90,15 @@ type statusSchedule struct {
 }
 
 type statusResp struct {
-	Uptime   string                    `json:"uptime"`
-	Version  string                    `json:"version"`
-	Listen   string                    `json:"listen"`
-	Health   map[string]statusHealth   `json:"health"`
-	Quota    map[string]statusQuota    `json:"quota"`
-	Schedule statusSchedule            `json:"schedule"`
-	Counters map[string]statusCounters `json:"counters"`
-	Warnings []string                  `json:"warnings"`
+	Uptime     string                       `json:"uptime"`
+	Version    string                       `json:"version"`
+	Listen     string                       `json:"listen"`
+	Health     map[string]statusHealth      `json:"health"`
+	ModelLocks map[string][]statusModelLock `json:"model_locks"`
+	Quota      map[string]statusQuota       `json:"quota"`
+	Schedule   statusSchedule               `json:"schedule"`
+	Counters   map[string]statusCounters    `json:"counters"`
+	Warnings   []string                     `json:"warnings"`
 }
 
 // --- /api/tokens decoded shape ---

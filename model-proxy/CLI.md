@@ -589,10 +589,10 @@ Logs (last <N>)
 
 ---
 
-## 12. `doctor` — 离线调度诊断（不需 daemon）
+## 12. `doctor` — 调度诊断（离线 dry-run / `--live` 实时）
 
 ```
-doctor
+doctor [--live]
 ```
 
 逻辑（`main.go:1729` `cmdDoctor` -> `doctorWithCfg`）：纯 config 离线诊断，无 live quota（全部 unknown -> tier 然后 priority）。
@@ -629,6 +629,48 @@ Scheduling
 ### 失败
 
 config 无效 -> **stdout** `✗ config invalid:  <ERR>`（红）+ exit 1（注意：`doctor` 的无效路径走 stdout + exit 1，同 `config check`）。
+
+### `doctor --live` — 实时诊断（需 running daemon + web.enabled）
+
+```
+doctor --live [--config PATH]
+```
+
+逻辑（`doctor_live.go` `renderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于 `takeover.proxy_url` 推导值），输出**结论先行**报告，回答「agent 为什么不动了」。纯只读；有 `--live` 时离线报告不再输出。
+
+### stdout
+
+```
+model-proxy doctor --live · http://<LISTEN>
+✓ daemon running (v<VERSION>, uptime <UPTIME>)
+
+Diagnosis
+  ✗ route "<R>": <N> targets all unavailable — earliest recovery <HH:MM> (<PROVIDER>, <CAUSE>)
+    → wait for recovery, or: model-proxy unfreeze <PROVIDER>
+  ⚠ route "<R>" pinned to <P> — no failover while pinned (…)        # pin 生效时
+  ⚠ route "<R>": <P> quota nearly exhausted (<N>% remaining)        # 首选 provider RemainingPct ≤ 5%
+  ⚠ <daemon warnings 原样透传>
+  ⚠ takeover drift: <CLIENT> (<FILE> points to <CURRENT>, want <EXPECTED>)
+    → re-run: model-proxy takeover <CLIENT> (or: model-proxy restore <CLIENT>)
+  ✓ route "<R>" → <P> (<N>% remaining)                              # 健康 route 的当前落点
+
+Schedule (<N> routes)                                               # 与 serve status 的 Schedule 节同一渲染
+
+Recent failures
+  <HH:MM:SS>  <ROUTE> → <PROVIDER>  <STATUS>  <LATENCY>ms           # request_log 开启时，最近 ≤5 条 status≥400
+
+Takeover
+  claude ✓  ·  opencode ✗ drift  ·  codex not taken over  ·  pi ✓
+```
+
+- 结论区按严重度排序：✗ route 全灭 -> ⚠（pin / 配额将尽 / warnings / takeover 漂移）-> ✓ 健康 route 落点；无 ✗/⚠ 时首行 `✓ no problems found`。
+- route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从 config routes + 隐式路由 + 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
+- `request_log` 未开启时 Recent failures 节是一行 dim 提示（`request_log disabled — …`），不算错误；无任何失败记录时显示 `none recorded`。
+- takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi `providers[<pid>].baseUrl`。
+
+### 失败（stderr `✗ <ERR>` + exit 1）
+
+同 §10 的 4 类（不可达 / 404-web.enabled / 非200 / 解析失败），文案一致。config 无效同离线路径：**stdout** `✗ config invalid:  <ERR>` + exit 1。
 
 ---
 

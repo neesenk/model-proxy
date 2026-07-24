@@ -172,8 +172,8 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 }
 
 // handleStatus returns a dashboard snapshot: uptime, version, listen address,
-// per-provider circuit/rate-limit health, quota snapshots, the current
-// schedule (per-route ordered providers), and request counters.
+// per-provider circuit/rate-limit health, active model locks, quota snapshots,
+// the current schedule (per-route ordered providers), and request counters.
 //
 // Lock discipline: each store is acquired and released in sequence — never
 // nested. Mirrors scheduleStatus() (proxy.go): (1) p.mu.RLock for cfg, (2)
@@ -210,6 +210,23 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 		}
 		health[name] = entry
 	}
+	// Model locks share healthMu, so snapshot them in the same critical section.
+	// Only active locks are emitted — mirrors circuit_until / rate_limited_until
+	// above, which likewise appear only when in the future. `doctor --live`
+	// needs them to explain a route whose targets are all locked out.
+	modelLocks := map[string][]map[string]any{}
+	for k, e := range w.p.modelLocks {
+		if !now.Before(e.lockedUntil) {
+			continue
+		}
+		modelLocks[k.provider] = append(modelLocks[k.provider], map[string]any{
+			"model": k.model,
+			"until": e.lockedUntil.UTC().Format(time.RFC3339),
+		})
+	}
+	for _, locks := range modelLocks {
+		sort.Slice(locks, func(i, j int) bool { return locks[i]["model"].(string) < locks[j]["model"].(string) })
+	}
 	w.p.healthMu.Unlock()
 
 	// allSnapshots takes quotaMu.RLock internally and returns a fresh map; we
@@ -231,15 +248,16 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 		cacheInfo = map[string]any{"enabled": true, "hits": h, "misses": m, "entries": e}
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{
-		"uptime":   time.Since(w.p.metrics.startedAt()).String(),
-		"version":  version,
-		"listen":   cfg.Listen,
-		"health":   health,
-		"quota":    quota,
-		"schedule": json.RawMessage(w.p.scheduleStatus()),
-		"counters": w.p.metrics.aggregateByProvider(),
-		"cache":    cacheInfo,
-		"warnings": routeWarnings,
+		"uptime":      time.Since(w.p.metrics.startedAt()).String(),
+		"version":     version,
+		"listen":      cfg.Listen,
+		"health":      health,
+		"model_locks": modelLocks,
+		"quota":       quota,
+		"schedule":    json.RawMessage(w.p.scheduleStatus()),
+		"counters":    w.p.metrics.aggregateByProvider(),
+		"cache":       cacheInfo,
+		"warnings":    routeWarnings,
 	})
 }
 
