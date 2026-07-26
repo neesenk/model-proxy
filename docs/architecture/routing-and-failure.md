@@ -15,6 +15,21 @@
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 
+后端协议解析优先级（`(*Proxy).resolvedBackendProto`，wirecap.go）：显式 `protocol:` > `ProtocolHint`（codex→responses）> **wire 探测 verdict** > 客户端协议透传。wire verdict 由 `wirecap.go` 在 boot/reload 时异步探测并按 parent provider 名缓存。探测请求：`/responses` 每 provider 一个；`/v1/messages` **仅当 provider 无 anthropic_base_url 时**才探（此时探测 URL 正是 anthropic 透传会打的 openai base 地址；有 anthropic_base_url 时矩阵直接短路到专用 base，绝不在 openai base 上拼 /v1/messages）。分类：404→no，2xx/400/401/403/429→yes，超时/连接错误/5xx→unknown。verdict 生效的决策矩阵：
+
+| 客户端协议 | 条件 | 后端协议 |
+|---|---|---|
+| openai(chat) | — | 透传 |
+| responses | verdict.responses ≠ no | 透传 |
+| responses | verdict.responses == no | 转 chat |
+| anthropic | provider 有 anthropic_base_url | 透传 |
+| anthropic | verdict.anthropic == yes | 透传（网关接受 anthropic） |
+| anthropic | verdict.responses == yes | 转 responses（reasoning 保留） |
+| anthropic | verdict.responses == no 且 anthropic ≠ yes | 转 chat |
+| anthropic | verdict unknown | 透传（维持现状） |
+
+**运行时 404 纠正**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss` 将 verdict.responses 置 no 并持久化，**跳过 recordModelFailure**，按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。
+
 运行态健康信息位于 `Proxy.health`，由 `healthMu` 保护，与 reload 使用的 `mu` 分离：
 
 - `schedule` 跳过熔断、限频和模型锁定目标。

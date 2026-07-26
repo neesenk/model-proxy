@@ -193,6 +193,24 @@ func apiFusionGet(t *testing.T, proxy *Proxy, query string) (struct {
 	return out, rec.Code
 }
 
+// awaitFusionState polls cond until the proxy's post-commit bookkeeping for
+// the just-served request(s) is visible. finishFusion records the run +
+// metrics AFTER the response stream completes, and the forwarded upstream
+// Content-Length lets the client's ReadAll finish before that bookkeeping
+// runs — under scheduler load an immediate read can legitimately miss the
+// just-served run (observed flake: "runs = 0, want 1"). Condition-driven, not
+// a fixed sleep: locally the first poll already passes.
+func awaitFusionState(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestAPIFusion: a successful run is recorded with per-leg detail + the
 // synthesis leg's outcome read back from the live-event hub; a quorum failure
 // is recorded as a degraded run. The workflow filter isolates recipes.
@@ -208,6 +226,10 @@ func TestAPIFusion(t *testing.T) {
 		proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
 		postAnthropic(t, px, fusionClientBody)
 
+		awaitFusionState(t, "success run recorded", func() bool {
+			o, _ := apiFusionGet(t, proxy, "")
+			return len(o.Runs) == 1
+		})
 		out, code := apiFusionGet(t, proxy, "")
 		if code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", code)
@@ -266,6 +288,10 @@ func TestAPIFusion(t *testing.T) {
 		proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "pc": pc, "ps": ps})
 		postAnthropic(t, px, fusionClientBody)
 
+		awaitFusionState(t, "degraded run recorded", func() bool {
+			o, _ := apiFusionGet(t, proxy, "?workflow=recipe")
+			return len(o.Runs) == 1
+		})
 		out, _ := apiFusionGet(t, proxy, "?workflow=recipe")
 		st := out.Workflows["recipe"]
 		if st.Runs != 1 || st.QuorumMet != 0 || st.Degraded[fusionDegradedInsufficient] != 1 {
@@ -323,6 +349,10 @@ func TestAPIFusion(t *testing.T) {
 		proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "pc": pc, "ps": ps})
 		postAnthropic(t, px, fusionClientBody)
 
+		awaitFusionState(t, "grace-cut run recorded", func() bool {
+			o, _ := apiFusionGet(t, proxy, "")
+			return len(o.Runs) == 1
+		})
 		out, _ := apiFusionGet(t, proxy, "")
 		if len(out.Runs) != 1 {
 			t.Fatalf("runs = %d, want 1", len(out.Runs))
@@ -366,6 +396,10 @@ func TestFusion_BudgetExceeded(t *testing.T) {
 	if strings.Contains(ps.lastBody(), "CANDIDATE") {
 		t.Errorf("over-budget body should be the original (no candidates): %s", ps.lastBody())
 	}
+	awaitFusionState(t, "budget-exceeded run recorded", func() bool {
+		o, _ := apiFusionGet(t, proxy, "")
+		return o.Workflows["recipe"].Runs == 2
+	})
 	out, _ := apiFusionGet(t, proxy, "")
 	st := out.Workflows["recipe"]
 	if st.Runs != 2 || st.QuorumMet != 1 || st.Degraded[fusionDegradedBudget] != 1 || st.RunsToday != 1 {
@@ -400,6 +434,10 @@ func TestFusion_FirstTurnOnly(t *testing.T) {
 	if strings.Contains(ps.lastBody(), "CANDIDATE") {
 		t.Errorf("multi-turn body should be the original (no candidates): %s", ps.lastBody())
 	}
+	awaitFusionState(t, "multi-turn degraded run recorded", func() bool {
+		o, _ := apiFusionGet(t, proxy, "")
+		return o.Workflows["recipe"].Runs == 2
+	})
 	out, _ := apiFusionGet(t, proxy, "")
 	st := out.Workflows["recipe"]
 	if st.Runs != 2 || st.Degraded[fusionDegradedMultiTurn] != 1 || st.RunsToday != 1 {
@@ -461,6 +499,10 @@ func TestFusion_JudgeReport(t *testing.T) {
 	}
 	// Registry: judge leg observed (kind=judge), report used, judge tokens
 	// aggregated separately from the panel.
+	awaitFusionState(t, "judge run recorded", func() bool {
+		o, _ := apiFusionGet(t, proxy, "")
+		return len(o.Runs) == 1
+	})
 	outAPI, _ := apiFusionGet(t, proxy, "")
 	run := outAPI.Runs[0]
 	if !run.JudgeUsed {
@@ -516,6 +558,10 @@ func TestFusion_JudgeFailure(t *testing.T) {
 	if !strings.Contains(synth.System, "draft-A") {
 		t.Errorf("synthesis should still carry candidates: %q", synth.System)
 	}
+	awaitFusionState(t, "judge-failure run recorded", func() bool {
+		o, _ := apiFusionGet(t, proxy, "")
+		return len(o.Runs) == 1
+	})
 	outAPI, _ := apiFusionGet(t, proxy, "")
 	run := outAPI.Runs[0]
 	if run.Degraded != "" || run.JudgeUsed {

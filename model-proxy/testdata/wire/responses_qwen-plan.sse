@@ -1,0 +1,140 @@
+id:1
+event:response.created
+:HTTP_STATUS/200
+data:{"response":{"id":"resp_19686af1-a8bf-4a06-963a-48766208c9fa","created_at":1784994488,"error":null,"incomplete_details":null,"instructions":null,"metadata":{},"model":"qwen3.8-max-preview","object":"response","output":[],"parallel_tool_calls":true,"temperature":1.0,"tool_choice":"auto","tools":[],"top_p":1.0,"background":false,"conversation":null,"max_output_tokens":null,"max_tool_calls":null,"previous_response_id":null,"prompt":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"queued","text":null,"top_logprobs":0,"truncation":null,"usage":null,"user":null,"completed_at":1784994488,"frequency_penalty":0.0,"presence_penalty":0.0,"store":false,"moderation":null,"billing":null},"sequence_number":0,"type":"response.created"}
+
+id:2
+event:response.in_progress
+:HTTP_STATUS/200
+data:{"response":{"id":"resp_19686af1-a8bf-4a06-963a-48766208c9fa","created_at":1784994488,"error":null,"incomplete_details":null,"instructions":null,"metadata":{},"model":"qwen3.8-max-preview","object":"response","output":[],"parallel_tool_calls":true,"temperature":1.0,"tool_choice":"auto","tools":[],"top_p":1.0,"background":false,"conversation":null,"max_output_tokens":null,"max_tool_calls":null,"previous_response_id":null,"prompt":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"in_progress","text":null,"top_logprobs":0,"truncation":null,"usage":null,"user":null,"completed_at":1784994488,"frequency_penalty":0.0,"presence_penalty":0.0,"store":false,"moderation":null,"billing":null},"sequence_number":1,"type":"response.in_progress"}
+
+id:3
+event:response.output_item.added
+:HTTP_STATUS/200
+data:{"item":{"id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","summary":[],"type":"reasoning","content":null,"encrypted_content":null,"status":null},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+id:4
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":"We","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":3,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:5
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" need to respond to","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":4,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:6
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" user: \"Say","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":5,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:7
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" hi in one short","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":6,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:8
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" sentence.\" Need final","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":7,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:9
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" answer only","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":8,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:10
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":". Simple: \"","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":9,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:11
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":"Hi!\"","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":10,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:12
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" But one short sentence","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":11,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:13
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":".","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":12,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:14
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" Could be \"Hi","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":13,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:15
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" there!\" Ensure short","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":14,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:16
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":".","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":15,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:17
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":"","item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":16,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:18
+event:response.reasoning_summary_text.done
+:HTTP_STATUS/200
+data:{"item_id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","output_index":0,"sequence_number":17,"summary_index":0,"text":"We need to respond to user: \"Say hi in one short sentence.\" Need final answer only. Simple: \"Hi!\" But one short sentence. Could be \"Hi there!\" Ensure short.","type":"response.reasoning_summary_text.done"}
+
+id:19
+event:response.output_item.done
+:HTTP_STATUS/200
+data:{"item":{"id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","summary":[{"text":"We need to respond to user: \"Say hi in one short sentence.\" Need final answer only. Simple: \"Hi!\" But one short sentence. Could be \"Hi there!\" Ensure short.","type":"summary_text"}],"type":"reasoning","content":null,"encrypted_content":null,"status":null},"output_index":0,"sequence_number":18,"type":"response.output_item.done"}
+
+id:20
+event:response.output_item.added
+:HTTP_STATUS/200
+data:{"item":{"id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","content":[],"role":"assistant","status":"in_progress","type":"message"},"output_index":1,"sequence_number":19,"type":"response.output_item.added"}
+
+id:21
+event:response.content_part.added
+:HTTP_STATUS/200
+data:{"content_index":0,"item_id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","output_index":1,"part":{"annotations":[],"text":"","type":"output_text","logprobs":null},"sequence_number":20,"type":"response.content_part.added"}
+
+id:22
+event:response.output_text.delta
+:HTTP_STATUS/200
+data:{"content_index":0,"delta":"Hi","item_id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","logprobs":[],"output_index":1,"sequence_number":21,"type":"response.output_text.delta"}
+
+id:23
+event:response.output_text.delta
+:HTTP_STATUS/200
+data:{"content_index":0,"delta":" there!","item_id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","logprobs":[],"output_index":1,"sequence_number":22,"type":"response.output_text.delta"}
+
+id:24
+event:response.output_text.delta
+:HTTP_STATUS/200
+data:{"content_index":0,"delta":"","item_id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","logprobs":[],"output_index":1,"sequence_number":23,"type":"response.output_text.delta"}
+
+id:25
+event:response.output_text.done
+:HTTP_STATUS/200
+data:{"content_index":0,"item_id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","logprobs":[],"output_index":1,"sequence_number":24,"text":"Hi there!","type":"response.output_text.done"}
+
+id:26
+event:response.content_part.done
+:HTTP_STATUS/200
+data:{"content_index":0,"item_id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","output_index":1,"part":{"annotations":[],"text":"Hi there!","type":"output_text","logprobs":null},"sequence_number":25,"type":"response.content_part.done"}
+
+id:27
+event:response.output_item.done
+:HTTP_STATUS/200
+data:{"item":{"id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","content":[{"annotations":[],"text":"Hi there!","type":"output_text","logprobs":null}],"role":"assistant","status":"completed","type":"message"},"output_index":1,"sequence_number":26,"type":"response.output_item.done"}
+
+id:28
+event:response.completed
+:HTTP_STATUS/200
+data:{"response":{"id":"resp_19686af1-a8bf-4a06-963a-48766208c9fa","created_at":1784994488,"error":null,"incomplete_details":null,"instructions":null,"metadata":{},"model":"qwen3.8-max-preview","object":"response","output":[{"id":"msg_ed5b5f47-bd59-4506-b9ca-bcab943cf2ce","summary":[{"text":"We need to respond to user: \"Say hi in one short sentence.\" Need final answer only. Simple: \"Hi!\" But one short sentence. Could be \"Hi there!\" Ensure short.","type":"summary_text"}],"type":"reasoning","content":null,"encrypted_content":null,"status":null},{"id":"msg_0401be85-d423-41bc-90c7-cdd81e146d7c","content":[{"annotations":[],"text":"Hi there!","type":"output_text","logprobs":null}],"role":"assistant","status":"completed","type":"message"}],"parallel_tool_calls":true,"temperature":1.0,"tool_choice":"auto","tools":[],"top_p":1.0,"background":false,"conversation":null,"max_output_tokens":null,"max_tool_calls":null,"previous_response_id":null,"prompt":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"completed","text":null,"top_logprobs":0,"truncation":null,"usage":{"input_tokens":91,"input_tokens_details":{"cached_tokens":0},"output_tokens":47,"output_tokens_details":{"reasoning_tokens":39},"total_tokens":138,"x_details":[{"input_tokens":91,"output_tokens":47,"total_tokens":138,"output_tokens_details":{"reasoning_tokens":39},"prompt_tokens_details":{"cached_tokens":0},"x_billing_type":"response_api"}]},"user":null,"completed_at":1784994490,"frequency_penalty":0.0,"presence_penalty":0.0,"store":false,"moderation":null,"billing":null},"sequence_number":27,"type":"response.completed"}
+

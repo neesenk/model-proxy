@@ -26,6 +26,7 @@
 - `ProtocolHint` 只有在现有转换器真实支持目标 wire shape 时才能返回值。
 - Codex 是 Responses API，不得标记成 Chat Completions `openai` hint。
 - 不可表达的 wire protocol 使用 `WireProtocolNote` 警告，不得伪装成可转换。
+- `ChatReasoningMode`（protocol_hint.go，与 ProtocolHint 并列）：r→chat 转换时 reasoning.effort 的方言形状（`reasoning_effort`/`thinking`/`enable_thinking`/`openrouter`）。新 provider 的 chat 端点 reasoning 字段形状不是平铺 `reasoning_effort` 时才登记，默认不要加条目。
 
 ## 修改要求
 

@@ -45,6 +45,7 @@ Commands:
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
   replay <id> --to P   Re-answer a logged request with a different backend
   shadow report       Shadow-evaluation aggregation (primary vs shadow compare)
+  wire record <prov>  Record raw upstream SSE streams into testdata/wire/
   help                 Print this message
 
 Options:
@@ -196,6 +197,15 @@ Flags:
   With no argument, clears ALL providers. A pooled parent name clears all
   its accounts. Sticky routes, pins, and learned parameter blocklists are
   NOT cleared. Requires a running daemon.`,
+
+	"wire": `wire record <provider> [--model M] [--prompt P] [--out DIR]
+
+  Record RAW upstream SSE streams for the golden-replay tests: one minimal
+  stream=true request per endpoint (responses / chat / anthropic), written
+  to <out>/<proto>_<provider>.sse (default: testdata/wire/). A non-2xx
+  endpoint lands in a .err file instead and never overwrites a good .sse.
+  Credentials come from login. Review recordings for sensitive content
+  before committing them.`,
 }
 
 func main() {
@@ -256,6 +266,8 @@ func main() {
 		cmdReplay(os.Args[2:])
 	case "shadow":
 		cmdShadow(os.Args[2:])
+	case "wire":
+		cmdWire(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		fmt.Print(usage)

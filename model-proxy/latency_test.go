@@ -231,8 +231,13 @@ func TestForward_RecordsLatency(t *testing.T) {
 	if snap.TTFTSum == 0 {
 		t.Error("TTFT not recorded (TTFTSum=0); first-byte stamp should fire on body write")
 	}
-	// TTFT can't exceed total latency (both measured from the same `start`).
-	if snap.TTFTSum > snap.LatencySum {
-		t.Errorf("ttft=%d > latency=%d (impossible, same start)", snap.TTFTSum, snap.LatencySum)
+	// Ordering: the recorded latency is the UPSTREAM response time (send →
+	// headers received, see proxy.go), while TTFT runs to the first byte
+	// written to the CLIENT — necessarily after the headers arrive. Both share
+	// the same `start`, so TTFT can never be SMALLER; the reverse (ttft >
+	// latency) is normal whenever the body copy lands in a later millisecond
+	// (ms truncation under load), not a bug.
+	if snap.TTFTSum < snap.LatencySum {
+		t.Errorf("ttft=%d < latency=%d (impossible: first client byte precedes upstream headers)", snap.TTFTSum, snap.LatencySum)
 	}
 }

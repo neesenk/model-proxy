@@ -30,7 +30,8 @@ kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h
 - provider health cooldown；
 - model locks；
 - model-scoped paramBlock；
-- config fingerprint。
+- config fingerprint；
+- 顶层 `wire_caps`：wire 探测 verdict（`{base_url, responses, anthropic, probed_at}`，triState 以 `"yes"/"no"/"unknown"` 字符串落盘），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时要求记录的 `base_url` 与当前 config 一致，不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——persist 经 fullSnapshot 取 p.mu.RLock，handler 已持有该锁，可能撞 reload 写者死锁）。verdict map 由独立的 `wireCapMu`（leaf 锁，不进入 `p.mu → healthMu → quotaMu` 锁序）保护。
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 

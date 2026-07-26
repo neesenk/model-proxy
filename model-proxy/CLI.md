@@ -760,6 +760,24 @@ unfreeze [provider] [--config PATH]
 
 ---
 
+## 17. `wire record` — 录制上游 SSE 黄金流（离线，凭据来自 login）
+
+```
+wire record <provider> [--model M] [--prompt P] [--out DIR]
+```
+
+逻辑（`wire_record_cmd.go` `cmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（强制工具调用：`get_weather` + `tool_choice` 强制）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
+
+### stdout / stderr
+
+- 成功：`  ✓ <proto> → <out>/<proto>_<provider>.sse (<N> bytes)`
+- 端点无 base url：`  - <proto>: skipped (no base url)`
+- 非 2xx：状态码 + body 摘录（≤4KiB）写入 `<proto>_<provider>.err`，stderr `✗ <proto>: HTTP <status> — wrote <ERRFILE> (existing .sse untouched)`；**不覆盖已有 .sse**。任一端点失败则 exit 1。
+
+凭据来自 `login`（providerImplFor）；录制文件只含响应字节，但 prompt/模型输出仍可能敏感——提交前人工审查。
+
+---
+
 ## 契约改动清单（改动时须核对）
 
 改契约时，除更新本文档外，还需同步这些测试断言（`strings.Contains` 精确文案）：

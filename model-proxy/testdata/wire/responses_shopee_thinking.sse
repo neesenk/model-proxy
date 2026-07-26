@@ -1,0 +1,54 @@
+: 
+
+data: {"type":"response.created","response":{"id":"gen-1784994260-xB9oocEiOTSRVwzXNRfl","object":"response","created_at":1784994260,"model":"deepseek/deepseek-v4-flash","status":"in_progress","completed_at":null,"output":[],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":null,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":{"effort":"low"},"safety_identifier":null,"prompt_cache_key":null,"prompt_cache_options":null,"usage":null},"sequence_number":0}
+
+data: {"type":"response.in_progress","response":{"id":"gen-1784994260-xB9oocEiOTSRVwzXNRfl","object":"response","created_at":1784994260,"model":"deepseek/deepseek-v4-flash","status":"in_progress","completed_at":null,"output":[],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":null,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":{"effort":"low"},"safety_identifier":null,"prompt_cache_key":null,"prompt_cache_options":null,"usage":null},"sequence_number":1}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_tmp_xogtjewee8n","type":"reasoning","status":"in_progress","summary":[]},"sequence_number":2}
+
+data: {"type":"response.content_part.added","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"part":{"type":"reasoning_text","text":""},"sequence_number":3}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":"We","sequence_number":4}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":" need to respond to the us","sequence_number":5}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":"er's request: \"Say hi in one short sente","sequence_number":6}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":"nce.\" The","sequence_number":7}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":" response","sequence_number":8}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":" should be a sho","sequence_number":9}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":"rt sente","sequence_number":10}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":"nce saying hi. For","sequence_number":11}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":" example, \"Hi","sequence_number":12}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":" there!","sequence_number":13}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"delta":"\" or \"Hello!\" Keep it simple.","sequence_number":14}
+
+data: {"type":"response.reasoning_text.done","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"text":"We need to respond to the user's request: \"Say hi in one short sentence.\" The response should be a short sentence saying hi. For example, \"Hi there!\" or \"Hello!\" Keep it simple.","sequence_number":15}
+
+data: {"type":"response.content_part.done","output_index":0,"item_id":"rs_tmp_xogtjewee8n","content_index":0,"part":{"type":"reasoning_text","text":"We need to respond to the user's request: \"Say hi in one short sentence.\" The response should be a short sentence saying hi. For example, \"Hi there!\" or \"Hello!\" Keep it simple."},"sequence_number":16}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_tmp_xogtjewee8n","type":"reasoning","status":"completed","content":[{"type":"reasoning_text","text":"We need to respond to the user's request: \"Say hi in one short sentence.\" The response should be a short sentence saying hi. For example, \"Hi there!\" or \"Hello!\" Keep it simple."}],"summary":[],"format":"unknown"},"sequence_number":17}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_tmp_rllmfi08z2r","type":"message","status":"in_progress","role":"assistant","content":[]},"sequence_number":18}
+
+data: {"type":"response.content_part.added","output_index":1,"item_id":"msg_tmp_rllmfi08z2r","content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]},"sequence_number":19}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_tmp_rllmfi08z2r","content_index":0,"delta":"Hi.","logprobs":[],"sequence_number":20}
+
+data: {"type":"response.output_text.done","output_index":1,"item_id":"msg_tmp_rllmfi08z2r","content_index":0,"text":"Hi.","logprobs":[],"sequence_number":21}
+
+data: {"type":"response.content_part.done","output_index":1,"item_id":"msg_tmp_rllmfi08z2r","content_index":0,"part":{"type":"output_text","text":"Hi.","annotations":[],"logprobs":[]},"sequence_number":22}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_tmp_rllmfi08z2r","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi.","annotations":[],"logprobs":[]}]},"sequence_number":23}
+
+data: {"type":"response.completed","response":{"id":"gen-1784994260-xB9oocEiOTSRVwzXNRfl","object":"response","created_at":1784994260,"model":"deepseek/deepseek-v4-flash","status":"completed","completed_at":1784994261,"output":[{"id":"rs_tmp_xogtjewee8n","type":"reasoning","status":"completed","content":[{"type":"reasoning_text","text":"We need to respond to the user's request: \"Say hi in one short sentence.\" The response should be a short sentence saying hi. For example, \"Hi there!\" or \"Hello!\" Keep it simple."}],"summary":[],"format":"unknown"},{"id":"msg_tmp_rllmfi08z2r","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hi.","annotations":[],"logprobs":[]}]}],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":null,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":{"effort":"low"},"safety_identifier":null,"prompt_cache_key":null,"prompt_cache_options":null,"usage":{"input_tokens":11,"input_tokens_details":{"cached_tokens":4},"output_tokens":47,"output_tokens_details":{"reasoning_tokens":45},"total_tokens":58,"cost":0.000009162,"is_byok":false,"cost_details":{"upstream_inference_cost":0.000009162,"upstream_inference_input_cost":7.02e-7,"upstream_inference_output_cost":0.00000846}},"openrouter_metadata":{"requested":"deepseek/deepseek-v4-flash","strategy":"direct","region":"SIN","summary":"available=4, selected=DeepInfra","attempt":1,"is_byok":false,"endpoints":{"total":20,"available":[{"provider":"DeepInfra","model":"deepseek/deepseek-v4-flash-20260423","selected":true},{"provider":"Novita","model":"deepseek/deepseek-v4-flash-20260423","selected":false},{"provider":"Parasail","model":"deepseek/deepseek-v4-flash-20260423","selected":false},{"provider":"Venice","model":"deepseek/deepseek-v4-flash-20260423","selected":false}]}}},"sequence_number":24}
+
+data: [DONE]
+

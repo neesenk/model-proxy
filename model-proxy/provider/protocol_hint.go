@@ -30,6 +30,26 @@ func ProtocolHint(providerID, model string) string {
 	return ""
 }
 
+// ChatReasoningMode returns how a responses reasoning.effort should be
+// rendered for this provider's CHAT endpoint (r→chat conversion): the chat
+// dialects differ per vendor family (cc-switch mapReasoningEffort).
+//
+//	"reasoning_effort" (default) — flat reasoning_effort field, kept as-is
+//	"thinking"        — thinking: {type:"enabled"|"disabled"} (zhipu/volcengine/kimi-code/deepseek)
+//	"enable_thinking" — enable_thinking: bool (qwen-plan)
+//	"openrouter"      — native reasoning: {effort} object (aqp / OpenRouter 系)
+func ChatReasoningMode(providerID string) string {
+	switch providerID {
+	case "zhipu", "volcengine", "kimi-code", "deepseek":
+		return "thinking"
+	case "qwen-plan":
+		return "enable_thinking"
+	case "aqp", "shopee":
+		return "openrouter"
+	}
+	return "reasoning_effort"
+}
+
 // WireProtocolNote describes a provider whose wire protocol our protocol system
 // cannot express AND cannot convert to — emitted as an honest marker ("this
 // client family can't be served") instead of a wrong conversion hint. "" when

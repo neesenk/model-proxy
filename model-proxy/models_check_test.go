@@ -103,6 +103,41 @@ func TestProbeModelCallable_OpenAI2xx(t *testing.T) {
 	}
 }
 
+// --- probeModelCallable: anthropic base → anthropic-shaped probe ---
+
+// Regression: with anthropic_base_url set, the probe must switch BOTH base and
+// shape (path /v1/messages + anthropic body + anthropic-version header) —
+// probing {anthropic_base}/chat/completions 404s on strict bases (deepseek)
+// and tests the wrong protocol on lenient ones (zhipu).
+func TestProbeModelCallable_AnthropicBaseUsesAnthropicShape(t *testing.T) {
+	var gotPath, gotVersion, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotVersion = r.Header.Get("anthropic-version")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	impl := &fakeProviderImpl{}
+	prov := Provider{OpenAIBaseURL: "http://openai-unused", AnthropicBaseURL: srv.URL, Provider: "deepseek"}
+	ok, _, _ := probeModelCallable(srv.Client(), prov, impl, "deepseek-v4-pro")
+	if !ok {
+		t.Error("anthropic-base probe: ok=false want true")
+	}
+	if gotPath != "/v1/messages" {
+		t.Errorf("probe path=%q want /v1/messages", gotPath)
+	}
+	if gotVersion == "" {
+		t.Error("anthropic-version header missing")
+	}
+	if !strings.Contains(gotBody, `"messages"`) || !strings.Contains(gotBody, `"deepseek-v4-pro"`) {
+		t.Errorf("probe body not anthropic-shaped: %s", gotBody)
+	}
+}
+
 // --- probeModelCallable: 404 with error body -> reason extracted ---
 
 func TestProbeModelCallable_404Reason(t *testing.T) {

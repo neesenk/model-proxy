@@ -110,6 +110,35 @@ race-clean 只是必要条件。并发测试还必须断言功能不变量，例
 - 禁止在测试日志输出真实 token、cookie、prompt 或用户请求体。
 
 
+## 协议转换的三层边界测试
+
+协议转换（`convert*.go`）在普通单测之外有三层补充覆盖，修改转换器时按需运行：
+
+1. **黄金文件回放**（`convert_golden_test.go` + `testdata/wire/<proto>_<provider|场景>.sse`）：目录下每个原始 SSE 流（按文件名前缀选源协议）喂给所有以该协议为源的转换器，断言不变量而非精确输出——不 panic、输出可解析为 SSE 帧、终态事件恰好一个、responses 目标 `output_item.added/done` 按 id+type 配对（failed 终态豁免）、无空 data 帧；以及**场景存活断言**——输入流真实携带 tool call 时输出必须保留目标协议的工具形状（全方向），真实携带 reasoning 时输出必须保留（anthropic→chat 为例外，按契约丢弃）。断言在压缩空白后匹配（zhipu 的 SSE JSON 带空格），标记精确化以防 `server_tool_use`、空 `tool_calls:[]` 误伤。种子为手写高保真流；真实上游流用 `model-proxy wire record <provider>` 录制进同一目录（每端点 text/_tool/_thinking 三场景；凭据来自 login，提交前人工审查脱敏，见 CLI.md §17）。
+2. **Fuzz**（`convert_fuzz_test.go` + `testdata/fuzz/`）：`FuzzConvertRequest`（12 个请求/响应 converter 不 panic）、`FuzzConvertSSE`（6 个流式 transformer 不 panic、输出有界 `128×len+16KiB`）、`FuzzParseToolArgs`（确定性）、`FuzzSanitizeToolUseID`（确定性 + 字符集 `^[a-zA-Z0-9_-]+$`；空 id 的计数器占位是设计例外）。普通 `go test` 跑种子语料；真 fuzz：
+
+   ```bash
+   go test -fuzz=FuzzConvertRequest -fuzztime=20s -run '^$' .
+   go test -fuzz=FuzzConvertSSE -fuzztime=20s -run '^$' .
+   go test -fuzz=FuzzParseToolArgs -fuzztime=15s -run '^$' .
+   go test -fuzz=FuzzSanitizeToolUseID -fuzztime=15s -run '^$' .
+   ```
+
+3. **差分测试**（`convert_differential_test.go` + `testdata/differential/`）：输入流逐字取自 opencodex 测试（fixture 顶部注释注明来源文件），断言语义等价；有意分歧处（`docs/decisions/intentional-behaviors.md` 第 10、11 条）按本仓语义断言并引用条目编号。
+
+Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会遍历 `testdata/wire/*.sse`（≤64KiB）全部并入语料——每次 `wire record` 录制的真实流自动成为 fuzz 输入，无需手工同步。
+
+## live e2e（真实上游，默认跳过）
+
+`live_e2e_test.go` 用**真实 `./config.yaml` 和 login 管理的真实凭据**（`~/.model-proxy`）端到端验证协议转换在真实 vendor 方言上的表现（mock 覆盖不了的差异：thinking 方言、视觉门控、custom 工具、占位 reasoning_content）。
+
+- 运行：`MODEL_PROXY_LIVE=1 go test -run 'TestLive_' -count=1 -timeout 10m .`。不设 `MODEL_PROXY_LIVE` 时全部 `t.Skip`，常规 `go test ./...` 保持 hermetic。
+- 跳过逻辑：config/provider 缺失、未 login（无 runtime impl）→ skip；上游 429 / zhipu 资源包 1113 → skip（账号/资源问题，不是转换缺陷，注释区分）。其他 4xx/5xx 如实 FAIL。
+- 路由换成测试给定的单目标（显式 `protocol:`，不依赖 wirecap verdict，避免 failover 干扰）；model 缺省取 provider.Models 最后一个（zhipu 旧模型受资源包限制会 429/1113，故取靠后的 glm-4.7）。
+- 包级 TestMain 会把 HOME 重定向到临时目录，live helper 用包级 init 捕获的真实 HOME 还原后再构建 provider。
+- 成本：每个用例都是真实付费调用，prompt 必须极短、max_tokens 给小值（≤512）。
+- 安全：响应 body 不打全量（失败 excerpt ≤500 字符）；禁止输出 API key/token/凭据。
+
 ## 文档修改检查清单
 
 修改 `AGENTS.md`（含目录级）或 `docs/` 下任何文档时，除 `git diff --check` 外逐项核对：

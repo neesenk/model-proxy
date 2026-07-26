@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"model\":\"g\",\"input\":[{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"f\",\"arguments\":\"not-json\"}],\"max_output_tokens\":10}")

@@ -1,0 +1,132 @@
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"\n1"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":".  **Analyze the Request:** The user wants to"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" say \"hi\" ("}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"or for me to say \"hi"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"\" to them, effectively"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":") in *one short"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" sentence*.\n\n2."}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"  **Identify the Constraint"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":":** \"One short sentence.\"\n\n"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"3.  **Draft Potential"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" Responses:**\n    *   \"Hello"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" there!\" (Good, simple"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":")\n    *   \""}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Hi, how are you?\" (A"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" bit long, but short"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":")\n    *   \"Greetings!\""}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" (Formal, short)\n    *"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"   \"Hey!\" (Very"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" short, casual)\n    *"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"   \"Hi!\" (Short"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"est)\n\n4.  **"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Select the Best Fit:** \""}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Hello!\" or \"Hi!\""}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" are the most direct translations"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" of the instruction. \"Hello"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" there!\" feels a bit friend"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"lier. \"Hello!\" is classic"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":". \"Hi!\" is very"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" direct.\n\n    *   *Selection"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" 1:* Hello!\n"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"    *   *Selection 2:*"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" Hi, how can I help you?"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" (Maybe too functional).\n"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"    *   *Selection 3:*"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" Hello there!\n\n5.  **Ref"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"ine for \"Short Sentence\""}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" constraint:**\n    *   \"Hi"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"!\" is technically a sentence ("}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"an imperative/exclamatory"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" one, often used as"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" a standalone greeting).\n    *  "}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" \"Hello!\" is similar"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":".\n    *   \"Hello there!\""}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" is slightly longer but still very"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" short.\n\n    Let's go with the"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" most natural, friendly,"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" and concise greeting.\n\n    *  "}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" *Option:* Hello there!\n\n6."}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"  **Final Polish:** The"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" user asked *me* to \""}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Say hi\". So the"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" output should just be the greeting.\n\n"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"    *   *Draft:* Hello there"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"!\n\n    Wait, is"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" \"Hi there!\" better? Or"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" just \"Hi!\"?\n"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"    \"Hello!\" is universally"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" acceptable.\n\n    Let's"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" try: \"Hello there"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"!\"\n\n7.  **Final"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":" Output Generation:** Hello there!"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","content":" there!"}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+
+data: {"id":"202607252348487bdb6096da2c4267","created":1784994528,"object":"chat.completion.chunk","model":"glm-4.7","choices":[{"index":0,"finish_reason":"stop","delta":{"role":"assistant","content":""}}],"usage":{"prompt_tokens":12,"completion_tokens":389,"total_tokens":401,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":384}}}
+
+data: [DONE]
+

@@ -98,9 +98,12 @@ func fakeJWT(claims map[string]any) string {
 }
 
 // codexAccessToken returns a JWT whose exp is far in the future (so
-// CodexOAuthProvider.token() treats it as valid and skips refresh).
+// CodexOAuthProvider.token() treats it as valid and skips refresh). The exp is
+// a FIXED timestamp: a time.Now()-relative one makes two calls in the same
+// test (auth file vs. header assertion) produce different JWTs when they
+// straddle a second boundary — the old flake.
 func codexAccessToken() string {
-	return fakeJWT(map[string]any{"exp": time.Now().Add(24 * time.Hour).Unix()})
+	return fakeJWT(map[string]any{"exp": int64(2_000_000_000)}) // 2033-05-18
 }
 
 // codexIDToken returns a JWT carrying the chatgpt_account_id claim.

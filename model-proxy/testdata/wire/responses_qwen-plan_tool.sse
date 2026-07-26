@@ -1,0 +1,145 @@
+id:1
+event:response.created
+:HTTP_STATUS/200
+data:{"response":{"id":"resp_ce5d0619-fac0-4993-b4a3-41044039d8c5","created_at":1784994490,"error":null,"incomplete_details":null,"instructions":null,"metadata":{},"model":"qwen3.8-max-preview","object":"response","output":[],"parallel_tool_calls":true,"temperature":1.0,"tool_choice":"auto","tools":[{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false},"strict":null,"type":"function","description":"Get the current weather for a city"}],"top_p":1.0,"background":false,"conversation":null,"max_output_tokens":null,"max_tool_calls":null,"previous_response_id":null,"prompt":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"queued","text":null,"top_logprobs":0,"truncation":null,"usage":null,"user":null,"completed_at":1784994490,"frequency_penalty":0.0,"presence_penalty":0.0,"store":false,"moderation":null,"billing":null},"sequence_number":0,"type":"response.created"}
+
+id:2
+event:response.in_progress
+:HTTP_STATUS/200
+data:{"response":{"id":"resp_ce5d0619-fac0-4993-b4a3-41044039d8c5","created_at":1784994490,"error":null,"incomplete_details":null,"instructions":null,"metadata":{},"model":"qwen3.8-max-preview","object":"response","output":[],"parallel_tool_calls":true,"temperature":1.0,"tool_choice":"auto","tools":[{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false},"strict":null,"type":"function","description":"Get the current weather for a city"}],"top_p":1.0,"background":false,"conversation":null,"max_output_tokens":null,"max_tool_calls":null,"previous_response_id":null,"prompt":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"in_progress","text":null,"top_logprobs":0,"truncation":null,"usage":null,"user":null,"completed_at":1784994490,"frequency_penalty":0.0,"presence_penalty":0.0,"store":false,"moderation":null,"billing":null},"sequence_number":1,"type":"response.in_progress"}
+
+id:3
+event:response.output_item.added
+:HTTP_STATUS/200
+data:{"item":{"id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","summary":[],"type":"reasoning","content":null,"encrypted_content":null,"status":null},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+id:4
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":"The","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":3,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:5
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" user is asking for","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":4,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:6
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" the current weather in","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":5,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:7
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" Paris and explicitly","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":6,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:8
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" requests using the get","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":7,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:9
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":"_weather tool","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":8,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:10
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":". This is a","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":9,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:11
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" straightforward request with a","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":10,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:12
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" clear tool available.","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":11,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:13
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" I","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":12,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:14
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" have the required parameter","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":13,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:15
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" (city =","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":14,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:16
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" \"Paris\"). I","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":15,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:17
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" should call the tool","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":16,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:18
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":" now.","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":17,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:19
+event:response.reasoning_summary_text.delta
+:HTTP_STATUS/200
+data:{"delta":"","item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":18,"summary_index":0,"type":"response.reasoning_summary_text.delta"}
+
+id:20
+event:response.reasoning_summary_text.done
+:HTTP_STATUS/200
+data:{"item_id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","output_index":0,"sequence_number":19,"summary_index":0,"text":"The user is asking for the current weather in Paris and explicitly requests using the get_weather tool. This is a straightforward request with a clear tool available. I have the required parameter (city = \"Paris\"). I should call the tool now.","type":"response.reasoning_summary_text.done"}
+
+id:21
+event:response.output_item.done
+:HTTP_STATUS/200
+data:{"item":{"id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","summary":[{"text":"The user is asking for the current weather in Paris and explicitly requests using the get_weather tool. This is a straightforward request with a clear tool available. I have the required parameter (city = \"Paris\"). I should call the tool now.","type":"summary_text"}],"type":"reasoning","content":null,"encrypted_content":null,"status":null},"output_index":0,"sequence_number":20,"type":"response.output_item.done"}
+
+id:22
+event:response.output_item.added
+:HTTP_STATUS/200
+data:{"item":{"arguments":"","call_id":"call_cd494ee22578422595592e9c","name":"get_weather","type":"function_call","id":"msg_22e99bae-3435-4f2f-8222-7c2a7e76ae3a","status":"in_progress"},"output_index":1,"sequence_number":21,"type":"response.output_item.added"}
+
+id:23
+event:response.function_call_arguments.delta
+:HTTP_STATUS/200
+data:{"delta":"","item_id":"msg_22e99bae-3435-4f2f-8222-7c2a7e76ae3a","output_index":1,"sequence_number":22,"type":"response.function_call_arguments.delta"}
+
+id:24
+event:response.function_call_arguments.delta
+:HTTP_STATUS/200
+data:{"delta":"{\"city\": \"Paris","item_id":"msg_22e99bae-3435-4f2f-8222-7c2a7e76ae3a","output_index":1,"sequence_number":23,"type":"response.function_call_arguments.delta"}
+
+id:25
+event:response.function_call_arguments.delta
+:HTTP_STATUS/200
+data:{"delta":"\"","item_id":"msg_22e99bae-3435-4f2f-8222-7c2a7e76ae3a","output_index":1,"sequence_number":24,"type":"response.function_call_arguments.delta"}
+
+id:26
+event:response.function_call_arguments.delta
+:HTTP_STATUS/200
+data:{"delta":"}","item_id":"msg_22e99bae-3435-4f2f-8222-7c2a7e76ae3a","output_index":1,"sequence_number":25,"type":"response.function_call_arguments.delta"}
+
+id:27
+event:response.function_call_arguments.done
+:HTTP_STATUS/200
+data:{"arguments":"{\"city\": \"Paris\"}","item_id":"msg_22e99bae-3435-4f2f-8222-7c2a7e76ae3a","name":"get_weather","output_index":1,"sequence_number":26,"type":"response.function_call_arguments.done"}
+
+id:28
+event:response.output_item.done
+:HTTP_STATUS/200
+data:{"item":{"arguments":"{\"city\": \"Paris\"}","call_id":"call_cd494ee22578422595592e9c","name":"get_weather","type":"function_call","id":"msg_22e99bae-3435-4f2f-8222-7c2a7e76ae3a","status":"completed"},"output_index":1,"sequence_number":27,"type":"response.output_item.done"}
+
+id:29
+event:response.completed
+:HTTP_STATUS/200
+data:{"response":{"id":"resp_ce5d0619-fac0-4993-b4a3-41044039d8c5","created_at":1784994490,"error":null,"incomplete_details":null,"instructions":null,"metadata":{},"model":"qwen3.8-max-preview","object":"response","output":[{"id":"msg_8a246c47-e5cf-48ef-bc24-c088572f3b7d","summary":[{"text":"The user is asking for the current weather in Paris and explicitly requests using the get_weather tool. This is a straightforward request with a clear tool available. I have the required parameter (city = \"Paris\"). I should call the tool now.","type":"summary_text"}],"type":"reasoning","content":null,"encrypted_content":null,"status":null},{"arguments":"{\"city\": \"Paris\"}","call_id":"call_cd494ee22578422595592e9c","name":"get_weather","type":"function_call","id":"msg_22e99bae-3435-4f2f-8222-7c2a7e76ae3a","status":"completed"}],"parallel_tool_calls":true,"temperature":1.0,"tool_choice":"auto","tools":[{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false},"strict":null,"type":"function","description":"Get the current weather for a city"}],"top_p":1.0,"background":false,"conversation":null,"max_output_tokens":null,"max_tool_calls":null,"previous_response_id":null,"prompt":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":null,"safety_identifier":null,"service_tier":"default","status":"completed","text":null,"top_logprobs":0,"truncation":null,"usage":{"input_tokens":354,"input_tokens_details":{"cached_tokens":0},"output_tokens":78,"output_tokens_details":{"reasoning_tokens":48},"total_tokens":432,"x_details":[{"input_tokens":354,"output_tokens":78,"total_tokens":432,"output_tokens_details":{"reasoning_tokens":48},"prompt_tokens_details":{"cached_tokens":0},"x_billing_type":"response_api"}]},"user":null,"completed_at":1784994493,"frequency_penalty":0.0,"presence_penalty":0.0,"store":false,"moderation":null,"billing":null},"sequence_number":28,"type":"response.completed"}
+

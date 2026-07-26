@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"shell","arguments":"{\"cmd\""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"arguments":":\"ls\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

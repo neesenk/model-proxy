@@ -126,9 +126,10 @@ providers:
     anthropic_base_url: https://api.kimi.com/coding
     usage_url: https://api.kimi.com/coding/v1/usages
     models:
+      - k3
+      - k3-256k
       - kimi-for-coding
       - kimi-for-coding-highspeed
-      - k3
   # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
   # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
   # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
@@ -167,7 +168,10 @@ claude_mapping:
 # Per-target options:
 #   protocol: anthropic|openai — declare when the target's protocol differs from
 #     the client's to trigger protocol conversion (same protocol = byte-level
-#     passthrough). E.g. let a Claude Code (anthropic) client hit codex:
+#     passthrough). When omitted, the proxy's wire probe verdict picks the
+#     default (supports /responses → responses, else chat; unknown → passthrough);
+#     an explicit protocol: always wins. E.g. let a Claude Code (anthropic)
+#     client hit codex:
 #     gpt-5.5: [{provider: codex, model: gpt-5.5, priority: 1, protocol: openai}]
 #   {provider: fusion, model: <workflow>} — reference a fusion: workflow (see
 #     the fusion block at the bottom of this file).

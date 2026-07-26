@@ -530,3 +530,40 @@ func (a *countingAuth) Refresh() error {
 	a.refreshes++
 	return nil
 }
+
+// --- P1: codex RewriteRequest merges include:["reasoning.encrypted_content"] ---
+// The codex backend is stateless (store:false); without the encrypted_content
+// include, multi-turn reasoning state is lost (cc-switch transform_responses).
+func TestCodexRewriteRequest_IncludeEncryptedContent(t *testing.T) {
+	p := &CodexProvider{}
+	// Absent include → created with the marker.
+	_, body := p.RewriteRequest("https://x/responses", []byte(`{"model":"gpt-5.5"}`), "/v1/responses")
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatal(err)
+	}
+	inc, _ := m["include"].([]any)
+	if len(inc) != 1 || inc[0] != "reasoning.encrypted_content" {
+		t.Errorf("include = %v, want [reasoning.encrypted_content]", m["include"])
+	}
+	// Existing include without the marker → appended, existing entries kept.
+	_, body2 := p.RewriteRequest("https://x/responses", []byte(`{"include":["code_interpreter.outputs"]}`), "/v1/responses")
+	var m2 map[string]any
+	if err := json.Unmarshal(body2, &m2); err != nil {
+		t.Fatal(err)
+	}
+	inc2, _ := m2["include"].([]any)
+	if len(inc2) != 2 || inc2[0] != "code_interpreter.outputs" || inc2[1] != "reasoning.encrypted_content" {
+		t.Errorf("include = %v, want existing + marker appended", m2["include"])
+	}
+	// Marker already present → no duplicate.
+	_, body3 := p.RewriteRequest("https://x/responses", []byte(`{"include":["reasoning.encrypted_content"]}`), "/v1/responses")
+	var m3 map[string]any
+	if err := json.Unmarshal(body3, &m3); err != nil {
+		t.Fatal(err)
+	}
+	inc3, _ := m3["include"].([]any)
+	if len(inc3) != 1 {
+		t.Errorf("include = %v, want no duplicate", m3["include"])
+	}
+}

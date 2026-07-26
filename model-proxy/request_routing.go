@@ -193,6 +193,28 @@ func targetCapabilities(cfg *Config, parentOf map[string]string, t RouteTarget) 
 	return pconf.Capabilities
 }
 
+// imageOKForTarget reports whether the target model accepts image content
+// (drives the tool_result media reinjection in protocol conversion):
+// config `capabilities:` override > models.dev catalog > default TRUE — a
+// model with no metadata anywhere keeps reinjection (better to possibly 400
+// than to silently drop user content). Note this default intentionally
+// differs from modelFits' conservative image routing (which must not SEND an
+// image to an unknown model); here the image is already in the conversation
+// and the only alternative is losing it.
+func imageOKForTarget(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, t RouteTarget) bool {
+	if caps := targetCapabilities(cfg, parentOf, t); caps != nil {
+		if declared, ok := caps[t.Model]; ok {
+			return hasCapability(declared, "image")
+		}
+	}
+	if cat != nil {
+		if m, ok := lookupModelMeta(cat, t.Model); ok {
+			return supportsImage(m)
+		}
+	}
+	return true
+}
+
 // imageMarkers are the JSON content-block shapes that indicate an image payload
 // across protocols (anthropic messages image blocks, openai chat image_url, openai
 // responses input_image). Matched as byte substrings — cheap, and a false

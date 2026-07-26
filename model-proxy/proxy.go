@@ -79,6 +79,16 @@ type Proxy struct {
 	// capturing the threaded sessionKey. Nil in production.
 	scheduleHook        func(sessionKey string)
 	persistSnapshotHook func() // test-only: runs after p.mu.RLock, before health/quota locks
+
+	// Wire capability probing (wirecap.go). wireCapMu is a LEAF lock: it is
+	// never held while acquiring p.mu/healthMu/quotaMu, so it joins no lock
+	// ordering (snapshotPersistedState may take it read-only under p.mu).
+	// wireCaps is keyed by PARENT provider name and survives reload (unlike
+	// health). wireProbe gates automatic probing (production NewProxy only —
+	// the test constructor leaves it off and tests probe synchronously).
+	wireCapMu sync.RWMutex
+	wireCaps  map[string]wireCaps
+	wireProbe bool
 }
 
 // providerHealth tracks a provider's circuit-breaker and rate-limit state.
@@ -250,8 +260,9 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 		OpenAIBaseURL: prov.OpenAIBaseURL,
 		Headers:       prov.Headers,
 		UsageURL:      prov.UsageURL,
-		BoundAPIKey:   cred.APIKey, // binding point #1 (forward path)
-		Models:        prov.Models, // for the usage-display fallback (listConfigModels)
+		AqpMintURL:    prov.AqpMintURL, // aqp: without this the key mint POSTs to ""
+		BoundAPIKey:   cred.APIKey,     // binding point #1 (forward path)
+		Models:        prov.Models,     // for the usage-display fallback (listConfigModels)
 		OAuthAuthFile: authFilePath(name, "oauth_auth"),
 	}
 	// Wire callbacks by provider type. aqp needs none: its Quota/Usage fetch
@@ -278,7 +289,12 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 }
 func NewProxy(cfg *Config) *Proxy {
 	home, _ := os.UserHomeDir()
-	return newProxyWithStatePath(cfg, filepath.Join(home, ".model-proxy", "quota_state.json"))
+	p := newProxyWithStatePath(cfg, filepath.Join(home, ".model-proxy", "quota_state.json"))
+	// Production only: probe wire capabilities asynchronously at boot (the
+	// injectable constructor leaves probing off; tests drive it synchronously).
+	p.wireProbe = true
+	p.startWireCapProbe()
+	return p
 }
 
 // newProxyWithStatePath is the injectable constructor used by tests so every
@@ -410,6 +426,18 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 			}
 		}
 		p.healthMu.Unlock()
+	}
+	// Restore wire capability verdicts (independent of the health fingerprint:
+	// capabilities are endpoint properties). A verdict is honored only while
+	// its recorded base_url still matches the current config — an endpoint
+	// change invalidates it and triggers a re-probe at the next boot probe.
+	if loaded := p.quota.LoadedWireCaps; len(loaded) > 0 {
+		p.wireCaps = map[string]wireCaps{}
+		for name, caps := range loaded {
+			if prov, ok := cfg.Providers[name]; ok && prov.OpenAIBaseURL == caps.BaseURL {
+				p.wireCaps[name] = caps
+			}
+		}
 	}
 	return p
 }
@@ -689,6 +717,7 @@ func (p *Proxy) snapshotPersistedState() persistedFullSnapshot {
 		Health:     p.snapshotHealthLocked(),
 		HealthFP:   healthConfigFingerprint(p.cfg),
 		Generation: p.runtimeGeneration,
+		WireCaps:   p.wireCapsSnapshot(),
 	}
 	p.quota.mu.RUnlock()
 	p.healthMu.Unlock()
@@ -771,6 +800,10 @@ func (p *Proxy) reload(configPath string) error {
 	// resolve their context window / modalities for request-aware routing. A
 	// failure leaves the previous catalog in place (never fails the reload).
 	go p.initCatalog()
+	// Re-probe wire capabilities for providers whose verdict is missing or
+	// whose base_url changed (existing verdicts survive reload — wireCaps is
+	// not part of the cleared health state).
+	p.startWireCapProbe()
 	// request_log is NOT rebuilt on reload (the logger owns a background
 	// goroutine + open file; restarting it mid-flight needs careful drain). So
 	// a config that enables/tunes request_log via SIGHUP won't take effect until
@@ -874,23 +907,10 @@ func synthesizeImplicitRoutesFrom(cfg *Config, loggedIn map[string]bool) (implic
 	return implicit, warnings
 }
 
-// resolvedBackendProto determines the backend protocol for a route target (or a
-// fusion/shadow leg): the declared `protocol:`, else the provider's
-// ProtocolHint (auto-resolve — e.g. codex→responses, so a non-Responses client
-// is converted without the user declaring protocol: on every codex route), else
-// the client's protocol (byte-level passthrough). The proxy exposes all three
-// protocols (anthropic/chat/responses); a target that natively speaks only one
-// (or a subset) is bridged by conversion automatically. Used by forward,
-// fusion, and shadow so the resolution rule is one place.
-func resolvedBackendProto(declared, provID, model, clientProto string) string {
-	if declared != "" {
-		return declared
-	}
-	if hint := provider.ProtocolHint(provID, model); hint != "" {
-		return hint
-	}
-	return clientProto
-}
+// The backend protocol for a route target is resolved by
+// (*Proxy).resolvedBackendProto (wirecap.go): declared protocol: >
+// ProtocolHint > wire probe verdict > client-protocol passthrough. Used by
+// forward, fusion, and shadow so the resolution rule is one place.
 
 // synthesizeImplicitRoutes derives login status then delegates to the pure core.
 func synthesizeImplicitRoutes(cfg *Config) (map[string]RouteTarget, []string) {
@@ -1502,9 +1522,11 @@ func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provi
 
 		// Backend protocol (#11 conversion): the target's declared protocol, else
 		// the provider's ProtocolHint (auto-resolve, e.g. codex→responses), else
-		// the client's. When it differs from the client's, convert the request
-		// body + route to the backend protocol; tryTarget converts the response back.
-		backendProto := resolvedBackendProto(t.Protocol, prov.Provider, t.Model, proto)
+		// the wire probe verdict, else the client's. When it differs from the
+		// client's, convert the request body + route to the backend protocol;
+		// tryTarget converts the response back. viaResponsesVerdict marks a
+		// verdict-driven switch to responses (rewound by the 404 correction).
+		backendProto, viaResponsesVerdict := p.resolvedBackendProto(t.Protocol, t.Provider, prov, t.Model, proto, parentOf)
 		convert := needsConversion(proto, backendProto)
 
 		// Rewrite the body's model to this target's real model (per target), then
@@ -1514,7 +1536,7 @@ func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provi
 			body = rewriteModel(origBody, t.Model)
 		}
 		if convert {
-			cb, err := convertRequest(body, proto, backendProto)
+			cb, err := convertRequestFor(body, proto, backendProto, convertReqOpts{ProviderID: prov.Provider, ImageOK: imageOKForTarget(cfg, parentOf, cat, t)})
 			if err != nil {
 				// Fail CLOSED: a conversion failure must NOT send the unconverted
 				// body to the backend (that ships an Anthropic body to an OpenAI
@@ -1556,7 +1578,7 @@ func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provi
 				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody, generation)
 			}
 		}
-		committed, retried, outcome := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry, ti == len(ordered)-1)
+		committed, retried, outcome := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry, ti == len(ordered)-1, viaResponsesVerdict, r2cCtxFor(proto, backendProto, origBody))
 		res.tried[t.Provider] = true
 		switch outcome {
 		case tryFailedHard:
@@ -1606,7 +1628,7 @@ const (
 	tryRateLimited                   // 429
 )
 
-func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx, ctxRetry func() []RouteTarget, lastTarget bool) (committed bool, retried []RouteTarget, outcome tryOutcome) {
+func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx, ctxRetry func() []RouteTarget, lastTarget, viaResponsesVerdict bool, r2c r2cCtx) (committed bool, retried []RouteTarget, outcome tryOutcome) {
 	// Wrap the client writer to capture time-to-first-token for latency stats.
 	// All writes below go through tw; ttft is read on the commit path.
 	tw := newTimingResponseWriter(w)
@@ -1790,15 +1812,29 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			// INTENTIONAL — 404/4xx failover is deliberate, see
 			// AGENTS.md「会被误认为是 bug 的设计」#2/#3.
 			if resp.StatusCode == 404 || isModelDenied(resp.StatusCode, peek) {
-				p.recordModelFailure(t.Provider, t.Model, sched, flc.generation)
+				// Wire-verdict 404 correction: this request was converted to
+				// /responses because the probe verdict said the endpoint
+				// supports it — a 404 here means the VERDICT was wrong, not
+				// the model. Flip the verdict (persisted; later requests use
+				// chat) and skip recordModelFailure so the model lock doesn't
+				// take the blame for our protocol choice.
+				if viaResponsesVerdict && resp.StatusCode == 404 {
+					p.noteWireResponsesMiss(t.Provider)
+					log.Printf("[proto=%s provider=%s] /responses 404 after wire verdict — provider responses downgraded to no (model NOT locked), failing over",
+						proto, t.Provider)
+				} else {
+					p.recordModelFailure(t.Provider, t.Model, sched, flc.generation)
+					if !lastTarget {
+						log.Printf("[proto=%s provider=%s] model %s unavailable upstream (status %d) — model locked %s, failing over",
+							proto, t.Provider, t.Model, resp.StatusCode, sched.modelLockout())
+					}
+				}
 				if !lastTarget {
 					resp.Body.Close()
 					p.releaseHalfOpenSlot(t.Provider, flc.generation)
 					if p.metrics != nil {
 						p.metrics.inc(t.Provider, t.Model, evFailovers)
 					}
-					log.Printf("[proto=%s provider=%s] model %s unavailable upstream (status %d) — model locked %s, failing over",
-						proto, t.Provider, t.Model, resp.StatusCode, sched.modelLockout())
 					return false, nil, tryFailedHard
 				}
 			}
@@ -1879,8 +1915,17 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// provider healthy — the upstream DID succeed; a convert failure is ours,
 		// not the provider's. The streaming path converts lazily after WriteHeader
 		// (below); its errors surface mid-stream and can't be pre-empted.
-		var preconv []byte // converted non-stream body; nil unless pre-converted here
+		//
+		// Some upstreams (codex, live-verified) stream SSE with an EMPTY
+		// content-type. Sniff the framing before committing to the buffered
+		// non-stream path — a JSON body never starts with event:/data:.
+		streamBySniff := false
 		if convert && !isSSE(resp.Header) {
+			peek := bytes.TrimSpace(peekResponseBody(resp, 16))
+			streamBySniff = bytes.HasPrefix(peek, []byte("event:")) || bytes.HasPrefix(peek, []byte("data:"))
+		}
+		var preconv []byte // converted non-stream body; nil unless pre-converted here
+		if convert && !isSSE(resp.Header) && !streamBySniff {
 			// 64 MiB cap: a non-stream LLM response larger than this is pathological
 			// (max_tokens bounds it); the cap bounds memory on the buffered convert.
 			all, rerr := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -1891,7 +1936,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				http.Error(w, fmt.Sprintf("upstream response read failed during %s→%s conversion", backendProto, proto), http.StatusBadGateway)
 				return true, nil, tryNone
 			}
-			conv, cerr := convertResponse(all, proto, backendProto)
+			conv, cerr := convertResponseNS(all, proto, backendProto, r2c)
 			if cerr != nil {
 				log.Printf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
 					proto, t.Provider, backendProto, proto, cerr)
@@ -1943,8 +1988,8 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		if convert {
 			if preconv != nil {
 				body = io.NopCloser(bytes.NewReader(preconv))
-			} else if isSSE(resp.Header) {
-				body = io.NopCloser(convertSSEReader(body, proto, backendProto, t.Model))
+			} else if isSSE(resp.Header) || streamBySniff {
+				body = io.NopCloser(convertSSEReaderNS(body, proto, backendProto, t.Model, r2c))
 			}
 		}
 		// request logging: tee the (possibly converted) body — `body`, NOT
@@ -1969,7 +2014,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				}))
 			})
 		}
-		if p.tokens != nil && isSSE(resp.Header) {
+		if p.tokens != nil && (isSSE(resp.Header) || streamBySniff) {
 			// Attribute the same observed usage to the calling agent (parallel
 			// agent pipeline) so per-agent token totals reconcile with per-model.
 			// Also stash into endTokens for the live-monitor end event (best-effort:
@@ -2195,12 +2240,13 @@ func (p *Proxy) runShadow(proto, bodyProto, calledModel, exposed string, shadow 
 		return
 	}
 	// Shadow backend protocol: declared, else the provider's ProtocolHint
-	// (auto-resolve, e.g. codex→responses), else same as the body's. Route +
-	// convert accordingly so the shadow gets a request in the protocol IT speaks.
-	shadowProto := resolvedBackendProto(shadow.Protocol, provCfg.Provider, shadow.Model, bodyProto)
+	// (auto-resolve, e.g. codex→responses), else the wire verdict, else same as
+	// the body's. Route + convert accordingly so the shadow gets a request in
+	// the protocol IT speaks.
+	shadowProto, _ := p.resolvedBackendProto(shadow.Protocol, shadow.Provider, provCfg, shadow.Model, bodyProto, parentOf)
 	sbody := reqBody
 	if needsConversion(bodyProto, shadowProto) {
-		cb, err := convertRequest(reqBody, bodyProto, shadowProto)
+		cb, err := convertRequestFor(reqBody, bodyProto, shadowProto, convertReqOpts{ProviderID: provCfg.Provider, ImageOK: imageOKForTarget(cfg, parentOf, p.catalogSnapshot(), RouteTarget{Provider: shadow.Provider, Model: shadow.Model})})
 		if err != nil {
 			// Fail CLOSED: don't send the unconverted body to the shadow backend
 			// (would ship an Anthropic body to an OpenAI endpoint). Skip this

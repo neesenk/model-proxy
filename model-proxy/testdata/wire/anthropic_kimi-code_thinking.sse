@@ -1,0 +1,120 @@
+event:message_start
+data:{"type":"message_start","message":{"id":"msg_GT3e6Gbt2Af8wYtXw5Zxy0ff","type":"message","role":"assistant","content":[],"model":"k3","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":93,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"service_tier":"standard","inference_geo":"not_available"}}}
+
+event:content_block_start
+data:{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" user"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" wants"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" simple"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" greeting"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" in"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" one"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" short"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" sentence"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" This"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" is"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" trivial"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" request"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" I"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" should"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" just"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" say"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" hi"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" briefly"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"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"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":0}
+
+event:content_block_start
+data:{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" there"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" nice"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" meet"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" you"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"!"}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":1}
+
+event:message_delta
+data:{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":93,"output_tokens":48,"output_tokens_details":{"thinking_tokens":25}}}
+
+event:message_stop
+data:{"type":"message_stop"}
+

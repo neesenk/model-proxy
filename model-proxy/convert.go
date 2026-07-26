@@ -23,10 +23,14 @@ import (
 // them when a target's declared protocol differs from the client's, so the
 // default same-protocol path stays byte-identical.
 //
-// Out of scope (dropped + warned, never silently): thinking/redacted_thinking
-// blocks, cache_control breakpoints, server-side tools (web_search/computer/...),
-// images inside tool_result, and logprobs. Claude Code's client tools
-// (bash/edit/...) are ordinary function tools and convert normally.
+// Out of scope for the anthropic↔chat pair (dropped + warned, never silently):
+// anthropic thinking/redacted_thinking blocks (chat reasoning_content DOES map
+// back to thinking), cache_control breakpoints, server-side tools
+// (web_search/computer/...). Images inside tool_result are NOT dropped — they
+// are reinjected via a synthetic user message (media reinjection). Refusals
+// map to plain text blocks. logprobs is dropped silently (debug-only field).
+// Claude Code's client tools (bash/edit/...) are ordinary function tools and
+// convert normally.
 
 // needsConversion reports whether a client protocol and a target's declared
 // backend protocol differ (and thus conversion applies). Any two distinct
@@ -98,6 +102,9 @@ func anthropicTextOf(content any) string {
 			t, _ := m["type"].(string)
 			if t == "text" || t == "" {
 				if s, _ := m["text"].(string); s != "" {
+					if b.Len() > 0 {
+						b.WriteString("\n") // blocks join with "\n", not verbatim concat
+					}
 					b.WriteString(s)
 				}
 			} else {
@@ -195,13 +202,16 @@ func anthropicContentBlockToOpenAIPart(blk map[string]any) map[string]any {
 		convertWarn("dropping " + strOf(blk["type"]) + " block (no cross-protocol equivalent)")
 		return nil
 	}
+	convertWarn("dropping unknown anthropic content block: " + strOf(blk["type"]))
 	return nil
 }
 
 // anthropicMsgToOpenAIMsgs converts one anthropic message to one or more openai
 // messages. A user message carrying tool_result blocks expands to separate openai
 // `tool` messages (one per result) plus a `user` message for any text/image.
-func anthropicMsgToOpenAIMsgs(m map[string]any) []map[string]any {
+// imageOK gates the media reinjection (#6): without vision the images collapse
+// to a placeholder line inside the tool message instead of image_url parts.
+func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 	role, _ := m["role"].(string)
 	content := m["content"]
 	var out []map[string]any
@@ -234,7 +244,14 @@ func anthropicMsgToOpenAIMsgs(m map[string]any) []map[string]any {
 			om["content"] = s
 		}
 		if len(textParts) == 1 {
-			om["content"] = textParts[0]["text"]
+			// Simplify a lone part to a bare string only when it IS a text part;
+			// a single image (etc.) part has no `text` key — keep the array,
+			// otherwise the content collapses to nil and the part is dropped.
+			if txt, ok := textParts[0]["text"]; ok {
+				om["content"] = txt
+			} else {
+				om["content"] = textParts
+			}
 		} else if len(textParts) > 1 {
 			om["content"] = textParts
 		} else if len(toolCalls) > 0 && len(textParts) == 0 {
@@ -257,7 +274,23 @@ func anthropicMsgToOpenAIMsgs(m map[string]any) []map[string]any {
 			if blk["type"] == "tool_result" {
 				id, _ := blk["tool_use_id"].(string)
 				txt := anthropicToolResultText(blk["content"])
+				imgs := anthropicToolResultImages(blk["content"])
+				if len(imgs) > 0 && !imageOK {
+					// No vision on the target: no synthetic user message, no
+					// image_url parts (deepseek 400s on them) — placeholder text.
+					txt = appendMediaPlaceholder(txt)
+					imgs = nil
+				}
 				out = append(out, map[string]any{"role": "tool", "tool_call_id": id, "content": txt})
+				// Media reinjection (cc-switch): images inside tool_result are
+				// re-delivered as a synthetic user message right after the tool
+				// message, instead of being dropped (a pure-image tool_result
+				// would otherwise become content:"" → tool loops).
+				if len(imgs) > 0 {
+					synth := []map[string]any{{"type": "text", "text": "[image returned by tool]"}}
+					synth = append(synth, imgs...)
+					out = append(out, map[string]any{"role": "user", "content": synth})
+				}
 				continue
 			}
 			if p := anthropicContentBlockToOpenAIPart(blk); p != nil {
@@ -267,7 +300,13 @@ func anthropicMsgToOpenAIMsgs(m map[string]any) []map[string]any {
 		if len(parts) > 0 {
 			um := map[string]any{"role": "user"}
 			if len(parts) == 1 {
-				um["content"] = parts[0]["text"]
+				// Same lone-part rule as the assistant branch: only a text part
+				// simplifies to a string; a single image part keeps the array.
+				if txt, ok := parts[0]["text"]; ok {
+					um["content"] = txt
+				} else {
+					um["content"] = parts
+				}
 			} else {
 				um["content"] = parts
 			}
@@ -280,7 +319,9 @@ func anthropicMsgToOpenAIMsgs(m map[string]any) []map[string]any {
 }
 
 // anthropicToolResultText extracts the text of a tool_result content (string or
-// text blocks); images inside tool_result are warned + dropped.
+// text blocks). Image blocks are skipped WITHOUT a warning — they are
+// re-delivered via anthropicToolResultImages (synthetic user message); other
+// non-text blocks are warned + dropped.
 func anthropicToolResultText(content any) string {
 	if s, ok := content.(string); ok {
 		return s
@@ -292,10 +333,13 @@ func anthropicToolResultText(content any) string {
 			if m == nil {
 				continue
 			}
-			if t, _ := m["type"].(string); t == "text" || t == "" {
+			t, _ := m["type"].(string)
+			if t == "text" || t == "" {
 				if s, _ := m["text"].(string); s != "" {
 					b.WriteString(s)
 				}
+			} else if t == "image" {
+				continue // reinjected, not dropped
 			} else {
 				convertWarn("dropping non-text block inside tool_result: " + t)
 			}
@@ -305,9 +349,49 @@ func anthropicToolResultText(content any) string {
 	return ""
 }
 
+// anthropicToolResultImages extracts image blocks from a tool_result content
+// value as openai image_url parts (base64 → data URL, url source kept) for
+// synthetic-user reinjection.
+func anthropicToolResultImages(content any) []map[string]any {
+	blocks, ok := content.([]any)
+	if !ok {
+		return nil
+	}
+	var out []map[string]any
+	for _, blk := range blocks {
+		m := asMap(blk)
+		if m == nil || m["type"] != "image" {
+			continue
+		}
+		if p := anthropicContentBlockToOpenAIPart(m); p != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// mediaOmittedPlaceholder replaces reinjected images when the target model
+// has no vision capability (#6: deepseek 400s "unknown variant" on image_url).
+const mediaOmittedPlaceholder = "[image omitted: target model has no vision capability]"
+
+// appendMediaPlaceholder folds the no-vision placeholder into a tool
+// message's text content (it IS the whole content when the result had no text).
+func appendMediaPlaceholder(txt string) string {
+	if txt == "" {
+		return mediaOmittedPlaceholder
+	}
+	return txt + "\n" + mediaOmittedPlaceholder
+}
+
 // convertAnthropicRequestToOpenAI transforms an Anthropic /v1/messages body into
 // an OpenAI /v1/chat/completions body (full tools support).
 func convertAnthropicRequestToOpenAI(body []byte) ([]byte, error) {
+	return convertAnthropicRequestToOpenAIV(body, true)
+}
+
+// convertAnthropicRequestToOpenAIV is convertAnthropicRequestToOpenAI with the
+// target model's vision capability (media reinjection gate).
+func convertAnthropicRequestToOpenAIV(body []byte, imageOK bool) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
@@ -333,7 +417,7 @@ func convertAnthropicRequestToOpenAI(body []byte) ([]byte, error) {
 	if raw, ok := src["messages"].([]any); ok {
 		for _, m := range raw {
 			if mm := asMap(m); mm != nil {
-				msgs = append(msgs, anthropicMsgToOpenAIMsgs(mm)...)
+				msgs = append(msgs, anthropicMsgToOpenAIMsgs(mm, imageOK)...)
 			}
 		}
 	}
@@ -441,6 +525,15 @@ func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
 		if u != "" {
 			return map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": u}}
 		}
+	case "refusal":
+		// Refusals map to plain text (anthropic has no refusal block type);
+		// stop_reason already carries the refusal semantics (cc-switch同款).
+		if s, _ := part["refusal"].(string); s != "" {
+			return map[string]any{"type": "text", "text": s}
+		}
+		return nil
+	default:
+		convertWarn("dropping unknown openai content part: " + strOf(part["type"]))
 	}
 	return nil
 }
@@ -465,6 +558,38 @@ func openaiContentToAnthropicBlocks(content any) []map[string]any {
 		}
 	}
 	return out
+}
+
+// openaiTextOf extracts concatenated text from an openai system/tool message
+// content value (string, or array of text parts joined with "\n"). Non-text
+// parts are warned + skipped; nil/absent content yields "" — NEVER the literal
+// "null" that strOf(nil) would render.
+func openaiTextOf(content any) string {
+	if s, ok := content.(string); ok {
+		return s
+	}
+	parts, ok := content.([]any)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		m := asMap(p)
+		if m == nil {
+			continue
+		}
+		if t, _ := m["type"].(string); t == "text" || t == "" {
+			if s, _ := m["text"].(string); s != "" {
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(s)
+			}
+		} else {
+			convertWarn("dropping non-text part in system/tool content: " + t)
+		}
+	}
+	return b.String()
 }
 
 // parseToolArgs parses an openai tool_call arguments JSON string into an object;
@@ -552,10 +677,19 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 			out[k] = v
 		}
 	}
-	if mt, ok := src["max_tokens"]; ok {
+	// max_completion_tokens wins over the legacy max_tokens when both are set;
+	// Anthropic requires max_tokens, so a generous default is injected last.
+	if mct, ok := src["max_completion_tokens"]; ok {
+		out["max_tokens"] = mct
+	} else if mt, ok := src["max_tokens"]; ok {
 		out["max_tokens"] = mt
 	} else {
 		out["max_tokens"] = 4096 // Anthropic requires it
+	}
+	if effort, ok := src["reasoning_effort"].(string); ok {
+		if th := effortToThinking(effort); th != nil {
+			out["thinking"] = th
+		}
 	}
 	if stream, ok := src["stream"]; ok {
 		out["stream"] = stream
@@ -587,7 +721,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 			blocks = append(blocks, map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": normID(tid),
-				"content":     strOf(tm["content"]),
+				"content":     openaiTextOf(tm["content"]),
 			})
 		}
 		msgs = append(msgs, map[string]any{"role": "user", "content": blocks})
@@ -601,7 +735,14 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 		role, _ := mm["role"].(string)
 		switch role {
 		case "system":
-			systemText += strOf(mm["content"])
+			// Parts-array content extracts its text parts; multiple system
+			// messages join with "\n" (cc-switch/opencodex join the same way).
+			if sys := openaiTextOf(mm["content"]); sys != "" {
+				if systemText != "" {
+					systemText += "\n"
+				}
+				systemText += sys
+			}
 			continue
 		case "tool":
 			pendingTool = append(pendingTool, mm)
@@ -697,24 +838,62 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 // convertRequest converts a request body from the client protocol to the target
 // protocol. Returns the original body unchanged when no conversion is needed.
 func convertRequest(body []byte, clientProto, targetProto string) ([]byte, error) {
+	return convertRequestFor(body, clientProto, targetProto, convertReqOpts{ImageOK: true})
+}
+
+// convertReqOpts carries per-target conversion options: the backend provider
+// id (reasoning dialect + codex shaping) and the target model's vision
+// capability (media reinjection gate). ImageOK defaults to TRUE at call sites
+// when unknown.
+type convertReqOpts struct {
+	ProviderID string
+	ImageOK    bool
+}
+
+// convertRequestFor is convertRequest with per-target options.
+func convertRequestFor(body []byte, clientProto, targetProto string, opts convertReqOpts) ([]byte, error) {
 	if !needsConversion(clientProto, targetProto) {
 		return body, nil
 	}
+	var (
+		out []byte
+		err error
+	)
 	switch clientProto + "->" + targetProto {
 	case "anthropic->openai":
-		return convertAnthropicRequestToOpenAI(body)
+		out, err = convertAnthropicRequestToOpenAIV(body, opts.ImageOK)
 	case "openai->anthropic":
-		return convertOpenAIRequestToAnthropic(body)
+		out, err = convertOpenAIRequestToAnthropic(body)
 	case "anthropic->responses":
-		return convertAnthropicRequestToResponses(body)
+		out, err = convertAnthropicRequestToResponsesV(body, opts.ImageOK)
 	case "openai->responses":
-		return convertOpenAIRequestToResponses(body)
+		out, err = convertOpenAIRequestToResponses(body)
 	case "responses->anthropic":
-		return convertResponsesRequestToAnthropic(body)
+		out, err = convertResponsesRequestToAnthropic(body)
 	case "responses->openai":
-		return convertResponsesRequestToOpenAI(body)
+		out, err = convertResponsesRequestToOpenAIFor(body, opts)
+	default:
+		return body, nil
 	}
-	return body, nil
+	if err != nil || opts.ProviderID != "codex" || targetProto != "responses" {
+		return out, err
+	}
+	// Codex backend strictness (cc-switch's codex shaping): it 400s on
+	// max_output_tokens ("Unsupported parameter") and the sampling knobs —
+	// strip them so the FIRST request doesn't have to fail for paramBlock to
+	// learn the same lesson.
+	var m map[string]any
+	if sonic.Unmarshal(out, &m) != nil {
+		return out, nil
+	}
+	for _, k := range []string{"max_output_tokens", "temperature", "top_p"} {
+		delete(m, k)
+	}
+	stripped, serr := sonic.Marshal(m)
+	if serr != nil {
+		return out, nil
+	}
+	return stripped, nil
 }
 
 // --- response (non-streaming) ---
@@ -728,6 +907,8 @@ func mapFinishToStopReason(finish string) string {
 		return "max_tokens"
 	case "tool_calls", "function_call":
 		return "tool_use"
+	case "content_filter":
+		return "refusal"
 	case "":
 		return "end_turn"
 	default:
@@ -745,6 +926,10 @@ func mapStopReasonToFinish(reason string) string {
 		return "length"
 	case "tool_use":
 		return "tool_calls"
+	case "refusal":
+		return "content_filter"
+	case "pause_turn":
+		return "stop" // best-effort: no chat equivalent
 	default:
 		return "stop"
 	}
@@ -781,9 +966,12 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		Model   string `json:"model"`
 		Choices []struct {
 			Message struct {
-				Role      string          `json:"role"`
-				Content   json.RawMessage `json:"content"`
-				ToolCalls []any           `json:"tool_calls"`
+				Role             string          `json:"role"`
+				Content          json.RawMessage `json:"content"`
+				Refusal          string          `json:"refusal"` // message-level refusal (content often null)
+				ReasoningContent string          `json:"reasoning_content"`
+				Reasoning        string          `json:"reasoning"` // OpenRouter spelling (its reasoning_content stays null)
+				ToolCalls        []any           `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -791,17 +979,31 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
 			PromptDetails    struct {
-				CachedTokens int `json:"cached_tokens"`
+				CachedTokens     int `json:"cached_tokens"`
+				CacheWriteTokens int `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"` // direct spelling
 		} `json:"usage"`
 	}
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse openai response: %w", err)
 	}
+	// An empty-choices 200 is a broken upstream (some reverse gateways return
+	// empty 200s when overloaded) — fail the conversion so the forward path
+	// surfaces an error instead of committing a well-formed empty message
+	// (intentional-behaviors #1: 空 200 视为模型失败).
+	if len(src.Choices) == 0 {
+		return nil, fmt.Errorf("openai response has no choices (treating as upstream failure)")
+	}
 	var content []map[string]any
 	stopReason := "end_turn"
 	if len(src.Choices) > 0 {
 		c := src.Choices[0]
+		// reasoning_content → a thinking block, placed BEFORE the text (the
+		// canonical anthropic ordering).
+		if rc := firstNonEmpty(c.Message.ReasoningContent, c.Message.Reasoning); rc != "" {
+			content = append(content, map[string]any{"type": "thinking", "thinking": rc})
+		}
 		// content may be a string or null.
 		if len(c.Message.Content) > 0 && string(c.Message.Content) != "null" {
 			var cv any
@@ -816,6 +1018,11 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 				}
 			}
 		}
+		// Message-level refusal field → text block (some providers put the
+		// refusal here instead of in a content part; content is usually null).
+		if c.Message.Refusal != "" {
+			content = append(content, map[string]any{"type": "text", "text": c.Message.Refusal})
+		}
 		if len(c.Message.ToolCalls) > 0 {
 			content = append(content, openaiToolCallsToAnthropic(c.Message.ToolCalls)...)
 		}
@@ -824,16 +1031,27 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 	if content == nil {
 		content = []map[string]any{}
 	}
-	// openai counts cached tokens as a SUBSET of prompt_tokens; anthropic counts
-	// input_tokens excluding cache reads. Split them out (clamped ≥0).
+	// openai counts cached AND cache-creation tokens as a SUBSET of
+	// prompt_tokens; anthropic counts both separately from input_tokens. Split
+	// them out (clamped ≥0) — leaving cache creation in input_tokens would
+	// count the write in BOTH the input and cache buckets. The direct
+	// cache_creation_input_tokens spelling wins over
+	// prompt_tokens_details.cache_write_tokens.
 	cached := src.Usage.PromptDetails.CachedTokens
-	inTok := src.Usage.PromptTokens - cached
+	cacheCreate := src.Usage.CacheCreationInputTokens
+	if cacheCreate == 0 {
+		cacheCreate = src.Usage.PromptDetails.CacheWriteTokens
+	}
+	inTok := src.Usage.PromptTokens - cached - cacheCreate
 	if inTok < 0 {
 		inTok = 0
 	}
 	usage := map[string]any{"input_tokens": inTok, "output_tokens": src.Usage.CompletionTokens}
 	if cached > 0 {
 		usage["cache_read_input_tokens"] = cached
+	}
+	if cacheCreate > 0 {
+		usage["cache_creation_input_tokens"] = cacheCreate
 	}
 	out := map[string]any{
 		"id":          "msg_" + src.ID,
@@ -926,6 +1144,12 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 // reverse of convertRequest), so the function chosen is the one named for that
 // direction, NOT the client->target key.
 func convertResponse(body []byte, clientProto, targetProto string) ([]byte, error) {
+	return convertResponseNS(body, clientProto, targetProto, r2cCtx{})
+}
+
+// convertResponseNS is convertResponse with an MCP namespace restore map for
+// the chat→responses direction (nil = no-op).
+func convertResponseNS(body []byte, clientProto, targetProto string, r2c r2cCtx) ([]byte, error) {
 	if !needsConversion(clientProto, targetProto) {
 		return body, nil
 	}
@@ -941,7 +1165,7 @@ func convertResponse(body []byte, clientProto, targetProto string) ([]byte, erro
 	case "responses->anthropic": // backend anthropic → client responses
 		return convertAnthropicResponseToResponses(body)
 	case "responses->openai": // backend openai → client responses
-		return convertOpenAIResponseToResponses(body)
+		return convertOpenAIResponseToResponsesNS(body, r2c)
 	}
 	return body, nil
 }
@@ -976,6 +1200,7 @@ type openaiSSEToAnthropicSSE struct {
 	outTok    int                   // completion_tokens from trailing usage
 	inTok     int                   // prompt_tokens from trailing usage
 	cachedTok int                   // prompt_tokens_details.cached_tokens from trailing usage
+	createTok int                   // cache write (cache_creation_input_tokens / cache_write_tokens)
 	stopRsn   string                // finish_reason mapped to stop_reason
 }
 
@@ -1038,6 +1263,21 @@ func (t *openaiSSEToAnthropicSSE) openText() {
 	})
 }
 
+// openThinking opens a thinking block (closing any other open block first).
+func (t *openaiSSEToAnthropicSSE) openThinking() {
+	if t.curKind == "thinking" {
+		return
+	}
+	t.closeBlock()
+	t.curKind = "thinking"
+	t.curIdx = t.nextIdx
+	t.nextIdx++
+	t.emit("content_block_start", map[string]any{
+		"type": "content_block_start", "index": t.curIdx,
+		"content_block": map[string]any{"type": "thinking", "thinking": ""},
+	})
+}
+
 // bufferTool accumulates an openai tool_call fragment (id+name on first sighting,
 // argument fragments appended). The tool_use block is emitted as a complete,
 // sequential block in finish() — never live — so interleaved parallel tools don't
@@ -1094,14 +1334,18 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 		sr = "end_turn"
 	}
 	// Same cache split as the non-streaming converter: openai's prompt_tokens
-	// INCLUDES cached tokens; anthropic's input_tokens excludes them (clamp ≥0).
-	inTok := t.inTok - t.cachedTok
+	// INCLUDES cached and cache-creation tokens; anthropic's input_tokens
+	// excludes both (clamp ≥0).
+	inTok := t.inTok - t.cachedTok - t.createTok
 	if inTok < 0 {
 		inTok = 0
 	}
 	usage := map[string]any{"input_tokens": inTok, "output_tokens": t.outTok}
 	if t.cachedTok > 0 {
 		usage["cache_read_input_tokens"] = t.cachedTok
+	}
+	if t.createTok > 0 {
+		usage["cache_creation_input_tokens"] = t.createTok
 	}
 	t.emit("message_delta", map[string]any{
 		"type":  "message_delta",
@@ -1163,8 +1407,11 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			Model   string `json:"model"`
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Content          string `json:"content"`
+					Refusal          string `json:"refusal"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"` // OpenRouter spelling
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Function struct {
@@ -1179,8 +1426,10 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 				PromptTokens     int `json:"prompt_tokens"`
 				CompletionTokens int `json:"completion_tokens"`
 				PromptDetails    struct {
-					CachedTokens int `json:"cached_tokens"`
+					CachedTokens     int `json:"cached_tokens"`
+					CacheWriteTokens int `json:"cache_write_tokens"`
 				} `json:"prompt_tokens_details"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"` // direct spelling
 			} `json:"usage"`
 		}
 		if sonic.Unmarshal([]byte(payload), &chunk) != nil {
@@ -1196,15 +1445,35 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			t.inTok = chunk.Usage.PromptTokens
 			t.outTok = chunk.Usage.CompletionTokens
 			t.cachedTok = chunk.Usage.PromptDetails.CachedTokens
+			t.createTok = chunk.Usage.CacheCreationInputTokens
+			if t.createTok == 0 {
+				t.createTok = chunk.Usage.PromptDetails.CacheWriteTokens
+			}
 		}
 		t.ensureStart()
 		if len(chunk.Choices) > 0 {
 			c := chunk.Choices[0]
+			if rc := firstNonEmpty(c.Delta.ReasoningContent, c.Delta.Reasoning); rc != "" {
+				t.openThinking()
+				t.emit("content_block_delta", map[string]any{
+					"type": "content_block_delta", "index": t.curIdx,
+					"delta": map[string]any{"type": "thinking_delta", "thinking": rc},
+				})
+			}
 			if c.Delta.Content != "" {
 				t.openText()
 				t.emit("content_block_delta", map[string]any{
 					"type": "content_block_delta", "index": t.curIdx,
 					"delta": map[string]any{"type": "text_delta", "text": c.Delta.Content},
+				})
+			}
+			// Refusal deltas stream as plain text (anthropic has no refusal
+			// block; the finish_reason already maps to stop_reason refusal).
+			if c.Delta.Refusal != "" {
+				t.openText()
+				t.emit("content_block_delta", map[string]any{
+					"type": "content_block_delta", "index": t.curIdx,
+					"delta": map[string]any{"type": "text_delta", "text": c.Delta.Refusal},
 				})
 			}
 			for _, tc := range c.Delta.ToolCalls {
@@ -1459,6 +1728,12 @@ func backendPath(backendProto string) string {
 // stream (targetProto) and emits the CLIENT stream (clientProto); caller has
 // verified needsConversion.
 func convertSSEReader(r io.Reader, clientProto, targetProto, model string) io.Reader {
+	return convertSSEReaderNS(r, clientProto, targetProto, model, r2cCtx{})
+}
+
+// convertSSEReaderNS is convertSSEReader with an MCP namespace restore map
+// for the chat→responses direction (nil = no-op).
+func convertSSEReaderNS(r io.Reader, clientProto, targetProto, model string, r2c r2cCtx) io.Reader {
 	switch targetProto + "->" + clientProto {
 	case "openai->anthropic":
 		return newOpenAIToAnthropicSSE(r, model)
@@ -1471,7 +1746,7 @@ func convertSSEReader(r io.Reader, clientProto, targetProto, model string) io.Re
 	case "anthropic->responses":
 		return newAnthropicToResponsesSSE(r, model)
 	case "openai->responses":
-		return newOpenAIToResponsesSSE(r, model)
+		return newOpenAIToResponsesSSENS(r, model, r2c)
 	}
 	return r
 }

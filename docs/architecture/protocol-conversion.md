@@ -6,7 +6,7 @@
 
 ## 边界
 
-目标未声明 `protocol:` 时，上游协议等于客户端协议，必须字节级透传。只有目标显式声明的协议（`anthropic` / `openai` / `responses`）与客户端不同，才启用转换。
+目标未声明 `protocol:` 时，上游协议按 `(*Proxy).resolvedBackendProto` 解析：显式 `protocol:` > `ProtocolHint`（codex→responses）> wire 探测 verdict（wirecap.go，boot/reload 时探测 `/responses` 与 `/v1/messages`）> 客户端协议透传。只有解析出的后端协议与客户端不同，才启用转换；verdict unknown 时维持透传（boot 窗口期行为不变），verdict 说 `/responses` 不存在时 anthropic/responses 客户端自动转 chat。
 
 三个协议值：
 
@@ -16,17 +16,28 @@
 
 转换器为直连 pairwise（`convert.go` 的 anthropic↔openai 不动；`convert_responses.go` 新增 4 方向 × {请求, 响应, 流式}）。`needsConversion` 对任意两个不同的已知协议返回 true；未知协议值 fail-safe 不转换。
 
-Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。codex 不再带 `WireProtocolNote`、不再告警。 Responses 转换无状态：丢弃 `previous_response_id`，历史全部靠 `input` 列表显式携带（等价于 messages）。
+Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。codex 不再带 `WireProtocolNote`、不再告警。 Responses 转换无状态：丢弃 `previous_response_id`，历史全部靠 `input` 列表显式携带（等价于 messages）。此外 `convertRequestFor` 在 provider 为 codex 时预剥离 `max_output_tokens`/`temperature`/`top_p`（codex 后端对这些字段 400 "Unsupported parameter"，等 paramBlock 学习会让每进程首个请求白失败一次；cc-switch 的 codex shaping 同款清单）。
 
 ## 请求映射（Responses 方向）
 
-- anthropic `system` ↔ responses `instructions`；chat 首条 system/developer message → `instructions`。
-- `messages` ↔ `input` items：text block ↔ `{type:message, content:[{input_text|output_text}]}`；image ↔ `{input_image, image_url:data:...}`。
-- anthropic `tool_use` / chat `tool_calls` → responses `{type:function_call, name, arguments, call_id}`；tool `id` ↔ `call_id`（`function_call_output` 的 `call_id` 必须回填）。
+- anthropic `system` ↔ responses `instructions`；chat 首条 system/developer message → `instructions`。**messages 内的 system/developer role 不允许进 Responses input**（codex 400 "System messages are not allowed"）：a→r 把它们折叠进 `instructions`（接在顶层 system 后，`\n\n` 连接，与 chat→r 一致）；r→a 反向把 input 里的 system/developer message item 折叠进 anthropic 顶层 `system`（同样接在 instructions 后，`\n\n` 连接——anthropic messages 只接受 user/assistant，原样发 role:"system" 必 400，降级为 user 会改变指令优先级，cc-switch transform_codex_anthropic 同款）。
+- **孤立 reasoning item 丢弃（a→r，cc-switch transform_responses.rs）**：仅含 thinking/redacted_thinking 块的 assistant 消息（incomplete turn 历史常见）转换后没有任何 message/function_call 后继，codex 400 "reasoning item without its required following item"——这类 reasoning item 直接丢弃 + `convertWarn`；同代内有 function_call/文本后继时保留。
+- `messages` ↔ `input` items：text block ↔ `{type:message, content:[{input_text|output_text}]}`；image ↔ `{input_image, image_url}`（base64 转 data URL，url-source 原样保留）。
+- anthropic `tool_use` / chat `tool_calls` → responses `{type:function_call, name, arguments, call_id}`；tool `id` ↔ `call_id`（`function_call_output` 的 `call_id` 必须回填）。arguments 缺省补 `"{}"`；chat→r 对只带 id 不带 name 的 tool_call（replace-style 客户端重发）按 call_id 从同请求前面的 function_call 回填 name，仍缺则 convertWarn。
 - anthropic `tool_result` / chat `role:tool` → responses `{type:function_call_output, call_id, output}`。
-- anthropic `thinking` ↔ responses `{type:reasoning, summary, encrypted_content}`；`thinking`↔`summary.text`，`signature`↔`encrypted_content`。
-- tools：`{type:function, name, parameters}` ↔ anthropic `input_schema` / chat `function.parameters`。
-- `max_tokens` ↔ `max_output_tokens`；`thinking.budget_tokens` ↔ `reasoning.effort`（best-effort 近似）；chat `reasoning_effort` ↔ responses `reasoning.effort`。
+- **tool_result 媒体改投（cc-switch 剥离-改投，按目标模型视觉能力门控）**：tool_result/function_call_output 里的 image 块不再丢弃——tool/function_call_output 消息只带文本，图片紧随一条合成 user 消息改投：a→chat 为 `{"role":"user","content":[{"type":"text","text":"[image returned by tool]"},{"type":"image_url",...}]}`（base64 转 data URL、url source 保留）；a→r 为 `{type:message, role:user, content:[input_text + input_image]}`；r→chat 的 output parts 数组同样拆 text/image 改投；**r→a 的 function_call_output parts 数组拆成 anthropic 原生块**（text part → tool_result 文本块，image part → image 块，base64/url source 均支持；r→a 侧无视觉门控——anthropic 目标恒接受 image 块）。连续多条带图 tool_result 各自的合成消息跟在各自 tool 消息后；无图时行为不变。**视觉门控**（`imageOKForTarget`，config `capabilities:` > models.dev catalog > 缺省 true）：目标模型无视觉能力时不发合成 user 消息，占位文本 `[image omitted: target model has no vision capability]` 并进 tool 消息文本（文本为空即全部 content）——无视觉上游（如 deepseek）会对 image_url part 400。
+- **占位 reasoning_content（thinking 方言限定）**：r→chat 在消息列表构建完成后，对 `ChatReasoningMode == "thinking"` 的 provider，给每条带非空 tool_calls 且 `reasoning_content` 为空/缺失的 assistant 消息注入 `"reasoning_content": "tool call"`（deepseek 400 "reasoning_content must be passed back"，kimi/Moonshot 同样拒绝；codex 的 reasoning item 为空 summary + encrypted_content，附挂后恰为空，由此兜住 codex→deepseek）。其他方言不注入。
+- **MCP namespace 工具名压平/还原（cc-switch）**：responses 的 `{type:"function", name, namespace}` 二维命名在 r→chat 请求侧压平为 `namespace__name`（namespace 自身以 `__` 结尾时拼出 4 个下划线；确定性前缀截断到 ≤64 字符；压平名与任一顶层工具撞名 → 转换错误 fail-closed）；input 历史 function_call 同步压平并删除 namespace 字段；namespace 型 tool_choice 降级 `"auto"`。**容器形 `{type:"namespace", name, tools:[…]}`（codex 0.145 实测存在）经 `nsExpandTools` 展开**：每个子工具提升为顶层声明，子工具缺 `namespace` 字段时取容器名、自带字段优先；容器与 field 形压平出**相同**扁平名，共享同一 restore map；容器嵌套（子工具又是 namespace）fail-closed 报错。chat→r 响应侧按**从原始 responses 请求体重建**的 restore map（`responsesNamespaceRestoreMap`，无跨请求状态，截断后的压平名做 key）把 function_call item 还原为 `{name, namespace}`（非流式 `convertOpenAIResponseToResponsesNS`、流式 `newOpenAIToResponsesSSENS` 的 added/done 帧；未命中名字原样透传）。其他未知工具类型（tool_search、hosted 工具）在 r→chat 请求侧丢弃 + convertWarn（含类型名）。
+- **custom/freeform 工具（cc-switch transform_codex_chat）**：Codex CLI 主力工具（shell/apply_patch）是 `{type:"custom", name}`，call 携带**原始字符串** input 而非 JSON arguments。r→chat：custom 工具包装为单参数 function（`parameters={"input": string}`，required+additionalProperties:false），`custom_tool_call` 历史编码为 `arguments={"input": <raw>}`，`custom_tool_call_output` 同 function_call_output（含媒体改投）。chat→r：响应转换凭从原始请求体重建的 custom 集合（`r2cCtx.custom`，与 ns restore map 同通道 `r2cCtxFor` 传递）把命中名字的 tool_call 还原为 `{type:"custom_tool_call", input}`（arguments JSON 解出 `input`，解析失败原样兜底）；流式合成 `response.custom_tool_call_input.{delta,done}`（item id `ctc_item_<idx>`），arguments 的部分 JSON 做**渐进解包**（吃 `{"input": "` 前缀、反转义内容、尾部不完整转义留存下一 chunk、结尾 `"}` 吃掉）。
+- **reasoning effort 方言（`provider.ChatReasoningMode`，cc-switch mapReasoningEffort）**：r→chat 的 `reasoning.effort` 按 provider 渲染——zhipu/volcengine/kimi-code/deepseek → `thinking:{type:"enabled"|"disabled"}`（none/minimal→disabled）；qwen-plan → `enable_thinking: bool`；aqp（OpenRouter 系）→ 原生 `reasoning:{effort}` 对象；其他 → `reasoning_effort` 原样。无 reasoning 字段时任何模式都不发声。
+- anthropic `thinking` ↔ responses `{type:reasoning, summary, encrypted_content}`；`thinking`↔`summary.text`，`signature`↔`encrypted_content`。`redacted_thinking` ↔ `summary` 为空数组但**键必须存在**（codex 实测 400 "Missing required parameter: 'input[N].summary'"）且仅含 `encrypted_content` 的 reasoning item，`data` 逐字往返。**a→r 的 `reasoning` 请求对象恒带 `summary:"auto"`**（opencodex 恒设；不设时 codex 响应零 reasoning item）。**adaptive thinking（Claude Code /effort 线路）**：`thinking:{type:"adaptive"}` 的 effort 取自顶层 `output_config.effort`（已知档位原样转发，未知串丢弃取默认 `high`；`type:"disabled"` 仍不发 reasoning）。codex provider 的 RewriteRequest 除 `store:false` 外还合并 `include:["reasoning.encrypted_content"]`（无服务端状态下多轮 reasoning 必须，cc-switch 同款）。**a→r 注入 `prompt_cache_key`**（无 key 时 codex 侧 cached_tokens 恒 0）：优先 `metadata.user_id` 的 sha256（hex 前 32 字符）——这是「metadata 丢弃」有损规则的**例外**，只有哈希跨协议、原始 user_id 永不出站；无 user_id 时用 model+instructions+转换后工具的确定性指纹（sonic.ConfigStd 排序键；opencodex 的 cache-cohort 思路）。r→chat 方向透传已有 `prompt_cache_key`（codex 自发）。
+- tools：`{type:function, name, parameters}` ↔ anthropic `input_schema` / chat `function.parameters`（`strict` 在 responses↔chat 两侧透传）。anthropic server-side 工具（`web_search_*`/`computer_*` 等带 `type` 的内建工具）在 a→r 方向丢弃 + `convertWarn`（与 a→chat 一致）。**工具声明合并（codex 0.145 实测）**：codex 把工具放在 input 的 `{type:"additional_tools", role:"developer", tools:[…]}` item 里（顶层可无 `tools`）——r→chat/r→a 统一经 `responsesRequestTools` 合并（顶层在前，additional_tools 按序追加），additional_tools item 是工具声明不是消息，不进消息流、不按 developer 消息折叠；ns restore map 与 custom 工具集合同样从合并后的声明重建。
+- `max_tokens` ↔ `max_output_tokens`；chat `max_completion_tokens` 与 `max_tokens` 并存时取前者（chat→a、chat→r 均同）。`thinking.budget_tokens` ↔ `reasoning.effort`（best-effort 近似）；chat `reasoning_effort` ↔ responses `reasoning.effort`（chat→a 也映射到 `thinking`）。r→chat 输出侧只写 `max_tokens`（兼容性最好）。**r→a 缺失 `max_output_tokens`（或为显式 null，codex 客户端常态）时注入与 chat→a 相同的默认值 4096**——anthropic 对缺 max_tokens 必 400。
+- chat `response_format` ↔ responses `text.format`（`json_object` 直通；`json_schema` 拆装一层 `json_schema` 包装）；anthropic 无对应，r→a 丢弃 + `convertWarn`。
+- `parallel_tool_calls` ↔ anthropic `disable_parallel_tool_use`（responses 四方向均映射；r→a 在 tool_choice 缺省时合成 `{type:auto}`，无 tools 或 `none` 时不合成）。
+- r→a 与 chat→a 一样保证首消息为 user（input 以 function_call 开头时插入占位 user）。
+- r→chat 特有：连续 function_call 合并进**一条** assistant 消息（多 tool_calls）；reasoning item 的文本附挂到**相邻 assistant 消息**的 `reasoning_content`（前向附到后续 assistant，尾部回溯附到前一条；DeepSeek 类上游要求带 tool_calls 的 assistant 消息必带 reasoning_content；无 assistant 时退化为独立消息）。**user/system 回合边界处 pending reasoning 立即回溯附挂到上一条 assistant（已有内容时 `\n\n` 追加），禁止跨 user 回合泄漏到下一轮 assistant；无可附挂的 assistant 时丢弃 + convertWarn**（cc-switch transform_codex_chat.rs:1012-1045）；system/developer 消息全部提到头部（保序，MiniMax 类上游拒绝 mid-thread system）；tools 为空（或全部被过滤）时丢弃 `tool_choice` 和 `parallel_tool_calls`（上游会拒绝引用不存在工具的参数，cc-switch #3557）。
+- `stop`/`stop_sequences` 无 Responses 对应字段：→r 方向丢弃 + `convertWarn`。
 
 ## 流式映射（Responses 方向）
 
@@ -34,15 +45,27 @@ Responses → {anthropic, chat}（`responsesSSETo*`，读 `response.*` 事件）
 
 - `response.created` → anthropic `message_start` / chat 首 chunk（`role:assistant`）。
 - `output_text.delta` → `text_delta` / `delta.content`。
-- `function_call_arguments.delta` → anthropic `input_json_delta` / chat `delta.tool_calls[].function.arguments`（`output_item.added` 时发出 tool_use/tool_calls 块头）。
-- `reasoning_summary_text.delta` → `thinking_delta` / `delta.reasoning_content`。
-- `response.completed` → `message_delta`(usage) + `message_stop` / chat finish chunk + `[DONE]`；usage 取自 `response.usage`。
+- `function_call_arguments.delta` → anthropic `input_json_delta` / chat `delta.tool_calls[].function.arguments`（`output_item.added` 时发出 tool_use/tool_calls 块头）。无 delta、仅 done 帧带完整 arguments 时回退补发（done-only fallback）；同一 item 的重复 `output_item.added` 忽略不重置块。**done-only tool call 补建**：网关连 `output_item.added` 都省掉、只发 `output_item.done` 时，用 done 帧里的完整 item（name/call_id/arguments）补建整个 tool_use/tool_calls 块，不再整个丢弃（opencodex chat/outbound.ts 同款）。**delta 先于 added 到达**时按 `item_id`（缺省 `output_index`）缓冲，added/done 到达时回放，避免首段参数丢失、arguments JSON 损坏。`response.completed` 事件携带 `status:"failed"` 时按错误处理，不产出干净终态。
+- `reasoning_summary_text.delta` → `thinking_delta` / `delta.reasoning_content`；reasoning item 的 `encrypted_content`（done 帧）→ `signature_delta`（无 summary 时整块 → `redacted_thinking`）。
+- `response.completed` → `message_delta`(usage) + `message_stop` / chat finish chunk + `[DONE]`；usage 取自 `response.usage`（含 cache/reasoning details，见 Usage 节）。completed 事件携带 `status:"failed"`/`"cancelled"` 或 error 非空时按错误处理，不产出干净终态（与非流式 fail-closed 对齐）。
+- `response.incomplete` 读 `incomplete_details.reason`：`content_filter`→`refusal`/`content_filter`，其余→`max_tokens`/`length`；**usage 同样读取**（cc-switch completed/incomplete 统一取 usage——max_tokens 截断恰好最需要计费）。
+- `response.refusal.delta` → `text_delta` / `delta.content`（refusal 正文是真实内容；stop 语义由 finish/stop_reason 携带，与 convert.go 方向 refusal→text 对齐）；非流式 `{type:"refusal"}` content part 同样转 text。
+
+方言兼容（真实流量录制发现）：
+
+- r→{a,chat} 的 SSE reader 在无 `event:` 行时回退用 payload 的 `type` 分派（OpenRouter 系网关如 aqp 的 `/responses` 完全不发 event 行；缺失时整流内容会被静默丢弃）。
+- `response.reasoning_text.delta`（OpenRouter 方言，reasoning 走 content part 而非 summary）与 `reasoning_summary_text.delta` 同等处理。
+- chat 源的 reasoning 方言按 cc-switch codex_chat_common 的穷举顺序提取（非流式 message 与流式 delta 同一 `chatReasoningText`）：`reasoning_content` > `reasoning`（字符串，或 `{content,text,summary}` 对象）> `reasoning_details`（OpenRouter 系数组/对象，取各项 text/content/summary，`\n\n` 连接；encrypted 项自然跳过）。
+- **内联 `<think>…</think>` 拆分（chat→r，MiniMax 类上游把 thinking 内联在 content）**：只拆**前导**块（前导空白容忍）——非流式拆成 reasoning item + 去掉 think 块的正文；流式用 detecting/reasoning/text 三态缓冲逐 chunk 判定（标签可跨 chunk），未闭合的前导块整段按 reasoning 收尾；正文中间的 `<think>` 永远原样保留（cc-switch split_leading_think_block / streaming 同款）。
+- r→chat 请求侧 `reasoning.context`（codex 发 `"all_turns"`）无 chat 对应：丢弃 + convertWarn。
 
 {anthropic, chat} → Responses（`*ToResponsesSSE`，合成 `response.*`）：
 
-- `message_start`/首 chunk → `response.created`；content 块增量组装回 `output_item.added` + 对应 `*.delta` + `output_item.done`。
-- 合成 item id：`msg_item_<idx>` / `fc_item_<idx>` / `rs_item_<idx>`。
-- `message_stop`/finish → `response.completed`（带 usage）。
+- `message_start`/首 chunk → `response.created`；content 块增量组装回 `output_item.added` + 对应 `*.delta` + `output_item.done`（added/done 按 item id + type 严格配对；从未发过 added 的空 text/thinking 块不发任何 done 帧）。**`output_item.done` 帧与 `response.completed.output` 携带完整 item**（message 带 content、function_call 带 name/call_id/arguments、reasoning 带 summary/encrypted_content、custom_tool_call 带 input，对齐真实上游 framing，cc-switch streaming_codex_chat 同款）。
+- 合成 item id：`msg_item_<idx>` / `fc_item_<idx>` / `rs_item_<idx>`。chat 侧 tool_call 的 `output_item.added` 延迟到 name 已知才发（空 name 是协议违规），且按连续 output_index 释放（前面的匿名 call 不跳过）；id/name 后到的碎片不覆盖已有 identity。
+- `message_stop`/finish → `response.completed`（带 usage）；status 为 `incomplete` 时事件名为 `response.incomplete` 并带 `incomplete_details.reason`（`max_tokens`/`length`→`max_output_tokens`，`refusal`/`content_filter`→`content_filter`）。**每个合成帧带递增 `sequence_number`（从 0 开始每帧 +1，对齐真实上游 framing）。**
+- anthropic `redacted_thinking` 块 → 仅含 `encrypted_content` 的 reasoning item。
+- 上游 error event / chat error chunk → `response.failed`，绝不合成干净的 `response.completed`；chat 源流显式 `event: error` 行同样判错（payload 无 error 键时从 message/detail 提取，cc-switch extract_chat_sse_error）。
 
 ## 请求映射（anthropic ↔ openai-chat，既有不变）
 
@@ -54,6 +77,12 @@ Responses → {anthropic, chat}（`responsesSSETo*`，读 `response.*` 事件）
 - image ↔ `image_url` data URL。
 - `parallel_tool_calls` ↔ `disable_parallel_tool_use`。
 - `tool_choice=none` 不携带 disable_parallel_tool_use。
+- chat `max_completion_tokens` 优先于 `max_tokens`；`reasoning_effort` → `thinking`（best-effort budget 阶梯，与 responses 方向共用）。
+- 单 part 消息仅当该 part 是 text 时才简化为字符串；单个 image part（无 `text` 键）保留数组，否则 content 坍缩为 nil 静默丢图（user/assistant 两分支同规则，cc-switch 同款）。
+- chat→a 的 system/tool 消息 content 为 parts 数组时抽取 text part（块间 "\n" 连接），content 缺失 → 空串（绝不产生字面量 `"null"`）；多条 system 消息以 "\n" 拼接。a→chat 的 system 多文本块同样以 "\n" 连接。
+- 响应 refusal：content part `{"type":"refusal","refusal":...}` 与 message 级 `refusal` 字段（含流式 `delta.refusal`）映射为 text block（cc-switch 同款）；stop/finish 语义映射已有。
+- 非流式 chat 响应 `choices` 为空按上游失败处理（转换报错 fail-closed，对齐 intentional-behaviors #1「空 200 视为模型失败」），不再合成 `content:[]` + `end_turn` 的合法空消息。
+- 响应 `reasoning_content` ↔ thinking block（非流式置于 text 前；流式 `thinking_delta` 独立 block 生命周期）。stop 语义：`content_filter ↔ refusal`；`pause_turn`→`stop`（best-effort）。
 
 ## 流式映射（anthropic ↔ openai-chat，既有不变）
 
@@ -76,35 +105,49 @@ Anthropic → OpenAI：
 
 OpenAI → Anthropic 的 tool use id 必须满足 `^[a-zA-Z0-9_-]+$`。同一调用内 tool_use/tool_result 使用 memo 保持成对映射；纯函数映射必须确定性。
 
+可选字段（call_id/name/arguments/model/id/stop_reason 等）缺失时**绝不产生字面量 `"null"`**——取值统一用 `strOpt`/`strKey`（`strOf(nil)` 会渲染成 `"null"` 字符串并击穿 `firstNonEmpty` 回退）。缺失时的具体行为：function_call `arguments` 缺省 `"{}"`（空串会让下游 `JSON.parse("")` 失败）；chat→r 请求里 `name` 缺失时按 `call_id` 从同请求较前项回填（replace-style 客户端只回传 id）并 `convertWarn`；流式合成缺失 tool id 时回退到合成的 item id（`fc_item_<idx>`）。
+
 ## Usage
 
-- Anthropic → OpenAI 请求注入 `stream_options.include_usage`。
-- OpenAI → Anthropic：`input = prompt - cached`，clamp 到非负，并设置 cache read。
+- Anthropic → OpenAI 请求注入 `stream_options.include_usage`；r→chat 的流式请求同样注入（kimi/MiniMax 类上游否则流式 usage 全 0）。
+- OpenAI → Anthropic：`input = prompt − cached − cache_creation`，clamp 到非负，并设置 cache read/creation。cache_creation 识别直传 `cache_creation_input_tokens` 与 `prompt_tokens_details.cache_write_tokens` 两种拼写（直传优先），cache write 必须从 input 双减，否则在 input 与 cache 桶重复计数。流式路径同语义。
 - Anthropic → OpenAI：prompt 包含 input、cache read、cache creation，并输出 `prompt_tokens_details.cached_tokens`。
+- Responses 方向同一约定（OpenAI inclusive）：a→r 的 `input_tokens` = input + cache_read + cache_creation，`cache_read` → `input_tokens_details.cached_tokens`；r→a 反向拆分（clamp 非负）——cache write 同样双减：r→a 识别直传 `cache_creation_input_tokens`（优先）与 `input_tokens_details.cache_write_tokens`（兜底），产出 `cache_creation_input_tokens`，`input = input − cached − cache_write`，流式路径同语义；chat↔r 双向透传 `cached_tokens`（`prompt_tokens_details`↔`input_tokens_details`）和 `reasoning_tokens`（`completion_tokens_details`↔`output_tokens_details`）。流式路径同语义（a→r 从 `message_start`/`message_delta` usage 按字段存在性累计，不用缺省值覆盖）。
 
 ## 有损字段
 
-anthropic↔openai-chat 方向：thinking、cache_control、server tools、tool_result 内图片、logprobs、未知 role 当前会丢弃，并通过 `convertWarn` 每进程每消息类型告警一次。流式 thinking_delta 同理丢弃。
+anthropic↔openai-chat 方向：thinking、cache_control、server tools、未知 role、document 等未知 content block、chat `input_audio` 等未知 content part 当前会丢弃，并通过 `convertWarn` 每进程每消息类型告警一次。流式 thinking_delta 同理丢弃。`logprobs` 丢弃（不告警，纯调试字段）。tool_result 内图片**不再丢弃**——按「tool_result 媒体改投」改投到合成 user 消息（见请求映射节）。
 
-涉及 responses 的方向（`convert_responses.go`）：**reasoning 保留**——responses `reasoning`（summary + encrypted_content）↔ anthropic `thinking`（thinking + signature）↔ chat `reasoning_content`。reasoning.effort 只单向到达 chat（`reasoning_effort`），anthropic 侧靠 `thinking.budget_tokens` best-effort 近似。多模态输出有损（responses 无 image output，用 `[Image]` 占位）。
+涉及 responses 的方向（`convert_responses.go`）：**reasoning 保留**——responses `reasoning`（summary + encrypted_content）↔ anthropic `thinking`（thinking + signature）↔ chat `reasoning_content`；`redacted_thinking` ↔ 仅 `encrypted_content` 的 reasoning item 也逐字往返。reasoning.effort 只单向到达 chat（`reasoning_effort`），anthropic 侧靠 `thinking.budget_tokens` best-effort 近似。多模态**输出**有损：responses 协议没有 image output item，上游返回的图片输出会被丢弃并 `convertWarn`（不存在 `[Image]` 占位）。`stop`/`stop_sequences`→r 丢弃 + `convertWarn`（Responses 无 stop 参数）；`text.format`→a 丢弃 + `convertWarn`。`audio`、`citations`、`top_k`、`seed`、`penalties`、`metadata`、`service_tier`、`n>1`、`store` 无跨协议对应，超出映射范围（丢弃）。**metadata 的唯一例外**：a→r 用 `metadata.user_id` 的 sha256 做 `prompt_cache_key`（只有哈希跨协议，见请求映射节）。
 
 reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔openai-chat 转换路由上仍会丢 thinking（replay cache 未实现）；经 responses 方向可保 reasoning。`configRoutingWarnings` 只负责警告，不代表已实现 replay cache。
 
 ## 接线要求
 
 - 响应转换必须是最内层 reader；logger、usage scanner、cache 只能看到客户端协议字节。
-- 非流式响应在 commit header 前转换，失败返回 502，禁止提交错误协议 body。
+- 非流式响应在 commit header 前转换，失败返回 502，禁止提交错误协议 body。上游 content-type 缺失/非 `text/event-stream` 时先嗅探帧格式（`event:`/`data:` 前缀，codex 实测空 CT 流式响应），按流式路径转换；usageScanner 同样吃嗅探结果。
 - 非流式读取上限 64 MiB。
 - SSE 单行上限 8 MiB，超限要记录错误。
 - 客户端断开后停止读取上游。
 
 ## 回归测试
 
-- 同协议逐字节透传。
+- 同协议逐字节透传（`TestConvertFault_SameProtocolPassthrough`：anthropic/responses 两方向请求与响应均 byte-identical，端到端）。
 - tools、并行工具、图片、usage 双向转换（anthropic↔openai-chat）。
 - 交错 tool delta 和 trailing usage。
 - 转换失败发生在 commit 前。
 - logger/cache 捕获客户端协议而非上游协议。
 - responses 方向：4 个请求 + 4 个响应 + 文本/工具流式转换（`convert_responses_test.go`），以及 anthropic/chat 客户端经 `protocol:responses` 目标的端到端（`TestForward_*ToResponses_NonStream`）。
+- 流式 4 方向均已覆盖：responses→{a,chat} 之外，`*ToResponsesSSE` 合成方向（`convert_responses_stream_test.go`）用 `drainSSE`（`convert_sse_test.go`）断言事件**序列**、合成 item id（`msg_item_/fc_item_/rs_item_`）和 added/done 配对，含并行交错 tool_calls、reasoning 流、EOF 与错误事件。
+- reasoning/encrypted_content 映射（`convert_reasoning_test.go`）：`thinking`+`signature` ↔ reasoning `summary.text`+`encrypted_content` ↔ chat `reasoning_content`，请求/响应/流式三层 + `budget_tokens`↔`effort`。
+- 容错与终态（`convert_fault_test.go`）：未知事件/畸形 JSON 帧跳过、`response.failed`/`response.incomplete` 分支、重复 `response.completed` 终态唯一、非 JSON arguments 兜底、孤儿 tool 对、末帧无尾换行、8MiB 行上限告警、responses 方向图片映射、未知 block/part/item/event 的 `convertWarn` 全覆盖（J）。
+- 三向审计补齐的映射（`convert_gap_test.go`）：usage cache/reasoning details 四方向（流式+非流式）、`content_filter`/`refusal`/`incomplete_details.reason` 语义、failed/cancelled fail-closed、server tools 过滤、r→a 首消息占位、`max_completion_tokens`、`response_format`↔`text.format`、responses 四方向 `parallel_tool_calls`；`redacted_thinking` 与 chat→a reasoning 见 `convert_reasoning_test.go`。cc-switch parity 补齐（K 段）：单 image part 保留数组、system/tool content parts 抽取与 "\n" 拼接、refusal → text block（非流式+流式）、cache_write 双减拆分（两种拼写）、空 choices fail-closed。
+- tool_result 媒体改投（`convert_media_test.go`）：a→chat / a→r / r→chat 三方向各覆盖纯图、多图（含 url source）、无图回归；视觉门控见 `convert_fixups_test.go`（占位文本、能力查找顺序、三方向无视觉路径）。
+- 占位 reasoning_content 与 sequence_number（`convert_fixups_test.go`）：thinking 方言注入/不覆盖/不越界注入，两个合成方向 0..N 连续递增。
+- MCP namespace 压平/还原（`convert_namespace_test.go`）：压平、历史 call + tool_choice、无 namespace no-op、撞名 fail-closed、restore map 反查、round-trip、未命中透传、80 字符截断一致、流式 added 帧还原。
+- custom/freeform 工具（`convert_custom_tool_test.go` + `convert_parity_test.go`）：定义/历史包装、非流式解包（含 parse 失败兜底）、流式渐进解包（前缀跨 chunk、`\n`/`\"`/`\uXXXX` 跨 chunk 截断）、cc-switch `restores_custom_tool_input_stream_events` 移植、reasoning effort 四方言 + 池虚拟名归一。
+- responses 方向 P0 修复：r→a 缺省/显式 null `max_output_tokens` 注入默认 max_tokens、r→chat 流式注入 `stream_options.include_usage`、system/developer role 双向折叠（r→a 顶层 system / a→r instructions）、a→r 孤立 reasoning item 丢弃（`convert_responses_test.go`）；流式 done-only tool call 补建与 delta 先于 added 的缓冲回放（`convert_parity_test.go` 的 `TestParity_DoneOnlyToolCallSynthesized` / `TestParity_ArgsDeltaBeforeAdded`）。
+- responses 方向 P1 修复：a→r `reasoning.summary:"auto"` + codex `include:["reasoning.encrypted_content"]`（后者在 `provider/provider_usecase_test.go`）、reasoning 方言穷举（reasoning 对象/reasoning_details，流式+非流式）、r→chat reasoning user 边界回溯（`TestParity_ResponsesToChat_ReasoningUserBoundary`）、合成流 done/completed 帧完整 item + 空块无 done（`TestResponsesSynthesis_*DoneFramesFullItems` / `EmptyBlockNoDoneFrames`）、r→a cache_write 双减（非流式+流式）、r→a tool 输出 parts 数组拆块、流式 incomplete 读 usage（`TestParity_IncompleteCarriesUsage`）、未知工具类型 convertWarn（`TestNSFlatten_UnknownToolTypeWarns`）、流式 completed cancelled/error fail-closed（`TestParity_CompletedCancelledOrErrorIsError`）、refusal 正文保留（非流式 + 流式 refusal.delta）、tool_use 缺 input arguments 兜底 `"{}"`、chat→r 流式 `event: error` 判错（`TestParity_ChatStreamEventErrorLine`）。
+- responses 方向第三批（codex 0.145 抓包驱动）：additional_tools 合并（`TestConvertResponsesRequestTo{OpenAI,Anthropic}_AdditionalTools`）、namespace 容器展开（`TestNSFlatten_NamespaceContainer` / `TestNSRestoreMap_NamespaceContainerInAdditionalTools`，含嵌套 fail-closed 与 field 形同名）、adaptive thinking/output_config.effort（`TestConvertAnthropicRequestToResponses_AdaptiveThinking` 三态+disabled）、内联 `<think>` 拆分（非流式 `TestConvertOpenAIResponseToResponses_InlineThink`、流式 `TestParity_ChatToResponses_InlineThinkStream` 含跨 chunk/未闭合/非前导）、prompt_cache_key 注入与透传（`TestConvertAnthropicRequestToResponses_PromptCacheKey`）、strict 透传（`TestConvertOpenAIRequestToResponses_ToolStrict`）、reasoning.context 丢弃告警（`TestConvertResponsesRequestToOpenAI_ReasoningContextWarns`）。
 - codex 路由：`ProtocolHint("codex")=="responses"`,转发路径经 `resolvedBackendProto` 自动回退到该 hint,所以缺 `protocol:` 的显式路由也会自动转换(不再告警、不再生成 Chat Completions hint、不再带 WireProtocolNote)。
 

@@ -1,0 +1,44 @@
+data: {"model":"qwen3.8-max-preview","id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","created":1784994498,"object":"chat.completion.chunk","usage":null,"choices":[{"logprobs":null,"index":0,"delta":{"reasoning_content":"","content":"","role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994498,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"The"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994498,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":" user is asking for"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994498,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":" the weather in Paris"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994498,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"."},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994498,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":" I have the get"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994498,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"_weather tool available"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":" and the required parameter"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":" is \"city"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"\", which the user"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":" has"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":" provided as \"Paris"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"\". I can make"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":" the call directly."},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"","tool_calls":[{"id":"call_26f060d341434e2b9c149020","type":"function","index":0,"function":{"name":"get_weather","arguments":""}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"","tool_calls":[{"id":"","type":"function","index":0,"function":{"arguments":"{\"city\": \"Paris"}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"","tool_calls":[{"id":"","type":"function","index":0,"function":{"arguments":"\""}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{"content":"","reasoning_content":"","tool_calls":[{"id":"","type":"function","index":0,"function":{"arguments":"}"}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"delta":{"tool_calls":[{"function":{"arguments":""},"index":0,"id":"","type":"function"}],"content":""},"index":0,"finish_reason":null,"logprobs":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls","logprobs":null}],"usage":null}
+
+data: {"id":"chatcmpl-bcc5c25d-a946-4124-99ea-296a25283c7c","object":"chat.completion.chunk","created":1784994499,"model":"qwen3.8-max-preview","choices":[],"usage":{"prompt_tokens":327,"total_tokens":398,"completion_tokens":71,"prompt_tokens_details":{"cached_tokens":0,"text_tokens":327},"completion_tokens_details":{"reasoning_tokens":41,"text_tokens":71}}}
+
+data: [DONE]
+

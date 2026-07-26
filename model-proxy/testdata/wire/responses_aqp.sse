@@ -1,0 +1,326 @@
+: 
+
+: 
+
+: 
+
+: 
+
+: 
+
+data: {"type":"response.created","response":{"id":"gen-1784994180-54lbp8KsKJPl96sGcDlS","object":"response","created_at":1784994180,"model":"z-ai/glm-5.2","status":"in_progress","completed_at":null,"output":[],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":null,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":null,"safety_identifier":null,"prompt_cache_key":null,"prompt_cache_options":null,"usage":null},"sequence_number":0}
+
+data: {"type":"response.in_progress","response":{"id":"gen-1784994180-54lbp8KsKJPl96sGcDlS","object":"response","created_at":1784994180,"model":"z-ai/glm-5.2","status":"in_progress","completed_at":null,"output":[],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":null,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":null,"safety_identifier":null,"prompt_cache_key":null,"prompt_cache_options":null,"usage":null},"sequence_number":1}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_tmp_bpfe72rjb2i","type":"reasoning","status":"in_progress","summary":[]},"sequence_number":2}
+
+data: {"type":"response.content_part.added","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"part":{"type":"reasoning_text","text":""},"sequence_number":3}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"1","sequence_number":4}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":".","sequence_number":5}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" ","sequence_number":6}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" **","sequence_number":7}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"An","sequence_number":8}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"alyze","sequence_number":9}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" the","sequence_number":10}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" Request","sequence_number":11}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":":","sequence_number":12}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"**\n","sequence_number":13}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"   ","sequence_number":14}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" *","sequence_number":15}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"  ","sequence_number":16}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" Goal","sequence_number":17}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":":","sequence_number":18}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" Say","sequence_number":19}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":20}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"hi","sequence_number":21}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"\".\n","sequence_number":22}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"   ","sequence_number":23}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" *","sequence_number":24}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"  ","sequence_number":25}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" Constraint","sequence_number":26}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" ","sequence_number":27}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"1","sequence_number":28}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":":","sequence_number":29}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" One","sequence_number":30}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" short","sequence_number":31}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" sentence","sequence_number":32}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":".\n\n","sequence_number":33}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"2","sequence_number":34}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":".","sequence_number":35}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" ","sequence_number":36}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" **","sequence_number":37}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Draft","sequence_number":38}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"ing","sequence_number":39}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" options","sequence_number":40}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":":","sequence_number":41}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"**\n","sequence_number":42}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"   ","sequence_number":43}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" *","sequence_number":44}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"  ","sequence_number":45}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":46}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Hi","sequence_number":47}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" there","sequence_number":48}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"!\"\n","sequence_number":49}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"   ","sequence_number":50}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" *","sequence_number":51}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"  ","sequence_number":52}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":53}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Hello","sequence_number":54}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":",","sequence_number":55}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" how","sequence_number":56}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" can","sequence_number":57}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" I","sequence_number":58}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" help","sequence_number":59}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" you","sequence_number":60}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" today","sequence_number":61}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"?\"\n","sequence_number":62}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"   ","sequence_number":63}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" *","sequence_number":64}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"  ","sequence_number":65}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":66}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Hi","sequence_number":67}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"!\"\n","sequence_number":68}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"   ","sequence_number":69}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" *","sequence_number":70}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"  ","sequence_number":71}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":72}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Hello","sequence_number":73}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"!\"\n\n","sequence_number":74}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"3","sequence_number":75}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":".","sequence_number":76}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" ","sequence_number":77}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" **","sequence_number":78}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Select","sequence_number":79}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"ing","sequence_number":80}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" the","sequence_number":81}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" best","sequence_number":82}
+
+: 
+
+: 
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" option","sequence_number":83}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":":","sequence_number":84}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"**\n","sequence_number":85}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"   ","sequence_number":86}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" *","sequence_number":87}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"  ","sequence_number":88}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":89}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Hi","sequence_number":90}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" there","sequence_number":91}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"!\"","sequence_number":92}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" is","sequence_number":93}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" a","sequence_number":94}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" standard","sequence_number":95}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":",","sequence_number":96}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" friendly","sequence_number":97}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" greeting","sequence_number":98}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" that","sequence_number":99}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" fits","sequence_number":100}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" perfectly","sequence_number":101}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" into","sequence_number":102}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" one","sequence_number":103}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" short","sequence_number":104}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" sentence","sequence_number":105}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":".\n\n","sequence_number":106}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"4","sequence_number":107}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":".","sequence_number":108}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" ","sequence_number":109}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" **","sequence_number":110}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Final","sequence_number":111}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" Polish","sequence_number":112}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":":**","sequence_number":113}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":114}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Hi","sequence_number":115}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" there","sequence_number":116}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"!\"","sequence_number":117}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" (","sequence_number":118}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"or","sequence_number":119}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" just","sequence_number":120}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":121}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Hi","sequence_number":122}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"!\")","sequence_number":123}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" Let","sequence_number":124}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"'s","sequence_number":125}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" go","sequence_number":126}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" with","sequence_number":127}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" \"","sequence_number":128}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"Hi","sequence_number":129}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" there","sequence_number":130}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":"!\"","sequence_number":131}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" for","sequence_number":132}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" a","sequence_number":133}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" slightly","sequence_number":134}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" more","sequence_number":135}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" natural","sequence_number":136}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" feel","sequence_number":137}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" while","sequence_number":138}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" remaining","sequence_number":139}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" extremely","sequence_number":140}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":" short","sequence_number":141}
+
+data: {"type":"response.reasoning_text.delta","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"delta":".","sequence_number":142}
+
+data: {"type":"response.reasoning_text.done","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"text":"1.  **Analyze the Request:**\n    *   Goal: Say \"hi\".\n    *   Constraint 1: One short sentence.\n\n2.  **Drafting options:**\n    *   \"Hi there!\"\n    *   \"Hello, how can I help you today?\"\n    *   \"Hi!\"\n    *   \"Hello!\"\n\n3.  **Selecting the best option:**\n    *   \"Hi there!\" is a standard, friendly greeting that fits perfectly into one short sentence.\n\n4.  **Final Polish:** \"Hi there!\" (or just \"Hi!\") Let's go with \"Hi there!\" for a slightly more natural feel while remaining extremely short.","sequence_number":143}
+
+data: {"type":"response.content_part.done","output_index":0,"item_id":"rs_tmp_bpfe72rjb2i","content_index":0,"part":{"type":"reasoning_text","text":"1.  **Analyze the Request:**\n    *   Goal: Say \"hi\".\n    *   Constraint 1: One short sentence.\n\n2.  **Drafting options:**\n    *   \"Hi there!\"\n    *   \"Hello, how can I help you today?\"\n    *   \"Hi!\"\n    *   \"Hello!\"\n\n3.  **Selecting the best option:**\n    *   \"Hi there!\" is a standard, friendly greeting that fits perfectly into one short sentence.\n\n4.  **Final Polish:** \"Hi there!\" (or just \"Hi!\") Let's go with \"Hi there!\" for a slightly more natural feel while remaining extremely short."},"sequence_number":144}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_tmp_bpfe72rjb2i","type":"reasoning","status":"completed","content":[{"type":"reasoning_text","text":"1.  **Analyze the Request:**\n    *   Goal: Say \"hi\".\n    *   Constraint 1: One short sentence.\n\n2.  **Drafting options:**\n    *   \"Hi there!\"\n    *   \"Hello, how can I help you today?\"\n    *   \"Hi!\"\n    *   \"Hello!\"\n\n3.  **Selecting the best option:**\n    *   \"Hi there!\" is a standard, friendly greeting that fits perfectly into one short sentence.\n\n4.  **Final Polish:** \"Hi there!\" (or just \"Hi!\") Let's go with \"Hi there!\" for a slightly more natural feel while remaining extremely short."}],"summary":[],"format":"unknown"},"sequence_number":145}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_tmp_uwvjzea8gda","type":"message","status":"in_progress","role":"assistant","content":[]},"sequence_number":146}
+
+data: {"type":"response.content_part.added","output_index":1,"item_id":"msg_tmp_uwvjzea8gda","content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]},"sequence_number":147}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_tmp_uwvjzea8gda","content_index":0,"delta":"Hi","logprobs":[],"sequence_number":148}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_tmp_uwvjzea8gda","content_index":0,"delta":" there","logprobs":[],"sequence_number":149}
+
+data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_tmp_uwvjzea8gda","content_index":0,"delta":"!","logprobs":[],"sequence_number":150}
+
+data: {"type":"response.output_text.done","output_index":1,"item_id":"msg_tmp_uwvjzea8gda","content_index":0,"text":"Hi there!","logprobs":[],"sequence_number":151}
+
+data: {"type":"response.content_part.done","output_index":1,"item_id":"msg_tmp_uwvjzea8gda","content_index":0,"part":{"type":"output_text","text":"Hi there!","annotations":[],"logprobs":[]},"sequence_number":152}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_tmp_uwvjzea8gda","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi there!","annotations":[],"logprobs":[]}]},"sequence_number":153}
+
+data: {"type":"response.completed","response":{"id":"gen-1784994180-54lbp8KsKJPl96sGcDlS","object":"response","created_at":1784994180,"model":"z-ai/glm-5.2","status":"completed","completed_at":1784994183,"output":[{"id":"rs_tmp_bpfe72rjb2i","type":"reasoning","status":"completed","content":[{"type":"reasoning_text","text":"1.  **Analyze the Request:**\n    *   Goal: Say \"hi\".\n    *   Constraint 1: One short sentence.\n\n2.  **Drafting options:**\n    *   \"Hi there!\"\n    *   \"Hello, how can I help you today?\"\n    *   \"Hi!\"\n    *   \"Hello!\"\n\n3.  **Selecting the best option:**\n    *   \"Hi there!\" is a standard, friendly greeting that fits perfectly into one short sentence.\n\n4.  **Final Polish:** \"Hi there!\" (or just \"Hi!\") Let's go with \"Hi there!\" for a slightly more natural feel while remaining extremely short."}],"summary":[],"format":"unknown"},{"id":"msg_tmp_uwvjzea8gda","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hi there!","annotations":[],"logprobs":[]}]}],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":null,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":null,"safety_identifier":null,"prompt_cache_key":null,"prompt_cache_options":null,"usage":{"input_tokens":19,"input_tokens_details":{"cached_tokens":0},"output_tokens":144,"output_tokens_details":{"reasoning_tokens":139},"total_tokens":163,"cost":0.0006602,"is_byok":false,"cost_details":{"upstream_inference_cost":0.0006602,"upstream_inference_input_cost":0.0000266,"upstream_inference_output_cost":0.0006336}},"openrouter_metadata":{"requested":"z-ai/glm-5.2","strategy":"direct","region":"SIN","summary":"available=4, selected=Z.AI","attempt":1,"is_byok":false,"endpoints":{"total":33,"available":[{"provider":"Z.AI","model":"z-ai/glm-5.2-20260616","selected":true},{"provider":"DeepInfra","model":"z-ai/glm-5.2-20260616","selected":false},{"provider":"Io Net","model":"z-ai/glm-5.2-20260616","selected":false},{"provider":"Novita","model":"z-ai/glm-5.2-20260616","selected":false}]}}},"sequence_number":154}
+
+data: [DONE]
+

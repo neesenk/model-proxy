@@ -23,8 +23,12 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
+
+	"model-proxy/provider"
 
 	sonic "github.com/bytedance/sonic"
 )
@@ -32,6 +36,11 @@ import (
 // ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
+
+// defaultAnthropicMaxTokens is the generous max_tokens injected when the
+// source request carries no cap — Anthropic 400s "max_tokens required"
+// otherwise. Same value as the chat→a direction (convert.go).
+const defaultAnthropicMaxTokens = 4096
 
 // copyOpt copies optional top-level keys from src to out when present.
 func copyOpt(out, src map[string]any, keys ...string) {
@@ -50,6 +59,46 @@ func firstNonEmpty(s ...string) string {
 		}
 	}
 	return ""
+}
+
+// strKey returns m[key] as a string, "" when m or the key is absent (unlike
+// strOf, which renders a missing key as "null").
+func strKey(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	s, _ := m[key].(string)
+	return s
+}
+
+// strOpt is strKey for a bare value: "" for nil/non-string. Use it for
+// OPTIONAL protocol fields (call_id/name) — strOf would stringify nil to
+// "null", which is a non-empty string and both poisons the field and defeats
+// firstNonEmpty fallbacks.
+func strOpt(v any) string { s, _ := v.(string); return s }
+
+// backfillToolNames fills empty function_call names from earlier items with
+// the same call_id; names still missing afterwards get a convertWarn (an
+// empty name is a protocol violation upstream).
+func backfillToolNames(items []map[string]any) {
+	names := map[string]string{}
+	for _, it := range items {
+		if it["type"] != "function_call" {
+			continue
+		}
+		id := strOpt(it["call_id"])
+		if name := strOpt(it["name"]); name != "" {
+			if id != "" {
+				names[id] = name
+			}
+			continue
+		}
+		if n, ok := names[id]; ok {
+			it["name"] = n
+		} else {
+			convertWarn("function_call missing name (call_id " + id + ")")
+		}
+	}
 }
 
 // responsesInputItems normalizes a Responses request `input` field (string
@@ -128,6 +177,18 @@ func thinkingBudgetToEffort(thinking map[string]any) string {
 	return "medium"
 }
 
+// outputConfigEffort reads the adaptive-thinking effort level from an
+// anthropic output_config object (Claude Code /effort wire). Unknown strings
+// return "" so downstream defaults win (opencodex effortFromOutputConfig).
+func outputConfigEffort(outputConfig any) string {
+	effort := strOpt(asMap(outputConfig)["effort"])
+	switch effort {
+	case "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+		return effort
+	}
+	return ""
+}
+
 // effortToThinking maps a Responses reasoning.effort back to an anthropic
 // thinking config (best-effort budget). nil means "do not set thinking".
 func effortToThinking(effort string) map[string]any {
@@ -145,8 +206,49 @@ func effortToThinking(effort string) map[string]any {
 	return map[string]any{"type": "enabled", "budget_tokens": budget}
 }
 
+// marshalToolInput serializes an anthropic tool_use input to a JSON arguments
+// string; a MISSING input becomes "{}" (sonic renders nil as "null", which
+// downstream JSON.parse rejects).
+func marshalToolInput(v any) string {
+	if v == nil {
+		return "{}"
+	}
+	args, _ := sonic.MarshalString(v)
+	if args == "" || args == "null" {
+		return "{}"
+	}
+	return args
+}
+
+// thinkOpenTag / thinkCloseTag mark inline thinking blocks that some chat
+// upstreams (MiniMax-style) emit inside content instead of a reasoning field.
+const thinkOpenTag = "<think>"
+const thinkCloseTag = "</think>"
+
+// splitLeadingThinkBlock splits a LEADING <think>…</think> block (leading
+// whitespace tolerated) into (reasoning, answer): reasoning trimmed, the
+// answer's leading separator whitespace stripped (cc-switch
+// split_leading_think_block). ok=false when the text does not START with a
+// think block — mid-text blocks are never split.
+func splitLeadingThinkBlock(text string) (reasoning, answer string, ok bool) {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if !strings.HasPrefix(trimmed, thinkOpenTag) {
+		return "", "", false
+	}
+	body := trimmed[len(thinkOpenTag):]
+	close := strings.Index(body, thinkCloseTag)
+	if close < 0 {
+		return "", "", false
+	}
+	reasoning = strings.TrimSpace(body[:close])
+	answer = strings.TrimLeft(body[close+len(thinkCloseTag):], " \t\r\n")
+	return reasoning, answer, true
+}
+
 // responsesReasoningText extracts (text, signature) from a Responses reasoning
-// item's summary array (+ encrypted_content as signature).
+// item's summary array (+ encrypted_content as signature). OpenRouter-style
+// items carry the text in content parts ({type:"reasoning_text"}) instead of a
+// summary — fall back to those (their streams use reasoning_text.delta too).
 func responsesReasoningText(item map[string]any) (text, sig string) {
 	if enc, ok := item["encrypted_content"].(string); ok {
 		sig = enc
@@ -160,7 +262,75 @@ func responsesReasoningText(item map[string]any) (text, sig string) {
 		}
 		text = b.String()
 	}
+	if text == "" {
+		if parts, ok := item["content"].([]any); ok {
+			var b strings.Builder
+			for _, p := range parts {
+				if pm := asMap(p); pm != nil {
+					b.WriteString(strOf(pm["text"]))
+				}
+			}
+			text = b.String()
+		}
+	}
 	return
+}
+
+// chatReasoningText extracts reasoning text from a chat message or stream
+// delta, exhausting the vendor spellings (cc-switch codex_chat_common's
+// extraction order): reasoning_content > reasoning (string, or an object with
+// content/text/summary) > reasoning_details (array/object; OpenRouter-style,
+// e.g. aqp). "" when nothing replayable is present.
+func chatReasoningText(m map[string]any) string {
+	for _, k := range []string{"reasoning_content", "reasoning"} {
+		if s := strOpt(m[k]); s != "" {
+			return s
+		}
+	}
+	if r := asMap(m["reasoning"]); r != nil {
+		for _, k := range []string{"content", "text", "summary"} {
+			if s := strOpt(r[k]); s != "" {
+				return s
+			}
+		}
+	}
+	return reasoningDetailsText(m["reasoning_details"])
+}
+
+// reasoningDetailsText extracts text from a reasoning_details value (string,
+// object, or array of detail entries joined "\n\n").
+func reasoningDetailsText(v any) string {
+	switch raw := v.(type) {
+	case string:
+		return raw
+	case map[string]any:
+		return reasoningDetailPartText(raw)
+	case []any:
+		var parts []string
+		for _, p := range raw {
+			if s := reasoningDetailPartText(p); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, "\n\n")
+	}
+	return ""
+}
+
+// reasoningDetailPartText reads one reasoning_details entry: text/content/
+// summary keys carry the replayable text (encrypted entries have none and are
+// skipped naturally).
+func reasoningDetailPartText(v any) string {
+	m := asMap(v)
+	if m == nil {
+		return strOpt(v)
+	}
+	for _, k := range []string{"text", "content", "summary"} {
+		if s := strOpt(m[k]); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +341,7 @@ func responsesReasoningText(item map[string]any) (text, sig string) {
 // Responses `input` items. text/image blocks collect into a `message` item;
 // tool_use → function_call, tool_result → function_call_output, thinking →
 // reasoning — each its own item (Responses separates them out of the message).
-func anthropicMsgToResponsesItems(m map[string]any) []map[string]any {
+func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]any {
 	role, _ := m["role"].(string)
 	partType := "input_text"
 	if role == "assistant" {
@@ -212,24 +382,41 @@ func anthropicMsgToResponsesItems(m map[string]any) []map[string]any {
 								"image_url": "data:" + mt + ";base64," + data,
 							})
 						}
+					} else if u, _ := src["url"].(string); u != "" {
+						// url-source images pass through as-is (a→chat supports
+						// them too; dropping would lose the content silently).
+						parts = append(parts, map[string]any{"type": "input_image", "image_url": u})
 					}
 				}
 			case "tool_use":
 				flush()
-				args, _ := sonic.MarshalString(b["input"])
+				args := marshalToolInput(b["input"])
 				items = append(items, map[string]any{
 					"type":      "function_call",
-					"call_id":   firstNonEmpty(strOf(b["id"]), strOf(b["name"])),
-					"name":      strOf(b["name"]),
+					"call_id":   firstNonEmpty(strOpt(b["id"]), strOpt(b["name"])),
+					"name":      strOpt(b["name"]),
 					"arguments": args,
 				})
 			case "tool_result":
 				flush()
+				txt := anthropicToolResultText(b["content"])
+				imgs := anthropicToolResultImagesResponses(b["content"])
+				if len(imgs) > 0 && !imageOK {
+					txt = appendMediaPlaceholder(txt)
+					imgs = nil
+				}
 				items = append(items, map[string]any{
 					"type":    "function_call_output",
 					"call_id": strOf(b["tool_use_id"]),
-					"output":  anthropicTextOf(b["content"]),
+					"output":  txt,
 				})
+				// Media reinjection (cc-switch): tool_result images are
+				// re-delivered as a synthetic user message item, not dropped.
+				if len(imgs) > 0 {
+					parts := []map[string]any{{"type": "input_text", "text": "[image returned by tool]"}}
+					parts = append(parts, imgs...)
+					items = append(items, map[string]any{"type": "message", "role": "user", "content": parts})
+				}
 			case "thinking":
 				flush()
 				item := map[string]any{
@@ -242,11 +429,75 @@ func anthropicMsgToResponsesItems(m map[string]any) []map[string]any {
 					item["encrypted_content"] = sig
 				}
 				items = append(items, item)
+			case "redacted_thinking":
+				flush()
+				// codex requires `summary` even when it's empty
+				// ("Missing required parameter: 'input[N].summary'", live-verified).
+				item := map[string]any{"type": "reasoning", "summary": []any{}}
+				if data, _ := b["data"].(string); data != "" {
+					item["encrypted_content"] = data
+				}
+				items = append(items, item)
+			default:
+				convertWarn("dropping anthropic content block in a→r request: " + strOf(b["type"]))
 			}
 		}
 	}
 	flush()
 	return items
+}
+
+// dropOrphanReasoningItems removes reasoning items produced from ONE assistant
+// message (input[start:]) when that generation contains no message or
+// function_call item to follow them — codex 400s "reasoning item without its
+// required following item" on thinking-only incomplete turns (cc-switch
+// transform_responses.rs does the same removal).
+func dropOrphanReasoningItems(items []map[string]any, start int) []map[string]any {
+	for _, it := range items[start:] {
+		if it["type"] == "message" || it["type"] == "function_call" {
+			return items
+		}
+	}
+	out := items[:start]
+	for _, it := range items[start:] {
+		if it["type"] == "reasoning" {
+			convertWarn("dropping orphan reasoning item (no following message/function_call in the same assistant turn)")
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
+// anthropicToolResultImagesResponses extracts image blocks from a tool_result
+// content value as responses input_image parts (base64 → data URL, url source
+// kept) for synthetic-user reinjection.
+func anthropicToolResultImagesResponses(content any) []map[string]any {
+	blocks, ok := content.([]any)
+	if !ok {
+		return nil
+	}
+	var out []map[string]any
+	for _, blk := range blocks {
+		m := asMap(blk)
+		if m == nil || m["type"] != "image" {
+			continue
+		}
+		src := asMap(m["source"])
+		if src == nil {
+			continue
+		}
+		if mt, _ := src["media_type"].(string); mt != "" {
+			if data, _ := src["data"].(string); data != "" {
+				out = append(out, map[string]any{"type": "input_image", "image_url": "data:" + mt + ";base64," + data})
+				continue
+			}
+		}
+		if u, _ := src["url"].(string); u != "" {
+			out = append(out, map[string]any{"type": "input_image", "image_url": u})
+		}
+	}
+	return out
 }
 
 func anthropicToolsToResponses(tools []any) []map[string]any {
@@ -256,7 +507,18 @@ func anthropicToolsToResponses(tools []any) []map[string]any {
 		if tm == nil {
 			continue
 		}
-		rt := map[string]any{"type": "function", "name": strOf(tm["name"])}
+		// Server-side/built-in tools declare a `type` (web_search_*, computer,
+		// bash, text_editor, ...) unlike custom function tools (name+input_schema,
+		// no type). Drop + warn, same as anthropicToolsToOpenAI.
+		if bt, ok := tm["type"].(string); ok && bt != "" {
+			convertWarn("dropping server-side anthropic tool type: " + bt)
+			continue
+		}
+		name := strOpt(tm["name"])
+		if name == "" {
+			continue
+		}
+		rt := map[string]any{"type": "function", "name": name}
 		if d, ok := tm["description"]; ok {
 			rt["description"] = d
 		}
@@ -290,6 +552,12 @@ func anthropicToolChoiceToResponses(tc any) any {
 }
 
 func convertAnthropicRequestToResponses(body []byte) ([]byte, error) {
+	return convertAnthropicRequestToResponsesV(body, true)
+}
+
+// convertAnthropicRequestToResponsesV is convertAnthropicRequestToResponses
+// with the target model's vision capability (media reinjection gate).
+func convertAnthropicRequestToResponsesV(body []byte, imageOK bool) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
@@ -298,18 +566,37 @@ func convertAnthropicRequestToResponses(body []byte) ([]byte, error) {
 	if v, ok := src["model"]; ok {
 		out["model"] = v
 	}
+	var instructionParts []string
 	if sys, ok := src["system"]; ok {
 		if txt := anthropicTextOf(sys); txt != "" {
-			out["instructions"] = txt
+			instructionParts = append(instructionParts, txt)
 		}
 	}
 	var input []map[string]any
 	if raw, ok := src["messages"].([]any); ok {
 		for _, m := range raw {
-			if mm := asMap(m); mm != nil {
-				input = append(input, anthropicMsgToResponsesItems(mm)...)
+			mm := asMap(m)
+			if mm == nil {
+				continue
+			}
+			// system/developer-role MESSAGES fold into instructions: Responses
+			// input rejects system-role message items (codex 400s "System
+			// messages are not allowed"; opencodex's inbound folds the same).
+			if role := strOpt(mm["role"]); role == "system" || role == "developer" {
+				if txt := anthropicTextOf(mm["content"]); txt != "" {
+					instructionParts = append(instructionParts, txt)
+				}
+				continue
+			}
+			start := len(input)
+			input = append(input, anthropicMsgToResponsesItems(mm, imageOK)...)
+			if strOpt(mm["role"]) == "assistant" {
+				input = dropOrphanReasoningItems(input, start)
 			}
 		}
+	}
+	if len(instructionParts) > 0 {
+		out["instructions"] = strings.Join(instructionParts, "\n\n")
 	}
 	if len(input) > 0 {
 		out["input"] = input
@@ -323,17 +610,64 @@ func convertAnthropicRequestToResponses(body []byte) ([]byte, error) {
 		if rc := anthropicToolChoiceToResponses(tc); rc != nil {
 			out["tool_choice"] = rc
 		}
+		// disable_parallel_tool_use:true → parallel_tool_calls:false.
+		if tcm := asMap(tc); tcm != nil {
+			if dis, _ := tcm["disable_parallel_tool_use"].(bool); dis {
+				out["parallel_tool_calls"] = false
+			}
+		}
+	}
+	if stops, ok := src["stop_sequences"].([]any); ok && len(stops) > 0 {
+		convertWarn("dropping stop_sequences (Responses API has no stop parameter)")
 	}
 	if thinking, ok := src["thinking"].(map[string]any); ok {
-		if effort := thinkingBudgetToEffort(thinking); effort != "" {
-			out["reasoning"] = map[string]any{"effort": effort}
+		effort := ""
+		if strOpt(thinking["type"]) == "adaptive" {
+			// Adaptive-thinking wire (Claude Code /effort, opencodex
+			// claude/inbound.ts): the level rides in output_config.effort;
+			// unknown strings drop to the default so garbage never crosses.
+			effort = outputConfigEffort(src["output_config"])
+			if effort == "" {
+				effort = "high"
+			}
+		} else {
+			effort = thinkingBudgetToEffort(thinking)
+		}
+		if effort != "" {
+			// summary:"auto" asks the backend to stream reasoning summaries
+			// (opencodex sets it unconditionally); without it codex responses
+			// carry no reasoning items at all.
+			out["reasoning"] = map[string]any{"effort": effort, "summary": "auto"}
 		}
 	}
 	if v, ok := src["max_tokens"]; ok {
 		out["max_output_tokens"] = v
 	}
+	// prompt_cache_key (codex reports cached_tokens:0 without one):
+	// metadata.user_id's sha256 is the stable per-session key — a deliberate
+	// exception to the "metadata is dropped" lossy-field rule, and only the
+	// HASH crosses (never the raw user_id). Without user_id, fingerprint the
+	// model + instructions + converted tools (cache-cohort key, opencodex
+	// claude/inbound.ts:443-475).
+	if uid := strOpt(asMap(src["metadata"])["user_id"]); uid != "" {
+		out["prompt_cache_key"] = sha256Hex32(uid)
+	} else if ins := strOpt(out["instructions"]); ins != "" || out["tools"] != nil {
+		// ConfigStd sorts map keys (like encoding/json) — the default sonic
+		// config does not, and an unsorted fingerprint is non-deterministic.
+		fp, _ := sonic.ConfigStd.MarshalToString(map[string]any{
+			"model": strOpt(out["model"]), "system": ins, "tools": out["tools"],
+		})
+		out["prompt_cache_key"] = sha256Hex32(fp)
+	}
 	copyOpt(out, src, "temperature", "top_p", "stream")
 	return sonic.Marshal(out)
+}
+
+// sha256Hex32 hashes s with SHA-256 and returns the first 32 hex chars (the
+// prompt_cache_key shape opencodex uses).
+func sha256Hex32(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:32]
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +682,7 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 	if role == "tool" {
 		out := map[string]any{
 			"type":    "function_call_output",
-			"call_id": strOf(m["tool_call_id"]),
+			"call_id": strOpt(m["tool_call_id"]),
 			"output":  chatContentText(m["content"]),
 		}
 		return []map[string]any{out}
@@ -358,6 +692,14 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 		partType = "output_text"
 	}
 	var items []map[string]any
+	// reasoning_content rides as its own reasoning item (preserved, like the
+	// anthropic thinking block — contract: reasoning survives the responses hop).
+	if rc, ok := m["reasoning_content"].(string); ok && rc != "" {
+		items = append(items, map[string]any{
+			"type":    "reasoning",
+			"summary": []map[string]any{{"type": "summary_text", "text": rc}},
+		})
+	}
 	var parts []map[string]any
 	switch c := m["content"].(type) {
 	case string:
@@ -379,6 +721,8 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 				} else if ium := asMap(pm["image_url"]); ium != nil {
 					parts = append(parts, map[string]any{"type": "input_image", "image_url": strOf(ium["url"])})
 				}
+			default:
+				convertWarn("dropping chat content part in chat→r request: " + strOf(pm["type"]))
 			}
 		}
 	}
@@ -392,11 +736,22 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 				continue
 			}
 			fn := asMap(tcm["function"])
+			// arguments must be a JSON STRING; "" is invalid (downstream
+			// JSON.parse("") breaks), default to "{}" like the stream path.
+			args := strOpt(fnMap(fn, "arguments"))
+			if args == "" {
+				if raw := fnMap(fn, "arguments"); raw != nil {
+					args = strOf(raw) // non-string (object) → compact JSON
+				}
+			}
+			if args == "" {
+				args = "{}"
+			}
 			items = append(items, map[string]any{
 				"type":      "function_call",
-				"call_id":   strOf(tcm["id"]),
-				"name":      strOf(firstNonEmpty(strOf(fnMap(fn, "name")), strOf(tcm["name"]))),
-				"arguments": strOf(fnMap(fn, "arguments")),
+				"call_id":   strOpt(tcm["id"]),
+				"name":      firstNonEmpty(strOpt(fnMap(fn, "name")), strOpt(tcm["name"])),
+				"arguments": args,
 			})
 		}
 	}
@@ -419,12 +774,15 @@ func chatToolsToResponses(tools []any) []map[string]any {
 			continue
 		}
 		fn := asMap(tm["function"])
-		rt := map[string]any{"type": "function", "name": strOf(fnMap(fn, "name"))}
+		rt := map[string]any{"type": "function", "name": strOpt(fnMap(fn, "name"))}
 		if d := fnMap(fn, "description"); d != nil {
 			rt["description"] = d
 		}
 		if p := fnMap(fn, "parameters"); p != nil {
 			rt["parameters"] = p
+		}
+		if s := fnMap(fn, "strict"); s != nil {
+			rt["strict"] = s
 		}
 		out = append(out, rt)
 	}
@@ -447,6 +805,39 @@ func chatToolChoiceToResponses(tc any) any {
 		}
 	}
 	return tcm
+}
+
+// chatResponseFormatToTextFormat maps a chat response_format to a Responses
+// text.format: json_object passes through; json_schema is unwrapped one level
+// (name/schema/strict/description live directly on the format object).
+func chatResponseFormatToTextFormat(rf map[string]any) map[string]any {
+	switch strOf(rf["type"]) {
+	case "json_object":
+		return map[string]any{"type": "json_object"}
+	case "json_schema":
+		js := asMap(rf["json_schema"])
+		if js == nil {
+			return nil
+		}
+		f := map[string]any{"type": "json_schema"}
+		copyOpt(f, js, "name", "description", "schema", "strict")
+		return f
+	}
+	return nil
+}
+
+// textFormatToChatResponseFormat maps a Responses text.format back to a chat
+// response_format (reverse of chatResponseFormatToTextFormat).
+func textFormatToChatResponseFormat(f map[string]any) map[string]any {
+	switch strOf(f["type"]) {
+	case "json_object":
+		return map[string]any{"type": "json_object"}
+	case "json_schema":
+		js := map[string]any{}
+		copyOpt(js, f, "name", "description", "schema", "strict")
+		return map[string]any{"type": "json_schema", "json_schema": js}
+	}
+	return nil
 }
 
 func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
@@ -477,6 +868,10 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 			input = append(input, chatMsgToResponsesItems(mm)...)
 		}
 	}
+	// Replace-style clients resend a tool_call carrying only the id (no name)
+	// in later turns — backfill from earlier items with the same call_id
+	// (opencodex's chat inbound does the same).
+	backfillToolNames(input)
 	if len(input) > 0 {
 		out["input"] = input
 	}
@@ -493,16 +888,46 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 	if effort, ok := src["reasoning_effort"].(string); ok && effort != "" {
 		out["reasoning"] = map[string]any{"effort": effort}
 	}
-	if v, ok := src["max_tokens"]; ok {
+	// max_completion_tokens wins over the legacy max_tokens when both are set.
+	if v, ok := src["max_completion_tokens"]; ok {
+		out["max_output_tokens"] = v
+	} else if v, ok := src["max_tokens"]; ok {
 		out["max_output_tokens"] = v
 	}
-	copyOpt(out, src, "temperature", "top_p", "stream")
+	if stops, ok := src["stop"].([]any); ok && len(stops) > 0 {
+		convertWarn("dropping stop (Responses API has no stop parameter)")
+	}
+	if rf := asMap(src["response_format"]); rf != nil {
+		if f := chatResponseFormatToTextFormat(rf); f != nil {
+			out["text"] = map[string]any{"format": f}
+		}
+	}
+	copyOpt(out, src, "temperature", "top_p", "stream", "parallel_tool_calls")
 	return sonic.Marshal(out)
 }
 
 // ---------------------------------------------------------------------------
 // request: responses → anthropic
 // ---------------------------------------------------------------------------
+
+// responsesRequestTools returns the effective tool declarations of a
+// responses request: top-level `tools` first, then the tools of every
+// {type:"additional_tools"} input item (codex 0.145+ declares tools ONLY in
+// such items, role:"developer" — a tool declaration, not a message).
+func responsesRequestTools(src map[string]any) []any {
+	var out []any
+	if tools, ok := src["tools"].([]any); ok {
+		out = append(out, tools...)
+	}
+	for _, item := range responsesInputItems(src["input"]) {
+		if item["type"] == "additional_tools" {
+			if tools, ok := item["tools"].([]any); ok {
+				out = append(out, tools...)
+			}
+		}
+	}
+	return out
+}
 
 // responsesContentToAnthropicBlocks turns a Responses message item's content
 // parts into anthropic content blocks.
@@ -530,9 +955,27 @@ func responsesContentToAnthropicBlocks(content any) []map[string]any {
 					"type": "base64", "media_type": mt, "data": data,
 				}})
 			}
+		default:
+			convertWarn("dropping responses content part in r→a request: " + strOf(pm["type"]))
 		}
 	}
 	return out
+}
+
+// responsesMessageText concatenates the text of a Responses message item's
+// content parts (for folding system/developer items into a plain-text field).
+func responsesMessageText(content any) string {
+	parts, ok := content.([]any)
+	if !ok {
+		return strOpt(content)
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if pm := asMap(p); pm != nil {
+			b.WriteString(strOf(pm["text"]))
+		}
+	}
+	return b.String()
 }
 
 func responsesToolsToAnthropic(tools []any) []map[string]any {
@@ -590,48 +1033,104 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 	if v, ok := src["model"]; ok {
 		out["model"] = v
 	}
+	var systemParts []string
 	if ins, ok := src["instructions"].(string); ok && ins != "" {
-		out["system"] = ins
+		systemParts = append(systemParts, ins)
 	}
 	var msgs []map[string]any
 	for _, item := range responsesInputItems(src["input"]) {
 		switch item["type"] {
 		case "message":
 			role, _ := item["role"].(string)
+			// Anthropic messages accept only user/assistant: system/developer
+			// items fold into the TOP-LEVEL system field (cc-switch
+			// transform_codex_anthropic; degrading to user would silently
+			// change instruction precedence, passing role:"system" through 400s).
+			if role == "system" || role == "developer" {
+				if txt := responsesMessageText(item["content"]); txt != "" {
+					systemParts = append(systemParts, txt)
+				}
+				continue
+			}
 			if role == "" {
 				role = "user"
 			}
 			blocks := responsesContentToAnthropicBlocks(item["content"])
-			if role == "assistant" || role == "user" || role == "system" {
+			if role == "assistant" || role == "user" {
 				msgs = append(msgs, map[string]any{"role": role, "content": blocks})
 			}
 		case "function_call":
 			args := parseToolArgs(strOf(item["arguments"]))
 			msgs = append(msgs, map[string]any{"role": "assistant", "content": []map[string]any{{
-				"type": "tool_use",
-				"id":   firstNonEmpty(strOf(item["call_id"]), strOf(item["id"])),
-				"name": strOf(item["name"]),
+				"type":  "tool_use",
+				"id":    firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
+				"name":  strOpt(item["name"]),
 				"input": args,
 			}}})
 		case "function_call_output":
+			// output may be a string OR a parts array (input_text/input_image);
+			// array parts become anthropic blocks — text into the tool_result
+			// text, images as native image blocks (base64/url source). r→a has
+			// no vision gate (anthropic targets always accept image blocks).
+			text, imgs := responsesOutputTextAndImages(item["output"])
+			var content any = text
+			if len(imgs) > 0 {
+				blocks := []map[string]any{{"type": "text", "text": text}}
+				for _, im := range imgs {
+					url := strKey(asMap(im["image_url"]), "url")
+					if mt, data, ok := parseDataURL(url); ok {
+						blocks = append(blocks, map[string]any{"type": "image", "source": map[string]any{
+							"type": "base64", "media_type": mt, "data": data,
+						}})
+					} else if url != "" {
+						blocks = append(blocks, map[string]any{"type": "image", "source": map[string]any{
+							"type": "url", "url": url,
+						}})
+					}
+				}
+				content = blocks
+			}
 			msgs = append(msgs, map[string]any{"role": "user", "content": []map[string]any{{
 				"type":        "tool_result",
 				"tool_use_id": strOf(item["call_id"]),
-				"content":     strOf(item["output"]),
+				"content":     content,
 			}}})
+		case "additional_tools":
+			// Tool declaration (codex 0.145+), consumed via
+			// responsesRequestTools — NOT a message; its role:"developer"
+			// must not fold into `system` either.
+			continue
 		case "reasoning":
 			text, sig := responsesReasoningText(item)
-			blk := map[string]any{"type": "thinking", "thinking": text}
-			if sig != "" {
-				blk["signature"] = sig
+			var blk map[string]any
+			if text == "" && sig != "" {
+				// encrypted-only reasoning ↔ redacted_thinking (data verbatim).
+				blk = map[string]any{"type": "redacted_thinking", "data": sig}
+			} else {
+				blk = map[string]any{"type": "thinking", "thinking": text}
+				if sig != "" {
+					blk["signature"] = sig
+				}
 			}
 			msgs = append(msgs, map[string]any{"role": "assistant", "content": []map[string]any{blk}})
+		default:
+			convertWarn("dropping responses input item in r→a request: " + strOf(item["type"]))
 		}
 	}
-	if len(msgs) > 0 {
-		out["messages"] = mergeConsecutiveAnthropicRoles(msgs)
+	if len(systemParts) > 0 {
+		out["system"] = strings.Join(systemParts, "\n\n")
 	}
-	if tools, ok := src["tools"].([]any); ok && len(tools) > 0 {
+	if len(msgs) > 0 {
+		msgs = mergeConsecutiveAnthropicRoles(msgs)
+		// Anthropic requires the first message to be role:user; insert a minimal
+		// placeholder when the converted list starts otherwise (e.g. input
+		// beginning with a function_call) — same fix as chat→anthropic.
+		if r, _ := msgs[0]["role"].(string); r != "user" {
+			msgs = append([]map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": "."}}}}, msgs...)
+		}
+		out["messages"] = msgs
+	}
+	if tools := responsesRequestTools(src); len(tools) > 0 {
 		if at := responsesToolsToAnthropic(tools); len(at) > 0 {
 			out["tools"] = at
 		}
@@ -641,13 +1140,35 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 			out["tool_choice"] = at
 		}
 	}
+	// parallel_tool_calls:false → disable_parallel_tool_use:true. Only with
+	// tools present; never on tool_choice none (mirrors the chat→a logic).
+	if ptc, ok := src["parallel_tool_calls"].(bool); ok && !ptc {
+		if toolsArr := responsesRequestTools(src); len(toolsArr) > 0 {
+			atm := asMap(out["tool_choice"])
+			if atm == nil {
+				atm = map[string]any{"type": "auto"}
+			}
+			if atm["type"] != "none" {
+				atm["disable_parallel_tool_use"] = true
+				out["tool_choice"] = atm
+			}
+		}
+	}
+	if f := asMap(asMap(src["text"])["format"]); f != nil {
+		convertWarn("dropping text.format (no anthropic equivalent)")
+	}
 	if r := asMap(src["reasoning"]); r != nil {
 		if th := effortToThinking(strOf(r["effort"])); th != nil {
 			out["thinking"] = th
 		}
 	}
-	if v, ok := src["max_output_tokens"]; ok {
+	// Anthropic requires max_tokens; codex clients routinely omit
+	// max_output_tokens (or send an explicit null), so inject the same
+	// generous default the chat→a direction uses (convert.go).
+	if v, ok := src["max_output_tokens"]; ok && v != nil {
 		out["max_tokens"] = v
+	} else {
+		out["max_tokens"] = defaultAnthropicMaxTokens
 	}
 	copyOpt(out, src, "temperature", "top_p", "stream")
 	return sonic.Marshal(out)
@@ -657,25 +1178,80 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 // request: responses → openai-chat
 // ---------------------------------------------------------------------------
 
-func responsesToolsToOpenAI(tools []any) []map[string]any {
+// responsesOutputTextAndImages splits a function_call_output `output` value
+// (string or parts array) into concatenated text + image parts (as chat
+// image_url parts) for media reinjection.
+func responsesOutputTextAndImages(v any) (text string, imgs []map[string]any) {
+	switch raw := v.(type) {
+	case string:
+		return raw, nil
+	case []any:
+		var b strings.Builder
+		for _, p := range raw {
+			pm := asMap(p)
+			if pm == nil {
+				continue
+			}
+			switch pm["type"] {
+			case "input_text", "output_text", "text":
+				b.WriteString(strOf(pm["text"]))
+			case "input_image", "image", "image_url":
+				url := strOf(pm["image_url"])
+				if ium := asMap(pm["image_url"]); ium != nil {
+					url = strOf(ium["url"])
+				}
+				if url != "" {
+					imgs = append(imgs, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+				}
+			}
+		}
+		return b.String(), imgs
+	}
+	return strOf(v), nil
+}
+
+// responsesContentToChat converts a Responses message item's content parts to
+// chat message content: a plain string when text-only (the common shape), or
+// a parts array when images are present — an input_image must not be silently
+// dropped on the responses→chat hop.
+func responsesContentToChat(content any) any {
+	parts, ok := content.([]any)
+	if !ok {
+		return chatContentText(content)
+	}
 	var out []map[string]any
-	for _, t := range tools {
-		tm := asMap(t)
-		if tm == nil || strOf(tm["type"]) != "function" {
+	hasImage := false
+	for _, p := range parts {
+		pm := asMap(p)
+		if pm == nil {
 			continue
 		}
-		fn := map[string]any{"name": strOf(tm["name"])}
-		if d, ok := tm["description"]; ok {
-			fn["description"] = d
+		switch pm["type"] {
+		case "input_text", "output_text", "text":
+			out = append(out, map[string]any{"type": "text", "text": strOf(pm["text"])})
+		case "input_image", "image", "image_url":
+			url := strOf(pm["image_url"])
+			if ium := asMap(pm["image_url"]); ium != nil {
+				url = strOf(ium["url"])
+			}
+			if url != "" {
+				hasImage = true
+				out = append(out, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+			}
+		default:
+			convertWarn("dropping responses content part in r→chat request: " + strOf(pm["type"]))
 		}
-		if p, ok := tm["parameters"]; ok {
-			fn["parameters"] = p
-		}
-		out = append(out, map[string]any{"type": "function", "function": fn})
+	}
+	if !hasImage {
+		return chatContentText(content)
 	}
 	return out
 }
 
+// responsesToolChoiceToOpenAI: "auto"/"none"/"required" passthrough;
+// {type:"function", name, namespace?} flattens the namespace into the name
+// (MCP); a namespace-selecting tool_choice degrades to "auto" (chat has no
+// namespace selector).
 func responsesToolChoiceToOpenAI(tc any) any {
 	if s, ok := tc.(string); ok {
 		return s
@@ -684,13 +1260,29 @@ func responsesToolChoiceToOpenAI(tc any) any {
 	if tcm == nil {
 		return nil
 	}
-	if t, _ := tcm["type"].(string); t == "function" {
-		return map[string]any{"type": "function", "function": map[string]any{"name": strOf(tcm["name"])}}
+	switch t, _ := tcm["type"].(string); t {
+	case "function":
+		name := strOf(tcm["name"])
+		if ns := strOpt(tcm["namespace"]); ns != "" {
+			name = nsFlattenName(ns, name)
+		}
+		return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+	case "namespace":
+		return "auto"
 	}
 	return tcm
 }
 
 func convertResponsesRequestToOpenAI(body []byte) ([]byte, error) {
+	return convertResponsesRequestToOpenAIFor(body, convertReqOpts{ImageOK: true})
+}
+
+// convertResponsesRequestToOpenAIFor is convertResponsesRequestToOpenAI with
+// per-target options (reasoning-effort dialect + vision gate for media
+// reinjection).
+func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byte, error) {
+	providerID := opts.ProviderID
+	imageOK := opts.ImageOK
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse responses request: %w", err)
@@ -703,6 +1295,42 @@ func convertResponsesRequestToOpenAI(body []byte) ([]byte, error) {
 	if ins, ok := src["instructions"].(string); ok && ins != "" {
 		msgs = append(msgs, map[string]any{"role": "system", "content": ins})
 	}
+	// pendingReasoning accumulates reasoning item text until it can attach to
+	// an ASSISTANT message (cc-switch's rule: reasoning_content must ride on
+	// the assistant message — DeepSeek-style upstreams reject tool turns whose
+	// assistant message lacks it; a standalone reasoning assistant message
+	// breaks role expectations). At a USER-turn boundary the pending reasoning
+	// attaches BACKWARD to the previous assistant (reasoning must never leak
+	// across a user turn into the next assistant, cc-switch
+	// transform_codex_chat.rs:1012-1045); leftovers attach backward at the end.
+	pendingReasoning := ""
+	lastAssistant := -1 // msgs index of the last assistant message
+	attachReasoning := func(mi int) {
+		if pendingReasoning != "" && mi >= 0 {
+			msgs[mi]["reasoning_content"] = pendingReasoning
+			pendingReasoning = ""
+		}
+	}
+	// attachBackward consumes pendingReasoning onto the LAST assistant message
+	// (appending when it already carries reasoning_content, cc-switch's
+	// append_reasoning_content "\n\n" separator). With no assistant to take
+	// it, the reasoning is dropped + warned — never carried forward.
+	attachBackward := func() {
+		if pendingReasoning == "" {
+			return
+		}
+		if lastAssistant < 0 {
+			convertWarn("dropping reasoning with no assistant message to attach to (r→chat)")
+			pendingReasoning = ""
+			return
+		}
+		if prev := strOpt(msgs[lastAssistant]["reasoning_content"]); prev != "" {
+			msgs[lastAssistant]["reasoning_content"] = prev + "\n\n" + pendingReasoning
+		} else {
+			msgs[lastAssistant]["reasoning_content"] = pendingReasoning
+		}
+		pendingReasoning = ""
+	}
 	for _, item := range responsesInputItems(src["input"]) {
 		switch item["type"] {
 		case "message":
@@ -713,14 +1341,38 @@ func convertResponsesRequestToOpenAI(body []byte) ([]byte, error) {
 			if role == "system" || role == "developer" {
 				role = "system"
 			}
-			msgs = append(msgs, map[string]any{"role": role, "content": chatContentText(item["content"])})
-		case "function_call":
-			callID := firstNonEmpty(strOf(item["call_id"]), strOf(item["id"]))
+			if role != "assistant" {
+				// User/system turn boundary: consume pending reasoning backward
+				// NOW so it cannot leak into the next assistant message.
+				attachBackward()
+			}
+			msgs = append(msgs, map[string]any{"role": role, "content": responsesContentToChat(item["content"])})
+			if role == "assistant" {
+				lastAssistant = len(msgs) - 1
+				attachReasoning(lastAssistant)
+			}
+		case "function_call", "custom_tool_call":
+			callID := firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))
+			var name, arguments string
+			if item["type"] == "custom_tool_call" {
+				// Custom/freeform call: raw string input wrapped as
+				// {"input": <raw>} arguments for the wrapper function.
+				name = strOpt(item["name"])
+				arguments = wrapCustomCallArguments(strOpt(item["input"]))
+			} else {
+				// MCP namespace: history calls reference the flattened chat name;
+				// the namespace field does not cross over.
+				name = strOpt(item["name"])
+				if ns := strOpt(item["namespace"]); ns != "" {
+					name = nsFlattenName(ns, name)
+				}
+				arguments = firstNonEmpty(strKey(item, "arguments"), "{}")
+			}
 			tc := map[string]any{
 				"id": callID, "type": "function",
 				"function": map[string]any{
-					"name":      strOf(item["name"]),
-					"arguments": strOf(item["arguments"]),
+					"name":      name,
+					"arguments": arguments,
 				},
 			}
 			// Append to the previous message if it is an assistant tool_calls
@@ -732,24 +1384,88 @@ func convertResponsesRequestToOpenAI(body []byte) ([]byte, error) {
 				}
 			}
 			msgs = append(msgs, map[string]any{"role": "assistant", "tool_calls": []map[string]any{tc}})
-		case "function_call_output":
+			lastAssistant = len(msgs) - 1
+			attachReasoning(lastAssistant)
+		case "function_call_output", "custom_tool_call_output":
+			// output may be a string OR a parts array (input_text/input_image);
+			// images are reinjected as a synthetic user message (cc-switch),
+			// gated on the target model's vision (#6).
+			text, imgs := responsesOutputTextAndImages(item["output"])
+			if len(imgs) > 0 && !imageOK {
+				text = appendMediaPlaceholder(text)
+				imgs = nil
+			}
 			msgs = append(msgs, map[string]any{
-				"role":          "tool",
-				"tool_call_id":  strOf(item["call_id"]),
-				"content":       strOf(item["output"]),
+				"role":         "tool",
+				"tool_call_id": strOpt(item["call_id"]),
+				"content":      text,
 			})
+			if len(imgs) > 0 {
+				parts := []map[string]any{{"type": "text", "text": "[image returned by tool]"}}
+				parts = append(parts, imgs...)
+				msgs = append(msgs, map[string]any{"role": "user", "content": parts})
+			}
+		case "additional_tools":
+			// Tool declaration (codex 0.145+), consumed via
+			// responsesRequestTools — NOT a message; its role:"developer"
+			// must not enter the chat message stream.
+			continue
 		case "reasoning":
-			// Reasoning in the input is rare; attach as reasoning_content on a
-			// fresh assistant message (best-effort, lossy if interleaved).
 			text, _ := responsesReasoningText(item)
-			msgs = append(msgs, map[string]any{"role": "assistant", "reasoning_content": text})
+			if pendingReasoning != "" && text != "" {
+				pendingReasoning += "\n"
+			}
+			pendingReasoning += text
+		default:
+			convertWarn("dropping responses input item in r→chat request: " + strOf(item["type"]))
+		}
+	}
+	// Trailing reasoning attaches backward to the last assistant message
+	// (appended, same as the boundary path); with no assistant at all, fall
+	// back to a standalone one (pinned our semantics — cc-switch drops it).
+	if pendingReasoning != "" {
+		if lastAssistant >= 0 {
+			attachBackward()
+		} else {
+			msgs = append(msgs, map[string]any{"role": "assistant", "reasoning_content": pendingReasoning})
+			pendingReasoning = ""
+		}
+	}
+	// System messages must lead (MiniMax-style upstreams reject mid-thread
+	// system): pull them to the head, preserving relative order (cc-switch's
+	// collapse_system_messages_to_head).
+	msgs = collapseSystemToHead(msgs)
+	// Placeholder reasoning_content (cc-switch): thinking-dialect upstreams
+	// (deepseek 400s "reasoning_content must be passed back"; kimi/Moonshot
+	// likewise) require EVERY assistant tool_calls message to carry it. Codex
+	// reasoning items are empty-summary + encrypted_content, so the attached
+	// reasoning_content is exactly empty here — inject the same placeholder
+	// cc-switch uses. Other dialects don't inject.
+	if provider.ChatReasoningMode(providerID) == "thinking" {
+		for _, m := range msgs {
+			if m["role"] != "assistant" {
+				continue
+			}
+			tcs, _ := m["tool_calls"].([]map[string]any)
+			if len(tcs) == 0 {
+				continue
+			}
+			if strOpt(m["reasoning_content"]) == "" {
+				m["reasoning_content"] = "tool call"
+			}
 		}
 	}
 	if len(msgs) > 0 {
 		out["messages"] = msgs
 	}
-	if tools, ok := src["tools"].([]any); ok && len(tools) > 0 {
-		if ot := responsesToolsToOpenAI(tools); len(ot) > 0 {
+	if tools := responsesRequestTools(src); len(tools) > 0 {
+		// MCP namespace flattening: collisions fail CLOSED (the forward layer
+		// turns a conversion error into a 502).
+		ot, err := nsFlattenResponsesTools(tools)
+		if err != nil {
+			return nil, err
+		}
+		if len(ot) > 0 {
 			out["tools"] = ot
 		}
 	}
@@ -759,61 +1475,127 @@ func convertResponsesRequestToOpenAI(body []byte) ([]byte, error) {
 		}
 	}
 	if r := asMap(src["reasoning"]); r != nil {
-		out["reasoning_effort"] = strOf(r["effort"])
+		effort := strOf(r["effort"])
+		// reasoning.context (codex sends "all_turns") has no chat equivalent.
+		if strOpt(r["context"]) != "" {
+			convertWarn("dropping reasoning.context (no chat equivalent)")
+		}
+		// Reasoning effort dialect (provider.ChatReasoningMode): the chat
+		// vendors disagree on the field shape; render per provider family.
+		switch provider.ChatReasoningMode(providerID) {
+		case "thinking":
+			if effort == "none" || effort == "minimal" {
+				out["thinking"] = map[string]any{"type": "disabled"}
+			} else {
+				out["thinking"] = map[string]any{"type": "enabled"}
+			}
+		case "enable_thinking":
+			out["enable_thinking"] = effort != "none" && effort != "minimal"
+		case "openrouter":
+			out["reasoning"] = map[string]any{"effort": effort}
+		default:
+			out["reasoning_effort"] = effort
+		}
 	}
 	if v, ok := src["max_output_tokens"]; ok {
 		out["max_tokens"] = v
 	}
-	copyOpt(out, src, "temperature", "top_p", "stream")
+	if f := asMap(asMap(src["text"])["format"]); f != nil {
+		if rf := textFormatToChatResponseFormat(f); rf != nil {
+			out["response_format"] = rf
+		}
+	}
+	copyOpt(out, src, "temperature", "top_p", "stream", "parallel_tool_calls", "prompt_cache_key")
+	// Streaming requests ask for a usage chunk (same as the a→chat direction):
+	// kimi/MiniMax-style upstreams otherwise report all-zero stream usage.
+	if b, ok := out["stream"].(bool); ok && b {
+		out["stream_options"] = map[string]any{"include_usage": true}
+	}
+	// cc-switch issue #3557: tool_choice / parallel_tool_calls with NO tools is
+	// rejected by several chat upstreams — drop both when the (filtered) tool
+	// list is empty.
+	if _, hasTools := out["tools"]; !hasTools {
+		delete(out, "tool_choice")
+		delete(out, "parallel_tool_calls")
+	}
 	return sonic.Marshal(out)
+}
+
+// collapseSystemToHead pulls all system messages to the front, preserving
+// their relative order and the order of the remaining messages (cc-switch's
+// collapse_system_messages_to_head — MiniMax-style upstreams reject
+// mid-thread system messages).
+func collapseSystemToHead(msgs []map[string]any) []map[string]any {
+	var sys, rest []map[string]any
+	for _, m := range msgs {
+		if m["role"] == "system" {
+			sys = append(sys, m)
+		} else {
+			rest = append(rest, m)
+		}
+	}
+	return append(sys, rest...)
 }
 
 // ===========================================================================
 // response (non-streaming)
 // ===========================================================================
 
-// responsesStatusToAnthropicStop maps a Responses status to an anthropic
-// stop_reason. A function_call in the output → tool_use (regardless of status).
-func responsesStatusToAnthropicStop(status string, hasToolUse bool) string {
+// responsesStatusToAnthropicStop maps a Responses status (+ the
+// incomplete_details.reason) to an anthropic stop_reason. A function_call in
+// the output → tool_use (regardless of status).
+func responsesStatusToAnthropicStop(status, incReason string, hasToolUse bool) string {
 	if hasToolUse {
 		return "tool_use"
 	}
-	switch status {
-	case "incomplete":
+	if status == "incomplete" {
+		if incReason == "content_filter" {
+			return "refusal"
+		}
 		return "max_tokens"
-	default:
-		return "end_turn"
 	}
+	return "end_turn"
 }
 
-// responsesStatusToOpenAIFinish maps a Responses status to a chat finish_reason.
-func responsesStatusToOpenAIFinish(status string, hasToolUse bool) string {
+// responsesStatusToOpenAIFinish maps a Responses status (+ reason) to a chat
+// finish_reason.
+func responsesStatusToOpenAIFinish(status, incReason string, hasToolUse bool) string {
 	if hasToolUse {
 		return "tool_calls"
 	}
-	switch status {
-	case "incomplete":
+	if status == "incomplete" {
+		if incReason == "content_filter" {
+			return "content_filter"
+		}
 		return "length"
-	default:
-		return "stop"
 	}
+	return "stop"
 }
 
-func anthropicStopToResponsesStatus(stop string) string {
+// anthropicStopToResponsesDetail maps an anthropic stop_reason to a Responses
+// status + incomplete_details.reason (reason "" when completed). pause_turn has
+// no Responses equivalent — best-effort completed.
+func anthropicStopToResponsesDetail(stop string) (status, reason string) {
 	switch stop {
 	case "max_tokens":
-		return "incomplete"
+		return "incomplete", "max_output_tokens"
+	case "refusal":
+		return "incomplete", "content_filter"
 	default:
-		return "completed"
+		return "completed", ""
 	}
 }
 
-func openAIFinishToResponsesStatus(finish string) string {
+// openAIFinishToResponsesDetail maps a chat finish_reason to a Responses
+// status + incomplete_details.reason.
+func openAIFinishToResponsesDetail(finish string) (status, reason string) {
 	switch finish {
 	case "length":
-		return "incomplete"
+		return "incomplete", "max_output_tokens"
+	case "content_filter":
+		return "incomplete", "content_filter"
 	default:
-		return "completed"
+		return "completed", ""
 	}
 }
 
@@ -839,6 +1621,14 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse responses response: %w", err)
 	}
+	// Fail-closed: a failed/cancelled response carrying an error must NOT be
+	// wrapped as a normal end_turn message (the forward layer turns a
+	// conversion error into a 502 before commit).
+	if st := strOf(src["status"]); st == "failed" || st == "cancelled" {
+		if e := asMap(src["error"]); e != nil {
+			return nil, fmt.Errorf("responses status %s: %s", st, strOf(e["message"]))
+		}
+	}
 	var blocks []map[string]any
 	hasToolUse := false
 	var textParts []map[string]any
@@ -857,6 +1647,13 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 						switch pm["type"] {
 						case "output_text", "text", "input_text":
 							textParts = append(textParts, pm)
+						case "refusal":
+							// Refusal text is real content — map to a text
+							// block (anthropic has no refusal block type;
+							// stop_reason carries the semantics).
+							textParts = append(textParts, map[string]any{"type": "text", "text": strOf(pm["refusal"])})
+						default:
+							convertWarn("dropping responses content part in r→a response: " + strOf(pm["type"]))
 						}
 					}
 				}
@@ -866,18 +1663,25 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 			hasToolUse = true
 			blocks = append(blocks, map[string]any{
 				"type":  "tool_use",
-				"id":    firstNonEmpty(strOf(item["call_id"]), strOf(item["id"])),
-				"name":  strOf(item["name"]),
+				"id":    firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
+				"name":  strOpt(item["name"]),
 				"input": parseToolArgs(strOf(item["arguments"])),
 			})
 		case "reasoning":
 			flushText()
 			text, sig := responsesReasoningText(item)
-			blk := map[string]any{"type": "thinking", "thinking": text}
-			if sig != "" {
-				blk["signature"] = sig
+			var blk map[string]any
+			if text == "" && sig != "" {
+				blk = map[string]any{"type": "redacted_thinking", "data": sig}
+			} else {
+				blk = map[string]any{"type": "thinking", "thinking": text}
+				if sig != "" {
+					blk["signature"] = sig
+				}
 			}
 			blocks = append(blocks, blk)
+		default:
+			convertWarn("dropping responses output item in r→a response: " + strOf(item["type"]))
 		}
 	}
 	flushText()
@@ -893,7 +1697,9 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 	if m, ok := src["model"]; ok {
 		out["model"] = m
 	}
-	out["stop_reason"] = responsesStatusToAnthropicStop(strOf(src["status"]), hasToolUse)
+	status := strOf(src["status"])
+	incReason := strKey(asMap(src["incomplete_details"]), "reason")
+	out["stop_reason"] = responsesStatusToAnthropicStop(status, incReason, hasToolUse)
 	out["usage"] = responsesUsageToAnthropic(src["usage"])
 	return sonic.Marshal(out)
 }
@@ -908,15 +1714,35 @@ func joinTextParts(parts []map[string]any) string {
 }
 
 // responsesUsageToAnthropic maps a Responses usage object to anthropic usage.
+// responses input_tokens INCLUDES cached AND cache-write tokens
+// (input_tokens_details); anthropic counts both separately from input_tokens —
+// split them out, clamped ≥0 (same convention as chat→anthropic). The direct
+// cache_creation_input_tokens spelling wins over details.cache_write_tokens.
 func responsesUsageToAnthropic(u any) map[string]any {
 	um := asMap(u)
 	if um == nil {
 		return map[string]any{"input_tokens": 0, "output_tokens": 0}
 	}
-	return map[string]any{
-		"input_tokens":  intOf(um["input_tokens"]),
+	cached := intOf(asMap(um["input_tokens_details"])["cached_tokens"])
+	cacheCreate := intOf(um["cache_creation_input_tokens"])
+	if cacheCreate == 0 {
+		cacheCreate = intOf(asMap(um["input_tokens_details"])["cache_write_tokens"])
+	}
+	inTok := intOf(um["input_tokens"]) - cached - cacheCreate
+	if inTok < 0 {
+		inTok = 0
+	}
+	out := map[string]any{
+		"input_tokens":  inTok,
 		"output_tokens": intOf(um["output_tokens"]),
 	}
+	if cached > 0 {
+		out["cache_read_input_tokens"] = cached
+	}
+	if cacheCreate > 0 {
+		out["cache_creation_input_tokens"] = cacheCreate
+	}
+	return out
 }
 
 // intOf coerces a JSON number to int (sonic decodes to float64).
@@ -937,6 +1763,12 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse responses response: %w", err)
 	}
+	// Fail-closed (same as convertResponsesToAnthropic).
+	if st := strOf(src["status"]); st == "failed" || st == "cancelled" {
+		if e := asMap(src["error"]); e != nil {
+			return nil, fmt.Errorf("responses status %s: %s", st, strOf(e["message"]))
+		}
+	}
 	var contentText strings.Builder
 	var toolCalls []map[string]any
 	var reasoning strings.Builder
@@ -949,22 +1781,30 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 						switch pm["type"] {
 						case "output_text", "text", "input_text":
 							contentText.WriteString(strOf(pm["text"]))
+						case "refusal":
+							// Refusal text is real content (finish_reason
+							// carries the refusal semantics).
+							contentText.WriteString(strOf(pm["refusal"]))
+						default:
+							convertWarn("dropping responses content part in r→chat response: " + strOf(pm["type"]))
 						}
 					}
 				}
 			}
 		case "function_call":
 			toolCalls = append(toolCalls, map[string]any{
-				"id":   firstNonEmpty(strOf(item["call_id"]), strOf(item["id"])),
+				"id":   firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
 				"type": "function",
 				"function": map[string]any{
-					"name":      strOf(item["name"]),
+					"name":      strOpt(item["name"]),
 					"arguments": strOf(item["arguments"]),
 				},
 			})
 		case "reasoning":
 			text, _ := responsesReasoningText(item)
 			reasoning.WriteString(text)
+		default:
+			convertWarn("dropping responses output item in r→chat response: " + strOf(item["type"]))
 		}
 	}
 	msg := map[string]any{"role": "assistant"}
@@ -979,7 +1819,9 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 	if reasoning.Len() > 0 {
 		msg["reasoning_content"] = reasoning.String()
 	}
-	finish := responsesStatusToOpenAIFinish(strOf(src["status"]), len(toolCalls) > 0)
+	status := strOf(src["status"])
+	incReason := strKey(asMap(src["incomplete_details"]), "reason")
+	finish := responsesStatusToOpenAIFinish(status, incReason, len(toolCalls) > 0)
 	choice := map[string]any{
 		"index":         0,
 		"message":       msg,
@@ -1000,15 +1842,25 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 func responsesUsageToOpenAI(u any) map[string]any {
 	um := asMap(u)
 	in, out := 0, 0
+	cached, reasoning := 0, 0
 	if um != nil {
 		in = intOf(um["input_tokens"])
 		out = intOf(um["output_tokens"])
+		cached = intOf(asMap(um["input_tokens_details"])["cached_tokens"])
+		reasoning = intOf(asMap(um["output_tokens_details"])["reasoning_tokens"])
 	}
-	return map[string]any{
+	m := map[string]any{
 		"prompt_tokens":     in,
 		"completion_tokens": out,
 		"total_tokens":      in + out,
 	}
+	if cached > 0 {
+		m["prompt_tokens_details"] = map[string]any{"cached_tokens": cached}
+	}
+	if reasoning > 0 {
+		m["completion_tokens_details"] = map[string]any{"reasoning_tokens": reasoning}
+	}
+	return m
 }
 
 // --- response: anthropic → responses ---
@@ -1040,7 +1892,7 @@ func convertAnthropicResponseToResponses(body []byte) ([]byte, error) {
 				textParts = append(textParts, strOf(b["text"]))
 			case "tool_use":
 				flushText()
-				args, _ := sonic.MarshalString(b["input"])
+				args := marshalToolInput(b["input"])
 				item := map[string]any{
 					"type": "function_call", "status": "completed",
 					"id": strOf(b["id"]), "call_id": strOf(b["id"]),
@@ -1057,6 +1909,15 @@ func convertAnthropicResponseToResponses(body []byte) ([]byte, error) {
 					item["encrypted_content"] = sig
 				}
 				output = append(output, item)
+			case "redacted_thinking":
+				flushText()
+				item := map[string]any{"type": "reasoning", "status": "completed", "summary": []any{}}
+				if data, _ := b["data"].(string); data != "" {
+					item["encrypted_content"] = data
+				}
+				output = append(output, item)
+			default:
+				convertWarn("dropping anthropic content block in a→r response: " + strOf(b["type"]))
 			}
 		}
 	}
@@ -1067,11 +1928,15 @@ func convertAnthropicResponseToResponses(body []byte) ([]byte, error) {
 			"content": []map[string]any{{"type": "output_text", "text": ""}},
 		}}
 	}
+	status, incReason := anthropicStopToResponsesDetail(strOf(src["stop_reason"]))
 	out := map[string]any{
 		"id":     strOf(src["id"]),
 		"object": "response",
-		"status": anthropicStopToResponsesStatus(strOf(src["stop_reason"])),
+		"status": status,
 		"output": output,
+	}
+	if incReason != "" {
+		out["incomplete_details"] = map[string]any{"reason": incReason}
 	}
 	if m, ok := src["model"]; ok {
 		out["model"] = m
@@ -1083,6 +1948,13 @@ func convertAnthropicResponseToResponses(body []byte) ([]byte, error) {
 // --- response: openai-chat → responses ---
 
 func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
+	return convertOpenAIResponseToResponsesNS(body, r2cCtx{})
+}
+
+// convertOpenAIResponseToResponsesNS converts with the responses→chat
+// context: MCP namespace restore + custom/freeform tool unwrapping (zero
+// value = no-op for both).
+func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse openai response: %w", err)
@@ -1104,9 +1976,24 @@ func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
 			finish = strOf(ch["finish_reason"])
 			if msg := asMap(ch["message"]); msg != nil {
 				if c, ok := msg["content"].(string); ok && c != "" {
-					textParts = append(textParts, c)
+					// MiniMax-style inline thinking: a LEADING <think>…</think>
+					// block inside content splits into a reasoning item
+					// (cc-switch split_leading_think_block); mid-text blocks
+					// stay literal.
+					if r, answer, ok := splitLeadingThinkBlock(c); ok {
+						if r != "" {
+							output = append(output, map[string]any{
+								"type": "reasoning", "status": "completed",
+								"summary": []map[string]any{{"type": "summary_text", "text": r}},
+							})
+						}
+						c = answer
+					}
+					if c != "" {
+						textParts = append(textParts, c)
+					}
 				}
-				if rc, ok := msg["reasoning_content"].(string); ok && rc != "" {
+				if rc := chatReasoningText(msg); rc != "" {
 					flushText()
 					output = append(output, map[string]any{
 						"type": "reasoning", "status": "completed",
@@ -1121,13 +2008,42 @@ func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
 						}
 						flushText()
 						fn := asMap(tcm["function"])
-						output = append(output, map[string]any{
+						args := strOpt(fnMap(fn, "arguments"))
+						if args == "" {
+							if raw := fnMap(fn, "arguments"); raw != nil {
+								args = strOf(raw)
+							}
+						}
+						if args == "" {
+							args = "{}"
+						}
+						name := strOpt(fnMap(fn, "name"))
+						// Custom/freeform call: unwrap {"input": "<raw>"} back
+						// to a custom_tool_call item (raw string input).
+						if r2c.custom[name] {
+							output = append(output, map[string]any{
+								"type": "custom_tool_call", "status": "completed",
+								"id":      strOpt(tcm["id"]),
+								"call_id": strOpt(tcm["id"]),
+								"name":    name,
+								"input":   unwrapCustomCallArguments(args),
+							})
+							continue
+						}
+						item := map[string]any{
 							"type": "function_call", "status": "completed",
-							"id":      strOf(tcm["id"]),
-							"call_id": strOf(tcm["id"]),
-							"name":    strOf(fnMap(fn, "name")),
-							"arguments": strOf(fnMap(fn, "arguments")),
-						})
+							"id":        strOpt(tcm["id"]),
+							"call_id":   strOpt(tcm["id"]),
+							"name":      name,
+							"arguments": args,
+						}
+						// MCP namespace restore: a chat name that was flattened
+						// from {namespace, name} round-trips back to二维.
+						if orig, ns, ok := nsRestoreName(r2c.ns, name); ok {
+							item["name"] = orig
+							item["namespace"] = ns
+						}
+						output = append(output, item)
 					}
 				}
 			}
@@ -1140,11 +2056,15 @@ func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
 			"content": []map[string]any{{"type": "output_text", "text": ""}},
 		}}
 	}
+	status, incReason := openAIFinishToResponsesDetail(finish)
 	out := map[string]any{
 		"id":     strOf(src["id"]),
 		"object": "response",
-		"status": openAIFinishToResponsesStatus(finish),
+		"status": status,
 		"output": output,
+	}
+	if incReason != "" {
+		out["incomplete_details"] = map[string]any{"reason": incReason}
 	}
 	if m, ok := src["model"]; ok {
 		out["model"] = m
@@ -1153,23 +2073,44 @@ func convertOpenAIResponseToResponses(body []byte) ([]byte, error) {
 	return sonic.Marshal(out)
 }
 
+// anthropicUsageToResponses maps anthropic usage to Responses usage. Responses
+// input_tokens is INCLUSIVE of cache traffic (same convention as
+// anthropic→chat prompt_tokens): input + cache_read + cache_creation, with
+// cache reads surfaced via input_tokens_details.
 func anthropicUsageToResponses(u any) map[string]any {
 	um := asMap(u)
 	in, out := 0, 0
+	cached, created := 0, 0
 	if um != nil {
 		in = intOf(um["input_tokens"])
 		out = intOf(um["output_tokens"])
+		cached = intOf(um["cache_read_input_tokens"])
+		created = intOf(um["cache_creation_input_tokens"])
 	}
-	return map[string]any{"input_tokens": in, "output_tokens": out, "total_tokens": in + out}
+	total := in + cached + created
+	m := map[string]any{"input_tokens": total, "output_tokens": out, "total_tokens": total + out}
+	if cached > 0 {
+		m["input_tokens_details"] = map[string]any{"cached_tokens": cached}
+	}
+	return m
 }
 
 func openAIUsageToResponses(u any) map[string]any {
 	um := asMap(u)
 	in, out := 0, 0
+	cached, reasoning := 0, 0
 	if um != nil {
 		in = intOf(um["prompt_tokens"])
 		out = intOf(um["completion_tokens"])
+		cached = intOf(asMap(um["prompt_tokens_details"])["cached_tokens"])
+		reasoning = intOf(asMap(um["completion_tokens_details"])["reasoning_tokens"])
 	}
-	return map[string]any{"input_tokens": in, "output_tokens": out, "total_tokens": in + out}
+	m := map[string]any{"input_tokens": in, "output_tokens": out, "total_tokens": in + out}
+	if cached > 0 {
+		m["input_tokens_details"] = map[string]any{"cached_tokens": cached}
+	}
+	if reasoning > 0 {
+		m["output_tokens_details"] = map[string]any{"reasoning_tokens": reasoning}
+	}
+	return m
 }
-

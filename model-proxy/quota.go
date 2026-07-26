@@ -73,6 +73,9 @@ type quotaTracker struct {
 	// under; NewProxy restores ONLY when it matches the current config's
 	// fingerprint (see healthConfigFingerprint).
 	LoadedHealthFP string
+	// LoadedWireCaps is populated by load() on boot; NewProxy restores the
+	// verdicts whose base_url still matches the current config (wirecap.go).
+	LoadedWireCaps map[string]wireCaps
 }
 
 // persistedHealth is the on-disk form of one provider's frozen runtime state.
@@ -90,6 +93,7 @@ type persistedFullSnapshot struct {
 	Health     map[string]persistedHealth
 	HealthFP   string
 	Generation uint64
+	WireCaps   map[string]wireCaps
 }
 
 // refreshState tracks per-provider refresh dedup state (guarded by quotaTracker.mu).
@@ -489,6 +493,9 @@ func (t *quotaTracker) persist() error {
 		wrap["sticky"] = sticky
 		wrap["health"] = s.Health
 		wrap["health_fp"] = s.HealthFP
+		if len(s.WireCaps) > 0 {
+			wrap["wire_caps"] = s.WireCaps
+		}
 	} else {
 		t.mu.RLock()
 		out := make(map[string]persistedSnapshot, len(t.state))
@@ -567,6 +574,7 @@ func (t *quotaTracker) load() {
 		Sticky    map[string]persistedSticky   `json:"sticky"`
 		Health    map[string]persistedHealth   `json:"health"`
 		HealthFP  string                       `json:"health_fp"`
+		WireCaps  map[string]wireCaps          `json:"wire_caps"`
 	}
 	if err := json.Unmarshal(data, &wrap); err != nil {
 		return
@@ -586,4 +594,5 @@ func (t *quotaTracker) load() {
 	}
 	t.LoadedHealth = wrap.Health
 	t.LoadedHealthFP = wrap.HealthFP
+	t.LoadedWireCaps = wrap.WireCaps
 }

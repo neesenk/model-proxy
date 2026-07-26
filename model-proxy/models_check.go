@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -61,14 +62,20 @@ func probeModelCallable(client *http.Client, prov Provider, impl provider.Provid
 	// anthropic_base_url is probed over the anthropic protocol (its primary chat
 	// path for Claude Code); otherwise the openai protocol.
 	baseURL := prov.OpenAIBaseURL
+	path, body := pr.Path, pr.Body
 	if prov.AnthropicBaseURL != "" {
 		baseURL = prov.AnthropicBaseURL
+		// The impl's ProbeRequest is openai-shaped; on the anthropic base the
+		// probe must speak anthropic (path + body), otherwise strict bases 404
+		// (deepseek) and lenient ones get tested with the wrong protocol shape
+		// (zhipu's gateway accepts /chat/completions on the anthropic base).
+		path = "/v1/messages"
+		body = []byte(`{"model":` + strconv.Quote(modelID) + `,"max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 	}
 
-	targetURL := strings.TrimRight(baseURL, "/") + pr.Path
-	body := pr.Body
+	targetURL := strings.TrimRight(baseURL, "/") + path
 	// Provider-specific URL/body tweaks (aqp ?beta=true, codex store:false).
-	targetURL, body = impl.RewriteRequest(targetURL, body, pr.Path)
+	targetURL, body = impl.RewriteRequest(targetURL, body, path)
 
 	req, err := http.NewRequest(pr.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -79,6 +86,11 @@ func probeModelCallable(client *http.Client, prov Provider, impl provider.Provid
 	// Minimal whitelist from forward's copyHeaderWhitelist - the probe has no
 	// client request to copy from, so just set the ones the upstream expects.
 	req.Header.Set("Accept", "application/json")
+	if path == "/v1/messages" {
+		// Anthropic endpoints require the version header (set BEFORE
+		// ExtraHeaders so a provider impl can still override it).
+		req.Header.Set("anthropic-version", "2023-06-01")
+	}
 
 	if err := impl.AuthHeaders(req); err != nil {
 		return false, 0, "auth: " + err.Error()
@@ -88,7 +100,7 @@ func probeModelCallable(client *http.Client, prov Provider, impl provider.Provid
 	}
 	// Provider-specific per-request headers (aqp: anthropic-version +
 	// x-compass-request-id). Same method the forward path calls - one impl.
-	impl.ExtraHeaders(req, pr.Path)
+	impl.ExtraHeaders(req, path)
 
 	resp, err := client.Do(req)
 	if err != nil {

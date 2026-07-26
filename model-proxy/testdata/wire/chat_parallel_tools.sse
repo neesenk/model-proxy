@@ -1,0 +1,14 @@
+data: {"id":"chatcmpl-seed3","object":"chat.completion.chunk","model":"gpt-seed","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-seed3","object":"chat.completion.chunk","model":"gpt-seed","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"shell","arguments":"{\"cmd\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-seed3","object":"chat.completion.chunk","model":"gpt-seed","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"read_file","arguments":"{\"path\""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-seed3","object":"chat.completion.chunk","model":"gpt-seed","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"ls\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-seed3","object":"chat.completion.chunk","model":"gpt-seed","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":":\"a.txt\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-seed3","object":"chat.completion.chunk","model":"gpt-seed","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":18,"completion_tokens":21,"total_tokens":39}}
+
+data: [DONE]
+

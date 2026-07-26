@@ -107,7 +107,7 @@ func TestConvertHelpers(t *testing.T) {
 			t.Errorf("mapStopReasonToFinish(%q)=%q want %q", reason, got, want)
 		}
 	}
-	// anthropicTextOf: string passthrough, array text concat, image skipped.
+	// anthropicTextOf: string passthrough, array text joined with "\n", image skipped.
 	if got := anthropicTextOf("hi"); got != "hi" {
 		t.Errorf("string extract=%q", got)
 	}
@@ -115,8 +115,8 @@ func TestConvertHelpers(t *testing.T) {
 		map[string]any{"type": "text", "text": "a"},
 		map[string]any{"type": "image", "text": "ignored"},
 		map[string]any{"type": "text", "text": "b"},
-	}); got != "ab" {
-		t.Errorf("array extract=%q want ab", got)
+	}); got != "a\nb" {
+		t.Errorf("array extract=%q want %q", got, "a\nb")
 	}
 	// backendPath by protocol.
 	if p := backendPath("anthropic"); p != "/v1/messages" {

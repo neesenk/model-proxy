@@ -29,8 +29,12 @@ func (p *CodexProvider) Refresh() error {
 	return p.auth.Refresh()
 }
 func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
-	// codex backend requires store:false in the request body.
+	// codex backend requires store:false in the request body. It is stateless
+	// (no server-side response storage), so reasoning.encrypted_content must
+	// be explicitly included or multi-turn reasoning state is lost (cc-switch
+	// transform_responses.rs:397-425).
 	body = ensureJSONField(body, "store", false)
+	body = ensureJSONArrayItem(body, "include", "reasoning.encrypted_content")
 	return targetURL, body
 }
 func (p *CodexProvider) Logout() error { return removeAuthFile(p.cfg.OAuthAuthFile) }
@@ -243,4 +247,26 @@ func ensureJSONField(body []byte, key string, val any) []byte {
 		return out
 	}
 	return body
+}
+
+// ensureJSONArrayItem appends item to the string array at body[key] (creating
+// the array when absent); a body that already carries the item is returned
+// unchanged. Non-JSON bodies pass through untouched.
+func ensureJSONArrayItem(body []byte, key, item string) []byte {
+	var v map[string]any
+	if err := json.Unmarshal(body, &v); err != nil {
+		return body
+	}
+	arr, _ := v[key].([]any)
+	for _, e := range arr {
+		if s, _ := e.(string); s == item {
+			return body
+		}
+	}
+	v[key] = append(arr, item)
+	out, err := json.Marshal(v)
+	if err != nil {
+		return body
+	}
+	return out
 }

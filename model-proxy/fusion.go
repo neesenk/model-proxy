@@ -335,14 +335,14 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	defer p.releaseHalfOpenSlot(m.Provider, fc.flc.generation)
 	sched := fc.cfg.Scheduling
 
-	backendProto := resolvedBackendProto(m.Protocol, provCfg.Provider, m.Model, fc.proto)
+	backendProto, _ := p.resolvedBackendProto(m.Protocol, m.Provider, provCfg, m.Model, fc.proto, fc.parentOf)
 	body := srcBody
 	if m.Model != fc.calledModel {
 		body = rewriteModel(body, m.Model)
 	}
 	convert := needsConversion(fc.proto, backendProto)
 	if convert {
-		cb, err := convertRequest(body, fc.proto, backendProto)
+		cb, err := convertRequestFor(body, fc.proto, backendProto, convertReqOpts{ProviderID: provCfg.Provider, ImageOK: imageOKForTarget(fc.cfg, fc.parentOf, p.catalogSnapshot(), m)})
 		if err != nil {
 			res.err = fmt.Errorf("convert %s→%s: %w", fc.proto, backendProto, err)
 			return
@@ -498,13 +498,13 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		log.Printf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
 		return false
 	}
-	backendProto := resolvedBackendProto(st.Protocol, prov.Provider, st.Model, fc.proto)
+	backendProto, viaResponsesVerdict := p.resolvedBackendProto(st.Protocol, st.Provider, prov, st.Model, fc.proto, fc.parentOf)
 	if st.Model != fc.calledModel {
 		body = rewriteModel(body, st.Model)
 	}
 	convert := needsConversion(fc.proto, backendProto)
 	if convert {
-		cb, err := convertRequest(body, fc.proto, backendProto)
+		cb, err := convertRequestFor(body, fc.proto, backendProto, convertReqOpts{ProviderID: prov.Provider, ImageOK: imageOKForTarget(fc.cfg, fc.parentOf, p.catalogSnapshot(), st)})
 		if err != nil {
 			// Fail CLOSED: a conversion failure must not send the unconverted
 			// body to the backend (it would ship an Anthropic body to an OpenAI
@@ -527,7 +527,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	// synthesis body (with the candidate sections), not the client's original.
 	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed, generation: fc.flc.generation}
 	committed, _, _ := p.tryTarget(fc.cfg, fc.proto, backendProto, fc.calledModel, st, prov, impl, baseURL, effPath,
-		body, w, r, fc.agent, cacheKey, false, cache, flc, nil, true)
+		body, w, r, fc.agent, cacheKey, false, cache, flc, nil, true, viaResponsesVerdict, r2cCtxFor(fc.proto, backendProto, fc.origBody))
 	return committed
 }
 
