@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +33,28 @@ import (
 // map to plain text blocks. logprobs is dropped silently (debug-only field).
 // Claude Code's client tools (bash/edit/...) are ordinary function tools and
 // convert normally.
+
+const toolResultErrorMarker = "[cc-switch:tool-result-error]"
+
+func markToolResultError(text string, isError bool) string {
+	if !isError {
+		return text
+	}
+	if text == "" {
+		return toolResultErrorMarker
+	}
+	return toolResultErrorMarker + "\n" + text
+}
+
+func splitToolResultError(text string) (string, bool) {
+	if text == toolResultErrorMarker {
+		return "", true
+	}
+	if strings.HasPrefix(text, toolResultErrorMarker+"\n") {
+		return strings.TrimPrefix(text, toolResultErrorMarker+"\n"), true
+	}
+	return text, false
+}
 
 // needsConversion reports whether a client protocol and a target's declared
 // backend protocol differ (and thus conversion applies). Any two distinct
@@ -126,9 +150,17 @@ func anthropicToolsToOpenAI(tools []any) []map[string]any {
 		if t == nil {
 			continue
 		}
-		// Server-side/built-in tools declare a `type` that isn't a plain function
-		// tool (which has name+input_schema, no `type`). Drop them.
+		// Preserve hosted web search as a callable fallback on Chat backends.
 		if bt, ok := t["type"].(string); ok && bt != "" {
+			if strings.HasPrefix(bt, "web_search") {
+				fn := map[string]any{
+					"name":        "web_search",
+					"description": "Search the web for current information.",
+					"parameters":  hostedToolSchema("web_search"),
+				}
+				out = append(out, map[string]any{"type": "function", "function": fn})
+				continue
+			}
 			convertWarn("dropping server-side anthropic tool type: " + bt)
 			continue
 		}
@@ -196,6 +228,42 @@ func anthropicContentBlockToOpenAIPart(blk map[string]any) map[string]any {
 			return map[string]any{"type": "image_url", "image_url": map[string]any{"url": u}}
 		}
 		return nil
+	case "document":
+		src := asMap(blk["source"])
+		if src == nil {
+			return nil
+		}
+		filename := firstNonEmpty(strOpt(blk["title"]), strOpt(blk["filename"]), "document.pdf")
+		switch strOpt(src["type"]) {
+		case "base64":
+			data := strOpt(src["data"])
+			if data == "" {
+				return nil
+			}
+			mediaType := firstNonEmpty(strOpt(src["media_type"]), "application/pdf")
+			return map[string]any{"type": "file", "file": map[string]any{
+				"filename":  filename,
+				"file_data": "data:" + mediaType + ";base64," + data,
+			}}
+		case "file":
+			if id := strOpt(src["file_id"]); id != "" {
+				return map[string]any{"type": "file", "file": map[string]any{
+					"filename": filename,
+					"file_id":  id,
+				}}
+			}
+		case "url":
+			if u := strOpt(src["url"]); u != "" {
+				// Chat Completions has no URL-backed file part. Preserve the
+				// reference as text instead of silently dropping the document.
+				return map[string]any{"type": "text", "text": "[document " + filename + "] " + u}
+			}
+		case "text":
+			if data := strOpt(src["data"]); data != "" {
+				return map[string]any{"type": "text", "text": "[document " + filename + "]\n" + data}
+			}
+		}
+		return nil
 	case "tool_use", "tool_result":
 		return nil // handled at message level
 	case "thinking", "redacted_thinking":
@@ -220,6 +288,10 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 		om := map[string]any{"role": "assistant"}
 		var textParts []map[string]any
 		var toolCalls []map[string]any
+		var hostedResults []map[string]any
+		var annotations []map[string]any
+		var reasoningParts []string
+		textOffset := 0
 		if blocks, ok := content.([]any); ok {
 			for _, b := range blocks {
 				blk := asMap(b)
@@ -234,7 +306,31 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 						"id": id, "type": "function",
 						"function": map[string]any{"name": name, "arguments": string(args)},
 					})
+				} else if blk["type"] == "server_tool_use" && strOpt(blk["name"]) == "web_search" {
+					args, _ := sonic.Marshal(blk["input"])
+					toolCalls = append(toolCalls, map[string]any{
+						"id": strOpt(blk["id"]), "type": "function",
+						"function": map[string]any{"name": "web_search", "arguments": string(args)},
+					})
+				} else if blk["type"] == "web_search_tool_result" {
+					data, _ := sonic.Marshal(blk["content"])
+					hostedResults = append(hostedResults, map[string]any{
+						"role": "tool", "tool_call_id": strOpt(blk["tool_use_id"]), "content": string(data),
+					})
+				} else if blk["type"] == "thinking" {
+					if thinking := strOpt(blk["thinking"]); thinking != "" {
+						reasoningParts = append(reasoningParts, thinking)
+					}
+				} else if blk["type"] == "redacted_thinking" {
+					// Opaque Anthropic payloads have no Chat equivalent. The
+					// Anthropic client still owns and replays the original
+					// block on its next request.
 				} else {
+					if blk["type"] == "text" {
+						text := strOf(blk["text"])
+						annotations = append(annotations, anthropicCitationsToChat(blk["citations"], text, textOffset)...)
+						textOffset += len([]rune(text))
+					}
 					if p := anthropicContentBlockToOpenAIPart(blk); p != nil {
 						textParts = append(textParts, p)
 					}
@@ -260,7 +356,13 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 		if len(toolCalls) > 0 {
 			om["tool_calls"] = toolCalls
 		}
-		return []map[string]any{om}
+		if len(annotations) > 0 {
+			om["annotations"] = annotations
+		}
+		if len(reasoningParts) > 0 {
+			om["reasoning_content"] = strings.Join(reasoningParts, "")
+		}
+		return append([]map[string]any{om}, hostedResults...)
 	}
 
 	// user (and any other role): split tool_result blocks from text/image parts.
@@ -273,7 +375,7 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 			}
 			if blk["type"] == "tool_result" {
 				id, _ := blk["tool_use_id"].(string)
-				txt := anthropicToolResultText(blk["content"])
+				txt := markToolResultError(anthropicToolResultText(blk["content"]), blk["is_error"] == true)
 				imgs := anthropicToolResultImages(blk["content"])
 				if len(imgs) > 0 && !imageOK {
 					// No vision on the target: no synthetic user message, no
@@ -441,6 +543,9 @@ func convertAnthropicRequestToOpenAIV(body []byte, imageOK bool) ([]byte, error)
 	if stops, ok := src["stop_sequences"].([]any); ok && len(stops) > 0 {
 		out["stop"] = stops
 	}
+	if key := anthropicExplicitPromptCacheKey(src, out); key != "" {
+		out["prompt_cache_key"] = key
+	}
 	return sonic.Marshal(out)
 }
 
@@ -467,11 +572,106 @@ func openaiToolsToAnthropic(tools []any) []map[string]any {
 			at["description"] = d
 		}
 		if p, ok := fn["parameters"]; ok {
-			at["input_schema"] = p
+			at["input_schema"] = normalizeAnthropicInputSchema(p)
+		} else {
+			at["input_schema"] = normalizeAnthropicInputSchema(nil)
 		}
 		out = append(out, at)
 	}
 	return out
+}
+
+// normalizeAnthropicInputSchema enforces Anthropic's root-object constraint.
+// Root oneOf/anyOf/allOf compositions are flattened while nested schemas stay
+// intact. The transport-only `encrypted` marker is removed from schema keyword
+// positions but properties literally named "encrypted" are preserved.
+func normalizeAnthropicInputSchema(schema any) map[string]any {
+	clean, _ := stripSchemaEncryptedMarker(schema, false).(map[string]any)
+	if clean == nil {
+		clean = map[string]any{}
+	}
+	composition := false
+	for _, key := range []string{"oneOf", "anyOf", "allOf"} {
+		if _, ok := clean[key].([]any); ok {
+			composition = true
+			break
+		}
+	}
+	if !composition {
+		clean["type"] = "object"
+		if clean["properties"] == nil {
+			clean["properties"] = map[string]any{}
+		}
+		return clean
+	}
+	properties := map[string]any{}
+	if p := asMap(clean["properties"]); p != nil {
+		for k, v := range p {
+			properties[k] = v
+		}
+	}
+	required := map[string]bool{}
+	for _, raw := range anySlice(clean["required"]) {
+		if name, ok := raw.(string); ok {
+			required[name] = true
+		}
+	}
+	for _, key := range []string{"oneOf", "anyOf", "allOf"} {
+		for _, raw := range anySlice(clean[key]) {
+			branch := asMap(raw)
+			for name, value := range asMap(branch["properties"]) {
+				properties[name] = value
+			}
+			if key == "allOf" {
+				for _, req := range anySlice(branch["required"]) {
+					if name, ok := req.(string); ok {
+						required[name] = true
+					}
+				}
+			}
+		}
+		delete(clean, key)
+	}
+	clean["type"] = "object"
+	clean["properties"] = properties
+	delete(clean, "required")
+	if len(required) > 0 {
+		names := make([]string, 0, len(required))
+		for name := range required {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		clean["required"] = names
+	}
+	return clean
+}
+
+func stripSchemaEncryptedMarker(value any, inNameBag bool) any {
+	switch node := value.(type) {
+	case []any:
+		out := make([]any, len(node))
+		for i := range node {
+			out[i] = stripSchemaEncryptedMarker(node[i], false)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(node))
+		for key, child := range node {
+			if !inNameBag && key == "encrypted" {
+				continue
+			}
+			nameBag := key == "properties" || key == "patternProperties" || key == "$defs" || key == "definitions"
+			literal := key == "const" || key == "default" || key == "enum" || key == "examples"
+			if literal {
+				out[key] = child
+			} else {
+				out[key] = stripSchemaEncryptedMarker(child, nameBag)
+			}
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // openaiToolChoiceToAnthropic maps an openai tool_choice to anthropic form.
@@ -525,6 +725,26 @@ func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
 		if u != "" {
 			return map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": u}}
 		}
+	case "file":
+		f := asMap(part["file"])
+		if f == nil {
+			return nil
+		}
+		filename := strOpt(f["filename"])
+		var block map[string]any
+		if id := strOpt(f["file_id"]); id != "" {
+			block = map[string]any{"type": "document", "source": map[string]any{"type": "file", "file_id": id}}
+		} else if dataURL := strOpt(f["file_data"]); dataURL != "" {
+			if mt, data, ok := parseDataURL(dataURL); ok {
+				block = map[string]any{"type": "document", "source": map[string]any{
+					"type": "base64", "media_type": mt, "data": data,
+				}}
+			}
+		}
+		if block != nil && filename != "" {
+			block["title"] = filename
+		}
+		return block
 	case "refusal":
 		// Refusals map to plain text (anthropic has no refusal block type);
 		// stop_reason already carries the refusal semantics (cc-switch同款).
@@ -654,6 +874,21 @@ func mergeConsecutiveAnthropicRoles(msgs []map[string]any) []map[string]any {
 	return out
 }
 
+func anySlice(v any) []any {
+	switch x := v.(type) {
+	case []any:
+		return x
+	case []map[string]any:
+		out := make([]any, len(x))
+		for i := range x {
+			out[i] = x[i]
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // convertOpenAIRequestToAnthropic transforms an OpenAI /v1/chat/completions body
 // into an Anthropic /v1/messages body (full tools support). max_tokens is required
 // by Anthropic; if absent a generous default is injected.
@@ -718,10 +953,12 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 		blocks := make([]map[string]any, 0, len(pendingTool))
 		for _, tm := range pendingTool {
 			tid, _ := tm["tool_call_id"].(string)
+			content, isError := splitToolResultError(openaiTextOf(tm["content"]))
 			blocks = append(blocks, map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": normID(tid),
-				"content":     openaiTextOf(tm["content"]),
+				"content":     content,
+				"is_error":    isError,
 			})
 		}
 		msgs = append(msgs, map[string]any{"role": "user", "content": blocks})
@@ -734,7 +971,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 		}
 		role, _ := mm["role"].(string)
 		switch role {
-		case "system":
+		case "system", "developer":
 			// Parts-array content extracts its text parts; multiple system
 			// messages join with "\n" (cc-switch/opencodex join the same way).
 			if sys := openaiTextOf(mm["content"]); sys != "" {
@@ -755,7 +992,11 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 				msgs = append(msgs, map[string]any{"role": "user", "content": blocks})
 			}
 		case "assistant":
-			var blocks []map[string]any
+			// A Chat client which preserved our reasoning_details extension
+			// can replay the exact signed Anthropic blocks before tool_use.
+			// Unsigned reasoning_content is intentionally not promoted to an
+			// Anthropic thinking block.
+			blocks := chatAnthropicThinkingReplay(mm)
 			if tb := openaiContentToAnthropicBlocks(mm["content"]); len(tb) > 0 {
 				blocks = append(blocks, tb...)
 			}
@@ -852,28 +1093,34 @@ type convertReqOpts struct {
 
 // convertRequestFor is convertRequest with per-target options.
 func convertRequestFor(body []byte, clientProto, targetProto string, opts convertReqOpts) ([]byte, error) {
-	if !needsConversion(clientProto, targetProto) {
-		return body, nil
+	if err := validateConversionCapabilities(body, clientProto, targetProto); err != nil {
+		return nil, err
 	}
 	var (
-		out []byte
+		out = body
 		err error
 	)
-	switch clientProto + "->" + targetProto {
-	case "anthropic->openai":
-		out, err = convertAnthropicRequestToOpenAIV(body, opts.ImageOK)
-	case "openai->anthropic":
-		out, err = convertOpenAIRequestToAnthropic(body)
-	case "anthropic->responses":
-		out, err = convertAnthropicRequestToResponsesV(body, opts.ImageOK)
-	case "openai->responses":
-		out, err = convertOpenAIRequestToResponses(body)
-	case "responses->anthropic":
-		out, err = convertResponsesRequestToAnthropic(body)
-	case "responses->openai":
-		out, err = convertResponsesRequestToOpenAIFor(body, opts)
-	default:
-		return body, nil
+	if needsConversion(clientProto, targetProto) {
+		switch clientProto + "->" + targetProto {
+		case "anthropic->openai":
+			out, err = convertAnthropicRequestToOpenAIV(body, opts.ImageOK)
+		case "openai->anthropic":
+			out, err = convertOpenAIRequestToAnthropic(body)
+		case "anthropic->responses":
+			out, err = convertAnthropicRequestToResponsesV(body, opts.ImageOK)
+		case "openai->responses":
+			out, err = convertOpenAIRequestToResponses(body)
+		case "responses->anthropic":
+			out, err = convertResponsesRequestToAnthropic(body)
+		case "responses->openai":
+			out, err = convertResponsesRequestToOpenAIFor(body, opts)
+		}
+	}
+	if err == nil && needsConversion(clientProto, targetProto) && targetProto == "anthropic" {
+		out = injectAnthropicCacheBreakpoints(out)
+	}
+	if err == nil && needsConversion(clientProto, targetProto) {
+		out, _ = shrinkRequestImages(out, 4<<20, 4096)
 	}
 	if err != nil || opts.ProviderID != "codex" || targetProto != "responses" {
 		return out, err
@@ -896,7 +1143,136 @@ func convertRequestFor(body []byte, clientProto, targetProto string, opts conver
 	return stripped, nil
 }
 
+// injectAnthropicCacheBreakpoints adds stable ephemeral breakpoints to the
+// converted request's system prompt, final tool declaration and last user
+// content block. Same-protocol traffic remains byte-identical.
+func injectAnthropicCacheBreakpoints(body []byte) []byte {
+	var root map[string]any
+	if sonic.Unmarshal(body, &root) != nil {
+		return body
+	}
+	cache := map[string]any{"type": "ephemeral"}
+	if tools, ok := root["tools"].([]any); ok && len(tools) > 0 {
+		if last := asMap(tools[len(tools)-1]); last != nil {
+			last["cache_control"] = cache
+		}
+	}
+	switch system := root["system"].(type) {
+	case string:
+		if system != "" {
+			root["system"] = []map[string]any{{
+				"type": "text", "text": system, "cache_control": cache,
+			}}
+		}
+	case []any:
+		if len(system) > 0 {
+			if last := asMap(system[len(system)-1]); last != nil {
+				last["cache_control"] = cache
+			}
+		}
+	}
+	if messages, ok := root["messages"].([]any); ok {
+		for i := len(messages) - 1; i >= 0; i-- {
+			msg := asMap(messages[i])
+			if strOpt(msg["role"]) != "user" {
+				continue
+			}
+			switch content := msg["content"].(type) {
+			case string:
+				if content != "" {
+					msg["content"] = []map[string]any{{
+						"type": "text", "text": content, "cache_control": cache,
+					}}
+				}
+			case []any:
+				if len(content) > 0 {
+					if last := asMap(content[len(content)-1]); last != nil {
+						last["cache_control"] = cache
+					}
+				}
+			}
+			break
+		}
+	}
+	out, err := sonic.Marshal(root)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // --- response (non-streaming) ---
+
+// convertErrorResponse translates a committed upstream HTTP error envelope into
+// the client protocol. Error bodies must never pass through a success-response
+// converter: an OpenAI {"error":...} otherwise looks like an empty completed
+// Responses object (or an empty Anthropic message).
+func convertErrorResponse(body []byte, clientProto, targetProto string, status int) ([]byte, error) {
+	if !needsConversion(clientProto, targetProto) {
+		return body, nil
+	}
+	var src map[string]any
+	if err := sonic.Unmarshal(body, &src); err != nil {
+		return nil, fmt.Errorf("parse upstream error response: %w", err)
+	}
+	errSrc := asMap(src["error"])
+	if errSrc == nil && strOf(src["type"]) == "error" {
+		errSrc = asMap(src["error"])
+	}
+	if errSrc == nil {
+		return nil, fmt.Errorf("upstream status %d has no recognized error envelope", status)
+	}
+	message := firstNonEmpty(strOpt(errSrc["message"]), fmt.Sprintf("upstream request failed with status %d", status))
+	errType := firstNonEmpty(strOpt(errSrc["type"]), protocolErrorType(status))
+	if clientProto != "anthropic" {
+		errType = firstNonEmpty(strOpt(errSrc["type"]), strOpt(errSrc["code"]), protocolErrorType(status))
+	}
+	requestID := firstNonEmpty(strOpt(src["request_id"]), strOpt(errSrc["request_id"]))
+
+	var out map[string]any
+	if clientProto == "anthropic" {
+		out = map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    errType,
+				"message": message,
+			},
+		}
+	} else {
+		e := map[string]any{
+			"message": message,
+			"type":    errType,
+		}
+		if v, ok := errSrc["param"]; ok {
+			e["param"] = v
+		}
+		if v, ok := errSrc["code"]; ok {
+			e["code"] = v
+		}
+		out = map[string]any{"error": e}
+	}
+	if requestID != "" {
+		out["request_id"] = requestID
+	}
+	return sonic.Marshal(out)
+}
+
+func protocolErrorType(status int) string {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return "invalid_request_error"
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	default:
+		return "api_error"
+	}
+}
 
 // mapFinishToStopReason maps an OpenAI finish_reason to an Anthropic stop_reason.
 func mapFinishToStopReason(finish string) string {
@@ -972,6 +1348,7 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 				ReasoningContent string          `json:"reasoning_content"`
 				Reasoning        string          `json:"reasoning"` // OpenRouter spelling (its reasoning_content stays null)
 				ToolCalls        []any           `json:"tool_calls"`
+				Annotations      []any           `json:"annotations"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -1009,7 +1386,11 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 			var cv any
 			sonic.Unmarshal(c.Message.Content, &cv)
 			if s, ok := cv.(string); ok {
-				content = append(content, map[string]any{"type": "text", "text": s})
+				part := map[string]any{"type": "output_text", "text": s}
+				if annotations := chatAnnotationsToResponses(c.Message.Annotations); len(annotations) > 0 {
+					part["annotations"] = annotations
+				}
+				content = append(content, map[string]any{"type": "text", "text": responsesTextWithCitationLinks(part)})
 			} else if parts, ok := cv.([]any); ok {
 				for _, p := range parts {
 					if blk := openaiContentPartToAnthropicBlock(asMap(p)); blk != nil {
@@ -1073,11 +1454,15 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 		Model      string `json:"model"`
 		StopReason string `json:"stop_reason"`
 		Content    []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			Citations []any           `json:"citations"`
+			Thinking  string          `json:"thinking"`
+			Signature string          `json:"signature"`
+			Data      string          `json:"data"`
 		} `json:"content"`
 		Usage struct {
 			InputTokens              int `json:"input_tokens"`
@@ -1091,9 +1476,13 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 	}
 	var text string
 	var toolCalls []any
+	var annotations []map[string]any
+	var reasoning strings.Builder
+	var reasoningDetails []map[string]any
 	for _, c := range src.Content {
 		switch c.Type {
 		case "text":
+			annotations = append(annotations, anthropicCitationsToChat(c.Citations, c.Text, len([]rune(text)))...)
 			text += c.Text
 		case "tool_use":
 			tc := map[string]any{
@@ -1104,6 +1493,19 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 				tc["function"].(map[string]any)["arguments"] = "{}"
 			}
 			toolCalls = append(toolCalls, tc)
+		case "thinking":
+			reasoning.WriteString(c.Thinking)
+			if c.Signature != "" {
+				reasoningDetails = append(reasoningDetails, map[string]any{
+					"type": "anthropic_thinking", "thinking": c.Thinking, "signature": c.Signature,
+				})
+			}
+		case "redacted_thinking":
+			if c.Data != "" {
+				reasoningDetails = append(reasoningDetails, map[string]any{
+					"type": "anthropic_redacted_thinking", "data": c.Data,
+				})
+			}
 		}
 	}
 	msg := map[string]any{"role": "assistant"}
@@ -1115,6 +1517,15 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 		if text == "" {
 			msg["content"] = nil
 		}
+	}
+	if len(annotations) > 0 {
+		msg["annotations"] = annotations
+	}
+	if reasoning.Len() > 0 {
+		msg["reasoning_content"] = reasoning.String()
+	}
+	if len(reasoningDetails) > 0 {
+		msg["reasoning_details"] = reasoningDetails
 	}
 	// anthropic counts cache reads/creation separately from input_tokens; openai
 	// folds them into prompt_tokens (cache reads surfaced via prompt_tokens_details).
@@ -1163,7 +1574,7 @@ func convertResponseNS(body []byte, clientProto, targetProto string, r2c r2cCtx)
 	case "openai->responses": // backend responses → client openai
 		return convertResponsesToOpenAI(body)
 	case "responses->anthropic": // backend anthropic → client responses
-		return convertAnthropicResponseToResponses(body)
+		return convertAnthropicResponseToResponsesNS(body, r2c)
 	case "responses->openai": // backend openai → client responses
 		return convertOpenAIResponseToResponsesNS(body, r2c)
 	}
@@ -1306,6 +1717,20 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 	}
 	t.ensureStart()
 	t.closeBlock()
+	for _, i := range t.toolOrder {
+		if args := t.tools[i].args; len(args) > 0 && !json.Valid(args) {
+			t.emit("error", map[string]any{
+				"type": "error",
+				"error": map[string]any{
+					"type":    "api_error",
+					"message": "upstream stream ended with incomplete tool arguments",
+				},
+			})
+			t.errored = true
+			t.closed = true
+			return
+		}
+	}
 	// Emit buffered tool_use blocks sequentially (one complete block each). Empty
 	// arguments → a "{}" input_json_delta so the tool_use has valid JSON input.
 	for _, i := range t.toolOrder {
@@ -1368,7 +1793,27 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		if !t.sc.Scan() {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("SSE scanner error (line too long?): " + err.Error())
+				t.ensureStart()
+				t.closeBlock()
+				t.emit("error", map[string]any{"type": "error", "error": map[string]any{
+					"type": "api_error", "message": "upstream stream terminated unexpectedly",
+				}})
+				t.errored = true
+				t.closed = true
+				t.done = true
+				continue
 			}
+			if t.stopRsn != "" {
+				t.done = true
+				continue
+			}
+			t.ensureStart()
+			t.closeBlock()
+			t.emit("error", map[string]any{"type": "error", "error": map[string]any{
+				"type": "api_error", "message": "upstream stream terminated before a terminal event",
+			}})
+			t.errored = true
+			t.closed = true
 			t.done = true
 			continue
 		}
@@ -1513,6 +1958,12 @@ type anthropicSSEToOpenAISSE struct {
 	outputTokens int
 	cacheRead    int // cache_read_input_tokens from message_start
 	cacheCreate  int // cache_creation_input_tokens from message_start
+	textRunes    int // rune length of all emitted text blocks
+	curTextStart int // rune offset of the current Anthropic text block
+	curText      string
+	curThinking  string
+	curSignature string
+	curRedacted  string
 }
 
 func newAnthropicToOpenAISSE(r io.Reader, model string) *anthropicSSEToOpenAISSE {
@@ -1577,6 +2028,26 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 		if !t.sc.Scan() {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("SSE scanner error (line too long?): " + err.Error())
+				errObj, _ := sonic.Marshal(map[string]any{
+					"message": "upstream stream terminated unexpectedly",
+					"type":    "api_error", "param": nil, "code": nil,
+				})
+				t.out = append(t.out, []byte("data: {\"error\":")...)
+				t.out = append(t.out, errObj...)
+				t.out = append(t.out, []byte("}\n\n")...)
+				t.finished = true
+				t.done = true
+				continue
+			}
+			if !t.finished {
+				errObj, _ := sonic.Marshal(map[string]any{
+					"message": "upstream stream terminated before a terminal event",
+					"type":    "api_error", "param": nil, "code": nil,
+				})
+				t.out = append(t.out, []byte("data: {\"error\":")...)
+				t.out = append(t.out, errObj...)
+				t.out = append(t.out, []byte("}\n\n")...)
+				t.finished = true
 			}
 			t.done = true
 			continue
@@ -1592,13 +2063,17 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			Delta struct {
 				Type        string `json:"type"`
 				Text        string `json:"text"`
+				Thinking    string `json:"thinking"`
+				Signature   string `json:"signature"`
 				PartialJSON string `json:"partial_json"`
 				StopReason  string `json:"stop_reason"`
+				Citation    any    `json:"citation"`
 			} `json:"delta"`
 			ContentBlock struct {
 				Type string `json:"type"`
 				ID   string `json:"id"`
 				Name string `json:"name"`
+				Data string `json:"data"`
 			} `json:"content_block"`
 			Message struct {
 				ID    string `json:"id"`
@@ -1647,6 +2122,15 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 		case "content_block_start":
 			t.curBlock = ev.Index
 			t.curType = ev.ContentBlock.Type
+			if ev.ContentBlock.Type == "text" {
+				t.curTextStart = t.textRunes
+				t.curText = ""
+			} else if ev.ContentBlock.Type == "thinking" {
+				t.curThinking = ""
+				t.curSignature = ""
+			} else if ev.ContentBlock.Type == "redacted_thinking" {
+				t.curRedacted = ev.ContentBlock.Data
+			}
 			if ev.ContentBlock.Type == "tool_use" {
 				tcIdx := t.nextTool
 				t.nextTool++
@@ -1663,7 +2147,23 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				if ev.Delta.Text != "" {
 					t.ensureRole()
 					t.emitChunk(map[string]any{"content": ev.Delta.Text}, nil, nil)
+					t.curText += ev.Delta.Text
+					t.textRunes += len([]rune(ev.Delta.Text))
 				}
+			case "citations_delta":
+				annotations := anthropicCitationsToChat([]any{ev.Delta.Citation}, t.curText, t.curTextStart)
+				if len(annotations) > 0 {
+					t.ensureRole()
+					t.emitChunk(map[string]any{"annotations": annotations}, nil, nil)
+				}
+			case "thinking_delta":
+				if thinking := firstNonEmpty(ev.Delta.Thinking, ev.Delta.Text); thinking != "" {
+					t.ensureRole()
+					t.emitChunk(map[string]any{"reasoning_content": thinking}, nil, nil)
+					t.curThinking += thinking
+				}
+			case "signature_delta":
+				t.curSignature += ev.Delta.Signature
 			case "input_json_delta":
 				if ev.Delta.PartialJSON != "" {
 					if tcIdx, ok := t.toolCallIdx[t.curBlock]; ok && t.curType == "tool_use" {
@@ -1680,6 +2180,15 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				}
 			}
 		case "content_block_stop":
+			if t.curType == "thinking" && t.curSignature != "" {
+				t.emitChunk(map[string]any{"reasoning_details": []map[string]any{{
+					"type": "anthropic_thinking", "thinking": t.curThinking, "signature": t.curSignature,
+				}}}, nil, nil)
+			} else if t.curType == "redacted_thinking" && t.curRedacted != "" {
+				t.emitChunk(map[string]any{"reasoning_details": []map[string]any{{
+					"type": "anthropic_redacted_thinking", "data": t.curRedacted,
+				}}}, nil, nil)
+			}
 			// Empty-args fallback: a tool_use block with no input_json_delta still
 			// gets a "{}" arguments fragment (openai requires valid JSON arguments).
 			if t.curType == "tool_use" {
@@ -1744,7 +2253,7 @@ func convertSSEReaderNS(r io.Reader, clientProto, targetProto, model string, r2c
 	case "responses->openai":
 		return newResponsesToOpenAISSE(r, model)
 	case "anthropic->responses":
-		return newAnthropicToResponsesSSE(r, model)
+		return newAnthropicToResponsesSSENS(r, model, r2c)
 	case "openai->responses":
 		return newOpenAIToResponsesSSENS(r, model, r2c)
 	}

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("data:{\"type\":\"content_block_start\"}\ndata:{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\"}}\ndata:[DONE]")

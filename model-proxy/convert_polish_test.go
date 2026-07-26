@@ -286,40 +286,40 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 	}
 }
 
-// TestConvertRequest_UnknownRoleWarns: a message with an unknown role
-// (developer/function/...) is dropped WITH a convertWarn, not silently.
-func TestConvertRequest_UnknownRoleWarns(t *testing.T) {
+// Developer is a first-class Chat role and maps to Anthropic's top-level
+// system field (Anthropic messages themselves accept no developer role).
+func TestConvertRequest_DeveloperFoldsIntoSystem(t *testing.T) {
 	in := []byte(`{"model":"g","messages":[{"role":"developer","content":"x"},{"role":"user","content":"hi"}]}`)
-	var out []byte
-	logs := captureConvertLog(t, func() {
-		var err error
-		out, err = convertOpenAIRequestToAnthropic(in)
-		if err != nil {
-			t.Fatal(err)
-		}
-	})
-	if !strings.Contains(logs, "dropping message with unknown role: developer") {
-		t.Errorf("unknown role not warned, log = %q", logs)
+	out, err := convertOpenAIRequestToAnthropic(in)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if s := string(out); strings.Contains(s, "developer") {
-		t.Errorf("unknown-role message leaked into output: %s", s)
+	got := unmarshalMap(t, out)
+	if got["system"] != "x" {
+		t.Fatalf("system = %#v, want developer content", got["system"])
+	}
+	for _, raw := range anySlice(got["messages"]) {
+		if asMap(raw)["role"] == "developer" {
+			t.Fatalf("developer role leaked into Anthropic messages: %s", out)
+		}
 	}
 }
 
-// TestStreaming_ThinkingDeltaWarns: anthropic thinking_delta/signature_delta
-// deltas have no openai equivalent — dropped with a convertWarn.
-func TestStreaming_ThinkingDeltaWarns(t *testing.T) {
+// Anthropic thinking/signature deltas use Chat's reasoning_content plus a
+// replayable reasoning_details envelope.
+func TestStreaming_ThinkingDeltaPreserved(t *testing.T) {
 	stream := "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\n" +
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hmm\"}}\n\n" +
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	logs := captureConvertLog(t, func() {
-		io.Copy(io.Discard, newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
-	})
-	if !strings.Contains(logs, "dropping thinking_delta delta (no cross-protocol equivalent)") {
-		t.Errorf("thinking_delta not warned, log = %q", logs)
+	raw, err := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(logs, "dropping signature_delta delta (no cross-protocol equivalent)") {
-		t.Errorf("signature_delta not warned, log = %q", logs)
+	for _, want := range []string{`"reasoning_content":"hmm"`, `"type":"anthropic_thinking"`, `"signature":"sig"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("reasoning replay missing %s:\n%s", want, raw)
+		}
 	}
 }

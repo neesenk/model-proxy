@@ -102,8 +102,8 @@ routes:
 	if !strings.Contains(out, "protocol openai") {
 		t.Errorf("doctor missing the declared protocol:\n%s", out)
 	}
-	// Lossy items list.
-	for _, want := range []string{"thinking blocks", "cache_control", "server-side tools", "tool_result images"} {
+	// Current residual-loss and newly-preserved items.
+	for _, want := range []string{"anthropic↔chat thinking", "unsupported server tools", "input_audio", "documents", "tool-result media"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor missing lossy item %q:\n%s", want, out)
 		}

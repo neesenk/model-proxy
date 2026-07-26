@@ -18,8 +18,9 @@
 //	                {type:"function_call", id, call_id, name, arguments},
 //	                {type:"reasoning", summary:[...]}
 //
-// Stateless: Responses' previous_response_id (server-side state) is dropped — the
-// full history rides in `input`, equivalent to anthropic/chat `messages`.
+// The pure pairwise converter consumes a full input history. Proxy expands
+// previous_response_id from its bounded local state store before calling it;
+// callers that use this helper directly should likewise supply complete input.
 package main
 
 import (
@@ -27,6 +28,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"model-proxy/provider"
 
@@ -350,6 +352,7 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 
 	var items []map[string]any
 	var parts []map[string]any
+	webSearchInputs := map[string]map[string]any{}
 	flush := func() {
 		if len(parts) > 0 {
 			items = append(items, map[string]any{
@@ -372,7 +375,13 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 			}
 			switch b["type"] {
 			case "text":
-				parts = append(parts, map[string]any{"type": partType, "text": strOf(b["text"])})
+				part := map[string]any{"type": partType, "text": strOf(b["text"])}
+				if partType == "output_text" {
+					if annotations := anthropicCitationsToResponses(b["citations"], strOf(b["text"])); len(annotations) > 0 {
+						part["annotations"] = annotations
+					}
+				}
+				parts = append(parts, part)
 			case "image":
 				if src := asMap(b["source"]); src != nil {
 					if mt, _ := src["media_type"].(string); mt != "" {
@@ -388,6 +397,10 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 						parts = append(parts, map[string]any{"type": "input_image", "image_url": u})
 					}
 				}
+			case "document":
+				if file := anthropicDocumentToResponsesPart(b); file != nil {
+					parts = append(parts, file)
+				}
 			case "tool_use":
 				flush()
 				args := marshalToolInput(b["input"])
@@ -397,6 +410,35 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 					"name":      strOpt(b["name"]),
 					"arguments": args,
 				})
+			case "server_tool_use":
+				flush()
+				if strOpt(b["name"]) == "web_search" {
+					webSearchInputs[strOpt(b["id"])] = asMap(b["input"])
+				} else {
+					convertWarn("dropping unsupported anthropic server_tool_use in a→r request: " + strOpt(b["name"]))
+				}
+			case "web_search_tool_result":
+				flush()
+				id := strOpt(b["tool_use_id"])
+				item := map[string]any{
+					"type": "web_search_call", "id": id, "status": "completed", "action": webSearchInputs[id],
+				}
+				switch content := b["content"].(type) {
+				case []any:
+					var sources []map[string]any
+					for _, raw := range content {
+						hit := asMap(raw)
+						if hit["type"] == "web_search_result" && strOpt(hit["url"]) != "" {
+							sources = append(sources, map[string]any{"url": hit["url"], "title": hit["title"]})
+						}
+					}
+					item["sources"] = sources
+				case map[string]any:
+					if content["type"] == "web_search_tool_result_error" {
+						item["status"] = "failed"
+					}
+				}
+				items = append(items, item)
 			case "tool_result":
 				flush()
 				txt := anthropicToolResultText(b["content"])
@@ -405,10 +447,18 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 					txt = appendMediaPlaceholder(txt)
 					imgs = nil
 				}
+				output := any(markToolResultError(txt, b["is_error"] == true))
+				if b["is_error"] == true && len(imgs) > 0 {
+					errorParts := []map[string]any{{"type": "input_text", "text": toolResultErrorMarker}}
+					if txt != "" {
+						errorParts = append(errorParts, map[string]any{"type": "input_text", "text": txt})
+					}
+					output = errorParts
+				}
 				items = append(items, map[string]any{
 					"type":    "function_call_output",
 					"call_id": strOf(b["tool_use_id"]),
-					"output":  txt,
+					"output":  output,
 				})
 				// Media reinjection (cc-switch): tool_result images are
 				// re-delivered as a synthetic user message item, not dropped.
@@ -445,6 +495,36 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 	}
 	flush()
 	return items
+}
+
+func anthropicDocumentToResponsesPart(block map[string]any) map[string]any {
+	src := asMap(block["source"])
+	if src == nil {
+		return nil
+	}
+	filename := firstNonEmpty(strOpt(block["title"]), strOpt(block["filename"]), "document.pdf")
+	switch strOpt(src["type"]) {
+	case "url":
+		if u := strOpt(src["url"]); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+			return map[string]any{"type": "input_file", "file_url": u, "filename": filename}
+		}
+	case "base64":
+		if data := strOpt(src["data"]); data != "" {
+			mediaType := firstNonEmpty(strOpt(src["media_type"]), "application/pdf")
+			return map[string]any{
+				"type": "input_file", "file_data": "data:" + mediaType + ";base64," + data, "filename": filename,
+			}
+		}
+	case "file":
+		if id := strOpt(src["file_id"]); id != "" {
+			return map[string]any{"type": "input_file", "file_id": id, "filename": filename}
+		}
+	case "text":
+		if text := strOpt(src["data"]); text != "" {
+			return map[string]any{"type": "input_text", "text": "[document " + filename + "]\n" + text}
+		}
+	}
+	return nil
 }
 
 // dropOrphanReasoningItems removes reasoning items produced from ONE assistant
@@ -511,6 +591,12 @@ func anthropicToolsToResponses(tools []any) []map[string]any {
 		// bash, text_editor, ...) unlike custom function tools (name+input_schema,
 		// no type). Drop + warn, same as anthropicToolsToOpenAI.
 		if bt, ok := tm["type"].(string); ok && bt != "" {
+			if strings.HasPrefix(bt, "web_search") {
+				rt := map[string]any{"type": "web_search"}
+				copyOpt(rt, tm, "max_uses", "allowed_domains", "blocked_domains")
+				out = append(out, rt)
+				continue
+			}
 			convertWarn("dropping server-side anthropic tool type: " + bt)
 			continue
 		}
@@ -670,6 +756,47 @@ func sha256Hex32(s string) string {
 	return hex.EncodeToString(sum[:])[:32]
 }
 
+func anthropicHasExplicitCacheControl(v any) bool {
+	switch value := v.(type) {
+	case map[string]any:
+		if value["cache_control"] != nil {
+			return true
+		}
+		for _, child := range value {
+			if anthropicHasExplicitCacheControl(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if anthropicHasExplicitCacheControl(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// anthropicExplicitPromptCacheKey gives Chat/Responses backends a stable cache
+// cohort when the Anthropic client explicitly placed cache breakpoints. Those
+// protocols cache prefixes automatically and have no per-block breakpoint,
+// so this preserves cache affinity without copying an invalid cache_control
+// field onto their wire format.
+func anthropicExplicitPromptCacheKey(src, converted map[string]any) string {
+	if !anthropicHasExplicitCacheControl(src) {
+		return ""
+	}
+	if uid := strOpt(asMap(src["metadata"])["user_id"]); uid != "" {
+		return sha256Hex32(uid)
+	}
+	fp, _ := sonic.ConfigStd.MarshalToString(map[string]any{
+		"model":  strOpt(converted["model"]),
+		"system": anthropicTextOf(src["system"]),
+		"tools":  converted["tools"],
+	})
+	return sha256Hex32(fp)
+}
+
 // ---------------------------------------------------------------------------
 // request: openai-chat → responses
 // ---------------------------------------------------------------------------
@@ -720,6 +847,12 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 					parts = append(parts, map[string]any{"type": "input_image", "image_url": u})
 				} else if ium := asMap(pm["image_url"]); ium != nil {
 					parts = append(parts, map[string]any{"type": "input_image", "image_url": strOf(ium["url"])})
+				}
+			case "input_file", "file":
+				file := map[string]any{"type": "input_file"}
+				copyOpt(file, pm, "file_id", "file_data", "file_url", "filename")
+				if len(file) > 1 {
+					parts = append(parts, file)
 				}
 			default:
 				convertWarn("dropping chat content part in chat→r request: " + strOf(pm["type"]))
@@ -850,7 +983,7 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 		out["model"] = v
 	}
 	var input []map[string]any
-	instructionsSet := false
+	var instructions []string
 	if raw, ok := src["messages"].([]any); ok {
 		for _, m := range raw {
 			mm := asMap(m)
@@ -858,15 +991,17 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 				continue
 			}
 			role, _ := mm["role"].(string)
-			if (role == "system" || role == "developer") && !instructionsSet {
+			if role == "system" || role == "developer" {
 				if txt := chatContentText(mm["content"]); txt != "" {
-					out["instructions"] = txt
-					instructionsSet = true
-					continue
+					instructions = append(instructions, txt)
 				}
+				continue
 			}
 			input = append(input, chatMsgToResponsesItems(mm)...)
 		}
+	}
+	if len(instructions) > 0 {
+		out["instructions"] = strings.Join(instructions, "\n\n")
 	}
 	// Replace-style clients resend a tool_call carrying only the id (no name)
 	// in later turns — backfill from earlier items with the same call_id
@@ -902,7 +1037,8 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 			out["text"] = map[string]any{"format": f}
 		}
 	}
-	copyOpt(out, src, "temperature", "top_p", "stream", "parallel_tool_calls")
+	copyOpt(out, src, "temperature", "top_p", "stream", "parallel_tool_calls",
+		"prompt_cache_key", "prompt_cache_retention")
 	return sonic.Marshal(out)
 }
 
@@ -913,20 +1049,64 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 // responsesRequestTools returns the effective tool declarations of a
 // responses request: top-level `tools` first, then the tools of every
 // {type:"additional_tools"} input item (codex 0.145+ declares tools ONLY in
-// such items, role:"developer" — a tool declaration, not a message).
+// such items, role:"developer" — a tool declaration, not a message), followed
+// by tools materialized by client-executed tool_search_output items. The latter
+// are active declarations for the next model turn, not merely display data.
 func responsesRequestTools(src map[string]any) []any {
 	var out []any
 	if tools, ok := src["tools"].([]any); ok {
 		out = append(out, tools...)
 	}
 	for _, item := range responsesInputItems(src["input"]) {
-		if item["type"] == "additional_tools" {
+		switch item["type"] {
+		case "additional_tools", "tool_search_output":
 			if tools, ok := item["tools"].([]any); ok {
 				out = append(out, tools...)
 			}
 		}
 	}
 	return out
+}
+
+// responsesToolSearchOutputText renders the client-executed Responses
+// tool_search result as a tool-result message for protocols which lack the
+// typed tool_search_output item. The exact wire names are intentionally kept
+// in the result text: the model must call one of the newly materialized tools
+// by that name on the following turn.
+func responsesToolSearchOutputText(item map[string]any) (string, bool) {
+	status := strings.ToLower(strOpt(item["status"]))
+	isError := status != "" && status != "completed" && status != "success" && status != "succeeded"
+
+	var names []string
+	if tools, ok := item["tools"].([]any); ok {
+		for _, entry := range nsExpandTools(tools) {
+			tm := entry.tm
+			switch strOpt(tm["type"]) {
+			case "function", "custom":
+				name := strOpt(tm["name"])
+				if entry.namespace != "" && name != "" {
+					name = nsFlattenName(entry.namespace, name)
+				}
+				if name != "" {
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	if len(names) > 0 {
+		return "Tool search loaded these exact tool names: " + strings.Join(names, ", "), isError
+	}
+
+	// Backward compatibility for older clients/proxies which used an opaque
+	// output string instead of the current typed `tools` array.
+	if _, exists := item["output"]; exists {
+		text, markedError := splitToolResultError(responsesToolOutputText(item["output"]))
+		return text, isError || markedError
+	}
+	if isError {
+		return "Tool search failed (status: " + status + ").", true
+	}
+	return "Tool search returned no tools.", false
 }
 
 // responsesContentToAnthropicBlocks turns a Responses message item's content
@@ -944,7 +1124,7 @@ func responsesContentToAnthropicBlocks(content any) []map[string]any {
 		}
 		switch pm["type"] {
 		case "input_text", "output_text", "text":
-			out = append(out, map[string]any{"type": "text", "text": strOf(pm["text"])})
+			out = append(out, map[string]any{"type": "text", "text": responsesTextWithCitationLinks(pm)})
 		case "input_image", "image", "image_url":
 			url := strOf(pm["image_url"])
 			if ium := asMap(pm["image_url"]); ium != nil {
@@ -954,12 +1134,86 @@ func responsesContentToAnthropicBlocks(content any) []map[string]any {
 				out = append(out, map[string]any{"type": "image", "source": map[string]any{
 					"type": "base64", "media_type": mt, "data": data,
 				}})
+			} else if url != "" {
+				out = append(out, map[string]any{"type": "image", "source": map[string]any{
+					"type": "url", "url": url,
+				}})
+			}
+		case "input_file", "file":
+			if block := responsesInputFileToAnthropicDocument(pm); block != nil {
+				out = append(out, block)
 			}
 		default:
 			convertWarn("dropping responses content part in r→a request: " + strOf(pm["type"]))
 		}
 	}
 	return out
+}
+
+func responsesInputFileToAnthropicDocument(part map[string]any) map[string]any {
+	filename := strOpt(part["filename"])
+	var block map[string]any
+	if u := strOpt(part["file_url"]); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+		block = map[string]any{"type": "document", "source": map[string]any{"type": "url", "url": u}}
+	} else if id := strOpt(part["file_id"]); id != "" {
+		block = map[string]any{"type": "document", "source": map[string]any{"type": "file", "file_id": id}}
+	} else if mt, data, ok := parseDataURL(strOpt(part["file_data"])); ok && data != "" {
+		block = map[string]any{"type": "document", "source": map[string]any{
+			"type": "base64", "media_type": mt, "data": data,
+		}}
+	}
+	if block != nil && filename != "" {
+		block["title"] = filename
+	}
+	return block
+}
+
+func hostedCallID(item map[string]any) string {
+	return firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))
+}
+
+func hostedCallArguments(item map[string]any) string {
+	if raw, ok := item["arguments"].(string); ok && raw != "" {
+		return raw
+	}
+	if args := item["arguments"]; args != nil {
+		if encoded, err := sonic.Marshal(args); err == nil {
+			return string(encoded)
+		}
+	}
+	if action := item["action"]; action != nil {
+		if encoded, err := sonic.Marshal(action); err == nil {
+			return string(encoded)
+		}
+	}
+	return "{}"
+}
+
+func responsesWebSearchToAnthropicBlocks(item map[string]any) []map[string]any {
+	id := firstNonEmpty(strOpt(item["id"]), strOpt(item["call_id"]), "web_search")
+	input := asMap(item["action"])
+	if input == nil {
+		input = parseToolArgs(hostedCallArguments(item)).(map[string]any)
+	}
+	var result any = []any{}
+	if strOpt(item["status"]) == "failed" {
+		result = map[string]any{"type": "web_search_tool_result_error", "error_code": "unavailable"}
+	} else if sources, ok := item["sources"].([]any); ok {
+		hits := make([]map[string]any, 0, len(sources))
+		for _, raw := range sources {
+			source := asMap(raw)
+			if url := strOpt(source["url"]); url != "" {
+				hits = append(hits, map[string]any{
+					"type": "web_search_result", "title": strOpt(source["title"]), "url": url,
+				})
+			}
+		}
+		result = hits
+	}
+	return []map[string]any{
+		{"type": "server_tool_use", "id": id, "name": "web_search", "input": input},
+		{"type": "web_search_tool_result", "tool_use_id": id, "content": result},
+	}
 }
 
 // responsesMessageText concatenates the text of a Responses message item's
@@ -978,26 +1232,51 @@ func responsesMessageText(content any) string {
 	return b.String()
 }
 
-func responsesToolsToAnthropic(tools []any) []map[string]any {
+func responsesToolsToAnthropic(tools []any) ([]map[string]any, error) {
 	var out []map[string]any
-	for _, t := range tools {
-		tm := asMap(t)
-		if tm == nil {
+	seen := map[string]bool{}
+	for _, e := range nsExpandTools(tools) {
+		tm := e.tm
+		toolType := strOf(tm["type"])
+		if toolType == "web_search" || toolType == "web_search_preview" {
+			at := map[string]any{"type": "web_search_20250305", "name": "web_search"}
+			copyOpt(at, tm, "max_uses", "allowed_domains", "blocked_domains", "user_location")
+			out = append(out, at)
 			continue
 		}
-		if strOf(tm["type"]) != "function" {
+		if toolType == "tool_search" {
+			out = append(out, map[string]any{
+				"name": "tool_search", "description": hostedToolDescription("tool_search"),
+				"input_schema": normalizeAnthropicInputSchema(hostedToolSchema("tool_search")),
+			})
 			continue
 		}
-		at := map[string]any{"name": strOf(tm["name"])}
+		if toolType != "function" {
+			continue
+		}
+		name := strOf(tm["name"])
+		if e.namespace != "" {
+			name = nsFlattenName(e.namespace, name)
+		}
+		if name == "" {
+			continue
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("responses→anthropic tool-name collision after namespace flattening: %q", name)
+		}
+		seen[name] = true
+		at := map[string]any{"name": name}
 		if d, ok := tm["description"]; ok {
 			at["description"] = d
 		}
 		if p, ok := tm["parameters"]; ok {
-			at["input_schema"] = p
+			at["input_schema"] = normalizeAnthropicInputSchema(p)
+		} else {
+			at["input_schema"] = normalizeAnthropicInputSchema(nil)
 		}
 		out = append(out, at)
 	}
-	return out
+	return out, nil
 }
 
 // responsesToolChoiceToAnthropic: "auto"→{type:auto}, "required"→{type:any},
@@ -1019,7 +1298,14 @@ func responsesToolChoiceToAnthropic(tc any) any {
 		return nil
 	}
 	if t, _ := tcm["type"].(string); t == "function" {
-		return map[string]any{"type": "tool", "name": strOf(tcm["name"])}
+		name := strOf(tcm["name"])
+		if namespace := strOpt(tcm["namespace"]); namespace != "" {
+			name = nsFlattenName(namespace, name)
+		}
+		return map[string]any{"type": "tool", "name": name}
+	}
+	if t, _ := tcm["type"].(string); t == "tool_search" {
+		return map[string]any{"type": "tool", "name": "tool_search"}
 	}
 	return nil
 }
@@ -1061,18 +1347,35 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 			}
 		case "function_call":
 			args := parseToolArgs(strOf(item["arguments"]))
+			name := strOpt(item["name"])
+			if namespace := strOpt(item["namespace"]); namespace != "" {
+				name = nsFlattenName(namespace, name)
+			}
 			msgs = append(msgs, map[string]any{"role": "assistant", "content": []map[string]any{{
 				"type":  "tool_use",
 				"id":    firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
-				"name":  strOpt(item["name"]),
+				"name":  name,
 				"input": args,
 			}}})
+		case "tool_search_call":
+			msgs = append(msgs, map[string]any{"role": "assistant", "content": []map[string]any{{
+				"type": "tool_use", "id": hostedCallID(item), "name": "tool_search",
+				"input": parseToolArgs(hostedCallArguments(item)),
+			}}})
+		case "tool_search_output":
+			text, isError := responsesToolSearchOutputText(item)
+			msgs = append(msgs, map[string]any{"role": "user", "content": []map[string]any{{
+				"type": "tool_result", "tool_use_id": hostedCallID(item), "content": text, "is_error": isError,
+			}}})
+		case "web_search_call":
+			msgs = append(msgs, map[string]any{"role": "assistant", "content": responsesWebSearchToAnthropicBlocks(item)})
 		case "function_call_output":
 			// output may be a string OR a parts array (input_text/input_image);
 			// array parts become anthropic blocks — text into the tool_result
 			// text, images as native image blocks (base64/url source). r→a has
 			// no vision gate (anthropic targets always accept image blocks).
 			text, imgs := responsesOutputTextAndImages(item["output"])
+			text, isError := splitToolResultError(text)
 			var content any = text
 			if len(imgs) > 0 {
 				blocks := []map[string]any{{"type": "text", "text": text}}
@@ -1094,6 +1397,7 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 				"type":        "tool_result",
 				"tool_use_id": strOf(item["call_id"]),
 				"content":     content,
+				"is_error":    isError,
 			}}})
 		case "additional_tools":
 			// Tool declaration (codex 0.145+), consumed via
@@ -1131,7 +1435,11 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 		out["messages"] = msgs
 	}
 	if tools := responsesRequestTools(src); len(tools) > 0 {
-		if at := responsesToolsToAnthropic(tools); len(at) > 0 {
+		at, err := responsesToolsToAnthropic(tools)
+		if err != nil {
+			return nil, err
+		}
+		if len(at) > 0 {
 			out["tools"] = at
 		}
 	}
@@ -1194,7 +1502,12 @@ func responsesOutputTextAndImages(v any) (text string, imgs []map[string]any) {
 			}
 			switch pm["type"] {
 			case "input_text", "output_text", "text":
-				b.WriteString(strOf(pm["text"]))
+				text := strOf(pm["text"])
+				if text == toolResultErrorMarker && b.Len() == 0 {
+					b.WriteString(toolResultErrorMarker + "\n")
+				} else {
+					b.WriteString(text)
+				}
 			case "input_image", "image", "image_url":
 				url := strOf(pm["image_url"])
 				if ium := asMap(pm["image_url"]); ium != nil {
@@ -1221,6 +1534,7 @@ func responsesContentToChat(content any) any {
 	}
 	var out []map[string]any
 	hasImage := false
+	hasFile := false
 	for _, p := range parts {
 		pm := asMap(p)
 		if pm == nil {
@@ -1228,7 +1542,7 @@ func responsesContentToChat(content any) any {
 		}
 		switch pm["type"] {
 		case "input_text", "output_text", "text":
-			out = append(out, map[string]any{"type": "text", "text": strOf(pm["text"])})
+			out = append(out, map[string]any{"type": "text", "text": responsesTextWithCitationLinks(pm)})
 		case "input_image", "image", "image_url":
 			url := strOf(pm["image_url"])
 			if ium := asMap(pm["image_url"]); ium != nil {
@@ -1238,11 +1552,20 @@ func responsesContentToChat(content any) any {
 				hasImage = true
 				out = append(out, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
 			}
+		case "input_file", "file":
+			file := map[string]any{}
+			copyOpt(file, pm, "file_id", "file_data", "filename")
+			if file["file_id"] != nil || file["file_data"] != nil {
+				hasFile = true
+				out = append(out, map[string]any{"type": "file", "file": file})
+			} else if u := strOpt(pm["file_url"]); u != "" {
+				out = append(out, map[string]any{"type": "text", "text": "[document " + firstNonEmpty(strOpt(pm["filename"]), "file") + "] " + u})
+			}
 		default:
 			convertWarn("dropping responses content part in r→chat request: " + strOf(pm["type"]))
 		}
 	}
-	if !hasImage {
+	if !hasImage && !hasFile {
 		return chatContentText(content)
 	}
 	return out
@@ -1351,7 +1674,7 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 				lastAssistant = len(msgs) - 1
 				attachReasoning(lastAssistant)
 			}
-		case "function_call", "custom_tool_call":
+		case "function_call", "custom_tool_call", "tool_search_call", "web_search_call":
 			callID := firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))
 			var name, arguments string
 			if item["type"] == "custom_tool_call" {
@@ -1359,6 +1682,12 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 				// {"input": <raw>} arguments for the wrapper function.
 				name = strOpt(item["name"])
 				arguments = wrapCustomCallArguments(strOpt(item["input"]))
+			} else if item["type"] == "tool_search_call" {
+				name = "tool_search"
+				arguments = hostedCallArguments(item)
+			} else if item["type"] == "web_search_call" {
+				name = "web_search"
+				arguments = hostedCallArguments(item)
 			} else {
 				// MCP namespace: history calls reference the flattened chat name;
 				// the namespace field does not cross over.
@@ -1386,18 +1715,26 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 			msgs = append(msgs, map[string]any{"role": "assistant", "tool_calls": []map[string]any{tc}})
 			lastAssistant = len(msgs) - 1
 			attachReasoning(lastAssistant)
-		case "function_call_output", "custom_tool_call_output":
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
 			// output may be a string OR a parts array (input_text/input_image);
 			// images are reinjected as a synthetic user message (cc-switch),
 			// gated on the target model's vision (#6).
-			text, imgs := responsesOutputTextAndImages(item["output"])
+			var text string
+			var imgs []map[string]any
+			if item["type"] == "tool_search_output" {
+				var isError bool
+				text, isError = responsesToolSearchOutputText(item)
+				text = markToolResultError(text, isError)
+			} else {
+				text, imgs = responsesOutputTextAndImages(item["output"])
+			}
 			if len(imgs) > 0 && !imageOK {
 				text = appendMediaPlaceholder(text)
 				imgs = nil
 			}
 			msgs = append(msgs, map[string]any{
 				"role":         "tool",
-				"tool_call_id": strOpt(item["call_id"]),
+				"tool_call_id": hostedCallID(item),
 				"content":      text,
 			})
 			if len(imgs) > 0 {
@@ -1505,7 +1842,8 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 			out["response_format"] = rf
 		}
 	}
-	copyOpt(out, src, "temperature", "top_p", "stream", "parallel_tool_calls", "prompt_cache_key")
+	copyOpt(out, src, "temperature", "top_p", "stream", "parallel_tool_calls",
+		"prompt_cache_key", "prompt_cache_retention")
 	// Streaming requests ask for a usage chunk (same as the a→chat direction):
 	// kimi/MiniMax-style upstreams otherwise report all-zero stream usage.
 	if b, ok := out["stream"].(bool); ok && b {
@@ -1625,18 +1963,20 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 	// wrapped as a normal end_turn message (the forward layer turns a
 	// conversion error into a 502 before commit).
 	if st := strOf(src["status"]); st == "failed" || st == "cancelled" {
+		message := "upstream response " + st
 		if e := asMap(src["error"]); e != nil {
-			return nil, fmt.Errorf("responses status %s: %s", st, strOf(e["message"]))
+			message = firstNonEmpty(strOpt(e["message"]), message)
 		}
+		return nil, fmt.Errorf("responses status %s: %s", st, message)
 	}
 	var blocks []map[string]any
 	hasToolUse := false
 	var textParts []map[string]any
 	flushText := func() {
-		if len(textParts) > 0 {
-			blocks = append(blocks, map[string]any{"type": "text", "text": joinTextParts(textParts)})
-			textParts = nil
+		for _, part := range textParts {
+			blocks = append(blocks, map[string]any{"type": "text", "text": responsesTextWithCitationLinks(part)})
 		}
+		textParts = nil
 	}
 	for _, item := range responsesOutputItems(src) {
 		switch item["type"] {
@@ -1667,6 +2007,16 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 				"name":  strOpt(item["name"]),
 				"input": parseToolArgs(strOf(item["arguments"])),
 			})
+		case "tool_search_call":
+			flushText()
+			hasToolUse = true
+			blocks = append(blocks, map[string]any{
+				"type": "tool_use", "id": hostedCallID(item), "name": "tool_search",
+				"input": parseToolArgs(hostedCallArguments(item)),
+			})
+		case "web_search_call":
+			flushText()
+			blocks = append(blocks, responsesWebSearchToAnthropicBlocks(item)...)
 		case "reasoning":
 			flushText()
 			text, sig := responsesReasoningText(item)
@@ -1765,11 +2115,14 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 	}
 	// Fail-closed (same as convertResponsesToAnthropic).
 	if st := strOf(src["status"]); st == "failed" || st == "cancelled" {
+		message := "upstream response " + st
 		if e := asMap(src["error"]); e != nil {
-			return nil, fmt.Errorf("responses status %s: %s", st, strOf(e["message"]))
+			message = firstNonEmpty(strOpt(e["message"]), message)
 		}
+		return nil, fmt.Errorf("responses status %s: %s", st, message)
 	}
 	var contentText strings.Builder
+	var annotations []map[string]any
 	var toolCalls []map[string]any
 	var reasoning strings.Builder
 	for _, item := range responsesOutputItems(src) {
@@ -1780,6 +2133,13 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 					if pm := asMap(p); pm != nil {
 						switch pm["type"] {
 						case "output_text", "text", "input_text":
+							base := utf8.RuneCountInString(contentText.String())
+							for _, annotation := range responsesAnnotationsToChat(pm["annotations"]) {
+								citation := asMap(annotation["url_citation"])
+								citation["start_index"] = intOf(citation["start_index"]) + base
+								citation["end_index"] = intOf(citation["end_index"]) + base
+								annotations = append(annotations, annotation)
+							}
 							contentText.WriteString(strOf(pm["text"]))
 						case "refusal":
 							// Refusal text is real content (finish_reason
@@ -1800,6 +2160,15 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 					"arguments": strOf(item["arguments"]),
 				},
 			})
+		case "tool_search_call", "web_search_call":
+			name := "tool_search"
+			if item["type"] == "web_search_call" {
+				name = "web_search"
+			}
+			toolCalls = append(toolCalls, map[string]any{
+				"id": hostedCallID(item), "type": "function",
+				"function": map[string]any{"name": name, "arguments": hostedCallArguments(item)},
+			})
 		case "reasoning":
 			text, _ := responsesReasoningText(item)
 			reasoning.WriteString(text)
@@ -1815,6 +2184,9 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 	}
 	if len(toolCalls) > 0 {
 		msg["tool_calls"] = toolCalls
+	}
+	if len(annotations) > 0 {
+		msg["annotations"] = annotations
 	}
 	if reasoning.Len() > 0 {
 		msg["reasoning_content"] = reasoning.String()
@@ -1866,17 +2238,22 @@ func responsesUsageToOpenAI(u any) map[string]any {
 // --- response: anthropic → responses ---
 
 func convertAnthropicResponseToResponses(body []byte) ([]byte, error) {
+	return convertAnthropicResponseToResponsesNS(body, r2cCtx{})
+}
+
+func convertAnthropicResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse anthropic response: %w", err)
 	}
 	var output []map[string]any
-	var textParts []string
+	webSearchInputs := map[string]map[string]any{}
+	var textParts []map[string]any
 	flushText := func() {
 		if len(textParts) > 0 {
 			output = append(output, map[string]any{
 				"type": "message", "role": "assistant", "status": "completed",
-				"content": []map[string]any{{"type": "output_text", "text": strings.Join(textParts, "")}},
+				"content": textParts,
 			})
 			textParts = nil
 		}
@@ -1889,14 +2266,52 @@ func convertAnthropicResponseToResponses(body []byte) ([]byte, error) {
 			}
 			switch b["type"] {
 			case "text":
-				textParts = append(textParts, strOf(b["text"]))
+				part := map[string]any{"type": "output_text", "text": strOf(b["text"])}
+				if annotations := anthropicCitationsToResponses(b["citations"], strOf(b["text"])); len(annotations) > 0 {
+					part["annotations"] = annotations
+				}
+				textParts = append(textParts, part)
 			case "tool_use":
 				flushText()
 				args := marshalToolInput(b["input"])
+				name := strOf(b["name"])
 				item := map[string]any{
 					"type": "function_call", "status": "completed",
 					"id": strOf(b["id"]), "call_id": strOf(b["id"]),
-					"name": strOf(b["name"]), "arguments": args,
+					"name": name, "arguments": args,
+				}
+				if original, namespace, ok := nsRestoreName(r2c.ns, name); ok {
+					item["name"] = original
+					item["namespace"] = namespace
+				}
+				output = append(output, item)
+			case "server_tool_use":
+				flushText()
+				if strOpt(b["name"]) == "web_search" {
+					webSearchInputs[strOpt(b["id"])] = asMap(b["input"])
+				} else {
+					convertWarn("dropping unsupported anthropic server_tool_use in a→r response: " + strOpt(b["name"]))
+				}
+			case "web_search_tool_result":
+				flushText()
+				id := strOpt(b["tool_use_id"])
+				item := map[string]any{
+					"type": "web_search_call", "id": id, "status": "completed", "action": webSearchInputs[id],
+				}
+				switch content := b["content"].(type) {
+				case []any:
+					var sources []map[string]any
+					for _, raw := range content {
+						hit := asMap(raw)
+						if hit["type"] == "web_search_result" && strOpt(hit["url"]) != "" {
+							sources = append(sources, map[string]any{"url": hit["url"], "title": hit["title"]})
+						}
+					}
+					item["sources"] = sources
+				case map[string]any:
+					if content["type"] == "web_search_tool_result_error" {
+						item["status"] = "failed"
+					}
 				}
 				output = append(output, item)
 			case "thinking":
@@ -1959,9 +2374,17 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse openai response: %w", err)
 	}
+	if asMap(src["error"]) != nil {
+		return nil, fmt.Errorf("openai error envelope cannot be converted as a successful response")
+	}
+	choices, choicesOK := src["choices"].([]any)
+	if !choicesOK || len(choices) == 0 {
+		return nil, fmt.Errorf("openai response has no choices")
+	}
 	var output []map[string]any
 	finish := ""
 	var textParts []string
+	var chatAnnotations []map[string]any
 	flushText := func() {
 		if len(textParts) > 0 {
 			output = append(output, map[string]any{
@@ -1971,85 +2394,97 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 			textParts = nil
 		}
 	}
-	if choices, ok := src["choices"].([]any); ok && len(choices) > 0 {
-		if ch := asMap(choices[0]); ch != nil {
-			finish = strOf(ch["finish_reason"])
-			if msg := asMap(ch["message"]); msg != nil {
-				if c, ok := msg["content"].(string); ok && c != "" {
-					// MiniMax-style inline thinking: a LEADING <think>…</think>
-					// block inside content splits into a reasoning item
-					// (cc-switch split_leading_think_block); mid-text blocks
-					// stay literal.
-					if r, answer, ok := splitLeadingThinkBlock(c); ok {
-						if r != "" {
-							output = append(output, map[string]any{
-								"type": "reasoning", "status": "completed",
-								"summary": []map[string]any{{"type": "summary_text", "text": r}},
-							})
-						}
-						c = answer
+	if ch := asMap(choices[0]); ch != nil {
+		finish = strOf(ch["finish_reason"])
+		if msg := asMap(ch["message"]); msg != nil {
+			if c, ok := msg["content"].(string); ok && c != "" {
+				// MiniMax-style inline thinking: a LEADING <think>…</think>
+				// block inside content splits into a reasoning item
+				// (cc-switch split_leading_think_block); mid-text blocks
+				// stay literal.
+				if r, answer, ok := splitLeadingThinkBlock(c); ok {
+					if r != "" {
+						output = append(output, map[string]any{
+							"type": "reasoning", "status": "completed",
+							"summary": []map[string]any{{"type": "summary_text", "text": r}},
+						})
 					}
-					if c != "" {
-						textParts = append(textParts, c)
-					}
+					c = answer
 				}
-				if rc := chatReasoningText(msg); rc != "" {
+				if c != "" {
+					textParts = append(textParts, c)
+				}
+			}
+			chatAnnotations = chatAnnotationsToResponses(msg["annotations"])
+			if rc := chatReasoningText(msg); rc != "" {
+				flushText()
+				output = append(output, map[string]any{
+					"type": "reasoning", "status": "completed",
+					"summary": []map[string]any{{"type": "summary_text", "text": rc}},
+				})
+			}
+			if tcs, ok := msg["tool_calls"].([]any); ok {
+				for _, tc := range tcs {
+					tcm := asMap(tc)
+					if tcm == nil {
+						continue
+					}
 					flushText()
-					output = append(output, map[string]any{
-						"type": "reasoning", "status": "completed",
-						"summary": []map[string]any{{"type": "summary_text", "text": rc}},
-					})
-				}
-				if tcs, ok := msg["tool_calls"].([]any); ok {
-					for _, tc := range tcs {
-						tcm := asMap(tc)
-						if tcm == nil {
-							continue
+					fn := asMap(tcm["function"])
+					args := strOpt(fnMap(fn, "arguments"))
+					if args == "" {
+						if raw := fnMap(fn, "arguments"); raw != nil {
+							args = strOf(raw)
 						}
-						flushText()
-						fn := asMap(tcm["function"])
-						args := strOpt(fnMap(fn, "arguments"))
-						if args == "" {
-							if raw := fnMap(fn, "arguments"); raw != nil {
-								args = strOf(raw)
-							}
-						}
-						if args == "" {
-							args = "{}"
-						}
-						name := strOpt(fnMap(fn, "name"))
-						// Custom/freeform call: unwrap {"input": "<raw>"} back
-						// to a custom_tool_call item (raw string input).
-						if r2c.custom[name] {
-							output = append(output, map[string]any{
-								"type": "custom_tool_call", "status": "completed",
-								"id":      strOpt(tcm["id"]),
-								"call_id": strOpt(tcm["id"]),
-								"name":    name,
-								"input":   unwrapCustomCallArguments(args),
-							})
-							continue
-						}
-						item := map[string]any{
-							"type": "function_call", "status": "completed",
-							"id":        strOpt(tcm["id"]),
-							"call_id":   strOpt(tcm["id"]),
-							"name":      name,
-							"arguments": args,
-						}
-						// MCP namespace restore: a chat name that was flattened
-						// from {namespace, name} round-trips back to二维.
-						if orig, ns, ok := nsRestoreName(r2c.ns, name); ok {
-							item["name"] = orig
-							item["namespace"] = ns
-						}
-						output = append(output, item)
 					}
+					if args == "" {
+						args = "{}"
+					}
+					name := strOpt(fnMap(fn, "name"))
+					// Custom/freeform call: unwrap {"input": "<raw>"} back
+					// to a custom_tool_call item (raw string input).
+					if r2c.custom[name] {
+						output = append(output, map[string]any{
+							"type": "custom_tool_call", "status": "completed",
+							"id":      strOpt(tcm["id"]),
+							"call_id": strOpt(tcm["id"]),
+							"name":    name,
+							"input":   unwrapCustomCallArguments(args),
+						})
+						continue
+					}
+					item := map[string]any{
+						"type": "function_call", "status": "completed",
+						"id":        strOpt(tcm["id"]),
+						"call_id":   strOpt(tcm["id"]),
+						"name":      name,
+						"arguments": args,
+					}
+					// MCP namespace restore: a chat name that was flattened
+					// from {namespace, name} round-trips back to二维.
+					if orig, ns, ok := nsRestoreName(r2c.ns, name); ok {
+						item["name"] = orig
+						item["namespace"] = ns
+					}
+					output = append(output, item)
 				}
 			}
 		}
 	}
 	flushText()
+	if len(chatAnnotations) > 0 {
+		for i := len(output) - 1; i >= 0; i-- {
+			item := output[i]
+			if item["type"] != "message" {
+				continue
+			}
+			content := anySlice(item["content"])
+			if len(content) > 0 {
+				asMap(content[0])["annotations"] = chatAnnotations
+			}
+			break
+		}
+	}
 	if len(output) == 0 {
 		output = []map[string]any{{
 			"type": "message", "role": "assistant", "status": "completed",

@@ -256,15 +256,12 @@ func TestParity_ResponsesToChat_NoToolsDropsToolChoice(t *testing.T) {
 		t.Errorf("parallel_tool_calls kept without tools: %v", out)
 	}
 
-	// Tools present but ALL filtered out (hosted tools only) → same drop.
+	// Hosted tools are converted to callable fallbacks, so tool controls stay.
 	in2 := `{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],` +
 		`"tools":[{"type":"web_search"}],"tool_choice":"auto","parallel_tool_calls":true}`
 	out2 := unmarshalMap(t, mustConvertResponsesToChat(t, in2))
-	if _, ok := out2["tool_choice"]; ok {
-		t.Errorf("tool_choice kept with empty filtered tools: %v", out2)
-	}
-	if _, ok := out2["parallel_tool_calls"]; ok {
-		t.Errorf("parallel_tool_calls kept with empty filtered tools: %v", out2)
+	if out2["tool_choice"] == nil || out2["parallel_tool_calls"] != true {
+		t.Errorf("tool controls dropped despite hosted fallback: %v", out2)
 	}
 
 	// Real tools present → both kept.

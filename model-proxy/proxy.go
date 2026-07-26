@@ -57,6 +57,7 @@ type Proxy struct {
 	flusher           *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog            *requestLogger                   // per-request access log (full bodies); nil = disabled (default) or init failure
 	cache             *responseCache                   // exact-match response cache (prompt-hash + TTL); nil = disabled
+	responsesState    *responsesStateStore             // previous_response_id replay for Responses clients bridged to stateless backends
 	events            *eventHub                        // live request monitor fan-out hub (SSE /api/events); always non-nil
 	fusionReg         *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
 	catalog           *modelsDevCatalog                // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
@@ -347,6 +348,7 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// Exact-match response cache. nil unless cache.enabled is set in config, so
 	// the default (off) path and direct-NewProxy tests pay zero overhead.
 	p.cache = newResponseCache(cfg.Cache)
+	p.responsesState = newResponsesStateStore(responsesStatePath(qpath))
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
 	// UI client subscribes; publish is non-blocking so it never stalls forward.
 	p.events = newEventHub()
@@ -450,6 +452,9 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 // generation. No-op for directly-constructed Proxies whose tracker was never
 // started (newQuotaProxy) — stop is idempotent and the empty path skips flush.
 func (p *Proxy) Close() {
+	if p.responsesState != nil {
+		p.responsesState.close()
+	}
 	if p.quota != nil {
 		p.quota.stop()
 		if p.quota.path != "" {
@@ -1339,6 +1344,11 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		if res.committed {
 			return
 		}
+		if res.conversionErr != nil && len(res.tried) == 0 {
+			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+			writeUnsupportedConversionError(w, proto, res.conversionErr)
+			return
+		}
 		sawHard = sawHard || res.sawHard
 		sawCool = sawCool || res.sawCooldown
 		// Key cooldown/TOCTOU on the EFFECTIVE targets serveOnce actually
@@ -1439,11 +1449,12 @@ type serveState struct {
 // terminal status derives from these (pure cooldown → 429; any hard → 502),
 // NOT from a racy health re-read at terminal time.
 type serveResult struct {
-	committed   bool
-	firstTried  RouteTarget
-	tried       map[string]bool // providers actually attempted this pass
-	sawHard     bool            // conn/timeout/5xx/401/build/model-denied-class failure
-	sawCooldown bool            // at least one 429 this pass
+	committed     bool
+	firstTried    RouteTarget
+	tried         map[string]bool             // providers actually attempted this pass
+	sawHard       bool                        // conn/timeout/5xx/401/build/model-denied-class failure
+	sawCooldown   bool                        // at least one 429 this pass
+	conversionErr *unsupportedConversionError // first client feature no candidate conversion could safely represent
 	// effectiveTargets is the target set serveOnce actually considered this pass
 	// (after scheduling drops cooling targets, request-aware routing narrows, or a
 	// context-overflow retry replaces it) — NOT necessarily the original route
@@ -1535,9 +1546,31 @@ func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provi
 		if t.Model != calledModel {
 			body = rewriteModel(origBody, t.Model)
 		}
+		var responsesHistory []any
+		if proto == "responses" && backendProto != "responses" && p.responsesState != nil {
+			expandedBody, history, hit, err := p.responsesState.expand(body, sessionKey)
+			if err != nil {
+				log.Printf("[proto=%s model=%s] target %d (%s/%s) responses state expansion failed: %v — skipping",
+					proto, exposed, ti, t.Provider, t.Model, err)
+				continue
+			}
+			if responsesPreviousID(body) != "" && !hit {
+				log.Printf("[proto=%s model=%s] previous_response_id cache miss; repaired orphaned continuation items", proto, exposed)
+			}
+			body = expandedBody
+			responsesHistory = history
+		}
 		if convert {
 			cb, err := convertRequestFor(body, proto, backendProto, convertReqOpts{ProviderID: prov.Provider, ImageOK: imageOKForTarget(cfg, parentOf, cat, t)})
 			if err != nil {
+				if unsupported, ok := asUnsupportedConversion(err); ok {
+					if res.conversionErr == nil {
+						res.conversionErr = unsupported
+					}
+					log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s unsupported feature %s — trying another target",
+						proto, exposed, ti, t.Provider, t.Model, proto, backendProto, unsupported.Feature)
+					continue
+				}
 				// Fail CLOSED: a conversion failure must NOT send the unconverted
 				// body to the backend (that ships an Anthropic body to an OpenAI
 				// endpoint, or vice versa). Skip this target and try the next; if
@@ -1578,7 +1611,7 @@ func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provi
 				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody, generation)
 			}
 		}
-		committed, retried, outcome := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry, ti == len(ordered)-1, viaResponsesVerdict, r2cCtxFor(proto, backendProto, origBody))
+		committed, retried, outcome := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry, ti == len(ordered)-1, viaResponsesVerdict, r2cCtxFor(proto, backendProto, origBody), responsesHistory, sessionKey)
 		res.tried[t.Provider] = true
 		switch outcome {
 		case tryFailedHard:
@@ -1628,7 +1661,7 @@ const (
 	tryRateLimited                   // 429
 )
 
-func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx, ctxRetry func() []RouteTarget, lastTarget, viaResponsesVerdict bool, r2c r2cCtx) (committed bool, retried []RouteTarget, outcome tryOutcome) {
+func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx, ctxRetry func() []RouteTarget, lastTarget, viaResponsesVerdict bool, r2c r2cCtx, responsesHistory []any, responsesSession string) (committed bool, retried []RouteTarget, outcome tryOutcome) {
 	// Wrap the client writer to capture time-to-first-token for latency stats.
 	// All writes below go through tw; ttft is read on the commit path.
 	tw := newTimingResponseWriter(w)
@@ -1669,6 +1702,8 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 	// retry (attempt-gated), and 400 unsupported-parameter → strip-retry
 	// (flag-gated below, rewinds `attempt` so it never consumes the 401 slot).
 	strippedParam := false
+	retriedImages := false
+	clientWantsStream := requestWantsStream(body)
 	for attempt := 0; attempt < 2; attempt++ {
 		targetURL := strings.TrimRight(baseURL, "/") + upPath
 		if r.URL.RawQuery != "" {
@@ -1784,6 +1819,17 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 			var peek []byte
 			if ctxRetry != nil || resp.StatusCode == 400 || resp.StatusCode == 403 || resp.StatusCode == 404 {
 				peek = peekResponseBody(resp, contextOverflowPeek)
+			}
+			if resp.StatusCode == http.StatusRequestEntityTooLarge && !retriedImages {
+				if smaller, changed := shrinkRequestImages(body, 1<<20, 2048); changed {
+					resp.Body.Close()
+					body = smaller
+					retriedImages = true
+					attempt--
+					log.Printf("[proto=%s provider=%s] 413 request too large — compressed inline images and retrying once",
+						proto, t.Provider)
+					continue
+				}
 			}
 			// Context-overflow retry: a 4xx whose body matches an upstream "prompt
 			// exceeds the context window" error is NOT committed while this request
@@ -1920,12 +1966,19 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 		// content-type. Sniff the framing before committing to the buffered
 		// non-stream path — a JSON body never starts with event:/data:.
 		streamBySniff := false
-		if convert && !isSSE(resp.Header) {
+		if resp.StatusCode < 300 && !isSSE(resp.Header) {
 			peek := bytes.TrimSpace(peekResponseBody(resp, 16))
 			streamBySniff = bytes.HasPrefix(peek, []byte("event:")) || bytes.HasPrefix(peek, []byte("data:"))
 		}
+		upstreamIsStream := resp.StatusCode < 300 && (isSSE(resp.Header) || streamBySniff)
+		modeMismatch := convert && resp.StatusCode < 300 && clientWantsStream != upstreamIsStream
+		transformed := convert || modeMismatch
+		clientOutputIsStream := upstreamIsStream
+		if modeMismatch {
+			clientOutputIsStream = clientWantsStream
+		}
 		var preconv []byte // converted non-stream body; nil unless pre-converted here
-		if convert && !isSSE(resp.Header) && !streamBySniff {
+		if modeMismatch || (convert && !upstreamIsStream) {
 			// 64 MiB cap: a non-stream LLM response larger than this is pathological
 			// (max_tokens bounds it); the cap bounds memory on the buffered convert.
 			all, rerr := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
@@ -1936,7 +1989,32 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				http.Error(w, fmt.Sprintf("upstream response read failed during %s→%s conversion", backendProto, proto), http.StatusBadGateway)
 				return true, nil, tryNone
 			}
-			conv, cerr := convertResponseNS(all, proto, backendProto, r2c)
+			conv, cerr := all, error(nil)
+			switch {
+			case resp.StatusCode >= 400 && convert:
+				conv, cerr = convertErrorResponse(all, proto, backendProto, resp.StatusCode)
+			case upstreamIsStream && !clientWantsStream:
+				if convert {
+					convertedSSE, readErr := io.ReadAll(convertSSEReaderNS(bytes.NewReader(all), proto, backendProto, t.Model, r2c))
+					if readErr != nil {
+						cerr = readErr
+					} else {
+						all = convertedSSE
+					}
+				}
+				if cerr == nil {
+					conv, cerr = aggregateSSEToResponse(all, proto)
+				}
+			case !upstreamIsStream && clientWantsStream:
+				if convert {
+					conv, cerr = convertResponseNS(all, proto, backendProto, r2c)
+				}
+				if cerr == nil {
+					conv, cerr = responseToSSE(conv, proto)
+				}
+			case convert:
+				conv, cerr = convertResponseNS(all, proto, backendProto, r2c)
+			}
 			if cerr != nil {
 				log.Printf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
 					proto, t.Provider, backendProto, proto, cerr)
@@ -1944,13 +2022,30 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				return true, nil, tryNone
 			}
 			preconv = conv
+			if resp.StatusCode < 300 && proto == "responses" && p.responsesState != nil && len(responsesHistory) > 0 {
+				if clientWantsStream {
+					p.responsesState.recordSSE(responsesSession, responsesHistory, preconv)
+				} else {
+					p.responsesState.recordJSON(responsesSession, responsesHistory, preconv)
+				}
+			}
 		}
 		for k, vs := range resp.Header {
-			if convert && (strings.EqualFold(k, "content-length") || strings.EqualFold(k, "transfer-encoding")) {
+			if transformed && (strings.EqualFold(k, "content-length") || strings.EqualFold(k, "transfer-encoding")) {
+				continue
+			}
+			if modeMismatch && strings.EqualFold(k, "content-type") {
 				continue
 			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
+			}
+		}
+		if modeMismatch {
+			if clientWantsStream {
+				w.Header().Set("content-type", "text/event-stream")
+			} else {
+				w.Header().Set("content-type", "application/json")
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
@@ -1992,6 +2087,17 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				body = io.NopCloser(convertSSEReaderNS(body, proto, backendProto, t.Model, r2c))
 			}
 		}
+		if proto == "responses" && p.responsesState != nil && len(responsesHistory) > 0 &&
+			preconv == nil && upstreamIsStream && resp.StatusCode < 300 {
+			state := p.responsesState
+			session := responsesSession
+			history := cloneAnySlice(responsesHistory)
+			body = newCaptureReader(body, responsesStateEntryMax, func(captured []byte, _ int64, truncated bool) {
+				if !truncated {
+					state.recordSSE(session, history, captured)
+				}
+			})
+		}
 		// request logging: tee the (possibly converted) body — `body`, NOT
 		// resp.Body. Wrapping resp.Body here would log/replay the backend's native
 		// bytes (e.g. openai SSE) instead of the client-protocol bytes the client
@@ -2014,7 +2120,7 @@ func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, 
 				}))
 			})
 		}
-		if p.tokens != nil && (isSSE(resp.Header) || streamBySniff) {
+		if p.tokens != nil && clientOutputIsStream {
 			// Attribute the same observed usage to the calling agent (parallel
 			// agent pipeline) so per-agent token totals reconcile with per-model.
 			// Also stash into endTokens for the live-monitor end event (best-effort:

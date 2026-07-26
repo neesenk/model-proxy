@@ -245,25 +245,21 @@ func TestNamespace_StreamRestore(t *testing.T) {
 // vanishing tools are undebuggable. (namespace CONTAINERS are supported since
 // the codex 0.145 capture: they expand into their subtools, see
 // TestNSFlatten_NamespaceContainer.)
-func TestNSFlatten_UnknownToolTypeWarns(t *testing.T) {
+func TestNSFlatten_HostedToolFallbacks(t *testing.T) {
 	tools := []any{
 		map[string]any{"type": "tool_search"},
 		map[string]any{"type": "web_search"},
 		map[string]any{"type": "function", "name": "f", "parameters": map[string]any{"type": "object"}},
 	}
-	var out []map[string]any
-	var err error
-	logs := captureConvertLog(t, func() {
-		out, err = nsFlattenResponsesTools(tools)
-	})
+	out, err := nsFlattenResponsesTools(tools)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(logs, "tool_search") || !strings.Contains(logs, "web_search") {
-		t.Errorf("warning must name the dropped types, got: %q", logs)
-	}
-	if len(out) != 1 || strOf(asMap(out[0]["function"])["name"]) != "f" {
-		t.Errorf("flattened tools = %v, want only the function tool", out)
+	if len(out) != 3 ||
+		strOf(asMap(out[0]["function"])["name"]) != "tool_search" ||
+		strOf(asMap(out[1]["function"])["name"]) != "web_search" ||
+		strOf(asMap(out[2]["function"])["name"]) != "f" {
+		t.Errorf("hosted fallback tools = %v", out)
 	}
 }
 
@@ -342,5 +338,50 @@ func TestNSRestoreMap_NamespaceContainerInAdditionalTools(t *testing.T) {
 	// Custom set: custom tools in additional_tools are registered.
 	if !responsesCustomToolSet(body)["exec"] {
 		t.Error("custom tool set missing exec from additional_tools")
+	}
+}
+
+func TestNamespace_AnthropicRoundTrip(t *testing.T) {
+	request := []byte(`{"model":"m","input":[{"type":"function_call","call_id":"c1","name":"read","namespace":"mcp__files","arguments":"{}"}],` +
+		`"tool_choice":{"type":"function","name":"read","namespace":"mcp__files"},` +
+		`"tools":[{"type":"function","name":"read","namespace":"mcp__files","parameters":{"type":"object"}}]}`)
+	converted, err := convertResponsesRequestToAnthropic(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(converted), `"name":"mcp__files__read"`) {
+		t.Fatalf("namespace was not flattened for Anthropic: %s", converted)
+	}
+
+	ctx := r2cCtxFor("responses", "anthropic", request)
+	response := []byte(`{"id":"msg_1","model":"claude","stop_reason":"tool_use","content":[` +
+		`{"type":"tool_use","id":"c2","name":"mcp__files__read","input":{}}],"usage":{}}`)
+	restored, err := convertAnthropicResponseToResponsesNS(response, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(restored), `"name":"read"`) ||
+		!strings.Contains(string(restored), `"namespace":"mcp__files"`) {
+		t.Fatalf("namespace was not restored from Anthropic response: %s", restored)
+	}
+
+	stream := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude","usage":{}}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c2","name":"mcp__files__read","input":{}}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	events := drainSSE(t, newAnthropicToResponsesSSENS(strings.NewReader(stream), "claude", ctx))
+	var joined strings.Builder
+	for _, event := range events {
+		joined.WriteString(event.data)
+	}
+	if !strings.Contains(joined.String(), `"name":"read"`) ||
+		!strings.Contains(joined.String(), `"namespace":"mcp__files"`) {
+		t.Fatalf("stream namespace was not restored: %s", joined.String())
 	}
 }

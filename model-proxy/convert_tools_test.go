@@ -388,15 +388,15 @@ func TestStreaming_AnthropicDuplicateMessageDelta(t *testing.T) {
 	}
 }
 
-// TestStreaming_NoUsageNoDone: an openai stream that omits usage AND [DONE] still
-// terminates cleanly (scanner EOF → finish with end_turn/0 tokens).
+// TestStreaming_NoUsageNoDone: an openai stream that omits both a finish_reason
+// and [DONE] is truncated and must fail closed.
 func TestStreaming_NoUsageNoDone(t *testing.T) {
 	stream := "data: {\"model\":\"gpt\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
 	r := newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt")
 	out, _ := io.ReadAll(r)
 	s := string(out)
-	if !strings.Contains(s, "event: message_stop") || !strings.Contains(s, `"stop_reason":"end_turn"`) {
-		t.Errorf("stream without usage/[DONE] did not terminate cleanly:\n%s", s)
+	if !strings.Contains(s, "event: error") || strings.Contains(s, "event: message_stop") {
+		t.Errorf("truncated stream did not fail closed:\n%s", s)
 	}
 }
 

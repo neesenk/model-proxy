@@ -5,7 +5,7 @@
 **特性一览**：
 
 - **多上游聚合 + 配额感知调度**：surplus 调度分 / 熔断 / 限频跳过 / 粘性驻留 / 多账号凭据池 + 会话粘性
-- **双协议转发 + 可选协议转换**：同协议字节级透传；路由目标声明 `protocol:` 即可跨协议（Anthropic ↔ OpenAI，tools 全链路）
+- **三协议转发 + 可选协议转换**：同协议字节级透传；路由目标声明 `protocol:` 即可在 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 间转换
 - **请求感知路由**：按图片/工具能力过滤目标、超长 prompt 自动改道大上下文模型、上游 400 溢出自动重试一次
 - **可观测性**：Web UI 六个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
 - **评测工具**：影子评测（真实负载双跑对比后端）、一键重放（replay）、端到端测活（`test` / UI 按钮）
@@ -276,7 +276,7 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 
 **按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。两个协议对客户端 `/v1` 前缀的处理相反：OpenAI 协议会剥掉客户端的 `/v1`，故 `openai_base_url` 自带版本段（如 `…/v1`、`…/paas/v4`）；Anthropic 协议保留客户端的 `/v1/messages`，故 `anthropic_base_url` **不带** `/v1`（如 `…/anthropic`、`…/api/plan`）。
 
-**协议转换（opt-in）**：路由目标声明 `protocol:` 且与客户端协议不同时，代理自动做 Anthropic ↔ OpenAI 双向转换（请求 + 响应 + 流式，**tools 全链路**：`tools`/`tool_choice`/`tool_use`/`tool_result` 结构映射、流式增量事件互转、usage/cache token 透传）——比如让 Claude Code（Anthropic 协议）直连只有 OpenAI 端点的后端：
+**协议转换（opt-in）**：路由目标声明 `protocol:` 且与客户端协议不同时，代理自动做 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 三种协议的双向转换（请求 + 响应 + 流式，**tools 全链路**：`tools`/`tool_choice`/`tool_use`/`tool_result` 结构映射、流式增量事件互转、usage/cache token 透传）——比如让 Claude Code（Anthropic 协议）直连只有 OpenAI 端点的后端：
 
 ```yaml
 routes:
@@ -285,7 +285,7 @@ routes:
     - {provider: zhipu, model: glm-5.2, priority: 1, protocol: openai}
 ```
 
-转换是 per-target 的，同协议目标保持字节级透传不受影响。不可映射的字段（thinking 块、cache_control、server-side tools 等）会丢弃并在日志打一次性告警（不静默）。两个跨协议保真机制：tool_result 里的图片不丢弃——剥离后紧随一条合成 user 消息改投（`[image returned by tool]` + 图片，纯图片 tool_result 不再变成空输出）；Responses 的 MCP namespace 工具（`{name, namespace}` 二维命名）在转 chat 时压平为 `namespace__name`、转回时按请求自动还原，撞名则 fail-closed 报 502。Codex CLI 的 custom/freeform 工具（shell/apply_patch）双向支持：转 chat 时包装成 `{input: string}` 单参数函数、转回时还原 `custom_tool_call`（流式渐进解包），reasoning effort 按 provider 方言渲染（zhipu/deepseek/kimi-code/volcengine 的 `thinking`、qwen 的 `enable_thinking`、aqp 的原生 `reasoning` 对象）——Codex CLI 可经 r→chat 转换直连 chat-only 上游。两类配置风险会被**标记提醒**（daemon 启动/reload 日志 + `/api/status.warnings` + `doctor`/`config check`）：① 需要 reasoning 回放的模型（名字含 `reasoner`/`thinking`/`mimo`，如 Kimi k2-thinking / DeepSeek V4 thinking / MiMo）配在转换路径上——thinking/reasoning 内容被丢弃，多轮工具调用会在上游 400（回放缓存未实现，仅标记）；② **codex 的线协议说明**：codex 只讲 OpenAI Responses API（`/responses` + `input` list 体）——anthropic/chat 客户端打 codex 路由会经 ProtocolHint 自动转成 Responses 请求（无需写 `protocol:`）；但 `protocol: openai` **不能**让 codex 被这类客户端使用，转换出的 chat 体会被 `Unsupported parameter: messages` 拒绝。
+转换是 per-target 的；同协议目标通常保持字节级透传，Codex Responses 例外：会清理其明确拒绝的采样/输出上限参数。Responses 客户端跨协议使用 `previous_response_id` 时，proxy 以 30 分钟短期本地状态展开完整历史（有界、0600 原子持久化；只缓存 completed/token-limit incomplete）。客户端 `stream` 与上游实际模式相反时会聚合 SSE 或合成 SSE。跨协议 4xx 保留 HTTP 状态和错误信息并改写为客户端错误格式；已知无法无损表达的请求先尝试兼容 target，最终按客户端格式返回 400 `unsupported_protocol_conversion`；缺协议终止事件、scanner 失败或工具 arguments JSON 未闭合时 fail-closed。document/input_file/file、tool_result 图片与 `is_error`、hosted web_search/tool_search（含发现工具物化）、citations 和 signed/redacted reasoning replay 均可转换或采用明确可见降级；到 Anthropic 的转换自动生成 prompt-cache breakpoints，Chat↔Responses 保留 cache key/retention。内联图片跨协议时限制为 4 MiB/4096px，413 时仅压缩重试一次（1 MiB/2048px）。MCP namespace 经 Chat/Anthropic 目标均可双向压平与恢复；custom/freeform 工具经 Chat 双向保留，经 Anthropic 时因没有等价 raw-input 契约而明确拒绝。reasoning effort 按 provider 方言渲染。unsupported server tools、audio、多 choice/logprobs 等不可表达特性会被能力扫描器拒绝，不再静默丢弃。
 
 **自动 wire 探测（零配置）**：daemon 启动和 reload 后会异步探测每个 provider 的 `openai_base_url` 是否支持 `/responses`（一个最小请求；404 判为不支持，其余 4xx/2xx 判为支持，超时/5xx 不下结论）；`/v1/messages` 只在 provider **没有** `anthropic_base_url` 时才探（探测地址正是 anthropic 透传会打的 openai base 地址；有 `anthropic_base_url` 时直接向它透传，不会在 openai base 上拼 /v1/messages）。探测结论作为协议选择的**默认值**：没写 `protocol:` 的目标，anthropic 客户端在端点支持 responses 时自动转 responses、不支持时自动转 chat（不再默认把 anthropic body 透传给只懂 chat 的端点）；网关本身接受 anthropic（探测 `/v1/messages` 成功）或有 `anthropic_base_url` 时仍保持透传。探测完成前（unknown）一律维持透传。显式 `protocol:` 永远优先，是关闭自动行为的逃逸口。探测结论持久化在 `quota_state.json` 的 `wire_caps`（换 base_url 自动作废重探）；若探测误报支持而上游对 `/responses` 返回 404，代理会自动把该 provider 降级为 chat 并记录日志（不锁模型）。codex 已由 ProtocolHint 覆盖，不参与探测。
 

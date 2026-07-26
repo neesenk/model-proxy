@@ -435,7 +435,7 @@ routes:
 - `priority`：可选，整数，低 = 优先（同 tier/quota band 内先试）；空 = 0。
 - `protocol`：可选，**协议转换** (#11)。声明该后端说的协议；与客户端协议不同时，proxy 双向转换（request+response+streaming，含 tools/tool_use/tool_result/image）。空 = 与客户端同协议（字节透传，默认）。
   - `validate` 会校验：`protocol: anthropic` 的 target 其 provider 必须配 `anthropic_base_url`（`protocol: openai` 同理需 `openai_base_url`），否则报错。
-  - 转换有损项（dropped + warned，不静默）：thinking/redacted_thinking 块、`cache_control` 断点、服务端 tools（web_search/computer/...）、`tool_result` 内的图片。`doctor` 会列出哪些路由发生转换 + 有损清单。
+  - 已保留：文档/文件、`tool_result` 图片与 `is_error`、Responses `web_search`/`tool_search`、跨协议到 Anthropic 时自动生成的 cache breakpoint。剩余有损项主要是 anthropic↔chat 的 thinking、尚无降级实现的 server tool（如 computer）和 chat `input_audio`。`doctor` 会列出转换路由与剩余有损项。
   - 纯 anthropic 后端可只配 `anthropic_base_url`（provider 校验已放宽为「至少一个 base URL」）。
 
 ### `shadow:` （配置驱动，非 CLI）
@@ -612,7 +612,7 @@ Routes (dry-run: no live quota -> tier then priority)
         <VIRTUAL_ID>                                                                              # 每个虚拟 id
     ⚠ no plan provider - only pay-as-you-go                                                       # 该路由无 plan provider 时
         ↔ target protocol <P> — converts when client protocol differs; lossy: …                    # target 声明 protocol: 时
-        ⚠ reasoning-required model behind conversion — … (replay cache not implemented)           # reasoning 模型 + 协议转换时（计入 warning 数）
+        ⚠ reasoning-required model behind openai-chat conversion — … (replay cache not implemented) # reasoning 模型 + openai-chat 转换时（计入 warning 数）
         ⚠ codex speaks the OpenAI Responses API … — only Responses-speaking clients …              # codex target（线协议说明，计入 warning 数）
         ⚠ no protocol: declared, but <ID> speaks <P> — …; add protocol: <P>                        # 缺 protocol: 且 provider 有协议 hint 时（计入 warning 数）
 

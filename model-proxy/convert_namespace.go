@@ -70,11 +70,11 @@ type r2cCtx struct {
 }
 
 // r2cCtxFor builds the context when the client speaks responses and the
-// backend speaks chat — the only direction where names are flattened/wrapped.
+// backend speaks chat or Anthropic — the directions where names are flattened.
 // origBody is the ORIGINAL client request (responses protocol); zero value
 // (nil maps) otherwise, which makes every consumer a no-op.
 func r2cCtxFor(clientProto, backendProto string, origBody []byte) r2cCtx {
-	if clientProto != "responses" || backendProto != "openai" || len(origBody) == 0 {
+	if clientProto != "responses" || (backendProto != "openai" && backendProto != "anthropic") || len(origBody) == 0 {
 		return r2cCtx{}
 	}
 	return r2cCtx{ns: responsesNamespaceRestoreMap(origBody), custom: responsesCustomToolSet(origBody)}
@@ -179,6 +179,18 @@ func nsFlattenResponsesTools(tools []any) ([]map[string]any, error) {
 				fn["strict"] = s
 			}
 			out = append(out, map[string]any{"type": "function", "function": fn})
+		case "web_search", "web_search_preview", "tool_search":
+			name := "web_search"
+			if ty == "tool_search" {
+				name = "tool_search"
+			}
+			if seen[name] {
+				return nil, fmt.Errorf("tool name %q collides after hosted-tool fallback", name)
+			}
+			seen[name] = true
+			out = append(out, map[string]any{"type": "function", "function": map[string]any{
+				"name": name, "description": hostedToolDescription(name), "parameters": hostedToolSchema(name),
+			}})
 		default:
 			// Unknown tool type (tool_search, hosted tools): dropped, but
 			// named in a warning — silently vanishing tools are undebuggable.
@@ -188,4 +200,33 @@ func nsFlattenResponsesTools(tools []any) ([]map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+func hostedToolDescription(name string) string {
+	if name == "tool_search" {
+		return "Search for tools that can help complete the request."
+	}
+	return "Search the web for current information."
+}
+
+func hostedToolSchema(name string) map[string]any {
+	if name == "tool_search" {
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string"},
+				"limit": map[string]any{"type": "integer"},
+			},
+			"required":             []string{"query"},
+			"additionalProperties": false,
+		}
+	}
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query":   map[string]any{"type": "string"},
+			"queries": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		},
+		"additionalProperties": false,
+	}
 }

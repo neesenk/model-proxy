@@ -19,6 +19,7 @@ package main
 // captures real upstream streams into the same directory.
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -93,6 +94,67 @@ func TestConvertGolden_Replay(t *testing.T) {
 	}
 	if n == 0 {
 		t.Fatal("testdata/wire holds no .sse seeds")
+	}
+}
+
+func TestConvertGolden_ErrorFixtures(t *testing.T) {
+	entries, err := os.ReadDir("testdata/wire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".err") {
+			continue
+		}
+		count++
+		raw, err := os.ReadFile(filepath.Join("testdata/wire", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		head, body, ok := strings.Cut(string(raw), "\n\n")
+		if !ok {
+			body = ""
+		}
+		status := 0
+		if _, err := fmt.Sscanf(strings.TrimSpace(head), "status: %d", &status); err != nil || status < 400 {
+			t.Fatalf("%s: invalid status header %q", entry.Name(), head)
+		}
+		prefix, _, _ := strings.Cut(entry.Name(), "_")
+		source := prefix
+		if source == "chat" {
+			source = "openai"
+		}
+		for _, target := range []string{"anthropic", "openai", "responses"} {
+			if target == source {
+				continue
+			}
+			t.Run(entry.Name()+"/"+target, func(t *testing.T) {
+				converted, err := convertErrorResponse([]byte(body), target, source, status)
+				var envelope map[string]any
+				parseErr := sonic.UnmarshalString(body, &envelope)
+				recognized := parseErr == nil && asMap(envelope["error"]) != nil
+				if !recognized {
+					if err == nil {
+						t.Fatalf("unrecognized error fixture converted successfully: %s", converted)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("recognized error fixture failed conversion: %v", err)
+				}
+				out := unmarshalMap(t, converted)
+				if asMap(out["error"]) == nil {
+					t.Fatalf("converted body has no error envelope: %s", converted)
+				}
+				if target == "anthropic" && out["type"] != "error" {
+					t.Fatalf("anthropic error type = %#v", out["type"])
+				}
+			})
+		}
+	}
+	if count == 0 {
+		t.Fatal("testdata/wire holds no .err fixtures")
 	}
 }
 

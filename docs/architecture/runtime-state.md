@@ -51,6 +51,17 @@ reload 按 `p.mu → healthMu → quotaMu` 一次性切换 cfg/providers/routes 
 
 旧版无 fingerprint 文件仅保留兼容读取，不应扩展新的无指纹状态。
 
+## Responses 对话状态
+
+`responsesStateStore` 只服务于 Responses 客户端跨协议访问无 `previous_response_id` 能力的 chat/anthropic 后端。状态与 quota tracker 分离，写入同目录 `responses_state.json`：
+
+- key 为 session + response id；缺 session 时仅接受唯一 response id；
+- TTL 30 分钟、最多 512 条、单条 2 MiB、总量 32 MiB；
+- 250ms debounce 异步落盘，目录 0700、文件 0600；每次使用同目录唯一临时文件、fsync 后原子 rename；
+- `Proxy.Close` 停写、等待 owner 并 final flush；
+- 命中后展开完整 input/output 历史；miss 只对本次 orphan/dangling item 做保守修复。
+- 只记录 completed 和因 `max_output_tokens`/token length 截断的 incomplete；content_filter、其他中止或带 error 的响应不进入 replay state。
+
 ## 锁顺序
 
 锁顺序是：

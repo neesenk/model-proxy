@@ -232,9 +232,8 @@ func TestConvertFault_NonJSONToolArgsFallback(t *testing.T) {
 	}
 }
 
-// C6: orphaned tool pairs pass through as-is (no pairing repair): a
-// function_call_output / role:tool without a matching call still converts,
-// and a dangling tool_use/function_call without a result is kept.
+// C6: ordinary full-history conversion preserves incomplete tool pairs. Repair
+// is scoped to a missed previous_response_id expansion, not every request.
 func TestConvertFault_OrphanToolPairs(t *testing.T) {
 	// responses→anthropic: orphan function_call_output.
 	out, err := convertResponsesRequestToAnthropic([]byte(
@@ -440,27 +439,12 @@ func TestConvertFault_UnknownMappingWarns(t *testing.T) {
 		run  func() // must call the converter inside captureConvertLog's fn
 		want string
 	}{
-		{"a→r document block", func() {
-			convertAnthropicRequestToResponses([]byte(`{"model":"c","max_tokens":10,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","data":"x"}}]}]}`))
-		}, "dropping anthropic content block in a→r request: document"},
-		{"a→chat document block", func() {
-			convertAnthropicRequestToOpenAI([]byte(`{"model":"c","max_tokens":10,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"text","data":"x"}}]}]}`))
-		}, "dropping unknown anthropic content block: document"},
 		{"chat→r input_audio part", func() {
 			convertOpenAIRequestToResponses([]byte(`{"model":"g","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"x","format":"wav"}}]}]}`))
 		}, "dropping chat content part in chat→r request: input_audio"},
 		{"chat→a input_audio part", func() {
 			convertOpenAIRequestToAnthropic([]byte(`{"model":"g","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"x","format":"wav"}}]}]}`))
 		}, "dropping unknown openai content part: input_audio"},
-		{"r→a unknown output item", func() {
-			convertResponsesToAnthropic([]byte(`{"id":"r1","status":"completed","output":[{"type":"web_search_call","id":"ws_0"}]}`))
-		}, "dropping responses output item in r→a response: web_search_call"},
-		{"r→chat unknown output item", func() {
-			convertResponsesToOpenAI([]byte(`{"id":"r1","status":"completed","output":[{"type":"web_search_call","id":"ws_0"}]}`))
-		}, "dropping responses output item in r→chat response: web_search_call"},
-		{"r→a unknown input item", func() {
-			convertResponsesRequestToAnthropic([]byte(`{"model":"g","input":[{"type":"web_search_call","id":"ws_0"}]}`))
-		}, "dropping responses input item in r→a request: web_search_call"},
 		{"a→r stop_sequences", func() {
 			convertAnthropicRequestToResponses([]byte(`{"model":"c","max_tokens":10,"stop_sequences":["END"],"messages":[{"role":"user","content":"hi"}]}`))
 		}, "dropping stop_sequences"},

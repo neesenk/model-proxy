@@ -319,7 +319,7 @@ func TestForward_OpenAIToAnthropic_NonStream(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if !strings.Contains(gotAnthropicReq, `"system":"s"`) || !strings.Contains(gotAnthropicReq, `"model":"claude"`) || !strings.Contains(gotAnthropicReq, `"max_tokens":100`) {
+	if !strings.Contains(gotAnthropicReq, `"text":"s"`) || !strings.Contains(gotAnthropicReq, `"model":"claude"`) || !strings.Contains(gotAnthropicReq, `"max_tokens":100`) {
 		t.Errorf("backend got non-Anthropic request: %s", gotAnthropicReq)
 	}
 	bs := string(body)

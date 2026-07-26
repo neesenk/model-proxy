@@ -1,7 +1,7 @@
 package main
 
 // convert_differential_test.go — differential tests against opencodex
-// (~/Code/opencodex) behavior: input fixtures under testdata/differential/
+// (~/code/opencodex) behavior: input fixtures under testdata/differential/
 // are wire-format SSE streams lifted VERBATIM from opencodex's test files and
 // fed to our converters. Assertions check semantic equivalence; where we
 // deliberately diverge (intentional-behaviors.md), we assert OUR semantics
@@ -132,26 +132,23 @@ func TestDifferential_ChatIDOnlyContinuation(t *testing.T) {
 	}
 }
 
-// opencodex fails CLOSED on a truncated stream (terminal error, no done). We
-// deliberately finish cleanly — intentional-behaviors.md #10 (fail-open).
+// A truncated stream must fail closed, matching opencodex: no clean terminal
+// may be synthesized from partial text or tool arguments.
 func TestDifferential_ChatEOFTruncated(t *testing.T) {
 	in := readDifferential(t, "chat_eof_truncated.sse")
-	// chat→responses: response.completed (status completed), NOT an error.
 	events := drainSSE(t, newOpenAIToResponsesSSE(strings.NewReader(in), "gpt-x"))
-	if got := sseCount(events, "response.completed"); got != 1 {
-		t.Errorf("a→r truncated EOF: response.completed = %d, want 1 (#10 fail-open)", got)
+	if got := sseCount(events, "response.completed"); got != 0 {
+		t.Errorf("chat→r truncated EOF: response.completed = %d, want 0", got)
 	}
-	if got := sseCount(events, "response.failed"); got != 0 {
-		t.Errorf("a→r truncated EOF: response.failed = %d, want 0 (#10 fail-open)", got)
+	if got := sseCount(events, "response.failed"); got != 1 {
+		t.Errorf("chat→r truncated EOF: response.failed = %d, want 1", got)
 	}
-	// chat→anthropic: clean message_stop (same #10 semantics as
-	// TestStreaming_NoUsageNoDone).
 	eventsA := drainSSE(t, newOpenAIToAnthropicSSE(strings.NewReader(in), "gpt-x"))
-	if got := sseCount(eventsA, "message_stop"); got != 1 {
-		t.Errorf("chat→a truncated EOF: message_stop = %d, want 1 (#10 fail-open)", got)
+	if got := sseCount(eventsA, "message_stop"); got != 0 {
+		t.Errorf("chat→a truncated EOF: message_stop = %d, want 0", got)
 	}
-	if got := sseCount(eventsA, "error"); got != 0 {
-		t.Errorf("chat→a truncated EOF: error = %d, want 0 (#10 fail-open)", got)
+	if got := sseCount(eventsA, "error"); got != 1 {
+		t.Errorf("chat→a truncated EOF: error = %d, want 1", got)
 	}
 }
 

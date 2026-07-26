@@ -527,7 +527,8 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	// synthesis body (with the candidate sections), not the client's original.
 	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed, generation: fc.flc.generation}
 	committed, _, _ := p.tryTarget(fc.cfg, fc.proto, backendProto, fc.calledModel, st, prov, impl, baseURL, effPath,
-		body, w, r, fc.agent, cacheKey, false, cache, flc, nil, true, viaResponsesVerdict, r2cCtxFor(fc.proto, backendProto, fc.origBody))
+		body, w, r, fc.agent, cacheKey, false, cache, flc, nil, true, viaResponsesVerdict,
+		r2cCtxFor(fc.proto, backendProto, fc.origBody), nil, "")
 	return committed
 }
 

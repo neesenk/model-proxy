@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	sonic "github.com/bytedance/sonic"
 )
 
 // requestSeedBodies covers valid bodies for all six request directions plus
@@ -114,8 +116,64 @@ func FuzzConvertSSE(f *testing.F) {
 			if len(out) > outCap {
 				t.Fatalf("%s: output %d bytes exceeds bound %d for %d input bytes (unbounded loop?)", name, len(out), outCap, len(data))
 			}
+			target := "responses"
+			if strings.HasSuffix(name, "→a") {
+				target = "anthropic"
+			} else if strings.HasSuffix(name, "→o") {
+				target = "chat"
+			}
+			assertFuzzSSESemantics(t, name, string(out), target)
 		}
 	})
+}
+
+func assertFuzzSSESemantics(t *testing.T, name, raw, target string) {
+	t.Helper()
+	events := parseSSE(raw)
+	if len(events) == 0 {
+		t.Fatalf("%s: output contains no SSE frames", name)
+	}
+	errors, clean := 0, 0
+	for _, event := range events {
+		if event.data == "[DONE]" {
+			continue
+		}
+		var payload map[string]any
+		if sonic.UnmarshalString(event.data, &payload) != nil {
+			t.Fatalf("%s: output contains invalid JSON frame %q", name, event.data)
+		}
+		switch target {
+		case "anthropic":
+			if event.event == "error" {
+				errors++
+			}
+			if event.event == "message_stop" {
+				clean++
+			}
+		case "chat":
+			if asMap(payload["error"]) != nil {
+				errors++
+			}
+			for _, rawChoice := range anySlice(payload["choices"]) {
+				if strOpt(asMap(rawChoice)["finish_reason"]) != "" {
+					clean++
+				}
+			}
+		case "responses":
+			switch event.event {
+			case "response.failed", "response.cancelled", "error":
+				errors++
+			case "response.completed", "response.incomplete":
+				clean++
+			}
+		}
+	}
+	if errors+clean != 1 || (errors > 0 && clean > 0) {
+		t.Fatalf("%s: terminal semantics errors=%d clean=%d\n%s", name, errors, clean, raw)
+	}
+	if target == "responses" && clean == 1 {
+		assertResponsesItemPairing(t, events)
+	}
 }
 
 // FuzzParseToolArgs: never panics, deterministic.

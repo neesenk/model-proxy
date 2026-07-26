@@ -951,13 +951,13 @@ func doctorWithCfg(cfg *Config) int {
 				// converts client↔backend when they differ. Surface it + the fixed
 				// set of fields conversion drops (so an operator wiring tools/images
 				// knows what's lossy before traffic flows).
-				fmt.Printf("        %s target protocol %s — converts when client protocol differs; lossy: thinking blocks, cache_control, server-side tools, tool_result images\n",
+				fmt.Printf("        %s target protocol %s — converts when client protocol differs; remaining lossy: anthropic↔chat thinking, unsupported server tools, input_audio (cache breakpoints/documents/tool-result media preserved)\n",
 					cYellow("↔"), t.Protocol)
 				// Reasoning-replay marker (#9): for models that REQUIRE reasoning
 				// content echoed back, the dropped thinking/reasoning is fatal to
 				// multi-turn tool calls, not just lossy.
-				if reasoningReplayModel(t.Model) {
-					fmt.Printf("        %s reasoning-required model behind conversion — thinking/reasoning content is dropped today; multi-turn tool calls may 400 upstream (replay cache not implemented)\n",
+				if reasoningReplayModel(t.Model) && t.Protocol == "openai" {
+					fmt.Printf("        %s reasoning-required model behind openai-chat conversion — Anthropic thinking is dropped; multi-turn tool calls may 400 upstream (replay cache not implemented)\n",
 						cYellow("⚠"))
 					warns++
 				}

@@ -338,7 +338,7 @@ func TestConvertStopSemantics_PauseTurn(t *testing.T) {
 // C. a→r server tools filtering
 // ---------------------------------------------------------------------------
 
-func TestConvertRequest_ServerToolsDroppedResponses(t *testing.T) {
+func TestConvertRequest_HostedWebSearchPreservedResponses(t *testing.T) {
 	in := `{"model":"c","max_tokens":10,"messages":[{"role":"user","content":"hi"}],` +
 		`"tools":[{"type":"web_search_20250305","name":"web_search"},` +
 		`{"type":"computer_20250124","name":"computer","display_width_px":1024},` +
@@ -352,11 +352,11 @@ func TestConvertRequest_ServerToolsDroppedResponses(t *testing.T) {
 		}
 	})
 	tools, _ := unmarshalMap(t, out)["tools"].([]any)
-	if len(tools) != 1 || asMap(tools[0])["name"] != "get_weather" {
-		t.Errorf("tools = %v, want only the custom function tool", tools)
+	if len(tools) != 2 || asMap(tools[0])["type"] != "web_search" || asMap(tools[1])["name"] != "get_weather" {
+		t.Errorf("tools = %v, want hosted web_search plus custom function", tools)
 	}
-	if !strings.Contains(logs, "dropping server-side anthropic tool type: web_search_20250305") {
-		t.Errorf("server tool not warned, log = %q", logs)
+	if strings.Contains(logs, "web_search_20250305") {
+		t.Errorf("supported web_search was warned as dropped, log = %q", logs)
 	}
 	if !strings.Contains(logs, "dropping server-side anthropic tool type: computer_20250124") {
 		t.Errorf("computer tool not warned, log = %q", logs)

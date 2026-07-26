@@ -323,32 +323,27 @@ func TestResponsesSynthesis_ChatReasoning(t *testing.T) {
 	}
 }
 
-// A6: EOF without a terminal signal (no message_stop / no [DONE]). The
-// synthesizers finish cleanly on EOF: they emit response.completed with status
-// completed and zero/seen usage. DIVERGENCE from opencodex, which is
-// fail-closed here (raises a truncation error); this project deliberately
-// finishes clean (same semantics as TestStreaming_NoUsageNoDone). Asserted
-// per current behavior — do not "fix" without a product decision.
+// A6: EOF without a terminal signal (no message_stop / finish / [DONE]) is a
+// truncated stream and must produce response.failed, never response.completed.
 func TestResponsesSynthesis_EOF(t *testing.T) {
 	// anthropic→responses: message_start then EOF.
 	inA := "event: message_start\n" +
 		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-x"}}` + "\n\n"
 	eventsA := drainSSE(t, newAnthropicToResponsesSSE(strings.NewReader(inA), "claude-x"))
-	assertEventSequence(t, eventsA, []string{"response.created", "response.completed"})
-	completedA := asMap(sseDataMap(t, eventsA[1])["response"])
-	if completedA["status"] != "completed" {
-		t.Errorf("EOF completed status = %v (fail-open clean finish)", completedA["status"])
+	assertEventSequence(t, eventsA, []string{"response.created", "response.failed"})
+	failedA := asMap(sseDataMap(t, eventsA[1])["response"])
+	if failedA["status"] != "failed" {
+		t.Errorf("EOF failed status = %v", failedA["status"])
 	}
 
 	// chat→responses: one content chunk then EOF (no finish_reason, no [DONE]).
 	inC := "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
 	eventsC := drainSSE(t, newOpenAIToResponsesSSE(strings.NewReader(inC), "gpt-x"))
-	if got := sseCount(eventsC, "response.completed"); got != 1 {
-		t.Fatalf("chat EOF: response.completed count = %d, want 1: %v", got, sseEventTypes(eventsC))
+	if got := sseCount(eventsC, "response.failed"); got != 1 {
+		t.Fatalf("chat EOF: response.failed count = %d, want 1: %v", got, sseEventTypes(eventsC))
 	}
-	completedC := asMap(sseDataMap(t, sseFilter(eventsC, "response.completed")[0])["response"])
-	if completedC["status"] != "completed" {
-		t.Errorf("chat EOF completed status = %v", completedC["status"])
+	if got := sseCount(eventsC, "response.completed"); got != 0 {
+		t.Errorf("chat EOF: response.completed count = %d, want 0", got)
 	}
 }
 

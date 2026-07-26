@@ -839,7 +839,9 @@ func TestConvertResponsesRequestToAnthropic_ToolOutputPartsArray(t *testing.T) {
 		t.Errorf("url image block = %v", img2)
 	}
 	// String output still maps to a plain string (no regression).
-	out2, err := convertResponsesRequestToAnthropic([]byte(`{"model":"m","input":[{"type":"function_call_output","call_id":"c1","output":"plain"}]}`))
+	out2, err := convertResponsesRequestToAnthropic([]byte(`{"model":"m","input":[` +
+		`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"plain"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
