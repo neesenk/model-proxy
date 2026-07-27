@@ -333,6 +333,10 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	defer p.releaseHalfOpenSlot(m.Provider, fc.flc.generation)
 	sched := fc.runtime.cfg.Scheduling
 
+	// Responses chain expansion (same rule as forward): only when the client
+	// spoke responses AND this leg's backend is stateless — a native-responses
+	// backend keeps previous_response_id passthrough and its server-side chain.
+	srcBody, _ = p.expandFusionResponses(fc, plan.backendProto, srcBody)
 	body := plan.rewriteModel(srcBody, fc.calledModel)
 	body, err = plan.convertBody(body)
 	if err != nil {
@@ -385,6 +389,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			p.recordFailure(m.Provider, sched, fc.flc.generation)
 			if p.metrics != nil {
 				p.metrics.inc(m.Provider, m.Model, evFailures)
+				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
 			}
 			res.err = err
 			return
@@ -396,6 +401,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			p.recordFailure(m.Provider, sched, fc.flc.generation)
 			if p.metrics != nil {
 				p.metrics.inc(m.Provider, m.Model, evFailures)
+				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
 			}
 			res.err = err
 			return
@@ -430,24 +436,37 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		p.recordRateLimit(m.Provider, until, kind, fc.flc.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evRateLimited429)
+			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
 		}
 		res.err = errFusionLegUnavailable
 	case resp.StatusCode >= 500:
 		p.recordFailure(m.Provider, sched, fc.flc.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evFailures)
+			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
 		}
 		res.err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	case resp.StatusCode == http.StatusUnauthorized:
 		p.recordFailure(m.Provider, sched, fc.flc.generation)
 		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evFailures)
+			p.metrics.inc(m.Provider, m.Model, evFailovers) // like tryTarget: failover only, no evFailures
 		}
 		res.err = fmt.Errorf("upstream status %d after auth refresh", resp.StatusCode)
 	case resp.StatusCode == http.StatusNotFound || isModelDenied(resp.StatusCode, respBody):
-		p.recordModelFailure(m.Provider, m.Model, sched, fc.flc.generation)
+		// Wire-verdict 404 correction (same as tryTarget): this leg was
+		// converted to /responses because the probe verdict said the endpoint
+		// supports it — a 404 here means the VERDICT was wrong, not the model.
+		// Flip the verdict (persisted; later legs use chat) and skip the model
+		// lock so the model doesn't take the blame for our protocol choice.
+		if plan.viaResponsesVerdict && resp.StatusCode == http.StatusNotFound {
+			p.noteWireResponsesMiss(m.Provider)
+			log.Printf("[fusion provider=%s] /responses 404 after wire verdict — provider responses downgraded to no (model NOT locked)",
+				m.Provider)
+		} else {
+			p.recordModelFailure(m.Provider, m.Model, sched, fc.flc.generation)
+		}
 		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evFailures)
+			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget's failover
 		}
 		res.err = fmt.Errorf("model unavailable (status %d)", resp.StatusCode)
 	case resp.StatusCode >= 300:
@@ -459,12 +478,12 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	default:
 		res.usage = parseUsageJSON(respBody)
-		res.text = truncateRunes(extractCandidateText(respBody), fusionCandidateMaxChars)
+		res.text = truncateRunes(extractCandidateText(respBody, plan.backendProto), fusionCandidateMaxChars)
 		if res.text == "" {
 			res.err = errFusionEmptyDraft
 			p.recordModelFailure(m.Provider, m.Model, sched, fc.flc.generation)
 			if p.metrics != nil {
-				p.metrics.inc(m.Provider, m.Model, evFailures)
+				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget's empty-200 failover
 			}
 		} else {
 			p.recordSuccess(m.Provider, m.Model, fc.flc.generation)
@@ -529,6 +548,15 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		log.Printf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
 		return false
 	}
+	// Responses chain expansion (same rule as forward): expand + orphan repair
+	// only for a stateless (non-responses) backend (native-responses backends
+	// keep previous_response_id passthrough and server-side chaining). TWO
+	// expansions on purpose: the SEND body is the synthesis-augmented one, but
+	// the RECORDED history is the expansion of the CLIENT-VISIBLE conversation
+	// (origBody) — the injected instruction/candidate scaffolding is ephemeral
+	// per-turn and must not be replayed into later turns as if the user said it.
+	body, _ = p.expandFusionResponses(fc, plan.backendProto, body)
+	_, responsesHistory := p.expandFusionResponses(fc, plan.backendProto, fc.origBody)
 	body = plan.rewriteModel(body, fc.calledModel)
 	body, err = plan.convertBody(body)
 	if err != nil {
@@ -562,8 +590,34 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		lastTarget:          true,
 		viaResponsesVerdict: plan.viaResponsesVerdict,
 		responseContext:     r2cCtxFor(fc.proto, plan.backendProto, fc.origBody),
+		responsesHistory:    responsesHistory,
+		responsesSession:    fc.sessionKey,
 	})
 	return committed
+}
+
+// expandFusionResponses mirrors forward's responses-state expansion for one
+// fusion sub-call body (panel leg / judge / synthesizer): it applies only when
+// the client spoke the responses protocol AND this leg's backend is stateless
+// (backendProto != responses) — a native-responses backend keeps
+// previous_response_id passthrough and its own server-side chain. On expansion
+// failure the UNEXPANDED body is sent: a broken chain degrades context but must
+// not kill the whole run (forward fails closed per-target; fusion has no
+// per-leg target list to fall through). Returns the body to send plus the
+// merged history for post-response recording (nil when not applicable).
+func (p *Proxy) expandFusionResponses(fc fusionCtx, backendProto string, body []byte) ([]byte, []any) {
+	if fc.proto != "responses" || backendProto == "responses" || p.responsesState == nil {
+		return body, nil
+	}
+	expanded, history, hit, err := p.responsesState.expand(body, fc.sessionKey)
+	if err != nil {
+		log.Printf("[fusion] %s: responses state expansion failed: %v — sending unexpanded body", fc.flc.exposed, err)
+		return body, nil
+	}
+	if responsesPreviousID(body) != "" && !hit {
+		log.Printf("[fusion] %s: previous_response_id cache miss; repaired orphaned continuation items", fc.flc.exposed)
+	}
+	return expanded, history
 }
 
 // runFusionJudge runs the optional judge leg: one non-streaming review of the
@@ -625,9 +679,9 @@ func buildFusionJudgeBody(origBody []byte, proto string, candidates []string) ([
 }
 
 // injectFusionSection appends section to the request body's system prompt
-// (anthropic) or as an extra trailing user message (openai), leaving the
-// conversation untouched. ok=false when the body isn't usable JSON (or has an
-// unexpected system shape).
+// (anthropic), as an extra trailing user message (openai chat), or as a typed
+// trailing input message item (responses), leaving the conversation untouched.
+// ok=false when the body isn't usable JSON (or has an unexpected system shape).
 func injectFusionSection(origBody []byte, proto, section string) ([]byte, bool) {
 	var v map[string]any
 	if err := json.Unmarshal(origBody, &v); err != nil {
@@ -644,14 +698,35 @@ func injectFusionSection(origBody []byte, proto, section string) ([]byte, bool) 
 		default:
 			return nil, false
 		}
+	} else if proto == "responses" {
+		// Responses bodies use input — never invent a parallel messages key
+		// (the r→chat converter reads ONLY input). The injected item must be a
+		// TYPED message: the converter switches on item type and drops untyped
+		// maps. A string input is normalized to a typed item first.
+		msg := map[string]any{
+			"type": "message", "role": "user",
+			"content": []any{map[string]any{"type": "input_text", "text": section}},
+		}
+		switch input := v["input"].(type) {
+		case []any:
+			v["input"] = append(input, msg)
+		case string:
+			var items []any
+			if input != "" {
+				items = append(items, map[string]any{
+					"type": "message", "role": "user",
+					"content": []any{map[string]any{"type": "input_text", "text": input}},
+				})
+			}
+			v["input"] = append(items, msg)
+		default:
+			v["input"] = []any{msg}
+		}
 	} else {
-		// openai (chat/completions uses messages; responses uses input — both
-		// accept a {role, content} message item).
+		// openai chat/completions: extra trailing user message.
 		msg := map[string]any{"role": "user", "content": section}
 		if msgs, ok := v["messages"].([]any); ok {
 			v["messages"] = append(msgs, msg)
-		} else if input, ok := v["input"].([]any); ok {
-			v["input"] = append(input, msg)
 		} else {
 			v["messages"] = []any{msg}
 		}
@@ -682,10 +757,15 @@ func stripFusionDraftFields(body []byte) []byte {
 	return out
 }
 
-// extractCandidateText pulls the assistant text out of a non-streaming response
-// in either protocol shape: anthropic content[] text blocks, or openai
-// choices[0].message.content. Anything else (e.g. responses-API output) yields "".
-func extractCandidateText(body []byte) string {
+// extractCandidateText pulls the assistant text out of a non-streaming
+// response, parsed in the shape of the leg's backend protocol: anthropic
+// content[] text blocks, openai choices[0].message.content, or (backendProto
+// "responses") the output[] message items' output_text parts. An unrecognized
+// shape yields "".
+func extractCandidateText(body []byte, backendProto string) string {
+	if backendProto == "responses" {
+		return extractResponsesCandidateText(body)
+	}
 	var v struct {
 		Content []struct {
 			Type string `json:"type"`
@@ -716,6 +796,38 @@ func extractCandidateText(body []byte) string {
 		}
 	}
 	return ""
+}
+
+// extractResponsesCandidateText pulls the assistant text out of a native
+// responses-API response: the output_text parts of the output[] message items
+// (reasoning/tool items carry no draft text and are skipped). Reuses the
+// r→chat converter's item/part walk so the leg sees the same text a converted
+// response would carry.
+func extractResponsesCandidateText(body []byte) string {
+	var src map[string]any
+	if err := json.Unmarshal(body, &src); err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, item := range responsesOutputItems(src) {
+		if item["type"] != "message" {
+			continue
+		}
+		parts, _ := item["content"].([]any)
+		for _, p := range parts {
+			pm := asMap(p)
+			if pm == nil {
+				continue
+			}
+			switch pm["type"] {
+			case "output_text", "text":
+				sb.WriteString(responsesTextWithCitationLinks(pm))
+			case "refusal":
+				sb.WriteString(strOf(pm["refusal"]))
+			}
+		}
+	}
+	return sb.String()
 }
 
 // parseUsageJSON extracts token usage from a non-streaming response body. One

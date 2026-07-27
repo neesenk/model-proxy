@@ -11,7 +11,9 @@
 - key 是 method、path、原始请求 body 的 SHA-256；
 - 只缓存 `<300`、完整读到 EOF、未超过 body cap 的响应；
 - 客户端断开或半截响应不得入缓存；
-- 转换后的响应删除旧 Content-Length/Transfer-Encoding 后保存；
+- 转换后的响应删除旧 Content-Length/Transfer-Encoding 后保存；mode mismatch
+  重写响应时保存的是 live 路径实际发送的 content-type（客户端最终收到的
+  协议体与 content-type 一致）；
 - 命中重放原始客户端协议字节并设置 `x-mp-cache: hit`；
 - cache hit 不计 provider metrics/agent stats，但产生 live end event；
 - pin 和 force-provider 跳过读写缓存；
@@ -66,8 +68,15 @@ base URL/path 选择，Fusion 不得重新读取 reload-owned catalog/config。
 panel/judge 在此共享 plan 上执行非流式、tool-free 分支，并应用与普通目标一致的
 half-open、401 refresh、paramBlock 预应用及即时学习重试、429/5xx、
 model-denied/404、empty-200 模型锁、metrics、usage、live event 和 request log
-策略。被 quorum/grace 主动 cancel 的分支不计 provider failure。候选文本最多
-24k rune。
+策略。verdict 驱动的 /responses leg 遇 404 时同样翻转 wire verdict
+（`noteWireResponsesMiss`）且**不锁模型**——verdict 判错而非模型缺失。metrics
+口径与 tryTarget 对齐：被放弃的 leg 记 evFailovers（连接错误/5xx 另记
+evFailures；401 只记 evFailovers）。候选文本按 leg 的 backendProto 解析
+（anthropic content[]、chat choices[] 或原生 responses output[] 的
+output_text），任何形状解析为空才判 empty draft 并锁模型。responses 客户端的
+previous_response_id 在每个 leg 上按 forward 同一规则展开（仅无状态后端；
+原生 responses 后端保持透传链路）。被 quorum/grace 主动 cancel 的分支不计
+provider failure。候选文本最多 24k rune。
 
 ### Quorum 与 grace
 
@@ -75,10 +84,17 @@ model-denied/404、empty-200 模型锁、metrics、usage、live event 和 reques
 
 ### Synthesizer
 
-候选段随机顺序注入：Anthropic 追加 system，OpenAI 追加 user/input item。
+候选段随机顺序注入：Anthropic 追加 system，OpenAI 追加 user，responses 追加带
+`type: "message"` 的 input item（无类型的 map 会被 r→chat 转换器丢弃）。
 synthesizer 与普通 route 共享 `targetPlan`，再构造同一个 `targetAttempt` 进入
 `attemptExecutor.execute`，因此 SSE、转换、metrics、cache、request log 和统一
 失败策略全部一致；不得为 synthesis 重新增加平行的 positional 参数接口。
+
+responses 客户端命中 fusion 时，synthesizer 为无状态后端则展开
+previous_response_id：发送体是合成体的展开，但**录制的 history 取客户端可见的
+原始对话**（注入的 instruction/候选段是单轮脚手架，不得回放到后续轮次）；最终
+返回给客户端的 responses 响应由 executor 录制，供下一轮换链。原生 responses
+后端保持透传，由上游自维护链。
 
 工具请求只在 synthesizer 保留 tools。synthesizer 不支持 tools 时降级为原始请求直打 synthesizer。
 
@@ -102,4 +118,7 @@ judge 是可选的一次非流式内部调用，复用 panel leg 管道。成功
 - request log 大 body 的 metadata 内存边界和跨文件乱序。
 - Fusion pooled resolver、共享 target plan、model lock、paramBlock 即时重试、
   429、empty 200。
+- Fusion leg 的 wire-verdict 404 翻转（不锁模型）与失败 metrics 口径、
+  原生 responses 后端 leg 的候选文本提取（不误判 empty draft）、
+  responses 客户端的 previous_response_id 展开与最终响应录制。
 - quorum impossible、grace、judge failure、tools fallback、daily budget。
