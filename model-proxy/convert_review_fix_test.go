@@ -90,28 +90,33 @@ func TestForward_Converted4xxUsesClientErrorEnvelope(t *testing.T) {
 	}
 }
 
-func TestConvertRequestFor_CodexShapesSameProtocolResponses(t *testing.T) {
+// Same-protocol responses→codex traffic is byte-identical passthrough in
+// production: targetPlan.convertBody short-circuits before convertRequestFor,
+// and codex's unsupported-parameter 400s self-heal via paramBlock learning
+// (failclass.go). The pre-strip codex shaping only runs on the cross-protocol
+// conversion path (covered by TestConvertGap_CodexStripsUnsupportedParams).
+func TestConvertBody_CodexSameProtocolResponsesPassthrough(t *testing.T) {
 	in := []byte(`{"model":"gpt-x","input":"hi","max_output_tokens":10,"temperature":0.2,"top_p":0.9,"store":true}`)
-	got, err := convertRequestFor(in, "responses", "responses", convertReqOpts{ProviderID: "codex", ImageOK: true})
-	if err != nil {
-		t.Fatal(err)
+	plan := targetPlan{
+		providerCfg:  Provider{Provider: "codex"},
+		clientProto:  "responses",
+		backendProto: "responses",
+		imageOK:      true,
 	}
-	var out map[string]any
-	if err := json.Unmarshal(got, &out); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"max_output_tokens", "temperature", "top_p"} {
-		if _, ok := out[key]; ok {
-			t.Errorf("codex same-protocol request retained %s: %s", key, got)
-		}
-	}
-	if out["input"] != "hi" || out["store"] != true {
-		t.Fatalf("unrelated fields changed: %s", got)
+	got, err := plan.convertBody(in)
+	if err != nil || !bytes.Equal(got, in) {
+		t.Fatalf("same-protocol codex request must stay byte-identical: %s, %v", got, err)
 	}
 
-	plain, err := convertRequestFor(in, "responses", "responses", convertReqOpts{ProviderID: "static", ImageOK: true})
-	if err != nil || !bytes.Equal(plain, in) {
-		t.Fatalf("non-codex same-protocol request must stay byte-identical: %s, %v", plain, err)
+	plain := targetPlan{
+		providerCfg:  Provider{Provider: "static"},
+		clientProto:  "responses",
+		backendProto: "responses",
+		imageOK:      true,
+	}
+	got, err = plain.convertBody(in)
+	if err != nil || !bytes.Equal(got, in) {
+		t.Fatalf("non-codex same-protocol request must stay byte-identical: %s, %v", got, err)
 	}
 }
 
@@ -230,5 +235,45 @@ func TestOpenAIStream_IncompleteToolArgumentsFailsClosed(t *testing.T) {
 	outR, _ := io.ReadAll(newOpenAIToResponsesSSE(strings.NewReader(in), "gpt-x"))
 	if !bytes.Contains(outR, []byte("event: response.failed")) || bytes.Contains(outR, []byte("event: response.completed")) {
 		t.Fatalf("chat→responses accepted incomplete tool JSON:\n%s", outR)
+	}
+}
+
+// Review fix: a bare error envelope ({"type":"error", ...} with no nested
+// "error" object) converts using its top-level fields instead of failing as
+// an unrecognized envelope.
+func TestConvertErrorResponse_BareEnvelope(t *testing.T) {
+	body := []byte(`{"type":"error","message":"boom","request_id":"req_bare"}`)
+	got, err := convertErrorResponse(body, "anthropic", "openai", http.StatusBadRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatal(err)
+	}
+	errObj := asMap(out["error"])
+	if errObj == nil || errObj["message"] != "boom" {
+		t.Fatalf("bare envelope error = %v", out)
+	}
+	// The literal "error" marker is not an error type — fall back to the
+	// status-derived type.
+	if errObj["type"] != "invalid_request_error" {
+		t.Errorf("error type = %v, want invalid_request_error (status-derived)", errObj["type"])
+	}
+	if out["request_id"] != "req_bare" {
+		t.Errorf("request_id = %v", out["request_id"])
+	}
+	// Chat clients get the same treatment ({"error":{...}} envelope).
+	got, err = convertErrorResponse(body, "openai", "anthropic", http.StatusNotFound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = nil
+	if err := json.Unmarshal(got, &out); err != nil {
+		t.Fatal(err)
+	}
+	errObj = asMap(out["error"])
+	if errObj == nil || errObj["message"] != "boom" || errObj["type"] != "not_found_error" {
+		t.Errorf("chat-side bare envelope error = %v", out)
 	}
 }

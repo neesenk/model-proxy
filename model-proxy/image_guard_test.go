@@ -54,6 +54,30 @@ func TestShrinkRequestImagesBoundsDimensions(t *testing.T) {
 	}
 }
 
+// A rewritten image forces a full body re-marshal; >2^53 integer literals
+// (snowflake-style ids) elsewhere in the body must survive that round trip.
+func TestImageGuard_PreservesBigIntegersOnRewrite(t *testing.T) {
+	url := testPNGDataURL(t, 3000, 2)
+	body := []byte(`{"snowflake_id":9007199254740993,"nested":{"ids":[2535301200456458802,-9007199254740993]},"image_url":"` + url + `"}`)
+	out, changed := shrinkRequestImages(body, 1<<20, 2048)
+	if !changed {
+		t.Fatal("expected oversized image to be rewritten")
+	}
+	wire := string(out)
+	for _, literal := range []string{"9007199254740993", "2535301200456458802", "-9007199254740993"} {
+		if !strings.Contains(wire, literal) {
+			t.Errorf("rewritten body lost integer literal %s: %s", literal, wire)
+		}
+	}
+
+	// Untouched bodies (no rewrite) stay byte-identical.
+	plain := []byte(`{"snowflake_id":9007199254740993,"message":"no image"}`)
+	got, ok := shrinkRequestImages(plain, 1<<20, 2048)
+	if ok || !bytes.Equal(got, plain) {
+		t.Fatalf("no-image body must stay byte-identical: %s, changed=%v", got, ok)
+	}
+}
+
 func TestForwardRetries413AfterImageCompression(t *testing.T) {
 	url := testPNGDataURL(t, 3000, 2)
 	var calls atomic.Int32

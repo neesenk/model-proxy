@@ -490,3 +490,56 @@ func TestForward_Convert_StreamingCountsTokens(t *testing.T) {
 		t.Errorf("reverse converted tokens: input=%d output=%d want 12/4 (F5: transformer emits usage chunk)", got.Input, got.Output)
 	}
 }
+
+// Review fix: multiple thinking blocks join with a separator instead of being
+// glued together — response direction (reasoning_content).
+func TestConvertAnthropicResponseToOpenAI_MultiThinkingSeparated(t *testing.T) {
+	in := []byte(`{"id":"msg_1","model":"claude","stop_reason":"end_turn","content":[{"type":"thinking","thinking":"t1"},{"type":"thinking","thinking":"t2"},{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	out, err := convertAnthropicResponseToOpenAI(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := asMap(asMap(asSlice(unmarshalMap(t, out)["choices"], 0))["message"])
+	if msg["reasoning_content"] != "t1\n\nt2" {
+		t.Errorf("reasoning_content = %q, want %q", msg["reasoning_content"], "t1\n\nt2")
+	}
+}
+
+// Review fix: same separator rule for the request direction (assistant
+// history with multiple thinking blocks → chat reasoning_content).
+func TestConvertAnthropicRequestToOpenAI_MultiThinkingSeparated(t *testing.T) {
+	in := []byte(`{"model":"claude","max_tokens":100,"messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"thinking","thinking":"t1"},{"type":"thinking","thinking":"t2"},{"type":"text","text":"a"}]}]}`)
+	out, err := convertAnthropicRequestToOpenAI(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, _ := unmarshalMap(t, out)["messages"].([]any)
+	var assistant map[string]any
+	for _, m := range msgs {
+		if asMap(m)["role"] == "assistant" {
+			assistant = asMap(m)
+		}
+	}
+	if assistant == nil || assistant["reasoning_content"] != "t1\n\nt2" {
+		t.Fatalf("assistant reasoning_content = %v (%s)", assistant, out)
+	}
+}
+
+// Review fix: chat→a with parts-array content keeps message-level annotations
+// as appended source links — previously only the string-content path folded
+// them in and the citations vanished.
+func TestConvertOpenAIResponseToAnthropic_PartsContentAnnotations(t *testing.T) {
+	in := []byte(`{"id":"a","model":"g","choices":[{"message":{"role":"assistant","content":[{"type":"text","text":"hello"}],"annotations":[{"type":"url_citation","url_citation":{"url":"https://s.example","title":"S"}}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	out, err := convertOpenAIResponseToAnthropic(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, _ := unmarshalMap(t, out)["content"].([]any)
+	if len(blocks) != 1 {
+		t.Fatalf("content = %v, want 1 text block", blocks)
+	}
+	text := strOf(asMap(blocks[0])["text"])
+	if !strings.Contains(text, "hello") || !strings.Contains(text, "Sources: [S](https://s.example)") {
+		t.Errorf("text = %q, want content + appended source link", text)
+	}
+}

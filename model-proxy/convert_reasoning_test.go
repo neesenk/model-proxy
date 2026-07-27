@@ -491,3 +491,17 @@ func TestConvertReasoning_ChatToAnthropic_Stream(t *testing.T) {
 		t.Errorf("block 1 type = %q, want text", got)
 	}
 }
+
+// Review fix: a reasoning_details item with a signature but an EMPTY thinking
+// text is skipped — replaying an empty thinking block can be rejected by
+// Anthropic.
+func TestConvertReasoning_ReplaySkipsEmptyThinking(t *testing.T) {
+	msg := map[string]any{"reasoning_details": []any{
+		map[string]any{"type": "anthropic_thinking", "thinking": "", "signature": "sig1"},
+		map[string]any{"type": "anthropic_thinking", "thinking": "real", "signature": "sig2"},
+	}}
+	out := chatAnthropicThinkingReplay(msg)
+	if len(out) != 1 || out[0]["thinking"] != "real" || out[0]["signature"] != "sig2" {
+		t.Errorf("replay = %v, want only the non-empty signed block", out)
+	}
+}

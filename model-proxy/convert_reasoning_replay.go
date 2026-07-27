@@ -11,11 +11,14 @@ func chatAnthropicThinkingReplay(message map[string]any) []map[string]any {
 		switch strOpt(detail["type"]) {
 		case "thinking", "anthropic_thinking":
 			signature := strOpt(detail["signature"])
-			if signature == "" {
+			thinking := strOpt(detail["thinking"])
+			// An empty thinking text replays as an empty thinking block, which
+			// Anthropic may reject — skip the item entirely.
+			if signature == "" || thinking == "" {
 				continue
 			}
 			out = append(out, map[string]any{
-				"type": "thinking", "thinking": strOpt(detail["thinking"]), "signature": signature,
+				"type": "thinking", "thinking": thinking, "signature": signature,
 			})
 		case "redacted_thinking", "anthropic_redacted_thinking":
 			data := strOpt(detail["data"])

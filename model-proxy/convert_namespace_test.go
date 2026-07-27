@@ -8,6 +8,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // 1. Flatten promotes namespaced sub-tools to flat chat names.
@@ -240,8 +241,9 @@ func TestNamespace_StreamRestore(t *testing.T) {
 	}
 }
 
-// Unknown responses tool types (tool_search, hosted tools, ...) are dropped
-// by nsFlattenResponsesTools with a convertWarn naming the type — silently
+// web_search/tool_search degrade to plain function tools in the r→chat
+// direction (hosted fallback); genuinely unknown tool types are dropped by
+// nsFlattenResponsesTools with a convertWarn naming the type — silently
 // vanishing tools are undebuggable. (namespace CONTAINERS are supported since
 // the codex 0.145 capture: they expand into their subtools, see
 // TestNSFlatten_NamespaceContainer.)
@@ -383,5 +385,50 @@ func TestNamespace_AnthropicRoundTrip(t *testing.T) {
 	if !strings.Contains(joined.String(), `"name":"read"`) ||
 		!strings.Contains(joined.String(), `"namespace":"mcp__files"`) {
 		t.Fatalf("stream namespace was not restored: %s", joined.String())
+	}
+}
+
+// Review fix: hosted fallback tool names join the collision set in the r→a
+// direction too (the r→chat converter already checks them) — a user function
+// named web_search/tool_search plus the hosted fallback would otherwise send
+// duplicate tool names to Anthropic (400).
+func TestResponsesToolsToAnthropic_HostedFallbackCollision(t *testing.T) {
+	for _, name := range []string{"web_search", "tool_search"} {
+		hosted := map[string]any{"type": name}
+		userFn := map[string]any{"type": "function", "name": name, "parameters": map[string]any{"type": "object"}}
+		if _, err := responsesToolsToAnthropic([]any{hosted, userFn}); err == nil {
+			t.Errorf("hosted fallback %q colliding with a user function must fail closed", name)
+		}
+		if _, err := responsesToolsToAnthropic([]any{userFn, hosted}); err == nil {
+			t.Errorf("user function %q colliding with the hosted fallback must fail closed", name)
+		}
+	}
+	// No collision → hosted fallbacks still convert.
+	out, err := responsesToolsToAnthropic([]any{map[string]any{"type": "web_search"}, map[string]any{"type": "tool_search"}})
+	if err != nil || len(out) != 2 {
+		t.Errorf("hosted fallbacks = %v, err %v, want 2 tools", out, err)
+	}
+}
+
+// Review fix: truncation backs off to a rune boundary — a raw 64-byte cut can
+// split a multi-byte rune and produce invalid UTF-8.
+func TestNamespace_TruncationRuneBoundary(t *testing.T) {
+	ns := strings.Repeat("n", 61) // 61 + "__" = 63 bytes; the next rune starts at byte 63
+	name := "界" + strings.Repeat("t", 10)
+	flat := nsFlattenName(ns, name)
+	if len(flat) > nsFlatMaxLen {
+		t.Fatalf("flat len = %d, want ≤ %d", len(flat), nsFlatMaxLen)
+	}
+	if !utf8.ValidString(flat) {
+		t.Fatalf("flat %q is not valid UTF-8", flat)
+	}
+	if flat != ns+"__" {
+		t.Errorf("flat = %q, want the rune-boundary prefix %q", flat, ns+"__")
+	}
+	// Determinism: flatten and the restore map agree on the truncated key.
+	req := `{"model":"g","input":[],"tools":[{"type":"function","name":"` + name + `","namespace":"` + ns + `"}]}`
+	m := responsesNamespaceRestoreMap([]byte(req))
+	if r, ok := m[flat]; !ok || r.Name != name || r.Namespace != ns {
+		t.Errorf("restore map must key on the rune-boundary flat name: %v", m)
 	}
 }

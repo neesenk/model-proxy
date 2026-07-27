@@ -115,11 +115,33 @@ func responsesAnnotationsToChat(raw any) []map[string]any {
 // Anthropic citation.
 func responsesTextWithCitationLinks(part map[string]any) string {
 	text := firstNonEmpty(strOpt(part["text"]), strOpt(part["refusal"]))
-	annotations, _ := part["annotations"].([]any)
-	seen := map[string]bool{}
+	raw, _ := part["annotations"].([]any)
+	annotations := make([]map[string]any, 0, len(raw))
+	for _, value := range raw {
+		if annotation := asMap(value); annotation != nil {
+			annotations = append(annotations, annotation)
+		}
+	}
+	links := responsesCitationLinks(annotations, nil)
+	if links == "" {
+		return text
+	}
+	if text == "" {
+		return links
+	}
+	return text + "\n\nSources: " + links
+}
+
+// responsesCitationLinks renders de-duplicated Markdown source links for
+// url_citation annotations. seen (nil = fresh set) carries the dedup state, so
+// streaming converters can pass a per-block/stream set and cite a repeated
+// URL only once instead of appending one link per annotation event.
+func responsesCitationLinks(annotations []map[string]any, seen map[string]bool) string {
+	if seen == nil {
+		seen = map[string]bool{}
+	}
 	var links []string
-	for _, value := range annotations {
-		annotation := asMap(value)
+	for _, annotation := range annotations {
 		if strOpt(annotation["type"]) != "url_citation" {
 			continue
 		}
@@ -131,11 +153,5 @@ func responsesTextWithCitationLinks(part map[string]any) string {
 		title := firstNonEmpty(strOpt(annotation["title"]), url)
 		links = append(links, "["+title+"]("+url+")")
 	}
-	if len(links) == 0 {
-		return text
-	}
-	if text == "" {
-		return strings.Join(links, " ")
-	}
-	return text + "\n\nSources: " + strings.Join(links, " ")
+	return strings.Join(links, " ")
 }

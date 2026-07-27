@@ -71,6 +71,21 @@ func TestConvertDocumentAndInputFileAcrossProtocols(t *testing.T) {
 	if backBlock["type"] != "document" || strOpt(asMap(backBlock["source"])["data"]) != "cGRm" {
 		t.Fatalf("chat→a document = %#v", backBlock)
 	}
+
+	// chat→r: Chat nests file fields under "file"; they must land flat on the
+	// responses input_file part (regression: nested fields were silently dropped).
+	chatToResponsesRaw, err := convertOpenAIRequestToResponses([]byte(`{"model":"m","messages":[{"role":"user","content":[
+		{"type":"file","file":{"filename":"inline.pdf","file_data":"data:application/pdf;base64,cGRm"}}
+	]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatToResponses := unmarshalMap(t, chatToResponsesRaw)
+	rItems := anySlice(chatToResponses["input"])
+	rFile := asMap(anySlice(asMap(rItems[0])["content"])[0])
+	if rFile["type"] != "input_file" || strOpt(rFile["file_data"]) != "data:application/pdf;base64,cGRm" {
+		t.Fatalf("chat→r nested file part = %#v", rFile)
+	}
 }
 
 func TestConvertHostedToolResponsesSSE(t *testing.T) {

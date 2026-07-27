@@ -14,19 +14,24 @@ import (
 
 const maxImageGuardDecodeBytes = 64 << 20
 
+// sonicNumberLiteral keeps number literals intact across the decode/encode
+// round trip: a rewritten image forces a full body re-marshal, and the
+// default float64 decode would corrupt >2^53 integers (snowflake ids).
+var sonicNumberLiteral = sonic.Config{UseNumber: true}.Froze()
+
 // shrinkRequestImages bounds inline image data URLs. It returns the original
 // bytes when nothing changes so same-protocol requests are only rewritten after
 // a concrete upstream 413.
 func shrinkRequestImages(body []byte, maxBytes, maxDimension int) ([]byte, bool) {
 	var root any
-	if sonic.Unmarshal(body, &root) != nil {
+	if sonicNumberLiteral.Unmarshal(body, &root) != nil {
 		return body, false
 	}
 	changed := shrinkImageNode(root, maxBytes, maxDimension)
 	if !changed {
 		return body, false
 	}
-	out, err := sonic.Marshal(root)
+	out, err := sonicNumberLiteral.Marshal(root)
 	if err != nil {
 		return body, false
 	}
@@ -62,6 +67,17 @@ func shrinkImageNode(node any, maxBytes, maxDimension int) bool {
 	return changed
 }
 
+// shrinkImageDataURL re-encodes one oversized/over-dimensional image data URL
+// as a smaller JPEG. Two inherent trade-offs are deliberate — do not "fix"
+// them without a schema-aware redesign:
+//
+//   - The `data:image/` prefix is the ONLY trigger: ANY string field anywhere
+//     in the body holding such a value (including plain-text fields whose
+//     content merely happens to be an image data URL) is decoded and may be
+//     re-encoded. The guard has no per-protocol field knowledge, so it cannot
+//     tell "image payload" from "text that looks like one".
+//   - The output is always a fresh JPEG encode, so EXIF metadata is lost —
+//     notably orientation: a portrait shot may come back rotated.
 func shrinkImageDataURL(value string, maxBytes, maxDimension int) (string, bool) {
 	if !strings.HasPrefix(value, "data:image/") {
 		return value, false

@@ -163,7 +163,10 @@ func validateAnthropicConversionCapabilities(root map[string]any, targetProto st
 	}
 	for _, raw := range anySlice(root["tools"]) {
 		toolType := strOpt(asMap(raw)["type"])
-		if toolType == "" || strings.HasPrefix(toolType, "web_search") {
+		// "" and "custom" both denote a regular client-side function tool
+		// ("custom" is Anthropic's explicit default type for name+input_schema
+		// tools); only hosted server tools fail closed here.
+		if toolType == "" || toolType == "custom" || strings.HasPrefix(toolType, "web_search") {
 			continue
 		}
 		return unsupportedFeature("anthropic", targetProto, "hosted_tool",

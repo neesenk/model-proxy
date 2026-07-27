@@ -561,3 +561,35 @@ func TestResponsesStream_R2A_CacheWriteUsage(t *testing.T) {
 		t.Errorf("usage = %v, want input 70 / read 10 / create 20", usage)
 	}
 }
+
+// Review fix: r→a streaming citation links dedup per block — each annotation
+// event carries ONE annotation, so a URL cited N times must append its
+// Markdown source link only once (the non-streaming converter dedups per
+// text part).
+func TestResponsesStream_R2A_CitationLinksDeduped(t *testing.T) {
+	in := `data: {"type":"response.output_text.delta","output_index":0,"delta":"hi"}` + "\n\n" +
+		`data: {"type":"response.output_text.annotation.added","output_index":0,"annotation":{"type":"url_citation","url":"https://a.example","title":"A"}}` + "\n\n" +
+		`data: {"type":"response.output_text.annotation.added","output_index":0,"annotation":{"type":"url_citation","url":"https://a.example","title":"A"}}` + "\n\n" +
+		`data: {"type":"response.output_text.annotation.added","output_index":0,"annotation":{"type":"url_citation","url":"https://b.example"}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n\n"
+	events := drainSSE(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	var deltas []string
+	for _, ev := range events {
+		if ev.event != "content_block_delta" {
+			continue
+		}
+		d := asMap(sseDataMap(t, ev)["delta"])
+		if d["type"] == "text_delta" {
+			deltas = append(deltas, strOf(d["text"]))
+		}
+	}
+	want := []string{"hi", " [A](https://a.example)", " [https://b.example](https://b.example)"}
+	if len(deltas) != len(want) {
+		t.Fatalf("text deltas = %v, want %v", deltas, want)
+	}
+	for i := range want {
+		if deltas[i] != want[i] {
+			t.Errorf("delta[%d] = %q, want %q", i, deltas[i], want[i])
+		}
+	}
+}

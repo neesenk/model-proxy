@@ -145,7 +145,9 @@ func anthropicToolsToOpenAI(tools []any) []map[string]any {
 			continue
 		}
 		// Preserve hosted web search as a callable fallback on Chat backends.
-		if bt, ok := t["type"].(string); ok && bt != "" {
+		// "custom" is Anthropic's explicit default type for regular function
+		// tools (name+input_schema) and falls through to the normal mapping.
+		if bt, ok := t["type"].(string); ok && bt != "" && bt != "custom" {
 			if strings.HasPrefix(bt, "web_search") {
 				fn := map[string]any{
 					"name":        "web_search",
@@ -354,7 +356,7 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 			om["annotations"] = annotations
 		}
 		if len(reasoningParts) > 0 {
-			om["reasoning_content"] = strings.Join(reasoningParts, "")
+			om["reasoning_content"] = strings.Join(reasoningParts, "\n\n")
 		}
 		return append([]map[string]any{om}, hostedResults...)
 	}
@@ -1106,8 +1108,11 @@ func convertRequestFor(body []byte, clientProto, targetProto string, opts conver
 	}
 	// Codex backend strictness (cc-switch's codex shaping): it 400s on
 	// max_output_tokens ("Unsupported parameter") and the sampling knobs —
-	// strip them so the FIRST request doesn't have to fail for paramBlock to
-	// learn the same lesson.
+	// strip them so the FIRST converted request doesn't have to fail for
+	// paramBlock to learn the same lesson. This shaping only runs on the
+	// cross-protocol conversion path: targetPlan.convertBody short-circuits
+	// same-protocol responses→codex traffic to byte-identical passthrough,
+	// which self-heals via the 400→paramBlock learning retry (failclass.go).
 	var m map[string]any
 	if sonic.Unmarshal(out, &m) != nil {
 		return out, nil
@@ -1196,15 +1201,23 @@ func convertErrorResponse(body []byte, clientProto, targetProto string, status i
 	}
 	errSrc := asMap(src["error"])
 	if errSrc == nil && strOf(src["type"]) == "error" {
-		errSrc = asMap(src["error"])
+		// Bare error envelope with no nested "error" object — the fields live
+		// at the top level ({"type":"error","message":...}).
+		errSrc = src
 	}
 	if errSrc == nil {
 		return nil, fmt.Errorf("upstream status %d has no recognized error envelope", status)
 	}
 	message := firstNonEmpty(strOpt(errSrc["message"]), fmt.Sprintf("upstream request failed with status %d", status))
-	errType := firstNonEmpty(strOpt(errSrc["type"]), protocolErrorType(status))
+	// A bare envelope's top-level "type" is the literal "error" marker, not an
+	// error type — never propagate it as one.
+	errType := strOpt(errSrc["type"])
+	if errType == "error" {
+		errType = ""
+	}
+	errType = firstNonEmpty(errType, protocolErrorType(status))
 	if clientProto != "anthropic" {
-		errType = firstNonEmpty(strOpt(errSrc["type"]), strOpt(errSrc["code"]), protocolErrorType(status))
+		errType = firstNonEmpty(errType, strOpt(errSrc["code"]), protocolErrorType(status))
 	}
 	requestID := firstNonEmpty(strOpt(src["request_id"]), strOpt(errSrc["request_id"]))
 
@@ -1376,6 +1389,24 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 						content = append(content, blk)
 					}
 				}
+				// Message-level annotations apply to the whole message — the
+				// string-content path above folds them into the text; do the
+				// same for parts content or the citations vanish.
+				if annotations := chatAnnotationsToResponses(c.Message.Annotations); len(annotations) > 0 {
+					if links := responsesCitationLinks(annotations, nil); links != "" {
+						appended := false
+						for i := len(content) - 1; i >= 0; i-- {
+							if content[i]["type"] == "text" {
+								content[i]["text"] = strOf(content[i]["text"]) + "\n\nSources: " + links
+								appended = true
+								break
+							}
+						}
+						if !appended {
+							content = append(content, map[string]any{"type": "text", "text": "Sources: " + links})
+						}
+					}
+				}
 			}
 		}
 		// Message-level refusal field → text block (some providers put the
@@ -1473,6 +1504,9 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 			}
 			toolCalls = append(toolCalls, tc)
 		case "thinking":
+			if reasoning.Len() > 0 && c.Thinking != "" {
+				reasoning.WriteString("\n\n")
+			}
 			reasoning.WriteString(c.Thinking)
 			if c.Signature != "" {
 				reasoningDetails = append(reasoningDetails, map[string]any{
@@ -1535,8 +1569,10 @@ func convertResponse(body []byte, clientProto, targetProto string) ([]byte, erro
 	return convertResponseNS(body, clientProto, targetProto, r2cCtx{})
 }
 
-// convertResponseNS is convertResponse with an MCP namespace restore map for
-// the chat→responses direction (nil = no-op).
+// convertResponseNS is convertResponse with an r2cCtx (namespace restore map
+// + custom tool set) for the responses→chat/anthropic directions — built by
+// r2cCtxFor when the client speaks responses and the backend is chat or
+// anthropic; the zero value (nil maps) makes every consumer a no-op.
 func convertResponseNS(body []byte, clientProto, targetProto string, r2c r2cCtx) ([]byte, error) {
 	conversion, ok := lookupProtocolConversion(clientProto, targetProto)
 	if !ok {
@@ -2204,8 +2240,10 @@ func convertSSEReader(r io.Reader, clientProto, targetProto, model string) io.Re
 	return convertSSEReaderNS(r, clientProto, targetProto, model, r2cCtx{})
 }
 
-// convertSSEReaderNS is convertSSEReader with an MCP namespace restore map
-// for the chat→responses direction (nil = no-op).
+// convertSSEReaderNS is convertSSEReader with an r2cCtx (namespace restore
+// map + custom tool set) for the responses→chat/anthropic directions — built
+// by r2cCtxFor when the client speaks responses and the backend is chat or
+// anthropic; the zero value (nil maps) makes every consumer a no-op.
 func convertSSEReaderNS(r io.Reader, clientProto, targetProto, model string, r2c r2cCtx) io.Reader {
 	if conversion, ok := lookupProtocolConversion(clientProto, targetProto); ok {
 		return conversion.stream(r, model, r2c)

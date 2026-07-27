@@ -69,6 +69,10 @@ type rsBlock struct {
 	opened   bool   // content_block_start emitted
 	itemID   string // responses item id (for completeness)
 	argsSeen bool   // tool_use: at least one arguments delta was emitted
+	// seenCitations dedups citation link URLs across annotation events of this
+	// block — each response.output_text.annotation.added event carries one
+	// annotation, so a URL cited N times would otherwise append N links.
+	seenCitations map[string]bool
 }
 
 // Early arguments deltas (a gateway that emits function_call_arguments.delta
@@ -333,9 +337,10 @@ func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
 				"content_block": map[string]any{"type": "text", "text": ""},
 			})
 		}
-		link := responsesTextWithCitationLinks(map[string]any{
-			"text": "", "annotations": []any{data["annotation"]},
-		})
+		if b.seenCitations == nil {
+			b.seenCitations = map[string]bool{}
+		}
+		link := responsesCitationLinks([]map[string]any{asMap(data["annotation"])}, b.seenCitations)
 		if link != "" {
 			t.emit("content_block_delta", map[string]any{
 				"type": "content_block_delta", "index": b.idx,

@@ -588,9 +588,10 @@ func anthropicToolsToResponses(tools []any) []map[string]any {
 			continue
 		}
 		// Server-side/built-in tools declare a `type` (web_search_*, computer,
-		// bash, text_editor, ...) unlike custom function tools (name+input_schema,
-		// no type). Drop + warn, same as anthropicToolsToOpenAI.
-		if bt, ok := tm["type"].(string); ok && bt != "" {
+		// bash, text_editor, ...) unlike custom function tools (name+input_schema;
+		// type absent or the explicit default "custom"). Drop + warn, same as
+		// anthropicToolsToOpenAI.
+		if bt, ok := tm["type"].(string); ok && bt != "" && bt != "custom" {
 			if strings.HasPrefix(bt, "web_search") {
 				rt := map[string]any{"type": "web_search"}
 				copyOpt(rt, tm, "max_uses", "allowed_domains", "blocked_domains")
@@ -850,7 +851,12 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 				}
 			case "input_file", "file":
 				file := map[string]any{"type": "input_file"}
-				copyOpt(file, pm, "file_id", "file_data", "file_url", "filename")
+				// Chat nests the fields under "file"; responses keeps them flat.
+				fm := asMap(pm["file"])
+				if fm == nil {
+					fm = pm
+				}
+				copyOpt(file, fm, "file_id", "file_data", "file_url", "filename")
 				if len(file) > 1 {
 					parts = append(parts, file)
 				}
@@ -1239,12 +1245,23 @@ func responsesToolsToAnthropic(tools []any) ([]map[string]any, error) {
 		tm := e.tm
 		toolType := strOf(tm["type"])
 		if toolType == "web_search" || toolType == "web_search_preview" {
+			// The hosted fallback occupies the plain name "web_search" — check
+			// it against user tools like any other name (the r→chat converter
+			// does the same), or Anthropic rejects duplicate tool names.
+			if seen["web_search"] {
+				return nil, fmt.Errorf("responses→anthropic tool-name collision after hosted-tool fallback: %q", "web_search")
+			}
+			seen["web_search"] = true
 			at := map[string]any{"type": "web_search_20250305", "name": "web_search"}
 			copyOpt(at, tm, "max_uses", "allowed_domains", "blocked_domains", "user_location")
 			out = append(out, at)
 			continue
 		}
 		if toolType == "tool_search" {
+			if seen["tool_search"] {
+				return nil, fmt.Errorf("responses→anthropic tool-name collision after hosted-tool fallback: %q", "tool_search")
+			}
+			seen["tool_search"] = true
 			out = append(out, map[string]any{
 				"name": "tool_search", "description": hostedToolDescription("tool_search"),
 				"input_schema": normalizeAnthropicInputSchema(hostedToolSchema("tool_search")),

@@ -59,6 +59,42 @@ func TestConversionCapabilities_RejectResponsesCustomToolToAnthropic(t *testing.
 	}
 }
 
+// Anthropic "custom" is the explicit default type of a regular function tool
+// (name+input_schema); it must convert like a type-less tool. Genuine hosted
+// tools (computer_*, bash_*, text_editor_*) stay dropped + warned.
+func TestAnthropicCustomTypeToolsConvertAsFunctions(t *testing.T) {
+	tools := []any{
+		map[string]any{
+			"type": "custom", "name": "get_weather", "description": "weather",
+			"input_schema": map[string]any{"type": "object"},
+		},
+		map[string]any{"name": "no_type", "input_schema": map[string]any{"type": "object"}},
+		map[string]any{"type": "computer_20241022", "name": "computer"},
+	}
+
+	chat := anthropicToolsToOpenAI(tools)
+	if len(chat) != 2 {
+		t.Fatalf("chat tools = %v, want custom+untyped only", chat)
+	}
+	if fn := asMap(chat[0]["function"]); fn["name"] != "get_weather" || fn["parameters"] == nil {
+		t.Fatalf("custom tool not mapped to chat function: %v", chat[0])
+	}
+	if fn := asMap(chat[1]["function"]); fn["name"] != "no_type" {
+		t.Fatalf("untyped tool not mapped to chat function: %v", chat[1])
+	}
+
+	resp := anthropicToolsToResponses(tools)
+	if len(resp) != 2 {
+		t.Fatalf("responses tools = %v, want custom+untyped only", resp)
+	}
+	if resp[0]["type"] != "function" || resp[0]["name"] != "get_weather" || resp[0]["parameters"] == nil {
+		t.Fatalf("custom tool not mapped to responses function: %v", resp[0])
+	}
+	if resp[1]["type"] != "function" || resp[1]["name"] != "no_type" {
+		t.Fatalf("untyped tool not mapped to responses function: %v", resp[1])
+	}
+}
+
 func TestConversionCapabilities_AllowSupportedAndSameProtocol(t *testing.T) {
 	tests := []struct {
 		client string
@@ -68,6 +104,10 @@ func TestConversionCapabilities_AllowSupportedAndSameProtocol(t *testing.T) {
 		{"responses", "anthropic", `{"input":[],"tools":[{"type":"web_search"},{"type":"tool_search"}]}`},
 		{"responses", "openai", `{"input":[],"tools":[{"type":"custom","name":"shell"}]}`},
 		{"anthropic", "responses", `{"messages":[],"tools":[{"type":"web_search_20250305","name":"web_search"}]}`},
+		// "custom" is Anthropic's explicit default type for regular function
+		// tools; it must not be mistaken for a hosted tool.
+		{"anthropic", "openai", `{"messages":[],"tools":[{"type":"custom","name":"get_weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}]}`},
+		{"anthropic", "responses", `{"messages":[],"tools":[{"type":"custom","name":"get_weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}}]}`},
 		{"openai", "anthropic", `{"messages":[{"role":"developer","content":"rule"}],"tools":[{"type":"function","function":{"name":"f"}}]}`},
 		// Same-protocol byte passthrough remains outside the conversion guard.
 		{"openai", "openai", `{"n":4,"logprobs":true,"messages":[]}`},

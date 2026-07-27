@@ -11,6 +11,7 @@ package main
 
 import (
 	"fmt"
+	"unicode/utf8"
 
 	sonic "github.com/bytedance/sonic"
 )
@@ -26,11 +27,16 @@ type nsRestore struct {
 
 // nsFlattenName flattens {namespace, name} to namespace+"__"+name truncated
 // to ≤64 chars. Deterministic — the truncated flat name is the restore key,
-// so flatten and restore always agree.
+// so flatten and restore always agree. The cut backs off to a rune boundary:
+// a raw byte cut could split a multi-byte rune and yield invalid UTF-8.
 func nsFlattenName(namespace, name string) string {
 	flat := namespace + "__" + name
 	if len(flat) > nsFlatMaxLen {
-		flat = flat[:nsFlatMaxLen]
+		cut := nsFlatMaxLen
+		for cut > 0 && !utf8.RuneStart(flat[cut]) {
+			cut--
+		}
+		flat = flat[:cut]
 	}
 	return flat
 }
@@ -192,8 +198,8 @@ func nsFlattenResponsesTools(tools []any) ([]map[string]any, error) {
 				"name": name, "description": hostedToolDescription(name), "parameters": hostedToolSchema(name),
 			}})
 		default:
-			// Unknown tool type (tool_search, hosted tools): dropped, but
-			// named in a warning — silently vanishing tools are undebuggable.
+			// Unknown tool type: dropped, but named in a warning — silently
+			// vanishing tools are undebuggable.
 			if ty != "" {
 				convertWarn("dropping responses tool of unknown type in r→chat request: " + ty)
 			}
