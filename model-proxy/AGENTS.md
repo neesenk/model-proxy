@@ -10,6 +10,8 @@
   synthesis 必须共享 `targetAttempt` 执行契约，不得重新扩张 positional 参数链。
 - 单目标 I/O 由 `attemptExecutor` 执行；它只能通过 `attemptState` 窄端口修改
   runtime state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
+- 三协议方向只在 `conversion_registry.go` 注册；request、response、SSE 入口
+  必须共享同一 pair 定义，不得各自维护方向 switch。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。

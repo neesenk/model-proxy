@@ -15,11 +15,10 @@ import (
 	sonic "github.com/bytedance/sonic"
 )
 
-// convert.go implements PROTOCOL CONVERSION (#11): let a client speak one protocol
-// (Anthropic /v1/messages or OpenAI /v1/chat/completions) while the upstream
-// backend speaks the OTHER, with FULL tool-call support (request + response +
-// streaming, both directions) plus text/system/max_tokens/temperature/stop/
-// stream/images.
+// convert.go implements protocol-specific codecs used by the typed registry in
+// conversion_registry.go. Clients and upstreams may independently speak
+// Anthropic Messages, OpenAI Chat Completions, or OpenAI Responses, with full
+// request/response/streaming conversion and tool-call support.
 //
 // The converters are pure (testable in isolation); the forward path only invokes
 // them when a target's declared protocol differs from the client's, so the
@@ -66,14 +65,9 @@ func needsConversion(clientProto, targetProto string) bool {
 	if targetProto == "" || targetProto == clientProto {
 		return false
 	}
-	for _, p := range []string{clientProto, targetProto} {
-		switch p {
-		case "anthropic", "openai", "responses":
-		default:
-			return false
-		}
-	}
-	return true
+	_, clientOK := parseWireProtocol(clientProto)
+	_, targetOK := parseWireProtocol(targetProto)
+	return clientOK && targetOK
 }
 
 // convertWarn logs a conversion warning once per process per message (rate-limited
@@ -1096,25 +1090,10 @@ func convertRequestFor(body []byte, clientProto, targetProto string, opts conver
 	if err := validateConversionCapabilities(body, clientProto, targetProto); err != nil {
 		return nil, err
 	}
-	var (
-		out = body
-		err error
-	)
-	if needsConversion(clientProto, targetProto) {
-		switch clientProto + "->" + targetProto {
-		case "anthropic->openai":
-			out, err = convertAnthropicRequestToOpenAIV(body, opts.ImageOK)
-		case "openai->anthropic":
-			out, err = convertOpenAIRequestToAnthropic(body)
-		case "anthropic->responses":
-			out, err = convertAnthropicRequestToResponsesV(body, opts.ImageOK)
-		case "openai->responses":
-			out, err = convertOpenAIRequestToResponses(body)
-		case "responses->anthropic":
-			out, err = convertResponsesRequestToAnthropic(body)
-		case "responses->openai":
-			out, err = convertResponsesRequestToOpenAIFor(body, opts)
-		}
+	out := body
+	var err error
+	if conversion, ok := lookupProtocolConversion(clientProto, targetProto); ok {
+		out, err = conversion.request(body, opts)
 	}
 	if err == nil && needsConversion(clientProto, targetProto) && targetProto == "anthropic" {
 		out = injectAnthropicCacheBreakpoints(out)
@@ -1548,8 +1527,6 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 	return sonic.Marshal(out)
 }
 
-// convertResponse converts a non-streaming response body from the target protocol
-// back to the client protocol.
 // convertResponse converts a BACKEND response body (in targetProto) back into the
 // CLIENT protocol (clientProto). The conversion direction is target→client (the
 // reverse of convertRequest), so the function chosen is the one named for that
@@ -1561,24 +1538,11 @@ func convertResponse(body []byte, clientProto, targetProto string) ([]byte, erro
 // convertResponseNS is convertResponse with an MCP namespace restore map for
 // the chat→responses direction (nil = no-op).
 func convertResponseNS(body []byte, clientProto, targetProto string, r2c r2cCtx) ([]byte, error) {
-	if !needsConversion(clientProto, targetProto) {
+	conversion, ok := lookupProtocolConversion(clientProto, targetProto)
+	if !ok {
 		return body, nil
 	}
-	switch clientProto + "->" + targetProto {
-	case "anthropic->openai": // backend openai → client anthropic
-		return convertOpenAIResponseToAnthropic(body)
-	case "openai->anthropic": // backend anthropic → client openai
-		return convertAnthropicResponseToOpenAI(body)
-	case "anthropic->responses": // backend responses → client anthropic
-		return convertResponsesToAnthropic(body)
-	case "openai->responses": // backend responses → client openai
-		return convertResponsesToOpenAI(body)
-	case "responses->anthropic": // backend anthropic → client responses
-		return convertAnthropicResponseToResponsesNS(body, r2c)
-	case "responses->openai": // backend openai → client responses
-		return convertOpenAIResponseToResponsesNS(body, r2c)
-	}
-	return body, nil
+	return conversion.response(body, r2c)
 }
 
 // --- streaming: openai chat chunk → anthropic message events ---
@@ -2243,19 +2207,8 @@ func convertSSEReader(r io.Reader, clientProto, targetProto, model string) io.Re
 // convertSSEReaderNS is convertSSEReader with an MCP namespace restore map
 // for the chat→responses direction (nil = no-op).
 func convertSSEReaderNS(r io.Reader, clientProto, targetProto, model string, r2c r2cCtx) io.Reader {
-	switch targetProto + "->" + clientProto {
-	case "openai->anthropic":
-		return newOpenAIToAnthropicSSE(r, model)
-	case "anthropic->openai":
-		return newAnthropicToOpenAISSE(r, model)
-	case "responses->anthropic":
-		return newResponsesToAnthropicSSE(r, model)
-	case "responses->openai":
-		return newResponsesToOpenAISSE(r, model)
-	case "anthropic->responses":
-		return newAnthropicToResponsesSSENS(r, model, r2c)
-	case "openai->responses":
-		return newOpenAIToResponsesSSENS(r, model, r2c)
+	if conversion, ok := lookupProtocolConversion(clientProto, targetProto); ok {
+		return conversion.stream(r, model, r2c)
 	}
 	return r
 }

@@ -14,7 +14,13 @@
 - `openai` = OpenAI Chat Completions（`/v1/chat/completions`，`messages` + `tool_calls`）。**不再**表示 Responses API。
 - `responses` = OpenAI Responses API（`/v1/responses`，`input` list + `output` items + `response.*` 流式事件）。`/v1/responses` 路径在 `protocolForPath` 里独立判为 `responses`，不再并入 `openai`。
 
-转换器为直连 pairwise（`convert.go` 的 anthropic↔openai 不动；`convert_responses.go` 新增 4 方向 × {请求, 响应, 流式}）。`needsConversion` 对任意两个不同的已知协议返回 true；未知协议值 fail-safe 不转换。
+转换器为直连 pairwise codec，并统一注册在 `conversion_registry.go`：
+一个 client→backend pair 必须同时声明 request、反向 response 和反向 SSE
+三个入口。注册表覆盖 3×2 共六组方向，并由结构测试保证完整；`convertRequestFor`、
+`convertResponseNS` 和 `convertSSEReaderNS` 不得各自维护方向 switch。
+pair-specific codec 保留协议特有语义，不引入最低公分母 IR：hosted tools、
+reasoning 方言、namespace restore 等信息无法通过统一 message IR 无损表达。
+`needsConversion` 对任意两个不同的已知协议返回 true；未知协议值 fail-safe 不转换。
 
 Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。Responses 客户端跨协议访问 chat/anthropic 后端时，proxy 为 `previous_response_id` 维护短期本地历史：按 session + response id 索引、TTL 30 分钟、最多 512 条、单条 2 MiB、总量 32 MiB，异步以 0600 写入 quota state 同目录的 `responses_state.json`。命中时展开完整 input/output 历史；未命中时只修复本次缺失历史导致的孤立 output/dangling call，普通显式全历史请求不做全局配对改写。只有 completed 和因 token 上限产生的 incomplete 响应进入 replay state，content_filter/其他中止不缓存。无稳定 session 时仅允许 response id 唯一命中，避免跨会话串线。此外 `convertRequestFor` 在 provider 为 codex 且目标协议为 responses 时剥离 `max_output_tokens`/`temperature`/`top_p`，包括客户端本来就讲 responses 的路径。
 
@@ -140,6 +146,8 @@ reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔opena
 
 ## 回归测试
 
+- `TestProtocolConversionRegistryIsComplete` 断言六组跨协议 pair 均同时注册
+  request、response、stream codec；未知协议与同协议不得命中注册表。
 - 同协议逐字节透传（`TestConvertFault_SameProtocolPassthrough`：anthropic/responses 两方向请求与响应均 byte-identical，端到端）。
 - tools、并行工具、图片、usage 双向转换（anthropic↔openai-chat）。
 - 交错 tool delta 和 trailing usage。
