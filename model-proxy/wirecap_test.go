@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -203,6 +204,46 @@ func TestWireCap_ProbeSkipsAnthropicLegWithBase(t *testing.T) {
 	p.probeAllWireCaps()
 	if len(paths) != 1 {
 		t.Errorf("re-probe hit upstream %d times, want 1 total (fresh verdict skipped)", len(paths))
+	}
+}
+
+// TestWireCap_StaleNegativeVerdictIsReprobed: a "no" verdict expires after
+// wireCapNegativeTTL (a transient 404 must not downgrade a provider forever);
+// a fresh "no" is still trusted and skips re-probing.
+func TestWireCap_StaleNegativeVerdictIsReprobed(t *testing.T) {
+	var hits atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		hits.Add(1)
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"r1","status":"completed","output":[]}`))
+	}))
+	defer up.Close()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m"}},
+		},
+		Routes: map[string][]RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+
+	p.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triNo, Anthropic: triNo,
+		ProbedAt: time.Now().Add(-2 * wireCapNegativeTTL)})
+	p.probeAllWireCaps()
+	if hits.Load() == 0 {
+		t.Fatal("stale negative verdict was not re-probed")
+	}
+	caps, _ := p.wireVerdict("p")
+	if caps.Responses != triYes {
+		t.Fatalf("verdict after re-probe = %s, want yes", caps.Responses)
+	}
+
+	hits.Store(0)
+	p.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triNo, Anthropic: triNo, ProbedAt: time.Now()})
+	p.probeAllWireCaps()
+	if hits.Load() != 0 {
+		t.Fatalf("fresh negative verdict re-probed (%d hits), want 0", hits.Load())
 	}
 }
 

@@ -704,17 +704,8 @@ func (c *Config) validate() error {
 			// URL and 400s at runtime. Catch it at validate time.
 			if t.Protocol != "" {
 				prov := c.Providers[t.Provider]
-				switch t.Protocol {
-				case "anthropic":
-					if prov.AnthropicBaseURL == "" {
-						return fmt.Errorf("route %q target %d: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", exposed, i, t.Provider)
-					}
-				case "openai", "responses":
-					if prov.OpenAIBaseURL == "" {
-						return fmt.Errorf("route %q target %d: protocol:%s but provider %q has no openai_base_url — conversion needs it", exposed, i, t.Protocol, t.Provider)
-					}
-				default:
-					return fmt.Errorf("route %q target %d: protocol %q is not \"anthropic\", \"openai\", or \"responses\"", exposed, i, t.Protocol)
+				if err := checkTargetProtocol(fmt.Sprintf("route %q target %d", exposed, i), t, prov); err != nil {
+					return err
 				}
 			}
 		}
@@ -740,8 +731,10 @@ func (c *Config) validate() error {
 		if _, ok := c.Providers[sh.Provider]; !ok {
 			return fmt.Errorf("shadow %q: provider %q not defined under providers:", route, sh.Provider)
 		}
-		if sh.Protocol != "" && sh.Protocol != "anthropic" && sh.Protocol != "openai" && sh.Protocol != "responses" {
-			return fmt.Errorf("shadow %q: protocol %q invalid — use \"anthropic\", \"openai\", or \"responses\"", route, sh.Protocol)
+		if sh.Protocol != "" {
+			if _, ok := parseWireProtocol(sh.Protocol); !ok {
+				return fmt.Errorf("shadow %q: protocol %q invalid — use \"anthropic\", \"openai\", or \"responses\"", route, sh.Protocol)
+			}
 		}
 	}
 	// Fusion validation: each recipe's panel/synthesizer reference real providers
@@ -811,18 +804,33 @@ func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
 	if t.Model == "" {
 		return fmt.Errorf("%s: model is empty", what)
 	}
-	switch t.Protocol {
-	case "":
-	case "anthropic":
+	return checkTargetProtocol(what, t, prov)
+}
+
+// checkTargetProtocol validates a target's declared backend protocol against
+// the closed wire-protocol set — parseWireProtocol (conversion_registry.go) is
+// the single source of truth for the legal values — and against the provider's
+// base URLs: protocol:anthropic needs anthropic_base_url, openai/responses
+// need openai_base_url (responses reuses the OpenAI base, e.g. codex's
+// openai_base_url is its /responses endpoint). `what` is the caller's error
+// prefix (e.g. `route "glm" target 0` / `fusion "f" synthesizer`).
+func checkTargetProtocol(what string, t RouteTarget, prov Provider) error {
+	if t.Protocol == "" {
+		return nil
+	}
+	protocol, ok := parseWireProtocol(t.Protocol)
+	if !ok {
+		return fmt.Errorf("%s: protocol %q is not \"anthropic\", \"openai\", or \"responses\"", what, t.Protocol)
+	}
+	switch protocol {
+	case protocolAnthropic:
 		if prov.AnthropicBaseURL == "" {
 			return fmt.Errorf("%s: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", what, t.Provider)
 		}
-	case "openai", "responses":
+	case protocolOpenAI, protocolResponses:
 		if prov.OpenAIBaseURL == "" {
 			return fmt.Errorf("%s: protocol:%s but provider %q has no openai_base_url — conversion needs it", what, t.Protocol, t.Provider)
 		}
-	default:
-		return fmt.Errorf("%s: protocol %q is not \"anthropic\", \"openai\", or \"responses\"", what, t.Protocol)
 	}
 	return nil
 }

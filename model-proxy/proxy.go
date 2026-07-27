@@ -2013,11 +2013,9 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// Some upstreams (codex, live-verified) stream SSE with an EMPTY
 		// content-type. Sniff the framing before committing to the buffered
 		// non-stream path — a JSON body never starts with event:/data:.
-		streamBySniff := false
-		if resp.StatusCode < 300 && !isSSE(resp.Header) {
-			peek := bytes.TrimSpace(peekResponseBody(resp, 16))
-			streamBySniff = bytes.HasPrefix(peek, []byte("event:")) || bytes.HasPrefix(peek, []byte("data:"))
-		}
+		// The sniff also feeds usageScanner / responses-state recording on the
+		// passthrough path, so it runs for same-protocol traffic too.
+		streamBySniff := resp.StatusCode < 300 && !isSSE(resp.Header) && sniffSSEFraming(resp)
 		upstreamIsStream := resp.StatusCode < 300 && (isSSE(resp.Header) || streamBySniff)
 		modeMismatch := convert && resp.StatusCode < 300 && clientWantsStream != upstreamIsStream
 		transformed := convert || modeMismatch
@@ -2232,17 +2230,13 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// streamed to a clean end). A client disconnect mid-stream leaves sawEOF
 		// false, so a half-read response is never cached as complete.
 		if crec != nil && crec.sawEOF && !crec.truncated && len(crec.buf) > 0 {
-			// For a converted response the cached body is the CLIENT-protocol body
-			// (different length than the backend's), so the backend's
-			// Content-Length / Transfer-Encoding must NOT be cached — replaying
-			// them with the converted body would corrupt the response. Strip them
-			// (same as the live forwarding path does); Go's server re-derives the
-			// length on replay.
-			hdr := resp.Header.Clone()
-			if convert {
-				hdr.Del("Content-Length")
-				hdr.Del("Transfer-Encoding")
-			}
+			// The cached body is the CLIENT-protocol body the recorder captured,
+			// so the stored header must describe THAT body: a converted response
+			// drops the backend's Content-Length/Transfer-Encoding, and a mode
+			// mismatch carries the content-type the live path sent (see
+			// cachedResponseHeader). Replaying the upstream's original values
+			// would corrupt the response or mislabel its framing.
+			hdr := cachedResponseHeader(resp.Header, convert, modeMismatch, clientWantsStream)
 			cache.put(cacheKey, &cacheEntry{
 				status: resp.StatusCode,
 				header: hdr,
@@ -2363,6 +2357,13 @@ func (p *Proxy) shouldShadow() bool {
 // own protocol is shadow.Protocol (defaulting to bodyProto); runShadow selects the
 // shadow base URL + path for THAT protocol and converts the body if it differs.
 func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime, proto, bodyProto, calledModel, exposed string, shadow ShadowTarget, reqBody []byte, primaryReqID string) {
+	if runtime.cfg == nil {
+		// Defensive: runtimeSnapshot is handed around as a plain value — a
+		// future call site that forgets to populate it must not nil-deref
+		// below (runtime.cfg.Scheduling.timeout()). Log loudly and skip.
+		log.Printf("[shadow] %s: skipped — runtime snapshot has no config (caller bug)", shadow.Provider)
+		return
+	}
 	logger := p.reqLog
 	if logger == nil {
 		return // nowhere to record → no point shadowing
@@ -3323,6 +3324,48 @@ func peekResponseBody(resp *http.Response, n int) []byte {
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(peeked), resp.Body), resp.Body}
 	return peeked
+}
+
+// sniffSSEFraming peeks at the first bytes of a <300 response whose
+// content-type did not declare SSE and reports whether the body starts with
+// SSE framing (event:/data:). Like peekResponseBody it restores resp.Body, so
+// the commit path re-reads every byte transparently.
+//
+// It reads ONCE before deciding to wait: a single Read returns as soon as any
+// bytes are buffered, whereas io.ReadAll(LimitReader(16)) would BLOCK until
+// the 16-byte window is full or EOF. Only when that first chunk leaves the
+// verdict undecided — empty/whitespace, or a proper prefix of "event:"/"data:"
+// (a short TCP segment can split inside the marker) — does it keep reading to
+// the window. This matters for an SSE upstream that sends a short heartbeat
+// (e.g. ": ping\n\n") then idles: the heartbeat already settles the verdict
+// (not SSE framing by prefix), so waiting to fill the window would delay the
+// client's first byte until the next event arrived (E2).
+func sniffSSEFraming(resp *http.Response) bool {
+	const window = 16
+	buf := make([]byte, window)
+	n, _ := resp.Body.Read(buf)
+	peeked := buf[:n]
+	if sniffUndecided(peeked) && n < window {
+		more, _ := io.ReadAll(io.LimitReader(resp.Body, int64(window-n)))
+		peeked = append(peeked, more...)
+	}
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(peeked), resp.Body), resp.Body}
+	peek := bytes.TrimSpace(peeked)
+	return bytes.HasPrefix(peek, []byte("event:")) || bytes.HasPrefix(peek, []byte("data:"))
+}
+
+// sniffUndecided reports whether a first peek could still turn out to be SSE
+// framing once more bytes arrive: nothing but whitespace so far, or a proper
+// prefix of the event:/data: markers.
+func sniffUndecided(peeked []byte) bool {
+	peek := bytes.TrimSpace(peeked)
+	if len(peek) == 0 {
+		return true
+	}
+	return bytes.HasPrefix([]byte("event:"), peek) || bytes.HasPrefix([]byte("data:"), peek)
 }
 
 // timingResponseWriter wraps the client ResponseWriter to capture time-to-first-

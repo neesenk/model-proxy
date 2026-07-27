@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAggregateAndSynthesizeAllProtocolStreams(t *testing.T) {
@@ -96,3 +97,101 @@ func TestForwardAdaptsUpstreamJSONToClientSSE(t *testing.T) {
 		t.Fatalf("client did not receive Responses SSE: %s", body)
 	}
 }
+
+// TestSniffSSEFraming: verdicts for the framing sniff, and the body must be
+// fully restored afterwards (the commit path re-reads every peeked byte).
+func TestSniffSSEFraming(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"event marker", "event: message_start\ndata: {}\n\n", true},
+		{"data marker", `data: {"a":1}` + "\n\n", true},
+		{"leading whitespace before marker", "\n  event: x\n", true},
+		{"json body", `{"id":"c1","choices":[]}`, false},
+		{"sse comment heartbeat", ": ping\n\n", false},
+		{"empty body", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(tc.body))}
+			if got := sniffSSEFraming(resp); got != tc.want {
+				t.Errorf("sniffSSEFraming(%q)=%v want %v", tc.body, got, tc.want)
+			}
+			restored, _ := io.ReadAll(resp.Body)
+			if string(restored) != tc.body {
+				t.Errorf("body not restored after sniff: got %q want %q", restored, tc.body)
+			}
+		})
+	}
+}
+
+// TestSniffSSEFraming_SplitMarker: a short first read that splits inside the
+// "event:" marker leaves the verdict undecided, so the sniff keeps reading to
+// the window instead of misjudging a stream as JSON.
+func TestSniffSSEFraming_SplitMarker(t *testing.T) {
+	full := "event: message_start\ndata: {}\n\n"
+	resp := &http.Response{Body: &chunkedReader{chunks: []string{"ev", full[2:]}}}
+	if !sniffSSEFraming(resp) {
+		t.Error("split event: marker must still sniff as SSE")
+	}
+	restored, _ := io.ReadAll(resp.Body)
+	if string(restored) != full {
+		t.Errorf("body not restored: got %q want %q", restored, full)
+	}
+}
+
+// TestSniffSSEFraming_HeartbeatNoBlock (E2): an SSE upstream with an empty
+// content-type may send a short heartbeat (": ping\n\n") then idle. The
+// heartbeat already settles the sniff verdict, so the sniff must return after
+// the first read — blocking to fill the 16-byte window would delay the
+// client's first byte until the next event arrives.
+func TestSniffSSEFraming_HeartbeatNoBlock(t *testing.T) {
+	pr, pw := io.Pipe()
+	resp := &http.Response{Body: pr}
+	done := make(chan bool, 1)
+	go func() { done <- sniffSSEFraming(resp) }()
+	if _, err := pw.Write([]byte(": ping\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got {
+			t.Error("heartbeat comment must not sniff as SSE framing")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("sniff blocked waiting to fill the window after a decisive first read")
+	}
+	// The peeked heartbeat must still reach the commit path. io.Pipe writes
+	// block until consumed, so feed the rest from a goroutine while ReadAll
+	// drains the restored body.
+	go func() {
+		pw.Write([]byte("event: x\n\n"))
+		pw.Close()
+	}()
+	restored, _ := io.ReadAll(resp.Body)
+	if string(restored) != ": ping\n\nevent: x\n\n" {
+		t.Errorf("body not restored after sniff: got %q", restored)
+	}
+}
+
+// chunkedReader returns its chunks one per Read, simulating TCP segmentation
+// that splits a marker across reads.
+type chunkedReader struct {
+	chunks []string
+}
+
+func (c *chunkedReader) Read(p []byte) (int, error) {
+	if len(c.chunks) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.chunks[0])
+	c.chunks[0] = c.chunks[0][n:]
+	if c.chunks[0] == "" {
+		c.chunks = c.chunks[1:]
+	}
+	return n, nil
+}
+
+func (c *chunkedReader) Close() error { return nil }

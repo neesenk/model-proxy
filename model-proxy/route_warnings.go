@@ -9,10 +9,9 @@ import (
 )
 
 // route_warnings.go — config-time routing hazards surfaced as MARKERS (startup
-// log + routeWarnings channel + doctor/config check), not hard errors. Two
-// classes today: reasoning-replay models behind protocol conversion (#9), and
-// explicit targets missing a protocol declaration on a provider whose wire
-// protocol differs (#10).
+// log + routeWarnings channel + doctor/config check), not hard errors. One
+// class today: reasoning-replay models behind anthropic↔chat protocol
+// conversion (#9).
 
 // reasoningReplayMarkers are model-name substrings (case-insensitive) known to
 // REQUIRE reasoning content echoed back in multi-turn tool-call history
@@ -32,11 +31,13 @@ func reasoningReplayModel(model string) bool {
 
 // configRoutingWarnings inspects expanded (explicit ∪ implicit) routes for:
 //
-//  1. reasoning-replay models behind protocol conversion (target declares
-//     protocol:, so clients of the other protocol convert): the anthropic↔chat
-//     converter currently DROPS thinking/reasoning content — multi-turn tool
-//     conversations will hard-400 upstream. Marker only until the reasoning
-//     replay cache exists (#9).
+//  1. reasoning-replay models behind anthropic↔chat conversion (target
+//     declares protocol: anthropic/openai, so clients of the other protocol
+//     convert): that converter currently DROPS thinking/reasoning content —
+//     multi-turn tool conversations will hard-400 upstream. Marker only until
+//     the reasoning replay cache exists (#9). responses targets preserve
+//     reasoning (docs/architecture/protocol-conversion.md), so a
+//     protocol:responses declaration does NOT warn.
 //
 // A target on a provider whose native wire differs from the client's but without
 // an explicit protocol: declaration (e.g. codex→responses) does NOT warn: the
@@ -65,7 +66,10 @@ func configRoutingWarnings(cfg *Config, expanded map[string][]RouteTarget) []str
 				continue
 			}
 			if t.Protocol != "" {
-				if reasoningReplayModel(t.Model) {
+				// Only the anthropic↔chat converter drops thinking/reasoning;
+				// a responses target preserves it, so protocol:responses must
+				// NOT warn (the message "currently dropped" would be wrong).
+				if p, ok := parseWireProtocol(t.Protocol); ok && p != protocolResponses && reasoningReplayModel(t.Model) {
 					out = append(out, fmt.Sprintf("route %q target %s/%s: reasoning-required model behind protocol conversion — thinking/reasoning content is currently dropped, multi-turn tool conversations may fail upstream (400); reasoning replay is not yet implemented",
 						exposed, t.Provider, t.Model))
 				}

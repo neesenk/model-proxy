@@ -20,9 +20,11 @@
 // the injectable constructor used by tests leaves probing off so mock
 // upstreams don't see surprise probe hits; tests call probeAllWireCaps
 // synchronously) and after each reload for providers whose verdict is missing
-// or whose base_url changed. No periodic re-probe: endpoint capabilities
-// rarely change, and a wrong "yes" is corrected at runtime by the 404 path
-// (tryTarget → noteWireResponsesMiss).
+// or whose base_url changed. A "yes" verdict is trusted indefinitely (a wrong
+// yes is corrected at runtime by the 404 path — tryTarget →
+// noteWireResponsesMiss); a "no" verdict expires after wireCapNegativeTTL so
+// one transient 404 (endpoint mid-deploy, gateway route gap) cannot downgrade
+// a provider forever — the next boot/reload pass re-probes it.
 package main
 
 import (
@@ -94,7 +96,24 @@ const (
 	// wireCapProbeConcurrency bounds concurrent probe requests across
 	// providers — probes are real upstream calls; don't burst at boot.
 	wireCapProbeConcurrency = 4
+	// wireCapNegativeTTL bounds how long a "no" verdict is trusted before the
+	// next probe pass re-checks it. Endpoint capabilities rarely change, but a
+	// negative conclusion can be wrong (transient 404) and has no runtime
+	// correction path, unlike a wrong "yes" (404 → noteWireResponsesMiss).
+	wireCapNegativeTTL = 24 * time.Hour
 )
+
+// wireLegFresh reports whether a concluded verdict is still trusted: a "yes"
+// indefinitely, a "no" only within wireCapNegativeTTL.
+func wireLegFresh(v triState, probedAt time.Time) bool {
+	switch v {
+	case triYes:
+		return true
+	case triNo:
+		return time.Since(probedAt) < wireCapNegativeTTL
+	}
+	return false
+}
 
 // wireCapProbeTimeout caps one probe request. A var (not const) so tests can
 // shrink it for the timeout branch.
@@ -209,13 +228,14 @@ func (p *Proxy) probeAllWireCaps() {
 			continue // protocol already known via hint (codex → responses)
 		}
 		// Skip providers with a fresh verdict: same base_url and every PROBED
-		// capability concluded (unknown legs are re-probed — no negative
-		// conclusion is ever final). With anthropic_base_url set the anthropic
-		// leg is never probed (the decision matrix short-circuits to the
-		// dedicated base), so only responses counts for freshness.
+		// capability concluded and still trusted (unknown or expired negative
+		// legs are re-probed — no negative conclusion is final). With
+		// anthropic_base_url set the anthropic leg is never probed (the
+		// decision matrix short-circuits to the dedicated base), so only
+		// responses counts for freshness.
 		if cur, ok := p.wireVerdict(name); ok && cur.BaseURL == provCfg.OpenAIBaseURL &&
-			cur.Responses != triUnknown &&
-			(provCfg.AnthropicBaseURL != "" || cur.Anthropic != triUnknown) {
+			wireLegFresh(cur.Responses, cur.ProbedAt) &&
+			(provCfg.AnthropicBaseURL != "" || wireLegFresh(cur.Anthropic, cur.ProbedAt)) {
 			continue
 		}
 		// Resolve the implementation like providerImplFor, but from the live

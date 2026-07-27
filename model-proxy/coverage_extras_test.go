@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -553,6 +554,21 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 	}
 	if got := shadowHits.Load(); got != 0 {
 		t.Errorf("shadow backend hit %d time(s) with an unconverted body after convert failure (fail-open); want 0", got)
+	}
+}
+
+// TestRunShadow_NilRuntimeConfig: a zero-value runtimeSnapshot (a future call
+// site forgetting to populate targetAttempt.runtime) must log + return instead
+// of panicking on runtime.cfg deep in runShadow.
+func TestRunShadow_NilRuntimeConfig(t *testing.T) {
+	p := newTestProxy(t, &Config{Providers: map[string]Provider{}})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	p.runShadow(runtimeSnapshot{}, nil, "anthropic", "anthropic", "m", "g",
+		ShadowTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid")
+	if !strings.Contains(buf.String(), "runtime snapshot has no config") {
+		t.Fatalf("expected the nil-cfg guard log, got %q", buf.String())
 	}
 }
 

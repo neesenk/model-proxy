@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -108,6 +109,49 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 	)
 	if oldHits.Load() != 1 || newHits.Load() != 0 {
 		t.Fatalf("shadow mixed reload generations: old=%d new=%d", oldHits.Load(), newHits.Load())
+	}
+}
+
+// TestShadowDispatchEmptyModelPassesThrough: a shadow target without an
+// explicit model forwards the called model unchanged (regression: the shared
+// targetPlan.rewriteModel used to write an empty "model" into the body).
+func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
+	var gotBody atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody.Store(string(body))
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"candidate": {Provider: "static", OpenAIBaseURL: upstream.URL},
+		},
+	}
+	p := newTestProxy(t, cfg)
+	p.reqLog = newRequestLogger(t.TempDir(), 1<<20, 1<<10, 0)
+	runtime := p.snapshotRuntime()
+	shadowRuntime := p.shadow.Load()
+
+	p.runShadow(
+		runtime,
+		shadowRuntime,
+		"responses",
+		"responses",
+		"alias",
+		"alias",
+		ShadowTarget{Provider: "candidate"},
+		[]byte(`{"model":"alias","input":[]}`),
+		"request-1",
+	)
+	body, _ := gotBody.Load().(string)
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		t.Fatalf("shadow body = %q: %v", body, err)
+	}
+	if decoded["model"] != "alias" {
+		t.Fatalf("shadow rewrote empty model into body: %s", body)
 	}
 }
 

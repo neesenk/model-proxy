@@ -220,6 +220,30 @@ func (c *cacheRecorder) Read(p []byte) (int, error) {
 
 func (c *cacheRecorder) Close() error { return c.src.Close() }
 
+// cachedResponseHeader returns the header set to store with a cached entry:
+// the upstream headers adjusted to match the CLIENT-facing body the recorder
+// captured. A converted body has a different length than the backend's, so the
+// backend's Content-Length / Transfer-Encoding must not be cached (Go's server
+// re-derives the length on replay). A mode-mismatch rewrite changed the
+// content-type the live path sent (e.g. a JSON upstream body replayed to the
+// client as SSE), so the cached header must carry THAT content-type — otherwise
+// a replay would pair an SSE body with the upstream's application/json.
+func cachedResponseHeader(h http.Header, convert, modeMismatch, clientWantsStream bool) http.Header {
+	hdr := h.Clone()
+	if convert {
+		hdr.Del("Content-Length")
+		hdr.Del("Transfer-Encoding")
+	}
+	if modeMismatch {
+		if clientWantsStream {
+			hdr.Set("Content-Type", "text/event-stream")
+		} else {
+			hdr.Set("Content-Type", "application/json")
+		}
+	}
+	return hdr
+}
+
 // replayCached writes a cached entry to the client verbatim: status + the stored
 // headers, then the body streamed (flushCopy so SSE chunks flush). Used on a
 // cache hit, before any upstream call.

@@ -70,7 +70,9 @@ func (p *Proxy) planTarget(input targetPlanInput) (targetPlan, error) {
 }
 
 func (plan targetPlan) rewriteModel(body []byte, calledModel string) []byte {
-	if plan.target.Model == calledModel {
+	// Shadow targets may declare no model (pass the called model through);
+	// route targets always carry one.
+	if plan.target.Model == "" || plan.target.Model == calledModel {
 		return body
 	}
 	return rewriteModel(body, plan.target.Model)

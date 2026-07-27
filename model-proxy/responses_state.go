@@ -27,6 +27,18 @@ type responsesStateEntry struct {
 	ID        string `json:"id"`
 	CreatedAt int64  `json:"created_at"`
 	History   []any  `json:"history"`
+	// size caches the entry's serialized byte length. sonic/json only marshal
+	// the exported fields above, so the value is stable across put / persist /
+	// restore; it is computed once at put time (or lazily on restore) so
+	// pruneLocked and persist don't re-marshal every live entry per lookup.
+	size int
+}
+
+// responsesEntrySize returns the serialized byte length of an entry. It is the
+// single place that marshals an entry for accounting.
+func responsesEntrySize(e responsesStateEntry) int {
+	b, _ := sonic.Marshal(e)
+	return len(b)
 }
 
 type responsesStateSnapshot struct {
@@ -169,11 +181,10 @@ func (s *responsesStateStore) persist() {
 		if !ok {
 			continue
 		}
-		b, _ := sonic.Marshal(e)
-		if len(b) > responsesStateEntryMax || total+len(b) > responsesStateTotalMax {
+		if e.size > responsesStateEntryMax || total+e.size > responsesStateTotalMax {
 			continue
 		}
-		total += len(b)
+		total += e.size
 		snap.Entries = append(snap.Entries, e)
 	}
 	s.mu.Unlock()
@@ -215,6 +226,11 @@ func (s *responsesStateStore) putLocked(e responsesStateEntry) {
 	if _, exists := s.entries[key]; !exists {
 		s.order = append(s.order, key)
 	}
+	if e.size == 0 {
+		// Restored (or hand-built) entries carry no cached size — compute it
+		// once here so prune/persist never re-marshal per lookup.
+		e.size = responsesEntrySize(e)
+	}
 	s.entries[key] = e
 }
 
@@ -227,12 +243,11 @@ func (s *responsesStateStore) pruneLocked(now time.Time) {
 			delete(s.entries, key)
 			continue
 		}
-		b, _ := sonic.Marshal(e)
-		if len(b) > responsesStateEntryMax {
+		if e.size > responsesStateEntryMax {
 			delete(s.entries, key)
 			continue
 		}
-		total += len(b)
+		total += e.size
 		kept = append(kept, key)
 	}
 	s.order = kept
@@ -240,8 +255,7 @@ func (s *responsesStateStore) pruneLocked(now time.Time) {
 		key := s.order[0]
 		s.order = s.order[1:]
 		if e, ok := s.entries[key]; ok {
-			b, _ := sonic.Marshal(e)
-			total -= len(b)
+			total -= e.size
 			delete(s.entries, key)
 		}
 	}
@@ -254,8 +268,13 @@ func (s *responsesStateStore) lookup(session, id string) (responsesStateEntry, b
 	if e, ok := s.entries[responsesStateKey(session, id)]; ok {
 		return e, true
 	}
-	// Clients without a stable session header still get continuity by opaque
-	// response id. Only accept an unambiguous match to avoid cross-session bleed.
+	// Clients WITHOUT a stable session header still get continuity by opaque
+	// response id. Only accept an unambiguous match to avoid cross-session
+	// bleed; a caller that DID present a session must never expand another
+	// session's history by guessing its response id.
+	if session != "" {
+		return responsesStateEntry{}, false
+	}
 	var found responsesStateEntry
 	matches := 0
 	for _, e := range s.entries {
@@ -287,7 +306,12 @@ func (s *responsesStateStore) expand(body []byte, session string) ([]byte, []any
 		}
 	}
 	merged = append(merged, current...)
-	merged = repairOrphanedResponsesItems(merged, prev != "" && !hit)
+	// Orphan repair rewrites semantics, so it only runs when the client chained
+	// on a previous_response_id we could not expand (contract: explicit
+	// full-history requests pass through untouched).
+	if prev != "" && !hit {
+		merged = repairOrphanedResponsesItems(merged)
+	}
 	if len(merged) > 0 {
 		src["input"] = merged
 	}
@@ -324,7 +348,7 @@ func cloneAnySlice(in []any) []any {
 	return out
 }
 
-func repairOrphanedResponsesItems(input []any, dropReasoning bool) []any {
+func repairOrphanedResponsesItems(input []any) []any {
 	fnCalls := map[string]bool{}
 	customCalls := map[string]bool{}
 	fnOutputs := map[string]bool{}
@@ -351,7 +375,9 @@ func repairOrphanedResponsesItems(input []any, dropReasoning bool) []any {
 			continue
 		}
 		typ := strOpt(item["type"])
-		if dropReasoning && typ == "reasoning" {
+		// Reasoning items are bound to the lost response's context; on a miss
+		// they would replay thinking the backend never saw.
+		if typ == "reasoning" {
 			continue
 		}
 		if (typ == "function_call" || typ == "local_shell_call") && !fnOutputs[strOpt(item["call_id"])] {
@@ -480,8 +506,8 @@ func (s *responsesStateStore) recordResponse(session string, requestHistory []an
 		return false
 	}
 	e := responsesStateEntry{Session: session, ID: id, CreatedAt: s.now().UnixMilli(), History: history}
-	b, _ := sonic.Marshal(e)
-	if len(b) > responsesStateEntryMax {
+	e.size = responsesEntrySize(e)
+	if e.size > responsesStateEntryMax {
 		return false
 	}
 	s.mu.Lock()

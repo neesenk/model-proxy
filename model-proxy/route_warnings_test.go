@@ -53,8 +53,11 @@ func TestConfigRoutingWarnings(t *testing.T) {
 	expanded := map[string][]RouteTarget{
 		"k2":        {{Provider: "aqp", Model: "kimi-k2-thinking", Protocol: "openai"}},
 		"plain":     {{Provider: "aqp", Model: "glm-5", Protocol: "openai"}},
-		"no-proto":  {{Provider: "codex", Model: "gpt-5.6"}}, // auto-resolves → no warning
+		"no-proto":  {{Provider: "codex", Model: "gpt-5.6"}},         // auto-resolves → no warning
 		"reason-ok": {{Provider: "aqp", Model: "deepseek-reasoner"}}, // no conversion → no warning
+		// responses targets preserve reasoning, so the "currently dropped"
+		// message would be a false positive for them.
+		"resp-think": {{Provider: "codex", Model: "kimi-k2-thinking", Protocol: "responses"}},
 	}
 	warns := configRoutingWarnings(cfg, expanded)
 	joined := strings.Join(warns, "\n")
@@ -63,6 +66,9 @@ func TestConfigRoutingWarnings(t *testing.T) {
 	}
 	if strings.Contains(joined, `route "no-proto"`) {
 		t.Errorf("codex auto-resolves (no protocol: needed) — must NOT warn, warns = %v", warns)
+	}
+	if strings.Contains(joined, `route "resp-think"`) {
+		t.Errorf("responses targets preserve reasoning — must NOT warn, warns = %v", warns)
 	}
 	if strings.Contains(joined, `route "plain"`) || strings.Contains(joined, `route "reason-ok"`) {
 		t.Errorf("false positive, warns = %v", warns)

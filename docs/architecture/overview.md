@@ -97,5 +97,6 @@ conversion entrypoints → conversion registry → pair codecs
 - Fusion、Shadow、Cache 与观测：`fusion-shadow-cache.md`
 - Web/API：`../web-api.md`
 
-架构边界的静态回归位于 `architecture_contract_test.go`；行为与并发验证仍按
+架构边界的静态回归位于 `architecture_contract_test.go`（基于 go/ast 的选择器/
+调用语义检查，识别 `w.p.<field>` 及直接赋值别名，不是字符串扫描）；行为与并发验证仍按
 `docs/engineering/testing.md` 执行。

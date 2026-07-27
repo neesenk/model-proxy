@@ -274,6 +274,93 @@ type errReader struct{ err error }
 func (e *errReader) Read(p []byte) (int, error) { return 0, e.err }
 func (e *errReader) Close() error               { return nil }
 
+// TestCachedResponseHeader: the stored header must describe the CLIENT-facing
+// body the recorder captured, not the upstream's original framing.
+func TestCachedResponseHeader(t *testing.T) {
+	upstream := http.Header{
+		"Content-Type":      {"application/json"},
+		"Content-Length":    {"123"},
+		"Transfer-Encoding": {"chunked"},
+		"X-Other":           {"keep"},
+	}
+	// Pass-through: headers stored verbatim.
+	hdr := cachedResponseHeader(upstream, false, false, false)
+	if hdr.Get("Content-Length") != "123" || hdr.Get("Content-Type") != "application/json" {
+		t.Errorf("pass-through must keep upstream headers, got %v", hdr)
+	}
+	// Converted: length headers dropped (client-protocol body differs in size).
+	hdr = cachedResponseHeader(upstream, true, false, false)
+	if hdr.Get("Content-Length") != "" || hdr.Get("Transfer-Encoding") != "" {
+		t.Errorf("converted must strip length headers, got %v", hdr)
+	}
+	if hdr.Get("Content-Type") != "application/json" || hdr.Get("X-Other") != "keep" {
+		t.Errorf("converted must keep content-type and unrelated headers, got %v", hdr)
+	}
+	// Mode mismatch, client wants stream: upstream JSON became SSE for the client.
+	hdr = cachedResponseHeader(upstream, true, true, true)
+	if ct := hdr.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("mode mismatch (client streams): content-type=%q want text/event-stream", ct)
+	}
+	// Mode mismatch, client wants JSON: upstream SSE was aggregated to JSON.
+	hdr = cachedResponseHeader(upstream, true, true, false)
+	if ct := hdr.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("mode mismatch (client non-stream): content-type=%q want application/json", ct)
+	}
+}
+
+// TestForward_CacheModeMismatch_ContentType (E1): a converted response whose
+// stream mode was rewritten (client asked stream:true, the openai backend
+// answered a plain JSON body) is served live as SSE with content-type
+// text/event-stream. The cached entry must record THAT content-type — before
+// the fix the cache stored the upstream's application/json, so a replay paired
+// an SSE body with a JSON content-type.
+func TestForward_CacheModeMismatch_ContentType(t *testing.T) {
+	const openaiResp = `{"id":"a","model":"gpt","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(openaiResp))
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt", Protocol: "openai"}}},
+		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["oai"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	do := func() (string, string) {
+		req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/messages",
+			strings.NewReader(`{"model":"claude-x","max_tokens":50,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+		resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		ct := resp.Header.Get("content-type")
+		mark := resp.Header.Get("x-mp-cache")
+		resp.Body.Close()
+		if mark == "" {
+			return string(b), ct
+		}
+		return string(b), ct + " [cached]"
+	}
+	firstBody, firstCT := do()
+	if firstCT != "text/event-stream" {
+		t.Fatalf("live mode-mismatch response content-type=%q want text/event-stream", firstCT)
+	}
+	secondBody, secondCT := do() // cache hit
+	if secondCT != "text/event-stream [cached]" {
+		t.Errorf("cache replay content-type=%q want text/event-stream (SSE body mislabeled)", secondCT)
+	}
+	if firstBody != secondBody {
+		t.Errorf("cache replay body differs from live:\nlive:   %s\nreplay: %s", firstBody, secondBody)
+	}
+}
+
 // TestForward_CacheConvert_ReplayIntact: a converted response that is cached
 // must replay byte-identical. Before the fix the cached entry held the backend's
 // Content-Length (openai body length) while the cached body was the converted

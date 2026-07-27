@@ -18,6 +18,8 @@
 10. **普通显式历史中的孤儿 tool 对原样透传；仅 previous_response_id miss 修复**：完整 `input/messages` 转换不擅自删改不配对工具项（锁定测试 `TestConvertFault_OrphanToolPairs`）。只有 Responses 跨协议请求声明 `previous_response_id` 且本地状态未命中时，才把 orphan output 降级成 user 文本、删除 dangling call/reasoning，避免无服务端状态后端直接 400。
 11. **wire verdict unknown 时维持透传**：探测未完成或结论为 unknown（超时/5xx）时，协议选择回落到客户端协议透传，与探测功能引入前的行为一致——探测只能"改善"默认行为，不能在 boot 窗口期改变它。锁定测试：`TestWireCap_DecisionMatrix`。
 12. **wire 探测把 404 以外的 4xx 视为端点存在**：探测分类里 400/401/403/429 都判 yes——400 是请求形状争议而非路由缺失，401/403/429 更是端点存在的直接证据；只有 404 判 no（proxy 只探测已知 LLM 路径）。误判 yes 的兜底是运行时 404 纠正（翻转 verdict + 跳过模型锁），因此探测本身不做更细的形状校验。
+13. **Responses 跨协议 body 解析失败落 502 而非 400**：responses 客户端走跨协议 target 时 body 先经 `responsesState.expand` 做本地历史展开（proxy.go serveOnce）；body 本身是非法 JSON 时展开报错、当前 target 被跳过，所有 target 都失败后走统一的 all-targets-failed 路径返回 502，而不是 400。转发主路径不整体解析客户端 body（同协议字节透传），调度层无法区分「客户端 body 坏」和「单 target 处理失败」，保持 fail-closed 跳过语义。
+14. **唯一可转换 target 冷却中时立即 400 而非等待恢复**：本 pass 记录了 `conversionErr` 且 `tried` 为空时（请求转换被 capability scanner 拒绝的 target 不计入 tried；唯一能安全转换的 target 在冷却、未进本轮调度），直接返回 400 `unsupported_protocol_conversion`，跳过 cooldown wait-retry——不等待冷却恢复。重试中的 agent 下一轮自然会再命中已恢复的 target。
 
 ## qwen-plan：用量仅控制台、不轮询（有意为之）
 

@@ -43,7 +43,9 @@ events 组件。不得从执行器重新持有完整 `*Proxy`，也不得让单�
 | anthropic | verdict.responses == no 且 anthropic ≠ yes | 转 chat |
 | anthropic | verdict unknown | 透传（维持现状） |
 
-**运行时 404 纠正**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss` 将 verdict.responses 置 no 并持久化，**跳过 recordModelFailure**，按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。
+**运行时 404 纠正**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss` 将 verdict.responses 置 no 并持久化，**跳过 recordModelFailure**，按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。Fusion leg 共享同一纠正（`planTarget` 已算出 `viaResponsesVerdict`，见 fusion-shadow-cache.md）。yes 结论永久信任（错误 yes 由上述运行时路径纠正）；**no 结论有 24h TTL**（`wireCapNegativeTTL`），到期后下一次 boot/reload 探测 pass 重探——一次性错误 no（上游发布中临时 404 等）不会永久降级该 provider。
+
+**判定的不对称兜底**：`classifyWireStatus` 把 404 以外的全部 4xx（含 401/403/405/429）一律判 yes，而运行时纠正只认 404。对 `/responses` 需要不同鉴权、或对未实现路径返 405 的网关会产生 wrong-yes 且不会被自动翻转——此时只能显式声明 `protocol:` 兜底，绕过 verdict。
 
 运行态健康信息位于 `Proxy.health`，由 `healthMu` 保护，与 reload 使用的 `mu` 分离：
 
