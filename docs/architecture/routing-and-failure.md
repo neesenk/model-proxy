@@ -6,8 +6,9 @@
 
 ## 实现入口
 
-- `Proxy.forward` / `serveOnce` / `tryTarget`
+- `Proxy.forward` / `serveOnce` / `attemptExecutor.execute`
 - `dispatch_context.go`：`runtimeSnapshot`、`serveRequest`、`targetAttempt`
+- `attempt_executor.go`：单目标 I/O 执行器及其窄状态端口 `attemptState`
 - `providerHealth`、`modelLocks`、`paramBlock`
 - `classify429`、`parseResetHint`、`isModelDenied`、`parseUnsupportedParam`
 - `cooldownState`、`hasRecoveredUntried`
@@ -19,8 +20,13 @@
 expanded routes、models.dev catalog 与 response cache；reload 只交换新对象，
 不得原地修改快照持有的 map。`serveRequest` 是一次完整 schedule/failover pass
 的输入，`targetAttempt` 是单次 resolved target 执行契约。普通 route 与 Fusion
-synthesizer 均通过 `targetAttempt` 进入 `tryTarget`，新增横切能力不得继续扩张
-positional 参数列表。
+synthesizer 均通过 `targetAttempt` 进入 `attemptExecutor.execute`，新增横切能力
+不得继续扩张 positional 参数列表。
+
+`attemptExecutor` 只允许依赖 `attemptState` 暴露的健康、参数学习和 wire
+能力，以及显式注入的 HTTP、metrics、token、request-log、Responses state 和
+events 组件。不得从执行器重新持有完整 `*Proxy`，也不得让单目标发送逻辑直接
+访问调度、reload 或 Web 状态。
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 

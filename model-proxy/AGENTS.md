@@ -8,6 +8,8 @@
 - 每个请求只通过 `snapshotRuntime()` 捕获一次 reload-owned 依赖，并以
   `runtimeSnapshot → serveRequest → targetAttempt` 传递；普通路由和 Fusion
   synthesis 必须共享 `targetAttempt` 执行契约，不得重新扩张 positional 参数链。
+- 单目标 I/O 由 `attemptExecutor` 执行；它只能通过 `attemptState` 窄端口修改
+  runtime state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。

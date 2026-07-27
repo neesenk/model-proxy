@@ -526,7 +526,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	// The log ctx carries NO origBody so the request log stores the actual
 	// synthesis body (with the candidate sections), not the client's original.
 	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed, generation: fc.flc.generation}
-	committed, _, _ := p.tryTarget(targetAttempt{
+	committed, _, _ := p.targetExecutor().execute(targetAttempt{
 		cfg:                 fc.cfg,
 		clientProto:         fc.proto,
 		backendProto:        backendProto,

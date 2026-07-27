@@ -1649,7 +1649,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody, generation)
 			}
 		}
-		committed, retried, outcome := p.tryTarget(targetAttempt{
+		committed, retried, outcome := p.targetExecutor().execute(targetAttempt{
 			cfg:                 cfg,
 			clientProto:         proto,
 			backendProto:        backendProto,
@@ -1723,7 +1723,7 @@ const (
 	tryRateLimited                   // 429
 )
 
-func (p *Proxy) tryTarget(attempt targetAttempt) (committed bool, retried []RouteTarget, outcome tryOutcome) {
+func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried []RouteTarget, outcome tryOutcome) {
 	cfg := attempt.cfg
 	proto := attempt.clientProto
 	backendProto := attempt.backendProto
@@ -2310,7 +2310,7 @@ func (p *Proxy) tryTarget(attempt targetAttempt) (committed bool, retried []Rout
 		// record the result; otherwise it's a no-op (nowhere to compare).
 		if p.reqLog != nil && len(cfg.Shadow) > 0 {
 			if sh, ok := cfg.Shadow[flc.exposed]; ok && sh.Provider != "" && sh.Provider != t.Provider {
-				sr := p.shadow.Load() // reload-swappable; capture once so send+release use the same sem
+				sr := p.currentShadowRuntime() // reload-swappable; capture once so send+release use the same sem
 				if sr.shouldSample() {
 					select {
 					case sr.sem <- struct{}{}:
