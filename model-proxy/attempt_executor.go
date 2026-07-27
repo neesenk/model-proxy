@@ -20,11 +20,21 @@ type attemptState interface {
 	learnParamBlock(provider, model, param string, generations ...uint64) bool
 	applyParamBlock(provider, model string, body []byte) []byte
 	noteWireResponsesMiss(name string)
-	runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime, proto, bodyProto, calledModel, exposed string, shadow ShadowTarget, reqBody []byte, primaryReqID string)
-	currentShadowRuntime() *shadowRuntime
 }
 
 var _ attemptState = (*Proxy)(nil)
+
+type shadowDispatchFunc func(
+	runtime runtimeSnapshot,
+	shadowRuntime *shadowRuntime,
+	proto string,
+	bodyProto string,
+	calledModel string,
+	exposed string,
+	shadow ShadowTarget,
+	reqBody []byte,
+	primaryReqID string,
+)
 
 // attemptExecutor owns the complete one-target I/O pipeline. Its collaborators
 // are explicit so request execution no longer has unrestricted access to Proxy.
@@ -40,6 +50,8 @@ type attemptExecutor struct {
 	reqLog         *requestLogger
 	responsesState *responsesStateStore
 	events         *eventHub
+	lifecycle      *proxyLifecycle
+	shadowDispatch shadowDispatchFunc
 }
 
 func (p *Proxy) targetExecutor() attemptExecutor {
@@ -52,9 +64,7 @@ func (p *Proxy) targetExecutor() attemptExecutor {
 		reqLog:         p.reqLog,
 		responsesState: p.responsesState,
 		events:         p.events,
+		lifecycle:      p.lifecycle,
+		shadowDispatch: p.runShadow,
 	}
-}
-
-func (p *Proxy) currentShadowRuntime() *shadowRuntime {
-	return p.shadow.Load()
 }

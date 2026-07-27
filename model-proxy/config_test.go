@@ -256,7 +256,22 @@ func TestConfig_ValidateShadowErrors(t *testing.T) {
 			mutate: func(c *Config) {
 				c.Shadow = map[string]ShadowTarget{"m": {Provider: "a", Model: "m", Protocol: "grpc"}}
 			},
-			wantSub: `protocol "grpc" invalid`,
+			wantSub: `protocol "grpc" is not`,
+		},
+		{
+			name: "shadow anthropic protocol without anthropic base URL",
+			mutate: func(c *Config) {
+				c.Shadow = map[string]ShadowTarget{"m": {Provider: "a", Model: "m", Protocol: "anthropic"}}
+			},
+			wantSub: "anthropic_base_url",
+		},
+		{
+			name: "shadow responses protocol without OpenAI base URL",
+			mutate: func(c *Config) {
+				c.Providers["a"] = Provider{AnthropicBaseURL: "https://x", Provider: "zhipu"}
+				c.Shadow = map[string]ShadowTarget{"m": {Provider: "a", Model: "m", Protocol: "responses"}}
+			},
+			wantSub: "openai_base_url",
 		},
 		{
 			name:    "sample rate negative",
@@ -308,6 +323,21 @@ func TestConfig_ValidateShadowOK(t *testing.T) {
 		if err := cfg.validate(); err != nil {
 			t.Errorf("rate=%v: valid shadow config rejected: %v", r, err)
 		}
+	}
+}
+
+func TestLoadShadowRejectsProtocolWithoutMatchingBaseURL(t *testing.T) {
+	_, err := LoadConfigFromBytes("x", []byte(`
+listen: 127.0.0.1:1
+providers:
+  candidate: {provider_id: static, anthropic_base_url: https://example.com}
+routes:
+  m: [{provider: candidate, model: m}]
+shadow:
+  m: {provider: candidate, model: m, protocol: responses}
+`))
+	if err == nil || !strings.Contains(err.Error(), "openai_base_url") {
+		t.Fatalf("LoadConfigFromBytes error = %v, want missing openai_base_url", err)
 	}
 }
 

@@ -728,12 +728,14 @@ func (c *Config) validate() error {
 		if sh.Provider == "fusion" {
 			return fmt.Errorf("shadow %q: provider \"fusion\" is not a valid shadow target — shadow a concrete provider", route)
 		}
-		if _, ok := c.Providers[sh.Provider]; !ok {
+		prov, ok := c.Providers[sh.Provider]
+		if !ok {
 			return fmt.Errorf("shadow %q: provider %q not defined under providers:", route, sh.Provider)
 		}
 		if sh.Protocol != "" {
-			if _, ok := parseWireProtocol(sh.Protocol); !ok {
-				return fmt.Errorf("shadow %q: protocol %q invalid — use \"anthropic\", \"openai\", or \"responses\"", route, sh.Protocol)
+			target := RouteTarget{Provider: sh.Provider, Model: sh.Model, Protocol: sh.Protocol}
+			if err := checkTargetProtocol(fmt.Sprintf("shadow %q", route), target, prov); err != nil {
+				return err
 			}
 		}
 	}

@@ -334,6 +334,10 @@ shadow:
     max_concurrent: 4            # 并发闸（省略=4）
 ```
 
+显式设置 `protocol:` 时，配置加载会同时检查 endpoint：`anthropic` 需要候选
+provider 配置 `anthropic_base_url`，`openai`/`responses` 需要
+`openai_base_url`；缺失时启动或 reload 直接报错，不会运行期静默跳过。
+
 ```bash
 model-proxy shadow report        # 近 24h 聚合：每对 (路由, 主, 影子) 的样本数/状态一致率/平均延迟差/响应大小比
 model-proxy shadow report --from 7d

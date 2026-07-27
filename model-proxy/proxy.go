@@ -2266,14 +2266,16 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// record the result; otherwise it's a no-op (nowhere to compare).
 		if p.reqLog != nil && len(cfg.Shadow) > 0 {
 			if sh, ok := cfg.Shadow[flc.exposed]; ok && sh.Provider != "" && sh.Provider != t.Provider {
-				sr := p.currentShadowRuntime() // reload-swappable; capture once so send+release use the same sem
-				if sr.shouldSample() {
+				sr := runtime.shadow
+				if sr != nil && sr.shouldSample() {
 					select {
 					case sr.sem <- struct{}{}:
-						go func() {
+						if !p.lifecycle.runBeforeLogDrain(func() {
 							defer func() { <-sr.sem }()
-							p.runShadow(runtime, sr, proto, backendProto, calledModel, flc.exposed, sh, reqBytes, flc.requestID)
-						}()
+							p.shadowDispatch(runtime, sr, proto, backendProto, calledModel, flc.exposed, sh, reqBytes, flc.requestID)
+						}) {
+							<-sr.sem
+						}
 					default:
 						// shadow concurrency cap reached → skip (best-effort)
 					}
@@ -3328,44 +3330,72 @@ func peekResponseBody(resp *http.Response, n int) []byte {
 
 // sniffSSEFraming peeks at the first bytes of a <300 response whose
 // content-type did not declare SSE and reports whether the body starts with
-// SSE framing (event:/data:). Like peekResponseBody it restores resp.Body, so
-// the commit path re-reads every byte transparently.
+// SSE framing. Besides event:/data:, the SSE grammar permits comment heartbeats
+// (": ping") and id:/retry: fields before the first data event. Like
+// peekResponseBody it restores resp.Body, so the commit path re-reads every byte
+// transparently.
 //
 // It reads ONCE before deciding to wait: a single Read returns as soon as any
 // bytes are buffered, whereas io.ReadAll(LimitReader(16)) would BLOCK until
 // the 16-byte window is full or EOF. Only when that first chunk leaves the
-// verdict undecided — empty/whitespace, or a proper prefix of "event:"/"data:"
-// (a short TCP segment can split inside the marker) — does it keep reading to
-// the window. This matters for an SSE upstream that sends a short heartbeat
-// (e.g. ": ping\n\n") then idles: the heartbeat already settles the verdict
-// (not SSE framing by prefix), so waiting to fill the window would delay the
-// client's first byte until the next event arrived (E2).
+// verdict undecided — empty/whitespace, or a proper prefix of a known SSE field
+// marker (a short TCP segment can split inside "event:") — does it keep reading
+// to the window. A comment heartbeat is a decisive SSE marker, so it returns
+// immediately instead of waiting for the next event and delaying the stream.
 func sniffSSEFraming(resp *http.Response) bool {
 	const window = 16
 	buf := make([]byte, window)
-	n, _ := resp.Body.Read(buf)
-	peeked := buf[:n]
-	if sniffUndecided(peeked) && n < window {
-		more, _ := io.ReadAll(io.LimitReader(resp.Body, int64(window-n)))
-		peeked = append(peeked, more...)
+	n, readErr := resp.Body.Read(buf)
+	total := n
+	for total < window && readErr == nil && sniffUndecided(buf[:total]) {
+		n, readErr = resp.Body.Read(buf[total:])
+		total += n
+		if n == 0 && readErr == nil {
+			break // defensive: an io.Reader should not return no progress
+		}
 	}
+	peeked := buf[:total]
 	resp.Body = struct {
 		io.Reader
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(peeked), resp.Body), resp.Body}
 	peek := bytes.TrimSpace(peeked)
-	return bytes.HasPrefix(peek, []byte("event:")) || bytes.HasPrefix(peek, []byte("data:"))
+	return hasSSEPrefix(peek)
 }
 
 // sniffUndecided reports whether a first peek could still turn out to be SSE
 // framing once more bytes arrive: nothing but whitespace so far, or a proper
-// prefix of the event:/data: markers.
+// prefix of a known field marker.
+var sseFieldPrefixes = [][]byte{
+	[]byte("event:"),
+	[]byte("data:"),
+	[]byte("id:"),
+	[]byte("retry:"),
+}
+
 func sniffUndecided(peeked []byte) bool {
 	peek := bytes.TrimSpace(peeked)
 	if len(peek) == 0 {
 		return true
 	}
-	return bytes.HasPrefix([]byte("event:"), peek) || bytes.HasPrefix([]byte("data:"), peek)
+	for _, marker := range sseFieldPrefixes {
+		if len(peek) < len(marker) && bytes.HasPrefix(marker, peek) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSSEPrefix(peek []byte) bool {
+	if bytes.HasPrefix(peek, []byte(":")) {
+		return true
+	}
+	for _, marker := range sseFieldPrefixes {
+		if bytes.HasPrefix(peek, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // timingResponseWriter wraps the client ResponseWriter to capture time-to-first-

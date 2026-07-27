@@ -9,6 +9,8 @@
 - 每个请求只通过 `snapshotRuntime()` 捕获一次 reload-owned 依赖，并以
   `runtimeSnapshot → serveRequest → targetAttempt` 传递；普通路由和 Fusion
   synthesis 必须共享 `targetAttempt` 执行契约，不得重新扩张 positional 参数链。
+  Shadow 的采样率、semaphore 和 client 也属于该快照，commit 后不得重新读取
+  `p.shadow`。
 - 单目标 I/O 由 `attemptExecutor` 执行；它只能通过 `attemptState` 窄端口修改
   runtime state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
 - 三协议方向只在 `conversion_registry.go` 注册；request、response、SSE 入口
@@ -19,7 +21,8 @@
 - Web/API handler 只能通过 `proxyReadView` 读取运行时；不得直接获取 Proxy 锁或
   读取 config/provider/health/model-lock 内部 map。
 - Proxy 级后台任务必须由 `proxyLifecycle` 接纳，daemon 只调用
-  `startRuntimeServices`/`Proxy.Close`；禁止分散启动 goroutine 或重复 final flush。
+  `startRuntimeServices`/`Proxy.Close`；会写 request log 的有限任务必须在 logger
+  drain 前完成，禁止分散启动 goroutine 或重复 final flush。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。

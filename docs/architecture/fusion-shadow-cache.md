@@ -43,6 +43,14 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 backend protocol、model rewrite、转换和 URL/path；goroutine 内禁止重新读取
 `p.cfg`/`p.providers`/`p.catalog` 或再次 load `p.shadow`。
 
+Shadow 作为 `proxyLifecycle` 的有限 log-producing task 接纳：shutdown 开始后
+拒绝新任务，已接纳任务受 shadow HTTP timeout 约束并在 request logger drain
+前完成，避免 `Proxy.Close` 返回后仍向无人消费的 channel 写记录。
+
+显式 `protocol:` 在配置加载时同时校验 endpoint：`anthropic` 需要
+`anthropic_base_url`，`openai`/`responses` 需要 `openai_base_url`；不允许把
+合法协议名配到缺失的 base URL 后留到运行期静默跳过。
+
 `replay` 使用 request_log 的原始客户端 body 和原 path，通过 force-provider 重发。拒绝 shadow record、非 `/v1` 路径和截断 body。
 
 ## Request log
@@ -114,7 +122,8 @@ judge 是可选的一次非流式内部调用，复用 panel leg 管道。成功
 ## 回归测试
 
 - cache 完整 EOF、client cancel、转换响应 header。
-- shadow reload generation、并发 cap、sample_rate=0。
+- shadow 真实 executor 路径的 reload generation、Close 时 logger drain 顺序、
+  协议与 base URL 校验、并发 cap、sample_rate=0。
 - request log 大 body 的 metadata 内存边界和跨文件乱序。
 - Fusion pooled resolver、共享 target plan、model lock、paramBlock 即时重试、
   429、empty 200。

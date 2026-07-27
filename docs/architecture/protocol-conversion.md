@@ -138,7 +138,7 @@ reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔opena
 ## 接线要求
 
 - 响应转换必须是最内层 reader；logger、usage scanner、cache 只能看到客户端协议字节。
-- 非流式响应在 commit header 前转换，失败返回 502，禁止提交错误协议 body。上游 content-type 缺失/非 `text/event-stream` 时先嗅探帧格式（`event:`/`data:` 前缀，codex 实测空 CT 流式响应），按流式路径转换；usageScanner 同样吃嗅探结果。嗅探对所有 <300 响应执行（透传路径的 usageScanner/responses-state 也依赖它），但只保证读满首个可用数据块：首块已能定判（如 `: ping` 心跳）就不再为填满 16 字节窗口而阻塞首字节；仅当首块是空白或标记被截断（`ev`+`ent:`）时才继续读满窗口。
+- 非流式响应在 commit header 前转换，失败返回 502，禁止提交错误协议 body。上游 content-type 缺失/非 `text/event-stream` 时先嗅探帧格式（`event:`/`data:`/`id:`/`retry:` 字段或 `:` comment heartbeat；codex 实测空 CT 流式响应），按流式路径转换；usageScanner 同样吃嗅探结果。嗅探对所有 <300 响应执行（透传路径的 usageScanner/responses-state 也依赖它），但只保证读满首个可用数据块：首块已能定判（如 `: ping` 心跳）就立即按 SSE 处理，不再为填满 16 字节窗口而阻塞；仅当首块是空白或标记被截断（`ev`+`ent:`）时才继续读满窗口。
 - 跨协议请求内联图片默认限制为 4 MiB / 4096px；上游返回 413 时仅重试一次，以 1 MiB / 2048px 重新编码 JPEG。非图片字段不改写，无法解码或超过 64 MiB 的图片不在请求路径展开。
 - 非流式读取上限 64 MiB。
 - SSE 单行上限 8 MiB，超限要记录错误。
@@ -155,6 +155,7 @@ reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔opena
 - logger/cache 捕获客户端协议而非上游协议。
 - responses 方向：4 个请求 + 4 个响应 + 文本/工具流式转换（`convert_responses_test.go`），以及 anthropic/chat 客户端经 `protocol:responses` 目标的端到端（`TestForward_*ToResponses_NonStream`）。
 - 流式 6 方向均已覆盖：responses→{a,chat}、{a,chat}→responses 和 anthropic↔chat；`convert_responses_stream_test.go` 用 `drainSSE`（`convert_sse_test.go`）断言事件**序列**、合成 item id（`msg_item_/fc_item_/rs_item_`）和 added/done 配对，含并行交错 tool_calls、reasoning 流、EOF fail-closed 与错误事件。跨方向 EOF 矩阵和未闭合 tool arguments 见 `convert_review_fix_test.go`。
+- 空/错误 content-type 的 framing 嗅探见 `stream_mode_test.go`：除 event/data 外覆盖 id/retry/comment heartbeat、分段 marker、heartbeat 不阻塞，以及 heartbeat 后跨协议端到端流式转换，防止误入非流式 JSON 分支。
 - reasoning/encrypted_content 映射（`convert_reasoning_test.go`）：`thinking`+`signature` ↔ reasoning `summary.text`+`encrypted_content` ↔ chat `reasoning_content`，请求/响应/流式三层 + `budget_tokens`↔`effort`。
 - 容错与终态（`convert_fault_test.go`）：未知事件/畸形 JSON 帧跳过、`response.failed`/`response.incomplete` 分支、重复 `response.completed` 终态唯一、非 JSON arguments 兜底、孤儿 tool 对、末帧无尾换行、8MiB 行上限告警、responses 方向图片映射、未知 block/part/item/event 的 `convertWarn` 全覆盖（J）。
 - 三向审计补齐的映射（`convert_gap_test.go`）：usage cache/reasoning details 四方向（流式+非流式）、`content_filter`/`refusal`/`incomplete_details.reason` 语义、failed/cancelled fail-closed、hosted web_search 保留与 unsupported server tools 过滤、r→a 首消息占位、`max_completion_tokens`、`response_format`↔`text.format`、responses 四方向 `parallel_tool_calls`；`redacted_thinking` 与 chat→a reasoning 见 `convert_reasoning_test.go`。

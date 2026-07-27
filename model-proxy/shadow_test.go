@@ -63,52 +63,92 @@ func TestForceProvider_OverridesRouting(t *testing.T) {
 }
 
 func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
-	var oldHits, newHits atomic.Int64
-	oldUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		oldHits.Add(1)
+	primaryStarted := make(chan struct{})
+	releasePrimary := make(chan struct{})
+	primaryUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(primaryStarted)
+		<-releasePrimary
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer primaryUpstream.Close()
+	shadowHit := make(chan struct{}, 1)
+	shadowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		shadowHit <- struct{}{}
 		w.Write([]byte(`{"ok":true}`))
 	}))
-	defer oldUpstream.Close()
-	newUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		newHits.Add(1)
-		w.Write([]byte(`{"ok":true}`))
-	}))
-	defer newUpstream.Close()
+	defer shadowUpstream.Close()
 
 	oldConfig := &Config{
 		Providers: map[string]Provider{
-			"candidate": {Provider: "static", OpenAIBaseURL: oldUpstream.URL},
+			"primary":   {Provider: "static", OpenAIBaseURL: primaryUpstream.URL},
+			"candidate": {Provider: "static", OpenAIBaseURL: shadowUpstream.URL},
+		},
+		Routes: map[string][]RouteTarget{
+			"alias": {{Provider: "primary", Model: "primary-model", Protocol: "openai"}},
+		},
+		Shadow: map[string]ShadowTarget{
+			"alias": {Provider: "candidate", Model: "shadow-model", Protocol: "openai"},
 		},
 	}
 	p := newTestProxy(t, oldConfig)
 	p.reqLog = newRequestLogger(t.TempDir(), 1<<20, 1<<10, 0)
-	runtime := p.snapshotRuntime()
-	shadowRuntime := p.shadow.Load()
+	p.providers["primary"] = &testProv{key: "primary"}
+	p.providers["candidate"] = &testProv{key: "candidate"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
 
-	// Simulate a reload after admission but before the goroutine runs.
+	requestDone := make(chan error, 1)
+	go func() {
+		resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(
+			`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`))
+		if err == nil {
+			_, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-primaryStarted:
+		// The request already captured the old runtime + shadow bundle.
+	case err := <-requestDone:
+		close(releasePrimary)
+		t.Fatalf("primary request ended before reaching upstream: %v", err)
+	case <-time.After(2 * time.Second):
+		close(releasePrimary)
+		t.Fatal("primary request did not reach upstream")
+	}
+
+	zero := 0.0
 	newConfig := &Config{
 		Providers: map[string]Provider{
-			"candidate": {Provider: "static", OpenAIBaseURL: newUpstream.URL},
+			"primary":   {Provider: "static", OpenAIBaseURL: primaryUpstream.URL},
+			"candidate": {Provider: "static", OpenAIBaseURL: shadowUpstream.URL},
 		},
+		Routes:           oldConfig.Routes,
+		Shadow:           oldConfig.Shadow,
+		ShadowSampleRate: &zero,
 	}
+	// Match reload's atomic swap: later requests must see sampling disabled, but
+	// this already-admitted request must retain the old sampling bundle.
 	p.mu.Lock()
 	p.cfg = newConfig
-	p.mu.Unlock()
 	p.shadow.Store(newShadowRuntime(newConfig))
+	p.mu.Unlock()
 
-	p.runShadow(
-		runtime,
-		shadowRuntime,
-		"responses",
-		"responses",
-		"alias",
-		"alias",
-		ShadowTarget{Provider: "candidate", Model: "shadow-model"},
-		[]byte(`{"model":"alias","input":[]}`),
-		"request-1",
-	)
-	if oldHits.Load() != 1 || newHits.Load() != 0 {
-		t.Fatalf("shadow mixed reload generations: old=%d new=%d", oldHits.Load(), newHits.Load())
+	close(releasePrimary)
+	select {
+	case err := <-requestDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("primary request did not finish")
+	}
+	select {
+	case <-shadowHit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight request used the reloaded shadow runtime instead of its captured generation")
 	}
 }
 

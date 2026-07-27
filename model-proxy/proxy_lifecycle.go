@@ -14,6 +14,10 @@ type proxyLifecycle struct {
 	stopping bool
 	stop     chan struct{}
 	wg       sync.WaitGroup
+	// beforeLogDrain tracks finite tasks whose final output is written through
+	// requestLogger (currently Shadow evaluations). Close rejects new
+	// admissions, waits for this group, and only then drains the logger.
+	beforeLogDrain sync.WaitGroup
 }
 
 func newProxyLifecycle() *proxyLifecycle {
@@ -38,6 +42,27 @@ func (l *proxyLifecycle) run(task func(stop <-chan struct{})) bool {
 	return true
 }
 
+// runBeforeLogDrain admits finite background work that may still enqueue a
+// request-log record. Admission shares the lifecycle mutex with beginStop, so
+// Add cannot race Wait and no task can start after shutdown begins.
+func (l *proxyLifecycle) runBeforeLogDrain(task func()) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	if l.stopping {
+		l.mu.Unlock()
+		return false
+	}
+	l.beforeLogDrain.Add(1)
+	l.mu.Unlock()
+	go func() {
+		defer l.beforeLogDrain.Done()
+		task()
+	}()
+	return true
+}
+
 func (l *proxyLifecycle) beginStop() {
 	if l == nil {
 		return
@@ -53,6 +78,12 @@ func (l *proxyLifecycle) beginStop() {
 func (l *proxyLifecycle) wait() {
 	if l != nil {
 		l.wg.Wait()
+	}
+}
+
+func (l *proxyLifecycle) waitBeforeLogDrain() {
+	if l != nil {
+		l.beforeLogDrain.Wait()
 	}
 }
 
@@ -83,10 +114,11 @@ func (p *Proxy) refreshCatalogAsync() {
 }
 
 // closeRuntimeServices establishes one shutdown order:
-// reject new Proxy-owned tasks → stop periodic loops → drain request log →
-// wait for in-flight refreshes → final stats/state flushes.
+// reject new Proxy-owned tasks → wait finite log-producing work → drain request
+// log → wait for periodic loops/refreshes → final stats/state flushes.
 func (p *Proxy) closeRuntimeServices() {
 	p.lifecycle.beginStop()
+	p.lifecycle.waitBeforeLogDrain()
 	if p.reqLogStarted {
 		p.reqLog.shutdown()
 	}

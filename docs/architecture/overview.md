@@ -24,7 +24,8 @@ HTTP handler
 ```
 
 - `runtimeSnapshot`：一次请求只捕获一个 reload generation 的 config、
-  provider implementations、pool identity、expanded routes、catalog 和 cache。
+  provider implementations、pool identity、expanded routes、catalog、cache 和
+  Shadow dispatch runtime。
 - `serveRequest`：一次 schedule/failover pass 的稳定输入。
 - `targetPlan`：普通 route、Fusion、Shadow 共用的 provider/protocol/model/body/
   base URL/path 准备。
@@ -60,8 +61,9 @@ map。写操作调用明确的 reload、pin、health reset、quota refresh 等�
 
 - daemon 只调用 `startRuntimeServices` 与 `Proxy.Close`；
 - reload catalog refresh 必须通过 lifecycle gate 接纳；
-- Close 拒绝新任务、停止 loop、drain request log、等待任务，再完成 stats、
-  Responses state 和 quota final flush。
+- Close 拒绝新任务，先等待会产生日志的有限任务（Shadow），再 drain request
+  log；随后等待 loop/refresh，最后完成 stats、Responses state 和 quota final
+  flush。这样 Close 返回后不会有 Shadow 向已关闭 logger 补写。
 
 quota tracker 与 Responses state store 各自拥有内部 debounce/worker，但由
 `Proxy.Close` 按统一顺序停止。

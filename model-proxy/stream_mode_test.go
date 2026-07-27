@@ -109,8 +109,10 @@ func TestSniffSSEFraming(t *testing.T) {
 		{"event marker", "event: message_start\ndata: {}\n\n", true},
 		{"data marker", `data: {"a":1}` + "\n\n", true},
 		{"leading whitespace before marker", "\n  event: x\n", true},
+		{"id marker", "id: 7\n", true},
+		{"retry marker", "retry: 1000\n", true},
 		{"json body", `{"id":"c1","choices":[]}`, false},
-		{"sse comment heartbeat", ": ping\n\n", false},
+		{"sse comment heartbeat", ": ping\n\n", true},
 		{"empty body", "", false},
 	}
 	for _, tc := range cases {
@@ -142,11 +144,33 @@ func TestSniffSSEFraming_SplitMarker(t *testing.T) {
 	}
 }
 
+func TestSniffSSEFraming_SplitShortFieldNoBlock(t *testing.T) {
+	pr, pw := io.Pipe()
+	resp := &http.Response{Body: pr}
+	done := make(chan bool, 1)
+	go func() { done <- sniffSSEFraming(resp) }()
+	if _, err := pw.Write([]byte("i")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.Write([]byte("d: 7\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if !got {
+			t.Error("split id field must sniff as SSE")
+		}
+	case <-time.After(time.Second):
+		t.Error("sniff waited to fill the window after a complete short SSE field")
+	}
+	pw.Close()
+}
+
 // TestSniffSSEFraming_HeartbeatNoBlock (E2): an SSE upstream with an empty
 // content-type may send a short heartbeat (": ping\n\n") then idle. The
-// heartbeat already settles the sniff verdict, so the sniff must return after
-// the first read — blocking to fill the 16-byte window would delay the
-// client's first byte until the next event arrives.
+// heartbeat is itself valid SSE framing, so the sniff must return true after the
+// first read — blocking to fill the 16-byte window would delay the stream until
+// the next event arrives.
 func TestSniffSSEFraming_HeartbeatNoBlock(t *testing.T) {
 	pr, pw := io.Pipe()
 	resp := &http.Response{Body: pr}
@@ -157,8 +181,8 @@ func TestSniffSSEFraming_HeartbeatNoBlock(t *testing.T) {
 	}
 	select {
 	case got := <-done:
-		if got {
-			t.Error("heartbeat comment must not sniff as SSE framing")
+		if !got {
+			t.Error("heartbeat comment must sniff as SSE framing")
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("sniff blocked waiting to fill the window after a decisive first read")
@@ -173,6 +197,52 @@ func TestSniffSSEFraming_HeartbeatNoBlock(t *testing.T) {
 	restored, _ := io.ReadAll(resp.Body)
 	if string(restored) != ": ping\n\nevent: x\n\n" {
 		t.Errorf("body not restored after sniff: got %q", restored)
+	}
+}
+
+// TestForwardConvertsSSEAfterCommentHeartbeat verifies the full routing path,
+// not just the framing helper. A cross-protocol upstream with no Content-Type
+// may legally start with an SSE comment; it must stay on the streaming converter
+// instead of being buffered and parsed as non-stream JSON.
+func TestForwardConvertsSSEAfterCommentHeartbeat(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A nil Content-Type value suppresses net/http's automatic sniffing so
+		// this exercises the proxy's empty-header fallback.
+		w.Header()["Content-Type"] = nil
+		io.WriteString(w, ": ping\n\n")
+		io.WriteString(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-x","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}`+"\n\n")
+		io.WriteString(w, `data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["oai"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(
+		`{"model":"claude-x","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "event: message_start") ||
+		!strings.Contains(string(body), `"text":"hello"`) ||
+		!strings.Contains(string(body), "event: message_stop") {
+		t.Fatalf("client did not receive converted Anthropic SSE: %s", body)
 	}
 }
 

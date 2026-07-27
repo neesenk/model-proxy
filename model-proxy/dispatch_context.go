@@ -18,6 +18,7 @@ type runtimeSnapshot struct {
 	expandedRoutes map[string][]RouteTarget
 	catalog        *modelsDevCatalog
 	cache          *responseCache
+	shadow         *shadowRuntime
 }
 
 // snapshotRuntime captures every reload-owned dependency under one brief read
@@ -35,6 +36,7 @@ func (p *Proxy) snapshotRuntime() runtimeSnapshot {
 		expandedRoutes: p.expandedRoutes,
 		catalog:        p.catalog,
 		cache:          p.cache,
+		shadow:         p.shadow.Load(),
 	}
 }
 

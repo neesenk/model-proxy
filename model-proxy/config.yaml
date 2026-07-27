@@ -290,6 +290,8 @@ takeover:
 # shadow:
 #   glm-5.2: {provider: deepseek, model: deepseek-v4-pro}                # shadow one route…
 #   deepseek-v4-pro: {provider: codex, model: gpt-5.5, protocol: openai} # …cross-protocol OK
+# Explicit anthropic requires anthropic_base_url; openai/responses require
+# openai_base_url. Invalid endpoint/protocol combinations fail config loading.
 
 # Multi-model orchestration (fusion): a route target {provider: fusion, model:
 # <workflow>} fans the request out to the panel members in parallel (candidate
