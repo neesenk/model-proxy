@@ -174,90 +174,19 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 // handleStatus returns a dashboard snapshot: uptime, version, listen address,
 // per-provider circuit/rate-limit health, active model locks, quota snapshots,
 // the current schedule (per-route ordered providers), and request counters.
-//
-// Lock discipline: each store is acquired and released in sequence — never
-// nested. Mirrors scheduleStatus() (proxy.go): (1) p.mu.RLock for cfg, (2)
-// p.healthMu.Lock to copy p.health, (3) p.quota.allSnapshots() takes its own
-// RLock internally. Lock ordering is healthMu → quotaMu; acquiring them
-// sequentially (not nested) keeps that order trivially correct.
 func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
-	w.p.mu.RLock()
-	cfg := w.p.cfg
-	routeWarnings := w.p.routeWarnings
-	w.p.mu.RUnlock()
-
-	now := time.Now()
-	w.p.healthMu.Lock()
-	health := map[string]any{}
-	for name, h := range w.p.health {
-		state := "closed"
-		switch {
-		case now.Before(h.circuitOpenUntil):
-			state = "open"
-		case h.halfOpenInFlight:
-			state = "half_open"
-		}
-		entry := map[string]any{
-			"circuit_state": state,
-			"available":     h.available(now),
-		}
-		if now.Before(h.circuitOpenUntil) {
-			entry["circuit_until"] = h.circuitOpenUntil.UTC().Format(time.RFC3339)
-		}
-		if now.Before(h.rateLimitedUntil) {
-			entry["rate_limited_until"] = h.rateLimitedUntil.UTC().Format(time.RFC3339)
-			entry["rate_limit_kind"] = h.rateLimitKind.String()
-		}
-		health[name] = entry
-	}
-	// Model locks share healthMu, so snapshot them in the same critical section.
-	// Only active locks are emitted — mirrors circuit_until / rate_limited_until
-	// above, which likewise appear only when in the future. `doctor --live`
-	// needs them to explain a route whose targets are all locked out.
-	modelLocks := map[string][]map[string]any{}
-	for k, e := range w.p.modelLocks {
-		if !now.Before(e.lockedUntil) {
-			continue
-		}
-		modelLocks[k.provider] = append(modelLocks[k.provider], map[string]any{
-			"model": k.model,
-			"until": e.lockedUntil.UTC().Format(time.RFC3339),
-		})
-	}
-	for _, locks := range modelLocks {
-		sort.Slice(locks, func(i, j int) bool { return locks[i]["model"].(string) < locks[j]["model"].(string) })
-	}
-	w.p.healthMu.Unlock()
-
-	// allSnapshots takes quotaMu.RLock internally and returns a fresh map; we
-	// hand it out verbatim (the shape is provider-defined). nil → omit.
-	var quota map[string]any
-	if qs := w.p.quota.allSnapshots(); qs != nil {
-		quota = make(map[string]any, len(qs))
-		for k, v := range qs {
-			quota[k] = v
-		}
-	}
-
-	// scheduleStatus() returns []byte that is already a JSON object
-	// {"models":…}. Embed it verbatim via json.RawMessage so writeJSON doesn't
-	// double-encode it.
-	// Cache observability: hits/misses/entries.
-	cacheInfo := map[string]any{"enabled": false}
-	if h, m, e := w.p.cache.stats(); e > 0 || h > 0 || w.p.cache != nil {
-		cacheInfo = map[string]any{"enabled": true, "hits": h, "misses": m, "entries": e}
-	}
+	view := w.p.readView().dashboard(time.Now())
 	writeJSON(resp, http.StatusOK, map[string]any{
-		"uptime":      time.Since(w.p.metrics.startedAt()).String(),
+		"uptime":      view.uptime,
 		"version":     version,
-		"listen":      cfg.Listen,
-		"health":      health,
-		"model_locks": modelLocks,
-		"quota":       quota,
-		"schedule":    json.RawMessage(w.p.scheduleStatus()),
-		"counters":    w.p.metrics.aggregateByProvider(),
-		"cache":       cacheInfo,
-		"warnings":    routeWarnings,
+		"listen":      view.listen,
+		"health":      view.health,
+		"model_locks": view.modelLocks,
+		"quota":       view.quota,
+		"schedule":    view.schedule,
+		"counters":    view.counters,
+		"cache":       view.cache,
+		"warnings":    view.warnings,
 	})
 }
 
@@ -269,12 +198,7 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 func (w *webServer) handleLogs(resp http.ResponseWriter, r *http.Request) {
 	path := w.logFile
 	if path == "" {
-		// Snapshot cfg under RLock — w.p.cfg is swapped by reload and reading
-		// it unlocked would race (production always sets w.logFile so this
-		// branch is rarely hit, but -race must stay clean).
-		w.p.mu.RLock()
-		path = w.p.cfg.LogFile
-		w.p.mu.RUnlock()
+		path = w.p.readView().logFile()
 	}
 	if path == "" {
 		writeJSONErr(resp, http.StatusNotFound, "no log_file configured")
@@ -403,9 +327,7 @@ func tailFile(path string, n int) ([]string, error) {
 // surfaces account_id + email parsed from the id_token; pooled apikey
 // providers surface {id, label, added_at} from the pool.
 func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request) {
-	w.p.mu.RLock()
-	providers := w.p.cfg.Providers
-	w.p.mu.RUnlock()
+	providers := w.p.readView().providerConfigs()
 
 	type acct struct {
 		ID      string `json:"id"`
@@ -907,9 +829,7 @@ func parseStatsTime(v string) (int64, bool) {
 // probe), so a concurrent request isn't blocked on the upstream timeout.
 func (w *webServer) handleAccountAdd(resp http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
-	w.p.mu.RLock()
-	prov, ok := w.p.cfg.Providers[name]
-	w.p.mu.RUnlock()
+	prov, ok := w.p.readView().providerConfig(name)
 	if !ok {
 		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
 		return
@@ -932,7 +852,7 @@ func (w *webServer) handleAccountAdd(resp http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cred := accountCred{APIKey: req.APIKey, AccessKey: req.AccessKey, SecretKey: req.SecretKey}
-	cfg := w.p.snapshotConfig()
+	cfg := w.p.readView().config()
 	var (
 		id  string
 		err error
@@ -976,7 +896,7 @@ func (w *webServer) handleAccountTest(resp http.ResponseWriter, r *http.Request)
 		return
 	}
 	name, id := parts[0], parts[1]
-	cfg := w.p.snapshotConfig()
+	cfg := w.p.readView().config()
 	prov, ok := cfg.Providers[name]
 	if !ok {
 		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
@@ -1029,9 +949,7 @@ func (w *webServer) handleAccountTest(resp http.ResponseWriter, r *http.Request)
 		writeJSONErr(resp, http.StatusBadRequest, name+" has no model to probe (no route targets it and its models: list is empty)")
 		return
 	}
-	w.p.mu.RLock()
-	impl := w.p.providers[key]
-	w.p.mu.RUnlock()
+	impl := w.p.readView().runtimeProvider(key)
 	if impl == nil {
 		writeJSONErr(resp, http.StatusNotFound, "provider "+key+" not available (reload pending?)")
 		return
@@ -1075,9 +993,7 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 		return
 	}
 	name, id := parts[0], parts[1]
-	w.p.mu.RLock()
-	prov, ok := w.p.cfg.Providers[name]
-	w.p.mu.RUnlock()
+	prov, ok := w.p.readView().providerConfig(name)
 	if !ok {
 		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
 		return
@@ -1130,9 +1046,7 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 func (w *webServer) handleLoginStart(resp http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/login/")
 	name := strings.TrimSuffix(rest, "/start")
-	w.p.mu.RLock()
-	prov, ok := w.p.cfg.Providers[name]
-	w.p.mu.RUnlock()
+	prov, ok := w.p.readView().providerConfig(name)
 	if !ok {
 		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
 		return

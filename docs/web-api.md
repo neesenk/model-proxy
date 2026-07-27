@@ -8,7 +8,7 @@
 
 | 方法 | 路径 | 请求 | 响应 | 备注 |
 |---|---|---|---|---|
-| GET | `/api/status` | — | `{uptime,version,listen,health{...},model_locks{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | 锁 `p.mu`→`healthMu`→`quotaMu` 顺序不嵌套。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出）。`model_locks[provider]` = `[{model,until}]`（仅生效中的模型锁，与 health 同一 healthMu 快照，过期不输出；`doctor --live` 用它解释 route 全灭） |
+| GET | `/api/status` | — | `{uptime,version,listen,health{...},model_locks{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | handler 只消费 `proxyReadView.dashboard` 的脱离式快照；锁 `p.mu`→`healthMu`→`quotaMu` 的顺序和内部 map 读取由 read view 封装且不嵌套。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出）。`model_locks[provider]` = `[{model,until}]`（仅生效中的模型锁，与 health 同一 healthMu 快照，过期不输出；`doctor --live` 用它解释 route 全灭） |
 | GET | `/api/logs?tail=N` | — | `{lines:[…]}` | 读 log 文件末尾 N 行（默认 200，上限 1000）；无 log 路径 → 404 |
 | GET | `/api/config` | — | `{yaml, summary, provider_models, routes}` | 原文件 verbatim round-trip |
 | POST | `/api/config` | `{yaml}` | `{status:"reloaded"}` / 400 | `saveAndReload`：validate → backup `back/<base>.<ts>.bak` → atomicWrite → reload。校验失败不落盘；reload 失败从当次备份回滚 |
@@ -69,6 +69,14 @@
 **CLI**：`stats --granularity day|month` 或 `--cost` 任一 → `renderAnalytics` 改打 `/api/analytics`（`formatAnalyticsTable`：每 (provider,model) 一行 = 窗口内 SUM，`--cost` 才出 cost 列，未定价 `n/a`；`--json` 原样）。两者都省略 → 走 `/api/stats`，输出与原 `stats` **字节一致**（CLI 契约不变，append-only）。
 
 **锁纪律**：`Proxy.pricingMu` 独立叶子锁；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入。无 stats store → `series:[]`（nil-safe）。
+
+## Web 运行时边界
+
+`web.go` 不得直接访问 `Proxy.mu`、`healthMu`、reload-owned config/provider map
+或 health/model-lock map。只读 handler 通过 `proxyReadView` 获取 detached
+dashboard/config/provider/runtime-provider 快照；网络探测与文件 I/O 必须发生在
+快照返回、锁已释放之后。写操作继续调用明确的 reload、pin、health reset 等
+应用命令，不允许在 handler 内直接修改 runtime map。
 
 ## 请求访问日志（`request_log.go`，JSONL 文件，默认关闭）
 
