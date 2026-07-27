@@ -7,11 +7,20 @@
 ## 实现入口
 
 - `Proxy.forward` / `serveOnce` / `tryTarget`
+- `dispatch_context.go`：`runtimeSnapshot`、`serveRequest`、`targetAttempt`
 - `providerHealth`、`modelLocks`、`paramBlock`
 - `classify429`、`parseResetHint`、`isModelDenied`、`parseUnsupportedParam`
 - `cooldownState`、`hasRecoveredUntried`
 
 ## 基本路由语义
+
+一次客户端请求在 `forward` 开始时只捕获一次 `runtimeSnapshot`。该快照包含
+同一 config generation 的 config、provider implementations、pool identity、
+expanded routes、models.dev catalog 与 response cache；reload 只交换新对象，
+不得原地修改快照持有的 map。`serveRequest` 是一次完整 schedule/failover pass
+的输入，`targetAttempt` 是单次 resolved target 执行契约。普通 route 与 Fusion
+synthesizer 均通过 `targetAttempt` 进入 `tryTarget`，新增横切能力不得继续扩张
+positional 参数列表。
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 

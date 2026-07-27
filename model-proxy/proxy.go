@@ -1196,18 +1196,14 @@ func (p *Proxy) publishTerminalEvent(requestID string, r *http.Request, proto, e
 // upstream path and base URL (anthropic_base_url vs openai_base_url); it does not
 // key the route.
 func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, requestID string) {
-	// Snapshot cfg + providers under a brief RLock, then release. The lock is NOT
-	// held during forwarding (which streams for minutes on SSE) — otherwise hot
-	// reload (Proxy.reload takes mu.Lock) blocks until all streams finish.
-	p.mu.RLock()
-	cfg := p.cfg
-	generation := p.configGeneration.Load()
-	provs := p.providers
-	expanded := p.expandedRoutes
-	parentOf := p.parentOf
-	poolIndex := p.poolIndex
-	cache := p.cache
-	p.mu.RUnlock()
+	// Capture all reload-owned dependencies once. The lock is NOT held during
+	// forwarding (which streams for minutes on SSE); the immutable snapshot keeps
+	// routing, providers, catalog, and cache on one config generation.
+	runtime := p.snapshotRuntime()
+	cfg := runtime.cfg
+	expanded := runtime.expandedRoutes
+	parentOf := runtime.parentOf
+	cache := runtime.cache
 
 	origBody, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -1292,8 +1288,6 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// Snapshot the models.dev catalog for request-aware routing (#8/#9 unified):
 	// a target must support the request's capability (image) and fit its context
 	// window; if none in the route fit, fall back cross-route by scheduling policy.
-	cat := p.catalogSnapshot()
-
 	// For openai protocol, strip the client's /v1 prefix (provider openai_base_url
 	// includes its own version segment, e.g. .../v3, .../paas/v4).
 	// For anthropic, keep /v1 — the official anthropic_base_url does NOT include
@@ -1339,8 +1333,28 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	retryWait := cfg.Scheduling.retryWait()
 	var st serveState
 	var sawHard, sawCool bool
+	execution := serveRequest{
+		runtime: runtime,
+
+		proto:       proto,
+		upPath:      upPath,
+		exposed:     exposed,
+		calledModel: calledModel,
+		sessionKey:  sessionKey,
+		agent:       agent,
+		requestID:   requestID,
+
+		targets:   targets,
+		routeKeys: routeKeys,
+		force:     force,
+		cacheKey:  cacheKey,
+		origBody:  origBody,
+
+		writer:  w,
+		request: r,
+	}
 	for round := 0; ; round++ {
-		res := p.serveOnce(cfg, generation, provs, poolIndex, parentOf, expanded, cat, proto, upPath, exposed, calledModel, sessionKey, targets, routeKeys, force, cache, cacheKey, w, r, agent, requestID, origBody, &st)
+		res := p.serveOnce(execution, &st)
 		if res.committed {
 			return
 		}
@@ -1469,7 +1483,31 @@ type serveResult struct {
 // serveOnce runs ONE full scheduling + failover pass: schedule → request-aware
 // routing → try each target in order (fusion recipes intercepted). forward
 // calls it in a wait-retry loop for all-cooldown situations.
-func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provider.Provider, poolIndex map[string][]string, parentOf map[string]string, expanded map[string][]RouteTarget, cat *modelsDevCatalog, proto, upPath, exposed, calledModel, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, force bool, cache *responseCache, cacheKey string, w http.ResponseWriter, r *http.Request, agent, requestID string, origBody []byte, st *serveState) serveResult {
+func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
+	runtime := req.runtime
+	cfg := runtime.cfg
+	generation := runtime.generation
+	provs := runtime.providers
+	poolIndex := runtime.poolIndex
+	parentOf := runtime.parentOf
+	expanded := runtime.expandedRoutes
+	cat := runtime.catalog
+	cache := runtime.cache
+	proto := req.proto
+	upPath := req.upPath
+	exposed := req.exposed
+	calledModel := req.calledModel
+	sessionKey := req.sessionKey
+	targets := req.targets
+	routeKeys := req.routeKeys
+	force := req.force
+	cacheKey := req.cacheKey
+	w := req.writer
+	r := req.request
+	agent := req.agent
+	requestID := req.requestID
+	origBody := req.origBody
+
 	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
 	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
 	// overrides request-aware routing (no cross-route reroute away from the pinned
@@ -1611,7 +1649,31 @@ func (p *Proxy) serveOnce(cfg *Config, generation uint64, provs map[string]provi
 				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody, generation)
 			}
 		}
-		committed, retried, outcome := p.tryTarget(cfg, proto, backendProto, calledModel, t, prov, provImpl, baseURL, effPath, body, w, r, agent, cacheKey, force, cache, flc, ctxRetry, ti == len(ordered)-1, viaResponsesVerdict, r2cCtxFor(proto, backendProto, origBody), responsesHistory, sessionKey)
+		committed, retried, outcome := p.tryTarget(targetAttempt{
+			cfg:                 cfg,
+			clientProto:         proto,
+			backendProto:        backendProto,
+			calledModel:         calledModel,
+			target:              t,
+			providerCfg:         prov,
+			providerImpl:        provImpl,
+			baseURL:             baseURL,
+			upPath:              effPath,
+			body:                body,
+			writer:              w,
+			request:             r,
+			agent:               agent,
+			cacheKey:            cacheKey,
+			force:               force,
+			cache:               cache,
+			log:                 flc,
+			contextRetry:        ctxRetry,
+			lastTarget:          ti == len(ordered)-1,
+			viaResponsesVerdict: viaResponsesVerdict,
+			responseContext:     r2cCtxFor(proto, backendProto, origBody),
+			responsesHistory:    responsesHistory,
+			responsesSession:    sessionKey,
+		})
 		res.tried[t.Provider] = true
 		switch outcome {
 		case tryFailedHard:
@@ -1661,7 +1723,31 @@ const (
 	tryRateLimited                   // 429
 )
 
-func (p *Proxy) tryTarget(cfg *Config, proto, backendProto, calledModel string, t RouteTarget, prov Provider, provImpl provider.Provider, baseURL, upPath string, body []byte, w http.ResponseWriter, r *http.Request, agent, cacheKey string, force bool, cache *responseCache, flc forwardLogCtx, ctxRetry func() []RouteTarget, lastTarget, viaResponsesVerdict bool, r2c r2cCtx, responsesHistory []any, responsesSession string) (committed bool, retried []RouteTarget, outcome tryOutcome) {
+func (p *Proxy) tryTarget(attempt targetAttempt) (committed bool, retried []RouteTarget, outcome tryOutcome) {
+	cfg := attempt.cfg
+	proto := attempt.clientProto
+	backendProto := attempt.backendProto
+	calledModel := attempt.calledModel
+	t := attempt.target
+	prov := attempt.providerCfg
+	provImpl := attempt.providerImpl
+	baseURL := attempt.baseURL
+	upPath := attempt.upPath
+	body := attempt.body
+	w := attempt.writer
+	r := attempt.request
+	agent := attempt.agent
+	cacheKey := attempt.cacheKey
+	force := attempt.force
+	cache := attempt.cache
+	flc := attempt.log
+	ctxRetry := attempt.contextRetry
+	lastTarget := attempt.lastTarget
+	viaResponsesVerdict := attempt.viaResponsesVerdict
+	r2c := attempt.responseContext
+	responsesHistory := attempt.responsesHistory
+	responsesSession := attempt.responsesSession
+
 	// Wrap the client writer to capture time-to-first-token for latency stats.
 	// All writes below go through tw; ttft is read on the commit path.
 	tw := newTimingResponseWriter(w)

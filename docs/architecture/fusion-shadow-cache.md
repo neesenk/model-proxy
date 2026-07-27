@@ -73,7 +73,7 @@ request log 是异步、非阻塞、owner-only 的 JSONL。查询分两条路径
 
 ### Synthesizer
 
-候选段随机顺序注入：Anthropic 追加 system，OpenAI 追加 user/input item。synthesizer 复用普通 `tryTarget`，因此 SSE、转换、metrics、cache、request log 和统一失败策略全部一致。
+候选段随机顺序注入：Anthropic 追加 system，OpenAI 追加 user/input item。synthesizer 与普通 route 都先构造同一个 `targetAttempt`，再进入 `tryTarget`，因此 SSE、转换、metrics、cache、request log 和统一失败策略全部一致；不得为 synthesis 重新增加平行的 positional 参数接口。
 
 工具请求只在 synthesizer 保留 tools。synthesizer 不支持 tools 时降级为原始请求直打 synthesizer。
 

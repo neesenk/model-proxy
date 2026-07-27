@@ -5,6 +5,9 @@
 ## 核心边界
 
 - `Proxy.mu` 保护 reload 交换的 config/providers/routes 快照；请求转发不得在流式响应期间长期持有它。
+- 每个请求只通过 `snapshotRuntime()` 捕获一次 reload-owned 依赖，并以
+  `runtimeSnapshot → serveRequest → targetAttempt` 传递；普通路由和 Fusion
+  synthesis 必须共享 `targetAttempt` 执行契约，不得重新扩张 positional 参数链。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。
