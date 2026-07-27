@@ -21,6 +21,7 @@ docs/                     架构、后端和 API 契约
 
 | 修改范围 | 必读 |
 |---|---|
+| 全局架构、模块边界、跨领域重构 | `docs/architecture/overview.md` |
 | `model-proxy/proxy.go`、`failclass.go`、cooldown | `model-proxy/AGENTS.md`、`docs/architecture/routing-and-failure.md` |
 | `quota.go`、schedule、sticky、pin、持久化 | `model-proxy/AGENTS.md`、`docs/architecture/runtime-state.md` |
 | `pool.go`、`resolve.go`、多账号 | `model-proxy/AGENTS.md`、`docs/architecture/provider-pools.md` |

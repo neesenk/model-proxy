@@ -1,6 +1,7 @@
 # AGENTS.md - 核心运行时规则
 
 适用于 `model-proxy/` 下的 Go daemon、CLI 和测试。Provider 子目录和 Web 前端有更具体的就近规则。
+全局模块依赖与 composition root 契约见 `../docs/architecture/overview.md`。
 
 ## 核心边界
 
