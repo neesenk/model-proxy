@@ -53,19 +53,16 @@ request log 是异步、非阻塞、owner-only 的 JSONL。查询分两条路径
 
 ### Panel
 
-每个成员独立 goroutine、独立 timeout。当前管道已经实现 resolver、runtime build gate、half-open gate、协议转换、provider rewrite、基本 429/5xx 记录、metrics、usage、live event 和 request log。
+每个成员独立 goroutine、独立 timeout。整个 Fusion 请求持有与普通 route 相同的
+`runtimeSnapshot`；panel、judge、synthesizer 与普通 route 均通过 `targetPlan`
+完成 provider config/runtime impl、backend protocol、model rewrite、协议转换及
+base URL/path 选择，Fusion 不得重新读取 reload-owned catalog/config。
 
-当前 panel/judge leg 没有复用普通 `tryTarget` 的完整模型级策略：resolver 的 `Pick` 已检查既有 model lock（与 tryTarget 同一规则，见 `resolve.go` `healthy`），但仍不会应用/学习 paramBlock、model-denied 或 empty-200。后续重构的目标顺序是：
-
-1. ~~resolver 解析 pooled provider~~（已完成）；
-2. ~~runtime impl/build gate fail-closed~~（已完成）；
-3. ~~model lock / half-open gate~~（已完成：resolver `Pick` 经 `healthy` 跳过 locked `(provider, model)`）；
-4. rewrite model、协议转换、provider rewrite、paramBlock；
-5. 剥除 tools/tool_choice，强制非流式；
-6. 使用与普通 tryTarget 一致的 429、5xx、model-denied、unsupported-param、empty-200 策略；
-7. 记录 branch metrics、usage、live event 和 request log。
-
-被 quorum/grace 主动 cancel 的分支不计 provider failure。候选文本最多 24k rune。
+panel/judge 在此共享 plan 上执行非流式、tool-free 分支，并应用与普通目标一致的
+half-open、401 refresh、paramBlock 预应用及即时学习重试、429/5xx、
+model-denied/404、empty-200 模型锁、metrics、usage、live event 和 request log
+策略。被 quorum/grace 主动 cancel 的分支不计 provider failure。候选文本最多
+24k rune。
 
 ### Quorum 与 grace
 
@@ -73,7 +70,10 @@ request log 是异步、非阻塞、owner-only 的 JSONL。查询分两条路径
 
 ### Synthesizer
 
-候选段随机顺序注入：Anthropic 追加 system，OpenAI 追加 user/input item。synthesizer 与普通 route 都先构造同一个 `targetAttempt`，再进入 `tryTarget`，因此 SSE、转换、metrics、cache、request log 和统一失败策略全部一致；不得为 synthesis 重新增加平行的 positional 参数接口。
+候选段随机顺序注入：Anthropic 追加 system，OpenAI 追加 user/input item。
+synthesizer 与普通 route 共享 `targetPlan`，再构造同一个 `targetAttempt` 进入
+`attemptExecutor.execute`，因此 SSE、转换、metrics、cache、request log 和统一
+失败策略全部一致；不得为 synthesis 重新增加平行的 positional 参数接口。
 
 工具请求只在 synthesizer 保留 tools。synthesizer 不支持 tools 时降级为原始请求直打 synthesizer。
 
@@ -95,5 +95,6 @@ judge 是可选的一次非流式内部调用，复用 panel leg 管道。成功
 - cache 完整 EOF、client cancel、转换响应 header。
 - shadow reload generation、并发 cap、sample_rate=0。
 - request log 大 body 的 metadata 内存边界和跨文件乱序。
-- Fusion pooled resolver、model lock、paramBlock、429、empty 200。
+- Fusion pooled resolver、共享 target plan、model lock、paramBlock 即时重试、
+  429、empty 200。
 - quorum impossible、grace、judge failure、tools fallback、daily budget。

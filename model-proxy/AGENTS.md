@@ -12,6 +12,8 @@
   runtime state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
 - 三协议方向只在 `conversion_registry.go` 注册；request、response、SSE 入口
   必须共享同一 pair 定义，不得各自维护方向 switch。
+- 普通 route 和所有 Fusion leg 共享 `targetPlan`；provider/protocol/model/body/
+  URL/path 准备逻辑不得在 Fusion 中复制，Fusion 只能使用请求捕获的 runtime snapshot。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。

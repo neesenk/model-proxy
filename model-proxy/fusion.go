@@ -12,8 +12,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"model-proxy/provider"
 )
 
 // fusion.go implements multi-model orchestration (panel → synthesis). A route
@@ -21,11 +19,11 @@ import (
 // recipe's panel in parallel; each member produces a NON-streaming text draft
 // (tools stripped); once a quorum of drafts is in (plus a short grace for
 // stragglers), the synthesizer model answers the CLIENT from the original
-// conversation + the collected drafts — streamed through the normal tryTarget
+// conversation + the collected drafts — streamed through the normal target
 // path, so the synthesis leg gets auth, conversion, metrics, latency, live
 // events, request logging and cache recording for free.
 //
-// Error semantics: a failed synthesis leg is a hard endpoint (tryTarget's
+// Error semantics: a failed synthesis leg is a hard endpoint (the executor's
 // answer, incl. upstream errors, goes to the client as-is — no re-orchestration;
 // a route-level failover target may still follow, as for any target). The
 // in-engine degradations all answer directly via the synthesizer with the
@@ -61,11 +59,8 @@ var (
 // fusionCtx bundles the per-request values the engine threads into panel legs
 // and the synthesizer call (all snapshotted by forward under p.mu).
 type fusionCtx struct {
-	cfg         *Config
-	provs       map[string]provider.Provider
-	parentOf    map[string]string
-	poolIndex   map[string][]string // parent → virtual ids; lets Fusion resolve pooled members/synthesizer via the resolver
-	proto       string              // client protocol ("anthropic"|"openai")
+	runtime     runtimeSnapshot
+	proto       string // client protocol ("anthropic"|"openai")
 	calledModel string
 	upPath      string // client request path (/v1 stripped for openai)
 	agent       string
@@ -179,7 +174,7 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 // finishFusion runs the synthesis leg (direct original body, or the
 // synthesis-augmented one) and records the run. The synthesis leg's
 // status/latency/tokens are read back from the live-event hub's recent ring —
-// tryTarget publishes that end event on commit, just before returning, so it
+// attemptExecutor publishes that end event on commit, just before returning, so it
 // is already visible here. The run then lands in the fusion registry and the
 // ("fusion", <workflow>) metrics counters.
 func (p *Proxy) finishFusion(fc fusionCtx, run *fusionRun, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
@@ -253,7 +248,7 @@ func collectFusionResults(results <-chan fusionLegResult, launched, quorum int, 
 // tool calls, judged by the provider's capabilities override first, then the
 // models.dev catalog (nil catalog → fits, the graceful default).
 func (p *Proxy) fusionSynthesizerSupportsTools(fc fusionCtx, st RouteTarget) bool {
-	return modelFits(p.catalogSnapshot(), targetCapabilities(fc.cfg, fc.parentOf, st), st.Model, requestProfile{hasTools: true})
+	return modelFits(fc.runtime.catalog, targetCapabilities(fc.runtime.cfg, fc.runtime.parentOf, st), st.Model, requestProfile{hasTools: true})
 }
 
 // callFusionLeg runs one non-streaming fusion sub-call: a panel member's
@@ -271,7 +266,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// without this a multi-account member was always dropped as "not available" the
 	// moment a second account was added. On !ok (unknown / not logged in / all
 	// accounts unhealthy) leave m as-is and let the build gate below report it.
-	if picked, ok := newResolver(p, fc.provs, fc.poolIndex).Pick(m, fc.sessionKey); ok {
+	if picked, ok := newResolver(p, fc.runtime.providers, fc.runtime.poolIndex).Pick(m, fc.sessionKey); ok {
 		m = picked
 	}
 	res := fusionLegResult{idx: idx, provider: m.Provider, model: m.Model}
@@ -315,17 +310,20 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 
 	// Credential/build gate (fail closed): an unbuildable member is dropped
 	// BEFORE any upstream call and only counts into the quorum math.
-	provCfg, ok := providerConfig(fc.cfg, fc.parentOf, m.Provider)
-	if !ok {
-		res.err = fmt.Errorf("unknown provider %q", m.Provider)
+	plan, err := p.planTarget(targetPlanInput{
+		runtime: fc.runtime, target: m, clientProto: fc.proto, clientPath: fc.upPath,
+	})
+	if err != nil {
+		res.err = err
 		return
 	}
-	impl := fc.provs[m.Provider]
+	provCfg := plan.providerCfg
+	impl := plan.providerImpl
 	if impl == nil {
 		res.err = fmt.Errorf("provider %s not available", m.Provider)
 		return
 	}
-	// Circuit gate (same availability rule as tryTarget): skip members the
+	// Circuit gate (same availability rule as attemptExecutor): skip members the
 	// breaker has open. record* below all clear the half-open slot; the deferred
 	// release is idempotent and covers the paths that don't record.
 	if !p.takeHalfOpenSlot(m.Provider, fc.flc.generation) {
@@ -333,80 +331,94 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		return
 	}
 	defer p.releaseHalfOpenSlot(m.Provider, fc.flc.generation)
-	sched := fc.cfg.Scheduling
+	sched := fc.runtime.cfg.Scheduling
 
-	backendProto, _ := p.resolvedBackendProto(m.Protocol, m.Provider, provCfg, m.Model, fc.proto, fc.parentOf)
-	body := srcBody
-	if m.Model != fc.calledModel {
-		body = rewriteModel(body, m.Model)
-	}
-	convert := needsConversion(fc.proto, backendProto)
-	if convert {
-		cb, err := convertRequestFor(body, fc.proto, backendProto, convertReqOpts{ProviderID: provCfg.Provider, ImageOK: imageOKForTarget(fc.cfg, fc.parentOf, p.catalogSnapshot(), m)})
-		if err != nil {
-			res.err = fmt.Errorf("convert %s→%s: %w", fc.proto, backendProto, err)
-			return
-		}
-		body = cb
+	body := plan.rewriteModel(srcBody, fc.calledModel)
+	body, err = plan.convertBody(body)
+	if err != nil {
+		res.err = fmt.Errorf("convert %s→%s: %w", fc.proto, plan.backendProto, err)
+		return
 	}
 	// Draft legs are non-streaming and tool-free: the draft only produces a
 	// text analysis; tools/tool_choice are the synthesizer's job.
 	body = stripFusionDraftFields(body)
 
-	baseURL := provCfg.OpenAIBaseURL
-	if backendProto == "anthropic" && provCfg.AnthropicBaseURL != "" {
-		baseURL = provCfg.AnthropicBaseURL
-	}
-	effPath := fc.upPath
-	if convert {
-		effPath = backendPath(backendProto)
-	}
 	legCtx, cancelLeg := context.WithTimeout(ctx, sched.timeout())
 	defer cancelLeg()
-	targetURL := strings.TrimRight(baseURL, "/") + effPath
-	targetURL, body = impl.RewriteRequest(targetURL, body, effPath)
-	req, err := http.NewRequestWithContext(legCtx, http.MethodPost, targetURL, bytes.NewReader(body))
-	if err != nil {
-		res.err = err
-		return
-	}
-	req.Header.Set("content-type", "application/json")
-	if err := impl.AuthHeaders(req); err != nil {
-		res.err = fmt.Errorf("auth: %w", err)
-		return
-	}
-	impl.ExtraHeaders(req, effPath)
-	for k, v := range provCfg.Headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		// A fusion-level cancel (grace expired / quorum unreachable / client
-		// disconnect) is NOT a provider failure — the leg was simply cut, so
-		// don't feed the circuit breaker. A genuine connection error or the
-		// per-leg timeout mirrors tryTarget: recordFailure.
-		if ctx.Err() == context.Canceled {
-			res.err = errFusionLegUnavailable
+	var (
+		req           *http.Request
+		resp          *http.Response
+		respBody      []byte
+		refreshedAuth bool
+		strippedParam bool
+	)
+	// Match the normal target pipeline's unsupported-parameter behavior: apply
+	// learned blocks before send, then learn/strip/retry one newly reported
+	// top-level parameter immediately.
+	for {
+		targetURL := strings.TrimRight(plan.baseURL, "/") + plan.upPath
+		targetURL, body = impl.RewriteRequest(targetURL, body, plan.upPath)
+		body = p.applyParamBlock(m.Provider, m.Model, body)
+		req, err = http.NewRequestWithContext(legCtx, http.MethodPost, targetURL, bytes.NewReader(body))
+		if err != nil {
+			res.err = err
 			return
 		}
-		p.recordFailure(m.Provider, sched, fc.flc.generation)
-		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evFailures)
+		req.Header.Set("content-type", "application/json")
+		if err := impl.AuthHeaders(req); err != nil {
+			res.err = fmt.Errorf("auth: %w", err)
+			return
 		}
-		res.err = err
-		return
-	}
-	defer resp.Body.Close()
-	status = resp.StatusCode
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-	if err != nil {
-		p.recordFailure(m.Provider, sched, fc.flc.generation)
-		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evFailures)
+		impl.ExtraHeaders(req, plan.upPath)
+		for k, v := range provCfg.Headers {
+			req.Header.Set(k, v)
 		}
-		res.err = err
-		return
+
+		resp, err = p.client.Do(req)
+		if err != nil {
+			// A fusion-level cancel (grace expired / quorum unreachable / client
+			// disconnect) is NOT a provider failure — the leg was simply cut.
+			if ctx.Err() == context.Canceled {
+				res.err = errFusionLegUnavailable
+				return
+			}
+			p.recordFailure(m.Provider, sched, fc.flc.generation)
+			if p.metrics != nil {
+				p.metrics.inc(m.Provider, m.Model, evFailures)
+			}
+			res.err = err
+			return
+		}
+		status = resp.StatusCode
+		respBody, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		resp.Body.Close()
+		if err != nil {
+			p.recordFailure(m.Provider, sched, fc.flc.generation)
+			if p.metrics != nil {
+				p.metrics.inc(m.Provider, m.Model, evFailures)
+			}
+			res.err = err
+			return
+		}
+		if resp.StatusCode == http.StatusUnauthorized && !refreshedAuth {
+			refreshedAuth = true
+			if refreshErr := impl.Refresh(); refreshErr == nil {
+				continue
+			}
+		}
+		if resp.StatusCode == http.StatusBadRequest && !strippedParam {
+			if param, found := parseUnsupportedParam(respBody); found {
+				p.learnParamBlock(m.Provider, m.Model, param, fc.flc.generation)
+				if stripped, changed := stripTopLevelParam(body, param); changed {
+					body = stripped
+					strippedParam = true
+					log.Printf("[fusion provider=%s] 400 unsupported parameter %q — stripped, retrying",
+						m.Provider, param)
+					continue
+				}
+			}
+		}
+		break
 	}
 	switch {
 	case resp.StatusCode == 429:
@@ -426,6 +438,18 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			p.metrics.inc(m.Provider, m.Model, evFailures)
 		}
 		res.err = fmt.Errorf("upstream status %d", resp.StatusCode)
+	case resp.StatusCode == http.StatusUnauthorized:
+		p.recordFailure(m.Provider, sched, fc.flc.generation)
+		if p.metrics != nil {
+			p.metrics.inc(m.Provider, m.Model, evFailures)
+		}
+		res.err = fmt.Errorf("upstream status %d after auth refresh", resp.StatusCode)
+	case resp.StatusCode == http.StatusNotFound || isModelDenied(resp.StatusCode, respBody):
+		p.recordModelFailure(m.Provider, m.Model, sched, fc.flc.generation)
+		if p.metrics != nil {
+			p.metrics.inc(m.Provider, m.Model, evFailures)
+		}
+		res.err = fmt.Errorf("model unavailable (status %d)", resp.StatusCode)
 	case resp.StatusCode >= 300:
 		// 4xx (non-429): client-class error — no candidate, but the provider is
 		// healthy; don't poison the circuit.
@@ -438,19 +462,24 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.text = truncateRunes(extractCandidateText(respBody), fusionCandidateMaxChars)
 		if res.text == "" {
 			res.err = errFusionEmptyDraft
+			p.recordModelFailure(m.Provider, m.Model, sched, fc.flc.generation)
+			if p.metrics != nil {
+				p.metrics.inc(m.Provider, m.Model, evFailures)
+			}
+		} else {
+			p.recordSuccess(m.Provider, m.Model, fc.flc.generation)
+			if p.metrics != nil {
+				p.metrics.inc(m.Provider, m.Model, evRequests)
+				latencyMs := time.Since(start).Milliseconds()
+				p.metrics.addLatency(m.Provider, m.Model, uint64(latencyMs), uint64(latencyMs))
+			}
+			// Usage is accounted per leg (internal books stay accurate; the
+			// client's own usage comes from the synthesizer, unmodified).
+			if p.tokens != nil {
+				p.tokens.commit(tokenKey{Provider: m.Provider, Model: m.Model}, res.usage)
+			}
+			p.agents.addTokens(fc.agent, m.Provider, m.Model, res.usage)
 		}
-		p.recordSuccess(m.Provider, m.Model, fc.flc.generation)
-		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evRequests)
-			latencyMs := time.Since(start).Milliseconds()
-			p.metrics.addLatency(m.Provider, m.Model, uint64(latencyMs), uint64(latencyMs))
-		}
-		// Usage is accounted per leg (internal books stay accurate; the client's
-		// own usage figures come from the synthesizer's stream, unmodified).
-		if p.tokens != nil {
-			p.tokens.commit(tokenKey{Provider: m.Provider, Model: m.Model}, res.usage)
-		}
-		p.agents.addTokens(fc.agent, m.Provider, m.Model, res.usage)
 	}
 	// Request log: each leg records under its own id (fusion-panel-<i>-<parent>
 	// / fusion-judge-<parent>) so per-leg detail is filterable by prefix in the
@@ -472,70 +501,56 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 }
 
 // callFusionSynthesizer sends the (possibly synthesis-augmented) body to the
-// synthesizer model through the normal tryTarget path — streaming, conversion,
+// synthesizer model through the normal attemptExecutor path — streaming, conversion,
 // auth, metrics, latency, live events, request log and cache all apply.
 func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
 	// Resolve to a runnable virtual (pooled parent → one healthy account,
 	// session-sticky so a conversation reuses one synthesizer account), same as
 	// the panel legs — otherwise a multi-account synthesizer has no impl and fails.
 	// FAIL CLOSED on resolver failure: proceeding with the unresolved (pooled
-	// parent) name would hand tryTarget a nil impl and ship an UNAUTHENTICATED
-	// request upstream (P0-1). Distinguish the causes in the log.
-	picked, ok := newResolver(p, fc.provs, fc.poolIndex).Pick(st, fc.sessionKey)
+	// parent) name would hand attemptExecutor a nil impl and fail closed.
+	picked, ok := newResolver(p, fc.runtime.providers, fc.runtime.poolIndex).Pick(st, fc.sessionKey)
 	if !ok {
 		log.Printf("[fusion] %s: synthesizer %s/%s unavailable (unknown provider, not logged in, or no healthy pooled account) — aborting synthesis",
 			fc.flc.exposed, st.Provider, st.Model)
 		return false
 	}
 	st = picked
-	prov, ok := providerConfig(fc.cfg, fc.parentOf, st.Provider)
-	if !ok {
-		log.Printf("[fusion] %s: synthesizer provider %q unknown in config", fc.flc.exposed, st.Provider)
+	plan, err := p.planTarget(targetPlanInput{
+		runtime: fc.runtime, target: st, clientProto: fc.proto, clientPath: fc.upPath,
+	})
+	if err != nil {
+		log.Printf("[fusion] %s: synthesizer target plan failed: %v", fc.flc.exposed, err)
 		return false
 	}
-	impl := fc.provs[st.Provider]
+	prov := plan.providerCfg
+	impl := plan.providerImpl
 	if impl == nil {
 		log.Printf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
 		return false
 	}
-	backendProto, viaResponsesVerdict := p.resolvedBackendProto(st.Protocol, st.Provider, prov, st.Model, fc.proto, fc.parentOf)
-	if st.Model != fc.calledModel {
-		body = rewriteModel(body, st.Model)
-	}
-	convert := needsConversion(fc.proto, backendProto)
-	if convert {
-		cb, err := convertRequestFor(body, fc.proto, backendProto, convertReqOpts{ProviderID: prov.Provider, ImageOK: imageOKForTarget(fc.cfg, fc.parentOf, p.catalogSnapshot(), st)})
-		if err != nil {
-			// Fail CLOSED: a conversion failure must not send the unconverted
-			// body to the backend (it would ship an Anthropic body to an OpenAI
-			// endpoint, or vice versa). Abort the synthesis; fusion degrades.
-			log.Printf("[fusion] synthesizer %s/%s %s→%s convert failed: %v — aborting synthesis",
-				st.Provider, st.Model, fc.proto, backendProto, err)
-			return false
-		}
-		body = cb
-	}
-	baseURL := prov.OpenAIBaseURL
-	if backendProto == "anthropic" && prov.AnthropicBaseURL != "" {
-		baseURL = prov.AnthropicBaseURL
-	}
-	effPath := fc.upPath
-	if convert {
-		effPath = backendPath(backendProto)
+	body = plan.rewriteModel(body, fc.calledModel)
+	body, err = plan.convertBody(body)
+	if err != nil {
+		// Fail CLOSED: a conversion failure must not send the unconverted body
+		// to a different backend protocol.
+		log.Printf("[fusion] synthesizer %s/%s %s→%s convert failed: %v — aborting synthesis",
+			st.Provider, st.Model, fc.proto, plan.backendProto, err)
+		return false
 	}
 	// The log ctx carries NO origBody so the request log stores the actual
 	// synthesis body (with the candidate sections), not the client's original.
 	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed, generation: fc.flc.generation}
 	committed, _, _ := p.targetExecutor().execute(targetAttempt{
-		cfg:                 fc.cfg,
+		cfg:                 fc.runtime.cfg,
 		clientProto:         fc.proto,
-		backendProto:        backendProto,
+		backendProto:        plan.backendProto,
 		calledModel:         fc.calledModel,
 		target:              st,
 		providerCfg:         prov,
 		providerImpl:        impl,
-		baseURL:             baseURL,
-		upPath:              effPath,
+		baseURL:             plan.baseURL,
+		upPath:              plan.upPath,
 		body:                body,
 		writer:              w,
 		request:             r,
@@ -544,8 +559,8 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		cache:               cache,
 		log:                 flc,
 		lastTarget:          true,
-		viaResponsesVerdict: viaResponsesVerdict,
-		responseContext:     r2cCtxFor(fc.proto, backendProto, fc.origBody),
+		viaResponsesVerdict: plan.viaResponsesVerdict,
+		responseContext:     r2cCtxFor(fc.proto, plan.backendProto, fc.origBody),
 	})
 	return committed
 }

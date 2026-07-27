@@ -645,6 +645,91 @@ func TestFusion_CircuitRecordFailure(t *testing.T) {
 	}
 }
 
+func TestFusionLegSharesTargetPolicies(t *testing.T) {
+	t.Run("unsupported parameter is learned and retried", func(t *testing.T) {
+		var mu sync.Mutex
+		hits := 0
+		pa := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			hits++
+			n := hits
+			mu.Unlock()
+			if n == 1 {
+				w.WriteHeader(http.StatusBadRequest)
+				io.WriteString(w, `{"error":{"message":"Unsupported parameter: temperature"}}`)
+				return
+			}
+			anthropicDraftResponder("draft-A")(w, r)
+		})
+		pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
+		ps := newFakeUpstream(t, anthropicSSEResponder("final"))
+		recipe := FusionConfig{
+			Panel:       []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
+			Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+		}
+		proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
+		body := `{"model":"hard","max_tokens":100,"temperature":0.2,"stream":true,"messages":[{"role":"user","content":"solve X"}]}`
+		if out := postAnthropic(t, px, body); !strings.Contains(out, "final") {
+			t.Fatalf("client body missing synthesis: %s", out)
+		}
+		if pa.hits() != 2 {
+			t.Fatalf("unsupported-parameter panel hits = %d, want 2", pa.hits())
+		}
+		var retry map[string]any
+		if err := json.Unmarshal([]byte(pa.lastBody()), &retry); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := retry["temperature"]; exists {
+			t.Errorf("retry still carries learned temperature: %s", pa.lastBody())
+		}
+		proxy.healthMu.Lock()
+		learned := proxy.paramBlock[modelLockKey{provider: "pa", model: "ma"}]["temperature"]
+		proxy.healthMu.Unlock()
+		if !learned {
+			t.Error("fusion leg did not persist unsupported parameter")
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		responder http.HandlerFunc
+	}{
+		{"model denied", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"error":{"message":"You do not have access to model ma"}}`)
+		}},
+		{"empty success", statusResponder(http.StatusOK)},
+	} {
+		t.Run(tc.name+" locks only the model", func(t *testing.T) {
+			pa := newFakeUpstream(t, tc.responder)
+			pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
+			pc := newFakeUpstream(t, anthropicDraftResponder("draft-C"))
+			ps := newFakeUpstream(t, anthropicSSEResponder("final"))
+			recipe := FusionConfig{
+				Panel: []RouteTarget{
+					{Provider: "pa", Model: "ma"},
+					{Provider: "pb", Model: "mb"},
+					{Provider: "pc", Model: "mc"},
+				},
+				Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+				MinPanel:    2,
+			}
+			proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{
+				"pa": pa, "pb": pb, "pc": pc, "ps": ps,
+			})
+			if out := postAnthropic(t, px, fusionClientBody); !strings.Contains(out, "final") {
+				t.Fatalf("client body missing synthesis: %s", out)
+			}
+			if !proxy.modelLocked("pa", "ma", time.Now()) {
+				t.Error("fusion leg failure did not lock (pa, ma)")
+			}
+			if proxy.modelLocked("pa", "other", time.Now()) {
+				t.Error("fusion leg failure poisoned another model")
+			}
+		})
+	}
+}
+
 // TestParseUsageJSON (plan #6): non-streaming usage parsing covers the
 // anthropic shape (incl. cache fields) and the openai shape.
 func TestParseUsageJSON(t *testing.T) {

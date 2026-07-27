@@ -1487,8 +1487,6 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 	runtime := req.runtime
 	cfg := runtime.cfg
 	generation := runtime.generation
-	provs := runtime.providers
-	poolIndex := runtime.poolIndex
 	parentOf := runtime.parentOf
 	expanded := runtime.expandedRoutes
 	cat := runtime.catalog
@@ -1542,8 +1540,8 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 				continue
 			}
 			fc := fusionCtx{
-				cfg: cfg, provs: provs, parentOf: parentOf, poolIndex: poolIndex,
-				proto: proto, calledModel: calledModel, upPath: upPath, agent: agent,
+				runtime: runtime,
+				proto:   proto, calledModel: calledModel, upPath: upPath, agent: agent,
 				sessionKey: sessionKey,
 				origBody:   origBody,
 				flc:        forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, generation: generation, origBody: origBody},
@@ -1558,34 +1556,19 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			log.Printf("[proto=%s model=%s] target %d (fusion/%s) failed; trying next", proto, exposed, ti, t.Model)
 			continue
 		}
-		// Resolve the provider CONFIG. For a pooled virtual ("name#<id>") the
-		// config lives under the parent name in cfg.Providers; providerConfig
-		// resolves it via parentOf. The provider IMPLEMENTATION (provImpl) is
-		// keyed by the virtual id in provs.
-		prov, ok := providerConfig(cfg, parentOf, t.Provider)
-		if !ok {
-			log.Printf("[proto=%s model=%s] target %d: unknown provider %q, skipping", proto, exposed, ti, t.Provider)
+		plan, err := p.planTarget(targetPlanInput{
+			runtime: runtime, target: t, clientProto: proto, clientPath: upPath,
+		})
+		if err != nil {
+			log.Printf("[proto=%s model=%s] target %d: %v, skipping", proto, exposed, ti, err)
 			continue
 		}
-		provImpl := provs[t.Provider]
-
-		// Backend protocol (#11 conversion): the target's declared protocol, else
-		// the provider's ProtocolHint (auto-resolve, e.g. codex→responses), else
-		// the wire probe verdict, else the client's. When it differs from the
-		// client's, convert the request body + route to the backend protocol;
-		// tryTarget converts the response back. viaResponsesVerdict marks a
-		// verdict-driven switch to responses (rewound by the 404 correction).
-		backendProto, viaResponsesVerdict := p.resolvedBackendProto(t.Protocol, t.Provider, prov, t.Model, proto, parentOf)
-		convert := needsConversion(proto, backendProto)
 
 		// Rewrite the body's model to this target's real model (per target), then
 		// convert the request to the backend protocol if needed.
-		body := origBody
-		if t.Model != calledModel {
-			body = rewriteModel(origBody, t.Model)
-		}
+		body := plan.rewriteModel(origBody, calledModel)
 		var responsesHistory []any
-		if proto == "responses" && backendProto != "responses" && p.responsesState != nil {
+		if proto == "responses" && plan.backendProto != "responses" && p.responsesState != nil {
 			expandedBody, history, hit, err := p.responsesState.expand(body, sessionKey)
 			if err != nil {
 				log.Printf("[proto=%s model=%s] target %d (%s/%s) responses state expansion failed: %v — skipping",
@@ -1598,36 +1581,23 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			body = expandedBody
 			responsesHistory = history
 		}
-		if convert {
-			cb, err := convertRequestFor(body, proto, backendProto, convertReqOpts{ProviderID: prov.Provider, ImageOK: imageOKForTarget(cfg, parentOf, cat, t)})
-			if err != nil {
-				if unsupported, ok := asUnsupportedConversion(err); ok {
-					if res.conversionErr == nil {
-						res.conversionErr = unsupported
-					}
-					log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s unsupported feature %s — trying another target",
-						proto, exposed, ti, t.Provider, t.Model, proto, backendProto, unsupported.Feature)
-					continue
+		body, err = plan.convertBody(body)
+		if err != nil {
+			if unsupported, ok := asUnsupportedConversion(err); ok {
+				if res.conversionErr == nil {
+					res.conversionErr = unsupported
 				}
-				// Fail CLOSED: a conversion failure must NOT send the unconverted
-				// body to the backend (that ships an Anthropic body to an OpenAI
-				// endpoint, or vice versa). Skip this target and try the next; if
-				// none serve, the loop's all-targets-failed path returns a 502.
-				log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s request convert failed: %v — skipping",
-					proto, exposed, ti, t.Provider, t.Model, proto, backendProto, err)
+				log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s unsupported feature %s — trying another target",
+					proto, exposed, ti, t.Provider, t.Model, proto, plan.backendProto, unsupported.Feature)
 				continue
 			}
-			body = cb
-		}
-
-		// Select the upstream base URL + path for the BACKEND protocol.
-		baseURL := prov.OpenAIBaseURL
-		if backendProto == "anthropic" && prov.AnthropicBaseURL != "" {
-			baseURL = prov.AnthropicBaseURL
-		}
-		effPath := upPath
-		if convert {
-			effPath = backendPath(backendProto)
+			// Fail CLOSED: a conversion failure must NOT send the unconverted
+			// body to the backend (that ships an Anthropic body to an OpenAI
+			// endpoint, or vice versa). Skip this target and try the next; if
+			// none serve, the loop's all-targets-failed path returns a 502.
+			log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s request convert failed: %v — skipping",
+				proto, exposed, ti, t.Provider, t.Model, proto, plan.backendProto, err)
+			continue
 		}
 
 		flc := forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, generation: generation, origBody: origBody}
@@ -1652,13 +1622,13 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		committed, retried, outcome := p.targetExecutor().execute(targetAttempt{
 			cfg:                 cfg,
 			clientProto:         proto,
-			backendProto:        backendProto,
+			backendProto:        plan.backendProto,
 			calledModel:         calledModel,
 			target:              t,
-			providerCfg:         prov,
-			providerImpl:        provImpl,
-			baseURL:             baseURL,
-			upPath:              effPath,
+			providerCfg:         plan.providerCfg,
+			providerImpl:        plan.providerImpl,
+			baseURL:             plan.baseURL,
+			upPath:              plan.upPath,
 			body:                body,
 			writer:              w,
 			request:             r,
@@ -1669,8 +1639,8 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			log:                 flc,
 			contextRetry:        ctxRetry,
 			lastTarget:          ti == len(ordered)-1,
-			viaResponsesVerdict: viaResponsesVerdict,
-			responseContext:     r2cCtxFor(proto, backendProto, origBody),
+			viaResponsesVerdict: plan.viaResponsesVerdict,
+			responseContext:     r2cCtxFor(proto, plan.backendProto, origBody),
 			responsesHistory:    responsesHistory,
 			responsesSession:    sessionKey,
 		})
