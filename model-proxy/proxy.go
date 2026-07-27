@@ -37,6 +37,7 @@ func nextRequestID() string {
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
+	lifecycle         *proxyLifecycle
 	mu                sync.RWMutex  // guards cfg/providers across reload (held by handler for the request)
 	healthMu          sync.Mutex    // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
 	configGeneration  atomic.Uint64 // incremented on every successful reload
@@ -56,6 +57,7 @@ type Proxy struct {
 	stats             *statsStore                      // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
 	flusher           *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog            *requestLogger                   // per-request access log (full bodies); nil = disabled (default) or init failure
+	reqLogStarted     bool                             // lifecycle owns loop/shutdown only when started by startRuntimeServices
 	cache             *responseCache                   // exact-match response cache (prompt-hash + TTL); nil = disabled
 	responsesState    *responsesStateStore             // previous_response_id replay for Responses clients bridged to stateless backends
 	events            *eventHub                        // live request monitor fan-out hub (SSE /api/events); always non-nil
@@ -63,6 +65,7 @@ type Proxy struct {
 	catalog           *modelsDevCatalog                // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
 	shadow            atomic.Pointer[shadowRuntime]    // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
 	pricingMu         sync.Mutex                       // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
+	closeOnce         sync.Once
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -303,6 +306,7 @@ func NewProxy(cfg *Config) *Proxy {
 func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	providers, poolIndex, parentOf := buildProviders(cfg)
 	p := &Proxy{
+		lifecycle:  newProxyLifecycle(),
 		cfg:        cfg,
 		providers:  providers,
 		client:     &http.Client{Timeout: 0},
@@ -444,25 +448,11 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	return p
 }
 
-// Close releases the proxy's background goroutines: it stops the quota tracker
-// and performs a final state flush so quota/health/cooldown state mutated since
-// the last periodic poll survives the process. Tests that build a Proxy via
-// NewProxy MUST defer this (or register it via t.Cleanup): without it the
-// poller goroutine outlives the test and can fire a persist from a stale
-// generation. No-op for directly-constructed Proxies whose tracker was never
-// started (newQuotaProxy) — stop is idempotent and the empty path skips flush.
+// Close releases every Proxy-owned background component and performs final
+// flushes. It is idempotent; lifecycle admission is closed before waiting so a
+// concurrent reload cannot add a catalog refresh behind shutdown.
 func (p *Proxy) Close() {
-	if p.responsesState != nil {
-		p.responsesState.close()
-	}
-	if p.quota != nil {
-		p.quota.stop()
-		if p.quota.path != "" {
-			if err := p.quota.persist(); err != nil {
-				log.Printf("[quota] final persist on close failed: %v", err)
-			}
-		}
-	}
+	p.closeOnce.Do(p.closeRuntimeServices)
 }
 
 // resetStats zeroes all call-statistics state: the in-memory metrics + token
@@ -804,7 +794,7 @@ func (p *Proxy) reload(configPath string) error {
 	// Refresh the models.dev catalog best-effort so newly configured model names
 	// resolve their context window / modalities for request-aware routing. A
 	// failure leaves the previous catalog in place (never fails the reload).
-	go p.initCatalog()
+	p.refreshCatalogAsync()
 	// Re-probe wire capabilities for providers whose verdict is missing or
 	// whose base_url changed (existing verdicts survive reload — wireCaps is
 	// not part of the cleared health state).

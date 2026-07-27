@@ -916,14 +916,22 @@ func diffAgent(cur, prev map[agentKey]agentCount) map[agentKey]agentCount {
 // statsFlushLoop ticks at wall-clock minute boundaries, flushing per-minute
 // deltas to SQLite. Nil-safe so a Proxy without a flusher (degenerate tests) is
 // a no-op. Returns immediately if the flusher is nil.
-func (p *Proxy) statsFlushLoop() {
+func (p *Proxy) statsFlushLoop(stop <-chan struct{}) {
 	if p.flusher == nil {
 		return
 	}
 	for {
 		d := untilNextMinute(time.Now())
-		time.Sleep(d)
-		p.flusher.flush(time.Now())
+		timer := time.NewTimer(d)
+		select {
+		case <-timer.C:
+			p.flusher.flush(time.Now())
+		case <-stop:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		}
 	}
 }
 

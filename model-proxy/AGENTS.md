@@ -16,6 +16,8 @@
   URL/path 准备逻辑不得在 Fusion 中复制，Fusion 只能使用请求捕获的 runtime snapshot。
 - Web/API handler 只能通过 `proxyReadView` 读取运行时；不得直接获取 Proxy 锁或
   读取 config/provider/health/model-lock 内部 map。
+- Proxy 级后台任务必须由 `proxyLifecycle` 接纳，daemon 只调用
+  `startRuntimeServices`/`Proxy.Close`；禁止分散启动 goroutine 或重复 final flush。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。

@@ -36,17 +36,18 @@
 18. 原子文件写不能在多个实例间共享固定 `.tmp` 名。
 19. reload 中 config generation 与运行态 snapshot/fingerprint 必须一致。
 20. supervisor 的 `spawnWorker` 可能返回 nil，调用方必须检查。
+21. Proxy 级 goroutine 必须经 `proxyLifecycle.run` 接纳；daemon 不得绕过
+    `startRuntimeServices`/`Proxy.Close` 分散启动或 final flush。
 
 ## 日志和持久化
 
-21. 文件日志禁用 ANSI color。
-22. request log list/report 不得在 metadata 查询中持有完整 body。
-23. 运行态按名字落盘必须经过 config fingerprint；测试不得写真实 `~/.model-proxy`。
-24. quota snapshot 超过 `3×poll_interval` 或带错误时只能视为 unknown。
+22. 文件日志禁用 ANSI color。
+23. request log list/report 不得在 metadata 查询中持有完整 body。
+24. 运行态按名字落盘必须经过 config fingerprint；测试不得写真实 `~/.model-proxy`。
+25. quota snapshot 超过 `3×poll_interval` 或带错误时只能视为 unknown。
 
 ## 回归要求
 
 - 每个陷阱应有测试或明确的测试缺口。
 - 修复回归时优先把规则归入对应专题文档；这里只保留跨模块摘要。
 - 已迁入 `backend-contracts.md` 或 `web-api.md` 的细节不要在这里复制。
-

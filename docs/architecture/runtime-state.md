@@ -62,6 +62,24 @@ reload 按 `p.mu → healthMu → quotaMu` 一次性切换 cfg/providers/routes 
 - 命中后展开完整 input/output 历史；miss 只对本次 orphan/dangling item 做保守修复。
 - 只记录 completed 和因 `max_output_tokens`/token length 截断的 incomplete；content_filter、其他中止或带 error 的响应不进入 replay state。
 
+## Proxy 生命周期
+
+`proxyLifecycle` 是 Proxy 级后台任务的唯一 owner。daemon 只调用
+`startRuntimeServices` 和 `Proxy.Close`，不得自行启动或关闭 stats flusher、
+request logger、catalog refresh。生命周期 gate 在同一 mutex 内完成
+accepting 检查与 `WaitGroup.Add`；shutdown 顺序为：
+
+1. 拒绝新任务并关闭 stop channel；
+2. 停止 stats 周期循环、drain request logger；
+3. 等待 reload catalog refresh 等已接纳任务；
+4. final stats flush；
+5. 关闭并 final flush Responses state；
+6. 停止 quota tracker 并持久化 quota/health/wire state。
+
+`Proxy.Close` 幂等。测试直接构造 Proxy 时仍必须注册 cleanup；只有通过
+`startRuntimeServices` 启动的 request logger 才由 lifecycle 关闭，测试手工注入
+但未启动的 logger 不得在 Close 中等待一个不存在的 loop。
+
 ## 锁顺序
 
 锁顺序是：
@@ -125,5 +143,7 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 - stale/error quota 的 unknown 降级。
 - 并发 poll/manual refresh/429 refresh 的单写正确性。
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。
+- lifecycle 关闭时拒绝新任务、等待已接纳任务、drain request logger，重复 Close
+  不阻塞。
 - fingerprint mismatch、旧请求/慢 quota poll 跨 generation、reload clear、mutation 后立即重启。
 - pin、force、unfreeze 与 cache/failover 的交互。
