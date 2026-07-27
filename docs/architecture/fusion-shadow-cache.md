@@ -36,6 +36,11 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 - 结果进入 request_log，id 以 `shadow-<primary-id>` 配对；
 - reload 必须让一次 dispatch 全程使用同一 generation 的 runtime、target、provider map 和 client。
 
+主请求在启动 goroutine 前同时捕获 `runtimeSnapshot` 与 `shadowRuntime`。Shadow
+随后与普通 route/Fusion 共用 `targetPlan` 完成 provider config/runtime impl、
+backend protocol、model rewrite、转换和 URL/path；goroutine 内禁止重新读取
+`p.cfg`/`p.providers`/`p.catalog` 或再次 load `p.shadow`。
+
 `replay` 使用 request_log 的原始客户端 body 和原 path，通过 force-provider 重发。拒绝 shadow record、非 `/v1` 路径和截断 body。
 
 ## Request log

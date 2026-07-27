@@ -66,6 +66,7 @@ type serveRequest struct {
 // Both normal routing and Fusion synthesis use this object, making additions to
 // the execution pipeline explicit without growing a 20+ argument function.
 type targetAttempt struct {
+	runtime      runtimeSnapshot
 	cfg          *Config
 	clientProto  string
 	backendProto string

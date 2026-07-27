@@ -61,6 +61,56 @@ func TestForceProvider_OverridesRouting(t *testing.T) {
 	}
 }
 
+func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
+	var oldHits, newHits atomic.Int64
+	oldUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		oldHits.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer oldUpstream.Close()
+	newUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		newHits.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer newUpstream.Close()
+
+	oldConfig := &Config{
+		Providers: map[string]Provider{
+			"candidate": {Provider: "static", OpenAIBaseURL: oldUpstream.URL},
+		},
+	}
+	p := newTestProxy(t, oldConfig)
+	p.reqLog = newRequestLogger(t.TempDir(), 1<<20, 1<<10, 0)
+	runtime := p.snapshotRuntime()
+	shadowRuntime := p.shadow.Load()
+
+	// Simulate a reload after admission but before the goroutine runs.
+	newConfig := &Config{
+		Providers: map[string]Provider{
+			"candidate": {Provider: "static", OpenAIBaseURL: newUpstream.URL},
+		},
+	}
+	p.mu.Lock()
+	p.cfg = newConfig
+	p.mu.Unlock()
+	p.shadow.Store(newShadowRuntime(newConfig))
+
+	p.runShadow(
+		runtime,
+		shadowRuntime,
+		"responses",
+		"responses",
+		"alias",
+		"alias",
+		ShadowTarget{Provider: "candidate", Model: "shadow-model"},
+		[]byte(`{"model":"alias","input":[]}`),
+		"request-1",
+	)
+	if oldHits.Load() != 1 || newHits.Load() != 0 {
+		t.Fatalf("shadow mixed reload generations: old=%d new=%d", oldHits.Load(), newHits.Load())
+	}
+}
+
 // TestReplayTarget parses --to in both --to X and --to=X forms.
 func TestReplayTarget(t *testing.T) {
 	if got := replayTarget([]string{"id", "--to", "kimi"}); got != "kimi" {

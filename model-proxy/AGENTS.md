@@ -12,8 +12,9 @@
   runtime state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
 - 三协议方向只在 `conversion_registry.go` 注册；request、response、SSE 入口
   必须共享同一 pair 定义，不得各自维护方向 switch。
-- 普通 route 和所有 Fusion leg 共享 `targetPlan`；provider/protocol/model/body/
-  URL/path 准备逻辑不得在 Fusion 中复制，Fusion 只能使用请求捕获的 runtime snapshot。
+- 普通 route、所有 Fusion leg 和 Shadow 共享 `targetPlan`；provider/protocol/
+  model/body/URL/path 准备逻辑不得复制，异步分支只能使用主请求捕获的 runtime
+  snapshot，禁止在 goroutine 内重新读取 reload-owned 状态。
 - Web/API handler 只能通过 `proxyReadView` 读取运行时；不得直接获取 Proxy 锁或
   读取 config/provider/health/model-lock 内部 map。
 - Proxy 级后台任务必须由 `proxyLifecycle` 接纳，daemon 只调用

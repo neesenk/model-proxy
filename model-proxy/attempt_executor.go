@@ -20,7 +20,7 @@ type attemptState interface {
 	learnParamBlock(provider, model, param string, generations ...uint64) bool
 	applyParamBlock(provider, model string, body []byte) []byte
 	noteWireResponsesMiss(name string)
-	runShadow(proto, bodyProto, calledModel, exposed string, shadow ShadowTarget, reqBody []byte, primaryReqID string)
+	runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime, proto, bodyProto, calledModel, exposed string, shadow ShadowTarget, reqBody []byte, primaryReqID string)
 	currentShadowRuntime() *shadowRuntime
 }
 
