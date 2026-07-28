@@ -12,6 +12,7 @@ import (
 	"time"
 
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/observe/requestlog"
 )
 
 // fusion_test.go covers the fusion orchestration engine (panel → synthesis):
@@ -254,8 +255,11 @@ func TestFusion_FanOutSynthesis(t *testing.T) {
 	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "pc": pc, "ps": ps})
 	// Wire a real request logger so panel-leg records are observable.
 	dir := t.TempDir()
-	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
-	go l.loop()
+	l := requestlog.New(requestlog.Options{
+		Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 1 << 20,
+	})
+	go l.Run()
+	t.Cleanup(l.Shutdown)
 	proxy.reqLog = l
 
 	out := postAnthropic(t, px, fusionClientBody)
@@ -344,9 +348,12 @@ func TestFusion_FanOutSynthesis(t *testing.T) {
 	}
 	// Request log: 3 panel records (fusion-panel-<i>-<parent>) + the
 	// synthesizer record (body contains the candidate sections).
-	l.shutdown()
-	records := allRecords(t, dir)
-	var panelRecs, synthRecs []requestLogRecord
+	l.Shutdown()
+	records, err := requestlog.QueryRecords(dir, requestlog.Filter{})
+	if err != nil {
+		t.Fatalf("query Fusion request records: %v", err)
+	}
+	var panelRecs, synthRecs []requestlog.Record
 	for _, r := range records {
 		if strings.HasPrefix(r.RequestID, "fusion-panel-") {
 			panelRecs = append(panelRecs, r)

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+
+	"model-proxy/internal/observe/requestlog"
 )
 
 // shadow_report_cmd.go implements `model-proxy shadow report` — the shadow
@@ -46,8 +48,8 @@ func cmdShadowReport(args []string) {
 		os.Exit(1)
 	}
 	var out struct {
-		Enabled bool                `json:"enabled"`
-		Entries []shadowReportEntry `json:"entries"`
+		Enabled bool                           `json:"enabled"`
+		Entries []requestlog.ShadowReportEntry `json:"entries"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		fmt.Fprintf(os.Stderr, "%s parse response: %v\n", cRed("✗"), err)

@@ -24,6 +24,7 @@ import (
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/transport/bodycapture"
@@ -63,7 +64,7 @@ type Proxy struct {
 	agents            *agentCounter                    // per-agent (UA) request/token counters; nil only in degenerate tests
 	stats             *statsStore                      // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
 	flusher           *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog            *requestLogger                   // per-request access log (full bodies); nil = disabled (default) or init failure
+	reqLog            *requestlog.Logger               // per-request access log (full bodies); nil = disabled (default) or init failure
 	reqLogStarted     bool                             // lifecycle owns loop/shutdown only when started by startRuntimeServices
 	cache             *responsecache.Store             // exact-match response cache (prompt-hash + TTL); nil = disabled
 	responsesState    *protocol.ResponsesStateStore    // previous_response_id replay for Responses clients bridged to stateless backends
@@ -1908,27 +1909,24 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 	var captured []byte
 	var capturedTotal int64
 	var capturedTruncated bool
-	cr := bodycapture.New(resp.Body, logger.maxBody, func(body []byte, total int64, truncated bool) {
+	cr := bodycapture.New(resp.Body, logger.MaxBodyBytes(), func(body []byte, total int64, truncated bool) {
 		captured = append([]byte(nil), body...)
 		capturedTotal = total
 		capturedTruncated = truncated
 	})
 	_, _ = io.Copy(io.Discard, cr)
 	_ = cr.Close()
-	rec := logger.buildRecord(recordInputs{
-		flc:         forwardLogCtx{requestID: "shadow-" + primaryReqID, attempt: 0, exposed: exposed},
-		r:           sreq,
-		proto:       proto,
-		calledModel: calledModel,
-		t:           RouteTarget{Provider: shadow.Provider, Model: shadow.Model},
-		resp:        resp,
-		start:       start,
-		requestBody: sbody,
-		captured:    captured,
-		total:       capturedTotal,
-		truncated:   capturedTruncated,
-	})
-	logger.record(rec)
+	logInput := requestLogInput(
+		forwardLogCtx{requestID: "shadow-" + primaryReqID, exposed: exposed},
+		sreq,
+		proto,
+		calledModel,
+		RouteTarget{Provider: shadow.Provider, Model: shadow.Model},
+		resp,
+		start,
+		sbody,
+	)
+	completeRequestLog(logger, logInput, captured, capturedTotal, capturedTruncated)
 }
 
 // tierRank maps a BillingClass to the scheduling tier order: plan(0) < unknown(1) < payg(2).

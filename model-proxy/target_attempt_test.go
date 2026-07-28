@@ -8,6 +8,7 @@ import (
 	"time"
 
 	responsecache "model-proxy/internal/cache"
+	"model-proxy/internal/observe/requestlog"
 )
 
 func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
@@ -121,9 +122,11 @@ func TestFusionSynthesizerDoesNotDispatchShadow(t *testing.T) {
 	for _, name := range []string{"panel-a", "panel-b", "synth", "shadow"} {
 		p.providers[name] = &testProv{key: name}
 	}
-	logger := newRequestLogger(t.TempDir(), 1<<20, 1<<10, 0)
-	go logger.loop()
-	t.Cleanup(logger.shutdown)
+	logger := requestlog.New(requestlog.Options{
+		Directory: t.TempDir(), MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
+	})
+	go logger.Run()
+	t.Cleanup(logger.Shutdown)
 	p.reqLog = logger
 	server := httptest.NewServer(http.HandlerFunc(p.handler))
 	t.Cleanup(server.Close)

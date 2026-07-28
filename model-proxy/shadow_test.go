@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"model-proxy/internal/observe/requestlog"
 )
 
 // TestForceProvider_OverridesRouting: a request with x-mp-force-provider is
@@ -92,7 +94,13 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 		},
 	}
 	p := newTestProxy(t, oldConfig)
-	p.reqLog = newRequestLogger(t.TempDir(), 1<<20, 1<<10, 0)
+	p.reqLog = requestlog.New(requestlog.Options{
+		Directory: t.TempDir(), MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
+	})
+	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) { p.reqLog.Run() })
+	if !p.reqLogStarted {
+		t.Fatal("request logger loop was not started")
+	}
 	p.providers["primary"] = &testProv{key: "primary"}
 	p.providers["candidate"] = &testProv{key: "candidate"}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -170,7 +178,13 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 		},
 	}
 	p := newTestProxy(t, cfg)
-	p.reqLog = newRequestLogger(t.TempDir(), 1<<20, 1<<10, 0)
+	p.reqLog = requestlog.New(requestlog.Options{
+		Directory: t.TempDir(), MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
+	})
+	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) { p.reqLog.Run() })
+	if !p.reqLogStarted {
+		t.Fatal("request logger loop was not started")
+	}
 	runtime := p.snapshotRuntime()
 	shadowRuntime := p.shadow.Load()
 
@@ -257,27 +271,23 @@ func TestShadow_LogsResult(t *testing.T) {
 		t.Errorf("client response = %s, want the primary's body", string(body))
 	}
 
-	// Wait for the shadow goroutine to hit the shadow upstream + the logger to
-	// flush its record, then read it back.
-	deadline := time.Now().Add(3 * time.Second)
-	var shadowRec *requestLogRecord
-	for time.Now().Before(deadline) {
-		if shadowHit.Load() {
-			for _, r := range allRecords(t, dir) {
-				if strings.HasPrefix(r.RequestID, "shadow-") && r.Provider == "shadowp" {
-					rr := r
-					shadowRec = &rr
-					break
-				}
-			}
-		}
-		if shadowRec != nil {
+	// Proxy.Close first waits for the admitted Shadow task; Shutdown then drains
+	// every record it enqueued. The disk query therefore has no timing window.
+	p.Close()
+	shutdown()
+	var shadowRec *requestlog.Record
+	for _, r := range allRecords(t, dir) {
+		if strings.HasPrefix(r.RequestID, "shadow-") && r.Provider == "shadowp" {
+			rr := r
+			shadowRec = &rr
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 	if shadowRec == nil {
 		t.Fatalf("shadow record not logged (shadowHit=%v)", shadowHit.Load())
+	}
+	if !shadowHit.Load() {
+		t.Fatal("shadow record was durable even though the candidate backend was not observed")
 	}
 	if shadowRec.UpstreamModel != "glm-shadow" || shadowRec.Status != 200 {
 		t.Errorf("shadow record = %+v want model glm-shadow / 200", shadowRec)
@@ -407,33 +417,22 @@ func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
 	}
 
 	// The upstream handler proves the asynchronous request reached the candidate.
-	// Its response must still be drained and recorded by the fire-and-forget
-	// runner, so wait on the observable log record with a deadline rather than a
-	// fixed delay. The deferred shutdown then drains the logger before teardown.
+	// Close waits for the fire-and-forget runner, then the logger shutdown drains
+	// its record before the disk query.
 	wantProvider := "shadow-pool#" + accountIDFor("zhipu", accountCred{APIKey: observedKey})
-	var shadowRecord *requestLogRecord
-	deadline := time.NewTimer(3 * time.Second)
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer deadline.Stop()
-	defer ticker.Stop()
-	for shadowRecord == nil {
-		for _, record := range allRecords(t, logDir) {
-			if strings.HasPrefix(record.RequestID, "shadow-") {
-				r := record
-				shadowRecord = &r
-				break
-			}
-		}
-		if shadowRecord != nil {
+	p.Close()
+	shutdownLogger()
+	var shadowRecord *requestlog.Record
+	for _, record := range allRecords(t, logDir) {
+		if strings.HasPrefix(record.RequestID, "shadow-") {
+			r := record
+			shadowRecord = &r
 			break
 		}
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			t.Fatal("shadow request log record was not written before deadline")
-		}
 	}
-	shutdownLogger() // drain any concurrently queued primary/shadow records before assertions.
+	if shadowRecord == nil {
+		t.Fatal("shadow request log record was not durable after Proxy.Close and logger Shutdown")
+	}
 	if shadowRecord.Provider != wantProvider {
 		t.Errorf("shadow log provider = %q, want selected virtual %q", shadowRecord.Provider, wantProvider)
 	}

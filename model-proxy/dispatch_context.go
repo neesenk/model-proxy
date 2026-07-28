@@ -67,6 +67,16 @@ type serveRequest struct {
 	request *http.Request
 }
 
+// forwardLogCtx carries stable request identity into target execution. Reload
+// generation remains owned by targetAttempt.runtime and is not duplicated in
+// this observation scope.
+type forwardLogCtx struct {
+	requestID string
+	attempt   int
+	exposed   string
+	origBody  []byte
+}
+
 // attemptExchange is the transport exchange for one target attempt. The body is
 // already model-rewritten, responses-state-expanded, and protocol-converted by
 // the caller; constructing an attempt never mutates it.

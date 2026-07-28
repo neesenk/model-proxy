@@ -72,10 +72,18 @@ request log 是异步、非阻塞、owner-only 的 JSONL。查询分两条路径
 `internal/transport/bodycapture.Reader`：reader 只负责有界 tee、完整长度和
 Close-once 回调，日志 schema、入队与 replay 判断不进入 transport 包。
 
-- metadata 查询（list API、shadow report）置 `recordFilter.MetadataOnly`，在 top-K 保留前丢弃 request/response body，内存边界按 `limit × metadata` 计算，不是 `limit × max_body`；UI list 上限 1000、shadow report 上限 10000 均只保留 metadata。
-- detail/replay 才反序列化并保留完整 body。
+- `requestlog.QuerySummaries` 与 `requestlog.ShadowReport` 在 top-K 保留前强制
+  丢弃 request/response body 和 response headers，内存边界按
+  `limit × metadata` 计算，不是 `limit × max_body`；UI list 上限 1000、
+  shadow report 上限 10000 均只保留 metadata，调用方没有可忘记设置的开关。
+- detail/replay 才调用 `requestlog.QueryRecords` 保留完整 body。
 
 扫描全部 `requests-*.log`（不假设文件名顺序等于 record timestamp 严格顺序，孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。
+
+JSONL schema、writer/rotation/retention、查询 heap、Summary 与 Shadow 聚合由
+`internal/observe/requestlog` 拥有；根 `request_log_adapter.go` 只完成 config
+和执行上下文到纯值 Input 的映射。通用 stream capture 留在
+`internal/transport/bodycapture`，两者不反向依赖。
 
 ## Fusion 工作流
 

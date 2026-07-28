@@ -29,6 +29,15 @@
 - 实时事件 DTO、最近 ring、订阅和非阻塞 fan-out 统一归
   `internal/observe/events`；该包是无仓库内依赖叶子。根 `live_events.go` 只保留
   SSE/keepalive 适配，不得重新持有 event ring、subscriber map 或其锁。
+- request log 的 JSONL schema、header 白名单/body 截断、非阻塞 logger、
+  rotation/retention/owner-only 权限、top-K 查询、Summary 脱敏与 Shadow 聚合
+  统一归 `internal/observe/requestlog`；该包是无仓库内依赖叶子。根
+  `request_log_adapter.go` 只映射 Config 和执行上下文纯值，capture 位置、
+  lifecycle drain、Web 参数、replay policy、Fusion/Shadow eligibility 留在根层。
+  metadata 调用必须使用 `QuerySummaries`/`ShadowReport`，不得用完整 Record
+  查询后再忘记清 body/header。
+- 通用有界响应流 tee 统一归 `internal/transport/bodycapture`，不得把 request
+  log、Responses state 或 Shadow 业务语义塞回 Reader。
 - 精确响应 cache 的 key、TTL/容量 store、bounded recorder、header normalization
   和 replay 统一归 `internal/cache`；该包是无仓库内依赖叶子。根层只做
   `CacheConfig` 适配和 force/pin/eligibility/lifecycle 编排，禁止重新声明 entry、

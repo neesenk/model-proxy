@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/protocol"
 )
 
@@ -24,9 +25,11 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 		responsesState: protocol.NewResponsesStateStore(statePath),
 	}
 	t.Cleanup(p.Close)
-	p.reqLog = newRequestLogger(logDir, 1<<20, 1<<10, 0)
+	p.reqLog = requestlog.New(requestlog.Options{
+		Directory: logDir, MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
+	})
 	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) {
-		p.reqLog.loop()
+		p.reqLog.Run()
 	})
 	if !p.reqLogStarted {
 		t.Fatal("request logger loop was not started")
@@ -41,7 +44,10 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 
 		// These writes happen at the end of an in-flight handler. Closing Proxy
 		// before HTTP drain would either lose them or write into stopped owners.
-		p.reqLog.record(&requestLogRecord{RequestID: "req-inflight"})
+		p.reqLog.Enqueue(p.reqLog.BuildRecord(requestlog.Input{
+			Timestamp: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC),
+			RequestID: "req-inflight", ResponseBody: []byte("handler-finished"),
+		}))
 		history := []any{map[string]any{
 			"type": "message", "role": "user",
 			"content": []any{map[string]any{"type": "input_text", "text": "hello"}},
@@ -119,11 +125,6 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 	// open; Responses-state ordering is asserted below by requiring the
 	// in-flight record to survive the final close-time persistence.
 	select {
-	case <-p.reqLog.closed:
-		t.Fatal("request logger closed before the in-flight handler completed")
-	default:
-	}
-	select {
 	case err := <-serveDone:
 		t.Fatalf("serve returned before the in-flight handler completed: %v", err)
 	default:
@@ -156,12 +157,13 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 		t.Fatal(msg)
 	default:
 	}
-	select {
-	case <-p.reqLog.closed:
-	default:
-		t.Fatal("request logger was not closed after handler drain")
+	records, err := requestlog.QueryRecords(logDir, requestlog.Filter{RequestID: "req-inflight"})
+	if err != nil {
+		t.Fatalf("query request log after final flush: %v", err)
 	}
-	assertFileTreeContains(t, logDir, "req-inflight")
+	if len(records) != 1 || records[0].ResponseBody != "handler-finished" {
+		t.Fatalf("final request-log flush omitted or changed in-flight record: %+v", records)
+	}
 	stateData, err := os.ReadFile(statePath)
 	if err != nil {
 		t.Fatalf("read final Responses state: %v", err)
@@ -458,31 +460,4 @@ func (l *failAfterFirstListener) Accept() (net.Conn, error) {
 	}
 	<-l.fail
 	return nil, l.err
-}
-
-func assertFileTreeContains(t *testing.T, root, want string) {
-	t.Helper()
-	found := false
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		if strings.Contains(string(data), want) {
-			found = true
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("scan %s: %v", root, err)
-	}
-	if !found {
-		t.Fatalf("%q not found under %s", want, root)
-	}
 }

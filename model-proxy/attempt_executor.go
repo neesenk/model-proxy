@@ -12,6 +12,7 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/transport/bodycapture"
 )
@@ -46,7 +47,7 @@ type attemptExecutor struct {
 	metrics        *metricsStore
 	tokens         *tokenCounter
 	agents         *agentCounter
-	reqLog         *requestLogger
+	reqLog         *requestlog.Logger
 	responsesState *protocol.ResponsesStateStore
 	events         *observeevents.Hub
 }
@@ -527,11 +528,11 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// done=true and committed, so Close is a harmless no-op (no double
 		// count). Non-SSE: body == resp.Body, equivalent to before.
 		//
-		// When request logging is enabled, wrap resp.Body in a captureReader
+		// When request logging is enabled, wrap resp.Body in a bodycapture.Reader
 		// (innermost) so the full response body is tee'd to a bounded buffer as
-		// it streams to the client; on Close it enqueues a requestLogRecord.
-		// The usageScanner wraps the captureReader (pass-through, so it sees the
-		// same bytes); scanner.Close -> captureReader.Close -> enqueue, then
+		// it streams to the client; on Close it enqueues a requestlog.Record.
+		// The usageScanner wraps the bodycapture.Reader (pass-through, so it sees
+		// the same bytes); scanner.Close -> bodycapture.Close -> enqueue, then
 		// resp.Body.Close. The token path is unchanged (cumulative counters
 		// only); request logging never touches it.
 		reqBytes := body // request bytes sent upstream (post-rewrite); capture before body is shadowed
@@ -567,20 +568,9 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// received, and for a converted non-stream response resp.Body is already
 		// read+closed → an empty capture. `body` is exactly what flushCopy sends.
 		if logger != nil {
-			body = bodycapture.New(body, logger.maxBody, func(captured []byte, total int64, truncated bool) {
-				logger.record(logger.buildRecord(recordInputs{
-					flc:         flc,
-					r:           r,
-					proto:       string(proto),
-					calledModel: calledModel,
-					t:           t,
-					resp:        resp,
-					start:       start,
-					requestBody: reqBytes,
-					captured:    captured,
-					total:       total,
-					truncated:   truncated,
-				}))
+			logInput := requestLogInput(flc, r, string(proto), calledModel, t, resp, start, reqBytes)
+			body = bodycapture.New(body, logger.MaxBodyBytes(), func(captured []byte, total int64, truncated bool) {
+				completeRequestLog(logger, logInput, captured, total, truncated)
 			})
 		}
 		if p.tokens != nil && clientOutputIsStream {

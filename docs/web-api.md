@@ -21,7 +21,7 @@
 | POST | `/api/tokens/reset` | — | `{status:"reset"}` | 清零内存 + SQLite + flusher 基线（注意：也清空响应缓存） |
 | GET | `/api/stats?from=&to=&provider=&model=&bucket=` | — | `{from,to,bucket,buckets:[...]}` | 存储 1 分钟桶；`bucket` 仅展示聚合（SQL GROUP BY）。buckets 含 `avg_latency_ms`/`avg_ttft_ms` |
 | GET | `/api/agents?from=&to=&agent=&provider=&model=&bucket=` | — | `{from,to,bucket,buckets:[...]}` | per-(agent,provider,model) 桶（`agent_buckets`：requests/input/output/latency_ms_sum/failures） |
-| GET | `/api/requests?model=&provider=&status=&errors=&from=&to=&limit=&shadow=` | — | `{enabled,records:[summary…]}` | request_log 查询（未启用 → `{enabled:false}`）。summary 含 `shadow` 布尔；`shadow=only\|exclude` 过滤影子记录。流式扫描（bufio.Scanner），limit 默认 100 上限 1000 |
+| GET | `/api/requests?model=&provider=&status=&errors=&from=&to=&limit=&shadow=` | — | `{enabled,records:[summary…]}` | request_log 查询（未启用 → `{enabled:false}`）。summary 含 `shadow` 布尔；`shadow=only\|exclude` 过滤影子记录。用 `bufio.Reader.ReadBytes` 流式扫描全部日志文件，limit 默认 100 上限 1000 |
 | GET | `/api/requests/<id>` | — | 完整 record（含 request/response body） | replay 的数据源；影子记录 id 为 `shadow-<原id>` |
 | GET | `/api/shadow-report?from=&to=` | — | `{from,to,entries:[{route,primary_provider,shadow_provider,samples,status_match_rate,primary_latency_ms,shadow_latency_ms,latency_diff_ms,primary_size_avg,shadow_size_avg}]}` | 影子评测聚合（按 `shadow-<父id>` 配对，仅成对样本计入） |
 | GET | `/api/fusion?workflow=` | — | `{workflows:{<名>:{runs,runs_today,quorum_met,degraded{原因:次数},panel_input/output,judge_input/output,synth_input/output,amplification}},runs:[{run_id,ts,route,workflow,agent,proto,quorum,drafts_used,degraded,legs[{provider,model,kind,status,latency_ms,input,output,err,cut}],judge_used,synth_committed,synth_status,synth_latency_ms,synth_input,synth_output}]}` | 编排观测（`fusionRegistry` 纯内存，200 条 run 环形新到旧；汇总数据从 eventHub 回读，**不依赖 request_log**）。degraded 原因：`insufficient_proposers`/`tools_unsupported`/`body_build_failed`/`budget_exceeded`/`multi_turn`；`amplification`=(候选+judge+汇总)/汇总 token。时间序列走 `("fusion",<workflow>)` 分钟桶（requests=编排次数、failovers=降级次数） |
@@ -88,10 +88,33 @@ Web 后台工作只能经 `webTaskOwner.run` 接纳；`web.go` 不允许裸 `go`
 取消 root context 并等待任务。GC 只删除超过 TTL 的 done/error 会话，不能删除
 仍 pending 的会话；否则 UI 会在后台任务仍可能落盘时提前得到 404。
 
-## 请求访问日志（`request_log.go`，JSONL 文件，默认关闭）
+## 请求访问日志（`internal/observe/requestlog`，JSONL 文件，默认关闭）
 
-记录每个 commit 的 upstream 调用的**完整 request+response body** + 元数据，逐行 JSON 写轮转文件，供离线分析（`jq`/`grep`）与查询 API。**默认 `enabled: false`**（零开销：不 wrap、不开文件、不起 goroutine）；改 `enabled` 需**重启**（reload 不重建 logger）。
+记录每个 commit 的 upstream 调用的 request+response body（各自受
+`max_body_bytes` 限制）和元数据，逐行 JSON 写轮转文件，供离线分析
+（`jq`/`grep`）与查询 API。**默认 `enabled: false`**（零开销：不 wrap、
+不开文件、不起 goroutine）；改 `enabled` 需**重启**（reload 不重建 logger）。
 
-热路径：`p.reqLog != nil` 时 `resp.Body`（**协议转换后**的字节）包 `internal/transport/bodycapture.Reader`（有界 tee，`max_body_bytes` 封顶，超限停捕获但字节仍透传）→ 非阻塞 `select` enqueue 到 buffered chan（cap 2048，满则计数降频 log，**绝不阻塞 forward**）。`request_id` 恒生成（启动 nonce + 原子计数器，live 事件同用）。单 goroutine drain 写文件；写失败计 `writeErrors` + 降频 log；`MkdirAll` 失败置 `dead`。轮转：超 `max_file_size`（默认 1G）或自然日变更时归档为 `requests-<start>--<end>-<seq>.log`，空文件不归档。retention（默认 30d）按 mtime 删归档文件，**活跃文件永不删**（启动/每小时/关停三次 sweep 回收上次遗留的活跃文件）。SIGINT/SIGTERM 排空 chan + 写完 + sweep + 关文件。文件 `0o600`、目录 `0o700`（含用户 prompt）。只记 commit 响应（2xx + 非 failover 4xx）；failover 中间尝试与 all-failed 502 不记。影子记录带 `shadow:true` + `request_id: shadow-<原id>`（见 `docs/architecture/fusion-shadow-cache.md`）。记录的 `request_body` 保存原始客户端请求体（replay 保真用；改写/转换前的）。`config.request_log.{enabled, dir, max_file_size, max_body_bytes, retention}`。
+热路径：根 `request_log_adapter.go` 先把请求、route target 与 response header
+快照映射为纯值 Input；`p.reqLog != nil` 时 `resp.Body`（**协议转换后**的字节）
+包 `internal/transport/bodycapture.Reader`（有界 tee，`max_body_bytes` 封顶，
+超限停捕获但字节仍透传）→ 非阻塞 enqueue 到 buffered chan（cap 2048，满则计数
+降频 log，**绝不阻塞 forward**）。`request_id` 恒生成（启动 nonce + 原子计数器，
+live 事件同用）。单 goroutine drain 写文件；写失败计数并降频 log；目录初始化失败
+后 logger fail closed。轮转：超 `max_file_size`（默认 1G）或自然日变更时归档为
+`requests-<start>--<end>-<seq>.log`，空文件不归档。retention（默认 30d）按
+mtime 删归档文件，**活跃文件永不删**（启动/每小时/关停三次 sweep 回收上次遗留
+的活跃文件）。SIGINT/SIGTERM 排空 chan + 写完 + sweep + 关文件。新建或既有日志
+目录/文件都收紧为 `0o700`/`0o600`（含用户 prompt）。只记 commit 响应
+（2xx + 非 failover 4xx）；failover 中间尝试与 all-failed 502 不记。影子记录带
+`shadow:true` + `request_id: shadow-<原id>`（见
+`docs/architecture/fusion-shadow-cache.md`）。记录的 `request_body` 保存原始
+客户端请求体（replay 保真用；改写/转换前的）。响应 header 只保存
+`content-type`、`x-request-id`、`retry-after`。配置入口为
+`request_log.{enabled, dir, max_file_size, max_body_bytes, retention}`。
 
-**查询 API/UI**：`GET /api/requests`（过滤 model/provider/status/errors/from/to/limit/`shadow=only|exclude`，流式 bufio.Scanner 逐行扫，单文件不再 GB 峰值）+ `GET /api/requests/<id>`（完整 body）+ Web UI Requests 标签页（过滤行 + 影子徽标 + 点击展开详情）。
+**查询 API/UI**：`GET /api/requests`（过滤
+model/provider/status/errors/from/to/limit/`shadow=only|exclude`，
+`QuerySummaries` 在 top-K 之前清除 request body、response body 和 response
+headers）+ `GET /api/requests/<id>`（`QueryRecords`，完整 body）+ Web UI
+Requests 标签页（过滤行 + 影子徽标 + 点击展开详情）。

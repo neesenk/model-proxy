@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"model-proxy/internal/observe/requestlog"
 )
 
 // TestDoPin covers the pin CLI core (POST /api/pin) against an httptest daemon:
@@ -146,11 +148,18 @@ func TestDoReplay(t *testing.T) {
 // incomplete request → a misleading upstream 400. doReplay refuses with a clear
 // message pointing at max_body_bytes.
 func TestDoReplay_TruncatedBody(t *testing.T) {
-	trunc := `{"model":"glm","input":"` + strings.Repeat("x", 50) + `"}` + truncMarker
+	logger := requestlog.New(requestlog.Options{MaxBodyBytes: 32})
+	record := logger.BuildRecord(requestlog.Input{
+		Timestamp:   time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC),
+		RequestID:   "trunc",
+		Path:        "/v1/responses",
+		RequestBody: []byte(`{"model":"glm","input":"` + strings.Repeat("x", 50) + `"}`),
+	})
+	if !record.RequestBodyTruncated() {
+		t.Fatalf("BuildRecord did not mark an over-limit request body as truncated: %+v", record)
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"records": []map[string]any{
-			{"path": "/v1/responses", "request_body": trunc},
-		}})
+		writeJSON(w, 200, map[string]any{"records": []requestlog.Record{*record}})
 	}))
 	defer srv.Close()
 	_, err := doReplay(srv.URL, "trunc", "zhipu")

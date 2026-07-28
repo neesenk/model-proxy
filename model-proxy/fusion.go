@@ -506,18 +506,17 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// / fusion-judge-<parent>) so per-leg detail is filterable by prefix in the
 	// log / API.
 	if logger := p.reqLog; logger != nil {
-		logger.record(logger.buildRecord(recordInputs{
-			flc:         forwardLogCtx{requestID: legID, exposed: fc.flc.exposed},
-			r:           req,
-			proto:       fc.proto,
-			calledModel: fc.calledModel,
-			t:           m,
-			resp:        resp,
-			start:       start,
-			requestBody: body,
-			captured:    respBody,
-			total:       int64(len(respBody)),
-		}))
+		logInput := requestLogInput(
+			forwardLogCtx{requestID: legID, exposed: fc.flc.exposed},
+			req,
+			fc.proto,
+			fc.calledModel,
+			m,
+			resp,
+			start,
+			body,
+		)
+		completeRequestLog(logger, logInput, respBody, int64(len(respBody)), false)
 	}
 }
 

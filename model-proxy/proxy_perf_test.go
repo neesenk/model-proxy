@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/provider"
 )
 
@@ -203,8 +204,8 @@ func BenchmarkProxy_Forward_SSE(b *testing.B) {
 }
 
 // BenchmarkProxy_Forward_RequestLog_SmallBody measures the hot-path overhead of
-// per-request access logging on a small non-streaming response: captureReader
-// tee + buildRecord + non-blocking enqueue. The logger writes to a temp dir
+// per-request access logging on a small non-streaming response: bodycapture
+// tee + record construction + non-blocking enqueue. The logger writes to a temp dir
 // with a running loop, so the full pipeline (capture -> channel -> file write)
 // is exercised. Compare against BenchmarkProxy_Forward_NoMap (logging disabled)
 // to size the cost.
@@ -216,9 +217,11 @@ func BenchmarkProxy_Forward_RequestLog_SmallBody(b *testing.B) {
 	defer px.Close()
 	// Wire a file-based request logger (running loop) onto the proxy.
 	dir := b.TempDir()
-	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
-	go l.loop()
-	defer l.shutdown()
+	l := requestlog.New(requestlog.Options{
+		Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 1 << 20,
+	})
+	go l.Run()
+	defer l.Shutdown()
 	pxp.reqLog = l
 	body := smallBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
@@ -236,7 +239,7 @@ func BenchmarkProxy_Forward_RequestLog_SmallBody(b *testing.B) {
 }
 
 // BenchmarkProxy_Forward_RequestLog_LargeBody measures logging overhead with a
-// large response body, where the captureReader tee cost (per-byte memory copy
+// large response body, where the bodycapture tee cost (per-byte memory copy
 // into the bounded buffer) dominates. The upstream returns a ~64KB body.
 func BenchmarkProxy_Forward_RequestLog_LargeBody(b *testing.B) {
 	silenceLog(b)
@@ -248,9 +251,11 @@ func BenchmarkProxy_Forward_RequestLog_LargeBody(b *testing.B) {
 	pxp, px := newProxyServerP(b, up.URL, "static", nil)
 	defer px.Close()
 	dir := b.TempDir()
-	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
-	go l.loop()
-	defer l.shutdown()
+	l := requestlog.New(requestlog.Options{
+		Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 1 << 20,
+	})
+	go l.Run()
+	defer l.Shutdown()
 	pxp.reqLog = l
 	body := smallBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
@@ -268,7 +273,7 @@ func BenchmarkProxy_Forward_RequestLog_LargeBody(b *testing.B) {
 }
 
 // BenchmarkProxy_Forward_RequestLog_1MB measures logging overhead at the
-// max_body_bytes scale (1MB response): the captureReader tee copies 1MB into
+// max_body_bytes scale (1MB response): the bodycapture reader copies 1MB into
 // the bounded buffer per request. Sizes the per-byte copy cost that dominates
 // for large streaming responses.
 func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
@@ -281,9 +286,11 @@ func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
 	pxp, px := newProxyServerP(b, up.URL, "static", nil)
 	defer px.Close()
 	dir := b.TempDir()
-	l := newRequestLogger(dir, 1<<30, 1<<20, 0)
-	go l.loop()
-	defer l.shutdown()
+	l := requestlog.New(requestlog.Options{
+		Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 1 << 20,
+	})
+	go l.Run()
+	defer l.Shutdown()
 	pxp.reqLog = l
 	body := smallBody()
 	cli := &http.Client{Timeout: 30 * time.Second}

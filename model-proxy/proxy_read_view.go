@@ -143,7 +143,7 @@ func (view proxyReadView) providerConfigs() map[string]Provider {
 }
 
 func (view proxyReadView) requestLogDirectory() string {
-	return view.proxy.reqLog.directory()
+	return view.proxy.reqLog.Directory()
 }
 
 func (view proxyReadView) tokenUsage() map[tokenKey]tokenUsage {

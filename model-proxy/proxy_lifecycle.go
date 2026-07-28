@@ -15,7 +15,7 @@ type proxyLifecycle struct {
 	stop     chan struct{}
 	wg       sync.WaitGroup
 	// beforeLogDrain tracks finite tasks whose final output is written through
-	// requestLogger (currently Shadow evaluations). Close rejects new
+	// requestlog.Logger (currently Shadow evaluations). Close rejects new
 	// admissions, waits for this group, and only then drains the logger.
 	beforeLogDrain sync.WaitGroup
 }
@@ -98,7 +98,7 @@ func (p *Proxy) startRuntimeServices(cfg *Config) {
 	p.initRequestLog(cfg.RequestLog)
 	if p.reqLog != nil {
 		p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) {
-			p.reqLog.loop()
+			p.reqLog.Run()
 		})
 	}
 
@@ -120,7 +120,7 @@ func (p *Proxy) closeRuntimeServices() {
 	p.lifecycle.beginStop()
 	p.lifecycle.waitBeforeLogDrain()
 	if p.reqLogStarted {
-		p.reqLog.shutdown()
+		p.reqLog.Shutdown()
 	}
 	p.lifecycle.wait()
 

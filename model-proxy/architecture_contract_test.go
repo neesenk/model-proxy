@@ -33,6 +33,8 @@ import (
 //     compatibility bridge.
 //   - internal/observe/events owns the live-event ring and fan-out as a
 //     repository leaf; the root live_events.go file is only an HTTP/SSE adapter.
+//   - internal/observe/requestlog owns JSONL records, writer lifecycle, queries,
+//     summaries, and shadow aggregation; root code only maps application values.
 //   - internal/cache owns exact-response keying, bounded capture,
 //     storage, header normalization, and replay as a repository leaf; the root
 //     adapter only maps resolved CacheConfig values.
@@ -123,9 +125,9 @@ func TestArchitectureBoundaries(t *testing.T) {
 		forbiddenCalls := map[string]bool{
 			"initStats": true, "initRequestLog": true, "statsFlushLoop": true,
 		}
-		// Chained internal components: <x>.reqLog.loop(), <x>.flusher.flush().
+		// Chained internal components: <x>.reqLog.Run(), <x>.flusher.flush().
 		forbiddenChains := [][2]string{
-			{"reqLog", "loop"}, {"reqLog", "shutdown"}, {"flusher", "flush"},
+			{"reqLog", "Run"}, {"reqLog", "Shutdown"}, {"flusher", "flush"},
 		}
 		for _, v := range forbiddenCallSites(f, fset, forbiddenCalls, forbiddenChains) {
 			t.Errorf("daemon.go bypasses proxyLifecycle: %s", v)
@@ -413,6 +415,68 @@ func TestArchitectureBoundaries(t *testing.T) {
 			t.Errorf("Proxy.events type = %T, want *observeevents.Hub", eventsType)
 		} else if name, ok := configSelectorName(pointer.X, "observeevents"); !ok || name != "Hub" {
 			t.Error("Proxy.events must be *observeevents.Hub")
+		}
+	})
+
+	t.Run("internal observe requestlog owns the JSONL data plane", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/observe/requestlog")
+		if _, err := os.Stat("request_log.go"); err == nil {
+			t.Error("legacy root request_log.go must not exist; request-log mechanics belong in internal/observe/requestlog")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat request_log.go: %v", err)
+		}
+
+		adapter, _ := parseGoFile(t, "request_log_adapter.go")
+		wantImports := map[string]bool{
+			"log":      true,
+			"net/http": true,
+			"time":     true,
+			"model-proxy/internal/observe/requestlog": true,
+		}
+		wantFunctions := map[string]int{
+			"requestLogInput":    0,
+			"completeRequestLog": 0,
+			"initRequestLog":     0,
+		}
+		for _, spec := range adapter.Imports {
+			importPath := strings.Trim(spec.Path.Value, `"`)
+			if !wantImports[importPath] {
+				t.Errorf("request_log_adapter.go has unexpected import %q", importPath)
+			}
+			delete(wantImports, importPath)
+		}
+		for missing := range wantImports {
+			t.Errorf("request_log_adapter.go is missing required import %q", missing)
+		}
+		for _, decl := range adapter.Decls {
+			switch decl := decl.(type) {
+			case *ast.GenDecl:
+				if decl.Tok != token.IMPORT {
+					t.Error("request_log_adapter.go must not declare types or package state")
+				}
+			case *ast.FuncDecl:
+				if _, ok := wantFunctions[decl.Name.Name]; !ok {
+					t.Errorf("request_log_adapter.go has unexpected function %s", decl.Name.Name)
+					continue
+				}
+				wantFunctions[decl.Name.Name]++
+			default:
+				t.Errorf("request_log_adapter.go has unexpected top-level declaration %T", decl)
+			}
+		}
+		for name, count := range wantFunctions {
+			if count != 1 {
+				t.Errorf("request_log_adapter.go %s declarations = %d, want exactly 1", name, count)
+			}
+		}
+
+		proxy, _ := parseGoFile(t, "proxy.go")
+		loggerType := namedStructFields(t, proxy, "Proxy")["reqLog"]
+		pointer, ok := loggerType.(*ast.StarExpr)
+		if !ok {
+			t.Errorf("Proxy.reqLog type = %T, want *requestlog.Logger", loggerType)
+		} else if name, ok := configSelectorName(pointer.X, "requestlog"); !ok || name != "Logger" {
+			t.Error("Proxy.reqLog must be *requestlog.Logger")
 		}
 	})
 
@@ -1134,14 +1198,14 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		t.Errorf("call check: got %v, want both call sites", gotCalls)
 	}
 
-	// Chained rules: p.reqLog.loop() fires, p.reqLog.flush() does not.
+	// Chained rules: p.reqLog.Run() fires, p.reqLog.Flush() does not.
 	f, fset = parse(`func h() {
-	p.reqLog.loop(ctx)
-	p.reqLog.flush()
+	p.reqLog.Run()
+	p.reqLog.Flush()
 }`)
-	gotCalls = forbiddenCallSites(f, fset, nil, [][2]string{{"reqLog", "loop"}})
+	gotCalls = forbiddenCallSites(f, fset, nil, [][2]string{{"reqLog", "Run"}})
 	if len(gotCalls) != 1 {
-		t.Errorf("chain check: got %v, want only reqLog.loop", gotCalls)
+		t.Errorf("chain check: got %v, want only reqLog.Run", gotCalls)
 	}
 
 	// Target execution checks: each synthetic regression must be detectable so

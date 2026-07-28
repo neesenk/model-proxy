@@ -91,6 +91,14 @@ forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为�
 客户端字节、client cancel、reload generation、live event 与 Web status 集成
 测试。缓存断言通过公开 `Stats` 与 HTTP 结果完成，不得读取内部 entry map/counter。
 
+请求日志的 Record 构造、header allowlist、writer rotation/权限、异步 drain/drop、
+retention、top-K 查询、Summary 脱敏与 Shadow 聚合单测归
+`internal/observe/requestlog/*_test.go`；通用有界流捕获归
+`internal/transport/bodycapture/reader_test.go`。根包只保留原始请求体与上游改写
+body 的映射、协议转换后客户端字节、HTTP list/detail 脱敏、replay 拒绝截断、
+Fusion/Shadow 记录以及 shutdown drain 顺序的集成测试。列表测试必须同时断言
+request body、response body、response headers 均不出现，不能只检查其中一项。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；

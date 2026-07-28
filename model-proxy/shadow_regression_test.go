@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -14,48 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"model-proxy/internal/observe/requestlog"
 )
-
-// TestShadowReport_Pairing: two primary + two shadow records → one aggregated
-// entry with correct metrics.
-func TestShadowReport_Pairing(t *testing.T) {
-	dir := t.TempDir()
-	// Write records: primary "p1" (2xx, 100ms, 200 bytes) + shadow "shadow-p1"
-	// (2xx, 150ms, 180 bytes), for the same route/provider pair.
-	recs := []requestLogRecord{
-		{Ts: "2026-07-19T01:00:00Z", RequestID: "p1", Exposed: "glm", Provider: "primary", Status: 200, LatencyMs: 100, ResponseSize: 200},
-		{Ts: "2026-07-19T01:00:01Z", RequestID: "shadow-p1", Exposed: "glm", Provider: "shadowp", Status: 200, LatencyMs: 150, ResponseSize: 180, Shadow: true},
-		{Ts: "2026-07-19T01:00:02Z", RequestID: "p2", Exposed: "glm", Provider: "primary", Status: 200, LatencyMs: 90, ResponseSize: 210},
-		{Ts: "2026-07-19T01:00:03Z", RequestID: "shadow-p2", Exposed: "glm", Provider: "shadowp", Status: 500, LatencyMs: 200, ResponseSize: 50, Shadow: true},
-	}
-	var b strings.Builder
-	for _, r := range recs {
-		line, _ := json.Marshal(r)
-		b.Write(line)
-		b.WriteByte('\n')
-	}
-	os.WriteFile(filepath.Join(dir, "requests-20260719-010000.log"), []byte(b.String()), 0o600)
-
-	entries, err := shadowReport(dir, recordFilter{Limit: 100})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("entries=%d want 1 (one route/primary/shadow triple)", len(entries))
-	}
-	e := entries[0]
-	if e.Samples != 2 {
-		t.Errorf("samples=%d want 2", e.Samples)
-	}
-	// Status match: p1(200) vs shadow(200) match; p2(200) vs shadow(500) mismatch. 1/2 = 0.5.
-	if e.StatusMatchRate != 0.5 {
-		t.Errorf("status_match=%v want 0.5", e.StatusMatchRate)
-	}
-	// Avg latency: primary (100+90)/2=95, shadow (150+200)/2=175, diff=80.
-	if e.PrimaryLatencyMs != 95 || e.ShadowLatencyMs != 175 || e.LatencyDiffMs != 80 {
-		t.Errorf("latency prim=%d shad=%d diff=%d want 95/175/80", e.PrimaryLatencyMs, e.ShadowLatencyMs, e.LatencyDiffMs)
-	}
-}
 
 // TestShouldShadow: rate=0 → false, rate>=1 → true, rate between → probabilistic.
 func TestShouldShadow(t *testing.T) {
@@ -288,7 +248,7 @@ func TestCmdShadowReport_InProcess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{
 			"enabled": true,
-			"entries": []shadowReportEntry{
+			"entries": []requestlog.ShadowReportEntry{
 				{Route: "glm", PrimaryProvider: "zhipu", ShadowProvider: "codex", Samples: 5, StatusMatchRate: 0.8, PrimaryLatencyMs: 100, ShadowLatencyMs: 150, LatencyDiffMs: 50, PrimarySizeAvg: 200, ShadowSizeAvg: 180},
 			},
 		})
@@ -302,32 +262,6 @@ func TestCmdShadowReport_InProcess(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("shadow report output missing %q:\n%s", want, out)
 		}
-	}
-}
-
-// TestShadowReport_Unpaired: records without a counterpart are skipped.
-func TestShadowReport_Unpaired(t *testing.T) {
-	dir := t.TempDir()
-	recs := []requestLogRecord{
-		{Ts: "2026-07-19T01:00:00Z", RequestID: "orphan", Exposed: "glm", Provider: "p", Status: 200, LatencyMs: 50},
-		{Ts: "2026-07-19T01:00:01Z", RequestID: "shadow-orphan", Exposed: "glm", Provider: "s", Status: 500, Shadow: true},
-		// A lone primary with no shadow.
-		{Ts: "2026-07-19T01:00:02Z", RequestID: "lonely", Exposed: "glm", Provider: "p", Status: 200, LatencyMs: 10},
-	}
-	var b strings.Builder
-	for _, r := range recs {
-		line, _ := json.Marshal(r)
-		b.Write(line)
-		b.WriteByte('\n')
-	}
-	os.WriteFile(filepath.Join(dir, "requests-20260719-010000.log"), []byte(b.String()), 0o600)
-	entries, err := shadowReport(dir, recordFilter{Limit: 100})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// "orphan" + "shadow-orphan" pair up; "lonely" doesn't.
-	if len(entries) != 1 {
-		t.Errorf("entries=%d want 1 (only orphan pair; lonely unpaired)", len(entries))
 	}
 }
 

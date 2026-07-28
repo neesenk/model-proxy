@@ -20,6 +20,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/pricing"
 	"model-proxy/provider"
 )
@@ -261,47 +262,42 @@ func (w *webServer) handleRequestsList(resp http.ResponseWriter, r *http.Request
 		return
 	}
 	q := r.URL.Query()
-	f := recordFilter{
+	filter := requestlog.Filter{
 		Model:      q.Get("model"),
 		Provider:   q.Get("provider"),
 		ErrorsOnly: q.Get("errors") != "",
 		Limit:      100,
 	}
 	if v := q.Get("shadow"); v == "only" || v == "exclude" {
-		f.Shadow = v
+		filter.Shadow = v
 	}
 	if v := q.Get("status"); v != "" {
 		if s, err := strconv.Atoi(v); err == nil {
-			f.Status = s
+			filter.Status = s
 		}
 	}
 	if v := q.Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			f.Limit = n
+			filter.Limit = n
 		}
 	}
-	if f.Limit > 1000 {
-		f.Limit = 1000
+	if filter.Limit > 1000 {
+		filter.Limit = 1000
 	}
 	if v := q.Get("from"); v != "" {
 		if t, ok := parseStatsTime(v); ok {
-			f.From = time.Unix(t, 0)
+			filter.From = time.Unix(t, 0)
 		}
 	}
 	if v := q.Get("to"); v != "" {
 		if t, ok := parseStatsTime(v); ok {
-			f.To = time.Unix(t, 0)
+			filter.To = time.Unix(t, 0)
 		}
 	}
-	f.MetadataOnly = true // list API returns summaries only — don't retain large bodies in the top-K
-	recs, err := queryRequestRecords(dir, f)
+	summaries, err := requestlog.QuerySummaries(dir, filter)
 	if err != nil {
 		writeJSONErr(resp, http.StatusInternalServerError, "request query: "+err.Error())
 		return
-	}
-	summaries := make([]requestLogSummary, 0, len(recs))
-	for _, rec := range recs {
-		summaries = append(summaries, summarizeRecord(rec))
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{"enabled": true, "records": summaries})
 }
@@ -317,7 +313,7 @@ func (w *webServer) handleRequestDetail(resp http.ResponseWriter, r *http.Reques
 		writeJSONErr(resp, http.StatusNotFound, "request logging is off or no id given")
 		return
 	}
-	recs, err := queryRequestRecords(dir, recordFilter{RequestID: id, Limit: 50})
+	recs, err := requestlog.QueryRecords(dir, requestlog.Filter{RequestID: id, Limit: 50})
 	if err != nil {
 		writeJSONErr(resp, http.StatusInternalServerError, "request query: "+err.Error())
 		return
@@ -595,7 +591,11 @@ func (w *webServer) handleShadowReport(resp http.ResponseWriter, r *http.Request
 			to = t
 		}
 	}
-	entries, err := shadowReport(dir, recordFilter{From: time.Unix(from, 0), To: time.Unix(to, 0), Limit: 10000})
+	entries, err := requestlog.ShadowReport(dir, requestlog.Filter{
+		From:  time.Unix(from, 0),
+		To:    time.Unix(to, 0),
+		Limit: 10000,
+	})
 	if err != nil {
 		writeJSONErr(resp, http.StatusInternalServerError, "shadow report: "+err.Error())
 		return

@@ -75,6 +75,15 @@ tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进�
 显式依赖 `events.Hub`，不得重新访问 ring、subscriber map 或互斥锁。纯 ring/
 订阅测试归内部包，HTTP、forward、Fusion 与 cache 事件契约仍在根包做集成测试。
 
+`internal/observe/requestlog` 是无仓库内依赖的请求访问日志数据面叶子包，拥有
+JSONL Record schema、body/header 截断与白名单、非阻塞队列、单 writer 的轮转/
+retention/owner-only 权限、全文件流式 top-K 查询、list-safe Summary 和 Shadow
+聚合。根 `request_log_adapter.go` 只把 `RequestLogConfig` 生效值及
+`forwardLogCtx`/HTTP/RouteTarget 映射为纯值输入；capture 在转换器外层的位置、
+`proxyLifecycle` 的 Shadow-before-drain 顺序、Web 参数、CLI replay policy 和
+Fusion/Shadow eligibility 继续由应用层编排。列表与 Shadow 必须调用强制丢弃
+body/header 的 metadata API，detail/replay 才能查询完整 Record。
+
 `internal/cache` 是无仓库内依赖的精确响应缓存叶子包，拥有请求 key、
 TTL/容量 store、客户端可见响应的 bounded recorder、header normalization 与
 逐块 flush replay。根 `cache_adapter.go` 只把 `CacheConfig` accessor 的生效值
@@ -146,6 +155,7 @@ analytics adapter → internal/pricing
 catalog adapter / routing → internal/catalog
 accounts adapter / login / provider builder → internal/accounts
 live-event publishers / SSE adapter → internal/observe/events
+target executor / Fusion / Shadow / Web / CLI → internal/observe/requestlog
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
 target plan / target executor → internal/protocol
@@ -170,6 +180,9 @@ composition root → internal/config → internal/pricing / internal/protocol
   或承担网络验证、Provider 构建、reload 与路由选择；
 - `internal/observe/events` 反向依赖 Proxy、HTTP/Web、Config、Provider 或任意
   `model-proxy/*` 包；根 SSE adapter 重新声明事件类型或拥有 ring/fan-out 状态；
+- `internal/observe/requestlog` 反向依赖 Config、Proxy、RouteTarget、Provider、
+  protocol、Web/CLI 或任意 `model-proxy/*` 包；根包重新声明 Record、writer、
+  logger、query heap 或 Shadow 聚合；
 - `internal/cache` 反向依赖 Config、Proxy、Provider、protocol、events
   或任意 `model-proxy/*` 包；根包重新声明 store、entry 或 recorder；
 - `internal/transport/bodycapture` 反向依赖 request log、protocol、Proxy、

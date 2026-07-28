@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"model-proxy/internal/observe/requestlog"
 )
 
 // replay_cmd.go implements `model-proxy replay <id> --to <provider>` (#12):
@@ -61,12 +63,7 @@ func doReplay(base, id, provider string) ([]byte, error) {
 		return nil, fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(recBody), 200))
 	}
 	var got struct {
-		Records []struct {
-			RequestID   string `json:"request_id"`
-			Method      string `json:"method"`
-			Path        string `json:"path"`
-			RequestBody string `json:"request_body"`
-		} `json:"records"`
+		Records []requestlog.Record `json:"records"`
 	}
 	if err := json.Unmarshal(recBody, &got); err != nil {
 		return nil, fmt.Errorf("parse records: %w", err)
@@ -91,7 +88,7 @@ func doReplay(base, id, provider string) ([]byte, error) {
 	// max_body_bytes (appending a truncation marker), so resending it verbatim
 	// would send an incomplete request → a misleading upstream 400. Ask the user
 	// to raise max_body_bytes instead.
-	if strings.HasSuffix(rec.RequestBody, truncMarker) {
+	if rec.RequestBodyTruncated() {
 		return nil, fmt.Errorf("record %s request body was truncated at request_log.max_body_bytes — replay would send an incomplete request; raise max_body_bytes and recapture", id)
 	}
 	path := rec.Path

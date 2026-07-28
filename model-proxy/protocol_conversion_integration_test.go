@@ -307,6 +307,7 @@ func TestForward_Convert_LogsClientProtocolBody(t *testing.T) {
 	}
 	// The request log must record the SAME anthropic body the client got — NOT the
 	// openai `choices` shape, and NOT empty.
+	shutdown()
 	recs := allRecords(t, dir)
 	if len(recs) != 1 {
 		t.Fatalf("expected 1 log record, got %d", len(recs))

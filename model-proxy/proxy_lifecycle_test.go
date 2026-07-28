@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"model-proxy/internal/observe/requestlog"
 )
 
 func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
@@ -43,32 +45,39 @@ func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
 
 func TestProxyCloseDrainsOwnedRequestLogger(t *testing.T) {
 	p := newTestProxy(t, &Config{})
-	p.reqLog = newRequestLogger(t.TempDir(), 1<<20, 1<<10, 0)
+	logDir := t.TempDir()
+	p.reqLog = requestlog.New(requestlog.Options{
+		Directory: logDir, MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
+	})
 	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) {
-		p.reqLog.loop()
+		p.reqLog.Run()
 	})
 	if !p.reqLogStarted {
 		t.Fatal("request logger loop was not started")
 	}
+	p.reqLog.Enqueue(p.reqLog.BuildRecord(requestlog.Input{
+		Timestamp: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC),
+		RequestID: "before-close", ResponseBody: []byte("durable"),
+	}))
 
 	p.Close()
-	select {
-	case <-p.reqLog.closed:
-	default:
-		t.Fatal("Close returned before request logger drained")
+	records, err := requestlog.QueryRecords(logDir, requestlog.Filter{RequestID: "before-close"})
+	if err != nil {
+		t.Fatalf("query drained request log: %v", err)
+	}
+	if len(records) != 1 || records[0].ResponseBody != "durable" {
+		t.Fatalf("Close returned without durably draining accepted record: %+v", records)
 	}
 }
 
 func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 	p := newTestProxy(t, &Config{})
-	p.reqLog = newRequestLogger(t.TempDir(), 1<<20, 1<<10, 0)
-	written := make(chan struct{}, 1)
-	p.reqLog.writeRecord = func(*requestLogRecord, time.Time) error {
-		written <- struct{}{}
-		return nil
-	}
+	logDir := t.TempDir()
+	p.reqLog = requestlog.New(requestlog.Options{
+		Directory: logDir, MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
+	})
 	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) {
-		p.reqLog.loop()
+		p.reqLog.Run()
 	})
 	if !p.reqLogStarted {
 		t.Fatal("request logger loop was not started")
@@ -79,7 +88,10 @@ func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 	if !p.lifecycle.runBeforeLogDrain(func() {
 		close(started)
 		<-release
-		p.reqLog.record(&requestLogRecord{RequestID: "shadow-r1"})
+		p.reqLog.Enqueue(p.reqLog.BuildRecord(requestlog.Input{
+			Timestamp: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC),
+			RequestID: "shadow-r1", ResponseBody: []byte("shadow-durable"),
+		}))
 	}) {
 		t.Fatal("shadow task was rejected before shutdown")
 	}
@@ -113,9 +125,11 @@ func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Close did not finish after the shadow task exited")
 	}
-	select {
-	case <-written:
-	default:
-		t.Fatal("request logger drained before the shadow record was written")
+	records, err := requestlog.QueryRecords(logDir, requestlog.Filter{RequestID: "shadow-r1"})
+	if err != nil {
+		t.Fatalf("query shadow record after Close: %v", err)
+	}
+	if len(records) != 1 || !records[0].Shadow || records[0].ResponseBody != "shadow-durable" {
+		t.Fatalf("request logger drained before the shadow record became durable: %+v", records)
 	}
 }
