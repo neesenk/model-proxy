@@ -30,6 +30,9 @@ type Reader struct {
 // New wraps source with bounded capture. The reader preserves the source's
 // Read return values exactly; capture never changes bytes delivered downstream.
 func New(source io.ReadCloser, max int, onClose Callback) *Reader {
+	if max < 0 {
+		max = 0
+	}
 	return &Reader{source: source, max: max, onClose: onClose}
 }
 
@@ -38,14 +41,15 @@ func (r *Reader) Read(buffer []byte) (int, error) {
 	n, err := r.source.Read(buffer)
 	if n > 0 {
 		r.total += int64(n)
-		if r.buffer.Len() < r.max {
-			room := r.max - r.buffer.Len()
-			if n <= room {
-				r.buffer.Write(buffer[:n])
-			} else {
-				r.buffer.Write(buffer[:room])
-				r.truncated = true
-			}
+		room := r.max - r.buffer.Len()
+		if room > n {
+			room = n
+		}
+		if room > 0 {
+			_, _ = r.buffer.Write(buffer[:room])
+		}
+		if n > room {
+			r.truncated = true
 		}
 	}
 	return n, err

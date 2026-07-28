@@ -65,6 +65,52 @@ func TestReaderTruncatesCaptureButPassesThroughFullBody(t *testing.T) {
 	}
 }
 
+func TestReaderMarksTruncatedWhenLaterReadCrossesExactBoundary(t *testing.T) {
+	source := &chunkedReadCloser{chunks: [][]byte{[]byte("1234"), []byte("5")}}
+	var captured []byte
+	var total int64
+	var truncated bool
+	reader := New(source, 4, func(got []byte, gotTotal int64, gotTruncated bool) {
+		captured = append([]byte(nil), got...)
+		total = gotTotal
+		truncated = gotTruncated
+	})
+
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if string(got) != "12345" {
+		t.Errorf("pass-through = %q, want %q", got, "12345")
+	}
+	if string(captured) != "1234" || total != 5 || !truncated {
+		t.Errorf("capture = %q total:%d truncated:%v, want %q/5/true", captured, total, truncated, "1234")
+	}
+}
+
+func TestReaderZeroLimitMarksAnyBodyTruncated(t *testing.T) {
+	var captured []byte
+	var total int64
+	var truncated bool
+	reader := New(io.NopCloser(bytes.NewReader([]byte("x"))), 0, func(got []byte, gotTotal int64, gotTruncated bool) {
+		captured = append([]byte(nil), got...)
+		total = gotTotal
+		truncated = gotTruncated
+	})
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(captured) != 0 || total != 1 || !truncated {
+		t.Errorf("capture = %q total:%d truncated:%v, want empty/1/true", captured, total, truncated)
+	}
+}
+
 func TestReaderCloseCallsCallbackAndSourceCloseOnce(t *testing.T) {
 	closeErr := errors.New("source close failed")
 	source := &closeTrackingReader{Reader: bytes.NewReader([]byte("x")), closeErr: closeErr}
@@ -138,6 +184,21 @@ type closeTrackingReader struct {
 	closeErr error
 	closes   int
 }
+
+type chunkedReadCloser struct {
+	chunks [][]byte
+}
+
+func (r *chunkedReadCloser) Read(buffer []byte) (int, error) {
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	chunk := r.chunks[0]
+	r.chunks = r.chunks[1:]
+	return copy(buffer, chunk), nil
+}
+
+func (*chunkedReadCloser) Close() error { return nil }
 
 func (r *closeTrackingReader) Close() error {
 	r.closes++
