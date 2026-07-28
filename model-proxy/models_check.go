@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,6 +51,14 @@ type dropReason struct {
 // error is reported as ok=false with reason set (status 0) - such a model is
 // conservatively dropped.
 func probeModelCallable(client *http.Client, prov Provider, impl provider.Provider, modelID string) (ok bool, status int, reason string) {
+	return probeModelCallableContext(context.Background(), client, prov, impl, modelID)
+}
+
+// probeModelCallableContext is the cancellable form used by request-scoped Web
+// probes. The context is attached before auth/header hooks so cancellation
+// covers the complete outbound round trip while the legacy CLI wrapper keeps
+// its existing signature.
+func probeModelCallableContext(ctx context.Context, client *http.Client, prov Provider, impl provider.Provider, modelID string) (ok bool, status int, reason string) {
 	// Ask the provider implementation for its probe request shape (path + body).
 	// This replaces the old `if prov.Provider == "codex"/"aqp"` branches - each
 	// provider now owns its probe path/body in its own file.
@@ -77,7 +86,7 @@ func probeModelCallable(client *http.Client, prov Provider, impl provider.Provid
 	// Provider-specific URL/body tweaks (aqp ?beta=true, codex store:false).
 	targetURL, body = impl.RewriteRequest(targetURL, body, path)
 
-	req, err := http.NewRequest(pr.Method, targetURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, pr.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return false, 0, "build request: " + err.Error()
 	}

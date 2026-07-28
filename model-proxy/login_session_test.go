@@ -33,7 +33,13 @@ func TestLoginSessionGC(t *testing.T) {
 	old := s.create("aqp")
 	old.created = time.Now().Add(-20 * time.Minute) // older than TTL
 	s.gc()
+	if _, ok := s.get(old.id); !ok {
+		t.Fatal("stale pending session was GC'd while its poll may still be running")
+	}
+
+	old.setState("error", "poll timed out")
+	s.gc()
 	if _, ok := s.get(old.id); ok {
-		t.Errorf("stale session not GC'd")
+		t.Error("stale terminal session not GC'd")
 	}
 }

@@ -108,8 +108,9 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 
 - `model-proxy listening on <LISTEN> (routes: <routeNames>)`
 - 收到 SIGHUP：`[reload] SIGHUP received, reloading config from <PATH>` + 上述结果行。
-- 收到 SIGINT/SIGTERM：停止 SIGHUP reload/Web session GC 并停止接入，最多等待
-  8 秒让在途请求完成；然后 final flush request log、Responses state、stats 和
+- 收到 SIGINT/SIGTERM：停止 SIGHUP reload，取消并等待 Web session GC/异步登录
+  轮询，再停止接入并最多等待 8 秒让在途请求完成；已进入凭据落盘 commit 的登录
+  会完成 save+reload。随后 final flush request log、Responses state、stats 和
   quota，正常退出。8 秒内未 drain 时强制取消活动连接，并记录
   `[shutdown] HTTP drain exceeded 8s (...)`; handler 完成退栈后继续 final flush。
 

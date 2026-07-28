@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,8 +73,17 @@ type codeSuccessResponse struct {
 }
 
 func requestUserCode(opts *codexLoginServerOptions, clientID string) (*userCodeResponse, error) {
+	return requestUserCodeContext(context.Background(), opts, clientID)
+}
+
+// requestUserCodeContext is requestUserCode with caller-controlled cancellation
+// of the device-flow bootstrap HTTP request.
+func requestUserCodeContext(ctx context.Context, opts *codexLoginServerOptions, clientID string) (*userCodeResponse, error) {
 	body, _ := json.Marshal(map[string]string{"client_id": clientID})
-	req, _ := http.NewRequest(http.MethodPost, opts.usercodeURL, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, opts.usercodeURL, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("request user code request: %w", err)
+	}
 	req.Header.Set("content-type", "application/json")
 	resp, err := opts.httpClient.Do(req)
 	if err != nil {
@@ -118,16 +128,28 @@ func devicePollErrorCode(body []byte) string {
 // pollForToken polls deviceauth/token until the user authorizes (or 15min timeout).
 // Returns the authorization_code + code_verifier on success.
 func pollForToken(opts *codexLoginServerOptions, deviceAuthID, userCode string, interval int) (*codeSuccessResponse, error) {
+	return pollForTokenContext(context.Background(), opts, deviceAuthID, userCode, interval)
+}
+
+// pollForTokenContext is pollForToken with caller-controlled cancellation. The
+// context covers both each device-token HTTP request and the wait between polls.
+func pollForTokenContext(ctx context.Context, opts *codexLoginServerOptions, deviceAuthID, userCode string, interval int) (*codeSuccessResponse, error) {
 	if interval <= 0 {
 		interval = 5
 	}
 	deadline := time.Now().Add(15 * time.Minute)
 	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("poll device token canceled: %w", err)
+		}
 		body, _ := json.Marshal(map[string]string{
 			"device_auth_id": deviceAuthID,
 			"user_code":      userCode,
 		})
-		req, _ := http.NewRequest(http.MethodPost, opts.deviceTokURL, strings.NewReader(string(body)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, opts.deviceTokURL, strings.NewReader(string(body)))
+		if err != nil {
+			return nil, fmt.Errorf("poll device token request: %w", err)
+		}
 		req.Header.Set("content-type", "application/json")
 		resp, err := opts.httpClient.Do(req)
 		if err != nil {
@@ -160,13 +182,31 @@ func pollForToken(opts *codexLoginServerOptions, deviceAuthID, userCode string, 
 		default:
 			return nil, fmt.Errorf("device token poll: HTTP %d: %s", resp.StatusCode, truncate(string(rb), 200))
 		}
-		time.Sleep(time.Duration(interval) * time.Second)
+
+		timer := time.NewTimer(time.Duration(interval) * time.Second)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, fmt.Errorf("poll device token canceled: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
 	return nil, fmt.Errorf("device login timed out after 15 minutes")
 }
 
 // exchangeCodeForTokens trades the authorization_code for access/refresh/id tokens.
 func exchangeCodeForTokens(opts *codexLoginServerOptions, clientID, authCode, codeVerifier string) (*provider.CodexAuthFile, error) {
+	return exchangeCodeForTokensContext(context.Background(), opts, clientID, authCode, codeVerifier)
+}
+
+// exchangeCodeForTokensContext is exchangeCodeForTokens with caller-controlled
+// cancellation of the token-exchange HTTP request.
+func exchangeCodeForTokensContext(ctx context.Context, opts *codexLoginServerOptions, clientID, authCode, codeVerifier string) (*provider.CodexAuthFile, error) {
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {authCode},
@@ -174,7 +214,10 @@ func exchangeCodeForTokens(opts *codexLoginServerOptions, clientID, authCode, co
 		"client_id":     {clientID},
 		"code_verifier": {codeVerifier},
 	}
-	req, _ := http.NewRequest(http.MethodPost, opts.tokenURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, opts.tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("exchange code request: %w", err)
+	}
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
 	resp, err := opts.httpClient.Do(req)
 	if err != nil {

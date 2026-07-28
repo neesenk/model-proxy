@@ -52,8 +52,11 @@ client→backend pair 必须同时提供 request、反向 response、反向 SSE 
 - quota、wire caps、metrics/tokens/agents、cache、pricing 各有独立 owner/leaf lock。
 - 跨域锁顺序仅允许 `healthMu → quotaMu`。
 
-Web/API 通过 `proxyReadView` 读取 detached snapshot，不直接获取 Proxy 锁或内部
-map。写操作调用明确的 reload、pin、health reset、quota refresh 等应用命令。
+Web/API 的 `webServer` 不持有 `*Proxy`，只持有 composition root 在构造时创建的
+具体 capability：`proxyReadView` 返回 detached snapshot，`proxyAdminCommands`
+执行 reload、pin、health reset、quota refresh 和账号测活等应用命令。账号测活
+只捕获一次 `runtimeSnapshot`，因此配置、路由与 provider implementation 始终来自
+同一 reload generation；网络 I/O 发生在快照完成、锁已释放之后。
 
 ## 生命周期
 
@@ -68,6 +71,11 @@ map。写操作调用明确的 reload、pin、health reset、quota refresh 等�
 quota tracker 与 Responses state store 各自拥有内部 debounce/worker，但由
 `Proxy.Close` 按统一顺序停止。
 
+Web 后台任务由独立的 `webTaskOwner` 管理，不混入 `proxyLifecycle`：login-session
+GC 与 AQP/Codex 异步登录轮询都必须经同一 admission gate 启动。HTTP transport
+关闭时先拒绝新 Web task、取消轮询并等待已接纳任务；若任务已进入凭据落盘
+commit，则允许 save + reload 完成后再关闭 Proxy。
+
 ## 依赖规则
 
 允许：
@@ -75,14 +83,15 @@ quota tracker 与 Responses state store 各自拥有内部 debounce/worker，但
 ```text
 transport → orchestration → target plan → target executor → provider
 Fusion/Shadow ────────────────┘
-Web → proxyReadView
+Web → proxyReadView / proxyAdminCommands
 lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
 ```
 
 禁止：
 
-- Web handler 直接访问 Proxy 锁、config/provider/health map；
+- `webServer` 持有 `*Proxy`，或 Web handler 绕过 capability 直接访问 Proxy；
+- `web.go` 用裸 `go` 启动绕过 `webTaskOwner` 的后台任务；
 - Fusion/Shadow 复制 provider lookup、协议选择、转换或 URL/path 逻辑；
 - request、response、SSE 各自维护协议方向 switch；
 - attemptExecutor 持有完整 `*Proxy`；
@@ -99,6 +108,7 @@ conversion entrypoints → conversion registry → pair codecs
 - Fusion、Shadow、Cache 与观测：`fusion-shadow-cache.md`
 - Web/API：`../web-api.md`
 
-架构边界的静态回归位于 `architecture_contract_test.go`（基于 go/ast 的选择器/
-调用语义检查，识别 `w.p.<field>` 及直接赋值别名，不是字符串扫描）；行为与并发验证仍按
+架构边界的静态回归位于 `architecture_contract_test.go`（基于 go/ast 检查
+`webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector 和
+账号测活的单次 runtime snapshot，不是字符串扫描）；行为与并发验证仍按
 `docs/engineering/testing.md` 执行。

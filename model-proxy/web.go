@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -38,7 +39,9 @@ var webFS fs.FS = webAssets
 // handler. The proxy's own "/" handler keeps working — ServeMux gives /ui/ and
 // /api/ precedence over "/".
 type webServer struct {
-	p          *Proxy
+	reads      proxyReadView
+	admin      proxyAdminCommands
+	tasks      *webTaskOwner
 	configFile string
 	logFile    string // resolved at runProxy time; "" → fall back to cfg.LogFile
 	sessions   *loginSessionStore
@@ -58,7 +61,9 @@ type webServer struct {
 // on-disk config path (for validate-before-write + saveAndReload).
 func newWebServer(p *Proxy, configFile string) *webServer {
 	w := &webServer{
-		p:              p,
+		reads:          p.readView(),
+		admin:          p.adminCommands(),
+		tasks:          newWebTaskOwner(),
 		configFile:     configFile,
 		sessions:       newLoginSessionStore(),
 		newAqpClientFn: newAqpClient,
@@ -69,6 +74,19 @@ func newWebServer(p *Proxy, configFile string) *webServer {
 		return o
 	}
 	return w
+}
+
+// start admits the Web component's periodic maintenance task. Long-running
+// login polls use the same owner, so close can cancel and join every Web-owned
+// goroutine before Proxy-owned state is finalized.
+func (w *webServer) start() bool {
+	return w.tasks.run(func(ctx context.Context) {
+		webGC(ctx.Done(), w.sessions)
+	})
+}
+
+func (w *webServer) close() {
+	w.tasks.close()
 }
 
 // webGC periodically drops stale login sessions. It is transport-owned by
@@ -182,7 +200,7 @@ func (w *webServer) serveAPI(resp http.ResponseWriter, r *http.Request) {
 // per-provider circuit/rate-limit health, active model locks, quota snapshots,
 // the current schedule (per-route ordered providers), and request counters.
 func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
-	view := w.p.readView().dashboard(time.Now())
+	view := w.reads.dashboard(time.Now())
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"uptime":      view.uptime,
 		"version":     version,
@@ -205,7 +223,7 @@ func (w *webServer) handleStatus(resp http.ResponseWriter, r *http.Request) {
 func (w *webServer) handleLogs(resp http.ResponseWriter, r *http.Request) {
 	path := w.logFile
 	if path == "" {
-		path = w.p.readView().logFile()
+		path = w.reads.logFile()
 	}
 	if path == "" {
 		writeJSONErr(resp, http.StatusNotFound, "no log_file configured")
@@ -236,7 +254,7 @@ func (w *webServer) handleLogs(resp http.ResponseWriter, r *http.Request) {
 // RFC3339), limit (default 100, capped at 1000). enabled=false in the response
 // when request logging is off (the UI shows a hint instead of a table).
 func (w *webServer) handleRequestsList(resp http.ResponseWriter, r *http.Request) {
-	dir := w.p.reqLog.directory()
+	dir := w.reads.requestLogDirectory()
 	if dir == "" {
 		writeJSON(resp, http.StatusOK, map[string]any{"enabled": false, "records": []any{}})
 		return
@@ -293,7 +311,7 @@ func (w *webServer) handleRequestsList(resp http.ResponseWriter, r *http.Request
 func (w *webServer) handleRequestDetail(resp http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/requests/")
 	id = strings.Trim(id, "/")
-	dir := w.p.reqLog.directory()
+	dir := w.reads.requestLogDirectory()
 	if dir == "" || id == "" {
 		writeJSONErr(resp, http.StatusNotFound, "request logging is off or no id given")
 		return
@@ -334,7 +352,7 @@ func tailFile(path string, n int) ([]string, error) {
 // surfaces account_id + email parsed from the id_token; pooled apikey
 // providers surface {id, label, added_at} from the pool.
 func (w *webServer) handleAccountsList(resp http.ResponseWriter, r *http.Request) {
-	providers := w.p.readView().providerConfigs()
+	providers := w.reads.providerConfigs()
 
 	type acct struct {
 		ID      string `json:"id"`
@@ -405,10 +423,8 @@ func (w *webServer) handleTokens(resp http.ResponseWriter, r *http.Request) {
 		tokenUsage
 	}
 	out := []entry{}
-	if w.p.tokens != nil {
-		for k, u := range w.p.tokens.snapshot() {
-			out = append(out, entry{Provider: k.Provider, Model: k.Model, tokenUsage: u})
-		}
+	for k, u := range w.reads.tokenUsage() {
+		out = append(out, entry{Provider: k.Provider, Model: k.Model, tokenUsage: u})
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{"usage": out})
 }
@@ -418,7 +434,7 @@ func (w *webServer) handleTokens(resp http.ResponseWriter, r *http.Request) {
 // (so the next flush sees zero delta). The next persist tick overwrites the DB
 // with the empty snapshot.
 func (w *webServer) handleTokensReset(resp http.ResponseWriter, r *http.Request) {
-	w.p.resetStats()
+	w.admin.resetStats()
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "reset"})
 }
 
@@ -437,19 +453,15 @@ func (w *webServer) handleQuotaRefresh(resp http.ResponseWriter, r *http.Request
 		Provider string `json:"provider,omitempty"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req) // empty body is valid -> refresh all
-	if w.p.quota == nil {
-		writeJSON(resp, http.StatusOK, map[string]string{"status": "refreshed"})
-		return
-	}
 	if req.Provider != "" {
-		if !w.p.quota.pollOne(req.Provider) {
+		if !w.admin.refreshQuota(req.Provider) {
 			writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+req.Provider)
 			return
 		}
 		writeJSON(resp, http.StatusOK, map[string]string{"status": "refreshed", "provider": req.Provider})
 		return
 	}
-	w.p.quota.pollAll(time.Now())
+	w.admin.refreshQuota("")
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "refreshed"})
 }
 
@@ -471,16 +483,14 @@ func (w *webServer) handleHealthReset(resp http.ResponseWriter, r *http.Request)
 		writeJSONErr(resp, http.StatusBadRequest, "malformed JSON body: "+err.Error())
 		return
 	}
-	cleared, locks := w.p.resetHealth(req.Provider)
+	cleared, locks, err := w.admin.resetHealthAndPersist(req.Provider)
 	// Durably persist the cleared state BEFORE answering (P1-3b): the next
 	// periodic persist is up to quota_poll_interval away, and a restart inside
 	// that window would resurrect the frozen state from disk. A persist failure
 	// is reported, not hidden behind a success response.
-	if w.p.quota != nil {
-		if err := w.p.quota.persist(); err != nil {
-			writeJSONErr(resp, http.StatusInternalServerError, "state cleared in memory but persist failed: "+err.Error())
-			return
-		}
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, "state cleared in memory but persist failed: "+err.Error())
+		return
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"cleared":             cleared,
@@ -512,14 +522,10 @@ func (w *webServer) handleStats(resp http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
 	model := r.URL.Query().Get("model")
 	bucketSecs := normalizeBucket(r.URL.Query().Get("bucket"))
-	buckets := []statsBucket{}
-	if w.p.stats != nil {
-		got, err := w.p.stats.queryRange(from, to, provider, model, bucketSecs)
-		if err != nil {
-			writeJSONErr(resp, http.StatusInternalServerError, "stats query: "+err.Error())
-			return
-		}
-		buckets = got
+	buckets, err := w.reads.stats(from, to, provider, model, bucketSecs)
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, "stats query: "+err.Error())
+		return
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"from":    from,
@@ -553,14 +559,10 @@ func (w *webServer) handleAgents(resp http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
 	model := r.URL.Query().Get("model")
 	bucketSecs := normalizeBucket(r.URL.Query().Get("bucket"))
-	buckets := []agentBucket{}
-	if w.p.stats != nil {
-		got, err := w.p.stats.queryAgentRange(from, to, agent, provider, model, bucketSecs)
-		if err != nil {
-			writeJSONErr(resp, http.StatusInternalServerError, "agent stats query: "+err.Error())
-			return
-		}
-		buckets = got
+	buckets, err := w.reads.agentStats(from, to, agent, provider, model, bucketSecs)
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, "agent stats query: "+err.Error())
+		return
 	}
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"from":    from,
@@ -574,7 +576,7 @@ func (w *webServer) handleAgents(resp http.ResponseWriter, r *http.Request) {
 // shadow comparison, paired by request_id). Query params: from/to (unix or
 // RFC3339; default last 24h). Nil-safe: no request_log → enabled=false.
 func (w *webServer) handleShadowReport(resp http.ResponseWriter, r *http.Request) {
-	dir := w.p.reqLog.directory()
+	dir := w.reads.requestLogDirectory()
 	if dir == "" {
 		writeJSON(resp, http.StatusOK, map[string]any{"enabled": false, "entries": []any{}})
 		return
@@ -608,7 +610,7 @@ func (w *webServer) handleShadowReport(resp http.ResponseWriter, r *http.Request
 // registry — no request_log dependency, nil-registry-safe (empty snapshot).
 func (w *webServer) handleFusion(resp http.ResponseWriter, r *http.Request) {
 	workflow := r.URL.Query().Get("workflow")
-	stats, runs := w.p.fusionReg.snapshot(workflow, time.Now())
+	stats, runs := w.reads.fusion(workflow, time.Now())
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"workflows": stats,
 		"runs":      runs,
@@ -638,7 +640,7 @@ func (w *webServer) handlePinSet(resp http.ResponseWriter, r *http.Request) {
 	if body.TTLSeconds > 0 {
 		ttl = time.Duration(body.TTLSeconds) * time.Second
 	}
-	pe, ok := w.p.setPin(body.Route, body.Provider, ttl)
+	pe, ok := w.admin.setPin(body.Route, body.Provider, ttl)
 	if !ok {
 		writeJSONErr(resp, http.StatusBadRequest, fmt.Sprintf(
 			"cannot pin %q to %q: no such route, or the route has no target for that provider", body.Route, body.Provider))
@@ -664,7 +666,7 @@ func (w *webServer) handlePinClear(resp http.ResponseWriter, r *http.Request) {
 		writeJSONErr(resp, http.StatusBadRequest, "route query param is required")
 		return
 	}
-	removed := w.p.clearPin(route)
+	removed := w.admin.clearPin(route)
 	writeJSON(resp, http.StatusOK, map[string]any{
 		"route":   route,
 		"removed": removed,
@@ -673,7 +675,7 @@ func (w *webServer) handlePinClear(resp http.ResponseWriter, r *http.Request) {
 
 // handlePinList lists active pins (route → {provider, expires_at}).
 func (w *webServer) handlePinList(resp http.ResponseWriter, r *http.Request) {
-	pins := w.p.listPins()
+	pins := w.reads.pins()
 	out := make([]map[string]any, 0, len(pins))
 	for route, pe := range pins {
 		expires := ""
@@ -735,17 +737,14 @@ func (w *webServer) handleAnalytics(resp http.ResponseWriter, r *http.Request) {
 		Points   []point `json:"points"`
 	}
 
-	buckets := []analyticsBucket{}
-	if w.p.stats != nil {
-		got, err := w.p.stats.queryAnalytics(from, to, provider, model, granularity)
-		if err != nil {
-			writeJSONErr(resp, http.StatusInternalServerError, "analytics query: "+err.Error())
-			return
-		}
-		buckets = got
+	buckets, err := w.reads.analytics(from, to, provider, model, granularity)
+	if err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, "analytics query: "+err.Error())
+		return
 	}
-	cat := w.p.pricingSnapshot()
-	prices := w.p.priceOverrides()
+	pricing := w.reads.pricing()
+	cat := pricing.catalog
+	prices := pricing.overrides
 
 	byKey := map[string]*series{}
 	var keys []string
@@ -836,7 +835,7 @@ func parseStatsTime(v string) (int64, bool) {
 // probe), so a concurrent request isn't blocked on the upstream timeout.
 func (w *webServer) handleAccountAdd(resp http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
-	prov, ok := w.p.readView().providerConfig(name)
+	prov, ok := w.reads.providerConfig(name)
 	if !ok {
 		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
 		return
@@ -859,7 +858,7 @@ func (w *webServer) handleAccountAdd(resp http.ResponseWriter, r *http.Request) 
 		return
 	}
 	cred := accountCred{APIKey: req.APIKey, AccessKey: req.AccessKey, SecretKey: req.SecretKey}
-	cfg := w.p.readView().config()
+	cfg := w.reads.config()
 	var (
 		id  string
 		err error
@@ -903,81 +902,28 @@ func (w *webServer) handleAccountTest(resp http.ResponseWriter, r *http.Request)
 		return
 	}
 	name, id := parts[0], parts[1]
-	cfg := w.p.readView().config()
-	prov, ok := cfg.Providers[name]
-	if !ok {
-		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
+	result, err := w.admin.accountProbe(r.Context(), name, id)
+	if err != nil {
+		status := http.StatusNotFound
+		var probeErr *accountProbeError
+		if errors.As(err, &probeErr) && probeErr.kind == accountProbeMissingModel {
+			status = http.StatusBadRequest
+		}
+		writeJSONErr(resp, status, err.Error())
 		return
 	}
-	// Resolve the account id to the virtual provider key. The id sources mirror
-	// handleAccountsList: aqp/codex read the oauth_auth file (single-credential,
-	// plain-name key), apikey providers read the credential pool (≥2 accounts →
-	// "name#<id>" virtual, 1 account → plain name).
-	key := name
-	switch prov.Provider {
-	case "aqp":
-		a, _ := provider.LoadAqpAccount(authFilePath(name, "oauth_auth"))
-		if a == nil || a.AccountID != id {
-			writeJSONErr(resp, http.StatusNotFound, "unknown account: "+id)
-			return
-		}
-	case "codex":
-		c, _ := provider.LoadCodexAccount(authFilePath(name, "oauth_auth"))
-		if c == nil || c.AccountID != id {
-			writeJSONErr(resp, http.StatusNotFound, "unknown account: "+id)
-			return
-		}
-	default:
-		pool, _ := loadPool(name, prov.Provider)
-		found := false
-		for _, a := range pool.Accounts {
-			if a.ID == id {
-				found = true
-				break
-			}
-		}
-		if !found {
-			writeJSONErr(resp, http.StatusNotFound, "unknown account: "+id)
-			return
-		}
-		if len(pool.Accounts) >= 2 {
-			key = name + "#" + id
-		}
-	}
-	// Pick a model to probe: prefer a model this provider serves in some route
-	// (sorted for determinism), else its first config model.
-	model := ""
-	if ms := routeModelsForProvider(cfg, name); len(ms) > 0 {
-		model = ms[0]
-	} else if len(prov.Models) > 0 {
-		model = prov.Models[0]
-	}
-	if model == "" {
-		writeJSONErr(resp, http.StatusBadRequest, name+" has no model to probe (no route targets it and its models: list is empty)")
-		return
-	}
-	impl := w.p.readView().runtimeProvider(key)
-	if impl == nil {
-		writeJSONErr(resp, http.StatusNotFound, "provider "+key+" not available (reload pending?)")
-		return
-	}
-	// The probe blocks on the upstream (up to the scheduling timeout) — run it
-	// WITHOUT holding p.mu so in-flight forwards aren't stalled.
-	client := &http.Client{Timeout: cfg.Scheduling.timeout()}
-	start := time.Now()
-	ok, status, reason := probeModelCallable(client, prov, impl, model)
 	out := map[string]any{
-		"http_status": status,
-		"latency_ms":  time.Since(start).Milliseconds(),
-		"provider":    name,
-		"account_id":  id,
-		"model":       model,
+		"http_status": result.httpStatus,
+		"latency_ms":  result.latency.Milliseconds(),
+		"provider":    result.provider,
+		"account_id":  result.accountID,
+		"model":       result.model,
 	}
-	if ok {
+	if result.ok {
 		out["status"] = "ok"
 	} else {
 		out["status"] = "failed"
-		out["reason"] = reason
+		out["reason"] = result.reason
 	}
 	writeJSON(resp, http.StatusOK, out)
 }
@@ -1000,7 +946,7 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 		return
 	}
 	name, id := parts[0], parts[1]
-	prov, ok := w.p.readView().providerConfig(name)
+	prov, ok := w.reads.providerConfig(name)
 	if !ok {
 		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
 		return
@@ -1053,7 +999,7 @@ func (w *webServer) handleAccountRemove(resp http.ResponseWriter, r *http.Reques
 func (w *webServer) handleLoginStart(resp http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/login/")
 	name := strings.TrimSuffix(rest, "/start")
-	prov, ok := w.p.readView().providerConfig(name)
+	prov, ok := w.reads.providerConfig(name)
 	if !ok {
 		writeJSONErr(resp, http.StatusNotFound, "unknown provider: "+name)
 		return
@@ -1077,7 +1023,7 @@ func (w *webServer) handleLoginStart(resp http.ResponseWriter, r *http.Request) 
 func (w *webServer) startAqpLogin(resp http.ResponseWriter, r *http.Request, name string) {
 	sess := w.sessions.create("aqp")
 	sess.aqpClient = w.newAqpClientFn(authFilePath(name, "oauth_auth"))
-	loginURL, err := sess.aqpClient.BootstrapLoginURL()
+	loginURL, err := sess.aqpClient.BootstrapLoginURLContext(r.Context())
 	if err != nil {
 		sess.setState("error", err.Error())
 		writeJSONErr(resp, http.StatusBadGateway, err.Error())
@@ -1089,7 +1035,14 @@ func (w *webServer) startAqpLogin(resp http.ResponseWriter, r *http.Request, nam
 	sess.mu.Lock()
 	sess.detail = loginURL
 	sess.mu.Unlock()
-	go w.runAqpPoll(sess, name)
+	if !w.tasks.run(func(ctx context.Context) {
+		w.runAqpPoll(ctx, sess, name)
+	}) {
+		err := "server is shutting down"
+		sess.setState("error", err)
+		writeJSONErr(resp, http.StatusServiceUnavailable, err)
+		return
+	}
 	writeJSON(resp, http.StatusOK, map[string]string{
 		"session_id": sess.id,
 		"login_url":  loginURL,
@@ -1101,12 +1054,12 @@ func (w *webServer) startAqpLogin(resp http.ResponseWriter, r *http.Request, nam
 // key + identity) → saveAccount → hot-reload. Every failure path sets state to
 // "error" so the poll endpoint surfaces it; there is no retry — the user starts
 // a fresh session. name is the config key so saveAccount writes the right file.
-func (w *webServer) runAqpPoll(sess *loginSession, name string) {
-	if _, err := sess.aqpClient.PollSession(3 * time.Minute); err != nil {
+func (w *webServer) runAqpPoll(ctx context.Context, sess *loginSession, name string) {
+	if _, err := sess.aqpClient.PollSessionContext(ctx, 3*time.Minute); err != nil {
 		sess.setState("error", err.Error())
 		return
 	}
-	keyData, err := sess.aqpClient.fetchAPIKey()
+	keyData, err := sess.aqpClient.fetchAPIKeyContext(ctx)
 	if err != nil {
 		sess.setState("error", "api key provisioning: "+err.Error())
 		return
@@ -1117,6 +1070,13 @@ func (w *webServer) runAqpPoll(sess *loginSession, name string) {
 		ProjectID:        keyData.ProjectID,
 		SSOSessionCookie: sess.aqpClient.SessionCookie(),
 		LastRefreshAt:    time.Now().Unix(),
+	}
+	// Credential persistence is the commit point. Respect cancellation before
+	// it, then finish save+reload atomically from the owner's perspective; close
+	// waits for this task before Proxy state can be finalized.
+	if err := ctx.Err(); err != nil {
+		sess.setState("error", err.Error())
+		return
 	}
 	if err := provider.SaveAqpAccount(authFilePath(name, "oauth_auth"), a); err != nil {
 		sess.setState("error", err.Error())
@@ -1133,7 +1093,7 @@ func (w *webServer) runAqpPoll(sess *loginSession, name string) {
 // config key so the auth file is written to <name>_oauth_auth.json.
 func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request, name string) {
 	opts := w.newCodexOptions()
-	uc, err := requestUserCode(opts, provider.CodexOAuthClientID)
+	uc, err := requestUserCodeContext(r.Context(), opts, provider.CodexOAuthClientID)
 	if err != nil {
 		writeJSONErr(resp, http.StatusBadGateway, err.Error())
 		return
@@ -1152,7 +1112,14 @@ func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request, n
 	sess.mu.Lock()
 	sess.detail = codexOAuthVerifyURL + "  code: " + uc.UserCode
 	sess.mu.Unlock()
-	go w.runCodexPoll(sess, name)
+	if !w.tasks.run(func(ctx context.Context) {
+		w.runCodexPoll(ctx, sess, name)
+	}) {
+		err := "server is shutting down"
+		sess.setState("error", err)
+		writeJSONErr(resp, http.StatusServiceUnavailable, err)
+		return
+	}
 	writeJSON(resp, http.StatusOK, map[string]string{
 		"session_id": sess.id,
 		"verify_url": codexOAuthVerifyURL,
@@ -1166,15 +1133,22 @@ func (w *webServer) startCodexLogin(resp http.ResponseWriter, r *http.Request, n
 // file 0600 → hot-reload. Every failure path sets state to "error" so the poll
 // endpoint surfaces it; there is no retry — the user starts a fresh session.
 // name is the config key so the auth file is written to <name>_oauth_auth.json.
-func (w *webServer) runCodexPoll(sess *loginSession, name string) {
+func (w *webServer) runCodexPoll(ctx context.Context, sess *loginSession, name string) {
 	cs := sess.codex
-	authCode, err := pollForToken(cs.opts, cs.deviceAuthID, cs.userCode, cs.interval)
+	authCode, err := pollForTokenContext(ctx, cs.opts, cs.deviceAuthID, cs.userCode, cs.interval)
 	if err != nil {
 		sess.setState("error", err.Error())
 		return
 	}
-	af, err := exchangeCodeForTokens(cs.opts, provider.CodexOAuthClientID, authCode.AuthorizationCode, authCode.CodeVerifier)
+	af, err := exchangeCodeForTokensContext(ctx, cs.opts, provider.CodexOAuthClientID, authCode.AuthorizationCode, authCode.CodeVerifier)
 	if err != nil {
+		sess.setState("error", err.Error())
+		return
+	}
+	// As with AQP, cancellation is honored until the credential commit begins.
+	// Once admitted here, file persistence and reload run to completion while
+	// webTaskOwner.close waits.
+	if err := ctx.Err(); err != nil {
 		sess.setState("error", err.Error())
 		return
 	}
@@ -1325,7 +1299,7 @@ func (w *webServer) saveAndReload(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := w.p.reload(w.configFile); err != nil {
+	if err := w.admin.reload(w.configFile); err != nil {
 		var applied *reloadAppliedWarning
 		if errors.As(err, &applied) {
 			return err // config is already live; rolling the file back would diverge it
@@ -1351,7 +1325,7 @@ func (w *webServer) saveAndReload(data []byte) error {
 // the operator must know, not see a silent success. Contrast saveAndReload
 // (config edits), which validates first and rolls back on failure.
 func (w *webServer) reloadAfterMutation() string {
-	if err := w.p.reload(w.configFile); err != nil {
+	if err := w.admin.reload(w.configFile); err != nil {
 		var applied *reloadAppliedWarning
 		if errors.As(err, &applied) {
 			log.Printf("[accounts] %v — credentials and runtime config are live, but runtime-state durability is degraded", err)

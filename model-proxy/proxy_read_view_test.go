@@ -29,8 +29,7 @@ func TestProxyReadViewReturnsDetachedSnapshots(t *testing.T) {
 		t.Fatalf("read view leaked mutable runtime references: warning=%q provider=%q", warning, providerID)
 	}
 	if dashboard.listen != "127.0.0.1:1234" ||
-		len(dashboard.modelLocks["up"]) != 1 ||
-		view.runtimeProvider("up") == nil {
+		len(dashboard.modelLocks["up"]) != 1 {
 		t.Fatalf("incomplete read view: %+v", dashboard)
 	}
 }

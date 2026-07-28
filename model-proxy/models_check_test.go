@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"model-proxy/provider"
 )
@@ -101,6 +103,61 @@ func TestProbeModelCallable_OpenAI2xx(t *testing.T) {
 	if gotPath != "/chat/completions" {
 		t.Errorf("openai probe path=%q want /chat/completions", gotPath)
 	}
+}
+
+func TestProbeModelCallableContext_CancelsUpstreamRequest(t *testing.T) {
+	started := make(chan struct{})
+	upstreamCanceled := make(chan struct{})
+	client := &http.Client{Transport: modelProbeRoundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		close(started)
+		<-r.Context().Done()
+		close(upstreamCanceled)
+		return nil, r.Context().Err()
+	})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var (
+		ok     bool
+		status int
+		reason string
+	)
+	go func() {
+		ok, status, reason = probeModelCallableContext(
+			ctx,
+			client,
+			Provider{OpenAIBaseURL: "https://probe.invalid", Provider: "static"},
+			&fakeProviderImpl{},
+			"cancel-me",
+		)
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not reach upstream")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("probe did not return after request context cancellation")
+	}
+	if ok || status != 0 || !strings.Contains(reason, context.Canceled.Error()) {
+		t.Fatalf("cancelled probe = ok=%v status=%d reason=%q", ok, status, reason)
+	}
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("upstream request context was not cancelled")
+	}
+}
+
+type modelProbeRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f modelProbeRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // --- probeModelCallable: anthropic base → anthropic-shaped probe ---

@@ -16,7 +16,7 @@
 | GET | `/api/accounts` | — | `{providers:[{name,provider_id,billing,accounts:[{id,label,added_at,[email]}]}]}` | **响应无任何 key 字段**（无法泄漏）；id 不掩码（UI 要用它删） |
 | POST | `/api/accounts/<provider>` | `{api_key, access_key?, secret_key?, label?, replace?}` | `{id,status:"added",warning?}` | 仅 apikey 类；aqp/codex 返 400 指向 async login。volcengine 走 `addVolcengineAccount`（探 usage_url 验 Ark API Key + 可选 AK/SK 经签名 GetAFPUsage），其余（含 kimi-code）探 usage_url。落盘后 best-effort reload；reload 失败（config.yaml 不可读/非法，非本次操作所致）时账号已存盘，响应带 `warning`，runtime 保持旧集直到 config 修复并 reload |
 | DELETE | `/api/accounts/<provider>/<id>` | — | `{status:"removed",warning?}` | apikey 类 `removeApikeyAccount`；aqp `provider.ClearAqpAccount`；codex `os.Remove`。落盘后 best-effort reload；失败同上，响应带 `warning` |
-| POST | `/api/accounts/<provider>/<id>/test` | — | `{status:"ok"\|"failed",http_status,reason,latency_ms,provider,account_id,model}` | 账号粒度测活（probeModelCallable 真实最小请求，复用 provider 的 ProbeRequest/ExtraHeaders）；模型取该 provider 首个路由目标否则 models[0]；只读不 reload。UI 账号卡片 Test 按钮 |
+| POST | `/api/accounts/<provider>/<id>/test` | — | `{status:"ok"\|"failed",http_status,reason,latency_ms,provider,account_id,model}` | 账号粒度测活（probeModelCallable 真实最小请求，复用 provider 的 ProbeRequest/ExtraHeaders）；`proxyAdminCommands` 一次 `snapshotRuntime` 同代捕获 config/impl，模型取该 provider 首个路由目标否则 models[0]；只读不 reload，请求取消会取消上游 probe。UI 账号卡片 Test 按钮 |
 | GET | `/api/tokens` | — | `{usage:[{provider,model,input,output,cache_creation,cache_read,requests}]}` | SSE 扫描器累计的观测用量（flat 数组） |
 | POST | `/api/tokens/reset` | — | `{status:"reset"}` | 清零内存 + SQLite + flusher 基线（注意：也清空响应缓存） |
 | GET | `/api/stats?from=&to=&provider=&model=&bucket=` | — | `{from,to,bucket,buckets:[...]}` | 存储 1 分钟桶；`bucket` 仅展示聚合（SQL GROUP BY）。buckets 含 `avg_latency_ms`/`avg_ttft_ms` |
@@ -30,7 +30,7 @@
 | GET | `/api/analytics?from=&to=&provider=&model=&granularity=day\|month` | — | `{granularity,from,to,series:[{provider,model,points:[{bucket,requests,input,output,cache_creation,cache_read,cost,priced}]}],totals:{input,output,cost},price_coverage:{priced:[],unpriced:[]}}` | 日历日/月聚合 + **服务端现算等价 payg 成本**（见下「Analytics 等价成本」） |
 | POST | `/api/quota/refresh` | 空 body 或 `{"provider":key}` | `{status:"refreshed"[,provider]}` / 404 | 同步刷新配额缓存（可立即重查 `/api/status`）：空 → `pollAll`，指定 → `pollOne`（key 即 `name` 或 `name#accountID`），未知 key 404 |
 | POST | `/api/health/reset` | 空 body 或 `{"provider":key}` | `{cleared:[names],model_locks_cleared:n}` | 清冻结运行态（熔断开路冷却、429 限频冷却、模型锁定），目标立即重试；空=全部，池化父名清全部虚拟；**不清** sticky/pin/剥参 blocklist。`unfreeze` CLI 与 UI Providers 卡 unfreeze 按钮 |
-| POST/GET | `/api/login/<provider>/start`、`/api/login/<session>/poll` | — | `{session_id,...}` / `{state, detail, result, warning?}` | 异步登录（aqp SSO URL / codex device flow）；poll 状态 pending/done/error。done 时若 reload 失败，`warning` 非空（凭据已落盘，runtime 旧） |
+| POST/GET | `/api/login/<provider>/start`、`/api/login/<session>/poll` | — | `{session_id,...}` / `{state, detail, result, warning?}` | 异步登录（aqp SSO URL / codex device flow）；poll 状态 pending/done/error。轮询由 `webTaskOwner` 管理，关闭时取消 HTTP/等待；凭据 commit 前响应取消，进入 commit 后完成 save+reload 再退出。done 时若 reload 失败，`warning` 非空（凭据已落盘，runtime 旧） |
 
 **写操作统一热重载**：所有 mutation 落盘后触发进程内 `proxy.reload` —— 同一 worker 进程原地换 cfg/providers，不重启。账号增删虽不改 config.yaml，但 reload→`buildProviders`→`loadPool` 重读池文件，新账号随即展开成虚拟。reload 还清空 `health`/`sticky`/`spreadCtr`、重建响应缓存，并 kick `quota.pollAll`。注意：进程内 reload（UI 与 worker 同进程）≠ `serve reload`（给独立进程发 SIGHUP）。
 
@@ -72,11 +72,21 @@
 
 ## Web 运行时边界
 
-`web.go` 不得直接访问 `Proxy.mu`、`healthMu`、reload-owned config/provider map
-或 health/model-lock map。只读 handler 通过 `proxyReadView` 获取 detached
-dashboard/config/provider/runtime-provider 快照；网络探测与文件 I/O 必须发生在
-快照返回、锁已释放之后。写操作继续调用明确的 reload、pin、health reset 等
-应用命令，不允许在 handler 内直接修改 runtime map。
+`webServer` 不持有 `*Proxy`；构造函数只把它转换为两个具体 capability 后即丢弃：
+只读 handler 通过 `proxyReadView` 查询 request log、tokens、stats、Fusion、
+pins、pricing 及 detached dashboard/config/provider 快照，写操作和主动网络探测
+通过 `proxyAdminCommands` 执行 reset、quota refresh、health reset + persist、
+pin、reload 与 account probe。`web.go` 不得绕过这两个端口直接访问 Proxy。
+
+账号测活必须在 admin capability 内只调用一次 `snapshotRuntime`，从同一 generation
+取得 config 和 provider implementation；凭据文件检查及上游网络 I/O 在快照完成、
+锁已释放后执行。`proxyReadView` 不提供按名字单独读取 runtime provider 的入口，
+避免 reload 期间把旧 config 与新 impl 混用。
+
+Web 后台工作只能经 `webTaskOwner.run` 接纳；`web.go` 不允许裸 `go`。owner 同时
+管理 login-session GC 与 AQP/Codex 轮询，关闭时在同一 mutex 内停止 admission、
+取消 root context 并等待任务。GC 只删除超过 TTL 的 done/error 会话，不能删除
+仍 pending 的会话；否则 UI 会在后台任务仍可能落盘时提前得到 404。
 
 ## 请求访问日志（`request_log.go`，JSONL 文件，默认关闭）
 

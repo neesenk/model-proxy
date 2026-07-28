@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"sort"
 	"time"
-
-	"model-proxy/provider"
 )
 
 // proxyReadView is the read-only application boundary used by Web/API
@@ -142,8 +140,60 @@ func (view proxyReadView) providerConfigs() map[string]Provider {
 	return configs
 }
 
-func (view proxyReadView) runtimeProvider(name string) provider.Provider {
-	view.proxy.mu.RLock()
-	defer view.proxy.mu.RUnlock()
-	return view.proxy.providers[name]
+func (view proxyReadView) requestLogDirectory() string {
+	return view.proxy.reqLog.directory()
+}
+
+func (view proxyReadView) tokenUsage() map[tokenKey]tokenUsage {
+	if view.proxy.tokens == nil {
+		return nil
+	}
+	return view.proxy.tokens.snapshot()
+}
+
+func (view proxyReadView) stats(from, to int64, provider, model string, bucketSecs int64) ([]statsBucket, error) {
+	if view.proxy.stats == nil {
+		return []statsBucket{}, nil
+	}
+	return view.proxy.stats.queryRange(from, to, provider, model, bucketSecs)
+}
+
+func (view proxyReadView) agentStats(from, to int64, agent, provider, model string, bucketSecs int64) ([]agentBucket, error) {
+	if view.proxy.stats == nil {
+		return []agentBucket{}, nil
+	}
+	return view.proxy.stats.queryAgentRange(from, to, agent, provider, model, bucketSecs)
+}
+
+func (view proxyReadView) analytics(from, to int64, provider, model, granularity string) ([]analyticsBucket, error) {
+	if view.proxy.stats == nil {
+		return []analyticsBucket{}, nil
+	}
+	return view.proxy.stats.queryAnalytics(from, to, provider, model, granularity)
+}
+
+func (view proxyReadView) fusion(workflow string, now time.Time) (map[string]fusionWorkflowStats, []fusionRun) {
+	return view.proxy.fusionReg.snapshot(workflow, now)
+}
+
+func (view proxyReadView) pins() map[string]pinEntry {
+	return view.proxy.listPins()
+}
+
+type pricingView struct {
+	catalog   *pricingCatalog
+	overrides map[string]PriceConfig
+}
+
+func (view proxyReadView) pricing() pricingView {
+	catalog := view.proxy.pricingSnapshot()
+	overrides := view.proxy.priceOverrides()
+	if overrides != nil {
+		detached := make(map[string]PriceConfig, len(overrides))
+		for model, price := range overrides {
+			detached[model] = price
+		}
+		overrides = detached
+	}
+	return pricingView{catalog: catalog, overrides: overrides}
 }

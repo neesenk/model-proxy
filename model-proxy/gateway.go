@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -99,12 +100,25 @@ type AuthInfoData struct {
 // BootstrapLoginURL hits auth/login expecting 401, extracts the login URL from
 // the `result` field, and retains the SSO_A cookie in the jar.
 func (c *AqpClient) BootstrapLoginURL() (string, error) {
-	return c.bootstrapAt(c.base + aqpAuthLoginPath)
+	return c.BootstrapLoginURLContext(context.Background())
+}
+
+// BootstrapLoginURLContext is BootstrapLoginURL with caller-controlled
+// cancellation of the bootstrap HTTP request.
+func (c *AqpClient) BootstrapLoginURLContext(ctx context.Context) (string, error) {
+	return c.bootstrapAtContext(ctx, c.base+aqpAuthLoginPath)
 }
 
 // bootstrapAt is the URL-parametrized core, used by tests with a mock server.
 func (c *AqpClient) bootstrapAt(endpoint string) (string, error) {
-	req, _ := http.NewRequest(http.MethodGet, endpoint, nil)
+	return c.bootstrapAtContext(context.Background(), endpoint)
+}
+
+func (c *AqpClient) bootstrapAtContext(ctx context.Context, endpoint string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("aqp sso bootstrap request: %w", err)
+	}
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -128,28 +142,61 @@ func (c *AqpClient) bootstrapAt(endpoint string) (string, error) {
 // PollSession polls auth/info (using the jar's cookies) until retcode==0 && hasAccess.
 // After a successful login the response sets the SSO_C cookie, captured by the jar.
 func (c *AqpClient) PollSession(timeout time.Duration) (*AuthInfoData, error) {
-	return c.pollAt(c.base+aqpAuthInfoPath, timeout)
+	return c.PollSessionContext(context.Background(), timeout)
+}
+
+// PollSessionContext is PollSession with caller-controlled cancellation. The
+// context covers both each auth/info HTTP request and the wait between polls.
+func (c *AqpClient) PollSessionContext(ctx context.Context, timeout time.Duration) (*AuthInfoData, error) {
+	return c.pollAtContext(ctx, c.base+aqpAuthInfoPath, timeout)
 }
 
 func (c *AqpClient) pollAt(endpoint string, timeout time.Duration) (*AuthInfoData, error) {
-	deadline := time.Now().Add(timeout)
+	return c.pollAtContext(context.Background(), endpoint, timeout)
+}
+
+func (c *AqpClient) pollAtContext(ctx context.Context, endpoint string, timeout time.Duration) (*AuthInfoData, error) {
+	pollCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	var lastErr error
-	for time.Now().Before(deadline) {
-		data, err := c.checkSessionAt(endpoint)
+	for {
+		data, err := c.checkSessionAtContext(pollCtx, endpoint)
 		if err == nil && data != nil {
 			return data, nil
 		}
 		lastErr = err
-		time.Sleep(2 * time.Second)
+
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-pollCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("aqp sso session check canceled: %w", ctxErr)
+			}
+			if lastErr != nil {
+				return nil, fmt.Errorf("aqp sso session check failed: %w", lastErr)
+			}
+			return nil, fmt.Errorf("aqp sso session check timed out")
+		case <-timer.C:
+		}
 	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("aqp sso session check failed: %w", lastErr)
-	}
-	return nil, fmt.Errorf("aqp sso session check timed out")
 }
 
 func (c *AqpClient) checkSessionAt(endpoint string) (*AuthInfoData, error) {
-	req, _ := http.NewRequest(http.MethodGet, endpoint, nil)
+	return c.checkSessionAtContext(context.Background(), endpoint)
+}
+
+func (c *AqpClient) checkSessionAtContext(ctx context.Context, endpoint string) (*AuthInfoData, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("aqp sso session check request: %w", err)
+	}
 	req.Header.Set("Accept", "application/json")
 	if c.Jar != nil {
 		u, _ := url.Parse(endpoint)
@@ -240,11 +287,20 @@ type APIKeyData struct {
 // fetchAPIKey calls get_or_generate with the persisted/jar SSO cookie.
 // Returns the full APIKeyData (api_key + project_id + employee identity).
 func (c *AqpClient) fetchAPIKey() (*APIKeyData, error) {
-	return c.fetchAPIKeyAt(c.base + aqpAPIKeyGetGenPath)
+	return c.fetchAPIKeyContext(context.Background())
+}
+
+// fetchAPIKeyContext is fetchAPIKey with caller-controlled cancellation.
+func (c *AqpClient) fetchAPIKeyContext(ctx context.Context) (*APIKeyData, error) {
+	return c.fetchAPIKeyAtContext(ctx, c.base+aqpAPIKeyGetGenPath)
 }
 
 // fetchAPIKeyAt is the URL-parametrized core, used by tests with a mock server.
 func (c *AqpClient) fetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
+	return c.fetchAPIKeyAtContext(context.Background(), endpoint)
+}
+
+func (c *AqpClient) fetchAPIKeyAtContext(ctx context.Context, endpoint string) (*APIKeyData, error) {
 	a, _ := provider.LoadAqpAccount(c.storePath) // absent file is non-fatal: post-login uses the jar
 	cookie := c.SessionCookie()
 	if a == nil {
@@ -259,7 +315,10 @@ func (c *AqpClient) fetchAPIKeyAt(endpoint string) (*APIKeyData, error) {
 	// The AQP endpoint returns the full identity without needing project_id
 	// input; send an empty JSON object (form-encoded is rejected).
 	payload, _ := json.Marshal(map[string]string{})
-	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("aqp api key request: %w", err)
+	}
 	req.Header.Set("Cookie", provider.CookieHeader(cookie))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.HTTP.Do(req)

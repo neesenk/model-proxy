@@ -104,12 +104,21 @@ func (s *loginSessionStore) get(id string) (*loginSession, bool) {
 	return sess, ok
 }
 
-// gc drops sessions older than loginSessionTTL. Run periodically (webGC).
+// gc drops terminal sessions older than loginSessionTTL. A pending session may
+// outlive the nominal TTL while its provider poll is still running; deleting it
+// would make the UI return 404 even though the owned task can still complete and
+// persist credentials. Web shutdown cancels and joins pending tasks separately.
 func (s *loginSessionStore) gc() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, sess := range s.sessions {
-		if time.Since(sess.created) > loginSessionTTL {
+		if time.Since(sess.created) <= loginSessionTTL {
+			continue
+		}
+		sess.mu.Lock()
+		terminal := sess.state == "done" || sess.state == "error"
+		sess.mu.Unlock()
+		if terminal {
 			delete(s.sessions, id)
 		}
 	}
