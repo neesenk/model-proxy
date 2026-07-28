@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -24,7 +27,7 @@ import (
 //               writes a pid file, and supervises the worker: spawn → wait →
 //               restart on exit (exponential backoff, reset after sustained uptime).
 //               Forwards SIGTERM/SIGINT to the worker and exits.
-//   - worker:   runs the actual proxy (http.ListenAndServe). stdio is already the
+//   - worker:   runs the actual proxy (explicit http.Server). stdio is already the
 //               log file (set by the supervisor), so all logs land there. Because
 //               stderr is a regular file, color.go's tty check auto-disables color
 //               → file logs stay escape-free.
@@ -33,7 +36,82 @@ const (
 	envRole        = "MODEL_PROXY_ROLE"
 	roleSupervisor = "supervisor"
 	roleWorker     = "worker"
+
+	// Keep this below the supervisor's 10-second worker kill window so a worker
+	// that has to force-close stuck clients still has time to final-flush
+	// Proxy-owned logs and state before the supervisor's hard stop.
+	gracefulShutdownTimeout  = 8 * time.Second
+	supervisorWorkerStopWait = 10 * time.Second
 )
+
+// transportTask is process transport work whose lifetime is bounded by the HTTP
+// server, rather than by Proxy. Tasks must return when stop is closed.
+type transportTask func(stop <-chan struct{})
+
+// runReloadLoop owns process SIGHUP handling. The double stop check gives
+// shutdown priority over an already-buffered SIGHUP, while an in-progress
+// reload is allowed to finish and is then joined by the transport task owner.
+func runReloadLoop(stop <-chan struct{}, hup <-chan os.Signal, reload func()) {
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		select {
+		case <-stop:
+			return
+		case <-hup:
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			reload()
+		}
+	}
+}
+
+// transportHandlerGate makes HTTP handler admission atomic with shutdown. The
+// standard library's Server.Close cancels active connections but does not
+// promise their handlers have returned, so Proxy-owned state must not close
+// until this gate's wait completes.
+type transportHandlerGate struct {
+	mu        sync.Mutex
+	accepting bool
+	wg        sync.WaitGroup
+	next      http.Handler
+}
+
+func newTransportHandlerGate(next http.Handler) *transportHandlerGate {
+	if next == nil {
+		next = http.DefaultServeMux
+	}
+	return &transportHandlerGate{accepting: true, next: next}
+}
+
+func (g *transportHandlerGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	if !g.accepting {
+		g.mu.Unlock()
+		http.Error(w, "server shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	g.wg.Add(1)
+	g.mu.Unlock()
+	defer g.wg.Done()
+	g.next.ServeHTTP(w, r)
+}
+
+func (g *transportHandlerGate) stopAccepting() {
+	g.mu.Lock()
+	g.accepting = false
+	g.mu.Unlock()
+}
+
+func (g *transportHandlerGate) wait() {
+	g.wg.Wait()
+}
 
 // serveArgs holds parsed `serve` flags.
 type serveArgs struct {
@@ -102,9 +180,18 @@ func cmdServe(args []string) {
 // plain foreground serve). When stdout/stderr is a log file (worker case) all
 // logs land there; when a tty (foreground) logs go to the terminal.
 func runProxy(sa serveArgs) {
+	if err := runProxyProcess(sa); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// runProxyProcess owns one foreground/worker process lifetime. It returns errors
+// to runProxy so deferred signal and pid-file cleanup runs before log.Fatal
+// terminates the process.
+func runProxyProcess(sa serveArgs) error {
 	cfg, err := LoadConfig(sa.config)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	pidPath := "" // foreground-only pid file (login/logout SIGHUP); removed on exit
 	// In true foreground mode (no role env), mirror logs to the configured file.
@@ -131,30 +218,35 @@ func runProxy(sa serveArgs) {
 			}
 		}
 	}
+	if pidPath != "" {
+		defer os.Remove(pidPath)
+	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	p := NewProxy(cfg)
 	// Start all process-owned optional services through the Proxy lifecycle
 	// owner (stats flusher, request logger, startup catalog load).
 	p.startRuntimeServices(cfg)
-	// Graceful shutdown: flush pending deltas on SIGINT/SIGTERM so ~1 minute of
-	// stats isn't lost, then remove the foreground pid file. The supervisor
-	// forwards SIGTERM to the worker, so this covers both roles.
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		<-sigCh
-		// Stop loops, drain logs, wait refreshes, and perform every final flush.
-		p.Close()
-		if pidPath != "" {
-			os.Remove(pidPath)
-		}
-		os.Exit(0)
-	}()
-	// SIGHUP → hot reload config.
-	go func() {
-		hupCh := make(chan os.Signal, 1)
-		signal.Notify(hupCh, syscall.SIGHUP)
-		for range hupCh {
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", p.handler)
+	var transportTasks []transportTask
+	if cfg.Web.Enabled {
+		web := newWebServer(p, sa.config)
+		web.logFile = resolveLogFile(sa, cfg)
+		web.register(mux)
+		transportTasks = append(transportTasks, func(stop <-chan struct{}) {
+			webGC(stop, web.sessions)
+		})
+	}
+
+	// SIGHUP reload is transport/process work: shutdown stops accepting reloads
+	// before the HTTP drain and waits for an already-running reload before
+	// Proxy.Close performs final lifecycle flushes.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	defer signal.Stop(hupCh)
+	transportTasks = append(transportTasks, func(stop <-chan struct{}) {
+		runReloadLoop(stop, hupCh, func() {
 			log.Printf("[reload] SIGHUP received, reloading config from %s", sa.config)
 			if err := p.reload(sa.config); err != nil {
 				var applied *reloadAppliedWarning
@@ -164,23 +256,118 @@ func runProxy(sa serveArgs) {
 					log.Printf("[reload] FAILED: %v (keeping old config)", err)
 				}
 			} else {
+				snapshot := p.snapshotRuntime()
 				log.Printf("[reload] config reloaded successfully (providers: %s, routes: %s)",
-					providerNames(p.cfg), routeNames(p.cfg))
+					providerNames(snapshot.cfg), routeNames(snapshot.cfg))
 			}
+		})
+	})
+
+	listener, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		p.Close()
+		return err
+	}
+	server := &http.Server{Addr: cfg.Listen, Handler: mux}
+	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
+	log.Printf("model-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
+	return serveHTTPUntilShutdown(
+		server,
+		listener,
+		shutdownCtx.Done(),
+		gracefulShutdownTimeout,
+		transportTasks,
+		p.Close,
+	)
+}
+
+// serveHTTPUntilShutdown runs one explicit HTTP server until it fails or a stop
+// is requested. Shutdown order is deliberately centralized:
+//
+//  1. reject new transport-owned work (reload and Web session GC);
+//  2. stop accepting HTTP connections and drain in-flight handlers;
+//  3. on deadline, force-close connections so request contexts are cancelled;
+//  4. wait transport tasks, then close/final-flush Proxy-owned state.
+//
+// The explicit listener and closeProxy callback keep this sequence testable
+// without sending real process signals or invoking os.Exit.
+func serveHTTPUntilShutdown(
+	server *http.Server,
+	listener net.Listener,
+	shutdown <-chan struct{},
+	timeout time.Duration,
+	tasks []transportTask,
+	closeProxy func(),
+) error {
+	handlers := newTransportHandlerGate(server.Handler)
+	server.Handler = handlers
+
+	transportStop := make(chan struct{})
+	var transportWG sync.WaitGroup
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		transportWG.Add(1)
+		go func(run transportTask) {
+			defer transportWG.Done()
+			run(transportStop)
+		}(task)
+	}
+
+	var stopOnce sync.Once
+	stopTransport := func() {
+		stopOnce.Do(func() {
+			close(transportStop)
+		})
+	}
+	defer func() {
+		stopTransport()
+		handlers.stopAccepting()
+		// Close is idempotent. It guarantees cancellation has been requested
+		// before waiting for admitted handlers to finish unwinding.
+		_ = server.Close()
+		handlers.wait()
+		transportWG.Wait()
+		if closeProxy != nil {
+			closeProxy()
 		}
 	}()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", p.handler)
-	if cfg.Web.Enabled {
-		web := newWebServer(p, sa.config)
-		web.logFile = resolveLogFile(sa, cfg)
-		web.register(mux)
-		go webGC(web.sessions)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveErr:
+		// Deferred teardown cancels and waits any still-active handlers before
+		// Proxy state is closed.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-shutdown:
+		stopTransport()
+		handlers.stopAccepting()
 	}
-	log.Printf("model-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
-	if err := http.ListenAndServe(cfg.Listen, mux); err != nil {
-		log.Fatal(err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	shutdownErr := server.Shutdown(ctx)
+	cancel()
+	if shutdownErr != nil {
+		log.Printf("[shutdown] HTTP drain exceeded %s (%v); forcing active connections closed", timeout, shutdownErr)
+		if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+			log.Printf("[shutdown] force-close failed: %v", closeErr)
+		}
 	}
+
+	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // persistTokensLoop has been removed; per-minute stats persistence is now owned
@@ -336,7 +523,7 @@ func runSupervisor(sa serveArgs) {
 			_ = worker.Process.Signal(syscall.SIGTERM)
 			select {
 			case <-exitCh:
-			case <-time.After(10 * time.Second):
+			case <-time.After(supervisorWorkerStopWait):
 				log.Printf("[supervisor] worker pid=%d did not exit, killing", worker.Process.Pid)
 				_ = worker.Process.Kill()
 				<-exitCh

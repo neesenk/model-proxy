@@ -80,6 +80,24 @@ accepting 检查与 `WaitGroup.Add`；shutdown 顺序为：
 `startRuntimeServices` 启动的 request logger 才由 lifecycle 关闭，测试手工注入
 但未启动的 logger 不得在 Close 中等待一个不存在的 loop。
 
+### HTTP transport 关闭
+
+HTTP listener、在途 handler、SIGHUP reload loop 和 Web login-session GC 属于
+daemon transport 生命周期，不属于 `proxyLifecycle`。SIGINT/SIGTERM 的关闭顺序是：
+
+1. transport gate 拒绝新的 handler、reload 和 Web GC 工作；
+2. 显式 `http.Server.Shutdown` 停止接入并等待在途 handler，deadline 为 8 秒；
+3. deadline 超时时调用 `http.Server.Close` 强制断开连接、取消 request context，
+   并继续等待所有已接纳 handler 完成退栈；
+4. 等待 SIGHUP/Web GC transport task 返回；
+5. 最后调用 `Proxy.Close`，执行 request logger、Responses state、stats 和 quota
+   的 drain/final flush。
+
+第 3 步不能在 `Server.Close` 返回后立即关闭 Proxy：Go HTTP server 不保证此时
+所有 handler 已经返回，必须以独立 admission gate/WaitGroup 证明 handler drain
+完成。8 秒 deadline 小于 supervisor 的 10 秒 worker hard-kill 窗口，为最终持久化
+留出时间。信号 goroutine 只发起 shutdown；不得在其中直接 `os.Exit` 绕过上述顺序。
+
 ## 锁顺序
 
 锁顺序是：
@@ -145,5 +163,7 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。
 - lifecycle 关闭时拒绝新任务、等待已接纳任务、drain request logger，重复 Close
   不阻塞。
+- transport shutdown 先停止 listener/reload/Web GC，正常等待在途 handler；超时
+  强制取消连接后仍等待 handler 退栈，再关闭并 final flush logger/Responses state。
 - fingerprint mismatch、旧请求/慢 quota poll 跨 generation、reload clear、mutation 后立即重启。
 - pin、force、unfreeze 与 cache/failover 的交互。

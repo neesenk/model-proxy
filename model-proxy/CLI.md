@@ -12,7 +12,7 @@
 
 | 码 | 含义 | 触发点 |
 |---|---|---|
-| `0` | 成功 | 命令正常返回；`serve` worker 收到 SIGINT/SIGTERM 优雅退出（`daemon.go:154`） |
+| `0` | 成功 | 命令正常返回；`serve` worker 收到 SIGINT/SIGTERM 后完成 transport drain 和 final flush（`runProxyProcess`） |
 | `1` | 运行时错误 | `log.Fatal(...)`（默认 exit 1）；显式 `os.Exit(1)`：config 无效、daemon 不可达、响应解析失败、未知子命令/参数 |
 
 真实 CLI 路径**不使用** exit 2。（`cli_test.go` 的 `TestHelperProcess` 在未知 `MP_SUBCMD` 时 `os.Exit(2)`，那是测试桩，不是真实路径。）
@@ -63,7 +63,7 @@ serve [daemon|stop|reload|status] [--config PATH] [--log-file PATH]
 
 | 调用 | 行为 |
 |---|---|
-| `serve`（无子命令） | 前台运行（`runProxy`）：加载 config、起 stats、注册 mux、`http.ListenAndServe`。 |
+| `serve`（无子命令） | 前台运行（`runProxy`）：加载 config、起 runtime services、注册 mux，以显式 `http.Server` 提供服务。 |
 | `serve daemon` | `daemonize`：分离一个 supervisor 进程（setsid，stdio -> log 文件），父进程立即返回。 |
 | `serve stop` | `cmdStop`：读 pid 文件，SIGTERM 等待 ≤15s，超时 SIGKILL。 |
 | `serve reload` | `cmdReload`：读 pid 文件，SIGHUP supervisor（转发给 worker 热重载）。 |
@@ -108,6 +108,10 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 
 - `model-proxy listening on <LISTEN> (routes: <routeNames>)`
 - 收到 SIGHUP：`[reload] SIGHUP received, reloading config from <PATH>` + 上述结果行。
+- 收到 SIGINT/SIGTERM：停止 SIGHUP reload/Web session GC 并停止接入，最多等待
+  8 秒让在途请求完成；然后 final flush request log、Responses state、stats 和
+  quota，正常退出。8 秒内未 drain 时强制取消活动连接，并记录
+  `[shutdown] HTTP drain exceeded 8s (...)`; handler 完成退栈后继续 final flush。
 
 ---
 

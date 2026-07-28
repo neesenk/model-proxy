@@ -38,13 +38,17 @@
 20. supervisor 的 `spawnWorker` 可能返回 nil，调用方必须检查。
 21. Proxy 级 goroutine 必须经 `proxyLifecycle.run` 接纳；daemon 不得绕过
     `startRuntimeServices`/`Proxy.Close` 分散启动或 final flush。
+22. daemon 收到退出信号时必须先 `http.Server.Shutdown` drain handler，再
+    `Proxy.Close`；deadline 超时调用 `Server.Close` 只能取消连接，仍须等待 handler
+    退栈。SIGHUP loop 和 Web GC 必须有 transport owner、stop 和 wait；禁止在 signal
+    goroutine 中直接 `os.Exit`。
 
 ## 日志和持久化
 
-22. 文件日志禁用 ANSI color。
-23. request log list/report 不得在 metadata 查询中持有完整 body。
-24. 运行态按名字落盘必须经过 config fingerprint；测试不得写真实 `~/.model-proxy`。
-25. quota snapshot 超过 `3×poll_interval` 或带错误时只能视为 unknown。
+23. 文件日志禁用 ANSI color。
+24. request log list/report 不得在 metadata 查询中持有完整 body。
+25. 运行态按名字落盘必须经过 config fingerprint；测试不得写真实 `~/.model-proxy`。
+26. quota snapshot 超过 `3×poll_interval` 或带错误时只能视为 unknown。
 
 ## 回归要求
 

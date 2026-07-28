@@ -71,12 +71,19 @@ func newWebServer(p *Proxy, configFile string) *webServer {
 	return w
 }
 
-// webGC periodically drops stale login sessions. It runs as a goroutine
-// started by runProxy; the ticker lives for the process lifetime.
-func webGC(s *loginSessionStore) {
+// webGC periodically drops stale login sessions. It is transport-owned by
+// serveHTTPUntilShutdown and returns promptly when the HTTP server begins
+// shutting down.
+func webGC(stop <-chan struct{}, s *loginSessionStore) {
 	t := time.NewTicker(5 * time.Minute)
-	for range t.C {
-		s.gc()
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			s.gc()
+		}
 	}
 }
 
