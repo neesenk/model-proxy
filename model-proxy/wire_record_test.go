@@ -37,7 +37,7 @@ func TestWireRecord_Run(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m1"}},
+			"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}},
 		},
 	}
 	outDir := t.TempDir()

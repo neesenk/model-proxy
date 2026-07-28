@@ -14,3 +14,14 @@ func setPoolHome(t *testing.T, dir string) {
 	}
 	t.Setenv("HOME", dir)
 }
+
+// useStaticProviderPools prepares real plural credentials for tests that load
+// production-style static providers from YAML. Behavior tests that construct
+// Config directly should use testProviderID instead.
+func useStaticProviderPools(t *testing.T, names ...string) {
+	t.Helper()
+	setPoolHome(t, t.TempDir())
+	for _, name := range names {
+		writePoolFile(t, name, "static", "STATIC-TEST-KEY")
+	}
+}

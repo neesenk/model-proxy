@@ -58,7 +58,7 @@ func TestUC_OpenAIStripsV1Prefix(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"codex": {OpenAIBaseURL: up.URL, Provider: "static"},
+			"codex": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},

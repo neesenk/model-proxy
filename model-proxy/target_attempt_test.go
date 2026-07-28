@@ -91,10 +91,10 @@ func TestFusionSynthesizerDoesNotDispatchShadow(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"panel-a": {Provider: "static", AnthropicBaseURL: panelA.srv.URL},
-			"panel-b": {Provider: "static", AnthropicBaseURL: panelB.srv.URL},
-			"synth":   {Provider: "static", AnthropicBaseURL: synth.srv.URL},
-			"shadow":  {Provider: "static", AnthropicBaseURL: shadow.srv.URL},
+			"panel-a": {Provider: testProviderID, AnthropicBaseURL: panelA.srv.URL},
+			"panel-b": {Provider: testProviderID, AnthropicBaseURL: panelB.srv.URL},
+			"synth":   {Provider: testProviderID, AnthropicBaseURL: synth.srv.URL},
+			"shadow":  {Provider: testProviderID, AnthropicBaseURL: shadow.srv.URL},
 		},
 		Routes: map[string][]RouteTarget{
 			"hard": {{Provider: "fusion", Model: "recipe"}},

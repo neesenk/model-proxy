@@ -92,7 +92,7 @@ func TestShowVolcengineUsage_NoAKSK(t *testing.T) {
 func writeVolcenginePool(t *testing.T, name string, accts ...poolAccount) {
 	t.Helper()
 	p := credentialPool{Version: 1, Accounts: accts}
-	if err := savePool(name, p); err != nil {
+	if err := savePool(name, "volcengine", p); err != nil {
 		t.Fatal(err)
 	}
 }

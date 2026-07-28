@@ -135,7 +135,7 @@ func TestForward_CacheHit(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
 	}
@@ -192,7 +192,7 @@ func TestForward_CacheHitHeader(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
 	}
@@ -226,6 +226,7 @@ func TestForward_CacheHitHeader(t *testing.T) {
 // without a restart: enabled → disabled drops the cache entirely; re-enabling
 // builds a FRESH one (old entries/counters are not carried over).
 func TestReload_RebuildsCache(t *testing.T) {
+	useStaticProviderPools(t, "z")
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	base := "listen: 127.0.0.1:0\n" +
 		"providers:\n  z:\n    openai_base_url: http://127.0.0.1:1\n    provider_id: static\n" +
@@ -342,7 +343,7 @@ func TestForward_CacheModeMismatch_ContentType(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt", Protocol: "openai"}}},
 		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
 	}
@@ -395,7 +396,7 @@ func TestForward_CacheConvert_ReplayIntact(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt", Protocol: "openai"}}},
 		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
 	}
@@ -445,7 +446,7 @@ func TestForward_CancelledConvertedSSEIsNotCached(t *testing.T) {
 	defer up.Close()
 
 	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"backend": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"backend": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"client-model": {{Provider: "backend", Model: "backend-model", Protocol: "responses"}}},
 		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
 	})
@@ -538,7 +539,7 @@ func TestForward_ForcedPooledProviderBypassesCache(t *testing.T) {
 
 	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{
-			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: "static"},
+			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
 			"pooled":  {OpenAIBaseURL: pooledUp.URL, Provider: "zhipu"},
 		},
 		Routes: map[string][]RouteTarget{"client-model": {
@@ -658,8 +659,8 @@ func TestForward_CacheBypassedByForceProvider(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {OpenAIBaseURL: aUp.URL, Provider: "static"},
-			"b": {OpenAIBaseURL: bUp.URL, Provider: "static"},
+			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{"glm": {
 			{Provider: "a", Model: "glm", Priority: 1},
@@ -730,8 +731,8 @@ func TestForward_ForceProvider_TypoHardFails(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {OpenAIBaseURL: aUp.URL, Provider: "static"},
-			"b": {OpenAIBaseURL: bUp.URL, Provider: "static"},
+			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{"glm": {
 			{Provider: "a", Model: "glm", Priority: 1},

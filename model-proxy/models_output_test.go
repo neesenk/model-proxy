@@ -50,8 +50,8 @@ func TestPrintAllModels_AllProviders(t *testing.T) {
 func TestPrintAllModels_Filter(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {Provider: "static", Models: []string{"m1"}},
-			"b": {Provider: "static", Models: []string{"m2"}},
+			"a": {Provider: testProviderID, Models: []string{"m1"}},
+			"b": {Provider: testProviderID, Models: []string{"m2"}},
 		},
 	}
 	out := grabStdout(t, func() { printAllModels(cfg, "a", nil, nil) })
@@ -66,7 +66,7 @@ func TestPrintAllModels_Filter(t *testing.T) {
 func TestPrintAllModels_EmptyContext(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {Provider: "static", Models: []string{"m1"}}, // no meta → ctx/out shown as —
+			"a": {Provider: testProviderID, Models: []string{"m1"}}, // no meta → ctx/out shown as —
 		},
 	}
 	out := grabStdout(t, func() { printAllModels(cfg, "", nil, nil) })

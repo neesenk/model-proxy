@@ -387,7 +387,7 @@ func cmdLogout(args []string) {
 	// goes through the singular removal path (backward compat: the legacy
 	// singular <name>_apikey.json is removed by clearApiKey).
 	if providerID == "aqp" || providerID == "codex" || !hasPoolFile(provName) {
-		provMap, _, _ := buildProviders(cfg)
+		provMap := buildProviders(cfg).providers
 		p := provMap[provName]
 		if p == nil {
 			log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
@@ -494,7 +494,7 @@ func cmdLogout(args []string) {
 				return fmt.Errorf("remove pool file: %w", err)
 			}
 		} else {
-			if err := savePool(provName, cur); err != nil {
+			if err := savePool(provName, providerID, cur); err != nil {
 				return fmt.Errorf("save pool: %w", err)
 			}
 		}
@@ -571,7 +571,7 @@ func printProviderUsage(cfg *Config, provName string) {
 		return
 	}
 	// Single-account / non-pooled / aqp / codex: build one provider + call Usage.
-	provMap, _, _ := buildProviders(cfg)
+	provMap := buildProviders(cfg).providers
 	p := provMap[provName]
 	if p == nil {
 		return
@@ -750,7 +750,7 @@ func addVolcengineAccount(cfg *Config, name string, prov Provider, cred accountC
 				ID: id, Label: lbl, APIKey: apiKey, AccessKey: ak, SecretKey: sk, AddedAt: now,
 			})
 		}
-		return savePool(name, pool)
+		return savePool(name, prov.Provider, pool)
 	})
 }
 

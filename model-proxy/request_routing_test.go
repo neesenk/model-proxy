@@ -114,8 +114,8 @@ func TestForward_ContextCrossRoute(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
-			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: "static"},
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
+			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm":      {{Provider: "small-prov", Model: "small"}},
@@ -169,8 +169,8 @@ func TestForward_CapabilityCrossRoute(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"text-p":   {OpenAIBaseURL: textUp.URL, Provider: "static"},
-			"vision-p": {OpenAIBaseURL: visionUp.URL, Provider: "static"},
+			"text-p":   {OpenAIBaseURL: textUp.URL, Provider: testProviderID},
+			"vision-p": {OpenAIBaseURL: visionUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm":        {{Provider: "text-p", Model: "text"}},
@@ -231,8 +231,8 @@ func TestForward_CapabilityFilter_E2E(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"text-p":   {OpenAIBaseURL: textUp.URL, Provider: "static"},
-			"vision-p": {OpenAIBaseURL: visionUp.URL, Provider: "static"},
+			"text-p":   {OpenAIBaseURL: textUp.URL, Provider: testProviderID},
+			"vision-p": {OpenAIBaseURL: visionUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {
@@ -350,11 +350,11 @@ func TestForward_CapabilitiesOverride_E2E(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"text-p": {OpenAIBaseURL: textUp.URL, Provider: "static"},
+			"text-p": {OpenAIBaseURL: textUp.URL, Provider: testProviderID},
 			// Blind-spot provider: "gpt-blind" is NOT in the models.dev catalog;
 			// without the capabilities declaration an image request would never
 			// route to it.
-			"blind-p": {OpenAIBaseURL: blindUp.URL, Provider: "static", Capabilities: map[string][]string{
+			"blind-p": {OpenAIBaseURL: blindUp.URL, Provider: testProviderID, Capabilities: map[string][]string{
 				"gpt-blind": {"image"},
 			}},
 		},

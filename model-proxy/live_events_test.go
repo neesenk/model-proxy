@@ -83,7 +83,7 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -140,7 +140,7 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 // lines; a published event reaches an HTTP subscriber.
 func TestServeEvents_SSE(t *testing.T) {
 	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	})
 	srv := httptest.NewServer(http.HandlerFunc(p.serveEvents))
@@ -181,7 +181,7 @@ func TestServeEvents_SSE(t *testing.T) {
 // is visible (the core "catch a retry loop" use case).
 func TestLiveEvents_EarlyFailures(t *testing.T) {
 	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "static"}},
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -227,7 +227,7 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 
 	mk := func(routes map[string][]RouteTarget, cache bool) *Proxy {
 		cfg := &Config{
-			Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: "static"}},
+			Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 			Routes:    routes,
 		}
 		if cache {
@@ -261,7 +261,7 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 
 	// All-failed 502 → end event with Status 502.
 	cfg := &Config{
-		Providers: map[string]Provider{"dead": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "static"}},
+		Providers: map[string]Provider{"dead": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "dead", Model: "glm"}}},
 	}
 	pf2 := newTestProxy(t, cfg)

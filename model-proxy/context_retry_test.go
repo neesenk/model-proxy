@@ -76,8 +76,8 @@ func TestForward_ContextOverflowRetry(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
-			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: "static"},
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
+			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm":      {{Provider: "small-prov", Model: "small"}},
@@ -134,8 +134,8 @@ func TestForward_ContextOverflowRetry_RespectsCapability(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
-			"big-text":   {OpenAIBaseURL: bigTextUp.URL, Provider: "static"},
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
+			"big-text":   {OpenAIBaseURL: bigTextUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"vision": {{Provider: "small-prov", Model: "small-vision"}},
@@ -193,9 +193,9 @@ func TestForward_ContextOverflowRetry_OnlyOnce(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
-			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: "static"},
-			"huge-prov":  {OpenAIBaseURL: hugeUp.URL, Provider: "static"},
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
+			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
+			"huge-prov":  {OpenAIBaseURL: hugeUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm":       {{Provider: "small-prov", Model: "small"}},
@@ -250,8 +250,8 @@ func TestForward_ContextOverflowRetry_Ordinary400(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
-			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: "static"},
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
+			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm":      {{Provider: "small-prov", Model: "small"}},
@@ -298,7 +298,7 @@ func TestForward_ContextOverflowRetry_NoBiggerTarget(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {{Provider: "small-prov", Model: "small"}},
@@ -350,8 +350,8 @@ func TestForward_ContextOverflowRetry_F3_UntriedTargets(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
-			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: "static"},
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
+			"big-prov":   {OpenAIBaseURL: bigUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			// SAME route: small (priority 1, tried first) + big (priority 2).
@@ -398,7 +398,7 @@ func TestForward_ContextOverflowRetry_NoCatalog(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: "static"},
+			"small-prov": {OpenAIBaseURL: smallUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {{Provider: "small-prov", Model: "small"}},

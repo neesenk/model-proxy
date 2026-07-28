@@ -14,8 +14,8 @@ import (
 func cooldownCfg(primary, fallback *httptest.Server, retryWait string) *Config {
 	return &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {

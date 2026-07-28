@@ -761,7 +761,7 @@ func TestConfigEditProviderAddMissingProviderID(t *testing.T) {
 // is present.
 func TestAccountsListMasked(t *testing.T) {
 	setPoolHome(t, t.TempDir())
-	if err := savePool("zhipu", credentialPool{
+	if err := savePool("zhipu", "zhipu", credentialPool{
 		Version: 1,
 		Accounts: []poolAccount{{
 			ID:        "abc1234567890def",

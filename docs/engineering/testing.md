@@ -107,6 +107,7 @@ race-clean 只是必要条件。并发测试还必须断言功能不变量，例
 - state、credential、request log 使用 `t.TempDir()` 或显式注入 path。
 - 后台 owner 必须提供 stop/wait；测试通过 `t.Cleanup` 关闭。
 - 普通功能测试统一使用 `newTestProxy`；它在构造前注入独立 state path，并自动注册 `Proxy.Close`。需要验证重启恢复时使用 `newTestProxyAt` 显式共享同一个测试 state path，并在创建下一实例前关闭旧实例。仅验证生产构造器本身时可在隔离 HOME 下直接调用 `NewProxy`，并精确断言默认 state path。
+- 不涉及凭据语义的根包行为测试使用 `testProviderID`，不得借用 `static` 形成对账号文件策略的隐式依赖。必须从 YAML 加载真实 `provider_id: static` 的 reload/CLI 测试，使用 `useStaticProviderPools` 写入隔离 HOME 下的 plural pool；static 凭据边界本身则精确断言 missing、legacy、损坏/空 plural 均 fail-closed。
 - 禁止在测试日志输出真实 token、cookie、prompt 或用户请求体。
 
 

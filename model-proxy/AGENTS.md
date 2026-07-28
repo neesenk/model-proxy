@@ -83,6 +83,12 @@ Provider、Proxy、Web/CLI 或发起网络验证。根 `accounts_adapter.go` 只
 编排层。任何 pool 写操作必须保持“网络/用户输入在锁外，锁内重新
 load → 按稳定 ID 修改 → save”的顺序。
 
+运行时 Provider 构建必须消费一次 `accounts.Store.LoadSnapshot` 同时取得 pool
+与 Source；不得在 `Load` 后另做 `Stat`。损坏 plural、空 plural tombstone 和
+损坏 legacy 均 fail-closed，不得构建可能重新读取旧凭据的 runtime provider。
+同一 build pass 必须连同 providers/poolIndex/parentOf 一起派生 implicit-route
+eligibility；startup/reload 不得再读账号文件生成同一 generation 的 routes。
+
 ## CLI
 
 CLI 输出是 change-controlled contract。修改命令、字段、颜色、顺序或提示前读取 `CLI.md`，实现后同步更新它。文件日志不得带 ANSI color。

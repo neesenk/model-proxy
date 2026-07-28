@@ -146,7 +146,7 @@ func newFusionRig(t *testing.T, recipe FusionConfig, ups map[string]*fakeUpstrea
 		if up == nil {
 			t.Fatalf("no fake upstream for provider %q", name)
 		}
-		p := Provider{Provider: "static"}
+		p := Provider{Provider: testProviderID}
 		if proto == "openai" || proto == "responses" {
 			p.OpenAIBaseURL = up.srv.URL
 		} else {
@@ -776,7 +776,7 @@ func TestFusion_SynthesizerPoolExhaustedFailsClosed(t *testing.T) {
 		Providers: map[string]Provider{
 			"zhipu-draft": {AnthropicBaseURL: draftUp.srv.URL, Provider: "zhipu"},
 			"zhipu-synth": {AnthropicBaseURL: synthUp.srv.URL, Provider: "zhipu"},
-			"direct":      {AnthropicBaseURL: directUp.srv.URL, Provider: "static"},
+			"direct":      {AnthropicBaseURL: directUp.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{"hard": {
 			{Provider: "fusion", Model: "recipe", Priority: 1},
@@ -827,9 +827,9 @@ func TestFusionLeg_WireVerdict404Correction(t *testing.T) {
 		Providers: map[string]Provider{
 			// pa has ONLY an openai base: with no declared protocol and a
 			// responses=yes verdict the leg is verdict-driven to /responses.
-			"pa": {OpenAIBaseURL: pa.srv.URL, Provider: "static"},
-			"pb": {AnthropicBaseURL: pb.srv.URL, Provider: "static"},
-			"ps": {AnthropicBaseURL: ps.srv.URL, Provider: "static"},
+			"pa": {OpenAIBaseURL: pa.srv.URL, Provider: testProviderID},
+			"pb": {AnthropicBaseURL: pb.srv.URL, Provider: testProviderID},
+			"ps": {AnthropicBaseURL: ps.srv.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{"hard": {{Provider: "fusion", Model: "recipe"}}},
 		Fusion: map[string]FusionConfig{"recipe": {

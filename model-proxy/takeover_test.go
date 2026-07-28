@@ -266,8 +266,8 @@ new = "y"
 func TestExposedModels_PicksBestPriority(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {Provider: "static", Models: []string{"m1"}},
-			"b": {Provider: "static", Models: []string{"m1"}},
+			"a": {Provider: testProviderID, Models: []string{"m1"}},
+			"b": {Provider: testProviderID, Models: []string{"m1"}},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {

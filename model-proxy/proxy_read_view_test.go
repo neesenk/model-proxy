@@ -9,7 +9,7 @@ func TestProxyReadViewReturnsDetachedSnapshots(t *testing.T) {
 	p := newTestProxy(t, &Config{
 		Listen: "127.0.0.1:1234",
 		Providers: map[string]Provider{
-			"up": {Provider: "static", OpenAIBaseURL: "https://example.test"},
+			"up": {Provider: testProviderID, OpenAIBaseURL: "https://example.test"},
 		},
 	})
 	p.routeWarnings = []string{"warning-one"}
@@ -25,7 +25,7 @@ func TestProxyReadViewReturnsDetachedSnapshots(t *testing.T) {
 	warning := p.routeWarnings[0]
 	providerID := p.cfg.Providers["up"].Provider
 	p.mu.RUnlock()
-	if warning != "warning-one" || providerID != "static" {
+	if warning != "warning-one" || providerID != testProviderID {
 		t.Fatalf("read view leaked mutable runtime references: warning=%q provider=%q", warning, providerID)
 	}
 	if dashboard.listen != "127.0.0.1:1234" ||

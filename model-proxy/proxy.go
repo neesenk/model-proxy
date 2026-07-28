@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/catalog"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
@@ -160,13 +161,14 @@ func (e pinEntry) expiresLabel(now time.Time) string {
 // only wires the remaining callback (FetchModelsFn: volcengine's V4-signed
 // ListArkAgentPlanModel) + the per-provider config fields.
 //
-// A provider whose credential pool (loadPool) has ≥2 accounts is UNROLLED into
+// A provider whose credential snapshot has ≥2 accounts is UNROLLED into
 // one virtual provider per account, keyed "name#<accountID>"; the parent name
 // is NOT a key (only the virtuals are). A 1-entry PLURAL pool (the file `login`
 // writes) is bound in-memory under the plain name. Only the no-plural-file /
 // not-logged-in case stays file-backed (reading the legacy singular
-// <name>_apikey.json via loadPool's fallback) — binding the cred there would
-// break the embedded ApiKeyBase, which reads the (non-existent) singular file.
+// <name>_apikey.json via Store.LoadSnapshot's fallback) — binding the cred
+// there would break the embedded ApiKeyBase, which reads the (non-existent)
+// singular file.
 //
 // It also derives the credential-pool index maps in the SAME pass:
 //   - poolIndex[parent] = its sorted virtual ids ("name#<accountID>")
@@ -178,43 +180,54 @@ func (e pinEntry) expiresLabel(now time.Time) string {
 // buildOne returned nil (provider.New error) is skipped in BOTH the providers
 // map AND the index. Single-account / not-logged-in providers appear in
 // neither index map (their id == the plain name).
-func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]string, map[string]string) {
+type providerBuild struct {
+	providers map[string]provider.Provider
+	poolIndex map[string][]string
+	parentOf  map[string]string
+	eligible  map[string]bool
+}
+
+func buildProviders(cfg *Config) providerBuild {
 	m := map[string]provider.Provider{}
 	poolIndex := map[string][]string{}
 	parentOf := map[string]string{}
+	eligible := map[string]bool{}
 	for name, prov := range cfg.Providers {
-		// Surface a corrupt pool file instead of silently dropping the provider —
-		// treat as empty (not-logged-in) but log the diagnostic so a 502 isn't
-		// mute. loadPool already wraps the parse error with the file path.
-		pool, poolErr := loadPool(name, prov.Provider)
-		if poolErr != nil {
-			log.Printf("[proxy] pool %s unreadable: %v; treating as not-logged-in", name, poolErr)
-			pool = credentialPool{}
-		}
-		// Distinguish a 1-entry PLURAL pool (written by `login` via savePool) from
-		// the legacy singular fallback / not-logged-in case. The plural file
-		// carries its own key on disk; the legacy path must stay file-backed
-		// (reading <name>_apikey.json) so Login/Logout file semantics are
-		// byte-for-byte unchanged. stat-ing the plural path — not loadPool's
-		// result — is what tells the two apart: loadPool wraps a legacy singular
-		// as a 1-entry pool, which would otherwise mis-route it to the bind path.
-		_, statErr := os.Stat(poolPath(name))
-		pluralExists := statErr == nil
-		// Distinguish "plural pool file exists but is empty" (cleared by
-		// `logout --all` or truncated by a crashed/corrupt write) from "provider
-		// was never logged in". With atomic savePool (#1) this is near-unreachable
-		// in practice, but a distinct diagnostic means a 502 isn't mute if it does
-		// happen. Only emitted when the pool read back OK — an unreadable pool is
-		// already covered by the "unreadable" log above.
-		if pluralExists && len(pool.Accounts) == 0 && poolErr == nil {
-			log.Printf("[proxy] pool %s exists but has 0 accounts (cleared or corrupt); treating as not logged in", name)
-		}
-		if !pluralExists || len(pool.Accounts) == 0 {
-			// no plural pool -> legacy singular fallback OR not logged in:
-			// cred=nil keeps ApiKeyBase file-backed (pre-pool path).
+		if prov.Provider == "aqp" || prov.Provider == "codex" {
+			// OAuth/SSO providers own separate auth stores and never consult the
+			// API-key account pool namespace.
 			if p := buildOne(cfg, name, prov, accountCred{}); p != nil {
 				m[name] = p
 			}
+			continue
+		}
+		// One storage read decides both credentials and authority. An unreadable
+		// plural file is never downgraded to the legacy singular key.
+		snapshot, poolErr := accountStore().LoadSnapshot(name, prov.Provider)
+		if poolErr != nil {
+			log.Printf("[proxy] pool %s unreadable: %v; disabling provider", name, poolErr)
+			continue
+		}
+		pool := snapshot.Pool
+		if snapshot.Source != accounts.SourcePlural {
+			// Missing or legacy: API-key providers keep their historical
+			// file-backed path. static is plural-only and has no safe file-backed
+			// AuthHeaders implementation, so an unbound instance must not exist.
+			if prov.Provider == "static" {
+				continue
+			}
+			if p := buildOne(cfg, name, prov, accountCred{}); p != nil {
+				m[name] = p
+				if snapshot.Source == accounts.SourceLegacy {
+					eligible[name] = true
+				}
+			}
+			continue
+		}
+		if len(pool.Accounts) == 0 {
+			// An empty plural file is an authoritative credential tombstone.
+			// Do not construct an unbound provider that could re-read legacy.
+			log.Printf("[proxy] pool %s exists but has 0 accounts; disabling provider", name)
 			continue
 		}
 		if len(pool.Accounts) == 1 {
@@ -224,6 +237,7 @@ func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]str
 			// authenticate at all.
 			if p := buildOne(cfg, name, prov, pool.Accounts[0].Credentials()); p != nil {
 				m[name] = p
+				eligible[name] = true
 			}
 			continue
 		}
@@ -245,9 +259,15 @@ func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]str
 		if len(vids) > 0 {
 			sort.Strings(vids)
 			poolIndex[name] = vids
+			eligible[name] = true
 		}
 	}
-	return m, poolIndex, parentOf
+	return providerBuild{
+		providers: m,
+		poolIndex: poolIndex,
+		parentOf:  parentOf,
+		eligible:  eligible,
+	}
 }
 
 // buildOne constructs a single provider instance (a real provider for the
@@ -307,11 +327,11 @@ func NewProxy(cfg *Config) *Proxy {
 // newProxyWithStatePath is the injectable constructor used by tests so every
 // Proxy owns an isolated state file before the tracker loads or starts.
 func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
-	providers, poolIndex, parentOf := buildProviders(cfg)
+	built := buildProviders(cfg)
 	p := &Proxy{
 		lifecycle:  newProxyLifecycle(),
 		cfg:        cfg,
-		providers:  providers,
+		providers:  built.providers,
 		client:     &http.Client{Timeout: 0},
 		health:     map[string]*providerHealth{},
 		sticky:     map[string]routeSticky{},
@@ -319,12 +339,12 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 		paramBlock: map[modelLockKey]map[string]bool{},
 		pins:       map[string]pinEntry{},
 		spreadCtr:  map[string]uint64{},
-		poolIndex:  poolIndex,
-		parentOf:   parentOf,
+		poolIndex:  built.poolIndex,
+		parentOf:   built.parentOf,
 	}
 	p.configGeneration.Store(1)
 	p.runtimeGeneration = 1
-	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutes(cfg)
+	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.eligible)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	// Config-time routing hazards (reasoning-replay models behind conversion,
 	// missing protocol: on hint providers): appended to the warnings channel
@@ -742,11 +762,8 @@ func (p *Proxy) reload(configPath string) error {
 	if err != nil {
 		return err
 	}
-	newProviders, newPoolIndex, newParentOf := buildProviders(cfg)
-	// synthesizeImplicitRoutes does per-provider loadPool file I/O — compute it
-	// BEFORE taking the write lock so in-flight forward handlers (RLock) aren't
-	// stalled behind N credential-file reads on every reload.
-	newImplicit, newWarnings := synthesizeImplicitRoutes(cfg)
+	built := buildProviders(cfg)
+	newImplicit, newWarnings := synthesizeImplicitRoutesFrom(cfg, built.eligible)
 	// Switch config and runtime state as one generation. Persist snapshots take
 	// the same lock order, and request mutations carry the generation captured by
 	// forward, so an old in-flight request cannot repopulate the cleared maps.
@@ -755,12 +772,12 @@ func (p *Proxy) reload(configPath string) error {
 	generation := p.configGeneration.Add(1)
 	p.runtimeGeneration = generation
 	p.cfg = cfg
-	p.providers = newProviders
+	p.providers = built.providers
 	// Rebuild the pool index + expanded routes from the single buildProviders
 	// pass. Doing this under the write lock means request readers (which take
 	// the read lock) see a consistent cfg/providers/poolIndex/expandedRoutes.
-	p.poolIndex = newPoolIndex
-	p.parentOf = newParentOf
+	p.poolIndex = built.poolIndex
+	p.parentOf = built.parentOf
 	p.implicitRoutes = newImplicit
 	p.expandedRoutes = p.buildExpandedRoutes()
 	hw := configRoutingWarnings(cfg, p.expandedRoutes)
@@ -858,15 +875,24 @@ func (p *Proxy) expandTarget(t RouteTarget) []RouteTarget {
 	return newResolver(p, p.providers, p.poolIndex).Expand(t)
 }
 
-// loggedInProviders returns the set of provider names (parents) that have ≥1
-// stored credential (plural pool OR legacy singular file). Used to decide which
-// providers can actually serve an implicit (auto) route. buildProviders builds
-// all configured providers (logged-in or not, file-backed), so its result map
-// can't answer "logged in?" — this does, via the same loadPool it uses.
+// loggedInProviders returns the provider parents whose authoritative account
+// snapshot can produce a runtime credential. Used to decide which providers can
+// serve an implicit route; corrupt/empty plural pools and static legacy files
+// remain fail-closed exactly as they do in buildProviders.
 func loggedInProviders(cfg *Config) map[string]bool {
 	out := map[string]bool{}
 	for name, prov := range cfg.Providers {
-		if pool, _ := loadPool(name, prov.Provider); len(pool.Accounts) > 0 {
+		if prov.Provider == "aqp" || prov.Provider == "codex" {
+			// OAuth/SSO login state belongs to their own stores; an unrelated
+			// API-key pool must never make them eligible for implicit routes.
+			continue
+		}
+		snapshot, err := accountStore().LoadSnapshot(name, prov.Provider)
+		if err != nil || len(snapshot.Pool.Accounts) == 0 {
+			continue
+		}
+		if snapshot.Source == accounts.SourcePlural ||
+			(snapshot.Source == accounts.SourceLegacy && prov.Provider != "static") {
 			out[name] = true
 		}
 	}

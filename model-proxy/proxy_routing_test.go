@@ -32,8 +32,8 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 	cfg := &Config{
 
 		Providers: map[string]Provider{
-			"codex": {OpenAIBaseURL: codexUp.URL, Provider: "static"},
-			"aqp":   {OpenAIBaseURL: gwUp.URL, Provider: "static"},
+			"codex": {OpenAIBaseURL: codexUp.URL, Provider: testProviderID},
+			"aqp":   {OpenAIBaseURL: gwUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
@@ -92,7 +92,7 @@ func TestForward_UnknownModel(t *testing.T) {
 	cfg := &Config{
 
 		Providers: map[string]Provider{
-			"aqp": {OpenAIBaseURL: gwUp.URL, Provider: "static"},
+			"aqp": {OpenAIBaseURL: gwUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"gpt-5.5": {{Provider: "aqp", Model: "gpt-5.5"}},

@@ -25,8 +25,8 @@ func TestUC_FailoverAndCircuitSkipsOpenProvider(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -79,7 +79,7 @@ func TestUC_401RefreshRetrySucceeds(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"codex": {OpenAIBaseURL: up.URL, Provider: "static"},
+			"codex": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
@@ -119,8 +119,8 @@ func TestUC_401RefreshFailsFailover(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -169,8 +169,8 @@ func TestUC_429RetryAfterSkipsProvider(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: up.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: up.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -216,8 +216,8 @@ func TestUC_UpstreamTimeoutFailover(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"slow":     {OpenAIBaseURL: slow.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"slow":     {OpenAIBaseURL: slow.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -277,7 +277,7 @@ func TestUC_ClientDisconnectStopsUpstream(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"codex": {OpenAIBaseURL: up.URL, Provider: "static"},
+			"codex": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"gpt-5.5": {{Provider: "codex", Model: "gpt-5.5"}},
@@ -319,8 +319,8 @@ func TestUC_AllTargetsFailReturns502(t *testing.T) {
 	defer b.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {OpenAIBaseURL: a.URL, Provider: "static"},
-			"b": {OpenAIBaseURL: b.URL, Provider: "static"},
+			"a": {OpenAIBaseURL: a.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: b.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {

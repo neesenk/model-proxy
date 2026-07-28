@@ -117,7 +117,7 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"p":   {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m-probe"}},
+			"p":   {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m-probe"}},
 			"cdx": {OpenAIBaseURL: codexUp.URL, Provider: "codex"},
 		},
 		Routes: map[string][]RouteTarget{},
@@ -181,7 +181,7 @@ func TestWireCap_ProbeSkipsAnthropicLegWithBase(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: "http://anthropic-unused", Provider: "static", Models: []string{"m"}},
+			"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: "http://anthropic-unused", Provider: testProviderID, Models: []string{"m"}},
 		},
 		Routes: map[string][]RouteTarget{},
 	}
@@ -221,7 +221,7 @@ func TestWireCap_StaleNegativeVerdictIsReprobed(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m"}},
+			"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m"}},
 		},
 		Routes: map[string][]RouteTarget{},
 	}
@@ -256,13 +256,13 @@ func TestWireCap_ProbeModelSelection(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "p", Model: "m1"}}},
 	}
 	if got := wireProbeModel(cfg, nil, "p"); got != "m1" {
 		t.Errorf("wireProbeModel = %q, want m1 (route target)", got)
 	}
-	cfg.Providers["p"] = Provider{OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m0"}}
+	cfg.Providers["p"] = Provider{OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m0"}}
 	if got := wireProbeModel(cfg, nil, "p"); got != "m0" {
 		t.Errorf("wireProbeModel = %q, want m0 (provider.Models[0] wins)", got)
 	}
@@ -285,7 +285,7 @@ func TestWireCap_Forward_AnthropicToResponses(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -324,7 +324,7 @@ func TestWireCap_Forward_ResponsesToChatWhenNo(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "oai", Model: "gpt-x"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -361,7 +361,7 @@ func TestWireCap_Forward_AnthropicPassthroughWhenGateway(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "claude-x"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -403,7 +403,7 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -457,13 +457,14 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 // top-level wire_caps key, restore on boot when base_url matches, drop when
 // it doesn't, and survive reload.
 func TestWireCap_PersistRoundTrip(t *testing.T) {
+	useStaticProviderPools(t, "p")
 	dir := t.TempDir()
 	statePath := dir + "/quota_state.json"
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{}`)) }))
 	defer up.Close()
 	mkCfg := func(baseURL string) *Config {
 		return &Config{
-			Providers: map[string]Provider{"p": {OpenAIBaseURL: baseURL, Provider: "static"}},
+			Providers: map[string]Provider{"p": {OpenAIBaseURL: baseURL, Provider: testProviderID}},
 			Routes:    map[string][]RouteTarget{},
 		}
 	}
@@ -521,7 +522,7 @@ func TestWireCap_ProbeTimeoutUnknown(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: "static", Models: []string{"m1"}}},
+		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}}},
 		Routes:    map[string][]RouteTarget{},
 	}
 	p := newTestProxy(t, cfg)

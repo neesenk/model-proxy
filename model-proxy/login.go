@@ -238,7 +238,7 @@ func addApikeyAccount(cfg *Config, name string, prov Provider, cred accountCred,
 			}
 			pool.Accounts = append(pool.Accounts, poolAccount{ID: id, Label: lbl, APIKey: key, AddedAt: now})
 		}
-		return savePool(name, pool)
+		return savePool(name, prov.Provider, pool)
 	})
 }
 
@@ -286,7 +286,7 @@ func removeApikeyAccount(name, providerID, id string) error {
 			}
 		}
 		pool.Accounts = out
-		return savePool(name, pool)
+		return savePool(name, providerID, pool)
 	})
 }
 

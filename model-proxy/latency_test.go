@@ -201,7 +201,7 @@ func TestForward_RecordsLatency(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"z": {OpenAIBaseURL: up.URL, Provider: "static"},
+			"z": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {{Provider: "z", Model: "glm-rt"}},

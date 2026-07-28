@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -33,6 +34,22 @@ type Account struct {
 type Pool struct {
 	Version  int       `json:"version"`
 	Accounts []Account `json:"accounts"`
+}
+
+// Source records which on-disk authority produced a pool snapshot.
+type Source uint8
+
+const (
+	SourceMissing Source = iota
+	SourceLegacy
+	SourcePlural
+)
+
+// Snapshot keeps pool data and its storage authority in one read result so
+// callers never need a second stat that could disagree with the loaded bytes.
+type Snapshot struct {
+	Pool   Pool
+	Source Source
 }
 
 // Credentials returns the complete credential tuple bound to this account.
@@ -64,28 +81,32 @@ func (s Store) ensureDirectory() error {
 	return os.Chmod(s.directory, 0o700)
 }
 
-// Load reads the plural pool file; if absent, wraps the legacy singular
-// <name>_apikey.json as a read-only 1-entry pool. A missing pool is empty (not
-// an error) — the caller treats "no accounts" as "not logged in".
-func (s Store) Load(name, providerID string) (Pool, error) {
+// LoadSnapshot reads the plural pool file; if absent, it wraps the legacy
+// singular <name>_apikey.json as a read-only 1-entry pool. A missing pool is a
+// successful SourceMissing snapshot. SourcePlural remains authoritative even
+// when its pool is empty or malformed, so callers cannot silently fall back.
+func (s Store) LoadSnapshot(name, providerID string) (Snapshot, error) {
 	data, err := os.ReadFile(s.PoolPath(name))
 	if err == nil {
 		var p Pool
 		if err := json.Unmarshal(data, &p); err != nil {
-			return Pool{}, fmt.Errorf("parse %s: %w", s.PoolPath(name), err)
+			return Snapshot{Source: SourcePlural}, fmt.Errorf("parse %s: %w", s.PoolPath(name), err)
 		}
-		return p, nil
+		if err := validatePool(providerID, p); err != nil {
+			return Snapshot{Source: SourcePlural}, fmt.Errorf("validate %s: %w", s.PoolPath(name), err)
+		}
+		return Snapshot{Pool: p, Source: SourcePlural}, nil
 	}
 	if !os.IsNotExist(err) {
-		return Pool{}, err
+		return Snapshot{Source: SourcePlural}, err
 	}
 	// Fall back to legacy singular file.
 	sdata, serr := os.ReadFile(s.LegacyPath(name))
 	if serr != nil {
 		if os.IsNotExist(serr) {
-			return Pool{}, nil
+			return Snapshot{Source: SourceMissing}, nil
 		}
-		return Pool{}, serr
+		return Snapshot{Source: SourceLegacy}, serr
 	}
 	var v struct {
 		APIKey    string `json:"api_key"`
@@ -93,17 +114,56 @@ func (s Store) Load(name, providerID string) (Pool, error) {
 		SecretKey string `json:"secret_key"`
 	}
 	if err := json.Unmarshal(sdata, &v); err != nil {
-		return Pool{}, fmt.Errorf("parse %s: %w", s.LegacyPath(name), err)
+		return Snapshot{Source: SourceLegacy}, fmt.Errorf("parse %s: %w", s.LegacyPath(name), err)
 	}
 	cred := Credentials{APIKey: v.APIKey, AccessKey: v.AccessKey, SecretKey: v.SecretKey}
-	return Pool{
-		Version: 1,
-		Accounts: []Account{{
-			ID:     AccountID(providerID, cred),
-			Label:  providerID,
-			APIKey: v.APIKey, AccessKey: v.AccessKey, SecretKey: v.SecretKey,
-		}},
-	}, nil
+	snapshot := Snapshot{
+		Source: SourceLegacy,
+		Pool: Pool{
+			Version: 1,
+			Accounts: []Account{{
+				ID:     AccountID(providerID, cred),
+				Label:  providerID,
+				APIKey: v.APIKey, AccessKey: v.AccessKey, SecretKey: v.SecretKey,
+			}},
+		},
+	}
+	if err := validatePool(providerID, snapshot.Pool); err != nil {
+		return Snapshot{Source: SourceLegacy}, fmt.Errorf("validate %s: %w", s.LegacyPath(name), err)
+	}
+	return snapshot, nil
+}
+
+func validatePool(providerID string, pool Pool) error {
+	seen := make(map[string]struct{}, len(pool.Accounts))
+	for i, account := range pool.Accounts {
+		if strings.TrimSpace(account.ID) == "" {
+			return fmt.Errorf("accounts[%d].id is empty", i)
+		}
+		if strings.Contains(account.ID, "#") {
+			return fmt.Errorf("accounts[%d].id contains reserved '#'", i)
+		}
+		if strings.TrimSpace(account.APIKey) == "" {
+			return fmt.Errorf("accounts[%d].api_key is empty", i)
+		}
+		if _, duplicate := seen[account.ID]; duplicate {
+			// Do not echo the identifier: for Volcengine it is the access key,
+			// and this validation error is surfaced in startup/reload logs.
+			return fmt.Errorf("accounts[%d].id duplicates an earlier account", i)
+		}
+		seen[account.ID] = struct{}{}
+		if providerID == "volcengine" && (account.AccessKey == "") != (account.SecretKey == "") {
+			return fmt.Errorf("accounts[%d] must set both access_key and secret_key", i)
+		}
+	}
+	return nil
+}
+
+// Load preserves the pool-only compatibility API for mutation and display
+// callers. Runtime construction must use LoadSnapshot so source is not lost.
+func (s Store) Load(name, providerID string) (Pool, error) {
+	snapshot, err := s.LoadSnapshot(name, providerID)
+	return snapshot.Pool, err
 }
 
 // Save writes the pool atomically: marshal → write path+".tmp" → os.Rename
@@ -111,8 +171,11 @@ func (s Store) Load(name, providerID string) (Pool, error) {
 // mid-write never leaves a truncated pool file (the read side never observes a
 // half-written JSON). Mirrors quota.go:persist. The temp file is 0o600 and lives
 // in the same dir (MkdirAll 0o700), so rename is a same-directory atomic move.
-func (s Store) Save(name string, p Pool) error {
+func (s Store) Save(name, providerID string, p Pool) error {
 	path := s.PoolPath(name)
+	if err := validatePool(providerID, p); err != nil {
+		return fmt.Errorf("validate pool %s: %w", name, err)
+	}
 	if err := s.ensureDirectory(); err != nil {
 		return err
 	}

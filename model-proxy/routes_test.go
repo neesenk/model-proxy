@@ -36,7 +36,7 @@ func TestForward_ClaudeMapping(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "static"},
+			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
@@ -84,8 +84,8 @@ func TestForward_Failover(t *testing.T) {
 	defer fallback.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {

@@ -127,7 +127,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 	// returns it, on a not-built name returns !ok.
 	p2 := newTestProxy(t, &Config{
 		Listen:    "127.0.0.1:1",
-		Providers: map[string]Provider{"single": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"single": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 	})
 	r2 := newResolver(p2, p2.providers, p2.poolIndex)
 	if e := r2.Expand(RouteTarget{Provider: "single", Model: "m"}); len(e) != 1 || e[0].Provider != "single" {

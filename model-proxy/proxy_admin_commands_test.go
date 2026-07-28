@@ -13,7 +13,7 @@ import (
 func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const accountID = "account-one"
-	if err := savePool("up", credentialPool{Accounts: []poolAccount{{
+	if err := savePool("up", "static", credentialPool{Accounts: []poolAccount{{
 		ID:     accountID,
 		APIKey: "test-key",
 	}}}); err != nil {
@@ -40,7 +40,7 @@ func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.
 	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{
 			"up": {
-				Provider:      "static",
+				Provider:      testProviderID,
 				OpenAIBaseURL: upstream.URL,
 				Models:        []string{"configured-model"},
 			},

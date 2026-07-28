@@ -79,7 +79,7 @@ func TestRefreshProviderModels_SingleAccount(t *testing.T) {
 func TestRefreshProviderModels_Unknown(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
-	cfg := &Config{Providers: map[string]Provider{"a": {Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {Provider: testProviderID}}}
 	_, err := refreshProviderModels(cfg, "nope")
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("unknown provider: err=%v want 'unknown provider'", err)

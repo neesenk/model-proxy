@@ -44,7 +44,7 @@ func TestForward_UnsupportedConversionReturns400WithoutUpstream(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{"ant": {
-			Provider: "static", AnthropicBaseURL: up.URL, OpenAIBaseURL: up.URL,
+			Provider: testProviderID, AnthropicBaseURL: up.URL, OpenAIBaseURL: up.URL,
 		}},
 		Routes: map[string][]RouteTarget{"m": {{
 			Provider: "ant", Model: "claude", Protocol: "anthropic",
@@ -86,8 +86,8 @@ func TestForward_UnsupportedTargetFallsThroughToCompatibleProtocol(t *testing.T)
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"ant":  {Provider: "static", AnthropicBaseURL: anthropic.URL, OpenAIBaseURL: anthropic.URL},
-			"chat": {Provider: "static", OpenAIBaseURL: chat.URL},
+			"ant":  {Provider: testProviderID, AnthropicBaseURL: anthropic.URL, OpenAIBaseURL: anthropic.URL},
+			"chat": {Provider: testProviderID, OpenAIBaseURL: chat.URL},
 		},
 		Routes: map[string][]RouteTarget{"m": {
 			{Provider: "ant", Model: "claude", Protocol: "anthropic", Priority: 0},

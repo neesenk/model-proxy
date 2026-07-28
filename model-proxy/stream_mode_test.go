@@ -18,7 +18,7 @@ func TestForwardAdaptsUpstreamSSEToClientJSON(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -48,7 +48,7 @@ func TestForwardAdaptsUpstreamJSONToClientSSE(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"codex-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -190,7 +190,7 @@ func TestForwardConvertsSSEAfterCommentHeartbeat(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)

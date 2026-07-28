@@ -8,7 +8,7 @@ import (
 // --- fetchProviderModels: unknown provider ---
 
 func TestFetchProviderModels_Unknown(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	_, err := fetchProviderModels(cfg, "nope")
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("unknown provider: err=%v", err)

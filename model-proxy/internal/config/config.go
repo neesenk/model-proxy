@@ -693,7 +693,9 @@ func (c *Config) validate() error {
 		}
 		// Check for known provider_id typos. apikey is a credential *category*
 		// (zhipu/deepseek/volcengine/kimi-code), not a registered provider_id;
-		// static is the no-login provider (auth via the per-provider `headers` map).
+		// static's login eligibility comes from its API-key pool. The generic
+		// `headers` map is applied later as an override, but cannot make an
+		// uncredentialed static provider runnable.
 		known := map[string]bool{"aqp": true, "codex": true, "zhipu": true, "deepseek": true, "volcengine": true, "kimi-code": true, "static": true, "zcode": true, "qwen-plan": true}
 		if !known[p.Provider] {
 			return fmt.Errorf("provider %q: unknown provider_id %q — valid: aqp, codex, zhipu, deepseek, volcengine, kimi-code, static, zcode, qwen-plan", name, p.Provider)

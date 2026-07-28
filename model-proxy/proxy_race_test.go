@@ -20,6 +20,7 @@ import (
 // The race detector only sees it when a reload overlaps a request, which no other
 // test exercises. Run with -race.
 func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
+	useStaticProviderPools(t, "p")
 	// Alternate 200/500 so the test exercises both recordSuccess and
 	// recordFailure (both reachable from tryTarget during a request).
 	var hits atomic.Int32

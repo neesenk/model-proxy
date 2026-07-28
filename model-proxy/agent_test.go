@@ -129,7 +129,7 @@ func TestForward_RecordsAgent(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"aqp": {AnthropicBaseURL: up.URL, Provider: "static"},
+			"aqp": {AnthropicBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"claude-sonnet-4": {{Provider: "aqp", Model: "claude-sonnet-4"}},

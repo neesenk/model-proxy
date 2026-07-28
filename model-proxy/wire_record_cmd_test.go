@@ -21,6 +21,10 @@ func TestWireRecord_CmdHappyPath(t *testing.T) {
 	defer up.Close()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writePoolFile(t, "p", "static", "STATIC-TEST-KEY")
 	cfgYAML := "providers:\n  p: {provider_id: static, openai_base_url: " + up.URL + ", models: [m1]}\n"
 	cfgPath := filepath.Join(home, "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {

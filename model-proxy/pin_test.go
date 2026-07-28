@@ -37,8 +37,8 @@ func TestPin_ForcesProvider(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"zhipu":    {OpenAIBaseURL: zhipuUp.URL, Provider: "static"},
-			"deepseek": {OpenAIBaseURL: deepUp.URL, Provider: "static"},
+			"zhipu":    {OpenAIBaseURL: zhipuUp.URL, Provider: testProviderID},
+			"deepseek": {OpenAIBaseURL: deepUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {
@@ -82,8 +82,8 @@ func TestPin_NoFailoverWhenPinned(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"zhipu":    {OpenAIBaseURL: zhipuUp.URL, Provider: "static"},
-			"deepseek": {OpenAIBaseURL: deepUp.URL, Provider: "static"},
+			"zhipu":    {OpenAIBaseURL: zhipuUp.URL, Provider: testProviderID},
+			"deepseek": {OpenAIBaseURL: deepUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {
@@ -116,7 +116,7 @@ func TestPin_NoFailoverWhenPinned(t *testing.T) {
 // can't reach (a pin that would silently do nothing).
 func TestSetPin_Validation(t *testing.T) {
 	cfg := &Config{
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -136,8 +136,8 @@ func TestSetPin_Validation(t *testing.T) {
 func TestPin_TTLExpiry(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"zhipu":    {OpenAIBaseURL: "https://x", Provider: "static"},
-			"deepseek": {OpenAIBaseURL: "https://y", Provider: "static"},
+			"zhipu":    {OpenAIBaseURL: "https://x", Provider: testProviderID},
+			"deepseek": {OpenAIBaseURL: "https://y", Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {
@@ -171,8 +171,8 @@ func TestPin_TTLExpiry(t *testing.T) {
 func TestScheduleStatus_ShowsPin(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"zhipu":    {OpenAIBaseURL: "https://x", Provider: "static"},
-			"deepseek": {OpenAIBaseURL: "https://y", Provider: "static"},
+			"zhipu":    {OpenAIBaseURL: "https://x", Provider: testProviderID},
+			"deepseek": {OpenAIBaseURL: "https://y", Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {
@@ -207,7 +207,7 @@ func TestScheduleStatus_ShowsPin(t *testing.T) {
 // POST to a bad provider is 400 with a clear message.
 func TestHandlePinAPI(t *testing.T) {
 	w := newWebServer(newTestProxy(t, &Config{
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	}), "test-config.yaml")
 	mux := http.NewServeMux()
@@ -274,8 +274,8 @@ func TestPin_BypassesCache(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {OpenAIBaseURL: aUp.URL, Provider: "static"},
-			"b": {OpenAIBaseURL: bUp.URL, Provider: "static"},
+			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{"glm": {
 			{Provider: "a", Model: "glm", Priority: 1},
@@ -339,8 +339,8 @@ func TestPin_ForcesThroughCircuit(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {OpenAIBaseURL: aUp.URL, Provider: "static"},
-			"b": {OpenAIBaseURL: bUp.URL, Provider: "static"},
+			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {

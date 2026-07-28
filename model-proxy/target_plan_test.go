@@ -9,7 +9,7 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{
 			"up": {
-				Provider:         "static",
+				Provider:         testProviderID,
 				OpenAIBaseURL:    "https://chat.example/v1",
 				AnthropicBaseURL: "https://anthropic.example",
 			},

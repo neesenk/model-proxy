@@ -26,7 +26,7 @@ func TestForward_AnthropicToResponses_NonStream(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -111,7 +111,7 @@ func TestForward_OpenAIToResponses_NonStream(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
 	}
 	p := newTestProxy(t, cfg)

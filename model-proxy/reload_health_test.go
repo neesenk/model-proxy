@@ -390,6 +390,7 @@ func waitRequestDone(t *testing.T, done <-chan proxyRequestResult) proxyRequestR
 // an old-generation upstream failure arriving after reload must not repopulate
 // the new generation's provider health, and subsequent traffic uses the new URL.
 func TestReload_RejectsOldRequestFailureMutation(t *testing.T) {
+	useStaticProviderPools(t, "p")
 	started := make(chan struct{})
 	release := make(chan struct{})
 	oldUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -445,6 +446,7 @@ func TestReload_RejectsOldRequestFailureMutation(t *testing.T) {
 // TestReload_RejectsOldRequestSuccessMutation covers the reverse corruption:
 // stale success must not clear a failure recorded by the new generation.
 func TestReload_RejectsOldRequestSuccessMutation(t *testing.T) {
+	useStaticProviderPools(t, "p")
 	started := make(chan struct{})
 	release := make(chan struct{})
 	oldUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -494,6 +496,7 @@ func TestReload_RejectsOldRequestSuccessMutation(t *testing.T) {
 // TestReload_RejectsAllDirectOldGenerationMutations complements the end-to-end
 // request tests by covering every generation-guarded state family explicitly.
 func TestReload_RejectsAllDirectOldGenerationMutations(t *testing.T) {
+	useStaticProviderPools(t, "p")
 	cfg1Path := writeConfigFile(t, routingConfig("http://127.0.0.1:1"))
 	cfg2Path := writeConfigFile(t, routingConfig("http://127.0.0.1:2"))
 	p := newTestProxy(t, mustLoadConfigFile(t, cfg1Path))

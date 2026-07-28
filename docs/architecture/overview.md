@@ -64,7 +64,10 @@ HOME、`MP_MODELSDEV_URL` 与 Config 的 provider/route 名单适配成 catalog 
 `internal/accounts` 是无仓库内依赖的 API-key 账号存储叶子包，拥有 credential
 tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进程锁。根
 `accounts_adapter.go` 只适配 HOME 并为尚在组合层的登录、Web、Provider 构建保留
-窄兼容入口；网络验证、交互、reload、运行时虚拟化和健康选择不进入存储包。
+窄兼容入口；`buildProviders` 以一次 `LoadSnapshot` 同时取得 pool 与来源，并在
+同一 build result 中派生 providers、pool identity 和 implicit-route eligibility，
+避免二次文件探测改变同一 runtime generation 的 authority 决策。网络验证、
+交互、reload、运行时虚拟化和健康选择不进入存储包。
 
 ## 编排与异步分支
 

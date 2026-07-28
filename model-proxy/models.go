@@ -335,7 +335,7 @@ func refreshProviderModels(cfg *Config, provName string) ([]string, error) {
 	if _, ok := cfg.Providers[provName]; !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	provMap, _, _ := buildProviders(cfg)
+	provMap := buildProviders(cfg).providers
 	target := provName
 	if vids, pooled := poolVirtuals(cfg, provName); pooled {
 		target = vids[0] // first virtual by account-id order

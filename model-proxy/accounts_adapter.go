@@ -26,8 +26,8 @@ func loadPool(name, providerID string) (credentialPool, error) {
 	return accountStore().Load(name, providerID)
 }
 
-func savePool(name string, pool credentialPool) error {
-	return accountStore().Save(name, pool)
+func savePool(name, providerID string, pool credentialPool) error {
+	return accountStore().Save(name, providerID, pool)
 }
 
 func withPoolLock(name string, fn func() error) error {

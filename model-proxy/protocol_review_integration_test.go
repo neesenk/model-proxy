@@ -19,7 +19,7 @@ func TestForward_Converted4xxUsesClientErrorEnvelope(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -60,7 +60,7 @@ func TestConvertBody_CodexSameProtocolResponsesPassthrough(t *testing.T) {
 	}
 
 	plain := targetPlan{
-		providerCfg:  Provider{Provider: "static"},
+		providerCfg:  Provider{Provider: testProviderID},
 		clientProto:  "responses",
 		backendProto: "responses",
 		imageOK:      true,

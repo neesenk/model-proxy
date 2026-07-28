@@ -15,8 +15,8 @@ import (
 // everything when empty — and never touches param blocklists, sticky, or pins.
 func TestResetHealth(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
-		"a": {OpenAIBaseURL: "http://x", Provider: "static"},
-		"b": {OpenAIBaseURL: "http://y", Provider: "static"},
+		"a": {OpenAIBaseURL: "http://x", Provider: testProviderID},
+		"b": {OpenAIBaseURL: "http://y", Provider: testProviderID},
 	}}
 	p := newTestProxy(t, cfg)
 	p.mu.Lock()

@@ -18,7 +18,7 @@ import (
 func TestUC_ModelsEndpointUnion(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"aqp": {OpenAIBaseURL: "http://x", Provider: "static"},
+			"aqp": {OpenAIBaseURL: "http://x", Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm-5.2":         {{Provider: "aqp", Model: "glm-5.2"}},
@@ -63,8 +63,8 @@ func TestUC_DebugScheduleReportsSticky(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {OpenAIBaseURL: up.URL, Provider: "static"},
-			"b": {OpenAIBaseURL: up.URL, Provider: "static"},
+			"a": {OpenAIBaseURL: up.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -130,8 +130,8 @@ func TestUC_StickySameProvider(t *testing.T) {
 	defer up.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {OpenAIBaseURL: up.URL, Provider: "static"},
-			"b": {OpenAIBaseURL: up.URL, Provider: "static"},
+			"a": {OpenAIBaseURL: up.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -295,7 +295,7 @@ func TestUC_DeepSeekDualProtocolBaseURL(t *testing.T) {
 
 func TestUC_UnknownPathAndHealth(t *testing.T) {
 	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}},
+		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -328,7 +328,7 @@ func TestUC_UnknownPathAndHealth(t *testing.T) {
 
 func TestUC_MissingModelField400(t *testing.T) {
 	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}},
+		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -346,7 +346,7 @@ func TestUC_MissingModelField400(t *testing.T) {
 
 func TestUC_UnparseableBody400(t *testing.T) {
 	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}},
+		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -370,7 +370,7 @@ func TestUC_ClientAuthNotForwarded(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"a": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"a": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "a", Model: "m1"}}},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"a": "proxy-key"})

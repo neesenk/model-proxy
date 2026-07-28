@@ -65,7 +65,7 @@ func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"other": {OpenAIBaseURL: "http://x", Provider: "static"},
+			"other": {OpenAIBaseURL: "http://x", Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{},
 	}

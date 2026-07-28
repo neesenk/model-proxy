@@ -32,7 +32,7 @@ func writePoolFile(t *testing.T, name, providerID string, keys ...string) {
 			AddedAt: "2026-07-08",
 		})
 	}
-	if err := savePool(name, p); err != nil {
+	if err := savePool(name, providerID, p); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -70,7 +70,7 @@ func TestSaveLoadPoolRoundTrip(t *testing.T) {
 		{ID: "id1", Label: "home", APIKey: "k1", AddedAt: "2026-07-08T00:00:00Z"},
 		{ID: "id2", Label: "team", APIKey: "k2", AddedAt: "2026-07-08T00:00:00Z"},
 	}}
-	if err := store.Save("zhipu", in); err != nil {
+	if err := store.Save("zhipu", "zhipu", in); err != nil {
 		t.Fatal(err)
 	}
 	out, err := store.Load("zhipu", "zhipu")
@@ -85,6 +85,34 @@ func TestSaveLoadPoolRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveRejectsInvalidPoolWithoutReplacingExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestStore(t, dir)
+	valid := Pool{Accounts: []Account{{ID: "existing", APIKey: "existing-key"}}}
+	if err := store.Save("volcengine", "volcengine", valid); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(store.PoolPath("volcengine"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := Pool{Accounts: []Account{{
+		ID: "replacement", APIKey: "replacement-key", AccessKey: "access-without-secret",
+	}}}
+	err = store.Save("volcengine", "volcengine", invalid)
+	if err == nil || !strings.Contains(err.Error(), "must set both access_key and secret_key") {
+		t.Fatalf("Save() error = %v, want semantic validation failure", err)
+	}
+	after, readErr := os.ReadFile(store.PoolPath("volcengine"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatal("failed Save replaced the previously valid pool")
+	}
+}
+
 func TestLoadPoolSingularFallback(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestStore(t, dir)
@@ -92,10 +120,14 @@ func TestLoadPoolSingularFallback(t *testing.T) {
 	singular := filepath.Join(dir, ".model-proxy", "zhipu_apikey.json")
 	os.WriteFile(singular, []byte(`{"api_key":"legacy-key"}`), 0o600)
 
-	pool, err := store.Load("zhipu", "zhipu")
+	snapshot, err := store.LoadSnapshot("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if snapshot.Source != SourceLegacy {
+		t.Fatalf("source = %v, want SourceLegacy", snapshot.Source)
+	}
+	pool := snapshot.Pool
 	if len(pool.Accounts) != 1 {
 		t.Fatalf("fallback len = %d, want 1", len(pool.Accounts))
 	}
@@ -115,16 +147,20 @@ func TestLoadPoolPluralPrecedenceAndParseErrors(t *testing.T) {
 		if err := os.WriteFile(store.LegacyPath("zhipu"), []byte(`{"api_key":"legacy"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.Save("zhipu", Pool{Accounts: []Account{{
+		if err := store.Save("zhipu", "zhipu", Pool{Accounts: []Account{{
 			ID: "plural-id", APIKey: "plural",
 		}}}); err != nil {
 			t.Fatal(err)
 		}
 
-		pool, err := store.Load("zhipu", "zhipu")
+		snapshot, err := store.LoadSnapshot("zhipu", "zhipu")
 		if err != nil {
 			t.Fatal(err)
 		}
+		if snapshot.Source != SourcePlural {
+			t.Fatalf("source = %v, want SourcePlural", snapshot.Source)
+		}
+		pool := snapshot.Pool
 		if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "plural" {
 			t.Fatalf("Load() = %+v, want only plural credential", pool.Accounts)
 		}
@@ -140,12 +176,15 @@ func TestLoadPoolPluralPrecedenceAndParseErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		pool, err := store.Load("zhipu", "zhipu")
+		snapshot, err := store.LoadSnapshot("zhipu", "zhipu")
 		if err == nil {
 			t.Fatal("corrupt plural pool should fail")
 		}
-		if len(pool.Accounts) != 0 {
-			t.Fatalf("corrupt plural pool returned legacy credentials: %+v", pool.Accounts)
+		if snapshot.Source != SourcePlural {
+			t.Fatalf("source = %v, want SourcePlural", snapshot.Source)
+		}
+		if len(snapshot.Pool.Accounts) != 0 {
+			t.Fatalf("corrupt plural pool returned legacy credentials: %+v", snapshot.Pool.Accounts)
 		}
 	})
 
@@ -156,21 +195,124 @@ func TestLoadPoolPluralPrecedenceAndParseErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := store.Load("deepseek", "deepseek"); err == nil {
+		snapshot, err := store.LoadSnapshot("deepseek", "deepseek")
+		if err == nil {
 			t.Fatal("corrupt legacy pool should fail")
 		} else if got := err.Error(); got == "" || !strings.Contains(got, store.LegacyPath("deepseek")) {
 			t.Fatalf("Load() error = %q, want legacy path %q", got, store.LegacyPath("deepseek"))
 		}
+		if snapshot.Source != SourceLegacy {
+			t.Fatalf("source = %v, want SourceLegacy", snapshot.Source)
+		}
 	})
+}
+
+func TestLoadSnapshotRejectsInvalidAccounts(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerID string
+		body       string
+		want       string
+	}{
+		{
+			name: "empty id",
+			body: `{"version":1,"accounts":[{"id":"","api_key":"key"}]}`,
+			want: "id is empty",
+		},
+		{
+			name: "reserved id separator",
+			body: `{"version":1,"accounts":[{"id":"one#two","api_key":"key"}]}`,
+			want: "reserved '#'",
+		},
+		{
+			name: "empty api key",
+			body: `{"version":1,"accounts":[{"id":"one","api_key":""}]}`,
+			want: "api_key is empty",
+		},
+		{
+			name: "duplicate id",
+			body: `{"version":1,"accounts":[{"id":"one","api_key":"key-1"},{"id":"one","api_key":"key-2"}]}`,
+			want: "duplicates an earlier account",
+		},
+		{
+			name:       "partial volcengine signing pair",
+			providerID: "volcengine",
+			body:       `{"version":1,"accounts":[{"id":"one","api_key":"key","access_key":"ak"}]}`,
+			want:       "must set both access_key and secret_key",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := newTestStore(t, dir)
+			if err := os.WriteFile(store.PoolPath("provider"), []byte(test.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			providerID := test.providerID
+			if providerID == "" {
+				providerID = "zhipu"
+			}
+
+			snapshot, err := store.LoadSnapshot("provider", providerID)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("LoadSnapshot() error = %v, want %q", err, test.want)
+			}
+			if snapshot.Source != SourcePlural || len(snapshot.Pool.Accounts) != 0 {
+				t.Fatalf("invalid snapshot = %+v, want empty SourcePlural", snapshot)
+			}
+		})
+	}
+}
+
+func TestLoadSnapshotDuplicateErrorDoesNotExposeIdentifier(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestStore(t, dir)
+	const accessKey = "AK-SENSITIVE-DO-NOT-LOG"
+	body := `{"version":1,"accounts":[` +
+		`{"id":"` + accessKey + `","api_key":"key-1","access_key":"ak-1","secret_key":"sk-1"},` +
+		`{"id":"` + accessKey + `","api_key":"key-2","access_key":"ak-2","secret_key":"sk-2"}]}`
+	if err := os.WriteFile(store.PoolPath("volcengine"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := store.LoadSnapshot("volcengine", "volcengine")
+	if err == nil {
+		t.Fatal("duplicate account id should fail")
+	}
+	if strings.Contains(err.Error(), accessKey) {
+		t.Fatalf("validation error exposed credential identifier: %q", err)
+	}
+	if !strings.Contains(err.Error(), "accounts[1].id duplicates an earlier account") {
+		t.Fatalf("validation error = %q, want index-only duplicate diagnostic", err)
+	}
+}
+
+func TestLoadSnapshotRejectsEmptyLegacyKey(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestStore(t, dir)
+	if err := os.WriteFile(store.LegacyPath("zhipu"), []byte(`{"api_key":""}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.LoadSnapshot("zhipu", "zhipu")
+	if err == nil || !strings.Contains(err.Error(), "api_key is empty") {
+		t.Fatalf("LoadSnapshot() error = %v, want empty api_key", err)
+	}
+	if snapshot.Source != SourceLegacy || len(snapshot.Pool.Accounts) != 0 {
+		t.Fatalf("invalid legacy snapshot = %+v, want empty SourceLegacy", snapshot)
+	}
 }
 
 func TestLoadPoolEmpty(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestStore(t, dir)
-	pool, err := store.Load("zhipu", "zhipu")
+	snapshot, err := store.LoadSnapshot("zhipu", "zhipu")
 	if err != nil {
 		t.Fatalf("missing pool should be empty, not error: %v", err)
 	}
+	if snapshot.Source != SourceMissing {
+		t.Fatalf("source = %v, want SourceMissing", snapshot.Source)
+	}
+	pool := snapshot.Pool
 	if len(pool.Accounts) != 0 {
 		t.Fatalf("want 0 accounts, got %d", len(pool.Accounts))
 	}
@@ -197,7 +339,7 @@ func TestSavePoolAtomic_NoTruncationOnDisk(t *testing.T) {
 	in := Pool{Version: 1, Accounts: []Account{
 		{ID: "id1", Label: "home", APIKey: "k1", AddedAt: "2026-07-08T00:00:00Z"},
 	}}
-	if err := store.Save("deepseek", in); err != nil {
+	if err := store.Save("deepseek", "deepseek", in); err != nil {
 		t.Fatal(err)
 	}
 	// No leftover temp file.

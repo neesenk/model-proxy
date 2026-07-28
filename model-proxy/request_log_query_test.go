@@ -120,7 +120,7 @@ func TestHandleRequests_ListAndDetail(t *testing.T) {
 	})
 
 	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	})
 	p.reqLog = &requestLogger{dir: dir} // no goroutine; only .directory() is used
@@ -161,7 +161,7 @@ func TestHandleRequests_ListAndDetail(t *testing.T) {
 
 	// Logging off → enabled=false.
 	p2 := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	})
 	w2 := newWebServer(p2, "test-config.yaml")
@@ -184,7 +184,7 @@ func TestHandleRequests_ShadowFilter(t *testing.T) {
 	})
 
 	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "zhipu", Model: "glm"}}},
 	})
 	p.reqLog = &requestLogger{dir: dir} // no goroutine; only .directory() is used

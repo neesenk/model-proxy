@@ -303,6 +303,67 @@ func TestArchitectureBoundaries(t *testing.T) {
 				t.Errorf("accounts_adapter.go %s declarations = %d, want exactly 1", name, count)
 			}
 		}
+
+		proxyFile, proxySet := parseGoFile(t, "proxy.go")
+		builder := namedFunction(t, proxyFile, "buildProviders")
+		if got := namedCallCountInNode(builder.Body, "LoadSnapshot"); got != 1 {
+			t.Errorf("buildProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
+		}
+		forbiddenStorageProbes := map[string]bool{
+			"loadPool": true, "poolPath": true, "singularPoolPath": true,
+			"Load": true, "PoolPath": true, "LegacyPath": true,
+			"Stat": true, "ReadFile": true, "Open": true, "OpenFile": true, "ReadDir": true,
+		}
+		for _, violation := range forbiddenCallSites(builder.Body, proxySet, forbiddenStorageProbes, nil) {
+			t.Errorf("buildProviders re-reads or probes account storage outside its snapshot: %s", violation)
+		}
+		loggedIn := namedFunction(t, proxyFile, "loggedInProviders")
+		if got := namedCallCountInNode(loggedIn.Body, "LoadSnapshot"); got != 1 {
+			t.Errorf("loggedInProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
+		}
+		for _, violation := range forbiddenCallSites(loggedIn.Body, proxySet, forbiddenStorageProbes, nil) {
+			t.Errorf("loggedInProviders re-reads or probes account storage outside its snapshot: %s", violation)
+		}
+
+		buildFields := namedStructFields(t, proxyFile, "providerBuild")
+		wantBuildFields := map[string]bool{
+			"providers": true, "poolIndex": true, "parentOf": true, "eligible": true,
+		}
+		if len(buildFields) != len(wantBuildFields) {
+			t.Errorf("providerBuild fields = %v, want exactly %v", sortedFieldNames(buildFields), sortedBoolNames(wantBuildFields))
+		}
+		for name := range wantBuildFields {
+			if _, ok := buildFields[name]; !ok {
+				t.Errorf("providerBuild missing %q", name)
+			}
+		}
+
+		constructor := namedFunction(t, proxyFile, "newProxyWithStatePath")
+		if got := namedCallCountInNode(constructor.Body, "synthesizeImplicitRoutesFrom"); got != 1 {
+			t.Errorf("newProxyWithStatePath synthesizeImplicitRoutesFrom calls = %d, want 1 build-derived eligibility use", got)
+		}
+		if got := namedCallWithArgsCount(constructor.Body, "synthesizeImplicitRoutesFrom", "cfg", "built", "eligible"); got != 1 {
+			t.Errorf("newProxyWithStatePath must pass exactly (cfg, built.eligible), matches = %d", got)
+		}
+		if got := namedCallCountInNode(constructor.Body, "loggedInProviders"); got != 0 {
+			t.Errorf("newProxyWithStatePath calls loggedInProviders %d time(s), re-reading account eligibility", got)
+		}
+		if got := namedCallCountInNode(constructor.Body, "synthesizeImplicitRoutes"); got != 0 {
+			t.Errorf("newProxyWithStatePath re-reads account eligibility %d time(s)", got)
+		}
+		reload := namedMethod(t, proxyFile, "Proxy", "reload")
+		if got := namedCallCountInNode(reload.Body, "synthesizeImplicitRoutesFrom"); got != 1 {
+			t.Errorf("Proxy.reload synthesizeImplicitRoutesFrom calls = %d, want 1 build-derived eligibility use", got)
+		}
+		if got := namedCallWithArgsCount(reload.Body, "synthesizeImplicitRoutesFrom", "cfg", "built", "eligible"); got != 1 {
+			t.Errorf("Proxy.reload must pass exactly (cfg, built.eligible), matches = %d", got)
+		}
+		if got := namedCallCountInNode(reload.Body, "loggedInProviders"); got != 0 {
+			t.Errorf("Proxy.reload calls loggedInProviders %d time(s), re-reading account eligibility", got)
+		}
+		if got := namedCallCountInNode(reload.Body, "synthesizeImplicitRoutes"); got != 0 {
+			t.Errorf("Proxy.reload re-reads account eligibility %d time(s)", got)
+		}
 	})
 
 	t.Run("internal pricing remains a repository-leaf package", func(t *testing.T) {
@@ -571,7 +632,7 @@ func isAccountsAdapterWrapper(fn *ast.FuncDecl) bool {
 		"poolPath":         {"name"},
 		"singularPoolPath": {"name"},
 		"loadPool":         {"name", "providerID"},
-		"savePool":         {"name", "pool"},
+		"savePool":         {"name", "providerID", "pool"},
 		"withPoolLock":     {"name", "fn"},
 	}[fn.Name.Name]
 	if wantMethod == "" {
@@ -1656,6 +1717,34 @@ func namedCallCountInNode(n ast.Node, name string) int {
 			if fun.Sel.Name == name {
 				count++
 			}
+		}
+		return true
+	})
+	return count
+}
+
+// namedCallWithArgsCount counts calls shaped exactly as
+// name(firstIdent, selectorBase.selectorField). It guards assembly code against
+// replacing a build-derived value with a fresh storage-dependent computation
+// while retaining the same callee and therefore fooling a call-count check.
+func namedCallWithArgsCount(n ast.Node, name, firstIdent, selectorBase, selectorField string) int {
+	count := 0
+	ast.Inspect(n, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || callableName(call.Fun) != name || len(call.Args) != 2 {
+			return true
+		}
+		first, ok := call.Args[0].(*ast.Ident)
+		if !ok || first.Name != firstIdent {
+			return true
+		}
+		second, ok := call.Args[1].(*ast.SelectorExpr)
+		if !ok || second.Sel.Name != selectorField {
+			return true
+		}
+		base, ok := second.X.(*ast.Ident)
+		if ok && base.Name == selectorBase {
+			count++
 		}
 		return true
 	})

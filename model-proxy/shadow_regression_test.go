@@ -60,7 +60,7 @@ func TestShadowReport_Pairing(t *testing.T) {
 // TestShouldShadow: rate=0 → false, rate>=1 → true, rate between → probabilistic.
 func TestShouldShadow(t *testing.T) {
 	cfg := &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "z", Model: "m"}}},
 	}
 	// rate >= 1 → always true.
@@ -87,6 +87,7 @@ func TestShouldShadow(t *testing.T) {
 // pre-fix the sample rate was cached at startup, so paid shadow requests kept
 // firing until restart.
 func TestReload_ShadowDisabledStopsFiring(t *testing.T) {
+	useStaticProviderPools(t, "main", "cand")
 	var candHits atomic.Int64
 	mainUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"ok":true}`))
@@ -182,7 +183,7 @@ func TestShadow_PooledProvider(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{
-			"main":         {OpenAIBaseURL: mainUp.URL, Provider: "static"},
+			"main":         {OpenAIBaseURL: mainUp.URL, Provider: testProviderID},
 			"zhipu-shadow": {OpenAIBaseURL: shadowUp.URL, Provider: "zhipu"},
 		},
 		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
@@ -229,8 +230,8 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{
-			"main":        {OpenAIBaseURL: mainUp.URL, Provider: "static"},
-			"shadow-prov": {AnthropicBaseURL: shadowUp.URL, Provider: "static"}, // cross-proto (anthropic) shadow
+			"main":        {OpenAIBaseURL: mainUp.URL, Provider: testProviderID},
+			"shadow-prov": {AnthropicBaseURL: shadowUp.URL, Provider: testProviderID}, // cross-proto (anthropic) shadow
 		},
 		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
 		Shadow: map[string]ShadowTarget{"m": {Provider: "shadow-prov", Model: "sm", Protocol: "anthropic"}},
@@ -335,7 +336,7 @@ func TestShadowReport_Unpaired(t *testing.T) {
 func TestHandleShadowReport_API(t *testing.T) {
 	// Off → enabled=false.
 	w := newWebServer(newTestProxy(t, &Config{
-		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: "static"}},
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	}), "test-config.yaml")
 	mux := http.NewServeMux()

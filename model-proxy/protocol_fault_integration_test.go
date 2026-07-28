@@ -25,7 +25,7 @@ func TestConvertFault_SameProtocolPassthrough(t *testing.T) {
 	}))
 	defer upA.Close()
 	pA := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"ant": {AnthropicBaseURL: upA.URL, Provider: "static"}},
+		Providers: map[string]Provider{"ant": {AnthropicBaseURL: upA.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "ant", Model: "claude-x"}}},
 	})
 	pA.providers["ant"] = &testProv{key: "k"}
@@ -58,7 +58,7 @@ func TestConvertFault_SameProtocolPassthrough(t *testing.T) {
 	}))
 	defer upR.Close()
 	pR := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: upR.URL, Provider: "static"}},
+		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: upR.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "cdx", Model: "gpt-x"}}},
 	})
 	pR.providers["cdx"] = &testProv{key: "k"}
@@ -95,7 +95,7 @@ func TestConvertFault_NonStream64MiBCap(t *testing.T) {
 	}))
 	defer up.Close()
 	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	})
 	p.providers["oai"] = &testProv{key: "k"}
@@ -136,7 +136,7 @@ func TestConvertFault_DisconnectStopsUpstream(t *testing.T) {
 	}))
 	defer up.Close()
 	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	})
 	p.providers["oai"] = &testProv{key: "k"}
@@ -162,7 +162,7 @@ func TestConvertFault_SniffSSEMissingContentType(t *testing.T) {
 	}))
 	defer up.Close()
 	p := newTestProxy(t, &Config{
-		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"cdx": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "cdx", Model: "gpt-x", Protocol: "responses"}}},
 	})
 	p.providers["cdx"] = &testProv{key: "k"}

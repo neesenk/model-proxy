@@ -127,7 +127,7 @@ func TestProbeModelCallableContext_CancelsUpstreamRequest(t *testing.T) {
 		ok, status, reason = probeModelCallableContext(
 			ctx,
 			client,
-			Provider{OpenAIBaseURL: "https://probe.invalid", Provider: "static"},
+			Provider{OpenAIBaseURL: "https://probe.invalid", Provider: testProviderID},
 			&fakeProviderImpl{},
 			"cancel-me",
 		)

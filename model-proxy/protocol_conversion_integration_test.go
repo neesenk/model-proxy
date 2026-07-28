@@ -28,7 +28,7 @@ func TestForward_AnthropicToOpenAI_NonStream(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -69,7 +69,7 @@ func TestForward_ConvertRequestFail_Closed(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -106,7 +106,7 @@ func TestForward_ConvertResponseFail_Closed(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -142,7 +142,7 @@ func TestForward_AnthropicToOpenAI_Stream(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -195,7 +195,7 @@ func TestForward_OpenAIToAnthropic_NonStream(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"ant": {AnthropicBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"ant": {AnthropicBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "ant", Model: "claude", Protocol: "anthropic"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -237,7 +237,7 @@ func TestForward_OpenAIToAnthropic_Stream(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"ant": {AnthropicBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"ant": {AnthropicBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "ant", Model: "claude", Protocol: "anthropic"}}},
 	}
 	p := newTestProxy(t, cfg)
@@ -285,7 +285,7 @@ func TestForward_Convert_LogsClientProtocolBody(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	p, dir, shutdown := newReqLogProxy(t, cfg)
@@ -344,7 +344,7 @@ func TestForward_Convert_StreamingCountsTokens(t *testing.T) {
 	}))
 	defer fwdUp.Close()
 	fwdCfg := &Config{
-		Providers: map[string]Provider{"oai": {OpenAIBaseURL: fwdUp.URL, Provider: "static"}},
+		Providers: map[string]Provider{"oai": {OpenAIBaseURL: fwdUp.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"claude-x": {{Provider: "oai", Model: "gpt-x", Protocol: "openai"}}},
 	}
 	fp := newTestProxy(t, fwdCfg)
@@ -376,7 +376,7 @@ func TestForward_Convert_StreamingCountsTokens(t *testing.T) {
 	}))
 	defer revUp.Close()
 	revCfg := &Config{
-		Providers: map[string]Provider{"ant": {AnthropicBaseURL: revUp.URL, Provider: "static"}},
+		Providers: map[string]Provider{"ant": {AnthropicBaseURL: revUp.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"gpt-x": {{Provider: "ant", Model: "claude", Protocol: "anthropic"}}},
 	}
 	rp := newTestProxy(t, revCfg)

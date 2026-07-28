@@ -14,7 +14,7 @@ func TestConvertFixup_ImageOKForTarget(t *testing.T) {
 	})
 	tgt := RouteTarget{Provider: "p", Model: "m-vision"}
 	// No caps anywhere: catalog decides.
-	cfg := &Config{Providers: map[string]Provider{"p": {Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"p": {Provider: testProviderID}}}
 	if !imageOKForTarget(cfg, nil, cat, tgt) {
 		t.Error("vision model via catalog must be image-ok")
 	}
@@ -30,7 +30,7 @@ func TestConvertFixup_ImageOKForTarget(t *testing.T) {
 		t.Error("nil catalog must default to image-ok")
 	}
 	// Config capabilities override wins over the catalog both ways.
-	cfgCaps := &Config{Providers: map[string]Provider{"p": {Provider: "static", Capabilities: map[string][]string{
+	cfgCaps := &Config{Providers: map[string]Provider{"p": {Provider: testProviderID, Capabilities: map[string][]string{
 		"m-vision": {"text"},          // declared text-only → false despite catalog
 		"m-text":   {"text", "image"}, // declared vision → true despite catalog
 	}}}}

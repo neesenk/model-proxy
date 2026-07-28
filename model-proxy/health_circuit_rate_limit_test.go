@@ -9,7 +9,7 @@ import (
 // --- releaseHalfOpenSlot: clears halfOpenInFlight; nil-health is a no-op ---
 
 func TestReleaseHalfOpenSlot(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
 	// No health entry yet → no-op (no panic).
 	p.releaseHalfOpenSlot("a")
@@ -30,7 +30,7 @@ func TestReleaseHalfOpenSlot(t *testing.T) {
 // --- takeHalfOpenSlot + releaseHalfOpenSlot lifecycle ---
 
 func TestTakeHalfOpenSlot_Lifecycle(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
 	// Closed circuit → take succeeds, no slot reserved.
 	if !p.takeHalfOpenSlot("a") {
@@ -59,7 +59,7 @@ func TestTakeHalfOpenSlot_Lifecycle(t *testing.T) {
 // --- takeHalfOpenSlot: circuit still open → false ---
 
 func TestTakeHalfOpenSlot_CircuitOpen(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
 	p.healthMu.Lock()
 	p.health["a"] = &providerHealth{circuitOpenUntil: time.Now().Add(5 * time.Minute)} // still open
@@ -72,7 +72,7 @@ func TestTakeHalfOpenSlot_CircuitOpen(t *testing.T) {
 // --- takeHalfOpenSlot: rate-limited → false ---
 
 func TestTakeHalfOpenSlot_RateLimited(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
 	p.healthMu.Lock()
 	p.health["a"] = &providerHealth{rateLimitedUntil: time.Now().Add(5 * time.Minute)}
@@ -85,7 +85,7 @@ func TestTakeHalfOpenSlot_RateLimited(t *testing.T) {
 // --- recordRateLimit extends (not shortens) the until time ---
 
 func TestRecordRateLimit_Extends(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
 	now := time.Now()
 	first := now.Add(60 * time.Second)
@@ -108,7 +108,7 @@ func TestRecordRateLimit_Extends(t *testing.T) {
 // --- recordSuccess clears the circuit ---
 
 func TestRecordSuccess_ClearsCircuit(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
 	p.healthMu.Lock()
 	p.health["a"] = &providerHealth{consecutiveFailures: 5, circuitOpenUntil: time.Now().Add(5 * time.Minute), halfOpenInFlight: true}
@@ -125,7 +125,7 @@ func TestRecordSuccess_ClearsCircuit(t *testing.T) {
 // --- recordFailure opens circuit at threshold ---
 
 func TestRecordFailure_OpensCircuitAtThreshold(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}, Scheduling: Scheduling{CircuitThreshold: 2, CircuitCooldown: "5m"}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}, Scheduling: Scheduling{CircuitThreshold: 2, CircuitCooldown: "5m"}}
 	p := newTestProxy(t, cfg)
 	p.recordFailure("a", cfg.Scheduling)
 	p.recordFailure("a", cfg.Scheduling) // reaches threshold
@@ -143,7 +143,7 @@ func TestRecordFailure_OpensCircuitAtThreshold(t *testing.T) {
 // --- parseRateLimit: body hint > Retry-After > per-class default ---
 
 func TestParseRateLimit(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
 	sched := Scheduling{RateLimitBackoff: "60s", QuotaCooldown: "2h"}
 	now := time.Now()

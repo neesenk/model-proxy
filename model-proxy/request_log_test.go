@@ -699,7 +699,7 @@ func TestForward_RequestLog_CapturesBodies_NonSSE(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"aqp": {OpenAIBaseURL: up.URL, Provider: "static"},
+			"aqp": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
@@ -760,7 +760,7 @@ func TestForward_RequestLog_CapturesBodies_SSE(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"aqp": {OpenAIBaseURL: up.URL, Provider: "static"},
+			"aqp": {OpenAIBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
@@ -806,7 +806,7 @@ func TestForward_RequestLog_NilLoggerPassThrough(t *testing.T) {
 	}))
 	defer up.Close()
 	cfg := &Config{
-		Providers: map[string]Provider{"aqp": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"aqp": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
 	}
 	p := newTestProxy(t, cfg) // p.reqLog stays nil
@@ -863,6 +863,7 @@ func BenchmarkCaptureReader_Tee(b *testing.B) {
 // warning when the new config has request_log.enabled:true but the logger isn't
 // running (p.reqLog == nil) - so enabling via SIGHUP isn't a silent no-op.
 func TestReload_WarnsWhenRequestLogEnabledButInactive(t *testing.T) {
+	useStaticProviderPools(t, "p")
 	// Capture log output.
 	var buf bytes.Buffer
 	origOut := log.Writer()
@@ -899,6 +900,7 @@ func TestReload_WarnsWhenRequestLogEnabledButInactive(t *testing.T) {
 // TestReload_NoWarnWhenRequestLogDisabled verifies reload() does NOT warn when
 // request_log is disabled (the common case).
 func TestReload_NoWarnWhenRequestLogDisabled(t *testing.T) {
+	useStaticProviderPools(t, "p")
 	var buf bytes.Buffer
 	origOut := log.Writer()
 	origFlags := log.Flags()

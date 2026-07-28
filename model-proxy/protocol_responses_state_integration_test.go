@@ -43,7 +43,7 @@ func TestForward_ResponsesPreviousIDRestoresChatToolHistory(t *testing.T) {
 	defer up.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
 	}
 	p := newTestProxy(t, cfg)

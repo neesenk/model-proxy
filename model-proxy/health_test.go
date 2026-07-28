@@ -64,8 +64,8 @@ func TestCircuit_OpensAfter3Failures(t *testing.T) {
 	defer fallback.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -109,8 +109,8 @@ func TestCircuit_HalfOpenClosesOnSuccess(t *testing.T) {
 	defer fallback.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -154,8 +154,8 @@ func TestRateLimit_SkipsProvider(t *testing.T) {
 	defer fallback.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -199,8 +199,8 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 	defer fallback.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -251,8 +251,8 @@ func TestUpstreamTimeout_Failover(t *testing.T) {
 	defer fallback.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {
@@ -309,8 +309,8 @@ func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
 	defer fallback.Close()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":  {OpenAIBaseURL: primary.URL, Provider: "static"},
-			"fallback": {OpenAIBaseURL: fallback.URL, Provider: "static"},
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"m1": {

@@ -30,8 +30,8 @@ func TestForceProvider_OverridesRouting(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"a": {OpenAIBaseURL: aUp.URL, Provider: "static"},
-			"b": {OpenAIBaseURL: bUp.URL, Provider: "static"},
+			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
 			"glm": {
@@ -81,8 +81,8 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 
 	oldConfig := &Config{
 		Providers: map[string]Provider{
-			"primary":   {Provider: "static", OpenAIBaseURL: primaryUpstream.URL},
-			"candidate": {Provider: "static", OpenAIBaseURL: shadowUpstream.URL},
+			"primary":   {Provider: testProviderID, OpenAIBaseURL: primaryUpstream.URL},
+			"candidate": {Provider: testProviderID, OpenAIBaseURL: shadowUpstream.URL},
 		},
 		Routes: map[string][]RouteTarget{
 			"alias": {{Provider: "primary", Model: "primary-model", Protocol: "openai"}},
@@ -122,8 +122,8 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 	zero := 0.0
 	newConfig := &Config{
 		Providers: map[string]Provider{
-			"primary":   {Provider: "static", OpenAIBaseURL: primaryUpstream.URL},
-			"candidate": {Provider: "static", OpenAIBaseURL: shadowUpstream.URL},
+			"primary":   {Provider: testProviderID, OpenAIBaseURL: primaryUpstream.URL},
+			"candidate": {Provider: testProviderID, OpenAIBaseURL: shadowUpstream.URL},
 		},
 		Routes:           oldConfig.Routes,
 		Shadow:           oldConfig.Shadow,
@@ -166,7 +166,7 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"candidate": {Provider: "static", OpenAIBaseURL: upstream.URL},
+			"candidate": {Provider: testProviderID, OpenAIBaseURL: upstream.URL},
 		},
 	}
 	p := newTestProxy(t, cfg)
@@ -233,8 +233,8 @@ func TestShadow_LogsResult(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: "static"},
-			"shadowp": {OpenAIBaseURL: shadowUp.URL, Provider: "static"},
+			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
+			"shadowp": {OpenAIBaseURL: shadowUp.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{"glm": {{Provider: "primary", Model: "glm"}}},
 		Shadow: map[string]ShadowTarget{"glm": {Provider: "shadowp", Model: "glm-shadow"}},
@@ -329,7 +329,7 @@ func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
 
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"primary":     {OpenAIBaseURL: primaryUpstream.URL, Provider: "static"},
+			"primary":     {OpenAIBaseURL: primaryUpstream.URL, Provider: testProviderID},
 			"shadow-pool": {AnthropicBaseURL: shadowUpstream.URL, Provider: "zhipu"},
 		},
 		Routes: map[string][]RouteTarget{

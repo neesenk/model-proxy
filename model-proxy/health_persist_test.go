@@ -11,7 +11,7 @@ import (
 // by a fresh Proxy; expired cooldowns are dropped.
 func TestHealthPersist_RoundTrip(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	statePath := filepath.Join(t.TempDir(), "quota_state.json")
 
 	p1 := newTestProxyAt(t, cfg, statePath)
@@ -78,7 +78,7 @@ func TestHealthPersist_RoundTrip(t *testing.T) {
 // (test binaries share the state file; daemons restart with edited configs).
 func TestHealthPersist_FingerprintMismatch(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfgA := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfgA := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	statePath := filepath.Join(t.TempDir(), "quota_state.json")
 	p1 := newTestProxyAt(t, cfgA, statePath)
 	p1.recordRateLimit("a", time.Now().Add(2*time.Hour), rlQuota)
@@ -88,7 +88,7 @@ func TestHealthPersist_FingerprintMismatch(t *testing.T) {
 	p1.Close()
 
 	// Same provider NAME, different upstream URL → different fingerprint.
-	cfgB := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://y", Provider: "static"}}}
+	cfgB := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://y", Provider: testProviderID}}}
 	p2 := newTestProxyAt(t, cfgB, statePath)
 	p2.healthMu.Lock()
 	_, frozen := p2.health["a"]
@@ -102,7 +102,7 @@ func TestHealthPersist_FingerprintMismatch(t *testing.T) {
 // (never failed → no health entry) must still persist + restore its blocklist.
 func TestHealthPersist_ParamBlockOnlyProvider(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	statePath := filepath.Join(t.TempDir(), "quota_state.json")
 	p1 := newTestProxyAt(t, cfg, statePath)
 	p1.learnParamBlock("a", "m1", "max_tokens")

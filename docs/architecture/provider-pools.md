@@ -16,9 +16,24 @@ provider，单数 `<name>_apikey.json` 仅作为只读 fallback，包装成一�
 不得自行读取 HOME，也不得依赖 Config、Provider、Proxy、Web/CLI 或执行网络
 验证。根 `accounts_adapter.go` 只负责 HOME 适配和迁移期兼容入口。
 
+`Store.Save` 与 `Store.LoadSnapshot` 使用同一套账号语义校验；保存调用必须传入
+provider ID。非法 ID、空 key、重复 ID 或不完整的 Volcengine AK/SK 在写临时文件
+前即失败，不能覆盖磁盘上已有的有效 pool。
+
 写操作必须在跨进程锁内重新读取当前 pool，再按账号 ID 修改并保存；stdin、
 浏览器和上游凭据验证必须在锁外完成。目录保持 `0700`，pool/lock 文件保持
 `0600`，保存使用同目录临时文件后 rename，避免读到半写 JSON。
+
+运行时构建只调用一次 `Store.LoadSnapshot`，由同一个结果携带 `Pool` 与
+`SourceMissing | SourceLegacy | SourcePlural`。plural 成功读取后始终是权威来源，
+即使账号列表为空也不能再读取 legacy；plural/legacy 不可读或 JSON 损坏时禁用该
+provider。只有 missing/legacy 来源允许普通 API-key provider 保持旧 file-backed
+路径；`static` 是 plural-only，missing/legacy 时同样不构建。
+
+同一次 `buildProviders` pass 必须同时产出 runtime providers、`poolIndex`、
+`parentOf` 和 implicit-route eligibility；startup/reload 将该 eligibility 直接
+传给 `synthesizeImplicitRoutesFrom`，不得再读取账号文件。这样一次 generation
+不会出现“新 route eligibility + 旧 provider key”或反向组合。
 
 账号 ID：
 
@@ -79,6 +94,9 @@ volcengine `FetchModels` 尚未按账号完全绑定；池化时 `models refresh
 ## 回归测试
 
 - 单账号池、多账号池和 legacy fallback。
+- plural 与 legacy 并存时只用 plural；损坏/空 plural 必须零上游请求。
+- 空 key、空/重复/含 `#` 的账号 ID 和不完整 Volcengine AK/SK 必须拒绝。
+- legacy-only 普通 provider 保持 file-backed；static 只接受 bound plural key。
 - BoundAPIKey 不读取虚拟名字对应的不存在文件。
 - session 稳定、不同 session 分流、账号冷却 failover。
 - Fusion panel/synthesizer 和 Shadow 的 pooled parent 解析。

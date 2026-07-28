@@ -57,7 +57,7 @@ func newProxyServerP(t testing.TB, upstreamURL, auth string, modelMap map[string
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"t": {OpenAIBaseURL: upstreamURL, Provider: "static", Models: provModels},
+			"t": {OpenAIBaseURL: upstreamURL, Provider: testProviderID, Models: provModels},
 		},
 		Routes: routes,
 	}
