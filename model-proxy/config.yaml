@@ -23,6 +23,8 @@ providers:
     anthropic_base_url: https://compass.llm.shopee.io/compass-api # same base without /v1; proxy keeps the client /v1/messages path
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     # peak_hours: "09:00-18:00"  # optional: route scheduling deprioritizes aqp during its peak window
+    headers:                     # sent on every aqp upstream request (forward + probe), after auth
+      x-ccswitch-client: "0.2.1"  # mirror AIS Switch's client header (bare app version, verified vs 0.2.1 binary + live log); bump when AIS Switch updates
     models:
       - glm-5.2
       - deepseek-v4-pro

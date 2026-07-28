@@ -24,8 +24,19 @@
 | 消息（anthropic） | POST | CQP Bearer | `/compass-api/v1/messages` |
 | 响应（openai） | POST | CQP Bearer | `/compass-api/v1/responses` |
 | 月度用量 | POST | SSO cookie | `/api/v1/cqp/ccswitch/monthly_usage` body `{"project_id":"..."}` |
+| 客户端版本检查 | POST | SSO cookie | `/api/v1/cqp/ccswitch/client-version/check` body `{"client_version":"x.y.z","platform":"macos|windows|linux"}`（AIS Switch 0.2.1 新增） |
 
 CQP key 长效，缓存 50min。SSO cookie 值已含 `SSO_C=` 前缀，直接作 Cookie 头值。`/v1/messages` 走 cqp 时需 `?beta=true`、`anthropic-version: 2023-06-01`、`x-compass-request-id`(UUID)。转发头用白名单（不透传客户端 Cookie/Authorization）。
+
+**0.2.1 实测增补**（2026-07-28，对照 AIS Switch 0.2.1 二进制 + 线上探测；均为增量、向后兼容，model-proxy 无需改动）：
+
+- `get_or_generate` 的 `data` 扩为 9 字段：`api_key`、`generated`、`quota_type`（如 `"CQP"`）、`employee_email`、`employee_user_id`、`employee_role`、`team_name`、`project_id`、`business_name`、`project_name`。代理只读 `api_key`/`project_id`/`employee_email`，不受影响。
+- `client-version/check`：`client_version`/`platform` 均必填（缺→422），platform 大小写/别名归一（`darwin`/`mac`→`macos`）。无 cookie→401 `Session expired`。`data` = `{force_update, latest_version, force_below_version, download_url(S3 签名), team_id, reason, message, release_notes{zh,zh-TW,en,ja,...}, platform, updater_endpoint}`；`client_version < force_below_version` 时 `force_update=true`（reason 如 `cqp_ccswitch_global_whitelist`）。
+- 客户端新增自标识头 `x-ccswitch-client`（模型拉取与转发都带），**值是 app 裸版本号**（如 `0.2.1`，无 `ais-switch/` 前缀——app 日志的 `client_version=0.2.1` 字段 + 二进制 rodata 共置 + 无任何前缀格式串三重佐证）。网关**不校验**：不带/任意值均 200，行为无差异。代理经通用 provider 级 `headers:` 发送（config.yaml aqp 节配 `x-ccswitch-client: "0.2.1"`，与 AIS Switch 版本对齐、随其升级同步改）——转发/探测/Fusion/Shadow 各路径在 `ExtraHeaders` 前统一应用 `prov.Headers`，无需 aqp 专属代码。
+- `monthly_usage` 契约不变（7 个 snake_case 字段）；二进制里的 camelCase（`projectId` 等）是 app 内 serde 命名，不是 wire 格式。
+- `auth/info` 的 `data.user` 新增 `teams`/`hris_status`/`updated_time`/`usertype`，顶层新增 `roles`/`permissions` 数组；成功信封消息键是 `errmessage`（非 `message`）。代理只读 `user.{userid,email,is_active}`，不受影响。
+- `/v1/messages` 响应 usage 扩展：`cost`、`price_cost_usd`、`cost_details{upstream_inference_cost,...}`、`is_byok`、`speed`、`inference_geo`、`output_tokens_details{thinking_tokens}`；顶层有 `container`/`stop_details`。字节透传与转换层均忽略未知字段。
+- `/compass-api/v1/models` 对有效 CQP key 返回空 `data:[]`（cookie 鉴权→401 `API key not found`）：模型发现不可用，`models refresh` 走「config 现有 models + 端点探测」合并路径兜底，不会清空 models:。app 自带 `cc-switch-model-catalog.json`。
 
 ## codex 后端契约（实测）
 

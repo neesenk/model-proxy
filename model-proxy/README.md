@@ -55,6 +55,8 @@ providers:
     provider_id: aqp
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
+    headers:                      # 可选：每个上游请求（转发+探测）额外带的头，鉴权之后应用
+      x-ccswitch-client: "0.2.1"  # 对齐 AIS Switch 的客户端标识头（值=app 裸版本号；AIS Switch 升级后同步改）
     models:                       # 只填模型名；元数据(context/output/modalities/tool_call)运行时从 models.dev 自动补
       - glm-5.2
   codex:
