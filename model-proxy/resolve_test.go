@@ -3,7 +3,62 @@ package main
 import (
 	"testing"
 	"time"
+
+	"model-proxy/provider"
 )
+
+type fakeResolverState struct {
+	spreadStart int
+	spreadCalls int
+	healthy     map[string]bool
+}
+
+func (s *fakeResolverState) resolverSpreadStart(_ string, n int) int {
+	s.spreadCalls++
+	if n == 0 {
+		return 0
+	}
+	return s.spreadStart % n
+}
+
+func (s *fakeResolverState) resolverTargetHealthy(virtual, _ string, _ time.Time) bool {
+	return s.healthy[virtual]
+}
+
+func TestResolverUsesNarrowStateCapability(t *testing.T) {
+	state := &fakeResolverState{
+		spreadStart: 1,
+		healthy: map[string]bool{
+			"pool#a": true,
+			"pool#b": false,
+		},
+	}
+	r := newResolver(
+		state,
+		map[string]provider.Provider{"pool#a": nil, "pool#b": nil},
+		map[string][]string{"pool": {"pool#a", "pool#b"}},
+	)
+
+	picked, ok := r.Pick(RouteTarget{Provider: "pool", Model: "m"}, "")
+	if !ok {
+		t.Fatal("Pick returned !ok; want healthy sibling failover")
+	}
+	if picked.Provider != "pool#a" {
+		t.Fatalf("Pick provider = %q, want pool#a", picked.Provider)
+	}
+	if state.spreadCalls != 1 {
+		t.Fatalf("spread calls = %d, want 1", state.spreadCalls)
+	}
+
+	// Sticky selection is deterministic and must not consume the shared spread
+	// capability; health failover still scans siblings from the sticky slot.
+	if _, ok := r.Pick(RouteTarget{Provider: "pool", Model: "m"}, "session"); !ok {
+		t.Fatal("sticky Pick returned !ok; want healthy sibling")
+	}
+	if state.spreadCalls != 1 {
+		t.Fatalf("sticky Pick spread calls = %d, want unchanged 1", state.spreadCalls)
+	}
+}
 
 // TestResolver_ExpandAndPick: the unified provider resolver — pool expansion
 // (Expand), session-sticky + health-aware single-virtual pick (Pick). Non-pooled

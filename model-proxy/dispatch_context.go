@@ -64,36 +64,63 @@ type serveRequest struct {
 	request *http.Request
 }
 
-// targetAttempt is the complete contract for executing one resolved target.
-// Both normal routing and Fusion synthesis use this object, making additions to
-// the execution pipeline explicit without growing a 20+ argument function.
-type targetAttempt struct {
-	runtime      runtimeSnapshot
-	cfg          *Config
-	clientProto  string
-	backendProto string
-	calledModel  string
-
-	target       RouteTarget
-	providerCfg  Provider
-	providerImpl provider.Provider
-	baseURL      string
-	upPath       string
-	body         []byte
-
-	writer  http.ResponseWriter
+// attemptExchange is the transport exchange for one target attempt. The body is
+// already model-rewritten, responses-state-expanded, and protocol-converted by
+// the caller; constructing an attempt never mutates it.
+type attemptExchange struct {
 	request *http.Request
+	writer  http.ResponseWriter
+	body    []byte
+}
 
-	agent    string
-	cacheKey string
-	force    bool
-	cache    *responseCache
-	log      forwardLogCtx
+// attemptScope carries request identity and observation context that is neither
+// part of target planning nor execution policy.
+type attemptScope struct {
+	calledModel string
+	agent       string
+	cacheKey    string
+	log         forwardLogCtx
 
-	contextRetry        func() []RouteTarget
-	lastTarget          bool
-	viaResponsesVerdict bool
-	responseContext     r2cCtx
-	responsesHistory    []any
-	responsesSession    string
+	responseContext  r2cCtx
+	responsesHistory []any
+	responsesSession string
+}
+
+// attemptPolicy contains the few scheduling decisions that affect one target
+// execution after planning has completed.
+type attemptPolicy struct {
+	force        bool
+	lastTarget   bool
+	contextRetry func() []RouteTarget
+}
+
+// targetAttempt is the complete contract for executing one resolved target.
+// Runtime- and plan-owned facts have exactly one source: cfg/cache/generation
+// come from runtime, while target/provider/protocol/URL/path come from plan.
+type targetAttempt struct {
+	runtime  runtimeSnapshot
+	plan     targetPlan
+	exchange attemptExchange
+	scope    attemptScope
+	policy   attemptPolicy
+}
+
+// newTargetAttempt is the single assembly point shared by normal routing and
+// Fusion synthesis. Request rewriting, state expansion, and protocol conversion
+// deliberately remain outside this factory because those operations have
+// caller-specific semantics and may fail before an attempt can be executed.
+func newTargetAttempt(
+	runtime runtimeSnapshot,
+	plan targetPlan,
+	exchange attemptExchange,
+	scope attemptScope,
+	policy attemptPolicy,
+) targetAttempt {
+	return targetAttempt{
+		runtime:  runtime,
+		plan:     plan,
+		exchange: exchange,
+		scope:    scope,
+		policy:   policy,
+	}
 }

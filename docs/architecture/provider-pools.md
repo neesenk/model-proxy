@@ -42,6 +42,10 @@ volcengine 每账号包含 `{api_key, access_key, secret_key}`。绑定凭据存
 
 resolver 负责 identity mapping 和健康预过滤，不负责占用 half-open slot。权威 gate 仍由调用方的 `takeHalfOpenSlot` 完成。
 
+resolver 不持有 composition root `*Proxy`；它只依赖 `resolverState` 暴露的
+健康检查与 spread index 能力，以及当前 `runtimeSnapshot` 的 provider/pool map。
+因此 pooled identity 选择不能顺带访问 reload、调度、Web 或其他 Proxy 状态。
+
 任何 resolver 失败都必须 fail-closed，禁止继续使用池化父名构造无认证请求。
 
 ## Session sticky
@@ -65,4 +69,3 @@ volcengine `FetchModels` 尚未按账号完全绑定；池化时 `models refresh
 - session 稳定、不同 session 分流、账号冷却 failover。
 - Fusion panel/synthesizer 和 Shadow 的 pooled parent 解析。
 - resolver !ok 时没有任何上游请求。
-

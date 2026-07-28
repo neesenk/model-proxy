@@ -23,10 +23,22 @@ expanded routes、models.dev catalog 与 response cache；reload 只交换新对
 synthesizer 均通过 `targetAttempt` 进入 `attemptExecutor.execute`，新增横切能力
 不得继续扩张 positional 参数列表。
 
+`targetAttempt` 固定为五组：`runtimeSnapshot`、`targetPlan`、`attemptExchange`
+（request/writer/body）、`attemptScope`（调用模型、agent、cache key/log/Responses
+上下文）和 `attemptPolicy`（force、last target、context retry）。两条调用链只能
+经 `newTargetAttempt` 构造；factory 仅装配，不做 model rewrite、state expansion
+或协议转换。执行器必须从 `runtime.generation/runtime.cfg/runtime.cache` 与
+`plan.target/provider/protocol/baseURL/path` 读取事实，禁止在 scope/log 中复制
+第二份 generation 或重新查 Proxy。
+
 `attemptExecutor` 只允许依赖 `attemptState` 暴露的健康、参数学习和 wire
 能力，以及显式注入的 HTTP、metrics、token、request-log、Responses state 和
 events 组件。不得从执行器重新持有完整 `*Proxy`，也不得让单目标发送逻辑直接
-访问调度、reload 或 Web 状态。
+访问调度、reload 或 Web 状态；实现主体和 `tryOutcome` 位于
+`attempt_executor.go`，`proxy.go` 只负责编排和调用。executor commit 后只返回
+含实际上游请求体的最小 `attemptCommit`；Shadow sampling、semaphore、lifecycle
+admission 与 dispatch 由 `serveOnce` 在 executor 外完成，Fusion synthesizer
+丢弃该 commit 元数据，禁止递归触发 Shadow。
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 

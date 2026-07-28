@@ -25,13 +25,23 @@ import (
 // slot — that stays in each caller (forward's takeHalfOpenSlot/recordSuccess/
 // recordFailure, Fusion's circuit gate), because those are coupled to failover.
 type resolver struct {
-	p         *Proxy
+	state     resolverState
 	providers map[string]provider.Provider // runtime instances (virtual ids only for pooled parents)
 	poolIndex map[string][]string          // parent name → sorted virtual ids (only multi-account parents)
 }
 
-func newResolver(p *Proxy, providers map[string]provider.Provider, poolIndex map[string][]string) *resolver {
-	return &resolver{p: p, providers: providers, poolIndex: poolIndex}
+// resolverState is the narrow mutable-runtime capability needed by identity
+// resolution. It deliberately exposes neither reload-owned maps nor the full
+// Proxy composition root.
+type resolverState interface {
+	resolverSpreadStart(parent string, n int) int
+	resolverTargetHealthy(virtual, model string, now time.Time) bool
+}
+
+var _ resolverState = (*Proxy)(nil)
+
+func newResolver(state resolverState, providers map[string]provider.Provider, poolIndex map[string][]string) *resolver {
+	return &resolver{state: state, providers: providers, poolIndex: poolIndex}
 }
 
 // virtualsOf returns the runnable virtual ids for a config provider name: the
@@ -114,11 +124,10 @@ func (r *resolver) pickStart(parent string, n int, stickyKey string) int {
 	if stickyKey != "" {
 		return int(stickyHash(stickyKey) % uint64(n))
 	}
-	r.p.healthMu.Lock()
-	defer r.p.healthMu.Unlock()
-	start := int(r.p.spreadCtr[parent] % uint64(n))
-	r.p.spreadCtr[parent]++
-	return start
+	if r.state == nil {
+		return 0
+	}
+	return r.state.resolverSpreadStart(parent, n)
 }
 
 // healthy reports whether a virtual may be tried for `model` — the SAME rule as
@@ -131,17 +140,31 @@ func (r *resolver) pickStart(parent string, n int, stickyKey string) int {
 // so they are read under the same lock; modelLockedLocked is the lock-holding
 // variant that fits here.
 func (r *resolver) healthy(virtual, model string) bool {
-	now := time.Now()
-	r.p.healthMu.Lock()
-	defer r.p.healthMu.Unlock()
-	h := r.p.health[virtual]
-	return (h == nil || h.available(now)) && !r.p.modelLockedLocked(virtual, model, now)
+	return r.state != nil && r.state.resolverTargetHealthy(virtual, model, time.Now())
 }
 
 // built reports whether a virtual id has a runtime provider impl.
 func (r *resolver) built(vid string) bool {
 	_, ok := r.providers[vid]
 	return ok
+}
+
+func (p *Proxy) resolverSpreadStart(parent string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	start := int(p.spreadCtr[parent] % uint64(n))
+	p.spreadCtr[parent]++
+	return start
+}
+
+func (p *Proxy) resolverTargetHealthy(virtual, model string, now time.Time) bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	h := p.health[virtual]
+	return (h == nil || h.available(now)) && !p.modelLockedLocked(virtual, model, now)
 }
 
 // stickyHash is a stable 64-bit hash of a session key, used to map a session to a

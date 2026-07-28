@@ -29,9 +29,18 @@ HTTP handler
 - `serveRequest`：一次 schedule/failover pass 的稳定输入。
 - `targetPlan`：普通 route、Fusion、Shadow 共用的 provider/protocol/model/body/
   base URL/path 准备。
-- `targetAttempt`：一个已解析上游目标的完整执行契约。
+- `targetAttempt`：一个已解析上游目标的完整执行契约，只由
+  `runtime + plan + exchange + scope + policy` 五组字段组成；`newTargetAttempt`
+  是普通 route 与 Fusion synthesizer 的唯一构造入口。
 - `attemptExecutor`：只通过 `attemptState` 修改健康、参数学习和 wire state；
-  其余 HTTP、metrics、tokens、request log、Responses state、events 显式注入。
+  其余 HTTP、metrics、tokens、request log、Responses state、events 显式注入；
+  commit 后只返回最小 `attemptCommit`，不持有生命周期或 Shadow 调度能力。
+
+`runtimeSnapshot` 与 `targetPlan` 是执行器内 reload-owned/config/provider/protocol
+事实的唯一来源；exchange 只承载 HTTP request/writer/body，scope 只承载本次请求
+身份与 Responses 上下文，policy 只承载 force/last-target/context-retry。
+`newTargetAttempt` 不负责 model rewrite、Responses history expansion 或协议转换，
+这些准备语义仍由普通/Fusion 各自编排后再进入执行器。
 
 同协议保持字节透传。跨协议方向只在 `conversion_registry.go` 注册；每个
 client→backend pair 必须同时提供 request、反向 response、反向 SSE codec。
@@ -41,8 +50,9 @@ client→backend pair 必须同时提供 request、反向 response、反向 SSE 
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
   synthesizer 通过正常 `targetAttempt → attemptExecutor` 返回客户端。
-- Shadow 在主请求 commit 时同时捕获 `runtimeSnapshot` 和 `shadowRuntime`，
-  goroutine 内不得重新读取 reload-owned 状态。
+- Shadow 由 `serveOnce` 在主请求 commit 后根据 `attemptCommit` 接纳和派发，同时
+  捕获 `runtimeSnapshot` 与 `shadowRuntime`；executor 和 Fusion synthesizer
+  均不得启动 Shadow，goroutine 内不得重新读取 reload-owned 状态。
 - Cache、request log、usage scanner 位于响应转换外层，只观察客户端协议字节。
 
 ## 状态与锁
@@ -95,6 +105,7 @@ conversion entrypoints → conversion registry → pair codecs
 - Fusion/Shadow 复制 provider lookup、协议选择、转换或 URL/path 逻辑；
 - request、response、SSE 各自维护协议方向 switch；
 - attemptExecutor 持有完整 `*Proxy`；
+- 普通 route/Fusion 绕过 `newTargetAttempt` 直接拼装执行器输入；
 - daemon/reload 绕过 `proxyLifecycle` 启动 Proxy 级 goroutine；
 - 将 config generation 内的 map 原地修改。
 

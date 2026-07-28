@@ -87,7 +87,7 @@ type fusionLegResult struct {
 // when the synthesizer leg committed a response to the client (success or a
 // committed upstream error); false means "nothing committed — fail over to the
 // route's next target". workflow is the recipe name (registry/metrics key).
-func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
+func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
 	run := &fusionRun{
 		RunID: fc.flc.requestID, Ts: time.Now().UnixMilli(),
 		Route: fc.flc.exposed, Workflow: workflow, Agent: fc.agent, Proto: fc.proto,
@@ -98,7 +98,7 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 		run.Degraded = fusionDegradedMultiTurn
 		log.Printf("[fusion] %s: workflow %s is first_turn_only and the conversation is multi-turn; answering directly (fusion_multi_turn)",
 			fc.flc.exposed, workflow)
-		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey)
 	}
 	// Tool round: drafts answer in plain text (tools stripped), the synthesizer
 	// carries the tools and may answer with a tool call directly. When the
@@ -108,7 +108,7 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 		run.Degraded = fusionDegradedTools
 		log.Printf("[fusion] %s: synthesizer %s/%s lacks tool support; answering directly (fusion_tools_unsupported)",
 			fc.flc.exposed, recipe.Synthesizer.Provider, recipe.Synthesizer.Model)
-		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey)
 	}
 	// Budget gate: cap orchestrated runs per local day; an over-budget request
 	// degrades to a plain direct call (only admitted runs consume the budget).
@@ -116,7 +116,7 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 		run.Degraded = fusionDegradedBudget
 		log.Printf("[fusion] %s: workflow %s daily orchestration budget exhausted (%d/day); answering directly (fusion_budget_exceeded)",
 			fc.flc.exposed, workflow, recipe.MaxRunsPerDay)
-		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey)
 	}
 	quorum := recipe.MinPanel
 	if quorum <= 0 {
@@ -142,7 +142,7 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 		run.Degraded = fusionDegradedInsufficient
 		log.Printf("[fusion] %s: fusion_insufficient_proposers (%d/%d drafts, quorum %d); answering directly via synthesizer",
 			fc.flc.exposed, len(legs), len(recipe.Panel), quorum)
-		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey)
 	}
 	candidates := make([]string, 0, len(legs))
 	for _, l := range legs {
@@ -165,10 +165,10 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 	if !ok {
 		run.Degraded = fusionDegradedBodyBuild
 		log.Printf("[fusion] %s: cannot build synthesis body; answering directly via synthesizer", fc.flc.exposed)
-		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey, cache)
+		return p.finishFusion(fc, run, recipe.Synthesizer, fc.origBody, w, r, cacheKey)
 	}
 	log.Printf("[fusion] %s: synthesizing from %d/%d drafts (quorum %d)", fc.flc.exposed, len(legs), len(recipe.Panel), quorum)
-	return p.finishFusion(fc, run, recipe.Synthesizer, synthBody, w, r, cacheKey, cache)
+	return p.finishFusion(fc, run, recipe.Synthesizer, synthBody, w, r, cacheKey)
 }
 
 // finishFusion runs the synthesis leg (direct original body, or the
@@ -177,8 +177,8 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 // attemptExecutor publishes that end event on commit, just before returning, so it
 // is already visible here. The run then lands in the fusion registry and the
 // ("fusion", <workflow>) metrics counters.
-func (p *Proxy) finishFusion(fc fusionCtx, run *fusionRun, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
-	run.SynthCommitted = p.callFusionSynthesizer(fc, st, body, w, r, cacheKey, cache)
+func (p *Proxy) finishFusion(fc fusionCtx, run *fusionRun, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
+	run.SynthCommitted = p.callFusionSynthesizer(fc, st, body, w, r, cacheKey)
 	if run.SynthCommitted {
 		if ev, ok := p.events.findEnd(run.RunID); ok {
 			run.SynthStatus = ev.Status
@@ -326,11 +326,11 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// Circuit gate (same availability rule as attemptExecutor): skip members the
 	// breaker has open. record* below all clear the half-open slot; the deferred
 	// release is idempotent and covers the paths that don't record.
-	if !p.takeHalfOpenSlot(m.Provider, fc.flc.generation) {
+	if !p.takeHalfOpenSlot(m.Provider, fc.runtime.generation) {
 		res.err = errFusionLegUnavailable
 		return
 	}
-	defer p.releaseHalfOpenSlot(m.Provider, fc.flc.generation)
+	defer p.releaseHalfOpenSlot(m.Provider, fc.runtime.generation)
 	sched := fc.runtime.cfg.Scheduling
 
 	// Responses chain expansion (same rule as forward): only when the client
@@ -386,7 +386,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 				res.err = errFusionLegUnavailable
 				return
 			}
-			p.recordFailure(m.Provider, sched, fc.flc.generation)
+			p.recordFailure(m.Provider, sched, fc.runtime.generation)
 			if p.metrics != nil {
 				p.metrics.inc(m.Provider, m.Model, evFailures)
 				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
@@ -398,7 +398,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		respBody, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		resp.Body.Close()
 		if err != nil {
-			p.recordFailure(m.Provider, sched, fc.flc.generation)
+			p.recordFailure(m.Provider, sched, fc.runtime.generation)
 			if p.metrics != nil {
 				p.metrics.inc(m.Provider, m.Model, evFailures)
 				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
@@ -414,7 +414,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		}
 		if resp.StatusCode == http.StatusBadRequest && !strippedParam {
 			if param, found := parseUnsupportedParam(respBody); found {
-				p.learnParamBlock(m.Provider, m.Model, param, fc.flc.generation)
+				p.learnParamBlock(m.Provider, m.Model, param, fc.runtime.generation)
 				if stripped, changed := stripTopLevelParam(body, param); changed {
 					body = stripped
 					strippedParam = true
@@ -433,21 +433,21 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			peek = peek[:8<<10]
 		}
 		until, kind := p.parseRateLimit(resp, peek, time.Now(), sched)
-		p.recordRateLimit(m.Provider, until, kind, fc.flc.generation)
+		p.recordRateLimit(m.Provider, until, kind, fc.runtime.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evRateLimited429)
 			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
 		}
 		res.err = errFusionLegUnavailable
 	case resp.StatusCode >= 500:
-		p.recordFailure(m.Provider, sched, fc.flc.generation)
+		p.recordFailure(m.Provider, sched, fc.runtime.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evFailures)
 			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
 		}
 		res.err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	case resp.StatusCode == http.StatusUnauthorized:
-		p.recordFailure(m.Provider, sched, fc.flc.generation)
+		p.recordFailure(m.Provider, sched, fc.runtime.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evFailovers) // like tryTarget: failover only, no evFailures
 		}
@@ -463,7 +463,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			log.Printf("[fusion provider=%s] /responses 404 after wire verdict — provider responses downgraded to no (model NOT locked)",
 				m.Provider)
 		} else {
-			p.recordModelFailure(m.Provider, m.Model, sched, fc.flc.generation)
+			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.generation)
 		}
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget's failover
@@ -481,12 +481,12 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.text = truncateRunes(extractCandidateText(respBody, plan.backendProto), fusionCandidateMaxChars)
 		if res.text == "" {
 			res.err = errFusionEmptyDraft
-			p.recordModelFailure(m.Provider, m.Model, sched, fc.flc.generation)
+			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.generation)
 			if p.metrics != nil {
 				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget's empty-200 failover
 			}
 		} else {
-			p.recordSuccess(m.Provider, m.Model, fc.flc.generation)
+			p.recordSuccess(m.Provider, m.Model, fc.runtime.generation)
 			if p.metrics != nil {
 				p.metrics.inc(m.Provider, m.Model, evRequests)
 				latencyMs := time.Since(start).Milliseconds()
@@ -522,7 +522,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 // callFusionSynthesizer sends the (possibly synthesis-augmented) body to the
 // synthesizer model through the normal attemptExecutor path — streaming, conversion,
 // auth, metrics, latency, live events, request log and cache all apply.
-func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string, cache *responseCache) bool {
+func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
 	// Resolve to a runnable virtual (pooled parent → one healthy account,
 	// session-sticky so a conversation reuses one synthesizer account), same as
 	// the panel legs — otherwise a multi-account synthesizer has no impl and fails.
@@ -542,9 +542,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		log.Printf("[fusion] %s: synthesizer target plan failed: %v", fc.flc.exposed, err)
 		return false
 	}
-	prov := plan.providerCfg
-	impl := plan.providerImpl
-	if impl == nil {
+	if plan.providerImpl == nil {
 		log.Printf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
 		return false
 	}
@@ -568,31 +566,27 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	}
 	// The log ctx carries NO origBody so the request log stores the actual
 	// synthesis body (with the candidate sections), not the client's original.
-	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed, generation: fc.flc.generation}
-	committed, _, _ := p.targetExecutor().execute(targetAttempt{
-		runtime:             fc.runtime,
-		cfg:                 fc.runtime.cfg,
-		clientProto:         fc.proto,
-		backendProto:        plan.backendProto,
-		calledModel:         fc.calledModel,
-		target:              st,
-		providerCfg:         prov,
-		providerImpl:        impl,
-		baseURL:             plan.baseURL,
-		upPath:              plan.upPath,
-		body:                body,
-		writer:              w,
-		request:             r,
-		agent:               fc.agent,
-		cacheKey:            cacheKey,
-		cache:               cache,
-		log:                 flc,
-		lastTarget:          true,
-		viaResponsesVerdict: plan.viaResponsesVerdict,
-		responseContext:     r2cCtxFor(fc.proto, plan.backendProto, fc.origBody),
-		responsesHistory:    responsesHistory,
-		responsesSession:    fc.sessionKey,
-	})
+	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed}
+	attempt := newTargetAttempt(
+		fc.runtime,
+		plan,
+		attemptExchange{
+			request: r,
+			writer:  w,
+			body:    body,
+		},
+		attemptScope{
+			calledModel:      fc.calledModel,
+			agent:            fc.agent,
+			cacheKey:         cacheKey,
+			log:              flc,
+			responseContext:  r2cCtxFor(fc.proto, plan.backendProto, fc.origBody),
+			responsesHistory: responsesHistory,
+			responsesSession: fc.sessionKey,
+		},
+		attemptPolicy{lastTarget: true},
+	)
+	committed, _, _, _ := p.targetExecutor().execute(attempt)
 	return committed
 }
 

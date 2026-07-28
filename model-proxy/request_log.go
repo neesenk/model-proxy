@@ -19,16 +19,15 @@ import (
 	"time"
 )
 
-// forwardLogCtx carries per-forward log context from forward() into tryTarget(),
-// where the upstream response (and thus the capture point) lives. requestID
-// groups one client request's failover attempts; attempt is the 0-based index
-// in the failover chain; exposed is the route name (post claude_mapping).
+// forwardLogCtx carries request-log identity from forward() into the target
+// executor, where the upstream response capture point lives. Reload generation
+// remains owned by targetAttempt.runtime and is intentionally not duplicated
+// into this observation-only scope.
 type forwardLogCtx struct {
-	requestID  string
-	attempt    int
-	exposed    string
-	generation uint64 // config generation captured with cfg/providers by forward
-	origBody   []byte // original client body (pre-rewrite, pre-convert) — for faithful replay
+	requestID string
+	attempt   int
+	exposed   string
+	origBody  []byte // original client body (pre-rewrite, pre-convert) — for faithful replay
 }
 
 // requestLogRecord is one line in the JSONL request log. Written as one JSON

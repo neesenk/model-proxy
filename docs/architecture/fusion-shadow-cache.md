@@ -38,10 +38,13 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 - 结果进入 request_log，id 以 `shadow-<primary-id>` 配对；
 - reload 必须让一次 dispatch 全程使用同一 generation 的 runtime、target、provider map 和 client。
 
-主请求在启动 goroutine 前同时捕获 `runtimeSnapshot` 与 `shadowRuntime`。Shadow
-随后与普通 route/Fusion 共用 `targetPlan` 完成 provider config/runtime impl、
-backend protocol、model rewrite、转换和 URL/path；goroutine 内禁止重新读取
-`p.cfg`/`p.providers`/`p.catalog` 或再次 load `p.shadow`。
+单目标 executor 只返回含实际上游请求体的最小 `attemptCommit`，不持有 Shadow
+或 lifecycle 回调。`serveOnce` 在确认 commit 后执行 sampling、semaphore 和
+lifecycle admission，并在启动 goroutine 前同时捕获 `runtimeSnapshot` 与
+`shadowRuntime`。Shadow 随后与普通 route/Fusion 共用 `targetPlan` 完成 provider
+config/runtime impl、backend protocol、model rewrite、转换和 URL/path；goroutine
+内禁止重新读取 `p.cfg`/`p.providers`/`p.catalog` 或再次 load `p.shadow`。Fusion
+synthesizer 不经过这条 post-commit hook，禁止递归派发 Shadow。
 
 Shadow 作为 `proxyLifecycle` 的有限 log-producing task 接纳：shutdown 开始后
 拒绝新任务，已接纳任务受 shadow HTTP timeout 约束并在 request logger drain
@@ -96,7 +99,10 @@ provider failure。候选文本最多 24k rune。
 `type: "message"` 的 input item（无类型的 map 会被 r→chat 转换器丢弃）。
 synthesizer 与普通 route 共享 `targetPlan`，再构造同一个 `targetAttempt` 进入
 `attemptExecutor.execute`，因此 SSE、转换、metrics、cache、request log 和统一
-失败策略全部一致；不得为 synthesis 重新增加平行的 positional 参数接口。
+失败策略全部一致；两者只能经 `newTargetAttempt(runtime, plan, exchange, scope,
+policy)` 装配，Fusion 不得直接构造 attempt 或重新增加平行的 positional 参数/
+HTTP 执行接口。factory 之前的 Responses expansion、model rewrite 与 request
+conversion 仍保留 Fusion 的客户端可见 history 语义。
 
 responses 客户端命中 fusion 时，synthesizer 为无状态后端则展开
 previous_response_id：发送体是合成体的展开，但**录制的 history 取客户端可见的
