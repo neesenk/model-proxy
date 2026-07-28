@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"model-proxy/internal/pricing"
 	"model-proxy/provider"
 )
 
@@ -64,7 +65,7 @@ type Proxy struct {
 	fusionReg         *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
 	catalog           *modelsDevCatalog                // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
 	shadow            atomic.Pointer[shadowRuntime]    // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
-	pricingMu         sync.Mutex                       // guards pricing during refresh (thundering-herd guard on ensurePricingFresh)
+	pricingMu         sync.Mutex                       // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
 	closeOnce         sync.Once
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
@@ -500,7 +501,7 @@ func (p *Proxy) cfgSnapshot() *Config {
 // stale (best-effort; offline falls back to the stale cache). Nil-safe (including
 // a nil cfg, as in degenerate tests) and thundering-herd-safe. Returns nil when
 // pricing is disabled.
-func (p *Proxy) pricingSnapshot() *pricingCatalog {
+func (p *Proxy) pricingSnapshot() *pricing.Catalog {
 	if p == nil {
 		return nil
 	}
@@ -510,9 +511,15 @@ func (p *Proxy) pricingSnapshot() *pricingCatalog {
 	}
 	p.pricingMu.Lock()
 	defer p.pricingMu.Unlock()
-	cat, err := ensurePricingFresh(pricingCachePath(), cfg.Pricing.sourceURL(), realPricingFetch, false, cfg.Pricing.ttl())
+	cat, err := pricing.EnsureFresh(pricing.RefreshOptions{
+		CacheFile: pricingCachePath(),
+		Endpoint:  cfg.Pricing.sourceURL(),
+		Fetch:     pricing.FetchHTTP,
+		TTL:       cfg.Pricing.ttl(),
+		Warnings:  os.Stderr,
+	})
 	if err != nil || cat == nil {
-		return emptyPricingCatalog()
+		return pricing.Empty()
 	}
 	return cat
 }

@@ -50,25 +50,25 @@
 
 **agent 维度**（`agent.go`）：`detectAgent` 从 `x-claude-code-session-id`/`claude-cli` UA → `claude-code`、UA 含 `codex` → `codex`、`opencode`、`pi/` 前缀 → `pi`（无 UA=`unknown`、其余=`other`）。并行管线 `agentCounter`（key=(agent,provider,model)，独立叶子锁）→ `agent_buckets` 表（requests/input/output/`latency_ms_sum`/`failures`，同样 additive 迁移）。token 归因经 usageScanner 的 agentSink（非 SSE 无 token 只计 requests）；全失败 502 记 `incRequests`+`incFailure`（到首个尝试目标）。查询 `GET /api/agents` + `stats --by-agent`（`--agent/--provider/--model` 过滤）+ UI Status 页 Agents 卡片。
 
-## Analytics 等价成本（`pricing.go` + `web.go:handleAnalytics`，默认开启）
+## Analytics 等价成本（`internal/pricing` + `web.go:handleAnalytics`，默认开启）
 
 `GET /api/analytics?from=&to=&provider=&model=&granularity=day|month` 在 SQLite stats 之上做**日历日/月聚合**（存储恒 1 分钟）：`queryAnalytics` 用 SQL `date(minute,'unixepoch','localtime','start of day'/'start of month')` GROUP BY；bucket = 本地时区自然日/月初的 unix instant，由 `localDayStart` 经 `time.ParseInLocation(...,time.Local)` 转——不用 `strftime('%s',…)`（会把本地日期误读为 UTC 当天 0 点，偏移一个时区）。每个 point 现算**等价 payg 成本**：price × tokens，**不落盘、不伪造**；未知价 → `cost:null, priced:false`。响应：`{granularity, from, to, series:[{provider, model, points:[…]}], totals:{input, output, cost}, price_coverage:{priced:[], unpriced:[]}}`。
 
-**价格优先级**（`resolvePrice`）：config `prices:`（USD/M tokens，查询时 ÷1e6 转 USD/token）> `pricingCache`（OpenRouter 目录，bare-name 精确匹配，无 endpoint/后缀模糊匹配）。OpenRouter 目录在 parse 期按 vendor rank 去重（`canonicalORVendors` rank 0 胜出，如 `deepseek/deepseek-v4-pro` 击败 `openrouter/deepseek-v4-pro`；tilde 别名 `~openai/gpt-5.6-luna` 剥成 bare 名 `gpt-5.6-luna`）。`computeCost`：`input×Prompt + output×Completion + cacheRead×CacheRead + cacheCreation×CacheWrite`。
+**价格优先级**（`pricing.Resolve`）：config `prices:` 在 `proxyReadView.pricing()` 边界复制并转换为 USD/M override，查询时 ÷1e6 转 USD/token；命中后覆盖 `pricing.Catalog`（OpenRouter 目录，bare-name 精确匹配，无 endpoint/后缀模糊匹配）。OpenRouter 目录在 parse 期按 vendor rank 去重（canonical vendor 胜出，如 `deepseek/deepseek-v4-pro` 击败 `openrouter/deepseek-v4-pro`；tilde 别名 `~openai/gpt-5.6-luna` 剥成 bare 名 `gpt-5.6-luna`）。`pricing.ComputeCost`：`input×Prompt + output×Completion + cacheRead×CacheRead + cacheCreation×CacheWrite`。
 
 **新配置**（`config.go`）：
-- 顶层 `pricing:{enabled, ttl, source_url}` — 默认 `enabled:true` / TTL `24h` / `source_url` 默认 `https://openrouter.ai/api/v1/models`（`defaultPricingEndpoint`）。`enabled:false` → `pricingSnapshot` 返回 nil，cost 恒 n/a（不抓取）。
+- 顶层 `pricing:{enabled, ttl, source_url}` — 默认 `enabled:true` / TTL `24h` / `source_url` 默认 `https://openrouter.ai/api/v1/models`（`pricing.DefaultEndpoint`）。`enabled:false` → `pricingSnapshot` 返回 nil 且不抓取目录；显式 `prices:` override 仍可定价，未命中 override 的模型显示 n/a。
 - 顶层 `prices:` map — per-model override，单位 **USD per MILLION tokens**（人类单位）；字段 `input`/`output`/`cache_read`/`cache_write`（后两者默认 0）。命中即盖过目录。
 
-**缓存**（`pricing.go`，镜像 models.dev 模式）：`~/.model-proxy/pricing_cache.json`，TTL 24h（`pricingTTL`，可被 `pricing.ttl` 覆盖），atomic tmp+rename。`ensurePricingFresh`：fresh → 用；stale → conditional GET（带 `If-None-Match`）；304 → 只刷 `fetched_at` + 持久化；200 → 重建 + 持久化。抓取失败：有旧 → 用旧 + stderr 告警；无 → 空 catalog（未知价显示 n/a，不阻塞 UI）。
+**缓存**（`internal/pricing`，镜像 models.dev 模式）：`~/.model-proxy/pricing_cache.json`，TTL 默认 24h（`pricing.DefaultTTL`，可被 `pricing.ttl` 覆盖）。`pricing.EnsureFresh`：fresh → 用；stale → conditional GET（带 `If-None-Match`）；304 → 只刷 `fetched_at` + 持久化；200 → 重建 + 持久化。持久化使用目标目录中的唯一临时文件再 atomic rename，多个进程不会争用固定 `.tmp`，读取者只观察完整 JSON。抓取失败：有旧 → 用旧 + stderr 告警；无 → 空 catalog（未知价显示 n/a，不阻塞 UI）。
 
-**环境变量 `MP_PRICING_URL`**：pricing 端点解析优先级 **config `pricing.source_url` > `MP_PRICING_URL` env > OpenRouter 默认**（`defaultPricingEndpoint`）。`PricingConfig.sourceURL()`（`config.go`）在 config 未设时回落到 env 感知的 `pricingEndpoint()`（`pricing.go`，读 `MP_PRICING_URL`，**镜像 `MP_MODELSDEV_URL`** 的 test/mirror override 语义），生产路径 `Proxy.pricingSnapshot`（`proxy.go`）经此生效。单测：`TestPricingEndpoint_EnvOverride`（`pricing_test.go`）+ `TestPricingConfigSourceURL_Precedence`（`config_test.go`，钉死 config > env > default 三级优先级）。
+**环境变量 `MP_PRICING_URL`**：pricing 端点解析优先级 **config `pricing.source_url` > `MP_PRICING_URL` env > OpenRouter 默认**（`pricing.DefaultEndpoint`）。`PricingConfig.sourceURL()`（`config.go`）在 config 未设时回落到 env 感知的 `pricingEndpoint()`（主包 `pricing.go`，读 `MP_PRICING_URL`，**镜像 `MP_MODELSDEV_URL`** 的 test/mirror override 语义），生产路径 `Proxy.pricingSnapshot`（`proxy.go`）经此生效。单测：`TestPricingEndpoint_EnvOverride`（主包 `pricing_test.go`）+ `TestPricingConfigSourceURL_Precedence`（`config_test.go`，钉死 config > env > default 三级优先级）；目录、缓存与计算测试归属 `internal/pricing/pricing_test.go`。
 
 **Web UI**：`/ui/` Analytics 标签页（`web_assets/`）消费 `/api/analytics`，渲染 token + 等价成本趋势（uPlot）。未定价模型（如 `doubao-*`）显示 `n/a` + UI 提示。
 
 **CLI**：`stats --granularity day|month` 或 `--cost` 任一 → `renderAnalytics` 改打 `/api/analytics`（`formatAnalyticsTable`：每 (provider,model) 一行 = 窗口内 SUM，`--cost` 才出 cost 列，未定价 `n/a`；`--json` 原样）。两者都省略 → 走 `/api/stats`，输出与原 `stats` **字节一致**（CLI 契约不变，append-only）。
 
-**锁纪律**：`Proxy.pricingMu` 独立叶子锁；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入。无 stats store → `series:[]`（nil-safe）。
+**锁与依赖纪律**：`Proxy.pricingMu` 独立叶子锁；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入。`internal/pricing` 不依赖 main 包的 YAML 配置、Proxy 或 Web；`proxyReadView.pricing()` 是 `PriceConfig → pricing.Override` 的复制/单位边界。无 stats store → `series:[]`（nil-safe）。
 
 ## Web 运行时边界
 

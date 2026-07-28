@@ -1442,7 +1442,7 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 		t.Errorf("point = %+v, want reqs=3 input=1000 output=200", pts)
 	}
 	// Never-fabricate: no catalog + no override on the test Proxy → unpriced.
-	// If resolvePrice ever returned ok=true for an unknown model with a nil
+	// If pricing.Resolve ever returned ok=true for an unknown model with a nil
 	// catalog, Priced would flip to true and the handler would have fabricated
 	// a cost — these assertions pin that contract.
 	if pts[0].Priced {
@@ -1469,5 +1469,101 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	mux.ServeHTTP(rec2, httptest.NewRequest("GET", "/api/analytics?granularity=hour", nil))
 	if rec2.Code != 400 {
 		t.Errorf("bad granularity status=%d want 400", rec2.Code)
+	}
+}
+
+func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var catalogRequests atomic.Int32
+	priceServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		catalogRequests.Add(1)
+		response.Header().Set("ETag", `"prices-v1"`)
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte(pricingIntegrationFixture))
+	}))
+	defer priceServer.Close()
+
+	p := &Proxy{
+		cfg: &Config{Pricing: PricingConfig{
+			Enabled:   true,
+			TTL:       "24h",
+			SourceURL: priceServer.URL,
+		}},
+		metrics: newMetricsStore(),
+		tokens:  newTokenCounter(),
+		stats:   newTestStatsStore(t),
+	}
+	minute := time.Now().Unix() / 60 * 60
+	if err := p.stats.flushDeltas(minute, map[pmKey]statsCounters{
+		{Provider: "zhipu", Model: "glm-4.6"}: {
+			Requests: 1, Input: 1_000_000, Output: 500_000,
+			CacheRead: 200_000, CacheCreation: 100_000,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	web := newWebServer(p, "test-config.yaml")
+	mux := http.NewServeMux()
+	web.register(mux)
+	readCost := func() (pointCost, totalCost float64, priced, covered bool) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest("GET", "/api/analytics?granularity=day", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status=%d want 200; body=%s", recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Series []struct {
+				Points []struct {
+					Cost   *float64 `json:"cost"`
+					Priced bool     `json:"priced"`
+				} `json:"points"`
+			} `json:"series"`
+			Totals struct {
+				Cost *float64 `json:"cost"`
+			} `json:"totals"`
+			PriceCoverage struct {
+				Priced []string `json:"priced"`
+			} `json:"price_coverage"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Series) != 1 || len(response.Series[0].Points) != 1 {
+			t.Fatalf("analytics series = %+v", response.Series)
+		}
+		point := response.Series[0].Points[0]
+		if point.Cost == nil || response.Totals.Cost == nil {
+			t.Fatalf("priced response has nil cost: %+v", response)
+		}
+		for _, model := range response.PriceCoverage.Priced {
+			covered = covered || model == "glm-4.6"
+		}
+		return *point.Cost, *response.Totals.Cost, point.Priced, covered
+	}
+
+	pointCost, totalCost, priced, covered := readCost()
+	if pointCost < 1.839999 || pointCost > 1.840001 ||
+		totalCost < 1.839999 || totalCost > 1.840001 || !priced || !covered {
+		t.Errorf("catalog pricing = point=%v total=%v priced=%v covered=%v, want 1.84/1.84/true/true",
+			pointCost, totalCost, priced, covered)
+	}
+
+	p.mu.Lock()
+	nextConfig := *p.cfg
+	nextConfig.Prices = map[string]PriceConfig{
+		"glm-4.6": {Input: 2, Output: 4, CacheRead: 0.5, CacheWrite: 1},
+	}
+	p.cfg = &nextConfig
+	p.mu.Unlock()
+	pointCost, totalCost, priced, covered = readCost()
+	if pointCost < 4.199999 || pointCost > 4.200001 ||
+		totalCost < 4.199999 || totalCost > 4.200001 || !priced || !covered {
+		t.Errorf("override pricing = point=%v total=%v priced=%v covered=%v, want 4.2/4.2/true/true",
+			pointCost, totalCost, priced, covered)
+	}
+	if got := catalogRequests.Load(); got != 1 {
+		t.Errorf("catalog requests = %d, want one cached refresh", got)
 	}
 }

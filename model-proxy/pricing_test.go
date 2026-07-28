@@ -1,80 +1,26 @@
 package main
 
 import (
-	"os"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
+
+	"model-proxy/internal/pricing"
 )
 
-// fixtureOR is a tiny OpenRouter /api/v1/models-shaped blob. deepseek-v4-pro is
-// listed by its canonical vendor (deepseek) AND a reseller (openrouter) under the
-// same bare name, so the dedup test exercises canonical-vendor preference.
-const fixtureOR = `{
+const pricingIntegrationFixture = `{
   "data": [
-    {"id": "deepseek/deepseek-v4-pro", "pricing": {"prompt": "0.0000011", "completion": "0.0000028", "input_cache_read": "0.0000001"}},
-    {"id": "openrouter/deepseek-v4-pro", "pricing": {"prompt": "0.0000099", "completion": "0.0000099"}},
-    {"id": "z-ai/glm-4.6", "pricing": {"prompt": "0.0000009", "completion": "0.0000009"}},
-    {"id": "~openai/gpt-5.6-luna", "pricing": {"prompt": "0.000005", "completion": "0.000015"}}
+    {"id": "z-ai/glm-4.6", "pricing": {
+      "prompt": "0.0000009",
+      "completion": "0.0000018",
+      "input_cache_read": "0.0000001",
+      "input_cache_write": "0.0000002"
+    }}
   ]
 }`
-
-func TestParsePricingAPI_DedupCanonicalVendor(t *testing.T) {
-	cat := parsePricingAPI([]byte(fixtureOR))
-	e, ok := cat.ByModel["deepseek-v4-pro"]
-	if !ok {
-		t.Fatal("deepseek-v4-pro missing")
-	}
-	// Canonical vendor deepseek wins: prompt 1.1e-6, NOT the reseller's 9.9e-6.
-	if e.Prompt != 1.1e-6 || e.Completion != 2.8e-6 {
-		t.Errorf("canonical vendor not preferred: %+v", e)
-	}
-	if len(cat.ByModel) != 3 {
-		t.Errorf("dedup count = %d, want 3 (deepseek-v4-pro, glm-4.6, gpt-5.6-luna); got %v",
-			len(cat.ByModel), pricingKeys(cat.ByModel))
-	}
-	// Tilde alias stripped to bare name.
-	if _, ok := cat.ByModel["gpt-5.6-luna"]; !ok {
-		t.Errorf("tilde-prefixed id should strip to bare name; got %v", pricingKeys(cat.ByModel))
-	}
-}
-
-func TestPricingLookup(t *testing.T) {
-	cat := parsePricingAPI([]byte(fixtureOR))
-	if e, ok := cat.lookup("glm-4.6"); !ok || e.Prompt != 0.9e-6 {
-		t.Errorf("glm-4.6 lookup: ok=%v prompt=%v", ok, e.Prompt)
-	}
-	if _, ok := cat.lookup("doubao-seed-1-8"); ok {
-		t.Error("doubao-seed-1-8 must be unpriced (not in catalog)")
-	}
-	var nilCat *pricingCatalog
-	if _, ok := nilCat.lookup("m"); ok {
-		t.Error("nil catalog lookup should return false")
-	}
-}
-
-func TestPricingCacheRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pricing_cache.json")
-	cat := &pricingCatalog{
-		FetchedAt: time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC),
-		Etag:      `"abc"`,
-		ByModel:   map[string]pricingEntry{"glm-4.6": {Prompt: 0.9e-6, Completion: 0.9e-6}},
-	}
-	if err := saveCachedPricing(path, cat); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := loadCachedPricing(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Etag != `"abc"` || loaded.ByModel["glm-4.6"].Prompt != 0.9e-6 {
-		t.Errorf("round-trip lost data: %+v", loaded)
-	}
-	none, err := loadCachedPricing(filepath.Join(t.TempDir(), "missing.json"))
-	if err != nil || none != nil {
-		t.Errorf("missing cache should yield (nil,nil); got (%+v,%v)", none, err)
-	}
-}
 
 func TestPricingEndpoint_EnvOverride(t *testing.T) {
 	t.Setenv("MP_PRICING_URL", "http://example.test/models")
@@ -83,159 +29,125 @@ func TestPricingEndpoint_EnvOverride(t *testing.T) {
 	}
 }
 
-// helpers + keep imports honest
-func pricingKeys(m map[string]pricingEntry) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+func TestPricingCachePathUsesApplicationHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got, want := pricingCachePath(), filepath.Join(home, ".model-proxy", "pricing_cache.json"); got != want {
+		t.Errorf("pricing cache path = %q, want %q", got, want)
 	}
-	return out
 }
 
-func pricingFakeFetch(status int, body []byte, etag string) pricingFetchFunc {
-	return func(endpoint, inEtag string) (int, []byte, string, error) {
-		if status == 304 {
-			return 304, nil, etag, nil
+func TestProxyReadViewPricingDetachesAndConvertsOverrides(t *testing.T) {
+	proxy := &Proxy{cfg: &Config{
+		Pricing: PricingConfig{Enabled: false},
+		Prices: map[string]PriceConfig{
+			"glm-4.6": {Input: 9, Output: 18, CacheRead: 1, CacheWrite: 2},
+		},
+	}}
+
+	view := proxy.readView().pricing()
+	if view.catalog != nil {
+		t.Fatalf("disabled pricing catalog = %+v, want nil", view.catalog)
+	}
+	entry, ok := pricing.Resolve(view.overrides, nil, "glm-4.6")
+	if !ok {
+		t.Fatal("converted override was not resolvable")
+	}
+	if entry.Prompt != 9e-6 || entry.Completion != 18e-6 ||
+		entry.CacheRead != 1e-6 || entry.CacheWrite != 2e-6 {
+		t.Errorf("override conversion = %+v", entry)
+	}
+
+	view.overrides["glm-4.6"] = pricing.Override{Input: 999}
+	if got := proxy.cfg.Prices["glm-4.6"].Input; got != 9 {
+		t.Errorf("pricing view mutated config override: input=%v", got)
+	}
+}
+
+func TestPricingSnapshotDisabled(t *testing.T) {
+	proxy := &Proxy{cfg: &Config{Pricing: PricingConfig{Enabled: false}}}
+	if got := proxy.pricingSnapshot(); got != nil {
+		t.Errorf("disabled pricing snapshot = %+v, want nil", got)
+	}
+}
+
+func TestPricingSnapshotInitialFailureReturnsEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	proxy := &Proxy{cfg: &Config{Pricing: PricingConfig{
+		Enabled:   true,
+		TTL:       "24h",
+		SourceURL: "://invalid-pricing-url",
+	}}}
+	got := proxy.pricingSnapshot()
+	if got == nil || len(got.ByModel) != 0 {
+		t.Errorf("failed initial refresh = %+v, want non-nil empty catalog", got)
+	}
+}
+
+func TestPricingSnapshotSerializesConcurrentRefresh(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var requests atomic.Int32
+	firstRequest := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if requests.Add(1) == 1 {
+			close(firstRequest)
+			<-releaseFirst
 		}
-		return status, body, etag, nil
-	}
-}
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("ETag", `"pricing-v1"`)
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte(pricingIntegrationFixture))
+	}))
+	defer server.Close()
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseFirst) })
 
-func TestEnsurePricingFresh_200(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pricing_cache.json")
-	cat, err := ensurePricingFresh(path, "http://x", pricingFakeFetch(200, []byte(fixtureOR), `"new"`), false, pricingTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cat.Etag != `"new"` || cat.ByModel["glm-4.6"].Prompt != 0.9e-6 {
-		t.Errorf("200 should rebuild: %+v", cat.ByModel["glm-4.6"])
-	}
-	loaded, _ := loadCachedPricing(path)
-	if loaded == nil || loaded.Etag != `"new"` {
-		t.Errorf("200 should persist: %+v", loaded)
-	}
-}
+	proxy := &Proxy{cfg: &Config{Pricing: PricingConfig{
+		Enabled:   true,
+		TTL:       "24h",
+		SourceURL: server.URL,
+	}}}
 
-func TestEnsurePricingFresh_TTLHitNoFetch(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pricing_cache.json")
-	fresh := &pricingCatalog{FetchedAt: time.Now(), Etag: `"e"`,
-		ByModel: map[string]pricingEntry{"glm-4.6": {Prompt: 0.9e-6}}}
-	saveCachedPricing(path, fresh)
-	var called bool
-	errFetch := func(endpoint, etag string) (int, []byte, string, error) { called = true; return 0, nil, "", nil }
-	cat, err := ensurePricingFresh(path, "http://x", errFetch, false, pricingTTL)
-	if err != nil || called {
-		t.Errorf("fresh cache should not fetch: err=%v called=%v", err, called)
+	firstResult := make(chan *pricing.Catalog, 1)
+	go func() {
+		firstResult <- proxy.pricingSnapshot()
+	}()
+	<-firstRequest
+	if proxy.pricingMu.TryLock() {
+		proxy.pricingMu.Unlock()
+		t.Fatal("pricingMu was not held while the first catalog refresh was in flight")
 	}
-	if cat.ByModel["glm-4.6"].Prompt != 0.9e-6 {
-		t.Errorf("fresh cache should return cached data: %+v", cat.ByModel["glm-4.6"])
-	}
-}
 
-func TestEnsurePricingFresh_FetchErrorFallsBackToStale(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pricing_cache.json")
-	stale := &pricingCatalog{FetchedAt: time.Now().Add(-2 * pricingTTL), Etag: `"e"`,
-		ByModel: map[string]pricingEntry{"glm-4.6": {Prompt: 0.9e-6}}}
-	saveCachedPricing(path, stale)
-	errFetch := func(endpoint, etag string) (int, []byte, string, error) { return 0, nil, "", os.ErrNotExist }
-	cat, err := ensurePricingFresh(path, "http://x", errFetch, false, pricingTTL)
-	if err != nil {
-		t.Fatalf("fetch error with stale cache should not error: %v", err)
+	const callers = 11
+	start := make(chan struct{})
+	results := make(chan *pricing.Catalog, callers)
+	var wait sync.WaitGroup
+	wait.Add(callers)
+	for range callers {
+		go func() {
+			defer wait.Done()
+			<-start
+			results <- proxy.pricingSnapshot()
+		}()
 	}
-	if cat.ByModel["glm-4.6"].Prompt != 0.9e-6 {
-		t.Errorf("should fall back to stale: %+v", cat.ByModel["glm-4.6"])
-	}
-}
+	close(start)
+	releaseOnce.Do(func() { close(releaseFirst) })
+	wait.Wait()
+	close(results)
 
-func TestEnsurePricingFresh_304(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pricing_cache.json")
-	stale := &pricingCatalog{FetchedAt: time.Now().Add(-2 * pricingTTL), Etag: `"old"`,
-		ByModel: map[string]pricingEntry{"glm-4.6": {Prompt: 0.9e-6}}}
-	saveCachedPricing(path, stale)
-	before := stale.FetchedAt
-	cat, err := ensurePricingFresh(path, "http://x", pricingFakeFetch(304, nil, `"new"`), false, pricingTTL)
-	if err != nil {
-		t.Fatalf("304 should refresh the cached catalog in place: err=%v", err)
+	first := <-firstResult
+	entry, ok := first.Lookup("glm-4.6")
+	if !ok || entry.Prompt != 0.9e-6 || first.Etag != `"pricing-v1"` {
+		t.Errorf("first snapshot = %+v, entry=%+v, ok=%v", first, entry, ok)
 	}
-	if !cat.FetchedAt.After(before) {
-		t.Error("304 should advance fetched_at")
+	for catalog := range results {
+		entry, ok = catalog.Lookup("glm-4.6")
+		if !ok || entry.Prompt != 0.9e-6 || catalog.Etag != `"pricing-v1"` {
+			t.Errorf("concurrent snapshot = %+v, entry=%+v, ok=%v", catalog, entry, ok)
+		}
 	}
-	if cat.Etag != `"new"` {
-		t.Errorf("304 should update etag: %q", cat.Etag)
-	}
-	if cat.ByModel["glm-4.6"].Prompt != 0.9e-6 {
-		t.Error("304 should not rebuild ByModel")
-	}
-	persisted, _ := loadCachedPricing(path)
-	if persisted == nil || !persisted.FetchedAt.After(before) {
-		t.Errorf("304 should persist the refreshed fetched_at: %+v", persisted)
-	}
-}
-
-func TestEnsurePricingFresh_ForceBypassesTTL(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pricing_cache.json")
-	fresh := &pricingCatalog{FetchedAt: time.Now(), Etag: `"old"`,
-		ByModel: map[string]pricingEntry{"glm-4.6": {Prompt: 1.0e-6}}}
-	saveCachedPricing(path, fresh)
-	cat, err := ensurePricingFresh(path, "http://x", pricingFakeFetch(200, []byte(fixtureOR), `"new"`), true, pricingTTL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// fixtureOR's z-ai/glm-4.6 prompt is 0.9e-6; force should rebuild despite fresh cache.
-	if cat.ByModel["glm-4.6"].Prompt != 0.9e-6 {
-		t.Errorf("force should re-fetch + rebuild: %+v", cat.ByModel["glm-4.6"])
-	}
-	if cat.Etag != `"new"` {
-		t.Errorf("force should update etag: %q", cat.Etag)
-	}
-}
-
-func TestEnsurePricingFresh_NoCacheNoFetchEmpty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pricing_cache.json")
-	errFetch := func(endpoint, etag string) (int, []byte, string, error) { return 0, nil, "", os.ErrNotExist }
-	cat, err := ensurePricingFresh(path, "http://x", errFetch, false, pricingTTL)
-	// Total failure (no cache + unreachable) surfaces an error; the catalog is
-	// still a usable empty so callers can render unpriced rather than crash.
-	if err == nil {
-		t.Error("no cache + fetch error should return a non-nil error")
-	}
-	if cat == nil || len(cat.ByModel) != 0 {
-		t.Errorf("no cache + fetch error → empty (non-nil) catalog, got %+v", cat)
-	}
-}
-
-func TestResolvePrice_OverrideBeatsCatalog(t *testing.T) {
-	cat := parsePricingAPI([]byte(fixtureOR))                              // glm-4.6 prompt 0.9e-6
-	prices := map[string]PriceConfig{"glm-4.6": {Input: 9.0, Output: 9.0}} // $9/M = 9e-6/token
-	e, ok := resolvePrice(prices, cat, "glm-4.6")
-	if !ok || e.Prompt != 9e-6 {
-		t.Errorf("override should win: ok=%v prompt=%v", ok, e.Prompt)
-	}
-	// No override → catalog.
-	e2, ok2 := resolvePrice(prices, cat, "deepseek-v4-pro")
-	if !ok2 || e2.Prompt != 1.1e-6 {
-		t.Errorf("catalog fallback wrong: ok=%v prompt=%v", ok2, e2.Prompt)
-	}
-	// Neither → unpriced.
-	if _, ok3 := resolvePrice(prices, cat, "doubao-seed-1-8"); ok3 {
-		t.Error("unknown model must be unpriced")
-	}
-}
-
-func TestComputeCost_Exact(t *testing.T) {
-	// 1,000,000 input @ $1.1/M (1.1e-6/token) = $1.1
-	//   500,000 output @ $2.8/M = $1.4 ; total $2.5
-	e := pricingEntry{Prompt: 1.1e-6, Completion: 2.8e-6}
-	r := computeCost(1_000_000, 500_000, 0, 0, e)
-	if !r.Priced || r.Cost < 2.499 || r.Cost > 2.501 {
-		t.Errorf("cost = %v priced=%v, want ~2.5 priced=true", r.Cost, r.Priced)
-	}
-	// cache_read + cache_creation both priced: 200000*1e-7 + 100000*1e-7 = 0.03.
-	// CacheWrite must be non-zero so the cacheCreation·e.CacheWrite term is
-	// exercised — dropping that term from computeCost must turn this red.
-	e2 := pricingEntry{Prompt: 1e-6, Completion: 2e-6, CacheRead: 1e-7, CacheWrite: 1e-7}
-	r2 := computeCost(0, 0, 200_000, 100_000, e2)
-	if !r2.Priced || r2.Cost < 0.029 || r2.Cost > 0.031 { // 0.02 + 0.01 = 0.03
-		t.Errorf("cache cost = %v, want ~0.03", r2.Cost)
+	if got := requests.Load(); got != 1 {
+		t.Errorf("upstream refresh requests = %d, want 1", got)
 	}
 }

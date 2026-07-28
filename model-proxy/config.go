@@ -9,6 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"model-proxy/internal/pricing"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -137,12 +139,12 @@ func (p PricingConfig) enabled() bool { return p.Enabled }
 // ttl returns the catalog cache TTL, defaulting to 24h.
 func (p PricingConfig) ttl() time.Duration {
 	if p.TTL == "" {
-		return 24 * time.Hour
+		return pricing.DefaultTTL
 	}
 	if d, err := time.ParseDuration(p.TTL); err == nil {
 		return d
 	}
-	return 24 * time.Hour
+	return pricing.DefaultTTL
 }
 
 // sourceURL returns the pricing endpoint. Precedence: config `source_url` >

@@ -109,6 +109,29 @@ func TestArchitectureBoundaries(t *testing.T) {
 			t.Errorf("daemon.go bypasses proxyLifecycle: %s", v)
 		}
 	})
+
+	t.Run("internal pricing remains a repository-leaf package", func(t *testing.T) {
+		files, err := filepath.Glob("internal/pricing/*.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) == 0 {
+			t.Fatal("internal/pricing has no Go files")
+		}
+		for _, path := range files {
+			if strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			f, _ := parseGoFile(t, path)
+			for _, spec := range f.Imports {
+				importPath := strings.Trim(spec.Path.Value, `"`)
+				if strings.HasPrefix(importPath, "model-proxy/") {
+					t.Errorf("%s imports repository package %q; pricing must remain a leaf",
+						filepath.Base(path), importPath)
+				}
+			}
+		}
+	})
 }
 
 // TestTargetExecutionArchitecture protects the next layer below targetPlan:

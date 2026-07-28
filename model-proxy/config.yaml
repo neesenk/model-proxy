@@ -264,7 +264,7 @@ takeover:
 
 # Equivalent-cost analytics: token usage × OpenRouter price catalog (cached).
 # pricing:
-#   enabled: true                       # default; false → cost shows n/a everywhere
+#   enabled: true                       # default; false disables catalog fetch (prices: overrides still work)
 #   ttl: 24h                            # default catalog cache TTL
 #   # source_url: https://openrouter.ai/api/v1/models  # default; MP_PRICING_URL env also works
 # Per-model price overrides (USD per 1M tokens) for models the catalog misses:

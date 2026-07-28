@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"sort"
 	"time"
+
+	"model-proxy/internal/pricing"
 )
 
 // proxyReadView is the read-only application boundary used by Web/API
@@ -181,19 +183,24 @@ func (view proxyReadView) pins() map[string]pinEntry {
 }
 
 type pricingView struct {
-	catalog   *pricingCatalog
-	overrides map[string]PriceConfig
+	catalog   *pricing.Catalog
+	overrides map[string]pricing.Override
 }
 
 func (view proxyReadView) pricing() pricingView {
 	catalog := view.proxy.pricingSnapshot()
 	overrides := view.proxy.priceOverrides()
+	var detached map[string]pricing.Override
 	if overrides != nil {
-		detached := make(map[string]PriceConfig, len(overrides))
+		detached = make(map[string]pricing.Override, len(overrides))
 		for model, price := range overrides {
-			detached[model] = price
+			detached[model] = pricing.Override{
+				Input:      price.Input,
+				Output:     price.Output,
+				CacheRead:  price.CacheRead,
+				CacheWrite: price.CacheWrite,
+			}
 		}
-		overrides = detached
 	}
-	return pricingView{catalog: catalog, overrides: overrides}
+	return pricingView{catalog: catalog, overrides: detached}
 }

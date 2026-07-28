@@ -20,6 +20,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"model-proxy/internal/pricing"
 	"model-proxy/provider"
 )
 
@@ -742,9 +743,9 @@ func (w *webServer) handleAnalytics(resp http.ResponseWriter, r *http.Request) {
 		writeJSONErr(resp, http.StatusInternalServerError, "analytics query: "+err.Error())
 		return
 	}
-	pricing := w.reads.pricing()
-	cat := pricing.catalog
-	prices := pricing.overrides
+	priceView := w.reads.pricing()
+	cat := priceView.catalog
+	prices := priceView.overrides
 
 	byKey := map[string]*series{}
 	var keys []string
@@ -759,16 +760,16 @@ func (w *webServer) handleAnalytics(resp http.ResponseWriter, r *http.Request) {
 			byKey[k] = s
 			keys = append(keys, k)
 		}
-		e, ok := resolvePrice(prices, cat, b.Model)
+		e, ok := pricing.Resolve(prices, cat, b.Model)
 		var cost *float64
 		if ok {
-			cr := computeCost(b.Input, b.Output, b.CacheRead, b.CacheCreation, e)
-			cost = &cr.Cost
+			computed := pricing.ComputeCost(b.Input, b.Output, b.CacheRead, b.CacheCreation, e)
+			cost = &computed
 			priced[b.Model] = true
 			if totCost == nil {
 				totCost = new(float64)
 			}
-			*totCost += cr.Cost
+			*totCost += computed
 		} else {
 			unpriced[b.Model] = true
 		}

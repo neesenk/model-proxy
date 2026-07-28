@@ -54,6 +54,9 @@ client→backend pair 必须同时提供 request、反向 response、反向 SSE 
   捕获 `runtimeSnapshot` 与 `shadowRuntime`；executor 和 Fusion synthesizer
   均不得启动 Shadow，goroutine 内不得重新读取 reload-owned 状态。
 - Cache、request log、usage scanner 位于响应转换外层，只观察客户端协议字节。
+- Analytics 的价格目录、条件抓取、原子缓存、override 解析与成本公式由
+  `internal/pricing` 这一无主包依赖的叶子包拥有；`pricing.go` 只适配环境变量与
+  应用 HOME 路径，`Proxy.pricingSnapshot` 保留配置快照和并发刷新锁。
 
 ## 状态与锁
 
@@ -96,6 +99,7 @@ Fusion/Shadow ────────────────┘
 Web → proxyReadView / proxyAdminCommands
 lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
+analytics adapter → internal/pricing
 ```
 
 禁止：
@@ -107,6 +111,7 @@ conversion entrypoints → conversion registry → pair codecs
 - attemptExecutor 持有完整 `*Proxy`；
 - 普通 route/Fusion 绕过 `newTargetAttempt` 直接拼装执行器输入；
 - daemon/reload 绕过 `proxyLifecycle` 启动 Proxy 级 goroutine；
+- `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - 将 config generation 内的 map 原地修改。
 
 ## 专题文档
