@@ -13,8 +13,11 @@
   `p.shadow`。
 - 单目标 I/O 由 `attemptExecutor` 执行；它只能通过 `attemptState` 窄端口修改
   runtime state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
-- 三协议方向只在 `conversion_registry.go` 注册；request、response、SSE 入口
-  必须共享同一 pair 定义，不得各自维护方向 switch。
+- 三协议方向只在 `internal/protocol/conversion_registry.go` 注册；request、
+  response、SSE 入口必须共享同一 pair 定义，不得各自维护方向 switch。
+  `internal/protocol` 是仓库依赖叶子，不得 import `model-proxy/*`；Provider 方言、
+  目标视觉能力由 `targetPlan` 解析后通过 request options 注入，HTTP 错误写入留在
+  transport 层。
 - 普通 route、所有 Fusion leg 和 Shadow 共享 `targetPlan`；provider/protocol/
   model/body/URL/path 准备逻辑不得复制，异步分支只能使用主请求捕获的 runtime
   snapshot，禁止在 goroutine 内重新读取 reload-owned 状态。

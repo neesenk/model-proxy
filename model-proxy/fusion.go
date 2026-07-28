@@ -336,7 +336,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// Responses chain expansion (same rule as forward): only when the client
 	// spoke responses AND this leg's backend is stateless — a native-responses
 	// backend keeps previous_response_id passthrough and its server-side chain.
-	srcBody, _ = p.expandFusionResponses(fc, plan.backendProto, srcBody)
+	srcBody, _ = p.expandFusionResponses(fc, string(plan.backendProto), srcBody)
 	body := plan.rewriteModel(srcBody, fc.calledModel)
 	body, err = plan.convertBody(body)
 	if err != nil {
@@ -478,7 +478,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	default:
 		res.usage = parseUsageJSON(respBody)
-		res.text = truncateRunes(extractCandidateText(respBody, plan.backendProto), fusionCandidateMaxChars)
+		res.text = truncateRunes(plan.extractResponseText(respBody), fusionCandidateMaxChars)
 		if res.text == "" {
 			res.err = errFusionEmptyDraft
 			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.generation)
@@ -553,8 +553,8 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	// the RECORDED history is the expansion of the CLIENT-VISIBLE conversation
 	// (origBody) — the injected instruction/candidate scaffolding is ephemeral
 	// per-turn and must not be replayed into later turns as if the user said it.
-	body, _ = p.expandFusionResponses(fc, plan.backendProto, body)
-	_, responsesHistory := p.expandFusionResponses(fc, plan.backendProto, fc.origBody)
+	body, _ = p.expandFusionResponses(fc, string(plan.backendProto), body)
+	_, responsesHistory := p.expandFusionResponses(fc, string(plan.backendProto), fc.origBody)
 	body = plan.rewriteModel(body, fc.calledModel)
 	body, err = plan.convertBody(body)
 	if err != nil {
@@ -580,7 +580,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 			agent:            fc.agent,
 			cacheKey:         cacheKey,
 			log:              flc,
-			responseContext:  r2cCtxFor(fc.proto, plan.backendProto, fc.origBody),
+			responseContext:  plan.responseContext(fc.origBody),
 			responsesHistory: responsesHistory,
 			responsesSession: fc.sessionKey,
 		},
@@ -603,12 +603,12 @@ func (p *Proxy) expandFusionResponses(fc fusionCtx, backendProto string, body []
 	if fc.proto != "responses" || backendProto == "responses" || p.responsesState == nil {
 		return body, nil
 	}
-	expanded, history, hit, err := p.responsesState.expand(body, fc.sessionKey)
+	expanded, history, hit, err := p.responsesState.Expand(body, fc.sessionKey)
 	if err != nil {
 		log.Printf("[fusion] %s: responses state expansion failed: %v — sending unexpanded body", fc.flc.exposed, err)
 		return body, nil
 	}
-	if responsesPreviousID(body) != "" && !hit {
+	if p.responsesPreviousID(body) != "" && !hit {
 		log.Printf("[fusion] %s: previous_response_id cache miss; repaired orphaned continuation items", fc.flc.exposed)
 	}
 	return expanded, history
@@ -749,79 +749,6 @@ func stripFusionDraftFields(body []byte) []byte {
 		return body
 	}
 	return out
-}
-
-// extractCandidateText pulls the assistant text out of a non-streaming
-// response, parsed in the shape of the leg's backend protocol: anthropic
-// content[] text blocks, openai choices[0].message.content, or (backendProto
-// "responses") the output[] message items' output_text parts. An unrecognized
-// shape yields "".
-func extractCandidateText(body []byte, backendProto string) string {
-	if backendProto == "responses" {
-		return extractResponsesCandidateText(body)
-	}
-	var v struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		Choices []struct {
-			Message struct {
-				Content json.RawMessage `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &v); err != nil {
-		return ""
-	}
-	var sb strings.Builder
-	for _, c := range v.Content {
-		if c.Type == "text" {
-			sb.WriteString(c.Text)
-		}
-	}
-	if sb.Len() > 0 {
-		return sb.String()
-	}
-	if len(v.Choices) > 0 {
-		var s string
-		if json.Unmarshal(v.Choices[0].Message.Content, &s) == nil {
-			return s
-		}
-	}
-	return ""
-}
-
-// extractResponsesCandidateText pulls the assistant text out of a native
-// responses-API response: the output_text parts of the output[] message items
-// (reasoning/tool items carry no draft text and are skipped). Reuses the
-// r→chat converter's item/part walk so the leg sees the same text a converted
-// response would carry.
-func extractResponsesCandidateText(body []byte) string {
-	var src map[string]any
-	if err := json.Unmarshal(body, &src); err != nil {
-		return ""
-	}
-	var sb strings.Builder
-	for _, item := range responsesOutputItems(src) {
-		if item["type"] != "message" {
-			continue
-		}
-		parts, _ := item["content"].([]any)
-		for _, p := range parts {
-			pm := asMap(p)
-			if pm == nil {
-				continue
-			}
-			switch pm["type"] {
-			case "output_text", "text":
-				sb.WriteString(responsesTextWithCitationLinks(pm))
-			case "refusal":
-				sb.WriteString(strOf(pm["refusal"]))
-			}
-		}
-	}
-	return sb.String()
 }
 
 // parseUsageJSON extracts token usage from a non-streaming response body. One

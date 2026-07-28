@@ -2,7 +2,8 @@
 
 ## 适用范围
 
-修改 `convert.go`、`provider/protocol_hint.go`、跨协议 route、流式转换或工具调用映射时必读。
+修改 `model-proxy/internal/protocol/*`、`provider/protocol_hint.go`、跨协议
+route、流式转换或工具调用映射时必读。
 
 ## 边界
 
@@ -12,9 +13,10 @@
 
 - `anthropic` = Anthropic Messages（`/v1/messages`，`messages` + content blocks）
 - `openai` = OpenAI Chat Completions（`/v1/chat/completions`，`messages` + `tool_calls`）。**不再**表示 Responses API。
-- `responses` = OpenAI Responses API（`/v1/responses`，`input` list + `output` items + `response.*` 流式事件）。`/v1/responses` 路径在 `protocolForPath` 里独立判为 `responses`，不再并入 `openai`。
+- `responses` = OpenAI Responses API（`/v1/responses`，`input` list + `output` items + `response.*` 流式事件）。`/v1/responses` 路径由 `protocol.ForPath` 独立判为 `responses`，不再并入 `openai`。
 
-转换器为直连 pairwise codec，并统一注册在 `conversion_registry.go`：
+转换器为直连 pairwise codec，并统一注册在
+`model-proxy/internal/protocol/conversion_registry.go`：
 一个 client→backend pair 必须同时声明 request、反向 response 和反向 SSE
 三个入口。注册表覆盖 3×2 共六组方向，并由结构测试保证完整；`convertRequestFor`、
 `convertResponseNS` 和 `convertSSEReaderNS` 不得各自维护方向 switch。
@@ -22,7 +24,15 @@ pair-specific codec 保留协议特有语义，不引入最低公分母 IR：hos
 reasoning 方言、namespace restore 等信息无法通过统一 message IR 无损表达。
 `needsConversion` 对任意两个不同的已知协议返回 true；未知协议值 fail-safe 不转换。
 
-Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。Responses 客户端跨协议访问 chat/anthropic 后端时，proxy 为 `previous_response_id` 维护短期本地历史：按 session + response id 索引、TTL 30 分钟、最多 512 条、单条 2 MiB、总量 32 MiB，异步以 0600 写入 quota state 同目录的 `responses_state.json`。命中时展开完整 input/output 历史；未命中时只修复本次缺失历史导致的孤立 output/dangling call，普通显式全历史请求不做全局配对改写。只有 completed 和因 token 上限产生的 incomplete 响应进入 replay state，content_filter/其他中止不缓存。无稳定 session 时仅允许 response id 唯一命中，避免跨会话串线。此外 `convertRequestFor` 在 provider 为 codex 且目标协议为 responses 时剥离 `max_output_tokens`/`temperature`/`top_p`——该预剥离只作用于转换路径；客户端本来就讲 responses 的同协议 codex 流量保持字节级透传（`targetPlan.convertBody` 短路），其 unsupported parameter 400 靠 paramBlock 学习后预防性剥离自愈（`routing-and-failure.md`）。
+`internal/protocol` 是仓库依赖叶子，拥有协议解析、转换 registry、请求/响应/SSE
+codec、SSE↔JSON 模式桥接、图片缩减和 Responses `previous_response_id` 状态；
+生产文件不得 import `model-proxy/*`。根包只通过导出 facade 接线：
+`RequestOptions` 接收 `targetPlan` 已解析的 reasoning 方言、Codex shaping 和视觉
+能力，`ResponseContext` 对 namespace/custom restore 状态保持 opaque。Provider
+映射仍由 `provider.ChatReasoningMode` 定义，具体 HTTP 400 envelope 仍由 transport
+层写入，二者都不反向进入协议包。
+
+Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。Responses 客户端跨协议访问 chat/anthropic 后端时，proxy 为 `previous_response_id` 维护短期本地历史：按 session + response id 索引、TTL 30 分钟、最多 512 条、单条 2 MiB、总量 32 MiB，异步以 0600 写入 quota state 同目录的 `responses_state.json`。命中时展开完整 input/output 历史；未命中时只修复本次缺失历史导致的孤立 output/dangling call，普通显式全历史请求不做全局配对改写。只有 completed 和因 token 上限产生的 incomplete 响应进入 replay state，content_filter/其他中止不缓存。无稳定 session 时仅允许 response id 唯一命中，避免跨会话串线。此外 `protocol.ConvertRequestWithOptions` 在 target plan 注入 `CodexShaping` 且目标协议为 responses 时剥离 `max_output_tokens`/`temperature`/`top_p`——该预剥离只作用于转换路径；客户端本来就讲 responses 的同协议 codex 流量保持字节级透传（`targetPlan.convertBody` 短路），其 unsupported parameter 400 靠 paramBlock 学习后预防性剥离自愈（`routing-and-failure.md`）。
 
 跨协议转换前先运行 capability scanner。已知无法无损表达的请求（例如 Chat `n>1`/logprobs/audio、未知 hosted tool、Anthropic MCP server、Responses 24h cache retention → Anthropic、Responses custom/freeform tool → Anthropic）不会进入上游：当前 target 被跳过并继续 failover；若没有兼容 target，按客户端协议返回 HTTP 400、code=`unsupported_protocol_conversion`。同协议透传不受扫描器影响。
 
@@ -32,12 +42,12 @@ Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses
 - **孤立 reasoning item 丢弃（a→r，cc-switch transform_responses.rs）**：仅含 thinking/redacted_thinking 块的 assistant 消息（incomplete turn 历史常见）转换后没有任何 message/function_call 后继，codex 400 "reasoning item without its required following item"——这类 reasoning item 直接丢弃 + `convertWarn`；同代内有 function_call/文本后继时保留。
 - `messages` ↔ `input` items：text block ↔ `{type:message, content:[{input_text|output_text}]}`；image ↔ `{input_image, image_url}`（base64 转 data URL，url-source 原样保留）；Anthropic `document` ↔ Responses `input_file`（file_id/base64 data URL/http(s) URL/filename），Chat 使用 `file` part，URL-only Chat 降级为带文件名的文本链接。
 - anthropic `tool_use` / chat `tool_calls` → responses `{type:function_call, name, arguments, call_id}`；tool `id` ↔ `call_id`（`function_call_output` 的 `call_id` 必须回填）。arguments 缺省补 `"{}"`；chat→r 对只带 id 不带 name 的 tool_call（replace-style 客户端重发）按 call_id 从同请求前面的 function_call 回填 name，仍缺则 convertWarn。
-- anthropic `tool_result` / chat `role:tool` → responses `{type:function_call_output, call_id, output}`。`is_error:true` 使用 cc-switch 兼容的 `[cc-switch:tool-result-error]` marker 可逆编码，反向恢复 `is_error`。**碰撞后果**：工具输出文本本身恰等于该 marker、或以 marker + `\n` 开头时（convert.go `splitToolResultError`），反向转换会误判 `is_error:true` 并剥掉 marker 前缀——内联编码无法与真实输出区分，属已知取舍。
+- anthropic `tool_result` / chat `role:tool` → responses `{type:function_call_output, call_id, output}`。`is_error:true` 使用 cc-switch 兼容的 `[cc-switch:tool-result-error]` marker 可逆编码，反向恢复 `is_error`。**碰撞后果**：工具输出文本本身恰等于该 marker、或以 marker + `\n` 开头时（`internal/protocol/convert.go` 的 `splitToolResultError`），反向转换会误判 `is_error:true` 并剥掉 marker 前缀——内联编码无法与真实输出区分，属已知取舍。
 - **tool_result 媒体改投（cc-switch 剥离-改投，按目标模型视觉能力门控）**：tool_result/function_call_output 里的 image 块不再丢弃——tool/function_call_output 消息只带文本，图片紧随一条合成 user 消息改投：a→chat 为 `{"role":"user","content":[{"type":"text","text":"[image returned by tool]"},{"type":"image_url",...}]}`（base64 转 data URL、url source 保留）；a→r 为 `{type:message, role:user, content:[input_text + input_image]}`；r→chat 的 output parts 数组同样拆 text/image 改投；**r→a 的 function_call_output parts 数组拆成 anthropic 原生块**（text part → tool_result 文本块，image part → image 块，base64/url source 均支持；r→a 侧无视觉门控——anthropic 目标恒接受 image 块）。连续多条带图 tool_result 各自的合成消息跟在各自 tool 消息后；无图时行为不变。**视觉门控**（`imageOKForTarget`，config `capabilities:` > models.dev catalog > 缺省 true）：目标模型无视觉能力时不发合成 user 消息，占位文本 `[image omitted: target model has no vision capability]` 并进 tool 消息文本（文本为空即全部 content）——无视觉上游（如 deepseek）会对 image_url part 400。
 - **占位 reasoning_content（thinking 方言限定）**：r→chat 在消息列表构建完成后，对 `ChatReasoningMode == "thinking"` 的 provider，给每条带非空 tool_calls 且 `reasoning_content` 为空/缺失的 assistant 消息注入 `"reasoning_content": "tool call"`（deepseek 400 "reasoning_content must be passed back"，kimi/Moonshot 同样拒绝；codex 的 reasoning item 为空 summary + encrypted_content，附挂后恰为空，由此兜住 codex→deepseek）。其他方言不注入。
 - **MCP namespace 与 hosted tools**：namespace function 经 Chat 或 Anthropic target 均按 `namespace__name` 压平（截断到 ≤64 字节时回退到 rune 边界，不产出非法 UTF-8），并在非流式/SSE 响应中按原请求 context 还原，撞名 fail-closed；namespace 容器先展开。Responses `web_search` 在 Anthropic 侧映射为 `web_search_20250305`，在 Chat 侧降级为同名 function；`tool_search` 在两侧降级为带 `{query,limit}` schema 的客户端工具；两个方向的 hosted fallback 名都与用户工具共用撞名检查，冲突 fail-closed。`web_search_call` 非流式与 r→{a,chat} 流式均保留（Anthropic 为 `server_tool_use + web_search_tool_result` pair，Chat 为 function tool call）。`tool_search_output.tools` 是下一轮已加载的真实工具声明：与顶层/additional_tools 合并，namespace 同样展开压平；结果消息列出准确 wire name，failed status 恢复为 Anthropic `is_error` 或 Chat 可逆错误 marker。
 - **custom/freeform 工具（cc-switch transform_codex_chat）**：Codex CLI 主力工具（shell/apply_patch）是 `{type:"custom", name}`，call 携带**原始字符串** input 而非 JSON arguments。r→chat：custom 工具包装为单参数 function（`parameters={"input": string}`，required+additionalProperties:false），`custom_tool_call` 历史编码为 `arguments={"input": <raw>}`，`custom_tool_call_output` 同 function_call_output（含媒体改投）。chat→r：响应转换凭从原始请求体重建的 custom 集合（`r2cCtx.custom`，与 ns restore map 同通道 `r2cCtxFor` 传递）把命中名字的 tool_call 还原为 `{type:"custom_tool_call", input}`（arguments JSON 解出 `input`，解析失败原样兜底）；流式合成 `response.custom_tool_call_input.{delta,done}`（item id `ctc_item_<idx>`），arguments 的部分 JSON 做**渐进解包**（吃 `{"input": "` 前缀、反转义内容、尾部不完整转义留存下一 chunk、结尾 `"}` 吃掉）。Anthropic 没有等价的 raw-input tool contract，因此 Responses custom/freeform → Anthropic 由 capability scanner 明确拒绝并尝试下一 target，而不是错误地伪装为 JSON-schema tool。
-- **reasoning effort 方言（`provider.ChatReasoningMode`，cc-switch mapReasoningEffort）**：r→chat 的 `reasoning.effort` 按 provider 渲染——zhipu/volcengine/kimi-code/deepseek → `thinking:{type:"enabled"|"disabled"}`（none/minimal→disabled）；qwen-plan → `enable_thinking: bool`；aqp（OpenRouter 系）→ 原生 `reasoning:{effort}` 对象；其他 → `reasoning_effort` 原样。无 reasoning 字段时任何模式都不发声。
+- **reasoning effort 方言（`provider.ChatReasoningMode` → `protocol.RequestOptions.ReasoningDialect`，cc-switch mapReasoningEffort）**：r→chat 的 `reasoning.effort` 按 provider 渲染——zhipu/volcengine/kimi-code/deepseek → `thinking:{type:"enabled"|"disabled"}`（none/minimal→disabled）；qwen-plan → `enable_thinking: bool`；aqp（OpenRouter 系）→ 原生 `reasoning:{effort}` 对象；其他 → `reasoning_effort` 原样。无 reasoning 字段时任何模式都不发声。
 - anthropic `thinking` ↔ responses `{type:reasoning, summary, encrypted_content}`；`thinking`↔`summary.text`，`signature`↔`encrypted_content`。`redacted_thinking` ↔ `summary` 为空数组但**键必须存在**且仅含 `encrypted_content` 的 reasoning item。Anthropic↔Chat 使用 replay envelope：可见文本走 `reasoning_content`，签名 thinking/redacted block 原样放在 `reasoning_details` 扩展；Chat 客户端回放该扩展时恢复原块并保证位于 tool_use 前（thinking 文本为空的项不回放——空 thinking 块可能被 Anthropic 拒收），unsigned reasoning 不伪造成 Anthropic thinking。**a→r 的 `reasoning` 请求对象恒带 `summary:"auto"`**。**adaptive thinking** 的 effort 取自顶层 `output_config.effort`。codex provider 合并 `include:["reasoning.encrypted_content"]`。**a→r 注入 `prompt_cache_key`**：优先 `metadata.user_id` 的 sha256；否则用 model+instructions+工具的确定性指纹。Anthropic 显式 cache breakpoint 转 Chat 时同样生成稳定 cache key；Chat↔Responses 透传 `prompt_cache_key`/`prompt_cache_retention`，24h retention 到 Anthropic 因无法等价表达而 fail-closed。
 - **引用**：Anthropic URL citation → Responses `output_text.annotations[].url_citation` / Chat `message.annotations[].url_citation`，按 Unicode 字符计算输出 offset；Chat↔Responses 可逆，非流式与 SSE 均覆盖。Responses → Anthropic 缺少 Anthropic web citation 必需的 `encrypted_index`，因此不伪造结构化 citation，而在同一文本块追加去重 Markdown 来源链接（流式按 block 去重：同一 URL 的多个 annotation 事件只追加一次；chat→a 的 parts 数组 content 同样把 message 级 annotations 追加进文本块）。file citation 仅在存在 `file_id` 且目标为 Responses 时结构化保留。
 - tools：`{type:function, name, parameters}` ↔ anthropic `input_schema` / chat `function.parameters`（`strict` 在 responses↔chat 两侧透传）。进入 Anthropic 的 schema 会去除 transport `encrypted` marker、保证根 `type:object` + `properties`，并展平根 oneOf/anyOf/allOf；字面名为 `encrypted` 的 property 保留。`web_search_*` 按 hosted tool 映射；Anthropic 普通 function tool 的显式默认 type `custom`（及缺省 type）按 name/input_schema 常规映射，不当 hosted tool 拒绝；仍不支持的 `computer_*` 等丢弃 + `convertWarn`。**工具声明合并（codex 0.145 实测）**：codex 把工具放在 input 的 `{type:"additional_tools", role:"developer", tools:[…]}` item 里（顶层可无 `tools`）——r→chat/r→a 统一经 `responsesRequestTools` 合并（顶层在前，additional_tools 按序追加），additional_tools item 是工具声明不是消息，不进消息流、不按 developer 消息折叠；ns restore map 与 custom 工具集合同样从合并后的声明重建。
@@ -131,7 +141,7 @@ OpenAI → Anthropic 的 tool use id 必须满足 `^[a-zA-Z0-9_-]+$`。同一调
 
 剩余有损项主要是尚未实现降级的 server tools（如 computer）、未知 role/content 和 chat `input_audio`。已知无法表达的请求特性优先由 capability scanner 拒绝；仅响应侧或可安全降级的差异使用 `convertWarn`。document/file、hosted web/tool search、tool_result 图片/错误标记、reasoning replay 和引用均已保留或采用明确降级。跨协议目标为 Anthropic 时，会在 system、最后一个 tool、最后一条 user content 注入 ephemeral cache breakpoint；原协议 cache_control 仍不逐点一一映射。
 
-涉及 responses 的方向（`convert_responses.go`）：reasoning、citations、document/file、工具与 usage 按上述规则保留。多模态**输出**仍有损：Responses 协议没有通用 image output item，上游返回的图片输出会告警。`stop`/`stop_sequences`→r 和 `text.format`→a 无对应。`top_k`、`seed`、penalties、metadata、service_tier、store 等非核心提示不跨协议；其中 metadata.user_id 仅以哈希形式用于 `prompt_cache_key`。
+涉及 responses 的方向（`internal/protocol/convert_responses.go`）：reasoning、citations、document/file、工具与 usage 按上述规则保留。多模态**输出**仍有损：Responses 协议没有通用 image output item，上游返回的图片输出会告警。`stop`/`stop_sequences`→r 和 `text.format`→a 无对应。`top_k`、`seed`、penalties、metadata、service_tier、store 等非核心提示不跨协议；其中 metadata.user_id 仅以哈希形式用于 `prompt_cache_key`。
 
 reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔openai-chat 转换路由上仍会丢 thinking（replay cache 未实现）；经 responses 方向可保 reasoning。`configRoutingWarnings` 只负责警告，不代表已实现 replay cache。
 
@@ -145,6 +155,10 @@ reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔opena
 - 客户端断开后停止读取上游。
 
 ## 回归测试
+
+以下纯 codec/state/framing 测试位于 `model-proxy/internal/protocol/`；名称以
+`TestForward_` 开头的 Proxy 接线测试仍位于根包，防止 codec 正确但 transport
+接线错误。
 
 - `TestProtocolConversionRegistryIsComplete` 断言六组跨协议 pair 均同时注册
   request、response、stream codec；未知协议与同协议不得命中注册表。

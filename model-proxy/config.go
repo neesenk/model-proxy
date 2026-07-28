@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"model-proxy/internal/pricing"
+	"model-proxy/internal/protocol"
 
 	"gopkg.in/yaml.v3"
 )
@@ -812,7 +813,7 @@ func (c *Config) checkFusionTarget(recipe, where string, t RouteTarget) error {
 }
 
 // checkTargetProtocol validates a target's declared backend protocol against
-// the closed wire-protocol set — parseWireProtocol (conversion_registry.go) is
+// the closed wire-protocol set — protocol.Parse is
 // the single source of truth for the legal values — and against the provider's
 // base URLs: protocol:anthropic needs anthropic_base_url, openai/responses
 // need openai_base_url (responses reuses the OpenAI base, e.g. codex's
@@ -822,36 +823,19 @@ func checkTargetProtocol(what string, t RouteTarget, prov Provider) error {
 	if t.Protocol == "" {
 		return nil
 	}
-	protocol, ok := parseWireProtocol(t.Protocol)
+	wireProtocol, ok := protocol.Parse(t.Protocol)
 	if !ok {
 		return fmt.Errorf("%s: protocol %q is not \"anthropic\", \"openai\", or \"responses\"", what, t.Protocol)
 	}
-	switch protocol {
-	case protocolAnthropic:
+	switch wireProtocol {
+	case protocol.Anthropic:
 		if prov.AnthropicBaseURL == "" {
 			return fmt.Errorf("%s: protocol:anthropic but provider %q has no anthropic_base_url — conversion needs it", what, t.Provider)
 		}
-	case protocolOpenAI, protocolResponses:
+	case protocol.OpenAI, protocol.Responses:
 		if prov.OpenAIBaseURL == "" {
 			return fmt.Errorf("%s: protocol:%s but provider %q has no openai_base_url — conversion needs it", what, t.Protocol, t.Provider)
 		}
 	}
 	return nil
-}
-
-// protocolForPath returns the protocol name (anthropic|openai|responses) for a
-// request path, or "" if no route matches. "openai" = Chat Completions,
-// "responses" = OpenAI Responses API (/v1/responses, the codex wire). They are
-// distinct protocols: a /v1/responses body (input list) is NOT a chat body
-// (messages), so they must convert separately.
-func protocolForPath(path string) string {
-	switch {
-	case strings.HasPrefix(path, "/v1/messages"):
-		return "anthropic"
-	case strings.HasPrefix(path, "/v1/chat/completions"):
-		return "openai"
-	case strings.HasPrefix(path, "/v1/responses"):
-		return "responses"
-	}
-	return ""
 }

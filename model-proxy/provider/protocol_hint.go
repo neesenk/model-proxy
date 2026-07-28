@@ -17,10 +17,11 @@ package provider
 //
 // codex speaks the OpenAI Responses API, NOT chat completions. It is hinted
 // "responses" so an anthropic/chat client reaching a codex target is converted
-// to a Responses body (convert_responses.go) rather than passthrough'd into a
-// body codex rejects ("Unsupported parameter: messages"). This hint is only
-// correct because a real Responses converter exists; without it the hint would
-// turn an obvious failure into a misleading one (see git history).
+// to a Responses body (internal/protocol/convert_responses.go) rather than
+// passthrough'd into a body codex rejects ("Unsupported parameter: messages").
+// This hint is only correct because a real Responses converter exists; without
+// it the hint would turn an obvious failure into a misleading one (see git
+// history).
 func ProtocolHint(providerID, model string) string {
 	_ = model
 	switch providerID {

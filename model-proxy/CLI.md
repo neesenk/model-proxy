@@ -771,7 +771,7 @@ unfreeze [provider] [--config PATH]
 wire record <provider> [--model M] [--prompt P] [--out DIR]
 ```
 
-逻辑（`wire_record_cmd.go` `cmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（强制工具调用：`get_weather` + `tool_choice` 强制）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
+逻辑（`wire_record_cmd.go` `cmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `internal/protocol/convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（强制工具调用：`get_weather` + `tool_choice` 强制）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
 
 ### stdout / stderr
 

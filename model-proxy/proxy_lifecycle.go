@@ -128,7 +128,7 @@ func (p *Proxy) closeRuntimeServices() {
 		p.flusher.flush(time.Now())
 	}
 	if p.responsesState != nil {
-		p.responsesState.close()
+		p.responsesState.Close()
 	}
 	if p.quota != nil {
 		p.quota.stop()

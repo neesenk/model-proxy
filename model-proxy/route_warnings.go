@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"model-proxy/internal/protocol"
 	"model-proxy/provider"
 )
 
@@ -58,8 +59,8 @@ func configRoutingWarnings(cfg *Config, expanded map[string][]RouteTarget) []str
 			}
 			// A provider whose wire protocol our system can neither passthrough
 			// nor convert (none today — codex/Responses is now converted in
-			// convert_responses.go): mark honestly which client families can't be
-			// served. Inert until such a provider exists.
+			// internal/protocol/convert_responses.go): mark honestly which client
+			// families can't be served. Inert until such a provider exists.
 			if note := provider.WireProtocolNote(provID); note != "" {
 				out = append(out, fmt.Sprintf("route %q target %s/%s: %s",
 					exposed, t.Provider, t.Model, note))
@@ -69,7 +70,7 @@ func configRoutingWarnings(cfg *Config, expanded map[string][]RouteTarget) []str
 				// Only the anthropic↔chat converter drops thinking/reasoning;
 				// a responses target preserves it, so protocol:responses must
 				// NOT warn (the message "currently dropped" would be wrong).
-				if p, ok := parseWireProtocol(t.Protocol); ok && p != protocolResponses && reasoningReplayModel(t.Model) {
+				if p, ok := protocol.Parse(t.Protocol); ok && p != protocol.Responses && reasoningReplayModel(t.Model) {
 					out = append(out, fmt.Sprintf("route %q target %s/%s: reasoning-required model behind protocol conversion — thinking/reasoning content is currently dropped, multi-turn tool conversations may fail upstream (400); reasoning replay is not yet implemented",
 						exposed, t.Provider, t.Model))
 				}

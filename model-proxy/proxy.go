@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"model-proxy/internal/pricing"
+	"model-proxy/internal/protocol"
 	"model-proxy/provider"
 )
 
@@ -60,7 +61,7 @@ type Proxy struct {
 	reqLog            *requestLogger                   // per-request access log (full bodies); nil = disabled (default) or init failure
 	reqLogStarted     bool                             // lifecycle owns loop/shutdown only when started by startRuntimeServices
 	cache             *responseCache                   // exact-match response cache (prompt-hash + TTL); nil = disabled
-	responsesState    *responsesStateStore             // previous_response_id replay for Responses clients bridged to stateless backends
+	responsesState    *protocol.ResponsesStateStore    // previous_response_id replay for Responses clients bridged to stateless backends
 	events            *eventHub                        // live request monitor fan-out hub (SSE /api/events); always non-nil
 	fusionReg         *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
 	catalog           *modelsDevCatalog                // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
@@ -353,7 +354,7 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// Exact-match response cache. nil unless cache.enabled is set in config, so
 	// the default (off) path and direct-NewProxy tests pay zero overhead.
 	p.cache = newResponseCache(cfg.Cache)
-	p.responsesState = newResponsesStateStore(responsesStatePath(qpath))
+	p.responsesState = protocol.NewResponsesStateStore(protocol.ResponsesStatePath(qpath))
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
 	// UI client subscribes; publish is non-blocking so it never stalls forward.
 	p.events = newEventHub()
@@ -937,7 +938,7 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 		p.serveEvents(w, r)
 		return
 	}
-	proto := protocolForPath(r.URL.Path)
+	proto := string(protocol.ForPath(r.URL.Path))
 	// Generate the request id ONCE, here at the handler top, so EVERY downstream
 	// path — including the unknown-path 502 below, which returns before forward —
 	// can publish live events carrying a stable id (the contract: every start/end
@@ -950,6 +951,10 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.forward(proto, w, r, requestID)
+}
+
+func (*Proxy) responsesPreviousID(body []byte) string {
+	return protocol.PreviousResponseID(body)
 }
 
 // scheduleStatus builds a read-only JSON snapshot of what each route would
@@ -1357,7 +1362,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		}
 		if res.conversionErr != nil && len(res.tried) == 0 {
 			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-			writeUnsupportedConversionError(w, proto, res.conversionErr)
+			writeUnsupportedConversionError(w, protocol.Protocol(proto), res.conversionErr)
 			return
 		}
 		sawHard = sawHard || res.sawHard
@@ -1462,10 +1467,10 @@ type serveState struct {
 type serveResult struct {
 	committed     bool
 	firstTried    RouteTarget
-	tried         map[string]bool             // providers actually attempted this pass
-	sawHard       bool                        // conn/timeout/5xx/401/build/model-denied-class failure
-	sawCooldown   bool                        // at least one 429 this pass
-	conversionErr *unsupportedConversionError // first client feature no candidate conversion could safely represent
+	tried         map[string]bool            // providers actually attempted this pass
+	sawHard       bool                       // conn/timeout/5xx/401/build/model-denied-class failure
+	sawCooldown   bool                       // at least one 429 this pass
+	conversionErr *protocol.UnsupportedError // first client feature no candidate conversion could safely represent
 	// effectiveTargets is the target set serveOnce actually considered this pass
 	// (after scheduling drops cooling targets, request-aware routing narrows, or a
 	// context-overflow retry replaces it) — NOT necessarily the original route
@@ -1565,13 +1570,13 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		body := plan.rewriteModel(origBody, calledModel)
 		var responsesHistory []any
 		if proto == "responses" && plan.backendProto != "responses" && p.responsesState != nil {
-			expandedBody, history, hit, err := p.responsesState.expand(body, sessionKey)
+			expandedBody, history, hit, err := p.responsesState.Expand(body, sessionKey)
 			if err != nil {
 				log.Printf("[proto=%s model=%s] target %d (%s/%s) responses state expansion failed: %v — skipping",
 					proto, exposed, ti, t.Provider, t.Model, err)
 				continue
 			}
-			if responsesPreviousID(body) != "" && !hit {
+			if protocol.PreviousResponseID(body) != "" && !hit {
 				log.Printf("[proto=%s model=%s] previous_response_id cache miss; repaired orphaned continuation items", proto, exposed)
 			}
 			body = expandedBody
@@ -1579,7 +1584,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		}
 		body, err = plan.convertBody(body)
 		if err != nil {
-			if unsupported, ok := asUnsupportedConversion(err); ok {
+			if unsupported, ok := protocol.AsUnsupported(err); ok {
 				if res.conversionErr == nil {
 					res.conversionErr = unsupported
 				}
@@ -1628,7 +1633,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 				agent:            agent,
 				cacheKey:         cacheKey,
 				log:              flc,
-				responseContext:  r2cCtxFor(proto, plan.backendProto, origBody),
+				responseContext:  plan.responseContext(origBody),
 				responsesHistory: responsesHistory,
 				responsesSession: sessionKey,
 			},
@@ -1650,7 +1655,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			p.dispatchShadowAfterCommit(
 				runtime,
 				proto,
-				plan.backendProto,
+				string(plan.backendProto),
 				calledModel,
 				exposed,
 				t,
@@ -1815,7 +1820,7 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 	target = picked
 	shadow.Provider = target.Provider
 	plan, err := p.planTarget(targetPlanInput{
-		runtime: runtime, target: target, clientProto: bodyProto, clientPath: backendPath(bodyProto),
+		runtime: runtime, target: target, clientProto: bodyProto, clientPath: protocol.BackendPath(protocol.Protocol(bodyProto)),
 	})
 	if err != nil {
 		log.Printf("[shadow] %s: target plan failed: %v", shadow.Provider, err)

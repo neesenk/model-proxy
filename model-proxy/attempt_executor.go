@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"model-proxy/internal/protocol"
 )
 
 // attemptState is the narrow mutable-runtime port required by target execution.
@@ -42,7 +44,7 @@ type attemptExecutor struct {
 	tokens         *tokenCounter
 	agents         *agentCounter
 	reqLog         *requestLogger
-	responsesState *responsesStateStore
+	responsesState *protocol.ResponsesStateStore
 	events         *eventHub
 }
 
@@ -163,7 +165,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 	// (flag-gated below, rewinds `attempt` so it never consumes the 401 slot).
 	strippedParam := false
 	retriedImages := false
-	clientWantsStream := requestWantsStream(body)
+	clientWantsStream := protocol.WantsStream(body)
 	for attempt := 0; attempt < 2; attempt++ {
 		targetURL := strings.TrimRight(baseURL, "/") + upPath
 		if r.URL.RawQuery != "" {
@@ -281,7 +283,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				peek = peekResponseBody(resp, contextOverflowPeek)
 			}
 			if resp.StatusCode == http.StatusRequestEntityTooLarge && !retriedImages {
-				if smaller, changed := shrinkRequestImages(body, 1<<20, 2048); changed {
+				if smaller, changed := protocol.ShrinkImages(body, 1<<20, 2048); changed {
 					resp.Body.Close()
 					body = smaller
 					retriedImages = true
@@ -413,7 +415,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// the response body is rewritten (#11), so its length changes — drop the
 		// backend's content-length / transfer-encoding (can't forward a length for
 		// a body we're about to transform; Go's server would reject the mismatch).
-		convert := needsConversion(proto, backendProto)
+		convert := protocol.NeedsConversion(proto, backendProto)
 		// Non-streaming conversion runs BEFORE we commit the status/headers so a
 		// conversion failure fails CLOSED (502 to the client) instead of sending
 		// the backend's body in the wrong protocol after the upstream's 2xx status.
@@ -450,10 +452,10 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 			conv, cerr := all, error(nil)
 			switch {
 			case resp.StatusCode >= 400 && convert:
-				conv, cerr = convertErrorResponse(all, proto, backendProto, resp.StatusCode)
+				conv, cerr = protocol.ConvertErrorResponse(all, proto, backendProto, resp.StatusCode)
 			case upstreamIsStream && !clientWantsStream:
 				if convert {
-					convertedSSE, readErr := io.ReadAll(convertSSEReaderNS(bytes.NewReader(all), proto, backendProto, t.Model, r2c))
+					convertedSSE, readErr := io.ReadAll(protocol.ConvertSSE(bytes.NewReader(all), proto, backendProto, t.Model, r2c))
 					if readErr != nil {
 						cerr = readErr
 					} else {
@@ -461,17 +463,17 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 					}
 				}
 				if cerr == nil {
-					conv, cerr = aggregateSSEToResponse(all, proto)
+					conv, cerr = protocol.AggregateSSE(all, proto)
 				}
 			case !upstreamIsStream && clientWantsStream:
 				if convert {
-					conv, cerr = convertResponseNS(all, proto, backendProto, r2c)
+					conv, cerr = protocol.ConvertResponse(all, proto, backendProto, r2c)
 				}
 				if cerr == nil {
-					conv, cerr = responseToSSE(conv, proto)
+					conv, cerr = protocol.ResponseToSSE(conv, proto)
 				}
 			case convert:
-				conv, cerr = convertResponseNS(all, proto, backendProto, r2c)
+				conv, cerr = protocol.ConvertResponse(all, proto, backendProto, r2c)
 			}
 			if cerr != nil {
 				log.Printf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
@@ -482,9 +484,9 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 			preconv = conv
 			if resp.StatusCode < 300 && proto == "responses" && p.responsesState != nil && len(responsesHistory) > 0 {
 				if clientWantsStream {
-					p.responsesState.recordSSE(responsesSession, responsesHistory, preconv)
+					p.responsesState.RecordSSE(responsesSession, responsesHistory, preconv)
 				} else {
-					p.responsesState.recordJSON(responsesSession, responsesHistory, preconv)
+					p.responsesState.RecordJSON(responsesSession, responsesHistory, preconv)
 				}
 			}
 		}
@@ -542,17 +544,17 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 			if preconv != nil {
 				body = io.NopCloser(bytes.NewReader(preconv))
 			} else if isSSE(resp.Header) || streamBySniff {
-				body = io.NopCloser(convertSSEReaderNS(body, proto, backendProto, t.Model, r2c))
+				body = io.NopCloser(protocol.ConvertSSE(body, proto, backendProto, t.Model, r2c))
 			}
 		}
 		if proto == "responses" && p.responsesState != nil && len(responsesHistory) > 0 &&
 			preconv == nil && upstreamIsStream && resp.StatusCode < 300 {
 			state := p.responsesState
 			session := responsesSession
-			history := cloneAnySlice(responsesHistory)
-			body = newCaptureReader(body, responsesStateEntryMax, func(captured []byte, _ int64, truncated bool) {
+			history := responsesHistory
+			body = newCaptureReader(body, protocol.ResponsesStateCaptureLimit, func(captured []byte, _ int64, truncated bool) {
 				if !truncated {
-					state.recordSSE(session, history, captured)
+					state.RecordSSE(session, history, captured)
 				}
 			})
 		}
@@ -566,7 +568,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				logger.record(logger.buildRecord(recordInputs{
 					flc:         flc,
 					r:           r,
-					proto:       proto,
+					proto:       string(proto),
 					calledModel: calledModel,
 					t:           t,
 					resp:        resp,
@@ -662,7 +664,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 			Ts:            time.Now().UnixMilli(),
 			RequestID:     flc.requestID,
 			Agent:         agent,
-			Protocol:      proto,
+			Protocol:      string(proto),
 			Exposed:       flc.exposed,
 			Provider:      t.Provider,
 			UpstreamModel: t.Model,

@@ -2,7 +2,7 @@ package main
 
 // wire_record_cmd.go implements `model-proxy wire record <provider>`: capture
 // RAW upstream SSE streams (responses/chat/anthropic) into testdata/wire/ as
-// <proto>_<provider>.sse, for the golden-replay tests (convert_golden_test.go).
+// <proto>_<provider>.sse, for the golden-replay tests in internal/protocol.
 // One minimal stream=true request per endpoint, built with the provider's own
 // call rules (RewriteRequest → AuthHeaders → prov.Headers → ExtraHeaders, same
 // order as probeModelCallable). Credentials come from `login` — never from

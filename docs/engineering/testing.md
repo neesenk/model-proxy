@@ -112,21 +112,26 @@ race-clean 只是必要条件。并发测试还必须断言功能不变量，例
 
 ## 协议转换的三层边界测试
 
-协议转换（`convert*.go`）在普通单测之外有三层补充覆盖，修改转换器时按需运行：
+协议转换（`internal/protocol/convert*.go`）在普通单测之外有三层补充覆盖，修改转换器时按需运行：
 
-1. **黄金文件回放**（`convert_golden_test.go` + `testdata/wire/<proto>_<provider|场景>.sse`）：目录下每个原始 SSE 流（按文件名前缀选源协议）喂给所有以该协议为源的转换器，断言不变量而非精确输出——不 panic、输出可解析为 SSE 帧、终态事件恰好一个、responses 目标 `output_item.added/done` 按 id+type 配对（failed 终态豁免）、无空 data 帧；以及**场景存活断言**——输入流真实携带 tool call 或 reasoning 时，输出必须保留目标协议的对应形状。断言在压缩空白后匹配（zhipu 的 SSE JSON 带空格），标记精确化以防 `server_tool_use`、空 `tool_calls:[]` 误伤。种子为手写高保真流；真实上游流用 `model-proxy wire record <provider>` 录制进同一目录（每端点 text/_tool/_thinking 三场景；凭据来自 login，提交前人工审查脱敏，见 CLI.md §17）。
-2. **Fuzz**（`convert_fuzz_test.go` + `testdata/fuzz/`）：`FuzzConvertRequest`（12 个请求/响应 converter 不 panic）、`FuzzConvertSSE`（6 个流式 transformer 不 panic、输出有界 `128×len+16KiB`，且终态唯一、clean/error 不混发、Responses added/done 配对）、`FuzzParseToolArgs`（确定性）、`FuzzSanitizeToolUseID`（确定性 + 字符集 `^[a-zA-Z0-9_-]+$`；空 id 的计数器占位是设计例外）。普通 `go test` 跑种子语料；真 fuzz：
+1. **黄金文件回放**（`internal/protocol/convert_golden_test.go` + `testdata/wire/<proto>_<provider|场景>.sse`）：目录下每个原始 SSE 流（按文件名前缀选源协议）喂给所有以该协议为源的转换器，断言不变量而非精确输出——不 panic、输出可解析为 SSE 帧、终态事件恰好一个、responses 目标 `output_item.added/done` 按 id+type 配对（failed 终态豁免）、无空 data 帧；以及**场景存活断言**——输入流真实携带 tool call 或 reasoning 时，输出必须保留目标协议的对应形状。断言在压缩空白后匹配（zhipu 的 SSE JSON 带空格），标记精确化以防 `server_tool_use`、空 `tool_calls:[]` 误伤。种子为手写高保真流；真实上游流用 `model-proxy wire record <provider>` 录制进同一目录（每端点 text/_tool/_thinking 三场景；凭据来自 login，提交前人工审查脱敏，见 CLI.md §17）。
+2. **Fuzz**（`internal/protocol/convert_fuzz_test.go` + `internal/protocol/testdata/fuzz/`）：`FuzzConvertRequest`（12 个请求/响应 converter 不 panic）、`FuzzConvertSSE`（6 个流式 transformer 不 panic、输出有界 `128×len+16KiB`，且终态唯一、clean/error 不混发、Responses added/done 配对）、`FuzzParseToolArgs`（确定性）、`FuzzSanitizeToolUseID`（确定性 + 字符集 `^[a-zA-Z0-9_-]+$`；空 id 的计数器占位是设计例外）。普通 `go test` 跑种子语料；真 fuzz：
 
    ```bash
-   go test -fuzz=FuzzConvertRequest -fuzztime=20s -run '^$' .
-   go test -fuzz=FuzzConvertSSE -fuzztime=20s -run '^$' .
-   go test -fuzz=FuzzParseToolArgs -fuzztime=15s -run '^$' .
-   go test -fuzz=FuzzSanitizeToolUseID -fuzztime=15s -run '^$' .
+   go test -fuzz=FuzzConvertRequest -fuzztime=20s -run '^$' ./internal/protocol
+   go test -fuzz=FuzzConvertSSE -fuzztime=20s -run '^$' ./internal/protocol
+   go test -fuzz=FuzzParseToolArgs -fuzztime=15s -run '^$' ./internal/protocol
+   go test -fuzz=FuzzSanitizeToolUseID -fuzztime=15s -run '^$' ./internal/protocol
    ```
 
-3. **差分测试**（`convert_differential_test.go` + `testdata/differential/`）：输入流逐字取自 opencodex 测试（fixture 顶部注释注明来源文件），断言语义等价；有意分歧处（`docs/decisions/intentional-behaviors.md` 第 10、11 条）按本仓语义断言并引用条目编号。
+3. **差分测试**（`internal/protocol/convert_differential_test.go` + `internal/protocol/testdata/differential/`）：输入流逐字取自 opencodex 测试（fixture 顶部注释注明来源文件），断言语义等价；有意分歧处（`docs/decisions/intentional-behaviors.md` 第 10、11 条）按本仓语义断言并引用条目编号。
 
-Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会遍历 `testdata/wire/*.sse`（≤64KiB）全部并入语料——每次 `wire record` 录制的真实流自动成为 fuzz 输入，无需手工同步。`convert_golden_test.go` 还必须消费全部 `*.err`：识别的 JSON error envelope 在每个跨协议目标下校验结构，HTML/空/未知 body 必须明确 fail-closed。
+Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会从协议包读取模块根
+`testdata/wire/*.sse`（≤64KiB）并全部加入语料；目录不可读或没有 `.sse` 时测试
+必须失败，不能静默假绿。每次 `wire record` 录制的真实流自动成为 fuzz 输入，
+无需手工同步。`internal/protocol/convert_golden_test.go` 还必须消费全部 `*.err`：
+识别的 JSON error envelope 在每个跨协议目标下校验结构，HTML/空/未知 body
+必须明确 fail-closed。
 
 协议能力和语义边界还必须覆盖：已知不支持字段的客户端原生 400 与 compatible-target failover；tool_search_output 的 discovered tools 物化；citation 非流式/SSE 六方向；signed/redacted reasoning replay；prompt cache key/retention；previous_response_id 命中、miss 修复、TTL、重启恢复及仅 token-limit incomplete 可缓存。
 

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"model-proxy/internal/protocol"
 	"model-proxy/provider"
 )
 
@@ -14,8 +15,8 @@ type targetPlan struct {
 	target              RouteTarget
 	providerCfg         Provider
 	providerImpl        provider.Provider
-	clientProto         string
-	backendProto        string
+	clientProto         protocol.Protocol
+	backendProto        protocol.Protocol
 	viaResponsesVerdict bool
 	baseURL             string
 	upPath              string
@@ -34,7 +35,7 @@ func (p *Proxy) planTarget(input targetPlanInput) (targetPlan, error) {
 	if !ok {
 		return targetPlan{}, fmt.Errorf("unknown provider %q", input.target.Provider)
 	}
-	backendProto, viaResponsesVerdict := p.resolvedBackendProto(
+	backendProtoName, viaResponsesVerdict := p.resolvedBackendProto(
 		input.target.Protocol,
 		input.target.Provider,
 		providerCfg,
@@ -42,20 +43,22 @@ func (p *Proxy) planTarget(input targetPlanInput) (targetPlan, error) {
 		input.clientProto,
 		input.runtime.parentOf,
 	)
-	convert := needsConversion(input.clientProto, backendProto)
+	clientProto := protocol.Protocol(input.clientProto)
+	backendProto := protocol.Protocol(backendProtoName)
+	convert := protocol.NeedsConversion(clientProto, backendProto)
 	baseURL := providerCfg.OpenAIBaseURL
-	if backendProto == "anthropic" && providerCfg.AnthropicBaseURL != "" {
+	if backendProto == protocol.Anthropic && providerCfg.AnthropicBaseURL != "" {
 		baseURL = providerCfg.AnthropicBaseURL
 	}
 	upPath := input.clientPath
 	if convert {
-		upPath = backendPath(backendProto)
+		upPath = protocol.BackendPath(backendProto)
 	}
 	return targetPlan{
 		target:              input.target,
 		providerCfg:         providerCfg,
 		providerImpl:        input.runtime.providers[input.target.Provider],
-		clientProto:         input.clientProto,
+		clientProto:         clientProto,
 		backendProto:        backendProto,
 		viaResponsesVerdict: viaResponsesVerdict,
 		baseURL:             baseURL,
@@ -79,11 +82,21 @@ func (plan targetPlan) rewriteModel(body []byte, calledModel string) []byte {
 }
 
 func (plan targetPlan) convertBody(body []byte) ([]byte, error) {
-	if !needsConversion(plan.clientProto, plan.backendProto) {
+	if !protocol.NeedsConversion(plan.clientProto, plan.backendProto) {
 		return body, nil
 	}
-	return convertRequestFor(body, plan.clientProto, plan.backendProto, convertReqOpts{
-		ProviderID: plan.providerCfg.Provider,
-		ImageOK:    plan.imageOK,
+	providerID := plan.providerCfg.Provider
+	return protocol.ConvertRequestWithOptions(body, plan.clientProto, plan.backendProto, protocol.RequestOptions{
+		ImageOK:          plan.imageOK,
+		ReasoningDialect: protocol.ReasoningDialect(provider.ChatReasoningMode(providerID)),
+		CodexShaping:     providerID == "codex",
 	})
+}
+
+func (plan targetPlan) responseContext(origBody []byte) protocol.ResponseContext {
+	return protocol.NewResponseContext(plan.clientProto, plan.backendProto, origBody)
+}
+
+func (plan targetPlan) extractResponseText(body []byte) string {
+	return protocol.ExtractResponseText(body, plan.backendProto)
 }

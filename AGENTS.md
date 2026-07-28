@@ -27,7 +27,7 @@ docs/                     架构、后端和 API 契约
 | `pool.go`、`resolve.go`、多账号 | `model-proxy/AGENTS.md`、`docs/architecture/provider-pools.md` |
 | 凭据、login/logout、池文件 | `docs/architecture/provider-pools.md`、`docs/backend-contracts.md` |
 | `model-proxy/provider/*` | `model-proxy/provider/AGENTS.md`、`docs/backend-contracts.md` |
-| `convert.go`、跨协议 route | `docs/architecture/protocol-conversion.md` |
+| `model-proxy/internal/protocol/*`、跨协议 route | `docs/architecture/protocol-conversion.md` |
 | `request_routing.go`、implicit routes | `docs/architecture/request-routing.md` |
 | models.dev catalog、`models refresh` | `docs/architecture/request-routing.md`；pricing/analytics 另读 `docs/web-api.md` |
 | `daemon.go`、supervisor、serve 生命周期 | `docs/engineering/pitfalls.md`（进程类陷阱）、`model-proxy/CLI.md`（serve 命令契约） |

@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 
+	"model-proxy/internal/protocol"
 	"model-proxy/provider"
 )
 
@@ -81,7 +82,7 @@ type attemptScope struct {
 	cacheKey    string
 	log         forwardLogCtx
 
-	responseContext  r2cCtx
+	responseContext  protocol.ResponseContext
 	responsesHistory []any
 	responsesSession string
 }

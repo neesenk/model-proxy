@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"model-proxy/internal/protocol"
 )
 
 func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) {
@@ -19,7 +21,7 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 	statePath := filepath.Join(t.TempDir(), "responses_state.json")
 	p := &Proxy{
 		lifecycle:      newProxyLifecycle(),
-		responsesState: newResponsesStateStore(statePath),
+		responsesState: protocol.NewResponsesStateStore(statePath),
 	}
 	t.Cleanup(p.Close)
 	p.reqLog = newRequestLogger(logDir, 1<<20, 1<<10, 0)
@@ -45,7 +47,7 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 			"content": []any{map[string]any{"type": "input_text", "text": "hello"}},
 		}}
 		response := []byte(`{"id":"resp-inflight","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]}`)
-		if !p.responsesState.recordJSON("sess", history, response) {
+		if !p.responsesState.RecordJSON("sess", history, response) {
 			handlerErr <- "responses state rejected in-flight record"
 		}
 		_, _ = io.WriteString(w, "ok")
@@ -113,16 +115,12 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 		t.Fatal("Web GC did not stop with transport shutdown")
 	}
 
-	// Shutdown is now waiting on the blocked handler. Proxy-owned stores must
-	// remain open until that handler can publish its final records.
+	// Shutdown is now waiting on the blocked handler. The logger must remain
+	// open; Responses-state ordering is asserted below by requiring the
+	// in-flight record to survive the final close-time persistence.
 	select {
 	case <-p.reqLog.closed:
 		t.Fatal("request logger closed before the in-flight handler completed")
-	default:
-	}
-	select {
-	case <-p.responsesState.done:
-		t.Fatal("Responses state closed before the in-flight handler completed")
 	default:
 	}
 	select {
@@ -163,12 +161,6 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 	default:
 		t.Fatal("request logger was not closed after handler drain")
 	}
-	select {
-	case <-p.responsesState.done:
-	default:
-		t.Fatal("Responses state was not closed after handler drain")
-	}
-
 	assertFileTreeContains(t, logDir, "req-inflight")
 	stateData, err := os.ReadFile(statePath)
 	if err != nil {

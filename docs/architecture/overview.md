@@ -42,9 +42,13 @@ HTTP handler
 `newTargetAttempt` 不负责 model rewrite、Responses history expansion 或协议转换，
 这些准备语义仍由普通/Fusion 各自编排后再进入执行器。
 
-同协议保持字节透传。跨协议方向只在 `conversion_registry.go` 注册；每个
-client→backend pair 必须同时提供 request、反向 response、反向 SSE codec。
+同协议保持字节透传。`internal/protocol` 是无仓库内依赖的叶子包，统一拥有协议
+identity、六组 pairwise codec、request/response/SSE registry、SSE↔JSON 模式
+桥接、跨协议图片约束，以及 Responses `previous_response_id` 的有界状态。
+每个 client→backend pair 必须同时提供 request、反向 response、反向 SSE codec；
 专用 pair codec 保留 hosted tools、reasoning 方言和 namespace 等协议特有语义。
+Provider 方言和目标视觉能力由 `targetPlan` 解析为窄 request options 后注入；
+具体 `http.ResponseWriter` 错误 envelope 仍由 transport 层负责。
 
 ## 编排与异步分支
 
@@ -100,6 +104,7 @@ Web → proxyReadView / proxyAdminCommands
 lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
 analytics adapter → internal/pricing
+target plan / target executor → internal/protocol
 ```
 
 禁止：
@@ -112,6 +117,8 @@ analytics adapter → internal/pricing
 - 普通 route/Fusion 绕过 `newTargetAttempt` 直接拼装执行器输入；
 - daemon/reload 绕过 `proxyLifecycle` 启动 Proxy 级 goroutine；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
+- `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
+  Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetPlan`；
 - 将 config generation 内的 map 原地修改。
 
 ## 专题文档
@@ -125,6 +132,7 @@ analytics adapter → internal/pricing
 - Web/API：`../web-api.md`
 
 架构边界的静态回归位于 `architecture_contract_test.go`（基于 go/ast 检查
-`webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector 和
-账号测活的单次 runtime snapshot，不是字符串扫描）；行为与并发验证仍按
+`webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector、
+账号测活的单次 runtime snapshot、internal 叶子包 import 以及 Fusion 不绕过
+`targetPlan`，不是字符串扫描）；行为与并发验证仍按
 `docs/engineering/testing.md` 执行。

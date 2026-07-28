@@ -289,7 +289,7 @@ routes:
 
 **自动 wire 探测（零配置）**：daemon 启动和 reload 后会异步探测每个 provider 的 `openai_base_url` 是否支持 `/responses`（一个最小请求；404 判为不支持，其余 4xx/2xx 判为支持，超时/5xx 不下结论）；`/v1/messages` 只在 provider **没有** `anthropic_base_url` 时才探（探测地址正是 anthropic 透传会打的 openai base 地址；有 `anthropic_base_url` 时直接向它透传，不会在 openai base 上拼 /v1/messages）。探测结论作为协议选择的**默认值**：没写 `protocol:` 的目标，anthropic 客户端在端点支持 responses 时自动转 responses、不支持时自动转 chat（不再默认把 anthropic body 透传给只懂 chat 的端点）；网关本身接受 anthropic（探测 `/v1/messages` 成功）或有 `anthropic_base_url` 时仍保持透传。探测完成前（unknown）一律维持透传。显式 `protocol:` 永远优先，是关闭自动行为的逃逸口。探测结论持久化在 `quota_state.json` 的 `wire_caps`（换 base_url 自动作废重探）；若探测误报支持而上游对 `/responses` 返回 404，代理会自动把该 provider 降级为 chat 并记录日志（不锁模型）。codex 已由 ProtocolHint 覆盖，不参与探测。
 
-**录制→回放（开发工作流）**：`model-proxy wire record <provider> [--model M] [--prompt P] [--out DIR]` 对 provider 的 `/responses`、`/chat/completions`、`/v1/messages` 各发一个最小 `stream=true` 请求，把**原始上游字节**录成 `testdata/wire/<proto>_<provider>.sse`（凭据来自 `login`，与 forward 相同的请求构造；非 2xx 存 `.err` 且不覆盖已有好文件）。`testdata/wire/` 下的流会被黄金回放测试（`convert_golden_test.go`）喂给所有同协议转换器做不变量断言（终态唯一、item 配对、无空帧）。录制文件不含凭据，但可能含模型输出的敏感内容——提交前人工审查。
+**录制→回放（开发工作流）**：`model-proxy wire record <provider> [--model M] [--prompt P] [--out DIR]` 对 provider 的 `/responses`、`/chat/completions`、`/v1/messages` 各发一个最小 `stream=true` 请求，把**原始上游字节**录成 `testdata/wire/<proto>_<provider>.sse`（凭据来自 `login`，与 forward 相同的请求构造；非 2xx 存 `.err` 且不覆盖已有好文件）。`testdata/wire/` 下的流会被黄金回放测试（`internal/protocol/convert_golden_test.go`）喂给所有同协议转换器做不变量断言（终态唯一、item 配对、无空帧）。录制文件不含凭据，但可能含模型输出的敏感内容——提交前人工审查。
 
 ## 请求感知路由
 

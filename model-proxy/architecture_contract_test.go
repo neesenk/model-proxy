@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -87,6 +88,11 @@ func TestArchitectureBoundaries(t *testing.T) {
 
 	t.Run("fusion.go reuses targetPlan helpers instead of duplicating them", func(t *testing.T) {
 		f, fset := parseGoFile(t, "fusion.go")
+		for _, spec := range f.Imports {
+			if strings.Trim(spec.Path.Value, `"`) == "model-proxy/internal/protocol" {
+				t.Error("fusion.go must not import internal/protocol directly; use targetPlan adapters")
+			}
+		}
 		forbiddenCalls := map[string]bool{
 			"providerConfig": true, "resolvedBackendProto": true,
 			"convertRequestFor": true, "catalogSnapshot": true,
@@ -111,27 +117,56 @@ func TestArchitectureBoundaries(t *testing.T) {
 	})
 
 	t.Run("internal pricing remains a repository-leaf package", func(t *testing.T) {
-		files, err := filepath.Glob("internal/pricing/*.go")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(files) == 0 {
-			t.Fatal("internal/pricing has no Go files")
-		}
-		for _, path := range files {
-			if strings.HasSuffix(path, "_test.go") {
-				continue
-			}
-			f, _ := parseGoFile(t, path)
-			for _, spec := range f.Imports {
-				importPath := strings.Trim(spec.Path.Value, `"`)
-				if strings.HasPrefix(importPath, "model-proxy/") {
-					t.Errorf("%s imports repository package %q; pricing must remain a leaf",
-						filepath.Base(path), importPath)
-				}
+		assertRepositoryLeafPackage(t, "internal/pricing")
+	})
+
+	t.Run("internal protocol owns conversion and remains a repository-leaf package", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/protocol")
+		for _, legacy := range []string{
+			"conversion_registry.go",
+			"convert.go",
+			"convert_capabilities.go",
+			"convert_citations.go",
+			"convert_custom_tool.go",
+			"convert_namespace.go",
+			"convert_reasoning_replay.go",
+			"convert_responses.go",
+			"convert_responses_stream.go",
+			"image_guard.go",
+			"responses_state.go",
+			"stream_mode.go",
+		} {
+			if _, err := os.Stat(legacy); err == nil {
+				t.Errorf("%s must live under internal/protocol, not the root package", legacy)
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("stat %s: %v", legacy, err)
 			}
 		}
 	})
+}
+
+func assertRepositoryLeafPackage(t *testing.T, directory string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(directory, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatalf("%s has no Go files", directory)
+	}
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, _ := parseGoFile(t, path)
+		for _, spec := range f.Imports {
+			importPath := strings.Trim(spec.Path.Value, `"`)
+			if strings.HasPrefix(importPath, "model-proxy/") {
+				t.Errorf("%s imports repository package %q; %s must remain a leaf",
+					filepath.Base(path), importPath, directory)
+			}
+		}
+	}
 }
 
 // TestTargetExecutionArchitecture protects the next layer below targetPlan:
