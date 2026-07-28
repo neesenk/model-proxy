@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,102 +31,6 @@ func TestNewRequestID(t *testing.T) {
 	if a == b {
 		t.Errorf("requestIDs collided: %s", a)
 	}
-}
-
-// --- captureReader ---
-
-func TestCaptureReader_ExactBytesAndPassThrough(t *testing.T) {
-	want := []byte("hello request log world\nline two\n")
-	src := io.NopCloser(bytes.NewReader(want))
-	var gotCaptured []byte
-	var gotTotal int64
-	var gotTrunc bool
-	c := newCaptureReader(src, 1024, func(captured []byte, total int64, truncated bool) {
-		gotCaptured = append([]byte{}, captured...)
-		gotTotal = total
-		gotTrunc = truncated
-	})
-	out, err := io.ReadAll(c)
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-	if !bytes.Equal(out, want) {
-		t.Errorf("pass-through bytes = %q, want %q (must not alter the stream)", out, want)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if !bytes.Equal(gotCaptured, want) {
-		t.Errorf("captured = %q, want %q (exact bytes, not just non-empty)", gotCaptured, want)
-	}
-	if gotTotal != int64(len(want)) {
-		t.Errorf("total = %d, want %d", gotTotal, len(want))
-	}
-	if gotTrunc {
-		t.Error("truncated = true, want false (under cap)")
-	}
-}
-
-func TestCaptureReader_TruncationPastCap(t *testing.T) {
-	want := bytes.Repeat([]byte("ABCDEFGH"), 1000) // 8000 bytes
-	const cap = 4096
-	src := io.NopCloser(bytes.NewReader(want))
-	var gotCaptured []byte
-	var gotTotal int64
-	var gotTrunc bool
-	c := newCaptureReader(src, cap, func(captured []byte, total int64, truncated bool) {
-		gotCaptured = append([]byte{}, captured...)
-		gotTotal = total
-		gotTrunc = truncated
-	})
-	out, _ := io.ReadAll(c)
-	c.Close()
-	// Pass-through is the FULL stream even when capture is truncated.
-	if !bytes.Equal(out, want) {
-		t.Errorf("pass-through length = %d, want %d (truncation must not block the client)", len(out), len(want))
-	}
-	if !gotTrunc {
-		t.Error("truncated = false, want true (input exceeded cap)")
-	}
-	if len(gotCaptured) != cap {
-		t.Errorf("captured length = %d, want %d (cap)", len(gotCaptured), cap)
-	}
-	if gotTotal != int64(len(want)) {
-		t.Errorf("total = %d, want %d (total counts even past cap)", gotTotal, len(want))
-	}
-}
-
-func TestCaptureReader_CloseIdempotentOneCallback(t *testing.T) {
-	src := io.NopCloser(bytes.NewReader([]byte("x")))
-	calls := 0
-	c := newCaptureReader(src, 64, func(captured []byte, total int64, truncated bool) {
-		calls++
-	})
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
-	}
-	if calls != 1 {
-		t.Errorf("onClose called %d times, want exactly 1 (idempotent Close)", calls)
-	}
-}
-
-func TestCaptureReader_ConcurrentReadsRaceClean(t *testing.T) {
-	// -race: many goroutines reading distinct captureReaders must be clean.
-	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			src := io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("z"), 1024)))
-			c := newCaptureReader(src, 2048, func([]byte, int64, bool) {})
-			io.Copy(io.Discard, c)
-			c.Close()
-		}()
-	}
-	wg.Wait()
 }
 
 // --- requestFileWriter: rotation by size and by day ---
@@ -828,34 +731,6 @@ func TestForward_RequestLog_NilLoggerPassThrough(t *testing.T) {
 	}
 	if p.reqLog != nil {
 		t.Error("p.reqLog should be nil for a plain NewProxy (disabled by default)")
-	}
-}
-
-// BenchmarkCaptureReader_Tee measures the per-byte tee cost of captureReader
-// in isolation (no HTTP), at 1KB / 64KB / 1MB response sizes. This is the
-// incremental hot-path cost request logging adds per response byte.
-func BenchmarkCaptureReader_Tee(b *testing.B) {
-	sizes := []struct {
-		name string
-		n    int
-	}{
-		{"1KB", 1024},
-		{"64KB", 64 * 1024},
-		{"1MB", 1024 * 1024},
-	}
-	for _, sz := range sizes {
-		b.Run(sz.name, func(b *testing.B) {
-			data := bytes.Repeat([]byte("z"), sz.n)
-			b.ReportAllocs()
-			b.SetBytes(int64(sz.n))
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				src := io.NopCloser(bytes.NewReader(data))
-				c := newCaptureReader(src, 1<<20, func([]byte, int64, bool) {})
-				io.Copy(io.Discard, c)
-				c.Close()
-			}
-		})
 	}
 }
 

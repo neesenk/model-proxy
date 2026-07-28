@@ -83,6 +83,11 @@ TTL/容量 store、客户端可见响应的 bounded recorder、header normalizat
 一次请求继续使用 `runtimeSnapshot.cache` 捕获的 Store，旧 generation 完成时不得
 向 reload 后的新 Store 写入。
 
+`internal/transport/bodycapture` 是无仓库内依赖的通用响应流捕获叶子包：
+字节原样透传，只保存有界 prefix，同时统计完整长度和截断状态，并在首次 Close
+执行一次回调。Responses state、request log 与 Shadow 共用这一 transport
+primitive；各自的持久化和业务判断不得反向塞进通用 reader。
+
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
@@ -142,6 +147,7 @@ catalog adapter / routing → internal/catalog
 accounts adapter / login / provider builder → internal/accounts
 live-event publishers / SSE adapter → internal/observe/events
 forward / target executor / cache adapter → internal/cache
+target executor / Shadow → internal/transport/bodycapture
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
 ```
@@ -166,6 +172,8 @@ composition root → internal/config → internal/pricing / internal/protocol
   `model-proxy/*` 包；根 SSE adapter 重新声明事件类型或拥有 ring/fan-out 状态；
 - `internal/cache` 反向依赖 Config、Proxy、Provider、protocol、events
   或任意 `model-proxy/*` 包；根包重新声明 store、entry 或 recorder；
+- `internal/transport/bodycapture` 反向依赖 request log、protocol、Proxy、
+  Config、Provider 或任意 `model-proxy/*` 包；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
   Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetPlan`；

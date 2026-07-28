@@ -2,7 +2,9 @@
 
 ## 适用范围
 
-修改 `fusion.go`、`shadow`、`request_log.go`、`cache.go`、`live_events.go` 或 replay 时必读。API 字段另见 `docs/web-api.md`。
+修改 `fusion.go`、Shadow、request log、`internal/cache`、
+`internal/transport/bodycapture`、live events 或 replay 时必读。API 字段另见
+`docs/web-api.md`。
 
 ## 精确响应缓存
 
@@ -65,6 +67,10 @@ Shadow 作为 `proxyLifecycle` 的有限 log-producing task 接纳：shutdown �
 ## Request log
 
 request log 是异步、非阻塞、owner-only 的 JSONL。查询分两条路径：
+
+协议转换后的响应流与 Responses state/Shadow 共用
+`internal/transport/bodycapture.Reader`：reader 只负责有界 tee、完整长度和
+Close-once 回调，日志 schema、入队与 replay 判断不进入 transport 包。
 
 - metadata 查询（list API、shadow report）置 `recordFilter.MetadataOnly`，在 top-K 保留前丢弃 request/response body，内存边界按 `limit × metadata` 计算，不是 `limit × max_body`；UI list 上限 1000、shadow report 上限 10000 均只保留 metadata。
 - detail/replay 才反序列化并保留完整 body。

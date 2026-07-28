@@ -13,6 +13,7 @@ import (
 	responsecache "model-proxy/internal/cache"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/transport/bodycapture"
 )
 
 // attemptState is the narrow mutable-runtime port required by target execution.
@@ -554,7 +555,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 			state := p.responsesState
 			session := responsesSession
 			history := responsesHistory
-			body = newCaptureReader(body, protocol.ResponsesStateCaptureLimit, func(captured []byte, _ int64, truncated bool) {
+			body = bodycapture.New(body, protocol.ResponsesStateCaptureLimit, func(captured []byte, _ int64, truncated bool) {
 				if !truncated {
 					state.RecordSSE(session, history, captured)
 				}
@@ -566,7 +567,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// received, and for a converted non-stream response resp.Body is already
 		// read+closed → an empty capture. `body` is exactly what flushCopy sends.
 		if logger != nil {
-			body = newCaptureReader(body, logger.maxBody, func(captured []byte, total int64, truncated bool) {
+			body = bodycapture.New(body, logger.maxBody, func(captured []byte, total int64, truncated bool) {
 				logger.record(logger.buildRecord(recordInputs{
 					flc:         flc,
 					r:           r,

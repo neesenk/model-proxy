@@ -26,6 +26,7 @@ import (
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/transport/bodycapture"
 	"model-proxy/provider"
 )
 
@@ -1902,11 +1903,18 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 		log.Printf("[shadow] %s/%s upstream error: %v", shadow.Provider, shadow.Model, err)
 		return
 	}
-	defer resp.Body.Close()
 	// Drain the shadow response into a bounded capture for the log. The reader
 	// passes all bytes through (drained to Discard) while teeing a capped copy.
-	cr := newCaptureReader(resp.Body, logger.maxBody, nil)
-	io.Copy(io.Discard, cr)
+	var captured []byte
+	var capturedTotal int64
+	var capturedTruncated bool
+	cr := bodycapture.New(resp.Body, logger.maxBody, func(body []byte, total int64, truncated bool) {
+		captured = append([]byte(nil), body...)
+		capturedTotal = total
+		capturedTruncated = truncated
+	})
+	_, _ = io.Copy(io.Discard, cr)
+	_ = cr.Close()
 	rec := logger.buildRecord(recordInputs{
 		flc:         forwardLogCtx{requestID: "shadow-" + primaryReqID, attempt: 0, exposed: exposed},
 		r:           sreq,
@@ -1916,9 +1924,9 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 		resp:        resp,
 		start:       start,
 		requestBody: sbody,
-		captured:    cr.buf.Bytes(),
-		total:       cr.total,
-		truncated:   cr.truncated,
+		captured:    captured,
+		total:       capturedTotal,
+		truncated:   capturedTruncated,
 	})
 	logger.record(rec)
 }

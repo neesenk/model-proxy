@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -673,56 +672,6 @@ func (l *requestLogger) shutdown() {
 	}
 	l.stopOnce.Do(func() { close(l.done) })
 	<-l.closed
-}
-
-// --- captureReader: bounded tee that captures response bytes in-flight ---
-
-// captureReader is a pass-through io.ReadCloser that tees bytes read from src
-// into a bounded buffer (up to max bytes; past that, capturing stops but bytes
-// keep flowing to the client and truncated is set). `total` always reflects the
-// full response size. On the first Close it calls onClose once, then closes src.
-type captureReader struct {
-	src       io.ReadCloser
-	buf       bytes.Buffer
-	total     int64
-	max       int
-	truncated bool
-	onClose   func(captured []byte, total int64, truncated bool)
-	closeOnce sync.Once
-}
-
-func newCaptureReader(src io.ReadCloser, max int, onClose func(captured []byte, total int64, truncated bool)) *captureReader {
-	return &captureReader{src: src, max: max, onClose: onClose}
-}
-
-func (c *captureReader) Read(p []byte) (int, error) {
-	n, err := c.src.Read(p)
-	if n > 0 {
-		c.total += int64(n)
-		// Tee into the buffer while under cap. Once over cap, stop capturing
-		// (bytes still pass through to the client) and mark truncated.
-		if c.buf.Len() < c.max {
-			room := c.max - c.buf.Len()
-			if n <= room {
-				c.buf.Write(p[:n])
-			} else {
-				c.buf.Write(p[:room])
-				c.truncated = true
-			}
-		}
-	}
-	return n, err
-}
-
-func (c *captureReader) Close() error {
-	var firstErr error
-	c.closeOnce.Do(func() {
-		if c.onClose != nil {
-			c.onClose(c.buf.Bytes(), c.total, c.truncated)
-		}
-		firstErr = c.src.Close()
-	})
-	return firstErr
 }
 
 // newRequestID returns a 32-char hex id from crypto/rand, used to group one

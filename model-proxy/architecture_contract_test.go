@@ -36,6 +36,8 @@ import (
 //   - internal/cache owns exact-response keying, bounded capture,
 //     storage, header normalization, and replay as a repository leaf; the root
 //     adapter only maps resolved CacheConfig values.
+//   - internal/transport/bodycapture owns the generic bounded pass-through
+//     response reader shared by Responses state and request logging.
 //
 // Being AST-based, comments and string literals can no longer false-positive,
 // and only actual selector/call expressions are judged. Known limits (accepted,
@@ -481,6 +483,17 @@ func TestArchitectureBoundaries(t *testing.T) {
 						t.Errorf("%s redeclares root cache type %s", path, typeSpec.Name.Name)
 					}
 				}
+			}
+		}
+	})
+
+	t.Run("internal transport owns bounded body capture", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/transport/bodycapture")
+		for _, name := range []string{"attempt_executor.go", "proxy.go"} {
+			file, fset := parseGoFile(t, name)
+			forbidden := map[string]bool{"newCaptureReader": true}
+			for _, violation := range forbiddenCallSites(file, fset, forbidden, nil) {
+				t.Errorf("%s uses legacy root capture instead of bodycapture.Reader: %s", name, violation)
 			}
 		}
 	})
