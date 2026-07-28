@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"sync"
-	"time"
 )
 
 // proxyLifecycle is the single owner for Proxy-level background work. The
@@ -125,7 +124,12 @@ func (p *Proxy) closeRuntimeServices() {
 	p.lifecycle.wait()
 
 	if p.flusher != nil {
-		p.flusher.flush(time.Now())
+		p.flusher.flushForShutdown(statsShutdownFlushTimeout)
+	}
+	if p.stats != nil {
+		if err := p.stats.Close(); err != nil {
+			log.Printf("[stats] close failed: %v", err)
+		}
 	}
 	if p.responsesState != nil {
 		p.responsesState.Close()

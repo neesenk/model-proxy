@@ -35,6 +35,8 @@ import (
 //     repository leaf; the root live_events.go file is only an HTTP/SSE adapter.
 //   - internal/observe/requestlog owns JSONL records, writer lifecycle, queries,
 //     summaries, and shadow aggregation; root code only maps application values.
+//   - internal/observe/stats owns SQLite schema, migrations, upserts, retention,
+//     and aggregate queries; root code owns runtime snapshots/diffs/lifecycle.
 //   - internal/cache owns exact-response keying, bounded capture,
 //     storage, header normalization, and replay as a repository leaf; the root
 //     adapter only maps resolved CacheConfig values.
@@ -477,6 +479,32 @@ func TestArchitectureBoundaries(t *testing.T) {
 			t.Errorf("Proxy.reqLog type = %T, want *requestlog.Logger", loggerType)
 		} else if name, ok := configSelectorName(pointer.X, "requestlog"); !ok || name != "Logger" {
 			t.Error("Proxy.reqLog must be *requestlog.Logger")
+		}
+	})
+
+	t.Run("internal observe stats owns SQLite persistence", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/observe/stats")
+		if _, err := os.Stat("stats.go"); err == nil {
+			t.Error("legacy root stats.go must not exist; persistence belongs in internal/observe/stats and runtime projection in stats_runtime.go")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat stats.go: %v", err)
+		}
+
+		proxy, _ := parseGoFile(t, "proxy.go")
+		storeType := namedStructFields(t, proxy, "Proxy")["stats"]
+		pointer, ok := storeType.(*ast.StarExpr)
+		if !ok {
+			t.Errorf("Proxy.stats type = %T, want *observestats.Store", storeType)
+		} else if name, ok := configSelectorName(pointer.X, "observestats"); !ok || name != "Store" {
+			t.Error("Proxy.stats must be *observestats.Store")
+		}
+
+		runtime, _ := parseGoFile(t, "stats_runtime.go")
+		reset := namedMethod(t, runtime, "statsFlusher", "reset")
+		for _, field := range reset.Type.Params.List {
+			if typeContainsIdent(field.Type, "Proxy") {
+				t.Error("statsFlusher.reset must not accept *Proxy; cache reset and composition stay at Proxy.resetStats")
+			}
 		}
 	})
 

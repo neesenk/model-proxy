@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestDetectAgent: each known client UA / header maps to a stable lowercase
@@ -67,51 +65,6 @@ func TestAgentCounter(t *testing.T) {
 	}
 }
 
-// TestStatsAgentFlushQuery: agent deltas persist additively and round-trip
-// through queryAgentRange with exact values; filters narrow correctly.
-func TestStatsAgentFlushQuery(t *testing.T) {
-	ss := newTestStatsStore(t)
-	minute := time.Now().Unix() / 60 * 60
-	if err := ss.flushAgentDeltas(minute, map[agentKey]agentCount{
-		{Agent: "claude-code", Provider: "z", Model: "glm"}: {Requests: 3, Input: 100, Output: 20},
-		{Agent: "codex", Provider: "z", Model: "glm"}:       {Requests: 1, Input: 40, Output: 5},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := ss.queryAgentRange(minute, minute, "", "", "", 60)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("rows=%d want 2", len(got))
-	}
-	// Find the claude-code row and assert exact counters.
-	var cc *agentBucket
-	for i := range got {
-		if got[i].Agent == "claude-code" {
-			cc = &got[i]
-		}
-	}
-	if cc == nil || cc.Requests != 3 || cc.Input != 100 || cc.Output != 20 {
-		t.Errorf("claude-code row = %+v want reqs=3 in=100 out=20", cc)
-	}
-	// Agent filter narrows to one row.
-	only, _ := ss.queryAgentRange(minute, minute, "codex", "", "", 60)
-	if len(only) != 1 || only[0].Agent != "codex" || only[0].Requests != 1 {
-		t.Errorf("agent filter = %+v want single codex reqs=1", only)
-	}
-	// A second flush into the same (agent,provider,model,minute) adds (additive).
-	if err := ss.flushAgentDeltas(minute, map[agentKey]agentCount{
-		{Agent: "claude-code", Provider: "z", Model: "glm"}: {Requests: 2, Input: 10, Output: 0},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got2, _ := ss.queryAgentRange(minute, minute, "claude-code", "", "", 60)
-	if len(got2) != 1 || got2[0].Requests != 5 || got2[0].Input != 110 || got2[0].Output != 20 {
-		t.Errorf("additive re-flush = %+v want reqs=5 in=110 out=20", got2[0])
-	}
-}
-
 // TestForward_RecordsAgent: a request carrying a Claude Code UA is attributed to
 // the "claude-code" agent in the agent counter — request count on commit, and
 // input/output tokens observed from the SSE usage stream. A second request with
@@ -166,66 +119,5 @@ func TestForward_RecordsAgent(t *testing.T) {
 	cx := snap[agentKey{Agent: "codex", Provider: "aqp", Model: "claude-sonnet-4"}]
 	if cx.Requests != 1 || cx.Input != 150 {
 		t.Errorf("codex cell = %+v want reqs=1 in=150 (split by UA)", cx)
-	}
-}
-
-// TestRenderAgentsCLI: `stats --by-agent` fetches /api/agents and renders a
-// per-agent summary sorted by total tokens desc, with the exact header + the
-// heaviest agent on top. Guards the CLI display contract for the agent view.
-func TestRenderAgentsCLI(t *testing.T) {
-	resp := agentResp{From: 1, To: 2, Bucket: 60, Buckets: []agentBucket{
-		{Agent: "claude-code", Requests: 10, Input: 5000, Output: 800},
-		{Agent: "codex", Requests: 3, Input: 200, Output: 50},
-	}}
-	raw, _ := json.Marshal(resp)
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/agents" {
-			http.NotFound(w, r)
-			return
-		}
-		io.WriteString(w, string(raw))
-	}))
-	defer up.Close()
-	listen := strings.TrimPrefix(up.URL, "http://")
-
-	out, err := renderAgents(listen, statsOpts{ByAgent: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "claude-code") || !strings.Contains(out, "codex") {
-		t.Errorf("agent table missing agents:\n%s", out)
-	}
-	// Exact header columns.
-	if !strings.Contains(out, "agent") || !strings.Contains(out, "reqs") || !strings.Contains(out, "input") || !strings.Contains(out, "output") {
-		t.Errorf("agent table missing a header:\n%s", out)
-	}
-	// claude-code (5800 tokens) sorts above codex (250 tokens).
-	if strings.Index(out, "claude-code") > strings.Index(out, "codex") {
-		t.Errorf("heaviest agent not on top:\n%s", out)
-	}
-}
-
-// TestRenderAgents_ProviderModelFilter: --provider/--model are forwarded to
-// /api/agents as query params in --by-agent mode (the server side already
-// filters on them); previously the CLI silently dropped them here.
-func TestRenderAgents_ProviderModelFilter(t *testing.T) {
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/agents" {
-			http.NotFound(w, r)
-			return
-		}
-		if got := r.URL.Query().Get("provider"); got != "zhipu" {
-			t.Errorf("provider query=%q want zhipu", got)
-		}
-		if got := r.URL.Query().Get("model"); got != "glm-5.2" {
-			t.Errorf("model query=%q want glm-5.2", got)
-		}
-		io.WriteString(w, `{"from":1,"to":2,"bucket":60,"buckets":[]}`)
-	}))
-	defer up.Close()
-	listen := strings.TrimPrefix(up.URL, "http://")
-
-	if _, err := renderAgents(listen, statsOpts{ByAgent: true, Provider: "zhipu", Model: "glm-5.2"}); err != nil {
-		t.Fatal(err)
 	}
 }

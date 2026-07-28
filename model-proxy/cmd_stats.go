@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	observestats "model-proxy/internal/observe/stats"
 )
 
 // statsOpts holds parsed `stats` command flags.
@@ -81,10 +83,10 @@ func parseStatsFlags(args []string) statsOpts {
 
 // statsResp is the decoded /api/stats shape.
 type statsResp struct {
-	From    int64         `json:"from"`
-	To      int64         `json:"to"`
-	Bucket  int64         `json:"bucket"`
-	Buckets []statsBucket `json:"buckets"`
+	From    int64                 `json:"from"`
+	To      int64                 `json:"to"`
+	Bucket  int64                 `json:"bucket"`
+	Buckets []observestats.Bucket `json:"buckets"`
 }
 
 // cmdStats queries the running daemon's /api/stats endpoint and prints per-
@@ -312,10 +314,10 @@ func bucketLabel(secs int64) string {
 // agentResp is the decoded /api/agents shape (mirrors the statsResp envelope,
 // with agent-dimension buckets).
 type agentResp struct {
-	From    int64         `json:"from"`
-	To      int64         `json:"to"`
-	Bucket  int64         `json:"bucket"`
-	Buckets []agentBucket `json:"buckets"`
+	From    int64                      `json:"from"`
+	To      int64                      `json:"to"`
+	Bucket  int64                      `json:"bucket"`
+	Buckets []observestats.AgentBucket `json:"buckets"`
 }
 
 // renderAgents fetches /api/agents and renders a per-agent summary ("who is

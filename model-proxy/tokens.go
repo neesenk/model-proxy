@@ -8,8 +8,8 @@ import (
 )
 
 // tokenKey aliases the shared (provider, model) key so existing call sites
-// (scanner, tests) read naturally. Persistence is handled by statsStore
-// (SQLite); the JSON file format is gone.
+// (scanner, tests) read naturally. Persistence is handled by
+// internal/observe/stats.Store (SQLite); the JSON file format is gone.
 type tokenKey = pmKey
 
 type tokenUsage struct {

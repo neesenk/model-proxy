@@ -427,11 +427,14 @@ func (w *webServer) handleTokens(resp http.ResponseWriter, r *http.Request) {
 }
 
 // handleTokensReset zeroes all call-statistics state: the in-memory metrics +
-// token counters, the persisted SQLite bucket history, and the flusher baseline
-// (so the next flush sees zero delta). The next persist tick overwrites the DB
-// with the empty snapshot.
+// token/agent counters, persisted SQLite history, response cache, and flusher
+// baselines. Durable reset runs first; on failure live state is preserved and
+// the handler returns 500 instead of claiming a reset that a restart would undo.
 func (w *webServer) handleTokensReset(resp http.ResponseWriter, r *http.Request) {
-	w.admin.resetStats()
+	if err := w.admin.resetStats(); err != nil {
+		writeJSONErr(resp, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(resp, http.StatusOK, map[string]string{"status": "reset"})
 }
 

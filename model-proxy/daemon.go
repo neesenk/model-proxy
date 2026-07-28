@@ -376,8 +376,9 @@ func serveHTTPUntilShutdown(
 	return nil
 }
 
-// persistTokensLoop has been removed; per-minute stats persistence is now owned
-// by statsStore + statsFlushLoop (stats.go), started in runProxy.
+// persistTokensLoop has been removed; per-minute persistence is now owned by
+// internal/observe/stats.Store + the root statsFlushLoop, started through
+// Proxy lifecycle services.
 
 // daemonize launches a detached supervisor (new session, stdio → log file) and
 // returns, so the invoking shell gets its prompt back.

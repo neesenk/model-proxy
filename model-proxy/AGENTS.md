@@ -42,6 +42,11 @@
   和 replay 统一归 `internal/cache`；该包是无仓库内依赖叶子。根层只做
   `CacheConfig` 适配和 force/pin/eligibility/lifecycle 编排，禁止重新声明 entry、
   recorder 或访问 Store 内部锁与 map。
+- SQLite stats 的 schema、additive migration、minute/agent upsert、retention、
+  legacy import 与聚合查询统一归 `internal/observe/stats`；该包是无仓库内依赖
+  叶子，不得读取 Config/HOME、持有 metrics/tokens/agents 或参与 Proxy lifecycle。
+  根 `statsFlusher` 只负责运行时 snapshot/diff/reset baseline，`proxyLifecycle`
+  只负责 loop、final flush 与 Store close；Web 仍经 `proxyReadView` 查询。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。

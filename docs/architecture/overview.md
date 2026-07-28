@@ -109,12 +109,17 @@ primitive；各自的持久化和业务判断不得反向塞进通用 reader。
   `internal/pricing` 这一无主包依赖的叶子包拥有；价格端点优先级由
   `internal/config` 解析，根 `pricing.go` 只适配应用 HOME 路径，
   `Proxy.pricingSnapshot` 保留配置快照和并发刷新锁。
+- 统计热路径仍由根层 `metricsStore`、`tokenCounter`、`agentCounter` 各自拥有；
+  根 `statsFlusher` 只做 cumulative snapshot → minute delta 的应用投影，
+  SQLite schema、迁移、upsert、聚合查询、retention 与 legacy token import
+  统一归无仓库内依赖的 `internal/observe/stats`。
 
 ## 状态与锁
 
 - `Proxy.mu`：只保护 reload-owned 对象交换；请求流式期间不持有。
 - `healthMu`：health、sticky、pin、model lock、paramBlock、spread counter。
-- quota、wire caps、metrics/tokens/agents、cache、pricing 各有独立 owner/leaf lock。
+- quota、wire caps、metrics/tokens/agents、stats flusher、cache、pricing 各有独立
+  owner/leaf lock；SQLite Store 不拥有或回调运行时 counter。
 - 跨域锁顺序仅允许 `healthMu → quotaMu`。
 
 Web/API 的 `webServer` 不持有 `*Proxy`，只持有 composition root 在构造时创建的
@@ -131,7 +136,8 @@ Web/API 的 `webServer` 不持有 `*Proxy`，只持有 composition root 在构�
 - reload catalog refresh 必须通过 lifecycle gate 接纳；
 - Close 拒绝新任务，先等待会产生日志的有限任务（Shadow），再 drain request
   log；随后等待 loop/refresh，最后完成 stats、Responses state 和 quota final
-  flush。这样 Close 返回后不会有 Shadow 向已关闭 logger 补写。
+  flush；stats 在 final flush 后关闭 SQLite Store。这样 Close 返回后不会有
+  Shadow 向已关闭 logger 补写，也不会遗留数据库连接。
 
 quota tracker 与 Responses state store 各自拥有内部 debounce/worker，但由
 `Proxy.Close` 按统一顺序停止。
@@ -156,6 +162,7 @@ catalog adapter / routing → internal/catalog
 accounts adapter / login / provider builder → internal/accounts
 live-event publishers / SSE adapter → internal/observe/events
 target executor / Fusion / Shadow / Web / CLI → internal/observe/requestlog
+stats flusher / proxyReadView → internal/observe/stats
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
 target plan / target executor → internal/protocol

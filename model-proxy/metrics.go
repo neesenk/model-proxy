@@ -178,8 +178,8 @@ func (s *metricsStore) seed(k pmKey, snap providerMetricsSnapshot) {
 }
 
 // reset zeroes every counter (in-memory). The SQLite history is cleared
-// separately by statsStore.resetAll; the two are called together by
-// Proxy.resetStats so "reset counters" zeroes both.
+// separately by internal/observe/stats.Store.Reset; statsFlusher coordinates
+// both under one application-level lock.
 func (s *metricsStore) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

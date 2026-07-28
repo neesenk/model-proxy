@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	observestats "model-proxy/internal/observe/stats"
 )
 
 func TestUsageScannerAnthropic(t *testing.T) {
@@ -82,18 +84,18 @@ func TestUsageScannerOversizedLine(t *testing.T) {
 }
 
 func TestTokenCounterPersist(t *testing.T) {
-	// Persistence now lives in statsStore (SQLite), not a JSON file. Verify the
+	// Persistence now lives in observestats.Store (SQLite), not a JSON file. Verify the
 	// flusher round-trip: commit tokens + bump metrics -> flush -> reopen the DB
 	// -> loadCumulative returns the exact same values (the boot restore path).
 	path := filepath.Join(t.TempDir(), "stats.db")
-	ss, err := openStatsStore(path, 0)
+	ss, err := openTestStatsStore(path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ss.Close()
 	m := newMetricsStore()
 	tc := newTokenCounter()
-	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[pmKey]statsCounters{})
+	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[observestats.Key]observestats.Counters{})
 
 	tc.commit(tokenKey{Provider: "z", Model: "m"}, tokenUsage{Input: 10, Output: 20, Requests: 1})
 	m.inc("z", "m", evRequests)
@@ -103,19 +105,19 @@ func TestTokenCounterPersist(t *testing.T) {
 	}
 
 	// Reopen the same DB file (simulates a restart) and load the cumulative totals.
-	ss2, err := openStatsStore(path, 0)
+	ss2, err := openTestStatsStore(path, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ss2.Close()
-	base, err := ss2.loadCumulative()
+	base, err := ss2.LoadCumulative()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(base) != 1 {
 		t.Fatalf("loadCumulative = %d keys, want 1", len(base))
 	}
-	got := base[pmKey{Provider: "z", Model: "m"}]
+	got := base[observestats.Key{Provider: "z", Model: "m"}]
 	if got.Input != 10 || got.Output != 20 || got.TokenRequests != 1 {
 		t.Errorf("token round-trip = %+v, want in=10 out=20 token_reqs=1", got)
 	}

@@ -20,8 +20,8 @@ func (p *Proxy) adminCommands() proxyAdminCommands {
 	return proxyAdminCommands{proxy: p}
 }
 
-func (commands proxyAdminCommands) resetStats() {
-	commands.proxy.resetStats()
+func (commands proxyAdminCommands) resetStats() error {
+	return commands.proxy.resetStats()
 }
 
 // refreshQuota synchronously refreshes one provider when name is non-empty, or

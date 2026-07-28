@@ -1,0 +1,428 @@
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	observestats "model-proxy/internal/observe/stats"
+)
+
+// TestRenderStatsCLI verifies the `stats` CLI renders the daemon's /api/stats
+// response into a terminal table (and --json passes raw JSON through).
+func TestRenderStatsCLI(t *testing.T) {
+	minute := time.Now().Unix() / 60 * 60
+	resp := statsResp{From: minute - 60, To: minute, Bucket: 60, Buckets: []observestats.Bucket{
+		{Provider: "zhipu", Model: "glm-5", Minute: minute, Requests: 7, Input: 100, Output: 20},
+	}}
+	raw, _ := json.Marshal(resp)
+
+	var gotQuery string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/stats" {
+			http.NotFound(w, r)
+			return
+		}
+		gotQuery = r.URL.RawQuery
+		io.WriteString(w, string(raw))
+	}))
+	defer up.Close()
+
+	// renderStats takes "host:port"; derive from the httptest server URL.
+	listen := strings.TrimPrefix(up.URL, "http://")
+	out, err := renderStats(listen, statsOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"zhipu", "glm-5", "7", "1m", "lat(ms)", "ttft(ms)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered table missing %q:\n%s", want, out)
+		}
+	}
+	// No --bucket flag -> query string omits bucket (server defaults to 1m).
+	if strings.Contains(gotQuery, "bucket=") {
+		t.Errorf("default query should omit bucket, got %q", gotQuery)
+	}
+
+	// --bucket 10m is forwarded to the daemon's query string.
+	if _, err := renderStats(listen, statsOpts{Bucket: "10m"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotQuery, "bucket=10m") {
+		t.Errorf("--bucket 10m not forwarded, query=%q", gotQuery)
+	}
+
+	// --json passes the raw body through.
+	outJSON, err := renderStats(listen, statsOpts{JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outJSON != string(raw) {
+		t.Errorf("stats --json passthrough mismatch:\ngot:  %s\nwant: %s", outJSON, raw)
+	}
+}
+
+// TestNormalizeBucket covers the granularity-spec parser: durations, bare
+// seconds, defaults, clamping, and round-up-to-60-multiple.
+func TestNormalizeBucket(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"", 60},       // default -> raw 1m
+		{"0", 60},      // explicit zero -> raw 1m
+		{"1m", 60},     // 1 minute
+		{"10m", 600},   // 10 minutes
+		{"1h", 3600},   // 1 hour
+		{"24h", 86400}, // 1 day (as 24h; "d" is not a Go duration unit)
+		{"30", 60},     // 30s < 60 -> clamp to 60
+		{"90", 120},    // 90s not a 60-multiple -> round up to 120
+		{"120", 120},   // exact multiple
+		{"garbage", 60},
+	}
+	for _, c := range cases {
+		if got := normalizeBucket(c.in); got != c.want {
+			t.Errorf("normalizeBucket(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestBucketLabel covers the CLI column-header rendering.
+func TestBucketLabel(t *testing.T) {
+	cases := []struct {
+		secs int64
+		want string
+	}{
+		{0, "1m"}, {60, "1m"}, {600, "10m"}, {3600, "1h"}, {86400, "24h"},
+	}
+	for _, c := range cases {
+		if got := bucketLabel(c.secs); got != c.want {
+			t.Errorf("bucketLabel(%d) = %q, want %q", c.secs, got, c.want)
+		}
+	}
+}
+
+func TestParseStatsFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want statsOpts
+	}{
+		{"empty", nil, statsOpts{}},
+		{"space-separated", []string{"--from", "2026-01-01", "--to", "2026-02-01",
+			"--provider", "zhipu", "--model", "glm-5.2", "--bucket", "5m", "--json"},
+			statsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
+				Model: "glm-5.2", Bucket: "5m", JSON: true}},
+		{"equals form", []string{"--from=2026-01-01", "--to=2026-02-01",
+			"--provider=zhipu", "--model=glm-5.2", "--bucket=5m"},
+			statsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
+				Model: "glm-5.2", Bucket: "5m"}},
+		{"value at end without arg", []string{"--from"}, statsOpts{}},
+		{"unknown flag ignored", []string{"--bogus", "x"}, statsOpts{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseStatsFlags(tc.args)
+			if got != tc.want {
+				t.Errorf("parseStatsFlags(%v) = %+v, want %+v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatStatsTable(t *testing.T) {
+	// Empty buckets -> "no stats" line.
+	out := formatStatsTable(statsResp{From: 1700000000, To: 1700003600, Bucket: 60})
+	if !strings.Contains(out, "no stats") || !strings.Contains(out, "bucket 1m") {
+		t.Errorf("formatStatsTable empty missing 'no stats':\n%s", out)
+	}
+	// With buckets -> header + rows.
+	resp := statsResp{From: 1700000000, To: 1700003600, Bucket: 3600, Buckets: []observestats.Bucket{
+		{Provider: "zhipu", Model: "glm-5.2", Minute: 1700000000, Requests: 100, Failovers: 2, Failures: 1, Input: 5000, Output: 3000},
+	}}
+	out = formatStatsTable(resp)
+	if !strings.Contains(out, "provider") || !strings.Contains(out, "zhipu") || !strings.Contains(out, "glm-5.2") {
+		t.Errorf("formatStatsTable rows missing marker:\n%s", out)
+	}
+}
+
+func TestParseStatsTime(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+		ok   bool
+	}{
+		{"1700000000", 1700000000, true},
+		{"2023-11-14T22:13:20Z", 1700000000, true},
+		{"bogus", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := parseStatsTime(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("parseStatsTime(%q)=(%d,%v) want (%d,%v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// TestStatsFlags_GranularityCost_Parsed verifies --granularity and --cost parse
+// into statsOpts (the new analytics-routing flags).
+func TestStatsFlags_GranularityCost_Parsed(t *testing.T) {
+	o := parseStatsFlags([]string{"--granularity", "month", "--cost", "--provider", "deepseek"})
+	if o.Granularity != "month" || !o.Cost || o.Provider != "deepseek" {
+		t.Errorf("parsed = %+v, want granularity=month cost=true provider=deepseek", o)
+	}
+}
+
+// TestStatsFlags_GranularityCost_DefaultOff verifies the new flags default off
+// (the CLI display contract: no behavioral change without flags).
+func TestStatsFlags_GranularityCost_DefaultOff(t *testing.T) {
+	o := parseStatsFlags([]string{"--from", "1", "--bucket", "1h"})
+	if o.Granularity != "" || o.Cost {
+		t.Errorf("new flags should default off: %+v", o)
+	}
+}
+
+// TestStatsFlags_GranularityCost_EqualsForm verifies --granularity=value parses.
+func TestStatsFlags_GranularityCost_EqualsForm(t *testing.T) {
+	o := parseStatsFlags([]string{"--granularity=day", "--cost"})
+	if o.Granularity != "day" || !o.Cost {
+		t.Errorf("equals form: parsed = %+v, want granularity=day cost=true", o)
+	}
+}
+
+// TestRenderStatsCLI_AnalyticsPath verifies --granularity/--cost route to
+// /api/analytics (not /api/stats) and the table renders provider/model/cost.
+// The table shape comes from formatAnalyticsTable; the cost column appears only
+// when --cost is set. The classic /api/stats path is still covered by
+// TestRenderStatsCLI above (byte-identity guard).
+func TestRenderStatsCLI_AnalyticsPath(t *testing.T) {
+	// granularity=month, two series, one with cost and one without (n/a).
+	body := `{"granularity":"month","from":1700000000,"to":1700000000,` +
+		`"series":[` +
+		`{"provider":"deepseek","model":"deepseek-chat","points":[` +
+		`{"bucket":1700000000,"requests":5,"input":1000,"output":500,"cost":0.12,"priced":true}]},` +
+		`{"provider":"zhipu","model":"glm-5","points":[` +
+		`{"bucket":1700000000,"requests":3,"input":200,"output":80,"cost":null,"priced":false}]}` +
+		`],"totals":{"input":1200,"output":580,"cost":0.12},` +
+		`"price_coverage":{"priced":["deepseek-chat"],"unpriced":["glm-5"]}}`
+
+	var sawAnalytics, sawStats bool
+	var lastQuery string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/analytics" {
+			sawAnalytics = true
+			lastQuery = r.URL.RawQuery
+			io.WriteString(w, body)
+			return
+		}
+		if r.URL.Path == "/api/stats" {
+			sawStats = true
+		}
+		http.NotFound(w, r)
+	}))
+	defer up.Close()
+	listen := strings.TrimPrefix(up.URL, "http://")
+
+	// --granularity month --cost: routes to /api/analytics, table has a cost
+	// column with the summed cost ($0.12) and n/a for the unpriced series.
+	out, err := renderStats(listen, statsOpts{Granularity: "month", Cost: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawAnalytics {
+		t.Error("expected request to /api/analytics")
+	}
+	if sawStats {
+		t.Error("did not expect request to /api/stats when granularity/cost set")
+	}
+	if !strings.Contains(lastQuery, "granularity=month") {
+		t.Errorf("query missing granularity=month: %q", lastQuery)
+	}
+	for _, want := range []string{"deepseek", "deepseek-chat", "$0.12", "n/a", "month"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("analytics table missing %q:\n%s", want, out)
+		}
+	}
+
+	// --cost only (no granularity): defaults to day in the query string.
+	sawAnalytics = false
+	if _, err := renderStats(listen, statsOpts{Cost: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !sawAnalytics {
+		t.Error("--cost alone should still route to /api/analytics")
+	}
+	if !strings.Contains(lastQuery, "granularity=day") {
+		t.Errorf("--cost alone should default granularity=day in query: %q", lastQuery)
+	}
+}
+
+// TestRenderStatsCLI_AnalyticsJSON verifies --json passes the analytics body
+// through unchanged.
+func TestRenderStatsCLI_AnalyticsJSON(t *testing.T) {
+	body := `{"granularity":"day","series":[],"price_coverage":{"priced":[],"unpriced":[]}}`
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	defer up.Close()
+	listen := strings.TrimPrefix(up.URL, "http://")
+	out, err := renderStats(listen, statsOpts{Granularity: "day", JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != body {
+		t.Errorf("analytics --json passthrough mismatch:\ngot:  %s\nwant: %s", out, body)
+	}
+}
+
+// TestFormatAnalyticsTable verifies the table renderer directly: header label
+// reflects granularity, cost column appears only with withCost, and per-series
+// cost sums correctly ( priced: $X.XX ; unpriced: n/a ).
+func TestFormatAnalyticsTable(t *testing.T) {
+	cost := 0.12
+	resp := analyticsResp{Granularity: "month"}
+	resp.Series = []struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Points   []struct {
+			Requests uint64   `json:"requests"`
+			Input    uint64   `json:"input"`
+			Output   uint64   `json:"output"`
+			Cost     *float64 `json:"cost"`
+		} `json:"points"`
+	}{
+		{Provider: "deepseek", Model: "deepseek-chat", Points: []struct {
+			Requests uint64   `json:"requests"`
+			Input    uint64   `json:"input"`
+			Output   uint64   `json:"output"`
+			Cost     *float64 `json:"cost"`
+		}{
+			{Requests: 3, Input: 500, Output: 100, Cost: &cost},
+			{Requests: 2, Input: 500, Output: 100, Cost: &cost},
+		}},
+		{Provider: "zhipu", Model: "glm-5", Points: []struct {
+			Requests uint64   `json:"requests"`
+			Input    uint64   `json:"input"`
+			Output   uint64   `json:"output"`
+			Cost     *float64 `json:"cost"`
+		}{
+			{Requests: 1, Input: 10, Output: 5, Cost: nil},
+		}},
+	}
+
+	// Without cost: 6-column table, no "cost" header, no $ values.
+	out := formatAnalyticsTable(resp, false)
+	if !strings.Contains(out, "month") || !strings.Contains(out, "deepseek") {
+		t.Errorf("table missing markers:\n%s", out)
+	}
+	if strings.Contains(out, "cost") || strings.Contains(out, "$") {
+		t.Errorf("without --cost, table should not mention cost/$:\n%s", out)
+	}
+	// Series totals are sums across points.
+	if !strings.Contains(out, compactNum(5)) { // 3+2 requests
+		t.Errorf("month-1 requests sum missing:\n%s", out)
+	}
+
+	// With cost: 7-column table; priced series shows $0.24 (0.12+0.12),
+	// unpriced shows n/a.
+	out = formatAnalyticsTable(resp, true)
+	if !strings.Contains(out, "cost") {
+		t.Errorf("with --cost, table should have a cost header:\n%s", out)
+	}
+	if !strings.Contains(out, "$0.24") {
+		t.Errorf("priced series cost should sum to $0.24:\n%s", out)
+	}
+	if !strings.Contains(out, "n/a") {
+		t.Errorf("unpriced series should show n/a:\n%s", out)
+	}
+}
+
+// TestConvertHelpers: finish↔stop maps (all branches), text extraction, backend
+// path, and the SSE reader selector.
+// TestFormatAgentsTable_Latency: the --by-agent table includes the new latency
+// + failure columns.
+func TestFormatAgentsTable_Latency(t *testing.T) {
+	resp := agentResp{Bucket: 60, Buckets: []observestats.AgentBucket{
+		{Agent: "claude-code", Requests: 10, Input: 100, Output: 50, LatencySum: 2000, Failures: 1},
+	}}
+	out := formatAgentsTable(resp)
+	for _, want := range []string{"claude-code", "lat", "fail", "10", "200", "1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("formatAgentsTable missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderAgentsCLI: `stats --by-agent` fetches /api/agents and renders a
+// per-agent summary sorted by total tokens desc, with the exact header + the
+// heaviest agent on top. Guards the CLI display contract for the agent view.
+func TestRenderAgentsCLI(t *testing.T) {
+	resp := agentResp{From: 1, To: 2, Bucket: 60, Buckets: []observestats.AgentBucket{
+		{Agent: "claude-code", Requests: 10, Input: 5000, Output: 800},
+		{Agent: "codex", Requests: 3, Input: 200, Output: 50},
+	}}
+	raw, _ := json.Marshal(resp)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agents" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, string(raw))
+	}))
+	defer up.Close()
+	listen := strings.TrimPrefix(up.URL, "http://")
+
+	out, err := renderAgents(listen, statsOpts{ByAgent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "claude-code") || !strings.Contains(out, "codex") {
+		t.Errorf("agent table missing agents:\n%s", out)
+	}
+	// Exact header columns.
+	if !strings.Contains(out, "agent") || !strings.Contains(out, "reqs") || !strings.Contains(out, "input") || !strings.Contains(out, "output") {
+		t.Errorf("agent table missing a header:\n%s", out)
+	}
+	// claude-code (5800 tokens) sorts above codex (250 tokens).
+	if strings.Index(out, "claude-code") > strings.Index(out, "codex") {
+		t.Errorf("heaviest agent not on top:\n%s", out)
+	}
+
+	outJSON, err := renderAgents(listen, statsOpts{ByAgent: true, JSON: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outJSON != string(raw) {
+		t.Errorf("agents --json passthrough mismatch:\ngot:  %s\nwant: %s", outJSON, raw)
+	}
+}
+
+// TestRenderAgents_ProviderModelFilter: --provider/--model are forwarded to
+// /api/agents as query params in --by-agent mode (the server side already
+// filters on them); previously the CLI silently dropped them here.
+func TestRenderAgents_ProviderModelFilter(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agents" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("provider"); got != "zhipu" {
+			t.Errorf("provider query=%q want zhipu", got)
+		}
+		if got := r.URL.Query().Get("model"); got != "glm-5.2" {
+			t.Errorf("model query=%q want glm-5.2", got)
+		}
+		io.WriteString(w, `{"from":1,"to":2,"bucket":60,"buckets":[]}`)
+	}))
+	defer up.Close()
+	listen := strings.TrimPrefix(up.URL, "http://")
+
+	if _, err := renderAgents(listen, statsOpts{ByAgent: true, Provider: "zhipu", Model: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+}

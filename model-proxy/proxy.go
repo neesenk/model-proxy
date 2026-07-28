@@ -25,6 +25,7 @@ import (
 	"model-proxy/internal/catalog"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/requestlog"
+	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/transport/bodycapture"
@@ -62,7 +63,7 @@ type Proxy struct {
 	metrics           *metricsStore                    // request counters (atomic); nil only in degenerate tests
 	tokens            *tokenCounter                    // SSE-scanned token usage; nil only in degenerate tests
 	agents            *agentCounter                    // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats             *statsStore                      // SQLite persistence for per-minute buckets; nil in tests (runProxy opens it)
+	stats             *observestats.Store              // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
 	flusher           *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog            *requestlog.Logger               // per-request access log (full bodies); nil = disabled (default) or init failure
 	reqLogStarted     bool                             // lifecycle owns loop/shutdown only when started by startRuntimeServices
@@ -370,8 +371,8 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	p.quota.start()
 	p.metrics = newMetricsStore()
 	// SSE token counter. Persistence (baseline restore + per-minute flush) is
-	// owned by statsStore/flusher, opened in runProxy so direct-NewProxy tests
-	// stay in-memory and don't touch ~/.model-proxy/.
+	// projected by statsFlusher into internal/observe/stats.Store, opened only
+	// by lifecycle services so direct-NewProxy tests stay in-memory.
 	p.tokens = newTokenCounter()
 	// Per-agent counters (detected from the client UA). Flushed alongside the
 	// minute buckets by the same flusher; nil-stats tests keep them in-memory.
@@ -486,33 +487,40 @@ func (p *Proxy) Close() {
 // counters, the persisted SQLite bucket history, and the flusher's diff
 // baseline (so the next flush sees zero delta rather than zero-minus-old
 // negatives). Drives POST /api/tokens/reset ("reset counters").
-func (p *Proxy) resetStats() {
-	// When a flusher exists, delegate to flusher.resetAll which does the full
+func (p *Proxy) resetStats() error {
+	// When a flusher exists, delegate to flusher.reset which does the full stats
 	// reset (counters + DB + baseline) UNDER the flusher's lock — preventing a
 	// concurrent per-minute flush from writing stale deltas to the just-cleared
 	// DB (the resetStats vs flush race).
 	if p.flusher != nil {
-		p.flusher.resetAll(p)
-		return
+		if err := p.flusher.reset(); err != nil {
+			return fmt.Errorf("reset persisted stats: %w", err)
+		}
+	} else {
+		// Non-flusher path (degenerate tests): clear durable state first. If that
+		// fails, keep the in-memory totals so a later restart cannot resurrect a
+		// history the user was told had been reset.
+		if p.stats != nil {
+			if err := p.stats.Reset(); err != nil {
+				return fmt.Errorf("reset persisted stats: %w", err)
+			}
+		}
+		if p.metrics != nil {
+			p.metrics.reset()
+		}
+		if p.tokens != nil {
+			p.tokens.reset()
+		}
+		if p.agents != nil {
+			p.agents.reset()
+		}
 	}
-	// Non-flusher path (degenerate tests): reset directly.
-	if p.metrics != nil {
-		p.metrics.reset()
-	}
-	if p.tokens != nil {
-		p.tokens.reset()
-	}
-	if p.agents != nil {
-		p.agents.reset()
-	}
+	// Response cache participates in the user-facing "reset counters" command,
+	// but is not stats persistence and therefore stays outside statsFlusher.
 	if p.cache != nil {
 		p.cache.Reset()
 	}
-	if p.stats != nil {
-		if err := p.stats.resetAll(); err != nil {
-			log.Printf("[stats] resetAll failed: %v", err)
-		}
-	}
+	return nil
 }
 
 // cfgSnapshot returns the current config under a brief read lock. Used by the

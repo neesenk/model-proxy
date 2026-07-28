@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 )
 
@@ -153,25 +154,25 @@ func (view proxyReadView) tokenUsage() map[tokenKey]tokenUsage {
 	return view.proxy.tokens.snapshot()
 }
 
-func (view proxyReadView) stats(from, to int64, provider, model string, bucketSecs int64) ([]statsBucket, error) {
+func (view proxyReadView) stats(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error) {
 	if view.proxy.stats == nil {
-		return []statsBucket{}, nil
+		return []observestats.Bucket{}, nil
 	}
-	return view.proxy.stats.queryRange(from, to, provider, model, bucketSecs)
+	return view.proxy.stats.QueryRange(from, to, provider, model, bucketSecs)
 }
 
-func (view proxyReadView) agentStats(from, to int64, agent, provider, model string, bucketSecs int64) ([]agentBucket, error) {
+func (view proxyReadView) agentStats(from, to int64, agent, provider, model string, bucketSecs int64) ([]observestats.AgentBucket, error) {
 	if view.proxy.stats == nil {
-		return []agentBucket{}, nil
+		return []observestats.AgentBucket{}, nil
 	}
-	return view.proxy.stats.queryAgentRange(from, to, agent, provider, model, bucketSecs)
+	return view.proxy.stats.QueryAgents(from, to, agent, provider, model, bucketSecs)
 }
 
-func (view proxyReadView) analytics(from, to int64, provider, model, granularity string) ([]analyticsBucket, error) {
+func (view proxyReadView) analytics(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error) {
 	if view.proxy.stats == nil {
-		return []analyticsBucket{}, nil
+		return []observestats.AnalyticsBucket{}, nil
 	}
-	return view.proxy.stats.queryAnalytics(from, to, provider, model, granularity)
+	return view.proxy.stats.QueryAnalytics(from, to, provider, model, granularity)
 }
 
 func (view proxyReadView) fusion(workflow string, now time.Time) (map[string]fusionWorkflowStats, []fusionRun) {

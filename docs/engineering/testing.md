@@ -99,6 +99,20 @@ body 的映射、协议转换后客户端字节、HTTP list/detail 脱敏、repl
 Fusion/Shadow 记录以及 shutdown drain 顺序的集成测试。列表测试必须同时断言
 request body、response body、response headers 均不出现，不能只检查其中一项。
 
+SQLite stats 的 schema/additive migration、legacy import、minute/agent upsert、
+retention、raw/wide/calendar 查询与 query plan 测试归
+`internal/observe/stats/*_test.go`。根包只保留 metrics/tokens/agents → flusher
+投影、失败分钟批次重试、reset-vs-flush、Proxy final flush/Store close、HTTP JSON
+shape 和 CLI 显示集成。宽 bucket 必须逐字段断言所有 additive counter、
+`MAX(last_request_at)`、平均值与 bucket floor；shutdown 测试需重开数据库证明
+final delta 恰好落盘一次，并覆盖一次瞬时 final-flush 失败后的 retry window；
+持续失败测试必须证明 pending batch 有界、最早时间边界稳定且合并后累计量不丢；
+SQLite 写锁测试必须证明 Store 的短 busy timeout 将单次锁等待限制在 1 秒内，
+另以可取消 sink 证明 shutdown context 的 retry window。reset 测试需证明历史与
+三个 counter 同步清零且首个 post-reset delta 不重复。Stats/Agents/Analytics
+HTTP 测试必须覆盖筛选参数接线、nil Store 空数组与 Store 错误 500，CLI
+`--json` 必须断言响应 body 字节级透传。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；
