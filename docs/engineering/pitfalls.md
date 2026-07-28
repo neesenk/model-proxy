@@ -25,7 +25,7 @@
 
 ## 配置
 
-13. 新顶层配置字段必须同时加入 `Config`、`rawConfig` 和拷贝段。yaml.v3 会静默忽略未知键，因此必须增加 YAML 加载测试，不能只直接构造 Config。
+13. 新顶层配置字段必须在 `internal/config` 同时加入 `Config`、`rawConfig` 和拷贝段。yaml.v3 会静默忽略未知键，因此必须增加该包的 YAML 加载测试，不能只直接构造 Config；根 `config_compat.go` 不承载字段或默认值逻辑。
 14. duration 字段除明确允许的 `retry_wait: "0"` 外应验证为正数；任何允许零/负数的字段都要写入契约。
 15. `BillingClass` iota 不是调度顺序，必须通过独立 `tierRank` 映射 `plan < unknown < payg`。
 

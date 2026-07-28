@@ -157,7 +157,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 	// recordSuccess/Failure/RateLimit below release the slot (force never took
 	// one, so those releases are harmless no-ops).
 
-	ctx, cancel := context.WithTimeout(r.Context(), sched.timeout())
+	ctx, cancel := context.WithTimeout(r.Context(), sched.Timeout())
 	defer cancel()
 
 	// Two independent one-shot retries live in this loop: 401 → auth-refresh
@@ -334,7 +334,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 					p.recordModelFailure(t.Provider, t.Model, sched, generation)
 					if !lastTarget {
 						log.Printf("[proto=%s provider=%s] model %s unavailable upstream (status %d) — model locked %s, failing over",
-							proto, t.Provider, t.Model, resp.StatusCode, sched.modelLockout())
+							proto, t.Provider, t.Model, resp.StatusCode, sched.ModelLockoutDuration())
 					}
 				}
 				if !lastTarget {
@@ -390,7 +390,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 					p.metrics.inc(t.Provider, t.Model, evFailovers)
 				}
 				log.Printf("[proto=%s provider=%s] empty 200 (Content-Length: 0) — model locked %s, failing over",
-					proto, t.Provider, sched.modelLockout())
+					proto, t.Provider, sched.ModelLockoutDuration())
 				return false, nil, tryFailedHard, nil
 			}
 		}
@@ -617,7 +617,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		if resp.StatusCode < 300 && counting.n == 0 && end == streamEOF && r.Context().Err() == nil {
 			p.recordModelFailure(t.Provider, t.Model, sched, generation)
 			log.Printf("[proto=%s provider=%s] 200 with zero-byte body — model locked %s (post-commit; next request fails over)",
-				proto, t.Provider, sched.modelLockout())
+				proto, t.Provider, sched.ModelLockoutDuration())
 		}
 		// Record latency for this committed (served) target: total wall-clock from
 		// upstream send to end of the streamed body, and TTFT from send to the

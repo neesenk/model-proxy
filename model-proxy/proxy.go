@@ -398,7 +398,7 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// so its next failure re-opens it immediately (same semantics as before).
 	if loaded := p.quota.LoadedHealth; len(loaded) > 0 && p.quota.LoadedHealthFP != "" && p.quota.LoadedHealthFP == fp {
 		now := time.Now()
-		threshold := cfg.Scheduling.threshold()
+		threshold := cfg.Scheduling.Threshold()
 		p.healthMu.Lock()
 		for name, ph := range loaded {
 			if now.Before(ph.RateLimitedUntil) || now.Before(ph.CircuitOpenUntil) {
@@ -507,16 +507,16 @@ func (p *Proxy) pricingSnapshot() *pricing.Catalog {
 		return nil
 	}
 	cfg := p.cfgSnapshot()
-	if cfg == nil || !cfg.Pricing.enabled() {
+	if cfg == nil || !cfg.Pricing.IsEnabled() {
 		return nil
 	}
 	p.pricingMu.Lock()
 	defer p.pricingMu.Unlock()
 	cat, err := pricing.EnsureFresh(pricing.RefreshOptions{
 		CacheFile: pricingCachePath(),
-		Endpoint:  cfg.Pricing.sourceURL(),
+		Endpoint:  cfg.Pricing.ResolvedSourceURL(),
 		Fetch:     pricing.FetchHTTP,
-		TTL:       cfg.Pricing.ttl(),
+		TTL:       cfg.Pricing.TTLDuration(),
 		Warnings:  os.Stderr,
 	})
 	if err != nil || cat == nil {
@@ -1066,7 +1066,7 @@ func (p *Proxy) scheduleStatus() []byte {
 				Tier:       billingClassName(p.billingClass(cfg, parentOf, t.Provider, qs)),
 				Surplus:    surplusOf(t.Provider),
 				Available:  avail(t.Provider),
-				Peak:       pconf.peakMultiplier(now) > 1,
+				Peak:       pconf.PeakMultiplier(now) > 1,
 			})
 		}
 		if len(parentSeen) > 0 {
@@ -1091,7 +1091,7 @@ func (p *Proxy) scheduleStatus() []byte {
 		}
 		if cur := stickyCopy[exposed]; cur.provider != "" {
 			ri.Sticky = cur.provider
-			if rem := cfg.Scheduling.dwell() - now.Sub(cur.since); rem > 0 && rem < cfg.Scheduling.dwell() {
+			if rem := cfg.Scheduling.Dwell() - now.Sub(cur.since); rem > 0 && rem < cfg.Scheduling.Dwell() {
 				ri.DwellRem = rem.Seconds()
 			}
 		}
@@ -1332,7 +1332,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// each time). Bounded: ≤2 retries, each wait ≤ retry_wait; a client
 	// disconnect aborts the wait. Skipped for one-shot force-provider overrides
 	// (replay wants the answer now).
-	retryWait := cfg.Scheduling.retryWait()
+	retryWait := cfg.Scheduling.RetryWaitDuration()
 	var st serveState
 	var sawHard, sawCool bool
 	execution := serveRequest{
@@ -1423,7 +1423,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		if !sawHard && (sawCool || (allDown && allRateLimited)) {
 			d := time.Until(earliest)
 			if d <= 0 {
-				d = cfg.Scheduling.rateBackoff() // horizon already lapsed: use the transient default
+				d = cfg.Scheduling.RateBackoff() // horizon already lapsed: use the transient default
 			}
 			secs := int(d / time.Second)
 			if d%time.Second != 0 {
@@ -1749,7 +1749,7 @@ func newShadowRuntime(cfg *Config) *shadowRuntime {
 	}
 	sr := &shadowRuntime{
 		sem:      make(chan struct{}, maxConc),
-		client:   &http.Client{Timeout: cfg.Scheduling.timeout()},
+		client:   &http.Client{Timeout: cfg.Scheduling.Timeout()},
 		sampRate: 1.0, // default; nil ShadowSampleRate = all requests
 	}
 	if cfg.ShadowSampleRate != nil {
@@ -1798,7 +1798,7 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 	if runtime.cfg == nil {
 		// Defensive: runtimeSnapshot is handed around as a plain value — a
 		// future call site that forgets to populate it must not nil-deref
-		// below (runtime.cfg.Scheduling.timeout()). Log loudly and skip.
+		// below (runtime.cfg.Scheduling.Timeout()). Log loudly and skip.
 		log.Printf("[shadow] %s: skipped — runtime snapshot has no config (caller bug)", shadow.Provider)
 		return
 	}
@@ -1844,7 +1844,7 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 			shadow.Provider, bodyProto, plan.backendProto, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), runtime.cfg.Scheduling.timeout())
+	ctx, cancel := context.WithTimeout(context.Background(), runtime.cfg.Scheduling.Timeout())
 	defer cancel()
 	targetURL := strings.TrimRight(plan.baseURL, "/") + plan.upPath
 	if impl != nil {
@@ -2056,7 +2056,7 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 			if routeKeys[k] {
 				continue // route name (explicit OR implicit) — preserve
 			}
-			if now.Sub(v.since) > sched.dwell() {
+			if now.Sub(v.since) > sched.Dwell() {
 				delete(p.sticky, k)
 			}
 		}
@@ -2112,7 +2112,7 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 		return surplusOf(availTargets[i].Provider) > surplusOf(availTargets[j].Provider) // surplus only breaks priority ties
 	})
 
-	margin := sched.switchMargin()
+	margin := sched.SwitchMargin()
 	cur := p.sticky[sk]
 
 	// Find cur's priority + whether it's still in the available set.
@@ -2128,7 +2128,7 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 
 	keepSticky := false
 	if cur.provider != "" && curInAvail {
-		if now.Sub(cur.since) < sched.dwell() {
+		if now.Sub(cur.since) < sched.Dwell() {
 			keepSticky = true // within dwell: preserve cache
 		} else if len(availTargets) == 0 {
 			keepSticky = true
@@ -2259,7 +2259,7 @@ func providerConfig(cfg *Config, parentOf map[string]string, name string) (Provi
 // the parent, not per-account).
 func (p *Proxy) billingClass(cfg *Config, parentOf map[string]string, name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
 	pconf, _ := providerConfig(cfg, parentOf, name)
-	return classifyBilling(qs[name], pconf.Billing, cfg.Scheduling.pollInterval())
+	return classifyBilling(qs[name], pconf.Billing, cfg.Scheduling.PollInterval())
 }
 
 // computeSurplus is the shared scheduling pace-score for one provider, used by
@@ -2269,7 +2269,7 @@ func (p *Proxy) billingClass(cfg *Config, parentOf map[string]string, name strin
 // provider (nil snapshot).
 func computeSurplus(cfg *Config, parentOf map[string]string, qs map[string]*provider.QuotaSnapshot, name string, now time.Time) float64 {
 	pconf, _ := providerConfig(cfg, parentOf, name)
-	peakMult := pconf.peakMultiplier(now)
+	peakMult := pconf.PeakMultiplier(now)
 	if peakMult < 1 {
 		peakMult = 1
 	}
@@ -2372,8 +2372,8 @@ func (p *Proxy) recordFailure(name string, sched Scheduling, generations ...uint
 	}
 	h.consecutiveFailures++
 	h.halfOpenInFlight = false
-	if h.consecutiveFailures >= sched.threshold() {
-		h.circuitOpenUntil = now.Add(sched.cooldown())
+	if h.consecutiveFailures >= sched.Threshold() {
+		h.circuitOpenUntil = now.Add(sched.Cooldown())
 	}
 }
 
@@ -2408,7 +2408,7 @@ func (p *Proxy) recordModelFailure(provider, model string, sched Scheduling, gen
 		p.modelLocks[k] = e
 	}
 	e.failures++
-	e.lockedUntil = now.Add(sched.modelLockout())
+	e.lockedUntil = now.Add(sched.ModelLockoutDuration())
 }
 
 // resetHealth clears frozen runtime health state (circuit-open cooldowns,
@@ -2646,37 +2646,10 @@ func (p *Proxy) parseRateLimit(resp *http.Response, bodyPeek []byte, now time.Ti
 		midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
 		return midnight, kind
 	case rlQuota:
-		return now.Add(sched.quotaCooldown()), kind
+		return now.Add(sched.QuotaCooldownDuration()), kind
 	default:
-		return now.Add(sched.rateBackoff()), kind
+		return now.Add(sched.RateBackoff()), kind
 	}
-}
-
-func parseHHMMRange(s string) (start, end int, ok bool) {
-	parts := strings.Split(s, "-")
-	if len(parts) != 2 {
-		return 0, 0, false
-	}
-	s1, ok1 := parseHHMM(parts[0])
-	s2, ok2 := parseHHMM(parts[1])
-	if !ok1 || !ok2 {
-		return 0, 0, false
-	}
-	return s1, s2, true
-}
-
-func parseHHMM(s string) (int, bool) {
-	s = strings.TrimSpace(s)
-	parts := strings.Split(s, ":")
-	if len(parts) != 2 {
-		return 0, false
-	}
-	h, err1 := strconv.Atoi(parts[0])
-	m, err2 := strconv.Atoi(parts[1])
-	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
-		return 0, false
-	}
-	return h*60 + m, true
 }
 
 // isSSE reports whether the response is an SSE stream (content-type

@@ -157,7 +157,7 @@ routes:
     - {provider: codex, model: gpt-5.5, priority: 1}
 
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
-# Every field has a code default (the accessors in config.go), so this entire
+# Every field has a code default (owned by internal/config), so this entire
 # block can be omitted - the values below are listed commented-out for reference.
 # Durations are strings (e.g. "10m", "60s"). Uncomment a line to override.
 # scheduling:

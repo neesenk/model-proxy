@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	configdomain "model-proxy/internal/config"
 )
 
 // Daemon (supervisor/worker) model for `model-proxy serve --daemon`.
@@ -733,7 +735,7 @@ func spawnWorker(sa serveArgs) *exec.Cmd {
 // there, not under the config dir). Returns "" only if the temp dir can't be resolved.
 func resolveLogFile(sa serveArgs, cfg *Config) string {
 	if sa.logFile != "" {
-		return expandPath(sa.logFile)
+		return configdomain.ExpandPath(sa.logFile)
 	}
 	if cfg.LogFile != "" {
 		return cfg.LogFile

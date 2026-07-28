@@ -698,7 +698,7 @@ func TestConfigGetRoutes(t *testing.T) {
 }
 
 // TestConfigEditProviderAddWithProviderID asserts the "add provider" flow
-// succeeds: a new provider block must carry provider_id (config.validate
+// succeeds: a new provider block must carry provider_id (configuration validation
 // rejects an empty one) and openai_base_url. Pre-fix editStructured never wrote
 // provider_id, so adding a provider always 400'd with "provider_id is empty".
 func TestConfigEditProviderAddWithProviderID(t *testing.T) {

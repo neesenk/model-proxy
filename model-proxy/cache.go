@@ -22,40 +22,6 @@ import (
 // SSE event streams. Bounded by max_entries (size cap, random eviction) and
 // max_body_bytes (responses larger than this stream without being cached).
 
-// CacheConfig configures the exact-match response cache.
-type CacheConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	TTL          string `yaml:"ttl"`            // entry expiry (default 10m)
-	MaxEntries   int    `yaml:"max_entries"`    // size cap (default 1000)
-	MaxBodyBytes int    `yaml:"max_body_bytes"` // cache only responses ≤ this (default 256KiB)
-}
-
-func (c CacheConfig) enabled() bool { return c.Enabled }
-
-func (c CacheConfig) ttl() time.Duration {
-	if c.TTL == "" {
-		return 10 * time.Minute
-	}
-	if d, err := time.ParseDuration(c.TTL); err == nil {
-		return d
-	}
-	return 10 * time.Minute
-}
-
-func (c CacheConfig) maxEntries() int {
-	if c.MaxEntries > 0 {
-		return c.MaxEntries
-	}
-	return 1000
-}
-
-func (c CacheConfig) maxBody() int {
-	if c.MaxBodyBytes > 0 {
-		return c.MaxBodyBytes
-	}
-	return 256 * 1024
-}
-
 // cacheEntry is one cached response. header is the upstream's full header set
 // (content-type etc.); body is the raw bytes to replay.
 type cacheEntry struct {
@@ -78,14 +44,14 @@ type responseCache struct {
 }
 
 func newResponseCache(cfg CacheConfig) *responseCache {
-	if !cfg.enabled() {
+	if !cfg.IsEnabled() {
 		return nil
 	}
 	return &responseCache{
 		m:          map[string]*cacheEntry{},
-		ttl:        cfg.ttl(),
-		maxEntries: cfg.maxEntries(),
-		maxBody:    cfg.maxBody(),
+		ttl:        cfg.TTLDuration(),
+		maxEntries: cfg.MaxEntriesValue(),
+		maxBody:    cfg.MaxBodyBytesValue(),
 	}
 }
 

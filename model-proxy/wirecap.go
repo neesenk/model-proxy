@@ -9,7 +9,7 @@
 // the top-priority escape hatch). See docs/architecture/routing-and-failure.md.
 //
 // Rationale: openai_base_url contractually serves BOTH /chat/completions and
-// /responses (config.go), but many third-party endpoints implement only chat.
+// /responses (internal/config), but many third-party endpoints implement only chat.
 // Without a verdict, an anthropic client defaults to byte-level passthrough of
 // an anthropic body to an openai base — right only for gateways that accept
 // anthropic. A probe verdict lets the proxy convert instead (responses first —

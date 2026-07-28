@@ -41,7 +41,7 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 
 ## Zhipu BigModel 契约
 
-- OpenAI base `https://open.bigmodel.cn/api/paas/v4`（`/chat/completions`、`/models`）；Anthropic base `https://open.bigmodel.cn/api/anthropic`（**不带 /v1**，代理保留客户端 `/v1/messages`；见 `config.go` 校验），Bearer。代理按协议转发。
+- OpenAI base `https://open.bigmodel.cn/api/paas/v4`（`/chat/completions`、`/models`）；Anthropic base `https://open.bigmodel.cn/api/anthropic`（**不带 /v1**，代理保留客户端 `/v1/messages`；见 `internal/config` 校验），Bearer。代理按协议转发。
 - 鉴权 `Authorization: Bearer <api_key>`（OpenAI 与 Anthropic 端点都用 Bearer，不像 DeepSeek 需 x-api-key）。
 - `/models` 只列 8 个文本对话模型；多模态（glm-4v-plus/cogview-4-plus）需手动加 config。
 - 配额 `GET .../api/monitor/usage/quota/limit`（Bearer）→ `{success, data:{limits:[{type,unit,number,percentage,nextResetTime,usage,currentValue,remaining,usageDetails}], level}}`；`type`=TOKENS_LIMIT|TIME_LIMIT，`unit` 3=5h/6=weekly/5=monthly。**`currentValue`=已用、`remaining`=剩余、`usage`=总额**（勿把 `usage` 当已用）。`/users/balance`、`/users/usage` 均 404。
@@ -59,7 +59,7 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 ## DeepSeek 契约（双协议，一个 key）
 
 - OpenAI base `https://api.deepseek.com`（`/chat/completions`、`/responses`、`/models`、`/user/balance`，Bearer）；Anthropic base `https://api.deepseek.com/anthropic`（**不带 /v1**，代理保留客户端 `/v1/messages`；`x-api-key`，`anthropic-version`/`anthropic-beta` 被忽略）。
-- Anthropic SDK 打 `/anthropic/v1/messages`（base `/anthropic` + `/v1/messages`）。代理保留客户端的 `/v1/messages`（不剥），故 `anthropic_base_url` **不带 /v1**（`config.go` 校验拒绝尾部 `/v1`）。`RewriteRequest` no-op，URL 选择在 `proxy.forward` 按 protocol 完成。
+- Anthropic SDK 打 `/anthropic/v1/messages`（base `/anthropic` + `/v1/messages`）。代理保留客户端的 `/v1/messages`（不剥），故 `anthropic_base_url` **不带 /v1**（`internal/config` 校验拒绝尾部 `/v1`）。`RewriteRequest` no-op，URL 选择在 `proxy.forward` 按 protocol 完成。
 - 鉴权双写：每请求同时设 `Authorization: Bearer` + `x-api-key`，一个 config 服务两协议。
 - 服务端模型自动映射（Anthropic）：`claude-opus*`→`deepseek-v4-pro`；`claude-sonnet*`/`claude-haiku*`→`deepseek-v4-flash`。
 - `/user/balance` → `{is_available, balance_infos:[{currency, total_balance, granted_balance, topped_up_balance}]}`（注意 `balance_infos` 非 `wallets`）。`/models` → OpenAI 风格；当前 `deepseek-v4-pro`/`deepseek-v4-flash`，旧名 `deepseek-chat`/`reasoner` 2026-07-24 弃用。

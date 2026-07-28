@@ -416,44 +416,6 @@ func TestTargetCapabilities_PooledVirtual(t *testing.T) {
 	}
 }
 
-// TestValidate_Capabilities: capabilities values must be known capability names
-// (image|tools), and keys must name a model in the provider's models: list — an
-// unknown key is almost certainly a typo that would silently never match.
-func TestValidate_Capabilities(t *testing.T) {
-	newCfg := func(caps map[string][]string) *Config {
-		return &Config{
-			Listen: "127.0.0.1:1",
-			Providers: map[string]Provider{
-				"cx": {
-					OpenAIBaseURL: "https://x", Provider: "codex",
-					Models:       []string{"gpt-5.5"},
-					Capabilities: caps,
-				},
-			},
-			Routes: map[string][]RouteTarget{
-				"gpt": {{Provider: "cx", Model: "gpt-5.5"}},
-			},
-		}
-	}
-	if err := newCfg(map[string][]string{"gpt-5.5": {"image", "tools"}}).validate(); err != nil {
-		t.Errorf("valid capabilities should be accepted, got %v", err)
-	}
-	if err := newCfg(map[string][]string{"gpt-5.5": {}}).validate(); err != nil {
-		t.Errorf("empty capabilities list should be accepted (declares neither), got %v", err)
-	}
-	if err := newCfg(nil).validate(); err != nil {
-		t.Errorf("nil capabilities should be accepted, got %v", err)
-	}
-	err := newCfg(map[string][]string{"gpt-5.5": {"vision"}}).validate()
-	if err == nil || !strings.Contains(err.Error(), "unknown capability") {
-		t.Errorf("invalid capability value: want 'unknown capability' error, got %v", err)
-	}
-	err = newCfg(map[string][]string{"gpt-5.6": {"image"}}).validate()
-	if err == nil || !strings.Contains(err.Error(), "not in its models: list") {
-		t.Errorf("unknown capabilities key: want 'not in its models: list' error, got %v", err)
-	}
-}
-
 // TestCollectCrossRoute_DedupIgnoresPriority: the same {provider, model, protocol}
 // appearing in multiple routes at DIFFERENT priorities is collected ONCE (the best
 // priority), not twice. Previously the dedup key was the whole RouteTarget value

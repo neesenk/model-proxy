@@ -14,7 +14,7 @@ import (
 // the run registry (record / ring eviction / aggregates / daily budget), the
 // /api/fusion endpoint, the cost gates (max_runs_per_day, first_turn_only),
 // and the quality knobs (judge report injection + failure tolerance,
-// instruction override), plus the YAML load/validate of the new recipe fields.
+// instruction override), plus doctor output for the recipe fields.
 
 // --- registry unit tests ---
 
@@ -605,109 +605,7 @@ func TestFusion_InstructionOverride(t *testing.T) {
 	}
 }
 
-// --- config load + validate + doctor ---
-
-// TestLoadFusionObsKnobs guards the new FusionConfig fields: they must load
-// from YAML (map-value decode, no rawConfig copy needed — trap #16) and obey
-// their validate rules.
-func TestLoadFusionObsKnobs(t *testing.T) {
-	yaml := func(fusion string) []byte {
-		return []byte(`listen: 127.0.0.1:15721
-providers:
-  a: {openai_base_url: "https://a", provider_id: static}
-  b: {openai_base_url: "https://b", provider_id: static}
-  s: {openai_base_url: "https://s", provider_id: static}
-  j: {openai_base_url: "https://j", provider_id: static}
-routes:
-  hard:
-    - {provider: fusion, model: r, priority: 1}
-` + fusion)
-	}
-	valid := `fusion:
-  r:
-    panel:
-      - {provider: a, model: ma}
-      - {provider: b, model: mb}
-    synthesizer: {provider: s, model: ms}
-    min_panel: 2
-    max_runs_per_day: 50
-    first_turn_only: true
-    judge: {provider: j, model: mj, protocol: openai}
-    instruction: "自定义指令"
-`
-	cfg, err := LoadConfigFromBytes("config.yaml", yaml(valid))
-	if err != nil {
-		t.Fatalf("valid fusion config rejected: %v", err)
-	}
-	recipe := cfg.Fusion["r"]
-	if recipe.MaxRunsPerDay != 50 || !recipe.FirstTurnOnly {
-		t.Errorf("loaded cost knobs = max_runs_per_day %d first_turn_only %v", recipe.MaxRunsPerDay, recipe.FirstTurnOnly)
-	}
-	if recipe.Judge == nil || recipe.Judge.Provider != "j" || recipe.Judge.Model != "mj" || recipe.Judge.Protocol != "openai" {
-		t.Errorf("loaded judge = %+v", recipe.Judge)
-	}
-	if recipe.Instruction != "自定义指令" {
-		t.Errorf("loaded instruction = %q", recipe.Instruction)
-	}
-
-	cases := []struct {
-		name          string
-		fusion        string
-		wantErrSubstr string
-	}{
-		{"negative budget", `fusion:
-  r:
-    panel:
-      - {provider: a, model: ma}
-      - {provider: b, model: mb}
-    synthesizer: {provider: s, model: ms}
-    max_runs_per_day: -1
-`, "max_runs_per_day"},
-		{"instruction too long", `fusion:
-  r:
-    panel:
-      - {provider: a, model: ma}
-      - {provider: b, model: mb}
-    synthesizer: {provider: s, model: ms}
-    instruction: "` + strings.Repeat("x", fusionInstructionMaxRunes+1) + `"
-`, "instruction"},
-		{"judge unknown provider", `fusion:
-  r:
-    panel:
-      - {provider: a, model: ma}
-      - {provider: b, model: mb}
-    synthesizer: {provider: s, model: ms}
-    judge: {provider: ghost, model: mg}
-`, "not defined"},
-		{"judge nested fusion", `fusion:
-  r:
-    panel:
-      - {provider: a, model: ma}
-      - {provider: b, model: mb}
-    synthesizer: {provider: s, model: ms}
-    judge: {provider: fusion, model: other}
-`, "nested"},
-		{"judge protocol without base url", `fusion:
-  r:
-    panel:
-      - {provider: a, model: ma}
-      - {provider: b, model: mb}
-    synthesizer: {provider: s, model: ms}
-    judge: {provider: j, model: mj, protocol: anthropic}
-`, "no anthropic_base_url"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			_, err := LoadConfigFromBytes("config.yaml", yaml(c.fusion))
-			if err == nil {
-				t.Fatalf("config accepted, want error containing %q", c.wantErrSubstr)
-			}
-			if !strings.Contains(err.Error(), c.wantErrSubstr) {
-				t.Fatalf("error %q missing %q", err, c.wantErrSubstr)
-			}
-		})
-	}
-}
+// --- doctor ---
 
 // TestDoctorFusion: the doctor diagnostic renders a Fusion section with the
 // panel/quorum plus the cost and quality knobs.

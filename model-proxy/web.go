@@ -1625,7 +1625,7 @@ func (w *webServer) editStructured(kind, name string, d map[string]any) error {
 		case "provider":
 			p := childMap(childMap(root, "providers"), name)
 			// provider_id first so a freshly-added provider block validates
-			// (config.validate requires it) - without it the Web UI's "add
+			// (configuration validation requires it) - without it the Web UI's "add
 			// provider" flow always 400s with "provider_id is empty".
 			for _, k := range []string{"provider_id", "openai_base_url", "anthropic_base_url", "usage_url", "billing"} {
 				if v, ok := d[k]; ok {

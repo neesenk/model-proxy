@@ -391,7 +391,7 @@ config init|print|check
 
 写 `config.yaml` 到 **CWD**（`os.WriteFile("config.yaml", defaultConfigYAML, 0o644)`）。stdout：`wrote config.yaml`。失败 -> stderr + exit 1。
 
-模板里的 `scheduling:` 整块默认是注释掉的（每行带 `(default N)`）：所有字段都有代码默认（`config.go` 的 accessor），不写即用默认，需覆盖时取消注释对应行。`config check` 的 `scheduling:` 摘要行始终打印**生效值**（已覆盖则显覆盖值，未配则显代码默认）。
+模板里的 `scheduling:` 整块默认是注释掉的（每行带 `(default N)`）：所有字段都有代码默认（`internal/config` 的 accessor），不写即用默认，需覆盖时取消注释对应行。`config check` 的 `scheduling:` 摘要行始终打印**生效值**（已覆盖则显覆盖值，未配则显代码默认）。
 
 ### `config print`
 

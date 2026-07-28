@@ -169,7 +169,7 @@ func (commands proxyAdminCommands) accountProbe(ctx context.Context, name, id st
 		}
 	}
 
-	client := &http.Client{Timeout: cfg.Scheduling.timeout()}
+	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
 	start := time.Now()
 	ok, status, reason := probeModelCallableContext(ctx, client, prov, impl, model)
 	return accountProbeResult{

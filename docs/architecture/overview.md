@@ -50,6 +50,12 @@ identity、六组 pairwise codec、request/response/SSE registry、SSE↔JSON �
 Provider 方言和目标视觉能力由 `targetPlan` 解析为窄 request options 后注入；
 具体 `http.ResponseWriter` 错误 envelope 仍由 transport 层负责。
 
+`internal/config` 统一拥有配置类型、YAML 加载、默认值、校验和生效值
+accessor；它不是无仓库依赖叶子，只允许依赖其校验/默认值实际需要的
+`internal/pricing` 与 `internal/protocol`。根包 `config_compat.go` 只保留类型别名
+和 `LoadConfig` / `LoadConfigFromBytes` 兼容 wrapper，composition root 与现有
+调用方不得在根包重新建立第二套配置事实或恢复 `config.go`。
+
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
@@ -59,8 +65,9 @@ Provider 方言和目标视觉能力由 `targetPlan` 解析为窄 request option
   均不得启动 Shadow，goroutine 内不得重新读取 reload-owned 状态。
 - Cache、request log、usage scanner 位于响应转换外层，只观察客户端协议字节。
 - Analytics 的价格目录、条件抓取、原子缓存、override 解析与成本公式由
-  `internal/pricing` 这一无主包依赖的叶子包拥有；`pricing.go` 只适配环境变量与
-  应用 HOME 路径，`Proxy.pricingSnapshot` 保留配置快照和并发刷新锁。
+  `internal/pricing` 这一无主包依赖的叶子包拥有；价格端点优先级由
+  `internal/config` 解析，根 `pricing.go` 只适配应用 HOME 路径，
+  `Proxy.pricingSnapshot` 保留配置快照和并发刷新锁。
 
 ## 状态与锁
 
@@ -105,6 +112,7 @@ lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
 analytics adapter → internal/pricing
 target plan / target executor → internal/protocol
+composition root → internal/config → internal/pricing / internal/protocol
 ```
 
 禁止：
@@ -116,6 +124,9 @@ target plan / target executor → internal/protocol
 - attemptExecutor 持有完整 `*Proxy`；
 - 普通 route/Fusion 绕过 `newTargetAttempt` 直接拼装执行器输入；
 - daemon/reload 绕过 `proxyLifecycle` 启动 Proxy 级 goroutine；
+- `internal/config` import `internal/pricing`、`internal/protocol` 以外的
+  `model-proxy/*` 包，或根 `config_compat.go` 承载类型别名与加载 wrapper
+  之外的配置实现；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
   Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetPlan`；
@@ -133,6 +144,7 @@ target plan / target executor → internal/protocol
 
 架构边界的静态回归位于 `architecture_contract_test.go`（基于 go/ast 检查
 `webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector、
-账号测活的单次 runtime snapshot、internal 叶子包 import 以及 Fusion 不绕过
-`targetPlan`，不是字符串扫描）；行为与并发验证仍按
+账号测活的单次 runtime snapshot、internal 叶子包 import、`internal/config`
+依赖 allowlist、根配置兼容 facade 以及 Fusion 不绕过 `targetPlan`，不是字符串
+扫描）；行为与并发验证仍按
 `docs/engineering/testing.md` 执行。

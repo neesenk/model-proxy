@@ -17,44 +17,6 @@ import (
 	"time"
 )
 
-// --- config accessors ---
-
-func TestRequestLogConfig_Accessors(t *testing.T) {
-	// Defaults: disabled, ~/.model-proxy/requests, 1GiB file cap, 5MiB body cap.
-	def := RequestLogConfig{}
-	if def.Enabled {
-		t.Error("default Enabled should be false")
-	}
-	if def.maxFileSize() != 1<<30 {
-		t.Errorf("default maxFileSize = %d, want 1GiB", def.maxFileSize())
-	}
-	if def.maxBodyBytes() != 5*1024*1024 {
-		t.Errorf("default maxBodyBytes = %d, want 5MiB", def.maxBodyBytes())
-	}
-	if !strings.HasSuffix(def.dir(), "requests") {
-		t.Errorf("default dir = %q, want suffix requests", def.dir())
-	}
-
-	// Overrides honored.
-	c := RequestLogConfig{Dir: "/tmp/x/rl", MaxFileSize: 2048, MaxBodyBytes: 1024}
-	if got := c.dir(); got != "/tmp/x/rl" {
-		t.Errorf("dir override = %q, want /tmp/x/rl", got)
-	}
-	if c.maxFileSize() != 2048 {
-		t.Errorf("maxFileSize override = %d, want 2048", c.maxFileSize())
-	}
-	if c.maxBodyBytes() != 1024 {
-		t.Errorf("maxBodyBytes override = %d, want 1024", c.maxBodyBytes())
-	}
-	// <= 0 falls back to the default.
-	if (RequestLogConfig{MaxFileSize: -1}).maxFileSize() != 1<<30 {
-		t.Error("maxFileSize <= 0 should fall back to 1GiB")
-	}
-	if (RequestLogConfig{MaxBodyBytes: -1}).maxBodyBytes() != 5*1024*1024 {
-		t.Error("maxBodyBytes <= 0 should fall back to 5MiB")
-	}
-}
-
 // --- newRequestID ---
 
 func TestNewRequestID(t *testing.T) {

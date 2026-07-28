@@ -55,7 +55,16 @@
 
 ## 配置
 
-新顶层配置字段的六步同步（`Config` → `rawConfig` → 拷贝段 → validate → YAML 加载测试 → 示例与文档）以 `../docs/engineering/pitfalls.md` 的配置节为权威定义。不要用直接构造 `Config` 的测试替代 YAML 加载覆盖。
+配置类型、YAML 加载、默认值、校验和生效值 accessor 统一归
+`internal/config`；该包只允许依赖 `internal/pricing` 与 `internal/protocol`。
+根包 `config_compat.go` 仅保留类型别名以及 `LoadConfig` /
+`LoadConfigFromBytes` 兼容 wrapper，不得承载配置逻辑，也不得恢复根
+`config.go`。
+
+新顶层配置字段的六步同步（`internal/config.Config` → `rawConfig` → 拷贝段
+→ validate → YAML 加载测试 → 示例与文档）以
+`../docs/engineering/pitfalls.md` 的配置节为权威定义。不要用直接构造
+`Config` 的测试替代 YAML 加载覆盖。
 
 ## CLI
 

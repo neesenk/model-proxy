@@ -960,8 +960,8 @@ func legacyTokensPath() string {
 // stats (in-memory counters still function). Called from runProxy only - direct
 // NewProxy callers (tests) stay in-memory and never touch ~/.model-proxy/.
 func (p *Proxy) initStats(sc StatsConfig) {
-	dbPath := sc.dbPath()
-	ss, err := openStatsStore(dbPath, sc.retention())
+	dbPath := sc.ResolvedDBPath()
+	ss, err := openStatsStore(dbPath, sc.RetentionDuration())
 	if err != nil {
 		log.Printf("[stats] open failed (%s): %v - running without persisted stats", dbPath, err)
 		return

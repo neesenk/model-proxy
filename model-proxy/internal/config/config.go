@@ -1,10 +1,11 @@
-package main
+package config
 
 import (
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -78,7 +79,7 @@ type FusionConfig struct {
 	Instruction string `yaml:"instruction"`
 }
 
-// fusionInstructionMaxRunes caps FusionConfig.Instruction (validate-enforced)
+// fusionInstructionMaxRunes caps FusionConfig.Instruction (validation-enforced)
 // so a pasted essay can't silently bloat every synthesis prompt.
 const fusionInstructionMaxRunes = 4000
 
@@ -106,17 +107,18 @@ type StatsConfig struct {
 	Retention string `yaml:"retention"`
 }
 
-// dbPath returns the SQLite stats DB path, defaulting to ~/.model-proxy/stats.db.
-func (s StatsConfig) dbPath() string {
+// ResolvedDBPath returns the SQLite stats DB path, defaulting to
+// ~/.model-proxy/stats.db.
+func (s StatsConfig) ResolvedDBPath() string {
 	if s.DBPath != "" {
-		return expandPath(s.DBPath)
+		return ExpandPath(s.DBPath)
 	}
 	return filepath.Join(homeDir(), ".model-proxy", "stats.db")
 }
 
-// retention returns the bucket retention duration, defaulting to 30 days.
+// RetentionDuration returns the bucket retention duration, defaulting to 30 days.
 // 0 or "0" keeps history forever.
-func (s StatsConfig) retention() time.Duration {
+func (s StatsConfig) RetentionDuration() time.Duration {
 	if s.Retention == "" {
 		return 720 * time.Hour
 	}
@@ -135,10 +137,11 @@ type PricingConfig struct {
 	SourceURL string `yaml:"source_url"`
 }
 
-func (p PricingConfig) enabled() bool { return p.Enabled }
+// IsEnabled reports whether catalog pricing is enabled.
+func (p PricingConfig) IsEnabled() bool { return p.Enabled }
 
-// ttl returns the catalog cache TTL, defaulting to 24h.
-func (p PricingConfig) ttl() time.Duration {
+// TTLDuration returns the catalog cache TTL, defaulting to 24h.
+func (p PricingConfig) TTLDuration() time.Duration {
 	if p.TTL == "" {
 		return pricing.DefaultTTL
 	}
@@ -148,13 +151,21 @@ func (p PricingConfig) ttl() time.Duration {
 	return pricing.DefaultTTL
 }
 
-// sourceURL returns the pricing endpoint. Precedence: config `source_url` >
+// ResolvedSourceURL returns the pricing endpoint. Precedence: config `source_url` >
 // MP_PRICING_URL env (mirrors MP_MODELSDEV_URL) > OpenRouter default.
-func (p PricingConfig) sourceURL() string {
+func (p PricingConfig) ResolvedSourceURL() string {
 	if p.SourceURL != "" {
 		return p.SourceURL
 	}
 	return pricingEndpoint() // MP_PRICING_URL env, else OpenRouter default
+}
+
+// pricingEndpoint returns the catalog endpoint, overridable via MP_PRICING_URL.
+func pricingEndpoint() string {
+	if value := os.Getenv("MP_PRICING_URL"); value != "" {
+		return value
+	}
+	return pricing.DefaultEndpoint
 }
 
 // PriceConfig is a per-model price override in USD per MILLION tokens (human
@@ -188,36 +199,36 @@ type RequestLogConfig struct {
 	Retention    string `yaml:"retention"`
 }
 
-// dir returns the request-log directory, defaulting to
+// ResolvedDir returns the request-log directory, defaulting to
 // ~/.model-proxy/requests.
-func (r RequestLogConfig) dir() string {
+func (r RequestLogConfig) ResolvedDir() string {
 	if r.Dir != "" {
-		return expandPath(r.Dir)
+		return ExpandPath(r.Dir)
 	}
 	return filepath.Join(homeDir(), ".model-proxy", "requests")
 }
 
-// maxFileSize returns the per-file rotation cap in bytes, defaulting to 1 GiB.
+// MaxFileSizeBytes returns the per-file rotation cap in bytes, defaulting to 1 GiB.
 // Values <= 0 fall back to the default.
-func (r RequestLogConfig) maxFileSize() int64 {
+func (r RequestLogConfig) MaxFileSizeBytes() int64 {
 	if r.MaxFileSize > 0 {
 		return r.MaxFileSize
 	}
 	return 1 << 30 // 1 GiB
 }
 
-// maxBodyBytes returns the per-body capture cap in bytes, defaulting to 5 MiB.
+// MaxBodyBytesValue returns the per-body capture cap in bytes, defaulting to 5 MiB.
 // Values <= 0 fall back to the default.
-func (r RequestLogConfig) maxBodyBytes() int {
+func (r RequestLogConfig) MaxBodyBytesValue() int {
 	if r.MaxBodyBytes > 0 {
 		return r.MaxBodyBytes
 	}
 	return 5 * 1024 * 1024
 }
 
-// retention returns the rotated-file retention duration, defaulting to 30 days.
+// RetentionDuration returns the rotated-file retention duration, defaulting to 30 days.
 // "0" or a zero duration means keep forever (no sweep).
-func (r RequestLogConfig) retention() time.Duration {
+func (r RequestLogConfig) RetentionDuration() time.Duration {
 	if r.Retention == "" {
 		return 720 * time.Hour
 	}
@@ -225,6 +236,45 @@ func (r RequestLogConfig) retention() time.Duration {
 		return d
 	}
 	return 720 * time.Hour
+}
+
+// CacheConfig configures the exact-match response cache.
+type CacheConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	TTL          string `yaml:"ttl"`            // entry expiry (default 10m)
+	MaxEntries   int    `yaml:"max_entries"`    // size cap (default 1000)
+	MaxBodyBytes int    `yaml:"max_body_bytes"` // cache only responses ≤ this (default 256KiB)
+}
+
+// IsEnabled reports whether the exact-match response cache is enabled.
+func (c CacheConfig) IsEnabled() bool { return c.Enabled }
+
+// TTLDuration returns the cache entry TTL, defaulting to 10 minutes.
+func (c CacheConfig) TTLDuration() time.Duration {
+	if c.TTL == "" {
+		return 10 * time.Minute
+	}
+	if d, err := time.ParseDuration(c.TTL); err == nil {
+		return d
+	}
+	return 10 * time.Minute
+}
+
+// MaxEntriesValue returns the cache entry cap, defaulting to 1000.
+func (c CacheConfig) MaxEntriesValue() int {
+	if c.MaxEntries > 0 {
+		return c.MaxEntries
+	}
+	return 1000
+}
+
+// MaxBodyBytesValue returns the largest cacheable response body, defaulting to
+// 256 KiB.
+func (c CacheConfig) MaxBodyBytesValue() int {
+	if c.MaxBodyBytes > 0 {
+		return c.MaxBodyBytes
+	}
+	return 256 * 1024
 }
 
 // Scheduling configures failover health (circuit breaker, rate-limit skip) and
@@ -243,61 +293,61 @@ type Scheduling struct {
 	QuotaSwitchMargin int    `yaml:"quota_switch_margin"` // switch if another plan provider's effective remaining beats current by ≥ this many pct points (default 15)
 }
 
-func (s Scheduling) threshold() int {
+func (s Scheduling) Threshold() int {
 	if s.CircuitThreshold > 0 {
 		return s.CircuitThreshold
 	}
 	return 3
 }
-func (s Scheduling) cooldown() time.Duration {
+func (s Scheduling) Cooldown() time.Duration {
 	if d, err := time.ParseDuration(s.CircuitCooldown); err == nil {
 		return d
 	}
 	return 10 * time.Minute
 }
-func (s Scheduling) rateBackoff() time.Duration {
+func (s Scheduling) RateBackoff() time.Duration {
 	if d, err := time.ParseDuration(s.RateLimitBackoff); err == nil {
 		return d
 	}
 	return 60 * time.Second
 }
-func (s Scheduling) quotaCooldown() time.Duration {
+func (s Scheduling) QuotaCooldownDuration() time.Duration {
 	if d, err := time.ParseDuration(s.QuotaCooldown); err == nil {
 		return d
 	}
 	return time.Hour
 }
-func (s Scheduling) modelLockout() time.Duration {
+func (s Scheduling) ModelLockoutDuration() time.Duration {
 	if d, err := time.ParseDuration(s.ModelLockout); err == nil {
 		return d
 	}
 	return 10 * time.Minute
 }
-func (s Scheduling) retryWait() time.Duration {
+func (s Scheduling) RetryWaitDuration() time.Duration {
 	if d, err := time.ParseDuration(s.RetryWait); err == nil {
 		return d // "0" disables the cooldown wait-retry
 	}
 	return 10 * time.Second
 }
-func (s Scheduling) timeout() time.Duration {
+func (s Scheduling) Timeout() time.Duration {
 	if d, err := time.ParseDuration(s.UpstreamTimeout); err == nil {
 		return d
 	}
 	return 1800 * time.Second
 }
-func (s Scheduling) dwell() time.Duration {
+func (s Scheduling) Dwell() time.Duration {
 	if d, err := time.ParseDuration(s.StickyDwell); err == nil {
 		return d
 	}
 	return 10 * time.Minute
 }
-func (s Scheduling) pollInterval() time.Duration {
+func (s Scheduling) PollInterval() time.Duration {
 	if d, err := time.ParseDuration(s.QuotaPollInterval); err == nil {
 		return d
 	}
 	return 5 * time.Minute
 }
-func (s Scheduling) switchMargin() float64 {
+func (s Scheduling) SwitchMargin() float64 {
 	if s.QuotaSwitchMargin > 0 {
 		return float64(s.QuotaSwitchMargin) / 100.0
 	}
@@ -391,9 +441,9 @@ func (p *PeakConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// peakMultiplier returns the multiplier of whichever peak segment `now` falls
+// PeakMultiplier returns the multiplier of whichever peak segment `now` falls
 // into (1.0 if none / no segments). Used to discount effective remaining quota.
-func (p Provider) peakMultiplier(now time.Time) float64 {
+func (p Provider) PeakMultiplier(now time.Time) float64 {
 	now = now.Local()
 	m := now.Hour()*60 + now.Minute()
 	for _, seg := range p.PeakHours {
@@ -411,24 +461,41 @@ func (p Provider) peakMultiplier(now time.Time) float64 {
 			if seg.Multiplier > 0 {
 				return seg.Multiplier
 			}
-			return defaultPeakMultiplier
+			return DefaultPeakMultiplier
 		}
 	}
 	return 1.0
 }
 
-const defaultPeakMultiplier = 2.0
+const DefaultPeakMultiplier = 2.0
 
-type ProviderModel struct {
-	Context    int64              `yaml:"context"`
-	Output     int                `yaml:"output"`
-	Modalities ProviderModalities `yaml:"modalities"`
-	ToolCall   bool               `yaml:"tool_call"`
+// parseHHMMRange parses a local-time window in HH:MM-HH:MM form.
+func parseHHMMRange(value string) (start, end int, ok bool) {
+	parts := strings.Split(value, "-")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	start, startOK := parseHHMM(parts[0])
+	end, endOK := parseHHMM(parts[1])
+	if !startOK || !endOK {
+		return 0, 0, false
+	}
+	return start, end, true
 }
 
-type ProviderModalities struct {
-	Input  []string `yaml:"input"`
-	Output []string `yaml:"output"`
+// parseHHMM parses a local wall-clock time and returns minutes since midnight.
+func parseHHMM(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 {
+		return 0, false
+	}
+	hour, hourErr := strconv.Atoi(parts[0])
+	minute, minuteErr := strconv.Atoi(parts[1])
+	if hourErr != nil || minuteErr != nil || hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, false
+	}
+	return hour*60 + minute, true
 }
 
 // RouteTarget is one upstream destination for an exposed model name. A route maps
@@ -439,11 +506,10 @@ type RouteTarget struct {
 	Provider string `yaml:"provider"` // config providers[] key
 	Model    string `yaml:"model"`    // real model name at that provider
 	Priority int    `yaml:"priority"` // lower = tried first within a tier/quota band (default 0)
-	// Protocol declares the backend's protocol ("anthropic" or "openai") for
-	// protocol CONVERSION (#11). Empty = same as the client (no conversion, the
-	// default). Set it when a backend speaks a different protocol than the client
-	// (e.g. Claude Code → an OpenAI backend). Conversion covers text/system/
-	// max_tokens/stream; see convert.go.
+	// Protocol declares the backend wire protocol ("anthropic", "openai", or
+	// "responses"). Empty means the client protocol is forwarded unchanged.
+	// Set it only when the target requires cross-protocol conversion; the exact
+	// conversion contract belongs to internal/protocol.
 	Protocol string `yaml:"protocol"`
 }
 
@@ -459,8 +525,8 @@ type Takeover struct {
 	ProviderID string `yaml:"provider_id"`
 }
 
-// expandPath expands ~ and the env: prefix.
-func expandPath(p string) string {
+// ExpandPath expands ~ and the env: prefix.
+func ExpandPath(p string) string {
 	if p == "" {
 		return p
 	}
@@ -474,6 +540,11 @@ func expandPath(p string) string {
 		}
 	}
 	return p
+}
+
+func homeDir() string {
+	home, _ := os.UserHomeDir()
+	return home
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -545,7 +616,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Fusion = raw.Fusion
 	cfg.Pricing = raw.Pricing
 	cfg.Prices = raw.Prices
-	cfg.LogFile = expandPath(cfg.LogFile)
+	cfg.LogFile = ExpandPath(cfg.LogFile)
 	t := &cfg.Takeover
 	// Takeover paths default to each client's standard config location (and
 	// provider_id to "model-proxy"), so config.yaml can omit the entire
@@ -566,10 +637,10 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	if t.Pi == "" {
 		t.Pi = "~/.pi/agent/models.json"
 	}
-	t.Claude = expandPath(t.Claude)
-	t.Opencode = expandPath(t.Opencode)
-	t.Codex = expandPath(t.Codex)
-	t.Pi = expandPath(t.Pi)
+	t.Claude = ExpandPath(t.Claude)
+	t.Opencode = ExpandPath(t.Opencode)
+	t.Codex = ExpandPath(t.Codex)
+	t.Pi = ExpandPath(t.Pi)
 	if t.ProxyURL == "" && cfg.Listen != "" {
 		t.ProxyURL = "http://" + cfg.Listen
 	}

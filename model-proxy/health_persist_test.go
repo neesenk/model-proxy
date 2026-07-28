@@ -63,9 +63,9 @@ func TestHealthPersist_RoundTrip(t *testing.T) {
 	if !hb.circuitOpenUntil.Equal(circuitUntil) {
 		t.Errorf("circuitOpenUntil = %s, want %s", hb.circuitOpenUntil, circuitUntil)
 	}
-	if hb.consecutiveFailures != cfg.Scheduling.threshold() {
+	if hb.consecutiveFailures != cfg.Scheduling.Threshold() {
 		t.Errorf("restored circuit failures = %d, want threshold %d (next failure re-opens)",
-			hb.consecutiveFailures, cfg.Scheduling.threshold())
+			hb.consecutiveFailures, cfg.Scheduling.Threshold())
 	}
 
 	if _, ok := p2.health["c"]; ok {

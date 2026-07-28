@@ -37,7 +37,7 @@ func cmdTest(args []string) {
 		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", cRed("✗"), model, routeNames(cfg))
 		os.Exit(1)
 	}
-	client := &http.Client{Timeout: cfg.Scheduling.timeout()}
+	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
 	anyOK := false
 	for _, t := range targets {
 		ok, status, reason, latency := probeRouteTarget(client, cfg, t)

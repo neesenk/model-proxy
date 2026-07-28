@@ -7,23 +7,6 @@ import (
 	"time"
 )
 
-// TestCacheConfigDefaults: zero-value config falls back to documented defaults.
-func TestCacheConfigDefaults(t *testing.T) {
-	var c CacheConfig
-	if c.ttl() != 10*time.Minute {
-		t.Errorf("default ttl=%v want 10m", c.ttl())
-	}
-	if c.maxEntries() != 1000 {
-		t.Errorf("default maxEntries=%d want 1000", c.maxEntries())
-	}
-	if c.maxBody() != 256*1024 {
-		t.Errorf("default maxBody=%d want 256KiB", c.maxBody())
-	}
-	if c.enabled() {
-		t.Error("default enabled should be false")
-	}
-}
-
 // TestPinEntryExpiresLabel: no-expiry, future, and past states render distinctly.
 func TestPinEntryExpiresLabel(t *testing.T) {
 	now := time.Now()

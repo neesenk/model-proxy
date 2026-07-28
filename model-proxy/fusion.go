@@ -347,7 +347,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// text analysis; tools/tool_choice are the synthesizer's job.
 	body = stripFusionDraftFields(body)
 
-	legCtx, cancelLeg := context.WithTimeout(ctx, sched.timeout())
+	legCtx, cancelLeg := context.WithTimeout(ctx, sched.Timeout())
 	defer cancelLeg()
 	var (
 		req           *http.Request

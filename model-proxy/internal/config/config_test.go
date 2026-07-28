@@ -1,6 +1,7 @@
-package main
+package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 //   - anthropic_base_url including /v1 (proxy keeps /v1/messages → double /v1)
 //   - wrong base URL patterns
 func TestConfig_ProviderBaseURLs(t *testing.T) {
-	cfg, err := LoadConfig("config.yaml")
+	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestConfig_ProviderBaseURLs(t *testing.T) {
 // TestConfig_RouteTargets verifies every route target references an existing
 // provider and has a non-empty model name.
 func TestConfig_RouteTargets(t *testing.T) {
-	cfg, err := LoadConfig("config.yaml")
+	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -82,7 +83,7 @@ func TestConfig_RouteTargets(t *testing.T) {
 
 // TestConfig_ClaudeMapping verifies claude_mapping values reference existing routes.
 func TestConfig_ClaudeMapping(t *testing.T) {
-	cfg, err := LoadConfig("config.yaml")
+	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -99,7 +100,7 @@ func TestConfig_ClaudeMapping(t *testing.T) {
 // TestConfig_UpstreamURLPreview prints the exact upstream URLs the proxy would
 // build for each provider×protocol. Useful for manual review — run with -v.
 func TestConfig_UpstreamURLPreview(t *testing.T) {
-	cfg, err := LoadConfig("config.yaml")
+	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -427,41 +428,41 @@ func TestProvider_PeakMultiplier(t *testing.T) {
 	}}
 	parseHHMMRange("09:00-12:00") // ensure parser initialized
 	at := func(h, m int) time.Time { return time.Date(2026, 7, 5, h, m, 0, 0, time.Local) }
-	if got := p.peakMultiplier(at(10, 0)); got != 2 {
+	if got := p.PeakMultiplier(at(10, 0)); got != 2 {
 		t.Errorf("10:00 (in 09-12) mult=%v, want 2", got)
 	}
-	if got := p.peakMultiplier(at(15, 0)); got != 3 {
+	if got := p.PeakMultiplier(at(15, 0)); got != 3 {
 		t.Errorf("15:00 (in 14-18) mult=%v, want 3", got)
 	}
-	if got := p.peakMultiplier(at(13, 0)); got != 1 {
+	if got := p.PeakMultiplier(at(13, 0)); got != 1 {
 		t.Errorf("13:00 (no segment) mult=%v, want 1", got)
 	}
 	// Window edges: start inclusive, end exclusive.
-	if got := p.peakMultiplier(at(9, 0)); got != 2 {
+	if got := p.PeakMultiplier(at(9, 0)); got != 2 {
 		t.Errorf("09:00 (window start, inclusive) mult=%v, want 2", got)
 	}
-	if got := p.peakMultiplier(at(12, 0)); got != 1 {
+	if got := p.PeakMultiplier(at(12, 0)); got != 1 {
 		t.Errorf("12:00 (window end, exclusive) mult=%v, want 1", got)
 	}
-	if got := p.peakMultiplier(at(14, 0)); got != 3 {
+	if got := p.PeakMultiplier(at(14, 0)); got != 3 {
 		t.Errorf("14:00 (second window start, inclusive) mult=%v, want 3", got)
 	}
-	if got := p.peakMultiplier(at(18, 0)); got != 1 {
+	if got := p.PeakMultiplier(at(18, 0)); got != 1 {
 		t.Errorf("18:00 (second window end, exclusive) mult=%v, want 1", got)
 	}
 }
 
 func TestScheduling_QuotaDefaults(t *testing.T) {
 	var s Scheduling
-	if s.pollInterval() != 5*time.Minute {
-		t.Errorf("default pollInterval=%v, want 5m", s.pollInterval())
+	if s.PollInterval() != 5*time.Minute {
+		t.Errorf("default pollInterval=%v, want 5m", s.PollInterval())
 	}
-	if s.switchMargin() != 0.15 {
-		t.Errorf("default switchMargin=%v, want 0.15", s.switchMargin())
+	if s.SwitchMargin() != 0.15 {
+		t.Errorf("default switchMargin=%v, want 0.15", s.SwitchMargin())
 	}
 	s.QuotaSwitchMargin = 20
-	if s.switchMargin() != 0.20 {
-		t.Errorf("switchMargin(20)=%v, want 0.20", s.switchMargin())
+	if s.SwitchMargin() != 0.20 {
+		t.Errorf("switchMargin(20)=%v, want 0.20", s.SwitchMargin())
 	}
 }
 
@@ -504,14 +505,14 @@ func TestPricingConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Pricing.enabled() {
+	if !cfg.Pricing.IsEnabled() {
 		t.Error("pricing should default to enabled")
 	}
-	if cfg.Pricing.ttl() != 24*time.Hour {
-		t.Errorf("default ttl = %v, want 24h", cfg.Pricing.ttl())
+	if cfg.Pricing.TTLDuration() != 24*time.Hour {
+		t.Errorf("default ttl = %v, want 24h", cfg.Pricing.TTLDuration())
 	}
-	if cfg.Pricing.sourceURL() != "https://openrouter.ai/api/v1/models" {
-		t.Errorf("default source = %q", cfg.Pricing.sourceURL())
+	if cfg.Pricing.ResolvedSourceURL() != "https://openrouter.ai/api/v1/models" {
+		t.Errorf("default source = %q", cfg.Pricing.ResolvedSourceURL())
 	}
 	if cfg.Prices != nil && len(cfg.Prices) != 0 {
 		t.Errorf("prices should default empty, got %v", cfg.Prices)
@@ -620,7 +621,7 @@ func TestPricingConfigSourceURL_Precedence(t *testing.T) {
 
 	t.Run("config_wins_over_env", func(t *testing.T) {
 		t.Setenv("MP_PRICING_URL", "http://env.example/models")
-		got := (PricingConfig{SourceURL: "http://cfg.example/m"}).sourceURL()
+		got := (PricingConfig{SourceURL: "http://cfg.example/m"}).ResolvedSourceURL()
 		if got != "http://cfg.example/m" {
 			t.Errorf("config should win over env: got %q", got)
 		}
@@ -628,7 +629,7 @@ func TestPricingConfigSourceURL_Precedence(t *testing.T) {
 
 	t.Run("env_when_config_unset", func(t *testing.T) {
 		t.Setenv("MP_PRICING_URL", "http://env.example/models")
-		got := (PricingConfig{}).sourceURL()
+		got := (PricingConfig{}).ResolvedSourceURL()
 		if got != "http://env.example/models" {
 			t.Errorf("env fallback wrong: got %q, want %q", got, "http://env.example/models")
 		}
@@ -636,7 +637,7 @@ func TestPricingConfigSourceURL_Precedence(t *testing.T) {
 
 	t.Run("default_when_neither_set", func(t *testing.T) {
 		t.Setenv("MP_PRICING_URL", "")
-		got := (PricingConfig{}).sourceURL()
+		got := (PricingConfig{}).ResolvedSourceURL()
 		if got != def {
 			t.Errorf("default wrong: got %q, want %q", got, def)
 		}

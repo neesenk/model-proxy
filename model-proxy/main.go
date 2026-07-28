@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/provider"
 )
 
@@ -820,7 +821,7 @@ func cmdConfig(args []string) {
 		fmt.Printf("  claude_mapping: %d\n", len(cfg.ClaudeMapping))
 		s := cfg.Scheduling
 		fmt.Printf("  scheduling: threshold=%d cooldown=%s rate_backoff=%s timeout=%s dwell=%s\n",
-			s.threshold(), s.cooldown(), s.rateBackoff(), s.timeout(), s.dwell())
+			s.Threshold(), s.Cooldown(), s.RateBackoff(), s.Timeout(), s.Dwell())
 		// Config-time routing hazards (explicit routes only — implicit routes are
 		// a daemon-side concept; the daemon logs these at boot/reload).
 		for _, w := range configRoutingWarnings(cfg, cfg.Routes) {
@@ -1053,7 +1054,7 @@ func doctorWithCfg(cfg *Config) int {
 	s := cfg.Scheduling
 	fmt.Printf("\n%s\n", cBold("Scheduling"))
 	fmt.Printf("  sticky_dwell=%s  quota_poll_interval=%s  quota_switch_margin=%d pts  circuit=(threshold %d, cooldown %s)\n",
-		s.dwell(), s.pollInterval(), s.QuotaSwitchMargin, s.threshold(), s.cooldown())
+		s.Dwell(), s.PollInterval(), s.QuotaSwitchMargin, s.Threshold(), s.Cooldown())
 	if warns > 0 {
 		fmt.Printf("\n%s %d warning(s)\n", cYellow("⚠"), warns)
 	} else {
@@ -1094,7 +1095,7 @@ func peakSummary(ph PeakConfig) string {
 	for _, seg := range ph {
 		mult := seg.Multiplier
 		if mult == 0 {
-			mult = defaultPeakMultiplier
+			mult = configdomain.DefaultPeakMultiplier
 		}
 		parts = append(parts, fmt.Sprintf("%s(×%g)", seg.Window, mult))
 	}

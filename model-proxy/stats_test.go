@@ -730,46 +730,6 @@ func TestParseStatsFlags(t *testing.T) {
 	}
 }
 
-func TestConfigAccessors(t *testing.T) {
-	// StatsConfig.dbPath: explicit + default.
-	if got := (StatsConfig{DBPath: "/tmp/x.db"}).dbPath(); got != "/tmp/x.db" {
-		t.Errorf("dbPath explicit=%q want /tmp/x.db", got)
-	}
-	if got := (StatsConfig{}).dbPath(); !strings.HasSuffix(got, ".model-proxy/stats.db") {
-		t.Errorf("dbPath default=%q want suffix .model-proxy/stats.db", got)
-	}
-	// StatsConfig.retention: empty -> 30d; "0" -> 0; "48h" -> 48h; bad -> 30d.
-	if got := (StatsConfig{}).retention(); got != 720*time.Hour {
-		t.Errorf("retention empty=%v want 720h", got)
-	}
-	if got := (StatsConfig{Retention: "0"}).retention(); got != 0 {
-		t.Errorf("retention 0=%v want 0", got)
-	}
-	if got := (StatsConfig{Retention: "48h"}).retention(); got != 48*time.Hour {
-		t.Errorf("retention 48h=%v want 48h", got)
-	}
-	if got := (StatsConfig{Retention: "bogus"}).retention(); got != 720*time.Hour {
-		t.Errorf("retention bogus=%v want 720h (fallback)", got)
-	}
-	// RequestLogConfig.retention: same shape.
-	if got := (RequestLogConfig{}).retention(); got != 720*time.Hour {
-		t.Errorf("reqlog retention empty=%v want 720h", got)
-	}
-	if got := (RequestLogConfig{Retention: "12h"}).retention(); got != 12*time.Hour {
-		t.Errorf("reqlog retention 12h=%v want 12h", got)
-	}
-	if got := (RequestLogConfig{Retention: "bogus"}).retention(); got != 720*time.Hour {
-		t.Errorf("reqlog retention bogus=%v want 720h", got)
-	}
-	// Scheduling.pollInterval: valid + default.
-	if got := (Scheduling{QuotaPollInterval: "30s"}).pollInterval(); got != 30*time.Second {
-		t.Errorf("pollInterval 30s=%v want 30s", got)
-	}
-	if got := (Scheduling{}).pollInterval(); got != 5*time.Minute {
-		t.Errorf("pollInterval empty=%v want 5m", got)
-	}
-}
-
 func TestFormatStatsTable(t *testing.T) {
 	// Empty buckets -> "no stats" line.
 	out := formatStatsTable(statsResp{From: 1700000000, To: 1700003600, Bucket: 60})

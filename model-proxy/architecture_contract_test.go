@@ -22,6 +22,9 @@ import (
 //     provider lookup, protocol selection or request conversion.
 //   - daemon.go must not start Proxy-level background tasks directly — they
 //     are owned by proxyLifecycle (startRuntimeServices / Proxy.Close).
+//   - internal/config owns configuration behind a root compatibility facade;
+//     its only repository imports are internal/pricing and internal/protocol,
+//     while config_compat.go contains only type aliases and load wrappers.
 //
 // Being AST-based, comments and string literals can no longer false-positive,
 // and only actual selector/call expressions are judged. Known limits (accepted,
@@ -116,6 +119,22 @@ func TestArchitectureBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("internal config owns configuration behind a narrow root facade", func(t *testing.T) {
+		assertRepositoryPackageImports(t, "internal/config", map[string]bool{
+			"model-proxy/internal/pricing":  true,
+			"model-proxy/internal/protocol": true,
+		})
+		if _, err := os.Stat("config.go"); err == nil {
+			t.Error("legacy root config.go must not exist; configuration belongs in internal/config")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat config.go: %v", err)
+		}
+		facade, _ := parseGoFile(t, "config_compat.go")
+		if got := configCompatViolations(facade); len(got) != 0 {
+			t.Errorf("config_compat.go must contain only internal/config type aliases and direct Load wrappers: %v", got)
+		}
+	})
+
 	t.Run("internal pricing remains a repository-leaf package", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/pricing")
 	})
@@ -147,6 +166,11 @@ func TestArchitectureBoundaries(t *testing.T) {
 
 func assertRepositoryLeafPackage(t *testing.T, directory string) {
 	t.Helper()
+	assertRepositoryPackageImports(t, directory, nil)
+}
+
+func assertRepositoryPackageImports(t *testing.T, directory string, allowed map[string]bool) {
+	t.Helper()
 	files, err := filepath.Glob(filepath.Join(directory, "*.go"))
 	if err != nil {
 		t.Fatal(err)
@@ -159,14 +183,186 @@ func assertRepositoryLeafPackage(t *testing.T, directory string) {
 			continue
 		}
 		f, _ := parseGoFile(t, path)
-		for _, spec := range f.Imports {
-			importPath := strings.Trim(spec.Path.Value, `"`)
-			if strings.HasPrefix(importPath, "model-proxy/") {
-				t.Errorf("%s imports repository package %q; %s must remain a leaf",
-					filepath.Base(path), importPath, directory)
+		for _, importPath := range unexpectedRepositoryImports(f, allowed) {
+			t.Errorf("%s imports repository package %q outside %s allowlist",
+				filepath.Base(path), importPath, directory)
+		}
+	}
+}
+
+func unexpectedRepositoryImports(f *ast.File, allowed map[string]bool) []string {
+	var out []string
+	for _, spec := range f.Imports {
+		importPath := strings.Trim(spec.Path.Value, `"`)
+		if strings.HasPrefix(importPath, "model-proxy/") && !allowed[importPath] {
+			out = append(out, importPath)
+		}
+	}
+	return sortedNames(out)
+}
+
+func requiredConfigCompatAliases() map[string]string {
+	return map[string]string{
+		"CacheConfig":      "CacheConfig",
+		"Config":           "Config",
+		"FusionConfig":     "FusionConfig",
+		"PeakConfig":       "PeakConfig",
+		"PeakSegment":      "PeakSegment",
+		"PriceConfig":      "PriceConfig",
+		"PricingConfig":    "PricingConfig",
+		"Provider":         "Provider",
+		"RequestLogConfig": "RequestLogConfig",
+		"RouteTarget":      "RouteTarget",
+		"Scheduling":       "Scheduling",
+		"ShadowTarget":     "ShadowTarget",
+		"StatsConfig":      "StatsConfig",
+		"Takeover":         "Takeover",
+		"WebConfig":        "WebConfig",
+	}
+}
+
+func configCompatViolations(f *ast.File) []string {
+	return configCompatViolationsForAliases(f, requiredConfigCompatAliases())
+}
+
+func configCompatViolationsForAliases(f *ast.File, expectedAliases map[string]string) []string {
+	var out []string
+	configPackage := ""
+	for _, spec := range f.Imports {
+		importPath := strings.Trim(spec.Path.Value, `"`)
+		if importPath != "model-proxy/internal/config" {
+			out = append(out, "unexpected import "+importPath)
+			continue
+		}
+		if configPackage != "" {
+			out = append(out, "duplicate internal/config import")
+			continue
+		}
+		configPackage = "config"
+		if spec.Name != nil {
+			configPackage = spec.Name.Name
+		}
+		if configPackage == "." || configPackage == "_" {
+			out = append(out, "invalid internal/config import name "+configPackage)
+		}
+	}
+	if configPackage == "" {
+		out = append(out, "missing internal/config import")
+	}
+
+	wrappers := map[string]int{
+		"LoadConfig":          0,
+		"LoadConfigFromBytes": 0,
+	}
+	aliases := make(map[string]int, len(expectedAliases))
+	for _, decl := range f.Decls {
+		switch decl := decl.(type) {
+		case *ast.GenDecl:
+			switch decl.Tok {
+			case token.IMPORT:
+				continue
+			case token.TYPE:
+				for _, spec := range decl.Specs {
+					typeSpec, ok := spec.(*ast.TypeSpec)
+					if !ok || !typeSpec.Assign.IsValid() {
+						out = append(out, "non-alias type declaration")
+						continue
+					}
+					remoteName, ok := configSelectorName(typeSpec.Type, configPackage)
+					if !ok {
+						out = append(out, "non-config alias "+typeSpec.Name.Name)
+						continue
+					}
+					localName := typeSpec.Name.Name
+					expectedRemote, expected := expectedAliases[localName]
+					if !expected {
+						out = append(out, fmt.Sprintf("unexpected alias %s=%s", localName, remoteName))
+						continue
+					}
+					aliases[localName]++
+					if remoteName != expectedRemote {
+						out = append(out, fmt.Sprintf("alias %s=%s, want %s", localName, remoteName, expectedRemote))
+					}
+				}
+			default:
+				out = append(out, "non-type declaration "+decl.Tok.String())
+			}
+		case *ast.FuncDecl:
+			if _, ok := wrappers[decl.Name.Name]; !ok {
+				out = append(out, "unexpected function "+decl.Name.Name)
+				continue
+			}
+			wrappers[decl.Name.Name]++
+			if !isDirectConfigLoadWrapper(decl, configPackage) {
+				out = append(out, "non-forwarding wrapper "+decl.Name.Name)
+			}
+		default:
+			out = append(out, fmt.Sprintf("unexpected declaration %T", decl))
+		}
+	}
+	for localName := range expectedAliases {
+		if aliases[localName] != 1 {
+			out = append(out, fmt.Sprintf("%s aliases = %d, want 1", localName, aliases[localName]))
+		}
+	}
+	for name, count := range wrappers {
+		if count != 1 {
+			out = append(out, fmt.Sprintf("%s declarations = %d, want 1", name, count))
+		}
+	}
+	return sortedNames(out)
+}
+
+func configSelectorName(expr ast.Expr, packageName string) (string, bool) {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || pkg.Name != packageName {
+		return "", false
+	}
+	return sel.Sel.Name, true
+}
+
+func isDirectConfigLoadWrapper(fn *ast.FuncDecl, packageName string) bool {
+	if fn.Recv != nil || fn.Body == nil || len(fn.Body.List) != 1 {
+		return false
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	call, ok := ret.Results[0].(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != fn.Name.Name {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || pkg.Name != packageName {
+		return false
+	}
+	var params []string
+	if fn.Type.Params != nil {
+		for _, field := range fn.Type.Params.List {
+			for _, name := range field.Names {
+				params = append(params, name.Name)
 			}
 		}
 	}
+	if len(call.Args) != len(params) {
+		return false
+	}
+	for i, arg := range call.Args {
+		id, ok := arg.(*ast.Ident)
+		if !ok || id.Name != params[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestTargetExecutionArchitecture protects the next layer below targetPlan:
@@ -416,6 +612,71 @@ func (w *webServer) h() {
 	f, _ = parse(`func h() { go unowned() }`)
 	if got := goStatementCount(f); got != 1 {
 		t.Errorf("bare goroutine check: got %d, want 1", got)
+	}
+
+	// Repository import allowlists distinguish true leaves from internal/config,
+	// which may use exactly pricing and protocol.
+	f, _ = parse(`import (
+	"model-proxy/internal/pricing"
+	"model-proxy/internal/protocol"
+)`)
+	configImports := map[string]bool{
+		"model-proxy/internal/pricing":  true,
+		"model-proxy/internal/protocol": true,
+	}
+	if got := unexpectedRepositoryImports(f, configImports); len(got) != 0 {
+		t.Errorf("config import allowlist rejected allowed dependencies: %v", got)
+	}
+	if got := unexpectedRepositoryImports(f, map[string]bool{
+		"model-proxy/internal/pricing": true,
+	}); len(got) != 1 || got[0] != "model-proxy/internal/protocol" {
+		t.Errorf("config import allowlist positive control: got %v, want internal/protocol", got)
+	}
+
+	// The root config facade accepts aliases and exact argument-forwarding load
+	// wrappers, but rejects implementation, extra imports, and indirect bodies.
+	f, _ = parse(`import "model-proxy/internal/config"
+type Config = config.Config
+func LoadConfig(path string) (*Config, error) {
+	return config.LoadConfig(path)
+}
+func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
+	return config.LoadConfigFromBytes(path, data)
+}`)
+	if got := configCompatViolationsForAliases(f, map[string]string{"Config": "Config"}); len(got) != 0 {
+		t.Errorf("valid config facade rejected: %v", got)
+	}
+	f, _ = parse(`import (
+	"model-proxy/internal/config"
+	"model-proxy/internal/pricing"
+)
+type Config config.Config
+const implementation = 1
+func LoadConfig(path string) (*Config, error) {
+	cfg, err := config.LoadConfig(path)
+	return cfg, err
+}
+func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
+	return config.LoadConfigFromBytes(path, data)
+}
+func helper() {}`)
+	if got := configCompatViolationsForAliases(f, map[string]string{"Config": "Config"}); len(got) < 4 {
+		t.Errorf("config facade positive control found %v, want import/type/const/wrapper/function violations", got)
+	}
+	f, _ = parse(`import "model-proxy/internal/config"
+type Config = config.StatsConfig
+func LoadConfig(path string) (*Config, error) {
+	return config.LoadConfig(path)
+}
+func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
+	return config.LoadConfigFromBytes(path, data)
+}`)
+	aliasViolations := configCompatViolationsForAliases(f, map[string]string{
+		"Config":    "Config",
+		"WebConfig": "WebConfig",
+	})
+	if len(aliasViolations) != 2 {
+		t.Errorf("config facade alias mapping control: got %v, want wrong Config target plus missing WebConfig", aliasViolations)
 	}
 
 	// Call rules: plain and receiver calls fire; comments don't.

@@ -184,7 +184,7 @@ func checkProviderModels(cfg *Config, provName string, ids []string) (kept []str
 		return nil, nil, err
 	}
 
-	client := &http.Client{Timeout: cfg.Scheduling.timeout()}
+	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
 
 	type result struct {
 		idx    int

@@ -8,45 +8,6 @@ import (
 	"model-proxy/provider"
 )
 
-// --- parseHHMM edge cases ---
-
-func TestParseHHMM(t *testing.T) {
-	for _, tc := range []struct {
-		in string
-		ok bool
-	}{
-		{"00:00", true},
-		{"23:59", true},
-		{"24:00", false}, // hour out of range
-		{"12:60", false}, // minute out of range
-		{"12", false},    // missing minute
-		{"", false},
-		{"ab:cd", false},
-	} {
-		_, ok := parseHHMM(tc.in)
-		if ok != tc.ok {
-			t.Errorf("parseHHMM(%q) ok=%v want %v", tc.in, ok, tc.ok)
-		}
-	}
-}
-
-// --- parseHHMMRange ---
-
-func TestParseHHMMRange(t *testing.T) {
-	_, _, ok := parseHHMMRange("09:00-18:00")
-	if !ok {
-		t.Error("parseHHMMRange(09:00-18:00) want ok")
-	}
-	_, _, ok = parseHHMMRange("bad")
-	if ok {
-		t.Error("parseHHMMRange(bad) want not ok")
-	}
-	_, _, ok = parseHHMMRange("09:00-18:00-20:00")
-	if ok {
-		t.Error("parseHHMMRange(3 parts) want not ok")
-	}
-}
-
 // --- billingClassName all tiers ---
 
 func TestBillingClassName(t *testing.T) {

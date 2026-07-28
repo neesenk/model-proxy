@@ -22,13 +22,6 @@ const pricingIntegrationFixture = `{
   ]
 }`
 
-func TestPricingEndpoint_EnvOverride(t *testing.T) {
-	t.Setenv("MP_PRICING_URL", "http://example.test/models")
-	if got := pricingEndpoint(); got != "http://example.test/models" {
-		t.Errorf("env override ignored: got %q", got)
-	}
-}
-
 func TestPricingCachePathUsesApplicationHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

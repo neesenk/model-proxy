@@ -144,7 +144,7 @@ func (t *quotaTracker) launch(fn func()) bool {
 func (t *quotaTracker) start() {
 	t.load() // baseline before first poll
 	t.launch(func() {
-		interval := t.cfg().Scheduling.pollInterval()
+		interval := t.cfg().Scheduling.PollInterval()
 		// bootstrap poll shortly after start, as a one-shot timer in the same
 		// goroutine — keeps the lifecycle to a single tracked goroutine (the
 		// bootstrap used to spawn a second, untracked one via pollAfter).
@@ -323,7 +323,7 @@ func (t *quotaTracker) refreshOne(name string, generations ...uint64) {
 		return
 	}
 	now := time.Now()
-	half := t.cfg().Scheduling.pollInterval() / 2
+	half := t.cfg().Scheduling.PollInterval() / 2
 	t.mu.Lock()
 	g := t.refreshGuard[name]
 	if g == nil {

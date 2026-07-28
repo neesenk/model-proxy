@@ -821,7 +821,7 @@ func (p *Proxy) initRequestLog(rlc RequestLogConfig) {
 	if !rlc.Enabled {
 		return
 	}
-	p.reqLog = newRequestLogger(rlc.dir(), rlc.maxFileSize(), rlc.maxBodyBytes(), rlc.retention())
+	p.reqLog = newRequestLogger(rlc.ResolvedDir(), rlc.MaxFileSizeBytes(), rlc.MaxBodyBytesValue(), rlc.RetentionDuration())
 	log.Printf("[request_log] enabled -> %s (max_file_size %d bytes, max_body %d bytes, retention %s)",
-		rlc.dir(), rlc.maxFileSize(), rlc.maxBodyBytes(), rlc.retention())
+		rlc.ResolvedDir(), rlc.MaxFileSizeBytes(), rlc.MaxBodyBytesValue(), rlc.RetentionDuration())
 }
