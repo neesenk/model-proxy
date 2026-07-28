@@ -49,6 +49,9 @@
   只负责 loop、final flush 与 Store close；Web 仍经 `proxyReadView` 查询。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
+- wire capability 的三态、选择策略和并发状态统一归
+  `internal/runtime/wirecap`；其 Store mutex 是 leaf lock，持锁时不得回调
+  Proxy。根 `wirecap.go` 只负责 probe、provider/config 适配与持久化调度。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。
 - provider config 通过 parentOf 解析，runtime implementation 使用虚拟 provider id 查找。
 - reload 应让请求看到一致的 cfg/providers/poolIndex/expandedRoutes generation。

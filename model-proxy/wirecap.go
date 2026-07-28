@@ -37,60 +37,22 @@ import (
 	"sync"
 	"time"
 
+	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/provider"
 )
 
-// triState is a three-valued probe verdict: unknown (not probed / probe
-// inconclusive), yes (endpoint exists), no (endpoint does not exist).
-type triState int
+// Compatibility aliases keep the application adapter readable while the
+// verdict, JSON contract, policy, and concurrent Store live in the runtime
+// wire-capability package.
+type triState = runtimewire.Verdict
 
 const (
-	triUnknown triState = iota
-	triYes
-	triNo
+	triUnknown = runtimewire.Unknown
+	triYes     = runtimewire.Yes
+	triNo      = runtimewire.No
 )
 
-func (s triState) String() string {
-	switch s {
-	case triYes:
-		return "yes"
-	case triNo:
-		return "no"
-	default:
-		return "unknown"
-	}
-}
-
-func parseTriState(s string) triState {
-	switch s {
-	case "yes":
-		return triYes
-	case "no":
-		return triNo
-	default:
-		return triUnknown
-	}
-}
-
-func (s triState) MarshalJSON() ([]byte, error) { return []byte(`"` + s.String() + `"`), nil }
-
-func (s *triState) UnmarshalJSON(b []byte) error {
-	*s = parseTriState(strings.Trim(string(b), `"`))
-	return nil
-}
-
-// wireCaps is one provider's probed wire capability verdict. Keyed by PARENT
-// provider name (pool virtuals share the parent's base URL). Persisted as a
-// top-level "wire_caps" key in quota_state.json — restored on boot only when
-// the recorded base_url still matches the current config (an endpoint change
-// invalidates the verdict), and NOT gated on the health config fingerprint
-// (capabilities are endpoint properties, independent of credentials/quota).
-type wireCaps struct {
-	BaseURL   string    `json:"base_url"`
-	Responses triState  `json:"responses"`
-	Anthropic triState  `json:"anthropic"`
-	ProbedAt  time.Time `json:"probed_at"`
-}
+type wireCaps = runtimewire.Capabilities
 
 const (
 	// wireCapProbeConcurrency bounds concurrent probe requests across
@@ -106,13 +68,7 @@ const (
 // wireLegFresh reports whether a concluded verdict is still trusted: a "yes"
 // indefinitely, a "no" only within wireCapNegativeTTL.
 func wireLegFresh(v triState, probedAt time.Time) bool {
-	switch v {
-	case triYes:
-		return true
-	case triNo:
-		return time.Since(probedAt) < wireCapNegativeTTL
-	}
-	return false
+	return runtimewire.LegFresh(v, probedAt, time.Now(), wireCapNegativeTTL)
 }
 
 // wireCapProbeTimeout caps one probe request. A var (not const) so tests can
@@ -126,16 +82,7 @@ var wireCapProbeTimeout = 10 * time.Second
 // connection errors and 5xx → unknown: no negative conclusion is cached, so
 // the next boot re-probes.
 func classifyWireStatus(status int, err error) triState {
-	if err != nil {
-		return triUnknown
-	}
-	if status == 404 {
-		return triNo
-	}
-	if status >= 200 && status < 500 {
-		return triYes
-	}
-	return triUnknown
+	return runtimewire.ClassifyStatus(status, err)
 }
 
 // wireProbeBodies builds the two minimal probe bodies (responses, anthropic).
@@ -286,31 +233,17 @@ func (p *Proxy) probeAllWireCaps() {
 
 // wireVerdict returns the stored verdict for a provider (parent name).
 func (p *Proxy) wireVerdict(name string) (wireCaps, bool) {
-	p.wireCapMu.RLock()
-	defer p.wireCapMu.RUnlock()
-	c, ok := p.wireCaps[name]
-	return c, ok
+	return p.wireCaps.Get(name)
 }
 
 // setWireCaps stores a verdict (parent name).
 func (p *Proxy) setWireCaps(name string, caps wireCaps) {
-	p.wireCapMu.Lock()
-	if p.wireCaps == nil {
-		p.wireCaps = map[string]wireCaps{}
-	}
-	p.wireCaps[name] = caps
-	p.wireCapMu.Unlock()
+	p.wireCaps.Put(name, caps)
 }
 
 // wireCapsSnapshot returns a copy of the verdict map for persistence.
 func (p *Proxy) wireCapsSnapshot() map[string]wireCaps {
-	p.wireCapMu.RLock()
-	defer p.wireCapMu.RUnlock()
-	out := make(map[string]wireCaps, len(p.wireCaps))
-	for k, v := range p.wireCaps {
-		out[k] = v
-	}
-	return out
+	return p.wireCaps.Snapshot()
 }
 
 // persistWireCaps triggers an ASYNC persist (never synchronous from the
@@ -348,15 +281,7 @@ func (p *Proxy) noteWireResponsesMiss(name string) {
 	if par, ok := parentOf[name]; ok {
 		parent = par
 	}
-	p.wireCapMu.Lock()
-	caps := p.wireCaps[parent]
-	caps.Responses = triNo
-	caps.ProbedAt = time.Now()
-	if p.wireCaps == nil {
-		p.wireCaps = map[string]wireCaps{}
-	}
-	p.wireCaps[parent] = caps
-	p.wireCapMu.Unlock()
+	p.wireCaps.MarkResponsesUnsupported(parent, time.Now())
 	p.persistWireCaps()
 }
 
@@ -392,30 +317,7 @@ func (p *Proxy) startWireCapProbe() {
 //	responses client + otherwise                       → passthrough (unchanged)
 //	chat client                                        → passthrough (unchanged)
 func resolveByWire(clientProto string, hasAnthropicBase bool, caps wireCaps, ok bool) (proto string, viaResponsesVerdict bool) {
-	switch clientProto {
-	case "anthropic":
-		if hasAnthropicBase {
-			return "anthropic", false
-		}
-		if ok {
-			switch {
-			case caps.Anthropic == triYes:
-				return "anthropic", false
-			case caps.Responses == triYes:
-				return "responses", true
-			case caps.Responses == triNo:
-				return "openai", false
-			}
-		}
-		return clientProto, false
-	case "responses":
-		if ok && caps.Responses == triNo {
-			return "openai", false
-		}
-		return clientProto, false
-	default:
-		return clientProto, false
-	}
+	return runtimewire.Resolve(clientProto, hasAnthropicBase, caps, ok)
 }
 
 // resolvedBackendProto determines the backend protocol for a route target (or

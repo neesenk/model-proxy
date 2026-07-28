@@ -28,6 +28,7 @@ import (
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/transport/bodycapture"
 	"model-proxy/provider"
 )
@@ -93,14 +94,9 @@ type Proxy struct {
 	scheduleHook        func(sessionKey string)
 	persistSnapshotHook func() // test-only: runs after p.mu.RLock, before health/quota locks
 
-	// Wire capability probing (wirecap.go). wireCapMu is a LEAF lock: it is
-	// never held while acquiring p.mu/healthMu/quotaMu, so it joins no lock
-	// ordering (snapshotPersistedState may take it read-only under p.mu).
-	// wireCaps is keyed by PARENT provider name and survives reload (unlike
-	// health). wireProbe gates automatic probing (production NewProxy only —
-	// the test constructor leaves it off and tests probe synchronously).
-	wireCapMu sync.RWMutex
-	wireCaps  map[string]wireCaps
+	// Runtime wire capabilities have their own leaf Store. The Store never
+	// calls back into Proxy while locked and survives reload generations.
+	wireCaps  runtimewire.Store
 	wireProbe bool
 }
 
@@ -466,12 +462,11 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// its recorded base_url still matches the current config — an endpoint
 	// change invalidates it and triggers a re-probe at the next boot probe.
 	if loaded := p.quota.LoadedWireCaps; len(loaded) > 0 {
-		p.wireCaps = map[string]wireCaps{}
-		for name, caps := range loaded {
-			if prov, ok := cfg.Providers[name]; ok && prov.OpenAIBaseURL == caps.BaseURL {
-				p.wireCaps[name] = caps
-			}
+		baseURLs := make(map[string]string, len(cfg.Providers))
+		for name, prov := range cfg.Providers {
+			baseURLs[name] = prov.OpenAIBaseURL
 		}
+		p.wireCaps.RestoreMatching(loaded, baseURLs)
 	}
 	return p
 }

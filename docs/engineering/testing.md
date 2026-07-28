@@ -113,6 +113,12 @@ SQLite 写锁测试必须证明 Store 的短 busy timeout 将单次锁等待限�
 HTTP 测试必须覆盖筛选参数接线、nil Store 空数组与 Store 错误 500，CLI
 `--json` 必须断言响应 body 字节级透传。
 
+wire capability 的 verdict JSON、freshness、HTTP status 分类、协议选择矩阵、
+detached snapshot、404 纠正和按当前 provider/base URL 恢复的纯测试归
+`internal/runtime/wirecap/*_test.go`；根包只保留真实 HTTP probe、认证/header、
+boot/reload、forward 协议选择、runtime 404 纠正与持久化 round trip。恢复测试
+必须覆盖“未知 parent + 空 base URL”不得被缺省 map lookup 误接纳。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；

@@ -42,6 +42,8 @@ import (
 //     adapter only maps resolved CacheConfig values.
 //   - internal/transport/bodycapture owns the generic bounded pass-through
 //     response reader shared by Responses state and request logging.
+//   - internal/runtime/wirecap owns endpoint capability verdicts, pure
+//     selection policy, and their leaf-locked Store without repository imports.
 //
 // Being AST-based, comments and string literals can no longer false-positive,
 // and only actual selector/call expressions are judged. Known limits (accepted,
@@ -586,6 +588,54 @@ func TestArchitectureBoundaries(t *testing.T) {
 			forbidden := map[string]bool{"newCaptureReader": true}
 			for _, violation := range forbiddenCallSites(file, fset, forbidden, nil) {
 				t.Errorf("%s uses legacy root capture instead of bodycapture.Reader: %s", name, violation)
+			}
+		}
+	})
+
+	t.Run("internal runtime wirecap owns endpoint capability state", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/runtime/wirecap")
+
+		proxy, _ := parseGoFile(t, "proxy.go")
+		wireStoreType := namedStructFields(t, proxy, "Proxy")["wireCaps"]
+		if name, ok := configSelectorName(wireStoreType, "runtimewire"); !ok || name != "Store" {
+			t.Error("Proxy.wireCaps must be runtimewire.Store")
+		}
+
+		adapter, _ := parseGoFile(t, "wirecap.go")
+		compatibilityAliases := map[string]string{
+			"triState": "Verdict",
+			"wireCaps": "Capabilities",
+		}
+		seenAliases := map[string]int{}
+		for _, declaration := range adapter.Decls {
+			generic, ok := declaration.(*ast.GenDecl)
+			if !ok || generic.Tok != token.TYPE {
+				continue
+			}
+			for _, specification := range generic.Specs {
+				typeSpec, ok := specification.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				want, tracked := compatibilityAliases[typeSpec.Name.Name]
+				if !tracked {
+					t.Errorf("wirecap.go must not declare application-owned type %s", typeSpec.Name.Name)
+					continue
+				}
+				remote, selector := configSelectorName(typeSpec.Type, "runtimewire")
+				if !typeSpec.Assign.IsValid() || !selector || remote != want {
+					t.Errorf(
+						"wirecap.go %s must remain an alias to runtimewire.%s",
+						typeSpec.Name.Name,
+						want,
+					)
+				}
+				seenAliases[typeSpec.Name.Name]++
+			}
+		}
+		for name := range compatibilityAliases {
+			if seenAliases[name] != 1 {
+				t.Errorf("wirecap.go alias %s declarations = %d, want exactly 1", name, seenAliases[name])
 			}
 		}
 	})

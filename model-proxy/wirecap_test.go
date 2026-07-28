@@ -1,15 +1,14 @@
 package main
 
-// wirecap_test.go — wire capability probing (wirecap.go): probe
-// classification, the verdict decision matrix, probe execution against mock
-// upstreams, end-to-end protocol selection through proxy.handler, the runtime
-// 404 correction, and persistence round-trips. Probing is synchronous in
-// tests (probeAllWireCaps called directly — production dispatches it
-// asynchronously via startWireCapProbe, which newProxyWithStatePath leaves
-// disabled).
+// wirecap_test.go — application integration for wire capability probing:
+// probe execution against mock upstreams, end-to-end protocol selection
+// through proxy.handler, runtime 404 correction, and persistence round-trips.
+// Pure verdict, policy, and Store behavior belongs to internal/runtime/wirecap.
+// Probing is synchronous in tests (probeAllWireCaps called directly —
+// production dispatches it asynchronously via startWireCapProbe, which
+// newProxyWithStatePath leaves disabled).
 
 import (
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,72 +19,6 @@ import (
 	"testing"
 	"time"
 )
-
-// ---------------------------------------------------------------------------
-// probe classification
-// ---------------------------------------------------------------------------
-
-func TestWireCap_Classify(t *testing.T) {
-	errBoom := errors.New("boom")
-	cases := []struct {
-		status int
-		err    error
-		want   triState
-	}{
-		{404, nil, triNo},
-		{200, nil, triYes},
-		{201, nil, triYes},
-		{400, nil, triYes}, // shape dispute, route exists
-		{401, nil, triYes},
-		{403, nil, triYes},
-		{429, nil, triYes},
-		{500, nil, triUnknown},
-		{502, nil, triUnknown},
-		{0, errBoom, triUnknown}, // timeout / connection error
-	}
-	for _, c := range cases {
-		if got := classifyWireStatus(c.status, c.err); got != c.want {
-			t.Errorf("classifyWireStatus(%d, %v) = %s, want %s", c.status, c.err, got, c.want)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// decision matrix
-// ---------------------------------------------------------------------------
-
-func TestWireCap_DecisionMatrix(t *testing.T) {
-	caps := func(r, a triState) wireCaps { return wireCaps{Responses: r, Anthropic: a} }
-	cases := []struct {
-		name             string
-		clientProto      string
-		hasAnthropicBase bool
-		caps             wireCaps
-		ok               bool
-		wantProto        string
-		wantViaVerdict   bool
-	}{
-		{"chat passthrough (verdict ignored)", "openai", false, caps(triNo, triNo), true, "openai", false},
-		{"responses passthrough (unknown)", "responses", false, caps(triUnknown, triUnknown), false, "responses", false},
-		{"responses passthrough (yes)", "responses", false, caps(triYes, triUnknown), true, "responses", false},
-		{"responses → chat when no", "responses", false, caps(triNo, triNo), true, "openai", false},
-		{"anthropic + anthropic_base_url", "anthropic", true, caps(triYes, triNo), true, "anthropic", false},
-		{"anthropic gateway accepted", "anthropic", false, caps(triUnknown, triYes), true, "anthropic", false},
-		{"anthropic → responses when yes", "anthropic", false, caps(triYes, triNo), true, "responses", true},
-		{"anthropic → responses when yes (anthropic unknown)", "anthropic", false, caps(triYes, triUnknown), true, "responses", true},
-		{"anthropic → chat when both no", "anthropic", false, caps(triNo, triNo), true, "openai", false},
-		{"anthropic → chat when responses no, anthropic unknown", "anthropic", false, caps(triNo, triUnknown), true, "openai", false},
-		{"anthropic unknown → passthrough", "anthropic", false, caps(triUnknown, triUnknown), false, "anthropic", false},
-		{"anthropic both unknown → passthrough", "anthropic", false, caps(triUnknown, triUnknown), true, "anthropic", false},
-		{"anthropic responses unknown, anthropic no → passthrough", "anthropic", false, caps(triUnknown, triNo), true, "anthropic", false},
-	}
-	for _, c := range cases {
-		proto, via := resolveByWire(c.clientProto, c.hasAnthropicBase, c.caps, c.ok)
-		if proto != c.wantProto || via != c.wantViaVerdict {
-			t.Errorf("%s: resolveByWire = (%s, %v), want (%s, %v)", c.name, proto, via, c.wantProto, c.wantViaVerdict)
-		}
-	}
-}
 
 // ---------------------------------------------------------------------------
 // probe execution

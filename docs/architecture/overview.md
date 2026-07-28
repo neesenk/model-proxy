@@ -97,6 +97,11 @@ TTL/容量 store、客户端可见响应的 bounded recorder、header normalizat
 执行一次回调。Responses state、request log 与 Shadow 共用这一 transport
 primitive；各自的持久化和业务判断不得反向塞进通用 reader。
 
+`internal/runtime/wirecap` 是无仓库内依赖的端点协议能力叶子包，拥有三态
+verdict、JSON 持久化表示、协议选择纯策略，以及 parent provider keyed 的并发
+Store。根 `wirecap.go` 只保留 HTTP probe、provider/config 适配、404 纠正触发和
+异步持久化编排；Store 的 leaf lock 内不得回调应用代码。
+
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
@@ -118,8 +123,9 @@ primitive；各自的持久化和业务判断不得反向塞进通用 reader。
 
 - `Proxy.mu`：只保护 reload-owned 对象交换；请求流式期间不持有。
 - `healthMu`：health、sticky、pin、model lock、paramBlock、spread counter。
-- quota、wire caps、metrics/tokens/agents、stats flusher、cache、pricing 各有独立
-  owner/leaf lock；SQLite Store 不拥有或回调运行时 counter。
+- quota、`internal/runtime/wirecap.Store`、metrics/tokens/agents、stats flusher、
+  cache、pricing 各有独立 owner/leaf lock；SQLite Store 与 wire-capability
+  Store 均不拥有或回调应用运行时。
 - 跨域锁顺序仅允许 `healthMu → quotaMu`。
 
 Web/API 的 `webServer` 不持有 `*Proxy`，只持有 composition root 在构造时创建的
@@ -165,6 +171,7 @@ target executor / Fusion / Shadow / Web / CLI → internal/observe/requestlog
 stats flusher / proxyReadView → internal/observe/stats
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
+wire probe / target plan → internal/runtime/wirecap
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
 ```
@@ -194,6 +201,8 @@ composition root → internal/config → internal/pricing / internal/protocol
   或任意 `model-proxy/*` 包；根包重新声明 store、entry 或 recorder；
 - `internal/transport/bodycapture` 反向依赖 request log、protocol、Proxy、
   Config、Provider 或任意 `model-proxy/*` 包；
+- `internal/runtime/wirecap` 反向依赖 Config、Proxy、Provider、HTTP/Web/CLI
+  或任意 `model-proxy/*` 包；根包重新声明 verdict、capabilities map 或其锁；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
   Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetPlan`；
