@@ -31,6 +31,8 @@ import (
 //   - internal/accounts owns API-key pool schemas, identity, persistence, and
 //     locking as a repository leaf; the root adapter is only an environment and
 //     compatibility bridge.
+//   - internal/observe/events owns the live-event ring and fan-out as a
+//     repository leaf; the root live_events.go file is only an HTTP/SSE adapter.
 //
 // Being AST-based, comments and string literals can no longer false-positive,
 // and only actual selector/call expressions are judged. Known limits (accepted,
@@ -368,6 +370,45 @@ func TestArchitectureBoundaries(t *testing.T) {
 
 	t.Run("internal pricing remains a repository-leaf package", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/pricing")
+	})
+
+	t.Run("internal observe events owns the live-event hub", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/observe/events")
+		adapter, _ := parseGoFile(t, "live_events.go")
+		functions := map[string]int{
+			"serveEvents":   0,
+			"keepaliveLoop": 0,
+		}
+		for _, decl := range adapter.Decls {
+			switch decl := decl.(type) {
+			case *ast.GenDecl:
+				if decl.Tok != token.IMPORT {
+					t.Error("live_events.go must not declare package state or types; it is only an HTTP/SSE adapter")
+				}
+			case *ast.FuncDecl:
+				if _, ok := functions[decl.Name.Name]; !ok {
+					t.Errorf("live_events.go has unexpected function %s; ring and fan-out behavior belongs in internal/observe/events", decl.Name.Name)
+					continue
+				}
+				functions[decl.Name.Name]++
+			default:
+				t.Errorf("live_events.go has unexpected top-level declaration %T", decl)
+			}
+		}
+		for name, count := range functions {
+			if count != 1 {
+				t.Errorf("live_events.go %s declarations = %d, want exactly 1", name, count)
+			}
+		}
+
+		proxy, _ := parseGoFile(t, "proxy.go")
+		eventsType := namedStructFields(t, proxy, "Proxy")["events"]
+		pointer, ok := eventsType.(*ast.StarExpr)
+		if !ok {
+			t.Errorf("Proxy.events type = %T, want *observeevents.Hub", eventsType)
+		} else if name, ok := configSelectorName(pointer.X, "observeevents"); !ok || name != "Hub" {
+			t.Error("Proxy.events must be *observeevents.Hub")
+		}
 	})
 
 	t.Run("internal protocol owns conversion and remains a repository-leaf package", func(t *testing.T) {

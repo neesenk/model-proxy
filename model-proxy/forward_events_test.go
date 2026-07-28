@@ -22,16 +22,16 @@ routes:
 `))
 	p := newTestProxy(t, cfg)
 
+	eventCursor := 0
 	endEventIDs := func() []string {
-		p.events.mu.Lock()
-		defer p.events.mu.Unlock()
+		recent := p.events.Snapshot()
 		var ids []string
-		for _, e := range p.events.recent {
+		for _, e := range recent[eventCursor:] {
 			if e.Type == "end" {
 				ids = append(ids, e.RequestID)
 			}
 		}
-		p.events.recent = p.events.recent[:0]
+		eventCursor = len(recent)
 		return ids
 	}
 	do := func(body, path string) int {

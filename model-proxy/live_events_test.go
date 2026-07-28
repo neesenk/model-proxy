@@ -3,74 +3,16 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	observeevents "model-proxy/internal/observe/events"
 )
-
-func TestEventHub_PublishSubscribeRecent(t *testing.T) {
-	h := newEventHub()
-	// Publish before anyone subscribes → lands in the recent ring.
-	h.publish(liveEvent{Type: "end", Agent: "claude-code", Exposed: "glm", Status: 200})
-
-	ch, recent, cancel := h.subscribe()
-	defer cancel()
-	if len(recent) != 1 || recent[0].Agent != "claude-code" {
-		t.Errorf("recent replay = %+v want 1 claude-code event", recent)
-	}
-	// New publishes reach the subscriber.
-	h.publish(liveEvent{Type: "end", Agent: "codex", Status: 500})
-	select {
-	case e := <-ch:
-		if e.Agent != "codex" || e.Status != 500 {
-			t.Errorf("got %+v want codex/500", e)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("did not receive published event")
-	}
-
-	// Cancel unsubscribes (channel removed from subs).
-	cancel()
-	h.mu.Lock()
-	n := len(h.subs)
-	h.mu.Unlock()
-	if n != 0 {
-		t.Errorf("after cancel, subs=%d want 0", n)
-	}
-}
-
-func TestEventHub_DropSlowSubscriber(t *testing.T) {
-	h := newEventHub()
-	ch, _, cancel := h.subscribe()
-	defer cancel()
-	// Fill the 32-buffer without reading, then keep publishing: publish must NOT
-	// block (slow subscriber is dropped, not stalled).
-	for i := 0; i < 32; i++ {
-		h.publish(liveEvent{Type: "end"})
-	}
-	done := make(chan struct{})
-	go func() {
-		h.publish(liveEvent{Type: "end"}) // would block a non-drop implementation
-		h.publish(liveEvent{Type: "end"})
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("publish blocked on a full subscriber buffer (must drop, not stall)")
-	}
-	// Drain to avoid leaking the buffered channel.
-	for {
-		select {
-		case <-ch:
-		default:
-			return
-		}
-	}
-}
 
 // TestForward_EmitsLiveEvents: a served request publishes a start event (on
 // entry) and an end event (on commit) to the hub, carrying agent/route/provider/
@@ -88,7 +30,7 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
-	ch, _, cancel := p.events.subscribe()
+	ch, _, cancel := p.events.Subscribe()
 	defer cancel()
 
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -103,7 +45,7 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 	resp.Body.Close()
 
 	// Collect events with a short grace for the async publish.
-	var got []liveEvent
+	var got []observeevents.Event
 	deadline := time.After(time.Second)
 	for len(got) < 2 {
 		select {
@@ -119,7 +61,7 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 	if got[0].Agent != "claude-code" || got[0].Exposed != "glm" {
 		t.Errorf("start event = %+v want agent claude-code / exposed glm", got[0])
 	}
-	var endEv liveEvent
+	var endEv observeevents.Event
 	for _, e := range got {
 		if e.Type == "end" {
 			endEv = e
@@ -159,19 +101,35 @@ func TestServeEvents_SSE(t *testing.T) {
 	}
 
 	// Publish an event; it must arrive as an SSE data line.
-	p.events.publish(liveEvent{Type: "end", Agent: "codex", Exposed: "glm", Provider: "z", Status: 200})
+	p.events.Publish(observeevents.Event{
+		Type: "end", RequestID: "sse-test", Agent: "codex",
+		Exposed: "glm", Provider: "z", Status: http.StatusOK,
+	})
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	found := false
+	var got observeevents.Event
 	for sc.Scan() {
 		line := sc.Text()
-		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "\"type\":\"end\"") && strings.Contains(line, "codex") {
-			found = true
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &got); err != nil {
+			t.Fatalf("decode SSE event %q: %v", line, err)
+		}
+		if got.RequestID == "sse-test" {
 			break
 		}
 	}
-	if !found {
+	if got.RequestID != "sse-test" {
 		t.Fatalf("did not receive the published SSE event before deadline; scan err=%v context err=%v", sc.Err(), ctx.Err())
+	}
+	want := observeevents.Event{
+		Type: "end", RequestID: "sse-test", Agent: "codex", Exposed: "glm",
+		Provider: "z", Status: http.StatusOK,
+	}
+	if got.Type != want.Type || got.Agent != want.Agent || got.Exposed != want.Exposed ||
+		got.Provider != want.Provider || got.Status != want.Status {
+		t.Errorf("SSE event = %+v, want core fields %+v", got, want)
 	}
 }
 
@@ -186,7 +144,7 @@ func TestLiveEvents_EarlyFailures(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["z"] = &testProv{key: "k"}
-	ch, _, cancel := p.events.subscribe()
+	ch, _, cancel := p.events.Subscribe()
 	defer cancel()
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
@@ -240,7 +198,7 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 
 	// Cache hit → end event with Provider "(cache)".
 	pc := mk(map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}}, true)
-	ch, _, cancel := pc.events.subscribe()
+	ch, _, cancel := pc.events.Subscribe()
 	defer cancel()
 	pxc := httptest.NewServer(http.HandlerFunc(pc.handler))
 	defer pxc.Close()
@@ -266,7 +224,7 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 	}
 	pf2 := newTestProxy(t, cfg)
 	pf2.providers["dead"] = &testProv{key: "k"}
-	ch2, _, cancel2 := pf2.events.subscribe()
+	ch2, _, cancel2 := pf2.events.Subscribe()
 	defer cancel2()
 	pxf := httptest.NewServer(http.HandlerFunc(pf2.handler))
 	defer pxf.Close()

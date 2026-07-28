@@ -69,6 +69,12 @@ tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进�
 避免二次文件探测改变同一 runtime generation 的 authority 决策。网络验证、
 交互、reload、运行时虚拟化和健康选择不进入存储包。
 
+`internal/observe/events` 是无仓库内依赖的实时事件叶子包，拥有事件 DTO、最近
+200 条的有界 ring、非阻塞 fan-out、订阅快照和终态查询。根
+`live_events.go` 只把该组件适配为 `/api/events` SSE 与 keepalive；业务发布点
+显式依赖 `events.Hub`，不得重新访问 ring、subscriber map 或互斥锁。纯 ring/
+订阅测试归内部包，HTTP、forward、Fusion 与 cache 事件契约仍在根包做集成测试。
+
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
@@ -126,6 +132,7 @@ conversion entrypoints → conversion registry → pair codecs
 analytics adapter → internal/pricing
 catalog adapter / routing → internal/catalog
 accounts adapter / login / provider builder → internal/accounts
+live-event publishers / SSE adapter → internal/observe/events
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
 ```
@@ -146,6 +153,8 @@ composition root → internal/config → internal/pricing / internal/protocol
   `model-proxy/*` 包；
 - `internal/accounts` 读取 HOME、反向依赖 Config、Proxy、Provider、Web/CLI，
   或承担网络验证、Provider 构建、reload 与路由选择；
+- `internal/observe/events` 反向依赖 Proxy、HTTP/Web、Config、Provider 或任意
+  `model-proxy/*` 包；根 SSE adapter 重新声明事件类型或拥有 ring/fan-out 状态；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
   Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetPlan`；
@@ -164,6 +173,7 @@ composition root → internal/config → internal/pricing / internal/protocol
 架构边界的静态回归位于 `architecture_contract_test.go`（基于 go/ast 检查
 `webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector、
 账号测活的单次 runtime snapshot、internal 叶子包 import（含 accounts/catalog）、
-`internal/config` 依赖 allowlist、根配置兼容 facade 以及 Fusion 不绕过
-`targetPlan`，不是字符串扫描）；行为与并发验证仍按
+`internal/observe/events` 与根 SSE adapter 的职责、`internal/config` 依赖
+allowlist、根配置兼容 facade 以及 Fusion 不绕过 `targetPlan`，不是字符串扫描）；
+行为与并发验证仍按
 `docs/engineering/testing.md` 执行。

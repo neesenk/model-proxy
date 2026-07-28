@@ -26,6 +26,9 @@
 - Proxy 级后台任务必须由 `proxyLifecycle` 接纳，daemon 只调用
   `startRuntimeServices`/`Proxy.Close`；会写 request log 的有限任务必须在 logger
   drain 前完成，禁止分散启动 goroutine 或重复 final flush。
+- 实时事件 DTO、最近 ring、订阅和非阻塞 fan-out 统一归
+  `internal/observe/events`；该包是无仓库内依赖叶子。根 `live_events.go` 只保留
+  SSE/keepalive 适配，不得重新持有 event ring、subscriber map 或其锁。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。

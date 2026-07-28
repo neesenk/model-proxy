@@ -23,7 +23,8 @@
 
 ## Live events
 
-`eventHub` 保存最近 200 条事件并非阻塞 fan-out。慢订阅者丢事件，不能反压请求路径。
+`internal/observe/events.Hub` 保存最近 200 条事件并做非阻塞 fan-out。慢订阅者
+丢事件，不能反压请求路径；根 `live_events.go` 只负责 SSE/keepalive 适配。
 
 forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens 和稳定 request_id。cache hit、400/502 终局也必须产生 end。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
 

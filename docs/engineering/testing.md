@@ -78,6 +78,14 @@ race-clean 只是必要条件。并发测试还必须断言功能不变量，例
 
 异步测试优先使用 channel、barrier、context deadline 或可观察状态同步；不得以固定 `Sleep` 证明异步工作“已经完成”或“没有发生”。流式读取必须设置 deadline，并同时断言读取错误、字节数和内容。
 
+### 模块归属
+
+叶子包的纯行为测试与实现放在同一模块目录；composition root 只保留跨模块行为和
+HTTP/CLI 生命周期集成测试。例如 `internal/observe/events/hub_test.go` 精确断言
+ring cap、detached snapshot、取消订阅、慢消费者丢弃和终态查询；根包只验证
+forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为读取内部状态
+而恢复根包 type alias、访问模块互斥锁或暴露 test-only 生产接口。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；

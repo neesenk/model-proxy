@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	observeevents "model-proxy/internal/observe/events"
 )
 
 // fusion.go implements multi-model orchestration (panel → synthesis). A route
@@ -180,7 +182,7 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 func (p *Proxy) finishFusion(fc fusionCtx, run *fusionRun, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
 	run.SynthCommitted = p.callFusionSynthesizer(fc, st, body, w, r, cacheKey)
 	if run.SynthCommitted {
-		if ev, ok := p.events.findEnd(run.RunID); ok {
+		if ev, ok := p.events.FindEnd(run.RunID); ok {
 			run.SynthStatus = ev.Status
 			run.SynthLatencyMs = ev.LatencyMs
 			run.SynthInput = ev.Input
@@ -279,7 +281,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	status := http.StatusBadGateway // pre-upstream failures report as 502
 	// Live monitor: fusion legs are visible while they run (progressive reveal),
 	// marked "<tag>:<model>" to distinguish them from direct targets.
-	p.events.publish(liveEvent{
+	p.events.Publish(observeevents.Event{
 		Type:      "start",
 		Ts:        start.UnixMilli(),
 		RequestID: legID,
@@ -291,7 +293,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	defer func() {
 		res.status = status
 		res.latencyMs = time.Since(start).Milliseconds()
-		p.events.publish(liveEvent{
+		p.events.Publish(observeevents.Event{
 			Type:          "end",
 			Ts:            time.Now().UnixMilli(),
 			RequestID:     legID,

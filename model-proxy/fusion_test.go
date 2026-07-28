@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	observeevents "model-proxy/internal/observe/events"
 )
 
 // fusion_test.go covers the fusion orchestration engine (panel → synthesis):
@@ -181,10 +183,8 @@ func postAnthropic(t *testing.T, px *httptest.Server, body string) string {
 	return string(b)
 }
 
-func recentLiveEvents(p *Proxy) []liveEvent {
-	p.events.mu.Lock()
-	defer p.events.mu.Unlock()
-	return append([]liveEvent(nil), p.events.recent...)
+func recentLiveEvents(p *Proxy) []observeevents.Event {
+	return p.events.Snapshot()
 }
 
 const fusionClientBody = `{"model":"hard","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"solve X"}]}`

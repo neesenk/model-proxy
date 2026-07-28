@@ -22,6 +22,7 @@ import (
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/catalog"
+	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
 	"model-proxy/provider"
@@ -64,7 +65,7 @@ type Proxy struct {
 	reqLogStarted     bool                             // lifecycle owns loop/shutdown only when started by startRuntimeServices
 	cache             *responseCache                   // exact-match response cache (prompt-hash + TTL); nil = disabled
 	responsesState    *protocol.ResponsesStateStore    // previous_response_id replay for Responses clients bridged to stateless backends
-	events            *eventHub                        // live request monitor fan-out hub (SSE /api/events); always non-nil
+	events            *observeevents.Hub               // live request monitor fan-out hub (SSE /api/events); always non-nil
 	fusionReg         *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
 	catalog           *catalog.Catalog                 // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
 	shadow            atomic.Pointer[shadowRuntime]    // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
@@ -378,7 +379,7 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	p.responsesState = protocol.NewResponsesStateStore(protocol.ResponsesStatePath(qpath))
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
 	// UI client subscribes; publish is non-blocking so it never stalls forward.
-	p.events = newEventHub()
+	p.events = observeevents.NewHub()
 	// Fusion orchestration observability registry (recent runs + per-workflow
 	// aggregates + daily budget counters). Like the event hub, reload does NOT
 	// rebuild it — aggregates and today's budget survive config edits.
@@ -1200,7 +1201,7 @@ func writeModels(w http.ResponseWriter, data []byte) {
 // events still pair with a stable id (the contract: 400/502 终局也必须产生 end
 // 且带稳定 request_id).
 func (p *Proxy) publishTerminalEvent(requestID string, r *http.Request, proto, exposed string, status int) {
-	p.events.publish(liveEvent{
+	p.events.Publish(observeevents.Event{
 		Type:      "end",
 		Ts:        time.Now().UnixMilli(),
 		RequestID: requestID,
@@ -1281,7 +1282,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 			// Live monitor (#6): a cache hit skips the normal start/end flow, so
 			// emit an end event explicitly — otherwise the live view is blind to
 			// these (e.g. a retry-looping agent served from cache stays invisible).
-			p.events.publish(liveEvent{
+			p.events.Publish(observeevents.Event{
 				Type:      "end",
 				Ts:        time.Now().UnixMilli(),
 				RequestID: requestID,
@@ -1343,7 +1344,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 
 	// Live request monitor (#6): announce the in-flight request so the Web UI's
 	// live view sees who is sending + where it routed, before the response lands.
-	p.events.publish(liveEvent{
+	p.events.Publish(observeevents.Event{
 		Type:      "start",
 		Ts:        time.Now().UnixMilli(),
 		RequestID: requestID,
@@ -1417,7 +1418,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					case <-r.Context().Done():
 						// Client gave up waiting — close the live event pair (499 =
 						// client closed request) and write nothing.
-						p.events.publish(liveEvent{
+						p.events.Publish(observeevents.Event{
 							Type: "end", Ts: time.Now().UnixMilli(), RequestID: requestID,
 							Agent: agent, Protocol: proto, Exposed: exposed, Status: 499,
 						})
@@ -1466,7 +1467,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		// Live monitor (#6): every target failed → emit an end event so the live
 		// view surfaces the failure (a retry-looping agent that always errors is
 		// otherwise invisible — only starts, never ends).
-		p.events.publish(liveEvent{
+		p.events.Publish(observeevents.Event{
 			Type:      "end",
 			Ts:        time.Now().UnixMilli(),
 			RequestID: requestID,

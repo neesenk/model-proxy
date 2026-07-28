@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
 )
 
@@ -45,7 +46,7 @@ type attemptExecutor struct {
 	agents         *agentCounter
 	reqLog         *requestLogger
 	responsesState *protocol.ResponsesStateStore
-	events         *eventHub
+	events         *observeevents.Hub
 }
 
 func (p *Proxy) targetExecutor() attemptExecutor {
@@ -659,7 +660,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		}
 		// Live request monitor (#6): announce the completed request (agent,
 		// route, chosen provider, status, latency, best-effort tokens).
-		p.events.publish(liveEvent{
+		p.events.Publish(observeevents.Event{
 			Type:          "end",
 			Ts:            time.Now().UnixMilli(),
 			RequestID:     flc.requestID,
