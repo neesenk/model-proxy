@@ -547,6 +547,157 @@ func TestForward_OpenAIToResponses_NonStream(t *testing.T) {
 	}
 }
 
+// TestForward_PooledResponsesConversionStreamsTerminalUsage proves the full
+// Chat -> Responses route remains correct after a credential-pool parent is
+// expanded: a pinned virtual supplies its own key, the request is rewritten to
+// the Responses wire shape, and the converted Chat SSE preserves one clean
+// terminal and the upstream usage accounting.
+func TestForward_PooledResponsesConversionStreamsTerminalUsage(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-B")
+
+	type upstreamRequest struct {
+		path string
+		auth string
+		body []byte
+	}
+	var got upstreamRequest
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.path = r.URL.Path
+		got.auth = r.Header.Get("Authorization")
+		got.body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, responsesTextSSE)
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"zhipu": {OpenAIBaseURL: up.URL, Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{
+			"public-model": {{Provider: "zhipu", Model: "upstream-model", Protocol: "responses"}},
+		},
+	}
+	p := newTestProxy(t, cfg)
+	virtuals := p.poolIndex["zhipu"]
+	if len(virtuals) != 2 {
+		t.Fatalf("pooled virtuals = %v, want two", virtuals)
+	}
+	selectedVirtual := virtuals[0]
+	keyForVirtual := map[string]string{
+		"zhipu#" + accountIDFor("zhipu", accountCred{APIKey: "KEY-A"}): "KEY-A",
+		"zhipu#" + accountIDFor("zhipu", accountCred{APIKey: "KEY-B"}): "KEY-B",
+	}
+	selectedKey, ok := keyForVirtual[selectedVirtual]
+	if !ok {
+		t.Fatalf("selected virtual %q has no configured key mapping", selectedVirtual)
+	}
+	if _, ok := p.setPin("public-model", selectedVirtual, 0); !ok {
+		t.Fatalf("pin pooled virtual %q", selectedVirtual)
+	}
+
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	req, err := http.NewRequest(http.MethodPost, px.URL+"/v1/chat/completions", strings.NewReader(`{"model":"public-model","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	if gotCT := resp.Header.Get("Content-Type"); gotCT != "text/event-stream" {
+		t.Fatalf("client Content-Type = %q, want text/event-stream", gotCT)
+	}
+
+	if got.path != "/responses" {
+		t.Errorf("upstream path = %q, want /responses", got.path)
+	}
+	if got.auth != "Bearer "+selectedKey {
+		t.Errorf("upstream Authorization = %q, want exact virtual %q key Bearer %s", got.auth, selectedVirtual, selectedKey)
+	}
+	upstream := unmarshalMap(t, got.body)
+	if upstream["model"] != "upstream-model" {
+		t.Errorf("upstream model = %v, want upstream-model", upstream["model"])
+	}
+	if upstream["stream"] != true {
+		t.Errorf("upstream stream = %v, want true", upstream["stream"])
+	}
+	if _, hasMessages := upstream["messages"]; hasMessages {
+		t.Errorf("Responses request unexpectedly contains messages: %s", got.body)
+	}
+	input, ok := upstream["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Fatalf("Responses input = %v, want one item", upstream["input"])
+	}
+	inputMessage := asMap(input[0])
+	if inputMessage["type"] != "message" || inputMessage["role"] != "user" {
+		t.Errorf("Responses input item = %v, want user message", inputMessage)
+	}
+	parts, ok := inputMessage["content"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("Responses input content = %v, want one input_text part", inputMessage["content"])
+	}
+	part := asMap(parts[0])
+	if part["type"] != "input_text" || part["text"] != "hello" {
+		t.Errorf("Responses input part = %v, want input_text hello", part)
+	}
+
+	events := parseSSE(string(body))
+	if got := sseCount(events, "[DONE]"); got != 1 {
+		t.Errorf("[DONE] count = %d, want 1; events=%v", got, sseEventTypes(events))
+	}
+	for _, event := range events {
+		if event.data == "[DONE]" {
+			continue
+		}
+		frame := sseDataMap(t, event)
+		if event.event == "error" || frame["type"] == "error" || frame["error"] != nil {
+			t.Fatalf("Chat stream contains an error terminal: event=%q data=%s", event.event, event.data)
+		}
+	}
+	finish := sseFilter(events, "chat.completion.chunk")
+	var finishReasons []string
+	var usage map[string]any
+	for _, event := range finish {
+		chunk := sseDataMap(t, event)
+		choices, _ := chunk["choices"].([]any)
+		for _, choice := range choices {
+			if reason, ok := asMap(choice)["finish_reason"].(string); ok && reason != "" {
+				finishReasons = append(finishReasons, reason)
+			}
+		}
+		if rawUsage, ok := chunk["usage"].(map[string]any); ok {
+			if usage != nil {
+				t.Fatalf("multiple Chat usage chunks: %v and %v", usage, rawUsage)
+			}
+			usage = rawUsage
+		}
+	}
+	if len(finishReasons) != 1 || finishReasons[0] != "stop" {
+		t.Errorf("non-empty finish reasons = %v, want exactly [stop]", finishReasons)
+	}
+	if usage == nil {
+		t.Fatal("Chat stream has no usage chunk")
+	}
+	if usage["prompt_tokens"] != float64(3) || usage["completion_tokens"] != float64(2) || usage["total_tokens"] != float64(5) {
+		t.Errorf("Chat stream usage = %v, want prompt=3 completion=2 total=5", usage)
+	}
+}
+
 // P0: r→a without max_output_tokens must still emit max_tokens (anthropic
 // 400s "max_tokens required" otherwise; codex clients routinely omit it or
 // send an explicit null — see testdata/wire/responses_codex.sse). The default

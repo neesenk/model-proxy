@@ -286,3 +286,167 @@ func TestShadow_LogsResult(t *testing.T) {
 		t.Errorf("shadow response body not captured: %q", shadowRec.ResponseBody)
 	}
 }
+
+// TestShadow_PooledCrossProtocolPreservesVirtualIdentity exercises the combined
+// Shadow boundary: an OpenAI Chat primary response is returned unchanged while a
+// pooled shadow parent is resolved to one virtual account and converted to its
+// declared Anthropic wire protocol. The recorded shadow provider must retain the
+// selected virtual identity rather than collapsing back to the pool parent.
+func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
+	poolHome := t.TempDir()
+	setPoolHome(t, poolHome)
+	writePoolFile(t, "shadow-pool", "zhipu", "shadow-key-a", "shadow-key-b")
+
+	const primaryBody = `{"id":"primary-marker","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"primary only"},"finish_reason":"stop"}]}`
+	const shadowBody = `{"id":"shadow-marker","type":"message","role":"assistant","model":"shadow-model","stop_reason":"end_turn","content":[{"type":"text","text":"shadow only"}],"usage":{"input_tokens":3,"output_tokens":2}}`
+	type shadowRequest struct {
+		path          string
+		authorization string
+		body          []byte
+	}
+	shadowReceived := make(chan shadowRequest, 1)
+	shadowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read shadow request: %v", err)
+			return
+		}
+		shadowReceived <- shadowRequest{
+			path:          r.URL.Path,
+			authorization: r.Header.Get("Authorization"),
+			body:          body,
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(shadowBody))
+	}))
+	defer shadowUpstream.Close()
+
+	primaryUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(primaryBody))
+	}))
+	defer primaryUpstream.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"primary":     {OpenAIBaseURL: primaryUpstream.URL, Provider: "static"},
+			"shadow-pool": {AnthropicBaseURL: shadowUpstream.URL, Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{
+			"alias": {{Provider: "primary", Model: "primary-model", Protocol: "openai"}},
+		},
+		Shadow: map[string]ShadowTarget{
+			"alias": {Provider: "shadow-pool", Model: "shadow-model", Protocol: "anthropic"},
+		},
+	}
+	p, logDir, shutdownLogger := newReqLogProxy(t, cfg)
+	defer shutdownLogger()
+	p.providers["primary"] = &testProv{key: "primary-key"}
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(
+		`{"model":"alias","messages":[{"role":"user","content":"shadow user"}],"max_tokens":37}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200; body=%s", resp.StatusCode, clientBody)
+	}
+	if got := string(clientBody); got != primaryBody {
+		t.Fatalf("client body = %s, want exact primary response %s", got, primaryBody)
+	}
+	if strings.Contains(string(clientBody), "shadow") {
+		t.Fatalf("client response leaked shadow output: %s", clientBody)
+	}
+
+	var observed shadowRequest
+	select {
+	case observed = <-shadowReceived:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shadow upstream did not receive the converted request")
+	}
+	if observed.path != "/v1/messages" {
+		t.Errorf("shadow path = %q, want /v1/messages", observed.path)
+	}
+	const bearerPrefix = "Bearer "
+	if !strings.HasPrefix(observed.authorization, bearerPrefix) {
+		t.Fatalf("shadow Authorization = %q, want exact pooled Bearer key", observed.authorization)
+	}
+	observedKey := strings.TrimPrefix(observed.authorization, bearerPrefix)
+	if observedKey != "shadow-key-a" && observedKey != "shadow-key-b" {
+		t.Fatalf("shadow pooled key = %q, want one configured pool key", observedKey)
+	}
+	var anthropic struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(observed.body, &anthropic); err != nil {
+		t.Fatalf("shadow request is not Anthropic JSON: %v; body=%s", err, observed.body)
+	}
+	if anthropic.Model != "shadow-model" {
+		t.Errorf("shadow model = %q, want shadow-model", anthropic.Model)
+	}
+	if anthropic.MaxTokens != 37 {
+		t.Errorf("shadow max_tokens = %d, want 37", anthropic.MaxTokens)
+	}
+	if len(anthropic.Messages) != 1 || anthropic.Messages[0].Role != "user" || len(anthropic.Messages[0].Content) != 1 || anthropic.Messages[0].Content[0].Type != "text" || anthropic.Messages[0].Content[0].Text != "shadow user" {
+		t.Errorf("shadow Anthropic user message = %+v, want one user text block shadow user", anthropic.Messages)
+	}
+
+	// The upstream handler proves the asynchronous request reached the candidate.
+	// Its response must still be drained and recorded by the fire-and-forget
+	// runner, so wait on the observable log record with a deadline rather than a
+	// fixed delay. The deferred shutdown then drains the logger before teardown.
+	wantProvider := "shadow-pool#" + accountIDFor("zhipu", accountCred{APIKey: observedKey})
+	var shadowRecord *requestLogRecord
+	deadline := time.NewTimer(3 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for shadowRecord == nil {
+		for _, record := range allRecords(t, logDir) {
+			if strings.HasPrefix(record.RequestID, "shadow-") {
+				r := record
+				shadowRecord = &r
+				break
+			}
+		}
+		if shadowRecord != nil {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("shadow request log record was not written before deadline")
+		}
+	}
+	shutdownLogger() // drain any concurrently queued primary/shadow records before assertions.
+	if shadowRecord.Provider != wantProvider {
+		t.Errorf("shadow log provider = %q, want selected virtual %q", shadowRecord.Provider, wantProvider)
+	}
+	if shadowRecord.UpstreamModel != "shadow-model" {
+		t.Errorf("shadow log model = %q, want shadow-model", shadowRecord.UpstreamModel)
+	}
+	if shadowRecord.Status != http.StatusOK {
+		t.Errorf("shadow log status = %d, want 200", shadowRecord.Status)
+	}
+	if shadowRecord.RequestBody != string(observed.body) {
+		t.Errorf("shadow log request body = %s, want exact upstream request %s", shadowRecord.RequestBody, observed.body)
+	}
+	if shadowRecord.ResponseBody != shadowBody {
+		t.Errorf("shadow log response body = %s, want exact shadow response %s", shadowRecord.ResponseBody, shadowBody)
+	}
+}

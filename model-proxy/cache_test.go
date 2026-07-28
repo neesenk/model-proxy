@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,24 @@ import (
 	"testing"
 	"time"
 )
+
+var errCacheTestClientGone = errors.New("test client write failed")
+
+// cacheTestFailingWriter deterministically emulates a client that disconnects
+// at the first streamed byte. Unlike closing an httptest TCP client, its Write
+// error is synchronous, so the cache-completeness assertion has no timing
+// dependency.
+type cacheTestFailingWriter struct {
+	header http.Header
+	writes int
+}
+
+func (w *cacheTestFailingWriter) Header() http.Header { return w.header }
+func (w *cacheTestFailingWriter) WriteHeader(int)     {}
+func (w *cacheTestFailingWriter) Write([]byte) (int, error) {
+	w.writes++
+	return 0, errCacheTestClientGone
+}
 
 func TestCacheKeyOf(t *testing.T) {
 	body := []byte(`{"model":"glm","input":[]}`)
@@ -402,6 +421,221 @@ func TestForward_CacheConvert_ReplayIntact(t *testing.T) {
 	}
 	if first != second {
 		t.Errorf("cache replay differs from the original converted response (corrupted by cached Content-Length):\nfirst:  %s\nsecond: %s", first, second)
+	}
+}
+
+// TestForward_CancelledConvertedSSEIsNotCached verifies that a write failure
+// while converting a Responses SSE stream to Chat cannot cache a partial client
+// stream. The retry must reach the backend and receive one complete [DONE]
+// terminator, rather than replaying the interrupted first response.
+func TestForward_CancelledConvertedSSEIsNotCached(t *testing.T) {
+	var hits int
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path != "/responses" {
+			t.Errorf("backend path=%q want /responses", r.URL.Path)
+		}
+		got := captureHit(r)
+		if got.model != "backend-model" {
+			t.Errorf("backend model=%q want backend-model", got.model)
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		io.WriteString(w, responsesTextSSE)
+	}))
+	defer up.Close()
+
+	p := newTestProxy(t, &Config{
+		Providers: map[string]Provider{"backend": {OpenAIBaseURL: up.URL, Provider: "static"}},
+		Routes:    map[string][]RouteTarget{"client-model": {{Provider: "backend", Model: "backend-model", Protocol: "responses"}}},
+		Cache:     CacheConfig{Enabled: true, TTL: "1h"},
+	})
+	p.providers["backend"] = &testProv{key: "test-key"}
+
+	body := `{"model":"client-model","messages":[{"role":"user","content":"hello"}],"stream":true}`
+	firstReq := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions", strings.NewReader(body))
+	failing := &cacheTestFailingWriter{header: make(http.Header)}
+	p.handler(failing, firstReq)
+	if failing.writes != 1 {
+		t.Fatalf("interrupted request writes=%d want 1", failing.writes)
+	}
+	if hits != 1 {
+		t.Fatalf("interrupted request upstream hits=%d want 1", hits)
+	}
+	if cacheHits, _, entries := p.cache.stats(); cacheHits != 0 || entries != 0 {
+		t.Fatalf("interrupted stream cache stats hits=%d entries=%d want 0/0", cacheHits, entries)
+	}
+
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+	secondReq, err := http.NewRequest(http.MethodPost, px.URL+"/v1/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondResp, err := http.DefaultClient.Do(secondReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBody, err := io.ReadAll(secondResp.Body)
+	secondResp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondResp.StatusCode != http.StatusOK {
+		t.Fatalf("retry status=%d body=%s", secondResp.StatusCode, secondBody)
+	}
+	if got := secondResp.Header.Get("x-mp-cache"); got != "" {
+		t.Fatalf("retry x-mp-cache=%q want empty (must not replay partial stream)", got)
+	}
+	if hits != 2 {
+		t.Fatalf("retry upstream hits=%d want 2 (partial stream must not be cached)", hits)
+	}
+	if got := strings.Count(string(secondBody), "data: [DONE]"); got != 1 {
+		t.Fatalf("retry [DONE] count=%d want 1; body=%s", got, secondBody)
+	}
+	if !strings.Contains(string(secondBody), `"content":"hel"`) || !strings.Contains(string(secondBody), `"content":"lo"`) {
+		t.Fatalf("retry missing complete converted content: %s", secondBody)
+	}
+	if cacheHits, _, entries := p.cache.stats(); cacheHits != 0 || entries != 1 {
+		t.Fatalf("after clean retry cache stats hits=%d entries=%d want 0/1", cacheHits, entries)
+	}
+}
+
+// TestForward_ForcedPooledProviderBypassesCache verifies that a cache primed by
+// the primary route never masks a forced pooled-parent request. The forced
+// request must use exactly one account-bound virtual provider, including its
+// bound Bearer token and rewritten backend model.
+func TestForward_ForcedPooledProviderBypassesCache(t *testing.T) {
+	poolHome := t.TempDir()
+	setPoolHome(t, poolHome)
+	writePoolFile(t, "pooled", "zhipu", "POOL-KEY-A", "POOL-KEY-B")
+
+	var primaryHits, pooledHits int
+	pooledAuth := make(chan string, 2)
+	primaryUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits++
+		got := captureHit(r)
+		if got.model != "primary-model" {
+			t.Errorf("primary model=%q want primary-model", got.model)
+		}
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"from":"primary"}`)
+	}))
+	defer primaryUp.Close()
+	pooledUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pooledHits++
+		got := captureHit(r)
+		if got.model != "pooled-model" {
+			t.Errorf("pooled model=%q want pooled-model", got.model)
+		}
+		if got.auth != "Bearer POOL-KEY-A" && got.auth != "Bearer POOL-KEY-B" {
+			t.Errorf("pooled Authorization=%q want exact bound pool key", got.auth)
+		}
+		pooledAuth <- got.auth
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"from":"pooled"}`)
+	}))
+	defer pooledUp.Close()
+
+	p := newTestProxy(t, &Config{
+		Providers: map[string]Provider{
+			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: "static"},
+			"pooled":  {OpenAIBaseURL: pooledUp.URL, Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{"client-model": {
+			{Provider: "primary", Model: "primary-model", Priority: 1},
+			{Provider: "pooled", Model: "pooled-model", Priority: 2},
+		}},
+		Cache: CacheConfig{Enabled: true, TTL: "1h"},
+	})
+	p.providers["primary"] = &testProv{key: "primary-key"}
+	if got := len(p.poolIndex["pooled"]); got != 2 {
+		t.Fatalf("pooled virtual count=%d want 2", got)
+	}
+	// A mixed route is normally pool-assigned. Temporarily make both pool
+	// virtuals unavailable so an ordinary (cacheable) request deterministically
+	// primes from the static primary; no force or pin may be used because both
+	// deliberately bypass the cache.
+	p.healthMu.Lock()
+	for _, virtual := range p.poolIndex["pooled"] {
+		p.health[virtual] = &providerHealth{rateLimitedUntil: time.Now().Add(time.Hour)}
+	}
+	p.healthMu.Unlock()
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	body := `{"model":"client-model","input":[]}`
+	do := func(force string) (http.Header, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if force != "" {
+			req.Header.Set("x-mp-force-provider", force)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("force=%q status=%d body=%s", force, resp.StatusCode, out)
+		}
+		return resp.Header, string(out)
+	}
+
+	if _, got := do(""); got != `{"from":"primary"}` {
+		t.Fatalf("prime body=%s want primary", got)
+	}
+	if primaryHits != 1 || pooledHits != 0 {
+		t.Fatalf("after prime primary/pooled hits=%d/%d want 1/0", primaryHits, pooledHits)
+	}
+	if h, got := do(""); h.Get("x-mp-cache") != "hit" || got != `{"from":"primary"}` {
+		t.Fatalf("ordinary replay cache=%q body=%s want hit/primary", h.Get("x-mp-cache"), got)
+	}
+	if primaryHits != 1 || pooledHits != 0 {
+		t.Fatalf("ordinary replay primary/pooled hits=%d/%d want 1/0", primaryHits, pooledHits)
+	}
+	p.healthMu.Lock()
+	for _, virtual := range p.poolIndex["pooled"] {
+		delete(p.health, virtual)
+	}
+	p.healthMu.Unlock()
+	if h, got := do("pooled"); h.Get("x-mp-cache") != "" || got != `{"from":"pooled"}` {
+		t.Fatalf("forced pooled response cache=%q body=%s want empty/pooled", h.Get("x-mp-cache"), got)
+	}
+	if primaryHits != 1 || pooledHits != 1 {
+		t.Fatalf("forced pooled primary/pooled hits=%d/%d want 1/1", primaryHits, pooledHits)
+	}
+	parentAuth := <-pooledAuth
+	if parentAuth != "Bearer POOL-KEY-A" && parentAuth != "Bearer POOL-KEY-B" {
+		t.Fatalf("forced parent Authorization=%q want one configured pool key", parentAuth)
+	}
+
+	// The parent case above proves force-provider expands a pool. Also force one
+	// concrete virtual so the test binds virtual identity to its exact key;
+	// accepting either key alone would miss a credential swap between accounts.
+	specificVirtual := p.poolIndex["pooled"][0]
+	keyByVirtual := map[string]string{
+		"pooled#" + accountIDFor("zhipu", accountCred{APIKey: "POOL-KEY-A"}): "POOL-KEY-A",
+		"pooled#" + accountIDFor("zhipu", accountCred{APIKey: "POOL-KEY-B"}): "POOL-KEY-B",
+	}
+	specificKey, ok := keyByVirtual[specificVirtual]
+	if !ok {
+		t.Fatalf("specific virtual %q has no configured key mapping", specificVirtual)
+	}
+	if h, got := do(specificVirtual); h.Get("x-mp-cache") != "" || got != `{"from":"pooled"}` {
+		t.Fatalf("forced virtual response cache=%q body=%s want empty/pooled", h.Get("x-mp-cache"), got)
+	}
+	if got := <-pooledAuth; got != "Bearer "+specificKey {
+		t.Fatalf("forced virtual %q Authorization=%q want Bearer %s", specificVirtual, got, specificKey)
+	}
+	if primaryHits != 1 || pooledHits != 2 {
+		t.Fatalf("forced virtual primary/pooled hits=%d/%d want 1/2", primaryHits, pooledHits)
 	}
 }
 
