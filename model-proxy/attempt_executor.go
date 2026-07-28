@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	responsecache "model-proxy/internal/cache"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
 )
@@ -599,10 +600,10 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// buffer so a 2xx response can be cached for replay. Placed outermost
 		// (pass-through wrappers below it don't alter bytes). Only when the cache
 		// is on, this is a cacheable 2xx, and a key was computed in forward.
-		var crec *cacheRecorder
+		var cacheCapture *responsecache.Recorder
 		if cache != nil && cacheKey != "" && resp.StatusCode < 300 {
-			crec = newCacheRecorder(body, cache.maxBody)
-			body = crec
+			cacheCapture = responsecache.NewRecorder(body, cache.MaxBodyBytes())
+			body = cacheCapture
 		}
 		// Count streamed bytes for the empty-200 postmortem below.
 		// INTENTIONAL — recording a failure AFTER a committed 200 is deliberate,
@@ -644,19 +645,15 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		// capture is COMPLETE: not truncated by the size cap, AND sawEOF (the body
 		// streamed to a clean end). A client disconnect mid-stream leaves sawEOF
 		// false, so a half-read response is never cached as complete.
-		if crec != nil && crec.sawEOF && !crec.truncated && len(crec.buf) > 0 {
+		if cacheCapture != nil && cacheCapture.Complete() && len(cacheCapture.Body()) > 0 {
 			// The cached body is the CLIENT-protocol body the recorder captured,
 			// so the stored header must describe THAT body: a converted response
 			// drops the backend's Content-Length/Transfer-Encoding, and a mode
 			// mismatch carries the content-type the live path sent (see
-			// cachedResponseHeader). Replaying the upstream's original values
+			// HeaderForCapturedBody). Replaying the upstream's original values
 			// would corrupt the response or mislabel its framing.
-			hdr := cachedResponseHeader(resp.Header, convert, modeMismatch, clientWantsStream)
-			cache.put(cacheKey, &cacheEntry{
-				status: resp.StatusCode,
-				header: hdr,
-				body:   crec.buf,
-			}, time.Now())
+			header := responsecache.HeaderForCapturedBody(resp.Header, convert, modeMismatch, clientWantsStream)
+			cache.Put(cacheKey, resp.StatusCode, header, cacheCapture.Body(), time.Now())
 		}
 		// Live request monitor (#6): announce the completed request (agent,
 		// route, chosen provider, status, latency, best-effort tokens).

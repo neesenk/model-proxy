@@ -5,11 +5,16 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	responsecache "model-proxy/internal/cache"
 )
 
 func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
 	cfg := &Config{}
-	cache := &responseCache{}
+	cache := responsecache.New(responsecache.Options{
+		TTL: time.Hour, MaxEntries: 1, MaxBodyBytes: 1,
+	})
 	runtime := runtimeSnapshot{cfg: cfg, generation: 41, cache: cache}
 	plan := targetPlan{
 		target:       RouteTarget{Provider: "upstream", Model: "target-model"},

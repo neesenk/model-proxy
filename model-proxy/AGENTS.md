@@ -29,6 +29,10 @@
 - 实时事件 DTO、最近 ring、订阅和非阻塞 fan-out 统一归
   `internal/observe/events`；该包是无仓库内依赖叶子。根 `live_events.go` 只保留
   SSE/keepalive 适配，不得重新持有 event ring、subscriber map 或其锁。
+- 精确响应 cache 的 key、TTL/容量 store、bounded recorder、header normalization
+  和 replay 统一归 `internal/cache`；该包是无仓库内依赖叶子。根层只做
+  `CacheConfig` 适配和 force/pin/eligibility/lifecycle 编排，禁止重新声明 entry、
+  recorder 或访问 Store 内部锁与 map。
 - `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
 - quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。

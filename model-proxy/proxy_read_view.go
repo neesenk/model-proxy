@@ -93,12 +93,12 @@ func (view proxyReadView) dashboard(now time.Time) dashboardView {
 	}
 
 	cacheInfo := map[string]any{"enabled": false}
-	if hits, misses, entries := cache.stats(); entries > 0 || hits > 0 || cache != nil {
+	if stats := cache.Stats(); stats.Entries > 0 || stats.Hits > 0 || cache != nil {
 		cacheInfo = map[string]any{
 			"enabled": true,
-			"hits":    hits,
-			"misses":  misses,
-			"entries": entries,
+			"hits":    stats.Hits,
+			"misses":  stats.Misses,
+			"entries": stats.Entries,
 		}
 	}
 

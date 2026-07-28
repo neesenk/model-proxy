@@ -82,8 +82,8 @@ cache: {enabled: true, ttl: 1h}
 		t.Fatal("cache not created despite cache.enabled")
 	}
 	now := time.Now()
-	p.cache.put("k", &cacheEntry{status: 200, body: []byte("x")}, now)
-	if _, ok := p.cache.get("k", now); !ok {
+	p.cache.Put("k", http.StatusOK, nil, []byte("x"), now)
+	if _, ok := p.cache.Lookup("k", now); !ok {
 		t.Fatal("seeded cache entry should hit")
 	}
 	w2 := newWebServer(p, "test-config.yaml")

@@ -33,6 +33,9 @@ import (
 //     compatibility bridge.
 //   - internal/observe/events owns the live-event ring and fan-out as a
 //     repository leaf; the root live_events.go file is only an HTTP/SSE adapter.
+//   - internal/cache owns exact-response keying, bounded capture,
+//     storage, header normalization, and replay as a repository leaf; the root
+//     adapter only maps resolved CacheConfig values.
 //
 // Being AST-based, comments and string literals can no longer false-positive,
 // and only actual selector/call expressions are judged. Known limits (accepted,
@@ -411,6 +414,77 @@ func TestArchitectureBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("internal observe cache owns exact-response storage", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/cache")
+		if _, err := os.Stat("cache.go"); err == nil {
+			t.Error("legacy root cache.go must not exist; cache mechanics belong in internal/cache")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat cache.go: %v", err)
+		}
+
+		adapter, _ := parseGoFile(t, "cache_adapter.go")
+		for _, spec := range adapter.Imports {
+			if path := strings.Trim(spec.Path.Value, `"`); path != "model-proxy/internal/cache" {
+				t.Errorf("cache_adapter.go has unexpected import %q", path)
+			}
+		}
+		functions := map[string]int{"newResponseCache": 0}
+		for _, decl := range adapter.Decls {
+			switch decl := decl.(type) {
+			case *ast.GenDecl:
+				if decl.Tok != token.IMPORT {
+					t.Error("cache_adapter.go must not declare package state or types")
+				}
+			case *ast.FuncDecl:
+				if _, ok := functions[decl.Name.Name]; !ok {
+					t.Errorf("cache_adapter.go has unexpected function %s", decl.Name.Name)
+					continue
+				}
+				functions[decl.Name.Name]++
+			default:
+				t.Errorf("cache_adapter.go has unexpected top-level declaration %T", decl)
+			}
+		}
+		if functions["newResponseCache"] != 1 {
+			t.Errorf("cache_adapter.go newResponseCache declarations = %d, want exactly 1", functions["newResponseCache"])
+		}
+
+		assertCacheStoreField := func(file, owner string) {
+			t.Helper()
+			parsed, _ := parseGoFile(t, file)
+			fieldType := namedStructFields(t, parsed, owner)["cache"]
+			pointer, ok := fieldType.(*ast.StarExpr)
+			if !ok {
+				t.Errorf("%s.cache type = %T, want *responsecache.Store", owner, fieldType)
+			} else if name, ok := configSelectorName(pointer.X, "responsecache"); !ok || name != "Store" {
+				t.Errorf("%s.cache must be *responsecache.Store", owner)
+			}
+		}
+		assertCacheStoreField("proxy.go", "Proxy")
+		assertCacheStoreField("dispatch_context.go", "runtimeSnapshot")
+
+		forbidden := map[string]bool{
+			"responseCache": true,
+			"cacheEntry":    true,
+			"cacheRecorder": true,
+		}
+		for _, path := range productionGoFiles(t) {
+			parsed, _ := parseGoFile(t, path)
+			for _, decl := range parsed.Decls {
+				gen, ok := decl.(*ast.GenDecl)
+				if !ok || gen.Tok != token.TYPE {
+					continue
+				}
+				for _, spec := range gen.Specs {
+					typeSpec, ok := spec.(*ast.TypeSpec)
+					if ok && forbidden[typeSpec.Name.Name] {
+						t.Errorf("%s redeclares root cache type %s", path, typeSpec.Name.Name)
+					}
+				}
+			}
+		}
+	})
+
 	t.Run("internal protocol owns conversion and remains a repository-leaf package", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/protocol")
 		for _, legacy := range []string{
@@ -771,7 +845,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			},
 		}
 		forbiddenTypes := map[string]bool{
-			"Proxy": true, "Config": true, "responseCache": true,
+			"Proxy": true, "Config": true, "Store": true,
 			"runtimeSnapshot": true, "targetPlan": true,
 		}
 		for _, contract := range contracts {
@@ -785,7 +859,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		f, _ := parseGoFile(t, "attempt_executor.go")
 		want := map[string]bool{"requestBody": true}
 		forbiddenTypes := map[string]bool{
-			"Proxy": true, "Config": true, "responseCache": true,
+			"Proxy": true, "Config": true, "Store": true,
 			"runtimeSnapshot": true, "targetPlan": true,
 			"proxyLifecycle": true, "shadowRuntime": true,
 		}
@@ -1066,7 +1140,7 @@ type attemptScope struct {
 	responseContext int; responsesHistory []any; responsesSession string
 	cfg *Config
 }
-	type attemptPolicy struct { force bool; lastTarget bool; contextRetry func(); cache *responseCache }
+	type attemptPolicy struct { force bool; lastTarget bool; contextRetry func(); cache *responsecache.Store }
 	type attemptCommit struct { requestBody []byte; runtime runtimeSnapshot }
 	func bad() { _ = targetAttempt{} }
 func newTargetAttempt() targetAttempt { return targetAttempt{} }
@@ -1092,7 +1166,7 @@ func (p *Proxy) callFusionSynthesizer() { p.client.Do(nil) }`)
 		t.Errorf("targetAttempt factory confinement positive control: got %d literals, want 1", len(got))
 	}
 	nestedForbidden := map[string]bool{
-		"Proxy": true, "Config": true, "responseCache": true,
+		"Proxy": true, "Config": true, "Store": true,
 		"runtimeSnapshot": true, "targetPlan": true,
 	}
 	nestedContracts := []struct {

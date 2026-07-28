@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"model-proxy/internal/accounts"
+	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/pricing"
@@ -63,7 +64,7 @@ type Proxy struct {
 	flusher           *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog            *requestLogger                   // per-request access log (full bodies); nil = disabled (default) or init failure
 	reqLogStarted     bool                             // lifecycle owns loop/shutdown only when started by startRuntimeServices
-	cache             *responseCache                   // exact-match response cache (prompt-hash + TTL); nil = disabled
+	cache             *responsecache.Store             // exact-match response cache (prompt-hash + TTL); nil = disabled
 	responsesState    *protocol.ResponsesStateStore    // previous_response_id replay for Responses clients bridged to stateless backends
 	events            *observeevents.Hub               // live request monitor fan-out hub (SSE /api/events); always non-nil
 	fusionReg         *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
@@ -503,7 +504,7 @@ func (p *Proxy) resetStats() {
 		p.agents.reset()
 	}
 	if p.cache != nil {
-		p.cache.reset()
+		p.cache.Reset()
 	}
 	if p.stats != nil {
 		if err := p.stats.resetAll(); err != nil {
@@ -1277,8 +1278,8 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// is in effect — both mean "send to THIS backend", not a stale cached answer.
 	var cacheKey string
 	if cache != nil && forceProvider(r) == "" && !force {
-		cacheKey = cacheKeyOf(r, origBody)
-		if e, ok := cache.get(cacheKey, time.Now()); ok {
+		cacheKey = responsecache.Key(r, origBody)
+		if e, ok := cache.Lookup(cacheKey, time.Now()); ok {
 			// Live monitor (#6): a cache hit skips the normal start/end flow, so
 			// emit an end event explicitly — otherwise the live view is blind to
 			// these (e.g. a retry-looping agent served from cache stays invisible).
@@ -1290,10 +1291,10 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 				Protocol:  proto,
 				Exposed:   calledModel,
 				Provider:  "(cache)",
-				Status:    e.status,
+				Status:    e.Status(),
 			})
 			w.Header().Set("x-mp-cache", "hit")
-			replayCached(w, e)
+			_ = responsecache.Replay(w, e)
 			return
 		}
 	}

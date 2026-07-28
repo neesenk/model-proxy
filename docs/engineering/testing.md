@@ -86,6 +86,11 @@ ring cap、detached snapshot、取消订阅、慢消费者丢弃和终态查询�
 forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为读取内部状态
 而恢复根包 type alias、访问模块互斥锁或暴露 test-only 生产接口。
 
+精确响应缓存的 key/store/recorder/header/replay 单测归
+`internal/cache/*_test.go`；根包保留 force/pin bypass、协议转换后的
+客户端字节、client cancel、reload generation、live event 与 Web status 集成
+测试。缓存断言通过公开 `Stats` 与 HTTP 结果完成，不得读取内部 entry map/counter。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；

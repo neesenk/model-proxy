@@ -877,7 +877,7 @@ func (f *statsFlusher) resetAll(p *Proxy) {
 		p.agents.reset()
 	}
 	if p.cache != nil {
-		p.cache.reset()
+		p.cache.Reset()
 	}
 	if f.stats != nil {
 		if err := f.stats.resetAll(); err != nil {

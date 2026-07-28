@@ -17,6 +17,20 @@ func setPinForTest(p *Proxy, route, provider string, ttl time.Duration) bool {
 	return ok
 }
 
+// TestPinEntryExpiresLabel covers no-expiry, future, and past labels.
+func TestPinEntryExpiresLabel(t *testing.T) {
+	now := time.Now()
+	if label := (pinEntry{provider: "z"}).expiresLabel(now); label != "" {
+		t.Errorf("no-expiry label=%q want empty", label)
+	}
+	if label := (pinEntry{provider: "z", expiresAt: now.Add(time.Hour)}).expiresLabel(now); label == "" || label == "expired" {
+		t.Errorf("future label=%q want 'expires in ...'", label)
+	}
+	if label := (pinEntry{provider: "z", expiresAt: now.Add(-time.Hour)}).expiresLabel(now); label != "expired" {
+		t.Errorf("past label=%q want expired", label)
+	}
+}
+
 // TestPin_ForcesProvider: a route with two targets (zhipu p1, deepseek p2) is
 // pinned to the LOWER-priority deepseek; forward then hits deepseek ONLY, never
 // zhipu, despite zhipu ranking first normally.

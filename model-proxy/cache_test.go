@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -31,94 +32,23 @@ func (w *cacheTestFailingWriter) Write([]byte) (int, error) {
 	return 0, errCacheTestClientGone
 }
 
-func TestCacheKeyOf(t *testing.T) {
-	body := []byte(`{"model":"glm","input":[]}`)
-	mk := func(path, query string, headers map[string]string) *http.Request {
-		u := "http://x" + path
-		if query != "" {
-			u += "?" + query
-		}
-		req, _ := http.NewRequest("POST", u, nil)
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		return req
+func TestNewResponseCacheAdaptsResolvedConfig(t *testing.T) {
+	if store := newResponseCache(CacheConfig{}); store != nil {
+		t.Fatalf("disabled cache created Store %#v", store)
 	}
-	k1 := cacheKeyOf(mk("/v1/responses", "", nil), body)
-	// identical → same key
-	if cacheKeyOf(mk("/v1/responses", "", nil), body) != k1 {
-		t.Error("identical requests must hash to the same key")
+	store := newResponseCache(CacheConfig{
+		Enabled: true, TTL: "1m", MaxEntries: 2, MaxBodyBytes: 123,
+	})
+	if store == nil {
+		t.Fatal("enabled cache did not create Store")
 	}
-	// different body → different key
-	if cacheKeyOf(mk("/v1/responses", "", nil), []byte(`{"model":"glm","input":[{"role":"user"}]}`)) == k1 {
-		t.Error("different body hashed to same key")
+	if got := store.MaxBodyBytes(); got != 123 {
+		t.Errorf("MaxBodyBytes = %d, want configured 123", got)
 	}
-	// different path → different key
-	if cacheKeyOf(mk("/v1/messages", "", nil), body) == k1 {
-		t.Error("different path hashed to same key")
-	}
-	// different query → different key (regression #8)
-	if cacheKeyOf(mk("/v1/responses", "version=2", nil), body) == k1 {
-		t.Error("different query hashed to same key (cache collision)")
-	}
-	// different anthropic-beta → different key
-	if cacheKeyOf(mk("/v1/responses", "", map[string]string{"anthropic-beta": "output-128k-2025-02-19"}), body) == k1 {
-		t.Error("different anthropic-beta hashed to same key (response-affecting header ignored)")
-	}
-	// different accept-language → different key
-	if cacheKeyOf(mk("/v1/responses", "", map[string]string{"accept-language": "zh-CN"}), body) == k1 {
-		t.Error("different accept-language hashed to same key (response-affecting header ignored)")
-	}
-	// a NON-response-affecting header must NOT change the key (guard against over-folding)
-	if cacheKeyOf(mk("/v1/responses", "", map[string]string{"x-custom": "whatever"}), body) != k1 {
-		t.Error("non-response-affecting header changed the key (over-folding)")
-	}
-}
-
-func TestResponseCache_GetPutExpiry(t *testing.T) {
-	c := newResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
-	now := time.Now()
-	c.put("k", &cacheEntry{status: 200, header: http.Header{"content-type": {"application/json"}}, body: []byte("ok")}, now)
-	if c.hits != 0 || c.misses != 0 {
-		t.Errorf("post-put counters hits=%d misses=%d want 0/0", c.hits, c.misses)
-	}
-	e, ok := c.get("k", now.Add(time.Second))
-	if !ok || e.status != 200 || string(e.body) != "ok" {
-		t.Errorf("get hit=%v entry=%+v want 200/ok", ok, e)
-	}
-	if c.hits != 1 {
-		t.Errorf("hits=%d want 1", c.hits)
-	}
-	// Expired → miss + lazy evict.
-	got, ok2 := c.get("k", now.Add(2*time.Hour))
-	if ok2 || got != nil {
-		t.Errorf("expired entry should miss, got=%+v ok=%v", got, ok2)
-	}
-	if _, stillThere := c.get("k", now.Add(2*time.Hour)); stillThere {
-		t.Error("expired entry not evicted")
-	}
-}
-
-func TestResponseCache_NilSafe(t *testing.T) {
-	var c *responseCache // nil (cache disabled)
-	if _, ok := c.get("k", time.Now()); ok {
-		t.Error("nil cache get should miss")
-	}
-	// put must not panic on a nil cache.
-	c.put("k", &cacheEntry{status: 200, body: []byte("x")}, time.Now())
-}
-
-func TestResponseCache_Eviction(t *testing.T) {
-	c := newResponseCache(CacheConfig{Enabled: true, TTL: "1h", MaxEntries: 2})
-	now := time.Now()
-	c.put("a", &cacheEntry{body: []byte("a")}, now)
-	c.put("b", &cacheEntry{body: []byte("b")}, now)
-	c.put("c", &cacheEntry{body: []byte("c")}, now) // over cap → evict one
-	c.mu.Lock()
-	n := len(c.m)
-	c.mu.Unlock()
-	if n != 2 {
-		t.Errorf("after over-cap put, len=%d want 2 (max_entries)", n)
+	now := time.Unix(1000, 0)
+	store.Put("key", http.StatusOK, nil, []byte("body"), now)
+	if _, ok := store.Lookup("key", now.Add(2*time.Minute)); ok {
+		t.Error("configured one-minute TTL did not expire entry")
 	}
 }
 
@@ -169,8 +99,8 @@ func TestForward_CacheHit(t *testing.T) {
 	if first != second {
 		t.Errorf("cached response differs from original:\nfirst:  %s\nsecond: %s", first, second)
 	}
-	if p.cache.hits != 1 {
-		t.Errorf("cache.hits=%d want 1", p.cache.hits)
+	if hits := p.cache.Stats().Hits; hits != 1 {
+		t.Errorf("cache hits=%d want 1", hits)
 	}
 
 	// A different body misses → upstream hit again.
@@ -245,7 +175,7 @@ func TestReload_RebuildsCache(t *testing.T) {
 	if p.cache == nil {
 		t.Fatal("cache not created despite cache.enabled")
 	}
-	p.cache.put("k", &cacheEntry{status: 200, body: []byte("x")}, time.Now())
+	p.cache.Put("k", http.StatusOK, nil, []byte("x"), time.Now())
 
 	// Disable via reload → cache gone.
 	write("")
@@ -264,67 +194,95 @@ func TestReload_RebuildsCache(t *testing.T) {
 	if p.cache == nil {
 		t.Fatal("reload with cache re-enabled should create a cache")
 	}
-	if _, _, entries := p.cache.stats(); entries != 0 {
+	if entries := p.cache.Stats().Entries; entries != 0 {
 		t.Errorf("rebuilt cache entries=%d want 0 (fresh, old entries not carried)", entries)
 	}
 }
 
-// TestCacheRecorder_Completeness (F3): sawEOF is set only on a clean EOF, so a
-// response truncated by a client disconnect (read ends with a non-EOF error) is
-// NOT treated as cacheable. A full read (EOF) is.
-func TestCacheRecorder_Completeness(t *testing.T) {
-	// Clean EOF → sawEOF true, not truncated.
-	rec := newCacheRecorder(io.NopCloser(strings.NewReader("hello world")), 100)
-	io.Copy(io.Discard, rec)
-	if !rec.sawEOF || rec.truncated {
-		t.Errorf("clean EOF: sawEOF=%v truncated=%v want true/false", rec.sawEOF, rec.truncated)
-	}
-	// Non-EOF termination (simulated disconnect) → sawEOF false.
-	rec2 := newCacheRecorder(&errReader{err: io.ErrUnexpectedEOF}, 100)
-	io.Copy(io.Discard, rec2)
-	if rec2.sawEOF {
-		t.Error("non-EOF termination should leave sawEOF false (partial → uncachable)")
-	}
-}
+func TestReload_DoesNotAdoptOldGenerationCacheWrites(t *testing.T) {
+	useStaticProviderPools(t, "z")
+	firstUpstream := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) == 1 {
+			close(firstUpstream)
+			<-releaseFirst
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		io.WriteString(writer, `{"id":"response"}`)
+	}))
+	defer upstream.Close()
 
-// errReader is a ReadCloser that returns 0 bytes + a fixed non-EOF error,
-// simulating a mid-stream abort (client disconnect / upstream error).
-type errReader struct{ err error }
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configBody := "listen: 127.0.0.1:0\n" +
+		"providers:\n  z:\n    provider_id: static\n    openai_base_url: " + upstream.URL + "\n" +
+		"routes:\n  model:\n    - {provider: z, model: model}\n" +
+		"cache: {enabled: true, ttl: 1h}\n"
+	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newTestProxy(t, config)
+	server := httptest.NewServer(http.HandlerFunc(proxy.handler))
+	defer server.Close()
 
-func (e *errReader) Read(p []byte) (int, error) { return 0, e.err }
-func (e *errReader) Close() error               { return nil }
+	requestBody := `{"model":"model","input":[{"role":"user","content":"same"}]}`
+	type result struct {
+		cacheHeader string
+		err         error
+	}
+	do := func() result {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/responses", strings.NewReader(requestBody))
+		if err != nil {
+			return result{err: err}
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			return result{err: err}
+		}
+		_, readErr := io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			return result{err: readErr}
+		}
+		return result{cacheHeader: response.Header.Get("x-mp-cache"), err: closeErr}
+	}
 
-// TestCachedResponseHeader: the stored header must describe the CLIENT-facing
-// body the recorder captured, not the upstream's original framing.
-func TestCachedResponseHeader(t *testing.T) {
-	upstream := http.Header{
-		"Content-Type":      {"application/json"},
-		"Content-Length":    {"123"},
-		"Transfer-Encoding": {"chunked"},
-		"X-Other":           {"keep"},
+	firstDone := make(chan result, 1)
+	go func() { firstDone <- do() }()
+	select {
+	case <-firstUpstream:
+	case <-time.After(3 * time.Second):
+		close(releaseFirst)
+		t.Fatal("old-generation request did not reach upstream")
 	}
-	// Pass-through: headers stored verbatim.
-	hdr := cachedResponseHeader(upstream, false, false, false)
-	if hdr.Get("Content-Length") != "123" || hdr.Get("Content-Type") != "application/json" {
-		t.Errorf("pass-through must keep upstream headers, got %v", hdr)
+	reloadErr := proxy.reload(configPath)
+	close(releaseFirst)
+	if reloadErr != nil {
+		t.Fatalf("reload while old request is in flight: %v", reloadErr)
 	}
-	// Converted: length headers dropped (client-protocol body differs in size).
-	hdr = cachedResponseHeader(upstream, true, false, false)
-	if hdr.Get("Content-Length") != "" || hdr.Get("Transfer-Encoding") != "" {
-		t.Errorf("converted must strip length headers, got %v", hdr)
+	if first := <-firstDone; first.err != nil {
+		t.Fatalf("old-generation request: %v", first.err)
 	}
-	if hdr.Get("Content-Type") != "application/json" || hdr.Get("X-Other") != "keep" {
-		t.Errorf("converted must keep content-type and unrelated headers, got %v", hdr)
+
+	if second := do(); second.err != nil || second.cacheHeader != "" {
+		t.Fatalf("first new-generation request = cache:%q err:%v, want upstream miss", second.cacheHeader, second.err)
 	}
-	// Mode mismatch, client wants stream: upstream JSON became SSE for the client.
-	hdr = cachedResponseHeader(upstream, true, true, true)
-	if ct := hdr.Get("Content-Type"); ct != "text/event-stream" {
-		t.Errorf("mode mismatch (client streams): content-type=%q want text/event-stream", ct)
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("upstream hits after new-generation miss = %d, want 2", got)
 	}
-	// Mode mismatch, client wants JSON: upstream SSE was aggregated to JSON.
-	hdr = cachedResponseHeader(upstream, true, true, false)
-	if ct := hdr.Get("Content-Type"); ct != "application/json" {
-		t.Errorf("mode mismatch (client non-stream): content-type=%q want application/json", ct)
+	if third := do(); third.err != nil || third.cacheHeader != "hit" {
+		t.Fatalf("second new-generation request = cache:%q err:%v, want cache hit", third.cacheHeader, third.err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("upstream hits after cache replay = %d, want 2", got)
 	}
 }
 
@@ -462,8 +420,8 @@ func TestForward_CancelledConvertedSSEIsNotCached(t *testing.T) {
 	if hits != 1 {
 		t.Fatalf("interrupted request upstream hits=%d want 1", hits)
 	}
-	if cacheHits, _, entries := p.cache.stats(); cacheHits != 0 || entries != 0 {
-		t.Fatalf("interrupted stream cache stats hits=%d entries=%d want 0/0", cacheHits, entries)
+	if stats := p.cache.Stats(); stats.Hits != 0 || stats.Entries != 0 {
+		t.Fatalf("interrupted stream cache stats hits=%d entries=%d want 0/0", stats.Hits, stats.Entries)
 	}
 
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
@@ -496,8 +454,8 @@ func TestForward_CancelledConvertedSSEIsNotCached(t *testing.T) {
 	if !strings.Contains(string(secondBody), `"content":"hel"`) || !strings.Contains(string(secondBody), `"content":"lo"`) {
 		t.Fatalf("retry missing complete converted content: %s", secondBody)
 	}
-	if cacheHits, _, entries := p.cache.stats(); cacheHits != 0 || entries != 1 {
-		t.Fatalf("after clean retry cache stats hits=%d entries=%d want 0/1", cacheHits, entries)
+	if stats := p.cache.Stats(); stats.Hits != 0 || stats.Entries != 1 {
+		t.Fatalf("after clean retry cache stats hits=%d entries=%d want 0/1", stats.Hits, stats.Entries)
 	}
 }
 

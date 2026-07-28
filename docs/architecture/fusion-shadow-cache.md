@@ -19,6 +19,11 @@
 - pin 和 force-provider 跳过读写缓存；
 - reload 重建缓存并清空条目。
 
+缓存机制由 `internal/cache` 叶子包拥有：request key、TTL/容量 store、
+bounded recorder、转换后 header normalization 与逐块 flush replay。根
+`cache_adapter.go` 只注入配置生效值；请求通过 `runtimeSnapshot.cache` 保持
+generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
+
 缓存定位是重复请求/重试盾牌，不是多轮对话前缀缓存。
 
 ## Live events
