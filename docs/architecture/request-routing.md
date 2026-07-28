@@ -12,7 +12,18 @@
 - `hasTools`：识别非空 tools；
 - `est`：CJK 每 rune 约 1 token，其他文本约 bytes/4，跳过超过 100 字符的 base64 run。
 
-catalog 在 daemon 启动和 reload 后异步加载。catalog 为 nil 时，请求感知路由整体 no-op，不能因此把所有目标过滤为空。
+`internal/catalog` 作为无仓库内依赖叶子包拥有 models.dev slim projection、
+canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存。根 adapter 只注入 HOME
+cache path、`MP_MODELSDEV_URL` 与 Config 中的 provider/route 名单。daemon
+启动时同步加载 catalog（最多受 source HTTP timeout 限制），reload 后的刷新才经
+lifecycle gate 异步执行；catalog 为 nil 时请求感知路由整体 no-op，不能因此把
+所有目标过滤为空。
+
+缓存写入必须使用目标目录内的唯一临时文件再 rename，多个进程不得共享固定
+`.tmp`。HTTP 200 的 payload 必须先成功解析才能替换旧 cache；malformed payload、
+非 2xx 或 fetch 错误有旧 cache 时告警并回落旧值，无旧 cache 时返回空 catalog
+与 non-nil error。304 只有在已有 cache 时有效，并要持久化新的 `fetched_at` 与
+可用 ETag。
 
 ## 能力判断
 
@@ -72,4 +83,5 @@ warning 同时出现在 daemon log、`/api/status.warnings`、models、doctor �
 - context overflow 的单次重试与 body 恢复。
 - implicit route 单 provider、多 provider 歧义、未登录 provider。
 - reasoning/codex protocol warnings。
-
+- catalog fresh/stale/force、ETag 304、malformed 200、非 2xx、损坏 cache 与并发
+  原子写。

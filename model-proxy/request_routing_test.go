@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"model-proxy/internal/catalog"
 )
 
 // testCatalog builds a models.dev catalog mapping model name → (context, input
@@ -15,17 +17,17 @@ import (
 func testCatalog(entries map[string]struct {
 	Context int64
 	Input   []string
-}, tools ...string) *modelsDevCatalog {
-	byName := map[string]modelsDevModel{}
+}, tools ...string) *catalog.Catalog {
+	byName := map[string]catalog.Model{}
 	for name, e := range entries {
-		byName[name] = modelsDevModel{Context: e.Context, Input: e.Input}
+		byName[name] = catalog.Model{Context: e.Context, Modalities: catalog.Modalities{Input: e.Input}}
 	}
 	for _, name := range tools {
 		m := byName[name]
 		m.ToolCall = true
 		byName[name] = m
 	}
-	return &modelsDevCatalog{ByName: byName}
+	return catalog.New(byName)
 }
 
 // TestModelFitsRequest: the unified predicate — a model fits iff it supports the

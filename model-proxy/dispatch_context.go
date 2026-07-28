@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 
+	"model-proxy/internal/catalog"
 	"model-proxy/internal/protocol"
 	"model-proxy/provider"
 )
@@ -17,7 +18,7 @@ type runtimeSnapshot struct {
 	poolIndex      map[string][]string
 	parentOf       map[string]string
 	expandedRoutes map[string][]RouteTarget
-	catalog        *modelsDevCatalog
+	catalog        *catalog.Catalog
 	cache          *responseCache
 	shadow         *shadowRuntime
 }

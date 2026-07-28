@@ -1,13 +1,17 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"model-proxy/internal/catalog"
+)
 
 // #6 unit: capability resolution order (config caps > catalog > default true).
 func TestConvertFixup_ImageOKForTarget(t *testing.T) {
-	cat := &modelsDevCatalog{ByName: map[string]modelsDevModel{
-		"m-vision": {Input: []string{"text", "image"}},
-		"m-text":   {Input: []string{"text"}},
-	}}
+	cat := catalog.New(map[string]catalog.Model{
+		"m-vision": {Modalities: catalog.Modalities{Input: []string{"text", "image"}}},
+		"m-text":   {Modalities: catalog.Modalities{Input: []string{"text"}}},
+	})
 	tgt := RouteTarget{Provider: "p", Model: "m-vision"}
 	// No caps anywhere: catalog decides.
 	cfg := &Config{Providers: map[string]Provider{"p": {Provider: "static"}}}

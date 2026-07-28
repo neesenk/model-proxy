@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"net/http"
+
+	"model-proxy/internal/catalog"
 )
 
 // request_routing.go implements request-aware routing decisions that need the
@@ -27,15 +29,8 @@ import (
 // the models.dev catalog. The catalog is keyed by canonical model name globally,
 // so a provider borrowing another vendor's model still resolves. ok=false when
 // the catalog is nil or the name is unknown.
-func lookupModelMeta(cat *modelsDevCatalog, model string) (ProviderModel, bool) {
-	if cat == nil {
-		return ProviderModel{}, false
-	}
-	md, ok := cat.lookup(model)
-	if !ok {
-		return ProviderModel{}, false
-	}
-	return md.toProviderModel(), true
+func lookupModelMeta(cat *catalog.Catalog, model string) (catalog.Model, bool) {
+	return cat.Lookup(model)
 }
 
 // estimateInputTokens returns a rough prompt-size estimate (input tokens) from
@@ -138,7 +133,7 @@ func profileRequest(body []byte) requestProfile {
 // image/tools ([image] = image yes, tools no) — the catalog is ignored for those
 // checks. This is the escape hatch for catalog blind spots (codex/aqp/volcengine).
 // Context-window checks always consult the catalog (capabilities declare no window).
-func modelFits(cat *modelsDevCatalog, caps map[string][]string, model string, prof requestProfile) bool {
+func modelFits(cat *catalog.Catalog, caps map[string][]string, model string, prof requestProfile) bool {
 	if declared, ok := caps[model]; ok {
 		if prof.hasImage && !hasCapability(declared, "image") {
 			return false
@@ -170,7 +165,7 @@ func modelFits(cat *modelsDevCatalog, caps map[string][]string, model string, pr
 
 // modelFitsRequest is a convenience wrapper (profiles the body then checks fit,
 // without a capabilities override).
-func modelFitsRequest(cat *modelsDevCatalog, model string, body []byte) bool {
+func modelFitsRequest(cat *catalog.Catalog, model string, body []byte) bool {
 	return modelFits(cat, nil, model, profileRequest(body))
 }
 
@@ -201,7 +196,7 @@ func targetCapabilities(cfg *Config, parentOf map[string]string, t RouteTarget) 
 // differs from modelFits' conservative image routing (which must not SEND an
 // image to an unknown model); here the image is already in the conversation
 // and the only alternative is losing it.
-func imageOKForTarget(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, t RouteTarget) bool {
+func imageOKForTarget(cfg *Config, parentOf map[string]string, cat *catalog.Catalog, t RouteTarget) bool {
 	if caps := targetCapabilities(cfg, parentOf, t); caps != nil {
 		if declared, ok := caps[t.Model]; ok {
 			return hasCapability(declared, "image")
@@ -254,7 +249,7 @@ func requestHasTools(body []byte) bool {
 // supportsImage reports whether a model's modalities accept image input. Models
 // with no recorded modalities are treated as NOT image-capable (conservative:
 // don't route an image to a model we can't confirm handles them).
-func supportsImage(m ProviderModel) bool {
+func supportsImage(m catalog.Model) bool {
 	for _, in := range m.Modalities.Input {
 		if in == "image" {
 			return true
@@ -271,7 +266,7 @@ func supportsImage(m ProviderModel) bool {
 // desc, + health/sticky/pool). No explicit fallback config is needed; the
 // scheduler picks the best-capable, best-ranked backend. No-op without a catalog
 // or when every in-route target already fits (the common case).
-func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, ordered []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte, generations ...uint64) []RouteTarget {
+func (p *Proxy) applyRequestAwareRouting(cfg *Config, parentOf map[string]string, cat *catalog.Catalog, exposed, sessionKey string, ordered []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte, generations ...uint64) []RouteTarget {
 	if cat == nil {
 		return ordered
 	}
@@ -364,7 +359,7 @@ func collectCrossRoute(expanded map[string][]RouteTarget, keep func(RouteTarget)
 // just fail the same request again. Returns nil without a catalog, when no tried
 // model has a known window (can't establish "larger"), or when nothing larger
 // AND capable exists — forward then commits the upstream 400.
-func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, cat *modelsDevCatalog, exposed, sessionKey string, tried []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte, generations ...uint64) []RouteTarget {
+func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, cat *catalog.Catalog, exposed, sessionKey string, tried []RouteTarget, expanded map[string][]RouteTarget, routeKeys map[string]bool, body []byte, generations ...uint64) []RouteTarget {
 	if cat == nil {
 		return nil
 	}

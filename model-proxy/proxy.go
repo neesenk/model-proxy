@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"model-proxy/internal/catalog"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
 	"model-proxy/provider"
@@ -64,7 +65,7 @@ type Proxy struct {
 	responsesState    *protocol.ResponsesStateStore    // previous_response_id replay for Responses clients bridged to stateless backends
 	events            *eventHub                        // live request monitor fan-out hub (SSE /api/events); always non-nil
 	fusionReg         *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
-	catalog           *modelsDevCatalog                // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
+	catalog           *catalog.Catalog                 // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
 	shadow            atomic.Pointer[shadowRuntime]    // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
 	pricingMu         sync.Mutex                       // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
 	closeOnce         sync.Once
@@ -552,7 +553,7 @@ func (p *Proxy) snapshotConfig() *Config {
 // or nil if unavailable (tests, or the best-effort load failed). Request-aware
 // routing (context-window fallback, capability routing) degrades to a no-op when
 // nil — the proxy forwards unchanged rather than guessing.
-func (p *Proxy) catalogSnapshot() *modelsDevCatalog {
+func (p *Proxy) catalogSnapshot() *catalog.Catalog {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.catalog
@@ -564,7 +565,7 @@ func (p *Proxy) catalogSnapshot() *modelsDevCatalog {
 // runProxy only — direct NewProxy callers (tests) stay offline; tests that need
 // metadata set p.catalog directly.
 func (p *Proxy) initCatalog() {
-	cat, err := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
+	cat, err := loadModelsCatalog(false)
 	if err != nil || cat == nil {
 		if err != nil {
 			log.Printf("[models] catalog load failed: %v - running without request-aware routing", err)

@@ -66,6 +66,14 @@
 `../docs/engineering/pitfalls.md` 的配置节为权威定义。不要用直接构造
 `Config` 的测试替代 YAML 加载覆盖。
 
+## Models.dev catalog
+
+slim metadata projection、canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存
+统一归 `internal/catalog`；该包是无仓库内依赖叶子，不能读取 Config、HOME、
+环境变量、Proxy、Provider 或 Web/CLI。根 adapter 只注入 cache path、endpoint
+和 provider/route 名单；请求路由必须继续使用 `runtimeSnapshot` 捕获的 catalog，
+不得在请求内刷新或重新读取。
+
 ## CLI
 
 CLI 输出是 change-controlled contract。修改命令、字段、颜色、顺序或提示前读取 `CLI.md`，实现后同步更新它。文件日志不得带 ANSI color。

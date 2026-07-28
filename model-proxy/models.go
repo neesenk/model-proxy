@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"model-proxy/internal/catalog"
 	"model-proxy/provider"
 )
 
@@ -39,11 +40,11 @@ func cmdModels(args []string) {
 	rest := nonFlagArgs(args)
 	if len(rest) > 0 && rest[0] == "pull" {
 		// models pull — force-refresh the global models.dev catalog cache.
-		cat, ferr := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, true)
+		cat, ferr := loadModelsCatalog(true)
 		if ferr != nil {
 			log.Fatal(ferr)
 		}
-		fmt.Printf("models.dev catalog refreshed: %d unique models, etag %s\n", len(cat.ByName), cat.Etag)
+		fmt.Printf("models.dev catalog refreshed: %d unique models, etag %s\n", cat.Count(), cat.ETag())
 		return
 	}
 	if len(rest) > 0 && rest[0] == "refresh" {
@@ -99,7 +100,7 @@ func cmdModels(args []string) {
 			log.Fatalf("unknown provider %q; available: %s", provFilter, providerNames(cfg))
 		}
 	}
-	cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
+	cat, _ := loadModelsCatalog(false)
 	meta, sources := hydrateModels(cfg, cat)
 	printAllModels(cfg, provFilter, meta, sources)
 	// Warn about unrouted models auto-routed to one of several logged-in providers
@@ -115,7 +116,7 @@ func cmdModels(args []string) {
 // printAllModels prints all models with their hydrated metadata. `meta` maps
 // provider→model→metadata (nil in legacy callers → names shown without ctx/out).
 // `sources` drives a trailing SRC tag: models.dev / default.
-func printAllModels(cfg *Config, provFilter string, meta map[string]map[string]ProviderModel, sources map[string]map[string]modelSource) {
+func printAllModels(cfg *Config, provFilter string, meta map[string]map[string]catalog.Model, sources map[string]map[string]modelSource) {
 	names := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
 		if provFilter != "" && n != provFilter {
@@ -147,7 +148,7 @@ func printAllModels(cfg *Config, provFilter string, meta map[string]map[string]P
 		}
 		sort.Strings(modelIDs)
 		for _, mid := range modelIDs {
-			var m ProviderModel
+			var m catalog.Model
 			if meta != nil && meta[pn] != nil {
 				m = meta[pn][mid]
 			}
@@ -264,7 +265,7 @@ func probeAndWriteModels(cfg *Config, provName string, merged, existing []string
 	provCfg := cfg.Providers[provName]
 	provCfg.Models = kept
 	cfg.Providers[provName] = provCfg
-	cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
+	cat, _ := loadModelsCatalog(false)
 	meta, sources := hydrateModels(cfg, cat)
 
 	// Output order: final list FIRST, then the filter summary with reasons.

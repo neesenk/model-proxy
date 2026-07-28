@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"model-proxy/internal/catalog"
 	"model-proxy/provider"
 )
 
@@ -313,7 +314,7 @@ func routeModelsForProvider(cfg *Config, provName string) []string {
 // table with models.dev metadata (context/output/input modalities/source) -
 // matching the `model-proxy models` display. Shown BEFORE the filter summary.
 // `meta`/`sources` come from hydrateModels (keyed by provider -> model id).
-func printKeptModels(provName string, kept []string, meta map[string]map[string]ProviderModel, sources map[string]map[string]modelSource) {
+func printKeptModels(provName string, kept []string, meta map[string]map[string]catalog.Model, sources map[string]map[string]modelSource) {
 	if len(kept) == 0 {
 		fmt.Println(cYellow("(no models)"))
 		return
@@ -323,7 +324,7 @@ func printKeptModels(provName string, kept []string, meta map[string]map[string]
 		cDim(pad("CTX", 10)), cDim(pad("OUTPUT", 8)),
 		cDim(pad("INPUT MODALITIES", 18)), cDim(pad("SRC", 10)))
 	for _, id := range kept {
-		var m ProviderModel
+		var m catalog.Model
 		if meta != nil && meta[provName] != nil {
 			m = meta[provName][id]
 		}

@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"model-proxy/internal/catalog"
 )
 
 // liveTimeout caps one upstream round trip.
@@ -292,9 +294,9 @@ func TestLive_AnthropicToChat_MediaVisionGate(t *testing.T) {
 	// is text-only, the cross-route fallback finds no vision candidate and
 	// falls back to the original target (intentional-behaviors.md #9), so the
 	// request still reaches deepseek with the image gated to placeholder text.
-	p.catalog = &modelsDevCatalog{ByName: map[string]modelsDevModel{
-		model: {Input: []string{"text"}},
-	}}
+	p.catalog = catalog.New(map[string]catalog.Model{
+		model: {Modalities: catalog.Modalities{Input: []string{"text"}}},
+	})
 
 	// 1x1 transparent PNG (fixture, not a real screenshot).
 	const px = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="

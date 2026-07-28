@@ -338,7 +338,9 @@ PROVIDER       MODEL ID               NAME                 CTX         OUTPUT   
 
 ### `models pull`（强制刷新 models.dev 缓存）
 
-stdout：`models.dev catalog refreshed: <N> unique models, etag <ETAG>`。失败 -> stderr + exit 1（`log.Fatal`）。
+stdout：`models.dev catalog refreshed: <N> unique models, etag <ETAG>`。网络错误、
+非 2xx、malformed 200 或无 cache 的异常 304：有旧 cache 时 stderr 告警并继续
+使用旧值；无可用 cache 时 stderr + exit 1（`log.Fatal`），且不会写入坏响应。
 
 ### `models refresh <provider>`（`cmdModels` refresh 分支 + `probeAndWriteModels`）
 

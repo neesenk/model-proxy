@@ -104,7 +104,7 @@ routes:
 #   enabled: true
 ```
 
-> **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities`/`tool_call` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。匹配不到的模型走保守默认值并在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
+> **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities`/`tool_call` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。网络、HTTP 或响应解析失败时已有缓存继续可用且不会被覆盖；无可用缓存时 `models pull` 明确报错，普通列表/刷新与 takeover 按原有 best-effort 语义使用保守默认值。匹配不到的模型会在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
 >
 > **隐式路由**：某个模型即使没在 `routes` 里配，只要某个**已登录** provider 的 `models:` 列了它，代理会自动按模型名路由到（字母序）首个 provider。若多个已登录 provider 都提供且无显式 route，只用首个并在 `models` 命令 / Web UI 发出歧义告警。显式 `routes` 永远优先（要做 failover/优先级控制仍需显式配置）。
 

@@ -30,7 +30,7 @@ docs/                     架构、后端和 API 契约
 | `model-proxy/internal/config/*`、`model-proxy/config_compat.go`、配置加载/校验/默认值 | `model-proxy/AGENTS.md`、`docs/architecture/overview.md`；字段同步另读 `docs/engineering/pitfalls.md` |
 | `model-proxy/internal/protocol/*`、跨协议 route | `docs/architecture/protocol-conversion.md` |
 | `request_routing.go`、implicit routes | `docs/architecture/request-routing.md` |
-| models.dev catalog、`models refresh` | `docs/architecture/request-routing.md`；pricing/analytics 另读 `docs/web-api.md` |
+| `model-proxy/internal/catalog/*`、models.dev catalog、`models refresh` | `docs/architecture/request-routing.md`；pricing/analytics 另读 `docs/web-api.md` |
 | `daemon.go`、supervisor、serve 生命周期 | `docs/engineering/pitfalls.md`（进程类陷阱）、`model-proxy/CLI.md`（serve 命令契约） |
 | Fusion、Shadow、Cache、request log、live | `docs/architecture/fusion-shadow-cache.md` |
 | `web.go`、`web_assets/*`、stats/API | `docs/web-api.md`；前端另读 `model-proxy/web_assets/AGENTS.md` |

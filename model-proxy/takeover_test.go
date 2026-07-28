@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"model-proxy/internal/catalog"
 )
 
 // takeover_test.go covers the client-config rewrite functions (rewriteClaude,
@@ -275,7 +277,7 @@ func TestExposedModels_PicksBestPriority(t *testing.T) {
 		},
 	}
 	// Metadata is now runtime-sourced (models.dev); build the hydrated map directly.
-	meta := map[string]map[string]ProviderModel{
+	meta := map[string]map[string]catalog.Model{
 		"a": {"m1": {Context: 1000, Output: 2000}},
 		"b": {"m1": {Context: 3000, Output: 4000}},
 	}

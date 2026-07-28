@@ -79,12 +79,15 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 - Agent Plan 的 5h/每日/周/月额度在 **GetAFPUsage**（火山引擎签名 OpenAPI：`Action=GetAFPUsage&Version=2024-01-01&serviceCode=ark`，管控面，HMAC-SHA256/V4，需 AccessKey/SecretKey）—— Ark API Key（Bearer）调不了 GetAFPUsage，但能调 `/models`（`login` 用作 key 校验）。`volcengine_sign.go` 做 V4 签名（CredentialScope `{date}/cn-beijing/ark/request`，signing key 链 SK→kDate→kRegion→kService→kSigning，**末项 `"request"` 非 `"volcengine_request"`**；签名头仅 `host;x-date`，**不含 `x-content-sha256`**）。`login volcengine` 收 Ark API Key（必填）+ AK/SK（可选，仅 chat 可缺省）；`login` 用 `usage_url`（Bearer GET `/api/plan/v3/models`）验 Ark Key，可选 AK/SK 经 GetAFPUsage 验证（401/403 拒，其余放行）。`usage volcengine` 解析 `Result.{AFPFiveHour,AFPDaily,AFPWeekly,AFPMonthly}`（各 `Quota/Used/ResetTime`）。`models refresh` 调 **ListArkAgentPlanModel**（同理 V4 签名）解析 `Result.Datas[].ModelID`，经正则过滤 + endpoint 探测后写。未配 AK/SK 退化列 config 模型。
 - 模型 ID 是模型名（如 `doubao-seed-1-8-251228`），非推理接入点 endpoint id。
 
-## models.dev 元数据契约（`modelsdev.go`，实测）
+## models.dev 元数据契约（`internal/catalog`，实测）
 
 - 数据源 `GET https://models.dev/api.json`（raw 3.05 MB）。gzip 后 ~286 KB（Go Transport 自动 gzip——**勿手动设 Accept-Encoding**，否则关掉自动解压）；`If-None-Match`→304 返回 0 字节。磁盘缓存只存去重 slim 投影（`by_name` 244 项，~150 KB），**绝不存 3 MB blob**。
-- 缓存 `~/.model-proxy/models_cache.json`，TTL 24h，atomic tmp+rename。`ensureCatalogFresh`：fresh→用；stale/force→conditional GET；fetch 失败+有旧→用旧+stderr；无→空 catalog。`MP_MODELSDEV_URL` 覆盖端点。
-- 匹配：`lookup()` 纯全局精确名查找，未命中→default（无 endpoint/后缀匹配逻辑）。借名模型（aqp 借的 `glm-*`/`deepseek-*`）靠 parse 期 `by_name` 去重时 canonical owner 胜出解析。
+- 缓存 `~/.model-proxy/models_cache.json`，TTL 24h；写入使用目标目录中的唯一临时文件再 atomic rename，多个进程不会争用固定 `.tmp`。`catalog.EnsureFresh`：fresh→用；stale/force→conditional GET；304→刷新并持久化 `fetched_at`/ETag；合法 200→重建并持久化。fetch 错误、非 2xx 或 malformed 200 有旧 cache 时告警并回落旧值，无旧 cache 时返回空 catalog + error，绝不以坏响应覆盖旧数据。`MP_MODELSDEV_URL` 由根 adapter 覆盖端点。
+- 匹配：`Catalog.Lookup()` 纯全局精确名查找，未命中→default（无 endpoint/后缀匹配逻辑）。借名模型（aqp 借的 `glm-*`/`deepseek-*`）靠 parse 期 `by_name` 去重时 canonical owner 胜出解析。
 - **`models:` 只配名字；元数据全来自 models.dev**（context/output/modalities/`tool_call` 运行时由 `hydrateModels` 补，失败→default；slim 投影含 `tool_call` 供能力路由）。effective = config 名字 ∪ routes 引用模型。
 - **`models refresh <provider>` 写 config**：拉 upstream 列表 + 现有 `models:` 合并去重 → 逐个 endpoint 探测（`probeModelCallable` 复刻 forward 的 base/path/auth）→ 仅 2xx 保留 → **覆盖写**回 `models:`（非 append-only）。`FilterModelIDs` 做静态策略过滤。探测 infra 不可用→写未校验合并集；**全部失败→保留 config 不清空+告警**。写是保注释的 yaml.Node 往返。**只有 `models refresh` 写 config.yaml；`models`/`takeover` 显示永不写**。
 - 覆盖盲区：models.dev **没有** aqp/compass、codex/ChatGPT、volcengine；未命中→default（能力路由的逃生口：provider config `capabilities:`，见 `docs/architecture/request-routing.md`）。
-- 作用域：`models`/`takeover` CLI 调 `ensureCatalogFresh`+`hydrateModels`（只改内存 cfg，不进 `LoadConfig`）；daemon 启动/reload 经 `initCatalog` 加载供请求感知路由用（失败→nil，路由功能 no-op）。`models` 显示 `SRC` 列（`models.dev`/`default`）。
+- 作用域：`models`/`takeover` CLI 经根 adapter 调 `catalog.EnsureFresh` +
+  `hydrateModels`（只改内存 cfg，不进 `LoadConfig`）；daemon 启动/reload 经
+  `initCatalog` 加载供请求感知路由用（失败→nil，路由功能 no-op）。`models`
+  显示 `SRC` 列（`models.dev`/`default`）。

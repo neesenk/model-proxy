@@ -56,6 +56,11 @@ accessor；它不是无仓库依赖叶子，只允许依赖其校验/默认值�
 和 `LoadConfig` / `LoadConfigFromBytes` 兼容 wrapper，composition root 与现有
 调用方不得在根包重新建立第二套配置事实或恢复 `config.go`。
 
+`internal/catalog` 是无仓库内依赖的 models.dev 元数据源叶子包，拥有 slim
+projection、canonical-owner 去重、HTTP/ETag/TTL 刷新和原子磁盘缓存。根包只把
+HOME、`MP_MODELSDEV_URL` 与 Config 的 provider/route 名单适配成 catalog 输入；
+请求感知路由继续消费一次性捕获在 `runtimeSnapshot` 中的不可变 catalog 指针。
+
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
@@ -111,6 +116,7 @@ Web → proxyReadView / proxyAdminCommands
 lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
 analytics adapter → internal/pricing
+catalog adapter / routing → internal/catalog
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
 ```
@@ -127,6 +133,8 @@ composition root → internal/config → internal/pricing / internal/protocol
 - `internal/config` import `internal/pricing`、`internal/protocol` 以外的
   `model-proxy/*` 包，或根 `config_compat.go` 承载类型别名与加载 wrapper
   之外的配置实现；
+- `internal/catalog` 反向依赖 Config、Proxy、Provider、Web/CLI 或任意
+  `model-proxy/*` 包；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
   Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetPlan`；
@@ -144,7 +152,7 @@ composition root → internal/config → internal/pricing / internal/protocol
 
 架构边界的静态回归位于 `architecture_contract_test.go`（基于 go/ast 检查
 `webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector、
-账号测活的单次 runtime snapshot、internal 叶子包 import、`internal/config`
-依赖 allowlist、根配置兼容 facade 以及 Fusion 不绕过 `targetPlan`，不是字符串
-扫描）；行为与并发验证仍按
+账号测活的单次 runtime snapshot、internal 叶子包 import（含 catalog）、
+`internal/config` 依赖 allowlist、根配置兼容 facade 以及 Fusion 不绕过
+`targetPlan`，不是字符串扫描）；行为与并发验证仍按
 `docs/engineering/testing.md` 执行。

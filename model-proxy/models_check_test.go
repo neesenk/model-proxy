@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/catalog"
 	"model-proxy/provider"
 )
 
@@ -461,9 +462,9 @@ func TestStripRequestID(t *testing.T) {
 
 func TestPrintKeptModels(t *testing.T) {
 	// models.dev metadata for two kept models: one with full metadata, one default.
-	meta := map[string]map[string]ProviderModel{
+	meta := map[string]map[string]catalog.Model{
 		"volcengine": {
-			"glm-5.2":   {Context: 200000, Output: 16384, Modalities: ProviderModalities{Input: []string{"text", "image"}}},
+			"glm-5.2":   {Context: 200000, Output: 16384, Modalities: catalog.Modalities{Input: []string{"text", "image"}}},
 			"kimi-k2.6": {}, // no metadata -> defaults (text, "-")
 		},
 	}

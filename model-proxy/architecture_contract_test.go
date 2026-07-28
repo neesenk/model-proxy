@@ -25,6 +25,9 @@ import (
 //   - internal/config owns configuration behind a root compatibility facade;
 //     its only repository imports are internal/pricing and internal/protocol,
 //     while config_compat.go contains only type aliases and load wrappers.
+//   - internal/catalog owns models.dev parsing, fetching, and persistence as a
+//     repository leaf; the root adapter is an exact environment/config bridge,
+//     and request routing consumes only runtimeSnapshot.catalog.
 //
 // Being AST-based, comments and string literals can no longer false-positive,
 // and only actual selector/call expressions are judged. Known limits (accepted,
@@ -132,6 +135,77 @@ func TestArchitectureBoundaries(t *testing.T) {
 		facade, _ := parseGoFile(t, "config_compat.go")
 		if got := configCompatViolations(facade); len(got) != 0 {
 			t.Errorf("config_compat.go must contain only internal/config type aliases and direct Load wrappers: %v", got)
+		}
+	})
+
+	t.Run("internal catalog owns the models.dev source kernel", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/catalog")
+		for _, legacy := range []string{"modelsdev.go", "model_catalog_types.go"} {
+			if _, err := os.Stat(legacy); err == nil {
+				t.Errorf("legacy root %s must not exist; catalog types and source logic belong in internal/catalog", legacy)
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("stat %s: %v", legacy, err)
+			}
+		}
+
+		adapter, _ := parseGoFile(t, "catalog_adapter.go")
+		wantImports := map[string]bool{
+			"os":                           true,
+			"path/filepath":                true,
+			"model-proxy/internal/catalog": true,
+		}
+		for _, spec := range adapter.Imports {
+			importPath := strings.Trim(spec.Path.Value, `"`)
+			if !wantImports[importPath] {
+				t.Errorf("catalog_adapter.go has unexpected import %q", importPath)
+			}
+			delete(wantImports, importPath)
+		}
+		for missing := range wantImports {
+			t.Errorf("catalog_adapter.go is missing required import %q", missing)
+		}
+		wantFunctions := map[string]int{
+			"modelsCatalogEndpoint": 0,
+			"modelsCatalogPath":     0,
+			"loadModelsCatalog":     0,
+			"hydrateModels":         0,
+		}
+		for _, decl := range adapter.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if fn.Recv != nil {
+				t.Errorf("catalog_adapter.go has unexpected method %s", fn.Name.Name)
+				continue
+			}
+			if _, allowed := wantFunctions[fn.Name.Name]; !allowed {
+				t.Errorf("catalog_adapter.go has unexpected function %s; source/cache logic belongs in internal/catalog", fn.Name.Name)
+				continue
+			}
+			wantFunctions[fn.Name.Name]++
+		}
+		for name, count := range wantFunctions {
+			if count != 1 {
+				t.Errorf("catalog_adapter.go %s declarations = %d, want exactly 1", name, count)
+			}
+		}
+
+		snapshot, _ := parseGoFile(t, "dispatch_context.go")
+		catalogType := namedStructFields(t, snapshot, "runtimeSnapshot")["catalog"]
+		pointer, ok := catalogType.(*ast.StarExpr)
+		if !ok {
+			t.Errorf("runtimeSnapshot.catalog type = %T, want *catalog.Catalog", catalogType)
+		} else if name, ok := configSelectorName(pointer.X, "catalog"); !ok || name != "Catalog" {
+			t.Errorf("runtimeSnapshot.catalog must be *catalog.Catalog")
+		}
+		routing, routingFSet := parseGoFile(t, "request_routing.go")
+		forbiddenRefresh := map[string]bool{
+			"EnsureFresh": true, "FetchHTTP": true, "loadModelsCatalog": true,
+			"modelsCatalogEndpoint": true, "modelsCatalogPath": true,
+		}
+		for _, violation := range forbiddenCallSites(routing, routingFSet, forbiddenRefresh, nil) {
+			t.Errorf("request routing refreshes or re-reads catalog instead of using runtimeSnapshot: %s", violation)
 		}
 	})
 

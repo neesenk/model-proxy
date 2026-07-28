@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"model-proxy/internal/catalog"
 )
 
 // errTakeoverNoFile signals that a takeover client's config file is absent.
@@ -86,10 +88,10 @@ func runTakeover(cfg *Config, which, bakDir string) error {
 	implicit, _ := synthesizeImplicitRoutes(cfg)
 	// Hydrate models.dev metadata only if a client in this set writes per-model
 	// metadata (opencode/pi). claude/codex ignore it, so skip the (≤10s) fetch.
-	var meta map[string]map[string]ProviderModel
+	var meta map[string]map[string]catalog.Model
 	var sources map[string]map[string]modelSource
 	if takeoverWritesMetadata(clients) {
-		cat, _ := ensureCatalogFresh(cachePath(), modelsDevEndpoint(), realModelsDevFetch, false)
+		cat, _ := loadModelsCatalog(false)
 		meta, sources = hydrateModels(cfg, cat)
 	}
 	emitTakeoverWarnings(clients, cfg, meta, sources, implicit)
@@ -120,14 +122,14 @@ func runTakeover(cfg *Config, which, bakDir string) error {
 // emitTakeoverWarnings prints a stderr warning for each default-sourced model
 // that a metadata-writing client (opencode, pi) in this takeover set will emit.
 // claude/codex don't write per-model metadata, so they are skipped to avoid noise.
-func emitTakeoverWarnings(clients []clientSpec, cfg *Config, meta map[string]map[string]ProviderModel, sources map[string]map[string]modelSource, implicit map[string]RouteTarget) {
+func emitTakeoverWarnings(clients []clientSpec, cfg *Config, meta map[string]map[string]catalog.Model, sources map[string]map[string]modelSource, implicit map[string]RouteTarget) {
 	if !takeoverWritesMetadata(clients) {
 		return
 	}
 	for _, m := range exposedModels(cfg, meta, implicit) {
 		if sources[m.provider] != nil && sources[m.provider][m.realModel] == srcDefault {
 			fmt.Fprintf(os.Stderr, "warning: model %s at %s: no models.dev metadata — wrote defaults (ctx=%d out=%d text-only)\n",
-				m.realModel, m.provider, defaultProviderModel.Context, defaultProviderModel.Output)
+				m.realModel, m.provider, defaultModelMetadata.Context, defaultModelMetadata.Output)
 		}
 	}
 }
@@ -152,21 +154,21 @@ func runRestore(cfg *Config, which, bakDir string) error {
 type clientSpec struct {
 	name    string
 	file    string
-	rewrite func(cfg *Config, meta map[string]map[string]ProviderModel, implicit map[string]RouteTarget) error
+	rewrite func(cfg *Config, meta map[string]map[string]catalog.Model, implicit map[string]RouteTarget) error
 }
 
 func listClients(cfg *Config, which string) []clientSpec {
 	all := []clientSpec{
-		{name: "claude", file: cfg.Takeover.Claude, rewrite: func(c *Config, _ map[string]map[string]ProviderModel, _ map[string]RouteTarget) error {
+		{name: "claude", file: cfg.Takeover.Claude, rewrite: func(c *Config, _ map[string]map[string]catalog.Model, _ map[string]RouteTarget) error {
 			return rewriteClaude(c)
 		}},
-		{name: "opencode", file: cfg.Takeover.Opencode, rewrite: func(c *Config, m map[string]map[string]ProviderModel, imp map[string]RouteTarget) error {
+		{name: "opencode", file: cfg.Takeover.Opencode, rewrite: func(c *Config, m map[string]map[string]catalog.Model, imp map[string]RouteTarget) error {
 			return rewriteOpencode(c, m, imp)
 		}},
-		{name: "codex", file: cfg.Takeover.Codex, rewrite: func(c *Config, _ map[string]map[string]ProviderModel, _ map[string]RouteTarget) error {
+		{name: "codex", file: cfg.Takeover.Codex, rewrite: func(c *Config, _ map[string]map[string]catalog.Model, _ map[string]RouteTarget) error {
 			return rewriteCodex(c)
 		}},
-		{name: "pi", file: cfg.Takeover.Pi, rewrite: func(c *Config, m map[string]map[string]ProviderModel, imp map[string]RouteTarget) error {
+		{name: "pi", file: cfg.Takeover.Pi, rewrite: func(c *Config, m map[string]map[string]catalog.Model, imp map[string]RouteTarget) error {
 			return rewritePi(c, m, imp)
 		}},
 	}

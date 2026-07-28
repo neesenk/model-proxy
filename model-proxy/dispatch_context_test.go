@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"model-proxy/internal/catalog"
 	"model-proxy/provider"
 )
 
@@ -11,7 +12,7 @@ func TestRuntimeSnapshotKeepsOneReloadGeneration(t *testing.T) {
 		Providers: map[string]Provider{"old": {Provider: "static"}},
 		Routes:    map[string][]RouteTarget{"m": {{Provider: "old", Model: "old-model"}}},
 	})
-	p.catalog = &modelsDevCatalog{}
+	p.catalog = catalog.New(nil)
 
 	snapshot := p.snapshotRuntime()
 	if snapshot.cfg != p.cfg ||
