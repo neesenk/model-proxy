@@ -9,7 +9,8 @@ log_level: info # debug | info | warn | error
 
 # Providers — upstream backends. Token files are auto-managed by login/logout
 # at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).
-# Multi-account: for apikey providers (zhipu/deepseek/volcengine), repeat
+# Multi-account: for apikey providers (static/zhipu/zcode/deepseek/
+# volcengine/kimi-code/qwen-plan), repeat
 # `login <provider>` to add more accounts into a credential pool
 # (~/.model-proxy/<name>_apikeys.json). At runtime each pool is unrolled into
 # per-account virtual providers; Claude Code conversations are spread across

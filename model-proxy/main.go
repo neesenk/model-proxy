@@ -561,7 +561,7 @@ func printProviderUsage(cfg *Config, provName string) {
 				fmt.Println(cDim(usageDivider))
 			}
 			fmt.Printf("%s (%s)\n", cBold(cCyan(a.Label)), mask(a.ID))
-			cred := a.cred()
+			cred := a.Credentials()
 			if p := buildOne(cfg, provName, prov, cred); p != nil {
 				if err := p.Usage(); err != nil {
 					fmt.Println(cYellow("  (usage unavailable: " + err.Error() + ")"))

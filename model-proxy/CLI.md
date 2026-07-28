@@ -162,7 +162,7 @@ restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 login <provider> [--label <name>] [--replace]
 ```
 
-逻辑（`login.go:29` `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
+逻辑（`login.go:29` `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
 
 ### 通用
 

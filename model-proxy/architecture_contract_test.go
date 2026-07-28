@@ -28,6 +28,9 @@ import (
 //   - internal/catalog owns models.dev parsing, fetching, and persistence as a
 //     repository leaf; the root adapter is an exact environment/config bridge,
 //     and request routing consumes only runtimeSnapshot.catalog.
+//   - internal/accounts owns API-key pool schemas, identity, persistence, and
+//     locking as a repository leaf; the root adapter is only an environment and
+//     compatibility bridge.
 //
 // Being AST-based, comments and string literals can no longer false-positive,
 // and only actual selector/call expressions are judged. Known limits (accepted,
@@ -206,6 +209,99 @@ func TestArchitectureBoundaries(t *testing.T) {
 		}
 		for _, violation := range forbiddenCallSites(routing, routingFSet, forbiddenRefresh, nil) {
 			t.Errorf("request routing refreshes or re-reads catalog instead of using runtimeSnapshot: %s", violation)
+		}
+	})
+
+	t.Run("internal accounts owns pool storage and identity", func(t *testing.T) {
+		assertRepositoryLeafPackage(t, "internal/accounts")
+		if _, err := os.Stat("pool.go"); err == nil {
+			t.Error("legacy root pool.go must not exist; account storage belongs in internal/accounts")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat pool.go: %v", err)
+		}
+
+		adapter, _ := parseGoFile(t, "accounts_adapter.go")
+		wantImports := map[string]bool{
+			"time":                          true,
+			"model-proxy/internal/accounts": true,
+		}
+		for _, spec := range adapter.Imports {
+			importPath := strings.Trim(spec.Path.Value, `"`)
+			if !wantImports[importPath] {
+				t.Errorf("accounts_adapter.go has unexpected import %q", importPath)
+			}
+			delete(wantImports, importPath)
+		}
+		for missing := range wantImports {
+			t.Errorf("accounts_adapter.go is missing required import %q", missing)
+		}
+
+		wantAliases := map[string]string{
+			"accountCred":    "Credentials",
+			"poolAccount":    "Account",
+			"credentialPool": "Pool",
+		}
+		seenAliases := map[string]int{}
+		wantFunctions := map[string]int{
+			"accountStore":     0,
+			"poolPath":         0,
+			"singularPoolPath": 0,
+			"loadPool":         0,
+			"savePool":         0,
+			"withPoolLock":     0,
+			"accountIDFor":     0,
+			"nowTS":            0,
+		}
+		for _, decl := range adapter.Decls {
+			switch decl := decl.(type) {
+			case *ast.GenDecl:
+				if decl.Tok == token.IMPORT {
+					continue
+				}
+				if decl.Tok != token.TYPE {
+					t.Errorf("accounts_adapter.go has unexpected %s declaration", decl.Tok)
+					continue
+				}
+				for _, spec := range decl.Specs {
+					typeSpec, ok := spec.(*ast.TypeSpec)
+					if !ok || !typeSpec.Assign.IsValid() {
+						t.Error("accounts_adapter.go may contain only type aliases")
+						continue
+					}
+					remote, ok := configSelectorName(typeSpec.Type, "accounts")
+					want, expected := wantAliases[typeSpec.Name.Name]
+					if !ok || !expected || remote != want {
+						t.Errorf("accounts_adapter.go has unexpected alias %s=%s", typeSpec.Name.Name, remote)
+						continue
+					}
+					seenAliases[typeSpec.Name.Name]++
+				}
+			case *ast.FuncDecl:
+				if decl.Recv != nil {
+					t.Errorf("accounts_adapter.go has unexpected method %s", decl.Name.Name)
+					continue
+				}
+				if _, allowed := wantFunctions[decl.Name.Name]; !allowed {
+					t.Errorf("accounts_adapter.go has unexpected function %s", decl.Name.Name)
+					continue
+				}
+				wantFunctions[decl.Name.Name]++
+				if !isAccountsAdapterWrapper(decl) {
+					t.Errorf("accounts_adapter.go %s must remain a direct environment/compatibility wrapper", decl.Name.Name)
+				}
+			default:
+				t.Errorf("accounts_adapter.go has unexpected declaration %T", decl)
+			}
+		}
+		for name := range wantAliases {
+			if seenAliases[name] != 1 {
+				t.Errorf("accounts_adapter.go alias %s declarations = %d, want exactly 1", name, seenAliases[name])
+			}
+		}
+		for name, count := range wantFunctions {
+			if count != 1 {
+				t.Errorf("accounts_adapter.go %s declarations = %d, want exactly 1", name, count)
+			}
 		}
 	})
 
@@ -433,6 +529,91 @@ func isDirectConfigLoadWrapper(fn *ast.FuncDecl, packageName string) bool {
 	for i, arg := range call.Args {
 		id, ok := arg.(*ast.Ident)
 		if !ok || id.Name != params[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func isAccountsAdapterWrapper(fn *ast.FuncDecl) bool {
+	if fn.Recv != nil || fn.Body == nil || len(fn.Body.List) != 1 {
+		return false
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false
+	}
+	call, ok := ret.Results[0].(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+
+	switch fn.Name.Name {
+	case "accountStore":
+		return selectorCallMatches(call, "accounts", "NewStore") &&
+			len(call.Args) == 1 && zeroArgIdentCall(call.Args[0], "homeDir")
+	case "nowTS":
+		return selectorCallMatches(call, "accounts", "Timestamp") &&
+			len(call.Args) == 1 && zeroArgSelectorCall(call.Args[0], "time", "Now")
+	case "accountIDFor":
+		return selectorCallMatches(call, "accounts", "AccountID") &&
+			identArgumentsMatch(call.Args, "providerID", "cred")
+	}
+
+	wantMethod := map[string]string{
+		"poolPath":         "PoolPath",
+		"singularPoolPath": "LegacyPath",
+		"loadPool":         "Load",
+		"savePool":         "Save",
+		"withPoolLock":     "WithLock",
+	}[fn.Name.Name]
+	wantArgs := map[string][]string{
+		"poolPath":         {"name"},
+		"singularPoolPath": {"name"},
+		"loadPool":         {"name", "providerID"},
+		"savePool":         {"name", "pool"},
+		"withPoolLock":     {"name", "fn"},
+	}[fn.Name.Name]
+	if wantMethod == "" {
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != wantMethod || !zeroArgIdentCall(selector.X, "accountStore") {
+		return false
+	}
+	return identArgumentsMatch(call.Args, wantArgs...)
+}
+
+func selectorCallMatches(call *ast.CallExpr, packageName, method string) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != method {
+		return false
+	}
+	pkg, ok := selector.X.(*ast.Ident)
+	return ok && pkg.Name == packageName
+}
+
+func zeroArgIdentCall(expr ast.Expr, name string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	return ok && ident.Name == name
+}
+
+func zeroArgSelectorCall(expr ast.Expr, packageName, method string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	return ok && len(call.Args) == 0 && selectorCallMatches(call, packageName, method)
+}
+
+func identArgumentsMatch(args []ast.Expr, names ...string) bool {
+	if len(args) != len(names) {
+		return false
+	}
+	for i, arg := range args {
+		ident, ok := arg.(*ast.Ident)
+		if !ok || ident.Name != names[i] {
 			return false
 		}
 	}

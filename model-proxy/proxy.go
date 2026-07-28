@@ -222,7 +222,7 @@ func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]str
 			// the plain name, no virtuals. The singular file does not exist in
 			// this case, so binding in-memory is required for the provider to
 			// authenticate at all.
-			if p := buildOne(cfg, name, prov, pool.Accounts[0].cred()); p != nil {
+			if p := buildOne(cfg, name, prov, pool.Accounts[0].Credentials()); p != nil {
 				m[name] = p
 			}
 			continue
@@ -230,7 +230,7 @@ func buildProviders(cfg *Config) (map[string]provider.Provider, map[string][]str
 		vids := make([]string, 0, len(pool.Accounts))
 		for _, a := range pool.Accounts {
 			vid := name + "#" + a.ID
-			p := buildOne(cfg, name, prov, a.cred())
+			p := buildOne(cfg, name, prov, a.Credentials())
 			if p == nil {
 				// provider.New failed for this account — skip it in BOTH the
 				// providers map and the index, so poolIndex never lists an id

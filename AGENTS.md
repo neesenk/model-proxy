@@ -24,7 +24,7 @@ docs/                     架构、后端和 API 契约
 | 全局架构、模块边界、跨领域重构 | `docs/architecture/overview.md` |
 | `model-proxy/proxy.go`、`failclass.go`、cooldown | `model-proxy/AGENTS.md`、`docs/architecture/routing-and-failure.md` |
 | `quota.go`、schedule、sticky、pin、持久化 | `model-proxy/AGENTS.md`、`docs/architecture/runtime-state.md` |
-| `pool.go`、`resolve.go`、多账号 | `model-proxy/AGENTS.md`、`docs/architecture/provider-pools.md` |
+| `model-proxy/internal/accounts/*`、`accounts_adapter.go`、`resolve.go`、多账号 | `model-proxy/AGENTS.md`、`docs/architecture/provider-pools.md` |
 | 凭据、login/logout、池文件 | `docs/architecture/provider-pools.md`、`docs/backend-contracts.md` |
 | `model-proxy/provider/*` | `model-proxy/provider/AGENTS.md`、`docs/backend-contracts.md` |
 | `model-proxy/internal/config/*`、`model-proxy/config_compat.go`、配置加载/校验/默认值 | `model-proxy/AGENTS.md`、`docs/architecture/overview.md`；字段同步另读 `docs/engineering/pitfalls.md` |

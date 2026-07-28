@@ -1,4 +1,5 @@
-package main
+// Package accounts owns API-key account identity and on-disk pool storage.
+package accounts
 
 import (
 	"crypto/sha256"
@@ -11,16 +12,16 @@ import (
 	"time"
 )
 
-// accountCred is one account's raw credentials, independent of storage format.
+// Credentials is one account's raw credential tuple, independent of storage format.
 // APIKey is used for Bearer/x-api-key auth; AccessKey/SecretKey are volcengine's
 // V4-signing pair (used by GetAFPUsage quota).
-type accountCred struct {
+type Credentials struct {
 	APIKey    string
 	AccessKey string
 	SecretKey string
 }
 
-type poolAccount struct {
+type Account struct {
 	ID        string `json:"id"`
 	Label     string `json:"label"`
 	APIKey    string `json:"api_key"`
@@ -29,44 +30,62 @@ type poolAccount struct {
 	AddedAt   string `json:"added_at"`
 }
 
-type credentialPool struct {
-	Version  int           `json:"version"`
-	Accounts []poolAccount `json:"accounts"`
+type Pool struct {
+	Version  int       `json:"version"`
+	Accounts []Account `json:"accounts"`
 }
 
-func (a poolAccount) cred() accountCred {
-	return accountCred{APIKey: a.APIKey, AccessKey: a.AccessKey, SecretKey: a.SecretKey}
+// Credentials returns the complete credential tuple bound to this account.
+func (a Account) Credentials() Credentials {
+	return Credentials{APIKey: a.APIKey, AccessKey: a.AccessKey, SecretKey: a.SecretKey}
 }
 
-func poolPath(name string) string {
-	return filepath.Join(homeDir(), ".model-proxy", name+"_apikeys.json")
-}
-func singularPoolPath(name string) string {
-	return filepath.Join(homeDir(), ".model-proxy", name+"_apikey.json")
+// Store resolves account files relative to one user home directory.
+type Store struct {
+	directory string
 }
 
-// loadPool reads the plural pool file; if absent, wraps the legacy singular
+func NewStore(homeDir string) Store {
+	return Store{directory: filepath.Join(homeDir, ".model-proxy")}
+}
+
+func (s Store) PoolPath(name string) string {
+	return filepath.Join(s.directory, name+"_apikeys.json")
+}
+
+func (s Store) LegacyPath(name string) string {
+	return filepath.Join(s.directory, name+"_apikey.json")
+}
+
+func (s Store) ensureDirectory() error {
+	if err := os.MkdirAll(s.directory, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(s.directory, 0o700)
+}
+
+// Load reads the plural pool file; if absent, wraps the legacy singular
 // <name>_apikey.json as a read-only 1-entry pool. A missing pool is empty (not
 // an error) — the caller treats "no accounts" as "not logged in".
-func loadPool(name, providerID string) (credentialPool, error) {
-	data, err := os.ReadFile(poolPath(name))
+func (s Store) Load(name, providerID string) (Pool, error) {
+	data, err := os.ReadFile(s.PoolPath(name))
 	if err == nil {
-		var p credentialPool
+		var p Pool
 		if err := json.Unmarshal(data, &p); err != nil {
-			return credentialPool{}, fmt.Errorf("parse %s: %w", poolPath(name), err)
+			return Pool{}, fmt.Errorf("parse %s: %w", s.PoolPath(name), err)
 		}
 		return p, nil
 	}
 	if !os.IsNotExist(err) {
-		return credentialPool{}, err
+		return Pool{}, err
 	}
 	// Fall back to legacy singular file.
-	sdata, serr := os.ReadFile(singularPoolPath(name))
+	sdata, serr := os.ReadFile(s.LegacyPath(name))
 	if serr != nil {
 		if os.IsNotExist(serr) {
-			return credentialPool{}, nil
+			return Pool{}, nil
 		}
-		return credentialPool{}, serr
+		return Pool{}, serr
 	}
 	var v struct {
 		APIKey    string `json:"api_key"`
@@ -74,27 +93,27 @@ func loadPool(name, providerID string) (credentialPool, error) {
 		SecretKey string `json:"secret_key"`
 	}
 	if err := json.Unmarshal(sdata, &v); err != nil {
-		return credentialPool{}, fmt.Errorf("parse %s: %w", singularPoolPath(name), err)
+		return Pool{}, fmt.Errorf("parse %s: %w", s.LegacyPath(name), err)
 	}
-	cred := accountCred{APIKey: v.APIKey, AccessKey: v.AccessKey, SecretKey: v.SecretKey}
-	return credentialPool{
+	cred := Credentials{APIKey: v.APIKey, AccessKey: v.AccessKey, SecretKey: v.SecretKey}
+	return Pool{
 		Version: 1,
-		Accounts: []poolAccount{{
-			ID:     accountIDFor(providerID, cred),
+		Accounts: []Account{{
+			ID:     AccountID(providerID, cred),
 			Label:  providerID,
 			APIKey: v.APIKey, AccessKey: v.AccessKey, SecretKey: v.SecretKey,
 		}},
 	}, nil
 }
 
-// savePool writes the pool atomically: marshal → write path+".tmp" → os.Rename
+// Save writes the pool atomically: marshal → write path+".tmp" → os.Rename
 // onto path. Rename makes the on-disk file appear whole or not at all, so a crash
 // mid-write never leaves a truncated pool file (the read side never observes a
 // half-written JSON). Mirrors quota.go:persist. The temp file is 0o600 and lives
 // in the same dir (MkdirAll 0o700), so rename is a same-directory atomic move.
-func savePool(name string, p credentialPool) error {
-	path := poolPath(name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+func (s Store) Save(name string, p Pool) error {
+	path := s.PoolPath(name)
+	if err := s.ensureDirectory(); err != nil {
 		return err
 	}
 	if p.Version == 0 {
@@ -109,13 +128,16 @@ func savePool(name string, p credentialPool) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return err
+	}
 	return os.Rename(tmp, path)
 }
 
-// withPoolLock runs fn while holding a cross-process lock for the named pool.
+// WithLock runs fn while holding a cross-process lock for the named pool.
 // stdlib only (no golang.org/x/sys → no flock); portable across daemon_unix.go
 // and daemon_windows.go. The arbiter is an O_CREATE|O_EXCL lockfile at
-// poolPath(name)+".lock": exactly one process can create it, the holder removes
+// PoolPath(name)+".lock": exactly one process can create it, the holder removes
 // it on return (ALWAYS, even on fn error). A crash strands a stale lockfile,
 // recovered by mtime — if older than poolLockStaleAge, a waiter removes it and
 // retries the create. SAFETY: the lock is held ONLY for the ms-scale
@@ -131,12 +153,12 @@ const (
 	poolLockStaleAge = 60 * time.Second
 )
 
-func withPoolLock(name string, fn func() error) error {
-	lockPath := poolPath(name) + ".lock"
+func (s Store) WithLock(name string, fn func() error) error {
+	lockPath := s.PoolPath(name) + ".lock"
 	// Ensure the parent (~/.model-proxy) exists before the O_CREATE below —
 	// O_CREATE does not create parent dirs, and on a first-ever login savePool
 	// (which does MkdirAll) has not yet run because it runs INSIDE this lock.
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+	if err := s.ensureDirectory(); err != nil {
 		return fmt.Errorf("pool %s lock dir: %w", name, err)
 	}
 	deadline := time.Now().Add(poolLockMaxWait)
@@ -176,11 +198,11 @@ func withPoolLock(name string, fn func() error) error {
 	return fn()
 }
 
-// accountIDFor returns a stable per-account identifier for dedup + virtual-id
+// AccountID returns a stable per-account identifier for dedup + virtual-id
 // suffixing. volcengine keys by AccessKey (account-level); other apikey
 // providers hash the APIKey (key-level). volcengine with no AccessKey falls
 // back to the key hash.
-func accountIDFor(providerID string, c accountCred) string {
+func AccountID(providerID string, c Credentials) string {
 	if providerID == "volcengine" && c.AccessKey != "" {
 		return c.AccessKey
 	}
@@ -188,6 +210,5 @@ func accountIDFor(providerID string, c accountCred) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// nowTS is a helper for AddedAt timestamps (tests can't call time.Now directly
-// in some harnesses; kept simple here).
-func nowTS() string { return time.Now().UTC().Format(time.RFC3339) }
+// Timestamp formats an account-added time in the persisted UTC representation.
+func Timestamp(now time.Time) string { return now.UTC().Format(time.RFC3339) }

@@ -74,6 +74,15 @@ slim metadata projection、canonical-owner 去重、HTTP/ETag/TTL 刷新和磁�
 和 provider/route 名单；请求路由必须继续使用 `runtimeSnapshot` 捕获的 catalog，
 不得在请求内刷新或重新读取。
 
+## API-key accounts
+
+账号 schema、稳定 ID、plural/legacy 文件优先级、原子保存和跨进程 mutation lock
+统一归 `internal/accounts`；该包是无仓库内依赖叶子，不得读取 HOME、Config、
+Provider、Proxy、Web/CLI 或发起网络验证。根 `accounts_adapter.go` 只注入 HOME
+并保留迁移期兼容 wrapper；交互、凭据验证、Provider 构建和 reload 继续留在应用
+编排层。任何 pool 写操作必须保持“网络/用户输入在锁外，锁内重新
+load → 按稳定 ID 修改 → save”的顺序。
+
 ## CLI
 
 CLI 输出是 change-controlled contract。修改命令、字段、颜色、顺序或提示前读取 `CLI.md`，实现后同步更新它。文件日志不得带 ANSI color。

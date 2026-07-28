@@ -1,26 +1,27 @@
-package main
+package accounts
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// setPoolHome redirects HOME to a temp dir (auto-cleanup via t.Setenv) and
-// pre-creates the .model-proxy subdir. Named distinctly to avoid colliding
-// with deepseek_forward_test.go's setHome helper.
-func setPoolHome(t *testing.T, dir string) {
+func newTestStore(t *testing.T, dir string) Store {
 	t.Helper()
-	os.MkdirAll(filepath.Join(dir, ".model-proxy"), 0o700)
-	t.Setenv("HOME", dir)
+	if err := os.MkdirAll(filepath.Join(dir, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return NewStore(dir)
 }
 
 func TestAccountIDFor(t *testing.T) {
-	z := accountIDFor("zhipu", accountCred{APIKey: "sk-abc"})
-	z2 := accountIDFor("zhipu", accountCred{APIKey: "sk-abc"})
-	z3 := accountIDFor("zhipu", accountCred{APIKey: "sk-other"})
+	z := AccountID("zhipu", Credentials{APIKey: "sk-abc"})
+	z2 := AccountID("zhipu", Credentials{APIKey: "sk-abc"})
+	z3 := AccountID("zhipu", Credentials{APIKey: "sk-other"})
 	if z != z2 {
 		t.Fatalf("same key must yield same id: %q vs %q", z, z2)
 	}
@@ -31,8 +32,8 @@ func TestAccountIDFor(t *testing.T) {
 		t.Fatalf("zhipu id len = %d, want 16", len(z))
 	}
 	// volcengine keys by access_key (account-level), not api_key
-	a := accountIDFor("volcengine", accountCred{APIKey: "k1", AccessKey: "AK9"})
-	b := accountIDFor("volcengine", accountCred{APIKey: "k2", AccessKey: "AK9"})
+	a := AccountID("volcengine", Credentials{APIKey: "k1", AccessKey: "AK9"})
+	b := AccountID("volcengine", Credentials{APIKey: "k2", AccessKey: "AK9"})
 	if a != b {
 		t.Fatalf("volcengine same access_key must yield same id: %q vs %q", a, b)
 	}
@@ -40,23 +41,39 @@ func TestAccountIDFor(t *testing.T) {
 		t.Fatalf("volcengine id = %q, want AK9", a)
 	}
 	// access_key empty → fall back to key hash
-	c := accountIDFor("volcengine", accountCred{APIKey: "k1"})
+	c := AccountID("volcengine", Credentials{APIKey: "k1"})
 	if c == "" || len(c) != 16 {
 		t.Fatalf("volcengine fallback id = %q", c)
 	}
 }
 
+func TestAccountCredentialsAndTimestamp(t *testing.T) {
+	account := Account{
+		APIKey: "api-key", AccessKey: "access-key", SecretKey: "secret-key",
+	}
+	if got := account.Credentials(); got != (Credentials{
+		APIKey: "api-key", AccessKey: "access-key", SecretKey: "secret-key",
+	}) {
+		t.Fatalf("Credentials() = %+v", got)
+	}
+
+	when := time.Date(2026, time.July, 28, 9, 10, 11, 0, time.FixedZone("UTC+8", 8*60*60))
+	if got, want := Timestamp(when), "2026-07-28T01:10:11Z"; got != want {
+		t.Fatalf("Timestamp() = %q, want %q", got, want)
+	}
+}
+
 func TestSaveLoadPoolRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	in := credentialPool{Version: 1, Accounts: []poolAccount{
+	store := newTestStore(t, dir)
+	in := Pool{Version: 1, Accounts: []Account{
 		{ID: "id1", Label: "home", APIKey: "k1", AddedAt: "2026-07-08T00:00:00Z"},
 		{ID: "id2", Label: "team", APIKey: "k2", AddedAt: "2026-07-08T00:00:00Z"},
 	}}
-	if err := savePool("zhipu", in); err != nil {
+	if err := store.Save("zhipu", in); err != nil {
 		t.Fatal(err)
 	}
-	out, err := loadPool("zhipu", "zhipu")
+	out, err := store.Load("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,12 +87,12 @@ func TestSaveLoadPoolRoundTrip(t *testing.T) {
 
 func TestLoadPoolSingularFallback(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	store := newTestStore(t, dir)
 	// Legacy single-key file, no plural pool.
 	singular := filepath.Join(dir, ".model-proxy", "zhipu_apikey.json")
 	os.WriteFile(singular, []byte(`{"api_key":"legacy-key"}`), 0o600)
 
-	pool, err := loadPool("zhipu", "zhipu")
+	pool, err := store.Load("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,15 +103,71 @@ func TestLoadPoolSingularFallback(t *testing.T) {
 		t.Fatalf("fallback key = %q", pool.Accounts[0].APIKey)
 	}
 	// id derived from the key.
-	if pool.Accounts[0].ID != accountIDFor("zhipu", accountCred{APIKey: "legacy-key"}) {
+	if pool.Accounts[0].ID != AccountID("zhipu", Credentials{APIKey: "legacy-key"}) {
 		t.Fatalf("fallback id not derived from key")
 	}
 }
 
+func TestLoadPoolPluralPrecedenceAndParseErrors(t *testing.T) {
+	t.Run("valid plural wins over valid legacy", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newTestStore(t, dir)
+		if err := os.WriteFile(store.LegacyPath("zhipu"), []byte(`{"api_key":"legacy"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Save("zhipu", Pool{Accounts: []Account{{
+			ID: "plural-id", APIKey: "plural",
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+
+		pool, err := store.Load("zhipu", "zhipu")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "plural" {
+			t.Fatalf("Load() = %+v, want only plural credential", pool.Accounts)
+		}
+	})
+
+	t.Run("corrupt plural never falls back to legacy", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newTestStore(t, dir)
+		if err := os.WriteFile(store.LegacyPath("zhipu"), []byte(`{"api_key":"legacy"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(store.PoolPath("zhipu"), []byte(`{`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		pool, err := store.Load("zhipu", "zhipu")
+		if err == nil {
+			t.Fatal("corrupt plural pool should fail")
+		}
+		if len(pool.Accounts) != 0 {
+			t.Fatalf("corrupt plural pool returned legacy credentials: %+v", pool.Accounts)
+		}
+	})
+
+	t.Run("corrupt legacy reports its own path", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newTestStore(t, dir)
+		if err := os.WriteFile(store.LegacyPath("deepseek"), []byte(`{`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := store.Load("deepseek", "deepseek"); err == nil {
+			t.Fatal("corrupt legacy pool should fail")
+		} else if got := err.Error(); got == "" || !strings.Contains(got, store.LegacyPath("deepseek")) {
+			t.Fatalf("Load() error = %q, want legacy path %q", got, store.LegacyPath("deepseek"))
+		}
+	})
+}
+
 func TestLoadPoolEmpty(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	pool, err := loadPool("zhipu", "zhipu")
+	store := newTestStore(t, dir)
+	pool, err := store.Load("zhipu", "zhipu")
 	if err != nil {
 		t.Fatalf("missing pool should be empty, not error: %v", err)
 	}
@@ -108,24 +181,46 @@ func TestLoadPoolEmpty(t *testing.T) {
 // Regression guard for #1/#2A (crash mid-write must not strand a truncated pool).
 func TestSavePoolAtomic_NoTruncationOnDisk(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
-	in := credentialPool{Version: 1, Accounts: []poolAccount{
+	store := NewStore(dir)
+	if err := os.MkdirAll(filepath.Dir(store.PoolPath("deepseek")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(store.PoolPath("deepseek")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.PoolPath("deepseek")+".tmp", []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store.PoolPath("deepseek")+".tmp", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := Pool{Version: 1, Accounts: []Account{
 		{ID: "id1", Label: "home", APIKey: "k1", AddedAt: "2026-07-08T00:00:00Z"},
 	}}
-	if err := savePool("deepseek", in); err != nil {
+	if err := store.Save("deepseek", in); err != nil {
 		t.Fatal(err)
 	}
 	// No leftover temp file.
-	if _, err := os.Stat(poolPath("deepseek") + ".tmp"); !os.IsNotExist(err) {
+	if _, err := os.Stat(store.PoolPath("deepseek") + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf(".tmp leftover after savePool: %v", err)
 	}
 	// The written file is parseable (not a half-written truncation).
-	out, err := loadPool("deepseek", "deepseek")
+	out, err := store.Load("deepseek", "deepseek")
 	if err != nil {
 		t.Fatalf("reload after atomic save: %v", err)
 	}
 	if len(out.Accounts) != 1 || out.Accounts[0].APIKey != "k1" {
 		t.Fatalf("round-trip mismatch: %+v", out.Accounts)
+	}
+	if info, err := os.Stat(store.PoolPath("deepseek")); err != nil {
+		t.Fatal(err)
+	} else if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("pool mode = %04o, want 0600", got)
+	}
+	if info, err := os.Stat(filepath.Dir(store.PoolPath("deepseek"))); err != nil {
+		t.Fatal(err)
+	} else if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("pool directory mode = %04o, want 0700", got)
 	}
 }
 
@@ -135,7 +230,7 @@ func TestSavePoolAtomic_NoTruncationOnDisk(t *testing.T) {
 // contention) and records the peak number of overlapping entries.
 func TestWithPoolLock_MutualExclusion(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	store := newTestStore(t, dir)
 	const name = "zhipu"
 	var mu sync.Mutex
 	var inCS, maxCS int
@@ -159,7 +254,7 @@ func TestWithPoolLock_MutualExclusion(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := withPoolLock(name, fn); err != nil {
+			if err := store.WithLock(name, fn); err != nil {
 				t.Errorf("withPoolLock: %v", err)
 			}
 		}()
@@ -169,8 +264,28 @@ func TestWithPoolLock_MutualExclusion(t *testing.T) {
 		t.Fatalf("critical section overlapped: peak concurrency = %d, want 1", maxCS)
 	}
 	// Lockfile cleaned up after every holder released.
-	if _, err := os.Stat(poolPath(name) + ".lock"); !os.IsNotExist(err) {
+	if _, err := os.Stat(store.PoolPath(name) + ".lock"); !os.IsNotExist(err) {
 		t.Fatalf("lockfile left behind after all holders: %v", err)
+	}
+}
+
+func TestWithPoolLockCallbackErrorCleansUp(t *testing.T) {
+	store := NewStore(t.TempDir())
+	want := errors.New("mutation failed")
+	if err := store.WithLock("zhipu", func() error {
+		info, err := os.Stat(store.PoolPath("zhipu") + ".lock")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("lock mode = %04o, want 0600", got)
+		}
+		return want
+	}); !errors.Is(err, want) {
+		t.Fatalf("WithLock() error = %v, want %v", err, want)
+	}
+	if _, err := os.Stat(store.PoolPath("zhipu") + ".lock"); !os.IsNotExist(err) {
+		t.Fatalf("lockfile left behind after callback error: %v", err)
 	}
 }
 
@@ -180,9 +295,9 @@ func TestWithPoolLock_MutualExclusion(t *testing.T) {
 // path that makes O_EXCL safe without flock.
 func TestWithPoolLock_StaleSteal(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	store := newTestStore(t, dir)
 	const name = "deepseek"
-	lockPath := poolPath(name) + ".lock"
+	lockPath := store.PoolPath(name) + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +310,7 @@ func TestWithPoolLock_StaleSteal(t *testing.T) {
 		t.Fatal(err)
 	}
 	ran := false
-	if err := withPoolLock(name, func() error { ran = true; return nil }); err != nil {
+	if err := store.WithLock(name, func() error { ran = true; return nil }); err != nil {
 		t.Fatalf("withPoolLock stale-steal failed: %v", err)
 	}
 	if !ran {
@@ -214,9 +329,9 @@ func TestWithPoolLock_StaleSteal(t *testing.T) {
 // spurious steal). The steal path is covered by TestWithPoolLock_StaleSteal.
 func TestWithPoolLock_FreshLockIsBusy(t *testing.T) {
 	dir := t.TempDir()
-	setPoolHome(t, dir)
+	store := newTestStore(t, dir)
 	const name = "volcengine"
-	lockPath := poolPath(name) + ".lock"
+	lockPath := store.PoolPath(name) + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +349,7 @@ func TestWithPoolLock_FreshLockIsBusy(t *testing.T) {
 	}()
 
 	ran := false
-	if err := withPoolLock(name, func() error { ran = true; return nil }); err != nil {
+	if err := store.WithLock(name, func() error { ran = true; return nil }); err != nil {
 		t.Fatalf("withPoolLock should have waited + acquired a freshly-freed lock: %v", err)
 	}
 	if !ran {

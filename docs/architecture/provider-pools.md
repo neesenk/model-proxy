@@ -2,18 +2,32 @@
 
 ## 适用范围
 
-修改 `pool.go`、`resolve.go`、`buildProviders`、登录/登出、多账号 quota 或 Fusion/Shadow provider 解析时必读。
+修改 `internal/accounts/*`、`accounts_adapter.go`、`resolve.go`、
+`buildProviders`、登录/登出、多账号 quota 或 Fusion/Shadow provider 解析时必读。
 
 ## 凭据文件
 
-池化 provider 使用 `~/.model-proxy/<name>_apikeys.json`。旧单数 `<name>_apikey.json` 仅作为只读 fallback，包装成一条账号。
+池化 provider 使用 `~/.model-proxy/<name>_apikeys.json`。对曾使用旧格式的
+provider，单数 `<name>_apikey.json` 仅作为只读 fallback，包装成一条账号；
+`static` 从引入起只使用 plural pool，没有可运行的 legacy singular 路径。
+
+文件 schema、稳定账号 ID、plural 优先/legacy fallback、原子保存和跨进程锁由
+无仓库内依赖的 `internal/accounts` 统一拥有。该包接收已解析的 home directory，
+不得自行读取 HOME，也不得依赖 Config、Provider、Proxy、Web/CLI 或执行网络
+验证。根 `accounts_adapter.go` 只负责 HOME 适配和迁移期兼容入口。
+
+写操作必须在跨进程锁内重新读取当前 pool，再按账号 ID 修改并保存；stdin、
+浏览器和上游凭据验证必须在锁外完成。目录保持 `0700`，pool/lock 文件保持
+`0600`，保存使用同目录临时文件后 rename，避免读到半写 JSON。
 
 账号 ID：
 
 - volcengine 优先使用 `access_key`，为空时回落到 hash；
 - 其他 API key provider 使用 `sha256(api_key)[:16]`。
 
-zhipu、deepseek、volcengine、kimi-code 支持池化；aqp、codex 不池化。login 按 id 去重，支持 label/replace，成功后触发热 reload。
+API-key provider（当前包括 static、zhipu、zcode、deepseek、volcengine、
+kimi-code、qwen-plan）支持池化；aqp、codex 使用各自 OAuth/SSO 单账号文件，
+不进入 API-key pool。login 按 id 去重，支持 label/replace，成功后触发热 reload。
 
 ## 构建期展开
 
@@ -23,11 +37,11 @@ zhipu、deepseek、volcengine、kimi-code 支持池化；aqp、codex 不池化�
 <parent>#<accountID>
 ```
 
-每个虚拟实例必须绑定自己的：
-
-1. `ApiKeyBase.BoundAPIKey`，供 forward auth；
-2. `cfg.Auth`，供 FetchModels；
-3. Usage/Quota closure。
+每个虚拟实例必须把自己的 API key 绑定到 `provider.Config.BoundAPIKey`；同一
+provider 实例的 `AuthHeaders` 为 forward 以及采用该通用认证入口的
+FetchModels、Usage/Quota 提供认证。volcengine 还必须把该账号的
+AccessKey/SecretKey 绑定到同一实例，供 V4-signed quota 调用；其 FetchModels
+仍是下述已知例外。不得恢复一套独立的 `cfg.Auth` 分支。
 
 单账号池文件也必须 bind；不能因为只有一条记录而退回运行期文件读取。
 
