@@ -59,9 +59,12 @@ type serveRequest struct {
 
 	targets   []RouteTarget
 	routeKeys map[string]bool
-	force     bool
-	cacheKey  string
-	origBody  []byte
+	force     bool // active pin: exclusive and bypasses circuit health
+	// forcedProvider is the request-scoped replay override. It is exclusive for
+	// routing, but unlike a pin it does not bypass circuit health.
+	forcedProvider string
+	cacheKey       string
+	origBody       []byte
 
 	writer  http.ResponseWriter
 	request *http.Request

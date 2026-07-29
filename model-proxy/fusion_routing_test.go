@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -279,4 +280,97 @@ func TestFusionLeg_FailureMetricsAlignTryTarget(t *testing.T) {
 			t.Errorf("5xx leg metrics = failures %d failovers %d, want 1/1", m.Failures, m.Failovers)
 		}
 	})
+}
+
+// TestFusionLeg_RateLimitMatchesTargetExecutor proves panel legs use the same
+// 429 outcome as a normal target: quota cooldown (not circuit failure), exact
+// metrics, and an async refresh of the provider that actually returned 429.
+func TestFusionLeg_RateLimitMatchesTargetExecutor(t *testing.T) {
+	pa := newFakeUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"error":"insufficient_quota"}`)
+	})
+	pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
+	ps := newFakeUpstream(t, anthropicSSEResponder("final"))
+	recipe := FusionConfig{
+		Panel:       []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
+		Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+		MinPanel:    1,
+	}
+	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
+	refreshed := make(chan string, 1)
+	proxy.providers["pa"] = &quotaCountProv{name: "pa", refreshed: refreshed}
+
+	before := time.Now()
+	if out := postAnthropic(t, px, fusionClientBody); !strings.Contains(out, "final") {
+		t.Fatalf("client body missing synthesis after rate-limited panel leg: %s", out)
+	}
+	after := time.Now()
+
+	metric := proxy.metrics.snapshot()[pmKey{Provider: "pa", Model: "ma"}]
+	if metric.RateLimited429 != 1 || metric.Failovers != 1 || metric.Failures != 0 {
+		t.Fatalf("429 panel metrics = %+v, want rate_limited/failovers/failures = 1/1/0", metric)
+	}
+	status, ok := proxy.runtimeState.Dashboard(time.Now()).Providers["pa"]
+	if !ok || status.RateLimitKind != rlQuota ||
+		status.RateLimitedUntil.Before(before.Add(120*time.Second)) ||
+		status.RateLimitedUntil.After(after.Add(120*time.Second)) ||
+		status.ConsecutiveFailures != 0 {
+		t.Fatalf("429 panel runtime state = %+v, want quota +120s without circuit failure", status)
+	}
+	select {
+	case name := <-refreshed:
+		if name != "pa" {
+			t.Fatalf("quota refresh provider=%q, want pa", name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("429 panel leg did not refresh its provider quota")
+	}
+	proxy.quota.stop()
+	select {
+	case name := <-refreshed:
+		t.Fatalf("unexpected duplicate quota refresh for %q", name)
+	default:
+	}
+}
+
+// TestFusionToolsUnsupportedDegradesDirectly verifies a tools request still
+// resolves the Fusion route, but a tool-blind synthesizer gate bypasses panel
+// fan-out and forwards the original tools unchanged to that synthesizer.
+func TestFusionToolsUnsupportedDegradesDirectly(t *testing.T) {
+	pa := newFakeUpstream(t, anthropicDraftResponder("must not run"))
+	pb := newFakeUpstream(t, anthropicDraftResponder("must not run"))
+	ps := newFakeUpstream(t, anthropicToolUseSSEResponder())
+	recipe := FusionConfig{
+		Panel:       []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}},
+		Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+	}
+	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
+	proxy.mu.Lock()
+	config := proxy.cfg.Providers["ps"]
+	config.Capabilities = map[string][]string{"ms": {"image"}}
+	proxy.cfg.Providers["ps"] = config
+	proxy.mu.Unlock()
+	body := `{"model":"hard","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"weather?"}],"tools":[{"name":"get_weather","input_schema":{"type":"object"}}],"tool_choice":{"type":"auto"}}`
+	if out := postAnthropic(t, px, body); !strings.Contains(out, `"type":"tool_use"`) {
+		t.Fatalf("tool-blind degrade did not preserve synthesizer tool response: %s", out)
+	}
+	if pa.hits() != 0 || pb.hits() != 0 || ps.hits() != 1 {
+		t.Fatalf("tool-blind gate hits panel/synth = %d/%d/%d, want 0/0/1", pa.hits(), pb.hits(), ps.hits())
+	}
+	var synthesis map[string]any
+	if err := json.Unmarshal([]byte(ps.lastBody()), &synthesis); err != nil {
+		t.Fatal(err)
+	}
+	var original map[string]any
+	if err := json.Unmarshal([]byte(body), &original); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(synthesis["tools"], original["tools"]) {
+		t.Fatalf("direct degraded synthesis changed tools:\n got: %v\nwant: %v", synthesis["tools"], original["tools"])
+	}
+	if !reflect.DeepEqual(synthesis["tool_choice"], original["tool_choice"]) {
+		t.Fatalf("direct degraded synthesis changed tool_choice:\n got: %v\nwant: %v", synthesis["tool_choice"], original["tool_choice"])
+	}
 }

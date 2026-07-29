@@ -88,13 +88,15 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		} else if name, ok := configSelectorName(pointer.X, "catalog"); !ok || name != "Catalog" {
 			t.Errorf("runtimeSnapshot.catalog must be *catalog.Catalog")
 		}
-		routing, routingFSet := parseGoFile(t, "request_routing.go")
 		forbiddenRefresh := map[string]bool{
 			"EnsureFresh": true, "FetchHTTP": true, "loadModelsCatalog": true,
 			"modelsCatalogEndpoint": true, "modelsCatalogPath": true,
 		}
-		for _, violation := range forbiddenCallSites(routing, routingFSet, forbiddenRefresh, nil) {
-			t.Errorf("request routing refreshes or re-reads catalog instead of using runtimeSnapshot: %s", violation)
+		for _, path := range []string{"internal/routing/request.go", "request_routing_adapter.go"} {
+			routingFile, routingSet := parseGoFile(t, path)
+			for _, violation := range forbiddenCallSites(routingFile, routingSet, forbiddenRefresh, nil) {
+				t.Errorf("%s refreshes or re-reads catalog instead of using runtimeSnapshot: %s", path, violation)
+			}
 		}
 	})
 

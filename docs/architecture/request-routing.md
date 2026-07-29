@@ -2,15 +2,33 @@
 
 ## 适用范围
 
-修改 `request_routing.go`、models.dev catalog、context overflow retry、implicit routes 或 route warnings 时必读。
+修改 `internal/routing/request.go`、`request_routing_adapter.go`、models.dev
+catalog、context overflow retry、implicit routes 或 route warnings 时必读。
 
 ## 请求画像
 
-`profileRequest` 每个请求只计算一次：
+`internal/routing.ProfileRequest` 在每次路由决策内只计算一次，不得在候选目标
+循环内重复扫描：
 
-- `hasImage`：扫描已知图片标记；
-- `hasTools`：识别非空 tools；
-- `est`：CJK 每 rune 约 1 token，其他文本约 bytes/4，跳过超过 100 字符的 base64 run。
+- `HasImage`：扫描已知图片标记；
+- `HasTools`：识别 tools；
+- `EstimatedTokens`：CJK 每 rune 约 1 token，其他文本约 bytes/4，跳过超过
+  100 字符的 base64 run。
+
+## 模块边界
+
+`internal/routing` 是无状态策略包，只允许依赖 `internal/catalog` 与
+`internal/config` 值类型，不得依赖 `Proxy`、`internal/runtime`、
+`internal/targetexec` 或任何 I/O owner。`routing.NewPlanner(PlannerInput)`
+隐藏内部字段；输入来自一次 `runtimeSnapshot`，generation-owned map 在 reload
+时只交换、不原地修改。
+
+`request_routing_adapter.go` 是唯一边界桥：它从 HTTP request 提取
+force-provider 字符串；`requestRoutingScheduler` 捕获同一快照的 config、parent
+identity、route keys 与 generation，并通过 `Proxy.schedule` 进入
+`internal/runtime.Manager`。`serveOnce` 每个 pass 只构造一个 Planner，同时用于
+主动 `Apply` 与反应式 `ContextOverflowRetry`，禁止重新读取 Proxy 或构造第二份
+generation。
 
 `internal/catalog` 作为无仓库内依赖叶子包拥有 models.dev slim projection、
 canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存。根 adapter 只注入 HOME
@@ -44,6 +62,11 @@ provider config 的 `capabilities: {model: [image, tools]}` 优先。某 model �
 3. 跨 route pool 仍使用正常 schedule 排序；
 4. 二次 schedule 返回空时回落原 ordered，宁可尝试不匹配目标，也不能零尝试直接 502；
 5. pin 和 force-provider 禁止跨 route 改道。
+
+`CollectCrossRoute(expanded, nil)` 明确定义为“保留所有 concrete target”；Fusion
+recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
+`{provider, model, protocol}`，冲突时保留更低 priority，池化虚拟 provider ID
+互不折叠。
 
 ## Context overflow retry
 
@@ -80,6 +103,7 @@ warning 同时出现在 daemon log、`/api/status.warnings`、models、doctor �
 - capabilities override 权威性和 parentOf 解析。
 - nil catalog no-op。
 - in-route/cross-route/回落/pin/force。
+- force-provider 即使能力不匹配也不得被替换到其他 route。
 - context overflow 的单次重试与 body 恢复。
 - implicit route 单 provider、多 provider 歧义、未登录 provider。
 - reasoning/codex protocol warnings。

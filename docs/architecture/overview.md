@@ -28,6 +28,9 @@ implicit-route eligibility；
 identity 投影；
 `proxy_health_adapter.go` 只把根层 health/cooldown/param/rate-limit 输入映射到
 runtime Manager，并保留 429 后 quota refresh 编排；
+`request_routing_adapter.go` 只把一次 runtime snapshot 的 config、parent
+identity、route keys 与 generation 绑定到 `internal/routing.Planner` 的 scheduler
+端口；
 `targetexec_adapter.go` 只把 captured generation/scheduling 与应用 observability
 映射到 `targetexec.State/Effects`；SSE/HTTP 流识别、复制和 ResponseWriter
 primitive 归 `internal/targetexec/transport.go`；
@@ -40,7 +43,7 @@ primitive 归 `internal/targetexec/transport.go`；
 HTTP handler
   → runtimeSnapshot
   → serveRequest
-  → schedule / failover
+  → schedule / internal/routing.Planner / failover
   → internal/targetexec.Plan
   → internal/targetexec.Attempt
   → internal/targetexec.Executor
@@ -95,6 +98,13 @@ accessor；它不是无仓库依赖叶子，只允许依赖其校验/默认值�
 projection、canonical-owner 去重、HTTP/ETag/TTL 刷新和原子磁盘缓存。根包只把
 HOME、`MP_MODELSDEV_URL` 与 Config 的 provider/route 名单适配成 catalog 输入；
 请求感知路由继续消费一次性捕获在 `runtimeSnapshot` 中的不可变 catalog 指针。
+
+`internal/routing` 是只依赖 `internal/catalog` 与 `internal/config` 值类型的
+无状态策略包，拥有请求画像、能力/context 判断、跨 route pool、context overflow
+replacement 和跨 pass cooldown 终局决策。`routing.Planner` 只能由
+`requestRoutingPlanner` 通过 constructor 装配；根 adapter 捕获 generation 并
+调用 `Proxy.schedule`，策略包不得 import Proxy、runtime Manager、target executor
+或任何 I/O owner。
 
 `internal/accounts` 是无仓库内依赖的 API-key 账号存储叶子包，拥有 credential
 tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进程锁。根
@@ -220,6 +230,7 @@ lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
 analytics adapter → internal/pricing
 catalog adapter / routing → internal/catalog
+request routing adapter → internal/routing → internal/catalog / internal/config
 accounts adapter / login / provider builder → internal/accounts
 live-event publishers / SSE adapter → internal/observe/events
 target executor / Fusion / Shadow / Web / CLI → internal/observe/requestlog
@@ -248,6 +259,9 @@ composition root → internal/targetexec → internal/protocol / provider
   之外的配置实现；
 - `internal/catalog` 反向依赖 Config、Proxy、Provider、Web/CLI 或任意
   `model-proxy/*` 包；
+- `internal/routing` 反向依赖 Proxy、runtime Manager、target executor、Web/CLI
+  或 `internal/catalog` / `internal/config` 之外的仓库包；根包恢复 request
+  profile、capability/context、cross-route 或 cooldown terminal 策略副本；
 - `internal/accounts` 读取 HOME、反向依赖 Config、Proxy、Provider、Web/CLI，
   或承担网络验证、Provider 构建、reload 与路由选择；
 - `internal/observe/events` 反向依赖 Proxy、HTTP/Web、Config、Provider 或任意

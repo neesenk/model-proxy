@@ -3,7 +3,8 @@
 ## 适用范围
 
 修改 `proxy_forward.go`、`targetexec_adapter.go`、
-`internal/targetexec/executor.go`、`proxy_health_adapter.go`、`failclass.go`、
+`internal/targetexec/executor.go`、`internal/targetexec/rate_limit.go`、
+`internal/routing/retry.go`、`proxy_health_adapter.go`、
 `resolve.go`、`health_test.go`、`model_lock_test.go` 或 cooldown/retry 行为时必读。
 
 ## 实现入口
@@ -19,9 +20,11 @@
   failure classification、response conversion/capture/cache pipeline
 - `targetexec_adapter.go`：captured generation/scheduling 的 `targetexec.State`
   与 metrics/tokens/request-log/events 的 `targetexec.Effects` 根适配
+- `internal/routing.DecideFailure`：跨 pass 失败类别、短 cooldown wait、
+  recovered-untried 与 429/502 终局的纯策略
 - `internal/runtime.Manager`：health、model lock、paramBlock、sticky、pin、
   spread、quota 与 schedule
-- `classify429`、`parseResetHint`、`targetexec.IsModelDenied`、
+- `targetexec.ParseRateLimit`、`targetexec.IsModelDenied`、
   `targetexec.ParseUnsupportedParam`
 - `cooldownState`、`hasRecoveredUntried`
 
@@ -81,7 +84,9 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 `Proxy.mu → runtime.Manager` 进入它：
 
 - `schedule` 跳过熔断、限频和模型锁定目标。
-- timeout、连接错误和 5xx 计入 provider 熔断。
+- timeout、连接错误、5xx 和 refresh 后仍失败的 401 计入 provider 熔断。
+- exhausted 401 的观测只记 failover，不记 `evFailures`；熔断状态与请求 metric
+  是不同语义，普通执行器和 Fusion leg 必须保持一致。
 - 429 进入 provider 限频冷却，不计熔断。
 - 404、model-denied、空 200 只锁 `(provider, model)`。
 - 半开状态使用 `halfOpenInFlight` 单飞。
@@ -105,6 +110,11 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 3. 分类默认值。
 
 body hint 支持 `retry after N s/m/h`、`reset after 2h5m`、`Resets in 164h` 和 reset/retry 关键词邻近的 RFC3339。上限 7 天；duration 在乘法前必须 clamp，防止溢出。
+
+分类与 horizon 只由 `internal/targetexec.ParseRateLimit` 计算；普通
+`targetexec.Executor` 与 Fusion leg 必须调用同一入口，再把预计算的
+`RateLimitDecision` 交给 runtime adapter。根包不得恢复 `classify429`、
+`parseResetHint`、`hintDuration` 或 `parseRateLimit` 副本。
 
 同一 provider 收到多个 429 时，只采用更晚的 horizon；`rateLimitKind` 必须跟随胜出的 horizon，短冷却不能覆盖既有长冷却的 kind。
 
@@ -156,6 +166,7 @@ body hint 支持 `retry after N s/m/h`、`reset after 2h5m`、`Resets in 164h` �
 
 - half-open 的成功、5xx、429、普通 4xx 生命周期。
 - transient/quota/daily 及 body/header reset 优先级。
+- 普通 target 与 Fusion leg 的 429 kind/horizon、metric、quota refresh 一致。
 - 同 provider 不同 model 的锁和 paramBlock 隔离。
 - empty stream 的 EOF、client cancel、upstream read error。
 - cooldown 全部恢复、部分恢复、跨轮纯 429、混合硬失败。

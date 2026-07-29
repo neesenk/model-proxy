@@ -19,6 +19,11 @@
   generation/scheduling 和应用 stores，不得重新实现 HTTP、转换或 retry。
 - 主请求的调度、failover、cooldown 重试与 commit 编排统一位于
   `proxy_forward.go`；`proxy.go` 只声明 composition-root owner。
+- 请求画像、能力/context 匹配、跨 route pool、context-overflow replacement
+  与终局 cooldown 判定统一归无状态 `internal/routing`。根
+  `request_routing_adapter.go` 只把一次 `runtimeSnapshot` 绑定为
+  generation-frozen scheduler port，并在 HTTP 边界提取 force-provider 纯值；
+  不得恢复根层策略副本，pin 与 force-provider 都必须禁止跨 route 改道。
 - 三协议方向只在 `internal/protocol/conversion_registry.go` 注册；request、
   response、SSE 入口必须共享同一 pair 定义，不得各自维护方向 switch。
   `internal/protocol` 是仓库依赖叶子，不得 import `model-proxy/*`；Provider 方言、

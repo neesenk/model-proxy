@@ -12,7 +12,8 @@ import (
 // There is NO public Credits-usage API (personal-edition usage is console-only),
 // so Quota() returns BillingUnknown carrying the console subscription URL in
 // Notes; the 5h/7d window exhaustion surfaces reactively via the 429
-// "Allocated quota exceeded" body, already classified as rlQuota by failclass.go
+// "Allocated quota exceeded" body, classified as quota by targetexec rate-limit
+// policy
 // → quota cooldown + failover.
 type QwenPlanProvider struct {
 	*ApiKeyBase
@@ -96,7 +97,7 @@ func (p *QwenPlanProvider) ExtraHeaders(req *http.Request, path string) {
 // console subscription URL rides in Notes so both the CLI `usage` command and
 // the Web UI (app.js renders snap.Notes) can link to the real 5h/7d numbers.
 // BillingUnknown → the surplus scheduler ranks qwen-plan by priority (neutral);
-// window exhaustion is handled reactively via 429 → rlQuota → cooldown/failover.
+// window exhaustion is handled reactively via 429 → quota cooldown → failover.
 func (p *QwenPlanProvider) Quota() (*QuotaSnapshot, error) {
 	return &QuotaSnapshot{
 		Billing: BillingUnknown,

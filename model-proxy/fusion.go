@@ -14,6 +14,8 @@ import (
 	"time"
 
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/routing"
+	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/internal/targetexec"
 )
 
@@ -107,7 +109,7 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 	// carries the tools and may answer with a tool call directly. When the
 	// synthesizer itself can't do tools, orchestration adds nothing — answer
 	// directly (degrade, don't fail).
-	if requestHasTools(fc.origBody) && !p.fusionSynthesizerSupportsTools(fc, recipe.Synthesizer) {
+	if routing.RequestHasTools(fc.origBody) && !p.fusionSynthesizerSupportsTools(fc, recipe.Synthesizer) {
 		run.Degraded = fusionDegradedTools
 		log.Printf("[fusion] %s: synthesizer %s/%s lacks tool support; answering directly (fusion_tools_unsupported)",
 			fc.flc.exposed, recipe.Synthesizer.Provider, recipe.Synthesizer.Model)
@@ -251,7 +253,12 @@ func collectFusionResults(results <-chan fusionLegResult, launched, quorum int, 
 // tool calls, judged by the provider's capabilities override first, then the
 // models.dev catalog (nil catalog → fits, the graceful default).
 func (p *Proxy) fusionSynthesizerSupportsTools(fc fusionCtx, st RouteTarget) bool {
-	return modelFits(fc.runtime.catalog, targetCapabilities(fc.runtime.cfg, fc.runtime.parentOf, st), st.Model, requestProfile{hasTools: true})
+	return routing.Fits(
+		fc.runtime.catalog,
+		routing.CapabilitiesFor(fc.runtime.cfg, fc.runtime.parentOf, st),
+		st.Model,
+		routing.Profile{HasTools: true},
+	)
 }
 
 // callFusionLeg runs one non-streaming fusion sub-call: a panel member's
@@ -437,8 +444,8 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		if len(peek) > 8<<10 {
 			peek = peek[:8<<10]
 		}
-		until, kind := p.parseRateLimit(resp, peek, time.Now(), sched)
-		p.recordRateLimit(m.Provider, until, kind, fc.runtime.generation)
+		decision := targetexec.ParseRateLimit(resp, peek, time.Now(), sched)
+		p.recordRateLimit(m.Provider, decision.Until, runtimestate.ParseRateLimitKind(string(decision.Kind)), fc.runtime.generation)
 		if p.metrics != nil {
 			p.metrics.inc(m.Provider, m.Model, evRateLimited429)
 			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget

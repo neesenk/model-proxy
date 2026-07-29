@@ -21,12 +21,6 @@ type Doer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-// RateLimit is the result of classifying an upstream 429.
-type RateLimit struct {
-	Until time.Time
-	Kind  string
-}
-
 // State is the generation-frozen mutable runtime adapter. Its methods never
 // accept a generation: the composition root binds that concern once.
 type State interface {
@@ -36,7 +30,7 @@ type State interface {
 	RecordSuccess(configdomain.RouteTarget)
 	RecordFailure(string)
 	RecordModelFailure(configdomain.RouteTarget)
-	RecordRateLimit(string, *http.Response, []byte, time.Time) RateLimit
+	RecordRateLimit(string, RateLimitDecision)
 	LearnParamBlock(configdomain.RouteTarget, string) bool
 	ApplyParamBlock(configdomain.RouteTarget, []byte) []byte
 	NoteWireResponsesMiss(string)
@@ -169,9 +163,10 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		if response.StatusCode == http.StatusTooManyRequests {
 			peek := peekResponseBody(response, 8<<10)
 			response.Body.Close()
+			decision := ParseRateLimit(response, peek, time.Now(), runtime.Scheduling)
 			if executor.State != nil {
-				decision := executor.State.RecordRateLimit(target.Provider, response, peek, time.Now())
-				if decision.Kind != "" && decision.Kind != "transient" {
+				executor.State.RecordRateLimit(target.Provider, decision)
+				if decision.Kind != "" && decision.Kind != RateLimitTransient {
 					log.Printf("[proto=%s provider=%s] 429 classified %s — skipped until %s",
 						plan.ClientProtocol(), target.Provider, decision.Kind, decision.Until.Format(time.RFC3339))
 				}

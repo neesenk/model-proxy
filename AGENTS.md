@@ -22,14 +22,14 @@ docs/                     架构、后端和 API 契约
 | 修改范围 | 必读 |
 |---|---|
 | 全局架构、模块边界、跨领域重构 | `docs/architecture/overview.md` |
-| `model-proxy/proxy_forward.go`、`proxy_health_adapter.go`、`failclass.go`、cooldown | `model-proxy/AGENTS.md`、`docs/architecture/routing-and-failure.md` |
+| `model-proxy/proxy_forward.go`、`proxy_health_adapter.go`、`internal/routing/retry.go`、`internal/targetexec/rate_limit.go`、cooldown | `model-proxy/AGENTS.md`、`docs/architecture/routing-and-failure.md` |
 | `model-proxy/internal/runtime/manager*.go`、`quota.go`、schedule、sticky、pin、持久化 | `model-proxy/AGENTS.md`、`docs/architecture/runtime-state.md`、`docs/architecture/routing-and-failure.md` |
 | `model-proxy/internal/accounts/*`、`accounts_adapter.go`、`resolve.go`、多账号 | `model-proxy/AGENTS.md`、`docs/architecture/provider-pools.md` |
 | 凭据、login/logout、池文件 | `docs/architecture/provider-pools.md`、`docs/backend-contracts.md` |
 | `model-proxy/provider/*` | `model-proxy/provider/AGENTS.md`、`docs/backend-contracts.md` |
 | `model-proxy/internal/config/*`、`model-proxy/config_compat.go`、配置加载/校验/默认值 | `model-proxy/AGENTS.md`、`docs/architecture/overview.md`；字段同步另读 `docs/engineering/pitfalls.md` |
 | `model-proxy/internal/protocol/*`、跨协议 route | `docs/architecture/protocol-conversion.md` |
-| `request_routing.go`、implicit routes | `docs/architecture/request-routing.md` |
+| `model-proxy/internal/routing/request.go`、`request_routing_adapter.go`、implicit routes | `docs/architecture/request-routing.md` |
 | `model-proxy/internal/catalog/*`、models.dev catalog、`models refresh` | `docs/architecture/request-routing.md`；pricing/analytics 另读 `docs/web-api.md` |
 | `daemon.go`、supervisor、serve 生命周期 | `docs/engineering/pitfalls.md`（进程类陷阱）、`model-proxy/CLI.md`（serve 命令契约） |
 | Fusion、Shadow、Cache、request log、live | `docs/architecture/fusion-shadow-cache.md` |

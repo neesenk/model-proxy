@@ -1103,7 +1103,7 @@ func convertRequestFor(body []byte, clientProto, targetProto string, opts conver
 	// paramBlock to learn the same lesson. This shaping only runs on the
 	// cross-protocol conversion path: targetexec.Plan.ConvertBody short-circuits
 	// same-protocol responses→codex traffic to byte-identical passthrough,
-	// which self-heals via the 400→paramBlock learning retry (failclass.go).
+	// which self-heals via targetexec's 400→paramBlock learning retry.
 	var m map[string]any
 	if sonic.Unmarshal(out, &m) != nil {
 		return out, nil

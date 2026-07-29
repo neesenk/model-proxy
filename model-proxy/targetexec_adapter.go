@@ -3,12 +3,12 @@ package main
 import (
 	"io"
 	"log"
-	"net/http"
 	"strconv"
 	"time"
 
 	configdomain "model-proxy/internal/config"
 	observeevents "model-proxy/internal/observe/events"
+	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/internal/targetexec"
 	"model-proxy/internal/transport/bodycapture"
 )
@@ -58,13 +58,9 @@ func (state targetExecutionState) RecordModelFailure(target configdomain.RouteTa
 
 func (state targetExecutionState) RecordRateLimit(
 	provider string,
-	response *http.Response,
-	bodyPeek []byte,
-	now time.Time,
-) targetexec.RateLimit {
-	until, kind := state.proxy.parseRateLimit(response, bodyPeek, now, state.scheduling)
-	state.proxy.recordRateLimit(provider, until, kind, state.runtime.Generation)
-	return targetexec.RateLimit{Until: until, Kind: kind.String()}
+	decision targetexec.RateLimitDecision,
+) {
+	state.proxy.recordRateLimit(provider, decision.Until, runtimestate.ParseRateLimitKind(string(decision.Kind)), state.runtime.Generation)
 }
 
 func (state targetExecutionState) LearnParamBlock(target configdomain.RouteTarget, parameter string) bool {

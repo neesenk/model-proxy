@@ -12,6 +12,7 @@ import (
 	responsecache "model-proxy/internal/cache"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/routing"
 	"model-proxy/internal/targetexec"
 )
 
@@ -24,8 +25,8 @@ import (
 // best available by (non-peak, priority); providers with an open circuit or active
 // rate-limit are skipped. It fails over to the next on connection error /
 // 401-after-refresh / 5xx / 429, and retries once on a strictly-larger-context
-// target when the upstream answers a context-overflow 400 (see
-// contextOverflowRetry). The protocol (from the request path) selects the
+// target when the upstream answers a context-overflow 400. The protocol (from
+// the request path) selects the
 // upstream path and base URL (anthropic_base_url vs openai_base_url); it does not
 // key the route.
 func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, requestID string) {
@@ -72,6 +73,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// not a stale cached answer from another provider — same rationale as the
 	// force-provider/replay bypass).
 	force := p.pinForces(exposed, targets, parentOf)
+	forcedProvider := forcedProviderFromRequest(r)
 
 	// Exact-match response cache (#10): a request byte-identical to a recently
 	// served one is replayed from cache with no upstream call. Computed before
@@ -79,7 +81,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// a fresh 2xx commit. SKIPPED entirely when a force-provider override OR a pin
 	// is in effect — both mean "send to THIS backend", not a stale cached answer.
 	var cacheKey string
-	if cache != nil && forceProvider(r) == "" && !force {
+	if cache != nil && forcedProvider == "" && !force {
 		cacheKey = responsecache.Key(r, origBody)
 		if e, ok := cache.Lookup(cacheKey, time.Now()); ok {
 			// Live monitor (#6): a cache hit skips the normal start/end flow, so
@@ -108,11 +110,11 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// a target of this route (typo, wrong name), HARD-FAIL (400): falling back to
 	// normal scheduling would let another provider answer while `replay --to`
 	// still reports the typo'd name, silently polluting comparison conclusions.
-	if fp := forceProvider(r); fp != "" {
-		narrowed := filterTargetsByProvider(targets, parentOf, fp)
+	if forcedProvider != "" {
+		narrowed := routing.FilterTargetsByProvider(targets, parentOf, forcedProvider)
 		if len(narrowed) == 0 {
 			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-			http.Error(w, fmt.Sprintf("force-provider %q is not a target for model %q", fp, exposed), http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("force-provider %q is not a target for model %q", forcedProvider, exposed), http.StatusBadRequest)
 			return
 		}
 		targets = narrowed
@@ -177,11 +179,12 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		agent:       agent,
 		requestID:   requestID,
 
-		targets:   targets,
-		routeKeys: routeKeys,
-		force:     force,
-		cacheKey:  cacheKey,
-		origBody:  origBody,
+		targets:        targets,
+		routeKeys:      routeKeys,
+		force:          force,
+		forcedProvider: forcedProvider,
+		cacheKey:       cacheKey,
+		origBody:       origBody,
 
 		writer:  w,
 		request: r,
@@ -211,32 +214,45 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		}
 		now := time.Now()
 		allDown, allRateLimited, earliest := p.cooldownState(checkTargets, now)
-		if forceProvider(r) == "" && retryWait > 0 && round < 2 {
-			if allDown {
-				if sleep := earliest.Sub(now); sleep > 0 && sleep <= retryWait {
-					log.Printf("[proto=%s model=%s] all targets cooling down; retry %d/2 in %s", proto, exposed, round+1, sleep.Round(time.Millisecond))
-					select {
-					case <-time.After(sleep):
-						continue
-					case <-r.Context().Done():
-						// Client gave up waiting — close the live event pair (499 =
-						// client closed request) and write nothing.
-						p.events.Publish(observeevents.Event{
-							Type: "end", Ts: time.Now().UnixMilli(), RequestID: requestID,
-							Agent: agent, Protocol: proto, Exposed: exposed, Status: 499,
-						})
-						return
-					}
-				}
-			} else if p.hasRecoveredUntried(checkTargets, res.tried, now) {
-				// TOCTOU (P0-5): a target recovered between scheduling and this
-				// terminal check but was never tried in the failed pass (its
-				// cooldown lapsed mid-pass while a sibling re-failed). Give it an
-				// immediate, zero-wait pass — still inside the round budget —
-				// instead of erroring out while a servable target exists.
-				log.Printf("[proto=%s model=%s] a cooled-down target recovered; retrying immediately (round %d/2)", proto, exposed, round+1)
+		bypassWait := forcedProvider != ""
+		recoveredUntried := false
+		if !bypassWait && retryWait > 0 && round < 2 && !allDown {
+			recoveredUntried = p.hasRecoveredUntried(checkTargets, res.tried, now)
+		}
+		decision := routing.DecideFailure(routing.FailureInput{
+			SawHard:            sawHard,
+			SawRateLimit:       sawCool,
+			AllDown:            allDown,
+			AllDownRateLimited: allRateLimited,
+			RecoveredUntried:   recoveredUntried,
+			BypassWait:         bypassWait,
+			Round:              round,
+			MaxRetryRounds:     2,
+			RetryWait:          retryWait,
+			RateLimitBackoff:   cfg.Scheduling.RateBackoff(),
+			EarliestRecovery:   earliest,
+			Now:                now,
+		})
+		switch decision.Action {
+		case routing.FailureWait:
+			log.Printf("[proto=%s model=%s] all targets cooling down; retry %d/2 in %s", proto, exposed, round+1, decision.Wait.Round(time.Millisecond))
+			select {
+			case <-time.After(decision.Wait):
 				continue
+			case <-r.Context().Done():
+				// Client gave up waiting — close the live event pair (499 =
+				// client closed request) and write nothing.
+				p.events.Publish(observeevents.Event{
+					Type: "end", Ts: time.Now().UnixMilli(), RequestID: requestID,
+					Agent: agent, Protocol: proto, Exposed: exposed, Status: 499,
+				})
+				return
 			}
+		case routing.FailureRetryNow:
+			// TOCTOU: a target recovered between scheduling and this terminal
+			// check but was never tried in the failed pass.
+			log.Printf("[proto=%s model=%s] a cooled-down target recovered; retrying immediately (round %d/2)", proto, exposed, round+1)
+			continue
 		}
 		// Terminal: every target failed. The status is honest about the CLASS of
 		// failures seen ACROSS ALL PASSES (not a racy health re-read — a target
@@ -251,21 +267,10 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		}
 		status := http.StatusBadGateway
 		msg := fmt.Sprintf("all targets failed for model %q", exposed)
-		if !sawHard && (sawCool || (allDown && allRateLimited)) {
-			d := time.Until(earliest)
-			if d <= 0 {
-				d = cfg.Scheduling.RateBackoff() // horizon already lapsed: use the transient default
-			}
-			secs := int(d / time.Second)
-			if d%time.Second != 0 {
-				secs++
-			}
-			if secs < 1 {
-				secs = 1
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(secs))
+		if decision.RateLimited {
+			w.Header().Set("Retry-After", strconv.Itoa(decision.RetryAfterSeconds))
 			status = http.StatusTooManyRequests
-			msg = fmt.Sprintf("all providers for model %q are rate-limited; retry after %ds", exposed, secs)
+			msg = fmt.Sprintf("all providers for model %q are rate-limited; retry after %ds", exposed, decision.RetryAfterSeconds)
 		}
 		// Live monitor (#6): every target failed → emit an end event so the live
 		// view surfaces the failure (a retry-looping agent that always errors is
@@ -321,7 +326,6 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 	cfg := runtime.cfg
 	generation := runtime.generation
 	parentOf := runtime.parentOf
-	expanded := runtime.expandedRoutes
 	cat := runtime.catalog
 	proto := req.proto
 	upPath := req.upPath
@@ -331,6 +335,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 	targets := req.targets
 	routeKeys := req.routeKeys
 	force := req.force
+	forcedProvider := req.forcedProvider
 	cacheKey := req.cacheKey
 	w := req.writer
 	r := req.request
@@ -338,17 +343,18 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 	requestID := req.requestID
 	origBody := req.origBody
 
+	planner := requestRoutingPlanner(p, runtime, routeKeys)
 	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
 	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
 	// overrides request-aware routing (no cross-route reroute away from the pinned
 	// provider) and, via the `force` flag into tryTarget, bypasses the circuit
 	// breaker — the user explicitly asked for THIS backend, no failover.
-	if !force {
+	if !force && forcedProvider == "" {
 		// Request-aware routing (#8 capability + #9 context, unified): keep targets
 		// that fit the request (image capability + context window); if none in the
 		// route fit, fall back to a cross-route capable+fitting pool ranked by the
 		// normal scheduling policy. No-op when everything already fits.
-		ordered = p.applyRequestAwareRouting(cfg, parentOf, cat, exposed, sessionKey, ordered, expanded, routeKeys, origBody, generation)
+		ordered = planner.Apply(exposed, sessionKey, ordered, origBody)
 	}
 	var firstTried RouteTarget
 	if len(ordered) > 0 {
@@ -362,7 +368,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		// panel→synthesis engine (its synthesizer leg reuses tryTarget). A
 		// force-provider override (replay) targets one concrete backend, so it
 		// skips fusion entirely.
-		if t.Provider == "fusion" && forceProvider(r) == "" {
+		if t.Provider == "fusion" && forcedProvider == "" {
 			recipe, ok := cfg.Fusion[t.Model]
 			if !ok {
 				log.Printf("[proto=%s model=%s] target %d: fusion recipe %q not defined, skipping", proto, exposed, ti, t.Model)
@@ -436,16 +442,16 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		// context replacement list (cross-route pool, scheduled) instead of
 		// committing. Nil — no peek, no retry — once the retry is spent, while a
 		// pin is in force (exclusive: no cross-route reroute), or without a
-		// catalog (same no-op degradation as applyRequestAwareRouting).
+		// catalog (same no-op degradation as Planner.Apply).
 		var ctxRetry func() []RouteTarget
-		if !st.retriedForContext && !force && cat != nil {
+		if !st.retriedForContext && !force && forcedProvider == "" && cat != nil {
 			// Only capture targets ACTUALLY tried so far (through the current
 			// index), not the full ordered list — failover targets further down
 			// haven't been attempted yet and shouldn't anchor the "strictly larger
 			// context" threshold (they might be worth trying as the retry itself).
 			alreadyTried := ordered[:ti+1]
 			ctxRetry = func() []RouteTarget {
-				return p.contextOverflowRetry(cfg, parentOf, cat, exposed, sessionKey, alreadyTried, expanded, routeKeys, origBody, generation)
+				return planner.ContextOverflowRetry(exposed, sessionKey, alreadyTried, origBody)
 			}
 		}
 		attempt := newTargetAttempt(

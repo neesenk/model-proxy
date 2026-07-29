@@ -16,6 +16,31 @@ import (
 	observestats "model-proxy/internal/observe/stats"
 )
 
+// TestUsageScanner_AgentSink verifies that the agent attribution callback
+// receives the exact usage observed when the scanner commits.
+func TestUsageScanner_AgentSink(t *testing.T) {
+	tc := newTokenCounter()
+	var got tokenUsage
+	stream := []byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n\n")
+	scanner := newUsageScanner(
+		io.NopCloser(bytes.NewReader(stream)),
+		tokenKey{Provider: "z", Model: "m"},
+		tc,
+		func(usage tokenUsage) {
+			got = usage
+		},
+	)
+	if _, err := io.Copy(io.Discard, scanner); err != nil {
+		t.Fatalf("copy usage stream: %v", err)
+	}
+	if err := scanner.Close(); err != nil {
+		t.Fatalf("close usage scanner: %v", err)
+	}
+	if got.Input != 42 {
+		t.Errorf("agent sink got input=%d want 42", got.Input)
+	}
+}
+
 func TestUsageScannerAnthropic(t *testing.T) {
 	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":50,\"cache_read_input_tokens\":10}}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":200}}\n\n")

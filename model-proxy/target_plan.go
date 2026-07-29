@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/routing"
 	"model-proxy/internal/targetexec"
 )
 
@@ -31,7 +32,7 @@ func (p *Proxy) planTarget(input targetPlanInput) (targetexec.Plan, error) {
 	)
 	clientProto := protocol.Protocol(input.clientProto)
 	backendProto := protocol.Protocol(backendProtoName)
-	imageOK := imageOKForTarget(
+	imageOK := routing.ImageOKForTarget(
 		input.runtime.cfg,
 		input.runtime.parentOf,
 		input.runtime.catalog,

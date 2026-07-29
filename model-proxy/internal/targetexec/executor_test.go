@@ -48,6 +48,7 @@ func (d *sequenceDoer) Do(request *http.Request) (*http.Response, error) {
 type executorState struct {
 	failures, modelFailures, releases, success, rateLimits, learned int
 	wireMisses                                                      int
+	rateLimitDecision                                               RateLimitDecision
 }
 
 func (*executorState) ModelLocked(configdomain.RouteTarget, time.Time) bool { return false }
@@ -56,9 +57,9 @@ func (s *executorState) ReleaseHalfOpenSlot(string)                         { s.
 func (s *executorState) RecordSuccess(configdomain.RouteTarget)             { s.success++ }
 func (s *executorState) RecordFailure(string)                               { s.failures++ }
 func (s *executorState) RecordModelFailure(configdomain.RouteTarget)        { s.modelFailures++ }
-func (s *executorState) RecordRateLimit(string, *http.Response, []byte, time.Time) RateLimit {
+func (s *executorState) RecordRateLimit(_ string, decision RateLimitDecision) {
 	s.rateLimits++
-	return RateLimit{}
+	s.rateLimitDecision = decision
 }
 func (s *executorState) LearnParamBlock(configdomain.RouteTarget, string) bool {
 	s.learned++
@@ -218,13 +219,22 @@ func TestExecutor429And5xxFailover(t *testing.T) {
 		attempt, _ := testAttempt(provider, `{}`, Policy{})
 		state := &executorState{}
 		effects := &executorEffects{}
+		response := testResponse(status, "err")
+		if status == 429 {
+			response.Header.Set("Retry-After", "120")
+		}
+		before := time.Now()
 		result := (Executor{
-			Client: &sequenceDoer{responses: []*http.Response{testResponse(status, "err")}}, State: state, Effects: effects,
+			Client: &sequenceDoer{responses: []*http.Response{response}}, State: state, Effects: effects,
 		}).Execute(attempt)
+		after := time.Now()
 		if result.Committed || effects.failovers != 1 ||
 			(status == 429 && (result.Outcome != OutcomeRateLimited || state.rateLimits != 1 ||
-				effects.rateLimits != 1 || effects.failures != 0)) ||
-			(status == 503 && (state.failures != 1 || effects.failures != 1 || effects.rateLimits != 0)) {
+				effects.rateLimits != 1 || effects.failures != 0 || state.rateLimitDecision.Kind != RateLimitTransient ||
+				state.rateLimitDecision.Until.Before(before.Add(120*time.Second)) ||
+				state.rateLimitDecision.Until.After(after.Add(120*time.Second)))) ||
+			(status == 503 && (result.Outcome != OutcomeFailedHard || state.failures != 1 || effects.failures != 1 ||
+				effects.rateLimits != 0 || state.rateLimits != 0)) {
 			t.Fatalf("status %d result=%+v state=%+v effects=%+v", status, result, state, effects)
 		}
 	}

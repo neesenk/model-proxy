@@ -1,8 +1,6 @@
 package main
 
 import (
-	"net/http"
-	"strconv"
 	"time"
 
 	runtimestate "model-proxy/internal/runtime"
@@ -142,7 +140,7 @@ func (p *Proxy) applyParamBlock(provider, model string, body []byte) []byte {
 // records the exhaustion class for display, and clears any half-open slot. Does
 // not count toward the circuit. It then triggers an async quota refresh of the
 // provider so its snapshot is fresh when the rate-limit clears.
-func (p *Proxy) recordRateLimit(name string, until time.Time, kind rateLimitKind, generations ...uint64) {
+func (p *Proxy) recordRateLimit(name string, until time.Time, kind runtimestate.RateLimitKind, generations ...uint64) {
 	generation := runtimeGenerationArg(generations)
 	if !p.runtimeState.RecordRateLimit(name, until, kind, generation) {
 		return
@@ -151,46 +149,5 @@ func (p *Proxy) recordRateLimit(name string, until time.Time, kind rateLimitKind
 		// refreshAsync is tracked + stop-aware: a 429-triggered refresh can't
 		// outlive Proxy.Close (no persist after the final flush).
 		p.quota.refreshAsync(name, generation)
-	}
-}
-
-// parseRateLimit derives the rate-limit-until time from a 429 response, most
-// precise source first: an explicit reset hint in the error body ("reset after
-// 2h5m", "Resets in 164h", RFC3339 — clamped to maxResetHint), then the
-// Retry-After header (seconds or HTTP-date), then a per-class default: daily
-// quota locks to local midnight, quota-exhausted waits quota_cooldown, and a
-// plain transient rate limit waits rate_limit_backoff.
-func (p *Proxy) parseRateLimit(resp *http.Response, bodyPeek []byte, now time.Time, sched Scheduling) (time.Time, rateLimitKind) {
-	kind := classify429(bodyPeek)
-	if t, ok := parseResetHint(bodyPeek, now); ok {
-		return t, kind
-	}
-	if ra := resp.Header.Get("Retry-After"); ra != "" {
-		if secs, err := strconv.Atoi(ra); err == nil {
-			if secs < 0 {
-				secs = 0
-			}
-			return now.Add(time.Duration(secs) * time.Second), kind
-		}
-		if t, err := http.ParseTime(ra); err == nil {
-			if t.Before(now) {
-				return now, kind
-			}
-			return t, kind
-		}
-	}
-	switch kind {
-	case rlDaily:
-		// Lock to the next LOCAL midnight — daily quotas reset on the provider's
-		// billing-day boundary, which for our providers tracks local time.
-		// INTENTIONAL — a day-long freeze from one 429 is deliberate (the
-		// upstream declared the window); `unfreeze` is the escape hatch, see
-		// AGENTS.md「会被误认为是 bug 的设计」#5.
-		midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
-		return midnight, kind
-	case rlQuota:
-		return now.Add(sched.QuotaCooldownDuration()), kind
-	default:
-		return now.Add(sched.RateBackoff()), kind
 	}
 }

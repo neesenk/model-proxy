@@ -10,6 +10,14 @@ import (
 // The helpers in this file keep root integration tests on the public runtime
 // boundary. Pure state-machine details belong in internal/runtime tests.
 
+type rateLimitKind = runtimestate.RateLimitKind
+
+const (
+	rlTransient = runtimestate.Transient
+	rlQuota     = runtimestate.Quota
+	rlDaily     = runtimestate.Daily
+)
+
 func runtimeStatus(
 	t testing.TB,
 	p *Proxy,
