@@ -198,8 +198,9 @@ func (s Store) Save(name, providerID string, p Pool) error {
 }
 
 // WithLock runs fn while holding a cross-process lock for the named pool.
-// stdlib only (no golang.org/x/sys → no flock); portable across daemon_unix.go
-// and daemon_windows.go. The arbiter is an O_CREATE|O_EXCL lockfile at
+// stdlib only (no golang.org/x/sys → no flock); portable across
+// cli_daemon_unix.go and cli_daemon_windows.go. The arbiter is an
+// O_CREATE|O_EXCL lockfile at
 // PoolPath(name)+".lock": exactly one process can create it, the holder removes
 // it on return (ALWAYS, even on fn error). A crash strands a stale lockfile,
 // recovered by mtime — if older than poolLockStaleAge, a waiter removes it and

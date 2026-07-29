@@ -235,7 +235,7 @@ transport，不由根包承载。
 
 `proxyLifecycle` 是 Proxy 级后台任务的唯一 owner：
 
-- daemon 只调用 `startRuntimeServices` 与 `Proxy.Close`；
+- `cli_serve.go` 只调用 `startRuntimeServices` 与 `Proxy.Close`；
 - reload catalog refresh 必须通过 lifecycle gate 接纳；
 - Close 拒绝新任务，先等待会产生日志的有限任务（Shadow），再 drain request
   log；随后等待 loop/refresh，最后完成 stats、Responses state 和 quota final
@@ -251,6 +251,21 @@ admission gate 启动。transport 关闭时先拒绝新 Web task、取消轮询�
 任务；若任务已进入凭据落盘 commit，则允许 save + reload 完成后再关闭 Proxy。
 session store 只保存 detached、transport-visible login 更新；GC 只删除超过 TTL 的
 done/error 会话，不能删除仍 pending 的会话。
+
+## CLI 与进程入口
+
+根 `main` 函数只绑定 OS 进程边界：把参数与标准输入输出错误流交给
+`runCLIArgs(args, stdin, stdout, stderr)`，再使用其 exit code 结束进程。
+`runCLIArgs` 是唯一可测试的顶层入口，直接处理无参数、help、未知命令及其 exit
+code，并通过命令表提供统一分发 seam。现阶段已知命令仍由兼容 adapter 调用既有
+handler，保留其进程 I/O 与 `log.Fatal` / `os.Exit` 语义；命令级注入式 I/O 和
+返回式退出尚未完成。`cli_serve.go` 拥有 `serve` 命令、前台/worker signal 与
+HTTP transport 生命周期，`daemon.go` 保留可独立测试的 HTTP drain primitive；
+`cli_daemon.go` 拥有 daemon/supervisor 的 signal 与 pid/probe 编排。child process
+detach 属性的平台差异归 `cli_daemon_unix.go` / `cli_daemon_windows.go`。
+
+这只是 CLI/进程入口的职责拆分。当前应用 composition root 仍是根包的 `Proxy`；
+不得把此阶段描述为新的 `internal/app` composition root 已经完成。
 
 ## 依赖规则
 
@@ -297,7 +312,10 @@ composition root → internal/targetexec → internal/protocol / provider
 - `targetexec.Executor` import/持有 `Proxy` 或其他 composition-root owner；
 - 根 `targetexec_adapter.go` 重新实现 HTTP、转换、retry 或 Shadow 编排；
 - 普通 route/Fusion 绕过 `newTargetAttempt` 直接拼装执行器输入；
-- daemon/reload 绕过 `proxyLifecycle` 启动 Proxy 级 goroutine；
+- `cli_serve.go` / `cli_daemon.go` / reload 绕过 `proxyLifecycle` 启动 Proxy 级
+  goroutine；
+- `main` 函数恢复命令解析、serve/daemon 编排，或根包恢复第二个顶层命令
+  分发器；
 - `internal/config` import `internal/pricing`、`internal/protocol` 以外的
   `model-proxy/*` 包，或根 `config_compat.go` 承载类型别名与加载 wrapper
   之外的配置实现；

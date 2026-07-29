@@ -8,16 +8,34 @@
 
 ## 全局约定
 
+### 实现边界
+
+`main` 函数只把 `os.Args`、`os.Stdin`、`os.Stdout`、`os.Stderr` 绑定到
+`runCLIArgs(args, stdin, stdout, stderr)`，并把其返回值交给 OS 进程退出。
+`runCLIArgs` 是可测试的顶层入口：它直接处理无参数、顶层/子命令 help、未知命令
+及其 exit code，并通过统一表分发已知命令。现阶段已知命令由兼容 adapter 调用
+既有 handler；这些 handler 的进程 I/O、`log.Fatal` / `os.Exit` 语义仍保持不变，
+不代表所有命令都已经改成注入流或返回 exit code。`serve` 命令和前台 HTTP
+生命周期及前台/worker signal 编排位于 `cli_serve.go`，可复用 HTTP drain
+primitive 留在 `daemon.go`；daemon/supervisor 的 signal 与 pid/probe 编排位于
+`cli_daemon.go`。child process detach 属性的平台差异位于
+`cli_daemon_unix.go` / `cli_daemon_windows.go`。
+
+本阶段仍由根包装配 CLI 与现有 `Proxy` 运行时；这里不表示应用 composition root
+已经迁入新的 internal 包。
+
 ### 退出码
 
 | 码 | 含义 | 触发点 |
 |---|---|---|
 | `0` | 成功 | 命令正常返回；`serve` worker 收到 SIGINT/SIGTERM 后完成 transport drain 和 final flush（`runProxyProcess`） |
-| `1` | 运行时错误 | `log.Fatal(...)`（默认 exit 1）；显式 `os.Exit(1)`：config 无效、daemon 不可达、响应解析失败、未知子命令/参数 |
+| `1` | 运行时错误 | 顶层无参数/未知命令由 `runCLIArgs` 返回 1；既有 handler 继续通过 `log.Fatal(...)` 或显式 `os.Exit(1)` 处理 config 无效、daemon 不可达、响应解析失败、未知子命令/参数 |
 
-真实 CLI 路径**不使用** exit 2。（`cli_test.go` 的 `TestHelperProcess` 在未知 `MP_SUBCMD` 时 `os.Exit(2)`，那是测试桩，不是真实路径。）
+真实 CLI 路径**不使用** exit 2。
 
-`log.Fatal` 把消息打到 **stderr** 再 exit 1；`log.Printf` 同样打 stderr。故 stderr 是诊断/进度/告警/错误的统一流。
+`runCLIArgs` 自己处理的顶层分支只返回 exit code、不终止进程；已知命令 handler
+仍可能按既有契约终止进程。`log.Printf` 写入 stderr；故 stderr 是
+诊断/进度/告警/错误的统一流。
 
 ### 流约定
 
@@ -61,7 +79,7 @@
 serve [daemon|stop|reload|status] [--config PATH] [--log-file PATH]
 ```
 
-### 子命令分发（`daemon.go:64` `cmdServe`）
+### 子命令分发（`cli_serve.go` 的 `cmdServe`）
 
 | 调用 | 行为 |
 |---|---|
@@ -124,7 +142,7 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 takeover <client>   # client ∈ {claude, opencode, codex, pi, all}
 ```
 
-逻辑（`takeover.go:66` `runTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再改写指向代理。含隐式路由模型；opencode/pi 额外 hydrate models.dev 元数据。
+逻辑（`takeover.go` 的 `runTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再改写指向代理。含隐式路由模型；opencode/pi 额外 hydrate models.dev 元数据。
 
 ### 输出
 
@@ -154,7 +172,7 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, all}
 restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 ```
 
-逻辑（`takeover.go:110`）：从 `<BAKDIR>/<client>.bak` verbatim 复制回原路径。输出同 §2 的 restore 行。失败：`log.Fatal` -> stderr + exit 1（无备份 -> `no backup for <client> in <BAKDIR>: ...`）。
+逻辑（`takeover.go` 的 restore 路径）：从 `<BAKDIR>/<client>.bak` verbatim 复制回原路径。输出同 §2 的 restore 行。失败：`log.Fatal` -> stderr + exit 1（无备份 -> `no backup for <client> in <BAKDIR>: ...`）。
 
 ---
 
@@ -164,7 +182,7 @@ restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 login <provider> [--label <name>] [--replace]
 ```
 
-逻辑（`login.go:29` `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
+逻辑（`login.go` 的 `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
 
 ### 通用
 
@@ -245,7 +263,7 @@ Volcengine Secret Access Key:
 logout <provider> [--label <name>] [--all]
 ```
 
-逻辑（`main.go:287` `cmdLogout`）：aqp/codex/无池文件 -> 单文件 `Logout()`；有池文件 -> 池路径（`--all` 清空 / `--label` 删指定 / 否则交互式列号选择）。
+逻辑（`cmdLogout`）：aqp/codex/无池文件 -> 单文件 `Logout()`；有池文件 -> 池路径（`--all` 清空 / `--label` 删指定 / 否则交互式列号选择）。
 
 ### 输出
 
@@ -466,7 +484,7 @@ shadow:
 schedule   # 查询运行中 daemon 的 GET /debug/schedule
 ```
 
-逻辑（`main.go:1694` `cmdSchedule`）：HTTP GET `http://<LISTEN>/debug/schedule`，10s 超时，渲染 `renderScheduleRoutes`（`serve_status.go`，与 `serve status` 共享）。
+逻辑（`cmdSchedule`）：HTTP GET `http://<LISTEN>/debug/schedule`，10s 超时，渲染 `renderScheduleRoutes`（`serve_status.go`，与 `serve status` 共享）。
 
 ### stdout（`renderScheduleRoutes`，每路由一块）
 
@@ -497,7 +515,7 @@ schedule   # 查询运行中 daemon 的 GET /debug/schedule
 stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--granularity day|month] [--cost] [--json]
 ```
 
-逻辑（`cmd_stats.go:75` `cmdStats` -> `renderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
+逻辑（`cmd_stats.go` 的 `cmdStats` -> `renderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
 
 > `--granularity day|month` 或 `--cost` 任一存在时，改走 `/api/analytics`（按自然日/月聚合，存储恒为 1 分钟），表格头与列由 `formatAnalyticsTable` 渲染（见下）。两者都省略时输出与原 `stats` 完全一致。
 
@@ -550,7 +568,7 @@ agent                reqs        input       output
 serve status [--logs [N]] [--json] [--config PATH]
 ```
 
-逻辑（`serve_status.go:486` `cmdServeStatus` -> `renderStatus`）：GET `/api/status` + `/api/tokens`（带 `--logs` 再加 `/api/logs?tail=N`，默认 N=20）。`--json` 合并 `{status, tokens[, logs]}` 原样输出。
+逻辑（`serve_status.go` 的 `cmdServeStatus` -> `renderStatus`）：GET `/api/status` + `/api/tokens`（带 `--logs` 再加 `/api/logs?tail=N`，默认 N=20）。`--json` 合并 `{status, tokens[, logs]}` 原样输出。
 
 ### stdout（渲染，各段由 `appendSection` 以空行分隔）
 
@@ -607,7 +625,7 @@ Logs (last <N>)
 doctor [--live]
 ```
 
-逻辑（`main.go:1729` `cmdDoctor` -> `doctorWithCfg`）：纯 config 离线诊断，无 live quota（全部 unknown -> tier 然后 priority）。
+逻辑（`cmdDoctor` -> `doctorWithCfg`）：纯 config 离线诊断，无 live quota（全部 unknown -> tier 然后 priority）。
 
 ### stdout
 
@@ -692,7 +710,7 @@ Takeover
 test <model> [--config PATH]
 ```
 
-逻辑（`test_cmd.go:18` `cmdTest`）：离线解析 `<model>` 的路由目标（claude_mapping 别名先翻译；显式 routes 按 priority 升序；无显式路由则回退隐式路由），对**每个**目标用 `probeModelCallable` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线，`test_cmd.go:86` `probeRouteTarget`）。不查询/不改动运行态。
+逻辑（`test_cmd.go` 的 `cmdTest`）：离线解析 `<model>` 的路由目标（claude_mapping 别名先翻译；显式 routes 按 priority 升序；无显式路由则回退隐式路由），对**每个**目标用 `probeModelCallable` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线，由 `probeRouteTarget` 执行）。不查询/不改动运行态。
 
 ### stdout（每目标一行）
 

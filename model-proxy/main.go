@@ -210,70 +210,7 @@ Flags:
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Print(usage)
-		os.Exit(1)
-	}
-	cmd := os.Args[1]
-	// Top-level help.
-	if cmd == "-h" || cmd == "--help" || cmd == "help" {
-		fmt.Print(usage)
-		return
-	}
-	// Per-command help: if any arg is -h/--help, print that command's help.
-	if help, ok := cmdHelp[cmd]; ok {
-		for _, a := range os.Args[2:] {
-			if a == "-h" || a == "--help" {
-				fmt.Println(help)
-				if takesProvider(cmd) {
-					printConfigProviders(os.Args[2:])
-				}
-				return
-			}
-		}
-	}
-	switch cmd {
-	case "serve":
-		cmdServe(os.Args[2:])
-	case "takeover":
-		cmdTakeover(os.Args[2:])
-	case "restore":
-		cmdRestore(os.Args[2:])
-	case "login":
-		cmdLogin(os.Args[2:])
-	case "logout":
-		cmdLogout(os.Args[2:])
-	case "usage":
-		cmdUsage(os.Args[2:])
-	case "models":
-		cmdModels(os.Args[2:])
-	case "config":
-		cmdConfig(os.Args[2:])
-	case "schedule":
-		cmdSchedule(os.Args[2:])
-	case "pin":
-		cmdPin(os.Args[2:])
-	case "unpin":
-		cmdUnpin(os.Args[2:])
-	case "unfreeze":
-		cmdUnfreeze(os.Args[2:])
-	case "stats":
-		cmdStats(os.Args[2:])
-	case "doctor":
-		cmdDoctor(os.Args[2:])
-	case "test":
-		cmdTest(os.Args[2:])
-	case "replay":
-		cmdReplay(os.Args[2:])
-	case "shadow":
-		cmdShadow(os.Args[2:])
-	case "wire":
-		cmdWire(os.Args[2:])
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
-		fmt.Print(usage)
-		os.Exit(1)
-	}
+	os.Exit(runCLIArgs(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // configPath resolves the config file path, scanning --config / -config /
@@ -1150,6 +1087,10 @@ func takesProvider(cmd string) bool {
 // defined under providers:, so the user knows what to pass as <provider>.
 // Silently skips if no config is available or it has no providers.
 func printConfigProviders(args []string) {
+	printConfigProvidersTo(os.Stdout, args)
+}
+
+func printConfigProvidersTo(out io.Writer, args []string) {
 	cfg, err := LoadConfig(configPath(args))
 	if err != nil || len(cfg.Providers) == 0 {
 		return
@@ -1159,9 +1100,9 @@ func printConfigProviders(args []string) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	fmt.Println("\nProviders (from config):")
+	fmt.Fprintln(out, "\nProviders (from config):")
 	for _, n := range names {
 		p := cfg.Providers[n]
-		fmt.Printf("  %s  provider=%s  %s\n", pad(n, 14), pad(p.Provider, 12), p.OpenAIBaseURL)
+		fmt.Fprintf(out, "  %s  provider=%s  %s\n", pad(n, 14), pad(p.Provider, 12), p.OpenAIBaseURL)
 	}
 }

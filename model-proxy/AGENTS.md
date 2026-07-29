@@ -49,7 +49,7 @@
   config/provider/health/model-lock 内部 map。根 `proxy_web_api.go` 只把
   `proxyReadView` / `proxyAdminCommands` 映射为这些端口；`web_adapter.go` 只负责
   composition 与 mux 挂载。
-- Proxy 级后台任务必须由 `proxyLifecycle` 接纳，daemon 只调用
+- Proxy 级后台任务必须由 `proxyLifecycle` 接纳，`cli_serve.go` 只调用
   `startRuntimeServices`/`Proxy.Close`；会写 request log 的有限任务必须在 logger
   drain 前完成，禁止分散启动 goroutine 或重复 final flush。
 - 实时事件 DTO、最近 ring、订阅和非阻塞 fan-out 统一归
@@ -147,7 +147,16 @@ eligibility；startup/reload 不得再读账号文件生成同一 generation 的
 
 ## CLI
 
-CLI 输出是 change-controlled contract。修改命令、字段、颜色、顺序或提示前读取 `CLI.md`，实现后同步更新它。文件日志不得带 ANSI color。
+CLI 输出是 change-controlled contract。修改命令、字段、颜色、顺序或提示前读取
+`CLI.md`，实现后同步更新它。文件日志不得带 ANSI color。
+
+`main` 函数只绑定 `os.Args`、标准输入输出错误流和最终进程退出；可测试的
+`runCLIArgs(args, stdin, stdout, stderr)` 统一拥有无参数、顶层/子命令 help、
+未知命令和已知命令分发 seam。现阶段既有 handler 仍保留原来的进程 I/O 以及
+`log.Fatal` / `os.Exit` 语义，不能误写成所有命令都已完成注入式 I/O/返回式退出。
+`serve` 命令与前台/worker signal、HTTP 生命周期归 `cli_serve.go`，HTTP drain
+primitive 留在 `daemon.go`，daemon/supervisor 编排归 `cli_daemon.go`，平台进程差异归
+`cli_daemon_unix.go` / `cli_daemon_windows.go`；不得恢复第二个顶层分发器。
 
 ## 测试
 

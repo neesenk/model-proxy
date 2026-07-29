@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// exec_test.go covers runCmd (util.go) and sysProcAttrDetach (daemon_unix.go)
+// exec_test.go covers runCmd (util.go) and sysProcAttrDetach (cli_daemon_unix.go)
 // — small wrappers around os/exec and syscall that are otherwise 0%.
 
 func TestRunCmd_StartsProcess(t *testing.T) {
