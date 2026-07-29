@@ -18,6 +18,7 @@ implicit-route eligibility；
 持久化快照；
 `proxy_routes_compile.go` 只编译 explicit/implicit route 与 pool fan-out；
 `proxy_reload.go` 执行 generation 原子交换及交换后的持久化/刷新编排；
+`proxy_http.go` 只承载主代理 HTTP 路由、models 响应和早期终态事件；
 `proxy_schedule_view.go` 从单个 detached dashboard snapshot 投影调度状态；
 `proxy_schedule_adapter.go` 只把 config route/pin 输入映射到 runtime Manager；
 `proxy_runtime_identity.go` 集中跨执行领域共享的 generation 与 pool provider
