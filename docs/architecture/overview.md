@@ -49,8 +49,10 @@ HTTP handler
   provider implementations、pool identity、expanded routes、catalog、cache 和
   Shadow dispatch runtime。
 - `serveRequest`：一次 schedule/failover pass 的稳定输入。
-- `targetPlan`：普通 route、Fusion、Shadow 共用的 provider/protocol/model/body/
-  base URL/path 准备。
+- `targetPlan`：根层只解析同一 `runtimeSnapshot` 中的 provider implementation、
+  backend protocol、wire verdict 与视觉能力；不可变的 model/body/base URL/path
+  wire preparation 由 `internal/targetexec.Plan` 拥有，普通 route、Fusion、
+  Shadow 共用。
 - `targetAttempt`：一个已解析上游目标的完整执行契约，只由
   `runtime + plan + exchange + scope + policy` 五组字段组成；`newTargetAttempt`
   是普通 route 与 Fusion synthesizer 的唯一构造入口。
@@ -59,8 +61,10 @@ HTTP handler
   commit 后只返回最小 `attemptCommit`，不持有生命周期或 Shadow 调度能力。
 
 `runtimeSnapshot` 与 `targetPlan` 是执行器内 reload-owned/config/provider/protocol
-事实的唯一来源；exchange 只承载 HTTP request/writer/body，scope 只承载本次请求
-身份与 Responses 上下文，policy 只承载 force/last-target/context-retry。
+事实的唯一来源；`targetPlan` 内的 wire preparation 只委托不可变的
+`internal/targetexec.Plan`，不得在普通/Fusion/Shadow 分支各自重算 endpoint 或
+conversion options。exchange 只承载 HTTP request/writer/body，scope 只承载本次
+请求身份与 Responses 上下文，policy 只承载 force/last-target/context-retry。
 `newTargetAttempt` 不负责 model rewrite、Responses history expansion 或协议转换，
 这些准备语义仍由普通/Fusion 各自编排后再进入执行器。
 
@@ -69,7 +73,8 @@ identity、六组 pairwise codec、request/response/SSE registry、SSE↔JSON �
 桥接、跨协议图片约束，以及 Responses `previous_response_id` 的有界状态。
 每个 client→backend pair 必须同时提供 request、反向 response、反向 SSE codec；
 专用 pair codec 保留 hosted tools、reasoning 方言和 namespace 等协议特有语义。
-Provider 方言和目标视觉能力由 `targetPlan` 解析为窄 request options 后注入；
+Provider 方言和目标视觉能力由根 `targetPlan` 解析后作为纯值注入
+`internal/targetexec.Plan` 的窄 request options；
 具体 `http.ResponseWriter` 错误 envelope 仍由 transport 层负责。
 
 `internal/config` 统一拥有配置类型、YAML 加载、默认值、校验和生效值
@@ -217,6 +222,7 @@ wire probe / target plan → internal/runtime/wirecap
 schedule / health / resolver / quota adapter → internal/runtime
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
+composition root → internal/targetexec → internal/protocol / provider
 ```
 
 禁止：

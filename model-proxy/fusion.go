@@ -344,8 +344,8 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// spoke responses AND this leg's backend is stateless — a native-responses
 	// backend keeps previous_response_id passthrough and its server-side chain.
 	srcBody, _ = p.expandFusionResponses(fc, string(plan.backendProto), srcBody)
-	body := plan.rewriteModel(srcBody, fc.calledModel)
-	body, err = plan.convertBody(body)
+	body := plan.wire.RewriteModel(srcBody, fc.calledModel)
+	body, err = plan.wire.ConvertBody(body)
 	if err != nil {
 		res.err = fmt.Errorf("convert %s→%s: %w", fc.proto, plan.backendProto, err)
 		return
@@ -485,7 +485,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	default:
 		res.usage = parseUsageJSON(respBody)
-		res.text = truncateRunes(plan.extractResponseText(respBody), fusionCandidateMaxChars)
+		res.text = truncateRunes(plan.wire.ExtractResponseText(respBody), fusionCandidateMaxChars)
 		if res.text == "" {
 			res.err = errFusionEmptyDraft
 			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.generation)
@@ -566,8 +566,8 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	// per-turn and must not be replayed into later turns as if the user said it.
 	body, _ = p.expandFusionResponses(fc, string(plan.backendProto), body)
 	_, responsesHistory := p.expandFusionResponses(fc, string(plan.backendProto), fc.origBody)
-	body = plan.rewriteModel(body, fc.calledModel)
-	body, err = plan.convertBody(body)
+	body = plan.wire.RewriteModel(body, fc.calledModel)
+	body, err = plan.wire.ConvertBody(body)
 	if err != nil {
 		// Fail CLOSED: a conversion failure must not send the unconverted body
 		// to a different backend protocol.
@@ -591,7 +591,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 			agent:            fc.agent,
 			cacheKey:         cacheKey,
 			log:              flc,
-			responseContext:  plan.responseContext(fc.origBody),
+			responseContext:  plan.wire.ResponseContext(fc.origBody),
 			responsesHistory: responsesHistory,
 			responsesSession: fc.sessionKey,
 		},

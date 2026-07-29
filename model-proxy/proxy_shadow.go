@@ -174,8 +174,8 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 	// (auto-resolve, e.g. codex→responses), else the wire verdict, else same as
 	// the body's. Route + convert accordingly so the shadow gets a request in
 	// the protocol IT speaks.
-	sbody := plan.rewriteModel(reqBody, calledModel)
-	sbody, err = plan.convertBody(sbody)
+	sbody := plan.wire.RewriteModel(reqBody, calledModel)
+	sbody, err = plan.wire.ConvertBody(sbody)
 	if err != nil {
 		// Fail CLOSED: don't send the unconverted body to the shadow backend.
 		log.Printf("[shadow] %s: %s→%s convert failed: %v — skipping",

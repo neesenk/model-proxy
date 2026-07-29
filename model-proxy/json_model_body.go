@@ -30,16 +30,3 @@ func extractModel(body []byte) string {
 	json.Unmarshal(body, &v)
 	return v.Model
 }
-
-func rewriteModel(body []byte, newModel string) []byte {
-	var v map[string]any
-	if err := json.Unmarshal(body, &v); err != nil {
-		return body
-	}
-	v["model"] = newModel
-	out, err := json.Marshal(v)
-	if err != nil {
-		return body
-	}
-	return out
-}

@@ -394,7 +394,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 
 		// Rewrite the body's model to this target's real model (per target), then
 		// convert the request to the backend protocol if needed.
-		body := plan.rewriteModel(origBody, calledModel)
+		body := plan.wire.RewriteModel(origBody, calledModel)
 		var responsesHistory []any
 		if proto == "responses" && plan.backendProto != "responses" && p.responsesState != nil {
 			expandedBody, history, hit, err := p.responsesState.Expand(body, sessionKey)
@@ -409,7 +409,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			body = expandedBody
 			responsesHistory = history
 		}
-		body, err = plan.convertBody(body)
+		body, err = plan.wire.ConvertBody(body)
 		if err != nil {
 			if unsupported, ok := protocol.AsUnsupported(err); ok {
 				if res.conversionErr == nil {
@@ -460,7 +460,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 				agent:            agent,
 				cacheKey:         cacheKey,
 				log:              flc,
-				responseContext:  plan.responseContext(origBody),
+				responseContext:  plan.wire.ResponseContext(origBody),
 				responsesHistory: responsesHistory,
 				responsesSession: sessionKey,
 			},

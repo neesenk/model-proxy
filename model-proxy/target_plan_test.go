@@ -1,9 +1,6 @@
 package main
 
-import (
-	"encoding/json"
-	"testing"
-)
+import "testing"
 
 func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 	p := newTestProxy(t, &Config{
@@ -31,17 +28,8 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 		t.Fatalf("unexpected target plan: %+v", plan)
 	}
 
-	body := plan.rewriteModel([]byte(`{"model":"alias","messages":[{"role":"user","content":"hi"}]}`), "alias")
-	body, err = plan.convertBody(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var converted map[string]any
-	if err := json.Unmarshal(body, &converted); err != nil {
-		t.Fatal(err)
-	}
-	if converted["model"] != "claude" || converted["max_tokens"] == nil {
-		t.Fatalf("converted target body = %s", body)
+	if plan.wire.BaseURL() != plan.baseURL || plan.wire.UpstreamPath() != plan.upPath {
+		t.Fatalf("root target plan did not preserve wire plan: %+v", plan)
 	}
 }
 

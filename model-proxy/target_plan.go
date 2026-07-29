@@ -4,13 +4,13 @@ import (
 	"fmt"
 
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/targetexec"
 	"model-proxy/provider"
 )
 
-// targetPlan is the immutable wire plan for one resolved RouteTarget. Normal
-// routing and every Fusion leg share this preparation step so provider lookup,
-// backend protocol selection, body conversion, and upstream path selection
-// cannot drift into parallel implementations.
+// targetPlan resolves root-owned provider/runtime facts for one RouteTarget.
+// Its wire preparation is delegated to targetexec.Plan so normal routing and
+// every Fusion leg share one immutable conversion contract.
 type targetPlan struct {
 	target              RouteTarget
 	providerCfg         Provider
@@ -21,6 +21,7 @@ type targetPlan struct {
 	baseURL             string
 	upPath              string
 	imageOK             bool
+	wire                targetexec.Plan
 }
 
 type targetPlanInput struct {
@@ -45,15 +46,22 @@ func (p *Proxy) planTarget(input targetPlanInput) (targetPlan, error) {
 	)
 	clientProto := protocol.Protocol(input.clientProto)
 	backendProto := protocol.Protocol(backendProtoName)
-	convert := protocol.NeedsConversion(clientProto, backendProto)
-	baseURL := providerCfg.OpenAIBaseURL
-	if backendProto == protocol.Anthropic && providerCfg.AnthropicBaseURL != "" {
-		baseURL = providerCfg.AnthropicBaseURL
-	}
-	upPath := input.clientPath
-	if convert {
-		upPath = protocol.BackendPath(backendProto)
-	}
+	imageOK := imageOKForTarget(
+		input.runtime.cfg,
+		input.runtime.parentOf,
+		input.runtime.catalog,
+		input.target,
+	)
+	wirePlan := targetexec.NewPlan(targetexec.PlanInput{
+		TargetModel:      input.target.Model,
+		ProviderID:       providerCfg.Provider,
+		ClientProtocol:   clientProto,
+		BackendProtocol:  backendProto,
+		OpenAIBaseURL:    providerCfg.OpenAIBaseURL,
+		AnthropicBaseURL: providerCfg.AnthropicBaseURL,
+		ClientPath:       input.clientPath,
+		ImageOK:          imageOK,
+	})
 	return targetPlan{
 		target:              input.target,
 		providerCfg:         providerCfg,
@@ -61,42 +69,9 @@ func (p *Proxy) planTarget(input targetPlanInput) (targetPlan, error) {
 		clientProto:         clientProto,
 		backendProto:        backendProto,
 		viaResponsesVerdict: viaResponsesVerdict,
-		baseURL:             baseURL,
-		upPath:              upPath,
-		imageOK: imageOKForTarget(
-			input.runtime.cfg,
-			input.runtime.parentOf,
-			input.runtime.catalog,
-			input.target,
-		),
+		baseURL:             wirePlan.BaseURL(),
+		upPath:              wirePlan.UpstreamPath(),
+		imageOK:             imageOK,
+		wire:                wirePlan,
 	}, nil
-}
-
-func (plan targetPlan) rewriteModel(body []byte, calledModel string) []byte {
-	// Shadow targets may declare no model (pass the called model through);
-	// route targets always carry one.
-	if plan.target.Model == "" || plan.target.Model == calledModel {
-		return body
-	}
-	return rewriteModel(body, plan.target.Model)
-}
-
-func (plan targetPlan) convertBody(body []byte) ([]byte, error) {
-	if !protocol.NeedsConversion(plan.clientProto, plan.backendProto) {
-		return body, nil
-	}
-	providerID := plan.providerCfg.Provider
-	return protocol.ConvertRequestWithOptions(body, plan.clientProto, plan.backendProto, protocol.RequestOptions{
-		ImageOK:          plan.imageOK,
-		ReasoningDialect: protocol.ReasoningDialect(provider.ChatReasoningMode(providerID)),
-		CodexShaping:     providerID == "codex",
-	})
-}
-
-func (plan targetPlan) responseContext(origBody []byte) protocol.ResponseContext {
-	return protocol.NewResponseContext(plan.clientProto, plan.backendProto, origBody)
-}
-
-func (plan targetPlan) extractResponseText(body []byte) string {
-	return protocol.ExtractResponseText(body, plan.backendProto)
 }

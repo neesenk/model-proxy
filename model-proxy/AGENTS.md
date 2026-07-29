@@ -20,9 +20,12 @@
   `internal/protocol` 是仓库依赖叶子，不得 import `model-proxy/*`；Provider 方言、
   目标视觉能力由 `targetPlan` 解析后通过 request options 注入，HTTP 错误写入留在
   transport 层。
-- 普通 route、所有 Fusion leg 和 Shadow 共享 `targetPlan`；provider/protocol/
-  model/body/URL/path 准备逻辑不得复制，异步分支只能使用主请求捕获的 runtime
-  snapshot，禁止在 goroutine 内重新读取 reload-owned 状态。
+- 普通 route、所有 Fusion leg 和 Shadow 共享 `targetPlan`；其中不可变的
+  model/body/URL/path wire preparation 统一归
+  `internal/targetexec.Plan`，根 `planTarget` 只把同一 runtime snapshot 解析出的
+  provider、protocol、wire verdict 与视觉能力投影为 plan input。准备逻辑不得
+  复制，异步分支只能使用主请求捕获的 runtime snapshot，禁止在 goroutine 内
+  重新读取 reload-owned 状态。
 - Web/API handler 只能通过 `proxyReadView` 读取运行时；不得直接获取 Proxy 锁或
   读取 config/provider/health/model-lock 内部 map。
 - Proxy 级后台任务必须由 `proxyLifecycle` 接纳，daemon 只调用

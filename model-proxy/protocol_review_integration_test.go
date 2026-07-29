@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -43,30 +42,5 @@ func TestForward_Converted4xxUsesClientErrorEnvelope(t *testing.T) {
 	}
 	if out["type"] != "error" || strOf(asMap(out["error"])["message"]) != "unsupported field" {
 		t.Fatalf("body is not an Anthropic error envelope: %s", body)
-	}
-}
-
-func TestConvertBody_CodexSameProtocolResponsesPassthrough(t *testing.T) {
-	in := []byte(`{"model":"gpt-x","input":"hi","max_output_tokens":10,"temperature":0.2,"top_p":0.9,"store":true}`)
-	plan := targetPlan{
-		providerCfg:  Provider{Provider: "codex"},
-		clientProto:  "responses",
-		backendProto: "responses",
-		imageOK:      true,
-	}
-	got, err := plan.convertBody(in)
-	if err != nil || !bytes.Equal(got, in) {
-		t.Fatalf("same-protocol codex request must stay byte-identical: %s, %v", got, err)
-	}
-
-	plain := targetPlan{
-		providerCfg:  Provider{Provider: testProviderID},
-		clientProto:  "responses",
-		backendProto: "responses",
-		imageOK:      true,
-	}
-	got, err = plain.convertBody(in)
-	if err != nil || !bytes.Equal(got, in) {
-		t.Fatalf("non-codex same-protocol request must stay byte-identical: %s, %v", got, err)
 	}
 }

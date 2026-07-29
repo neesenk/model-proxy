@@ -11,6 +11,8 @@
 - `proxy_health_adapter.go`：根执行层到 runtime health/cooldown/param/rate-limit
   状态端口的适配
 - `dispatch_context.go`：`runtimeSnapshot`、`serveRequest`、`targetAttempt`
+- `internal/targetexec.Plan`：已解析目标的不可变 model/body/base URL/path wire
+  preparation；根 `planTarget` 只做 snapshot-owned facts 的投影
 - `attempt_executor.go`：单目标 I/O 执行器及其窄状态端口 `attemptState`
 - `internal/runtime.Manager`：health、model lock、paramBlock、sticky、pin、
   spread、quota 与 schedule
@@ -31,7 +33,10 @@ synthesizer 均通过 `targetAttempt` 进入 `attemptExecutor.execute`，新增�
 （request/writer/body）、`attemptScope`（调用模型、agent、cache key/log/Responses
 上下文）和 `attemptPolicy`（force、last target、context retry）。两条调用链只能
 经 `newTargetAttempt` 构造；factory 仅装配，不做 model rewrite、state expansion
-或协议转换。执行器必须从 `runtime.generation/runtime.cfg/runtime.cache` 与
+或协议转换。`targetPlan` 的 immutable wire preparation 委托
+`internal/targetexec.Plan`，普通/Fusion/Shadow 不得复制 endpoint、model rewrite
+或 conversion-option 逻辑。执行器必须从
+`runtime.generation/runtime.cfg/runtime.cache` 与
 `plan.target/provider/protocol/baseURL/path` 读取事实，禁止在 scope/log 中复制
 第二份 generation 或重新查 Proxy。
 
