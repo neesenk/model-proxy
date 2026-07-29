@@ -11,6 +11,8 @@ Web/API 保持同一部署单元，但通过显式数据结构和窄端口隔离
 增加内部字段访问。
 
 根包的物理布局按职责逐步收敛：`proxy.go` 保留 composition-root owner；
+`provider_build.go` 以一次账号 snapshot 同时构建 provider、pool identity 和
+implicit-route eligibility；
 `proxy_transport.go` 集中 SSE/HTTP 流识别、复制和 ResponseWriter primitive；
 `json_model_body.go` 只处理顶层 model 的提取与改写。移动到这些文件不改变同包
 调用边界，也不允许 transport helper 反向持有 `Proxy`。
