@@ -10,19 +10,24 @@
 
 ### 实现边界
 
-`main` 函数只把 `os.Args`、`os.Stdin`、`os.Stdout`、`os.Stderr` 绑定到
-`runCLIArgs(args, stdin, stdout, stderr)`，并把其返回值交给 OS 进程退出。
-`runCLIArgs` 是可测试的顶层入口：它直接处理无参数、顶层/子命令 help、未知命令
-及其 exit code，并通过统一表分发已知命令。现阶段已知命令由兼容 adapter 调用
-既有 handler；这些 handler 的进程 I/O、`log.Fatal` / `os.Exit` 语义仍保持不变，
-不代表所有命令都已经改成注入流或返回 exit code。`serve` 命令和前台 HTTP
-生命周期及前台/worker signal 编排位于 `cli_serve.go`，可复用 HTTP drain
-primitive 留在 `daemon.go`；daemon/supervisor 的 signal 与 pid/probe 编排位于
-`cli_daemon.go`。child process detach 属性的平台差异位于
-`cli_daemon_unix.go` / `cli_daemon_windows.go`。
+`main` 函数只把 `os.Args`、`os.Stdin`、`os.Stdout`、`os.Stderr` 绑定到根
+`package main` 的 `application.Run`，并把其返回值交给 OS 进程退出。`application`
+是实际进程 composition owner，拥有命令表和 `serveAssembly`；其 `Run` 是可测试的
+顶层入口：它直接处理无参数、顶层/子命令 help、未知命令及其 exit code，并通过统一
+表分发已知命令。`runCLIArgs` 只是创建 application 并委派的兼容入口。现阶段已知命令
+由兼容 adapter 调用既有 handler；这些 handler 的进程 I/O、`log.Fatal` / `os.Exit`
+语义仍保持不变，不代表所有命令都已经改成注入流或返回 exit code。
 
-本阶段仍由根包装配 CLI 与现有 `Proxy` 运行时；这里不表示应用 composition root
-已经迁入新的 internal 包。
+`serveAssembly` 拥有 `serve` 命令及前台/worker signal、HTTP server 生命周期；
+其 `applicationRuntime` 在配置和进程日志准备后构造 `Proxy`、调用
+`startRuntimeServices`、装配 mux/Web、投影 reload、交出 transport task，并以
+`Close` 结束 Proxy 生命周期。可复用 HTTP drain primitive 留在 `daemon.go`；
+daemon/supervisor 的 signal 与 pid/probe 编排位于 `cli_daemon.go`。child process
+detach 属性的平台差异位于 `cli_daemon_unix.go` / `cli_daemon_windows.go`。
+
+这是内部装配边界的收敛，不改变命令、输出或退出码。它不是新的 `internal/app`：Go
+的 main package 不能被 import，把根函数包进 callback bag 不会形成真实依赖边界；
+只有 Proxy/handlers 移入可 import 包后，才评估严格的 `internal/app`。
 
 ### 退出码
 

@@ -171,3 +171,17 @@ func TestDevicePollErrorCode(t *testing.T) {
 		}
 	}
 }
+
+func TestDirOf(t *testing.T) {
+	cases := map[string]string{
+		"/a/b/c":    "/a/b",
+		"/root":     "",
+		"nopath":    ".",
+		"a/b/c.txt": "a/b",
+	}
+	for in, want := range cases {
+		if got := dirOf(in); got != want {
+			t.Errorf("dirOf(%q)=%q want %q", in, got, want)
+		}
+	}
+}

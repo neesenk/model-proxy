@@ -18,7 +18,13 @@
   reload、Web、lifecycle 或 Shadow。根 `targetexec_adapter.go` 只绑定 captured
   generation/scheduling 和应用 stores，不得重新实现 HTTP、转换或 retry。
 - 主请求的调度、failover、cooldown 重试与 commit 编排统一位于
-  `proxy_forward.go`；`proxy.go` 只声明 composition-root owner。
+  `proxy_forward.go`；`proxy.go` 只声明 `Proxy` 这个应用运行时聚合对象。
+  根 `package main` 的 `application` 才是进程 composition owner：它一次性绑定具体
+  命令和 `serveAssembly`；`applicationRuntime` 一次性构造 `Proxy`、调用
+  `startRuntimeServices`、装配 mux/Web、投影 reload、交出 transport task，并以
+  `Close` 结束 Proxy 生命周期。不得把这些职责拆成 callback bag 假装成可导入的
+  `internal/app`；`package main` 不可被 import。只有 Proxy/handlers 真正移入可导入
+  包后，才评估严格的 `internal/app` 边界。
 - 请求画像、能力/context 匹配、跨 route pool、context-overflow replacement
   与终局 cooldown 判定统一归无状态 `internal/routing`。根
   `request_routing_adapter.go` 只把一次 `runtimeSnapshot` 绑定为
@@ -49,9 +55,11 @@
   config/provider/health/model-lock 内部 map。根 `proxy_web_api.go` 只把
   `proxyReadView` / `proxyAdminCommands` 映射为这些端口；`web_adapter.go` 只负责
   composition 与 mux 挂载。
-- Proxy 级后台任务必须由 `proxyLifecycle` 接纳，`cli_serve.go` 只调用
-  `startRuntimeServices`/`Proxy.Close`；会写 request log 的有限任务必须在 logger
-  drain 前完成，禁止分散启动 goroutine 或重复 final flush。
+- Proxy 级后台任务必须由 `proxyLifecycle` 接纳；serve 进程只能通过
+  `applicationRuntime` 调用 `startRuntimeServices`/`Proxy.Close`，`cli_serve.go`
+  只编排 serve 进程并把 transport task 与 Close callback 交给 HTTP lifecycle。会写
+  request log 的有限任务必须在 logger drain 前完成，禁止分散启动 goroutine 或重复
+  final flush。
 - 实时事件 DTO、最近 ring、订阅和非阻塞 fan-out 统一归
   `internal/observe/events`；该包是无仓库内依赖叶子。根 `live_events.go` 只保留
   SSE/keepalive 适配，不得重新持有 event ring、subscriber map 或其锁。
@@ -150,13 +158,17 @@ eligibility；startup/reload 不得再读账号文件生成同一 generation 的
 CLI 输出是 change-controlled contract。修改命令、字段、颜色、顺序或提示前读取
 `CLI.md`，实现后同步更新它。文件日志不得带 ANSI color。
 
-`main` 函数只绑定 `os.Args`、标准输入输出错误流和最终进程退出；可测试的
-`runCLIArgs(args, stdin, stdout, stderr)` 统一拥有无参数、顶层/子命令 help、
-未知命令和已知命令分发 seam。现阶段既有 handler 仍保留原来的进程 I/O 以及
-`log.Fatal` / `os.Exit` 语义，不能误写成所有命令都已完成注入式 I/O/返回式退出。
-`serve` 命令与前台/worker signal、HTTP 生命周期归 `cli_serve.go`，HTTP drain
-primitive 留在 `daemon.go`，daemon/supervisor 编排归 `cli_daemon.go`，平台进程差异归
-`cli_daemon_unix.go` / `cli_daemon_windows.go`；不得恢复第二个顶层分发器。
+根 `package main` 的 `application` 是实际进程 composition owner：它拥有命令表与
+`serveAssembly`。`main` 只绑定 `os.Args`、标准输入输出错误流和最终进程退出；
+`application.Run` 统一拥有无参数、顶层/子命令 help、未知命令和已知命令分发 seam；
+`runCLIArgs(args, stdin, stdout, stderr)` 只是创建 application 并委派的兼容入口。
+现阶段既有 handler 仍保留原来的进程 I/O 以及 `log.Fatal` / `os.Exit` 语义，不能误写
+成所有命令都已完成注入式 I/O/返回式退出。
+`serveAssembly` 拥有 serve 命令、前台/worker signal、HTTP server lifecycle；其
+`applicationRuntime` 构造并关闭 Proxy、装配 mux/Web、投影 reload，并交出 transport
+task。HTTP drain primitive 留在 `daemon.go`，daemon/supervisor 编排归
+`cli_daemon.go`，平台进程差异归 `cli_daemon_unix.go` / `cli_daemon_windows.go`；
+不得恢复第二个顶层分发器或用 callback wrapper 虚构 `internal/app` 边界。
 
 ## 测试
 

@@ -6,11 +6,27 @@ model-proxy 是单进程模块化单体。Provider、调度、协议转换、运
 Web/API 保持同一部署单元，但通过显式数据结构和窄端口隔离；当前复杂度不需要
 拆成微服务。
 
-`Proxy` 是 composition root：负责持有组件引用和装配，不是允许任意模块访问的
-共享状态袋。新增行为应进入下述模块边界，不能继续给长参数链或 Web handler
-增加内部字段访问。
+根 `package main` 的 `application` 是实际的进程 composition owner：它一次性绑定
+具体 CLI 命令与 `serveAssembly`。`applicationRuntime` 装配并持有一次 serve 进程使用
+的 `Proxy`、HTTP 与 Web 组件；`Proxy` 是应用运行时聚合对象，不是允许任意模块访问的
+共享状态袋。新增行为应进入下述模块边界，不能继续给长参数链或 Web handler 增加内部
+字段访问。
 
-根包的物理布局按职责逐步收敛：`proxy.go` 只保留 composition-root owner；
+```text
+main (OS args/streams/exit)
+  → application (process composition, command table)
+    → serveAssembly (serve/daemon process lifecycle)
+      → applicationRuntime (Proxy construction, runtime services, mux/Web,
+                            reload projection, transport tasks, Close)
+        → Proxy (application runtime aggregate and domain lifecycle)
+```
+
+`application`、`serveAssembly` 与 `applicationRuntime` 目前必须留在根 `package main`：
+Go 的 main package 不能被其他包 import。把现有根函数塞进 callback bag 再置于
+`internal/app` 不会形成依赖边界，反而掩盖真实 owner。只有 `Proxy` 与 handlers 已实际
+移动到可 import 的包后，才应评估严格的 `internal/app`。
+
+根包的物理布局按职责逐步收敛：`proxy.go` 只保留应用运行时聚合对象；
 `proxy_forward.go` 集中主请求的 forward/serve 调度、failover 与 commit 编排；
 `proxy_shadow.go` 只保留 Shadow post-commit policy、lifecycle admission、
 generation-bound resolver/plan 与 request-log 投影；可热重载 sampling/
@@ -21,7 +37,7 @@ panel/judge 的 target policy adapter 与 synthesizer 的正常 target executor
 `internal/fusion`；
 `provider_build.go` 以一次账号 snapshot 同时构建 provider、pool identity 和
 implicit-route eligibility；
-`proxy_constructor.go` 负责组件装配、状态恢复、Close 委派和 stats reset；
+`proxy_constructor.go` 负责 Proxy 内部组件装配、状态恢复、Close 委派和 stats reset；
 `proxy_snapshot.go` 集中 config/provider/catalog/pricing 读取与 generation 一致的
 持久化快照；
 `proxy_routes_compile.go` 只编译 explicit/implicit route 与 pool fan-out；
@@ -43,7 +59,10 @@ identity、route keys 与 generation 绑定到 `internal/routing.Planner` 的 sc
 映射到 `targetexec.State/Effects`；SSE/HTTP 流识别、复制和 ResponseWriter
 primitive 归 `internal/targetexec/transport.go`；
 `json_model_body.go` 只处理顶层 model 的提取与改写。移动到这些文件不改变同包
-调用边界，也不允许 transport helper 反向持有 `Proxy`。
+调用边界，也不允许 transport helper 反向持有 `Proxy`。根 `app_assembly.go` 定义
+process-level `application`、`serveAssembly` 与 `applicationRuntime`：后者只在配置及
+进程日志准备好后构造 Proxy、启动运行时服务、注册根 handler/Web、保存 reload 投影和
+transport tasks，并以 `Close` 委派给 Proxy。它不引入新的可 import 应用层。
 
 ## 请求执行链
 
@@ -235,7 +254,9 @@ transport，不由根包承载。
 
 `proxyLifecycle` 是 Proxy 级后台任务的唯一 owner：
 
-- `cli_serve.go` 只调用 `startRuntimeServices` 与 `Proxy.Close`；
+- serve 进程只能通过 `applicationRuntime` 调用 `startRuntimeServices` 与
+  `Proxy.Close`；`serveAssembly` 在 process lifecycle 中创建它，并把其 transport
+  task 和 Close callback 交给 HTTP server；
 - reload catalog refresh 必须通过 lifecycle gate 接纳；
 - Close 拒绝新任务，先等待会产生日志的有限任务（Shadow），再 drain request
   log；随后等待 loop/refresh，最后完成 stats、Responses state 和 quota final
@@ -254,18 +275,23 @@ done/error 会话，不能删除仍 pending 的会话。
 
 ## CLI 与进程入口
 
-根 `main` 函数只绑定 OS 进程边界：把参数与标准输入输出错误流交给
-`runCLIArgs(args, stdin, stdout, stderr)`，再使用其 exit code 结束进程。
-`runCLIArgs` 是唯一可测试的顶层入口，直接处理无参数、help、未知命令及其 exit
-code，并通过命令表提供统一分发 seam。现阶段已知命令仍由兼容 adapter 调用既有
-handler，保留其进程 I/O 与 `log.Fatal` / `os.Exit` 语义；命令级注入式 I/O 和
-返回式退出尚未完成。`cli_serve.go` 拥有 `serve` 命令、前台/worker signal 与
-HTTP transport 生命周期，`daemon.go` 保留可独立测试的 HTTP drain primitive；
-`cli_daemon.go` 拥有 daemon/supervisor 的 signal 与 pid/probe 编排。child process
-detach 属性的平台差异归 `cli_daemon_unix.go` / `cli_daemon_windows.go`。
+根 `main` 函数只绑定 OS 进程边界：构造 `application`，把参数与标准输入输出错误流
+交给 `application.Run`，再使用其 exit code 结束进程。`application` 拥有命令表，
+`Run` 是可测试的顶层入口，直接处理无参数、help、未知命令及其 exit code；
+`runCLIArgs(args, stdin, stdout, stderr)` 只是保留同一行为的兼容入口。现阶段已知命令
+仍由兼容 adapter 调用既有 handler，保留其进程 I/O 与 `log.Fatal` / `os.Exit`
+语义；命令级注入式 I/O 和返回式退出尚未完成。`serveAssembly` 拥有 `serve` 命令、
+前台/worker signal 与 HTTP
+transport 生命周期；它创建 `applicationRuntime`，后者构造 Proxy、启动运行时服务、
+装配 mux/Web、执行 reload projection、持有 transport task，并以 `Close` 结束 Proxy。
+`daemon.go` 保留可独立测试的 HTTP drain primitive；`cli_daemon.go` 拥有
+daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性的平台差异归
+`cli_daemon_unix.go` / `cli_daemon_windows.go`。
 
-这只是 CLI/进程入口的职责拆分。当前应用 composition root 仍是根包的 `Proxy`；
-不得把此阶段描述为新的 `internal/app` composition root 已经完成。
+这是根 package main 内的真实进程装配收敛，不改变任何用户可见 CLI 或 serve 行为。
+它不是新的 `internal/app`：main package 不能 import，使用 callback bag 包装现有根
+函数也不会建立可验证的依赖边界。只有 Proxy/handlers 移入可 import 包后，才评估
+严格的 `internal/app` composition root。
 
 ## 依赖规则
 
@@ -293,6 +319,7 @@ schedule / health / resolver / quota adapter → internal/runtime
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
 composition root → internal/targetexec → internal/protocol / provider
+application → serveAssembly → applicationRuntime → Proxy
 ```
 
 禁止：
@@ -309,13 +336,17 @@ composition root → internal/targetexec → internal/protocol / provider
   auth、转换和 bounded capture；
 - Fusion/Shadow adapter 复制 provider lookup、协议选择或 target plan 逻辑；
 - request、response、SSE 各自维护协议方向 switch；
-- `targetexec.Executor` import/持有 `Proxy` 或其他 composition-root owner；
+- `targetexec.Executor` import/持有 `Proxy`、application composition owner 或其他
+  runtime aggregate；
 - 根 `targetexec_adapter.go` 重新实现 HTTP、转换、retry 或 Shadow 编排；
 - 普通 route/Fusion 绕过 `newTargetAttempt` 直接拼装执行器输入；
 - `cli_serve.go` / `cli_daemon.go` / reload 绕过 `proxyLifecycle` 启动 Proxy 级
   goroutine；
 - `main` 函数恢复命令解析、serve/daemon 编排，或根包恢复第二个顶层命令
   分发器；
+- 将根 `package main` 的 application/serve runtime 伪装成可 import 的
+  `internal/app` callback bag；在 Proxy/handlers 尚未移入可 import 包前，这不是
+  真实边界；
 - `internal/config` import `internal/pricing`、`internal/protocol` 以外的
   `model-proxy/*` 包，或根 `config_compat.go` 承载类型别名与加载 wrapper
   之外的配置实现；
@@ -361,7 +392,8 @@ consumer-owned ports、禁止 transport 访问 root、账号测活的单次 runt
 snapshot、internal 叶子包 import（含
 accounts/catalog）、
 `internal/observe/events`、`internal/cache` 与各自根 adapter 的职责、
-`internal/config` 依赖 allowlist、根配置兼容 facade、`internal/fusion`/
+`internal/config` 依赖 allowlist、根配置兼容 facade、根 application/serve/runtime 的
+process-composition owner 边界、`internal/fusion`/
 `internal/shadow` import 与 owner 边界，以及 Fusion/Shadow 不绕过
 `targetexec.Plan`，不是字符串扫描）。`Proxy` / `runtime.Manager` 的语义所有权检查
 合并 package 内全部生产 Go 声明，不绑定单一物理文件；adapter/facade 的精确形状

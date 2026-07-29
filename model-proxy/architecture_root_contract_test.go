@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestArchitectureRootBoundaries keeps composition-root ownership narrow:
+// TestArchitectureRootBoundaries keeps process and runtime ownership narrow:
 // Web uses explicit capabilities, account probes capture one generation, Fusion
 // shares target planning, and daemon background work enters proxyLifecycle.
 func TestArchitectureRootBoundaries(t *testing.T) {
@@ -50,9 +50,11 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		}
 	})
 
-	t.Run("process entry leaves Proxy background tasks to proxyLifecycle", func(t *testing.T) {
+	t.Run("application assembly is the only concrete Proxy process wiring", func(t *testing.T) {
 		forbiddenCalls := map[string]bool{
-			"initStats": true, "initRequestLog": true, "statsFlushLoop": true,
+			"NewProxy": true, "startRuntimeServices": true,
+			"newWebServer": true, "initStats": true,
+			"initRequestLog": true, "statsFlushLoop": true,
 		}
 		// Chained internal components: <x>.reqLog.Run(), <x>.flusher.flush().
 		forbiddenChains := [][2]string{
@@ -65,33 +67,35 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			}
 		}
 
+		assembly, _ := parseGoFile(t, "app_assembly.go")
+		if got := namedCallCount(assembly, "NewProxy"); got != 1 {
+			t.Errorf("app_assembly.go NewProxy calls = %d, want exactly 1", got)
+		}
+		if got := namedCallCount(assembly, "startRuntimeServices"); got != 1 {
+			t.Errorf("app_assembly.go startRuntimeServices calls = %d, want exactly 1", got)
+		}
+		if got := callCountOnIdent(assembly, "proxy", "startRuntimeServices"); got != 1 {
+			t.Errorf("app_assembly.go proxy.startRuntimeServices calls = %d, want exactly 1", got)
+		}
+		if got := selectorCountNamed(assembly, "startRuntimeServices"); got != 1 {
+			t.Errorf("app_assembly.go startRuntimeServices selector uses = %d, want exactly 1 direct call", got)
+		}
+		if got := selectorCountOnIdent(assembly, "proxy", "startRuntimeServices"); got != 1 {
+			t.Errorf("app_assembly.go proxy.startRuntimeServices selector uses = %d, want exactly 1", got)
+		}
+		if got := namedCallCount(assembly, "newWebServer"); got != 1 {
+			t.Errorf("app_assembly.go newWebServer calls = %d, want exactly 1", got)
+		}
+
 		serve, _ := parseGoFile(t, "cli_serve.go")
-		if got := namedCallCount(serve, "startRuntimeServices"); got != 1 {
-			t.Errorf("cli_serve.go startRuntimeServices calls = %d, want exactly 1", got)
+		if got := namedCallCount(serve, "newApplicationRuntime"); got != 1 {
+			t.Errorf("cli_serve.go newApplicationRuntime calls = %d, want exactly 1 concrete assembly hand-off", got)
 		}
-		if got := callCountOnIdent(serve, "p", "startRuntimeServices"); got != 1 {
-			t.Errorf("cli_serve.go p.startRuntimeServices calls = %d, want exactly 1", got)
+		if got := selectorCountOnIdent(serve, "runtime", "Close"); got != 2 {
+			t.Errorf("cli_serve.go runtime.Close selector uses = %d, want listener-error cleanup plus final callback", got)
 		}
-		if got := selectorCountNamed(serve, "startRuntimeServices"); got != 1 {
-			t.Errorf("cli_serve.go startRuntimeServices selector uses = %d, want exactly 1 direct call", got)
-		}
-		if got := selectorCountOnIdent(serve, "p", "startRuntimeServices"); got != 1 {
-			t.Errorf("cli_serve.go p.startRuntimeServices selector uses = %d, want exactly 1", got)
-		}
-		if got := namedCallCount(serve, "Close"); got != 1 {
-			t.Errorf("cli_serve.go direct Close calls = %d, want exactly 1 listener-error cleanup", got)
-		}
-		if got := callCountOnIdent(serve, "p", "Close"); got != 1 {
-			t.Errorf("cli_serve.go direct p.Close calls = %d, want exactly 1", got)
-		}
-		if got := selectorCountNamed(serve, "Close"); got != 2 {
-			t.Errorf("cli_serve.go Close selector uses = %d, want direct cleanup plus final callback", got)
-		}
-		if got := selectorCountOnIdent(serve, "p", "Close"); got != 2 {
-			t.Errorf("cli_serve.go p.Close selector uses = %d, want exactly 2", got)
-		}
-		if got := callCountWithLastSelector(serve, "serveHTTPUntilShutdown", "p", "Close"); got != 1 {
-			t.Errorf("serveHTTPUntilShutdown(..., p.Close) calls = %d, want exactly 1 final-flush callback", got)
+		if got := callCountWithLastSelector(serve, "serveHTTPUntilShutdown", "runtime", "Close"); got != 1 {
+			t.Errorf("serveHTTPUntilShutdown(..., runtime.Close) calls = %d, want exactly 1 final-flush callback", got)
 		}
 	})
 

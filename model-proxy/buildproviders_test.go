@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"model-proxy/provider"
@@ -126,3 +128,77 @@ func TestBuildProviders_FetchModelsWired(t *testing.T) {
 
 // keep provider import referenced.
 var _ = provider.New
+
+// --- codex Logout removes the oauth file (provider-owned since Phase 5) ---
+
+func TestCodexProvider_Logout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cred := authFilePath("codex", "oauth_auth")
+	os.MkdirAll(filepath.Dir(cred), 0o700)
+	os.WriteFile(cred, []byte(`{}`), 0o600)
+
+	cfg := &Config{Providers: map[string]Provider{"codex": {Provider: "codex"}}}
+	p := buildOne(cfg, "codex", cfg.Providers["codex"], accountCred{})
+	if p == nil {
+		t.Fatal("buildOne codex returned nil")
+	}
+	if err := p.Logout(); err != nil {
+		t.Fatalf("codex Logout: %v", err)
+	}
+	if _, err := os.Stat(cred); !os.IsNotExist(err) {
+		t.Error("codex Logout did not remove the oauth_auth file")
+	}
+	// Idempotent: missing file is not an error.
+	if err := p.Logout(); err != nil {
+		t.Errorf("codex Logout (missing): want nil, got %v", err)
+	}
+}
+
+// --- apikey Logout removes <name>_apikey.json (provider-owned since Phase 5) ---
+
+func TestApiKeyProvider_Logout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cred := filepath.Join(home, ".model-proxy", "zhipu-work_apikey.json")
+	os.MkdirAll(filepath.Dir(cred), 0o700)
+	os.WriteFile(cred, []byte(`{}`), 0o600)
+
+	cfg := &Config{Providers: map[string]Provider{
+		"zhipu-work": {Provider: "zhipu"},
+	}}
+	p := buildOne(cfg, "zhipu-work", cfg.Providers["zhipu-work"], accountCred{})
+	if p == nil {
+		t.Fatal("buildOne zhipu-work returned nil")
+	}
+	if err := p.Logout(); err != nil {
+		t.Fatalf("apikey Logout: %v", err)
+	}
+	if _, err := os.Stat(cred); !os.IsNotExist(err) {
+		t.Error("apikey Logout did not remove the file")
+	}
+	if err := p.Logout(); err != nil {
+		t.Errorf("apikey Logout (missing): want nil, got %v", err)
+	}
+}
+
+// --- aqp Logout removes the oauth_auth file (provider-owned since Phase 5) ---
+
+func TestAqpProvider_Logout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cred := authFilePath("aqp", "oauth_auth")
+	os.MkdirAll(filepath.Dir(cred), 0o700)
+	os.WriteFile(cred, []byte(`{}`), 0o600)
+	cfg := &Config{Providers: map[string]Provider{"aqp": {Provider: "aqp"}}}
+	p := buildOne(cfg, "aqp", cfg.Providers["aqp"], accountCred{})
+	if p == nil {
+		t.Fatal("buildOne aqp returned nil")
+	}
+	if err := p.Logout(); err != nil {
+		t.Fatalf("aqp Logout: %v", err)
+	}
+	if _, err := os.Stat(cred); !os.IsNotExist(err) {
+		t.Error("aqp Logout did not remove the oauth_auth file")
+	}
+}

@@ -105,3 +105,30 @@ func TestWireRecord_SplitArgs(t *testing.T) {
 		t.Errorf("flagArgs2=%v pos2=%v", flagArgs2, pos2)
 	}
 }
+
+func TestWireRecord_CmdHappyPath(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		io.WriteString(w, "data: {\"ok\":true}\n\n")
+	}))
+	defer up.Close()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writePoolFile(t, "p", "static", "STATIC-TEST-KEY")
+	cfgYAML := "providers:\n  p: {provider_id: static, openai_base_url: " + up.URL + ", models: [m1]}\n"
+	cfgPath := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	// cmdWire → cmdWireRecord → runWireRecord, all endpoints 2xx → returns
+	// without os.Exit. Any exit would kill the test binary (caught as failure).
+	cmdWire([]string{"record", "p", "--out", outDir, "--config", cfgPath})
+	// Spot-check one recorded file exists.
+	if _, err := os.Stat(filepath.Join(outDir, "responses_p.sse")); err != nil {
+		t.Errorf("responses_p.sse missing after happy-path run: %v", err)
+	}
+}

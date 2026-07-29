@@ -57,7 +57,7 @@ func TestRunCLIArgsTopLevelContract(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := runCLIArgs(
+			code := newApplication().Run(
 				test.args,
 				strings.NewReader("stdin must not be read for top-level routing"),
 				&stdout,
@@ -117,7 +117,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		command := command
 		t.Run(command, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := runCLIArgs(
+			code := newApplication().Run(
 				[]string{command, "--help", "--config", configFile},
 				strings.NewReader("stdin must not be read for command help"),
 				&stdout,
@@ -141,7 +141,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 
 	t.Run("short flag uses the same exact output", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := runCLIArgs(
+		code := newApplication().Run(
 			[]string{"serve", "-h"},
 			strings.NewReader(""),
 			&stdout,
@@ -208,7 +208,7 @@ func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 		"replay":   "cmdReplay",
 		"restore":  "cmdRestore",
 		"schedule": "cmdSchedule",
-		"serve":    "cmdServe",
+		"serve":    "app.serve.command",
 		"shadow":   "cmdShadow",
 		"stats":    "cmdStats",
 		"takeover": "cmdTakeover",
@@ -218,8 +218,9 @@ func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 		"usage":    "cmdUsage",
 		"wire":     "cmdWire",
 	}
-	gotCommands := make([]string, 0, len(cliCommands))
-	for command := range cliCommands {
+	app := newApplication()
+	gotCommands := make([]string, 0, len(app.commands))
+	for command := range app.commands {
 		gotCommands = append(gotCommands, command)
 	}
 	sort.Strings(gotCommands)
@@ -232,13 +233,13 @@ func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 		t.Fatalf("CLI command registry = %q, want exactly %q", got, want)
 	}
 
-	gotTargets := parseCLICommandTargets(t)
+	gotTargets := parseApplicationCommandTargets(t)
 	if len(gotTargets) != len(wantTargets) {
 		t.Fatalf("CLI command target count = %d, want %d: %#v", len(gotTargets), len(wantTargets), gotTargets)
 	}
 	for command, wantTarget := range wantTargets {
 		if gotTarget := gotTargets[command]; gotTarget != wantTarget {
-			t.Errorf("cliCommands[%q] target = %q, want %q", command, gotTarget, wantTarget)
+			t.Errorf("newApplication().commands[%q] target = %q, want %q", command, gotTarget, wantTarget)
 		}
 	}
 }
@@ -250,7 +251,7 @@ func TestMainIsThinCLIEntry(t *testing.T) {
 		t.Fatal("main must have no parameters or results")
 	}
 	if got := len(mainFunc.Body.List); got != 1 {
-		t.Fatalf("main statements = %d, want exactly os.Exit(runCLIArgs(...))", got)
+		t.Fatalf("main statements = %d, want exactly os.Exit(newApplication().Run(...))", got)
 	}
 	expression, ok := mainFunc.Body.List[0].(*ast.ExprStmt)
 	if !ok {
@@ -261,27 +262,35 @@ func TestMainIsThinCLIEntry(t *testing.T) {
 		t.Fatalf("main expression = %T, want os.Exit call", expression.X)
 	}
 	if len(exitCall.Args) != 1 {
-		t.Fatalf("os.Exit arguments = %d, want runCLIArgs result only", len(exitCall.Args))
+		t.Fatalf("os.Exit arguments = %d, want newApplication().Run result only", len(exitCall.Args))
 	}
 	runCall, ok := exitCall.Args[0].(*ast.CallExpr)
 	if !ok {
-		t.Fatalf("os.Exit argument = %T, want runCLIArgs call", exitCall.Args[0])
+		t.Fatalf("os.Exit argument = %T, want newApplication().Run call", exitCall.Args[0])
 	}
-	runName, ok := runCall.Fun.(*ast.Ident)
-	if !ok || runName.Name != "runCLIArgs" {
-		t.Fatalf("os.Exit callee = %T %v, want runCLIArgs", runCall.Fun, runCall.Fun)
+	runSelector, ok := runCall.Fun.(*ast.SelectorExpr)
+	if !ok || runSelector.Sel.Name != "Run" {
+		t.Fatalf("os.Exit callee = %T %v, want newApplication().Run", runCall.Fun, runCall.Fun)
+	}
+	applicationCall, ok := runSelector.X.(*ast.CallExpr)
+	if !ok {
+		t.Fatalf("Run receiver = %T, want newApplication()", runSelector.X)
+	}
+	applicationConstructor, ok := applicationCall.Fun.(*ast.Ident)
+	if !ok || applicationConstructor.Name != "newApplication" || len(applicationCall.Args) != 0 {
+		t.Fatalf("Run receiver = %T, want zero-argument newApplication()", runSelector.X)
 	}
 	if len(runCall.Args) != 4 {
-		t.Fatalf("runCLIArgs arguments = %d, want args plus three process streams", len(runCall.Args))
+		t.Fatalf("application.Run arguments = %d, want args plus three process streams", len(runCall.Args))
 	}
 	argsSlice, ok := runCall.Args[0].(*ast.SliceExpr)
 	if !ok || !cliSelectorIs(argsSlice.X, "os", "Args") || !cliIntegerLiteralIs(argsSlice.Low, "1") ||
 		argsSlice.High != nil || argsSlice.Max != nil {
-		t.Fatalf("runCLIArgs first argument must be exactly os.Args[1:]")
+		t.Fatalf("application.Run first argument must be exactly os.Args[1:]")
 	}
 	for index, name := range []string{"Stdin", "Stdout", "Stderr"} {
 		if !cliSelectorIs(runCall.Args[index+1], "os", name) {
-			t.Fatalf("runCLIArgs argument %d must be exactly os.%s", index+2, name)
+			t.Fatalf("application.Run argument %d must be exactly os.%s", index+2, name)
 		}
 	}
 }
@@ -304,11 +313,19 @@ func TestRunCLIArgsDoesNotAccessProcessGlobals(t *testing.T) {
 	for _, file := range files {
 		for _, declaration := range file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Recv != nil {
+			if !ok {
 				continue
 			}
-			functions[function.Name.Name] = append(
-				functions[function.Name.Name],
+			name := function.Name.Name
+			if function.Recv != nil {
+				receiver, ok := receiverTypeName(function.Recv)
+				if !ok {
+					t.Fatalf("CLI method %s has unsupported receiver", function.Name.Name)
+				}
+				name = receiver + "." + name
+			}
+			functions[name] = append(
+				functions[name],
 				functionLocation{function: function, file: file},
 			)
 		}
@@ -316,7 +333,7 @@ func TestRunCLIArgsDoesNotAccessProcessGlobals(t *testing.T) {
 
 	var found []string
 	visited := map[string]bool{}
-	queue := []string{"runCLIArgs"}
+	queue := []string{"newApplication", "application.Run"}
 	predeclaredCalls := map[string]bool{
 		"append": true, "cap": true, "clear": true, "close": true, "complex": true,
 		"copy": true, "delete": true, "imag": true, "len": true, "make": true,
@@ -363,7 +380,7 @@ func TestRunCLIArgsDoesNotAccessProcessGlobals(t *testing.T) {
 							queue = append(queue, callable.Name)
 						}
 					} else if callable.Name == "run" {
-						if name != "runCLIArgsWithCommands" {
+						if name != "processCLICommand" && name != "runCLIArgsWithCommands" {
 							found = append(found, name+":unexpected-handler-call:"+callable.Name)
 						}
 					} else if !predeclaredCalls[callable.Name] {
@@ -382,66 +399,57 @@ func TestRunCLIArgsDoesNotAccessProcessGlobals(t *testing.T) {
 
 	sort.Strings(found)
 	if len(found) != 0 {
-		t.Fatalf("runCLIArgs static call graph accesses process globals directly: %s", strings.Join(found, ", "))
+		t.Fatalf("application.Run static call graph accesses process globals directly: %s", strings.Join(found, ", "))
 	}
 }
 
-func parseCLICommandTargets(t *testing.T) map[string]string {
+func parseApplicationCommandTargets(t *testing.T) map[string]string {
 	t.Helper()
 	files := parseCLIProductionFiles(t)
+	constructor := findCLIProductionFunc(t, files, "newApplication")
 	targets := map[string]string{}
-	declarations := 0
-	for _, file := range files {
-		for _, declaration := range file.Decls {
-			general, ok := declaration.(*ast.GenDecl)
-			if !ok || general.Tok != token.VAR {
-				continue
-			}
-			for _, specification := range general.Specs {
-				values, ok := specification.(*ast.ValueSpec)
-				if !ok || len(values.Names) != 1 || values.Names[0].Name != "cliCommands" {
-					continue
-				}
-				declarations++
-				if len(values.Values) != 1 {
-					t.Fatalf("cliCommands values = %d, want one map literal", len(values.Values))
-				}
-				literal, ok := values.Values[0].(*ast.CompositeLit)
-				if !ok {
-					t.Fatalf("cliCommands value = %T, want map literal", values.Values[0])
-				}
-				for _, element := range literal.Elts {
-					entry, ok := element.(*ast.KeyValueExpr)
-					if !ok {
-						t.Fatalf("cliCommands element = %T, want key/value", element)
-					}
-					key, ok := entry.Key.(*ast.BasicLit)
-					if !ok || key.Kind != token.STRING {
-						t.Fatalf("cliCommands key = %T, want string literal", entry.Key)
-					}
-					command := strings.Trim(key.Value, `"`)
-					call, ok := entry.Value.(*ast.CallExpr)
-					if !ok || len(call.Args) != 1 {
-						t.Fatalf("cliCommands[%q] value = %T, want processCLICommand(handler)", command, entry.Value)
-					}
-					factory, ok := call.Fun.(*ast.Ident)
-					if !ok || factory.Name != "processCLICommand" {
-						t.Fatalf("cliCommands[%q] factory = %T, want processCLICommand", command, call.Fun)
-					}
-					handler, ok := call.Args[0].(*ast.Ident)
-					if !ok {
-						t.Fatalf("cliCommands[%q] handler = %T, want identifier", command, call.Args[0])
-					}
-					if previous, exists := targets[command]; exists {
-						t.Fatalf("duplicate cliCommands[%q]: %s and %s", command, previous, handler.Name)
-					}
-					targets[command] = handler.Name
-				}
-			}
+	assignments := 0
+	ast.Inspect(constructor.Body, func(node ast.Node) bool {
+		assignment, ok := node.(*ast.AssignStmt)
+		if !ok || assignment.Tok != token.ASSIGN || len(assignment.Lhs) != 1 || len(assignment.Rhs) != 1 {
+			return true
 		}
-	}
-	if declarations != 1 {
-		t.Fatalf("cliCommands declarations = %d, want exactly 1", declarations)
+		field, ok := assignment.Lhs[0].(*ast.SelectorExpr)
+		if !ok || field.Sel.Name != "commands" || !identIs(field.X, "app") {
+			return true
+		}
+		assignments++
+		literal, ok := assignment.Rhs[0].(*ast.CompositeLit)
+		if !ok {
+			t.Fatalf("newApplication app.commands value = %T, want map literal", assignment.Rhs[0])
+		}
+		for _, element := range literal.Elts {
+			entry, ok := element.(*ast.KeyValueExpr)
+			if !ok {
+				t.Fatalf("newApplication app.commands element = %T, want key/value", element)
+			}
+			key, ok := entry.Key.(*ast.BasicLit)
+			if !ok || key.Kind != token.STRING {
+				t.Fatalf("newApplication app.commands key = %T, want string literal", entry.Key)
+			}
+			command := strings.Trim(key.Value, `"`)
+			call, ok := entry.Value.(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 || !identIs(call.Fun, "processCLICommand") {
+				t.Fatalf("newApplication().commands[%q] value = %T, want processCLICommand(handler)", command, entry.Value)
+			}
+			handler := expressionName(call.Args[0])
+			if handler == "" {
+				t.Fatalf("newApplication().commands[%q] handler = %T, want concrete handler", command, call.Args[0])
+			}
+			if previous, exists := targets[command]; exists {
+				t.Fatalf("duplicate newApplication().commands[%q]: %s and %s", command, previous, handler)
+			}
+			targets[command] = handler
+		}
+		return true
+	})
+	if assignments != 1 {
+		t.Fatalf("newApplication app.commands assignments = %d, want exactly 1 concrete map", assignments)
 	}
 	return targets
 }
@@ -572,6 +580,40 @@ func findCLIProductionFunc(t *testing.T, files []*ast.File, name string) *ast.Fu
 		t.Fatalf("production function %s declarations = %d, want exactly 1", name, len(found))
 	}
 	return found[0]
+}
+
+func receiverTypeName(receivers *ast.FieldList) (string, bool) {
+	if receivers == nil || len(receivers.List) != 1 {
+		return "", false
+	}
+	typ := receivers.List[0].Type
+	if pointer, ok := typ.(*ast.StarExpr); ok {
+		typ = pointer.X
+	}
+	identifier, ok := typ.(*ast.Ident)
+	return identifier.Name, ok
+}
+
+func identIs(expression ast.Expr, name string) bool {
+	identifier, ok := expression.(*ast.Ident)
+	return ok && identifier.Name == name
+}
+
+func expressionName(expression ast.Expr) string {
+	switch value := expression.(type) {
+	case *ast.Ident:
+		return value.Name
+	case *ast.SelectorExpr:
+		base := expressionName(value.X)
+		if base == "" {
+			return ""
+		}
+		return base + "." + value.Sel.Name
+	case *ast.ParenExpr:
+		return expressionName(value.X)
+	default:
+		return ""
+	}
 }
 
 func cliOSPackageNames(t *testing.T, file *ast.File) map[string]bool {

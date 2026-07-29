@@ -2,45 +2,24 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 )
-
-// serveArgs holds parsed `serve` flags.
-type serveArgs struct {
-	config  string
-	logFile string // --log-file override
-}
-
-func parseServeArgs(args []string) serveArgs {
-	sa := serveArgs{config: configPath(args)}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--log-file":
-			if i+1 < len(args) {
-				sa.logFile = args[i+1]
-				i++
-			}
-		case strings.HasPrefix(a, "--log-file="):
-			sa.logFile = strings.TrimPrefix(a, "--log-file=")
-		}
-	}
-	return sa
-}
 
 // cmdServe dispatches by role and subcommand:
 //   - no subcommand: foreground proxy (or supervisor/worker if env role set)
 //   - "daemon": launch a detached supervisor
 //   - "stop": SIGTERM a running daemon
 func cmdServe(args []string) {
+	serveAssembly{}.command(args)
+}
+
+func (assembly serveAssembly) command(args []string) {
 	// Worker/supervisor processes have envRole set — they always run their loop
 	// regardless of subcommand (the subcommand was consumed by the parent).
 	role := os.Getenv(envRole)
@@ -51,7 +30,7 @@ func cmdServe(args []string) {
 	}
 	if role == roleWorker {
 		sa := parseServeArgs(args)
-		runProxy(sa)
+		assembly.runProxy(sa)
 		return
 	}
 
@@ -72,23 +51,22 @@ func cmdServe(args []string) {
 	default:
 		// No subcommand — foreground serve.
 		sa := parseServeArgs(args)
-		runProxy(sa)
+		assembly.runProxy(sa)
 	}
 }
 
-// runProxy loads the config and runs the proxy inline (used by the worker and by
+// runProxy loads the config and runs the proxy inline (used by the worker and
 // plain foreground serve). When stdout/stderr is a log file (worker case) all
 // logs land there; when a tty (foreground) logs go to the terminal.
-func runProxy(sa serveArgs) {
-	if err := runProxyProcess(sa); err != nil {
+func (assembly serveAssembly) runProxy(sa serveArgs) {
+	if err := assembly.runProxyProcess(sa); err != nil {
 		log.Fatal(err)
 	}
 }
 
 // runProxyProcess owns one foreground/worker process lifetime. It returns errors
-// to runProxy so deferred signal and pid-file cleanup runs before log.Fatal
-// terminates the process.
-func runProxyProcess(sa serveArgs) error {
+// to runProxy so deferred signal and pid-file cleanup runs before log.Fatal.
+func (serveAssembly) runProxyProcess(sa serveArgs) error {
 	cfg, err := LoadConfig(sa.config)
 	if err != nil {
 		return err
@@ -122,26 +100,7 @@ func runProxyProcess(sa serveArgs) error {
 		defer os.Remove(pidPath)
 	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	p := NewProxy(cfg)
-	// Start all process-owned optional services through the Proxy lifecycle
-	// owner (stats flusher, request logger, startup catalog load).
-	p.startRuntimeServices(cfg)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", p.handler)
-	var transportTasks []transportTask
-	if cfg.Web.Enabled {
-		web := newWebServer(p, sa.config)
-		web.logFile = resolveLogFile(sa, cfg)
-		web.register(mux)
-		transportTasks = append(transportTasks, func(stop <-chan struct{}) {
-			if !web.start() {
-				return
-			}
-			<-stop
-			web.close()
-		})
-	}
+	runtime := newApplicationRuntime(cfg, sa)
 
 	// SIGHUP reload is transport/process work: shutdown stops accepting reloads
 	// before the HTTP drain and waits for an already-running reload before
@@ -149,40 +108,27 @@ func runProxyProcess(sa serveArgs) error {
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)
 	defer signal.Stop(hupCh)
-	transportTasks = append(transportTasks, func(stop <-chan struct{}) {
-		runReloadLoop(stop, hupCh, func() {
-			log.Printf("[reload] SIGHUP received, reloading config from %s", sa.config)
-			if err := p.reload(sa.config); err != nil {
-				var applied *reloadAppliedWarning
-				if errors.As(err, &applied) {
-					log.Printf("[reload] WARNING: %v", err)
-				} else {
-					log.Printf("[reload] FAILED: %v (keeping old config)", err)
-				}
-			} else {
-				snapshot := p.snapshotRuntime()
-				log.Printf("[reload] config reloaded successfully (providers: %s, routes: %s)",
-					providerNames(snapshot.cfg), routeNames(snapshot.cfg))
-			}
-		})
+	runtime.transportTasks = append(runtime.transportTasks, func(stop <-chan struct{}) {
+		runReloadLoop(stop, hupCh, runtime.reload)
 	})
 
-	listener, err := net.Listen("tcp", cfg.Listen)
+	listener, err := net.Listen("tcp", runtime.startupConfig.Listen)
 	if err != nil {
-		p.Close()
+		runtime.Close()
 		return err
 	}
-	server := &http.Server{Addr: cfg.Listen, Handler: mux}
+	server := &http.Server{Addr: runtime.startupConfig.Listen, Handler: runtime.handler}
 	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
-	log.Printf("model-proxy listening on %s (routes: %s)", cfg.Listen, routeNames(cfg))
+	log.Printf("model-proxy listening on %s (routes: %s)",
+		runtime.startupConfig.Listen, routeNames(runtime.startupConfig))
 	return serveHTTPUntilShutdown(
 		server,
 		listener,
 		shutdownCtx.Done(),
 		gracefulShutdownTimeout,
-		transportTasks,
-		p.Close,
+		runtime.transportTasks,
+		runtime.Close,
 	)
 }

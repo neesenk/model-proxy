@@ -1,0 +1,59 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestQuotaSourceLabel(t *testing.T) {
+	for _, tc := range []struct {
+		id   string
+		want string
+	}{
+		{"aqp", "monthly_usage"},
+		{"codex", "wham/usage"},
+		{"zhipu", "quota/limit"},
+		{"volcengine", "GetAFPUsage (AK/SK)"},
+		{"deepseek", "user/balance"},
+		{"unknown", "(none → unknown at runtime)"},
+	} {
+		if got := quotaSourceLabel(tc.id); got != tc.want {
+			t.Errorf("quotaSourceLabel(%q)=%q want %q", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestDryRunOrder: offline order is tier (plan before payg) then priority asc.
+func TestDryRunOrder(t *testing.T) {
+	cfg := &Config{Providers: map[string]Provider{
+		"plana": {}, "planb": {}, "payg": {Billing: "pay-as-you-go"},
+	}}
+	targets := []RouteTarget{
+		{Provider: "payg", Priority: 1},
+		{Provider: "planb", Priority: 3},
+		{Provider: "plana", Priority: 2},
+	}
+	got := dryRunOrder(cfg, targets)
+	want := []string{"plana", "planb", "payg"}
+	if len(got) != len(want) {
+		t.Fatalf("len=%d, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if i >= len(got) || got[i].Provider != w {
+			t.Errorf("pos %d: got %+v, want %q", i, got, w)
+		}
+	}
+}
+
+func TestPeakSummary(t *testing.T) {
+	if got := peakSummary(nil); got != "-" {
+		t.Errorf("empty peakSummary=%q, want -", got)
+	}
+	got := peakSummary(PeakConfig{{Window: "09:00-12:00", Multiplier: 2}})
+	if !strings.Contains(got, "09:00-12:00") || !strings.Contains(got, "×2") {
+		t.Errorf("peakSummary=%q, want window + mult", got)
+	}
+	if got := peakSummary(PeakConfig{{Window: "09:00-12:00"}}); !strings.Contains(got, "×2") {
+		t.Errorf("default multiplier: %q, want ×2", got)
+	}
+}

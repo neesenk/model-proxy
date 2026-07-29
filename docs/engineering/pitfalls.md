@@ -37,20 +37,25 @@
 18. 原子文件写不能在多个实例间共享固定 `.tmp` 名。
 19. reload 中 config generation 与运行态 snapshot/fingerprint 必须一致。
 20. `cli_daemon.go` 的 supervisor `spawnWorker` 可能返回 nil，调用方必须检查。
-21. Proxy 级 goroutine 必须经 `proxyLifecycle.run` 接纳；daemon 不得绕过
-    `startRuntimeServices`/`Proxy.Close` 分散启动或 final flush。
+21. Proxy 级 goroutine 必须经 `proxyLifecycle.run` 接纳；serve process 只能通过
+    `applicationRuntime` 调用 `startRuntimeServices`/`Proxy.Close`。不得绕过它分散
+    启动或 final flush。
 22. daemon 收到退出信号时必须先 `http.Server.Shutdown` drain handler，再
     `Proxy.Close`；deadline 超时调用 `Server.Close` 只能取消连接，仍须等待 handler
     退栈。SIGHUP loop 和 Web GC 必须有 transport owner、stop 和 wait；禁止在 signal
     goroutine 中直接 `os.Exit`。
-23. `main` 函数只绑定 OS 参数、I/O 与最终进程退出；无参数、help、未知命令及已知
-    命令分发 seam 统一经过可测试的
-    `runCLIArgs(args, stdin, stdout, stderr)`。现阶段既有 handler 仍保留进程 I/O
-    和 `log.Fatal` / `os.Exit` 语义，不得误写成命令级迁移已完成。
-    `serve` 与前台/worker signal、HTTP 生命周期归 `cli_serve.go`，daemon/
-    supervisor signal 与 pid/probe 归 `cli_daemon.go`，平台 companion 只提供
-    child detach 属性，HTTP drain primitive 留在 `daemon.go`；不要恢复第二个
-    顶层分发器，也不要把这一阶段误写成 `internal/app` 已落地。
+23. `main` 函数只绑定 OS 参数、I/O 与最终进程退出；根 `package main` 的
+    `application` 是实际进程 composition owner，拥有命令表与 `serveAssembly`。
+    无参数、help、未知命令及已知命令分发 seam 统一经过可测试的 `application.Run`；
+    `runCLIArgs(args, stdin, stdout, stderr)` 只是兼容入口。现阶段既有 handler 仍保留
+    进程 I/O 和 `log.Fatal` / `os.Exit` 语义，不得误写成命令级迁移已完成。
+    `serveAssembly` 拥有 serve 与前台/worker signal、HTTP 生命周期；
+    `applicationRuntime` 构造/关闭 Proxy，启动运行时服务，装配 mux/Web，投影 reload
+    并交出 transport task。daemon/supervisor signal 与 pid/probe 归
+    `cli_daemon.go`，平台 companion 只提供 child detach 属性，HTTP drain primitive
+    留在 `daemon.go`；不要恢复第二个顶层分发器。main package 不能被 import，故在
+    Proxy/handlers 仍在根包时，不要用 callback bag 虚构 `internal/app`；待它们移入
+    可 import 包后再评估严格边界。
 
 ## 日志和持久化
 

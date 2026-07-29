@@ -17,32 +17,11 @@ func processCLICommand(run func([]string)) cliCommand {
 	}
 }
 
-var cliCommands = map[string]cliCommand{
-	"serve":    processCLICommand(cmdServe),
-	"takeover": processCLICommand(cmdTakeover),
-	"restore":  processCLICommand(cmdRestore),
-	"login":    processCLICommand(cmdLogin),
-	"logout":   processCLICommand(cmdLogout),
-	"usage":    processCLICommand(cmdUsage),
-	"models":   processCLICommand(cmdModels),
-	"config":   processCLICommand(cmdConfig),
-	"schedule": processCLICommand(cmdSchedule),
-	"pin":      processCLICommand(cmdPin),
-	"unpin":    processCLICommand(cmdUnpin),
-	"unfreeze": processCLICommand(cmdUnfreeze),
-	"stats":    processCLICommand(cmdStats),
-	"doctor":   processCLICommand(cmdDoctor),
-	"test":     processCLICommand(cmdTest),
-	"replay":   processCLICommand(cmdReplay),
-	"shadow":   processCLICommand(cmdShadow),
-	"wire":     processCLICommand(cmdWire),
-}
-
-// runCLIArgs owns top-level CLI parsing and exit status. It deliberately does
-// not read process globals: main binds os.Args and the process streams once,
-// while tests can call this boundary directly with buffers.
+// runCLIArgs is the compatibility entry used by tests and embedders that still
+// call the pre-composition boundary. The concrete application owns command
+// registration; neither layer reads process globals.
 func runCLIArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	return runCLIArgsWithCommands(args, stdin, stdout, stderr, cliCommands)
+	return newApplication().Run(args, stdin, stdout, stderr)
 }
 
 func runCLIArgsWithCommands(

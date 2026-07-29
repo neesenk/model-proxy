@@ -33,7 +33,7 @@ type resolver struct {
 
 // resolverState is the narrow mutable-runtime capability needed by identity
 // resolution. It deliberately exposes neither reload-owned maps nor the full
-// Proxy composition root.
+// Proxy runtime aggregate.
 type resolverState interface {
 	resolverSpreadStart(parent string, n int, generation uint64) int
 	resolverTargetHealthy(virtual, model string, now time.Time) bool

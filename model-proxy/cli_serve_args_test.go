@@ -2,10 +2,26 @@ package main
 
 import "testing"
 
-// pure_funcs_test.go covers small pure/simple functions still under 70%:
-// parseServeArgs, zhipuLimitLabel, SessionCookie.
-
-// --- parseServeArgs ---
+func TestParseServeArgs(t *testing.T) {
+	// All cases use an explicit --config so the result doesn't depend on whether
+	// ~/.model-proxy/config.yaml exists on the test host.
+	cases := []struct {
+		name string
+		args []string
+		want serveArgs
+	}{
+		{"bare config", []string{"--config", "c.yaml"}, serveArgs{config: "c.yaml"}},
+		{"config=", []string{"--config=/x.yaml"}, serveArgs{config: "/x.yaml"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseServeArgs(tc.args)
+			if got != tc.want {
+				t.Errorf("got %+v want %+v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestParseServeArgs_Extra(t *testing.T) {
 	for _, tc := range []struct {
