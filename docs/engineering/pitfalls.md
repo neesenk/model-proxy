@@ -31,7 +31,8 @@
 
 ## 并发与生命周期
 
-16. 锁顺序是 `healthMu → quotaMu`，禁止反向嵌套。
+16. 跨域锁顺序是 `Proxy.mu → internal/runtime.Manager`；Manager 持锁时禁止回调
+    Proxy、quota tracker、wirecap Store 或外部 I/O。
 17. 后台 goroutine 必须有 owner、stop、wait 和 final flush。测试创建 owner 后必须注册 cleanup。
 18. 原子文件写不能在多个实例间共享固定 `.tmp` 名。
 19. reload 中 config generation 与运行态 snapshot/fingerprint 必须一致。

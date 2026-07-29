@@ -21,7 +21,7 @@ func TestPollAll_PollsPooledVirtuals(t *testing.T) {
 		"zhipu#a": &testProv{key: "zhipu#a"},
 		"zhipu#b": &testProv{key: "zhipu#b"},
 	}
-	tr := newQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return provs })
+	tr := newStandaloneQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return provs })
 	tr.pollAll(time.Now())
 	for _, vid := range []string{"zhipu#a", "zhipu#b"} {
 		if tr.snapshot(vid) == nil {

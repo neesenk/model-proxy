@@ -21,9 +21,23 @@
 
 kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h/weekly。`TIME_LIMIT` 和 booster wallet 只展示，不参与调度。
 
-## quotaTracker
+## runtime Manager 与 quotaTracker
 
-`quotaTracker` 默认每 5 分钟并行轮询，缓存到内存并原子写入 `~/.model-proxy/quota_state.json`。文件包含：
+`internal/runtime.Manager` 是 config generation 内可变路由状态的唯一 owner。
+它以一把 mutex 统一持有 generation、provider health、route/session sticky、
+operator pin、model lock、model-scoped paramBlock、pool spread counter 和 quota
+snapshot，并在同一临界区内完成 schedule、cooldown、resolver health gate、
+persistence snapshot 与 Web dashboard snapshot。所有复合 snapshot 都是 detached
+copy；调用方不得保留或修改 Manager 内部 map/slice。
+
+Manager 只依赖 `provider` 的 quota 值类型。Config 适配、HTTP、状态文件编码、
+Web DTO 映射和 lifecycle 都留在根包；Manager 持锁时不得回调这些外部职责。
+
+`quotaTracker` 默认每 5 分钟并行轮询，负责 provider `Quota()` 调用、manual/429
+refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` 的文件
+编排。quota snapshot 的内存权威值属于 Manager，tracker 不持有第二份 quota map。
+
+状态文件包含：
 
 - provider quota snapshot；
 - route-keyed sticky；
@@ -31,7 +45,7 @@ kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h
 - model locks；
 - model-scoped paramBlock；
 - config fingerprint；
-- 顶层 `wire_caps`：wire 探测 verdict（`{base_url, responses, anthropic, probed_at}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在且记录的 `base_url` 与当前 config 一致，不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——persist 经 fullSnapshot 取 p.mu.RLock，handler 已持有该锁，可能撞 reload 写者死锁）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `p.mu → healthMu → quotaMu` 锁序。
+- 顶层 `wire_caps`：wire 探测 verdict（`{base_url, responses, anthropic, probed_at}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在且记录的 `base_url` 与当前 config 一致，不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——persist 经 fullSnapshot 取 `p.mu.RLock`，handler 已持有该锁，可能撞 reload 写者死锁）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `Proxy.mu → runtime.Manager` 锁序。
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 
@@ -39,9 +53,18 @@ kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h
 
 ### config generation 一致性
 
-Proxy 为每次成功 reload 分配单调递增的 config generation。forward、Fusion 和 quota poll 都携带开始时的 generation；health/sticky/modelLock/paramBlock mutation 与 quota poll 提交前必须校验 generation，旧请求和慢 poll 的结果直接丢弃。
+Proxy 为每次成功 reload 分配单调递增的 config generation。forward、Fusion、
+resolver spread 和 quota poll 都携带开始时的 generation；health、sticky、
+modelLock、paramBlock、spread 和 quota mutation 由 Manager 在同一锁内校验
+generation，旧请求和慢 poll 的结果直接丢弃。
 
-reload 按 `p.mu → healthMu → quotaMu` 一次性切换 cfg/providers/routes generation，并清空旧 health、sticky、model lock、paramBlock 和 quota snapshot。`persist()` 按同一锁顺序一次性复制 quota + health + sticky + config fingerprint，不允许分别回调后拼装。reload 交换完成后同步写入「新 fingerprint + 空运行态」；写盘失败以“配置已生效但 durability 降级”的 warning 返回，调用方不得回滚已经与 runtime 分叉的 config 文件。
+reload 按 `Proxy.mu → runtime.Manager` 一次性切换 cfg/providers/routes generation；
+`Manager.ReplaceGeneration` 原子清空旧 health、sticky、model lock、paramBlock、
+spread 和 quota，operator pin 有意跨 reload 保留。`persist()` 按同一锁顺序捕获
+config fingerprint 和 Manager 的 `generation + quota + health + route-keyed
+sticky` 原子 snapshot，不允许分别读取后拼装。reload 交换完成后同步写入「新
+fingerprint + 空 generation-scoped 运行态」；写盘失败以“配置已生效但 durability
+降级”的 warning 返回，调用方不得回滚已经与 runtime 分叉的 config 文件。
 
 ### 已知缺口与目标契约
 
@@ -102,13 +125,15 @@ login-session GC/AQP/Codex 异步登录属于 daemon transport 生命周期，�
 
 ## 锁顺序
 
-锁顺序是：
+跨域锁顺序是：
 
 ```text
-healthMu → quotaMu
+Proxy.mu → runtime.Manager
 ```
 
-不得持有 `healthMu` 时回调会反向获取 quota/外部锁的代码。持久化应先分别复制 snapshot，再做 JSON 和文件 I/O，不能长期持锁。
+Manager 内部只有一把状态锁，不存在 health/quota 的嵌套锁。Manager 持锁时不得
+回调 Proxy、quota tracker、wirecap Store 或外部 I/O；持久化和 Web 先取得 atomic
+detached snapshot，再在锁外完成 JSON、文件或响应编码。
 
 ## 调度分
 
@@ -133,6 +158,22 @@ tierRank → priority asc → surplus desc
 - priority 高于 surplus。
 - 相同 priority 允许多个目标组成 surplus 竞争池。
 - peak multiplier 只作用于 Short 窗口折算。
+
+`Manager.DecideOrder` 在同一锁内从权威 quota snapshot 投影 billing/surplus，
+并读取 pin、health、model lock、sticky 和 spread；根包只传 provider/model/
+parent、priority、billing override、peak multiplier 等 config-derived 输入，
+不得先读 quota 再调用 Manager 排序。这样一次请求决策不会在 quota projection
+与 availability/sticky 选择之间跨过 reload 或并发 mutation。
+
+只有 `Commit=true` 且 generation 匹配时，才允许清理陈旧 sticky 或推进 pool
+spread。请求路径不深拷贝 quota 的 Notes/Windows/Details，也不为 projection
+分配中间 map。
+
+`DashboardSnapshot.PreviewOrder` 复用与 `Manager.DecideOrder` 相同的排序 core，
+但只读取 snapshot 内已经脱离的 quota/health/model-lock/pin/sticky/spread，
+且强制 `Commit=false`。`/debug/schedule` 与 `/api/status.schedule` 必须用捕获
+config generation 时取得的这一个 DashboardSnapshot 计算，不得再次进入 Manager；
+因此同一响应中的 health/quota/pin/sticky/order 属于同一时刻、同一 generation。
 
 ## Sticky
 
@@ -160,13 +201,18 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 ## 回归测试
 
 - tier/priority/surplus 排序和 sticky margin。
+- Manager 的 generation 替换、stale mutation 丢弃、quota 深拷贝、schedule
+  commit gate、单锁 quota+health+pin+sticky+spread 决策、PreviewOrder parity、
+  atomic persist/dashboard snapshot 与 detached map/slice。
 - stale/error quota 的 unknown 降级。
-- 并发 poll/manual refresh/429 refresh 的单写正确性。
+- quotaTracker 的并发 poll/manual refresh/429 refresh 去重、停止接纳和文件单写
+  正确性；不得通过 tracker 内部 quota map 断言。
 - 多 tracker 同 path、进程退出、测试 TempDir cleanup。
 - lifecycle 关闭时拒绝新任务、等待已接纳任务、drain request logger，重复 Close
   不阻塞。
 - transport shutdown 先停止 listener/reload/Web owner，取消并等待异步登录与 GC，
   正常等待在途 handler；超时强制取消连接后仍等待 handler 退栈，再关闭并 final
   flush logger/Responses state。
-- fingerprint mismatch、旧请求/慢 quota poll 跨 generation、reload clear、mutation 后立即重启。
+- fingerprint mismatch、旧请求/慢 quota poll/resolver spread 跨 generation、
+  reload clear、pin 跨 reload 保留、mutation 后立即重启。
 - pin、force、unfreeze 与 cache/failover 的交互。

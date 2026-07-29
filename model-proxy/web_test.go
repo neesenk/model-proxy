@@ -116,9 +116,7 @@ func TestAPIStatusModelLocks(t *testing.T) {
 	mux := http.NewServeMux()
 	w.register(mux)
 	p.recordModelFailure("zhipu", "glm-x", Scheduling{ModelLockout: "1h"})
-	p.healthMu.Lock()
-	p.modelLocks[modelLockKey{provider: "zhipu", model: "old"}] = &modelLockEntry{failures: 1, lockedUntil: time.Now().Add(-time.Minute)}
-	p.healthMu.Unlock()
+	p.runtimeState.RecordModelFailure("zhipu", "old", -time.Minute, 0)
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))

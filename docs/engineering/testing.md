@@ -119,6 +119,17 @@ detached snapshot、404 纠正和按当前 provider/base URL 恢复的纯测试�
 boot/reload、forward 协议选择、runtime 404 纠正与持久化 round trip。恢复测试
 必须覆盖“未知 parent + 空 base URL”不得被缺省 map lookup 误接纳。
 
+generation-scoped health、sticky、pin、model lock、paramBlock、spread、quota、
+schedule、persist/dashboard snapshot 的纯状态机测试归
+`internal/runtime/manager*_test.go`。必须精确断言 generation 替换清理集合与 pin
+保留、旧 generation mutation 拒绝、half-open 生命周期、429 horizon/kind、
+model/param 隔离、quota 嵌套 slice 深拷贝、schedule commit gate、resolver spread
+gate、quota projection 与 health/pin/sticky/spread 的单锁决策、Dashboard
+PreviewOrder 的 order/sticky/facts parity 与无 mutation，以及并发 snapshot 的
+generation 与内容不会混代。根包只保留真实
+forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通过公开行为
+或 detached snapshot 断言，不得访问 Manager mutex 或恢复第二份内部 map。
+
 ## 禁止的弱测试
 
 - 只有 `t.Logf`，没有断言；

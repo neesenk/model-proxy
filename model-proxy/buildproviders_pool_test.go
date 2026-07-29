@@ -90,10 +90,9 @@ func TestBuildProvidersUnrollsPool(t *testing.T) {
 			t.Fatalf("parentOf[%s]=%q want zhipu", vid, p.parentOf[vid])
 		}
 	}
-	// spreadCtr map initialized (session-assignment counter; Task 6 lazily
-	// populates per-parent entries on first use).
-	if p.spreadCtr == nil {
-		t.Fatal("spreadCtr should be a non-nil map after NewProxy")
+	// The runtime manager lazily owns the pool spread counter.
+	if got := p.runtimeState.ResolverSpreadStart("zhipu", len(vids), 0); got != 0 {
+		t.Fatalf("initial pool spread index = %d, want 0", got)
 	}
 }
 

@@ -16,9 +16,9 @@ import (
 // budget counters backing FusionConfig.MaxRunsPerDay. It lives on Proxy and
 // survives reloads (like the event hub), so config edits don't reset it.
 //
-// Lock discipline: fusionRegistry.mu is independent and LAST in the lock
-// order (after healthMu/quotaMu) — methods never call into other subsystems
-// while holding it (record only copies caller-built values).
+// Lock discipline: fusionRegistry.mu is an independent leaf owner — methods
+// never call into other subsystems while holding it (record only copies
+// caller-built values).
 
 // fusionRecentCap bounds the recent-run ring (same size as the live-event ring).
 const fusionRecentCap = 200

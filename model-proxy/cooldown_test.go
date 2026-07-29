@@ -40,12 +40,8 @@ func TestServeOnce_EffectiveTargetsReflectsScheduledSet(t *testing.T) {
 		map[string]Provider{"a": {}, "b": {}},
 		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
 	cfg := p.cfg
-	// Make "a" cooling (rate-limited) by setting its health directly — avoids
-	// recordRateLimit, which spawns refreshOne and needs a fully-initialized
-	// tracker that newQuotaProxy doesn't build.
-	p.healthMu.Lock()
-	p.health["a"] = &providerHealth{rateLimitedUntil: time.Now().Add(time.Hour)}
-	p.healthMu.Unlock()
+	// Make "a" cooling without invoking the quota refresh side effect.
+	seedRuntimeRateLimit(t, p, "a", time.Now().Add(time.Hour), rlTransient)
 
 	routeKeys := map[string]bool{"m": true}
 	targets := cfg.Routes["m"]

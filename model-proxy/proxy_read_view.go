@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"sort"
 	"time"
 
 	observestats "model-proxy/internal/observe/stats"
@@ -35,57 +34,54 @@ type dashboardView struct {
 func (view proxyReadView) dashboard(now time.Time) dashboardView {
 	p := view.proxy
 
-	// Reload-owned values are captured together, then their locks are released
-	// before health/quota/component snapshots are taken.
+	// Capture reload-owned values and the Manager dashboard under the repository
+	// lock order so config and generation-scoped state cannot cross generations.
 	p.mu.RLock()
-	listen := p.cfg.Listen
+	cfg := p.cfg
+	listen := cfg.Listen
 	warnings := append([]string(nil), p.routeWarnings...)
 	cache := p.cache
+	expanded := p.expandedRoutes
+	parentOf := p.parentOf
+	poolIndex := p.poolIndex
+	runtimeSnapshot := p.runtimeState.Dashboard(now)
 	p.mu.RUnlock()
-
-	p.healthMu.Lock()
-	health := make(map[string]any, len(p.health))
-	for name, state := range p.health {
-		circuitState := "closed"
-		switch {
-		case now.Before(state.circuitOpenUntil):
-			circuitState = "open"
-		case state.halfOpenInFlight:
-			circuitState = "half_open"
-		}
+	schedule := scheduleStatusFromSnapshot(
+		cfg,
+		expanded,
+		parentOf,
+		poolIndex,
+		runtimeSnapshot,
+		now,
+	)
+	health := make(map[string]any, len(runtimeSnapshot.Providers))
+	for name, state := range runtimeSnapshot.Providers {
 		entry := map[string]any{
-			"circuit_state": circuitState,
-			"available":     state.available(now),
+			"circuit_state": state.CircuitState,
+			"available":     state.Available,
 		}
-		if now.Before(state.circuitOpenUntil) {
-			entry["circuit_until"] = state.circuitOpenUntil.UTC().Format(time.RFC3339)
+		if now.Before(state.CircuitOpenUntil) {
+			entry["circuit_until"] = state.CircuitOpenUntil.UTC().Format(time.RFC3339)
 		}
-		if now.Before(state.rateLimitedUntil) {
-			entry["rate_limited_until"] = state.rateLimitedUntil.UTC().Format(time.RFC3339)
-			entry["rate_limit_kind"] = state.rateLimitKind.String()
+		if now.Before(state.RateLimitedUntil) {
+			entry["rate_limited_until"] = state.RateLimitedUntil.UTC().Format(time.RFC3339)
+			entry["rate_limit_kind"] = state.RateLimitKind.String()
 		}
 		health[name] = entry
 	}
 	modelLocks := map[string][]map[string]any{}
-	for key, entry := range p.modelLocks {
-		if !now.Before(entry.lockedUntil) {
-			continue
+	for providerName, locks := range runtimeSnapshot.ModelLocks {
+		for _, lock := range locks {
+			modelLocks[providerName] = append(modelLocks[providerName], map[string]any{
+				"model": lock.Model,
+				"until": lock.LockedUntil.UTC().Format(time.RFC3339),
+			})
 		}
-		modelLocks[key.provider] = append(modelLocks[key.provider], map[string]any{
-			"model": key.model,
-			"until": entry.lockedUntil.UTC().Format(time.RFC3339),
-		})
-	}
-	p.healthMu.Unlock()
-	for _, locks := range modelLocks {
-		sort.Slice(locks, func(i, j int) bool {
-			return locks[i]["model"].(string) < locks[j]["model"].(string)
-		})
 	}
 
 	var quota map[string]any
 	if p.quota != nil {
-		if snapshots := p.quota.allSnapshots(); snapshots != nil {
+		if snapshots := runtimeSnapshot.Quotas; snapshots != nil {
 			quota = make(map[string]any, len(snapshots))
 			for key, snapshot := range snapshots {
 				quota[key] = snapshot
@@ -109,7 +105,7 @@ func (view proxyReadView) dashboard(now time.Time) dashboardView {
 		health:     health,
 		modelLocks: modelLocks,
 		quota:      quota,
-		schedule:   json.RawMessage(p.scheduleStatus()),
+		schedule:   json.RawMessage(schedule),
 		counters:   p.metrics.aggregateByProvider(),
 		cache:      cacheInfo,
 		warnings:   warnings,

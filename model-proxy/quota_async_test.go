@@ -105,6 +105,7 @@ func TestPollAll_DiscardsStaleGeneration(t *testing.T) {
 	}()
 	pollFor(t, prov.ran.Load, time.Second, "old-generation quota poll did not start")
 	generation.Store(2)
+	tr.runtime.ReplaceGeneration(2)
 	tr.clearForGeneration(2)
 	sentinel := &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.75}
 	if !tr.commitSnapshot(2, "x", sentinel) {
@@ -130,7 +131,7 @@ func (b *blockQuotaProv) Quota() (*provider.QuotaSnapshot, error) {
 
 func newBlockTracker(t *testing.T, prov *blockQuotaProv) *quotaTracker {
 	t.Helper()
-	tr := newQuotaTracker(t.TempDir()+"/q.json",
+	tr := newStandaloneQuotaTracker(t.TempDir()+"/q.json",
 		func() *Config { return &Config{} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
 	t.Cleanup(tr.stop)

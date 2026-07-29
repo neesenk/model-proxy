@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	runtimestate "model-proxy/internal/runtime"
 )
 
 // TestHealthPersist_RoundTrip: frozen health state (rate-limit + kind, circuit,
@@ -24,51 +26,50 @@ func TestHealthPersist_RoundTrip(t *testing.T) {
 	p1.learnParamBlock("a", "m1", "max_tokens")
 	// Circuit on a second provider + an already-expired rate limit (must drop).
 	circuitUntil := now.Add(10 * time.Minute)
-	p1.healthMu.Lock()
-	p1.health["b"] = &providerHealth{consecutiveFailures: 3, circuitOpenUntil: circuitUntil}
-	p1.health["c"] = &providerHealth{rateLimitedUntil: now.Add(-time.Minute)}
-	p1.healthMu.Unlock()
+	p1.runtimeState.RestoreHealth(map[string]runtimestate.PersistedHealth{
+		"b": {CircuitOpenUntil: circuitUntil},
+		"c": {RateLimitedUntil: now.Add(-time.Minute)},
+	}, now, cfg.Scheduling.Threshold())
 	if err := p1.quota.persist(); err != nil {
 		t.Fatalf("persist source state: %v", err)
 	}
 	p1.Close()
 
 	p2 := newTestProxyAt(t, cfg, statePath)
-	p2.healthMu.Lock()
-	defer p2.healthMu.Unlock()
-
-	h := p2.health["a"]
-	if h == nil {
-		t.Fatalf("provider a rate-limit not restored: %+v", h)
+	runtimeSnapshot := p2.runtimeState.Dashboard(now)
+	h, ok := runtimeSnapshot.Providers["a"]
+	if !ok {
+		t.Fatalf("provider a rate-limit not restored: %+v", runtimeSnapshot.Providers)
 	}
-	if !h.rateLimitedUntil.Equal(rateLimitUntil) {
-		t.Errorf("rateLimitedUntil = %s, want %s", h.rateLimitedUntil, rateLimitUntil)
+	if !h.RateLimitedUntil.Equal(rateLimitUntil) {
+		t.Errorf("rateLimitedUntil = %s, want %s", h.RateLimitedUntil, rateLimitUntil)
 	}
-	if h.rateLimitKind != rlQuota {
-		t.Errorf("rateLimitKind = %v want rlQuota", h.rateLimitKind)
+	if h.RateLimitKind != rlQuota {
+		t.Errorf("rateLimitKind = %v want rlQuota", h.RateLimitKind)
 	}
-	if e := p2.modelLocks[modelLockKey{provider: "a", model: "m1"}]; e == nil {
-		t.Errorf("model lock (a,m1) not restored: %+v", e)
-	} else if e.lockedUntil.Before(modelLockBefore) || e.lockedUntil.After(modelLockAfter) {
-		t.Errorf("model lock until %s outside [%s, %s]", e.lockedUntil, modelLockBefore, modelLockAfter)
+	locks := runtimeSnapshot.ModelLocks["a"]
+	if len(locks) != 1 || locks[0].Model != "m1" {
+		t.Errorf("model lock (a,m1) not restored: %+v", locks)
+	} else if locks[0].LockedUntil.Before(modelLockBefore) || locks[0].LockedUntil.After(modelLockAfter) {
+		t.Errorf("model lock until %s outside [%s, %s]", locks[0].LockedUntil, modelLockBefore, modelLockAfter)
 	}
-	if !p2.paramBlock[modelLockKey{provider: "a", model: "m1"}]["max_tokens"] {
+	if !p2.runtimeState.ParamBlocked("a", "m1", "max_tokens") {
 		t.Error("param blocklist for a not restored")
 	}
 
-	hb := p2.health["b"]
-	if hb == nil {
-		t.Fatalf("provider b circuit not restored: %+v", hb)
+	hb, ok := runtimeSnapshot.Providers["b"]
+	if !ok {
+		t.Fatalf("provider b circuit not restored: %+v", runtimeSnapshot.Providers)
 	}
-	if !hb.circuitOpenUntil.Equal(circuitUntil) {
-		t.Errorf("circuitOpenUntil = %s, want %s", hb.circuitOpenUntil, circuitUntil)
+	if !hb.CircuitOpenUntil.Equal(circuitUntil) {
+		t.Errorf("circuitOpenUntil = %s, want %s", hb.CircuitOpenUntil, circuitUntil)
 	}
-	if hb.consecutiveFailures != cfg.Scheduling.Threshold() {
+	if hb.ConsecutiveFailures != cfg.Scheduling.Threshold() {
 		t.Errorf("restored circuit failures = %d, want threshold %d (next failure re-opens)",
-			hb.consecutiveFailures, cfg.Scheduling.Threshold())
+			hb.ConsecutiveFailures, cfg.Scheduling.Threshold())
 	}
 
-	if _, ok := p2.health["c"]; ok {
+	if _, ok := runtimeSnapshot.Providers["c"]; ok {
 		t.Error("expired rate-limit on c must be dropped, not restored")
 	}
 }
@@ -90,9 +91,7 @@ func TestHealthPersist_FingerprintMismatch(t *testing.T) {
 	// Same provider NAME, different upstream URL → different fingerprint.
 	cfgB := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://y", Provider: testProviderID}}}
 	p2 := newTestProxyAt(t, cfgB, statePath)
-	p2.healthMu.Lock()
-	_, frozen := p2.health["a"]
-	p2.healthMu.Unlock()
+	_, frozen := p2.runtimeState.Dashboard(time.Now()).Providers["a"]
 	if frozen {
 		t.Error("health must not restore under a mismatched config fingerprint")
 	}
@@ -112,10 +111,8 @@ func TestHealthPersist_ParamBlockOnlyProvider(t *testing.T) {
 	p1.Close()
 
 	p2 := newTestProxyAt(t, cfg, statePath)
-	p2.healthMu.Lock()
-	blocked := p2.paramBlock[modelLockKey{provider: "a", model: "m1"}]["max_tokens"]
-	_, hasHealth := p2.health["a"]
-	p2.healthMu.Unlock()
+	blocked := p2.runtimeState.ParamBlocked("a", "m1", "max_tokens")
+	_, hasHealth := p2.runtimeState.Dashboard(time.Now()).Providers["a"]
 	if !blocked {
 		t.Error("param blocklist must persist even without a health entry")
 	}

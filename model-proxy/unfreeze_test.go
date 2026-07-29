@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	runtimestate "model-proxy/internal/runtime"
 )
 
 // TestResetHealth: the proxy method clears circuit/rate-limit state + model
@@ -29,10 +31,8 @@ func TestResetHealth(t *testing.T) {
 	p.recordModelFailure("a#v1", "m1", Scheduling{ModelLockout: "1h"})
 	p.recordModelFailure("b", "m2", Scheduling{ModelLockout: "1h"})
 	p.learnParamBlock("a#v1", "m1", "max_tokens")
-	p.healthMu.Lock()
-	p.sticky["route1"] = routeSticky{provider: "a#v1", since: now}
-	p.pins["route2"] = pinEntry{provider: "a#v1"}
-	p.healthMu.Unlock()
+	seedRuntimeSticky(t, p, "route1", "a#v1", now)
+	p.runtimeState.SetPin("route2", runtimestate.Pin{Provider: "a#v1"})
 
 	cleared, locks := p.resetHealth("a")
 	if len(cleared) != 2 || cleared[0] != "a#v1" || cleared[1] != "a#v2" {
@@ -41,13 +41,12 @@ func TestResetHealth(t *testing.T) {
 	if locks != 1 {
 		t.Errorf("locks = %d, want 1 (only (a#v1,m1))", locks)
 	}
-	p.healthMu.Lock()
-	_, bFrozen := p.health["b"]
-	_, bLock := p.modelLocks[modelLockKey{provider: "b", model: "m2"}]
-	blocked := p.paramBlock[modelLockKey{provider: "a#v1", model: "m1"}]["max_tokens"]
-	_, stickyOK := p.sticky["route1"]
-	_, pinOK := p.pins["route2"]
-	p.healthMu.Unlock()
+	snapshot := p.runtimeState.Dashboard(now)
+	_, bFrozen := snapshot.Providers["b"]
+	bLock := p.runtimeState.ModelLocked("b", "m2", now)
+	blocked := p.runtimeState.ParamBlocked("a#v1", "m1", "max_tokens")
+	_, stickyOK := p.runtimeState.Sticky("route1")
+	_, pinOK := p.runtimeState.Pins(now)["route2"]
 	if !bFrozen || !bLock {
 		t.Error("provider b state must survive resetHealth(\"a\")")
 	}
@@ -88,7 +87,7 @@ func TestHealthResetAPI(t *testing.T) {
 	if len(out.Cleared) != 1 || out.Cleared[0] != "zhipu" || out.ModelLocksCleared != 1 {
 		t.Errorf("response = %+v, want cleared [zhipu] + 1 lock", out)
 	}
-	if _, frozen := p.health["zhipu"]; frozen {
+	if _, frozen := p.runtimeState.Dashboard(time.Now()).Providers["zhipu"]; frozen {
 		t.Error("zhipu still frozen after API reset")
 	}
 
@@ -112,7 +111,7 @@ func TestHealthResetAPI_MalformedJSON(t *testing.T) {
 	if rec.Code != 400 {
 		t.Fatalf("malformed body: status = %d, want 400", rec.Code)
 	}
-	if _, frozen := p.health["zhipu"]; !frozen {
+	if _, frozen := p.runtimeState.Dashboard(time.Now()).Providers["zhipu"]; !frozen {
 		t.Error("malformed body must leave frozen state untouched")
 	}
 }

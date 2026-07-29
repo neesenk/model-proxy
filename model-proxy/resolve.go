@@ -25,23 +25,38 @@ import (
 // slot — that stays in each caller (forward's takeHalfOpenSlot/recordSuccess/
 // recordFailure, Fusion's circuit gate), because those are coupled to failover.
 type resolver struct {
-	state     resolverState
-	providers map[string]provider.Provider // runtime instances (virtual ids only for pooled parents)
-	poolIndex map[string][]string          // parent name → sorted virtual ids (only multi-account parents)
+	state      resolverState
+	providers  map[string]provider.Provider // runtime instances (virtual ids only for pooled parents)
+	poolIndex  map[string][]string          // parent name → sorted virtual ids (only multi-account parents)
+	generation uint64                       // request snapshot generation; gates spread mutation
 }
 
 // resolverState is the narrow mutable-runtime capability needed by identity
 // resolution. It deliberately exposes neither reload-owned maps nor the full
 // Proxy composition root.
 type resolverState interface {
-	resolverSpreadStart(parent string, n int) int
+	resolverSpreadStart(parent string, n int, generation uint64) int
 	resolverTargetHealthy(virtual, model string, now time.Time) bool
 }
 
 var _ resolverState = (*Proxy)(nil)
 
-func newResolver(state resolverState, providers map[string]provider.Provider, poolIndex map[string][]string) *resolver {
-	return &resolver{state: state, providers: providers, poolIndex: poolIndex}
+func newResolver(
+	state resolverState,
+	providers map[string]provider.Provider,
+	poolIndex map[string][]string,
+	generations ...uint64,
+) *resolver {
+	var generation uint64
+	if len(generations) > 0 {
+		generation = generations[0]
+	}
+	return &resolver{
+		state:      state,
+		providers:  providers,
+		poolIndex:  poolIndex,
+		generation: generation,
+	}
 }
 
 // virtualsOf returns the runnable virtual ids for a config provider name: the
@@ -88,8 +103,8 @@ func (r *resolver) Expand(t RouteTarget) []RouteTarget {
 //   - ok=false when no virtual is healthy or the provider has no built impl
 //     (unknown / not logged in); the caller treats the target as unavailable.
 //
-// Health is a pre-filter read under healthMu (race-free — the same lock mutates
-// these fields); the caller still does its own authoritative gating.
+// Health is a pre-filter read through the runtime Manager; the caller still
+// does its own authoritative gating.
 func (r *resolver) Pick(t RouteTarget, stickyKey string) (RouteTarget, bool) {
 	vids := r.virtualsOf(t.Provider)
 	if len(vids) == 0 {
@@ -119,7 +134,7 @@ func (r *resolver) Pick(t RouteTarget, stickyKey string) (RouteTarget, bool) {
 
 // pickStart returns the virtual index to try first: a stable hash of stickyKey
 // (session-sticky) when non-empty, else the shared per-parent spread counter
-// (round-robin). Both under healthMu (spreadCtr lives there).
+// (round-robin). The shared counter is owned by the runtime Manager.
 func (r *resolver) pickStart(parent string, n int, stickyKey string) int {
 	if stickyKey != "" {
 		return int(stickyHash(stickyKey) % uint64(n))
@@ -127,7 +142,7 @@ func (r *resolver) pickStart(parent string, n int, stickyKey string) int {
 	if r.state == nil {
 		return 0
 	}
-	return r.state.resolverSpreadStart(parent, n)
+	return r.state.resolverSpreadStart(parent, n, r.generation)
 }
 
 // healthy reports whether a virtual may be tried for `model` — the SAME rule as
@@ -136,9 +151,8 @@ func (r *resolver) pickStart(parent string, n int, stickyKey string) int {
 // The model-lock check matters because Fusion panel/judge legs + Shadow route
 // through Pick (not tryTarget): without it they would keep requesting a model
 // the main path already locked (recordModelFailure) until the lockout expired.
-// The health fields are mutated under healthMu (recordSuccess/Failure/RateLimit),
-// so they are read under the same lock; modelLockedLocked is the lock-holding
-// variant that fits here.
+// The runtime Manager applies the same health + model-lock predicate used by
+// the authoritative attempt gate.
 func (r *resolver) healthy(virtual, model string) bool {
 	return r.state != nil && r.state.resolverTargetHealthy(virtual, model, time.Now())
 }
@@ -149,22 +163,12 @@ func (r *resolver) built(vid string) bool {
 	return ok
 }
 
-func (p *Proxy) resolverSpreadStart(parent string, n int) int {
-	if n <= 0 {
-		return 0
-	}
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	start := int(p.spreadCtr[parent] % uint64(n))
-	p.spreadCtr[parent]++
-	return start
+func (p *Proxy) resolverSpreadStart(parent string, n int, generation uint64) int {
+	return p.runtimeState.ResolverSpreadStart(parent, n, generation)
 }
 
 func (p *Proxy) resolverTargetHealthy(virtual, model string, now time.Time) bool {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	h := p.health[virtual]
-	return (h == nil || h.available(now)) && !p.modelLockedLocked(virtual, model, now)
+	return p.runtimeState.TargetHealthy(virtual, model, now)
 }
 
 // stickyHash is a stable 64-bit hash of a session key, used to map a session to a

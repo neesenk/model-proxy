@@ -57,13 +57,12 @@ func newModelLockProxy(t *testing.T, cfg *Config) (*Proxy, *httptest.Server) {
 }
 
 func (p *Proxy) modelLockState(provider, model string) (failures int, locked bool) {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	e := p.modelLocks[modelLockKey{provider: provider, model: model}]
-	if e == nil {
-		return 0, false
+	for _, entry := range p.runtimeState.Dashboard(time.Now()).ModelLocks[provider] {
+		if entry.Model == model {
+			return entry.Failures, true
+		}
 	}
-	return e.failures, time.Now().Before(e.lockedUntil)
+	return 0, false
 }
 
 // TestModelLock_404FailsOverWithoutCircuit: a 404 on the primary's model fails
@@ -95,10 +94,8 @@ func TestModelLock_404FailsOverWithoutCircuit(t *testing.T) {
 		t.Errorf("model lock (primary,m1): failures=%d locked=%v, want 1,true", failures, locked)
 	}
 	// Circuit must NOT be poisoned.
-	p.healthMu.Lock()
-	h := p.health["primary"]
-	p.healthMu.Unlock()
-	if h != nil && h.consecutiveFailures != 0 {
+	if h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]; ok &&
+		h.ConsecutiveFailures != 0 {
 		t.Errorf("primary circuit poisoned by model failure: %+v", h)
 	}
 
@@ -251,10 +248,8 @@ func TestEmpty200_PreflightFailsOver(t *testing.T) {
 	if _, locked := p.modelLockState("primary", "m1"); !locked {
 		t.Error("(primary,m1) should be locked after the empty 200")
 	}
-	p.healthMu.Lock()
-	h := p.health["primary"]
-	p.healthMu.Unlock()
-	if h != nil && h.consecutiveFailures != 0 {
+	if h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]; ok &&
+		h.ConsecutiveFailures != 0 {
 		t.Errorf("circuit poisoned by empty 200: %+v", h)
 	}
 
@@ -342,9 +337,7 @@ func TestParamStrip_LearnAndRetry(t *testing.T) {
 	if got := sawMaxTokens.Load(); got != 1 {
 		t.Errorf("bodies with max_tokens = %d, want 1 (only the first attempt)", got)
 	}
-	p.healthMu.Lock()
-	blocked := p.paramBlock[modelLockKey{provider: "primary", model: "m1"}]["max_tokens"]
-	p.healthMu.Unlock()
+	blocked := p.runtimeState.ParamBlocked("primary", "m1", "max_tokens")
 	if !blocked {
 		t.Error("max_tokens should be in primary's learned blocklist")
 	}
@@ -412,9 +405,10 @@ func TestEmpty200_ClientCancelNoLock(t *testing.T) {
 		resp.Body.Close()
 	}
 	time.Sleep(300 * time.Millisecond) // let the proxy observe the cancellation
-	p.healthMu.Lock()
-	n := len(p.modelLocks)
-	p.healthMu.Unlock()
+	n := 0
+	for _, locks := range p.runtimeState.Dashboard(time.Now()).ModelLocks {
+		n += len(locks)
+	}
 	if n != 0 {
 		t.Errorf("client disconnect must NOT lock the model, got %d lock(s)", n)
 	}

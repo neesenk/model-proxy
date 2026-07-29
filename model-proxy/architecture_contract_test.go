@@ -42,6 +42,8 @@ import (
 //     adapter only maps resolved CacheConfig values.
 //   - internal/transport/bodycapture owns the generic bounded pass-through
 //     response reader shared by Responses state and request logging.
+//   - internal/runtime owns generation-scoped routing state, scheduling
+//     decisions, quota values, and detached snapshots behind one Manager.
 //   - internal/runtime/wirecap owns endpoint capability verdicts, pure
 //     selection policy, and their leaf-locked Store without repository imports.
 //
@@ -592,6 +594,209 @@ func TestArchitectureBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("internal runtime owns generation-scoped routing state", func(t *testing.T) {
+		assertRepositoryPackageImports(t, "internal/runtime", map[string]bool{
+			"model-proxy/provider": true,
+		})
+
+		proxyFile, _ := parseGoFile(t, "proxy.go")
+		proxyFields := namedStructFields(t, proxyFile, "Proxy")
+		if name, ok := configSelectorName(proxyFields["runtimeState"], "runtimestate"); !ok || name != "Manager" {
+			t.Error("Proxy.runtimeState must be runtimestate.Manager")
+		}
+		for _, forbidden := range []string{
+			"healthMu", "runtimeGeneration", "health", "sticky", "pins",
+			"modelLocks", "paramBlock", "spreadCtr",
+		} {
+			if _, ok := proxyFields[forbidden]; ok {
+				t.Errorf("Proxy must not re-own runtime field %s", forbidden)
+			}
+		}
+
+		quotaFile, _ := parseGoFile(t, "quota.go")
+		quotaFields := namedStructFields(t, quotaFile, "quotaTracker")
+		runtimePointer, ok := quotaFields["runtime"].(*ast.StarExpr)
+		if !ok {
+			t.Errorf("quotaTracker.runtime type = %T, want *runtimestate.Manager", quotaFields["runtime"])
+		} else if name, ok := configSelectorName(runtimePointer.X, "runtimestate"); !ok || name != "Manager" {
+			t.Error("quotaTracker.runtime must be *runtimestate.Manager")
+		}
+		if _, ok := quotaFields["state"]; ok {
+			t.Error("quotaTracker must not retain a second quota state map")
+		}
+		for _, legacy := range []string{"stickySnapshot", "healthSnapshot"} {
+			if _, ok := quotaFields[legacy]; ok {
+				t.Errorf("quotaTracker must not retain legacy split snapshot callback %s", legacy)
+			}
+		}
+		for _, testOnly := range []string{"setSnapshot", "snapshot", "allSnapshots"} {
+			if methodDeclared(quotaFile, testOnly) {
+				t.Errorf("quota.go must not expose test-only quotaTracker.%s", testOnly)
+			}
+		}
+		trackerConstructor := namedFunction(t, quotaFile, "newQuotaTracker")
+		if trackerConstructor.Type.Params == nil || len(trackerConstructor.Type.Params.List) != 4 {
+			t.Fatalf("newQuotaTracker must require exactly four parameters")
+		}
+		managerParam, ok := trackerConstructor.Type.Params.List[3].Type.(*ast.StarExpr)
+		if !ok {
+			t.Errorf(
+				"newQuotaTracker fourth parameter type = %T, want *runtimestate.Manager",
+				trackerConstructor.Type.Params.List[3].Type,
+			)
+		} else if name, ok := configSelectorName(managerParam.X, "runtimestate"); !ok || name != "Manager" {
+			t.Error("newQuotaTracker fourth parameter must be *runtimestate.Manager")
+		}
+
+		forbiddenTypes := map[string]bool{
+			"providerHealth": true,
+			"modelLockKey":   true,
+			"modelLockEntry": true,
+			"routeSticky":    true,
+		}
+		for _, path := range productionGoFiles(t) {
+			parsed, _ := parseGoFile(t, path)
+			for _, declaration := range parsed.Decls {
+				generic, ok := declaration.(*ast.GenDecl)
+				if !ok || generic.Tok != token.TYPE {
+					continue
+				}
+				for _, specification := range generic.Specs {
+					typeSpec, ok := specification.(*ast.TypeSpec)
+					if ok && forbiddenTypes[typeSpec.Name.Name] {
+						t.Errorf("%s redeclares runtime-owned type %s", path, typeSpec.Name.Name)
+					}
+				}
+			}
+		}
+
+		constructor := namedFunction(t, proxyFile, "newProxyWithStatePath")
+		injectedManager := 0
+		ast.Inspect(constructor.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || callableName(call.Fun) != "newQuotaTracker" {
+				return true
+			}
+			for _, argument := range call.Args {
+				address, ok := argument.(*ast.UnaryExpr)
+				if !ok || address.Op != token.AND {
+					continue
+				}
+				selector, ok := address.X.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "runtimeState" {
+					continue
+				}
+				if base, ok := selector.X.(*ast.Ident); ok && base.Name == "p" {
+					injectedManager++
+				}
+			}
+			return true
+		})
+		if got := namedCallCountInNode(constructor.Body, "newQuotaTracker"); got != 1 || injectedManager != 1 {
+			t.Errorf(
+				"newProxyWithStatePath must inject its one Manager into one quotaTracker call: calls=%d injections=%d",
+				got,
+				injectedManager,
+			)
+		}
+
+		reload := namedMethod(t, proxyFile, "Proxy", "reload")
+		if got := namedCallCountInNode(reload.Body, "ReplaceGeneration"); got != 1 {
+			t.Errorf("Proxy.reload ReplaceGeneration calls = %d, want exactly 1", got)
+		}
+		persist := namedMethod(t, proxyFile, "Proxy", "snapshotPersistedState")
+		if got := namedCallCountInNode(persist.Body, "SnapshotForPersist"); got != 1 {
+			t.Errorf("snapshotPersistedState SnapshotForPersist calls = %d, want exactly 1", got)
+		}
+		for _, legacy := range []string{"allSnapshots", "snapshotHealth", "snapshotSticky"} {
+			if got := namedCallCountInNode(persist.Body, legacy); got != 0 {
+				t.Errorf("snapshotPersistedState reassembles %s %d time(s)", legacy, got)
+			}
+			if methodDeclared(proxyFile, legacy) {
+				t.Errorf("Proxy must not retain legacy split snapshot method %s", legacy)
+			}
+		}
+
+		readView, _ := parseGoFile(t, "proxy_read_view.go")
+		dashboard := namedMethod(t, readView, "proxyReadView", "dashboard")
+		if got := namedCallCountInNode(dashboard.Body, "Dashboard"); got != 1 {
+			t.Errorf("proxyReadView.dashboard Manager.Dashboard calls = %d, want exactly 1", got)
+		}
+		if got := namedCallCountInNode(dashboard.Body, "scheduleStatusFromSnapshot"); got != 1 {
+			t.Errorf(
+				"proxyReadView.dashboard scheduleStatusFromSnapshot calls = %d, want exactly 1",
+				got,
+			)
+		}
+		if got := namedCallCountInNode(dashboard.Body, "scheduleStatus"); got != 0 {
+			t.Errorf("proxyReadView.dashboard rereads runtime through scheduleStatus %d time(s)", got)
+		}
+		assertCallPathBetween(
+			t,
+			dashboard.Body,
+			"p.runtimeState.Dashboard",
+			"p.mu.RLock",
+			"p.mu.RUnlock",
+		)
+
+		scheduleStatus := namedMethod(t, proxyFile, "Proxy", "scheduleStatus")
+		if got := namedCallCountInNode(scheduleStatus.Body, "Dashboard"); got != 1 {
+			t.Errorf("Proxy.scheduleStatus Manager.Dashboard calls = %d, want exactly 1", got)
+		}
+		if got := namedCallCountInNode(scheduleStatus.Body, "scheduleStatusFromSnapshot"); got != 1 {
+			t.Errorf(
+				"Proxy.scheduleStatus scheduleStatusFromSnapshot calls = %d, want exactly 1",
+				got,
+			)
+		}
+		assertCallPathBetween(
+			t,
+			scheduleStatus.Body,
+			"p.runtimeState.Dashboard",
+			"p.mu.RLock",
+			"p.mu.RUnlock",
+		)
+
+		statusFromSnapshot := namedFunction(t, proxyFile, "scheduleStatusFromSnapshot")
+		if got := namedCallCountInNode(statusFromSnapshot.Body, "PreviewOrder"); got != 1 {
+			t.Errorf("scheduleStatusFromSnapshot PreviewOrder calls = %d, want exactly 1", got)
+		}
+		for _, forbidden := range []string{"Dashboard", "DecideOrder", "SchedulingQuotas"} {
+			if got := namedCallCountInNode(statusFromSnapshot.Body, forbidden); got != 0 {
+				t.Errorf("scheduleStatusFromSnapshot rereads Manager through %s %d time(s)", forbidden, got)
+			}
+		}
+
+		order := namedMethod(t, proxyFile, "Proxy", "decideOrder")
+		if got := namedCallCountInNode(order.Body, "DecideOrder"); got != 1 {
+			t.Errorf("Proxy.decideOrder Manager.DecideOrder calls = %d, want exactly 1", got)
+		}
+		if got := namedCallCountInNode(order.Body, "SchedulingQuotas"); got != 0 {
+			t.Errorf("Proxy.decideOrder splits quota projection into %d Manager read(s)", got)
+		}
+		if got := keyedCompositeFieldCallCount(
+			order.Body,
+			"ScheduleInput",
+			"Generation",
+			"runtimeGenerationArg",
+		); got != 1 {
+			t.Errorf("Proxy.decideOrder runtimeGenerationArg-bound ScheduleInput fields = %d, want 1", got)
+		}
+
+		managerFile, _ := parseGoFile(t, "internal/runtime/manager.go")
+		if methodDeclared(managerFile, "SchedulingQuotas") {
+			t.Error("runtime.Manager must project quotas inside DecideOrder, not expose SchedulingQuotas")
+		}
+		managerOrder := namedMethod(t, managerFile, "Manager", "DecideOrder")
+		if got := namedCallCountInNode(managerOrder.Body, "decideOrder"); got != 1 {
+			t.Errorf("Manager.DecideOrder shared order-core calls = %d, want exactly 1", got)
+		}
+		preview := namedMethod(t, managerFile, "DashboardSnapshot", "PreviewOrder")
+		if got := namedCallCountInNode(preview.Body, "decideOrder"); got != 1 {
+			t.Errorf("DashboardSnapshot.PreviewOrder shared order-core calls = %d, want exactly 1", got)
+		}
+	})
+
 	t.Run("internal runtime wirecap owns endpoint capability state", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/runtime/wirecap")
 
@@ -1137,6 +1342,35 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		if functionSignatureContainsIdent(factory, "Proxy") {
 			t.Error("newResolver must receive resolverState, not *Proxy")
 		}
+
+		countGenerationBoundResolvers := func(node ast.Node) (calls, bound int) {
+			t.Helper()
+			ast.Inspect(node, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok || callableName(call.Fun) != "newResolver" {
+					return true
+				}
+				calls++
+				if len(call.Args) == 0 {
+					return true
+				}
+				if selector, ok := call.Args[len(call.Args)-1].(*ast.SelectorExpr); ok &&
+					selector.Sel.Name == "generation" {
+					bound++
+				}
+				return true
+			})
+			return calls, bound
+		}
+		fusion, _ := parseGoFile(t, "fusion.go")
+		if calls, bound := countGenerationBoundResolvers(fusion); calls != 2 || bound != calls {
+			t.Errorf("Fusion resolver calls must bind runtime generation: calls=%d bound=%d", calls, bound)
+		}
+		proxy, _ := parseGoFile(t, "proxy.go")
+		shadow := namedMethod(t, proxy, "Proxy", "runShadow")
+		if calls, bound := countGenerationBoundResolvers(shadow.Body); calls != 1 || bound != calls {
+			t.Errorf("Shadow resolver call must bind runtime generation: calls=%d bound=%d", calls, bound)
+		}
 	})
 }
 
@@ -1198,6 +1432,62 @@ func (w *webServer) h() {
 	f, _ = parse(`func h() { go unowned() }`)
 	if got := goStatementCount(f); got != 1 {
 		t.Errorf("bare goroutine check: got %d, want 1", got)
+	}
+
+	// Runtime snapshot guards must bind the exact p.mu and p.runtimeState
+	// receivers; same-named methods on another object are a negative control.
+	f, _ = parse(`func valid() {
+	p.mu.RLock()
+	p.runtimeState.Dashboard(now)
+	p.mu.RUnlock()
+}`)
+	valid := namedFunction(t, f, "valid")
+	if !oneCallPathBetween(
+		callPathPositions(valid.Body, "p.runtimeState.Dashboard"),
+		callPathPositions(valid.Body, "p.mu.RLock"),
+		callPathPositions(valid.Body, "p.mu.RUnlock"),
+	) {
+		t.Error("qualified runtime snapshot lock positive control did not fire")
+	}
+	f, _ = parse(`func wrongReceiver() {
+	other.mu.RLock()
+	p.runtimeState.Dashboard(now)
+	other.mu.RUnlock()
+}`)
+	wrongReceiver := namedFunction(t, f, "wrongReceiver")
+	if oneCallPathBetween(
+		callPathPositions(wrongReceiver.Body, "p.runtimeState.Dashboard"),
+		callPathPositions(wrongReceiver.Body, "p.mu.RLock"),
+		callPathPositions(wrongReceiver.Body, "p.mu.RUnlock"),
+	) {
+		t.Error("qualified runtime snapshot lock accepted another receiver")
+	}
+
+	// A generation field is not enough: it must be derived from the request's
+	// threaded runtime generation rather than a zero literal.
+	f, _ = parse(`func generationBound() {
+	_ = ScheduleInput{Generation: runtimeGenerationArg(generations)}
+}`)
+	generationBound := namedFunction(t, f, "generationBound")
+	if got := keyedCompositeFieldCallCount(
+		generationBound.Body,
+		"ScheduleInput",
+		"Generation",
+		"runtimeGenerationArg",
+	); got != 1 {
+		t.Errorf("generation binding positive control = %d, want 1", got)
+	}
+	f, _ = parse(`func generationZero() {
+	_ = ScheduleInput{Generation: 0}
+}`)
+	generationZero := namedFunction(t, f, "generationZero")
+	if got := keyedCompositeFieldCallCount(
+		generationZero.Body,
+		"ScheduleInput",
+		"Generation",
+		"runtimeGenerationArg",
+	); got != 0 {
+		t.Errorf("generation binding accepted zero literal: %d", got)
 	}
 
 	// Repository import allowlists distinguish true leaves from internal/config,
@@ -1991,6 +2281,93 @@ func namedCallCountInNode(n ast.Node, name string) int {
 		return true
 	})
 	return count
+}
+
+func keyedCompositeFieldCallCount(
+	n ast.Node,
+	typeName string,
+	fieldName string,
+	callName string,
+) int {
+	count := 0
+	ast.Inspect(n, func(node ast.Node) bool {
+		literal, ok := node.(*ast.CompositeLit)
+		if !ok || callableName(literal.Type) != typeName {
+			return true
+		}
+		for _, element := range literal.Elts {
+			entry, ok := element.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			key, ok := entry.Key.(*ast.Ident)
+			value, valueOK := entry.Value.(*ast.CallExpr)
+			if ok && key.Name == fieldName && valueOK && callableName(value.Fun) == callName {
+				count++
+			}
+		}
+		return true
+	})
+	return count
+}
+
+// assertCallPathBetween guards the repository lock order structurally: the
+// exact receiver-qualified target call must be lexically enclosed by the exact
+// receiver-qualified lock and unlock calls in the same function body.
+func assertCallPathBetween(t *testing.T, n ast.Node, target, before, after string) {
+	t.Helper()
+	targets := callPathPositions(n, target)
+	befores := callPathPositions(n, before)
+	afters := callPathPositions(n, after)
+	if !oneCallPathBetween(targets, befores, afters) {
+		t.Errorf(
+			"%s must appear between one %s and one %s: %s=%v %s=%v %s=%v",
+			target,
+			before,
+			after,
+			before,
+			befores,
+			target,
+			targets,
+			after,
+			afters,
+		)
+	}
+}
+
+func oneCallPathBetween(targets, befores, afters []token.Pos) bool {
+	return len(targets) == 1 &&
+		len(befores) == 1 &&
+		len(afters) == 1 &&
+		befores[0] < targets[0] &&
+		targets[0] < afters[0]
+}
+
+func callPathPositions(n ast.Node, path string) []token.Pos {
+	var positions []token.Pos
+	ast.Inspect(n, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if ok && expressionPath(call.Fun) == path {
+			positions = append(positions, call.Pos())
+		}
+		return true
+	})
+	return positions
+}
+
+func expressionPath(expr ast.Expr) string {
+	switch value := expr.(type) {
+	case *ast.Ident:
+		return value.Name
+	case *ast.SelectorExpr:
+		prefix := expressionPath(value.X)
+		if prefix == "" {
+			return value.Sel.Name
+		}
+		return prefix + "." + value.Sel.Name
+	default:
+		return ""
+	}
 }
 
 // namedCallWithArgsCount counts calls shaped exactly as

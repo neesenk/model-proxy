@@ -47,14 +47,20 @@
   叶子，不得读取 Config/HOME、持有 metrics/tokens/agents 或参与 Proxy lifecycle。
   根 `statsFlusher` 只负责运行时 snapshot/diff/reset baseline，`proxyLifecycle`
   只负责 loop、final flush 与 Store close；Web 仍经 `proxyReadView` 查询。
-- `healthMu` 保护熔断、限频、modelLocks、paramBlock、sticky、spread counter。
-- quota tracker 使用独立 mutex；锁顺序始终为 `healthMu → quotaMu`。
+- config generation 内的 health、sticky、pin、model lock、paramBlock、spread、
+  quota、调度决策和 detached snapshot 统一归 `internal/runtime.Manager`，由其单
+  mutex 保持原子性。该包只允许依赖 `provider` 值类型，不得读取 Config、执行
+  HTTP/持久化或承担 Web 展示。
+- `quotaTracker` 只负责轮询、manual/429 refresh 去重和状态文件编排，不得恢复
+  第二份 quota map。跨域锁顺序始终为 `Proxy.mu → runtime.Manager`；Manager
+  持锁期间不得回调 Proxy、quota tracker 或外部 I/O。
 - wire capability 的三态、选择策略和并发状态统一归
   `internal/runtime/wirecap`；其 Store mutex 是 leaf lock，持锁时不得回调
   Proxy。根 `wirecap.go` 只负责 probe、provider/config 适配与持久化调度。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。
 - provider config 通过 parentOf 解析，runtime implementation 使用虚拟 provider id 查找。
-- reload 应让请求看到一致的 cfg/providers/poolIndex/expandedRoutes generation。
+- reload 应让请求看到一致的 cfg/providers/poolIndex/expandedRoutes generation；
+  resolver spread 与所有运行态 mutation 都必须携带该 generation。
 
 ## 转发契约
 

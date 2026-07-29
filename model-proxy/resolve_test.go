@@ -8,13 +8,15 @@ import (
 )
 
 type fakeResolverState struct {
-	spreadStart int
-	spreadCalls int
-	healthy     map[string]bool
+	spreadStart      int
+	spreadCalls      int
+	spreadGeneration uint64
+	healthy          map[string]bool
 }
 
-func (s *fakeResolverState) resolverSpreadStart(_ string, n int) int {
+func (s *fakeResolverState) resolverSpreadStart(_ string, n int, generation uint64) int {
 	s.spreadCalls++
+	s.spreadGeneration = generation
 	if n == 0 {
 		return 0
 	}
@@ -37,6 +39,7 @@ func TestResolverUsesNarrowStateCapability(t *testing.T) {
 		state,
 		map[string]provider.Provider{"pool#a": nil, "pool#b": nil},
 		map[string][]string{"pool": {"pool#a", "pool#b"}},
+		9,
 	)
 
 	picked, ok := r.Pick(RouteTarget{Provider: "pool", Model: "m"}, "")
@@ -48,6 +51,9 @@ func TestResolverUsesNarrowStateCapability(t *testing.T) {
 	}
 	if state.spreadCalls != 1 {
 		t.Fatalf("spread calls = %d, want 1", state.spreadCalls)
+	}
+	if state.spreadGeneration != 9 {
+		t.Fatalf("spread generation = %d, want request snapshot generation 9", state.spreadGeneration)
 	}
 
 	// Sticky selection is deterministic and must not consume the shared spread
@@ -144,9 +150,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 
 	// Health-aware failover: circuit-open the sticky account → Pick fails over to
 	// the healthy sibling instead of returning the dead one.
-	p.healthMu.Lock()
-	p.health[sessA.Provider] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
-	p.healthMu.Unlock()
+	seedRuntimeCircuit(t, p, sessA.Provider, time.Now().Add(time.Hour))
 	fallback, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A")
 	if !ok {
 		t.Fatal("Pick session-A with sticky account circuit-open should fail over, got !ok")
@@ -160,9 +164,7 @@ func TestResolver_ExpandAndPick(t *testing.T) {
 
 	// All accounts circuit-open → Pick !ok (no healthy virtual).
 	other := fallback.Provider
-	p.healthMu.Lock()
-	p.health[other] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
-	p.healthMu.Unlock()
+	seedRuntimeCircuit(t, p, other, time.Now().Add(time.Hour))
 	if _, ok := r.Pick(RouteTarget{Provider: "zhipu", Model: "glm"}, "session-A"); ok {
 		t.Error("Pick with ALL accounts circuit-open should be !ok")
 	}

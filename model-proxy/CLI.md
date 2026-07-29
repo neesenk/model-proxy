@@ -706,7 +706,7 @@ pin [<route> <provider>] [--ttl DUR] [--config PATH]
 unpin <route> [--config PATH]
 ```
 
-逻辑（`pin_cmd.go`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin`（`web.go` `handlePinSet`）写入 daemon 内存 `Proxy.pins`（`healthMu`）；`decideOrder` 末尾对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
+逻辑（`pin_cmd.go`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin`（`web.go` `handlePinSet`）写入 daemon 的 `internal/runtime.Manager`；`Manager.DecideOrder` 在 availability 过滤前对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）；operator pin 有意跨 config reload 保留。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
 
 ### stdout
 

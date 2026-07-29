@@ -553,12 +553,10 @@ func TestFusion_QuorumGrace(t *testing.T) {
 		}
 		// The cancelled straggler was CUT, not failed — the circuit must not
 		// count it as a provider failure.
-		proxy.healthMu.Lock()
 		failures := 0
-		if h := proxy.health["pc"]; h != nil {
-			failures = h.consecutiveFailures
+		if status, ok := proxy.runtimeState.Dashboard(time.Now()).Providers["pc"]; ok {
+			failures = status.ConsecutiveFailures
 		}
-		proxy.healthMu.Unlock()
 		if failures != 0 {
 			t.Errorf("cancelled straggler consecutiveFailures = %d, want 0", failures)
 		}
@@ -647,13 +645,10 @@ func TestFusion_CircuitRecordFailure(t *testing.T) {
 	if !strings.Contains(out, "final answer") {
 		t.Fatalf("client body missing answer: %s", out)
 	}
-	proxy.healthMu.Lock()
-	h := proxy.health["pb"]
 	failures := 0
-	if h != nil {
-		failures = h.consecutiveFailures
+	if status, ok := proxy.runtimeState.Dashboard(time.Now()).Providers["pb"]; ok {
+		failures = status.ConsecutiveFailures
 	}
-	proxy.healthMu.Unlock()
 	if failures != 1 {
 		t.Errorf("failed member consecutiveFailures = %d, want 1", failures)
 	}
@@ -699,9 +694,7 @@ func TestFusionLegSharesTargetPolicies(t *testing.T) {
 		if _, exists := retry["temperature"]; exists {
 			t.Errorf("retry still carries learned temperature: %s", pa.lastBody())
 		}
-		proxy.healthMu.Lock()
-		learned := proxy.paramBlock[modelLockKey{provider: "pa", model: "ma"}]["temperature"]
-		proxy.healthMu.Unlock()
+		learned := proxy.runtimeState.ParamBlocked("pa", "ma", "temperature")
 		if !learned {
 			t.Error("fusion leg did not persist unsupported parameter")
 		}
@@ -1000,13 +993,10 @@ func TestFusionLeg_FailureMetricsAlignTryTarget(t *testing.T) {
 			t.Errorf("401 leg metrics = failures %d failovers %d, want 0/1", m.Failures, m.Failovers)
 		}
 		// …but the circuit still sees the failure (same as tryTarget).
-		proxy.healthMu.Lock()
-		h := proxy.health["pa"]
 		failures := 0
-		if h != nil {
-			failures = h.consecutiveFailures
+		if status, ok := proxy.runtimeState.Dashboard(time.Now()).Providers["pa"]; ok {
+			failures = status.ConsecutiveFailures
 		}
-		proxy.healthMu.Unlock()
 		if failures != 1 {
 			t.Errorf("401 leg consecutiveFailures = %d, want 1", failures)
 		}

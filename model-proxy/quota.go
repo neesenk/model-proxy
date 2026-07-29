@@ -9,15 +9,17 @@ import (
 	"sync"
 	"time"
 
+	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/provider"
 )
 
 // quotaTracker polls providers' Quota() periodically, caches the results in
 // memory + a file (~/.model-proxy/quota_state.json), and serves them to the
-// scheduler. It has its own mutex (quotaMu), independent of healthMu / reload mu.
+// scheduler. Quota values live in the shared runtime Manager; the tracker mutex
+// only deduplicates refresh work.
 type quotaTracker struct {
-	mu        sync.RWMutex
-	state     map[string]*provider.QuotaSnapshot
+	mu        sync.Mutex // guards refreshGuard only; quota values live in runtime
+	runtime   *runtimestate.Manager
 	path      string
 	cfg       func() *Config
 	provs     func() map[string]provider.Provider
@@ -31,8 +33,7 @@ type quotaTracker struct {
 	poller sync.WaitGroup
 	// generation identifies the Proxy config generation that owns provider
 	// snapshots. A nil callback means a standalone/test tracker with generation 0.
-	generation      func() uint64
-	stateGeneration uint64
+	generation func() uint64
 	// persistMu serializes persist() WITHIN one tracker. Cross-tracker
 	// contention (parallel test proxies, or the daemon vs a test) is handled by
 	// the unique temp file in persist() — the fixed ".tmp" name used to make a
@@ -49,47 +50,30 @@ type quotaTracker struct {
 	// coalesces concurrent ones; last debounces ones that just ran), so a 429
 	// storm doesn't fire N upstream Quota() calls + N persists. Guarded by mu.
 	refreshGuard map[string]*refreshState
-	// stickySnapshot, if set, returns the current per-route sticky map for
-	// persistence — restored on boot so the proxy resumes parking on the same
-	// providers (prompt-cache-friendly across restarts, and gives visibility into
-	// the previous selection).
-	stickySnapshot func() map[string]routeSticky
-	// LoadedSticky is populated by load() on boot; NewProxy applies it to p.sticky.
-	LoadedSticky map[string]routeSticky
-	// healthSnapshot, if set, returns the frozen health state (rate-limit /
-	// circuit cooldowns, model lockouts, learned param blocklist) for
-	// persistence — restored on boot so long cooldowns (quota-exhausted, daily)
-	// survive a restart. Same healthMu-only lock discipline as stickySnapshot.
-	healthSnapshot func() map[string]persistedHealth
+	// loadedSticky is populated by load() on boot; NewProxy restores it through
+	// the runtime Manager.
+	loadedSticky map[string]runtimestate.Sticky
 	// fullSnapshot is installed by Proxy and atomically snapshots config
-	// fingerprint + health/sticky + quota under the repository lock order. It
-	// supersedes the legacy stickySnapshot/healthSnapshot callbacks above, which
-	// remain for focused quotaTracker unit tests.
+	// fingerprint + health/sticky + quota under the repository lock order.
 	fullSnapshot func() persistedFullSnapshot
-	// LoadedHealth is populated by load() on boot; NewProxy applies it (future-
-	// dated entries only) to p.health / p.modelLocks / p.paramBlock.
-	LoadedHealth map[string]persistedHealth
-	// LoadedHealthFP is the config fingerprint the loaded health was frozen
+	// loadedHealth is populated by load() on boot; NewProxy applies it (future-
+	// dated entries only) through the runtime Manager.
+	loadedHealth map[string]persistedHealth
+	// loadedHealthFP is the config fingerprint the loaded health was frozen
 	// under; NewProxy restores ONLY when it matches the current config's
 	// fingerprint (see healthConfigFingerprint).
-	LoadedHealthFP string
-	// LoadedWireCaps is populated by load() on boot; NewProxy restores the
+	loadedHealthFP string
+	// loadedWireCaps is populated by load() on boot; NewProxy restores the
 	// verdicts whose base_url still matches the current config (wirecap.go).
-	LoadedWireCaps map[string]wireCaps
+	loadedWireCaps map[string]wireCaps
 }
 
 // persistedHealth is the on-disk form of one provider's frozen runtime state.
-type persistedHealth struct {
-	RateLimitedUntil time.Time            `json:"rate_limited_until,omitempty"`
-	RateLimitKind    string               `json:"rate_limit_kind,omitempty"`
-	CircuitOpenUntil time.Time            `json:"circuit_open_until,omitempty"`
-	ModelLocks       map[string]time.Time `json:"model_locks,omitempty"` // model → lockedUntil
-	ParamBlock       map[string][]string  `json:"param_block,omitempty"` // model → learned unsupported top-level params
-}
+type persistedHealth = runtimestate.PersistedHealth
 
 type persistedFullSnapshot struct {
 	Providers  map[string]persistedSnapshot
-	Sticky     map[string]routeSticky
+	Sticky     map[string]runtimestate.Sticky
 	Health     map[string]persistedHealth
 	HealthFP   string
 	Generation uint64
@@ -102,9 +86,17 @@ type refreshState struct {
 	inFlight bool
 }
 
-func newQuotaTracker(path string, cfg func() *Config, provs func() map[string]provider.Provider) *quotaTracker {
+func newQuotaTracker(
+	path string,
+	cfg func() *Config,
+	provs func() map[string]provider.Provider,
+	runtimeManager *runtimestate.Manager,
+) *quotaTracker {
+	if runtimeManager == nil {
+		panic("quota tracker requires a runtime Manager")
+	}
 	return &quotaTracker{
-		state:         map[string]*provider.QuotaSnapshot{},
+		runtime:       runtimeManager,
 		refreshGuard:  map[string]*refreshState{},
 		path:          path,
 		cfg:           cfg,
@@ -260,29 +252,19 @@ func (t *quotaTracker) pollAllGeneration(now time.Time, generation uint64) {
 		}(name, provImpl)
 	}
 	wg.Wait()
-	t.mu.Lock()
-	if t.currentGeneration() != generation {
-		t.mu.Unlock()
+	if !t.runtime.MergeQuotas(results, generation) {
 		return // reload happened while the upstream polls were in flight
 	}
-	for name, snapshot := range results {
-		t.state[name] = snapshot
-	}
-	t.stateGeneration = generation
-	t.mu.Unlock()
 	if err := t.persist(); err != nil {
 		log.Printf("[quota] persist after pollAll failed: %v", err)
 	}
 }
 
 // clearForGeneration drops quota snapshots owned by the previous config. The
-// caller changes Proxy generation first, then calls this while holding the
-// Proxy's config+health locks (lock order: p.mu -> healthMu -> quotaMu).
+// The caller changes the runtime Manager generation first; stale clears are
+// rejected by the same generation gate as poll commits.
 func (t *quotaTracker) clearForGeneration(generation uint64) {
-	t.mu.Lock()
-	t.state = map[string]*provider.QuotaSnapshot{}
-	t.stateGeneration = generation
-	t.mu.Unlock()
+	t.runtime.ClearQuotas(generation)
 }
 
 // pollOne re-polls a single provider by its quota key (a config name or a
@@ -357,14 +339,10 @@ func (t *quotaTracker) refreshOne(name string, generations ...uint64) {
 }
 
 func (t *quotaTracker) commitSnapshot(generation uint64, name string, snapshot *provider.QuotaSnapshot) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.currentGeneration() != generation {
 		return false
 	}
-	t.state[name] = snapshot
-	t.stateGeneration = generation
-	return true
+	return t.runtime.SetQuota(name, snapshot, generation)
 }
 
 // fetchQuota polls a provider's Quota(), retrying transient errors (DNS "no
@@ -417,56 +395,12 @@ func isTransientQuotaErr(err string) bool {
 	return true
 }
 
-func (t *quotaTracker) setSnapshot(name string, s *provider.QuotaSnapshot) {
-	t.mu.Lock()
-	t.state[name] = s
-	t.mu.Unlock()
-}
-
-func (t *quotaTracker) snapshot(name string) *provider.QuotaSnapshot {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.state[name]
-}
-
-func (t *quotaTracker) allSnapshots() map[string]*provider.QuotaSnapshot {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	out := make(map[string]*provider.QuotaSnapshot, len(t.state))
-	for k, v := range t.state {
-		out[k] = v
-	}
-	return out
-}
-
-// classifyBilling applies the pay-as-you-go config override, the error guard,
-// and the staleness guard (a snapshot older than 3× the poll interval, or one
-// carrying an error, is treated as Unknown). Pure; shared by Proxy.billingClass
-// so the scheduling-tier logic lives in one place.
-func classifyBilling(s *provider.QuotaSnapshot, billingCfg string, interval time.Duration) provider.BillingClass {
-	if billingCfg == "pay-as-you-go" {
-		return provider.BillingPayG
-	}
-	if s == nil || s.Billing == provider.BillingUnknown || s.Err != "" {
-		return provider.BillingUnknown
-	}
-	if time.Since(s.AsOf) > 3*interval {
-		return provider.BillingUnknown
-	}
-	return s.Billing
-}
-
 type persistedSnapshot struct {
 	Billing      provider.BillingClass  `json:"billing"`
 	RemainingPct float64                `json:"remaining_pct"`
 	Windows      []provider.QuotaWindow `json:"windows"`
 	AsOf         time.Time              `json:"as_of"`
 	Err          string                 `json:"err,omitempty"`
-}
-
-type persistedSticky struct {
-	Provider string    `json:"provider"`
-	Since    time.Time `json:"since"`
 }
 
 // persist writes the quota/sticky/health snapshot atomically (tmp + rename).
@@ -486,47 +420,22 @@ func (t *quotaTracker) persist() error {
 	if t.fullSnapshot != nil {
 		s := t.fullSnapshot()
 		wrap["providers"] = s.Providers
-		sticky := make(map[string]persistedSticky, len(s.Sticky))
-		for k, v := range s.Sticky {
-			sticky[k] = persistedSticky{Provider: v.provider, Since: v.since}
-		}
-		wrap["sticky"] = sticky
+		wrap["sticky"] = s.Sticky
 		wrap["health"] = s.Health
 		wrap["health_fp"] = s.HealthFP
 		if len(s.WireCaps) > 0 {
 			wrap["wire_caps"] = s.WireCaps
 		}
 	} else {
-		t.mu.RLock()
-		out := make(map[string]persistedSnapshot, len(t.state))
-		for k, v := range t.state {
+		snapshots := t.runtime.Quotas()
+		out := make(map[string]persistedSnapshot, len(snapshots))
+		for k, v := range snapshots {
 			out[k] = persistedSnapshot{
 				Billing: v.Billing, RemainingPct: v.RemainingPct,
 				Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
 			}
 		}
-		t.mu.RUnlock()
 		wrap["providers"] = out
-	}
-	if t.fullSnapshot == nil && t.stickySnapshot != nil {
-		// stickySnapshot takes healthMu (proxy.go). It MUST be called outside
-		// quotaMu — calling it inside the RLock above would invert the lock
-		// order (healthMu → quotaMu is the rule; reverse = deadlock risk).
-		sm := t.stickySnapshot()
-		sticky := make(map[string]persistedSticky, len(sm))
-		for k, v := range sm {
-			sticky[k] = persistedSticky{Provider: v.provider, Since: v.since}
-		}
-		wrap["sticky"] = sticky
-	}
-	if t.fullSnapshot == nil && t.healthSnapshot != nil {
-		// Same lock discipline as stickySnapshot: healthMu only, never nested
-		// inside quotaMu. The fingerprint gates restore to the exact config the
-		// state was frozen under (health keys are provider names — without the
-		// gate, a different config's daemon/test reading this file would
-		// "restore" cooldowns onto unrelated same-named providers).
-		wrap["health"] = t.healthSnapshot()
-		wrap["health_fp"] = healthConfigFingerprint(t.cfg())
 	}
 	data, err := json.MarshalIndent(wrap, "", "  ")
 	if err != nil {
@@ -570,29 +479,27 @@ func (t *quotaTracker) load() {
 		return
 	}
 	var wrap struct {
-		Providers map[string]persistedSnapshot `json:"providers"`
-		Sticky    map[string]persistedSticky   `json:"sticky"`
-		Health    map[string]persistedHealth   `json:"health"`
-		HealthFP  string                       `json:"health_fp"`
-		WireCaps  map[string]wireCaps          `json:"wire_caps"`
+		Providers map[string]persistedSnapshot   `json:"providers"`
+		Sticky    map[string]runtimestate.Sticky `json:"sticky"`
+		Health    map[string]persistedHealth     `json:"health"`
+		HealthFP  string                         `json:"health_fp"`
+		WireCaps  map[string]wireCaps            `json:"wire_caps"`
 	}
 	if err := json.Unmarshal(data, &wrap); err != nil {
 		return
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	quota := make(map[string]*provider.QuotaSnapshot, len(wrap.Providers))
 	for k, v := range wrap.Providers {
-		t.state[k] = &provider.QuotaSnapshot{
+		quota[k] = &provider.QuotaSnapshot{
 			Billing: v.Billing, RemainingPct: v.RemainingPct,
 			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
 		}
 	}
-	t.stateGeneration = t.currentGeneration()
-	t.LoadedSticky = make(map[string]routeSticky, len(wrap.Sticky))
-	for k, v := range wrap.Sticky {
-		t.LoadedSticky[k] = routeSticky{provider: v.Provider, since: v.Since}
-	}
-	t.LoadedHealth = wrap.Health
-	t.LoadedHealthFP = wrap.HealthFP
-	t.LoadedWireCaps = wrap.WireCaps
+	t.runtime.MergeQuotas(quota, t.currentGeneration())
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.loadedSticky = wrap.Sticky
+	t.loadedHealth = wrap.Health
+	t.loadedHealthFP = wrap.HealthFP
+	t.loadedWireCaps = wrap.WireCaps
 }

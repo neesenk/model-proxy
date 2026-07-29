@@ -72,8 +72,11 @@ volcengine 每账号包含 `{api_key, access_key, secret_key}`。绑定凭据存
 resolver 负责 identity mapping 和健康预过滤，不负责占用 half-open slot。权威 gate 仍由调用方的 `takeHalfOpenSlot` 完成。
 
 resolver 不持有 composition root `*Proxy`；它只依赖 `resolverState` 暴露的
-健康检查与 spread index 能力，以及当前 `runtimeSnapshot` 的 provider/pool map。
-因此 pooled identity 选择不能顺带访问 reload、调度、Web 或其他 Proxy 状态。
+Manager health gate 与 generation-aware spread index 能力，以及当前
+`runtimeSnapshot` 的 provider/pool map。无 session 的 spread 推进必须携带该
+snapshot 的 generation；reload 后到达的旧请求不得改变新 generation 的轮询
+位置。因此 pooled identity 选择不能顺带访问 reload、完整调度、Web 或其他
+Proxy 状态，也不得自行持有 health/spread map。
 
 任何 resolver 失败都必须 fail-closed，禁止继续使用池化父名构造无认证请求。
 

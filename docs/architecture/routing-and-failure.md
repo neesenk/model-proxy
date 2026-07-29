@@ -9,7 +9,8 @@
 - `Proxy.forward` / `serveOnce` / `attemptExecutor.execute`
 - `dispatch_context.go`：`runtimeSnapshot`、`serveRequest`、`targetAttempt`
 - `attempt_executor.go`：单目标 I/O 执行器及其窄状态端口 `attemptState`
-- `providerHealth`、`modelLocks`、`paramBlock`
+- `internal/runtime.Manager`：health、model lock、paramBlock、sticky、pin、
+  spread、quota 与 schedule
 - `classify429`、`parseResetHint`、`isModelDenied`、`parseUnsupportedParam`
 - `cooldownState`、`hasRecoveredUntried`
 
@@ -59,7 +60,10 @@ admission 与 dispatch 由 `serveOnce` 在 executor 外完成，Fusion synthesiz
 
 **判定的不对称兜底**：`classifyWireStatus` 把 404 以外的全部 4xx（含 401/403/405/429）一律判 yes，而运行时纠正只认 404。对 `/responses` 需要不同鉴权、或对未实现路径返 405 的网关会产生 wrong-yes 且不会被自动翻转——此时只能显式声明 `protocol:` 兜底，绕过 verdict。
 
-运行态健康信息位于 `Proxy.health`，由 `healthMu` 保护，与 reload 使用的 `mu` 分离：
+运行态健康、模型锁和调度状态统一位于 `internal/runtime.Manager`。Manager 以
+单锁和 generation gate 保证健康 mutation、availability 过滤、schedule、
+cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload 只按
+`Proxy.mu → runtime.Manager` 进入它：
 
 - `schedule` 跳过熔断、限频和模型锁定目标。
 - timeout、连接错误和 5xx 计入 provider 熔断。

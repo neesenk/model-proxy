@@ -102,6 +102,13 @@ verdict、JSON 持久化表示、协议选择纯策略，以及 parent provider 
 Store。根 `wirecap.go` 只保留 HTTP probe、provider/config 适配、404 纠正触发和
 异步持久化编排；Store 的 leaf lock 内不得回调应用代码。
 
+`internal/runtime.Manager` 是 config generation 内可变路由状态的唯一 owner，
+以单 mutex 统一 health、sticky、pin、model lock、paramBlock、spread、quota、
+schedule 决策以及 persistence/Web detached snapshot。该包只依赖 `provider`
+中的 quota 值类型；Config、HTTP、文件持久化和 Web DTO 映射仍由 composition
+root 编排。`quotaTracker` 只执行轮询、refresh 去重和文件写入，不再拥有第二份
+quota 状态。
+
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
@@ -122,11 +129,17 @@ Store。根 `wirecap.go` 只保留 HTTP probe、provider/config 适配、404 纠
 ## 状态与锁
 
 - `Proxy.mu`：只保护 reload-owned 对象交换；请求流式期间不持有。
-- `healthMu`：health、sticky、pin、model lock、paramBlock、spread counter。
-- quota、`internal/runtime/wirecap.Store`、metrics/tokens/agents、stats flusher、
+- `internal/runtime.Manager`：以单锁保护 generation、health、sticky、pin、
+  model lock、paramBlock、spread、quota 和 schedule；所有返回给 persistence
+  或 Web 的复合结果必须在该锁内原子复制并与 generation 一起返回。
+  请求排序在同一次临界区内完成 quota projection 与 health/pin/sticky/spread
+  选择；Web/调试调度从同一个 detached DashboardSnapshot 做只读 preview，
+  禁止为 order 二次读取 Manager。
+- `internal/runtime/wirecap.Store`、metrics/tokens/agents、stats flusher、
   cache、pricing 各有独立 owner/leaf lock；SQLite Store 与 wire-capability
   Store 均不拥有或回调应用运行时。
-- 跨域锁顺序仅允许 `healthMu → quotaMu`。
+- 跨域锁顺序仅允许 `Proxy.mu → runtime.Manager`。Manager 持锁时不得回调
+  Proxy、quota tracker 或任何外部 I/O。
 
 Web/API 的 `webServer` 不持有 `*Proxy`，只持有 composition root 在构造时创建的
 具体 capability：`proxyReadView` 返回 detached snapshot，`proxyAdminCommands`
@@ -145,8 +158,8 @@ Web/API 的 `webServer` 不持有 `*Proxy`，只持有 composition root 在构�
   flush；stats 在 final flush 后关闭 SQLite Store。这样 Close 返回后不会有
   Shadow 向已关闭 logger 补写，也不会遗留数据库连接。
 
-quota tracker 与 Responses state store 各自拥有内部 debounce/worker，但由
-`Proxy.Close` 按统一顺序停止。
+quota tracker 的 poll/refresh task 与 persist 编排、Responses state store 的
+debounce/worker 都由 `Proxy.Close` 按统一顺序停止。
 
 Web 后台任务由独立的 `webTaskOwner` 管理，不混入 `proxyLifecycle`：login-session
 GC 与 AQP/Codex 异步登录轮询都必须经同一 admission gate 启动。HTTP transport
@@ -172,6 +185,7 @@ stats flusher / proxyReadView → internal/observe/stats
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
 wire probe / target plan → internal/runtime/wirecap
+schedule / health / resolver / quota adapter → internal/runtime
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
 ```
@@ -203,6 +217,9 @@ composition root → internal/config → internal/pricing / internal/protocol
   Config、Provider 或任意 `model-proxy/*` 包；
 - `internal/runtime/wirecap` 反向依赖 Config、Proxy、Provider、HTTP/Web/CLI
   或任意 `model-proxy/*` 包；根包重新声明 verdict、capabilities map 或其锁；
+- `internal/runtime` 依赖 `provider` 值类型之外的 Config、Proxy、HTTP/Web/CLI
+  或持久化实现；根包恢复 health/sticky/pin/model-lock/paramBlock/spread/quota
+  的第二份 map 或互斥锁；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
   Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetPlan`；

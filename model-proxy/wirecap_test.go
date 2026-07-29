@@ -360,9 +360,10 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 	if caps.Responses != triNo {
 		t.Errorf("post-404 verdict responses = %s, want no", caps.Responses)
 	}
-	p.healthMu.Lock()
-	locks := len(p.modelLocks)
-	p.healthMu.Unlock()
+	locks := 0
+	for _, entries := range p.runtimeState.Dashboard(time.Now()).ModelLocks {
+		locks += len(entries)
+	}
 	if locks != 0 {
 		t.Errorf("model locked %d time(s), want 0 (verdict miss is not a model failure)", locks)
 	}

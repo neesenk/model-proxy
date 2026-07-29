@@ -38,7 +38,12 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 	p.providers["fallback"] = &testProv{key: "f"}
 	refreshed := make(chan string, 2)
 	p.quota.stop()
-	p.quota = newQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return p.providers })
+	p.quota = newQuotaTracker(
+		"",
+		func() *Config { return cfg },
+		func() map[string]provider.Provider { return p.providers },
+		&p.runtimeState,
+	)
 	p.quota.generation = p.configGeneration.Load
 	// refreshHook lets the test count refreshes + capture WHICH provider was
 	// refreshed — not just how many (P0-3: if the bug fires on fallback instead
@@ -111,13 +116,16 @@ func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]
 		cfg:       cfg,
 		providers: map[string]provider.Provider{},
 		client:    &http.Client{Timeout: 0},
-		health:    map[string]*providerHealth{},
-		sticky:    map[string]routeSticky{},
 		poolIndex: map[string][]string{},
 		parentOf:  map[string]string{},
 	}
 	p.expandedRoutes = p.buildExpandedRoutes()
-	p.quota = newQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return p.providers })
+	p.quota = newQuotaTracker(
+		"",
+		func() *Config { return cfg },
+		func() map[string]provider.Provider { return p.providers },
+		&p.runtimeState,
+	)
 	p.quota.generation = p.configGeneration.Load
 	t.Cleanup(p.Close)
 	for name := range provs {
@@ -159,7 +167,7 @@ func TestSchedule_StickyHoldsWithinDwell(t *testing.T) {
 	staticSurplus(p, "a", 0.5, 0.5) // surplus 0 (current sticky)
 	staticSurplus(p, "b", 0.5, 0)   // surplus 0.5 (higher)
 	// seed sticky on 'a'
-	p.sticky["m"] = routeSticky{provider: "a", since: time.Now()}
+	seedRuntimeSticky(t, p, "m", "a", time.Now())
 	if got := firstProvider(p, "m"); got != "a" {
 		t.Errorf("within dwell: first=%q, want a (sticky despite lower surplus)", got)
 	}
@@ -172,7 +180,7 @@ func TestSchedule_SwitchesAfterDwellByMargin(t *testing.T) {
 	p.cfg.Scheduling.StickyDwell = "1ms"
 	staticSurplus(p, "a", 0.5, 0.5) // surplus 0
 	staticSurplus(p, "b", 0.5, 0)   // surplus 0.5 — ahead by 0.5 ≥ 0.15 margin
-	p.sticky["m"] = routeSticky{provider: "a", since: time.Now().Add(-time.Second)}
+	seedRuntimeSticky(t, p, "m", "a", time.Now().Add(-time.Second))
 	time.Sleep(2 * time.Millisecond) // dwell expired
 	if got := firstProvider(p, "m"); got != "b" {
 		t.Errorf("after dwell + margin: first=%q, want b", got)
@@ -186,7 +194,7 @@ func TestSchedule_NoSwitchBelowMargin(t *testing.T) {
 	p.cfg.Scheduling.StickyDwell = "1ms"
 	staticSurplus(p, "a", 0.5, 0.2)  // surplus 0.3
 	staticSurplus(p, "b", 0.5, 0.15) // surplus 0.35 — ahead by 0.05 < 0.15 margin
-	p.sticky["m"] = routeSticky{provider: "a", since: time.Now().Add(-time.Second)}
+	seedRuntimeSticky(t, p, "m", "a", time.Now().Add(-time.Second))
 	time.Sleep(2 * time.Millisecond)
 	if got := firstProvider(p, "m"); got != "a" {
 		t.Errorf("below margin: first=%q, want a (stay sticky)", got)
@@ -205,9 +213,7 @@ func TestSchedule_PayGStrictLastResort(t *testing.T) {
 		t.Errorf("plan@5%% still beats payg: first=%q, want plan", got)
 	}
 	// now mark plan unavailable (rate-limited) → payg used
-	p.healthMu.Lock()
-	p.health["plan"] = &providerHealth{rateLimitedUntil: time.Now().Add(time.Hour)}
-	p.healthMu.Unlock()
+	seedRuntimeRateLimit(t, p, "plan", time.Now().Add(time.Hour), rlTransient)
 	if got := firstProvider(p, "m"); got != "payg" {
 		t.Errorf("when plan unavailable: first=%q, want payg (last resort)", got)
 	}
@@ -271,7 +277,7 @@ func TestSchedule_SwitchesOnPriorityAfterDwell(t *testing.T) {
 	p.cfg.Scheduling.StickyDwell = "1ms"
 	staticQuota(p, "a", 0.5)
 	staticQuota(p, "b", 0.5) // equal remaining → sub-margin; priority decides
-	p.sticky["m"] = routeSticky{provider: "b", since: time.Now().Add(-time.Second)}
+	seedRuntimeSticky(t, p, "m", "b", time.Now().Add(-time.Second))
 	time.Sleep(2 * time.Millisecond) // dwell expired
 	if got := firstProvider(p, "m"); got != "a" {
 		t.Errorf("after dwell: first=%q, want a (better priority wins on sub-margin quota)", got)
@@ -294,9 +300,7 @@ func TestSchedule_PayGOrderByPriority(t *testing.T) {
 	if got := firstProvider(p, "m"); got != "paygA" {
 		t.Errorf("first=%q, want paygA (priority 1 within payg tier)", got)
 	}
-	p.healthMu.Lock()
-	p.health["paygA"] = &providerHealth{rateLimitedUntil: time.Now().Add(time.Hour)}
-	p.healthMu.Unlock()
+	seedRuntimeRateLimit(t, p, "paygA", time.Now().Add(time.Hour), rlTransient)
 	if got := firstProvider(p, "m"); got != "paygB" {
 		t.Errorf("paygA unavailable: first=%q, want paygB", got)
 	}
@@ -448,7 +452,7 @@ func TestSchedule_RestoredStickyReevaluatesWhenDwellExpired(t *testing.T) {
 	staticSurplus(p, "a", 0.5, 0)   // surplus +0.5 (best)
 	staticSurplus(p, "b", 0.5, 0.5) // surplus 0
 	// Simulate a sticky restored from disk whose since is well past dwell.
-	p.sticky["m"] = routeSticky{provider: "b", since: time.Now().Add(-1 * time.Hour)}
+	seedRuntimeSticky(t, p, "m", "b", time.Now().Add(-time.Hour))
 	if got := firstProvider(p, "m"); got != "a" {
 		t.Errorf("restored sticky with expired dwell: first=%q, want a (re-evaluated to best surplus)", got)
 	}

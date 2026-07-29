@@ -14,14 +14,9 @@ func TestReleaseHalfOpenSlot(t *testing.T) {
 	// No health entry yet → no-op (no panic).
 	p.releaseHalfOpenSlot("a")
 	// Set up a half-open slot, then release it.
-	p.healthMu.Lock()
-	h := &providerHealth{halfOpenInFlight: true}
-	p.health["a"] = h
-	p.healthMu.Unlock()
+	seedRuntimeHalfOpen(t, p, "a")
 	p.releaseHalfOpenSlot("a")
-	p.healthMu.Lock()
-	stillInFlight := p.health["a"].halfOpenInFlight
-	p.healthMu.Unlock()
+	stillInFlight := runtimeStatus(t, p, "a", time.Now()).HalfOpenInFlight
 	if stillInFlight {
 		t.Error("releaseHalfOpenSlot did not clear halfOpenInFlight")
 	}
@@ -39,9 +34,7 @@ func TestTakeHalfOpenSlot_Lifecycle(t *testing.T) {
 	p.releaseHalfOpenSlot("a") // release is a no-op when no slot reserved
 
 	// Open the circuit, then half-open allows exactly one probe.
-	p.healthMu.Lock()
-	p.health["a"] = &providerHealth{circuitOpenUntil: time.Now().Add(-1 * time.Minute)} // cooldown expired → half-open
-	p.healthMu.Unlock()
+	seedRuntimeCircuit(t, p, "a", time.Now().Add(-time.Minute))
 	if !p.takeHalfOpenSlot("a") {
 		t.Error("half-open first probe: want true")
 	}
@@ -61,9 +54,7 @@ func TestTakeHalfOpenSlot_Lifecycle(t *testing.T) {
 func TestTakeHalfOpenSlot_CircuitOpen(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
-	p.healthMu.Lock()
-	p.health["a"] = &providerHealth{circuitOpenUntil: time.Now().Add(5 * time.Minute)} // still open
-	p.healthMu.Unlock()
+	seedRuntimeCircuit(t, p, "a", time.Now().Add(5*time.Minute))
 	if p.takeHalfOpenSlot("a") {
 		t.Error("circuit open: takeHalfOpenSlot want false")
 	}
@@ -74,9 +65,7 @@ func TestTakeHalfOpenSlot_CircuitOpen(t *testing.T) {
 func TestTakeHalfOpenSlot_RateLimited(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
-	p.healthMu.Lock()
-	p.health["a"] = &providerHealth{rateLimitedUntil: time.Now().Add(5 * time.Minute)}
-	p.healthMu.Unlock()
+	seedRuntimeRateLimit(t, p, "a", time.Now().Add(5*time.Minute), rlTransient)
 	if p.takeHalfOpenSlot("a") {
 		t.Error("rate-limited: takeHalfOpenSlot want false")
 	}
@@ -93,10 +82,9 @@ func TestRecordRateLimit_Extends(t *testing.T) {
 	// A shorter until must NOT overwrite the longer one — and its kind must not
 	// overwrite the winning horizon's kind either.
 	p.recordRateLimit("a", now.Add(10*time.Second), rlTransient)
-	p.healthMu.Lock()
-	got := p.health["a"].rateLimitedUntil
-	kind := p.health["a"].rateLimitKind
-	p.healthMu.Unlock()
+	status := runtimeStatus(t, p, "a", now)
+	got := status.RateLimitedUntil
+	kind := status.RateLimitKind
 	if !got.Equal(first) {
 		t.Errorf("recordRateLimit extended: got %v want %v (should keep the later)", got, first)
 	}
@@ -110,14 +98,15 @@ func TestRecordRateLimit_Extends(t *testing.T) {
 func TestRecordSuccess_ClearsCircuit(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
 	p := newTestProxy(t, cfg)
-	p.healthMu.Lock()
-	p.health["a"] = &providerHealth{consecutiveFailures: 5, circuitOpenUntil: time.Now().Add(5 * time.Minute), halfOpenInFlight: true}
-	p.healthMu.Unlock()
+	for range 5 {
+		p.runtimeState.RecordFailure("a", 5, -time.Second, 0)
+	}
+	if !p.takeHalfOpenSlot("a") {
+		t.Fatal("failed to reserve half-open slot")
+	}
 	p.recordSuccess("a", "m1")
-	p.healthMu.Lock()
-	h := p.health["a"]
-	p.healthMu.Unlock()
-	if h.consecutiveFailures != 0 || !h.circuitOpenUntil.IsZero() || h.halfOpenInFlight {
+	h := runtimeStatus(t, p, "a", time.Now())
+	if h.ConsecutiveFailures != 0 || !h.CircuitOpenUntil.IsZero() || h.HalfOpenInFlight {
 		t.Errorf("recordSuccess did not reset health: %+v", h)
 	}
 }
@@ -129,13 +118,11 @@ func TestRecordFailure_OpensCircuitAtThreshold(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	p.recordFailure("a", cfg.Scheduling)
 	p.recordFailure("a", cfg.Scheduling) // reaches threshold
-	p.healthMu.Lock()
-	h := p.health["a"]
-	p.healthMu.Unlock()
-	if h.circuitOpenUntil.IsZero() {
+	h := runtimeStatus(t, p, "a", time.Now())
+	if h.CircuitOpenUntil.IsZero() {
 		t.Error("circuit not opened after threshold failures")
 	}
-	if h.halfOpenInFlight {
+	if h.HalfOpenInFlight {
 		t.Error("halfOpenInFlight should be cleared on failure")
 	}
 }

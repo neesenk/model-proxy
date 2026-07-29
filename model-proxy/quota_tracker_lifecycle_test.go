@@ -14,7 +14,7 @@ func TestQuotaTracker_Stop(t *testing.T) {
 	dir := t.TempDir()
 	cfg := func() *Config { return &Config{} }
 	provs := func() map[string]provider.Provider { return nil }
-	tr := newQuotaTracker(dir+"/q.json", cfg, provs)
+	tr := newStandaloneQuotaTracker(dir+"/q.json", cfg, provs)
 	tr.start()
 	// stop must be idempotent and not block.
 	tr.stop()
@@ -29,7 +29,7 @@ func TestQuotaTracker_PollAfter(t *testing.T) {
 		called.Add(1)
 		return nil
 	}
-	tr := newQuotaTracker(dir+"/q.json", cfg, provs)
+	tr := newStandaloneQuotaTracker(dir+"/q.json", cfg, provs)
 	tr.start()
 	defer tr.stop()
 	// pollAfter → pollAll → provs(). Measure the delta: start()'s bootstrap poll

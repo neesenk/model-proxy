@@ -88,7 +88,7 @@ func TestQuotaPersist_ConcurrentTrackersNoRenameRace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			tr := newQuotaTracker(path, cfg, provs)
+			tr := newStandaloneQuotaTracker(path, cfg, provs)
 			for j := 0; j < persists; j++ {
 				if err := tr.persist(); err != nil {
 					t.Errorf("persist failed: %v", err)

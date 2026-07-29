@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	runtimestate "model-proxy/internal/runtime"
 )
 
 // setPinForTest installs a pin bypassing TTL clock semantics the test controls
@@ -169,11 +171,10 @@ func TestPin_TTLExpiry(t *testing.T) {
 		t.Errorf("active pin order=%+v want [deepseek] only", ordered)
 	}
 	// Expire the pin → back to the full ranking (zhipu first by priority).
-	p.healthMu.Lock()
-	pe := p.pins["glm"]
-	pe.expiresAt = time.Now().Add(-time.Minute)
-	p.pins["glm"] = pe
-	p.healthMu.Unlock()
+	p.runtimeState.SetPin("glm", runtimestate.Pin{
+		Provider:  "deepseek",
+		ExpiresAt: time.Now().Add(-time.Minute),
+	})
 	ordered2, _ := p.decideOrder(cfg, p.parentOf, "glm", "", cfg.Routes["glm"], time.Now(), false, routeKeys)
 	if len(ordered2) != 2 || ordered2[0].Provider != "zhipu" {
 		t.Errorf("expired pin order=%+v want full ranking [zhipu, deepseek]", ordered2)
@@ -374,10 +375,8 @@ func TestPin_ForcesThroughCircuit(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		p.recordFailure("b", sched)
 	}
-	p.healthMu.Lock()
-	hb := p.health["b"]
-	open := hb != nil && hb.circuitOpenUntil.After(time.Now())
-	p.healthMu.Unlock()
+	hb, ok := p.runtimeState.Dashboard(time.Now()).Providers["b"]
+	open := ok && hb.CircuitOpenUntil.After(time.Now())
 	if !open {
 		t.Fatal("precondition: b should be circuit-open")
 	}

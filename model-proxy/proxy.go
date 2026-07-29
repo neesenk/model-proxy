@@ -28,6 +28,7 @@ import (
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
+	runtimestate "model-proxy/internal/runtime"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/transport/bodycapture"
 	"model-proxy/provider"
@@ -47,44 +48,38 @@ func nextRequestID() string {
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
-	lifecycle         *proxyLifecycle
-	mu                sync.RWMutex  // guards cfg/providers across reload (held by handler for the request)
-	healthMu          sync.Mutex    // guards health + sticky maps (runtime circuit/rate-limit/sticky state)
-	configGeneration  atomic.Uint64 // incremented on every successful reload
-	runtimeGeneration uint64        // guarded by healthMu; rejects stale request mutations
-	cfg               *Config
-	providers         map[string]provider.Provider // provider name → Provider (shared)
-	client            *http.Client
-	health            map[string]*providerHealth       // provider name → circuit/rate-limit state
-	sticky            map[string]routeSticky           // exposed model → current provider + since
-	pins              map[string]pinEntry              // exposed model → manual pin (healthMu); hot-switch, overrides schedule
-	modelLocks        map[modelLockKey]*modelLockEntry // (provider,model) → model-level failure lockout (healthMu); isolates a bad model without poisoning the account
-	paramBlock        map[modelLockKey]map[string]bool // {provider,model} → learned unsupported top-level request params, stripped before send (healthMu)
-	quota             *quotaTracker                    // background quota poller; nil only in degenerate tests
-	metrics           *metricsStore                    // request counters (atomic); nil only in degenerate tests
-	tokens            *tokenCounter                    // SSE-scanned token usage; nil only in degenerate tests
-	agents            *agentCounter                    // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats             *observestats.Store              // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
-	flusher           *statsFlusher                    // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog            *requestlog.Logger               // per-request access log (full bodies); nil = disabled (default) or init failure
-	reqLogStarted     bool                             // lifecycle owns loop/shutdown only when started by startRuntimeServices
-	cache             *responsecache.Store             // exact-match response cache (prompt-hash + TTL); nil = disabled
-	responsesState    *protocol.ResponsesStateStore    // previous_response_id replay for Responses clients bridged to stateless backends
-	events            *observeevents.Hub               // live request monitor fan-out hub (SSE /api/events); always non-nil
-	fusionReg         *fusionRegistry                  // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
-	catalog           *catalog.Catalog                 // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
-	shadow            atomic.Pointer[shadowRuntime]    // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
-	pricingMu         sync.Mutex                       // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
-	closeOnce         sync.Once
+	lifecycle        *proxyLifecycle
+	mu               sync.RWMutex  // guards cfg/providers across reload (held by handler for the request)
+	configGeneration atomic.Uint64 // incremented on every successful reload
+	runtimeState     runtimestate.Manager
+	cfg              *Config
+	providers        map[string]provider.Provider // provider name → Provider (shared)
+	client           *http.Client
+	quota            *quotaTracker                 // background quota poller; nil only in degenerate tests
+	metrics          *metricsStore                 // request counters (atomic); nil only in degenerate tests
+	tokens           *tokenCounter                 // SSE-scanned token usage; nil only in degenerate tests
+	agents           *agentCounter                 // per-agent (UA) request/token counters; nil only in degenerate tests
+	stats            *observestats.Store           // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
+	flusher          *statsFlusher                 // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog           *requestlog.Logger            // per-request access log (full bodies); nil = disabled (default) or init failure
+	reqLogStarted    bool                          // lifecycle owns loop/shutdown only when started by startRuntimeServices
+	cache            *responsecache.Store          // exact-match response cache (prompt-hash + TTL); nil = disabled
+	responsesState   *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
+	events           *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
+	fusionReg        *fusionRegistry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
+	catalog          *catalog.Catalog              // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
+	shadow           atomic.Pointer[shadowRuntime] // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
+	pricingMu        sync.Mutex                    // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
+	closeOnce        sync.Once
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
 	// the inverse. Single-account / not-logged-in providers appear in neither
 	// map (their id == the plain name). Guards: same as the struct — poolIndex
-	// and parentOf are rebuilt on reload under p.mu; spreadCtr under healthMu.
+	// and parentOf are rebuilt on reload under p.mu; pool spread is owned by
+	// runtimeState.
 	poolIndex      map[string][]string      // parent name → sorted virtual ids (only multi-account parents)
 	parentOf       map[string]string        // virtual id → parent name
-	spreadCtr      map[string]uint64        // parent name → session-assignment round-robin counter (healthMu)
 	expandedRoutes map[string][]RouteTarget // exposed model → expanded targets (explicit + implicit)
 	implicitRoutes map[string]RouteTarget   // exposed model → single target auto-derived from logged-in providers' model lists (for models not in cfg.Routes)
 	routeWarnings  []string                 // ambiguity warnings for implicit routes (multi-provider); surfaced in `models` CLI + /api/status
@@ -92,7 +87,7 @@ type Proxy struct {
 	// scheduleHook is a test-only hook fired in forward right after schedule(),
 	// capturing the threaded sessionKey. Nil in production.
 	scheduleHook        func(sessionKey string)
-	persistSnapshotHook func() // test-only: runs after p.mu.RLock, before health/quota locks
+	persistSnapshotHook func() // test-only: runs after p.mu.RLock, before the Manager snapshot
 
 	// Runtime wire capabilities have their own leaf Store. The Store never
 	// calls back into Proxy while locked and survives reload generations.
@@ -100,40 +95,9 @@ type Proxy struct {
 	wireProbe bool
 }
 
-// providerHealth tracks a provider's circuit-breaker and rate-limit state.
-type providerHealth struct {
-	consecutiveFailures int
-	circuitOpenUntil    time.Time // zero = closed
-	rateLimitedUntil    time.Time // zero = not limited
-	rateLimitKind       rateLimitKind
-	halfOpenInFlight    bool // a half-open probe is running
-}
-
-// routeSticky records the provider a route is currently parked on + when it was
-// chosen (for the sticky_dwell window).
-type routeSticky struct {
-	provider string
-	since    time.Time
-}
-
-// modelLockKey identifies a (provider, model) pair for model-level failure
-// isolation: a model removed upstream (404), denied on this account (400/403
-// model-denied), or returning empty 200s locks ONLY that pair — the account's
-// other models keep serving. Guarded by healthMu.
-type modelLockKey struct {
-	provider string
-	model    string
-}
-
-// modelLockEntry is the lockout state of one (provider, model): consecutive
-// model-level failures + the lockout horizon (zero = not locked).
-type modelLockEntry struct {
-	failures    int
-	lockedUntil time.Time
-}
-
 // pinEntry is a manual route→provider pin (model-proxy pin <route> <provider>
-// --ttl). expiresAt zero = no expiry (until unpin). Guarded by healthMu.
+// --ttl). expiresAt zero = no expiry (until unpin). The runtime Manager owns
+// storage; this private value is the application/Web compatibility projection.
 type pinEntry struct {
 	provider  string
 	expiresAt time.Time
@@ -330,21 +294,15 @@ func NewProxy(cfg *Config) *Proxy {
 func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	built := buildProviders(cfg)
 	p := &Proxy{
-		lifecycle:  newProxyLifecycle(),
-		cfg:        cfg,
-		providers:  built.providers,
-		client:     &http.Client{Timeout: 0},
-		health:     map[string]*providerHealth{},
-		sticky:     map[string]routeSticky{},
-		modelLocks: map[modelLockKey]*modelLockEntry{},
-		paramBlock: map[modelLockKey]map[string]bool{},
-		pins:       map[string]pinEntry{},
-		spreadCtr:  map[string]uint64{},
-		poolIndex:  built.poolIndex,
-		parentOf:   built.parentOf,
+		lifecycle: newProxyLifecycle(),
+		cfg:       cfg,
+		providers: built.providers,
+		client:    &http.Client{Timeout: 0},
+		poolIndex: built.poolIndex,
+		parentOf:  built.parentOf,
 	}
+	p.runtimeState.ReplaceGeneration(1)
 	p.configGeneration.Store(1)
-	p.runtimeGeneration = 1
 	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.eligible)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	// Config-time routing hazards (reasoning-replay models behind conversion,
@@ -361,7 +319,8 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
 	p.quota = newQuotaTracker(qpath,
 		func() *Config { return p.cfgSnapshot() },
-		func() map[string]provider.Provider { return p.providerSnapshot() })
+		func() map[string]provider.Provider { return p.providerSnapshot() },
+		&p.runtimeState)
 	p.quota.generation = p.configGeneration.Load
 	p.quota.fullSnapshot = p.snapshotPersistedState
 	p.quota.start()
@@ -397,18 +356,14 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// like "m1" collide across configs even when providers don't). Legacy
 	// files without a fingerprint keep the historical restore behavior.
 	fp := healthConfigFingerprint(cfg)
-	fpMatch := p.quota.LoadedHealthFP == "" || p.quota.LoadedHealthFP == fp
-	if p.quota.LoadedHealthFP != "" && !fpMatch {
+	fpMatch := p.quota.loadedHealthFP == "" || p.quota.loadedHealthFP == fp
+	if p.quota.loadedHealthFP != "" && !fpMatch {
 		// Quota snapshots are provider/account observations too. A changed provider
 		// identity or endpoint must not inherit the old file's scheduling tier.
 		p.quota.clearForGeneration(p.configGeneration.Load())
 	}
-	if loaded := p.quota.LoadedSticky; len(loaded) > 0 && fpMatch {
-		p.healthMu.Lock()
-		for k, v := range loaded {
-			p.sticky[k] = v
-		}
-		p.healthMu.Unlock()
+	if loaded := p.quota.loadedSticky; len(loaded) > 0 && fpMatch {
+		p.runtimeState.RestoreSticky(loaded)
 	}
 	// Restore frozen health state (rate-limit/circuit cooldowns, model lockouts,
 	// learned param blocklist) persisted before the last restart — ONLY when the
@@ -418,50 +373,14 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// providers. Only future-dated cooldowns are applied — expired ones
 	// self-heal by being dropped. A restored circuit gets a full failure count
 	// so its next failure re-opens it immediately (same semantics as before).
-	if loaded := p.quota.LoadedHealth; len(loaded) > 0 && p.quota.LoadedHealthFP != "" && p.quota.LoadedHealthFP == fp {
-		now := time.Now()
-		threshold := cfg.Scheduling.Threshold()
-		p.healthMu.Lock()
-		for name, ph := range loaded {
-			if now.Before(ph.RateLimitedUntil) || now.Before(ph.CircuitOpenUntil) {
-				h := p.health[name]
-				if h == nil {
-					h = &providerHealth{}
-					p.health[name] = h
-				}
-				if now.Before(ph.RateLimitedUntil) {
-					h.rateLimitedUntil = ph.RateLimitedUntil
-					h.rateLimitKind = rateLimitKindFromString(ph.RateLimitKind)
-				}
-				if now.Before(ph.CircuitOpenUntil) {
-					h.circuitOpenUntil = ph.CircuitOpenUntil
-					h.consecutiveFailures = threshold
-				}
-			}
-			for model, until := range ph.ModelLocks {
-				if now.Before(until) {
-					p.modelLocks[modelLockKey{provider: name, model: model}] = &modelLockEntry{failures: 1, lockedUntil: until}
-				}
-			}
-			for model, params := range ph.ParamBlock {
-				k := modelLockKey{provider: name, model: model}
-				m := p.paramBlock[k]
-				if m == nil {
-					m = map[string]bool{}
-					p.paramBlock[k] = m
-				}
-				for _, param := range params {
-					m[param] = true
-				}
-			}
-		}
-		p.healthMu.Unlock()
+	if loaded := p.quota.loadedHealth; len(loaded) > 0 && p.quota.loadedHealthFP != "" && p.quota.loadedHealthFP == fp {
+		p.runtimeState.RestoreHealth(loaded, time.Now(), cfg.Scheduling.Threshold())
 	}
 	// Restore wire capability verdicts (independent of the health fingerprint:
 	// capabilities are endpoint properties). A verdict is honored only while
 	// its recorded base_url still matches the current config — an endpoint
 	// change invalidates it and triggers a re-probe at the next boot probe.
-	if loaded := p.quota.LoadedWireCaps; len(loaded) > 0 {
+	if loaded := p.quota.loadedWireCaps; len(loaded) > 0 {
 		baseURLs := make(map[string]string, len(cfg.Providers))
 		for name, prov := range cfg.Providers {
 			baseURLs[name] = prov.OpenAIBaseURL
@@ -611,32 +530,18 @@ func (p *Proxy) providerSnapshot() map[string]provider.Provider {
 	return p.providers
 }
 
-// snapshotSticky returns a copy of the per-route sticky map under healthMu, for
-// persistence by the quota tracker (restored on boot — see NewProxy). Only
-// ROUTE-keyed entries (keys present in cfg.Routes) are persisted: per-session
-// entries (keyed by x-claude-code-session-id) matter only within a running
-// daemon's dwell window and self-heal on the next request, so writing them to
-// quota_state.json would just accumulate client conversation IDs on disk.
-func (p *Proxy) snapshotSticky() map[string]routeSticky {
-	p.mu.RLock()
-	p.healthMu.Lock()
-	out := p.snapshotStickyLocked(p.cfg.Routes, p.implicitRoutes)
-	p.healthMu.Unlock()
-	p.mu.RUnlock()
-	return out
-}
-
-func (p *Proxy) snapshotStickyLocked(routes map[string][]RouteTarget, implicit map[string]RouteTarget) map[string]routeSticky {
-	out := make(map[string]routeSticky, len(p.sticky))
-	for k, v := range p.sticky {
-		if _, isRoute := routes[k]; !isRoute {
-			if _, isImplicit := implicit[k]; !isImplicit {
-				continue // session-keyed — don't persist
-			}
-		}
-		out[k] = v
+func runtimeRouteKeys(
+	routes map[string][]RouteTarget,
+	implicit map[string]RouteTarget,
+) map[string]bool {
+	keys := make(map[string]bool, len(routes)+len(implicit))
+	for route := range routes {
+		keys[route] = true
 	}
-	return out
+	for route := range implicit {
+		keys[route] = true
+	}
+	return keys
 }
 
 // healthConfigFingerprint identifies the exact provider config that frozen
@@ -658,85 +563,23 @@ func healthConfigFingerprint(cfg *Config) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// snapshotHealth returns the frozen runtime health state (rate-limit/circuit
-// cooldowns, model lockouts, learned param blocklist) for persistence by the
-// quota tracker (restored on boot — see NewProxy). Only entries carrying
-// actual state are included; healthy providers are omitted. Takes healthMu —
-// never call it while holding quotaMu (lock order healthMu → quotaMu).
-func (p *Proxy) snapshotHealth() map[string]persistedHealth {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	return p.snapshotHealthLocked()
-}
-
-func (p *Proxy) snapshotHealthLocked() map[string]persistedHealth {
-	out := make(map[string]persistedHealth, len(p.health))
-	// Iterate the UNION of health ∪ paramBlock keys: a provider with only
-	// learned params (never failed) has no health entry — dropping it here
-	// would silently lose the blocklist on restart (P1-2d).
-	names := make(map[string]bool, len(p.health)+len(p.paramBlock))
-	for name := range p.health {
-		names[name] = true
-	}
-	for k := range p.paramBlock {
-		names[k.provider] = true
-	}
-	for name := range names {
-		ph := persistedHealth{}
-		if h := p.health[name]; h != nil {
-			ph.RateLimitedUntil = h.rateLimitedUntil
-			ph.CircuitOpenUntil = h.circuitOpenUntil
-			if now := time.Now(); now.Before(h.rateLimitedUntil) {
-				ph.RateLimitKind = h.rateLimitKind.String()
-			}
-		}
-		if ph.RateLimitedUntil.IsZero() && ph.CircuitOpenUntil.IsZero() && len(ph.ParamBlock) == 0 {
-			continue // healthy + nothing learned — omit
-		}
-		out[name] = ph
-	}
-	// Model lockouts + param blocklists fold into their provider's entry
-	// (creating one when the provider itself has no health record).
-	for k, e := range p.modelLocks {
-		ph := out[k.provider]
-		if ph.ModelLocks == nil {
-			ph.ModelLocks = map[string]time.Time{}
-		}
-		ph.ModelLocks[k.model] = e.lockedUntil
-		out[k.provider] = ph
-	}
-	for k, m := range p.paramBlock {
-		if len(m) == 0 {
-			continue
-		}
-		ph := out[k.provider]
-		if ph.ParamBlock == nil {
-			ph.ParamBlock = map[string][]string{}
-		}
-		params := make([]string, 0, len(m))
-		for param := range m {
-			params = append(params, param)
-		}
-		sort.Strings(params)
-		ph.ParamBlock[k.model] = params
-		out[k.provider] = ph
-	}
-	return out
-}
-
 // snapshotPersistedState takes the one authoritative persistence snapshot under
-// a single generation and the repository lock order p.mu -> healthMu ->
-// quotaMu. No reload or request-state mutation can interleave cfg fingerprint,
-// health/sticky, or quota snapshots.
+// a single generation and the repository lock order p.mu -> runtimeState.
+// No reload or request-state mutation can interleave cfg fingerprint,
+// health/sticky, or quota snapshots. SnapshotForPersist takes the runtime lock
+// exactly once, so quota and health can no longer be observed from different
+// generations.
 func (p *Proxy) snapshotPersistedState() persistedFullSnapshot {
 	p.mu.RLock()
 	if p.persistSnapshotHook != nil {
 		p.persistSnapshotHook()
 	}
-	p.healthMu.Lock()
-	p.quota.mu.RLock()
-	providers := make(map[string]persistedSnapshot, len(p.quota.state))
-	for k, v := range p.quota.state {
+	runtimeSnapshot := p.runtimeState.SnapshotForPersist(
+		runtimeRouteKeys(p.cfg.Routes, p.implicitRoutes),
+		time.Now(),
+	)
+	providers := make(map[string]persistedSnapshot, len(runtimeSnapshot.Quotas))
+	for k, v := range runtimeSnapshot.Quotas {
 		providers[k] = persistedSnapshot{
 			Billing: v.Billing, RemainingPct: v.RemainingPct,
 			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
@@ -744,14 +587,12 @@ func (p *Proxy) snapshotPersistedState() persistedFullSnapshot {
 	}
 	s := persistedFullSnapshot{
 		Providers:  providers,
-		Sticky:     p.snapshotStickyLocked(p.cfg.Routes, p.implicitRoutes),
-		Health:     p.snapshotHealthLocked(),
+		Sticky:     runtimeSnapshot.Sticky,
+		Health:     runtimeSnapshot.Health,
 		HealthFP:   healthConfigFingerprint(p.cfg),
-		Generation: p.runtimeGeneration,
+		Generation: runtimeSnapshot.Generation,
 		WireCaps:   p.wireCapsSnapshot(),
 	}
-	p.quota.mu.RUnlock()
-	p.healthMu.Unlock()
 	p.mu.RUnlock()
 	return s
 }
@@ -775,9 +616,7 @@ func (p *Proxy) reload(configPath string) error {
 	// the same lock order, and request mutations carry the generation captured by
 	// forward, so an old in-flight request cannot repopulate the cleared maps.
 	p.mu.Lock()
-	p.healthMu.Lock()
 	generation := p.configGeneration.Add(1)
-	p.runtimeGeneration = generation
 	p.cfg = cfg
 	p.providers = built.providers
 	// Rebuild the pool index + expanded routes from the single buildProviders
@@ -798,15 +637,7 @@ func (p *Proxy) reload(configPath string) error {
 	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until
 	// restart. Swapped atomically; in-flight shadow goroutines finish on the old bundle.
 	p.shadow.Store(newShadowRuntime(cfg))
-	p.health = map[string]*providerHealth{}
-	p.sticky = map[string]routeSticky{}
-	p.spreadCtr = map[string]uint64{}
-	p.modelLocks = map[modelLockKey]*modelLockEntry{}
-	p.paramBlock = map[modelLockKey]map[string]bool{}
-	if p.quota != nil {
-		p.quota.clearForGeneration(generation)
-	}
-	p.healthMu.Unlock()
+	p.runtimeState.ReplaceGeneration(generation)
 	p.mu.Unlock()
 	for _, w := range hw {
 		log.Printf("[reload] ⚠ %s", w)
@@ -995,7 +826,7 @@ func (*Proxy) responsesPreviousID(body []byte) string {
 // schedule right now: the first-choice provider, the full ordered list (with
 // tier/surplus/availability/peak per provider), and the current sticky selection
 // (+ dwell remaining). Used by the /debug/schedule endpoint. It does NOT mutate
-// sticky — it peeks via decideOrder.
+// sticky — it previews the detached Manager dashboard snapshot.
 //
 // Credential pools are surfaced (Task 9 observability): each virtual in `ordered`
 // carries its `pool_parent`, and each route whose targets share a pool carries a
@@ -1009,33 +840,35 @@ func (p *Proxy) scheduleStatus() []byte {
 	expanded := p.expandedRoutes
 	parentOf := p.parentOf
 	poolIndex := p.poolIndex
+	runtimeSnapshot := p.runtimeState.Dashboard(now)
 	p.mu.RUnlock()
-	var qs map[string]*provider.QuotaSnapshot
-	if p.quota != nil {
-		qs = p.quota.allSnapshots()
-	}
+	return scheduleStatusFromSnapshot(
+		cfg,
+		expanded,
+		parentOf,
+		poolIndex,
+		runtimeSnapshot,
+		now,
+	)
+}
 
-	// Snapshot health + sticky once (per-provider info + sticky display).
-	p.healthMu.Lock()
-	healthCopy := make(map[string]providerHealth, len(p.health))
-	for k, v := range p.health {
-		healthCopy[k] = *v
-	}
-	stickyCopy := make(map[string]routeSticky, len(p.sticky))
-	for k, v := range p.sticky {
-		stickyCopy[k] = v
-	}
-	pinsCopy := make(map[string]pinEntry, len(p.pins))
-	for k, v := range p.pins {
-		pinsCopy[k] = v
-	}
-	p.healthMu.Unlock()
-
+// scheduleStatusFromSnapshot is deliberately pure with respect to Proxy and
+// Manager state. Both /debug/schedule and /api/status pass one dashboard
+// snapshot captured alongside one config generation; the displayed ordering,
+// health, quota facts, pin, sticky, and spread position therefore cannot mix
+// independent runtime reads.
+func scheduleStatusFromSnapshot(
+	cfg *Config,
+	expanded map[string][]RouteTarget,
+	parentOf map[string]string,
+	poolIndex map[string][]string,
+	runtimeSnapshot runtimestate.DashboardSnapshot,
+	now time.Time,
+) []byte {
 	avail := func(name string) bool {
-		h := healthCopy[name]
-		return h.available(now)
+		state, ok := runtimeSnapshot.Providers[name]
+		return !ok || state.Available
 	}
-	surplusOf := func(name string) float64 { return computeSurplus(cfg, parentOf, qs, name, now) }
 
 	type provInfo struct {
 		Provider   string  `json:"provider"`
@@ -1067,10 +900,32 @@ func (p *Proxy) scheduleStatus() []byte {
 		routeKeys[k] = true
 	}
 	for exposed, targets := range expanded {
-		// commit=false: scheduleStatus is a read-only peek — it must NOT bump the
-		// round-robin counter, set sticky, or evict sticky entries. decideOrder
-		// gates all sticky mutation on commit, so the peek is side-effect-free.
-		ordered, _ := p.decideOrder(cfg, parentOf, exposed, "", targets, now, false, routeKeys)
+		runtimeTargets := make([]runtimestate.Target, len(targets))
+		for index, target := range targets {
+			pconf, _ := providerConfig(cfg, parentOf, target.Provider)
+			runtimeTargets[index] = runtimestate.Target{
+				Provider:        target.Provider,
+				Parent:          parentOf[target.Provider],
+				Model:           target.Model,
+				Priority:        target.Priority,
+				BillingOverride: configuredBillingOverride(pconf.Billing),
+				PeakMultiplier:  pconf.PeakMultiplier(now),
+			}
+		}
+		decision := runtimeSnapshot.PreviewOrder(runtimestate.ScheduleInput{
+			Exposed:      exposed,
+			Targets:      runtimeTargets,
+			RouteKeys:    routeKeys,
+			Dwell:        cfg.Scheduling.Dwell(),
+			SwitchMargin: cfg.Scheduling.SwitchMargin(),
+			Now:          now,
+			QuotaMaxAge:  3 * cfg.Scheduling.PollInterval(),
+			Generation:   runtimeSnapshot.Generation,
+		})
+		ordered := make([]RouteTarget, 0, len(decision.Order))
+		for _, index := range decision.Order {
+			ordered = append(ordered, targets[index])
+		}
 		ri := routeInfo{}
 		if len(ordered) > 0 {
 			ri.First = ordered[0].Provider
@@ -1078,16 +933,17 @@ func (p *Proxy) scheduleStatus() []byte {
 		// Surface an active manual pin (hot-switch) so /debug/schedule shows WHY a
 		// route is narrowed to one provider, plus its expiry. The pin's effect on
 		// `ordered` is already applied inside decideOrder; this just labels it.
-		if pe, ok := pinsCopy[exposed]; ok && pe.active(now) {
-			ri.Pin = pe.provider
-			ri.PinExpires = pe.expiresLabel(now)
+		if pin, ok := runtimeSnapshot.Pins[exposed]; ok {
+			ri.Pin = pin.Provider
+			ri.PinExpires = pin.ExpiresLabel(now)
 		}
 		// Track which parents appear in `ordered` so the route-level `pools`
 		// summary can be emitted. A parent may have more accounts in poolIndex
 		// than are currently in `ordered` (some unavailable) — Accounts uses
 		// poolIndex (total), Available counts only those in `ordered`.
 		parentSeen := map[string]bool{}
-		for _, t := range ordered {
+		for orderIndex, t := range ordered {
+			targetIndex := decision.Order[orderIndex]
 			pconf, _ := providerConfig(cfg, parentOf, t.Provider)
 			parent := parentOf[t.Provider]
 			if parent != "" {
@@ -1097,8 +953,8 @@ func (p *Proxy) scheduleStatus() []byte {
 				Provider:   t.Provider,
 				PoolParent: parent,
 				Priority:   t.Priority,
-				Tier:       billingClassName(p.billingClass(cfg, parentOf, t.Provider, qs)),
-				Surplus:    surplusOf(t.Provider),
+				Tier:       billingClassName(decision.Facts[targetIndex].Billing),
+				Surplus:    decision.Facts[targetIndex].Surplus,
 				Available:  avail(t.Provider),
 				Peak:       pconf.PeakMultiplier(now) > 1,
 			})
@@ -1123,9 +979,9 @@ func (p *Proxy) scheduleStatus() []byte {
 				})
 			}
 		}
-		if cur := stickyCopy[exposed]; cur.provider != "" {
-			ri.Sticky = cur.provider
-			if rem := cfg.Scheduling.Dwell() - now.Sub(cur.since); rem > 0 && rem < cfg.Scheduling.Dwell() {
+		if cur := runtimeSnapshot.Sticky[exposed]; cur.Provider != "" {
+			ri.Sticky = cur.Provider
+			if rem := cfg.Scheduling.Dwell() - now.Sub(cur.Since); rem > 0 && rem < cfg.Scheduling.Dwell() {
 				ri.DwellRem = rem.Seconds()
 			}
 		}
@@ -1846,7 +1702,12 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 	// without this shadow silently stopped sampling the moment a second account was
 	// added.
 	target := RouteTarget{Provider: shadow.Provider, Model: shadow.Model, Protocol: shadow.Protocol}
-	picked, ok := newResolver(p, runtime.providers, runtime.poolIndex).Pick(target, "")
+	picked, ok := newResolver(
+		p,
+		runtime.providers,
+		runtime.poolIndex,
+		runtime.generation,
+	).Pick(target, "")
 	if !ok {
 		log.Printf("[shadow] %s: provider not available (no runnable healthy virtual)", shadow.Provider)
 		return
@@ -1932,18 +1793,11 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 	completeRequestLog(logger, logInput, captured, capturedTotal, capturedTruncated)
 }
 
-// tierRank maps a BillingClass to the scheduling tier order: plan(0) < unknown(1) < payg(2).
-// (BillingClass iota values are Unknown=0,Plan=1,PayG=2, which is NOT the scheduling order,
-// so rank through this map instead of comparing the raw constants.)
-func tierRank(b provider.BillingClass) int {
-	switch b {
-	case provider.BillingPlan:
-		return 0
-	case provider.BillingPayG:
-		return 2
-	default:
-		return 1 // BillingUnknown or anything else
+func configuredBillingOverride(value string) provider.BillingClass {
+	if value == "pay-as-you-go" {
+		return provider.BillingPayG
 	}
+	return provider.BillingUnknown
 }
 
 // schedule returns targets in try-order using quota-aware ranking:
@@ -1965,11 +1819,11 @@ func (p *Proxy) schedule(cfg *Config, parentOf map[string]string, exposed, sessi
 		if sk == "" {
 			sk = exposed
 		}
-		p.healthMu.Lock()
-		if p.generationMatchesLocked(generations...) {
-			p.sticky[sk] = routeSticky{provider: stickyToSet, since: now}
-		}
-		p.healthMu.Unlock()
+		p.runtimeState.SetSticky(
+			sk,
+			runtimestate.Sticky{Provider: stickyToSet, Since: now},
+			runtimeGenerationArg(generations),
+		)
 	}
 	return ordered
 }
@@ -2002,31 +1856,25 @@ func (p *Proxy) setPin(route, provider string, ttl time.Duration) (pinEntry, boo
 	if ttl > 0 {
 		pe.expiresAt = now.Add(ttl)
 	}
-	p.healthMu.Lock()
-	p.pins[route] = pe
-	p.healthMu.Unlock()
+	p.runtimeState.SetPin(route, runtimestate.Pin{
+		Provider:  pe.provider,
+		ExpiresAt: pe.expiresAt,
+	})
 	return pe, true
 }
 
 // clearPin removes a route's manual pin (no-op if none).
 func (p *Proxy) clearPin(route string) bool {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	_, ok := p.pins[route]
-	delete(p.pins, route)
-	return ok
+	return p.runtimeState.ClearPin(route)
 }
 
 // listPins returns the active pins (provider + expiry), dropping expired ones.
 func (p *Proxy) listPins() map[string]pinEntry {
 	now := time.Now()
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	out := make(map[string]pinEntry, len(p.pins))
-	for k, v := range p.pins {
-		if v.active(now) {
-			out[k] = v
-		}
+	pins := p.runtimeState.Pins(now)
+	out := make(map[string]pinEntry, len(pins))
+	for route, pin := range pins {
+		out[route] = pinEntry{provider: pin.Provider, expiresAt: pin.ExpiresAt}
 	}
 	return out
 }
@@ -2036,22 +1884,19 @@ func (p *Proxy) listPins() map[string]pinEntry {
 // true, forward treats the route as pinned-exclusive: request-aware routing is
 // skipped (no reroute away from the pin) and tryTarget bypasses the circuit.
 func (p *Proxy) pinForces(exposed string, ordered []RouteTarget, parentOf map[string]string) bool {
-	p.healthMu.Lock()
-	pe, ok := p.pins[exposed]
-	p.healthMu.Unlock()
-	if !ok || !pe.active(time.Now()) {
-		return false
-	}
-	for _, t := range ordered {
-		if t.Provider == pe.provider || parentOf[t.Provider] == pe.provider {
-			return true
+	targets := make([]runtimestate.Target, len(ordered))
+	for index, target := range ordered {
+		targets[index] = runtimestate.Target{
+			Provider: target.Provider,
+			Parent:   parentOf[target.Provider],
+			Model:    target.Model,
 		}
 	}
-	return false
+	return p.runtimeState.PinForces(exposed, targets, time.Now())
 }
 
 // decideOrder computes the try-order for targets and the provider to park sticky
-// on ("" = leave the current sticky untouched), WITHOUT mutating p.sticky (the
+// on ("" = leave the current sticky untouched), WITHOUT mutating sticky (the
 // counter bump when commit=true is the one exception — it advances the per-parent
 // round-robin, not sticky). schedule() commits the sticky on the SESSION key;
 // scheduleStatus() (the /debug/schedule endpoint) calls this with commit=false for
@@ -2059,221 +1904,42 @@ func (p *Proxy) pinForces(exposed string, ordered []RouteTarget, parentOf map[st
 // (billing/peak are parent-level, not per-account) AND drives per-parent
 // round-robin assignment of new sessions.
 func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool, routeKeys map[string]bool, generations ...uint64) (ordered []RouteTarget, stickyToSet string) {
-	sched := cfg.Scheduling
-	// (a) Re-key sticky on the session. Non-session clients (sessionKey=="")
-	// fall back to the exposed model → identical to the pre-session path, so the
-	// existing model-keyed sticky tests stay green.
-	sk := sessionKey
-	if sk == "" {
-		sk = exposed
-	}
-	// Snapshot quota once (brief RLock), to avoid holding quotaMu during the sort
-	// or while taking healthMu below.
-	var qs map[string]*provider.QuotaSnapshot
-	if p.quota != nil {
-		qs = p.quota.allSnapshots()
-	}
-
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	commit = commit && p.generationMatchesLocked(generations...)
-
-	// (b) Evict expired SESSION entries to bound the sticky map. Per-session
-	// keying adds one entry per distinct session id; without eviction a
-	// long-running daemon would grow without bound between reloads. Only
-	// session-id keys (not present in cfg.Routes) are evicted: model/route keys
-	// are few (one per route) and MUST be preserved so the non-session path
-	// stays byte-identical to pre-Task-6 (the after-dwell margin re-evaluation
-	// reads them — evicting at dwell would silently delete the seeded entries
-	// those tests rely on and re-pick on every call). Active sessions don't age
-	// out: keepSticky refreshes their `since` each call (see below). Eviction is
-	// commit-gated (schedule path only) so the /debug/schedule peek
-	// (commit=false) never mutates sticky — a genuinely read-only snapshot.
-	if commit {
-		for k, v := range p.sticky {
-			if routeKeys[k] {
-				continue // route name (explicit OR implicit) — preserve
-			}
-			if now.Sub(v.since) > sched.Dwell() {
-				delete(p.sticky, k)
-			}
+	runtimeTargets := make([]runtimestate.Target, len(targets))
+	for index, target := range targets {
+		pconf, _ := providerConfig(cfg, parentOf, target.Provider)
+		runtimeTargets[index] = runtimestate.Target{
+			Provider:        target.Provider,
+			Parent:          parentOf[target.Provider],
+			Model:           target.Model,
+			Priority:        target.Priority,
+			BillingOverride: configuredBillingOverride(pconf.Billing),
+			PeakMultiplier:  pconf.PeakMultiplier(now),
 		}
 	}
-
-	// Manual pin (model-proxy pin <route> <provider> --ttl): narrow to the pinned
-	// provider's targets UP FRONT and force them past the circuit breaker. A pin
-	// is an explicit "send to THIS backend, don't fail over" (debugging / A-B
-	// compare) — it must NOT silently fail to another provider when the pinned one
-	// is circuit-open. A pin whose provider isn't a route target is a no-op
-	// (pt empty → targets unchanged); expired pins are ignored (lazy). The pin's
-	// effect is visible in /debug/schedule via pinsCopy.
-	pinned := false
-	if pe, ok := p.pins[exposed]; ok && pe.active(now) {
-		var pt []RouteTarget
-		for _, t := range targets {
-			if t.Provider == pe.provider || parentOf[t.Provider] == pe.provider {
-				pt = append(pt, t)
-			}
-		}
-		if len(pt) > 0 {
-			targets = pt
-			pinned = true
-		}
-	}
-
-	avail := func(t RouteTarget) bool {
-		if pinned {
-			return true // an active pin forces through circuit/rate-limit/lockout state
-		}
-		h := p.health[t.Provider]
-		return (h == nil || h.available(now)) && !p.modelLockedLocked(t.Provider, t.Model, now)
-	}
-
-	var availTargets []RouteTarget
-	for _, t := range targets {
-		if avail(t) {
-			availTargets = append(availTargets, t)
-		}
-	}
-
-	billingOf := func(name string) provider.BillingClass { return p.billingClass(cfg, parentOf, name, qs) }
-	surplusOf := func(name string) float64 { return computeSurplus(cfg, parentOf, qs, name, now) }
-
-	sort.SliceStable(availTargets, func(i, j int) bool {
-		ri, rj := tierRank(billingOf(availTargets[i].Provider)), tierRank(billingOf(availTargets[j].Provider))
-		if ri != rj {
-			return ri < rj // tier: plan < unknown < payg
-		}
-		if pi, pj := availTargets[i].Priority, availTargets[j].Priority; pi != pj {
-			return pi < pj // priority (config) decides before surplus
-		}
-		return surplusOf(availTargets[i].Provider) > surplusOf(availTargets[j].Provider) // surplus only breaks priority ties
+	result := p.runtimeState.DecideOrder(runtimestate.ScheduleInput{
+		Exposed:      exposed,
+		SessionKey:   sessionKey,
+		Targets:      runtimeTargets,
+		RouteKeys:    routeKeys,
+		Dwell:        cfg.Scheduling.Dwell(),
+		SwitchMargin: cfg.Scheduling.SwitchMargin(),
+		Now:          now,
+		QuotaMaxAge:  3 * cfg.Scheduling.PollInterval(),
+		Commit:       commit,
+		Generation:   runtimeGenerationArg(generations),
 	})
-
-	margin := sched.SwitchMargin()
-	cur := p.sticky[sk]
-
-	// Find cur's priority + whether it's still in the available set.
-	curPrio := 0
-	curInAvail := false
-	for _, t := range availTargets {
-		if t.Provider == cur.provider {
-			curInAvail = true
-			curPrio = t.Priority
-			break
-		}
+	ordered = make([]RouteTarget, 0, len(result.Order))
+	for _, index := range result.Order {
+		ordered = append(ordered, targets[index])
 	}
-
-	keepSticky := false
-	if cur.provider != "" && curInAvail {
-		if now.Sub(cur.since) < sched.Dwell() {
-			keepSticky = true // within dwell: preserve cache
-		} else if len(availTargets) == 0 {
-			keepSticky = true
-		} else {
-			best := availTargets[0]
-			if best.Provider == cur.provider {
-				keepSticky = true // current is already the best
-			} else {
-				rb, rc := tierRank(billingOf(best.Provider)), tierRank(billingOf(cur.provider))
-				switch {
-				case rb < rc:
-					keepSticky = false // best has a better billing tier
-				// rb > rc is unreachable: best is availTargets[0] (sorted tier→priority→surplus),
-				// and cur is in availTargets, so best can never rank worse than cur on tier.
-				case best.Priority < curPrio:
-					keepSticky = false // same tier; best has better priority → switch (priority beats surplus)
-				// best.Priority > curPrio is unreachable for the same reason (best sorts first).
-				case surplusOf(best.Provider)-surplusOf(cur.provider) >= margin:
-					keepSticky = false // same tier + same priority; best ahead by surplus margin → switch
-				default:
-					keepSticky = true // same tier + same priority, sub-margin surplus → preserve cache
-				}
-			}
-		}
-	}
-
-	if keepSticky {
-		// leave p.sticky untouched (stickyToSet stays "" = keep current)
-		for _, t := range availTargets {
-			if t.Provider == cur.provider {
-				ordered = append(ordered, t)
-				break
-			}
-		}
-		// For a SESSION key, refresh `since` (return the current provider as
-		// stickyToSet so schedule re-writes the entry with now) — an active
-		// conversation then never ages out past the eviction horizon and stays
-		// on one account (cache-warm) for its whole lifetime. Model-keyed
-		// clients (sk == exposed) skip this: leaving the entry untouched keeps
-		// the pre-Task-6 after-dwell re-evaluate-every-call behavior, so the
-		// existing model-keyed sticky tests stay byte-identical.
-		if sk != exposed {
-			stickyToSet = cur.provider
-		}
-	} else if len(availTargets) > 0 {
-		// (c) Assign a fresh account. For a pooled route, round-robin over the
-		// available band of the pool (id-sorted → deterministic) via the
-		// per-parent counter so distinct sessions land on distinct accounts;
-		// for a non-pooled route, keep the prior best-first (sorted) pick. The
-		// counter advance is commit-gated so the read-only /debug/schedule peek
-		// doesn't perturb assignment order for real traffic.
-		pick := availTargets[0].Provider
-		if parent, pooled := routePoolParent(parentOf, availTargets); pooled {
-			band := poolBandByID(parentOf, availTargets, parent)
-			// Modulo the uint64 counter BEFORE the int cast: on 32-bit the cast
-			// of a counter past ~2³¹ would go negative and index band out of
-			// range. Modulo-uint64 keeps start in [0, len(band)).
-			start := int(p.spreadCtr[parent] % uint64(len(band)))
-			if commit {
-				p.spreadCtr[parent]++
-			}
-			pick = band[start].Provider
-			// Move pick to the front of ordered (same move-to-front the
-			// keepSticky branch uses for cur) so forward() tries it first.
-			for _, t := range availTargets {
-				if t.Provider == pick {
-					ordered = append(ordered, t)
-					break
-				}
-			}
-		}
-		stickyToSet = pick
-	}
-	for _, t := range availTargets {
-		if len(ordered) > 0 && t.Provider == ordered[0].Provider {
-			continue
-		}
-		ordered = append(ordered, t)
-	}
-	return ordered, stickyToSet
+	return ordered, result.StickyProvider
 }
 
-// routePoolParent reports whether any available target belongs to a credential
-// pool, returning that pool's parent name. A route is pooled if at least one
-// available target's provider is a virtual id present in parentOf. Used by
-// decideOrder to decide whether to round-robin-assign a new session.
-func routePoolParent(parentOf map[string]string, avail []RouteTarget) (string, bool) {
-	for _, t := range avail {
-		if parent, ok := parentOf[t.Provider]; ok {
-			return parent, true
-		}
+func runtimeGenerationArg(generations []uint64) uint64 {
+	if len(generations) == 0 {
+		return 0
 	}
-	return "", false
-}
-
-// poolBandByID returns the available virtuals of `parent`, sorted by virtual id
-// (stable account-id order → deterministic round-robin across schedule calls and
-// across restarts, since account ids derive from the keys, not insertion order).
-func poolBandByID(parentOf map[string]string, avail []RouteTarget, parent string) []RouteTarget {
-	var band []RouteTarget
-	for _, t := range avail {
-		if parentOf[t.Provider] == parent {
-			band = append(band, t)
-		}
-	}
-	sort.SliceStable(band, func(i, j int) bool { return band[i].Provider < band[j].Provider })
-	return band
+	return generations[0]
 }
 
 // providerConfig resolves the Provider config for name, resolving a
@@ -2290,163 +1956,54 @@ func providerConfig(cfg *Config, parentOf map[string]string, name string) (Provi
 	return p, ok
 }
 
-// billingClass returns the effective scheduling tier, applying the staleness
-// guard and the pay-as-you-go config override. A snapshot older than 3× the poll
-// interval, or one carrying an error, is treated as Unknown. parentOf resolves
-// virtual ids to their parent's billing config (pay-as-you-go / plan is set on
-// the parent, not per-account).
-func (p *Proxy) billingClass(cfg *Config, parentOf map[string]string, name string, qs map[string]*provider.QuotaSnapshot) provider.BillingClass {
-	pconf, _ := providerConfig(cfg, parentOf, name)
-	return classifyBilling(qs[name], pconf.Billing, cfg.Scheduling.PollInterval())
-}
-
-// computeSurplus is the shared scheduling pace-score for one provider, used by
-// both scheduleStatus (the /debug/schedule peek) and decideOrder (the commit
-// path). It resolves the provider's peak multiplier, fetches its quota snapshot,
-// and delegates to QuotaSnapshot.Surplus. Returns 0 for an unknown/unmeasured
-// provider (nil snapshot).
-func computeSurplus(cfg *Config, parentOf map[string]string, qs map[string]*provider.QuotaSnapshot, name string, now time.Time) float64 {
-	pconf, _ := providerConfig(cfg, parentOf, name)
-	peakMult := pconf.PeakMultiplier(now)
-	if peakMult < 1 {
-		peakMult = 1
-	}
-	snap := qs[name]
-	if snap == nil {
-		return 0
-	}
-	return snap.Surplus(now, peakMult)
-}
-
-// available reports whether a provider may be tried: not rate-limited, and
-// circuit closed or half-open with no probe in flight.
-func (h *providerHealth) available(now time.Time) bool {
-	if now.Before(h.rateLimitedUntil) {
-		return false
-	}
-	if !h.circuitOpenUntil.IsZero() && now.Before(h.circuitOpenUntil) {
-		return false // circuit open
-	}
-	if !h.circuitOpenUntil.IsZero() && !now.Before(h.circuitOpenUntil) && h.halfOpenInFlight {
-		return false // half-open, but a probe is already in flight
-	}
-	return true
-}
-
-// takeHalfOpenSlot re-checks availability and, for a half-open provider, reserves
-// the single probe slot. Returns false if the provider should be skipped (circuit
-// open, rate-limited, or a half-open probe is already in flight).
-func (p *Proxy) generationMatchesLocked(generations ...uint64) bool {
-	return len(generations) == 0 || generations[0] == 0 || generations[0] == p.runtimeGeneration
-}
-
 func (p *Proxy) takeHalfOpenSlot(name string, generations ...uint64) bool {
-	now := time.Now()
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	if !p.generationMatchesLocked(generations...) {
-		return true // let the old request finish, but do not mutate the new generation
-	}
-	h := p.health[name]
-	if h == nil {
-		return true // no failures recorded → available, no slot needed
-	}
-	if now.Before(h.rateLimitedUntil) {
-		return false
-	}
-	if h.circuitOpenUntil.IsZero() {
-		return true // circuit closed
-	}
-	if now.Before(h.circuitOpenUntil) {
-		return false // circuit open
-	}
-	// Half-open (cooldown expired): allow one probe at a time.
-	if h.halfOpenInFlight {
-		return false
-	}
-	h.halfOpenInFlight = true
-	return true
+	return p.runtimeState.TakeHalfOpenSlot(
+		name,
+		runtimeGenerationArg(generations),
+	)
 }
 
 func (p *Proxy) releaseHalfOpenSlot(name string, generations ...uint64) {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	if !p.generationMatchesLocked(generations...) {
-		return
-	}
-	if h := p.health[name]; h != nil {
-		h.halfOpenInFlight = false
-	}
+	p.runtimeState.ReleaseHalfOpenSlot(
+		name,
+		runtimeGenerationArg(generations),
+	)
 }
 
 func (p *Proxy) recordSuccess(name, model string, generations ...uint64) {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	if !p.generationMatchesLocked(generations...) {
-		return
-	}
-	if h := p.health[name]; h != nil {
-		h.consecutiveFailures = 0
-		h.circuitOpenUntil = time.Time{}
-		h.halfOpenInFlight = false
-	}
-	// A served (provider, model) proves the model healthy — clear its lockout.
-	delete(p.modelLocks, modelLockKey{provider: name, model: model})
+	p.runtimeState.RecordSuccess(
+		name,
+		model,
+		runtimeGenerationArg(generations),
+	)
 }
 
 // recordFailure increments a provider's consecutive failures and opens the
 // circuit (for cooldown) once the threshold is reached. Clears any half-open slot.
 func (p *Proxy) recordFailure(name string, sched Scheduling, generations ...uint64) {
-	now := time.Now()
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	if !p.generationMatchesLocked(generations...) {
-		return
-	}
-	h := p.health[name]
-	if h == nil {
-		h = &providerHealth{}
-		p.health[name] = h
-	}
-	h.consecutiveFailures++
-	h.halfOpenInFlight = false
-	if h.consecutiveFailures >= sched.Threshold() {
-		h.circuitOpenUntil = now.Add(sched.Cooldown())
-	}
-}
-
-// modelLockedLocked reports whether (provider, model) is inside its lockout
-// window. Caller must hold healthMu (decideOrder's avail closure does).
-func (p *Proxy) modelLockedLocked(provider, model string, now time.Time) bool {
-	e := p.modelLocks[modelLockKey{provider: provider, model: model}]
-	return e != nil && now.Before(e.lockedUntil)
+	p.runtimeState.RecordFailure(
+		name,
+		sched.Threshold(),
+		sched.Cooldown(),
+		runtimeGenerationArg(generations),
+	)
 }
 
 // modelLocked is the lock-taking variant for tryTarget's entry check.
 func (p *Proxy) modelLocked(provider, model string, now time.Time) bool {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	return p.modelLockedLocked(provider, model, now)
+	return p.runtimeState.ModelLocked(provider, model, now)
 }
 
 // recordModelFailure locks (provider, model) for model_lockout. Model-level
 // failures (404 / model-denied / empty 200) never touch the account's circuit
 // breaker — the account may serve its other models fine.
 func (p *Proxy) recordModelFailure(provider, model string, sched Scheduling, generations ...uint64) {
-	now := time.Now()
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	if !p.generationMatchesLocked(generations...) {
-		return
-	}
-	k := modelLockKey{provider: provider, model: model}
-	e := p.modelLocks[k]
-	if e == nil {
-		e = &modelLockEntry{}
-		p.modelLocks[k] = e
-	}
-	e.failures++
-	e.lockedUntil = now.Add(sched.ModelLockoutDuration())
+	p.runtimeState.RecordModelFailure(
+		provider,
+		model,
+		sched.ModelLockoutDuration(),
+		runtimeGenerationArg(generations),
+	)
 }
 
 // resetHealth clears frozen runtime health state (circuit-open cooldowns,
@@ -2458,30 +2015,10 @@ func (p *Proxy) recordModelFailure(provider, model string, sched Scheduling, gen
 // matches all its virtual accounts (same matching as pins). Returns the
 // cleared provider names + the number of model locks removed.
 func (p *Proxy) resetHealth(name string) (cleared []string, locks int) {
-	// parentOf is reload-guarded (p.mu); grab the reference first — reload
-	// swaps maps, never mutates them in place. Lock order mu → healthMu.
 	p.mu.RLock()
 	parentOf := p.parentOf
 	p.mu.RUnlock()
-	match := func(provider string) bool {
-		return name == "" || provider == name || parentOf[provider] == name
-	}
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	for provider := range p.health {
-		if match(provider) {
-			delete(p.health, provider)
-			cleared = append(cleared, provider)
-		}
-	}
-	for k := range p.modelLocks {
-		if match(k.provider) {
-			delete(p.modelLocks, k)
-			locks++
-		}
-	}
-	sort.Strings(cleared)
-	return cleared, locks
+	return p.runtimeState.ResetHealth(name, parentOf)
 }
 
 // cooldownState inspects a route's target providers' health for the wait-retry
@@ -2494,51 +2031,14 @@ func (p *Proxy) resetHealth(name string) (cleared []string, locks int) {
 // they make schedule drop the target, which leads here via the ordinary
 // all-failed path.
 func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time) (allDown, allRateLimited bool, earliest time.Time) {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	if len(targets) == 0 {
-		return false, false, time.Time{}
-	}
-	for _, t := range targets {
-		h := p.health[t.Provider]
-		if h == nil || h.available(now) {
-			return false, false, time.Time{} // a servable target exists — not an all-cooldown situation
+	runtimeTargets := make([]runtimestate.Target, len(targets))
+	for index, target := range targets {
+		runtimeTargets[index] = runtimestate.Target{
+			Provider: target.Provider,
+			Model:    target.Model,
 		}
 	}
-	allDown, allRateLimited = true, true
-	for _, t := range targets {
-		h := p.health[t.Provider]
-		rl := now.Before(h.rateLimitedUntil)
-		co := !h.circuitOpenUntil.IsZero() && now.Before(h.circuitOpenUntil)
-		var until time.Time
-		switch {
-		case rl && co:
-			// Both frozen: the provider recovers only when BOTH lapsed (max),
-			// and a circuit component means the terminal is NOT pure rate-limit.
-			allRateLimited = false
-			until = h.rateLimitedUntil
-			if h.circuitOpenUntil.After(until) {
-				until = h.circuitOpenUntil
-			}
-		case rl:
-			until = h.rateLimitedUntil
-		case co:
-			allRateLimited = false
-			until = h.circuitOpenUntil
-		default:
-			// Half-open probe in flight (or stale state): unavailable to this
-			// request, but there is no horizon worth waiting on.
-			allRateLimited = false
-			until = now
-		}
-		if until.Before(now) {
-			until = now
-		}
-		if earliest.IsZero() || until.Before(earliest) {
-			earliest = until
-		}
-	}
-	return allDown, allRateLimited, earliest
+	return p.runtimeState.CooldownState(runtimeTargets, now)
 }
 
 // hasRecoveredUntried reports the TOCTOU case: a target is available now but was
@@ -2549,15 +2049,14 @@ func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time) (allDown, al
 // made the all-recover-simultaneously case terminally fail. The round budget in
 // forward (≤2 retries) bounds the loop.
 func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time) bool {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	for _, t := range targets {
-		h := p.health[t.Provider]
-		if (h == nil || h.available(now)) && !tried[t.Provider] {
-			return true
+	runtimeTargets := make([]runtimestate.Target, len(targets))
+	for index, target := range targets {
+		runtimeTargets[index] = runtimestate.Target{
+			Provider: target.Provider,
+			Model:    target.Model,
 		}
 	}
-	return false
+	return p.runtimeState.HasRecoveredUntried(runtimeTargets, tried, now)
 }
 
 // learnParamBlock records an upstream-rejected top-level request parameter for
@@ -2566,33 +2065,19 @@ func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool
 // models rejecting temperature) must not strip params for its siblings.
 // Reports whether the parameter is newly learned (for log-once).
 func (p *Proxy) learnParamBlock(provider, model, param string, generations ...uint64) (isNew bool) {
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	if !p.generationMatchesLocked(generations...) {
-		return false
-	}
-	k := modelLockKey{provider: provider, model: model}
-	m := p.paramBlock[k]
-	if m == nil {
-		m = map[string]bool{}
-		p.paramBlock[k] = m
-	}
-	isNew = !m[param]
-	m[param] = true
-	return isNew
+	return p.runtimeState.LearnParamBlock(
+		provider,
+		model,
+		param,
+		runtimeGenerationArg(generations),
+	)
 }
 
 // applyParamBlock strips every learned-unsupported top-level parameter for the
 // (provider, model) from the outgoing body. Best-effort: a non-JSON body (or
 // one the params aren't in) passes through unchanged.
 func (p *Proxy) applyParamBlock(provider, model string, body []byte) []byte {
-	p.healthMu.Lock()
-	var params []string
-	for k := range p.paramBlock[modelLockKey{provider: provider, model: model}] {
-		params = append(params, k)
-	}
-	p.healthMu.Unlock()
-	for _, param := range params {
+	for _, param := range p.runtimeState.ParamBlock(provider, model) {
 		if nb, did := stripTopLevelParam(body, param); did {
 			body = nb
 		}
@@ -2622,30 +2107,16 @@ func stripTopLevelParam(body []byte, param string) (out []byte, did bool) {
 // recordRateLimit marks a provider rate-limited until `until` (extends if later),
 // records the exhaustion class for display, and clears any half-open slot. Does
 // not count toward the circuit. It then triggers an async quota refresh of the
-// provider so its snapshot is fresh when the rate-limit clears. healthMu is
-// released BEFORE spawning refreshOne — refreshOne takes quotaMu internally and
-// we never nest the two locks.
+// provider so its snapshot is fresh when the rate-limit clears.
 func (p *Proxy) recordRateLimit(name string, until time.Time, kind rateLimitKind, generations ...uint64) {
-	p.healthMu.Lock()
-	if !p.generationMatchesLocked(generations...) {
-		p.healthMu.Unlock()
+	generation := runtimeGenerationArg(generations)
+	if !p.runtimeState.RecordRateLimit(name, until, kind, generation) {
 		return
 	}
-	h := p.health[name]
-	if h == nil {
-		h = &providerHealth{}
-		p.health[name] = h
-	}
-	h.halfOpenInFlight = false
-	if until.After(h.rateLimitedUntil) {
-		h.rateLimitedUntil = until
-		h.rateLimitKind = kind // the kind follows the WINNING horizon, not the latest 429
-	}
-	p.healthMu.Unlock()
 	if p.quota != nil {
 		// refreshAsync is tracked + stop-aware: a 429-triggered refresh can't
 		// outlive Proxy.Close (no persist after the final flush).
-		p.quota.refreshAsync(name, generations...)
+		p.quota.refreshAsync(name, generation)
 	}
 }
 

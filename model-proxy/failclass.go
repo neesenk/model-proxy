@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	runtimestate "model-proxy/internal/runtime"
 )
 
 // failclass.go — upstream failure classification (P0). Conservative substring /
@@ -16,34 +18,16 @@ import (
 // rateLimitKind classifies a 429 by WHAT the upstream says is exhausted. The
 // kind picks the default cooldown when the response carries no explicit reset
 // hint (body text or Retry-After header always wins over the kind default).
-type rateLimitKind int
+type rateLimitKind = runtimestate.RateLimitKind
 
 const (
-	rlTransient rateLimitKind = iota // generic rate limit (req/s, tokens/min) — short cooldown
-	rlQuota                          // account quota/balance exhausted — long cooldown
-	rlDaily                          // daily quota — locked until local midnight
+	rlTransient = runtimestate.Transient // generic rate limit (req/s, tokens/min) — short cooldown
+	rlQuota     = runtimestate.Quota     // account quota/balance exhausted — long cooldown
+	rlDaily     = runtimestate.Daily     // daily quota — locked until local midnight
 )
 
-func (k rateLimitKind) String() string {
-	switch k {
-	case rlQuota:
-		return "quota"
-	case rlDaily:
-		return "daily"
-	default:
-		return "transient"
-	}
-}
-
 func rateLimitKindFromString(s string) rateLimitKind {
-	switch s {
-	case "quota":
-		return rlQuota
-	case "daily":
-		return rlDaily
-	default:
-		return rlTransient
-	}
+	return runtimestate.ParseRateLimitKind(s)
 }
 
 // dailyQuotaMarkers: the daily-quota class is checked FIRST — it is strictly

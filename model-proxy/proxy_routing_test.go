@@ -373,9 +373,7 @@ func TestSessionStickySkipsCircuitOpen(t *testing.T) {
 	sortedVids := append([]string(nil), p.poolIndex["zhipu"]...)
 	sort.Strings(sortedVids)
 	blocked := sortedVids[0]
-	p.healthMu.Lock()
-	p.health[blocked] = &providerHealth{circuitOpenUntil: time.Now().Add(time.Hour)}
-	p.healthMu.Unlock()
+	seedRuntimeCircuit(t, p, blocked, time.Now().Add(time.Hour))
 	// Available band = sortedVids minus blocked = [sortedVids[1], sortedVids[2]].
 	want := map[string]string{
 		"s1": sortedVids[1],

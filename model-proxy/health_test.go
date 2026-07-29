@@ -334,19 +334,17 @@ func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
 	if st != 400 {
 		t.Fatalf("half-open probe: status = %d, want 400 (committed client error)", st)
 	}
-	p.healthMu.Lock()
-	h := p.health["primary"]
-	p.healthMu.Unlock()
-	if h == nil {
+	h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]
+	if !ok {
 		t.Fatal("primary health missing")
 	}
-	if h.halfOpenInFlight {
+	if h.HalfOpenInFlight {
 		t.Error("halfOpenInFlight stuck after 4xx commit — provider would starve")
 	}
-	if h.consecutiveFailures == 0 {
+	if h.ConsecutiveFailures == 0 {
 		t.Error("4xx commit must NOT clear failure history (release-neutral)")
 	}
-	if !h.available(time.Now()) {
+	if !h.Available {
 		t.Error("primary must be available again after the 4xx probe released the slot")
 	}
 	// Next request reaches the primary again (single-flight freed).

@@ -8,7 +8,7 @@
 
 | 方法 | 路径 | 请求 | 响应 | 备注 |
 |---|---|---|---|---|
-| GET | `/api/status` | — | `{uptime,version,listen,health{...},model_locks{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | handler 只消费 `proxyReadView.dashboard` 的脱离式快照；锁 `p.mu`→`healthMu`→`quotaMu` 的顺序和内部 map 读取由 read view 封装且不嵌套。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出）。`model_locks[provider]` = `[{model,until}]`（仅生效中的模型锁，与 health 同一 healthMu 快照，过期不输出；`doctor --live` 用它解释 route 全灭） |
+| GET | `/api/status` | — | `{uptime,version,listen,health{...},model_locks{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | handler 只消费 `proxyReadView.dashboard` 的脱离式快照；read view 按 `Proxy.mu → internal/runtime.Manager` 捕获同一 config generation 的 listen/warnings/cache 与 health/model-lock/quota/pin/sticky/spread，`schedule` 通过该 snapshot 的只读 `PreviewOrder` 计算，不再次读取 Manager，故同一响应的 health/quota/pin/sticky/order 不会混代或跨 mutation。内部 map 不外泄。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出）。`model_locks[provider]` = `[{model,until}]`（仅生效中的模型锁，与 health 同一 Manager dashboard 快照，过期不输出；`doctor --live` 用它解释 route 全灭） |
 | GET | `/api/logs?tail=N` | — | `{lines:[…]}` | 读 log 文件末尾 N 行（默认 200，上限 1000）；无 log 路径 → 404 |
 | GET | `/api/config` | — | `{yaml, summary, provider_models, routes}` | 原文件 verbatim round-trip |
 | POST | `/api/config` | `{yaml}` | `{status:"reloaded"}` / 400 | `saveAndReload`：validate → backup `back/<base>.<ts>.bak` → atomicWrite → reload。校验失败不落盘；reload 失败从当次备份回滚 |
@@ -32,7 +32,7 @@
 | POST | `/api/health/reset` | 空 body 或 `{"provider":key}` | `{cleared:[names],model_locks_cleared:n}` | 清冻结运行态（熔断开路冷却、429 限频冷却、模型锁定），目标立即重试；空=全部，池化父名清全部虚拟；**不清** sticky/pin/剥参 blocklist。`unfreeze` CLI 与 UI Providers 卡 unfreeze 按钮 |
 | POST/GET | `/api/login/<provider>/start`、`/api/login/<session>/poll` | — | `{session_id,...}` / `{state, detail, result, warning?}` | 异步登录（aqp SSO URL / codex device flow）；poll 状态 pending/done/error。轮询由 `webTaskOwner` 管理，关闭时取消 HTTP/等待；凭据 commit 前响应取消，进入 commit 后完成 save+reload 再退出。done 时若 reload 失败，`warning` 非空（凭据已落盘，runtime 旧） |
 
-**写操作统一热重载**：所有 mutation 落盘后触发进程内 `proxy.reload` —— 同一 worker 进程原地换 cfg/providers，不重启。账号增删虽不改 config.yaml，但 reload→`buildProviders`→`loadPool` 重读池文件，新账号随即展开成虚拟。reload 还清空 `health`/`sticky`/`spreadCtr`、重建响应缓存，并 kick `quota.pollAll`。注意：进程内 reload（UI 与 worker 同进程）≠ `serve reload`（给独立进程发 SIGHUP）。
+**写操作统一热重载**：所有 mutation 落盘后触发进程内 `proxy.reload` —— 同一 worker 进程原地换 cfg/providers，不重启。账号增删虽不改 config.yaml，但 reload→`buildProviders`→`loadPool` 重读池文件，新账号随即展开成虚拟。reload 通过 `runtime.Manager.ReplaceGeneration` 清空 health/sticky/model-lock/paramBlock/spread/quota（operator pin 保留）、重建响应缓存，并 kick `quota.pollAll`。注意：进程内 reload（UI 与 worker 同进程）≠ `serve reload`（给独立进程发 SIGHUP）。
 
 **reload 失败不是静默成功**：`reload` 仅在 `config.yaml` 自身不可读/非法时失败（mutation 写的是池文件，不是 config.yaml，所以正常操作不会触发）。失败时凭据已落盘、不可撤销，故仍返回 2xx，但响应带 `warning`（错误原文）并记一行 `[accounts] reload after mutation failed` 日志；runtime 保持旧集直到 config 修复并下次 reload（普通请求不会重读池文件）。前端在 add/remove 模态框和登录 done 状态展示该 warning。config 编辑走 `saveAndReload`，先校验、失败从备份回滚并返回 400（不同于账号增删的 best-effort）。
 
@@ -40,7 +40,7 @@
 
 ## SSE token 扫描器（`tokens.go`，forward 2xx 提交处接入）
 
-`usageScanner` 是 `io.ReadCloser`，仅当 `isSSE(resp.Header)` 包在 `resp.Body` 外，字节**原样透传**（不修改/缓冲/阻塞）；失败静默。bounded 64KB 行缓冲（防 OOM）。commit-on-EOF/close（含客户端断开，`forward` 在 `flushCopy` 后显式 `body.Close()`）。解析只看 `data:` + 首字符 `{` 的行：anthropic shape（`message_start`→input/cache、`message_delta`→output）或 openai shape（`prompt_tokens`/`completion_tokens`，best-effort——`usage` 仅当客户端发 `stream_options.include_usage` 才有；协议转换路径由转换器注入）。`tokenCounter` 纯内存；持久化由 SQLite stats 接管。其内嵌 `mu` 是独立叶子锁，不与 `p.mu`/`healthMu`/`quotaMu` 嵌套。
+`usageScanner` 是 `io.ReadCloser`，仅当 `isSSE(resp.Header)` 包在 `resp.Body` 外，字节**原样透传**（不修改/缓冲/阻塞）；失败静默。bounded 64KB 行缓冲（防 OOM）。commit-on-EOF/close（含客户端断开，`forward` 在 `flushCopy` 后显式 `body.Close()`）。解析只看 `data:` + 首字符 `{` 的行：anthropic shape（`message_start`→input/cache、`message_delta`→output）或 openai shape（`prompt_tokens`/`completion_tokens`，best-effort——`usage` 仅当客户端发 `stream_options.include_usage` 才有；协议转换路径由转换器注入）。`tokenCounter` 纯内存；持久化由 SQLite stats 接管。其内嵌 `mu` 是独立叶子锁，不与 `Proxy.mu` 或 `runtime.Manager` 嵌套。
 
 ## 调用统计持久化（`internal/observe/stats` + 根 `stats_runtime.go`）
 

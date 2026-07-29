@@ -268,7 +268,12 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// without this a multi-account member was always dropped as "not available" the
 	// moment a second account was added. On !ok (unknown / not logged in / all
 	// accounts unhealthy) leave m as-is and let the build gate below report it.
-	if picked, ok := newResolver(p, fc.runtime.providers, fc.runtime.poolIndex).Pick(m, fc.sessionKey); ok {
+	if picked, ok := newResolver(
+		p,
+		fc.runtime.providers,
+		fc.runtime.poolIndex,
+		fc.runtime.generation,
+	).Pick(m, fc.sessionKey); ok {
 		m = picked
 	}
 	res := fusionLegResult{idx: idx, provider: m.Provider, model: m.Model}
@@ -529,7 +534,12 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	// the panel legs — otherwise a multi-account synthesizer has no impl and fails.
 	// FAIL CLOSED on resolver failure: proceeding with the unresolved (pooled
 	// parent) name would hand attemptExecutor a nil impl and fail closed.
-	picked, ok := newResolver(p, fc.runtime.providers, fc.runtime.poolIndex).Pick(st, fc.sessionKey)
+	picked, ok := newResolver(
+		p,
+		fc.runtime.providers,
+		fc.runtime.poolIndex,
+		fc.runtime.generation,
+	).Pick(st, fc.sessionKey)
 	if !ok {
 		log.Printf("[fusion] %s: synthesizer %s/%s unavailable (unknown provider, not logged in, or no healthy pooled account) — aborting synthesis",
 			fc.flc.exposed, st.Provider, st.Model)

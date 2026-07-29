@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/provider"
 )
 
@@ -80,9 +81,7 @@ providers:
 	p := newTestProxy(t, cfg1)
 
 	// Freeze zhipu health, persist → disk carries zhipu + cfg1 fingerprint.
-	p.healthMu.Lock()
-	p.health["zhipu"] = &providerHealth{rateLimitedUntil: time.Now().Add(time.Hour)}
-	p.healthMu.Unlock()
+	seedRuntimeRateLimit(t, p, "zhipu", time.Now().Add(time.Hour), rlTransient)
 	if err := p.quota.persist(); err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +113,10 @@ providers:
 }
 
 type persistedRuntimeState struct {
-	Providers map[string]persistedSnapshot `json:"providers"`
-	Sticky    map[string]persistedSticky   `json:"sticky"`
-	Health    map[string]persistedHealth   `json:"health"`
-	HealthFP  string                       `json:"health_fp"`
+	Providers map[string]persistedSnapshot   `json:"providers"`
+	Sticky    map[string]runtimestate.Sticky `json:"sticky"`
+	Health    map[string]persistedHealth     `json:"health"`
+	HealthFP  string                         `json:"health_fp"`
 }
 
 func readPersistedRuntimeState(t *testing.T, path string) persistedRuntimeState {
@@ -134,22 +133,27 @@ func readPersistedRuntimeState(t *testing.T, path string) persistedRuntimeState 
 }
 
 func seedRuntimeGeneration(p *Proxy, providerName string) {
-	p.mu.Lock()
-	p.healthMu.Lock()
-	p.quota.mu.Lock()
-	p.health = map[string]*providerHealth{
-		providerName: {rateLimitedUntil: time.Now().Add(time.Hour)},
-	}
-	p.sticky = map[string]routeSticky{
-		"m": {provider: providerName, since: time.Now()},
-	}
-	p.quota.state = map[string]*provider.QuotaSnapshot{
-		providerName: {Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: time.Now()},
-	}
-	p.quota.stateGeneration = p.runtimeGeneration
-	p.quota.mu.Unlock()
-	p.healthMu.Unlock()
-	p.mu.Unlock()
+	generation := p.configGeneration.Load()
+	p.runtimeState.RecordRateLimit(
+		providerName,
+		time.Now().Add(time.Hour),
+		rlTransient,
+		generation,
+	)
+	p.runtimeState.SetSticky(
+		"m",
+		runtimestate.Sticky{Provider: providerName, Since: time.Now()},
+		generation,
+	)
+	p.runtimeState.SetQuota(
+		providerName,
+		&provider.QuotaSnapshot{
+			Billing:      provider.BillingPlan,
+			RemainingPct: 0.5,
+			AsOf:         time.Now(),
+		},
+		generation,
+	)
 }
 
 func assertPersistedGeneration(t *testing.T, p *Proxy, providerName string, empty bool) {
@@ -193,7 +197,7 @@ func assertSnapshotGeneration(t *testing.T, state persistedFullSnapshot, cfg *Co
 	if _, ok := state.Health[providerName]; !ok {
 		t.Fatalf("snapshot health missing %q: %+v", providerName, state.Health)
 	}
-	if len(state.Sticky) != 1 || state.Sticky["m"].provider != providerName {
+	if len(state.Sticky) != 1 || state.Sticky["m"].Provider != providerName {
 		t.Fatalf("snapshot sticky is mixed or missing for %q: %+v", providerName, state.Sticky)
 	}
 }
@@ -242,19 +246,29 @@ routes:
 	go func() {
 		close(swapAttempted)
 		p.mu.Lock()
-		p.healthMu.Lock()
-		p.quota.mu.Lock()
 		p.cfg = cfg2
-		p.runtimeGeneration++
-		p.configGeneration.Store(p.runtimeGeneration)
-		p.health = map[string]*providerHealth{"deepseek": {rateLimitedUntil: time.Now().Add(time.Hour)}}
-		p.sticky = map[string]routeSticky{"m": {provider: "deepseek", since: time.Now()}}
-		p.quota.state = map[string]*provider.QuotaSnapshot{
-			"deepseek": {Billing: provider.BillingPlan, RemainingPct: 0.4, AsOf: time.Now()},
-		}
-		p.quota.stateGeneration = p.runtimeGeneration
-		p.quota.mu.Unlock()
-		p.healthMu.Unlock()
+		generation := p.configGeneration.Add(1)
+		p.runtimeState.ReplaceGeneration(generation)
+		p.runtimeState.RecordRateLimit(
+			"deepseek",
+			time.Now().Add(time.Hour),
+			rlTransient,
+			generation,
+		)
+		p.runtimeState.SetSticky(
+			"m",
+			runtimestate.Sticky{Provider: "deepseek", Since: time.Now()},
+			generation,
+		)
+		p.runtimeState.SetQuota(
+			"deepseek",
+			&provider.QuotaSnapshot{
+				Billing:      provider.BillingPlan,
+				RemainingPct: 0.4,
+				AsOf:         time.Now(),
+			},
+			generation,
+		)
 		p.mu.Unlock()
 		close(swapDone)
 	}()
@@ -426,9 +440,7 @@ func TestReload_RejectsOldRequestFailureMutation(t *testing.T) {
 	if oldResult.status != http.StatusBadGateway || !strings.Contains(oldResult.body, `all targets failed for model "m"`) {
 		t.Fatalf("old failed request = status %d body %q, want 502 with target-failure diagnostic", oldResult.status, oldResult.body)
 	}
-	p.healthMu.Lock()
-	_, polluted := p.health["p"]
-	p.healthMu.Unlock()
+	_, polluted := p.runtimeState.Dashboard(time.Now()).Providers["p"]
 	if polluted {
 		t.Fatal("old-generation failure repopulated new-generation health")
 	}
@@ -477,18 +489,18 @@ func TestReload_RejectsOldRequestSuccessMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantUntil := time.Now().Add(time.Hour)
-	p.healthMu.Lock()
-	p.health["p"] = &providerHealth{consecutiveFailures: 1, circuitOpenUntil: wantUntil}
-	p.healthMu.Unlock()
+	p.runtimeState.RestoreHealth(
+		map[string]persistedHealth{"p": {CircuitOpenUntil: wantUntil}},
+		time.Now(),
+		1,
+	)
 	close(release)
 	oldResult := waitRequestDone(t, done)
 	if oldResult.status != http.StatusOK || oldResult.body != `{"ok":true}` {
 		t.Fatalf("old successful request = status %d body %q, want 200/old body", oldResult.status, oldResult.body)
 	}
-	p.healthMu.Lock()
-	h := p.health["p"]
-	p.healthMu.Unlock()
-	if h == nil || h.consecutiveFailures != 1 || !h.circuitOpenUntil.Equal(wantUntil) {
+	h, ok := p.runtimeState.Dashboard(time.Now()).Providers["p"]
+	if !ok || h.ConsecutiveFailures != 1 || !h.CircuitOpenUntil.Equal(wantUntil) {
 		t.Fatalf("old-generation success cleared new-generation health: %+v", h)
 	}
 }
@@ -505,14 +517,21 @@ func TestReload_RejectsAllDirectOldGenerationMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	key := modelLockKey{provider: "p", model: "m"}
-	wantCircuit := time.Now().Add(time.Hour)
-	wantModelLock := time.Now().Add(2 * time.Hour)
-	p.healthMu.Lock()
-	p.health["p"] = &providerHealth{consecutiveFailures: 7, circuitOpenUntil: wantCircuit, halfOpenInFlight: true}
-	p.modelLocks[key] = &modelLockEntry{failures: 4, lockedUntil: wantModelLock}
-	p.paramBlock[key] = map[string]bool{"existing": true}
-	p.healthMu.Unlock()
+	currentGeneration := p.configGeneration.Load()
+	for range 7 {
+		p.runtimeState.RecordFailure("p", 1, -time.Second, currentGeneration)
+	}
+	if !p.runtimeState.TakeHalfOpenSlot("p", currentGeneration) {
+		t.Fatal("failed to seed current-generation half-open slot")
+	}
+	for range 4 {
+		p.runtimeState.RecordModelFailure("p", "m", 2*time.Hour, currentGeneration)
+	}
+	if !p.runtimeState.LearnParamBlock("p", "m", "existing", currentGeneration) {
+		t.Fatal("failed to seed current-generation parameter block")
+	}
+	refreshCalled := make(chan string, 1)
+	p.quota.refreshHook = func(name string) { refreshCalled <- name }
 
 	p.recordFailure("p", Scheduling{}, oldGeneration)
 	p.recordModelFailure("p", "m", Scheduling{}, oldGeneration)
@@ -525,18 +544,24 @@ func TestReload_RejectsAllDirectOldGenerationMutations(t *testing.T) {
 	if allowed := p.takeHalfOpenSlot("p", oldGeneration); !allowed {
 		t.Fatal("old request should be allowed to finish without mutating the new generation")
 	}
+	p.quota.stop()
+	select {
+	case name := <-refreshCalled:
+		t.Fatalf("stale rate limit triggered quota refresh for %q", name)
+	default:
+	}
 
-	p.healthMu.Lock()
-	defer p.healthMu.Unlock()
-	h := p.health["p"]
-	if h == nil || h.consecutiveFailures != 7 || !h.circuitOpenUntil.Equal(wantCircuit) || !h.halfOpenInFlight || !h.rateLimitedUntil.IsZero() {
+	snapshot := p.runtimeState.Dashboard(time.Now())
+	h, ok := snapshot.Providers["p"]
+	if !ok || h.ConsecutiveFailures != 7 || !h.HalfOpenInFlight || !h.RateLimitedUntil.IsZero() {
 		t.Fatalf("old generation changed provider health: %+v", h)
 	}
-	lock := p.modelLocks[key]
-	if lock == nil || lock.failures != 4 || !lock.lockedUntil.Equal(wantModelLock) {
-		t.Fatalf("old generation changed model lock: %+v", lock)
+	locks := snapshot.ModelLocks["p"]
+	if len(locks) != 1 || locks[0].Model != "m" || locks[0].Failures != 4 {
+		t.Fatalf("old generation changed model lock: %+v", locks)
 	}
-	if !p.paramBlock[key]["existing"] || p.paramBlock[key]["stale"] {
-		t.Fatalf("old generation changed parameter blocklist: %+v", p.paramBlock[key])
+	if !p.runtimeState.ParamBlocked("p", "m", "existing") ||
+		p.runtimeState.ParamBlocked("p", "m", "stale") {
+		t.Fatalf("old generation changed parameter blocklist: %+v", p.runtimeState.ParamBlock("p", "m"))
 	}
 }

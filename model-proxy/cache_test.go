@@ -514,11 +514,9 @@ func TestForward_ForcedPooledProviderBypassesCache(t *testing.T) {
 	// virtuals unavailable so an ordinary (cacheable) request deterministically
 	// primes from the static primary; no force or pin may be used because both
 	// deliberately bypass the cache.
-	p.healthMu.Lock()
 	for _, virtual := range p.poolIndex["pooled"] {
-		p.health[virtual] = &providerHealth{rateLimitedUntil: time.Now().Add(time.Hour)}
+		seedRuntimeRateLimit(t, p, virtual, time.Now().Add(time.Hour), rlTransient)
 	}
-	p.healthMu.Unlock()
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 
@@ -559,11 +557,7 @@ func TestForward_ForcedPooledProviderBypassesCache(t *testing.T) {
 	if primaryHits != 1 || pooledHits != 0 {
 		t.Fatalf("ordinary replay primary/pooled hits=%d/%d want 1/0", primaryHits, pooledHits)
 	}
-	p.healthMu.Lock()
-	for _, virtual := range p.poolIndex["pooled"] {
-		delete(p.health, virtual)
-	}
-	p.healthMu.Unlock()
+	p.resetHealth("pooled")
 	if h, got := do("pooled"); h.Get("x-mp-cache") != "" || got != `{"from":"pooled"}` {
 		t.Fatalf("forced pooled response cache=%q body=%s want empty/pooled", h.Get("x-mp-cache"), got)
 	}
