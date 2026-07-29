@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,9 +35,9 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 		Scheduling: schedCfg(3, "50ms", "10s", "5s", "0s"),
 	}
 	p := newTestProxy(t, cfg)
-	p.providers["primary"] = &quotaCountProv{}
-	p.providers["fallback"] = &testProv{key: "f"}
 	refreshed := make(chan string, 2)
+	p.providers["primary"] = &quotaCountProv{name: "primary", refreshed: refreshed}
+	p.providers["fallback"] = &quotaCountProv{name: "fallback", refreshed: refreshed}
 	p.quota.stop()
 	p.quota = newQuotaTracker(
 		"",
@@ -45,12 +46,6 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 		&p.runtimeState,
 	)
 	p.quota.generation = p.configGeneration.Load
-	// refreshHook lets the test count refreshes + capture WHICH provider was
-	// refreshed — not just how many (P0-3: if the bug fires on fallback instead
-	// of the rate-limited primary, a count-only assertion would miss it).
-	p.quota.refreshHook = func(name string) {
-		refreshed <- name
-	}
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
@@ -70,17 +65,22 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 	}
 }
 
-// quotaCountProv is a testProv whose Quota() is callable.
-type quotaCountProv struct{ testProv }
-
-func (q *quotaCountProv) Quota() (*provider.QuotaSnapshot, error) {
-	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5}, nil
+// quotaCountProv is a controllable Provider whose real Quota call records its
+// own identity. This proves the 429 path refreshes the provider that failed,
+// rather than merely proving an arbitrary refresh happened.
+type quotaCountProv struct {
+	testProv
+	name      string
+	refreshed chan<- string
+	calls     atomic.Int32
 }
 
-// staticQuota sets the tracker's snapshot for a provider (plan, given remaining%).
-// No windows → surplus 0 (neutral); use when only the billing tier matters.
-func staticQuota(p *Proxy, name string, rem float64) {
-	p.quota.setSnapshot(name, &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: rem, AsOf: time.Now()})
+func (q *quotaCountProv) Quota() (*provider.QuotaSnapshot, error) {
+	q.calls.Add(1)
+	if q.refreshed != nil {
+		q.refreshed <- q.name
+	}
+	return &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5}, nil
 }
 
 // staticSurplus sets a plan snapshot whose single ultimate window has the given
@@ -147,98 +147,14 @@ func firstProvider(p *Proxy, model string) string {
 	return ordered[0].Provider
 }
 
-func TestSchedule_PicksHighestSurplus(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}, "c": {}},
-		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}, {Provider: "c"}}})
-	staticSurplus(p, "a", 0.5, 0.5) // surplus 0 (on pace)
-	staticSurplus(p, "b", 0.5, 0)   // surplus 0.5 (waste risk → use it or lose it)
-	staticSurplus(p, "c", 0.1, 0.9) // surplus -0.8 (over pace → avoid)
-	if got := firstProvider(p, "m"); got != "b" {
-		t.Errorf("first=%q, want b (highest surplus)", got)
-	}
-}
-
-func TestSchedule_StickyHoldsWithinDwell(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
-	p.cfg.Scheduling.StickyDwell = "10m"
-	staticSurplus(p, "a", 0.5, 0.5) // surplus 0 (current sticky)
-	staticSurplus(p, "b", 0.5, 0)   // surplus 0.5 (higher)
-	// seed sticky on 'a'
-	seedRuntimeSticky(t, p, "m", "a", time.Now())
-	if got := firstProvider(p, "m"); got != "a" {
-		t.Errorf("within dwell: first=%q, want a (sticky despite lower surplus)", got)
-	}
-}
-
-func TestSchedule_SwitchesAfterDwellByMargin(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
-	p.cfg.Scheduling.StickyDwell = "1ms"
-	staticSurplus(p, "a", 0.5, 0.5) // surplus 0
-	staticSurplus(p, "b", 0.5, 0)   // surplus 0.5 — ahead by 0.5 ≥ 0.15 margin
-	seedRuntimeSticky(t, p, "m", "a", time.Now().Add(-time.Second))
-	time.Sleep(2 * time.Millisecond) // dwell expired
-	if got := firstProvider(p, "m"); got != "b" {
-		t.Errorf("after dwell + margin: first=%q, want b", got)
-	}
-}
-
-func TestSchedule_NoSwitchBelowMargin(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
-	p.cfg.Scheduling.StickyDwell = "1ms"
-	staticSurplus(p, "a", 0.5, 0.2)  // surplus 0.3
-	staticSurplus(p, "b", 0.5, 0.15) // surplus 0.35 — ahead by 0.05 < 0.15 margin
-	seedRuntimeSticky(t, p, "m", "a", time.Now().Add(-time.Second))
-	time.Sleep(2 * time.Millisecond)
-	if got := firstProvider(p, "m"); got != "a" {
-		t.Errorf("below margin: first=%q, want a (stay sticky)", got)
-	}
-}
-
-func TestSchedule_PayGStrictLastResort(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"plan": {Billing: ""}, "payg": {Billing: "pay-as-you-go"}},
-		// payg listed first: with sort.SliceStable, a missing tier comparison
-		// would keep config order — the expected winner must not be first.
-		map[string][]RouteTarget{"m": {{Provider: "payg"}, {Provider: "plan"}}})
-	p.quota.setSnapshot("plan", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.05, AsOf: time.Now()})
-	p.quota.setSnapshot("payg", &provider.QuotaSnapshot{Billing: provider.BillingPayG, RemainingPct: -1, AsOf: time.Now()})
-	if got := firstProvider(p, "m"); got != "plan" {
-		t.Errorf("plan@5%% still beats payg: first=%q, want plan", got)
-	}
-	// now mark plan unavailable (rate-limited) → payg used
-	seedRuntimeRateLimit(t, p, "plan", time.Now().Add(time.Hour), rlTransient)
-	if got := firstProvider(p, "m"); got != "payg" {
-		t.Errorf("when plan unavailable: first=%q, want payg (last resort)", got)
-	}
-}
-
-// TestSchedule_PlanBeforeUnknown: a measurable Plan provider ranks ahead of an
-// unmeasurable Unknown one (tier order: plan < unknown < payg), even when the
-// Plan provider's remaining quota is low.
-func TestSchedule_PlanBeforeUnknown(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"planprov": {}, "unkprov": {}},
-		// unkprov listed first: with sort.SliceStable, a missing tier comparison
-		// would keep config order — the expected winner must not be first.
-		map[string][]RouteTarget{"m": {{Provider: "unkprov"}, {Provider: "planprov"}}})
-	staticQuota(p, "planprov", 0.05) // low but known
-	// unkprov: no snapshot → BillingUnknown
-	if got := firstProvider(p, "m"); got != "planprov" {
-		t.Errorf("first=%q, want planprov (plan tier ranks ahead of unknown)", got)
-	}
-}
-
-// TestSchedule_PeakBurnsShortWindow: a provider in peak (multiplier 2) with a
+// TestScheduleAdapter_AppliesPeakMultiplier verifies the root adapter projects
+// Provider.PeakHours into runtime.Target.PeakMultiplier. The underlying surplus
+// state machine is covered in internal/runtime.
+//
+// A provider in peak (multiplier 2) with a
 // short rate-cap window has its surplus reduced by the peak-burn deduction, so a
 // non-peak peer (same ultimate remaining + time-left) ranks ahead.
-func TestSchedule_PeakBurnsShortWindow(t *testing.T) {
+func TestScheduleAdapter_AppliesPeakMultiplier(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]Provider{
 			"plain": {},
@@ -264,45 +180,84 @@ func TestSchedule_PeakBurnsShortWindow(t *testing.T) {
 	}
 }
 
-// TestSchedule_SwitchesOnPriorityAfterDwell: after dwell, with quota equal
-// (sub-margin), the best provider wins on priority — the "return to the
-// preferred provider" branch (proxy.go keepSticky priority arm).
-func TestSchedule_SwitchesOnPriorityAfterDwell(t *testing.T) {
+func TestScheduleAdapter_ProjectsParentBillingAndMapsTargets(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	targets := []RouteTarget{
+		{Provider: "pool#acct", Model: "pool-model", Priority: 1},
+		{Provider: "plan", Model: "plan-model", Priority: 9},
+	}
 	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		map[string][]RouteTarget{"m": {
-			{Provider: "a", Priority: 1},
-			{Provider: "b", Priority: 2},
-		}})
-	p.cfg.Scheduling.StickyDwell = "1ms"
-	staticQuota(p, "a", 0.5)
-	staticQuota(p, "b", 0.5) // equal remaining → sub-margin; priority decides
-	seedRuntimeSticky(t, p, "m", "b", time.Now().Add(-time.Second))
-	time.Sleep(2 * time.Millisecond) // dwell expired
-	if got := firstProvider(p, "m"); got != "a" {
-		t.Errorf("after dwell: first=%q, want a (better priority wins on sub-margin quota)", got)
+		map[string]Provider{
+			"pool": {Billing: "pay-as-you-go"},
+			"plan": {},
+		},
+		map[string][]RouteTarget{"m": targets})
+	p.parentOf = map[string]string{"pool#acct": "pool"}
+	p.quota.setSnapshot("pool#acct", &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan,
+		AsOf:    now,
+	})
+	p.quota.setSnapshot("plan", &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan,
+		AsOf:    now,
+	})
+	if got := configuredBillingOverride(p.cfg.Providers["pool"].Billing); got != provider.BillingPayG {
+		t.Fatalf("parent billing override=%v, want payg", got)
+	}
+	if got := p.quota.snapshot("pool#acct"); got == nil || got.Billing != provider.BillingPlan {
+		t.Fatalf("virtual quota=%+v, want fresh plan snapshot", got)
+	}
+	if got := p.quota.snapshot("plan"); got == nil || got.Billing != provider.BillingPlan {
+		t.Fatalf("plan quota=%+v, want fresh plan snapshot", got)
+	}
+
+	ordered, _ := p.decideOrder(
+		p.cfg,
+		p.parentOf,
+		"m",
+		"",
+		targets,
+		now,
+		false,
+		map[string]bool{"m": true},
+	)
+	if len(ordered) != 2 {
+		t.Fatalf("ordered=%+v, want two targets", ordered)
+	}
+	if ordered[0].Provider != "plan" || ordered[0].Model != "plan-model" ||
+		ordered[1].Provider != "pool#acct" || ordered[1].Model != "pool-model" {
+		t.Fatalf("ordered=%+v, want exact plan then payg virtual target mapping", ordered)
 	}
 }
 
-// TestSchedule_PayGOrderByPriority: among multiple pay-as-you-go providers
-// (same tier, no quota data), priority orders them; the higher-priority one
-// serves, and the next serves when it's unavailable.
-func TestSchedule_PayGOrderByPriority(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{
-			"paygA": {Billing: "pay-as-you-go"},
-			"paygB": {Billing: "pay-as-you-go"},
-		},
-		map[string][]RouteTarget{"m": {
-			{Provider: "paygA", Priority: 1},
-			{Provider: "paygB", Priority: 2},
-		}})
-	if got := firstProvider(p, "m"); got != "paygA" {
-		t.Errorf("first=%q, want paygA (priority 1 within payg tier)", got)
+func TestScheduleAdapter_DerivesQuotaMaxAgeFromPollInterval(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	targets := []RouteTarget{
+		{Provider: "unknown", Model: "unknown-model", Priority: 1},
+		{Provider: "candidate", Model: "candidate-model", Priority: 1},
 	}
-	seedRuntimeRateLimit(t, p, "paygA", time.Now().Add(time.Hour), rlTransient)
-	if got := firstProvider(p, "m"); got != "paygB" {
-		t.Errorf("paygA unavailable: first=%q, want paygB", got)
+	p := newQuotaProxy(t,
+		map[string]Provider{"unknown": {}, "candidate": {}},
+		map[string][]RouteTarget{"m": targets})
+	p.quota.setSnapshot("candidate", &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan,
+		AsOf:    now.Add(-5 * time.Minute),
+	})
+
+	p.cfg.Scheduling.QuotaPollInterval = "2m" // max age = 3 × 2m = 6m
+	fresh, _ := p.decideOrder(
+		p.cfg, p.parentOf, "m", "", targets, now, false, map[string]bool{"m": true},
+	)
+	if len(fresh) != 2 || fresh[0].Provider != "candidate" {
+		t.Fatalf("6m max age order=%+v, want fresh plan candidate first", fresh)
+	}
+
+	p.cfg.Scheduling.QuotaPollInterval = "1m" // max age = 3m; snapshot is stale
+	stale, _ := p.decideOrder(
+		p.cfg, p.parentOf, "m", "", targets, now, false, map[string]bool{"m": true},
+	)
+	if len(stale) != 2 || stale[0].Provider != "unknown" {
+		t.Fatalf("3m max age order=%+v, want stable unknown-first order", stale)
 	}
 }
 
@@ -373,87 +328,5 @@ func TestPeakSummary(t *testing.T) {
 	}
 	if got := peakSummary(PeakConfig{{Window: "09:00-12:00"}}); !strings.Contains(got, "×2") {
 		t.Errorf("default multiplier: %q, want ×2", got)
-	}
-}
-
-// TestSchedule_SurplusComparableAcrossPeriods: surplus is normalized to a pace
-// fraction (fLeft = time-left/duration), so a weekly and a monthly window are
-// directly comparable — a weekly provider near reset (waste risk) outranks a
-// monthly one on pace, even though their absolute cycle lengths differ.
-func TestSchedule_SurplusComparableAcrossPeriods(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"weekly": {}, "monthly": {}},
-		// monthly listed first: without surplus normalization the stable sort
-		// would keep config order — the expected winner must not be first.
-		map[string][]RouteTarget{"m": {{Provider: "monthly"}, {Provider: "weekly"}}})
-	now := time.Now()
-	setWin := func(name string, rem, fLeft, days float64) {
-		dur := time.Duration(days * 24 * float64(time.Hour))
-		p.quota.setSnapshot(name, &provider.QuotaSnapshot{
-			Billing: provider.BillingPlan, RemainingPct: rem,
-			Windows: []provider.QuotaWindow{{
-				Ultimate: true, Kind: "tokens", RemainingPct: rem, Total: 100,
-				Duration: dur, ResetsAt: now.Add(time.Duration(fLeft * float64(dur))),
-			}},
-			AsOf: now,
-		})
-	}
-	setWin("weekly", 0.5, 0, 7)     // near reset → surplus +0.5 (use it or lose it)
-	setWin("monthly", 0.5, 0.5, 30) // mid-cycle → surplus 0 (on pace)
-	if got := firstProvider(p, "m"); got != "weekly" {
-		t.Errorf("first=%q, want weekly (waste-risk surplus +0.5 > monthly on-pace 0, across periods)", got)
-	}
-}
-
-// TestSchedule_PriorityBeatsSurplus: within the same tier, a higher-priority
-// provider ranks ahead even when its surplus is much lower (priority was moved
-// before surplus). surplus only breaks ties at equal priority.
-func TestSchedule_PriorityBeatsSurplus(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		map[string][]RouteTarget{"m": {
-			{Provider: "a", Priority: 1},
-			{Provider: "b", Priority: 2},
-		}})
-	staticSurplus(p, "a", 0.1, 0.9) // priority 1, surplus −0.8 (over pace, near exhaust)
-	staticSurplus(p, "b", 0.5, 0)   // priority 2, surplus +0.5 (waste risk)
-	if got := firstProvider(p, "m"); got != "a" {
-		t.Errorf("first=%q, want a (priority 1 beats higher-surplus priority 2)", got)
-	}
-}
-
-// TestSchedule_SurplusBreaksPriorityTie: at equal priority, surplus decides
-// (waste-risk first) — the only place surplus now affects ordering.
-func TestSchedule_SurplusBreaksPriorityTie(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		// b listed first: without the surplus tiebreak the stable sort would
-		// keep config order — the expected winner must not be first.
-		map[string][]RouteTarget{"m": {
-			{Provider: "b", Priority: 1},
-			{Provider: "a", Priority: 1},
-		}})
-	staticSurplus(p, "a", 0.5, 0)   // surplus +0.5 (waste risk)
-	staticSurplus(p, "b", 0.5, 0.5) // surplus 0 (on pace)
-	if got := firstProvider(p, "m"); got != "a" {
-		t.Errorf("first=%q, want a (equal priority → higher surplus first)", got)
-	}
-}
-
-// TestSchedule_RestoredStickyReevaluatesWhenDwellExpired: a sticky selection
-// restored from quota_state.json with a stale `since` (restart took longer than
-// sticky_dwell) is re-evaluated immediately — the next request picks the best
-// surplus provider rather than honoring the stale park.
-func TestSchedule_RestoredStickyReevaluatesWhenDwellExpired(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
-	p.cfg.Scheduling.StickyDwell = "10m"
-	staticSurplus(p, "a", 0.5, 0)   // surplus +0.5 (best)
-	staticSurplus(p, "b", 0.5, 0.5) // surplus 0
-	// Simulate a sticky restored from disk whose since is well past dwell.
-	seedRuntimeSticky(t, p, "m", "b", time.Now().Add(-time.Hour))
-	if got := firstProvider(p, "m"); got != "a" {
-		t.Errorf("restored sticky with expired dwell: first=%q, want a (re-evaluated to best surplus)", got)
 	}
 }

@@ -18,10 +18,6 @@ func poolPath(name string) string {
 	return accountStore().PoolPath(name)
 }
 
-func singularPoolPath(name string) string {
-	return accountStore().LegacyPath(name)
-}
-
 func loadPool(name, providerID string) (credentialPool, error) {
 	return accountStore().Load(name, providerID)
 }

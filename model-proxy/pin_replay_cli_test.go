@@ -219,11 +219,11 @@ func TestCmdPin_InProcess(t *testing.T) {
 	listen := strings.TrimPrefix(srv.URL, "http://")
 	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: http://x}\nroutes:\n  glm: [{provider: zhipu, model: glm-4}]\n")
 
-	out := captureStdout(t, func() { cmdPin([]string{"--config", cfgPath, "glm", "zhipu", "--ttl", "1h"}) })
+	out := grabStdout(t, func() { cmdPin([]string{"--config", cfgPath, "glm", "zhipu", "--ttl", "1h"}) })
 	if !strings.Contains(out, "pinned glm → zhipu") {
 		t.Errorf("cmdPin out=%q", out)
 	}
-	out = captureStdout(t, func() { cmdUnpin([]string{"--config", cfgPath, "glm"}) })
+	out = grabStdout(t, func() { cmdUnpin([]string{"--config", cfgPath, "glm"}) })
 	if !strings.Contains(out, "unpinned glm") {
 		t.Errorf("cmdUnpin out=%q", out)
 	}

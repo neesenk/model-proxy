@@ -202,102 +202,6 @@ func assertSnapshotGeneration(t *testing.T, state persistedFullSnapshot, cfg *Co
 	}
 }
 
-// TestPersistedSnapshot_BlocksGenerationSwap forces the exact lock-boundary
-// interleaving: snapshot pauses after taking p.mu.RLock while a generation swap
-// attempts p.mu.Lock. The captured tuple must be wholly old-generation; after
-// the swap, a second tuple must be wholly new-generation.
-func TestPersistedSnapshot_BlocksGenerationSwap(t *testing.T) {
-	cfg1Path := writeConfigFile(t, `listen: 127.0.0.1:0
-providers:
-  zhipu: {provider_id: zhipu, openai_base_url: https://x}
-routes:
-  m: [{provider: zhipu, model: m}]
-`)
-	cfg2Path := writeConfigFile(t, `listen: 127.0.0.1:0
-providers:
-  deepseek: {provider_id: deepseek, openai_base_url: https://y}
-routes:
-  m: [{provider: deepseek, model: m}]
-`)
-	cfg1 := mustLoadConfigFile(t, cfg1Path)
-	cfg2 := mustLoadConfigFile(t, cfg2Path)
-	p := newTestProxy(t, cfg1)
-	p.quota.stop()
-	seedRuntimeGeneration(p, "zhipu")
-
-	snapshotHoldingConfig := make(chan struct{})
-	releaseSnapshot := make(chan struct{})
-	p.mu.Lock()
-	p.persistSnapshotHook = func() {
-		close(snapshotHoldingConfig)
-		<-releaseSnapshot
-	}
-	p.mu.Unlock()
-	snapshotDone := make(chan persistedFullSnapshot, 1)
-	go func() { snapshotDone <- p.snapshotPersistedState() }()
-	select {
-	case <-snapshotHoldingConfig:
-	case <-time.After(2 * time.Second):
-		t.Fatal("snapshot did not reach the config-lock barrier")
-	}
-
-	swapAttempted := make(chan struct{})
-	swapDone := make(chan struct{})
-	go func() {
-		close(swapAttempted)
-		p.mu.Lock()
-		p.cfg = cfg2
-		generation := p.configGeneration.Add(1)
-		p.runtimeState.ReplaceGeneration(generation)
-		p.runtimeState.RecordRateLimit(
-			"deepseek",
-			time.Now().Add(time.Hour),
-			rlTransient,
-			generation,
-		)
-		p.runtimeState.SetSticky(
-			"m",
-			runtimestate.Sticky{Provider: "deepseek", Since: time.Now()},
-			generation,
-		)
-		p.runtimeState.SetQuota(
-			"deepseek",
-			&provider.QuotaSnapshot{
-				Billing:      provider.BillingPlan,
-				RemainingPct: 0.4,
-				AsOf:         time.Now(),
-			},
-			generation,
-		)
-		p.mu.Unlock()
-		close(swapDone)
-	}()
-	<-swapAttempted
-	select {
-	case <-swapDone:
-		t.Fatal("generation swap passed p.mu while snapshot held its read lock")
-	default:
-	}
-	close(releaseSnapshot)
-
-	var oldSnapshot persistedFullSnapshot
-	select {
-	case oldSnapshot = <-snapshotDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("snapshot did not finish after barrier release")
-	}
-	assertSnapshotGeneration(t, oldSnapshot, cfg1, "zhipu")
-	select {
-	case <-swapDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("generation swap did not finish after snapshot")
-	}
-	p.mu.Lock()
-	p.persistSnapshotHook = nil
-	p.mu.Unlock()
-	assertSnapshotGeneration(t, p.snapshotPersistedState(), cfg2, "deepseek")
-}
-
 // TestReload_PersistedSnapshotMatchesGeneration deterministically verifies the
 // complete persisted tuple. Each reload must first write the new fingerprint
 // with empty quota/health/sticky, then a seeded current-generation snapshot must
@@ -530,8 +434,18 @@ func TestReload_RejectsAllDirectOldGenerationMutations(t *testing.T) {
 	if !p.runtimeState.LearnParamBlock("p", "m", "existing", currentGeneration) {
 		t.Fatal("failed to seed current-generation parameter block")
 	}
+	// reload may have admitted its own poll. Drain it before replacing the
+	// tracker, so the assertion below observes only a 429-triggered refresh.
+	p.quota.stop()
 	refreshCalled := make(chan string, 1)
-	p.quota.refreshHook = func(name string) { refreshCalled <- name }
+	p.providers["p"] = &quotaCountProv{name: "p", refreshed: refreshCalled}
+	p.quota = newQuotaTracker(
+		t.TempDir()+"/quota_state.json",
+		func() *Config { return p.cfg },
+		func() map[string]provider.Provider { return p.providers },
+		&p.runtimeState,
+	)
+	p.quota.generation = p.configGeneration.Load
 
 	p.recordFailure("p", Scheduling{}, oldGeneration)
 	p.recordModelFailure("p", "m", Scheduling{}, oldGeneration)

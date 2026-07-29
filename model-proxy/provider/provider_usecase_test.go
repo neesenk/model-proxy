@@ -103,6 +103,22 @@ func TestEnsureJSONField_NonJSON(t *testing.T) {
 	}
 }
 
+func TestEnsureJSONField_InjectsMissingAndPreservesExisting(t *testing.T) {
+	missing := ensureJSONField([]byte(`{"model":"gpt-5.5"}`), "store", false)
+	var got map[string]any
+	if err := json.Unmarshal(missing, &got); err != nil {
+		t.Fatalf("injected body is not JSON: %s", missing)
+	}
+	if got["store"] != false {
+		t.Errorf("injected store=%v want false", got["store"])
+	}
+
+	existing := []byte(`{"store":true,"model":"gpt-5.5"}`)
+	if got := ensureJSONField(existing, "store", false); string(got) != string(existing) {
+		t.Errorf("existing store must remain byte-for-byte untouched: got %q want %q", got, existing)
+	}
+}
+
 // --- P6: codex FetchModels queries /models live and keeps visibility=="list" ---
 
 func TestCodexFetchModels_LiveQuery(t *testing.T) {

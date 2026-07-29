@@ -27,9 +27,11 @@
 
 ### 着色
 
-两套独立开关（`color.go`）：
+两套独立开关：
 
-- `colorEnabled` — stdout 着色（`cGreen`/`cRed`/`cYellow`/`cDim`/`cBold`/`cBlue`/`cCyan`/`cGray`/`cMagenta`）。
+- `provider.ColorEnabled`（`provider/display.go`）— stdout 着色；根 CLI 仅保留
+  实际使用的 `cGreen`/`cRed`/`cYellow`/`cDim`/`cBold`/`cBlue`/`cCyan`/`cGray`
+  等薄包装。
 - `logColorEnabled` — stderr/log 着色（`cl(...)`，运行时日志用）。
 
 两者都遵循：`NO_COLOR` 非空 -> 关；`CLICOLOR_FORCE` 非 0/空 -> 开；否则按 fd 是否 tty 自动。**管道/重定向到文件时着色自动关闭**，故脚本看到的 stdout 是纯文本。契约文案里的 `cGreen("✓")` 等表示「着色开启时包 ANSI，关闭时原样」。
@@ -269,7 +271,9 @@ logout <provider> [--label <name>] [--all]
 usage [provider]   # 无参数 = 所有已配置 provider
 ```
 
-逻辑（`main.go:436` `cmdUsage` -> `printProviderUsage`）：无参数时按 provider 名排序逐个打印，块间用 `usageDivider` 分隔。未知 provider -> stderr `unknown provider ...` + exit 1。
+逻辑（`cmdUsage` -> `printProviderUsage` -> `provider.Provider.Usage()`）：无参数时
+按 provider 名排序逐个打印，块间用 `usageDivider` 分隔。未知 provider -> stderr
+`unknown provider ...` + exit 1。
 
 ### 分隔符
 
@@ -284,7 +288,8 @@ const usageDivider = "───────────────────�
 ```
 <LABEL> (<MASKED_ID>)
 ```
-然后按 `provider_id` 调 `showDeepseekUsage` / `showVolcengineUsage` / `showGenericUsage`。
+然后为该账号构建绑定凭据的虚拟 provider，并调用它的 `Usage()`；账号间不得共享
+凭据或绕过统一 Provider 接口。
 
 ### 单账号/非池化（aqp/codex）
 
@@ -300,14 +305,14 @@ Provider:   <PROVNAME>
 
 | provider | 关键行（首行之后） |
 |---|---|
-| aqp (`showAqpUsage`) | `Account:    <EMAIL>`；`Project ID: <ID>`；`Usage:      [<BAR>] <PCT>% used · $<USAGE> / $<TOTAL>  (balance $<BAL>, <PLAN>, <YEAR>-<MONTH>)`；`Store:      <PATH>` |
-| codex (`showCodexUsage`) | `Account:   <EMAIL|"(unknown)">`；`Plan:      <PLAN_TYPE>`；`Credits:   unlimited`/`has credits (<BAL>)`/`none`；`Rate Limit:` 状态；`Usage:` `limit reached` 或 `[<BAR>] <PCT>% used · <USED> / <TOTAL> credits, resets <DUR>` |
+| aqp (`AqpProvider.Usage`) | `Account:    <EMAIL>`；`Project ID: <ID>`；`Usage:      [<BAR>] <PCT>% used · $<USAGE> / $<TOTAL>  (balance $<BAL>, <PLAN>, <YEAR>-<MONTH>)`；`Store:      <PATH>` |
+| codex (`CodexProvider.Usage`) | `Account:   <EMAIL|"(unknown)">`；`Plan:      <PLAN_TYPE>`；`Credits:   unlimited`/`has credits (<BAL>)`/`none`；`Rate Limit:` 状态；`Usage:` `limit reached` 或 `[<BAR>] <PCT>% used · <USED> / <TOTAL> credits, resets <DUR>` |
 
 > `<PCT>` 为已用百分比，统一保留小数点后一位（如 `56.8%`、`25.0%`）。
-| zhipu (`showGenericUsage`) | 5h/weekly token 限额 + 月度时间限额（带进度条）；`TIME_LIMIT` 按 MCP 工具（search-prime/web-reader/zread）分解；回退：OpenAI 风格模型列表 |
-| deepseek (`showDeepseekUsage`) | `Available:  no (insufficient balance)`（余额不足时）；各币种 `total/granted/topped-up` 余额 |
-| volcengine (`showVolcengineUsage`) | 无 AK/SK：`Note:` 说明 + 列 config 模型；有 AK/SK：`Plan: <PLAN_TYPE>` + `AFPFiveHour/Daily/Weekly/Monthly` 各窗口 Quota/Used/Remaining/ResetTime |
-| kimi-code (`showGenericUsage`) | `Plan:       Kimi Code membership`；`Weekly limit`（Ultimate，7d）+ `5h limit`（Short，5h）+ 其他限额窗口（带进度条/重置时间）+ `Extra usage`/`Monthly cap` 钱包窗口（`n/a`）。取自 `/usages`。拉取失败：`Usage:      (unavailable: <ERR>)` + 控制台提示 + 列 config 模型 |
+| zhipu (`ZhipuProvider.Usage`) | 5h/weekly token 限额 + 月度时间限额（带进度条）；`TIME_LIMIT` 按 MCP 工具（search-prime/web-reader/zread）分解；回退：OpenAI 风格模型列表 |
+| deepseek (`DeepSeekProvider.Usage`) | `Available:  no (insufficient balance)`（余额不足时）；各币种 `total/granted/topped-up` 余额 |
+| volcengine (`VolcengineProvider.Usage`) | 无 AK/SK：`Note:` 说明 + 列 config 模型；有 AK/SK：`Plan: <PLAN_TYPE>` + `AFPFiveHour/Daily/Weekly/Monthly` 各窗口 Quota/Used/Remaining/ResetTime |
+| kimi-code (`KimiCodeProvider.Usage`) | `Plan:       Kimi Code membership`；`Weekly limit`（Ultimate，7d）+ `5h limit`（Short，5h）+ 其他限额窗口（带进度条/重置时间）+ `Extra usage`/`Monthly cap` 钱包窗口（`n/a`）。取自 `/usages`。拉取失败：`Usage:      (unavailable: <ERR>)` + 控制台提示 + 列 config 模型 |
 
 重置时间格式：`<duration>(at <time>)`；`formatResetAt`：今天显示 `HH:MM`，否则 `MM-DD HH:MM`。
 

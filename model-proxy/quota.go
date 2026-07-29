@@ -43,9 +43,6 @@ type quotaTracker struct {
 	// Defaults (3 / 1s) are set in newQuotaTracker; tests shrink them to stay fast.
 	retryAttempts int
 	retryBackoff  time.Duration
-	// refreshHook, if set, replaces refreshOne's real poll — used by tests to
-	// observe refreshes without hitting a network. If nil, the real poll runs.
-	refreshHook func(name string)
 	// refreshGuard dedupes 429-triggered refreshes per provider (inFlight
 	// coalesces concurrent ones; last debounces ones that just ran), so a 429
 	// storm doesn't fire N upstream Quota() calls + N persists. Guarded by mu.
@@ -287,9 +284,8 @@ func (t *quotaTracker) pollOne(key string) bool {
 	return true
 }
 
-// refreshOne re-polls a single provider (called after a 429). If a refreshHook
-// is installed it replaces the real poll (used by tests). Otherwise the call is
-// deduped: a concurrent refresh (inFlight) or one that ran less than
+// refreshOne re-polls a single provider after a 429. The call is deduped: a
+// concurrent refresh (inFlight) or one that ran less than
 // pollInterval/2 ago (last) is dropped, so a 429 storm doesn't fire N upstream
 // Quota() calls + N persists for the same provider.
 func (t *quotaTracker) refreshOne(name string, generations ...uint64) {
@@ -298,10 +294,6 @@ func (t *quotaTracker) refreshOne(name string, generations ...uint64) {
 		generation = generations[0]
 	}
 	if t.currentGeneration() != generation {
-		return
-	}
-	if t.refreshHook != nil {
-		t.refreshHook(name)
 		return
 	}
 	now := time.Now()

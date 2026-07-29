@@ -27,8 +27,7 @@ const (
 
 // ColorEnabled controls stdout color for the provider display helpers. Decided
 // at init from os.Stdout (tty -> on); NO_COLOR disables, CLICOLOR_FORCE=1
-// forces on. The main package sets this (via SetColorEnabled) to mirror its
-// own colorEnabled so both packages agree.
+// forces on.
 var ColorEnabled = decideColor(os.Stdout)
 
 func decideColor(f *os.File) bool {
@@ -50,8 +49,7 @@ func isTerminal(f *os.File) bool {
 	return fi.Mode()&os.ModeCharDevice != 0
 }
 
-// SetColorEnabled lets the main package sync its colorEnabled into the provider
-// package (e.g. tests force color off during stdout capture).
+// SetColorEnabled lets tests and embedding callers override stdout color.
 func SetColorEnabled(on bool) { ColorEnabled = on }
 
 // C wraps s in a color; returns s unchanged when color is disabled.

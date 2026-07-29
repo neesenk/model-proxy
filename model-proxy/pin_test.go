@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	runtimestate "model-proxy/internal/runtime"
 )
 
 // setPinForTest installs a pin bypassing TTL clock semantics the test controls
@@ -17,20 +15,6 @@ import (
 func setPinForTest(p *Proxy, route, provider string, ttl time.Duration) bool {
 	_, ok := p.setPin(route, provider, ttl)
 	return ok
-}
-
-// TestPinEntryExpiresLabel covers no-expiry, future, and past labels.
-func TestPinEntryExpiresLabel(t *testing.T) {
-	now := time.Now()
-	if label := (pinEntry{provider: "z"}).expiresLabel(now); label != "" {
-		t.Errorf("no-expiry label=%q want empty", label)
-	}
-	if label := (pinEntry{provider: "z", expiresAt: now.Add(time.Hour)}).expiresLabel(now); label == "" || label == "expired" {
-		t.Errorf("future label=%q want 'expires in ...'", label)
-	}
-	if label := (pinEntry{provider: "z", expiresAt: now.Add(-time.Hour)}).expiresLabel(now); label != "expired" {
-		t.Errorf("past label=%q want expired", label)
-	}
 }
 
 // TestPin_ForcesProvider: a route with two targets (zhipu p1, deepseek p2) is
@@ -144,40 +128,6 @@ func TestSetPin_Validation(t *testing.T) {
 	}
 	if !setPinForTest(p, "glm", "zhipu", 0) {
 		t.Error("setPin valid route+provider should succeed")
-	}
-}
-
-// TestPin_TTLExpiry: an expired pin is ignored (decideOrder falls back to the
-// normal order), while an active pin holds.
-func TestPin_TTLExpiry(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"zhipu":    {OpenAIBaseURL: "https://x", Provider: testProviderID},
-			"deepseek": {OpenAIBaseURL: "https://y", Provider: testProviderID},
-		},
-		Routes: map[string][]RouteTarget{
-			"glm": {
-				{Provider: "zhipu", Model: "glm", Priority: 1},
-				{Provider: "deepseek", Model: "glm", Priority: 2},
-			},
-		},
-	}
-	p := newTestProxy(t, cfg)
-	routeKeys := map[string]bool{"glm": true}
-	// Active pin → only deepseek.
-	setPinForTest(p, "glm", "deepseek", time.Hour)
-	ordered, _ := p.decideOrder(cfg, p.parentOf, "glm", "", cfg.Routes["glm"], time.Now(), false, routeKeys)
-	if len(ordered) != 1 || ordered[0].Provider != "deepseek" {
-		t.Errorf("active pin order=%+v want [deepseek] only", ordered)
-	}
-	// Expire the pin → back to the full ranking (zhipu first by priority).
-	p.runtimeState.SetPin("glm", runtimestate.Pin{
-		Provider:  "deepseek",
-		ExpiresAt: time.Now().Add(-time.Minute),
-	})
-	ordered2, _ := p.decideOrder(cfg, p.parentOf, "glm", "", cfg.Routes["glm"], time.Now(), false, routeKeys)
-	if len(ordered2) != 2 || ordered2[0].Provider != "zhipu" {
-		t.Errorf("expired pin order=%+v want full ranking [zhipu, deepseek]", ordered2)
 	}
 }
 

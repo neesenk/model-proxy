@@ -1,35 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"testing"
 )
 
-// proxy_extra_test.go covers small uncovered proxy.go helpers + quota.go
-// stop/pollAfter + authAdapter.Refresh + the half-open slot lifecycle.
-
-// --- main-package ensureJSONField ---
-
-func TestEnsureJSONField_MainPkg(t *testing.T) {
-	// Absent key → injected.
-	got := ensureJSONField([]byte(`{"model":"x"}`), "store", false)
-	var m map[string]any
-	json.Unmarshal(got, &m)
-	if v, ok := m["store"].(bool); !ok || v != false {
-		t.Errorf("store not injected: %v", m)
-	}
-	// Existing key → untouched.
-	got = ensureJSONField([]byte(`{"model":"x","store":true}`), "store", false)
-	json.Unmarshal(got, &m)
-	if v, _ := m["store"].(bool); v != true {
-		t.Errorf("existing store overwritten: %v", m)
-	}
-	// Non-JSON body → returned unchanged.
-	orig := []byte(`not-json`)
-	if got := ensureJSONField(orig, "store", false); string(got) != string(orig) {
-		t.Errorf("non-JSON body changed: %q", got)
-	}
-}
+// json_model_body_test.go covers the JSON body helpers owned by the
+// composition root. Codex-specific field injection belongs to provider tests.
 
 // --- rewriteModel: non-JSON body returned unchanged ---
 

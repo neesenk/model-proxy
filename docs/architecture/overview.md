@@ -67,7 +67,8 @@ tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进�
 窄兼容入口；`buildProviders` 以一次 `LoadSnapshot` 同时取得 pool 与来源，并在
 同一 build result 中派生 providers、pool identity 和 implicit-route eligibility，
 避免二次文件探测改变同一 runtime generation 的 authority 决策。网络验证、
-交互、reload、运行时虚拟化和健康选择不进入存储包。
+交互、reload、运行时虚拟化和健康选择不进入存储包。legacy singular 路径只由
+`accounts.Store` 的读取兼容逻辑拥有，根 adapter 不再导出路径 wrapper。
 
 `internal/observe/events` 是无仓库内依赖的实时事件叶子包，拥有事件 DTO、最近
 200 条的有界 ring、非阻塞 fan-out、订阅快照和终态查询。根

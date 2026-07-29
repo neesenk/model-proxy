@@ -54,9 +54,7 @@ func TestConfigPath_LookupOrder(t *testing.T) {
 	if err := os.WriteFile(homeCfg, []byte("listen: 127.0.0.1:0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	oldHome := homeDirForTest
-	homeDirForTest = dir
-	defer func() { homeDirForTest = oldHome }()
+	t.Setenv("HOME", dir)
 	// Without a flag and with a user-level file present, configPath returns it.
 	got = configPath(nil)
 	if got != homeCfg {

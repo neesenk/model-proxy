@@ -14,9 +14,11 @@ import (
 // tracked by the poller WaitGroup (stop waits) and stop-aware (no-op after stop).
 type blockQuotaProv struct {
 	testProv
-	release chan struct{}
-	ran     atomic.Bool
-	done    atomic.Bool
+	release   chan struct{}
+	entered   chan struct{}
+	enterOnce sync.Once
+	ran       atomic.Bool
+	done      atomic.Bool
 }
 
 // TestQuotaLaunch_StopWaitsForAdmittedTask establishes the lifecycle contract
@@ -124,6 +126,7 @@ func TestPollAll_DiscardsStaleGeneration(t *testing.T) {
 
 func (b *blockQuotaProv) Quota() (*provider.QuotaSnapshot, error) {
 	b.ran.Store(true)
+	b.enterOnce.Do(func() { close(b.entered) })
 	<-b.release
 	b.done.Store(true)
 	return &provider.QuotaSnapshot{Billing: provider.BillingUnknown}, nil
@@ -131,6 +134,9 @@ func (b *blockQuotaProv) Quota() (*provider.QuotaSnapshot, error) {
 
 func newBlockTracker(t *testing.T, prov *blockQuotaProv) *quotaTracker {
 	t.Helper()
+	if prov.entered == nil {
+		prov.entered = make(chan struct{})
+	}
 	tr := newStandaloneQuotaTracker(t.TempDir()+"/q.json",
 		func() *Config { return &Config{} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
@@ -199,13 +205,11 @@ func TestPollAsync_NoopAfterStop(t *testing.T) {
 
 // TestRefreshAsync_TrackedByStop: the 429 refreshAsync path is tracked too.
 func TestRefreshAsync_TrackedByStop(t *testing.T) {
-	tr := newBlockTracker(t, &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})})
-	started := make(chan struct{})
-	release := make(chan struct{})
-	tr.refreshHook = func(name string) { close(started); <-release }
+	prov := &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})}
+	tr := newBlockTracker(t, prov)
 	tr.refreshAsync("x")
 	select {
-	case <-started:
+	case <-prov.entered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("refreshAsync did not start")
 	}
@@ -217,7 +221,7 @@ func TestRefreshAsync_TrackedByStop(t *testing.T) {
 		t.Fatal("stop() returned while refreshAsync is still in-flight (not tracked)")
 	default:
 	}
-	close(release)
+	close(prov.release)
 	select {
 	case <-stopped:
 	case <-time.After(2 * time.Second):
@@ -227,12 +231,11 @@ func TestRefreshAsync_TrackedByStop(t *testing.T) {
 
 // TestRefreshAsync_NoopAfterStop: a 429 refresh dispatched after stop is a no-op.
 func TestRefreshAsync_NoopAfterStop(t *testing.T) {
-	tr := newBlockTracker(t, &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})})
-	var called atomic.Bool
-	tr.refreshHook = func(name string) { called.Store(true) }
+	prov := &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})}
+	tr := newBlockTracker(t, prov)
 	tr.stop()
 	tr.refreshAsync("x")
-	if called.Load() {
+	if prov.ran.Load() {
 		t.Errorf("refreshAsync dispatched after stop; should be a no-op")
 	}
 }

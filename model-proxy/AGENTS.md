@@ -128,6 +128,7 @@ CLI 输出是 change-controlled contract。修改命令、字段、颜色、顺�
 完整测试矩阵和断言规范见 `../docs/engineering/testing.md`。
 
 - 构造 `NewProxy` 的测试必须隔离 state path/HOME，并注册 cleanup。
-- 并发和时间边界测试使用可缩短的 duration/hook，避免真实长等待。
+- 并发和时间边界测试使用可缩短的 duration、fake Provider、channel/barrier 或
+  可观察状态，避免真实长等待；不得为测试向生产结构体增加 hook 字段。
 - 新状态机至少覆盖成功、硬失败、限频、取消和 reload/重启。
 - 修复 race 时运行定向 `go test -race -run ... -count=20`，再跑全量 race。

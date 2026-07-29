@@ -15,6 +15,13 @@ func setPoolHome(t *testing.T, dir string) {
 	t.Setenv("HOME", dir)
 }
 
+// legacyPoolPath is test support for constructing compatibility fixtures. The
+// production adapter intentionally exposes no legacy-path wrapper; fallback
+// ownership remains inside accounts.Store.LoadSnapshot.
+func legacyPoolPath(name string) string {
+	return accountStore().LegacyPath(name)
+}
+
 // useStaticProviderPools prepares real plural credentials for tests that load
 // production-style static providers from YAML. Behavior tests that construct
 // Config directly should use testProviderID instead.

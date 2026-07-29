@@ -7,11 +7,10 @@ import (
 	"testing"
 )
 
-// volcengine_creds_test.go covers loadVolcengineCreds + showVolcengineUsage's
-// no-AK/SK fallback path (prints configured models + a note), PLUS the pool
-// login (runVolcengineLoginWithInput: writes the {api_key, access_key,
-// secret_key} triple, dedup by AccessKey). The AK/SK resolution + GetAFPUsage
-// fetch are tested directly in the provider package (provider/quota_fetch_test.go).
+// volcengine_creds_test.go covers loadVolcengineCreds and the pool login
+// (runVolcengineLoginWithInput: writes the {api_key, access_key, secret_key}
+// triple, dedup by AccessKey). Usage display and quota behavior belong to the
+// provider package.
 
 // stubVolcengineValidator replaces volcengineAKSKValidator with a no-op success
 // for the runVolcengineLoginWithInput tests below, which exercise pool dedup/
@@ -58,29 +57,6 @@ func TestLoadVolcengineCreds_BadJSON(t *testing.T) {
 	os.WriteFile(filepath.Join(credDir, "volcengine_apikey.json"), []byte(`not-json`), 0o600)
 	if _, err := loadVolcengineCreds("volcengine"); err == nil {
 		t.Error("loadVolcengineCreds bad JSON: want error, got nil")
-	}
-}
-
-// --- showVolcengineUsage: no AK/SK → prints configured models + note ---
-
-func TestShowVolcengineUsage_NoAKSK(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // no cred file
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"volcengine": {
-				OpenAIBaseURL: "http://x", Provider: "volcengine",
-				Models: []string{"doubao-seed-2-0-code"},
-			},
-		},
-	}
-	out := grabStdout(t, func() {
-		showVolcengineUsage(cfg, "volcengine", cfg.Providers["volcengine"], nil)
-	})
-	if !contains(out, "doubao-seed-2-0-code") {
-		t.Errorf("showVolcengineUsage missing configured model:\n%s", out)
-	}
-	if !contains(out, "AK/SK") && !contains(out, "Agent Plan") {
-		t.Errorf("showVolcengineUsage missing AK/SK note:\n%s", out)
 	}
 }
 

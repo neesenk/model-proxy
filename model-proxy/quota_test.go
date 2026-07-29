@@ -35,47 +35,6 @@ func TestQuotaTracker_PersistAndLoad(t *testing.T) {
 	}
 }
 
-func TestClassifyBilling(t *testing.T) {
-	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	fresh := &provider.QuotaSnapshot{Billing: provider.BillingPlan, AsOf: now}
-	stale := &provider.QuotaSnapshot{Billing: provider.BillingPlan, AsOf: now.Add(-30 * time.Minute)}
-	errSnap := &provider.QuotaSnapshot{Billing: provider.BillingPlan, Err: "boom", AsOf: now}
-	unknownSnap := &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: now}
-	cases := []struct {
-		name       string
-		snap       *provider.QuotaSnapshot
-		billingCfg string
-		want       provider.BillingClass
-	}{
-		{"fresh plan", fresh, "", provider.BillingPlan},
-		{"stale->unknown", stale, "", provider.BillingUnknown},
-		{"err->unknown", errSnap, "", provider.BillingUnknown},
-		{"nil->unknown", nil, "", provider.BillingUnknown},
-		{"unknown-snap->unknown", unknownSnap, "", provider.BillingUnknown},
-		{"payg override", fresh, "pay-as-you-go", provider.BillingPayG},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			manager := runtimestate.NewManager(1)
-			if tc.snap != nil {
-				manager.SetQuota("provider", tc.snap, 1)
-			}
-			result := manager.DecideOrder(runtimestate.ScheduleInput{
-				Now:         now,
-				QuotaMaxAge: 15 * time.Minute,
-				Targets: []runtimestate.Target{{
-					Provider:        "provider",
-					BillingOverride: configuredBillingOverride(tc.billingCfg),
-					PeakMultiplier:  1,
-				}},
-			})
-			if got := result.Facts[0].Billing; got != tc.want {
-				t.Errorf("got %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestQuotaTracker_PollAllCallsQuota(t *testing.T) {
 	dir := t.TempDir()
 	tr := newStandaloneQuotaTracker(filepath.Join(dir, "q.json"),

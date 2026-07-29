@@ -258,14 +258,13 @@ func TestArchitectureBoundaries(t *testing.T) {
 		}
 		seenAliases := map[string]int{}
 		wantFunctions := map[string]int{
-			"accountStore":     0,
-			"poolPath":         0,
-			"singularPoolPath": 0,
-			"loadPool":         0,
-			"savePool":         0,
-			"withPoolLock":     0,
-			"accountIDFor":     0,
-			"nowTS":            0,
+			"accountStore": 0,
+			"poolPath":     0,
+			"loadPool":     0,
+			"savePool":     0,
+			"withPoolLock": 0,
+			"accountIDFor": 0,
+			"nowTS":        0,
 		}
 		for _, decl := range adapter.Decls {
 			switch decl := decl.(type) {
@@ -629,6 +628,9 @@ func TestArchitectureBoundaries(t *testing.T) {
 				t.Errorf("quotaTracker must not retain legacy split snapshot callback %s", legacy)
 			}
 		}
+		if _, ok := quotaFields["refreshHook"]; ok {
+			t.Error("quotaTracker must not expose a test-only refreshHook")
+		}
 		for _, testOnly := range []string{"setSnapshot", "snapshot", "allSnapshots"} {
 			if methodDeclared(quotaFile, testOnly) {
 				t.Errorf("quota.go must not expose test-only quotaTracker.%s", testOnly)
@@ -705,8 +707,26 @@ func TestArchitectureBoundaries(t *testing.T) {
 			t.Errorf("Proxy.reload ReplaceGeneration calls = %d, want exactly 1", got)
 		}
 		persist := namedMethod(t, proxyFile, "Proxy", "snapshotPersistedState")
+		if got := namedCallCountInNode(persist.Body, "RLock"); got != 1 {
+			t.Errorf("snapshotPersistedState RLock calls = %d, want exactly 1", got)
+		}
+		if got := namedCallCountInNode(persist.Body, "RUnlock"); got != 1 {
+			t.Errorf("snapshotPersistedState RUnlock calls = %d, want exactly 1", got)
+		}
 		if got := namedCallCountInNode(persist.Body, "SnapshotForPersist"); got != 1 {
 			t.Errorf("snapshotPersistedState SnapshotForPersist calls = %d, want exactly 1", got)
+		}
+		lockPos := firstNamedCallPos(persist.Body, "RLock")
+		snapshotPos := firstNamedCallPos(persist.Body, "SnapshotForPersist")
+		unlockPos := firstNamedCallPos(persist.Body, "RUnlock")
+		if !lockPos.IsValid() || !snapshotPos.IsValid() || !unlockPos.IsValid() ||
+			!(lockPos < snapshotPos && snapshotPos < unlockPos) {
+			t.Error("snapshotPersistedState must hold p.mu.RLock across its single Manager snapshot")
+		}
+		for _, testOnly := range []string{"scheduleHook", "persistSnapshotHook"} {
+			if _, ok := namedStructFields(t, proxyFile, "Proxy")[testOnly]; ok {
+				t.Errorf("Proxy must not retain test-only field %s", testOnly)
+			}
 		}
 		for _, legacy := range []string{"allSnapshots", "snapshotHealth", "snapshotSticky"} {
 			if got := namedCallCountInNode(persist.Body, legacy); got != 0 {
@@ -1097,18 +1117,16 @@ func isAccountsAdapterWrapper(fn *ast.FuncDecl) bool {
 	}
 
 	wantMethod := map[string]string{
-		"poolPath":         "PoolPath",
-		"singularPoolPath": "LegacyPath",
-		"loadPool":         "Load",
-		"savePool":         "Save",
-		"withPoolLock":     "WithLock",
+		"poolPath":     "PoolPath",
+		"loadPool":     "Load",
+		"savePool":     "Save",
+		"withPoolLock": "WithLock",
 	}[fn.Name.Name]
 	wantArgs := map[string][]string{
-		"poolPath":         {"name"},
-		"singularPoolPath": {"name"},
-		"loadPool":         {"name", "providerID"},
-		"savePool":         {"name", "providerID", "pool"},
-		"withPoolLock":     {"name", "fn"},
+		"poolPath":     {"name"},
+		"loadPool":     {"name", "providerID"},
+		"savePool":     {"name", "providerID", "pool"},
+		"withPoolLock": {"name", "fn"},
 	}[fn.Name.Name]
 	if wantMethod == "" {
 		return false

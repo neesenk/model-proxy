@@ -99,7 +99,7 @@ func TestBuildProviders_QuotaFnWired(t *testing.T) {
 		},
 	}
 	m := buildProviders(cfg).providers
-	// aqp Quota → fetchAqpQuota (no cred → BillingUnknown, no error).
+	// aqp provider Quota (no cred → BillingUnknown, no error).
 	// (provider.Quota delegates to cfg.QuotaOrUnknown → QuotaFn.)
 	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
 		if _, err := m[name].Quota(); err != nil {

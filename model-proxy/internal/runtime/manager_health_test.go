@@ -104,6 +104,8 @@ func TestHealthCircuitHalfOpenAndSuccess(t *testing.T) {
 	m.health["success"] = &providerHealth{
 		consecutiveFailures: 3,
 		circuitOpenUntil:    now.Add(-time.Hour),
+		rateLimitedUntil:    now.Add(time.Hour),
+		rateLimitKind:       Daily,
 		halfOpenInFlight:    true,
 	}
 	m.modelLocks[ModelKey{Provider: "model", Model: "locked"}] = &modelLock{
@@ -149,9 +151,12 @@ func TestHealthCircuitHalfOpenAndSuccess(t *testing.T) {
 
 	m.RecordSuccess("success", "m", 9)
 	status := m.Dashboard(now).Providers["success"]
+	// A success from an in-flight request must not erase a later 429's cooldown:
+	// rate limiting is independent of circuit recovery and has its own horizon.
 	if status.ConsecutiveFailures != 0 || status.CircuitState != "closed" ||
-		status.HalfOpenInFlight || m.ModelLocked("success", "m", now) {
-		t.Fatalf("success did not clear circuit/model state: %+v", status)
+		status.HalfOpenInFlight || m.ModelLocked("success", "m", now) ||
+		!status.RateLimitedUntil.Equal(now.Add(time.Hour)) || status.RateLimitKind != Daily {
+		t.Fatalf("success state = %+v, want reset circuit/model with preserved rate limit", status)
 	}
 
 	m.RecordFailure("threshold", 2, time.Hour, 9)
@@ -163,6 +168,15 @@ func TestHealthCircuitHalfOpenAndSuccess(t *testing.T) {
 	second := m.Dashboard(now).Providers["threshold"]
 	if second.ConsecutiveFailures != 2 || second.CircuitState != "open" {
 		t.Fatalf("threshold failure did not open circuit: %+v", second)
+	}
+
+	// A failed half-open probe must release the only probe slot as it reopens
+	// the circuit; otherwise every later request would remain blocked forever.
+	m.RecordFailure("half", 1, time.Hour, 9)
+	half := m.Dashboard(time.Now()).Providers["half"]
+	if half.ConsecutiveFailures != 1 || half.CircuitState != "open" ||
+		half.HalfOpenInFlight || half.CircuitOpenUntil.Before(time.Now()) {
+		t.Fatalf("half-open failure did not reopen and release slot: %+v", half)
 	}
 }
 

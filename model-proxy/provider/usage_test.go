@@ -84,10 +84,19 @@ func TestCodexUsage_Parsed(t *testing.T) {
 		if r.URL.Path != "/wham/usage" {
 			t.Errorf("codex path=%q want /wham/usage", r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer quota-token" {
+			t.Errorf("Authorization=%q want %q", got, "Bearer quota-token")
+		}
+		if got := r.Header.Get("originator"); got != "codex_cli_rs" {
+			t.Errorf("originator=%q want %q", got, "codex_cli_rs")
+		}
+		if got := r.Header.Get("ChatGPT-Account-Id"); got != "acct-quota" {
+			t.Errorf("ChatGPT-Account-Id=%q want %q", got, "acct-quota")
+		}
 		w.Write([]byte(codexUsageBody))
 	}))
 	defer srv.Close()
-	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: codexRequestAuth{}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	for _, want := range []string{"codex", "a@b.com", "pro", "has credits", "Rate Limit:", "25.0% used", "5 / 20 credits"} {
 		if !contains(out, want) {
@@ -112,8 +121,8 @@ func TestCodexUsage_HTTPError(t *testing.T) {
 	defer srv.Close()
 	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
 	out := captureStdoutProvider(func() { _ = p.Usage() })
-	if !contains(out, "HTTP 500") {
-		t.Errorf("codex usage HTTP error missing 'HTTP 500':\n%s", out)
+	if !contains(out, "Error: HTTP 500: boom") {
+		t.Errorf("codex usage HTTP error missing exact marker:\n%s", out)
 	}
 }
 
@@ -163,6 +172,31 @@ func TestZhipuUsage_NotLoggedIn(t *testing.T) {
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	if !contains(out, "Not logged in") {
 		t.Errorf("zhipu usage not-logged-in missing marker:\n%s", out)
+	}
+}
+
+func TestZhipuUsage_HTTPAndParseErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		code int
+		want string
+	}{
+		{name: "http", code: http.StatusBadGateway, body: "quota unavailable", want: "Error: HTTP 502: quota unavailable"},
+		{name: "parse", code: http.StatusOK, body: "not-json", want: "Error: parse usage response:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}, providerName: "zhipu"}
+			out := captureStdoutProvider(func() { _ = p.Usage() })
+			if !contains(out, tc.want) {
+				t.Errorf("zhipu usage %s missing %q:\n%s", tc.name, tc.want, out)
+			}
+		})
 	}
 }
 
@@ -228,6 +262,31 @@ func TestDeepseekUsage_NotLoggedIn(t *testing.T) {
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	if !contains(out, "Not logged in") {
 		t.Errorf("deepseek usage not-logged-in missing marker:\n%s", out)
+	}
+}
+
+func TestDeepseekUsage_HTTPAndParseErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		code int
+		want string
+	}{
+		{name: "http", code: http.StatusServiceUnavailable, body: "maintenance", want: "Error: HTTP 503: maintenance"},
+		{name: "parse", code: http.StatusOK, body: "not-json", want: "Error: parse usage response:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			p := &DeepSeekProvider{ApiKeyBase: NewApiKeyBaseWithKey("deepseek", "k"), cfg: &Config{UsageURL: srv.URL, ProviderName: "deepseek"}}
+			out := captureStdoutProvider(func() { _ = p.Usage() })
+			if !contains(out, tc.want) {
+				t.Errorf("deepseek usage %s missing %q:\n%s", tc.name, tc.want, out)
+			}
+		})
 	}
 }
 

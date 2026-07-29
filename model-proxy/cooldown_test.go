@@ -7,29 +7,6 @@ import (
 	"time"
 )
 
-// TestHasRecoveredUntried_AllRecoveredSimultaneously (bug 4, claim 2): when
-// every untried target recovers at the same moment before the terminal check
-// (none is STILL cooling), the old anyCooling precondition made
-// hasRecoveredUntried return false → a terminal 502 even though a zero-wait
-// re-schedule would have succeeded. Dropping anyCooling (relying on the round
-// budget to bound the loop) lets that re-schedule happen.
-func TestHasRecoveredUntried_AllRecoveredSimultaneously(t *testing.T) {
-	p := newQuotaProxy(t,
-		map[string]Provider{"a": {}, "b": {}},
-		map[string][]RouteTarget{"m": {{Provider: "a"}, {Provider: "b"}}})
-	targets := []RouteTarget{{Provider: "a"}, {Provider: "b"}}
-	now := time.Now()
-
-	// No health entries → both available (none cooling). None tried this pass.
-	if got := p.hasRecoveredUntried(targets, map[string]bool{}, now); !got {
-		t.Errorf("all recovered, none tried: hasRecoveredUntried=false, want true (claim 2: must re-schedule, not terminally fail)")
-	}
-	// Everything tried → nothing recovered-untried.
-	if got := p.hasRecoveredUntried(targets, map[string]bool{"a": true, "b": true}, now); got {
-		t.Errorf("all tried: hasRecoveredUntried=true, want false")
-	}
-}
-
 // TestServeOnce_EffectiveTargetsReflectsScheduledSet (bug 4, claim 1): serveOnce
 // must return the EFFECTIVE target set it actually used (after scheduling drops
 // cooling targets), so forward's cooldown/TOCTOU decisions key on what was

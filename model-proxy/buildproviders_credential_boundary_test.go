@@ -82,7 +82,7 @@ func assertCredentialBoundaryUnavailable(t *testing.T, p *Proxy, upstream *crede
 func TestBuildProviders_CorruptPluralFailsClosedWithoutLegacyFallback(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	const name = "zhipu"
-	if err := os.WriteFile(singularPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
+	if err := os.WriteFile(legacyPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(poolPath(name), []byte(`{`), 0o600); err != nil {
@@ -101,7 +101,7 @@ func TestBuildProviders_CorruptPluralFailsClosedWithoutLegacyFallback(t *testing
 func TestBuildProviders_EmptyAPIKeyPluralFailsClosedWithoutLegacyFallback(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	const name = "zhipu"
-	if err := os.WriteFile(singularPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
+	if err := os.WriteFile(legacyPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(poolPath(name),
@@ -121,7 +121,7 @@ func TestBuildProviders_EmptyAPIKeyPluralFailsClosedWithoutLegacyFallback(t *tes
 func TestBuildProviders_EmptyPluralIsCredentialTombstone(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	const name = "zhipu"
-	if err := os.WriteFile(singularPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
+	if err := os.WriteFile(legacyPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := savePool(name, "zhipu", credentialPool{Version: 1}); err != nil {
@@ -140,7 +140,7 @@ func TestBuildProviders_EmptyPluralIsCredentialTombstone(t *testing.T) {
 func TestBuildProviders_LegacyOnlyRemainsFileBacked(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	const name = "zhipu"
-	if err := os.WriteFile(singularPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
+	if err := os.WriteFile(legacyPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(poolPath(name)); !os.IsNotExist(err) {
@@ -179,7 +179,7 @@ func TestBuildProviders_StaticProviderUsesPluralCredentialWithoutLegacyFile(t *t
 	setPoolHome(t, t.TempDir())
 	const name = "static-up"
 	writePoolFile(t, name, "static", "STATIC-POOL")
-	if _, err := os.Stat(singularPoolPath(name)); !os.IsNotExist(err) {
+	if _, err := os.Stat(legacyPoolPath(name)); !os.IsNotExist(err) {
 		t.Fatalf("singular precondition failed: %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestBuildProviders_StaticInvalidCredentialSourcesFailClosed(t *testing.T) {
 		{
 			name: "legacy",
 			prepare: func(t *testing.T, providerName string) {
-				if err := os.WriteFile(singularPoolPath(providerName), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
+				if err := os.WriteFile(legacyPoolPath(providerName), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},

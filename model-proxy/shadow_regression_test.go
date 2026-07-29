@@ -257,7 +257,7 @@ func TestCmdShadowReport_InProcess(t *testing.T) {
 	listen := strings.TrimPrefix(srv.URL, "http://")
 	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: http://x}\nroutes:\n  glm: [{provider: zhipu, model: glm}]\n")
 
-	out := captureStdout(t, func() { cmdShadow([]string{"report", "--config", cfgPath}) })
+	out := grabStdout(t, func() { cmdShadow([]string{"report", "--config", cfgPath}) })
 	for _, want := range []string{"glm", "zhipu", "codex", "SAMPLES", "5", "80%"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("shadow report output missing %q:\n%s", want, out)

@@ -276,10 +276,6 @@ func main() {
 	}
 }
 
-// homeDirForTest is overridden in tests to redirect the user-config lookup.
-// In production it's empty, and os.UserHomeDir() is used.
-var homeDirForTest = ""
-
 // configPath resolves the config file path, scanning --config / -config /
 // --config= manually (ignoring other flags so flag.Parse doesn't choke on
 // unknown ones like login's --import). Lookup order:
@@ -304,11 +300,9 @@ func configPath(args []string) string {
 		}
 	}
 	// 2. user-level config under ~/.model-proxy/
-	home := homeDirForTest
-	if home == "" {
-		if h, err := os.UserHomeDir(); err == nil {
-			home = h
-		}
+	home := ""
+	if h, err := os.UserHomeDir(); err == nil {
+		home = h
 	}
 	if home != "" {
 		p := filepath.Join(home, ".model-proxy", "config.yaml")

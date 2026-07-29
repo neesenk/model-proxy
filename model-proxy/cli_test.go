@@ -294,8 +294,9 @@ func setStdin(t *testing.T, s string) {
 }
 
 // poolConfigTmpl is a minimal config with one zhipu provider; usage_url is
-// filled per-test (typically an httptest server). zhipu uses showGenericUsage
-// (BigModel quota format) and is the canonical apikey-pool provider.
+// filled per-test (typically an httptest server). Zhipu's provider-owned Usage
+// implementation uses the BigModel quota format and is the canonical
+// apikey-pool integration fixture.
 const poolConfigTmpl = `listen: 127.0.0.1:1
 providers:
   zhipu:
@@ -388,7 +389,7 @@ func TestCLI_LogoutAllClearsPool(t *testing.T) {
 	if _, err := os.Stat(poolPath("zhipu")); !os.IsNotExist(err) {
 		t.Errorf("plural pool file should be removed; stat err=%v", err)
 	}
-	if _, err := os.Stat(singularPoolPath("zhipu")); !os.IsNotExist(err) {
+	if _, err := os.Stat(legacyPoolPath("zhipu")); !os.IsNotExist(err) {
 		t.Errorf("singular file should not exist; stat err=%v", err)
 	}
 }
@@ -465,7 +466,7 @@ func TestCLI_UsagePoolPrintsAllAccounts(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, srv.URL)
 
-	out := captureStdout(t, func() { cmdUsage([]string{"zhipu", "--config", cfgPath}) })
+	out := grabStdout(t, func() { cmdUsage([]string{"zhipu", "--config", cfgPath}) })
 
 	// Each account's key was sent (proves per-account cred dispatch, not a
 	// single shared key).
@@ -516,7 +517,7 @@ func TestCLI_UsageAllProvidersWithPool(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, srv.URL)
 
-	out := captureStdout(t, func() { cmdUsage([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { cmdUsage([]string{"--config", cfgPath}) })
 
 	if !strings.Contains(out, "K1") || !strings.Contains(out, "K2") {
 		t.Errorf("all-providers usage missing pool account labels:\n%s", out)

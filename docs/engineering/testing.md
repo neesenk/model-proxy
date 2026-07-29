@@ -57,7 +57,8 @@ quota parser 测试必须断言：
 
 ### 429 refresh
 
-`refreshHook` 必须记录并断言具体 provider 名，不能只断言调用次数。
+使用可控 fake provider 的真实 `Quota()` 调用观察 refresh，必须记录并断言具体
+provider 名，不能只断言调用次数；不得为此在生产结构体增加 test-only hook。
 
 ### Route side effects
 
@@ -85,6 +86,10 @@ HTTP/CLI 生命周期集成测试。例如 `internal/observe/events/hub_test.go`
 ring cap、detached snapshot、取消订阅、慢消费者丢弃和终态查询；根包只验证
 forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为读取内部状态
 而恢复根包 type alias、访问模块互斥锁或暴露 test-only 生产接口。
+
+Provider 的 `Usage`、`Quota`、fetch/parse、认证和显示格式测试直接归
+`provider/*_test.go`；根包只验证 YAML/账号池/build dispatch/CLI 输出等组合行为，
+不得在 `_test.go` 重建已删除的 `show*Usage` / `fetch*Quota` 兼容函数后重复测试。
 
 精确响应缓存的 key/store/recorder/header/replay 单测归
 `internal/cache/*_test.go`；根包保留 force/pin bypass、协议转换后的

@@ -84,11 +84,6 @@ type Proxy struct {
 	implicitRoutes map[string]RouteTarget   // exposed model → single target auto-derived from logged-in providers' model lists (for models not in cfg.Routes)
 	routeWarnings  []string                 // ambiguity warnings for implicit routes (multi-provider); surfaced in `models` CLI + /api/status
 
-	// scheduleHook is a test-only hook fired in forward right after schedule(),
-	// capturing the threaded sessionKey. Nil in production.
-	scheduleHook        func(sessionKey string)
-	persistSnapshotHook func() // test-only: runs after p.mu.RLock, before the Manager snapshot
-
 	// Runtime wire capabilities have their own leaf Store. The Store never
 	// calls back into Proxy while locked and survives reload generations.
 	wireCaps  runtimewire.Store
@@ -571,9 +566,6 @@ func healthConfigFingerprint(cfg *Config) string {
 // generations.
 func (p *Proxy) snapshotPersistedState() persistedFullSnapshot {
 	p.mu.RLock()
-	if p.persistSnapshotHook != nil {
-		p.persistSnapshotHook()
-	}
 	runtimeSnapshot := p.runtimeState.SnapshotForPersist(
 		runtimeRouteKeys(p.cfg.Routes, p.implicitRoutes),
 		time.Now(),
@@ -1408,9 +1400,6 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		// route fit, fall back to a cross-route capable+fitting pool ranked by the
 		// normal scheduling policy. No-op when everything already fits.
 		ordered = p.applyRequestAwareRouting(cfg, parentOf, cat, exposed, sessionKey, ordered, expanded, routeKeys, origBody, generation)
-	}
-	if p.scheduleHook != nil {
-		p.scheduleHook(sessionKey)
 	}
 	var firstTried RouteTarget
 	if len(ordered) > 0 {
@@ -2397,20 +2386,4 @@ func rewriteModel(body []byte, newModel string) []byte {
 		return body
 	}
 	return out
-}
-
-func ensureJSONField(body []byte, key string, val any) []byte {
-	var v map[string]any
-	if err := json.Unmarshal(body, &v); err != nil {
-		return body
-	}
-	if _, ok := v[key]; !ok {
-		v[key] = val
-		out, err := json.Marshal(v)
-		if err != nil {
-			return body
-		}
-		return out
-	}
-	return body
 }

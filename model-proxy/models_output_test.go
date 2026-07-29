@@ -9,8 +9,8 @@ import (
 
 // models_extra_test.go covers printAllModels / printProviderModels /
 // fetchProviderModels / listArkAgentPlanModelIDs (error paths) + the
-// exposedModels/displayName edge cases. Uses a local stdout-capture helper
-// (grabStdout) to avoid clashing with any captureStdout in other test files.
+// exposedModels/displayName edge cases. grabStdout is the shared root-package
+// stdout-capture helper for in-process CLI tests.
 
 // grabStdout captures everything written to os.Stdout during fn. Restores
 // os.Stdout even on failure.

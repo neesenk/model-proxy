@@ -7,74 +7,8 @@ import (
 	"time"
 )
 
-// format_test.go covers the pure helper functions in main.go / models.go /
-// clients.go via table-driven tests. These are 0% in the baseline; each has
-// small, well-defined branch sets.
-
-func TestFormatDuration(t *testing.T) {
-	for _, tc := range []struct {
-		secs int
-		want string
-	}{
-		{-5, "—"},
-		{0, "—"},
-		{30, "0m"},      // < 1h → minutes only (30s truncates to 0m)
-		{90, "1m"},      // 1m30s → 1m
-		{3700, "1h1m"},  // 1h1m40s
-		{7200, "2h0m"},  // 2h
-		{90000, "1d1h"}, // 25h
-		{86400, "1d0h"}, // exactly 1 day
-		{3 * 86400, "3d0h"},
-	} {
-		if got := formatDuration(tc.secs); got != tc.want {
-			t.Errorf("formatDuration(%d)=%q want %q", tc.secs, got, tc.want)
-		}
-	}
-}
-
-func TestFormatWithCommas(t *testing.T) {
-	for _, tc := range []struct {
-		n    int
-		want string
-	}{
-		{0, "0"},
-		{999, "999"},
-		{1000, "1,000"},
-		{1234567, "1,234,567"},
-		{-1234567, "-1,234,567"},
-		{-999, "-999"},
-	} {
-		if got := formatWithCommas(tc.n); got != tc.want {
-			t.Errorf("formatWithCommas(%d)=%q want %q", tc.n, got, tc.want)
-		}
-	}
-}
-
-func TestFormatCredits(t *testing.T) {
-	for _, tc := range []struct {
-		in   string
-		want string
-	}{
-		{"330.258", "330"},
-		{"22500", "22,500"},
-		{"0.9", "0"},
-		{"not-a-number", "0"},
-		{"9999999", "9,999,999"},
-	} {
-		if got := formatCredits(tc.in); got != tc.want {
-			t.Errorf("formatCredits(%q)=%q want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-func TestMoney(t *testing.T) {
-	if got := money(12.5); got != "$12.50" {
-		t.Errorf("money(12.5)=%q want $12.50", got)
-	}
-	if got := money(0); got != "$0.00" {
-		t.Errorf("money(0)=%q want $0.00", got)
-	}
-}
+// format_test.go covers pure display helpers that remain in the composition
+// root. Provider-owned formatting primitives live in provider/display_test.go.
 
 func TestProgressBar(t *testing.T) {
 	// Width clamping: width < 4 becomes 4.

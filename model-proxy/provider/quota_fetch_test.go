@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,24 @@ import (
 	"testing"
 	"time"
 )
+
+// codexRequestAuth models the complete OAuth request contract without relying
+// on an on-disk token. The CodexOAuth injector itself is covered in auth_test;
+// these fetch tests guard that Quota and Usage actually send all its headers.
+type codexRequestAuth struct{}
+
+func (codexRequestAuth) Inject(req *http.Request) error {
+	req.Header.Set("Authorization", "Bearer quota-token")
+	req.Header.Set("originator", "codex_cli_rs")
+	req.Header.Set("ChatGPT-Account-Id", "acct-quota")
+	return nil
+}
+func (codexRequestAuth) Refresh() error { return nil }
+
+type quotaErrAuth struct{}
+
+func (quotaErrAuth) Inject(*http.Request) error { return errors.New("not logged in") }
+func (quotaErrAuth) Refresh() error             { return nil }
 
 // quota_fetch_test.go covers each provider's Quota() fetch+parse path directly
 // (introduced in Phase 2 when fetch*Quota moved from main into the provider
@@ -29,10 +48,19 @@ func TestCodexProvider_Quota_Parsed(t *testing.T) {
 		if r.URL.Path != "/wham/usage" {
 			t.Errorf("codex path=%q want /wham/usage", r.URL.Path)
 		}
+		if got := r.Header.Get("Authorization"); got != "Bearer quota-token" {
+			t.Errorf("Authorization=%q want %q", got, "Bearer quota-token")
+		}
+		if got := r.Header.Get("originator"); got != "codex_cli_rs" {
+			t.Errorf("originator=%q want %q", got, "codex_cli_rs")
+		}
+		if got := r.Header.Get("ChatGPT-Account-Id"); got != "acct-quota" {
+			t.Errorf("ChatGPT-Account-Id=%q want %q", got, "acct-quota")
+		}
 		w.Write([]byte(body))
 	}))
 	defer srv.Close()
-	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: fakeAuth{key: "k"}}
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: srv.URL + "/codex"}, auth: codexRequestAuth{}}
 	s, err := p.Quota()
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +73,17 @@ func TestCodexProvider_Quota_Parsed(t *testing.T) {
 	}
 	if s.Account != "a@b.com" || s.Plan != "pro" {
 		t.Errorf("Account/Plan=%q/%q", s.Account, s.Plan)
+	}
+}
+
+func TestCodexProvider_Quota_NotLoggedIn(t *testing.T) {
+	p := &CodexProvider{cfg: &Config{OpenAIBaseURL: "http://x.invalid/codex"}, auth: quotaErrAuth{}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota() error=%v want nil", err)
+	}
+	if s == nil || s.Billing != BillingUnknown || s.Err != "not logged in" {
+		t.Fatalf("Quota()=%+v want BillingUnknown with exact not-logged-in error", s)
 	}
 }
 
@@ -131,6 +170,18 @@ func TestZhipuProvider_Quota_HTTPError(t *testing.T) {
 	}
 }
 
+func TestZhipuProvider_Quota_NotLoggedIn(t *testing.T) {
+	p := &ZhipuProvider{ApiKeyBase: &ApiKeyBase{}, cfg: &Config{UsageURL: "http://x.invalid"}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota() error=%v want nil", err)
+	}
+	const wantErr = "not logged in; run `model-proxy login` for this provider"
+	if s == nil || s.Billing != BillingUnknown || s.Err != wantErr {
+		t.Fatalf("Quota()=%+v want BillingUnknown with exact not-logged-in error", s)
+	}
+}
+
 // --- deepseek ---
 
 func TestDeepSeekProvider_Quota_Parsed(t *testing.T) {
@@ -169,6 +220,18 @@ func TestDeepSeekProvider_Quota_HTTPError(t *testing.T) {
 	s, _ := p.Quota()
 	if s.Billing != BillingUnknown || s.Err != "HTTP 503" {
 		t.Errorf("got %+v want BillingUnknown/HTTP 503", s)
+	}
+}
+
+func TestDeepSeekProvider_Quota_NotLoggedIn(t *testing.T) {
+	p := &DeepSeekProvider{ApiKeyBase: &ApiKeyBase{}, cfg: &Config{UsageURL: "http://x.invalid"}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatalf("Quota() error=%v want nil", err)
+	}
+	const wantErr = "not logged in; run `model-proxy login` for this provider"
+	if s == nil || s.Billing != BillingUnknown || s.Err != wantErr {
+		t.Fatalf("Quota()=%+v want BillingUnknown with exact not-logged-in error", s)
 	}
 }
 
