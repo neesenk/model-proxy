@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/targetexec"
 	"model-proxy/internal/transport/bodycapture"
 )
 
@@ -27,7 +28,7 @@ func (p *Proxy) dispatchShadowAfterCommit(
 	exposed string,
 	primary RouteTarget,
 	primaryRequestID string,
-	commit *attemptCommit,
+	commit *targetexec.Commit,
 ) {
 	if commit == nil || p.reqLog == nil || len(runtime.cfg.Shadow) == 0 {
 		return
@@ -52,7 +53,7 @@ func (p *Proxy) dispatchShadowAfterCommit(
 				calledModel,
 				exposed,
 				shadow,
-				commit.requestBody,
+				commit.RequestBody(),
 				primaryRequestID,
 			)
 		}) {
@@ -117,7 +118,7 @@ func (p *Proxy) shouldShadow() bool {
 
 // runShadow sends the same prompt to a candidate backend (shadow evaluation,
 // #12): fire-and-forget, the result is logged for offline comparison and NEVER
-// returned to the client. It shares targetPlan request preparation but is
+// returned to the client. It shares targetexec.Plan request preparation but is
 // best-effort and bounded — any error is logged and dropped (shadow must never
 // affect the live request). Both runtimeSnapshot and shadowRuntime are captured
 // by the primary attempt before launching the goroutine, so reload cannot mix
@@ -164,8 +165,7 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 		log.Printf("[shadow] %s: target plan failed: %v", shadow.Provider, err)
 		return
 	}
-	provCfg := plan.providerCfg
-	impl := plan.providerImpl
+	impl := plan.Provider()
 	if impl == nil {
 		log.Printf("[shadow] %s: provider not available", shadow.Provider)
 		return
@@ -174,19 +174,19 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 	// (auto-resolve, e.g. codex→responses), else the wire verdict, else same as
 	// the body's. Route + convert accordingly so the shadow gets a request in
 	// the protocol IT speaks.
-	sbody := plan.wire.RewriteModel(reqBody, calledModel)
-	sbody, err = plan.wire.ConvertBody(sbody)
+	sbody := plan.RewriteModel(reqBody, calledModel)
+	sbody, err = plan.ConvertBody(sbody)
 	if err != nil {
 		// Fail CLOSED: don't send the unconverted body to the shadow backend.
 		log.Printf("[shadow] %s: %s→%s convert failed: %v — skipping",
-			shadow.Provider, bodyProto, plan.backendProto, err)
+			shadow.Provider, bodyProto, plan.BackendProtocol(), err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), runtime.cfg.Scheduling.Timeout())
 	defer cancel()
-	targetURL := strings.TrimRight(plan.baseURL, "/") + plan.upPath
+	targetURL := strings.TrimRight(plan.BaseURL(), "/") + plan.UpstreamPath()
 	if impl != nil {
-		targetURL, sbody = impl.RewriteRequest(targetURL, sbody, plan.upPath)
+		targetURL, sbody = impl.RewriteRequest(targetURL, sbody, plan.UpstreamPath())
 	}
 	sreq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(sbody))
 	if err != nil {
@@ -199,11 +199,9 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 			log.Printf("[shadow] %s: auth: %v", shadow.Provider, err)
 			return
 		}
-		impl.ExtraHeaders(sreq, plan.upPath)
+		impl.ExtraHeaders(sreq, plan.UpstreamPath())
 	}
-	for k, v := range provCfg.Headers {
-		sreq.Header.Set(k, v)
-	}
+	plan.ApplyConfiguredHeaders(sreq.Header)
 	client := shadowRuntime.client
 	start := time.Now()
 	resp, err := client.Do(sreq)

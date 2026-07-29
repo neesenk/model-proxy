@@ -10,7 +10,8 @@
 - `Proxy.forward` / `serveOnce` / `attemptExecutor.execute`
 - `proxy_health_adapter.go`：根执行层到 runtime health/cooldown/param/rate-limit
   状态端口的适配
-- `dispatch_context.go`：`runtimeSnapshot`、`serveRequest`、`targetAttempt`
+- `dispatch_context.go`：`runtimeSnapshot`、`serveRequest` 与
+  `targetexec.Attempt` 的 snapshot 投影/唯一 assembly adapter
 - `internal/targetexec.Plan`：已解析目标的不可变 model/body/base URL/path wire
   preparation；根 `planTarget` 只做 snapshot-owned facts 的投影
 - `attempt_executor.go`：单目标 I/O 执行器及其窄状态端口 `attemptState`
@@ -25,30 +26,29 @@
 同一 config generation 的 config、provider implementations、pool identity、
 expanded routes、models.dev catalog 与 response cache；reload 只交换新对象，
 不得原地修改快照持有的 map。`serveRequest` 是一次完整 schedule/failover pass
-的输入，`targetAttempt` 是单次 resolved target 执行契约。普通 route 与 Fusion
-synthesizer 均通过 `targetAttempt` 进入 `attemptExecutor.execute`，新增横切能力
-不得继续扩张 positional 参数列表。
+的输入，`internal/targetexec.Attempt` 是单次 resolved target 的强类型执行契约。
+普通 route 与 Fusion synthesizer 均通过该契约进入 `attemptExecutor.execute`，
+新增横切能力不得继续扩张 positional 参数列表或以 `any` 夹带 root owner。
 
-`targetAttempt` 固定为五组：`runtimeSnapshot`、`targetPlan`、`attemptExchange`
-（request/writer/body）、`attemptScope`（调用模型、agent、cache key/log/Responses
-上下文）和 `attemptPolicy`（force、last target、context retry）。两条调用链只能
-经 `newTargetAttempt` 构造；factory 仅装配，不做 model rewrite、state expansion
-或协议转换。`targetPlan` 的 immutable wire preparation 委托
-`internal/targetexec.Plan`，普通/Fusion/Shadow 不得复制 endpoint、model rewrite
-或 conversion-option 逻辑。执行器必须从
-`runtime.generation/runtime.cfg/runtime.cache` 与
-`plan.target/provider/protocol/baseURL/path` 读取事实，禁止在 scope/log 中复制
-第二份 generation 或重新查 Proxy。
+`targetexec.Attempt` 固定为五组：`targetexec.Runtime`
+（captured scheduling/generation/cache）、`targetexec.Plan`、
+`targetexec.Exchange`（request/writer/body）、`targetexec.Scope`（调用模型、
+agent、cache key/log/Responses 上下文）和 `targetexec.Policy`（force、last
+target、context retry）。两条调用链只能经
+`newTargetAttempt → targetexec.NewAttempt` 构造；factory 仅投影/装配，不做
+model rewrite、state expansion 或协议转换。普通/Fusion/Shadow 不得复制
+endpoint、model rewrite 或 conversion-option 逻辑。执行器必须从 typed
+Runtime 与 Plan 读取事实，禁止在 scope/log 中复制第二份 generation、嵌入完整
+`runtimeSnapshot`、使用 `any` 或重新查 Proxy。
 
 `attemptExecutor` 只允许依赖 `attemptState` 暴露的健康、参数学习和 wire
 能力，以及显式注入的 HTTP、metrics、token、request-log、Responses state 和
 events 组件。不得从执行器重新持有完整 `*Proxy`，也不得让单目标发送逻辑直接
-访问调度、reload 或 Web 状态；实现主体和 `tryOutcome` 位于
-`attempt_executor.go`，`proxy_forward.go` 只负责编排和调用。executor commit
-后只返回
-含实际上游请求体的最小 `attemptCommit`；Shadow sampling、semaphore、lifecycle
-admission 与 dispatch 由 `serveOnce` 在 executor 外完成，Fusion synthesizer
-丢弃该 commit 元数据，禁止递归触发 Shadow。
+访问调度、reload 或 Web 状态；实现主体位于 `attempt_executor.go`，失败类别使用
+`targetexec.Outcome`；`proxy_forward.go` 只负责编排和调用。executor commit 后
+只返回含实际上游请求体的最小 `targetexec.Commit`；Shadow sampling、semaphore、
+lifecycle admission 与 dispatch 由 `serveOnce` 在 executor 外完成，Fusion
+synthesizer 丢弃该 commit 元数据，禁止递归触发 Shadow。
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 

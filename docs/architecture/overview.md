@@ -39,8 +39,8 @@ HTTP handler
   → runtimeSnapshot
   → serveRequest
   → schedule / failover
-  → targetPlan
-  → targetAttempt
+  → internal/targetexec.Plan
+  → internal/targetexec.Attempt
   → attemptExecutor
   → provider.Provider
 ```
@@ -49,22 +49,25 @@ HTTP handler
   provider implementations、pool identity、expanded routes、catalog、cache 和
   Shadow dispatch runtime。
 - `serveRequest`：一次 schedule/failover pass 的稳定输入。
-- `targetPlan`：根层只解析同一 `runtimeSnapshot` 中的 provider implementation、
-  backend protocol、wire verdict 与视觉能力；不可变的 model/body/base URL/path
-  wire preparation 由 `internal/targetexec.Plan` 拥有，普通 route、Fusion、
-  Shadow 共用。
-- `targetAttempt`：一个已解析上游目标的完整执行契约，只由
-  `runtime + plan + exchange + scope + policy` 五组字段组成；`newTargetAttempt`
-  是普通 route 与 Fusion synthesizer 的唯一构造入口。
+- `internal/targetexec.Plan`：根 `planTarget` 只解析同一 `runtimeSnapshot` 中的
+  provider implementation、backend protocol、wire verdict 与视觉能力；不可变
+  的 model/body/base URL/path wire preparation 和 target/provider facts 由该
+  Plan 拥有，普通 route、Fusion、Shadow 共用。
+- `internal/targetexec.Attempt`：一个已解析上游目标的完整执行契约，只由
+  `runtime + plan + exchange + scope + policy` 五组强类型字段组成；
+  `newTargetAttempt → targetexec.NewAttempt` 是普通 route 与 Fusion
+  synthesizer 的唯一构造入口。Runtime 只投影 captured scheduling、generation
+  与 cache，不允许用 `any` 或完整 `runtimeSnapshot` 绕过边界。
 - `attemptExecutor`：只通过 `attemptState` 修改健康、参数学习和 wire state；
   其余 HTTP、metrics、tokens、request log、Responses state、events 显式注入；
-  commit 后只返回最小 `attemptCommit`，不持有生命周期或 Shadow 调度能力。
+  commit 后只返回最小 `targetexec.Commit`，不持有生命周期或 Shadow 调度能力。
 
-`runtimeSnapshot` 与 `targetPlan` 是执行器内 reload-owned/config/provider/protocol
-事实的唯一来源；`targetPlan` 内的 wire preparation 只委托不可变的
-`internal/targetexec.Plan`，不得在普通/Fusion/Shadow 分支各自重算 endpoint 或
-conversion options。exchange 只承载 HTTP request/writer/body，scope 只承载本次
-请求身份与 Responses 上下文，policy 只承载 force/last-target/context-retry。
+`runtimeSnapshot` 与 `internal/targetexec.Plan` 是执行器内
+reload-owned/config/provider/protocol 事实的唯一来源；根 assembly 只把 snapshot
+投影为 typed `targetexec.Runtime`，不得在普通/Fusion/Shadow 分支各自重算
+endpoint 或 conversion options。exchange 只承载 HTTP request/writer/body，
+scope 只承载本次请求身份与 Responses 上下文，policy 只承载
+force/last-target/context-retry。
 `newTargetAttempt` 不负责 model rewrite、Responses history expansion 或协议转换，
 这些准备语义仍由普通/Fusion 各自编排后再进入执行器。
 
@@ -73,7 +76,7 @@ identity、六组 pairwise codec、request/response/SSE registry、SSE↔JSON �
 桥接、跨协议图片约束，以及 Responses `previous_response_id` 的有界状态。
 每个 client→backend pair 必须同时提供 request、反向 response、反向 SSE codec；
 专用 pair codec 保留 hosted tools、reasoning 方言和 namespace 等协议特有语义。
-Provider 方言和目标视觉能力由根 `targetPlan` 解析后作为纯值注入
+Provider 方言和目标视觉能力由根 `planTarget` 解析后作为纯值注入
 `internal/targetexec.Plan` 的窄 request options；
 具体 `http.ResponseWriter` 错误 envelope 仍由 transport 层负责。
 
@@ -146,8 +149,8 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`manager.go` �
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
-  synthesizer 通过正常 `targetAttempt → attemptExecutor` 返回客户端。
-- Shadow 由 `serveOnce` 在主请求 commit 后根据 `attemptCommit` 接纳和派发，同时
+  synthesizer 通过正常 `targetexec.Attempt → attemptExecutor` 返回客户端。
+- Shadow 由 `serveOnce` 在主请求 commit 后根据 `targetexec.Commit` 接纳和派发，同时
   捕获 `runtimeSnapshot` 与 `shadowRuntime`；executor 和 Fusion synthesizer
   均不得启动 Shadow，goroutine 内不得重新读取 reload-owned 状态。
 - Cache、request log、usage scanner 位于响应转换外层，只观察客户端协议字节。
@@ -257,7 +260,7 @@ composition root → internal/targetexec → internal/protocol / provider
   的第二份 map 或互斥锁；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、
-  Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetPlan`；
+  Proxy、Web/CLI；Fusion 直接 import protocol 绕过 `targetexec.Plan`；
 - 将 config generation 内的 map 原地修改。
 
 ## 专题文档
@@ -275,7 +278,7 @@ composition root → internal/targetexec → internal/protocol / provider
 账号测活的单次 runtime snapshot、internal 叶子包 import（含 accounts/catalog）、
 `internal/observe/events`、`internal/cache` 与各自根 adapter 的职责、
 `internal/config` 依赖 allowlist、根配置兼容 facade 以及 Fusion 不绕过
-`targetPlan`，不是字符串扫描）。`Proxy` / `runtime.Manager` 的语义所有权检查
+`targetexec.Plan`，不是字符串扫描）。`Proxy` / `runtime.Manager` 的语义所有权检查
 合并 package 内全部生产 Go 声明，不绑定单一物理文件；adapter/facade 的精确形状
 约束仍保持 file-scoped。行为与并发验证仍按
 `docs/engineering/testing.md` 执行。

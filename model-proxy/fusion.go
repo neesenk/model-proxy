@@ -14,6 +14,7 @@ import (
 	"time"
 
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/targetexec"
 )
 
 // fusion.go implements multi-model orchestration (panel → synthesis). A route
@@ -324,8 +325,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.err = err
 		return
 	}
-	provCfg := plan.providerCfg
-	impl := plan.providerImpl
+	impl := plan.Provider()
 	if impl == nil {
 		res.err = fmt.Errorf("provider %s not available", m.Provider)
 		return
@@ -343,11 +343,11 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// Responses chain expansion (same rule as forward): only when the client
 	// spoke responses AND this leg's backend is stateless — a native-responses
 	// backend keeps previous_response_id passthrough and its server-side chain.
-	srcBody, _ = p.expandFusionResponses(fc, string(plan.backendProto), srcBody)
-	body := plan.wire.RewriteModel(srcBody, fc.calledModel)
-	body, err = plan.wire.ConvertBody(body)
+	srcBody, _ = p.expandFusionResponses(fc, string(plan.BackendProtocol()), srcBody)
+	body := plan.RewriteModel(srcBody, fc.calledModel)
+	body, err = plan.ConvertBody(body)
 	if err != nil {
-		res.err = fmt.Errorf("convert %s→%s: %w", fc.proto, plan.backendProto, err)
+		res.err = fmt.Errorf("convert %s→%s: %w", fc.proto, plan.BackendProtocol(), err)
 		return
 	}
 	// Draft legs are non-streaming and tool-free: the draft only produces a
@@ -367,8 +367,8 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// learned blocks before send, then learn/strip/retry one newly reported
 	// top-level parameter immediately.
 	for {
-		targetURL := strings.TrimRight(plan.baseURL, "/") + plan.upPath
-		targetURL, body = impl.RewriteRequest(targetURL, body, plan.upPath)
+		targetURL := strings.TrimRight(plan.BaseURL(), "/") + plan.UpstreamPath()
+		targetURL, body = impl.RewriteRequest(targetURL, body, plan.UpstreamPath())
 		body = p.applyParamBlock(m.Provider, m.Model, body)
 		req, err = http.NewRequestWithContext(legCtx, http.MethodPost, targetURL, bytes.NewReader(body))
 		if err != nil {
@@ -380,10 +380,8 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			res.err = fmt.Errorf("auth: %w", err)
 			return
 		}
-		impl.ExtraHeaders(req, plan.upPath)
-		for k, v := range provCfg.Headers {
-			req.Header.Set(k, v)
-		}
+		impl.ExtraHeaders(req, plan.UpstreamPath())
+		plan.ApplyConfiguredHeaders(req.Header)
 
 		resp, err = p.client.Do(req)
 		if err != nil {
@@ -465,7 +463,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		// supports it — a 404 here means the VERDICT was wrong, not the model.
 		// Flip the verdict (persisted; later legs use chat) and skip the model
 		// lock so the model doesn't take the blame for our protocol choice.
-		if plan.viaResponsesVerdict && resp.StatusCode == http.StatusNotFound {
+		if plan.ViaResponsesVerdict() && resp.StatusCode == http.StatusNotFound {
 			p.noteWireResponsesMiss(m.Provider)
 			log.Printf("[fusion provider=%s] /responses 404 after wire verdict — provider responses downgraded to no (model NOT locked)",
 				m.Provider)
@@ -485,7 +483,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	default:
 		res.usage = parseUsageJSON(respBody)
-		res.text = truncateRunes(plan.wire.ExtractResponseText(respBody), fusionCandidateMaxChars)
+		res.text = truncateRunes(plan.ExtractResponseText(respBody), fusionCandidateMaxChars)
 		if res.text == "" {
 			res.err = errFusionEmptyDraft
 			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.generation)
@@ -553,7 +551,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		log.Printf("[fusion] %s: synthesizer target plan failed: %v", fc.flc.exposed, err)
 		return false
 	}
-	if plan.providerImpl == nil {
+	if plan.Provider() == nil {
 		log.Printf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
 		return false
 	}
@@ -564,15 +562,15 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	// the RECORDED history is the expansion of the CLIENT-VISIBLE conversation
 	// (origBody) — the injected instruction/candidate scaffolding is ephemeral
 	// per-turn and must not be replayed into later turns as if the user said it.
-	body, _ = p.expandFusionResponses(fc, string(plan.backendProto), body)
-	_, responsesHistory := p.expandFusionResponses(fc, string(plan.backendProto), fc.origBody)
-	body = plan.wire.RewriteModel(body, fc.calledModel)
-	body, err = plan.wire.ConvertBody(body)
+	body, _ = p.expandFusionResponses(fc, string(plan.BackendProtocol()), body)
+	_, responsesHistory := p.expandFusionResponses(fc, string(plan.BackendProtocol()), fc.origBody)
+	body = plan.RewriteModel(body, fc.calledModel)
+	body, err = plan.ConvertBody(body)
 	if err != nil {
 		// Fail CLOSED: a conversion failure must not send the unconverted body
 		// to a different backend protocol.
 		log.Printf("[fusion] synthesizer %s/%s %s→%s convert failed: %v — aborting synthesis",
-			st.Provider, st.Model, fc.proto, plan.backendProto, err)
+			st.Provider, st.Model, fc.proto, plan.BackendProtocol(), err)
 		return false
 	}
 	// The log ctx carries NO origBody so the request log stores the actual
@@ -581,24 +579,23 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	attempt := newTargetAttempt(
 		fc.runtime,
 		plan,
-		attemptExchange{
-			request: r,
-			writer:  w,
-			body:    body,
+		targetexec.Exchange{
+			Request: r,
+			Writer:  w,
+			Body:    body,
 		},
-		attemptScope{
-			calledModel:      fc.calledModel,
-			agent:            fc.agent,
-			cacheKey:         cacheKey,
-			log:              flc,
-			responseContext:  plan.wire.ResponseContext(fc.origBody),
-			responsesHistory: responsesHistory,
-			responsesSession: fc.sessionKey,
+		targetexec.Scope{
+			CalledModel:      fc.calledModel,
+			Agent:            fc.agent,
+			CacheKey:         cacheKey,
+			Log:              targetLogContext(flc),
+			ResponseContext:  plan.ResponseContext(fc.origBody),
+			ResponsesHistory: responsesHistory,
+			ResponsesSession: fc.sessionKey,
 		},
-		attemptPolicy{lastTarget: true},
+		targetexec.Policy{LastTarget: true},
 	)
-	committed, _, _, _ := p.targetExecutor().execute(attempt)
-	return committed
+	return p.targetExecutor().execute(attempt).Committed
 }
 
 // expandFusionResponses mirrors forward's responses-state expansion for one

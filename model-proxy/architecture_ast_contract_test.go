@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -485,6 +486,18 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	if len(gotCalls) != 2 {
 		t.Errorf("call check: got %v, want both call sites", gotCalls)
 	}
+	f, fset = parse(`import tx "model-proxy/internal/targetexec"
+func assemble() { tx.NewAttempt() }`)
+	importedCalls := importedFunctionCallSites(
+		f,
+		fset,
+		"synthetic.go",
+		"model-proxy/internal/targetexec",
+		"NewAttempt",
+	)
+	if len(importedCalls) != 1 || importedCalls[0].function != "assemble" {
+		t.Errorf("import-aware call check: got %v, want aliased targetexec.NewAttempt in assemble", importedCalls)
+	}
 
 	// Chained rules: p.reqLog.Run() fires, p.reqLog.Flush() does not.
 	f, fset = parse(`func h() {
@@ -914,8 +927,12 @@ func exprName(e ast.Expr) string {
 }
 
 func productionGoFiles(t *testing.T) []string {
+	return productionGoFilesIn(t, ".")
+}
+
+func productionGoFilesIn(t *testing.T, dir string) []string {
 	t.Helper()
-	paths, err := filepath.Glob("*.go")
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -924,6 +941,101 @@ func productionGoFiles(t *testing.T) []string {
 		if !strings.HasSuffix(path, "_test.go") {
 			out = append(out, path)
 		}
+	}
+	return out
+}
+
+func productionGoFilesRecursively(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "testdata", "vendor":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sortedNames(out)
+}
+
+type importedFunctionCallSite struct {
+	file     string
+	function string
+	position token.Position
+}
+
+func (site importedFunctionCallSite) String() string {
+	return fmt.Sprintf("%s:%s at %s", site.file, site.function, site.position)
+}
+
+// importedFunctionCallSites resolves the local import name before matching a
+// package function call, so aliases and dot imports cannot bypass a boundary
+// guard that relies on the repository import path.
+func importedFunctionCallSites(
+	f *ast.File,
+	fset *token.FileSet,
+	sourcePath string,
+	importPath string,
+	functionName string,
+) []importedFunctionCallSite {
+	packageName := ""
+	for _, spec := range f.Imports {
+		if strings.Trim(spec.Path.Value, `"`) != importPath {
+			continue
+		}
+		packageName = filepath.Base(importPath)
+		if spec.Name != nil {
+			packageName = spec.Name.Name
+		}
+		break
+	}
+	if packageName == "" || packageName == "_" {
+		return nil
+	}
+
+	var out []importedFunctionCallSite
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			matches := false
+			if packageName == "." {
+				ident, ok := call.Fun.(*ast.Ident)
+				matches = ok && ident.Name == functionName
+			} else {
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if ok && selector.Sel.Name == functionName {
+					ident, identOK := selector.X.(*ast.Ident)
+					matches = identOK && ident.Name == packageName
+				}
+			}
+			if matches {
+				out = append(out, importedFunctionCallSite{
+					file:     sourcePath,
+					function: fn.Name.Name,
+					position: fset.Position(call.Pos()),
+				})
+			}
+			return true
+		})
 	}
 	return out
 }

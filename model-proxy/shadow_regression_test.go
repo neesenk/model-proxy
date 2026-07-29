@@ -228,7 +228,7 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 }
 
 // TestRunShadow_NilRuntimeConfig: a zero-value runtimeSnapshot (a future call
-// site forgetting to populate targetAttempt.runtime) must log + return instead
+// site forgetting to populate targetexec.Attempt.Runtime) must log + return instead
 // of panicking on runtime.cfg deep in runShadow.
 func TestRunShadow_NilRuntimeConfig(t *testing.T) {
 	p := newTestProxy(t, &Config{Providers: map[string]Provider{}})

@@ -1101,7 +1101,7 @@ func convertRequestFor(body []byte, clientProto, targetProto string, opts conver
 	// max_output_tokens ("Unsupported parameter") and the sampling knobs —
 	// strip them so the FIRST converted request doesn't have to fail for
 	// paramBlock to learn the same lesson. This shaping only runs on the
-	// cross-protocol conversion path: targetPlan.convertBody short-circuits
+	// cross-protocol conversion path: targetexec.Plan.ConvertBody short-circuits
 	// same-protocol responses→codex traffic to byte-identical passthrough,
 	// which self-heals via the 400→paramBlock learning retry (failclass.go).
 	var m map[string]any

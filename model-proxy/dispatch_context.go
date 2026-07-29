@@ -5,7 +5,7 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
-	"model-proxy/internal/protocol"
+	"model-proxy/internal/targetexec"
 	"model-proxy/provider"
 )
 
@@ -68,8 +68,8 @@ type serveRequest struct {
 }
 
 // forwardLogCtx carries stable request identity into target execution. Reload
-// generation remains owned by targetAttempt.runtime and is not duplicated in
-// this observation scope.
+// generation remains owned by targetexec.Attempt.Runtime and is not duplicated
+// in this observation scope.
 type forwardLogCtx struct {
 	requestID string
 	attempt   int
@@ -77,45 +77,13 @@ type forwardLogCtx struct {
 	origBody  []byte
 }
 
-// attemptExchange is the transport exchange for one target attempt. The body is
-// already model-rewritten, responses-state-expanded, and protocol-converted by
-// the caller; constructing an attempt never mutates it.
-type attemptExchange struct {
-	request *http.Request
-	writer  http.ResponseWriter
-	body    []byte
-}
-
-// attemptScope carries request identity and observation context that is neither
-// part of target planning nor execution policy.
-type attemptScope struct {
-	calledModel string
-	agent       string
-	cacheKey    string
-	log         forwardLogCtx
-
-	responseContext  protocol.ResponseContext
-	responsesHistory []any
-	responsesSession string
-}
-
-// attemptPolicy contains the few scheduling decisions that affect one target
-// execution after planning has completed.
-type attemptPolicy struct {
-	force        bool
-	lastTarget   bool
-	contextRetry func() []RouteTarget
-}
-
-// targetAttempt is the complete contract for executing one resolved target.
-// Runtime- and plan-owned facts have exactly one source: cfg/cache/generation
-// come from runtime, while target/provider/protocol/URL/path come from plan.
-type targetAttempt struct {
-	runtime  runtimeSnapshot
-	plan     targetPlan
-	exchange attemptExchange
-	scope    attemptScope
-	policy   attemptPolicy
+func targetLogContext(context forwardLogCtx) targetexec.LogContext {
+	return targetexec.LogContext{
+		RequestID:    context.requestID,
+		Attempt:      context.attempt,
+		Exposed:      context.exposed,
+		OriginalBody: context.origBody,
+	}
 }
 
 // newTargetAttempt is the single assembly point shared by normal routing and
@@ -124,16 +92,24 @@ type targetAttempt struct {
 // caller-specific semantics and may fail before an attempt can be executed.
 func newTargetAttempt(
 	runtime runtimeSnapshot,
-	plan targetPlan,
-	exchange attemptExchange,
-	scope attemptScope,
-	policy attemptPolicy,
-) targetAttempt {
-	return targetAttempt{
-		runtime:  runtime,
-		plan:     plan,
-		exchange: exchange,
-		scope:    scope,
-		policy:   policy,
+	plan targetexec.Plan,
+	exchange targetexec.Exchange,
+	scope targetexec.Scope,
+	policy targetexec.Policy,
+) targetexec.Attempt {
+	var scheduling Scheduling
+	if runtime.cfg != nil {
+		scheduling = runtime.cfg.Scheduling
 	}
+	return targetexec.NewAttempt(
+		targetexec.Runtime{
+			Scheduling: scheduling,
+			Generation: runtime.generation,
+			Cache:      runtime.cache,
+		},
+		plan,
+		exchange,
+		scope,
+		policy,
+	)
 }

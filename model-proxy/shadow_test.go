@@ -162,7 +162,7 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 
 // TestShadowDispatchEmptyModelPassesThrough: a shadow target without an
 // explicit model forwards the called model unchanged (regression: the shared
-// targetPlan.rewriteModel used to write an empty "model" into the body).
+// the old root targetPlan.rewriteModel used to write an empty "model" into the body).
 func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 	var gotBody atomic.Value
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

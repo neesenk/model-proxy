@@ -21,15 +21,16 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.backendProto != "anthropic" ||
-		plan.baseURL != "https://anthropic.example" ||
-		plan.upPath != "/v1/messages" ||
-		plan.providerImpl == nil {
+	if plan.BackendProtocol() != "anthropic" ||
+		plan.BaseURL() != "https://anthropic.example" ||
+		plan.UpstreamPath() != "/v1/messages" ||
+		plan.Provider() == nil {
 		t.Fatalf("unexpected target plan: %+v", plan)
 	}
 
-	if plan.wire.BaseURL() != plan.baseURL || plan.wire.UpstreamPath() != plan.upPath {
-		t.Fatalf("root target plan did not preserve wire plan: %+v", plan)
+	if plan.Target() != (RouteTarget{Provider: "up", Model: "claude", Protocol: "anthropic"}) ||
+		plan.ProviderID() != testProviderID {
+		t.Fatalf("root target facts not frozen in plan: %+v", plan)
 	}
 }
 

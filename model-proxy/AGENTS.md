@@ -7,20 +7,22 @@
 
 - `Proxy.mu` 保护 reload 交换的 config/providers/routes 快照；请求转发不得在流式响应期间长期持有它。
 - 每个请求只通过 `snapshotRuntime()` 捕获一次 reload-owned 依赖，并以
-  `runtimeSnapshot → serveRequest → targetAttempt` 传递；普通路由和 Fusion
-  synthesis 必须共享 `targetAttempt` 执行契约，不得重新扩张 positional 参数链。
+  `runtimeSnapshot → serveRequest → internal/targetexec.Attempt` 传递；普通路由和
+  Fusion synthesis 必须共享该五组强类型执行契约，不得重新扩张 positional
+  参数链或用 `any` 携带根对象。
   Shadow 的采样率、semaphore 和 client 也属于该快照，commit 后不得重新读取
   `p.shadow`。
-- 单目标 I/O 由 `attemptExecutor` 执行；它只能通过 `attemptState` 窄端口修改
-  runtime state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
+- 单目标 I/O 由 `attemptExecutor` 执行；输入/结果/commit 归
+  `internal/targetexec`，执行器只能通过 `attemptState` 窄端口修改 runtime
+  state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
 - 主请求的调度、failover、cooldown 重试与 commit 编排统一位于
   `proxy_forward.go`；`proxy.go` 只声明 composition-root owner。
 - 三协议方向只在 `internal/protocol/conversion_registry.go` 注册；request、
   response、SSE 入口必须共享同一 pair 定义，不得各自维护方向 switch。
   `internal/protocol` 是仓库依赖叶子，不得 import `model-proxy/*`；Provider 方言、
-  目标视觉能力由 `targetPlan` 解析后通过 request options 注入，HTTP 错误写入留在
-  transport 层。
-- 普通 route、所有 Fusion leg 和 Shadow 共享 `targetPlan`；其中不可变的
+  目标视觉能力由 `planTarget` 解析后通过 `targetexec.Plan` request options
+  注入，HTTP 错误写入留在 transport 层。
+- 普通 route、所有 Fusion leg 和 Shadow 共享 `targetexec.Plan`；其中不可变的
   model/body/URL/path wire preparation 统一归
   `internal/targetexec.Plan`，根 `planTarget` 只把同一 runtime snapshot 解析出的
   provider、protocol、wire verdict 与视觉能力投影为 plan input。准备逻辑不得

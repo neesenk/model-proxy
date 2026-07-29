@@ -14,6 +14,7 @@ import (
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/targetexec"
 	"model-proxy/internal/transport/bodycapture"
 )
 
@@ -75,64 +76,59 @@ func (p *Proxy) targetExecutor() attemptExecutor {
 // when no larger target exists → the peeked 400 commits unchanged). It updates
 // the provider's health on success/failure/rate-limit and enforces half-open
 // single-flight. Failover/retarget only happen before any bytes are written
-// to w. A final committed response additionally returns attemptCommit so the
+// to w. A final committed response additionally returns targetexec.Commit so the
 // orchestration layer can run post-commit work without an executor back-reference
 // to Proxy.
-// tryOutcome classifies a failed (non-committed) target attempt, for the
-// terminal-status decision in forward: a request whose failures are ALL
-// cooldown-flavored ends as 429 (+Retry-After); any hard failure makes it 502.
-type tryOutcome int
-
-const (
-	tryNone        tryOutcome = iota // not attempted (locked / unavailable / no info)
-	tryFailedHard                    // conn error / timeout / 401-after-refresh / 5xx / build / auth / model-denied class
-	tryRateLimited                   // 429
-)
-
-// attemptCommit exposes the only post-commit datum that orchestration needs:
-// the exact upstream request bytes after provider rewrite and retry shaping.
-// Shadow policy, lifecycle admission, and dispatch stay outside the executor.
-type attemptCommit struct {
-	requestBody []byte
+func (p attemptExecutor) execute(attempt targetexec.Attempt) targetexec.Result {
+	committed, retried, outcome, commit := p.executeAttempt(attempt)
+	return targetexec.Result{
+		Committed: committed,
+		Retried:   retried,
+		Outcome:   outcome,
+		Commit:    commit,
+	}
 }
 
-func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried []RouteTarget, outcome tryOutcome, commit *attemptCommit) {
-	runtime := attempt.runtime
-	plan := attempt.plan
-	exchange := attempt.exchange
-	scope := attempt.scope
-	policy := attempt.policy
+func (p attemptExecutor) executeAttempt(attempt targetexec.Attempt) (committed bool, retried []RouteTarget, outcome targetexec.Outcome, commit *targetexec.Commit) {
+	runtime := attempt.Runtime()
+	plan := attempt.Plan()
+	exchange := attempt.Exchange()
+	scope := attempt.Scope()
+	policy := attempt.Policy()
 
-	cfg := runtime.cfg
-	generation := runtime.generation
-	cache := runtime.cache
-	proto := plan.clientProto
-	backendProto := plan.backendProto
-	t := plan.target
-	prov := plan.providerCfg
-	provImpl := plan.providerImpl
-	baseURL := plan.baseURL
-	upPath := plan.upPath
-	body := exchange.body
-	w := exchange.writer
-	r := exchange.request
-	calledModel := scope.calledModel
-	agent := scope.agent
-	cacheKey := scope.cacheKey
-	flc := scope.log
-	ctxRetry := policy.contextRetry
-	force := policy.force
-	lastTarget := policy.lastTarget
-	viaResponsesVerdict := plan.viaResponsesVerdict
-	r2c := scope.responseContext
-	responsesHistory := scope.responsesHistory
-	responsesSession := scope.responsesSession
+	generation := runtime.Generation
+	cache := runtime.Cache
+	proto := plan.ClientProtocol()
+	backendProto := plan.BackendProtocol()
+	t := plan.Target()
+	provImpl := plan.Provider()
+	baseURL := plan.BaseURL()
+	upPath := plan.UpstreamPath()
+	body := exchange.Body
+	w := exchange.Writer
+	r := exchange.Request
+	calledModel := scope.CalledModel
+	agent := scope.Agent
+	cacheKey := scope.CacheKey
+	flc := forwardLogCtx{
+		requestID: scope.Log.RequestID,
+		attempt:   scope.Log.Attempt,
+		exposed:   scope.Log.Exposed,
+		origBody:  scope.Log.OriginalBody,
+	}
+	ctxRetry := policy.ContextRetry
+	force := policy.Force
+	lastTarget := policy.LastTarget
+	viaResponsesVerdict := plan.ViaResponsesVerdict()
+	r2c := scope.ResponseContext
+	responsesHistory := scope.ResponsesHistory
+	responsesSession := scope.ResponsesSession
 
 	// Wrap the client writer to capture time-to-first-token for latency stats.
 	// All writes below go through tw; ttft is read on the commit path.
 	tw := newTimingResponseWriter(w)
 	w = tw
-	sched := cfg.Scheduling
+	sched := runtime.Scheduling
 	// Fail CLOSED on a missing runtime implementation: nil impl would silently
 	// skip AuthHeaders/RewriteRequest and ship an UNAUTHENTICATED request
 	// upstream (pooled parent leaking through, provider not logged in). This is
@@ -142,21 +138,21 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 		if p.metrics != nil {
 			p.metrics.inc(t.Provider, t.Model, evFailovers)
 		}
-		return false, nil, tryFailedHard, nil
+		return false, nil, targetexec.OutcomeFailedHard, nil
 	}
 	// Model-level lockout: schedule() already filters locked (provider, model)
 	// pairs; this is the race guard for locks recorded after scheduling. Checked
 	// BEFORE takeHalfOpenSlot so a locked model never burns the half-open probe.
 	// force (pin / x-mp-force-provider) bypasses — the user asked for THIS target.
 	if !force && p.modelLocked(t.Provider, t.Model, time.Now()) {
-		return false, nil, tryNone, nil
+		return false, nil, targetexec.OutcomeNone, nil
 	}
 	// Re-check availability and reserve the half-open probe slot if needed. A pin
 	// (force) bypasses the circuit breaker — the user explicitly asked for THIS
 	// backend, so circuit-open state must not block it (and there's no failover
 	// target anyway). recordSuccess on a forced hit reopens the circuit.
 	if !force && !p.takeHalfOpenSlot(t.Provider, generation) {
-		return false, nil, tryNone, nil
+		return false, nil, targetexec.OutcomeNone, nil
 	}
 	// recordSuccess/Failure/RateLimit below release the slot (force never took
 	// one, so those releases are harmless no-ops).
@@ -190,7 +186,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil, tryFailedHard, nil
+			return false, nil, targetexec.OutcomeFailedHard, nil
 		}
 		copyHeaderWhitelist(req.Header, r.Header,
 			"content-type", "accept", "user-agent", "x-session-id",
@@ -205,12 +201,10 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				if p.metrics != nil {
 					p.metrics.inc(t.Provider, t.Model, evFailovers)
 				}
-				return false, nil, tryFailedHard, nil
+				return false, nil, targetexec.OutcomeFailedHard, nil
 			}
 		}
-		for k, v := range prov.Headers {
-			req.Header.Set(k, v)
-		}
+		plan.ApplyConfiguredHeaders(req.Header)
 		// Provider-specific per-request headers (aqp: anthropic-version +
 		// x-compass-request-id). Same method the probe path calls - one impl,
 		// no duplicated aqp branch.
@@ -228,7 +222,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				p.metrics.inc(t.Provider, t.Model, evFailures)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil, tryFailedHard, nil
+			return false, nil, targetexec.OutcomeFailedHard, nil
 		}
 
 		// 401: refresh + retry once on the same target; still 401 → failure + failover.
@@ -246,7 +240,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 			if p.metrics != nil {
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil, tryFailedHard, nil
+			return false, nil, targetexec.OutcomeFailedHard, nil
 		}
 		// Rate limit (429): skip this provider until the upstream's reset hint /
 		// Retry-After / per-class default backoff. Does not count toward the circuit.
@@ -263,7 +257,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				p.metrics.inc(t.Provider, t.Model, evRateLimited429)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil, tryRateLimited, nil
+			return false, nil, targetexec.OutcomeRateLimited, nil
 		}
 		// Transient upstream errors → circuit + failover.
 		if resp.StatusCode >= 500 {
@@ -273,7 +267,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				p.metrics.inc(t.Provider, t.Model, evFailures)
 				p.metrics.inc(t.Provider, t.Model, evFailovers)
 			}
-			return false, nil, tryFailedHard, nil
+			return false, nil, targetexec.OutcomeFailedHard, nil
 		}
 
 		// 4xx classification (ONE peek, ≤64KiB, bytes restored transparently):
@@ -311,7 +305,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 					}
 					log.Printf("[proto=%s provider=%s] context overflow (status %d); retrying on a larger-context target",
 						proto, t.Provider, resp.StatusCode)
-					return false, bigger, tryNone, nil
+					return false, bigger, targetexec.OutcomeNone, nil
 				}
 			}
 			// Model-level failure: any 404 (the proxy only forwards known LLM
@@ -347,7 +341,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 					if p.metrics != nil {
 						p.metrics.inc(t.Provider, t.Model, evFailovers)
 					}
-					return false, nil, tryFailedHard, nil
+					return false, nil, targetexec.OutcomeFailedHard, nil
 				}
 			}
 			// Unsupported-parameter learning: a 400 naming an offending top-level
@@ -395,7 +389,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				}
 				log.Printf("[proto=%s provider=%s] empty 200 (Content-Length: 0) — model locked %s, failing over",
 					proto, t.Provider, sched.ModelLockoutDuration())
-				return false, nil, tryFailedHard, nil
+				return false, nil, targetexec.OutcomeFailedHard, nil
 			}
 		}
 
@@ -451,7 +445,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				log.Printf("[proto=%s provider=%s] %s→%s convert read failed: %v — failing closed",
 					proto, t.Provider, backendProto, proto, rerr)
 				http.Error(w, fmt.Sprintf("upstream response read failed during %s→%s conversion", backendProto, proto), http.StatusBadGateway)
-				return true, nil, tryNone, nil
+				return true, nil, targetexec.OutcomeNone, nil
 			}
 			conv, cerr := all, error(nil)
 			switch {
@@ -483,7 +477,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 				log.Printf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
 					proto, t.Provider, backendProto, proto, cerr)
 				http.Error(w, fmt.Sprintf("response conversion %s→%s failed", backendProto, proto), http.StatusBadGateway)
-				return true, nil, tryNone, nil
+				return true, nil, targetexec.OutcomeNone, nil
 			}
 			preconv = conv
 			if resp.StatusCode < 300 && proto == "responses" && p.responsesState != nil && len(responsesHistory) > 0 {
@@ -662,7 +656,7 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 			Input:         endTokens.Input,
 			Output:        endTokens.Output,
 		})
-		return true, nil, tryNone, &attemptCommit{requestBody: reqBytes}
+		return true, nil, targetexec.OutcomeNone, targetexec.NewCommit(reqBytes)
 	}
 	// 401-retry exhausted without resolution — release the slot.
 	// Defensive guard: unreachable in normal flow (the 401 branch above always
@@ -671,5 +665,5 @@ func (p attemptExecutor) execute(attempt targetAttempt) (committed bool, retried
 	if p.metrics != nil {
 		p.metrics.inc(t.Provider, t.Model, evFailovers)
 	}
-	return false, nil, tryFailedHard, nil
+	return false, nil, targetexec.OutcomeFailedHard, nil
 }

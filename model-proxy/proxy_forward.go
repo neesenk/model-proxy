@@ -12,6 +12,7 @@ import (
 	responsecache "model-proxy/internal/cache"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/targetexec"
 )
 
 // forward proxies a request to the upstream selected by the route for the
@@ -394,9 +395,9 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 
 		// Rewrite the body's model to this target's real model (per target), then
 		// convert the request to the backend protocol if needed.
-		body := plan.wire.RewriteModel(origBody, calledModel)
+		body := plan.RewriteModel(origBody, calledModel)
 		var responsesHistory []any
-		if proto == "responses" && plan.backendProto != "responses" && p.responsesState != nil {
+		if proto == "responses" && plan.BackendProtocol() != protocol.Responses && p.responsesState != nil {
 			expandedBody, history, hit, err := p.responsesState.Expand(body, sessionKey)
 			if err != nil {
 				log.Printf("[proto=%s model=%s] target %d (%s/%s) responses state expansion failed: %v — skipping",
@@ -409,14 +410,14 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			body = expandedBody
 			responsesHistory = history
 		}
-		body, err = plan.wire.ConvertBody(body)
+		body, err = plan.ConvertBody(body)
 		if err != nil {
 			if unsupported, ok := protocol.AsUnsupported(err); ok {
 				if res.conversionErr == nil {
 					res.conversionErr = unsupported
 				}
 				log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s unsupported feature %s — trying another target",
-					proto, exposed, ti, t.Provider, t.Model, proto, plan.backendProto, unsupported.Feature)
+					proto, exposed, ti, t.Provider, t.Model, proto, plan.BackendProtocol(), unsupported.Feature)
 				continue
 			}
 			// Fail CLOSED: a conversion failure must NOT send the unconverted
@@ -424,7 +425,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			// endpoint, or vice versa). Skip this target and try the next; if
 			// none serve, the loop's all-targets-failed path returns a 502.
 			log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s request convert failed: %v — skipping",
-				proto, exposed, ti, t.Provider, t.Model, proto, plan.backendProto, err)
+				proto, exposed, ti, t.Provider, t.Model, proto, plan.BackendProtocol(), err)
 			continue
 		}
 
@@ -450,52 +451,52 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		attempt := newTargetAttempt(
 			runtime,
 			plan,
-			attemptExchange{
-				request: r,
-				writer:  w,
-				body:    body,
+			targetexec.Exchange{
+				Request: r,
+				Writer:  w,
+				Body:    body,
 			},
-			attemptScope{
-				calledModel:      calledModel,
-				agent:            agent,
-				cacheKey:         cacheKey,
-				log:              flc,
-				responseContext:  plan.wire.ResponseContext(origBody),
-				responsesHistory: responsesHistory,
-				responsesSession: sessionKey,
+			targetexec.Scope{
+				CalledModel:      calledModel,
+				Agent:            agent,
+				CacheKey:         cacheKey,
+				Log:              targetLogContext(flc),
+				ResponseContext:  plan.ResponseContext(origBody),
+				ResponsesHistory: responsesHistory,
+				ResponsesSession: sessionKey,
 			},
-			attemptPolicy{
-				force:        force,
-				lastTarget:   ti == len(ordered)-1,
-				contextRetry: ctxRetry,
+			targetexec.Policy{
+				Force:        force,
+				LastTarget:   ti == len(ordered)-1,
+				ContextRetry: ctxRetry,
 			},
 		)
-		committed, retried, outcome, commit := p.targetExecutor().execute(attempt)
+		result := p.targetExecutor().execute(attempt)
 		res.tried[t.Provider] = true
-		switch outcome {
-		case tryFailedHard:
+		switch result.Outcome {
+		case targetexec.OutcomeFailedHard:
 			res.sawHard = true
-		case tryRateLimited:
+		case targetexec.OutcomeRateLimited:
 			res.sawCooldown = true
 		}
-		if committed {
+		if result.Committed {
 			p.dispatchShadowAfterCommit(
 				runtime,
 				proto,
-				string(plan.backendProto),
+				string(plan.BackendProtocol()),
 				calledModel,
 				exposed,
 				t,
 				requestID,
-				commit,
+				result.Commit,
 			)
 			res.committed = true
 			return res // committed: response written to the client
 		}
-		if retried != nil {
+		if result.Retried != nil {
 			st.retriedForContext = true
 			log.Printf("[proto=%s model=%s] target %d (%s/%s) context overflow; retrying with larger-context targets", proto, exposed, ti, t.Provider, t.Model)
-			ordered = retried
+			ordered = result.Retried
 			ti = -1 // restart at the first replacement target (post-statement ti++ → 0)
 			continue
 		}

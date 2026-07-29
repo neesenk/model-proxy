@@ -76,11 +76,11 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		}
 	})
 
-	t.Run("fusion.go reuses targetPlan helpers instead of duplicating them", func(t *testing.T) {
+	t.Run("fusion.go reuses targetexec Plan helpers instead of duplicating them", func(t *testing.T) {
 		f, fset := parseGoFile(t, "fusion.go")
 		for _, spec := range f.Imports {
 			if strings.Trim(spec.Path.Value, `"`) == "model-proxy/internal/protocol" {
-				t.Error("fusion.go must not import internal/protocol directly; use targetPlan adapters")
+				t.Error("fusion.go must not import internal/protocol directly; use targetexec.Plan")
 			}
 		}
 		forbiddenCalls := map[string]bool{
@@ -88,7 +88,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"convertRequestFor": true, "catalogSnapshot": true,
 		}
 		for _, v := range forbiddenCallSites(f, fset, forbiddenCalls, nil) {
-			t.Errorf("fusion.go bypasses targetPlan: %s", v)
+			t.Errorf("fusion.go bypasses targetexec.Plan: %s", v)
 		}
 	})
 

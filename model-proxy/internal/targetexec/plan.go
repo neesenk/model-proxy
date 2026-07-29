@@ -4,7 +4,9 @@ package targetexec
 
 import (
 	"encoding/json"
+	"net/http"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 	"model-proxy/provider"
 )
@@ -13,53 +15,77 @@ import (
 // request for one upstream. Provider/config resolution deliberately remains in
 // the composition root.
 type PlanInput struct {
-	TargetModel      string
-	ProviderID       string
-	ClientProtocol   protocol.Protocol
-	BackendProtocol  protocol.Protocol
-	OpenAIBaseURL    string
-	AnthropicBaseURL string
-	ClientPath       string
-	ImageOK          bool
+	Target              configdomain.RouteTarget
+	ProviderConfig      configdomain.Provider
+	Provider            provider.Provider
+	ClientProtocol      protocol.Protocol
+	BackendProtocol     protocol.Protocol
+	ViaResponsesVerdict bool
+	ClientPath          string
+	ImageOK             bool
 }
 
 // Plan is an immutable wire plan for one resolved target.
 type Plan struct {
-	targetModel     string
-	clientProtocol  protocol.Protocol
-	backendProtocol protocol.Protocol
-	baseURL         string
-	upstreamPath    string
-	providerID      string
-	imageOK         bool
+	target              configdomain.RouteTarget
+	provider            provider.Provider
+	providerID          string
+	configuredHeaders   map[string]string
+	targetModel         string
+	clientProtocol      protocol.Protocol
+	backendProtocol     protocol.Protocol
+	viaResponsesVerdict bool
+	baseURL             string
+	upstreamPath        string
+	imageOK             bool
 }
 
 // NewPlan derives the upstream endpoint and retains the facts needed for
 // request/response conversion.
 func NewPlan(input PlanInput) Plan {
-	baseURL := input.OpenAIBaseURL
-	if input.BackendProtocol == protocol.Anthropic && input.AnthropicBaseURL != "" {
-		baseURL = input.AnthropicBaseURL
+	baseURL := input.ProviderConfig.OpenAIBaseURL
+	if input.BackendProtocol == protocol.Anthropic && input.ProviderConfig.AnthropicBaseURL != "" {
+		baseURL = input.ProviderConfig.AnthropicBaseURL
 	}
 	upstreamPath := input.ClientPath
 	if protocol.NeedsConversion(input.ClientProtocol, input.BackendProtocol) {
 		upstreamPath = protocol.BackendPath(input.BackendProtocol)
 	}
+	headers := make(map[string]string, len(input.ProviderConfig.Headers))
+	for key, value := range input.ProviderConfig.Headers {
+		headers[key] = value
+	}
 	return Plan{
-		targetModel:     input.TargetModel,
-		clientProtocol:  input.ClientProtocol,
-		backendProtocol: input.BackendProtocol,
-		baseURL:         baseURL,
-		upstreamPath:    upstreamPath,
-		providerID:      input.ProviderID,
-		imageOK:         input.ImageOK,
+		target:              input.Target,
+		provider:            input.Provider,
+		providerID:          input.ProviderConfig.Provider,
+		configuredHeaders:   headers,
+		targetModel:         input.Target.Model,
+		clientProtocol:      input.ClientProtocol,
+		backendProtocol:     input.BackendProtocol,
+		viaResponsesVerdict: input.ViaResponsesVerdict,
+		baseURL:             baseURL,
+		upstreamPath:        upstreamPath,
+		imageOK:             input.ImageOK,
 	}
 }
 
+func (plan Plan) Target() configdomain.RouteTarget   { return plan.target }
+func (plan Plan) ProviderID() string                 { return plan.providerID }
+func (plan Plan) Provider() provider.Provider        { return plan.provider }
 func (plan Plan) BaseURL() string                    { return plan.baseURL }
 func (plan Plan) UpstreamPath() string               { return plan.upstreamPath }
 func (plan Plan) ClientProtocol() protocol.Protocol  { return plan.clientProtocol }
 func (plan Plan) BackendProtocol() protocol.Protocol { return plan.backendProtocol }
+func (plan Plan) ViaResponsesVerdict() bool          { return plan.viaResponsesVerdict }
+
+// ApplyConfiguredHeaders copies static target headers without exposing the
+// generation-owned provider config map for mutation.
+func (plan Plan) ApplyConfiguredHeaders(header http.Header) {
+	for key, value := range plan.configuredHeaders {
+		header.Set(key, value)
+	}
+}
 
 // RewriteModel preserves the called model when a target has no replacement
 // model, as Shadow targets may do.
@@ -85,10 +111,11 @@ func (plan Plan) ConvertBody(body []byte) ([]byte, error) {
 	if !protocol.NeedsConversion(plan.clientProtocol, plan.backendProtocol) {
 		return body, nil
 	}
+	providerID := plan.providerID
 	return protocol.ConvertRequestWithOptions(body, plan.clientProtocol, plan.backendProtocol, protocol.RequestOptions{
 		ImageOK:          plan.imageOK,
-		ReasoningDialect: protocol.ReasoningDialect(provider.ChatReasoningMode(plan.providerID)),
-		CodexShaping:     plan.providerID == "codex",
+		ReasoningDialect: protocol.ReasoningDialect(provider.ChatReasoningMode(providerID)),
+		CodexShaping:     providerID == "codex",
 	})
 }
 

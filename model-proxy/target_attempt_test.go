@@ -9,6 +9,8 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/observe/requestlog"
+	"model-proxy/internal/protocol"
+	"model-proxy/internal/targetexec"
 )
 
 func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
@@ -17,13 +19,14 @@ func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
 		TTL: time.Hour, MaxEntries: 1, MaxBodyBytes: 1,
 	})
 	runtime := runtimeSnapshot{cfg: cfg, generation: 41, cache: cache}
-	plan := targetPlan{
-		target:       RouteTarget{Provider: "upstream", Model: "target-model"},
-		clientProto:  "responses",
-		backendProto: "openai",
-		baseURL:      "https://example.invalid",
-		upPath:       "/v1/chat/completions",
-	}
+	plan := targetexec.NewPlan(targetexec.PlanInput{
+		Target:          RouteTarget{Provider: "upstream", Model: "target-model"},
+		ProviderConfig:  Provider{OpenAIBaseURL: "https://example.invalid", Provider: testProviderID},
+		ClientProtocol:  protocol.Responses,
+		BackendProtocol: protocol.OpenAI,
+		ClientPath:      "/v1/responses",
+		ImageOK:         true,
+	})
 	req := httptest.NewRequest("POST", "/v1/responses", nil)
 	writer := httptest.NewRecorder()
 	body := []byte(`{"model":"client-model"}`)
@@ -32,53 +35,59 @@ func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
 	attempt := newTargetAttempt(
 		runtime,
 		plan,
-		attemptExchange{request: req, writer: writer, body: body},
-		attemptScope{
-			calledModel:      "client-model",
-			agent:            "test-agent",
-			cacheKey:         "cache-key",
-			log:              forwardLogCtx{requestID: "req-1", exposed: "public-model"},
-			responsesHistory: []any{"history"},
-			responsesSession: "session-1",
+		targetexec.Exchange{Request: req, Writer: writer, Body: body},
+		targetexec.Scope{
+			CalledModel:      "client-model",
+			Agent:            "test-agent",
+			CacheKey:         "cache-key",
+			Log:              targetLogContext(forwardLogCtx{requestID: "req-1", exposed: "public-model"}),
+			ResponsesHistory: []any{"history"},
+			ResponsesSession: "session-1",
 		},
-		attemptPolicy{
-			force:      true,
-			lastTarget: true,
-			contextRetry: func() []RouteTarget {
+		targetexec.Policy{
+			Force:      true,
+			LastTarget: true,
+			ContextRetry: func() []RouteTarget {
 				return []RouteTarget{retryTarget}
 			},
 		},
 	)
 
-	if attempt.runtime.cfg != cfg || attempt.runtime.cache != cache || attempt.runtime.generation != 41 {
-		t.Fatalf("runtime group changed: %+v", attempt.runtime)
+	attemptRuntime := attempt.Runtime()
+	if attemptRuntime.Cache != cache || attemptRuntime.Generation != 41 ||
+		attemptRuntime.Scheduling != cfg.Scheduling {
+		t.Fatalf("runtime group changed: %+v", attemptRuntime)
 	}
-	if attempt.plan.target != plan.target ||
-		attempt.plan.clientProto != "responses" ||
-		attempt.plan.backendProto != "openai" ||
-		attempt.plan.baseURL != plan.baseURL ||
-		attempt.plan.upPath != plan.upPath {
-		t.Fatalf("plan group changed: %+v", attempt.plan)
+	attemptPlan := attempt.Plan()
+	if attemptPlan.Target() != plan.Target() ||
+		attemptPlan.ClientProtocol() != protocol.Responses ||
+		attemptPlan.BackendProtocol() != protocol.OpenAI ||
+		attemptPlan.BaseURL() != plan.BaseURL() ||
+		attemptPlan.UpstreamPath() != plan.UpstreamPath() {
+		t.Fatalf("plan group changed: %+v", attemptPlan)
 	}
-	if attempt.exchange.request != req || attempt.exchange.writer != writer || string(attempt.exchange.body) != string(body) {
-		t.Fatalf("exchange group changed: %+v", attempt.exchange)
+	exchange := attempt.Exchange()
+	if exchange.Request != req || exchange.Writer != writer || string(exchange.Body) != string(body) {
+		t.Fatalf("exchange group changed: %+v", exchange)
 	}
-	if attempt.scope.calledModel != "client-model" ||
-		attempt.scope.agent != "test-agent" ||
-		attempt.scope.cacheKey != "cache-key" ||
-		attempt.scope.log.requestID != "req-1" ||
-		attempt.scope.responsesSession != "session-1" {
-		t.Fatalf("scope group changed: %+v", attempt.scope)
+	scope := attempt.Scope()
+	if scope.CalledModel != "client-model" ||
+		scope.Agent != "test-agent" ||
+		scope.CacheKey != "cache-key" ||
+		scope.Log.RequestID != "req-1" ||
+		scope.ResponsesSession != "session-1" {
+		t.Fatalf("scope group changed: %+v", scope)
 	}
-	if !attempt.policy.force || !attempt.policy.lastTarget {
-		t.Fatalf("policy group changed: %+v", attempt.policy)
+	policy := attempt.Policy()
+	if !policy.Force || !policy.LastTarget {
+		t.Fatalf("policy group changed: %+v", policy)
 	}
-	retried := attempt.policy.contextRetry()
+	retried := policy.ContextRetry()
 	if len(retried) != 1 || retried[0] != retryTarget {
 		t.Fatalf("context retry = %+v, want %+v", retried, retryTarget)
 	}
-	if string(attempt.exchange.body) != `{"model":"client-model"}` {
-		t.Fatalf("factory rewrote body: %s", attempt.exchange.body)
+	if string(exchange.Body) != `{"model":"client-model"}` {
+		t.Fatalf("factory rewrote body: %s", exchange.Body)
 	}
 }
 

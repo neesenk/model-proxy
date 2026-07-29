@@ -3,21 +3,25 @@ package targetexec
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"testing"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 )
 
 func TestPlanOwnsWirePreparation(t *testing.T) {
 	plan := NewPlan(PlanInput{
-		TargetModel:      "claude",
-		ProviderID:       "test",
-		ClientProtocol:   protocol.OpenAI,
-		BackendProtocol:  protocol.Anthropic,
-		OpenAIBaseURL:    "https://chat.example/v1",
-		AnthropicBaseURL: "https://anthropic.example",
-		ClientPath:       "/chat/completions",
-		ImageOK:          true,
+		Target: configdomain.RouteTarget{Model: "claude"},
+		ProviderConfig: configdomain.Provider{
+			Provider:         "test",
+			OpenAIBaseURL:    "https://chat.example/v1",
+			AnthropicBaseURL: "https://anthropic.example",
+		},
+		ClientProtocol:  protocol.OpenAI,
+		BackendProtocol: protocol.Anthropic,
+		ClientPath:      "/chat/completions",
+		ImageOK:         true,
 	})
 	if plan.BaseURL() != "https://anthropic.example" || plan.UpstreamPath() != "/v1/messages" {
 		t.Fatalf("wire endpoint = %q %q", plan.BaseURL(), plan.UpstreamPath())
@@ -36,16 +40,32 @@ func TestPlanOwnsWirePreparation(t *testing.T) {
 	}
 }
 
+func TestPlanAppliesConfiguredHeadersWithoutExposingConfig(t *testing.T) {
+	providerConfig := configdomain.Provider{
+		Provider: "test",
+		Headers:  map[string]string{"x-upstream-feature": "enabled"},
+	}
+	plan := NewPlan(PlanInput{
+		ProviderConfig: providerConfig,
+	})
+	providerConfig.Headers["x-upstream-feature"] = "mutated"
+	header := http.Header{}
+	plan.ApplyConfiguredHeaders(header)
+	if got := header.Get("x-upstream-feature"); got != "enabled" {
+		t.Fatalf("configured header = %q, want enabled", got)
+	}
+	if plan.ProviderID() != "test" {
+		t.Fatalf("provider id = %q, want test", plan.ProviderID())
+	}
+}
+
 func TestPlanPreservesSameProtocolBytesAndEndpoint(t *testing.T) {
 	in := []byte("{  \"model\" : \"same\", \"messages\" : [] }\n")
 	plan := NewPlan(PlanInput{
-		TargetModel:     "same",
-		ProviderID:      "test",
-		ClientProtocol:  protocol.OpenAI,
-		BackendProtocol: protocol.OpenAI,
-		OpenAIBaseURL:   "https://chat.example/v1",
-		ClientPath:      "/chat/completions",
-		ImageOK:         true,
+		Target:         configdomain.RouteTarget{Model: "same"},
+		ProviderConfig: configdomain.Provider{Provider: "test", OpenAIBaseURL: "https://chat.example/v1"},
+		ClientProtocol: protocol.OpenAI, BackendProtocol: protocol.OpenAI,
+		ClientPath: "/chat/completions", ImageOK: true,
 	})
 	rewritten := plan.RewriteModel(in, "same")
 	got, err := plan.ConvertBody(rewritten)
@@ -69,7 +89,8 @@ func TestPlanPreservesBodyWhenTargetModelEmptyOrBodyMalformed(t *testing.T) {
 
 	malformed := []byte(`not-json`)
 	rewriting := NewPlan(PlanInput{
-		TargetModel: "upstream", ClientProtocol: protocol.OpenAI, BackendProtocol: protocol.OpenAI,
+		Target:         configdomain.RouteTarget{Model: "upstream"},
+		ClientProtocol: protocol.OpenAI, BackendProtocol: protocol.OpenAI,
 	})
 	if got := rewriting.RewriteModel(malformed, "called"); !bytes.Equal(got, malformed) {
 		t.Fatalf("malformed body changed: %s", got)
@@ -100,7 +121,7 @@ func TestPlanExtractResponseTextByBackendProtocol(t *testing.T) {
 func TestPlanSameProtocolCodexPassthrough(t *testing.T) {
 	in := []byte(`{"model":"gpt-x","input":"hi","max_output_tokens":10,"temperature":0.2,"top_p":0.9}`)
 	plan := NewPlan(PlanInput{
-		ProviderID:      "codex",
+		ProviderConfig:  configdomain.Provider{Provider: "codex"},
 		ClientProtocol:  protocol.Responses,
 		BackendProtocol: protocol.Responses,
 		ClientPath:      "/v1/responses",
