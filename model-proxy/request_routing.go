@@ -384,37 +384,6 @@ func (p *Proxy) contextOverflowRetry(cfg *Config, parentOf map[string]string, ca
 	}, generations...)
 }
 
-// contextOverflowMarkers are conservative case-insensitive substrings matching
-// upstream "prompt exceeds the context window" error bodies across providers
-// (openai's context_length_exceeded code, deepseek/zhipu "maximum context
-// length" messages, anthropic "prompt is too long", ...). Deliberately specific
-// so an ordinary 400 (bad key, malformed request) never matches.
-var contextOverflowMarkers = [][]byte{
-	[]byte("context_length_exceeded"),
-	[]byte("maximum context length"),
-	[]byte("context window"),
-	[]byte("context length"),
-	[]byte("prompt is too long"),
-	[]byte("reduce the length"),
-	[]byte("too many tokens"),
-}
-
-// isContextOverflow reports whether a 4xx response body looks like a
-// context-window overflow error rather than an ordinary client error. status
-// must be 4xx; bodyPeek is the first ≤64KiB of the body (peekResponseBody).
-func isContextOverflow(status int, bodyPeek []byte) bool {
-	if status < 400 || status >= 500 || len(bodyPeek) == 0 {
-		return false
-	}
-	lower := bytes.ToLower(bodyPeek)
-	for _, m := range contextOverflowMarkers {
-		if bytes.Contains(lower, m) {
-			return true
-		}
-	}
-	return false
-}
-
 // forceProvider returns the one-shot provider override for a request, from the
 // x-mp-force-provider header or the force_provider query param (header wins).
 // Empty = no override. Used by `model-proxy replay` to re-answer with a chosen

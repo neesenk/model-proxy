@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"model-proxy/internal/targetexec"
 )
 
 func TestClassify429(t *testing.T) {
@@ -101,7 +103,7 @@ func TestIsModelDenied(t *testing.T) {
 		{500, `{"error":"model not found"}`, false}, // only 400/403 classify
 	}
 	for _, c := range cases {
-		if got := isModelDenied(c.status, []byte(c.body)); got != c.want {
+		if got := targetexec.IsModelDenied(c.status, []byte(c.body)); got != c.want {
 			t.Errorf("isModelDenied(%d, %q) = %v want %v", c.status, c.body, got, c.want)
 		}
 	}
@@ -128,7 +130,7 @@ func TestParseUnsupportedParam(t *testing.T) {
 		{``, "", false},
 	}
 	for _, c := range cases {
-		got, ok := parseUnsupportedParam([]byte(c.body))
+		got, ok := targetexec.ParseUnsupportedParam([]byte(c.body))
 		if got != c.want || ok != c.ok {
 			t.Errorf("parseUnsupportedParam(%q) = %q,%v want %q,%v", c.body, got, ok, c.want, c.ok)
 		}

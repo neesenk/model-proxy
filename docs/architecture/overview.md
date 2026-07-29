@@ -28,7 +28,9 @@ implicit-route eligibility；
 identity 投影；
 `proxy_health_adapter.go` 只把根层 health/cooldown/param/rate-limit 输入映射到
 runtime Manager，并保留 429 后 quota refresh 编排；
-`proxy_transport.go` 集中 SSE/HTTP 流识别、复制和 ResponseWriter primitive；
+`targetexec_adapter.go` 只把 captured generation/scheduling 与应用 observability
+映射到 `targetexec.State/Effects`；SSE/HTTP 流识别、复制和 ResponseWriter
+primitive 归 `internal/targetexec/transport.go`；
 `json_model_body.go` 只处理顶层 model 的提取与改写。移动到这些文件不改变同包
 调用边界，也不允许 transport helper 反向持有 `Proxy`。
 
@@ -41,7 +43,7 @@ HTTP handler
   → schedule / failover
   → internal/targetexec.Plan
   → internal/targetexec.Attempt
-  → attemptExecutor
+  → internal/targetexec.Executor
   → provider.Provider
 ```
 
@@ -58,9 +60,12 @@ HTTP handler
   `newTargetAttempt → targetexec.NewAttempt` 是普通 route 与 Fusion
   synthesizer 的唯一构造入口。Runtime 只投影 captured scheduling、generation
   与 cache，不允许用 `any` 或完整 `runtimeSnapshot` 绕过边界。
-- `attemptExecutor`：只通过 `attemptState` 修改健康、参数学习和 wire state；
-  其余 HTTP、metrics、tokens、request log、Responses state、events 显式注入；
-  commit 后只返回最小 `targetexec.Commit`，不持有生命周期或 Shadow 调度能力。
+- `internal/targetexec.Executor`：拥有完整单目标 HTTP/retry/response pipeline，
+  只通过 generation-frozen `targetexec.State` 修改健康、参数学习和 wire state；
+  metrics、tokens、request log、Responses state、events 只经 typed
+  `targetexec.Effects/Responses` 注入。根 `targetexec_adapter.go` 只组装这些端口，
+  不执行 I/O、转换或 failover。commit 后只返回最小 `targetexec.Commit`，不持有
+  生命周期或 Shadow 调度能力。
 
 `runtimeSnapshot` 与 `internal/targetexec.Plan` 是执行器内
 reload-owned/config/provider/protocol 事实的唯一来源；根 assembly 只把 snapshot
@@ -149,7 +154,7 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`manager.go` �
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
-  synthesizer 通过正常 `targetexec.Attempt → attemptExecutor` 返回客户端。
+  synthesizer 通过正常 `targetexec.Attempt → targetexec.Executor` 返回客户端。
 - Shadow 由 `serveOnce` 在主请求 commit 后根据 `targetexec.Commit` 接纳和派发，同时
   捕获 `runtimeSnapshot` 与 `shadowRuntime`；executor 和 Fusion synthesizer
   均不得启动 Shadow，goroutine 内不得重新读取 reload-owned 状态。
@@ -234,7 +239,8 @@ composition root → internal/targetexec → internal/protocol / provider
 - `web.go` 用裸 `go` 启动绕过 `webTaskOwner` 的后台任务；
 - Fusion/Shadow 复制 provider lookup、协议选择、转换或 URL/path 逻辑；
 - request、response、SSE 各自维护协议方向 switch；
-- attemptExecutor 持有完整 `*Proxy`；
+- `targetexec.Executor` import/持有 `Proxy` 或其他 composition-root owner；
+- 根 `targetexec_adapter.go` 重新实现 HTTP、转换、retry 或 Shadow 编排；
 - 普通 route/Fusion 绕过 `newTargetAttempt` 直接拼装执行器输入；
 - daemon/reload 绕过 `proxyLifecycle` 启动 Proxy 级 goroutine；
 - `internal/config` import `internal/pricing`、`internal/protocol` 以外的

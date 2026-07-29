@@ -12,9 +12,11 @@
   参数链或用 `any` 携带根对象。
   Shadow 的采样率、semaphore 和 client 也属于该快照，commit 后不得重新读取
   `p.shadow`。
-- 单目标 I/O 由 `attemptExecutor` 执行；输入/结果/commit 归
-  `internal/targetexec`，执行器只能通过 `attemptState` 窄端口修改 runtime
-  state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
+- 单目标 I/O 由 `internal/targetexec.Executor` 执行；它只能通过
+  generation-frozen `targetexec.State` 与 typed `Effects/Responses` 端口访问
+  runtime/observability，不得 import 或持有完整 `*Proxy`，也不得访问调度、
+  reload、Web、lifecycle 或 Shadow。根 `targetexec_adapter.go` 只绑定 captured
+  generation/scheduling 和应用 stores，不得重新实现 HTTP、转换或 retry。
 - 主请求的调度、failover、cooldown 重试与 commit 编排统一位于
   `proxy_forward.go`；`proxy.go` 只声明 composition-root owner。
 - 三协议方向只在 `internal/protocol/conversion_registry.go` 注册；request、

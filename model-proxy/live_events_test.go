@@ -78,6 +78,76 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 	}
 }
 
+// TestForward_LiveEndEventCarriesStreamUsage proves that the terminal live
+// event is published only after the client-facing SSE stream has passed through
+// targetexec's usage capture. The usage frame is the normal OpenAI Chat
+// completion shape, rather than a synthetic event DTO.
+func TestForward_LiveEndEventCarriesStreamUsage(t *testing.T) {
+	const upstreamStream = "data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9,\"total_tokens\":26}}\n\n" +
+		"data: [DONE]\n\n"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		io.WriteString(w, upstreamStream)
+	}))
+	defer up.Close()
+
+	p := newTestProxy(t, &Config{
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "gpt-x", Protocol: "openai"}}},
+	})
+	p.providers["z"] = &testProv{key: "k"}
+	ch, _, cancel := p.events.Subscribe()
+	defer cancel()
+	px := httptest.NewServer(http.HandlerFunc(p.handler))
+	defer px.Close()
+
+	req, err := http.NewRequest(http.MethodPost, px.URL+"/v1/chat/completions", strings.NewReader(
+		`{"model":"glm","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("user-agent", "claude-cli/1.0")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("content-type"), "text/event-stream") || string(body) != upstreamStream {
+		t.Fatalf("client stream status=%d content-type=%q body=%q", resp.StatusCode, resp.Header.Get("content-type"), body)
+	}
+
+	var start, end observeevents.Event
+	deadline := time.After(time.Second)
+	for end.Type == "" {
+		select {
+		case event := <-ch:
+			switch event.Type {
+			case "start":
+				start = event
+			case "end":
+				end = event
+			}
+		case <-deadline:
+			t.Fatalf("did not receive terminal live event; start=%+v end=%+v", start, end)
+		}
+	}
+	if start.Agent != "claude-code" || start.Exposed != "glm" {
+		t.Errorf("start event = %+v, want agent claude-code / exposed glm", start)
+	}
+	if start.RequestID == "" || end.RequestID != start.RequestID ||
+		end.Agent != "claude-code" || end.Protocol != "openai" ||
+		end.Exposed != "glm" || end.Provider != "z" || end.UpstreamModel != "gpt-x" || end.Status != http.StatusOK ||
+		end.Input != 17 || end.Output != 9 || end.LatencyMs < 0 {
+		t.Errorf("start=%+v terminal=%+v, want matching request id; claude-code/openai/glm/z/gpt-x/200; usage 17/9; non-negative latency", start, end)
+	}
+}
+
 // TestServeEvents_SSE: the /api/events endpoint streams events as SSE `data:`
 // lines; a published event reaches an HTTP subscriber.
 func TestServeEvents_SSE(t *testing.T) {

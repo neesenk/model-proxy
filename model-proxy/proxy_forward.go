@@ -471,7 +471,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 				ContextRetry: ctxRetry,
 			},
 		)
-		result := p.targetExecutor().execute(attempt)
+		result := p.targetExecutor(attempt.Runtime()).Execute(attempt)
 		res.tried[t.Provider] = true
 		switch result.Outcome {
 		case targetexec.OutcomeFailedHard:

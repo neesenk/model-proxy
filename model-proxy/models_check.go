@@ -93,8 +93,8 @@ func probeModelCallableContext(ctx context.Context, client *http.Client, prov Pr
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
-	// Minimal whitelist from forward's copyHeaderWhitelist - the probe has no
-	// client request to copy from, so just set the ones the upstream expects.
+	// The probe has no client request to copy from, so set only the headers the
+	// upstream expects.
 	req.Header.Set("Accept", "application/json")
 	if path == "/v1/messages" {
 		// Anthropic endpoints require the version header (set BEFORE

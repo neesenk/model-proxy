@@ -10,10 +10,9 @@ import (
 	runtimestate "model-proxy/internal/runtime"
 )
 
-// failclass.go — upstream failure classification (P0). Conservative substring /
-// regex matchers over peeked error bodies, in the spirit of isContextOverflow:
-// deliberately specific so ordinary client errors never match. Everything here
-// is a pure function over a bounded body peek (≤64KiB, see peekResponseBody).
+// failclass.go — upstream 429 classification. Conservative substring/regex
+// matchers inspect a bounded body peek; target-specific context, model-denial,
+// and unsupported-parameter classifiers live in internal/targetexec.
 
 // rateLimitKind classifies a 429 by WHAT the upstream says is exhausted. The
 // kind picks the default cooldown when the response carries no explicit reset
@@ -190,93 +189,4 @@ func hintDuration(numB, unitB []byte) (time.Duration, bool) {
 		return maxResetHint, true
 	}
 	return time.Duration(n) * unit, true
-}
-
-// modelDeniedMarkers: 400/403 bodies saying the MODEL (not the account, not the
-// request shape) is the problem — removed, renamed, or not provisioned on this
-// account. Such failures must lock only (provider, model), never the account's
-// circuit breaker. Kept specific so auth/credential errors never match.
-var modelDeniedMarkers = [][]byte{
-	[]byte("model not found"),
-	[]byte("model_not_found"),
-	[]byte("model does not exist"),
-	[]byte("does not exist"),
-	[]byte("no such model"),
-	[]byte("model is not available"),
-	[]byte("model unavailable"),
-	[]byte("do not have access to model"),
-	[]byte("not have access to the model"),
-	[]byte("no access to model"),
-	[]byte("not entitled to access model"),
-	[]byte("invalid model"),
-	[]byte("unknown model"),
-	[]byte("模型不存在"),
-	[]byte("模型已下线"),
-	[]byte("模型不可用"),
-	[]byte("无权限访问模型"),
-	[]byte("没有该模型的访问权限"),
-}
-
-// isModelDenied reports whether a 400/403 body says the model itself is
-// unavailable. 404 is handled unconditionally by the caller (the proxy only
-// forwards known LLM paths, so an upstream 404 means the model/path is gone).
-func isModelDenied(status int, bodyPeek []byte) bool {
-	if status != 400 && status != 403 {
-		return false
-	}
-	if len(bodyPeek) == 0 {
-		return false
-	}
-	lower := bytes.ToLower(bodyPeek)
-	for _, m := range modelDeniedMarkers {
-		if bytes.Contains(lower, m) {
-			return true
-		}
-	}
-	return false
-}
-
-var (
-	// OpenAI style: "Unsupported parameter: 'max_tokens'" / `unsupported_parameter`.
-	unsupportedParamRe = regexp.MustCompile(`(?i)unsupported[ _]parameter[^a-z0-9]{0,12}["'` + "`" + `]?([a-zA-Z0-9_.\-]{1,64})`)
-	unknownParamRe     = regexp.MustCompile(`(?i)unknown[ _](?:parameter|param|field|argument)[^a-z0-9]{0,12}["'` + "`" + `]?([a-zA-Z0-9_.\-]{1,64})`)
-	unrecogParamRe     = regexp.MustCompile(`(?i)unrecognized[ _](?:parameter|param|field)[^a-z0-9]{0,12}["'` + "`" + `]?([a-zA-Z0-9_.\-]{1,64})`)
-	notSupportedRe     = regexp.MustCompile(`(?i)(?:parameter|param|field)[^a-z0-9]{0,12}["'` + "`" + `]?([a-zA-Z0-9_.\-]{1,64})["'` + "`" + `]?[^a-z0-9]{0,20}(?:is\s+)?not\s+(?:supported|allowed|recognized)`)
-	// Structured form: {"error": {"param": "store", "code": "unsupported_parameter"}}.
-	jsonParamRe = regexp.MustCompile(`"param"\s*:\s*"([a-zA-Z0-9_.\-]{1,64})"`)
-)
-
-// neverStripParams can never be auto-stripped even if an upstream names them —
-// removing them would break routing, hollow out the request, or silently change
-// its semantics (streaming on/off, tool availability, response shape).
-var neverStripParams = map[string]bool{
-	"model": true, "messages": true, "input": true, "prompt": true, "system": true,
-	"stream": true, "tools": true, "tool_choice": true, "response_format": true,
-}
-
-// parseUnsupportedParam extracts the offending top-level request parameter
-// from a 400 body, for the auto-strip blocklist. Conservative: returns false
-// unless a known phrasing matches AND the extracted name survives the
-// never-strip list. Only top-level JSON keys are ever stripped.
-func parseUnsupportedParam(bodyPeek []byte) (string, bool) {
-	if len(bodyPeek) == 0 {
-		return "", false
-	}
-	for _, re := range []*regexp.Regexp{unsupportedParamRe, unknownParamRe, unrecogParamRe, notSupportedRe} {
-		if m := re.FindSubmatch(bodyPeek); m != nil {
-			if p := string(m[1]); !neverStripParams[p] {
-				return p, true
-			}
-		}
-	}
-	// Structured {"param": ...} only counts when the same body says the param is
-	// unsupported — a bare "param" field appears in unrelated errors.
-	if bytes.Contains(bytes.ToLower(bodyPeek), []byte("unsupported")) {
-		if m := jsonParamRe.FindSubmatch(bodyPeek); m != nil {
-			if p := string(m[1]); !neverStripParams[p] {
-				return p, true
-			}
-		}
-	}
-	return "", false
 }

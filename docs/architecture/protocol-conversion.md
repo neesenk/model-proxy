@@ -27,12 +27,12 @@ reasoning 方言、namespace restore 等信息无法通过统一 message IR 无�
 `internal/protocol` 是仓库依赖叶子，拥有协议解析、转换 registry、请求/响应/SSE
 codec、SSE↔JSON 模式桥接、图片缩减和 Responses `previous_response_id` 状态；
 生产文件不得 import `model-proxy/*`。根包只通过导出 facade 接线：
-`RequestOptions` 接收 `targetPlan` 已解析的 reasoning 方言、Codex shaping 和视觉
-能力，`ResponseContext` 对 namespace/custom restore 状态保持 opaque。Provider
-映射仍由 `provider.ChatReasoningMode` 定义，具体 HTTP 400 envelope 仍由 transport
-层写入，二者都不反向进入协议包。
+`RequestOptions` 接收 `targetexec.Plan` 已解析的 reasoning 方言、Codex shaping
+和视觉能力，`ResponseContext` 对 namespace/custom restore 状态保持 opaque。
+Provider 映射仍由 `provider.ChatReasoningMode` 定义，具体 HTTP 400 envelope
+仍由 transport 层写入，二者都不反向进入协议包。
 
-Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。Responses 客户端跨协议访问 chat/anthropic 后端时，proxy 为 `previous_response_id` 维护短期本地历史：按 session + response id 索引、TTL 30 分钟、最多 512 条、单条 2 MiB、总量 32 MiB，异步以 0600 写入 quota state 同目录的 `responses_state.json`。命中时展开完整 input/output 历史；未命中时只修复本次缺失历史导致的孤立 output/dangling call，普通显式全历史请求不做全局配对改写。只有 completed 和因 token 上限产生的 incomplete 响应进入 replay state，content_filter/其他中止不缓存。无稳定 session 时仅允许 response id 唯一命中，避免跨会话串线。此外 `protocol.ConvertRequestWithOptions` 在 target plan 注入 `CodexShaping` 且目标协议为 responses 时剥离 `max_output_tokens`/`temperature`/`top_p`——该预剥离只作用于转换路径；客户端本来就讲 responses 的同协议 codex 流量保持字节级透传（`targetPlan.convertBody` 短路），其 unsupported parameter 400 靠 paramBlock 学习后预防性剥离自愈（`routing-and-failure.md`）。
+Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses"`。转发路径在目标未声明 `protocol:` 时经 `resolvedBackendProto` 自动回退到 `ProtocolHint`（forward/fusion/shadow 共用），所以 anthropic/chat 客户端打 codex 路由会**自动转换**,无需用户写 `protocol: responses`(显式声明仍可,且优先级最高)。Responses 客户端跨协议访问 chat/anthropic 后端时，proxy 为 `previous_response_id` 维护短期本地历史：按 session + response id 索引、TTL 30 分钟、最多 512 条、单条 2 MiB、总量 32 MiB，异步以 0600 写入 quota state 同目录的 `responses_state.json`。命中时展开完整 input/output 历史；未命中时只修复本次缺失历史导致的孤立 output/dangling call，普通显式全历史请求不做全局配对改写。只有 completed 和因 token 上限产生的 incomplete 响应进入 replay state，content_filter/其他中止不缓存。无稳定 session 时仅允许 response id 唯一命中，避免跨会话串线。此外 `protocol.ConvertRequestWithOptions` 在 target plan 注入 `CodexShaping` 且目标协议为 responses 时剥离 `max_output_tokens`/`temperature`/`top_p`——该预剥离只作用于转换路径；客户端本来就讲 responses 的同协议 codex 流量保持字节级透传（`targetexec.Plan.ConvertBody` 短路），其 unsupported parameter 400 靠 paramBlock 学习后预防性剥离自愈（`routing-and-failure.md`）。
 
 跨协议转换前先运行 capability scanner。已知无法无损表达的请求（例如 Chat `n>1`/logprobs/audio、未知 hosted tool、Anthropic MCP server、Responses 24h cache retention → Anthropic、Responses custom/freeform tool → Anthropic）不会进入上游：当前 target 被跳过并继续 failover；若没有兼容 target，按客户端协议返回 HTTP 400、code=`unsupported_protocol_conversion`。同协议透传不受扫描器影响。
 

@@ -148,10 +148,13 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			t.Errorf("targetexec.NewAttempt call site = %v, want dispatch_context.go:newTargetAttempt", site)
 		}
 		serveOnce := namedMethod(t, rootPackage, "Proxy", "serveOnce")
-		if !assignedFactoryValueExecuted(serveOnce.Body, "newTargetAttempt", "targetExecutor", "execute") {
-			t.Error("Proxy.serveOnce must pass the attempt assigned from newTargetAttempt to targetExecutor().execute")
+		if !assignedFactoryValueExecuted(serveOnce.Body, "newTargetAttempt", "targetExecutor", "Execute") {
+			t.Error("Proxy.serveOnce must pass the attempt assigned from newTargetAttempt to targetexec.Executor.Execute")
 		}
-		executePos := firstNamedCallPos(serveOnce.Body, "execute")
+		if !executorRuntimeBoundToAttempt(serveOnce.Body, "targetExecutor", "Execute") {
+			t.Error("Proxy.serveOnce must bind targetExecutor to the exact attempt.Runtime generation")
+		}
+		executePos := firstNamedCallPos(serveOnce.Body, "Execute")
 		shadowPos := firstNamedCallPos(serveOnce.Body, "dispatchShadowAfterCommit")
 		if !executePos.IsValid() || !shadowPos.IsValid() || shadowPos <= executePos {
 			t.Errorf("Proxy.serveOnce must dispatch post-commit Shadow after execute (execute=%v shadow=%v)", executePos, shadowPos)
@@ -162,21 +165,28 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			t.Errorf("fusion.go must call newTargetAttempt, not construct targetexec.Attempt: %s", describeNodes(fusionSet, got, "Attempt literal"))
 		}
 		synth := namedMethod(t, fusionFile, "Proxy", "callFusionSynthesizer")
-		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "execute") {
-			t.Error("callFusionSynthesizer must pass the attempt assigned from newTargetAttempt to targetExecutor().execute")
+		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "Execute") {
+			t.Error("callFusionSynthesizer must pass the attempt assigned from newTargetAttempt to targetexec.Executor.Execute")
+		}
+		if !executorRuntimeBoundToAttempt(synth.Body, "targetExecutor", "Execute") {
+			t.Error("callFusionSynthesizer must bind targetExecutor to the exact attempt.Runtime generation")
 		}
 	})
 
-	t.Run("attemptExecutor cannot regain Proxy scheduling reload or Web access", func(t *testing.T) {
-		f, fset := parseGoFile(t, "attempt_executor.go")
-		for name, typ := range namedStructFields(t, f, "attemptExecutor") {
-			if typeContainsIdent(typ, "Proxy") {
-				t.Errorf("attemptExecutor.%s retains forbidden Proxy dependency", name)
-			}
+	t.Run("targetexec Executor owns IO without root scheduling reload or Web access", func(t *testing.T) {
+		f, fset := parseGoFile(t, "internal/targetexec/executor.go")
+		executorFields := namedStructFields(t, f, "Executor")
+		wantFields := map[string]bool{
+			"Client": true, "State": true, "Effects": true, "Responses": true,
 		}
-		execute := namedMethod(t, f, "attemptExecutor", "execute")
+		if got := structContractViolations(executorFields, wantFields, map[string]bool{
+			"Proxy": true, "runtimeSnapshot": true, "targetPlan": true, "any": true,
+		}); len(got) != 0 {
+			t.Errorf("targetexec.Executor contract violations: %v", got)
+		}
+		execute := namedMethod(t, f, "Executor", "Execute")
 		if functionSignatureContainsIdent(execute, "Proxy") {
-			t.Error("attemptExecutor.execute must not receive *Proxy")
+			t.Error("targetexec.Executor.Execute must not receive *Proxy")
 		}
 		forbidden := map[string]bool{
 			"schedule": true, "reload": true, "snapshotRuntime": true,
@@ -186,26 +196,45 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			"shouldSample": true, "runBeforeLogDrain": true,
 		}
 		if got := forbiddenCallSites(f, fset, forbidden, nil); len(got) != 0 {
-			t.Errorf("attempt_executor.go crossed orchestration boundary: %v", got)
+			t.Errorf("internal/targetexec/executor.go crossed orchestration boundary: %v", got)
 		}
 		forbiddenTypes := map[string]bool{
-			"proxyLifecycle": true, "shadowRuntime": true, "ShadowTarget": true,
+			"Proxy": true, "proxyLifecycle": true, "shadowRuntime": true,
+			"ShadowTarget": true, "runtimeSnapshot": true, "targetPlan": true,
 		}
 		if got := forbiddenIdentifierSites(f, fset, forbiddenTypes); len(got) != 0 {
-			t.Errorf("attempt_executor.go retained forbidden owner/orchestration types: %v", got)
+			t.Errorf("internal/targetexec/executor.go retained forbidden owner/orchestration types: %v", got)
 		}
-		proxyMethods := receiverMethodNames(t, productionGoFiles(t), "Proxy")
-		targetExecutor := namedMethod(t, f, "Proxy", "targetExecutor")
-		if got := methodValueInjections(targetExecutor.Body, "attemptExecutor", "p", proxyMethods); len(got) != 0 {
-			t.Errorf("targetExecutor injects Proxy method values into attemptExecutor: %v", describeExprNodes(fset, got, "Proxy method value"))
+		allowedImports := map[string]bool{
+			"model-proxy/internal/cache":                 true,
+			"model-proxy/internal/config":                true,
+			"model-proxy/internal/protocol":              true,
+			"model-proxy/internal/transport/bodycapture": true,
+		}
+		if got := unexpectedRepositoryImports(f, allowedImports); len(got) != 0 {
+			t.Errorf("internal/targetexec/executor.go imports outside its execution leaves: %v", got)
+		}
+
+		adapter, adapterSet := parseGoFile(t, "targetexec_adapter.go")
+		factory := namedMethod(t, adapter, "Proxy", "targetExecutor")
+		adapterForbidden := map[string]bool{
+			"Do": true, "ConvertRequest": true, "ConvertResponse": true,
+			"ConvertSSE": true, "flushCopy": true, "contextOverflowRetry": true,
+			"dispatchShadowAfterCommit": true, "runShadow": true,
+		}
+		if got := forbiddenCallSites(factory.Body, adapterSet, adapterForbidden, nil); len(got) != 0 {
+			t.Errorf("targetExecutor factory contains execution/orchestration logic: %v", got)
 		}
 	})
 
 	t.Run("Fusion synthesizer delegates client delivery to target executor", func(t *testing.T) {
 		f, fset := parseGoFile(t, "fusion.go")
 		synth := namedMethod(t, f, "Proxy", "callFusionSynthesizer")
-		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "execute") {
+		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "Execute") {
 			t.Error("callFusionSynthesizer must execute the exact value returned by newTargetAttempt")
+		}
+		if !executorRuntimeBoundToAttempt(synth.Body, "targetExecutor", "Execute") {
+			t.Error("callFusionSynthesizer must execute with the same attempt.Runtime generation")
 		}
 		if got := namedCallCountInNode(synth.Body, "Do"); got != 0 {
 			t.Errorf("callFusionSynthesizer must not add a parallel client.Do pipeline: found %d call(s)", got)

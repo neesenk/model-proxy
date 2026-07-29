@@ -1,12 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
 	runtimestate "model-proxy/internal/runtime"
+	"model-proxy/internal/targetexec"
 )
 
 func (p *Proxy) takeHalfOpenSlot(name string, generations ...uint64) bool {
@@ -131,30 +131,11 @@ func (p *Proxy) learnParamBlock(provider, model, param string, generations ...ui
 // one the params aren't in) passes through unchanged.
 func (p *Proxy) applyParamBlock(provider, model string, body []byte) []byte {
 	for _, param := range p.runtimeState.ParamBlock(provider, model) {
-		if nb, did := stripTopLevelParam(body, param); did {
+		if nb, did := targetexec.StripTopLevelParam(body, param); did {
 			body = nb
 		}
 	}
 	return body
-}
-
-// stripTopLevelParam removes one top-level key from a JSON object body.
-// Best-effort: non-JSON / non-object bodies, or bodies without the key, are
-// returned unchanged with did=false.
-func stripTopLevelParam(body []byte, param string) (out []byte, did bool) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return body, false
-	}
-	if _, ok := obj[param]; !ok {
-		return body, false
-	}
-	delete(obj, param)
-	nb, err := json.Marshal(obj)
-	if err != nil {
-		return body, false
-	}
-	return nb, true
 }
 
 // recordRateLimit marks a provider rate-limited until `until` (extends if later),

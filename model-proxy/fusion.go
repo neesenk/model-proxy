@@ -177,7 +177,7 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 // finishFusion runs the synthesis leg (direct original body, or the
 // synthesis-augmented one) and records the run. The synthesis leg's
 // status/latency/tokens are read back from the live-event hub's recent ring —
-// attemptExecutor publishes that end event on commit, just before returning, so it
+// targetexec.Executor publishes that end event on commit, just before returning, so it
 // is already visible here. The run then lands in the fusion registry and the
 // ("fusion", <workflow>) metrics counters.
 func (p *Proxy) finishFusion(fc fusionCtx, run *fusionRun, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
@@ -330,7 +330,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.err = fmt.Errorf("provider %s not available", m.Provider)
 		return
 	}
-	// Circuit gate (same availability rule as attemptExecutor): skip members the
+	// Circuit gate (same availability rule as targetexec.Executor): skip members the
 	// breaker has open. record* below all clear the half-open slot; the deferred
 	// release is idempotent and covers the paths that don't record.
 	if !p.takeHalfOpenSlot(m.Provider, fc.runtime.generation) {
@@ -418,9 +418,9 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			}
 		}
 		if resp.StatusCode == http.StatusBadRequest && !strippedParam {
-			if param, found := parseUnsupportedParam(respBody); found {
+			if param, found := targetexec.ParseUnsupportedParam(respBody); found {
 				p.learnParamBlock(m.Provider, m.Model, param, fc.runtime.generation)
-				if stripped, changed := stripTopLevelParam(body, param); changed {
+				if stripped, changed := targetexec.StripTopLevelParam(body, param); changed {
 					body = stripped
 					strippedParam = true
 					log.Printf("[fusion provider=%s] 400 unsupported parameter %q — stripped, retrying",
@@ -457,7 +457,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			p.metrics.inc(m.Provider, m.Model, evFailovers) // like tryTarget: failover only, no evFailures
 		}
 		res.err = fmt.Errorf("upstream status %d after auth refresh", resp.StatusCode)
-	case resp.StatusCode == http.StatusNotFound || isModelDenied(resp.StatusCode, respBody):
+	case resp.StatusCode == http.StatusNotFound || targetexec.IsModelDenied(resp.StatusCode, respBody):
 		// Wire-verdict 404 correction (same as tryTarget): this leg was
 		// converted to /responses because the probe verdict said the endpoint
 		// supports it — a 404 here means the VERDICT was wrong, not the model.
@@ -524,14 +524,14 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 }
 
 // callFusionSynthesizer sends the (possibly synthesis-augmented) body to the
-// synthesizer model through the normal attemptExecutor path — streaming, conversion,
+// synthesizer model through the normal targetexec.Executor path — streaming, conversion,
 // auth, metrics, latency, live events, request log and cache all apply.
 func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
 	// Resolve to a runnable virtual (pooled parent → one healthy account,
 	// session-sticky so a conversation reuses one synthesizer account), same as
 	// the panel legs — otherwise a multi-account synthesizer has no impl and fails.
 	// FAIL CLOSED on resolver failure: proceeding with the unresolved (pooled
-	// parent) name would hand attemptExecutor a nil impl and fail closed.
+	// parent) name would hand targetexec.Executor a nil impl and fail closed.
 	picked, ok := newResolver(
 		p,
 		fc.runtime.providers,
@@ -595,7 +595,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		},
 		targetexec.Policy{LastTarget: true},
 	)
-	return p.targetExecutor().execute(attempt).Committed
+	return p.targetExecutor(attempt.Runtime()).Execute(attempt).Committed
 }
 
 // expandFusionResponses mirrors forward's responses-state expansion for one

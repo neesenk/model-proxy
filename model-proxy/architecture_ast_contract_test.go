@@ -625,6 +625,26 @@ func (p *Proxy) serveOnce() {
 	if assignedFactoryValueExecuted(falseGreen.Body, "newTargetAttempt", "targetExecutor", "execute") {
 		t.Error("factory-to-executor dataflow accepted unrelated factory/execute calls")
 	}
+	f, _ = parse(`type attemptValue struct{}
+func (attemptValue) Runtime() int { return 0 }
+type executorValue struct{}
+func (executorValue) Execute(attemptValue) {}
+func (p *Proxy) targetExecutor(int) executorValue { return executorValue{} }
+func (p *Proxy) bound() {
+	attempt := attemptValue{}
+	p.targetExecutor(attempt.Runtime()).Execute(attempt)
+}
+func (p *Proxy) mismatched() {
+	attempt := attemptValue{}
+	other := attemptValue{}
+	p.targetExecutor(other.Runtime()).Execute(attempt)
+}`)
+	if !executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "bound").Body, "targetExecutor", "Execute") {
+		t.Error("executor runtime binding positive control rejected the same attempt")
+	}
+	if executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "mismatched").Body, "targetExecutor", "Execute") {
+		t.Error("executor runtime binding accepted a different attempt")
+	}
 
 	f, _ = parse(`func (p *Proxy) execute() {}
 func (p *Proxy) dispatchShadowAfterCommit() {}
@@ -1209,9 +1229,9 @@ func describeExprNodes(fset *token.FileSet, nodes []ast.Expr, what string) []str
 }
 
 // assignedFactoryValueExecuted follows the direct local dataflow used by the
-// production paths: `attempt := newTargetAttempt(...)` followed by
-// `p.targetExecutor().execute(attempt)`. Merely having unrelated factory and
-// execute calls in the same function is deliberately insufficient.
+// production paths: an attempt returned by the assembly factory must be the
+// exact value passed to the executor. Merely having unrelated factory and
+// execution calls in the same function is deliberately insufficient.
 func assignedFactoryValueExecuted(n ast.Node, factory, receiverFactory, terminal string) bool {
 	produced := map[string]token.Pos{}
 	found := false
@@ -1249,6 +1269,50 @@ func assignedFactoryValueExecuted(n ast.Node, factory, receiverFactory, terminal
 		return true
 	})
 	return found
+}
+
+// executorRuntimeBoundToAttempt proves that the adapter factory is parameterized
+// by the same attempt's Runtime value that is passed to Execute:
+//
+//	p.targetExecutor(attempt.Runtime()).Execute(attempt)
+//
+// This prevents a caller from pairing one generation's typed attempt with
+// another generation's root State adapter.
+func executorRuntimeBoundToAttempt(n ast.Node, receiverFactory, terminal string) bool {
+	bound := false
+	ast.Inspect(n, func(node ast.Node) bool {
+		if bound {
+			return false
+		}
+		call, ok := node.(*ast.CallExpr)
+		if !ok || !isChainedCall(call, receiverFactory, terminal) || len(call.Args) != 1 {
+			return true
+		}
+		attempt, ok := call.Args[0].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		terminalSelector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		factoryCall, ok := terminalSelector.X.(*ast.CallExpr)
+		if !ok || len(factoryCall.Args) != 1 {
+			return true
+		}
+		runtimeCall, ok := factoryCall.Args[0].(*ast.CallExpr)
+		if !ok || len(runtimeCall.Args) != 0 {
+			return true
+		}
+		runtimeSelector, ok := runtimeCall.Fun.(*ast.SelectorExpr)
+		if !ok || runtimeSelector.Sel.Name != "Runtime" {
+			return true
+		}
+		runtimeAttempt, ok := runtimeSelector.X.(*ast.Ident)
+		bound = ok && runtimeAttempt.Name == attempt.Name
+		return !bound
+	})
+	return bound
 }
 
 func isChainedCall(call *ast.CallExpr, receiverFactory, terminal string) bool {

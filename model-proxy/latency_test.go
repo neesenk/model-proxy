@@ -38,37 +38,6 @@ func TestMetricsAddLatency(t *testing.T) {
 	}
 }
 
-// TestTimingResponseWriter: the first Write stamps firstByte; a writer that never
-// receives bytes leaves hasFirstByte false; Flush delegates so SSE still flushes.
-func TestTimingResponseWriter(t *testing.T) {
-	rec := httptest.NewRecorder()
-	tw := newTimingResponseWriter(rec)
-	if tw.hasFirstByte {
-		t.Fatal("firstByte should be unset before any Write")
-	}
-	time.Sleep(2 * time.Millisecond)
-	tw.Write([]byte("hello"))
-	if !tw.hasFirstByte {
-		t.Error("firstByte not stamped on first Write")
-	}
-	if tw.firstByte.IsZero() {
-		t.Error("firstByte is zero after Write")
-	}
-	// Subsequent writes do not move firstByte.
-	fb := tw.firstByte
-	time.Sleep(time.Millisecond)
-	tw.Write([]byte("world"))
-	if tw.firstByte != fb {
-		t.Error("firstByte moved on a later Write")
-	}
-	// Flusher delegation: the recorder implements http.Flusher (no-op), so this
-	// must not panic and the underlying writer must still be usable.
-	tw.Flush()
-	if rec.Body.String() != "helloworld" {
-		t.Errorf("body=%q want helloworld (Flush must not corrupt writes)", rec.Body.String())
-	}
-}
-
 // TestForward_RecordsLatency: a served request records a non-zero total latency
 // and TTFT against its (provider, model) in the metrics store on the hot path.
 // The upstream deliberately delays before responding so latency is measurable.

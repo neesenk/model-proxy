@@ -2,22 +2,27 @@
 
 ## 适用范围
 
-修改 `proxy_forward.go`、`proxy_health_adapter.go`、`failclass.go`、`resolve.go`、
-`health_test.go`、`model_lock_test.go` 或 cooldown/retry 行为时必读。
+修改 `proxy_forward.go`、`targetexec_adapter.go`、
+`internal/targetexec/executor.go`、`proxy_health_adapter.go`、`failclass.go`、
+`resolve.go`、`health_test.go`、`model_lock_test.go` 或 cooldown/retry 行为时必读。
 
 ## 实现入口
 
-- `Proxy.forward` / `serveOnce` / `attemptExecutor.execute`
+- `Proxy.forward` / `serveOnce` / `targetexec.Executor.Execute`
 - `proxy_health_adapter.go`：根执行层到 runtime health/cooldown/param/rate-limit
   状态端口的适配
 - `dispatch_context.go`：`runtimeSnapshot`、`serveRequest` 与
   `targetexec.Attempt` 的 snapshot 投影/唯一 assembly adapter
 - `internal/targetexec.Plan`：已解析目标的不可变 model/body/base URL/path wire
   preparation；根 `planTarget` 只做 snapshot-owned facts 的投影
-- `attempt_executor.go`：单目标 I/O 执行器及其窄状态端口 `attemptState`
+- `internal/targetexec/executor.go`：完整单目标 I/O、401/参数/图片 retry、
+  failure classification、response conversion/capture/cache pipeline
+- `targetexec_adapter.go`：captured generation/scheduling 的 `targetexec.State`
+  与 metrics/tokens/request-log/events 的 `targetexec.Effects` 根适配
 - `internal/runtime.Manager`：health、model lock、paramBlock、sticky、pin、
   spread、quota 与 schedule
-- `classify429`、`parseResetHint`、`isModelDenied`、`parseUnsupportedParam`
+- `classify429`、`parseResetHint`、`targetexec.IsModelDenied`、
+  `targetexec.ParseUnsupportedParam`
 - `cooldownState`、`hasRecoveredUntried`
 
 ## 基本路由语义
@@ -27,7 +32,7 @@
 expanded routes、models.dev catalog 与 response cache；reload 只交换新对象，
 不得原地修改快照持有的 map。`serveRequest` 是一次完整 schedule/failover pass
 的输入，`internal/targetexec.Attempt` 是单次 resolved target 的强类型执行契约。
-普通 route 与 Fusion synthesizer 均通过该契约进入 `attemptExecutor.execute`，
+普通 route 与 Fusion synthesizer 均通过该契约进入 `targetexec.Executor.Execute`，
 新增横切能力不得继续扩张 positional 参数列表或以 `any` 夹带 root owner。
 
 `targetexec.Attempt` 固定为五组：`targetexec.Runtime`
@@ -41,14 +46,15 @@ endpoint、model rewrite 或 conversion-option 逻辑。执行器必须从 typed
 Runtime 与 Plan 读取事实，禁止在 scope/log 中复制第二份 generation、嵌入完整
 `runtimeSnapshot`、使用 `any` 或重新查 Proxy。
 
-`attemptExecutor` 只允许依赖 `attemptState` 暴露的健康、参数学习和 wire
-能力，以及显式注入的 HTTP、metrics、token、request-log、Responses state 和
-events 组件。不得从执行器重新持有完整 `*Proxy`，也不得让单目标发送逻辑直接
-访问调度、reload 或 Web 状态；实现主体位于 `attempt_executor.go`，失败类别使用
-`targetexec.Outcome`；`proxy_forward.go` 只负责编排和调用。executor commit 后
-只返回含实际上游请求体的最小 `targetexec.Commit`；Shadow sampling、semaphore、
-lifecycle admission 与 dispatch 由 `serveOnce` 在 executor 外完成，Fusion
-synthesizer 丢弃该 commit 元数据，禁止递归触发 Shadow。
+`targetexec.Executor` 只允许依赖 generation-frozen `targetexec.State` 暴露的
+健康、参数学习和 wire 能力，以及 typed `Effects/Responses` 端口；不得 import
+或持有完整 `*Proxy`，也不得访问调度、reload、Web、lifecycle 或 Shadow。
+`targetexec_adapter.go` 从 `Attempt.Runtime()` 绑定 generation/scheduling，再把
+根 metrics/token/request-log/events 映射为语义 effect，不得包含 `client.Do`、
+转换、retry 或 failover pipeline。`proxy_forward.go` 只负责编排和调用。
+executor commit 后只返回含实际上游请求体的最小 `targetexec.Commit`；Shadow
+sampling、semaphore、lifecycle admission 与 dispatch 由 `serveOnce` 在
+executor 外完成，Fusion synthesizer 丢弃该 commit 元数据，禁止递归触发 Shadow。
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 
@@ -109,7 +115,7 @@ body hint 支持 `retry after N s/m/h`、`reset after 2h5m`、`Resets in 164h` �
 会记录模型锁的情况：
 
 - 任意 404；
-- 400/403 且 `isModelDenied` 保守命中；
+- 400/403 且 `targetexec.IsModelDenied` 保守命中；
 - `Content-Length: 0` 的成功响应；
 - 流式成功响应在 clean EOF、零字节且客户端仍连接时。
 

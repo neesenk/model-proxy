@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"model-proxy/internal/targetexec"
 )
 
 // postStatus is post() with the status code returned (for asserting committed
@@ -356,7 +358,7 @@ func TestParamStrip_LearnAndRetry(t *testing.T) {
 
 // TestStripTopLevelParam: unit semantics of the best-effort stripper.
 func TestStripTopLevelParam(t *testing.T) {
-	out, did := stripTopLevelParam([]byte(`{"model":"m","max_tokens":5,"messages":[]}`), "max_tokens")
+	out, did := targetexec.StripTopLevelParam([]byte(`{"model":"m","max_tokens":5,"messages":[]}`), "max_tokens")
 	if !did {
 		t.Fatal("expected did=true")
 	}
@@ -370,10 +372,10 @@ func TestStripTopLevelParam(t *testing.T) {
 	if _, ok := obj["model"]; !ok {
 		t.Error("model must be preserved")
 	}
-	if _, did := stripTopLevelParam([]byte(`{"model":"m"}`), "max_tokens"); did {
+	if _, did := targetexec.StripTopLevelParam([]byte(`{"model":"m"}`), "max_tokens"); did {
 		t.Error("absent key: did should be false")
 	}
-	if _, did := stripTopLevelParam([]byte(`not-json`), "max_tokens"); did {
+	if _, did := targetexec.StripTopLevelParam([]byte(`not-json`), "max_tokens"); did {
 		t.Error("non-JSON: did should be false")
 	}
 }

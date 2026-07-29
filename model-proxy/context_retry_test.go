@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"model-proxy/internal/targetexec"
 )
 
 // TestIsContextOverflow: the 4xx body classifier — hits the context-overflow
@@ -43,7 +45,7 @@ func TestIsContextOverflow(t *testing.T) {
 		{"empty body", 400, ``, false},
 	}
 	for _, c := range cases {
-		if got := isContextOverflow(c.status, []byte(c.body)); got != c.want {
+		if got := targetexec.IsContextOverflow(c.status, []byte(c.body)); got != c.want {
 			t.Errorf("%s: isContextOverflow(%d, body) = %v, want %v", c.name, c.status, got, c.want)
 		}
 	}
