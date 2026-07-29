@@ -22,6 +22,8 @@ implicit-route eligibility；
 `proxy_schedule_adapter.go` 只把 config route/pin 输入映射到 runtime Manager；
 `proxy_runtime_identity.go` 集中跨执行领域共享的 generation 与 pool provider
 identity 投影；
+`proxy_health_adapter.go` 只把根层 health/cooldown/param/rate-limit 输入映射到
+runtime Manager，并保留 429 后 quota refresh 编排；
 `proxy_transport.go` 集中 SSE/HTTP 流识别、复制和 ResponseWriter primitive；
 `json_model_body.go` 只处理顶层 model 的提取与改写。移动到这些文件不改变同包
 调用边界，也不允许 transport helper 反向持有 `Proxy`。

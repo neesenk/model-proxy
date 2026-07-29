@@ -2,11 +2,14 @@
 
 ## 适用范围
 
-修改 `proxy.go`、`failclass.go`、`resolve.go`、`health_test.go`、`model_lock_test.go` 或 cooldown/retry 行为时必读。
+修改 `proxy.go`、`proxy_health_adapter.go`、`failclass.go`、`resolve.go`、
+`health_test.go`、`model_lock_test.go` 或 cooldown/retry 行为时必读。
 
 ## 实现入口
 
 - `Proxy.forward` / `serveOnce` / `attemptExecutor.execute`
+- `proxy_health_adapter.go`：根执行层到 runtime health/cooldown/param/rate-limit
+  状态端口的适配
 - `dispatch_context.go`：`runtimeSnapshot`、`serveRequest`、`targetAttempt`
 - `attempt_executor.go`：单目标 I/O 执行器及其窄状态端口 `attemptState`
 - `internal/runtime.Manager`：health、model lock、paramBlock、sticky、pin、
