@@ -10,9 +10,10 @@ Web/API 保持同一部署单元，但通过显式数据结构和窄端口隔离
 共享状态袋。新增行为应进入下述模块边界，不能继续给长参数链或 Web handler
 增加内部字段访问。
 
-根包的物理布局按职责逐步收敛：`proxy.go` 保留 composition-root owner 和主
-forward/serve 路径；`proxy_shadow.go` 集中 Shadow post-commit dispatch、可热重载
-runtime、sampling 与异步执行；
+根包的物理布局按职责逐步收敛：`proxy.go` 只保留 composition-root owner；
+`proxy_forward.go` 集中主请求的 forward/serve 调度、failover 与 commit 编排；
+`proxy_shadow.go` 集中 Shadow post-commit dispatch、可热重载 runtime、sampling
+与异步执行；
 `provider_build.go` 以一次账号 snapshot 同时构建 provider、pool identity 和
 implicit-route eligibility；
 `proxy_constructor.go` 负责组件装配、状态恢复、Close 委派和 stats reset；

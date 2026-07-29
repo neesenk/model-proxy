@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `proxy.go`、`proxy_health_adapter.go`、`failclass.go`、`resolve.go`、
+修改 `proxy_forward.go`、`proxy_health_adapter.go`、`failclass.go`、`resolve.go`、
 `health_test.go`、`model_lock_test.go` 或 cooldown/retry 行为时必读。
 
 ## 实现入口
@@ -39,7 +39,8 @@ synthesizer 均通过 `targetAttempt` 进入 `attemptExecutor.execute`，新增�
 能力，以及显式注入的 HTTP、metrics、token、request-log、Responses state 和
 events 组件。不得从执行器重新持有完整 `*Proxy`，也不得让单目标发送逻辑直接
 访问调度、reload 或 Web 状态；实现主体和 `tryOutcome` 位于
-`attempt_executor.go`，`proxy.go` 只负责编排和调用。executor commit 后只返回
+`attempt_executor.go`，`proxy_forward.go` 只负责编排和调用。executor commit
+后只返回
 含实际上游请求体的最小 `attemptCommit`；Shadow sampling、semaphore、lifecycle
 admission 与 dispatch 由 `serveOnce` 在 executor 外完成，Fusion synthesizer
 丢弃该 commit 元数据，禁止递归触发 Shadow。

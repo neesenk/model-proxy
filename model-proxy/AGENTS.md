@@ -13,6 +13,8 @@
   `p.shadow`。
 - 单目标 I/O 由 `attemptExecutor` 执行；它只能通过 `attemptState` 窄端口修改
   runtime state，不得重新持有完整 `*Proxy` 或访问调度、reload、Web 职责。
+- 主请求的调度、failover、cooldown 重试与 commit 编排统一位于
+  `proxy_forward.go`；`proxy.go` 只声明 composition-root owner。
 - 三协议方向只在 `internal/protocol/conversion_registry.go` 注册；request、
   response、SSE 入口必须共享同一 pair 定义，不得各自维护方向 switch。
   `internal/protocol` 是仓库依赖叶子，不得 import `model-proxy/*`；Provider 方言、
