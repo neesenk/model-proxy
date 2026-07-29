@@ -1009,8 +1009,16 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 		}
 	} else if len(available) > 0 {
 		pick := available[0]
-		if parent, ok := firstPoolParent(available); ok {
-			band := poolBandByID(available, parent)
+		// Spread only within the already-winning pool rank. A lower-ranked pool
+		// must never leapfrog the sorted best target merely because the route
+		// contains a virtual account somewhere later in the list.
+		if parent := pick.target.Parent; parent != "" {
+			band := poolBandByID(
+				available,
+				parent,
+				pick.tier,
+				pick.target.Priority,
+			)
 			start := int(state.spread[parent] % uint64(len(band)))
 			if commit {
 				state.spread[parent]++
@@ -1039,19 +1047,17 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 	return result
 }
 
-func firstPoolParent(candidates []scheduleCandidate) (string, bool) {
-	for _, candidate := range candidates {
-		if candidate.target.Parent != "" {
-			return candidate.target.Parent, true
-		}
-	}
-	return "", false
-}
-
-func poolBandByID(candidates []scheduleCandidate, parent string) []scheduleCandidate {
+func poolBandByID(
+	candidates []scheduleCandidate,
+	parent string,
+	tier int,
+	priority int,
+) []scheduleCandidate {
 	band := make([]scheduleCandidate, 0)
 	for _, candidate := range candidates {
-		if candidate.target.Parent == parent {
+		if candidate.target.Parent == parent &&
+			candidate.tier == tier &&
+			candidate.target.Priority == priority {
 			band = append(band, candidate)
 		}
 	}

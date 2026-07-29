@@ -90,6 +90,11 @@ Proxy 状态，也不得自行持有 health/spread map。
 - 会话中不得仅因 quota surplus 边际变化迁移账号；
 - session sticky 不落盘。
 
+路由调度中的 pool spread 不能改变全局排序语义：只有排序第一名本身是池账号时
+才推进该 parent 的 spread，且只在同 tier、同 priority 的 winning rank 内轮询。
+较低排名的池不能越过更优的非池候选，池内较低 tier/priority 的账号也不能借
+spread 提前。
+
 ## 已知边界
 
 volcengine `FetchModels` 尚未按账号完全绑定；池化时 `models refresh` 复用首个虚拟凭据。探测全失败时保留合并模型集，不写空。
@@ -101,6 +106,7 @@ volcengine `FetchModels` 尚未按账号完全绑定；池化时 `models refresh
 - 空 key、空/重复/含 `#` 的账号 ID 和不完整 Volcengine AK/SK 必须拒绝。
 - legacy-only 普通 provider 保持 file-backed；static 只接受 bound plural key。
 - BoundAPIKey 不读取虚拟名字对应的不存在文件。
-- session 稳定、不同 session 分流、账号冷却 failover。
+- session 稳定、不同 session 分流、账号冷却 failover，以及 pool spread 不跨
+  winning rank。
 - Fusion panel/synthesizer 和 Shadow 的 pooled parent 解析。
 - resolver !ok 时没有任何上游请求。

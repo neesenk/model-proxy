@@ -251,6 +251,58 @@ func TestDecideOrderMarksStaleAndErroredQuotaUnknownAndAppliesPeakMultiplier(t *
 	}
 }
 
+func TestDecideOrderComparesSurplusAcrossUltimatePeriods(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 29, 18, 30, 0, 0, time.UTC)
+	m := NewManager(8)
+	weekly := scheduleQuota(provider.BillingPlan, .5, now)
+	weekly.Windows[0].Duration = 7 * 24 * time.Hour
+	weekly.Windows[0].ResetsAt = now.Add(24 * time.Hour)
+	monthly := scheduleQuota(provider.BillingPlan, .6, now)
+	monthly.Windows[0].Duration = 30 * 24 * time.Hour
+	monthly.Windows[0].ResetsAt = now.Add(15 * 24 * time.Hour)
+	setScheduleQuota(t, m, "weekly", weekly, 8)
+	setScheduleQuota(t, m, "monthly", monthly, 8)
+
+	result := m.DecideOrder(ScheduleInput{
+		Exposed: "route", Now: now, QuotaMaxAge: time.Hour,
+		Targets: []Target{{Provider: "weekly"}, {Provider: "monthly"}},
+	})
+	if !reflect.DeepEqual(result.Order, []int{0, 1}) {
+		t.Fatalf("cross-period order = %v, want weekly surplus before monthly", result.Order)
+	}
+	if got := result.Facts; got[0].Billing != provider.BillingPlan ||
+		math.Abs(got[0].Surplus-(.5-1.0/7.0)) > 1e-9 ||
+		got[1].Billing != provider.BillingPlan || math.Abs(got[1].Surplus-.1) > 1e-9 {
+		t.Fatalf("cross-period surplus facts = %+v", got)
+	}
+}
+
+func TestDecideOrderBillingOverrideBeatsFreshQuotaBilling(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 29, 18, 30, 0, 0, time.UTC)
+	m := NewManager(8)
+	setScheduleQuota(t, m, "plan", scheduleQuota(provider.BillingPlan, .5, now), 8)
+	setScheduleQuota(t, m, "override", scheduleQuota(provider.BillingPlan, .9, now), 8)
+
+	result := m.DecideOrder(ScheduleInput{
+		Exposed: "route", Now: now, QuotaMaxAge: time.Hour,
+		Targets: []Target{
+			{Provider: "plan"},
+			{Provider: "override", BillingOverride: provider.BillingPayG},
+		},
+	})
+	if !reflect.DeepEqual(result.Order, []int{0, 1}) {
+		t.Fatalf("billing override order = %v, want measured plan before pay-as-you-go", result.Order)
+	}
+	if got := result.Facts; got[0].Billing != provider.BillingPlan ||
+		got[1].Billing != provider.BillingPayG || math.Abs(got[1].Surplus-.9) > 1e-9 {
+		t.Fatalf("billing override facts = %+v", got)
+	}
+}
+
 func TestDecideOrderPoolSpreadCommitAndGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -291,6 +343,61 @@ func TestDecideOrderPoolSpreadCommitAndGeneration(t *testing.T) {
 		!reflect.DeepEqual(stale2.Order, stale1.Order) {
 		t.Fatalf("stale generation advanced spread: %v then %v", stale1.Order, stale2.Order)
 	}
+}
+
+func TestDecideOrderPoolSpreadStaysWithinWinningRank(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 29, 18, 15, 0, 0, time.UTC)
+	t.Run("lower-ranked pool cannot leapfrog non-pool winner", func(t *testing.T) {
+		t.Parallel()
+		m := NewManager(12)
+		setScheduleQuota(t, m, "plan", scheduleQuota(provider.BillingPlan, .2, now), 12)
+		setScheduleQuota(t, m, "pool#a", scheduleQuota(provider.BillingPlan, .9, now), 12)
+
+		result := m.DecideOrder(ScheduleInput{
+			Exposed: "route", Now: now, QuotaMaxAge: time.Hour,
+			Commit: true, Generation: 12,
+			Targets: []Target{
+				{
+					Provider:        "pool#a",
+					Parent:          "pool",
+					Priority:        1,
+					BillingOverride: provider.BillingPayG,
+				},
+				{Provider: "plan", Priority: 9},
+			},
+		})
+		if !reflect.DeepEqual(result.Order, []int{1, 0}) {
+			t.Fatalf("mixed pool order = %v, want measured plan before payg pool", result.Order)
+		}
+		if got := m.Dashboard(now).spread["pool"]; got != 0 {
+			t.Fatalf("losing pool advanced spread=%d, want 0", got)
+		}
+	})
+
+	t.Run("pool rotation excludes lower tier and priority siblings", func(t *testing.T) {
+		t.Parallel()
+		m := NewManager(13)
+		setScheduleQuota(t, m, "pool#a", scheduleQuota(provider.BillingPlan, .3, now), 13)
+		setScheduleQuota(t, m, "pool#c", scheduleQuota(provider.BillingPlan, .8, now), 13)
+
+		input := ScheduleInput{
+			Exposed: "route", Now: now, QuotaMaxAge: time.Hour,
+			Commit: true, Generation: 13,
+			Targets: []Target{
+				{Provider: "pool#b", Parent: "pool", Priority: 1}, // unknown tier
+				{Provider: "pool#c", Parent: "pool", Priority: 2}, // lower priority
+				{Provider: "pool#a", Parent: "pool", Priority: 1}, // winning band
+			},
+		}
+		first := m.DecideOrder(input)
+		second := m.DecideOrder(input)
+		if !reflect.DeepEqual(first.Order, []int{2, 1, 0}) ||
+			!reflect.DeepEqual(second.Order, first.Order) {
+			t.Fatalf("rank-limited pool spread = first %v second %v, want stable [2 1 0]", first.Order, second.Order)
+		}
+	})
 }
 
 func TestDecideOrderEvictsOnlyCommittedCurrentStaleSticky(t *testing.T) {

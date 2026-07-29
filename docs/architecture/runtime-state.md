@@ -158,6 +158,9 @@ tierRank → priority asc → surplus desc
 - priority 高于 surplus。
 - 相同 priority 允许多个目标组成 surplus 竞争池。
 - peak multiplier 只作用于 Short 窗口折算。
+- pool spread 只在排序第一名本身属于池时启用，且轮询范围仅限同一 parent、
+  同一 tier、同一 priority 的 winning rank；路由中较后的池不得越过更优的非池
+  候选，池内较低 tier/priority 的账号也不得被轮询到 winning rank 前。
 
 `Manager.DecideOrder` 在同一锁内从权威 quota snapshot 投影 billing/surplus，
 并读取 pin、health、model lock、sticky 和 spread；根包只传 provider/model/
@@ -200,7 +203,7 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 
 ## 回归测试
 
-- tier/priority/surplus 排序和 sticky margin。
+- tier/priority/surplus 排序、pool spread 不跨 winning rank，以及 sticky margin。
 - Manager 的 generation 替换、stale mutation 丢弃、quota 深拷贝、schedule
   commit gate、单锁 quota+health+pin+sticky+spread 决策、PreviewOrder parity、
   atomic persist/dashboard snapshot 与 detached map/slice。
