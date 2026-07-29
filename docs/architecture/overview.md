@@ -264,7 +264,7 @@ composition root → internal/config → internal/pricing / internal/protocol
 - Fusion、Shadow、Cache 与观测：`fusion-shadow-cache.md`
 - Web/API：`../web-api.md`
 
-架构边界的静态回归位于 `architecture_contract_test.go`（基于 go/ast 检查
+架构边界的静态回归位于 `architecture_*_contract_test.go` 套件（基于 go/ast 检查
 `webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector、
 账号测活的单次 runtime snapshot、internal 叶子包 import（含 accounts/catalog）、
 `internal/observe/events`、`internal/cache` 与各自根 adapter 的职责、
