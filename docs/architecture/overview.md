@@ -110,6 +110,12 @@ schedule 决策以及 persistence/Web detached snapshot。该包只依赖 `provi
 root 编排。`quotaTracker` 只执行轮询、refresh 去重和文件写入，不再拥有第二份
 quota 状态。
 
+Manager 的物理文件按职责拆分，但不形成多 owner：`manager.go` 只定义 owner、
+单锁与 generation；`manager_types.go` 放边界 DTO；`manager_persist.go`、
+`manager_quota.go`、`manager_routing_state.go`、`manager_health.go`、
+`manager_schedule.go` 分别承载持久化投影、配额、路由选择状态、健康状态和调度。
+新增可变 map 或锁必须仍回到 `Manager`，不得因文件拆分建立子状态仓库。
+
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
