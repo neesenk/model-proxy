@@ -1,0 +1,461 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type commandFake struct {
+	mu sync.Mutex
+
+	resetStats  func() error
+	refresh     func(string) bool
+	resetHealth func(string) ([]string, int, error)
+	setPin      func(string, string, time.Duration) (Pin, bool)
+	clearPin    func(string) bool
+	save        func([]byte) error
+	edit        func(EditRequest) error
+	add         func(context.Context, string, AccountInput) (MutationResult, error)
+	probe       func(context.Context, string, string) (ProbeResult, error)
+	remove      func(string, string) (MutationResult, error)
+	begin       func(context.Context, string) (LoginStart, error)
+}
+
+func (fake *commandFake) ResetStats() error {
+	if fake.resetStats != nil {
+		return fake.resetStats()
+	}
+	return nil
+}
+
+func (fake *commandFake) RefreshQuota(provider string) bool {
+	if fake.refresh != nil {
+		return fake.refresh(provider)
+	}
+	return true
+}
+
+func (fake *commandFake) ResetHealth(provider string) ([]string, int, error) {
+	if fake.resetHealth != nil {
+		return fake.resetHealth(provider)
+	}
+	return nil, 0, nil
+}
+
+func (fake *commandFake) SetPin(route, provider string, ttl time.Duration) (Pin, bool) {
+	if fake.setPin != nil {
+		return fake.setPin(route, provider, ttl)
+	}
+	return Pin{}, true
+}
+
+func (fake *commandFake) ClearPin(route string) bool {
+	if fake.clearPin != nil {
+		return fake.clearPin(route)
+	}
+	return true
+}
+
+func (fake *commandFake) SaveConfig(contents []byte) error {
+	if fake.save != nil {
+		return fake.save(contents)
+	}
+	return nil
+}
+
+func (fake *commandFake) EditConfig(req EditRequest) error {
+	if fake.edit != nil {
+		return fake.edit(req)
+	}
+	return nil
+}
+
+func (fake *commandFake) AddAccount(ctx context.Context, provider string, input AccountInput) (MutationResult, error) {
+	if fake.add != nil {
+		return fake.add(ctx, provider, input)
+	}
+	return MutationResult{}, nil
+}
+
+func (fake *commandFake) ProbeAccount(ctx context.Context, provider, id string) (ProbeResult, error) {
+	if fake.probe != nil {
+		return fake.probe(ctx, provider, id)
+	}
+	return ProbeResult{}, nil
+}
+
+func (fake *commandFake) RemoveAccount(provider, id string) (MutationResult, error) {
+	if fake.remove != nil {
+		return fake.remove(provider, id)
+	}
+	return MutationResult{}, nil
+}
+
+func (fake *commandFake) BeginLogin(ctx context.Context, provider string) (LoginStart, error) {
+	if fake.begin != nil {
+		return fake.begin(ctx, provider)
+	}
+	return LoginStart{}, nil
+}
+
+func newCommandTestServer(t *testing.T, commands *commandFake) *Server {
+	t.Helper()
+	server, err := New(Options{Reads: testReadAPI{}, Commands: commands})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+	return server
+}
+
+func commandRequest(server *Server, method, path, body string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	server.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func commandJSON(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	if got := recorder.Header().Get("content-type"); got != "application/json" {
+		t.Fatalf("content-type=%q want application/json", got)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode JSON %q: %v", recorder.Body.String(), err)
+	}
+	return body
+}
+
+func requireCommandResponse(t *testing.T, recorder *httptest.ResponseRecorder, status int, want map[string]any) {
+	t.Helper()
+	if recorder.Code != status {
+		t.Fatalf("status=%d want %d body=%s", recorder.Code, status, recorder.Body.String())
+	}
+	got := commandJSON(t, recorder)
+	if len(got) != len(want) {
+		t.Fatalf("body=%v want exactly %v", got, want)
+	}
+	for key, value := range want {
+		if !reflect.DeepEqual(got[key], value) {
+			t.Fatalf("body[%q]=%#v want %#v; body=%v", key, got[key], value, got)
+		}
+	}
+}
+
+func TestCommandTokensResetContract(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		calls := 0
+		server := newCommandTestServer(t, &commandFake{resetStats: func() error {
+			calls++
+			return nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/tokens/reset", ""), http.StatusOK, map[string]any{"status": "reset"})
+		if calls != 1 {
+			t.Fatalf("ResetStats calls=%d want 1", calls)
+		}
+	})
+	t.Run("error", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{resetStats: func() error { return errors.New("sqlite unavailable") }})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/tokens/reset", ""), http.StatusInternalServerError, map[string]any{"error": "sqlite unavailable"})
+	})
+}
+
+func TestCommandQuotaRefreshContract(t *testing.T) {
+	var providers []string
+	server := newCommandTestServer(t, &commandFake{refresh: func(provider string) bool {
+		providers = append(providers, provider)
+		return provider != "missing"
+	}})
+	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", ""), http.StatusOK, map[string]any{"status": "refreshed"})
+	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"aqp#one"}`), http.StatusOK, map[string]any{"status": "refreshed", "provider": "aqp#one"})
+	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"missing"}`), http.StatusNotFound, map[string]any{"error": "unknown provider: missing"})
+	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", "not-json"), http.StatusOK, map[string]any{"status": "refreshed"})
+	if got, want := strings.Join(providers, ","), ",aqp#one,missing,"; got != want {
+		t.Fatalf("RefreshQuota providers=%q want %q", got, want)
+	}
+}
+
+func TestCommandHealthResetContract(t *testing.T) {
+	t.Run("empty body targets all", func(t *testing.T) {
+		var provider string
+		server := newCommandTestServer(t, &commandFake{resetHealth: func(got string) ([]string, int, error) {
+			provider = got
+			return []string{"aqp", "codex"}, 2, nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/health/reset", ""), http.StatusOK, map[string]any{"cleared": []any{"aqp", "codex"}, "model_locks_cleared": float64(2)})
+		if provider != "" {
+			t.Fatalf("ResetHealth provider=%q want all target empty string", provider)
+		}
+	})
+	t.Run("malformed body", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{})
+		recorder := commandRequest(server, http.MethodPost, "/api/health/reset", "{")
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		if errorText := commandJSON(t, recorder)["error"]; !strings.HasPrefix(errorText.(string), "malformed JSON body: ") {
+			t.Fatalf("error=%q missing malformed prefix", errorText)
+		}
+	})
+	t.Run("persist error preserves the stable prefix", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{resetHealth: func(string) ([]string, int, error) {
+			return nil, 0, errors.New("write state")
+		}})
+		recorder := commandRequest(server, http.MethodPost, "/api/health/reset", `{"provider":"aqp"}`)
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		if got, want := commandJSON(t, recorder)["error"], "state cleared in memory but persist failed: write state"; got != want {
+			t.Fatalf("error=%q want %q", got, want)
+		}
+	})
+}
+
+func TestCommandPinContract(t *testing.T) {
+	t.Run("set applies TTL and returns normalized expiry", func(t *testing.T) {
+		var route, provider string
+		var ttl time.Duration
+		expires := time.Date(2026, time.July, 29, 3, 4, 5, 0, time.FixedZone("test", -7*60*60))
+		server := newCommandTestServer(t, &commandFake{setPin: func(gotRoute, gotProvider string, gotTTL time.Duration) (Pin, bool) {
+			route, provider, ttl = gotRoute, gotProvider, gotTTL
+			if gotRoute == "permanent" {
+				return Pin{}, true
+			}
+			return Pin{ExpiresAt: expires}, true
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/pin", `{"route":"fast","provider":"aqp","ttl_seconds":90}`), http.StatusOK, map[string]any{"route": "fast", "provider": "aqp", "expires_at": "2026-07-29T10:04:05Z", "status": "pinned"})
+		if route != "fast" || provider != "aqp" || ttl != 90*time.Second {
+			t.Fatalf("SetPin args=(%q,%q,%s) want (fast,aqp,1m30s)", route, provider, ttl)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/pin", `{"route":"permanent","provider":"aqp"}`), http.StatusOK, map[string]any{"route": "permanent", "provider": "aqp", "expires_at": "", "status": "pinned"})
+		if ttl != 0 {
+			t.Fatalf("SetPin default TTL=%s want 0", ttl)
+		}
+	})
+	t.Run("validation and unavailable target", func(t *testing.T) {
+		calls := 0
+		server := newCommandTestServer(t, &commandFake{setPin: func(string, string, time.Duration) (Pin, bool) {
+			calls++
+			return Pin{}, false
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/pin", "{"), http.StatusBadRequest, map[string]any{"error": "parse pin body: unexpected EOF"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/pin", `{"route":""}`), http.StatusBadRequest, map[string]any{"error": "route and provider are required"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/pin", `{"route":"fast","provider":"missing","ttl_seconds":-1}`), http.StatusBadRequest, map[string]any{"error": "cannot pin \"fast\" to \"missing\": no such route, or the route has no target for that provider"})
+		if calls != 1 {
+			t.Fatalf("SetPin calls=%d want 1", calls)
+		}
+	})
+	t.Run("clear requires route and returns exact removal result", func(t *testing.T) {
+		var routes []string
+		server := newCommandTestServer(t, &commandFake{clearPin: func(route string) bool {
+			routes = append(routes, route)
+			return route == "fast"
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/pin", ""), http.StatusBadRequest, map[string]any{"error": "route query param is required"})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/pin?route=fast", ""), http.StatusOK, map[string]any{"route": "fast", "removed": true})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/pin?route=gone", ""), http.StatusOK, map[string]any{"route": "gone", "removed": false})
+		if got, want := strings.Join(routes, ","), "fast,gone"; got != want {
+			t.Fatalf("ClearPin routes=%q want %q", got, want)
+		}
+	})
+}
+
+func TestCommandConfigContract(t *testing.T) {
+	t.Run("put success parse and application errors", func(t *testing.T) {
+		var saved []byte
+		server := newCommandTestServer(t, &commandFake{save: func(contents []byte) error {
+			saved = append([]byte(nil), contents...)
+			if string(contents) == "bad: [" {
+				return NewHTTPError(http.StatusUnprocessableEntity, "invalid YAML")
+			}
+			return nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config", `{"yaml":"routes: []\n"}`), http.StatusOK, map[string]any{"status": "reloaded"})
+		if got, want := string(saved), "routes: []\n"; got != want {
+			t.Fatalf("SaveConfig body=%q want %q", got, want)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config", "{"), http.StatusBadRequest, map[string]any{"error": "invalid JSON body: unexpected EOF"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config", `{"yaml":"bad: ["}`), http.StatusUnprocessableEntity, map[string]any{"error": "invalid YAML"})
+	})
+	t.Run("edit validates kind and sends exact structured request", func(t *testing.T) {
+		var got EditRequest
+		server := newCommandTestServer(t, &commandFake{edit: func(request EditRequest) error {
+			got = request
+			if request.Name == "broken" {
+				return errors.New("reload failed")
+			}
+			return nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/edit", "{"), http.StatusBadRequest, map[string]any{"error": "unexpected EOF"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/edit", `{"kind":"nope"}`), http.StatusBadRequest, map[string]any{"error": "unknown edit kind: nope"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/edit", `{"kind":"route","name":"fast","data":{"model":"gpt"}}`), http.StatusOK, map[string]any{"status": "reloaded"})
+		if got.Kind != "route" || got.Name != "fast" || len(got.Data) != 1 || got.Data["model"] != "gpt" {
+			t.Fatalf("EditConfig request=%#v", got)
+		}
+		for _, kind := range []string{"general", "scheduling", "provider", "claude_mapping"} {
+			requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/edit", `{"kind":"`+kind+`"}`), http.StatusOK, map[string]any{"status": "reloaded"})
+			if got.Kind != kind {
+				t.Fatalf("EditConfig kind=%q want %q", got.Kind, kind)
+			}
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/edit", `{"kind":"general","name":"broken"}`), http.StatusBadRequest, map[string]any{"error": "reload failed"})
+	})
+}
+
+func TestCommandAccountContract(t *testing.T) {
+	t.Run("add routing input context and errors", func(t *testing.T) {
+		var provider string
+		var input AccountInput
+		var contextValue any
+		calls := 0
+		server := newCommandTestServer(t, &commandFake{add: func(ctx context.Context, gotProvider string, gotInput AccountInput) (MutationResult, error) {
+			calls++
+			provider, input, contextValue = gotProvider, gotInput, ctx.Value("request")
+			if gotProvider == "fail" {
+				return MutationResult{}, NewHTTPError(http.StatusConflict, "already exists")
+			}
+			return MutationResult{ID: "acct-1", Warning: "reload deferred"}, nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/", `{}`), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/extra", `{}`), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/", `{}`), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp///", `{}`), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>"})
+		if calls != 0 {
+			t.Fatalf("AddAccount calls=%d want no malformed-path mutation", calls)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp", "{"), http.StatusBadRequest, map[string]any{"error": "unexpected EOF"})
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/accounts/aqp", strings.NewReader(`{"api_key":"secret","label":"one","replace":true}`)).WithContext(context.WithValue(context.Background(), "request", "add-context"))
+		server.ServeHTTP(recorder, request)
+		requireCommandResponse(t, recorder, http.StatusOK, map[string]any{"id": "acct-1", "status": "added", "warning": "reload deferred"})
+		if provider != "aqp" || input.APIKey != "secret" || input.Label != "one" || !input.Replace || contextValue != "add-context" {
+			t.Fatalf("AddAccount args provider=%q input=%#v context=%v", provider, input, contextValue)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/fail", `{}`), http.StatusConflict, map[string]any{"error": "already exists"})
+	})
+	t.Run("test routing presentation context and errors", func(t *testing.T) {
+		var provider, id string
+		var contextValue any
+		server := newCommandTestServer(t, &commandFake{probe: func(ctx context.Context, gotProvider, gotID string) (ProbeResult, error) {
+			provider, id, contextValue = gotProvider, gotID, ctx.Value("request")
+			if gotID == "missing" {
+				return ProbeResult{}, NewHTTPError(http.StatusGone, "deleted")
+			}
+			if gotID == "failed" {
+				return ProbeResult{OK: false, HTTPStatus: 429, Reason: "rate limited", Provider: gotProvider, AccountID: gotID, Model: "m", Latency: 1750 * time.Millisecond}, nil
+			}
+			return ProbeResult{OK: true, HTTPStatus: 200, Provider: gotProvider, AccountID: gotID, Model: "m", Latency: 3 * time.Millisecond}, nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/test", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>/<id>/test"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/failed/test", ""), http.StatusOK, map[string]any{"status": "failed", "reason": "rate limited", "http_status": float64(429), "latency_ms": float64(1750), "provider": "aqp", "account_id": "failed", "model": "m"})
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/accounts/aqp/one/test", nil).WithContext(context.WithValue(context.Background(), "request", "probe-context"))
+		server.ServeHTTP(recorder, request)
+		requireCommandResponse(t, recorder, http.StatusOK, map[string]any{"status": "ok", "http_status": float64(200), "latency_ms": float64(3), "provider": "aqp", "account_id": "one", "model": "m"})
+		if provider != "aqp" || id != "one" || contextValue != "probe-context" {
+			t.Fatalf("ProbeAccount args=(%q,%q,%v)", provider, id, contextValue)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/missing/test", ""), http.StatusGone, map[string]any{"error": "deleted"})
+	})
+	t.Run("remove routing and errors", func(t *testing.T) {
+		var provider, id string
+		server := newCommandTestServer(t, &commandFake{remove: func(gotProvider, gotID string) (MutationResult, error) {
+			provider, id = gotProvider, gotID
+			if gotID == "fail" {
+				return MutationResult{}, errors.New("cannot remove")
+			}
+			return MutationResult{Warning: "reload deferred"}, nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>/<id>"})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp/one", ""), http.StatusOK, map[string]any{"status": "removed", "warning": "reload deferred"})
+		if provider != "aqp" || id != "one" {
+			t.Fatalf("RemoveAccount args=(%q,%q)", provider, id)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp/fail", ""), http.StatusBadRequest, map[string]any{"error": "cannot remove"})
+	})
+}
+
+type loginJobFunc func(context.Context) LoginUpdate
+
+func (job loginJobFunc) Run(ctx context.Context) LoginUpdate { return job(ctx) }
+
+func TestCommandLoginContract(t *testing.T) {
+	t.Run("start session then poll pending and complete", func(t *testing.T) {
+		started := make(chan struct{})
+		release := make(chan struct{})
+		finished := make(chan struct{})
+		server := newCommandTestServer(t, &commandFake{begin: func(ctx context.Context, provider string) (LoginStart, error) {
+			if provider != "aqp" || ctx == nil {
+				t.Fatalf("BeginLogin provider=%q context=%v", provider, ctx)
+			}
+			return LoginStart{Provider: "aqp", LoginURL: "https://login.example", Job: loginJobFunc(func(context.Context) LoginUpdate {
+				close(started)
+				<-release
+				update := LoginUpdate{State: "done", Detail: "saved", Result: "acct-1", Warning: "reload deferred"}
+				close(finished)
+				return update
+			})}, nil
+		}})
+		start := commandRequest(server, http.MethodPost, "/api/login/aqp/start", "")
+		if start.Code != http.StatusOK {
+			t.Fatalf("start status=%d body=%s", start.Code, start.Body.String())
+		}
+		body := commandJSON(t, start)
+		if len(body) != 2 || body["login_url"] != "https://login.example" {
+			t.Fatalf("start body=%v", body)
+		}
+		id, ok := body["session_id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("session_id=%#v", body["session_id"])
+		}
+		<-started
+		requireCommandResponse(t, commandRequest(server, http.MethodGet, "/api/login/"+id+"/poll", ""), http.StatusOK, map[string]any{"state": "pending", "detail": "https://login.example", "result": "", "warning": ""})
+		close(release)
+		<-finished
+		server.Close()
+		requireCommandResponse(t, commandRequest(server, http.MethodGet, "/api/login/"+id+"/poll", ""), http.StatusOK, map[string]any{"state": "done", "detail": "saved", "result": "acct-1", "warning": "reload deferred"})
+	})
+	t.Run("device flow, rejected start, nil job, unknown poll", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{begin: func(_ context.Context, provider string) (LoginStart, error) {
+			switch provider {
+			case "codex":
+				return LoginStart{Provider: "codex", VerifyURL: "https://verify.example", UserCode: "ABCD", Job: loginJobFunc(func(context.Context) LoginUpdate { return LoginUpdate{State: "done"} })}, nil
+			case "bad":
+				return LoginStart{}, NewHTTPError(http.StatusUnauthorized, "login unavailable")
+			case "nil":
+				return LoginStart{Provider: "nil"}, nil
+			default:
+				t.Fatalf("unexpected provider %q", provider)
+				return LoginStart{}, nil
+			}
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/login//start", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/login/<provider>/start"})
+		start := commandRequest(server, http.MethodPost, "/api/login/codex/start", "")
+		if start.Code != http.StatusOK {
+			t.Fatalf("device start status=%d body=%s", start.Code, start.Body.String())
+		}
+		body := commandJSON(t, start)
+		if len(body) != 3 || body["verify_url"] != "https://verify.example" || body["user_code"] != "ABCD" || body["session_id"] == "" {
+			t.Fatalf("device start body=%v", body)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/login/bad/start", ""), http.StatusUnauthorized, map[string]any{"error": "login unavailable"})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/login/nil/start", ""), http.StatusInternalServerError, map[string]any{"error": "login flow returned no job"})
+		requireCommandResponse(t, commandRequest(server, http.MethodGet, "/api/login/unknown/poll", ""), http.StatusNotFound, map[string]any{"error": "unknown or expired session"})
+	})
+	t.Run("shutdown rejects a new job and records terminal error", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{begin: func(context.Context, string) (LoginStart, error) {
+			return LoginStart{Provider: "aqp", LoginURL: "https://login.example", Job: completedLogin{}}, nil
+		}})
+		server.Close()
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/login/aqp/start", ""), http.StatusServiceUnavailable, map[string]any{"error": "server is shutting down"})
+	})
+}

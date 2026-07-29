@@ -44,8 +44,11 @@
   `internal/shadow.Runtime`。根 `proxy_shadow.go` 只拥有 commit 后 eligibility、
   `proxyLifecycle` admission、generation-bound resolver/plan 和 request-log
   投影；Shadow 禁止进入 target executor 或写生产 health/metrics/events。
-- Web/API handler 只能通过 `proxyReadView` 读取运行时；不得直接获取 Proxy 锁或
-  读取 config/provider/health/model-lock 内部 map。
+- HTTP/UI transport 统一归 `internal/web`，只能消费其 consumer-owned `ReadAPI` /
+  `CommandAPI`；不得 import 或持有 `*Proxy`，也不得直接获取 Proxy 锁或读取
+  config/provider/health/model-lock 内部 map。根 `proxy_web_api.go` 只把
+  `proxyReadView` / `proxyAdminCommands` 映射为这些端口；`web_adapter.go` 只负责
+  composition 与 mux 挂载。
 - Proxy 级后台任务必须由 `proxyLifecycle` 接纳，daemon 只调用
   `startRuntimeServices`/`Proxy.Close`；会写 request log 的有限任务必须在 logger
   drain 前完成，禁止分散启动 goroutine 或重复 final flush。

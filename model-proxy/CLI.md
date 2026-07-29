@@ -711,7 +711,7 @@ pin [<route> <provider>] [--ttl DUR] [--config PATH]
 unpin <route> [--config PATH]
 ```
 
-逻辑（`pin_cmd.go`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin`（`web.go` `handlePinSet`）写入 daemon 的 `internal/runtime.Manager`；`Manager.DecideOrder` 在 availability 过滤前对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）；operator pin 有意跨 config reload 保留。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
+逻辑（`pin_cmd.go`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin` 由 `internal/web` transport 的 `CommandAPI` 写入 daemon 的 `internal/runtime.Manager`；`Manager.DecideOrder` 在 availability 过滤前对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）；operator pin 有意跨 config reload 保留。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
 
 ### stdout
 
@@ -758,7 +758,7 @@ replay <id> --to <provider> [--config PATH]
 unfreeze [provider] [--config PATH]
 ```
 
-逻辑（`unfreeze_cmd.go` `cmdUnfreeze`）：经 `POST /api/health/reset`（`web.go` `handleHealthReset`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
+逻辑（`unfreeze_cmd.go` `cmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
 
 ### stdout
 

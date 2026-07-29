@@ -97,6 +97,12 @@ Provider 的 `Usage`、`Quota`、fetch/parse、认证和显示格式测试直接
 `provider/*_test.go`；根包只验证 YAML/账号池/build dispatch/CLI 输出等组合行为，
 不得在 `_test.go` 重建已删除的 `show*Usage` / `fetch*Quota` 兼容函数后重复测试。
 
+Web transport 的 HTTP routing、JSON presentation、asset serving、login session
+store 和 task owner 测试归 `internal/web/*_test.go`；根包只保留真实应用
+`ReadAPI` / `CommandAPI` 适配、mux composition 及 Web 与 daemon/Proxy lifecycle
+的集成行为。测试通过端口和 HTTP 结果断言，不得让 `internal/web` import root 或为
+读取 session/task 内部状态恢复 root-private hook。
+
 精确响应缓存的 key/store/recorder/header/replay 单测归
 `internal/cache/*_test.go`；根包保留 force/pin bypass、协议转换后的
 客户端字节、client cancel、reload generation、live event 与 Web status 集成
@@ -166,7 +172,7 @@ forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通�
 
 | 改动 | 追加验证 |
 |---|---|
-| Web JS | `node --check web_assets/app.js` |
+| Web JS | `node --check internal/web/assets/app.js` |
 | 并发、reload、持久化 | 定向 `go test -race -run ... -count=20` |
 | build tags/平台代码 | Linux + Windows cross build |
 | CLI 显示 | `CLI.md` 对应 stdout/stderr/exit code 测试 |

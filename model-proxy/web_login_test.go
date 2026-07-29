@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -48,7 +50,7 @@ func TestAqpLoginFlow(t *testing.T) {
 	w.newAqpClientFn = func(store string) *AqpClient { return newAqpClientWithBase(store, up.URL) }
 
 	rec := httptest.NewRecorder()
-	w.handleLoginStart(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
+	w.serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
 	if rec.Code != 200 {
 		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -66,41 +68,26 @@ func TestAqpLoginFlow(t *testing.T) {
 		t.Errorf("login_url=%q want https://soup.shopee.io/login", start.LoginURL)
 	}
 
-	// Poll until done (the goroutine resolves quickly against the mock).
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		rec2 := httptest.NewRecorder()
-		w.handleLoginPoll(rec2, httptest.NewRequest("GET", "/api/login/"+start.SessionID+"/poll", nil))
-		var st struct {
-			State  string `json:"state"`
-			Result string `json:"result"`
-		}
-		json.Unmarshal(rec2.Body.Bytes(), &st)
-		if st.State == "done" {
-			if st.Result != "u@x.com" {
-				t.Errorf("poll result=%q want u@x.com", st.Result)
-			}
-			a, _ := provider.LoadAqpAccount(authFilePath("aqp", "oauth_auth"))
-			if a == nil {
-				t.Fatal("aqp account file not written")
-			}
-			if a.Email != "u@x.com" {
-				t.Errorf("persisted email=%q want u@x.com", a.Email)
-			}
-			if a.ProjectID != "proj" {
-				t.Errorf("persisted project_id=%q want proj", a.ProjectID)
-			}
-			if a.SSOSessionCookie == "" {
-				t.Error("persisted sso_session_cookie is empty")
-			}
-			return
-		}
-		if st.State == "error" {
-			t.Fatalf("poll errored: %s", rec2.Body.String())
-		}
-		time.Sleep(50 * time.Millisecond)
+	state := waitForLoginDone(t, w, start.SessionID)
+	if state.Result != "u@x.com" {
+		t.Errorf("poll result=%q want u@x.com", state.Result)
 	}
-	t.Fatal("aqp login never completed")
+	account, err := provider.LoadAqpAccount(authFilePath("aqp", "oauth_auth"))
+	if err != nil {
+		t.Fatalf("load persisted AQP account: %v", err)
+	}
+	if account == nil {
+		t.Fatal("aqp account file not written")
+	}
+	if account.Email != "u@x.com" {
+		t.Errorf("persisted email=%q want u@x.com", account.Email)
+	}
+	if account.ProjectID != "proj" {
+		t.Errorf("persisted project_id=%q want proj", account.ProjectID)
+	}
+	if account.SSOSessionCookie == "" {
+		t.Error("persisted sso_session_cookie is empty")
+	}
 }
 
 // TestAqpLoginFlow_Error asserts the goroutine sets state="error" when the
@@ -122,7 +109,7 @@ func TestAqpLoginFlow_Error(t *testing.T) {
 	w.newAqpClientFn = func(store string) *AqpClient { return newAqpClientWithBase(store, up.URL) }
 
 	rec := httptest.NewRecorder()
-	w.handleLoginStart(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
+	w.serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("start status=%d want 502 body=%s", rec.Code, rec.Body.String())
 	}
@@ -218,7 +205,7 @@ func TestCodexLoginFlow(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	w.handleLoginStart(rec, httptest.NewRequest("POST", "/api/login/codex/start", nil))
+	w.serve(rec, httptest.NewRequest("POST", "/api/login/codex/start", nil))
 	if rec.Code != 200 {
 		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -240,37 +227,65 @@ func TestCodexLoginFlow(t *testing.T) {
 		t.Fatal("session_id empty")
 	}
 
-	// Poll until done (the goroutine resolves quickly against the mock).
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		rec2 := httptest.NewRecorder()
-		w.handleLoginPoll(rec2, httptest.NewRequest("GET", "/api/login/"+start.SessionID+"/poll", nil))
-		var st struct {
-			State  string `json:"state"`
-			Result string `json:"result"`
-		}
-		json.Unmarshal(rec2.Body.Bytes(), &st)
-		if st.State == "done" {
-			if st.Result != "acct-1" {
-				t.Errorf("poll result=%q want acct-1", st.Result)
-			}
-			// codex auth file must exist (written 0600 by the goroutine).
-			path := authFilePath("codex", "oauth_auth")
-			info, err := os.Stat(path)
-			if err != nil {
-				t.Fatalf("codex auth file not written: %v", err)
-			}
-			if perm := info.Mode().Perm(); perm != 0o600 {
-				t.Errorf("codex auth file perm=%o want 0600", perm)
-			}
-			return
-		}
-		if st.State == "error" {
-			t.Fatalf("poll errored: %s", rec2.Body.String())
-		}
-		time.Sleep(50 * time.Millisecond)
+	state := waitForLoginDone(t, w, start.SessionID)
+	if state.Result != "acct-1" {
+		t.Errorf("poll result=%q want acct-1", state.Result)
 	}
-	t.Fatal("codex login never completed")
+	// codex auth file must exist (written 0600 by the goroutine).
+	path := authFilePath("codex", "oauth_auth")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("codex auth file not written: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("codex auth file perm=%o want 0600", perm)
+	}
+}
+
+type loginPollState struct {
+	State   string `json:"state"`
+	Detail  string `json:"detail"`
+	Result  string `json:"result"`
+	Warning string `json:"warning"`
+}
+
+func waitForLoginDone(t *testing.T, server *webServer, sessionID string) loginPollState {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		recorder := httptest.NewRecorder()
+		server.serve(
+			recorder,
+			httptest.NewRequest(http.MethodGet, "/api/login/"+sessionID+"/poll", nil),
+		)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf(
+				"login poll status=%d want 200 body=%s",
+				recorder.Code,
+				recorder.Body.String(),
+			)
+		}
+		var state loginPollState
+		if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
+			t.Fatalf("decode login poll response: %v: %s", err, recorder.Body.String())
+		}
+		switch state.State {
+		case "done":
+			return state
+		case "error":
+			t.Fatalf("login poll errored: %s", recorder.Body.String())
+		case "pending":
+		default:
+			t.Fatalf("login poll returned invalid state %q: %s", state.State, recorder.Body.String())
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("login session %s did not complete: %v", sessionID, ctx.Err())
+		default:
+			runtime.Gosched()
+		}
+	}
 }
 
 // TestLoginStartByProviderID asserts handleLoginStart dispatches on the RESOLVED
@@ -302,7 +317,7 @@ func TestLoginStartByProviderID(t *testing.T) {
 	w.newAqpClientFn = func(store string) *AqpClient { return newAqpClientWithBase(store, up.URL) }
 
 	rec := httptest.NewRecorder()
-	w.handleLoginStart(rec, httptest.NewRequest("POST", "/api/login/aqp-alt/start", nil))
+	w.serve(rec, httptest.NewRequest("POST", "/api/login/aqp-alt/start", nil))
 	if rec.Code != 200 {
 		t.Fatalf("start status=%d want 200 (must dispatch by provider_id, not URL name): %s", rec.Code, rec.Body.String())
 	}

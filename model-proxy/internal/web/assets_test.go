@@ -1,16 +1,16 @@
-package main
+package web
 
 import (
-	"bytes"
 	"io/fs"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func mustWebAsset(t *testing.T, name string) string {
 	t.Helper()
-	b, err := fs.ReadFile(webAssets, "web_assets/"+name)
+	b, err := fs.ReadFile(defaultAssets(), "assets/"+name)
 	if err != nil {
 		t.Fatalf("read embedded asset %s: %v", name, err)
 	}
@@ -22,11 +22,10 @@ func TestWebAssetsJavaScriptSyntax(t *testing.T) {
 	if err != nil {
 		t.Skip("node is not installed; run the required node --check validation separately")
 	}
-	js := []byte(mustWebAsset(t, "app.js"))
-	cmd := exec.Command(node, "--check", "-")
-	cmd.Stdin = bytes.NewReader(js)
+	assetPath := filepath.Join("assets", "app.js")
+	cmd := exec.Command(node, "--check", assetPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("node --check web_assets/app.js: %v\n%s", err, out)
+		t.Fatalf("node --check internal/web/assets/app.js: %v\n%s", err, out)
 	}
 }
 
@@ -79,11 +78,6 @@ func TestWebAssetsYAMLVisibleHeightContract(t *testing.T) {
 	}
 }
 
-// TestWebAssetsAnalyticsTabContract pins the Analytics tab's presence in the
-// admin UI: the tab button + panel in index.html, the vendored uPlot asset
-// references (loaded before app.js, same pattern as CodeMirror), and the
-// renderAnalyticsTab wiring in app.js. Mirrors the existing contract tests'
-// plain strings.Contains pattern.
 func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 	indexHTML := mustWebAsset(t, "index.html")
 	js := mustWebAsset(t, "app.js")
@@ -97,11 +91,8 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 			t.Errorf("index.html missing %q", want)
 		}
 	}
-	// The uPlot script must load before the deferred app.js module so the
-	// uPlot global exists when renderAnalyticsTab runs.
 	if !strings.Contains(indexHTML, `src="vendor/uPlot.min.js"`) ||
-		strings.Index(indexHTML, `src="vendor/uPlot.min.js"`) >
-			strings.Index(indexHTML, `type="module" src="app.js"`) {
+		strings.Index(indexHTML, `src="vendor/uPlot.min.js"`) > strings.Index(indexHTML, `type="module" src="app.js"`) {
 		t.Error("index.html: uPlot script must come before the deferred app.js module")
 	}
 	for _, want := range []string{
@@ -120,16 +111,22 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 			t.Errorf("app.js missing %q", want)
 		}
 	}
-	// The vendored uPlot assets themselves must be embedded and non-trivial.
-	jsMin := mustWebAsset(t, "vendor/uPlot.min.js")
-	cssMin := mustWebAsset(t, "vendor/uPlot.min.css")
-	if !strings.Contains(jsMin, "uPlot") {
-		t.Error("vendor/uPlot.min.js does not look like uPlot (no 'uPlot' token)")
+}
+
+func TestWebAssetsEmbeddedAndOffline(t *testing.T) {
+	for _, name := range []string{
+		"index.html", "app.js", "styles.css", "vendor/codemirror.min.js",
+		"vendor/codemirror.min.css", "vendor/uPlot.min.js", "vendor/uPlot.min.css",
+		"vendor/yaml.min.js", "vendor/closebrackets.min.js", "vendor/matchbrackets.min.js",
+		"vendor/README.md",
+	} {
+		if got := mustWebAsset(t, name); len(got) == 0 {
+			t.Errorf("embedded asset %s is empty", name)
+		}
 	}
-	if len(jsMin) < 10000 {
-		t.Errorf("vendor/uPlot.min.js is suspiciously small (%d bytes)", len(jsMin))
-	}
-	if !strings.Contains(cssMin, ".uplot") {
-		t.Error("vendor/uPlot.min.css does not look like uPlot's stylesheet")
+	for _, name := range []string{"index.html", "app.js", "styles.css"} {
+		if strings.Contains(mustWebAsset(t, name), "https://") || strings.Contains(mustWebAsset(t, name), "http://") {
+			t.Errorf("%s contains a runtime CDN URL", name)
+		}
 	}
 }

@@ -22,49 +22,6 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		_ = namedMethod(t, rootPackage, "Proxy", "startRuntimeServices")
 	})
 
-	t.Run("web.go depends only on explicit Proxy capabilities", func(t *testing.T) {
-		f, fset := parseGoFile(t, "web.go")
-		fields := namedStructFields(t, f, "webServer")
-		if got := simpleTypeName(fields["reads"]); got != "proxyReadView" {
-			t.Errorf("webServer.reads type = %q, want proxyReadView", got)
-		}
-		if got := simpleTypeName(fields["admin"]); got != "proxyAdminCommands" {
-			t.Errorf("webServer.admin type = %q, want proxyAdminCommands", got)
-		}
-		if got := simpleTypeName(fields["tasks"]); got != "*webTaskOwner" {
-			t.Errorf("webServer.tasks type = %q, want *webTaskOwner", got)
-		}
-		for name, typ := range fields {
-			if typeContainsIdent(typ, "Proxy") {
-				t.Errorf("webServer.%s must not retain *Proxy", name)
-			}
-		}
-		for _, v := range directSelectorSites(f, fset, "w", "p") {
-			t.Errorf("web.go retains forbidden direct Proxy access: %s", v)
-		}
-
-		allowed := map[string]map[string]bool{
-			"reads": {
-				"agentStats": true, "analytics": true, "config": true,
-				"dashboard": true, "fusion": true, "logFile": true,
-				"pins": true, "pricing": true, "providerConfig": true,
-				"providerConfigs": true, "requestLogDirectory": true,
-				"stats": true, "tokenUsage": true,
-			},
-			"admin": {
-				"accountProbe": true, "clearPin": true, "refreshQuota": true,
-				"reload": true, "resetHealthAndPersist": true,
-				"resetStats": true, "setPin": true,
-			},
-		}
-		for _, v := range unexpectedPortAccesses(f, fset, "w", allowed) {
-			t.Errorf("web.go uses a capability outside the allowlist: %s", v)
-		}
-		if got := goStatementCount(f); got != 0 {
-			t.Errorf("web.go starts %d bare goroutine(s); use webTaskOwner.run", got)
-		}
-	})
-
 	t.Run("account probe captures one runtime generation", func(t *testing.T) {
 		admin, _ := parseGoFile(t, "proxy_admin_commands.go")
 		if got := methodCallCount(admin, "accountProbe", "snapshotRuntime"); got != 1 {

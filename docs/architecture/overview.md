@@ -33,6 +33,9 @@ implicit-route eligibility；
 identity 投影；
 `proxy_health_adapter.go` 只把根层 health/cooldown/param/rate-limit 输入映射到
 runtime Manager，并保留 429 后 quota refresh 编排；
+`proxy_web_api.go` 只把 root-private 的 `proxyReadView` / `proxyAdminCommands`
+投影为 `internal/web` consumer-owned `ReadAPI` / `CommandAPI`，包括 JSON-safe DTO
+和应用 mutation；`web_adapter.go` 只装配 `internal/web.Server` 并挂载到主 mux；
 `request_routing_adapter.go` 只把一次 runtime snapshot 的 config、parent
 identity、route keys 与 generation 绑定到 `internal/routing.Planner` 的 scheduler
 端口；
@@ -219,11 +222,14 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`manager.go` �
 - 跨域锁顺序仅允许 `Proxy.mu → runtime.Manager`。Manager 持锁时不得回调
   Proxy、quota tracker 或任何外部 I/O。
 
-Web/API 的 `webServer` 不持有 `*Proxy`，只持有 composition root 在构造时创建的
-具体 capability：`proxyReadView` 返回 detached snapshot，`proxyAdminCommands`
-执行 reload、pin、health reset、quota refresh 和账号测活等应用命令。账号测活
-只捕获一次 `runtimeSnapshot`，因此配置、路由与 provider implementation 始终来自
-同一 reload generation；网络 I/O 发生在快照完成、锁已释放之后。
+HTTP/UI transport 归 `internal/web`：`Server` 只消费 consumer-owned `ReadAPI` /
+`CommandAPI`，不 import 或持有 `*Proxy`。根 `proxy_web_api.go` 是唯一的应用
+适配层：它把 `proxyReadView` 的 detached snapshot 和 `proxyAdminCommands` 的
+mutation / active probe 投影到两个端口；`web_adapter.go` 只负责 composition 与
+mux 挂载。账号测活只捕获一次 `runtimeSnapshot`，因此配置、路由与 provider
+implementation 始终来自同一 reload generation；网络 I/O 在快照完成、锁已释放后
+执行。嵌入式 UI 资源归 `internal/web/assets`，由 `internal/web/assets.go` 提供给
+transport，不由根包承载。
 
 ## 生命周期
 
@@ -239,10 +245,12 @@ Web/API 的 `webServer` 不持有 `*Proxy`，只持有 composition root 在构�
 quota tracker 的 poll/refresh task 与 persist 编排、Responses state store 的
 debounce/worker 都由 `Proxy.Close` 按统一顺序停止。
 
-Web 后台任务由独立的 `webTaskOwner` 管理，不混入 `proxyLifecycle`：login-session
-GC 与 AQP/Codex 异步登录轮询都必须经同一 admission gate 启动。HTTP transport
-关闭时先拒绝新 Web task、取消轮询并等待已接纳任务；若任务已进入凭据落盘
-commit，则允许 save + reload 完成后再关闭 Proxy。
+Web 生命周期归 `internal/web` 的 task owner 与 session store，不混入
+`proxyLifecycle`：login-session GC 与 AQP/Codex 异步登录轮询都必须经同一
+admission gate 启动。transport 关闭时先拒绝新 Web task、取消轮询并等待已接纳
+任务；若任务已进入凭据落盘 commit，则允许 save + reload 完成后再关闭 Proxy。
+session store 只保存 detached、transport-visible login 更新；GC 只删除超过 TTL 的
+done/error 会话，不能删除仍 pending 的会话。
 
 ## 依赖规则
 
@@ -252,7 +260,8 @@ commit，则允许 save + reload 完成后再关闭 Proxy。
 transport → orchestration → target plan → target executor → provider
 root Fusion adapter → internal/fusion
 root Shadow adapter → internal/shadow → target plan / bodycapture
-Web → proxyReadView / proxyAdminCommands
+internal/web → ReadAPI / CommandAPI
+proxy_web_api → proxyReadView / proxyAdminCommands → internal/web.ReadAPI / CommandAPI
 lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
 analytics adapter → internal/pricing
@@ -273,8 +282,11 @@ composition root → internal/targetexec → internal/protocol / provider
 
 禁止：
 
-- `webServer` 持有 `*Proxy`，或 Web handler 绕过 capability 直接访问 Proxy；
-- `web.go` 用裸 `go` 启动绕过 `webTaskOwner` 的后台任务；
+- `internal/web.Server` 持有 `*Proxy`，或 handler 绕过 `ReadAPI` / `CommandAPI`
+  直接访问应用运行态；
+- `internal/web` 用裸 `go` 启动绕过其 task owner 的后台任务；
+- 根 `proxy_web_api.go` 承担 HTTP routing、session/task lifecycle，或
+  `web_adapter.go` 恢复应用逻辑；
 - `internal/fusion` 访问 Proxy、HTTP、runtime/observability owner，或根
   `runFusion` 恢复 fan-out/quorum/body/registry 策略副本；
 - `internal/shadow` 访问 Proxy、lifecycle、runtime Manager、request log、
@@ -326,8 +338,10 @@ composition root → internal/targetexec → internal/protocol / provider
 - Web/API：`../web-api.md`
 
 架构边界的静态回归位于 `architecture_*_contract_test.go` 套件（基于 go/ast 检查
-`webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector、
-账号测活的单次 runtime snapshot、internal 叶子包 import（含 accounts/catalog）、
+`internal/web.Server`、根 Web composition/application adapter 的精确字段集合与
+consumer-owned ports、禁止 transport 访问 root、账号测活的单次 runtime
+snapshot、internal 叶子包 import（含
+accounts/catalog）、
 `internal/observe/events`、`internal/cache` 与各自根 adapter 的职责、
 `internal/config` 依赖 allowlist、根配置兼容 facade、`internal/fusion`/
 `internal/shadow` import 与 owner 边界，以及 Fusion/Shadow 不绕过

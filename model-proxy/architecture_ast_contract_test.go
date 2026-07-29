@@ -324,8 +324,8 @@ func TestArchitectureBoundaryChecker(t *testing.T) {
 		t.Errorf("field check: got %v, want exactly the q.mu and w.p.health accesses", got)
 	}
 
-	// The Web capability checks must reject a retained *Proxy, direct w.p, and
-	// an unreviewed port method while accepting an allowlisted method.
+	// The Web field-set check must reject a retained application owner while
+	// accepting the reviewed transport ports.
 	f, fset = parse(`type webServer struct {
 	reads proxyReadView
 	admin proxyAdminCommands
@@ -340,15 +340,11 @@ func (w *webServer) h() {
 	if !typeContainsIdent(webFields["backend"], "Proxy") {
 		t.Error("webServer *Proxy field positive control did not fire")
 	}
-	if got := directSelectorSites(f, fset, "w", "p"); len(got) != 1 {
-		t.Errorf("direct w.p check: got %v, want exactly one access", got)
-	}
-	allowed := map[string]map[string]bool{
-		"reads": {"dashboard": true},
-		"admin": {"reload": true},
-	}
-	if got := unexpectedPortAccesses(f, fset, "w", allowed); len(got) != 1 {
-		t.Errorf("port allowlist check: got %v, want only admin.unreviewed", got)
+	if got := exactFieldSetViolations(webFields, map[string]bool{
+		"reads": true,
+		"admin": true,
+	}); len(got) != 1 || got[0] != "unexpected field backend" {
+		t.Errorf("Web exact-field positive control: got %v", got)
 	}
 	f, _ = parse(`func h() { go unowned() }`)
 	if got := goStatementCount(f); got != 1 {
@@ -758,46 +754,6 @@ func typeContainsIdent(expr ast.Expr, name string) bool {
 		return !found
 	})
 	return found
-}
-
-func directSelectorSites(f *ast.File, fset *token.FileSet, receiver, field string) []string {
-	var out []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		sel, ok := n.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != field {
-			return true
-		}
-		id, ok := sel.X.(*ast.Ident)
-		if ok && id.Name == receiver {
-			out = append(out, describe(fset, sel, receiver+"."+field))
-		}
-		return true
-	})
-	return out
-}
-
-func unexpectedPortAccesses(f *ast.File, fset *token.FileSet, receiver string, allowed map[string]map[string]bool) []string {
-	var out []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		outer, ok := n.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		inner, ok := outer.X.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		base, ok := inner.X.(*ast.Ident)
-		if !ok || base.Name != receiver {
-			return true
-		}
-		methods, isPort := allowed[inner.Sel.Name]
-		if isPort && !methods[outer.Sel.Name] {
-			out = append(out, describe(fset, outer, receiver+"."+inner.Sel.Name+"."+outer.Sel.Name))
-		}
-		return true
-	})
-	return out
 }
 
 func methodCallCount(f *ast.File, method, called string) int {

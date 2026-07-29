@@ -70,7 +70,7 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 	})
 
 	shutdown := make(chan struct{})
-	gcStopped := make(chan struct{})
+	transportStopped := make(chan struct{})
 	orderingErr := make(chan string, 1)
 	serveDone := make(chan error, 1)
 	go func() {
@@ -80,14 +80,14 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 			shutdown,
 			time.Second,
 			[]transportTask{func(stop <-chan struct{}) {
-				webGC(stop, newLoginSessionStore())
-				close(gcStopped)
+				<-stop
+				close(transportStopped)
 			}},
 			func() {
 				select {
-				case <-gcStopped:
+				case <-transportStopped:
 				default:
-					orderingErr <- "Proxy.Close ran before Web GC stopped"
+					orderingErr <- "Proxy.Close ran before transport task stopped"
 				}
 				p.Close()
 			},
@@ -116,9 +116,9 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 		t.Fatal("HTTP shutdown did not begin")
 	}
 	select {
-	case <-gcStopped:
+	case <-transportStopped:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Web GC did not stop with transport shutdown")
+		t.Fatal("transport task did not stop with transport shutdown")
 	}
 
 	// Shutdown is now waiting on the blocked handler. The logger must remain

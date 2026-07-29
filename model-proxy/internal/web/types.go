@@ -1,0 +1,250 @@
+// Package web owns the embedded admin UI, HTTP routing, JSON presentation,
+// login-session transport, and Web-scoped background tasks.
+//
+// Application state and mutations stay behind consumer-owned ReadAPI and
+// CommandAPI ports so this package never imports the composition root.
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"model-proxy/internal/fusion"
+	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/pricing"
+)
+
+// Metrics is the JSON-safe projection of one provider's process counters.
+type Metrics struct {
+	Requests       uint64 `json:"requests"`
+	Failovers      uint64 `json:"failovers"`
+	RateLimited429 uint64 `json:"rate_limited_429"`
+	Failures       uint64 `json:"failures"`
+	LastRequestAt  int64  `json:"last_request_at"`
+	LatencySum     uint64 `json:"latency_ms_sum"`
+	TTFTSum        uint64 `json:"ttft_ms_sum"`
+}
+
+// Dashboard is one detached, generation-consistent status snapshot.
+type Dashboard struct {
+	Uptime     string
+	Listen     string
+	Health     map[string]any
+	ModelLocks map[string][]map[string]any
+	Quota      map[string]any
+	Schedule   json.RawMessage
+	Counters   map[string]Metrics
+	Cache      map[string]any
+	Warnings   []string
+}
+
+// Account is deliberately incapable of carrying a credential.
+type Account struct {
+	ID      string `json:"id"`
+	Label   string `json:"label"`
+	AddedAt string `json:"added_at"`
+	Email   string `json:"email,omitempty"`
+}
+
+// ProviderAccounts is one configured provider and its public account metadata.
+type ProviderAccounts struct {
+	Name       string    `json:"name"`
+	ProviderID string    `json:"provider_id"`
+	Billing    string    `json:"billing"`
+	Accounts   []Account `json:"accounts"`
+}
+
+// TokenUsage is one flattened provider/model usage counter.
+type TokenUsage struct {
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	Input         uint64 `json:"input"`
+	Output        uint64 `json:"output"`
+	CacheCreation uint64 `json:"cache_creation"`
+	CacheRead     uint64 `json:"cache_read"`
+	Requests      uint64 `json:"requests"`
+}
+
+// Pin is the public projection of one manual route pin.
+type Pin struct {
+	Route     string
+	Provider  string
+	ExpiresAt time.Time
+}
+
+// PricingSnapshot contains detached pricing inputs used for analytics
+// presentation. Catalog is immutable after publication.
+type PricingSnapshot struct {
+	Catalog   *pricing.Catalog
+	Overrides map[string]pricing.Override
+}
+
+// ConfigRouteTarget is the JSON shape returned by GET /api/config.
+type ConfigRouteTarget struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Priority int    `json:"priority"`
+}
+
+// ConfigSummary is the small structured summary paired with raw YAML.
+type ConfigSummary struct {
+	Listen        string `json:"listen"`
+	ProviderCount int    `json:"provider_count"`
+	RouteCount    int    `json:"route_count"`
+}
+
+// ConfigDocument is the complete transport projection for GET /api/config.
+type ConfigDocument struct {
+	YAML           string                         `json:"yaml"`
+	Summary        ConfigSummary                  `json:"summary"`
+	ProviderModels map[string][]string            `json:"provider_models"`
+	Routes         map[string][]ConfigRouteTarget `json:"routes"`
+}
+
+// StatsQuery is the normalized query passed through the read port.
+type StatsQuery struct {
+	From       int64
+	To         int64
+	Provider   string
+	Model      string
+	BucketSecs int64
+}
+
+// AgentStatsQuery is the agent-dimension form of StatsQuery.
+type AgentStatsQuery struct {
+	From       int64
+	To         int64
+	Agent      string
+	Provider   string
+	Model      string
+	BucketSecs int64
+}
+
+// AnalyticsQuery describes one calendar aggregation read.
+type AnalyticsQuery struct {
+	From        int64
+	To          int64
+	Provider    string
+	Model       string
+	Granularity string
+}
+
+// EditRequest is a structured config mutation.
+type EditRequest struct {
+	Kind string         `json:"kind"`
+	Name string         `json:"name"`
+	Data map[string]any `json:"data"`
+}
+
+// AccountInput is the credential input accepted by the account-add endpoint.
+// It must never be logged or returned from this package.
+type AccountInput struct {
+	APIKey    string `json:"api_key"`
+	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+	Label     string `json:"label"`
+	Replace   bool   `json:"replace"`
+}
+
+// MutationResult reports a durable account mutation plus any reload warning.
+type MutationResult struct {
+	ID      string
+	Warning string
+}
+
+// ProbeResult is one active account probe projection.
+type ProbeResult struct {
+	OK         bool
+	HTTPStatus int
+	Reason     string
+	Provider   string
+	AccountID  string
+	Model      string
+	Latency    time.Duration
+}
+
+// LoginUpdate is a detached async-login session state.
+type LoginUpdate struct {
+	State   string `json:"state"`
+	Detail  string `json:"detail"`
+	Result  string `json:"result"`
+	Warning string `json:"warning"`
+}
+
+// LoginJob completes provider-specific polling and credential persistence.
+// Cancellation is honored until the application-defined credential commit.
+type LoginJob interface {
+	Run(context.Context) LoginUpdate
+}
+
+// LoginStart carries the transport-visible bootstrap values and its owned job.
+type LoginStart struct {
+	Provider  string
+	LoginURL  string
+	VerifyURL string
+	UserCode  string
+	Job       LoginJob
+}
+
+// HTTPError lets the application port select a stable HTTP status without
+// exposing root-private error types to the transport.
+type HTTPError struct {
+	Status  int
+	Message string
+}
+
+func (err *HTTPError) Error() string {
+	if err == nil {
+		return ""
+	}
+	return err.Message
+}
+
+// NewHTTPError constructs a transport-classified application error.
+func NewHTTPError(status int, message string) error {
+	return &HTTPError{Status: status, Message: message}
+}
+
+// ReadAPI is the complete read-only capability consumed by the Web transport.
+type ReadAPI interface {
+	Dashboard(time.Time) Dashboard
+	LogFile() string
+	RequestLogDirectory() string
+	Accounts() []ProviderAccounts
+	Tokens() []TokenUsage
+	Stats(StatsQuery) ([]observestats.Bucket, error)
+	AgentStats(AgentStatsQuery) ([]observestats.AgentBucket, error)
+	Analytics(AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
+	Pricing() PricingSnapshot
+	Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
+	Pins() []Pin
+	ConfigDocument() (ConfigDocument, error)
+}
+
+// CommandAPI is the complete mutation/active-probe capability consumed by the
+// Web transport.
+type CommandAPI interface {
+	ResetStats() error
+	RefreshQuota(provider string) bool
+	ResetHealth(provider string) ([]string, int, error)
+	SetPin(route, provider string, ttl time.Duration) (Pin, bool)
+	ClearPin(route string) bool
+	SaveConfig([]byte) error
+	EditConfig(EditRequest) error
+	AddAccount(context.Context, string, AccountInput) (MutationResult, error)
+	ProbeAccount(context.Context, string, string) (ProbeResult, error)
+	RemoveAccount(string, string) (MutationResult, error)
+	BeginLogin(context.Context, string) (LoginStart, error)
+}
+
+func requirePorts(reads ReadAPI, commands CommandAPI) error {
+	if reads == nil {
+		return fmt.Errorf("web ReadAPI is nil")
+	}
+	if commands == nil {
+		return fmt.Errorf("web CommandAPI is nil")
+	}
+	return nil
+}

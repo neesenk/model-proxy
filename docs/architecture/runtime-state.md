@@ -105,9 +105,9 @@ accepting 检查与 `WaitGroup.Add`；shutdown 顺序为：
 
 ### HTTP transport 关闭
 
-HTTP listener、在途 handler、SIGHUP reload loop，以及 `webTaskOwner` 管理的
-login-session GC/AQP/Codex 异步登录属于 daemon transport 生命周期，不属于
-`proxyLifecycle`。SIGINT/SIGTERM 的关闭顺序是：
+HTTP listener、在途 handler、SIGHUP reload loop，以及 `internal/web` task owner
+管理的 login-session GC/AQP/Codex 异步登录属于 daemon transport 生命周期，
+不属于 `proxyLifecycle`。SIGINT/SIGTERM 的关闭顺序是：
 
 1. transport gate 拒绝新的 handler/reload；Web owner 拒绝新任务并取消轮询；
 2. 显式 `http.Server.Shutdown` 停止接入并等待在途 handler，deadline 为 8 秒；

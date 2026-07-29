@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,67 +11,6 @@ import (
 	"testing"
 	"time"
 )
-
-func TestWebTaskOwnerCloseCancelsAndWaitsThroughAdmittedCommit(t *testing.T) {
-	owner := newWebTaskOwner()
-	started := make(chan struct{})
-	cancelled := make(chan struct{})
-	release := make(chan struct{})
-
-	if !owner.run(func(ctx context.Context) {
-		close(started)
-		<-ctx.Done()
-		close(cancelled)
-		// Model a login task that crossed its credential-commit boundary just
-		// before cancellation: save+reload must finish before close returns.
-		<-release
-	}) {
-		t.Fatal("task was not admitted before close")
-	}
-	<-started
-
-	closed := make(chan struct{})
-	go func() {
-		owner.close()
-		close(closed)
-	}()
-
-	select {
-	case <-cancelled:
-	case <-time.After(time.Second):
-		t.Fatal("close did not cancel the Web task context")
-	}
-	select {
-	case <-closed:
-		t.Fatal("close returned before the admitted Web task finished")
-	default:
-	}
-
-	close(release)
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("close did not return after the Web task finished")
-	}
-}
-
-func TestWebTaskOwnerRejectsTasksAfterClose(t *testing.T) {
-	owner := newWebTaskOwner()
-	owner.close()
-
-	ran := make(chan struct{})
-	if owner.run(func(context.Context) { close(ran) }) {
-		t.Fatal("task was admitted after close")
-	}
-	select {
-	case <-ran:
-		t.Fatal("rejected task still ran")
-	default:
-	}
-
-	// Close is intentionally idempotent for deferred/error-path cleanup.
-	owner.close()
-}
 
 func TestWebCloseCancelsAqpLoginBeforeCredentialCommit(t *testing.T) {
 	setPoolHome(t, t.TempDir())
@@ -103,7 +41,7 @@ func TestWebCloseCancelsAqpLoginBeforeCredentialCommit(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	w.handleLoginStart(rec, httptest.NewRequest(http.MethodPost, "/api/login/aqp/start", nil))
+	w.serve(rec, httptest.NewRequest(http.MethodPost, "/api/login/aqp/start", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("start status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -153,7 +91,7 @@ func TestWebCloseCancelsCodexLoginBeforeCredentialCommit(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	w.handleLoginStart(rec, httptest.NewRequest(http.MethodPost, "/api/login/codex/start", nil))
+	w.serve(rec, httptest.NewRequest(http.MethodPost, "/api/login/codex/start", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("start status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -211,15 +149,26 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, failure string) {
 
 func assertLoginCancelledWithoutCredential(t *testing.T, w *webServer, sessionID, path string) {
 	t.Helper()
-	session, ok := w.sessions.get(sessionID)
-	if !ok {
-		t.Fatal("cancelled login session disappeared")
+	recorder := httptest.NewRecorder()
+	w.serve(
+		recorder,
+		httptest.NewRequest(http.MethodGet, "/api/login/"+sessionID+"/poll", nil),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf(
+			"cancelled login poll status = %d, body = %s",
+			recorder.Code,
+			recorder.Body.String(),
+		)
 	}
-	session.mu.Lock()
-	state := session.state
-	session.mu.Unlock()
-	if state != "error" {
-		t.Fatalf("cancelled login state = %q, want error", state)
+	var session struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode cancelled login poll: %v", err)
+	}
+	if session.State != "error" {
+		t.Fatalf("cancelled login state = %q, want error", session.State)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("credential was persisted before commit boundary: stat error = %v", err)

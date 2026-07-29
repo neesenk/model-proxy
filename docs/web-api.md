@@ -30,7 +30,7 @@
 | GET | `/api/analytics?from=&to=&provider=&model=&granularity=day\|month` | — | `{granularity,from,to,series:[{provider,model,points:[{bucket,requests,input,output,cache_creation,cache_read,cost,priced}]}],totals:{input,output,cost},price_coverage:{priced:[],unpriced:[]}}` | 日历日/月聚合 + **服务端现算等价 payg 成本**（见下「Analytics 等价成本」） |
 | POST | `/api/quota/refresh` | 空 body 或 `{"provider":key}` | `{status:"refreshed"[,provider]}` / 404 | 同步刷新配额缓存（可立即重查 `/api/status`）：空 → `pollAll`，指定 → `pollOne`（key 即 `name` 或 `name#accountID`），未知 key 404 |
 | POST | `/api/health/reset` | 空 body 或 `{"provider":key}` | `{cleared:[names],model_locks_cleared:n}` | 清冻结运行态（熔断开路冷却、429 限频冷却、模型锁定），目标立即重试；空=全部，池化父名清全部虚拟；**不清** sticky/pin/剥参 blocklist。`unfreeze` CLI 与 UI Providers 卡 unfreeze 按钮 |
-| POST/GET | `/api/login/<provider>/start`、`/api/login/<session>/poll` | — | `{session_id,...}` / `{state, detail, result, warning?}` | 异步登录（aqp SSO URL / codex device flow）；poll 状态 pending/done/error。轮询由 `webTaskOwner` 管理，关闭时取消 HTTP/等待；凭据 commit 前响应取消，进入 commit 后完成 save+reload 再退出。done 时若 reload 失败，`warning` 非空（凭据已落盘，runtime 旧） |
+| POST/GET | `/api/login/<provider>/start`、`/api/login/<session>/poll` | — | `{session_id,...}` / `{state, detail, result, warning?}` | 异步登录（aqp SSO URL / codex device flow）；poll 状态 pending/done/error。`internal/web` 的 task owner 管理轮询，关闭时取消 HTTP/等待；凭据 commit 前响应取消，进入 commit 后完成 save+reload 再退出。done 时若 reload 失败，`warning` 非空（凭据已落盘，runtime 旧） |
 
 **写操作统一热重载**：所有 mutation 落盘后触发进程内 `proxy.reload` —— 同一 worker 进程原地换 cfg/providers，不重启。账号增删虽不改 config.yaml，但 reload→`buildProviders`→`loadPool` 重读池文件，新账号随即展开成虚拟。reload 通过 `runtime.Manager.ReplaceGeneration` 清空 health/sticky/model-lock/paramBlock/spread/quota（operator pin 保留）、重建响应缓存，并 kick `quota.pollAll`。注意：进程内 reload（UI 与 worker 同进程）≠ `serve reload`（给独立进程发 SIGHUP）。
 
@@ -50,7 +50,7 @@
 
 **agent 维度**（`agent.go`）：`detectAgent` 从 `x-claude-code-session-id`/`claude-cli` UA → `claude-code`、UA 含 `codex` → `codex`、`opencode`、`pi/` 前缀 → `pi`（无 UA=`unknown`、其余=`other`）。并行管线 `agentCounter`（key=(agent,provider,model)，独立叶子锁）→ `agent_buckets` 表（requests/input/output/`latency_ms_sum`/`failures`，同样 additive 迁移）。token 归因经 usageScanner 的 agentSink（非 SSE 无 token 只计 requests）；全失败 502 记 `incRequests`+`incFailure`（到首个尝试目标）。查询 `GET /api/agents` + `stats --by-agent`（`--agent/--provider/--model` 过滤）+ UI Status 页 Agents 卡片。
 
-## Analytics 等价成本（`internal/pricing` + `web.go:handleAnalytics`，默认开启）
+## Analytics 等价成本（`internal/pricing` + `internal/web` handler，默认开启）
 
 `GET /api/analytics?from=&to=&provider=&model=&granularity=day|month` 在 SQLite stats 之上做**日历日/月聚合**（存储恒 1 分钟）：`stats.Store.QueryAnalytics` 用 SQL `date(minute,'unixepoch','localtime','start of day'/'start of month')` GROUP BY；bucket = 本地时区自然日/月初的 unix instant，由 Store 经 `time.ParseInLocation(...,time.Local)` 转——不用 `strftime('%s',…)`（会把本地日期误读为 UTC 当天 0 点，偏移一个时区）。每个 point 现算**等价 payg 成本**：price × tokens，**不落盘、不伪造**；未知价 → `cost:null, priced:false`。响应：`{granularity, from, to, series:[{provider, model, points:[…]}], totals:{input, output, cost}, price_coverage:{priced:[], unpriced:[]}}`。
 
@@ -64,7 +64,9 @@
 
 **环境变量 `MP_PRICING_URL`**：pricing 端点解析优先级 **config `pricing.source_url` > `MP_PRICING_URL` env > OpenRouter 默认**（`pricing.DefaultEndpoint`）。`PricingConfig.ResolvedSourceURL()`（`internal/config`）在 config 未设时回落到环境变量，**镜像 `MP_MODELSDEV_URL`** 的 test/mirror override 语义，生产路径 `Proxy.pricingSnapshot`（`proxy.go`）经此生效。单测 `internal/config` 的 `TestPricingConfigSourceURL_Precedence` 钉死 config > env > default 三级优先级；目录、缓存与计算测试归属 `internal/pricing/pricing_test.go`。
 
-**Web UI**：`/ui/` Analytics 标签页（`web_assets/`）消费 `/api/analytics`，渲染 token + 等价成本趋势（uPlot）。未定价模型（如 `doubao-*`）显示 `n/a` + UI 提示。
+**Web UI**：`/ui/` Analytics 标签页（`internal/web/assets/`）消费
+`/api/analytics`，渲染 token + 等价成本趋势（uPlot）。未定价模型（如
+`doubao-*`）显示 `n/a` + UI 提示。
 
 **CLI**：`stats --granularity day|month` 或 `--cost` 任一 → `renderAnalytics` 改打 `/api/analytics`（`formatAnalyticsTable`：每 (provider,model) 一行 = 窗口内 SUM，`--cost` 才出 cost 列，未定价 `n/a`；`--json` 原样）。两者都省略 → 走 `/api/stats`，输出与原 `stats` **字节一致**（CLI 契约不变，append-only）。
 
@@ -72,21 +74,26 @@
 
 ## Web 运行时边界
 
-`webServer` 不持有 `*Proxy`；构造函数只把它转换为两个具体 capability 后即丢弃：
-只读 handler 通过 `proxyReadView` 查询 request log、tokens、stats、Fusion、
-pins、pricing 及 detached dashboard/config/provider 快照，写操作和主动网络探测
-通过 `proxyAdminCommands` 执行 reset、quota refresh、health reset + persist、
-pin、reload 与 account probe。`web.go` 不得绕过这两个端口直接访问 Proxy。
+HTTP/UI transport 统一归 `internal/web`。其 `Server` 不持有 `*Proxy`，只消费
+consumer-owned `ReadAPI` / `CommandAPI`：只读 handler 通过 `ReadAPI` 查询
+request log、tokens、stats、Fusion、pins、pricing 及 detached
+dashboard/config/provider 快照；写操作和主动网络探测通过 `CommandAPI` 执行
+reset、quota refresh、health reset + persist、pin、reload 与 account probe。根
+`proxy_web_api.go` 是两个端口的唯一应用适配，负责 `proxyReadView` /
+`proxyAdminCommands` 到 transport DTO/命令的映射；`web_adapter.go` 只负责
+composition 与 mux 挂载。任何 transport handler 都不得绕过端口直接访问 Proxy。
 
 账号测活必须在 admin capability 内只调用一次 `snapshotRuntime`，从同一 generation
 取得 config 和 provider implementation；凭据文件检查及上游网络 I/O 在快照完成、
 锁已释放后执行。`proxyReadView` 不提供按名字单独读取 runtime provider 的入口，
 避免 reload 期间把旧 config 与新 impl 混用。
 
-Web 后台工作只能经 `webTaskOwner.run` 接纳；`web.go` 不允许裸 `go`。owner 同时
-管理 login-session GC 与 AQP/Codex 轮询，关闭时在同一 mutex 内停止 admission、
-取消 root context 并等待任务。GC 只删除超过 TTL 的 done/error 会话，不能删除
-仍 pending 的会话；否则 UI 会在后台任务仍可能落盘时提前得到 404。
+Web 生命周期也归 `internal/web`：task owner 是后台工作的唯一 admission gate，
+session store 保存 detached、transport-visible login 更新。task owner 管理
+login-session GC 与 AQP/Codex 轮询，关闭时在同一 mutex 内停止 admission、取消
+root context 并等待任务。GC 只删除超过 TTL 的 done/error 会话，不能删除仍
+pending 的会话；否则 UI 会在后台任务仍可能落盘时提前得到 404。嵌入式资源位于
+`internal/web/assets`，由该包的 asset owner 提供，无独立前端构建步骤。
 
 ## 请求访问日志（`internal/observe/requestlog`，JSONL 文件，默认关闭）
 

@@ -52,7 +52,7 @@ func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.
 
 	w := newWebServer(p, "test-config.yaml")
 	rec := httptest.NewRecorder()
-	w.handleAccountTest(rec, httptest.NewRequest(
+	w.serve(rec, httptest.NewRequest(
 		http.MethodPost,
 		"/api/accounts/up/"+accountID+"/test",
 		strings.NewReader(""),

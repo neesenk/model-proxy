@@ -150,25 +150,6 @@ func TestFormatStatsTable(t *testing.T) {
 	}
 }
 
-func TestParseStatsTime(t *testing.T) {
-	cases := []struct {
-		in   string
-		want int64
-		ok   bool
-	}{
-		{"1700000000", 1700000000, true},
-		{"2023-11-14T22:13:20Z", 1700000000, true},
-		{"bogus", 0, false},
-		{"", 0, false},
-	}
-	for _, c := range cases {
-		got, ok := parseStatsTime(c.in)
-		if ok != c.ok || (ok && got != c.want) {
-			t.Errorf("parseStatsTime(%q)=(%d,%v) want (%d,%v)", c.in, got, ok, c.want, c.ok)
-		}
-	}
-}
-
 // TestStatsFlags_GranularityCost_Parsed verifies --granularity and --cost parse
 // into statsOpts (the new analytics-routing flags).
 func TestStatsFlags_GranularityCost_Parsed(t *testing.T) {

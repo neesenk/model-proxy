@@ -7,7 +7,7 @@
 ```text
 model-proxy/              Go daemon、CLI、核心测试
 model-proxy/provider/     上游 Provider 实现
-model-proxy/web_assets/   Web UI 静态资源
+model-proxy/internal/web/ Web/API transport、会话和嵌入式 UI 静态资源
 docs/                     架构、后端和 API 契约
 ```
 
@@ -33,7 +33,7 @@ docs/                     架构、后端和 API 契约
 | `model-proxy/internal/catalog/*`、models.dev catalog、`models refresh` | `docs/architecture/request-routing.md`；pricing/analytics 另读 `docs/web-api.md` |
 | `daemon.go`、supervisor、serve 生命周期 | `docs/engineering/pitfalls.md`（进程类陷阱）、`model-proxy/CLI.md`（serve 命令契约） |
 | Fusion、Shadow、Cache、request log、live | `docs/architecture/fusion-shadow-cache.md` |
-| `web.go`、`web_assets/*`、stats/API | `docs/web-api.md`；前端另读 `model-proxy/web_assets/AGENTS.md` |
+| `internal/web/*`、`proxy_web_api.go`、`web_adapter.go`、stats/API | `docs/web-api.md`；前端另读 `model-proxy/internal/web/assets/AGENTS.md` |
 | CLI 命令或显示 | `model-proxy/CLI.md` |
 | 用户可见功能、配置或使用方式 | `model-proxy/README.md`、`model-proxy/config.yaml`，并按领域读取对应契约 |
 | takeover/restore | `docs/client-takeover.md` |

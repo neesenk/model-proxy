@@ -1,6 +1,6 @@
 # AGENTS.md - Web UI 规则
 
-修改本目录前读取 `../../docs/web-api.md`。API shape、状态字段和 mutation 语义以该文档为准。
+修改本目录前读取 `../../../../docs/web-api.md`。API shape、状态字段和 mutation 语义以该文档为准。
 
 ## 边界
 
@@ -17,10 +17,8 @@
 ## 验证
 
 ```bash
-node --check app.js
-cd ..
-go test ./... -count=1
+node --check internal/web/assets/app.js
+go test ./internal/web -count=1
 ```
 
 布局改动还需检查窄窗口、短窗口、长日志、长 YAML 和 hover/selection 状态。
-

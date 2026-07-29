@@ -292,7 +292,7 @@ func runProxyProcess(sa serveArgs) error {
 // serveHTTPUntilShutdown runs one explicit HTTP server until it fails or a stop
 // is requested. Shutdown order is deliberately centralized:
 //
-//  1. reject new transport-owned work (reload, Web GC and async login polls);
+//  1. reject new transport-owned work (reload and internal/web tasks);
 //  2. stop accepting HTTP connections and drain in-flight handlers;
 //  3. on deadline, force-close connections so request contexts are cancelled;
 //  4. wait transport tasks, then close/final-flush Proxy-owned state.

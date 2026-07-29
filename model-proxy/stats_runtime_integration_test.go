@@ -498,7 +498,7 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	cache.Put("key", http.StatusOK, http.Header{"X-Test": {"value"}}, []byte("body"), time.Now())
 
 	recorder := httptest.NewRecorder()
-	newWebServer(proxy, "test-config.yaml").handleTokensReset(
+	newWebServer(proxy, "test-config.yaml").serve(
 		recorder,
 		httptest.NewRequest(http.MethodPost, "/api/tokens/reset", nil),
 	)
@@ -547,7 +547,7 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	cache.Put("key", http.StatusOK, nil, []byte("body"), time.Now())
 
 	recorder := httptest.NewRecorder()
-	newWebServer(proxy, "test-config.yaml").handleTokensReset(
+	newWebServer(proxy, "test-config.yaml").serve(
 		recorder,
 		httptest.NewRequest(http.MethodPost, "/api/tokens/reset", nil),
 	)

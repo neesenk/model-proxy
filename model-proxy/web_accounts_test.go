@@ -29,11 +29,21 @@ func TestAccountsListMasked(t *testing.T) {
 	}
 	w, _ := newTestWeb(t)
 	rec := httptest.NewRecorder()
-	w.handleAccountsList(rec, httptest.NewRequest("GET", "/api/accounts", nil))
+	w.serve(rec, httptest.NewRequest("GET", "/api/accounts", nil))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
+	var decoded any
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode accounts response: %v: %s", err, body)
+	}
+	assertJSONKeysAbsent(t, decoded, map[string]bool{
+		"api_key":            true,
+		"access_key":         true,
+		"secret_key":         true,
+		"sso_session_cookie": true,
+	})
 	// No raw secret may appear anywhere in the response.
 	for _, secret := range []string{"sk-secret-key-1234567890", "AK-LEAK-12345", "SK-LEAK-67890"} {
 		if strings.Contains(body, secret) {
@@ -80,11 +90,20 @@ func TestAccountsListCodex(t *testing.T) {
 	p.mu.Unlock()
 
 	rec := httptest.NewRecorder()
-	w.handleAccountsList(rec, httptest.NewRequest("GET", "/api/accounts", nil))
+	w.serve(rec, httptest.NewRequest("GET", "/api/accounts", nil))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
+	var decoded any
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode codex accounts response: %v: %s", err, body)
+	}
+	assertJSONKeysAbsent(t, decoded, map[string]bool{
+		"access_token":  true,
+		"refresh_token": true,
+		"id_token":      true,
+	})
 	// The account_id (used by the UI for removal) + email label must appear.
 	if !strings.Contains(body, `"id":"acct-codex-42"`) {
 		t.Errorf("account_id missing:\n%s", body)
@@ -121,6 +140,27 @@ func TestAccountsListCodex(t *testing.T) {
 	}
 }
 
+func assertJSONKeysAbsent(t *testing.T, value any, forbidden map[string]bool) {
+	t.Helper()
+	var visit func(any)
+	visit = func(current any) {
+		switch current := current.(type) {
+		case map[string]any:
+			for key, child := range current {
+				if forbidden[key] {
+					t.Errorf("forbidden credential field %q present in accounts response", key)
+				}
+				visit(child)
+			}
+		case []any:
+			for _, child := range current {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+}
+
 func TestAccountsAddRemove(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +180,7 @@ func TestAccountsAddRemove(t *testing.T) {
 	// from accidentally swallowing these into the apikey path.
 	for _, name := range []string{"aqp", "codex"} {
 		rec := httptest.NewRecorder()
-		w.handleAccountAdd(rec, httptest.NewRequest("POST", "/api/accounts/"+name,
+		w.serve(rec, httptest.NewRequest("POST", "/api/accounts/"+name,
 			strings.NewReader(`{"api_key":"x"}`)))
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s add status=%d want 400 (async flow): %s", name, rec.Code, rec.Body.String())
@@ -152,7 +192,7 @@ func TestAccountsAddRemove(t *testing.T) {
 
 	// unknown provider add → 404 (route table + 404 contract intact).
 	rec404 := httptest.NewRecorder()
-	w.handleAccountAdd(rec404, httptest.NewRequest("POST", "/api/accounts/nope",
+	w.serve(rec404, httptest.NewRequest("POST", "/api/accounts/nope",
 		strings.NewReader(`{"api_key":"x"}`)))
 	if rec404.Code != http.StatusNotFound {
 		t.Errorf("unknown provider add status=%d want 404", rec404.Code)
@@ -160,7 +200,7 @@ func TestAccountsAddRemove(t *testing.T) {
 
 	// apikey add: validate (200 from usage mock) → save to pool → reload (best-effort).
 	rec := httptest.NewRecorder()
-	w.handleAccountAdd(rec, httptest.NewRequest("POST", "/api/accounts/zhipu",
+	w.serve(rec, httptest.NewRequest("POST", "/api/accounts/zhipu",
 		strings.NewReader(`{"api_key":"sk-test-1234567890","label":"work"}`)))
 	if rec.Code != 200 {
 		t.Fatalf("add status=%d body=%s", rec.Code, rec.Body.String())
@@ -176,7 +216,7 @@ func TestAccountsAddRemove(t *testing.T) {
 
 	// remove → pool emptied.
 	rec2 := httptest.NewRecorder()
-	w.handleAccountRemove(rec2, httptest.NewRequest("DELETE", "/api/accounts/zhipu/"+id, nil))
+	w.serve(rec2, httptest.NewRequest("DELETE", "/api/accounts/zhipu/"+id, nil))
 	if rec2.Code != 200 {
 		t.Fatalf("remove status=%d body=%s", rec2.Code, rec2.Body.String())
 	}
@@ -187,21 +227,21 @@ func TestAccountsAddRemove(t *testing.T) {
 
 	// remove with a missing id segment → 400 (not a panic / 500).
 	rec3 := httptest.NewRecorder()
-	w.handleAccountRemove(rec3, httptest.NewRequest("DELETE", "/api/accounts/zhipu", nil))
+	w.serve(rec3, httptest.NewRequest("DELETE", "/api/accounts/zhipu", nil))
 	if rec3.Code != http.StatusBadRequest {
 		t.Errorf("malformed remove status=%d want 400: %s", rec3.Code, rec3.Body.String())
 	}
 
 	// remove on unknown provider → 404 (route table intact).
 	rec404b := httptest.NewRecorder()
-	w.handleAccountRemove(rec404b, httptest.NewRequest("DELETE", "/api/accounts/nope/x", nil))
+	w.serve(rec404b, httptest.NewRequest("DELETE", "/api/accounts/nope/x", nil))
 	if rec404b.Code != http.StatusNotFound {
 		t.Errorf("remove unknown provider status=%d want 404", rec404b.Code)
 	}
 
 	// add JSON decode failure → 400.
 	recBad := httptest.NewRecorder()
-	w.handleAccountAdd(recBad, httptest.NewRequest("POST", "/api/accounts/zhipu",
+	w.serve(recBad, httptest.NewRequest("POST", "/api/accounts/zhipu",
 		strings.NewReader(`{not-json`)))
 	if recBad.Code != http.StatusBadRequest {
 		t.Errorf("bad-json add status=%d want 400: %s", recBad.Code, recBad.Body.String())
@@ -219,7 +259,7 @@ func TestAccountsAddRemove(t *testing.T) {
 	p.cfg.Providers["zhipu"] = Provider{Provider: "zhipu", OpenAIBaseURL: "https://x", UsageURL: badUp.URL}
 	p.mu.Unlock()
 	recVal := httptest.NewRecorder()
-	w.handleAccountAdd(recVal, httptest.NewRequest("POST", "/api/accounts/zhipu",
+	w.serve(recVal, httptest.NewRequest("POST", "/api/accounts/zhipu",
 		strings.NewReader(`{"api_key":"sk-bad"}`)))
 	if recVal.Code != http.StatusBadRequest {
 		t.Errorf("validation-failed add status=%d want 400: %s", recVal.Code, recVal.Body.String())

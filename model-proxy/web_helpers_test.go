@@ -8,21 +8,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestContentTypeFor(t *testing.T) {
-	cases := map[string]string{
-		"page.html": "text/html; charset=utf-8",
-		"app.js":    "text/javascript; charset=utf-8",
-		"style.css": "text/css; charset=utf-8",
-		"logo.png":  "application/octet-stream",
-		"":          "application/octet-stream",
-	}
-	for name, want := range cases {
-		if got := contentTypeFor(name); got != want {
-			t.Errorf("contentTypeFor(%q)=%q want %q", name, got, want)
-		}
-	}
-}
-
 func TestAtomicWrite(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
