@@ -87,6 +87,12 @@ ring cap、detached snapshot、取消订阅、慢消费者丢弃和终态查询�
 forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为读取内部状态
 而恢复根包 type alias、访问模块互斥锁或暴露 test-only 生产接口。
 
+根包集成测试仍使用 `package main`，但文件按 `<domain>_<concern>_test.go` 组织；
+跨文件共享 fixture 只保留在 `<domain>_test_support_test.go`，不得复制 helper 或
+把 test-only hook 塞回生产结构。一个文件只覆盖一个清晰领域时不按行数强拆；
+当同一 catch-all 文件混合 HTTP status、配置、账号、登录等独立契约时，必须按
+领域拆分，并保持原测试名、断言与 cleanup 语义。
+
 Provider 的 `Usage`、`Quota`、fetch/parse、认证和显示格式测试直接归
 `provider/*_test.go`；根包只验证 YAML/账号池/build dispatch/CLI 输出等组合行为，
 不得在 `_test.go` 重建已删除的 `show*Usage` / `fetch*Quota` 兼容函数后重复测试。
