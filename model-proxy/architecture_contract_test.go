@@ -56,6 +56,18 @@ import (
 // exist today — the rules below encode exactly the tokens the old string test
 // forbade).
 func TestArchitectureBoundaries(t *testing.T) {
+	rootPackage, rootSet := parseGoPackage(t, ".")
+
+	t.Run("root semantic package view spans source files", func(t *testing.T) {
+		if fields := namedStructFields(t, rootPackage, "Proxy"); len(fields) == 0 {
+			t.Fatal("root package view did not find Proxy fields")
+		}
+		// Proxy is currently declared in proxy.go while this method lives in
+		// proxy_lifecycle.go. Finding both proves semantic guards are no longer
+		// coupled to one physical composition-root file.
+		_ = namedMethod(t, rootPackage, "Proxy", "startRuntimeServices")
+	})
+
 	t.Run("web.go depends only on explicit Proxy capabilities", func(t *testing.T) {
 		f, fset := parseGoFile(t, "web.go")
 		fields := namedStructFields(t, f, "webServer")
@@ -318,7 +330,7 @@ func TestArchitectureBoundaries(t *testing.T) {
 			}
 		}
 
-		proxyFile, proxySet := parseGoFile(t, "proxy.go")
+		proxyFile, proxySet := rootPackage, rootSet
 		builder := namedFunction(t, proxyFile, "buildProviders")
 		if got := namedCallCountInNode(builder.Body, "LoadSnapshot"); got != 1 {
 			t.Errorf("buildProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
@@ -413,7 +425,7 @@ func TestArchitectureBoundaries(t *testing.T) {
 			}
 		}
 
-		proxy, _ := parseGoFile(t, "proxy.go")
+		proxy := rootPackage
 		eventsType := namedStructFields(t, proxy, "Proxy")["events"]
 		pointer, ok := eventsType.(*ast.StarExpr)
 		if !ok {
@@ -475,7 +487,7 @@ func TestArchitectureBoundaries(t *testing.T) {
 			}
 		}
 
-		proxy, _ := parseGoFile(t, "proxy.go")
+		proxy := rootPackage
 		loggerType := namedStructFields(t, proxy, "Proxy")["reqLog"]
 		pointer, ok := loggerType.(*ast.StarExpr)
 		if !ok {
@@ -493,7 +505,7 @@ func TestArchitectureBoundaries(t *testing.T) {
 			t.Fatalf("stat stats.go: %v", err)
 		}
 
-		proxy, _ := parseGoFile(t, "proxy.go")
+		proxy := rootPackage
 		storeType := namedStructFields(t, proxy, "Proxy")["stats"]
 		pointer, ok := storeType.(*ast.StarExpr)
 		if !ok {
@@ -546,9 +558,8 @@ func TestArchitectureBoundaries(t *testing.T) {
 			t.Errorf("cache_adapter.go newResponseCache declarations = %d, want exactly 1", functions["newResponseCache"])
 		}
 
-		assertCacheStoreField := func(file, owner string) {
+		assertCacheStoreField := func(parsed *ast.File, owner string) {
 			t.Helper()
-			parsed, _ := parseGoFile(t, file)
 			fieldType := namedStructFields(t, parsed, owner)["cache"]
 			pointer, ok := fieldType.(*ast.StarExpr)
 			if !ok {
@@ -557,8 +568,9 @@ func TestArchitectureBoundaries(t *testing.T) {
 				t.Errorf("%s.cache must be *responsecache.Store", owner)
 			}
 		}
-		assertCacheStoreField("proxy.go", "Proxy")
-		assertCacheStoreField("dispatch_context.go", "runtimeSnapshot")
+		assertCacheStoreField(rootPackage, "Proxy")
+		dispatchContext, _ := parseGoFile(t, "dispatch_context.go")
+		assertCacheStoreField(dispatchContext, "runtimeSnapshot")
 
 		forbidden := map[string]bool{
 			"responseCache": true,
@@ -584,12 +596,9 @@ func TestArchitectureBoundaries(t *testing.T) {
 
 	t.Run("internal transport owns bounded body capture", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/transport/bodycapture")
-		for _, name := range []string{"attempt_executor.go", "proxy.go"} {
-			file, fset := parseGoFile(t, name)
-			forbidden := map[string]bool{"newCaptureReader": true}
-			for _, violation := range forbiddenCallSites(file, fset, forbidden, nil) {
-				t.Errorf("%s uses legacy root capture instead of bodycapture.Reader: %s", name, violation)
-			}
+		forbidden := map[string]bool{"newCaptureReader": true}
+		for _, violation := range forbiddenCallSites(rootPackage, rootSet, forbidden, nil) {
+			t.Errorf("root package uses legacy capture instead of bodycapture.Reader: %s", violation)
 		}
 	})
 
@@ -598,7 +607,7 @@ func TestArchitectureBoundaries(t *testing.T) {
 			"model-proxy/provider": true,
 		})
 
-		proxyFile, _ := parseGoFile(t, "proxy.go")
+		proxyFile := rootPackage
 		proxyFields := namedStructFields(t, proxyFile, "Proxy")
 		if name, ok := configSelectorName(proxyFields["runtimeState"], "runtimestate"); !ok || name != "Manager" {
 			t.Error("Proxy.runtimeState must be runtimestate.Manager")
@@ -803,7 +812,7 @@ func TestArchitectureBoundaries(t *testing.T) {
 			t.Errorf("Proxy.decideOrder runtimeGenerationArg-bound ScheduleInput fields = %d, want 1", got)
 		}
 
-		managerFile, _ := parseGoFile(t, "internal/runtime/manager.go")
+		managerFile, _ := parseGoPackage(t, "internal/runtime")
 		if methodDeclared(managerFile, "SchedulingQuotas") {
 			t.Error("runtime.Manager must project quotas inside DecideOrder, not expose SchedulingQuotas")
 		}
@@ -820,7 +829,7 @@ func TestArchitectureBoundaries(t *testing.T) {
 	t.Run("internal runtime wirecap owns endpoint capability state", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/runtime/wirecap")
 
-		proxy, _ := parseGoFile(t, "proxy.go")
+		proxy := rootPackage
 		wireStoreType := namedStructFields(t, proxy, "Proxy")["wireCaps"]
 		if name, ok := configSelectorName(wireStoreType, "runtimewire"); !ok || name != "Store" {
 			t.Error("Proxy.wireCaps must be runtimewire.Store")
@@ -1179,6 +1188,8 @@ func identArgumentsMatch(args []ast.Expr, names ...string) bool {
 // composition-root escape hatch, Fusion's client-facing synthesis reuses that
 // executor, and pool resolution reaches health only through resolverState.
 func TestTargetExecutionArchitecture(t *testing.T) {
+	rootPackage, _ := parseGoPackage(t, ".")
+
 	t.Run("targetAttempt has only its five execution contract fields", func(t *testing.T) {
 		f, _ := parseGoFile(t, "dispatch_context.go")
 		fields := namedStructFields(t, f, "targetAttempt")
@@ -1272,11 +1283,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		if len(literalSites) != 0 {
 			t.Errorf("targetAttempt composite literals must be confined to newTargetAttempt: %v", literalSites)
 		}
-		proxyFile, proxySet := parseGoFile(t, "proxy.go")
-		if got := compositeLiteralSites(proxyFile, "targetAttempt"); len(got) != 0 {
-			t.Errorf("proxy.go must call newTargetAttempt, not construct targetAttempt: %s", describeNodes(proxySet, got, "targetAttempt literal"))
-		}
-		serveOnce := namedMethod(t, proxyFile, "Proxy", "serveOnce")
+		serveOnce := namedMethod(t, rootPackage, "Proxy", "serveOnce")
 		if !assignedFactoryValueExecuted(serveOnce.Body, "newTargetAttempt", "targetExecutor", "execute") {
 			t.Error("Proxy.serveOnce must pass the attempt assigned from newTargetAttempt to targetExecutor().execute")
 		}
@@ -1384,8 +1391,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		if calls, bound := countGenerationBoundResolvers(fusion); calls != 2 || bound != calls {
 			t.Errorf("Fusion resolver calls must bind runtime generation: calls=%d bound=%d", calls, bound)
 		}
-		proxy, _ := parseGoFile(t, "proxy.go")
-		shadow := namedMethod(t, proxy, "Proxy", "runShadow")
+		shadow := namedMethod(t, rootPackage, "Proxy", "runShadow")
 		if calls, bound := countGenerationBoundResolvers(shadow.Body); calls != 1 || bound != calls {
 			t.Errorf("Shadow resolver call must bind runtime generation: calls=%d bound=%d", calls, bound)
 		}
@@ -1739,6 +1745,38 @@ func parseGoFile(t *testing.T, path string) (*ast.File, *token.FileSet) {
 		t.Fatal(err)
 	}
 	return f, fset
+}
+
+// parseGoPackage builds a declaration-only AST view across all production Go
+// files in dir. Semantic architecture rules should use this view when they
+// constrain package ownership rather than a particular physical filename.
+// File-scoped adapter/facade contracts continue to use parseGoFile.
+func parseGoPackage(t *testing.T, dir string) (*ast.File, *token.FileSet) {
+	t.Helper()
+	pattern := filepath.Join(dir, "*.go")
+	paths, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	merged := &ast.File{Name: ast.NewIdent("main")}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		if len(merged.Decls) == 0 {
+			merged.Name = f.Name
+		}
+		merged.Decls = append(merged.Decls, f.Decls...)
+	}
+	if len(merged.Decls) == 0 {
+		t.Fatalf("no production Go declarations found in %s", dir)
+	}
+	return merged, fset
 }
 
 func namedStructFields(t *testing.T, f *ast.File, name string) map[string]ast.Expr {

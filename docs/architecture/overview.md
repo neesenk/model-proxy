@@ -241,5 +241,7 @@ composition root → internal/config → internal/pricing / internal/protocol
 账号测活的单次 runtime snapshot、internal 叶子包 import（含 accounts/catalog）、
 `internal/observe/events`、`internal/cache` 与各自根 adapter 的职责、
 `internal/config` 依赖 allowlist、根配置兼容 facade 以及 Fusion 不绕过
-`targetPlan`，不是字符串扫描）；行为与并发验证仍按
+`targetPlan`，不是字符串扫描）。`Proxy` / `runtime.Manager` 的语义所有权检查
+合并 package 内全部生产 Go 声明，不绑定单一物理文件；adapter/facade 的精确形状
+约束仍保持 file-scoped。行为与并发验证仍按
 `docs/engineering/testing.md` 执行。
