@@ -5,6 +5,7 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
+	"model-proxy/internal/shadow"
 	"model-proxy/internal/targetexec"
 	"model-proxy/provider"
 )
@@ -21,7 +22,7 @@ type runtimeSnapshot struct {
 	expandedRoutes map[string][]RouteTarget
 	catalog        *catalog.Catalog
 	cache          *responsecache.Store
-	shadow         *shadowRuntime
+	shadow         *shadow.Runtime
 }
 
 // snapshotRuntime captures every reload-owned dependency under one brief read

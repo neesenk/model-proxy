@@ -110,6 +110,15 @@ body 的映射、协议转换后客户端字节、HTTP list/detail 脱敏、repl
 Fusion/Shadow 记录以及 shutdown drain 顺序的集成测试。列表测试必须同时断言
 request body、response body、response headers 均不出现，不能只检查其中一项。
 
+Fusion 的 registry/budget、quorum/grace collection、judge/synthesis body、
+usage/rune helper 和 Engine gate/fan-out 单测归 `internal/fusion/*_test.go`；
+Shadow 的 sampling、concurrency gate、detached request rewrite/auth/header、
+fail-closed conversion 与 bounded capture 单测归
+`internal/shadow/*_test.go`。根包只保留真实 resolver/target plan、reload
+generation、target policy、stream/client response、metrics/events/request log
+和 Shadow-before-drain 集成；不得为检查 semaphore、registry ring 或随机数而
+暴露内部字段或恢复根兼容类型。
+
 SQLite stats 的 schema/additive migration、legacy import、minute/agent upsert、
 retention、raw/wide/calendar 查询与 query plan 测试归
 `internal/observe/stats/*_test.go`。根包只保留 metrics/tokens/agents → flusher

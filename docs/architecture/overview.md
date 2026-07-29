@@ -12,8 +12,13 @@ Web/API 保持同一部署单元，但通过显式数据结构和窄端口隔离
 
 根包的物理布局按职责逐步收敛：`proxy.go` 只保留 composition-root owner；
 `proxy_forward.go` 集中主请求的 forward/serve 调度、failover 与 commit 编排；
-`proxy_shadow.go` 集中 Shadow post-commit dispatch、可热重载 runtime、sampling
-与异步执行；
+`proxy_shadow.go` 只保留 Shadow post-commit policy、lifecycle admission、
+generation-bound resolver/plan 与 request-log 投影；可热重载 sampling/
+concurrency/client 及 detached HTTP 执行归 `internal/shadow`；
+`fusion.go` 是 captured runtime 到 `internal/fusion.Engine` 的应用适配，并保留
+panel/judge 的 target policy adapter 与 synthesizer 的正常 target executor
+接线；fan-out、quorum/grace、judge/body 构造、budget 和 registry 归
+`internal/fusion`；
 `provider_build.go` 以一次账号 snapshot 同时构建 provider、pool identity 和
 implicit-route eligibility；
 `proxy_constructor.go` 负责组件装配、状态恢复、Close 委派和 stats reset；
@@ -106,6 +111,25 @@ replacement 和跨 pass cooldown 终局决策。`routing.Planner` 只能由
 调用 `Proxy.schedule`，策略包不得 import Proxy、runtime Manager、target executor
 或任何 I/O owner。
 
+`internal/fusion` 是只依赖 `internal/config` 值类型的编排包：
+`Engine` 拥有 first-turn/tools/budget gate、panel fan-out、quorum/grace、
+judge、三协议 synthesis body 构造和 run 记录时序；`Registry` 拥有 200 条有界
+run ring、per-workflow aggregate 与 local-day budget。该包只经
+`fusion.Ports` 请求 generation-bound leg/synthesis 能力，不得访问 `Proxy`、
+HTTP client、runtime Manager、metrics/events/request log 或 reload-owned
+对象。根 `fusionAdapter` 在一次 `fusionCtx.runtime` 上实现这些端口；
+panel/judge 仍使用共享 `targetexec.Plan`，synthesizer 仍通过唯一
+`newTargetAttempt → targetexec.Executor` 返回客户端。
+
+`internal/shadow` 拥有 reload-swappable `Runtime`：sample decision、非阻塞
+concurrency gate、专用 timeout client，以及基于已解析 `targetexec.Plan` 的
+model rewrite、fail-closed conversion、provider auth/rewrite/header、detached
+HTTP drain 和 bounded capture。它不得使用 target executor 或生产
+state/effects。根 `proxy_shadow.go` 是唯一 post-commit adapter，先基于主请求
+captured runtime 做 eligibility/sample/acquire，再经 `proxyLifecycle` 接纳；
+goroutine 内仅做 generation-bound resolver/plan、调用 `shadow.Runtime.Execute`
+并投影 request log。
+
 `internal/accounts` 是无仓库内依赖的 API-key 账号存储叶子包，拥有 credential
 tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进程锁。根
 `accounts_adapter.go` 只适配 HOME 并为尚在组合层的登录、Web、Provider 构建保留
@@ -163,10 +187,12 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`manager.go` �
 
 ## 编排与异步分支
 
-- Fusion 全程持有主请求的 `runtimeSnapshot`。panel/judge 共用内部非流式策略，
-  synthesizer 通过正常 `targetexec.Attempt → targetexec.Executor` 返回客户端。
+- Fusion 全程持有主请求的 `runtimeSnapshot`。`internal/fusion.Engine` 拥有
+  gates/fan-out/quorum/judge/registry，根 adapter 让 panel/judge 共用非流式
+  target policy，并让 synthesizer 通过正常
+  `targetexec.Attempt → targetexec.Executor` 返回客户端。
 - Shadow 由 `serveOnce` 在主请求 commit 后根据 `targetexec.Commit` 接纳和派发，同时
-  捕获 `runtimeSnapshot` 与 `shadowRuntime`；executor 和 Fusion synthesizer
+  捕获 `runtimeSnapshot` 与 `*shadow.Runtime`；executor 和 Fusion synthesizer
   均不得启动 Shadow，goroutine 内不得重新读取 reload-owned 状态。
 - Cache、request log、usage scanner 位于响应转换外层，只观察客户端协议字节。
 - Analytics 的价格目录、条件抓取、原子缓存、override 解析与成本公式由
@@ -224,7 +250,8 @@ commit，则允许 save + reload 完成后再关闭 Proxy。
 
 ```text
 transport → orchestration → target plan → target executor → provider
-Fusion/Shadow ────────────────┘
+root Fusion adapter → internal/fusion
+root Shadow adapter → internal/shadow → target plan / bodycapture
 Web → proxyReadView / proxyAdminCommands
 lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
@@ -248,7 +275,12 @@ composition root → internal/targetexec → internal/protocol / provider
 
 - `webServer` 持有 `*Proxy`，或 Web handler 绕过 capability 直接访问 Proxy；
 - `web.go` 用裸 `go` 启动绕过 `webTaskOwner` 的后台任务；
-- Fusion/Shadow 复制 provider lookup、协议选择、转换或 URL/path 逻辑；
+- `internal/fusion` 访问 Proxy、HTTP、runtime/observability owner，或根
+  `runFusion` 恢复 fan-out/quorum/body/registry 策略副本；
+- `internal/shadow` 访问 Proxy、lifecycle、runtime Manager、request log、
+  metrics/events 或 `targetexec.Executor`，或根 `runShadow` 恢复 detached HTTP、
+  auth、转换和 bounded capture；
+- Fusion/Shadow adapter 复制 provider lookup、协议选择或 target plan 逻辑；
 - request、response、SSE 各自维护协议方向 switch；
 - `targetexec.Executor` import/持有 `Proxy` 或其他 composition-root owner；
 - 根 `targetexec_adapter.go` 重新实现 HTTP、转换、retry 或 Shadow 编排；
@@ -297,7 +329,8 @@ composition root → internal/targetexec → internal/protocol / provider
 `webServer` 字段类型、Web capability 方法 allowlist、禁止的 `w.p` selector、
 账号测活的单次 runtime snapshot、internal 叶子包 import（含 accounts/catalog）、
 `internal/observe/events`、`internal/cache` 与各自根 adapter 的职责、
-`internal/config` 依赖 allowlist、根配置兼容 facade 以及 Fusion 不绕过
+`internal/config` 依赖 allowlist、根配置兼容 facade、`internal/fusion`/
+`internal/shadow` import 与 owner 边界，以及 Fusion/Shadow 不绕过
 `targetexec.Plan`，不是字符串扫描）。`Proxy` / `runtime.Manager` 的语义所有权检查
 合并 package 内全部生产 Go 声明，不绑定单一物理文件；adapter/facade 的精确形状
 约束仍保持 file-scoped。行为与并发验证仍按

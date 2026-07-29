@@ -35,6 +35,15 @@
   provider、protocol、wire verdict 与视觉能力投影为 plan input。准备逻辑不得
   复制，异步分支只能使用主请求捕获的 runtime snapshot，禁止在 goroutine 内
   重新读取 reload-owned 状态。
+- Fusion 的 gates、fan-out、quorum/grace、judge/body 构造和 registry 统一归
+  `internal/fusion.Engine/Registry`。根 `fusionAdapter` 只能用 captured
+  `fusionCtx.runtime` 实现 tool、leg、synthesis 三个窄端口；panel/judge 的
+  target policy 留在 adapter，synthesizer 必须继续走唯一
+  `newTargetAttempt → targetexec.Executor`。
+- Shadow 的 sampling/concurrency/client 与 detached HTTP/capture 统一归
+  `internal/shadow.Runtime`。根 `proxy_shadow.go` 只拥有 commit 后 eligibility、
+  `proxyLifecycle` admission、generation-bound resolver/plan 和 request-log
+  投影；Shadow 禁止进入 target executor 或写生产 health/metrics/events。
 - Web/API handler 只能通过 `proxyReadView` 读取运行时；不得直接获取 Proxy 锁或
   读取 config/provider/health/model-lock 内部 map。
 - Proxy 级后台任务必须由 `proxyLifecycle` 接纳，daemon 只调用

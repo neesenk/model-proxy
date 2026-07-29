@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"model-proxy/internal/observe/requestlog"
+	shadowexec "model-proxy/internal/shadow"
 )
 
 // TestShouldShadow: rate=0 → false, rate>=1 → true, rate between → probabilistic.
@@ -25,12 +26,14 @@ func TestShouldShadow(t *testing.T) {
 	}
 	// rate >= 1 → always true.
 	p := newTestProxy(t, cfg)
-	p.shadow.Store(&shadowRuntime{sem: make(chan struct{}, 1), sampRate: 1.0})
+	one := 1.0
+	p.shadow.Store(shadowexec.NewRuntime(shadowexec.Options{SampleRate: &one, MaxConcurrent: 1}))
 	if !p.shouldShadow() {
 		t.Error("rate=1.0 should return true")
 	}
 	// rate <= 0 → always false.
-	p.shadow.Store(&shadowRuntime{sem: make(chan struct{}, 1), sampRate: 0})
+	zero := 0.0
+	p.shadow.Store(shadowexec.NewRuntime(shadowexec.Options{SampleRate: &zero, MaxConcurrent: 1}))
 	if p.shouldShadow() {
 		t.Error("rate=0 should return false")
 	}
@@ -108,11 +111,10 @@ func TestReload_ShadowDisabledStopsFiring(t *testing.T) {
 		t.Fatalf("reload: %v", err)
 	}
 	send()
-	// Admission to the shadow semaphore happens synchronously before the
-	// fire-and-forget goroutine starts. An empty gate after send therefore proves
-	// this request was not admitted, without a timing-based absence assertion.
-	if inFlight := len(p.shadow.Load().sem); inFlight != 0 {
-		t.Fatalf("after disabling shadow via reload, in-flight shadow admissions=%d, want 0", inFlight)
+	// Sampling is checked synchronously before lifecycle admission. The captured
+	// post-reload runtime must therefore reject the request deterministically.
+	if p.shadow.Load().ShouldSample() {
+		t.Fatal("post-reload shadow runtime still samples at rate 0")
 	}
 	if got := candHits.Load(); got != 1 {
 		t.Errorf("after disabling shadow via reload, candHits=%d, want 1 (shadow kept firing — sample rate not reload-aware)", got)
@@ -213,15 +215,9 @@ func TestShadow_ConvertFail_Closed(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	// Admission is synchronous; wait for the admitted conversion attempt to
-	// finish, then assert the fail-closed path never reached the backend.
-	deadline := time.Now().Add(time.Second)
-	for len(p.shadow.Load().sem) != 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if inFlight := len(p.shadow.Load().sem); inFlight != 0 {
-		t.Fatalf("shadow conversion attempt did not finish before deadline; in-flight=%d", inFlight)
-	}
+	// Close waits for the admitted detached task, so the zero-hit assertion has
+	// no asynchronous timing window.
+	p.Close()
 	if got := shadowHits.Load(); got != 0 {
 		t.Errorf("shadow backend hit %d time(s) with an unconverted body after convert failure (fail-open); want 0", got)
 	}

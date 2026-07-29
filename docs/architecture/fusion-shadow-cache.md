@@ -2,7 +2,8 @@
 
 ## 适用范围
 
-修改 `fusion.go`、Shadow、request log、`internal/cache`、
+修改 `fusion.go`、`internal/fusion`、`proxy_shadow.go`、`internal/shadow`、
+request log、`internal/cache`、
 `internal/transport/bodycapture`、live events 或 replay 时必读。API 字段另见
 `docs/web-api.md`。
 
@@ -46,15 +47,23 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 - 结果进入 request_log，id 以 `shadow-<primary-id>` 配对；
 - reload 必须让一次 dispatch 全程使用同一 generation 的 runtime、target、provider map 和 client。
 
-`proxy_shadow.go` 拥有 Shadow dispatch runtime 与 post-commit 异步执行。单目标
-executor 只返回含实际上游请求体的最小 `targetexec.Commit`，不持有 Shadow 或
-lifecycle 回调。`serveOnce` 在确认 commit 后执行 sampling、semaphore 和
-lifecycle admission，并在启动 goroutine 前同时捕获 `runtimeSnapshot` 与
-`shadowRuntime`。Shadow 随后与普通 route/Fusion 共用 `targetexec.Plan` 完成
-provider config/runtime impl、backend protocol、model rewrite、转换和 URL/path；
-goroutine 内禁止重新读取 `p.cfg`/`p.providers`/`p.catalog` 或再次 load
-`p.shadow`。Fusion synthesizer 不经过这条 post-commit hook，禁止递归派发
-Shadow。
+`internal/shadow.Runtime` 拥有可热重载的 sample decision、semaphore、专用
+timeout client 和 detached transport；`Execute` 只消费根层已解析的
+`targetexec.Plan` 与主请求 commit body，完成 model rewrite、fail-closed
+conversion、provider rewrite/auth/header、HTTP drain 和 bounded capture，不得
+进入 `targetexec.Executor` 或生产 metrics/health/sticky/events。
+
+`proxy_shadow.go` 是唯一 post-commit adapter。单目标 executor 只返回含实际
+上游请求体的最小 `targetexec.Commit`，不持有 Shadow 或 lifecycle 回调。
+`serveOnce` 确认 commit 后调用 adapter；adapter 按
+eligibility → sample → non-blocking acquire → lifecycle admission 的顺序接纳，
+`TryAcquire` 返回一次性、幂等释放的 permit，admission 拒绝与任务完成路径各自
+释放同一 permit，禁止直接操作共享 semaphore。adapter 在启动 goroutine 前同时
+捕获 `runtimeSnapshot` 与 `*shadow.Runtime`。
+goroutine 内由根 adapter 使用 captured provider/pool/generation 解析 virtual
+target 和 `targetexec.Plan`，再调用 `Runtime.Execute` 并映射 request log；
+禁止重新读取 `p.cfg`/`p.providers`/`p.catalog` 或再次 load `p.shadow`。Fusion
+synthesizer 不经过这条 post-commit hook，禁止递归派发 Shadow。
 
 Shadow 作为 `proxyLifecycle` 的有限 log-producing task 接纳：shutdown 开始后
 拒绝新任务，已接纳任务受 shadow HTTP timeout 约束并在 request logger drain
@@ -91,10 +100,19 @@ JSONL schema、writer/rotation/retention、查询 heap、Summary 与 Shadow 聚�
 
 顶层 `fusion:` 定义 2–4 个 panel 成员、synthesizer、可选 `min_panel`、judge、budget 和 instruction。route 通过 `{provider: fusion, model: <workflow>}` 引用。
 
+`internal/fusion.Engine` 是工作流 owner：拥有 first-turn/tools/budget gates、
+panel fan-out、quorum/grace、judge、候选注入、degrade 和 registry 记录；
+`Registry` 拥有有界 run ring、aggregate 与 daily admission。Engine 只消费
+`fusion.Ports`，不持有 HTTP、Proxy、runtime state 或 observability stores。
+根 `fusionAdapter` 把同一个 `fusionCtx.runtime` 绑定为三个窄能力：
+tool capability、非流式 leg 和 client-facing synthesis；根 `runFusion` 不再
+启动 goroutine、计算 quorum 或维护 registry。
+
 ### Panel
 
 每个成员独立 goroutine、独立 timeout。整个 Fusion 请求持有与普通 route 相同的
-`runtimeSnapshot`；panel、judge、synthesizer 与普通 route 均通过
+`runtimeSnapshot`；goroutine 由 `internal/fusion.Engine` 启动，实际 leg 由根
+generation-bound adapter 执行。panel、judge、synthesizer 与普通 route 均通过
 `targetexec.Plan` 完成 provider config/runtime impl、backend protocol、model
 rewrite、协议转换及 base URL/path 选择，Fusion 不得重新读取 reload-owned
 catalog/config。
@@ -152,7 +170,7 @@ judge 是可选的一次非流式内部调用，复用 panel leg 管道。成功
 ## 回归测试
 
 - cache 完整 EOF、client cancel、转换响应 header。
-- shadow 真实 executor 路径的 reload generation、Close 时 logger drain 顺序、
+- shadow detached transport 路径的 reload generation、Close 时 logger drain 顺序、
   协议与 base URL 校验、并发 cap、sample_rate=0。
 - request log 大 body 的 metadata 内存边界和跨文件乱序。
 - Fusion pooled resolver、共享 target plan、model lock、paramBlock 即时重试、
@@ -161,3 +179,7 @@ judge 是可选的一次非流式内部调用，复用 panel leg 管道。成功
   原生 responses 后端 leg 的候选文本提取（不误判 empty draft）、
   responses 客户端的 previous_response_id 展开与最终响应录制。
 - quorum impossible、grace、judge failure、tools fallback、daily budget。
+- `internal/fusion` 直接断言 gate、fan-out/cancel、三协议 body、registry detached
+  snapshot；`internal/shadow` 直接断言 sampling 阈值、gate、header/auth/path、
+  conversion fail-closed 与 bounded capture。根包只保留 generation/lifecycle/
+  pool/protocol/log/metrics 的跨模块集成断言。

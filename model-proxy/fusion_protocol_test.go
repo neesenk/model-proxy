@@ -72,22 +72,6 @@ func TestFusion_CrossProtocolPanel(t *testing.T) {
 	}
 }
 
-// TestParseUsageJSON (plan #6): non-streaming usage parsing covers the
-// anthropic shape (incl. cache fields) and the openai shape.
-func TestParseUsageJSON(t *testing.T) {
-	anth := parseUsageJSON([]byte(`{"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":3,"cache_read_input_tokens":2}}`))
-	if anth.Input != 10 || anth.Output != 5 || anth.CacheCreation != 3 || anth.CacheRead != 2 {
-		t.Errorf("anthropic usage = %+v, want {10 5 3 2}", anth)
-	}
-	oai := parseUsageJSON([]byte(`{"usage":{"prompt_tokens":20,"completion_tokens":7}}`))
-	if oai.Input != 20 || oai.Output != 7 {
-		t.Errorf("openai usage = %+v, want {20 7}", oai)
-	}
-	if u := parseUsageJSON([]byte(`not json`)); u != (tokenUsage{}) {
-		t.Errorf("garbage usage = %+v, want zero", u)
-	}
-}
-
 // TestFusionLeg_WireVerdict404Correction (review fix): a panel leg converted
 // to /responses by the wire verdict that comes back 404 must flip the verdict
 // (noteWireResponsesMiss) and must NOT lock the model — the verdict was wrong,

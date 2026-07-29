@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"model-proxy/internal/observe/requestlog"
+	shadowexec "model-proxy/internal/shadow"
 )
 
 // TestForceProvider_OverridesRouting: a request with x-mp-force-provider is
@@ -141,7 +142,11 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 	// this already-admitted request must retain the old sampling bundle.
 	p.mu.Lock()
 	p.cfg = newConfig
-	p.shadow.Store(newShadowRuntime(newConfig))
+	p.shadow.Store(shadowexec.NewRuntime(shadowexec.Options{
+		SampleRate:    newConfig.ShadowSampleRate,
+		MaxConcurrent: newConfig.ShadowMaxConcurrent,
+		Timeout:       newConfig.Scheduling.Timeout(),
+	}))
 	p.mu.Unlock()
 
 	close(releasePrimary)
@@ -294,6 +299,72 @@ func TestShadow_LogsResult(t *testing.T) {
 	}
 	if !strings.Contains(shadowRec.ResponseBody, `"shadow":true`) {
 		t.Errorf("shadow response body not captured: %q", shadowRec.ResponseBody)
+	}
+}
+
+func TestRunShadowPartialResponseIsLogged(t *testing.T) {
+	shadowUpstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			t.Error("test server does not support hijacking")
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack shadow response: %v", err)
+			return
+		}
+		_, _ = io.WriteString(
+			conn,
+			"HTTP/1.1 200 OK\r\n"+
+				"Content-Type: application/json\r\n"+
+				"X-Request-Id: partial-response\r\n"+
+				"Content-Length: 20\r\n"+
+				"Connection: close\r\n\r\n"+
+				"partial",
+		)
+		_ = conn.Close()
+	}))
+	defer shadowUpstream.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"candidate": {Provider: testProviderID, OpenAIBaseURL: shadowUpstream.URL},
+		},
+	}
+	proxy, logDir, shutdownLogger := newReqLogProxy(t, cfg)
+	proxy.providers["candidate"] = &testProv{key: "candidate"}
+	proxy.runShadow(
+		proxy.snapshotRuntime(),
+		proxy.shadow.Load(),
+		"openai",
+		"openai",
+		"alias",
+		"alias",
+		ShadowTarget{Provider: "candidate", Model: "shadow-model", Protocol: "openai"},
+		[]byte(`{"model":"alias","messages":[]}`),
+		"partial-1",
+	)
+	shutdownLogger()
+
+	records := allRecords(t, logDir)
+	if len(records) != 1 {
+		t.Fatalf("request-log records = %d, want one partial Shadow record: %+v", len(records), records)
+	}
+	record := records[0]
+	if record.RequestID != "shadow-partial-1" || !record.Shadow ||
+		record.Provider != "candidate" || record.UpstreamModel != "shadow-model" ||
+		record.Status != http.StatusOK {
+		t.Errorf("partial Shadow identity/status = %+v", record)
+	}
+	if record.ResponseBody != "partial" || record.ResponseSize != 7 {
+		t.Errorf("partial Shadow body/size = %q/%d, want partial/7", record.ResponseBody, record.ResponseSize)
+	}
+	if record.ResponseHeaders != `{"content-type":"application/json","x-request-id":"partial-response"}` {
+		t.Errorf("partial Shadow response headers = %s", record.ResponseHeaders)
+	}
+	if !strings.Contains(record.RequestBody, `"model":"shadow-model"`) {
+		t.Errorf("partial Shadow request body = %s, want rewritten model", record.RequestBody)
 	}
 }
 

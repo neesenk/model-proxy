@@ -2,178 +2,25 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"model-proxy/internal/fusion"
 )
 
-// fusion_obs_test.go covers the fusion observability layer (fusion_obs.go):
-// the run registry (record / ring eviction / aggregates / daily budget), the
-// /api/fusion endpoint, the cost gates (max_runs_per_day, first_turn_only),
-// and the quality knobs (judge report injection + failure tolerance,
-// instruction override), plus doctor output for the recipe fields.
-
-// --- registry unit tests ---
-
-// TestFusionRegistry_AdmitBudget: the daily budget admits up to the limit,
-// rejects beyond it, resets on the local-day rollover, and limit<=0 is
-// unlimited. Nil-registry calls are no-op permissive.
-func TestFusionRegistry_AdmitBudget(t *testing.T) {
-	now := time.Now()
-	r := newFusionRegistry()
-	if !r.admit("w", 2, now) || !r.admit("w", 2, now) {
-		t.Fatal("first two admissions should succeed")
-	}
-	if r.admit("w", 2, now) {
-		t.Fatal("third admission should be rejected (budget exhausted)")
-	}
-	if !r.admit("other", 2, now) {
-		t.Fatal("budget is per-workflow — another workflow should admit")
-	}
-	if !r.admit("w", 2, now.Add(25*time.Hour)) {
-		t.Fatal("next-day admission should succeed (day rollover resets)")
-	}
-	if !r.admit("w", 0, now) || !r.admit("w", -1, now) {
-		t.Fatal("limit <= 0 should be unlimited")
-	}
-	var nilReg *fusionRegistry
-	if !nilReg.admit("w", 1, now) {
-		t.Fatal("nil registry should admit")
-	}
-	nilReg.record(&fusionRun{Workflow: "w"}) // must not panic
-	if stats, runs := nilReg.snapshot("", now); len(stats) != 0 || len(runs) != 0 {
-		t.Fatal("nil registry snapshot should be empty")
-	}
-}
-
-// TestFusionRegistry_RecordEvictAggregate: runs land in the ring (oldest
-// evicted past the cap, newest first on read) and fold correctly into the
-// per-workflow cumulative aggregate.
-func TestFusionRegistry_RecordEvictAggregate(t *testing.T) {
-	now := time.Now()
-	r := newFusionRegistry()
-	const total = fusionRecentCap + 5
-	for i := 0; i < total; i++ {
-		run := &fusionRun{
-			RunID: fmt.Sprintf("r%d", i), Ts: int64(i),
-			Route: "hard", Workflow: "w", Quorum: 2,
-			Legs: []fusionLegObs{
-				{Kind: "panel", Input: 10, Output: 5},
-				{Kind: "judge", Input: 3, Output: 1},
-			},
-			SynthInput: 100, SynthOutput: 20, SynthCommitted: true,
-		}
-		if i%2 == 0 {
-			run.DraftsUsed = 2 // quorum met
-		} else {
-			run.DraftsUsed = 1
-			run.Degraded = fusionDegradedInsufficient
-		}
-		r.record(run)
-	}
-	// A second workflow aggregates independently.
-	r3 := newFusionRegistry()
-	r3.record(&fusionRun{RunID: "w1", Workflow: "w", Quorum: 2, DraftsUsed: 2})
-	r3.record(&fusionRun{RunID: "x", Workflow: "other", Quorum: 2, DraftsUsed: 2})
-
-	stats, runs := r.snapshot("w", now)
-	if len(runs) != fusionRecentCap {
-		t.Fatalf("ring size = %d, want %d", len(runs), fusionRecentCap)
-	}
-	if runs[0].RunID != "r204" {
-		t.Errorf("newest run = %q, want r204", runs[0].RunID)
-	}
-	if runs[len(runs)-1].RunID != "r5" {
-		t.Errorf("oldest kept run = %q, want r5 (older evicted)", runs[len(runs)-1].RunID)
-	}
-	st := stats["w"]
-	if st.Runs != total {
-		t.Errorf("runs = %d, want %d", st.Runs, total)
-	}
-	if st.QuorumMet != 103 { // even i in [0,205): 0,2,...,204
-		t.Errorf("quorum_met = %d, want 103", st.QuorumMet)
-	}
-	if st.Degraded[fusionDegradedInsufficient] != 102 {
-		t.Errorf("degraded[insufficient_proposers] = %d, want 102", st.Degraded[fusionDegradedInsufficient])
-	}
-	if st.PanelInput != 10*total || st.PanelOutput != 5*total {
-		t.Errorf("panel tokens = %d/%d, want %d/%d", st.PanelInput, st.PanelOutput, 10*total, 5*total)
-	}
-	if st.JudgeInput != 3*total || st.JudgeOutput != 1*total {
-		t.Errorf("judge tokens = %d/%d, want %d/%d", st.JudgeInput, st.JudgeOutput, 3*total, 1*total)
-	}
-	if st.SynthInput != 100*total || st.SynthOutput != 20*total {
-		t.Errorf("synth tokens = %d/%d, want %d/%d", st.SynthInput, st.SynthOutput, 100*total, 20*total)
-	}
-	// amplification = (panel+judge+synth) / synth = (3075+820+24600)/24600.
-	if st.Amplification != 1.16 {
-		t.Errorf("amplification = %v, want 1.16", st.Amplification)
-	}
-	// Budget counter surfaced as runs_today.
-	r.admit("w", 5, now)
-	r.admit("w", 5, now)
-	stats, _ = r.snapshot("w", now)
-	if stats["w"].RunsToday != 2 {
-		t.Errorf("runs_today = %d, want 2", stats["w"].RunsToday)
-	}
-	// Unfiltered snapshot sees both workflows.
-	stats, _ = r3.snapshot("", now)
-	if len(stats) != 2 || stats["other"].Runs != 1 || stats["w"].Runs != 1 {
-		t.Errorf("unfiltered stats = %+v, want w+other", stats)
-	}
-}
-
-// TestReconcileFusionLegs: members with a received result project into their
-// observation; members without one are marked cut.
-func TestReconcileFusionLegs(t *testing.T) {
-	panel := []RouteTarget{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}}
-	received := []fusionLegResult{
-		{idx: 0, provider: "pa", model: "ma", text: "d", status: 200, latencyMs: 42},
-	}
-	legs := reconcileFusionLegs(panel, received)
-	if len(legs) != 2 {
-		t.Fatalf("legs = %d, want 2", len(legs))
-	}
-	if legs[0].Status != 200 || legs[0].LatencyMs != 42 || legs[0].Cut || legs[0].Err != "" {
-		t.Errorf("leg 0 = %+v, want a clean 200 observation", legs[0])
-	}
-	if !legs[1].Cut || legs[1].Err == "" || legs[1].Provider != "pb" {
-		t.Errorf("leg 1 = %+v, want cut pb observation", legs[1])
-	}
-}
-
-// TestBodyHasAssistantTurn: the first_turn_only probe sees an assistant message
-// in anthropic/openai messages[] and responses input[], and nothing else.
-func TestBodyHasAssistantTurn(t *testing.T) {
-	cases := []struct {
-		name string
-		body string
-		want bool
-	}{
-		{"anthropic first turn", `{"messages":[{"role":"user","content":"hi"}]}`, false},
-		{"anthropic multi-turn", `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"},{"role":"user","content":"again"}]}`, true},
-		{"openai multi-turn", `{"messages":[{"role":"system","content":"s"},{"role":"assistant","content":"a"}]}`, true},
-		{"responses input list", `{"input":[{"role":"assistant","content":"a"}]}`, true},
-		{"responses input string", `{"input":"hello"}`, false},
-		{"system only", `{"system":"s","messages":[{"role":"user","content":"u"}]}`, false},
-		{"garbage", `not json`, false},
-	}
-	for _, c := range cases {
-		if got := bodyHasAssistantTurn([]byte(c.body)); got != c.want {
-			t.Errorf("%s: bodyHasAssistantTurn = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
+// fusion_obs_test.go covers the application integration around
+// internal/fusion: /api/fusion, cost gates, judge behavior, instruction
+// override, and doctor output. Pure registry/engine tests live with the package.
 
 // --- /api/fusion ---
 
 // apiFusionGet queries /api/fusion on a rig proxy and decodes the response.
 func apiFusionGet(t *testing.T, proxy *Proxy, query string) (struct {
-	Workflows map[string]fusionWorkflowStats `json:"workflows"`
-	Runs      []fusionRun                    `json:"runs"`
+	Workflows map[string]fusion.WorkflowStats `json:"workflows"`
+	Runs      []fusion.Run                    `json:"runs"`
 }, int) {
 	t.Helper()
 	w := newWebServer(proxy, "test-config.yaml")
@@ -182,8 +29,8 @@ func apiFusionGet(t *testing.T, proxy *Proxy, query string) (struct {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/fusion"+query, nil))
 	var out struct {
-		Workflows map[string]fusionWorkflowStats `json:"workflows"`
-		Runs      []fusionRun                    `json:"runs"`
+		Workflows map[string]fusion.WorkflowStats `json:"workflows"`
+		Runs      []fusion.Run                    `json:"runs"`
 	}
 	if rec.Code == http.StatusOK {
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -294,19 +141,19 @@ func TestAPIFusion(t *testing.T) {
 		})
 		out, _ := apiFusionGet(t, proxy, "?workflow=recipe")
 		st := out.Workflows["recipe"]
-		if st.Runs != 1 || st.QuorumMet != 0 || st.Degraded[fusionDegradedInsufficient] != 1 {
+		if st.Runs != 1 || st.QuorumMet != 0 || st.Degraded[fusion.DegradedInsufficientProposers] != 1 {
 			t.Errorf("stats = %+v, want 1 degraded run (insufficient_proposers)", st)
 		}
 		if len(out.Runs) != 1 {
 			t.Fatalf("runs = %d, want 1", len(out.Runs))
 		}
 		run := out.Runs[0]
-		if run.Degraded != fusionDegradedInsufficient || run.DraftsUsed != 0 {
+		if run.Degraded != fusion.DegradedInsufficientProposers || run.DraftsUsed != 0 {
 			t.Errorf("run degraded = %q drafts %d, want insufficient_proposers/0", run.Degraded, run.DraftsUsed)
 		}
 		// The failures are visible per leg; the delayed member was cut once the
 		// quorum became unreachable.
-		byProv := map[string]fusionLegObs{}
+		byProv := map[string]fusion.LegObservation{}
 		for _, l := range run.Legs {
 			byProv[l.Provider] = l
 		}
@@ -402,7 +249,7 @@ func TestFusion_BudgetExceeded(t *testing.T) {
 	})
 	out, _ := apiFusionGet(t, proxy, "")
 	st := out.Workflows["recipe"]
-	if st.Runs != 2 || st.QuorumMet != 1 || st.Degraded[fusionDegradedBudget] != 1 || st.RunsToday != 1 {
+	if st.Runs != 2 || st.QuorumMet != 1 || st.Degraded[fusion.DegradedBudgetExceeded] != 1 || st.RunsToday != 1 {
 		t.Errorf("stats = %+v, want runs 2, quorum 1, budget_exceeded 1, runs_today 1", st)
 	}
 }
@@ -440,7 +287,7 @@ func TestFusion_FirstTurnOnly(t *testing.T) {
 	})
 	out, _ := apiFusionGet(t, proxy, "")
 	st := out.Workflows["recipe"]
-	if st.Runs != 2 || st.Degraded[fusionDegradedMultiTurn] != 1 || st.RunsToday != 1 {
+	if st.Runs != 2 || st.Degraded[fusion.DegradedMultiTurn] != 1 || st.RunsToday != 1 {
 		t.Errorf("stats = %+v, want runs 2, multi_turn 1, runs_today 1 (degraded runs don't consume budget)", st)
 	}
 }
@@ -508,7 +355,7 @@ func TestFusion_JudgeReport(t *testing.T) {
 	if !run.JudgeUsed {
 		t.Errorf("run.JudgeUsed = false, want true")
 	}
-	var judgeLeg *fusionLegObs
+	var judgeLeg *fusion.LegObservation
 	for i := range run.Legs {
 		if run.Legs[i].Kind == "judge" {
 			judgeLeg = &run.Legs[i]
@@ -567,7 +414,7 @@ func TestFusion_JudgeFailure(t *testing.T) {
 	if run.Degraded != "" || run.JudgeUsed {
 		t.Errorf("run = degraded %q judgeUsed %v, want no degrade, no judge report", run.Degraded, run.JudgeUsed)
 	}
-	var judgeLeg *fusionLegObs
+	var judgeLeg *fusion.LegObservation
 	for i := range run.Legs {
 		if run.Legs[i].Kind == "judge" {
 			judgeLeg = &run.Legs[i]

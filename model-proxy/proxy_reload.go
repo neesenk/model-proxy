@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"model-proxy/internal/shadow"
 )
 
 // reloadAppliedWarning means the new config is already live, but a required
@@ -45,7 +47,11 @@ func (p *Proxy) reload(configPath string) error {
 	// shadow_max_concurrent / client-timeout changes take effect at once — without
 	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until
 	// restart. Swapped atomically; in-flight shadow goroutines finish on the old bundle.
-	p.shadow.Store(newShadowRuntime(cfg))
+	p.shadow.Store(shadow.NewRuntime(shadow.Options{
+		SampleRate:    cfg.ShadowSampleRate,
+		MaxConcurrent: cfg.ShadowMaxConcurrent,
+		Timeout:       cfg.Scheduling.Timeout(),
+	}))
 	p.runtimeState.ReplaceGeneration(generation)
 	p.mu.Unlock()
 	for _, w := range hw {

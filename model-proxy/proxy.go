@@ -7,12 +7,14 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
+	"model-proxy/internal/fusion"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/protocol"
 	runtimestate "model-proxy/internal/runtime"
 	runtimewire "model-proxy/internal/runtime/wirecap"
+	"model-proxy/internal/shadow"
 	"model-proxy/provider"
 )
 
@@ -25,21 +27,21 @@ type Proxy struct {
 	cfg              *Config
 	providers        map[string]provider.Provider // provider name → Provider (shared)
 	client           *http.Client
-	quota            *quotaTracker                 // background quota poller; nil only in degenerate tests
-	metrics          *metricsStore                 // request counters (atomic); nil only in degenerate tests
-	tokens           *tokenCounter                 // SSE-scanned token usage; nil only in degenerate tests
-	agents           *agentCounter                 // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats            *observestats.Store           // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
-	flusher          *statsFlusher                 // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog           *requestlog.Logger            // per-request access log (full bodies); nil = disabled (default) or init failure
-	reqLogStarted    bool                          // lifecycle owns loop/shutdown only when started by startRuntimeServices
-	cache            *responsecache.Store          // exact-match response cache (prompt-hash + TTL); nil = disabled
-	responsesState   *protocol.ResponsesStateStore // previous_response_id replay for Responses clients bridged to stateless backends
-	events           *observeevents.Hub            // live request monitor fan-out hub (SSE /api/events); always non-nil
-	fusionReg        *fusionRegistry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
-	catalog          *catalog.Catalog              // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
-	shadow           atomic.Pointer[shadowRuntime] // reload-swappable shadow dispatch state (sample rate, concurrency gate, client); see shadowRuntime
-	pricingMu        sync.Mutex                    // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
+	quota            *quotaTracker                  // background quota poller; nil only in degenerate tests
+	metrics          *metricsStore                  // request counters (atomic); nil only in degenerate tests
+	tokens           *tokenCounter                  // SSE-scanned token usage; nil only in degenerate tests
+	agents           *agentCounter                  // per-agent (UA) request/token counters; nil only in degenerate tests
+	stats            *observestats.Store            // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
+	flusher          *statsFlusher                  // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog           *requestlog.Logger             // per-request access log (full bodies); nil = disabled (default) or init failure
+	reqLogStarted    bool                           // lifecycle owns loop/shutdown only when started by startRuntimeServices
+	cache            *responsecache.Store           // exact-match response cache (prompt-hash + TTL); nil = disabled
+	responsesState   *protocol.ResponsesStateStore  // previous_response_id replay for Responses clients bridged to stateless backends
+	events           *observeevents.Hub             // live request monitor fan-out hub (SSE /api/events); always non-nil
+	fusionReg        *fusion.Registry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
+	catalog          *catalog.Catalog               // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
+	shadow           atomic.Pointer[shadow.Runtime] // reload-swappable detached Shadow runtime; captured with each request generation
+	pricingMu        sync.Mutex                     // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
 	closeOnce        sync.Once
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,

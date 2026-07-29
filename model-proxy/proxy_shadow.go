@@ -1,18 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"log"
-	"math/rand"
-	"net/http"
-	"strings"
-	"time"
 
 	"model-proxy/internal/protocol"
+	shadowexec "model-proxy/internal/shadow"
 	"model-proxy/internal/targetexec"
-	"model-proxy/internal/transport/bodycapture"
 )
 
 // dispatchShadowAfterCommit is orchestration-layer post-processing for a
@@ -38,74 +32,29 @@ func (p *Proxy) dispatchShadowAfterCommit(
 		return
 	}
 	shadowRuntime := runtime.shadow
-	if shadowRuntime == nil || !shadowRuntime.shouldSample() {
+	if shadowRuntime == nil || !shadowRuntime.ShouldSample() {
 		return
 	}
-	select {
-	case shadowRuntime.sem <- struct{}{}:
-		if !p.lifecycle.runBeforeLogDrain(func() {
-			defer func() { <-shadowRuntime.sem }()
-			p.runShadow(
-				runtime,
-				shadowRuntime,
-				proto,
-				backendProto,
-				calledModel,
-				exposed,
-				shadow,
-				commit.RequestBody(),
-				primaryRequestID,
-			)
-		}) {
-			<-shadowRuntime.sem
-		}
-	default:
-		// Shadow concurrency cap reached → skip (best-effort).
+	permit := shadowRuntime.TryAcquire()
+	if permit == nil {
+		return
 	}
-}
-
-// shadowRuntime is the reload-swappable shadow dispatch state. reload replaces
-// the whole bundle via an atomic store; each dispatch loads it once, so in-flight
-// goroutines finish on the bundle they started with (same sem/client) while new
-// traffic follows the reloaded sample rate / concurrency cap / client timeout.
-type shadowRuntime struct {
-	sem      chan struct{} // buffered concurrency gate (cap = max concurrent)
-	client   *http.Client  // shared HTTP client for shadow requests
-	sampRate float64       // 0-1; fraction of requests to shadow (1.0 = all, 0 = off)
-}
-
-// newShadowRuntime builds the shadow dispatch bundle from a config (used by both
-// NewProxy and reload so the two stay in sync).
-func newShadowRuntime(cfg *Config) *shadowRuntime {
-	maxConc := cfg.ShadowMaxConcurrent
-	if maxConc <= 0 {
-		maxConc = 4
+	if !p.lifecycle.runBeforeLogDrain(func() {
+		defer permit.Release()
+		p.runShadow(
+			runtime,
+			shadowRuntime,
+			proto,
+			backendProto,
+			calledModel,
+			exposed,
+			shadow,
+			commit.RequestBody(),
+			primaryRequestID,
+		)
+	}) {
+		permit.Release()
 	}
-	sr := &shadowRuntime{
-		sem:      make(chan struct{}, maxConc),
-		client:   &http.Client{Timeout: cfg.Scheduling.Timeout()},
-		sampRate: 1.0, // default; nil ShadowSampleRate = all requests
-	}
-	if cfg.ShadowSampleRate != nil {
-		sr.sampRate = *cfg.ShadowSampleRate // explicit 0.0 = off
-	}
-	return sr
-}
-
-// shouldSample reports whether this request should be shadow-evaluated, based on
-// the configured sample rate (1.0 = all, 0.5 = half, 0 = none). A nil sem means
-// shadowing is not configured.
-func (sr *shadowRuntime) shouldSample() bool {
-	if sr == nil || sr.sem == nil {
-		return false
-	}
-	if sr.sampRate >= 1 {
-		return true
-	}
-	if sr.sampRate <= 0 {
-		return false
-	}
-	return rand.Float64() < sr.sampRate
 }
 
 // shouldShadow reports whether this request should be shadow-evaluated, based on
@@ -113,7 +62,7 @@ func (sr *shadowRuntime) shouldSample() bool {
 // pointer is swapped atomically, so a config change (e.g. sample_rate: 0) takes
 // effect immediately without a restart.
 func (p *Proxy) shouldShadow() bool {
-	return p.shadow.Load().shouldSample()
+	return p.shadow.Load().ShouldSample()
 }
 
 // runShadow sends the same prompt to a candidate backend (shadow evaluation,
@@ -126,14 +75,14 @@ func (p *Proxy) shouldShadow() bool {
 //
 // `bodyProto` is the protocol of reqBody (the primary target's backend proto —
 // reqBody may already be converted from the client's proto). The shadow backend's
-// own protocol is shadow.Protocol (defaulting to bodyProto); runShadow selects the
+// own protocol is shadowTarget.Protocol (defaulting to bodyProto); runShadow selects the
 // shadow base URL + path for THAT protocol and converts the body if it differs.
-func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime, proto, bodyProto, calledModel, exposed string, shadow ShadowTarget, reqBody []byte, primaryReqID string) {
+func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowexec.Runtime, proto, bodyProto, calledModel, exposed string, shadowTarget ShadowTarget, reqBody []byte, primaryReqID string) {
 	if runtime.cfg == nil {
 		// Defensive: runtimeSnapshot is handed around as a plain value — a
 		// future call site that forgets to populate it must not nil-deref
 		// below (runtime.cfg.Scheduling.Timeout()). Log loudly and skip.
-		log.Printf("[shadow] %s: skipped — runtime snapshot has no config (caller bug)", shadow.Provider)
+		log.Printf("[shadow] %s: skipped — runtime snapshot has no config (caller bug)", shadowTarget.Provider)
 		return
 	}
 	logger := p.reqLog
@@ -145,7 +94,7 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 	// shadow is fire-and-forget). A pooled parent name has no runtime instance, so
 	// without this shadow silently stopped sampling the moment a second account was
 	// added.
-	target := RouteTarget{Provider: shadow.Provider, Model: shadow.Model, Protocol: shadow.Protocol}
+	target := RouteTarget{Provider: shadowTarget.Provider, Model: shadowTarget.Model, Protocol: shadowTarget.Protocol}
 	picked, ok := newResolver(
 		p,
 		runtime.providers,
@@ -153,83 +102,41 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowRuntime,
 		runtime.generation,
 	).Pick(target, "")
 	if !ok {
-		log.Printf("[shadow] %s: provider not available (no runnable healthy virtual)", shadow.Provider)
+		log.Printf("[shadow] %s: provider not available (no runnable healthy virtual)", shadowTarget.Provider)
 		return
 	}
 	target = picked
-	shadow.Provider = target.Provider
 	plan, err := p.planTarget(targetPlanInput{
 		runtime: runtime, target: target, clientProto: bodyProto, clientPath: protocol.BackendPath(protocol.Protocol(bodyProto)),
 	})
 	if err != nil {
-		log.Printf("[shadow] %s: target plan failed: %v", shadow.Provider, err)
+		log.Printf("[shadow] %s: target plan failed: %v", target.Provider, err)
 		return
 	}
-	impl := plan.Provider()
-	if impl == nil {
-		log.Printf("[shadow] %s: provider not available", shadow.Provider)
-		return
-	}
-	// Shadow backend protocol: declared, else the provider's ProtocolHint
-	// (auto-resolve, e.g. codex→responses), else the wire verdict, else same as
-	// the body's. Route + convert accordingly so the shadow gets a request in
-	// the protocol IT speaks.
-	sbody := plan.RewriteModel(reqBody, calledModel)
-	sbody, err = plan.ConvertBody(sbody)
-	if err != nil {
-		// Fail CLOSED: don't send the unconverted body to the shadow backend.
-		log.Printf("[shadow] %s: %s→%s convert failed: %v — skipping",
-			shadow.Provider, bodyProto, plan.BackendProtocol(), err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), runtime.cfg.Scheduling.Timeout())
-	defer cancel()
-	targetURL := strings.TrimRight(plan.BaseURL(), "/") + plan.UpstreamPath()
-	if impl != nil {
-		targetURL, sbody = impl.RewriteRequest(targetURL, sbody, plan.UpstreamPath())
-	}
-	sreq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(sbody))
-	if err != nil {
-		log.Printf("[shadow] %s: build req: %v", shadow.Provider, err)
-		return
-	}
-	sreq.Header.Set("content-type", "application/json")
-	if impl != nil {
-		if err := impl.AuthHeaders(sreq); err != nil {
-			log.Printf("[shadow] %s: auth: %v", shadow.Provider, err)
+	result := shadowRuntime.Execute(context.Background(), shadowexec.Job{
+		Plan:         plan,
+		Body:         reqBody,
+		CalledModel:  calledModel,
+		MaxBodyBytes: logger.MaxBodyBytes(),
+	})
+	if result.Err != nil {
+		log.Printf("[shadow] %s/%s execution failed: %v", target.Provider, target.Model, result.Err)
+		// Once upstream response headers exist, preserve the historical
+		// best-effort request-log record even when draining the body times out or
+		// is cut short. Preparation/transport failures have no response to log.
+		if result.Request == nil || result.Response == nil {
 			return
 		}
-		impl.ExtraHeaders(sreq, plan.UpstreamPath())
 	}
-	plan.ApplyConfiguredHeaders(sreq.Header)
-	client := shadowRuntime.client
-	start := time.Now()
-	resp, err := client.Do(sreq)
-	if err != nil {
-		log.Printf("[shadow] %s/%s upstream error: %v", shadow.Provider, shadow.Model, err)
-		return
-	}
-	// Drain the shadow response into a bounded capture for the log. The reader
-	// passes all bytes through (drained to Discard) while teeing a capped copy.
-	var captured []byte
-	var capturedTotal int64
-	var capturedTruncated bool
-	cr := bodycapture.New(resp.Body, logger.MaxBodyBytes(), func(body []byte, total int64, truncated bool) {
-		captured = append([]byte(nil), body...)
-		capturedTotal = total
-		capturedTruncated = truncated
-	})
-	_, _ = io.Copy(io.Discard, cr)
-	_ = cr.Close()
 	logInput := requestLogInput(
 		forwardLogCtx{requestID: "shadow-" + primaryReqID, exposed: exposed},
-		sreq,
+		result.Request,
 		proto,
 		calledModel,
-		RouteTarget{Provider: shadow.Provider, Model: shadow.Model},
-		resp,
-		start,
-		sbody,
+		RouteTarget{Provider: target.Provider, Model: target.Model},
+		result.Response,
+		result.Started,
+		result.RequestBody,
 	)
-	completeRequestLog(logger, logInput, captured, capturedTotal, capturedTruncated)
+	completeRequestLog(logger, logInput, result.Capture.Body, result.Capture.Total, result.Capture.Truncated)
 }

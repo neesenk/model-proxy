@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"model-proxy/internal/fusion"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 )
@@ -171,8 +172,8 @@ func (view proxyReadView) analytics(from, to int64, provider, model, granularity
 	return view.proxy.stats.QueryAnalytics(from, to, provider, model, granularity)
 }
 
-func (view proxyReadView) fusion(workflow string, now time.Time) (map[string]fusionWorkflowStats, []fusionRun) {
-	return view.proxy.fusionReg.snapshot(workflow, now)
+func (view proxyReadView) fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
+	return view.proxy.fusionReg.Snapshot(workflow, now)
 }
 
 func (view proxyReadView) pins() map[string]pinEntry {

@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"model-proxy/internal/fusion"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/shadow"
 	"model-proxy/provider"
 )
 
@@ -76,12 +78,16 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// Fusion orchestration observability registry (recent runs + per-workflow
 	// aggregates + daily budget counters). Like the event hub, reload does NOT
 	// rebuild it — aggregates and today's budget survive config edits.
-	p.fusionReg = newFusionRegistry()
-	// Shadow dispatch state (sample rate, concurrency gate, shared client). Stored
+	p.fusionReg = fusion.NewRegistry()
+	// Detached Shadow runtime (sample rate, concurrency gate, shared client). Stored
 	// in an atomic pointer so reload can swap the whole bundle race-free; each
 	// dispatch loads it once and uses that snapshot, so in-flight shadow goroutines
 	// finish on the old bundle while new traffic follows the reloaded config.
-	p.shadow.Store(newShadowRuntime(cfg))
+	p.shadow.Store(shadow.NewRuntime(shadow.Options{
+		SampleRate:    cfg.ShadowSampleRate,
+		MaxConcurrent: cfg.ShadowMaxConcurrent,
+		Timeout:       cfg.Scheduling.Timeout(),
+	}))
 	// Restore the per-route sticky selections persisted before the last restart,
 	// so the proxy resumes parking on the same providers (prompt-cache-friendly).
 	// Gated like the health restore below: a file with a MISMATCHING config
