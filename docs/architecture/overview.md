@@ -17,6 +17,7 @@ implicit-route eligibility；
 `proxy_snapshot.go` 集中 config/provider/catalog/pricing 读取与 generation 一致的
 持久化快照；
 `proxy_routes_compile.go` 只编译 explicit/implicit route 与 pool fan-out；
+`proxy_reload.go` 执行 generation 原子交换及交换后的持久化/刷新编排；
 `proxy_transport.go` 集中 SSE/HTTP 流识别、复制和 ResponseWriter primitive；
 `json_model_body.go` 只处理顶层 model 的提取与改写。移动到这些文件不改变同包
 调用边界，也不允许 transport helper 反向持有 `Proxy`。
