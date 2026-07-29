@@ -46,8 +46,9 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 - 结果进入 request_log，id 以 `shadow-<primary-id>` 配对；
 - reload 必须让一次 dispatch 全程使用同一 generation 的 runtime、target、provider map 和 client。
 
-单目标 executor 只返回含实际上游请求体的最小 `attemptCommit`，不持有 Shadow
-或 lifecycle 回调。`serveOnce` 在确认 commit 后执行 sampling、semaphore 和
+`proxy_shadow.go` 拥有 Shadow dispatch runtime 与 post-commit 异步执行。单目标
+executor 只返回含实际上游请求体的最小 `attemptCommit`，不持有 Shadow 或
+lifecycle 回调。`serveOnce` 在确认 commit 后执行 sampling、semaphore 和
 lifecycle admission，并在启动 goroutine 前同时捕获 `runtimeSnapshot` 与
 `shadowRuntime`。Shadow 随后与普通 route/Fusion 共用 `targetPlan` 完成 provider
 config/runtime impl、backend protocol、model rewrite、转换和 URL/path；goroutine
