@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"sort"
 	"time"
+
+	"model-proxy/internal/probe"
 )
 
 // test_cmd.go implements `model-proxy test <model>` — an end-to-end link test:
@@ -92,7 +95,6 @@ func probeRouteTarget(client *http.Client, cfg *Config, t RouteTarget) (ok bool,
 	if err != nil {
 		return false, 0, err.Error(), 0
 	}
-	start := time.Now()
-	ok, status, reason = probeModelCallable(client, provCfg, impl, t.Model)
-	return ok, status, reason, time.Since(start)
+	r := probe.Exchange(context.Background(), client, provCfg, impl, t.Model)
+	return r.OK, r.Status, r.Reason, r.Latency
 }

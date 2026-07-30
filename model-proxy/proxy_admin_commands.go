@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"model-proxy/internal/probe"
 	"net/http"
 	"time"
 
@@ -171,7 +172,7 @@ func (commands proxyAdminCommands) accountProbe(ctx context.Context, name, id st
 
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
 	start := time.Now()
-	ok, status, reason := probeModelCallableContext(ctx, client, prov, impl, model)
+	ok, status, reason := probe.Callable(ctx, client, prov, impl, model)
 	return accountProbeResult{
 		ok:         ok,
 		httpStatus: status,

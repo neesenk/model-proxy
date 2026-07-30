@@ -331,6 +331,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `config → pricing, protocol`；
 - `fusion → config`；
 - `routing → catalog, config`；
+- `probe → config, provider`；
 - `runtime → provider`；
 - `takeover → catalog, config`；
 - `shadow → targetexec, transport/bodycapture`；

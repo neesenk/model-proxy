@@ -29,6 +29,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/observe/requestlog":    nil,
 		"model-proxy/internal/observe/stats":         nil,
 		"model-proxy/internal/pricing":               nil,
+		"model-proxy/internal/probe":                 {"model-proxy/internal/config": true, "model-proxy/provider": true},
 		"model-proxy/internal/protocol":              nil,
 		"model-proxy/internal/routing":               {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true},
 		"model-proxy/internal/runtime":               {"model-proxy/provider": true},

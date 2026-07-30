@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"model-proxy/internal/probe"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -97,7 +98,7 @@ func TestProbeModelCallable_OpenAI2xx(t *testing.T) {
 
 	impl := &fakeProviderImpl{}
 	prov := Provider{OpenAIBaseURL: srv.URL, Provider: "zhipu"}
-	ok, status, reason := probeModelCallable(srv.Client(), prov, impl, "glm-5.2")
+	ok, status, reason := probe.Callable(context.Background(), srv.Client(), prov, impl, "glm-5.2")
 	if !ok || status != 200 || reason != "" {
 		t.Errorf("2xx probe: ok=%v status=%d reason=%q want ok=true,200,empty", ok, status, reason)
 	}
@@ -124,7 +125,7 @@ func TestProbeModelCallableContext_CancelsUpstreamRequest(t *testing.T) {
 		reason string
 	)
 	go func() {
-		ok, status, reason = probeModelCallableContext(
+		ok, status, reason = probe.Callable(
 			ctx,
 			client,
 			Provider{OpenAIBaseURL: "https://probe.invalid", Provider: testProviderID},
@@ -181,7 +182,7 @@ func TestProbeModelCallable_AnthropicBaseUsesAnthropicShape(t *testing.T) {
 
 	impl := &fakeProviderImpl{}
 	prov := Provider{OpenAIBaseURL: "http://openai-unused", AnthropicBaseURL: srv.URL, Provider: "deepseek"}
-	ok, _, _ := probeModelCallable(srv.Client(), prov, impl, "deepseek-v4-pro")
+	ok, _, _ := probe.Callable(context.Background(), srv.Client(), prov, impl, "deepseek-v4-pro")
 	if !ok {
 		t.Error("anthropic-base probe: ok=false want true")
 	}
@@ -207,7 +208,7 @@ func TestProbeModelCallable_404Reason(t *testing.T) {
 
 	impl := &fakeProviderImpl{}
 	prov := Provider{OpenAIBaseURL: srv.URL, Provider: "volcengine"}
-	ok, status, reason := probeModelCallable(srv.Client(), prov, impl, "doubao-seedance-1.5-pro")
+	ok, status, reason := probe.Callable(context.Background(), srv.Client(), prov, impl, "doubao-seedance-1.5-pro")
 	if ok {
 		t.Errorf("404 probe: ok=true want false")
 	}
@@ -230,7 +231,7 @@ func TestProbeModelCallable_500RawBody(t *testing.T) {
 
 	impl := &fakeProviderImpl{}
 	prov := Provider{OpenAIBaseURL: srv.URL, Provider: "volcengine"}
-	ok, status, reason := probeModelCallable(srv.Client(), prov, impl, "doubao-embedding-vision")
+	ok, status, reason := probe.Callable(context.Background(), srv.Client(), prov, impl, "doubao-embedding-vision")
 	if ok || status != 500 {
 		t.Errorf("500 probe: ok=%v status=%d want false,500", ok, status)
 	}
@@ -447,16 +448,16 @@ func TestDiffStringSets(t *testing.T) {
 func TestStripRequestID(t *testing.T) {
 	in := "AccessDenied: does not have access to messages api Request id: 021783844191650eb717b7491a66ffdd25ddc462b95700bc69454"
 	want := "AccessDenied: does not have access to messages api"
-	if got := stripRequestID(in); got != want {
+	if got := probe.StripRequestID(in); got != want {
 		t.Errorf("stripRequestID=%q want %q", got, want)
 	}
 	// no request id -> unchanged
-	if got := stripRequestID("plain error"); got != "plain error" {
-		t.Errorf("stripRequestID(no-id)=%q want unchanged", got)
+	if got := probe.StripRequestID("plain error"); got != "plain error" {
+		t.Errorf("probe.StripRequestID(no-id)=%q want unchanged", got)
 	}
 	// case-insensitive
-	if got := stripRequestID("err REQUEST ID: abc"); got != "err" {
-		t.Errorf("stripRequestID(upper)=%q want 'err'", got)
+	if got := probe.StripRequestID("err REQUEST ID: abc"); got != "err" {
+		t.Errorf("probe.StripRequestID(upper)=%q want 'err'", got)
 	}
 }
 
