@@ -22,19 +22,19 @@ func (p *Proxy) reload(configPath string) error {
 		return err
 	}
 	built := buildProviders(cfg)
-	newImplicit, newWarnings := synthesizeImplicitRoutesFrom(cfg, built.eligible)
+	newImplicit, newWarnings := synthesizeImplicitRoutesFrom(cfg, built.Eligible)
 	// Switch config and runtime state as one generation. Persist snapshots take
 	// the same lock order, and request mutations carry the generation captured by
 	// forward, so an old in-flight request cannot repopulate the cleared maps.
 	p.mu.Lock()
 	generation := p.configGeneration.Add(1)
 	p.cfg = cfg
-	p.providers = built.providers
+	p.providers = built.Providers
 	// Rebuild the pool index + expanded routes from the single buildProviders
 	// pass. Doing this under the write lock means request readers (which take
 	// the read lock) see a consistent cfg/providers/poolIndex/expandedRoutes.
-	p.poolIndex = built.poolIndex
-	p.parentOf = built.parentOf
+	p.poolIndex = built.PoolIndex
+	p.parentOf = built.ParentOf
 	p.implicitRoutes = newImplicit
 	p.expandedRoutes = p.buildExpandedRoutes()
 	hw := configRoutingWarnings(cfg, p.expandedRoutes)

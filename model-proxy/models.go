@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"model-proxy/internal/app"
 	"net/http"
 	"os"
 	"sort"
@@ -335,7 +336,7 @@ func refreshProviderModels(cfg *Config, provName string) ([]string, error) {
 	if _, ok := cfg.Providers[provName]; !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	provMap := buildProviders(cfg).providers
+	provMap := buildProviders(cfg).Providers
 	target := provName
 	if vids, pooled := poolVirtuals(cfg, provName); pooled {
 		target = vids[0] // first virtual by account-id order
@@ -373,7 +374,7 @@ func poolVirtuals(cfg *Config, name string) ([]string, bool) {
 // listArkAgentPlanModelIDs calls the Volcengine signed OpenAPI ListArkAgentPlanModel
 // via the provider's stored AK/SK and returns the Agent Plan's supported model IDs.
 func listArkAgentPlanModelIDs(provName string) ([]string, error) {
-	creds, err := loadVolcengineCreds(provName)
+	creds, err := app.LoadVolcengineCreds(homeDir(), provName)
 	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
 		return nil, fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
 	}

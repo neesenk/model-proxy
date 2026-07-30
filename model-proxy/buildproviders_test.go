@@ -25,7 +25,7 @@ func TestBuildProviders_AllProviderIDs(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
 		},
 	}
-	m := buildProviders(cfg).providers
+	m := buildProviders(cfg).Providers
 	// P1-3: not just nil-check — also verify the concrete type matches the
 	// expected provider_id (catches a bug where all providers instantiate as zhipu).
 	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
@@ -59,7 +59,7 @@ func TestBuildProviders_LogoutWired(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
 		},
 	}
-	m := buildProviders(cfg).providers
+	m := buildProviders(cfg).Providers
 	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
 		if err := m[name].Logout(); err != nil {
 			t.Errorf("%s Logout: %v", name, err)
@@ -77,7 +77,7 @@ func TestBuildProviders_UnknownProviderSkipped(t *testing.T) {
 			"bad":  {OpenAIBaseURL: "http://x", Provider: "nope-id"},
 		},
 	}
-	m := buildProviders(cfg).providers
+	m := buildProviders(cfg).Providers
 	if m["good"] == nil {
 		t.Error("good provider should be built")
 	}
@@ -100,7 +100,7 @@ func TestBuildProviders_QuotaFnWired(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
 		},
 	}
-	m := buildProviders(cfg).providers
+	m := buildProviders(cfg).Providers
 	// aqp provider Quota (no cred → BillingUnknown, no error).
 	// (provider.Quota delegates to cfg.QuotaOrUnknown → QuotaFn.)
 	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
@@ -120,7 +120,7 @@ func TestBuildProviders_FetchModelsWired(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
 		},
 	}
-	m := buildProviders(cfg).providers
+	m := buildProviders(cfg).Providers
 	if _, err := m["volcengine"].FetchModels(); err == nil {
 		t.Error("volcengine FetchModels without AK/SK: want error, got nil")
 	}

@@ -189,17 +189,18 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		}
 
 		proxyFile, proxySet := rootPackage, rootSet
-		builder := namedFunction(t, proxyFile, "buildProviders")
+		appFile, appSet := parseGoPackage(t, "internal/app")
+		builder := namedFunction(t, appFile, "BuildProviders")
 		if got := namedCallCountInNode(builder.Body, "LoadSnapshot"); got != 1 {
-			t.Errorf("buildProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
+			t.Errorf("app.BuildProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
 		}
 		forbiddenStorageProbes := map[string]bool{
 			"loadPool": true, "poolPath": true, "singularPoolPath": true,
 			"Load": true, "PoolPath": true, "LegacyPath": true,
 			"Stat": true, "ReadFile": true, "Open": true, "OpenFile": true, "ReadDir": true,
 		}
-		for _, violation := range forbiddenCallSites(builder.Body, proxySet, forbiddenStorageProbes, nil) {
-			t.Errorf("buildProviders re-reads or probes account storage outside its snapshot: %s", violation)
+		for _, violation := range forbiddenCallSites(builder.Body, appSet, forbiddenStorageProbes, nil) {
+			t.Errorf("app.BuildProviders re-reads or probes account storage outside its snapshot: %s", violation)
 		}
 		loggedIn := namedFunction(t, proxyFile, "loggedInProviders")
 		if got := namedCallCountInNode(loggedIn.Body, "LoadSnapshot"); got != 1 {
@@ -209,16 +210,16 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Errorf("loggedInProviders re-reads or probes account storage outside its snapshot: %s", violation)
 		}
 
-		buildFields := namedStructFields(t, proxyFile, "providerBuild")
+		buildFields := namedStructFields(t, appFile, "Build")
 		wantBuildFields := map[string]bool{
-			"providers": true, "poolIndex": true, "parentOf": true, "eligible": true,
+			"Providers": true, "PoolIndex": true, "ParentOf": true, "Eligible": true,
 		}
 		if len(buildFields) != len(wantBuildFields) {
-			t.Errorf("providerBuild fields = %v, want exactly %v", sortedFieldNames(buildFields), sortedBoolNames(wantBuildFields))
+			t.Errorf("app.Build fields = %v, want exactly %v", sortedFieldNames(buildFields), sortedBoolNames(wantBuildFields))
 		}
 		for name := range wantBuildFields {
 			if _, ok := buildFields[name]; !ok {
-				t.Errorf("providerBuild missing %q", name)
+				t.Errorf("app.Build missing %q", name)
 			}
 		}
 
@@ -226,8 +227,8 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		if got := namedCallCountInNode(constructor.Body, "synthesizeImplicitRoutesFrom"); got != 1 {
 			t.Errorf("newProxyWithStatePath synthesizeImplicitRoutesFrom calls = %d, want 1 build-derived eligibility use", got)
 		}
-		if got := namedCallWithArgsCount(constructor.Body, "synthesizeImplicitRoutesFrom", "cfg", "built", "eligible"); got != 1 {
-			t.Errorf("newProxyWithStatePath must pass exactly (cfg, built.eligible), matches = %d", got)
+		if got := namedCallWithArgsCount(constructor.Body, "synthesizeImplicitRoutesFrom", "cfg", "built", "Eligible"); got != 1 {
+			t.Errorf("newProxyWithStatePath must pass exactly (cfg, built.Eligible), matches = %d", got)
 		}
 		if got := namedCallCountInNode(constructor.Body, "loggedInProviders"); got != 0 {
 			t.Errorf("newProxyWithStatePath calls loggedInProviders %d time(s), re-reading account eligibility", got)
@@ -239,8 +240,8 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		if got := namedCallCountInNode(reload.Body, "synthesizeImplicitRoutesFrom"); got != 1 {
 			t.Errorf("Proxy.reload synthesizeImplicitRoutesFrom calls = %d, want 1 build-derived eligibility use", got)
 		}
-		if got := namedCallWithArgsCount(reload.Body, "synthesizeImplicitRoutesFrom", "cfg", "built", "eligible"); got != 1 {
-			t.Errorf("Proxy.reload must pass exactly (cfg, built.eligible), matches = %d", got)
+		if got := namedCallWithArgsCount(reload.Body, "synthesizeImplicitRoutesFrom", "cfg", "built", "Eligible"); got != 1 {
+			t.Errorf("Proxy.reload must pass exactly (cfg, built.Eligible), matches = %d", got)
 		}
 		if got := namedCallCountInNode(reload.Body, "loggedInProviders"); got != 0 {
 			t.Errorf("Proxy.reload calls loggedInProviders %d time(s), re-reading account eligibility", got)

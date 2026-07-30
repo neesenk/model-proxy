@@ -66,7 +66,7 @@ func printProviderUsage(cfg *Config, provName string) {
 		return
 	}
 	// Single-account / non-pooled / aqp / codex: build one provider + call Usage.
-	provMap := buildProviders(cfg).providers
+	provMap := buildProviders(cfg).Providers
 	p := provMap[provName]
 	if p == nil {
 		return

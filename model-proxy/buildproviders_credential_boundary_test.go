@@ -271,8 +271,8 @@ func TestBuildProviders_FailedProviderConstructionIsNotRouteEligible(t *testing.
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "unsupported-provider-id", upstream.server.URL)
 	built := buildProviders(cfg)
-	if len(built.providers) != 0 || len(built.poolIndex) != 0 ||
-		len(built.parentOf) != 0 || len(built.eligible) != 0 {
+	if len(built.Providers) != 0 || len(built.PoolIndex) != 0 ||
+		len(built.ParentOf) != 0 || len(built.Eligible) != 0 {
 		t.Fatalf("failed provider build leaked runtime state: %+v", built)
 	}
 

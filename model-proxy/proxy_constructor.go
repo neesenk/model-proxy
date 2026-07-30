@@ -32,14 +32,14 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	p := &Proxy{
 		lifecycle: newProxyLifecycle(),
 		cfg:       cfg,
-		providers: built.providers,
+		providers: built.Providers,
 		client:    &http.Client{Timeout: 0},
-		poolIndex: built.poolIndex,
-		parentOf:  built.parentOf,
+		poolIndex: built.PoolIndex,
+		parentOf:  built.ParentOf,
 	}
 	p.runtimeState.ReplaceGeneration(1)
 	p.configGeneration.Store(1)
-	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.eligible)
+	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.Eligible)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	// Config-time routing hazards (reasoning-replay models behind conversion,
 	// missing protocol: on hint providers): appended to the warnings channel

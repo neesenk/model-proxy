@@ -100,7 +100,7 @@ func providerImplFor(cfg *Config, provName string) (provider.Provider, error) {
 	if _, ok := cfg.Providers[provName]; !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	provMap := buildProviders(cfg).providers
+	provMap := buildProviders(cfg).Providers
 	target := provName
 	if vids, pooled := poolVirtuals(cfg, provName); pooled {
 		target = vids[0]

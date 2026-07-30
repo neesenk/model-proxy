@@ -43,7 +43,7 @@ func cmdLogout(args []string) {
 	// goes through the singular removal path (backward compat: the legacy
 	// singular <name>_apikey.json is removed by clearApiKey).
 	if providerID == "aqp" || providerID == "codex" || !hasPoolFile(provName) {
-		provMap := buildProviders(cfg).providers
+		provMap := buildProviders(cfg).Providers
 		p := provMap[provName]
 		if p == nil {
 			log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
