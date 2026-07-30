@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -571,7 +572,7 @@ func TestAddVolcengineAccountCore_ArkKeyValid(t *testing.T) {
 }
 
 // TestAddVolcengineAccountCore_AKSKValidationFail pins that the AK/SK pair is
-// validated (via the volcengineAKSKValidator seam, stubbed here to fail) when
+// validated (via the clilogin.VolcengineAKSKValidator seam, stubbed here to fail) when
 // both are present, and that a failure rejects before save. Asserts the stub WAS
 // called — a count-only check would miss a "never validated" bug.
 func TestAddVolcengineAccountCore_AKSKValidationFail(t *testing.T) {
@@ -581,10 +582,10 @@ func TestAddVolcengineAccountCore_AKSKValidationFail(t *testing.T) {
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
 	prov := cfg.Providers["vol"]
 
-	orig := volcengineAKSKValidator
-	defer func() { volcengineAKSKValidator = orig }()
+	orig := clilogin.VolcengineAKSKValidator
+	defer func() { clilogin.VolcengineAKSKValidator = orig }()
 	called := false
-	volcengineAKSKValidator = func(ak, sk string) error {
+	clilogin.VolcengineAKSKValidator = func(ak, sk string) error {
 		called = true
 		if ak != "AK9" || sk != "SK9" {
 			t.Errorf("validator got ak=%q sk=%q, want AK9/SK9", ak, sk)
@@ -615,9 +616,9 @@ func TestAddVolcengineAccountCore_AKSKEmptySkips(t *testing.T) {
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
 	prov := cfg.Providers["vol"]
 
-	orig := volcengineAKSKValidator
-	defer func() { volcengineAKSKValidator = orig }()
-	volcengineAKSKValidator = func(ak, sk string) error {
+	orig := clilogin.VolcengineAKSKValidator
+	defer func() { clilogin.VolcengineAKSKValidator = orig }()
+	clilogin.VolcengineAKSKValidator = func(ak, sk string) error {
 		t.Fatal("validator must not be called when AK/SK absent")
 		return nil
 	}
@@ -643,9 +644,9 @@ func TestAddVolcengineAccountCore_PartialAKSKRejected(t *testing.T) {
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
 	prov := cfg.Providers["vol"]
 
-	orig := volcengineAKSKValidator
-	defer func() { volcengineAKSKValidator = orig }()
-	volcengineAKSKValidator = func(string, string) error {
+	orig := clilogin.VolcengineAKSKValidator
+	defer func() { clilogin.VolcengineAKSKValidator = orig }()
+	clilogin.VolcengineAKSKValidator = func(string, string) error {
 		t.Error("validator must not run for a partial or empty AK/SK pair")
 		return nil
 	}

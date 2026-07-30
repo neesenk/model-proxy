@@ -2,6 +2,7 @@ package main
 
 import (
 	"model-proxy/internal/app"
+	clilogin "model-proxy/internal/cli/login"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,15 +14,15 @@ import (
 // triple, dedup by AccessKey). Usage display and quota behavior belong to the
 // provider package.
 
-// stubVolcengineValidator replaces volcengineAKSKValidator with a no-op success
+// stubVolcengineValidator replaces clilogin.VolcengineAKSKValidator with a no-op success
 // for the runVolcengineLoginWithInput tests below, which exercise pool dedup/
 // save logic (not key validation). The validation decision itself is tested in
 // login_cmd_test.go (TestAddVolcengineAccountCore_AKSK*). Restored on test end.
 func stubVolcengineValidator(t *testing.T) {
 	t.Helper()
-	orig := volcengineAKSKValidator
-	volcengineAKSKValidator = func(string, string) error { return nil }
-	t.Cleanup(func() { volcengineAKSKValidator = orig })
+	orig := clilogin.VolcengineAKSKValidator
+	clilogin.VolcengineAKSKValidator = func(string, string) error { return nil }
+	t.Cleanup(func() { clilogin.VolcengineAKSKValidator = orig })
 }
 
 // --- loadVolcengineCreds: reads {api_key, access_key, secret_key} ---

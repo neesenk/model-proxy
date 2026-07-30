@@ -9,6 +9,9 @@ import (
 // truncate caps a string at n bytes (provider display rules).
 func truncate(s string, n int) string { return provider.Truncate(s, n) }
 
+func cGreen(s string) string { return provider.Green(s) }
+func cGray(s string) string  { return provider.Gray(s) }
+
 // mask redacts a credential/id for logs: first 2 + … + last 2 (see
 // model-proxy/util.go for the canonical CLI copy; this mirrors it).
 func mask(s string) string {
