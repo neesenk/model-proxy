@@ -25,7 +25,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/catalog":               nil,
 		"model-proxy/internal/cli/login":             {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/provider": true},
 		"model-proxy/internal/cli/models":            {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/probe": true, "model-proxy/provider": true},
-		"model-proxy/internal/cli":                   {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/observe/stats": true, "model-proxy/provider": true},
+		"model-proxy/internal/cli":                   {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/observe/stats": true, "model-proxy/provider": true},
 		"model-proxy/internal/config":                {"model-proxy/internal/pricing": true, "model-proxy/internal/protocol": true},
 		"model-proxy/internal/daemonctl":             nil,
 		"model-proxy/internal/fusion":                {"model-proxy/internal/config": true},
