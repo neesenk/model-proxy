@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+
+	configdomain "model-proxy/internal/config"
 )
 
 func cmdConfig(args []string) {
@@ -13,7 +15,7 @@ func cmdConfig(args []string) {
 	}
 	switch args[0] {
 	case "init":
-		if err := os.WriteFile("config.yaml", []byte(defaultConfigYAML), 0o644); err != nil {
+		if err := os.WriteFile("config.yaml", []byte(configdomain.DefaultConfigYAML), 0o644); err != nil {
 			log.Fatal(err)
 		}
 		fmt.Println("wrote config.yaml")

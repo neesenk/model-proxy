@@ -1,7 +1,7 @@
-package main
+package config
 
-// defaultConfigYAML is the template written by `model-proxy config init`; matches the repo's config.yaml.
-const defaultConfigYAML = `# model-proxy config — standalone, portable to Linux.
+// DefaultConfigYAML is the template written by `model-proxy config init`; matches the repo's config.yaml.
+const DefaultConfigYAML = `# model-proxy config — standalone, portable to Linux.
 # Paths support ~ expansion. env:ENV_VAR reads an environment variable.
 
 listen: 127.0.0.1:15721
