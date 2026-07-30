@@ -205,12 +205,8 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		if got := forbiddenIdentifierSites(f, fset, forbiddenTypes); len(got) != 0 {
 			t.Errorf("internal/targetexec/executor.go retained forbidden owner/orchestration types: %v", got)
 		}
-		allowedImports := map[string]bool{
-			"model-proxy/internal/cache":                 true,
-			"model-proxy/internal/config":                true,
-			"model-proxy/internal/protocol":              true,
-			"model-proxy/internal/transport/bodycapture": true,
-		}
+		allowedImports := cloneBoolMap(internalRepositoryImportPolicy()["model-proxy/internal/targetexec"])
+		delete(allowedImports, "model-proxy/provider") // executor.go must not build providers directly.
 		if got := unexpectedRepositoryImports(f, allowedImports); len(got) != 0 {
 			t.Errorf("internal/targetexec/executor.go imports outside its execution leaves: %v", got)
 		}

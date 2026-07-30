@@ -322,6 +322,35 @@ composition root → internal/targetexec → internal/protocol / provider
 application → serveAssembly → applicationRuntime → Proxy
 ```
 
+`internal` 的直接仓库依赖采用闭合 allowlist；标准库与外部 module 不在此表中：
+
+- 叶子包（不得依赖其他 `model-proxy/*` 包）：`accounts`、`cache`、`catalog`、
+  `observe/events`、`observe/requestlog`、`observe/stats`、`pricing`、`protocol`、
+  `runtime/wirecap`、`transport/bodycapture`；
+- `config → pricing, protocol`；
+- `fusion → config`；
+- `routing → catalog, config`；
+- `runtime → provider`；
+- `shadow → targetexec, transport/bodycapture`；
+- `targetexec → cache, config, protocol, transport/bodycapture, provider`；
+- `web → fusion, observe/requestlog, observe/stats, pricing`。
+
+`architecture_dependency_dag_contract_test.go` 是这份 allowlist 的可执行镜像：它必须发现并
+分类全部生产 `internal` package、拒绝未声明边、拒绝环；新增 package 不能靠遗漏目录
+绕过检查；仓库内 import 不得使用 dot/blank alias 绕过 owner matcher。扩大依赖前必须
+先证明 owner 边界仍成立并更新本节，不能只放宽测试。
+
+根包到模块的构造入口同样是闭合的：`app_assembly.go` 独占 serve process 的
+`NewProxy` / `startRuntimeServices` / `newWebServer` 装配；`target_plan.go` 构造
+`targetexec.Plan`，`dispatch_context.go` 构造 `targetexec.Attempt`，
+`targetexec_adapter.go` 绑定 `targetexec.Executor`；`request_routing_adapter.go`
+构造 request `routing.Planner`；`fusion.go` 绑定 `fusion.Engine` 及其 ports；
+`proxy_constructor.go` / `proxy_reload.go` 构造启动与 reload generation 的 Shadow
+runtime；`web_adapter.go` 构造 `internal/web.Server`。其他根文件只能消费这些 seam，
+不得建立第二套 owner。owner 符号只能通过已审查的直接形态引用（`pkg.F(...)` /
+`pkg.T{...}` / `receiver.Method(...)` / 裸标识符调用）；function value、method value、
+type alias 和 method expression 都会被守卫计为新的引用点并判定违规。
+
 禁止：
 
 - `internal/web.Server` 持有 `*Proxy`，或 handler 绕过 `ReadAPI` / `CommandAPI`
@@ -395,7 +424,13 @@ accounts/catalog）、
 `internal/config` 依赖 allowlist、根配置兼容 facade、根 application/serve/runtime 的
 process-composition owner 边界、`internal/fusion`/
 `internal/shadow` import 与 owner 边界，以及 Fusion/Shadow 不绕过
-`targetexec.Plan`，不是字符串扫描）。`Proxy` / `runtime.Manager` 的语义所有权检查
+`targetexec.Plan`，不是字符串扫描）。`architecture_dependency_dag_contract_test.go`
+额外检查
+internal package 发现全集、闭合 direct-import allowlist 与无环性；交互合同检查根构造
+入口的精确 owner/callsite、planner 构造值的调用接收者、executor result 的 committed
+分支以及同一代 Shadow runtime 的采样/准入/执行数据流，并为 guard helper 保留
+正向/反向 control，避免空扫描或仅有同名调用造成假绿。
+`Proxy` / `runtime.Manager` 的语义所有权检查
 合并 package 内全部生产 Go 声明，不绑定单一物理文件；adapter/facade 的精确形状
 约束仍保持 file-scoped。行为与并发验证仍按
 `docs/engineering/testing.md` 执行。

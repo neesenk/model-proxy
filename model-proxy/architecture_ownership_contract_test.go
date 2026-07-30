@@ -12,10 +12,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 	rootPackage, rootSet := parseGoPackage(t, ".")
 
 	t.Run("internal config owns configuration behind a narrow root facade", func(t *testing.T) {
-		assertRepositoryPackageImports(t, "internal/config", map[string]bool{
-			"model-proxy/internal/pricing":  true,
-			"model-proxy/internal/protocol": true,
-		})
+		assertInternalPackageImportPolicy(t, "internal/config")
 		if _, err := os.Stat("config.go"); err == nil {
 			t.Error("legacy root config.go must not exist; configuration belongs in internal/config")
 		} else if !os.IsNotExist(err) {

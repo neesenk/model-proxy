@@ -10,9 +10,7 @@ import (
 // their internal owners while the root remains a generation-bound adapter.
 func TestFusionShadowArchitecture(t *testing.T) {
 	t.Run("Fusion engine is transport-free and root owns only its adapter", func(t *testing.T) {
-		assertRepositoryPackageImports(t, "internal/fusion", map[string]bool{
-			"model-proxy/internal/config": true,
-		})
+		assertInternalPackageImportPolicy(t, "internal/fusion")
 		for _, path := range productionGoFilesIn(t, "internal/fusion") {
 			file, fileSet := parseGoFile(t, path)
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{
@@ -68,10 +66,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 	})
 
 	t.Run("Shadow runtime owns detached transport and root owns ordering", func(t *testing.T) {
-		assertRepositoryPackageImports(t, "internal/shadow", map[string]bool{
-			"model-proxy/internal/targetexec":            true,
-			"model-proxy/internal/transport/bodycapture": true,
-		})
+		assertInternalPackageImportPolicy(t, "internal/shadow")
 		for _, path := range productionGoFilesIn(t, "internal/shadow") {
 			file, fileSet := parseGoFile(t, path)
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{

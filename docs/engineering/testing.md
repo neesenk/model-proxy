@@ -97,6 +97,28 @@ Provider 的 `Usage`、`Quota`、fetch/parse、认证和显示格式测试直接
 `provider/*_test.go`；根包只验证 YAML/账号池/build dispatch/CLI 输出等组合行为，
 不得在 `_test.go` 重建已删除的 `show*Usage` / `fetch*Quota` 兼容函数后重复测试。
 
+### 架构 DAG 与交互合同
+
+`architecture_dependency_dag_contract_test.go` 必须枚举全部生产 `internal` package，并按
+`docs/architecture/overview.md` 的闭合 allowlist 检查直接仓库依赖和无环性。新增
+`internal` 目录必须显式分类；不得通过跳过目录、只扫描部分文件或给未知 package
+隐式空规则形成假绿，也不得使用 dot/blank repository import 绕过 matcher。依赖变更
+应缩小或保持边界；确需扩大时先更新权威架构契约并说明 owner 关系。
+
+根包交互 guard 必须解析 Go AST/类型形状，断言构造器或 mutable owner 的精确生产
+callsite；不能用注释/字符串包含、只断言“至少一次”，也不能只检查预期文件而不扫描
+其他生产文件。受保护 owner 符号的引用必须保持已审查的直接形态：root 函数只允许
+裸标识符调用，imported 构造器只允许 `pkg.F(...)`，imported 类型只允许 `pkg.T{...}`
+或直接函数签名引用，受保护方法只允许 `receiver.Method(...)`。function value
+（`f := pkg.NewPlan`）、method value（`fn := runtime.Execute`）、type alias
+（`type E = pkg.Executor`）与 method expression（`(*pkg.T).Execute`）都计入引用点
+集合，从而破坏 owner 唯一性断言而失败。通用 guard helper 要有 synthetic
+positive/negative control，证明它既能接受合法图/调用点，也能抓到未知 package、越级
+边、环、重复 owner 或上述 alias/method-value 绕过。跨调用的数据流合同必须从构造/执行赋值推导接收者，不能硬编码局部变量名或仅
+比较词法先后；commit 后派发必须绑定同一个 executor result，reload-owned runtime
+必须捕获一次并贯穿采样、准入和异步执行。静态合同只防止结构漂移，不能替代对应
+HTTP/CLI、reload-generation、shutdown order 和并发行为测试。
+
 Web transport 的 HTTP routing、JSON presentation、asset serving、login session
 store 和 task owner 测试归 `internal/web/*_test.go`；根包只保留真实应用
 `ReadAPI` / `CommandAPI` 适配、mux composition 及 Web 与 daemon/Proxy lifecycle

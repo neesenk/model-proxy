@@ -11,10 +11,7 @@ import (
 // generation-gated scheduling.
 func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 	t.Run("leaf dependencies and immutable planner surface", func(t *testing.T) {
-		allowedImports := map[string]bool{
-			"model-proxy/internal/catalog": true,
-			"model-proxy/internal/config":  true,
-		}
+		allowedImports := internalRepositoryImportPolicy()["model-proxy/internal/routing"]
 		forbiddenBoundaryImports := map[string]bool{
 			"net/http": true, "net/url": true, "os": true,
 			"io": true, "database/sql": true,

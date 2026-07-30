@@ -174,6 +174,9 @@ task。HTTP drain primitive 留在 `daemon.go`，daemon/supervisor 编排归
 
 完整测试矩阵和断言规范见 `../docs/engineering/testing.md`。
 
+- 新增或移动 `internal` package 必须同步更新中央 dependency-DAG 分类；扩大直接仓库
+  依赖或增加根构造 callsite 必须先更新 `docs/architecture/overview.md` 的 owner
+  契约，不能只放宽 AST 测试。
 - 构造 `NewProxy` 的测试必须隔离 state path/HOME，并注册 cleanup。
 - 并发和时间边界测试使用可缩短的 duration、fake Provider、channel/barrier 或
   可观察状态，避免真实长等待；不得为测试向生产结构体增加 hook 字段。

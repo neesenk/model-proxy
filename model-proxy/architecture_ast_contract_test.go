@@ -13,7 +13,7 @@ import (
 
 func assertRepositoryLeafPackage(t *testing.T, directory string) {
 	t.Helper()
-	assertRepositoryPackageImports(t, directory, nil)
+	assertInternalPackageImportPolicy(t, directory)
 }
 
 func assertRepositoryPackageImports(t *testing.T, directory string, allowed map[string]bool) {

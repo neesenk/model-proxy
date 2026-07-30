@@ -11,9 +11,7 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 	rootPackage, _ := parseGoPackage(t, ".")
 
 	t.Run("internal runtime owns generation-scoped routing state", func(t *testing.T) {
-		assertRepositoryPackageImports(t, "internal/runtime", map[string]bool{
-			"model-proxy/provider": true,
-		})
+		assertInternalPackageImportPolicy(t, "internal/runtime")
 
 		proxyFile := rootPackage
 		proxyFields := namedStructFields(t, proxyFile, "Proxy")

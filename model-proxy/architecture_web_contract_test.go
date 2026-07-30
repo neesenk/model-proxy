@@ -11,12 +11,7 @@ import (
 // composition root and makes the two application ports the only crossing.
 func TestArchitectureWebBoundaries(t *testing.T) {
 	t.Run("transport imports only reviewed internal collaborators", func(t *testing.T) {
-		assertRepositoryPackageImports(t, "internal/web", map[string]bool{
-			"model-proxy/internal/fusion":             true,
-			"model-proxy/internal/observe/requestlog": true,
-			"model-proxy/internal/observe/stats":      true,
-			"model-proxy/internal/pricing":            true,
-		})
+		assertInternalPackageImportPolicy(t, "internal/web")
 	})
 
 	t.Run("transport owns server task and session state", func(t *testing.T) {
