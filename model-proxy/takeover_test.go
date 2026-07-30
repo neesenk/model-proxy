@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,8 +11,8 @@ import (
 	"model-proxy/internal/catalog"
 )
 
-// takeover_test.go covers the client-config rewrite functions (rewriteClaude,
-// rewriteOpencode, rewritePi, rewriteCodex) and their TOML helpers. These are
+// takeover_test.go covers the client-config rewrite functions (takeover.RewriteClaude,
+// takeover.RewriteOpencode, takeover.RewritePi, takeover.RewriteCodex) and their TOML helpers. These are
 // pure file/string operations against the takeover target files — fully
 // testable with temp dirs.
 
@@ -37,7 +38,7 @@ func testTakeoverConfig(t *testing.T, dir string) *Config {
 	}
 }
 
-// --- rewriteClaude: sets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN ---
+// --- takeover.RewriteClaude: sets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN ---
 
 func TestRewriteClaude(t *testing.T) {
 	dir := t.TempDir()
@@ -45,7 +46,7 @@ func TestRewriteClaude(t *testing.T) {
 	// Start with an existing settings.json (possibly with other env keys).
 	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OTHER":"x"},"theme":"dark"}`), 0o644)
 
-	if err := rewriteClaude(cfg); err != nil {
+	if err := takeover.RewriteClaude(cfg); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
@@ -68,12 +69,12 @@ func TestRewriteClaude(t *testing.T) {
 	}
 }
 
-// --- rewriteClaude on a missing file: creates a new one (or errors predictably) ---
+// --- takeover.RewriteClaude on a missing file: creates a new one (or errors predictably) ---
 
 func TestRewriteClaude_NewFile(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testTakeoverConfig(t, dir)
-	if err := rewriteClaude(cfg); err != nil {
+	if err := takeover.RewriteClaude(cfg); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(cfg.Takeover.Claude)
@@ -85,14 +86,14 @@ func TestRewriteClaude_NewFile(t *testing.T) {
 	}
 }
 
-// --- rewriteOpencode: writes provider entry with /v1 baseURL + models ---
+// --- takeover.RewriteOpencode: writes provider entry with /v1 baseURL + models ---
 
 func TestRewriteOpencode(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testTakeoverConfig(t, dir)
 	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
 
-	if err := rewriteOpencode(cfg, nil, nil); err != nil {
+	if err := takeover.RewriteOpencode(cfg, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
@@ -117,14 +118,14 @@ func TestRewriteOpencode(t *testing.T) {
 	}
 }
 
-// --- rewritePi: writes provider with bare baseURL (no /v1) + anthropic-messages api ---
+// --- takeover.RewritePi: writes provider with bare baseURL (no /v1) + anthropic-messages api ---
 
 func TestRewritePi(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testTakeoverConfig(t, dir)
 	os.WriteFile(cfg.Takeover.Pi, []byte(`{}`), 0o644)
 
-	if err := rewritePi(cfg, nil, nil); err != nil {
+	if err := takeover.RewritePi(cfg, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
@@ -148,7 +149,7 @@ func TestRewritePi(t *testing.T) {
 	}
 }
 
-// --- rewriteCodex: injects [model_providers."id"] + sets top-level model_provider ---
+// --- takeover.RewriteCodex: injects [model_providers."id"] + sets top-level model_provider ---
 
 func TestRewriteCodex(t *testing.T) {
 	dir := t.TempDir()
@@ -158,7 +159,7 @@ func TestRewriteCodex(t *testing.T) {
 name = "old"
 `), 0o644)
 
-	if err := rewriteCodex(cfg); err != nil {
+	if err := takeover.RewriteCodex(cfg); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Codex)
@@ -170,7 +171,7 @@ name = "old"
 	if !strings.Contains(text, `[model_providers."model-proxy"]`) {
 		t.Errorf("codex config missing [model_providers.\"model-proxy\"] section:\n%s", text)
 	}
-	// Note: rewriteCodex does NOT remove a pre-existing provider section under
+	// Note: takeover.RewriteCodex does NOT remove a pre-existing provider section under
 	// a different id; it only injects/replaces its own. The top-level
 	// model_provider key is what selects the active provider.
 }
@@ -182,7 +183,7 @@ func TestSetTOMLTopKey_Replace(t *testing.T) {
 [some]
 x = 1
 `
-	out := setTOMLTopKey(in, "model_provider", `"new"`)
+	out := takeover.SetTOMLTopKey(in, "model_provider", `"new"`)
 	if !strings.Contains(out, `model_provider = "new"`) {
 		t.Errorf("setTOMLTopKey replace:\n%s", out)
 	}
@@ -197,7 +198,7 @@ func TestSetTOMLTopKey_InsertBeforeSection(t *testing.T) {
 	in := `[some]
 x = 1
 `
-	out := setTOMLTopKey(in, "model_provider", `"mp"`)
+	out := takeover.SetTOMLTopKey(in, "model_provider", `"mp"`)
 	idxKey := strings.Index(out, `model_provider = "mp"`)
 	idxSec := strings.Index(out, "[some]")
 	if idxKey < 0 || idxSec < 0 {
@@ -212,7 +213,7 @@ x = 1
 
 func TestSetTOMLTopKey_Append(t *testing.T) {
 	in := ``
-	out := setTOMLTopKey(in, "model_provider", `"mp"`)
+	out := takeover.SetTOMLTopKey(in, "model_provider", `"mp"`)
 	if !strings.Contains(out, `model_provider = "mp"`) {
 		t.Errorf("setTOMLTopKey append:\n%s", out)
 	}
@@ -227,7 +228,7 @@ func TestReplaceOrAppendTOMLSection_Append(t *testing.T) {
 [foo]
 bar = "baz"
 `
-	out := replaceOrAppendTOMLSection(in, "foo", section)
+	out := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
 	if !strings.Contains(out, `[foo]`) || !strings.Contains(out, `bar = "baz"`) {
 		t.Errorf("replaceOrAppendTOMLSection append:\n%s", out)
 	}
@@ -249,7 +250,7 @@ keep = true
 [foo]
 new = "y"
 `
-	out := replaceOrAppendTOMLSection(in, "foo", section)
+	out := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
 	if !strings.Contains(out, `new = "y"`) {
 		t.Errorf("replace did not add new key:\n%s", out)
 	}
@@ -281,25 +282,25 @@ func TestExposedModels_PicksBestPriority(t *testing.T) {
 		"a": {"m1": {Context: 1000, Output: 2000}},
 		"b": {"m1": {Context: 3000, Output: 4000}},
 	}
-	got := exposedModels(cfg, meta, nil)
+	got := takeover.ExposedModels(cfg, meta, nil)
 	if len(got) != 1 {
 		t.Fatalf("exposedModels len=%d want 1", len(got))
 	}
-	if got[0].provider != "a" {
-		t.Errorf("exposedModels provider=%q want a (priority 1)", got[0].provider)
+	if got[0].Provider != "a" {
+		t.Errorf("exposedModels provider=%q want a (priority 1)", got[0].Provider)
 	}
-	if got[0].pm.Context != 1000 {
-		t.Errorf("exposedModels context=%d want 1000 (from provider a)", got[0].pm.Context)
+	if got[0].PM.Context != 1000 {
+		t.Errorf("exposedModels context=%d want 1000 (from provider a)", got[0].PM.Context)
 	}
 }
 
 // --- providerID: default + override ---
 
 func TestProviderID(t *testing.T) {
-	if got := providerID(&Config{}); got != "model-proxy" {
-		t.Errorf("providerID(empty)=%q want model-proxy", got)
+	if got := takeover.ProviderID(&Config{}); got != "model-proxy" {
+		t.Errorf("takeover.ProviderID(empty)=%q want model-proxy", got)
 	}
-	if got := providerID(&Config{Takeover: Takeover{ProviderID: "custom"}}); got != "custom" {
-		t.Errorf("providerID(custom)=%q want custom", got)
+	if got := takeover.ProviderID(&Config{Takeover: Takeover{ProviderID: "custom"}}); got != "custom" {
+		t.Errorf("takeover.ProviderID(custom)=%q want custom", got)
 	}
 }

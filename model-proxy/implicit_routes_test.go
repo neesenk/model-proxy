@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"model-proxy/internal/takeover"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -173,7 +174,7 @@ func TestTakeover_IncludesImplicitRoutes(t *testing.T) {
 	}
 	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
 	implicit := map[string]RouteTarget{"glm-4.6": {Provider: "zhipu", Model: "glm-4.6", Priority: 1}}
-	if err := rewriteOpencode(cfg, nil, implicit); err != nil {
+	if err := takeover.RewriteOpencode(cfg, nil, implicit); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Opencode)

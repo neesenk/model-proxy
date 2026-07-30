@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"model-proxy/internal/takeover"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,28 +14,28 @@ import (
 
 func TestListClients_All(t *testing.T) {
 	cfg := &Config{Takeover: Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d"}}
-	all := listClients(cfg, "")
+	all := takeover.ListClients(cfg, "")
 	if len(all) != 4 {
-		t.Errorf("listClients('') len=%d want 4", len(all))
+		t.Errorf("takeover.ListClients('') len=%d want 4", len(all))
 	}
-	all = listClients(cfg, "all")
+	all = takeover.ListClients(cfg, "all")
 	if len(all) != 4 {
-		t.Errorf("listClients('all') len=%d want 4", len(all))
+		t.Errorf("takeover.ListClients('all') len=%d want 4", len(all))
 	}
 }
 
 func TestListClients_OneByName(t *testing.T) {
 	cfg := &Config{Takeover: Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d"}}
-	one := listClients(cfg, "codex")
-	if len(one) != 1 || one[0].name != "codex" {
-		t.Errorf("listClients('codex')=%+v want [codex]", one)
+	one := takeover.ListClients(cfg, "codex")
+	if len(one) != 1 || one[0].Name != "codex" {
+		t.Errorf("takeover.ListClients('codex')=%+v want [codex]", one)
 	}
 }
 
 func TestListClients_UnknownReturnsNil(t *testing.T) {
 	cfg := &Config{Takeover: Takeover{Claude: "a"}}
-	if got := listClients(cfg, "nope"); got != nil {
-		t.Errorf("listClients('nope')=%+v want nil", got)
+	if got := takeover.ListClients(cfg, "nope"); got != nil {
+		t.Errorf("takeover.ListClients('nope')=%+v want nil", got)
 	}
 }
 
@@ -53,7 +54,7 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 
 	// Seed an existing claude config, then takeover rewrites it (after backing up).
 	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644)
-	if err := runTakeover(cfg, "claude", bakDir); err != nil {
+	if err := takeover.RunTakeover(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}); err != nil {
 		t.Fatal(err)
 	}
 	rewritten, _ := os.ReadFile(cfg.Takeover.Claude)
@@ -66,7 +67,7 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 		t.Errorf("backup did not preserve original: %s", bak)
 	}
 	// Restore brings the original back.
-	if err := runRestore(cfg, "claude", bakDir); err != nil {
+	if err := takeover.RunRestore(cfg, "claude", bakDir); err != nil {
 		t.Fatal(err)
 	}
 	restored, _ := os.ReadFile(cfg.Takeover.Claude)
@@ -78,7 +79,7 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 func TestRunTakeover_UnknownClientNoOps(t *testing.T) {
 	cfg := &Config{Takeover: Takeover{Claude: "a"}}
 	// "nope" → listClients returns nil → loop body never runs → nil error.
-	if err := runTakeover(cfg, "nope", t.TempDir()); err != nil {
+	if err := takeover.RunTakeover(cfg, "nope", t.TempDir(), takeover.ModelFacts{SourceDefault: -1}); err != nil {
 		t.Errorf("runTakeover unknown client: want nil, got %v", err)
 	}
 }
@@ -86,7 +87,7 @@ func TestRunTakeover_UnknownClientNoOps(t *testing.T) {
 // --- runTakeover all: skips a client whose config file is absent ---
 
 func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
-	// Keep the models.dev catalog fetch offline: runTakeover("all") refreshes
+	// Keep the models.dev catalog fetch offline: takeover.RunTakeover("all") refreshes
 	// the catalog for opencode/pi model metadata — point it at a local stub.
 	md := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -113,7 +114,25 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 	}
 	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644)
 
-	if err := runTakeover(cfg, "all", bakDir); err != nil {
+	cat, _ := loadModelsCatalog(false)
+	meta, sources := hydrateModels(cfg, cat)
+	factsSources := make(map[string]map[string]int, len(sources))
+	for provider, models := range sources {
+		factsSources[provider] = make(map[string]int, len(models))
+		for model, source := range models {
+			factsSources[provider][model] = int(source)
+		}
+	}
+	implicit, _ := synthesizeImplicitRoutes(cfg)
+	facts := takeover.ModelFacts{
+		Implicit:       implicit,
+		Meta:           meta,
+		Sources:        factsSources,
+		SourceDefault:  int(srcDefault),
+		DefaultContext: defaultModelMetadata.Context,
+		DefaultOutput:  defaultModelMetadata.Output,
+	}
+	if err := takeover.RunTakeover(cfg, "all", bakDir, facts); err != nil {
 		t.Fatalf("runTakeover all with missing files: want nil, got %v", err)
 	}
 	// claude was rewritten (backup + rewrite succeeded).
@@ -143,7 +162,7 @@ func TestRunTakeover_SingleMissingFileErrors(t *testing.T) {
 			Pi:       filepath.Join(dir, "nonexistent.json"),
 		},
 	}
-	if err := runTakeover(cfg, "pi", dir); err == nil {
+	if err := takeover.RunTakeover(cfg, "pi", dir, takeover.ModelFacts{SourceDefault: -1}); err == nil {
 		t.Error("runTakeover pi with missing file: want error, got nil (single client must not be skipped)")
 	}
 }
@@ -169,7 +188,7 @@ func TestRunRestore_AllSkipsMissingBackup(t *testing.T) {
 			Pi:       filepath.Join(dir, "pi.json"),
 		},
 	}
-	if err := runRestore(cfg, "all", bakDir); err != nil {
+	if err := takeover.RunRestore(cfg, "all", bakDir); err != nil {
 		t.Fatalf("runRestore all with missing backups: want nil, got %v", err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Claude)

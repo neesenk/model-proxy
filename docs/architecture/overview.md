@@ -332,10 +332,16 @@ application → serveAssembly → applicationRuntime → Proxy
 - `fusion → config`；
 - `routing → catalog, config`；
 - `runtime → provider`；
+- `takeover → catalog, config`；
 - `shadow → targetexec, transport/bodycapture`；
 - `targetexec → cache, config, protocol, transport/bodycapture, provider`；
 - `appapi → fusion, observe/stats, pricing`；
 - `web → appapi, observe/requestlog, pricing`。
+
+`internal/takeover` 拥有客户端配置的备份、改写与恢复（claude/opencode/codex/pi），
+只消费 config DTO 与 catalog 元数据；implicit routes、catalog 加载与 source 标记
+由根 `cli_takeover.go` 的 `takeoverFacts` 计算并以 `ModelFacts` 注入，包内不读取
+应用运行时。
 
 `architecture_dependency_dag_contract_test.go` 是这份 allowlist 的可执行镜像：它必须发现并
 分类全部生产 `internal` package、拒绝未声明边、拒绝环；新增 package 不能靠遗漏目录

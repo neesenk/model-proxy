@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
 	"sort"
@@ -77,7 +78,7 @@ func renderDoctorLive(cfg *Config, cfgPath string) (string, error) {
 	if err := json.Unmarshal(statusBody, &st); err != nil {
 		return "", fmt.Errorf("parse status response: %v", err)
 	}
-	drift := checkTakeoverDrift(cfg, backupDir(cfgPath))
+	drift := checkTakeoverDrift(cfg, takeover.BackupDir(cfgPath))
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s · %s\n", cBold("model-proxy doctor --live"), cDim(base))
@@ -345,16 +346,16 @@ type clientDrift struct {
 // silently talks to a dead endpoint, which looks exactly like "agent stuck".
 // Local files only, read-only.
 func checkTakeoverDrift(cfg *Config, bakDir string) []clientDrift {
-	pid := providerID(cfg)
+	pid := takeover.ProviderID(cfg)
 	out := []clientDrift{}
-	for _, c := range listClients(cfg, "") {
-		d := clientDrift{client: c.name, file: c.file}
-		if _, err := os.Stat(filepath.Join(bakDir, c.name+".bak")); err != nil {
+	for _, c := range takeover.ListClients(cfg, "") {
+		d := clientDrift{client: c.Name, file: c.File}
+		if _, err := os.Stat(filepath.Join(bakDir, c.Name+".bak")); err != nil {
 			out = append(out, d) // no backup marker → not taken over
 			continue
 		}
 		d.taken = true
-		d.current, d.expected = takeoverPointer(c.name, c.file, pid, cfg.Takeover.ProxyURL)
+		d.current, d.expected = takeoverPointer(c.Name, c.File, pid, cfg.Takeover.ProxyURL)
 		d.ok = d.current == d.expected
 		out = append(out, d)
 	}
@@ -384,7 +385,7 @@ func takeoverPointer(client, file, pid, proxyURL string) (current, expected stri
 	if _, err := os.Stat(file); err != nil {
 		return "(file missing)", expected
 	}
-	v, err := readJSONConfig(file)
+	v, err := takeover.ReadJSONConfig(file)
 	if err != nil {
 		return "(unreadable: " + err.Error() + ")", expected
 	}

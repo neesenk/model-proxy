@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/takeover"
 	"sort"
 	"strings"
 	"testing"
@@ -46,8 +47,8 @@ func TestPad(t *testing.T) {
 }
 
 func TestDisplayName(t *testing.T) {
-	if got := displayName("glm-5.2"); got != "glm-5.2" {
-		t.Errorf("displayName(glm-5.2)=%q want glm-5.2", got)
+	if got := takeover.DisplayName("glm-5.2"); got != "glm-5.2" {
+		t.Errorf("takeover.DisplayName(glm-5.2)=%q want glm-5.2", got)
 	}
 }
 

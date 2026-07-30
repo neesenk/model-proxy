@@ -1,17 +1,19 @@
-package main
+package takeover
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
 )
 
-// rewriteClaude: ~/.claude/settings.json
+// RewriteClaude: ~/.claude/settings.json
 // Sets env.ANTHROPIC_BASE_URL → proxy, env.ANTHROPIC_AUTH_TOKEN → PROXY_MANAGED.
-func rewriteClaude(cfg *Config) error {
+func RewriteClaude(cfg *configdomain.Config) error {
 	file := cfg.Takeover.Claude
-	v, err := readJSONConfig(file)
+	v, err := ReadJSONConfig(file)
 	if err != nil {
 		return err
 	}
@@ -22,30 +24,30 @@ func rewriteClaude(cfg *Config) error {
 	env["ANTHROPIC_BASE_URL"] = cfg.Takeover.ProxyURL
 	env["ANTHROPIC_AUTH_TOKEN"] = "PROXY_MANAGED"
 	v["env"] = env
-	return writeJSONConfig(file, v)
+	return WriteJSONConfig(file, v)
 }
 
-// providerID returns the configured provider id (default "model-proxy").
-func providerID(cfg *Config) string {
+// ProviderID returns the configured provider id (default "model-proxy").
+func ProviderID(cfg *configdomain.Config) string {
 	if cfg.Takeover.ProviderID != "" {
 		return cfg.Takeover.ProviderID
 	}
 	return "model-proxy"
 }
 
-// exposedModels returns all exposed model names across all protocol routes,
+// ExposedModels returns all exposed model names across all protocol routes,
 // with their provider model metadata (context/output/modalities). Each entry
 // is {exposedName, providerName, realModel, catalog.Model}.
-type exposedModel struct {
-	exposed   string
-	provider  string
-	realModel string
-	pm        catalog.Model
+type ExposedModel struct {
+	Exposed   string
+	Provider  string
+	RealModel string
+	PM        catalog.Model
 }
 
-func exposedModels(cfg *Config, meta map[string]map[string]catalog.Model, implicit map[string]RouteTarget) []exposedModel {
-	var out []exposedModel
-	add := func(exposed string, t RouteTarget) {
+func ExposedModels(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) []ExposedModel {
+	var out []ExposedModel
+	add := func(exposed string, t configdomain.RouteTarget) {
 		if _, ok := cfg.Providers[t.Provider]; !ok {
 			return
 		}
@@ -53,11 +55,11 @@ func exposedModels(cfg *Config, meta map[string]map[string]catalog.Model, implic
 		if meta[t.Provider] != nil {
 			pm = meta[t.Provider][t.Model]
 		}
-		out = append(out, exposedModel{
-			exposed:   exposed,
-			provider:  t.Provider,
-			realModel: t.Model,
-			pm:        pm,
+		out = append(out, ExposedModel{
+			Exposed:   exposed,
+			Provider:  t.Provider,
+			RealModel: t.Model,
+			PM:        pm,
 		})
 	}
 	for exposed, targets := range cfg.Routes {
@@ -86,19 +88,19 @@ func exposedModels(cfg *Config, meta map[string]map[string]catalog.Model, implic
 	return out
 }
 
-// displayName returns a human-readable name for a model.
+// DisplayName returns a human-readable name for a model.
 // Currently just returns the ID; can be extended later.
-func displayName(id string) string {
+func DisplayName(id string) string {
 	return id
 }
 
-// rewriteOpencode: ~/.config/opencode/opencode.json
+// RewriteOpencode: ~/.config/opencode/opencode.json
 // Writes a provider entry pointing at the proxy, with all exposed models from
 // the config's routes + provider model metadata (context/output/modalities).
-func rewriteOpencode(cfg *Config, meta map[string]map[string]catalog.Model, implicit map[string]RouteTarget) error {
+func RewriteOpencode(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) error {
 	file := cfg.Takeover.Opencode
-	pid := providerID(cfg)
-	v, err := readJSONConfig(file)
+	pid := ProviderID(cfg)
+	v, err := ReadJSONConfig(file)
 	if err != nil {
 		return err
 	}
@@ -119,36 +121,36 @@ func rewriteOpencode(cfg *Config, meta map[string]map[string]catalog.Model, impl
 		"models": opencodeModels(cfg, meta, implicit),
 	}
 	v["provider"] = prov
-	return writeJSONConfig(file, v)
+	return WriteJSONConfig(file, v)
 }
 
 // opencodeModels builds the opencode model map from the config's exposed
 // models (routes + hydrated metadata). Each model gets name, limit.{context,
 // output}, modalities.{input,output}.
-func opencodeModels(cfg *Config, meta map[string]map[string]catalog.Model, implicit map[string]RouteTarget) map[string]any {
-	models := exposedModels(cfg, meta, implicit)
+func opencodeModels(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) map[string]any {
+	models := ExposedModels(cfg, meta, implicit)
 	out := make(map[string]any, len(models))
 	for _, m := range models {
-		name := displayName(m.exposed)
+		name := DisplayName(m.Exposed)
 		limit := map[string]any{}
-		if m.pm.Context > 0 {
-			limit["context"] = m.pm.Context
+		if m.PM.Context > 0 {
+			limit["context"] = m.PM.Context
 		}
-		if m.pm.Output > 0 {
-			limit["output"] = m.pm.Output
+		if m.PM.Output > 0 {
+			limit["output"] = m.PM.Output
 		}
 		modalities := map[string]any{
-			"input":  m.pm.Modalities.Input,
-			"output": m.pm.Modalities.Output,
+			"input":  m.PM.Modalities.Input,
+			"output": m.PM.Modalities.Output,
 		}
 		// Default modalities if empty.
-		if len(m.pm.Modalities.Input) == 0 {
+		if len(m.PM.Modalities.Input) == 0 {
 			modalities["input"] = []string{"text"}
 		}
-		if len(m.pm.Modalities.Output) == 0 {
+		if len(m.PM.Modalities.Output) == 0 {
 			modalities["output"] = []string{"text"}
 		}
-		out[m.exposed] = map[string]any{
+		out[m.Exposed] = map[string]any{
 			"name":       name,
 			"limit":      limit,
 			"modalities": modalities,
@@ -157,13 +159,13 @@ func opencodeModels(cfg *Config, meta map[string]map[string]catalog.Model, impli
 	return out
 }
 
-// rewritePi: ~/.pi/agent/models.json
+// RewritePi: ~/.pi/agent/models.json
 // providers.<name> = { baseUrl, api: anthropic-messages, apiKey: PROXY_MANAGED,
 // models:[{id, name, contextWindow, input, maxTokens}] }
-func rewritePi(cfg *Config, meta map[string]map[string]catalog.Model, implicit map[string]RouteTarget) error {
+func RewritePi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) error {
 	file := cfg.Takeover.Pi
-	name := providerID(cfg)
-	v, err := readJSONConfig(file)
+	name := ProviderID(cfg)
+	v, err := ReadJSONConfig(file)
 	if err != nil {
 		return err
 	}
@@ -171,23 +173,23 @@ func rewritePi(cfg *Config, meta map[string]map[string]catalog.Model, implicit m
 	if prov == nil {
 		prov = map[string]any{}
 	}
-	models := exposedModels(cfg, meta, implicit)
+	models := ExposedModels(cfg, meta, implicit)
 	piModels := []map[string]any{}
 	for _, m := range models {
 		entry := map[string]any{
-			"name":      displayName(m.exposed),
-			"id":        m.exposed,
-			"input":     m.pm.Modalities.Input,
-			"maxTokens": m.pm.Output,
+			"name":      DisplayName(m.Exposed),
+			"id":        m.Exposed,
+			"input":     m.PM.Modalities.Input,
+			"maxTokens": m.PM.Output,
 		}
-		if len(m.pm.Modalities.Input) == 0 {
+		if len(m.PM.Modalities.Input) == 0 {
 			entry["input"] = []string{"text"}
 		}
-		if m.pm.Output == 0 {
+		if m.PM.Output == 0 {
 			entry["maxTokens"] = 4096
 		}
-		if m.pm.Context > 0 {
-			entry["contextWindow"] = m.pm.Context
+		if m.PM.Context > 0 {
+			entry["contextWindow"] = m.PM.Context
 		}
 		piModels = append(piModels, entry)
 	}
@@ -203,19 +205,19 @@ func rewritePi(cfg *Config, meta map[string]map[string]catalog.Model, implicit m
 		"models":  piModels,
 	}
 	v["providers"] = prov
-	return writeJSONConfig(file, v)
+	return WriteJSONConfig(file, v)
 }
 
-// rewriteCodex: ~/.codex/config.toml
+// RewriteCodex: ~/.codex/config.toml
 // Text edit: set top-level model_provider=<id> and inject a [model_providers."<id>"] section.
-func rewriteCodex(cfg *Config) error {
+func RewriteCodex(cfg *configdomain.Config) error {
 	file := cfg.Takeover.Codex
 	data, err := readFile(file)
 	if err != nil {
 		return err
 	}
 	text := string(data)
-	pid := providerID(cfg)
+	pid := ProviderID(cfg)
 	header := fmt.Sprintf(`model_providers."%s"`, pid)
 
 	section := fmt.Sprintf(`
@@ -226,14 +228,14 @@ wire_api = "responses"
 requires_openai_auth = true
 `, pid, cfg.Takeover.ProxyURL)
 
-	text = replaceOrAppendTOMLSection(text, header, section)
-	text = setTOMLTopKey(text, "model_provider", fmt.Sprintf("%q", pid))
+	text = ReplaceOrAppendTOMLSection(text, header, section)
+	text = SetTOMLTopKey(text, "model_provider", fmt.Sprintf("%q", pid))
 
 	return writeFile(file, []byte(text), 0o644)
 }
 
-// setTOMLTopKey sets a top-level bare key (placed before any [section]).
-func setTOMLTopKey(text, key, val string) string {
+// SetTOMLTopKey sets a top-level bare key (placed before any [section]).
+func SetTOMLTopKey(text, key, val string) string {
 	lines := strings.Split(text, "\n")
 	firstSection := -1
 	for i, l := range lines {
@@ -261,8 +263,8 @@ func setTOMLTopKey(text, key, val string) string {
 	return strings.Join(lines, "\n")
 }
 
-// replaceOrAppendTOMLSection replaces an existing [section] block, or appends a new one.
-func replaceOrAppendTOMLSection(text, sectionHeader, section string) string {
+// ReplaceOrAppendTOMLSection replaces an existing [section] block, or appends a new one.
+func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 	header := "[" + sectionHeader + "]"
 	idx := strings.Index(text, header)
 	if idx >= 0 {
@@ -282,4 +284,12 @@ func replaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 	}
 	text += strings.TrimSpace(section) + "\n"
 	return text
+}
+
+// readFile/writeFile are tiny local I/O helpers kept here so the package has no
+// application dependency.
+func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+func writeFile(path string, data []byte, mode os.FileMode) error {
+	return os.WriteFile(path, data, mode)
 }

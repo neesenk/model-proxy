@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,7 +19,7 @@ func TestBackup_CreatesCopyAndMeta(t *testing.T) {
 	os.WriteFile(src, []byte(`{"x":1}`), 0o644)
 	bakDir := filepath.Join(dir, ".mp")
 
-	if err := backup(src, bakDir, "claude"); err != nil {
+	if err := takeover.Backup(src, bakDir, "claude"); err != nil {
 		t.Fatal(err)
 	}
 	bak := filepath.Join(bakDir, "claude.bak")
@@ -43,12 +44,12 @@ func TestBackup_Idempotent(t *testing.T) {
 	src := filepath.Join(dir, "s.json")
 	os.WriteFile(src, []byte("original"), 0o644)
 	bakDir := filepath.Join(dir, ".mp")
-	if err := backup(src, bakDir, "c"); err != nil {
+	if err := takeover.Backup(src, bakDir, "c"); err != nil {
 		t.Fatal(err)
 	}
 	// Change source; second backup must NOT overwrite the existing .bak.
 	os.WriteFile(src, []byte("changed"), 0o644)
-	if err := backup(src, bakDir, "c"); err != nil {
+	if err := takeover.Backup(src, bakDir, "c"); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(filepath.Join(bakDir, "c.bak"))
@@ -59,7 +60,7 @@ func TestBackup_Idempotent(t *testing.T) {
 
 func TestBackup_MissingSource(t *testing.T) {
 	dir := t.TempDir()
-	err := backup(filepath.Join(dir, "nope"), filepath.Join(dir, ".mp"), "c")
+	err := takeover.Backup(filepath.Join(dir, "nope"), filepath.Join(dir, ".mp"), "c")
 	if err == nil {
 		t.Error("backup of missing file: want error, got nil")
 	}
@@ -75,7 +76,7 @@ func TestRestore_WritesBack(t *testing.T) {
 	os.MkdirAll(bakDir, 0o700)
 	os.WriteFile(filepath.Join(bakDir, "c.bak"), []byte("original"), 0o600)
 
-	if err := restore(src, bakDir, "c"); err != nil {
+	if err := takeover.Restore(src, bakDir, "c"); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(src)
@@ -86,7 +87,7 @@ func TestRestore_WritesBack(t *testing.T) {
 
 func TestRestore_NoBackup(t *testing.T) {
 	dir := t.TempDir()
-	err := restore(filepath.Join(dir, "out"), filepath.Join(dir, ".mp"), "c")
+	err := takeover.Restore(filepath.Join(dir, "out"), filepath.Join(dir, ".mp"), "c")
 	if err == nil {
 		t.Error("restore with no backup: want error, got nil")
 	}
@@ -96,17 +97,17 @@ func TestRestore_NoBackup(t *testing.T) {
 
 func TestSha256hex(t *testing.T) {
 	// Known: sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-	got := sha256hex([]byte("hello"))
+	got := takeover.Sha256hex([]byte("hello"))
 	want := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 	if got != want {
-		t.Errorf("sha256hex(hello)=%q want %q", got, want)
+		t.Errorf("takeover.Sha256hex(hello)=%q want %q", got, want)
 	}
 }
 
 // --- backupDir ---
 
 func TestBackupDir(t *testing.T) {
-	got := backupDir("/home/user/.config/foo/config.yaml")
+	got := takeover.BackupDir("/home/user/.config/foo/config.yaml")
 	want := "/home/user/.config/foo/.model-proxy"
 	if got != want {
 		t.Errorf("backupDir=%q want %q", got, want)
