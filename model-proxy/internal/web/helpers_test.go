@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"model-proxy/internal/appapi"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -53,7 +54,7 @@ func TestWritePortErrClassifiesWrappedHTTPError(t *testing.T) {
 	writePortErr(
 		recorder,
 		http.StatusInternalServerError,
-		errors.Join(errors.New("context"), NewHTTPError(http.StatusConflict, "conflict")),
+		errors.Join(errors.New("context"), appapi.NewHTTPError(http.StatusConflict, "conflict")),
 	)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusConflict)

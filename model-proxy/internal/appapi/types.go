@@ -3,7 +3,7 @@
 //
 // Application state and mutations stay behind consumer-owned ReadAPI and
 // CommandAPI ports so this package never imports the composition root.
-package web
+package appapi
 
 import (
 	"context"
@@ -239,12 +239,14 @@ type CommandAPI interface {
 	BeginLogin(context.Context, string) (LoginStart, error)
 }
 
-func requirePorts(reads ReadAPI, commands CommandAPI) error {
+// RequirePorts validates that both application ports are present. It is
+// exported so the transport package can fail fast during construction.
+func RequirePorts(reads ReadAPI, commands CommandAPI) error {
 	if reads == nil {
-		return fmt.Errorf("web ReadAPI is nil")
+		return fmt.Errorf("appapi ReadAPI is nil")
 	}
 	if commands == nil {
-		return fmt.Errorf("web CommandAPI is nil")
+		return fmt.Errorf("appapi CommandAPI is nil")
 	}
 	return nil
 }

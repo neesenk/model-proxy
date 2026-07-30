@@ -1,6 +1,7 @@
 package web
 
 import (
+	"model-proxy/internal/appapi"
 	"testing"
 	"time"
 )
@@ -12,14 +13,14 @@ func TestLoginSessionStore(t *testing.T) {
 		t.Fatalf("session ID length = %d, want 32", len(id))
 	}
 	update, ok := store.Snapshot(id)
-	if !ok || update != (LoginUpdate{State: "pending", Detail: "https://verify.invalid"}) {
+	if !ok || update != (appapi.LoginUpdate{State: "pending", Detail: "https://verify.invalid"}) {
 		t.Fatalf("initial snapshot = %#v, %v", update, ok)
 	}
 	if _, ok := store.Snapshot("nope"); ok {
 		t.Fatal("unknown session unexpectedly exists")
 	}
 
-	want := LoginUpdate{State: "done", Detail: "https://verify.invalid", Result: "user@example.com", Warning: "reload later"}
+	want := appapi.LoginUpdate{State: "done", Detail: "https://verify.invalid", Result: "user@example.com", Warning: "reload later"}
 	if !store.Update(id, want) {
 		t.Fatal("update rejected known session")
 	}
@@ -48,7 +49,7 @@ func TestLoginSessionGC(t *testing.T) {
 	if _, ok := store.Snapshot(id); !ok {
 		t.Fatal("stale pending session was GC'd while its poll may still be running")
 	}
-	if !store.Update(id, LoginUpdate{State: "error", Detail: "poll timed out"}) {
+	if !store.Update(id, appapi.LoginUpdate{State: "error", Detail: "poll timed out"}) {
 		t.Fatal("update rejected stale session")
 	}
 	store.GC()

@@ -17,11 +17,11 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 	t.Run("transport owns server task and session state", func(t *testing.T) {
 		transport, _ := parseGoPackage(t, "internal/web")
 		fields := namedStructFields(t, transport, "Server")
-		if got := simpleTypeName(fields["reads"]); got != "ReadAPI" {
-			t.Errorf("Server.reads type = %q, want ReadAPI", got)
+		if got := expressionPath(fields["reads"]); got != "appapi.ReadAPI" {
+			t.Errorf("Server.reads type = %q, want appapi.ReadAPI", got)
 		}
-		if got := simpleTypeName(fields["commands"]); got != "CommandAPI" {
-			t.Errorf("Server.commands type = %q, want CommandAPI", got)
+		if got := expressionPath(fields["commands"]); got != "appapi.CommandAPI" {
+			t.Errorf("Server.commands type = %q, want appapi.CommandAPI", got)
 		}
 		if got := simpleTypeName(fields["tasks"]); got != "*taskOwner" {
 			t.Errorf("Server.tasks type = %q, want *taskOwner", got)

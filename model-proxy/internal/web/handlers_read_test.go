@@ -14,6 +14,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"model-proxy/internal/appapi"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
@@ -21,54 +22,54 @@ import (
 )
 
 type readAPIStub struct {
-	dashboard Dashboard
+	dashboard appapi.Dashboard
 	logFile   string
 	logDir    string
-	accounts  []ProviderAccounts
-	tokens    []TokenUsage
-	stats     func(StatsQuery) ([]observestats.Bucket, error)
-	agents    func(AgentStatsQuery) ([]observestats.AgentBucket, error)
-	analytics func(AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
-	pricing   PricingSnapshot
+	accounts  []appapi.ProviderAccounts
+	tokens    []appapi.TokenUsage
+	stats     func(appapi.StatsQuery) ([]observestats.Bucket, error)
+	agents    func(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error)
+	analytics func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
+	pricing   appapi.PricingSnapshot
 	fusion    func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
-	pins      []Pin
-	config    func() (ConfigDocument, error)
+	pins      []appapi.Pin
+	config    func() (appapi.ConfigDocument, error)
 }
 
-func (r *readAPIStub) Dashboard(time.Time) Dashboard { return r.dashboard }
-func (r *readAPIStub) LogFile() string               { return r.logFile }
-func (r *readAPIStub) RequestLogDirectory() string   { return r.logDir }
-func (r *readAPIStub) Accounts() []ProviderAccounts  { return r.accounts }
-func (r *readAPIStub) Tokens() []TokenUsage          { return r.tokens }
-func (r *readAPIStub) Stats(q StatsQuery) ([]observestats.Bucket, error) {
+func (r *readAPIStub) Dashboard(time.Time) appapi.Dashboard { return r.dashboard }
+func (r *readAPIStub) LogFile() string                      { return r.logFile }
+func (r *readAPIStub) RequestLogDirectory() string          { return r.logDir }
+func (r *readAPIStub) Accounts() []appapi.ProviderAccounts  { return r.accounts }
+func (r *readAPIStub) Tokens() []appapi.TokenUsage          { return r.tokens }
+func (r *readAPIStub) Stats(q appapi.StatsQuery) ([]observestats.Bucket, error) {
 	if r.stats == nil {
 		return nil, nil
 	}
 	return r.stats(q)
 }
-func (r *readAPIStub) AgentStats(q AgentStatsQuery) ([]observestats.AgentBucket, error) {
+func (r *readAPIStub) AgentStats(q appapi.AgentStatsQuery) ([]observestats.AgentBucket, error) {
 	if r.agents == nil {
 		return nil, nil
 	}
 	return r.agents(q)
 }
-func (r *readAPIStub) Analytics(q AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+func (r *readAPIStub) Analytics(q appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
 	if r.analytics == nil {
 		return nil, nil
 	}
 	return r.analytics(q)
 }
-func (r *readAPIStub) Pricing() PricingSnapshot { return r.pricing }
+func (r *readAPIStub) Pricing() appapi.PricingSnapshot { return r.pricing }
 func (r *readAPIStub) Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 	if r.fusion == nil {
 		return nil, nil
 	}
 	return r.fusion(workflow, now)
 }
-func (r *readAPIStub) Pins() []Pin { return r.pins }
-func (r *readAPIStub) ConfigDocument() (ConfigDocument, error) {
+func (r *readAPIStub) Pins() []appapi.Pin { return r.pins }
+func (r *readAPIStub) ConfigDocument() (appapi.ConfigDocument, error) {
 	if r.config == nil {
-		return ConfigDocument{}, nil
+		return appapi.ConfigDocument{}, nil
 	}
 	return r.config()
 }
@@ -167,7 +168,7 @@ func TestReadUIAndAPIRouter(t *testing.T) {
 	}
 
 	id := s.sessions.Create("p", "verify")
-	if got, ok := s.sessions.Snapshot(id); !ok || got != (LoginUpdate{State: "pending", Detail: "verify"}) {
+	if got, ok := s.sessions.Snapshot(id); !ok || got != (appapi.LoginUpdate{State: "pending", Detail: "verify"}) {
 		t.Fatalf("session snapshot = (%#v, %v)", got, ok)
 	}
 }
@@ -175,23 +176,23 @@ func TestReadUIAndAPIRouter(t *testing.T) {
 func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 	expires := time.Date(2026, 7, 30, 1, 2, 3, 0, time.FixedZone("test", 8*3600))
 	reads := &readAPIStub{
-		dashboard: Dashboard{
+		dashboard: appapi.Dashboard{
 			Uptime: "1m", Listen: "127.0.0.1:8317", Health: map[string]any{"p": "healthy"},
 			ModelLocks: map[string][]map[string]any{"r": {{"provider": "p"}}}, Quota: map[string]any{"p": 99},
-			Schedule: json.RawMessage(`{"enabled":true}`), Counters: map[string]Metrics{"p": {Requests: 2}},
+			Schedule: json.RawMessage(`{"enabled":true}`), Counters: map[string]appapi.Metrics{"p": {Requests: 2}},
 			Cache: map[string]any{"hits": 1}, Warnings: []string{"watch quota"},
 		},
-		accounts: []ProviderAccounts{{Name: "upstream", ProviderID: "p", Billing: "metered", Accounts: []Account{{ID: "a", Label: "primary"}}}},
-		tokens:   []TokenUsage{{Provider: "p", Model: "m", Input: 3, Output: 4, Requests: 1}},
+		accounts: []appapi.ProviderAccounts{{Name: "upstream", ProviderID: "p", Billing: "metered", Accounts: []appapi.Account{{ID: "a", Label: "primary"}}}},
+		tokens:   []appapi.TokenUsage{{Provider: "p", Model: "m", Input: 3, Output: 4, Requests: 1}},
 		fusion: func(workflow string, _ time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 			if workflow != "judge" {
 				t.Fatalf("fusion workflow = %q, want judge", workflow)
 			}
 			return map[string]fusion.WorkflowStats{"judge": {Runs: 2}}, []fusion.Run{{RunID: "run-1", Workflow: "judge"}}
 		},
-		pins: []Pin{{Route: "chat", Provider: "p", ExpiresAt: expires}, {Route: "all", Provider: "fallback"}},
-		config: func() (ConfigDocument, error) {
-			return ConfigDocument{YAML: "listen: :8317\n", Summary: ConfigSummary{Listen: ":8317", ProviderCount: 1, RouteCount: 2}, ProviderModels: map[string][]string{"p": {"m"}}, Routes: map[string][]ConfigRouteTarget{"chat": {{Provider: "p", Model: "m", Priority: 3}}}}, nil
+		pins: []appapi.Pin{{Route: "chat", Provider: "p", ExpiresAt: expires}, {Route: "all", Provider: "fallback"}},
+		config: func() (appapi.ConfigDocument, error) {
+			return appapi.ConfigDocument{YAML: "listen: :8317\n", Summary: appapi.ConfigSummary{Listen: ":8317", ProviderCount: 1, RouteCount: 2}, ProviderModels: map[string][]string{"p": {"m"}}, Routes: map[string][]appapi.ConfigRouteTarget{"chat": {{Provider: "p", Model: "m", Priority: 3}}}}, nil
 		},
 	}
 	s := newReadServer(t, reads, func(o *Options) { o.Version = "v-test" })
@@ -202,7 +203,7 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 		Version  string                      `json:"version"`
 		Listen   string                      `json:"listen"`
 		Warnings []string                    `json:"warnings"`
-		Counters map[string]Metrics          `json:"counters"`
+		Counters map[string]appapi.Metrics   `json:"counters"`
 		Schedule json.RawMessage             `json:"schedule"`
 		Health   map[string]any              `json:"health"`
 		Cache    map[string]any              `json:"cache"`
@@ -216,7 +217,7 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 
 	accounts := serveRead(t, s, http.MethodGet, "/api/accounts")
 	var gotAccounts struct {
-		Providers []ProviderAccounts `json:"providers"`
+		Providers []appapi.ProviderAccounts `json:"providers"`
 	}
 	decodeReadJSON(t, accounts, &gotAccounts)
 	if accounts.Code != http.StatusOK || len(gotAccounts.Providers) != 1 || gotAccounts.Providers[0].Accounts[0].ID != "a" {
@@ -224,7 +225,7 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 	}
 	tokens := serveRead(t, s, http.MethodGet, "/api/tokens")
 	var gotTokens struct {
-		Usage []TokenUsage `json:"usage"`
+		Usage []appapi.TokenUsage `json:"usage"`
 	}
 	decodeReadJSON(t, tokens, &gotTokens)
 	if tokens.Code != http.StatusOK || len(gotTokens.Usage) != 1 || gotTokens.Usage[0].Output != 4 {
@@ -255,13 +256,15 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 	}
 
 	config := serveRead(t, s, http.MethodGet, "/api/config")
-	var gotConfig ConfigDocument
+	var gotConfig appapi.ConfigDocument
 	decodeReadJSON(t, config, &gotConfig)
 	if config.Code != http.StatusOK || gotConfig.Summary.RouteCount != 2 || gotConfig.ProviderModels["p"][0] != "m" || gotConfig.Routes["chat"][0].Priority != 3 {
 		t.Fatalf("config = %#v", gotConfig)
 	}
 
-	reads.config = func() (ConfigDocument, error) { return ConfigDocument{}, errors.New("config unavailable") }
+	reads.config = func() (appapi.ConfigDocument, error) {
+		return appapi.ConfigDocument{}, errors.New("config unavailable")
+	}
 	failed := serveRead(t, s, http.MethodGet, "/api/config")
 	var routeError struct {
 		Error string `json:"error"`
@@ -410,26 +413,26 @@ func TestReadShadowReportAndErrors(t *testing.T) {
 }
 
 func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
-	var statsQuery StatsQuery
-	var agentQuery AgentStatsQuery
-	var analyticsQuery AnalyticsQuery
+	var statsQuery appapi.StatsQuery
+	var agentQuery appapi.AgentStatsQuery
+	var analyticsQuery appapi.AnalyticsQuery
 	reads := &readAPIStub{
-		stats: func(q StatsQuery) ([]observestats.Bucket, error) {
+		stats: func(q appapi.StatsQuery) ([]observestats.Bucket, error) {
 			statsQuery = q
 			return []observestats.Bucket{{Provider: "p", Model: "m", Minute: 120, Requests: 2}}, nil
 		},
-		agents: func(q AgentStatsQuery) ([]observestats.AgentBucket, error) {
+		agents: func(q appapi.AgentStatsQuery) ([]observestats.AgentBucket, error) {
 			agentQuery = q
 			return []observestats.AgentBucket{{Agent: "a", Provider: "p", Model: "m", Minute: 120, Requests: 3}}, nil
 		},
-		analytics: func(q AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+		analytics: func(q appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
 			analyticsQuery = q
 			return []observestats.AnalyticsBucket{
 				{Provider: "p", Model: "priced", Bucket: 100, Requests: 2, Input: 10, Output: 5, CacheRead: 2, CacheCreation: 1},
 				{Provider: "p", Model: "unknown", Bucket: 200, Requests: 1, Input: 7, Output: 3},
 			}, nil
 		},
-		pricing: PricingSnapshot{Catalog: &pricing.Catalog{ByModel: map[string]pricing.Entry{"priced": {Prompt: .001, Completion: .002, CacheRead: .003, CacheWrite: .004}}}},
+		pricing: appapi.PricingSnapshot{Catalog: &pricing.Catalog{ByModel: map[string]pricing.Entry{"priced": {Prompt: .001, Completion: .002, CacheRead: .003, CacheWrite: .004}}}},
 	}
 	s := newReadServer(t, reads)
 	stats := serveRead(t, s, http.MethodGet, "/api/stats?from=100&to=1970-01-01T00:03:20Z&provider=p&model=m&bucket=61s")
@@ -440,7 +443,7 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 		Buckets []observestats.Bucket `json:"buckets"`
 	}
 	decodeReadJSON(t, stats, &statsResponse)
-	if stats.Code != http.StatusOK || statsQuery != (StatsQuery{From: 100, To: 200, Provider: "p", Model: "m", BucketSecs: 120}) || statsResponse.Bucket != 120 || len(statsResponse.Buckets) != 1 || statsResponse.Buckets[0].Requests != 2 {
+	if stats.Code != http.StatusOK || statsQuery != (appapi.StatsQuery{From: 100, To: 200, Provider: "p", Model: "m", BucketSecs: 120}) || statsResponse.Bucket != 120 || len(statsResponse.Buckets) != 1 || statsResponse.Buckets[0].Requests != 2 {
 		t.Fatalf("stats query=%#v response=%#v", statsQuery, statsResponse)
 	}
 	agents := serveRead(t, s, http.MethodGet, "/api/agents?from=100&to=200&agent=a&provider=p&model=m&bucket=bad")
@@ -449,7 +452,7 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 		Buckets []observestats.AgentBucket `json:"buckets"`
 	}
 	decodeReadJSON(t, agents, &agentsResponse)
-	if agents.Code != http.StatusOK || agentQuery != (AgentStatsQuery{From: 100, To: 200, Agent: "a", Provider: "p", Model: "m", BucketSecs: 60}) || agentsResponse.Bucket != 60 || agentsResponse.Buckets[0].Requests != 3 {
+	if agents.Code != http.StatusOK || agentQuery != (appapi.AgentStatsQuery{From: 100, To: 200, Agent: "a", Provider: "p", Model: "m", BucketSecs: 60}) || agentsResponse.Bucket != 60 || agentsResponse.Buckets[0].Requests != 3 {
 		t.Fatalf("agent query=%#v response=%#v", agentQuery, agentsResponse)
 	}
 
@@ -474,7 +477,7 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 		} `json:"series"`
 	}
 	decodeReadJSON(t, analytics, &analyticsResponse)
-	if analytics.Code != http.StatusOK || analyticsQuery != (AnalyticsQuery{From: 100, To: 200, Provider: "p", Model: "all", Granularity: "month"}) || analyticsResponse.Granularity != "month" || analyticsResponse.Totals.Input != 17 || analyticsResponse.Totals.Output != 8 || analyticsResponse.Totals.Cost == nil || math.Abs(*analyticsResponse.Totals.Cost-.03) > 1e-12 || strings.Join(analyticsResponse.Coverage.Priced, ",") != "priced" || strings.Join(analyticsResponse.Coverage.Unpriced, ",") != "unknown" || len(analyticsResponse.Series) != 2 || !analyticsResponse.Series[0].Points[0].Priced || analyticsResponse.Series[1].Points[0].Cost != nil {
+	if analytics.Code != http.StatusOK || analyticsQuery != (appapi.AnalyticsQuery{From: 100, To: 200, Provider: "p", Model: "all", Granularity: "month"}) || analyticsResponse.Granularity != "month" || analyticsResponse.Totals.Input != 17 || analyticsResponse.Totals.Output != 8 || analyticsResponse.Totals.Cost == nil || math.Abs(*analyticsResponse.Totals.Cost-.03) > 1e-12 || strings.Join(analyticsResponse.Coverage.Priced, ",") != "priced" || strings.Join(analyticsResponse.Coverage.Unpriced, ",") != "unknown" || len(analyticsResponse.Series) != 2 || !analyticsResponse.Series[0].Points[0].Priced || analyticsResponse.Series[1].Points[0].Cost != nil {
 		t.Fatalf("analytics query=%#v response=%#v", analyticsQuery, analyticsResponse)
 	}
 
@@ -487,19 +490,21 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 		t.Fatalf("invalid analytics = (%d, %#v)", invalid.Code, routeError)
 	}
 
-	reads.stats = func(StatsQuery) ([]observestats.Bucket, error) { return nil, errors.New("store down") }
+	reads.stats = func(appapi.StatsQuery) ([]observestats.Bucket, error) { return nil, errors.New("store down") }
 	statsFailure := serveRead(t, s, http.MethodGet, "/api/stats?from=1&to=2")
 	decodeReadJSON(t, statsFailure, &routeError)
 	if statsFailure.Code != http.StatusInternalServerError || routeError.Error != "stats query: store down" {
 		t.Fatalf("stats failure = (%d, %#v)", statsFailure.Code, routeError)
 	}
-	reads.agents = func(AgentStatsQuery) ([]observestats.AgentBucket, error) { return nil, errors.New("agent store down") }
+	reads.agents = func(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error) {
+		return nil, errors.New("agent store down")
+	}
 	agentFailure := serveRead(t, s, http.MethodGet, "/api/agents?from=1&to=2")
 	decodeReadJSON(t, agentFailure, &routeError)
 	if agentFailure.Code != http.StatusInternalServerError || routeError.Error != "agent stats query: agent store down" {
 		t.Fatalf("agent failure = (%d, %#v)", agentFailure.Code, routeError)
 	}
-	reads.analytics = func(AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+	reads.analytics = func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
 		return nil, errors.New("analytics store down")
 	}
 	analyticsFailure := serveRead(t, s, http.MethodGet, "/api/analytics?from=1&to=2")
@@ -510,10 +515,10 @@ func TestReadStatsAgentsAndAnalyticsQueries(t *testing.T) {
 }
 
 func TestReadHelperBranches(t *testing.T) {
-	if err := requirePorts(nil, testCommandAPI{}); err == nil || err.Error() != "web ReadAPI is nil" {
+	if err := appapi.RequirePorts(nil, testCommandAPI{}); err == nil || err.Error() != "appapi ReadAPI is nil" {
 		t.Fatalf("nil reads error = %v", err)
 	}
-	if err := requirePorts(testReadAPI{}, nil); err == nil || err.Error() != "web CommandAPI is nil" {
+	if err := appapi.RequirePorts(testReadAPI{}, nil); err == nil || err.Error() != "appapi CommandAPI is nil" {
 		t.Fatalf("nil commands error = %v", err)
 	}
 	for _, test := range []struct {
@@ -553,7 +558,7 @@ func TestReadHelperBranches(t *testing.T) {
 		t.Fatalf("unclassified port error = (%d, %q)", recorder.Code, recorder.Body.String())
 	}
 	zeroStatus := httptest.NewRecorder()
-	writePortErr(zeroStatus, http.StatusTeapot, &HTTPError{Message: "zero"})
+	writePortErr(zeroStatus, http.StatusTeapot, &appapi.HTTPError{Message: "zero"})
 	if zeroStatus.Code != http.StatusTeapot || zeroStatus.Body.String() != `{"error":"zero"}` {
 		t.Fatalf("zero-status port error = (%d, %q)", zeroStatus.Code, zeroStatus.Body.String())
 	}
@@ -601,4 +606,4 @@ func TestReadServerStartStops(t *testing.T) {
 	}
 }
 
-var _ CommandAPI = testCommandAPI{}
+var _ appapi.CommandAPI = testCommandAPI{}

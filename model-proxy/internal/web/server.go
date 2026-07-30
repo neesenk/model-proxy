@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"io/fs"
+	"model-proxy/internal/appapi"
 	"net/http"
 	"strings"
 	"time"
@@ -11,8 +12,8 @@ import (
 // Options supplies the application ports and immutable presentation inputs for
 // an admin server. It intentionally contains no composition-root type.
 type Options struct {
-	Reads     ReadAPI
-	Commands  CommandAPI
+	Reads     appapi.ReadAPI
+	Commands  appapi.CommandAPI
 	Version   string
 	Assets    fs.FS
 	AssetRoot string
@@ -21,8 +22,8 @@ type Options struct {
 
 // Server serves the admin UI and its JSON API.
 type Server struct {
-	reads     ReadAPI
-	commands  CommandAPI
+	reads     appapi.ReadAPI
+	commands  appapi.CommandAPI
 	version   string
 	assets    fs.FS
 	assetRoot string
@@ -32,7 +33,7 @@ type Server struct {
 }
 
 func New(opts Options) (*Server, error) {
-	if err := requirePorts(opts.Reads, opts.Commands); err != nil {
+	if err := appapi.RequirePorts(opts.Reads, opts.Commands); err != nil {
 		return nil, err
 	}
 	assets := opts.Assets

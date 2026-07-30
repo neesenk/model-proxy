@@ -50,7 +50,7 @@ identity 投影；
 `proxy_health_adapter.go` 只把根层 health/cooldown/param/rate-limit 输入映射到
 runtime Manager，并保留 429 后 quota refresh 编排；
 `proxy_web_api.go` 只把 root-private 的 `proxyReadView` / `proxyAdminCommands`
-投影为 `internal/web` consumer-owned `ReadAPI` / `CommandAPI`，包括 JSON-safe DTO
+投影为 `internal/appapi` consumer-owned `ReadAPI` / `CommandAPI`，包括 JSON-safe DTO
 和应用 mutation；`web_adapter.go` 只装配 `internal/web.Server` 并挂载到主 mux；
 `request_routing_adapter.go` 只把一次 runtime snapshot 的 config、parent
 identity、route keys 与 generation 绑定到 `internal/routing.Planner` 的 scheduler
@@ -241,8 +241,9 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`manager.go` �
 - 跨域锁顺序仅允许 `Proxy.mu → runtime.Manager`。Manager 持锁时不得回调
   Proxy、quota tracker 或任何外部 I/O。
 
-HTTP/UI transport 归 `internal/web`：`Server` 只消费 consumer-owned `ReadAPI` /
-`CommandAPI`，不 import 或持有 `*Proxy`。根 `proxy_web_api.go` 是唯一的应用
+HTTP/UI transport 归 `internal/web`：`Server` 只消费 `internal/appapi` 的
+consumer-owned `ReadAPI` / `CommandAPI`，不 import 或持有 `*Proxy`。`internal/appapi`
+拥有全部 Web/CLI 共享的 DTO 与端口契约（JSON-safe、不含凭据），不依赖任何应用运行时。根 `proxy_web_api.go` 是唯一的应用
 适配层：它把 `proxyReadView` 的 detached snapshot 和 `proxyAdminCommands` 的
 mutation / active probe 投影到两个端口；`web_adapter.go` 只负责 composition 与
 mux 挂载。账号测活只捕获一次 `runtimeSnapshot`，因此配置、路由与 provider
@@ -301,8 +302,8 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 transport → orchestration → target plan → target executor → provider
 root Fusion adapter → internal/fusion
 root Shadow adapter → internal/shadow → target plan / bodycapture
-internal/web → ReadAPI / CommandAPI
-proxy_web_api → proxyReadView / proxyAdminCommands → internal/web.ReadAPI / CommandAPI
+internal/web → internal/appapi（ReadAPI / CommandAPI）
+proxy_web_api → proxyReadView / proxyAdminCommands → internal/appapi.ReadAPI / CommandAPI
 lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
 analytics adapter → internal/pricing
@@ -333,7 +334,8 @@ application → serveAssembly → applicationRuntime → Proxy
 - `runtime → provider`；
 - `shadow → targetexec, transport/bodycapture`；
 - `targetexec → cache, config, protocol, transport/bodycapture, provider`；
-- `web → fusion, observe/requestlog, observe/stats, pricing`。
+- `appapi → fusion, observe/stats, pricing`；
+- `web → appapi, observe/requestlog, pricing`。
 
 `architecture_dependency_dag_contract_test.go` 是这份 allowlist 的可执行镜像：它必须发现并
 分类全部生产 `internal` package、拒绝未声明边、拒绝环；新增 package 不能靠遗漏目录

@@ -36,7 +36,8 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/shadow":                {"model-proxy/internal/targetexec": true, "model-proxy/internal/transport/bodycapture": true},
 		"model-proxy/internal/targetexec":            {"model-proxy/internal/cache": true, "model-proxy/internal/config": true, "model-proxy/internal/protocol": true, "model-proxy/internal/transport/bodycapture": true, "model-proxy/provider": true},
 		"model-proxy/internal/transport/bodycapture": nil,
-		"model-proxy/internal/web":                   {"model-proxy/internal/fusion": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},
+		"model-proxy/internal/appapi":                {"model-proxy/internal/fusion": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},
+		"model-proxy/internal/web":                   {"model-proxy/internal/appapi": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/pricing": true},
 	}
 }
 

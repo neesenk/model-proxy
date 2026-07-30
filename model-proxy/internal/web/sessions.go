@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"model-proxy/internal/appapi"
 	"sync"
 	"time"
 )
@@ -19,7 +20,7 @@ type sessionStore struct {
 type loginSession struct {
 	mu       sync.RWMutex
 	provider string
-	update   LoginUpdate
+	update   appapi.LoginUpdate
 	created  time.Time
 }
 
@@ -44,7 +45,7 @@ func (store *sessionStore) Create(provider, detail string) string {
 	store.mu.Lock()
 	store.sessions[id] = &loginSession{
 		provider: provider,
-		update:   LoginUpdate{State: "pending", Detail: detail},
+		update:   appapi.LoginUpdate{State: "pending", Detail: detail},
 		created:  time.Now(),
 	}
 	store.mu.Unlock()
@@ -53,7 +54,7 @@ func (store *sessionStore) Create(provider, detail string) string {
 
 // Update replaces the transport state for an existing session. It reports
 // false for unknown or already-collected sessions.
-func (store *sessionStore) Update(id string, update LoginUpdate) bool {
+func (store *sessionStore) Update(id string, update appapi.LoginUpdate) bool {
 	session, ok := store.session(id)
 	if !ok {
 		return false
@@ -65,10 +66,10 @@ func (store *sessionStore) Update(id string, update LoginUpdate) bool {
 }
 
 // Snapshot returns a detached point-in-time copy of one session update.
-func (store *sessionStore) Snapshot(id string) (LoginUpdate, bool) {
+func (store *sessionStore) Snapshot(id string) (appapi.LoginUpdate, bool) {
 	session, ok := store.session(id)
 	if !ok {
-		return LoginUpdate{}, false
+		return appapi.LoginUpdate{}, false
 	}
 	session.mu.RLock()
 	update := session.update

@@ -10,6 +10,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"model-proxy/internal/appapi"
 	"model-proxy/internal/fusion"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
@@ -26,58 +27,68 @@ func (assets *permissiveAssetFS) Open(name string) (fs.File, error) {
 
 type testReadAPI struct{}
 
-func (testReadAPI) Dashboard(time.Time) Dashboard                                    { return Dashboard{} }
-func (testReadAPI) LogFile() string                                                  { return "" }
-func (testReadAPI) RequestLogDirectory() string                                      { return "" }
-func (testReadAPI) Accounts() []ProviderAccounts                                     { return nil }
-func (testReadAPI) Tokens() []TokenUsage                                             { return nil }
-func (testReadAPI) Stats(StatsQuery) ([]observestats.Bucket, error)                  { return nil, nil }
-func (testReadAPI) AgentStats(AgentStatsQuery) ([]observestats.AgentBucket, error)   { return nil, nil }
-func (testReadAPI) Analytics(AnalyticsQuery) ([]observestats.AnalyticsBucket, error) { return nil, nil }
-func (testReadAPI) Pricing() PricingSnapshot                                         { return PricingSnapshot{Catalog: &pricing.Catalog{}} }
+func (testReadAPI) Dashboard(time.Time) appapi.Dashboard                   { return appapi.Dashboard{} }
+func (testReadAPI) LogFile() string                                        { return "" }
+func (testReadAPI) RequestLogDirectory() string                            { return "" }
+func (testReadAPI) Accounts() []appapi.ProviderAccounts                    { return nil }
+func (testReadAPI) Tokens() []appapi.TokenUsage                            { return nil }
+func (testReadAPI) Stats(appapi.StatsQuery) ([]observestats.Bucket, error) { return nil, nil }
+func (testReadAPI) AgentStats(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error) {
+	return nil, nil
+}
+func (testReadAPI) Analytics(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+	return nil, nil
+}
+func (testReadAPI) Pricing() appapi.PricingSnapshot {
+	return appapi.PricingSnapshot{Catalog: &pricing.Catalog{}}
+}
 func (testReadAPI) Fusion(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 	return nil, nil
 }
-func (testReadAPI) Pins() []Pin                             { return nil }
-func (testReadAPI) ConfigDocument() (ConfigDocument, error) { return ConfigDocument{}, nil }
+func (testReadAPI) Pins() []appapi.Pin { return nil }
+func (testReadAPI) ConfigDocument() (appapi.ConfigDocument, error) {
+	return appapi.ConfigDocument{}, nil
+}
 
 type testCommandAPI struct {
-	begin func(context.Context, string) (LoginStart, error)
+	begin func(context.Context, string) (appapi.LoginStart, error)
 }
 
-func (testCommandAPI) ResetStats() error                                { return nil }
-func (testCommandAPI) RefreshQuota(string) bool                         { return true }
-func (testCommandAPI) ResetHealth(string) ([]string, int, error)        { return nil, 0, nil }
-func (testCommandAPI) SetPin(string, string, time.Duration) (Pin, bool) { return Pin{}, true }
-func (testCommandAPI) ClearPin(string) bool                             { return true }
-func (testCommandAPI) SaveConfig([]byte) error                          { return nil }
-func (testCommandAPI) EditConfig(EditRequest) error                     { return nil }
-func (testCommandAPI) AddAccount(context.Context, string, AccountInput) (MutationResult, error) {
-	return MutationResult{}, nil
+func (testCommandAPI) ResetStats() error                         { return nil }
+func (testCommandAPI) RefreshQuota(string) bool                  { return true }
+func (testCommandAPI) ResetHealth(string) ([]string, int, error) { return nil, 0, nil }
+func (testCommandAPI) SetPin(string, string, time.Duration) (appapi.Pin, bool) {
+	return appapi.Pin{}, true
 }
-func (testCommandAPI) ProbeAccount(context.Context, string, string) (ProbeResult, error) {
-	return ProbeResult{}, nil
+func (testCommandAPI) ClearPin(string) bool                { return true }
+func (testCommandAPI) SaveConfig([]byte) error             { return nil }
+func (testCommandAPI) EditConfig(appapi.EditRequest) error { return nil }
+func (testCommandAPI) AddAccount(context.Context, string, appapi.AccountInput) (appapi.MutationResult, error) {
+	return appapi.MutationResult{}, nil
 }
-func (testCommandAPI) RemoveAccount(string, string) (MutationResult, error) {
-	return MutationResult{}, nil
+func (testCommandAPI) ProbeAccount(context.Context, string, string) (appapi.ProbeResult, error) {
+	return appapi.ProbeResult{}, nil
 }
-func (api testCommandAPI) BeginLogin(ctx context.Context, name string) (LoginStart, error) {
+func (testCommandAPI) RemoveAccount(string, string) (appapi.MutationResult, error) {
+	return appapi.MutationResult{}, nil
+}
+func (api testCommandAPI) BeginLogin(ctx context.Context, name string) (appapi.LoginStart, error) {
 	if api.begin == nil {
-		return LoginStart{}, errors.New("not implemented")
+		return appapi.LoginStart{}, errors.New("not implemented")
 	}
 	return api.begin(ctx, name)
 }
 
 type completedLogin struct{}
 
-func (completedLogin) Run(context.Context) LoginUpdate {
-	return LoginUpdate{State: "done", Result: "account"}
+func (completedLogin) Run(context.Context) appapi.LoginUpdate {
+	return appapi.LoginUpdate{State: "done", Result: "account"}
 }
 
 func TestServeUITraversalGuard(t *testing.T) {
 	assets := &permissiveAssetFS{}
-	s, err := New(Options{Reads: testReadAPI{}, Commands: testCommandAPI{begin: func(context.Context, string) (LoginStart, error) {
-		return LoginStart{Provider: "aqp", LoginURL: "https://login.example", Job: completedLogin{}}, nil
+	s, err := New(Options{Reads: testReadAPI{}, Commands: testCommandAPI{begin: func(context.Context, string) (appapi.LoginStart, error) {
+		return appapi.LoginStart{Provider: "aqp", LoginURL: "https://login.example", Job: completedLogin{}}, nil
 	}}, Assets: assets})
 	if err != nil {
 		t.Fatal(err)
@@ -104,8 +115,8 @@ func TestServeUITraversalGuard(t *testing.T) {
 func TestServerLoginTransport(t *testing.T) {
 	s, err := New(Options{
 		Reads: testReadAPI{},
-		Commands: testCommandAPI{begin: func(context.Context, string) (LoginStart, error) {
-			return LoginStart{Provider: "aqp", LoginURL: "https://login.example", Job: completedLogin{}}, nil
+		Commands: testCommandAPI{begin: func(context.Context, string) (appapi.LoginStart, error) {
+			return appapi.LoginStart{Provider: "aqp", LoginURL: "https://login.example", Job: completedLogin{}}, nil
 		}},
 		Assets: fstest.MapFS{"assets/index.html": {Data: []byte("ok")}},
 	})

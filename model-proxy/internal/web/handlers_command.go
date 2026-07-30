@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"model-proxy/internal/appapi"
 	"net/http"
 	"strings"
 	"time"
@@ -105,7 +106,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfigEdit(w http.ResponseWriter, r *http.Request) {
-	var req EditRequest
+	var req appapi.EditRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -127,7 +128,7 @@ func (s *Server) handleAccountAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusBadRequest, "expected /api/accounts/<provider>")
 		return
 	}
-	var in AccountInput
+	var in appapi.AccountInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSONErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -199,7 +200,7 @@ func (s *Server) handleLoginStart(w http.ResponseWriter, r *http.Request) {
 	id := s.sessions.Create(start.Provider, detail)
 	if !s.tasks.Run(func(ctx context.Context) { s.sessions.Update(id, start.Job.Run(ctx)) }) {
 		err := "server is shutting down"
-		s.sessions.Update(id, LoginUpdate{State: "error", Detail: err})
+		s.sessions.Update(id, appapi.LoginUpdate{State: "error", Detail: err})
 		writeJSONErr(w, http.StatusServiceUnavailable, err)
 		return
 	}

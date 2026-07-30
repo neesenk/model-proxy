@@ -50,8 +50,9 @@
   `internal/shadow.Runtime`。根 `proxy_shadow.go` 只拥有 commit 后 eligibility、
   `proxyLifecycle` admission、generation-bound resolver/plan 和 request-log
   投影；Shadow 禁止进入 target executor 或写生产 health/metrics/events。
-- HTTP/UI transport 统一归 `internal/web`，只能消费其 consumer-owned `ReadAPI` /
-  `CommandAPI`；不得 import 或持有 `*Proxy`，也不得直接获取 Proxy 锁或读取
+- Web/CLI 共享的 DTO 与端口契约归 `internal/appapi`（JSON-safe、不含凭据、
+  不依赖应用运行时）；HTTP/UI transport 统一归 `internal/web`，只能消费
+  `internal/appapi` 的 `ReadAPI` / `CommandAPI`；不得 import 或持有 `*Proxy`，也不得直接获取 Proxy 锁或读取
   config/provider/health/model-lock 内部 map。根 `proxy_web_api.go` 只把
   `proxyReadView` / `proxyAdminCommands` 映射为这些端口；`web_adapter.go` 只负责
   composition 与 mux 挂载。

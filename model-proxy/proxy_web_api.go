@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"time"
 
+	"model-proxy/internal/appapi"
 	"model-proxy/internal/fusion"
 	observestats "model-proxy/internal/observe/stats"
-	webtransport "model-proxy/internal/web"
 	"model-proxy/provider"
 )
 
@@ -44,11 +44,11 @@ func newProxyWebAPI(proxy *Proxy, configFile func() string) *proxyWebAPI {
 	return api
 }
 
-func (api *proxyWebAPI) Dashboard(now time.Time) webtransport.Dashboard {
+func (api *proxyWebAPI) Dashboard(now time.Time) appapi.Dashboard {
 	view := api.reads.dashboard(now)
-	counters := make(map[string]webtransport.Metrics, len(view.counters))
+	counters := make(map[string]appapi.Metrics, len(view.counters))
 	for name, counter := range view.counters {
-		counters[name] = webtransport.Metrics{
+		counters[name] = appapi.Metrics{
 			Requests:       counter.Requests,
 			Failovers:      counter.Failovers,
 			RateLimited429: counter.RateLimited429,
@@ -58,7 +58,7 @@ func (api *proxyWebAPI) Dashboard(now time.Time) webtransport.Dashboard {
 			TTFTSum:        counter.TTFTSum,
 		}
 	}
-	return webtransport.Dashboard{
+	return appapi.Dashboard{
 		Uptime:     view.uptime,
 		Listen:     view.listen,
 		Health:     view.health,
@@ -79,21 +79,21 @@ func (api *proxyWebAPI) RequestLogDirectory() string {
 	return api.reads.requestLogDirectory()
 }
 
-func (api *proxyWebAPI) Accounts() []webtransport.ProviderAccounts {
+func (api *proxyWebAPI) Accounts() []appapi.ProviderAccounts {
 	configs := api.reads.providerConfigs()
-	out := make([]webtransport.ProviderAccounts, 0, len(configs))
+	out := make([]appapi.ProviderAccounts, 0, len(configs))
 	for name, config := range configs {
-		item := webtransport.ProviderAccounts{
+		item := appapi.ProviderAccounts{
 			Name:       name,
 			ProviderID: config.Provider,
 			Billing:    config.Billing,
-			Accounts:   []webtransport.Account{},
+			Accounts:   []appapi.Account{},
 		}
 		switch config.Provider {
 		case "aqp":
 			account, _ := provider.LoadAqpAccount(authFilePath(name, "oauth_auth"))
 			if account != nil && account.AccountID != "" {
-				item.Accounts = append(item.Accounts, webtransport.Account{
+				item.Accounts = append(item.Accounts, appapi.Account{
 					ID:      account.AccountID,
 					Label:   account.Email,
 					AddedAt: time.Unix(account.CreatedAt, 0).UTC().Format(time.RFC3339),
@@ -103,7 +103,7 @@ func (api *proxyWebAPI) Accounts() []webtransport.ProviderAccounts {
 		case "codex":
 			account, _ := provider.LoadCodexAccount(authFilePath(name, "oauth_auth"))
 			if account != nil && account.AccountID != "" {
-				item.Accounts = append(item.Accounts, webtransport.Account{
+				item.Accounts = append(item.Accounts, appapi.Account{
 					ID:    account.AccountID,
 					Label: account.Email,
 					Email: account.Email,
@@ -112,7 +112,7 @@ func (api *proxyWebAPI) Accounts() []webtransport.ProviderAccounts {
 		default:
 			pool, _ := loadPool(name, config.Provider)
 			for _, account := range pool.Accounts {
-				item.Accounts = append(item.Accounts, webtransport.Account{
+				item.Accounts = append(item.Accounts, appapi.Account{
 					ID:      account.ID,
 					Label:   account.Label,
 					AddedAt: account.AddedAt,
@@ -124,11 +124,11 @@ func (api *proxyWebAPI) Accounts() []webtransport.ProviderAccounts {
 	return out
 }
 
-func (api *proxyWebAPI) Tokens() []webtransport.TokenUsage {
+func (api *proxyWebAPI) Tokens() []appapi.TokenUsage {
 	snapshot := api.reads.tokenUsage()
-	out := make([]webtransport.TokenUsage, 0, len(snapshot))
+	out := make([]appapi.TokenUsage, 0, len(snapshot))
 	for key, usage := range snapshot {
-		out = append(out, webtransport.TokenUsage{
+		out = append(out, appapi.TokenUsage{
 			Provider:      key.Provider,
 			Model:         key.Model,
 			Input:         usage.Input,
@@ -141,7 +141,7 @@ func (api *proxyWebAPI) Tokens() []webtransport.TokenUsage {
 	return out
 }
 
-func (api *proxyWebAPI) Stats(query webtransport.StatsQuery) ([]observestats.Bucket, error) {
+func (api *proxyWebAPI) Stats(query appapi.StatsQuery) ([]observestats.Bucket, error) {
 	return api.reads.stats(
 		query.From,
 		query.To,
@@ -151,7 +151,7 @@ func (api *proxyWebAPI) Stats(query webtransport.StatsQuery) ([]observestats.Buc
 	)
 }
 
-func (api *proxyWebAPI) AgentStats(query webtransport.AgentStatsQuery) ([]observestats.AgentBucket, error) {
+func (api *proxyWebAPI) AgentStats(query appapi.AgentStatsQuery) ([]observestats.AgentBucket, error) {
 	return api.reads.agentStats(
 		query.From,
 		query.To,
@@ -162,7 +162,7 @@ func (api *proxyWebAPI) AgentStats(query webtransport.AgentStatsQuery) ([]observ
 	)
 }
 
-func (api *proxyWebAPI) Analytics(query webtransport.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
+func (api *proxyWebAPI) Analytics(query appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
 	return api.reads.analytics(
 		query.From,
 		query.To,
@@ -172,9 +172,9 @@ func (api *proxyWebAPI) Analytics(query webtransport.AnalyticsQuery) ([]observes
 	)
 }
 
-func (api *proxyWebAPI) Pricing() webtransport.PricingSnapshot {
+func (api *proxyWebAPI) Pricing() appapi.PricingSnapshot {
 	view := api.reads.pricing()
-	return webtransport.PricingSnapshot{
+	return appapi.PricingSnapshot{
 		Catalog:   view.catalog,
 		Overrides: view.overrides,
 	}
@@ -184,11 +184,11 @@ func (api *proxyWebAPI) Fusion(workflow string, now time.Time) (map[string]fusio
 	return api.reads.fusion(workflow, now)
 }
 
-func (api *proxyWebAPI) Pins() []webtransport.Pin {
+func (api *proxyWebAPI) Pins() []appapi.Pin {
 	snapshot := api.reads.pins()
-	out := make([]webtransport.Pin, 0, len(snapshot))
+	out := make([]appapi.Pin, 0, len(snapshot))
 	for route, pin := range snapshot {
-		out = append(out, webtransport.Pin{
+		out = append(out, appapi.Pin{
 			Route:     route,
 			Provider:  pin.provider,
 			ExpiresAt: pin.expiresAt,
@@ -197,25 +197,25 @@ func (api *proxyWebAPI) Pins() []webtransport.Pin {
 	return out
 }
 
-func (api *proxyWebAPI) ConfigDocument() (webtransport.ConfigDocument, error) {
+func (api *proxyWebAPI) ConfigDocument() (appapi.ConfigDocument, error) {
 	path := api.currentConfigFile()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return webtransport.ConfigDocument{}, err
+		return appapi.ConfigDocument{}, err
 	}
 	config, err := LoadConfigFromBytes(path, data)
 	if err != nil {
-		return webtransport.ConfigDocument{}, err
+		return appapi.ConfigDocument{}, err
 	}
 	providerModels := make(map[string][]string, len(config.Providers))
 	for name, providerConfig := range config.Providers {
 		providerModels[name] = append([]string(nil), providerConfig.Models...)
 	}
-	routes := make(map[string][]webtransport.ConfigRouteTarget, len(config.Routes))
+	routes := make(map[string][]appapi.ConfigRouteTarget, len(config.Routes))
 	for exposed, targets := range config.Routes {
-		row := make([]webtransport.ConfigRouteTarget, 0, len(targets))
+		row := make([]appapi.ConfigRouteTarget, 0, len(targets))
 		for _, target := range targets {
-			row = append(row, webtransport.ConfigRouteTarget{
+			row = append(row, appapi.ConfigRouteTarget{
 				Provider: target.Provider,
 				Model:    target.Model,
 				Priority: target.Priority,
@@ -223,9 +223,9 @@ func (api *proxyWebAPI) ConfigDocument() (webtransport.ConfigDocument, error) {
 		}
 		routes[exposed] = row
 	}
-	return webtransport.ConfigDocument{
+	return appapi.ConfigDocument{
 		YAML: string(data),
-		Summary: webtransport.ConfigSummary{
+		Summary: appapi.ConfigSummary{
 			Listen:        config.Listen,
 			ProviderCount: len(config.Providers),
 			RouteCount:    len(config.Routes),
@@ -247,12 +247,12 @@ func (api *proxyWebAPI) ResetHealth(provider string) ([]string, int, error) {
 	return api.commands.resetHealthAndPersist(provider)
 }
 
-func (api *proxyWebAPI) SetPin(route, provider string, ttl time.Duration) (webtransport.Pin, bool) {
+func (api *proxyWebAPI) SetPin(route, provider string, ttl time.Duration) (appapi.Pin, bool) {
 	pin, ok := api.commands.setPin(route, provider, ttl)
 	if !ok {
-		return webtransport.Pin{}, false
+		return appapi.Pin{}, false
 	}
-	return webtransport.Pin{
+	return appapi.Pin{
 		Route:     route,
 		Provider:  provider,
 		ExpiresAt: pin.expiresAt,
@@ -267,7 +267,7 @@ func (api *proxyWebAPI) SaveConfig(data []byte) error {
 	return api.saveAndReload(data)
 }
 
-func (api *proxyWebAPI) EditConfig(request webtransport.EditRequest) error {
+func (api *proxyWebAPI) EditConfig(request appapi.EditRequest) error {
 	switch request.Kind {
 	case "general":
 		return api.editGeneral(request.Data)
@@ -276,7 +276,7 @@ func (api *proxyWebAPI) EditConfig(request webtransport.EditRequest) error {
 	case "provider", "route", "claude_mapping":
 		return api.editStructured(request.Kind, request.Name, request.Data)
 	default:
-		return webtransport.NewHTTPError(
+		return appapi.NewHTTPError(
 			http.StatusBadRequest,
 			"unknown edit kind: "+request.Kind,
 		)
@@ -286,19 +286,19 @@ func (api *proxyWebAPI) EditConfig(request webtransport.EditRequest) error {
 func (api *proxyWebAPI) AddAccount(
 	ctx context.Context,
 	name string,
-	input webtransport.AccountInput,
-) (webtransport.MutationResult, error) {
+	input appapi.AccountInput,
+) (appapi.MutationResult, error) {
 	_ = ctx // validation helpers own their request timeouts.
 	providerConfig, ok := api.reads.providerConfig(name)
 	if !ok {
-		return webtransport.MutationResult{}, webtransport.NewHTTPError(
+		return appapi.MutationResult{}, appapi.NewHTTPError(
 			http.StatusNotFound,
 			"unknown provider: "+name,
 		)
 	}
 	switch providerConfig.Provider {
 	case "aqp", "codex":
-		return webtransport.MutationResult{}, webtransport.NewHTTPError(
+		return appapi.MutationResult{}, appapi.NewHTTPError(
 			http.StatusBadRequest,
 			name+" uses the async login flow: POST /api/login/"+name+"/start",
 		)
@@ -333,12 +333,12 @@ func (api *proxyWebAPI) AddAccount(
 		)
 	}
 	if err != nil {
-		return webtransport.MutationResult{}, webtransport.NewHTTPError(
+		return appapi.MutationResult{}, appapi.NewHTTPError(
 			http.StatusBadRequest,
 			err.Error(),
 		)
 	}
-	return webtransport.MutationResult{
+	return appapi.MutationResult{
 		ID:      id,
 		Warning: api.reloadAfterMutation(),
 	}, nil
@@ -348,7 +348,7 @@ func (api *proxyWebAPI) ProbeAccount(
 	ctx context.Context,
 	name string,
 	id string,
-) (webtransport.ProbeResult, error) {
+) (appapi.ProbeResult, error) {
 	result, err := api.commands.accountProbe(ctx, name, id)
 	if err != nil {
 		status := http.StatusNotFound
@@ -356,9 +356,9 @@ func (api *proxyWebAPI) ProbeAccount(
 		if errors.As(err, &probeError) && probeError.kind == accountProbeMissingModel {
 			status = http.StatusBadRequest
 		}
-		return webtransport.ProbeResult{}, webtransport.NewHTTPError(status, err.Error())
+		return appapi.ProbeResult{}, appapi.NewHTTPError(status, err.Error())
 	}
-	return webtransport.ProbeResult{
+	return appapi.ProbeResult{
 		OK:         result.ok,
 		HTTPStatus: result.httpStatus,
 		Reason:     result.reason,
@@ -369,10 +369,10 @@ func (api *proxyWebAPI) ProbeAccount(
 	}, nil
 }
 
-func (api *proxyWebAPI) RemoveAccount(name, id string) (webtransport.MutationResult, error) {
+func (api *proxyWebAPI) RemoveAccount(name, id string) (appapi.MutationResult, error) {
 	providerConfig, ok := api.reads.providerConfig(name)
 	if !ok {
-		return webtransport.MutationResult{}, webtransport.NewHTTPError(
+		return appapi.MutationResult{}, appapi.NewHTTPError(
 			http.StatusNotFound,
 			"unknown provider: "+name,
 		)
@@ -380,7 +380,7 @@ func (api *proxyWebAPI) RemoveAccount(name, id string) (webtransport.MutationRes
 	switch providerConfig.Provider {
 	case "aqp":
 		if err := provider.ClearAqpAccount(authFilePath(name, "oauth_auth")); err != nil {
-			return webtransport.MutationResult{}, webtransport.NewHTTPError(
+			return appapi.MutationResult{}, appapi.NewHTTPError(
 				http.StatusInternalServerError,
 				err.Error(),
 			)
@@ -388,20 +388,20 @@ func (api *proxyWebAPI) RemoveAccount(name, id string) (webtransport.MutationRes
 	case "codex":
 		err := os.Remove(authFilePath(name, "oauth_auth"))
 		if err != nil && !os.IsNotExist(err) {
-			return webtransport.MutationResult{}, webtransport.NewHTTPError(
+			return appapi.MutationResult{}, appapi.NewHTTPError(
 				http.StatusInternalServerError,
 				err.Error(),
 			)
 		}
 	default:
 		if err := removeApikeyAccount(name, providerConfig.Provider, id); err != nil {
-			return webtransport.MutationResult{}, webtransport.NewHTTPError(
+			return appapi.MutationResult{}, appapi.NewHTTPError(
 				http.StatusBadRequest,
 				err.Error(),
 			)
 		}
 	}
-	return webtransport.MutationResult{Warning: api.reloadAfterMutation()}, nil
+	return appapi.MutationResult{Warning: api.reloadAfterMutation()}, nil
 }
 
 func (api *proxyWebAPI) currentConfigFile() string {
@@ -438,9 +438,9 @@ type aqpLoginJob struct {
 	detail string
 }
 
-func (job *aqpLoginJob) Run(ctx context.Context) webtransport.LoginUpdate {
-	fail := func(err error) webtransport.LoginUpdate {
-		return webtransport.LoginUpdate{
+func (job *aqpLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
+	fail := func(err error) appapi.LoginUpdate {
+		return appapi.LoginUpdate{
 			State:  "error",
 			Detail: job.detail,
 			Result: err.Error(),
@@ -469,7 +469,7 @@ func (job *aqpLoginJob) Run(ctx context.Context) webtransport.LoginUpdate {
 	); err != nil {
 		return fail(err)
 	}
-	return webtransport.LoginUpdate{
+	return appapi.LoginUpdate{
 		State:   "done",
 		Detail:  job.detail,
 		Result:  account.Email,
@@ -485,7 +485,7 @@ type codexLoginJob struct {
 }
 
 // codexLoginState is application-owned device-flow state. The Web transport
-// retains only the resulting LoginUpdate and never sees OAuth client details.
+// retains only the resulting appapi.LoginUpdate and never sees OAuth client details.
 type codexLoginState struct {
 	deviceAuthID string
 	userCode     string
@@ -493,9 +493,9 @@ type codexLoginState struct {
 	opts         *codexLoginServerOptions
 }
 
-func (job *codexLoginJob) Run(ctx context.Context) webtransport.LoginUpdate {
-	fail := func(err error) webtransport.LoginUpdate {
-		return webtransport.LoginUpdate{
+func (job *codexLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
+	fail := func(err error) appapi.LoginUpdate {
+		return appapi.LoginUpdate{
 			State:  "error",
 			Detail: job.detail,
 			Result: err.Error(),
@@ -532,7 +532,7 @@ func (job *codexLoginJob) Run(ctx context.Context) webtransport.LoginUpdate {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fail(err)
 	}
-	return webtransport.LoginUpdate{
+	return appapi.LoginUpdate{
 		State:   "done",
 		Detail:  job.detail,
 		Result:  authFile.Tokens.AccountID,
@@ -543,10 +543,10 @@ func (job *codexLoginJob) Run(ctx context.Context) webtransport.LoginUpdate {
 func (api *proxyWebAPI) BeginLogin(
 	ctx context.Context,
 	name string,
-) (webtransport.LoginStart, error) {
+) (appapi.LoginStart, error) {
 	providerConfig, ok := api.reads.providerConfig(name)
 	if !ok {
-		return webtransport.LoginStart{}, webtransport.NewHTTPError(
+		return appapi.LoginStart{}, appapi.NewHTTPError(
 			http.StatusNotFound,
 			"unknown provider: "+name,
 		)
@@ -556,12 +556,12 @@ func (api *proxyWebAPI) BeginLogin(
 		client := api.newAqpClientFn(authFilePath(name, "oauth_auth"))
 		loginURL, err := client.BootstrapLoginURLContext(ctx)
 		if err != nil {
-			return webtransport.LoginStart{}, webtransport.NewHTTPError(
+			return appapi.LoginStart{}, appapi.NewHTTPError(
 				http.StatusBadGateway,
 				err.Error(),
 			)
 		}
-		return webtransport.LoginStart{
+		return appapi.LoginStart{
 			Provider: "aqp",
 			LoginURL: loginURL,
 			Job: &aqpLoginJob{
@@ -579,14 +579,14 @@ func (api *proxyWebAPI) BeginLogin(
 			provider.CodexOAuthClientID,
 		)
 		if err != nil {
-			return webtransport.LoginStart{}, webtransport.NewHTTPError(
+			return appapi.LoginStart{}, appapi.NewHTTPError(
 				http.StatusBadGateway,
 				err.Error(),
 			)
 		}
 		intervalSeconds, _ := strconv.Atoi(userCode.Interval)
 		detail := codexOAuthVerifyURL + "  code: " + userCode.UserCode
-		return webtransport.LoginStart{
+		return appapi.LoginStart{
 			Provider:  "codex",
 			VerifyURL: codexOAuthVerifyURL,
 			UserCode:  userCode.UserCode,
@@ -603,7 +603,7 @@ func (api *proxyWebAPI) BeginLogin(
 			},
 		}, nil
 	default:
-		return webtransport.LoginStart{}, webtransport.NewHTTPError(
+		return appapi.LoginStart{}, appapi.NewHTTPError(
 			http.StatusBadRequest,
 			name+" has no async login flow",
 		)
@@ -611,6 +611,6 @@ func (api *proxyWebAPI) BeginLogin(
 }
 
 var (
-	_ webtransport.ReadAPI    = (*proxyWebAPI)(nil)
-	_ webtransport.CommandAPI = (*proxyWebAPI)(nil)
+	_ appapi.ReadAPI    = (*proxyWebAPI)(nil)
+	_ appapi.CommandAPI = (*proxyWebAPI)(nil)
 )

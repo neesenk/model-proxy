@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"model-proxy/internal/appapi"
 	"net/http"
 	"os"
 	"sort"
@@ -40,7 +41,7 @@ func writeJSONErr(w http.ResponseWriter, code int, msg string) {
 }
 
 func writePortErr(w http.ResponseWriter, fallback int, err error) {
-	var classified *HTTPError
+	var classified *appapi.HTTPError
 	if errors.As(err, &classified) && classified.Status != 0 {
 		writeJSONErr(w, classified.Status, classified.Message)
 		return
