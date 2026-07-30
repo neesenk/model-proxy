@@ -116,7 +116,7 @@ func AddVolcengineAccount(cfg *configdomain.Config, name string, prov configdoma
 	// Validate the Ark API Key via usage_url (GET /models with Bearer), mirroring
 	// addApikeyAccount's usage_url gate: 401/403 or a network error = bad key →
 	// reject before save. No-op when usage_url is unset.
-	if err := validateKeyBearerGET(prov.UsageURL, apiKey); err != nil {
+	if err := ValidateKeyBearerGET(prov.UsageURL, apiKey); err != nil {
 		return "", err
 	}
 	// AK/SK are optional (chat-only accounts omit them entirely), but they must

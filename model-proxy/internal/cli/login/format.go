@@ -11,6 +11,9 @@ func truncate(s string, n int) string { return provider.Truncate(s, n) }
 
 func cGreen(s string) string { return provider.Green(s) }
 func cGray(s string) string  { return provider.Gray(s) }
+func cBold(s string) string  { return provider.Bold(s) }
+func cCyan(s string) string  { return provider.Cyan(s) }
+func cDim(s string) string   { return provider.Dim(s) }
 
 // mask redacts a credential/id for logs: first 2 + … + last 2 (see
 // model-proxy/util.go for the canonical CLI copy; this mirrors it).

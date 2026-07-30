@@ -36,9 +36,9 @@ func nowTS() string { return accounts.Timestamp(time.Now()) }
 type accountCred = accounts.Credentials
 type poolAccount = accounts.Account
 
-// validateKeyBearerGET rejects a key when the validation endpoint answers
+// ValidateKeyBearerGET rejects a key when the validation endpoint answers
 // 401/403 (or is unreachable). No-op when url is empty.
-func validateKeyBearerGET(url, key string) error {
+func ValidateKeyBearerGET(url, key string) error {
 	if url == "" {
 		return nil
 	}

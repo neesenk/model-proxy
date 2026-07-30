@@ -469,7 +469,7 @@ func TestAqpCodexLogin_UsesConfigNameForAuthFile(t *testing.T) {
 // mean "key rejected"). Green-signal guard: getting the accept/reject boundary
 // wrong would silently pass bad keys or reject valid ones.
 func TestValidateKeyBearerGET(t *testing.T) {
-	if err := validateKeyBearerGET("", "k"); err != nil {
+	if err := clilogin.ValidateKeyBearerGET("", "k"); err != nil {
 		t.Errorf("empty url: want nil, got %v", err)
 	}
 	statusCase := func(code int) {
@@ -478,7 +478,7 @@ func TestValidateKeyBearerGET(t *testing.T) {
 			w.WriteHeader(code)
 		}))
 		defer srv.Close()
-		err := validateKeyBearerGET(srv.URL, "k")
+		err := clilogin.ValidateKeyBearerGET(srv.URL, "k")
 		switch code {
 		case 200:
 			if err != nil {
