@@ -330,6 +330,7 @@ application → serveAssembly → applicationRuntime → Proxy
   `runtime/wirecap`、`transport/bodycapture`；
 - `app → accounts, catalog, config, provider`；
 - `cli → daemonctl, observe/stats, provider`；
+- `cli/login → provider`；
 - `cli/models → accounts, app, catalog, config, probe, provider`；
 - `config → pricing, protocol`；
 - `daemonctl`（叶子，CLI→daemon HTTP client）；

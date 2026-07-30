@@ -363,7 +363,7 @@ After logging in, the browser will try to redirect back to this machine:
 	// 5. Provision the managed API key — get_or_generate returns the full identity
 	//    (api_key + project_id + employee_*), so we call it first to populate the
 	//    account, then persist.
-	keyData, err := c.fetchAPIKey()
+	keyData, err := c.FetchAPIKey()
 	if err != nil {
 		return fmt.Errorf("api key provisioning: %w", err)
 	}

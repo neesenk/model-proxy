@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -65,11 +66,11 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	c := &AqpClient{
 		HTTP:      &http.Client{Jar: jar},
 		Jar:       jar,
-		storePath: storePath,
+		StorePath: storePath,
 	}
 
 	// 1. Bootstrap: get the login URL (401 + result).
-	loginURL, err := c.bootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
+	loginURL, err := c.BootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -100,7 +101,7 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	}
 
 	// 3. Poll session (jar carries SSO_A; mock upgrades to SSO_C).
-	data, err := c.pollAt(aqp.URL+"/compass-api/v1/auth/info", 10*time.Second)
+	data, err := c.PollAt(aqp.URL+"/compass-api/v1/auth/info", 10*time.Second)
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 	if err := provider.SaveAqpAccount(storePath, a); err != nil {
 		t.Fatal(err)
 	}
-	key, err := c.fetchAPIKeyAt(aqp.URL + "/api/v1/cqp/ccswitch/api_key/get_or_generate")
+	key, err := c.FetchAPIKeyAt(aqp.URL + "/api/v1/cqp/ccswitch/api_key/get_or_generate")
 	if err != nil {
 		t.Fatalf("fetch key: %v", err)
 	}
@@ -146,8 +147,8 @@ func TestBootstrap_MissingLoginURL(t *testing.T) {
 	}))
 	defer aqp.Close()
 	jar, _ := cookiejar.New(nil)
-	c := &AqpClient{HTTP: &http.Client{Jar: jar}, Jar: jar, storePath: t.TempDir() + "/g.json"}
-	_, err := c.bootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
+	c := &AqpClient{HTTP: &http.Client{Jar: jar}, Jar: jar, StorePath: t.TempDir() + "/g.json"}
+	_, err := c.BootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "missing login url") {
 		t.Errorf("err=%v", err)
 	}
@@ -163,8 +164,8 @@ func TestExtractLoginURL_Coverage(t *testing.T) {
 		{`not json`, ""},
 	}
 	for _, tc := range cases {
-		if got := extractLoginURL(tc.body); got != tc.want {
-			t.Errorf("extractLoginURL(%q)=%q want %q", tc.body, got, tc.want)
+		if got := clilogin.ExtractLoginURL(tc.body); got != tc.want {
+			t.Errorf("clilogin.ExtractLoginURL(%q)=%q want %q", tc.body, got, tc.want)
 		}
 	}
 }

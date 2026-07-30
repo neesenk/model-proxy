@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,12 +23,12 @@ func TestWebCloseCancelsAqpLoginBeforeCredentialCommit(t *testing.T) {
 	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://unused.invalid"}
 	p.mu.Unlock()
 	w.newAqpClientFn = func(storePath string) *AqpClient {
-		client := newAqpClientWithBase(storePath, "https://aqp.invalid")
+		client := clilogin.NewAqpClientWithBase(storePath, "https://aqp.invalid")
 		client.HTTP.Transport = webLifecycleRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.URL.Path {
-			case aqpAuthLoginPath:
+			case clilogin.AqpAuthLoginPath:
 				return webLifecycleResponse(req, http.StatusUnauthorized, `{"result":"https://login.invalid"}`), nil
-			case aqpAuthInfoPath:
+			case clilogin.AqpAuthInfoPath:
 				close(pollStarted)
 				<-req.Context().Done()
 				close(pollCancelled)

@@ -449,7 +449,7 @@ func (job *aqpLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 	if _, err := job.client.PollSessionContext(ctx, 3*time.Minute); err != nil {
 		return fail(err)
 	}
-	keyData, err := job.client.fetchAPIKeyContext(ctx)
+	keyData, err := job.client.FetchAPIKeyContext(ctx)
 	if err != nil {
 		return fail(errors.New("api key provisioning: " + err.Error()))
 	}

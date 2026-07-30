@@ -1,6 +1,7 @@
 package main
 
 import (
+	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -23,8 +24,8 @@ func TestPollAt_TimesOut(t *testing.T) {
 		w.Write([]byte(`{"retcode":1,"message":"pending"}`))
 	}))
 	defer srv.Close()
-	c := newAqpClient(filepath.Join(t.TempDir(), "store.json"))
-	_, err := c.pollAt(srv.URL, 1*time.Millisecond)
+	c := clilogin.NewAqpClient(filepath.Join(t.TempDir(), "store.json"))
+	_, err := c.PollAt(srv.URL, 1*time.Millisecond)
 	if err == nil {
 		t.Error("pollAt always-401: want error, got nil")
 	}

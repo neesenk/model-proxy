@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -60,7 +61,7 @@ func TestAqpPollAtContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := client.pollAtContext(ctx, "https://aqp.invalid/auth/info", time.Minute)
+		_, err := client.PollAtContext(ctx, "https://aqp.invalid/auth/info", time.Minute)
 		result <- err
 	}()
 	<-entered
@@ -85,7 +86,7 @@ func TestAqpPollAtContext_CancelsRetryWait(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := client.pollAtContext(ctx, "https://aqp.invalid/auth/info", time.Minute)
+		_, err := client.PollAtContext(ctx, "https://aqp.invalid/auth/info", time.Minute)
 		result <- err
 	}()
 	<-bodyClosed
@@ -164,7 +165,7 @@ func TestAqpFetchAPIKeyAtContext_CancelsInFlightRequest(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	client := newAqpClient(storePath)
+	client := clilogin.NewAqpClient(storePath)
 	client.HTTP = &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		entered <- struct{}{}
 		<-req.Context().Done()
@@ -173,7 +174,7 @@ func TestAqpFetchAPIKeyAtContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := client.fetchAPIKeyAtContext(ctx, "https://aqp.invalid/api-key")
+		_, err := client.FetchAPIKeyAtContext(ctx, "https://aqp.invalid/api-key")
 		result <- err
 	}()
 	<-entered
@@ -212,7 +213,7 @@ func TestExchangeCodeForTokensContext_CancelsInFlightRequest(t *testing.T) {
 func TestAqpBootstrapAtContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	client := newAqpClient(t.TempDir() + "/aqp_oauth_auth.json")
+	client := clilogin.NewAqpClient(t.TempDir() + "/aqp_oauth_auth.json")
 	client.HTTP = &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		entered <- struct{}{}
 		<-req.Context().Done()
@@ -221,7 +222,7 @@ func TestAqpBootstrapAtContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := client.bootstrapAtContext(ctx, "https://aqp.invalid/auth/login")
+		_, err := client.BootstrapAtContext(ctx, "https://aqp.invalid/auth/login")
 		result <- err
 	}()
 	<-entered
