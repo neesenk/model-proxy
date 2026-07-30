@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/cli"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,11 +130,11 @@ func TestCLI_UsageAllDividersBetweenOnly(t *testing.T) {
 		t.Fatalf("usage (all) exit=%d", code)
 	}
 	// Two providers, neither logged in → exactly 1 divider between them.
-	if c := strings.Count(stdout, usageDivider); c != 1 {
+	if c := strings.Count(stdout, cli.UsageDivider); c != 1 {
 		t.Errorf("want exactly 1 divider between 2 providers, got %d:\n%s", c, stdout)
 	}
 	// Must not start with the divider.
-	if strings.HasPrefix(strings.TrimLeft(stdout, "\n"), usageDivider) {
+	if strings.HasPrefix(strings.TrimLeft(stdout, "\n"), cli.UsageDivider) {
 		t.Errorf("usage output should not start with a divider:\n%s", stdout)
 	}
 }
