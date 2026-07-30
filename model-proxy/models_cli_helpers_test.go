@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	climodels "model-proxy/internal/cli/models"
+)
 
 // --- pad edge cases (models.go) ---
 
@@ -13,9 +17,9 @@ func TestPad_AlreadyLong(t *testing.T) {
 // --- nonFlagArgs: --config= form + flags interspersed ---
 
 func TestNonFlagArgs_ConfigEquals(t *testing.T) {
-	got := nonFlagArgs([]string{"--config=x.yaml", "models", "zhipu"})
+	got := climodels.NonFlagArgs([]string{"--config=x.yaml", "models", "zhipu"})
 	if len(got) != 2 || got[0] != "models" || got[1] != "zhipu" {
-		t.Errorf("nonFlagArgs(--config=)=%v want [models zhipu]", got)
+		t.Errorf("climodels.NonFlagArgs(--config=)=%v want [models zhipu]", got)
 	}
 }
 

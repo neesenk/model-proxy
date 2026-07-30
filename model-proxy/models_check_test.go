@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/probe"
 	"net/http"
 	"net/http/httptest"
@@ -288,7 +289,7 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 		},
 	}
 	ids := []string{"keep-a", "drop-b", "keep-c", "drop-d", "keep-e"}
-	kept, dropped, err := checkProviderModels(cfg, "zhipu", ids)
+	kept, dropped, err := climodels.CheckProviderModels(cfg, "zhipu", ids)
 	if err != nil {
 		t.Fatalf("checkProviderModels: %v", err)
 	}
@@ -335,7 +336,7 @@ func TestCheckProviderModels_NotLoggedInAllDropped(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"},
 		},
 	}
-	kept, dropped, err := checkProviderModels(cfg, "zhipu", []string{"glm-5.2"})
+	kept, dropped, err := climodels.CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"})
 	if err != nil {
 		t.Fatalf("not-logged-in: want no error (impl builds file-backed), got %v", err)
 	}
@@ -354,8 +355,8 @@ func TestCheckProviderModels_NotLoggedInAllDropped(t *testing.T) {
 
 func TestMergeModelIDs_DedupOrder(t *testing.T) {
 	existing := []string{"a", "b"}
-	entries := []ModelEntry{{ID: "b"}, {ID: "c"}, {ID: "a"}}
-	got := mergeModelIDs(existing, entries)
+	entries := []climodels.ModelEntry{{ID: "b"}, {ID: "c"}, {ID: "a"}}
+	got := climodels.MergeModelIDs(existing, entries)
 	want := []string{"a", "b", "c"}
 	if len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
 		t.Errorf("mergeModelIDs=%v want %v (existing-first, deduped)", got, want)
@@ -365,7 +366,7 @@ func TestMergeModelIDs_DedupOrder(t *testing.T) {
 // --- mergeStringIDs: dedup, a-first-then-b order (shared by refresh + fallback) ---
 
 func TestMergeStringIDs(t *testing.T) {
-	got := mergeStringIDs([]string{"a", "b", "c"}, []string{"b", "d", "a", "e"})
+	got := climodels.MergeStringIDs([]string{"a", "b", "c"}, []string{"b", "d", "a", "e"})
 	want := []string{"a", "b", "c", "d", "e"}
 	if len(got) != len(want) {
 		t.Fatalf("mergeStringIDs=%v want %v", got, want)
@@ -376,11 +377,11 @@ func TestMergeStringIDs(t *testing.T) {
 		}
 	}
 	// empty sides pass through cleanly.
-	if got := mergeStringIDs(nil, []string{"x"}); len(got) != 1 || got[0] != "x" {
-		t.Errorf("mergeStringIDs(nil,[x])=%v want [x]", got)
+	if got := climodels.MergeStringIDs(nil, []string{"x"}); len(got) != 1 || got[0] != "x" {
+		t.Errorf("climodels.MergeStringIDs(nil,[x])=%v want [x]", got)
 	}
-	if got := mergeStringIDs([]string{"x"}, nil); len(got) != 1 || got[0] != "x" {
-		t.Errorf("mergeStringIDs([x],nil)=%v want [x]", got)
+	if got := climodels.MergeStringIDs([]string{"x"}, nil); len(got) != 1 || got[0] != "x" {
+		t.Errorf("climodels.MergeStringIDs([x],nil)=%v want [x]", got)
 	}
 }
 
@@ -395,40 +396,40 @@ func TestRouteModelsForProvider(t *testing.T) {
 	}}
 	// aqp is targeted by 3 distinct models across routes; glm-5.2 appears in
 	// two routes but must be deduped. Sorted for deterministic order.
-	got := routeModelsForProvider(cfg, "aqp")
+	got := climodels.RouteModelsForProvider(cfg, "aqp")
 	want := []string{"deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2"}
 	if len(got) != len(want) {
-		t.Fatalf("routeModelsForProvider(aqp)=%v want %v", got, want)
+		t.Fatalf("climodels.RouteModelsForProvider(aqp)=%v want %v", got, want)
 	}
 	for i, m := range want {
 		if got[i] != m {
-			t.Errorf("routeModelsForProvider(aqp)[%d]=%q want %q (sorted, deduped)", i, got[i], m)
+			t.Errorf("climodels.RouteModelsForProvider(aqp)[%d]=%q want %q (sorted, deduped)", i, got[i], m)
 		}
 	}
 	// A provider not targeted by any route -> empty (no panic).
-	if got := routeModelsForProvider(cfg, "volcengine"); len(got) != 0 {
-		t.Errorf("routeModelsForProvider(volcengine)=%v want empty", got)
+	if got := climodels.RouteModelsForProvider(cfg, "volcengine"); len(got) != 0 {
+		t.Errorf("climodels.RouteModelsForProvider(volcengine)=%v want empty", got)
 	}
 	// No routes at all -> empty.
-	if got := routeModelsForProvider(&Config{}, "aqp"); len(got) != 0 {
-		t.Errorf("routeModelsForProvider(no-routes)=%v want empty", got)
+	if got := climodels.RouteModelsForProvider(&Config{}, "aqp"); len(got) != 0 {
+		t.Errorf("climodels.RouteModelsForProvider(no-routes)=%v want empty", got)
 	}
 }
 
 func TestSameStringSet(t *testing.T) {
-	if !sameStringSet([]string{"a", "b"}, []string{"b", "a"}) {
+	if !climodels.SameStringSet([]string{"a", "b"}, []string{"b", "a"}) {
 		t.Errorf("same set {a,b}=={b,a} want true")
 	}
-	if sameStringSet([]string{"a", "b"}, []string{"a", "c"}) {
+	if climodels.SameStringSet([]string{"a", "b"}, []string{"a", "c"}) {
 		t.Errorf("different sets want false")
 	}
-	if sameStringSet([]string{"a"}, []string{"a", "b"}) {
+	if climodels.SameStringSet([]string{"a"}, []string{"a", "b"}) {
 		t.Errorf("different sizes want false")
 	}
 }
 
 func TestDiffStringSets(t *testing.T) {
-	added, removed := diffStringSets([]string{"a", "b"}, []string{"b", "c"})
+	added, removed := climodels.DiffStringSets([]string{"a", "b"}, []string{"b", "c"})
 	if len(added) != 1 || added[0] != "c" {
 		t.Errorf("added=%v want [c]", added)
 	}
@@ -472,7 +473,7 @@ func TestPrintKeptModels(t *testing.T) {
 	sources := map[string]map[string]modelSource{
 		"volcengine": {"glm-5.2": srcModelsDev, "kimi-k2.6": srcDefault},
 	}
-	out := grabStdout(t, func() { printKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources) })
+	out := grabStdout(t, func() { climodels.PrintKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources) })
 	if !strings.Contains(out, "glm-5.2") || !strings.Contains(out, "kimi-k2.6") {
 		t.Errorf("printKeptModels missing models: %q", out)
 	}
@@ -495,7 +496,7 @@ func TestPrintKeptModels(t *testing.T) {
 }
 
 func TestPrintKeptModels_Empty(t *testing.T) {
-	out := grabStdout(t, func() { printKeptModels("x", nil, nil, nil) })
+	out := grabStdout(t, func() { climodels.PrintKeptModels("x", nil, nil, nil) })
 	if !strings.Contains(out, "(no models)") {
 		t.Errorf("empty printKeptModels=%q want (no models)", out)
 	}
@@ -505,11 +506,11 @@ func TestPrintKeptModels_Empty(t *testing.T) {
 
 func TestPrintFilterSummary_PolicyAndProbe(t *testing.T) {
 	policyDropped := []string{"glm-latest", "kimi-latest"}
-	probeDropped := []dropReason{
+	probeDropped := []climodels.DropReason{
 		{Model: "doubao-seedance-2.0", Status: 403, Reason: "AccessDenied: does not have access to messages api"},
 		{Model: "doubao-seedream-5.0-lite", Status: 403, Reason: "AccessDenied: does not have access to messages api"},
 	}
-	out := grabStderr(t, func() { printFilterSummary(policyDropped, probeDropped, nil, false) })
+	out := grabStderr(t, func() { climodels.PrintFilterSummary(policyDropped, probeDropped, nil, false) })
 	if !strings.Contains(out, "filtered out 4 model(s)") {
 		t.Errorf("summary count: %q want 'filtered out 4 model(s)'", out)
 	}
@@ -525,15 +526,15 @@ func TestPrintFilterSummary_PolicyAndProbe(t *testing.T) {
 }
 
 func TestPrintFilterSummary_NoDrops(t *testing.T) {
-	out := grabStderr(t, func() { printFilterSummary(nil, nil, nil, false) })
+	out := grabStderr(t, func() { climodels.PrintFilterSummary(nil, nil, nil, false) })
 	if out != "" {
 		t.Errorf("no-drops summary=%q want empty", out)
 	}
 }
 
 func TestPrintFilterSummary_AllFailedWarning(t *testing.T) {
-	probeDropped := []dropReason{{Model: "glm-5.2", Status: 0, Reason: "auth: no key"}}
-	out := grabStderr(t, func() { printFilterSummary(nil, probeDropped, nil, true) })
+	probeDropped := []climodels.DropReason{{Model: "glm-5.2", Status: 0, Reason: "auth: no key"}}
+	out := grabStderr(t, func() { climodels.PrintFilterSummary(nil, probeDropped, nil, true) })
 	if !strings.Contains(out, "failed for ALL") {
 		t.Errorf("all-failed summary=%q want 'failed for ALL' warning", out)
 	}

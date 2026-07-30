@@ -1,6 +1,7 @@
 package main
 
 import (
+	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/takeover"
 	"sort"
 	"strings"
@@ -129,9 +130,9 @@ func TestNonFlagArgs(t *testing.T) {
 		{"empty", []string{}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := nonFlagArgs(tc.args)
+			got := climodels.NonFlagArgs(tc.args)
 			if !equalSlices(got, tc.want) {
-				t.Errorf("nonFlagArgs(%v)=%v want %v", tc.args, got, tc.want)
+				t.Errorf("climodels.NonFlagArgs(%v)=%v want %v", tc.args, got, tc.want)
 			}
 		})
 	}

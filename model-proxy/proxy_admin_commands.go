@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/probe"
 	"net/http"
 	"time"
@@ -151,7 +152,7 @@ func (commands proxyAdminCommands) accountProbe(ctx context.Context, name, id st
 	}
 
 	model := ""
-	if models := routeModelsForProvider(cfg, name); len(models) > 0 {
+	if models := climodels.RouteModelsForProvider(cfg, name); len(models) > 0 {
 		model = models[0]
 	} else if len(prov.Models) > 0 {
 		model = prov.Models[0]

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	climodels "model-proxy/internal/cli/models"
 	"os"
 	"sort"
 	"strconv"
@@ -58,7 +59,7 @@ func doctorWithCfg(cfg *Config) int {
 			tier = "pay-as-you-go"
 		}
 		extra := ""
-		if vids, pooled := poolVirtuals(cfg, name); pooled {
+		if vids, pooled := climodels.PoolVirtuals(cfg, name); pooled {
 			extra = fmt.Sprintf("  pool: %d accounts", len(vids))
 		}
 		fmt.Printf("  %s %s  quota=%s  peak=%s%s\n",
@@ -117,7 +118,7 @@ func doctorWithCfg(cfg *Config) int {
 			// per-account virtual ids. Offline (no live quota) so we can't show
 			// per-account surplus — note the session-sticky round-robin so an
 			// operator understands how traffic spreads at runtime.
-			if vids, pooled := poolVirtuals(cfg, t.Provider); pooled {
+			if vids, pooled := climodels.PoolVirtuals(cfg, t.Provider); pooled {
 				fmt.Printf("        %s %d accounts (round-robin session-sticky; no live quota → falls back to priority)\n",
 					cDim("pool:"), len(vids))
 				for _, vid := range vids {

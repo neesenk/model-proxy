@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	climodels "model-proxy/internal/cli/models"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -78,7 +79,7 @@ func runWireRecord(provName, model, prompt, outDir string, cfg *Config) error {
 	if !ok {
 		return fmt.Errorf("unknown provider %q", provName)
 	}
-	impl, err := providerImplFor(cfg, provName)
+	impl, err := climodels.ProviderImplFor(cfg, provName)
 	if err != nil {
 		return err
 	}

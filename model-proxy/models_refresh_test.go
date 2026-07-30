@@ -1,6 +1,7 @@
 package main
 
 import (
+	climodels "model-proxy/internal/cli/models"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,7 +29,7 @@ func TestRefreshProviderModelsOnceForPool(t *testing.T) {
 	defer srv.Close()
 	cfg := &Config{Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: srv.URL + "/v1", Provider: "zhipu"}}}
-	entries, err := refreshProviderModels(cfg, "zhipu")
+	entries, err := climodels.RefreshProviderModels(cfg, "zhipu")
 	if err != nil {
 		t.Fatalf("refreshProviderModels: %v", err)
 	}
@@ -63,7 +64,7 @@ func TestRefreshProviderModels_SingleAccount(t *testing.T) {
 	defer srv.Close()
 	cfg := &Config{Listen: "127.0.0.1:1",
 		Providers: map[string]Provider{"zhipu": {OpenAIBaseURL: srv.URL + "/v1", Provider: "zhipu"}}}
-	entries, err := refreshProviderModels(cfg, "zhipu")
+	entries, err := climodels.RefreshProviderModels(cfg, "zhipu")
 	if err != nil {
 		t.Fatalf("refreshProviderModels: %v", err)
 	}
@@ -80,7 +81,7 @@ func TestRefreshProviderModels_Unknown(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	cfg := &Config{Providers: map[string]Provider{"a": {Provider: testProviderID}}}
-	_, err := refreshProviderModels(cfg, "nope")
+	_, err := climodels.RefreshProviderModels(cfg, "nope")
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("unknown provider: err=%v want 'unknown provider'", err)
 	}
@@ -94,7 +95,7 @@ func TestPoolVirtuals(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A", "KEY-C", "KEY-B")
 	cfg := &Config{Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
 
-	vids, pooled := poolVirtuals(cfg, "zhipu")
+	vids, pooled := climodels.PoolVirtuals(cfg, "zhipu")
 	if !pooled {
 		t.Fatal("pooled=true want true for 3-account pool")
 	}
@@ -119,12 +120,12 @@ func TestPoolVirtuals(t *testing.T) {
 	t.Setenv("HOME", home2)
 	os.MkdirAll(home2+"/.model-proxy", 0o700)
 	os.WriteFile(home2+"/.model-proxy/zhipu_apikey.json", []byte(`{"api_key":"K"}`), 0o600)
-	if _, pooled := poolVirtuals(cfg, "zhipu"); pooled {
+	if _, pooled := climodels.PoolVirtuals(cfg, "zhipu"); pooled {
 		t.Error("single account: pooled=true want false")
 	}
 
 	// Unknown provider → not pooled.
-	if _, pooled := poolVirtuals(cfg, "nope"); pooled {
+	if _, pooled := climodels.PoolVirtuals(cfg, "nope"); pooled {
 		t.Error("unknown provider: pooled=true want false")
 	}
 }

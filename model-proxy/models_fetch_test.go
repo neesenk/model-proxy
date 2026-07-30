@@ -1,6 +1,7 @@
 package main
 
 import (
+	climodels "model-proxy/internal/cli/models"
 	"strings"
 	"testing"
 )
@@ -9,7 +10,7 @@ import (
 
 func TestFetchProviderModels_Unknown(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
-	_, err := fetchProviderModels(cfg, "nope")
+	_, err := climodels.FetchProviderModels(cfg, "nope")
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("unknown provider: err=%v", err)
 	}
@@ -26,7 +27,7 @@ func TestListArkAgentPlanModelIDs_NoCreds(t *testing.T) {
 	// loadVolcengineCreds reads ~/.model-proxy/<provName>_apikey.json. With HOME
 	// in a temp dir, the file is absent → error.
 	t.Setenv("HOME", t.TempDir())
-	_, err := listArkAgentPlanModelIDs("volcengine")
+	_, err := climodels.ListArkAgentPlanModelIDs("volcengine")
 	if err == nil || !strings.Contains(err.Error(), "AK/SK") {
 		t.Errorf("no creds: err=%v want AK/SK error", err)
 	}

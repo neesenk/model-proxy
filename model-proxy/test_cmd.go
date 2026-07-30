@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	climodels "model-proxy/internal/cli/models"
 	"net/http"
 	"os"
 	"sort"
@@ -91,7 +92,7 @@ func probeRouteTarget(client *http.Client, cfg *Config, t RouteTarget) (ok bool,
 	if !ok {
 		return false, 0, "provider not in config", 0
 	}
-	impl, err := providerImplFor(cfg, t.Provider)
+	impl, err := climodels.ProviderImplFor(cfg, t.Provider)
 	if err != nil {
 		return false, 0, err.Error(), 0
 	}

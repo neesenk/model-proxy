@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
@@ -217,7 +218,7 @@ func liveTargets(cfg *Config, implicit map[string]RouteTarget, route string) []R
 	}
 	var out []RouteTarget
 	for _, t := range targets {
-		if vids, pooled := poolVirtuals(cfg, t.Provider); pooled {
+		if vids, pooled := climodels.PoolVirtuals(cfg, t.Provider); pooled {
 			for _, vid := range vids {
 				out = append(out, RouteTarget{Provider: vid, Model: t.Model, Priority: t.Priority})
 			}

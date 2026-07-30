@@ -1,4 +1,4 @@
-package main
+package models
 
 import (
 	"context"
@@ -9,7 +9,9 @@ import (
 	"strings"
 	"sync"
 
+	"model-proxy/internal/app"
 	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/provider"
 )
@@ -32,8 +34,8 @@ import (
 // Probes are real upstream calls; a small bound avoids bursting a provider.
 const probeConcurrency = 5
 
-// dropReason is one model dropped by the endpoint probe.
-type dropReason struct {
+// DropReason is one model dropped by the endpoint probe.
+type DropReason struct {
 	Model  string `json:"model"`
 	Status int    `json:"status"`
 	Reason string `json:"reason"`
@@ -46,12 +48,12 @@ type dropReason struct {
 // proxy) and probes concurrently (bounded by probeConcurrency). A build failure
 // (e.g. not logged in) returns an error - the caller should fall back to keeping
 // all ids rather than silently dropping them.
-func checkProviderModels(cfg *Config, provName string, ids []string) (kept []string, dropped []dropReason, err error) {
+func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string) (kept []string, dropped []DropReason, err error) {
 	provCfg, ok := cfg.Providers[provName]
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	impl, err := providerImplFor(cfg, provName)
+	impl, err := ProviderImplFor(cfg, provName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -85,7 +87,7 @@ func checkProviderModels(cfg *Config, provName string, ids []string) (kept []str
 		if r.ok {
 			kept = append(kept, r.id)
 		} else {
-			dropped = append(dropped, dropReason{Model: r.id, Status: r.status, Reason: r.reason})
+			dropped = append(dropped, DropReason{Model: r.id, Status: r.status, Reason: r.reason})
 		}
 	}
 	return kept, dropped, nil
@@ -96,13 +98,13 @@ func checkProviderModels(cfg *Config, provName string, ids []string) (kept []str
 // path's binding. Shared by applyProviderModelFilter and checkProviderModels so
 // the filter and probe use the SAME impl. Returns nil + error when the provider
 // is unknown or not built (e.g. not logged in).
-func providerImplFor(cfg *Config, provName string) (provider.Provider, error) {
+func ProviderImplFor(cfg *configdomain.Config, provName string) (provider.Provider, error) {
 	if _, ok := cfg.Providers[provName]; !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	provMap := buildProviders(cfg).Providers
+	provMap := app.BuildProviders(cfg, accountStore(), buildOpts()).Providers
 	target := provName
-	if vids, pooled := poolVirtuals(cfg, provName); pooled {
+	if vids, pooled := PoolVirtuals(cfg, provName); pooled {
 		target = vids[0]
 	}
 	impl := provMap[target]
@@ -118,8 +120,8 @@ func providerImplFor(cfg *Config, provName string) (provider.Provider, error) {
 // pass; the endpoint probe (checkProviderModels) is the separate "callability"
 // pass. Applied to the merged config+fetched set so stale config ids are cleaned
 // up too. A build failure (not logged in) returns the input unchanged.
-func applyProviderModelFilter(cfg *Config, provName string, ids []string) (kept, dropped []string) {
-	impl, err := providerImplFor(cfg, provName)
+func ApplyProviderModelFilter(cfg *configdomain.Config, provName string, ids []string) (kept, dropped []string) {
+	impl, err := ProviderImplFor(cfg, provName)
 	if err != nil || impl == nil {
 		return ids, nil // can't build impl -> skip policy filter (probe will report)
 	}
@@ -129,19 +131,19 @@ func applyProviderModelFilter(cfg *Config, provName string, ids []string) (kept,
 // mergeModelIDs returns existing first, then any fetched ids not already
 // present (in fetch order), deduped. Used by `models refresh` to build the set
 // the endpoint probe validates - so pre-existing ids get re-validated too.
-func mergeModelIDs(existing []string, entries []ModelEntry) []string {
+func MergeModelIDs(existing []string, entries []ModelEntry) []string {
 	ids := make([]string, len(entries))
 	for i, e := range entries {
 		ids[i] = e.ID
 	}
-	return mergeStringIDs(existing, ids)
+	return MergeStringIDs(existing, ids)
 }
 
 // mergeStringIDs returns a first, then any ids from b not already present (in b
 // order), deduped. Shared by `models refresh` (existing config models + fetched
 // ids) and the route-probe fallback (existing config models + route-target
 // models) to build the candidate set the endpoint probe validates.
-func mergeStringIDs(a, b []string) []string {
+func MergeStringIDs(a, b []string) []string {
 	seen := make(map[string]bool, len(a)+len(b))
 	merged := make([]string, 0, len(a)+len(b))
 	for _, s := range a {
@@ -166,7 +168,7 @@ func mergeStringIDs(a, b []string) []string {
 // routes, so probing them discovers which the provider actually serves. Sorted
 // because `routes` is a map (random iteration order); a deterministic candidate
 // order keeps probe/display/drop output stable across runs.
-func routeModelsForProvider(cfg *Config, provName string) []string {
+func RouteModelsForProvider(cfg *configdomain.Config, provName string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, targets := range cfg.Routes {
@@ -185,7 +187,7 @@ func routeModelsForProvider(cfg *Config, provName string) []string {
 // table with models.dev metadata (context/output/input modalities/source) -
 // matching the `model-proxy models` display. Shown BEFORE the filter summary.
 // `meta`/`sources` come from hydrateModels (keyed by provider -> model id).
-func printKeptModels(provName string, kept []string, meta map[string]map[string]catalog.Model, sources map[string]map[string]modelSource) {
+func PrintKeptModels(provName string, kept []string, meta map[string]map[string]catalog.Model, sources map[string]map[string]app.ModelSource) {
 	if len(kept) == 0 {
 		fmt.Println(cYellow("(no models)"))
 		return
@@ -215,9 +217,9 @@ func printKeptModels(provName string, kept []string, meta map[string]map[string]
 		src := ""
 		if sources != nil {
 			switch sources[provName][id] {
-			case srcModelsDev:
+			case app.SrcModelsDev:
 				src = "models.dev"
-			case srcDefault:
+			case app.SrcDefault:
 				src = "default"
 			}
 		}
@@ -237,7 +239,7 @@ func printKeptModels(provName string, kept []string, meta map[string]map[string]
 //
 // allFailed indicates every probed model failed (likely a login/network issue),
 // in which case the probe drops are surfaced as a warning rather than a verdict.
-func printFilterSummary(policyDropped []string, probeDropped []dropReason, perr error, allFailed bool) {
+func PrintFilterSummary(policyDropped []string, probeDropped []DropReason, perr error, allFailed bool) {
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "endpoint probe skipped (%v); list written unvalidated\n", perr)
 		return
@@ -255,7 +257,7 @@ func printFilterSummary(policyDropped []string, probeDropped []dropReason, perr 
 		fmt.Fprintf(os.Stderr, "  %-30s %s\n", id, "excluded by filter rule")
 	}
 	for _, d := range probeDropped {
-		reason := probeDropReason(d)
+		reason := ProbeDropReason(d)
 		if allFailed {
 			reason = "probe failed (login/network?) - " + reason
 		}
@@ -266,7 +268,7 @@ func printFilterSummary(policyDropped []string, probeDropped []dropReason, perr 
 // probeDropReason renders one probe drop as a short, human-readable cause:
 // the upstream's error code + message when available, else the HTTP status,
 // else a network/build-error label.
-func probeDropReason(d dropReason) string {
+func ProbeDropReason(d DropReason) string {
 	if d.Reason != "" {
 		return "not callable on base_url - " + d.Reason
 	}
@@ -279,7 +281,7 @@ func probeDropReason(d dropReason) string {
 // sameStringSet reports whether a and b contain the same set of strings
 // (order-independent). Used to skip a config rewrite when refresh produces no
 // net change.
-func sameStringSet(a, b []string) bool {
+func SameStringSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -299,7 +301,7 @@ func sameStringSet(a, b []string) bool {
 // diffStringSets returns (inAnotB, inBnotA) - added/removed relative to a -> b.
 // `added` = ids now in b that weren't in a; `removed` = ids that were in a but
 // not in b. Both sorted for stable display.
-func diffStringSets(a, b []string) (added, removed []string) {
+func DiffStringSets(a, b []string) (added, removed []string) {
 	as := make(map[string]bool, len(a))
 	for _, s := range a {
 		as[s] = true
