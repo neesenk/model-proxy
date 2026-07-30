@@ -668,45 +668,6 @@ func importedTypeMethodReferenceSitesInFiles(
 	return sites
 }
 
-func importedSymbolReferenceSitesAcrossProduction(
-	t *testing.T,
-	importPath string,
-	symbol string,
-) []interactionSite {
-	t.Helper()
-	var sites []interactionSite
-	for _, path := range productionGoFilesRecursively(t, ".") {
-		file, _ := parseGoFile(t, path)
-		packageName := importedPackageName(file, importPath)
-		if packageName == "" || packageName == "_" || packageName == "." {
-			continue
-		}
-		appendSelectors := func(node ast.Node, owner string) {
-			ast.Inspect(node, func(candidate ast.Node) bool {
-				selector, ok := candidate.(*ast.SelectorExpr)
-				if ok && selectorOnIdent(selector, packageName, symbol) {
-					sites = append(sites, interactionSite{file: filepath.ToSlash(path), function: owner})
-				}
-				return true
-			})
-		}
-		for _, decl := range file.Decls {
-			switch declaration := decl.(type) {
-			case *ast.FuncDecl:
-				appendSelectors(declaration.Type, declaration.Name.Name)
-				if declaration.Body != nil {
-					appendSelectors(declaration.Body, declaration.Name.Name)
-				}
-			case *ast.GenDecl:
-				if declaration.Tok != token.IMPORT {
-					appendSelectors(declaration, "package declaration")
-				}
-			}
-		}
-	}
-	return sites
-}
-
 func importedTypeDeclarationSitesAcrossProduction(
 	t *testing.T,
 	importPath string,
