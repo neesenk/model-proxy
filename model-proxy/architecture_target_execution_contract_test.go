@@ -2,7 +2,6 @@ package main
 
 import (
 	"go/ast"
-	"path/filepath"
 	"testing"
 )
 
@@ -131,21 +130,17 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		if len(literalSites) != 0 {
 			t.Errorf("targetexec.Attempt composite literals must be confined to targetexec.NewAttempt: %v", literalSites)
 		}
-		var constructorCalls []importedFunctionCallSite
-		for _, path := range productionGoFilesRecursively(t, ".") {
-			f, fset := parseGoFile(t, path)
-			constructorCalls = append(constructorCalls, importedFunctionCallSites(
-				f,
-				fset,
-				path,
-				"model-proxy/internal/targetexec",
-				"NewAttempt",
-			)...)
+		constructorCalls := importedFunctionReferenceSitesAcrossProduction(
+			t,
+			"model-proxy/internal/targetexec",
+			"NewAttempt",
+		)
+		if len(constructorCalls) != 1 ||
+			constructorCalls[0].file != "dispatch_context.go" || constructorCalls[0].function != "newTargetAttempt" {
+			t.Errorf("targetexec.NewAttempt production reference sites = %v, want only dispatch_context.go:newTargetAttempt direct call", constructorCalls)
 		}
-		if len(constructorCalls) != 1 {
-			t.Errorf("targetexec.NewAttempt production call sites = %v, want exactly dispatch_context.go:newTargetAttempt", constructorCalls)
-		} else if site := constructorCalls[0]; filepath.Base(site.file) != "dispatch_context.go" || site.function != "newTargetAttempt" {
-			t.Errorf("targetexec.NewAttempt call site = %v, want dispatch_context.go:newTargetAttempt", site)
+		if sites := packageLocalFunctionCallSites(t, "internal/targetexec", "NewAttempt"); len(sites) != 0 {
+			t.Errorf("targetexec package-local NewAttempt calls = %v, want none outside the root factory", sites)
 		}
 		serveOnce := namedMethod(t, rootPackage, "Proxy", "serveOnce")
 		if !assignedFactoryValueExecuted(serveOnce.Body, "newTargetAttempt", "targetExecutor", "Execute") {

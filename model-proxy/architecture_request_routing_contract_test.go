@@ -73,24 +73,18 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			t.Error("requestRoutingPlanner must project one runtime snapshot into PlannerInput and requestRoutingScheduler")
 		}
 
-		var constructorSites []importedFunctionCallSite
-		for _, path := range productionGoFiles(t) {
-			file, fileSet := parseGoFile(t, path)
-			constructorSites = append(
-				constructorSites,
-				importedFunctionCallSites(
-					file,
-					fileSet,
-					path,
-					"model-proxy/internal/routing",
-					"NewPlanner",
-				)...,
-			)
-		}
+		constructorSites := importedFunctionReferenceSitesAcrossProduction(
+			t,
+			"model-proxy/internal/routing",
+			"NewPlanner",
+		)
 		if len(constructorSites) != 1 ||
 			constructorSites[0].file != "request_routing_adapter.go" ||
 			constructorSites[0].function != "requestRoutingPlanner" {
-			t.Errorf("routing.NewPlanner production call sites = %v, want only request_routing_adapter.go:requestRoutingPlanner", constructorSites)
+			t.Errorf("routing.NewPlanner production reference sites = %v, want only request_routing_adapter.go:requestRoutingPlanner direct call", constructorSites)
+		}
+		if sites := packageLocalFunctionCallSites(t, "internal/routing", "NewPlanner"); len(sites) != 0 {
+			t.Errorf("routing package-local NewPlanner calls = %v, want none outside the root adapter", sites)
 		}
 	})
 

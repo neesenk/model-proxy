@@ -23,11 +23,10 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 			{call: "startRuntimeServices", function: "newApplicationRuntime", receiver: "proxy"},
 			{call: "newWebServer", function: "newApplicationRuntime"},
 		} {
-			sites := rootCallSites(t, contract.call)
+			var sites []interactionSite
 			if contract.receiver != "" {
 				sites = rootReceiverCallSites(t, contract.receiver, contract.call)
-			}
-			if contract.receiver == "" {
+			} else {
 				sites = rootFunctionReferenceSites(t, contract.call)
 			}
 			if len(sites) != 1 || sites[0].file != "app_assembly.go" || sites[0].function != contract.function {
@@ -182,34 +181,6 @@ type interactionSite struct {
 }
 
 func (site interactionSite) String() string { return site.file + ":" + site.function }
-
-func rootCallSites(t *testing.T, name string) []interactionSite {
-	t.Helper()
-	var sites []interactionSite
-	for _, path := range productionGoFiles(t) {
-		file, _ := parseGoFile(t, path)
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				if node == nil {
-					return true
-				}
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if identIs(call.Fun, name) {
-					sites = append(sites, interactionSite{file: filepath.Base(path), function: fn.Name.Name})
-				}
-				return true
-			})
-		}
-	}
-	return sites
-}
 
 func rootReceiverCallSites(t *testing.T, receiver, method string) []interactionSite {
 	t.Helper()
