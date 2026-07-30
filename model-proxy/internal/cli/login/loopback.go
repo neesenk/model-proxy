@@ -1,0 +1,227 @@
+package login
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"runtime"
+	"time"
+
+	"model-proxy/provider"
+)
+
+func WithNextCallback(loginURL, callback string) string {
+	u, err := url.Parse(loginURL)
+	if err != nil {
+		return loginURL
+	}
+	q := u.Query()
+	q.Set("next", callback)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// waitForLoginSignal blocks until either the loopback server is hit by the
+// browser (local login) or the user presses ENTER on stdin (remote/SSH login,
+// where the browser cannot reach this machine's loopback port). Either signal
+// means the user has completed the browser login and the CLI may proceed to
+// poll auth/info with the SSO_A already in its cookie jar.
+func WaitForLoginSignal(ls *LoopbackServer, timeout time.Duration) error {
+	done := make(chan struct{}, 1)
+	// Loopback hit watcher.
+	go func() {
+		_, _ = ls.WaitForCookie(timeout)
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}()
+	// Stdin ENTER watcher.
+	go func() {
+		br := bufio.NewReader(os.Stdin)
+		_, _ = br.ReadString('\n')
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("login timed out waiting for callback or ENTER")
+	}
+}
+
+// ---- LoopbackServer ----
+
+// LoopbackServer runs the local /company-gateway/login-complete callback server.
+// It captures the SSO_A cookie from the browser redirect.
+type LoopbackServer struct {
+	addr     string
+	CookieCh chan string
+	ErrCh    chan error
+	srv      *http.Server
+	port     int
+}
+
+// NewLoopbackServer binds an ephemeral loopback port.
+func NewLoopbackServer() (*LoopbackServer, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return &LoopbackServer{
+		addr:     fmt.Sprintf("127.0.0.1:%d", port),
+		port:     port,
+		CookieCh: make(chan string, 1),
+		ErrCh:    make(chan error, 1),
+	}, nil
+}
+
+// Port returns the bound port.
+func (l *LoopbackServer) Port() int { return l.port }
+
+// CallbackURL returns the full callback URL.
+func (l *LoopbackServer) CallbackURL() string {
+	return fmt.Sprintf("http://%s%s", l.addr, LoginCompletePath)
+}
+
+// Start begins serving (non-blocking). The listener is bound synchronously so
+// the callback URL is reachable as soon as Start returns.
+func (l *LoopbackServer) Start() error {
+	mux := http.NewServeMux()
+	mux.HandleFunc(LoginCompletePath, l.handle)
+	l.srv = &http.Server{Handler: mux}
+	ln, err := net.Listen("tcp", l.addr)
+	if err != nil {
+		return fmt.Errorf("failed to start local login success page: %w", err)
+	}
+	l.addr = ln.Addr().String() // resolve actual addr
+	go func() {
+		if err := l.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			l.ErrCh <- err
+		}
+	}()
+	return nil
+}
+
+func (l *LoopbackServer) handle(w http.ResponseWriter, r *http.Request) {
+	// Validate callback origin (scheme http(s), must have host, no path/query/fragment beyond the registered path).
+	if err := ValidateOrigin(r); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		l.ErrCh <- err
+		return
+	}
+	// The loopback callback is the terminal step of the SSO redirect chain.
+	// After Google login: soup.shopee.io -> aqp (sets SSO_C) -> here, the
+	// browser carries SSO_A/SSO_C cookies on this request. Capture whichever is
+	// present (preferring SSO_C). Ignore code/state (AQP Soup SSO flow).
+	var ssoC, ssoA string
+	for _, c := range r.Cookies() {
+		switch c.Name {
+		case provider.SsoCookieName: // SSO_C
+			ssoC = c.Value
+		case "SSO_A":
+			ssoA = c.Value
+		}
+	}
+	if ssoC == "" {
+		ssoC = r.URL.Query().Get(provider.SsoCookieName)
+	}
+	fmt.Printf("[GoogleGateway] Received SSO callback signal; checking AQP session (SSO_C=%v SSO_A=%v)\n",
+		ssoC != "", ssoA != "")
+
+	// Respond with the success page.
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Connection", "close")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, successHTML)
+
+	// Signal completion. Prefer SSO_C; fall back to SSO_A; else a bare signal
+	// (the session is later resolved by polling auth/info with the jar's SSO_A).
+	cookie := ssoC
+	if cookie == "" {
+		cookie = ssoA
+	}
+	if cookie == "" {
+		cookie = "callback-signal"
+	}
+	select {
+	case l.CookieCh <- cookie:
+	default:
+	}
+}
+
+// WaitForCookie blocks until the cookie arrives or times out.
+func (l *LoopbackServer) WaitForCookie(timeout time.Duration) (string, error) {
+	select {
+	case c := <-l.CookieCh:
+		return c, nil
+	case err := <-l.ErrCh:
+		return "", err
+	case <-time.After(timeout):
+		return "", fmt.Errorf("login success page timed out")
+	}
+}
+
+// Stop shuts down the server.
+func (l *LoopbackServer) Stop() {
+	if l.srv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = l.srv.Shutdown(ctx)
+	}
+}
+
+func ValidateOrigin(r *http.Request) error {
+	origin := r.Host
+	if origin == "" {
+		return fmt.Errorf("callback origin missing host")
+	}
+	// Allow only loopback hosts.
+	host, _, err := net.SplitHostPort(origin)
+	if err != nil {
+		host = origin
+	}
+	if host != "127.0.0.1" && host != "localhost" {
+		return fmt.Errorf("unsupported callback origin host: %s", host)
+	}
+	if r.URL.Path != LoginCompletePath {
+		return fmt.Errorf("callback origin must not include path beyond %s", LoginCompletePath)
+	}
+	return nil
+}
+
+const successHTML = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>model-proxy</title>
+<style>body{font-family:system-ui,sans-serif;text-align:center;padding:3rem}h1{color:#16a34a}</style>
+</head><body><h1>✓ Login successful</h1>
+<p>You can close this window and return to the terminal.</p>
+<p style="color:#666;font-size:.9em">If you're logging in over SSH, this page may not open — that's normal; just return to the terminal and press ENTER.</p>
+</body></html>`
+
+// openBrowser opens a URL in the default browser (cross-platform).
+func OpenBrowser(rawurl string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", rawurl).Run()
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawurl).Run()
+	default: // linux/bsd
+		for _, b := range []string{"xdg-open", "x-www-browser", "www-browser"} {
+			if err := exec.Command(b, rawurl).Run(); err == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("no browser launcher found")
+	}
+}

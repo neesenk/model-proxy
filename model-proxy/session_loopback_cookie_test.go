@@ -27,7 +27,7 @@ func TestWaitForCookie_CookieReceived(t *testing.T) {
 	defer ls.Stop()
 	// Send a cookie on the channel before waiting.
 	go func() {
-		ls.cookieCh <- "SSO_C=got-it"
+		ls.CookieCh <- "SSO_C=got-it"
 	}()
 	got, err := ls.WaitForCookie(500 * time.Millisecond)
 	if err != nil {
@@ -45,7 +45,7 @@ func TestWaitForCookie_ErrorReceived(t *testing.T) {
 	}
 	defer ls.Stop()
 	go func() {
-		ls.errCh <- errBoom
+		ls.ErrCh <- errBoom
 	}()
 	if _, err := ls.WaitForCookie(500 * time.Millisecond); err == nil {
 		t.Error("WaitForCookie with errCh signal: want error, got nil")
