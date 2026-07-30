@@ -41,12 +41,6 @@ func newWebServer(proxy *Proxy, configFile string) *webServer {
 	return server
 }
 
-func defaultCodexLoginOptions() *codexLoginServerOptions {
-	options := &codexLoginServerOptions{}
-	options.defaults()
-	return options
-}
-
 func mustNewWebTransport(server *webServer) *webtransport.Server {
 	transport, err := webtransport.New(webtransport.Options{
 		Reads:    server.api,

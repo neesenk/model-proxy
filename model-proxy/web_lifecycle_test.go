@@ -70,11 +70,11 @@ func TestWebCloseCancelsCodexLoginBeforeCredentialCommit(t *testing.T) {
 	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://unused.invalid"}
 	p.mu.Unlock()
 	w.newCodexOptions = func() *codexLoginServerOptions {
-		return &codexLoginServerOptions{
-			usercodeURL:  "https://auth.invalid/usercode",
-			deviceTokURL: "https://auth.invalid/devtok",
-			tokenURL:     "https://auth.invalid/token",
-			httpClient: &http.Client{Transport: webLifecycleRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &clilogin.CodexLoginServerOptions{
+			UsercodeURL:  "https://auth.invalid/usercode",
+			DeviceTokURL: "https://auth.invalid/devtok",
+			TokenURL:     "https://auth.invalid/token",
+			HTTPClient: &http.Client{Transport: webLifecycleRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				switch req.URL.Path {
 				case "/usercode":
 					return webLifecycleResponse(req, http.StatusOK, `{"device_auth_id":"device","user_code":"CODE","interval":"60"}`), nil

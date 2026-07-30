@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func newProxyWebAPI(proxy *Proxy, configFile func() string) *proxyWebAPI {
 	}
 	api.newCodexOptions = func() *codexLoginServerOptions {
 		options := &codexLoginServerOptions{}
-		options.defaults()
+		options.Defaults()
 		return options
 	}
 	return api
@@ -585,10 +586,10 @@ func (api *proxyWebAPI) BeginLogin(
 			)
 		}
 		intervalSeconds, _ := strconv.Atoi(userCode.Interval)
-		detail := codexOAuthVerifyURL + "  code: " + userCode.UserCode
+		detail := clilogin.CodexOAuthVerifyURL + "  code: " + userCode.UserCode
 		return appapi.LoginStart{
 			Provider:  "codex",
-			VerifyURL: codexOAuthVerifyURL,
+			VerifyURL: clilogin.CodexOAuthVerifyURL,
 			UserCode:  userCode.UserCode,
 			Job: &codexLoginJob{
 				api:  api,

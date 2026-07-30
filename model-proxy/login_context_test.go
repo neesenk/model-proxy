@@ -103,9 +103,9 @@ func TestAqpPollAtContext_CancelsRetryWait(t *testing.T) {
 func TestPollForTokenContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	opts := &codexLoginServerOptions{
-		deviceTokURL: "https://auth.invalid/device-token",
-		httpClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	opts := &clilogin.CodexLoginServerOptions{
+		DeviceTokURL: "https://auth.invalid/device-token",
+		HTTPClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			entered <- struct{}{}
 			<-req.Context().Done()
 			return nil, req.Context().Err()
@@ -129,9 +129,9 @@ func TestPollForTokenContext_CancelsRetryWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	bodyClosed := make(chan struct{}, 1)
 	var calls atomic.Int32
-	opts := &codexLoginServerOptions{
-		deviceTokURL: "https://auth.invalid/device-token",
-		httpClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	opts := &clilogin.CodexLoginServerOptions{
+		DeviceTokURL: "https://auth.invalid/device-token",
+		HTTPClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			calls.Add(1)
 			return pendingLoginResponse(req, &closeNotifyBody{
 				Reader: strings.NewReader(`{"error":{"code":"deviceauth_authorization_pending"}}`),
@@ -188,9 +188,9 @@ func TestAqpFetchAPIKeyAtContext_CancelsInFlightRequest(t *testing.T) {
 func TestExchangeCodeForTokensContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	opts := &codexLoginServerOptions{
-		tokenURL: "https://auth.invalid/oauth/token",
-		httpClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	opts := &clilogin.CodexLoginServerOptions{
+		TokenURL: "https://auth.invalid/oauth/token",
+		HTTPClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			entered <- struct{}{}
 			<-req.Context().Done()
 			return nil, req.Context().Err()
@@ -236,9 +236,9 @@ func TestAqpBootstrapAtContext_CancelsInFlightRequest(t *testing.T) {
 func TestRequestUserCodeContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	opts := &codexLoginServerOptions{
-		usercodeURL: "https://auth.invalid/device-code",
-		httpClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	opts := &clilogin.CodexLoginServerOptions{
+		UsercodeURL: "https://auth.invalid/device-code",
+		HTTPClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			entered <- struct{}{}
 			<-req.Context().Done()
 			return nil, req.Context().Err()

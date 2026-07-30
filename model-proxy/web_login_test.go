@@ -135,8 +135,8 @@ func TestLoginRouting(t *testing.T) {
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	dead.Close()
 	w.newCodexOptions = func() *codexLoginServerOptions {
-		o := &codexLoginServerOptions{usercodeURL: dead.URL + "/usercode"}
-		o.defaults()
+		o := &clilogin.CodexLoginServerOptions{UsercodeURL: dead.URL + "/usercode"}
+		o.Defaults()
 		return o
 	}
 	rec := httptest.NewRecorder()
@@ -197,11 +197,11 @@ func TestCodexLoginFlow(t *testing.T) {
 	// exchangeCodeForTokens hit the httptest server instead of the real OpenAI
 	// deviceauth endpoints.
 	w.newCodexOptions = func() *codexLoginServerOptions {
-		o := &codexLoginServerOptions{}
-		o.defaults()
-		o.usercodeURL = up.URL + "/usercode"
-		o.deviceTokURL = up.URL + "/devtok"
-		o.tokenURL = up.URL + "/tok"
+		o := &clilogin.CodexLoginServerOptions{}
+		o.Defaults()
+		o.UsercodeURL = up.URL + "/usercode"
+		o.DeviceTokURL = up.URL + "/devtok"
+		o.TokenURL = up.URL + "/tok"
 		return o
 	}
 
@@ -221,8 +221,8 @@ func TestCodexLoginFlow(t *testing.T) {
 	if start.UserCode != "CODE" {
 		t.Fatalf("user_code=%q want CODE: %s", start.UserCode, rec.Body.String())
 	}
-	if start.VerifyURL != codexOAuthVerifyURL {
-		t.Errorf("verify_url=%q want %q", start.VerifyURL, codexOAuthVerifyURL)
+	if start.VerifyURL != clilogin.CodexOAuthVerifyURL {
+		t.Errorf("verify_url=%q want %q", start.VerifyURL, clilogin.CodexOAuthVerifyURL)
 	}
 	if start.SessionID == "" {
 		t.Fatal("session_id empty")

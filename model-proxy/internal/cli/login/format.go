@@ -1,6 +1,10 @@
 package login
 
-import "model-proxy/provider"
+import (
+	"os"
+
+	"model-proxy/provider"
+)
 
 // truncate caps a string at n bytes (provider display rules).
 func truncate(s string, n int) string { return provider.Truncate(s, n) }
@@ -17,4 +21,10 @@ func mask(s string) string {
 		return "****"
 	}
 	return s[:2] + "…" + s[len(s)-2:]
+}
+
+// HomeDir resolves the user home (credential files live under ~/.model-proxy).
+func HomeDir() string {
+	h, _ := os.UserHomeDir()
+	return h
 }
