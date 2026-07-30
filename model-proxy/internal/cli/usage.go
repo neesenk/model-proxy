@@ -13,7 +13,6 @@ import (
 	"model-proxy/internal/app"
 	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
 )
 
 func CmdUsage(args []string, cfg *configdomain.Config) {
@@ -136,10 +135,6 @@ func providerNames(cfg *configdomain.Config) string {
 	return strings.Join(names, ", ")
 }
 
-func cDim(s string) string    { return provider.Dim(s) }
-func cBold(s string) string   { return provider.Bold(s) }
-func cCyan(s string) string   { return provider.Cyan(s) }
-func cYellow(s string) string { return provider.Yellow(s) }
 func mask(s string) string {
 	if s == "" {
 		return "(empty)"

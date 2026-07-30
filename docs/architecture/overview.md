@@ -328,7 +328,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`accounts`、`cache`、`catalog`、
   `observe/events`、`observe/requestlog`、`observe/stats`、`pricing`、`protocol`、
   `runtime/wirecap`、`transport/bodycapture`；
-- `app → accounts, catalog, config, provider`；
+- `app → accounts, catalog, config, protocol, provider`；
 - `cli → daemonctl, observe/stats, provider`；
 - `cli/login → accounts, config, provider`；
 - `cli/models → accounts, app, catalog, config, probe, provider`；

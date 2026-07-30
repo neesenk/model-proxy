@@ -11,6 +11,24 @@ import (
 // truncate caps a string at n bytes, trailing "..." (provider display rules).
 func truncate(s string, n int) string { return provider.Truncate(s, n) }
 
+func cRed(s string) string               { return provider.Red(s) }
+func cGreen(s string) string             { return provider.Green(s) }
+func cYellow(s string) string            { return provider.Yellow(s) }
+func cDim(s string) string               { return provider.Dim(s) }
+func cGray(s string) string              { return provider.Gray(s) }
+func cBold(s string) string              { return provider.Bold(s) }
+func cCyan(s string) string              { return provider.Cyan(s) }
+func pad(s string, n int) string         { return provider.Pad(s, n) }
+func formatResetAt(resetMs int64) string { return provider.FormatResetAt(resetMs) }
+
+// Plural returns sing for n==1 else plur.
+func Plural(n int, sing, plur string) string {
+	if n == 1 {
+		return sing
+	}
+	return plur
+}
+
 // CompactNum renders a count compactly: 0, 5, 567, 1k, 1.2k, 450k, 1.2M, 5.6B.
 // Rounding that would carry a value up to 1000 of its unit promotes to the next
 // unit instead (e.g. 999999 → "1M", not "1000k").

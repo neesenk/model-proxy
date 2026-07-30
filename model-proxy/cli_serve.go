@@ -47,7 +47,7 @@ func (assembly serveAssembly) command(args []string) {
 	case "reload":
 		cmdReload(args)
 	case "status":
-		cmdServeStatus(args)
+		cmdServeStatusCLI(args)
 	default:
 		// No subcommand — foreground serve.
 		sa := parseServeArgs(args)

@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/cli"
+	"model-proxy/internal/daemonctl"
 	"net/url"
 	"os"
 
@@ -37,7 +39,7 @@ func cmdShadowReport(args []string) {
 	}
 	base := "http://" + cfg.Listen
 	q := makeURLQuery(args)
-	resp, err := daemonHTTPClient.Get(base + "/api/shadow-report?" + q.Encode())
+	resp, err := daemonctl.Client.Get(base + "/api/shadow-report?" + q.Encode())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n", cRed("✗"), cfg.Listen, err)
 		os.Exit(1)
@@ -71,7 +73,7 @@ func cmdShadowReport(args []string) {
 			e.StatusMatchRate*100,
 			fmt.Sprintf("%dms", e.PrimaryLatencyMs),
 			fmt.Sprintf("%dms", e.ShadowLatencyMs),
-			compactNum(uint64(e.PrimarySizeAvg)), compactNum(uint64(e.ShadowSizeAvg)))
+			cli.CompactNum(uint64(e.PrimarySizeAvg)), cli.CompactNum(uint64(e.ShadowSizeAvg)))
 	}
 }
 

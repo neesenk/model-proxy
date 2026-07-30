@@ -306,7 +306,7 @@ func TestFormatAnalyticsTable(t *testing.T) {
 		t.Errorf("without --cost, table should not mention cost/$:\n%s", out)
 	}
 	// Series totals are sums across points.
-	if !strings.Contains(out, compactNum(5)) { // 3+2 requests
+	if !strings.Contains(out, cli.CompactNum(5)) { // 3+2 requests
 		t.Errorf("month-1 requests sum missing:\n%s", out)
 	}
 

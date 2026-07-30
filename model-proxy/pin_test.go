@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"model-proxy/internal/cli"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -148,7 +149,7 @@ func TestScheduleStatus_ShowsPin(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	setPinForTest(p, "glm", "deepseek", time.Hour)
-	var st statusSchedule
+	var st cli.StatusSchedule
 	if err := json.Unmarshal(p.scheduleStatus(), &st); err != nil {
 		t.Fatal(err)
 	}

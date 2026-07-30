@@ -1,12 +1,12 @@
-package main
+package cli
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
-	"model-proxy/internal/cli"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
+	"model-proxy/provider"
 	"os"
 	"sort"
 	"strconv"
@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// statusOpts selects what serve status fetches/renders.
-type statusOpts struct {
+// StatusOpts selects what serve status fetches/renders.
+type StatusOpts struct {
 	Logs  bool // include the Logs section (--logs)
 	LogsN int  // number of log lines (default 20)
 	JSON  bool // dump merged raw JSON (--json)
@@ -26,7 +26,7 @@ type statusOpts struct {
 // these structs entirely (raw json.RawMessage), and JSON decode ignores any
 // extra upstream fields, so unused fields are omitted rather than maintained.
 
-type statusHealth struct {
+type StatusHealth struct {
 	CircuitState     string `json:"circuit_state"` // closed | open | half_open
 	Available        bool   `json:"available"`
 	CircuitUntil     string `json:"circuit_until,omitempty"`      // RFC3339, only when in the future
@@ -34,7 +34,7 @@ type statusHealth struct {
 	RateLimitKind    string `json:"rate_limit_kind,omitempty"`    // transient | quota | daily (with rate_limited_until)
 }
 
-type statusCounters struct {
+type StatusCounters struct {
 	Requests      uint64 `json:"requests"`
 	Failovers     uint64 `json:"failovers"`
 	RateLimited   uint64 `json:"rate_limited_429"`
@@ -45,7 +45,7 @@ type statusCounters struct {
 }
 
 // Quota windows come from *provider.QuotaSnapshot: PascalCase, no json tags upstream.
-type statusWindow struct {
+type StatusWindow struct {
 	Label        string    `json:"Label"`
 	RemainingPct float64   `json:"RemainingPct"` // 0..1, -1 if unknown
 	ResetsAt     time.Time `json:"ResetsAt"`
@@ -53,15 +53,15 @@ type statusWindow struct {
 	Short        bool      `json:"Short"`
 }
 
-type statusQuota struct {
+type StatusQuota struct {
 	Account      string         `json:"Account"`
 	Plan         string         `json:"Plan"`
 	RemainingPct float64        `json:"RemainingPct"` // ultimate window remaining, 0..1; -1 if unknown
-	Windows      []statusWindow `json:"Windows"`
+	Windows      []StatusWindow `json:"Windows"`
 	Err          string         `json:"Err"`
 }
 
-type statusOrdered struct {
+type StatusOrdered struct {
 	Provider  string  `json:"provider"`
 	Priority  int     `json:"priority"`
 	Tier      string  `json:"tier"`
@@ -70,41 +70,47 @@ type statusOrdered struct {
 	Peak      bool    `json:"peak"`
 }
 
-type statusPool struct {
+type StatusPool struct {
 	Parent    string `json:"parent"`
 	Accounts  int    `json:"accounts"`
 	Available int    `json:"available"`
 }
 
-type statusRoute struct {
+type StatusRoute struct {
 	First      string          `json:"first"`
-	Ordered    []statusOrdered `json:"ordered"`
+	Ordered    []StatusOrdered `json:"ordered"`
 	Sticky     string          `json:"sticky"`
 	DwellRem   float64         `json:"sticky_dwell_remaining_sec"`
-	Pools      []statusPool    `json:"pools"`
+	Pools      []StatusPool    `json:"pools"`
 	Pin        string          `json:"pin"`
 	PinExpires string          `json:"pin_expires"`
 }
 
-type statusSchedule struct {
-	Models map[string]statusRoute `json:"models"`
+// statusModelLock is one model-level lock entry from /api/status model_locks.
+type statusModelLock struct {
+	Model string `json:"model"`
+	Until string `json:"until"`
 }
 
-type statusResp struct {
+type StatusSchedule struct {
+	Models map[string]StatusRoute `json:"models"`
+}
+
+type StatusResp struct {
 	Uptime     string                       `json:"uptime"`
 	Version    string                       `json:"version"`
 	Listen     string                       `json:"listen"`
-	Health     map[string]statusHealth      `json:"health"`
+	Health     map[string]StatusHealth      `json:"health"`
 	ModelLocks map[string][]statusModelLock `json:"model_locks"`
-	Quota      map[string]statusQuota       `json:"quota"`
-	Schedule   statusSchedule               `json:"schedule"`
-	Counters   map[string]statusCounters    `json:"counters"`
+	Quota      map[string]StatusQuota       `json:"quota"`
+	Schedule   StatusSchedule               `json:"schedule"`
+	Counters   map[string]StatusCounters    `json:"counters"`
 	Warnings   []string                     `json:"warnings"`
 }
 
 // --- /api/tokens decoded shape ---
 
-type tokenEntry struct {
+type TokenEntry struct {
 	Provider      string `json:"provider"`
 	Model         string `json:"model"`
 	Input         uint64 `json:"input"`
@@ -114,23 +120,23 @@ type tokenEntry struct {
 	Requests      uint64 `json:"requests"`
 }
 
-type tokensResp struct {
-	Usage []tokenEntry `json:"usage"`
+type TokensResp struct {
+	Usage []TokenEntry `json:"usage"`
 }
 
 // --- /api/logs decoded shape ---
 
-type logsResp struct {
+type LogsResp struct {
 	Lines []string `json:"lines"`
 }
 
 // compactNum delegates to the CLI formatting package (single owner for
 // terminal number rendering shared by stats/status/shadow-report).
-func compactNum(n uint64) string { return cli.CompactNum(n) }
+func compactNum(n uint64) string { return CompactNum(n) }
 
 // renderAvgMs returns the average latency/ttft in ms (sum/requests) as a display
 // string, or "—" when no requests were served.
-func renderAvgMs(sum, reqs uint64) string {
+func RenderAvgMs(sum, reqs uint64) string {
 	if reqs == 0 {
 		return "—"
 	}
@@ -138,7 +144,7 @@ func renderAvgMs(sum, reqs uint64) string {
 }
 
 // formatClock renders a unix-seconds timestamp as local HH:MM:SS, or "—" when ≤0.
-func formatClock(unixSec int64) string {
+func FormatClock(unixSec int64) string {
 	if unixSec <= 0 {
 		return "—"
 	}
@@ -156,7 +162,7 @@ func plural(n int, sing, plur string) string {
 // renderProviders renders the Providers table: one row per health entry (sorted),
 // with counters looked up by name. The API only emits circuit_until /
 // rate_limited_until when they are in the future, so field presence ⇒ active.
-func renderProviders(st *statusResp) string {
+func RenderProviders(st *StatusResp) string {
 	names := make([]string, 0, len(st.Health))
 	for n := range st.Health {
 		names = append(names, n)
@@ -171,7 +177,7 @@ func renderProviders(st *statusResp) string {
 		pad("PROVIDER", 16), pad("HEALTH", 13), "REQS", "FAILOVERS", "429", "FAILURES", "LAT", "TTFT", "LAST")
 	fmt.Fprintln(&b, cDim(hdr))
 	for _, name := range names {
-		label, color := healthLabel(st.Health[name])
+		label, color := HealthLabel(st.Health[name])
 		c := st.Counters[name]
 		fmt.Fprintf(&b, "  %s  %s  %8s  %9s  %5s  %8s  %6s  %6s  %s\n",
 			pad(name, 16),
@@ -180,15 +186,15 @@ func renderProviders(st *statusResp) string {
 			compactNum(c.Failovers),
 			compactNum(c.RateLimited),
 			compactNum(c.Failures),
-			renderAvgMs(c.LatencySum, c.Requests),
-			renderAvgMs(c.TTFTSum, c.Requests),
-			formatClock(c.LastRequestAt))
+			RenderAvgMs(c.LatencySum, c.Requests),
+			RenderAvgMs(c.TTFTSum, c.Requests),
+			FormatClock(c.LastRequestAt))
 	}
 	return b.String()
 }
 
 // healthLabel returns the visible label + color func for a provider's health cell.
-func healthLabel(h statusHealth) (string, func(string) string) {
+func HealthLabel(h StatusHealth) (string, func(string) string) {
 	switch {
 	case h.CircuitState == "open":
 		return "circuit open", cRed
@@ -212,7 +218,7 @@ func healthLabel(h statusHealth) (string, func(string) string) {
 // `schedule` command (ind "") and the serve-status Schedule section (ind "  "),
 // so the two views never drift. Output ends with a trailing blank line, matching
 // the original `schedule` command.
-func renderScheduleRoutes(models map[string]statusRoute, ind string) string {
+func RenderScheduleRoutes(models map[string]StatusRoute, ind string) string {
 	names := make([]string, 0, len(models))
 	for n := range models {
 		names = append(names, n)
@@ -259,19 +265,19 @@ func renderScheduleRoutes(models map[string]statusRoute, ind string) string {
 // renderSchedule renders the serve-status Schedule section: header + the shared
 // per-route renderer at 2-space indent. (Trailing-newline normalization is
 // handled once by appendSection.)
-func renderSchedule(st *statusResp) string {
+func RenderSchedule(st *StatusResp) string {
 	if len(st.Schedule.Models) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s (%d %s)\n", cBold("Schedule"), len(st.Schedule.Models), plural(len(st.Schedule.Models), "route", "routes"))
-	b.WriteString(renderScheduleRoutes(st.Schedule.Models, "  "))
+	b.WriteString(RenderScheduleRoutes(st.Schedule.Models, "  "))
 	return b.String()
 }
 
 // renderTokens renders the per provider/model token-usage table, sorted by
 // provider then model, with totals in the header.
-func renderTokens(t *tokensResp) string {
+func RenderTokens(t *TokensResp) string {
 	if len(t.Usage) == 0 {
 		return ""
 	}
@@ -302,7 +308,7 @@ func renderTokens(t *tokensResp) string {
 }
 
 // renderLogs renders the recent log lines (only with --logs).
-func renderLogs(l *logsResp) string {
+func RenderLogs(l *LogsResp) string {
 	if len(l.Lines) == 0 {
 		return ""
 	}
@@ -318,7 +324,7 @@ func renderLogs(l *logsResp) string {
 // + remaining % + bar + reset time. A window that is neither Ultimate nor Short
 // (e.g. volcengine daily/weekly, codex primary/weekly, zhipu TIME_LIMIT) gets no
 // tag rather than being mislabeled "(short)".
-func renderQuota(st *statusResp) string {
+func RenderQuota(st *StatusResp) string {
 	names := make([]string, 0, len(st.Quota))
 	for n := range st.Quota {
 		names = append(names, n)
@@ -363,7 +369,7 @@ func renderQuota(st *statusResp) string {
 				resets = cDim("  resets " + formatResetAt(w.ResetsAt.UnixMilli()))
 			}
 			fmt.Fprintf(&b, "      %s  %5s  %s%s\n",
-				pad(label, 22), pctStr, progressBar(usedPct, 16), resets)
+				pad(label, 22), pctStr, provider.ProgressBar(usedPct, 16), resets)
 		}
 	}
 	return b.String()
@@ -375,7 +381,7 @@ var daemonHTTPClient = daemonctl.Client
 
 // statusGet fetches base+path and returns the body, HTTP status, and transport
 // error (if any). A non-2xx status is NOT an error here — the caller inspects it.
-func statusGet(base, path string) (body []byte, status int, err error) {
+func StatusGet(base, path string) (body []byte, status int, err error) {
 	resp, err := daemonHTTPClient.Get(base + path)
 	if err != nil {
 		return nil, 0, err
@@ -391,9 +397,9 @@ func statusGet(base, path string) (body []byte, status int, err error) {
 // /api/status always; /api/tokens always; /api/logs?tail=N once, only when
 // opts.Logs (shared by the JSON and render paths; a non-200 is "no logs", not
 // embedded as data).
-func renderStatus(listen string, opts statusOpts) (string, error) {
+func RenderStatus(listen string, opts StatusOpts) (string, error) {
 	base := "http://" + listen
-	statusBody, status, err := statusGet(base, "/api/status")
+	statusBody, status, err := StatusGet(base, "/api/status")
 	if err != nil {
 		return "", fmt.Errorf("cannot reach daemon at %s: %v\nis `model-proxy serve` running?", listen, err)
 	}
@@ -404,12 +410,12 @@ func renderStatus(listen string, opts statusOpts) (string, error) {
 		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(statusBody), 200))
 	}
 
-	tokensBody, _, _ := statusGet(base, "/api/tokens") // non-fatal; absence just hides the section
+	tokensBody, _, _ := StatusGet(base, "/api/tokens") // non-fatal; absence just hides the section
 
 	var logsBody []byte
 	logsOK := false
 	if opts.Logs {
-		lb, ls, e := statusGet(base, "/api/logs?tail="+strconv.Itoa(opts.LogsN))
+		lb, ls, e := StatusGet(base, "/api/logs?tail="+strconv.Itoa(opts.LogsN))
 		logsBody, logsOK = lb, (e == nil && ls == 200)
 	}
 
@@ -425,11 +431,11 @@ func renderStatus(listen string, opts statusOpts) (string, error) {
 		return string(enc), nil
 	}
 
-	var st statusResp
+	var st StatusResp
 	if err := json.Unmarshal(statusBody, &st); err != nil {
 		return "", fmt.Errorf("parse status response: %v", err)
 	}
-	var tok tokensResp
+	var tok TokensResp
 	if len(tokensBody) > 0 {
 		json.Unmarshal(tokensBody, &tok)
 	}
@@ -437,17 +443,17 @@ func renderStatus(listen string, opts statusOpts) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  %s · %s · %s\n\n",
 		cBold("model-proxy"), cDim("v"+st.Version), cDim(st.Uptime), cDim(st.Listen))
-	appendSection(&b, renderProviders(&st))
-	appendSection(&b, renderSchedule(&st))
-	appendSection(&b, renderQuota(&st))
+	AppendSection(&b, RenderProviders(&st))
+	AppendSection(&b, RenderSchedule(&st))
+	AppendSection(&b, RenderQuota(&st))
 	if len(st.Warnings) > 0 {
-		appendSection(&b, renderWarnings(&st))
+		AppendSection(&b, RenderWarnings(&st))
 	}
-	appendSection(&b, renderTokens(&tok))
+	AppendSection(&b, RenderTokens(&tok))
 	if logsOK {
-		var lg logsResp
+		var lg LogsResp
 		json.Unmarshal(logsBody, &lg)
-		appendSection(&b, renderLogs(&lg))
+		AppendSection(&b, RenderLogs(&lg))
 	}
 	return b.String(), nil
 }
@@ -455,7 +461,7 @@ func renderStatus(listen string, opts statusOpts) (string, error) {
 // appendSection writes a non-empty section followed by one blank separator line.
 // Trailing newlines are normalized away so each renderer need not worry about
 // its exact trailing whitespace.
-func appendSection(b *strings.Builder, s string) {
+func AppendSection(b *strings.Builder, s string) {
 	s = strings.TrimRight(s, "\n")
 	if s == "" {
 		return
@@ -466,7 +472,7 @@ func appendSection(b *strings.Builder, s string) {
 
 // renderWarnings renders the implicit-route ambiguity warnings (a model served
 // by >1 logged-in provider with no explicit route). Mirrors the `models` CLI.
-func renderWarnings(st *statusResp) string {
+func RenderWarnings(st *StatusResp) string {
 	if len(st.Warnings) == 0 {
 		return ""
 	}
@@ -481,13 +487,9 @@ func renderWarnings(st *statusResp) string {
 // cmdServeStatus prints a terminal-optimized snapshot of the running daemon's
 // state — the same data the Web UI's Status tab shows: providers health +
 // counters, schedule, quota, tokens, and optionally recent logs. One-shot.
-func cmdServeStatus(args []string) {
-	opts := parseStatusFlags(args)
-	cfg, err := LoadConfig(configPath(args))
-	if err != nil {
-		log.Fatal(err)
-	}
-	out, err := renderStatus(cfg.Listen, opts)
+func CmdServeStatus(args []string, cfg *configdomain.Config) {
+	opts := ParseStatusFlags(args)
+	out, err := RenderStatus(cfg.Listen, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err.Error())
 		os.Exit(1)
@@ -498,8 +500,8 @@ func cmdServeStatus(args []string) {
 // parseStatusFlags scans serve-status args for --json and --logs [N] (default
 // N=20). Both "--logs 50" and "--logs=50" are accepted. --config is intentionally
 // ignored here — configPath handles it.
-func parseStatusFlags(args []string) statusOpts {
-	o := statusOpts{LogsN: 20}
+func ParseStatusFlags(args []string) StatusOpts {
+	o := StatusOpts{LogsN: 20}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {

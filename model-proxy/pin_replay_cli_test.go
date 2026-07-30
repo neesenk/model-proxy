@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/cli"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,12 +17,12 @@ import (
 // TestPositionalArgs: --flag value pairs are skipped; bare positionals are kept
 // in order (used by pin/unpin/replay to pull <route> [<provider>] / <id>).
 func TestPositionalArgs(t *testing.T) {
-	got := positionalArgs([]string{"glm", "--config", "x.yaml", "zhipu", "--ttl", "1h"})
+	got := cli.PositionalArgs([]string{"glm", "--config", "x.yaml", "zhipu", "--ttl", "1h"})
 	if len(got) != 2 || got[0] != "glm" || got[1] != "zhipu" {
 		t.Errorf("positionalArgs=%v want [glm zhipu]", got)
 	}
 	// --flag=value form doesn't consume a following bare token.
-	got = positionalArgs([]string{"--config=x.yaml", "glm"})
+	got = cli.PositionalArgs([]string{"--config=x.yaml", "glm"})
 	if len(got) != 1 || got[0] != "glm" {
 		t.Errorf("positionalArgs=%v want [glm]", got)
 	}
@@ -29,23 +30,23 @@ func TestPositionalArgs(t *testing.T) {
 
 // TestParsePinTTL: both --ttl DUR and --ttl=DUR forms parse; absent → 0.
 func TestParsePinTTL(t *testing.T) {
-	if d := parsePinTTL([]string{"--ttl", "90m"}); d != 90*time.Minute {
+	if d := cli.ParsePinTTL([]string{"--ttl", "90m"}); d != 90*time.Minute {
 		t.Errorf("--ttl 90m = %v want 90m", d)
 	}
-	if d := parsePinTTL([]string{"--ttl=2h"}); d != 2*time.Hour {
+	if d := cli.ParsePinTTL([]string{"--ttl=2h"}); d != 2*time.Hour {
 		t.Errorf("--ttl=2h = %v want 2h", d)
 	}
-	if d := parsePinTTL([]string{"glm", "zhipu"}); d != 0 {
+	if d := cli.ParsePinTTL([]string{"glm", "zhipu"}); d != 0 {
 		t.Errorf("absent --ttl = %v want 0", d)
 	}
 }
 
 // TestIsDaemonUnreachable: connection-refused errors match, others don't.
 func TestIsDaemonUnreachable(t *testing.T) {
-	if !isDaemonUnreachable(fmt.Errorf("dial tcp 127.0.0.1:8080: connect: connection refused")) {
+	if !cli.IsDaemonUnreachable(fmt.Errorf("dial tcp 127.0.0.1:8080: connect: connection refused")) {
 		t.Error("connection refused should match")
 	}
-	if isDaemonUnreachable(fmt.Errorf("some other error")) {
+	if cli.IsDaemonUnreachable(fmt.Errorf("some other error")) {
 		t.Error("non-refused error should not match")
 	}
 }
@@ -71,7 +72,7 @@ func TestDoPin(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := doPin(srv.URL, "glm", "zhipu", time.Hour)
+	out, err := cli.DoPin(srv.URL, "glm", "zhipu", time.Hour)
 	if err != nil {
 		t.Fatalf("doPin: %v", err)
 	}
@@ -83,16 +84,16 @@ func TestDoPin(t *testing.T) {
 		writeJSON(w, http.StatusOK, map[string]any{"expires_at": ""})
 	}))
 	defer srv2.Close()
-	out2, _ := doPin(srv2.URL, "glm", "z", 0)
+	out2, _ := cli.DoPin(srv2.URL, "glm", "z", 0)
 	if !strings.Contains(out2, "no expiry") {
 		t.Errorf("no-expiry out=%q", out2)
 	}
 	// 400 surfaces the daemon's message.
-	if _, err := doPin(srv.URL, "glm", "bad", 0); err == nil || !strings.Contains(err.Error(), "cannot pin") {
+	if _, err := cli.DoPin(srv.URL, "glm", "bad", 0); err == nil || !strings.Contains(err.Error(), "cannot pin") {
 		t.Errorf("bad-provider err=%v want cannot pin", err)
 	}
 	// Unreachable daemon → error.
-	if _, err := doPin("http://127.0.0.1:1", "glm", "z", 0); err == nil {
+	if _, err := cli.DoPin("http://127.0.0.1:1", "glm", "z", 0); err == nil {
 		t.Error("unreachable doPin should error")
 	}
 }
@@ -107,10 +108,10 @@ func TestDoUnpin(t *testing.T) {
 		writeJSON(w, http.StatusOK, map[string]any{"removed": true})
 	}))
 	defer srv.Close()
-	if out, _ := doUnpin(srv.URL, "glm"); !strings.Contains(out, "unpinned glm") {
+	if out, _ := cli.DoUnpin(srv.URL, "glm"); !strings.Contains(out, "unpinned glm") {
 		t.Errorf("removed out=%q", out)
 	}
-	if out, _ := doUnpin(srv.URL, "absent"); !strings.Contains(out, "no pin on absent") {
+	if out, _ := cli.DoUnpin(srv.URL, "absent"); !strings.Contains(out, "no pin on absent") {
 		t.Errorf("absent out=%q", out)
 	}
 }
@@ -128,7 +129,7 @@ func TestDoListPins(t *testing.T) {
 		}})
 	}))
 	defer srv.Close()
-	out, _ := doListPins(srv.URL)
+	out, _ := cli.DoListPins(srv.URL)
 	if !strings.Contains(out, "ROUTE") || !strings.Contains(out, "glm") || !strings.Contains(out, "never") || !strings.Contains(out, "2030") {
 		t.Errorf("list out=%q", out)
 	}
@@ -137,7 +138,7 @@ func TestDoListPins(t *testing.T) {
 		writeJSON(w, http.StatusOK, map[string]any{"pins": []any{}})
 	}))
 	defer srv2.Close()
-	if out, _ := doListPins(srv2.URL); !strings.Contains(out, "(no active pins)") {
+	if out, _ := cli.DoListPins(srv2.URL); !strings.Contains(out, "(no active pins)") {
 		t.Errorf("empty list out=%q", out)
 	}
 }

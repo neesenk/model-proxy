@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/cli"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/takeover"
 	"os"
@@ -60,7 +61,7 @@ func doctorLive(args []string) bool {
 // (<configDir>/.model-proxy/). Errors mirror renderStatus exactly.
 func renderDoctorLive(cfg *Config, cfgPath string) (string, error) {
 	base := "http://" + cfg.Listen
-	statusBody, status, err := statusGet(base, "/api/status")
+	statusBody, status, err := cli.StatusGet(base, "/api/status")
 	if err != nil {
 		return "", fmt.Errorf("cannot reach daemon at %s: %v\nis `model-proxy serve` running?", cfg.Listen, err)
 	}
@@ -73,9 +74,9 @@ func renderDoctorLive(cfg *Config, cfgPath string) (string, error) {
 
 	// Recent failures are context, not verdict: a fetch failure or a disabled
 	// request_log degrades to a dim note, never to a command error.
-	reqBody, reqStatus, reqErr := statusGet(base, "/api/requests?errors=1&limit=5")
+	reqBody, reqStatus, reqErr := cli.StatusGet(base, "/api/requests?errors=1&limit=5")
 
-	var st statusResp
+	var st cli.StatusResp
 	if err := json.Unmarshal(statusBody, &st); err != nil {
 		return "", fmt.Errorf("parse status response: %v", err)
 	}
@@ -84,12 +85,12 @@ func renderDoctorLive(cfg *Config, cfgPath string) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s · %s\n", cBold("model-proxy doctor --live"), cDim(base))
 	fmt.Fprintf(&b, "%s daemon running (v%s, uptime %s)\n\n", cGreen("✓"), st.Version, st.Uptime)
-	appendSection(&b, renderDiagnosis(cfg, &st, drift))
-	appendSection(&b, renderSchedule(&st))
+	cli.AppendSection(&b, renderDiagnosis(cfg, &st, drift))
+	cli.AppendSection(&b, cli.RenderSchedule(&st))
 	if reqErr == nil && reqStatus == 200 {
-		appendSection(&b, renderDoctorFailures(reqBody))
+		cli.AppendSection(&b, renderDoctorFailures(reqBody))
 	}
-	appendSection(&b, renderDoctorTakeover(drift))
+	cli.AppendSection(&b, renderDoctorTakeover(drift))
 	return b.String(), nil
 }
 
@@ -107,7 +108,7 @@ type diagLine struct {
 // daemon warnings → takeover drift; healthy routes close the section with
 // their current landing. All data comes from /api/status + the local drift
 // check; nothing is probed live.
-func renderDiagnosis(cfg *Config, st *statusResp, drift []clientDrift) string {
+func renderDiagnosis(cfg *Config, st *cli.StatusResp, drift []clientDrift) string {
 	now := time.Now()
 	implicit, _ := synthesizeImplicitRoutes(cfg)
 
@@ -142,7 +143,7 @@ func renderDiagnosis(cfg *Config, st *statusResp, drift []clientDrift) string {
 				// still report the outage, just without recovery detail.
 				n = len(ri.Ordered)
 			}
-			text := fmt.Sprintf("route %q: %d %s all unavailable", r, n, plural(n, "target", "targets"))
+			text := fmt.Sprintf("route %q: %d %s all unavailable", r, n, cli.Plural(n, "target", "targets"))
 			hint := ""
 			if rec, ok := earliestRecovery(st, targets, now); ok {
 				text += fmt.Sprintf(" — earliest recovery %s (%s, %s)",
@@ -240,7 +241,7 @@ type recovery struct {
 // 429 rate-limit, circuit breaker, and (provider, model) lockout — and returns
 // the soonest. Model locks are matched by the target's model, not just the
 // provider, so a lock on the provider's OTHER models doesn't mislead.
-func earliestRecovery(st *statusResp, targets []RouteTarget, now time.Time) (recovery, bool) {
+func earliestRecovery(st *cli.StatusResp, targets []RouteTarget, now time.Time) (recovery, bool) {
 	var best recovery
 	found := false
 	consider := func(provider, kind, untilStr string) {

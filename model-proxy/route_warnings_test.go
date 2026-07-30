@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/app"
 	"strings"
 	"testing"
 
@@ -59,7 +60,7 @@ func TestConfigRoutingWarnings(t *testing.T) {
 		// message would be a false positive for them.
 		"resp-think": {{Provider: "codex", Model: "kimi-k2-thinking", Protocol: "responses"}},
 	}
-	warns := configRoutingWarnings(cfg, expanded)
+	warns := app.ConfigRoutingWarnings(cfg, expanded)
 	joined := strings.Join(warns, "\n")
 	if !strings.Contains(joined, `route "k2"`) || !strings.Contains(joined, "reasoning-required") {
 		t.Errorf("missing reasoning marker, warns = %v", warns)

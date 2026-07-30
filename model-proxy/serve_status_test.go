@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/cli"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -33,31 +34,31 @@ func TestCompactNum(t *testing.T) {
 		{999999999, "1B"},
 	}
 	for _, c := range cases {
-		if got := compactNum(c.in); got != c.want {
-			t.Errorf("compactNum(%d) = %q, want %q", c.in, got, c.want)
+		if got := cli.CompactNum(c.in); got != c.want {
+			t.Errorf("cli.CompactNum(%d) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }
 
 func TestFormatClock(t *testing.T) {
-	if got := formatClock(0); got != "—" {
-		t.Errorf("formatClock(0) = %q, want —", got)
+	if got := cli.FormatClock(0); got != "—" {
+		t.Errorf("cli.FormatClock(0) = %q, want —", got)
 	}
-	if got := formatClock(-5); got != "—" {
-		t.Errorf("formatClock(-5) = %q, want —", got)
+	if got := cli.FormatClock(-5); got != "—" {
+		t.Errorf("cli.FormatClock(-5) = %q, want —", got)
 	}
 	want := time.Unix(1700000000, 0).Local().Format("15:04:05")
-	if got := formatClock(1700000000); got != want {
-		t.Errorf("formatClock(1700000000) = %q, want %q", got, want)
+	if got := cli.FormatClock(1700000000); got != want {
+		t.Errorf("cli.FormatClock(1700000000) = %q, want %q", got, want)
 	}
 }
 
 func TestPlural(t *testing.T) {
-	if got := plural(1, "route", "routes"); got != "route" {
-		t.Errorf("plural(1) = %q, want route", got)
+	if got := cli.Plural(1, "route", "routes"); got != "route" {
+		t.Errorf("cli.Plural(1) = %q, want route", got)
 	}
-	if got := plural(3, "route", "routes"); got != "routes" {
-		t.Errorf("plural(3) = %q, want routes", got)
+	if got := cli.Plural(3, "route", "routes"); got != "routes" {
+		t.Errorf("cli.Plural(3) = %q, want routes", got)
 	}
 }
 
@@ -73,25 +74,25 @@ func TestRenderAvgMs(t *testing.T) {
 		{1500000, 2, "750k"},
 	}
 	for _, c := range cases {
-		if got := renderAvgMs(c.sum, c.reqs); got != c.want {
-			t.Errorf("renderAvgMs(%d, %d) = %q, want %q", c.sum, c.reqs, got, c.want)
+		if got := cli.RenderAvgMs(c.sum, c.reqs); got != c.want {
+			t.Errorf("cli.RenderAvgMs(%d, %d) = %q, want %q", c.sum, c.reqs, got, c.want)
 		}
 	}
 }
 
 func TestRenderProviders(t *testing.T) {
-	st := &statusResp{
-		Health: map[string]statusHealth{
+	st := &cli.StatusResp{
+		Health: map[string]cli.StatusHealth{
 			"aqp":   {CircuitState: "closed", Available: true},
 			"codex": {CircuitState: "open"},
 			"zhipu": {CircuitState: "closed", RateLimitedUntil: "2099-01-01T00:00:00Z"},
 		},
-		Counters: map[string]statusCounters{
+		Counters: map[string]cli.StatusCounters{
 			"aqp":   {Requests: 1234, Failovers: 12, RateLimited: 3, Failures: 5, LastRequestAt: 1700000000},
 			"codex": {Requests: 567, Failovers: 45, RateLimited: 8, Failures: 20, LastRequestAt: 0},
 		},
 	}
-	out := renderProviders(st)
+	out := cli.RenderProviders(st)
 	for _, want := range []string{"PROVIDER", "HEALTH", "REQS", "FAILOVERS", "429", "FAILURES", "LAST"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("header missing %q in:\n%s", want, out)
@@ -128,10 +129,10 @@ func TestRenderProviders(t *testing.T) {
 }
 
 func TestRenderScheduleRoutes(t *testing.T) {
-	models := map[string]statusRoute{
+	models := map[string]cli.StatusRoute{
 		"claude-sonnet": {
 			First: "aqp",
-			Ordered: []statusOrdered{
+			Ordered: []cli.StatusOrdered{
 				{Provider: "aqp", Priority: 1, Tier: "plan", Surplus: 12.3, Available: true},
 				{Provider: "codex", Priority: 1, Tier: "plan", Surplus: 8.1, Available: false},
 			},
@@ -146,7 +147,7 @@ func TestRenderScheduleRoutes(t *testing.T) {
 		{"  ", "  claude-sonnet → aqp\n", "      aqp"},
 	}
 	for _, tc := range cases {
-		out := renderScheduleRoutes(models, tc.ind)
+		out := cli.RenderScheduleRoutes(models, tc.ind)
 		if !strings.HasPrefix(out, tc.routePfx) {
 			t.Errorf("ind=%q: want prefix %q, got:\n%s", tc.ind, tc.routePfx, out)
 		}
@@ -171,10 +172,10 @@ func TestRenderScheduleRoutes(t *testing.T) {
 }
 
 func TestRenderSchedule(t *testing.T) {
-	st := &statusResp{Schedule: statusSchedule{Models: map[string]statusRoute{
+	st := &cli.StatusResp{Schedule: cli.StatusSchedule{Models: map[string]cli.StatusRoute{
 		"gpt-5.5": {First: "codex"},
 	}}}
-	out := renderSchedule(st)
+	out := cli.RenderSchedule(st)
 	if !strings.HasPrefix(out, "Schedule (1 route)\n") {
 		t.Errorf("header wrong, got:\n%s", out)
 	}
@@ -184,17 +185,17 @@ func TestRenderSchedule(t *testing.T) {
 }
 
 func TestRenderScheduleEmpty(t *testing.T) {
-	if got := renderSchedule(&statusResp{}); got != "" {
+	if got := cli.RenderSchedule(&cli.StatusResp{}); got != "" {
 		t.Errorf("empty schedule should render nothing, got %q", got)
 	}
 }
 
 func TestRenderQuota(t *testing.T) {
-	st := &statusResp{
-		Quota: map[string]statusQuota{
+	st := &cli.StatusResp{
+		Quota: map[string]cli.StatusQuota{
 			"aqp": {
 				Account: "work", Plan: "plan",
-				Windows: []statusWindow{
+				Windows: []cli.StatusWindow{
 					{Label: "Monthly", RemainingPct: 0.62, Ultimate: true, ResetsAt: time.Now().Add(time.Hour)},
 					{Label: "5h tokens", RemainingPct: 0.88, Short: true},
 					{Label: "daily", RemainingPct: 0.5}, // neither Ultimate nor Short → no tag
@@ -203,7 +204,7 @@ func TestRenderQuota(t *testing.T) {
 			"codex": {Err: "rate limited"},
 		},
 	}
-	out := renderQuota(st)
+	out := cli.RenderQuota(st)
 	// sorted: aqp before codex
 	if i, j := strings.Index(out, "aqp"), strings.Index(out, "codex"); !(i >= 0 && j > i) {
 		t.Errorf("want aqp before codex, got aqp@%d codex@%d", i, j)
@@ -223,16 +224,16 @@ func TestRenderQuota(t *testing.T) {
 }
 
 func TestRenderQuotaEmpty(t *testing.T) {
-	if got := renderQuota(&statusResp{}); got != "" {
+	if got := cli.RenderQuota(&cli.StatusResp{}); got != "" {
 		t.Errorf("empty quota should render nothing, got %q", got)
 	}
 }
 
 func TestRenderWarnings(t *testing.T) {
-	if got := renderWarnings(&statusResp{}); got != "" {
+	if got := cli.RenderWarnings(&cli.StatusResp{}); got != "" {
 		t.Errorf("empty warnings should render nothing, got %q", got)
 	}
-	out := renderWarnings(&statusResp{Warnings: []string{
+	out := cli.RenderWarnings(&cli.StatusResp{Warnings: []string{
 		`model "foo" served by 2 logged-in providers (aqp, zhipu); auto-routing to aqp`,
 	}})
 	for _, want := range []string{"implicit-route warnings", "foo", "aqp", "zhipu"} {
@@ -243,11 +244,11 @@ func TestRenderWarnings(t *testing.T) {
 }
 
 func TestRenderTokens(t *testing.T) {
-	tok := &tokensResp{Usage: []tokenEntry{
+	tok := &cli.TokensResp{Usage: []cli.TokenEntry{
 		{Provider: "zhipu", Model: "glm-4.6", Input: 1000, Output: 500, Requests: 1},
 		{Provider: "aqp", Model: "claude-sonnet", Input: 1200000, Output: 450000, CacheCreation: 200000, CacheRead: 1100000, Requests: 1234},
 	}}
-	out := renderTokens(tok)
+	out := cli.RenderTokens(tok)
 	// sorted by provider then model: aqp before zhipu
 	if i, j := strings.Index(out, "aqp"), strings.Index(out, "zhipu"); !(i >= 0 && j > i) {
 		t.Errorf("want aqp before zhipu, got aqp@%d zhipu@%d", i, j)
@@ -260,13 +261,13 @@ func TestRenderTokens(t *testing.T) {
 }
 
 func TestRenderTokensEmpty(t *testing.T) {
-	if got := renderTokens(&tokensResp{}); got != "" {
+	if got := cli.RenderTokens(&cli.TokensResp{}); got != "" {
 		t.Errorf("empty tokens should render nothing, got %q", got)
 	}
 }
 
 func TestRenderLogs(t *testing.T) {
-	out := renderLogs(&logsResp{Lines: []string{"line one", "line two"}})
+	out := cli.RenderLogs(&cli.LogsResp{Lines: []string{"line one", "line two"}})
 	if !strings.Contains(out, "Logs (last 2)") {
 		t.Errorf("want header, got:\n%s", out)
 	}
@@ -278,7 +279,7 @@ func TestRenderLogs(t *testing.T) {
 }
 
 func TestRenderLogsEmpty(t *testing.T) {
-	if got := renderLogs(&logsResp{}); got != "" {
+	if got := cli.RenderLogs(&cli.LogsResp{}); got != "" {
 		t.Errorf("empty logs should render nothing, got %q", got)
 	}
 }
@@ -304,7 +305,7 @@ func TestRenderStatusIntegration(t *testing.T) {
 	defer ts.Close()
 	listen := ts.Listener.Addr().String()
 
-	out, err := renderStatus(listen, statusOpts{})
+	out, err := cli.RenderStatus(listen, cli.StatusOpts{})
 	if err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
@@ -320,7 +321,7 @@ func TestRenderStatusIntegration(t *testing.T) {
 	}
 
 	// --logs includes a log line
-	outLogs, err := renderStatus(listen, statusOpts{Logs: true, LogsN: 20})
+	outLogs, err := cli.RenderStatus(listen, cli.StatusOpts{Logs: true, LogsN: 20})
 	if err != nil {
 		t.Fatalf("renderStatus logs: %v", err)
 	}
@@ -329,7 +330,7 @@ func TestRenderStatusIntegration(t *testing.T) {
 	}
 
 	// --json: valid merged object with status + tokens (+ logs when requested)
-	outJSON, err := renderStatus(listen, statusOpts{JSON: true, Logs: true, LogsN: 2})
+	outJSON, err := cli.RenderStatus(listen, cli.StatusOpts{JSON: true, Logs: true, LogsN: 2})
 	if err != nil {
 		t.Fatalf("renderStatus json: %v", err)
 	}
@@ -352,7 +353,7 @@ func TestRenderStatusDaemonDown(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 	ln.Close()
-	_, err = renderStatus(addr, statusOpts{})
+	_, err = cli.RenderStatus(addr, cli.StatusOpts{})
 	if err == nil {
 		t.Fatal("want error for unreachable daemon")
 	}
@@ -366,7 +367,7 @@ func TestRenderStatusWebDisabled(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer ts.Close()
-	_, err := renderStatus(ts.Listener.Addr().String(), statusOpts{})
+	_, err := cli.RenderStatus(ts.Listener.Addr().String(), cli.StatusOpts{})
 	if err == nil || !strings.Contains(err.Error(), "web.enabled") {
 		t.Fatalf("want web.enabled error, got %v", err)
 	}
@@ -389,7 +390,7 @@ func TestRenderStatusJSONLogsError(t *testing.T) {
 	defer ts.Close()
 
 	// --json: the 404 error body must NOT be embedded as the "logs" field.
-	outJSON, err := renderStatus(ts.Listener.Addr().String(), statusOpts{JSON: true, Logs: true, LogsN: 5})
+	outJSON, err := cli.RenderStatus(ts.Listener.Addr().String(), cli.StatusOpts{JSON: true, Logs: true, LogsN: 5})
 	if err != nil {
 		t.Fatalf("renderStatus json: %v", err)
 	}
@@ -405,7 +406,7 @@ func TestRenderStatusJSONLogsError(t *testing.T) {
 	}
 
 	// rendered path: the error body must not leak and the Logs section is omitted.
-	out, err := renderStatus(ts.Listener.Addr().String(), statusOpts{Logs: true, LogsN: 5})
+	out, err := cli.RenderStatus(ts.Listener.Addr().String(), cli.StatusOpts{Logs: true, LogsN: 5})
 	if err != nil {
 		t.Fatalf("renderStatus: %v", err)
 	}
@@ -418,32 +419,32 @@ func TestRenderStatusJSONLogsError(t *testing.T) {
 }
 
 func TestParseStatusFlags(t *testing.T) {
-	o := parseStatusFlags([]string{})
+	o := cli.ParseStatusFlags([]string{})
 	if o.Logs || o.JSON || o.LogsN != 20 {
 		t.Errorf("defaults wrong: %+v", o)
 	}
-	o = parseStatusFlags([]string{"--logs"})
+	o = cli.ParseStatusFlags([]string{"--logs"})
 	if !o.Logs || o.LogsN != 20 {
 		t.Errorf("--logs default N wrong: %+v", o)
 	}
-	o = parseStatusFlags([]string{"--logs", "50"})
+	o = cli.ParseStatusFlags([]string{"--logs", "50"})
 	if !o.Logs || o.LogsN != 50 {
 		t.Errorf("--logs 50 wrong: %+v", o)
 	}
-	o = parseStatusFlags([]string{"--json"})
+	o = cli.ParseStatusFlags([]string{"--json"})
 	if !o.JSON {
 		t.Errorf("--json not set")
 	}
-	o = parseStatusFlags([]string{"--logs=50"})
+	o = cli.ParseStatusFlags([]string{"--logs=50"})
 	if !o.Logs || o.LogsN != 50 {
 		t.Errorf("--logs=50 wrong: %+v", o)
 	}
-	o = parseStatusFlags([]string{"--logs=0"})
+	o = cli.ParseStatusFlags([]string{"--logs=0"})
 	if !o.Logs || o.LogsN != 20 { // non-positive value falls back to the default
 		t.Errorf("--logs=0 should keep default N=20: %+v", o)
 	}
 	// --config must be skipped (configPath handles it) and not swallow --logs
-	o = parseStatusFlags([]string{"--config", "x.yaml", "--logs"})
+	o = cli.ParseStatusFlags([]string{"--config", "x.yaml", "--logs"})
 	if !o.Logs {
 		t.Errorf("--config swallowed --logs: %+v", o)
 	}

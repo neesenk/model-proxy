@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/cli"
+	"model-proxy/internal/daemonctl"
 	"net/http"
 	"os"
 	"strings"
@@ -30,7 +32,7 @@ func cmdReplay(args []string) {
 		fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err)
 		os.Exit(1)
 	}
-	pos := positionalArgs(args)
+	pos := cli.PositionalArgs(args)
 	if len(pos) == 0 {
 		fmt.Fprintf(os.Stderr, "%s usage: model-proxy replay <id> --to <provider>\n", cRed("✗"))
 		os.Exit(1)
@@ -52,7 +54,7 @@ func cmdReplay(args []string) {
 // force-provider override, and returns the new backend's response body. base is
 // "http://<listen>". Errors carry a clear message (404, no body, upstream error).
 func doReplay(base, id, provider string) ([]byte, error) {
-	recBody, status, err := statusGet(base, "/api/requests/"+id)
+	recBody, status, err := cli.StatusGet(base, "/api/requests/"+id)
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach daemon: %v", err)
 	}
@@ -98,7 +100,7 @@ func doReplay(base, id, provider string) ([]byte, error) {
 	req, _ := http.NewRequest(http.MethodPost, base+path, bytes.NewReader([]byte(rec.RequestBody)))
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("x-mp-force-provider", provider)
-	resp, err := daemonHTTPClient.Do(req)
+	resp, err := daemonctl.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("replay request failed: %v", err)
 	}

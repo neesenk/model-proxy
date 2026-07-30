@@ -14,7 +14,6 @@ import (
 	"model-proxy/internal/app"
 	clilogin "model-proxy/internal/cli/login"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
 )
 
 // hasPoolFile reports whether the plural credential pool file
@@ -178,8 +177,6 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	}
 	maybeReloadDaemon(cfg)
 }
-
-func cGreen(s string) string { return provider.Green(s) }
 
 func flagStringValue(args []string, flag string) string {
 	for i := 0; i < len(args); i++ {

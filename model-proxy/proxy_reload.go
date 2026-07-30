@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"model-proxy/internal/app"
 	"time"
 
 	"model-proxy/internal/shadow"
@@ -37,7 +38,7 @@ func (p *Proxy) reload(configPath string) error {
 	p.parentOf = built.ParentOf
 	p.implicitRoutes = newImplicit
 	p.expandedRoutes = p.buildExpandedRoutes()
-	hw := configRoutingWarnings(cfg, p.expandedRoutes)
+	hw := app.ConfigRoutingWarnings(cfg, p.expandedRoutes)
 	p.routeWarnings = append(newWarnings, hw...)
 	// Rebuild the cache from the new config (pure in-memory, no goroutine/file
 	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now

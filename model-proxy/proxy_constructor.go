@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"model-proxy/internal/app"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// missing protocol: on hint providers): appended to the warnings channel
 	// (/api/status + `models` CLI) AND logged — the operator should see them at
 	// boot, not only when they open the dashboard.
-	if hw := configRoutingWarnings(cfg, p.expandedRoutes); len(hw) > 0 {
+	if hw := app.ConfigRoutingWarnings(cfg, p.expandedRoutes); len(hw) > 0 {
 		p.routeWarnings = append(p.routeWarnings, hw...)
 		for _, w := range hw {
 			log.Printf("[startup] ⚠ %s", w)

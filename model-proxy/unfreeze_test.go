@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"model-proxy/internal/cli"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -136,14 +137,14 @@ func TestDoUnfreeze(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := doUnfreeze(srv.URL, "zhipu")
+	out, err := cli.DoUnfreeze(srv.URL, "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "zhipu") || !strings.Contains(out, "2 model lock") {
 		t.Errorf("out = %q, want unfroze line with provider + lock count", out)
 	}
-	out, err = doUnfreeze(srv.URL, "empty")
+	out, err = cli.DoUnfreeze(srv.URL, "empty")
 	if err != nil {
 		t.Fatal(err)
 	}

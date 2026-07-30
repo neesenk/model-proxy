@@ -1,10 +1,11 @@
-package main
+package app
 
 import (
 	"fmt"
 	"sort"
 	"strings"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
 	"model-proxy/provider"
 )
@@ -20,7 +21,7 @@ import (
 // advisory — a false positive costs one warning line.
 var reasoningReplayMarkers = []string{"reasoner", "thinking", "mimo"}
 
-func reasoningReplayModel(model string) bool {
+func ReasoningReplayModel(model string) bool {
 	l := strings.ToLower(model)
 	for _, m := range reasoningReplayMarkers {
 		if strings.Contains(l, m) {
@@ -44,7 +45,7 @@ func reasoningReplayModel(model string) bool {
 // an explicit protocol: declaration (e.g. codex→responses) does NOT warn: the
 // forward path auto-resolves it via resolvedBackendProto/ProtocolHint, so it
 // converts without user action.
-func configRoutingWarnings(cfg *Config, expanded map[string][]RouteTarget) []string {
+func ConfigRoutingWarnings(cfg *configdomain.Config, expanded map[string][]configdomain.RouteTarget) []string {
 	var out []string
 	routes := make([]string, 0, len(expanded))
 	for r := range expanded {
@@ -70,7 +71,7 @@ func configRoutingWarnings(cfg *Config, expanded map[string][]RouteTarget) []str
 				// Only the anthropic↔chat converter drops thinking/reasoning;
 				// a responses target preserves it, so protocol:responses must
 				// NOT warn (the message "currently dropped" would be wrong).
-				if p, ok := protocol.Parse(t.Protocol); ok && p != protocol.Responses && reasoningReplayModel(t.Model) {
+				if p, ok := protocol.Parse(t.Protocol); ok && p != protocol.Responses && ReasoningReplayModel(t.Model) {
 					out = append(out, fmt.Sprintf("route %q target %s/%s: reasoning-required model behind protocol conversion — thinking/reasoning content is currently dropped, multi-turn tool conversations may fail upstream (400); reasoning replay is not yet implemented",
 						exposed, t.Provider, t.Model))
 				}
