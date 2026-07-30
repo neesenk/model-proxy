@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"model-proxy/internal/cli"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,7 +17,7 @@ import (
 // response into a terminal table (and --json passes raw JSON through).
 func TestRenderStatsCLI(t *testing.T) {
 	minute := time.Now().Unix() / 60 * 60
-	resp := statsResp{From: minute - 60, To: minute, Bucket: 60, Buckets: []observestats.Bucket{
+	resp := cli.StatsResp{From: minute - 60, To: minute, Bucket: 60, Buckets: []observestats.Bucket{
 		{Provider: "zhipu", Model: "glm-5", Minute: minute, Requests: 7, Input: 100, Output: 20},
 	}}
 	raw, _ := json.Marshal(resp)
@@ -34,7 +35,7 @@ func TestRenderStatsCLI(t *testing.T) {
 
 	// renderStats takes "host:port"; derive from the httptest server URL.
 	listen := strings.TrimPrefix(up.URL, "http://")
-	out, err := renderStats(listen, statsOpts{})
+	out, err := cli.RenderStats(listen, cli.StatsOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +50,7 @@ func TestRenderStatsCLI(t *testing.T) {
 	}
 
 	// --bucket 10m is forwarded to the daemon's query string.
-	if _, err := renderStats(listen, statsOpts{Bucket: "10m"}); err != nil {
+	if _, err := cli.RenderStats(listen, cli.StatsOpts{Bucket: "10m"}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(gotQuery, "bucket=10m") {
@@ -57,7 +58,7 @@ func TestRenderStatsCLI(t *testing.T) {
 	}
 
 	// --json passes the raw body through.
-	outJSON, err := renderStats(listen, statsOpts{JSON: true})
+	outJSON, err := cli.RenderStats(listen, cli.StatsOpts{JSON: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +101,8 @@ func TestBucketLabel(t *testing.T) {
 		{0, "1m"}, {60, "1m"}, {600, "10m"}, {3600, "1h"}, {86400, "24h"},
 	}
 	for _, c := range cases {
-		if got := bucketLabel(c.secs); got != c.want {
-			t.Errorf("bucketLabel(%d) = %q, want %q", c.secs, got, c.want)
+		if got := cli.BucketLabel(c.secs); got != c.want {
+			t.Errorf("cli.BucketLabel(%d) = %q, want %q", c.secs, got, c.want)
 		}
 	}
 }
@@ -110,25 +111,25 @@ func TestParseStatsFlags(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
-		want statsOpts
+		want cli.StatsOpts
 	}{
-		{"empty", nil, statsOpts{}},
+		{"empty", nil, cli.StatsOpts{}},
 		{"space-separated", []string{"--from", "2026-01-01", "--to", "2026-02-01",
 			"--provider", "zhipu", "--model", "glm-5.2", "--bucket", "5m", "--json"},
-			statsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
+			cli.StatsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
 				Model: "glm-5.2", Bucket: "5m", JSON: true}},
 		{"equals form", []string{"--from=2026-01-01", "--to=2026-02-01",
 			"--provider=zhipu", "--model=glm-5.2", "--bucket=5m"},
-			statsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
+			cli.StatsOpts{From: "2026-01-01", To: "2026-02-01", Provider: "zhipu",
 				Model: "glm-5.2", Bucket: "5m"}},
-		{"value at end without arg", []string{"--from"}, statsOpts{}},
-		{"unknown flag ignored", []string{"--bogus", "x"}, statsOpts{}},
+		{"value at end without arg", []string{"--from"}, cli.StatsOpts{}},
+		{"unknown flag ignored", []string{"--bogus", "x"}, cli.StatsOpts{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseStatsFlags(tc.args)
+			got := cli.ParseStatsFlags(tc.args)
 			if got != tc.want {
-				t.Errorf("parseStatsFlags(%v) = %+v, want %+v", tc.args, got, tc.want)
+				t.Errorf("cli.ParseStatsFlags(%v) = %+v, want %+v", tc.args, got, tc.want)
 			}
 		})
 	}
@@ -136,24 +137,24 @@ func TestParseStatsFlags(t *testing.T) {
 
 func TestFormatStatsTable(t *testing.T) {
 	// Empty buckets -> "no stats" line.
-	out := formatStatsTable(statsResp{From: 1700000000, To: 1700003600, Bucket: 60})
+	out := cli.FormatStatsTable(cli.StatsResp{From: 1700000000, To: 1700003600, Bucket: 60})
 	if !strings.Contains(out, "no stats") || !strings.Contains(out, "bucket 1m") {
 		t.Errorf("formatStatsTable empty missing 'no stats':\n%s", out)
 	}
 	// With buckets -> header + rows.
-	resp := statsResp{From: 1700000000, To: 1700003600, Bucket: 3600, Buckets: []observestats.Bucket{
+	resp := cli.StatsResp{From: 1700000000, To: 1700003600, Bucket: 3600, Buckets: []observestats.Bucket{
 		{Provider: "zhipu", Model: "glm-5.2", Minute: 1700000000, Requests: 100, Failovers: 2, Failures: 1, Input: 5000, Output: 3000},
 	}}
-	out = formatStatsTable(resp)
+	out = cli.FormatStatsTable(resp)
 	if !strings.Contains(out, "provider") || !strings.Contains(out, "zhipu") || !strings.Contains(out, "glm-5.2") {
 		t.Errorf("formatStatsTable rows missing marker:\n%s", out)
 	}
 }
 
 // TestStatsFlags_GranularityCost_Parsed verifies --granularity and --cost parse
-// into statsOpts (the new analytics-routing flags).
+// into cli.StatsOpts (the new analytics-routing flags).
 func TestStatsFlags_GranularityCost_Parsed(t *testing.T) {
-	o := parseStatsFlags([]string{"--granularity", "month", "--cost", "--provider", "deepseek"})
+	o := cli.ParseStatsFlags([]string{"--granularity", "month", "--cost", "--provider", "deepseek"})
 	if o.Granularity != "month" || !o.Cost || o.Provider != "deepseek" {
 		t.Errorf("parsed = %+v, want granularity=month cost=true provider=deepseek", o)
 	}
@@ -162,7 +163,7 @@ func TestStatsFlags_GranularityCost_Parsed(t *testing.T) {
 // TestStatsFlags_GranularityCost_DefaultOff verifies the new flags default off
 // (the CLI display contract: no behavioral change without flags).
 func TestStatsFlags_GranularityCost_DefaultOff(t *testing.T) {
-	o := parseStatsFlags([]string{"--from", "1", "--bucket", "1h"})
+	o := cli.ParseStatsFlags([]string{"--from", "1", "--bucket", "1h"})
 	if o.Granularity != "" || o.Cost {
 		t.Errorf("new flags should default off: %+v", o)
 	}
@@ -170,7 +171,7 @@ func TestStatsFlags_GranularityCost_DefaultOff(t *testing.T) {
 
 // TestStatsFlags_GranularityCost_EqualsForm verifies --granularity=value parses.
 func TestStatsFlags_GranularityCost_EqualsForm(t *testing.T) {
-	o := parseStatsFlags([]string{"--granularity=day", "--cost"})
+	o := cli.ParseStatsFlags([]string{"--granularity=day", "--cost"})
 	if o.Granularity != "day" || !o.Cost {
 		t.Errorf("equals form: parsed = %+v, want granularity=day cost=true", o)
 	}
@@ -211,7 +212,7 @@ func TestRenderStatsCLI_AnalyticsPath(t *testing.T) {
 
 	// --granularity month --cost: routes to /api/analytics, table has a cost
 	// column with the summed cost ($0.12) and n/a for the unpriced series.
-	out, err := renderStats(listen, statsOpts{Granularity: "month", Cost: true})
+	out, err := cli.RenderStats(listen, cli.StatsOpts{Granularity: "month", Cost: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +233,7 @@ func TestRenderStatsCLI_AnalyticsPath(t *testing.T) {
 
 	// --cost only (no granularity): defaults to day in the query string.
 	sawAnalytics = false
-	if _, err := renderStats(listen, statsOpts{Cost: true}); err != nil {
+	if _, err := cli.RenderStats(listen, cli.StatsOpts{Cost: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !sawAnalytics {
@@ -252,7 +253,7 @@ func TestRenderStatsCLI_AnalyticsJSON(t *testing.T) {
 	}))
 	defer up.Close()
 	listen := strings.TrimPrefix(up.URL, "http://")
-	out, err := renderStats(listen, statsOpts{Granularity: "day", JSON: true})
+	out, err := cli.RenderStats(listen, cli.StatsOpts{Granularity: "day", JSON: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +267,7 @@ func TestRenderStatsCLI_AnalyticsJSON(t *testing.T) {
 // cost sums correctly ( priced: $X.XX ; unpriced: n/a ).
 func TestFormatAnalyticsTable(t *testing.T) {
 	cost := 0.12
-	resp := analyticsResp{Granularity: "month"}
+	resp := cli.AnalyticsResp{Granularity: "month"}
 	resp.Series = []struct {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
@@ -297,7 +298,7 @@ func TestFormatAnalyticsTable(t *testing.T) {
 	}
 
 	// Without cost: 6-column table, no "cost" header, no $ values.
-	out := formatAnalyticsTable(resp, false)
+	out := cli.FormatAnalyticsTable(resp, false)
 	if !strings.Contains(out, "month") || !strings.Contains(out, "deepseek") {
 		t.Errorf("table missing markers:\n%s", out)
 	}
@@ -311,7 +312,7 @@ func TestFormatAnalyticsTable(t *testing.T) {
 
 	// With cost: 7-column table; priced series shows $0.24 (0.12+0.12),
 	// unpriced shows n/a.
-	out = formatAnalyticsTable(resp, true)
+	out = cli.FormatAnalyticsTable(resp, true)
 	if !strings.Contains(out, "cost") {
 		t.Errorf("with --cost, table should have a cost header:\n%s", out)
 	}
@@ -328,10 +329,10 @@ func TestFormatAnalyticsTable(t *testing.T) {
 // TestFormatAgentsTable_Latency: the --by-agent table includes the new latency
 // + failure columns.
 func TestFormatAgentsTable_Latency(t *testing.T) {
-	resp := agentResp{Bucket: 60, Buckets: []observestats.AgentBucket{
+	resp := cli.AgentResp{Bucket: 60, Buckets: []observestats.AgentBucket{
 		{Agent: "claude-code", Requests: 10, Input: 100, Output: 50, LatencySum: 2000, Failures: 1},
 	}}
-	out := formatAgentsTable(resp)
+	out := cli.FormatAgentsTable(resp)
 	for _, want := range []string{"claude-code", "lat", "fail", "10", "200", "1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("formatAgentsTable missing %q:\n%s", want, out)
@@ -343,7 +344,7 @@ func TestFormatAgentsTable_Latency(t *testing.T) {
 // per-agent summary sorted by total tokens desc, with the exact header + the
 // heaviest agent on top. Guards the CLI display contract for the agent view.
 func TestRenderAgentsCLI(t *testing.T) {
-	resp := agentResp{From: 1, To: 2, Bucket: 60, Buckets: []observestats.AgentBucket{
+	resp := cli.AgentResp{From: 1, To: 2, Bucket: 60, Buckets: []observestats.AgentBucket{
 		{Agent: "claude-code", Requests: 10, Input: 5000, Output: 800},
 		{Agent: "codex", Requests: 3, Input: 200, Output: 50},
 	}}
@@ -358,7 +359,7 @@ func TestRenderAgentsCLI(t *testing.T) {
 	defer up.Close()
 	listen := strings.TrimPrefix(up.URL, "http://")
 
-	out, err := renderAgents(listen, statsOpts{ByAgent: true})
+	out, err := cli.RenderAgents(listen, cli.StatsOpts{ByAgent: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +375,7 @@ func TestRenderAgentsCLI(t *testing.T) {
 		t.Errorf("heaviest agent not on top:\n%s", out)
 	}
 
-	outJSON, err := renderAgents(listen, statsOpts{ByAgent: true, JSON: true})
+	outJSON, err := cli.RenderAgents(listen, cli.StatsOpts{ByAgent: true, JSON: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +404,7 @@ func TestRenderAgents_ProviderModelFilter(t *testing.T) {
 	defer up.Close()
 	listen := strings.TrimPrefix(up.URL, "http://")
 
-	if _, err := renderAgents(listen, statsOpts{ByAgent: true, Provider: "zhipu", Model: "glm-5.2"}); err != nil {
+	if _, err := cli.RenderAgents(listen, cli.StatsOpts{ByAgent: true, Provider: "zhipu", Model: "glm-5.2"}); err != nil {
 		t.Fatal(err)
 	}
 }
