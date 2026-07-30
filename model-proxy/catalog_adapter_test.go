@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/app"
 	"path/filepath"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 // adapter contract separate from the catalog package's fetch/cache behavior.
 func TestModelsCatalogEndpoint_EnvOverride(t *testing.T) {
 	t.Setenv("MP_MODELSDEV_URL", "http://example.test/api.json")
-	if got := modelsCatalogEndpoint(); got != "http://example.test/api.json" {
+	if got := app.ModelsCatalogEndpoint(); got != "http://example.test/api.json" {
 		t.Errorf("env override ignored: got %q", got)
 	}
 }
@@ -20,10 +21,10 @@ func TestModelsCatalogAdapterDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("MP_MODELSDEV_URL", "")
-	if got := modelsCatalogEndpoint(); got != catalog.DefaultEndpoint {
+	if got := app.ModelsCatalogEndpoint(); got != catalog.DefaultEndpoint {
 		t.Errorf("default endpoint = %q, want %q", got, catalog.DefaultEndpoint)
 	}
-	if got, want := modelsCatalogPath(), filepath.Join(home, ".model-proxy", "models_cache.json"); got != want {
+	if got, want := app.ModelsCatalogPath(home), filepath.Join(home, ".model-proxy", "models_cache.json"); got != want {
 		t.Errorf("cache path = %q, want %q", got, want)
 	}
 }

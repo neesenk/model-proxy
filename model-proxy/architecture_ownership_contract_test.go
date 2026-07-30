@@ -34,27 +34,28 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			}
 		}
 
-		adapter, _ := parseGoFile(t, "catalog_adapter.go")
+		adapter, _ := parseGoFile(t, "internal/app/catalog_adapter.go")
 		wantImports := map[string]bool{
 			"os":                           true,
 			"path/filepath":                true,
 			"model-proxy/internal/catalog": true,
+			"model-proxy/internal/config":  true,
 		}
 		for _, spec := range adapter.Imports {
 			importPath := strings.Trim(spec.Path.Value, `"`)
 			if !wantImports[importPath] {
-				t.Errorf("catalog_adapter.go has unexpected import %q", importPath)
+				t.Errorf("app catalog_adapter.go has unexpected import %q", importPath)
 			}
 			delete(wantImports, importPath)
 		}
 		for missing := range wantImports {
-			t.Errorf("catalog_adapter.go is missing required import %q", missing)
+			t.Errorf("app catalog_adapter.go is missing required import %q", missing)
 		}
 		wantFunctions := map[string]int{
-			"modelsCatalogEndpoint": 0,
-			"modelsCatalogPath":     0,
-			"loadModelsCatalog":     0,
-			"hydrateModels":         0,
+			"ModelsCatalogEndpoint": 0,
+			"ModelsCatalogPath":     0,
+			"LoadModelsCatalog":     0,
+			"HydrateModels":         0,
 		}
 		for _, decl := range adapter.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
@@ -62,18 +63,18 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 				continue
 			}
 			if fn.Recv != nil {
-				t.Errorf("catalog_adapter.go has unexpected method %s", fn.Name.Name)
+				t.Errorf("app catalog_adapter.go has unexpected method %s", fn.Name.Name)
 				continue
 			}
 			if _, allowed := wantFunctions[fn.Name.Name]; !allowed {
-				t.Errorf("catalog_adapter.go has unexpected function %s; source/cache logic belongs in internal/catalog", fn.Name.Name)
+				t.Errorf("app catalog_adapter.go has unexpected function %s; source/cache logic belongs in internal/catalog", fn.Name.Name)
 				continue
 			}
 			wantFunctions[fn.Name.Name]++
 		}
 		for name, count := range wantFunctions {
 			if count != 1 {
-				t.Errorf("catalog_adapter.go %s declarations = %d, want exactly 1", name, count)
+				t.Errorf("app catalog_adapter.go %s declarations = %d, want exactly 1", name, count)
 			}
 		}
 
@@ -188,7 +189,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			}
 		}
 
-		proxyFile, proxySet := rootPackage, rootSet
+		proxyFile, _ := rootPackage, rootSet
 		appFile, appSet := parseGoPackage(t, "internal/app")
 		builder := namedFunction(t, appFile, "BuildProviders")
 		if got := namedCallCountInNode(builder.Body, "LoadSnapshot"); got != 1 {
@@ -202,12 +203,12 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		for _, violation := range forbiddenCallSites(builder.Body, appSet, forbiddenStorageProbes, nil) {
 			t.Errorf("app.BuildProviders re-reads or probes account storage outside its snapshot: %s", violation)
 		}
-		loggedIn := namedFunction(t, proxyFile, "loggedInProviders")
+		loggedIn := namedFunction(t, appFile, "LoggedInProviders")
 		if got := namedCallCountInNode(loggedIn.Body, "LoadSnapshot"); got != 1 {
-			t.Errorf("loggedInProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
+			t.Errorf("app.LoggedInProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
 		}
-		for _, violation := range forbiddenCallSites(loggedIn.Body, proxySet, forbiddenStorageProbes, nil) {
-			t.Errorf("loggedInProviders re-reads or probes account storage outside its snapshot: %s", violation)
+		for _, violation := range forbiddenCallSites(loggedIn.Body, appSet, forbiddenStorageProbes, nil) {
+			t.Errorf("app.LoggedInProviders re-reads or probes account storage outside its snapshot: %s", violation)
 		}
 
 		buildFields := namedStructFields(t, appFile, "Build")
