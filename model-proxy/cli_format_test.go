@@ -1,6 +1,7 @@
 package main
 
 import (
+	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/takeover"
 	"sort"
@@ -110,8 +111,8 @@ func TestPositional(t *testing.T) {
 		{"positional after flag", []string{"--verbose", "models", "zhipu"}, "models"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := positional(tc.args); got != tc.want {
-				t.Errorf("positional(%v)=%q want %q", tc.args, got, tc.want)
+			if got := cliframework.Positional(tc.args); got != tc.want {
+				t.Errorf("cliframework.Positional(%v)=%q want %q", tc.args, got, tc.want)
 			}
 		})
 	}

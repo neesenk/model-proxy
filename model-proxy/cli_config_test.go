@@ -63,7 +63,7 @@ func TestCLI_ConfigInit(t *testing.T) {
 
 func TestCLI_ConfigPrint(t *testing.T) {
 	cfgPath := writeTempConfig(t, minimalConfig)
-	// Run in-process: cmdConfig print reads configPath(args[1:]) where args[0]=="print".
+	// Run in-process: cmdConfig print reads cliframework.ConfigPath(args[1:]) where args[0]=="print".
 	out := grabStdout(t, func() {
 		cmdConfig([]string{"print", "--config", cfgPath})
 	})

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 	"os"
 
 	clilogin "model-proxy/internal/cli/login"
@@ -11,11 +12,11 @@ import (
 // cmdLogin is the process-level wrapper: config loading and arg parsing stay
 // here; provider login flows live in internal/cli/login.
 func cmdLogin(args []string) {
-	cfg, err := LoadConfig(configPath(args))
+	cfg, err := LoadConfig(cliframework.ConfigPath(args))
 	if err != nil {
 		log.Fatal(err)
 	}
-	provName := positional(args)
+	provName := cliframework.Positional(args)
 	if provName == "" {
 		fmt.Println("usage: model-proxy login <provider> [--label <name>] [--replace]")
 		fmt.Println("available providers:")
@@ -28,8 +29,8 @@ func cmdLogin(args []string) {
 	if !ok {
 		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
 	}
-	label := flagStringValue(args, "--label")
-	replace := hasFlagValue(args, "--replace")
+	label := cliframework.FlagStringValue(args, "--label")
+	replace := cliframework.HasFlagValue(args, "--replace")
 
 	switch prov.Provider {
 	case "aqp":

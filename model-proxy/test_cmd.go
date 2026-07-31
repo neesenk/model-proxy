@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	"net/http"
 	"os"
@@ -20,12 +21,12 @@ import (
 // fails (or the model has no route at all).
 
 func cmdTest(args []string) {
-	cfg, err := LoadConfig(configPath(args))
+	cfg, err := LoadConfig(cliframework.ConfigPath(args))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err)
 		os.Exit(1)
 	}
-	model := positional(args)
+	model := cliframework.Positional(args)
 	if model == "" {
 		fmt.Fprintf(os.Stderr, "%s usage: model-proxy test <model> [--config PATH]\n", cRed("✗"))
 		os.Exit(1)

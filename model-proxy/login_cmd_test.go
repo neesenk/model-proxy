@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/httptest"
@@ -392,22 +393,22 @@ func TestFlagStringValue(t *testing.T) {
 		{[]string{}, "--label", ""},
 	}
 	for i, c := range cases {
-		got := flagStringValue(c.args, c.flag)
+		got := cliframework.FlagStringValue(c.args, c.flag)
 		if got != c.want {
-			t.Errorf("case %d: flagStringValue(%v, %q) = %q, want %q", i, c.args, c.flag, got, c.want)
+			t.Errorf("case %d: cliframework.FlagStringValue(%v, %q) = %q, want %q", i, c.args, c.flag, got, c.want)
 		}
 	}
 }
 
 func TestHasFlagValue(t *testing.T) {
-	if !hasFlagValue([]string{"--replace", "zhipu"}, "--replace") {
+	if !cliframework.HasFlagValue([]string{"--replace", "zhipu"}, "--replace") {
 		t.Error("--replace present should be true")
 	}
-	if hasFlagValue([]string{"zhipu"}, "--replace") {
+	if cliframework.HasFlagValue([]string{"zhipu"}, "--replace") {
 		t.Error("missing --replace should be false")
 	}
 	// --replace=anything still counts as present
-	if !hasFlagValue([]string{"--replace=true"}, "--replace") {
+	if !cliframework.HasFlagValue([]string{"--replace=true"}, "--replace") {
 		t.Error("--replace=true should be true")
 	}
 }

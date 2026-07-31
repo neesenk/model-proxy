@@ -16,6 +16,7 @@ package main
 
 import (
 	"io"
+	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,7 +47,7 @@ func liveProxy(t *testing.T, routes map[string][]RouteTarget, needProviders ...s
 	oldHome := os.Getenv("HOME")
 	os.Setenv("HOME", realHome)
 	t.Cleanup(func() { os.Setenv("HOME", oldHome) })
-	cfg, err := LoadConfig(configPath(nil))
+	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
 	if err != nil {
 		t.Skipf("live: cannot load ./config.yaml: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestLive_ResponsesToChat_ToolRoundTrip(t *testing.T) {
 	}
 	for _, tc := range providers {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfig(configPath(nil))
+			cfg, err := LoadConfig(cliframework.ConfigPath(nil))
 			if err != nil {
 				t.Skipf("live: %v", err)
 			}
@@ -229,7 +230,7 @@ func TestLive_ResponsesToChat_CustomTool(t *testing.T) {
 	if os.Getenv("MODEL_PROXY_LIVE") == "" {
 		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
 	}
-	cfg, err := LoadConfig(configPath(nil))
+	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
 	if err != nil {
 		t.Skipf("live: %v", err)
 	}
@@ -278,7 +279,7 @@ func TestLive_AnthropicToChat_MediaVisionGate(t *testing.T) {
 	if os.Getenv("MODEL_PROXY_LIVE") == "" {
 		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
 	}
-	cfg, err := LoadConfig(configPath(nil))
+	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
 	if err != nil {
 		t.Skipf("live: %v", err)
 	}
@@ -318,7 +319,7 @@ func TestLive_AnthropicPassthrough(t *testing.T) {
 	if os.Getenv("MODEL_PROXY_LIVE") == "" {
 		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
 	}
-	cfg, err := LoadConfig(configPath(nil))
+	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
 	if err != nil {
 		t.Skipf("live: %v", err)
 	}

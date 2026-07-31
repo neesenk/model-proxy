@@ -95,7 +95,7 @@ func runCLIWithHome(t *testing.T, home, subcmd, cfgPath string, extraArgs ...str
 	// a provider name or "check"), then --config last. This ordering matters:
 	//   - cmdConfig reads args[0] as its subcommand ("check"), and configPath
 	//     scans args[1:] for --config.
-	//   - cmdModels/cmdUsage use positional()/climodels.NonFlagArgs(), which skip --config
+	//   - cmdModels/cmdUsage use cliframework.Positional()/climodels.NonFlagArgs(), which skip --config
 	//     and its value wherever they appear.
 	cliArgs := append([]string{}, extraArgs...)
 	if cfgPath != "" {

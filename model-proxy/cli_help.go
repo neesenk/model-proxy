@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	cliframework "model-proxy/internal/cli/framework"
 	"os"
 	"sort"
 )
@@ -218,7 +219,7 @@ func printConfigProviders(args []string) {
 }
 
 func printConfigProvidersTo(out io.Writer, args []string) {
-	cfg, err := LoadConfig(configPath(args))
+	cfg, err := LoadConfig(cliframework.ConfigPath(args))
 	if err != nil || len(cfg.Providers) == 0 {
 		return
 	}

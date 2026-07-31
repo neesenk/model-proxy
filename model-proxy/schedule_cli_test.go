@@ -21,7 +21,7 @@ func TestCmdSchedule_ParsesDaemonResponse(t *testing.T) {
 	// Write a config whose listen matches the mock.
 	cfgPath := writeTempConfig(t, "listen: "+mock.listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n")
 
-	// cmdSchedule reads configPath(args) and hits the daemon. In-process.
+	// cmdSchedule reads cliframework.ConfigPath(args) and hits the daemon. In-process.
 	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "glm-5.2") {
 		t.Errorf("schedule output missing model glm-5.2:\n%s", out)

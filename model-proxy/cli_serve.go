@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	"net"
 	"net/http"
@@ -36,7 +37,7 @@ func (assembly serveAssembly) command(args []string) {
 	}
 
 	// Check for subcommand (daemon | stop | reload | status).
-	sub := positional(args)
+	sub := cliframework.Positional(args)
 	switch sub {
 	case "daemon":
 		sa := cliserve.ParseArgs(args)

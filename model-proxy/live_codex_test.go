@@ -14,6 +14,7 @@ package main
 // chars, never tokens.
 
 import (
+	cliframework "model-proxy/internal/cli/framework"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -34,7 +35,7 @@ func liveCodexSkip(t *testing.T, status int, body string) {
 // responses for determinism).
 func liveCodexProxy(t *testing.T) *httptest.Server {
 	t.Helper()
-	cfg, err := LoadConfig(configPath(nil))
+	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
 	if err != nil {
 		t.Skipf("live: %v", err)
 	}
@@ -261,7 +262,7 @@ func TestLive_ResponsesToChat_Reasoning(t *testing.T) {
 	}
 	for _, tc := range providers {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfig(configPath(nil))
+			cfg, err := LoadConfig(cliframework.ConfigPath(nil))
 			if err != nil {
 				t.Skipf("live: %v", err)
 			}
@@ -304,7 +305,7 @@ func TestLive_ResponsesToChat_MultiTurnText(t *testing.T) {
 	if os.Getenv("MODEL_PROXY_LIVE") == "" {
 		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
 	}
-	cfg, err := LoadConfig(configPath(nil))
+	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
 	if err != nil {
 		t.Skipf("live: %v", err)
 	}

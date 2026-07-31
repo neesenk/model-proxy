@@ -2,29 +2,30 @@ package main
 
 import (
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 
 	"model-proxy/internal/takeover"
 )
 
 func cmdTakeover(args []string) {
-	cp := configPath(args)
+	cp := cliframework.ConfigPath(args)
 	cfg, err := LoadConfig(cp)
 	if err != nil {
 		log.Fatal(err)
 	}
-	which := positional(args)
+	which := cliframework.Positional(args)
 	if err := takeover.RunTakeover(cfg, which, takeover.BackupDir(cp), takeoverFacts(cfg, which)); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func cmdRestore(args []string) {
-	cp := configPath(args)
+	cp := cliframework.ConfigPath(args)
 	cfg, err := LoadConfig(cp)
 	if err != nil {
 		log.Fatal(err)
 	}
-	which := positional(args)
+	which := cliframework.Positional(args)
 	if err := takeover.RunRestore(cfg, which, takeover.BackupDir(cp)); err != nil {
 		log.Fatal(err)
 	}

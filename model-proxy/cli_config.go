@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 
 	clicmd "model-proxy/internal/cli"
 )
@@ -13,7 +14,7 @@ func cmdConfig(args []string) {
 		clicmd.CmdConfig(args, nil)
 		return
 	}
-	cfg, err := LoadConfig(configPath(args[1:]))
+	cfg, err := LoadConfig(cliframework.ConfigPath(args[1:]))
 	if err != nil {
 		log.Fatal(err)
 	}
