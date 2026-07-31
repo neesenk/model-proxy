@@ -23,6 +23,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/accounts":              nil,
 		"model-proxy/internal/cache":                 nil,
 		"model-proxy/internal/catalog":               nil,
+		"model-proxy/internal/cli/doctor":            {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/cli": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/takeover": true, "model-proxy/provider": true},
 		"model-proxy/internal/cli/login":             {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true, "model-proxy/provider": true},
 		"model-proxy/internal/cli/models":            {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/probe": true, "model-proxy/provider": true},
 		"model-proxy/internal/cli":                   {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/cli/login": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/observe/stats": true, "model-proxy/provider": true},

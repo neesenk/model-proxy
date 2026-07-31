@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	clidoctor "model-proxy/internal/cli/doctor"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -71,7 +72,7 @@ routes:
     - {provider: zhipu, model: glm-5.2, priority: 2}
 `)
 
-	out, err := renderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	out, err := clidoctor.RenderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatalf("renderDoctorLive: %v", err)
 	}
@@ -129,7 +130,7 @@ routes:
     - {provider: zhipu, model: glm-5.2, priority: 2}
 `)
 
-	out, err := renderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	out, err := clidoctor.RenderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatalf("renderDoctorLive: %v", err)
 	}
@@ -171,7 +172,7 @@ routes:
     - {provider: volc, model: glm-5.2, priority: 1}
 `)
 
-	out, err := renderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	out, err := clidoctor.RenderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatalf("renderDoctorLive: %v", err)
 	}
@@ -211,7 +212,7 @@ routes:
     - {provider: aqp, model: glm-5.2, priority: 1}
 `)
 
-	out, err := renderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	out, err := clidoctor.RenderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatalf("renderDoctorLive: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestRenderDoctorLiveDaemonDown(t *testing.T) {
 	ln.Close() // bind then close → guaranteed connection refused
 
 	cfg := doctorLiveTestCfg(t, addr, "providers:\n  aqp: {provider_id: aqp, openai_base_url: https://x}\n")
-	_, err = renderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	_, err = clidoctor.RenderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
 	if err == nil {
 		t.Fatal("want error for unreachable daemon")
 	}
@@ -260,7 +261,7 @@ func TestRenderDoctorLiveWebDisabled(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := doctorLiveTestCfg(t, ts.Listener.Addr().String(), "providers:\n  aqp: {provider_id: aqp, openai_base_url: https://x}\n")
-	_, err := renderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	_, err := clidoctor.RenderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "web.enabled") {
 		t.Fatalf("want web.enabled error, got %v", err)
 	}
@@ -269,16 +270,16 @@ func TestRenderDoctorLiveWebDisabled(t *testing.T) {
 // TestDoctorLiveFlag: the --live scan follows the parseStatusFlags convention —
 // exact match only, --config and its value are ignored (configPath owns them).
 func TestDoctorLiveFlag(t *testing.T) {
-	if doctorLive([]string{}) {
+	if clidoctor.DoctorLive([]string{}) {
 		t.Error("no args → false")
 	}
-	if !doctorLive([]string{"--live"}) {
+	if !clidoctor.DoctorLive([]string{"--live"}) {
 		t.Error("--live → true")
 	}
-	if !doctorLive([]string{"--config", "x.yaml", "--live"}) {
+	if !clidoctor.DoctorLive([]string{"--config", "x.yaml", "--live"}) {
 		t.Error("--config must not swallow --live")
 	}
-	if doctorLive([]string{"--lives"}) {
+	if clidoctor.DoctorLive([]string{"--lives"}) {
 		t.Error("--lives must not match --live")
 	}
 }
@@ -319,25 +320,25 @@ providers:
 		}
 	}
 
-	drift := checkTakeoverDrift(cfg, bakDir)
-	byClient := map[string]clientDrift{}
+	drift := clidoctor.CheckTakeoverDrift(cfg, bakDir)
+	byClient := map[string]clidoctor.ClientDrift{}
 	for _, d := range drift {
-		byClient[d.client] = d
+		byClient[d.Client] = d
 	}
 	if len(drift) != 4 {
 		t.Fatalf("want 4 clients, got %d", len(drift))
 	}
-	if c := byClient["claude"]; !c.taken || !c.ok {
+	if c := byClient["claude"]; !c.Taken || !c.OK {
 		t.Errorf("claude = %+v, want taken+ok", c)
 	}
-	if c := byClient["opencode"]; !c.taken || c.ok ||
-		c.current != "http://127.0.0.1:9999/v1" || c.expected != proxyURL+"/v1" {
+	if c := byClient["opencode"]; !c.Taken || c.OK ||
+		c.Current != "http://127.0.0.1:9999/v1" || c.Expected != proxyURL+"/v1" {
 		t.Errorf("opencode = %+v, want drift 9999/v1 vs %s/v1", c, proxyURL)
 	}
-	if c := byClient["codex"]; c.taken {
+	if c := byClient["codex"]; c.Taken {
 		t.Errorf("codex = %+v, want not taken over", c)
 	}
-	if c := byClient["pi"]; !c.taken || c.ok || c.current != "(file missing)" {
+	if c := byClient["pi"]; !c.Taken || c.OK || c.Current != "(file missing)" {
 		t.Errorf("pi = %+v, want drift (file missing)", c)
 	}
 }
@@ -358,25 +359,25 @@ wire_api = "responses"
 	if err := os.WriteFile(file, []byte(good), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if cur, exp := codexPointer(file, "model-proxy", proxyURL); cur != exp {
+	if cur, exp := clidoctor.CodexPointer(file, "model-proxy", proxyURL); cur != exp {
 		t.Errorf("good config: current=%q expected=%q, want equal", cur, exp)
 	}
 
 	// model_provider switched away (e.g. user edited back to openai).
 	bad := strings.Replace(good, `model_provider = "model-proxy"`, `model_provider = "openai"`, 1)
 	os.WriteFile(file, []byte(bad), 0o600)
-	if cur, _ := codexPointer(file, "model-proxy", proxyURL); cur != `model_provider = "openai"` {
+	if cur, _ := clidoctor.CodexPointer(file, "model-proxy", proxyURL); cur != `model_provider = "openai"` {
 		t.Errorf("wrong model_provider: current=%q", cur)
 	}
 
 	// Section intact but base_url stale (listen port changed).
 	stale := strings.Replace(good, `base_url = "http://127.0.0.1:8314"`, `base_url = "http://127.0.0.1:9999"`, 1)
 	os.WriteFile(file, []byte(stale), 0o600)
-	if cur, exp := codexPointer(file, "model-proxy", proxyURL); cur != "http://127.0.0.1:9999" || exp != proxyURL {
+	if cur, exp := clidoctor.CodexPointer(file, "model-proxy", proxyURL); cur != "http://127.0.0.1:9999" || exp != proxyURL {
 		t.Errorf("stale base_url: current=%q expected=%q", cur, exp)
 	}
 
-	if cur, _ := codexPointer(filepath.Join(dir, "nope.toml"), "model-proxy", proxyURL); cur != "(file missing)" {
+	if cur, _ := clidoctor.CodexPointer(filepath.Join(dir, "nope.toml"), "model-proxy", proxyURL); cur != "(file missing)" {
 		t.Errorf("missing file: current=%q", cur)
 	}
 }
@@ -422,7 +423,7 @@ routes:
 		os.WriteFile(filepath.Join(bakDir, name+".bak"), []byte("{}"), 0o600)
 	}
 
-	out, err := renderDoctorLive(cfg, filepath.Join(home, "config.yaml"))
+	out, err := clidoctor.RenderDoctorLive(cfg, filepath.Join(home, "config.yaml"))
 	if err != nil {
 		t.Fatalf("renderDoctorLive: %v", err)
 	}

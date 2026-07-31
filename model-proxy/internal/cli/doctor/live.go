@@ -1,10 +1,12 @@
-package main
+package doctor
 
 import (
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/app"
 	"model-proxy/internal/cli"
 	climodels "model-proxy/internal/cli/models"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
@@ -42,7 +44,7 @@ type doctorRequestsResp struct {
 
 // doctorLive reports whether args contain --live. Manual scan, same convention
 // as parseStatusFlags (no flag package); --config is handled by configPath.
-func doctorLive(args []string) bool {
+func DoctorLive(args []string) bool {
 	for _, a := range args {
 		if a == "--live" {
 			return true
@@ -59,7 +61,7 @@ func doctorLive(args []string) bool {
 // lists currently schedulable targets, so a down route arrives with an empty
 // ordered list). cfgPath locates the takeover backup markers
 // (<configDir>/.model-proxy/). Errors mirror renderStatus exactly.
-func renderDoctorLive(cfg *Config, cfgPath string) (string, error) {
+func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) {
 	base := "http://" + cfg.Listen
 	statusBody, status, err := cli.StatusGet(base, "/api/status")
 	if err != nil {
@@ -80,17 +82,17 @@ func renderDoctorLive(cfg *Config, cfgPath string) (string, error) {
 	if err := json.Unmarshal(statusBody, &st); err != nil {
 		return "", fmt.Errorf("parse status response: %v", err)
 	}
-	drift := checkTakeoverDrift(cfg, takeover.BackupDir(cfgPath))
+	drift := CheckTakeoverDrift(cfg, takeover.BackupDir(cfgPath))
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s · %s\n", cBold("model-proxy doctor --live"), cDim(base))
 	fmt.Fprintf(&b, "%s daemon running (v%s, uptime %s)\n\n", cGreen("✓"), st.Version, st.Uptime)
-	cli.AppendSection(&b, renderDiagnosis(cfg, &st, drift))
+	cli.AppendSection(&b, RenderDiagnosis(cfg, &st, drift))
 	cli.AppendSection(&b, cli.RenderSchedule(&st))
 	if reqErr == nil && reqStatus == 200 {
-		cli.AppendSection(&b, renderDoctorFailures(reqBody))
+		cli.AppendSection(&b, RenderDoctorFailures(reqBody))
 	}
-	cli.AppendSection(&b, renderDoctorTakeover(drift))
+	cli.AppendSection(&b, RenderDoctorTakeover(drift))
 	return b.String(), nil
 }
 
@@ -108,9 +110,9 @@ type diagLine struct {
 // daemon warnings → takeover drift; healthy routes close the section with
 // their current landing. All data comes from /api/status + the local drift
 // check; nothing is probed live.
-func renderDiagnosis(cfg *Config, st *cli.StatusResp, drift []clientDrift) string {
+func RenderDiagnosis(cfg *configdomain.Config, st *cli.StatusResp, drift []ClientDrift) string {
 	now := time.Now()
-	implicit, _ := synthesizeImplicitRoutes(cfg)
+	implicit, _ := app.SynthesizeImplicitRoutes(cfg, accountStore())
 
 	routes := make([]string, 0, len(st.Schedule.Models))
 	for r := range st.Schedule.Models {
@@ -136,7 +138,7 @@ func renderDiagnosis(cfg *Config, st *cli.StatusResp, drift []clientDrift) strin
 			warns = append(warns, diagLine{1, text, "unpin with: model-proxy unpin " + r})
 		}
 		if availN == 0 {
-			targets := liveTargets(cfg, implicit, r)
+			targets := LiveTargets(cfg, implicit, r)
 			n := len(targets)
 			if n == 0 {
 				// Route unknown to this config (CLI and daemon configs differ):
@@ -145,7 +147,7 @@ func renderDiagnosis(cfg *Config, st *cli.StatusResp, drift []clientDrift) strin
 			}
 			text := fmt.Sprintf("route %q: %d %s all unavailable", r, n, cli.Plural(n, "target", "targets"))
 			hint := ""
-			if rec, ok := earliestRecovery(st, targets, now); ok {
+			if rec, ok := EarliestRecovery(st, targets, now); ok {
 				text += fmt.Sprintf(" — earliest recovery %s (%s, %s)",
 					rec.until.Local().Format("15:04"), rec.provider, rec.kind)
 				hint = "wait for recovery, or: model-proxy unfreeze " + rec.provider
@@ -167,10 +169,10 @@ func renderDiagnosis(cfg *Config, st *cli.StatusResp, drift []clientDrift) strin
 		warns = append(warns, diagLine{1, w, ""})
 	}
 	for _, d := range drift {
-		if d.taken && !d.ok {
+		if d.Taken && !d.OK {
 			warns = append(warns, diagLine{1, fmt.Sprintf("takeover drift: %s (%s points to %s, want %s)",
-				d.client, d.file, d.current, d.expected),
-				"re-run: model-proxy takeover " + d.client + " (or: model-proxy restore " + d.client + ")"})
+				d.Client, d.File, d.Current, d.Expected),
+				"re-run: model-proxy takeover " + d.Client + " (or: model-proxy restore " + d.Client + ")"})
 		}
 	}
 
@@ -208,20 +210,20 @@ func renderDiagnosis(cfg *Config, st *cli.StatusResp, drift []clientDrift) strin
 // daemon schedules over: pool parents become their virtual account ids,
 // matching the keys /api/status uses in health and model_locks. Returns nil
 // when the route is unknown to this config.
-func liveTargets(cfg *Config, implicit map[string]RouteTarget, route string) []RouteTarget {
+func LiveTargets(cfg *configdomain.Config, implicit map[string]configdomain.RouteTarget, route string) []configdomain.RouteTarget {
 	targets, ok := cfg.Routes[route]
 	if !ok {
 		if t, found := implicit[route]; found {
-			targets = []RouteTarget{t}
+			targets = []configdomain.RouteTarget{t}
 		} else {
 			return nil
 		}
 	}
-	var out []RouteTarget
+	var out []configdomain.RouteTarget
 	for _, t := range targets {
 		if vids, pooled := climodels.PoolVirtuals(cfg, t.Provider); pooled {
 			for _, vid := range vids {
-				out = append(out, RouteTarget{Provider: vid, Model: t.Model, Priority: t.Priority})
+				out = append(out, configdomain.RouteTarget{Provider: vid, Model: t.Model, Priority: t.Priority})
 			}
 			continue
 		}
@@ -241,7 +243,7 @@ type recovery struct {
 // 429 rate-limit, circuit breaker, and (provider, model) lockout — and returns
 // the soonest. Model locks are matched by the target's model, not just the
 // provider, so a lock on the provider's OTHER models doesn't mislead.
-func earliestRecovery(st *cli.StatusResp, targets []RouteTarget, now time.Time) (recovery, bool) {
+func EarliestRecovery(st *cli.StatusResp, targets []configdomain.RouteTarget, now time.Time) (recovery, bool) {
 	var best recovery
 	found := false
 	consider := func(provider, kind, untilStr string) {
@@ -280,7 +282,7 @@ func earliestRecovery(st *cli.StatusResp, targets []RouteTarget, now time.Time) 
 // renderDoctorFailures renders the last few failed requests as context for the
 // verdict. request_log defaults to off, so the disabled case is a dim hint,
 // not an error.
-func renderDoctorFailures(body []byte) string {
+func RenderDoctorFailures(body []byte) string {
 	var rr doctorRequestsResp
 	if err := json.Unmarshal(body, &rr); err != nil {
 		return ""
@@ -315,31 +317,31 @@ func renderDoctorFailures(body []byte) string {
 
 // renderDoctorTakeover renders the one-line takeover state: per client either
 // not taken over, ✓ (pointer intact), or ✗ drift (details in Diagnosis).
-func renderDoctorTakeover(drift []clientDrift) string {
+func RenderDoctorTakeover(drift []ClientDrift) string {
 	parts := make([]string, 0, len(drift))
 	for _, d := range drift {
 		switch {
-		case !d.taken:
-			parts = append(parts, d.client+" "+cDim("not taken over"))
-		case d.ok:
-			parts = append(parts, d.client+" "+cGreen("✓"))
+		case !d.Taken:
+			parts = append(parts, d.Client+" "+cDim("not taken over"))
+		case d.OK:
+			parts = append(parts, d.Client+" "+cGreen("✓"))
 		default:
-			parts = append(parts, d.client+" "+cRed("✗ drift"))
+			parts = append(parts, d.Client+" "+cRed("✗ drift"))
 		}
 	}
 	return cBold("Takeover") + "\n  " + strings.Join(parts, "  ·  ") + "\n"
 }
 
-// clientDrift is the takeover state of one agent client: taken (a backup
+// ClientDrift is the takeover state of one agent client: taken (a backup
 // marker exists) or not; when taken, ok reports whether the client's config
 // still points at this proxy. current/expected feed the drift detail line.
-type clientDrift struct {
-	client   string
-	file     string
-	taken    bool
-	ok       bool
-	current  string
-	expected string
+type ClientDrift struct {
+	Client   string
+	File     string
+	Taken    bool
+	OK       bool
+	Current  string
+	Expected string
 }
 
 // checkTakeoverDrift compares every taken-over client's proxy pointer against
@@ -347,18 +349,18 @@ type clientDrift struct {
 // rewrites its config or the proxy's listen address changes — the agent then
 // silently talks to a dead endpoint, which looks exactly like "agent stuck".
 // Local files only, read-only.
-func checkTakeoverDrift(cfg *Config, bakDir string) []clientDrift {
+func CheckTakeoverDrift(cfg *configdomain.Config, bakDir string) []ClientDrift {
 	pid := takeover.ProviderID(cfg)
-	out := []clientDrift{}
+	out := []ClientDrift{}
 	for _, c := range takeover.ListClients(cfg, "") {
-		d := clientDrift{client: c.Name, file: c.File}
+		d := ClientDrift{Client: c.Name, File: c.File}
 		if _, err := os.Stat(filepath.Join(bakDir, c.Name+".bak")); err != nil {
 			out = append(out, d) // no backup marker → not taken over
 			continue
 		}
-		d.taken = true
-		d.current, d.expected = takeoverPointer(c.Name, c.File, pid, cfg.Takeover.ProxyURL)
-		d.ok = d.current == d.expected
+		d.Taken = true
+		d.Current, d.Expected = TakeoverPointer(c.Name, c.File, pid, cfg.Takeover.ProxyURL)
+		d.OK = d.Current == d.Expected
 		out = append(out, d)
 	}
 	return out
@@ -369,9 +371,9 @@ func checkTakeoverDrift(cfg *Config, bakDir string) []clientDrift {
 // writes (including opencode's /v1 suffix and pi's trimmed base). A missing
 // file, unreadable JSON, or absent key yields a descriptive placeholder as
 // current, which can never equal the expected URL — i.e. drift.
-func takeoverPointer(client, file, pid, proxyURL string) (current, expected string) {
+func TakeoverPointer(client, file, pid, proxyURL string) (current, expected string) {
 	if client == "codex" {
-		return codexPointer(file, pid, proxyURL)
+		return CodexPointer(file, pid, proxyURL)
 	}
 	var path []string
 	switch client {
@@ -391,7 +393,7 @@ func takeoverPointer(client, file, pid, proxyURL string) (current, expected stri
 	if err != nil {
 		return "(unreadable: " + err.Error() + ")", expected
 	}
-	s, ok := jsonNestedString(v, path...)
+	s, ok := JSONNestedString(v, path...)
 	if !ok {
 		return "(missing)", expected
 	}
@@ -399,7 +401,7 @@ func takeoverPointer(client, file, pid, proxyURL string) (current, expected stri
 }
 
 // jsonNestedString walks v along path and returns the terminal string.
-func jsonNestedString(v map[string]any, path ...string) (string, bool) {
+func JSONNestedString(v map[string]any, path ...string) (string, bool) {
 	cur := v
 	for i, k := range path {
 		if i == len(path)-1 {
@@ -419,9 +421,9 @@ func jsonNestedString(v map[string]any, path ...string) (string, bool) {
 // model_provider no longer selects our section, or the section's base_url no
 // longer equals the proxy URL. Text scan only (the repo has no TOML decoder);
 // it matches the shape rewriteCodex writes, which is all takeover needs.
-func codexPointer(file, pid, proxyURL string) (current, expected string) {
+func CodexPointer(file, pid, proxyURL string) (current, expected string) {
 	expected = proxyURL
-	data, err := readFile(file)
+	data, err := os.ReadFile(file)
 	if err != nil {
 		return "(file missing)", expected
 	}

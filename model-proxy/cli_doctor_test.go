@@ -1,6 +1,7 @@
 package main
 
 import (
+	clidoctor "model-proxy/internal/cli/doctor"
 	"strings"
 	"testing"
 )
@@ -17,8 +18,8 @@ func TestQuotaSourceLabel(t *testing.T) {
 		{"deepseek", "user/balance"},
 		{"unknown", "(none → unknown at runtime)"},
 	} {
-		if got := quotaSourceLabel(tc.id); got != tc.want {
-			t.Errorf("quotaSourceLabel(%q)=%q want %q", tc.id, got, tc.want)
+		if got := clidoctor.QuotaSourceLabel(tc.id); got != tc.want {
+			t.Errorf("clidoctor.QuotaSourceLabel(%q)=%q want %q", tc.id, got, tc.want)
 		}
 	}
 }
@@ -33,7 +34,7 @@ func TestDryRunOrder(t *testing.T) {
 		{Provider: "planb", Priority: 3},
 		{Provider: "plana", Priority: 2},
 	}
-	got := dryRunOrder(cfg, targets)
+	got := clidoctor.DryRunOrder(cfg, targets)
 	want := []string{"plana", "planb", "payg"}
 	if len(got) != len(want) {
 		t.Fatalf("len=%d, want %d: %+v", len(got), len(want), got)
@@ -46,14 +47,14 @@ func TestDryRunOrder(t *testing.T) {
 }
 
 func TestPeakSummary(t *testing.T) {
-	if got := peakSummary(nil); got != "-" {
+	if got := clidoctor.PeakSummary(nil); got != "-" {
 		t.Errorf("empty peakSummary=%q, want -", got)
 	}
-	got := peakSummary(PeakConfig{{Window: "09:00-12:00", Multiplier: 2}})
+	got := clidoctor.PeakSummary(PeakConfig{{Window: "09:00-12:00", Multiplier: 2}})
 	if !strings.Contains(got, "09:00-12:00") || !strings.Contains(got, "×2") {
 		t.Errorf("peakSummary=%q, want window + mult", got)
 	}
-	if got := peakSummary(PeakConfig{{Window: "09:00-12:00"}}); !strings.Contains(got, "×2") {
+	if got := clidoctor.PeakSummary(PeakConfig{{Window: "09:00-12:00"}}); !strings.Contains(got, "×2") {
 		t.Errorf("default multiplier: %q, want ×2", got)
 	}
 }

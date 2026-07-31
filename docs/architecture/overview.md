@@ -330,6 +330,7 @@ application → serveAssembly → applicationRuntime → Proxy
   `runtime/wirecap`、`transport/bodycapture`；
 - `app → accounts, catalog, config, protocol, provider`；
 - `cli → daemonctl, observe/stats, provider`；
+- `cli/doctor → accounts, app, cli, cli/models, config, takeover, provider`；
 - `cli/login → accounts, config, provider`；
 - `cli/models → accounts, app, catalog, config, probe, provider`；
 - `config → pricing, protocol`；
