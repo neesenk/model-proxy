@@ -260,18 +260,17 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/observe/events")
 		adapter, _ := parseGoFile(t, "live_events.go")
 		functions := map[string]int{
-			"serveEvents":   0,
-			"keepaliveLoop": 0,
+			"serveEvents": 0,
 		}
 		for _, decl := range adapter.Decls {
 			switch decl := decl.(type) {
 			case *ast.GenDecl:
 				if decl.Tok != token.IMPORT {
-					t.Error("live_events.go must not declare package state or types; it is only an HTTP/SSE adapter")
+					t.Error("live_events.go must not declare package state or types; it is only a Proxy adapter")
 				}
 			case *ast.FuncDecl:
 				if _, ok := functions[decl.Name.Name]; !ok {
-					t.Errorf("live_events.go has unexpected function %s; ring and fan-out behavior belongs in internal/observe/events", decl.Name.Name)
+					t.Errorf("live_events.go has unexpected function %s; the SSE handler belongs in internal/observe/events", decl.Name.Name)
 					continue
 				}
 				functions[decl.Name.Name]++
@@ -282,6 +281,23 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		for name, count := range functions {
 			if count != 1 {
 				t.Errorf("live_events.go %s declarations = %d, want exactly 1", name, count)
+			}
+		}
+		// The SSE handler and keepalive loop live in the leaf package.
+		sse, _ := parseGoFile(t, "internal/observe/events/sse.go")
+		sseFunctions := map[string]int{"ServeEvents": 0, "keepaliveLoop": 0}
+		for _, decl := range sse.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if _, tracked := sseFunctions[fn.Name.Name]; tracked {
+				sseFunctions[fn.Name.Name]++
+			}
+		}
+		for name, count := range sseFunctions {
+			if count != 1 {
+				t.Errorf("internal/observe/events/sse.go %s declarations = %d, want exactly 1", name, count)
 			}
 		}
 
