@@ -186,3 +186,62 @@ func Truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// --- log-stream (stderr) color, shared by CLI runtime logs ---
+
+// LogColorEnabled mirrors the root CLI's stderr color decision (NO_COLOR /
+// CLICOLOR_FORCE / terminal detection), evaluated once at startup.
+var LogColorEnabled = DecideLogColor(os.Stderr)
+
+// DecideLogColor applies NO_COLOR / CLICOLOR_FORCE / terminal detection.
+func DecideLogColor(f *os.File) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	if os.Getenv("CLICOLOR_FORCE") != "" && os.Getenv("CLICOLOR_FORCE") != "0" {
+		return true
+	}
+	return IsTerminalLog(f)
+}
+
+// IsTerminalLog approximates whether the fd is a terminal (char device).
+func IsTerminalLog(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+const (
+	LogAnsiReset  = "\033[0m"
+	LogAnsiGreen  = "\033[32m"
+	LogAnsiYellow = "\033[33m"
+	LogAnsiRed    = "\033[31m"
+	LogAnsiGray   = "\033[90m"
+)
+
+// LogColor wraps s in code when the log color switch is on.
+func LogColor(code, s string) string {
+	if !LogColorEnabled {
+		return s
+	}
+	return code + s + LogAnsiReset
+}
+
+// StatusColor colors text by upstream HTTP status: 2xx green, 3xx/4xx yellow,
+// 5xx red, else gray.
+func StatusColor(status int, s string) string {
+	var code string
+	switch {
+	case status >= 200 && status < 300:
+		code = LogAnsiGreen
+	case status >= 300 && status < 500:
+		code = LogAnsiYellow
+	case status >= 500:
+		code = LogAnsiRed
+	default:
+		code = LogAnsiGray
+	}
+	return LogColor(code, s)
+}

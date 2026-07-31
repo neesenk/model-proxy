@@ -5,6 +5,7 @@ import (
 	"fmt"
 	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
+	"model-proxy/provider"
 	"net/http"
 	"os"
 	"sort"
@@ -23,23 +24,23 @@ import (
 func cmdTest(args []string) {
 	cfg, err := LoadConfig(cliframework.ConfigPath(args))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err)
+		fmt.Fprintf(os.Stderr, "%s %s\n", provider.Red("✗"), err)
 		os.Exit(1)
 	}
 	model := cliframework.Positional(args)
 	if model == "" {
-		fmt.Fprintf(os.Stderr, "%s usage: model-proxy test <model> [--config PATH]\n", cRed("✗"))
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy test <model> [--config PATH]\n", provider.Red("✗"))
 		os.Exit(1)
 	}
 	// claude_mapping translates a claude alias to the exposed model name first,
 	// mirroring forward's routing order.
 	if mapped, ok := cfg.ClaudeMapping[model]; ok {
-		fmt.Printf("%s %s → %s\n", cDim("claude_mapping:"), model, mapped)
+		fmt.Printf("%s %s → %s\n", provider.Dim("claude_mapping:"), model, mapped)
 		model = mapped
 	}
 	targets := testTargetsFor(cfg, model)
 	if len(targets) == 0 {
-		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", cRed("✗"), model, routeNames(cfg))
+		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", provider.Red("✗"), model, routeNames(cfg))
 		os.Exit(1)
 	}
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
@@ -49,15 +50,15 @@ func cmdTest(args []string) {
 		lat := latency.Round(time.Millisecond)
 		if ok {
 			anyOK = true
-			fmt.Printf("%s %s → %s (%s) — HTTP %d (%s)\n", cGreen("✓"), model, t.Provider, t.Model, status, lat)
+			fmt.Printf("%s %s → %s (%s) — HTTP %d (%s)\n", provider.Green("✓"), model, t.Provider, t.Model, status, lat)
 			continue
 		}
 		// status 0 = build/auth/network error (no upstream answer) — print the
 		// reason without a bogus "HTTP 0".
 		if status != 0 {
-			fmt.Printf("%s %s → %s (%s) — HTTP %d: %s (%s)\n", cRed("✗"), model, t.Provider, t.Model, status, truncate(reason, 120), lat)
+			fmt.Printf("%s %s → %s (%s) — HTTP %d: %s (%s)\n", provider.Red("✗"), model, t.Provider, t.Model, status, provider.Truncate(reason, 120), lat)
 		} else {
-			fmt.Printf("%s %s → %s (%s) — %s (%s)\n", cRed("✗"), model, t.Provider, t.Model, truncate(reason, 120), lat)
+			fmt.Printf("%s %s → %s (%s) — %s (%s)\n", provider.Red("✗"), model, t.Provider, t.Model, provider.Truncate(reason, 120), lat)
 		}
 	}
 	if !anyOK {

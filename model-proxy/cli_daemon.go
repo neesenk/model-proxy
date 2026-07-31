@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	cliserve "model-proxy/internal/cli/serve"
+	"model-proxy/provider"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -217,7 +218,7 @@ func cmdStop(args []string) {
 	pidStr, err := os.ReadFile(pidPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Println(cYellow("No daemon running.") + " (pid file not found: " + cGray(pidPath) + ")")
+			fmt.Println(provider.Yellow("No daemon running.") + " (pid file not found: " + provider.Gray(pidPath) + ")")
 			return
 		}
 		log.Fatal(err)
@@ -241,7 +242,7 @@ func cmdStop(args []string) {
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		// Process is gone — clean up the stale pid file.
 		os.Remove(pidPath)
-		fmt.Println(cYellow("Daemon not running.") + " (removed stale pid file " + cGray(pidPath) + ")")
+		fmt.Println(provider.Yellow("Daemon not running.") + " (removed stale pid file " + provider.Gray(pidPath) + ")")
 		return
 	}
 
@@ -255,7 +256,7 @@ func cmdStop(args []string) {
 	for time.Now().Before(deadline) {
 		if err := proc.Signal(syscall.Signal(0)); err != nil {
 			// Gone.
-			fmt.Println(cGreen("✓ Stopped."))
+			fmt.Println(provider.Green("✓ Stopped."))
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -264,7 +265,7 @@ func cmdStop(args []string) {
 	fmt.Fprintf(os.Stderr, "graceful stop timed out, sending SIGKILL to %d\n", pid)
 	_ = proc.Kill()
 	os.Remove(pidPath)
-	fmt.Println(cGreen("✓ Killed."))
+	fmt.Println(provider.Green("✓ Killed."))
 }
 
 // cmdReload sends SIGHUP to a running daemon's supervisor, which forwards it
@@ -281,7 +282,7 @@ func cmdReload(args []string) {
 	pidStr, err := os.ReadFile(pidPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Println(cYellow("No daemon running.") + " (pid file not found: " + cGray(pidPath) + ")")
+			fmt.Println(provider.Yellow("No daemon running.") + " (pid file not found: " + provider.Gray(pidPath) + ")")
 			return
 		}
 		log.Fatal(err)
@@ -299,14 +300,14 @@ func cmdReload(args []string) {
 	proc, err := os.FindProcess(pid)
 	if err != nil || proc.Signal(syscall.Signal(0)) != nil {
 		os.Remove(pidPath)
-		fmt.Println(cYellow("Daemon not running.") + " (removed stale pid file)")
+		fmt.Println(provider.Yellow("Daemon not running.") + " (removed stale pid file)")
 		return
 	}
 	fmt.Printf("Reloading model-proxy daemon (pid=%d)...\n", pid)
 	if err := proc.Signal(syscall.SIGHUP); err != nil {
 		log.Fatalf("send SIGHUP to %d: %v", pid, err)
 	}
-	fmt.Println(cGreen("✓ Reload signal sent.") + " Check logs for [reload] lines.")
+	fmt.Println(provider.Green("✓ Reload signal sent.") + " Check logs for [reload] lines.")
 }
 
 // maybeReloadDaemon sends SIGHUP to a running daemon's supervisor (which
@@ -352,7 +353,7 @@ func maybeReloadDaemon(args []string) {
 		return
 	}
 	if err := proc.Signal(syscall.SIGHUP); err == nil {
-		fmt.Println("  " + cGray(fmt.Sprintf("(signaled serve to reload: pid=%d)", pid)))
+		fmt.Println("  " + provider.Gray(fmt.Sprintf("(signaled serve to reload: pid=%d)", pid)))
 	}
 }
 

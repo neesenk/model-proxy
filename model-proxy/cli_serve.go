@@ -6,6 +6,7 @@ import (
 	"log"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
+	"model-proxy/provider"
 	"net"
 	"net/http"
 	"os"
@@ -85,7 +86,7 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 				// don't pollute the file (logColorEnabled was set at init from
 				// stderr being a tty, but the MultiWriter writes the same bytes
 				// to both, and files must stay escape-free).
-				logColorEnabled = false
+				provider.LogColorEnabled = false
 			}
 			// Write a pid file so `login`/`logout` can SIGHUP this foreground
 			// serve to hot-reload new credentials. The daemon supervisor writes

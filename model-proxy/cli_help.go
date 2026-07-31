@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	cliframework "model-proxy/internal/cli/framework"
+	"model-proxy/provider"
 	"os"
 	"sort"
 )
@@ -231,6 +232,6 @@ func printConfigProvidersTo(out io.Writer, args []string) {
 	fmt.Fprintln(out, "\nProviders (from config):")
 	for _, n := range names {
 		p := cfg.Providers[n]
-		fmt.Fprintf(out, "  %s  provider=%s  %s\n", pad(n, 14), pad(p.Provider, 12), p.OpenAIBaseURL)
+		fmt.Fprintf(out, "  %s  provider=%s  %s\n", provider.Pad(n, 14), provider.Pad(p.Provider, 12), p.OpenAIBaseURL)
 	}
 }

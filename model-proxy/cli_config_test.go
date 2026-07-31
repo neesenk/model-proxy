@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/provider"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,25 +13,25 @@ import (
 func TestStatusColor_AllBranches(t *testing.T) {
 	// Force log color on (it's off in tests: stderr is not a tty) so the
 	// status→ANSI mapping is actually exercised — including branch edges.
-	old := logColorEnabled
-	logColorEnabled = true
-	defer func() { logColorEnabled = old }()
+	old := provider.LogColorEnabled
+	provider.LogColorEnabled = true
+	defer func() { provider.LogColorEnabled = old }()
 	for _, c := range []struct {
 		status int
 		code   string
 	}{
-		{200, logAnsiGreen}, {299, logAnsiGreen},
-		{300, logAnsiYellow}, {499, logAnsiYellow},
-		{500, logAnsiRed},
-		{100, logAnsiGray}, {0, logAnsiGray},
+		{200, provider.LogAnsiGreen}, {299, provider.LogAnsiGreen},
+		{300, provider.LogAnsiYellow}, {499, provider.LogAnsiYellow},
+		{500, provider.LogAnsiRed},
+		{100, provider.LogAnsiGray}, {0, provider.LogAnsiGray},
 	} {
-		want := c.code + "x" + logAnsiReset
+		want := c.code + "x" + provider.LogAnsiReset
 		if got := statusColor(c.status, "x"); got != want {
 			t.Errorf("statusColor(%d)=%q, want %q", c.status, got, want)
 		}
 	}
 	// Color off: identity passthrough.
-	logColorEnabled = false
+	provider.LogColorEnabled = false
 	if got := statusColor(200, "ok"); got != "ok" {
 		t.Errorf("statusColor(200) with color off=%q, want ok", got)
 	}

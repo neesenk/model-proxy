@@ -4,6 +4,7 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/takeover"
+	"model-proxy/provider"
 	"sort"
 	"strings"
 	"testing"
@@ -15,36 +16,36 @@ import (
 
 func TestProgressBar(t *testing.T) {
 	// Width clamping: width < 4 becomes 4.
-	bar := progressBar(50, 2)
+	bar := provider.ProgressBar(50, 2)
 	if !strings.Contains(bar, "[") || !strings.Contains(bar, "]") {
-		t.Errorf("progressBar(width=2)=%q missing brackets", bar)
+		t.Errorf("provider.ProgressBar(width=2)=%q missing brackets", bar)
 	}
 	// 0% used → all empty.
-	bar = progressBar(0, 10)
+	bar = provider.ProgressBar(0, 10)
 	if strings.Count(bar, "█") != 0 {
-		t.Errorf("progressBar(0%%)=%q want no filled cells", bar)
+		t.Errorf("provider.ProgressBar(0%%)=%q want no filled cells", bar)
 	}
 	// 100% used → all filled.
-	bar = progressBar(100, 10)
+	bar = provider.ProgressBar(100, 10)
 	if strings.Count(bar, "█") != 10 {
-		t.Errorf("progressBar(100%%)=%q want 10 filled cells", bar)
+		t.Errorf("provider.ProgressBar(100%%)=%q want 10 filled cells", bar)
 	}
 	// >100% clamps to full.
-	bar = progressBar(200, 10)
+	bar = provider.ProgressBar(200, 10)
 	if strings.Count(bar, "█") != 10 {
-		t.Errorf("progressBar(200%%)=%q want 10 (clamped)", bar)
+		t.Errorf("provider.ProgressBar(200%%)=%q want 10 (clamped)", bar)
 	}
 }
 
 func TestPad(t *testing.T) {
-	if got := pad("ab", 5); got != "ab   " {
-		t.Errorf("pad(%q,5)=%q want %q", "ab", got, "ab   ")
+	if got := provider.Pad("ab", 5); got != "ab   " {
+		t.Errorf("provider.Pad(%q,5)=%q want %q", "ab", got, "ab   ")
 	}
-	if got := pad("abcde", 3); got != "abcde" {
-		t.Errorf("pad(%q,3)=%q want %q (no truncation)", "abcde", got, "abcde")
+	if got := provider.Pad("abcde", 3); got != "abcde" {
+		t.Errorf("provider.Pad(%q,3)=%q want %q (no truncation)", "abcde", got, "abcde")
 	}
-	if got := pad("", 3); got != "   " {
-		t.Errorf("pad(%q,3)=%q want %q", "", got, "   ")
+	if got := provider.Pad("", 3); got != "   " {
+		t.Errorf("provider.Pad(%q,3)=%q want %q", "", got, "   ")
 	}
 }
 
@@ -156,15 +157,15 @@ func TestFormatResetAt(t *testing.T) {
 	// Today's date → HH:MM only.
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 14, 30, 0, 0, now.Location())
-	got := formatResetAt(today.UnixMilli())
+	got := provider.FormatResetAt(today.UnixMilli())
 	if !strings.Contains(got, "14:30") || strings.Contains(got, "-") {
-		t.Errorf("formatResetAt(today 14:30)=%q want 14:30 (no date)", got)
+		t.Errorf("provider.FormatResetAt(today 14:30)=%q want 14:30 (no date)", got)
 	}
 	// A different date → MM-DD HH:MM.
 	other := time.Date(now.Year(), now.Month(), now.Day()+5, 9, 5, 0, 0, now.Location())
-	got = formatResetAt(other.UnixMilli())
+	got = provider.FormatResetAt(other.UnixMilli())
 	if !strings.Contains(got, "09:05") {
-		t.Errorf("formatResetAt(other day)=%q want MM-DD 09:05", got)
+		t.Errorf("provider.FormatResetAt(other day)=%q want MM-DD 09:05", got)
 	}
 }
 

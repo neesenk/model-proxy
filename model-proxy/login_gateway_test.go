@@ -28,13 +28,13 @@ func TestPublicCookies(t *testing.T) {
 // --- truncate (gateway.go) ---
 
 func TestTruncate(t *testing.T) {
-	if got := truncate("short", 10); got != "short" {
-		t.Errorf("truncate(short)=%q", got)
+	if got := provider.Truncate("short", 10); got != "short" {
+		t.Errorf("provider.Truncate(short)=%q", got)
 	}
-	if got := truncate("abcdef", 3); got != "abc..." {
-		t.Errorf("truncate(abcdef,3)=%q want abc...", got)
+	if got := provider.Truncate("abcdef", 3); got != "abc..." {
+		t.Errorf("provider.Truncate(abcdef,3)=%q want abc...", got)
 	}
-	if got := truncate("exact", 5); got != "exact" {
-		t.Errorf("truncate(exact,5)=%q want exact", got)
+	if got := provider.Truncate("exact", 5); got != "exact" {
+		t.Errorf("provider.Truncate(exact,5)=%q want exact", got)
 	}
 }

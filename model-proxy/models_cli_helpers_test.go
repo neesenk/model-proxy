@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/provider"
 	"testing"
 
 	climodels "model-proxy/internal/cli/models"
@@ -9,8 +10,8 @@ import (
 // --- pad edge cases (models.go) ---
 
 func TestPad_AlreadyLong(t *testing.T) {
-	if got := pad("toolongalready", 5); got != "toolongalready" {
-		t.Errorf("pad(long,5)=%q want passthrough", got)
+	if got := provider.Pad("toolongalready", 5); got != "toolongalready" {
+		t.Errorf("provider.Pad(long,5)=%q want passthrough", got)
 	}
 }
 
