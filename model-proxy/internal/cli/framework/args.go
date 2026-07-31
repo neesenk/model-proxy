@@ -5,7 +5,9 @@ package framework
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -114,4 +116,35 @@ func Plural(n int, sing, plur string) string {
 		return sing
 	}
 	return plur
+}
+
+// ReadFile/WriteFile are thin os wrappers kept for the remaining CLI callers.
+func ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+func WriteFile(path string, data []byte, mode os.FileMode) error {
+	return os.WriteFile(path, data, mode)
+}
+
+// RuntimeOS returns runtime.GOOS (browser-launch dispatch).
+func RuntimeOS() string { return runtime.GOOS }
+
+// RunCmd starts a process without waiting (browser launchers, daemon spawn).
+func RunCmd(name string, args ...string) error {
+	return exec.Command(name, args...).Start()
+}
+
+// EnvOrEmpty returns os.Getenv (named for call-site readability).
+func EnvOrEmpty(k string) string { return os.Getenv(k) }
+
+// HomeDir resolves the user home directory (credential files live under
+// ~/.model-proxy).
+func HomeDir() string {
+	h, _ := os.UserHomeDir()
+	return h
+}
+
+// AuthFilePath returns the credential file path for a provider name
+// (<home>/.model-proxy/<name>_<suffix>.json).
+func AuthFilePath(providerName, suffix string) string {
+	return filepath.Join(HomeDir(), ".model-proxy", providerName+"_"+suffix+".json")
 }

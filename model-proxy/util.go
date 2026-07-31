@@ -2,54 +2,25 @@ package main
 
 import (
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
+
+	cliframework "model-proxy/internal/cli/framework"
 )
 
-func readFile(path string) ([]byte, error) {
-	return os.ReadFile(path)
-}
-
-func envOrEmpty(k string) string { return os.Getenv(k) }
-
+// File/env/process helpers delegate to internal/cli/framework (single owner);
+// aliases keep the remaining root callers compiling during migration.
+func readFile(path string) ([]byte, error) { return cliframework.ReadFile(path) }
+func envOrEmpty(k string) string           { return cliframework.EnvOrEmpty(k) }
 func writeFile(path string, data []byte, mode os.FileMode) error {
-	return os.WriteFile(path, data, mode)
+	return cliframework.WriteFile(path, data, mode)
 }
+func runtimeOS() string                        { return cliframework.RuntimeOS() }
+func runCmd(name string, args ...string) error { return cliframework.RunCmd(name, args...) }
+func mask(s string) string                     { return cliframework.Mask(s) }
 
-func runtimeOS() string { return runtime.GOOS }
-
-func runCmd(name string, args ...string) error {
-	c := exec.Command(name, args...)
-	return c.Start()
-}
-
-// mask redacts a secret for logging. Keeps the first 2 and last 2 chars (so a
-// value is still identifiable in debug), replacing the middle with "…". Short
-// or empty values become "****" so they never leak verbatim. Used for cookies,
-// API keys, tokens — never log raw secrets.
-func mask(s string) string {
-	if s == "" {
-		return "(empty)"
-	}
-	// Short secrets: don't reveal even partial — full mask.
-	const minReveal = 8
-	if len(s) < minReveal {
-		return "****"
-	}
-	return s[:2] + "…" + s[len(s)-2:]
-}
-
-func homeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
-}
+func homeDir() string { return cliframework.HomeDir() }
 
 // authFilePath returns the credential file path for a provider name.
 // OAuth providers use <name>_oauth_auth.json; apikey providers use <name>_apikey.json.
 func authFilePath(providerName, suffix string) string {
-	return filepath.Join(homeDir(), ".model-proxy", providerName+"_"+suffix+".json")
+	return cliframework.AuthFilePath(providerName, suffix)
 }
-
-// flagStringValue/hasFlagValue delegate to internal/cli/framework (single
-// owner for CLI flag scanning; see cli_args.go for the aliases).
