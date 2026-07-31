@@ -1,26 +1,11 @@
 package main
 
-import "strings"
+import (
+	cliserve "model-proxy/internal/cli/serve"
+)
 
-// serveArgs holds parsed `serve` flags.
-type serveArgs struct {
-	config  string
-	logFile string // --log-file override
-}
+// serveArgs/parseServeArgs delegate to internal/cli/serve; aliases keep root
+// call sites compiling while daemon/serve orchestration migrates.
+type serveArgs = cliserve.Args
 
-func parseServeArgs(args []string) serveArgs {
-	sa := serveArgs{config: configPath(args)}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--log-file":
-			if i+1 < len(args) {
-				sa.logFile = args[i+1]
-				i++
-			}
-		case strings.HasPrefix(a, "--log-file="):
-			sa.logFile = strings.TrimPrefix(a, "--log-file=")
-		}
-	}
-	return sa
-}
+func parseServeArgs(args []string) serveArgs { return cliserve.ParseArgs(args) }

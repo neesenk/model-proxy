@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	cliserve "model-proxy/internal/cli/serve"
 	"net/http"
 )
 
@@ -60,7 +61,7 @@ type applicationRuntime struct {
 	transportTasks []transportTask
 }
 
-func newApplicationRuntime(cfg *Config, args serveArgs) *applicationRuntime {
+func newApplicationRuntime(cfg *Config, args cliserve.Args) *applicationRuntime {
 	proxy := NewProxy(cfg)
 	// Start all process-owned optional services through the Proxy lifecycle
 	// owner (stats flusher, request logger, startup catalog load).
@@ -69,14 +70,14 @@ func newApplicationRuntime(cfg *Config, args serveArgs) *applicationRuntime {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", proxy.handler)
 	runtime := &applicationRuntime{
-		configPath:    args.config,
+		configPath:    args.Config,
 		startupConfig: cfg,
 		proxy:         proxy,
 		handler:       mux,
 	}
 	if cfg.Web.Enabled {
-		web := newWebServer(proxy, args.config)
-		web.logFile = resolveLogFile(args, cfg)
+		web := newWebServer(proxy, args.Config)
+		web.logFile = cliserve.ResolveLogFile(args, cfg)
 		web.register(mux)
 		runtime.transportTasks = append(runtime.transportTasks, func(stop <-chan struct{}) {
 			if !web.start() {

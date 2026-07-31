@@ -331,6 +331,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `app → accounts, catalog, config, protocol, provider`；
 - `cli → daemonctl, observe/requestlog, observe/stats, provider`；
 - `cli/doctor → accounts, app, cli, cli/models, config, takeover, provider`；
+- `cli/serve → config`；
 - `cli/login → accounts, config, provider`；
 - `cli/models → accounts, app, catalog, config, probe, provider`；
 - `config → pricing, protocol`；

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log"
+	cliserve "model-proxy/internal/cli/serve"
 	"net"
 	"net/http"
 	"os"
@@ -24,12 +25,12 @@ func (assembly serveAssembly) command(args []string) {
 	// regardless of subcommand (the subcommand was consumed by the parent).
 	role := os.Getenv(envRole)
 	if role == roleSupervisor {
-		sa := parseServeArgs(args)
+		sa := cliserve.ParseArgs(args)
 		runSupervisor(sa)
 		return
 	}
 	if role == roleWorker {
-		sa := parseServeArgs(args)
+		sa := cliserve.ParseArgs(args)
 		assembly.runProxy(sa)
 		return
 	}
@@ -38,7 +39,7 @@ func (assembly serveAssembly) command(args []string) {
 	sub := positional(args)
 	switch sub {
 	case "daemon":
-		sa := parseServeArgs(args)
+		sa := cliserve.ParseArgs(args)
 		if err := daemonize(sa); err != nil {
 			log.Fatal(err)
 		}
@@ -50,7 +51,7 @@ func (assembly serveAssembly) command(args []string) {
 		cmdServeStatusCLI(args)
 	default:
 		// No subcommand — foreground serve.
-		sa := parseServeArgs(args)
+		sa := cliserve.ParseArgs(args)
 		assembly.runProxy(sa)
 	}
 }
@@ -58,7 +59,7 @@ func (assembly serveAssembly) command(args []string) {
 // runProxy loads the config and runs the proxy inline (used by the worker and
 // plain foreground serve). When stdout/stderr is a log file (worker case) all
 // logs land there; when a tty (foreground) logs go to the terminal.
-func (assembly serveAssembly) runProxy(sa serveArgs) {
+func (assembly serveAssembly) runProxy(sa cliserve.Args) {
 	if err := assembly.runProxyProcess(sa); err != nil {
 		log.Fatal(err)
 	}
@@ -66,8 +67,8 @@ func (assembly serveAssembly) runProxy(sa serveArgs) {
 
 // runProxyProcess owns one foreground/worker process lifetime. It returns errors
 // to runProxy so deferred signal and pid-file cleanup runs before log.Fatal.
-func (serveAssembly) runProxyProcess(sa serveArgs) error {
-	cfg, err := LoadConfig(sa.config)
+func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
+	cfg, err := LoadConfig(sa.Config)
 	if err != nil {
 		return err
 	}
@@ -76,8 +77,8 @@ func (serveAssembly) runProxyProcess(sa serveArgs) error {
 	// The worker's stdio is already the log file (set by the supervisor), so it
 	// must NOT reopen/mirror — that would double every line.
 	if os.Getenv(envRole) == "" {
-		if lf := resolveLogFile(sa, cfg); lf != "" {
-			if f, err := openLogFile(lf); err == nil {
+		if lf := cliserve.ResolveLogFile(sa, cfg); lf != "" {
+			if f, err := cliserve.OpenLogFile(lf); err == nil {
 				log.SetOutput(io.MultiWriter(os.Stderr, f))
 				// Logs now land in a file too → disable color so escape codes
 				// don't pollute the file (logColorEnabled was set at init from
@@ -90,8 +91,8 @@ func (serveAssembly) runProxyProcess(sa serveArgs) error {
 			// its own pid file; the worker skips this block (envRole is set), so
 			// there's no double-write. Remove it on SIGINT/SIGTERM so it doesn't
 			// go stale (the reload path self-heals stale pids too, via Signal(0)).
-			pidPath = pidFilePath(lf)
-			if err := writePidFile(pidPath, os.Getpid()); err != nil {
+			pidPath = cliserve.PidFilePath(lf)
+			if err := cliserve.WritePidFile(pidPath, os.Getpid()); err != nil {
 				pidPath = "" // failed to write -> don't try to remove on exit
 			}
 		}

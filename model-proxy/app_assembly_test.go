@@ -45,7 +45,7 @@ func TestApplicationRuntimeConcreteAssemblyContract(t *testing.T) {
 		}
 		literals++
 		want := map[string]string{
-			"configPath":    "args.config",
+			"configPath":    "args.Config",
 			"startupConfig": "cfg",
 			"proxy":         "proxy",
 			"handler":       "mux",
@@ -95,7 +95,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 				Stats:     StatsConfig{DBPath: filepath.Join(home, "stats.db")},
 				Web:       WebConfig{Enabled: test.web},
 			}
-			runtime := newApplicationRuntime(cfg, serveArgs{config: "test-config.yaml"})
+			runtime := newApplicationRuntime(cfg, serveArgs{Config: "test-config.yaml"})
 			t.Cleanup(runtime.Close)
 
 			if runtime.proxy == nil || runtime.startupConfig != cfg || runtime.handler == nil {
@@ -197,7 +197,7 @@ providers:
 		Providers: map[string]Provider{},
 		Stats:     StatsConfig{DBPath: filepath.Join(home, "stats.db")},
 	}
-	runtime := newApplicationRuntime(cfg, serveArgs{config: configPath})
+	runtime := newApplicationRuntime(cfg, serveArgs{Config: configPath})
 	t.Cleanup(runtime.Close)
 	runtime.reload()
 	snapshot := runtime.proxy.snapshotRuntime()

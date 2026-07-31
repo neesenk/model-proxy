@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	cliserve "model-proxy/internal/cli/serve"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,31 +59,31 @@ providers:
 
 func TestResolveLogFile(t *testing.T) {
 	cfg := &Config{LogFile: "/from/config.log"}
-	sa := serveArgs{config: "/etc/model-proxy/config.yaml"}
+	sa := serveArgs{Config: "/etc/model-proxy/config.yaml"}
 
 	// config used
-	if got := resolveLogFile(sa, cfg); got != "/from/config.log" {
+	if got := cliserve.ResolveLogFile(sa, cfg); got != "/from/config.log" {
 		t.Errorf("config: got %q", got)
 	}
 	// default: the OS temp dir (runtime artifacts), e.g. /tmp on Linux, $TMPDIR on macOS
 	wantDefault := filepath.Join(os.TempDir(), "model-proxy.log")
-	if got := resolveLogFile(serveArgs{config: "/etc/model-proxy/config.yaml"}, &Config{}); got != wantDefault {
+	if got := cliserve.ResolveLogFile(serveArgs{Config: "/etc/model-proxy/config.yaml"}, &Config{}); got != wantDefault {
 		t.Errorf("default: got %q want %q", got, wantDefault)
 	}
 }
 
 func TestPidFilePath(t *testing.T) {
-	if got := pidFilePath("/var/log/model-proxy.log"); got != "/var/log/model-proxy.pid" {
+	if got := cliserve.PidFilePath("/var/log/model-proxy.log"); got != "/var/log/model-proxy.pid" {
 		t.Errorf("got %q", got)
 	}
-	if got := pidFilePath("/var/log/agent"); got != "/var/log/agent.pid" {
+	if got := cliserve.PidFilePath("/var/log/agent"); got != "/var/log/agent.pid" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestWriteReadPidFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.pid")
-	if err := writePidFile(path, 4242); err != nil {
+	if err := cliserve.WritePidFile(path, 4242); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(path)
@@ -101,7 +102,7 @@ func TestWriteReadPidFile(t *testing.T) {
 func TestAliveDaemonPid(t *testing.T) {
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "mp.log")
-	pidPath := pidFilePath(logFile)
+	pidPath := cliserve.PidFilePath(logFile)
 
 	// No pid file -> 0.
 	if got := aliveDaemonPid(logFile); got != 0 {
@@ -109,7 +110,7 @@ func TestAliveDaemonPid(t *testing.T) {
 	}
 
 	// Live pid (this test process) -> returned, pid file untouched.
-	if err := writePidFile(pidPath, os.Getpid()); err != nil {
+	if err := cliserve.WritePidFile(pidPath, os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	if got := aliveDaemonPid(logFile); got != os.Getpid() {
@@ -120,7 +121,7 @@ func TestAliveDaemonPid(t *testing.T) {
 	}
 
 	// Stale pid (a pid that surely isn't running) -> 0, and the pid file removed.
-	if err := writePidFile(pidPath, 999999); err != nil {
+	if err := cliserve.WritePidFile(pidPath, 999999); err != nil {
 		t.Fatal(err)
 	}
 	if got := aliveDaemonPid(logFile); got != 0 {
@@ -140,7 +141,7 @@ func TestDaemonizeRefusesSecondDaemon(t *testing.T) {
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "mp.log")
 	// Pretend a daemon is running: pid file names THIS test process (alive).
-	if err := writePidFile(pidFilePath(logFile), os.Getpid()); err != nil {
+	if err := cliserve.WritePidFile(cliserve.PidFilePath(logFile), os.Getpid()); err != nil {
 		t.Fatal(err)
 	}
 	cfgBody := fmt.Sprintf("listen: 127.0.0.1:0\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - m\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
@@ -155,7 +156,7 @@ func TestDaemonizeRefusesSecondDaemon(t *testing.T) {
 	}
 	// The pid file must be intact (not overwritten) so the real daemon is still
 	// reachable by `serve stop`.
-	b, err := os.ReadFile(pidFilePath(logFile))
+	b, err := os.ReadFile(cliserve.PidFilePath(logFile))
 	if err != nil {
 		t.Fatalf("pid file removed/missing: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestDaemonizeRefusesSecondDaemon(t *testing.T) {
 func TestOpenLogFile_CreatesDirAndFile(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "sub", "model-proxy.log")
-	f, err := openLogFile(p)
+	f, err := cliserve.OpenLogFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,10 +182,10 @@ func TestOpenLogFile_CreatesDirAndFile(t *testing.T) {
 
 func TestOpenLogFile_Appends(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "x.log")
-	f1, _ := openLogFile(p)
+	f1, _ := cliserve.OpenLogFile(p)
 	f1.Write([]byte("first\n"))
 	f1.Close()
-	f2, _ := openLogFile(p)
+	f2, _ := cliserve.OpenLogFile(p)
 	f2.Write([]byte("second\n"))
 	f2.Close()
 	data, _ := os.ReadFile(p)
@@ -199,7 +200,7 @@ func TestOpenLogFile_Appends(t *testing.T) {
 
 func TestWritePidFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "x.pid")
-	if err := writePidFile(p, 12345); err != nil {
+	if err := cliserve.WritePidFile(p, 12345); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(p)
