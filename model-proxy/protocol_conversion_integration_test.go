@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -363,7 +364,7 @@ func TestForward_Convert_StreamingCountsTokens(t *testing.T) {
 	// trailing prompt_tokens into message_delta.usage.input_tokens, and the
 	// usageScanner reads input_tokens there (openai delivers prompt_tokens at the
 	// trailing chunk, after message_start already fired with 0).
-	if got := fp.tokens.snapshot()[pmKey{Provider: "oai", Model: "gpt-x"}]; got.Output != 7 || got.Input != 10 {
+	if got := fp.tokens.Snapshot()[counters.PMKey{Provider: "oai", Model: "gpt-x"}]; got.Output != 7 || got.Input != 10 {
 		t.Errorf("forward converted tokens: input=%d output=%d want 10/7", got.Input, got.Output)
 	}
 
@@ -391,7 +392,7 @@ func TestForward_Convert_StreamingCountsTokens(t *testing.T) {
 	}
 	io.Copy(io.Discard, resp2.Body)
 	resp2.Body.Close()
-	if got := rp.tokens.snapshot()[pmKey{Provider: "ant", Model: "claude"}]; got.Input != 12 || got.Output != 4 {
+	if got := rp.tokens.Snapshot()[counters.PMKey{Provider: "ant", Model: "claude"}]; got.Input != 12 || got.Output != 4 {
 		t.Errorf("reverse converted tokens: input=%d output=%d want 12/4 (F5: transformer emits usage chunk)", got.Input, got.Output)
 	}
 }

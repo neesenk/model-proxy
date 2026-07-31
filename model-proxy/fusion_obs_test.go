@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	clidoctor "model-proxy/internal/cli/doctor"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -114,7 +115,7 @@ func TestAPIFusion(t *testing.T) {
 			}
 		}
 		// Metrics: ("fusion", recipe) run counted, no degrade.
-		m := proxy.metrics.snapshot()[pmKey{Provider: "fusion", Model: "recipe"}]
+		m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "fusion", Model: "recipe"}]
 		if m.Requests != 1 || m.Failovers != 0 {
 			t.Errorf("fusion metrics = requests %d failovers %d, want 1/0", m.Requests, m.Failovers)
 		}
@@ -169,7 +170,7 @@ func TestAPIFusion(t *testing.T) {
 		if !run.SynthCommitted || run.SynthStatus != 200 {
 			t.Errorf("degraded synth = committed %v status %d", run.SynthCommitted, run.SynthStatus)
 		}
-		m := proxy.metrics.snapshot()[pmKey{Provider: "fusion", Model: "recipe"}]
+		m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "fusion", Model: "recipe"}]
 		if m.Requests != 1 || m.Failovers != 1 {
 			t.Errorf("fusion metrics = requests %d failovers %d, want 1/1", m.Requests, m.Failovers)
 		}
@@ -370,7 +371,7 @@ func TestFusion_JudgeReport(t *testing.T) {
 		t.Errorf("judge tokens = %d/%d, want 11/7", st.JudgeInput, st.JudgeOutput)
 	}
 	// The judge call went through the standard per-(provider,model) books.
-	if m := proxy.metrics.snapshot()[pmKey{Provider: "pj", Model: "mj"}]; m.Requests != 1 {
+	if m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "pj", Model: "mj"}]; m.Requests != 1 {
 		t.Errorf("judge metrics requests = %d, want 1", m.Requests)
 	}
 }

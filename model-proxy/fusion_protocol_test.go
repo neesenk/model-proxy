@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,8 +67,8 @@ func TestFusion_CrossProtocolPanel(t *testing.T) {
 		}
 	}
 	// Openai-shaped usage was parsed into the counter.
-	toks := proxy.tokens.snapshot()
-	if u := toks[tokenKey{Provider: "pb", Model: "mb"}]; u.Input != 21 || u.Output != 9 {
+	toks := proxy.tokens.Snapshot()
+	if u := toks[counters.TokenKey{Provider: "pb", Model: "mb"}]; u.Input != 21 || u.Output != 9 {
 		t.Errorf("openai member usage = %+v, want {21 9}", u)
 	}
 }
@@ -125,7 +126,7 @@ func TestFusionLeg_WireVerdict404Correction(t *testing.T) {
 	if proxy.modelLocked("pa", "ma", time.Now()) {
 		t.Error("(pa, ma) model-locked after a verdict-miss 404 — the verdict was wrong, not the model")
 	}
-	if m := proxy.metrics.snapshot()[pmKey{Provider: "pa", Model: "ma"}]; m.Failures != 0 || m.Failovers != 1 {
+	if m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "pa", Model: "ma"}]; m.Failures != 0 || m.Failovers != 1 {
 		t.Errorf("pa metrics = failures %d failovers %d, want 0/1 (leg abandoned like tryTarget's failover)", m.Failures, m.Failovers)
 	}
 
@@ -189,7 +190,7 @@ func TestFusionLeg_NativeResponsesBackendDraft(t *testing.T) {
 	if proxy.modelLocked("pa", "ma", time.Now()) {
 		t.Error("(pa, ma) model-locked — a good responses draft was misjudged as empty")
 	}
-	if m := proxy.metrics.snapshot()[pmKey{Provider: "pa", Model: "ma"}]; m.Failovers != 0 || m.Requests != 1 {
+	if m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "pa", Model: "ma"}]; m.Failovers != 0 || m.Requests != 1 {
 		t.Errorf("pa metrics = requests %d failovers %d, want 1/0 (successful leg)", m.Requests, m.Failovers)
 	}
 }

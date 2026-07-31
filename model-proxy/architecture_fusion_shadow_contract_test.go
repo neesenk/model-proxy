@@ -14,8 +14,8 @@ func TestFusionShadowArchitecture(t *testing.T) {
 		for _, path := range productionGoFilesIn(t, "internal/fusion") {
 			file, fileSet := parseGoFile(t, path)
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{
-				"Proxy": true, "runtimeSnapshot": true, "metricsStore": true,
-				"tokenCounter": true, "requestlog": true, "http": true,
+				"Proxy": true, "runtimeSnapshot": true, "counters.MetricsStore": true,
+				"counters.TokenCounter": true, "requestlog": true, "http": true,
 			}); len(got) != 0 {
 				t.Errorf("%s crosses the Fusion orchestration boundary: %v", path, got)
 			}
@@ -71,7 +71,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			file, fileSet := parseGoFile(t, path)
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{
 				"Proxy": true, "proxyLifecycle": true, "runtimeSnapshot": true,
-				"Manager": true, "requestlog": true, "metricsStore": true,
+				"Manager": true, "requestlog": true, "counters.MetricsStore": true,
 				"Executor": true,
 			}); len(got) != 0 {
 				t.Errorf("%s crosses the detached Shadow boundary: %v", path, got)

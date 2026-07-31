@@ -1,4 +1,4 @@
-package main
+package counters
 
 import (
 	"bytes"
@@ -7,12 +7,12 @@ import (
 	"sync"
 )
 
-// tokenKey aliases the shared (provider, model) key so existing call sites
+// TokenKey aliases the shared (provider, model) key so existing call sites
 // (scanner, tests) read naturally. Persistence is handled by
 // internal/observe/stats.Store (SQLite); the JSON file format is gone.
-type tokenKey = pmKey
+type TokenKey = PMKey
 
-type tokenUsage struct {
+type TokenUsage struct {
 	Input         uint64 `json:"input"`
 	Output        uint64 `json:"output"`
 	CacheCreation uint64 `json:"cache_creation"`
@@ -20,25 +20,25 @@ type tokenUsage struct {
 	Requests      uint64 `json:"requests"`
 }
 
-type tokenCounter struct {
+type TokenCounter struct {
 	mu sync.Mutex
-	m  map[tokenKey]*tokenUsage
+	m  map[TokenKey]*TokenUsage
 }
 
-func newTokenCounter() *tokenCounter {
-	return &tokenCounter{m: map[tokenKey]*tokenUsage{}}
+func NewTokenCounter() *TokenCounter {
+	return &TokenCounter{m: map[TokenKey]*TokenUsage{}}
 }
 
 // commit records one observed usage payload under the (provider, model) key.
-// All reads and writes of a *tokenUsage's fields happen under tc.mu: the
+// All reads and writes of a *TokenUsage's fields happen under tc.mu: the
 // get-or-create and the read-modify-write are a single critical section so two
 // concurrent scanners committing to the same key cannot lose increments.
-func (tc *tokenCounter) commit(k tokenKey, add tokenUsage) {
+func (tc *TokenCounter) Commit(k TokenKey, add TokenUsage) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	u := tc.m[k]
 	if u == nil {
-		u = &tokenUsage{}
+		u = &TokenUsage{}
 		tc.m[k] = u
 	}
 	u.Input += add.Input
@@ -52,10 +52,10 @@ func (tc *tokenCounter) commit(k tokenKey, add tokenUsage) {
 
 // snapshot returns a detached copy of all counters. Every field is copied under
 // tc.mu; callers may read the returned map without holding the lock.
-func (tc *tokenCounter) snapshot() map[tokenKey]tokenUsage {
+func (tc *TokenCounter) Snapshot() map[TokenKey]TokenUsage {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	out := make(map[tokenKey]tokenUsage, len(tc.m))
+	out := make(map[TokenKey]TokenUsage, len(tc.m))
 	for k, v := range tc.m {
 		out[k] = *v
 	}
@@ -63,55 +63,55 @@ func (tc *tokenCounter) snapshot() map[tokenKey]tokenUsage {
 }
 
 // seed sets a (provider, model) entry to a baseline (boot restore from SQLite).
-func (tc *tokenCounter) seed(k tokenKey, u tokenUsage) {
+func (tc *TokenCounter) Seed(k TokenKey, u TokenUsage) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	v := u
 	tc.m[k] = &v
 }
 
-func (tc *tokenCounter) reset() {
+func (tc *TokenCounter) Reset() {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
-	tc.m = map[tokenKey]*tokenUsage{}
+	tc.m = map[TokenKey]*TokenUsage{}
 }
 
 const scanLineCap = 64 * 1024
 
-// usageScanner is a pass-through io.ReadCloser: bytes read from src are returned
+// UsageScanner is a pass-through io.ReadCloser: bytes read from src are returned
 // verbatim, and observed incrementally to extract SSE usage events. It never
 // modifies, buffers the stream, or blocks the client. Failures are silent (no
 // usage recorded). commit happens once on EOF.
-type usageScanner struct {
+type UsageScanner struct {
 	src     io.ReadCloser
-	key     tokenKey
-	tc      *tokenCounter
-	onAgent func(tokenUsage) // optional: attribute the same usage to an agent (parallel agent pipeline)
+	key     TokenKey
+	tc      *TokenCounter
+	onAgent func(TokenUsage) // optional: attribute the same usage to an agent (parallel agent pipeline)
 	line    []byte           // current incomplete line (bounded by scanLineCap)
-	acc     tokenUsage
+	acc     TokenUsage
 	done    bool
 }
 
-func newUsageScanner(src io.ReadCloser, key tokenKey, tc *tokenCounter, onAgent func(tokenUsage)) *usageScanner {
-	return &usageScanner{src: src, key: key, tc: tc, onAgent: onAgent}
+func NewUsageScanner(src io.ReadCloser, key TokenKey, tc *TokenCounter, onAgent func(TokenUsage)) *UsageScanner {
+	return &UsageScanner{src: src, key: key, tc: tc, onAgent: onAgent}
 }
 
-func (s *usageScanner) Read(p []byte) (int, error) {
+func (s *UsageScanner) Read(p []byte) (int, error) {
 	n, err := s.src.Read(p)
 	if n > 0 {
 		s.observe(p[:n])
 	}
 	if err != nil && !s.done {
 		s.done = true
-		s.commit()
+		s.Commit()
 	}
 	return n, err
 }
 
-func (s *usageScanner) Close() error {
+func (s *UsageScanner) Close() error {
 	if !s.done {
 		s.done = true
-		s.commit()
+		s.Commit()
 	}
 	return s.src.Close()
 }
@@ -119,8 +119,8 @@ func (s *usageScanner) Close() error {
 // commit flushes the accumulated usage to the (provider, model) token counter
 // and, if an agent sink is wired, to the agent pipeline too (same bytes, so
 // per-agent token totals reconcile with the per-model totals).
-func (s *usageScanner) commit() {
-	s.tc.commit(s.key, s.acc)
+func (s *UsageScanner) Commit() {
+	s.tc.Commit(s.key, s.acc)
 	if s.onAgent != nil && (s.acc.Input > 0 || s.acc.Output > 0) {
 		s.onAgent(s.acc)
 	}
@@ -128,7 +128,7 @@ func (s *usageScanner) commit() {
 
 // observe scans a chunk for complete lines, extracting usage. Partial line bytes
 // are held in s.line (capped); an over-long line is flushed (skipped) to bound memory.
-func (s *usageScanner) observe(chunk []byte) {
+func (s *UsageScanner) observe(chunk []byte) {
 	for _, b := range chunk {
 		if b == '\n' {
 			s.parseLine(s.line)
@@ -143,7 +143,7 @@ func (s *usageScanner) observe(chunk []byte) {
 }
 
 // parseLine inspects one SSE data line for a usage payload.
-func (s *usageScanner) parseLine(line []byte) {
+func (s *UsageScanner) parseLine(line []byte) {
 	trimmed := bytes.TrimLeft(line, " \t")
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
 		return

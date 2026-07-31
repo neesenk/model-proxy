@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -110,11 +111,11 @@ func TestForward_ContextOverflowRetry(t *testing.T) {
 	if smallHits != 1 || bigHits != 1 {
 		t.Errorf("small=%d big=%d, want one attempt each", smallHits, bigHits)
 	}
-	m := p.metrics.snapshot()
-	if s := m[pmKey{Provider: "small-prov", Model: "small"}]; s.Failovers != 1 || s.Requests != 0 || s.Failures != 0 {
+	m := p.metrics.Snapshot()
+	if s := m[counters.PMKey{Provider: "small-prov", Model: "small"}]; s.Failovers != 1 || s.Requests != 0 || s.Failures != 0 {
 		t.Errorf("small metrics = %+v, want failovers=1 requests=0 failures=0", s)
 	}
-	if b := m[pmKey{Provider: "big-prov", Model: "big"}]; b.Requests != 1 {
+	if b := m[counters.PMKey{Provider: "big-prov", Model: "big"}]; b.Requests != 1 {
 		t.Errorf("big metrics = %+v, want requests=1", b)
 	}
 }
@@ -284,8 +285,8 @@ func TestForward_ContextOverflowRetry_Ordinary400(t *testing.T) {
 	if smallHits != 1 || bigHits != 0 {
 		t.Errorf("small=%d big=%d, want small only (an ordinary 400 never retries)", smallHits, bigHits)
 	}
-	m := p.metrics.snapshot()
-	if s := m[pmKey{Provider: "small-prov", Model: "small"}]; s.Requests != 1 || s.Failovers != 0 {
+	m := p.metrics.Snapshot()
+	if s := m[counters.PMKey{Provider: "small-prov", Model: "small"}]; s.Requests != 1 || s.Failovers != 0 {
 		t.Errorf("small metrics = %+v, want requests=1 failovers=0 (committed 4xx)", s)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"strconv"
 	"strings"
@@ -91,7 +92,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 				Type:      "end",
 				Ts:        time.Now().UnixMilli(),
 				RequestID: requestID,
-				Agent:     detectAgent(r),
+				Agent:     counters.DetectAgent(r),
 				Protocol:  proto,
 				Exposed:   calledModel,
 				Provider:  "(cache)",
@@ -145,7 +146,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// terminal/cache-hit paths share it) and passed in here.
 	// Detect the calling agent once (from the UA / known headers); attributed to
 	// whichever target commits, in the parallel agent-stats pipeline.
-	agent := detectAgent(r)
+	agent := counters.DetectAgent(r)
 
 	// Live request monitor (#6): announce the in-flight request so the Web UI's
 	// live view sees who is sending + where it routed, before the response lands.
@@ -262,8 +263,8 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		// to the calling agent so failing-only agents stay visible (first-tried
 		// target = where the request WAS directed).
 		if p.agents != nil && agent != "" && res.firstTried.Provider != "" {
-			p.agents.incRequests(agent, res.firstTried.Provider, res.firstTried.Model)
-			p.agents.incFailure(agent, res.firstTried.Provider, res.firstTried.Model)
+			p.agents.IncRequests(agent, res.firstTried.Provider, res.firstTried.Model)
+			p.agents.IncFailure(agent, res.firstTried.Provider, res.firstTried.Model)
 		}
 		status := http.StatusBadGateway
 		msg := fmt.Sprintf("all targets failed for model %q", exposed)

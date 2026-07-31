@@ -1,4 +1,4 @@
-package main
+package counters
 
 import (
 	"sync"
@@ -6,33 +6,33 @@ import (
 	"time"
 )
 
-// pmKey is the (provider, model) key shared by metrics and token counters.
+// PMKey is the (provider, model) key shared by metrics and token counters.
 // For pooled providers Provider is the virtual id ("name#<accountID>"); Model is
 // the rewrite-target upstream model name (not the exposed/client name).
-type pmKey struct {
+type PMKey struct {
 	Provider string
 	Model    string
 }
 
-// metricsEvent identifies a counter to bump on the forward hot path.
-type metricsEvent string
+// MetricsEvent identifies a counter to bump on the forward hot path.
+type MetricsEvent string
 
 const (
-	evRequests       metricsEvent = "requests"
-	evFailovers      metricsEvent = "failovers"
-	evRateLimited429 metricsEvent = "rate_limited_429"
-	evFailures       metricsEvent = "failures"
+	EvRequests       MetricsEvent = "requests"
+	EvFailovers      MetricsEvent = "failovers"
+	EvRateLimited429 MetricsEvent = "rate_limited_429"
+	EvFailures       MetricsEvent = "failures"
 	// Fusion observability reuses the generic per-minute buckets under the
 	// virtual key ("fusion", <workflow>): an orchestration run counts as a
 	// "request", a degraded run (answered directly instead of orchestrated)
 	// counts into the failovers column — the closest existing "fell back"
 	// semantic. /api/stats and the stats CLI thus get a fusion time series
 	// with zero schema change.
-	evFusionRuns     metricsEvent = "fusion_runs"
-	evFusionDegraded metricsEvent = "fusion_degraded"
+	EvFusionRuns     MetricsEvent = "fusion_runs"
+	EvFusionDegraded MetricsEvent = "fusion_degraded"
 )
 
-type providerMetrics struct {
+type ProviderMetrics struct {
 	Requests       atomic.Uint64
 	Failovers      atomic.Uint64
 	RateLimited429 atomic.Uint64
@@ -45,8 +45,8 @@ type providerMetrics struct {
 	TTFTSum    atomic.Uint64
 }
 
-// providerMetricsSnapshot is the JSON-friendly, lock-acquired copy.
-type providerMetricsSnapshot struct {
+// ProviderMetricsSnapshot is the JSON-friendly, lock-acquired copy.
+type ProviderMetricsSnapshot struct {
 	Requests       uint64 `json:"requests"`
 	Failovers      uint64 `json:"failovers"`
 	RateLimited429 uint64 `json:"rate_limited_429"`
@@ -56,28 +56,28 @@ type providerMetricsSnapshot struct {
 	TTFTSum        uint64 `json:"ttft_ms_sum"`
 }
 
-type metricsStore struct {
+type MetricsStore struct {
 	started time.Time
 	// mu guards the map only. Increments acquire mu briefly to get-or-create
 	// the per-(provider,model) entry, then do an atomic add; snapshots acquire mu
 	// to iterate the map.
 	mu sync.Mutex
-	m  map[pmKey]*providerMetrics
+	m  map[PMKey]*ProviderMetrics
 }
 
-func newMetricsStore() *metricsStore {
-	return &metricsStore{started: time.Now(), m: map[pmKey]*providerMetrics{}}
+func NewMetricsStore() *MetricsStore {
+	return &MetricsStore{started: time.Now(), m: map[PMKey]*ProviderMetrics{}}
 }
 
-func (s *metricsStore) startedAt() time.Time { return s.started }
+func (s *MetricsStore) StartedAt() time.Time { return s.started }
 
 // entry returns the per-(provider,model) metrics, creating it if absent.
-func (s *metricsStore) entry(k pmKey) *providerMetrics {
+func (s *MetricsStore) Entry(k PMKey) *ProviderMetrics {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pm := s.m[k]
 	if pm == nil {
-		pm = &providerMetrics{}
+		pm = &ProviderMetrics{}
 		s.m[k] = pm
 	}
 	return pm
@@ -87,22 +87,22 @@ func (s *metricsStore) entry(k pmKey) *providerMetrics {
 // lookup). Model is the rewrite-target upstream model (t.Model on the forward
 // path), so failovers/429/failures are attributed to the same model the request
 // was sent to.
-func (s *metricsStore) inc(provider, model string, ev metricsEvent) {
-	pm := s.entry(pmKey{Provider: provider, Model: model})
+func (s *MetricsStore) Inc(provider, model string, ev MetricsEvent) {
+	pm := s.Entry(PMKey{Provider: provider, Model: model})
 	switch ev {
-	case evRequests:
+	case EvRequests:
 		pm.Requests.Add(1)
 		pm.LastRequestAt.Store(time.Now().Unix())
-	case evFailovers:
+	case EvFailovers:
 		pm.Failovers.Add(1)
-	case evRateLimited429:
+	case EvRateLimited429:
 		pm.RateLimited429.Add(1)
-	case evFailures:
+	case EvFailures:
 		pm.Failures.Add(1)
-	case evFusionRuns:
+	case EvFusionRuns:
 		pm.Requests.Add(1)
 		pm.LastRequestAt.Store(time.Now().Unix())
-	case evFusionDegraded:
+	case EvFusionDegraded:
 		pm.Failovers.Add(1)
 	}
 }
@@ -110,25 +110,25 @@ func (s *metricsStore) inc(provider, model string, ev metricsEvent) {
 // addLatency records one served response's wall-clock latency and time-to-first-
 // token (milliseconds) for a (provider, model), accumulating into the sums the
 // flusher diffs. Called once per committed target on the forward hot path.
-func (s *metricsStore) addLatency(provider, model string, latencyMs, ttftMs uint64) {
-	pm := s.entry(pmKey{Provider: provider, Model: model})
+func (s *MetricsStore) AddLatency(provider, model string, latencyMs, ttftMs uint64) {
+	pm := s.Entry(PMKey{Provider: provider, Model: model})
 	pm.LatencySum.Add(latencyMs)
 	pm.TTFTSum.Add(ttftMs)
 }
 
 // snapshot returns a detached per-(provider,model) copy. Callers may read the
 // returned map without holding the lock.
-func (s *metricsStore) snapshot() map[pmKey]providerMetricsSnapshot {
+func (s *MetricsStore) Snapshot() map[PMKey]ProviderMetricsSnapshot {
 	s.mu.Lock()
-	keys := make([]pmKey, 0, len(s.m))
+	keys := make([]PMKey, 0, len(s.m))
 	for k := range s.m {
 		keys = append(keys, k)
 	}
 	s.mu.Unlock()
-	out := map[pmKey]providerMetricsSnapshot{}
+	out := map[PMKey]ProviderMetricsSnapshot{}
 	for _, k := range keys {
-		pm := s.entry(k)
-		out[k] = providerMetricsSnapshot{
+		pm := s.Entry(k)
+		out[k] = ProviderMetricsSnapshot{
 			Requests:       pm.Requests.Load(),
 			Failovers:      pm.Failovers.Load(),
 			RateLimited429: pm.RateLimited429.Load(),
@@ -145,9 +145,9 @@ func (s *metricsStore) snapshot() map[pmKey]providerMetricsSnapshot {
 // totals (summing across models). Used by /api/status so the existing
 // provider-keyed "counters" shape (and the Web UI Providers card) is unchanged
 // despite the store now being model-aware.
-func (s *metricsStore) aggregateByProvider() map[string]providerMetricsSnapshot {
-	per := map[string]providerMetricsSnapshot{}
-	for k, snap := range s.snapshot() {
+func (s *MetricsStore) AggregateByProvider() map[string]ProviderMetricsSnapshot {
+	per := map[string]ProviderMetricsSnapshot{}
+	for k, snap := range s.Snapshot() {
 		cur := per[k.Provider]
 		cur.Requests += snap.Requests
 		cur.Failovers += snap.Failovers
@@ -166,8 +166,8 @@ func (s *metricsStore) aggregateByProvider() map[string]providerMetricsSnapshot 
 // seed sets a (provider,model) entry's counters to a baseline value (used on
 // boot to restore cumulative totals persisted in SQLite). Seeds are rare
 // (boot-only), so the per-key Lock/entry overhead is fine.
-func (s *metricsStore) seed(k pmKey, snap providerMetricsSnapshot) {
-	pm := s.entry(k)
+func (s *MetricsStore) Seed(k PMKey, snap ProviderMetricsSnapshot) {
+	pm := s.Entry(k)
 	pm.Requests.Store(snap.Requests)
 	pm.Failovers.Store(snap.Failovers)
 	pm.RateLimited429.Store(snap.RateLimited429)
@@ -180,8 +180,8 @@ func (s *metricsStore) seed(k pmKey, snap providerMetricsSnapshot) {
 // reset zeroes every counter (in-memory). The SQLite history is cleared
 // separately by internal/observe/stats.Store.Reset; statsFlusher coordinates
 // both under one application-level lock.
-func (s *metricsStore) reset() {
+func (s *MetricsStore) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.m = map[pmKey]*providerMetrics{}
+	s.m = map[PMKey]*ProviderMetrics{}
 }

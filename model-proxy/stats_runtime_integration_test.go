@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	obscounters "model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -35,20 +36,20 @@ func openRuntimeStatsStore(
 }
 
 func addRuntimeStats(
-	metrics *metricsStore,
-	tokens *tokenCounter,
-	agents *agentCounter,
+	metrics *obscounters.MetricsStore,
+	tokens *obscounters.TokenCounter,
+	agents *obscounters.AgentCounter,
 	requests int,
 	input uint64,
 ) {
 	for range requests {
-		metrics.inc("provider", "model", evRequests)
-		agents.incRequests("codex", "provider", "model")
+		metrics.Inc("provider", "model", obscounters.EvRequests)
+		agents.IncRequests("codex", "provider", "model")
 	}
 	if input > 0 {
-		usage := tokenUsage{Input: input}
-		tokens.commit(tokenKey{Provider: "provider", Model: "model"}, usage)
-		agents.addTokens("codex", "provider", "model", usage)
+		usage := obscounters.TokenUsage{Input: input}
+		tokens.Commit(obscounters.TokenKey{Provider: "provider", Model: "model"}, usage)
+		agents.AddTokens("codex", "provider", "model", usage)
 	}
 }
 
@@ -118,9 +119,9 @@ func TestInitStatsRestoresAllRuntimeFieldsWithoutDuplicateFlush(t *testing.T) {
 	}
 
 	proxy := &Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
-		agents:  newAgentCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
+		agents:  obscounters.NewAgentCounter(),
 	}
 	proxy.initStats(StatsConfig{DBPath: path, Retention: "0"})
 	if proxy.stats == nil || proxy.flusher == nil {
@@ -130,22 +131,22 @@ func TestInitStatsRestoresAllRuntimeFieldsWithoutDuplicateFlush(t *testing.T) {
 		_ = proxy.stats.Close()
 	})
 
-	runtimeKey := pmKey{Provider: key.Provider, Model: key.Model}
-	wantMetrics := providerMetricsSnapshot{
+	runtimeKey := obscounters.PMKey{Provider: key.Provider, Model: key.Model}
+	wantMetrics := obscounters.ProviderMetricsSnapshot{
 		Requests: persisted.Requests, Failovers: persisted.Failovers,
 		RateLimited429: persisted.RateLimited429, Failures: persisted.Failures,
 		LastRequestAt: persisted.LastRequestAt, LatencySum: persisted.LatencySum,
 		TTFTSum: persisted.TTFTSum,
 	}
-	if got := proxy.metrics.snapshot()[runtimeKey]; got != wantMetrics {
+	if got := proxy.metrics.Snapshot()[runtimeKey]; got != wantMetrics {
 		t.Errorf("restored metrics = %+v, want %+v", got, wantMetrics)
 	}
-	wantTokens := tokenUsage{
+	wantTokens := obscounters.TokenUsage{
 		Input: persisted.Input, Output: persisted.Output,
 		CacheCreation: persisted.CacheCreation, CacheRead: persisted.CacheRead,
 		Requests: persisted.TokenRequests,
 	}
-	if got := proxy.tokens.snapshot()[runtimeKey]; got != wantTokens {
+	if got := proxy.tokens.Snapshot()[runtimeKey]; got != wantTokens {
 		t.Errorf("restored tokens = %+v, want %+v", got, wantTokens)
 	}
 
@@ -171,9 +172,9 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 		resetEntered: make(chan struct{}),
 	}
 	t.Cleanup(sink.unblock)
-	metrics := newMetricsStore()
-	tokens := newTokenCounter()
-	agents := newAgentCounter()
+	metrics := obscounters.NewMetricsStore()
+	tokens := obscounters.NewTokenCounter()
+	agents := obscounters.NewAgentCounter()
 	flusher := newStatsFlusher(sink, metrics, tokens, agents, nil)
 	proxy := &Proxy{
 		metrics: metrics, tokens: tokens, agents: agents,
@@ -224,9 +225,9 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 	if len(rows) != 0 || len(agentRows) != 0 {
 		t.Fatalf("reset left durable rows: stats=%+v agents=%+v", rows, agentRows)
 	}
-	if len(metrics.snapshot()) != 0 || len(tokens.snapshot()) != 0 || len(agents.snapshot()) != 0 {
+	if len(metrics.Snapshot()) != 0 || len(tokens.Snapshot()) != 0 || len(agents.Snapshot()) != 0 {
 		t.Fatalf("reset left runtime counters: metrics=%+v tokens=%+v agents=%+v",
-			metrics.snapshot(), tokens.snapshot(), agents.snapshot())
+			metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot())
 	}
 
 	addRuntimeStats(metrics, tokens, agents, 1, 5)
@@ -268,15 +269,15 @@ func (sink *failAgentOnceSink) FlushAgentsContext(
 func TestStatsFlusherRetriesPipelinesIndependently(t *testing.T) {
 	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
 	sink := &failAgentOnceSink{Store: store, failAgent: true}
-	metrics := newMetricsStore()
-	agents := newAgentCounter()
-	flusher := newStatsFlusher(sink, metrics, newTokenCounter(), agents, nil)
+	metrics := obscounters.NewMetricsStore()
+	agents := obscounters.NewAgentCounter()
+	flusher := newStatsFlusher(sink, metrics, obscounters.NewTokenCounter(), agents, nil)
 
 	for range 2 {
-		metrics.inc("provider", "model", evRequests)
+		metrics.Inc("provider", "model", obscounters.EvRequests)
 	}
 	for range 3 {
-		agents.incRequests("codex", "provider", "model")
+		agents.IncRequests("codex", "provider", "model")
 	}
 	if !flusher.flush(time.Unix(120, 0)) {
 		t.Fatal("primary success should report a durable write")
@@ -289,8 +290,8 @@ func TestStatsFlusherRetriesPipelinesIndependently(t *testing.T) {
 		t.Fatalf("failed agent pipeline unexpectedly advanced: %+v", rows)
 	}
 
-	metrics.inc("provider", "model", evRequests)
-	agents.incRequests("codex", "provider", "model")
+	metrics.Inc("provider", "model", obscounters.EvRequests)
+	agents.IncRequests("codex", "provider", "model")
 	if !flusher.flush(time.Unix(180, 0)) {
 		t.Fatal("recovery flush did not persist deltas")
 	}
@@ -326,7 +327,7 @@ func TestStatsFlusherPrunesDuringIdleMinute(t *testing.T) {
 	}
 
 	flusher := newStatsFlusher(
-		store, newMetricsStore(), newTokenCounter(), newAgentCounter(), nil,
+		store, obscounters.NewMetricsStore(), obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil,
 	)
 	if flusher.flush(now) {
 		t.Fatal("idle prune reported a counter write")
@@ -341,9 +342,9 @@ func TestStatsFlusherPrunesDuringIdleMinute(t *testing.T) {
 func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.db")
 	store := openRuntimeStatsStore(t, path, 0)
-	metrics := newMetricsStore()
-	tokens := newTokenCounter()
-	agents := newAgentCounter()
+	metrics := obscounters.NewMetricsStore()
+	tokens := obscounters.NewTokenCounter()
+	agents := obscounters.NewAgentCounter()
 	flusher := newStatsFlusher(store, metrics, tokens, agents, nil)
 	proxy := &Proxy{
 		lifecycle: newProxyLifecycle(),
@@ -397,9 +398,9 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.db")
 	store := openRuntimeStatsStore(t, path, 0)
-	metrics := newMetricsStore()
-	tokens := newTokenCounter()
-	agents := newAgentCounter()
+	metrics := obscounters.NewMetricsStore()
+	tokens := obscounters.NewTokenCounter()
+	agents := obscounters.NewAgentCounter()
 	sink := &failOnceStatsSink{Store: store, failNext: true}
 	proxy := &Proxy{
 		lifecycle: newProxyLifecycle(),
@@ -452,9 +453,9 @@ func (sink *blockingShutdownStatsSink) FlushContext(
 
 func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
 	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
-	metrics := newMetricsStore()
-	tokens := newTokenCounter()
-	agents := newAgentCounter()
+	metrics := obscounters.NewMetricsStore()
+	tokens := obscounters.NewTokenCounter()
+	agents := obscounters.NewAgentCounter()
 	sink := &blockingShutdownStatsSink{
 		Store: store, entered: make(chan struct{}),
 	}
@@ -482,9 +483,9 @@ func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
 
 func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
-	metrics := newMetricsStore()
-	tokens := newTokenCounter()
-	agents := newAgentCounter()
+	metrics := obscounters.NewMetricsStore()
+	tokens := obscounters.NewTokenCounter()
+	agents := obscounters.NewAgentCounter()
 	cache := newResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
 	flusher := newStatsFlusher(store, metrics, tokens, agents, nil)
 	proxy := &Proxy{
@@ -515,10 +516,10 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	rows, _ := store.QueryRange(0, 300, "", "", 60)
 	agentRows, _ := store.QueryAgents(0, 300, "", "", "", 60)
 	if len(rows) != 0 || len(agentRows) != 0 ||
-		len(metrics.snapshot()) != 0 || len(tokens.snapshot()) != 0 ||
-		len(agents.snapshot()) != 0 || cache.Stats().Entries != 0 {
+		len(metrics.Snapshot()) != 0 || len(tokens.Snapshot()) != 0 ||
+		len(agents.Snapshot()) != 0 || cache.Stats().Entries != 0 {
 		t.Fatalf("reset incomplete: rows=%+v agents=%+v metrics=%+v tokens=%+v agentCounters=%+v cache=%+v",
-			rows, agentRows, metrics.snapshot(), tokens.snapshot(), agents.snapshot(), cache.Stats())
+			rows, agentRows, metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot(), cache.Stats())
 	}
 }
 
@@ -532,9 +533,9 @@ func (sink *resetErrorSink) Reset() error {
 
 func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	store := openRuntimeStatsStore(t, filepath.Join(t.TempDir(), "stats.db"), 0)
-	metrics := newMetricsStore()
-	tokens := newTokenCounter()
-	agents := newAgentCounter()
+	metrics := obscounters.NewMetricsStore()
+	tokens := obscounters.NewTokenCounter()
+	agents := obscounters.NewAgentCounter()
 	cache := newResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
 	flusher := newStatsFlusher(
 		&resetErrorSink{Store: store}, metrics, tokens, agents, nil,
@@ -557,11 +558,11 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "injected durable reset failure") {
 		t.Errorf("reset failure body = %s", recorder.Body.String())
 	}
-	if metrics.snapshot()[pmKey{Provider: "provider", Model: "model"}].Requests != 1 ||
-		tokens.snapshot()[tokenKey{Provider: "provider", Model: "model"}].Input != 5 ||
-		agents.snapshot()[agentKey{Agent: "codex", Provider: "provider", Model: "model"}].Requests != 1 ||
+	if metrics.Snapshot()[obscounters.PMKey{Provider: "provider", Model: "model"}].Requests != 1 ||
+		tokens.Snapshot()[obscounters.TokenKey{Provider: "provider", Model: "model"}].Input != 5 ||
+		agents.Snapshot()[obscounters.AgentKey{Agent: "codex", Provider: "provider", Model: "model"}].Requests != 1 ||
 		cache.Stats().Entries != 1 {
 		t.Fatalf("failed reset mutated live state: metrics=%+v tokens=%+v agents=%+v cache=%+v",
-			metrics.snapshot(), tokens.snapshot(), agents.snapshot(), cache.Stats())
+			metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot(), cache.Stats())
 	}
 }

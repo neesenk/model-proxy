@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,15 +11,15 @@ import (
 )
 
 func TestMetricsCounters(t *testing.T) {
-	m := newMetricsStore()
-	m.inc("zhipu", "m", evRequests)
-	m.inc("zhipu", "m", evRequests)
-	m.inc("zhipu", "m", evFailures)
-	m.inc("deepseek", "d", evRateLimited429)
-	m.inc("zhipu", "m", evFailovers)
+	m := counters.NewMetricsStore()
+	m.Inc("zhipu", "m", counters.EvRequests)
+	m.Inc("zhipu", "m", counters.EvRequests)
+	m.Inc("zhipu", "m", counters.EvFailures)
+	m.Inc("deepseek", "d", counters.EvRateLimited429)
+	m.Inc("zhipu", "m", counters.EvFailovers)
 
-	snap := m.snapshot()
-	zk := pmKey{Provider: "zhipu", Model: "m"}
+	snap := m.Snapshot()
+	zk := counters.PMKey{Provider: "zhipu", Model: "m"}
 	if snap[zk].Requests != 2 {
 		t.Errorf("zhipu/m requests = %d, want 2", snap[zk].Requests)
 	}
@@ -28,17 +29,17 @@ func TestMetricsCounters(t *testing.T) {
 	if snap[zk].Failovers != 1 {
 		t.Errorf("zhipu/m failovers = %d, want 1", snap[zk].Failovers)
 	}
-	dk := pmKey{Provider: "deepseek", Model: "d"}
+	dk := counters.PMKey{Provider: "deepseek", Model: "d"}
 	if snap[dk].RateLimited429 != 1 {
 		t.Errorf("deepseek/d 429 = %d, want 1", snap[dk].RateLimited429)
 	}
-	if snap[pmKey{Provider: "missing", Model: "x"}].Requests != 0 { // unseen -> zero value
+	if snap[counters.PMKey{Provider: "missing", Model: "x"}].Requests != 0 { // unseen -> zero value
 		t.Errorf("missing key should be zero-valued")
 	}
 
 	// aggregateByProvider collapses the model dimension: zhipu has both metrics
 	// under model "m", deepseek under "d".
-	agg := m.aggregateByProvider()
+	agg := m.AggregateByProvider()
 	if agg["zhipu"].Requests != 2 || agg["zhipu"].Failures != 1 || agg["zhipu"].Failovers != 1 {
 		t.Errorf("aggregate zhipu = %+v, want reqs=2 fail=1 failover=1", agg["zhipu"])
 	}
@@ -49,8 +50,8 @@ func TestMetricsCounters(t *testing.T) {
 
 func TestMetricsStartedAt(t *testing.T) {
 	before := time.Now()
-	m := newMetricsStore()
-	sa := m.startedAt()
+	m := counters.NewMetricsStore()
+	sa := m.StartedAt()
 	if sa.Before(before) || sa.After(time.Now().Add(time.Second)) {
 		t.Errorf("startedAt %v not ~now", sa)
 	}
@@ -93,7 +94,7 @@ routes:
 		io.Copy(io.Discard, rec.Result().Body)
 		rec.Result().Body.Close()
 	}
-	zk := pmKey{Provider: "zhipu", Model: "glm-5"}
+	zk := counters.PMKey{Provider: "zhipu", Model: "glm-5"}
 
 	t.Run("2xx bumps Requests", func(t *testing.T) {
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +104,7 @@ routes:
 		defer up.Close()
 		p := makeProxy(up.URL)
 		doRequest(p)
-		got := p.metrics.snapshot()[zk].Requests
+		got := p.metrics.Snapshot()[zk].Requests
 		if got != 1 {
 			t.Fatalf("after 2xx, requests=%d want 1", got)
 		}
@@ -117,7 +118,7 @@ routes:
 		defer up.Close()
 		p := makeProxy(up.URL)
 		doRequest(p)
-		snap := p.metrics.snapshot()[zk]
+		snap := p.metrics.Snapshot()[zk]
 		if snap.RateLimited429 != 1 {
 			t.Fatalf("after 429, rate_limited_429=%d want 1", snap.RateLimited429)
 		}
@@ -137,7 +138,7 @@ routes:
 		defer up.Close()
 		p := makeProxy(up.URL)
 		doRequest(p)
-		snap := p.metrics.snapshot()[zk]
+		snap := p.metrics.Snapshot()[zk]
 		if snap.Failures != 1 {
 			t.Fatalf("after 500, failures=%d want 1", snap.Failures)
 		}
@@ -162,7 +163,7 @@ routes:
 		defer up.Close()
 		p := makeProxy(up.URL)
 		doRequest(p)
-		snap := p.metrics.snapshot()[zk]
+		snap := p.metrics.Snapshot()[zk]
 		if snap.Failures != 1 {
 			t.Fatalf("after conn error, failures=%d want 1", snap.Failures)
 		}

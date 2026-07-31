@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"model-proxy/internal/observe/counters"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -95,17 +96,17 @@ func TestFusion_FanOutSynthesis(t *testing.T) {
 	// Metrics + tokens: one committed request per member and the synthesizer;
 	// draft-leg usage (anthropic shape) and synthesizer usage (SSE scan) both
 	// land in the token counter.
-	metrics := proxy.metrics.snapshot()
-	for _, k := range []pmKey{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}, {Provider: "pc", Model: "mc"}, {Provider: "ps", Model: "ms"}} {
+	metrics := proxy.metrics.Snapshot()
+	for _, k := range []counters.PMKey{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}, {Provider: "pc", Model: "mc"}, {Provider: "ps", Model: "ms"}} {
 		if metrics[k].Requests != 1 {
 			t.Errorf("metrics %v requests = %d, want 1", k, metrics[k].Requests)
 		}
 	}
-	toks := proxy.tokens.snapshot()
-	if u := toks[tokenKey{Provider: "pa", Model: "ma"}]; u.Input != 11 || u.Output != 7 {
+	toks := proxy.tokens.Snapshot()
+	if u := toks[counters.TokenKey{Provider: "pa", Model: "ma"}]; u.Input != 11 || u.Output != 7 {
 		t.Errorf("member pa usage = %+v, want {11 7}", u)
 	}
-	if u := toks[tokenKey{Provider: "ps", Model: "ms"}]; u.Input != 50 || u.Output != 9 {
+	if u := toks[counters.TokenKey{Provider: "ps", Model: "ms"}]; u.Input != 50 || u.Output != 9 {
 		t.Errorf("synthesizer usage = %+v, want {50 9}", u)
 	}
 	// Live events: panel legs are marked fusion-panel:<model> (start + end).

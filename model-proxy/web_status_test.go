@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -176,7 +177,7 @@ func TestAPIStatusUnknown404(t *testing.T) {
 func TestAPITokens(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	w, p := newTestWeb(t)
-	p.tokens.commit(tokenKey{Provider: "zhipu", Model: "glm-5"}, tokenUsage{Input: 30, Output: 12})
+	p.tokens.Commit(counters.TokenKey{Provider: "zhipu", Model: "glm-5"}, counters.TokenUsage{Input: 30, Output: 12})
 
 	mux := http.NewServeMux()
 	w.register(mux)
@@ -197,8 +198,8 @@ func TestAPITokens(t *testing.T) {
 	if rec2.Code != 200 {
 		t.Fatalf("reset status=%d want 200", rec2.Code)
 	}
-	if len(p.tokens.snapshot()) != 0 {
-		t.Errorf("after reset, snapshot non-empty: %+v", p.tokens.snapshot())
+	if len(p.tokens.Snapshot()) != 0 {
+		t.Errorf("after reset, snapshot non-empty: %+v", p.tokens.Snapshot())
 	}
 }
 

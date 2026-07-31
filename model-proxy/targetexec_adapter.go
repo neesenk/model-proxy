@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"log"
+	"model-proxy/internal/observe/counters"
 	"strconv"
 	"time"
 
@@ -86,19 +87,19 @@ var _ targetexec.Effects = targetExecutionEffects{}
 
 func (effects targetExecutionEffects) Failover(target configdomain.RouteTarget) {
 	if effects.proxy.metrics != nil {
-		effects.proxy.metrics.inc(target.Provider, target.Model, evFailovers)
+		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvFailovers)
 	}
 }
 
 func (effects targetExecutionEffects) Failure(target configdomain.RouteTarget) {
 	if effects.proxy.metrics != nil {
-		effects.proxy.metrics.inc(target.Provider, target.Model, evFailures)
+		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvFailures)
 	}
 }
 
 func (effects targetExecutionEffects) RateLimited(target configdomain.RouteTarget) {
 	if effects.proxy.metrics != nil {
-		effects.proxy.metrics.inc(target.Provider, target.Model, evRateLimited429)
+		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvRateLimited429)
 	}
 }
 
@@ -156,13 +157,13 @@ func (effects targetExecutionEffects) CaptureUsage(
 	}
 	target := attempt.Target
 	agent := attempt.Scope.Agent
-	return newUsageScanner(
+	return counters.NewUsageScanner(
 		body,
-		tokenKey{Provider: target.Provider, Model: target.Model},
+		counters.TokenKey{Provider: target.Provider, Model: target.Model},
 		effects.proxy.tokens,
-		func(usage tokenUsage) {
+		func(usage counters.TokenUsage) {
 			if effects.proxy.agents != nil && agent != "" {
-				effects.proxy.agents.addTokens(agent, target.Provider, target.Model, usage)
+				effects.proxy.agents.AddTokens(agent, target.Provider, target.Model, usage)
 			}
 			observe(targetexec.Usage{Input: usage.Input, Output: usage.Output})
 		},
@@ -172,8 +173,8 @@ func (effects targetExecutionEffects) CaptureUsage(
 func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 	target := attempt.Target
 	if effects.proxy.metrics != nil {
-		effects.proxy.metrics.inc(target.Provider, target.Model, evRequests)
-		effects.proxy.metrics.addLatency(
+		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvRequests)
+		effects.proxy.metrics.AddLatency(
 			target.Provider,
 			target.Model,
 			uint64(attempt.UpstreamMilliseconds),
@@ -181,8 +182,8 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 		)
 	}
 	if effects.proxy.agents != nil && attempt.Scope.Agent != "" {
-		effects.proxy.agents.incRequests(attempt.Scope.Agent, target.Provider, target.Model)
-		effects.proxy.agents.addLatency(
+		effects.proxy.agents.IncRequests(attempt.Scope.Agent, target.Provider, target.Model)
+		effects.proxy.agents.AddLatency(
 			attempt.Scope.Agent,
 			target.Provider,
 			target.Model,

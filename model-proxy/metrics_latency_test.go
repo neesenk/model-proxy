@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,11 +14,11 @@ import (
 // TestMetricsAddLatency: addLatency accumulates into the sums the flusher diffs,
 // snapshot returns them, and seed round-trips them (the boot-restore path).
 func TestMetricsAddLatency(t *testing.T) {
-	m := newMetricsStore()
-	m.inc("z", "glm", evRequests)
-	m.addLatency("z", "glm", 100, 20)
-	m.addLatency("z", "glm", 50, 10)
-	snap := m.snapshot()[pmKey{Provider: "z", Model: "glm"}]
+	m := counters.NewMetricsStore()
+	m.Inc("z", "glm", counters.EvRequests)
+	m.AddLatency("z", "glm", 100, 20)
+	m.AddLatency("z", "glm", 50, 10)
+	snap := m.Snapshot()[counters.PMKey{Provider: "z", Model: "glm"}]
 	if snap.Requests != 1 {
 		t.Errorf("requests=%d want 1", snap.Requests)
 	}
@@ -25,14 +26,14 @@ func TestMetricsAddLatency(t *testing.T) {
 		t.Errorf("latency=%d ttft=%d want 150/30", snap.LatencySum, snap.TTFTSum)
 	}
 	// aggregateByProvider rolls the sums up across models.
-	agg := m.aggregateByProvider()["z"]
+	agg := m.AggregateByProvider()["z"]
 	if agg.LatencySum != 150 || agg.TTFTSum != 30 {
 		t.Errorf("aggregate latency=%d ttft=%d want 150/30", agg.LatencySum, agg.TTFTSum)
 	}
 	// seed round-trips the sums (boot restore).
-	m2 := newMetricsStore()
-	m2.seed(pmKey{Provider: "z", Model: "glm"}, snap)
-	got := m2.snapshot()[pmKey{Provider: "z", Model: "glm"}]
+	m2 := counters.NewMetricsStore()
+	m2.Seed(counters.PMKey{Provider: "z", Model: "glm"}, snap)
+	got := m2.Snapshot()[counters.PMKey{Provider: "z", Model: "glm"}]
 	if got.LatencySum != 150 || got.TTFTSum != 30 {
 		t.Errorf("seed round-trip latency=%d ttft=%d want 150/30", got.LatencySum, got.TTFTSum)
 	}
@@ -71,7 +72,7 @@ func TestForward_RecordsLatency(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	snap := p.metrics.snapshot()[pmKey{Provider: "z", Model: "glm-rt"}]
+	snap := p.metrics.Snapshot()[counters.PMKey{Provider: "z", Model: "glm-rt"}]
 	if snap.Requests != 1 {
 		t.Errorf("requests=%d want 1", snap.Requests)
 	}

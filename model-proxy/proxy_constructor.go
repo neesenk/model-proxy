@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"model-proxy/internal/app"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -61,14 +62,14 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	p.quota.generation = p.configGeneration.Load
 	p.quota.fullSnapshot = p.snapshotPersistedState
 	p.quota.start()
-	p.metrics = newMetricsStore()
+	p.metrics = counters.NewMetricsStore()
 	// SSE token counter. Persistence (baseline restore + per-minute flush) is
 	// projected by statsFlusher into internal/observe/stats.Store, opened only
 	// by lifecycle services so direct-NewProxy tests stay in-memory.
-	p.tokens = newTokenCounter()
+	p.tokens = counters.NewTokenCounter()
 	// Per-agent counters (detected from the client UA). Flushed alongside the
 	// minute buckets by the same flusher; nil-stats tests keep them in-memory.
-	p.agents = newAgentCounter()
+	p.agents = counters.NewAgentCounter()
 	// Exact-match response cache. nil unless cache.enabled is set in config, so
 	// the default (off) path and direct-NewProxy tests pay zero overhead.
 	p.cache = newResponseCache(cfg.Cache)
@@ -161,13 +162,13 @@ func (p *Proxy) resetStats() error {
 			}
 		}
 		if p.metrics != nil {
-			p.metrics.reset()
+			p.metrics.Reset()
 		}
 		if p.tokens != nil {
-			p.tokens.reset()
+			p.tokens.Reset()
 		}
 		if p.agents != nil {
-			p.agents.reset()
+			p.agents.Reset()
 		}
 	}
 	// Response cache participates in the user-facing "reset counters" command,

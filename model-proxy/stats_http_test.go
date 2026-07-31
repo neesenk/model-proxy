@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	obscounters "model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -15,8 +16,8 @@ import (
 // TestAPIStatsHandler verifies /api/stats returns persisted buckets as JSON.
 func TestAPIStatsHandler(t *testing.T) {
 	p := &Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 		stats:   newTestStatsStore(t),
 	}
 	minute := time.Now().Unix() / 60 * 60
@@ -108,8 +109,8 @@ func TestAPIStatsHandler(t *testing.T) {
 
 	nilMux := http.NewServeMux()
 	newWebServer(&Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 	}, "test-config.yaml").register(nilMux)
 	nilRecorder := httptest.NewRecorder()
 	nilMux.ServeHTTP(nilRecorder, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
@@ -132,8 +133,8 @@ func TestAPIStatsHandler(t *testing.T) {
 	}
 	closedMux := http.NewServeMux()
 	newWebServer(&Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 		stats:   closedStore,
 	}, "test-config.yaml").register(closedMux)
 	closedRecorder := httptest.NewRecorder()
@@ -166,8 +167,8 @@ func TestAPIAgentsHandlerFiltersAggregatesAndReportsStoreStates(t *testing.T) {
 	}
 
 	proxy := &Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 		stats:   store,
 	}
 	mux := http.NewServeMux()
@@ -207,8 +208,8 @@ func TestAPIAgentsHandlerFiltersAggregatesAndReportsStoreStates(t *testing.T) {
 
 	nilMux := http.NewServeMux()
 	newWebServer(&Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 	}, "test-config.yaml").register(nilMux)
 	nilRecorder := httptest.NewRecorder()
 	nilMux.ServeHTTP(nilRecorder, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
@@ -236,8 +237,8 @@ func TestAPIAgentsHandlerFiltersAggregatesAndReportsStoreStates(t *testing.T) {
 	}
 	closedMux := http.NewServeMux()
 	newWebServer(&Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 		stats:   closedStore,
 	}, "test-config.yaml").register(closedMux)
 	closedRecorder := httptest.NewRecorder()
@@ -250,8 +251,8 @@ func TestAPIAgentsHandlerFiltersAggregatesAndReportsStoreStates(t *testing.T) {
 
 func TestAPIAnalyticsHandler(t *testing.T) {
 	p := &Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 		stats:   newTestStatsStore(t),
 		// pricing: nil → resolver falls back to unpriced (cost null), proving the
 		// handler never fabricates a price and never panics on a nil catalog.
@@ -345,8 +346,8 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 
 	nilMux := http.NewServeMux()
 	newWebServer(&Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 	}, "test-config.yaml").register(nilMux)
 	nilRecorder := httptest.NewRecorder()
 	nilMux.ServeHTTP(nilRecorder, httptest.NewRequest(http.MethodGet, "/api/analytics", nil))
@@ -369,8 +370,8 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	}
 	closedMux := http.NewServeMux()
 	newWebServer(&Proxy{
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 		stats:   closedStore,
 	}, "test-config.yaml").register(closedMux)
 	closedRecorder := httptest.NewRecorder()
@@ -404,8 +405,8 @@ func TestAPIAnalyticsUsesCatalogThenDetachedOverride(t *testing.T) {
 			TTL:       "24h",
 			SourceURL: priceServer.URL,
 		}},
-		metrics: newMetricsStore(),
-		tokens:  newTokenCounter(),
+		metrics: obscounters.NewMetricsStore(),
+		tokens:  obscounters.NewTokenCounter(),
 		stats:   newTestStatsStore(t),
 	}
 	minute := time.Now().Unix() / 60 * 60

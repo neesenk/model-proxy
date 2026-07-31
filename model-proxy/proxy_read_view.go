@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	obscounters "model-proxy/internal/observe/counters"
 	"time"
 
 	"model-proxy/internal/fusion"
@@ -27,7 +28,7 @@ type dashboardView struct {
 	modelLocks map[string][]map[string]any
 	quota      map[string]any
 	schedule   json.RawMessage
-	counters   map[string]providerMetricsSnapshot
+	counters   map[string]obscounters.ProviderMetricsSnapshot
 	cache      map[string]any
 	warnings   []string
 }
@@ -101,13 +102,13 @@ func (view proxyReadView) dashboard(now time.Time) dashboardView {
 	}
 
 	return dashboardView{
-		uptime:     time.Since(p.metrics.startedAt()).String(),
+		uptime:     time.Since(p.metrics.StartedAt()).String(),
 		listen:     listen,
 		health:     health,
 		modelLocks: modelLocks,
 		quota:      quota,
 		schedule:   json.RawMessage(schedule),
-		counters:   p.metrics.aggregateByProvider(),
+		counters:   p.metrics.AggregateByProvider(),
 		cache:      cacheInfo,
 		warnings:   warnings,
 	}
@@ -144,11 +145,11 @@ func (view proxyReadView) requestLogDirectory() string {
 	return view.proxy.reqLog.Directory()
 }
 
-func (view proxyReadView) tokenUsage() map[tokenKey]tokenUsage {
+func (view proxyReadView) tokenUsageSnapshot() map[obscounters.TokenKey]obscounters.TokenUsage {
 	if view.proxy.tokens == nil {
 		return nil
 	}
-	return view.proxy.tokens.snapshot()
+	return view.proxy.tokens.Snapshot()
 }
 
 func (view proxyReadView) stats(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error) {

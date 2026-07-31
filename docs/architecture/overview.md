@@ -326,7 +326,7 @@ application → serveAssembly → applicationRuntime → Proxy
 `internal` 的直接仓库依赖采用闭合 allowlist；标准库与外部 module 不在此表中：
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`accounts`、`cache`、`catalog`、
-  `observe/events`、`observe/requestlog`、`observe/stats`、`pricing`、`protocol`、
+  `observe/counters`、`observe/events`、`observe/requestlog`、`observe/stats`、`pricing`、`protocol`、
   `runtime/wirecap`、`transport/bodycapture`；
 - `app → accounts, catalog, config, protocol, provider`；
 - `cli → daemonctl, observe/requestlog, observe/stats, provider`；

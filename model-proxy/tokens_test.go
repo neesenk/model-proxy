@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	obscounters "model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,14 +20,14 @@ import (
 // TestUsageScanner_AgentSink verifies that the agent attribution callback
 // receives the exact usage observed when the scanner commits.
 func TestUsageScanner_AgentSink(t *testing.T) {
-	tc := newTokenCounter()
-	var got tokenUsage
+	tc := obscounters.NewTokenCounter()
+	var got obscounters.TokenUsage
 	stream := []byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n\n")
-	scanner := newUsageScanner(
+	scanner := obscounters.NewUsageScanner(
 		io.NopCloser(bytes.NewReader(stream)),
-		tokenKey{Provider: "z", Model: "m"},
+		obscounters.TokenKey{Provider: "z", Model: "m"},
 		tc,
-		func(usage tokenUsage) {
+		func(usage obscounters.TokenUsage) {
 			got = usage
 		},
 	)
@@ -44,12 +45,12 @@ func TestUsageScanner_AgentSink(t *testing.T) {
 func TestUsageScannerAnthropic(t *testing.T) {
 	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":50,\"cache_read_input_tokens\":10}}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":200}}\n\n")
-	tc := newTokenCounter()
-	key := tokenKey{Provider: "zhipu", Model: "glm-5"}
-	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
+	tc := obscounters.NewTokenCounter()
+	key := obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
 	io.Copy(io.Discard, sc)
 
-	got := tc.snapshot()[key]
+	got := tc.Snapshot()[key]
 	if got.Input != 100 || got.CacheCreation != 50 || got.CacheRead != 10 || got.Output != 200 {
 		t.Errorf("usage = %+v, want in=100 cc=50 cr=10 out=200", got)
 	}
@@ -57,10 +58,10 @@ func TestUsageScannerAnthropic(t *testing.T) {
 
 func TestUsageScannerOpenAI(t *testing.T) {
 	stream := []byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13}}\n\n")
-	tc := newTokenCounter()
-	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "deepseek", Model: "d"}, tc, nil)
+	tc := obscounters.NewTokenCounter()
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "deepseek", Model: "d"}, tc, nil)
 	io.Copy(io.Discard, sc)
-	got := tc.snapshot()[tokenKey{Provider: "deepseek", Model: "d"}]
+	got := tc.Snapshot()[obscounters.TokenKey{Provider: "deepseek", Model: "d"}]
 	if got.Input != 7 || got.Output != 13 {
 		t.Errorf("usage = %+v, want in=7 out=13", got)
 	}
@@ -70,10 +71,10 @@ func TestUsageScannerOpenAI(t *testing.T) {
 // arbitrarily small reads.
 func TestUsageScannerSplitBoundaries(t *testing.T) {
 	payload := []byte("data: {\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":99}}\n\n")
-	tc := newTokenCounter()
-	sc := newUsageScanner(io.NopCloser(&oneByteReader{b: payload}), tokenKey{Provider: "p", Model: "m"}, tc, nil)
+	tc := obscounters.NewTokenCounter()
+	sc := obscounters.NewUsageScanner(io.NopCloser(&oneByteReader{b: payload}), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
 	io.Copy(io.Discard, sc)
-	got := tc.snapshot()[tokenKey{Provider: "p", Model: "m"}]
+	got := tc.Snapshot()[obscounters.TokenKey{Provider: "p", Model: "m"}]
 	if got.Input != 42 || got.Output != 99 {
 		t.Errorf("split-boundary usage = %+v, want in=42 out=99", got)
 	}
@@ -83,8 +84,8 @@ func TestUsageScannerSplitBoundaries(t *testing.T) {
 func TestUsageScannerPassthrough(t *testing.T) {
 	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\ndata: garbage\n\n")
 	var sink bytes.Buffer
-	tc := newTokenCounter()
-	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "p", Model: "m"}, tc, nil)
+	tc := obscounters.NewTokenCounter()
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
 	io.Copy(&sink, sc)
 	if !bytes.Equal(sink.Bytes(), stream) {
 		t.Errorf("passthrough not byte-identical:\nwant %q\ngot  %q", stream, sink.Bytes())
@@ -96,14 +97,14 @@ func TestUsageScannerOversizedLine(t *testing.T) {
 	huge := bytes.Repeat([]byte("x"), 80_000)
 	stream := append([]byte("data: "), huge...)
 	stream = append(stream, []byte("\n\ndata: {\"usage\":{\"prompt_tokens\":3}}\n\n")...)
-	tc := newTokenCounter()
+	tc := obscounters.NewTokenCounter()
 	var sink bytes.Buffer
-	sc := newUsageScanner(io.NopCloser(bytes.NewReader(stream)), tokenKey{Provider: "p", Model: "m"}, tc, nil)
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
 	io.Copy(&sink, sc)
 	if !bytes.Equal(sink.Bytes(), stream) {
 		t.Error("oversized passthrough mismatch")
 	}
-	if got := tc.snapshot()[tokenKey{Provider: "p", Model: "m"}].Input; got != 3 {
+	if got := tc.Snapshot()[obscounters.TokenKey{Provider: "p", Model: "m"}].Input; got != 3 {
 		t.Errorf("usage after oversized line = %d, want 3", got)
 	}
 }
@@ -118,13 +119,13 @@ func TestTokenCounterPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ss.Close()
-	m := newMetricsStore()
-	tc := newTokenCounter()
-	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[observestats.Key]observestats.Counters{})
+	m := obscounters.NewMetricsStore()
+	tc := obscounters.NewTokenCounter()
+	f := newStatsFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{})
 
-	tc.commit(tokenKey{Provider: "z", Model: "m"}, tokenUsage{Input: 10, Output: 20, Requests: 1})
-	m.inc("z", "m", evRequests)
-	m.inc("z", "m", evFailovers)
+	tc.Commit(obscounters.TokenKey{Provider: "z", Model: "m"}, obscounters.TokenUsage{Input: 10, Output: 20, Requests: 1})
+	m.Inc("z", "m", obscounters.EvRequests)
+	m.Inc("z", "m", obscounters.EvFailovers)
 	if !f.flush(time.Now()) {
 		t.Fatal("flush reported no deltas despite pending commits")
 	}
@@ -167,20 +168,20 @@ func (r *oneByteReader) Read(p []byte) (int, error) {
 }
 
 // TestTokenCounterConcurrent would race under -race before the fix (the old
-// commit mutated *tokenUsage fields after releasing tc.mu inside entry()). It
+// commit mutated *obscounters.TokenUsage fields after releasing tc.mu inside entry()). It
 // spawns 50 concurrent committers to the SAME key plus a concurrent snapshot
 // reader; after the fix every increment lands (no lost updates) and -race is
 // clean. Final Input/Output must equal exactly the number of committers.
 func TestTokenCounterConcurrent(t *testing.T) {
-	tc := newTokenCounter()
-	key := tokenKey{Provider: "p", Model: "m"}
+	tc := obscounters.NewTokenCounter()
+	key := obscounters.TokenKey{Provider: "p", Model: "m"}
 	const committers = 50
 
 	var snapDone sync.WaitGroup
 	snapDone.Add(1)
 	stopSnap := make(chan struct{})
 	// Concurrent reader: hammers snapshot during commits. Before the fix this
-	// read *tokenUsage fields while commit mutated them unlocked -> -race.
+	// read *obscounters.TokenUsage fields while commit mutated them unlocked -> -race.
 	go func() {
 		defer snapDone.Done()
 		for {
@@ -188,7 +189,7 @@ func TestTokenCounterConcurrent(t *testing.T) {
 			case <-stopSnap:
 				return
 			default:
-				_ = tc.snapshot()
+				_ = tc.Snapshot()
 			}
 		}
 	}()
@@ -200,7 +201,7 @@ func TestTokenCounterConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			tc.commit(key, tokenUsage{Input: 1, Output: 1})
+			tc.Commit(key, obscounters.TokenUsage{Input: 1, Output: 1})
 		}()
 	}
 	close(start) // release all committers together to maximize contention
@@ -208,7 +209,7 @@ func TestTokenCounterConcurrent(t *testing.T) {
 	close(stopSnap)
 	snapDone.Wait()
 
-	got := tc.snapshot()[key]
+	got := tc.Snapshot()[key]
 	if got.Input != committers {
 		t.Errorf("Input = %d, want %d (lost increments)", got.Input, committers)
 	}
@@ -223,7 +224,7 @@ func TestTokenCounterConcurrent(t *testing.T) {
 // TestForwardCountsTokens verifies the proxy forward hot path wraps SSE response
 // bodies in a usageScanner keyed by the chosen (provider, model), committing
 // observed anthropic usage (input_tokens from message_start, output_tokens from
-// message_delta) to the shared tokenCounter. Non-SSE responses are not scanned.
+// message_delta) to the shared obscounters.TokenCounter. Non-SSE responses are not scanned.
 // HOME is pinned to a temp dir (with a dummy zhipu apikey) so NewProxy's
 // baseline load can't pick up the developer's real ~/.model-proxy/token_usage.json
 // and the provider can authenticate against the mock upstream.
@@ -253,7 +254,7 @@ func TestForwardCountsTokens(t *testing.T) {
 	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
 	io.Copy(io.Discard, rec.Result().Body)
 	rec.Result().Body.Close()
-	got := p.tokens.snapshot()[tokenKey{Provider: "zhipu", Model: "glm-5"}]
+	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
 	if got.Input != 42 || got.Output != 8 {
 		t.Errorf("tokens = %+v, want in=42 out=8", got)
 	}
@@ -285,7 +286,7 @@ func TestForwardDoesNotScanNonSSE(t *testing.T) {
 	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)))
 	io.Copy(io.Discard, rec.Result().Body)
 	rec.Result().Body.Close()
-	got := p.tokens.snapshot()[tokenKey{Provider: "zhipu", Model: "glm-5"}]
+	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
 	if got.Input != 0 || got.Output != 0 || got.Requests != 0 {
 		t.Errorf("non-SSE tokens = %+v, want zero (non-SSE must not be scanned)", got)
 	}
@@ -348,7 +349,7 @@ func TestForwardCommitsOnDisconnect(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	rec := &disconnectWriter{ResponseRecorder: httptest.NewRecorder()}
 	p.handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
-	got := p.tokens.snapshot()[tokenKey{Provider: "zhipu", Model: "glm-5"}]
+	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
 	if got.Input != 42 {
 		t.Errorf("input tokens after disconnect = %d, want 42 (observed usage must commit on client-cancel, not be silently dropped)", got.Input)
 	}

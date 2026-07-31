@@ -126,7 +126,7 @@ func (api *proxyWebAPI) Accounts() []appapi.ProviderAccounts {
 }
 
 func (api *proxyWebAPI) Tokens() []appapi.TokenUsage {
-	snapshot := api.reads.tokenUsage()
+	snapshot := api.reads.tokenUsageSnapshot()
 	out := make([]appapi.TokenUsage, 0, len(snapshot))
 	for key, usage := range snapshot {
 		out = append(out, appapi.TokenUsage{

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -84,7 +85,7 @@ func TestFusion_CircuitRecordFailure(t *testing.T) {
 	if failures != 1 {
 		t.Errorf("failed member consecutiveFailures = %d, want 1", failures)
 	}
-	if got := proxy.metrics.snapshot()[pmKey{Provider: "pb", Model: "mb"}].Failures; got != 1 {
+	if got := proxy.metrics.Snapshot()[counters.PMKey{Provider: "pb", Model: "mb"}].Failures; got != 1 {
 		t.Errorf("failed member metrics failures = %d, want 1", got)
 	}
 }
@@ -245,7 +246,7 @@ func TestFusionLeg_FailureMetricsAlignTryTarget(t *testing.T) {
 		if out := postAnthropic(t, px, fusionClientBody); !strings.Contains(out, "final") {
 			t.Fatalf("client body missing synthesis: %s", out)
 		}
-		m := proxy.metrics.snapshot()[pmKey{Provider: "pa", Model: "ma"}]
+		m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "pa", Model: "ma"}]
 		if m.Failures != 1 || m.Failovers != 1 {
 			t.Errorf("conn-error leg metrics = failures %d failovers %d, want 1/1", m.Failures, m.Failovers)
 		}
@@ -256,7 +257,7 @@ func TestFusionLeg_FailureMetricsAlignTryTarget(t *testing.T) {
 		if out := postAnthropic(t, px, fusionClientBody); !strings.Contains(out, "final") {
 			t.Fatalf("client body missing synthesis: %s", out)
 		}
-		m := proxy.metrics.snapshot()[pmKey{Provider: "pa", Model: "ma"}]
+		m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "pa", Model: "ma"}]
 		if m.Failures != 0 || m.Failovers != 1 {
 			t.Errorf("401 leg metrics = failures %d failovers %d, want 0/1", m.Failures, m.Failovers)
 		}
@@ -275,7 +276,7 @@ func TestFusionLeg_FailureMetricsAlignTryTarget(t *testing.T) {
 		if out := postAnthropic(t, px, fusionClientBody); !strings.Contains(out, "final") {
 			t.Fatalf("client body missing synthesis: %s", out)
 		}
-		m := proxy.metrics.snapshot()[pmKey{Provider: "pa", Model: "ma"}]
+		m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "pa", Model: "ma"}]
 		if m.Failures != 1 || m.Failovers != 1 {
 			t.Errorf("5xx leg metrics = failures %d failovers %d, want 1/1", m.Failures, m.Failovers)
 		}
@@ -308,7 +309,7 @@ func TestFusionLeg_RateLimitMatchesTargetExecutor(t *testing.T) {
 	}
 	after := time.Now()
 
-	metric := proxy.metrics.snapshot()[pmKey{Provider: "pa", Model: "ma"}]
+	metric := proxy.metrics.Snapshot()[counters.PMKey{Provider: "pa", Model: "ma"}]
 	if metric.RateLimited429 != 1 || metric.Failovers != 1 || metric.Failures != 0 {
 		t.Fatalf("429 panel metrics = %+v, want rate_limited/failovers/failures = 1/1/0", metric)
 	}

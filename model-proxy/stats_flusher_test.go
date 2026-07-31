@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	obscounters "model-proxy/internal/observe/counters"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -52,22 +53,22 @@ func TestDiffCountersClampsAndOmits(t *testing.T) {
 // flusher diff + lastBucket monotonic guard.
 func TestStatsFlushTwoMinutes(t *testing.T) {
 	ss := newTestStatsStore(t)
-	m := newMetricsStore()
-	tc := newTokenCounter()
-	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[observestats.Key]observestats.Counters{})
+	m := obscounters.NewMetricsStore()
+	tc := obscounters.NewTokenCounter()
+	f := newStatsFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{})
 
 	// Minute 1: 1 request, 1 failover.
-	m.inc("z", "m", evRequests)
-	m.inc("z", "m", evFailovers)
-	tc.commit(tokenKey{Provider: "z", Model: "m"}, tokenUsage{Input: 10, Output: 5, Requests: 1})
+	m.Inc("z", "m", obscounters.EvRequests)
+	m.Inc("z", "m", obscounters.EvFailovers)
+	tc.Commit(obscounters.TokenKey{Provider: "z", Model: "m"}, obscounters.TokenUsage{Input: 10, Output: 5, Requests: 1})
 	if !f.flush(time.Now()) {
 		t.Fatal("first flush should write deltas")
 	}
 
 	// Minute 2: 2 more requests (total 3), more tokens.
-	m.inc("z", "m", evRequests)
-	m.inc("z", "m", evRequests)
-	tc.commit(tokenKey{Provider: "z", Model: "m"}, tokenUsage{Input: 20, Output: 5, Requests: 1})
+	m.Inc("z", "m", obscounters.EvRequests)
+	m.Inc("z", "m", obscounters.EvRequests)
+	tc.Commit(obscounters.TokenKey{Provider: "z", Model: "m"}, obscounters.TokenUsage{Input: 20, Output: 5, Requests: 1})
 	if !f.flush(time.Now()) {
 		t.Fatal("second flush should write deltas")
 	}
@@ -109,13 +110,13 @@ func TestStatsRestoreOnBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := newMetricsStore()
-	tc := newTokenCounter()
-	f := newStatsFlusher(ss, m, tc, newAgentCounter(), map[observestats.Key]observestats.Counters{})
-	m.inc("a", "x", evRequests)
-	m.inc("a", "x", evRequests)
-	m.inc("a", "x", evFailures)
-	tc.commit(tokenKey{Provider: "a", Model: "x"}, tokenUsage{Input: 100, Output: 50, CacheRead: 7})
+	m := obscounters.NewMetricsStore()
+	tc := obscounters.NewTokenCounter()
+	f := newStatsFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{})
+	m.Inc("a", "x", obscounters.EvRequests)
+	m.Inc("a", "x", obscounters.EvRequests)
+	m.Inc("a", "x", obscounters.EvFailures)
+	tc.Commit(obscounters.TokenKey{Provider: "a", Model: "x"}, obscounters.TokenUsage{Input: 100, Output: 50, CacheRead: 7})
 	f.flush(time.Now())
 	if err := ss.Close(); err != nil {
 		t.Fatal(err)
@@ -147,17 +148,17 @@ func TestUntilNextMinuteBounded(t *testing.T) {
 // TestSeedRestore verifies the boot-restore seed methods set the in-memory
 // counters to a baseline value exactly (the path initStats uses on startup).
 func TestSeedRestore(t *testing.T) {
-	m := newMetricsStore()
-	tc := newTokenCounter()
-	k := pmKey{Provider: "z", Model: "m"}
-	m.seed(k, providerMetricsSnapshot{Requests: 100, Failovers: 3, Failures: 2, RateLimited429: 1, LastRequestAt: 42})
-	tc.seed(k, tokenUsage{Input: 500, Output: 50, CacheCreation: 9, CacheRead: 4, Requests: 7})
+	m := obscounters.NewMetricsStore()
+	tc := obscounters.NewTokenCounter()
+	k := obscounters.PMKey{Provider: "z", Model: "m"}
+	m.Seed(k, obscounters.ProviderMetricsSnapshot{Requests: 100, Failovers: 3, Failures: 2, RateLimited429: 1, LastRequestAt: 42})
+	tc.Seed(k, obscounters.TokenUsage{Input: 500, Output: 50, CacheCreation: 9, CacheRead: 4, Requests: 7})
 
-	msnap := m.snapshot()[k]
+	msnap := m.Snapshot()[k]
 	if msnap.Requests != 100 || msnap.Failovers != 3 || msnap.Failures != 2 || msnap.RateLimited429 != 1 || msnap.LastRequestAt != 42 {
 		t.Errorf("metrics seed = %+v, want exact baseline", msnap)
 	}
-	tsnap := tc.snapshot()[k]
+	tsnap := tc.Snapshot()[k]
 	if tsnap.Input != 500 || tsnap.Output != 50 || tsnap.CacheCreation != 9 || tsnap.CacheRead != 4 || tsnap.Requests != 7 {
 		t.Errorf("tokens seed = %+v, want exact baseline", tsnap)
 	}
@@ -175,7 +176,7 @@ func TestLegacyTokensPath(t *testing.T) {
 // reports false (the idle-proxy path).
 func TestStatsFlushEmptyIsNoop(t *testing.T) {
 	ss := newTestStatsStore(t)
-	f := newStatsFlusher(ss, newMetricsStore(), newTokenCounter(), newAgentCounter(), map[observestats.Key]observestats.Counters{})
+	f := newStatsFlusher(ss, obscounters.NewMetricsStore(), obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{})
 	if f.flush(time.Now()) {
 		t.Error("flush with no deltas should report false")
 	}
@@ -191,12 +192,12 @@ func TestStatsFlushEmptyIsNoop(t *testing.T) {
 func TestFlush_DefersBaselineOnFlushError(t *testing.T) {
 	ss := newTestStatsStore(t)
 	sink := &failOnceStatsSink{Store: ss}
-	metrics := newMetricsStore()
-	f := newStatsFlusher(sink, metrics, newTokenCounter(), newAgentCounter(), nil)
+	metrics := obscounters.NewMetricsStore()
+	f := newStatsFlusher(sink, metrics, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil)
 
 	addReq := func(n int) {
 		for i := 0; i < n; i++ {
-			metrics.inc("zhipu", "glm-5", evRequests)
+			metrics.Inc("zhipu", "glm-5", obscounters.EvRequests)
 		}
 	}
 
@@ -259,9 +260,9 @@ func (sink *alwaysFailStatsSink) FlushAgentsContext(
 func TestStatsPendingBacklogIsBoundedWithoutLosingTotals(t *testing.T) {
 	store := newTestStatsStore(t)
 	sink := &alwaysFailStatsSink{Store: store}
-	metrics := newMetricsStore()
-	agents := newAgentCounter()
-	flusher := newStatsFlusher(sink, metrics, newTokenCounter(), agents, nil)
+	metrics := obscounters.NewMetricsStore()
+	agents := obscounters.NewAgentCounter()
+	flusher := newStatsFlusher(sink, metrics, obscounters.NewTokenCounter(), agents, nil)
 	key := observestats.Key{Provider: "zhipu", Model: "glm-5"}
 	agentKey := observestats.AgentKey{
 		Agent: "codex", Provider: "zhipu", Model: "glm-5",
@@ -270,8 +271,8 @@ func TestStatsPendingBacklogIsBoundedWithoutLosingTotals(t *testing.T) {
 	total := maxPendingStatsBatches + overflow
 
 	for index := 0; index < total; index++ {
-		metrics.inc(key.Provider, key.Model, evRequests)
-		agents.incRequests(agentKey.Agent, agentKey.Provider, agentKey.Model)
+		metrics.Inc(key.Provider, key.Model, obscounters.EvRequests)
+		agents.IncRequests(agentKey.Agent, agentKey.Provider, agentKey.Model)
 		flusher.flush(time.Unix(int64(index+2)*60, 0))
 	}
 
@@ -326,9 +327,9 @@ func TestStatsPendingDrainIsBoundedPerCycle(t *testing.T) {
 	store := newTestStatsStore(t)
 	flusher := newStatsFlusher(
 		store,
-		newMetricsStore(),
-		newTokenCounter(),
-		newAgentCounter(),
+		obscounters.NewMetricsStore(),
+		obscounters.NewTokenCounter(),
+		obscounters.NewAgentCounter(),
 		nil,
 	)
 	key := observestats.Key{Provider: "p", Model: "m"}

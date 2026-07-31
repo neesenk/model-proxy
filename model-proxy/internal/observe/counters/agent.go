@@ -1,4 +1,4 @@
-package main
+package counters
 
 import (
 	"net/http"
@@ -13,11 +13,11 @@ import (
 // counter keyed (agent, provider, model) flushed to a separate agent_buckets
 // table — leaving the hot (provider, model) counters untouched.
 
-// detectAgent maps a request's User-Agent / known agent headers to a short,
+// DetectAgent maps a request's User-Agent / known agent headers to a short,
 // stable lowercase label (no spaces). Order matters: the most specific signals
 // first. "unknown" = no UA at all; "other" = a UA we don't recognize (so an
 // unrecognized client is still distinguishable from a headerless one).
-func detectAgent(r *http.Request) string {
+func DetectAgent(r *http.Request) string {
 	ua := strings.ToLower(r.Header.Get("user-agent"))
 	// Claude Code sends x-claude-code-session-id AND a "claude-cli/<ver>" UA;
 	// either is a strong, unambiguous signal.
@@ -42,20 +42,20 @@ func detectAgent(r *http.Request) string {
 	return "other"
 }
 
-// agentKey is the (agent, provider, model) key for the parallel agent pipeline.
-// Provider is the virtual id for pooled providers (same as pmKey); Model is the
+// AgentKey is the (agent, provider, model) key for the parallel agent pipeline.
+// Provider is the virtual id for pooled providers (same as PMKey); Model is the
 // rewrite-target upstream model.
-type agentKey struct {
+type AgentKey struct {
 	Agent    string
 	Provider string
 	Model    string
 }
 
-// agentCount is one in-memory cumulative counter cell for the agent pipeline:
+// AgentCount is one in-memory cumulative counter cell for the agent pipeline:
 // request count + observed input/output tokens. All fields are mutated under
-// agentCounter.mu (get-or-create and read-modify-write are one critical section,
-// mirroring tokenCounter so two concurrent scanners can't lose an increment).
-type agentCount struct {
+// AgentCounter.mu (get-or-create and read-modify-write are one critical section,
+// mirroring TokenCounter so two concurrent scanners can't lose an increment).
+type AgentCount struct {
 	Requests   uint64
 	Input      uint64
 	Output     uint64
@@ -63,27 +63,27 @@ type agentCount struct {
 	Failures   uint64 // all-targets-failed 502 count
 }
 
-type agentCounter struct {
+type AgentCounter struct {
 	mu sync.Mutex
-	m  map[agentKey]*agentCount
+	m  map[AgentKey]*AgentCount
 }
 
-func newAgentCounter() *agentCounter {
-	return &agentCounter{m: map[agentKey]*agentCount{}}
+func NewAgentCounter() *AgentCounter {
+	return &AgentCounter{m: map[AgentKey]*AgentCount{}}
 }
 
 // incRequests bumps the request count for one (agent, provider, model) — called
 // once per committed (served) target on the forward hot path.
-func (a *agentCounter) incRequests(agent, provider, model string) {
+func (a *AgentCounter) IncRequests(agent, provider, model string) {
 	if a == nil || agent == "" {
 		return
 	}
-	k := agentKey{Agent: agent, Provider: provider, Model: model}
+	k := AgentKey{Agent: agent, Provider: provider, Model: model}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.m[k]
 	if c == nil {
-		c = &agentCount{}
+		c = &AgentCount{}
 		a.m[k] = c
 	}
 	c.Requests++
@@ -92,16 +92,16 @@ func (a *agentCounter) incRequests(agent, provider, model string) {
 // addTokens accrues observed usage to (agent, provider, model). Called from the
 // SSE usageScanner's commit path (the same bytes that feed the (provider, model)
 // token counter), so agent token attribution matches the per-model totals.
-func (a *agentCounter) addTokens(agent, provider, model string, u tokenUsage) {
+func (a *AgentCounter) AddTokens(agent, provider, model string, u TokenUsage) {
 	if a == nil || agent == "" {
 		return
 	}
-	k := agentKey{Agent: agent, Provider: provider, Model: model}
+	k := AgentKey{Agent: agent, Provider: provider, Model: model}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.m[k]
 	if c == nil {
-		c = &agentCount{}
+		c = &AgentCount{}
 		a.m[k] = c
 	}
 	c.Input += u.Input
@@ -110,10 +110,10 @@ func (a *agentCounter) addTokens(agent, provider, model string, u tokenUsage) {
 
 // snapshot returns a detached copy of all agent cells. Callers may read it
 // without holding the lock (the flusher diffs it once per minute).
-func (a *agentCounter) snapshot() map[agentKey]agentCount {
+func (a *AgentCounter) Snapshot() map[AgentKey]AgentCount {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := make(map[agentKey]agentCount, len(a.m))
+	out := make(map[AgentKey]AgentCount, len(a.m))
 	for k, v := range a.m {
 		out[k] = *v
 	}
@@ -122,39 +122,39 @@ func (a *agentCounter) snapshot() map[agentKey]agentCount {
 
 // addLatency records the upstream response latency (ms) for one (agent,provider,
 // model) — called on commit alongside the metrics addLatency.
-func (a *agentCounter) addLatency(agent, provider, model string, ms uint64) {
+func (a *AgentCounter) AddLatency(agent, provider, model string, ms uint64) {
 	if a == nil || agent == "" {
 		return
 	}
-	k := agentKey{Agent: agent, Provider: provider, Model: model}
+	k := AgentKey{Agent: agent, Provider: provider, Model: model}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.m[k]
 	if c == nil {
-		c = &agentCount{}
+		c = &AgentCount{}
 		a.m[k] = c
 	}
 	c.LatencySum += ms
 }
 
 // incFailure bumps the failure count (all-targets-failed 502) for an agent.
-func (a *agentCounter) incFailure(agent, provider, model string) {
+func (a *AgentCounter) IncFailure(agent, provider, model string) {
 	if a == nil || agent == "" {
 		return
 	}
-	k := agentKey{Agent: agent, Provider: provider, Model: model}
+	k := AgentKey{Agent: agent, Provider: provider, Model: model}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	c := a.m[k]
 	if c == nil {
-		c = &agentCount{}
+		c = &AgentCount{}
 		a.m[k] = c
 	}
 	c.Failures++
 }
 
-func (a *agentCounter) reset() {
+func (a *AgentCounter) Reset() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.m = map[agentKey]*agentCount{}
+	a.m = map[AgentKey]*AgentCount{}
 }

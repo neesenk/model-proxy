@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"strings"
 	"time"
@@ -78,9 +79,9 @@ func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w 
 		Recipe:       recipe,
 	}, fusionAdapter{proxy: p, context: fc, writer: w, request: r, cacheKey: cacheKey})
 	if p.metrics != nil {
-		p.metrics.inc("fusion", result.Run.Workflow, evFusionRuns)
+		p.metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionRuns)
 		if result.Run.Degraded != "" {
-			p.metrics.inc("fusion", result.Run.Workflow, evFusionDegraded)
+			p.metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionDegraded)
 		}
 	}
 	return result.Committed
@@ -277,8 +278,8 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			}
 			p.recordFailure(m.Provider, sched, fc.runtime.generation)
 			if p.metrics != nil {
-				p.metrics.inc(m.Provider, m.Model, evFailures)
-				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
+				p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
+				p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
 			}
 			res.Err = err
 			return
@@ -289,8 +290,8 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		if err != nil {
 			p.recordFailure(m.Provider, sched, fc.runtime.generation)
 			if p.metrics != nil {
-				p.metrics.inc(m.Provider, m.Model, evFailures)
-				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
+				p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
+				p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
 			}
 			res.Err = err
 			return
@@ -324,21 +325,21 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		decision := targetexec.ParseRateLimit(resp, peek, time.Now(), sched)
 		p.recordRateLimit(m.Provider, decision.Until, runtimestate.ParseRateLimitKind(string(decision.Kind)), fc.runtime.generation)
 		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evRateLimited429)
-			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
+			p.metrics.Inc(m.Provider, m.Model, counters.EvRateLimited429)
+			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
 		}
 		res.Err = errFusionLegUnavailable
 	case resp.StatusCode >= 500:
 		p.recordFailure(m.Provider, sched, fc.runtime.generation)
 		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evFailures)
-			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget
+			p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
+			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
 		}
 		res.Err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	case resp.StatusCode == http.StatusUnauthorized:
 		p.recordFailure(m.Provider, sched, fc.runtime.generation)
 		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evFailovers) // like tryTarget: failover only, no evFailures
+			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // like tryTarget: failover only, no counters.EvFailures
 		}
 		res.Err = fmt.Errorf("upstream status %d after auth refresh", resp.StatusCode)
 	case resp.StatusCode == http.StatusNotFound || targetexec.IsModelDenied(resp.StatusCode, respBody):
@@ -355,14 +356,14 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.generation)
 		}
 		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget's failover
+			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget's failover
 		}
 		res.Err = fmt.Errorf("model unavailable (status %d)", resp.StatusCode)
 	case resp.StatusCode >= 300:
 		// 4xx (non-429): client-class error — no candidate, but the provider is
 		// healthy; don't poison the circuit.
 		if p.metrics != nil {
-			p.metrics.inc(m.Provider, m.Model, evFailures)
+			p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
 		}
 		res.Err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	default:
@@ -372,27 +373,27 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			res.Err = errFusionEmptyDraft
 			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.generation)
 			if p.metrics != nil {
-				p.metrics.inc(m.Provider, m.Model, evFailovers) // leg abandoned, like tryTarget's empty-200 failover
+				p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget's empty-200 failover
 			}
 		} else {
 			p.recordSuccess(m.Provider, m.Model, fc.runtime.generation)
 			if p.metrics != nil {
-				p.metrics.inc(m.Provider, m.Model, evRequests)
+				p.metrics.Inc(m.Provider, m.Model, counters.EvRequests)
 				latencyMs := time.Since(start).Milliseconds()
-				p.metrics.addLatency(m.Provider, m.Model, uint64(latencyMs), uint64(latencyMs))
+				p.metrics.AddLatency(m.Provider, m.Model, uint64(latencyMs), uint64(latencyMs))
 			}
 			// Usage is accounted per leg (internal books stay accurate; the
 			// client's own usage comes from the synthesizer, unmodified).
-			usage := tokenUsage{
+			usage := counters.TokenUsage{
 				Input:         res.Usage.Input,
 				Output:        res.Usage.Output,
 				CacheCreation: res.Usage.CacheCreation,
 				CacheRead:     res.Usage.CacheRead,
 			}
 			if p.tokens != nil {
-				p.tokens.commit(tokenKey{Provider: m.Provider, Model: m.Model}, usage)
+				p.tokens.Commit(counters.TokenKey{Provider: m.Provider, Model: m.Model}, usage)
 			}
-			p.agents.addTokens(fc.agent, m.Provider, m.Model, usage)
+			p.agents.AddTokens(fc.agent, m.Provider, m.Model, usage)
 		}
 	}
 	// Request log: each leg records under its own id (fusion-panel-<i>-<parent>

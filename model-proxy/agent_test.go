@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,8 +35,8 @@ func TestDetectAgent(t *testing.T) {
 			if c.hdr != "" {
 				req.Header.Set("x-claude-code-session-id", c.hdr)
 			}
-			if got := detectAgent(req); got != c.want {
-				t.Errorf("detectAgent(ua=%q, hdr=%q) = %q want %q", c.ua, c.hdr, got, c.want)
+			if got := counters.DetectAgent(req); got != c.want {
+				t.Errorf("counters.DetectAgent(ua=%q, hdr=%q) = %q want %q", c.ua, c.hdr, got, c.want)
 			}
 		})
 	}
@@ -44,24 +45,24 @@ func TestDetectAgent(t *testing.T) {
 // TestAgentCounter: incRequests + addTokens accumulate under the (agent,
 // provider, model) key; snapshot returns a detached copy.
 func TestAgentCounter(t *testing.T) {
-	a := newAgentCounter()
-	a.incRequests("claude-code", "z", "glm")
-	a.incRequests("claude-code", "z", "glm")
-	a.addTokens("claude-code", "z", "glm", tokenUsage{Input: 100, Output: 20})
-	a.incRequests("codex", "z", "glm")
-	snap := a.snapshot()
-	cc := snap[agentKey{Agent: "claude-code", Provider: "z", Model: "glm"}]
+	a := counters.NewAgentCounter()
+	a.IncRequests("claude-code", "z", "glm")
+	a.IncRequests("claude-code", "z", "glm")
+	a.AddTokens("claude-code", "z", "glm", counters.TokenUsage{Input: 100, Output: 20})
+	a.IncRequests("codex", "z", "glm")
+	snap := a.Snapshot()
+	cc := snap[counters.AgentKey{Agent: "claude-code", Provider: "z", Model: "glm"}]
 	if cc.Requests != 2 || cc.Input != 100 || cc.Output != 20 {
 		t.Errorf("claude-code cell = %+v want reqs=2 in=100 out=20", cc)
 	}
-	cx := snap[agentKey{Agent: "codex", Provider: "z", Model: "glm"}]
+	cx := snap[counters.AgentKey{Agent: "codex", Provider: "z", Model: "glm"}]
 	if cx.Requests != 1 || cx.Input != 0 {
 		t.Errorf("codex cell = %+v want reqs=1 in=0", cx)
 	}
 	// reset clears all cells.
-	a.reset()
-	if len(a.snapshot()) != 0 {
-		t.Errorf("after reset, cells=%v want empty", a.snapshot())
+	a.Reset()
+	if len(a.Snapshot()) != 0 {
+		t.Errorf("after reset, cells=%v want empty", a.Snapshot())
 	}
 }
 
@@ -108,15 +109,15 @@ func TestForward_RecordsAgent(t *testing.T) {
 
 	// Give the scanner's async-ish commit a beat (it commits on Close, which is
 	// synchronous in forward, so the snapshot is already final here).
-	snap := p.agents.snapshot()
-	cc := snap[agentKey{Agent: "claude-code", Provider: "aqp", Model: "claude-sonnet-4"}]
+	snap := p.agents.Snapshot()
+	cc := snap[counters.AgentKey{Agent: "claude-code", Provider: "aqp", Model: "claude-sonnet-4"}]
 	if cc.Requests != 1 {
 		t.Errorf("claude-code requests=%d want 1", cc.Requests)
 	}
 	if cc.Input != 150 || cc.Output != 42 {
 		t.Errorf("claude-code tokens in=%d out=%d want 150/42 (SSE usage must attribute to agent)", cc.Input, cc.Output)
 	}
-	cx := snap[agentKey{Agent: "codex", Provider: "aqp", Model: "claude-sonnet-4"}]
+	cx := snap[counters.AgentKey{Agent: "codex", Provider: "aqp", Model: "claude-sonnet-4"}]
 	if cx.Requests != 1 || cx.Input != 150 {
 		t.Errorf("codex cell = %+v want reqs=1 in=150 (split by UA)", cx)
 	}

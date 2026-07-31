@@ -1,6 +1,7 @@
 package main
 
 import (
+	obscounters "model-proxy/internal/observe/counters"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -28,9 +29,9 @@ type Proxy struct {
 	providers        map[string]provider.Provider // provider name → Provider (shared)
 	client           *http.Client
 	quota            *quotaTracker                  // background quota poller; nil only in degenerate tests
-	metrics          *metricsStore                  // request counters (atomic); nil only in degenerate tests
-	tokens           *tokenCounter                  // SSE-scanned token usage; nil only in degenerate tests
-	agents           *agentCounter                  // per-agent (UA) request/token counters; nil only in degenerate tests
+	metrics          *obscounters.MetricsStore      // request counters (atomic); nil only in degenerate tests
+	tokens           *obscounters.TokenCounter      // SSE-scanned token usage; nil only in degenerate tests
+	agents           *obscounters.AgentCounter      // per-agent (UA) request/token counters; nil only in degenerate tests
 	stats            *observestats.Store            // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
 	flusher          *statsFlusher                  // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog           *requestlog.Logger             // per-request access log (full bodies); nil = disabled (default) or init failure

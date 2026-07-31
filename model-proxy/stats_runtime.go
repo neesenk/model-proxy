@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	obscounters "model-proxy/internal/observe/counters"
 	"path/filepath"
 	"sync"
 	"time"
@@ -37,9 +38,9 @@ type statsSink interface {
 // baseline under the same lock.
 type statsFlusher struct {
 	stats   statsSink
-	metrics *metricsStore
-	tokens  *tokenCounter
-	agents  *agentCounter
+	metrics *obscounters.MetricsStore
+	tokens  *obscounters.TokenCounter
+	agents  *obscounters.AgentCounter
 
 	mu         sync.Mutex
 	prev       map[observestats.Key]observestats.Counters
@@ -67,9 +68,9 @@ type agentStatsBatch struct {
 
 func newStatsFlusher(
 	stats statsSink,
-	metrics *metricsStore,
-	tokens *tokenCounter,
-	agents *agentCounter,
+	metrics *obscounters.MetricsStore,
+	tokens *obscounters.TokenCounter,
+	agents *obscounters.AgentCounter,
 	baseline map[observestats.Key]observestats.Counters,
 ) *statsFlusher {
 	return &statsFlusher{
@@ -80,7 +81,7 @@ func newStatsFlusher(
 func (f *statsFlusher) collect() map[observestats.Key]observestats.Counters {
 	snapshot := map[observestats.Key]observestats.Counters{}
 	if f.metrics != nil {
-		for key, metrics := range f.metrics.snapshot() {
+		for key, metrics := range f.metrics.Snapshot() {
 			statsKey := observestats.Key{Provider: key.Provider, Model: key.Model}
 			counters := snapshot[statsKey]
 			counters.Requests = metrics.Requests
@@ -94,7 +95,7 @@ func (f *statsFlusher) collect() map[observestats.Key]observestats.Counters {
 		}
 	}
 	if f.tokens != nil {
-		for key, usage := range f.tokens.snapshot() {
+		for key, usage := range f.tokens.Snapshot() {
 			statsKey := observestats.Key{Provider: key.Provider, Model: key.Model}
 			counters := snapshot[statsKey]
 			counters.Input = usage.Input
@@ -112,7 +113,7 @@ func (f *statsFlusher) collectAgents() map[observestats.AgentKey]observestats.Ag
 	if f.agents == nil {
 		return nil
 	}
-	source := f.agents.snapshot()
+	source := f.agents.Snapshot()
 	snapshot := make(map[observestats.AgentKey]observestats.AgentCounters, len(source))
 	for key, counters := range source {
 		snapshot[observestats.AgentKey{
@@ -443,13 +444,13 @@ func (f *statsFlusher) reset() error {
 		return err
 	}
 	if f.metrics != nil {
-		f.metrics.reset()
+		f.metrics.Reset()
 	}
 	if f.tokens != nil {
-		f.tokens.reset()
+		f.tokens.Reset()
 	}
 	if f.agents != nil {
-		f.agents.reset()
+		f.agents.Reset()
 	}
 	f.prev = f.collect()
 	f.agentPrev = f.collectAgents()
@@ -530,18 +531,18 @@ func (p *Proxy) initStats(config StatsConfig) {
 		log.Printf("[stats] load baseline failed: %v", err)
 		baseline = map[observestats.Key]observestats.Counters{}
 	}
-	for key, counters := range baseline {
-		runtimeKey := pmKey{Provider: key.Provider, Model: key.Model}
-		p.metrics.seed(runtimeKey, providerMetricsSnapshot{
-			Requests: counters.Requests, Failovers: counters.Failovers,
-			RateLimited429: counters.RateLimited429, Failures: counters.Failures,
-			LastRequestAt: counters.LastRequestAt, LatencySum: counters.LatencySum,
-			TTFTSum: counters.TTFTSum,
+	for key, base := range baseline {
+		runtimeKey := obscounters.PMKey{Provider: key.Provider, Model: key.Model}
+		p.metrics.Seed(runtimeKey, obscounters.ProviderMetricsSnapshot{
+			Requests: base.Requests, Failovers: base.Failovers,
+			RateLimited429: base.RateLimited429, Failures: base.Failures,
+			LastRequestAt: base.LastRequestAt, LatencySum: base.LatencySum,
+			TTFTSum: base.TTFTSum,
 		})
-		p.tokens.seed(runtimeKey, tokenUsage{
-			Input: counters.Input, Output: counters.Output,
-			CacheCreation: counters.CacheCreation, CacheRead: counters.CacheRead,
-			Requests: counters.TokenRequests,
+		p.tokens.Seed(runtimeKey, obscounters.TokenUsage{
+			Input: base.Input, Output: base.Output,
+			CacheCreation: base.CacheCreation, CacheRead: base.CacheRead,
+			Requests: base.TokenRequests,
 		})
 	}
 	p.flusher = newStatsFlusher(store, p.metrics, p.tokens, p.agents, baseline)

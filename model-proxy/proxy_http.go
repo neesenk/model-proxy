@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/observe/counters"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -124,7 +125,7 @@ func (p *Proxy) publishTerminalEvent(requestID string, r *http.Request, proto, e
 		Type:      "end",
 		Ts:        time.Now().UnixMilli(),
 		RequestID: requestID,
-		Agent:     detectAgent(r),
+		Agent:     counters.DetectAgent(r),
 		Protocol:  proto,
 		Exposed:   exposed,
 		Status:    status,
