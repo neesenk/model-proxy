@@ -329,7 +329,7 @@ application → serveAssembly → applicationRuntime → Proxy
   `observe/events`、`observe/requestlog`、`observe/stats`、`pricing`、`protocol`、
   `runtime/wirecap`、`transport/bodycapture`；
 - `app → accounts, catalog, config, protocol, provider`；
-- `cli → daemonctl, observe/stats, provider`；
+- `cli → daemonctl, observe/requestlog, observe/stats, provider`；
 - `cli/doctor → accounts, app, cli, cli/models, config, takeover, provider`；
 - `cli/login → accounts, config, provider`；
 - `cli/models → accounts, app, catalog, config, probe, provider`；
