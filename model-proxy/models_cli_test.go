@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/protocol"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,7 +121,7 @@ func TestCLI_ModelsRefreshFallback_RouteProbe(t *testing.T) {
 			return
 		}
 		// /chat/completions probe: 2xx for callable models, 404 (+ error body) otherwise.
-		model := extractModel(readAll(r.Body))
+		model := protocol.ExtractModel(readAll(r.Body))
 		if callable[model] {
 			w.WriteHeader(200)
 			w.Write([]byte(`{}`))

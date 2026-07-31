@@ -19,7 +19,7 @@ func TestWriteUnsupportedConversionError_ProtocolEnvelopes(t *testing.T) {
 	for _, proto := range []protocol.Protocol{protocol.OpenAI, protocol.Responses, protocol.Anthropic} {
 		t.Run(string(proto), func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			writeUnsupportedConversionError(rec, proto, err)
+			protocol.WriteUnsupportedConversionError(rec, proto, err)
 			if rec.Code != http.StatusBadRequest || rec.Header().Get("content-type") != "application/json" {
 				t.Fatalf("status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
 			}

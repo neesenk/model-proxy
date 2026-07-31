@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"model-proxy/internal/protocol"
 	"model-proxy/internal/takeover"
 	"net/http"
 	"net/http/httptest"
@@ -108,7 +109,7 @@ func TestImplicitRoute_ForwardsUnroutedLoggedInModel(t *testing.T) {
 	var gotModel string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		gotModel = extractModel(b)
+		gotModel = protocol.ExtractModel(b)
 		w.Header().Set("content-type", "application/json")
 		w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
 	}))

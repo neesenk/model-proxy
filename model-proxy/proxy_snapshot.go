@@ -37,7 +37,7 @@ func (p *Proxy) pricingSnapshot() *pricing.Catalog {
 	p.pricingMu.Lock()
 	defer p.pricingMu.Unlock()
 	cat, err := pricing.EnsureFresh(pricing.RefreshOptions{
-		CacheFile: pricingCachePath(),
+		CacheFile: pricing.CachePath(homeDir()),
 		Endpoint:  cfg.Pricing.ResolvedSourceURL(),
 		Fetch:     pricing.FetchHTTP,
 		TTL:       cfg.Pricing.TTLDuration(),

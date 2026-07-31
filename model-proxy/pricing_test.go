@@ -25,7 +25,7 @@ const pricingIntegrationFixture = `{
 func TestPricingCachePathUsesApplicationHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if got, want := pricingCachePath(), filepath.Join(home, ".model-proxy", "pricing_cache.json"); got != want {
+	if got, want := pricing.CachePath(homeDir()), filepath.Join(home, ".model-proxy", "pricing_cache.json"); got != want {
 		t.Errorf("pricing cache path = %q, want %q", got, want)
 	}
 }

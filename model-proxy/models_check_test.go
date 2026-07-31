@@ -5,6 +5,7 @@ import (
 	"io"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/probe"
+	"model-proxy/internal/protocol"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -269,7 +270,7 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// extract model from body
 		body := readAll(r.Body)
-		model := extractModel(body)
+		model := protocol.ExtractModel(body)
 		code, ok := behaviors[model]
 		if !ok {
 			code = 404

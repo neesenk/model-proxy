@@ -1,11 +1,11 @@
-package main
+package protocol
 
 import (
 	"bytes"
 	"encoding/json"
 )
 
-func extractModel(body []byte) string {
+func ExtractModel(body []byte) string {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	// Consume the opening {.
 	dec.Token()

@@ -47,7 +47,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	}
 	r.Body.Close()
 
-	calledModel := extractModel(origBody)
+	calledModel := protocol.ExtractModel(origBody)
 	if calledModel == "" {
 		p.publishTerminalEvent(requestID, r, proto, calledModel, http.StatusBadRequest)
 		http.Error(w, `missing or unparseable "model" field in request body`, http.StatusBadRequest)
@@ -197,7 +197,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		}
 		if res.conversionErr != nil && len(res.tried) == 0 {
 			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-			writeUnsupportedConversionError(w, protocol.Protocol(proto), res.conversionErr)
+			protocol.WriteUnsupportedConversionError(w, protocol.Protocol(proto), res.conversionErr)
 			return
 		}
 		sawHard = sawHard || res.sawHard
