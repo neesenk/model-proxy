@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -37,14 +38,14 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 	refreshed := make(chan string, 2)
 	p.providers["primary"] = &quotaCountProv{name: "primary", refreshed: refreshed}
 	p.providers["fallback"] = &quotaCountProv{name: "fallback", refreshed: refreshed}
-	p.quota.stop()
-	p.quota = newQuotaTracker(
+	p.quota.Stop()
+	p.quota = runtimestate.NewQuotaTracker(
 		"",
 		func() *Config { return cfg },
 		func() map[string]provider.Provider { return p.providers },
 		&p.runtimeState,
 	)
-	p.quota.generation = p.configGeneration.Load
+	p.quota.Generation = p.configGeneration.Load
 	px := httptest.NewServer(http.HandlerFunc(p.handler))
 	defer px.Close()
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
@@ -56,7 +57,7 @@ func TestProxy_QuotaRefreshOnRateLimit(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("quota refresh did not run after 429")
 	}
-	p.quota.stop() // drain every admitted refresh before asserting exact cardinality
+	p.quota.Stop() // drain every admitted refresh before asserting exact cardinality
 	select {
 	case name := <-refreshed:
 		t.Fatalf("unexpected duplicate quota refresh for %q", name)
@@ -88,7 +89,7 @@ func (q *quotaCountProv) Quota() (*provider.QuotaSnapshot, error) {
 func staticSurplus(p *Proxy, name string, remaining, fLeft float64) {
 	now := time.Now()
 	const dur = 7 * 24 * time.Hour
-	p.quota.setSnapshot(name, &provider.QuotaSnapshot{
+	p.quota.SetSnapshot(name, &provider.QuotaSnapshot{
 		Billing:      provider.BillingPlan,
 		RemainingPct: remaining,
 		Windows: []provider.QuotaWindow{{
@@ -99,7 +100,7 @@ func staticSurplus(p *Proxy, name string, remaining, fLeft float64) {
 	})
 }
 
-// newQuotaProxy builds a Proxy wired with a hand-built quotaTracker (no polling),
+// newQuotaProxy builds a Proxy wired with a hand-built runtimestate.QuotaTracker (no polling),
 // for schedule() unit tests. Providers are backed by testProv. It constructs the
 // Proxy directly (not via NewProxy) so no real poller goroutine starts — which
 // avoids a data race between that goroutine reading cfg.Scheduling and these
@@ -119,13 +120,13 @@ func newQuotaProxy(t *testing.T, provs map[string]Provider, routes map[string][]
 		parentOf:  map[string]string{},
 	}
 	p.expandedRoutes = p.buildExpandedRoutes()
-	p.quota = newQuotaTracker(
+	p.quota = runtimestate.NewQuotaTracker(
 		"",
 		func() *Config { return cfg },
 		func() map[string]provider.Provider { return p.providers },
 		&p.runtimeState,
 	)
-	p.quota.generation = p.configGeneration.Load
+	p.quota.Generation = p.configGeneration.Load
 	t.Cleanup(p.Close)
 	for name := range provs {
 		p.providers[name] = &testProv{key: name}
@@ -168,11 +169,11 @@ func TestScheduleAdapter_AppliesPeakMultiplier(t *testing.T) {
 	ult := provider.QuotaWindow{Ultimate: true, Kind: "tokens", RemainingPct: 0.5, Total: 200,
 		Duration: dur, ResetsAt: now.Add(dur / 2)} // fLeft 0.5
 	// plain: ultimate only → surplus 0.5 − 0.5 = 0.
-	p.quota.setSnapshot("plain", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5,
+	p.quota.SetSnapshot("plain", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5,
 		Windows: []provider.QuotaWindow{ult}, AsOf: now})
 	// peak: ultimate + short (rem 0.6, total 100 → share 0.5); peak mult 2 →
 	// remaining = 0.5 − 0.6×0.5×1 = 0.2 → surplus 0.2 − 0.5 = −0.3.
-	p.quota.setSnapshot("peak", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5,
+	p.quota.SetSnapshot("peak", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5,
 		Windows: []provider.QuotaWindow{ult, {Short: true, Kind: "tokens", RemainingPct: 0.6, Total: 100}}, AsOf: now})
 	if got := firstProvider(p, "m"); got != "plain" {
 		t.Errorf("first=%q, want plain (peak provider's surplus reduced by short-window burn)", got)
@@ -192,21 +193,21 @@ func TestScheduleAdapter_ProjectsParentBillingAndMapsTargets(t *testing.T) {
 		},
 		map[string][]RouteTarget{"m": targets})
 	p.parentOf = map[string]string{"pool#acct": "pool"}
-	p.quota.setSnapshot("pool#acct", &provider.QuotaSnapshot{
+	p.quota.SetSnapshot("pool#acct", &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan,
 		AsOf:    now,
 	})
-	p.quota.setSnapshot("plan", &provider.QuotaSnapshot{
+	p.quota.SetSnapshot("plan", &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan,
 		AsOf:    now,
 	})
 	if got := configuredBillingOverride(p.cfg.Providers["pool"].Billing); got != provider.BillingPayG {
 		t.Fatalf("parent billing override=%v, want payg", got)
 	}
-	if got := p.quota.snapshot("pool#acct"); got == nil || got.Billing != provider.BillingPlan {
+	if got := p.quota.Snapshot("pool#acct"); got == nil || got.Billing != provider.BillingPlan {
 		t.Fatalf("virtual quota=%+v, want fresh plan snapshot", got)
 	}
-	if got := p.quota.snapshot("plan"); got == nil || got.Billing != provider.BillingPlan {
+	if got := p.quota.Snapshot("plan"); got == nil || got.Billing != provider.BillingPlan {
 		t.Fatalf("plan quota=%+v, want fresh plan snapshot", got)
 	}
 
@@ -238,7 +239,7 @@ func TestScheduleAdapter_DerivesQuotaMaxAgeFromPollInterval(t *testing.T) {
 	p := newQuotaProxy(t,
 		map[string]Provider{"unknown": {}, "candidate": {}},
 		map[string][]RouteTarget{"m": targets})
-	p.quota.setSnapshot("candidate", &provider.QuotaSnapshot{
+	p.quota.SetSnapshot("candidate", &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan,
 		AsOf:    now.Add(-5 * time.Minute),
 	})

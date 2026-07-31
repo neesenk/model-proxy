@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"encoding/json"
@@ -9,19 +9,20 @@ import (
 	"sync"
 	"time"
 
-	runtimestate "model-proxy/internal/runtime"
+	configdomain "model-proxy/internal/config"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/provider"
 )
 
-// quotaTracker polls providers' Quota() periodically, caches the results in
+// QuotaTracker polls providers' Quota() periodically, caches the results in
 // memory + a file (~/.model-proxy/quota_state.json), and serves them to the
 // scheduler. Quota values live in the shared runtime Manager; the tracker mutex
 // only deduplicates refresh work.
-type quotaTracker struct {
-	mu        sync.Mutex // guards refreshGuard only; quota values live in runtime
-	runtime   *runtimestate.Manager
-	path      string
-	cfg       func() *Config
+type QuotaTracker struct {
+	mu        sync.Mutex // guards RefreshGuard only; quota values live in runtime
+	runtime   *Manager
+	Path      string
+	cfg       func() *configdomain.Config
 	provs     func() map[string]provider.Provider
 	stopCh    chan struct{}
 	stopOnce  sync.Once
@@ -33,7 +34,7 @@ type quotaTracker struct {
 	poller sync.WaitGroup
 	// generation identifies the Proxy config generation that owns provider
 	// snapshots. A nil callback means a standalone/test tracker with generation 0.
-	generation func() uint64
+	Generation func() uint64
 	// persistMu serializes persist() WITHIN one tracker. Cross-tracker
 	// contention (parallel test proxies, or the daemon vs a test) is handled by
 	// the unique temp file in persist() — the fixed ".tmp" name used to make a
@@ -43,59 +44,56 @@ type quotaTracker struct {
 	// Defaults (3 / 1s) are set in newQuotaTracker; tests shrink them to stay fast.
 	retryAttempts int
 	retryBackoff  time.Duration
-	// refreshGuard dedupes 429-triggered refreshes per provider (inFlight
+	// RefreshGuard dedupes 429-triggered refreshes per provider (inFlight
 	// coalesces concurrent ones; last debounces ones that just ran), so a 429
 	// storm doesn't fire N upstream Quota() calls + N persists. Guarded by mu.
-	refreshGuard map[string]*refreshState
+	RefreshGuard map[string]*RefreshState
 	// loadedSticky is populated by load() on boot; NewProxy restores it through
 	// the runtime Manager.
-	loadedSticky map[string]runtimestate.Sticky
+	LoadedSticky map[string]Sticky
 	// fullSnapshot is installed by Proxy and atomically snapshots config
 	// fingerprint + health/sticky + quota under the repository lock order.
-	fullSnapshot func() persistedFullSnapshot
+	FullSnapshot func() PersistedFullSnapshot
 	// loadedHealth is populated by load() on boot; NewProxy applies it (future-
 	// dated entries only) through the runtime Manager.
-	loadedHealth map[string]persistedHealth
+	LoadedHealth map[string]PersistedHealth
 	// loadedHealthFP is the config fingerprint the loaded health was frozen
 	// under; NewProxy restores ONLY when it matches the current config's
 	// fingerprint (see healthConfigFingerprint).
-	loadedHealthFP string
+	LoadedHealthFP string
 	// loadedWireCaps is populated by load() on boot; NewProxy restores the
 	// verdicts whose base_url still matches the current config (wirecap.go).
-	loadedWireCaps map[string]wireCaps
+	LoadedWireCaps map[string]runtimewire.Capabilities
 }
 
-// persistedHealth is the on-disk form of one provider's frozen runtime state.
-type persistedHealth = runtimestate.PersistedHealth
-
-type persistedFullSnapshot struct {
-	Providers  map[string]persistedSnapshot
-	Sticky     map[string]runtimestate.Sticky
-	Health     map[string]persistedHealth
+type PersistedFullSnapshot struct {
+	Providers  map[string]PersistedQuotaSnapshot
+	Sticky     map[string]Sticky
+	Health     map[string]PersistedHealth
 	HealthFP   string
 	Generation uint64
-	WireCaps   map[string]wireCaps
+	WireCaps   map[string]runtimewire.Capabilities
 }
 
-// refreshState tracks per-provider refresh dedup state (guarded by quotaTracker.mu).
-type refreshState struct {
+// RefreshState tracks per-provider refresh dedup state (guarded by QuotaTracker.mu).
+type RefreshState struct {
 	last     time.Time
 	inFlight bool
 }
 
-func newQuotaTracker(
+func NewQuotaTracker(
 	path string,
-	cfg func() *Config,
+	cfg func() *configdomain.Config,
 	provs func() map[string]provider.Provider,
-	runtimeManager *runtimestate.Manager,
-) *quotaTracker {
+	runtimeManager *Manager,
+) *QuotaTracker {
 	if runtimeManager == nil {
 		panic("quota tracker requires a runtime Manager")
 	}
-	return &quotaTracker{
+	return &QuotaTracker{
 		runtime:       runtimeManager,
-		refreshGuard:  map[string]*refreshState{},
-		path:          path,
+		RefreshGuard:  map[string]*RefreshState{},
+		Path:          path,
 		cfg:           cfg,
 		provs:         provs,
 		stopCh:        make(chan struct{}),
@@ -105,17 +103,17 @@ func newQuotaTracker(
 	}
 }
 
-func (t *quotaTracker) currentGeneration() uint64 {
-	if t.generation == nil {
+func (t *QuotaTracker) CurrentGeneration() uint64 {
+	if t.Generation == nil {
 		return 0
 	}
-	return t.generation()
+	return t.Generation()
 }
 
 // launch admits a background task and increments the WaitGroup under the same
 // lifecycle mutex used by stop. This makes accepting+Add atomic with the
 // accepting=false transition, so Add can never race a zero-counter Wait.
-func (t *quotaTracker) launch(fn func()) bool {
+func (t *QuotaTracker) Launch(fn func()) bool {
 	t.lifeMu.Lock()
 	if !t.accepting {
 		t.lifeMu.Unlock()
@@ -130,9 +128,9 @@ func (t *quotaTracker) launch(fn func()) bool {
 	return true
 }
 
-func (t *quotaTracker) start() {
-	t.load() // baseline before first poll
-	t.launch(func() {
+func (t *QuotaTracker) Start() {
+	t.Load() // baseline before first poll
+	t.Launch(func() {
 		interval := t.cfg().Scheduling.PollInterval()
 		// bootstrap poll shortly after start, as a one-shot timer in the same
 		// goroutine — keeps the lifecycle to a single tracked goroutine (the
@@ -144,9 +142,9 @@ func (t *quotaTracker) start() {
 		for {
 			select {
 			case <-bootstrap.C:
-				t.pollAll(time.Now())
+				t.PollAll(time.Now())
 			case <-ticker.C:
-				t.pollAll(time.Now())
+				t.PollAll(time.Now())
 			case <-t.stopCh:
 				return
 			}
@@ -158,7 +156,7 @@ func (t *quotaTracker) start() {
 // the owner (Proxy.Close / tests) releases the tracker deterministically —
 // without the wait a lingering poll could fire a persist after the owner has
 // torn down or moved to a new config generation. Idempotent via stopOnce.
-func (t *quotaTracker) stop() {
+func (t *QuotaTracker) Stop() {
 	t.stopOnce.Do(func() {
 		t.lifeMu.Lock()
 		t.accepting = false
@@ -170,11 +168,11 @@ func (t *quotaTracker) stop() {
 	})
 }
 
-func (t *quotaTracker) pollAfter(d time.Duration) {
-	t.launch(func() {
+func (t *QuotaTracker) PollAfter(d time.Duration) {
+	t.Launch(func() {
 		select {
 		case <-time.After(d):
-			t.pollAll(time.Now())
+			t.PollAll(time.Now())
 		case <-t.stopCh:
 		}
 	})
@@ -182,7 +180,7 @@ func (t *quotaTracker) pollAfter(d time.Duration) {
 
 // stopped reports whether stop has been signaled (non-blocking). Used by the
 // async dispatchers to no-op a poll dispatched after Close.
-func (t *quotaTracker) stopped() bool {
+func (t *QuotaTracker) Stopped() bool {
 	select {
 	case <-t.stopCh:
 		return true
@@ -195,28 +193,28 @@ func (t *quotaTracker) stopped() bool {
 // reload uses to "poll now". Tracked by poller so Proxy.Close waits for it, and
 // stop-aware so a dispatch after Close no-ops instead of firing a persist after
 // the final flush (the bug: reload's bare `go pollAll` bypassed the WaitGroup).
-func (t *quotaTracker) pollAsync(now time.Time) {
-	gen := t.currentGeneration()
-	t.launch(func() {
-		if t.stopped() {
+func (t *QuotaTracker) PollAsync(now time.Time) {
+	gen := t.CurrentGeneration()
+	t.Launch(func() {
+		if t.Stopped() {
 			return
 		}
-		t.pollAllGeneration(now, gen)
+		t.PollAllGeneration(now, gen)
 	})
 }
 
 // refreshAsync dispatches one refreshOne on a tracked, stop-aware goroutine —
 // the 429 path. Same lifecycle as pollAsync; refreshOne keeps its own dedup.
-func (t *quotaTracker) refreshAsync(name string, generations ...uint64) {
-	gen := t.currentGeneration()
+func (t *QuotaTracker) RefreshAsync(name string, generations ...uint64) {
+	gen := t.CurrentGeneration()
 	if len(generations) > 0 {
 		gen = generations[0]
 	}
-	t.launch(func() {
-		if t.stopped() {
+	t.Launch(func() {
+		if t.Stopped() {
 			return
 		}
-		t.refreshOne(name, gen)
+		t.RefreshOne(name, gen)
 	})
 }
 
@@ -229,11 +227,11 @@ func (t *quotaTracker) refreshAsync(name string, generations ...uint64) {
 // cfg.Providers and looking the parent up by name found nil and skipped the
 // whole pool every cycle. Each virtual carries its own bound credentials
 // (buildOne binding point #1), so fetchQuota(p) queries the correct account.
-func (t *quotaTracker) pollAll(now time.Time) {
-	t.pollAllGeneration(now, t.currentGeneration())
+func (t *QuotaTracker) PollAll(now time.Time) {
+	t.PollAllGeneration(now, t.CurrentGeneration())
 }
 
-func (t *quotaTracker) pollAllGeneration(now time.Time, generation uint64) {
+func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 	provs := t.provs()
 	var wg sync.WaitGroup
 	results := make(map[string]*provider.QuotaSnapshot, len(provs))
@@ -242,7 +240,7 @@ func (t *quotaTracker) pollAllGeneration(now time.Time, generation uint64) {
 		wg.Add(1)
 		go func(n string, p provider.Provider) {
 			defer wg.Done()
-			s := t.fetchQuota(p, now) // fetchQuota retries transient errors
+			s := t.FetchQuota(p, now) // fetchQuota retries transient errors
 			resultsMu.Lock()
 			results[n] = s
 			resultsMu.Unlock()
@@ -252,7 +250,7 @@ func (t *quotaTracker) pollAllGeneration(now time.Time, generation uint64) {
 	if !t.runtime.MergeQuotas(results, generation) {
 		return // reload happened while the upstream polls were in flight
 	}
-	if err := t.persist(); err != nil {
+	if err := t.Persist(); err != nil {
 		log.Printf("[quota] persist after pollAll failed: %v", err)
 	}
 }
@@ -260,7 +258,7 @@ func (t *quotaTracker) pollAllGeneration(now time.Time, generation uint64) {
 // clearForGeneration drops quota snapshots owned by the previous config. The
 // The caller changes the runtime Manager generation first; stale clears are
 // rejected by the same generation gate as poll commits.
-func (t *quotaTracker) clearForGeneration(generation uint64) {
+func (t *QuotaTracker) ClearForGeneration(generation uint64) {
 	t.runtime.ClearQuotas(generation)
 }
 
@@ -269,16 +267,16 @@ func (t *quotaTracker) clearForGeneration(generation uint64) {
 // UI's per-account "Refresh usage" - unlike refreshOne it is NOT debounced
 // (a manual click should always re-poll) and runs synchronously so the caller
 // sees the fresh snapshot. Returns false if the key isn't a live provider.
-func (t *quotaTracker) pollOne(key string) bool {
-	generation := t.currentGeneration()
+func (t *QuotaTracker) PollOne(key string) bool {
+	generation := t.CurrentGeneration()
 	p := t.provs()[key]
 	if p == nil {
 		return false
 	}
-	if !t.commitSnapshot(generation, key, t.fetchQuota(p, time.Now())) {
+	if !t.CommitSnapshot(generation, key, t.FetchQuota(p, time.Now())) {
 		return false
 	}
-	if err := t.persist(); err != nil {
+	if err := t.Persist(); err != nil {
 		log.Printf("[quota] persist after pollOne(%s) failed: %v", key, err)
 	}
 	return true
@@ -288,21 +286,21 @@ func (t *quotaTracker) pollOne(key string) bool {
 // concurrent refresh (inFlight) or one that ran less than
 // pollInterval/2 ago (last) is dropped, so a 429 storm doesn't fire N upstream
 // Quota() calls + N persists for the same provider.
-func (t *quotaTracker) refreshOne(name string, generations ...uint64) {
-	generation := t.currentGeneration()
+func (t *QuotaTracker) RefreshOne(name string, generations ...uint64) {
+	generation := t.CurrentGeneration()
 	if len(generations) > 0 {
 		generation = generations[0]
 	}
-	if t.currentGeneration() != generation {
+	if t.CurrentGeneration() != generation {
 		return
 	}
 	now := time.Now()
 	half := t.cfg().Scheduling.PollInterval() / 2
 	t.mu.Lock()
-	g := t.refreshGuard[name]
+	g := t.RefreshGuard[name]
 	if g == nil {
-		g = &refreshState{}
-		t.refreshGuard[name] = g
+		g = &RefreshState{}
+		t.RefreshGuard[name] = g
 	}
 	if g.inFlight || now.Sub(g.last) < half {
 		t.mu.Unlock()
@@ -313,9 +311,9 @@ func (t *quotaTracker) refreshOne(name string, generations ...uint64) {
 
 	refreshed := false
 	if p := t.provs()[name]; p != nil {
-		s := t.fetchQuota(p, time.Now())
-		if t.commitSnapshot(generation, name, s) {
-			if err := t.persist(); err != nil {
+		s := t.FetchQuota(p, time.Now())
+		if t.CommitSnapshot(generation, name, s) {
+			if err := t.Persist(); err != nil {
 				log.Printf("[quota] persist after refreshOne(%s) failed: %v", name, err)
 			}
 			refreshed = true
@@ -330,8 +328,45 @@ func (t *quotaTracker) refreshOne(name string, generations ...uint64) {
 	t.mu.Unlock()
 }
 
-func (t *quotaTracker) commitSnapshot(generation uint64, name string, snapshot *provider.QuotaSnapshot) bool {
-	if t.currentGeneration() != generation {
+// Snapshot reads one quota snapshot (nil when absent). Test seam mirroring
+// the removed root helper; production reads flow through Manager.Quota.
+// Runtime returns the Manager this tracker writes quota snapshots into.
+// Tests swap it to isolate state between scenarios.
+// AdmissionOpen reports whether the tracker still admits background tasks
+// (false after Stop begins). Test seam mirroring the removed root helper.
+// SetRetryBackoff overrides the transient-error retry delay (tests shrink it
+// to keep polling fast). Production keeps the constructor default.
+func (t *QuotaTracker) SetRetryBackoff(d time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.retryBackoff = d
+}
+
+// StopChannel returns the channel closed by Stop (read-only lifecycle probe
+// for tests; production never selects on it directly).
+func (t *QuotaTracker) StopChannel() <-chan struct{} { return t.stopCh }
+
+func (t *QuotaTracker) AdmissionOpen() bool {
+	t.lifeMu.Lock()
+	defer t.lifeMu.Unlock()
+	return t.accepting
+}
+
+func (t *QuotaTracker) Runtime() *Manager { return t.runtime }
+
+func (t *QuotaTracker) Snapshot(name string) *provider.QuotaSnapshot {
+	return t.runtime.Quota(name)
+}
+
+// SetSnapshot writes a quota snapshot for the tracker's current generation.
+// Test seam mirroring the removed root helper: production commits flow through
+// CommitSnapshot/FetchQuota.
+func (t *QuotaTracker) SetSnapshot(name string, snapshot *provider.QuotaSnapshot) {
+	t.runtime.SetQuota(name, snapshot, t.CurrentGeneration())
+}
+
+func (t *QuotaTracker) CommitSnapshot(generation uint64, name string, snapshot *provider.QuotaSnapshot) bool {
+	if t.CurrentGeneration() != generation {
 		return false
 	}
 	return t.runtime.SetQuota(name, snapshot, generation)
@@ -343,14 +378,14 @@ func (t *quotaTracker) commitSnapshot(generation uint64, name string, snapshot *
 // on the error until the next interval. Non-transient errors (auth, retcode,
 // 4xx, missing credentials) return immediately - retrying those just wastes
 // time. Returns the final snapshot (Err set if all attempts failed); never nil.
-func (t *quotaTracker) fetchQuota(p provider.Provider, now time.Time) *provider.QuotaSnapshot {
+func (t *QuotaTracker) FetchQuota(p provider.Provider, now time.Time) *provider.QuotaSnapshot {
 	var s *provider.QuotaSnapshot
 	for attempt := 0; attempt < t.retryAttempts; attempt++ {
 		s, _ = p.Quota()
 		if s == nil {
 			s = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: now}
 		}
-		if s.Err == "" || !isTransientQuotaErr(s.Err) {
+		if s.Err == "" || !IsTransientQuotaErr(s.Err) {
 			break // success, or a non-transient error - don't retry
 		}
 		if attempt < t.retryAttempts-1 {
@@ -371,7 +406,7 @@ func (t *quotaTracker) fetchQuota(p provider.Provider, now time.Time) *provider.
 // so retrying those just burns time. Unrecognized errors default to transient so
 // a new failure shape still gets retried (and recovers) rather than sticking for
 // a whole poll interval.
-func isTransientQuotaErr(err string) bool {
+func IsTransientQuotaErr(err string) bool {
 	e := strings.ToLower(err)
 	// Permanent: auth, config, or upstream-rejected - retry won't help.
 	for _, m := range []string{
@@ -387,7 +422,7 @@ func isTransientQuotaErr(err string) bool {
 	return true
 }
 
-type persistedSnapshot struct {
+type PersistedQuotaSnapshot struct {
 	Billing      provider.BillingClass  `json:"billing"`
 	RemainingPct float64                `json:"remaining_pct"`
 	Windows      []provider.QuotaWindow `json:"windows"`
@@ -398,8 +433,8 @@ type persistedSnapshot struct {
 // persist writes the quota/sticky/health snapshot atomically (tmp + rename).
 // Returns the write error so synchronous callers (unfreeze API) can fail the
 // operation instead of reporting a false success; background callers log it.
-func (t *quotaTracker) persist() error {
-	if t.path == "" {
+func (t *QuotaTracker) Persist() error {
+	if t.Path == "" {
 		return nil // in-memory tracker (direct-construct tests) has no file
 	}
 	// Serialize the whole write (snapshot → tmp → rename) WITHIN this tracker.
@@ -409,8 +444,8 @@ func (t *quotaTracker) persist() error {
 	t.persistMu.Lock()
 	defer t.persistMu.Unlock()
 	wrap := map[string]any{}
-	if t.fullSnapshot != nil {
-		s := t.fullSnapshot()
+	if t.FullSnapshot != nil {
+		s := t.FullSnapshot()
 		wrap["providers"] = s.Providers
 		wrap["sticky"] = s.Sticky
 		wrap["health"] = s.Health
@@ -420,9 +455,9 @@ func (t *quotaTracker) persist() error {
 		}
 	} else {
 		snapshots := t.runtime.Quotas()
-		out := make(map[string]persistedSnapshot, len(snapshots))
+		out := make(map[string]PersistedQuotaSnapshot, len(snapshots))
 		for k, v := range snapshots {
-			out[k] = persistedSnapshot{
+			out[k] = PersistedQuotaSnapshot{
 				Billing: v.Billing, RemainingPct: v.RemainingPct,
 				Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
 			}
@@ -433,7 +468,7 @@ func (t *quotaTracker) persist() error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(t.path)
+	dir := filepath.Dir(t.Path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -457,7 +492,7 @@ func (t *quotaTracker) persist() error {
 		remove()
 		return err
 	}
-	if err := os.Rename(tmp, t.path); err != nil {
+	if err := os.Rename(tmp, t.Path); err != nil {
 		log.Printf("[quota] persist rename failed: %v", err)
 		remove()
 		return err
@@ -465,17 +500,17 @@ func (t *quotaTracker) persist() error {
 	return nil
 }
 
-func (t *quotaTracker) load() {
-	data, err := os.ReadFile(t.path)
+func (t *QuotaTracker) Load() {
+	data, err := os.ReadFile(t.Path)
 	if err != nil {
 		return
 	}
 	var wrap struct {
-		Providers map[string]persistedSnapshot   `json:"providers"`
-		Sticky    map[string]runtimestate.Sticky `json:"sticky"`
-		Health    map[string]persistedHealth     `json:"health"`
-		HealthFP  string                         `json:"health_fp"`
-		WireCaps  map[string]wireCaps            `json:"wire_caps"`
+		Providers map[string]PersistedQuotaSnapshot   `json:"providers"`
+		Sticky    map[string]Sticky                   `json:"sticky"`
+		Health    map[string]PersistedHealth          `json:"health"`
+		HealthFP  string                              `json:"health_fp"`
+		WireCaps  map[string]runtimewire.Capabilities `json:"wire_caps"`
 	}
 	if err := json.Unmarshal(data, &wrap); err != nil {
 		return
@@ -487,11 +522,11 @@ func (t *quotaTracker) load() {
 			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
 		}
 	}
-	t.runtime.MergeQuotas(quota, t.currentGeneration())
+	t.runtime.MergeQuotas(quota, t.CurrentGeneration())
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.loadedSticky = wrap.Sticky
-	t.loadedHealth = wrap.Health
-	t.loadedHealthFP = wrap.HealthFP
-	t.loadedWireCaps = wrap.WireCaps
+	t.LoadedSticky = wrap.Sticky
+	t.LoadedHealth = wrap.Health
+	t.LoadedHealthFP = wrap.HealthFP
+	t.LoadedWireCaps = wrap.WireCaps
 }

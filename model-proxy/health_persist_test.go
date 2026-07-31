@@ -30,7 +30,7 @@ func TestHealthPersist_RoundTrip(t *testing.T) {
 		"b": {CircuitOpenUntil: circuitUntil},
 		"c": {RateLimitedUntil: now.Add(-time.Minute)},
 	}, now, cfg.Scheduling.Threshold())
-	if err := p1.quota.persist(); err != nil {
+	if err := p1.quota.Persist(); err != nil {
 		t.Fatalf("persist source state: %v", err)
 	}
 	p1.Close()
@@ -83,7 +83,7 @@ func TestHealthPersist_FingerprintMismatch(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "quota_state.json")
 	p1 := newTestProxyAt(t, cfgA, statePath)
 	p1.recordRateLimit("a", time.Now().Add(2*time.Hour), rlQuota)
-	if err := p1.quota.persist(); err != nil {
+	if err := p1.quota.Persist(); err != nil {
 		t.Fatalf("persist source state: %v", err)
 	}
 	p1.Close()
@@ -105,7 +105,7 @@ func TestHealthPersist_ParamBlockOnlyProvider(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "quota_state.json")
 	p1 := newTestProxyAt(t, cfg, statePath)
 	p1.learnParamBlock("a", "m1", "max_tokens")
-	if err := p1.quota.persist(); err != nil {
+	if err := p1.quota.Persist(); err != nil {
 		t.Fatalf("persist source state: %v", err)
 	}
 	p1.Close()

@@ -22,14 +22,14 @@ func TestPollAll_PollsPooledVirtuals(t *testing.T) {
 		"zhipu#b": &testProv{key: "zhipu#b"},
 	}
 	tr := newStandaloneQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return provs })
-	tr.pollAll(time.Now())
+	tr.PollAll(time.Now())
 	for _, vid := range []string{"zhipu#a", "zhipu#b"} {
-		if tr.snapshot(vid) == nil {
+		if tr.Snapshot(vid) == nil {
 			t.Errorf("%s: pooled virtual has no snapshot after pollAll (poller skipped it)", vid)
 		}
 	}
 	// The parent name is not runnable and must NOT be polled as a key.
-	if tr.snapshot("zhipu") != nil {
+	if tr.Snapshot("zhipu") != nil {
 		t.Errorf("parent name should not appear as a polled runtime key")
 	}
 }

@@ -9,8 +9,8 @@ import (
 
 // --- cmdSchedule success path: mock daemon returning valid JSON ---
 //
-// cmdSchedule does http.Get("http://"+cfg.Listen+"/debug/schedule"). We point
-// cfg.Listen at a local mock server that returns a valid schedule JSON, then
+// cmdSchedule does http.Get("http://"+cfg.listen+"/debug/schedule"). We point
+// cfg.listen at a local mock server that returns a valid schedule JSON, then
 // call cmdSchedule in-process and assert it prints the first-choice provider.
 
 func TestCmdSchedule_ParsesDaemonResponse(t *testing.T) {

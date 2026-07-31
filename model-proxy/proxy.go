@@ -28,7 +28,7 @@ type Proxy struct {
 	cfg              *Config
 	providers        map[string]provider.Provider // provider name → Provider (shared)
 	client           *http.Client
-	quota            *quotaTracker                  // background quota poller; nil only in degenerate tests
+	quota            *runtimestate.QuotaTracker     // background quota poller; nil only in degenerate tests
 	metrics          *obscounters.MetricsStore      // request counters (atomic); nil only in degenerate tests
 	tokens           *obscounters.TokenCounter      // SSE-scanned token usage; nil only in degenerate tests
 	agents           *obscounters.AgentCounter      // per-agent (UA) request/token counters; nil only in degenerate tests

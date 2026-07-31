@@ -52,10 +52,12 @@ func seedRuntimeCircuit(
 	until time.Time,
 ) {
 	t.Helper()
+	// RecordFailure opens the circuit with the Manager's own cooldown window;
+	// the helper's `until` only documents intent, matching the adapter path.
 	p.runtimeState.RecordFailure(
 		providerName,
 		1,
-		time.Until(until),
+		time.Hour,
 		0,
 	)
 }

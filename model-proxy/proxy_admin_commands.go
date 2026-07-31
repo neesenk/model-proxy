@@ -33,16 +33,16 @@ func (commands proxyAdminCommands) refreshQuota(name string) bool {
 		return true
 	}
 	if name != "" {
-		return commands.proxy.quota.pollOne(name)
+		return commands.proxy.quota.PollOne(name)
 	}
-	commands.proxy.quota.pollAll(time.Now())
+	commands.proxy.quota.PollAll(time.Now())
 	return true
 }
 
 func (commands proxyAdminCommands) resetHealthAndPersist(name string) ([]string, int, error) {
 	cleared, locks := commands.proxy.resetHealth(name)
 	if commands.proxy.quota != nil {
-		if err := commands.proxy.quota.persist(); err != nil {
+		if err := commands.proxy.quota.Persist(); err != nil {
 			return cleared, locks, err
 		}
 	}

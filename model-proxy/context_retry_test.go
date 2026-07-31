@@ -52,7 +52,7 @@ func TestIsContextOverflow(t *testing.T) {
 	}
 }
 
-// overflowServer returns an httptest server that always answers 400 with a
+// overflowServer returns an httptest.Server that always answers 400 with a
 // context-overflow error body carrying the given marker text.
 func overflowServer(body string, hits *int) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

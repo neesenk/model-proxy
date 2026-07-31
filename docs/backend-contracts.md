@@ -36,7 +36,7 @@ CQP key 长效，缓存 50min。SSO cookie 值已含 `SSO_C=` 前缀，直接作
 - `monthly_usage` 契约不变（7 个 snake_case 字段）；二进制里的 camelCase（`projectId` 等）是 app 内 serde 命名，不是 wire 格式。
 - `auth/info` 的 `data.user` 新增 `teams`/`hris_status`/`updated_time`/`usertype`，顶层新增 `roles`/`permissions` 数组；成功信封消息键是 `errmessage`（非 `message`）。代理只读 `user.{userid,email,is_active}`，不受影响。
 - `/v1/messages` 响应 usage 扩展：`cost`、`price_cost_usd`、`cost_details{upstream_inference_cost,...}`、`is_byok`、`speed`、`inference_geo`、`output_tokens_details{thinking_tokens}`；顶层有 `container`/`stop_details`。字节透传与转换层均忽略未知字段。
-- `/compass-api/v1/models` 对有效 CQP key 返回空 `data:[]`（cookie 鉴权→401 `API key not found`）：模型发现不可用，`models refresh` 走「config 现有 models + 端点探测」合并路径兜底，不会清空 models:。app 自带 `cc-switch-model-catalog.json`。
+- `/compass-api/v1/models`：**2026-07-31 实测契约已变**——对有效 CQP key 不再返回空，而是返回**全量通用 MaaS 目录**（232 个 id：Chirp/Qwen 全系列/DeepSeek-R1/fal 视频模型等 + 全套 coding 模型 kimi-k3/glm-5.2/gpt-5.4/deepseek-v4-*/claude-opus-4-8/claude-sonnet-5）。每条 `{id, object:"model", owned_by, created:0, all_providers:[{<后端>:[<子provider>...]}], context_window?}`：`owned_by` 是属主（anthropic/openai/openrouter/google/qwen/fal），`all_providers` 是可服务后端，`context_window` **可选**（部分模型有才返回，如 kimi-k3=1048576、gpt-5.4=1050000、claude-opus-4-8 无）。**不含** inputTypes/推理 variants/smartRanking/output 上限——那些是 AIS Switch 客户端内置 catalog 富化的，非网关下发。`?app_type=` 被忽略（返回同样通用列表）。⚠️ 对 `models refresh` 的影响：该端点从「返回空→走 config 兜底」变成「返回 232 个通用模型」，若直接消费会把大量非 coding 的通用 MaaS 模型灌进 models:，需按 curated coding 集合过滤或继续以 config models: 为准。（2026-07-28 时该端点对有效 CQP key 返回空 `data:[]`、cookie 鉴权→401 `API key not found`。）
 
 ## codex 后端契约（实测）
 

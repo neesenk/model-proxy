@@ -162,10 +162,10 @@ func TestHealthResetAPI_PersistsClearedState(t *testing.T) {
 	mux := http.NewServeMux()
 	w.register(mux)
 	p.recordRateLimit("zhipu", time.Now().Add(time.Hour), rlQuota)
-	if err := p.quota.persist(); err != nil {
+	if err := p.quota.Persist(); err != nil {
 		t.Fatal(err)
 	}
-	statePath := p.quota.path
+	statePath := p.quota.Path
 	if data, _ := os.ReadFile(statePath); !strings.Contains(string(data), "zhipu") {
 		t.Fatalf("precondition: frozen entry should be on disk: %s", data)
 	}

@@ -36,7 +36,7 @@ func newUpstream(h http.HandlerFunc) *httptest.Server {
 	return httptest.NewServer(h)
 }
 
-// newProxyServer wraps a Proxy with the given auth + model_map and returns a hitable httptest server.
+// newProxyServer wraps a Proxy with the given auth + model_map and returns a hitable httptest.Server.
 func newProxyServer(t testing.TB, upstreamURL, auth string, modelMap map[string]string) *httptest.Server {
 	_, px := newProxyServerP(t, upstreamURL, auth, modelMap)
 	return px

@@ -294,7 +294,7 @@ func setStdin(t *testing.T, s string) {
 }
 
 // poolConfigTmpl is a minimal config with one zhipu provider; usage_url is
-// filled per-test (typically an httptest server). Zhipu's provider-owned Usage
+// filled per-test (typically an httptest.Server). Zhipu's provider-owned Usage
 // implementation uses the BigModel quota format and is the canonical
 // apikey-pool integration fixture.
 const poolConfigTmpl = `listen: 127.0.0.1:1
@@ -448,7 +448,7 @@ func TestCLI_LogoutInvalidSelectionExits(t *testing.T) {
 
 // Test: `usage zhipu` with a 2-account pool iterates each account, printing a
 // per-account header (label + masked id) and dispatching one usage fetch per
-// account with THAT account's API key (captured by the httptest server).
+// account with THAT account's API key (captured by the httptest.Server).
 func TestCLI_UsagePoolPrintsAllAccounts(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)

@@ -254,11 +254,11 @@ func (p *Proxy) persistWireCaps() {
 	if p.quota == nil {
 		return
 	}
-	p.quota.launch(func() {
-		if p.quota.stopped() {
+	p.quota.Launch(func() {
+		if p.quota.Stopped() {
 			return
 		}
-		if err := p.quota.persist(); err != nil {
+		if err := p.quota.Persist(); err != nil {
 			log.Printf("[wirecap] persist failed: %v", err)
 		}
 	})
@@ -293,8 +293,8 @@ func (p *Proxy) startWireCapProbe() {
 	if p.quota == nil || !p.wireProbe {
 		return
 	}
-	p.quota.launch(func() {
-		if p.quota.stopped() {
+	p.quota.Launch(func() {
+		if p.quota.Stopped() {
 			return
 		}
 		p.probeAllWireCaps()

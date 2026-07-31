@@ -33,7 +33,7 @@ func TestRenderStatsCLI(t *testing.T) {
 	}))
 	defer up.Close()
 
-	// renderStats takes "host:port"; derive from the httptest server URL.
+	// renderStats takes "host:port"; derive from the httptest.Server URL.
 	listen := strings.TrimPrefix(up.URL, "http://")
 	out, err := cli.RenderStats(listen, cli.StatsOpts{})
 	if err != nil {

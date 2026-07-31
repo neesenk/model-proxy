@@ -82,7 +82,7 @@ func TestPidFilePath(t *testing.T) {
 }
 
 func TestWriteReadPidFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "x.pid")
+	path := filepath.Join(t.TempDir(), "x.Pid")
 	if err := cliserve.WritePidFile(path, 4242); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestOpenLogFile_Appends(t *testing.T) {
 // --- writePidFile ---
 
 func TestWritePidFile(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "x.pid")
+	p := filepath.Join(t.TempDir(), "x.Pid")
 	if err := cliserve.WritePidFile(p, 12345); err != nil {
 		t.Fatal(err)
 	}

@@ -232,7 +232,7 @@ func TestAPIQuotaRefresh(t *testing.T) {
 		t.Errorf("refresh did not poll: Quota() called %d times, want >=1", got)
 	}
 	// The snapshot is populated (proves the poll result was stored).
-	if s := p.quota.snapshot("zhipu"); s == nil || s.RemainingPct != 0.5 {
+	if s := p.quota.Snapshot("zhipu"); s == nil || s.RemainingPct != 0.5 {
 		t.Errorf("after refresh, snapshot=%+v want RemainingPct 0.5", s)
 	}
 }

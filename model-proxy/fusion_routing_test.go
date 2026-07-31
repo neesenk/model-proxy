@@ -328,7 +328,7 @@ func TestFusionLeg_RateLimitMatchesTargetExecutor(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("429 panel leg did not refresh its provider quota")
 	}
-	proxy.quota.stop()
+	proxy.quota.Stop()
 	select {
 	case name := <-refreshed:
 		t.Fatalf("unexpected duplicate quota refresh for %q", name)

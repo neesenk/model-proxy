@@ -47,7 +47,7 @@ providers:
 `)
 	cfg1 := mustLoadConfigFile(t, cfg1Path)
 	p := newTestProxy(t, cfg1)
-	p.quota.path = t.TempDir() // rename(temp, existing directory) must fail
+	p.quota.Path = t.TempDir() // rename(temp, existing directory) must fail
 	err := p.reload(cfg2Path)
 	var warning *reloadAppliedWarning
 	if !errors.As(err, &warning) {
@@ -82,10 +82,10 @@ providers:
 
 	// Freeze zhipu health, persist → disk carries zhipu + cfg1 fingerprint.
 	seedRuntimeRateLimit(t, p, "zhipu", time.Now().Add(time.Hour), rlTransient)
-	if err := p.quota.persist(); err != nil {
+	if err := p.quota.Persist(); err != nil {
 		t.Fatal(err)
 	}
-	statePath := p.quota.path
+	statePath := p.quota.Path
 
 	// Reload to cfg2 (different provider/fingerprint) — clears health.
 	if err := p.reload(cfg2Path); err != nil {
@@ -113,10 +113,10 @@ providers:
 }
 
 type persistedRuntimeState struct {
-	Providers map[string]persistedSnapshot   `json:"providers"`
-	Sticky    map[string]runtimestate.Sticky `json:"sticky"`
-	Health    map[string]persistedHealth     `json:"health"`
-	HealthFP  string                         `json:"health_fp"`
+	Providers map[string]runtimestate.PersistedQuotaSnapshot `json:"providers"`
+	Sticky    map[string]runtimestate.Sticky                 `json:"sticky"`
+	Health    map[string]runtimestate.PersistedHealth        `json:"health"`
+	HealthFP  string                                         `json:"health_fp"`
 }
 
 func readPersistedRuntimeState(t *testing.T, path string) persistedRuntimeState {
@@ -158,7 +158,7 @@ func seedRuntimeGeneration(p *Proxy, providerName string) {
 
 func assertPersistedGeneration(t *testing.T, p *Proxy, providerName string, empty bool) {
 	t.Helper()
-	state := readPersistedRuntimeState(t, p.quota.path)
+	state := readPersistedRuntimeState(t, p.quota.Path)
 	wantFP := healthConfigFingerprint(p.cfgSnapshot())
 	if state.HealthFP != wantFP {
 		t.Fatalf("health_fp = %q, want current generation %q", state.HealthFP, wantFP)
@@ -183,7 +183,7 @@ func assertPersistedGeneration(t *testing.T, p *Proxy, providerName string, empt
 	}
 }
 
-func assertSnapshotGeneration(t *testing.T, state persistedFullSnapshot, cfg *Config, providerName string) {
+func assertSnapshotGeneration(t *testing.T, state runtimestate.PersistedFullSnapshot, cfg *Config, providerName string) {
 	t.Helper()
 	if got, want := state.HealthFP, healthConfigFingerprint(cfg); got != want {
 		t.Fatalf("snapshot fingerprint = %q, want %q", got, want)
@@ -224,9 +224,9 @@ routes:
 	p := newTestProxy(t, cfg1)
 	// Disable background quota dispatch for this persistence-only test so the
 	// synchronous empty snapshot observed immediately after reload is stable.
-	p.quota.stop()
+	p.quota.Stop()
 	seedRuntimeGeneration(p, "zhipu")
-	if err := p.quota.persist(); err != nil {
+	if err := p.quota.Persist(); err != nil {
 		t.Fatal(err)
 	}
 	assertPersistedGeneration(t, p, "zhipu", false)
@@ -244,7 +244,7 @@ routes:
 		}
 		assertPersistedGeneration(t, p, step.provider, true)
 		seedRuntimeGeneration(p, step.provider)
-		if err := p.quota.persist(); err != nil {
+		if err := p.quota.Persist(); err != nil {
 			t.Fatalf("persist %s generation: %v", step.provider, err)
 		}
 		assertPersistedGeneration(t, p, step.provider, false)
@@ -394,7 +394,7 @@ func TestReload_RejectsOldRequestSuccessMutation(t *testing.T) {
 	}
 	wantUntil := time.Now().Add(time.Hour)
 	p.runtimeState.RestoreHealth(
-		map[string]persistedHealth{"p": {CircuitOpenUntil: wantUntil}},
+		map[string]runtimestate.PersistedHealth{"p": {CircuitOpenUntil: wantUntil}},
 		time.Now(),
 		1,
 	)
@@ -436,16 +436,16 @@ func TestReload_RejectsAllDirectOldGenerationMutations(t *testing.T) {
 	}
 	// reload may have admitted its own poll. Drain it before replacing the
 	// tracker, so the assertion below observes only a 429-triggered refresh.
-	p.quota.stop()
+	p.quota.Stop()
 	refreshCalled := make(chan string, 1)
 	p.providers["p"] = &quotaCountProv{name: "p", refreshed: refreshCalled}
-	p.quota = newQuotaTracker(
+	p.quota = runtimestate.NewQuotaTracker(
 		t.TempDir()+"/quota_state.json",
 		func() *Config { return p.cfg },
 		func() map[string]provider.Provider { return p.providers },
 		&p.runtimeState,
 	)
-	p.quota.generation = p.configGeneration.Load
+	p.quota.Generation = p.configGeneration.Load
 
 	p.recordFailure("p", Scheduling{}, oldGeneration)
 	p.recordModelFailure("p", "m", Scheduling{}, oldGeneration)
@@ -458,7 +458,7 @@ func TestReload_RejectsAllDirectOldGenerationMutations(t *testing.T) {
 	if allowed := p.takeHalfOpenSlot("p", oldGeneration); !allowed {
 		t.Fatal("old request should be allowed to finish without mutating the new generation")
 	}
-	p.quota.stop()
+	p.quota.Stop()
 	select {
 	case name := <-refreshCalled:
 		t.Fatalf("stale rate limit triggered quota refresh for %q", name)

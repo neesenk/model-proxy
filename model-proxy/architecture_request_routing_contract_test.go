@@ -35,7 +35,7 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			}
 		}
 
-		requestFile, _ := parseGoFile(t, "internal/routing/request.go")
+		requestFile, _ := parseGoFile(t, "internal/routing/request.Go")
 		plannerFields := namedStructFields(t, requestFile, "Planner")
 		want := map[string]bool{
 			"config": true, "parentOf": true, "catalog": true,
@@ -207,7 +207,7 @@ func plannerConstructorUsesRuntimeSnapshot(node ast.Node) bool {
 		requestRoutingExprPath(schedulerFields["config"]) == "runtime.cfg" &&
 		requestRoutingExprPath(schedulerFields["parentOf"]) == "runtime.parentOf" &&
 		requestRoutingExprPath(schedulerFields["routeKeys"]) == "routeKeys" &&
-		requestRoutingExprPath(schedulerFields["generation"]) == "runtime.generation"
+		requestRoutingExprPath(schedulerFields["generation"]) == "runtime.Generation"
 }
 
 func requestRoutingCompositeFields(literal *ast.CompositeLit) map[string]ast.Expr {

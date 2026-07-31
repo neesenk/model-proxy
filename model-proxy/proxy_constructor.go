@@ -5,6 +5,7 @@ import (
 	"log"
 	"model-proxy/internal/app"
 	"model-proxy/internal/observe/counters"
+	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,13 +56,13 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	}
 	// The tracker reads cfg/providers asynchronously via the snapshot closures
 	// (each takes p.mu.RLock), so reloads are picked up without recreating it.
-	p.quota = newQuotaTracker(qpath,
+	p.quota = runtimestate.NewQuotaTracker(qpath,
 		func() *Config { return p.cfgSnapshot() },
 		func() map[string]provider.Provider { return p.providerSnapshot() },
 		&p.runtimeState)
-	p.quota.generation = p.configGeneration.Load
-	p.quota.fullSnapshot = p.snapshotPersistedState
-	p.quota.start()
+	p.quota.Generation = p.configGeneration.Load
+	p.quota.FullSnapshot = p.snapshotPersistedState
+	p.quota.Start()
 	p.metrics = counters.NewMetricsStore()
 	// SSE token counter. Persistence (baseline restore + per-minute flush) is
 	// projected by statsFlusher into internal/observe/stats.Store, opened only
@@ -98,13 +99,13 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// like "m1" collide across configs even when providers don't). Legacy
 	// files without a fingerprint keep the historical restore behavior.
 	fp := healthConfigFingerprint(cfg)
-	fpMatch := p.quota.loadedHealthFP == "" || p.quota.loadedHealthFP == fp
-	if p.quota.loadedHealthFP != "" && !fpMatch {
+	fpMatch := p.quota.LoadedHealthFP == "" || p.quota.LoadedHealthFP == fp
+	if p.quota.LoadedHealthFP != "" && !fpMatch {
 		// Quota snapshots are provider/account observations too. A changed provider
 		// identity or endpoint must not inherit the old file's scheduling tier.
-		p.quota.clearForGeneration(p.configGeneration.Load())
+		p.quota.ClearForGeneration(p.configGeneration.Load())
 	}
-	if loaded := p.quota.loadedSticky; len(loaded) > 0 && fpMatch {
+	if loaded := p.quota.LoadedSticky; len(loaded) > 0 && fpMatch {
 		p.runtimeState.RestoreSticky(loaded)
 	}
 	// Restore frozen health state (rate-limit/circuit cooldowns, model lockouts,
@@ -115,14 +116,14 @@ func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// providers. Only future-dated cooldowns are applied — expired ones
 	// self-heal by being dropped. A restored circuit gets a full failure count
 	// so its next failure re-opens it immediately (same semantics as before).
-	if loaded := p.quota.loadedHealth; len(loaded) > 0 && p.quota.loadedHealthFP != "" && p.quota.loadedHealthFP == fp {
+	if loaded := p.quota.LoadedHealth; len(loaded) > 0 && p.quota.LoadedHealthFP != "" && p.quota.LoadedHealthFP == fp {
 		p.runtimeState.RestoreHealth(loaded, time.Now(), cfg.Scheduling.Threshold())
 	}
 	// Restore wire capability verdicts (independent of the health fingerprint:
 	// capabilities are endpoint properties). A verdict is honored only while
 	// its recorded base_url still matches the current config — an endpoint
 	// change invalidates it and triggers a re-probe at the next boot probe.
-	if loaded := p.quota.loadedWireCaps; len(loaded) > 0 {
+	if loaded := p.quota.LoadedWireCaps; len(loaded) > 0 {
 		baseURLs := make(map[string]string, len(cfg.Providers))
 		for name, prov := range cfg.Providers {
 			baseURLs[name] = prov.OpenAIBaseURL

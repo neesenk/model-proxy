@@ -15,7 +15,7 @@ import (
 
 // The Parse*Quota parser tests moved to the provider package in Phase 1
 // (provider/quota_parse_test.go) so go test ./provider covers the parsers.
-// This file keeps quotaTracker and root scheduling-adapter tests.
+// This file keeps runtimestate.QuotaTracker and root scheduling-adapter tests.
 
 func TestQuotaTracker_PersistAndLoad(t *testing.T) {
 	dir := t.TempDir()
@@ -23,14 +23,14 @@ func TestQuotaTracker_PersistAndLoad(t *testing.T) {
 	cfg := func() *Config { return &Config{} }
 	provs := func() map[string]provider.Provider { return nil }
 	tr := newStandaloneQuotaTracker(path, cfg, provs)
-	tr.setSnapshot("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.42, AsOf: time.Now()})
-	if err := tr.persist(); err != nil {
+	tr.SetSnapshot("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.42, AsOf: time.Now()})
+	if err := tr.Persist(); err != nil {
 		t.Fatal(err)
 	}
 
 	tr2 := newStandaloneQuotaTracker(path, cfg, provs)
-	tr2.load()
-	if s := tr2.snapshot("zhipu"); s == nil || s.RemainingPct != 0.42 {
+	tr2.Load()
+	if s := tr2.Snapshot("zhipu"); s == nil || s.RemainingPct != 0.42 {
 		t.Fatalf("after reload: %+v", s)
 	}
 }
@@ -43,8 +43,8 @@ func TestQuotaTracker_PollAllCallsQuota(t *testing.T) {
 			return map[string]provider.Provider{"x": &snapshotProv{rem: 0.77}}
 		},
 	)
-	tr.pollAll(time.Now())
-	if s := tr.snapshot("x"); s == nil || s.RemainingPct != 0.77 {
+	tr.PollAll(time.Now())
+	if s := tr.Snapshot("x"); s == nil || s.RemainingPct != 0.77 {
 		t.Fatalf("pollAll did not populate: %+v", s)
 	}
 }
@@ -128,13 +128,13 @@ func TestQuotaTracker_RefreshOneCoalescesConcurrent(t *testing.T) {
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
 	var first sync.WaitGroup
 	first.Add(1)
-	go func() { defer first.Done(); tr.refreshOne("x") }()
+	go func() { defer first.Done(); tr.RefreshOne("x") }()
 	<-prov.started
 
 	var coalesced sync.WaitGroup
 	for i := 0; i < 11; i++ {
 		coalesced.Add(1)
-		go func() { defer coalesced.Done(); tr.refreshOne("x") }()
+		go func() { defer coalesced.Done(); tr.RefreshOne("x") }()
 	}
 	coalesced.Wait()
 	close(prov.release)
@@ -142,7 +142,7 @@ func TestQuotaTracker_RefreshOneCoalescesConcurrent(t *testing.T) {
 	if got := prov.calls.Load(); got != 1 {
 		t.Fatalf("concurrent refreshOne: Quota() called %d times, want exactly 1", got)
 	}
-	if got := tr.snapshot("x"); got == nil || got.RemainingPct != 0.5 {
+	if got := tr.Snapshot("x"); got == nil || got.RemainingPct != 0.5 {
 		t.Fatalf("coalesced refresh snapshot = %+v, want RemainingPct=0.5", got)
 	}
 }
@@ -156,8 +156,8 @@ func TestQuotaTracker_RefreshOneDebouncesSequential(t *testing.T) {
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
 		func() *Config { return cfg },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
-	tr.refreshOne("x") // calls=1, sets last
-	tr.refreshOne("x") // within 2.5m -> debounced
+	tr.RefreshOne("x") // calls=1, sets last
+	tr.RefreshOne("x") // within 2.5m -> debounced
 	if got := calls.Load(); got != 1 {
 		t.Errorf("sequential refreshOne: Quota() called %d times, want 1 (debounced)", got)
 	}
@@ -170,20 +170,20 @@ func TestQuotaTracker_StickyPersistLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "quota_state.json")
 	tr := newStandaloneQuotaTracker(path, func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
 	since := time.Unix(123, 0)
-	tr.fullSnapshot = func() persistedFullSnapshot {
-		return persistedFullSnapshot{
+	tr.FullSnapshot = func() runtimestate.PersistedFullSnapshot {
+		return runtimestate.PersistedFullSnapshot{
 			Sticky: map[string]runtimestate.Sticky{
 				"glm-5.2": {Provider: "zhipu", Since: since},
 			},
 		}
 	}
-	if err := tr.persist(); err != nil {
+	if err := tr.Persist(); err != nil {
 		t.Fatal(err)
 	}
 
 	tr2 := newStandaloneQuotaTracker(path, func() *Config { return &Config{} }, func() map[string]provider.Provider { return nil })
-	tr2.load()
-	got := tr2.loadedSticky["glm-5.2"]
+	tr2.Load()
+	got := tr2.LoadedSticky["glm-5.2"]
 	if got.Provider != "zhipu" || !got.Since.Equal(since) {
 		t.Fatalf("sticky not restored: %+v", got)
 	}
@@ -215,8 +215,8 @@ func TestIsTransientQuotaErr(t *testing.T) {
 		{"HTTP 404", false},
 	}
 	for _, tc := range cases {
-		if got := isTransientQuotaErr(tc.err); got != tc.want {
-			t.Errorf("isTransientQuotaErr(%q)=%v want %v", tc.err, got, tc.want)
+		if got := runtimestate.IsTransientQuotaErr(tc.err); got != tc.want {
+			t.Errorf("runtimestate.IsTransientQuotaErr(%q)=%v want %v", tc.err, got, tc.want)
 		}
 	}
 }
@@ -236,8 +236,8 @@ func TestQuotaTracker_FetchQuotaRetriesTransient(t *testing.T) {
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
 		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
-	tr.retryBackoff = time.Millisecond // fast
-	s := tr.fetchQuota(prov, time.Now())
+	tr.SetRetryBackoff(time.Millisecond) // fast
+	s := tr.FetchQuota(prov, time.Now())
 	if s.Err != "" {
 		t.Fatalf("expected recovery after retry, got Err=%q", s.Err)
 	}
@@ -262,8 +262,8 @@ func TestQuotaTracker_FetchQuotaNoRetryPermanent(t *testing.T) {
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
 		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "aqp"}}} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
-	tr.retryBackoff = time.Millisecond
-	s := tr.fetchQuota(prov, time.Now())
+	tr.SetRetryBackoff(time.Millisecond)
+	s := tr.FetchQuota(prov, time.Now())
 	if s.Err == "" {
 		t.Fatalf("expected permanent error preserved, got success")
 	}
@@ -288,9 +288,9 @@ func TestQuotaTracker_PollAllRetriesTransientError(t *testing.T) {
 	tr := newStandaloneQuotaTracker(filepath.Join(t.TempDir(), "q.json"),
 		func() *Config { return &Config{Providers: map[string]Provider{"x": {Provider: "zhipu"}}} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
-	tr.retryBackoff = time.Millisecond
-	tr.pollAll(time.Now())
-	s := tr.snapshot("x")
+	tr.SetRetryBackoff(time.Millisecond)
+	tr.PollAll(time.Now())
+	s := tr.Snapshot("x")
 	if s == nil || s.Err != "" {
 		t.Fatalf("pollAll should have recovered via retry, got %+v", s)
 	}
@@ -317,7 +317,7 @@ func TestQuotaTracker_PollOneSingleAccount(t *testing.T) {
 		func() map[string]provider.Provider { return provs })
 
 	// Poll just the virtual-id account.
-	if ok := tr.pollOne("zhipu#account-id"); !ok {
+	if ok := tr.PollOne("zhipu#account-id"); !ok {
 		t.Fatal("pollOne returned false for a live virtual id")
 	}
 	if got := bCalls.Load(); got != 1 {
@@ -327,13 +327,13 @@ func TestQuotaTracker_PollOneSingleAccount(t *testing.T) {
 		t.Errorf("parent zhipu Quota() called %d times, want 0 (pollOne is single-account)", got)
 	}
 	// Snapshot stored under the polled key.
-	if s := tr.snapshot("zhipu#account-id"); s == nil || s.RemainingPct != 0.5 {
+	if s := tr.Snapshot("zhipu#account-id"); s == nil || s.RemainingPct != 0.5 {
 		t.Errorf("virtual-id snapshot=%+v want 0.5", s)
 	}
 
 	// Unknown key -> false, no poll.
 	before := bCalls.Load()
-	if ok := tr.pollOne("ghost"); ok {
+	if ok := tr.PollOne("ghost"); ok {
 		t.Error("pollOne returned true for an unknown key")
 	}
 	if got := bCalls.Load(); got != before {

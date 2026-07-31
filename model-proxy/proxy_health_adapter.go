@@ -148,6 +148,6 @@ func (p *Proxy) recordRateLimit(name string, until time.Time, kind runtimestate.
 	if p.quota != nil {
 		// refreshAsync is tracked + stop-aware: a 429-triggered refresh can't
 		// outlive Proxy.Close (no persist after the final flush).
-		p.quota.refreshAsync(name, generation)
+		p.quota.RefreshAsync(name, generation)
 	}
 }

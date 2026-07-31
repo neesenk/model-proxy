@@ -756,8 +756,8 @@ func importedTypeValueReferenceSitesAcrossProduction(
 	return importedTypeValueReferenceSitesInFiles(files, importPath, typeName)
 }
 
-// importedMethodExpressionSitesAcrossProduction reports `pkg.T.Method` /
-// `(*pkg.T).Method` expressions, which turn a reviewed method into an
+// importedMethodExpressionSitesAcrossProduction reports `pkg.t.Method` /
+// `(*pkg.t).method` expressions, which turn a reviewed method into an
 // unreviewed function value.
 func importedMethodExpressionSitesAcrossProduction(
 	t *testing.T,
@@ -780,7 +780,7 @@ func importedMethodExpressionSitesAcrossProduction(
 	return importedMethodExpressionSitesInFiles(files, importPath, typeName, method)
 }
 
-// rootMethodValueReferenceSites reports same-package `receiver.Method`
+// rootMethodValueReferenceSites reports same-package `receiver.method`
 // selector expressions that are not the callee of a call expression. Direct
 // calls are validated by their dedicated dataflow guards; this guard catches
 // `fn := p.runShadow` / `fn := shadowRuntime.Execute` style escapes.

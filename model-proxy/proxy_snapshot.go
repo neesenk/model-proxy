@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	runtimestate "model-proxy/internal/runtime"
 	"os"
 	"sort"
 	"time"
@@ -146,20 +147,20 @@ func healthConfigFingerprint(cfg *Config) string {
 // health/sticky, or quota snapshots. SnapshotForPersist takes the runtime lock
 // exactly once, so quota and health can no longer be observed from different
 // generations.
-func (p *Proxy) snapshotPersistedState() persistedFullSnapshot {
+func (p *Proxy) snapshotPersistedState() runtimestate.PersistedFullSnapshot {
 	p.mu.RLock()
 	runtimeSnapshot := p.runtimeState.SnapshotForPersist(
 		runtimeRouteKeys(p.cfg.Routes, p.implicitRoutes),
 		time.Now(),
 	)
-	providers := make(map[string]persistedSnapshot, len(runtimeSnapshot.Quotas))
+	providers := make(map[string]runtimestate.PersistedQuotaSnapshot, len(runtimeSnapshot.Quotas))
 	for k, v := range runtimeSnapshot.Quotas {
-		providers[k] = persistedSnapshot{
+		providers[k] = runtimestate.PersistedQuotaSnapshot{
 			Billing: v.Billing, RemainingPct: v.RemainingPct,
 			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,
 		}
 	}
-	s := persistedFullSnapshot{
+	s := runtimestate.PersistedFullSnapshot{
 		Providers:  providers,
 		Sticky:     runtimeSnapshot.Sticky,
 		Health:     runtimeSnapshot.Health,

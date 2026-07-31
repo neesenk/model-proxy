@@ -27,42 +27,42 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			}
 		}
 
-		quotaFile, _ := parseGoFile(t, "quota.go")
-		quotaFields := namedStructFields(t, quotaFile, "quotaTracker")
+		quotaFile, _ := parseGoFile(t, "internal/runtime/quota_tracker.go")
+		quotaFields := namedStructFields(t, quotaFile, "QuotaTracker")
 		runtimePointer, ok := quotaFields["runtime"].(*ast.StarExpr)
 		if !ok {
-			t.Errorf("quotaTracker.runtime type = %T, want *runtimestate.Manager", quotaFields["runtime"])
-		} else if name, ok := configSelectorName(runtimePointer.X, "runtimestate"); !ok || name != "Manager" {
-			t.Error("quotaTracker.runtime must be *runtimestate.Manager")
+			t.Errorf("QuotaTracker.runtime type = %T, want *Manager", quotaFields["runtime"])
+		} else if ident, ok := runtimePointer.X.(*ast.Ident); !ok || ident.Name != "Manager" {
+			t.Errorf("QuotaTracker.runtime must be *Manager, got %T", runtimePointer.X)
 		}
 		if _, ok := quotaFields["state"]; ok {
-			t.Error("quotaTracker must not retain a second quota state map")
+			t.Error("QuotaTracker must not retain a second quota state map")
 		}
 		for _, legacy := range []string{"stickySnapshot", "healthSnapshot"} {
 			if _, ok := quotaFields[legacy]; ok {
-				t.Errorf("quotaTracker must not retain legacy split snapshot callback %s", legacy)
+				t.Errorf("QuotaTracker must not retain legacy split snapshot callback %s", legacy)
 			}
 		}
 		if _, ok := quotaFields["refreshHook"]; ok {
-			t.Error("quotaTracker must not expose a test-only refreshHook")
+			t.Error("QuotaTracker must not expose a test-only refreshHook")
 		}
 		for _, testOnly := range []string{"setSnapshot", "snapshot", "allSnapshots"} {
 			if methodDeclared(quotaFile, testOnly) {
-				t.Errorf("quota.go must not expose test-only quotaTracker.%s", testOnly)
+				t.Errorf("quota_tracker.go must not expose test-only QuotaTracker.%s", testOnly)
 			}
 		}
-		trackerConstructor := namedFunction(t, quotaFile, "newQuotaTracker")
+		trackerConstructor := namedFunction(t, quotaFile, "NewQuotaTracker")
 		if trackerConstructor.Type.Params == nil || len(trackerConstructor.Type.Params.List) != 4 {
-			t.Fatalf("newQuotaTracker must require exactly four parameters")
+			t.Fatalf("NewQuotaTracker must require exactly four parameters")
 		}
 		managerParam, ok := trackerConstructor.Type.Params.List[3].Type.(*ast.StarExpr)
 		if !ok {
 			t.Errorf(
-				"newQuotaTracker fourth parameter type = %T, want *runtimestate.Manager",
+				"NewQuotaTracker fourth parameter type = %T, want *Manager",
 				trackerConstructor.Type.Params.List[3].Type,
 			)
-		} else if name, ok := configSelectorName(managerParam.X, "runtimestate"); !ok || name != "Manager" {
-			t.Error("newQuotaTracker fourth parameter must be *runtimestate.Manager")
+		} else if ident, ok := managerParam.X.(*ast.Ident); !ok || ident.Name != "Manager" {
+			t.Errorf("NewQuotaTracker fourth parameter must be *Manager, got %T", managerParam.X)
 		}
 
 		forbiddenTypes := map[string]bool{
@@ -91,7 +91,7 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 		injectedManager := 0
 		ast.Inspect(constructor.Body, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
-			if !ok || callableName(call.Fun) != "newQuotaTracker" {
+			if !ok || callableName(call.Fun) != "NewQuotaTracker" {
 				return true
 			}
 			for _, argument := range call.Args {
@@ -109,9 +109,9 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			}
 			return true
 		})
-		if got := namedCallCountInNode(constructor.Body, "newQuotaTracker"); got != 1 || injectedManager != 1 {
+		if got := namedCallCountInNode(constructor.Body, "NewQuotaTracker"); got != 1 || injectedManager != 1 {
 			t.Errorf(
-				"newProxyWithStatePath must inject its one Manager into one quotaTracker call: calls=%d injections=%d",
+				"newProxyWithStatePath must inject its one Manager into one runtimestate.NewQuotaTracker call: calls=%d injections=%d",
 				got,
 				injectedManager,
 			)

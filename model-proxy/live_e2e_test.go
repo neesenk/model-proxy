@@ -204,7 +204,7 @@ func liveExtractFunctionCall(t *testing.T, raw string) (callID, name, arguments 
 				arguments = a
 			}
 		}
-		// response.completed → response.output items.
+		// response.completed → response.Output items.
 		if resp := asMap(m["response"]); resp != nil {
 			for _, it := range resp["output"].([]any) {
 				item := asMap(it)

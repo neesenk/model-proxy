@@ -90,7 +90,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			"EnsureFresh": true, "FetchHTTP": true, "loadModelsCatalog": true,
 			"modelsCatalogEndpoint": true, "modelsCatalogPath": true,
 		}
-		for _, path := range []string{"internal/routing/request.go", "request_routing_adapter.go"} {
+		for _, path := range []string{"internal/routing/request.Go", "request_routing_adapter.go"} {
 			routingFile, routingSet := parseGoFile(t, path)
 			for _, violation := range forbiddenCallSites(routingFile, routingSet, forbiddenRefresh, nil) {
 				t.Errorf("%s refreshes or re-reads catalog instead of using runtimeSnapshot: %s", path, violation)

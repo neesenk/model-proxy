@@ -65,8 +65,8 @@ func (p *Proxy) reload(configPath string) error {
 	// outlive Close (no persist after the final flush).
 	var appliedWarning error
 	if p.quota != nil {
-		persistErr := p.quota.persist()
-		p.quota.pollAsync(time.Now())
+		persistErr := p.quota.Persist()
+		p.quota.PollAsync(time.Now())
 		if persistErr != nil {
 			appliedWarning = &reloadAppliedWarning{err: fmt.Errorf("persist cleared runtime state: %w", persistErr)}
 		}

@@ -135,9 +135,9 @@ func (p *Proxy) closeRuntimeServices() {
 		p.responsesState.Close()
 	}
 	if p.quota != nil {
-		p.quota.stop()
-		if p.quota.path != "" {
-			if err := p.quota.persist(); err != nil {
+		p.quota.Stop()
+		if p.quota.Path != "" {
+			if err := p.quota.Persist(); err != nil {
 				log.Printf("[quota] final persist on close failed: %v", err)
 			}
 		}

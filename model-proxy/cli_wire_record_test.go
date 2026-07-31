@@ -73,11 +73,11 @@ func TestWireRecord_Run(t *testing.T) {
 	for _, stem := range []string{"anthropic_p", "anthropic_p_tool", "anthropic_p_thinking"} {
 		raw, rerr := os.ReadFile(filepath.Join(outDir, stem+".err"))
 		if rerr != nil {
-			t.Errorf("%s.err missing: %v", stem, rerr)
+			t.Errorf("%s.Err missing: %v", stem, rerr)
 			continue
 		}
 		if !strings.Contains(string(raw), "status: 404") {
-			t.Errorf("%s.err = %q", stem, raw)
+			t.Errorf("%s.Err = %q", stem, raw)
 		}
 	}
 	kept, _ := os.ReadFile(goodFile)

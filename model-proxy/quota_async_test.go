@@ -1,6 +1,7 @@
 package main
 
 import (
+	runtimestate "model-proxy/internal/runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,7 +31,7 @@ func TestQuotaLaunch_StopWaitsForAdmittedTask(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	finished := make(chan struct{})
-	if admitted := tr.launch(func() {
+	if admitted := tr.Launch(func() {
 		close(started)
 		<-release
 		close(finished)
@@ -40,7 +41,7 @@ func TestQuotaLaunch_StopWaitsForAdmittedTask(t *testing.T) {
 	<-started
 
 	stopped := make(chan struct{})
-	go func() { tr.stop(); close(stopped) }()
+	go func() { tr.Stop(); close(stopped) }()
 	waitForTrackerAdmissionClosed(t, tr)
 	select {
 	case <-stopped:
@@ -62,9 +63,9 @@ func TestQuotaLaunch_StopWaitsForAdmittedTask(t *testing.T) {
 
 func TestQuotaLaunch_RejectsAfterStop(t *testing.T) {
 	tr := newBlockTracker(t, &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})})
-	tr.stop()
+	tr.Stop()
 	called := false
-	if admitted := tr.launch(func() { called = true }); admitted {
+	if admitted := tr.Launch(func() { called = true }); admitted {
 		t.Fatal("task admitted after stop")
 	}
 	if called {
@@ -81,8 +82,8 @@ func TestAsyncDispatch_ConcurrentStop(t *testing.T) {
 		tr := newBlockTracker(t, prov)
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); tr.pollAsync(time.Now()) }()
-		go func() { defer wg.Done(); tr.stop() }()
+		go func() { defer wg.Done(); tr.PollAsync(time.Now()) }()
+		go func() { defer wg.Done(); tr.Stop() }()
 		close(release)
 		wg.Wait()
 		if prov.ran.Load() && !prov.done.Load() {
@@ -99,18 +100,18 @@ func TestPollAll_DiscardsStaleGeneration(t *testing.T) {
 	release := make(chan struct{})
 	prov := &blockQuotaProv{testProv: testProv{key: "x"}, release: release}
 	tr := newBlockTracker(t, prov)
-	tr.generation = generation.Load
+	tr.Generation = generation.Load
 	done := make(chan struct{})
 	go func() {
-		tr.pollAllGeneration(time.Now(), 1)
+		tr.PollAllGeneration(time.Now(), 1)
 		close(done)
 	}()
 	pollFor(t, prov.ran.Load, time.Second, "old-generation quota poll did not start")
 	generation.Store(2)
-	tr.runtime.ReplaceGeneration(2)
-	tr.clearForGeneration(2)
+	tr.Runtime().ReplaceGeneration(2)
+	tr.ClearForGeneration(2)
 	sentinel := &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.75}
-	if !tr.commitSnapshot(2, "x", sentinel) {
+	if !tr.CommitSnapshot(2, "x", sentinel) {
 		t.Fatal("current-generation sentinel was rejected")
 	}
 	close(release)
@@ -119,7 +120,7 @@ func TestPollAll_DiscardsStaleGeneration(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("old-generation quota poll did not finish after release")
 	}
-	if got := tr.snapshot("x"); got == nil || got.Billing != sentinel.Billing || got.RemainingPct != sentinel.RemainingPct {
+	if got := tr.Snapshot("x"); got == nil || got.Billing != sentinel.Billing || got.RemainingPct != sentinel.RemainingPct {
 		t.Fatalf("stale generation replaced current snapshot: got=%+v want=%+v", got, sentinel)
 	}
 }
@@ -132,7 +133,7 @@ func (b *blockQuotaProv) Quota() (*provider.QuotaSnapshot, error) {
 	return &provider.QuotaSnapshot{Billing: provider.BillingUnknown}, nil
 }
 
-func newBlockTracker(t *testing.T, prov *blockQuotaProv) *quotaTracker {
+func newBlockTracker(t *testing.T, prov *blockQuotaProv) *runtimestate.QuotaTracker {
 	t.Helper()
 	if prov.entered == nil {
 		prov.entered = make(chan struct{})
@@ -140,7 +141,7 @@ func newBlockTracker(t *testing.T, prov *blockQuotaProv) *quotaTracker {
 	tr := newStandaloneQuotaTracker(t.TempDir()+"/q.json",
 		func() *Config { return &Config{} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": prov} })
-	t.Cleanup(tr.stop)
+	t.Cleanup(tr.Stop)
 	return tr
 }
 
@@ -157,12 +158,10 @@ func pollFor(t *testing.T, cond func() bool, timeout time.Duration, msg string) 
 	t.Fatal(msg)
 }
 
-func waitForTrackerAdmissionClosed(t *testing.T, tr *quotaTracker) {
+func waitForTrackerAdmissionClosed(t *testing.T, tr *runtimestate.QuotaTracker) {
 	t.Helper()
 	pollFor(t, func() bool {
-		tr.lifeMu.Lock()
-		defer tr.lifeMu.Unlock()
-		return !tr.accepting
+		return !tr.AdmissionOpen()
 	}, time.Second, "stop did not close task admission")
 }
 
@@ -172,11 +171,11 @@ func waitForTrackerAdmissionClosed(t *testing.T, tr *quotaTracker) {
 func TestPollAsync_TrackedByStop(t *testing.T) {
 	prov := &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})}
 	tr := newBlockTracker(t, prov)
-	tr.pollAsync(time.Now())
+	tr.PollAsync(time.Now())
 	pollFor(t, prov.ran.Load, time.Second, "pollAsync did not enter the provider's Quota")
 
 	stopped := make(chan struct{})
-	go func() { tr.stop(); close(stopped) }()
+	go func() { tr.Stop(); close(stopped) }()
 	waitForTrackerAdmissionClosed(t, tr)
 	select {
 	case <-stopped:
@@ -196,8 +195,8 @@ func TestPollAsync_TrackedByStop(t *testing.T) {
 func TestPollAsync_NoopAfterStop(t *testing.T) {
 	prov := &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})}
 	tr := newBlockTracker(t, prov)
-	tr.stop()
-	tr.pollAsync(time.Now())
+	tr.Stop()
+	tr.PollAsync(time.Now())
 	if prov.ran.Load() {
 		t.Errorf("pollAsync dispatched a poll after stop; should be a no-op")
 	}
@@ -207,14 +206,14 @@ func TestPollAsync_NoopAfterStop(t *testing.T) {
 func TestRefreshAsync_TrackedByStop(t *testing.T) {
 	prov := &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})}
 	tr := newBlockTracker(t, prov)
-	tr.refreshAsync("x")
+	tr.RefreshAsync("x")
 	select {
 	case <-prov.entered:
 	case <-time.After(2 * time.Second):
 		t.Fatal("refreshAsync did not start")
 	}
 	stopped := make(chan struct{})
-	go func() { tr.stop(); close(stopped) }()
+	go func() { tr.Stop(); close(stopped) }()
 	waitForTrackerAdmissionClosed(t, tr)
 	select {
 	case <-stopped:
@@ -233,8 +232,8 @@ func TestRefreshAsync_TrackedByStop(t *testing.T) {
 func TestRefreshAsync_NoopAfterStop(t *testing.T) {
 	prov := &blockQuotaProv{testProv: testProv{key: "x"}, release: make(chan struct{})}
 	tr := newBlockTracker(t, prov)
-	tr.stop()
-	tr.refreshAsync("x")
+	tr.Stop()
+	tr.RefreshAsync("x")
 	if prov.ran.Load() {
 		t.Errorf("refreshAsync dispatched after stop; should be a no-op")
 	}

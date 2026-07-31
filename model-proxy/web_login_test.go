@@ -46,7 +46,7 @@ func TestAqpLoginFlow(t *testing.T) {
 	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	// Seam: point the AQP client at the mock base so BootstrapLoginURL /
-	// PollSession / fetchAPIKey hit the httptest server instead of the real
+	// PollSession / fetchAPIKey hit the httptest.Server instead of the real
 	// compass backend.
 	w.newAqpClientFn = func(store string) *AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
 
@@ -194,7 +194,7 @@ func TestCodexLoginFlow(t *testing.T) {
 	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
 	// Seam: point codex options at the mock so requestUserCode / pollForToken /
-	// exchangeCodeForTokens hit the httptest server instead of the real OpenAI
+	// exchangeCodeForTokens hit the httptest.Server instead of the real OpenAI
 	// deviceauth endpoints.
 	w.newCodexOptions = func() *codexLoginServerOptions {
 		o := &clilogin.CodexLoginServerOptions{}

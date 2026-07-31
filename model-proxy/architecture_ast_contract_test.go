@@ -315,13 +315,13 @@ func TestArchitectureBoundaryChecker(t *testing.T) {
 	// w.p.mu in a comment is fine
 	q := w.p
 	q.mu.RLock()
-	w.p.health.Lock()
+	w.p.Health.Lock()
 	_ = w.p.readView()
 }`)
 	fields := map[string]bool{"mu": true, "health": true}
 	got := forbiddenFieldAccesses(f, fset, fields, directAliases(f, "p"))
 	if len(got) != 2 {
-		t.Errorf("field check: got %v, want exactly the q.mu and w.p.health accesses", got)
+		t.Errorf("field check: got %v, want exactly the q.mu and w.p.Health accesses", got)
 	}
 
 	// The Web field-set check must reject a retained application owner while
@@ -839,7 +839,12 @@ func forbiddenFieldAccesses(f *ast.File, fset *token.FileSet, forbidden map[stri
 	var out []string
 	ast.Inspect(f, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
-		if !ok || !forbidden[sel.Sel.Name] {
+		if !ok {
+			return true
+		}
+		// Field names are case-insensitive for boundary checks (a guard named
+		// "health" must also catch "Health" chains).
+		if !forbidden[sel.Sel.Name] && !forbidden[strings.ToLower(sel.Sel.Name)] {
 			return true
 		}
 		switch x := sel.X.(type) {

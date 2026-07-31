@@ -405,7 +405,7 @@ func TestWireCap_PersistRoundTrip(t *testing.T) {
 
 	p1 := newTestProxyAt(t, mkCfg(up.URL), statePath)
 	p1.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triYes, Anthropic: triNo, ProbedAt: time.Now()})
-	if err := p1.quota.persist(); err != nil {
+	if err := p1.quota.Persist(); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(statePath)

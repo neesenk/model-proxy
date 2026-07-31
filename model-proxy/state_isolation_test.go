@@ -65,8 +65,8 @@ func TestNewProxy_DefaultStatePath(t *testing.T) {
 	p := NewProxy(cfg)
 	t.Cleanup(p.Close)
 	want := filepath.Join(home, ".model-proxy", "quota_state.json")
-	if p.quota.path != want {
-		t.Fatalf("NewProxy quota path = %q, want %q", p.quota.path, want)
+	if p.quota.Path != want {
+		t.Fatalf("NewProxy quota path = %q, want %q", p.quota.Path, want)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestQuotaPersist_ConcurrentTrackersNoRenameRace(t *testing.T) {
 			defer wg.Done()
 			tr := newStandaloneQuotaTracker(path, cfg, provs)
 			for j := 0; j < persists; j++ {
-				if err := tr.persist(); err != nil {
+				if err := tr.Persist(); err != nil {
 					t.Errorf("persist failed: %v", err)
 				}
 			}
@@ -117,13 +117,13 @@ providers:
 `))
 	p := newTestProxy(t, cfg)
 	select {
-	case <-p.quota.stopCh:
+	case <-p.quota.StopChannel():
 		t.Fatal("stopCh should be open before Close")
 	default:
 	}
 	p.Close()
 	select {
-	case <-p.quota.stopCh:
+	case <-p.quota.StopChannel():
 	default:
 		t.Fatal("stopCh should be closed after Close")
 	}

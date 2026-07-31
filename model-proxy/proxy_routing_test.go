@@ -487,7 +487,7 @@ func TestExpandTarget_PreservesProtocol(t *testing.T) {
 			t.Errorf("expanded[%d].Protocol = %q, want \"openai\" (dropped in fan-out → no conversion + wrong URL/path)", i, tg.Protocol)
 		}
 		if tg.Model != "glm-5" {
-			t.Errorf("expanded[%d].Model = %q, want glm-5", i, tg.Model)
+			t.Errorf("expanded[%d].model = %q, want glm-5", i, tg.Model)
 		}
 		if tg.Priority != 2 {
 			t.Errorf("expanded[%d].Priority = %d, want 2", i, tg.Priority)
