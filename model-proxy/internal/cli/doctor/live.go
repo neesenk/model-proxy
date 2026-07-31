@@ -8,6 +8,7 @@ import (
 	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/takeover"
+	"model-proxy/provider"
 	"os"
 	"path/filepath"
 	"sort"
@@ -71,7 +72,7 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 		return "", fmt.Errorf("web UI endpoints not available — is web.enabled true on the daemon?")
 	}
 	if status != 200 {
-		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(statusBody), 200))
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, provider.Truncate(string(statusBody), 200))
 	}
 
 	// Recent failures are context, not verdict: a fetch failure or a disabled
@@ -85,8 +86,8 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 	drift := CheckTakeoverDrift(cfg, takeover.BackupDir(cfgPath))
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s · %s\n", cBold("model-proxy doctor --live"), cDim(base))
-	fmt.Fprintf(&b, "%s daemon running (v%s, uptime %s)\n\n", cGreen("✓"), st.Version, st.Uptime)
+	fmt.Fprintf(&b, "%s · %s\n", provider.Bold("model-proxy doctor --live"), provider.Dim(base))
+	fmt.Fprintf(&b, "%s daemon running (v%s, uptime %s)\n\n", provider.Green("✓"), st.Version, st.Uptime)
 	cli.AppendSection(&b, RenderDiagnosis(cfg, &st, drift))
 	cli.AppendSection(&b, cli.RenderSchedule(&st))
 	if reqErr == nil && reqStatus == 200 {
@@ -177,21 +178,21 @@ func RenderDiagnosis(cfg *configdomain.Config, st *cli.StatusResp, drift []Clien
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", cBold("Diagnosis"))
+	fmt.Fprintf(&b, "%s\n", provider.Bold("Diagnosis"))
 	if len(errs) == 0 && len(warns) == 0 {
-		fmt.Fprintf(&b, "  %s\n", cGreen("✓ no problems found"))
+		fmt.Fprintf(&b, "  %s\n", provider.Green("✓ no problems found"))
 	}
 	emit := func(l diagLine) {
-		mark := cGreen("✓")
+		mark := provider.Green("✓")
 		switch l.sev {
 		case 0:
-			mark = cRed("✗")
+			mark = provider.Red("✗")
 		case 1:
-			mark = cYellow("⚠")
+			mark = provider.Yellow("⚠")
 		}
 		fmt.Fprintf(&b, "  %s %s\n", mark, l.text)
 		if l.hint != "" {
-			fmt.Fprintf(&b, "    %s\n", cDim("→ "+l.hint))
+			fmt.Fprintf(&b, "    %s\n", provider.Dim("→ "+l.hint))
 		}
 	}
 	for _, l := range errs {
@@ -288,28 +289,28 @@ func RenderDoctorFailures(body []byte) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", cBold("Recent failures"))
+	fmt.Fprintf(&b, "%s\n", provider.Bold("Recent failures"))
 	switch {
 	case !rr.Enabled:
-		fmt.Fprintf(&b, "  %s\n", cDim("request_log disabled — set request_log.enabled in config to record requests"))
+		fmt.Fprintf(&b, "  %s\n", provider.Dim("request_log disabled — set request_log.enabled in config to record requests"))
 	case len(rr.Records) == 0:
-		fmt.Fprintf(&b, "  %s\n", cDim("none recorded"))
+		fmt.Fprintf(&b, "  %s\n", provider.Dim("none recorded"))
 	default:
 		for _, r := range rr.Records {
 			ts := r.Ts
 			if t, err := time.Parse(time.RFC3339, r.Ts); err == nil {
 				ts = t.Local().Format("15:04:05")
 			}
-			statusColor := cYellow
+			statusColor := provider.Yellow
 			if r.Status >= 500 {
-				statusColor = cRed
+				statusColor = provider.Red
 			}
 			route := r.Exposed
 			if route == "" {
-				route = cDim("(no route)")
+				route = provider.Dim("(no route)")
 			}
 			fmt.Fprintf(&b, "  %s  %s → %s  %s  %dms\n",
-				cDim(ts), route, r.Provider, statusColor(strconv.Itoa(r.Status)), r.LatencyMs)
+				provider.Dim(ts), route, r.Provider, statusColor(strconv.Itoa(r.Status)), r.LatencyMs)
 		}
 	}
 	return b.String()
@@ -322,14 +323,14 @@ func RenderDoctorTakeover(drift []ClientDrift) string {
 	for _, d := range drift {
 		switch {
 		case !d.Taken:
-			parts = append(parts, d.Client+" "+cDim("not taken over"))
+			parts = append(parts, d.Client+" "+provider.Dim("not taken over"))
 		case d.OK:
-			parts = append(parts, d.Client+" "+cGreen("✓"))
+			parts = append(parts, d.Client+" "+provider.Green("✓"))
 		default:
-			parts = append(parts, d.Client+" "+cRed("✗ drift"))
+			parts = append(parts, d.Client+" "+provider.Red("✗ drift"))
 		}
 	}
-	return cBold("Takeover") + "\n  " + strings.Join(parts, "  ·  ") + "\n"
+	return provider.Bold("Takeover") + "\n  " + strings.Join(parts, "  ·  ") + "\n"
 }
 
 // ClientDrift is the takeover state of one agent client: taken (a backup

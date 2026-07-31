@@ -4,6 +4,8 @@ package cli
 
 import (
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
+	displaypkg "model-proxy/provider"
 	"os"
 	"sort"
 	"strings"
@@ -26,14 +28,14 @@ func CmdUsage(args []string, cfg *configdomain.Config) {
 		sort.Strings(names)
 		for i, n := range names {
 			if i > 0 {
-				fmt.Println(cDim(UsageDivider))
+				fmt.Println(displaypkg.Dim(UsageDivider))
 			}
 			PrintProviderUsage(cfg, n)
 		}
 		return
 	}
 	if _, ok := cfg.Providers[provName]; !ok {
-		fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, providerNames(cfg))
+		fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cliframework.ProviderNames(cfg))
 		os.Exit(1)
 	}
 	PrintProviderUsage(cfg, provName)
@@ -65,13 +67,13 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 	if len(pool.Accounts) >= 2 {
 		for ai, a := range pool.Accounts {
 			if ai > 0 {
-				fmt.Println(cDim(UsageDivider))
+				fmt.Println(displaypkg.Dim(UsageDivider))
 			}
-			fmt.Printf("%s (%s)\n", cBold(cCyan(a.Label)), mask(a.ID))
+			fmt.Printf("%s (%s)\n", displaypkg.Bold(displaypkg.Cyan(a.Label)), cliframework.Mask(a.ID))
 			cred := a.Credentials()
 			if p := app.BuildOne(cfg, buildOpts(), provName, prov, cred); p != nil {
 				if err := p.Usage(); err != nil {
-					fmt.Println(cYellow("  (usage unavailable: " + err.Error() + ")"))
+					fmt.Println(displaypkg.Yellow("  (usage unavailable: " + err.Error() + ")"))
 				}
 			}
 		}
@@ -84,7 +86,7 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 		return
 	}
 	if err := p.Usage(); err != nil {
-		fmt.Println(cYellow("  (usage unavailable: " + err.Error() + ")"))
+		fmt.Println(displaypkg.Yellow("  (usage unavailable: " + err.Error() + ")"))
 	}
 }
 
@@ -124,24 +126,4 @@ func buildOpts() app.BuildOptions {
 func homeDir() string {
 	h, _ := os.UserHomeDir()
 	return h
-}
-
-func providerNames(cfg *configdomain.Config) string {
-	names := make([]string, 0, len(cfg.Providers))
-	for n := range cfg.Providers {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
-}
-
-func mask(s string) string {
-	if s == "" {
-		return "(empty)"
-	}
-	const minReveal = 8
-	if len(s) < minReveal {
-		return "****"
-	}
-	return s[:2] + "…" + s[len(s)-2:]
 }

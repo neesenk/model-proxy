@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"os"
 	"sort"
@@ -57,7 +58,7 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 		}
 		provName := rest[1]
 		if _, ok := cfg.Providers[provName]; !ok {
-			log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
+			log.Fatalf("unknown provider %q; available: %s", provName, cliframework.ProviderNames(cfg))
 		}
 		fmt.Fprintf(os.Stderr, "Refreshing models from %s...\n", provName)
 		existing := cfg.Providers[provName].Models
@@ -95,7 +96,7 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 	if len(rest) > 0 {
 		provFilter = rest[0]
 		if _, ok := cfg.Providers[provFilter]; !ok {
-			log.Fatalf("unknown provider %q; available: %s", provFilter, providerNames(cfg))
+			log.Fatalf("unknown provider %q; available: %s", provFilter, cliframework.ProviderNames(cfg))
 		}
 	}
 	cat, _ := app.LoadModelsCatalog(homeDir(), false)
@@ -104,7 +105,7 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 	// Warn about unrouted models auto-routed to one of several logged-in providers
 	// (ambiguity). Single-provider implicit routes are silent.
 	if _, warnings := app.SynthesizeImplicitRoutes(cfg, accountStore()); len(warnings) > 0 {
-		fmt.Fprintf(os.Stderr, "\n%s implicit-route warnings:\n", cYellow("⚠"))
+		fmt.Fprintf(os.Stderr, "\n%s implicit-route warnings:\n", provider.Yellow("⚠"))
 		for _, w := range warnings {
 			fmt.Fprintf(os.Stderr, "  %s\n", w)
 		}
@@ -125,9 +126,9 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 	sort.Strings(names)
 
 	fmt.Printf("%s  %s  %s  %s  %s  %s  %s\n",
-		cDim(pad("PROVIDER", 12)), cDim(pad("MODEL ID", 22)),
-		cDim(pad("NAME", 20)), cDim(pad("CTX", 10)),
-		cDim(pad("OUTPUT", 8)), cDim(pad("MODALITIES", 16)), cDim(pad("SRC", 10)))
+		provider.Dim(provider.Pad("PROVIDER", 12)), provider.Dim(provider.Pad("MODEL ID", 22)),
+		provider.Dim(provider.Pad("NAME", 20)), provider.Dim(provider.Pad("CTX", 10)),
+		provider.Dim(provider.Pad("OUTPUT", 8)), provider.Dim(provider.Pad("MODALITIES", 16)), provider.Dim(provider.Pad("SRC", 10)))
 	for _, pn := range names {
 		// Effective model set: hydrated metadata keys ∪ the config name list
 		// (config names show even when meta is nil — e.g. legacy callers).
@@ -173,9 +174,9 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 				}
 			}
 			fmt.Printf("%s  %s  %s  %s  %s  %s  %s\n",
-				cBlue(pad(pn, 12)), cCyan(pad(mid, 22)),
-				cGreen(pad(name, 20)), cGray(pad(ctx, 10)),
-				cGray(pad(out, 8)), cGray(pad(mod, 16)), cGray(pad(src, 10)))
+				provider.Blue(provider.Pad(pn, 12)), provider.Cyan(provider.Pad(mid, 22)),
+				provider.Green(provider.Pad(name, 20)), provider.Gray(provider.Pad(ctx, 10)),
+				provider.Gray(provider.Pad(out, 8)), provider.Gray(provider.Pad(mod, 16)), provider.Gray(provider.Pad(src, 10)))
 		}
 	}
 }
@@ -183,13 +184,13 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 // printProviderModels prints models fetched live from a provider's /models endpoint.
 func PrintProviderModels(provName string, entries []ModelEntry) {
 	if len(entries) == 0 {
-		fmt.Println(cYellow("(no models)"))
+		fmt.Println(provider.Yellow("(no models)"))
 		return
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	fmt.Printf("%s  %s  %s  %s\n",
-		cDim(pad("MODEL ID", 22)), cDim(pad("NAME", 20)),
-		cDim(pad("CTX", 10)), cDim(pad("OWNED BY", 12)))
+		provider.Dim(provider.Pad("MODEL ID", 22)), provider.Dim(provider.Pad("NAME", 20)),
+		provider.Dim(provider.Pad("CTX", 10)), provider.Dim(provider.Pad("OWNED BY", 12)))
 	for _, m := range entries {
 		name := m.ID
 		ctx := "—"
@@ -197,10 +198,10 @@ func PrintProviderModels(provName string, entries []ModelEntry) {
 			ctx = fmt.Sprintf("%d", m.ContextWindow)
 		}
 		fmt.Printf("%s  %s  %s  %s\n",
-			cCyan(pad(m.ID, 22)), cGreen(pad(name, 20)),
-			cGray(pad(ctx, 10)), cGray(pad(m.OwnedBy, 12)))
+			provider.Cyan(provider.Pad(m.ID, 22)), provider.Green(provider.Pad(name, 20)),
+			provider.Gray(provider.Pad(ctx, 10)), provider.Gray(provider.Pad(m.OwnedBy, 12)))
 	}
-	fmt.Printf("\n%s %s: %d models\n", cDim("provider:"), provName, len(entries))
+	fmt.Printf("\n%s %s: %d models\n", provider.Dim("provider:"), provName, len(entries))
 }
 
 // fetchProviderModels fetches the live model list from a provider. Delegates to
@@ -386,7 +387,7 @@ func ListArkAgentPlanModelIDs(provName string) ([]string, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("ListArkAgentPlanModel HTTP %d: %s", resp.StatusCode, truncate(string(body), 300))
+		return nil, fmt.Errorf("ListArkAgentPlanModel HTTP %d: %s", resp.StatusCode, provider.Truncate(string(body), 300))
 	}
 	var wrap struct {
 		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`
@@ -428,14 +429,4 @@ func NonFlagArgs(args []string) []string {
 		out = append(out, a)
 	}
 	return out
-}
-
-// providerNames returns sorted config provider names for error messages.
-func providerNames(cfg *configdomain.Config) string {
-	names := make([]string, 0, len(cfg.Providers))
-	for n := range cfg.Providers {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
 }

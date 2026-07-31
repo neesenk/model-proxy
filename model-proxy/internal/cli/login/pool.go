@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"model-proxy/internal/accounts"
+	displaypkg "model-proxy/provider"
 )
 
 // Account-store seams, resolved lazily so tests can isolate HOME via
@@ -54,7 +55,7 @@ func ValidateKeyBearerGET(url, key string) error {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 200))
+		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, displaypkg.Truncate(string(body), 200))
 	}
 	return nil
 }

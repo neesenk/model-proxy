@@ -3,12 +3,12 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
+	cliserve "model-proxy/internal/cli/serve"
+	displaypkg "model-proxy/provider"
 	"os"
 	"strconv"
 	"strings"
-
-	"path/filepath"
-	"syscall"
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
@@ -37,7 +37,7 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	}
 	prov, ok := cfg.Providers[provName]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, providerNames(cfg))
+		fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cliframework.ProviderNames(cfg))
 		os.Exit(1)
 	}
 	providerID := prov.Provider
@@ -50,14 +50,14 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 		provMap := app.BuildProviders(cfg, accountStore(), buildOpts()).Providers
 		p := provMap[provName]
 		if p == nil {
-			fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, providerNames(cfg))
+			fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cliframework.ProviderNames(cfg))
 			os.Exit(1)
 		}
 		if err := p.Logout(); err != nil {
 			fmt.Fprintf(os.Stderr, "logout failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println(cGreen("✓ Logged out"))
+		fmt.Println(displaypkg.Green("✓ Logged out"))
 		return
 	}
 
@@ -96,7 +96,7 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 			fmt.Fprintf(os.Stderr, "logout failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println(cYellow("Not logged in."))
+		fmt.Println(displaypkg.Yellow("Not logged in."))
 		return
 	}
 
@@ -125,7 +125,7 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 		// Interactive: list + pick a number.
 		fmt.Printf("Accounts for %s:\n", provName)
 		for i, a := range pool.Accounts {
-			fmt.Printf("  %d) %s  (#%s  added %s)\n", i+1, a.Label, mask(a.ID), a.AddedAt)
+			fmt.Printf("  %d) %s  (#%s  added %s)\n", i+1, a.Label, cliframework.Mask(a.ID), a.AddedAt)
 		}
 		fmt.Print("Remove which (number)? ")
 		reader := bufio.NewReader(os.Stdin)
@@ -171,11 +171,11 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	}
 
 	if all {
-		fmt.Println(cGreen("✓ Removed all accounts from " + provName))
+		fmt.Println(displaypkg.Green("✓ Removed all accounts from " + provName))
 	} else {
-		fmt.Println(cGreen("✓ Removed account " + mask(rmID)))
+		fmt.Println(displaypkg.Green("✓ Removed account " + cliframework.Mask(rmID)))
 	}
-	maybeReloadDaemon(cfg)
+	cliserve.MaybeReloadDaemon(cfg)
 }
 
 func flagStringValue(args []string, flag string) string {
@@ -198,44 +198,4 @@ func hasFlagValue(args []string, flag string) bool {
 		}
 	}
 	return false
-}
-
-// maybeReloadDaemon SIGHUPs a running daemon after a config/credential write
-// (same semantics as cli/models reload.go; kept here to avoid a cross-import).
-func maybeReloadDaemon(cfg *configdomain.Config) {
-	logFile := cfg.LogFile
-	if logFile == "" {
-		logFile = filepath.Join(os.TempDir(), "model-proxy.log")
-	}
-	pidPath := pidFilePath(logFile)
-	pidStr, err := os.ReadFile(pidPath)
-	if err != nil {
-		return
-	}
-	var pid int
-	for _, c := range pidStr {
-		if c < '0' || c > '9' {
-			break
-		}
-		pid = pid*10 + int(c-'0')
-	}
-	if pid <= 0 {
-		return
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		os.Remove(pidPath)
-		return
-	}
-	_ = proc.Signal(syscall.SIGHUP)
-}
-
-func pidFilePath(logFile string) string {
-	if strings.HasSuffix(logFile, ".log") {
-		return strings.TrimSuffix(logFile, ".log") + ".pid"
-	}
-	return logFile + ".pid"
 }

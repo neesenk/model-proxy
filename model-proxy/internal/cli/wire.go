@@ -36,7 +36,7 @@ const wireRecordTimeout = 30 * time.Second
 
 func CmdWire(args []string, cfg *configdomain.Config) {
 	if len(args) == 0 || args[0] != "record" {
-		fmt.Fprintf(os.Stderr, "%s usage: model-proxy wire record <provider> [--model M] [--prompt P] [--out DIR]\n", cRed("✗"))
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy wire record <provider> [--model M] [--prompt P] [--out DIR]\n", provider.Red("✗"))
 		os.Exit(1)
 	}
 	CmdWireRecord(args[1:], cfg)
@@ -56,13 +56,13 @@ func CmdWireRecord(args []string, cfg *configdomain.Config) {
 	flagArgs = StripGlobalFlags(flagArgs)
 	fs.Parse(flagArgs)
 	if len(pos) != 1 {
-		fmt.Fprintf(os.Stderr, "%s usage: model-proxy wire record <provider> [--model M] [--prompt P] [--out DIR]\n", cRed("✗"))
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy wire record <provider> [--model M] [--prompt P] [--out DIR]\n", provider.Red("✗"))
 		os.Exit(1)
 	}
 	provName := pos[0]
 
 	if err := RunWireRecord(provName, *model, *prompt, *outDir, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "%s %v\n", cRed("✗"), err)
+		fmt.Fprintf(os.Stderr, "%s %v\n", provider.Red("✗"), err)
 		os.Exit(1)
 	}
 }
@@ -141,7 +141,7 @@ func RunWireRecord(provName, model, prompt, outDir string, cfg *configdomain.Con
 		}
 		if err := RecordEndpoint(client, provCfg, impl, ep.proto, ep.scenario, ep.baseURL, ep.path, ep.body, provName, outDir); err != nil {
 			failed++
-			fmt.Fprintf(os.Stderr, "  %s %s%s: %v\n", cRed("✗"), ep.proto, ep.scenario, err)
+			fmt.Fprintf(os.Stderr, "  %s %s%s: %v\n", provider.Red("✗"), ep.proto, ep.scenario, err)
 		}
 	}
 	if failed > 0 {
@@ -200,7 +200,7 @@ func RecordEndpoint(client *http.Client, provCfg configdomain.Provider, impl pro
 	if err := os.WriteFile(sseFile, raw, 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("  %s %s → %s (%d bytes)\n", cGreen("✓"), proto, sseFile, len(raw))
+	fmt.Printf("  %s %s → %s (%d bytes)\n", provider.Green("✓"), proto, sseFile, len(raw))
 	return nil
 }
 

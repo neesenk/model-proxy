@@ -3,6 +3,7 @@ package login
 import (
 	"bufio"
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
 	"os"
 	"strings"
 
@@ -86,7 +87,7 @@ func RunVolcengineLoginWithInput(cfg *configdomain.Config, provName string, prov
 	// Print the confirmation line (label resolved from the freshly-saved pool,
 	// which may have been re-sorted by savePool).
 	pool, _ := loadPool(provName, prov.Provider)
-	fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
+	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(cliframework.Mask(id)+" ("+labelFor(pool, id)+")"))
 	return nil
 }
 

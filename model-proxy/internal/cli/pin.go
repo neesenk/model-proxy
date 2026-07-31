@@ -7,6 +7,7 @@ import (
 	"io"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
+	displaypkg "model-proxy/provider"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,7 +34,7 @@ func CmdPin(args []string, cfg *configdomain.Config) {
 		return
 	}
 	if len(pos) < 2 {
-		fmt.Fprintf(os.Stderr, "%s usage: model-proxy pin <route> <provider> [--ttl DUR]\n", cRed("✗"))
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy pin <route> <provider> [--ttl DUR]\n", displaypkg.Red("✗"))
 		os.Exit(1)
 	}
 	out, err := DoPin(base, pos[0], pos[1], ParsePinTTL(args))
@@ -44,7 +45,7 @@ func CmdPin(args []string, cfg *configdomain.Config) {
 func CmdUnpin(args []string, cfg *configdomain.Config) {
 	pos := PositionalArgs(args)
 	if len(pos) == 0 {
-		fmt.Fprintf(os.Stderr, "%s usage: model-proxy unpin <route>\n", cRed("✗"))
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy unpin <route>\n", displaypkg.Red("✗"))
 		os.Exit(1)
 	}
 	out, err := DoUnpin("http://"+cfg.Listen, pos[0])
@@ -56,9 +57,9 @@ func CmdUnpin(args []string, cfg *configdomain.Config) {
 func EmitPinResult(_ *os.File, stderr *os.File, out string, err error, listen string) {
 	if err != nil {
 		if IsDaemonUnreachable(err) {
-			fmt.Fprintf(stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n", cRed("✗"), listen, err)
+			fmt.Fprintf(stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n", displaypkg.Red("✗"), listen, err)
 		} else {
-			fmt.Fprintf(stderr, "%s %s\n", cRed("✗"), err)
+			fmt.Fprintf(stderr, "%s %s\n", displaypkg.Red("✗"), err)
 		}
 		os.Exit(1)
 	}
@@ -78,7 +79,7 @@ func DoPin(base, route, provider string, ttl time.Duration) (string, error) {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("%s", truncate(strings.TrimSpace(string(rb)), 200))
+		return "", fmt.Errorf("%s", displaypkg.Truncate(strings.TrimSpace(string(rb)), 200))
 	}
 	var out struct {
 		ExpiresAt string `json:"expires_at"`
@@ -88,7 +89,7 @@ func DoPin(base, route, provider string, ttl time.Duration) (string, error) {
 	if out.ExpiresAt != "" {
 		suffix = "expires " + out.ExpiresAt
 	}
-	return fmt.Sprintf("%s pinned %s → %s (%s)\n", cGreen("✓"), route, provider, suffix), nil
+	return fmt.Sprintf("%s pinned %s → %s (%s)\n", displaypkg.Green("✓"), route, provider, suffix), nil
 }
 
 // doUnpin removes a pin via DELETE /api/pin?route= and returns the result line.
@@ -101,16 +102,16 @@ func DoUnpin(base, route string) (string, error) {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("daemon returned HTTP %d: %s", resp.StatusCode, truncate(string(rb), 200))
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", resp.StatusCode, displaypkg.Truncate(string(rb), 200))
 	}
 	var out struct {
 		Removed bool `json:"removed"`
 	}
 	json.Unmarshal(rb, &out)
 	if out.Removed {
-		return fmt.Sprintf("%s unpinned %s\n", cGreen("✓"), route), nil
+		return fmt.Sprintf("%s unpinned %s\n", displaypkg.Green("✓"), route), nil
 	}
-	return fmt.Sprintf("%s no pin on %s\n", cDim("•"), route), nil
+	return fmt.Sprintf("%s no pin on %s\n", displaypkg.Dim("•"), route), nil
 }
 
 // doListPins fetches GET /api/pin and returns the rendered pin table (or the
@@ -123,7 +124,7 @@ func DoListPins(base string) (string, error) {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("daemon returned HTTP %d: %s", resp.StatusCode, truncate(string(rb), 200))
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", resp.StatusCode, displaypkg.Truncate(string(rb), 200))
 	}
 	var out struct {
 		Pins []struct {
@@ -175,7 +176,7 @@ func ParseTTLValue(s string) time.Duration {
 	if d, err := time.ParseDuration(s); err == nil {
 		return d
 	}
-	fmt.Fprintf(os.Stderr, "%s invalid --ttl %q (use a Go duration like 1h, 30m, 2h45m)\n", cRed("✗"), s)
+	fmt.Fprintf(os.Stderr, "%s invalid --ttl %q (use a Go duration like 1h, 30m, 2h45m)\n", displaypkg.Red("✗"), s)
 	os.Exit(1)
 	return 0
 }

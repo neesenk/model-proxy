@@ -28,7 +28,7 @@ func CmdDoctor(args []string, cfg *configdomain.Config, cfgPath string) {
 	if DoctorLive(args) {
 		out, err := RenderDoctorLive(cfg, cfgPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err.Error())
+			fmt.Fprintf(os.Stderr, "%s %s\n", provider.Red("✗"), err.Error())
 			os.Exit(1)
 		}
 		fmt.Print(out)
@@ -42,9 +42,9 @@ func CmdDoctor(args []string, cfg *configdomain.Config, cfgPath string) {
 // Config (no temp config file needed). Writes to stdout; returns the warning
 // count.
 func DoctorWithCfg(cfg *configdomain.Config) int {
-	fmt.Println(cGreen("✓ config valid"))
+	fmt.Println(provider.Green("✓ config valid"))
 
-	fmt.Printf("\n%s\n", cBold("Providers"))
+	fmt.Printf("\n%s\n", provider.Bold("Providers"))
 	pnames := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
 		pnames = append(pnames, n)
@@ -61,10 +61,10 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 			extra = fmt.Sprintf("  pool: %d accounts", len(vids))
 		}
 		fmt.Printf("  %s %s  quota=%s  peak=%s%s\n",
-			pad(name, 12), cCyan(pad(tier, 13)), cGray(QuotaSourceLabel(prov.Provider)), PeakSummary(prov.PeakHours), extra)
+			provider.Pad(name, 12), provider.Cyan(provider.Pad(tier, 13)), provider.Gray(QuotaSourceLabel(prov.Provider)), PeakSummary(prov.PeakHours), extra)
 	}
 
-	fmt.Printf("\n%s\n", cBold("Routes (dry-run: no live quota → tier then priority)"))
+	fmt.Printf("\n%s\n", provider.Bold("Routes (dry-run: no live quota → tier then priority)"))
 	warns := 0
 	rnames := make([]string, 0, len(cfg.Routes))
 	for n := range cfg.Routes {
@@ -84,13 +84,13 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 			if tier == "plan" {
 				hasPlan = true
 			}
-			fmt.Printf("    %s %s  p%d\n", pad(t.Provider, 12), cCyan(pad(tier, 13)), t.Priority)
+			fmt.Printf("    %s %s  p%d\n", provider.Pad(t.Provider, 12), provider.Cyan(provider.Pad(tier, 13)), t.Priority)
 			// Wire-protocol note: a provider our protocol system can neither
 			// passthrough nor convert (none today — codex/Responses is now
 			// converted) would get the HONEST marker — which client families
 			// can't be served — not a conversion suggestion.
 			if note := provider.WireProtocolNote(prov.Provider); note != "" {
-				fmt.Printf("        %s %s\n", cYellow("⚠"), note)
+				fmt.Printf("        %s %s\n", provider.Yellow("⚠"), note)
 				warns++
 			} else if t.Protocol != "" {
 				// Protocol conversion (#11): a target declaring a backend protocol
@@ -98,18 +98,18 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 				// set of fields conversion drops (so an operator wiring tools/images
 				// knows what's lossy before traffic flows).
 				fmt.Printf("        %s target protocol %s — converts when client protocol differs; remaining lossy: anthropic↔chat thinking, unsupported server tools, input_audio (cache breakpoints/documents/tool-result media preserved)\n",
-					cYellow("↔"), t.Protocol)
+					provider.Yellow("↔"), t.Protocol)
 				// Reasoning-replay marker (#9): for models that REQUIRE reasoning
 				// content echoed back, the dropped thinking/reasoning is fatal to
 				// multi-turn tool calls, not just lossy.
 				if app.ReasoningReplayModel(t.Model) && t.Protocol == "openai" {
 					fmt.Printf("        %s reasoning-required model behind openai-chat conversion — Anthropic thinking is dropped; multi-turn tool calls may 400 upstream (replay cache not implemented)\n",
-						cYellow("⚠"))
+						provider.Yellow("⚠"))
 					warns++
 				}
 			} else if hint := provider.ProtocolHint(prov.Provider, t.Model); hint != "" {
 				fmt.Printf("        %s no protocol: declared, but %s speaks %s — clients of the other protocol will send malformed bodies; add protocol: %s\n",
-					cYellow("⚠"), prov.Provider, hint, hint)
+					provider.Yellow("⚠"), prov.Provider, hint, hint)
 				warns++
 			}
 			// Expand a pooled parent inline: show its account count + the
@@ -118,14 +118,14 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 			// operator understands how traffic spreads at runtime.
 			if vids, pooled := climodels.PoolVirtuals(cfg, t.Provider); pooled {
 				fmt.Printf("        %s %d accounts (round-robin session-sticky; no live quota → falls back to priority)\n",
-					cDim("pool:"), len(vids))
+					provider.Dim("pool:"), len(vids))
 				for _, vid := range vids {
-					fmt.Printf("        %s\n", cGray(vid))
+					fmt.Printf("        %s\n", provider.Gray(vid))
 				}
 			}
 		}
 		if !hasPlan {
-			fmt.Printf("    %s no plan provider — only pay-as-you-go\n", cYellow("⚠"))
+			fmt.Printf("    %s no plan provider — only pay-as-you-go\n", provider.Yellow("⚠"))
 			warns++
 		}
 	}
@@ -133,7 +133,7 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 	// Shadow evaluation: each route's candidate backend + the global sampling
 	// knobs. Omitted entirely when no shadow is configured.
 	if len(cfg.Shadow) > 0 {
-		fmt.Printf("\n%s\n", cBold("Shadow"))
+		fmt.Printf("\n%s\n", provider.Bold("Shadow"))
 		rate := 1.0
 		if cfg.ShadowSampleRate != nil {
 			rate = *cfg.ShadowSampleRate
@@ -154,7 +154,7 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 				proto = "same-as-primary"
 			}
 			fmt.Printf("  %s → %s/%s  protocol=%s  sample_rate=%s  max_concurrent=%d\n",
-				pad(route, 12), sh.Provider, sh.Model, proto, strconv.FormatFloat(rate, 'f', -1, 64), maxConc)
+				provider.Pad(route, 12), sh.Provider, sh.Model, proto, strconv.FormatFloat(rate, 'f', -1, 64), maxConc)
 		}
 	}
 
@@ -162,7 +162,7 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 	// plus the cost knobs (budget, first_turn_only) and quality knobs (judge,
 	// custom instruction). Omitted entirely when no fusion recipe is configured.
 	if len(cfg.Fusion) > 0 {
-		fmt.Printf("\n%s\n", cBold("Fusion"))
+		fmt.Printf("\n%s\n", provider.Bold("Fusion"))
 		fnames := make([]string, 0, len(cfg.Fusion))
 		for n := range cfg.Fusion {
 			fnames = append(fnames, n)
@@ -192,18 +192,18 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 				extra += "  custom instruction"
 			}
 			fmt.Printf("  %s panel=%d quorum=%d  synthesizer=%s/%s  budget=%s%s\n",
-				pad(name, 12), len(f.Panel), quorum, f.Synthesizer.Provider, f.Synthesizer.Model, budget, extra)
+				provider.Pad(name, 12), len(f.Panel), quorum, f.Synthesizer.Provider, f.Synthesizer.Model, budget, extra)
 		}
 	}
 
 	s := cfg.Scheduling
-	fmt.Printf("\n%s\n", cBold("Scheduling"))
+	fmt.Printf("\n%s\n", provider.Bold("Scheduling"))
 	fmt.Printf("  sticky_dwell=%s  quota_poll_interval=%s  quota_switch_margin=%d pts  circuit=(threshold %d, cooldown %s)\n",
 		s.Dwell(), s.PollInterval(), s.QuotaSwitchMargin, s.Threshold(), s.Cooldown())
 	if warns > 0 {
-		fmt.Printf("\n%s %d warning(s)\n", cYellow("⚠"), warns)
+		fmt.Printf("\n%s %d warning(s)\n", provider.Yellow("⚠"), warns)
 	} else {
-		fmt.Printf("\n%s no warnings\n", cGreen("✓"))
+		fmt.Printf("\n%s no warnings\n", provider.Green("✓"))
 	}
 	return warns
 }

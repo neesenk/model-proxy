@@ -3,6 +3,7 @@ package login
 import (
 	"bufio"
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,7 +91,7 @@ func RunApiKeyLoginWithInput(cfg *configdomain.Config, provName string, prov con
 	// Print the confirmation line (label resolved from the freshly-saved pool,
 	// which may have been re-sorted by savePool).
 	pool, _ := loadPool(provName, prov.Provider)
-	fmt.Println(cGreen("✓ Saved account ") + cGray(mask(id)+" ("+labelFor(pool, id)+")"))
+	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(cliframework.Mask(id)+" ("+labelFor(pool, id)+")"))
 	return nil
 }
 
@@ -263,8 +264,8 @@ After logging in, the browser will try to redirect back to this machine:
 		return fmt.Errorf("failed to persist account: %w", err)
 	}
 
-	fmt.Printf("%s login complete: %s (project=%s)\n", cGreen("[GoogleGateway]"), cBold(cCyan(a.Email)), cGray(a.ProjectID))
-	fmt.Printf("  %s %s\n", cDim("store:"), cGray(storePath))
-	fmt.Printf("\n%s You can now run `%s`.\n", cGreen("Login complete."), cCyan("model-proxy serve"))
+	fmt.Printf("%s login complete: %s (project=%s)\n", provider.Green("[GoogleGateway]"), provider.Bold(provider.Cyan(a.Email)), provider.Gray(a.ProjectID))
+	fmt.Printf("  %s %s\n", provider.Dim("store:"), provider.Gray(storePath))
+	fmt.Printf("\n%s You can now run `%s`.\n", provider.Green("Login complete."), provider.Cyan("model-proxy serve"))
 	return nil
 }

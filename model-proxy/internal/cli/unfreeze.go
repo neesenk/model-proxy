@@ -7,6 +7,7 @@ import (
 	"io"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
+	displaypkg "model-proxy/provider"
 	"os"
 	"strings"
 )
@@ -43,7 +44,7 @@ func DoUnfreeze(base, provider string) (string, error) {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("%s", truncate(strings.TrimSpace(string(rb)), 200))
+		return "", fmt.Errorf("%s", displaypkg.Truncate(strings.TrimSpace(string(rb)), 200))
 	}
 	var out struct {
 		Cleared           []string `json:"cleared"`
@@ -55,11 +56,11 @@ func DoUnfreeze(base, provider string) (string, error) {
 		scope = provider
 	}
 	if len(out.Cleared) == 0 && out.ModelLocksCleared == 0 {
-		return fmt.Sprintf("%s no frozen state on %s\n", cDim("•"), scope), nil
+		return fmt.Sprintf("%s no frozen state on %s\n", displaypkg.Dim("•"), scope), nil
 	}
 	names := strings.Join(out.Cleared, ", ")
 	if names == "" {
 		names = "(no provider cooldowns)"
 	}
-	return fmt.Sprintf("%s unfroze %s: %s (+%d model lock(s))\n", cGreen("✓"), scope, names, out.ModelLocksCleared), nil
+	return fmt.Sprintf("%s unfroze %s: %s (+%d model lock(s))\n", displaypkg.Green("✓"), scope, names, out.ModelLocksCleared), nil
 }

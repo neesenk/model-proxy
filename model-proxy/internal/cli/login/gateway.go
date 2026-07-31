@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -131,10 +132,10 @@ func (c *AqpClient) BootstrapAtContext(ctx context.Context, endpoint string) (st
 	loginURL := ExtractLoginURL(string(body))
 	if loginURL == "" {
 		return "", fmt.Errorf("aqp sso bootstrap missing login URL: status=%d, body=%s",
-			resp.StatusCode, truncate(string(body), 300))
+			resp.StatusCode, provider.Truncate(string(body), 300))
 	}
 	for _, ck := range c.PublicCookies() {
-		logf("[GoogleGateway] bootstrap jar cookie: %s=%s", ck.Name, mask(ck.Value))
+		logf("[GoogleGateway] bootstrap jar cookie: %s=%s", ck.Name, cliframework.Mask(ck.Value))
 	}
 	return loginURL, nil
 }
@@ -202,7 +203,7 @@ func (c *AqpClient) CheckSessionAtContext(ctx context.Context, endpoint string) 
 		u, _ := url.Parse(endpoint)
 		var names []string
 		for _, ck := range c.Jar.Cookies(u) {
-			names = append(names, ck.Name+"="+mask(ck.Value))
+			names = append(names, ck.Name+"="+cliframework.Mask(ck.Value))
 		}
 		logf("[GoogleGateway] auth/info jar cookies: %s", strings.Join(names, "; "))
 	}
@@ -218,7 +219,7 @@ func (c *AqpClient) CheckSessionAtContext(ctx context.Context, endpoint string) 
 	logf("[GoogleGateway] auth/info status=%d body=%dB", resp.StatusCode, len(body))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("aqp sso session check failed: status=%d body=%s",
-			resp.StatusCode, truncate(string(body), 200))
+			resp.StatusCode, provider.Truncate(string(body), 200))
 	}
 	var air AuthInfoResponse
 	if err := json.Unmarshal(body, &air); err != nil {

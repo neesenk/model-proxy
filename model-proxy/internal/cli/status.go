@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
 	"model-proxy/provider"
@@ -151,14 +152,6 @@ func FormatClock(unixSec int64) string {
 	return time.Unix(unixSec, 0).Local().Format("15:04:05")
 }
 
-// plural returns sing for n==1 else plur.
-func plural(n int, sing, plur string) string {
-	if n == 1 {
-		return sing
-	}
-	return plur
-}
-
 // renderProviders renders the Providers table: one row per health entry (sorted),
 // with counters looked up by name. The API only emits circuit_until /
 // rate_limited_until when they are in the future, so field presence ⇒ active.
@@ -172,16 +165,16 @@ func RenderProviders(st *StatusResp) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (%d)\n", cBold("Providers"), len(names))
+	fmt.Fprintf(&b, "%s (%d)\n", provider.Bold("Providers"), len(names))
 	hdr := fmt.Sprintf("  %s  %s  %8s  %9s  %5s  %8s  %6s  %6s  %s",
-		pad("PROVIDER", 16), pad("HEALTH", 13), "REQS", "FAILOVERS", "429", "FAILURES", "LAT", "TTFT", "LAST")
-	fmt.Fprintln(&b, cDim(hdr))
+		provider.Pad("PROVIDER", 16), provider.Pad("HEALTH", 13), "REQS", "FAILOVERS", "429", "FAILURES", "LAT", "TTFT", "LAST")
+	fmt.Fprintln(&b, provider.Dim(hdr))
 	for _, name := range names {
 		label, color := HealthLabel(st.Health[name])
 		c := st.Counters[name]
 		fmt.Fprintf(&b, "  %s  %s  %8s  %9s  %5s  %8s  %6s  %6s  %s\n",
-			pad(name, 16),
-			color(pad(label, 13)),
+			provider.Pad(name, 16),
+			color(provider.Pad(label, 13)),
 			compactNum(c.Requests),
 			compactNum(c.Failovers),
 			compactNum(c.RateLimited),
@@ -197,19 +190,19 @@ func RenderProviders(st *StatusResp) string {
 func HealthLabel(h StatusHealth) (string, func(string) string) {
 	switch {
 	case h.CircuitState == "open":
-		return "circuit open", cRed
+		return "circuit open", provider.Red
 	case h.CircuitState == "half_open":
-		return "half-open", cRed
+		return "half-open", provider.Red
 	case h.RateLimitedUntil != "" && h.RateLimitKind == "quota":
-		return "rl:quota", cYellow
+		return "rl:quota", provider.Yellow
 	case h.RateLimitedUntil != "" && h.RateLimitKind == "daily":
-		return "rl:daily", cYellow
+		return "rl:daily", provider.Yellow
 	case h.RateLimitedUntil != "":
-		return "rate-limited", cYellow
+		return "rate-limited", provider.Yellow
 	case h.Available:
-		return "available", cGreen
+		return "available", provider.Green
 	default:
-		return "unavailable", cDim
+		return "unavailable", provider.Dim
 	}
 }
 
@@ -227,35 +220,35 @@ func RenderScheduleRoutes(models map[string]StatusRoute, ind string) string {
 	var b strings.Builder
 	for _, m := range names {
 		ri := models[m]
-		fmt.Fprintf(&b, "%s%s → %s\n", ind, cBold(m), cGreen(ri.First))
+		fmt.Fprintf(&b, "%s%s → %s\n", ind, provider.Bold(m), provider.Green(ri.First))
 		if ri.Pin != "" {
 			exp := ""
 			if ri.PinExpires != "" {
-				exp = cDim(" (" + ri.PinExpires + ")")
+				exp = provider.Dim(" (" + ri.PinExpires + ")")
 			}
-			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, cYellow("pinned: "), ri.Pin, exp)
+			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, provider.Yellow("pinned: "), ri.Pin, exp)
 		}
 		for _, pool := range ri.Pools {
 			fmt.Fprintf(&b, "%s    %s %s (%d accounts, %d available)\n",
-				ind, cDim("pool:"), cBold(pool.Parent), pool.Accounts, pool.Available)
+				ind, provider.Dim("pool:"), provider.Bold(pool.Parent), pool.Accounts, pool.Available)
 		}
 		for _, t := range ri.Ordered {
 			extra := ""
 			if !t.Available {
-				extra += " " + cRed("(unavailable)")
+				extra += " " + provider.Red("(unavailable)")
 			}
 			if t.Peak {
-				extra += " " + cYellow("peak")
+				extra += " " + provider.Yellow("peak")
 			}
 			fmt.Fprintf(&b, "%s    %s %s  surplus %+.2f  p%d%s\n",
-				ind, pad(t.Provider, 14), cGray(pad(t.Tier, 13)), t.Surplus, t.Priority, extra)
+				ind, provider.Pad(t.Provider, 14), provider.Gray(provider.Pad(t.Tier, 13)), t.Surplus, t.Priority, extra)
 		}
 		if ri.Sticky != "" {
 			dwell := ""
 			if ri.DwellRem > 0 {
 				dwell = fmt.Sprintf(", %.0fs dwell left", ri.DwellRem)
 			}
-			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, cDim("sticky: "), ri.Sticky, cDim(dwell))
+			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, provider.Dim("sticky: "), ri.Sticky, provider.Dim(dwell))
 		}
 		b.WriteString("\n")
 	}
@@ -270,7 +263,7 @@ func RenderSchedule(st *StatusResp) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (%d %s)\n", cBold("Schedule"), len(st.Schedule.Models), plural(len(st.Schedule.Models), "route", "routes"))
+	fmt.Fprintf(&b, "%s (%d %s)\n", provider.Bold("Schedule"), len(st.Schedule.Models), cliframework.Plural(len(st.Schedule.Models), "route", "routes"))
 	b.WriteString(RenderScheduleRoutes(st.Schedule.Models, "  "))
 	return b.String()
 }
@@ -293,10 +286,10 @@ func RenderTokens(t *TokensResp) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s (%d %s · %s requests)\n",
-		cBold("Tokens"), len(t.Usage), plural(len(t.Usage), "model", "models"), compactNum(totalReqs))
+		provider.Bold("Tokens"), len(t.Usage), cliframework.Plural(len(t.Usage), "model", "models"), compactNum(totalReqs))
 	hdr := fmt.Sprintf("  %-14s %-22s %10s %10s %10s %10s %10s",
 		"PROVIDER", "MODEL", "INPUT", "OUTPUT", "CACHE-CR", "CACHE-RD", "REQUESTS")
-	fmt.Fprintln(&b, cDim(hdr))
+	fmt.Fprintln(&b, provider.Dim(hdr))
 	for _, e := range t.Usage {
 		fmt.Fprintf(&b, "  %-14s %-22s %10s %10s %10s %10s %10s\n",
 			e.Provider, e.Model,
@@ -313,7 +306,7 @@ func RenderLogs(l *LogsResp) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (last %d)\n", cBold("Logs"), len(l.Lines))
+	fmt.Fprintf(&b, "%s (last %d)\n", provider.Bold("Logs"), len(l.Lines))
 	for _, line := range l.Lines {
 		fmt.Fprintf(&b, "  %s\n", line)
 	}
@@ -334,7 +327,7 @@ func RenderQuota(st *StatusResp) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (%d)\n", cBold("Quota"), len(names))
+	fmt.Fprintf(&b, "%s (%d)\n", provider.Bold("Quota"), len(names))
 	for _, name := range names {
 		q := st.Quota[name]
 		header := name
@@ -344,9 +337,9 @@ func RenderQuota(st *StatusResp) string {
 		if q.Plan != "" {
 			header += " · " + q.Plan
 		}
-		fmt.Fprintf(&b, "  %s\n", cBold(header))
+		fmt.Fprintf(&b, "  %s\n", provider.Bold(header))
 		if q.Err != "" {
-			fmt.Fprintf(&b, "      %s\n", cDim("no data ("+q.Err+")"))
+			fmt.Fprintf(&b, "      %s\n", provider.Dim("no data ("+q.Err+")"))
 			continue
 		}
 		for _, w := range q.Windows {
@@ -366,10 +359,10 @@ func RenderQuota(st *StatusResp) string {
 			}
 			resets := ""
 			if !w.ResetsAt.IsZero() {
-				resets = cDim("  resets " + formatResetAt(w.ResetsAt.UnixMilli()))
+				resets = provider.Dim("  resets " + formatResetAt(w.ResetsAt.UnixMilli()))
 			}
 			fmt.Fprintf(&b, "      %s  %5s  %s%s\n",
-				pad(label, 22), pctStr, provider.ProgressBar(usedPct, 16), resets)
+				provider.Pad(label, 22), pctStr, provider.ProgressBar(usedPct, 16), resets)
 		}
 	}
 	return b.String()
@@ -407,7 +400,7 @@ func RenderStatus(listen string, opts StatusOpts) (string, error) {
 		return "", fmt.Errorf("web UI endpoints not available — is web.enabled true on the daemon?")
 	}
 	if status != 200 {
-		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(statusBody), 200))
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, provider.Truncate(string(statusBody), 200))
 	}
 
 	tokensBody, _, _ := StatusGet(base, "/api/tokens") // non-fatal; absence just hides the section
@@ -442,7 +435,7 @@ func RenderStatus(listen string, opts StatusOpts) (string, error) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  %s · %s · %s\n\n",
-		cBold("model-proxy"), cDim("v"+st.Version), cDim(st.Uptime), cDim(st.Listen))
+		provider.Bold("model-proxy"), provider.Dim("v"+st.Version), provider.Dim(st.Uptime), provider.Dim(st.Listen))
 	AppendSection(&b, RenderProviders(&st))
 	AppendSection(&b, RenderSchedule(&st))
 	AppendSection(&b, RenderQuota(&st))
@@ -477,7 +470,7 @@ func RenderWarnings(st *StatusResp) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s  implicit-route warnings\n", cYellow("⚠"))
+	fmt.Fprintf(&b, "%s  implicit-route warnings\n", provider.Yellow("⚠"))
 	for _, w := range st.Warnings {
 		fmt.Fprintf(&b, "  %s\n", w)
 	}
@@ -491,7 +484,7 @@ func CmdServeStatus(args []string, cfg *configdomain.Config) {
 	opts := ParseStatusFlags(args)
 	out, err := RenderStatus(cfg.Listen, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s %s\n", cRed("✗"), err.Error())
+		fmt.Fprintf(os.Stderr, "%s %s\n", provider.Red("✗"), err.Error())
 		os.Exit(1)
 	}
 	fmt.Print(out)

@@ -5,21 +5,12 @@ import (
 	"strconv"
 	"strings"
 
-	"model-proxy/provider"
+	displaypkg "model-proxy/provider"
 )
 
 // truncate caps a string at n bytes, trailing "..." (provider display rules).
-func truncate(s string, n int) string { return provider.Truncate(s, n) }
 
-func cRed(s string) string               { return provider.Red(s) }
-func cGreen(s string) string             { return provider.Green(s) }
-func cYellow(s string) string            { return provider.Yellow(s) }
-func cDim(s string) string               { return provider.Dim(s) }
-func cGray(s string) string              { return provider.Gray(s) }
-func cBold(s string) string              { return provider.Bold(s) }
-func cCyan(s string) string              { return provider.Cyan(s) }
-func pad(s string, n int) string         { return provider.Pad(s, n) }
-func formatResetAt(resetMs int64) string { return provider.FormatResetAt(resetMs) }
+func formatResetAt(resetMs int64) string { return displaypkg.FormatResetAt(resetMs) }
 
 // Plural returns sing for n==1 else plur.
 func Plural(n int, sing, plur string) string {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	configdomain "model-proxy/internal/config"
 )
@@ -79,4 +80,36 @@ func PidFilePath(logFile string) string {
 // WritePidFile writes pid as a single line.
 func WritePidFile(path string, pid int) error {
 	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", pid)), 0o644)
+}
+
+// MaybeReloadDaemon SIGHUPs a running daemon after a config/credential write
+// so the change takes effect without a manual `serve reload`. Best-effort:
+// silent when no daemon runs, the pid file is stale, or the signal fails.
+func MaybeReloadDaemon(cfg *configdomain.Config) {
+	logFile := ResolveLogFile(Args{}, cfg)
+	pidPath := PidFilePath(logFile)
+	pidStr, err := os.ReadFile(pidPath)
+	if err != nil {
+		return // no pid file → no daemon running
+	}
+	var pid int
+	for _, c := range pidStr {
+		if c < '0' || c > '9' {
+			break
+		}
+		pid = pid*10 + int(c-'0')
+	}
+	if pid <= 0 {
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		// Stale pid file — clean it up so the next start isn't confused.
+		os.Remove(pidPath)
+		return
+	}
+	_ = proc.Signal(syscall.SIGHUP)
 }

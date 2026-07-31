@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	displaypkg "model-proxy/provider"
 	"net/url"
 	"sort"
 	"strings"
@@ -145,7 +146,7 @@ func RenderStats(listen string, opts StatsOpts) (string, error) {
 		return "", fmt.Errorf("web UI endpoints not available - is web.enabled true on the daemon?")
 	}
 	if status != 200 {
-		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(body), 200))
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, displaypkg.Truncate(string(body), 200))
 	}
 	if opts.JSON {
 		return string(body), nil
@@ -207,7 +208,7 @@ func RenderAnalytics(listen string, opts StatsOpts) (string, error) {
 		return "", fmt.Errorf("web UI endpoints not available - is web.enabled true on the daemon?")
 	}
 	if status != 200 {
-		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(body), 200))
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, displaypkg.Truncate(string(body), 200))
 	}
 	if opts.JSON {
 		return string(body), nil
@@ -354,7 +355,7 @@ func RenderAgents(listen string, opts StatsOpts) (string, error) {
 		return "", fmt.Errorf("web UI endpoints not available - is web.enabled true on the daemon?")
 	}
 	if status != 200 {
-		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(body), 200))
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, displaypkg.Truncate(string(body), 200))
 	}
 	if opts.JSON {
 		return string(body), nil

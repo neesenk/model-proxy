@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"model-proxy/internal/app"
+	displaypkg "model-proxy/provider"
 	"os"
 
 	configdomain "model-proxy/internal/config"
@@ -32,7 +33,7 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 			fmt.Printf("claude_mapping: %d aliases\n", len(cfg.ClaudeMapping))
 		}
 	case "check":
-		fmt.Println(cGreen("✓ config valid"))
+		fmt.Println(displaypkg.Green("✓ config valid"))
 		fmt.Printf("  listen:    %s\n", cfg.Listen)
 		fmt.Printf("  log_file:  %s\n", cfg.LogFile)
 		fmt.Printf("  providers: %d\n", len(cfg.Providers))
@@ -50,7 +51,7 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		// Config-time routing hazards (explicit routes only — implicit routes are
 		// a daemon-side concept; the daemon logs these at boot/reload).
 		for _, w := range app.ConfigRoutingWarnings(cfg, cfg.Routes) {
-			fmt.Println(cYellow("  ⚠ " + w))
+			fmt.Println(displaypkg.Yellow("  ⚠ " + w))
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])

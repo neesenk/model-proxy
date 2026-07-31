@@ -5,6 +5,7 @@ import (
 	"fmt"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
+	displaypkg "model-proxy/provider"
 	"net/url"
 	"os"
 
@@ -19,14 +20,14 @@ import (
 
 func CmdShadow(args []string, cfg *configdomain.Config) {
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "%s usage: model-proxy shadow report [--from --to --config]\n", cRed("✗"))
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy shadow report [--from --to --config]\n", displaypkg.Red("✗"))
 		os.Exit(1)
 	}
 	switch args[0] {
 	case "report":
 		CmdShadowReport(args[1:], cfg)
 	default:
-		fmt.Fprintf(os.Stderr, "%s unknown shadow subcommand: %s (try 'report')\n", cRed("✗"), args[0])
+		fmt.Fprintf(os.Stderr, "%s unknown shadow subcommand: %s (try 'report')\n", displaypkg.Red("✗"), args[0])
 		os.Exit(1)
 	}
 }
@@ -36,12 +37,12 @@ func CmdShadowReport(args []string, cfg *configdomain.Config) {
 	q := MakeURLQuery(args)
 	resp, err := daemonctl.Client.Get(base + "/api/shadow-report?" + q.Encode())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n", cRed("✗"), cfg.Listen, err)
+		fmt.Fprintf(os.Stderr, "%s cannot reach daemon at %s: %v\nis `model-proxy serve` running?\n", displaypkg.Red("✗"), cfg.Listen, err)
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		fmt.Fprintf(os.Stderr, "%s daemon returned HTTP %d\n", cRed("✗"), resp.StatusCode)
+		fmt.Fprintf(os.Stderr, "%s daemon returned HTTP %d\n", displaypkg.Red("✗"), resp.StatusCode)
 		os.Exit(1)
 	}
 	var out struct {
@@ -49,7 +50,7 @@ func CmdShadowReport(args []string, cfg *configdomain.Config) {
 		Entries []requestlog.ShadowReportEntry `json:"entries"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		fmt.Fprintf(os.Stderr, "%s parse response: %v\n", cRed("✗"), err)
+		fmt.Fprintf(os.Stderr, "%s parse response: %v\n", displaypkg.Red("✗"), err)
 		os.Exit(1)
 	}
 	if !out.Enabled {

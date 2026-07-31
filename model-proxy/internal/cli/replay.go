@@ -7,6 +7,7 @@ import (
 	"io"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
+	displaypkg "model-proxy/provider"
 	"net/http"
 	"os"
 	"strings"
@@ -29,17 +30,17 @@ import (
 func CmdReplay(args []string, cfg *configdomain.Config) {
 	pos := PositionalArgs(args)
 	if len(pos) == 0 {
-		fmt.Fprintf(os.Stderr, "%s usage: model-proxy replay <id> --to <provider>\n", cRed("✗"))
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy replay <id> --to <provider>\n", displaypkg.Red("✗"))
 		os.Exit(1)
 	}
 	provider := ReplayTarget(args)
 	if provider == "" {
-		fmt.Fprintf(os.Stderr, "%s usage: model-proxy replay <id> --to <provider> (--to is required)\n", cRed("✗"))
+		fmt.Fprintf(os.Stderr, "%s usage: model-proxy replay <id> --to <provider> (--to is required)\n", displaypkg.Red("✗"))
 		os.Exit(1)
 	}
 	body, err := DoReplay("http://"+cfg.Listen, pos[0], provider)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s %v\n", cRed("✗"), err)
+		fmt.Fprintf(os.Stderr, "%s %v\n", displaypkg.Red("✗"), err)
 		os.Exit(1)
 	}
 	os.Stdout.Write(body)
@@ -57,7 +58,7 @@ func DoReplay(base, id, provider string) ([]byte, error) {
 		return nil, fmt.Errorf("no request log for id %s (is request_log.enabled on?)", id)
 	}
 	if status != 200 {
-		return nil, fmt.Errorf("daemon returned HTTP %d: %s", status, truncate(string(recBody), 200))
+		return nil, fmt.Errorf("daemon returned HTTP %d: %s", status, displaypkg.Truncate(string(recBody), 200))
 	}
 	var got struct {
 		Records []requestlog.Record `json:"records"`
@@ -100,10 +101,10 @@ func DoReplay(base, id, provider string) ([]byte, error) {
 		return nil, fmt.Errorf("replay request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	fmt.Fprintf(os.Stderr, "%s replay %s → %s (HTTP %d)\n", cDim("•"), id, provider, resp.StatusCode)
+	fmt.Fprintf(os.Stderr, "%s replay %s → %s (HTTP %d)\n", displaypkg.Dim("•"), id, provider, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("%s", truncate(strings.TrimSpace(string(body)), 400))
+		return nil, fmt.Errorf("%s", displaypkg.Truncate(strings.TrimSpace(string(body)), 400))
 	}
 	return body, nil
 }
