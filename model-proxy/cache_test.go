@@ -25,7 +25,7 @@ type cacheTestFailingWriter struct {
 	writes int
 }
 
-func (w *cacheTestFailingWriter) Header() http.Header { return w.Header() }
+func (w *cacheTestFailingWriter) Header() http.Header { return w.header }
 func (w *cacheTestFailingWriter) WriteHeader(int)     {}
 func (w *cacheTestFailingWriter) Write([]byte) (int, error) {
 	w.writes++

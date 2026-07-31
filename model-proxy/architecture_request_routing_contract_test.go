@@ -207,7 +207,7 @@ func plannerConstructorUsesRuntimeSnapshot(node ast.Node) bool {
 		requestRoutingExprPath(schedulerFields["config"]) == "runtime.cfg" &&
 		requestRoutingExprPath(schedulerFields["parentOf"]) == "runtime.parentOf" &&
 		requestRoutingExprPath(schedulerFields["routeKeys"]) == "routeKeys" &&
-		requestRoutingExprPath(schedulerFields["generation"]) == "runtime.Generation"
+		requestRoutingExprPath(schedulerFields["generation"]) == "runtime.generation"
 }
 
 func requestRoutingCompositeFields(literal *ast.CompositeLit) map[string]ast.Expr {

@@ -441,22 +441,22 @@ func TestMaybeReloadDaemon_NoOpWithoutPidFile(t *testing.T) {
 // by convention, so this test guards the fix at the source level: the login
 // functions MUST resolve the auth file from provName, not the provider_id.
 func TestAqpCodexLogin_UsesConfigNameForAuthFile(t *testing.T) {
-	src, err := os.ReadFile("login.go")
+	src, err := os.ReadFile("internal/cli/login/login.go")
 	if err != nil {
 		t.Skip("source not readable:", err)
 	}
-	if !strings.Contains(string(src), `authFilePath(provName, "oauth_auth")`) {
-		t.Errorf("login.go runLogin must use authFilePath(provName, \"oauth_auth\"), not the hardcoded provider_id")
+	if !strings.Contains(string(src), `provName+"_oauth_auth.json"`) {
+		t.Errorf("internal/cli/login/login.go runLogin must resolve the auth file from provName, not the hardcoded provider_id")
 	}
-	csrc, err := os.ReadFile("codex_login.go")
+	csrc, err := os.ReadFile("internal/cli/login/codex_login.go")
 	if err != nil {
 		t.Skip("source not readable:", err)
 	}
-	if !strings.Contains(string(csrc), `authFilePath(provName, "oauth_auth")`) {
-		t.Errorf("codex_login.go cmdCodexLogin must use authFilePath(provName, \"oauth_auth\"), not the hardcoded provider_id")
+	if !strings.Contains(string(csrc), `provName+"_oauth_auth.json"`) {
+		t.Errorf("internal/cli/login/codex_login.go cmdCodexLogin must resolve the auth file from provName, not the hardcoded provider_id")
 	}
 	// And the hardcoded forms must be GONE (the bug).
-	for _, bad := range []string{`authFilePath("aqp", "oauth_auth")`, `authFilePath("codex", "oauth_auth")`} {
+	for _, bad := range []string{`"aqp_oauth_auth.json"`, `"codex_oauth_auth.json"`} {
 		if strings.Contains(string(src), bad) || strings.Contains(string(csrc), bad) {
 			t.Errorf("hardcoded provider_id auth path %q still present (the bug)", bad)
 		}
