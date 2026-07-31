@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"model-proxy/internal/cli"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -216,13 +217,13 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 
 // TestReplayTarget parses --to in both --to X and --to=X forms.
 func TestReplayTarget(t *testing.T) {
-	if got := replayTarget([]string{"id", "--to", "kimi"}); got != "kimi" {
+	if got := cli.ReplayTarget([]string{"id", "--to", "kimi"}); got != "kimi" {
 		t.Errorf("--to X = %q want kimi", got)
 	}
-	if got := replayTarget([]string{"id", "--to=kimi"}); got != "kimi" {
+	if got := cli.ReplayTarget([]string{"id", "--to=kimi"}); got != "kimi" {
 		t.Errorf("--to=X = %q want kimi", got)
 	}
-	if got := replayTarget([]string{"id"}); got != "" {
+	if got := cli.ReplayTarget([]string{"id"}); got != "" {
 		t.Errorf("missing --to = %q want empty", got)
 	}
 }

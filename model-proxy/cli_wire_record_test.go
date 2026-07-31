@@ -6,6 +6,7 @@ package main
 
 import (
 	"io"
+	"model-proxy/internal/cli"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,7 +48,7 @@ func TestWireRecord_Run(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := runWireRecord("p", "", "hi", outDir, cfg)
+	err := cli.RunWireRecord("p", "", "hi", outDir, cfg)
 	if err == nil {
 		t.Fatal("expected error (anthropic endpoints 404)")
 	}
@@ -85,7 +86,7 @@ func TestWireRecord_Run(t *testing.T) {
 	}
 
 	// Unknown provider → error (no exit).
-	if err := runWireRecord("nope", "", "hi", t.TempDir(), cfg); err == nil {
+	if err := cli.RunWireRecord("nope", "", "hi", t.TempDir(), cfg); err == nil {
 		t.Error("unknown provider must error")
 	}
 }
@@ -93,14 +94,14 @@ func TestWireRecord_Run(t *testing.T) {
 // TestWireRecord_SplitArgs: interspersed flags and positionals split
 // correctly (`wire record <prov> --out DIR` and `--out DIR <prov>` both work).
 func TestWireRecord_SplitArgs(t *testing.T) {
-	flagArgs, pos := splitWireRecordArgs([]string{"p1", "--out", "/tmp/x", "--model=m2"})
+	flagArgs, pos := cli.SplitWireRecordArgs([]string{"p1", "--out", "/tmp/x", "--model=m2"})
 	if len(pos) != 1 || pos[0] != "p1" {
 		t.Errorf("pos = %v", pos)
 	}
 	if len(flagArgs) != 3 || flagArgs[0] != "--out" || flagArgs[1] != "/tmp/x" || flagArgs[2] != "--model=m2" {
 		t.Errorf("flagArgs = %v", flagArgs)
 	}
-	flagArgs2, pos2 := splitWireRecordArgs([]string{"--model", "m2", "p1"})
+	flagArgs2, pos2 := cli.SplitWireRecordArgs([]string{"--model", "m2", "p1"})
 	if len(pos2) != 1 || pos2[0] != "p1" || len(flagArgs2) != 2 || flagArgs2[1] != "m2" {
 		t.Errorf("flagArgs2=%v pos2=%v", flagArgs2, pos2)
 	}

@@ -167,17 +167,17 @@ func TestDoReplay(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, err := doReplay(srv.URL, "good", "zhipu")
+	body, err := cli.DoReplay(srv.URL, "good", "zhipu")
 	if err != nil {
 		t.Fatalf("doReplay good: %v", err)
 	}
 	if !strings.Contains(string(body), `"replayed":true`) {
 		t.Errorf("replay body=%q", string(body))
 	}
-	if _, err := doReplay(srv.URL, "ghost", "zhipu"); err == nil || !strings.Contains(err.Error(), "no request log") {
+	if _, err := cli.DoReplay(srv.URL, "ghost", "zhipu"); err == nil || !strings.Contains(err.Error(), "no request log") {
 		t.Errorf("ghost err=%v want no request log", err)
 	}
-	if _, err := doReplay(srv.URL, "nobody", "zhipu"); err == nil || !strings.Contains(err.Error(), "no captured request body") {
+	if _, err := cli.DoReplay(srv.URL, "nobody", "zhipu"); err == nil || !strings.Contains(err.Error(), "no captured request body") {
 		t.Errorf("nobody err=%v want no captured body", err)
 	}
 }
@@ -201,7 +201,7 @@ func TestDoReplay_TruncatedBody(t *testing.T) {
 		writeJSON(w, 200, map[string]any{"records": []requestlog.Record{*record}})
 	}))
 	defer srv.Close()
-	_, err := doReplay(srv.URL, "trunc", "zhipu")
+	_, err := cli.DoReplay(srv.URL, "trunc", "zhipu")
 	if err == nil || !strings.Contains(err.Error(), "truncated") || !strings.Contains(err.Error(), "max_body_bytes") {
 		t.Errorf("truncated-body replay err=%v, want a truncated/max_body_bytes refusal", err)
 	}
@@ -218,7 +218,7 @@ func TestDoReplay_RejectsShadowRecord(t *testing.T) {
 		}})
 	}))
 	defer srv.Close()
-	_, err := doReplay(srv.URL, "shadow-abc123", "zhipu")
+	_, err := cli.DoReplay(srv.URL, "shadow-abc123", "zhipu")
 	if err == nil || !strings.Contains(err.Error(), "shadow") {
 		t.Errorf("shadow-record replay err=%v, want a shadow refusal", err)
 	}
@@ -234,7 +234,7 @@ func TestDoReplay_RejectsNonV1Path(t *testing.T) {
 		}})
 	}))
 	defer srv.Close()
-	_, err := doReplay(srv.URL, "req-1", "zhipu")
+	_, err := cli.DoReplay(srv.URL, "req-1", "zhipu")
 	if err == nil || !strings.Contains(err.Error(), "/v1/") {
 		t.Errorf("non-/v1/ path replay err=%v, want a /v1/ refusal", err)
 	}
