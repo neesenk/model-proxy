@@ -12,10 +12,10 @@ func TestParseServeArgs(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
-		want serveArgs
+		want cliserve.Args
 	}{
-		{"bare config", []string{"--config", "c.yaml"}, serveArgs{Config: "c.yaml"}},
-		{"config=", []string{"--config=/x.yaml"}, serveArgs{Config: "/x.yaml"}},
+		{"bare config", []string{"--config", "c.yaml"}, cliserve.Args{Config: "c.yaml"}},
+		{"config=", []string{"--config=/x.yaml"}, cliserve.Args{Config: "/x.yaml"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"go/ast"
+	cliserve "model-proxy/internal/cli/serve"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -95,7 +96,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 				Stats:     StatsConfig{DBPath: filepath.Join(home, "stats.db")},
 				Web:       WebConfig{Enabled: test.web},
 			}
-			runtime := newApplicationRuntime(cfg, serveArgs{Config: "test-config.yaml"})
+			runtime := newApplicationRuntime(cfg, cliserve.Args{Config: "test-config.yaml"})
 			t.Cleanup(runtime.Close)
 
 			if runtime.proxy == nil || runtime.startupConfig != cfg || runtime.handler == nil {
@@ -197,7 +198,7 @@ providers:
 		Providers: map[string]Provider{},
 		Stats:     StatsConfig{DBPath: filepath.Join(home, "stats.db")},
 	}
-	runtime := newApplicationRuntime(cfg, serveArgs{Config: configPath})
+	runtime := newApplicationRuntime(cfg, cliserve.Args{Config: configPath})
 	t.Cleanup(runtime.Close)
 	runtime.reload()
 	snapshot := runtime.proxy.snapshotRuntime()

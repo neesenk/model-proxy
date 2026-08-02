@@ -59,7 +59,7 @@ providers:
 
 func TestResolveLogFile(t *testing.T) {
 	cfg := &Config{LogFile: "/from/config.log"}
-	sa := serveArgs{Config: "/etc/model-proxy/config.yaml"}
+	sa := cliserve.Args{Config: "/etc/model-proxy/config.yaml"}
 
 	// config used
 	if got := cliserve.ResolveLogFile(sa, cfg); got != "/from/config.log" {
@@ -67,7 +67,7 @@ func TestResolveLogFile(t *testing.T) {
 	}
 	// default: the OS temp dir (runtime artifacts), e.g. /tmp on Linux, $TMPDIR on macOS
 	wantDefault := filepath.Join(os.TempDir(), "model-proxy.log")
-	if got := cliserve.ResolveLogFile(serveArgs{Config: "/etc/model-proxy/config.yaml"}, &Config{}); got != wantDefault {
+	if got := cliserve.ResolveLogFile(cliserve.Args{Config: "/etc/model-proxy/config.yaml"}, &Config{}); got != wantDefault {
 		t.Errorf("default: got %q want %q", got, wantDefault)
 	}
 }
