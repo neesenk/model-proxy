@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -80,7 +81,7 @@ func TestAccountsListCodex(t *testing.T) {
 	af.Tokens.IDToken = "head." + idPayload + ".sig"
 	af.Tokens.AccountID = "acct-codex-42"
 	ab, _ := json.MarshalIndent(af, "", "  ")
-	if err := os.WriteFile(authFilePath("codex", "oauth_auth"), ab, 0o600); err != nil {
+	if err := os.WriteFile(cliframework.AuthFilePath("codex", "oauth_auth"), ab, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

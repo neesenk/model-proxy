@@ -2,6 +2,7 @@ package main
 
 import (
 	"model-proxy/internal/app"
+	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
 	"os"
 	"path/filepath"
@@ -35,7 +36,7 @@ func TestLoadVolcengineCreds(t *testing.T) {
 	os.WriteFile(filepath.Join(credDir, "volcengine_apikey.json"),
 		[]byte(`{"api_key":"ark-key","access_key":"ak","secret_key":"sk"}`), 0o600)
 
-	c, err := app.LoadVolcengineCreds(homeDir(), "volcengine")
+	c, err := app.LoadVolcengineCreds(cliframework.HomeDir(), "volcengine")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +47,7 @@ func TestLoadVolcengineCreds(t *testing.T) {
 
 func TestLoadVolcengineCreds_Missing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if _, err := app.LoadVolcengineCreds(homeDir(), "volcengine"); err == nil {
+	if _, err := app.LoadVolcengineCreds(cliframework.HomeDir(), "volcengine"); err == nil {
 		t.Error("loadVolcengineCreds missing file: want error, got nil")
 	}
 }
@@ -57,7 +58,7 @@ func TestLoadVolcengineCreds_BadJSON(t *testing.T) {
 	credDir := filepath.Join(home, ".model-proxy")
 	os.MkdirAll(credDir, 0o700)
 	os.WriteFile(filepath.Join(credDir, "volcengine_apikey.json"), []byte(`not-json`), 0o600)
-	if _, err := app.LoadVolcengineCreds(homeDir(), "volcengine"); err == nil {
+	if _, err := app.LoadVolcengineCreds(cliframework.HomeDir(), "volcengine"); err == nil {
 		t.Error("loadVolcengineCreds bad JSON: want error, got nil")
 	}
 }

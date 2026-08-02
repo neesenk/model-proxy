@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/httptest"
@@ -73,7 +74,7 @@ func TestAqpLoginFlow(t *testing.T) {
 	if state.Result != "u@x.com" {
 		t.Errorf("poll result=%q want u@x.com", state.Result)
 	}
-	account, err := provider.LoadAqpAccount(authFilePath("aqp", "oauth_auth"))
+	account, err := provider.LoadAqpAccount(cliframework.AuthFilePath("aqp", "oauth_auth"))
 	if err != nil {
 		t.Fatalf("load persisted AQP account: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestCodexLoginFlow(t *testing.T) {
 		t.Errorf("poll result=%q want acct-1", state.Result)
 	}
 	// codex auth file must exist (written 0600 by the goroutine).
-	path := authFilePath("codex", "oauth_auth")
+	path := cliframework.AuthFilePath("codex", "oauth_auth")
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("codex auth file not written: %v", err)

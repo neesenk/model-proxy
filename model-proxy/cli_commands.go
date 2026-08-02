@@ -144,7 +144,7 @@ func takeoverFacts(cfg *Config, which string) takeover.ModelFacts {
 		SourceDefault: -1,
 	}
 	if takeover.WritesMetadata(takeover.ListClients(cfg, which)) {
-		cat, _ := app.LoadModelsCatalog(homeDir(), false)
+		cat, _ := app.LoadModelsCatalog(cliframework.HomeDir(), false)
 		meta, sources := app.HydrateModels(cfg, cat)
 		facts.Meta = meta
 		facts.Sources = make(map[string]map[string]int, len(sources))

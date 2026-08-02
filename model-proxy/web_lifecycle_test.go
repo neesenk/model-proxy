@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/httptest"
@@ -57,7 +58,7 @@ func TestWebCloseCancelsAqpLoginBeforeCredentialCommit(t *testing.T) {
 	waitForSignal(t, pollCancelled, "AQP poll request was not cancelled")
 	waitForSignal(t, closeDone, "Web close did not join the cancelled AQP poll")
 
-	assertLoginCancelledWithoutCredential(t, w, sessionID, authFilePath("aqp", "oauth_auth"))
+	assertLoginCancelledWithoutCredential(t, w, sessionID, cliframework.AuthFilePath("aqp", "oauth_auth"))
 }
 
 func TestWebCloseCancelsCodexLoginBeforeCredentialCommit(t *testing.T) {
@@ -107,7 +108,7 @@ func TestWebCloseCancelsCodexLoginBeforeCredentialCommit(t *testing.T) {
 	waitForSignal(t, pollCancelled, "Codex poll request was not cancelled")
 	waitForSignal(t, closeDone, "Web close did not join the cancelled Codex poll")
 
-	assertLoginCancelledWithoutCredential(t, w, sessionID, authFilePath("codex", "oauth_auth"))
+	assertLoginCancelledWithoutCredential(t, w, sessionID, cliframework.AuthFilePath("codex", "oauth_auth"))
 }
 
 type webLifecycleRoundTripperFunc func(*http.Request) (*http.Response, error)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	cliframework "model-proxy/internal/cli/framework"
 	"os/exec"
 	"testing"
 )
@@ -12,18 +13,18 @@ func TestRunCmd_StartsProcess(t *testing.T) {
 	// `true` exits 0 immediately. runCmd uses Start (non-blocking), so the
 	// process may still be starting when we check — but Start itself either
 	// errors or returns nil with the process created.
-	if err := runCmd("true"); err != nil {
+	if err := cliframework.RunCmd("true"); err != nil {
 		// `true` may not be on PATH in some environments; skip then.
 		if _, lerr := exec.LookPath("true"); lerr != nil {
 			t.Skip("`true` not on PATH")
 		}
-		t.Errorf("runCmd(true): %v", err)
+		t.Errorf("cliframework.RunCmd(true): %v", err)
 	}
 }
 
 func TestRunCmd_MissingBinary(t *testing.T) {
-	if err := runCmd("no-such-binary-xyz"); err == nil {
-		t.Error("runCmd(missing binary): want error, got nil")
+	if err := cliframework.RunCmd("no-such-binary-xyz"); err == nil {
+		t.Error("cliframework.RunCmd(missing binary): want error, got nil")
 	}
 }
 

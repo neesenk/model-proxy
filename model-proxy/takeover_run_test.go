@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"model-proxy/internal/app"
+	cliframework "model-proxy/internal/cli/framework"
 	"model-proxy/internal/takeover"
 	"net/http"
 	"net/http/httptest"
@@ -115,7 +116,7 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 	}
 	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644)
 
-	cat, _ := app.LoadModelsCatalog(homeDir(), false)
+	cat, _ := app.LoadModelsCatalog(cliframework.HomeDir(), false)
 	meta, sources := app.HydrateModels(cfg, cat)
 	factsSources := make(map[string]map[string]int, len(sources))
 	for provider, models := range sources {

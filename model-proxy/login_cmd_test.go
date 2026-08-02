@@ -433,7 +433,7 @@ func TestMaybeReloadDaemon_NoOpWithoutPidFile(t *testing.T) {
 
 // --- aqp/codex CLI login path-key regression ---
 //
-// Bug: cmdCodexLogin/runLogin previously hardcoded authFilePath("aqp"/"codex",
+// Bug: cmdCodexLogin/runLogin previously hardcoded cliframework.AuthFilePath("aqp"/"codex",
 // "oauth_auth"), so a renamed instance (provider_id=codex, name=codex-work)
 // wrote codex_oauth_auth.json — a file the forward path (buildOne, which uses
 // the config name) never read → 401/502 after login. The fix threads provName

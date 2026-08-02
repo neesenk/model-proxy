@@ -1,6 +1,7 @@
 package main
 
 import (
+	cliframework "model-proxy/internal/cli/framework"
 	"os"
 	"path/filepath"
 	"testing"
@@ -134,7 +135,7 @@ var _ = provider.New
 func TestCodexProvider_Logout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	cred := authFilePath("codex", "oauth_auth")
+	cred := cliframework.AuthFilePath("codex", "oauth_auth")
 	os.MkdirAll(filepath.Dir(cred), 0o700)
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 
@@ -187,7 +188,7 @@ func TestApiKeyProvider_Logout(t *testing.T) {
 func TestAqpProvider_Logout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	cred := authFilePath("aqp", "oauth_auth")
+	cred := cliframework.AuthFilePath("aqp", "oauth_auth")
 	os.MkdirAll(filepath.Dir(cred), 0o700)
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 	cfg := &Config{Providers: map[string]Provider{"aqp": {Provider: "aqp"}}}

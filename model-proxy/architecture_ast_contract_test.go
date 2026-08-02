@@ -227,8 +227,19 @@ func isAccountsAdapterWrapper(fn *ast.FuncDecl) bool {
 
 	switch fn.Name.Name {
 	case "accountStore":
-		return selectorCallMatches(call, "accounts", "NewStore") &&
-			len(call.Args) == 1 && zeroArgIdentCall(call.Args[0], "homeDir")
+		// accounts owns its home-dir seam: either the package homeDir() wrapper
+		// or a direct os.UserHomeDir() inline.
+		if !selectorCallMatches(call, "accounts", "NewStore") || len(call.Args) != 1 {
+			return false
+		}
+		arg := call.Args[0]
+		if zeroArgIdentCall(arg, "homeDir") {
+			return true
+		}
+		if inner, ok := arg.(*ast.CallExpr); ok {
+			return selectorCallMatches(inner, "os", "UserHomeDir")
+		}
+		return false
 	case "nowTS":
 		return selectorCallMatches(call, "accounts", "Timestamp") &&
 			len(call.Args) == 1 && zeroArgSelectorCall(call.Args[0], "time", "Now")

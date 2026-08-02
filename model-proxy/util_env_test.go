@@ -1,6 +1,7 @@
 package main
 
 import (
+	cliframework "model-proxy/internal/cli/framework"
 	"model-proxy/provider"
 	"path/filepath"
 	"runtime"
@@ -11,59 +12,59 @@ import (
 // --- util.go ---
 
 func TestEnvOrEmpty(t *testing.T) {
-	if got := envOrEmpty("MP_TEST_UNSET_VAR"); got != "" {
-		t.Errorf("envOrEmpty(unset)=%q want empty", got)
+	if got := cliframework.EnvOrEmpty("MP_TEST_UNSET_VAR"); got != "" {
+		t.Errorf("cliframework.EnvOrEmpty(unset)=%q want empty", got)
 	}
 	t.Setenv("MP_TEST_SET", "hello")
-	if got := envOrEmpty("MP_TEST_SET"); got != "hello" {
-		t.Errorf("envOrEmpty(set)=%q want hello", got)
+	if got := cliframework.EnvOrEmpty("MP_TEST_SET"); got != "hello" {
+		t.Errorf("cliframework.EnvOrEmpty(set)=%q want hello", got)
 	}
 }
 
 func TestRuntimeOS(t *testing.T) {
-	if got := runtimeOS(); got != runtime.GOOS {
-		t.Errorf("runtimeOS()=%q want %q", got, runtime.GOOS)
+	if got := cliframework.RuntimeOS(); got != runtime.GOOS {
+		t.Errorf("cliframework.RuntimeOS()=%q want %q", got, runtime.GOOS)
 	}
 }
 
 func TestReadFile_Missing(t *testing.T) {
-	if _, err := readFile(filepath.Join(t.TempDir(), "nope")); err == nil {
-		t.Error("readFile(missing): want error, got nil")
+	if _, err := cliframework.ReadFile(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Error("cliframework.ReadFile(missing): want error, got nil")
 	}
 }
 
 func TestWriteFile_ReadFile_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
-	if err := writeFile(p, []byte("hi"), 0o644); err != nil {
+	if err := cliframework.WriteFile(p, []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readFile(p)
+	got, err := cliframework.ReadFile(p)
 	if err != nil || string(got) != "hi" {
 		t.Errorf("round-trip: got=%q err=%v", got, err)
 	}
 }
 
 func TestMask_ShortAndEmpty(t *testing.T) {
-	if got := mask(""); got != "(empty)" {
-		t.Errorf("mask(empty)=%q want (empty)", got)
+	if got := cliframework.Mask(""); got != "(empty)" {
+		t.Errorf("cliframework.Mask(empty)=%q want (empty)", got)
 	}
-	if got := mask("short"); got != "****" {
-		t.Errorf("mask(short)=%q want ****", got)
+	if got := cliframework.Mask("short"); got != "****" {
+		t.Errorf("cliframework.Mask(short)=%q want ****", got)
 	}
-	if got := mask("ab"); got != "****" {
-		t.Errorf("mask(2-char)=%q want ****", got)
+	if got := cliframework.Mask("ab"); got != "****" {
+		t.Errorf("cliframework.Mask(2-char)=%q want ****", got)
 	}
 }
 
 func TestMask_Long(t *testing.T) {
-	if got := mask("abcdefghijklmnop"); got != "ab…op" {
-		t.Errorf("mask(long)=%q want ab…op", got)
+	if got := cliframework.Mask("abcdefghijklmnop"); got != "ab…op" {
+		t.Errorf("cliframework.Mask(long)=%q want ab…op", got)
 	}
 }
 
 func TestAuthFilePath(t *testing.T) {
-	got := authFilePath("zhipu-work", "apikey")
+	got := cliframework.AuthFilePath("zhipu-work", "apikey")
 	if !contains(got, "zhipu-work_apikey.json") || !contains(got, ".model-proxy") {
 		t.Errorf("authFilePath=%q want zhipu-work_apikey.json under .model-proxy", got)
 	}

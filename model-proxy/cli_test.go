@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -490,10 +491,10 @@ func TestCLI_UsagePoolPrintsAllAccounts(t *testing.T) {
 	if !strings.Contains(out, "K2") {
 		t.Errorf("output missing K2 label:\n%s", out)
 	}
-	if m := mask(id1); !strings.Contains(out, m) {
+	if m := cliframework.Mask(id1); !strings.Contains(out, m) {
 		t.Errorf("output missing masked id for K1 (%q):\n%s", m, out)
 	}
-	if m := mask(id2); !strings.Contains(out, m) {
+	if m := cliframework.Mask(id2); !strings.Contains(out, m) {
 		t.Errorf("output missing masked id for K2 (%q):\n%s", m, out)
 	}
 	// Two account blocks → at least two divider lines.

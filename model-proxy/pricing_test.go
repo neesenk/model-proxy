@@ -1,6 +1,7 @@
 package main
 
 import (
+	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,7 +26,7 @@ const pricingIntegrationFixture = `{
 func TestPricingCachePathUsesApplicationHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	if got, want := pricing.CachePath(homeDir()), filepath.Join(home, ".model-proxy", "pricing_cache.json"); got != want {
+	if got, want := pricing.CachePath(cliframework.HomeDir()), filepath.Join(home, ".model-proxy", "pricing_cache.json"); got != want {
 		t.Errorf("pricing cache path = %q, want %q", got, want)
 	}
 }
