@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"model-proxy/internal/observe/counters"
+	"model-proxy/provider"
 	"strconv"
 	"time"
 
@@ -112,7 +113,7 @@ func (effects targetExecutionEffects) LogAttempt(attempt targetexec.AttemptDTO) 
 		attempt.Request.URL.Path,
 		attempt.Scope.CalledModel,
 		attempt.Target.Model,
-		statusColor(attempt.Response.StatusCode, strconv.Itoa(attempt.Response.StatusCode)),
+		provider.StatusColor(attempt.Response.StatusCode, strconv.Itoa(attempt.Response.StatusCode)),
 		time.Since(attempt.Started).Milliseconds(),
 		len(attempt.Body),
 	)

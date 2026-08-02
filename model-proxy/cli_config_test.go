@@ -26,14 +26,14 @@ func TestStatusColor_AllBranches(t *testing.T) {
 		{100, provider.LogAnsiGray}, {0, provider.LogAnsiGray},
 	} {
 		want := c.code + "x" + provider.LogAnsiReset
-		if got := statusColor(c.status, "x"); got != want {
-			t.Errorf("statusColor(%d)=%q, want %q", c.status, got, want)
+		if got := provider.StatusColor(c.status, "x"); got != want {
+			t.Errorf("provider.StatusColor(%d)=%q, want %q", c.status, got, want)
 		}
 	}
 	// Color off: identity passthrough.
 	provider.LogColorEnabled = false
-	if got := statusColor(200, "ok"); got != "ok" {
-		t.Errorf("statusColor(200) with color off=%q, want ok", got)
+	if got := provider.StatusColor(200, "ok"); got != "ok" {
+		t.Errorf("provider.StatusColor(200) with color off=%q, want ok", got)
 	}
 }
 
