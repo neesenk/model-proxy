@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"model-proxy/internal/app"
 	runtimestate "model-proxy/internal/runtime"
 	"os"
 	"sort"
@@ -89,7 +90,7 @@ func (p *Proxy) catalogSnapshot() *catalog.Catalog {
 // runProxy only — direct NewProxy callers (tests) stay offline; tests that need
 // metadata set p.catalog directly.
 func (p *Proxy) initCatalog() {
-	cat, err := loadModelsCatalog(false)
+	cat, err := app.LoadModelsCatalog(homeDir(), false)
 	if err != nil || cat == nil {
 		if err != nil {
 			log.Printf("[models] catalog load failed: %v - running without request-aware routing", err)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"model-proxy/internal/app"
 	"model-proxy/internal/takeover"
 	"net/http"
 	"net/http/httptest"
@@ -114,8 +115,8 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 	}
 	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644)
 
-	cat, _ := loadModelsCatalog(false)
-	meta, sources := hydrateModels(cfg, cat)
+	cat, _ := app.LoadModelsCatalog(homeDir(), false)
+	meta, sources := app.HydrateModels(cfg, cat)
 	factsSources := make(map[string]map[string]int, len(sources))
 	for provider, models := range sources {
 		factsSources[provider] = make(map[string]int, len(models))
@@ -128,9 +129,9 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 		Implicit:       implicit,
 		Meta:           meta,
 		Sources:        factsSources,
-		SourceDefault:  int(srcDefault),
-		DefaultContext: defaultModelMetadata.Context,
-		DefaultOutput:  defaultModelMetadata.Output,
+		SourceDefault:  int(app.SrcDefault),
+		DefaultContext: app.DefaultModelMetadata.Context,
+		DefaultOutput:  app.DefaultModelMetadata.Output,
 	}
 	if err := takeover.RunTakeover(cfg, "all", bakDir, facts); err != nil {
 		t.Fatalf("runTakeover all with missing files: want nil, got %v", err)

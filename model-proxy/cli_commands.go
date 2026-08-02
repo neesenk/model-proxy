@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"model-proxy/internal/app"
 	"os"
 
 	clicmd "model-proxy/internal/cli"
@@ -143,8 +144,8 @@ func takeoverFacts(cfg *Config, which string) takeover.ModelFacts {
 		SourceDefault: -1,
 	}
 	if takeover.WritesMetadata(takeover.ListClients(cfg, which)) {
-		cat, _ := loadModelsCatalog(false)
-		meta, sources := hydrateModels(cfg, cat)
+		cat, _ := app.LoadModelsCatalog(homeDir(), false)
+		meta, sources := app.HydrateModels(cfg, cat)
 		facts.Meta = meta
 		facts.Sources = make(map[string]map[string]int, len(sources))
 		for provider, models := range sources {
@@ -153,9 +154,9 @@ func takeoverFacts(cfg *Config, which string) takeover.ModelFacts {
 				facts.Sources[provider][model] = int(source)
 			}
 		}
-		facts.SourceDefault = int(srcDefault)
-		facts.DefaultContext = defaultModelMetadata.Context
-		facts.DefaultOutput = defaultModelMetadata.Output
+		facts.SourceDefault = int(app.SrcDefault)
+		facts.DefaultContext = app.DefaultModelMetadata.Context
+		facts.DefaultOutput = app.DefaultModelMetadata.Output
 	}
 	return facts
 }

@@ -50,30 +50,30 @@ func TestHydrateModels(t *testing.T) {
 			"gpt-5.5":         {{Provider: "codex", Model: "gpt-5.5", Priority: 1}},
 		},
 	}
-	meta, src := hydrateModels(cfg, cat)
+	meta, src := app.HydrateModels(cfg, cat)
 
 	if pm := meta["zhipu"]["glm-4.6"]; pm.Context != 204800 || pm.Output != 131072 {
 		t.Errorf("zhipu/glm-4.6 should be catalog-sourced: %+v", pm)
 	}
-	if src["zhipu"]["glm-4.6"] != srcModelsDev {
-		t.Errorf("zhipu/glm-4.6 source = %v, want srcModelsDev", src["zhipu"]["glm-4.6"])
+	if src["zhipu"]["glm-4.6"] != app.SrcModelsDev {
+		t.Errorf("zhipu/glm-4.6 source = %v, want app.SrcModelsDev", src["zhipu"]["glm-4.6"])
 	}
 	if pm := meta["aqp"]["deepseek-v4-pro"]; pm.Context != 1000000 || pm.Output != 65536 {
 		t.Errorf("aqp/deepseek-v4-pro should be catalog-sourced: %+v", pm)
 	}
-	if src["aqp"]["deepseek-v4-pro"] != srcModelsDev {
-		t.Errorf("aqp/deepseek-v4-pro source = %v, want srcModelsDev", src["aqp"]["deepseek-v4-pro"])
+	if src["aqp"]["deepseek-v4-pro"] != app.SrcModelsDev {
+		t.Errorf("aqp/deepseek-v4-pro source = %v, want app.SrcModelsDev", src["aqp"]["deepseek-v4-pro"])
 	}
 	if pm := meta["codex"]["gpt-5.5"]; pm.Context != 200000 || pm.Output != 16384 {
 		t.Errorf("codex/gpt-5.5 should be default: %+v", pm)
 	}
-	if src["codex"]["gpt-5.5"] != srcDefault {
-		t.Errorf("codex/gpt-5.5 source = %v, want srcDefault", src["codex"]["gpt-5.5"])
+	if src["codex"]["gpt-5.5"] != app.SrcDefault {
+		t.Errorf("codex/gpt-5.5 source = %v, want app.SrcDefault", src["codex"]["gpt-5.5"])
 	}
 	if pm, ok := meta["volcengine"]["doubao-x"]; !ok || pm.Context != 200000 {
 		t.Errorf("volcengine/doubao-x should be present + default: %+v ok=%v", pm, ok)
 	}
-	if src["volcengine"]["doubao-x"] != srcDefault {
-		t.Errorf("volcengine/doubao-x source = %v, want srcDefault", src["volcengine"]["doubao-x"])
+	if src["volcengine"]["doubao-x"] != app.SrcDefault {
+		t.Errorf("volcengine/doubao-x source = %v, want app.SrcDefault", src["volcengine"]["doubao-x"])
 	}
 }

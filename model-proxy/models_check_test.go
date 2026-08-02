@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"model-proxy/internal/app"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/protocol"
@@ -471,8 +472,8 @@ func TestPrintKeptModels(t *testing.T) {
 			"kimi-k2.6": {}, // no metadata -> defaults (text, "-")
 		},
 	}
-	sources := map[string]map[string]modelSource{
-		"volcengine": {"glm-5.2": srcModelsDev, "kimi-k2.6": srcDefault},
+	sources := map[string]map[string]app.ModelSource{
+		"volcengine": {"glm-5.2": app.SrcModelsDev, "kimi-k2.6": app.SrcDefault},
 	}
 	out := grabStdout(t, func() { climodels.PrintKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources) })
 	if !strings.Contains(out, "glm-5.2") || !strings.Contains(out, "kimi-k2.6") {
