@@ -70,7 +70,7 @@ func TestWebCloseCancelsCodexLoginBeforeCredentialCommit(t *testing.T) {
 	p.mu.Lock()
 	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://unused.invalid"}
 	p.mu.Unlock()
-	w.newCodexOptions = func() *codexLoginServerOptions {
+	w.newCodexOptions = func() *clilogin.CodexLoginServerOptions {
 		return &clilogin.CodexLoginServerOptions{
 			UsercodeURL:  "https://auth.invalid/usercode",
 			DeviceTokURL: "https://auth.invalid/devtok",

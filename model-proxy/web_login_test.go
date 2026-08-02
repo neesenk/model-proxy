@@ -135,7 +135,7 @@ func TestLoginRouting(t *testing.T) {
 	// server keeps it deterministic — no real network dependency.
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	dead.Close()
-	w.newCodexOptions = func() *codexLoginServerOptions {
+	w.newCodexOptions = func() *clilogin.CodexLoginServerOptions {
 		o := &clilogin.CodexLoginServerOptions{UsercodeURL: dead.URL + "/usercode"}
 		o.Defaults()
 		return o
@@ -197,7 +197,7 @@ func TestCodexLoginFlow(t *testing.T) {
 	// Seam: point codex options at the mock so requestUserCode / pollForToken /
 	// exchangeCodeForTokens hit the httptest.Server instead of the real OpenAI
 	// deviceauth endpoints.
-	w.newCodexOptions = func() *codexLoginServerOptions {
+	w.newCodexOptions = func() *clilogin.CodexLoginServerOptions {
 		o := &clilogin.CodexLoginServerOptions{}
 		o.Defaults()
 		o.UsercodeURL = up.URL + "/usercode"

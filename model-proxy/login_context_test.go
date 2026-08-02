@@ -114,7 +114,7 @@ func TestPollForTokenContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := pollForTokenContext(ctx, opts, "device-auth-id", "user-code", 60)
+		_, err := clilogin.PollForTokenContext(ctx, opts, "device-auth-id", "user-code", 60)
 		result <- err
 	}()
 	<-entered
@@ -142,7 +142,7 @@ func TestPollForTokenContext_CancelsRetryWait(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := pollForTokenContext(ctx, opts, "device-auth-id", "user-code", 60)
+		_, err := clilogin.PollForTokenContext(ctx, opts, "device-auth-id", "user-code", 60)
 		result <- err
 	}()
 	<-bodyClosed
@@ -199,7 +199,7 @@ func TestExchangeCodeForTokensContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := exchangeCodeForTokensContext(ctx, opts, provider.CodexOAuthClientID, "authorization-code", "verifier")
+		_, err := clilogin.ExchangeCodeForTokensContext(ctx, opts, provider.CodexOAuthClientID, "authorization-code", "verifier")
 		result <- err
 	}()
 	<-entered
@@ -247,7 +247,7 @@ func TestRequestUserCodeContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := requestUserCodeContext(ctx, opts, provider.CodexOAuthClientID)
+		_, err := clilogin.RequestUserCodeContext(ctx, opts, provider.CodexOAuthClientID)
 		result <- err
 	}()
 	<-entered
