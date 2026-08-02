@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"model-proxy/internal/app"
+	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/observe/counters"
 	runtimestate "model-proxy/internal/runtime"
 	"net/http"
@@ -178,4 +179,17 @@ func (p *Proxy) resetStats() error {
 		p.cache.Reset()
 	}
 	return nil
+}
+
+// newResponseCache adapts resolved application configuration into the
+// repository-leaf cache component.
+func newResponseCache(config CacheConfig) *responsecache.Store {
+	if !config.IsEnabled() {
+		return nil
+	}
+	return responsecache.New(responsecache.Options{
+		TTL:          config.TTLDuration(),
+		MaxEntries:   config.MaxEntriesValue(),
+		MaxBodyBytes: config.MaxBodyBytesValue(),
+	})
 }

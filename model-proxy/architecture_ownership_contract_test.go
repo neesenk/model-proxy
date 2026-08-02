@@ -407,31 +407,9 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Fatalf("stat cache.go: %v", err)
 		}
 
-		adapter, _ := parseGoFile(t, "cache_adapter.go")
-		for _, spec := range adapter.Imports {
-			if path := strings.Trim(spec.Path.Value, `"`); path != "model-proxy/internal/cache" {
-				t.Errorf("cache_adapter.go has unexpected import %q", path)
-			}
-		}
-		functions := map[string]int{"newResponseCache": 0}
-		for _, decl := range adapter.Decls {
-			switch decl := decl.(type) {
-			case *ast.GenDecl:
-				if decl.Tok != token.IMPORT {
-					t.Error("cache_adapter.go must not declare package state or types")
-				}
-			case *ast.FuncDecl:
-				if _, ok := functions[decl.Name.Name]; !ok {
-					t.Errorf("cache_adapter.go has unexpected function %s", decl.Name.Name)
-					continue
-				}
-				functions[decl.Name.Name]++
-			default:
-				t.Errorf("cache_adapter.go has unexpected top-level declaration %T", decl)
-			}
-		}
-		if functions["newResponseCache"] != 1 {
-			t.Errorf("cache_adapter.go newResponseCache declarations = %d, want exactly 1", functions["newResponseCache"])
+		adapter, _ := parseGoFile(t, "proxy_constructor.go")
+		if got := namedCallCount(adapter, "newResponseCache"); got != 1 {
+			t.Errorf("proxy_constructor.go newResponseCache declarations = %d, want exactly 1", got)
 		}
 
 		assertCacheStoreField := func(parsed *ast.File, owner string) {
