@@ -117,7 +117,7 @@ func TestRunVolcengineLoginWithInput_WritesPoolTriple(t *testing.T) {
 	stubVolcengineValidator(t)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
-	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
+	if err := clilogin.RunVolcengineLoginWithInput(cfg, "volcengine", prov,
 		"ark-key-1", "AK-ONE", "SK-ONE", "acct-one", false); err != nil {
 		t.Fatalf("runVolcengineLoginWithInput: %v", err)
 	}
@@ -155,12 +155,12 @@ func TestRunVolcengineLoginWithInput_DedupByAccessKey(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
 	// Seed an account with AccessKey=AK9.
-	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
+	if err := clilogin.RunVolcengineLoginWithInput(cfg, "volcengine", prov,
 		"old-ark", "AK9", "old-sk", "first", false); err != nil {
 		t.Fatal(err)
 	}
 	// Replace SAME AccessKey (AK9) with a new api_key + secret_key + label.
-	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
+	if err := clilogin.RunVolcengineLoginWithInput(cfg, "volcengine", prov,
 		"new-ark", "AK9", "new-sk", "renamed", true /*replace*/); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestRunVolcengineLoginWithInput_DedupNoReplace_Aborts(t *testing.T) {
 	stubVolcengineValidator(t)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
-	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
+	if err := clilogin.RunVolcengineLoginWithInput(cfg, "volcengine", prov,
 		"old-ark", "AK9", "old-sk", "first", false); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestRunVolcengineLoginWithInput_DedupNoReplace_Aborts(t *testing.T) {
 	w.Write([]byte("n\n"))
 	w.Close()
 
-	err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
+	err := clilogin.RunVolcengineLoginWithInput(cfg, "volcengine", prov,
 		"new-ark", "AK9", "new-sk", "", false /*replace*/)
 	if err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("expected 'cancelled' error, got %v", err)
@@ -217,11 +217,11 @@ func TestRunVolcengineLoginWithInput_DifferentAccessKeyAppends(t *testing.T) {
 	stubVolcengineValidator(t)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"volcengine": {Provider: "volcengine"}}}
 	prov := cfg.Providers["volcengine"]
-	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
+	if err := clilogin.RunVolcengineLoginWithInput(cfg, "volcengine", prov,
 		"ark-1", "AK1", "sk-1", "a", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := runVolcengineLoginWithInput(cfg, "volcengine", prov,
+	if err := clilogin.RunVolcengineLoginWithInput(cfg, "volcengine", prov,
 		"ark-2", "AK2", "sk-2", "b", false); err != nil {
 		t.Fatal(err)
 	}

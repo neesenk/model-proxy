@@ -339,7 +339,7 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n"))
 	prov := cfg.Providers["vol"]
 	cred := accountCred{APIKey: "ark-key", AccessKey: "AK9XYZ", SecretKey: "SK9"}
-	id, err := addVolcengineAccount(cfg, "vol", prov, cred, "volc-label", false)
+	id, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, cred, "volc-label", false)
 	if err != nil {
 		t.Fatalf("addVolcengineAccount: %v", err)
 	}
@@ -354,10 +354,10 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 		t.Fatalf("triple not saved: %+v", pool.Accounts[0])
 	}
 	// Same AccessKey with replace=false aborts; with replace=true overwrites the triple.
-	if _, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
+	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("dup-no-replace should error 'cancelled', got %v", err)
 	}
-	if _, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "renamed", true); err != nil {
+	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "renamed", true); err != nil {
 		t.Fatalf("replace addVolcengineAccount: %v", err)
 	}
 	pool2, _ := loadPool("vol", "volcengine")
@@ -541,7 +541,7 @@ func TestAddVolcengineAccountCore_ArkKeyValidation401(t *testing.T) {
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
 	prov := cfg.Providers["vol"]
 	// No AK/SK — isolates the Ark-key path.
-	_, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "bad-ark"}, "", false)
+	_, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "bad-ark"}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Fatalf("Ark 401: err=%v want 'validation failed'", err)
 	}
@@ -559,7 +559,7 @@ func TestAddVolcengineAccountCore_ArkKeyValid(t *testing.T) {
 	defer srv.Close()
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
 	prov := cfg.Providers["vol"]
-	id, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "lbl", false)
+	id, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "lbl", false)
 	if err != nil {
 		t.Fatalf("Ark 200: %v", err)
 	}
@@ -594,7 +594,7 @@ func TestAddVolcengineAccountCore_AKSKValidationFail(t *testing.T) {
 		return fmt.Errorf("GetAFPUsage HTTP 401: signature mismatch")
 	}
 
-	_, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark", AccessKey: "AK9", SecretKey: "SK9"}, "", false)
+	_, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark", AccessKey: "AK9", SecretKey: "SK9"}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Fatalf("AK/SK fail: err=%v want 'validation failed'", err)
 	}
@@ -624,7 +624,7 @@ func TestAddVolcengineAccountCore_AKSKEmptySkips(t *testing.T) {
 		return nil
 	}
 
-	if _, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "", false); err != nil {
+	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "", false); err != nil {
 		t.Fatalf("chat-only login should succeed: %v", err)
 	}
 	pool, _ := loadPool("vol", "volcengine")
@@ -656,7 +656,7 @@ func TestAddVolcengineAccountCore_PartialAKSKRejected(t *testing.T) {
 		{APIKey: "good-ark", AccessKey: "AK9"}, // lone AK
 		{APIKey: "good-ark", SecretKey: "SK9"}, // lone SK
 	} {
-		_, err := addVolcengineAccount(cfg, "vol", prov, cred, "", false)
+		_, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, cred, "", false)
 		if err == nil || !strings.Contains(err.Error(), "both be set") {
 			t.Errorf("partial %+v: err=%v want 'both be set'", cred, err)
 		}
@@ -667,7 +667,7 @@ func TestAddVolcengineAccountCore_PartialAKSKRejected(t *testing.T) {
 	}
 
 	// Neither set → chat-only success; pool written.
-	if _, err := addVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "", false); err != nil {
+	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "", false); err != nil {
 		t.Fatalf("chat-only (no AK/SK): %v", err)
 	}
 	pool, _ := loadPool("vol", "volcengine")
