@@ -1,6 +1,7 @@
 package main
 
 import (
+	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 
 	webtransport "model-proxy/internal/web"
@@ -16,14 +17,14 @@ type webServer struct {
 	configFile string
 	logFile    string
 
-	newAqpClientFn  func(storePath string) *AqpClient
+	newAqpClientFn  func(storePath string) *clilogin.AqpClient
 	newCodexOptions func() *codexLoginServerOptions
 }
 
 func newWebServer(proxy *Proxy, configFile string) *webServer {
 	server := &webServer{
 		configFile:      configFile,
-		newAqpClientFn:  newAqpClient,
+		newAqpClientFn:  clilogin.NewAqpClient,
 		newCodexOptions: defaultCodexLoginOptions,
 	}
 	server.api = newProxyWebAPI(proxy, func() string {
@@ -31,7 +32,7 @@ func newWebServer(proxy *Proxy, configFile string) *webServer {
 	})
 	// Keep test endpoint overrides dynamic: tests replace these hooks after
 	// construction, while the application adapter reads them at login start.
-	server.api.newAqpClientFn = func(path string) *AqpClient {
+	server.api.newAqpClientFn = func(path string) *clilogin.AqpClient {
 		return server.newAqpClientFn(path)
 	}
 	server.api.newCodexOptions = func() *codexLoginServerOptions {

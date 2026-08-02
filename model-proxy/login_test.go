@@ -63,7 +63,7 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 
 	storePath := t.TempDir() + "/google_oauth_auth.json"
 	jar, _ := cookiejar.New(nil)
-	c := &AqpClient{
+	c := &clilogin.AqpClient{
 		HTTP:      &http.Client{Jar: jar},
 		Jar:       jar,
 		StorePath: storePath,
@@ -147,7 +147,7 @@ func TestBootstrap_MissingLoginURL(t *testing.T) {
 	}))
 	defer aqp.Close()
 	jar, _ := cookiejar.New(nil)
-	c := &AqpClient{HTTP: &http.Client{Jar: jar}, Jar: jar, StorePath: t.TempDir() + "/g.json"}
+	c := &clilogin.AqpClient{HTTP: &http.Client{Jar: jar}, Jar: jar, StorePath: t.TempDir() + "/g.json"}
 	_, err := c.BootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "missing login url") {
 		t.Errorf("err=%v", err)

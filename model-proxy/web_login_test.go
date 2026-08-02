@@ -49,7 +49,7 @@ func TestAqpLoginFlow(t *testing.T) {
 	// Seam: point the AQP client at the mock base so BootstrapLoginURL /
 	// PollSession / fetchAPIKey hit the httptest.Server instead of the real
 	// compass backend.
-	w.newAqpClientFn = func(store string) *AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
+	w.newAqpClientFn = func(store string) *clilogin.AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
 
 	rec := httptest.NewRecorder()
 	w.serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
@@ -108,7 +108,7 @@ func TestAqpLoginFlow_Error(t *testing.T) {
 	p.mu.Lock()
 	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
-	w.newAqpClientFn = func(store string) *AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
+	w.newAqpClientFn = func(store string) *clilogin.AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
 
 	rec := httptest.NewRecorder()
 	w.serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
@@ -316,7 +316,7 @@ func TestLoginStartByProviderID(t *testing.T) {
 	p.mu.Lock()
 	p.cfg.Providers["aqp-alt"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
-	w.newAqpClientFn = func(store string) *AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
+	w.newAqpClientFn = func(store string) *clilogin.AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
 
 	rec := httptest.NewRecorder()
 	w.serve(rec, httptest.NewRequest("POST", "/api/login/aqp-alt/start", nil))

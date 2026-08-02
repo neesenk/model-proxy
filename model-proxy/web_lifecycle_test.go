@@ -23,7 +23,7 @@ func TestWebCloseCancelsAqpLoginBeforeCredentialCommit(t *testing.T) {
 	p.mu.Lock()
 	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://unused.invalid"}
 	p.mu.Unlock()
-	w.newAqpClientFn = func(storePath string) *AqpClient {
+	w.newAqpClientFn = func(storePath string) *clilogin.AqpClient {
 		client := clilogin.NewAqpClientWithBase(storePath, "https://aqp.invalid")
 		client.HTTP.Transport = webLifecycleRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.URL.Path {

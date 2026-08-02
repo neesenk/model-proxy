@@ -53,7 +53,7 @@ func waitLoginResult(t *testing.T, result <-chan error) error {
 func TestAqpPollAtContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	client := &AqpClient{HTTP: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	client := &clilogin.AqpClient{HTTP: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		entered <- struct{}{}
 		<-req.Context().Done()
 		return nil, req.Context().Err()
@@ -76,7 +76,7 @@ func TestAqpPollAtContext_CancelsRetryWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	bodyClosed := make(chan struct{}, 1)
 	var calls atomic.Int32
-	client := &AqpClient{HTTP: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	client := &clilogin.AqpClient{HTTP: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return pendingLoginResponse(req, &closeNotifyBody{
 			Reader: strings.NewReader(`{"retcode":1,"message":"pending"}`),

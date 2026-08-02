@@ -26,7 +26,7 @@ type proxyWebAPI struct {
 	commands   proxyAdminCommands
 	configFile func() string
 
-	newAqpClientFn  func(storePath string) *AqpClient
+	newAqpClientFn  func(storePath string) *clilogin.AqpClient
 	newCodexOptions func() *codexLoginServerOptions
 }
 
@@ -35,7 +35,7 @@ func newProxyWebAPI(proxy *Proxy, configFile func() string) *proxyWebAPI {
 		reads:          proxy.readView(),
 		commands:       proxy.adminCommands(),
 		configFile:     configFile,
-		newAqpClientFn: newAqpClient,
+		newAqpClientFn: clilogin.NewAqpClient,
 	}
 	api.newCodexOptions = func() *codexLoginServerOptions {
 		options := &codexLoginServerOptions{}
@@ -435,7 +435,7 @@ func (api *proxyWebAPI) reloadAfterMutation() string {
 type aqpLoginJob struct {
 	api    *proxyWebAPI
 	name   string
-	client *AqpClient
+	client *clilogin.AqpClient
 	detail string
 }
 
