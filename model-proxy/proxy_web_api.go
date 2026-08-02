@@ -315,7 +315,7 @@ func (api *proxyWebAPI) AddAccount(
 		err error
 	)
 	if providerConfig.Provider == "volcengine" {
-		id, err = addVolcengineAccount(
+		id, err = clilogin.AddVolcengineAccount(
 			config,
 			name,
 			providerConfig,

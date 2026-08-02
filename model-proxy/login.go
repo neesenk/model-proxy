@@ -50,7 +50,7 @@ func cmdLogin(args []string) {
 	default:
 		var err error
 		if prov.Provider == "volcengine" {
-			err = runVolcengineLoginWithInput(cfg, provName, prov, "", "", "", label, replace)
+			err = clilogin.RunVolcengineLoginWithInput(cfg, provName, prov, "", "", "", label, replace)
 		} else {
 			err = clilogin.RunApiKeyLoginWithInput(cfg, provName, prov, "", label, replace)
 		}
