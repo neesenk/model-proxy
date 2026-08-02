@@ -18,7 +18,7 @@ type webServer struct {
 	logFile    string
 
 	newAqpClientFn  func(storePath string) *clilogin.AqpClient
-	newCodexOptions func() *codexLoginServerOptions
+	newCodexOptions func() *clilogin.CodexLoginServerOptions
 }
 
 func newWebServer(proxy *Proxy, configFile string) *webServer {
@@ -35,7 +35,7 @@ func newWebServer(proxy *Proxy, configFile string) *webServer {
 	server.api.newAqpClientFn = func(path string) *clilogin.AqpClient {
 		return server.newAqpClientFn(path)
 	}
-	server.api.newCodexOptions = func() *codexLoginServerOptions {
+	server.api.newCodexOptions = func() *clilogin.CodexLoginServerOptions {
 		return server.newCodexOptions()
 	}
 	server.server = mustNewWebTransport(server)
@@ -71,4 +71,11 @@ func (server *webServer) close() {
 
 func (server *webServer) serve(response http.ResponseWriter, request *http.Request) {
 	server.server.ServeHTTP(response, request)
+}
+
+// defaultCodexLoginOptions wires production codex OAuth endpoints.
+func defaultCodexLoginOptions() *clilogin.CodexLoginServerOptions {
+	options := &clilogin.CodexLoginServerOptions{}
+	options.Defaults()
+	return options
 }

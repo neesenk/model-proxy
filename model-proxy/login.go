@@ -38,7 +38,7 @@ func cmdLogin(args []string) {
 			log.Fatalf("login failed: %v", err)
 		}
 	case "codex":
-		cmdCodexLogin(provName)
+		clilogin.CmdCodexLogin(provName)
 	case "zcode":
 		fmt.Println("Opening BigModel login to fetch a Coding Plan API key…")
 		if err := clilogin.OpenBrowser("https://bigmodel.cn/login"); err != nil {

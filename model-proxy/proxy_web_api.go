@@ -27,7 +27,7 @@ type proxyWebAPI struct {
 	configFile func() string
 
 	newAqpClientFn  func(storePath string) *clilogin.AqpClient
-	newCodexOptions func() *codexLoginServerOptions
+	newCodexOptions func() *clilogin.CodexLoginServerOptions
 }
 
 func newProxyWebAPI(proxy *Proxy, configFile func() string) *proxyWebAPI {
@@ -37,8 +37,8 @@ func newProxyWebAPI(proxy *Proxy, configFile func() string) *proxyWebAPI {
 		configFile:     configFile,
 		newAqpClientFn: clilogin.NewAqpClient,
 	}
-	api.newCodexOptions = func() *codexLoginServerOptions {
-		options := &codexLoginServerOptions{}
+	api.newCodexOptions = func() *clilogin.CodexLoginServerOptions {
+		options := &clilogin.CodexLoginServerOptions{}
 		options.Defaults()
 		return options
 	}
@@ -491,7 +491,7 @@ type codexLoginState struct {
 	deviceAuthID string
 	userCode     string
 	interval     int
-	opts         *codexLoginServerOptions
+	opts         *clilogin.CodexLoginServerOptions
 }
 
 func (job *codexLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
@@ -502,7 +502,7 @@ func (job *codexLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 			Result: err.Error(),
 		}
 	}
-	authCode, err := pollForTokenContext(
+	authCode, err := clilogin.PollForTokenContext(
 		ctx,
 		job.state.opts,
 		job.state.deviceAuthID,
@@ -512,7 +512,7 @@ func (job *codexLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 	if err != nil {
 		return fail(err)
 	}
-	authFile, err := exchangeCodeForTokensContext(
+	authFile, err := clilogin.ExchangeCodeForTokensContext(
 		ctx,
 		job.state.opts,
 		provider.CodexOAuthClientID,
@@ -574,7 +574,7 @@ func (api *proxyWebAPI) BeginLogin(
 		}, nil
 	case "codex":
 		options := api.newCodexOptions()
-		userCode, err := requestUserCodeContext(
+		userCode, err := clilogin.RequestUserCodeContext(
 			ctx,
 			options,
 			provider.CodexOAuthClientID,
