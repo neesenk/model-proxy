@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/httpx"
 	"model-proxy/internal/observe/counters"
 	"net/http"
 	"sync/atomic"
@@ -13,11 +14,11 @@ import (
 )
 
 // reqIDPrefix is a per-process 8-hex-char nonce (generated once from crypto/rand
-// at package init via newRequestID). Combined with an atomic counter, this gives
+// at package init via httpx.NewRequestID). Combined with an atomic counter, this gives
 // each request a unique id with ONE atomic add (no crypto/rand syscall per
 // request). Always generated — even when request_log is off — so live start↔end
 // event pairing + Live↔Requests cross-page linking work.
-var reqIDPrefix = newRequestID()[:8]
+var reqIDPrefix = httpx.NewRequestID()[:8]
 var reqIDCounter atomic.Uint64
 
 func nextRequestID() string {
