@@ -37,7 +37,7 @@
 18. 原子文件写不能在多个实例间共享固定 `.tmp` 名。
 19. reload 中 config generation 与运行态 snapshot/fingerprint 必须一致。
 20. `cli_daemon.go` 的 supervisor `spawnWorker` 可能返回 nil，调用方必须检查。
-21. Proxy 级 goroutine 必须经 `proxyLifecycle.run` 接纳；serve process 只能通过
+21. Proxy 级 goroutine 必须经 `Lifecycle.Run` 接纳；serve process 只能通过
     `applicationRuntime` 调用 `startRuntimeServices`/`Proxy.Close`。不得绕过它分散
     启动或 final flush。
 22. daemon 收到退出信号时必须先 `http.Server.Shutdown` drain handler，再

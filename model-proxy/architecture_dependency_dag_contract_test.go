@@ -29,7 +29,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/cli/login":             {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/provider": true},
 		"model-proxy/internal/cli/models":            {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/probe": true, "model-proxy/provider": true},
 		"model-proxy/internal/cli":                   {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/doctor": true, "model-proxy/internal/cli/login": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/takeover": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/provider": true},
-		"model-proxy/internal/cli/clicommon":        {"model-proxy/internal/appapi": true, "model-proxy/internal/daemonctl": true, "model-proxy/provider": true},
+		"model-proxy/internal/cli/clicommon":         {"model-proxy/internal/appapi": true, "model-proxy/internal/daemonctl": true, "model-proxy/provider": true},
 		"model-proxy/internal/config":                {"model-proxy/internal/pricing": true, "model-proxy/internal/protocol": true},
 		"model-proxy/internal/configedit":            nil,
 		"model-proxy/internal/daemonctl":             nil,
@@ -63,9 +63,9 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/transport/bodycapture": true, "model-proxy/internal/web": true,
 			"model-proxy/provider": true,
 		},
-		"model-proxy/internal/appapi":                {"model-proxy/internal/fusion": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},
-		"model-proxy/internal/httpx":                 nil,
-		"model-proxy/internal/web":                   {"model-proxy/internal/appapi": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},
+		"model-proxy/internal/appapi": {"model-proxy/internal/fusion": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},
+		"model-proxy/internal/httpx":  nil,
+		"model-proxy/internal/web":    {"model-proxy/internal/appapi": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},
 	}
 }
 

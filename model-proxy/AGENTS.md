@@ -6,8 +6,8 @@
 ## 核心边界
 
 - `Proxy.mu` 保护 reload 交换的 config/providers/routes 快照；请求转发不得在流式响应期间长期持有它。
-- 每个请求只通过 `snapshotRuntime()` 捕获一次 reload-owned 依赖，并以
-  `runtimeSnapshot → serveRequest → internal/targetexec.Attempt` 传递；普通路由和
+- 每个请求只通过 `SnapshotRuntime()` 捕获一次 reload-owned 依赖，并以
+  `RuntimeSnapshot → serveRequest → internal/targetexec.Attempt` 传递；普通路由和
   Fusion synthesis 必须共享该五组强类型执行契约，不得重新扩张 positional
   参数链或用 `any` 携带根对象。
   Shadow 的采样率、semaphore 和 client 也属于该快照，commit 后不得重新读取
@@ -15,19 +15,17 @@
 - 单目标 I/O 由 `internal/targetexec.Executor` 执行；它只能通过
   generation-frozen `targetexec.State` 与 typed `Effects/Responses` 端口访问
   runtime/observability，不得 import 或持有完整 `*Proxy`，也不得访问调度、
-  reload、Web、lifecycle 或 Shadow。根 `targetexec_adapter.go` 只绑定 captured
+  reload、Web、lifecycle 或 Shadow。`internal/app/targetexec_adapter.go` 只绑定 captured
   generation/scheduling 和应用 stores，不得重新实现 HTTP、转换或 retry。
 - 主请求的调度、failover、cooldown 重试与 commit 编排统一位于
-  `proxy_forward.go`；`proxy.go` 只声明 `Proxy` 这个应用运行时聚合对象。
-  根 `package main` 的 `application` 才是进程 composition owner：它一次性绑定具体
-  命令和 `serveAssembly`；`applicationRuntime` 一次性构造 `Proxy`、调用
-  `startRuntimeServices`、装配 mux/Web、投影 reload、交出 transport task，并以
-  `Close` 结束 Proxy 生命周期。不得把这些职责拆成 callback bag 假装成可导入的
-  `internal/app`；`package main` 不可被 import。只有 Proxy/handlers 真正移入可导入
-  包后，才评估严格的 `internal/app` 边界。
+  `internal/app/proxy_forward.go`；`internal/app/proxy.go` 只声明 `Proxy` 这个应用
+  运行时聚合对象。`internal/cli.Application` 是进程 composition owner：它一次性
+  绑定具体命令；`internal/app.Runtime` 一次性构造 `Proxy`、调用
+  `StartRuntimeServices`、装配 mux/Web、投影 reload、交出 transport task，并以
+  `Close` 结束 Proxy 生命周期。根 `package main` 只剩薄进程入口。
 - 请求画像、能力/context 匹配、跨 route pool、context-overflow replacement
   与终局 cooldown 判定统一归无状态 `internal/routing`。根
-  `request_routing_adapter.go` 只把一次 `runtimeSnapshot` 绑定为
+  `internal/app/request_routing_adapter.go` 只把一次 `RuntimeSnapshot` 绑定为
   generation-frozen scheduler port，并在 HTTP 边界提取 force-provider 纯值；
   不得恢复根层策略副本，pin 与 force-provider 都必须禁止跨 route 改道。
 - 三协议方向只在 `internal/protocol/conversion_registry.go` 注册；request、
@@ -91,7 +89,7 @@
   持锁期间不得回调 Proxy、quota tracker 或外部 I/O。
 - wire capability 的三态、选择策略和并发状态统一归
   `internal/runtime/wirecap`；其 Store mutex 是 leaf lock，持锁时不得回调
-  Proxy。根 `wirecap.go` 只负责 probe、provider/config 适配与持久化调度。
+  Proxy。`internal/app/wirecap.go` 只负责 probe 编排、provider/config 适配与持久化调度。
 - 正常转发、Fusion、Shadow、probe 共享 provider identity resolver；池化父名不能直接进入上游请求。
 - provider config 通过 parentOf 解析，runtime implementation 使用虚拟 provider id 查找。
 - reload 应让请求看到一致的 cfg/providers/poolIndex/expandedRoutes generation；
@@ -143,7 +141,7 @@ slim metadata projection、canonical-owner 去重、HTTP/ETag/TTL 刷新和磁�
 
 账号 schema、稳定 ID、plural/legacy 文件优先级、原子保存和跨进程 mutation lock
 统一归 `internal/accounts`；该包是无仓库内依赖叶子，不得读取 HOME、Config、
-Provider、Proxy、Web/CLI 或发起网络验证。根 `accounts_adapter.go` 只注入 HOME
+Provider、Proxy、Web/CLI 或发起网络验证。`internal/app/accounts_store.go` 只注入 HOME
 并保留迁移期兼容 wrapper；交互、凭据验证、Provider 构建和 reload 继续留在应用
 编排层。任何 pool 写操作必须保持“网络/用户输入在锁外，锁内重新
 load → 按稳定 ID 修改 → save”的顺序。
@@ -159,17 +157,15 @@ eligibility；startup/reload 不得再读账号文件生成同一 generation 的
 CLI 输出是 change-controlled contract。修改命令、字段、颜色、顺序或提示前读取
 `CLI.md`，实现后同步更新它。文件日志不得带 ANSI color。
 
-根 `package main` 的 `application` 是实际进程 composition owner：它拥有命令表与
-`serveAssembly`。`main` 只绑定 `os.Args`、标准输入输出错误流和最终进程退出；
-`application.Run` 统一拥有无参数、顶层/子命令 help、未知命令和已知命令分发 seam；
-`runCLIArgs(args, stdin, stdout, stderr)` 只是创建 application 并委派的兼容入口。
-现阶段既有 handler 仍保留原来的进程 I/O 以及 `log.Fatal` / `os.Exit` 语义，不能误写
-成所有命令都已完成注入式 I/O/返回式退出。
-`serveAssembly` 拥有 serve 命令、前台/worker signal、HTTP server lifecycle；其
-`applicationRuntime` 构造并关闭 Proxy、装配 mux/Web、投影 reload，并交出 transport
-task。HTTP drain primitive 留在 `daemon.go`，daemon/supervisor 编排归
-`cli_daemon.go`，平台进程差异归 `cli_daemon_unix.go` / `cli_daemon_windows.go`；
-不得恢复第二个顶层分发器或用 callback wrapper 虚构 `internal/app` 边界。
+`internal/cli.Application` 是实际进程 composition owner：它拥有命令表。`main` 只
+绑定 `os.Args`、标准输入输出错误流和最终进程退出；`Application.Run` 统一拥有无
+参数、顶层/子命令 help、未知命令和已知命令分发。根 `app_assembly.go` 只是把 serve
+驱动注入 `internal/cli.NewApplication`。
+`cli_serve.go` 的 `serveAssembly` 拥有 serve 命令、前台/worker signal、HTTP server
+lifecycle；`internal/app.Runtime` 构造并关闭 Proxy、装配 mux/Web、投影 reload，并
+交出 transport task。HTTP drain primitive 归 `internal/cli/serve/shutdown.go`，
+daemon/supervisor 编排归 `internal/cli/serve/supervisor.go`，平台进程差异归
+`internal/cli/serve/detach_unix.go` / `detach_windows.go`。
 
 ## 测试
 

@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `internal/accounts/*`、`accounts_adapter.go`、`resolve.go`、
+修改 `internal/accounts/*`、`internal/app/accounts_store.go`、`internal/routing/resolver.go`、
 `buildProviders`、登录/登出、多账号 quota 或 Fusion/Shadow provider 解析时必读。
 
 ## 凭据文件
@@ -14,7 +14,7 @@ provider，单数 `<name>_apikey.json` 仅作为只读 fallback，包装成一�
 文件 schema、稳定账号 ID、plural 优先/legacy fallback、原子保存和跨进程锁由
 无仓库内依赖的 `internal/accounts` 统一拥有。该包接收已解析的 home directory，
 不得自行读取 HOME，也不得依赖 Config、Provider、Proxy、Web/CLI 或执行网络
-验证。根 `accounts_adapter.go` 只负责 HOME 适配和迁移期兼容入口。
+验证。`internal/app/accounts_store.go` 只负责 HOME 适配和兼容入口。
 
 `Store.Save` 与 `Store.LoadSnapshot` 使用同一套账号语义校验；保存调用必须传入
 provider ID。非法 ID、空 key、重复 ID 或不完整的 Volcengine AK/SK 在写临时文件

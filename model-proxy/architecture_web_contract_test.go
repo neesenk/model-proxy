@@ -80,10 +80,10 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 			}
 		}
 		allowedMethods := map[string]bool{
-			"Register": true,
-			"Start":    true,
-			"Close":    true,
-			"Serve":    true,
+			"Register":   true,
+			"Start":      true,
+			"Close":      true,
+			"Serve":      true,
 			"SetLogFile": true,
 		}
 		for name := range receiverMethodNames(t, []string{"internal/app/web_adapter.go"}, "WebServer") {

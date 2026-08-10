@@ -21,9 +21,9 @@ func (s *stubImpl) Refresh() error { return nil }
 func (s *stubImpl) RewriteRequest(url string, body []byte, path string) (string, []byte) {
 	return url, body
 }
-func (s *stubImpl) Logout() error                   { return nil }
-func (s *stubImpl) Usage() error                    { return nil }
-func (s *stubImpl) FetchModels() ([]string, error)  { return nil, nil }
+func (s *stubImpl) Logout() error                           { return nil }
+func (s *stubImpl) Usage() error                            { return nil }
+func (s *stubImpl) FetchModels() ([]string, error)          { return nil, nil }
 func (s *stubImpl) Quota() (*provider.QuotaSnapshot, error) { return nil, nil }
 func (s *stubImpl) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: "/chat/completions"}

@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `fusion.go`、`internal/fusion`、`proxy_shadow.go`、`internal/shadow`、
+修改 `internal/app/fusion.go`、`internal/fusion`、`internal/app/proxy_shadow.go`、`internal/shadow`、
 request log、`internal/cache`、
 `internal/transport/bodycapture`、live events 或 replay 时必读。API 字段另见
 `docs/web-api.md`。
@@ -32,7 +32,7 @@ generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 ## Live events
 
 `internal/observe/events.Hub` 保存最近 200 条事件并做非阻塞 fan-out。慢订阅者
-丢事件，不能反压请求路径；根 `live_events.go` 只负责 SSE/keepalive 适配。
+丢事件，不能反压请求路径；`/api/events` 的 SSE/keepalive 由 `internal/observe/events` 直接服务。
 
 forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens 和稳定 request_id。cache hit、400/502 终局也必须产生 end。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
 
@@ -53,7 +53,7 @@ timeout client 和 detached transport；`Execute` 只消费根层已解析的
 conversion、provider rewrite/auth/header、HTTP drain 和 bounded capture，不得
 进入 `targetexec.Executor` 或生产 metrics/health/sticky/events。
 
-`proxy_shadow.go` 是唯一 post-commit adapter。单目标 executor 只返回含实际
+`internal/app/proxy_shadow.go` 是唯一 post-commit adapter。单目标 executor 只返回含实际
 上游请求体的最小 `targetexec.Commit`，不持有 Shadow 或 lifecycle 回调。
 `serveOnce` 确认 commit 后调用 adapter；adapter 按
 eligibility → sample → non-blocking acquire → lifecycle admission 的顺序接纳，
@@ -65,7 +65,7 @@ target 和 `targetexec.Plan`，再调用 `Runtime.Execute` 并映射 request log
 禁止重新读取 `p.cfg`/`p.providers`/`p.catalog` 或再次 load `p.shadow`。Fusion
 synthesizer 不经过这条 post-commit hook，禁止递归派发 Shadow。
 
-Shadow 作为 `proxyLifecycle` 的有限 log-producing task 接纳：shutdown 开始后
+Shadow 作为 `internal/runtime.Lifecycle` 的有限 log-producing task 接纳：shutdown 开始后
 拒绝新任务，已接纳任务受 shadow HTTP timeout 约束并在 request logger drain
 前完成，避免 `Proxy.Close` 返回后仍向无人消费的 channel 写记录。
 

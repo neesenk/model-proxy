@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `proxy_forward.go`、`targetexec_adapter.go`、
+修改 `internal/app/proxy_forward.go`、`internal/app/targetexec_adapter.go`、
 `internal/targetexec/executor.go`、`internal/targetexec/rate_limit.go`、
 `internal/routing/retry.go`、`proxy_health_adapter.go`、
 `resolve.go`、`health_test.go`、`model_lock_test.go` 或 cooldown/retry 行为时必读。
@@ -54,7 +54,7 @@ Runtime 与 Plan 读取事实，禁止在 scope/log 中复制第二份 generatio
 或持有完整 `*Proxy`，也不得访问调度、reload、Web、lifecycle 或 Shadow。
 `targetexec_adapter.go` 从 `Attempt.Runtime()` 绑定 generation/scheduling，再把
 根 metrics/token/request-log/events 映射为语义 effect，不得包含 `client.Do`、
-转换、retry 或 failover pipeline。`proxy_forward.go` 只负责编排和调用。
+转换、retry 或 failover pipeline。`internal/app/proxy_forward.go` 只负责编排和调用。
 executor commit 后只返回含实际上游请求体的最小 `targetexec.Commit`；Shadow
 sampling、semaphore、lifecycle admission 与 dispatch 由 `serveOnce` 在
 executor 外完成，Fusion synthesizer 丢弃该 commit 元数据，禁止递归触发 Shadow。

@@ -25,7 +25,7 @@ func writePoolFile(t *testing.T, name, providerID string, keys ...string) {
 	for _, key := range keys {
 		cred := accounts.Credentials{APIKey: key}
 		pool.Accounts = append(pool.Accounts, accounts.Account{
-			ID: accounts.AccountID(providerID, cred),
+			ID:    accounts.AccountID(providerID, cred),
 			Label: key, APIKey: key, AddedAt: "2026-07-08",
 		})
 	}

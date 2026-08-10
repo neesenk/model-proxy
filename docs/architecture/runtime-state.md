@@ -87,7 +87,7 @@ fingerprint + 空 generation-scoped 运行态」；写盘失败以“配置已�
 
 ## Proxy 生命周期
 
-`proxyLifecycle` 是 Proxy 级后台任务的唯一 owner。daemon 只调用
+`internal/runtime.Lifecycle` 是 Proxy 级后台任务的唯一 owner。daemon 只调用
 `startRuntimeServices` 和 `Proxy.Close`，不得自行启动或关闭 stats flusher、
 request logger、catalog refresh。生命周期 gate 在同一 mutex 内完成
 accepting 检查与 `WaitGroup.Add`；shutdown 顺序为：
@@ -107,7 +107,7 @@ accepting 检查与 `WaitGroup.Add`；shutdown 顺序为：
 
 HTTP listener、在途 handler、SIGHUP reload loop，以及 `internal/web` task owner
 管理的 login-session GC/AQP/Codex 异步登录属于 daemon transport 生命周期，
-不属于 `proxyLifecycle`。SIGINT/SIGTERM 的关闭顺序是：
+不属于 `internal/runtime.Lifecycle`。SIGINT/SIGTERM 的关闭顺序是：
 
 1. transport gate 拒绝新的 handler/reload；Web owner 拒绝新任务并取消轮询；
 2. 显式 `http.Server.Shutdown` 停止接入并等待在途 handler，deadline 为 8 秒；
