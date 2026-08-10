@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"os"
@@ -20,7 +20,7 @@ func TestCLI_ConfigInit(t *testing.T) {
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
-	cmdConfig([]string{"init"})
+	RunConfig([]string{"init"})
 	data, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
 	if err != nil {
 		t.Fatalf("config init did not write config.yaml: %v", err)
@@ -36,7 +36,7 @@ func TestCLI_ConfigPrint(t *testing.T) {
 	cfgPath := writeTempConfig(t, minimalConfig)
 	// Run in-process: cmdConfig print reads cliframework.ConfigPath(args[1:]) where args[0]=="print".
 	out := grabStdout(t, func() {
-		cmdConfig([]string{"print", "--config", cfgPath})
+		RunConfig([]string{"print", "--config", cfgPath})
 	})
 	if !strings.Contains(out, "listen:") || !strings.Contains(out, "aqp") {
 		t.Errorf("config print missing content:\n%s", out)

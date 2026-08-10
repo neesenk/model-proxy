@@ -88,3 +88,18 @@ func init() {
 		return provider.New(&staticCfg, providerName)
 	})
 }
+
+// minimalConfig is the shared one-provider CLI fixture.
+const minimalConfig = `listen: 127.0.0.1:15721
+providers:
+  aqp:
+    openai_base_url: https://example.invalid/compass-api/v1
+    anthropic_base_url: https://example.invalid/compass-api
+    provider_id: aqp
+    aqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
+    models:
+      - glm-5.2
+routes:
+  glm-5.2:
+    - {provider: aqp, model: glm-5.2, priority: 1}
+`
