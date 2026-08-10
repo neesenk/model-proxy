@@ -9,41 +9,27 @@ import (
 	clicmd "model-proxy/internal/cli"
 	clidoctor "model-proxy/internal/cli/doctor"
 	cliframework "model-proxy/internal/cli/framework"
-	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/takeover"
 )
 
-// Command wrappers: each loads config (when needed) and delegates to the
-// migrated internal/cli/* implementation. Kept in one file because the
-// per-command files became pure forwarding shells after migration.
-
-func loadCmdConfig(args []string) *Config {
-	cfg, err := LoadConfig(cliframework.ConfigPath(args))
-	if err != nil {
-		log.Fatal(err)
-	}
-	return cfg
-}
-
-func cmdStats(args []string) {
-	cfg := loadCmdConfig(args)
-	os.Exit(clicmd.CmdStats(args, cfg.Listen, os.Stdout, os.Stderr))
-}
-
-func cmdModels(args []string) {
-	cfg := loadCmdConfig(args)
-	climodels.CmdModels(args, cfg, cliframework.ConfigPath(args))
-}
-
-func cmdUsage(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdUsage(args, cfg)
-}
-
-func cmdLogout(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdLogout(args, cfg)
-}
+// Command wrappers delegate to internal/cli Run* entries (config loading lives
+// there). Doctor/takeover/restore stay root-side because they cross into
+// doctor/app packages that import internal/cli.
+func cmdStats(args []string)          { clicmd.RunStats(args) }
+func cmdModels(args []string)         { clicmd.RunModels(args) }
+func cmdUsage(args []string)          { clicmd.RunUsage(args) }
+func cmdLogout(args []string)         { clicmd.RunLogout(args) }
+func cmdConfig(args []string)         { clicmd.RunConfig(args) }
+func cmdSchedule(args []string)       { clicmd.RunSchedule(args) }
+func cmdPin(args []string)            { clicmd.RunPin(args) }
+func cmdUnpin(args []string)          { clicmd.RunUnpin(args) }
+func cmdUnfreeze(args []string)       { clicmd.RunUnfreeze(args) }
+func cmdReplay(args []string)         { clicmd.RunReplay(args) }
+func cmdShadow(args []string)         { clicmd.RunShadow(args) }
+func cmdShadowReport(args []string)   { clicmd.RunShadowReport(args) }
+func cmdWire(args []string)           { clicmd.RunWire(args) }
+func cmdWireRecord(args []string)     { clicmd.RunWireRecordCLI(args) }
+func cmdServeStatusCLI(args []string) { clicmd.RunServeStatus(args) }
 
 func cmdDoctor(args []string) {
 	cfg, err := LoadConfig(cliframework.ConfigPath(args))
@@ -52,60 +38,6 @@ func cmdDoctor(args []string) {
 		os.Exit(1)
 	}
 	clidoctor.CmdDoctor(args, cfg, cliframework.ConfigPath(args))
-}
-
-func cmdConfig(args []string) {
-	clicmd.CmdConfigRun(args)
-}
-
-func cmdSchedule(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdSchedule(args, cfg)
-}
-
-func cmdPin(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdPin(args, cfg)
-}
-
-func cmdUnpin(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdUnpin(args, cfg)
-}
-
-func cmdUnfreeze(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdUnfreeze(args, cfg)
-}
-
-func cmdReplay(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdReplay(args, cfg)
-}
-
-func cmdShadow(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdShadow(args, cfg)
-}
-
-func cmdShadowReport(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdShadowReport(args, cfg)
-}
-
-func cmdWire(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdWire(args, cfg)
-}
-
-func cmdWireRecord(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdWireRecord(args, cfg)
-}
-
-func cmdServeStatusCLI(args []string) {
-	cfg := loadCmdConfig(args)
-	clicmd.CmdServeStatus(args, cfg)
 }
 
 func cmdTakeover(args []string) {
@@ -124,9 +56,17 @@ func cmdRestore(args []string) {
 	}
 }
 
+func loadCmdConfig(args []string) *Config {
+	cfg, err := LoadConfig(cliframework.ConfigPath(args))
+	if err != nil {
+		log.Fatal(err)
+	}
+	return cfg
+}
+
 // takeoverFacts computes the application-owned implicit routes and (only when a
 // metadata-writing client is selected) hydrated models.dev metadata for the
-// takeover package. Catalog loading and source markers stay in the root.
+// takeover package.
 func takeoverFacts(cfg *Config, which string) takeover.ModelFacts {
 	implicit, _ := app.SynthesizeImplicitRoutes(cfg, app.AccountStore())
 	facts := takeover.ModelFacts{

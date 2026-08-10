@@ -1,10 +1,10 @@
 package cli
 
 import (
-	"model-proxy/internal/appapi"
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/appapi"
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
