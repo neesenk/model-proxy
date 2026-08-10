@@ -39,7 +39,7 @@ func (p *Proxy) handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/events" {
-		p.serveEvents(w, r)
+		observeevents.ServeEvents(p.events, w, r)
 		return
 	}
 	proto := string(protocol.ForPath(r.URL.Path))

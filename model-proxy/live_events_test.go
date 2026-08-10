@@ -155,7 +155,7 @@ func TestServeEvents_SSE(t *testing.T) {
 		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
 	})
-	srv := httptest.NewServer(http.HandlerFunc(p.serveEvents))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { observeevents.ServeEvents(p.events, w, r) }))
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
