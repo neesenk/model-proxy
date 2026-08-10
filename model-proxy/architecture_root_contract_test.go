@@ -10,7 +10,7 @@ import (
 // Web uses explicit capabilities, account probes capture one generation, Fusion
 // shares target planning, and daemon background work enters proxyLifecycle.
 func TestArchitectureRootBoundaries(t *testing.T) {
-	rootPackage, rootSet := parseGoPackage(t, ".")
+	rootPackage, rootSet := parseGoPackage(t, "internal/app")
 	_ = rootSet
 
 	t.Run("root semantic package view spans source files", func(t *testing.T) {
@@ -20,22 +20,22 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		// Proxy is currently declared in proxy.go while this method lives in
 		// proxy_lifecycle.go. Finding both proves semantic guards are no longer
 		// coupled to one physical composition-root file.
-		_ = namedMethod(t, rootPackage, "Proxy", "startRuntimeServices")
+		_ = namedMethod(t, rootPackage, "Proxy", "StartRuntimeServices")
 	})
 
 	t.Run("account probe captures one runtime generation", func(t *testing.T) {
-		admin, _ := parseGoFile(t, "proxy_admin_commands.go")
-		if got := methodCallCount(admin, "accountProbe", "snapshotRuntime"); got != 1 {
-			t.Errorf("proxyAdminCommands.accountProbe snapshotRuntime calls = %d, want exactly 1", got)
+		admin, _ := parseGoFile(t, "internal/app/proxy_admin_commands.go")
+		if got := methodCallCount(admin, "accountProbe", "SnapshotRuntime"); got != 1 {
+			t.Errorf("proxyAdminCommands.accountProbe SnapshotRuntime calls = %d, want exactly 1", got)
 		}
-		readView, _ := parseGoFile(t, "proxy_read_view.go")
+		readView, _ := parseGoFile(t, "internal/app/proxy_read_view.go")
 		if methodDeclared(readView, "runtimeProvider") {
-			t.Error("proxyReadView.runtimeProvider must not exist; account probes use one runtimeSnapshot")
+			t.Error("proxyReadView.runtimeProvider must not exist; account probes use one RuntimeSnapshot")
 		}
 	})
 
 	t.Run("fusion.go reuses targetexec Plan helpers instead of duplicating them", func(t *testing.T) {
-		f, fset := parseGoFile(t, "fusion.go")
+		f, fset := parseGoFile(t, "internal/app/fusion.go")
 		for _, spec := range f.Imports {
 			if strings.Trim(spec.Path.Value, `"`) == "model-proxy/internal/protocol" {
 				t.Error("fusion.go must not import internal/protocol directly; use targetexec.Plan")
@@ -52,8 +52,8 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 
 	t.Run("application assembly is the only concrete Proxy process wiring", func(t *testing.T) {
 		forbiddenCalls := map[string]bool{
-			"NewProxy": true, "startRuntimeServices": true,
-			"newWebServer": true, "initStats": true,
+			"NewProxy": true, "StartRuntimeServices": true,
+			"NewWebServer": true, "initStats": true,
 			"initRequestLog": true, "statsFlushLoop": true,
 		}
 		// Chained internal components: <x>.reqLog.Run(), <x>.flusher.flush().
@@ -71,20 +71,20 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		if got := namedCallCount(assembly, "NewProxy"); got != 1 {
 			t.Errorf("app_assembly.go NewProxy calls = %d, want exactly 1", got)
 		}
-		if got := namedCallCount(assembly, "startRuntimeServices"); got != 1 {
-			t.Errorf("app_assembly.go startRuntimeServices calls = %d, want exactly 1", got)
+		if got := namedCallCount(assembly, "StartRuntimeServices"); got != 1 {
+			t.Errorf("app_assembly.go StartRuntimeServices calls = %d, want exactly 1", got)
 		}
-		if got := callCountOnIdent(assembly, "proxy", "startRuntimeServices"); got != 1 {
-			t.Errorf("app_assembly.go proxy.startRuntimeServices calls = %d, want exactly 1", got)
+		if got := callCountOnIdent(assembly, "proxy", "StartRuntimeServices"); got != 1 {
+			t.Errorf("app_assembly.go proxy.StartRuntimeServices calls = %d, want exactly 1", got)
 		}
-		if got := selectorCountNamed(assembly, "startRuntimeServices"); got != 1 {
-			t.Errorf("app_assembly.go startRuntimeServices selector uses = %d, want exactly 1 direct call", got)
+		if got := selectorCountNamed(assembly, "StartRuntimeServices"); got != 1 {
+			t.Errorf("app_assembly.go StartRuntimeServices selector uses = %d, want exactly 1 direct call", got)
 		}
-		if got := selectorCountOnIdent(assembly, "proxy", "startRuntimeServices"); got != 1 {
-			t.Errorf("app_assembly.go proxy.startRuntimeServices selector uses = %d, want exactly 1", got)
+		if got := selectorCountOnIdent(assembly, "proxy", "StartRuntimeServices"); got != 1 {
+			t.Errorf("app_assembly.go proxy.StartRuntimeServices selector uses = %d, want exactly 1", got)
 		}
-		if got := namedCallCount(assembly, "newWebServer"); got != 1 {
-			t.Errorf("app_assembly.go newWebServer calls = %d, want exactly 1", got)
+		if got := namedCallCount(assembly, "NewWebServer"); got != 1 {
+			t.Errorf("app_assembly.go NewWebServer calls = %d, want exactly 1", got)
 		}
 
 		serve, _ := parseGoFile(t, "cli_serve.go")

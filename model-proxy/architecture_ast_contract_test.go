@@ -339,19 +339,19 @@ func TestArchitectureBoundaryChecker(t *testing.T) {
 
 	// The Web field-set check must reject a retained application owner while
 	// accepting the reviewed transport ports.
-	f, fset = parse(`type webServer struct {
+	f, fset = parse(`type WebServer struct {
 	reads proxyReadView
 	admin proxyAdminCommands
 	backend *Proxy
 }
-func (w *webServer) h() {
+func (w *WebServer) h() {
 	_ = w.p
 	w.reads.dashboard(now)
 	w.admin.unreviewed()
 }`)
-	webFields := namedStructFields(t, f, "webServer")
+	webFields := namedStructFields(t, f, "WebServer")
 	if !typeContainsIdent(webFields["backend"], "Proxy") {
-		t.Error("webServer *Proxy field positive control did not fire")
+		t.Error("WebServer *Proxy field positive control did not fire")
 	}
 	if got := exactFieldSetViolations(webFields, map[string]bool{
 		"reads": true,
@@ -528,7 +528,7 @@ type attemptScope struct {
 	cfg *Config
 }
 	type attemptPolicy struct { force bool; lastTarget bool; contextRetry func(); cache *responsecache.Store }
-	type attemptCommit struct { requestBody []byte; runtime runtimeSnapshot }
+	type attemptCommit struct { requestBody []byte; runtime RuntimeSnapshot }
 	func bad() { _ = targetAttempt{} }
 func newTargetAttempt() targetAttempt { return targetAttempt{} }
 	type attemptExecutor struct { proxy *Proxy; lifecycle *proxyLifecycle; hook func(); hook2 func() }
@@ -554,7 +554,7 @@ func (p *Proxy) callFusionSynthesizer() { p.client.Do(nil) }`)
 	}
 	nestedForbidden := map[string]bool{
 		"Proxy": true, "Config": true, "Store": true,
-		"runtimeSnapshot": true, "targetPlan": true,
+		"RuntimeSnapshot": true, "targetPlan": true,
 	}
 	nestedContracts := []struct {
 		name string

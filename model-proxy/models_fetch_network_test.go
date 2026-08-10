@@ -1,7 +1,7 @@
 package main
 
 import (
-	climodels "model-proxy/internal/cli/models"
+	"model-proxy/internal/app"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,7 +21,7 @@ func TestListArkAgentPlanModelIDs_DeadProxy(t *testing.T) {
 	dead.Close()
 	t.Setenv("HTTPS_PROXY", "http://"+addr)
 	t.Setenv("HTTP_PROXY", "http://"+addr)
-	_, err := climodels.ListArkAgentPlanModelIDs("volcengine")
+	_, err := app.ListArkAgentPlanModelIDs("volcengine")
 	if err == nil {
 		t.Error("listArkAgentPlanModelIDs (dead proxy): want error, got nil")
 	}

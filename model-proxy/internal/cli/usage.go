@@ -13,7 +13,6 @@ import (
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
-	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
 )
 
@@ -119,7 +118,7 @@ func buildOpts() app.BuildOptions {
 		HomeDir:                  homeDir(),
 		CodexCLIVersion:          app.CodexCLIVersion,
 		CodexCacheVersion:        app.CodexCacheVersion,
-		ListArkAgentPlanModelIDs: climodels.ListArkAgentPlanModelIDs,
+		ListArkAgentPlanModelIDs: app.ListArkAgentPlanModelIDs,
 	}
 }
 

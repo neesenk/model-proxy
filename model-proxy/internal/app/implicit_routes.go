@@ -110,3 +110,20 @@ func BuildExpandedRoutes(
 	}
 	return out
 }
+
+// RouteModelsForProvider returns the sorted distinct upstream model ids that
+// routes assign to one provider.
+func RouteModelsForProvider(cfg *configdomain.Config, provName string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, targets := range cfg.Routes {
+		for _, t := range targets {
+			if t.Provider == provName && !seen[t.Model] {
+				seen[t.Model] = true
+				out = append(out, t.Model)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}

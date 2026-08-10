@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/provider"
@@ -73,7 +74,7 @@ func cmdTest(args []string) {
 func testTargetsFor(cfg *Config, model string) []RouteTarget {
 	targets, ok := cfg.Routes[model]
 	if !ok {
-		implicit, _ := synthesizeImplicitRoutes(cfg)
+		implicit, _ := app.SynthesizeImplicitRoutes(cfg, accountStore())
 		t, found := implicit[model]
 		if !found {
 			return nil

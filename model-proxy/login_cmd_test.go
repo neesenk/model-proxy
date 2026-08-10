@@ -715,3 +715,11 @@ func TestApiKeyValidationURL_Fallback(t *testing.T) {
 		})
 	}
 }
+
+// stubVolcengineValidator no-ops AK/SK validation for pool dedup/save tests.
+func stubVolcengineValidator(t *testing.T) {
+	t.Helper()
+	orig := clilogin.VolcengineAKSKValidator
+	clilogin.VolcengineAKSKValidator = func(string, string) error { return nil }
+	t.Cleanup(func() { clilogin.VolcengineAKSKValidator = orig })
+}

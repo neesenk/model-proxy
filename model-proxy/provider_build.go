@@ -3,7 +3,6 @@ package main
 import (
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
-	climodels "model-proxy/internal/cli/models"
 	"model-proxy/provider"
 )
 
@@ -18,7 +17,7 @@ func buildProviders(cfg *Config) providerBuild {
 		HomeDir:                  cliframework.HomeDir(),
 		CodexCLIVersion:          app.CodexCLIVersion,
 		CodexCacheVersion:        app.CodexCacheVersion,
-		ListArkAgentPlanModelIDs: climodels.ListArkAgentPlanModelIDs,
+		ListArkAgentPlanModelIDs: app.ListArkAgentPlanModelIDs,
 	})
 }
 
@@ -29,6 +28,6 @@ func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provide
 		HomeDir:                  cliframework.HomeDir(),
 		CodexCLIVersion:          app.CodexCLIVersion,
 		CodexCacheVersion:        app.CodexCacheVersion,
-		ListArkAgentPlanModelIDs: climodels.ListArkAgentPlanModelIDs,
+		ListArkAgentPlanModelIDs: app.ListArkAgentPlanModelIDs,
 	}, name, prov, cred)
 }

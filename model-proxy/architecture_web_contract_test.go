@@ -56,13 +56,13 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 	})
 
 	t.Run("root adapter is composition only", func(t *testing.T) {
-		adapter, _ := parseGoFile(t, "web_adapter.go")
-		fields := namedStructFields(t, adapter, "webServer")
+		adapter, _ := parseGoFile(t, "internal/app/web_adapter.go")
+		fields := namedStructFields(t, adapter, "WebServer")
 		if !typeContainsIdent(fields["server"], "Server") {
-			t.Error("webServer.server must retain internal/web.Server")
+			t.Error("WebServer.server must retain internal/web.Server")
 		}
 		if got := simpleTypeName(fields["api"]); got != "*proxyWebAPI" {
-			t.Errorf("webServer.api type = %q, want *proxyWebAPI", got)
+			t.Errorf("WebServer.api type = %q, want *proxyWebAPI", got)
 		}
 		for _, violation := range exactFieldSetViolations(fields, map[string]bool{
 			"server":          true,
@@ -72,20 +72,21 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 			"newAqpClientFn":  true,
 			"newCodexOptions": true,
 		}) {
-			t.Errorf("webServer field boundary: %s", violation)
+			t.Errorf("WebServer field boundary: %s", violation)
 		}
 		for name, fieldType := range fields {
 			if typeContainsIdent(fieldType, "Proxy") {
-				t.Errorf("webServer.%s must not retain *Proxy", name)
+				t.Errorf("WebServer.%s must not retain *Proxy", name)
 			}
 		}
 		allowedMethods := map[string]bool{
-			"register": true,
-			"start":    true,
-			"close":    true,
-			"serve":    true,
+			"Register": true,
+			"Start":    true,
+			"Close":    true,
+			"Serve":    true,
+			"SetLogFile": true,
 		}
-		for name := range receiverMethodNames(t, []string{"web_adapter.go"}, "webServer") {
+		for name := range receiverMethodNames(t, []string{"internal/app/web_adapter.go"}, "WebServer") {
 			if !allowedMethods[name] {
 				t.Errorf("web_adapter.go owns non-composition method %s", name)
 			}
@@ -96,7 +97,7 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 	})
 
 	t.Run("application adapter retains capabilities not Proxy", func(t *testing.T) {
-		adapter, fset := parseGoFile(t, "proxy_web_api.go")
+		adapter, fset := parseGoFile(t, "internal/app/proxy_web_api.go")
 		fields := namedStructFields(t, adapter, "proxyWebAPI")
 		if got := simpleTypeName(fields["reads"]); got != "proxyReadView" {
 			t.Errorf("proxyWebAPI.reads type = %q, want proxyReadView", got)
@@ -118,7 +119,7 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 				t.Errorf("proxyWebAPI.%s must not retain *Proxy", name)
 			}
 		}
-		for name := range receiverMethodNames(t, []string{"proxy_web_api.go"}, "proxyWebAPI") {
+		for name := range receiverMethodNames(t, []string{"internal/app/proxy_web_api.go"}, "proxyWebAPI") {
 			if strings.HasPrefix(name, "handle") || strings.HasPrefix(name, "serve") {
 				t.Errorf("proxy_web_api.go restores HTTP transport method %s", name)
 			}

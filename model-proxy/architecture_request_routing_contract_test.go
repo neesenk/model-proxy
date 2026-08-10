@@ -28,7 +28,7 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 				t.Errorf("%s imports outside routing leaves: %v", path, got)
 			}
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{
-				"Proxy": true, "runtimeSnapshot": true,
+				"Proxy": true, "RuntimeSnapshot": true,
 				"Executor": true, "Attempt": true,
 			}); len(got) != 0 {
 				t.Errorf("%s retained root/execution owner types: %v", path, got)
@@ -52,7 +52,7 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 	})
 
 	t.Run("root adapter freezes generation and is the only constructor", func(t *testing.T) {
-		adapter, _ := parseGoFile(t, "request_routing_adapter.go")
+		adapter, _ := parseGoFile(t, "internal/app/request_routing_adapter.go")
 		schedulerFields := namedStructFields(t, adapter, "requestRoutingScheduler")
 		want := map[string]bool{
 			"proxy": true, "config": true, "parentOf": true,
@@ -79,7 +79,7 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			"NewPlanner",
 		)
 		if len(constructorSites) != 1 ||
-			constructorSites[0].file != "request_routing_adapter.go" ||
+			constructorSites[0].file != "internal/app/request_routing_adapter.go" ||
 			constructorSites[0].function != "requestRoutingPlanner" {
 			t.Errorf("routing.NewPlanner production reference sites = %v, want only request_routing_adapter.go:requestRoutingPlanner direct call", constructorSites)
 		}
@@ -122,7 +122,7 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			}
 		}
 
-		forward, _ := parseGoFile(t, "proxy_forward.go")
+		forward, _ := parseGoFile(t, "internal/app/proxy_forward.go")
 		serveOnce := namedMethod(t, forward, "Proxy", "serveOnce")
 		for name, want := range map[string]int{
 			"requestRoutingPlanner": 1,
@@ -191,10 +191,10 @@ func plannerConstructorUsesRuntimeSnapshot(node ast.Node) bool {
 	}
 	fields := requestRoutingCompositeFields(literals[0])
 	if len(fields) != 5 ||
-		requestRoutingExprPath(fields["Config"]) != "runtime.cfg" ||
-		requestRoutingExprPath(fields["ParentOf"]) != "runtime.parentOf" ||
-		requestRoutingExprPath(fields["Catalog"]) != "runtime.catalog" ||
-		requestRoutingExprPath(fields["ExpandedRoutes"]) != "runtime.expandedRoutes" {
+		requestRoutingExprPath(fields["Config"]) != "runtime.Cfg" ||
+		requestRoutingExprPath(fields["ParentOf"]) != "runtime.ParentOf" ||
+		requestRoutingExprPath(fields["Catalog"]) != "runtime.Catalog" ||
+		requestRoutingExprPath(fields["ExpandedRoutes"]) != "runtime.ExpandedRoutes" {
 		return false
 	}
 	scheduler, ok := fields["Scheduler"].(*ast.CompositeLit)
@@ -204,10 +204,10 @@ func plannerConstructorUsesRuntimeSnapshot(node ast.Node) bool {
 	schedulerFields := requestRoutingCompositeFields(scheduler)
 	return len(schedulerFields) == 5 &&
 		requestRoutingExprPath(schedulerFields["proxy"]) == "proxy" &&
-		requestRoutingExprPath(schedulerFields["config"]) == "runtime.cfg" &&
-		requestRoutingExprPath(schedulerFields["parentOf"]) == "runtime.parentOf" &&
+		requestRoutingExprPath(schedulerFields["config"]) == "runtime.Cfg" &&
+		requestRoutingExprPath(schedulerFields["parentOf"]) == "runtime.ParentOf" &&
 		requestRoutingExprPath(schedulerFields["routeKeys"]) == "routeKeys" &&
-		requestRoutingExprPath(schedulerFields["generation"]) == "runtime.generation"
+		requestRoutingExprPath(schedulerFields["generation"]) == "runtime.Generation"
 }
 
 func requestRoutingCompositeFields(literal *ast.CompositeLit) map[string]ast.Expr {

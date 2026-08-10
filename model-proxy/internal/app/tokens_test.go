@@ -1,0 +1,362 @@
+package app
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	obscounters "model-proxy/internal/observe/counters"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	observestats "model-proxy/internal/observe/stats"
+)
+
+// TestUsageScanner_AgentSink verifies that the agent attribution callback
+// receives the exact usage observed when the scanner commits.
+func TestUsageScanner_AgentSink(t *testing.T) {
+	tc := obscounters.NewTokenCounter()
+	var got obscounters.TokenUsage
+	stream := []byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n\n")
+	scanner := obscounters.NewUsageScanner(
+		io.NopCloser(bytes.NewReader(stream)),
+		obscounters.TokenKey{Provider: "z", Model: "m"},
+		tc,
+		func(usage obscounters.TokenUsage) {
+			got = usage
+		},
+	)
+	if _, err := io.Copy(io.Discard, scanner); err != nil {
+		t.Fatalf("copy usage stream: %v", err)
+	}
+	if err := scanner.Close(); err != nil {
+		t.Fatalf("close usage scanner: %v", err)
+	}
+	if got.Input != 42 {
+		t.Errorf("agent sink got input=%d want 42", got.Input)
+	}
+}
+
+func TestUsageScannerAnthropic(t *testing.T) {
+	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":50,\"cache_read_input_tokens\":10}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":200}}\n\n")
+	tc := obscounters.NewTokenCounter()
+	key := obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
+	io.Copy(io.Discard, sc)
+
+	got := tc.Snapshot()[key]
+	if got.Input != 100 || got.CacheCreation != 50 || got.CacheRead != 10 || got.Output != 200 {
+		t.Errorf("usage = %+v, want in=100 cc=50 cr=10 out=200", got)
+	}
+}
+
+func TestUsageScannerOpenAI(t *testing.T) {
+	stream := []byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13}}\n\n")
+	tc := obscounters.NewTokenCounter()
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "deepseek", Model: "d"}, tc, nil)
+	io.Copy(io.Discard, sc)
+	got := tc.Snapshot()[obscounters.TokenKey{Provider: "deepseek", Model: "d"}]
+	if got.Input != 7 || got.Output != 13 {
+		t.Errorf("usage = %+v, want in=7 out=13", got)
+	}
+}
+
+// Split every usage payload byte-by-byte to prove the scanner reassembles across
+// arbitrarily small reads.
+func TestUsageScannerSplitBoundaries(t *testing.T) {
+	payload := []byte("data: {\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":99}}\n\n")
+	tc := obscounters.NewTokenCounter()
+	sc := obscounters.NewUsageScanner(io.NopCloser(&oneByteReader{b: payload}), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
+	io.Copy(io.Discard, sc)
+	got := tc.Snapshot()[obscounters.TokenKey{Provider: "p", Model: "m"}]
+	if got.Input != 42 || got.Output != 99 {
+		t.Errorf("split-boundary usage = %+v, want in=42 out=99", got)
+	}
+}
+
+// Pass-through must be byte-identical.
+func TestUsageScannerPassthrough(t *testing.T) {
+	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\ndata: garbage\n\n")
+	var sink bytes.Buffer
+	tc := obscounters.NewTokenCounter()
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
+	io.Copy(&sink, sc)
+	if !bytes.Equal(sink.Bytes(), stream) {
+		t.Errorf("passthrough not byte-identical:\nwant %q\ngot  %q", stream, sink.Bytes())
+	}
+}
+
+// An oversized line is skipped for scanning but still passed through.
+func TestUsageScannerOversizedLine(t *testing.T) {
+	huge := bytes.Repeat([]byte("x"), 80_000)
+	stream := append([]byte("data: "), huge...)
+	stream = append(stream, []byte("\n\ndata: {\"usage\":{\"prompt_tokens\":3}}\n\n")...)
+	tc := obscounters.NewTokenCounter()
+	var sink bytes.Buffer
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), obscounters.TokenKey{Provider: "p", Model: "m"}, tc, nil)
+	io.Copy(&sink, sc)
+	if !bytes.Equal(sink.Bytes(), stream) {
+		t.Error("oversized passthrough mismatch")
+	}
+	if got := tc.Snapshot()[obscounters.TokenKey{Provider: "p", Model: "m"}].Input; got != 3 {
+		t.Errorf("usage after oversized line = %d, want 3", got)
+	}
+}
+
+func TestTokenCounterPersist(t *testing.T) {
+	// Persistence now lives in observestats.Store (SQLite), not a JSON file. Verify the
+	// flusher round-trip: commit tokens + bump metrics -> flush -> reopen the DB
+	// -> loadCumulative returns the exact same values (the boot restore path).
+	path := filepath.Join(t.TempDir(), "stats.db")
+	ss, err := openTestStatsStore(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	m := obscounters.NewMetricsStore()
+	tc := obscounters.NewTokenCounter()
+	f := observestats.NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{})
+
+	tc.Commit(obscounters.TokenKey{Provider: "z", Model: "m"}, obscounters.TokenUsage{Input: 10, Output: 20, Requests: 1})
+	m.Inc("z", "m", obscounters.EvRequests)
+	m.Inc("z", "m", obscounters.EvFailovers)
+	if !f.Flush(time.Now()) {
+		t.Fatal("flush reported no deltas despite pending commits")
+	}
+
+	// Reopen the same DB file (simulates a restart) and load the cumulative totals.
+	ss2, err := openTestStatsStore(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss2.Close()
+	base, err := ss2.LoadCumulative()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(base) != 1 {
+		t.Fatalf("loadCumulative = %d keys, want 1", len(base))
+	}
+	got := base[observestats.Key{Provider: "z", Model: "m"}]
+	if got.Input != 10 || got.Output != 20 || got.TokenRequests != 1 {
+		t.Errorf("token round-trip = %+v, want in=10 out=20 token_reqs=1", got)
+	}
+	if got.Requests != 1 || got.Failovers != 1 {
+		t.Errorf("metrics round-trip = %+v, want reqs=1 failovers=1", got)
+	}
+}
+
+// oneByteReader yields one byte per Read to force split-boundary scanning.
+type oneByteReader struct {
+	b   []byte
+	off int
+}
+
+func (r *oneByteReader) Read(p []byte) (int, error) {
+	if r.off >= len(r.b) {
+		return 0, io.EOF
+	}
+	p[0] = r.b[r.off]
+	r.off++
+	return 1, nil
+}
+
+// TestTokenCounterConcurrent would race under -race before the fix (the old
+// commit mutated *obscounters.TokenUsage fields after releasing tc.mu inside entry()). It
+// spawns 50 concurrent committers to the SAME key plus a concurrent snapshot
+// reader; after the fix every increment lands (no lost updates) and -race is
+// clean. Final Input/Output must equal exactly the number of committers.
+func TestTokenCounterConcurrent(t *testing.T) {
+	tc := obscounters.NewTokenCounter()
+	key := obscounters.TokenKey{Provider: "p", Model: "m"}
+	const committers = 50
+
+	var snapDone sync.WaitGroup
+	snapDone.Add(1)
+	stopSnap := make(chan struct{})
+	// Concurrent reader: hammers snapshot during commits. Before the fix this
+	// read *obscounters.TokenUsage fields while commit mutated them unlocked -> -race.
+	go func() {
+		defer snapDone.Done()
+		for {
+			select {
+			case <-stopSnap:
+				return
+			default:
+				_ = tc.Snapshot()
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(committers)
+	start := make(chan struct{})
+	for i := 0; i < committers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			tc.Commit(key, obscounters.TokenUsage{Input: 1, Output: 1})
+		}()
+	}
+	close(start) // release all committers together to maximize contention
+	wg.Wait()
+	close(stopSnap)
+	snapDone.Wait()
+
+	got := tc.Snapshot()[key]
+	if got.Input != committers {
+		t.Errorf("Input = %d, want %d (lost increments)", got.Input, committers)
+	}
+	if got.Output != committers {
+		t.Errorf("Output = %d, want %d (lost increments)", got.Output, committers)
+	}
+	if got.Requests != committers {
+		t.Errorf("Requests = %d, want %d", got.Requests, committers)
+	}
+}
+
+// TestForwardCountsTokens verifies the proxy forward hot path wraps SSE response
+// bodies in a usageScanner keyed by the chosen (provider, model), committing
+// observed anthropic usage (input_tokens from message_start, output_tokens from
+// message_delta) to the shared obscounters.TokenCounter. Non-SSE responses are not scanned.
+// HOME is pinned to a temp dir (with a dummy zhipu apikey) so NewProxy's
+// baseline load can't pick up the developer's real ~/.model-proxy/token_usage.json
+// and the provider can authenticate against the mock upstream.
+func TestForwardCountsTokens(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "zhipu_apikey.json"), []byte(`{"api_key":"sk-test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":8}}\n\n")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write(stream)
+	}))
+	defer up.Close()
+	cfg, err := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	p := newTestProxy(t, cfg)
+	rec := httptest.NewRecorder()
+	p.Handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
+	io.Copy(io.Discard, rec.Result().Body)
+	rec.Result().Body.Close()
+	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
+	if got.Input != 42 || got.Output != 8 {
+		t.Errorf("tokens = %+v, want in=42 out=8", got)
+	}
+	if got.Requests != 1 {
+		t.Errorf("requests = %d, want 1", got.Requests)
+	}
+}
+
+// TestForwardDoesNotScanNonSSE verifies a non-SSE 2xx response is NOT wrapped:
+// the counter must stay zero (no scanner overhead, no commit) for plain JSON.
+func TestForwardDoesNotScanNonSSE(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "zhipu_apikey.json"), []byte(`{"api_key":"sk-test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer up.Close()
+	cfg, _ := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	p := newTestProxy(t, cfg)
+	rec := httptest.NewRecorder()
+	p.Handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m"}`)))
+	io.Copy(io.Discard, rec.Result().Body)
+	rec.Result().Body.Close()
+	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
+	if got.Input != 0 || got.Output != 0 || got.Requests != 0 {
+		t.Errorf("non-SSE tokens = %+v, want zero (non-SSE must not be scanned)", got)
+	}
+}
+
+// disconnectWriter wraps an httptest.ResponseRecorder and fails every Write,
+// simulating a client that has already gone away (broken pipe). flushCopy must
+// stop reading the upstream stream on the first failed write.
+type disconnectWriter struct {
+	*httptest.ResponseRecorder
+}
+
+func (disconnectWriter) Write([]byte) (int, error) {
+	return 0, errors.New("client disconnected: broken pipe")
+}
+
+// TestForwardCommitsOnDisconnect verifies that when a client disconnects
+// mid-stream (flushCopy's w.Write returns an error after the upstream has
+// already delivered usage events), usage observed BEFORE the disconnect —
+// notably input_tokens from message_start, which arrives at the START of the
+// stream before any cancel — is still committed.
+//
+// Previously the inline usageScanner passed to flushCopy was never assigned,
+// so resp.Body.Close() closed the underlying body and bypassed the scanner's
+// Close → commit path, silently dropping observed usage. With the fix the
+// wrapped body is bound to a variable and closed explicitly, firing the
+// commit. On a normal (EOF) stream the scanner's Read already committed, so
+// the explicit Close is a harmless no-op (no double-count) — covered by
+// TestForwardCountsTokens above.
+func TestForwardCommitsOnDisconnect(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "zhipu_apikey.json"), []byte(`{"api_key":"sk-test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Upstream delivers both usage events, then HOLDS the stream open (err==nil
+	// on the proxy's first Read) to simulate ongoing generation the client
+	// cancels. This is the critical precondition: the scanner's Read-err commit
+	// path must NOT fire (no error yet), so the only commit path is the
+	// explicit body.Close() the fix adds.
+	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":42}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":8}}\n\n")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write(stream)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done() // hold open until the proxy closes the body (disconnect)
+	}))
+	defer up.Close()
+	cfg, err := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	p := newTestProxy(t, cfg)
+	rec := &disconnectWriter{ResponseRecorder: httptest.NewRecorder()}
+	p.Handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
+	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
+	if got.Input != 42 {
+		t.Errorf("input tokens after disconnect = %d, want 42 (observed usage must commit on client-cancel, not be silently dropped)", got.Input)
+	}
+	if got.Output != 8 {
+		t.Errorf("output tokens after disconnect = %d, want 8", got.Output)
+	}
+	if got.Requests != 1 {
+		t.Errorf("requests after disconnect = %d, want 1", got.Requests)
+	}
+}

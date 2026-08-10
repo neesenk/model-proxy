@@ -9,7 +9,7 @@ import (
 )
 
 func TestArchitectureOwnershipBoundaries(t *testing.T) {
-	rootPackage, rootSet := parseGoPackage(t, ".")
+	rootPackage, rootSet := parseGoPackage(t, "internal/app")
 
 	t.Run("internal config owns configuration behind a narrow root facade", func(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/config")
@@ -78,22 +78,22 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			}
 		}
 
-		snapshot, _ := parseGoFile(t, "dispatch_context.go")
-		catalogType := namedStructFields(t, snapshot, "runtimeSnapshot")["catalog"]
+		snapshot, _ := parseGoFile(t, "internal/app/dispatch_context.go")
+		catalogType := namedStructFields(t, snapshot, "RuntimeSnapshot")["Catalog"]
 		pointer, ok := catalogType.(*ast.StarExpr)
 		if !ok {
-			t.Errorf("runtimeSnapshot.catalog type = %T, want *catalog.Catalog", catalogType)
+			t.Errorf("RuntimeSnapshot.Catalog type = %T, want *catalog.Catalog", catalogType)
 		} else if name, ok := configSelectorName(pointer.X, "catalog"); !ok || name != "Catalog" {
-			t.Errorf("runtimeSnapshot.catalog must be *catalog.Catalog")
+			t.Errorf("RuntimeSnapshot.Catalog must be *catalog.Catalog")
 		}
 		forbiddenRefresh := map[string]bool{
 			"EnsureFresh": true, "FetchHTTP": true, "loadModelsCatalog": true,
 			"modelsCatalogEndpoint": true, "modelsCatalogPath": true,
 		}
-		for _, path := range []string{"internal/routing/request.Go", "request_routing_adapter.go"} {
+		for _, path := range []string{"internal/routing/request.go", "internal/app/request_routing_adapter.go"} {
 			routingFile, routingSet := parseGoFile(t, path)
 			for _, violation := range forbiddenCallSites(routingFile, routingSet, forbiddenRefresh, nil) {
-				t.Errorf("%s refreshes or re-reads catalog instead of using runtimeSnapshot: %s", path, violation)
+				t.Errorf("%s refreshes or re-reads catalog instead of using RuntimeSnapshot: %s", path, violation)
 			}
 		}
 	})
@@ -140,7 +140,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat live_events.go: %v", err)
 		}
-		handler, _ := parseGoFile(t, "proxy_http.go")
+		handler, _ := parseGoFile(t, "internal/app/proxy_http.go")
 		if got := selectorCountNamed(handler, "ServeEvents"); got != 1 {
 			t.Errorf("proxy_http.go observeevents.ServeEvents calls = %d, want exactly 1 direct call", got)
 		}
@@ -180,7 +180,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Fatalf("stat request_log.go: %v", err)
 		}
 
-		adapter, _ := parseGoFile(t, "request_log_adapter.go")
+		adapter, _ := parseGoFile(t, "internal/app/request_log_adapter.go")
 		wantImports := map[string]bool{
 			"log": true,
 			"model-proxy/internal/observe/requestlog": true,
@@ -273,24 +273,24 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Fatalf("stat cache.go: %v", err)
 		}
 
-		adapter, _ := parseGoFile(t, "proxy_constructor.go")
-		if got := namedCallCount(adapter, "newResponseCache"); got != 1 {
-			t.Errorf("proxy_constructor.go newResponseCache declarations = %d, want exactly 1", got)
+		adapter, _ := parseGoFile(t, "internal/app/proxy_constructor.go")
+		if got := namedCallCount(adapter, "NewResponseCache"); got != 1 {
+			t.Errorf("proxy_constructor.go NewResponseCache declarations = %d, want exactly 1", got)
 		}
 
-		assertCacheStoreField := func(parsed *ast.File, owner string) {
+		assertCacheStoreFieldNamed := func(parsed *ast.File, owner, field string) {
 			t.Helper()
-			fieldType := namedStructFields(t, parsed, owner)["cache"]
+			fieldType := namedStructFields(t, parsed, owner)[field]
 			pointer, ok := fieldType.(*ast.StarExpr)
 			if !ok {
-				t.Errorf("%s.cache type = %T, want *responsecache.Store", owner, fieldType)
+				t.Errorf("%s.Cache type = %T, want *responsecache.Store", owner, fieldType)
 			} else if name, ok := configSelectorName(pointer.X, "responsecache"); !ok || name != "Store" {
-				t.Errorf("%s.cache must be *responsecache.Store", owner)
+				t.Errorf("%s.Cache must be *responsecache.Store", owner)
 			}
 		}
-		assertCacheStoreField(rootPackage, "Proxy")
-		dispatchContext, _ := parseGoFile(t, "dispatch_context.go")
-		assertCacheStoreField(dispatchContext, "runtimeSnapshot")
+		assertCacheStoreFieldNamed(rootPackage, "Proxy", "cache")
+		dispatchContext, _ := parseGoFile(t, "internal/app/dispatch_context.go")
+		assertCacheStoreFieldNamed(dispatchContext, "RuntimeSnapshot", "Cache")
 
 		forbidden := map[string]bool{
 			"responseCache": true,

@@ -8,7 +8,7 @@ import (
 )
 
 func TestArchitectureRuntimeBoundaries(t *testing.T) {
-	rootPackage, _ := parseGoPackage(t, ".")
+	rootPackage, _ := parseGoPackage(t, "internal/app")
 
 	t.Run("internal runtime owns generation-scoped routing state", func(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/runtime")
@@ -87,7 +87,7 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			}
 		}
 
-		constructor := namedFunction(t, proxyFile, "newProxyWithStatePath")
+		constructor := namedFunction(t, proxyFile, "NewProxyWithStatePath")
 		injectedManager := 0
 		ast.Inspect(constructor.Body, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
@@ -111,15 +111,15 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 		})
 		if got := namedCallCountInNode(constructor.Body, "NewQuotaTracker"); got != 1 || injectedManager != 1 {
 			t.Errorf(
-				"newProxyWithStatePath must inject its one Manager into one runtimestate.NewQuotaTracker call: calls=%d injections=%d",
+				"NewProxyWithStatePath must inject its one Manager into one runtimestate.NewQuotaTracker call: calls=%d injections=%d",
 				got,
 				injectedManager,
 			)
 		}
 
-		reload := namedMethod(t, proxyFile, "Proxy", "reload")
+		reload := namedMethod(t, proxyFile, "Proxy", "Reload")
 		if got := namedCallCountInNode(reload.Body, "ReplaceGeneration"); got != 1 {
-			t.Errorf("Proxy.reload ReplaceGeneration calls = %d, want exactly 1", got)
+			t.Errorf("Proxy.Reload ReplaceGeneration calls = %d, want exactly 1", got)
 		}
 		persist := namedMethod(t, proxyFile, "Proxy", "snapshotPersistedState")
 		if got := namedCallCountInNode(persist.Body, "RLock"); got != 1 {
@@ -152,7 +152,7 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			}
 		}
 
-		readView, _ := parseGoFile(t, "proxy_read_view.go")
+		readView, _ := parseGoFile(t, "internal/app/proxy_read_view.go")
 		dashboard := namedMethod(t, readView, "proxyReadView", "dashboard")
 		if got := namedCallCountInNode(dashboard.Body, "Dashboard"); got != 1 {
 			t.Errorf("proxyReadView.dashboard Manager.Dashboard calls = %d, want exactly 1", got)
@@ -240,7 +240,7 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			t.Error("Proxy.wireCaps must be runtimewire.Store")
 		}
 
-		adapter, _ := parseGoFile(t, "wirecap.go")
+		adapter, _ := parseGoFile(t, "internal/app/wirecap.go")
 		compatibilityAliases := map[string]string{
 			"triState": "Verdict",
 			"wireCaps": "Capabilities",

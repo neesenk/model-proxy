@@ -33,7 +33,7 @@ func buildOpts() app.BuildOptions {
 		HomeDir:                  homeDir(),
 		CodexCLIVersion:          app.CodexCLIVersion,
 		CodexCacheVersion:        app.CodexCacheVersion,
-		ListArkAgentPlanModelIDs: ListArkAgentPlanModelIDs,
+		ListArkAgentPlanModelIDs: app.ListArkAgentPlanModelIDs,
 	}
 }
 

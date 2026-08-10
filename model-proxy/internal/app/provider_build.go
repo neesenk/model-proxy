@@ -3,10 +3,14 @@ package app
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
@@ -201,4 +205,53 @@ func HealthConfigFingerprint(cfg *configdomain.Config) string {
 		fmt.Fprintf(h, "%s|%s|%s|%s\n", name, p.Provider, p.OpenAIBaseURL, p.AnthropicBaseURL)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// buildOpts wires the production environment seams (home dir, codex version
+// probes, volcengine signed model list) for BuildProviders.
+func buildOpts() BuildOptions {
+	return BuildOptions{
+		HomeDir:                  accounts.HomeDir(),
+		CodexCLIVersion:          CodexCLIVersion,
+		CodexCacheVersion:        CodexCacheVersion,
+		ListArkAgentPlanModelIDs: ListArkAgentPlanModelIDs,
+	}
+}
+
+// listArkAgentPlanModelIDs calls the Volcengine signed OpenAPI ListArkAgentPlanModel
+// via the provider's stored AK/SK and returns the Agent Plan's supported model IDs.
+func ListArkAgentPlanModelIDs(provName string) ([]string, error) {
+	creds, err := LoadVolcengineCreds(accounts.HomeDir(), provName)
+	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
+		return nil, fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
+	}
+	req, err := provider.VolcengineSignedGet("ListArkAgentPlanModel", "2024-01-01", creds.AccessKey, creds.SecretKey, time.Now(), "")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ListArkAgentPlanModel: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("ListArkAgentPlanModel HTTP %d: %s", resp.StatusCode, provider.Truncate(string(body), 300))
+	}
+	var wrap struct {
+		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`
+		Result           struct {
+			Datas []struct {
+				ModelID string `json:"ModelID"`
+			} `json:"Datas"`
+		} `json:"Result"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		return nil, fmt.Errorf("parse ListArkAgentPlanModel: %w", err)
+	}
+	ids := make([]string, 0, len(wrap.Result.Datas))
+	for _, d := range wrap.Result.Datas {
+		ids = append(ids, d.ModelID)
+	}
+	return ids, nil
 }

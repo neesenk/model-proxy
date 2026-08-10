@@ -14,7 +14,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 		for _, path := range productionGoFilesIn(t, "internal/fusion") {
 			file, fileSet := parseGoFile(t, path)
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{
-				"Proxy": true, "runtimeSnapshot": true, "counters.MetricsStore": true,
+				"Proxy": true, "RuntimeSnapshot": true, "counters.MetricsStore": true,
 				"counters.TokenCounter": true, "requestlog": true, "http": true,
 			}); len(got) != 0 {
 				t.Errorf("%s crosses the Fusion orchestration boundary: %v", path, got)
@@ -26,7 +26,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			t.Fatalf("stat fusion_obs.go: %v", err)
 		}
 
-		root, rootSet := parseGoFile(t, "fusion.go")
+		root, rootSet := parseGoFile(t, "internal/app/fusion.go")
 		run := namedMethod(t, root, "Proxy", "runFusion")
 		if got := namedCallCountInNode(run.Body, "Run"); got != 1 {
 			t.Errorf("Proxy.runFusion Engine.Run calls = %d, want exactly 1", got)
@@ -55,7 +55,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			)
 		}
 
-		proxy, _ := parseGoFile(t, "proxy.go")
+		proxy, _ := parseGoFile(t, "internal/app/proxy.go")
 		field := namedStructFields(t, proxy, "Proxy")["fusionReg"]
 		pointer, ok := field.(*ast.StarExpr)
 		if !ok {
@@ -70,7 +70,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 		for _, path := range productionGoFilesIn(t, "internal/shadow") {
 			file, fileSet := parseGoFile(t, path)
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{
-				"Proxy": true, "proxyLifecycle": true, "runtimeSnapshot": true,
+				"Proxy": true, "proxyLifecycle": true, "RuntimeSnapshot": true,
 				"Manager": true, "requestlog": true, "counters.MetricsStore": true,
 				"Executor": true,
 			}); len(got) != 0 {
@@ -78,7 +78,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			}
 		}
 
-		root, rootSet := parseGoFile(t, "proxy_shadow.go")
+		root, rootSet := parseGoFile(t, "internal/app/proxy_shadow.go")
 		dispatch := namedMethod(t, root, "Proxy", "dispatchShadowAfterCommit")
 		samplePos := firstNamedCallPos(dispatch.Body, "ShouldSample")
 		acquirePos := firstNamedCallPos(dispatch.Body, "TryAcquire")
@@ -113,13 +113,13 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			)
 		}
 
-		snapshot, _ := parseGoFile(t, "dispatch_context.go")
-		field := namedStructFields(t, snapshot, "runtimeSnapshot")["shadow"]
+		snapshot, _ := parseGoFile(t, "internal/app/dispatch_context.go")
+		field := namedStructFields(t, snapshot, "RuntimeSnapshot")["Shadow"]
 		pointer, ok := field.(*ast.StarExpr)
 		if !ok {
-			t.Errorf("runtimeSnapshot.shadow type = %T, want *shadow.Runtime", field)
+			t.Errorf("RuntimeSnapshot.shadow type = %T, want *shadow.Runtime", field)
 		} else if name, ok := configSelectorName(pointer.X, "shadow"); !ok || name != "Runtime" {
-			t.Error("runtimeSnapshot.shadow must be *shadow.Runtime")
+			t.Error("RuntimeSnapshot.shadow must be *shadow.Runtime")
 		}
 	})
 }

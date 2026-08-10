@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"log"
+	cliframework "model-proxy/internal/cli/framework"
 	"encoding/json"
 	"fmt"
 	configdomain "model-proxy/internal/config"
@@ -91,4 +93,14 @@ func MakeURLQuery(args []string) url.Values {
 		}
 	}
 	return q
+}
+
+// CmdShadowRun is the process-level entry: it owns config loading and
+// delegates to CmdShadow.
+func CmdShadowRun(args []string) {
+	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
+	if err != nil {
+		log.Fatal(err)
+	}
+	CmdShadow(args, cfg)
 }

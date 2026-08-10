@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	appdomain "model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	"net/http"
@@ -63,13 +64,13 @@ type applicationRuntime struct {
 }
 
 func newApplicationRuntime(cfg *Config, args cliserve.Args) *applicationRuntime {
-	proxy := NewProxy(cfg)
+	proxy := appdomain.NewProxy(cfg)
 	// Start all process-owned optional services through the Proxy lifecycle
 	// owner (stats flusher, request logger, startup catalog load).
-	proxy.startRuntimeServices(cfg)
+	proxy.StartRuntimeServices(cfg)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", proxy.handler)
+	mux.HandleFunc("/", proxy.Handler)
 	runtime := &applicationRuntime{
 		configPath:    args.Config,
 		startupConfig: cfg,
@@ -77,15 +78,15 @@ func newApplicationRuntime(cfg *Config, args cliserve.Args) *applicationRuntime 
 		handler:       mux,
 	}
 	if cfg.Web.Enabled {
-		web := newWebServer(proxy, args.Config)
-		web.logFile = cliserve.ResolveLogFile(args, cfg)
-		web.register(mux)
+		web := appdomain.NewWebServer(proxy, args.Config)
+		web.SetLogFile(cliserve.ResolveLogFile(args, cfg))
+		web.Register(mux)
 		runtime.transportTasks = append(runtime.transportTasks, func(stop <-chan struct{}) {
-			if !web.start() {
+			if !web.Start() {
 				return
 			}
 			<-stop
-			web.close()
+			web.Close()
 		})
 	}
 	return runtime
@@ -93,7 +94,7 @@ func newApplicationRuntime(cfg *Config, args cliserve.Args) *applicationRuntime 
 
 func (runtime *applicationRuntime) reload() {
 	log.Printf("[reload] SIGHUP received, reloading config from %s", runtime.configPath)
-	if err := runtime.proxy.reload(runtime.configPath); err != nil {
+	if err := runtime.proxy.Reload(runtime.configPath); err != nil {
 		var applied *reloadAppliedWarning
 		if errors.As(err, &applied) {
 			log.Printf("[reload] WARNING: %v", err)
@@ -102,9 +103,9 @@ func (runtime *applicationRuntime) reload() {
 		}
 		return
 	}
-	snapshot := runtime.proxy.snapshotRuntime()
+	snapshot := runtime.proxy.SnapshotRuntime()
 	log.Printf("[reload] config reloaded successfully (providers: %s, routes: %s)",
-		cliframework.ProviderNames(snapshot.cfg), cliframework.RouteNames(snapshot.cfg))
+		cliframework.ProviderNames(snapshot.Cfg), cliframework.RouteNames(snapshot.Cfg))
 }
 
 func (runtime *applicationRuntime) Close() {

@@ -24,14 +24,14 @@ func TestApplicationRuntimeConcreteAssemblyContract(t *testing.T) {
 	if got := namedCallCountInNode(constructor.Body, "NewProxy"); got != 1 {
 		t.Errorf("newApplicationRuntime NewProxy calls = %d, want exactly 1", got)
 	}
-	if got := callCountOnIdentInNode(constructor.Body, "proxy", "startRuntimeServices"); got != 1 {
-		t.Errorf("newApplicationRuntime proxy.startRuntimeServices calls = %d, want exactly 1", got)
+	if got := callCountOnIdentInNode(constructor.Body, "proxy", "StartRuntimeServices"); got != 1 {
+		t.Errorf("newApplicationRuntime proxy.StartRuntimeServices calls = %d, want exactly 1", got)
 	}
 	if got := namedCallCountInNode(constructor.Body, "NewServeMux"); got != 1 {
 		t.Errorf("newApplicationRuntime http.NewServeMux calls = %d, want exactly 1", got)
 	}
-	if got := namedCallCountInNode(constructor.Body, "newWebServer"); got != 1 {
-		t.Errorf("newApplicationRuntime newWebServer calls = %d, want exactly 1 guarded Web assembly", got)
+	if got := namedCallCountInNode(constructor.Body, "NewWebServer"); got != 1 {
+		t.Errorf("newApplicationRuntime NewWebServer calls = %d, want exactly 1 guarded Web assembly", got)
 	}
 
 	literals := 0
@@ -105,10 +105,10 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			if runtime.configPath != "test-config.yaml" {
 				t.Fatalf("applicationRuntime configPath = %q, want test-config.yaml", runtime.configPath)
 			}
-			if runtime.proxy.stats == nil || runtime.proxy.flusher == nil {
+			if runtime.proxy.StatsStore() == nil || runtime.proxy.Flusher() == nil {
 				t.Fatal("newApplicationRuntime did not start persisted runtime services")
 			}
-			catalog := runtime.proxy.catalogSnapshot()
+			catalog := runtime.proxy.CatalogSnapshot()
 			if catalog == nil || catalog.Count() != 1 {
 				t.Fatalf("newApplicationRuntime catalog count = %v, want 1 from isolated cache", catalog)
 			}
@@ -143,7 +143,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			}
 
 			stopped := make(chan struct{})
-			if admitted := runtime.proxy.lifecycle.Run(func(stop <-chan struct{}) {
+			if admitted := runtime.proxy.Lifecycle().Run(func(stop <-chan struct{}) {
 				<-stop
 				close(stopped)
 			}); !admitted {
@@ -158,7 +158,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			// Proxy.Close is idempotent; applicationRuntime must preserve that
 			// property rather than layering a competing callback/task owner.
 			runtime.Close()
-			if runtime.proxy.lifecycle.Run(func(<-chan struct{}) {}) {
+			if runtime.proxy.Lifecycle().Run(func(<-chan struct{}) {}) {
 				t.Fatal("applicationRuntime.Close admitted work after closing its Proxy")
 			}
 		})
@@ -168,11 +168,11 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 func TestApplicationRuntimeReloadSummaryContract(t *testing.T) {
 	file, _ := parseGoFile(t, "app_assembly.go")
 	reload := namedMethod(t, file, "applicationRuntime", "reload")
-	if got := namedCallCountInNode(reload.Body, "reload"); got != 1 {
-		t.Errorf("applicationRuntime.reload nested reload calls = %d, want exactly runtime.proxy.reload", got)
+	if got := selectorCallCountInNode(reload.Body, "Reload"); got != 1 {
+		t.Errorf("applicationRuntime.reload nested reload calls = %d, want exactly runtime.proxy.Reload", got)
 	}
-	if got := namedCallCountInNode(reload.Body, "snapshotRuntime"); got != 1 {
-		t.Errorf("applicationRuntime.reload snapshotRuntime calls = %d, want exactly 1 successful reload summary", got)
+	if got := namedCallCountInNode(reload.Body, "SnapshotRuntime"); got != 1 {
+		t.Errorf("applicationRuntime.reload SnapshotRuntime calls = %d, want exactly 1 successful reload summary", got)
 	}
 	if got := selectorCallCountInNode(reload.Body, "ProviderNames"); got != 1 {
 		t.Errorf("applicationRuntime.reload cliframework.ProviderNames calls = %d, want exactly 1 successful reload summary", got)
@@ -201,11 +201,11 @@ providers:
 	runtime := newApplicationRuntime(cfg, cliserve.Args{Config: configPath})
 	t.Cleanup(runtime.Close)
 	runtime.reload()
-	snapshot := runtime.proxy.snapshotRuntime()
-	if snapshot.cfg.Listen != "127.0.0.1:17834" {
-		t.Fatalf("reload runtime listen = %q, want 127.0.0.1:17834", snapshot.cfg.Listen)
+	snapshot := runtime.proxy.SnapshotRuntime()
+	if snapshot.Cfg.Listen != "127.0.0.1:17834" {
+		t.Fatalf("reload runtime listen = %q, want 127.0.0.1:17834", snapshot.Cfg.Listen)
 	}
-	if provider := snapshot.cfg.Providers["demo"]; provider.Provider != "zhipu" {
+	if provider := snapshot.Cfg.Providers["demo"]; provider.Provider != "zhipu" {
 		t.Fatalf("reload provider demo = %#v, want provider_id zhipu", provider)
 	}
 	if runtime.startupConfig.Listen != "127.0.0.1:17833" {

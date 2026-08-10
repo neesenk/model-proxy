@@ -10,7 +10,7 @@ import (
 // composition-root escape hatch, Fusion's client-facing synthesis reuses that
 // executor, and pool resolution reaches health only through resolverState.
 func TestTargetExecutionArchitecture(t *testing.T) {
-	rootPackage, _ := parseGoPackage(t, ".")
+	rootPackage, _ := parseGoPackage(t, "internal/app")
 
 	t.Run("targetexec Attempt has only its five execution contract fields", func(t *testing.T) {
 		f, _ := parseGoFile(t, "internal/targetexec/attempt.go")
@@ -50,7 +50,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 				want: map[string]bool{"Scheduling": true, "Generation": true, "Cache": true},
 				forbidden: map[string]bool{
 					"Proxy": true, "Config": true, "any": true,
-					"runtimeSnapshot": true, "targetPlan": true,
+					"RuntimeSnapshot": true, "targetPlan": true,
 				},
 			},
 			{
@@ -58,7 +58,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 				want: map[string]bool{"Request": true, "Writer": true, "Body": true},
 				forbidden: map[string]bool{
 					"Proxy": true, "Config": true, "Store": true, "any": true,
-					"runtimeSnapshot": true, "targetPlan": true,
+					"RuntimeSnapshot": true, "targetPlan": true,
 				},
 			},
 			{
@@ -71,7 +71,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 				// protocol JSON; the group still cannot regain root owners.
 				forbidden: map[string]bool{
 					"Proxy": true, "Config": true, "Store": true,
-					"runtimeSnapshot": true, "targetPlan": true,
+					"RuntimeSnapshot": true, "targetPlan": true,
 				},
 			},
 			{
@@ -79,7 +79,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 				want: map[string]bool{"Force": true, "LastTarget": true, "ContextRetry": true},
 				forbidden: map[string]bool{
 					"Proxy": true, "Config": true, "Store": true, "any": true,
-					"runtimeSnapshot": true, "targetPlan": true,
+					"RuntimeSnapshot": true, "targetPlan": true,
 				},
 			},
 		}
@@ -95,7 +95,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		want := map[string]bool{"requestBody": true}
 		forbiddenTypes := map[string]bool{
 			"Proxy": true, "Config": true, "Store": true,
-			"runtimeSnapshot": true, "targetPlan": true,
+			"RuntimeSnapshot": true, "targetPlan": true,
 			"proxyLifecycle": true, "shadowRuntime": true,
 		}
 		if got := structContractViolations(namedStructFields(t, f, "Commit"), want, forbiddenTypes); len(got) != 0 {
@@ -136,7 +136,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			"NewAttempt",
 		)
 		if len(constructorCalls) != 1 ||
-			constructorCalls[0].file != "dispatch_context.go" || constructorCalls[0].function != "newTargetAttempt" {
+			constructorCalls[0].file != "internal/app/dispatch_context.go" || constructorCalls[0].function != "newTargetAttempt" {
 			t.Errorf("targetexec.NewAttempt production reference sites = %v, want only dispatch_context.go:newTargetAttempt direct call", constructorCalls)
 		}
 		if sites := packageLocalFunctionCallSites(t, "internal/targetexec", "NewAttempt"); len(sites) != 0 {
@@ -155,7 +155,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			t.Errorf("Proxy.serveOnce must dispatch post-commit Shadow after execute (execute=%v shadow=%v)", executePos, shadowPos)
 		}
 
-		fusionFile, fusionSet := parseGoFile(t, "fusion.go")
+		fusionFile, fusionSet := parseGoFile(t, "internal/app/fusion.go")
 		if got := compositeLiteralSites(fusionFile, "Attempt"); len(got) != 0 {
 			t.Errorf("fusion.go must call newTargetAttempt, not construct targetexec.Attempt: %s", describeNodes(fusionSet, got, "Attempt literal"))
 		}
@@ -175,7 +175,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			"Client": true, "State": true, "Effects": true, "Responses": true,
 		}
 		if got := structContractViolations(executorFields, wantFields, map[string]bool{
-			"Proxy": true, "runtimeSnapshot": true, "targetPlan": true, "any": true,
+			"Proxy": true, "RuntimeSnapshot": true, "targetPlan": true, "any": true,
 		}); len(got) != 0 {
 			t.Errorf("targetexec.Executor contract violations: %v", got)
 		}
@@ -184,9 +184,9 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			t.Error("targetexec.Executor.Execute must not receive *Proxy")
 		}
 		forbidden := map[string]bool{
-			"schedule": true, "reload": true, "snapshotRuntime": true,
-			"newWebServer": true, "serveHTTPUntilShutdown": true,
-			"startRuntimeServices": true, "contextOverflowRetry": true,
+			"schedule": true, "reload": true, "SnapshotRuntime": true,
+			"NewWebServer": true, "serveHTTPUntilShutdown": true,
+			"StartRuntimeServices": true, "contextOverflowRetry": true,
 			"runShadow": true, "dispatchShadowAfterCommit": true,
 			"shouldSample": true, "runBeforeLogDrain": true,
 		}
@@ -195,7 +195,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		}
 		forbiddenTypes := map[string]bool{
 			"Proxy": true, "proxyLifecycle": true, "shadowRuntime": true,
-			"ShadowTarget": true, "runtimeSnapshot": true, "targetPlan": true,
+			"ShadowTarget": true, "RuntimeSnapshot": true, "targetPlan": true,
 		}
 		if got := forbiddenIdentifierSites(f, fset, forbiddenTypes); len(got) != 0 {
 			t.Errorf("internal/targetexec/executor.go retained forbidden owner/orchestration types: %v", got)
@@ -206,7 +206,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			t.Errorf("internal/targetexec/executor.go imports outside its execution leaves: %v", got)
 		}
 
-		adapter, adapterSet := parseGoFile(t, "targetexec_adapter.go")
+		adapter, adapterSet := parseGoFile(t, "internal/app/targetexec_adapter.go")
 		factory := namedMethod(t, adapter, "Proxy", "targetExecutor")
 		adapterForbidden := map[string]bool{
 			"Do": true, "ConvertRequest": true, "ConvertResponse": true,
@@ -219,7 +219,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 	})
 
 	t.Run("Fusion synthesizer delegates client delivery to target executor", func(t *testing.T) {
-		f, fset := parseGoFile(t, "fusion.go")
+		f, fset := parseGoFile(t, "internal/app/fusion.go")
 		synth := namedMethod(t, f, "Proxy", "callFusionSynthesizer")
 		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "Execute") {
 			t.Error("callFusionSynthesizer must execute the exact value returned by newTargetAttempt")
@@ -266,14 +266,14 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 					return true
 				}
 				if selector, ok := call.Args[len(call.Args)-1].(*ast.SelectorExpr); ok &&
-					selector.Sel.Name == "generation" {
+					selector.Sel.Name == "Generation" {
 					bound++
 				}
 				return true
 			})
 			return calls, bound
 		}
-		fusion, _ := parseGoFile(t, "fusion.go")
+		fusion, _ := parseGoFile(t, "internal/app/fusion.go")
 		if calls, bound := countGenerationBoundResolvers(fusion); calls != 2 || bound != calls {
 			t.Errorf("Fusion resolver calls must bind runtime generation: calls=%d bound=%d", calls, bound)
 		}

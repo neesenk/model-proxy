@@ -5,14 +5,9 @@ import (
 	"net/http"
 )
 
-// writeJSON is a test-server helper retained in the composition-root test
-// package. Production JSON presentation belongs to internal/web.
+// writeJSON is the root test-server JSON helper.
 func writeJSON(response http.ResponseWriter, status int, value any) {
 	response.Header().Set("content-type", "application/json")
 	response.WriteHeader(status)
-	data, err := json.Marshal(value)
-	if err != nil {
-		panic("marshal test JSON: " + err.Error())
-	}
-	_, _ = response.Write(data)
+	_ = json.NewEncoder(response).Encode(value)
 }

@@ -2,16 +2,12 @@ package models
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	cliframework "model-proxy/internal/cli/framework"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -75,7 +71,7 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 			// unavailable) keep config intact on a total outage, so a
 			// down/not-logged-in provider never wipes models:.
 			fmt.Fprintf(os.Stderr, "models endpoint unavailable for %s (%v); probing route-configured models instead\n", provName, err)
-			merged = MergeStringIDs(existing, RouteModelsForProvider(cfg, provName))
+			merged = MergeStringIDs(existing, app.RouteModelsForProvider(cfg, provName))
 			if len(merged) == 0 {
 				fmt.Fprintf(os.Stderr, "no models to probe for %s (no /models endpoint and no routes target it); add routes targeting %s first\n", provName, provName)
 			}
@@ -367,44 +363,6 @@ func PoolVirtuals(cfg *configdomain.Config, name string) ([]string, bool) {
 	}
 	sort.Strings(vids)
 	return vids, true
-}
-
-// listArkAgentPlanModelIDs calls the Volcengine signed OpenAPI ListArkAgentPlanModel
-// via the provider's stored AK/SK and returns the Agent Plan's supported model IDs.
-func ListArkAgentPlanModelIDs(provName string) ([]string, error) {
-	creds, err := app.LoadVolcengineCreds(homeDir(), provName)
-	if err != nil || creds.AccessKey == "" || creds.SecretKey == "" {
-		return nil, fmt.Errorf("Agent Plan model list needs AK/SK — run `model-proxy login %s`", provName)
-	}
-	req, err := provider.VolcengineSignedGet("ListArkAgentPlanModel", "2024-01-01", creds.AccessKey, creds.SecretKey, time.Now(), "")
-	if err != nil {
-		return nil, err
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("ListArkAgentPlanModel: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("ListArkAgentPlanModel HTTP %d: %s", resp.StatusCode, provider.Truncate(string(body), 300))
-	}
-	var wrap struct {
-		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`
-		Result           struct {
-			Datas []struct {
-				ModelID string `json:"ModelID"`
-			} `json:"Datas"`
-		} `json:"Result"`
-	}
-	if err := json.Unmarshal(body, &wrap); err != nil {
-		return nil, fmt.Errorf("parse ListArkAgentPlanModel: %w", err)
-	}
-	ids := make([]string, 0, len(wrap.Result.Datas))
-	for _, d := range wrap.Result.Datas {
-		ids = append(ids, d.ModelID)
-	}
-	return ids, nil
 }
 
 // volcengineModelFilterRegexps and isVolcengineModelFiltered moved to
