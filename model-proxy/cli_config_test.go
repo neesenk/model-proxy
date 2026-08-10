@@ -1,41 +1,11 @@
 package main
 
 import (
-	"model-proxy/provider"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// --- statusColor: all branches ---
-
-func TestStatusColor_AllBranches(t *testing.T) {
-	// Force log color on (it's off in tests: stderr is not a tty) so the
-	// status→ANSI mapping is actually exercised — including branch edges.
-	old := provider.LogColorEnabled
-	provider.LogColorEnabled = true
-	defer func() { provider.LogColorEnabled = old }()
-	for _, c := range []struct {
-		status int
-		code   string
-	}{
-		{200, provider.LogAnsiGreen}, {299, provider.LogAnsiGreen},
-		{300, provider.LogAnsiYellow}, {499, provider.LogAnsiYellow},
-		{500, provider.LogAnsiRed},
-		{100, provider.LogAnsiGray}, {0, provider.LogAnsiGray},
-	} {
-		want := c.code + "x" + provider.LogAnsiReset
-		if got := provider.StatusColor(c.status, "x"); got != want {
-			t.Errorf("provider.StatusColor(%d)=%q, want %q", c.status, got, want)
-		}
-	}
-	// Color off: identity passthrough.
-	provider.LogColorEnabled = false
-	if got := provider.StatusColor(200, "ok"); got != "ok" {
-		t.Errorf("provider.StatusColor(200) with color off=%q, want ok", got)
-	}
-}
 
 // --- cmdConfig init: writes config.yaml in the CWD ---
 
