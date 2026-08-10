@@ -396,14 +396,14 @@ func (w *webServer) h() {
 	// A generation field is not enough: it must be derived from the request's
 	// threaded runtime generation rather than a zero literal.
 	f, _ = parse(`func generationBound() {
-	_ = ScheduleInput{Generation: runtimeGenerationArg(generations)}
+	_ = ScheduleInput{Generation: runtimestate.GenerationArg(generations)}
 }`)
 	generationBound := namedFunction(t, f, "generationBound")
 	if got := keyedCompositeFieldCallCount(
 		generationBound.Body,
 		"ScheduleInput",
 		"Generation",
-		"runtimeGenerationArg",
+		"GenerationArg",
 	); got != 1 {
 		t.Errorf("generation binding positive control = %d, want 1", got)
 	}
@@ -415,7 +415,7 @@ func (w *webServer) h() {
 		generationZero.Body,
 		"ScheduleInput",
 		"Generation",
-		"runtimeGenerationArg",
+		"GenerationArg",
 	); got != 0 {
 		t.Errorf("generation binding accepted zero literal: %d", got)
 	}

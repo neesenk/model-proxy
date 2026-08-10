@@ -1,6 +1,7 @@
 package main
 
 import (
+	configdomain "model-proxy/internal/config"
 	"time"
 
 	runtimestate "model-proxy/internal/runtime"
@@ -62,7 +63,7 @@ func (p *Proxy) schedule(cfg *Config, parentOf map[string]string, exposed, sessi
 		p.runtimeState.SetSticky(
 			sk,
 			runtimestate.Sticky{Provider: stickyToSet, Since: now},
-			runtimeGenerationArg(generations),
+			runtimestate.GenerationArg(generations),
 		)
 	}
 	return ordered
@@ -146,7 +147,7 @@ func (p *Proxy) pinForces(exposed string, ordered []RouteTarget, parentOf map[st
 func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, now time.Time, commit bool, routeKeys map[string]bool, generations ...uint64) (ordered []RouteTarget, stickyToSet string) {
 	runtimeTargets := make([]runtimestate.Target, len(targets))
 	for index, target := range targets {
-		pconf, _ := providerConfig(cfg, parentOf, target.Provider)
+		pconf, _ := configdomain.ProviderConfig(cfg, parentOf, target.Provider)
 		runtimeTargets[index] = runtimestate.Target{
 			Provider:        target.Provider,
 			Parent:          parentOf[target.Provider],
@@ -166,7 +167,7 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 		Now:          now,
 		QuotaMaxAge:  3 * cfg.Scheduling.PollInterval(),
 		Commit:       commit,
-		Generation:   runtimeGenerationArg(generations),
+		Generation:   runtimestate.GenerationArg(generations),
 	})
 	ordered = make([]RouteTarget, 0, len(result.Order))
 	for _, index := range result.Order {

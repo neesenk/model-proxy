@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	configdomain "model-proxy/internal/config"
 
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
@@ -18,7 +19,7 @@ type targetPlanInput struct {
 // planTarget resolves snapshot-owned provider, protocol, endpoint-capability,
 // and runtime implementation facts, then freezes them in targetexec.Plan.
 func (p *Proxy) planTarget(input targetPlanInput) (targetexec.Plan, error) {
-	providerCfg, ok := providerConfig(input.runtime.cfg, input.runtime.parentOf, input.target.Provider)
+	providerCfg, ok := configdomain.ProviderConfig(input.runtime.cfg, input.runtime.parentOf, input.target.Provider)
 	if !ok {
 		return targetexec.Plan{}, fmt.Errorf("unknown provider %q", input.target.Provider)
 	}

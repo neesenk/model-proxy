@@ -912,3 +912,17 @@ func checkTargetProtocol(what string, t RouteTarget, prov Provider) error {
 	}
 	return nil
 }
+
+// ProviderConfig resolves the Provider config for name, resolving a
+// credential-pool virtual id ("name#<accountID>") back to its parent. parentOf
+// is the snapshot taken alongside the config; for a non-virtual name (incl.
+// single-account providers), parentOf[name] is "" and the config is read
+// directly. Returns the zero Provider (ok=false) if neither name nor a parent
+// is found — callers treat that as an unknown provider.
+func ProviderConfig(cfg *Config, parentOf map[string]string, name string) (Provider, bool) {
+	if parent := parentOf[name]; parent != "" {
+		name = parent
+	}
+	p, ok := cfg.Providers[name]
+	return p, ok
+}

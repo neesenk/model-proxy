@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	configdomain "model-proxy/internal/config"
 	"sort"
 	"time"
 
@@ -89,7 +90,7 @@ func scheduleStatusFromSnapshot(
 	for exposed, targets := range expanded {
 		runtimeTargets := make([]runtimestate.Target, len(targets))
 		for index, target := range targets {
-			pconf, _ := providerConfig(cfg, parentOf, target.Provider)
+			pconf, _ := configdomain.ProviderConfig(cfg, parentOf, target.Provider)
 			runtimeTargets[index] = runtimestate.Target{
 				Provider:        target.Provider,
 				Parent:          parentOf[target.Provider],
@@ -131,7 +132,7 @@ func scheduleStatusFromSnapshot(
 		parentSeen := map[string]bool{}
 		for orderIndex, t := range ordered {
 			targetIndex := decision.Order[orderIndex]
-			pconf, _ := providerConfig(cfg, parentOf, t.Provider)
+			pconf, _ := configdomain.ProviderConfig(cfg, parentOf, t.Provider)
 			parent := parentOf[t.Provider]
 			if parent != "" {
 				parentSeen[parent] = true

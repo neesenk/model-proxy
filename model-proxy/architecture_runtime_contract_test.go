@@ -213,7 +213,7 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			order.Body,
 			"ScheduleInput",
 			"Generation",
-			"runtimeGenerationArg",
+			"GenerationArg",
 		); got != 1 {
 			t.Errorf("Proxy.decideOrder runtimeGenerationArg-bound ScheduleInput fields = %d, want 1", got)
 		}

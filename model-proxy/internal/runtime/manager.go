@@ -78,3 +78,13 @@ func (m *Manager) ReplaceGeneration(generation uint64) {
 	m.spread = make(map[string]uint64)
 	m.quotas = make(map[string]*provider.QuotaSnapshot)
 }
+
+// GenerationArg keeps compatibility with callers that omit a generation while
+// letting request-scoped paths bind runtime mutations to their captured reload
+// generation.
+func GenerationArg(generations []uint64) uint64 {
+	if len(generations) == 0 {
+		return 0
+	}
+	return generations[0]
+}

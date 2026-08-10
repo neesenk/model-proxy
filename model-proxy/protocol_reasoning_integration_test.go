@@ -1,6 +1,7 @@
 package main
 
 import (
+	configdomain "model-proxy/internal/config"
 	"testing"
 
 	"model-proxy/internal/protocol"
@@ -14,9 +15,9 @@ func TestParity_ReasoningDialectPooledProvider(t *testing.T) {
 		Providers: map[string]Provider{"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://x"}},
 	}
 	parentOf := map[string]string{"zhipu#ab12": "zhipu"}
-	prov, ok := providerConfig(cfg, parentOf, "zhipu#ab12")
+	prov, ok := configdomain.ProviderConfig(cfg, parentOf, "zhipu#ab12")
 	if !ok {
-		t.Fatal("providerConfig did not resolve pooled virtual")
+		t.Fatal("configdomain.ProviderConfig did not resolve pooled virtual")
 	}
 	out, err := protocol.ConvertRequestWithOptions(
 		[]byte(`{"model":"g","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`),

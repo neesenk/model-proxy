@@ -10,14 +10,14 @@ import (
 func (p *Proxy) takeHalfOpenSlot(name string, generations ...uint64) bool {
 	return p.runtimeState.TakeHalfOpenSlot(
 		name,
-		runtimeGenerationArg(generations),
+		runtimestate.GenerationArg(generations),
 	)
 }
 
 func (p *Proxy) releaseHalfOpenSlot(name string, generations ...uint64) {
 	p.runtimeState.ReleaseHalfOpenSlot(
 		name,
-		runtimeGenerationArg(generations),
+		runtimestate.GenerationArg(generations),
 	)
 }
 
@@ -25,7 +25,7 @@ func (p *Proxy) recordSuccess(name, model string, generations ...uint64) {
 	p.runtimeState.RecordSuccess(
 		name,
 		model,
-		runtimeGenerationArg(generations),
+		runtimestate.GenerationArg(generations),
 	)
 }
 
@@ -36,7 +36,7 @@ func (p *Proxy) recordFailure(name string, sched Scheduling, generations ...uint
 		name,
 		sched.Threshold(),
 		sched.Cooldown(),
-		runtimeGenerationArg(generations),
+		runtimestate.GenerationArg(generations),
 	)
 }
 
@@ -53,7 +53,7 @@ func (p *Proxy) recordModelFailure(provider, model string, sched Scheduling, gen
 		provider,
 		model,
 		sched.ModelLockoutDuration(),
-		runtimeGenerationArg(generations),
+		runtimestate.GenerationArg(generations),
 	)
 }
 
@@ -120,7 +120,7 @@ func (p *Proxy) learnParamBlock(provider, model, param string, generations ...ui
 		provider,
 		model,
 		param,
-		runtimeGenerationArg(generations),
+		runtimestate.GenerationArg(generations),
 	)
 }
 
@@ -141,7 +141,7 @@ func (p *Proxy) applyParamBlock(provider, model string, body []byte) []byte {
 // not count toward the circuit. It then triggers an async quota refresh of the
 // provider so its snapshot is fresh when the rate-limit clears.
 func (p *Proxy) recordRateLimit(name string, until time.Time, kind runtimestate.RateLimitKind, generations ...uint64) {
-	generation := runtimeGenerationArg(generations)
+	generation := runtimestate.GenerationArg(generations)
 	if !p.runtimeState.RecordRateLimit(name, until, kind, generation) {
 		return
 	}
