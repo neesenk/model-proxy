@@ -18,9 +18,14 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat config.go: %v", err)
 		}
-		facade, _ := parseGoFile(t, "config_compat.go")
+		if _, err := os.Stat("config_compat.go"); err == nil {
+			t.Error("legacy root config_compat.go must not exist; production code uses internal/config directly")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat config_compat.go: %v", err)
+		}
+		facade, _ := parseGoFile(t, "config_alias_test.go")
 		if got := configCompatViolations(facade); len(got) != 0 {
-			t.Errorf("config_compat.go must contain only internal/config type aliases and direct Load wrappers: %v", got)
+			t.Errorf("config_alias_test.go must contain only internal/config type aliases and direct Load wrappers: %v", got)
 		}
 	})
 

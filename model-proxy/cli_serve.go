@@ -6,6 +6,7 @@ import (
 	"log"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/provider"
 	"net"
 	"net/http"
@@ -70,7 +71,7 @@ func (assembly serveAssembly) runProxy(sa cliserve.Args) {
 // runProxyProcess owns one foreground/worker process lifetime. It returns errors
 // to runProxy so deferred signal and pid-file cleanup runs before log.Fatal.
 func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
-	cfg, err := LoadConfig(sa.Config)
+	cfg, err := configdomain.LoadConfig(sa.Config)
 	if err != nil {
 		return err
 	}

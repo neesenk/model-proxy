@@ -2,6 +2,8 @@ package main
 
 import configdomain "model-proxy/internal/config"
 
+// Test-only aliases so root CLI/integration tests keep the short names; the
+// canonical config types live in internal/config.
 type Config = configdomain.Config
 type FusionConfig = configdomain.FusionConfig
 type ShadowTarget = configdomain.ShadowTarget

@@ -4,6 +4,7 @@ import (
 	"io"
 	appdomain "model-proxy/internal/app"
 	cliserve "model-proxy/internal/cli/serve"
+	configdomain "model-proxy/internal/config"
 )
 
 // serveAssembly owns the process-level serve/daemon routing and foreground
@@ -14,7 +15,7 @@ type serveAssembly struct{}
 // applicationRuntime aliases the app-owned runtime.
 type applicationRuntime = appdomain.Runtime
 
-func newApplicationRuntime(cfg *Config, args cliserve.Args) *applicationRuntime {
+func newApplicationRuntime(cfg *configdomain.Config, args cliserve.Args) *applicationRuntime {
 	return appdomain.NewRuntime(cfg, args)
 }
 
