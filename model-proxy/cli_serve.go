@@ -28,7 +28,7 @@ func (assembly serveAssembly) command(args []string) {
 	role := os.Getenv(envRole)
 	if role == roleSupervisor {
 		sa := cliserve.ParseArgs(args)
-		runSupervisor(sa)
+		cliserve.RunSupervisor(daemonEnv(), sa)
 		return
 	}
 	if role == roleWorker {
@@ -42,7 +42,7 @@ func (assembly serveAssembly) command(args []string) {
 	switch sub {
 	case "daemon":
 		sa := cliserve.ParseArgs(args)
-		if err := daemonize(sa); err != nil {
+		if err := cliserve.Daemonize(daemonEnv(), sa); err != nil {
 			log.Fatal(err)
 		}
 	case "stop":
