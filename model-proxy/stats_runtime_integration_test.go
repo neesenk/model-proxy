@@ -150,7 +150,7 @@ func TestInitStatsRestoresAllRuntimeFieldsWithoutDuplicateFlush(t *testing.T) {
 		t.Errorf("restored tokens = %+v, want %+v", got, wantTokens)
 	}
 
-	if proxy.flusher.flush(time.Unix(180, 0)) {
+	if proxy.flusher.Flush(time.Unix(180, 0)) {
 		t.Fatal("unchanged restored counters were written again on the first flush")
 	}
 	cumulative, err := proxy.stats.LoadCumulative()
@@ -175,7 +175,7 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	flusher := newStatsFlusher(sink, metrics, tokens, agents, nil)
+	flusher := observestats.NewFlusher(sink, metrics, tokens, agents, nil)
 	proxy := &Proxy{
 		metrics: metrics, tokens: tokens, agents: agents,
 		stats: store, flusher: flusher,
@@ -184,7 +184,7 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 
 	flushDone := make(chan struct{})
 	go func() {
-		flusher.flush(time.Unix(120, 0))
+		flusher.Flush(time.Unix(120, 0))
 		close(flushDone)
 	}()
 	<-sink.entered // Flush holds flusher.mu before entering the Store port.
@@ -231,7 +231,7 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 	}
 
 	addRuntimeStats(metrics, tokens, agents, 1, 5)
-	if !flusher.flush(time.Unix(180, 0)) {
+	if !flusher.Flush(time.Unix(180, 0)) {
 		t.Fatal("first post-reset delta was not persisted")
 	}
 	rows, _ = store.QueryRange(0, 300, "", "", 60)
@@ -271,7 +271,7 @@ func TestStatsFlusherRetriesPipelinesIndependently(t *testing.T) {
 	sink := &failAgentOnceSink{Store: store, failAgent: true}
 	metrics := obscounters.NewMetricsStore()
 	agents := obscounters.NewAgentCounter()
-	flusher := newStatsFlusher(sink, metrics, obscounters.NewTokenCounter(), agents, nil)
+	flusher := observestats.NewFlusher(sink, metrics, obscounters.NewTokenCounter(), agents, nil)
 
 	for range 2 {
 		metrics.Inc("provider", "model", obscounters.EvRequests)
@@ -279,7 +279,7 @@ func TestStatsFlusherRetriesPipelinesIndependently(t *testing.T) {
 	for range 3 {
 		agents.IncRequests("codex", "provider", "model")
 	}
-	if !flusher.flush(time.Unix(120, 0)) {
+	if !flusher.Flush(time.Unix(120, 0)) {
 		t.Fatal("primary success should report a durable write")
 	}
 	cumulative, _ := store.LoadCumulative()
@@ -292,7 +292,7 @@ func TestStatsFlusherRetriesPipelinesIndependently(t *testing.T) {
 
 	metrics.Inc("provider", "model", obscounters.EvRequests)
 	agents.IncRequests("codex", "provider", "model")
-	if !flusher.flush(time.Unix(180, 0)) {
+	if !flusher.Flush(time.Unix(180, 0)) {
 		t.Fatal("recovery flush did not persist deltas")
 	}
 	cumulative, _ = store.LoadCumulative()
@@ -326,10 +326,10 @@ func TestStatsFlusherPrunesDuringIdleMinute(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	flusher := newStatsFlusher(
+	flusher := observestats.NewFlusher(
 		store, obscounters.NewMetricsStore(), obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil,
 	)
-	if flusher.flush(now) {
+	if flusher.Flush(now) {
 		t.Fatal("idle prune reported a counter write")
 	}
 	rows, _ := store.QueryRange(0, now.Unix()+60, "", "", 60)
@@ -345,7 +345,7 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	flusher := newStatsFlusher(store, metrics, tokens, agents, nil)
+	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil)
 	proxy := &Proxy{
 		lifecycle: newProxyLifecycle(),
 		metrics:   metrics,
@@ -357,7 +357,7 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 	t.Cleanup(proxy.Close)
 
 	addRuntimeStats(metrics, tokens, agents, 1, 10)
-	if !flusher.flush(time.Unix(120, 0)) {
+	if !flusher.Flush(time.Unix(120, 0)) {
 		t.Fatal("pre-close baseline flush did not write")
 	}
 	addRuntimeStats(metrics, tokens, agents, 2, 20)
@@ -401,20 +401,20 @@ func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	sink := &failOnceStatsSink{Store: store, failNext: true}
+	sink := &observestats.FailOnceSink{Store: store, FailNext: true}
 	proxy := &Proxy{
 		lifecycle: newProxyLifecycle(),
 		metrics:   metrics,
 		tokens:    tokens,
 		agents:    agents,
 		stats:     store,
-		flusher:   newStatsFlusher(sink, metrics, tokens, agents, nil),
+		flusher:   observestats.NewFlusher(sink, metrics, tokens, agents, nil),
 	}
 	t.Cleanup(proxy.Close)
 	addRuntimeStats(metrics, tokens, agents, 2, 20)
 
 	proxy.Close()
-	if sink.failNext {
+	if sink.FailNext {
 		t.Fatal("shutdown did not exercise the injected final-flush failure")
 	}
 
@@ -459,12 +459,12 @@ func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
 	sink := &blockingShutdownStatsSink{
 		Store: store, entered: make(chan struct{}),
 	}
-	flusher := newStatsFlusher(sink, metrics, tokens, agents, nil)
+	flusher := observestats.NewFlusher(sink, metrics, tokens, agents, nil)
 	addRuntimeStats(metrics, tokens, agents, 1, 5)
 
 	const timeout = 75 * time.Millisecond
 	start := time.Now()
-	flusher.flushForShutdown(timeout)
+	flusher.FlushForShutdown(timeout)
 	elapsed := time.Since(start)
 	select {
 	case <-sink.entered:
@@ -474,7 +474,7 @@ func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
 	if elapsed < timeout/2 || elapsed > 500*time.Millisecond {
 		t.Errorf("shutdown flush elapsed = %v, want a bounded wait near %v", elapsed, timeout)
 	}
-	providerPending, agentPending := flusher.pendingCounts()
+	providerPending, agentPending := flusher.PendingCounts()
 	if providerPending != 1 || agentPending != 1 {
 		t.Errorf("pending after deadline = provider:%d agent:%d, want 1/1",
 			providerPending, agentPending)
@@ -487,13 +487,13 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
 	cache := newResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
-	flusher := newStatsFlusher(store, metrics, tokens, agents, nil)
+	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil)
 	proxy := &Proxy{
 		metrics: metrics, tokens: tokens, agents: agents,
 		stats: store, flusher: flusher, cache: cache,
 	}
 	addRuntimeStats(metrics, tokens, agents, 2, 20)
-	if !flusher.flush(time.Unix(120, 0)) {
+	if !flusher.Flush(time.Unix(120, 0)) {
 		t.Fatal("reset precondition flush did not write")
 	}
 	cache.Put("key", http.StatusOK, http.Header{"X-Test": {"value"}}, []byte("body"), time.Now())
@@ -537,7 +537,7 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
 	cache := newResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
-	flusher := newStatsFlusher(
+	flusher := observestats.NewFlusher(
 		&resetErrorSink{Store: store}, metrics, tokens, agents, nil,
 	)
 	proxy := &Proxy{

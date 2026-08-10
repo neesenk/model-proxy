@@ -357,10 +357,10 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		}
 	})
 
-	t.Run("internal observe stats owns SQLite persistence", func(t *testing.T) {
-		assertRepositoryLeafPackage(t, "internal/observe/stats")
+	t.Run("internal observe stats owns SQLite persistence and the runtime projection", func(t *testing.T) {
+		assertInternalPackageImportPolicy(t, "internal/observe/stats")
 		if _, err := os.Stat("stats.go"); err == nil {
-			t.Error("legacy root stats.go must not exist; persistence belongs in internal/observe/stats and runtime projection in stats_runtime.go")
+			t.Error("legacy root stats.go must not exist; persistence and the minute-diff projection belong in internal/observe/stats")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat stats.go: %v", err)
 		}
@@ -373,12 +373,21 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		} else if name, ok := configSelectorName(pointer.X, "observestats"); !ok || name != "Store" {
 			t.Error("Proxy.stats must be *observestats.Store")
 		}
+		flusherType := namedStructFields(t, proxy, "Proxy")["flusher"]
+		pointer, ok = flusherType.(*ast.StarExpr)
+		if !ok {
+			t.Errorf("Proxy.flusher type = %T, want *observestats.Flusher", flusherType)
+		} else if name, ok := configSelectorName(pointer.X, "observestats"); !ok || name != "Flusher" {
+			t.Error("Proxy.flusher must be *observestats.Flusher")
+		}
 
-		runtime, _ := parseGoFile(t, "stats_runtime.go")
-		reset := namedMethod(t, runtime, "statsFlusher", "reset")
+		// The projection loop owns the Flusher lifecycle: reset accepts no
+		// Proxy (cache reset and composition stay at Proxy.resetStats).
+		flusher, _ := parseGoFile(t, "internal/observe/stats/flusher.go")
+		reset := namedMethod(t, flusher, "Flusher", "Reset")
 		for _, field := range reset.Type.Params.List {
 			if typeContainsIdent(field.Type, "Proxy") {
-				t.Error("statsFlusher.reset must not accept *Proxy; cache reset and composition stay at Proxy.resetStats")
+				t.Error("Flusher.Reset must not accept *Proxy; cache reset and composition stay at Proxy.resetStats")
 			}
 		}
 	})

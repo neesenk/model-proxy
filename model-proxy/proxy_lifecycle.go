@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	observestats "model-proxy/internal/observe/stats"
 	"sync"
 )
 
@@ -124,7 +125,7 @@ func (p *Proxy) closeRuntimeServices() {
 	p.lifecycle.wait()
 
 	if p.flusher != nil {
-		p.flusher.flushForShutdown(statsShutdownFlushTimeout)
+		p.flusher.FlushForShutdown(observestats.StatsShutdownFlushTimeout)
 	}
 	if p.stats != nil {
 		if err := p.stats.Close(); err != nil {

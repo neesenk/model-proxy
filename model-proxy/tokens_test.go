@@ -121,12 +121,12 @@ func TestTokenCounterPersist(t *testing.T) {
 	defer ss.Close()
 	m := obscounters.NewMetricsStore()
 	tc := obscounters.NewTokenCounter()
-	f := newStatsFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{})
+	f := observestats.NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{})
 
 	tc.Commit(obscounters.TokenKey{Provider: "z", Model: "m"}, obscounters.TokenUsage{Input: 10, Output: 20, Requests: 1})
 	m.Inc("z", "m", obscounters.EvRequests)
 	m.Inc("z", "m", obscounters.EvFailovers)
-	if !f.flush(time.Now()) {
+	if !f.Flush(time.Now()) {
 		t.Fatal("flush reported no deltas despite pending commits")
 	}
 

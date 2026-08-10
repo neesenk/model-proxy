@@ -151,7 +151,7 @@ func (p *Proxy) resetStats() error {
 	// concurrent per-minute flush from writing stale deltas to the just-cleared
 	// DB (the resetStats vs flush race).
 	if p.flusher != nil {
-		if err := p.flusher.reset(); err != nil {
+		if err := p.flusher.Reset(); err != nil {
 			return fmt.Errorf("reset persisted stats: %w", err)
 		}
 	} else {

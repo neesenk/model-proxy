@@ -33,7 +33,7 @@ type Proxy struct {
 	tokens           *obscounters.TokenCounter      // SSE-scanned token usage; nil only in degenerate tests
 	agents           *obscounters.AgentCounter      // per-agent (UA) request/token counters; nil only in degenerate tests
 	stats            *observestats.Store            // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
-	flusher          *statsFlusher                  // per-minute diff loop; nil in tests (runProxy starts it)
+	flusher          *observestats.Flusher          // per-minute diff loop; nil in tests (runProxy starts it)
 	reqLog           *requestlog.Logger             // per-request access log (full bodies); nil = disabled (default) or init failure
 	reqLogStarted    bool                           // lifecycle owns loop/shutdown only when started by startRuntimeServices
 	cache            *responsecache.Store           // exact-match response cache (prompt-hash + TTL); nil = disabled
