@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log"
+	clicmd "model-proxy/internal/cli"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
@@ -26,13 +27,13 @@ func cmdServe(args []string) {
 func (assembly serveAssembly) command(args []string) {
 	// Worker/supervisor processes have envRole set — they always run their loop
 	// regardless of subcommand (the subcommand was consumed by the parent).
-	role := os.Getenv(envRole)
-	if role == roleSupervisor {
+	role := os.Getenv(cliserve.EnvRole)
+	if role == cliserve.RoleSupervisor {
 		sa := cliserve.ParseArgs(args)
 		cliserve.RunSupervisor(daemonEnv(), sa)
 		return
 	}
-	if role == roleWorker {
+	if role == cliserve.RoleWorker {
 		sa := cliserve.ParseArgs(args)
 		assembly.runProxy(sa)
 		return
@@ -47,11 +48,11 @@ func (assembly serveAssembly) command(args []string) {
 			log.Fatal(err)
 		}
 	case "stop":
-		cmdStop(args)
+		cliserve.CmdStop(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
 	case "reload":
-		cmdReload(args)
+		cliserve.CmdReload(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
 	case "status":
-		cmdServeStatusCLI(args)
+		clicmd.RunServeStatus(args)
 	default:
 		// No subcommand — foreground serve.
 		sa := cliserve.ParseArgs(args)
@@ -79,7 +80,7 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 	// In true foreground mode (no role env), mirror logs to the configured file.
 	// The worker's stdio is already the log file (set by the supervisor), so it
 	// must NOT reopen/mirror — that would double every line.
-	if os.Getenv(envRole) == "" {
+	if os.Getenv(cliserve.EnvRole) == "" {
 		if lf := cliserve.ResolveLogFile(sa, cfg); lf != "" {
 			if f, err := cliserve.OpenLogFile(lf); err == nil {
 				log.SetOutput(io.MultiWriter(os.Stderr, f))

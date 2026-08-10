@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
+	cliserve "model-proxy/internal/cli/serve"
+	"model-proxy/provider"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,9 +62,9 @@ func TestHelperProcess(t *testing.T) {
 	case "logout":
 		cmdLogout(args)
 	case "stop":
-		cmdStop(args)
+		cliserve.CmdStop(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
 	case "reload":
-		cmdReload(args)
+		cliserve.CmdReload(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
 	case "login":
 		cmdLogin(args)
 	case "serve":
