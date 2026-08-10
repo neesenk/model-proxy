@@ -4,6 +4,7 @@
 package framework
 
 import (
+	"model-proxy/internal/accounts"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -149,12 +150,11 @@ func EnvOrEmpty(k string) string { return os.Getenv(k) }
 // HomeDir resolves the user home directory (credential files live under
 // ~/.model-proxy).
 func HomeDir() string {
-	h, _ := os.UserHomeDir()
-	return h
+	return accounts.HomeDir()
 }
 
 // AuthFilePath returns the credential file path for a provider name
 // (<home>/.model-proxy/<name>_<suffix>.json).
 func AuthFilePath(providerName, suffix string) string {
-	return filepath.Join(HomeDir(), ".model-proxy", providerName+"_"+suffix+".json")
+	return accounts.AuthFilePath(providerName, suffix)
 }
