@@ -1,8 +1,7 @@
-package main
+package login
 
 import (
 	"fmt"
-	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -63,7 +62,7 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 
 	storePath := t.TempDir() + "/google_oauth_auth.json"
 	jar, _ := cookiejar.New(nil)
-	c := &clilogin.AqpClient{
+	c := &AqpClient{
 		HTTP:      &http.Client{Jar: jar},
 		Jar:       jar,
 		StorePath: storePath,
@@ -147,7 +146,7 @@ func TestBootstrap_MissingLoginURL(t *testing.T) {
 	}))
 	defer aqp.Close()
 	jar, _ := cookiejar.New(nil)
-	c := &clilogin.AqpClient{HTTP: &http.Client{Jar: jar}, Jar: jar, StorePath: t.TempDir() + "/g.json"}
+	c := &AqpClient{HTTP: &http.Client{Jar: jar}, Jar: jar, StorePath: t.TempDir() + "/g.json"}
 	_, err := c.BootstrapAt(aqp.URL + "/compass-api/v1/auth/login")
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "missing login url") {
 		t.Errorf("err=%v", err)
@@ -164,8 +163,8 @@ func TestExtractLoginURL_Coverage(t *testing.T) {
 		{`not json`, ""},
 	}
 	for _, tc := range cases {
-		if got := clilogin.ExtractLoginURL(tc.body); got != tc.want {
-			t.Errorf("clilogin.ExtractLoginURL(%q)=%q want %q", tc.body, got, tc.want)
+		if got := ExtractLoginURL(tc.body); got != tc.want {
+			t.Errorf("ExtractLoginURL(%q)=%q want %q", tc.body, got, tc.want)
 		}
 	}
 }

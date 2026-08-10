@@ -1,10 +1,9 @@
-package main
+package login
 
 import (
 	"context"
 	"errors"
 	"io"
-	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -53,7 +52,7 @@ func waitLoginResult(t *testing.T, result <-chan error) error {
 func TestAqpPollAtContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	client := &clilogin.AqpClient{HTTP: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	client := &AqpClient{HTTP: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		entered <- struct{}{}
 		<-req.Context().Done()
 		return nil, req.Context().Err()
@@ -76,7 +75,7 @@ func TestAqpPollAtContext_CancelsRetryWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	bodyClosed := make(chan struct{}, 1)
 	var calls atomic.Int32
-	client := &clilogin.AqpClient{HTTP: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+	client := &AqpClient{HTTP: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return pendingLoginResponse(req, &closeNotifyBody{
 			Reader: strings.NewReader(`{"retcode":1,"message":"pending"}`),
@@ -103,7 +102,7 @@ func TestAqpPollAtContext_CancelsRetryWait(t *testing.T) {
 func TestPollForTokenContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	opts := &clilogin.CodexLoginServerOptions{
+	opts := &CodexLoginServerOptions{
 		DeviceTokURL: "https://auth.invalid/device-token",
 		HTTPClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			entered <- struct{}{}
@@ -114,7 +113,7 @@ func TestPollForTokenContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := clilogin.PollForTokenContext(ctx, opts, "device-auth-id", "user-code", 60)
+		_, err := PollForTokenContext(ctx, opts, "device-auth-id", "user-code", 60)
 		result <- err
 	}()
 	<-entered
@@ -129,7 +128,7 @@ func TestPollForTokenContext_CancelsRetryWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	bodyClosed := make(chan struct{}, 1)
 	var calls atomic.Int32
-	opts := &clilogin.CodexLoginServerOptions{
+	opts := &CodexLoginServerOptions{
 		DeviceTokURL: "https://auth.invalid/device-token",
 		HTTPClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			calls.Add(1)
@@ -142,7 +141,7 @@ func TestPollForTokenContext_CancelsRetryWait(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := clilogin.PollForTokenContext(ctx, opts, "device-auth-id", "user-code", 60)
+		_, err := PollForTokenContext(ctx, opts, "device-auth-id", "user-code", 60)
 		result <- err
 	}()
 	<-bodyClosed
@@ -165,7 +164,7 @@ func TestAqpFetchAPIKeyAtContext_CancelsInFlightRequest(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	client := clilogin.NewAqpClient(storePath)
+	client := NewAqpClient(storePath)
 	client.HTTP = &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		entered <- struct{}{}
 		<-req.Context().Done()
@@ -188,7 +187,7 @@ func TestAqpFetchAPIKeyAtContext_CancelsInFlightRequest(t *testing.T) {
 func TestExchangeCodeForTokensContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	opts := &clilogin.CodexLoginServerOptions{
+	opts := &CodexLoginServerOptions{
 		TokenURL: "https://auth.invalid/oauth/token",
 		HTTPClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			entered <- struct{}{}
@@ -199,7 +198,7 @@ func TestExchangeCodeForTokensContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := clilogin.ExchangeCodeForTokensContext(ctx, opts, provider.CodexOAuthClientID, "authorization-code", "verifier")
+		_, err := ExchangeCodeForTokensContext(ctx, opts, provider.CodexOAuthClientID, "authorization-code", "verifier")
 		result <- err
 	}()
 	<-entered
@@ -213,7 +212,7 @@ func TestExchangeCodeForTokensContext_CancelsInFlightRequest(t *testing.T) {
 func TestAqpBootstrapAtContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	client := clilogin.NewAqpClient(t.TempDir() + "/aqp_oauth_auth.json")
+	client := NewAqpClient(t.TempDir() + "/aqp_oauth_auth.json")
 	client.HTTP = &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		entered <- struct{}{}
 		<-req.Context().Done()
@@ -236,7 +235,7 @@ func TestAqpBootstrapAtContext_CancelsInFlightRequest(t *testing.T) {
 func TestRequestUserCodeContext_CancelsInFlightRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	entered := make(chan struct{}, 1)
-	opts := &clilogin.CodexLoginServerOptions{
+	opts := &CodexLoginServerOptions{
 		UsercodeURL: "https://auth.invalid/device-code",
 		HTTPClient: &http.Client{Transport: loginRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			entered <- struct{}{}
@@ -247,7 +246,7 @@ func TestRequestUserCodeContext_CancelsInFlightRequest(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := clilogin.RequestUserCodeContext(ctx, opts, provider.CodexOAuthClientID)
+		_, err := RequestUserCodeContext(ctx, opts, provider.CodexOAuthClientID)
 		result <- err
 	}()
 	<-entered

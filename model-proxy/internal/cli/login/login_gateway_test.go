@@ -1,7 +1,6 @@
-package main
+package login
 
 import (
-	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/url"
 	"testing"
@@ -11,13 +10,13 @@ import (
 
 func TestPublicCookies(t *testing.T) {
 	// nil jar -> nil.
-	c := clilogin.NewAqpClient("/tmp/nope.json")
+	c := NewAqpClient("/tmp/nope.json")
 	if got := c.PublicCookies(); got != nil {
 		t.Errorf("PublicCookies(nil jar)=%v want nil", got)
 	}
 	// With a cookie set on the jar for c.base.
 	u, _ := url.Parse(provider.AqpBase)
-	c2 := clilogin.NewAqpClient("/tmp/nope.json")
+	c2 := NewAqpClient("/tmp/nope.json")
 	c2.Jar.SetCookies(u, []*http.Cookie{{Name: provider.SsoCookieName, Value: "v"}})
 	got := c2.PublicCookies()
 	if len(got) != 1 || got[0].Name != provider.SsoCookieName {

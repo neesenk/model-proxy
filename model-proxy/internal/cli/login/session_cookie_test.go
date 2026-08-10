@@ -1,7 +1,6 @@
-package main
+package login
 
 import (
-	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/url"
 	"testing"
@@ -14,14 +13,14 @@ import (
 // --- SessionCookie: returns "SSO_C=val" when the jar has one, "" otherwise ---
 
 func TestSessionCookie_Empty(t *testing.T) {
-	c := clilogin.NewAqpClient("/tmp/nope.json")
+	c := NewAqpClient("/tmp/nope.json")
 	if got := c.SessionCookie(); got != "" {
 		t.Errorf("SessionCookie with empty jar=%q want empty", got)
 	}
 }
 
 func TestSessionCookie_WithCookie(t *testing.T) {
-	c := clilogin.NewAqpClient("/tmp/nope.json")
+	c := NewAqpClient("/tmp/nope.json")
 	u, _ := url.Parse(provider.AqpBase)
 	c.Jar.SetCookies(u, []*http.Cookie{{Name: provider.SsoCookieName, Value: "val123"}})
 	got := c.SessionCookie()
