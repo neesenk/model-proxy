@@ -1,8 +1,9 @@
-package main
+package models_test
 
 import (
 	"io"
 	climodels "model-proxy/internal/cli/models"
+	configdomain "model-proxy/internal/config"
 	"os"
 	"strings"
 	"testing"
@@ -37,8 +38,8 @@ func grabStdout(t *testing.T, fn func()) string {
 // --- printAllModels: lists providers + models, respects filter ---
 
 func TestPrintAllModels_AllProviders(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"zhipu": {Provider: "zhipu", Models: []string{"glm-5.2", "glm-4.5"}},
 		},
 	}
@@ -49,10 +50,10 @@ func TestPrintAllModels_AllProviders(t *testing.T) {
 }
 
 func TestPrintAllModels_Filter(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"a": {Provider: testProviderID, Models: []string{"m1"}},
-			"b": {Provider: testProviderID, Models: []string{"m2"}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"a": {Provider: "static", Models: []string{"m1"}},
+			"b": {Provider: "static", Models: []string{"m2"}},
 		},
 	}
 	out := grabStdout(t, func() { climodels.PrintAllModels(cfg, "a", nil, nil) })
@@ -65,9 +66,9 @@ func TestPrintAllModels_Filter(t *testing.T) {
 }
 
 func TestPrintAllModels_EmptyContext(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"a": {Provider: testProviderID, Models: []string{"m1"}}, // no meta → ctx/out shown as —
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"a": {Provider: "static", Models: []string{"m1"}}, // no meta → ctx/out shown as —
 		},
 	}
 	out := grabStdout(t, func() { climodels.PrintAllModels(cfg, "", nil, nil) })
