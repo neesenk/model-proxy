@@ -40,7 +40,7 @@ func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
 			CalledModel:      "client-model",
 			Agent:            "test-agent",
 			CacheKey:         "cache-key",
-			Log:              targetLogContext(forwardLogCtx{requestID: "req-1", exposed: "public-model"}),
+			Log:              targetexec.LogContext{RequestID: "req-1", Exposed: "public-model"},
 			ResponsesHistory: []any{"history"},
 			ResponsesSession: "session-1",
 		},

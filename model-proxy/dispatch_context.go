@@ -81,15 +81,6 @@ type forwardLogCtx struct {
 	origBody  []byte
 }
 
-func targetLogContext(context forwardLogCtx) targetexec.LogContext {
-	return targetexec.LogContext{
-		RequestID:    context.requestID,
-		Attempt:      context.attempt,
-		Exposed:      context.exposed,
-		OriginalBody: context.origBody,
-	}
-}
-
 // newTargetAttempt is the single assembly point shared by normal routing and
 // Fusion synthesis. Request rewriting, state expansion, and protocol conversion
 // deliberately remain outside this factory because those operations have
