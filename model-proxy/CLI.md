@@ -14,31 +14,30 @@
 `package main` 的 `application.Run`，并把其返回值交给 OS 进程退出。`application`
 是实际进程 composition owner，拥有命令表和 `serveAssembly`；其 `Run` 是可测试的
 顶层入口：它直接处理无参数、顶层/子命令 help、未知命令及其 exit code，并通过统一
-表分发已知命令。`runCLIArgs` 只是创建 application 并委派的兼容入口。现阶段已知命令
+表分发已知命令（唯一 CLI 分发入口）。现阶段已知命令
 由兼容 adapter 调用既有 handler；这些 handler 的进程 I/O、`log.Fatal` / `os.Exit`
 语义仍保持不变，不代表所有命令都已经改成注入流或返回 exit code。
 
 `serveAssembly` 拥有 `serve` 命令及前台/worker signal、HTTP server 生命周期；
 其 `applicationRuntime` 在配置和进程日志准备后构造 `Proxy`、调用
 `startRuntimeServices`、装配 mux/Web、投影 reload、交出 transport task，并以
-`Close` 结束 Proxy 生命周期。可复用 HTTP drain primitive 留在 `daemon.go`；
-daemon/supervisor 的 signal 与 pid/probe 编排位于 `cli_daemon.go`。child process
-detach 属性的平台差异位于 `cli_daemon_unix.go` / `cli_daemon_windows.go`。
+`Close` 结束 Proxy 生命周期。可复用 HTTP drain primitive 留在
+`internal/cli/serve/shutdown.go`；daemon/supervisor 的 signal 与 pid/probe 编排位于
+`internal/cli/serve/supervisor.go`。child process
+detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `detach_windows.go`。
 
-这是内部装配边界的收敛，不改变命令、输出或退出码。它不是新的 `internal/app`：Go
-的 main package 不能被 import，把根函数包进 callback bag 不会形成真实依赖边界；
-只有 Proxy/handlers 移入可 import 包后，才评估严格的 `internal/app`。
+这是内部装配边界的收敛，不改变命令、输出或退出码。
 
 ### 退出码
 
 | 码 | 含义 | 触发点 |
 |---|---|---|
 | `0` | 成功 | 命令正常返回；`serve` worker 收到 SIGINT/SIGTERM 后完成 transport drain 和 final flush（`runProxyProcess`） |
-| `1` | 运行时错误 | 顶层无参数/未知命令由 `runCLIArgs` 返回 1；既有 handler 继续通过 `log.Fatal(...)` 或显式 `os.Exit(1)` 处理 config 无效、daemon 不可达、响应解析失败、未知子命令/参数 |
+| `1` | 运行时错误 | 顶层无参数/未知命令由 `Application.Run` 返回 1；既有 handler 继续通过 `log.Fatal(...)` 或显式 `os.Exit(1)` 处理 config 无效、daemon 不可达、响应解析失败、未知子命令/参数 |
 
 真实 CLI 路径**不使用** exit 2。
 
-`runCLIArgs` 自己处理的顶层分支只返回 exit code、不终止进程；已知命令 handler
+`Application.Run` 自己处理的顶层分支只返回 exit code、不终止进程；已知命令 handler
 仍可能按既有契约终止进程。`log.Printf` 写入 stderr；故 stderr 是
 诊断/进度/告警/错误的统一流。
 
@@ -520,7 +519,7 @@ schedule   # 查询运行中 daemon 的 GET /debug/schedule
 stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--granularity day|month] [--cost] [--json]
 ```
 
-逻辑（`cmd_stats.go` 的 `cmdStats` -> `renderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
+逻辑（`internal/cli/stats.go` 的 `CmdStats` -> `RenderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
 
 > `--granularity day|month` 或 `--cost` 任一存在时，改走 `/api/analytics`（按自然日/月聚合，存储恒为 1 分钟），表格头与列由 `formatAnalyticsTable` 渲染（见下）。两者都省略时输出与原 `stats` 完全一致。
 
@@ -817,10 +816,10 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 
 改契约时，除更新本文档外，还需同步这些测试断言（`strings.Contains` 精确文案）：
 
-- `cli_extra2_test.go`：`models refresh` 的 `config: added/removed ...`、fallback 通知、`models` 歧义告警、`models pull`、takeover/restore。
-- `cli_test.go`：`models refresh` 未知/无参数 provider、`config` 子命令。
-- `models_check_test.go`：`printKeptModels` / `printFilterSummary` 输出。
-- `serve_status.go` / `cmd_stats.go` 的 `render*` 函数均有 httptest 单测锁文案。
+- `internal/cli/models_cli_test.go`：`models refresh` 的 `config: added/removed ...`、fallback 通知、`models` 歧义告警、`models pull`；`internal/cli/cli_takeover_test.go`：takeover/restore。
+- `internal/cli/models_cli_test.go`：`models refresh` 未知/无参数 provider；`internal/cli/cli_subcommands_test.go`：`config` 子命令。
+- `internal/cli/models/models_check_test.go`：`PrintKeptModels` / `PrintFilterSummary` 输出。
+- `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
 - `provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

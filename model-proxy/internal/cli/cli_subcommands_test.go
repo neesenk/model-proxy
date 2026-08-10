@@ -1,161 +1,16 @@
-package main
+package cli
 
 import (
-	"bytes"
-	"fmt"
-	"model-proxy/internal/app"
-	cliframework "model-proxy/internal/cli/framework"
-	cliserve "model-proxy/internal/cli/serve"
-	"model-proxy/provider"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
+
+	"model-proxy/internal/app"
+	cliframework "model-proxy/internal/cli/framework"
 )
-
-// cli_test.go covers CLI subcommands that call os.Exit / log.Fatal — they
-// cannot be tested in-process (they'd kill the test binary). Instead we run
-// the test binary as a subprocess via the TestHelperProcess trick: a hidden
-// test entrypoint re-dispatches into the real CLI handler, and the parent
-// test asserts on stdout/stderr/exit-code.
-//
-// Usage data (showXxxUsage) needs real upstreams + credential files, so it's
-// not covered here end-to-end; the showXxxUsage parsers are covered by the
-// quota_test.go parse tests instead.
-
-// -- subprocess dispatcher --------------------------------------------------
-
-// TestHelperProcess is the subprocess entrypoint. It is selected by
-// -test.run=TestHelperProcess and reads MP_SUBCMD env vars to decide which
-// CLI handler to invoke with the args passed after "--".
-func TestHelperProcess(t *testing.T) {
-	if os.Getenv("MP_CLI_HELPER") != "1" {
-		t.Skip("not a helper subprocess")
-	}
-	// Args after "--" are the user's CLI args.
-	args := os.Args[len(os.Args)-1:]
-	// When go test passes its own flags, the real args land in MP_CLI_ARGS.
-	if a := os.Getenv("MP_CLI_ARGS"); a != "" {
-		args = strings.Fields(a)
-	}
-	cmd := os.Getenv("MP_SUBCMD")
-	switch cmd {
-	case "models":
-		cmdModels(args)
-	case "doctor":
-		cmdDoctor(args)
-	case "test":
-		cmdTest(args)
-	case "schedule":
-		cmdSchedule(args)
-	case "config":
-		cmdConfig(args)
-	case "usage":
-		cmdUsage(args)
-	case "takeover":
-		cmdTakeover(args)
-	case "restore":
-		cmdRestore(args)
-	case "logout":
-		cmdLogout(args)
-	case "stop":
-		cliserve.CmdStop(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
-	case "reload":
-		cliserve.CmdReload(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
-	case "login":
-		cmdLogin(args)
-	case "serve":
-		cmdServe(args)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown MP_SUBCMD %q\n", cmd)
-		os.Exit(2)
-	}
-	// Handlers that reach here without exiting return 0.
-	os.Exit(0)
-}
-
-// runCLI runs the given CLI subcommand in a subprocess with --config pointing
-// at cfgPath, returning stdout, stderr, and the exit code. extraArgs are the
-// args after the subcommand (e.g. a provider name, or "check" for `config`).
-//
-// HOME is pinned to a fresh temp dir so the subprocess never touches the real
-// ~/.model-proxy (credential/config lookups land in isolation). Tests that need
-// to pre-populate the credential dir should use runCLIWithHome.
-func runCLI(t *testing.T, subcmd, cfgPath string, extraArgs ...string) (stdout, stderr string, exitCode int) {
-	return runCLIWithHome(t, "", subcmd, cfgPath, extraArgs...)
-}
-
-// runCLIWithHome is like runCLI but pins HOME to `home` instead of a fresh temp
-// dir, so a test can pre-create credential files under <home>/.model-proxy/ and
-// assert on them (e.g. logout removing the apikey file). If home is "" a fresh
-// temp dir is used (same isolation as runCLI).
-func runCLIWithHome(t *testing.T, home, subcmd, cfgPath string, extraArgs ...string) (stdout, stderr string, exitCode int) {
-	t.Helper()
-	tb := os.Args[0]
-	// Build the args the handler receives. extraArgs first (positional args like
-	// a provider name or "check"), then --config last. This ordering matters:
-	//   - cmdConfig reads args[0] as its subcommand ("check"), and configPath
-	//     scans args[1:] for --config.
-	//   - cmdModels/cmdUsage use cliframework.Positional()/climodels.NonFlagArgs(), which skip --config
-	//     and its value wherever they appear.
-	cliArgs := append([]string{}, extraArgs...)
-	if cfgPath != "" {
-		cliArgs = append(cliArgs, "--config", cfgPath)
-	}
-
-	cmd := exec.Command(tb, "-test.run=TestHelperProcess", "--", subcmd)
-	cmd.Env = append(os.Environ(),
-		"MP_CLI_HELPER=1",
-		"MP_SUBCMD="+subcmd,
-		"MP_CLI_ARGS="+strings.Join(cliArgs, " "),
-	)
-	if home == "" {
-		home = t.TempDir()
-	}
-	var out, errB bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errB
-	// Pin HOME (isolation from real ~/.model-proxy) and strip color so
-	// assertions don't depend on a tty.
-	cmd.Env = append(cmd.Env, "HOME="+home, "NO_COLOR=1", "TERM=dumb")
-	err := cmd.Run()
-	exitCode = 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		exitCode = ee.ExitCode()
-	} else if err != nil {
-		t.Fatalf("runCLI %s: %v", subcmd, err)
-	}
-	t.Logf("runCLI %s: exit=%d\n--- stdout ---\n%s\n--- stderr ---\n%s", subcmd, exitCode, out.String(), errB.String())
-	return out.String(), errB.String(), exitCode
-}
-
-// writeTempConfig writes a minimal valid config to a temp file and returns its path.
-func writeTempConfig(t *testing.T, body string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := dir + "/config.yaml"
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-const minimalConfig = `listen: 127.0.0.1:15721
-providers:
-  aqp:
-    openai_base_url: https://example.invalid/compass-api/v1
-    anthropic_base_url: https://example.invalid/compass-api
-    provider_id: aqp
-    aqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
-    models:
-      - glm-5.2
-routes:
-  glm-5.2:
-    - {provider: aqp, model: glm-5.2, priority: 1}
-`
 
 // -- C1: `models` lists all exposed models from config ---
 
@@ -281,74 +136,6 @@ func TestCLI_ConfigNoSubcommand(t *testing.T) {
 // use the subprocess pattern via runCLI / runCLIWithStdin. Tests that touch
 // os.Stdin / os.Stdout run sequentially (none call t.Parallel).
 
-// setStdin replaces os.Stdin with a pipe yielding s, restored on cleanup.
-func setStdin(t *testing.T, s string) {
-	t.Helper()
-	orig := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = orig })
-	if _, err := w.Write([]byte(s)); err != nil {
-		t.Fatal(err)
-	}
-	w.Close()
-}
-
-// poolConfigTmpl is a minimal config with one zhipu provider; usage_url is
-// filled per-test (typically an httptest.Server). Zhipu's provider-owned Usage
-// implementation uses the BigModel quota format and is the canonical
-// apikey-pool integration fixture.
-const poolConfigTmpl = `listen: 127.0.0.1:1
-providers:
-  zhipu:
-    openai_base_url: https://zhipu.invalid/api/paas/v4
-    provider_id: zhipu
-    usage_url: %s
-routes: {}
-`
-
-func writeZhipuPoolConfig(t *testing.T, usageURL string) string {
-	t.Helper()
-	return writeTempConfig(t, fmt.Sprintf(poolConfigTmpl, usageURL))
-}
-
-// runCLIWithStdin is like runCLIWithHome but pipes `stdin` into the subprocess
-// (needed for the interactive logout prompt, which reads os.Stdin).
-func runCLIWithStdin(t *testing.T, stdin, home, subcmd, cfgPath string, extraArgs ...string) (stdout, stderr string, exitCode int) {
-	t.Helper()
-	tb := os.Args[0]
-	cliArgs := append([]string{}, extraArgs...)
-	if cfgPath != "" {
-		cliArgs = append(cliArgs, "--config", cfgPath)
-	}
-	cmd := exec.Command(tb, "-test.run=TestHelperProcess", "--", subcmd)
-	cmd.Env = append(os.Environ(),
-		"MP_CLI_HELPER=1",
-		"MP_SUBCMD="+subcmd,
-		"MP_CLI_ARGS="+strings.Join(cliArgs, " "),
-	)
-	if home == "" {
-		home = t.TempDir()
-	}
-	cmd.Stdin = strings.NewReader(stdin)
-	var out, errB bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errB
-	cmd.Env = append(cmd.Env, "HOME="+home, "NO_COLOR=1", "TERM=dumb")
-	err := cmd.Run()
-	exitCode = 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		exitCode = ee.ExitCode()
-	} else if err != nil {
-		t.Fatalf("runCLIWithStdin %s: %v", subcmd, err)
-	}
-	t.Logf("runCLIWithStdin %s: exit=%d\n--- stdout ---\n%s\n--- stderr ---\n%s", subcmd, exitCode, out.String(), errB.String())
-	return out.String(), errB.String(), exitCode
-}
-
 // Test: `logout zhipu` interactive removes exactly the selected account.
 // savePool sorts accounts by ID, so we compute which account is at index 0
 // before the test, select it, and assert it's the one removed.
@@ -366,7 +153,7 @@ func TestCLI_LogoutInteractiveRemovesAccount(t *testing.T) {
 	secondID := pool.Accounts[1].ID
 
 	setStdin(t, "1\n") // pick the first account (1-based)
-	cmdLogout([]string{"zhipu", "--config", cfgPath})
+	RunLogout([]string{"zhipu", "--config", cfgPath})
 
 	pool2, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool2.Accounts) != 1 {
@@ -388,12 +175,12 @@ func TestCLI_LogoutAllClearsPool(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, "https://zhipu.invalid/u")
 
-	cmdLogout([]string{"zhipu", "--all", "--config", cfgPath})
+	RunLogout([]string{"zhipu", "--all", "--config", cfgPath})
 
 	if _, err := os.Stat(app.PoolPath("zhipu")); !os.IsNotExist(err) {
 		t.Errorf("plural pool file should be removed; stat err=%v", err)
 	}
-	if _, err := os.Stat(legacyPoolPath("zhipu")); !os.IsNotExist(err) {
+	if _, err := os.Stat(app.AccountStore().LegacyPath("zhipu")); !os.IsNotExist(err) {
 		t.Errorf("singular file should not exist; stat err=%v", err)
 	}
 }
@@ -405,7 +192,7 @@ func TestCLI_LogoutByLabel(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, "https://zhipu.invalid/u")
 
-	cmdLogout([]string{"zhipu", "--label", "K1", "--config", cfgPath})
+	RunLogout([]string{"zhipu", "--label", "K1", "--config", cfgPath})
 
 	pool, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool.Accounts) != 1 {
@@ -417,7 +204,7 @@ func TestCLI_LogoutByLabel(t *testing.T) {
 }
 
 // Test: `logout zhipu --label nope` exits non-zero with "no account labeled"
-// (subprocess — cmdLogout calls log.Fatalf on missing label).
+// (subprocess — RunLogout calls log.Fatalf on missing label).
 func TestCLI_LogoutLabelNotFoundExits(t *testing.T) {
 	home := t.TempDir()
 	setPoolHome(t, home)
@@ -470,7 +257,7 @@ func TestCLI_UsagePoolPrintsAllAccounts(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, srv.URL)
 
-	out := grabStdout(t, func() { cmdUsage([]string{"zhipu", "--config", cfgPath}) })
+	out := grabStdout(t, func() { RunUsage([]string{"zhipu", "--config", cfgPath}) })
 
 	// Each account's key was sent (proves per-account cred dispatch, not a
 	// single shared key).
@@ -521,7 +308,7 @@ func TestCLI_UsageAllProvidersWithPool(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, srv.URL)
 
-	out := grabStdout(t, func() { cmdUsage([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { RunUsage([]string{"--config", cfgPath}) })
 
 	if !strings.Contains(out, "K1") || !strings.Contains(out, "K2") {
 		t.Errorf("all-providers usage missing pool account labels:\n%s", out)

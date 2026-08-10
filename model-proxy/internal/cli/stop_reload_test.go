@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// stop_reload_test.go covers cmdStop / cmdReload's stale-pid and invalid-pid
-// branches via the subprocess CLI harness. The happy path (signaling a real
-// daemon) is not tested end-to-end (needs a long-running worker).
+// This file covers stop / reload's stale-pid and invalid-pid branches via the
+// subprocess CLI harness. The happy path (signaling a real daemon) is not
+// tested end-to-end (needs a long-running worker).
 
-// --- cmdStop: stale pid file (process gone) → removed + "Daemon not running" ---
+// --- stop: stale pid file (process gone) → removed + "Daemon not running." ---
 
 func TestCLI_StopStalePidFile(t *testing.T) {
 	dir := t.TempDir()
@@ -39,7 +39,7 @@ func TestCLI_StopStalePidFile(t *testing.T) {
 	}
 }
 
-// --- cmdStop: invalid pid (0 / non-numeric) → non-zero ---
+// --- stop: invalid pid (0 / non-numeric) → non-zero ---
 
 func TestCLI_StopInvalidPid(t *testing.T) {
 	dir := t.TempDir()
@@ -60,7 +60,7 @@ func TestCLI_StopInvalidPid(t *testing.T) {
 	}
 }
 
-// --- cmdReload: stale pid file → "not running" message ---
+// --- reload: stale pid file → "not running" message ---
 
 func TestCLI_ReloadStalePidFile(t *testing.T) {
 	dir := t.TempDir()

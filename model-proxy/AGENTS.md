@@ -120,9 +120,9 @@
 
 配置类型、YAML 加载、默认值、校验和生效值 accessor 统一归
 `internal/config`；该包只允许依赖 `internal/pricing` 与 `internal/protocol`。
-根包 `config_compat.go` 仅保留类型别名以及 `LoadConfig` /
-`LoadConfigFromBytes` 兼容 wrapper，不得承载配置逻辑，也不得恢复根
-`config.go`。
+根包的 `config_compat.go` 类型别名与 `LoadConfig` / `LoadConfigFromBytes`
+兼容 wrapper 已删除，配置实现不得回流根包，也不得恢复根 `config.go` /
+`config_compat.go`。
 
 新顶层配置字段的六步同步（`internal/config.Config` → `rawConfig` → 拷贝段
 → validate → YAML 加载测试 → 示例与文档）以

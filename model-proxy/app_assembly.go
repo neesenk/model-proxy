@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io"
 	appdomain "model-proxy/internal/app"
 	clicmd "model-proxy/internal/cli"
 	cliserve "model-proxy/internal/cli/serve"
@@ -26,10 +25,4 @@ type application = clicmd.Application
 
 func newApplication() *application {
 	return clicmd.NewApplication(serveAssembly{}.command)
-}
-
-// runCLIArgs is the compatibility entry used by tests and embedders that still
-// call the pre-composition boundary.
-func runCLIArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	return newApplication().Run(args, stdin, stdout, stderr)
 }

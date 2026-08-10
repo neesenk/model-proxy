@@ -1,4 +1,4 @@
-package main
+package archtest
 
 import (
 	"go/ast"
@@ -295,7 +295,7 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			"responses_state.go",
 			"stream_mode.go",
 		} {
-			if _, err := os.Stat(legacy); err == nil {
+			if _, err := os.Stat(repoRooted(t, legacy)); err == nil {
 				t.Errorf("%s must live under internal/protocol, not the root package", legacy)
 			} else if !os.IsNotExist(err) {
 				t.Fatalf("stat %s: %v", legacy, err)

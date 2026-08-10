@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -11,14 +11,13 @@ import (
 	"time"
 )
 
-// cli_extra_test.go extends cli_test.go's subprocess pattern to the remaining
-// 0%-coverage CLI handlers that call log.Fatal / os.Exit: cmdTakeover,
-// cmdRestore, cmdLogout, cmdUsage, cmdStop, cmdReload.
+// This file extends the subprocess pattern (subprocess_test_support_test.go)
+// to the takeover/restore CLI handlers that call log.Fatal / os.Exit:
+// RunTakeover, RunRestore.
 //
-// The subprocess dispatcher (TestHelperProcess in cli_test.go) was extended
-// with "takeover", "restore", "logout", "stop", "reload" cases; runCLI now pins
-// HOME to a fresh temp dir (isolation), and runCLIWithHome lets a test pin HOME
-// to a pre-populated dir (for the logout-removes-cred-file happy path).
+// The subprocess dispatcher (TestHelperProcess) covers "takeover" and
+// "restore" cases; runCLI pins HOME to a fresh temp dir (isolation), and
+// runCLIWithHome lets a test pin HOME to a pre-populated dir.
 
 // -- T1: `takeover claude` backs up the original and rewrites it ---
 
@@ -104,7 +103,7 @@ func TestCLI_TakeoverUnknownClient(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeTakeoverConfig(t, dir, filepath.Join(dir, "claude.json"))
 	_, _, code := runCLI(t, "takeover", cfgPath, "nope")
-	// runTakeover on an unknown client is a no-op (listClients returns nil →
+	// RunTakeover on an unknown client is a no-op (listClients returns nil →
 	// the loop body never runs → nil error → exit 0). This is the product
 	// behavior; takeover doesn't validate the client name up front.
 	if code != 0 {
@@ -140,7 +139,7 @@ routes:
 	return path
 }
 
-// --- cmdTakeover opencode: rewrites opencode config ---
+// --- takeover opencode: rewrites opencode config ---
 
 func TestCLI_TakeoverOpencode(t *testing.T) {
 	dir := t.TempDir()
@@ -158,7 +157,7 @@ func TestCLI_TakeoverOpencode(t *testing.T) {
 	}
 }
 
-// --- cmdRestore claude: restores from backup (full takeover→restore cycle) ---
+// --- restore claude: restores from backup (full takeover→restore cycle) ---
 
 func TestCLI_RestoreClaudeRoundTrip(t *testing.T) {
 	dir := t.TempDir()

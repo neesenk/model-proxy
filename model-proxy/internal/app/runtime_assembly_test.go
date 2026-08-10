@@ -1,79 +1,19 @@
-package main
+package app
 
 import (
+	"fmt"
 	"go/ast"
-	cliserve "model-proxy/internal/cli/serve"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	cliserve "model-proxy/internal/cli/serve"
 )
-
-func TestApplicationRuntimeConcreteAssemblyContract(t *testing.T) {
-	file, _ := parseGoFile(t, "internal/app/runtime.go")
-	fields := namedStructFields(t, file, "Runtime")
-	for _, field := range []string{"ConfigPath", "StartupConfig", "Proxy", "Handler", "TransportTasks"} {
-		if _, ok := fields[field]; !ok {
-			t.Errorf("applicationRuntime is missing concrete owner field %q", field)
-		}
-	}
-
-	constructor := namedFunction(t, file, "NewRuntime")
-	if got := namedCallCountInNode(constructor.Body, "NewProxy"); got != 1 {
-		t.Errorf("newApplicationRuntime NewProxy calls = %d, want exactly 1", got)
-	}
-	if got := callCountOnIdentInNode(constructor.Body, "proxy", "StartRuntimeServices"); got != 1 {
-		t.Errorf("newApplicationRuntime proxy.StartRuntimeServices calls = %d, want exactly 1", got)
-	}
-	if got := namedCallCountInNode(constructor.Body, "NewServeMux"); got != 1 {
-		t.Errorf("newApplicationRuntime http.NewServeMux calls = %d, want exactly 1", got)
-	}
-	if got := namedCallCountInNode(constructor.Body, "NewWebServer"); got != 1 {
-		t.Errorf("newApplicationRuntime NewWebServer calls = %d, want exactly 1 guarded Web assembly", got)
-	}
-
-	literals := 0
-	ast.Inspect(constructor.Body, func(node ast.Node) bool {
-		unary, ok := node.(*ast.UnaryExpr)
-		if !ok || unary.Op.String() != "&" {
-			return true
-		}
-		literal, ok := unary.X.(*ast.CompositeLit)
-		if !ok || !identIs(literal.Type, "Runtime") {
-			return true
-		}
-		literals++
-		want := map[string]string{
-			"ConfigPath":    "args.Config",
-			"StartupConfig": "cfg",
-			"Proxy":         "proxy",
-			"Handler":       "mux",
-		}
-		got := map[string]string{}
-		for _, element := range literal.Elts {
-			entry, ok := element.(*ast.KeyValueExpr)
-			if !ok {
-				t.Fatalf("applicationRuntime literal element = %T, want keyed field", element)
-			}
-			key, ok := entry.Key.(*ast.Ident)
-			if !ok {
-				t.Fatalf("applicationRuntime literal key = %T, want identifier", entry.Key)
-			}
-			got[key.Name] = expressionName(entry.Value)
-		}
-		for field, value := range want {
-			if got[field] != value {
-				t.Errorf("applicationRuntime.%s initializer = %q, want %q", field, got[field], value)
-			}
-		}
-		return true
-	})
-	if literals != 1 {
-		t.Errorf("newApplicationRuntime concrete literals = %d, want exactly 1", literals)
-	}
-}
 
 func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 	for _, test := range []struct {
@@ -96,7 +36,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 				Stats:     StatsConfig{DBPath: filepath.Join(home, "stats.db")},
 				Web:       WebConfig{Enabled: test.web},
 			}
-			runtime := newApplicationRuntime(cfg, cliserve.Args{Config: "test-config.yaml"})
+			runtime := NewRuntime(cfg, cliserve.Args{Config: "test-config.yaml"})
 			t.Cleanup(runtime.Close)
 
 			if runtime.Proxy == nil || runtime.StartupConfig != cfg || runtime.Handler == nil {
@@ -166,7 +106,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 }
 
 func TestApplicationRuntimeReloadSummaryContract(t *testing.T) {
-	file, _ := parseGoFile(t, "internal/app/runtime.go")
+	file, _ := parseGoFile(t, "runtime.go")
 	reload := namedMethod(t, file, "Runtime", "Reload")
 	if got := selectorCallCountInNode(reload.Body, "Reload"); got != 1 {
 		t.Errorf("applicationRuntime.reload nested reload calls = %d, want exactly runtime.Proxy.Reload", got)
@@ -198,7 +138,7 @@ providers:
 		Providers: map[string]Provider{},
 		Stats:     StatsConfig{DBPath: filepath.Join(home, "stats.db")},
 	}
-	runtime := newApplicationRuntime(cfg, cliserve.Args{Config: configPath})
+	runtime := NewRuntime(cfg, cliserve.Args{Config: configPath})
 	t.Cleanup(runtime.Close)
 	runtime.Reload()
 	snapshot := runtime.Proxy.SnapshotRuntime()
@@ -226,23 +166,6 @@ func writeFreshApplicationCatalog(t *testing.T, home string) {
 	}
 }
 
-func callCountOnIdentInNode(node ast.Node, receiver, method string) int {
-	count := 0
-	ast.Inspect(node, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != method || !identIs(selector.X, receiver) {
-			return true
-		}
-		count++
-		return true
-	})
-	return count
-}
-
 // selectorCallCountInNode counts <x>.<name>(...) call sites under n.
 func selectorCallCountInNode(n ast.Node, name string) int {
 	count := 0
@@ -253,6 +176,69 @@ func selectorCallCountInNode(n ast.Node, name string) int {
 		}
 		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
 			count++
+		}
+		return true
+	})
+	return count
+}
+
+// -- minimal local AST helpers (the shared set lives in internal/archtest;
+// this package only needs the few below) --
+
+func parseGoFile(t *testing.T, path string) (*ast.File, *token.FileSet) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, fset
+}
+
+func namedMethod(t *testing.T, f *ast.File, receiver, name string) *ast.FuncDecl {
+	t.Helper()
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || fn.Name.Name != name {
+			continue
+		}
+		for _, field := range fn.Recv.List {
+			if simpleTypeName(field.Type) == receiver || simpleTypeName(field.Type) == "*"+receiver {
+				return fn
+			}
+		}
+	}
+	t.Fatalf("method %s.%s not found", receiver, name)
+	return nil
+}
+
+func simpleTypeName(expr ast.Expr) string {
+	switch typ := expr.(type) {
+	case *ast.Ident:
+		return typ.Name
+	case *ast.StarExpr:
+		return "*" + simpleTypeName(typ.X)
+	default:
+		return fmt.Sprintf("%T", expr)
+	}
+}
+
+func namedCallCountInNode(n ast.Node, name string) int {
+	count := 0
+	ast.Inspect(n, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			if fun.Name == name {
+				count++
+			}
+		case *ast.SelectorExpr:
+			if fun.Sel.Name == name {
+				count++
+			}
 		}
 		return true
 	})

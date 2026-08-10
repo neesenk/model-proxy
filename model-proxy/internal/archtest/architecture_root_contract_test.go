@@ -1,4 +1,4 @@
-package main
+package archtest
 
 import (
 	"go/ast"
@@ -60,7 +60,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		forbiddenChains := [][2]string{
 			{"reqLog", "Run"}, {"reqLog", "Shutdown"}, {"flusher", "flush"},
 		}
-		for _, path := range []string{"cli_serve.go", "cli_daemon.go"} {
+		for _, path := range []string{"cli_serve.go"} {
 			file, fileSet := parseGoFile(t, path)
 			for _, violation := range forbiddenCallSites(file, fileSet, forbiddenCalls, forbiddenChains) {
 				t.Errorf("%s bypasses proxyLifecycle: %s", path, violation)

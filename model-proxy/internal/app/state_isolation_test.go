@@ -17,26 +17,15 @@ import (
 // the repo rule (model-proxy/AGENTS.md: tests must not touch the real HOME; the
 // rule was on the books but unenforced — most NewProxy tests wrote the real
 // state file).
-//
-// SKIPPED for the TestHelperProcess subprocess (runCLIWithHome re-invokes this
-// binary with MP_CLI_HELPER=1 and pins its own HOME via cmd.Env); redirecting
-// here would clobber the per-test HOME the parent chose and the CLI could no
-// longer find the pool files the test wrote.
 func TestMain(m *testing.M) {
-	dir := ""
-	if os.Getenv("MP_CLI_HELPER") == "" {
-		var err error
-		dir, err = os.MkdirTemp("", "model-proxy-test-home")
-		if err != nil {
-			panic(err)
-		}
-		os.Setenv("HOME", dir)
+	dir, err := os.MkdirTemp("", "model-proxy-test-home")
+	if err != nil {
+		panic(err)
 	}
+	os.Setenv("HOME", dir)
 	// os.Exit skips defers, so remove the temp HOME explicitly before exiting.
 	code := m.Run()
-	if dir != "" {
-		os.RemoveAll(dir)
-	}
+	os.RemoveAll(dir)
 	os.Exit(code)
 }
 

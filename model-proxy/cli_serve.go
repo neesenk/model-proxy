@@ -60,6 +60,11 @@ func (assembly serveAssembly) command(args []string) {
 	}
 }
 
+// daemonEnv wires the production process seams for the daemon paths.
+func daemonEnv() cliserve.DaemonEnv {
+	return cliserve.DaemonEnv{LoadConfig: configdomain.LoadConfig, Executable: os.Args[0], Stdout: os.Stdout, Stderr: os.Stderr}
+}
+
 // runProxy loads the config and runs the proxy inline (used by the worker and
 // plain foreground serve). When stdout/stderr is a log file (worker case) all
 // logs land there; when a tty (foreground) logs go to the terminal.

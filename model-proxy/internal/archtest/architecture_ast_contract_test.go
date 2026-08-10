@@ -1,4 +1,4 @@
-package main
+package archtest
 
 import (
 	"fmt"
@@ -6,10 +6,59 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// repoRoot resolves the module root (the directory containing go.mod) from
+// this source file's location, so contract tests keep writing
+// module-root-relative paths regardless of the test binary's cwd.
+var repoRootOnce = sync.OnceValues(func() (string, error) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		return "", fmt.Errorf("runtime.Caller failed")
+	}
+	root := filepath.Dir(filepath.Dir(filepath.Dir(file)))
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		return "", fmt.Errorf("go.mod not found at inferred repo root %s: %w", root, err)
+	}
+	return root, nil
+})
+
+func repoRoot(t testing.TB) string {
+	t.Helper()
+	root, err := repoRootOnce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// repoRooted anchors a module-root-relative path to the repo root; absolute
+// paths pass through unchanged.
+func repoRooted(t testing.TB, path string) string {
+	t.Helper()
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(repoRoot(t), path)
+}
+
+// repoRootRel renders an absolute path under the repo root module-relative
+// again, preserving the path strings call sites and assertions were written
+// against (e.g. "internal/app/proxy.go").
+func repoRootRel(t testing.TB, path string) string {
+	t.Helper()
+	rel, err := filepath.Rel(repoRoot(t), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rel
+}
 
 func assertRepositoryLeafPackage(t *testing.T, directory string) {
 	t.Helper()
@@ -18,7 +67,7 @@ func assertRepositoryLeafPackage(t *testing.T, directory string) {
 
 func assertRepositoryPackageImports(t *testing.T, directory string, allowed map[string]bool) {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join(directory, "*.go"))
+	files, err := filepath.Glob(filepath.Join(repoRooted(t, directory), "*.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,6 +97,9 @@ func unexpectedRepositoryImports(f *ast.File, allowed map[string]bool) []string 
 	return sortedNames(out)
 }
 
+// requiredConfigCompatAliases is the exact alias set the internal/app config
+// facade (internal/app/config_alias.go) may declare — nothing more, nothing
+// less.
 func requiredConfigCompatAliases() map[string]string {
 	return map[string]string{
 		"CacheConfig":      "CacheConfig",
@@ -66,10 +118,6 @@ func requiredConfigCompatAliases() map[string]string {
 		"Takeover":         "Takeover",
 		"WebConfig":        "WebConfig",
 	}
-}
-
-func configCompatViolations(f *ast.File) []string {
-	return configCompatViolationsForAliases(f, requiredConfigCompatAliases())
 }
 
 func configCompatViolationsForAliases(f *ast.File, expectedAliases map[string]string) []string {
@@ -678,7 +726,7 @@ func (p *Proxy) reversed() {
 func parseGoFile(t *testing.T, path string) (*ast.File, *token.FileSet) {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
+	f, err := parser.ParseFile(fset, repoRooted(t, path), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -691,7 +739,7 @@ func parseGoFile(t *testing.T, path string) (*ast.File, *token.FileSet) {
 // File-scoped adapter/facade contracts continue to use parseGoFile.
 func parseGoPackage(t *testing.T, dir string) (*ast.File, *token.FileSet) {
 	t.Helper()
-	pattern := filepath.Join(dir, "*.go")
+	pattern := filepath.Join(repoRooted(t, dir), "*.go")
 	paths, err := filepath.Glob(pattern)
 	if err != nil {
 		t.Fatal(err)
@@ -926,14 +974,14 @@ func productionGoFiles(t *testing.T) []string {
 
 func productionGoFilesIn(t *testing.T, dir string) []string {
 	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	paths, err := filepath.Glob(filepath.Join(repoRooted(t, dir), "*.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := make([]string, 0, len(paths))
 	for _, path := range paths {
 		if !strings.HasSuffix(path, "_test.go") {
-			out = append(out, path)
+			out = append(out, repoRootRel(t, path))
 		}
 	}
 	return out
@@ -942,7 +990,7 @@ func productionGoFilesIn(t *testing.T, dir string) []string {
 func productionGoFilesRecursively(t *testing.T, root string) []string {
 	t.Helper()
 	var out []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(repoRooted(t, root), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -954,7 +1002,7 @@ func productionGoFilesRecursively(t *testing.T, root string) []string {
 			return nil
 		}
 		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
-			out = append(out, path)
+			out = append(out, repoRootRel(t, path))
 		}
 		return nil
 	})

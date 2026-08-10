@@ -1,4 +1,4 @@
-package main
+package archtest
 
 import (
 	"go/ast"
@@ -20,7 +20,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 				t.Errorf("%s crosses the Fusion orchestration boundary: %v", path, got)
 			}
 		}
-		if _, err := os.Stat("fusion_obs.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "fusion_obs.go")); err == nil {
 			t.Error("legacy root fusion_obs.go must not exist; registry and DTOs belong in internal/fusion")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat fusion_obs.go: %v", err)

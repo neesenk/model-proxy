@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"net/http"
@@ -7,10 +7,9 @@ import (
 	"testing"
 )
 
-// test_cmd_test.go covers `model-proxy test <model>` (test_cmd.go). cmdTest
-// os.Exits, so the end-to-end cases run through the TestHelperProcess
-// subprocess harness (cli_test.go) against an httptest fake upstream; the
-// route-resolution helper testTargetsFor is covered in-process at the bottom.
+// This file covers `model-proxy test <model>`. climodels.CmdTest os.Exits, so
+// the end-to-end cases run through the TestHelperProcess subprocess harness
+// (subprocess_test_support_test.go) against an httptest fake upstream.
 
 // testCLIConfig renders a one-provider config pointing at the fake upstream.
 func testCLIConfig(upstream string) string {

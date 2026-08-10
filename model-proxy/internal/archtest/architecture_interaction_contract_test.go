@@ -1,4 +1,4 @@
-package main
+package archtest
 
 import (
 	"go/ast"
@@ -167,10 +167,9 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 		}
 
 		sites := rootFunctionReferenceSites(t, "newApplication")
-		if len(sites) != 2 ||
-			sites[0].file != "app_assembly.go" || sites[0].function != "runCLIArgs" ||
-			sites[1].file != "main.go" || sites[1].function != "main" {
-			t.Errorf("newApplication production reference sites = %v, want only app_assembly.go compatibility seam and main direct calls", sites)
+		if len(sites) != 1 ||
+			sites[0].file != "main.go" || sites[0].function != "main" {
+			t.Errorf("newApplication production reference sites = %v, want only the main direct call", sites)
 		}
 	})
 }

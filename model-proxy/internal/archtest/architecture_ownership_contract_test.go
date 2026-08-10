@@ -1,4 +1,4 @@
-package main
+package archtest
 
 import (
 	"go/ast"
@@ -11,28 +11,35 @@ import (
 func TestArchitectureOwnershipBoundaries(t *testing.T) {
 	rootPackage, rootSet := parseGoPackage(t, "internal/app")
 
-	t.Run("internal config owns configuration behind a narrow root facade", func(t *testing.T) {
+	t.Run("internal config owns configuration", func(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/config")
-		if _, err := os.Stat("config.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "config.go")); err == nil {
 			t.Error("legacy root config.go must not exist; configuration belongs in internal/config")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat config.go: %v", err)
 		}
-		if _, err := os.Stat("config_compat.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "config_compat.go")); err == nil {
 			t.Error("legacy root config_compat.go must not exist; production code uses internal/config directly")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat config_compat.go: %v", err)
 		}
-		facade, _ := parseGoFile(t, "config_alias_test.go")
-		if got := configCompatViolations(facade); len(got) != 0 {
-			t.Errorf("config_alias_test.go must contain only internal/config type aliases and direct Load wrappers: %v", got)
+		if _, err := os.Stat(repoRooted(t, "config_alias_test.go")); err == nil {
+			t.Error("legacy root config_alias_test.go facade must not exist; tests use internal/config (or the owning package's aliases) directly")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat config_alias_test.go: %v", err)
+		}
+		// The surviving facade is internal/app/config_alias.go: it must stay a
+		// narrow alias+delegate seam and never grow configuration logic.
+		facade, _ := parseGoFile(t, "internal/app/config_alias.go")
+		for _, violation := range configCompatViolationsForAliases(facade, requiredConfigCompatAliases()) {
+			t.Errorf("internal/app/config_alias.go: %s", violation)
 		}
 	})
 
 	t.Run("internal catalog owns the models.dev source kernel", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/catalog")
 		for _, legacy := range []string{"modelsdev.go", "model_catalog_types.go"} {
-			if _, err := os.Stat(legacy); err == nil {
+			if _, err := os.Stat(repoRooted(t, legacy)); err == nil {
 				t.Errorf("legacy root %s must not exist; catalog types and source logic belong in internal/catalog", legacy)
 			} else if !os.IsNotExist(err) {
 				t.Fatalf("stat %s: %v", legacy, err)
@@ -105,7 +112,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 	t.Run("internal accounts owns pool storage and identity", func(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/accounts")
-		if _, err := os.Stat("pool.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "pool.go")); err == nil {
 			t.Error("legacy root pool.go must not exist; account storage belongs in internal/accounts")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat pool.go: %v", err)
@@ -113,7 +120,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 		// The root accounts adapter shell is gone: callers use internal/app's
 		// account-store wrappers (or internal/accounts directly).
-		if _, err := os.Stat("accounts_adapter.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "accounts_adapter.go")); err == nil {
 			t.Error("legacy root accounts_adapter.go must not exist; use internal/app account wrappers")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat accounts_adapter.go: %v", err)
@@ -127,7 +134,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 	t.Run("internal observe events owns the live-event hub", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/observe/events")
-		if _, err := os.Stat("live_events.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "live_events.go")); err == nil {
 			t.Error("legacy root live_events.go adapter shell must not exist; proxy_http.go calls observeevents.ServeEvents directly")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat live_events.go: %v", err)
@@ -166,7 +173,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 	t.Run("internal observe requestlog owns the JSONL data plane", func(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/observe/requestlog")
-		if _, err := os.Stat("request_log.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "request_log.go")); err == nil {
 			t.Error("legacy root request_log.go must not exist; request-log mechanics belong in internal/observe/requestlog")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat request_log.go: %v", err)
@@ -224,7 +231,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 	t.Run("internal observe stats owns SQLite persistence and the runtime projection", func(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/observe/stats")
-		if _, err := os.Stat("stats.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "stats.go")); err == nil {
 			t.Error("legacy root stats.go must not exist; persistence and the minute-diff projection belong in internal/observe/stats")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat stats.go: %v", err)
@@ -259,7 +266,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 	t.Run("internal observe cache owns exact-response storage", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/cache")
-		if _, err := os.Stat("cache.go"); err == nil {
+		if _, err := os.Stat(repoRooted(t, "cache.go")); err == nil {
 			t.Error("legacy root cache.go must not exist; cache mechanics belong in internal/cache")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat cache.go: %v", err)

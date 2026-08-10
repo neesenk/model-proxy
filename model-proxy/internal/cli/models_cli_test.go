@@ -1,8 +1,7 @@
-package main
+package cli
 
 import (
 	"io"
-	"model-proxy/internal/protocol"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,9 +9,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"model-proxy/internal/protocol"
 )
 
-// --- cmdModels refresh: no provider → usage + available providers ---
+// --- models refresh: no provider → usage + available providers ---
 
 func TestCLI_ModelsRefreshNoProvider(t *testing.T) {
 	cfg := writeTempConfig(t, minimalConfig)
@@ -25,7 +26,7 @@ func TestCLI_ModelsRefreshNoProvider(t *testing.T) {
 	}
 }
 
-// --- cmdModels refresh <unknown> → non-zero ---
+// --- models refresh <unknown> → non-zero ---
 
 func TestCLI_ModelsRefreshUnknownProvider(t *testing.T) {
 	cfg := writeTempConfig(t, minimalConfig)
@@ -38,7 +39,7 @@ func TestCLI_ModelsRefreshUnknownProvider(t *testing.T) {
 	}
 }
 
-// --- cmdModels refresh <zhipu> happy path: mock /models + cred file ---
+// --- models refresh <zhipu> happy path: mock /models + cred file ---
 
 func TestCLI_ModelsRefreshZhipuMock(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

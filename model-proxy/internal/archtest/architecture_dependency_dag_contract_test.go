@@ -1,4 +1,4 @@
-package main
+package archtest
 
 import (
 	"fmt"
@@ -21,6 +21,7 @@ const internalImportPathPrefix = "model-proxy/internal/"
 func internalRepositoryImportPolicy() map[string]map[string]bool {
 	return map[string]map[string]bool{
 		"model-proxy/internal/accounts":              nil,
+		"model-proxy/internal/archtest":              nil,
 		"model-proxy/internal/cache":                 nil,
 		"model-proxy/internal/catalog":               nil,
 		"model-proxy/internal/cli/doctor":            {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/takeover": true, "model-proxy/provider": true},
@@ -81,6 +82,7 @@ func assertInternalPackageImportPolicy(t *testing.T, directory string) {
 
 func discoverProductionInternalPackages(root string) (map[string][]string, error) {
 	packages := make(map[string][]string)
+	testOnly := make(map[string][]string)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -92,7 +94,7 @@ func discoverProductionInternalPackages(root string) (map[string][]string, error
 			}
 			return nil
 		}
-		if !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+		if !strings.HasSuffix(entry.Name(), ".go") {
 			return nil
 		}
 		directory := filepath.Dir(path)
@@ -101,11 +103,22 @@ func discoverProductionInternalPackages(root string) (map[string][]string, error
 			return err
 		}
 		packagePath := filepath.ToSlash(filepath.Join(internalImportPathPrefix, relative))
+		// Test-only directories (e.g. internal/archtest) are still packages
+		// that must be classified; their test files are import-checked.
+		if strings.HasSuffix(entry.Name(), "_test.go") {
+			testOnly[packagePath] = append(testOnly[packagePath], path)
+			return nil
+		}
 		packages[packagePath] = append(packages[packagePath], path)
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	for packagePath, paths := range testOnly {
+		if _, ok := packages[packagePath]; !ok {
+			packages[packagePath] = paths
+		}
 	}
 	for packagePath := range packages {
 		sort.Strings(packages[packagePath])
@@ -213,7 +226,7 @@ func repositoryImportAliasViolations(file *ast.File) []string {
 
 func TestArchitectureInternalDependencyDAG(t *testing.T) {
 	policy := internalRepositoryImportPolicy()
-	discovered, err := discoverProductionInternalPackages("internal")
+	discovered, err := discoverProductionInternalPackages(repoRooted(t, "internal"))
 	if err != nil {
 		t.Fatalf("discover internal production packages: %v", err)
 	}
@@ -269,6 +282,30 @@ func TestDiscoverProductionInternalPackagesIncludesNestedPackage(t *testing.T) {
 	for _, paths := range packages {
 		if len(paths) != 1 || filepath.Base(paths[0]) != "package.go" {
 			t.Fatalf("discovered paths = %v, want only package.go", paths)
+		}
+	}
+}
+
+func TestDiscoverProductionInternalPackagesIncludesTestOnlyPackage(t *testing.T) {
+	root := t.TempDir()
+	packageDir := filepath.Join(root, "contracts")
+	if err := os.MkdirAll(packageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "contract_test.go"), []byte("package contracts\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	packages, err := discoverProductionInternalPackages(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packages) != 1 {
+		t.Fatalf("discovered packages = %v, want the test-only package", packages)
+	}
+	for _, paths := range packages {
+		if len(paths) != 1 || filepath.Base(paths[0]) != "contract_test.go" {
+			t.Fatalf("discovered paths = %v, want only contract_test.go", paths)
 		}
 	}
 }
