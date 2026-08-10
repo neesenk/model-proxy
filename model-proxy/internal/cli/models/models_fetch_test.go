@@ -1,8 +1,8 @@
-package main
+package models
 
 import (
 	"model-proxy/internal/app"
-	climodels "model-proxy/internal/cli/models"
+	configdomain "model-proxy/internal/config"
 	"strings"
 	"testing"
 )
@@ -10,8 +10,8 @@ import (
 // --- fetchProviderModels: unknown provider ---
 
 func TestFetchProviderModels_Unknown(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://x", Provider: testProviderID}}}
-	_, err := climodels.FetchProviderModels(cfg, "nope")
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"a": {OpenAIBaseURL: "http://x", Provider: "static"}}}
+	_, err := FetchProviderModels(cfg, "nope")
 	if err == nil || !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("unknown provider: err=%v", err)
 	}

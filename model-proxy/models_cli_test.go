@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"model-proxy/internal/protocol"
 	"net/http"
 	"net/http/httptest"
@@ -303,4 +304,10 @@ func TestCLI_ModelsDisplay_HydratesFromCache(t *testing.T) {
 	if !strings.Contains(stdout, "204800") {
 		t.Errorf("display should show cached context 204800:\n%s", stdout)
 	}
+}
+
+// readAll is a tiny test helper.
+func readAll(r io.Reader) []byte {
+	b, _ := io.ReadAll(r)
+	return b
 }

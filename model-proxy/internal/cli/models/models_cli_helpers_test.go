@@ -1,12 +1,11 @@
-package main
+package models
 
 import (
+	configdomain "model-proxy/internal/config"
 	"model-proxy/provider"
 	"testing"
 
 	cliframework "model-proxy/internal/cli/framework"
-
-	climodels "model-proxy/internal/cli/models"
 )
 
 // --- pad edge cases (models.go) ---
@@ -20,16 +19,16 @@ func TestPad_AlreadyLong(t *testing.T) {
 // --- nonFlagArgs: --config= form + flags interspersed ---
 
 func TestNonFlagArgs_ConfigEquals(t *testing.T) {
-	got := climodels.NonFlagArgs([]string{"--config=x.yaml", "models", "zhipu"})
+	got := NonFlagArgs([]string{"--config=x.yaml", "models", "zhipu"})
 	if len(got) != 2 || got[0] != "models" || got[1] != "zhipu" {
-		t.Errorf("climodels.NonFlagArgs(--config=)=%v want [models zhipu]", got)
+		t.Errorf("NonFlagArgs(--config=)=%v want [models zhipu]", got)
 	}
 }
 
 // --- routeNames sorting (already tested, but check empty) ---
 
 func TestRouteNames_Sorted(t *testing.T) {
-	cfg := &Config{Routes: map[string][]RouteTarget{
+	cfg := &configdomain.Config{Routes: map[string][]configdomain.RouteTarget{
 		"zeta":  {{Provider: "a", Model: "z"}},
 		"alpha": {{Provider: "a", Model: "a"}},
 		"mid":   {{Provider: "a", Model: "m"}},
