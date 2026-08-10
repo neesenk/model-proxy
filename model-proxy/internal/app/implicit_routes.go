@@ -81,3 +81,32 @@ func SynthesizeImplicitRoutesFrom(cfg *configdomain.Config, loggedIn map[string]
 func SynthesizeImplicitRoutes(cfg *configdomain.Config, store accounts.Store) (map[string]configdomain.RouteTarget, []string) {
 	return SynthesizeImplicitRoutesFrom(cfg, LoggedInProviders(cfg, store))
 }
+
+// BuildExpandedRoutes returns routes with pooled targets fanned out to their
+// virtual children: a target whose provider is a pooled parent (key present in
+// poolIndex) is replaced by its N virtuals, each with the SAME Model + Priority
+// as the original; non-pooled targets pass through unchanged. Routes with no
+// pooled targets are returned as-is (same slice contents). Implicit routes
+// (auto-derived for unrouted models served by a logged-in provider) merge under
+// explicit routes and fan out the same way.
+func BuildExpandedRoutes(
+	cfg *configdomain.Config,
+	implicit map[string]configdomain.RouteTarget,
+	expand func(configdomain.RouteTarget) []configdomain.RouteTarget,
+) map[string][]configdomain.RouteTarget {
+	out := make(map[string][]configdomain.RouteTarget, len(cfg.Routes))
+	for exposed, targets := range cfg.Routes {
+		var exp []configdomain.RouteTarget
+		for _, t := range targets {
+			exp = append(exp, expand(t)...)
+		}
+		out[exposed] = exp
+	}
+	for exposed, t := range implicit {
+		if _, explicit := out[exposed]; explicit {
+			continue
+		}
+		out[exposed] = expand(t)
+	}
+	return out
+}
