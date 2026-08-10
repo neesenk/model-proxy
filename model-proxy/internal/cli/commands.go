@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"model-proxy/internal/app"
+	clidoctor "model-proxy/internal/cli/doctor"
+	"model-proxy/internal/takeover"
 	"os"
 
 	cliframework "model-proxy/internal/cli/framework"
@@ -104,4 +107,59 @@ func HasHelpFlag(args []string) bool {
 		}
 	}
 	return false
+}
+
+// RunDoctor runs the offline/live scheduling diagnostic.
+func RunDoctor(args []string) {
+	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
+	if err != nil {
+		fmt.Println("✗ config invalid: " + err.Error())
+		os.Exit(1)
+	}
+	clidoctor.CmdDoctor(args, cfg, cliframework.ConfigPath(args))
+}
+
+// RunTakeover rewrites a client config to point at the proxy.
+func RunTakeover(args []string) {
+	cfg := LoadCmdConfig(args)
+	which := cliframework.Positional(args)
+	if err := takeover.RunTakeover(cfg, which, takeover.BackupDir(cliframework.ConfigPath(args)), takeoverFacts(cfg, which)); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// RunRestore restores a client config from its takeover backup.
+func RunRestore(args []string) {
+	cfg := LoadCmdConfig(args)
+	which := cliframework.Positional(args)
+	if err := takeover.RunRestore(cfg, which, takeover.BackupDir(cliframework.ConfigPath(args))); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// takeoverFacts computes the application-owned implicit routes and (only when a
+// metadata-writing client is selected) hydrated models.dev metadata for the
+// takeover package.
+func takeoverFacts(cfg *configdomain.Config, which string) takeover.ModelFacts {
+	implicit, _ := app.SynthesizeImplicitRoutes(cfg, app.AccountStore())
+	facts := takeover.ModelFacts{
+		Implicit:      implicit,
+		SourceDefault: -1,
+	}
+	if takeover.WritesMetadata(takeover.ListClients(cfg, which)) {
+		cat, _ := app.LoadModelsCatalog(cliframework.HomeDir(), false)
+		meta, sources := app.HydrateModels(cfg, cat)
+		facts.Meta = meta
+		facts.Sources = make(map[string]map[string]int, len(sources))
+		for provider, models := range sources {
+			facts.Sources[provider] = make(map[string]int, len(models))
+			for model, source := range models {
+				facts.Sources[provider][model] = int(source)
+			}
+		}
+		facts.SourceDefault = int(app.SrcDefault)
+		facts.DefaultContext = app.DefaultModelMetadata.Context
+		facts.DefaultOutput = app.DefaultModelMetadata.Output
+	}
+	return facts
 }
