@@ -258,30 +258,14 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 	t.Run("internal observe events owns the live-event hub", func(t *testing.T) {
 		assertRepositoryLeafPackage(t, "internal/observe/events")
-		adapter, _ := parseGoFile(t, "live_events.go")
-		functions := map[string]int{
-			"serveEvents": 0,
+		if _, err := os.Stat("live_events.go"); err == nil {
+			t.Error("legacy root live_events.go adapter shell must not exist; proxy_http.go calls observeevents.ServeEvents directly")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat live_events.go: %v", err)
 		}
-		for _, decl := range adapter.Decls {
-			switch decl := decl.(type) {
-			case *ast.GenDecl:
-				if decl.Tok != token.IMPORT {
-					t.Error("live_events.go must not declare package state or types; it is only a Proxy adapter")
-				}
-			case *ast.FuncDecl:
-				if _, ok := functions[decl.Name.Name]; !ok {
-					t.Errorf("live_events.go has unexpected function %s; the SSE handler belongs in internal/observe/events", decl.Name.Name)
-					continue
-				}
-				functions[decl.Name.Name]++
-			default:
-				t.Errorf("live_events.go has unexpected top-level declaration %T", decl)
-			}
-		}
-		for name, count := range functions {
-			if count != 1 {
-				t.Errorf("live_events.go %s declarations = %d, want exactly 1", name, count)
-			}
+		handler, _ := parseGoFile(t, "proxy_http.go")
+		if got := selectorCountNamed(handler, "ServeEvents"); got != 1 {
+			t.Errorf("proxy_http.go observeevents.ServeEvents calls = %d, want exactly 1 direct call", got)
 		}
 		// The SSE handler and keepalive loop live in the leaf package.
 		sse, _ := parseGoFile(t, "internal/observe/events/sse.go")

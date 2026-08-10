@@ -3,116 +3,29 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"os"
 
 	"gopkg.in/yaml.v3"
+
+	"model-proxy/internal/configedit"
 )
 
-func loadConfigNode(path string) (*yaml.Node, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, err
-	}
-	return &root, nil
-}
-
-func mapNode(root *yaml.Node) *yaml.Node {
-	if root == nil || len(root.Content) == 0 {
-		return nil
-	}
-	return root.Content[0]
-}
-
-func scalarNode(value string) *yaml.Node {
-	return &yaml.Node{Kind: yaml.ScalarNode, Value: value}
-}
-
-func setScalar(root *yaml.Node, key, value string) {
-	mapping := mapNode(root)
-	if mapping == nil {
-		return
-	}
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		if mapping.Content[index].Value == key {
-			mapping.Content[index+1].Value = value
-			return
-		}
-	}
-	mapping.Content = append(mapping.Content, scalarNode(key), scalarNode(value))
-}
-
+// YAML node helpers delegate to internal/configedit; these thin wrappers keep
+// root web/test call sites stable while the web API migrates behind appapi.
+func loadConfigNode(path string) (*yaml.Node, error) { return configedit.LoadNode(path) }
+func mapNode(root *yaml.Node) *yaml.Node             { return configedit.MapNode(root) }
+func scalarNode(value string) *yaml.Node             { return configedit.ScalarNode(value) }
+func setScalar(root *yaml.Node, key, value string)   { configedit.SetScalar(root, key, value) }
 func childMap(root *yaml.Node, key string) *yaml.Node {
-	mapping := root
-	if root != nil && root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
-		mapping = root.Content[0]
-	}
-	if mapping == nil || mapping.Kind != yaml.MappingNode {
-		return nil
-	}
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		if mapping.Content[index].Value == key &&
-			mapping.Content[index+1].Kind == yaml.MappingNode {
-			return mapping.Content[index+1]
-		}
-	}
-	child := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-	mapping.Content = append(mapping.Content, scalarNode(key), child)
-	return child
+	return configedit.ChildMap(root, key)
 }
-
 func setChildScalar(parent *yaml.Node, key, value string) {
-	if parent == nil {
-		return
-	}
-	for index := 0; index+1 < len(parent.Content); index += 2 {
-		if parent.Content[index].Value == key {
-			parent.Content[index+1].Value = value
-			return
-		}
-	}
-	parent.Content = append(parent.Content, scalarNode(key), scalarNode(value))
+	configedit.SetChildScalar(parent, key, value)
 }
-
-func deleteKey(mapping *yaml.Node, key string) {
-	if mapping == nil {
-		return
-	}
-	out := mapping.Content[:0]
-	for index := 0; index+1 < len(mapping.Content); index += 2 {
-		if mapping.Content[index].Value == key {
-			continue
-		}
-		out = append(out, mapping.Content[index], mapping.Content[index+1])
-	}
-	mapping.Content = out
-}
-
+func deleteKey(mapping *yaml.Node, key string) { configedit.DeleteKey(mapping, key) }
 func setChildNode(parent *yaml.Node, key string, value *yaml.Node) {
-	if parent == nil {
-		return
-	}
-	for index := 0; index+1 < len(parent.Content); index += 2 {
-		if parent.Content[index].Value == key {
-			parent.Content[index+1] = value
-			return
-		}
-	}
-	parent.Content = append(parent.Content, scalarNode(key), value)
+	configedit.SetChildNode(parent, key, value)
 }
-
-func mustEncode(value any) *yaml.Node {
-	data, _ := yaml.Marshal(value)
-	var node yaml.Node
-	_ = yaml.Unmarshal(data, &node)
-	if len(node.Content) > 0 {
-		return node.Content[0]
-	}
-	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null"}
-}
+func mustEncode(value any) *yaml.Node { return configedit.MustEncode(value) }
 
 func (api *proxyWebAPI) editConfigNode(mutate func(*yaml.Node)) error {
 	root, err := loadConfigNode(api.currentConfigFile())
