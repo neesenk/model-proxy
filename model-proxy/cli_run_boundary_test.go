@@ -457,7 +457,7 @@ func parseApplicationCommandTargets(t *testing.T) map[string]string {
 
 func assertCLIHandlerBindingIsDirect(t *testing.T, files []*ast.File) {
 	t.Helper()
-	function := findCLIProductionFunc(t, files, "runCLIArgsWithCommands")
+	function := findCLIProductionFunc(t, files, "RunArgsWithCommands")
 	assignments := 0
 	directBindings := 0
 	calls := 0
@@ -545,6 +545,11 @@ func requireCLIResult(
 func parseCLIProductionFiles(t *testing.T) []*ast.File {
 	t.Helper()
 	paths, err := filepath.Glob("*.go")
+	if err == nil {
+		if extra, gerr := filepath.Glob("internal/cli/*.go"); gerr == nil {
+			paths = append(paths, extra...)
+		}
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

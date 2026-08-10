@@ -1,26 +1,20 @@
 package main
 
 import (
-	"fmt"
 	"io"
+
 	clicmd "model-proxy/internal/cli"
 )
 
-// cliCommand is the process-level adapter for an existing command handler.
-// The stream parameters make the front-door contract explicit and provide the
-// migration seam for handlers that still own process-scoped I/O or termination.
-type cliCommand func(args []string, stdin io.Reader, stdout, stderr io.Writer) int
+// cliCommand aliases the internal/cli command contract.
+type cliCommand = clicmd.Command
 
 func processCLICommand(run func([]string)) cliCommand {
-	return func(args []string, _ io.Reader, _, _ io.Writer) int {
-		run(args)
-		return 0
-	}
+	return clicmd.ProcessCommand(run)
 }
 
 // runCLIArgs is the compatibility entry used by tests and embedders that still
-// call the pre-composition boundary. The concrete application owns command
-// registration; neither layer reads process globals.
+// call the pre-composition boundary.
 func runCLIArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return newApplication().Run(args, stdin, stdout, stderr)
 }
@@ -31,39 +25,7 @@ func runCLIArgsWithCommands(
 	stdout, stderr io.Writer,
 	commands map[string]cliCommand,
 ) int {
-	if len(args) == 0 {
-		_, _ = io.WriteString(stdout, clicmd.Usage)
-		return 1
-	}
-
-	cmd := args[0]
-	if cmd == "-h" || cmd == "--help" || cmd == "help" {
-		_, _ = io.WriteString(stdout, clicmd.Usage)
-		return 0
-	}
-
-	if help, ok := clicmd.Help[cmd]; ok && hasHelpFlag(args[1:]) {
-		_, _ = fmt.Fprintln(stdout, help)
-		if clicmd.TakesProvider(cmd) {
-			clicmd.PrintConfigProvidersTo(stdout, args[1:])
-		}
-		return 0
-	}
-
-	run, ok := commands[cmd]
-	if !ok {
-		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n", cmd)
-		_, _ = io.WriteString(stdout, clicmd.Usage)
-		return 1
-	}
-	return run(args[1:], stdin, stdout, stderr)
+	return clicmd.RunArgsWithCommands(args, stdin, stdout, stderr, commands)
 }
 
-func hasHelpFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "-h" || arg == "--help" {
-			return true
-		}
-	}
-	return false
-}
+func hasHelpFlag(args []string) bool { return clicmd.HasHelpFlag(args) }
