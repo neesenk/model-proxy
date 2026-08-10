@@ -1,7 +1,8 @@
-package main
+package doctor_test
 
 import (
 	clidoctor "model-proxy/internal/cli/doctor"
+	configdomain "model-proxy/internal/config"
 	"strings"
 	"testing"
 )
@@ -26,10 +27,10 @@ func TestQuotaSourceLabel(t *testing.T) {
 
 // TestDryRunOrder: offline order is tier (plan before payg) then priority asc.
 func TestDryRunOrder(t *testing.T) {
-	cfg := &Config{Providers: map[string]Provider{
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
 		"plana": {}, "planb": {}, "payg": {Billing: "pay-as-you-go"},
 	}}
-	targets := []RouteTarget{
+	targets := []configdomain.RouteTarget{
 		{Provider: "payg", Priority: 1},
 		{Provider: "planb", Priority: 3},
 		{Provider: "plana", Priority: 2},
@@ -50,11 +51,11 @@ func TestPeakSummary(t *testing.T) {
 	if got := clidoctor.PeakSummary(nil); got != "-" {
 		t.Errorf("empty peakSummary=%q, want -", got)
 	}
-	got := clidoctor.PeakSummary(PeakConfig{{Window: "09:00-12:00", Multiplier: 2}})
+	got := clidoctor.PeakSummary(configdomain.PeakConfig{{Window: "09:00-12:00", Multiplier: 2}})
 	if !strings.Contains(got, "09:00-12:00") || !strings.Contains(got, "×2") {
 		t.Errorf("peakSummary=%q, want window + mult", got)
 	}
-	if got := clidoctor.PeakSummary(PeakConfig{{Window: "09:00-12:00"}}); !strings.Contains(got, "×2") {
+	if got := clidoctor.PeakSummary(configdomain.PeakConfig{{Window: "09:00-12:00"}}); !strings.Contains(got, "×2") {
 		t.Errorf("default multiplier: %q, want ×2", got)
 	}
 }

@@ -1,8 +1,9 @@
-package main
+package doctor_test
 
 import (
 	"fmt"
 	clidoctor "model-proxy/internal/cli/doctor"
+	configdomain "model-proxy/internal/config"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -33,9 +34,9 @@ func doctorLiveTestServer(t *testing.T, statusJSON func(addr string) string, req
 
 // doctorLiveTestCfg loads a config bound to the test server address (listen
 // must point at the httptest listener — renderDoctorLive dials cfg.Listen).
-func doctorLiveTestCfg(t *testing.T, addr, extra string) *Config {
+func doctorLiveTestCfg(t *testing.T, addr, extra string) *configdomain.Config {
 	t.Helper()
-	cfg, err := LoadConfigFromBytes("test", []byte("listen: "+addr+"\n"+extra))
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte("listen: "+addr+"\n"+extra))
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
@@ -291,7 +292,7 @@ func TestCheckTakeoverDrift(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", t.TempDir()) // isolate any pool-file reads
 	proxyURL := "http://127.0.0.1:8314"
-	cfg, err := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:8314
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:8314
 takeover:
   claude: `+filepath.Join(home, "claude.json")+`
   opencode: `+filepath.Join(home, "opencode.json")+`
