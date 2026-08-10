@@ -8,25 +8,14 @@ import (
 	"model-proxy/internal/configedit"
 )
 
-// backupConfig / atomicWrite / backupConfigPath delegate to
-// internal/configedit; wrappers keep root call sites stable during migration.
-func backupConfig(path, backup string) { configedit.BackupConfig(path, backup) }
-func atomicWrite(path string, data []byte) error {
-	return configedit.AtomicWrite(path, data)
-}
-func backupConfigPath(configFile string) string { return configedit.BackupPath(configFile) }
-
-// writeConfigValidated is shared by Web config writes and models refresh.
-func writeConfigValidated(configFile, data string) (backup string, err error) {
-	return configedit.WriteConfigValidated(configFile, data, func(path string, raw []byte) error {
+// saveAndReload validates, backs up, atomically writes, then hot-reloads the
+// config; on reload failure the previous file is restored from the backup.
+func (api *proxyWebAPI) saveAndReload(data []byte) error {
+	configFile := api.currentConfigFile()
+	backup, err := configedit.WriteConfigValidated(configFile, string(data), func(path string, raw []byte) error {
 		_, err := configdomain.LoadConfigFromBytes(path, raw)
 		return err
 	})
-}
-
-func (api *proxyWebAPI) saveAndReload(data []byte) error {
-	configFile := api.currentConfigFile()
-	backup, err := writeConfigValidated(configFile, string(data))
 	if err != nil {
 		return err
 	}
@@ -36,7 +25,7 @@ func (api *proxyWebAPI) saveAndReload(data []byte) error {
 			return err
 		}
 		if original, readErr := os.ReadFile(backup); readErr == nil {
-			_ = atomicWrite(configFile, original)
+			_ = configedit.AtomicWrite(configFile, original)
 		}
 		return err
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/configedit"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +12,7 @@ import (
 func TestAtomicWrite(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
-	if err := atomicWrite(p, []byte("hello")); err != nil {
+	if err := configedit.AtomicWrite(p, []byte("hello")); err != nil {
 		t.Fatalf("atomicWrite: %v", err)
 	}
 	b, _ := os.ReadFile(p)
