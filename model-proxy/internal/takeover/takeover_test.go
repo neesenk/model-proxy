@@ -1,7 +1,8 @@
-package main
+package takeover_test
 
 import (
 	"encoding/json"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
@@ -16,18 +17,18 @@ import (
 // pure file/string operations against the takeover target files — fully
 // testable with temp dirs.
 
-func testTakeoverConfig(t *testing.T, dir string) *Config {
-	return &Config{
-		Providers: map[string]Provider{
+func testTakeoverConfig(t *testing.T, dir string) *configdomain.Config {
+	return &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {
 				OpenAIBaseURL: "http://x", Provider: "aqp",
 				Models: []string{"glm-5.2"},
 			},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2", Priority: 1}},
 		},
-		Takeover: Takeover{
+		Takeover: configdomain.Takeover{
 			ProxyURL:   "http://127.0.0.1:15721",
 			Claude:     filepath.Join(dir, "claude.json"),
 			Opencode:   filepath.Join(dir, "opencode.json"),
@@ -265,12 +266,12 @@ new = "y"
 // --- exposedModels: picks best-priority target's metadata ---
 
 func TestExposedModels_PicksBestPriority(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"a": {Provider: testProviderID, Models: []string{"m1"}},
-			"b": {Provider: testProviderID, Models: []string{"m1"}},
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"a": {Provider: "static", Models: []string{"m1"}},
+			"b": {Provider: "static", Models: []string{"m1"}},
 		},
-		Routes: map[string][]RouteTarget{
+		Routes: map[string][]configdomain.RouteTarget{
 			"m1": {
 				{Provider: "b", Model: "m1", Priority: 2},
 				{Provider: "a", Model: "m1", Priority: 1}, // best
@@ -297,10 +298,10 @@ func TestExposedModels_PicksBestPriority(t *testing.T) {
 // --- providerID: default + override ---
 
 func TestProviderID(t *testing.T) {
-	if got := takeover.ProviderID(&Config{}); got != "model-proxy" {
+	if got := takeover.ProviderID(&configdomain.Config{}); got != "model-proxy" {
 		t.Errorf("takeover.ProviderID(empty)=%q want model-proxy", got)
 	}
-	if got := takeover.ProviderID(&Config{Takeover: Takeover{ProviderID: "custom"}}); got != "custom" {
+	if got := takeover.ProviderID(&configdomain.Config{Takeover: configdomain.Takeover{ProviderID: "custom"}}); got != "custom" {
 		t.Errorf("takeover.ProviderID(custom)=%q want custom", got)
 	}
 }

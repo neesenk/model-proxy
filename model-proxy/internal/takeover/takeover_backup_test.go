@@ -1,7 +1,9 @@
-package main
+package takeover_test
 
 import (
-	"model-proxy/internal/takeover"
+	"strings"
+
+	takeover "model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,7 +36,7 @@ func TestBackup_CreatesCopyAndMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("meta file not created: %v", err)
 	}
-	if !contains(string(meta), "sha256") || !contains(string(meta), "path") {
+	if !strings.Contains(string(meta), "sha256") || !strings.Contains(string(meta), "path") {
 		t.Errorf("meta missing fields: %s", meta)
 	}
 }

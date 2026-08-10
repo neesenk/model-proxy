@@ -1,7 +1,7 @@
-package main
+package takeover_test
 
 import (
-	"model-proxy/internal/takeover"
+	takeover "model-proxy/internal/takeover"
 	"os"
 	"path/filepath"
 	"testing"

@@ -1,21 +1,24 @@
-package main
+package takeover_test
 
 import (
 	"fmt"
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/takeover"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // --- listClients ---
 
 func TestListClients_All(t *testing.T) {
-	cfg := &Config{Takeover: Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d"}}
+	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d"}}
 	all := takeover.ListClients(cfg, "")
 	if len(all) != 4 {
 		t.Errorf("takeover.ListClients('') len=%d want 4", len(all))
@@ -27,7 +30,7 @@ func TestListClients_All(t *testing.T) {
 }
 
 func TestListClients_OneByName(t *testing.T) {
-	cfg := &Config{Takeover: Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d"}}
+	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d"}}
 	one := takeover.ListClients(cfg, "codex")
 	if len(one) != 1 || one[0].Name != "codex" {
 		t.Errorf("takeover.ListClients('codex')=%+v want [codex]", one)
@@ -35,7 +38,7 @@ func TestListClients_OneByName(t *testing.T) {
 }
 
 func TestListClients_UnknownReturnsNil(t *testing.T) {
-	cfg := &Config{Takeover: Takeover{Claude: "a"}}
+	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a"}}
 	if got := takeover.ListClients(cfg, "nope"); got != nil {
 		t.Errorf("takeover.ListClients('nope')=%+v want nil", got)
 	}
@@ -45,12 +48,12 @@ func TestListClients_UnknownReturnsNil(t *testing.T) {
 
 func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
 		},
-		Routes:   map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
-		Takeover: Takeover{ProxyURL: "http://127.0.0.1:15721", Claude: filepath.Join(dir, "claude.json")},
+		Routes:   map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
+		Takeover: configdomain.Takeover{ProxyURL: "http://127.0.0.1:15721", Claude: filepath.Join(dir, "claude.json")},
 	}
 	bakDir := filepath.Join(dir, ".mp")
 
@@ -60,12 +63,12 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 		t.Fatal(err)
 	}
 	rewritten, _ := os.ReadFile(cfg.Takeover.Claude)
-	if !contains(string(rewritten), "ANTHROPIC_BASE_URL") {
+	if !strings.Contains(string(rewritten), "ANTHROPIC_BASE_URL") {
 		t.Errorf("takeover did not rewrite claude: %s", rewritten)
 	}
 	// Backup preserved the original.
 	bak, _ := os.ReadFile(filepath.Join(bakDir, "claude.bak"))
-	if !contains(string(bak), "OLD") {
+	if !strings.Contains(string(bak), "OLD") {
 		t.Errorf("backup did not preserve original: %s", bak)
 	}
 	// Restore brings the original back.
@@ -73,13 +76,13 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, _ := os.ReadFile(cfg.Takeover.Claude)
-	if !contains(string(restored), "OLD") || contains(string(restored), "ANTHROPIC_BASE_URL") {
+	if !strings.Contains(string(restored), "OLD") || strings.Contains(string(restored), "ANTHROPIC_BASE_URL") {
 		t.Errorf("restore did not revert: %s", restored)
 	}
 }
 
 func TestRunTakeover_UnknownClientNoOps(t *testing.T) {
-	cfg := &Config{Takeover: Takeover{Claude: "a"}}
+	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a"}}
 	// "nope" → listClients returns nil → loop body never runs → nil error.
 	if err := takeover.RunTakeover(cfg, "nope", t.TempDir(), takeover.ModelFacts{SourceDefault: -1}); err != nil {
 		t.Errorf("runTakeover unknown client: want nil, got %v", err)
@@ -100,13 +103,13 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 
 	dir := t.TempDir()
 	bakDir := filepath.Join(dir, ".mp")
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
 		},
-		Routes: map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
+		Routes: map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
 		// Only claude exists; opencode/codex/pi point at non-existent paths.
-		Takeover: Takeover{
+		Takeover: configdomain.Takeover{
 			ProxyURL: "http://127.0.0.1:15721",
 			Claude:   filepath.Join(dir, "claude.json"),
 			Opencode: filepath.Join(dir, "opencode.json"),
@@ -125,7 +128,7 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 			factsSources[provider][model] = int(source)
 		}
 	}
-	implicit, _ := synthesizeImplicitRoutes(cfg)
+	implicit, _ := app.SynthesizeImplicitRoutes(cfg, accounts.NewStore(cliframework.HomeDir()))
 	facts := takeover.ModelFacts{
 		Implicit:       implicit,
 		Meta:           meta,
@@ -139,7 +142,7 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 	}
 	// claude was rewritten (backup + rewrite succeeded).
 	b, _ := os.ReadFile(cfg.Takeover.Claude)
-	if !contains(string(b), "ANTHROPIC_BASE_URL") {
+	if !strings.Contains(string(b), "ANTHROPIC_BASE_URL") {
 		t.Errorf("claude not rewritten: %s", b)
 	}
 	// Missing clients' files were NOT created (skipped, not rewritten to defaults).
@@ -154,12 +157,12 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 
 func TestRunTakeover_SingleMissingFileErrors(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
 		},
-		Routes: map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
-		Takeover: Takeover{
+		Routes: map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
+		Takeover: configdomain.Takeover{
 			ProxyURL: "http://127.0.0.1:15721",
 			Pi:       filepath.Join(dir, "nonexistent.json"),
 		},
@@ -177,12 +180,12 @@ func TestRunRestore_AllSkipsMissingBackup(t *testing.T) {
 	os.MkdirAll(bakDir, 0o700)
 	// Only a claude backup exists.
 	os.WriteFile(filepath.Join(bakDir, "claude.bak"), []byte(`{"env":{"OLD":"1"}}`), 0o600)
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
 		},
-		Routes: map[string][]RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
-		Takeover: Takeover{
+		Routes: map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
+		Takeover: configdomain.Takeover{
 			ProxyURL: "http://127.0.0.1:15721",
 			Claude:   filepath.Join(dir, "claude.json"),
 			Opencode: filepath.Join(dir, "opencode.json"),
@@ -194,7 +197,7 @@ func TestRunRestore_AllSkipsMissingBackup(t *testing.T) {
 		t.Fatalf("runRestore all with missing backups: want nil, got %v", err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Claude)
-	if !contains(string(b), "OLD") {
+	if !strings.Contains(string(b), "OLD") {
 		t.Errorf("claude not restored from backup: %s", b)
 	}
 }
