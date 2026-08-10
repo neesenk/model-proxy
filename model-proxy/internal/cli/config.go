@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"model-proxy/internal/app"
+	cliframework "model-proxy/internal/cli/framework"
 	displaypkg "model-proxy/provider"
 	"os"
 
@@ -57,4 +58,20 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
 		os.Exit(1)
 	}
+}
+
+// CmdConfigRun is the process-level entry: it owns config loading (init skips
+// it) and delegates to CmdConfig.
+func CmdConfigRun(args []string) {
+	// config init writes the template without loading config; print/check need
+	// a loaded config.
+	if len(args) > 0 && args[0] == "init" {
+		CmdConfig(args, nil)
+		return
+	}
+	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args[1:]))
+	if err != nil {
+		log.Fatal(err)
+	}
+	CmdConfig(args, cfg)
 }
