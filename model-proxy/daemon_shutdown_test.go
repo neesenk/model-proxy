@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"io"
+	cliserve "model-proxy/internal/cli/serve"
 	"net"
 	"net/http"
 	"os"
@@ -74,12 +75,12 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 	orderingErr := make(chan string, 1)
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- serveHTTPUntilShutdown(
+		serveDone <- cliserve.ServeHTTPUntilShutdown(
 			server,
 			listener,
 			shutdown,
 			time.Second,
-			[]transportTask{func(stop <-chan struct{}) {
+			[]cliserve.TransportTask{func(stop <-chan struct{}) {
 				<-stop
 				close(transportStopped)
 			}},
@@ -196,7 +197,7 @@ func TestServeHTTPUntilShutdownForceClosesConnectionsAfterDeadline(t *testing.T)
 	orderingErr := make(chan string, 1)
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- serveHTTPUntilShutdown(
+		serveDone <- cliserve.ServeHTTPUntilShutdown(
 			server,
 			listener,
 			shutdown,
@@ -303,12 +304,12 @@ func TestServeHTTPUntilShutdownCleansUpAfterServeError(t *testing.T) {
 	orderingErr := make(chan string, 1)
 	serveDone := make(chan error, 1)
 	go func() {
-		serveDone <- serveHTTPUntilShutdown(
+		serveDone <- cliserve.ServeHTTPUntilShutdown(
 			server,
 			listener,
 			make(chan struct{}),
 			time.Second,
-			[]transportTask{func(stop <-chan struct{}) {
+			[]cliserve.TransportTask{func(stop <-chan struct{}) {
 				close(taskStarted)
 				<-stop
 				close(taskStopped)
@@ -394,7 +395,7 @@ func TestRunReloadLoopStopsBufferedSignalsAndJoinsActiveReload(t *testing.T) {
 	loopDone := make(chan struct{})
 	var calls atomic.Int32
 	go func() {
-		runReloadLoop(stop, hup, func() {
+		cliserve.RunReloadLoop(stop, hup, func() {
 			calls.Add(1)
 			close(reloadStarted)
 			<-releaseReload
@@ -431,16 +432,16 @@ func TestRunReloadLoopStopsBufferedSignalsAndJoinsActiveReload(t *testing.T) {
 	close(stopped)
 	buffered := make(chan os.Signal, 1)
 	buffered <- syscall.SIGHUP
-	runReloadLoop(stopped, buffered, func() {
+	cliserve.RunReloadLoop(stopped, buffered, func() {
 		t.Fatal("buffered SIGHUP started a reload after shutdown")
 	})
 }
 
 func TestGracefulShutdownFitsSupervisorHardStopWindow(t *testing.T) {
-	if gracefulShutdownTimeout >= supervisorWorkerStopWait {
+	if cliserve.GracefulShutdownTimeout >= supervisorWorkerStopWait {
 		t.Fatalf(
 			"graceful shutdown timeout %s must stay below supervisor hard-stop wait %s",
-			gracefulShutdownTimeout,
+			cliserve.GracefulShutdownTimeout,
 			supervisorWorkerStopWait,
 		)
 	}

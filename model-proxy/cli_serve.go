@@ -112,7 +112,7 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 	signal.Notify(hupCh, syscall.SIGHUP)
 	defer signal.Stop(hupCh)
 	runtime.transportTasks = append(runtime.transportTasks, func(stop <-chan struct{}) {
-		runReloadLoop(stop, hupCh, runtime.reload)
+		cliserve.RunReloadLoop(stop, hupCh, runtime.reload)
 	})
 
 	listener, err := net.Listen("tcp", runtime.startupConfig.Listen)
@@ -126,11 +126,11 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 
 	log.Printf("model-proxy listening on %s (routes: %s)",
 		runtime.startupConfig.Listen, cliframework.RouteNames(runtime.startupConfig))
-	return serveHTTPUntilShutdown(
+	return cliserve.ServeHTTPUntilShutdown(
 		server,
 		listener,
 		shutdownCtx.Done(),
-		gracefulShutdownTimeout,
+		cliserve.GracefulShutdownTimeout,
 		runtime.transportTasks,
 		runtime.Close,
 	)

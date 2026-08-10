@@ -59,7 +59,7 @@ type applicationRuntime struct {
 	startupConfig  *Config // immutable listen/startup-log view; reload state lives in Proxy
 	proxy          *Proxy
 	handler        http.Handler
-	transportTasks []transportTask
+	transportTasks []cliserve.TransportTask
 }
 
 func newApplicationRuntime(cfg *Config, args cliserve.Args) *applicationRuntime {

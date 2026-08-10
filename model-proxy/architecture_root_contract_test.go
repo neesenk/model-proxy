@@ -60,7 +60,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		forbiddenChains := [][2]string{
 			{"reqLog", "Run"}, {"reqLog", "Shutdown"}, {"flusher", "flush"},
 		}
-		for _, path := range []string{"daemon.go", "cli_serve.go", "cli_daemon.go"} {
+		for _, path := range []string{"cli_serve.go", "cli_daemon.go"} {
 			file, fileSet := parseGoFile(t, path)
 			for _, violation := range forbiddenCallSites(file, fileSet, forbiddenCalls, forbiddenChains) {
 				t.Errorf("%s bypasses proxyLifecycle: %s", path, violation)
@@ -94,8 +94,8 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		if got := selectorCountOnIdent(serve, "runtime", "Close"); got != 2 {
 			t.Errorf("cli_serve.go runtime.Close selector uses = %d, want listener-error cleanup plus final callback", got)
 		}
-		if got := callCountWithLastSelector(serve, "serveHTTPUntilShutdown", "runtime", "Close"); got != 1 {
-			t.Errorf("serveHTTPUntilShutdown(..., runtime.Close) calls = %d, want exactly 1 final-flush callback", got)
+		if got := callCountWithLastSelector(serve, "ServeHTTPUntilShutdown", "runtime", "Close"); got != 1 {
+			t.Errorf("cliserve.ServeHTTPUntilShutdown(..., runtime.Close) calls = %d, want exactly 1 final-flush callback", got)
 		}
 	})
 
@@ -128,8 +128,16 @@ func callCountWithLastSelector(file *ast.File, function, receiver, method string
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		identifier, ok := call.Fun.(*ast.Ident)
-		if !ok || identifier.Name != function {
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			if fun.Name != function {
+				return true
+			}
+		case *ast.SelectorExpr:
+			if fun.Sel.Name != function {
+				return true
+			}
+		default:
 			return true
 		}
 		selector, ok := call.Args[len(call.Args)-1].(*ast.SelectorExpr)
