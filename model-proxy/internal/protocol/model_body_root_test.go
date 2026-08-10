@@ -1,4 +1,4 @@
-package main
+package protocol_test
 
 import (
 	"model-proxy/internal/protocol"

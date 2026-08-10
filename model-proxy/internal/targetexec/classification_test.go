@@ -1,9 +1,7 @@
-package main
+package targetexec
 
 import (
 	"testing"
-
-	"model-proxy/internal/targetexec"
 )
 
 func TestIsModelDenied(t *testing.T) {
@@ -24,7 +22,7 @@ func TestIsModelDenied(t *testing.T) {
 		{500, `{"error":"model not found"}`, false},
 	}
 	for _, test := range cases {
-		if got := targetexec.IsModelDenied(test.status, []byte(test.body)); got != test.want {
+		if got := IsModelDenied(test.status, []byte(test.body)); got != test.want {
 			t.Errorf("IsModelDenied(%d, %q) = %v, want %v", test.status, test.body, got, test.want)
 		}
 	}
@@ -49,7 +47,7 @@ func TestParseUnsupportedParam(t *testing.T) {
 		{``, "", false},
 	}
 	for _, test := range cases {
-		got, ok := targetexec.ParseUnsupportedParam([]byte(test.body))
+		got, ok := ParseUnsupportedParam([]byte(test.body))
 		if got != test.want || ok != test.ok {
 			t.Errorf("ParseUnsupportedParam(%q) = %q,%v, want %q,%v", test.body, got, ok, test.want, test.ok)
 		}
