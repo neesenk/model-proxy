@@ -70,8 +70,8 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 
 		adapter, _ := parseGoFile(t, "targetexec_adapter.go")
 		factory := namedMethod(t, adapter, "Proxy", "targetExecutor")
-		if got := namedCallCountInNode(factory.Body, "newTargetExecutionState"); got != 1 {
-			t.Errorf("Proxy.targetExecutor newTargetExecutionState calls = %d, want one frozen-state adapter", got)
+		if got := selectorCompositeCountInNode(factory.Body, "targetexec", "GateState"); got != 1 {
+			t.Errorf("Proxy.targetExecutor targetexec.GateState composites = %d, want one frozen-state adapter", got)
 		}
 	})
 
@@ -1376,4 +1376,24 @@ func importedCompositeLiteralSitesInFiles(files []struct {
 		}
 	}
 	return sites
+}
+
+// selectorCompositeCountInNode counts <pkg>.<Type>{...} composite literals under n.
+func selectorCompositeCountInNode(n ast.Node, pkg, typ string) int {
+	count := 0
+	ast.Inspect(n, func(node ast.Node) bool {
+		lit, ok := node.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		sel, ok := lit.Type.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != typ {
+			return true
+		}
+		if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == pkg {
+			count++
+		}
+		return true
+	})
+	return count
 }

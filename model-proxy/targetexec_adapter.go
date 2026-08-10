@@ -15,66 +15,39 @@ import (
 	"model-proxy/internal/transport/bodycapture"
 )
 
-// targetExecutionState freezes the reload generation and scheduling values
-// captured by one Attempt. The internal executor therefore cannot accidentally
-// mutate a newer runtime generation or reach back into root scheduling.
-type targetExecutionState struct {
-	proxy      *Proxy
-	runtime    targetexec.Runtime
-	scheduling Scheduling
+// proxyHealthGate adapts the root Proxy to targetexec.HealthGate (the narrow
+// scheduling capability used by GateState).
+type proxyHealthGate struct{ proxy *Proxy }
+
+func (g proxyHealthGate) ModelLocked(provider, model string, now time.Time) bool {
+	return g.proxy.modelLocked(provider, model, now)
 }
-
-var _ targetexec.State = targetExecutionState{}
-
-func newTargetExecutionState(proxy *Proxy, runtime targetexec.Runtime) targetExecutionState {
-	return targetExecutionState{
-		proxy:      proxy,
-		runtime:    runtime,
-		scheduling: runtime.Scheduling,
-	}
+func (g proxyHealthGate) TakeHalfOpenSlot(provider string, generation uint64) bool {
+	return g.proxy.takeHalfOpenSlot(provider, generation)
 }
-
-func (state targetExecutionState) ModelLocked(target configdomain.RouteTarget, now time.Time) bool {
-	return state.proxy.modelLocked(target.Provider, target.Model, now)
+func (g proxyHealthGate) ReleaseHalfOpenSlot(provider string, generation uint64) {
+	g.proxy.releaseHalfOpenSlot(provider, generation)
 }
-
-func (state targetExecutionState) TakeHalfOpenSlot(provider string) bool {
-	return state.proxy.takeHalfOpenSlot(provider, state.runtime.Generation)
+func (g proxyHealthGate) RecordSuccess(provider, model string, generation uint64) {
+	g.proxy.recordSuccess(provider, model, generation)
 }
-
-func (state targetExecutionState) ReleaseHalfOpenSlot(provider string) {
-	state.proxy.releaseHalfOpenSlot(provider, state.runtime.Generation)
+func (g proxyHealthGate) RecordFailure(provider string, scheduling configdomain.Scheduling, generation uint64) {
+	g.proxy.recordFailure(provider, scheduling, generation)
 }
-
-func (state targetExecutionState) RecordSuccess(target configdomain.RouteTarget) {
-	state.proxy.recordSuccess(target.Provider, target.Model, state.runtime.Generation)
+func (g proxyHealthGate) RecordModelFailure(provider, model string, scheduling configdomain.Scheduling, generation uint64) {
+	g.proxy.recordModelFailure(provider, model, scheduling, generation)
 }
-
-func (state targetExecutionState) RecordFailure(provider string) {
-	state.proxy.recordFailure(provider, state.scheduling, state.runtime.Generation)
+func (g proxyHealthGate) RecordRateLimit(provider string, until time.Time, kind string, generation uint64) {
+	g.proxy.recordRateLimit(provider, until, runtimestate.ParseRateLimitKind(kind), generation)
 }
-
-func (state targetExecutionState) RecordModelFailure(target configdomain.RouteTarget) {
-	state.proxy.recordModelFailure(target.Provider, target.Model, state.scheduling, state.runtime.Generation)
+func (g proxyHealthGate) LearnParamBlock(provider, model, parameter string, generation uint64) bool {
+	return g.proxy.learnParamBlock(provider, model, parameter, generation)
 }
-
-func (state targetExecutionState) RecordRateLimit(
-	provider string,
-	decision targetexec.RateLimitDecision,
-) {
-	state.proxy.recordRateLimit(provider, decision.Until, runtimestate.ParseRateLimitKind(string(decision.Kind)), state.runtime.Generation)
+func (g proxyHealthGate) ApplyParamBlock(provider, model string, body []byte) []byte {
+	return g.proxy.applyParamBlock(provider, model, body)
 }
-
-func (state targetExecutionState) LearnParamBlock(target configdomain.RouteTarget, parameter string) bool {
-	return state.proxy.learnParamBlock(target.Provider, target.Model, parameter, state.runtime.Generation)
-}
-
-func (state targetExecutionState) ApplyParamBlock(target configdomain.RouteTarget, body []byte) []byte {
-	return state.proxy.applyParamBlock(target.Provider, target.Model, body)
-}
-
-func (state targetExecutionState) NoteWireResponsesMiss(provider string) {
-	state.proxy.noteWireResponsesMiss(provider)
+func (g proxyHealthGate) NoteWireResponsesMiss(provider string) {
+	g.proxy.noteWireResponsesMiss(provider)
 }
 
 // targetExecutionEffects maps semantic target-execution observations to the
@@ -211,8 +184,12 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 
 func (p *Proxy) targetExecutor(runtime targetexec.Runtime) targetexec.Executor {
 	return targetexec.Executor{
-		Client:    p.client,
-		State:     newTargetExecutionState(p, runtime),
+		Client: p.client,
+		State: targetexec.GateState{
+			Gate:       proxyHealthGate{proxy: p},
+			Runtime:    runtime,
+			Scheduling: runtime.Scheduling,
+		},
 		Effects:   targetExecutionEffects{proxy: p},
 		Responses: p.responsesState,
 	}
