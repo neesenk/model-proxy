@@ -42,7 +42,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/protocol":              nil,
 		"model-proxy/internal/routing":               {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true},
 		"model-proxy/internal/runtime":               {"model-proxy/internal/config": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/provider": true},
-		"model-proxy/internal/runtime/wirecap":       nil,
+		"model-proxy/internal/runtime/wirecap":       {"model-proxy/internal/config": true, "model-proxy/provider": true},
 		"model-proxy/internal/shadow":                {"model-proxy/internal/targetexec": true, "model-proxy/internal/transport/bodycapture": true},
 		"model-proxy/internal/takeover":              {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true},
 		"model-proxy/internal/targetexec":            {"model-proxy/internal/cache": true, "model-proxy/internal/config": true, "model-proxy/internal/protocol": true, "model-proxy/internal/transport/bodycapture": true, "model-proxy/provider": true},

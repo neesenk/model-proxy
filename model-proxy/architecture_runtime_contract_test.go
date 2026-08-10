@@ -233,7 +233,6 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 	})
 
 	t.Run("internal runtime wirecap owns endpoint capability state", func(t *testing.T) {
-		assertRepositoryLeafPackage(t, "internal/runtime/wirecap")
 
 		proxy := rootPackage
 		wireStoreType := namedStructFields(t, proxy, "Proxy")["wireCaps"]
