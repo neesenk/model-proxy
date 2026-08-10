@@ -1,6 +1,7 @@
 package main
 
 import (
+	cliframework "model-proxy/internal/cli/framework"
 	"time"
 
 	"model-proxy/internal/accounts"
@@ -11,7 +12,7 @@ type poolAccount = accounts.Account
 type credentialPool = accounts.Pool
 
 func accountStore() accounts.Store {
-	return accounts.NewStore(homeDir())
+	return accounts.NewStore(cliframework.HomeDir())
 }
 
 func poolPath(name string) string {

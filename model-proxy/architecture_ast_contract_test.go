@@ -227,7 +227,7 @@ func isAccountsAdapterWrapper(fn *ast.FuncDecl) bool {
 
 	switch fn.Name.Name {
 	case "accountStore":
-		// accounts owns its home-dir seam: either the package homeDir() wrapper
+		// accounts owns its home-dir seam: either the package cliframework.HomeDir() wrapper
 		// or a direct os.UserHomeDir() inline.
 		if !selectorCallMatches(call, "accounts", "NewStore") || len(call.Args) != 1 {
 			return false
@@ -237,7 +237,9 @@ func isAccountsAdapterWrapper(fn *ast.FuncDecl) bool {
 			return true
 		}
 		if inner, ok := arg.(*ast.CallExpr); ok {
-			return selectorCallMatches(inner, "os", "UserHomeDir")
+			// The home-dir seam lives in internal/cli/framework (HomeDir).
+			return selectorCallMatches(inner, "os", "UserHomeDir") ||
+				selectorCallMatches(inner, "cliframework", "HomeDir")
 		}
 		return false
 	case "nowTS":

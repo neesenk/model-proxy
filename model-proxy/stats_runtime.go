@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 	obscounters "model-proxy/internal/observe/counters"
 	"time"
 
@@ -51,7 +52,7 @@ func (p *Proxy) initStats(config StatsConfig) {
 	}
 	p.stats = store
 
-	if count, err := store.ImportLegacyTokens(observestats.LegacyTokensPath(homeDir())); err != nil {
+	if count, err := store.ImportLegacyTokens(observestats.LegacyTokensPath(cliframework.HomeDir())); err != nil {
 		log.Printf("[stats] legacy token_usage.json migration failed: %v", err)
 	} else if count > 0 {
 		log.Printf("[stats] imported %d entries from legacy token_usage.json", count)

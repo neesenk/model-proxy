@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"os"
@@ -92,7 +93,7 @@ func (api *proxyWebAPI) Accounts() []appapi.ProviderAccounts {
 		}
 		switch config.Provider {
 		case "aqp":
-			account, _ := provider.LoadAqpAccount(authFilePath(name, "oauth_auth"))
+			account, _ := provider.LoadAqpAccount(cliframework.AuthFilePath(name, "oauth_auth"))
 			if account != nil && account.AccountID != "" {
 				item.Accounts = append(item.Accounts, appapi.Account{
 					ID:      account.AccountID,
@@ -102,7 +103,7 @@ func (api *proxyWebAPI) Accounts() []appapi.ProviderAccounts {
 				})
 			}
 		case "codex":
-			account, _ := provider.LoadCodexAccount(authFilePath(name, "oauth_auth"))
+			account, _ := provider.LoadCodexAccount(cliframework.AuthFilePath(name, "oauth_auth"))
 			if account != nil && account.AccountID != "" {
 				item.Accounts = append(item.Accounts, appapi.Account{
 					ID:    account.AccountID,
@@ -380,14 +381,14 @@ func (api *proxyWebAPI) RemoveAccount(name, id string) (appapi.MutationResult, e
 	}
 	switch providerConfig.Provider {
 	case "aqp":
-		if err := provider.ClearAqpAccount(authFilePath(name, "oauth_auth")); err != nil {
+		if err := provider.ClearAqpAccount(cliframework.AuthFilePath(name, "oauth_auth")); err != nil {
 			return appapi.MutationResult{}, appapi.NewHTTPError(
 				http.StatusInternalServerError,
 				err.Error(),
 			)
 		}
 	case "codex":
-		err := os.Remove(authFilePath(name, "oauth_auth"))
+		err := os.Remove(cliframework.AuthFilePath(name, "oauth_auth"))
 		if err != nil && !os.IsNotExist(err) {
 			return appapi.MutationResult{}, appapi.NewHTTPError(
 				http.StatusInternalServerError,
@@ -465,7 +466,7 @@ func (job *aqpLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 		return fail(err)
 	}
 	if err := provider.SaveAqpAccount(
-		authFilePath(job.name, "oauth_auth"),
+		cliframework.AuthFilePath(job.name, "oauth_auth"),
 		account,
 	); err != nil {
 		return fail(err)
@@ -525,7 +526,7 @@ func (job *codexLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}
-	path := authFilePath(job.name, "oauth_auth")
+	path := cliframework.AuthFilePath(job.name, "oauth_auth")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fail(err)
 	}
@@ -554,7 +555,7 @@ func (api *proxyWebAPI) BeginLogin(
 	}
 	switch providerConfig.Provider {
 	case "aqp":
-		client := api.newAqpClientFn(authFilePath(name, "oauth_auth"))
+		client := api.newAqpClientFn(cliframework.AuthFilePath(name, "oauth_auth"))
 		loginURL, err := client.BootstrapLoginURLContext(ctx)
 		if err != nil {
 			return appapi.LoginStart{}, appapi.NewHTTPError(

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"model-proxy/internal/app"
+	cliframework "model-proxy/internal/cli/framework"
 	runtimestate "model-proxy/internal/runtime"
 	"os"
 	"sort"
@@ -39,7 +40,7 @@ func (p *Proxy) pricingSnapshot() *pricing.Catalog {
 	p.pricingMu.Lock()
 	defer p.pricingMu.Unlock()
 	cat, err := pricing.EnsureFresh(pricing.RefreshOptions{
-		CacheFile: pricing.CachePath(homeDir()),
+		CacheFile: pricing.CachePath(cliframework.HomeDir()),
 		Endpoint:  cfg.Pricing.ResolvedSourceURL(),
 		Fetch:     pricing.FetchHTTP,
 		TTL:       cfg.Pricing.TTLDuration(),
@@ -90,7 +91,7 @@ func (p *Proxy) catalogSnapshot() *catalog.Catalog {
 // runProxy only — direct NewProxy callers (tests) stay offline; tests that need
 // metadata set p.catalog directly.
 func (p *Proxy) initCatalog() {
-	cat, err := app.LoadModelsCatalog(homeDir(), false)
+	cat, err := app.LoadModelsCatalog(cliframework.HomeDir(), false)
 	if err != nil || cat == nil {
 		if err != nil {
 			log.Printf("[models] catalog load failed: %v - running without request-aware routing", err)

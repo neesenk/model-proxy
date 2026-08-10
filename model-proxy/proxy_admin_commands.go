@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/probe"
 	"net/http"
@@ -116,7 +117,7 @@ func (commands proxyAdminCommands) accountProbe(ctx context.Context, name, id st
 	key := name
 	switch prov.Provider {
 	case "aqp":
-		account, _ := provider.LoadAqpAccount(authFilePath(name, "oauth_auth"))
+		account, _ := provider.LoadAqpAccount(cliframework.AuthFilePath(name, "oauth_auth"))
 		if account == nil || account.AccountID != id {
 			return accountProbeResult{}, &accountProbeError{
 				kind: accountProbeUnknownAccount,
@@ -124,7 +125,7 @@ func (commands proxyAdminCommands) accountProbe(ctx context.Context, name, id st
 			}
 		}
 	case "codex":
-		account, _ := provider.LoadCodexAccount(authFilePath(name, "oauth_auth"))
+		account, _ := provider.LoadCodexAccount(cliframework.AuthFilePath(name, "oauth_auth"))
 		if account == nil || account.AccountID != id {
 			return accountProbeResult{}, &accountProbeError{
 				kind: accountProbeUnknownAccount,

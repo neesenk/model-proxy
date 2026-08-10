@@ -108,8 +108,9 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 		adapter, _ := parseGoFile(t, "accounts_adapter.go")
 		wantImports := map[string]bool{
-			"time":                          true,
-			"model-proxy/internal/accounts": true,
+			"time":                               true,
+			"model-proxy/internal/accounts":      true,
+			"model-proxy/internal/cli/framework": true,
 		}
 		for _, spec := range adapter.Imports {
 			importPath := strings.Trim(spec.Path.Value, `"`)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"model-proxy/internal/app"
+	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/provider"
 )
@@ -14,7 +15,7 @@ type providerBuild = app.Build
 // version probes, volcengine signed model list) and delegates to internal/app.
 func buildProviders(cfg *Config) providerBuild {
 	return app.BuildProviders(cfg, accountStore(), app.BuildOptions{
-		HomeDir:                  homeDir(),
+		HomeDir:                  cliframework.HomeDir(),
 		CodexCLIVersion:          app.CodexCLIVersion,
 		CodexCacheVersion:        app.CodexCacheVersion,
 		ListArkAgentPlanModelIDs: climodels.ListArkAgentPlanModelIDs,
@@ -25,7 +26,7 @@ func buildProviders(cfg *Config) providerBuild {
 // seams (used by `usage` for per-account iteration without starting a Proxy).
 func buildOne(cfg *Config, name string, prov Provider, cred accountCred) provider.Provider {
 	return app.BuildOne(cfg, app.BuildOptions{
-		HomeDir:                  homeDir(),
+		HomeDir:                  cliframework.HomeDir(),
 		CodexCLIVersion:          app.CodexCLIVersion,
 		CodexCacheVersion:        app.CodexCacheVersion,
 		ListArkAgentPlanModelIDs: climodels.ListArkAgentPlanModelIDs,
