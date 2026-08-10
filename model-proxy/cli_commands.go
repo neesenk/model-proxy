@@ -1,6 +1,10 @@
 package main
 
-import clicmd "model-proxy/internal/cli"
+import (
+	clicmd "model-proxy/internal/cli"
+	clilogin "model-proxy/internal/cli/login"
+	climodels "model-proxy/internal/cli/models"
+)
 
 // Command wrappers delegate to internal/cli Run* entries.
 func cmdStats(args []string)          { clicmd.RunStats(args) }
@@ -21,3 +25,5 @@ func cmdServeStatusCLI(args []string) { clicmd.RunServeStatus(args) }
 func cmdDoctor(args []string)         { clicmd.RunDoctor(args) }
 func cmdTakeover(args []string)       { clicmd.RunTakeover(args) }
 func cmdRestore(args []string)        { clicmd.RunRestore(args) }
+func cmdLogin(args []string)          { clilogin.CmdLogin(args) }
+func cmdTest(args []string)           { climodels.CmdTest(args) }
