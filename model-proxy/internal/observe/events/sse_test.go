@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -57,30 +58,22 @@ func TestServeEventsReplaysRecentThenStreams(t *testing.T) {
 	hub := NewHub()
 	hub.Publish(Event{Type: "end", RequestID: "old", Ts: 1})
 
-	recorder := httptest.NewRecorder()
+	writer := newSyncSSEWriter()
 	ctx, cancel := context.WithCancel(context.Background())
 	request := httptest.NewRequest("GET", "/api/events", nil).WithContext(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ServeEvents(hub, recorder, request)
+		ServeEvents(hub, writer, request)
 	}()
 
 	// Wait for the replay to land, then publish a live event.
-	deadline := time.Now().Add(2 * time.Second)
-	for !strings.Contains(recorder.Body.String(), `"request_id":"old"`) {
-		if time.Now().After(deadline) {
-			t.Fatalf("recent event never replayed: %q", recorder.Body.String())
-		}
-		time.Sleep(2 * time.Millisecond)
+	if !writer.waitFor(`"request_id":"old"`, 2*time.Second) {
+		t.Fatalf("recent event never replayed: %q", writer.body())
 	}
 	hub.Publish(Event{Type: "start", RequestID: "live", Ts: 2})
-	deadline = time.Now().Add(2 * time.Second)
-	for !strings.Contains(recorder.Body.String(), `"request_id":"live"`) {
-		if time.Now().After(deadline) {
-			t.Fatalf("live event never streamed: %q", recorder.Body.String())
-		}
-		time.Sleep(2 * time.Millisecond)
+	if !writer.waitFor(`"request_id":"live"`, 2*time.Second) {
+		t.Fatalf("live event never streamed: %q", writer.body())
 	}
 
 	cancel()
@@ -92,6 +85,44 @@ func TestServeEventsReplaysRecentThenStreams(t *testing.T) {
 
 	// A non-flusher writer must be rejected rather than panicking.
 	ServeEvents(hub, &noFlusher{header: http.Header{}}, httptest.NewRequest("GET", "/api/events", nil))
+}
+
+// syncSSEWriter is a mutex-guarded ResponseWriter/Flusher so the test can poll
+// the written body without racing the handler goroutine.
+type syncSSEWriter struct {
+	mu     sync.Mutex
+	header http.Header
+	buf    strings.Builder
+}
+
+func newSyncSSEWriter() *syncSSEWriter {
+	return &syncSSEWriter{header: http.Header{}}
+}
+
+func (w *syncSSEWriter) Header() http.Header { return w.header }
+func (w *syncSSEWriter) WriteHeader(int)     {}
+func (w *syncSSEWriter) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(b)
+}
+func (w *syncSSEWriter) Flush() {}
+
+func (w *syncSSEWriter) body() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+func (w *syncSSEWriter) waitFor(substr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(w.body(), substr) {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return false
 }
 
 type noFlusher struct{ header http.Header }
