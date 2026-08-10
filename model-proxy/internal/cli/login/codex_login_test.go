@@ -1,10 +1,9 @@
-package main
+package login
 
 import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,8 +25,8 @@ func TestRequestUserCode(t *testing.T) {
 		fmt.Fprint(w, `{"device_auth_id":"daid-1","user_code":"ABC-123","interval":"5"}`)
 	}))
 	defer srv.Close()
-	opts := &clilogin.CodexLoginServerOptions{UsercodeURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
-	uc, err := clilogin.RequestUserCode(opts, provider.CodexOAuthClientID)
+	opts := &CodexLoginServerOptions{UsercodeURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	uc, err := RequestUserCode(opts, provider.CodexOAuthClientID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +59,8 @@ func TestPollForToken_PendingThenSuccess(t *testing.T) {
 		fmt.Fprint(w, `{"authorization_code":"authcode-1","code_challenge":"cc","code_verifier":"cv-1"}`)
 	}))
 	defer srv.Close()
-	opts := &clilogin.CodexLoginServerOptions{DeviceTokURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
-	cs, err := clilogin.PollForToken(opts, "daid", "uc", 0) // interval=0 → defaults to 5
+	opts := &CodexLoginServerOptions{DeviceTokURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	cs, err := PollForToken(opts, "daid", "uc", 0) // interval=0 → defaults to 5
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -83,8 +82,8 @@ func TestPollForToken_SlowDownThenSuccess(t *testing.T) {
 		fmt.Fprint(w, `{"authorization_code":"a","code_verifier":"v"}`)
 	}))
 	defer srv.Close()
-	opts := &clilogin.CodexLoginServerOptions{DeviceTokURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
-	_, err := clilogin.PollForToken(opts, "d", "u", 0)
+	opts := &CodexLoginServerOptions{DeviceTokURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	_, err := PollForToken(opts, "d", "u", 0)
 	if err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -99,8 +98,8 @@ func TestPollForToken_AccessDenied(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"code":"deviceauth_authorization_denied"}}`)
 	}))
 	defer srv.Close()
-	opts := &clilogin.CodexLoginServerOptions{DeviceTokURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
-	_, err := clilogin.PollForToken(opts, "d", "u", 0)
+	opts := &CodexLoginServerOptions{DeviceTokURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	_, err := PollForToken(opts, "d", "u", 0)
 	if err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Fatalf("expected denial error, got %v", err)
 	}
@@ -116,12 +115,12 @@ func TestExchangeCodeForTokens(t *testing.T) {
 		fmt.Fprint(w, `{"access_token":"at","refresh_token":"rt","id_token":"it"}`)
 	}))
 	defer srv.Close()
-	opts := &clilogin.CodexLoginServerOptions{TokenURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
-	af, err := clilogin.ExchangeCodeForTokens(opts, provider.CodexOAuthClientID, "authcode", "verifier")
+	opts := &CodexLoginServerOptions{TokenURL: srv.URL, HTTPClient: &http.Client{Timeout: 5 * time.Second}}
+	af, err := ExchangeCodeForTokens(opts, provider.CodexOAuthClientID, "authcode", "verifier")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "authorization_code|authcode|" + clilogin.CodexOAuthCallback + "|" + provider.CodexOAuthClientID + "|verifier"
+	want := "authorization_code|authcode|" + CodexOAuthCallback + "|" + provider.CodexOAuthClientID + "|verifier"
 	if gotForm != want {
 		t.Errorf("form=%q want %q", gotForm, want)
 	}
@@ -167,8 +166,8 @@ func TestDevicePollErrorCode(t *testing.T) {
 		{`{"error":{}}`, ""},
 		{`not json`, ""},
 	} {
-		if got := clilogin.DevicePollErrorCode([]byte(tc.body)); got != tc.want {
-			t.Errorf("clilogin.DevicePollErrorCode(%s)=%q, want %q", tc.body, got, tc.want)
+		if got := DevicePollErrorCode([]byte(tc.body)); got != tc.want {
+			t.Errorf("DevicePollErrorCode(%s)=%q, want %q", tc.body, got, tc.want)
 		}
 	}
 }
@@ -181,8 +180,8 @@ func TestDirOf(t *testing.T) {
 		"a/b/c.txt": "a/b",
 	}
 	for in, want := range cases {
-		if got := clilogin.DirOf(in); got != want {
-			t.Errorf("clilogin.DirOf(%q)=%q want %q", in, got, want)
+		if got := DirOf(in); got != want {
+			t.Errorf("DirOf(%q)=%q want %q", in, got, want)
 		}
 	}
 }

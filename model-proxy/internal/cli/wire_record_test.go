@@ -1,4 +1,4 @@
-package main
+package cli
 
 // wire_record_test.go — `wire record` against a mock upstream: byte-faithful
 // .sse recording, .err on non-2xx (never overwriting a good .sse), full
@@ -6,7 +6,7 @@ package main
 
 import (
 	"io"
-	"model-proxy/internal/cli"
+	configdomain "model-proxy/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,8 +36,8 @@ func TestWireRecord_Run(t *testing.T) {
 	}))
 	defer up.Close()
 
-	cfg := &Config{
-		Providers: map[string]Provider{
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
 			"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m1"}},
 		},
 	}
@@ -48,7 +48,7 @@ func TestWireRecord_Run(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := cli.RunWireRecord("p", "", "hi", outDir, cfg)
+	err := RunWireRecord("p", "", "hi", outDir, cfg)
 	if err == nil {
 		t.Fatal("expected error (anthropic endpoints 404)")
 	}
@@ -86,7 +86,7 @@ func TestWireRecord_Run(t *testing.T) {
 	}
 
 	// Unknown provider → error (no exit).
-	if err := cli.RunWireRecord("nope", "", "hi", t.TempDir(), cfg); err == nil {
+	if err := RunWireRecord("nope", "", "hi", t.TempDir(), cfg); err == nil {
 		t.Error("unknown provider must error")
 	}
 }
@@ -94,14 +94,14 @@ func TestWireRecord_Run(t *testing.T) {
 // TestWireRecord_SplitArgs: interspersed flags and positionals split
 // correctly (`wire record <prov> --out DIR` and `--out DIR <prov>` both work).
 func TestWireRecord_SplitArgs(t *testing.T) {
-	flagArgs, pos := cli.SplitWireRecordArgs([]string{"p1", "--out", "/tmp/x", "--model=m2"})
+	flagArgs, pos := SplitWireRecordArgs([]string{"p1", "--out", "/tmp/x", "--model=m2"})
 	if len(pos) != 1 || pos[0] != "p1" {
 		t.Errorf("pos = %v", pos)
 	}
 	if len(flagArgs) != 3 || flagArgs[0] != "--out" || flagArgs[1] != "/tmp/x" || flagArgs[2] != "--model=m2" {
 		t.Errorf("flagArgs = %v", flagArgs)
 	}
-	flagArgs2, pos2 := cli.SplitWireRecordArgs([]string{"--model", "m2", "p1"})
+	flagArgs2, pos2 := SplitWireRecordArgs([]string{"--model", "m2", "p1"})
 	if len(pos2) != 1 || pos2[0] != "p1" || len(flagArgs2) != 2 || flagArgs2[1] != "m2" {
 		t.Errorf("flagArgs2=%v pos2=%v", flagArgs2, pos2)
 	}
@@ -127,7 +127,7 @@ func TestWireRecord_CmdHappyPath(t *testing.T) {
 	outDir := t.TempDir()
 	// cmdWire → cmdWireRecord → runWireRecord, all endpoints 2xx → returns
 	// without os.Exit. Any exit would kill the test binary (caught as failure).
-	cmdWire([]string{"record", "p", "--out", outDir, "--config", cfgPath})
+	RunWire([]string{"record", "p", "--out", outDir, "--config", cfgPath})
 	// Spot-check one recorded file exists.
 	if _, err := os.Stat(filepath.Join(outDir, "responses_p.sse")); err != nil {
 		t.Errorf("responses_p.sse missing after happy-path run: %v", err)

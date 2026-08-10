@@ -1,10 +1,9 @@
-package main
+package cli
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"model-proxy/internal/cli"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,12 +16,12 @@ import (
 // TestPositionalArgs: --flag value pairs are skipped; bare positionals are kept
 // in order (used by pin/unpin/replay to pull <route> [<provider>] / <id>).
 func TestPositionalArgs(t *testing.T) {
-	got := cli.PositionalArgs([]string{"glm", "--config", "x.yaml", "zhipu", "--ttl", "1h"})
+	got := PositionalArgs([]string{"glm", "--config", "x.yaml", "zhipu", "--ttl", "1h"})
 	if len(got) != 2 || got[0] != "glm" || got[1] != "zhipu" {
 		t.Errorf("positionalArgs=%v want [glm zhipu]", got)
 	}
 	// --flag=value form doesn't consume a following bare token.
-	got = cli.PositionalArgs([]string{"--config=x.yaml", "glm"})
+	got = PositionalArgs([]string{"--config=x.yaml", "glm"})
 	if len(got) != 1 || got[0] != "glm" {
 		t.Errorf("positionalArgs=%v want [glm]", got)
 	}
@@ -30,23 +29,23 @@ func TestPositionalArgs(t *testing.T) {
 
 // TestParsePinTTL: both --ttl DUR and --ttl=DUR forms parse; absent → 0.
 func TestParsePinTTL(t *testing.T) {
-	if d := cli.ParsePinTTL([]string{"--ttl", "90m"}); d != 90*time.Minute {
+	if d := ParsePinTTL([]string{"--ttl", "90m"}); d != 90*time.Minute {
 		t.Errorf("--ttl 90m = %v want 90m", d)
 	}
-	if d := cli.ParsePinTTL([]string{"--ttl=2h"}); d != 2*time.Hour {
+	if d := ParsePinTTL([]string{"--ttl=2h"}); d != 2*time.Hour {
 		t.Errorf("--ttl=2h = %v want 2h", d)
 	}
-	if d := cli.ParsePinTTL([]string{"glm", "zhipu"}); d != 0 {
+	if d := ParsePinTTL([]string{"glm", "zhipu"}); d != 0 {
 		t.Errorf("absent --ttl = %v want 0", d)
 	}
 }
 
 // TestIsDaemonUnreachable: connection-refused errors match, others don't.
 func TestIsDaemonUnreachable(t *testing.T) {
-	if !cli.IsDaemonUnreachable(fmt.Errorf("dial tcp 127.0.0.1:8080: connect: connection refused")) {
+	if !IsDaemonUnreachable(fmt.Errorf("dial tcp 127.0.0.1:8080: connect: connection refused")) {
 		t.Error("connection refused should match")
 	}
-	if cli.IsDaemonUnreachable(fmt.Errorf("some other error")) {
+	if IsDaemonUnreachable(fmt.Errorf("some other error")) {
 		t.Error("non-refused error should not match")
 	}
 }
@@ -72,7 +71,7 @@ func TestDoPin(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out, err := cli.DoPin(srv.URL, "glm", "zhipu", time.Hour)
+	out, err := DoPin(srv.URL, "glm", "zhipu", time.Hour)
 	if err != nil {
 		t.Fatalf("doPin: %v", err)
 	}
@@ -84,16 +83,16 @@ func TestDoPin(t *testing.T) {
 		writeJSON(w, http.StatusOK, map[string]any{"expires_at": ""})
 	}))
 	defer srv2.Close()
-	out2, _ := cli.DoPin(srv2.URL, "glm", "z", 0)
+	out2, _ := DoPin(srv2.URL, "glm", "z", 0)
 	if !strings.Contains(out2, "no expiry") {
 		t.Errorf("no-expiry out=%q", out2)
 	}
 	// 400 surfaces the daemon's message.
-	if _, err := cli.DoPin(srv.URL, "glm", "bad", 0); err == nil || !strings.Contains(err.Error(), "cannot pin") {
+	if _, err := DoPin(srv.URL, "glm", "bad", 0); err == nil || !strings.Contains(err.Error(), "cannot pin") {
 		t.Errorf("bad-provider err=%v want cannot pin", err)
 	}
 	// Unreachable daemon → error.
-	if _, err := cli.DoPin("http://127.0.0.1:1", "glm", "z", 0); err == nil {
+	if _, err := DoPin("http://127.0.0.1:1", "glm", "z", 0); err == nil {
 		t.Error("unreachable doPin should error")
 	}
 }
@@ -108,10 +107,10 @@ func TestDoUnpin(t *testing.T) {
 		writeJSON(w, http.StatusOK, map[string]any{"removed": true})
 	}))
 	defer srv.Close()
-	if out, _ := cli.DoUnpin(srv.URL, "glm"); !strings.Contains(out, "unpinned glm") {
+	if out, _ := DoUnpin(srv.URL, "glm"); !strings.Contains(out, "unpinned glm") {
 		t.Errorf("removed out=%q", out)
 	}
-	if out, _ := cli.DoUnpin(srv.URL, "absent"); !strings.Contains(out, "no pin on absent") {
+	if out, _ := DoUnpin(srv.URL, "absent"); !strings.Contains(out, "no pin on absent") {
 		t.Errorf("absent out=%q", out)
 	}
 }
@@ -129,7 +128,7 @@ func TestDoListPins(t *testing.T) {
 		}})
 	}))
 	defer srv.Close()
-	out, _ := cli.DoListPins(srv.URL)
+	out, _ := DoListPins(srv.URL)
 	if !strings.Contains(out, "ROUTE") || !strings.Contains(out, "glm") || !strings.Contains(out, "never") || !strings.Contains(out, "2030") {
 		t.Errorf("list out=%q", out)
 	}
@@ -138,7 +137,7 @@ func TestDoListPins(t *testing.T) {
 		writeJSON(w, http.StatusOK, map[string]any{"pins": []any{}})
 	}))
 	defer srv2.Close()
-	if out, _ := cli.DoListPins(srv2.URL); !strings.Contains(out, "(no active pins)") {
+	if out, _ := DoListPins(srv2.URL); !strings.Contains(out, "(no active pins)") {
 		t.Errorf("empty list out=%q", out)
 	}
 }
@@ -167,17 +166,17 @@ func TestDoReplay(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, err := cli.DoReplay(srv.URL, "good", "zhipu")
+	body, err := DoReplay(srv.URL, "good", "zhipu")
 	if err != nil {
 		t.Fatalf("doReplay good: %v", err)
 	}
 	if !strings.Contains(string(body), `"replayed":true`) {
 		t.Errorf("replay body=%q", string(body))
 	}
-	if _, err := cli.DoReplay(srv.URL, "ghost", "zhipu"); err == nil || !strings.Contains(err.Error(), "no request log") {
+	if _, err := DoReplay(srv.URL, "ghost", "zhipu"); err == nil || !strings.Contains(err.Error(), "no request log") {
 		t.Errorf("ghost err=%v want no request log", err)
 	}
-	if _, err := cli.DoReplay(srv.URL, "nobody", "zhipu"); err == nil || !strings.Contains(err.Error(), "no captured request body") {
+	if _, err := DoReplay(srv.URL, "nobody", "zhipu"); err == nil || !strings.Contains(err.Error(), "no captured request body") {
 		t.Errorf("nobody err=%v want no captured body", err)
 	}
 }
@@ -201,7 +200,7 @@ func TestDoReplay_TruncatedBody(t *testing.T) {
 		writeJSON(w, 200, map[string]any{"records": []requestlog.Record{*record}})
 	}))
 	defer srv.Close()
-	_, err := cli.DoReplay(srv.URL, "trunc", "zhipu")
+	_, err := DoReplay(srv.URL, "trunc", "zhipu")
 	if err == nil || !strings.Contains(err.Error(), "truncated") || !strings.Contains(err.Error(), "max_body_bytes") {
 		t.Errorf("truncated-body replay err=%v, want a truncated/max_body_bytes refusal", err)
 	}
@@ -218,7 +217,7 @@ func TestDoReplay_RejectsShadowRecord(t *testing.T) {
 		}})
 	}))
 	defer srv.Close()
-	_, err := cli.DoReplay(srv.URL, "shadow-abc123", "zhipu")
+	_, err := DoReplay(srv.URL, "shadow-abc123", "zhipu")
 	if err == nil || !strings.Contains(err.Error(), "shadow") {
 		t.Errorf("shadow-record replay err=%v, want a shadow refusal", err)
 	}
@@ -234,7 +233,7 @@ func TestDoReplay_RejectsNonV1Path(t *testing.T) {
 		}})
 	}))
 	defer srv.Close()
-	_, err := cli.DoReplay(srv.URL, "req-1", "zhipu")
+	_, err := DoReplay(srv.URL, "req-1", "zhipu")
 	if err == nil || !strings.Contains(err.Error(), "/v1/") {
 		t.Errorf("non-/v1/ path replay err=%v, want a /v1/ refusal", err)
 	}
@@ -258,11 +257,11 @@ func TestCmdPin_InProcess(t *testing.T) {
 	listen := strings.TrimPrefix(srv.URL, "http://")
 	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: http://x}\nroutes:\n  glm: [{provider: zhipu, model: glm-4}]\n")
 
-	out := grabStdout(t, func() { cmdPin([]string{"--config", cfgPath, "glm", "zhipu", "--ttl", "1h"}) })
+	out := grabStdout(t, func() { RunPin([]string{"--config", cfgPath, "glm", "zhipu", "--ttl", "1h"}) })
 	if !strings.Contains(out, "pinned glm → zhipu") {
 		t.Errorf("cmdPin out=%q", out)
 	}
-	out = grabStdout(t, func() { cmdUnpin([]string{"--config", cfgPath, "glm"}) })
+	out = grabStdout(t, func() { RunUnpin([]string{"--config", cfgPath, "glm"}) })
 	if !strings.Contains(out, "unpinned glm") {
 		t.Errorf("cmdUnpin out=%q", out)
 	}

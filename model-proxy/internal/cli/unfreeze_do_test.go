@@ -21,10 +21,10 @@ func TestDoUnfreeze(t *testing.T) {
 		}
 		json.NewDecoder(r.Body).Decode(&body)
 		if body.Provider == "empty" {
-			writeJSONTest(w, http.StatusOK, map[string]any{"cleared": []string{}, "model_locks_cleared": 0})
+			writeJSON(w, http.StatusOK, map[string]any{"cleared": []string{}, "model_locks_cleared": 0})
 			return
 		}
-		writeJSONTest(w, http.StatusOK, map[string]any{"cleared": []string{"zhipu"}, "model_locks_cleared": 2})
+		writeJSON(w, http.StatusOK, map[string]any{"cleared": []string{"zhipu"}, "model_locks_cleared": 2})
 	}))
 	defer srv.Close()
 
@@ -44,7 +44,7 @@ func TestDoUnfreeze(t *testing.T) {
 	}
 }
 
-func writeJSONTest(w http.ResponseWriter, status int, v any) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
