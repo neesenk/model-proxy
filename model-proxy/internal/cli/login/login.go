@@ -3,7 +3,9 @@ package login
 import (
 	"bufio"
 	"fmt"
+	"log"
 	cliframework "model-proxy/internal/cli/framework"
+	cliserve "model-proxy/internal/cli/serve"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,4 +270,57 @@ After logging in, the browser will try to redirect back to this machine:
 	fmt.Printf("  %s %s\n", provider.Dim("store:"), provider.Gray(storePath))
 	fmt.Printf("\n%s You can now run `%s`.\n", provider.Green("Login complete."), provider.Cyan("model-proxy serve"))
 	return nil
+}
+
+// CmdLogin is the process-level login entry: it loads config, dispatches the
+// provider login flow, and signals a running daemon to hot-reload.
+func CmdLogin(args []string) {
+	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
+	if err != nil {
+		log.Fatal(err)
+	}
+	provName := cliframework.Positional(args)
+	if provName == "" {
+		fmt.Println("usage: model-proxy login <provider> [--label <name>] [--replace]")
+		fmt.Println("available providers:")
+		for name, p := range cfg.Providers {
+			fmt.Printf("  %s (provider=%s)\n", name, p.Provider)
+		}
+		return
+	}
+	prov, ok := cfg.Providers[provName]
+	if !ok {
+		log.Fatalf("unknown provider %q; available: %s", provName, cliframework.ProviderNames(cfg))
+	}
+	label := cliframework.FlagStringValue(args, "--label")
+	replace := cliframework.HasFlagValue(args, "--replace")
+
+	switch prov.Provider {
+	case "aqp":
+		if err := RunLogin(cfg, provName); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+	case "codex":
+		CmdCodexLogin(provName)
+	case "zcode":
+		fmt.Println("Opening BigModel login to fetch a Coding Plan API key…")
+		if err := OpenBrowser("https://bigmodel.cn/login"); err != nil {
+			fmt.Fprintf(os.Stderr, "(could not open browser: %v — open https://bigmodel.cn/login manually)\n", err)
+		}
+		if err := RunApiKeyLoginWithInput(cfg, provName, prov, "", label, replace); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+	default:
+		var err error
+		if prov.Provider == "volcengine" {
+			err = RunVolcengineLoginWithInput(cfg, provName, prov, "", "", "", label, replace)
+		} else {
+			err = RunApiKeyLoginWithInput(cfg, provName, prov, "", label, replace)
+		}
+		if err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+	}
+	// After ANY successful login, signal a running serve to hot-reload.
+	cliserve.MaybeReloadDaemon(cfg)
 }

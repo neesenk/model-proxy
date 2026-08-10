@@ -53,7 +53,7 @@ func TestRunApiKeyLogin_EmptyKey(t *testing.T) {
 	w.Close()
 
 	cfg := &Config{Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
-	err := runApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"])
+	err := clilogin.RunApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"])
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("empty key: err=%v want 'empty' error", err)
 	}
@@ -84,7 +84,7 @@ func TestRunApiKeyLogin_ValidKeyMockValidation(t *testing.T) {
 			"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 		},
 	}
-	if err := runApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"]); err != nil {
+	if err := clilogin.RunApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"]); err != nil {
 		t.Fatalf("runApiKeyLogin: %v", err)
 	}
 	// The key should have been saved to the PLURAL pool file
@@ -126,7 +126,7 @@ func TestRunApiKeyLogin_Validation401(t *testing.T) {
 	w.Close()
 
 	cfg := &Config{Providers: map[string]Provider{"zhipu": {Provider: "zhipu", UsageURL: srv.URL}}}
-	err := runApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"])
+	err := clilogin.RunApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"])
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Errorf("401 validation: err=%v want 'validation failed'", err)
 	}
@@ -144,7 +144,7 @@ func TestRunApiKeyLoginWithInput_DedupSameKey(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
 	prov := cfg.Providers["zhipu"]
 	writePoolFile(t, "zhipu", "zhipu", "DUP-KEY")
-	runApiKeyLoginWithInput(cfg, "zhipu", prov, "DUP-KEY", "renamed", true /*replace*/)
+	clilogin.RunApiKeyLoginWithInput(cfg, "zhipu", prov, "DUP-KEY", "renamed", true /*replace*/)
 	pool, err := app.LoadPool("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func TestRunApiKeyLoginWithInput_DedupSameKey_NoReplace_Aborts(t *testing.T) {
 	w.Write([]byte("n\n"))
 	w.Close()
 
-	err := runApiKeyLoginWithInput(cfg, "zhipu", prov, "DUP-KEY", "", false /*replace*/)
+	err := clilogin.RunApiKeyLoginWithInput(cfg, "zhipu", prov, "DUP-KEY", "", false /*replace*/)
 	if err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("expected 'cancelled' error, got %v", err)
 	}
@@ -197,7 +197,7 @@ func TestRunApiKeyLoginWithInput_DifferentKeyAppends(t *testing.T) {
 	setPoolHome(t, dir)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
 	writePoolFile(t, "zhipu", "zhipu", "KEY-1")
-	runApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "KEY-2", "team", false)
+	clilogin.RunApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "KEY-2", "team", false)
 	pool, err := app.LoadPool("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestRunApiKeyLoginWithInput_EmptyKey(t *testing.T) {
 	w.Close()
 
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
-	err := runApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "", "", false)
+	err := clilogin.RunApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "", "", false)
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("empty key: err=%v want 'empty'", err)
 	}
@@ -244,7 +244,7 @@ func TestRunApiKeyLoginWithInput_NoLabel_DefaultsToID(t *testing.T) {
 	setPoolHome(t, dir)
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
 	prov := cfg.Providers["zhipu"]
-	if err := runApiKeyLoginWithInput(cfg, "zhipu", prov, "FRESH-KEY", "", false); err != nil {
+	if err := clilogin.RunApiKeyLoginWithInput(cfg, "zhipu", prov, "FRESH-KEY", "", false); err != nil {
 		t.Fatal(err)
 	}
 	pool, _ := app.LoadPool("zhipu", "zhipu")
@@ -516,7 +516,7 @@ func TestRunApiKeyLogin_KimiCode_Validation401(t *testing.T) {
 	w.Close()
 
 	cfg := &Config{Providers: map[string]Provider{"kimi-code": {Provider: "kimi-code", UsageURL: srv.URL}}}
-	err := runApiKeyLogin(cfg, "kimi-code", cfg.Providers["kimi-code"])
+	err := clilogin.RunApiKeyLogin(cfg, "kimi-code", cfg.Providers["kimi-code"])
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Errorf("kimi-code 401: err=%v want 'validation failed'", err)
 	}
