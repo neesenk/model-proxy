@@ -106,27 +106,14 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Fatalf("stat pool.go: %v", err)
 		}
 
-		// The root adapter is a thin delegation layer over internal/app's
-		// account-store wrappers; it keeps root callers/tests on stable names
-		// while the composition root migrates.
-		adapter, _ := parseGoFile(t, "accounts_adapter.go")
-		for _, decl := range adapter.Decls {
-			switch decl := decl.(type) {
-			case *ast.GenDecl:
-				if decl.Tok == token.IMPORT {
-					continue
-				}
-				if decl.Tok != token.TYPE {
-					t.Errorf("accounts_adapter.go has unexpected %s declaration", decl.Tok)
-				}
-			case *ast.FuncDecl:
-				if decl.Recv != nil {
-					t.Errorf("accounts_adapter.go has unexpected method %s", decl.Name.Name)
-				}
-			default:
-				t.Errorf("accounts_adapter.go has unexpected declaration %T", decl)
-			}
+		// The root accounts adapter shell is gone: callers use internal/app's
+		// account-store wrappers (or internal/accounts directly).
+		if _, err := os.Stat("accounts_adapter.go"); err == nil {
+			t.Error("legacy root accounts_adapter.go must not exist; use internal/app account wrappers")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat accounts_adapter.go: %v", err)
 		}
+
 	})
 
 	t.Run("internal pricing remains a repository-leaf package", func(t *testing.T) {

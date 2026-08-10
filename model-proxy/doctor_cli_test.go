@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/app"
 	"os"
 	"strings"
 	"testing"
@@ -39,7 +40,7 @@ routes:
 		t.Errorf("doctor output missing '3 accounts':\n%s", out)
 	}
 	// Each virtual id from the pool appears (parent is shown expanded).
-	pool, _ := loadPool("zhipu", "zhipu")
+	pool, _ := app.LoadPool("zhipu", "zhipu")
 	for _, a := range pool.Accounts {
 		vid := "zhipu#" + a.ID
 		if !strings.Contains(out, vid) {

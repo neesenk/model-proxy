@@ -128,7 +128,7 @@ func cmdRestore(args []string) {
 // metadata-writing client is selected) hydrated models.dev metadata for the
 // takeover package. Catalog loading and source markers stay in the root.
 func takeoverFacts(cfg *Config, which string) takeover.ModelFacts {
-	implicit, _ := app.SynthesizeImplicitRoutes(cfg, accountStore())
+	implicit, _ := app.SynthesizeImplicitRoutes(cfg, app.AccountStore())
 	facts := takeover.ModelFacts{
 		Implicit:      implicit,
 		SourceDefault: -1,

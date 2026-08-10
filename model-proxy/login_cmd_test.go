@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
 	"net/http"
@@ -90,7 +91,7 @@ func TestRunApiKeyLogin_ValidKeyMockValidation(t *testing.T) {
 	// (<name>_apikeys.json). The legacy singular <name>_apikey.json is no
 	// longer written by runApiKeyLogin — it now routes through the pool-aware
 	// path. Assert via loadPool so we also verify the file is parseable.
-	pool, err := loadPool("zhipu", "zhipu")
+	pool, err := app.LoadPool("zhipu", "zhipu")
 	if err != nil {
 		t.Fatalf("load pool: %v", err)
 	}
@@ -101,7 +102,7 @@ func TestRunApiKeyLogin_ValidKeyMockValidation(t *testing.T) {
 		t.Errorf("saved key = %q, want test-api-key", pool.Accounts[0].APIKey)
 	}
 	// ID must match the sha256[:16] of the key (zhipu is non-volcengine).
-	wantID := accountIDFor("zhipu", accountCred{APIKey: "test-api-key"})
+	wantID := app.AccountIDFor("zhipu", app.AccountCred{APIKey: "test-api-key"})
 	if pool.Accounts[0].ID != wantID {
 		t.Errorf("saved id = %q, want %q", pool.Accounts[0].ID, wantID)
 	}
@@ -144,7 +145,7 @@ func TestRunApiKeyLoginWithInput_DedupSameKey(t *testing.T) {
 	prov := cfg.Providers["zhipu"]
 	writePoolFile(t, "zhipu", "zhipu", "DUP-KEY")
 	runApiKeyLoginWithInput(cfg, "zhipu", prov, "DUP-KEY", "renamed", true /*replace*/)
-	pool, err := loadPool("zhipu", "zhipu")
+	pool, err := app.LoadPool("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +184,7 @@ func TestRunApiKeyLoginWithInput_DedupSameKey_NoReplace_Aborts(t *testing.T) {
 		t.Fatalf("expected 'cancelled' error, got %v", err)
 	}
 	// Pool unchanged.
-	pool, _ := loadPool("zhipu", "zhipu")
+	pool, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "DUP-KEY" {
 		t.Fatalf("abort should leave pool untouched: %+v", pool.Accounts)
 	}
@@ -197,7 +198,7 @@ func TestRunApiKeyLoginWithInput_DifferentKeyAppends(t *testing.T) {
 	cfg := &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
 	writePoolFile(t, "zhipu", "zhipu", "KEY-1")
 	runApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "KEY-2", "team", false)
-	pool, err := loadPool("zhipu", "zhipu")
+	pool, err := app.LoadPool("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +206,7 @@ func TestRunApiKeyLoginWithInput_DifferentKeyAppends(t *testing.T) {
 		t.Fatalf("different key should append, got %d: %+v", len(pool.Accounts), pool.Accounts)
 	}
 	// Label applied to the new entry.
-	var labeled *poolAccount
+	var labeled *app.PoolAccount
 	for i := range pool.Accounts {
 		if pool.Accounts[i].Label == "team" {
 			labeled = &pool.Accounts[i]
@@ -246,11 +247,11 @@ func TestRunApiKeyLoginWithInput_NoLabel_DefaultsToID(t *testing.T) {
 	if err := runApiKeyLoginWithInput(cfg, "zhipu", prov, "FRESH-KEY", "", false); err != nil {
 		t.Fatal(err)
 	}
-	pool, _ := loadPool("zhipu", "zhipu")
+	pool, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool.Accounts) != 1 {
 		t.Fatalf("want 1 account, got %d", len(pool.Accounts))
 	}
-	wantID := accountIDFor("zhipu", accountCred{APIKey: "FRESH-KEY"})
+	wantID := app.AccountIDFor("zhipu", app.AccountCred{APIKey: "FRESH-KEY"})
 	if pool.Accounts[0].ID != wantID {
 		t.Fatalf("id = %q want %q", pool.Accounts[0].ID, wantID)
 	}
@@ -271,7 +272,7 @@ func TestAddApikeyAccountCore(t *testing.T) {
 	defer up.Close()
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
 	prov := cfg.Providers["zhipu"]
-	id, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "my-label", false)
+	id, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, app.AccountCred{APIKey: "sk-test-1234567890"}, "my-label", false)
 	if err != nil {
 		t.Fatalf("addApikeyAccount: %v", err)
 	}
@@ -279,32 +280,32 @@ func TestAddApikeyAccountCore(t *testing.T) {
 		t.Fatal("empty id")
 	}
 	// ID must match the sha256[:16] of the key (non-volcengine).
-	wantID := accountIDFor("zhipu", accountCred{APIKey: "sk-test-1234567890"})
+	wantID := app.AccountIDFor("zhipu", app.AccountCred{APIKey: "sk-test-1234567890"})
 	if id != wantID {
 		t.Fatalf("id = %q, want %q", id, wantID)
 	}
-	pool, _ := loadPool("zhipu", "zhipu")
+	pool, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool.Accounts) != 1 || pool.Accounts[0].Label != "my-label" {
 		t.Fatalf("pool not written: %+v", pool.Accounts)
 	}
 	// Replace path: same id, new label, replace=true overwrites in place.
-	if _, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "renamed", true); err != nil {
+	if _, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, app.AccountCred{APIKey: "sk-test-1234567890"}, "renamed", true); err != nil {
 		t.Fatalf("replace addApikeyAccount: %v", err)
 	}
-	pool2, _ := loadPool("zhipu", "zhipu")
+	pool2, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool2.Accounts) != 1 || pool2.Accounts[0].Label != "renamed" {
 		t.Fatalf("replace should keep size 1 + update label: %+v", pool2.Accounts)
 	}
 	// Replace path with replace=false on an existing id aborts without prompting
 	// (no stdin in core) and leaves the pool untouched.
-	if _, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "ignored", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
+	if _, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, app.AccountCred{APIKey: "sk-test-1234567890"}, "ignored", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("dup-no-replace should error 'cancelled', got %v", err)
 	}
 	// Remove: pool empties.
 	if err := clilogin.RemoveApikeyAccount("zhipu", "zhipu", id); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	pool3, _ := loadPool("zhipu", "zhipu")
+	pool3, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool3.Accounts) != 0 {
 		t.Fatalf("pool not emptied: %+v", pool3.Accounts)
 	}
@@ -321,11 +322,11 @@ func TestAddApikeyAccountCore_ValidationFail(t *testing.T) {
 	defer srv.Close()
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
 	prov := cfg.Providers["zhipu"]
-	_, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "bad"}, "", false)
+	_, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, app.AccountCred{APIKey: "bad"}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Fatalf("expected 'validation failed', got %v", err)
 	}
-	pool, _ := loadPool("zhipu", "zhipu")
+	pool, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool.Accounts) != 0 {
 		t.Fatalf("401 should not save: %+v", pool.Accounts)
 	}
@@ -338,7 +339,7 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 	stubVolcengineValidator(t) // pool dedup/save logic; AK/SK validation tested elsewhere
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n"))
 	prov := cfg.Providers["vol"]
-	cred := accountCred{APIKey: "ark-key", AccessKey: "AK9XYZ", SecretKey: "SK9"}
+	cred := app.AccountCred{APIKey: "ark-key", AccessKey: "AK9XYZ", SecretKey: "SK9"}
 	id, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, cred, "volc-label", false)
 	if err != nil {
 		t.Fatalf("addVolcengineAccount: %v", err)
@@ -346,7 +347,7 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 	if id != "AK9XYZ" {
 		t.Fatalf("volcengine id = %q, want AK9XYZ", id)
 	}
-	pool, _ := loadPool("vol", "volcengine")
+	pool, _ := app.LoadPool("vol", "volcengine")
 	if len(pool.Accounts) != 1 || pool.Accounts[0].Label != "volc-label" {
 		t.Fatalf("pool not written: %+v", pool.Accounts)
 	}
@@ -354,13 +355,13 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 		t.Fatalf("triple not saved: %+v", pool.Accounts[0])
 	}
 	// Same AccessKey with replace=false aborts; with replace=true overwrites the triple.
-	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
+	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, app.AccountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("dup-no-replace should error 'cancelled', got %v", err)
 	}
-	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "renamed", true); err != nil {
+	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, app.AccountCred{APIKey: "ark2", AccessKey: "AK9XYZ", SecretKey: "SK-new"}, "renamed", true); err != nil {
 		t.Fatalf("replace addVolcengineAccount: %v", err)
 	}
-	pool2, _ := loadPool("vol", "volcengine")
+	pool2, _ := app.LoadPool("vol", "volcengine")
 	if len(pool2.Accounts) != 1 {
 		t.Fatalf("replace should keep size 1: %+v", pool2.Accounts)
 	}
@@ -370,7 +371,7 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 	if err := clilogin.RemoveApikeyAccount("vol", "volcengine", id); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	pool3, _ := loadPool("vol", "volcengine")
+	pool3, _ := app.LoadPool("vol", "volcengine")
 	if len(pool3.Accounts) != 0 {
 		t.Fatalf("pool not emptied: %+v", pool3.Accounts)
 	}
@@ -519,7 +520,7 @@ func TestRunApiKeyLogin_KimiCode_Validation401(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Errorf("kimi-code 401: err=%v want 'validation failed'", err)
 	}
-	pool, _ := loadPool("kimi-code", "kimi-code")
+	pool, _ := app.LoadPool("kimi-code", "kimi-code")
 	if len(pool.Accounts) != 0 {
 		t.Errorf("kimi-code 401 should not save: %+v", pool.Accounts)
 	}
@@ -541,11 +542,11 @@ func TestAddVolcengineAccountCore_ArkKeyValidation401(t *testing.T) {
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
 	prov := cfg.Providers["vol"]
 	// No AK/SK — isolates the Ark-key path.
-	_, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "bad-ark"}, "", false)
+	_, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, app.AccountCred{APIKey: "bad-ark"}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Fatalf("Ark 401: err=%v want 'validation failed'", err)
 	}
-	pool, _ := loadPool("vol", "volcengine")
+	pool, _ := app.LoadPool("vol", "volcengine")
 	if len(pool.Accounts) != 0 {
 		t.Fatalf("Ark 401 should not save: %+v", pool.Accounts)
 	}
@@ -559,14 +560,14 @@ func TestAddVolcengineAccountCore_ArkKeyValid(t *testing.T) {
 	defer srv.Close()
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
 	prov := cfg.Providers["vol"]
-	id, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "lbl", false)
+	id, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, app.AccountCred{APIKey: "good-ark"}, "lbl", false)
 	if err != nil {
 		t.Fatalf("Ark 200: %v", err)
 	}
 	if id == "" {
 		t.Fatal("empty id")
 	}
-	pool, _ := loadPool("vol", "volcengine")
+	pool, _ := app.LoadPool("vol", "volcengine")
 	if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "good-ark" || pool.Accounts[0].Label != "lbl" {
 		t.Fatalf("Ark 200 should save triple: %+v", pool.Accounts)
 	}
@@ -594,14 +595,14 @@ func TestAddVolcengineAccountCore_AKSKValidationFail(t *testing.T) {
 		return fmt.Errorf("GetAFPUsage HTTP 401: signature mismatch")
 	}
 
-	_, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark", AccessKey: "AK9", SecretKey: "SK9"}, "", false)
+	_, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, app.AccountCred{APIKey: "good-ark", AccessKey: "AK9", SecretKey: "SK9"}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Fatalf("AK/SK fail: err=%v want 'validation failed'", err)
 	}
 	if !called {
 		t.Fatal("AK/SK validator was not called")
 	}
-	pool, _ := loadPool("vol", "volcengine")
+	pool, _ := app.LoadPool("vol", "volcengine")
 	if len(pool.Accounts) != 0 {
 		t.Fatalf("AK/SK fail should not save: %+v", pool.Accounts)
 	}
@@ -624,10 +625,10 @@ func TestAddVolcengineAccountCore_AKSKEmptySkips(t *testing.T) {
 		return nil
 	}
 
-	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "", false); err != nil {
+	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, app.AccountCred{APIKey: "good-ark"}, "", false); err != nil {
 		t.Fatalf("chat-only login should succeed: %v", err)
 	}
-	pool, _ := loadPool("vol", "volcengine")
+	pool, _ := app.LoadPool("vol", "volcengine")
 	if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "good-ark" {
 		t.Fatalf("chat-only should save: %+v", pool.Accounts)
 	}
@@ -652,7 +653,7 @@ func TestAddVolcengineAccountCore_PartialAKSKRejected(t *testing.T) {
 		return nil
 	}
 
-	for _, cred := range []accountCred{
+	for _, cred := range []app.AccountCred{
 		{APIKey: "good-ark", AccessKey: "AK9"}, // lone AK
 		{APIKey: "good-ark", SecretKey: "SK9"}, // lone SK
 	} {
@@ -660,17 +661,17 @@ func TestAddVolcengineAccountCore_PartialAKSKRejected(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "both be set") {
 			t.Errorf("partial %+v: err=%v want 'both be set'", cred, err)
 		}
-		pool, _ := loadPool("vol", "volcengine")
+		pool, _ := app.LoadPool("vol", "volcengine")
 		if len(pool.Accounts) != 0 {
 			t.Errorf("partial pair must not save: %+v", pool.Accounts)
 		}
 	}
 
 	// Neither set → chat-only success; pool written.
-	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, accountCred{APIKey: "good-ark"}, "", false); err != nil {
+	if _, err := clilogin.AddVolcengineAccount(cfg, "vol", prov, app.AccountCred{APIKey: "good-ark"}, "", false); err != nil {
 		t.Fatalf("chat-only (no AK/SK): %v", err)
 	}
-	pool, _ := loadPool("vol", "volcengine")
+	pool, _ := app.LoadPool("vol", "volcengine")
 	if len(pool.Accounts) != 1 || pool.Accounts[0].APIKey != "good-ark" {
 		t.Fatalf("chat-only should save: %+v", pool.Accounts)
 	}

@@ -74,7 +74,7 @@ func cmdTest(args []string) {
 func testTargetsFor(cfg *Config, model string) []RouteTarget {
 	targets, ok := cfg.Routes[model]
 	if !ok {
-		implicit, _ := app.SynthesizeImplicitRoutes(cfg, accountStore())
+		implicit, _ := app.SynthesizeImplicitRoutes(cfg, app.AccountStore())
 		t, found := implicit[model]
 		if !found {
 			return nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	"os"
 	"path/filepath"
@@ -140,7 +141,7 @@ func TestCodexProvider_Logout(t *testing.T) {
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 
 	cfg := &Config{Providers: map[string]Provider{"codex": {Provider: "codex"}}}
-	p := buildOne(cfg, "codex", cfg.Providers["codex"], accountCred{})
+	p := buildOne(cfg, "codex", cfg.Providers["codex"], app.AccountCred{})
 	if p == nil {
 		t.Fatal("buildOne codex returned nil")
 	}
@@ -168,7 +169,7 @@ func TestApiKeyProvider_Logout(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"zhipu-work": {Provider: "zhipu"},
 	}}
-	p := buildOne(cfg, "zhipu-work", cfg.Providers["zhipu-work"], accountCred{})
+	p := buildOne(cfg, "zhipu-work", cfg.Providers["zhipu-work"], app.AccountCred{})
 	if p == nil {
 		t.Fatal("buildOne zhipu-work returned nil")
 	}
@@ -192,7 +193,7 @@ func TestAqpProvider_Logout(t *testing.T) {
 	os.MkdirAll(filepath.Dir(cred), 0o700)
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 	cfg := &Config{Providers: map[string]Provider{"aqp": {Provider: "aqp"}}}
-	p := buildOne(cfg, "aqp", cfg.Providers["aqp"], accountCred{})
+	p := buildOne(cfg, "aqp", cfg.Providers["aqp"], app.AccountCred{})
 	if p == nil {
 		t.Fatal("buildOne aqp returned nil")
 	}

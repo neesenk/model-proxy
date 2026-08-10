@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"net/http/httptest"
@@ -355,7 +356,7 @@ func TestCLI_LogoutInteractiveRemovesAccount(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, "https://zhipu.invalid/u")
 
-	pool, _ := loadPool("zhipu", "zhipu")
+	pool, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool.Accounts) != 2 {
 		t.Fatalf("setup: want 2 accounts, got %d", len(pool.Accounts))
 	}
@@ -365,7 +366,7 @@ func TestCLI_LogoutInteractiveRemovesAccount(t *testing.T) {
 	setStdin(t, "1\n") // pick the first account (1-based)
 	cmdLogout([]string{"zhipu", "--config", cfgPath})
 
-	pool2, _ := loadPool("zhipu", "zhipu")
+	pool2, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool2.Accounts) != 1 {
 		t.Fatalf("after logout want 1 account, got %d: %+v", len(pool2.Accounts), pool2.Accounts)
 	}
@@ -387,7 +388,7 @@ func TestCLI_LogoutAllClearsPool(t *testing.T) {
 
 	cmdLogout([]string{"zhipu", "--all", "--config", cfgPath})
 
-	if _, err := os.Stat(poolPath("zhipu")); !os.IsNotExist(err) {
+	if _, err := os.Stat(app.PoolPath("zhipu")); !os.IsNotExist(err) {
 		t.Errorf("plural pool file should be removed; stat err=%v", err)
 	}
 	if _, err := os.Stat(legacyPoolPath("zhipu")); !os.IsNotExist(err) {
@@ -404,7 +405,7 @@ func TestCLI_LogoutByLabel(t *testing.T) {
 
 	cmdLogout([]string{"zhipu", "--label", "K1", "--config", cfgPath})
 
-	pool, _ := loadPool("zhipu", "zhipu")
+	pool, _ := app.LoadPool("zhipu", "zhipu")
 	if len(pool.Accounts) != 1 {
 		t.Fatalf("want 1 account after --label logout, got %d: %+v", len(pool.Accounts), pool.Accounts)
 	}
@@ -483,8 +484,8 @@ func TestCLI_UsagePoolPrintsAllAccounts(t *testing.T) {
 	}
 
 	// Per-account headers: each label + masked id appears.
-	id1 := accountIDFor("zhipu", accountCred{APIKey: "K1"})
-	id2 := accountIDFor("zhipu", accountCred{APIKey: "K2"})
+	id1 := app.AccountIDFor("zhipu", app.AccountCred{APIKey: "K1"})
+	id2 := app.AccountIDFor("zhipu", app.AccountCred{APIKey: "K2"})
 	if !strings.Contains(out, "K1") {
 		t.Errorf("output missing K1 label:\n%s", out)
 	}
