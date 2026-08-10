@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	clicmd "model-proxy/internal/cli"
 )
 
 // cliCommand is the process-level adapter for an existing command handler.
@@ -31,20 +32,20 @@ func runCLIArgsWithCommands(
 	commands map[string]cliCommand,
 ) int {
 	if len(args) == 0 {
-		_, _ = io.WriteString(stdout, usage)
+		_, _ = io.WriteString(stdout, clicmd.Usage)
 		return 1
 	}
 
 	cmd := args[0]
 	if cmd == "-h" || cmd == "--help" || cmd == "help" {
-		_, _ = io.WriteString(stdout, usage)
+		_, _ = io.WriteString(stdout, clicmd.Usage)
 		return 0
 	}
 
-	if help, ok := cmdHelp[cmd]; ok && hasHelpFlag(args[1:]) {
+	if help, ok := clicmd.Help[cmd]; ok && hasHelpFlag(args[1:]) {
 		_, _ = fmt.Fprintln(stdout, help)
-		if takesProvider(cmd) {
-			printConfigProvidersTo(stdout, args[1:])
+		if clicmd.TakesProvider(cmd) {
+			clicmd.PrintConfigProvidersTo(stdout, args[1:])
 		}
 		return 0
 	}
@@ -52,7 +53,7 @@ func runCLIArgsWithCommands(
 	run, ok := commands[cmd]
 	if !ok {
 		_, _ = fmt.Fprintf(stderr, "unknown command: %s\n\n", cmd)
-		_, _ = io.WriteString(stdout, usage)
+		_, _ = io.WriteString(stdout, clicmd.Usage)
 		return 1
 	}
 	return run(args[1:], stdin, stdout, stderr)

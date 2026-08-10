@@ -1,6 +1,7 @@
 package main
 
 import (
+	clicmd "model-proxy/internal/cli"
 	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	"model-proxy/internal/takeover"
@@ -142,13 +143,13 @@ func TestNonFlagArgs(t *testing.T) {
 
 func TestTakesProvider(t *testing.T) {
 	for _, cmd := range []string{"login", "logout", "usage"} {
-		if !takesProvider(cmd) {
-			t.Errorf("takesProvider(%q)=false want true", cmd)
+		if !clicmd.TakesProvider(cmd) {
+			t.Errorf("clicmd.TakesProvider(%q)=false want true", cmd)
 		}
 	}
 	for _, cmd := range []string{"models", "serve", "schedule", "doctor", "config", "takeover", "help", ""} {
-		if takesProvider(cmd) {
-			t.Errorf("takesProvider(%q)=true want false", cmd)
+		if clicmd.TakesProvider(cmd) {
+			t.Errorf("clicmd.TakesProvider(%q)=true want false", cmd)
 		}
 	}
 }

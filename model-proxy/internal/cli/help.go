@@ -1,15 +1,16 @@
-package main
+package cli
 
 import (
 	"fmt"
 	"io"
 	cliframework "model-proxy/internal/cli/framework"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/provider"
 	"os"
 	"sort"
 )
 
-const usage = `model-proxy — standalone portable multi-provider LLM proxy
+const Usage = `model-proxy — standalone portable multi-provider LLM proxy
 
 Usage: model-proxy <COMMAND> [SUBCOMMAND] [OPTIONS]
 
@@ -55,7 +56,7 @@ Options:
 `
 
 // cmdHelp returns the short help for a command, or "" if unknown.
-var cmdHelp = map[string]string{
+var Help = map[string]string{
 	"serve": `serve [subcommand] [--config PATH] [--log-file PATH]
 
   Start the proxy server.
@@ -204,7 +205,7 @@ Flags:
 
 // takesProvider reports whether the command requires a <provider> argument
 // whose -h help should list the providers defined in config.yaml.
-func takesProvider(cmd string) bool {
+func TakesProvider(cmd string) bool {
 	switch cmd {
 	case "login", "logout", "usage":
 		return true
@@ -215,12 +216,12 @@ func takesProvider(cmd string) bool {
 // printConfigProviders loads the config (best-effort) and lists the providers
 // defined under providers:, so the user knows what to pass as <provider>.
 // Silently skips if no config is available or it has no providers.
-func printConfigProviders(args []string) {
-	printConfigProvidersTo(os.Stdout, args)
+func PrintConfigProviders(args []string) {
+	PrintConfigProvidersTo(os.Stdout, args)
 }
 
-func printConfigProvidersTo(out io.Writer, args []string) {
-	cfg, err := LoadConfig(cliframework.ConfigPath(args))
+func PrintConfigProvidersTo(out io.Writer, args []string) {
+	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
 	if err != nil || len(cfg.Providers) == 0 {
 		return
 	}

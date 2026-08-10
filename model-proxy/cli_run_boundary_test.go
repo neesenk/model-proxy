@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	clicmd "model-proxy/internal/cli"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -23,31 +24,31 @@ func TestRunCLIArgsTopLevelContract(t *testing.T) {
 	}{
 		{
 			name:       "no arguments",
-			wantStdout: usage,
+			wantStdout: clicmd.Usage,
 			wantCode:   1,
 		},
 		{
 			name:       "short help",
 			args:       []string{"-h"},
-			wantStdout: usage,
+			wantStdout: clicmd.Usage,
 			wantCode:   0,
 		},
 		{
 			name:       "long help",
 			args:       []string{"--help"},
-			wantStdout: usage,
+			wantStdout: clicmd.Usage,
 			wantCode:   0,
 		},
 		{
 			name:       "help command",
 			args:       []string{"help"},
-			wantStdout: usage,
+			wantStdout: clicmd.Usage,
 			wantCode:   0,
 		},
 		{
 			name:       "unknown command",
 			args:       []string{"not-a-command"},
-			wantStdout: usage,
+			wantStdout: clicmd.Usage,
 			wantStderr: "unknown command: not-a-command\n\n",
 			wantCode:   1,
 		},
@@ -96,13 +97,13 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		"usage",
 		"wire",
 	}
-	gotCommands := make([]string, 0, len(cmdHelp))
-	for command := range cmdHelp {
+	gotCommands := make([]string, 0, len(clicmd.Help))
+	for command := range clicmd.Help {
 		gotCommands = append(gotCommands, command)
 	}
 	sort.Strings(gotCommands)
 	if got, want := strings.Join(gotCommands, ","), strings.Join(helpCommands, ","); got != want {
-		t.Fatalf("cmdHelp keys = %q, want exactly %q; update the exhaustive help cases", got, want)
+		t.Fatalf("clicmd.Help keys = %q, want exactly %q; update the exhaustive help cases", got, want)
 	}
 
 	configFile := writeTempConfig(t, minimalConfig)
@@ -123,8 +124,8 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 				&stdout,
 				&stderr,
 			)
-			wantStdout := cmdHelp[command] + "\n"
-			if takesProvider(command) {
+			wantStdout := clicmd.Help[command] + "\n"
+			if clicmd.TakesProvider(command) {
 				wantStdout += providerAppendix
 			}
 			requireCLIResult(
@@ -153,7 +154,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 			stdout.String(),
 			stderr.String(),
 			0,
-			cmdHelp["serve"]+"\n",
+			clicmd.Help["serve"]+"\n",
 			"",
 		)
 	})
@@ -199,24 +200,24 @@ func TestRunCLIArgsDispatchContract(t *testing.T) {
 
 func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 	wantTargets := map[string]string{
-		"config":   "cmdConfig",
-		"doctor":   "cmdDoctor",
-		"login":    "cmdLogin",
-		"logout":   "cmdLogout",
-		"models":   "cmdModels",
-		"pin":      "cmdPin",
-		"replay":   "cmdReplay",
-		"restore":  "cmdRestore",
-		"schedule": "cmdSchedule",
-		"serve":    "app.serve.command",
-		"shadow":   "cmdShadow",
-		"stats":    "cmdStats",
-		"takeover": "cmdTakeover",
-		"test":     "cmdTest",
-		"unfreeze": "cmdUnfreeze",
-		"unpin":    "cmdUnpin",
-		"usage":    "cmdUsage",
-		"wire":     "cmdWire",
+		"config":       "cmdConfig",
+		"doctor":       "cmdDoctor",
+		"login":        "cmdLogin",
+		"logout":       "cmdLogout",
+		"models":       "cmdModels",
+		"pin":          "cmdPin",
+		"replay":       "cmdReplay",
+		"restore":      "cmdRestore",
+		"schedule":     "cmdSchedule",
+		"serve":        "app.serve.command",
+		"shadow":       "cmdShadow",
+		"stats":        "cmdStats",
+		"takeover":     "cmdTakeover",
+		"test":         "cmdTest",
+		"unfreeze":     "cmdUnfreeze",
+		"unpin":        "cmdUnpin",
+		"usage": "cmdUsage",
+		"wire":         "cmdWire",
 	}
 	app := newApplication()
 	gotCommands := make([]string, 0, len(app.commands))

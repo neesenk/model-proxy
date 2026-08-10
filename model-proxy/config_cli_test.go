@@ -1,6 +1,7 @@
 package main
 
 import (
+	clicmd "model-proxy/internal/cli"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ routes:
     - {provider: zhipu, model: glm-5.2}
 `), 0o644)
 
-	out := grabStdout(t, func() { printConfigProviders([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { clicmd.PrintConfigProviders([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "zhipu") {
 		t.Errorf("printConfigProviders missing zhipu:\n%s", out)
 	}
@@ -36,9 +37,9 @@ routes:
 func TestPrintConfigProviders_NoConfig(t *testing.T) {
 	// Missing config → LoadConfig errors → early return (no output, no panic).
 	out := grabStdout(t, func() {
-		printConfigProviders([]string{"--config", filepath.Join(t.TempDir(), "nope.yaml")})
+		clicmd.PrintConfigProviders([]string{"--config", filepath.Join(t.TempDir(), "nope.yaml")})
 	})
 	if strings.TrimSpace(out) != "" {
-		t.Errorf("printConfigProviders(missing config) should print nothing: %q", out)
+		t.Errorf("clicmd.PrintConfigProviders(missing config) should print nothing: %q", out)
 	}
 }
