@@ -236,20 +236,22 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		}
 	})
 
-	t.Run("resolver depends on resolverState instead of Proxy", func(t *testing.T) {
-		f, _ := parseGoFile(t, "resolve.go")
-		fields := namedStructFields(t, f, "resolver")
-		if got := simpleTypeName(fields["state"]); got != "resolverState" {
-			t.Errorf("resolver.state type = %q, want resolverState", got)
+	t.Run("resolver depends on ResolverState instead of Proxy", func(t *testing.T) {
+		// The resolver struct and its narrow state port now live in
+		// internal/routing; the root file only aliases them.
+		f, _ := parseGoFile(t, "internal/routing/resolver.go")
+		fields := namedStructFields(t, f, "Resolver")
+		if got := simpleTypeName(fields["state"]); got != "ResolverState" {
+			t.Errorf("Resolver.state type = %q, want ResolverState", got)
 		}
 		for name, typ := range fields {
 			if typeContainsIdent(typ, "Proxy") {
-				t.Errorf("resolver.%s retains forbidden Proxy dependency", name)
+				t.Errorf("Resolver.%s retains forbidden Proxy dependency", name)
 			}
 		}
-		factory := namedFunction(t, f, "newResolver")
+		factory := namedFunction(t, f, "NewResolver")
 		if functionSignatureContainsIdent(factory, "Proxy") {
-			t.Error("newResolver must receive resolverState, not *Proxy")
+			t.Error("NewResolver must receive ResolverState, not *Proxy")
 		}
 
 		countGenerationBoundResolvers := func(node ast.Node) (calls, bound int) {
