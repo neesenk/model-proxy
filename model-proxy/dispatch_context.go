@@ -2,6 +2,9 @@ package main
 
 import (
 	"net/http"
+	"time"
+
+	"model-proxy/internal/observe/requestlog"
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
@@ -71,9 +74,9 @@ type serveRequest struct {
 	request *http.Request
 }
 
-// forwardLogCtx carries stable request identity into target execution. Reload
-// generation remains owned by targetexec.Attempt.Runtime and is not duplicated
-// in this observation scope.
+// forwardLogCtx aliases the request-log observation scope; field names differ
+// (requestID/attempt/exposed/origBody) so root call sites keep their local
+// vocabulary while the data-plane mapping lives in internal/observe/requestlog.
 type forwardLogCtx struct {
 	requestID string
 	attempt   int
@@ -106,5 +109,34 @@ func newTargetAttempt(
 		exchange,
 		scope,
 		policy,
+	)
+}
+
+// buildRequestLogInput adapts the root forwardLogCtx vocabulary to
+// requestlog.BuildInput.
+func buildRequestLogInput(
+	context forwardLogCtx,
+	request *http.Request,
+	protocol string,
+	calledModel string,
+	target RouteTarget,
+	response *http.Response,
+	startedAt time.Time,
+	upstreamRequestBody []byte,
+) requestlog.Input {
+	return requestlog.BuildInput(
+		requestlog.LogCtx{
+			RequestID: context.requestID,
+			Attempt:   context.attempt,
+			Exposed:   context.exposed,
+			OrigBody:  context.origBody,
+		},
+		request,
+		protocol,
+		calledModel,
+		target,
+		response,
+		startedAt,
+		upstreamRequestBody,
 	)
 }

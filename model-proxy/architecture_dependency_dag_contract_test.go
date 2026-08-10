@@ -35,7 +35,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/fusion":                {"model-proxy/internal/config": true},
 		"model-proxy/internal/observe/counters":      nil,
 		"model-proxy/internal/observe/events":        nil,
-		"model-proxy/internal/observe/requestlog":    nil,
+		"model-proxy/internal/observe/requestlog":    {"model-proxy/internal/config": true},
 		"model-proxy/internal/observe/stats":         {"model-proxy/internal/observe/counters": true},
 		"model-proxy/internal/pricing":               nil,
 		"model-proxy/internal/probe":                 {"model-proxy/internal/config": true, "model-proxy/provider": true},

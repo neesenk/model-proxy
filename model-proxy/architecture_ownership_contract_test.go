@@ -297,7 +297,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 	})
 
 	t.Run("internal observe requestlog owns the JSONL data plane", func(t *testing.T) {
-		assertRepositoryLeafPackage(t, "internal/observe/requestlog")
+		assertInternalPackageImportPolicy(t, "internal/observe/requestlog")
 		if _, err := os.Stat("request_log.go"); err == nil {
 			t.Error("legacy root request_log.go must not exist; request-log mechanics belong in internal/observe/requestlog")
 		} else if !os.IsNotExist(err) {
@@ -306,15 +306,11 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 		adapter, _ := parseGoFile(t, "request_log_adapter.go")
 		wantImports := map[string]bool{
-			"log":      true,
-			"net/http": true,
-			"time":     true,
+			"log": true,
 			"model-proxy/internal/observe/requestlog": true,
 		}
 		wantFunctions := map[string]int{
-			"requestLogInput":    0,
-			"completeRequestLog": 0,
-			"initRequestLog":     0,
+			"initRequestLog": 0,
 		}
 		for _, spec := range adapter.Imports {
 			importPath := strings.Trim(spec.Path.Value, `"`)

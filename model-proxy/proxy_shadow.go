@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"model-proxy/internal/observe/requestlog"
 
 	"model-proxy/internal/protocol"
 	shadowexec "model-proxy/internal/shadow"
@@ -128,7 +129,7 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowexec.Run
 			return
 		}
 	}
-	logInput := requestLogInput(
+	logInput := buildRequestLogInput(
 		forwardLogCtx{requestID: "shadow-" + primaryReqID, exposed: exposed},
 		result.Request,
 		proto,
@@ -138,5 +139,5 @@ func (p *Proxy) runShadow(runtime runtimeSnapshot, shadowRuntime *shadowexec.Run
 		result.Started,
 		result.RequestBody,
 	)
-	completeRequestLog(logger, logInput, result.Capture.Body, result.Capture.Total, result.Capture.Truncated)
+	requestlog.Complete(logger, logInput, result.Capture.Body, result.Capture.Total, result.Capture.Truncated)
 }

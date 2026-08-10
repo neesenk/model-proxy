@@ -21,7 +21,7 @@ func TestRequestLogInputMapsRuntimeValuesAndPrefersOriginalBody(t *testing.T) {
 	rewritten := []byte(`{"model":"backend-model","messages":[]}`)
 	startedAt := time.Unix(1_000, 0)
 
-	input := requestLogInput(
+	input := buildRequestLogInput(
 		forwardLogCtx{
 			requestID: "request-1",
 			attempt:   2,
@@ -71,7 +71,7 @@ func TestRequestLogInputFallsBackToUpstreamBodyForInternalLeg(t *testing.T) {
 	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
 	upstream := []byte(`{"model":"panel-model","input":"prompt"}`)
 
-	input := requestLogInput(
+	input := buildRequestLogInput(
 		forwardLogCtx{requestID: "fusion-panel-1", exposed: "fusion-route"},
 		request,
 		"responses",

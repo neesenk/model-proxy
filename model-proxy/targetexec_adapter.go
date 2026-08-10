@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/provider"
 	"strconv"
 	"time"
@@ -106,7 +107,7 @@ func (effects targetExecutionEffects) CaptureResponse(
 		exposed:   attempt.Scope.Log.Exposed,
 		origBody:  attempt.Scope.Log.OriginalBody,
 	}
-	input := requestLogInput(
+	input := buildRequestLogInput(
 		logContext,
 		attempt.Request,
 		string(attempt.Protocol),
@@ -117,7 +118,7 @@ func (effects targetExecutionEffects) CaptureResponse(
 		attempt.Body,
 	)
 	return bodycapture.New(body, logger.MaxBodyBytes(), func(captured []byte, total int64, truncated bool) {
-		completeRequestLog(logger, input, captured, total, truncated)
+		requestlog.Complete(logger, input, captured, total, truncated)
 	})
 }
 

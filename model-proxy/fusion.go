@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/requestlog"
 	"net/http"
 	"strings"
 	"time"
@@ -400,7 +401,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// / fusion-judge-<parent>) so per-leg detail is filterable by prefix in the
 	// log / API.
 	if logger := p.reqLog; logger != nil {
-		logInput := requestLogInput(
+		logInput := buildRequestLogInput(
 			forwardLogCtx{requestID: legID, exposed: fc.flc.exposed},
 			req,
 			fc.proto,
@@ -410,7 +411,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			start,
 			body,
 		)
-		completeRequestLog(logger, logInput, respBody, int64(len(respBody)), false)
+		requestlog.Complete(logger, logInput, respBody, int64(len(respBody)), false)
 	}
 	return res
 }
