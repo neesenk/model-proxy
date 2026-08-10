@@ -1,4 +1,4 @@
-package main
+package doctor
 
 import (
 	"model-proxy/internal/app"
@@ -31,7 +31,7 @@ routes:
     - {provider: zhipu, model: glm-5.2, priority: 1}
 `)
 
-	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { CmdDoctor([]string{"--config", cfgPath}, mustCfg(t, cfgPath), cfgPath) })
 
 	if !strings.Contains(out, "zhipu") {
 		t.Errorf("doctor output missing parent name zhipu:\n%s", out)
@@ -61,7 +61,7 @@ func TestCmdDoctor_SingleProviderNoPool(t *testing.T) {
 	os.MkdirAll(home+"/.model-proxy", 0o700)
 	// No pool file → single-account path; provider name appears plainly.
 	cfgPath := writeTempConfig(t, minimalConfig)
-	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { CmdDoctor([]string{"--config", cfgPath}, mustCfg(t, cfgPath), cfgPath) })
 	if !strings.Contains(out, "aqp") {
 		t.Errorf("doctor output missing provider aqp:\n%s", out)
 	}
@@ -89,7 +89,7 @@ routes:
   claude-x:
     - {provider: oai, model: gpt-x, priority: 1, protocol: openai}
 `)
-	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { CmdDoctor([]string{"--config", cfgPath}, mustCfg(t, cfgPath), cfgPath) })
 	if !strings.Contains(out, "converts when client protocol differs") {
 		t.Errorf("doctor missing conversion note:\n%s", out)
 	}
@@ -127,7 +127,7 @@ shadow:
 shadow_sample_rate: 0.5
 shadow_max_concurrent: 8
 `)
-	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { CmdDoctor([]string{"--config", cfgPath}, mustCfg(t, cfgPath), cfgPath) })
 	for _, want := range []string{"Shadow", "glm", "deepseek/deepseek-v4-pro", "protocol=openai", "sample_rate=0.5", "max_concurrent=8"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor shadow section missing %q:\n%s", want, out)
@@ -153,7 +153,7 @@ routes:
 shadow:
   glm: {provider: zhipu, model: glm-4.5}
 `)
-	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { CmdDoctor([]string{"--config", cfgPath}, mustCfg(t, cfgPath), cfgPath) })
 	for _, want := range []string{"Shadow", "zhipu/glm-4.5", "protocol=same-as-primary", "sample_rate=1", "max_concurrent=4"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor shadow defaults missing %q:\n%s", want, out)
@@ -168,7 +168,7 @@ func TestCmdDoctor_NoShadowSection(t *testing.T) {
 	t.Setenv("HOME", home)
 	os.MkdirAll(home+"/.model-proxy", 0o700)
 	cfgPath := writeTempConfig(t, minimalConfig)
-	out := grabStdout(t, func() { cmdDoctor([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { CmdDoctor([]string{"--config", cfgPath}, mustCfg(t, cfgPath), cfgPath) })
 	if strings.Contains(out, "Shadow") {
 		t.Errorf("doctor without shadow config should not show a Shadow section:\n%s", out)
 	}
