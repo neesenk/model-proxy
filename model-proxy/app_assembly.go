@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	appdomain "model-proxy/internal/app"
+	clicmd "model-proxy/internal/cli"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
 )
@@ -19,39 +20,16 @@ func newApplicationRuntime(cfg *configdomain.Config, args cliserve.Args) *applic
 	return appdomain.NewRuntime(cfg, args)
 }
 
-// application is the process composition owner. It binds the concrete command
-// handlers and the serve runtime once; main only supplies process arguments,
-// streams, and the final exit boundary.
-type application struct {
-	serve    serveAssembly
-	commands map[string]cliCommand
-}
+// application is the process composition owner; the command registry lives in
+// internal/cli (newApplication keeps the root serve driver injected).
+type application = clicmd.Application
 
 func newApplication() *application {
-	app := &application{}
-	app.commands = map[string]cliCommand{
-		"serve":    processCLICommand(app.serve.command),
-		"takeover": processCLICommand(cmdTakeover),
-		"restore":  processCLICommand(cmdRestore),
-		"login":    processCLICommand(cmdLogin),
-		"logout":   processCLICommand(cmdLogout),
-		"usage":    processCLICommand(cmdUsage),
-		"models":   processCLICommand(cmdModels),
-		"config":   processCLICommand(cmdConfig),
-		"schedule": processCLICommand(cmdSchedule),
-		"pin":      processCLICommand(cmdPin),
-		"unpin":    processCLICommand(cmdUnpin),
-		"unfreeze": processCLICommand(cmdUnfreeze),
-		"stats":    processCLICommand(cmdStats),
-		"doctor":   processCLICommand(cmdDoctor),
-		"test":     processCLICommand(cmdTest),
-		"replay":   processCLICommand(cmdReplay),
-		"shadow":   processCLICommand(cmdShadow),
-		"wire":     processCLICommand(cmdWire),
-	}
-	return app
+	return clicmd.NewApplication(serveAssembly{}.command)
 }
 
-func (app *application) Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	return runCLIArgsWithCommands(args, stdin, stdout, stderr, app.commands)
+// runCLIArgs is the compatibility entry used by tests and embedders that still
+// call the pre-composition boundary.
+func runCLIArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return newApplication().Run(args, stdin, stdout, stderr)
 }

@@ -13,12 +13,6 @@ func processCLICommand(run func([]string)) cliCommand {
 	return clicmd.ProcessCommand(run)
 }
 
-// runCLIArgs is the compatibility entry used by tests and embedders that still
-// call the pre-composition boundary.
-func runCLIArgs(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	return newApplication().Run(args, stdin, stdout, stderr)
-}
-
 func runCLIArgsWithCommands(
 	args []string,
 	stdin io.Reader,

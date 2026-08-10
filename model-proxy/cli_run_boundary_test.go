@@ -200,28 +200,28 @@ func TestRunCLIArgsDispatchContract(t *testing.T) {
 
 func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 	wantTargets := map[string]string{
-		"config":       "cmdConfig",
-		"doctor":       "cmdDoctor",
-		"login":        "cmdLogin",
-		"logout":       "cmdLogout",
-		"models":       "cmdModels",
-		"pin":          "cmdPin",
-		"replay":       "cmdReplay",
-		"restore":      "cmdRestore",
-		"schedule":     "cmdSchedule",
-		"serve":        "app.serve.command",
-		"shadow":       "cmdShadow",
-		"stats":        "cmdStats",
-		"takeover":     "cmdTakeover",
-		"test":         "cmdTest",
-		"unfreeze":     "cmdUnfreeze",
-		"unpin":        "cmdUnpin",
-		"usage": "cmdUsage",
-		"wire":         "cmdWire",
+		"config":       "RunConfig",
+		"doctor":       "RunDoctor",
+		"login":        "clilogin.CmdLogin",
+		"logout":       "RunLogout",
+		"models":       "RunModels",
+		"pin":          "RunPin",
+		"replay":       "RunReplay",
+		"restore":      "RunRestore",
+		"schedule":     "RunSchedule",
+		"serve":        "app.Serve",
+		"shadow":       "RunShadow",
+		"stats":        "RunStats",
+		"takeover":     "RunTakeover",
+		"test":         "climodels.CmdTest",
+		"unfreeze":     "RunUnfreeze",
+		"unpin":        "RunUnpin",
+		"usage":        "RunUsage",
+		"wire":         "RunWire",
 	}
 	app := newApplication()
-	gotCommands := make([]string, 0, len(app.commands))
-	for command := range app.commands {
+	gotCommands := make([]string, 0, len(app.Commands))
+	for command := range app.Commands {
 		gotCommands = append(gotCommands, command)
 	}
 	sort.Strings(gotCommands)
@@ -334,7 +334,7 @@ func TestRunCLIArgsDoesNotAccessProcessGlobals(t *testing.T) {
 
 	var found []string
 	visited := map[string]bool{}
-	queue := []string{"newApplication", "application.Run"}
+	queue := []string{"NewApplication", "Application.Run"}
 	predeclaredCalls := map[string]bool{
 		"append": true, "cap": true, "clear": true, "close": true, "complex": true,
 		"copy": true, "delete": true, "imag": true, "len": true, "make": true,
@@ -381,7 +381,7 @@ func TestRunCLIArgsDoesNotAccessProcessGlobals(t *testing.T) {
 							queue = append(queue, callable.Name)
 						}
 					} else if callable.Name == "run" {
-						if name != "processCLICommand" && name != "runCLIArgsWithCommands" {
+						if name != "ProcessCommand" && name != "RunArgsWithCommands" {
 							found = append(found, name+":unexpected-handler-call:"+callable.Name)
 						}
 					} else if !predeclaredCalls[callable.Name] {
@@ -407,7 +407,7 @@ func TestRunCLIArgsDoesNotAccessProcessGlobals(t *testing.T) {
 func parseApplicationCommandTargets(t *testing.T) map[string]string {
 	t.Helper()
 	files := parseCLIProductionFiles(t)
-	constructor := findCLIProductionFunc(t, files, "newApplication")
+	constructor := findCLIProductionFunc(t, files, "NewApplication")
 	targets := map[string]string{}
 	assignments := 0
 	ast.Inspect(constructor.Body, func(node ast.Node) bool {
@@ -416,27 +416,27 @@ func parseApplicationCommandTargets(t *testing.T) map[string]string {
 			return true
 		}
 		field, ok := assignment.Lhs[0].(*ast.SelectorExpr)
-		if !ok || field.Sel.Name != "commands" || !identIs(field.X, "app") {
+		if !ok || field.Sel.Name != "Commands" || !identIs(field.X, "app") {
 			return true
 		}
 		assignments++
 		literal, ok := assignment.Rhs[0].(*ast.CompositeLit)
 		if !ok {
-			t.Fatalf("newApplication app.commands value = %T, want map literal", assignment.Rhs[0])
+			t.Fatalf("newApplication app.Commands value = %T, want map literal", assignment.Rhs[0])
 		}
 		for _, element := range literal.Elts {
 			entry, ok := element.(*ast.KeyValueExpr)
 			if !ok {
-				t.Fatalf("newApplication app.commands element = %T, want key/value", element)
+				t.Fatalf("newApplication app.Commands element = %T, want key/value", element)
 			}
 			key, ok := entry.Key.(*ast.BasicLit)
 			if !ok || key.Kind != token.STRING {
-				t.Fatalf("newApplication app.commands key = %T, want string literal", entry.Key)
+				t.Fatalf("newApplication app.Commands key = %T, want string literal", entry.Key)
 			}
 			command := strings.Trim(key.Value, `"`)
 			call, ok := entry.Value.(*ast.CallExpr)
-			if !ok || len(call.Args) != 1 || !identIs(call.Fun, "processCLICommand") {
-				t.Fatalf("newApplication().commands[%q] value = %T, want processCLICommand(handler)", command, entry.Value)
+			if !ok || len(call.Args) != 1 || !identIs(call.Fun, "ProcessCommand") {
+				t.Fatalf("newApplication().commands[%q] value = %T, want ProcessCommand(handler)", command, entry.Value)
 			}
 			handler := expressionName(call.Args[0])
 			if handler == "" {
@@ -450,7 +450,7 @@ func parseApplicationCommandTargets(t *testing.T) map[string]string {
 		return true
 	})
 	if assignments != 1 {
-		t.Fatalf("newApplication app.commands assignments = %d, want exactly 1 concrete map", assignments)
+		t.Fatalf("newApplication app.Commands assignments = %d, want exactly 1 concrete map", assignments)
 	}
 	return targets
 }

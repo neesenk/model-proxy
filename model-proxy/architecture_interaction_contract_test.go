@@ -160,17 +160,17 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 	})
 
 	t.Run("application owns command registration and main only crosses the OS boundary", func(t *testing.T) {
-		app, _ := parseGoFile(t, "app_assembly.go")
-		constructor := namedFunction(t, app, "newApplication")
-		if got := namedCallCountInNode(constructor.Body, "processCLICommand"); got != 18 {
+		app, _ := parseGoFile(t, "internal/cli/app.go")
+		constructor := namedFunction(t, app, "NewApplication")
+		if got := namedCallCountInNode(constructor.Body, "ProcessCommand"); got != 18 {
 			t.Errorf("newApplication processCLICommand registrations = %d, want 18 concrete command bindings", got)
 		}
 
 		sites := rootFunctionReferenceSites(t, "newApplication")
 		if len(sites) != 2 ||
-			sites[0].file != "cli_run.go" || sites[0].function != "runCLIArgs" ||
+			sites[0].file != "app_assembly.go" || sites[0].function != "runCLIArgs" ||
 			sites[1].file != "main.go" || sites[1].function != "main" {
-			t.Errorf("newApplication production reference sites = %v, want only runCLIArgs compatibility seam and main direct calls", sites)
+			t.Errorf("newApplication production reference sites = %v, want only app_assembly.go compatibility seam and main direct calls", sites)
 		}
 	})
 }
