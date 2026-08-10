@@ -1,15 +1,11 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"log"
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	runtimestate "model-proxy/internal/runtime"
 	"os"
-	"sort"
 	"time"
 
 	"model-proxy/internal/catalog"
@@ -124,23 +120,9 @@ func runtimeRouteKeys(
 	return keys
 }
 
-// healthConfigFingerprint identifies the exact provider config that frozen
-// health state belongs to. Persisted cooldowns restore only on an exact match
-// — health is keyed by provider NAME, so without this gate a different config
-// (or a test binary sharing ~/.model-proxy/quota_state.json) would "restore"
-// cooldowns onto unrelated same-named providers.
+// healthConfigFingerprint delegates to internal/app.HealthConfigFingerprint.
 func healthConfigFingerprint(cfg *Config) string {
-	names := make([]string, 0, len(cfg.Providers))
-	for name := range cfg.Providers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	h := sha256.New()
-	for _, name := range names {
-		p := cfg.Providers[name]
-		fmt.Fprintf(h, "%s|%s|%s|%s\n", name, p.Provider, p.OpenAIBaseURL, p.AnthropicBaseURL)
-	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
+	return app.HealthConfigFingerprint(cfg)
 }
 
 // snapshotPersistedState takes the one authoritative persistence snapshot under

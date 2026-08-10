@@ -1,6 +1,9 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"log"
 	"path/filepath"
 	"sort"
@@ -179,4 +182,23 @@ func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov con
 		return nil
 	}
 	return p
+}
+
+// HealthConfigFingerprint identifies the exact provider config that frozen
+// health state belongs to. Persisted cooldowns restore only on an exact match
+// — health is keyed by provider NAME, so without this gate a different config
+// (or a test binary sharing ~/.model-proxy/quota_state.json) would "restore"
+// cooldowns onto unrelated same-named providers.
+func HealthConfigFingerprint(cfg *configdomain.Config) string {
+	names := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		p := cfg.Providers[name]
+		fmt.Fprintf(h, "%s|%s|%s|%s\n", name, p.Provider, p.OpenAIBaseURL, p.AnthropicBaseURL)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
