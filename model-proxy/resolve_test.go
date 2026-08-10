@@ -14,7 +14,7 @@ type fakeResolverState struct {
 	healthy          map[string]bool
 }
 
-func (s *fakeResolverState) resolverSpreadStart(_ string, n int, generation uint64) int {
+func (s *fakeResolverState) ResolverSpreadStart(_ string, n int, generation uint64) int {
 	s.spreadCalls++
 	s.spreadGeneration = generation
 	if n == 0 {
@@ -23,7 +23,7 @@ func (s *fakeResolverState) resolverSpreadStart(_ string, n int, generation uint
 	return s.spreadStart % n
 }
 
-func (s *fakeResolverState) resolverTargetHealthy(virtual, _ string, _ time.Time) bool {
+func (s *fakeResolverState) TargetHealthy(virtual, _ string, _ time.Time) bool {
 	return s.healthy[virtual]
 }
 
