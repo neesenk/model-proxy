@@ -2,10 +2,11 @@
 
 package main
 
-import "syscall"
+import (
+	"syscall"
 
-// sysProcAttrDetach is a no-op on Windows (setsid is Unix-only). Daemon mode is
-// best supported on Unix; on Windows the supervisor stays attached to the console.
-func sysProcAttrDetach() *syscall.SysProcAttr {
-	return nil
-}
+	cliserve "model-proxy/internal/cli/serve"
+)
+
+// sysProcAttrDetach delegates to cliserve.SysProcAttrDetach (no-op on Windows).
+func sysProcAttrDetach() *syscall.SysProcAttr { return cliserve.SysProcAttrDetach() }
