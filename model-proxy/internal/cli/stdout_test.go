@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+
+	"model-proxy/internal/app"
 	"testing"
 )
 
@@ -24,4 +28,51 @@ func grabStdout(t *testing.T, fn func()) string {
 	fn()
 	w.Close()
 	return <-done
+}
+
+// writeTempConfig writes a YAML config body into a temp dir.
+func writeTempConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// setPoolHome isolates account storage for CLI tests.
+func setPoolHome(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".model-proxy"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+}
+
+// writePoolFile writes a plural credential pool for `name` with the given keys.
+func writePoolFile(t *testing.T, name, providerID string, keys ...string) {
+	t.Helper()
+	pool := app.CredentialPool{Version: 1}
+	for _, key := range keys {
+		pool.Accounts = append(pool.Accounts, app.PoolAccount{
+			ID:    app.AccountIDFor(providerID, app.AccountCred{APIKey: key}),
+			Label: key, APIKey: key, AddedAt: "2026-07-08",
+		})
+	}
+	if err := app.SavePool(name, providerID, pool); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeZhipuPoolConfig writes a one-provider config with a custom usage_url.
+func writeZhipuPoolConfig(t *testing.T, usageURL string) string {
+	t.Helper()
+	return writeTempConfig(t, fmt.Sprintf(`listen: 127.0.0.1:15721
+providers:
+  zhipu:
+    openai_base_url: https://zhipu.invalid/api/paas/v4
+    provider_id: zhipu
+    usage_url: %s
+routes: {}
+`, usageURL))
 }

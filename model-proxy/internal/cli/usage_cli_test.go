@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"net/http"
@@ -26,7 +26,7 @@ func TestCLI_UsageSingleAccount(t *testing.T) {
 	cfgPath := writeZhipuPoolConfig(t, srv.URL)
 
 	out := grabStdout(t, func() {
-		cmdUsage([]string{"zhipu", "--config", cfgPath})
+		RunUsage([]string{"zhipu", "--config", cfgPath})
 	})
 
 	select {

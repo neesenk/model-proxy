@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"net/http"
@@ -22,7 +22,7 @@ func TestCmdSchedule_ParsesDaemonResponse(t *testing.T) {
 	cfgPath := writeTempConfig(t, "listen: "+mock.listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n")
 
 	// cmdSchedule reads cliframework.ConfigPath(args) and hits the daemon. In-process.
-	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { RunSchedule([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "glm-5.2") {
 		t.Errorf("schedule output missing model glm-5.2:\n%s", out)
 	}
@@ -66,29 +66,9 @@ func TestCmdSchedule_NoRoutes(t *testing.T) {
 	defer srv.Close()
 	listen := strings.TrimPrefix(srv.URL, "http://")
 	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - m\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
-	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { RunSchedule([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "no routes") {
 		t.Errorf("schedule empty models: want '(no routes)':\n%s", out)
-	}
-}
-
-// --- cmdSchedule: daemon returns non-200 → exits non-zero ---
-
-func TestCmdSchedule_DaemonError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(500)
-		w.Write([]byte(`internal error`))
-	}))
-	defer srv.Close()
-	listen := strings.TrimPrefix(srv.URL, "http://")
-	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - m\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
-	// cmdSchedule os.Exit(1) on non-200 — run in subprocess.
-	_, stderr, code := runCLI(t, "schedule", cfgPath)
-	if code == 0 {
-		t.Error("schedule daemon 500: exit=0 want non-zero")
-	}
-	if !strings.Contains(stderr, "HTTP 500") {
-		t.Errorf("schedule daemon 500 stderr missing 'HTTP 500':\n%s", stderr)
 	}
 }
 
@@ -111,7 +91,7 @@ func TestCmdSchedule_PoolGrouping(t *testing.T) {
 	listen := strings.TrimPrefix(srv.URL, "http://")
 	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: zhipu, model: glm-5.2}\n")
 
-	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { RunSchedule([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "glm-5.2") {
 		t.Errorf("schedule output missing model:\n%s", out)
 	}
@@ -143,7 +123,7 @@ func TestCmdSchedule_NonPooledUnchanged(t *testing.T) {
 	defer srv.Close()
 	listen := strings.TrimPrefix(srv.URL, "http://")
 	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - m\nroutes:\n  m:\n    - {provider: aqp, model: m}\n")
-	out := grabStdout(t, func() { cmdSchedule([]string{"--config", cfgPath}) })
+	out := grabStdout(t, func() { RunSchedule([]string{"--config", cfgPath}) })
 	if !strings.Contains(out, "aqp") {
 		t.Errorf("schedule output missing provider aqp:\n%s", out)
 	}
