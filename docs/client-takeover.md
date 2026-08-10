@@ -5,9 +5,10 @@
 修改 `takeover` / `restore`、客户端配置路径、provider_id 或 baseURL 生成时必读。
 
 实现归属：备份/改写/恢复与四个客户端的 rewrite 归 `model-proxy/internal/takeover`
-（`RunTakeover` / `RunRestore` / `ListClients` / `BackupDir`）；根 `cli_takeover.go`
+（`RunTakeover` / `RunRestore` / `ListClients` / `BackupDir`）；`internal/cli`
+（`commands.go` 的 `RunTakeover` / `RunRestore` / `takeoverFacts`）
 只解析参数、加载 config 并用 `takeoverFacts` 注入 implicit routes 与 models.dev
-元数据（catalog 加载与 source 标记留在根层）。
+元数据（catalog 加载与 source 标记留在 CLI 层）。
 
 | 客户端 | baseURL 格式 | 关键差异 |
 |---|---|---|

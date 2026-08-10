@@ -25,7 +25,7 @@
 
 ## 配置
 
-13. 新顶层配置字段必须在 `internal/config` 同时加入 `Config`、`rawConfig` 和拷贝段。yaml.v3 会静默忽略未知键，因此必须增加该包的 YAML 加载测试，不能只直接构造 Config；根 `config_compat.go` 不承载字段或默认值逻辑。
+13. 新顶层配置字段必须在 `internal/config` 同时加入 `Config`、`rawConfig` 和拷贝段。yaml.v3 会静默忽略未知键，因此必须增加该包的 YAML 加载测试，不能只直接构造 Config；根包不承载字段或默认值逻辑（`config_compat.go` 已删除）。
 14. duration 字段除明确允许的 `retry_wait: "0"` 外应验证为正数；任何允许零/负数的字段都要写入契约。
 15. `BillingClass` iota 不是调度顺序，必须通过独立 `tierRank` 映射 `plan < unknown < payg`。
 
@@ -36,7 +36,7 @@
 17. 后台 goroutine 必须有 owner、stop、wait 和 final flush。测试创建 owner 后必须注册 cleanup。
 18. 原子文件写不能在多个实例间共享固定 `.tmp` 名。
 19. reload 中 config generation 与运行态 snapshot/fingerprint 必须一致。
-20. `cli_daemon.go` 的 supervisor `spawnWorker` 可能返回 nil，调用方必须检查。
+20. `internal/cli/serve/supervisor.go` 的 supervisor `SpawnWorker` 可能返回 nil，调用方必须检查。
 21. Proxy 级 goroutine 必须经 `Lifecycle.Run` 接纳；serve process 只能通过
     `applicationRuntime` 调用 `startRuntimeServices`/`Proxy.Close`。不得绕过它分散
     启动或 final flush。
@@ -46,16 +46,15 @@
     goroutine 中直接 `os.Exit`。
 23. `main` 函数只绑定 OS 参数、I/O 与最终进程退出；根 `package main` 的
     `application` 是实际进程 composition owner，拥有命令表与 `serveAssembly`。
-    无参数、help、未知命令及已知命令分发 seam 统一经过可测试的 `application.Run`；
-    `runCLIArgs(args, stdin, stdout, stderr)` 只是兼容入口。现阶段既有 handler 仍保留
+    无参数、help、未知命令及已知命令分发 seam 统一经过可测试的 `application.Run`
+    （唯一 CLI 分发入口）。现阶段既有 handler 仍保留
     进程 I/O 和 `log.Fatal` / `os.Exit` 语义，不得误写成命令级迁移已完成。
     `serveAssembly` 拥有 serve 与前台/worker signal、HTTP 生命周期；
     `applicationRuntime` 构造/关闭 Proxy，启动运行时服务，装配 mux/Web，投影 reload
     并交出 transport task。daemon/supervisor signal 与 pid/probe 归
-    `cli_daemon.go`，平台 companion 只提供 child detach 属性，HTTP drain primitive
-    留在 `daemon.go`；不要恢复第二个顶层分发器。main package 不能被 import，故在
-    Proxy/handlers 仍在根包时，不要用 callback bag 虚构 `internal/app`；待它们移入
-    可 import 包后再评估严格边界。
+    `internal/cli/serve/supervisor.go`，平台 companion（`detach_unix.go` /
+    `detach_windows.go`）只提供 child detach 属性，HTTP drain primitive
+    留在 `internal/cli/serve/shutdown.go`；不要恢复第二个顶层分发器。
 
 ## 日志和持久化
 

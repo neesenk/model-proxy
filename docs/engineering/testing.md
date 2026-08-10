@@ -21,7 +21,7 @@ gofmt -l .
 scripts/cover.sh
 ```
 
-`scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate。底层 `go test` 任一 package 失败、缺少预期 package 输出或缺少覆盖率百分比时，脚本必须非零退出，已有或不完整的 `cov.out` 不得形成假绿。
+`scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate。底层 `go test` 任一 package 失败、缺少预期 package 输出或缺少覆盖率百分比时，脚本必须非零退出，已有或不完整的 `cov.out` 不得形成假绿。两类合法例外计入预期输出但不参与百分比 gate：无测试文件的包（coverage 模式下打印裸 `coverage: 0.0%` 行，如根 package main）和无可覆盖语句的纯测试包（`[no statements]`，如 `internal/archtest`）。另有若干 package 覆盖率历史低于 80%（gate 修复前从未绿过），以 `gap` 行展示但不判失败，豁免清单维护在 `scripts/cover.sh` 的 `exemptions` 变量中；提升覆盖率后应从清单移除。
 
 daemon process、浏览器 OAuth/SSO、交互 stdin 和真实上游 FetchModels 属于外部 I/O 路径，可通过集成验证覆盖，不强制全部单元化。
 
@@ -87,8 +87,12 @@ ring cap、detached snapshot、取消订阅、慢消费者丢弃和终态查询�
 forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为读取内部状态
 而恢复根包 type alias、访问模块互斥锁或暴露 test-only 生产接口。
 
-根包集成测试仍使用 `package main`，但文件按 `<domain>_<concern>_test.go` 组织；
-跨文件共享 fixture 只保留在 `<domain>_test_support_test.go`，不得复制 helper 或
+根包不再保留测试文件。CLI 子命令与进程生命周期集成测试归 `internal/cli`
+（os.Exit/log.Fatal 命令经 `subprocess_test_support_test.go` 的
+`TestHelperProcess` / `runCLI*` subprocess harness 覆盖）；`app.NewRuntime`
+装配行为测试归 `internal/app/runtime_assembly_test.go`；架构 AST 契约测试归
+`internal/archtest`（纯测试包，经 `repoRoot` 定位模块根，调用点写模块根相对路径）。
+跨文件共享 fixture 只保留在各包的 `*_test_support_test.go`，不得复制 helper 或
 把 test-only hook 塞回生产结构。一个文件只覆盖一个清晰领域时不按行数强拆；
 当同一 catch-all 文件混合 HTTP status、配置、账号、登录等独立契约时，必须按
 领域拆分，并保持原测试名、断言与 cleanup 语义。
@@ -99,13 +103,13 @@ Provider 的 `Usage`、`Quota`、fetch/parse、认证和显示格式测试直接
 
 ### 架构 DAG 与交互合同
 
-`architecture_dependency_dag_contract_test.go` 必须枚举全部生产 `internal` package，并按
+`internal/archtest/architecture_dependency_dag_contract_test.go` 必须枚举全部生产 `internal` package，并按
 `docs/architecture/overview.md` 的闭合 allowlist 检查直接仓库依赖和无环性。新增
 `internal` 目录必须显式分类；不得通过跳过目录、只扫描部分文件或给未知 package
 隐式空规则形成假绿，也不得使用 dot/blank repository import 绕过 matcher。依赖变更
 应缩小或保持边界；确需扩大时先更新权威架构契约并说明 owner 关系。
 
-根包交互 guard 必须解析 Go AST/类型形状，断言构造器或 mutable owner 的精确生产
+架构交互 guard（`internal/archtest`）必须解析 Go AST/类型形状，断言构造器或 mutable owner 的精确生产
 callsite；不能用注释/字符串包含、只断言“至少一次”，也不能只检查预期文件而不扫描
 其他生产文件。受保护 owner 符号的引用必须保持已审查的直接形态：root 函数只允许
 裸标识符调用，imported 构造器只允许 `pkg.F(...)`，imported 类型只允许 `pkg.T{...}`

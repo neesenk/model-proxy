@@ -23,8 +23,7 @@ main (OS args/streams/exit)
 
 根 `package main` 只保留进程边界文件：`main.go`（OS args/streams/exit）、
 `app_assembly.go`（把 serve 驱动注入 `internal/cli.Application`）、`cli_serve.go`
-（serve/daemon 角色分发、signal/listener/drain 编排）、`cli_commands.go` /
-`cli_run.go` / `cli_daemon.go`（到 `internal/cli*` 的薄转发）与 `version.go`
+（serve/daemon 角色分发、signal/listener/drain 编排）与 `version.go`
 （构建注入的版本号）。CLI 命令实现、参数解析与调度循环归 `internal/cli*`；
 组合根、Proxy、forward 链与 Web/API 适配归 `internal/app`。
 
@@ -114,9 +113,9 @@ Provider 方言和目标视觉能力由根 `planTarget` 解析后作为纯值注
 
 `internal/config` 统一拥有配置类型、YAML 加载、默认值、校验和生效值
 accessor；它不是无仓库依赖叶子，只允许依赖其校验/默认值实际需要的
-`internal/pricing` 与 `internal/protocol`。根包 `config_compat.go` 只保留类型别名
-和 `LoadConfig` / `LoadConfigFromBytes` 兼容 wrapper，composition root 与现有
-调用方不得在根包重新建立第二套配置事实或恢复 `config.go`。
+`internal/pricing` 与 `internal/protocol`。根包的类型别名与兼容 wrapper 已删除，
+composition root 与现有
+调用方不得在根包重新建立第二套配置事实或恢复 `config.go` / `config_compat.go`。
 
 `internal/catalog` 是无仓库内依赖的 models.dev 元数据源叶子包，拥有 slim
 projection、canonical-owner 去重、HTTP/ETag/TTL 刷新和原子磁盘缓存。根包只把
@@ -275,8 +274,8 @@ done/error 会话，不能删除仍 pending 的会话。
 
 根 `main` 函数只绑定 OS 进程边界：构造 `application`，把参数与标准输入输出错误流
 交给 `application.Run`，再使用其 exit code 结束进程。`application` 拥有命令表，
-`Run` 是可测试的顶层入口，直接处理无参数、help、未知命令及其 exit code；
-`runCLIArgs(args, stdin, stdout, stderr)` 只是保留同一行为的兼容入口。现阶段已知命令
+`Run` 是唯一 CLI 分发入口（可测试的顶层入口），直接处理无参数、help、未知命令及其
+exit code。现阶段已知命令
 仍由兼容 adapter 调用既有 handler，保留其进程 I/O 与 `log.Fatal` / `os.Exit`
 语义；命令级注入式 I/O 和返回式退出尚未完成。`serveAssembly` 拥有 `serve` 命令、
 前台/worker signal 与 HTTP
@@ -284,12 +283,9 @@ transport 生命周期；它创建 `applicationRuntime`，后者构造 Proxy、�
 装配 mux/Web、执行 reload projection、持有 transport task，并以 `Close` 结束 Proxy。
 `internal/cli/serve/shutdown.go` 保留可独立测试的 HTTP drain primitive；`internal/cli/serve/supervisor.go` 拥有
 daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性的平台差异归
-`cli_daemon_unix.go` / `cli_daemon_windows.go`。
+`internal/cli/serve/detach_unix.go` / `detach_windows.go`。
 
 这是根 package main 内的真实进程装配收敛，不改变任何用户可见 CLI 或 serve 行为。
-它不是新的 `internal/app`：main package 不能 import，使用 callback bag 包装现有根
-函数也不会建立可验证的依赖边界。只有 Proxy/handlers 移入可 import 包后，才评估
-严格的 `internal/app` composition root。
 
 ## 依赖规则
 
@@ -346,9 +342,11 @@ application → serveAssembly → applicationRuntime → Proxy
 
 `internal/takeover` 拥有客户端配置的备份、改写与恢复（claude/opencode/codex/pi），
 只消费 config DTO 与 catalog 元数据；implicit routes、catalog 加载与 source 标记
-由根 `cli_takeover.go` 的 `takeoverFacts` 计算并以 `ModelFacts` 注入，包内不读取
+由 `internal/cli` 的 `takeoverFacts` 计算并以 `ModelFacts` 注入，包内不读取
 应用运行时。
 
+`internal/archtest` 是架构契约测试的 owner：纯测试包、仓内零依赖，经 `repoRoot`
+（`runtime.Caller` 定位模块根）以模块根相对路径扫描全仓生产文件。其中的
 `architecture_dependency_dag_contract_test.go` 是这份 allowlist 的可执行镜像：它必须发现并
 分类全部生产 `internal` package、拒绝未声明边、拒绝环；新增 package 不能靠遗漏目录
 绕过检查；仓库内 import 不得使用 dot/blank alias 绕过 owner matcher。扩大依赖前必须
@@ -388,11 +386,9 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
 - `main` 函数恢复命令解析、serve/daemon 编排，或根包恢复第二个顶层命令
   分发器；
 - 将根 `package main` 的 application/serve runtime 伪装成可 import 的
-  `internal/app` callback bag；在 Proxy/handlers 尚未移入可 import 包前，这不是
-  真实边界；
+  callback bag；真实边界是薄 main + `internal/cli` / `internal/app`；
 - `internal/config` import `internal/pricing`、`internal/protocol` 以外的
-  `model-proxy/*` 包，或根 `config_compat.go` 承载类型别名与加载 wrapper
-  之外的配置实现；
+  `model-proxy/*` 包，或在根包恢复配置类型别名、加载 wrapper 等任何配置实现；
 - `internal/catalog` 反向依赖 Config、Proxy、Provider、Web/CLI 或任意
   `model-proxy/*` 包；
 - `internal/routing` 反向依赖 Proxy、runtime Manager、target executor、Web/CLI

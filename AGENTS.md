@@ -27,17 +27,17 @@ docs/                     架构、后端和 API 契约
 | `model-proxy/internal/accounts/*`、`accounts_adapter.go`、`resolve.go`、多账号 | `model-proxy/AGENTS.md`、`docs/architecture/provider-pools.md` |
 | 凭据、login/logout、池文件 | `docs/architecture/provider-pools.md`、`docs/backend-contracts.md` |
 | `model-proxy/provider/*` | `model-proxy/provider/AGENTS.md`、`docs/backend-contracts.md` |
-| `model-proxy/internal/config/*`、`model-proxy/config_compat.go`、配置加载/校验/默认值 | `model-proxy/AGENTS.md`、`docs/architecture/overview.md`；字段同步另读 `docs/engineering/pitfalls.md` |
+| `model-proxy/internal/config/*`、配置加载/校验/默认值 | `model-proxy/AGENTS.md`、`docs/architecture/overview.md`；字段同步另读 `docs/engineering/pitfalls.md` |
 | `model-proxy/internal/protocol/*`、跨协议 route | `docs/architecture/protocol-conversion.md` |
 | `model-proxy/internal/routing/request.go`、`request_routing_adapter.go`、implicit routes | `docs/architecture/request-routing.md` |
 | `model-proxy/internal/catalog/*`、models.dev catalog、`models refresh` | `docs/architecture/request-routing.md`；pricing/analytics 另读 `docs/web-api.md` |
-| `model-proxy/main.go`、`model-proxy/app_assembly.go`、`model-proxy/cli_run.go`、`model-proxy/cli_serve.go`、`model-proxy/daemon.go`（HTTP drain）、`model-proxy/cli_daemon*.go`、supervisor、serve 生命周期 | `model-proxy/AGENTS.md`、`docs/architecture/overview.md`、`docs/engineering/pitfalls.md`（进程类陷阱）、`model-proxy/CLI.md`（CLI/serve 契约） |
+| `model-proxy/main.go`、`model-proxy/app_assembly.go`、`model-proxy/cli_serve.go`（HTTP drain 编排）、supervisor、serve 生命周期 | `model-proxy/AGENTS.md`、`docs/architecture/overview.md`、`docs/engineering/pitfalls.md`（进程类陷阱）、`model-proxy/CLI.md`（CLI/serve 契约） |
 | Fusion、Shadow、Cache、request log、live | `docs/architecture/fusion-shadow-cache.md` |
 | `internal/web/*`、`proxy_web_api.go`、`web_adapter.go`、stats/API | `docs/web-api.md`；前端另读 `model-proxy/internal/web/assets/AGENTS.md` |
 | CLI 命令或显示 | `model-proxy/CLI.md` |
 | 用户可见功能、配置或使用方式 | `model-proxy/README.md`、`model-proxy/config.yaml`，并按领域读取对应契约 |
 | takeover/restore | `docs/client-takeover.md` |
-| 测试、覆盖率、跨平台构建 | `docs/engineering/testing.md` |
+| 测试、覆盖率、跨平台构建、架构契约测试（`internal/archtest`） | `docs/engineering/testing.md` |
 | 容易误判为 bug 的行为 | `docs/decisions/intentional-behaviors.md` |
 | 跨模块历史陷阱 | `docs/engineering/pitfalls.md` |
 
