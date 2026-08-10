@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"model-proxy/internal/app"
-	"model-proxy/internal/cli"
+	"model-proxy/internal/appapi"
+	clicommon "model-proxy/internal/cli/clicommon"
+	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/takeover"
@@ -64,7 +66,7 @@ func DoctorLive(args []string) bool {
 // (<configDir>/.model-proxy/). Errors mirror renderStatus exactly.
 func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) {
 	base := "http://" + cfg.Listen
-	statusBody, status, err := cli.StatusGet(base, "/api/status")
+	statusBody, status, err := clicommon.StatusGet(base, "/api/status")
 	if err != nil {
 		return "", fmt.Errorf("cannot reach daemon at %s: %v\nis `model-proxy serve` running?", cfg.Listen, err)
 	}
@@ -77,9 +79,9 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 
 	// Recent failures are context, not verdict: a fetch failure or a disabled
 	// request_log degrades to a dim note, never to a command error.
-	reqBody, reqStatus, reqErr := cli.StatusGet(base, "/api/requests?errors=1&limit=5")
+	reqBody, reqStatus, reqErr := clicommon.StatusGet(base, "/api/requests?errors=1&limit=5")
 
-	var st cli.StatusResp
+	var st appapi.StatusResp
 	if err := json.Unmarshal(statusBody, &st); err != nil {
 		return "", fmt.Errorf("parse status response: %v", err)
 	}
@@ -88,12 +90,12 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s · %s\n", provider.Bold("model-proxy doctor --live"), provider.Dim(base))
 	fmt.Fprintf(&b, "%s daemon running (v%s, uptime %s)\n\n", provider.Green("✓"), st.Version, st.Uptime)
-	cli.AppendSection(&b, RenderDiagnosis(cfg, &st, drift))
-	cli.AppendSection(&b, cli.RenderSchedule(&st))
+	clicommon.AppendSection(&b, RenderDiagnosis(cfg, &st, drift))
+	clicommon.AppendSection(&b, clicommon.RenderSchedule(&st))
 	if reqErr == nil && reqStatus == 200 {
-		cli.AppendSection(&b, RenderDoctorFailures(reqBody))
+		clicommon.AppendSection(&b, RenderDoctorFailures(reqBody))
 	}
-	cli.AppendSection(&b, RenderDoctorTakeover(drift))
+	clicommon.AppendSection(&b, RenderDoctorTakeover(drift))
 	return b.String(), nil
 }
 
@@ -111,7 +113,7 @@ type diagLine struct {
 // daemon warnings → takeover drift; healthy routes close the section with
 // their current landing. All data comes from /api/status + the local drift
 // check; nothing is probed live.
-func RenderDiagnosis(cfg *configdomain.Config, st *cli.StatusResp, drift []ClientDrift) string {
+func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []ClientDrift) string {
 	now := time.Now()
 	implicit, _ := app.SynthesizeImplicitRoutes(cfg, accountStore())
 
@@ -146,7 +148,7 @@ func RenderDiagnosis(cfg *configdomain.Config, st *cli.StatusResp, drift []Clien
 				// still report the outage, just without recovery detail.
 				n = len(ri.Ordered)
 			}
-			text := fmt.Sprintf("route %q: %d %s all unavailable", r, n, cli.Plural(n, "target", "targets"))
+			text := fmt.Sprintf("route %q: %d %s all unavailable", r, n, cliframework.Plural(n, "target", "targets"))
 			hint := ""
 			if rec, ok := EarliestRecovery(st, targets, now); ok {
 				text += fmt.Sprintf(" — earliest recovery %s (%s, %s)",
@@ -244,7 +246,7 @@ type recovery struct {
 // 429 rate-limit, circuit breaker, and (provider, model) lockout — and returns
 // the soonest. Model locks are matched by the target's model, not just the
 // provider, so a lock on the provider's OTHER models doesn't mislead.
-func EarliestRecovery(st *cli.StatusResp, targets []configdomain.RouteTarget, now time.Time) (recovery, bool) {
+func EarliestRecovery(st *appapi.StatusResp, targets []configdomain.RouteTarget, now time.Time) (recovery, bool) {
 	var best recovery
 	found := false
 	consider := func(provider, kind, untilStr string) {

@@ -3,8 +3,8 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"model-proxy/internal/appapi"
+	clicommon "model-proxy/internal/cli/clicommon"
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
@@ -119,61 +119,14 @@ func HealthLabel(h StatusHealth) (string, func(string) string) {
 // `schedule` command (ind "") and the serve-status Schedule section (ind "  "),
 // so the two views never drift. Output ends with a trailing blank line, matching
 // the original `schedule` command.
-func RenderScheduleRoutes(models map[string]StatusRoute, ind string) string {
-	names := make([]string, 0, len(models))
-	for n := range models {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	var b strings.Builder
-	for _, m := range names {
-		ri := models[m]
-		fmt.Fprintf(&b, "%s%s → %s\n", ind, provider.Bold(m), provider.Green(ri.First))
-		if ri.Pin != "" {
-			exp := ""
-			if ri.PinExpires != "" {
-				exp = provider.Dim(" (" + ri.PinExpires + ")")
-			}
-			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, provider.Yellow("pinned: "), ri.Pin, exp)
-		}
-		for _, pool := range ri.Pools {
-			fmt.Fprintf(&b, "%s    %s %s (%d accounts, %d available)\n",
-				ind, provider.Dim("pool:"), provider.Bold(pool.Parent), pool.Accounts, pool.Available)
-		}
-		for _, t := range ri.Ordered {
-			extra := ""
-			if !t.Available {
-				extra += " " + provider.Red("(unavailable)")
-			}
-			if t.Peak {
-				extra += " " + provider.Yellow("peak")
-			}
-			fmt.Fprintf(&b, "%s    %s %s  surplus %+.2f  p%d%s\n",
-				ind, provider.Pad(t.Provider, 14), provider.Gray(provider.Pad(t.Tier, 13)), t.Surplus, t.Priority, extra)
-		}
-		if ri.Sticky != "" {
-			dwell := ""
-			if ri.DwellRem > 0 {
-				dwell = fmt.Sprintf(", %.0fs dwell left", ri.DwellRem)
-			}
-			fmt.Fprintf(&b, "%s    %s%s%s\n", ind, provider.Dim("sticky: "), ri.Sticky, provider.Dim(dwell))
-		}
-		b.WriteString("\n")
-	}
-	return b.String()
+// RenderSchedule delegates to clicommon.
+func RenderSchedule(st *StatusResp) string {
+	return clicommon.RenderSchedule(st)
 }
 
-// renderSchedule renders the serve-status Schedule section: header + the shared
-// per-route renderer at 2-space indent. (Trailing-newline normalization is
-// handled once by appendSection.)
-func RenderSchedule(st *StatusResp) string {
-	if len(st.Schedule.Models) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s (%d %s)\n", provider.Bold("Schedule"), len(st.Schedule.Models), cliframework.Plural(len(st.Schedule.Models), "route", "routes"))
-	b.WriteString(RenderScheduleRoutes(st.Schedule.Models, "  "))
-	return b.String()
+// RenderScheduleRoutes delegates to clicommon.
+func RenderScheduleRoutes(models map[string]StatusRoute, ind string) string {
+	return clicommon.RenderScheduleRoutes(models, ind)
 }
 
 // renderTokens renders the per provider/model token-usage table, sorted by
@@ -280,16 +233,9 @@ func RenderQuota(st *StatusResp) string {
 // and schedule) so a wedged listener fails fast instead of hanging the command.
 var daemonHTTPClient = daemonctl.Client
 
-// statusGet fetches base+path and returns the body, HTTP status, and transport
-// error (if any). A non-2xx status is NOT an error here — the caller inspects it.
+// StatusGet fetches base+path via clicommon (shared daemon client).
 func StatusGet(base, path string) (body []byte, status int, err error) {
-	resp, err := daemonHTTPClient.Get(base + path)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	body, _ = io.ReadAll(resp.Body)
-	return body, resp.StatusCode, nil
+	return clicommon.StatusGet(base, path)
 }
 
 // renderStatus fetches the daemon's status endpoints and returns either the
@@ -359,16 +305,9 @@ func RenderStatus(listen string, opts StatusOpts) (string, error) {
 	return b.String(), nil
 }
 
-// appendSection writes a non-empty section followed by one blank separator line.
-// Trailing newlines are normalized away so each renderer need not worry about
-// its exact trailing whitespace.
+// AppendSection delegates to clicommon.
 func AppendSection(b *strings.Builder, s string) {
-	s = strings.TrimRight(s, "\n")
-	if s == "" {
-		return
-	}
-	b.WriteString(s)
-	b.WriteString("\n\n")
+	clicommon.AppendSection(b, s)
 }
 
 // renderWarnings renders the implicit-route ambiguity warnings (a model served
