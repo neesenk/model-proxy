@@ -71,27 +71,6 @@ func parseStatsTime(v string) (int64, bool) {
 	return 0, false
 }
 
-func normalizeBucket(v string) int64 {
-	if v == "" || v == "0" {
-		return 60
-	}
-	seconds := int64(0)
-	if d, err := time.ParseDuration(v); err == nil {
-		seconds = int64(d.Seconds())
-	} else if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-		seconds = n
-	} else {
-		return 60
-	}
-	if seconds <= 60 {
-		return 60
-	}
-	if rem := seconds % 60; rem != 0 {
-		seconds += 60 - rem
-	}
-	return seconds
-}
-
 func mapKeys(m map[string]bool) []string {
 	if len(m) == 0 {
 		return []string{}

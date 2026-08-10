@@ -527,7 +527,7 @@ func TestReadHelperBranches(t *testing.T) {
 	}{
 		{"", 60}, {"0", 60}, {"-1", 60}, {"60", 60}, {"61", 120}, {"90s", 120}, {"2m", 120}, {"bad", 60},
 	} {
-		if got := normalizeBucket(test.in); got != test.want {
+		if got := observestats.NormalizeBucket(test.in); got != test.want {
 			t.Errorf("normalizeBucket(%q) = %d, want %d", test.in, got, test.want)
 		}
 	}

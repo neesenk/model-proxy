@@ -86,8 +86,8 @@ func TestNormalizeBucket(t *testing.T) {
 		{"garbage", 60},
 	}
 	for _, c := range cases {
-		if got := normalizeBucket(c.in); got != c.want {
-			t.Errorf("normalizeBucket(%q) = %d, want %d", c.in, got, c.want)
+		if got := observestats.NormalizeBucket(c.in); got != c.want {
+			t.Errorf("observestats.NormalizeBucket(%q) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }

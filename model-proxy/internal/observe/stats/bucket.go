@@ -1,13 +1,13 @@
-package main
+package stats
 
 import (
 	"strconv"
 	"time"
 )
 
-// normalizeBucket parses an API display-granularity spec into seconds. Storage
+// NormalizeBucket parses an API display-granularity spec into seconds. Storage
 // remains one-minute; wider values only affect the query projection.
-func normalizeBucket(value string) int64 {
+func NormalizeBucket(value string) int64 {
 	if value == "" || value == "0" {
 		return 60
 	}

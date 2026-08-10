@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"model-proxy/internal/observe/requestlog"
+	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 )
 
@@ -127,7 +128,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			to = n
 		}
 	}
-	bucket := normalizeBucket(r.URL.Query().Get("bucket"))
+	bucket := observestats.NormalizeBucket(r.URL.Query().Get("bucket"))
 	bs, err := s.reads.Stats(appapi.StatsQuery{From: from, To: to, Provider: r.URL.Query().Get("provider"), Model: r.URL.Query().Get("model"), BucketSecs: bucket})
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "stats query: "+err.Error())
@@ -149,7 +150,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 			to = n
 		}
 	}
-	bucket := normalizeBucket(r.URL.Query().Get("bucket"))
+	bucket := observestats.NormalizeBucket(r.URL.Query().Get("bucket"))
 	bs, err := s.reads.AgentStats(appapi.AgentStatsQuery{From: from, To: to, Agent: r.URL.Query().Get("agent"), Provider: r.URL.Query().Get("provider"), Model: r.URL.Query().Get("model"), BucketSecs: bucket})
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "agent stats query: "+err.Error())
