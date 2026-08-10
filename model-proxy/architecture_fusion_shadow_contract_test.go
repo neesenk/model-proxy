@@ -82,7 +82,7 @@ func TestFusionShadowArchitecture(t *testing.T) {
 		dispatch := namedMethod(t, root, "Proxy", "dispatchShadowAfterCommit")
 		samplePos := firstNamedCallPos(dispatch.Body, "ShouldSample")
 		acquirePos := firstNamedCallPos(dispatch.Body, "TryAcquire")
-		admitPos := firstNamedCallPos(dispatch.Body, "runBeforeLogDrain")
+		admitPos := firstNamedCallPos(dispatch.Body, "RunBeforeLogDrain")
 		if !samplePos.IsValid() || !acquirePos.IsValid() || !admitPos.IsValid() ||
 			!(samplePos < acquirePos && acquirePos < admitPos) {
 			t.Errorf("Shadow dispatch order must be sample → acquire → lifecycle admission (sample=%v acquire=%v admit=%v)",
