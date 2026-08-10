@@ -5,6 +5,9 @@ import (
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
+	cliserve "model-proxy/internal/cli/serve"
+	configdomain "model-proxy/internal/config"
+	"model-proxy/provider"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -429,7 +432,7 @@ func TestMaybeReloadDaemon_NoOpWithoutPidFile(t *testing.T) {
 			t.Fatalf("maybeReloadDaemon panicked: %v", r)
 		}
 	}()
-	maybeReloadDaemon(nil)
+	cliserve.SignalReloadDaemon(cliserve.DaemonEnv{LoadConfig: configdomain.LoadConfig, Executable: "model-proxy"}, cliserve.ParseArgs(nil), provider.Gray)
 }
 
 // --- aqp/codex CLI login path-key regression ---

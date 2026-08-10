@@ -30,7 +30,3 @@ func cmdStop(args []string) {
 func cmdReload(args []string) {
 	cliserve.CmdReload(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
 }
-
-func maybeReloadDaemon(args []string) {
-	cliserve.SignalReloadDaemon(daemonEnv(), cliserve.ParseArgs(args), provider.Gray)
-}
