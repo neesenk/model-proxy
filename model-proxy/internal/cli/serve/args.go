@@ -113,3 +113,36 @@ func MaybeReloadDaemon(cfg *configdomain.Config) {
 	}
 	_ = proc.Signal(syscall.SIGHUP)
 }
+
+// ReadLivePid reads the pid file derived from logFile and returns the pid of
+// the live process it names. It returns 0 when no pid file exists, the file is
+// unreadable/invalid, or the process is gone (a stale pid file is removed in
+// that last case). Shared by daemonize's pre-start guard and the stop/reload
+// commands so the "is a daemon already running?" check is one implementation.
+func ReadLivePid(logFile string) int {
+	pidPath := PidFilePath(logFile)
+	pidStr, err := os.ReadFile(pidPath)
+	if err != nil {
+		return 0
+	}
+	var pid int
+	for _, c := range pidStr {
+		if c < '0' || c > '9' {
+			break
+		}
+		pid = pid*10 + int(c-'0')
+	}
+	if pid <= 0 {
+		return 0
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return 0
+	}
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		// Stale pid file — clean it up so the next start isn't confused.
+		os.Remove(pidPath)
+		return 0
+	}
+	return pid
+}

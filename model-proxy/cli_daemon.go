@@ -22,39 +22,9 @@ const (
 	supervisorWorkerStopWait = 10 * time.Second
 )
 
-// daemonize launches a detached supervisor (new session, stdio → log file) and
-// returns, so the invoking shell gets its prompt back.
-// aliveDaemonPid reads the pid file derived from logFile and returns the pid of
-// the live daemon (supervisor) it names, or 0 if no pid file exists, the pid is
-// invalid, or the process is gone (a stale pid file is removed in the latter
-// case). Shared by daemonize's pre-start guard and the stop/reload commands so
-// the "is a daemon already running?" check is one implementation.
+// aliveDaemonPid delegates to cliserve.ReadLivePid.
 func aliveDaemonPid(logFile string) int {
-	pidPath := cliserve.PidFilePath(logFile)
-	pidStr, err := os.ReadFile(pidPath)
-	if err != nil {
-		return 0
-	}
-	var pid int
-	for _, c := range pidStr {
-		if c < '0' || c > '9' {
-			break
-		}
-		pid = pid*10 + int(c-'0')
-	}
-	if pid <= 0 {
-		return 0
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return 0
-	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		// Stale pid file - clean it up so the next start isn't confused.
-		os.Remove(pidPath)
-		return 0
-	}
-	return pid
+	return cliserve.ReadLivePid(logFile)
 }
 
 func daemonize(sa cliserve.Args) error {
