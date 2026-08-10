@@ -87,6 +87,16 @@ func HasFlagValue(args []string, flag string) bool {
 	return false
 }
 
+// RouteNames returns sorted route names for status/error messages.
+func RouteNames(cfg *configdomain.Config) string {
+	names := make([]string, 0, len(cfg.Routes))
+	for n := range cfg.Routes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 // ProviderNames returns sorted config provider names for error messages.
 func ProviderNames(cfg *configdomain.Config) string {
 	names := make([]string, 0, len(cfg.Providers))

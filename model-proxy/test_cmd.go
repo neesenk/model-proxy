@@ -40,7 +40,7 @@ func cmdTest(args []string) {
 	}
 	targets := testTargetsFor(cfg, model)
 	if len(targets) == 0 {
-		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", provider.Red("✗"), model, routeNames(cfg))
+		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", provider.Red("✗"), model, cliframework.RouteNames(cfg))
 		os.Exit(1)
 	}
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}

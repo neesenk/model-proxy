@@ -63,14 +63,14 @@ func TestRouteNames(t *testing.T) {
 			"deepseek": {{Provider: "c", Model: "deepseek"}},
 		},
 	}
-	got := routeNames(cfg)
+	got := cliframework.RouteNames(cfg)
 	want := "deepseek, glm-5.2, gpt-5.5" // sorted
 	if got != want {
-		t.Errorf("routeNames()=%q want %q (sorted)", got, want)
+		t.Errorf("cliframework.RouteNames()=%q want %q (sorted)", got, want)
 	}
 	// Empty routes → empty string.
-	if got := routeNames(&Config{}); got != "" {
-		t.Errorf("routeNames(empty)=%q want empty", got)
+	if got := cliframework.RouteNames(&Config{}); got != "" {
+		t.Errorf("cliframework.RouteNames(empty)=%q want empty", got)
 	}
 }
 
@@ -82,17 +82,17 @@ func TestProviderNames(t *testing.T) {
 			"codex": {},
 		},
 	}
-	got := providerNames(cfg)
+	got := cliframework.ProviderNames(cfg)
 	// providerNames does NOT sort (unlike routeNames); collect + sort for stable check.
 	parts := strings.Split(got, ", ")
 	sort.Strings(parts)
 	want := []string{"aqp", "codex", "zhipu"}
 	if len(parts) != len(want) {
-		t.Fatalf("providerNames()=%q want 3 providers", got)
+		t.Fatalf("cliframework.ProviderNames()=%q want 3 providers", got)
 	}
 	for i := range want {
 		if parts[i] != want[i] {
-			t.Errorf("providerNames() parts=%v want %v", parts, want)
+			t.Errorf("cliframework.ProviderNames() parts=%v want %v", parts, want)
 		}
 	}
 }

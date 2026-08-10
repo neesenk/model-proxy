@@ -174,11 +174,11 @@ func TestApplicationRuntimeReloadSummaryContract(t *testing.T) {
 	if got := namedCallCountInNode(reload.Body, "snapshotRuntime"); got != 1 {
 		t.Errorf("applicationRuntime.reload snapshotRuntime calls = %d, want exactly 1 successful reload summary", got)
 	}
-	if got := namedCallCountInNode(reload.Body, "providerNames"); got != 1 {
-		t.Errorf("applicationRuntime.reload providerNames calls = %d, want exactly 1 successful reload summary", got)
+	if got := selectorCallCountInNode(reload.Body, "ProviderNames"); got != 1 {
+		t.Errorf("applicationRuntime.reload cliframework.ProviderNames calls = %d, want exactly 1 successful reload summary", got)
 	}
-	if got := namedCallCountInNode(reload.Body, "routeNames"); got != 1 {
-		t.Errorf("applicationRuntime.reload routeNames calls = %d, want exactly 1 successful reload summary", got)
+	if got := selectorCallCountInNode(reload.Body, "RouteNames"); got != 1 {
+		t.Errorf("applicationRuntime.reload cliframework.RouteNames calls = %d, want exactly 1 successful reload summary", got)
 	}
 
 	home := t.TempDir()
@@ -238,6 +238,22 @@ func callCountOnIdentInNode(node ast.Node, receiver, method string) int {
 			return true
 		}
 		count++
+		return true
+	})
+	return count
+}
+
+// selectorCallCountInNode counts <x>.<name>(...) call sites under n.
+func selectorCallCountInNode(n ast.Node, name string) int {
+	count := 0
+	ast.Inspect(n, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
+			count++
+		}
 		return true
 	})
 	return count

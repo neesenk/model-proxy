@@ -27,7 +27,7 @@ func cmdLogin(args []string) {
 	}
 	prov, ok := cfg.Providers[provName]
 	if !ok {
-		log.Fatalf("unknown provider %q; available: %s", provName, providerNames(cfg))
+		log.Fatalf("unknown provider %q; available: %s", provName, cliframework.ProviderNames(cfg))
 	}
 	label := cliframework.FlagStringValue(args, "--label")
 	replace := cliframework.HasFlagValue(args, "--replace")

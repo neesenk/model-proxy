@@ -4,6 +4,8 @@ import (
 	"model-proxy/provider"
 	"testing"
 
+	cliframework "model-proxy/internal/cli/framework"
+
 	climodels "model-proxy/internal/cli/models"
 )
 
@@ -32,7 +34,7 @@ func TestRouteNames_Sorted(t *testing.T) {
 		"alpha": {{Provider: "a", Model: "a"}},
 		"mid":   {{Provider: "a", Model: "m"}},
 	}}
-	got := routeNames(cfg)
+	got := cliframework.RouteNames(cfg)
 	want := "alpha, mid, zeta"
 	if got != want {
 		t.Errorf("routeNames=%q want %q (sorted)", got, want)

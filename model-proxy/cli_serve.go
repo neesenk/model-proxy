@@ -125,7 +125,7 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 	defer stopSignals()
 
 	log.Printf("model-proxy listening on %s (routes: %s)",
-		runtime.startupConfig.Listen, routeNames(runtime.startupConfig))
+		runtime.startupConfig.Listen, cliframework.RouteNames(runtime.startupConfig))
 	return serveHTTPUntilShutdown(
 		server,
 		listener,

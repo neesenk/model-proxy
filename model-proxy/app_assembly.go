@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	"net/http"
 )
@@ -103,7 +104,7 @@ func (runtime *applicationRuntime) reload() {
 	}
 	snapshot := runtime.proxy.snapshotRuntime()
 	log.Printf("[reload] config reloaded successfully (providers: %s, routes: %s)",
-		providerNames(snapshot.cfg), routeNames(snapshot.cfg))
+		cliframework.ProviderNames(snapshot.cfg), cliframework.RouteNames(snapshot.cfg))
 }
 
 func (runtime *applicationRuntime) Close() {
