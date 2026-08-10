@@ -67,24 +67,24 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			}
 		}
 
-		assembly, _ := parseGoFile(t, "app_assembly.go")
+		assembly, _ := parseGoFile(t, "internal/app/runtime.go")
 		if got := namedCallCount(assembly, "NewProxy"); got != 1 {
-			t.Errorf("app_assembly.go NewProxy calls = %d, want exactly 1", got)
+			t.Errorf("internal/app/runtime.go NewProxy calls = %d, want exactly 1", got)
 		}
 		if got := namedCallCount(assembly, "StartRuntimeServices"); got != 1 {
-			t.Errorf("app_assembly.go StartRuntimeServices calls = %d, want exactly 1", got)
+			t.Errorf("internal/app/runtime.go StartRuntimeServices calls = %d, want exactly 1", got)
 		}
 		if got := callCountOnIdent(assembly, "proxy", "StartRuntimeServices"); got != 1 {
-			t.Errorf("app_assembly.go proxy.StartRuntimeServices calls = %d, want exactly 1", got)
+			t.Errorf("internal/app/runtime.go proxy.StartRuntimeServices calls = %d, want exactly 1", got)
 		}
 		if got := selectorCountNamed(assembly, "StartRuntimeServices"); got != 1 {
-			t.Errorf("app_assembly.go StartRuntimeServices selector uses = %d, want exactly 1 direct call", got)
+			t.Errorf("internal/app/runtime.go StartRuntimeServices selector uses = %d, want exactly 1 direct call", got)
 		}
 		if got := selectorCountOnIdent(assembly, "proxy", "StartRuntimeServices"); got != 1 {
-			t.Errorf("app_assembly.go proxy.StartRuntimeServices selector uses = %d, want exactly 1", got)
+			t.Errorf("internal/app/runtime.go proxy.StartRuntimeServices selector uses = %d, want exactly 1", got)
 		}
 		if got := namedCallCount(assembly, "NewWebServer"); got != 1 {
-			t.Errorf("app_assembly.go NewWebServer calls = %d, want exactly 1", got)
+			t.Errorf("internal/app/runtime.go NewWebServer calls = %d, want exactly 1", got)
 		}
 
 		serve, _ := parseGoFile(t, "cli_serve.go")

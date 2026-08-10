@@ -111,27 +111,27 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 	hupCh := make(chan os.Signal, 1)
 	signal.Notify(hupCh, syscall.SIGHUP)
 	defer signal.Stop(hupCh)
-	runtime.transportTasks = append(runtime.transportTasks, func(stop <-chan struct{}) {
-		cliserve.RunReloadLoop(stop, hupCh, runtime.reload)
+	runtime.TransportTasks = append(runtime.TransportTasks, func(stop <-chan struct{}) {
+		cliserve.RunReloadLoop(stop, hupCh, runtime.Reload)
 	})
 
-	listener, err := net.Listen("tcp", runtime.startupConfig.Listen)
+	listener, err := net.Listen("tcp", runtime.StartupConfig.Listen)
 	if err != nil {
 		runtime.Close()
 		return err
 	}
-	server := &http.Server{Addr: runtime.startupConfig.Listen, Handler: runtime.handler}
+	server := &http.Server{Addr: runtime.StartupConfig.Listen, Handler: runtime.Handler}
 	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
 	log.Printf("model-proxy listening on %s (routes: %s)",
-		runtime.startupConfig.Listen, cliframework.RouteNames(runtime.startupConfig))
+		runtime.StartupConfig.Listen, cliframework.RouteNames(runtime.StartupConfig))
 	return cliserve.ServeHTTPUntilShutdown(
 		server,
 		listener,
 		shutdownCtx.Done(),
 		cliserve.GracefulShutdownTimeout,
-		runtime.transportTasks,
+		runtime.TransportTasks,
 		runtime.Close,
 	)
 }

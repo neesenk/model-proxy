@@ -19,9 +19,9 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 			function string
 			receiver string
 		}{
-			{call: "NewProxy", function: "newApplicationRuntime"},
-			{call: "StartRuntimeServices", function: "newApplicationRuntime", receiver: "proxy"},
-			{call: "NewWebServer", function: "newApplicationRuntime"},
+			{call: "NewProxy", function: "NewRuntime"},
+			{call: "StartRuntimeServices", function: "NewRuntime", receiver: "proxy"},
+			{call: "NewWebServer", function: "NewRuntime"},
 		} {
 			var sites []interactionSite
 			if contract.receiver != "" {
@@ -29,8 +29,8 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 			} else {
 				sites = rootFunctionReferenceSites(t, contract.call)
 			}
-			if len(sites) != 1 || sites[0].file != "app_assembly.go" || sites[0].function != contract.function {
-				t.Errorf("%s production reference sites = %v, want only app_assembly.go:%s direct call", contract.call, sites, contract.function)
+			if len(sites) != 1 || sites[0].file != "runtime.go" || sites[0].function != contract.function {
+				t.Errorf("%s production reference sites = %v, want only internal/app/runtime.go:%s direct call", contract.call, sites, contract.function)
 			}
 		}
 
@@ -185,7 +185,7 @@ func (site interactionSite) String() string { return site.file + ":" + site.func
 func rootReceiverCallSites(t *testing.T, receiver, method string) []interactionSite {
 	t.Helper()
 	var sites []interactionSite
-	for _, path := range productionGoFiles(t) {
+	for _, path := range productionGoFilesRecursively(t, ".") {
 		file, _ := parseGoFile(t, path)
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
@@ -698,7 +698,7 @@ func rootFunctionReferenceSites(t *testing.T, name string) []interactionSite {
 		path string
 		file *ast.File
 	}
-	for _, path := range productionGoFiles(t) {
+	for _, path := range productionGoFilesRecursively(t, ".") {
 		file, _ := parseGoFile(t, path)
 		files = append(files, struct {
 			path string
@@ -787,7 +787,7 @@ func importedMethodExpressionSitesAcrossProduction(
 func rootMethodValueReferenceSites(t *testing.T, method string) []interactionSite {
 	t.Helper()
 	var sites []interactionSite
-	for _, path := range productionGoFiles(t) {
+	for _, path := range productionGoFilesRecursively(t, ".") {
 		file, _ := parseGoFile(t, path)
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)

@@ -12,15 +12,15 @@ import (
 )
 
 func TestApplicationRuntimeConcreteAssemblyContract(t *testing.T) {
-	file, _ := parseGoFile(t, "app_assembly.go")
-	fields := namedStructFields(t, file, "applicationRuntime")
-	for _, field := range []string{"configPath", "startupConfig", "proxy", "handler", "transportTasks"} {
+	file, _ := parseGoFile(t, "internal/app/runtime.go")
+	fields := namedStructFields(t, file, "Runtime")
+	for _, field := range []string{"ConfigPath", "StartupConfig", "Proxy", "Handler", "TransportTasks"} {
 		if _, ok := fields[field]; !ok {
 			t.Errorf("applicationRuntime is missing concrete owner field %q", field)
 		}
 	}
 
-	constructor := namedFunction(t, file, "newApplicationRuntime")
+	constructor := namedFunction(t, file, "NewRuntime")
 	if got := namedCallCountInNode(constructor.Body, "NewProxy"); got != 1 {
 		t.Errorf("newApplicationRuntime NewProxy calls = %d, want exactly 1", got)
 	}
@@ -41,15 +41,15 @@ func TestApplicationRuntimeConcreteAssemblyContract(t *testing.T) {
 			return true
 		}
 		literal, ok := unary.X.(*ast.CompositeLit)
-		if !ok || !identIs(literal.Type, "applicationRuntime") {
+		if !ok || !identIs(literal.Type, "Runtime") {
 			return true
 		}
 		literals++
 		want := map[string]string{
-			"configPath":    "args.Config",
-			"startupConfig": "cfg",
-			"proxy":         "proxy",
-			"handler":       "mux",
+			"ConfigPath":    "args.Config",
+			"StartupConfig": "cfg",
+			"Proxy":         "proxy",
+			"Handler":       "mux",
 		}
 		got := map[string]string{}
 		for _, element := range literal.Elts {
@@ -99,30 +99,30 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			runtime := newApplicationRuntime(cfg, cliserve.Args{Config: "test-config.yaml"})
 			t.Cleanup(runtime.Close)
 
-			if runtime.proxy == nil || runtime.startupConfig != cfg || runtime.handler == nil {
+			if runtime.Proxy == nil || runtime.StartupConfig != cfg || runtime.Handler == nil {
 				t.Fatal("applicationRuntime did not retain its concrete proxy/config/mux owners")
 			}
-			if runtime.configPath != "test-config.yaml" {
-				t.Fatalf("applicationRuntime configPath = %q, want test-config.yaml", runtime.configPath)
+			if runtime.ConfigPath != "test-config.yaml" {
+				t.Fatalf("applicationRuntime configPath = %q, want test-config.yaml", runtime.ConfigPath)
 			}
-			if runtime.proxy.StatsStore() == nil || runtime.proxy.Flusher() == nil {
+			if runtime.Proxy.StatsStore() == nil || runtime.Proxy.Flusher() == nil {
 				t.Fatal("newApplicationRuntime did not start persisted runtime services")
 			}
-			catalog := runtime.proxy.CatalogSnapshot()
+			catalog := runtime.Proxy.CatalogSnapshot()
 			if catalog == nil || catalog.Count() != 1 {
 				t.Fatalf("newApplicationRuntime catalog count = %v, want 1 from isolated cache", catalog)
 			}
-			if got := len(runtime.transportTasks); got != test.taskCount {
+			if got := len(runtime.TransportTasks); got != test.taskCount {
 				t.Fatalf("applicationRuntime transport tasks = %d, want %d", got, test.taskCount)
 			}
 
 			health := httptest.NewRecorder()
-			runtime.handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+			runtime.Handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
 			if health.Code != http.StatusOK {
 				t.Fatalf("assembled root handler /health status = %d, want 200", health.Code)
 			}
 			ui := httptest.NewRecorder()
-			runtime.handler.ServeHTTP(ui, httptest.NewRequest(http.MethodGet, "/ui/", nil))
+			runtime.Handler.ServeHTTP(ui, httptest.NewRequest(http.MethodGet, "/ui/", nil))
 			if ui.Code != test.uiStatus {
 				t.Fatalf("assembled /ui/ status = %d, want %d", ui.Code, test.uiStatus)
 			}
@@ -131,7 +131,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 				stop := make(chan struct{})
 				done := make(chan struct{})
 				go func() {
-					runtime.transportTasks[0](stop)
+					runtime.TransportTasks[0](stop)
 					close(done)
 				}()
 				close(stop)
@@ -143,7 +143,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			}
 
 			stopped := make(chan struct{})
-			if admitted := runtime.proxy.Lifecycle().Run(func(stop <-chan struct{}) {
+			if admitted := runtime.Proxy.Lifecycle().Run(func(stop <-chan struct{}) {
 				<-stop
 				close(stopped)
 			}); !admitted {
@@ -158,7 +158,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			// Proxy.Close is idempotent; applicationRuntime must preserve that
 			// property rather than layering a competing callback/task owner.
 			runtime.Close()
-			if runtime.proxy.Lifecycle().Run(func(<-chan struct{}) {}) {
+			if runtime.Proxy.Lifecycle().Run(func(<-chan struct{}) {}) {
 				t.Fatal("applicationRuntime.Close admitted work after closing its Proxy")
 			}
 		})
@@ -166,10 +166,10 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 }
 
 func TestApplicationRuntimeReloadSummaryContract(t *testing.T) {
-	file, _ := parseGoFile(t, "app_assembly.go")
-	reload := namedMethod(t, file, "applicationRuntime", "reload")
+	file, _ := parseGoFile(t, "internal/app/runtime.go")
+	reload := namedMethod(t, file, "Runtime", "Reload")
 	if got := selectorCallCountInNode(reload.Body, "Reload"); got != 1 {
-		t.Errorf("applicationRuntime.reload nested reload calls = %d, want exactly runtime.proxy.Reload", got)
+		t.Errorf("applicationRuntime.reload nested reload calls = %d, want exactly runtime.Proxy.Reload", got)
 	}
 	if got := namedCallCountInNode(reload.Body, "SnapshotRuntime"); got != 1 {
 		t.Errorf("applicationRuntime.reload SnapshotRuntime calls = %d, want exactly 1 successful reload summary", got)
@@ -200,16 +200,16 @@ providers:
 	}
 	runtime := newApplicationRuntime(cfg, cliserve.Args{Config: configPath})
 	t.Cleanup(runtime.Close)
-	runtime.reload()
-	snapshot := runtime.proxy.SnapshotRuntime()
+	runtime.Reload()
+	snapshot := runtime.Proxy.SnapshotRuntime()
 	if snapshot.Cfg.Listen != "127.0.0.1:17834" {
 		t.Fatalf("reload runtime listen = %q, want 127.0.0.1:17834", snapshot.Cfg.Listen)
 	}
 	if provider := snapshot.Cfg.Providers["demo"]; provider.Provider != "zhipu" {
 		t.Fatalf("reload provider demo = %#v, want provider_id zhipu", provider)
 	}
-	if runtime.startupConfig.Listen != "127.0.0.1:17833" {
-		t.Fatalf("startupConfig listen mutated to %q during reload", runtime.startupConfig.Listen)
+	if runtime.StartupConfig.Listen != "127.0.0.1:17833" {
+		t.Fatalf("startupConfig listen mutated to %q during reload", runtime.StartupConfig.Listen)
 	}
 }
 
