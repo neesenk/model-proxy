@@ -40,7 +40,7 @@ func (p *Proxy) dispatchShadowAfterCommit(
 	if permit == nil {
 		return
 	}
-	if !p.lifecycle.runBeforeLogDrain(func() {
+	if !p.lifecycle.RunBeforeLogDrain(func() {
 		defer permit.Release()
 		p.runShadow(
 			runtime,

@@ -143,7 +143,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			}
 
 			stopped := make(chan struct{})
-			if admitted := runtime.proxy.lifecycle.run(func(stop <-chan struct{}) {
+			if admitted := runtime.proxy.lifecycle.Run(func(stop <-chan struct{}) {
 				<-stop
 				close(stopped)
 			}); !admitted {
@@ -158,7 +158,7 @@ func TestApplicationRuntimeOwnsIsolatedLifecycle(t *testing.T) {
 			// Proxy.Close is idempotent; applicationRuntime must preserve that
 			// property rather than layering a competing callback/task owner.
 			runtime.Close()
-			if runtime.proxy.lifecycle.run(func(<-chan struct{}) {}) {
+			if runtime.proxy.lifecycle.Run(func(<-chan struct{}) {}) {
 				t.Fatal("applicationRuntime.Close admitted work after closing its Proxy")
 			}
 		})

@@ -534,7 +534,7 @@ func newTargetAttempt() targetAttempt { return targetAttempt{} }
 	type attemptExecutor struct { proxy *Proxy; lifecycle *proxyLifecycle; hook func(); hook2 func() }
 func (p attemptExecutor) execute(root *Proxy) {
 	root.reload()
-	p.lifecycle.runBeforeLogDrain(nil)
+	p.lifecycle.RunBeforeLogDrain(nil)
 }
 	func (p *Proxy) runShadow() {}
 	func (p *Proxy) targetExecutor() attemptExecutor {
@@ -589,8 +589,8 @@ func (p *Proxy) callFusionSynthesizer() { p.client.Do(nil) }`)
 	if got := forbiddenCallSites(execute.Body, token.NewFileSet(), map[string]bool{"reload": true}, nil); len(got) != 1 {
 		t.Errorf("executor orchestration positive control: got %v, want reload", got)
 	}
-	if got := forbiddenCallSites(execute.Body, fset, map[string]bool{"runBeforeLogDrain": true}, nil); len(got) != 1 {
-		t.Errorf("executor Shadow orchestration positive control: got %v, want runBeforeLogDrain", got)
+	if got := forbiddenCallSites(execute.Body, fset, map[string]bool{"RunBeforeLogDrain": true}, nil); len(got) != 1 {
+		t.Errorf("executor Shadow orchestration positive control: got %v, want RunBeforeLogDrain", got)
 	}
 	if got := forbiddenIdentifierSites(f, fset, map[string]bool{"proxyLifecycle": true}); len(got) == 0 {
 		t.Error("executor forbidden owner type positive control did not fire")

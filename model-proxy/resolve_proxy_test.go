@@ -3,7 +3,6 @@ package main
 import (
 	"testing"
 	"time"
-
 )
 
 // TestResolver_ExpandAndPick: the unified provider resolver — pool expansion

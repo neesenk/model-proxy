@@ -99,7 +99,7 @@ func TestShadowDispatchKeepsCapturedReloadGeneration(t *testing.T) {
 	p.reqLog = requestlog.New(requestlog.Options{
 		Directory: t.TempDir(), MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
 	})
-	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) { p.reqLog.Run() })
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) { p.reqLog.Run() })
 	if !p.reqLogStarted {
 		t.Fatal("request logger loop was not started")
 	}
@@ -187,7 +187,7 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 	p.reqLog = requestlog.New(requestlog.Options{
 		Directory: t.TempDir(), MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
 	})
-	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) { p.reqLog.Run() })
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) { p.reqLog.Run() })
 	if !p.reqLogStarted {
 		t.Fatal("request logger loop was not started")
 	}

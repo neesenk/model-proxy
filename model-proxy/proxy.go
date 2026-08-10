@@ -21,7 +21,7 @@ import (
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
-	lifecycle        *proxyLifecycle
+	lifecycle        *runtimestate.Lifecycle
 	mu               sync.RWMutex  // guards cfg/providers across reload (held by handler for the request)
 	configGeneration atomic.Uint64 // incremented on every successful reload
 	runtimeState     runtimestate.Manager

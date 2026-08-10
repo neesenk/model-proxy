@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	obscounters "model-proxy/internal/observe/counters"
+	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -347,7 +348,7 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 	agents := obscounters.NewAgentCounter()
 	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil)
 	proxy := &Proxy{
-		lifecycle: newProxyLifecycle(),
+		lifecycle: runtimestate.NewLifecycle(),
 		metrics:   metrics,
 		tokens:    tokens,
 		agents:    agents,
@@ -403,7 +404,7 @@ func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 	agents := obscounters.NewAgentCounter()
 	sink := &observestats.FailOnceSink{Store: store, FailNext: true}
 	proxy := &Proxy{
-		lifecycle: newProxyLifecycle(),
+		lifecycle: runtimestate.NewLifecycle(),
 		metrics:   metrics,
 		tokens:    tokens,
 		agents:    agents,

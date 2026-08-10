@@ -11,7 +11,7 @@ func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
 	p := newTestProxy(t, &Config{})
 	started := make(chan struct{})
 	release := make(chan struct{})
-	if !p.lifecycle.run(func(<-chan struct{}) {
+	if !p.lifecycle.Run(func(<-chan struct{}) {
 		close(started)
 		<-release
 	}) {
@@ -29,7 +29,7 @@ func TestProxyCloseWaitsForOwnedTasksAndRejectsNewWork(t *testing.T) {
 		t.Fatal("Close returned before the owned task finished")
 	case <-time.After(20 * time.Millisecond):
 	}
-	if p.lifecycle.run(func(<-chan struct{}) {}) {
+	if p.lifecycle.Run(func(<-chan struct{}) {}) {
 		t.Fatal("lifecycle admitted new work after shutdown began")
 	}
 	close(release)
@@ -49,7 +49,7 @@ func TestProxyCloseDrainsOwnedRequestLogger(t *testing.T) {
 	p.reqLog = requestlog.New(requestlog.Options{
 		Directory: logDir, MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
 	})
-	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) {
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
 		p.reqLog.Run()
 	})
 	if !p.reqLogStarted {
@@ -76,7 +76,7 @@ func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 	p.reqLog = requestlog.New(requestlog.Options{
 		Directory: logDir, MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
 	})
-	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) {
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
 		p.reqLog.Run()
 	})
 	if !p.reqLogStarted {
@@ -85,7 +85,7 @@ func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	if !p.lifecycle.runBeforeLogDrain(func() {
+	if !p.lifecycle.RunBeforeLogDrain(func() {
 		close(started)
 		<-release
 		p.reqLog.Enqueue(p.reqLog.BuildRecord(requestlog.Input{
@@ -103,7 +103,7 @@ func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 		close(closed)
 	}()
 	select {
-	case <-p.lifecycle.stop:
+	case <-p.lifecycle.StopChannel():
 	case <-time.After(time.Second):
 		close(release)
 		t.Fatal("Close did not begin lifecycle shutdown")
@@ -114,7 +114,7 @@ func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 		t.Fatal("Close returned before the shadow task finished")
 	default:
 	}
-	if p.lifecycle.runBeforeLogDrain(func() {}) {
+	if p.lifecycle.RunBeforeLogDrain(func() {}) {
 		close(release)
 		t.Fatal("lifecycle admitted shadow work after shutdown began")
 	}

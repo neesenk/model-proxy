@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	cliserve "model-proxy/internal/cli/serve"
+	runtimestate "model-proxy/internal/runtime"
 	"net"
 	"net/http"
 	"os"
@@ -22,14 +23,14 @@ func TestServeHTTPUntilShutdownDrainsHandlerBeforeProxyFinalFlush(t *testing.T) 
 	logDir := filepath.Join(t.TempDir(), "requests")
 	statePath := filepath.Join(t.TempDir(), "responses_state.json")
 	p := &Proxy{
-		lifecycle:      newProxyLifecycle(),
+		lifecycle:      runtimestate.NewLifecycle(),
 		responsesState: protocol.NewResponsesStateStore(statePath),
 	}
 	t.Cleanup(p.Close)
 	p.reqLog = requestlog.New(requestlog.Options{
 		Directory: logDir, MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
 	})
-	p.reqLogStarted = p.lifecycle.run(func(<-chan struct{}) {
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
 		p.reqLog.Run()
 	})
 	if !p.reqLogStarted {

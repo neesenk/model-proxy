@@ -34,7 +34,7 @@ func NewProxy(cfg *Config) *Proxy {
 func newProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	built := buildProviders(cfg)
 	p := &Proxy{
-		lifecycle: newProxyLifecycle(),
+		lifecycle: runtimestate.NewLifecycle(),
 		cfg:       cfg,
 		providers: built.Providers,
 		client:    &http.Client{Timeout: 0},

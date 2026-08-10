@@ -403,7 +403,7 @@ func shadowDispatchUsesCapturedRuntime(node ast.Node) bool {
 		return false
 	}
 
-	admissions := callsWithPath(node, "p.lifecycle.runBeforeLogDrain")
+	admissions := callsWithPath(node, "p.lifecycle.RunBeforeLogDrain")
 	if len(admissions) != 1 || len(admissions[0].Args) != 1 {
 		return false
 	}
@@ -1050,7 +1050,7 @@ func validShadow() {
 	shadowRuntime := runtime.shadow
 	shadowRuntime.ShouldSample()
 	permit := shadowRuntime.TryAcquire()
-	p.lifecycle.runBeforeLogDrain(func() {
+	p.lifecycle.RunBeforeLogDrain(func() {
 		defer permit.Release()
 		p.runShadow(runtime, shadowRuntime, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID)
 	})
@@ -1061,7 +1061,7 @@ func invalidShadow() {
 	shadowRuntime.ShouldSample()
 	other := p.shadow.Load()
 	permit := other.TryAcquire()
-	p.lifecycle.runBeforeLogDrain(func() {
+	p.lifecycle.RunBeforeLogDrain(func() {
 		defer permit.Release()
 		p.runShadow(runtime, other, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID)
 	})
