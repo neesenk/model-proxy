@@ -271,7 +271,7 @@ func TestAddApikeyAccountCore(t *testing.T) {
 	defer up.Close()
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
 	prov := cfg.Providers["zhipu"]
-	id, err := addApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "my-label", false)
+	id, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "my-label", false)
 	if err != nil {
 		t.Fatalf("addApikeyAccount: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestAddApikeyAccountCore(t *testing.T) {
 		t.Fatalf("pool not written: %+v", pool.Accounts)
 	}
 	// Replace path: same id, new label, replace=true overwrites in place.
-	if _, err := addApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "renamed", true); err != nil {
+	if _, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "renamed", true); err != nil {
 		t.Fatalf("replace addApikeyAccount: %v", err)
 	}
 	pool2, _ := loadPool("zhipu", "zhipu")
@@ -297,11 +297,11 @@ func TestAddApikeyAccountCore(t *testing.T) {
 	}
 	// Replace path with replace=false on an existing id aborts without prompting
 	// (no stdin in core) and leaves the pool untouched.
-	if _, err := addApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "ignored", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
+	if _, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "sk-test-1234567890"}, "ignored", false); err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("dup-no-replace should error 'cancelled', got %v", err)
 	}
 	// Remove: pool empties.
-	if err := removeApikeyAccount("zhipu", "zhipu", id); err != nil {
+	if err := clilogin.RemoveApikeyAccount("zhipu", "zhipu", id); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	pool3, _ := loadPool("zhipu", "zhipu")
@@ -321,7 +321,7 @@ func TestAddApikeyAccountCore_ValidationFail(t *testing.T) {
 	defer srv.Close()
 	cfg, _ := LoadConfigFromBytes("test", []byte("providers:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    usage_url: "+srv.URL+"\n"))
 	prov := cfg.Providers["zhipu"]
-	_, err := addApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "bad"}, "", false)
+	_, err := clilogin.AddApikeyAccount(cfg, "zhipu", prov, accountCred{APIKey: "bad"}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Fatalf("expected 'validation failed', got %v", err)
 	}
@@ -367,7 +367,7 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 	if pool2.Accounts[0].APIKey != "ark2" || pool2.Accounts[0].SecretKey != "SK-new" || pool2.Accounts[0].Label != "renamed" {
 		t.Fatalf("replace did not overwrite triple/label: %+v", pool2.Accounts[0])
 	}
-	if err := removeApikeyAccount("vol", "volcengine", id); err != nil {
+	if err := clilogin.RemoveApikeyAccount("vol", "volcengine", id); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	pool3, _ := loadPool("vol", "volcengine")
@@ -709,7 +709,7 @@ func TestApiKeyValidationURL_Fallback(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := apiKeyValidationURL(c.prov); got != c.want {
+			if got := clilogin.ApiKeyValidationURL(c.prov); got != c.want {
 				t.Errorf("apiKeyValidationURL = %q, want %q", got, c.want)
 			}
 		})

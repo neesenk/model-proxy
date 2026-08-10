@@ -62,15 +62,8 @@ func cmdLogin(args []string) {
 	maybeReloadDaemon(args)
 }
 
-// Aliases for the remaining root callers (web layer, tests) while login
-// migrates fully into internal/cli/login.
+// Aliases retained for root-package login command tests.
 type LoopbackServer = clilogin.LoopbackServer
-
-var (
-	withNextCallback   = clilogin.WithNextCallback
-	waitForLoginSignal = clilogin.WaitForLoginSignal
-	openBrowser        = clilogin.OpenBrowser
-)
 
 func NewLoopbackServer() (*LoopbackServer, error) { return clilogin.NewLoopbackServer() }
 
@@ -81,15 +74,3 @@ func runApiKeyLogin(cfg *Config, provName string, prov Provider) error {
 func runApiKeyLoginWithInput(cfg *Config, provName string, prov Provider, in, label string, replace bool) error {
 	return clilogin.RunApiKeyLoginWithInput(cfg, provName, prov, in, label, replace)
 }
-
-func apiKeyValidationURL(prov Provider) string { return clilogin.ApiKeyValidationURL(prov) }
-
-func addApikeyAccount(cfg *Config, name string, prov Provider, cred accountCred, label string, replace bool) (string, error) {
-	return clilogin.AddApikeyAccount(cfg, name, prov, cred, label, replace)
-}
-
-func removeApikeyAccount(name, providerID, id string) error {
-	return clilogin.RemoveApikeyAccount(name, providerID, id)
-}
-
-func runLogin(cfg *Config, provName string) error { return clilogin.RunLogin(cfg, provName) }

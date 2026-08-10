@@ -325,7 +325,7 @@ func (api *proxyWebAPI) AddAccount(
 			input.Replace,
 		)
 	} else {
-		id, err = addApikeyAccount(
+		id, err = clilogin.AddApikeyAccount(
 			config,
 			name,
 			providerConfig,
@@ -396,7 +396,7 @@ func (api *proxyWebAPI) RemoveAccount(name, id string) (appapi.MutationResult, e
 			)
 		}
 	default:
-		if err := removeApikeyAccount(name, providerConfig.Provider, id); err != nil {
+		if err := clilogin.RemoveApikeyAccount(name, providerConfig.Provider, id); err != nil {
 			return appapi.MutationResult{}, appapi.NewHTTPError(
 				http.StatusBadRequest,
 				err.Error(),
