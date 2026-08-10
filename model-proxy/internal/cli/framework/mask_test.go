@@ -1,9 +1,7 @@
-package main
+package framework
 
 import (
 	"testing"
-
-	cliframework "model-proxy/internal/cli/framework"
 )
 
 func TestMask(t *testing.T) {
@@ -16,8 +14,8 @@ func TestMask(t *testing.T) {
 		{"d042cb5f6e8b8d4e8f7a413475dad38fd3d4c873ea6daf533ba7d5a60ec6720a", "d0…0a"},
 	}
 	for _, c := range cases {
-		if got := cliframework.Mask(c.in); got != c.want {
-			t.Errorf("cliframework.Mask(%q)=%q want %q", c.in, got, c.want)
+		if got := Mask(c.in); got != c.want {
+			t.Errorf("Mask(%q)=%q want %q", c.in, got, c.want)
 		}
 	}
 }
@@ -25,7 +23,7 @@ func TestMask(t *testing.T) {
 // TestMask_NeverLeaksRaw ensures a full secret never appears in masked output.
 func TestMask_NeverLeaksRaw(t *testing.T) {
 	secret := "AKIAIOSFODNN7EXAMPLE"
-	got := cliframework.Mask(secret)
+	got := Mask(secret)
 	if got == secret {
 		t.Fatalf("mask leaked raw secret: %q", got)
 	}

@@ -1,7 +1,6 @@
-package main
+package framework
 
 import (
-	cliframework "model-proxy/internal/cli/framework"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,11 +10,11 @@ import (
 // --config flag > ~/.model-proxy/config.yaml > ./config.yaml.
 func TestConfigPath_LookupOrder(t *testing.T) {
 	// 1. explicit flag wins over everything.
-	got := cliframework.ConfigPath([]string{"--config", "/explicit.yaml"})
+	got := ConfigPath([]string{"--config", "/explicit.yaml"})
 	if got != "/explicit.yaml" {
 		t.Errorf("flag: got %q", got)
 	}
-	got = cliframework.ConfigPath([]string{"--config=/explicit2.yaml"})
+	got = ConfigPath([]string{"--config=/explicit2.yaml"})
 	if got != "/explicit2.yaml" {
 		t.Errorf("flag=: got %q", got)
 	}
@@ -34,7 +33,7 @@ func TestConfigPath_LookupOrder(t *testing.T) {
 	}
 	t.Setenv("HOME", dir)
 	// Without a flag and with a user-level file present, configPath returns it.
-	got = cliframework.ConfigPath(nil)
+	got = ConfigPath(nil)
 	if got != homeCfg {
 		t.Errorf("user-level: got %q want %q", got, homeCfg)
 	}

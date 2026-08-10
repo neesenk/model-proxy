@@ -1,9 +1,7 @@
-package main
+package serve
 
 import (
 	"testing"
-
-	cliserve "model-proxy/internal/cli/serve"
 )
 
 func TestParseServeArgs(t *testing.T) {
@@ -12,14 +10,14 @@ func TestParseServeArgs(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
-		want cliserve.Args
+		want Args
 	}{
-		{"bare config", []string{"--config", "c.yaml"}, cliserve.Args{Config: "c.yaml"}},
-		{"config=", []string{"--config=/x.yaml"}, cliserve.Args{Config: "/x.yaml"}},
+		{"bare config", []string{"--config", "c.yaml"}, Args{Config: "c.yaml"}},
+		{"config=", []string{"--config=/x.yaml"}, Args{Config: "/x.yaml"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := cliserve.ParseArgs(tc.args)
+			got := ParseArgs(tc.args)
 			if got != tc.want {
 				t.Errorf("got %+v want %+v", got, tc.want)
 			}
@@ -42,7 +40,7 @@ func TestParseServeArgs_Extra(t *testing.T) {
 		{"log-file at end without value", []string{"--log-file"}, "config.yaml", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sa := cliserve.ParseArgs(tc.args)
+			sa := ParseArgs(tc.args)
 			if sa.Config != tc.wantCfg {
 				t.Errorf("config=%q want %q", sa.Config, tc.wantCfg)
 			}
