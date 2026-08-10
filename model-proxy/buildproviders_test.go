@@ -27,7 +27,7 @@ func TestBuildProviders_AllProviderIDs(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
 		},
 	}
-	m := buildProviders(cfg).Providers
+	m := app.BuildProviders(cfg, app.AccountStore(), testBuildOpts()).Providers
 	// P1-3: not just nil-check — also verify the concrete type matches the
 	// expected provider_id (catches a bug where all providers instantiate as zhipu).
 	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
@@ -61,7 +61,7 @@ func TestBuildProviders_LogoutWired(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
 		},
 	}
-	m := buildProviders(cfg).Providers
+	m := app.BuildProviders(cfg, app.AccountStore(), testBuildOpts()).Providers
 	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
 		if err := m[name].Logout(); err != nil {
 			t.Errorf("%s Logout: %v", name, err)
@@ -79,7 +79,7 @@ func TestBuildProviders_UnknownProviderSkipped(t *testing.T) {
 			"bad":  {OpenAIBaseURL: "http://x", Provider: "nope-id"},
 		},
 	}
-	m := buildProviders(cfg).Providers
+	m := app.BuildProviders(cfg, app.AccountStore(), testBuildOpts()).Providers
 	if m["good"] == nil {
 		t.Error("good provider should be built")
 	}
@@ -102,7 +102,7 @@ func TestBuildProviders_QuotaFnWired(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
 		},
 	}
-	m := buildProviders(cfg).Providers
+	m := app.BuildProviders(cfg, app.AccountStore(), testBuildOpts()).Providers
 	// aqp provider Quota (no cred → BillingUnknown, no error).
 	// (provider.Quota delegates to cfg.QuotaOrUnknown → QuotaFn.)
 	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
@@ -122,7 +122,7 @@ func TestBuildProviders_FetchModelsWired(t *testing.T) {
 			"volcengine": {OpenAIBaseURL: "http://x", Provider: "volcengine"},
 		},
 	}
-	m := buildProviders(cfg).Providers
+	m := app.BuildProviders(cfg, app.AccountStore(), testBuildOpts()).Providers
 	if _, err := m["volcengine"].FetchModels(); err == nil {
 		t.Error("volcengine FetchModels without AK/SK: want error, got nil")
 	}
@@ -141,7 +141,7 @@ func TestCodexProvider_Logout(t *testing.T) {
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 
 	cfg := &Config{Providers: map[string]Provider{"codex": {Provider: "codex"}}}
-	p := buildOne(cfg, "codex", cfg.Providers["codex"], app.AccountCred{})
+	p := app.BuildOne(cfg, testBuildOpts(), "codex", cfg.Providers["codex"], app.AccountCred{})
 	if p == nil {
 		t.Fatal("buildOne codex returned nil")
 	}
@@ -169,7 +169,7 @@ func TestApiKeyProvider_Logout(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"zhipu-work": {Provider: "zhipu"},
 	}}
-	p := buildOne(cfg, "zhipu-work", cfg.Providers["zhipu-work"], app.AccountCred{})
+	p := app.BuildOne(cfg, testBuildOpts(), "zhipu-work", cfg.Providers["zhipu-work"], app.AccountCred{})
 	if p == nil {
 		t.Fatal("buildOne zhipu-work returned nil")
 	}
@@ -193,7 +193,7 @@ func TestAqpProvider_Logout(t *testing.T) {
 	os.MkdirAll(filepath.Dir(cred), 0o700)
 	os.WriteFile(cred, []byte(`{}`), 0o600)
 	cfg := &Config{Providers: map[string]Provider{"aqp": {Provider: "aqp"}}}
-	p := buildOne(cfg, "aqp", cfg.Providers["aqp"], app.AccountCred{})
+	p := app.BuildOne(cfg, testBuildOpts(), "aqp", cfg.Providers["aqp"], app.AccountCred{})
 	if p == nil {
 		t.Fatal("buildOne aqp returned nil")
 	}
@@ -202,5 +202,15 @@ func TestAqpProvider_Logout(t *testing.T) {
 	}
 	if _, err := os.Stat(cred); !os.IsNotExist(err) {
 		t.Error("aqp Logout did not remove the oauth_auth file")
+	}
+}
+
+// testBuildOpts wires the production environment seams for root tests.
+func testBuildOpts() app.BuildOptions {
+	return app.BuildOptions{
+		HomeDir:                  cliframework.HomeDir(),
+		CodexCLIVersion:          app.CodexCLIVersion,
+		CodexCacheVersion:        app.CodexCacheVersion,
+		ListArkAgentPlanModelIDs: app.ListArkAgentPlanModelIDs,
 	}
 }
