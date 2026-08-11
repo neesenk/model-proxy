@@ -14,7 +14,7 @@ import (
 // ever reads or writes the real ~/.model-proxy state (quota_state.json, pool
 // files, models cache, stats.db). Tests needing their own isolated dir still
 // call t.Setenv("HOME", t.TempDir()). This is the package-level enforcement of
-// the repo rule (model-proxy/AGENTS.md: tests must not touch the real HOME; the
+// the repo rule (AGENTS.md: tests must not touch the real HOME; the
 // rule was on the books but unenforced — most NewProxy tests wrote the real
 // state file).
 func TestMain(m *testing.M) {

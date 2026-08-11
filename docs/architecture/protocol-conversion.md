@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `model-proxy/internal/protocol/*`、`provider/protocol_hint.go`、跨协议
+修改 `internal/protocol/*`、`provider/protocol_hint.go`、跨协议
 route、流式转换或工具调用映射时必读。
 
 ## 边界
@@ -16,7 +16,7 @@ route、流式转换或工具调用映射时必读。
 - `responses` = OpenAI Responses API（`/v1/responses`，`input` list + `output` items + `response.*` 流式事件）。`/v1/responses` 路径由 `protocol.ForPath` 独立判为 `responses`，不再并入 `openai`。
 
 转换器为直连 pairwise codec，并统一注册在
-`model-proxy/internal/protocol/conversion_registry.go`：
+`internal/protocol/conversion_registry.go`：
 一个 client→backend pair 必须同时声明 request、反向 response 和反向 SSE
 三个入口。注册表覆盖 3×2 共六组方向，并由结构测试保证完整；`convertRequestFor`、
 `convertResponseNS` 和 `convertSSEReaderNS` 不得各自维护方向 switch。
@@ -156,7 +156,7 @@ reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔opena
 
 ## 回归测试
 
-以下纯 codec/state/framing 测试位于 `model-proxy/internal/protocol/`；名称以
+以下纯 codec/state/framing 测试位于 `internal/protocol/`；名称以
 `TestForward_` 开头的 Proxy 接线测试仍位于根包，防止 codec 正确但 transport
 接线错误。
 

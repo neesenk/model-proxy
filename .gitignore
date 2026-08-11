@@ -16,16 +16,15 @@ yarn-error.log*
 .env.*
 .playwright-mcp
 
-# Build artifacts (Go binaries built inside the source dir). The dir shares the
-# project name, so anchor each binary by relative path to avoid matching the dir.
-/model-proxy/model-proxy
-/model-proxy/model-proxy-linux
-/model-proxy/model-proxy-linux-*
-/model-proxy/model-proxy.exe
+# Build artifacts (Go binaries built inside the source dir, repo root).
+/model-proxy
+/model-proxy-linux
+/model-proxy-linux-*
+/model-proxy.exe
 
 # Coverage artifacts from scripts/cover.sh
-/model-proxy/cov.out
-/model-proxy/coverage.html
+/cov.out
+/coverage.html
 
 # Agent/IDE session state
 .omx/

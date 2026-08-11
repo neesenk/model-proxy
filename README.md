@@ -31,7 +31,6 @@
 ## 构建
 
 ```bash
-cd model-proxy
 go build -o model-proxy .          # 原生编译（host）
 
 # 交叉编译（纯 Go，CGO_ENABLED=0，全静态，无需交叉工具链）
