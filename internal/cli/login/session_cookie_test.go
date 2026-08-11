@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // --- zhipuLimitLabel: moved to provider/quota_parse_test.go (Phase 1) ---

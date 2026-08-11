@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // --- runtimestate.QuotaTracker.stop / pollAfter ---

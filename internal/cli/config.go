@@ -5,7 +5,7 @@ import (
 	"log"
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
-	displaypkg "model-proxy/provider"
+	displaypkg "model-proxy/internal/provider"
 	"os"
 
 	configdomain "model-proxy/internal/config"

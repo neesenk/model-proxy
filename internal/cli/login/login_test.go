@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // TestLogin_FullFlowWithMockAQP drives the entire real SSO flow shape

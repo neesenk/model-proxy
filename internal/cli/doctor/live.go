@@ -10,7 +10,7 @@ import (
 	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/takeover"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 	"os"
 	"path/filepath"
 	"sort"

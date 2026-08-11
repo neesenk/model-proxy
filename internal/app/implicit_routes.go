@@ -7,7 +7,7 @@ import (
 
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // loggedInProviders returns the provider parents whose authoritative account

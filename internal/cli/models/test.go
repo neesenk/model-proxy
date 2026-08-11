@@ -12,7 +12,7 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // CmdTest implements `model-proxy test <model>`: probe each route target once.

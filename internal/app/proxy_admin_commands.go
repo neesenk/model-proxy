@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // proxyAdminCommands is the Web/API mutation and active-probe boundary. It

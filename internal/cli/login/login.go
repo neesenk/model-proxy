@@ -12,7 +12,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // runApiKeyLogin is a no-label/no-replace convenience wrapper over

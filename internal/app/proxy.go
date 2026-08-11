@@ -16,7 +16,7 @@ import (
 	runtimestate "model-proxy/internal/runtime"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/shadow"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Proxy holds the compiled provider instances + the config.

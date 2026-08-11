@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	displaypkg "model-proxy/provider"
+	displaypkg "model-proxy/internal/provider"
 	"net/url"
 	"sort"
 	"strings"

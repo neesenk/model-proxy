@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // cmdDoctor runs an OFFLINE diagnostic of the scheduling setup from config (no

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sync"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // fakeProviderImpl is the shared no-op provider implementation for app tests.

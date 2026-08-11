@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // TestForward_ProviderRouting_SplitsByModel verifies that the proxy routes

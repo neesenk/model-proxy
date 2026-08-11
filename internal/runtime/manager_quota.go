@@ -1,6 +1,6 @@
 package runtime
 
-import "model-proxy/provider"
+import "model-proxy/internal/provider"
 
 func (m *Manager) MergeQuotas(snapshots map[string]*provider.QuotaSnapshot, generation uint64) bool {
 	m.mu.Lock()

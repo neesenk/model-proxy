@@ -5,7 +5,7 @@ import (
 	"time"
 
 	runtimestate "model-proxy/internal/runtime"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // pinEntry is a manual route→provider pin (model-proxy pin <route> <provider>

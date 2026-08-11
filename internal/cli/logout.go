@@ -5,7 +5,7 @@ import (
 	"fmt"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
-	displaypkg "model-proxy/provider"
+	displaypkg "model-proxy/internal/provider"
 	"os"
 	"strconv"
 	"strings"

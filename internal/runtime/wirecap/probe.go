@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // ProbeBodies builds the two minimal probe bodies (responses, anthropic) for

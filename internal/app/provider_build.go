@@ -14,7 +14,7 @@ import (
 
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // buildProviders creates provider.Provider instances from config. Each provider

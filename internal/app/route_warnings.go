@@ -7,7 +7,7 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // route_warnings.go — config-time routing hazards surfaced as MARKERS (startup

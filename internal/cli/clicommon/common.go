@@ -11,7 +11,7 @@ import (
 
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/daemonctl"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // StatusGet fetches base+path via the shared daemon client. A non-2xx status

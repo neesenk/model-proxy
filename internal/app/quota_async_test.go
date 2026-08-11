@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // blockQuotaProv embeds testProv but blocks in Quota until release is closed,

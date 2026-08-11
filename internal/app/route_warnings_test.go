@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // TestProtocolHint: codex hints "responses" (it speaks the OpenAI Responses API,

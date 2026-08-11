@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"model-proxy/internal/protocol"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Pool virtual names (name#id) normalize to the parent's provider id before

@@ -8,7 +8,7 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // PlanInput contains the already-resolved target facts needed to prepare a

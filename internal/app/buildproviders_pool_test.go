@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // buildproviders_pool_test.go covers the credential-pool unrolling in

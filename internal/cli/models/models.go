@@ -14,7 +14,7 @@ import (
 	"model-proxy/internal/app"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Model entry as returned by the gateway's /models endpoint (OpenAI-style).

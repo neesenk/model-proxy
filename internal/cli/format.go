@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	displaypkg "model-proxy/provider"
+	displaypkg "model-proxy/internal/provider"
 )
 
 // truncate caps a string at n bytes, trailing "..." (provider display rules).

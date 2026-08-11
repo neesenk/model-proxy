@@ -15,7 +15,7 @@ import (
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/shadow"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func NewProxy(cfg *Config) *Proxy {

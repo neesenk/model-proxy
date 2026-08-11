@@ -1,7 +1,7 @@
 package framework
 
 import (
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 	"path/filepath"
 	"runtime"
 	"strings"

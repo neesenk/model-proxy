@@ -2,7 +2,7 @@ package models
 
 import (
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 	"testing"
 
 	cliframework "model-proxy/internal/cli/framework"

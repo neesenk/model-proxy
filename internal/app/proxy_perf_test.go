@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"model-proxy/internal/observe/requestlog"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Performance tests: isolate proxy forwarding overhead with a mock upstream, no

@@ -6,7 +6,7 @@
 
 ```text
 main.go / app_assembly.go / cli_serve.go / version.go  薄进程入口（package main）
-provider/     上游 Provider 实现
+internal/provider/  上游 Provider 实现
 internal/     全部 internal 包（app、cli、routing、runtime、archtest 等）
 internal/web/ Web/API transport、会话和嵌入式 UI 静态资源
 docs/         架构、后端和 API 契约
@@ -28,7 +28,7 @@ scripts/ examples/ testdata/  构建与覆盖率脚本、示例配置、测试�
 | `internal/runtime/manager*.go`、`quota.go`、schedule、sticky、pin、持久化 | 本文件核心运行时规则节、`docs/architecture/runtime-state.md`、`docs/architecture/routing-and-failure.md` |
 | `internal/accounts/*`、`internal/app/accounts_store.go`、多账号 | 本文件核心运行时规则节、`docs/architecture/provider-pools.md` |
 | 凭据、login/logout、池文件 | `docs/architecture/provider-pools.md`、`docs/backend-contracts.md` |
-| `provider/*` | `provider/AGENTS.md`、`docs/backend-contracts.md` |
+| `internal/provider/*` | `internal/provider/AGENTS.md`、`docs/backend-contracts.md` |
 | `internal/config/*`、配置加载/校验/默认值 | 本文件核心运行时规则节、`docs/architecture/overview.md`；字段同步另读 `docs/engineering/pitfalls.md` |
 | `internal/protocol/*`、跨协议 route | `docs/architecture/protocol-conversion.md` |
 | `internal/routing/request.go`、`internal/app/request_routing_adapter.go`、implicit routes | `docs/architecture/request-routing.md` |
@@ -62,7 +62,7 @@ scripts/ examples/ testdata/  构建与覆盖率脚本、示例配置、测试�
 
 # 核心运行时规则
 
-适用于 Go daemon、CLI 和测试（根 `package main` 薄入口 + `internal/`）。`provider/` 和 `internal/web/assets/` 有更具体的就近规则。
+适用于 Go daemon、CLI 和测试（根 `package main` 薄入口 + `internal/`）。`internal/provider/` 和 `internal/web/assets/` 有更具体的就近规则。
 全局模块依赖与 composition root 契约见 `docs/architecture/overview.md`。
 
 ## 核心边界

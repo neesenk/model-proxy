@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func scheduleQuota(billing provider.BillingClass, remaining float64, now time.Time) *provider.QuotaSnapshot {

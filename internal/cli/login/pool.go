@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"model-proxy/internal/accounts"
-	displaypkg "model-proxy/provider"
+	displaypkg "model-proxy/internal/provider"
 )
 
 // Account-store seams, resolved lazily so tests can isolate HOME via

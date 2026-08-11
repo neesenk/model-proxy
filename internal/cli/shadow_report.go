@@ -7,7 +7,7 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
-	displaypkg "model-proxy/provider"
+	displaypkg "model-proxy/internal/provider"
 	"net/url"
 	"os"
 

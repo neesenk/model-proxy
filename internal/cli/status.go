@@ -8,7 +8,7 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 	"os"
 	"sort"
 	"strconv"

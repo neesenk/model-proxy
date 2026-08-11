@@ -5,7 +5,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Resolver is the single front door for provider IDENTITY: it turns a config

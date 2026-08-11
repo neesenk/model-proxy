@@ -12,7 +12,7 @@ import (
 	climodels "model-proxy/internal/cli/models"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // This file covers CLI subcommands that call os.Exit / log.Fatal — they

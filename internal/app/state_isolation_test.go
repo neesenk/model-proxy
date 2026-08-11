@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // TestMain redirects HOME to a throwaway dir for the whole package so no test

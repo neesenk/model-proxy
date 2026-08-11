@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func TestRateLimitKindAndPin(t *testing.T) {

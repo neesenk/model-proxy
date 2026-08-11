@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func TestAccountsListMasked(t *testing.T) {

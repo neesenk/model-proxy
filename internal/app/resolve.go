@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"model-proxy/internal/routing"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // resolver is the root alias for routing.Resolver; resolution logic lives in

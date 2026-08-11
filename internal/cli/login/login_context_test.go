@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 type loginRoundTripperFunc func(*http.Request) (*http.Response, error)

@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func TestPublicCookies(t *testing.T) {

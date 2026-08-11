@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Core of AQP SSO: a single cookie jar carried across the whole login flow. Both the

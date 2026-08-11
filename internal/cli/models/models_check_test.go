@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"model-proxy/internal/catalog"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // models_check_test.go covers the endpoint probe (models_check.go):

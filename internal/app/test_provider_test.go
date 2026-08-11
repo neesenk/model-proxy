@@ -1,6 +1,6 @@
 package app
 
-import "model-proxy/provider"
+import "model-proxy/internal/provider"
 
 // testProviderID gives proxy behavior tests a credential-independent upstream.
 // Historically those tests used static, which accidentally coupled routing,

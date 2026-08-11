@@ -6,7 +6,7 @@ import (
 	"time"
 
 	runtimestate "model-proxy/internal/runtime"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func TestProxyReadViewReturnsDetachedSnapshots(t *testing.T) {

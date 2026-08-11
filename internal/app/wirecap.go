@@ -34,7 +34,7 @@ import (
 	"time"
 
 	runtimewire "model-proxy/internal/runtime/wirecap"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Compatibility aliases keep the application adapter readable while the

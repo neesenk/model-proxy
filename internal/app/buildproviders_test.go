@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // buildproviders_test.go covers buildProviders' per-provider switch branches

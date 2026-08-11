@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // TestPollAll_PollsPooledVirtuals (bug 1): a multi-account provider is unrolled

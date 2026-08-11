@@ -16,7 +16,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Result is one probe exchange outcome. Status 0 means the request never

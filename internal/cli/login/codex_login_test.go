@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // TestRequestUserCode verifies the usercode request format + response parsing.

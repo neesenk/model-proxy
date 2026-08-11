@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // wireRecordTimeout caps one recording request.

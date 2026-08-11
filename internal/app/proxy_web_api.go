@@ -16,7 +16,7 @@ import (
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/fusion"
 	observestats "model-proxy/internal/observe/stats"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // proxyWebAPI is the application adapter consumed by internal/web. It owns

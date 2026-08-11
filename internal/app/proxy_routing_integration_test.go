@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // --- UC10: GET /v1/models returns exposed names ∪ claude_mapping keys ---

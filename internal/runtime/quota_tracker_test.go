@@ -9,7 +9,7 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // snapshotProv is a minimal Provider returning a fixed quota snapshot.

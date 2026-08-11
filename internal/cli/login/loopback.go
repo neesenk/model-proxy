@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func WithNextCallback(loginURL, callback string) string {

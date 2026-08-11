@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"model-proxy/internal/catalog"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 func TestRuntimeSnapshotKeepsOneReloadGeneration(t *testing.T) {

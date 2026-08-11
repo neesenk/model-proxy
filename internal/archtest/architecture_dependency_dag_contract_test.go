@@ -24,13 +24,13 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/archtest":              nil,
 		"model-proxy/internal/cache":                 nil,
 		"model-proxy/internal/catalog":               nil,
-		"model-proxy/internal/cli/doctor":            {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/takeover": true, "model-proxy/provider": true},
+		"model-proxy/internal/cli/doctor":            {"model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/takeover": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/cli/serve":             {"model-proxy/internal/config": true},
 		"model-proxy/internal/cli/framework":         {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true},
-		"model-proxy/internal/cli/login":             {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/provider": true},
-		"model-proxy/internal/cli/models":            {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/probe": true, "model-proxy/provider": true},
-		"model-proxy/internal/cli":                   {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/doctor": true, "model-proxy/internal/cli/login": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/takeover": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/provider": true},
-		"model-proxy/internal/cli/clicommon":         {"model-proxy/internal/appapi": true, "model-proxy/internal/daemonctl": true, "model-proxy/provider": true},
+		"model-proxy/internal/cli/login":             {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/internal/provider": true},
+		"model-proxy/internal/cli/models":            {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true},
+		"model-proxy/internal/cli":                   {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/doctor": true, "model-proxy/internal/cli/login": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/takeover": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/provider": true},
+		"model-proxy/internal/cli/clicommon":         {"model-proxy/internal/appapi": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/config":                {"model-proxy/internal/pricing": true, "model-proxy/internal/protocol": true},
 		"model-proxy/internal/configedit":            nil,
 		"model-proxy/internal/daemonctl":             nil,
@@ -40,14 +40,15 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/observe/requestlog":    {"model-proxy/internal/config": true},
 		"model-proxy/internal/observe/stats":         {"model-proxy/internal/observe/counters": true},
 		"model-proxy/internal/pricing":               nil,
-		"model-proxy/internal/probe":                 {"model-proxy/internal/config": true, "model-proxy/provider": true},
+		"model-proxy/internal/probe":                 {"model-proxy/internal/config": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/protocol":              nil,
-		"model-proxy/internal/routing":               {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/provider": true},
-		"model-proxy/internal/runtime":               {"model-proxy/internal/config": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/provider": true},
-		"model-proxy/internal/runtime/wirecap":       {"model-proxy/internal/config": true, "model-proxy/provider": true},
+		"model-proxy/internal/provider":              nil,
+		"model-proxy/internal/routing":               {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/provider": true},
+		"model-proxy/internal/runtime":               {"model-proxy/internal/config": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/provider": true},
+		"model-proxy/internal/runtime/wirecap":       {"model-proxy/internal/config": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/shadow":                {"model-proxy/internal/targetexec": true, "model-proxy/internal/transport/bodycapture": true},
 		"model-proxy/internal/takeover":              {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true},
-		"model-proxy/internal/targetexec":            {"model-proxy/internal/cache": true, "model-proxy/internal/config": true, "model-proxy/internal/protocol": true, "model-proxy/internal/transport/bodycapture": true, "model-proxy/provider": true},
+		"model-proxy/internal/targetexec":            {"model-proxy/internal/cache": true, "model-proxy/internal/config": true, "model-proxy/internal/protocol": true, "model-proxy/internal/transport/bodycapture": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/transport/bodycapture": nil,
 		"model-proxy/internal/app": {
 			"model-proxy/internal/accounts": true, "model-proxy/internal/appapi": true,
@@ -62,7 +63,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 			"model-proxy/internal/runtime": true, "model-proxy/internal/runtime/wirecap": true,
 			"model-proxy/internal/shadow": true, "model-proxy/internal/targetexec": true,
 			"model-proxy/internal/transport/bodycapture": true, "model-proxy/internal/web": true,
-			"model-proxy/provider": true,
+			"model-proxy/internal/provider": true,
 		},
 		"model-proxy/internal/appapi": {"model-proxy/internal/fusion": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/pricing": true},
 		"model-proxy/internal/httpx":  nil,
@@ -338,7 +339,7 @@ func TestRepositoryImportAliasViolationsReportsGuardBypass(t *testing.T) {
 	file, err := parser.ParseFile(fset, "positive_control.go", `package sample
 import (
 	. "model-proxy/internal/protocol"
-	_ "model-proxy/provider"
+	_ "model-proxy/internal/provider"
 	alias "model-proxy/internal/config"
 )
 `, 0)
@@ -346,7 +347,7 @@ import (
 		t.Fatal(err)
 	}
 	got := repositoryImportAliasViolations(file)
-	want := []string{". model-proxy/internal/protocol", "_ model-proxy/provider"}
+	want := []string{". model-proxy/internal/protocol", "_ model-proxy/internal/provider"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("repository alias violations = %v, want %v", got, want)
 	}

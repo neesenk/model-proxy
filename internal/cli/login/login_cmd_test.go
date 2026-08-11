@@ -6,7 +6,7 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 	"net/http"
 	"net/http/httptest"
 	"os"

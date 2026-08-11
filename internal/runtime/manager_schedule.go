@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 type scheduleCandidate struct {

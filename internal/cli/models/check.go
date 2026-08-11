@@ -13,7 +13,7 @@ import (
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // models_check.go implements the endpoint probe used by `models refresh`: after

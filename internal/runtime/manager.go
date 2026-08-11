@@ -6,7 +6,7 @@ package runtime
 import (
 	"sync"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // Manager owns all mutable routing state behind one mutex. The zero value is

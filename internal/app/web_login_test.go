@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // TestAqpLoginFlow exercises the full async aqp SSO login: start bootstraps a

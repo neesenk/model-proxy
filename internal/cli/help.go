@@ -5,7 +5,7 @@ import (
 	"io"
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 	"os"
 	"sort"
 )

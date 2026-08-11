@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // usecase_test.go organizes tests by user-facing use case (end-to-end through

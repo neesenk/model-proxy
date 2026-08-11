@@ -6,7 +6,7 @@ import (
 	"io"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/daemonctl"
-	displaypkg "model-proxy/provider"
+	displaypkg "model-proxy/internal/provider"
 	"os"
 )
 

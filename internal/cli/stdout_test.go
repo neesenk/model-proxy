@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"model-proxy/internal/app"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 	"testing"
 )
 

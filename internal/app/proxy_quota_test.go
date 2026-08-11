@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // TestProxy_QuotaRefreshOnRateLimit: a 429 on a provider triggers an async

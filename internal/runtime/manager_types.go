@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // RateLimitKind classifies what an upstream 429 says is exhausted.

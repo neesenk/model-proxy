@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // runVolcengineLoginWithInput performs a pool-aware volcengine login. The

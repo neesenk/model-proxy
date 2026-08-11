@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // --- billingClassName all tiers ---

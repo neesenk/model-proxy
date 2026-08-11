@@ -10,7 +10,7 @@ import (
 	"time"
 
 	runtimestate "model-proxy/internal/runtime"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // The Parse*Quota parser tests moved to the provider package in Phase 1

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // codex OAuth device flow (independent tokens, not shared with codex CLI).

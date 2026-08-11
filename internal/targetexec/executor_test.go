@@ -11,7 +11,7 @@ import (
 	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 type executorTestProvider struct{ refreshes int }

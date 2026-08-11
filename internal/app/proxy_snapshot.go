@@ -9,7 +9,7 @@ import (
 
 	"model-proxy/internal/catalog"
 	"model-proxy/internal/pricing"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // cfgSnapshot returns the current config under a brief read lock. Used by the

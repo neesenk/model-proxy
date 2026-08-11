@@ -10,7 +10,7 @@ import (
 	"model-proxy/internal/catalog"
 	"model-proxy/internal/shadow"
 	"model-proxy/internal/targetexec"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 )
 
 // RuntimeSnapshot is one immutable view of reload-swapped runtime dependencies.

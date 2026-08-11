@@ -5,7 +5,7 @@ import (
 	"log"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
-	"model-proxy/provider"
+	"model-proxy/internal/provider"
 	"strconv"
 	"time"
 
