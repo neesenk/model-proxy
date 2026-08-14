@@ -23,8 +23,9 @@ request log、`internal/cache`、
 - reload 重建缓存并清空条目。
 
 缓存机制由 `internal/cache` 叶子包拥有：request key、TTL/容量 store、
-bounded recorder、转换后 header normalization 与逐块 flush replay。根
-`cache_adapter.go` 只注入配置生效值；请求通过 `runtimeSnapshot.cache` 保持
+bounded recorder、转换后 header normalization 与逐块 flush replay。
+`internal/app/proxy_constructor.go` 的 `NewResponseCache` 只注入配置生效值；
+请求通过 `runtimeSnapshot.cache` 保持
 generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 
 缓存定位是重复请求/重试盾牌，不是多轮对话前缀缓存。
@@ -48,7 +49,7 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 - reload 必须让一次 dispatch 全程使用同一 generation 的 runtime、target、provider map 和 client。
 
 `internal/shadow.Runtime` 拥有可热重载的 sample decision、semaphore、专用
-timeout client 和 detached transport；`Execute` 只消费根层已解析的
+timeout client 和 detached transport；`Execute` 只消费应用层已解析的
 `targetexec.Plan` 与主请求 commit body，完成 model rewrite、fail-closed
 conversion、provider rewrite/auth/header、HTTP drain 和 bounded capture，不得
 进入 `targetexec.Executor` 或生产 metrics/health/sticky/events。
@@ -60,7 +61,7 @@ eligibility → sample → non-blocking acquire → lifecycle admission 的顺�
 `TryAcquire` 返回一次性、幂等释放的 permit，admission 拒绝与任务完成路径各自
 释放同一 permit，禁止直接操作共享 semaphore。adapter 在启动 goroutine 前同时
 捕获 `runtimeSnapshot` 与 `*shadow.Runtime`。
-goroutine 内由根 adapter 使用 captured provider/pool/generation 解析 virtual
+goroutine 内由 `internal/app/proxy_shadow.go` 使用 captured provider/pool/generation 解析 virtual
 target 和 `targetexec.Plan`，再调用 `Runtime.Execute` 并映射 request log；
 禁止重新读取 `p.cfg`/`p.providers`/`p.catalog` 或再次 load `p.shadow`。Fusion
 synthesizer 不经过这条 post-commit hook，禁止递归派发 Shadow。
@@ -92,7 +93,7 @@ Close-once 回调，日志 schema、入队与 replay 判断不进入 transport �
 扫描全部 `requests-*.log`（不假设文件名顺序等于 record timestamp 严格顺序，孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。
 
 JSONL schema、writer/rotation/retention、查询 heap、Summary 与 Shadow 聚合由
-`internal/observe/requestlog` 拥有；根 `request_log_adapter.go` 只完成 config
+`internal/observe/requestlog` 拥有；`internal/app/request_log_adapter.go` 只完成 config
 和执行上下文到纯值 Input 的映射。通用 stream capture 留在
 `internal/transport/bodycapture`，两者不反向依赖。
 
@@ -104,14 +105,14 @@ JSONL schema、writer/rotation/retention、查询 heap、Summary 与 Shadow 聚�
 panel fan-out、quorum/grace、judge、候选注入、degrade 和 registry 记录；
 `Registry` 拥有有界 run ring、aggregate 与 daily admission。Engine 只消费
 `fusion.Ports`，不持有 HTTP、Proxy、runtime state 或 observability stores。
-根 `fusionAdapter` 把同一个 `fusionCtx.runtime` 绑定为三个窄能力：
-tool capability、非流式 leg 和 client-facing synthesis；根 `runFusion` 不再
+`internal/app/fusion.go` 的 `fusionAdapter` 把同一个 `fusionCtx.runtime` 绑定为三个窄能力：
+tool capability、非流式 leg 和 client-facing synthesis；应用层 `runFusion` 不再
 启动 goroutine、计算 quorum 或维护 registry。
 
 ### Panel
 
 每个成员独立 goroutine、独立 timeout。整个 Fusion 请求持有与普通 route 相同的
-`runtimeSnapshot`；goroutine 由 `internal/fusion.Engine` 启动，实际 leg 由根
+`runtimeSnapshot`；goroutine 由 `internal/fusion.Engine` 启动，实际 leg 由应用层
 generation-bound adapter 执行。panel、judge、synthesizer 与普通 route 均通过
 `targetexec.Plan` 完成 provider config/runtime impl、backend protocol、model
 rewrite、协议转换及 base URL/path 选择，Fusion 不得重新读取 reload-owned

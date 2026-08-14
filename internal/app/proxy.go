@@ -13,10 +13,10 @@ import (
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/provider"
 	runtimestate "model-proxy/internal/runtime"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/shadow"
-	"model-proxy/internal/provider"
 )
 
 // Proxy holds the compiled provider instances + the config.

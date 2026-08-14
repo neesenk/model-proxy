@@ -4,8 +4,8 @@ import (
 	configdomain "model-proxy/internal/config"
 	"time"
 
-	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/internal/provider"
+	runtimestate "model-proxy/internal/runtime"
 )
 
 // pinEntry is a manual route→provider pin (model-proxy pin <route> <provider>

@@ -14,9 +14,7 @@ package app
 // chars, never tokens.
 
 import (
-	cliframework "model-proxy/internal/cli/framework"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
@@ -35,12 +33,9 @@ func liveCodexSkip(t *testing.T, status int, body string) {
 // responses for determinism).
 func liveCodexProxy(t *testing.T) *httptest.Server {
 	t.Helper()
-	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
-	if err != nil {
-		t.Skipf("live: %v", err)
-	}
+	cfg := liveConfig(t)
 	model := liveModel(t, cfg, "codex", "gpt-5.5")
-	srv, _ := liveProxy(t, map[string][]RouteTarget{
+	srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
 		"live-cx": {{Provider: "codex", Model: model, Protocol: "responses"}},
 	}, "codex")
 	return srv
@@ -48,9 +43,6 @@ func liveCodexProxy(t *testing.T) *httptest.Server {
 
 // A1: anthropic client → codex. Full anthropic SSE shape with usage.
 func TestLive_AnthropicToCodex_Text(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
 	srv := liveCodexProxy(t)
 	defer srv.Close()
 	status, raw := livePost(t, srv, "/v1/messages",
@@ -95,9 +87,6 @@ func TestLive_AnthropicToCodex_Text(t *testing.T) {
 // replays assistant tool_use + user tool_result (codex must accept the
 // converted tool history — call_id 回填 included).
 func TestLive_AnthropicToCodex_ToolRoundTrip(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
 	srv := liveCodexProxy(t)
 	defer srv.Close()
 
@@ -122,12 +111,7 @@ func TestLive_AnthropicToCodex_ToolRoundTrip(t *testing.T) {
 			toolInput += strOpt(d["partial_json"])
 		}
 	}
-	if toolName == "" {
-		t.Fatalf("no tool_use in turn 1:\n%s", liveExcerpt(raw1))
-	}
-	if toolInput == "" {
-		toolInput = `{"city":"Paris"}`
-	}
+	liveRequireWeatherCall(t, toolID, toolName, toolInput, raw1)
 
 	turn2 := `{"model":"live-cx","max_tokens":512,"stream":true,` +
 		`"tools":[` + tool + `],` +
@@ -148,9 +132,6 @@ func TestLive_AnthropicToCodex_ToolRoundTrip(t *testing.T) {
 // replays them. 200 = the signature round-trips byte-exact on the real
 // backend (its signature validation accepts our replay).
 func TestLive_AnthropicToCodex_ReasoningReplay(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
 	srv := liveCodexProxy(t)
 	defer srv.Close()
 
@@ -158,9 +139,6 @@ func TestLive_AnthropicToCodex_ReasoningReplay(t *testing.T) {
 		`"thinking":{"type":"enabled","budget_tokens":1024},` +
 		`"messages":[{"role":"user","content":"What is 17*23? Think briefly, then answer with just the number."}]}`
 	status, raw1 := livePost(t, srv, "/v1/messages", turn1)
-	if status == 400 && (strings.Contains(raw1, "thinking") || strings.Contains(raw1, "reasoning")) {
-		t.Skipf("live: codex model rejects thinking requests (model capability, not a conversion defect): %s", liveExcerpt(raw1))
-	}
 	liveCodexSkip(t, status, raw1)
 
 	var thinking strings.Builder
@@ -172,7 +150,9 @@ func TestLive_AnthropicToCodex_ReasoningReplay(t *testing.T) {
 		}
 		m := sseDataMap(t, ev)
 		if cb := asMap(m["content_block"]); cb != nil && strOpt(cb["type"]) == "redacted_thinking" {
-			redacted = append(redacted, strOpt(cb["data"]))
+			if data := strOpt(cb["data"]); data != "" {
+				redacted = append(redacted, data)
+			}
 		}
 		if d := asMap(m["delta"]); d != nil {
 			switch strOpt(d["type"]) {
@@ -184,7 +164,7 @@ func TestLive_AnthropicToCodex_ReasoningReplay(t *testing.T) {
 		}
 	}
 	if signature == "" && len(redacted) == 0 {
-		t.Skipf("live: no signature/redacted_thinking in stream (model returned no replayable reasoning):\n%s", liveExcerpt(raw1))
+		t.Fatalf("live: no signature/redacted_thinking in converted stream:\n%s", liveExcerpt(raw1))
 	}
 
 	// Rebuild the assistant turn: redacted blocks first, then the signed
@@ -213,9 +193,6 @@ func TestLive_AnthropicToCodex_ReasoningReplay(t *testing.T) {
 
 // A4: chat client → codex. chat.completion.chunk shape with finish + [DONE].
 func TestLive_ChatToCodex_Text(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
 	srv := liveCodexProxy(t)
 	defer srv.Close()
 	status, raw := livePost(t, srv, "/v1/chat/completions",
@@ -252,22 +229,18 @@ func TestLive_ChatToCodex_Text(t *testing.T) {
 
 // B5: r→chat reasoning — effort dialect mapping + reasoning return path.
 func TestLive_ResponsesToChat_Reasoning(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
 	providers := []struct{ name, prefer string }{
-		{"deepseek", "deepseek-v4-pro"}, // ChatReasoningMode = thinking
-		{"zhipu", "glm-4.7"},            // thinking
-		{"kimi-code", "k3"},             // thinking; skip if the model doesn't reason
+		{"deepseek", "deepseek-v4-pro"},      // ChatReasoningMode = thinking
+		{"zhipu", "glm-4.7"},                 // thinking
+		{"kimi-code", "k3"},                  // thinking
+		{"qwen-plan", "qwen3.8-max-preview"}, // enable_thinking
+		{"aqp", "glm-5.2"},                   // OpenRouter reasoning object
 	}
 	for _, tc := range providers {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfig(cliframework.ConfigPath(nil))
-			if err != nil {
-				t.Skipf("live: %v", err)
-			}
+			cfg := liveConfig(t)
 			model := liveModel(t, cfg, tc.name, tc.prefer)
-			srv, _ := liveProxy(t, map[string][]RouteTarget{
+			srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
 				"live-m": {{Provider: tc.name, Model: model, Protocol: "openai"}},
 			}, tc.name)
 			defer srv.Close()
@@ -277,24 +250,15 @@ func TestLive_ResponsesToChat_Reasoning(t *testing.T) {
 				`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"What is 17*23? Think briefly, then answer with just the number."}]}]}`
 			raw := liveResponsesTurn(t, srv, body)
 			events := drainSSE(t, strings.NewReader(raw))
-			hasReasoning := sseCount(events, "response.reasoning_summary_text.delta") > 0
-			if !hasReasoning {
-				// Some backends wrap reasoning as a reasoning item without
-				// summary deltas — accept the item as proof too.
-				for _, ev := range sseFilter(events, "response.output_item.added") {
-					if strOf(asMap(sseDataMap(t, ev)["item"])["type"]) == "reasoning" {
-						hasReasoning = true
-					}
+			var reasoning strings.Builder
+			for _, ev := range events {
+				switch sseEventType(ev) {
+				case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+					reasoning.WriteString(strOpt(sseDataMap(t, ev)["delta"]))
 				}
 			}
-			if !hasReasoning {
-				if tc.name == "kimi-code" {
-					t.Skipf("live: %s/%s returned no reasoning content (model likely doesn't reason at effort=low)", tc.name, model)
-				}
-				t.Fatalf("no reasoning in stream:\n%s", liveExcerpt(raw))
-			}
-			if got := sseCount(events, "response.completed") + sseCount(events, "response.incomplete"); got != 1 {
-				t.Fatalf("terminal events = %d:\n%s", got, liveExcerpt(raw))
+			if strings.TrimSpace(reasoning.String()) == "" {
+				t.Fatalf("no non-empty reasoning text in stream:\n%s", liveExcerpt(raw))
 			}
 		})
 	}
@@ -302,15 +266,9 @@ func TestLive_ResponsesToChat_Reasoning(t *testing.T) {
 
 // B6: plain multi-turn text through r→chat (no-tool regression).
 func TestLive_ResponsesToChat_MultiTurnText(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
-	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
-	if err != nil {
-		t.Skipf("live: %v", err)
-	}
+	cfg := liveConfig(t)
 	model := liveModel(t, cfg, "deepseek", "deepseek-v4-pro")
-	srv, _ := liveProxy(t, map[string][]RouteTarget{
+	srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
 		"live-m": {{Provider: "deepseek", Model: model, Protocol: "openai"}},
 	}, "deepseek")
 	defer srv.Close()
@@ -322,9 +280,6 @@ func TestLive_ResponsesToChat_MultiTurnText(t *testing.T) {
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"what is my name? one word"}]}]}`
 	raw := liveResponsesTurn(t, srv, body)
 	events := drainSSE(t, strings.NewReader(raw))
-	if got := sseCount(events, "response.completed"); got != 1 {
-		t.Fatalf("response.completed = %d:\n%s", got, liveExcerpt(raw))
-	}
 	text := ""
 	for _, ev := range sseFilter(events, "response.output_text.delta") {
 		text += strOf(sseDataMap(t, ev)["delta"])

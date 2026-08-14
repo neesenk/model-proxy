@@ -33,8 +33,8 @@ import (
 	"sync"
 	"time"
 
-	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/provider"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // Compatibility aliases keep the application adapter readable while the

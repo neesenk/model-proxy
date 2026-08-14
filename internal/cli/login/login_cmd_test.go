@@ -2,16 +2,22 @@ package login
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
 	"model-proxy/internal/accounts"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"strings"
-	"testing"
 )
 
 // login_cmd_test.go covers cmdLogin's error/help paths (subprocess) and
@@ -414,34 +420,131 @@ func TestMaybeReloadDaemon_NoOpWithoutPidFile(t *testing.T) {
 
 // --- aqp/codex CLI login path-key regression ---
 //
-// Bug: cmdCodexLogin/runLogin previously hardcoded cliframework.AuthFilePath("aqp"/"codex",
-// "oauth_auth"), so a renamed instance (provider_id=codex, name=codex-work)
-// wrote codex_oauth_auth.json — a file the forward path (buildOne, which uses
-// the config name) never read → 401/502 after login. The fix threads provName
-// through. These flows are interactive (browser/device-flow) and not unit-run
-// by convention, so this test guards the fix at the source level: the login
-// functions MUST resolve the auth file from provName, not the provider_id.
+// Bug: cmdCodexLogin/runLogin previously used the provider_id (aqp/codex), so
+// a renamed instance wrote a credential file that the forward path never read.
+// Both interactive flows now share this behavior-tested path resolver.
+func readLoginRepositoryFile(t *testing.T, relativePath string) []byte {
+	t.Helper()
+	_, testFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate login_cmd_test.go")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(testFile), "..", "..", ".."))
+	path := filepath.Join(repoRoot, filepath.FromSlash(relativePath))
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read repository file %s: %v", relativePath, err)
+	}
+	return src
+}
+
 func TestAqpCodexLogin_UsesConfigNameForAuthFile(t *testing.T) {
-	src, err := os.ReadFile("internal/cli/login/login.go")
-	if err != nil {
-		t.Skip("source not readable:", err)
-	}
-	if !strings.Contains(string(src), `provName+"_oauth_auth.json"`) {
-		t.Errorf("internal/cli/login/login.go runLogin must resolve the auth file from provName, not the hardcoded provider_id")
-	}
-	csrc, err := os.ReadFile("internal/cli/login/codex_login.go")
-	if err != nil {
-		t.Skip("source not readable:", err)
-	}
-	if !strings.Contains(string(csrc), `provName+"_oauth_auth.json"`) {
-		t.Errorf("internal/cli/login/codex_login.go cmdCodexLogin must resolve the auth file from provName, not the hardcoded provider_id")
-	}
-	// And the hardcoded forms must be GONE (the bug).
-	for _, bad := range []string{`"aqp_oauth_auth.json"`, `"codex_oauth_auth.json"`} {
-		if strings.Contains(string(src), bad) || strings.Contains(string(csrc), bad) {
-			t.Errorf("hardcoded provider_id auth path %q still present (the bug)", bad)
+	home := filepath.Join("test-home", "user")
+	for _, providerName := range []string{"aqp-work", "codex-work"} {
+		want := filepath.Join(home, ".model-proxy", providerName+"_oauth_auth.json")
+		if got := oauthAuthFilePath(home, providerName); got != want {
+			t.Errorf("oauthAuthFilePath(%q, %q) = %q, want %q", home, providerName, got, want)
 		}
 	}
+	assertLoginUsesOAuthAuthFilePath(t, "internal/cli/login/login.go", "RunLogin", "storePath")
+	assertLoginUsesOAuthAuthFilePath(t, "internal/cli/login/codex_login.go", "CmdCodexLogin", "authFile")
+}
+
+// assertLoginUsesOAuthAuthFilePath is a structural wiring guard around the two
+// interactive flows that are impractical to run as unit tests. It scopes the
+// assertion to one function AST, requires the credential variable's sole
+// assignment to use oauthAuthFilePath(HomeDir(), provName), and rejects the old
+// direct path constructors. Comments and dead strings cannot satisfy it.
+func assertLoginUsesOAuthAuthFilePath(t *testing.T, relativePath, functionName, variableName string) {
+	t.Helper()
+	src := readLoginRepositoryFile(t, relativePath)
+	file, err := parser.ParseFile(token.NewFileSet(), relativePath, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", relativePath, err)
+	}
+	var body *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == functionName {
+			body = fn.Body
+			break
+		}
+	}
+	if body == nil {
+		t.Fatalf("%s: function %s not found", relativePath, functionName)
+	}
+
+	helperCalls := 0
+	variableAssignments := 0
+	directAuthPath := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && ident.Name == variableName {
+					variableAssignments++
+					if len(n.Rhs) != 1 || !isExactOAuthAuthFilePathCall(n.Rhs[0]) {
+						t.Errorf("%s %s: %s assignment must be oauthAuthFilePath(HomeDir(), provName)", relativePath, functionName, variableName)
+					}
+				}
+			}
+		case *ast.CallExpr:
+			if ident, ok := n.Fun.(*ast.Ident); ok && ident.Name == "oauthAuthFilePath" {
+				helperCalls++
+			}
+			if selector, ok := n.Fun.(*ast.SelectorExpr); ok {
+				pkg, _ := selector.X.(*ast.Ident)
+				if pkg != nil && pkg.Name == "filepath" && selector.Sel.Name == "Join" && containsOAuthAuthSuffix(n) {
+					directAuthPath = true
+				}
+				if selector.Sel.Name == "AuthFilePath" {
+					directAuthPath = true
+				}
+			}
+		}
+		return true
+	})
+	if helperCalls != 1 {
+		t.Errorf("%s %s: oauthAuthFilePath calls = %d, want exactly 1", relativePath, functionName, helperCalls)
+	}
+	if variableAssignments != 1 {
+		t.Errorf("%s %s: %s assignments = %d, want exactly 1", relativePath, functionName, variableName, variableAssignments)
+	}
+	if directAuthPath {
+		t.Errorf("%s %s: constructs an OAuth auth path directly instead of using oauthAuthFilePath", relativePath, functionName)
+	}
+}
+
+func isExactOAuthAuthFilePathCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 2 {
+		return false
+	}
+	fn, ok := call.Fun.(*ast.Ident)
+	if !ok || fn.Name != "oauthAuthFilePath" {
+		return false
+	}
+	homeCall, ok := call.Args[0].(*ast.CallExpr)
+	if !ok || len(homeCall.Args) != 0 {
+		return false
+	}
+	homeFn, ok := homeCall.Fun.(*ast.Ident)
+	providerName, providerOK := call.Args[1].(*ast.Ident)
+	return ok && homeFn.Name == "HomeDir" && providerOK && providerName.Name == "provName"
+}
+
+func containsOAuthAuthSuffix(call *ast.CallExpr) bool {
+	found := false
+	for _, arg := range call.Args {
+		ast.Inspect(arg, func(node ast.Node) bool {
+			literal, ok := node.(*ast.BasicLit)
+			if ok && strings.Contains(literal.Value, "oauth_auth") {
+				found = true
+			}
+			return !found
+		})
+	}
+	return found
 }
 
 // --- login validates API keys for kimi-code and volcengine ---
@@ -657,22 +760,35 @@ func TestAddVolcengineAccountCore_PartialAKSKRejected(t *testing.T) {
 	}
 }
 
-// TestDefaultsHaveValidationURLs is a source-level guard: kimi-code and
-// volcengine MUST carry a usage_url in both the repo config.yaml and the
-// `config init` template (defaults.go), or login silently skips validation for
-// them (the gap this change closes). Pattern of TestAqpCodexLogin_UsesConfigNameForAuthFile.
+// TestDefaultsHaveValidationURLs parses both user-facing default configs and
+// asserts the URLs on their exact provider entries. A raw substring check can
+// pass when a URL survives only in a comment or is attached to the wrong key.
 func TestDefaultsHaveValidationURLs(t *testing.T) {
-	for _, file := range []string{"config.yaml", "defaults.go"} {
-		src, err := os.ReadFile(file)
+	sources := []struct {
+		name string
+		yaml []byte
+	}{
+		{name: "config.yaml", yaml: readLoginRepositoryFile(t, "config.yaml")},
+		{name: "config init template", yaml: []byte(configdomain.DefaultConfigYAML)},
+	}
+	wants := map[string]string{
+		"kimi-code":  "https://api.kimi.com/coding/v1/usages",
+		"volcengine": "https://ark.cn-beijing.volces.com/api/plan/v3/models",
+	}
+	for _, source := range sources {
+		cfg, err := configdomain.LoadConfigFromBytes(source.name, source.yaml)
 		if err != nil {
-			t.Skipf("%s not readable: %v", file, err)
+			t.Fatalf("parse %s: %v", source.name, err)
 		}
-		s := string(src)
-		if !strings.Contains(s, "usage_url: https://api.kimi.com/coding/v1/usages") {
-			t.Errorf("%s: kimi-code usage_url missing (login would skip validation)", file)
-		}
-		if !strings.Contains(s, "usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models") {
-			t.Errorf("%s: volcengine usage_url missing (login would skip validation)", file)
+		for providerName, wantURL := range wants {
+			prov, ok := cfg.Providers[providerName]
+			if !ok {
+				t.Errorf("%s: provider %q missing", source.name, providerName)
+				continue
+			}
+			if prov.UsageURL != wantURL {
+				t.Errorf("%s: provider %q usage_url = %q, want %q", source.name, providerName, prov.UsageURL, wantURL)
+			}
 		}
 	}
 }

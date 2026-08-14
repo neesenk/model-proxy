@@ -8,9 +8,9 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
+	"model-proxy/internal/provider"
 	"model-proxy/internal/shadow"
 	"model-proxy/internal/targetexec"
-	"model-proxy/internal/provider"
 )
 
 // RuntimeSnapshot is one immutable view of reload-swapped runtime dependencies.

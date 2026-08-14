@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -255,7 +254,7 @@ func ExchangeCodeForTokensContext(ctx context.Context, opts *CodexLoginServerOpt
 // path / web UI / logout read. A renamed instance (e.g. "codex-work") thus
 // writes codex-work_oauth_auth.json, not codex_oauth_auth.json.
 func CmdCodexLogin(provName string) {
-	authFile := filepath.Join(HomeDir(), ".model-proxy", provName+"_oauth_auth.json")
+	authFile := oauthAuthFilePath(HomeDir(), provName)
 	opts := &CodexLoginServerOptions{}
 	opts.Defaults()
 

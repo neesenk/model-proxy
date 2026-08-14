@@ -24,7 +24,7 @@
 `Close` 结束 Proxy 生命周期。可复用 HTTP drain primitive 留在
 `internal/cli/serve/shutdown.go`；daemon/supervisor 的 signal 与 pid/probe 编排位于
 `internal/cli/serve/supervisor.go`。child process
-detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `detach_windows.go`。
+detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `internal/cli/serve/detach_windows.go`。
 
 这是内部装配边界的收敛，不改变命令、输出或退出码。
 
@@ -51,7 +51,7 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `detach
 
 两套独立开关：
 
-- `provider.ColorEnabled`（`provider/display.go`）— stdout 着色；根 CLI 仅保留
+- `provider.ColorEnabled`（`internal/provider/display.go`）— stdout 着色；根 CLI 仅保留
   实际使用的 `cGreen`/`cRed`/`cYellow`/`cDim`/`cBold`/`cBlue`/`cCyan`/`cGray`
   等薄包装。
 - `logColorEnabled` — stderr/log 着色（`cl(...)`，运行时日志用）。
@@ -146,7 +146,7 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 takeover <client>   # client ∈ {claude, opencode, codex, pi, all}
 ```
 
-逻辑（`takeover.go` 的 `runTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再改写指向代理。含隐式路由模型；opencode/pi 额外 hydrate models.dev 元数据。
+逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再改写指向代理。含隐式路由模型；opencode/pi 额外 hydrate models.dev 元数据。
 
 ### 输出
 
@@ -176,7 +176,7 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, all}
 restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 ```
 
-逻辑（`takeover.go` 的 restore 路径）：从 `<BAKDIR>/<client>.bak` verbatim 复制回原路径。输出同 §2 的 restore 行。失败：`log.Fatal` -> stderr + exit 1（无备份 -> `no backup for <client> in <BAKDIR>: ...`）。
+逻辑（`internal/takeover/takeover.go` 的 `RunRestore`）：从 `<BAKDIR>/<client>.bak` verbatim 复制回原路径。输出同 §2 的 restore 行。失败：`log.Fatal` -> stderr + exit 1（无备份 -> `no backup for <client> in <BAKDIR>: ...`）。
 
 ---
 
@@ -186,7 +186,7 @@ restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 login <provider> [--label <name>] [--replace]
 ```
 
-逻辑（`login.go` 的 `cmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `maybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
+逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
 
 ### 通用
 
@@ -212,7 +212,7 @@ Once you've finished logging in (or the redirect above succeeded), come back her
 Login complete. You can now run `model-proxy serve`.
 ```
 
-### codex（OAuth device flow，`codex_login.go` `cmdCodexLogin`）
+### codex（OAuth device flow，`internal/cli/login/codex_login.go` 的 `CmdCodexLogin`）
 
 stdout：
 ```
@@ -293,7 +293,7 @@ logout <provider> [--label <name>] [--all]
 usage [provider]   # 无参数 = 所有已配置 provider
 ```
 
-逻辑（`cmdUsage` -> `printProviderUsage` -> `provider.Provider.Usage()`）：无参数时
+逻辑（`internal/cli/usage.go` 的 `CmdUsage` -> `PrintProviderUsage` -> `provider.Provider.Usage()`）：无参数时
 按 provider 名排序逐个打印，块间用 `usageDivider` 分隔。未知 provider -> stderr
 `unknown provider ...` + exit 1。
 
@@ -488,7 +488,7 @@ shadow:
 schedule   # 查询运行中 daemon 的 GET /debug/schedule
 ```
 
-逻辑（`cmdSchedule`）：HTTP GET `http://<LISTEN>/debug/schedule`，10s 超时，渲染 `renderScheduleRoutes`（`serve_status.go`，与 `serve status` 共享）。
+逻辑（`internal/cli/schedule.go` 的 `CmdSchedule`）：HTTP GET `http://<LISTEN>/debug/schedule`，10s 超时，渲染 `RenderScheduleRoutes`（`internal/cli/status.go`，与 `serve status` 共享）。
 
 ### stdout（`renderScheduleRoutes`，每路由一块）
 
@@ -572,7 +572,7 @@ agent                reqs        input       output
 serve status [--logs [N]] [--json] [--config PATH]
 ```
 
-逻辑（`serve_status.go` 的 `cmdServeStatus` -> `renderStatus`）：GET `/api/status` + `/api/tokens`（带 `--logs` 再加 `/api/logs?tail=N`，默认 N=20）。`--json` 合并 `{status, tokens[, logs]}` 原样输出。
+逻辑（`internal/cli/status.go` 的 `CmdServeStatus` -> `RenderStatus`）：GET `/api/status` + `/api/tokens`（带 `--logs` 再加 `/api/logs?tail=N`，默认 N=20）。`--json` 合并 `{status, tokens[, logs]}` 原样输出。
 
 ### stdout（渲染，各段由 `appendSection` 以空行分隔）
 
@@ -670,7 +670,7 @@ config 无效 -> **stdout** `✗ config invalid:  <ERR>`（红）+ exit 1（注�
 doctor --live [--config PATH]
 ```
 
-逻辑（`doctor_live.go` `renderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于 `takeover.proxy_url` 推导值），输出**结论先行**报告，回答「agent 为什么不动了」。纯只读；有 `--live` 时离线报告不再输出。
+逻辑（`internal/cli/doctor/live.go` 的 `RenderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于 `takeover.proxy_url` 推导值），输出**结论先行**报告，回答「agent 为什么不动了」。纯只读；有 `--live` 时离线报告不再输出。
 
 ### stdout
 
@@ -714,7 +714,7 @@ Takeover
 test <model> [--config PATH]
 ```
 
-逻辑（`test_cmd.go` 的 `cmdTest`）：离线解析 `<model>` 的路由目标（claude_mapping 别名先翻译；显式 routes 按 priority 升序；无显式路由则回退隐式路由），对**每个**目标用 `probeModelCallable` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线，由 `probeRouteTarget` 执行）。不查询/不改动运行态。
+逻辑（`internal/cli/models/test.go` 的 `CmdTest`）：离线解析 `<model>` 的路由目标（claude_mapping 别名先翻译；显式 routes 按 priority 升序；无显式路由则回退隐式路由），对**每个**目标由 `probeRouteTarget` 调用 `internal/probe.Exchange` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线）。不查询/不改动运行态。
 
 ### stdout（每目标一行）
 
@@ -733,7 +733,7 @@ pin [<route> <provider>] [--ttl DUR] [--config PATH]
 unpin <route> [--config PATH]
 ```
 
-逻辑（`pin_cmd.go`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin` 由 `internal/web` transport 的 `CommandAPI` 写入 daemon 的 `internal/runtime.Manager`；`Manager.DecideOrder` 在 availability 过滤前对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）；operator pin 有意跨 config reload 保留。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
+逻辑（`internal/cli/pin.go` 的 `CmdPin`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin` 由 `internal/web` transport 的 `CommandAPI` 写入 daemon 的 `internal/runtime.Manager`；`Manager.DecideOrder` 在 availability 过滤前对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）；operator pin 有意跨 config reload 保留。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
 
 ### stdout
 
@@ -753,7 +753,7 @@ unpin <route> [--config PATH]
 replay <id> --to <provider> [--config PATH]
 ```
 
-逻辑（`replay_cmd.go` `cmdReplay`）：从 daemon 的 `GET /api/requests/<id>` 取回原请求（method/path/body，需 `request_log.enabled`），再以 `x-mp-force-provider: <provider>` 头把同一 body 重发到 proxy（该头对**这一条请求**做一次性 provider 钉死，不动全局 pin），把新后端的响应写 stdout，用于并排对比。
+逻辑（`internal/cli/replay.go` 的 `CmdReplay`）：从 daemon 的 `GET /api/requests/<id>` 取回原请求（method/path/body，需 `request_log.enabled`），再以 `x-mp-force-provider: <provider>` 头把同一 body 重发到 proxy（该头对**这一条请求**做一次性 provider 钉死，不动全局 pin），把新后端的响应写 stdout，用于并排对比。
 
 ### stdout
 
@@ -780,7 +780,7 @@ replay <id> --to <provider> [--config PATH]
 unfreeze [provider] [--config PATH]
 ```
 
-逻辑（`unfreeze_cmd.go` `cmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
+逻辑（`internal/cli/unfreeze.go` 的 `CmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
 
 ### stdout
 
@@ -800,7 +800,7 @@ unfreeze [provider] [--config PATH]
 wire record <provider> [--model M] [--prompt P] [--out DIR]
 ```
 
-逻辑（`wire_record_cmd.go` `cmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `internal/protocol/convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（强制工具调用：`get_weather` + `tool_choice` 强制）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
+逻辑（`internal/cli/wire.go` 的 `CmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `internal/protocol/convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（强制工具调用：`get_weather` + `tool_choice` 强制）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
 
 ### stdout / stderr
 
@@ -820,6 +820,6 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 - `internal/cli/models_cli_test.go`：`models refresh` 未知/无参数 provider；`internal/cli/cli_subcommands_test.go`：`config` 子命令。
 - `internal/cli/models/models_check_test.go`：`PrintKeptModels` / `PrintFilterSummary` 输出。
 - `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
-- `provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
+- `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

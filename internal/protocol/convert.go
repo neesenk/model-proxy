@@ -2070,9 +2070,9 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				ID    string `json:"id"`
 				Model string `json:"model"`
 				Usage struct {
-					InputTokens int `json:"input_tokens"`
-					CacheRead   int `json:"cache_read_input_tokens"`
-					CacheCreate int `json:"cache_creation_input_tokens"`
+					InputTokens *int `json:"input_tokens"`
+					CacheRead   *int `json:"cache_read_input_tokens"`
+					CacheCreate *int `json:"cache_creation_input_tokens"`
 				} `json:"usage"`
 			} `json:"message"`
 			Error struct {
@@ -2080,7 +2080,10 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				Message string `json:"message"`
 			} `json:"error"`
 			Usage struct {
-				OutputTokens int `json:"output_tokens"`
+				InputTokens  *int `json:"input_tokens"`
+				OutputTokens *int `json:"output_tokens"`
+				CacheRead    *int `json:"cache_read_input_tokens"`
+				CacheCreate  *int `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 		}
 		if sonic.Unmarshal([]byte(payload), &ev) != nil {
@@ -2091,9 +2094,9 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 		}
 		switch ev.Type {
 		case "message_start":
-			t.inputTokens = ev.Message.Usage.InputTokens
-			t.cacheRead = ev.Message.Usage.CacheRead
-			t.cacheCreate = ev.Message.Usage.CacheCreate
+			updateUsageValue(ev.Message.Usage.InputTokens, &t.inputTokens)
+			updateUsageValue(ev.Message.Usage.CacheRead, &t.cacheRead)
+			updateUsageValue(ev.Message.Usage.CacheCreate, &t.cacheCreate)
 			if ev.Message.ID != "" {
 				t.id = ev.Message.ID // pass the upstream's real message id through
 			}
@@ -2191,9 +2194,14 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			}
 			t.curType = ""
 		case "message_delta":
-			if ev.Usage.OutputTokens > 0 {
-				t.outputTokens = ev.Usage.OutputTokens
-			}
+			// Vendors differ on where final usage lands: some put input/cache
+			// only on message_delta, while Kimi moves input into cache_read at
+			// the terminal event. Update by field presence (including explicit
+			// zero), otherwise keep the message_start value.
+			updateUsageValue(ev.Usage.InputTokens, &t.inputTokens)
+			updateUsageValue(ev.Usage.CacheRead, &t.cacheRead)
+			updateUsageValue(ev.Usage.CacheCreate, &t.cacheCreate)
+			updateUsageValue(ev.Usage.OutputTokens, &t.outputTokens)
 			// The finish chunk carries usage so the OpenAI-protocol usage scanner
 			// attributes tokens. Guard: a malformed stream with >1 message_delta
 			// must not emit >1 finish chunk.
@@ -2208,6 +2216,12 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 	n := copy(p, t.out)
 	t.out = t.out[n:]
 	return n, nil
+}
+
+func updateUsageValue(value *int, target *int) {
+	if value != nil {
+		*target = *value
+	}
 }
 
 // backendPath returns the upstream request path for a backend protocol (used when

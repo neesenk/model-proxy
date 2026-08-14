@@ -13,8 +13,8 @@ import (
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
-	"model-proxy/internal/targetexec"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/targetexec"
 )
 
 type testProvider struct {

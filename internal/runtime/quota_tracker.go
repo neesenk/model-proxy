@@ -10,8 +10,8 @@ import (
 	"time"
 
 	configdomain "model-proxy/internal/config"
-	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/provider"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // QuotaTracker polls providers' Quota() periodically, caches the results in

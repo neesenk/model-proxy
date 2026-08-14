@@ -11,6 +11,13 @@ import (
 // disconnects. A periodic comment keepalive prevents idle proxies from closing the
 // connection. Nil-hub-safe (a Proxy without one answers an empty stream).
 func ServeEvents(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	serveEventsWithTicks(hub, w, r, nil)
+}
+
+// serveEventsWithTicks is the SSE entry core. A nil tick channel preserves the
+// production 15-second ticker; tests supply a channel to drive the complete
+// response path without sleeping or bypassing headers and initial flushes.
+func serveEventsWithTicks(hub *Hub, w http.ResponseWriter, r *http.Request, ticks <-chan time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -25,7 +32,11 @@ func ServeEvents(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	if hub == nil {
 		// No hub: hold the connection open with keepalives so the client doesn't
 		// spin reconnects.
-		keepaliveLoop(w, flusher, r)
+		if ticks == nil {
+			keepaliveLoop(w, flusher, r)
+		} else {
+			keepaliveLoopWithTicks(w, flusher, r, ticks)
+		}
 		return
 	}
 	ch, recent, cancel := hub.Subscribe()
@@ -44,17 +55,22 @@ func ServeEvents(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	// Stream new events + a 15s keepalive comment.
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+	if ticks == nil {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		ticks = ticker.C
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
+		case _, ok := <-ticks:
+			if !ok {
 				return
 			}
-			flusher.Flush()
+			if !writeKeepalive(w, flusher) {
+				return
+			}
 		case e := <-ch:
 			writeEvent(e)
 			flusher.Flush()
@@ -67,15 +83,29 @@ func ServeEvents(hub *Hub, w http.ResponseWriter, r *http.Request) {
 func keepaliveLoop(w http.ResponseWriter, flusher http.Flusher, r *http.Request) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+	keepaliveLoopWithTicks(w, flusher, r, ticker.C)
+}
+
+func keepaliveLoopWithTicks(w http.ResponseWriter, flusher http.Flusher, r *http.Request, ticks <-chan time.Time) {
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
+		case _, ok := <-ticks:
+			if !ok {
 				return
 			}
-			flusher.Flush()
+			if !writeKeepalive(w, flusher) {
+				return
+			}
 		}
 	}
+}
+
+func writeKeepalive(w http.ResponseWriter, flusher http.Flusher) bool {
+	if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
+		return false
+	}
+	flusher.Flush()
+	return true
 }

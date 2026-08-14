@@ -229,14 +229,46 @@ func FetchProviderModels(cfg *configdomain.Config, provName string) ([]ModelEntr
 // kept unvalidated rather than wiping `models:`; the latter still surfaces the
 // failures as a warning via printFilterSummary.
 func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, args []string, configFile string) {
+	if err := probeAndWriteModels(cfg, provName, merged, existing, configFile, productionProbeAndWriteModelsOps()); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// probeAndWriteModelsOps is deliberately package-private: the refresh state
+// machine can be tested with deterministic policy/probe/write collaborators
+// without exposing mutable production hooks or reaching a real provider.
+type probeAndWriteModelsOps struct {
+	filter  func(*configdomain.Config, string, []string) ([]string, []string)
+	probe   func(*configdomain.Config, string, []string) ([]string, []DropReason, error)
+	display func(*configdomain.Config, string, []string, []DropReason, error, bool)
+	write   func(string, string, []string) error
+	reload  func(*configdomain.Config)
+}
+
+func productionProbeAndWriteModelsOps() probeAndWriteModelsOps {
+	return probeAndWriteModelsOps{
+		filter: ApplyProviderModelFilter,
+		probe:  CheckProviderModels,
+		display: func(cfg *configdomain.Config, provName string, policyDropped []string, dropped []DropReason, perr error, allProbeFailed bool) {
+			cat, _ := app.LoadModelsCatalog(homeDir(), false)
+			meta, sources := app.HydrateModels(cfg, cat)
+			PrintKeptModels(provName, cfg.Providers[provName].Models, meta, sources)
+			PrintFilterSummary(policyDropped, dropped, perr, allProbeFailed)
+		},
+		write:  WriteProviderModels,
+		reload: maybeReloadDaemon,
+	}
+}
+
+func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, configFile string, ops probeAndWriteModelsOps) error {
 	// Policy filter (provider-specific static rules via the provider impl's
 	// FilterModelIDs, applied to BOTH pre-existing config ids and freshly-fetched
 	// ones so a stale config is cleaned up too). Currently volcengine drops
 	// *-latest / doubao-seed-1-* / lite / mini by policy regardless of
 	// callability. The endpoint probe below is the second, general pass
 	// (callable on the provider base_url?).
-	policyKept, policyDropped := ApplyProviderModelFilter(cfg, provName, merged)
-	kept, dropped, perr := CheckProviderModels(cfg, provName, policyKept)
+	policyKept, policyDropped := ops.filter(cfg, provName, merged)
+	kept, dropped, perr := ops.probe(cfg, provName, policyKept)
 	allProbeFailed := perr == nil && len(policyKept) > 0 && len(kept) == 0
 	if perr != nil {
 		// Probe infra unavailable (e.g. provider not logged in). Fall back to
@@ -260,19 +292,16 @@ func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 	provCfg := cfg.Providers[provName]
 	provCfg.Models = kept
 	cfg.Providers[provName] = provCfg
-	cat, _ := app.LoadModelsCatalog(homeDir(), false)
-	meta, sources := app.HydrateModels(cfg, cat)
 
 	// Output order: final list FIRST, then the filter summary with reasons.
-	PrintKeptModels(provName, kept, meta, sources)
-	PrintFilterSummary(policyDropped, dropped, perr, allProbeFailed)
+	ops.display(cfg, provName, policyDropped, dropped, perr, allProbeFailed)
 
 	// Write the validated list (overwrite, not append-only). writeProviderModels
 	// re-encodes the whole models: sequence, so ids absent from `kept` (both
 	// pre-existing uncallable ones and freshly-fetched failures) are removed.
 	if !SameStringSet(kept, existing) {
-		if err := WriteProviderModels(configFile, provName, kept); err != nil {
-			log.Fatalf("writing models to config: %v", err)
+		if err := ops.write(configFile, provName, kept); err != nil {
+			return fmt.Errorf("writing models to config: %w", err)
 		}
 		added, removed := DiffStringSets(existing, kept)
 		if len(added) > 0 {
@@ -284,8 +313,9 @@ func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 		// Hot-reload a running daemon so the new model set takes effect for
 		// implicit routing (and refresh the display) without a manual
 		// `serve reload`. No-op if no daemon is running. Mirrors login/logout.
-		maybeReloadDaemon(cfg)
+		ops.reload(cfg)
 	}
+	return nil
 }
 
 // writeProviderModels rewrites providers.<provName>.models to `names` in

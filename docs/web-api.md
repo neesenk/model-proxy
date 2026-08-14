@@ -44,7 +44,7 @@
 
 ## 调用统计持久化（`internal/observe/stats` + `internal/app/stats_runtime.go`）
 
-`metricsStore`（per-(provider,model) 原子计数器）+ `tokenCounter` 在 hot path 纯内存，**hot path 不碰 SQLite**。根 `statsFlusher` 按墙钟分钟边界 tick，快照 metrics/tokens/agents 并与上次 baseline diff；每一路 delta 先进入带原始 minute 的 pending batch，再按时间顺序写 Store，故某一路瞬时失败不会把累计量挪到后一个时间桶。每路最多保留 360 个 exact-minute batch；更长故障会把最老两桶合并并归到最早 minute 边界（累计量不丢，只降低最老区间的时间分辨率），恢复时每个 tick 每路最多 drain 30 桶，避免长期持有 flusher 锁。`internal/observe/stats.Store` 独占 SQLite schema、additive migration、分钟桶 upsert、查询、retention 和 legacy JSON import。非零 delta 写入 `~/.model-proxy/stats.db`（`minute_buckets` 表，`ON CONFLICT DO UPDATE` 累加，`last_request_at` 用 `MAX`）。`modernc.org/sqlite` 纯 Go（`CGO_ENABLED=0`）；stats 连接的 SQLite busy timeout 为 250ms，避免外部写锁让 flusher 卡满原先的 5 秒；`config.stats.{db_path, retention}` 默认 30d。空闲 tick 仍会重试 pending batch 并执行 retention prune；SIGINT/SIGTERM 会取消正在执行的周期 Store 调用，在 lifecycle loop 停止后 final flush，并在 2 秒 best-effort retry window 内重试 pending 后关闭 Store；永久失败记录剩余批次数。context 可取消普通 Begin/Exec，但 modernc busy handler 和底层文件系统调用不提供绝对 hard deadline，因此契约不承诺 `Proxy.Close` 必在 2 秒内返回。查询 `GET /api/stats`（`bucket` 聚合，存储恒 1 分钟）+ `model-proxy stats` CLI。锁纪律：metrics/token/agent/flusher 都是独立叶子锁，不与其它嵌套；Store 不反向持有 runtime owner。
+`metricsStore`（per-(provider,model) 原子计数器）+ `tokenCounter` 在 hot path 纯内存，**hot path 不碰 SQLite**。应用层 `statsFlusher` 按墙钟分钟边界 tick，快照 metrics/tokens/agents 并与上次 baseline diff；每一路 delta 先进入带原始 minute 的 pending batch，再按时间顺序写 Store，故某一路瞬时失败不会把累计量挪到后一个时间桶。每路最多保留 360 个 exact-minute batch；更长故障会把最老两桶合并并归到最早 minute 边界（累计量不丢，只降低最老区间的时间分辨率），恢复时每个 tick 每路最多 drain 30 桶，避免长期持有 flusher 锁。`internal/observe/stats.Store` 独占 SQLite schema、additive migration、分钟桶 upsert、查询、retention 和 legacy JSON import。非零 delta 写入 `~/.model-proxy/stats.db`（`minute_buckets` 表，`ON CONFLICT DO UPDATE` 累加，`last_request_at` 用 `MAX`）。`modernc.org/sqlite` 纯 Go（`CGO_ENABLED=0`）；stats 连接的 SQLite busy timeout 为 250ms，避免外部写锁让 flusher 卡满原先的 5 秒；`config.stats.{db_path, retention}` 默认 30d。空闲 tick 仍会重试 pending batch 并执行 retention prune；SIGINT/SIGTERM 会取消正在执行的周期 Store 调用，在 lifecycle loop 停止后 final flush，并在 2 秒 best-effort retry window 内重试 pending 后关闭 Store；永久失败记录剩余批次数。context 可取消普通 Begin/Exec，但 modernc busy handler 和底层文件系统调用不提供绝对 hard deadline，因此契约不承诺 `Proxy.Close` 必在 2 秒内返回。查询 `GET /api/stats`（`bucket` 聚合，存储恒 1 分钟）+ `model-proxy stats` CLI。锁纪律：metrics/token/agent/flusher 都是独立叶子锁，不与其它嵌套；Store 不反向持有 runtime owner。
 
 **延迟与失败口径**：`minute_buckets` 带 `latency_ms_sum`/`ttft_ms_sum`（additive ALTER 迁移，老库自动加列）。stats 延迟用**上游响应头到达**时间（`upstreamMs`，不含客户端慢读；live 事件的 latency 仍是客户端口径）。`evRequests` **只在 commit +1**（失败尝试只计 failovers/failures，不稀释 avg）。`statsFlusher.flush()` 全周期持 `f.mu`，`reset()` 同锁并同时处理三个 runtime counter、SQLite history 与 baseline（否则分钟边界撞 reset 会把全量历史写回刚清空的库）；响应 cache 由外层 `Proxy.resetStats` 清理，不进入 Store。
 
@@ -78,9 +78,9 @@ HTTP/UI transport 统一归 `internal/web`。其 `Server` 不持有 `*Proxy`，�
 consumer-owned `ReadAPI` / `CommandAPI`：只读 handler 通过 `ReadAPI` 查询
 request log、tokens、stats、Fusion、pins、pricing 及 detached
 dashboard/config/provider 快照；写操作和主动网络探测通过 `CommandAPI` 执行
-reset、quota refresh、health reset + persist、pin、reload 与 account probe。根
-`proxy_web_api.go` 是两个端口的唯一应用适配，负责 `proxyReadView` /
-`proxyAdminCommands` 到 transport DTO/命令的映射；`web_adapter.go` 只负责
+reset、quota refresh、health reset + persist、pin、reload 与 account probe。应用层的
+`internal/app/proxy_web_api.go` 是两个端口的唯一应用适配，负责 `proxyReadView` /
+`proxyAdminCommands` 到 transport DTO/命令的映射；`internal/app/web_adapter.go` 只负责
 composition 与 mux 挂载。任何 transport handler 都不得绕过端口直接访问 Proxy。
 
 账号测活必须在 admin capability 内只调用一次 `snapshotRuntime`，从同一 generation
@@ -102,7 +102,7 @@ pending 的会话；否则 UI 会在后台任务仍可能落盘时提前得到 4
 （`jq`/`grep`）与查询 API。**默认 `enabled: false`**（零开销：不 wrap、
 不开文件、不起 goroutine）；改 `enabled` 需**重启**（reload 不重建 logger）。
 
-热路径：根 `request_log_adapter.go` 先把请求、route target 与 response header
+热路径：`internal/app/request_log_adapter.go` 先把请求、route target 与 response header
 快照映射为纯值 Input；`p.reqLog != nil` 时 `resp.Body`（**协议转换后**的字节）
 包 `internal/transport/bodycapture.Reader`（有界 tee，`max_body_bytes` 封顶，
 超限停捕获但字节仍透传）→ 非阻塞 enqueue 到 buffered chan（cap 2048，满则计数

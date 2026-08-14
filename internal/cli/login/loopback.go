@@ -1,9 +1,10 @@
 package login
 
 import (
-	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,6 +15,14 @@ import (
 
 	"model-proxy/internal/provider"
 )
+
+const loginSignalPollInterval = 50 * time.Millisecond
+
+type loginEnterSource interface {
+	Poll(time.Duration) (bool, error)
+}
+
+type stdinEnterSource struct{ file *os.File }
 
 func WithNextCallback(loginURL, callback string) string {
 	u, err := url.Parse(loginURL)
@@ -32,31 +41,77 @@ func WithNextCallback(loginURL, callback string) string {
 // means the user has completed the browser login and the CLI may proceed to
 // poll auth/info with the SSO_A already in its cookie jar.
 func WaitForLoginSignal(ls *LoopbackServer, timeout time.Duration) error {
-	done := make(chan struct{}, 1)
-	// Loopback hit watcher.
-	go func() {
-		_, _ = ls.WaitForCookie(timeout)
-		select {
-		case done <- struct{}{}:
-		default:
-		}
-	}()
-	// Stdin ENTER watcher.
-	go func() {
-		br := bufio.NewReader(os.Stdin)
-		_, _ = br.ReadString('\n')
-		select {
-		case done <- struct{}{}:
-		default:
-		}
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-time.After(timeout):
-		return fmt.Errorf("login timed out waiting for callback or ENTER")
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	err := waitForLoginSignal(ctx, ls, &stdinEnterSource{file: os.Stdin})
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("login timed out waiting for callback or ENTER: %w", err)
 	}
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("login canceled while waiting for callback or ENTER: %w", err)
+	}
+	return err
+}
+
+// waitForLoginSignal is the cancellable core shared by callback and ENTER
+// completion. The stdin source performs bounded readiness polling, so callback,
+// timeout, and cancellation never strand an uninterruptible reader goroutine.
+func waitForLoginSignal(ctx context.Context, ls *LoopbackServer, enter loginEnterSource) error {
+	for {
+		select {
+		case <-ls.CookieCh:
+			return nil
+		case err := <-ls.ErrCh:
+			return fmt.Errorf("login callback failed: %w", err)
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if enter == nil {
+			select {
+			case <-ls.CookieCh:
+				return nil
+			case err := <-ls.ErrCh:
+				return fmt.Errorf("login callback failed: %w", err)
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		pollFor := loginSignalPollInterval
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return context.DeadlineExceeded
+			}
+			if remaining < pollFor {
+				pollFor = remaining
+			}
+		}
+		pressed, err := enter.Poll(pollFor)
+		if errors.Is(err, io.EOF) {
+			// A closed/non-interactive stdin cannot provide ENTER. Disable that
+			// branch and continue waiting for callback or context completion.
+			enter = nil
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read login confirmation: %w", err)
+		}
+		if pressed {
+			return nil
+		}
+	}
+}
+
+func readLoginEnterByte(file *os.File) (bool, error) {
+	var b [1]byte
+	n, err := file.Read(b[:])
+	if n > 0 {
+		return b[0] == '\n' || b[0] == '\r', nil
+	}
+	return false, err
 }
 
 // ---- LoopbackServer ----

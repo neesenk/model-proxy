@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `internal/routing/request.go`、`request_routing_adapter.go`、models.dev
+修改 `internal/routing/request.go`、`internal/app/request_routing_adapter.go`、models.dev
 catalog、context overflow retry、implicit routes 或 route warnings 时必读。
 
 ## 请求画像
@@ -23,7 +23,7 @@ catalog、context overflow retry、implicit routes 或 route warnings 时必读�
 隐藏内部字段；输入来自一次 `runtimeSnapshot`，generation-owned map 在 reload
 时只交换、不原地修改。
 
-`request_routing_adapter.go` 是唯一边界桥：它从 HTTP request 提取
+`internal/app/request_routing_adapter.go` 是唯一边界桥：它从 HTTP request 提取
 force-provider 字符串；`requestRoutingScheduler` 捕获同一快照的 config、parent
 identity、route keys 与 generation，并通过 `Proxy.schedule` 进入
 `internal/runtime.Manager`。`serveOnce` 每个 pass 只构造一个 Planner，同时用于
@@ -31,7 +31,7 @@ identity、route keys 与 generation，并通过 `Proxy.schedule` 进入
 generation。
 
 `internal/catalog` 作为无仓库内依赖叶子包拥有 models.dev slim projection、
-canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存。根 adapter 只注入 HOME
+canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存。`internal/app/catalog_adapter.go` 只注入 HOME
 cache path、`MP_MODELSDEV_URL` 与 Config 中的 provider/route 名单。daemon
 启动时同步加载 catalog（最多受 source HTTP timeout 限制），reload 后的刷新才经
 lifecycle gate 异步执行；catalog 为 nil 时请求感知路由整体 no-op，不能因此把

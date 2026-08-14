@@ -126,6 +126,65 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Fatalf("stat accounts_adapter.go: %v", err)
 		}
 
+		// Provider construction and implicit-route eligibility must share one
+		// authoritative account snapshot per provider. Keep these structural
+		// guards here so moving the assembly code cannot silently re-introduce a
+		// second filesystem probe (and a generation-local TOCTOU decision).
+		builder := namedFunction(t, rootPackage, "BuildProviders")
+		if got := namedCallCountInNode(builder.Body, "LoadSnapshot"); got != 1 {
+			t.Errorf("app.BuildProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
+		}
+		forbiddenStorageProbes := map[string]bool{
+			"loadPool": true, "poolPath": true, "singularPoolPath": true,
+			"Load": true, "PoolPath": true, "LegacyPath": true,
+			"Stat": true, "ReadFile": true, "Open": true, "OpenFile": true, "ReadDir": true,
+		}
+		for _, violation := range forbiddenCallSites(builder.Body, rootSet, forbiddenStorageProbes, nil) {
+			t.Errorf("app.BuildProviders re-reads or probes account storage outside its snapshot: %s", violation)
+		}
+
+		loggedIn := namedFunction(t, rootPackage, "LoggedInProviders")
+		if got := namedCallCountInNode(loggedIn.Body, "LoadSnapshot"); got != 1 {
+			t.Errorf("app.LoggedInProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
+		}
+		for _, violation := range forbiddenCallSites(loggedIn.Body, rootSet, forbiddenStorageProbes, nil) {
+			t.Errorf("app.LoggedInProviders re-reads or probes account storage outside its snapshot: %s", violation)
+		}
+
+		buildFields := namedStructFields(t, rootPackage, "Build")
+		wantBuildFields := map[string]bool{
+			"Providers": true, "PoolIndex": true, "ParentOf": true, "Eligible": true,
+		}
+		if len(buildFields) != len(wantBuildFields) {
+			t.Errorf("app.Build fields = %v, want exactly %v", sortedFieldNames(buildFields), sortedBoolNames(wantBuildFields))
+		}
+		for name := range wantBuildFields {
+			if _, ok := buildFields[name]; !ok {
+				t.Errorf("app.Build missing %q", name)
+			}
+		}
+
+		assertUsesBuildEligibility := func(owner string, body ast.Node) {
+			t.Helper()
+			if got := namedCallCountInNode(body, "synthesizeImplicitRoutesFrom"); got != 1 {
+				t.Errorf("%s synthesizeImplicitRoutesFrom calls = %d, want 1 build-derived eligibility use", owner, got)
+			}
+			if got := namedCallWithArgsCount(body, "synthesizeImplicitRoutesFrom", "cfg", "built", "Eligible"); got != 1 {
+				t.Errorf("%s must pass exactly (cfg, built.Eligible), matches = %d", owner, got)
+			}
+			for _, forbidden := range []string{
+				"LoggedInProviders", "loggedInProviders",
+				"SynthesizeImplicitRoutes", "synthesizeImplicitRoutes",
+			} {
+				if got := namedCallCountInNode(body, forbidden); got != 0 {
+					t.Errorf("%s calls %s %d time(s), re-reading account eligibility", owner, forbidden, got)
+				}
+			}
+		}
+		constructor := namedFunction(t, rootPackage, "NewProxyWithStatePath")
+		assertUsesBuildEligibility("NewProxyWithStatePath", constructor.Body)
+		reload := namedMethod(t, rootPackage, "Proxy", "Reload")
+		assertUsesBuildEligibility("Proxy.Reload", reload.Body)
 	})
 
 	t.Run("internal pricing remains a repository-leaf package", func(t *testing.T) {

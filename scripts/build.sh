@@ -36,7 +36,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# The module root is this directory (go.mod lives here, not at the repo root).
+# The module root is this repository root (go.mod lives here).
 outdir="dist"
 version_override=""
 strip=0

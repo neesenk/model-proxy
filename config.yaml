@@ -23,18 +23,17 @@ providers:
     anthropic_base_url: https://compass.llm.shopee.io/compass-api # same base without /v1; proxy keeps the client /v1/messages path
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     # peak_hours: "09:00-18:00"  # optional: route scheduling deprioritizes aqp during its peak window
-    headers:                     # sent on every aqp upstream request (forward + probe), after auth
-      x-ccswitch-client: "0.2.1"  # mirror AIS Switch's client header (bare app version, verified vs 0.2.1 binary + live log); bump when AIS Switch updates
+    headers: # sent on every aqp upstream request (forward + probe), after auth
+      x-ccswitch-client: "0.2.1" # mirror AIS Switch's client header (bare app version, verified vs 0.2.1 binary + live log); bump when AIS Switch updates
     models:
-      - glm-5.2
-      - deepseek-v4-pro
       - deepseek-v4-flash
+      - deepseek-v4-pro
+      - glm-5.2
+      - kimi-k3
   codex:
     provider_id: codex
     openai_base_url: https://chatgpt.com/backend-api/codex
     models:
-      - gpt-5.4
-      - gpt-5.4-mini
       - gpt-5.5
       - gpt-5.6-luna
       - gpt-5.6-sol
@@ -54,13 +53,7 @@ providers:
       - {window: "14:00-18:00", multiplier: 4}
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit # `usage zhipu`: 5h/weekly/monthly quota + token consumption
     models:
-      - glm-4.5
-      - glm-4.5-air
-      - glm-4.6
-      - glm-4.7
-      - glm-5
       - glm-5-turbo
-      - glm-5.1
       - glm-5.2
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
@@ -109,10 +102,9 @@ providers:
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - glm-5.1
       - glm-5.2
       - kimi-k2.7-code
-      - kimi-k2.6
+      - kimi-k3
       - minimax-m3
   # Kimi Code (Moonshot membership coding plan — NOT the pay-as-you-go 开放平台).
   # API key via `login kimi-code` (from https://www.kimi.com/code/console).

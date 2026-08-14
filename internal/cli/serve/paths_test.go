@@ -1,8 +1,10 @@
 package serve_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	serve "model-proxy/internal/cli/serve"
@@ -25,7 +27,112 @@ func TestResolveLogFile(t *testing.T) {
 }
 
 func TestPidFilePath(t *testing.T) {
-	if got := serve.PidFilePath("/var/log/model-proxy.log"); got != "/var/log/model-proxy.pid" {
-		t.Errorf("got %q", got)
+	for _, tc := range []struct {
+		name    string
+		logFile string
+		want    string
+	}{
+		{name: "log suffix", logFile: "/var/log/model-proxy.log", want: "/var/log/model-proxy.pid"},
+		{name: "non-log suffix", logFile: "/var/run/model-proxy", want: "/var/run/model-proxy.pid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serve.PidFilePath(tc.logFile); got != tc.want {
+				t.Fatalf("PidFilePath(%q) = %q, want %q", tc.logFile, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenLogFileCreatesParentAndAppends(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "model-proxy.log")
+
+	first, err := serve.OpenLogFile(path)
+	if err != nil {
+		t.Fatalf("OpenLogFile(first): %v", err)
+	}
+	if _, err := first.WriteString("first\n"); err != nil {
+		first.Close()
+		t.Fatalf("write first log: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first log: %v", err)
+	}
+
+	second, err := serve.OpenLogFile(path)
+	if err != nil {
+		t.Fatalf("OpenLogFile(second): %v", err)
+	}
+	if _, err := second.WriteString("second\n"); err != nil {
+		second.Close()
+		t.Fatalf("write second log: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("close second log: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if want := "first\nsecond\n"; string(got) != want {
+		t.Fatalf("log content = %q, want %q", got, want)
+	}
+}
+
+func TestWritePidFileExactContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "model-proxy.pid")
+	if err := serve.WritePidFile(path, 4242); err != nil {
+		t.Fatalf("WritePidFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read pid file: %v", err)
+	}
+	if want := "4242\n"; string(got) != want {
+		t.Fatalf("pid file content = %q, want %q", got, want)
+	}
+}
+
+func TestDaemonizeRefusesSecondDaemon(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "model-proxy.log")
+	pidFile := serve.PidFilePath(logFile)
+	if err := serve.WritePidFile(pidFile, os.Getpid()); err != nil {
+		t.Fatalf("write live pid: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	loadCalls := 0
+	err := serve.Daemonize(serve.DaemonEnv{
+		LoadConfig: func(path string) (*configdomain.Config, error) {
+			loadCalls++
+			if path != configPath {
+				t.Fatalf("LoadConfig path = %q, want %q", path, configPath)
+			}
+			return &configdomain.Config{LogFile: logFile}, nil
+		},
+		// An invalid executable is deliberate: the live-pid guard must return
+		// before any child-process launch is attempted.
+		Executable: filepath.Join(dir, "must-not-execute"),
+	}, serve.Args{Config: configPath})
+	if err == nil {
+		t.Fatal("Daemonize returned nil, want already-running error")
+	}
+	wantPID := os.Getpid()
+	if !strings.Contains(err.Error(), "already running") || !strings.Contains(err.Error(), fmt.Sprintf("pid=%d", wantPID)) {
+		t.Fatalf("Daemonize error = %q, want already-running error with pid %d", err, wantPID)
+	}
+	if loadCalls != 1 {
+		t.Fatalf("LoadConfig calls = %d, want 1", loadCalls)
+	}
+	if _, err := os.Stat(logFile); !os.IsNotExist(err) {
+		t.Fatalf("log file was opened before live-pid guard: stat err=%v", err)
+	}
+	got, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read guarded pid file: %v", err)
+	}
+	if want := fmt.Sprintf("%d\n", wantPID); string(got) != want {
+		t.Fatalf("guarded pid file = %q, want %q", got, want)
 	}
 }

@@ -14,8 +14,8 @@ import (
 	"model-proxy/internal/fusion"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
-	"model-proxy/internal/shadow"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/shadow"
 )
 
 func NewProxy(cfg *Config) *Proxy {

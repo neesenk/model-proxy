@@ -284,6 +284,21 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 			t.Errorf("a→o stream missing %q:\n%s", want, s3)
 		}
 	}
+
+	// Some Anthropic-compatible vendors report provisional/zero input usage at
+	// message_start and the authoritative input/cache split at message_delta.
+	// Present terminal fields (including explicit zero) replace the start value;
+	// omitted terminal fields retain it.
+	revTerminal := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":90,\"cache_read_input_tokens\":1,\"cache_creation_input_tokens\":2}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":93,\"output_tokens\":4}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	out4, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(revTerminal), "c"))
+	s4 := string(out4)
+	for _, want := range []string{`"prompt_tokens":95`, `"completion_tokens":4`, `"total_tokens":99`, `"prompt_tokens_details":{"cached_tokens":93}`} {
+		if !strings.Contains(s4, want) {
+			t.Errorf("a→o terminal usage override missing %q:\n%s", want, s4)
+		}
+	}
 }
 
 // Developer is a first-class Chat role and maps to Anthropic's top-level

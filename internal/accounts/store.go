@@ -218,6 +218,13 @@ const (
 )
 
 func (s Store) WithLock(name string, fn func() error) error {
+	return s.withLock(name, fn, time.Sleep)
+}
+
+// withLock is the lock acquisition core. wait is supplied by the production
+// wrapper as time.Sleep; accepting it here lets concurrency tests observe a
+// real contention point and release the holder without timing assumptions.
+func (s Store) withLock(name string, fn func() error, wait func(time.Duration)) error {
 	lockPath := s.PoolPath(name) + ".lock"
 	// Ensure the parent (~/.model-proxy) exists before the O_CREATE below —
 	// O_CREATE does not create parent dirs, and on a first-ever login savePool
@@ -256,7 +263,7 @@ func (s Store) WithLock(name string, fn func() error) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("pool %s locked by another process after %s; if stale remove %s", name, poolLockMaxWait, lockPath)
 		}
-		time.Sleep(poolLockRetry)
+		wait(poolLockRetry)
 	}
 	defer os.Remove(lockPath)
 	return fn()

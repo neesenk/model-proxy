@@ -11,7 +11,7 @@
 
 ## 请求与流
 
-5. 上游请求使用 `http.NewRequestWithContext(r.Context(), ...)`。
+5. 上游请求使用 `http.NewRequestWithContext(r.Context(), ...)`，并受 `upstream_timeout` 限制。
 6. `flushCopy` 在客户端写错误后必须立即停止读取上游。
 7. 响应转换必须位于 logger/scanner/cache 内层，让它们看到客户端协议。
 8. 非流式转换必须在 WriteHeader 前完成，失败时 fail-closed。
@@ -25,7 +25,7 @@
 
 ## 配置
 
-13. 新顶层配置字段必须在 `internal/config` 同时加入 `Config`、`rawConfig` 和拷贝段。yaml.v3 会静默忽略未知键，因此必须增加该包的 YAML 加载测试，不能只直接构造 Config；根包不承载字段或默认值逻辑（`config_compat.go` 已删除）。
+13. 新顶层配置字段必须六步同步：`internal/config.Config` → `rawConfig` → 拷贝段 → validate → 该包的 YAML 加载测试（yaml.v3 会静默忽略未知键，不能只直接构造 Config）→ 示例与文档（`config.yaml` 模板/README）。根包不承载字段或默认值逻辑（`config_compat.go` 已删除）。
 14. duration 字段除明确允许的 `retry_wait: "0"` 外应验证为正数；任何允许零/负数的字段都要写入契约。
 15. `BillingClass` iota 不是调度顺序，必须通过独立 `tierRank` 映射 `plan < unknown < payg`。
 
@@ -52,8 +52,8 @@
     `serveAssembly` 拥有 serve 与前台/worker signal、HTTP 生命周期；
     `applicationRuntime` 构造/关闭 Proxy，启动运行时服务，装配 mux/Web，投影 reload
     并交出 transport task。daemon/supervisor signal 与 pid/probe 归
-    `internal/cli/serve/supervisor.go`，平台 companion（`detach_unix.go` /
-    `detach_windows.go`）只提供 child detach 属性，HTTP drain primitive
+    `internal/cli/serve/supervisor.go`，平台 companion（`internal/cli/serve/detach_unix.go` /
+    `internal/cli/serve/detach_windows.go`）只提供 child detach 属性，HTTP drain primitive
     留在 `internal/cli/serve/shutdown.go`；不要恢复第二个顶层分发器。
 
 ## 日志和持久化

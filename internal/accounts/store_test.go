@@ -464,38 +464,91 @@ func TestWithPoolLock_StaleSteal(t *testing.T) {
 	}
 }
 
-// TestWithPoolLock_FreshLockIsBusy asserts a YOUNG lockfile is NOT stolen —
-// withPoolLock waits and eventually reports contention rather than clobbering a
-// live holder. Uses a short-lived holder goroutine to confirm the wait succeeds
-// when the holder releases promptly (distinguishing "busy, then acquired" from a
-// spurious steal). The steal path is covered by TestWithPoolLock_StaleSteal.
+// TestWithPoolLock_FreshLockIsBusy asserts a live holder is not stolen. Both
+// contenders use the real O_EXCL lock path; the wait seam only pauses the
+// waiter after it has observed contention. The holder's WithLock must return
+// (and therefore run its deferred lockfile removal) before the waiter retries.
 func TestWithPoolLock_FreshLockIsBusy(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestStore(t, dir)
 	const name = "volcengine"
 	lockPath := store.PoolPath(name) + ".lock"
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	// Pre-create a fresh lockfile held by "another process", mtime = now.
-	if err := os.WriteFile(lockPath, []byte("99999\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
-	// A concurrent goroutine simulates the other process releasing the lock
-	// after 80ms — well within poolLockRetry cadence, so withPoolLock should
-	// observe the free slot and acquire rather than erroring.
+	holderEntered := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderResult := make(chan error, 1)
+	var releaseHolderOnce sync.Once
+	t.Cleanup(func() { releaseHolderOnce.Do(func() { close(releaseHolder) }) })
 	go func() {
-		time.Sleep(80 * time.Millisecond)
-		os.Remove(lockPath)
+		holderResult <- store.WithLock(name, func() error {
+			close(holderEntered)
+			<-releaseHolder
+			return nil
+		})
 	}()
-
-	ran := false
-	if err := store.WithLock(name, func() error { ran = true; return nil }); err != nil {
-		t.Fatalf("withPoolLock should have waited + acquired a freshly-freed lock: %v", err)
+	select {
+	case <-holderEntered:
+	case <-time.After(time.Second):
+		t.Fatal("holder did not acquire the fresh lock")
 	}
-	if !ran {
-		t.Fatal("fn did not run after waiting for the holder to release")
+
+	waiterBlocked := make(chan struct{}, 1)
+	retryWaiter := make(chan struct{})
+	callbackEntered := make(chan struct{})
+	waiterResult := make(chan error, 1)
+	var retryWaiterOnce sync.Once
+	t.Cleanup(func() { retryWaiterOnce.Do(func() { close(retryWaiter) }) })
+	go func() {
+		waiterResult <- store.withLock(name, func() error {
+			close(callbackEntered)
+			return nil
+		}, func(time.Duration) {
+			select {
+			case waiterBlocked <- struct{}{}:
+			default:
+			}
+			<-retryWaiter
+		})
+	}()
+	select {
+	case <-waiterBlocked:
+	case err := <-waiterResult:
+		t.Fatalf("waiter returned instead of observing the live holder: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not reach the contention wait point")
+	}
+	select {
+	case <-callbackEntered:
+		t.Fatal("waiter callback entered while the holder still owned the lock")
+	default:
+	}
+
+	releaseHolderOnce.Do(func() { close(releaseHolder) })
+	select {
+	case err := <-holderResult:
+		if err != nil {
+			t.Fatalf("holder WithLock: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("holder did not finish releasing the lock")
+	}
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("holder returned before removing its lockfile: %v", err)
+	}
+
+	retryWaiterOnce.Do(func() { close(retryWaiter) })
+	select {
+	case err := <-waiterResult:
+		if err != nil {
+			t.Fatalf("waiter WithLock after holder release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not acquire after holder release")
+	}
+	select {
+	case <-callbackEntered:
+	default:
+		t.Fatal("callback did not run after holder release")
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("lockfile not cleaned up: %v", err)

@@ -1,25 +1,29 @@
 package app
 
 // live_e2e_test.go — LIVE end-to-end tests against REAL upstreams, using the
-// real ./config.yaml and login-managed credentials (~/.model-proxy). These
-// verify protocol conversion against real vendor dialects that mocks cannot
-// cover (thinking dialects, vision gating, custom tools).
+// repository-root config.yaml (or MODEL_PROXY_LIVE_CONFIG) and login-managed
+// credentials (~/.model-proxy). These verify protocol conversion against real
+// vendor dialects that mocks cannot cover (thinking dialects, vision gating,
+// custom tools).
 //
 // ALL tests here are skipped unless MODEL_PROXY_LIVE=1 is set — a plain
 // `go test ./...` stays hermetic. Run with:
 //
-//	MODEL_PROXY_LIVE=1 go test -run TestLive -count=1 -timeout 10m .
+//	MODEL_PROXY_LIVE=1 go test -run 'TestLive_' -count=1 -timeout 10m ./internal/app
 //
 // Cost note: every test makes real (tiny) paid calls — prompts are minimal.
 // Sensitive data discipline: response bodies are NEVER logged in full;
 // failures print at most 500 chars.
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
-	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,22 +39,110 @@ const liveTimeout = 60 * time.Second
 // the real ~/.model-proxy credentials, so they restore it.
 var realHome, _ = os.UserHomeDir()
 
-// liveProxy builds a Proxy from the REAL ./config.yaml with Routes replaced
-// by the given single-target routes (no failover noise, explicit protocol:
-// for determinism — no wirecap verdict involved). Skips when the config is
-// missing, the provider is absent, or no credential can build its impl.
-func liveProxy(t *testing.T, routes map[string][]RouteTarget, needProviders ...string) (*httptest.Server, *Proxy) {
+const liveConfigEnv = "MODEL_PROXY_LIVE_CONFIG"
+
+// liveRepositoryRoot finds the checkout root from this source file. Falling
+// back to the process working directory keeps the helper usable with builds
+// that trim source paths, while walking upward makes it independent of the
+// package working directory selected by `go test`.
+func liveRepositoryRoot() (string, error) {
+	var starts []string
+	if _, source, _, ok := runtime.Caller(0); ok {
+		starts = append(starts, filepath.Dir(source))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		starts = append(starts, wd)
+	}
+	for _, start := range starts {
+		root, ok := findLiveModuleRoot(start)
+		if ok {
+			return root, nil
+		}
+	}
+	return "", fmt.Errorf("cannot locate repository root containing go.mod")
+}
+
+func findLiveModuleRoot(start string) (string, bool) {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return "", false
+	}
+	for {
+		if info, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !info.IsDir() {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// liveConfigPath resolves the live configuration independently of the test
+// package's working directory. An absolute override is used verbatim; a
+// relative override is interpreted from the repository root.
+func liveConfigPath() (string, error) {
+	override := os.Getenv(liveConfigEnv)
+	if override != "" && filepath.IsAbs(override) {
+		return filepath.Clean(override), nil
+	}
+	root, err := liveRepositoryRoot()
+	if err != nil {
+		return "", err
+	}
+	if override != "" {
+		return filepath.Join(root, override), nil
+	}
+	return filepath.Join(root, "config.yaml"), nil
+}
+
+// liveUseRealHome restores login-managed credentials after package TestMain
+// redirects HOME. Live tests are intentionally sequential because HOME is
+// process-global.
+func liveUseRealHome(t *testing.T) {
 	t.Helper()
 	if realHome == "" {
 		t.Skip("live: cannot determine real home directory")
 	}
 	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", realHome)
-	t.Cleanup(func() { os.Setenv("HOME", oldHome) })
-	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
-	if err != nil {
-		t.Skipf("live: cannot load ./config.yaml: %v", err)
+	if oldHome == realHome {
+		return
 	}
+	if err := os.Setenv("HOME", realHome); err != nil {
+		t.Fatalf("live: restore HOME: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Setenv("HOME", oldHome) })
+}
+
+// liveConfig is the single entry point for live-test configuration. Once the
+// live gate is explicitly enabled, a missing or unreadable configuration is a
+// test failure rather than a skip: otherwise the whole E2E suite can go green
+// without exercising an upstream.
+func liveConfig(t *testing.T) *Config {
+	t.Helper()
+	if os.Getenv("MODEL_PROXY_LIVE") != "1" {
+		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
+	}
+	liveUseRealHome(t)
+	path, err := liveConfigPath()
+	if err != nil {
+		t.Fatalf("live: resolve config path: %v", err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("live: load config %q: %v", path, err)
+	}
+	return cfg
+}
+
+// liveProxy builds a Proxy from the live config with Routes replaced
+// by the given single-target routes (no failover noise, explicit protocol:
+// for determinism — no wirecap verdict involved). Skips when the provider is
+// absent or no credential can build its impl.
+func liveProxy(t *testing.T, cfg *Config, routes map[string][]RouteTarget, needProviders ...string) (*httptest.Server, *Proxy) {
+	t.Helper()
+	liveUseRealHome(t)
 	for _, name := range needProviders {
 		if _, ok := cfg.Providers[name]; !ok {
 			t.Skipf("live: provider %q not in config", name)
@@ -128,7 +220,67 @@ func liveResponsesTurn(t *testing.T, srv *httptest.Server, body string) string {
 	t.Helper()
 	status, raw := livePost(t, srv, "/v1/responses", body)
 	liveStatusOK(t, status, raw)
+	liveRequireResponsesCompleted(t, raw)
 	return raw
+}
+
+// liveRequireResponsesCompleted rejects every non-clean Responses terminal.
+// These live cases use generous output limits and are intended to prove a full
+// round trip, so an incomplete/failed/error terminal is a regression rather
+// than an acceptable HTTP-200 response.
+func liveRequireResponsesCompleted(t *testing.T, raw string) []sseEvent {
+	t.Helper()
+	events := parseSSE(raw)
+	if err := validateLiveResponsesCompleted(events); err != nil {
+		t.Fatalf("live: %v:\n%s", err, liveExcerpt(raw))
+	}
+	return events
+}
+
+func validateLiveResponsesCompleted(events []sseEvent) error {
+	completed := sseCount(events, "response.completed")
+	incomplete := sseCount(events, "response.incomplete")
+	failed := sseCount(events, "response.failed") + sseCount(events, "response.cancelled")
+	if completed != 1 || incomplete != 0 || failed != 0 {
+		return fmt.Errorf("Responses terminals completed/incomplete/failed = %d/%d/%d, want 1/0/0",
+			completed, incomplete, failed)
+	}
+	for _, event := range events {
+		eventType := sseEventType(event)
+		if eventType == "error" {
+			return fmt.Errorf("unexpected SSE error event")
+		}
+		var body map[string]any
+		if err := json.Unmarshal([]byte(event.data), &body); err != nil {
+			if eventType == "response.completed" {
+				return fmt.Errorf("malformed response.completed payload: %w", err)
+			}
+			continue
+		}
+		if body["error"] != nil {
+			return fmt.Errorf("unexpected SSE error payload")
+		}
+		response := asMap(body["response"])
+		if eventType == "response.completed" && response == nil {
+			return fmt.Errorf("response.completed is missing nested response object")
+		}
+		if response == nil {
+			continue
+		}
+		if response["error"] != nil {
+			return fmt.Errorf("unexpected nested response.error payload")
+		}
+		if eventType == "response.completed" {
+			status, present := response["status"]
+			if !present {
+				return fmt.Errorf("response.completed is missing nested response.status")
+			}
+			if strOpt(status) != "completed" {
+				return fmt.Errorf("response.completed nested status = %q, want completed", strOpt(status))
+			}
+		}
+	}
+	return nil
 }
 
 // liveWeatherTool is the shared function-tool fixture (JSON in a Go string).
@@ -140,9 +292,6 @@ const liveWeatherTool = `{"type":"function","name":"get_weather","description":"
 // placeholder reasoning_content fix (deepseek: "reasoning_content must be
 // passed back").
 func TestLive_ResponsesToChat_ToolRoundTrip(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
 	providers := []struct{ name, prefer string }{
 		{"deepseek", "deepseek-v4-pro"},
 		{"zhipu", "glm-4.7"},
@@ -151,12 +300,9 @@ func TestLive_ResponsesToChat_ToolRoundTrip(t *testing.T) {
 	}
 	for _, tc := range providers {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadConfig(cliframework.ConfigPath(nil))
-			if err != nil {
-				t.Skipf("live: %v", err)
-			}
+			cfg := liveConfig(t)
 			model := liveModel(t, cfg, tc.name, tc.prefer)
-			srv, _ := liveProxy(t, map[string][]RouteTarget{
+			srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
 				"live-m": {{Provider: tc.name, Model: model, Protocol: "openai"}},
 			}, tc.name)
 			defer srv.Close()
@@ -167,9 +313,7 @@ func TestLive_ResponsesToChat_ToolRoundTrip(t *testing.T) {
 				`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"What is the weather in Paris right now? You MUST call the get_weather tool to answer."}]}]}`
 			raw1 := liveResponsesTurn(t, srv, turn1)
 			callID, callName, callArgs := liveExtractFunctionCall(t, raw1)
-			if callName == "" {
-				t.Fatalf("live: no function_call in turn 1 stream:\n%s", liveExcerpt(raw1))
-			}
+			liveRequireWeatherCall(t, callID, callName, callArgs, raw1)
 
 			// Turn 2: feed the call + its output back (the placeholder-reasoning path).
 			turn2 := `{"model":"live-m","stream":true,"max_output_tokens":512,` +
@@ -178,10 +322,7 @@ func TestLive_ResponsesToChat_ToolRoundTrip(t *testing.T) {
 				`{"type":"message","role":"user","content":[{"type":"input_text","text":"What is the weather in Paris right now? You MUST call the get_weather tool to answer."}]},` +
 				`{"type":"function_call","call_id":"` + callID + `","name":"` + callName + `","arguments":` + mustJSONStr(t, callArgs) + `},` +
 				`{"type":"function_call_output","call_id":"` + callID + `","output":"sunny, 22°C"}]}`
-			raw2 := liveResponsesTurn(t, srv, turn2)
-			if !strings.Contains(raw2, "response.completed") && !strings.Contains(raw2, "response.incomplete") {
-				t.Fatalf("live: turn 2 has no terminal event:\n%s", liveExcerpt(raw2))
-			}
+			liveResponsesTurn(t, srv, turn2)
 		})
 	}
 }
@@ -206,7 +347,8 @@ func liveExtractFunctionCall(t *testing.T, raw string) (callID, name, arguments 
 		}
 		// response.completed → response.Output items.
 		if resp := asMap(m["response"]); resp != nil {
-			for _, it := range resp["output"].([]any) {
+			items, _ := resp["output"].([]any)
+			for _, it := range items {
 				item := asMap(it)
 				if strOpt(item["type"]) == "function_call" {
 					callID = firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]), callID)
@@ -218,8 +360,66 @@ func liveExtractFunctionCall(t *testing.T, raw string) (callID, name, arguments 
 			}
 		}
 	}
+	return
+}
+
+func liveRequireWeatherCall(t *testing.T, callID, name, arguments, raw string) {
+	t.Helper()
+	if err := validateLiveWeatherCall(callID, name, arguments); err != nil {
+		t.Fatalf("live: %v:\n%s", err, liveExcerpt(raw))
+	}
+}
+
+func validateLiveWeatherCall(callID, name, arguments string) error {
+	if callID == "" {
+		return fmt.Errorf("weather call id is empty")
+	}
+	if name == "" {
+		return fmt.Errorf("weather call name is empty")
+	}
 	if arguments == "" {
-		arguments = `{"city":"Paris"}`
+		return fmt.Errorf("weather call arguments are empty")
+	}
+	if name != "get_weather" {
+		return fmt.Errorf("tool name = %q, want get_weather", name)
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return fmt.Errorf("tool arguments are not a valid JSON object: %w", err)
+	}
+	city, _ := args["city"].(string)
+	if city != "Paris" {
+		return fmt.Errorf("tool city = %q, want Paris", city)
+	}
+	return nil
+}
+
+func liveExtractCustomToolCall(t *testing.T, raw string) (callID, name, input string) {
+	t.Helper()
+	var inputDelta strings.Builder
+	for _, ev := range parseSSE(raw) {
+		if ev.data == "[DONE]" {
+			continue
+		}
+		m := unmarshalMap(t, []byte(ev.data))
+		if item := asMap(m["item"]); item != nil && strOpt(item["type"]) == "custom_tool_call" {
+			callID = firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]), callID)
+			name = firstNonEmpty(strOpt(item["name"]), name)
+			if value := strOpt(item["input"]); value != "" {
+				input = value
+			}
+		}
+		switch sseEventType(ev) {
+		case "response.custom_tool_call_input.delta":
+			inputDelta.WriteString(strOpt(m["delta"]))
+		case "response.custom_tool_call_input.done":
+			if value := strOpt(m["input"]); value != "" {
+				input = value
+			}
+		}
+	}
+	if input == "" {
+		input = inputDelta.String()
 	}
 	return
 }
@@ -227,15 +427,9 @@ func liveExtractFunctionCall(t *testing.T, raw string) (callID, name, arguments 
 // TestLive_ResponsesToChat_CustomTool: a custom/freeform tool wraps to
 // {input: string} and unwraps back to custom_tool_call in the stream.
 func TestLive_ResponsesToChat_CustomTool(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
-	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
-	if err != nil {
-		t.Skipf("live: %v", err)
-	}
+	cfg := liveConfig(t)
 	model := liveModel(t, cfg, "deepseek", "deepseek-v4-pro")
-	srv, _ := liveProxy(t, map[string][]RouteTarget{
+	srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
 		"live-m": {{Provider: "deepseek", Model: model, Protocol: "openai"}},
 	}, "deepseek")
 	defer srv.Close()
@@ -244,19 +438,13 @@ func TestLive_ResponsesToChat_CustomTool(t *testing.T) {
 		`"tools":[{"type":"custom","name":"apply_patch","description":"Apply a code patch to a file"}],` +
 		`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Create hello.txt containing just the word hi. You MUST use the apply_patch tool."}]}]}`
 	raw1 := liveResponsesTurn(t, srv, turn1)
-	if !strings.Contains(raw1, "custom_tool_call") {
-		t.Fatalf("live: no custom_tool_call in stream:\n%s", liveExcerpt(raw1))
+	callID, callName, callInput := liveExtractCustomToolCall(t, raw1)
+	if callID == "" || callName == "" || callInput == "" {
+		t.Fatalf("live: incomplete custom call id/name/input = %q/%q/%q:\n%s",
+			callID, callName, callInput, liveExcerpt(raw1))
 	}
-	callID := ""
-	for _, ev := range parseSSE(raw1) {
-		if ev.data == "[DONE]" {
-			continue
-		}
-		m := unmarshalMap(t, []byte(ev.data))
-		if item := asMap(m["item"]); item != nil && strOpt(item["type"]) == "custom_tool_call" {
-			callID = firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))
-			break
-		}
+	if callName != "apply_patch" {
+		t.Fatalf("live: custom tool name = %q, want apply_patch", callName)
 	}
 
 	// Turn 2: custom_tool_call + custom_tool_call_output in history.
@@ -264,27 +452,18 @@ func TestLive_ResponsesToChat_CustomTool(t *testing.T) {
 		`"tools":[{"type":"custom","name":"apply_patch","description":"Apply a code patch to a file"}],` +
 		`"input":[` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"Create hello.txt containing just the word hi. You MUST use the apply_patch tool."}]},` +
-		`{"type":"custom_tool_call","call_id":"` + callID + `","name":"apply_patch","input":"*** Begin Patch\n*** Add File: hello.txt\n+hi\n*** End Patch"},` +
+		`{"type":"custom_tool_call","call_id":"` + callID + `","name":"` + callName + `","input":` + mustJSONStr(t, callInput) + `},` +
 		`{"type":"custom_tool_call_output","call_id":"` + callID + `","output":"patch applied"}]}`
-	raw2 := liveResponsesTurn(t, srv, turn2)
-	if !strings.Contains(raw2, "response.completed") && !strings.Contains(raw2, "response.incomplete") {
-		t.Fatalf("live: turn 2 has no terminal event:\n%s", liveExcerpt(raw2))
-	}
+	liveResponsesTurn(t, srv, turn2)
 }
 
 // TestLive_AnthropicToChat_MediaVisionGate: a tool_result image in history
 // must not 400 a text-only chat model (deepseek 400d "unknown variant
 // image_url" before the vision gate) — the placeholder text rides instead.
 func TestLive_AnthropicToChat_MediaVisionGate(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
-	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
-	if err != nil {
-		t.Skipf("live: %v", err)
-	}
+	cfg := liveConfig(t)
 	model := liveModel(t, cfg, "deepseek", "deepseek-v4-pro")
-	srv, p := liveProxy(t, map[string][]RouteTarget{
+	srv, p := liveProxy(t, cfg, map[string][]RouteTarget{
 		"live-m": {{Provider: "deepseek", Model: model, Protocol: "openai"}},
 	}, "deepseek")
 	defer srv.Close()
@@ -316,19 +495,13 @@ func TestLive_AnthropicToChat_MediaVisionGate(t *testing.T) {
 // TestLive_AnthropicPassthrough: sanity control — anthropic client →
 // anthropic backend (zhipu anthropic_base_url), byte-level passthrough works.
 func TestLive_AnthropicPassthrough(t *testing.T) {
-	if os.Getenv("MODEL_PROXY_LIVE") == "" {
-		t.Skip("live tests disabled (set MODEL_PROXY_LIVE=1)")
-	}
-	cfg, err := LoadConfig(cliframework.ConfigPath(nil))
-	if err != nil {
-		t.Skipf("live: %v", err)
-	}
+	cfg := liveConfig(t)
 	prov, ok := cfg.Providers["zhipu"]
 	if !ok || prov.AnthropicBaseURL == "" {
 		t.Skip("live: zhipu has no anthropic_base_url")
 	}
 	model := liveModel(t, cfg, "zhipu", "glm-4.7")
-	srv, _ := liveProxy(t, map[string][]RouteTarget{
+	srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
 		"live-m": {{Provider: "zhipu", Model: model, Protocol: "anthropic"}},
 	}, "zhipu")
 	defer srv.Close()

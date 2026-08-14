@@ -110,7 +110,10 @@ func TestParseZhipuQuota(t *testing.T) {
 func TestParseZhipuQuota_NotZhipu(t *testing.T) {
 	// Non-zhipu JSON -> returns nil snapshot (caller falls back to model list).
 	s, err := ParseZhipuQuota([]byte(`{"object":"list","data":[]}`), "")
-	if err == nil && s != nil {
+	if err != nil {
+		t.Fatalf("ParseZhipuQuota(non-zhipu) error = %v, want nil", err)
+	}
+	if s != nil {
 		t.Fatalf("expected nil snapshot for non-zhipu body, got %+v", s)
 	}
 }

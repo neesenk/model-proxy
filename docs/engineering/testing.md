@@ -21,9 +21,9 @@ gofmt -l .
 scripts/cover.sh
 ```
 
-`scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate。底层 `go test` 任一 package 失败、缺少预期 package 输出或缺少覆盖率百分比时，脚本必须非零退出，已有或不完整的 `cov.out` 不得形成假绿。两类合法例外计入预期输出但不参与百分比 gate：无测试文件的包（coverage 模式下打印裸 `coverage: 0.0%` 行，如根 package main）和无可覆盖语句的纯测试包（`[no statements]`，如 `internal/archtest`）。另有若干 package 覆盖率历史低于 80%（gate 修复前从未绿过），以 `gap` 行展示但不判失败，豁免清单维护在 `scripts/cover.sh` 的 `exemptions` 变量中；提升覆盖率后应从清单移除。
+`scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate。底层 `go test` 任一 package 失败、缺少预期 package 输出或缺少覆盖率百分比时，脚本必须非零退出，已有或不完整的 `cov.out` 不得形成假绿。无可覆盖语句的纯测试包（`[no statements]`，如 `internal/archtest`）是合法例外；有生产 statements 但无测试文件的包会打印裸 `coverage: 0.0%` 行，默认必须判失败，只有组合入口等确实无需包内单测的 package 才能显式列入 `scripts/cover.sh` 的 `no_test_exemptions`（当前仅根 package main）。历史上尚未达到 80% 的 package 不再使用可降到 0% 的 blanket exemption，而在 `coverage_floor_for` 中逐包记录明确 floor；低于 floor 必须失败，达到 floor 但低于 80% 显示 `gap`，新增可靠测试后同步提高 floor。`scripts/cover.sh --self-test` 校验 coverage 行解析、普通 package 的 80% 合同，以及所有历史 floor 都拒绝 0% 和 `floor - 0.1%`。
 
-daemon process、浏览器 OAuth/SSO、交互 stdin 和真实上游 FetchModels 属于外部 I/O 路径，可通过集成验证覆盖，不强制全部单元化。
+普通 package coverage 是包内测试视角；composition/integration 测试对 owner package 的执行归因需要按需使用 `go test -coverpkg=<owner packages> <test packages>` 复核，不能用跨包执行率替代逐包 floor。daemon process、浏览器 OAuth/SSO、交互 stdin 和真实上游 FetchModels 属于外部 I/O 路径；其控制状态机必须通过包内窄接口、可取消等待或受控 subprocess/fake 验证，不得为 coverage 向外暴露无约束 production hook，也不得向真实用户进程发送信号。
 
 ## 构建验证
 
@@ -79,6 +79,10 @@ race-clean 只是必要条件。并发测试还必须断言功能不变量，例
 
 异步测试优先使用 channel、barrier、context deadline 或可观察状态同步；不得以固定 `Sleep` 证明异步工作“已经完成”或“没有发生”。流式读取必须设置 deadline，并同时断言读取错误、字节数和内容。
 
+### 状态机
+
+新状态机至少覆盖成功、硬失败、限频、取消和 reload/重启。
+
 ### 模块归属
 
 叶子包的纯行为测试与实现放在同一模块目录；composition root 只保留跨模块行为和
@@ -98,7 +102,7 @@ forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为�
 领域拆分，并保持原测试名、断言与 cleanup 语义。
 
 Provider 的 `Usage`、`Quota`、fetch/parse、认证和显示格式测试直接归
-`provider/*_test.go`；根包只验证 YAML/账号池/build dispatch/CLI 输出等组合行为，
+`internal/provider/*_test.go`；根包只验证 YAML/账号池/build dispatch/CLI 输出等组合行为，
 不得在 `_test.go` 重建已删除的 `show*Usage` / `fetch*Quota` 兼容函数后重复测试。
 
 ### 架构 DAG 与交互合同
@@ -219,7 +223,7 @@ forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通�
 
 协议转换（`internal/protocol/convert*.go`）在普通单测之外有三层补充覆盖，修改转换器时按需运行：
 
-1. **黄金文件回放**（`internal/protocol/convert_golden_test.go` + `testdata/wire/<proto>_<provider|场景>.sse`）：目录下每个原始 SSE 流（按文件名前缀选源协议）喂给所有以该协议为源的转换器，断言不变量而非精确输出——不 panic、输出可解析为 SSE 帧、终态事件恰好一个、responses 目标 `output_item.added/done` 按 id+type 配对（failed 终态豁免）、无空 data 帧；以及**场景存活断言**——输入流真实携带 tool call 或 reasoning 时，输出必须保留目标协议的对应形状。断言在压缩空白后匹配（zhipu 的 SSE JSON 带空格），标记精确化以防 `server_tool_use`、空 `tool_calls:[]` 误伤。种子为手写高保真流；真实上游流用 `model-proxy wire record <provider>` 录制进同一目录（每端点 text/_tool/_thinking 三场景；凭据来自 login，提交前人工审查脱敏，见 CLI.md §17）。
+1. **黄金文件回放**（`internal/protocol/convert_golden_test.go` + `testdata/wire/<proto>_<provider|场景>.sse`）：目录下每个原始 SSE 流（按文件名前缀选源协议）喂给所有以该协议为源的转换器，断言不变量而非精确输出——不 panic、输出可解析为 SSE 帧、终态事件恰好一个、responses 目标 `output_item.added/done` 按 id+type 配对（failed 终态豁免）、无空 data 帧；以及**场景存活与语义断言**——输入流真实携带 tool call 或 reasoning 时，输出必须保留目标协议的对应形状；输入含非空正文或 reasoning 文本时，目标协议必须逐字保留；输入含正数 terminal usage 时，按各协议的 inclusive input/cache 口径归一后 input/output 必须精确相等，不允许按转换方向整体豁免。形状断言在压缩空白后匹配（zhipu 的 SSE JSON 带空格），标记精确化以防 `server_tool_use`、空 `tool_calls:[]` 误伤。种子为手写高保真流；真实上游流用 `model-proxy wire record <provider>` 录制进同一目录（每端点 text/_tool/_thinking 三场景；凭据来自 login，提交前人工审查脱敏，见 CLI.md §17）。
 2. **Fuzz**（`internal/protocol/convert_fuzz_test.go` + `internal/protocol/testdata/fuzz/`）：`FuzzConvertRequest`（12 个请求/响应 converter 不 panic）、`FuzzConvertSSE`（6 个流式 transformer 不 panic、输出有界 `128×len+16KiB`，且终态唯一、clean/error 不混发、Responses added/done 配对）、`FuzzParseToolArgs`（确定性）、`FuzzSanitizeToolUseID`（确定性 + 字符集 `^[a-zA-Z0-9_-]+$`；空 id 的计数器占位是设计例外）。普通 `go test` 跑种子语料；真 fuzz：
 
    ```bash
@@ -242,12 +246,13 @@ Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会从协议包读取�
 
 ## live e2e（真实上游，默认跳过）
 
-`live_e2e_test.go` 用**真实 `./config.yaml` 和 login 管理的真实凭据**（`~/.model-proxy`）端到端验证协议转换在真实 vendor 方言上的表现（mock 覆盖不了的差异：thinking 方言、视觉门控、custom 工具、占位 reasoning_content）。
+`internal/app/live_e2e_test.go` 用**仓库根 `config.yaml`（可由 `MODEL_PROXY_LIVE_CONFIG` 覆盖）和 login 管理的真实凭据**（`~/.model-proxy`）端到端验证协议转换在真实 vendor 方言上的表现（mock 覆盖不了的差异：thinking 方言、视觉门控、custom 工具、占位 reasoning_content）。override 的绝对路径原样使用，相对路径按仓库根解析，不依赖 `go test` 的 package working directory。
 
-- 运行：`MODEL_PROXY_LIVE=1 go test -run 'TestLive_' -count=1 -timeout 10m .`。不设 `MODEL_PROXY_LIVE` 时全部 `t.Skip`，常规 `go test ./...` 保持 hermetic。
-- 跳过逻辑：config/provider 缺失、未 login（无 runtime impl）→ skip；上游 429 / zhipu 资源包 1113 → skip（账号/资源问题，不是转换缺陷，注释区分）。其他 4xx/5xx 如实 FAIL。
+- 运行：`MODEL_PROXY_LIVE=1 go test -run 'TestLive_' -count=1 -timeout 10m ./internal/app`。不设 `MODEL_PROXY_LIVE=1` 时全部 `t.Skip`，常规 `go test ./...` 保持 hermetic。
+- 失败/跳过逻辑：显式启用 live 后 config 路径无法解析、文件缺失或内容无效 → FAIL（禁止整套假绿）；provider 缺失、未 login（无 runtime impl）→ skip；上游 429 / zhipu 资源包 1113 → skip（账号/资源问题，不是转换缺陷，注释区分）。其他 4xx/5xx 如实 FAIL。
+- Responses round-trip 必须统一解析 SSE，并断言恰有一个 `response.completed`，且 `response.incomplete` / `response.failed` / error 为零；不得用 raw substring 或把 incomplete 当成功。强制工具场景还必须断言 call id/name/arguments 非空、arguments 为合法 JSON 且 `city` 精确为 `Paris`，禁止测试侧补默认参数。转换结果缺 reasoning/signature 等协议字段属于 FAIL，只有上条列出的外部前置条件可 skip。
 - 路由换成测试给定的单目标（显式 `protocol:`，不依赖 wirecap verdict，避免 failover 干扰）；model 缺省取 provider.Models 最后一个（zhipu 旧模型受资源包限制会 429/1113，故取靠后的 glm-4.7）。
-- 包级 TestMain 会把 HOME 重定向到临时目录，live helper 用包级 init 捕获的真实 HOME 还原后再构建 provider。
+- 包级 TestMain 会把 HOME 重定向到临时目录，live helper 用包级 init 捕获的真实 HOME 还原后再构建 provider；配置始终通过上面的显式绝对路径加载。
 - 成本：每个用例都是真实付费调用，prompt 必须极短、max_tokens 给小值（≤512）。
 - 安全：响应 body 不打全量（失败 excerpt ≤500 字符）；禁止输出 API key/token/凭据。
 

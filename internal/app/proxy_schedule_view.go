@@ -6,8 +6,8 @@ import (
 	"sort"
 	"time"
 
-	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/internal/provider"
+	runtimestate "model-proxy/internal/runtime"
 )
 
 // scheduleStatus builds a read-only JSON snapshot of what each route would

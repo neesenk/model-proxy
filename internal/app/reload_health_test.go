@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/internal/provider"
+	runtimestate "model-proxy/internal/runtime"
 )
 
 func writeConfigFile(t *testing.T, body string) string {

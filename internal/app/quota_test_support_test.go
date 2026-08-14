@@ -1,8 +1,8 @@
 package app
 
 import (
-	"model-proxy/internal/runtime"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/runtime"
 )
 
 // newStandaloneQuotaTracker builds a QuotaTracker with an isolated Manager for

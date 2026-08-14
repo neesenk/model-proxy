@@ -188,8 +188,15 @@ func RemoveApikeyAccount(name, providerID, id string) error {
 	})
 }
 
+// oauthAuthFilePath resolves the OAuth credential file from the config-level
+// provider name. Keeping this in one pure helper prevents interactive login
+// implementations from drifting back to provider_id-based filenames.
+func oauthAuthFilePath(homeDir, providerName string) string {
+	return filepath.Join(homeDir, ".model-proxy", providerName+"_oauth_auth.json")
+}
+
 func RunLogin(cfg *configdomain.Config, provName string) error {
-	storePath := filepath.Join(HomeDir(), ".model-proxy", provName+"_oauth_auth.json")
+	storePath := oauthAuthFilePath(HomeDir(), provName)
 	c := NewAqpClient(storePath)
 
 	// 1. Bootstrap: get the login URL + SSO_A cookie.
