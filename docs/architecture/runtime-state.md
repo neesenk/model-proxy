@@ -182,7 +182,7 @@ config generation 时取得的这一个 DashboardSnapshot 计算，不得再次�
 
 route sticky 记录 current provider 和 since。在 `sticky_dwell` 内优先当前 provider；驻留期结束后，只有 tier、priority 或 surplus margin 足够更优才切换。
 
-session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 route key。session-keyed sticky 不落盘，route-keyed sticky 可落盘。
+session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 route key。session-keyed sticky 不落盘，route-keyed sticky 可落盘。session sticky 的 dwell 自**最近一次使用**起算（活跃会话每次请求刷新 since），因此连续活跃的会话会一直停留在当前 provider，直到闲置超过 `sticky_dwell` 或其失败熔断——"会话中不得仅因 quota surplus 边际变化迁移账号"（见 provider-pools.md）。
 
 ## Pin
 

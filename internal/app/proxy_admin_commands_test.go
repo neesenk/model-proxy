@@ -12,7 +12,8 @@ import (
 
 func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	const accountID = "account-one"
+	// IDs are derived from credentials (AccountID), like login does.
+	accountID := AccountIDFor("static", AccountCred{APIKey: "test-key"})
 	if err := SavePool("up", "static", CredentialPool{Accounts: []PoolAccount{{
 		ID:     accountID,
 		APIKey: "test-key",

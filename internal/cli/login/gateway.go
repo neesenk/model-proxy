@@ -12,7 +12,6 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"model-proxy/internal/provider"
@@ -48,9 +47,6 @@ type AqpClient struct {
 	Jar       http.CookieJar
 	StorePath string
 	Base      string // base URL (aqpBase in production; overridable for tests)
-
-	mu        sync.Mutex
-	cachedKey string
 }
 
 // newAqpClient builds a AQP client backed by the given store file.
@@ -342,8 +338,6 @@ func (c *AqpClient) FetchAPIKeyAtContext(ctx context.Context, endpoint string) (
 	if d.APIKey == "" {
 		return nil, fmt.Errorf("aqp api key response missing api_key")
 	}
-	// Managed key is cached in memory only (the desktop app does not persist it).
-	c.cachedKey = d.APIKey
 	return &d, nil
 }
 

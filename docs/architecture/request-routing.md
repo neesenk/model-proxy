@@ -104,6 +104,8 @@ warning 同时出现在 daemon log、`/api/status.warnings`、models、doctor �
 - nil catalog no-op。
 - in-route/cross-route/回落/pin/force。
 - force-provider 即使能力不匹配也不得被替换到其他 route。
+- force-provider 是代理内部控制参数：`?force_provider=` query 由 executor 从
+  上游 URL 剥除（`stripInternalQuery`），不透传给上游 API。
 - context overflow 的单次重试与 body 恢复。
 - implicit route 单 provider、多 provider 歧义、未登录 provider。
 - reasoning/codex protocol warnings。

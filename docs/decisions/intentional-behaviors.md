@@ -25,6 +25,26 @@
 
 千问 Token Plan 个人版的 Credits 用量（5h/7d 窗口）**没有公开 API**（文档「以控制台订阅页用量明细为准」），且平台条款「严禁 API 调用」明确禁止自动化/批量调用（仅允许 Claude Code/Cursor 等交互式工具）。model-proxy 作为交互式开发工具的转发代理，转发本身合规；但**有意不实现**控制台 cookie 抓取或后台配额轮询——`Quota()` 返回 `BillingUnknown`，仅把控制台订阅页 URL（`https://platform.qianwenai.com/home/billing/subscription/token-plan-individual`）附在 CLI `usage` 与 Web UI（`/api/status.quota` → app.js 渲染 `snap.Notes`）里供人工查看。窗口耗尽由 429 `Allocated quota exceeded` 经 `internal/targetexec.ParseRateLimit` 分类为 `quota` 后反应式触发冷却与 failover，无需新增轮询。
 
+## 有意的测试与观测行为
+
+- 生产包的 `_test.go` 不受 DAG import policy 检查（仅无生产文件的目录例外）：
+  测试依赖历来比生产宽（fixture 需要跨包构造），"依赖图闭合"只在生产维度成立。
+  若要收紧，先改 `architecture_dependency_dag_contract_test.go` 的分类逻辑并同步
+  本文件。
+- 登录交互式输入 API key 时终端明文回显：stdin 同时服务管道/脚本输入
+  （`echo key | model-proxy login ...`），`term.ReadPassword` 会破坏非终端输入。
+  凭据不会进入日志，回显只存在于用户自己的终端缓冲。
+- `observe/events` 订阅后的短窗口内，同一条事件可能既出现在重放的 recent 快照
+  又出现在订阅流里（注册与 recent 复制在同一把锁内完成，publish 无需感知订阅时
+  点）。仅影响展示端去重，不丢事件。
+- Fusion 面板全部以 429 冷却失败时，终局按 hard 处理返回 502 而非 429+
+  Retry-After：fusion 伪 provider 无健康状态，`cooldownState` 判不出 allDown；
+  代码注释自认 "opaque → hard"。收紧前先给 fusion 伪 provider 建立限频观测。
+- 半开单飞（`halfOpenInFlight`）期间，并发请求把该 provider 视为不可用，若其余
+  target 也全灭则立即终局 502，不享有 retry_wait 等待——这是单飞探针语义的固有
+  代价（让一个请求独占探测权），与"短冷却等待优于立即报错"的整体取向的偏差是
+  已知且接受的。
+
 ## 修改要求
 
 - 改变任一决策必须同步更新本文件、实现注释和回归测试。

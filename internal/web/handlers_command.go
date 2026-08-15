@@ -22,7 +22,12 @@ func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Provider string `json:"provider,omitempty"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	// A malformed body must not silently degrade into a full-network refresh;
+	// an empty body (io.EOF) is the documented "refresh all" form.
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
 	if req.Provider != "" {
 		if !s.commands.RefreshQuota(req.Provider) {
 			writeJSONErr(w, http.StatusNotFound, "unknown provider: "+req.Provider)
@@ -165,7 +170,7 @@ func (s *Server) handleAccountTest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAccountRemove(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/accounts/")
-	parts := strings.SplitN(rest, "/", 2)
+	parts := strings.Split(rest, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		writeJSONErr(w, http.StatusBadRequest, "expected /api/accounts/<provider>/<id>")
 		return

@@ -33,7 +33,10 @@ const openRouterFixture = `{
 }`
 
 func TestParseOpenRouterCanonicalVendorAndAliases(t *testing.T) {
-	catalog := parseOpenRouter([]byte(openRouterFixture))
+	catalog, err := parseOpenRouter([]byte(openRouterFixture))
+	if err != nil {
+		t.Fatalf("fixture parse: %v", err)
+	}
 	if len(catalog.ByModel) != 3 {
 		t.Fatalf("catalog keys = %v, want 3 entries", catalogKeys(catalog.ByModel))
 	}
@@ -53,10 +56,15 @@ func TestParseOpenRouterCanonicalVendorAndAliases(t *testing.T) {
 }
 
 func TestParseOpenRouterMalformedInputs(t *testing.T) {
-	if got := parseOpenRouter([]byte(`not-json`)); got == nil || len(got.ByModel) != 0 {
-		t.Errorf("malformed JSON = %+v, want non-nil empty catalog", got)
+	// Regression: a malformed 200 body used to become an EMPTY catalog that
+	// the 200 path persisted over a good cache. Parsing must fail instead.
+	if got, err := parseOpenRouter([]byte(`not-json`)); err == nil || got == nil || len(got.ByModel) != 0 {
+		t.Errorf("malformed JSON = (%+v, %v), want empty catalog + error", got, err)
 	}
-	catalog := parseOpenRouter([]byte(`{
+	if got, err := parseOpenRouter([]byte(`{"data":[]}`)); err == nil || len(got.ByModel) != 0 {
+		t.Errorf("empty data = (%+v, %v), want empty catalog + error", got, err)
+	}
+	catalog, err := parseOpenRouter([]byte(`{
 	  "data": [
 	    {"id": "vendor/", "pricing": {"prompt": "1"}},
 	    {"id": "vendor/model", "pricing": {
@@ -64,6 +72,9 @@ func TestParseOpenRouterMalformedInputs(t *testing.T) {
 	    }}
 	  ]
 	}`))
+	if err != nil {
+		t.Fatalf("usable entries must parse: %v", err)
+	}
 	if len(catalog.ByModel) != 1 {
 		t.Fatalf("catalog after empty-name skip = %+v", catalog.ByModel)
 	}
@@ -73,7 +84,10 @@ func TestParseOpenRouterMalformedInputs(t *testing.T) {
 }
 
 func TestCatalogLookupIsExactAndNilSafe(t *testing.T) {
-	catalog := parseOpenRouter([]byte(openRouterFixture))
+	catalog, err := parseOpenRouter([]byte(openRouterFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if entry, ok := catalog.Lookup("glm-4.6"); !ok || entry.Prompt != 0.9e-6 {
 		t.Errorf("exact lookup: entry=%+v ok=%v", entry, ok)
 	}
@@ -87,7 +101,10 @@ func TestCatalogLookupIsExactAndNilSafe(t *testing.T) {
 }
 
 func TestResolveOverridePrecedenceAndUnits(t *testing.T) {
-	catalog := parseOpenRouter([]byte(openRouterFixture))
+	catalog, err := parseOpenRouter([]byte(openRouterFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
 	overrides := map[string]Override{
 		"glm-4.6": {Input: 9, Output: 18, CacheRead: 1, CacheWrite: 2},
 	}
@@ -399,6 +416,51 @@ func TestEnsureFreshLifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("malformed 200 never poisons a good cache", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "pricing_cache.json")
+		good := &Catalog{FetchedAt: time.Now().Add(-2 * DefaultTTL), Etag: "\"good\"", ByModel: map[string]Entry{"glm-4.6": {Prompt: 0.9e-6}}}
+		if err := saveCache(path, good); err != nil {
+			t.Fatal(err)
+		}
+		// Stale cache + a "200" that is actually a gateway error page.
+		catalog, err := EnsureFresh(RefreshOptions{
+			CacheFile: path, Endpoint: "http://prices.test", TTL: DefaultTTL,
+			Fetch: assertingFetch(t, "http://prices.test", "\"good\"", http.StatusOK, []byte("<html>gateway timeout</html>"), "\"bad\""),
+		})
+		if err != nil {
+			t.Fatalf("malformed 200 must fall back to the stale cache, got error: %v", err)
+		}
+		if entry, ok := catalog.ByModel["glm-4.6"]; !ok || entry.Prompt != 0.9e-6 {
+			t.Fatalf("stale catalog was not served: %+v", catalog.ByModel)
+		}
+		persisted, err := loadCache(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if persisted.Etag != "\"good\"" || persisted.ByModel["glm-4.6"].Prompt != 0.9e-6 {
+			t.Fatalf("good cache was overwritten: etag=%q models=%v", persisted.Etag, persisted.ByModel)
+		}
+	})
+
+	t.Run("empty 200 never poisons a good cache", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "pricing_cache.json")
+		good := &Catalog{FetchedAt: time.Now().Add(-2 * DefaultTTL), Etag: "\"good\"", ByModel: map[string]Entry{"glm-4.6": {Prompt: 0.9e-6}}}
+		if err := saveCache(path, good); err != nil {
+			t.Fatal(err)
+		}
+		catalog, err := EnsureFresh(RefreshOptions{
+			CacheFile: path, Endpoint: "http://prices.test", TTL: DefaultTTL,
+			Fetch: assertingFetch(t, "http://prices.test", "\"good\"", http.StatusOK, []byte(`{"data":[]}`), "\"empty\""),
+		})
+		if err != nil || catalog.ByModel["glm-4.6"].Prompt != 0.9e-6 {
+			t.Fatalf("empty 200 = (%+v, %v), want stale fallback", catalog, err)
+		}
+		persisted, _ := loadCache(path)
+		if persisted.Etag != "\"good\"" {
+			t.Fatalf("good cache was overwritten by the empty catalog: etag=%q", persisted.Etag)
+		}
+	})
+
 	t.Run("304 without cache is empty", func(t *testing.T) {
 		catalog, err := EnsureFresh(RefreshOptions{
 			CacheFile: filepath.Join(t.TempDir(), "missing.json"),
@@ -473,6 +535,83 @@ func TestEnsureFreshLifecycle(t *testing.T) {
 			t.Errorf("nil fetch = %+v, err=%v", catalog, err)
 		}
 	})
+
+	// Regression: TTL<=0 used to make every cache entry look stale (refetch on
+	// every call). It must normalize to DefaultTTL, mirroring internal/catalog.
+	t.Run("zero TTL behaves as default TTL", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "pricing_cache.json")
+		want := &Catalog{FetchedAt: time.Now(), Etag: `"fresh"`, ByModel: map[string]Entry{"m": {Prompt: 1}}}
+		if err := saveCache(path, want); err != nil {
+			t.Fatal(err)
+		}
+		called := false
+		catalog, err := EnsureFresh(RefreshOptions{
+			CacheFile: path,
+			Endpoint:  "unused",
+			TTL:       0,
+			Fetch: func(_, _ string) (int, []byte, string, error) {
+				called = true
+				return 0, nil, "", errors.New("must not be called")
+			},
+		})
+		if err != nil || called || catalog.Etag != want.Etag {
+			t.Errorf("TTL=0 = (catalog=%+v, err=%v, fetched=%v), want fresh cache reuse", catalog, err, called)
+		}
+	})
+}
+
+func TestWriteAtomicSyncsBeforeRenameAndCreatesOwnerOnlyDir(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "model-proxy", "cache")
+	path := filepath.Join(nested, "pricing_cache.json")
+
+	var order []string
+	if err := writeAtomicWith(path, []byte(`{"etag":"a"}`), atomicWriteOps{
+		createTemp: os.CreateTemp,
+		sync:       func(*os.File) error { order = append(order, "sync"); return nil },
+		rename: func(oldPath, newPath string) error {
+			order = append(order, "rename")
+			return os.Rename(oldPath, newPath)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 || order[0] != "sync" || order[1] != "rename" {
+		t.Fatalf("write order=%v, want sync before rename", order)
+	}
+	// The cache dir sits under ~/.model-proxy beside credential files: it must
+	// be owner-only (0700 standard from internal/accounts), not 0755.
+	info, err := os.Stat(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("cache dir perm=%o, want no group/other access", perm)
+	}
+
+	// A sync failure must abort before rename and leave the old target intact.
+	if err := saveCache(path, &Catalog{FetchedAt: time.Now(), Etag: `"old"`}); err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("disk full")
+	renameReached := false
+	if err := writeAtomicWith(path, []byte(`{"etag":"new"}`), atomicWriteOps{
+		createTemp: os.CreateTemp,
+		sync:       func(*os.File) error { return syncErr },
+		rename: func(oldPath, newPath string) error {
+			renameReached = true
+			return os.Rename(oldPath, newPath)
+		},
+	}); !errors.Is(err, syncErr) {
+		t.Fatalf("sync error=%v, want %v", err, syncErr)
+	}
+	if renameReached {
+		t.Error("rename ran despite sync failure")
+	}
+	afterFailure, err := loadCache(path)
+	if err != nil || afterFailure.Etag != `"old"` {
+		t.Errorf("failed sync changed cache=%+v err=%v", afterFailure, err)
+	}
 }
 
 func assertingFetch(

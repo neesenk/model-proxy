@@ -54,7 +54,7 @@ func TestProbeAndWriteModelsProbeErrorKeepsAndWritesCandidates(t *testing.T) {
 			written = append([]string(nil), names...)
 			return nil
 		},
-		reload: func(gotCfg *configdomain.Config) {
+		reload: func(gotArgs []string, gotCfg *configdomain.Config) {
 			reloadCalls++
 			if gotCfg != cfg {
 				t.Fatalf("reload cfg = %p, want %p", gotCfg, cfg)
@@ -62,7 +62,7 @@ func TestProbeAndWriteModelsProbeErrorKeepsAndWritesCandidates(t *testing.T) {
 		},
 	}
 
-	err := probeAndWriteModels(cfg, "aqp", []string{"old-model", "candidate-b", "candidate-a"}, []string{"old-model"}, "config.yaml", ops)
+	err := probeAndWriteModels(cfg, "aqp", []string{"old-model", "candidate-b", "candidate-a"}, []string{"old-model"}, nil, "config.yaml", ops)
 	if err != nil {
 		t.Fatalf("probeAndWriteModels: %v", err)
 	}
@@ -111,10 +111,10 @@ func TestProbeAndWriteModelsAllProbeFailedDoesNotWipe(t *testing.T) {
 			written = append([]string(nil), names...)
 			return nil
 		},
-		reload: func(*configdomain.Config) { reloadCalls++ },
+		reload: func([]string, *configdomain.Config) { reloadCalls++ },
 	}
 
-	err := probeAndWriteModels(cfg, "aqp", []string{"old-model", "candidate-a", "candidate-b"}, []string{"old-model"}, "config.yaml", ops)
+	err := probeAndWriteModels(cfg, "aqp", []string{"old-model", "candidate-a", "candidate-b"}, []string{"old-model"}, nil, "config.yaml", ops)
 	if err != nil {
 		t.Fatalf("probeAndWriteModels: %v", err)
 	}
@@ -141,10 +141,10 @@ func TestProbeAndWriteModelsWriteFailureDoesNotReload(t *testing.T) {
 		},
 		display: func(*configdomain.Config, string, []string, []DropReason, error, bool) {},
 		write:   func(string, string, []string) error { return writeErr },
-		reload:  func(*configdomain.Config) { reloadCalls++ },
+		reload:  func([]string, *configdomain.Config) { reloadCalls++ },
 	}
 
-	err := probeAndWriteModels(cfg, "aqp", []string{"new-model"}, []string{"old-model"}, "config.yaml", ops)
+	err := probeAndWriteModels(cfg, "aqp", []string{"new-model"}, []string{"old-model"}, nil, "config.yaml", ops)
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("probeAndWriteModels error = %v, want %v", err, writeErr)
 	}

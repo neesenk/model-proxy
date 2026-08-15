@@ -40,6 +40,14 @@ func TestHelperProcess(t *testing.T) {
 	if a := os.Getenv("MP_CLI_ARGS"); a != "" {
 		args = strings.Fields(a)
 	}
+	// Optional CWD override for handlers that touch the working directory
+	// (`config init` writes ./config.yaml).
+	if d := os.Getenv("MP_CLI_CWD"); d != "" {
+		if err := os.Chdir(d); err != nil {
+			fmt.Fprintf(os.Stderr, "helper chdir %s: %v\n", d, err)
+			os.Exit(2)
+		}
+	}
 	cmd := os.Getenv("MP_SUBCMD")
 	switch cmd {
 	case "models":
@@ -93,11 +101,10 @@ func runCLIWithHome(t *testing.T, home, subcmd, cfgPath string, extraArgs ...str
 	t.Helper()
 	tb := os.Args[0]
 	// Build the args the handler receives. extraArgs first (positional args like
-	// a provider name or "check"), then --config last. This ordering matters:
-	//   - CmdConfigRun reads args[0] as its subcommand ("check"), and configPath
-	//     scans args[1:] for --config.
-	//   - RunModels/RunUsage use cliframework.Positional()/climodels.NonFlagArgs(), which skip --config
-	//     and its value wherever they appear.
+	// a provider name or "check"), then --config last. The handlers resolve the
+	// subcommand and the config path by scanning the FULL arg list
+	// (cliframework.Positional / ConfigPath skip --config and its value
+	// wherever they appear), so the ordering is only a convention.
 	cliArgs := append([]string{}, extraArgs...)
 	if cfgPath != "" {
 		cliArgs = append(cliArgs, "--config", cfgPath)

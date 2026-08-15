@@ -21,7 +21,11 @@ func TestQuotaTracker_PersistAndLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "quota_state.json")
 	cfg := func() *Config { return &Config{} }
-	provs := func() map[string]provider.Provider { return nil }
+	// Production order is BuildProviders → Start → Load, so the provider set
+	// is populated when Load filters persisted keys; model that here.
+	provs := func() map[string]provider.Provider {
+		return map[string]provider.Provider{"zhipu": &snapshotProv{rem: 0}}
+	}
 	tr := newStandaloneQuotaTracker(path, cfg, provs)
 	tr.SetSnapshot("zhipu", &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.42, AsOf: time.Now()})
 	if err := tr.Persist(); err != nil {

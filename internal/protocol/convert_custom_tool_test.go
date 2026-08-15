@@ -335,3 +335,55 @@ func TestCustomTool_UnescapeHoldInvalidHex(t *testing.T) {
 		t.Errorf("decodeHex4(ZZZZ) = %v,%v, want 0,false", r, ok)
 	}
 }
+
+// Regression: \uXXXX surrogate pairs (json.dumps ensure_ascii=True — the
+// Python default) used to be decoded one half at a time; strings.Builder
+// writes each unpaired surrogate as U+FFFD, so emoji in tool arguments came
+// out as two replacement chars, and a pair split across stream chunks was
+// corrupted even though the unwrapper exists to hold incomplete tails.
+func TestUnescapeHoldSurrogatePairs(t *testing.T) {
+	// Complete pair in one chunk decodes to the combined rune.
+	if got, want := unescapeHold(`a\ud83d\ude00b`, false), "a😀b"; got != want {
+		t.Errorf("pair in one chunk = %q, want %q", got, want)
+	}
+	// High surrogate at the tail is HELD mid-stream (may pair next chunk)…
+	if got := unescapeHold(`a\ud83d`, false); got != "a" {
+		t.Errorf("held high surrogate = %q, want %q", got, "a")
+	}
+	if got := unescapeHold(`a\ud83d\ude`, false); got != "a" {
+		t.Errorf("held partial low escape = %q, want %q", got, "a")
+	}
+	// …and pairs across feeds once the rest arrives.
+	if got, want := unescapeHold(`a\ud83d\ude00b`, true), "a😀b"; got != want {
+		t.Errorf("pair at stream end = %q, want %q", got, want)
+	}
+	// Unpaired halves (definitively no partner) degrade to U+FFFD, matching
+	// encoding/json.
+	if got, want := unescapeHold(`a\ud83db`, false), "a\uFFFDb"; got != want {
+		t.Errorf("unpaired high = %q, want %q", got, want)
+	}
+	if got, want := unescapeHold(`a\ude00b`, false), "a\uFFFDb"; got != want {
+		t.Errorf("unpaired low = %q, want %q", got, want)
+	}
+	if got, want := unescapeHold(`a\ud83d`, true), "a\uFFFD"; got != want {
+		t.Errorf("high surrogate at complete end = %q, want %q", got, want)
+	}
+	// BMP escapes still decode as before.
+	if got, want := unescapeHold(`caf\u00e9`, false), "café"; got != want {
+		t.Errorf("BMP escape = %q, want %q", got, want)
+	}
+}
+
+// The full progressive path: ensure_ascii-escaped arguments stream in two
+// chunks with the surrogate pair split at the boundary.
+func TestUnwrapSurrogatePairAcrossChunks(t *testing.T) {
+	u := newPartialInputUnwrapper()
+	first := u.unwrap(`{"input": "rm \ud83d`, false)
+	if first != "rm " {
+		t.Fatalf("mid-pair feed emitted %q, want %q (high surrogate held)", first, "rm ")
+	}
+	got := u.unwrap(`{"input": "rm \ud83d\ude00 -rf /"}`, false)
+	if want := "rm 😀 -rf /"; got != want {
+		t.Fatalf("unwrapped = %q, want %q", got, want)
+	}
+}

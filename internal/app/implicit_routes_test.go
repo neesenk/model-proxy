@@ -119,9 +119,7 @@ func TestImplicitRoute_ForwardsUnroutedLoggedInModel(t *testing.T) {
 	credDir := filepath.Join(home, ".model-proxy")
 	os.MkdirAll(credDir, 0o700)
 	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"k"}`), 0o600)
-	prev := os.Getenv("HOME")
-	os.Setenv("HOME", home)
-	defer os.Setenv("HOME", prev)
+	t.Setenv("HOME", home)
 
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
@@ -191,9 +189,7 @@ func TestImplicitRoute_ListedInV1Models(t *testing.T) {
 	credDir := filepath.Join(home, ".model-proxy")
 	os.MkdirAll(credDir, 0o700)
 	os.WriteFile(filepath.Join(credDir, "zhipu_apikey.json"), []byte(`{"api_key":"k"}`), 0o600)
-	prev := os.Getenv("HOME")
-	os.Setenv("HOME", home)
-	defer os.Setenv("HOME", prev)
+	t.Setenv("HOME", home)
 
 	cfg := &Config{
 		Listen: "127.0.0.1:0",

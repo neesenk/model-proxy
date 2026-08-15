@@ -229,7 +229,7 @@ func FetchProviderModels(cfg *configdomain.Config, provName string) ([]ModelEntr
 // kept unvalidated rather than wiping `models:`; the latter still surfaces the
 // failures as a warning via printFilterSummary.
 func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, args []string, configFile string) {
-	if err := probeAndWriteModels(cfg, provName, merged, existing, configFile, productionProbeAndWriteModelsOps()); err != nil {
+	if err := probeAndWriteModels(cfg, provName, merged, existing, args, configFile, productionProbeAndWriteModelsOps()); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -242,7 +242,7 @@ type probeAndWriteModelsOps struct {
 	probe   func(*configdomain.Config, string, []string) ([]string, []DropReason, error)
 	display func(*configdomain.Config, string, []string, []DropReason, error, bool)
 	write   func(string, string, []string) error
-	reload  func(*configdomain.Config)
+	reload  func([]string, *configdomain.Config)
 }
 
 func productionProbeAndWriteModelsOps() probeAndWriteModelsOps {
@@ -260,7 +260,7 @@ func productionProbeAndWriteModelsOps() probeAndWriteModelsOps {
 	}
 }
 
-func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, configFile string, ops probeAndWriteModelsOps) error {
+func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, existing []string, args []string, configFile string, ops probeAndWriteModelsOps) error {
 	// Policy filter (provider-specific static rules via the provider impl's
 	// FilterModelIDs, applied to BOTH pre-existing config ids and freshly-fetched
 	// ones so a stale config is cleaned up too). Currently volcengine drops
@@ -313,7 +313,7 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 		// Hot-reload a running daemon so the new model set takes effect for
 		// implicit routing (and refresh the display) without a manual
 		// `serve reload`. No-op if no daemon is running. Mirrors login/logout.
-		ops.reload(cfg)
+		ops.reload(args, cfg)
 	}
 	return nil
 }

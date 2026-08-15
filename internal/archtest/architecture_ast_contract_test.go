@@ -74,10 +74,11 @@ func assertRepositoryPackageImports(t *testing.T, directory string, allowed map[
 	if len(files) == 0 {
 		t.Fatalf("%s has no Go files", directory)
 	}
-	for _, path := range files {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
+	production := productionGoPaths(files)
+	if len(production) == 0 {
+		t.Fatalf("%s matched %d Go files but zero production files: refusing an import scan that would pass vacuously", directory, len(files))
+	}
+	for _, path := range production {
 		f, _ := parseGoFile(t, path)
 		for _, importPath := range unexpectedRepositoryImports(f, allowed) {
 			t.Errorf("%s imports repository package %q outside %s allowlist",
@@ -485,6 +486,29 @@ func (w *WebServer) h() {
 		"model-proxy/internal/pricing": true,
 	}); len(got) != 1 || got[0] != "model-proxy/internal/protocol" {
 		t.Errorf("config import allowlist positive control: got %v, want internal/protocol", got)
+	}
+
+	// The repository import scan must not go blind: a directory whose glob only
+	// matched _test.go files filters to zero production files, and
+	// assertRepositoryPackageImports fails that state instead of scanning
+	// nothing. (A deliberately failing subtest would fail this package too, so
+	// the control pins the Fatal guard's trigger on the pure filter.)
+	testOnlyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(testOnlyDir, "only_test.go"), []byte("package foo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globbed, err := filepath.Glob(filepath.Join(testOnlyDir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(globbed) == 0 {
+		t.Fatal("test-only control directory matched no files")
+	}
+	if got := productionGoPaths(globbed); len(got) != 0 {
+		t.Errorf("test-only control kept production files %v, want none so the zero-production-files guard fires", got)
+	}
+	if got := productionGoPaths([]string{"a.go", "a_test.go", "b_test.go"}); len(got) != 1 || got[0] != "a.go" {
+		t.Errorf("production file filter = %v, want only a.go", got)
 	}
 
 	// The root config facade accepts aliases and exact argument-forwarding load
@@ -972,6 +996,19 @@ func productionGoFiles(t *testing.T) []string {
 	return productionGoFilesIn(t, ".")
 }
 
+// productionGoPaths drops _test.go files from a glob result. A non-empty glob
+// that filters to zero production files is a scanner-blind state (a directory
+// holding only test files): callers must fail instead of passing vacuously.
+func productionGoPaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if !strings.HasSuffix(path, "_test.go") {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
 func productionGoFilesIn(t *testing.T, dir string) []string {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(repoRooted(t, dir), "*.go"))
@@ -979,10 +1016,8 @@ func productionGoFilesIn(t *testing.T, dir string) []string {
 		t.Fatal(err)
 	}
 	out := make([]string, 0, len(paths))
-	for _, path := range paths {
-		if !strings.HasSuffix(path, "_test.go") {
-			out = append(out, repoRootRel(t, path))
-		}
+	for _, path := range productionGoPaths(paths) {
+		out = append(out, repoRootRel(t, path))
 	}
 	return out
 }

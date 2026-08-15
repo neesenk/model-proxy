@@ -40,7 +40,10 @@ func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
 	cfgYAML := "listen: 127.0.0.1:0\n" +
 		"providers:\n  p:\n    openai_base_url: " + upstream.URL + "\n    provider_id: static\n" +
 		"routes:\n  m:\n    - {provider: p, model: m}\n" +
-		"scheduling:\n  sticky_dwell: 0s\n  upstream_timeout: 1s\n  circuit_threshold: 10\n"
+		// Tiny positive dwell (validation rejects non-positive durations):
+		// the test only needs requests to re-evaluate immediately, not to
+		// assert dwell semantics.
+		"scheduling:\n  sticky_dwell: 1ms\n  upstream_timeout: 1s\n  circuit_threshold: 10\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -32,9 +32,6 @@ const aqpMonthlyUsagePath = "/api/v1/cqp/ccswitch/monthly_usage"
 // Shared by the provider's CookieHeader and main's SSO login flow.
 const SsoCookieName = "SSO_C"
 
-// googleOAuthAuthFile is the legacy store filename (used in error messages).
-const googleOAuthAuthFile = "google_oauth_auth.json"
-
 // AqpAccountData mirrors <name>_oauth_auth.json. 6 fields; the managed AQP key
 // is NOT persisted (fetched on demand, cached in memory only).
 type AqpAccountData struct {
@@ -57,7 +54,9 @@ func LoadAqpAccount(path string) (*AqpAccountData, error) {
 	}
 	var a AqpAccountData
 	if err := json.Unmarshal(b, &a); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", googleOAuthAuthFile, err)
+		// Name the actual store file (<name>_oauth_auth.json), not the legacy
+		// default — a wrong filename misleads account debugging.
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return &a, nil
 }
@@ -78,7 +77,7 @@ func SaveAqpAccount(path string, a *AqpAccountData) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return atomicWriteFile(path, b, 0o600)
 }
 
 // ClearAqpAccount removes the account file (logout). Treating "not exist" as

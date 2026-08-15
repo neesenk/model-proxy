@@ -1,8 +1,11 @@
 package configedit
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -147,5 +150,51 @@ func TestWriteConfigValidated(t *testing.T) {
 
 	if got := BackupPath("/tmp/x/config.yaml"); filepath.Dir(got) != "/tmp/x/back" {
 		t.Errorf("BackupPath = %q", got)
+	}
+}
+
+// Regression (pitfalls #18): AtomicWrite used a fixed ".tmp" name shared by
+// every writer. The daemon's Web editor and CLI commands are separate
+// processes writing the same config.yaml — one rename could carry away
+// another process's half-written temp file. Writers must use unique temp
+// names so concurrent writes can't corrupt each other, and no temp leftovers
+// may remain.
+func TestAtomicWrite_ConcurrentWritersUniqueTemps(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.yaml")
+	if err := AtomicWrite(target, []byte("initial")); err != nil {
+		t.Fatal(err)
+	}
+	const writers, rounds = 8, 40
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		payload := strings.Repeat(fmt.Sprintf("writer-%d\n", w), 256)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := 0; r < rounds; r++ {
+				if err := AtomicWrite(target, []byte(payload)); err != nil {
+					t.Errorf("write: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	first := lines[0]
+	for i, line := range lines {
+		if line != first {
+			t.Fatalf("line %d differs — concurrent writers interleaved", i)
+		}
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("temp leftover: %s", e.Name())
+		}
 	}
 }

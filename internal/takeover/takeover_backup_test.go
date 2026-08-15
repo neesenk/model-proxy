@@ -1,12 +1,15 @@
 package takeover_test
 
 import (
-	"strings"
-
-	takeover "model-proxy/internal/takeover"
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+
+	takeover "model-proxy/internal/takeover"
 )
 
 // takeover_extra_test.go covers the backup/restore/listClients/sha256hex
@@ -95,6 +98,110 @@ func TestRestore_NoBackup(t *testing.T) {
 	}
 }
 
+// --- restore integrity: the .meta sha256 Backup records must gate restores ---
+
+// Regression: Backup wrote a sha256 into <bak>.meta but Restore never checked
+// it — a corrupted or tampered .bak was copied verbatim over the user's config.
+// A present-but-mismatching sha256 must refuse the restore.
+func TestRestore_ShaMismatchRefuses(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "s.json")
+	if err := os.WriteFile(src, []byte("current"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bakDir := filepath.Join(dir, ".mp")
+	if err := takeover.Backup(src, bakDir, "c"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tamper with the backup content after the meta was written.
+	if err := os.WriteFile(filepath.Join(bakDir, "c.bak"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := takeover.Restore(src, bakDir, "c")
+	if err == nil || !strings.Contains(err.Error(), "sha256") {
+		t.Fatalf("Restore err = %v, want sha256 integrity failure", err)
+	}
+	// Fail-closed: the target file must not have been overwritten.
+	got, readErr := os.ReadFile(src)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "current" {
+		t.Fatalf("restore overwrote target despite integrity failure: %q", got)
+	}
+}
+
+// A meta recorded by Backup (matching content) must restore successfully.
+func TestRestore_MatchingMetaSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "s.json")
+	original := []byte("original-content")
+	if err := os.WriteFile(src, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bakDir := filepath.Join(dir, ".mp")
+	if err := takeover.Backup(src, bakDir, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("rewritten"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := takeover.Restore(src, bakDir, "c"); err != nil {
+		t.Fatalf("Restore with matching meta: %v", err)
+	}
+	got, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("restored content = %q, want %q", got, original)
+	}
+}
+
+// A missing or corrupt meta is a WARNING, not a blocker: backups taken before
+// meta existed must stay restorable.
+func TestRestore_MissingOrCorruptMetaWarnsAndRestores(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metaBody string
+	}{
+		{"no meta", ""},
+		{"corrupt meta", "not-json"},
+		{"meta without sha256", `{"backed_up_at":"2026-01-01T00:00:00Z"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "out.json")
+			bakDir := filepath.Join(dir, ".mp")
+			if err := os.MkdirAll(bakDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bakDir, "c.bak"), []byte("original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.metaBody != "" {
+				if err := os.WriteFile(filepath.Join(bakDir, "c.bak.meta"), []byte(tc.metaBody), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := takeover.Restore(src, bakDir, "c"); err != nil {
+				t.Fatalf("Restore with %s must degrade to a warning, got %v", tc.name, err)
+			}
+			got, err := os.ReadFile(src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != "original" {
+				t.Fatalf("restored content = %q, want original", got)
+			}
+		})
+	}
+}
+
 // --- sha256hex ---
 
 func TestSha256hex(t *testing.T) {
@@ -113,5 +220,98 @@ func TestBackupDir(t *testing.T) {
 	want := "/home/user/.config/foo/.model-proxy"
 	if got != want {
 		t.Errorf("backupDir=%q want %q", got, want)
+	}
+}
+
+// Regression (atomic backup/restore): Backup, Restore and WriteJSONConfig used
+// to write the destination directly, so a crash mid-write left a truncated
+// file — a truncated .bak would be preserved forever by the "existing backup
+// is kept" idempotency rule, losing the user's original client config. All
+// three paths now write via a unique temp file + rename: the destination is
+// always the complete old or complete new content, concurrent writers can't
+// interleave, and no temp leftovers remain.
+func TestBackupRestore_NoTempLeftoversAndByteFidelity(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "settings.json")
+	original := []byte(`{"a":1,"b":"x"}` + strings.Repeat("//pad", 512))
+	if err := os.WriteFile(src, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bakDir := filepath.Join(dir, "bak")
+
+	if err := takeover.Backup(src, bakDir, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(bakDir, "claude.bak"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("backup not byte-identical: %d vs %d bytes", len(got), len(original))
+	}
+
+	// Corrupt the original, restore, and require the exact original bytes back.
+	if err := os.WriteFile(src, []byte(`{"c":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := takeover.Restore(src, bakDir, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("restore did not return the exact backup bytes")
+	}
+	for _, path := range []string{dir, bakDir} {
+		entries, _ := os.ReadDir(path)
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".tmp") {
+				t.Errorf("temp leftover: %s/%s", path, e.Name())
+			}
+		}
+	}
+}
+
+// Concurrent writers to the same client config must never interleave: the
+// final file is valid JSON identical to exactly one writer's payload.
+func TestWriteJSONConfig_ConcurrentWritersNeverInterleave(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "config.json")
+	if err := takeover.WriteJSONConfig(file, map[string]any{"init": true}); err != nil {
+		t.Fatal(err)
+	}
+	const writers, rounds = 8, 25
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		payload := map[string]any{
+			"writer": w,
+			"pad":    strings.Repeat("x", 4096),
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := 0; r < rounds; r++ {
+				if err := takeover.WriteJSONConfig(file, payload); err != nil {
+					t.Errorf("write: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatalf("final file is not valid JSON (interleaved writers): %v", err)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("temp leftover: %s", e.Name())
+		}
 	}
 }

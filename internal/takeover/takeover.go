@@ -20,10 +20,44 @@ import (
 // hard error for a single named client.
 var ErrNoFile = errors.New("takeover: client config file not present")
 
+// atomicWriteFile writes data via a unique temp file in the target directory
+// followed by rename, so a crash mid-write can never leave a truncated file
+// in place of the user's client config (docs/engineering/pitfalls.md #18).
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
 // backup copies file verbatim into bakDir/<name>.bak (a clean copy, easy to
 // restore), and writes meta to bakDir/<name>.bak.meta. An existing backup is
 // not overwritten → idempotent. A missing source file returns ErrNoFile
 // so RunTakeover can skip the client (for `all`) rather than abort the batch.
+// Both files are written atomically: a truncated .bak would poison every
+// future takeover (the "existing backup is kept" idempotency rule would keep
+// the corrupt copy forever) and lose the user's original client config.
 func Backup(file, bakDir, name string) error {
 	if _, err := os.Stat(file); err != nil {
 		if os.IsNotExist(err) {
@@ -40,7 +74,7 @@ func Backup(file, bakDir, name string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(bak, data, 0o600); err != nil {
+		if err := atomicWriteFile(bak, data, 0o600); err != nil {
 			return err
 		}
 		meta := map[string]any{
@@ -48,8 +82,13 @@ func Backup(file, bakDir, name string) error {
 			"sha256":       Sha256hex(data),
 			"path":         file,
 		}
-		mb, _ := json.MarshalIndent(meta, "", "  ")
-		os.WriteFile(bak+".meta", mb, 0o600)
+		mb, err := json.MarshalIndent(meta, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := atomicWriteFile(bak+".meta", mb, 0o600); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -57,6 +96,13 @@ func Backup(file, bakDir, name string) error {
 // restore copies bakDir/<name>.bak verbatim back to file. A missing backup
 // returns ErrNoFile so RunRestore can skip it (for `all`) symmetrically
 // with RunTakeover's skip of a client whose config was never present.
+// Before writing, the backup is verified against the sha256 Backup recorded
+// in <bak>.meta — restoring a corrupted/tampered backup over the user's last
+// copy must fail closed. A MISSING or unreadable/corrupt meta degrades to a
+// warning and proceeds: backups taken before meta existed (or whose meta was
+// lost) must stay restorable.
+// The restored file is written atomically — a crash mid-restore must not
+// destroy the last copy of the user's config.
 func Restore(file, bakDir, name string) error {
 	bak := filepath.Join(bakDir, name+".bak")
 	data, err := os.ReadFile(bak)
@@ -66,7 +112,34 @@ func Restore(file, bakDir, name string) error {
 		}
 		return fmt.Errorf("no backup for %s in %s: %w", name, bakDir, err)
 	}
-	return os.WriteFile(file, data, 0o644)
+	if err := verifyBackupIntegrity(bak, data); err != nil {
+		return err
+	}
+	return atomicWriteFile(file, data, 0o644)
+}
+
+// verifyBackupIntegrity checks `data` against the sha256 Backup wrote to
+// <bak>.meta. Meta problems (absent, unreadable, unparseable, sha256 field
+// empty) warn and pass — the meta is an integrity AID, not a restore
+// prerequisite; a sha256 that is present but does not match the backup bytes
+// is corruption and must block the restore.
+func verifyBackupIntegrity(bak string, data []byte) error {
+	mb, err := os.ReadFile(bak + ".meta")
+	if err != nil {
+		log.Printf("takeover: restore %s: no readable meta (%v) — restoring without integrity check", bak, err)
+		return nil
+	}
+	var meta struct {
+		Sha256 string `json:"sha256"`
+	}
+	if err := json.Unmarshal(mb, &meta); err != nil || meta.Sha256 == "" {
+		log.Printf("takeover: restore %s: meta has no usable sha256 — restoring without integrity check", bak)
+		return nil
+	}
+	if got := Sha256hex(data); got != meta.Sha256 {
+		return fmt.Errorf("backup %s integrity check failed: sha256 mismatch (meta=%s content=%s) — refusing to restore a corrupted backup", bak, meta.Sha256, got)
+	}
+	return nil
 }
 
 func Sha256hex(b []byte) string {
@@ -227,6 +300,8 @@ func WriteJSONConfig(file string, v map[string]any) error {
 		return err
 	}
 	dir := filepath.Dir(file)
-	os.MkdirAll(dir, 0o755)
-	return os.WriteFile(file, out, 0o644)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return atomicWriteFile(file, out, 0o644)
 }

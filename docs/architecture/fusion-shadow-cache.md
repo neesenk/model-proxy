@@ -11,7 +11,9 @@ request log、`internal/cache`、
 
 缓存默认关闭：`cache.enabled/ttl/max_entries/max_body_bytes`，默认 TTL 10m、1000 条、单 body 256 KiB。
 
-- key 是 method、path、原始请求 body 的 SHA-256；
+- key 是 method、path、原始 query、白名单 header（`anthropic-beta`、
+  `accept-language`）与原始请求 body 的 SHA-256，各字段长度前缀编码
+  （body 是任意字节，裸分隔符拼接存在理论碰撞）；
 - 只缓存 `<300`、完整读到 EOF、未超过 body cap 的响应；
 - 客户端断开或半截响应不得入缓存；
 - 转换后的响应删除旧 Content-Length/Transfer-Encoding 后保存；mode mismatch
@@ -161,7 +163,8 @@ judge 是可选的一次非流式内部调用，复用 panel leg 管道。成功
 
 ### 成本和观测
 
-- `max_runs_per_day` 在 fan-out 前 admission；降级运行不消耗预算。
+- `max_runs_per_day` 在 fan-out 前 admission；进入 fan-out 之前的降级（multi_turn/tools_unsupported）不消耗预算，
+fan-out 之后的降级（insufficient_proposers、body_build_failed）仍计入当日预算。
 - `first_turn_only` 在多轮会话直接降级。
 - 降级原因：`insufficient_proposers`、`tools_unsupported`、`body_build_failed`、`budget_exceeded`、`multi_turn`。
 - registry 保留 200 条 run，跨 reload 存活。

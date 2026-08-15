@@ -35,7 +35,7 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			}
 		}
 
-		requestFile, _ := parseGoFile(t, "internal/routing/request.Go")
+		requestFile, _ := parseGoFile(t, "internal/routing/request.go")
 		plannerFields := namedStructFields(t, requestFile, "Planner")
 		want := map[string]bool{
 			"config": true, "parentOf": true, "catalog": true,

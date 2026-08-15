@@ -124,19 +124,23 @@ type LoopbackServer struct {
 	ErrCh    chan error
 	srv      *http.Server
 	port     int
+	ln       net.Listener
 }
 
-// NewLoopbackServer binds an ephemeral loopback port.
+// NewLoopbackServer binds an ephemeral loopback port. The listener bound here
+// is KEPT and handed to Start — re-listening the same address in Start would
+// be a bind-close-rebind TOCTOU: another socket could take the port between
+// the two calls, breaking the callback URL the login flow already printed.
 func NewLoopbackServer() (*LoopbackServer, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
+	addr := ln.Addr().(*net.TCPAddr)
 	return &LoopbackServer{
-		addr:     fmt.Sprintf("127.0.0.1:%d", port),
-		port:     port,
+		addr:     fmt.Sprintf("127.0.0.1:%d", addr.Port),
+		port:     addr.Port,
+		ln:       ln,
 		CookieCh: make(chan string, 1),
 		ErrCh:    make(chan error, 1),
 	}, nil
@@ -150,19 +154,18 @@ func (l *LoopbackServer) CallbackURL() string {
 	return fmt.Sprintf("http://%s%s", l.addr, LoginCompletePath)
 }
 
-// Start begins serving (non-blocking). The listener is bound synchronously so
-// the callback URL is reachable as soon as Start returns.
+// Start begins serving (non-blocking) on the listener bound at construction,
+// so the callback URL is reachable as soon as Start returns — and on the very
+// port that URL was derived from.
 func (l *LoopbackServer) Start() error {
+	if l.srv != nil {
+		return fmt.Errorf("loopback server already started")
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(LoginCompletePath, l.handle)
 	l.srv = &http.Server{Handler: mux}
-	ln, err := net.Listen("tcp", l.addr)
-	if err != nil {
-		return fmt.Errorf("failed to start local login success page: %w", err)
-	}
-	l.addr = ln.Addr().String() // resolve actual addr
 	go func() {
-		if err := l.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := l.srv.Serve(l.ln); err != nil && err != http.ErrServerClosed {
 			l.ErrCh <- err
 		}
 	}()
@@ -172,8 +175,10 @@ func (l *LoopbackServer) Start() error {
 func (l *LoopbackServer) handle(w http.ResponseWriter, r *http.Request) {
 	// Validate callback origin (scheme http(s), must have host, no path/query/fragment beyond the registered path).
 	if err := ValidateOrigin(r); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		l.ErrCh <- err
+		// Reject the request and KEEP WAITING for the real callback: any local
+		// process can hit this port with a crafted Host header, and writing the
+		// error to ErrCh would abort the whole SSO login on that probe.
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 	// The loopback callback is the terminal step of the SSO redirect chain.
@@ -228,12 +233,18 @@ func (l *LoopbackServer) WaitForCookie(timeout time.Duration) (string, error) {
 	}
 }
 
-// Stop shuts down the server.
+// Stop shuts down the server. Shutdown closes the served listener; when Start
+// was never called the construction listener is closed directly so the port is
+// always released.
 func (l *LoopbackServer) Stop() {
 	if l.srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = l.srv.Shutdown(ctx)
+		return
+	}
+	if l.ln != nil {
+		_ = l.ln.Close()
 	}
 }
 

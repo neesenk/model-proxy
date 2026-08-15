@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -291,8 +292,12 @@ func TestAqpKeyProvider_MintAndCache(t *testing.T) {
 }
 
 func TestAqpKeyProvider_Non200(t *testing.T) {
+	// Regression: the full error body used to be embedded untruncated. The
+	// message is now capped at 200 bytes + "..." like the codex refresh error.
+	longBody := strings.Repeat("x", 5000)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
+		w.Write([]byte(longBody))
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
@@ -300,8 +305,15 @@ func TestAqpKeyProvider_Non200(t *testing.T) {
 	writeSSOCookie(t, store, "SSO_C=x")
 	p := NewAqpKeyProvider(srv.URL, store)
 	req, _ := http.NewRequest("POST", "http://x", nil)
-	if err := p.Inject(req); err == nil {
-		t.Error("expected error on mint HTTP 500")
+	err := p.Inject(req)
+	if err == nil {
+		t.Fatal("expected error on mint HTTP 500")
+	}
+	if !strings.Contains(err.Error(), "mint aqp key: HTTP 500:") {
+		t.Errorf("error %q missing mint prefix", err.Error())
+	}
+	if got := len(err.Error()); got > len("mint aqp key: HTTP 500: ")+200+3 {
+		t.Errorf("error length %d exceeds 200-byte body cap", got)
 	}
 }
 

@@ -860,6 +860,46 @@ func (c *Config) validate() error {
 	// sticky switching only on a margin edge). Do NOT re-add a duplicate-priority
 	// rejection here - it contradicts the scheduling contract (AGENTS.md
 	// "quota-aware scheduling").
+
+	// Duration strings (pitfalls #14): apart from fields whose contract
+	// explicitly allows "0" (retry_wait disables the cooldown wait; stats /
+	// request_log retention "0" keeps history forever), a SET duration must
+	// parse and be positive — e.g. upstream_timeout: "0s" would silently
+	// remove the only timeout bound on upstream and shadow requests.
+	durationChecks := []struct {
+		field     string
+		value     string
+		allowZero bool
+	}{
+		{"scheduling.upstream_timeout", c.Scheduling.UpstreamTimeout, false},
+		{"scheduling.circuit_cooldown", c.Scheduling.CircuitCooldown, false},
+		{"scheduling.rate_limit_backoff", c.Scheduling.RateLimitBackoff, false},
+		{"scheduling.quota_cooldown", c.Scheduling.QuotaCooldown, false},
+		{"scheduling.model_lockout", c.Scheduling.ModelLockout, false},
+		{"scheduling.sticky_dwell", c.Scheduling.StickyDwell, false},
+		{"scheduling.quota_poll_interval", c.Scheduling.QuotaPollInterval, false},
+		{"scheduling.retry_wait", c.Scheduling.RetryWait, true},
+		{"cache.ttl", c.Cache.TTL, false},
+		{"pricing.ttl", c.Pricing.TTL, false},
+		{"stats.retention", c.Stats.Retention, true},
+		{"request_log.retention", c.RequestLog.Retention, true},
+	}
+	for _, check := range durationChecks {
+		if check.value == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(check.value)
+		if err != nil {
+			return fmt.Errorf("%s: invalid duration %q", check.field, check.value)
+		}
+		if parsed < 0 || (parsed == 0 && !check.allowZero) {
+			note := ""
+			if check.allowZero {
+				note = ` (or "0")`
+			}
+			return fmt.Errorf("%s: duration %q must be positive%s", check.field, check.value, note)
+		}
+	}
 	return nil
 }
 

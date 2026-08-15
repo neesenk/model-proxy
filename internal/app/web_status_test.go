@@ -132,9 +132,7 @@ func TestAPIStatus_IncludesRouteWarnings(t *testing.T) {
 	for _, n := range []string{"zhipu", "deepseek"} {
 		os.WriteFile(credDir+"/"+n+"_apikey.json", []byte(`{"api_key":"k"}`), 0o600)
 	}
-	prev := os.Getenv("HOME")
-	os.Setenv("HOME", home)
-	defer os.Setenv("HOME", prev)
+	t.Setenv("HOME", home)
 
 	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:

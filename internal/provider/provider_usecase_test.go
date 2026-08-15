@@ -523,14 +523,10 @@ func TestVolcengineProvider_Delegates(t *testing.T) {
 	}
 }
 
-// --- P27: AuthFilePath (provider package's top-level helper) ---
-
-func TestAuthFilePath_TopLevel(t *testing.T) {
-	got := AuthFilePath("codex", "oauth_auth")
-	if !strings.HasSuffix(got, "codex_oauth_auth.json") {
-		t.Errorf("AuthFilePath=%q want suffix codex_oauth_auth.json", got)
-	}
-}
+// --- P27: top-level AuthFilePath deleted — it returned a literal "~/..." path
+// that Go never expands, had no production callers (credential paths come from
+// internal/accounts.AuthFilePath via the CLI framework), and duplicated that
+// helper. ---
 
 // countingAuth is a fakeAuth that records calls.
 type countingAuth struct {

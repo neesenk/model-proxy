@@ -307,7 +307,7 @@ func (p *ZhipuProvider) Usage() error {
 	if json.Unmarshal(body, &ml) == nil && ml.Object == "list" {
 		fmt.Printf("%s %d models available\n", Dim("Models:    "), len(ml.Data))
 		for _, m := range ml.Data {
-			fmt.Printf("  %s  %s\n", Cyan(Pad(m.ID, 22)), Gray(m.ID))
+			fmt.Printf("  %s  %s\n", Cyan(Pad(m.ID, 22)), Gray(m.OwnedBy))
 		}
 		return nil
 	}

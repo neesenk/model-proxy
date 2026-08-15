@@ -42,15 +42,26 @@ func serveEventsWithTicks(hub *Hub, w http.ResponseWriter, r *http.Request, tick
 	ch, recent, cancel := hub.Subscribe()
 	defer cancel()
 
-	writeEvent := func(e Event) {
+	writeEvent := func(e Event) bool {
 		b, _ := json.Marshal(e)
-		w.Write([]byte("data: "))
-		w.Write(b)
-		w.Write([]byte("\n\n"))
+		// A dead connection must end the loop, not spin writes into it until
+		// the context or the next keepalive notices (mirrors writeKeepalive).
+		if _, err := w.Write([]byte("data: ")); err != nil {
+			return false
+		}
+		if _, err := w.Write(b); err != nil {
+			return false
+		}
+		if _, err := w.Write([]byte("\n\n")); err != nil {
+			return false
+		}
+		return true
 	}
 	// Replay recent history first.
 	for _, e := range recent {
-		writeEvent(e)
+		if !writeEvent(e) {
+			return
+		}
 	}
 	flusher.Flush()
 
@@ -72,7 +83,9 @@ func serveEventsWithTicks(hub *Hub, w http.ResponseWriter, r *http.Request, tick
 				return
 			}
 		case e := <-ch:
-			writeEvent(e)
+			if !writeEvent(e) {
+				return
+			}
 			flusher.Flush()
 		}
 	}

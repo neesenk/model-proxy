@@ -91,6 +91,12 @@ const (
 	OutcomeNone Outcome = iota
 	OutcomeFailedHard
 	OutcomeRateLimited
+	// OutcomeClientGone: the caller abandoned the request (disconnect or its
+	// own deadline) before the upstream answered. It is not a provider verdict
+	// — no circuit-breaker tick, no failover effects — and orchestration stops
+	// the failover loop instead of burning the remaining targets on a dead
+	// request context.
+	OutcomeClientGone
 )
 
 // Commit is the only post-commit datum orchestration needs for Shadow: the

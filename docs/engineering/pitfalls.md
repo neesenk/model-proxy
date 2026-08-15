@@ -62,6 +62,17 @@
 25. request log list/report 不得在 metadata 查询中持有完整 body。
 26. 运行态按名字落盘必须经过 config fingerprint；测试不得写真实 `~/.model-proxy`。
 27. quota snapshot 超过 `3×poll_interval` 或带错误时只能视为 unknown。
+28. Go 标准库行为：取消一个**带请求 body** 的外发 `http.Client.Do` 不会立刻
+    关闭到上游的连接（不带 body 的会）。客户端在响应头阶段断开后，代理与上游
+    之间的连接会存留到上游响应或 `upstream_timeout` 兜底。测试里模拟"上游挂起
+    等待取消"时，不要依赖上游 handler 的 `r.Context().Done()` 传播，用测试自己
+    控制的释放信号（见 `internal/app/client_cancel_test.go` 的 release channel）。
+29. `quota_poll_interval` 在 tracker `Start()` 时读取一次并冻结 ticker：reload
+    热改不生效，重启才生效（Web 配置编辑该键后需重启 daemon）。
+30. sticky 落盘键不区分命名空间：客户端可控的 `x-claude-code-session-id` 与
+    route 名共享同一键空间。会话 id 恰好等于某 route 名时，会话选择会按该 route
+    的 sticky 落盘并在重启后恢复。route 名是操作者控制的，实践中撞名概率极低，
+    但新增 route 命名时避开常见会话 id 形态。
 
 ## 回归要求
 

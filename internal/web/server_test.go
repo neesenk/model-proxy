@@ -110,6 +110,37 @@ func TestServeUITraversalGuard(t *testing.T) {
 	if got, want := assets.opened, []string{"assets/app.js"}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("normal asset Open paths=%q want %q", got, want)
 	}
+	if got := good.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("asset Cache-Control=%q want no-cache", got)
+	}
+	if got := good.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("asset X-Content-Type-Options=%q want nosniff", got)
+	}
+}
+
+func TestServeUICacheHeadersOnIndex(t *testing.T) {
+	s, err := New(Options{
+		Reads: testReadAPI{},
+		Commands: testCommandAPI{begin: func(context.Context, string) (appapi.LoginStart, error) {
+			return appapi.LoginStart{}, errors.New("not implemented")
+		}},
+		Assets: fstest.MapFS{"assets/index.html": {Data: []byte("ok")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ui/", nil))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "ok" {
+		t.Fatalf("index status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("index Cache-Control=%q want no-cache", got)
+	}
+	if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("index X-Content-Type-Options=%q want nosniff", got)
+	}
 }
 
 func TestServerLoginTransport(t *testing.T) {

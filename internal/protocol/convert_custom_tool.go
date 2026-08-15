@@ -12,6 +12,8 @@ package protocol
 
 import (
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	sonic "github.com/bytedance/sonic"
 )
@@ -224,7 +226,33 @@ func unescapeHold(s string, complete bool) string {
 				}
 				return b.String()
 			}
-			if r, ok := decodeHex4(s[i+2 : i+6]); ok {
+			r, ok := decodeHex4(s[i+2 : i+6])
+			if !ok {
+				i += 4 // invalid hex: skip the escape (pre-existing behavior)
+				break
+			}
+			if isHighSurrogate(r) {
+				// A high surrogate must pair with the immediately following
+				// \uDC00-\uDFFF escape. json.dumps(ensure_ascii=True) — the
+				// common Python client — escapes emoji as such pairs, and a
+				// pair can be SPLIT across stream chunks.
+				if i+12 <= len(s) && s[i+6] == '\\' && s[i+7] == 'u' {
+					if low, lowOK := decodeHex4(s[i+8 : i+12]); lowOK && isLowSurrogate(low) {
+						b.WriteRune(utf16.DecodeRune(r, low))
+						i += 10 // both escapes (12) minus the common i += 2 below
+						break
+					}
+				} else if !complete && partialLowEscapeSuffix(s[i+6:]) {
+					// The next chunk may complete the pair: hold the high
+					// surrogate instead of corrupting it to U+FFFD now.
+					return b.String()
+				}
+				// Unpaired high surrogate (stream over, or a non-escape
+				// follows): U+FFFD, matching encoding/json.
+				b.WriteRune(utf8.RuneError)
+			} else if isLowSurrogate(r) {
+				b.WriteRune(utf8.RuneError) // unpaired low surrogate
+			} else {
 				b.WriteRune(r)
 			}
 			i += 4 // fall through to the common i += 2
@@ -239,8 +267,8 @@ func unescapeHold(s string, complete bool) string {
 	return b.String()
 }
 
-// decodeHex4 parses 4 hex digits into a rune (BMP only; surrogate pairs pass
-// through as-is, matching JSON-decoder leniency needs of a preview stream).
+// decodeHex4 parses 4 hex digits into a rune (surrogate code units included —
+// pairing is handled by the caller).
 func decodeHex4(s string) (rune, bool) {
 	v := 0
 	for _, c := range []byte(s) {
@@ -257,4 +285,35 @@ func decodeHex4(s string) (rune, bool) {
 		}
 	}
 	return rune(v), true
+}
+
+func isHighSurrogate(r rune) bool { return r >= 0xD800 && r <= 0xDBFF }
+func isLowSurrogate(r rune) bool  { return r >= 0xDC00 && r <= 0xDFFF }
+
+// partialLowEscapeSuffix reports whether rest (the bytes after a trailing
+// high-surrogate escape) could still GROW into a complete \uXXXX low-surrogate
+// escape once more chunks arrive: "", "\", "\\u", "\\uD", "\\uD8", "\\uD83".
+func partialLowEscapeSuffix(rest string) bool {
+	if len(rest) >= 6 {
+		return false
+	}
+	if rest == "" {
+		return true
+	}
+	if rest[0] != '\\' {
+		return false
+	}
+	if len(rest) == 1 {
+		return true
+	}
+	if rest[1] != 'u' {
+		return false
+	}
+	for _, c := range []byte(rest[2:]) {
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHex {
+			return false
+		}
+	}
+	return true
 }

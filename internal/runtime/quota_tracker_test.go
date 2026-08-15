@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,13 +68,31 @@ func TestPollAllMergesAndPersists(t *testing.T) {
 		t.Fatalf("PollAll snapshot = %+v", s)
 	}
 
+	// Load restores only keys that exist in the CURRENT provider set (the
+	// production order is BuildProviders → Start → Load, so provs() is
+	// populated). Quota keys include pool virtual ids: keys from removed
+	// accounts/providers must NOT merge back — they used to re-persist
+	// forever and revive on every restart.
 	fresh := NewQuotaTracker(path,
 		func() *configdomain.Config { return &configdomain.Config{} },
-		func() map[string]provider.Provider { return nil },
+		func() map[string]provider.Provider { return map[string]provider.Provider{"x": &snapshotProv{rem: 0}} },
 		NewManager(0))
 	fresh.Load()
 	if s := fresh.Snapshot("x"); s == nil || s.RemainingPct != 0.5 {
 		t.Fatalf("Load snapshot = %+v", s)
+	}
+	if s := fresh.Snapshot("ghost"); s != nil {
+		t.Fatalf("ghost key restored = %+v, want filtered", s)
+	}
+	if err := fresh.Persist(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "ghost") {
+		t.Fatal("ghost key re-persisted — stale quota keys never shrink")
 	}
 }
 

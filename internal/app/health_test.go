@@ -129,7 +129,12 @@ func TestCircuit_HalfOpenClosesOnSuccess(t *testing.T) {
 	for i := 0; i < 3; i++ { // trip the circuit (3 failures)
 		postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	}
-	time.Sleep(80 * time.Millisecond)                                        // cooldown expires → half-open
+	// Cooldown expiry is observable (provider available again) — poll instead
+	// of sleeping a fixed 80ms.
+	waitUntil(t, "primary circuit cooldown → half-open", func() bool {
+		h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]
+		return ok && h.Available
+	})
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // probe: primary recovered → close
 	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary available again
 
@@ -221,8 +226,15 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 	}
 	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary open → fallback, sticky=fallback
 	fbAfterFailover := fHits.Load()
+	stickyFrom := time.Now()
 
-	time.Sleep(80 * time.Millisecond) // primary cooldown expired (half-open) but fallback dwell (150ms) still active
+	// Wait for the cooldown to lapse (observable), not a fixed sleep: this
+	// ends at the earliest moment primary is probeable, leaving the whole
+	// dwell window as margin.
+	waitUntil(t, "primary circuit cooldown → half-open", func() bool {
+		h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]
+		return ok && h.Available
+	})
 	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	if got := fHits.Load(); got != fbAfterFailover+1 {
 		t.Errorf("within dwell: fallback should still serve (sticky), got fHits %d→%d", fbAfterFailover, got)
@@ -231,7 +243,11 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 		t.Errorf("within dwell: primary should not be retried yet, got pHits %d (want 3)", got)
 	}
 
-	time.Sleep(100 * time.Millisecond) // dwell (150ms) now expired → re-evaluate
+	// Dwell (150ms, set at the failover post) now expired → re-evaluate. Sleep
+	// to the KNOWN deadline captured at the dwell anchor, not a fixed guess.
+	if rest := time.Until(stickyFrom.Add(200 * time.Millisecond)); rest > 0 {
+		time.Sleep(rest)
+	}
 	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	if got := pHits.Load(); got != 4 {
 		t.Errorf("after dwell: primary should be re-evaluated (half-open probe), got pHits %d (want 4)", got)
@@ -329,7 +345,12 @@ func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
 	for i := 0; i < 3; i++ { // trip the circuit (3× 500)
 		post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	}
-	time.Sleep(80 * time.Millisecond) // cooldown expires → half-open
+	// Cooldown expiry is observable (provider available again) — poll instead
+	// of sleeping a fixed 80ms.
+	waitUntil(t, "primary circuit cooldown → half-open", func() bool {
+		h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]
+		return ok && h.Available
+	})
 	st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	if st != 400 {
 		t.Fatalf("half-open probe: status = %d, want 400 (committed client error)", st)

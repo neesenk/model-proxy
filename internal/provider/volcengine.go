@@ -207,11 +207,22 @@ func getAFPUsage(ak, sk string) (*AfpUsage, error) {
 		return nil, fmt.Errorf("GetAFPUsage HTTP %d: %s", resp.StatusCode, truncateStr(string(body), 300))
 	}
 	var wrap struct {
-		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`
-		Result           AfpUsage        `json:"Result"`
+		ResponseMetadata struct {
+			Error struct {
+				Code    string `json:"Code"`
+				Message string `json:"Message"`
+			} `json:"Error"`
+		} `json:"ResponseMetadata"`
+		Result AfpUsage `json:"Result"`
 	}
 	if err := json.Unmarshal(body, &wrap); err != nil {
 		return nil, fmt.Errorf("parse GetAFPUsage: %w", err)
+	}
+	// Volcengine OpenAPI reports business errors as HTTP 200 + a non-empty
+	// ResponseMetadata.Error (e.g. invalid AK/SK). Only Code/Message from the
+	// response body enter the error string — never the signing SecretKey.
+	if e := wrap.ResponseMetadata.Error; e.Code != "" || e.Message != "" {
+		return nil, fmt.Errorf("GetAFPUsage: %s: %s", e.Code, e.Message)
 	}
 	return &wrap.Result, nil
 }

@@ -182,7 +182,12 @@ func TestCookieHeader(t *testing.T) {
 	}
 }
 
-// TestLoopbackServer_RejectsForeignHost verifies the callback origin check rejects non-loopback hosts.
+// TestLoopbackServer_RejectsForeignHost verifies the callback origin check
+// rejects non-loopback hosts with 403 — and, critically, that the rejection
+// does NOT abort the login flow: any local process can hit the port with a
+// crafted Host header, and writing the error to ErrCh used to fail the whole
+// SSO login on that probe. After the hostile request the server must still
+// complete a genuine callback.
 func TestLoopbackServer_RejectsForeignHost(t *testing.T) {
 	ls, err := NewLoopbackServer()
 	if err != nil {
@@ -200,7 +205,28 @@ func TestLoopbackServer_RejectsForeignHost(t *testing.T) {
 		t.Fatalf("foreign Host request failed before callback validation: %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("foreign host status=%d want %d", resp.StatusCode, http.StatusBadRequest)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("foreign host status=%d want %d", resp.StatusCode, http.StatusForbidden)
+	}
+	select {
+	case err := <-ls.ErrCh:
+		t.Fatalf("origin rejection must not abort the login flow (ErrCh got %v)", err)
+	default:
+	}
+	// The login flow keeps waiting and a genuine callback still completes.
+	good, err := http.NewRequest("GET", ls.CallbackURL(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gresp, err := http.DefaultTransport.RoundTrip(good)
+	if err != nil {
+		t.Fatalf("genuine callback request failed: %v", err)
+	}
+	gresp.Body.Close()
+	if gresp.StatusCode != http.StatusOK {
+		t.Errorf("genuine callback status=%d want %d", gresp.StatusCode, http.StatusOK)
+	}
+	if _, err := ls.WaitForCookie(time.Second); err != nil {
+		t.Fatalf("login did not complete after hostile probe: %v", err)
 	}
 }

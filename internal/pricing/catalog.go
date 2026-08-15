@@ -6,6 +6,7 @@ package pricing
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -79,7 +80,11 @@ func parsePrice(s string) float64 {
 	return value
 }
 
-func parseOpenRouter(blob []byte) *Catalog {
+// parseOpenRouter decodes an OpenRouter pricing payload. A malformed body or
+// an empty data array is an ERROR, never an empty catalog: the 200 path in
+// EnsureFresh persists the parsed result, and persisting an empty catalog
+// would poison a previously good cache until upstream changes its ETag.
+func parseOpenRouter(blob []byte) (*Catalog, error) {
 	var raw struct {
 		Data []struct {
 			ID      string `json:"id"`
@@ -92,7 +97,10 @@ func parseOpenRouter(blob []byte) *Catalog {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(blob, &raw); err != nil {
-		return Empty()
+		return Empty(), fmt.Errorf("pricing source returned malformed JSON: %w", err)
+	}
+	if len(raw.Data) == 0 {
+		return Empty(), fmt.Errorf("pricing source returned an empty model list")
 	}
 
 	catalog := Empty()
@@ -114,7 +122,10 @@ func parseOpenRouter(blob []byte) *Catalog {
 			ranks[name] = rank
 		}
 	}
-	return catalog
+	if len(catalog.ByModel) == 0 {
+		return Empty(), fmt.Errorf("pricing source listed no usable models")
+	}
+	return catalog, nil
 }
 
 // Lookup returns the exact bare-name catalog entry. It is nil-safe.

@@ -94,9 +94,12 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 				RequestID: requestID,
 				Agent:     counters.DetectAgent(r),
 				Protocol:  proto,
-				Exposed:   calledModel,
-				Provider:  "(cache)",
-				Status:    e.Status(),
+				// Same mapping as the start event above: with claude_mapping
+				// the live view must show ONE exposed name per request, not
+				// the called name on start and the mapped name on end.
+				Exposed:  exposed,
+				Provider: "(cache)",
+				Status:   e.Status(),
 			})
 			w.Header().Set("x-mp-cache", "hit")
 			_ = responsecache.Replay(w, e)
@@ -193,6 +196,16 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	for round := 0; ; round++ {
 		res := p.serveOnce(execution, &st)
 		if res.committed {
+			return
+		}
+		if res.clientGone {
+			// Client went away before any commit — no terminal status is
+			// writable to a dead connection. Close the live event pair as 499
+			// (client closed request), same as the cooldown-wait cancel path.
+			p.events.Publish(observeevents.Event{
+				Type: "end", Ts: time.Now().UnixMilli(), RequestID: requestID,
+				Agent: agent, Protocol: proto, Exposed: exposed, Status: 499,
+			})
 			return
 		}
 		if res.conversionErr != nil && len(res.tried) == 0 {
@@ -302,11 +315,16 @@ type serveState struct {
 // terminal status derives from these (pure cooldown → 429; any hard → 502),
 // NOT from a racy health re-read at terminal time.
 type serveResult struct {
-	committed     bool
-	firstTried    RouteTarget
-	tried         map[string]bool            // providers actually attempted this pass
-	sawHard       bool                       // conn/timeout/5xx/401/build/model-denied-class failure
-	sawCooldown   bool                       // at least one 429 this pass
+	committed   bool
+	firstTried  RouteTarget
+	tried       map[string]bool // providers actually attempted this pass
+	sawHard     bool            // conn/timeout/5xx/401/build/model-denied-class failure
+	sawCooldown bool            // at least one 429 this pass
+	// clientGone: the caller disconnected before any target committed. The
+	// failover loop stops immediately — every remaining target would fail
+	// instantly on the dead request context and (pre-fix) each burned a
+	// circuit-breaker tick for a provider that never misbehaved.
+	clientGone    bool
 	conversionErr *protocol.UnsupportedError // first client feature no candidate conversion could safely represent
 	// effectiveTargets is the target set serveOnce actually considered this pass
 	// (after scheduling drops cooling targets, request-aware routing narrows, or a
@@ -364,6 +382,12 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 	res := serveResult{firstTried: firstTried, tried: map[string]bool{}}
 	for ti := 0; ti < len(ordered); ti++ {
 		t := ordered[ti]
+		// A cancelled request context means every remaining target would fail
+		// instantly in the executor — stop before doing per-target work.
+		if r.Context().Err() != nil {
+			res.clientGone = true
+			break
+		}
 		// Fusion orchestration: {provider: fusion, model: <recipe>} is NOT a
 		// provider — intercept before the providerConfig lookup and run the
 		// panel→synthesis engine (its synthesizer leg reuses tryTarget). A
@@ -490,6 +514,11 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			res.sawHard = true
 		case targetexec.OutcomeRateLimited:
 			res.sawCooldown = true
+		case targetexec.OutcomeClientGone:
+			res.clientGone = true
+		}
+		if res.clientGone {
+			break
 		}
 		if result.Committed {
 			p.dispatchShadowAfterCommit(

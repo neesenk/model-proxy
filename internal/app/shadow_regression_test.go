@@ -29,18 +29,18 @@ func TestShouldShadow(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	one := 1.0
 	p.shadow.Store(shadowexec.NewRuntime(shadowexec.Options{SampleRate: &one, MaxConcurrent: 1}))
-	if !p.shouldShadow() {
+	if !p.shadow.Load().ShouldSample() {
 		t.Error("rate=1.0 should return true")
 	}
 	// rate <= 0 → always false.
 	zero := 0.0
 	p.shadow.Store(shadowexec.NewRuntime(shadowexec.Options{SampleRate: &zero, MaxConcurrent: 1}))
-	if p.shouldShadow() {
+	if p.shadow.Load().ShouldSample() {
 		t.Error("rate=0 should return false")
 	}
 	// nil runtime → false.
 	p.shadow.Store(nil)
-	if p.shouldShadow() {
+	if p.shadow.Load().ShouldSample() {
 		t.Error("nil shadow runtime should return false")
 	}
 }

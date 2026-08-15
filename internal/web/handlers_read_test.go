@@ -551,6 +551,19 @@ func TestReadHelperBranches(t *testing.T) {
 	if _, err := tailFile(filepath.Join(t.TempDir(), "none"), 1); err == nil {
 		t.Fatal("missing tail file unexpectedly succeeded")
 	}
+	for name, contents := range map[string][]byte{"empty file": nil, "newline only": []byte("\n")} {
+		empty := filepath.Join(t.TempDir(), name+".log")
+		if err := os.WriteFile(empty, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := tailFile(empty, 20)
+		if err != nil {
+			t.Fatalf("tailFile(%s): %v", name, err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("tailFile(%s) = %#v, want empty line list", name, got)
+		}
+	}
 
 	recorder := httptest.NewRecorder()
 	writePortErr(recorder, http.StatusInternalServerError, errors.New("plain"))

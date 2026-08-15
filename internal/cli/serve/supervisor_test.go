@@ -2,8 +2,12 @@ package serve
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -96,6 +100,97 @@ func waitSupervisorResult(t *testing.T, done <-chan error) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("runSupervisor did not return")
+	}
+}
+
+// supervisorArgs must forward --log-file: without it the supervisor resolves a
+// different log (and pid) file than the parent claimed in Daemonize whenever
+// the flag is set.
+func TestSupervisorArgsForwardsLogFile(t *testing.T) {
+	if got, want := supervisorArgs(Args{Config: "c.yaml"}), []string{"serve", "--config", "c.yaml"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("supervisorArgs(no log file) = %v, want %v", got, want)
+	}
+	got := supervisorArgs(Args{Config: "c.yaml", LogFile: "/tmp/x.log"})
+	want := []string{"serve", "--config", "c.yaml", "--log-file", "/tmp/x.log"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("supervisorArgs(log file) = %v, want %v", got, want)
+	}
+}
+
+// waitForProcessExit reports a dead process immediately and a live one only
+// after the deadline (bounded poll, never a fixed sleep).
+func TestWaitForProcessExit(t *testing.T) {
+	// Dead: spawn and reap a child so its pid is definitively gone.
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForProcessExit(dead.Process, time.Second) {
+		t.Fatal("waitForProcessExit(dead) = false, want true")
+	}
+
+	// Alive (self): must hit the deadline and report still-running.
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if waitForProcessExit(self, 80*time.Millisecond) {
+		t.Fatal("waitForProcessExit(self) = true, want false")
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Fatalf("waitForProcessExit(self) waited %s, far beyond its deadline", waited)
+	}
+}
+
+// stopDaemonHelper is a child that ignores SIGTERM (signal.Notify) and can only
+// be stopped by SIGKILL — the stand-in for a stuck daemon.
+func TestStopDaemonHelper(t *testing.T) {
+	if os.Getenv("MP_STOP_HELPER") != "1" {
+		t.Skip("helper subprocess only")
+	}
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, syscall.SIGTERM)
+	<-make(chan struct{}) // block until SIGKILL
+}
+
+// Regression: `serve stop` printed "✓ Killed." immediately after SIGKILL,
+// while the daemon could still be running (holding the listen port). After
+// stopDaemonProcess returns claiming the kill, the process must really be gone.
+func TestStopDaemonProcess_WaitsForExitAfterKill(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGTERM/SIGKILL liveness semantics differ on Windows")
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestStopDaemonHelper", "--", "stop-helper")
+	cmd.Env = append(os.Environ(), "MP_STOP_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Reap the child as soon as SIGKILL lands, so Signal(0) on its pid fails
+	// instead of reporting a zombie. The cleanup is the single waitDone
+	// consumer — reading it in the body too would deadlock the cleanup.
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-waitDone })
+
+	proc, err := os.FindProcess(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(t.TempDir(), "daemon.pid")
+	if err := WritePidFile(pidPath, cmd.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+
+	// Short graceful budget: the helper ignores SIGTERM, so this escalates to
+	// SIGKILL quickly and then verifies the exit (the production budget is 5s).
+	stopDaemonProcess(proc, cmd.Process.Pid, pidPath, 150*time.Millisecond, stopKillExitWait, func(s string) string { return s }, func(s string) string { return s })
+
+	if err := proc.Signal(syscall.Signal(0)); err == nil {
+		t.Fatal("process still signalable after stopDaemonProcess reported the kill")
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("pid file not removed on kill path: %v", err)
 	}
 }
 

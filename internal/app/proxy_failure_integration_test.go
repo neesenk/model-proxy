@@ -303,11 +303,11 @@ func TestUC_ClientDisconnectStopsUpstream(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Give the proxy a moment to propagate the write error up to the upstream.
-	time.Sleep(300 * time.Millisecond)
-	if atomic.LoadInt32(&upstreamBroken) == 0 {
-		t.Error("upstream never saw a write error — proxy may be keep pulling after client disconnect")
-	}
+	// The upstream write error is observable — poll for it instead of
+	// sleeping a fixed 300ms (AGENTS.md: no fixed sleeps to prove timing).
+	waitUntil(t, "upstream to see the disconnect write error", func() bool {
+		return atomic.LoadInt32(&upstreamBroken) == 1
+	})
 }
 
 // --- UC9: all targets fail → 502 ---

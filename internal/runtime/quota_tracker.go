@@ -40,10 +40,11 @@ type QuotaTracker struct {
 	// the unique temp file in persist() — the fixed ".tmp" name used to make a
 	// concurrent writer's rename fail ENOENT.
 	persistMu sync.Mutex
-	// retryAttempts/retryBackoff tune fetchQuota's transient-error retry.
+	// retryAttemptsValue/retryBackoffValue tune fetchQuota's transient-error
+	// retry; reads go through the locked accessors below.
 	// Defaults (3 / 1s) are set in newQuotaTracker; tests shrink them to stay fast.
-	retryAttempts int
-	retryBackoff  time.Duration
+	retryAttemptsValue int
+	retryBackoffValue  time.Duration
 	// RefreshGuard dedupes 429-triggered refreshes per provider (inFlight
 	// coalesces concurrent ones; last debounces ones that just ran), so a 429
 	// storm doesn't fire N upstream Quota() calls + N persists. Guarded by mu.
@@ -91,15 +92,15 @@ func NewQuotaTracker(
 		panic("quota tracker requires a runtime Manager")
 	}
 	return &QuotaTracker{
-		runtime:       runtimeManager,
-		RefreshGuard:  map[string]*RefreshState{},
-		Path:          path,
-		cfg:           cfg,
-		provs:         provs,
-		stopCh:        make(chan struct{}),
-		accepting:     true,
-		retryAttempts: 3,
-		retryBackoff:  time.Second,
+		runtime:            runtimeManager,
+		RefreshGuard:       map[string]*RefreshState{},
+		Path:               path,
+		cfg:                cfg,
+		provs:              provs,
+		stopCh:             make(chan struct{}),
+		accepting:          true,
+		retryAttemptsValue: 3,
+		retryBackoffValue:  time.Second,
 	}
 }
 
@@ -339,7 +340,7 @@ func (t *QuotaTracker) RefreshOne(name string, generations ...uint64) {
 func (t *QuotaTracker) SetRetryBackoff(d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.retryBackoff = d
+	t.retryBackoffValue = d
 }
 
 // StopChannel returns the channel closed by Stop (read-only lifecycle probe
@@ -380,7 +381,7 @@ func (t *QuotaTracker) CommitSnapshot(generation uint64, name string, snapshot *
 // time. Returns the final snapshot (Err set if all attempts failed); never nil.
 func (t *QuotaTracker) FetchQuota(p provider.Provider, now time.Time) *provider.QuotaSnapshot {
 	var s *provider.QuotaSnapshot
-	for attempt := 0; attempt < t.retryAttempts; attempt++ {
+	for attempt := 0; attempt < t.retryAttempts(); attempt++ {
 		s, _ = p.Quota()
 		if s == nil {
 			s = &provider.QuotaSnapshot{Billing: provider.BillingUnknown, AsOf: now}
@@ -388,17 +389,36 @@ func (t *QuotaTracker) FetchQuota(p provider.Provider, now time.Time) *provider.
 		if s.Err == "" || !IsTransientQuotaErr(s.Err) {
 			break // success, or a non-transient error - don't retry
 		}
-		if attempt < t.retryAttempts-1 {
+		if attempt < t.retryAttempts()-1 {
 			// backoff: b, 2b, 4b ... (1s, 2s by default). Respects stop so a
-			// shutting-down daemon isn't held by a retry sleep.
+			// shutting-down daemon isn't held by a retry sleep — and stops the
+			// remaining attempts too: shutdown must not fire more upstream
+			// calls (the stop wake-up is the last thing we do).
 			select {
-			case <-time.After(t.retryBackoff << uint(attempt)):
+			case <-time.After(t.retryBackoff() << uint(attempt)):
 			case <-t.stopCh:
+				s.AsOf = now
+				return s
 			}
 		}
 	}
 	s.AsOf = now
 	return s
+}
+
+// retryAttempts/retryBackoff are read on the fetch path and written by tests
+// via SetRetryBackoff under t.mu; route reads through the same lock so a
+// concurrent adjustment can't race.
+func (t *QuotaTracker) retryAttempts() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.retryAttemptsValue
+}
+
+func (t *QuotaTracker) retryBackoff() time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.retryBackoffValue
 }
 
 // isTransientQuotaErr reports whether a quota-fetch error is worth retrying.
@@ -488,6 +508,13 @@ func (t *QuotaTracker) Persist() error {
 		remove()
 		return err
 	}
+	// fsync before rename: a crash+reboot must not leave the rename durable
+	// while the data isn't (empty state file).
+	if err := f.Sync(); err != nil {
+		f.Close()
+		remove()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		remove()
 		return err
@@ -516,7 +543,15 @@ func (t *QuotaTracker) Load() {
 		return
 	}
 	quota := make(map[string]*provider.QuotaSnapshot, len(wrap.Providers))
+	// Filter to the CURRENT provider set: quota keys include virtual ids from
+	// pools, so keys from removed accounts/providers would otherwise merge
+	// into the generation and be re-persisted forever (reviving on every
+	// restart). Scheduling reads are lazy, but the file never shrinks.
+	current := t.provs()
 	for k, v := range wrap.Providers {
+		if _, active := current[k]; !active {
+			continue
+		}
 		quota[k] = &provider.QuotaSnapshot{
 			Billing: v.Billing, RemainingPct: v.RemainingPct,
 			Windows: v.Windows, AsOf: v.AsOf, Err: v.Err,

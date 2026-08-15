@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -152,6 +153,23 @@ func TestZhipuUsage_FallbackModelList(t *testing.T) {
 	out := captureStdoutProvider(func() { _ = p.Usage() })
 	if !contains(out, "1 models available") || !contains(out, "gpt-4") {
 		t.Errorf("zhipu usage model-list fallback missing marker:\n%s", out)
+	}
+}
+
+// The model-list fallback shows the owner in the second column — the model ID
+// must not be printed twice. Regression: the second column used to repeat m.ID.
+func TestZhipuUsage_FallbackModelListShowsOwner(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2","owned_by":"zhipuai"}]}`))
+	}))
+	defer srv.Close()
+	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}, providerName: "zhipu"}
+	out := captureStdoutProvider(func() { _ = p.Usage() })
+	if !contains(out, "zhipuai") {
+		t.Errorf("model-list fallback missing owner %q:\n%s", "zhipuai", out)
+	}
+	if strings.Count(out, "glm-5.2") != 1 {
+		t.Errorf("model id printed %d times, want exactly 1:\n%s", strings.Count(out, "glm-5.2"), out)
 	}
 }
 

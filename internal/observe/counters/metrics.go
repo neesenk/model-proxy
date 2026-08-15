@@ -117,17 +117,14 @@ func (s *MetricsStore) AddLatency(provider, model string, latencyMs, ttftMs uint
 }
 
 // snapshot returns a detached per-(provider,model) copy. Callers may read the
-// returned map without holding the lock.
+// returned map without holding the lock. Entries are read UNDER the lock: a
+// concurrent Reset between key collection and a re-creating Entry lookup used
+// to resurrect phantom zero-count entries into the snapshot.
 func (s *MetricsStore) Snapshot() map[PMKey]ProviderMetricsSnapshot {
 	s.mu.Lock()
-	keys := make([]PMKey, 0, len(s.m))
-	for k := range s.m {
-		keys = append(keys, k)
-	}
-	s.mu.Unlock()
-	out := map[PMKey]ProviderMetricsSnapshot{}
-	for _, k := range keys {
-		pm := s.Entry(k)
+	defer s.mu.Unlock()
+	out := make(map[PMKey]ProviderMetricsSnapshot, len(s.m))
+	for k, pm := range s.m {
 		out[k] = ProviderMetricsSnapshot{
 			Requests:       pm.Requests.Load(),
 			Failovers:      pm.Failovers.Load(),

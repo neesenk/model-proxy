@@ -8,24 +8,6 @@ import (
 	"testing"
 )
 
-// setHome redirects HOME to a temp dir for tests that exercise providers reading
-// credential files from ~/.model-proxy. Returns a restore func. Not safe for
-// parallel tests (HOME is process-global); these tests run sequentially.
-func setHome(t *testing.T, dir string) func() {
-	t.Helper()
-	old, had := os.LookupEnv("HOME")
-	if err := os.Setenv("HOME", dir); err != nil {
-		t.Fatalf("set HOME: %v", err)
-	}
-	return func() {
-		if had {
-			os.Setenv("HOME", old)
-		} else {
-			os.Unsetenv("HOME")
-		}
-	}
-}
-
 // newDeepSeekTestProxy wires a real DeepSeekProvider (via NewProxy/buildProviders)
 // against two mock upstreams — openaiURL (openai_base_url) and anthropicURL
 // (anthropic_base_url) — with a fake key file under a temp HOME. Returns the
@@ -33,7 +15,7 @@ func setHome(t *testing.T, dir string) func() {
 func newDeepSeekTestProxy(t *testing.T, openaiURL, anthropicURL string) *httptest.Server {
 	t.Helper()
 	tmpHome := t.TempDir()
-	t.Cleanup(setHome(t, tmpHome))
+	t.Setenv("HOME", tmpHome)
 	keyFile := filepath.Join(tmpHome, ".model-proxy", "deepseek_apikey.json")
 	if err := os.MkdirAll(filepath.Dir(keyFile), 0o700); err != nil {
 		t.Fatal(err)

@@ -53,7 +53,8 @@ func TestVolcengineAuthHeaders_BothSchemes(t *testing.T) {
 // TestValidateVolcengineAKSK exercises the AK/SK validation wrapper's full
 // round-trip (sign + GET + status check) against a mock Volcengine OpenAPI by
 // pointing volcengineOpenAPIBase at an httptest server. nil on 200 + parseable
-// AFP result; error on non-200. The V4 signing itself is covered by
+// AFP result; error on non-200 AND on 200 + ResponseMetadata.Error (the
+// Volcengine OpenAPI business-error shape). The V4 signing itself is covered by
 // volcengine_sign_test.go — here it only needs to produce a request the mock answers.
 func TestValidateVolcengineAKSK(t *testing.T) {
 	orig := volcengineOpenAPIBase
@@ -78,6 +79,27 @@ func TestValidateVolcengineAKSK(t *testing.T) {
 	volcengineOpenAPIBase = bad.URL
 	if err := ValidateVolcengineAKSK("AKtest", "SKtest"); err == nil {
 		t.Error("401: want error, got nil")
+	}
+
+	// 200 + ResponseMetadata.Error → business error (Volcengine OpenAPI
+	// reports failures as HTTP 200 with an Error payload). Must surface the
+	// Code/Message, never the SecretKey.
+	bizErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ResponseMetadata":{"RequestId":"req-1","Error":{"Code":"InvalidAccessKey","Message":"ak/sk rejected"}},"Result":{"PlanType":"agent"}}`))
+	}))
+	defer bizErr.Close()
+	volcengineOpenAPIBase = bizErr.URL
+	err := ValidateVolcengineAKSK("AKtest", "SKtest-supersecret")
+	if err == nil {
+		t.Fatal("200 + metadata.Error: want error, got nil")
+	}
+	for _, want := range []string{"GetAFPUsage", "InvalidAccessKey", "ak/sk rejected"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("200 + metadata.Error: error %q missing %q", err.Error(), want)
+		}
+	}
+	if strings.Contains(err.Error(), "SKtest-supersecret") {
+		t.Errorf("200 + metadata.Error: error leaks SecretKey: %q", err.Error())
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 // cmdServe dispatches by role and subcommand:
@@ -98,17 +99,14 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 			// Write a pid file so `login`/`logout` can SIGHUP this foreground
 			// serve to hot-reload new credentials. The daemon supervisor writes
 			// its own pid file; the worker skips this block (envRole is set), so
-			// there's no double-write. Remove it on SIGINT/SIGTERM so it doesn't
-			// go stale (the reload path self-heals stale pids too, via Signal(0)).
-			pidPath = cliserve.PidFilePath(lf)
-			if err := cliserve.WritePidFile(pidPath, os.Getpid()); err != nil {
-				pidPath = "" // failed to write -> don't try to remove on exit
-			}
+			// there's no double-write. When a live daemon (or another serve)
+			// already owns the file, DON'T take it over — overwriting would
+			// point stop/reload at us, and our exit cleanup would delete the
+			// daemon's pid file and orphan it.
+			pidPath = cliserve.ClaimForegroundPidFile(lf)
 		}
 	}
-	if pidPath != "" {
-		defer os.Remove(pidPath)
-	}
+	defer cliserve.ReleasePidFileIfOwned(pidPath)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	runtime := newApplicationRuntime(cfg, sa)
 
@@ -127,7 +125,14 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 		runtime.Close()
 		return err
 	}
-	server := &http.Server{Addr: runtime.StartupConfig.Listen, Handler: runtime.Handler}
+	// ReadHeaderTimeout bounds how long a connection may sit before its
+	// headers arrive: without it a slow/idle peer pins a handler goroutine
+	// forever (the body timeout comes from upstream_timeout per request).
+	server := &http.Server{
+		Addr:              runtime.StartupConfig.Listen,
+		Handler:           runtime.Handler,
+		ReadHeaderTimeout: 30 * time.Second,
+	}
 	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 

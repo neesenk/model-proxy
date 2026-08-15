@@ -60,3 +60,39 @@ func TestNewAndLookupDefensivelyCopy(t *testing.T) {
 		t.Fatal("nil catalog accessors must be zero-safe")
 	}
 }
+
+// Regression: provider folding used `for provider := range raw`, so two
+// equal-rank providers defining the same model name could win depending on Go's
+// random map iteration order. The sorted-first provider must always win,
+// deterministically, for equal-rank collisions.
+func TestParseEqualRankCollisionIsDeterministic(t *testing.T) {
+	conflict := `{
+	  "aaa-mirror": {"models": {
+	    "shared-model": {"limit":{"context":111,"output":11},"modalities":{"input":["text"],"output":["text"]}}
+	  }},
+	  "zzz-mirror": {"models": {
+	    "shared-model": {"limit":{"context":999,"output":99},"modalities":{"input":["text"],"output":["text"]}}
+	  }}
+	}`
+	for range 10 {
+		cat, err := parse([]byte(conflict))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, ok := cat.Lookup("shared-model")
+		if !ok || m.Context != 111 || m.Output != 11 {
+			t.Fatalf("equal-rank collision winner=%+v ok=%v, want sorted-first provider aaa-mirror (111/11) every run", m, ok)
+		}
+	}
+	// Canonical rank still beats sort order (openrouter is not canonical; zhipuai is).
+	cat, err := parse([]byte(`{
+	  "openrouter": {"models": {"glm-9.9": {"limit":{"context":999,"output":99}}}},
+	  "zhipuai": {"models": {"glm-9.9": {"limit":{"context":204800,"output":131072}}}}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := cat.Lookup("glm-9.9"); m.Context != 204800 {
+		t.Fatalf("canonical owner lost to sorted-first reseller: %+v", m)
+	}
+}

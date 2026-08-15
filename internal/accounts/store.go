@@ -95,7 +95,7 @@ func (s Store) LoadSnapshot(name, providerID string) (Snapshot, error) {
 		if err := validatePool(providerID, p); err != nil {
 			return Snapshot{Source: SourcePlural}, fmt.Errorf("validate %s: %w", s.PoolPath(name), err)
 		}
-		return Snapshot{Pool: p, Source: SourcePlural}, nil
+		return Snapshot{Pool: normalizePool(providerID, p), Source: SourcePlural}, nil
 	}
 	if !os.IsNotExist(err) {
 		return Snapshot{Source: SourcePlural}, err
@@ -134,6 +134,30 @@ func (s Store) LoadSnapshot(name, providerID string) (Snapshot, error) {
 	return snapshot, nil
 }
 
+// normalizePool converges stored account IDs onto the current AccountID
+// derivation. Pools written before the volcengine identifier changed from the
+// raw access key to its hash would otherwise keep serving credential material
+// inside virtual ids (logs, request-log JSONL, persisted runtime state) until
+// the file is rewritten, and login dedup would miss the same account (stored
+// plaintext id ≠ newly derived hash). IDs are a pure function of credentials,
+// so entries colliding after normalization are the same identity — the first
+// wins. The pool file itself is rewritten with normalized ids on the next
+// Save; loading alone never writes.
+func normalizePool(providerID string, pool Pool) Pool {
+	normalized := make([]Account, 0, len(pool.Accounts))
+	seen := make(map[string]struct{}, len(pool.Accounts))
+	for _, account := range pool.Accounts {
+		account.ID = AccountID(providerID, account.Credentials())
+		if _, duplicate := seen[account.ID]; duplicate {
+			continue
+		}
+		seen[account.ID] = struct{}{}
+		normalized = append(normalized, account)
+	}
+	pool.Accounts = normalized
+	return pool
+}
+
 func validatePool(providerID string, pool Pool) error {
 	seen := make(map[string]struct{}, len(pool.Accounts))
 	for i, account := range pool.Accounts {
@@ -147,8 +171,7 @@ func validatePool(providerID string, pool Pool) error {
 			return fmt.Errorf("accounts[%d].api_key is empty", i)
 		}
 		if _, duplicate := seen[account.ID]; duplicate {
-			// Do not echo the identifier: for Volcengine it is the access key,
-			// and this validation error is surfaced in startup/reload logs.
+			// Do not echo the identifier into startup/reload logs.
 			return fmt.Errorf("accounts[%d].id duplicates an earlier account", i)
 		}
 		seen[account.ID] = struct{}{}
@@ -188,10 +211,28 @@ func (s Store) Save(name, providerID string, p Pool) error {
 		return fmt.Errorf("marshal pool %s: %w", name, err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	// fsync before rename: credentials must not survive a crash as a renamed
+	// file with unsynced (empty) contents.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	if err := os.Chmod(tmp, 0o600); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -272,12 +313,18 @@ func (s Store) withLock(name string, fn func() error, wait func(time.Duration)) 
 // AccountID returns a stable per-account identifier for dedup + virtual-id
 // suffixing. volcengine keys by AccessKey (account-level); other apikey
 // providers hash the APIKey (key-level). volcengine with no AccessKey falls
-// back to the key hash.
+// back to the key hash. Identifiers are ALWAYS hashes: virtual ids surface in
+// logs, request-log JSONL and persisted runtime state, so the identifier must
+// never carry credential material (AGENTS.md red line 3).
 func AccountID(providerID string, c Credentials) string {
 	if providerID == "volcengine" && c.AccessKey != "" {
-		return c.AccessKey
+		return hashID(c.AccessKey)
 	}
-	sum := sha256.Sum256([]byte(c.APIKey))
+	return hashID(c.APIKey)
+}
+
+func hashID(material string) string {
+	sum := sha256.Sum256([]byte(material))
 	return hex.EncodeToString(sum[:])[:16]
 }
 

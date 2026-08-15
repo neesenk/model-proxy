@@ -76,26 +76,10 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 		os.Exit(1)
 	}
 	if len(pool.Accounts) == 0 {
-		// Pool file exists but is empty — remove it and report not-logged-in.
-		// Re-resolve under the cross-process lock so a concurrent `login` can't
-		// append an account between the unlocked read above and the remove; if
-		// the pool is still empty under the lock, drop the file. Mirrors the
-		// in-lock remove-by-id path below.
-		if err := accountStore().WithLock(provName, func() error {
-			cur, err := accountStore().Load(provName, providerID)
-			if err != nil {
-				return err
-			}
-			if len(cur.Accounts) == 0 {
-				if err := os.Remove(clilogin.PoolPath(provName)); err != nil && !os.IsNotExist(err) {
-					return fmt.Errorf("remove pool file: %w", err)
-				}
-			}
-			return nil
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "logout failed: %v\n", err)
-			os.Exit(1)
-		}
+		// Pool file exists but is empty: an authoritative credential
+		// TOMBSTONE (provider-pools.md) — it must stay on disk. Removing it
+		// would re-open the legacy singular fallback and resurrect an old key
+		// after "removed all accounts".
 		fmt.Println(displaypkg.Yellow("Not logged in."))
 		return
 	}
@@ -155,14 +139,12 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 			}
 			cur.Accounts = out
 		}
-		if len(cur.Accounts) == 0 {
-			if err := os.Remove(clilogin.PoolPath(provName)); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("remove pool file: %w", err)
-			}
-		} else {
-			if err := accountStore().Save(provName, providerID, cur); err != nil {
-				return fmt.Errorf("save pool: %w", err)
-			}
+		// An empty pool is SAVED, not removed: the empty plural file is the
+		// authoritative credential tombstone that also blocks the legacy
+		// singular fallback. Deleting it here would let a stale
+		// <name>_apikey.json resurrect old credentials after logout.
+		if err := accountStore().Save(provName, providerID, cur); err != nil {
+			return fmt.Errorf("save pool: %w", err)
 		}
 		return nil
 	}); err != nil {
@@ -175,7 +157,7 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	} else {
 		fmt.Println(displaypkg.Green("✓ Removed account " + cliframework.Mask(rmID)))
 	}
-	cliserve.MaybeReloadDaemon(cfg)
+	cliserve.MaybeReloadDaemon(args, cfg)
 }
 
 func flagStringValue(args []string, flag string) string {

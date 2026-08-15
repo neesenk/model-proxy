@@ -2075,7 +2075,7 @@ async function removeAccount(provider, id, label) {
     const data = await apiDel(`/api/accounts/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`);
     const accMsg = document.getElementById('acc-msg');
     if (data && data.warning) {
-      showMsg(accMsg, 'warn', `Removed from disk, but not live yet: ${esc(data.warning)} — fix config.yaml and reload. See logs.`);
+      showMsg(accMsg, 'warn', `Removed from disk, but not live yet: ${data.warning} — fix config.yaml and reload. See logs.`);
     } else {
       showMsg(accMsg, 'ok', 'removed — reloading');
     }
@@ -2175,7 +2175,7 @@ async function submitAdd(providerName) {
       // Account saved to disk, but the in-process reload failed (config.yaml
       // unreadable/invalid) — runtime keeps the old set until config is fixed +
       // reloaded. Keep the modal open so the warning is read; see logs.
-      showMsg(msg, 'warn', `Saved, but not live yet: ${esc(data.warning)} — fix config.yaml and reload. See logs.`);
+      showMsg(msg, 'warn', `Saved, but not live yet: ${data.warning} — fix config.yaml and reload. See logs.`);
       return;
     }
     showMsg(msg, 'ok', 'added — reloading');
@@ -2502,6 +2502,12 @@ function analyticsRenderTable(panel, resp) {
 // Wire the persistent #login-cancel button (defined in the static HTML).
 const loginCancelStatic = document.getElementById('login-cancel');
 if (loginCancelStatic) loginCancelStatic.addEventListener('click', closeLoginModal);
+// Esc closes a <dialog> via the `cancel` event, bypassing closeLoginModal —
+// clear the poll timer there too so polling doesn't run behind a closed modal.
+const loginModalEl = document.getElementById('login-modal');
+if (loginModalEl) loginModalEl.addEventListener('cancel', () => {
+  if (loginPollTimer) { clearInterval(loginPollTimer); loginPollTimer = null; }
+});
 
 // Initial render: activate the tab the URL hash names (so a refresh or shared
 // link lands on the same view), defaulting to Status. For #accounts/<provider>,

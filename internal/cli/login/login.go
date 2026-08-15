@@ -328,6 +328,8 @@ func CmdLogin(args []string) {
 			log.Fatalf("login failed: %v", err)
 		}
 	}
-	// After ANY successful login, signal a running serve to hot-reload.
-	cliserve.MaybeReloadDaemon(cfg)
+	// After ANY successful login, signal a running serve to hot-reload. The
+	// full args are passed so a serve started with `--log-file` is found at the
+	// pid file that flag derives.
+	cliserve.MaybeReloadDaemon(args, cfg)
 }

@@ -959,6 +959,25 @@ func sameNameSelector() { factory.NewProxy(cfg) }
 	}{{path: "synthetic.go", file: file}}, "model-proxy/internal/targetexec", "Executor"); len(got) != 2 {
 		t.Errorf("imported composite positive control = %v, want owner and bypass", got)
 	}
+	// Blank/dot-aliased imports must not contribute sites: without the alias
+	// guard a blank import would make `_.Executor{}` match the local name.
+	aliasSkipFile, err := parser.ParseFile(fset, "alias_skip.go", `package main
+import (
+	_ "model-proxy/internal/targetexec"
+	. "model-proxy/internal/shadow"
+)
+func blankQualified() { _ = _.Executor{} }
+func dotBare() { _ = Runtime{} }
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := importedCompositeLiteralSitesInFiles([]struct {
+		path string
+		file *ast.File
+	}{{path: "alias_skip.go", file: aliasSkipFile}}, "model-proxy/internal/targetexec", "Executor"); len(got) != 0 {
+		t.Errorf("imported composite alias control = %v, want no sites from blank/dot-aliased imports", got)
+	}
 	if methodFile, err := parser.ParseFile(fset, "methods.go", `package main
 func h() { planner.Apply(); other.Apply() }
 `, 0); err != nil {
@@ -1349,6 +1368,9 @@ func importedCompositeLiteralSitesInFiles(files []struct {
 	var sites []interactionSite
 	for _, input := range files {
 		localName := importedPackageName(input.file, importPath)
+		if localName == "" || localName == "_" || localName == "." {
+			continue
+		}
 		for _, decl := range input.file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {

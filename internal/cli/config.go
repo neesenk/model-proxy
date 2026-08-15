@@ -12,12 +12,22 @@ import (
 )
 
 func CmdConfig(args []string, cfg *configdomain.Config) {
-	if len(args) == 0 {
+	sub := cliframework.Positional(args)
+	if sub == "" {
 		fmt.Println("usage: model-proxy config [init|print|check]")
 		os.Exit(1)
 	}
-	switch args[0] {
+	switch sub {
 	case "init":
+		// Refuse to clobber an existing ./config.yaml: init is a one-shot
+		// template writer, and overwriting would silently destroy the user's
+		// live config (the file `serve` loads by default).
+		if _, err := os.Stat("config.yaml"); err == nil {
+			fmt.Fprintln(os.Stderr, "config.yaml already exists — refusing to overwrite it (move it aside or delete it first)")
+			os.Exit(1)
+		} else if !os.IsNotExist(err) {
+			log.Fatal(err)
+		}
 		if err := os.WriteFile("config.yaml", []byte(configdomain.DefaultConfigYAML), 0o644); err != nil {
 			log.Fatal(err)
 		}
@@ -55,7 +65,7 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 			fmt.Println(displaypkg.Yellow("  ⚠ " + w))
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", sub)
 		os.Exit(1)
 	}
 }
@@ -64,12 +74,14 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 // it) and delegates to CmdConfig.
 func CmdConfigRun(args []string) {
 	// config init writes the template without loading config; print/check need
-	// a loaded config.
-	if len(args) > 0 && args[0] == "init" {
+	// a loaded config. The subcommand comes from Positional and the config path
+	// from a FULL-args scan (like every other command), so
+	// `model-proxy config --config X check` works regardless of flag position.
+	if cliframework.Positional(args) == "init" {
 		CmdConfig(args, nil)
 		return
 	}
-	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args[1:]))
+	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
 	if err != nil {
 		log.Fatal(err)
 	}

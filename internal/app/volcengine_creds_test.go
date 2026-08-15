@@ -1,6 +1,7 @@
 package app
 
 import (
+	"model-proxy/internal/accounts"
 	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
 	"os"
@@ -95,10 +96,13 @@ func TestVolcenginePoolPerAccountAK(t *testing.T) {
 	if got := len(px.poolIndex["volcengine"]); got != 2 {
 		t.Fatalf("poolIndex[volcengine] len = %d, want 2 (%v)", got, px.poolIndex["volcengine"])
 	}
-	want := map[string]bool{"volcengine#AK1": true, "volcengine#AK2": true}
+	want := map[string]bool{
+		"volcengine#" + accounts.AccountID("volcengine", accounts.Credentials{AccessKey: "AK1"}): true,
+		"volcengine#" + accounts.AccountID("volcengine", accounts.Credentials{AccessKey: "AK2"}): true,
+	}
 	for _, vid := range px.poolIndex["volcengine"] {
 		if !want[vid] {
-			t.Fatalf("unexpected virtual %q (want one of volcengine#AK1/AK2)", vid)
+			t.Fatalf("unexpected virtual %q (want hashed volcengine ids)", vid)
 		}
 	}
 }
@@ -107,9 +111,10 @@ func TestVolcenginePoolPerAccountAK(t *testing.T) {
 
 // TestRunVolcengineLoginWithInput_WritesPoolTriple verifies the pool-aware
 // volcengine login writes a pool entry carrying the FULL triple
-// {api_key, access_key, secret_key} with id = AccessKey (not the api_key hash).
-// Deleting any of the three fields from the saved entry, or keying by api_key,
-// turns this red.
+// {api_key, access_key, secret_key} with id keyed by the AccessKey HASH
+// (account-level identity, no credential material — the id reaches logs and
+// persisted state). Deleting any of the three fields from the saved entry, or
+// keying by api_key, turns this red.
 func TestRunVolcengineLoginWithInput_WritesPoolTriple(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
@@ -128,9 +133,14 @@ func TestRunVolcengineLoginWithInput_WritesPoolTriple(t *testing.T) {
 		t.Fatalf("want 1 account, got %d: %+v", len(pool.Accounts), pool.Accounts)
 	}
 	a := pool.Accounts[0]
-	// id keyed by AccessKey (account-level), NOT the api_key hash.
-	if a.ID != "AK-ONE" {
-		t.Errorf("id = %q, want AK-ONE (access_key)", a.ID)
+	// id keyed by the AccessKey hash (account-level identity), NOT the api_key
+	// hash and never the raw access key.
+	wantID := accounts.AccountID("volcengine", accounts.Credentials{APIKey: "ark-key-1", AccessKey: "AK-ONE", SecretKey: "SK-ONE"})
+	if a.ID != wantID {
+		t.Errorf("id = %q, want %q (access_key hash)", a.ID, wantID)
+	}
+	if a.ID == "AK-ONE" || strings.Contains(a.ID, "AK-ONE") {
+		t.Errorf("id %q must not carry the raw access key", a.ID)
 	}
 	if a.APIKey != "ark-key-1" || a.AccessKey != "AK-ONE" || a.SecretKey != "SK-ONE" {
 		t.Errorf("saved triple = %+v, want {api_key:ark-key-1 access_key:AK-ONE secret_key:SK-ONE}", a)

@@ -54,7 +54,13 @@ func tailFile(path string, n int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	trimmed := strings.TrimRight(string(b), "\n")
+	if trimmed == "" {
+		// An empty (or newline-only) log file has no lines; "" would surface as
+		// a phantom blank entry in the /api/logs response.
+		return []string{}, nil
+	}
+	lines := strings.Split(trimmed, "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}

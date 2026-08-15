@@ -3,6 +3,7 @@ package catalog
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -135,8 +136,10 @@ func ownerRank(provider string) int {
 }
 
 // parse converts a models.dev API response into the compact global-name index.
-// Canonical providers win name collisions; non-canonical collisions retain the
-// first value, exactly as the historical projection did.
+// Canonical providers win name collisions; among equal ranks the FIRST provider
+// in sorted provider-name order wins, so map iteration order can never change
+// the projection. (Equal-rank collisions retain the sorted-first value, the
+// deterministic reading of the historical "retain the first value" rule.)
 func parse(data []byte) (*Catalog, error) {
 	var raw map[string]struct {
 		Models map[string]struct {
@@ -159,11 +162,16 @@ func parse(data []byte) (*Catalog, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("models.dev catalog contains no providers")
 	}
+	providers := make([]string, 0, len(raw))
+	for provider := range raw {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
 	models := make(map[string]Model)
 	ranks := make(map[string]int)
-	for provider, sourceProvider := range raw {
+	for _, provider := range providers {
 		rank := ownerRank(provider)
-		for name, source := range sourceProvider.Models {
+		for name, source := range raw[provider].Models {
 			if current, ok := ranks[name]; ok && rank >= current {
 				continue
 			}

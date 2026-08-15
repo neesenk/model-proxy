@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -106,7 +107,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 	for authAttempt := 0; authAttempt < 2; authAttempt++ {
 		targetURL := strings.TrimRight(plan.BaseURL(), "/") + plan.UpstreamPath()
 		if exchange.Request.URL.RawQuery != "" {
-			targetURL += "?" + exchange.Request.URL.RawQuery
+			targetURL += "?" + stripInternalQuery(exchange.Request.URL.RawQuery)
 		}
 		targetURL, body = providerImpl.RewriteRequest(targetURL, body, plan.UpstreamPath())
 		if executor.State != nil {
@@ -133,6 +134,16 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		response, err := executor.Client.Do(req)
 		upstreamMS := time.Since(started).Milliseconds()
 		if err != nil {
+			// The caller walked away (client disconnect / caller deadline), not
+			// the upstream misbehaving: the request context is the caller-owned
+			// one, and our own upstream-timeout ctx is a child of it, so a live
+			// caller context here means the abort came from the caller side.
+			// Client cancellations must not poison the circuit breaker or be
+			// retried against the remaining targets.
+			if exchange.Request.Context().Err() != nil {
+				executor.release(target.Provider)
+				return Result{Outcome: OutcomeClientGone}
+			}
 			log.Printf("[proto=%s provider=%s] upstream error: %v", plan.ClientProtocol(), target.Provider, err)
 			executor.failure(target, true)
 			return Result{Outcome: OutcomeFailedHard}
@@ -311,7 +322,24 @@ func (executor Executor) commit(
 			}
 		}
 	}
+	// Hop-by-hop headers belong to ONE transport connection, never to the
+	// client (RFC 9110 §7.6.1): strip Connection (plus every header it names),
+	// Trailer and the other connection-scoped tokens. HTTP/2 upstreams never
+	// send them; HTTP/1.1 upstreams sometimes do, and forwarding them to the
+	// client corrupts connection handling.
+	connectionNamed := map[string]bool{}
+	for _, connectionValue := range response.Header.Values("Connection") {
+		for _, token := range strings.Split(connectionValue, ",") {
+			if named := strings.TrimSpace(token); named != "" {
+				connectionNamed[strings.ToLower(named)] = true
+			}
+		}
+	}
 	for key, values := range response.Header {
+		lower := strings.ToLower(key)
+		if hopByHopHeaders[lower] || connectionNamed[lower] {
+			continue
+		}
 		if transformed && (strings.EqualFold(key, "content-length") || strings.EqualFold(key, "transfer-encoding")) {
 			continue
 		}
@@ -419,6 +447,49 @@ func (executor Executor) release(provider string) {
 	if executor.State != nil {
 		executor.State.ReleaseHalfOpenSlot(provider)
 	}
+}
+
+// internalQueryKeys are proxy control parameters consumed at the front door
+// (forcedProviderFromRequest). They address the PROXY, not the upstream API:
+// forwarding ?force_provider=x leaks an internal knob to third parties and
+// strict-argument upstreams reject the request outright.
+var internalQueryKeys = map[string]bool{"force_provider": true}
+
+// hopByHopHeaders must never be forwarded from the upstream response to the
+// client (RFC 9110 §7.6.1); headers named by the Connection header are
+// stripped alongside them.
+var hopByHopHeaders = map[string]bool{
+	"connection":          true,
+	"keep-alive":          true,
+	"proxy-authenticate":  true,
+	"proxy-authorization": true,
+	"te":                  true,
+	"trailer":             true,
+	"upgrade":             true,
+}
+
+// stripInternalQuery removes internal control keys from a raw query string.
+// When no internal key is present the ORIGINAL bytes pass through untouched —
+// same-protocol requests keep byte-transparent queries; only requests that
+// actually used an internal knob get re-encoded.
+func stripInternalQuery(rawQuery string) string {
+	parsed, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		// Unparseable query: pass through rather than corrupt it. The front
+		// door's Query().Get would not have found the key either.
+		return rawQuery
+	}
+	found := false
+	for key := range parsed {
+		if internalQueryKeys[strings.ToLower(key)] {
+			found = true
+			parsed.Del(key)
+		}
+	}
+	if !found {
+		return rawQuery
+	}
+	return parsed.Encode()
 }
 func (executor Executor) failover(target configdomain.RouteTarget) {
 	if executor.Effects != nil {

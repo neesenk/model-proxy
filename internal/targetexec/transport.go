@@ -72,8 +72,13 @@ func sniffUndecided(peek []byte) bool {
 
 func copyHeaderWhitelist(dst, src http.Header, keys ...string) {
 	for _, key := range keys {
-		if value := src.Get(key); value != "" {
-			dst.Set(key, value)
+		// Values + Add, not Get + Set: whitelisted headers like anthropic-beta
+		// are legal multi-valued, and collapsing them to the first value
+		// silently drops beta-capability declarations.
+		for _, value := range src.Values(key) {
+			if value != "" {
+				dst.Add(key, value)
+			}
 		}
 	}
 }

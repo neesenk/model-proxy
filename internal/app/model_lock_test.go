@@ -219,7 +219,11 @@ func TestModelLock_SuccessClears(t *testing.T) {
 	if _, locked := p.modelLockState("primary", "m1"); !locked {
 		t.Fatal("expected (primary,m1) locked")
 	}
-	time.Sleep(80 * time.Millisecond)                                      // lockout expires
+	// Lockout expiry is observable — poll instead of sleeping a fixed 80ms.
+	waitUntil(t, "model lockout expiry", func() bool {
+		_, locked := p.modelLockState("primary", "m1")
+		return !locked
+	})
 	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary serves → clear
 	if _, locked := p.modelLockState("primary", "m1"); locked {
 		t.Error("model lock should be cleared after a served response")

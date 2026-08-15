@@ -1,6 +1,8 @@
-// Package wirecap owns the concurrency-safe, persisted state kernel for
-// endpoint wire-capability verdicts. HTTP probing, provider authentication,
-// config lookup, and persistence scheduling remain application concerns.
+// Package wirecap owns the endpoint wire-capability domain: the concurrency-safe,
+// persisted verdict store, the protocol-selection policy over those verdicts,
+// and the probe request construction (config lookup + provider auth values in,
+// plain requests out). Executing probes, 404-correction triggers and async
+// persistence scheduling remain application concerns (internal/app/wirecap.go).
 package wirecap
 
 import (

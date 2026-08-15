@@ -18,13 +18,31 @@ func BackupConfig(path, backup string) {
 	_ = os.WriteFile(backup, data, 0o644)
 }
 
-// AtomicWrite makes the target appear whole or not at all.
+// AtomicWrite makes the target appear whole or not at all. The temp file is
+// UNIQUE per writer: the daemon's Web config editor and CLI commands run in
+// different processes and can write the same config.yaml concurrently — a
+// shared ".tmp" name let one process rename away another's half-written file
+// (docs/engineering/pitfalls.md #18).
 func AtomicWrite(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	temporary := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(temporary)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(temporary)
+		return err
+	}
+	if err := os.Chmod(temporary, 0o644); err != nil {
+		os.Remove(temporary)
 		return err
 	}
 	return os.Rename(temporary, path)

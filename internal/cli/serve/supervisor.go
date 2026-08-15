@@ -79,6 +79,18 @@ func productionSupervisorDeps(signals <-chan os.Signal) supervisorDeps {
 	}
 }
 
+// supervisorArgs builds the argv the supervisor is spawned with. --log-file is
+// forwarded so the supervisor resolves the SAME log (and pid) file the parent
+// claimed; without it the parent and supervisor would disagree whenever the
+// flag is set.
+func supervisorArgs(sa Args) []string {
+	args := []string{"serve", "--config", sa.Config}
+	if sa.LogFile != "" {
+		args = append(args, "--log-file", sa.LogFile)
+	}
+	return args
+}
+
 // Daemonize launches a detached supervisor (new session, stdio → log file) and
 // returns, so the invoking shell gets its prompt back.
 func Daemonize(env DaemonEnv, sa Args) error {
@@ -99,12 +111,37 @@ func Daemonize(env DaemonEnv, sa Args) error {
 	if pid := ReadLivePid(logFile); pid > 0 {
 		return fmt.Errorf("model-proxy is already running (supervisor pid=%d); use `serve stop` first, or `serve status` to inspect", pid)
 	}
+	// Close the precheck→write double-start window: claim the pid file with an
+	// atomic O_EXCL create the moment the precheck passes. Without the claim,
+	// two concurrent `serve daemon` starts both pass the precheck and the second
+	// supervisor's pid write clobbers the first. The placeholder names THIS
+	// process — live while it runs, so a racing starter's re-read refuses; the
+	// spawned supervisor overwrites the same file with its own pid (runSupervisor
+	// writes to the identical path), and any later failure here removes it again.
+	pidPath := PidFilePath(logFile)
+	placeholder, err := os.OpenFile(pidPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		// Lost the race, or the path is unusable. Re-read: a live owner means a
+		// daemon (or another starter) won — refuse; anything else is an error.
+		if pid := ReadLivePid(logFile); pid > 0 {
+			return fmt.Errorf("model-proxy is already running (supervisor pid=%d); use `serve stop` first, or `serve status` to inspect", pid)
+		}
+		return fmt.Errorf("claim pid file %s: %w", pidPath, err)
+	}
+	if _, err := fmt.Fprintf(placeholder, "%d\n", os.Getpid()); err != nil {
+		placeholder.Close()
+		os.Remove(pidPath)
+		return fmt.Errorf("write pid file placeholder %s: %w", pidPath, err)
+	}
+	placeholder.Close()
+
 	lf, err := OpenLogFile(logFile)
 	if err != nil {
+		os.Remove(pidPath)
 		return fmt.Errorf("open log file %s: %w", logFile, err)
 	}
 
-	cmd := exec.Command(env.Executable, "serve", "--config", sa.Config)
+	cmd := exec.Command(env.Executable, supervisorArgs(sa)...)
 	cmd.Env = append(os.Environ(), EnvRole+"="+RoleSupervisor)
 	cmd.Stdin = nil
 	cmd.Stdout = lf
@@ -112,6 +149,7 @@ func Daemonize(env DaemonEnv, sa Args) error {
 	cmd.SysProcAttr = SysProcAttrDetach() // setsid: detach from controlling terminal
 	if err := cmd.Start(); err != nil {
 		lf.Close()
+		os.Remove(pidPath)
 		return fmt.Errorf("start supervisor: %w", err)
 	}
 	// The supervisor inherits the lf fd; the parent can close its copy now.
@@ -277,10 +315,18 @@ func nextSupervisorBackoff(current, maximum time.Duration) time.Duration {
 	return next
 }
 
+// Wait budgets for `serve stop`: the graceful SIGTERM window, and the window
+// verifying a SIGKILLed daemon is actually gone before reporting success.
+const (
+	stopGracefulWait = 15 * time.Second
+	stopKillExitWait = 5 * time.Second
+)
+
 // CmdStop stops a running `serve daemon` by reading the pid file (derived from
 // the same log path the supervisor used) and sending SIGTERM. The supervisor
 // forwards SIGTERM to its worker, waits for it, removes the pid file, and
-// exits. Waits up to 15s for the process to disappear; falls back to SIGKILL.
+// exits. Waits up to 15s for the process to disappear; falls back to SIGKILL
+// and then verifies the exit before claiming success.
 func CmdStop(env DaemonEnv, sa Args, yellow, gray, green func(string) string) {
 	cfg, err := env.LoadConfig(sa.Config)
 	if err != nil {
@@ -297,13 +343,7 @@ func CmdStop(env DaemonEnv, sa Args, yellow, gray, green func(string) string) {
 		}
 		log.Fatal(err)
 	}
-	var pid int
-	for _, c := range pidStr {
-		if c < '0' || c > '9' {
-			break
-		}
-		pid = pid*10 + int(c-'0')
-	}
+	pid := parsePidFileContents(pidStr)
 	if pid <= 0 {
 		log.Fatalf("invalid pid in %s: %q", pidPath, string(pidStr))
 	}
@@ -324,22 +364,43 @@ func CmdStop(env DaemonEnv, sa Args, yellow, gray, green func(string) string) {
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		log.Fatalf("send SIGTERM to %d: %v", pid, err)
 	}
+	stopDaemonProcess(proc, pid, pidPath, stopGracefulWait, stopKillExitWait, yellow, green)
+}
 
-	// Wait for the process to exit (it removes its own pid file on graceful exit).
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			// Gone.
-			fmt.Println(green("✓ Stopped."))
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
+// stopDaemonProcess waits (bounded) for the SIGTERMed daemon to exit and
+// escalates to SIGKILL, verifying the process really disappeared before
+// reporting success — "✓ Killed." used to print immediately after the signal,
+// while the daemon could still hold the listen port and break
+// `serve stop && serve daemon` restart scripts. Split from CmdStop so tests
+// can drive the escalate/verify edges with millisecond budgets.
+func stopDaemonProcess(proc *os.Process, pid int, pidPath string, graceful, killExit time.Duration, yellow, green func(string) string) {
+	if waitForProcessExit(proc, graceful) {
+		fmt.Println(green("✓ Stopped."))
+		return
 	}
-	// Didn't exit gracefully — force kill.
 	fmt.Fprintf(os.Stderr, "graceful stop timed out, sending SIGKILL to %d\n", pid)
 	_ = proc.Kill()
 	os.Remove(pidPath)
-	fmt.Println(green("✓ Killed."))
+	if waitForProcessExit(proc, killExit) {
+		fmt.Println(green("✓ Killed."))
+		return
+	}
+	fmt.Println(yellow(fmt.Sprintf("⚠ SIGKILL sent to %d but it has not exited yet; verify the process manually.", pid)))
+}
+
+// waitForProcessExit polls process liveness (Signal 0) until the process is
+// gone or the deadline passes; it reports whether the process disappeared.
+func waitForProcessExit(proc *os.Process, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // CmdReload sends SIGHUP to a running daemon's supervisor, which forwards it
@@ -360,13 +421,7 @@ func CmdReload(env DaemonEnv, sa Args, yellow, gray, green func(string) string) 
 		}
 		log.Fatal(err)
 	}
-	var pid int
-	for _, c := range pidStr {
-		if c < '0' || c > '9' {
-			break
-		}
-		pid = pid*10 + int(c-'0')
-	}
+	pid := parsePidFileContents(pidStr)
 	if pid <= 0 {
 		log.Fatalf("invalid pid in %s: %q", pidPath, string(pidStr))
 	}
@@ -381,45 +436,4 @@ func CmdReload(env DaemonEnv, sa Args, yellow, gray, green func(string) string) 
 		log.Fatalf("send SIGHUP to %d: %v", pid, err)
 	}
 	fmt.Println(green("✓ Reload signal sent.") + " Check logs for [reload] lines.")
-}
-
-// SignalReloadDaemon sends SIGHUP to a running daemon's supervisor (which
-// forwards to the worker for hot config reload) so newly added credentials are
-// picked up without a restart. It is a NO-OP (no error, no fatal) when the
-// config can't be loaded, no pid file exists, the pid file is stale, or the
-// signal can't be delivered. Used after a successful login; callers that want
-// errors should use `serve reload` directly.
-func SignalReloadDaemon(env DaemonEnv, sa Args, gray func(string) string) {
-	cfg, err := env.LoadConfig(sa.Config)
-	if err != nil {
-		return
-	}
-	logFile := ResolveLogFile(sa, cfg)
-	pidPath := PidFilePath(logFile)
-	pidStr, err := os.ReadFile(pidPath)
-	if err != nil {
-		return // no pid file → no daemon running
-	}
-	var pid int
-	for _, c := range pidStr {
-		if c < '0' || c > '9' {
-			break
-		}
-		pid = pid*10 + int(c-'0')
-	}
-	if pid <= 0 {
-		return
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return
-	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		// Stale pid file — clean it up so the next start isn't confused.
-		os.Remove(pidPath)
-		return
-	}
-	if err := proc.Signal(syscall.SIGHUP); err == nil {
-		fmt.Println("  " + gray(fmt.Sprintf("(signaled serve to reload: pid=%d)", pid)))
-	}
 }

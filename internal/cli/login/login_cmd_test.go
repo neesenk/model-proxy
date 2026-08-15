@@ -12,12 +12,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"model-proxy/internal/accounts"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/provider"
 )
 
 // login_cmd_test.go covers cmdLogin's error/help paths (subprocess) and
@@ -330,8 +330,9 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addVolcengineAccount: %v", err)
 	}
-	if id != "AK9XYZ" {
-		t.Fatalf("volcengine id = %q, want AK9XYZ", id)
+	wantID := accounts.AccountID("volcengine", cred)
+	if id != wantID || id == "AK9XYZ" {
+		t.Fatalf("volcengine id = %q, want hashed %q (never the raw access key)", id, wantID)
 	}
 	pool, _ := accounts.NewStore(accounts.HomeDir()).Load("vol", "volcengine")
 	if len(pool.Accounts) != 1 || pool.Accounts[0].Label != "volc-label" {
@@ -404,18 +405,16 @@ func TestHasFlagValue(t *testing.T) {
 
 // TestMaybeReloadDaemon_NoOpWithoutPidFile pins the contract that
 // maybeReloadDaemon returns silently (no error, no fatal) when no pid file
-// exists — the foreground/test case. We point HOME at an empty temp dir so
-// resolveLogFile lands in a path with no pid file.
+// exists — the foreground/test case. We point --log-file at an empty temp dir
+// so resolveLogFile lands in a path with no pid file.
 func TestMaybeReloadDaemon_NoOpWithoutPidFile(t *testing.T) {
 	setPoolHome(t, t.TempDir())
-	// No config file either — maybeReloadDaemon must tolerate LoadConfig failure
-	// and still be a no-op (no panic, no fatal).
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("maybeReloadDaemon panicked: %v", r)
 		}
 	}()
-	cliserve.SignalReloadDaemon(cliserve.DaemonEnv{LoadConfig: configdomain.LoadConfig, Executable: "model-proxy"}, cliserve.ParseArgs(nil), provider.Gray)
+	cliserve.MaybeReloadDaemon([]string{"--log-file", filepath.Join(t.TempDir(), "none.log")}, nil)
 }
 
 // --- aqp/codex CLI login path-key regression ---
@@ -578,6 +577,35 @@ func TestValidateKeyBearerGET(t *testing.T) {
 	statusCase(200)
 	statusCase(401)
 	statusCase(403)
+}
+
+// TestValidateKeyBearerGET_HugeBodyIsCapped pins the 16KB read cap: the error
+// path only needs a short excerpt, and an endless/huge validation response
+// must not be buffered in full. Without the cap this test hits the 15s client
+// timeout and returns a transport error instead of the HTTP 401 verdict.
+func TestValidateKeyBearerGET_HugeBodyIsCapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		// Write far beyond the cap until the capped client stops reading.
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- ValidateKeyBearerGET(srv.URL, "k") }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+			t.Fatalf("err = %v, want HTTP 401 verdict", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ValidateKeyBearerGET never returned — the body read is not capped")
+	}
 }
 
 // TestRunApiKeyLogin_KimiCode_Validation401 pins that kimi-code login now

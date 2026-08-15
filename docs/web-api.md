@@ -4,6 +4,9 @@
 
 `web.enabled`（默认 true）时 daemon 同一 mux 挂 `/ui/`（embed 静态资源）和 `/api/`（JSON）。**无鉴权**；loopback 由 `internal/config` 校验强制——`requireLoopbackListen` 拒绝一切非回环 `listen`（`0.0.0.0`、空 host `:PORT`、`[::]`、内网 IP、域名），只放行 `127.x`/`[::1]`/`localhost`。
 
+**浏览器侧防线**（`internal/web` `guardBrowserOrigin`，挂在 `serveUI`/`serveAPI` 入口）：
+loopback 挡不住"借用户浏览器之手"的请求,所以凡携带浏览器身份头（`Origin` 或 `Sec-Fetch-Site`）的请求额外要求 (1) `Host` 头的 host 部分是回环地址——封 DNS rebinding(rebound 域名对浏览器是 same-origin,只有 Host 检查能拦),GET `/api/config` 原文返回含 static provider key 的 YAML,读与写同等防护;(2) `Origin` 与请求 `Host` 一致——封 CSRF(evil.com 的跨站 fetch 是 CORS simple request,`text/plain` body 不触发 preflight 也能直达 POST handler)。无浏览器头的本地 CLI/curl(`daemonctl`、脚本)不受影响。
+
 **前端布局契约**：Status→Logs 每条日志是「行号 gutter + 正文」两列网格；行号与 gutter 右边框留 2px，gutter 背景只覆盖行号列，鼠标悬停标出整条逻辑行，单击选中该行（改变行号前景色，不干预原生选择）。Config→Raw YAML **硬最小高度 480px**，按编辑器 viewport top + 卡片下方 chrome 重新计算，可见空间大于 480px 铺满、不足仍 480px 并允许滚动，绝不靠固定 `100vh - 常量` 推测。
 
 | 方法 | 路径 | 请求 | 响应 | 备注 |
@@ -13,7 +16,7 @@
 | GET | `/api/config` | — | `{yaml, summary, provider_models, routes}` | 原文件 verbatim round-trip |
 | POST | `/api/config` | `{yaml}` | `{status:"reloaded"}` / 400 | `saveAndReload`：validate → backup `back/<base>.<ts>.bak` → atomicWrite → reload。校验失败不落盘；reload 失败从当次备份回滚 |
 | POST | `/api/config/edit` | `{kind,name,data}` | `{status:"reloaded"}` / 400 | 结构化编辑 `kind∈{general,scheduling,provider,route,claude_mapping}`，改 `yaml.Node`（保留注释/键序）→ `saveAndReload` |
-| GET | `/api/accounts` | — | `{providers:[{name,provider_id,billing,accounts:[{id,label,added_at,[email]}]}]}` | **响应无任何 key 字段**（无法泄漏）；id 不掩码（UI 要用它删） |
+| GET | `/api/accounts` | — | `{providers:[{name,provider_id,billing,accounts:[{id,label,added_at,[email]}]}]}` | **响应无任何 key 字段**（无法泄漏）；id 不掩码（UI 要用它删）。codex 的 `added_at` 恒为空：codex OAuth 文件不落创建时间戳（只有语义不同的 `last_refresh`），不伪造数据 |
 | POST | `/api/accounts/<provider>` | `{api_key, access_key?, secret_key?, label?, replace?}` | `{id,status:"added",warning?}` | 仅 apikey 类；aqp/codex 返 400 指向 async login。volcengine 走 `addVolcengineAccount`（探 usage_url 验 Ark API Key + 可选 AK/SK 经签名 GetAFPUsage），其余（含 kimi-code）探 usage_url。落盘后 best-effort reload；reload 失败（config.yaml 不可读/非法，非本次操作所致）时账号已存盘，响应带 `warning`，runtime 保持旧集直到 config 修复并 reload |
 | DELETE | `/api/accounts/<provider>/<id>` | — | `{status:"removed",warning?}` | apikey 类 `removeApikeyAccount`；aqp `provider.ClearAqpAccount`；codex `os.Remove`。落盘后 best-effort reload；失败同上，响应带 `warning` |
 | POST | `/api/accounts/<provider>/<id>/test` | — | `{status:"ok"\|"failed",http_status,reason,latency_ms,provider,account_id,model}` | 账号粒度测活（probeModelCallable 真实最小请求，复用 provider 的 ProbeRequest/ExtraHeaders）；`proxyAdminCommands` 一次 `snapshotRuntime` 同代捕获 config/impl，模型取该 provider 首个路由目标否则 models[0]；只读不 reload，请求取消会取消上游 probe。UI 账号卡片 Test 按钮 |
@@ -28,7 +31,7 @@
 | GET | `/api/events` | — | SSE 流 | 实时请求监视：先重放 200 条 recent ring 再推 start/end 事件（含 request_id/agent/provider/status/latency/tokens），15s keepalive。挂在主 mux（不受 web.enabled 控制） |
 | GET/POST/DELETE | `/api/pin` | POST `{route,provider,ttl?}` | `{pins:[...]}` / `{status:"pinned"}` / `{status:"unpinned"}` | 运行期 pin（见 `docs/architecture/runtime-state.md`）；GET 列表、DELETE `{route}` 清除 |
 | GET | `/api/analytics?from=&to=&provider=&model=&granularity=day\|month` | — | `{granularity,from,to,series:[{provider,model,points:[{bucket,requests,input,output,cache_creation,cache_read,cost,priced}]}],totals:{input,output,cost},price_coverage:{priced:[],unpriced:[]}}` | 日历日/月聚合 + **服务端现算等价 payg 成本**（见下「Analytics 等价成本」） |
-| POST | `/api/quota/refresh` | 空 body 或 `{"provider":key}` | `{status:"refreshed"[,provider]}` / 404 | 同步刷新配额缓存（可立即重查 `/api/status`）：空 → `pollAll`，指定 → `pollOne`（key 即 `name` 或 `name#accountID`），未知 key 404 |
+| POST | `/api/quota/refresh` | 空 body 或 `{"provider":key}` | `{status:"refreshed"[,provider]}` / 400 / 404 | 同步刷新配额缓存（可立即重查 `/api/status`）：空 → `pollAll`，指定 → `pollOne`（key 即 `name` 或 `name#accountID`），未知 key 404；malformed JSON body → 400（与 `/api/health/reset` 一致，不触发全量 poll） |
 | POST | `/api/health/reset` | 空 body 或 `{"provider":key}` | `{cleared:[names],model_locks_cleared:n}` | 清冻结运行态（熔断开路冷却、429 限频冷却、模型锁定），目标立即重试；空=全部，池化父名清全部虚拟；**不清** sticky/pin/剥参 blocklist。`unfreeze` CLI 与 UI Providers 卡 unfreeze 按钮 |
 | POST/GET | `/api/login/<provider>/start`、`/api/login/<session>/poll` | — | `{session_id,...}` / `{state, detail, result, warning?}` | 异步登录（aqp SSO URL / codex device flow）；poll 状态 pending/done/error。`internal/web` 的 task owner 管理轮询，关闭时取消 HTTP/等待；凭据 commit 前响应取消，进入 commit 后完成 save+reload 再退出。done 时若 reload 失败，`warning` 非空（凭据已落盘，runtime 旧） |
 

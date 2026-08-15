@@ -3,6 +3,7 @@ package serve_test
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,5 +135,73 @@ func TestDaemonizeRefusesSecondDaemon(t *testing.T) {
 	}
 	if want := fmt.Sprintf("%d\n", wantPID); string(got) != want {
 		t.Fatalf("guarded pid file = %q, want %q", got, want)
+	}
+}
+
+// Regression (double-start window): after the pre-start guard passes, Daemonize
+// claims the pid file with an atomic O_EXCL create. The placeholder must be
+// removed again when the supervisor fails to spawn — otherwise a leftover file
+// naming the exited parent looks like a (stale) daemon and confuses the next
+// start/stop.
+func TestDaemonizeRemovesPlaceholderOnSpawnFailure(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "model-proxy.log")
+	configPath := filepath.Join(dir, "config.yaml")
+	pidFile := serve.PidFilePath(logFile)
+
+	// A definitely-dead pid: the pre-start guard cleans the stale file, then
+	// the O_EXCL claim takes the now-free path.
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := serve.WritePidFile(pidFile, dead.ProcessState.Pid()); err != nil {
+		t.Fatal(err)
+	}
+
+	err := serve.Daemonize(serve.DaemonEnv{
+		LoadConfig: func(path string) (*configdomain.Config, error) {
+			if path != configPath {
+				t.Fatalf("LoadConfig path = %q, want %q", path, configPath)
+			}
+			return &configdomain.Config{LogFile: logFile}, nil
+		},
+		// Deliberately invalid executable: the claim must happen, then the
+		// spawn must fail and the placeholder be rolled back.
+		Executable: filepath.Join(dir, "must-not-execute"),
+	}, serve.Args{Config: configPath})
+	if err == nil || !strings.Contains(err.Error(), "start supervisor") {
+		t.Fatalf("Daemonize err = %v, want start-supervisor failure", err)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("pid file placeholder survived a failed spawn: %v", err)
+	}
+	if _, err := os.Stat(logFile); err != nil {
+		t.Fatalf("log file not opened after claim: %v", err)
+	}
+}
+
+// The O_EXCL claim must fail loudly when the pid path is unusable for a reason
+// other than a live daemon (here: the path is a directory) — silent proceed
+// would resurrect the double-start window the claim exists to close.
+func TestDaemonizeClaimFailsOnUnusablePidPath(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "model-proxy.log")
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.Mkdir(serve.PidFilePath(logFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := serve.Daemonize(serve.DaemonEnv{
+		LoadConfig: func(path string) (*configdomain.Config, error) {
+			return &configdomain.Config{LogFile: logFile}, nil
+		},
+		Executable: filepath.Join(dir, "must-not-execute"),
+	}, serve.Args{Config: configPath})
+	if err == nil || !strings.Contains(err.Error(), "claim pid file") {
+		t.Fatalf("Daemonize err = %v, want claim-pid-file failure", err)
+	}
+	if _, err := os.Stat(logFile); !os.IsNotExist(err) {
+		t.Fatalf("log file opened despite claim failure: %v", err)
 	}
 }

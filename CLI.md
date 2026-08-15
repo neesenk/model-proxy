@@ -107,6 +107,11 @@ model-proxy daemonized: supervisor pid=<PID> log=<LOGFILE> pidfile=<PIDFILE>
 model-proxy is already running (supervisor pid=<PID>); use `serve stop` first, or `serve status` to inspect
 ```
 
+前台 `serve`（无子命令）同样不接管已被活进程持有的 pid 文件
+（`ClaimForegroundPidFile`）：daemon 在跑时前台进程不覆盖该文件、退出时也不
+删除它，避免夺走 daemon 的 `serve stop`/`reload` 入口；退出清理只删除仍指向
+本进程的 pid 文件（`ReleasePidFileIfOwned`）。
+
 ### `serve stop` 输出
 
 | 场景 | 流 | 文案 |
@@ -418,9 +423,10 @@ config init|print|check
 
 ### `config init`
 
-写 `config.yaml` 到 **CWD**（`os.WriteFile("config.yaml", defaultConfigYAML, 0o644)`）。stdout：`wrote config.yaml`。失败 -> stderr + exit 1。
+写 `config.yaml` 到 **CWD**。stdout：`wrote config.yaml`。失败 -> stderr + exit 1。
+**CWD 已存在 `config.yaml` 时拒绝覆盖**（保留原文件，stderr + exit 1）——避免一次误操作抹掉现有配置。
 
-模板里的 `scheduling:` 整块默认是注释掉的（每行带 `(default N)`）：所有字段都有代码默认（`internal/config` 的 accessor），不写即用默认，需覆盖时取消注释对应行。`config check` 的 `scheduling:` 摘要行始终打印**生效值**（已覆盖则显覆盖值，未配则显代码默认）。
+模板里的 `scheduling:` 整块默认是注释掉的（每行带 `(default N)`）：所有字段都有代码默认（`internal/config` 的 accessor），不写即用默认，需覆盖时取消注释对应行。`config check` 的 `scheduling:` 摘要行始终打印**生效值**（已覆盖则显覆盖值，未配则显代码默认）。`--config` 与其他命令一致、位置无关（`config --config X check` 与 `config check --config X` 等价）。
 
 ### `config print`
 

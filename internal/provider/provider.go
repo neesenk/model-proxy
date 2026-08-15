@@ -238,8 +238,3 @@ func New(cfg *Config, providerName string) (Provider, error) {
 	}
 	return fn(cfg, providerName)
 }
-
-// AuthFilePath returns the credential file path for a provider name.
-func AuthFilePath(providerName, suffix string) string {
-	return fmt.Sprintf("~/.model-proxy/%s_%s.json", providerName, suffix)
-}

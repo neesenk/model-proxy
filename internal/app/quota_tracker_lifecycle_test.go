@@ -37,7 +37,12 @@ func TestQuotaTracker_PollAfter(t *testing.T) {
 	// provs() call after dispatch must come from the pollAfter path.
 	before := called.Load()
 	tr.PollAfter(50 * time.Millisecond)
-	time.Sleep(300 * time.Millisecond) // let the pollAfter-driven poll fire
+	// Deadline poll instead of a fixed sleep: on a slow machine the poll fires
+	// after the fixed window and the assertion flakes.
+	deadline := time.Now().Add(5 * time.Second)
+	for called.Load()-before < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := called.Load() - before; got < 1 {
 		t.Errorf("pollAfter did not trigger a poll: provs called %d more times", got)
 	}

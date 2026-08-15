@@ -179,8 +179,16 @@ func TestCommandQuotaRefreshContract(t *testing.T) {
 	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", ""), http.StatusOK, map[string]any{"status": "refreshed"})
 	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"aqp#one"}`), http.StatusOK, map[string]any{"status": "refreshed", "provider": "aqp#one"})
 	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", `{"provider":"missing"}`), http.StatusNotFound, map[string]any{"error": "unknown provider: missing"})
-	requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/quota/refresh", "not-json"), http.StatusOK, map[string]any{"status": "refreshed"})
-	if got, want := strings.Join(providers, ","), ",aqp#one,missing,"; got != want {
+	// A malformed body is rejected without triggering any refresh — it must not
+	// silently degrade into a full-network poll.
+	malformed := commandRequest(server, http.MethodPost, "/api/quota/refresh", "not-json")
+	if malformed.Code != http.StatusBadRequest {
+		t.Fatalf("malformed body status=%d body=%s", malformed.Code, malformed.Body.String())
+	}
+	if errorText := commandJSON(t, malformed)["error"]; !strings.HasPrefix(errorText.(string), "malformed JSON body: ") {
+		t.Fatalf("error=%q missing malformed prefix", errorText)
+	}
+	if got, want := strings.Join(providers, ","), ",aqp#one,missing"; got != want {
 		t.Fatalf("RefreshQuota providers=%q want %q", got, want)
 	}
 }
@@ -369,7 +377,9 @@ func TestCommandAccountContract(t *testing.T) {
 	})
 	t.Run("remove routing and errors", func(t *testing.T) {
 		var provider, id string
+		calls := 0
 		server := newCommandTestServer(t, &commandFake{remove: func(gotProvider, gotID string) (appapi.MutationResult, error) {
+			calls++
 			provider, id = gotProvider, gotID
 			if gotID == "fail" {
 				return appapi.MutationResult{}, errors.New("cannot remove")
@@ -377,6 +387,13 @@ func TestCommandAccountContract(t *testing.T) {
 			return appapi.MutationResult{Warning: "reload deferred"}, nil
 		}})
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>/<id>"})
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp/", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>/<id>"})
+		// A slash inside the id segment must not be folded into the id: the id is
+		// a single path segment (mirrors handleAccountAdd's strict check).
+		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp/a/b", ""), http.StatusBadRequest, map[string]any{"error": "expected /api/accounts/<provider>/<id>"})
+		if calls != 0 {
+			t.Fatalf("RemoveAccount calls=%d want no malformed-path mutation", calls)
+		}
 		requireCommandResponse(t, commandRequest(server, http.MethodDelete, "/api/accounts/aqp/one", ""), http.StatusOK, map[string]any{"status": "removed", "warning": "reload deferred"})
 		if provider != "aqp" || id != "one" {
 			t.Fatalf("RemoveAccount args=(%q,%q)", provider, id)

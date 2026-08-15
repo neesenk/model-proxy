@@ -37,8 +37,13 @@ provider。只有 missing/legacy 来源允许普通 API-key provider 保持旧 f
 
 账号 ID：
 
-- volcengine 优先使用 `access_key`，为空时回落到 hash；
+- volcengine 优先使用 `access_key` 的 hash，为空时回落到 api_key 的 hash；
 - 其他 API key provider 使用 `sha256(api_key)[:16]`。
+
+ID 永远是 hash：virtual id 会进入日志、request log 与持久化状态，不得携带
+凭据材料。`accounts.Store.LoadSnapshot` 在读取时把存量 ID 归一到当前推导
+（修复历史版本把 volcengine 明文 access key 当 ID 的池文件），并在下一次
+Save 时写回归一后的 ID。
 
 API-key provider（当前包括 static、zhipu、zcode、deepseek、volcengine、
 kimi-code、qwen-plan）支持池化；aqp、codex 使用各自 OAuth/SSO 单账号文件，

@@ -52,7 +52,9 @@ func ValidateKeyBearerGET(url, key string) error {
 	if err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	// Cap the read at 16KB (probe parity): only a short excerpt is used below,
+	// and a hostile/huge validation response must not be buffered in full.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 	resp.Body.Close()
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		return fmt.Errorf("validation failed: HTTP %d: %s", resp.StatusCode, displaypkg.Truncate(string(body), 200))

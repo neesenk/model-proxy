@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 )
@@ -173,15 +174,31 @@ func TestCLI_LogoutAllClearsPool(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
+	// A stale legacy singular file from before pooling: it must NOT come back
+	// to life after `logout --all` removes the pool accounts.
+	if err := os.WriteFile(app.AccountStore().LegacyPath("zhipu"), []byte(`{"api_key":"ancient"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfgPath := writeZhipuPoolConfig(t, "https://zhipu.invalid/u")
 
 	RunLogout([]string{"zhipu", "--all", "--config", cfgPath})
 
-	if _, err := os.Stat(app.PoolPath("zhipu")); !os.IsNotExist(err) {
-		t.Errorf("plural pool file should be removed; stat err=%v", err)
+	// The empty plural file stays as the authoritative credential tombstone
+	// (provider-pools.md) — removing it would re-open the legacy fallback and
+	// resurrect the old key.
+	pool, err := app.AccountStore().Load("zhipu", "zhipu")
+	if err != nil {
+		t.Fatalf("tombstone pool unreadable: %v", err)
 	}
-	if _, err := os.Stat(app.AccountStore().LegacyPath("zhipu")); !os.IsNotExist(err) {
-		t.Errorf("singular file should not exist; stat err=%v", err)
+	if len(pool.Accounts) != 0 {
+		t.Errorf("pool accounts = %d, want 0", len(pool.Accounts))
+	}
+	snapshot, err := app.AccountStore().LoadSnapshot("zhipu", "zhipu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Source != accounts.SourcePlural {
+		t.Errorf("source = %v, want SourcePlural (tombstone must override legacy)", snapshot.Source)
 	}
 }
 

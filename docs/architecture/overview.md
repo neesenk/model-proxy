@@ -122,8 +122,8 @@ projection、canonical-owner 去重、HTTP/ETag/TTL 刷新和原子磁盘缓存�
 HOME、`MP_MODELSDEV_URL` 与 Config 的 provider/route 名单适配成 catalog 输入；
 请求感知路由继续消费一次性捕获在 `runtimeSnapshot` 中的不可变 catalog 指针。
 
-`internal/routing` 是只依赖 `internal/catalog` 与 `internal/config` 值类型的
-无状态策略包，拥有请求画像、能力/context 判断、跨 route pool、context overflow
+`internal/routing` 是只依赖 `internal/catalog`、`internal/config` 与
+`internal/provider` 值类型的无状态策略包，拥有请求画像、能力/context 判断、跨 route pool、context overflow
 replacement 和跨 pass cooldown 终局决策。`routing.Planner` 只能由
 `requestRoutingPlanner` 通过 constructor 装配；`internal/app/request_routing_adapter.go` 捕获 generation 并
 调用 `Proxy.schedule`，策略包不得 import Proxy、runtime Manager、target executor
@@ -163,7 +163,8 @@ tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进�
 显式依赖 `events.Hub`，不得重新访问 ring、subscriber map 或互斥锁。纯 ring/
 订阅测试归内部包，HTTP、forward、Fusion 与 cache 事件契约仍在根包做集成测试。
 
-`internal/observe/requestlog` 是无仓库内依赖的请求访问日志数据面叶子包，拥有
+`internal/observe/requestlog` 是只依赖 `internal/config` 值类型（生效值
+accessor）的请求访问日志数据面叶子包，拥有
 JSONL Record schema、body/header 截断与白名单、非阻塞队列、单 writer 的轮转/
 retention/owner-only 权限、全文件流式 top-K 查询、list-safe Summary 和 Shadow
 聚合。应用层 `internal/app/request_log_adapter.go` 只把 `RequestLogConfig` 生效值及
@@ -192,8 +193,9 @@ Store。`internal/app/wirecap.go` 只保留 Proxy 侧的探测编排、404 纠�
 
 `internal/runtime.Manager` 是 config generation 内可变路由状态的唯一 owner，
 以单 mutex 统一 health、sticky、pin、model lock、paramBlock、spread、quota、
-schedule 决策以及 persistence/Web detached snapshot。该包只依赖 `internal/provider`
-中的 quota 值类型；Config、HTTP、文件持久化和 Web DTO 映射仍由 composition
+schedule 决策以及 persistence/Web detached snapshot。该包只依赖 `internal/config`
+值类型、`internal/runtime/wirecap` 与 `internal/provider`
+中的 quota 值类型；HTTP、文件持久化和 Web DTO 映射仍由 composition
 root 编排。`quotaTracker` 只执行轮询、refresh 去重和文件写入，不再拥有第二份
 quota 状态。
 
@@ -301,14 +303,14 @@ lifecycle → background components
 conversion entrypoints → conversion registry → pair codecs
 analytics adapter → internal/pricing
 catalog adapter / routing → internal/catalog
-request routing adapter → internal/routing → internal/catalog / internal/config
+request routing adapter → internal/routing → internal/catalog / internal/config / internal/provider
 accounts adapter / login / provider builder → internal/accounts
 live-event publishers / SSE adapter → internal/observe/events
 target executor / Fusion / Shadow / Web / CLI → internal/observe/requestlog
 stats flusher / proxyReadView → internal/observe/stats
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
-wire probe / target plan → internal/runtime/wirecap
+wire probe / target plan → internal/runtime/wirecap → config / provider（值类型）
 schedule / health / resolver / quota adapter → internal/runtime
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
@@ -316,29 +318,42 @@ composition root → internal/targetexec → internal/protocol / internal/provid
 application → serveAssembly → applicationRuntime → Proxy
 ```
 
-`internal` 的直接仓库依赖采用闭合 allowlist；标准库与外部 module 不在此表中：
+`internal` 的直接仓库依赖采用闭合 allowlist；标准库与外部 module 不在此表中。
+该清单与 `internal/archtest/architecture_dependency_dag_contract_test.go` 的
+`internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
-- 叶子包（不得依赖其他 `model-proxy/*` 包）：`accounts`、`cache`、`catalog`、
-  `observe/counters`、`observe/events`、`observe/requestlog`、`observe/stats`、`pricing`、`protocol`、
-  `runtime/wirecap`、`transport/bodycapture`；
-- `app → accounts, catalog, config, protocol, provider`；
-- `cli → daemonctl, observe/requestlog, observe/stats, provider`；
-- `cli/doctor → accounts, app, cli, cli/models, config, takeover, provider`；
-- `cli/framework`（叶子，CLI 参数扫描）；
+- 叶子包（不得依赖其他 `model-proxy/*` 包）：`accounts`、`archtest`（纯测试包）、
+  `cache`、`catalog`、`configedit`、`daemonctl`、`httpx`、`observe/counters`、
+  `observe/events`、`observe/stats`、`pricing`、`protocol`、`provider`、
+  `transport/bodycapture`；
+- `app → accounts, appapi, cache, catalog, cli/framework, cli/login, cli/serve,
+  config, configedit, fusion, httpx, observe/counters, observe/events,
+  observe/requestlog, observe/stats, pricing, probe, protocol, provider,
+  routing, runtime, runtime/wirecap, shadow, targetexec, transport/bodycapture,
+  web`；
+- `appapi → fusion, observe/stats, pricing`；
+- `cli → cli/serve, cli/framework, accounts, app, appapi, cli/clicommon,
+  cli/doctor, cli/login, cli/models, config, daemonctl, takeover,
+  observe/requestlog, observe/stats, provider`；
+- `cli/clicommon → appapi, daemonctl, provider`；
+- `cli/doctor → accounts, app, appapi, cli/clicommon, cli/framework,
+  cli/models, config, takeover, provider`；
+- `cli/framework → accounts, config`；
 - `cli/serve → config`；
-- `cli/login → accounts, config, provider`；
-- `cli/models → accounts, app, catalog, config, probe, provider`；
+- `cli/login → accounts, cli/framework, cli/serve, config, provider`；
+- `cli/models → cli/serve, cli/framework, accounts, app, catalog, config,
+  configedit, probe, provider`；
 - `config → pricing, protocol`；
-- `daemonctl`（叶子，CLI→daemon HTTP client）；
 - `fusion → config`；
-- `routing → catalog, config`；
+- `observe/requestlog → config`（生效值 accessor 所需的值类型）；
 - `probe → config, provider`；
-- `runtime → provider`；
+- `routing → catalog, config, provider`（均为值类型消费）；
+- `runtime → config, runtime/wirecap, provider`；
+- `runtime/wirecap → config, provider`；
 - `takeover → catalog, config`；
 - `shadow → targetexec, transport/bodycapture`；
 - `targetexec → cache, config, protocol, transport/bodycapture, provider`；
-- `appapi → fusion, observe/stats, pricing`；
-- `web → appapi, observe/requestlog, pricing`。
+- `web → appapi, observe/requestlog, observe/stats, pricing`。
 
 `internal/takeover` 拥有客户端配置的备份、改写与恢复（claude/opencode/codex/pi），
 只消费 config DTO 与 catalog 元数据；implicit routes、catalog 加载与 source 标记
@@ -392,23 +407,24 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
 - `internal/catalog` 反向依赖 Config、Proxy、Provider、Web/CLI 或任意
   `model-proxy/*` 包；
 - `internal/routing` 反向依赖 Proxy、runtime Manager、target executor、Web/CLI
-  或 `internal/catalog` / `internal/config` 之外的仓库包；根包恢复 request
+  或 `internal/catalog` / `internal/config` / `internal/provider` 值类型之外
+  的仓库包；根包恢复 request
   profile、capability/context、cross-route 或 cooldown terminal 策略副本；
 - `internal/accounts` 读取 HOME、反向依赖 Config、Proxy、Provider、Web/CLI，
   或承担网络验证、Provider 构建、reload 与路由选择；
 - `internal/observe/events` 反向依赖 Proxy、HTTP/Web、Config、Provider 或任意
   `model-proxy/*` 包；根 SSE adapter 重新声明事件类型或拥有 ring/fan-out 状态；
-- `internal/observe/requestlog` 反向依赖 Config、Proxy、RouteTarget、Provider、
-  protocol、Web/CLI 或任意 `model-proxy/*` 包；根包重新声明 Record、writer、
+- `internal/observe/requestlog` 反向依赖 Proxy、RouteTarget、Provider、
+  protocol、Web/CLI 或 `config` 值类型之外的 `model-proxy/*` 包；根包重新声明 Record、writer、
   logger、query heap 或 Shadow 聚合；
 - `internal/cache` 反向依赖 Config、Proxy、Provider、protocol、events
   或任意 `model-proxy/*` 包；根包重新声明 store、entry 或 recorder；
 - `internal/transport/bodycapture` 反向依赖 request log、protocol、Proxy、
   Config、Provider 或任意 `model-proxy/*` 包；
-- `internal/runtime/wirecap` 反向依赖 Config、Proxy、Provider、HTTP/Web/CLI
-  或任意 `model-proxy/*` 包；根包重新声明 verdict、capabilities map 或其锁；
-- `internal/runtime` 依赖 `provider` 值类型之外的 Config、Proxy、HTTP/Web/CLI
-  或持久化实现；根包恢复 health/sticky/pin/model-lock/paramBlock/spread/quota
+- `internal/runtime/wirecap` 反向依赖 Proxy、HTTP/Web/CLI 或 `config` /
+  `provider` 值类型之外的 `model-proxy/*` 包；根包重新声明 verdict、capabilities map 或其锁；
+- `internal/runtime` 依赖 `config`/`provider` 值类型与 `runtime/wirecap` 之外的
+  Proxy、HTTP/Web/CLI 或持久化实现；根包恢复 health/sticky/pin/model-lock/paramBlock/spread/quota
   的第二份 map 或互斥锁；
 - `internal/pricing` 反向依赖 `main` 的 YAML 配置、Proxy、Web 或通用 helper；
 - `internal/protocol` import 任意 `model-proxy/*`，或反向读取 Config、Provider、

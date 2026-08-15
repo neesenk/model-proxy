@@ -105,7 +105,9 @@ func (p *AqpKeyProvider) keyLocked() (string, error) {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("mint aqp key: HTTP %d: %s", resp.StatusCode, string(rb))
+		// Truncated like the codex refresh error: the body may be a large
+		// error page and must not flood logs/errors.
+		return "", fmt.Errorf("mint aqp key: HTTP %d: %s", resp.StatusCode, Truncate(string(rb), 200))
 	}
 	var parsed struct {
 		Retcode int `json:"retcode"`
@@ -355,12 +357,20 @@ func (p *CodexOAuthProvider) refreshLocked(af *CodexAuthFile) error {
 	return nil
 }
 
-func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
+// WriteCodexAuthFile atomically persists a codex OAuth auth file (0600): the
+// CLI's initial device-flow login and the provider's token-rotation refresh
+// both funnel through here so a crash mid-write can never truncate the file
+// holding the only copy of a rotated refresh token.
+func WriteCodexAuthFile(path string, af *CodexAuthFile) error {
 	b, err := json.MarshalIndent(af, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p.authFile, b, 0o600)
+	return atomicWriteFile(path, b, 0o600)
+}
+
+func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
+	return WriteCodexAuthFile(p.authFile, af)
 }
 
 // CodexAccountInfo is the Web-UI display projection of a codex OAuth auth

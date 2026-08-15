@@ -289,6 +289,14 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		respBody, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		resp.Body.Close()
 		if err != nil {
+			// Same rule as the Do path above: a fusion-level cancel (grace
+			// expired / quorum reached / client disconnect) cutting the leg
+			// mid-body is NOT a provider failure — the upstream never got to
+			// finish, it was simply abandoned.
+			if ctx.Err() == context.Canceled {
+				res.Err = errFusionLegUnavailable
+				return
+			}
 			p.recordFailure(m.Provider, sched, fc.runtime.Generation)
 			if p.metrics != nil {
 				p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
@@ -394,7 +402,9 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			if p.tokens != nil {
 				p.tokens.Commit(counters.TokenKey{Provider: m.Provider, Model: m.Model}, usage)
 			}
-			p.agents.AddTokens(fc.agent, m.Provider, m.Model, usage)
+			if p.agents != nil {
+				p.agents.AddTokens(fc.agent, m.Provider, m.Model, usage)
+			}
 		}
 	}
 	// Request log: each leg records under its own id (fusion-panel-<i>-<parent>

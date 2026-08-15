@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"model-proxy/internal/provider"
 )
@@ -93,4 +94,20 @@ func mustRealProvider(t *testing.T, providerID string, cfg *provider.Config) pro
 		t.Fatalf("provider.New(%s): %v", providerID, err)
 	}
 	return p
+}
+
+// waitUntil polls a condition until it holds or the deadline lapses. It
+// replaces fixed sleeps that "prove" timing (AGENTS.md testing rules): the
+// wait ends as soon as the observable state flips (fast machines finish
+// early) and never flakes on slow ones, and a genuine failure still fails
+// with a named condition instead of a downstream assertion mystery.
+func waitUntil(t *testing.T, what string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !condition() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !condition() {
+		t.Fatalf("timed out waiting for %s", what)
+	}
 }

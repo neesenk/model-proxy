@@ -18,7 +18,8 @@ func TestAccountsListMasked(t *testing.T) {
 	if err := SavePool("zhipu", "zhipu", CredentialPool{
 		Version: 1,
 		Accounts: []PoolAccount{{
-			ID:        "abc1234567890def",
+			// ID is derived from the credential (AccountID), like login does.
+			ID:        AccountIDFor("zhipu", AccountCred{APIKey: "sk-secret-key-1234567890"}),
 			Label:     "work",
 			APIKey:    "sk-secret-key-1234567890",
 			AccessKey: "AK-LEAK-12345",
@@ -53,7 +54,7 @@ func TestAccountsListMasked(t *testing.T) {
 	}
 	// The real account id MUST be present (unmasked) — the UI sends it back on
 	// remove, so masking it would break deletion.
-	if !strings.Contains(body, `"id":"abc1234567890def"`) {
+	if want := AccountIDFor("zhipu", AccountCred{APIKey: "sk-secret-key-1234567890"}); !strings.Contains(body, `"id":"`+want+`"`) {
 		t.Errorf("real id (for removal) missing:\n%s", body)
 	}
 	if !strings.Contains(body, `"label":"work"`) {

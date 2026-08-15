@@ -316,6 +316,62 @@ func TestAtomicWriteKeepsOldTargetVisibleUntilRename(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteSyncsBeforeRenameAndCreatesOwnerOnlyDir(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "model-proxy", "cache")
+	path := filepath.Join(nested, "models_cache.json")
+
+	var order []string
+	if err := atomicWriteWith(path, []byte("data"), atomicWriteOps{
+		createTemp: os.CreateTemp,
+		sync:       func(*os.File) error { order = append(order, "sync"); return nil },
+		rename: func(oldPath, newPath string) error {
+			order = append(order, "rename")
+			return os.Rename(oldPath, newPath)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 2 || order[0] != "sync" || order[1] != "rename" {
+		t.Fatalf("write order=%v, want sync before rename", order)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "data" {
+		t.Fatalf("target=%q err=%v", got, err)
+	}
+	// The cache dir sits under ~/.model-proxy beside credential files: it must
+	// be owner-only (0700 standard from internal/accounts), not 0755.
+	info, err := os.Stat(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("cache dir perm=%o, want no group/other access", perm)
+	}
+
+	// A sync failure must abort before rename and leave the old target intact.
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("disk full")
+	renameReached := false
+	if err := atomicWriteWith(path, []byte("new"), atomicWriteOps{
+		createTemp: os.CreateTemp,
+		sync:       func(*os.File) error { return syncErr },
+		rename: func(oldPath, newPath string) error {
+			renameReached = true
+			return os.Rename(oldPath, newPath)
+		},
+	}); !errors.Is(err, syncErr) {
+		t.Fatalf("sync error=%v, want %v", err, syncErr)
+	}
+	if renameReached {
+		t.Error("rename ran despite sync failure")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "old" {
+		t.Fatalf("failed sync changed target=%q err=%v", got, err)
+	}
+}
+
 func TestAge(t *testing.T) {
 	for _, tc := range []struct {
 		at   time.Time

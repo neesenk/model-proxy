@@ -4,7 +4,9 @@ import (
 	"context"
 	"io/fs"
 	"model-proxy/internal/appapi"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -81,7 +83,63 @@ func (s *Server) Start() bool {
 
 func (s *Server) Close() { s.tasks.Close() }
 
+// guardBrowserOrigin enforces the loopback trust boundary for the unauthenticated
+// admin surface. Local CLI/curl clients send no Origin/Sec-Fetch-Site and pass
+// untouched; requests that carry BROWSER identity headers must:
+//
+//   - carry a LOOPBACK Host (DNS rebinding serves attacker domains that resolve
+//     here — same-origin from the browser's view, so only the Host check stops
+//     it), and
+//   - have an Origin that matches the request Host (a page on evil.com doing a
+//     cross-site fetch — a CORS simple request with a text/plain body reaches
+//     POST handlers — cannot forge this).
+//
+// GET /api/config answers with the verbatim YAML (static provider keys live in
+// it), so reads need the same protection as mutations.
+func guardBrowserOrigin(w http.ResponseWriter, r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	browser := origin != "" || r.Header.Get("Sec-Fetch-Site") != ""
+	if !browser {
+		return true
+	}
+	if !isLoopbackHostHeader(r.Host) {
+		http.Error(w, "admin API host must be a loopback address", http.StatusForbidden)
+		return false
+	}
+	if origin != "" {
+		originHost := originHostPort(origin)
+		if !strings.EqualFold(originHost, r.Host) {
+			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+			return false
+		}
+	}
+	return true
+}
+
+func isLoopbackHostHeader(hostPort string) bool {
+	host := hostPort
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = h
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// originHostPort extracts "host[:port]" from an Origin header value.
+func originHostPort(origin string) string {
+	if u, err := url.Parse(origin); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return origin
+}
+
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
+	if !guardBrowserOrigin(w, r) {
+		return
+	}
 	name := strings.TrimPrefix(r.URL.Path, "/ui/")
 	if name == "" || strings.HasSuffix(name, "/") {
 		name = "index.html"
@@ -99,11 +157,19 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Assets are embedded in the binary; a binary update must not be masked by a
+	// browser holding a stale index.html/app.js. no-cache allows revalidation
+	// while embedded FS reads stay cheap. nosniff is defense in depth.
 	w.Header().Set("content-type", contentTypeFor(name))
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = w.Write(data)
 }
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
+	if !guardBrowserOrigin(w, r) {
+		return
+	}
 	p := r.URL.Path
 	switch {
 	case p == "/api/status" && r.Method == http.MethodGet:

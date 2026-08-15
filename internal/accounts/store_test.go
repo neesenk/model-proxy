@@ -31,14 +31,23 @@ func TestAccountIDFor(t *testing.T) {
 	if len(z) != 16 {
 		t.Fatalf("zhipu id len = %d, want 16", len(z))
 	}
-	// volcengine keys by access_key (account-level), not api_key
+	// volcengine keys by access_key (account-level), not api_key. The id is a
+	// hash of it — virtual ids reach logs and persisted state, so the raw
+	// access key must never appear in the identifier (AGENTS.md red line 3).
 	a := AccountID("volcengine", Credentials{APIKey: "k1", AccessKey: "AK9"})
 	b := AccountID("volcengine", Credentials{APIKey: "k2", AccessKey: "AK9"})
 	if a != b {
 		t.Fatalf("volcengine same access_key must yield same id: %q vs %q", a, b)
 	}
-	if a != "AK9" {
-		t.Fatalf("volcengine id = %q, want AK9", a)
+	if strings.Contains(a, "AK9") {
+		t.Fatalf("volcengine id %q must not contain the raw access key", a)
+	}
+	if len(a) != 16 {
+		t.Fatalf("volcengine id len = %d, want 16", len(a))
+	}
+	d := AccountID("volcengine", Credentials{APIKey: "k1", AccessKey: "AK8"})
+	if a == d {
+		t.Fatalf("different access keys must yield different ids")
 	}
 	// access_key empty → fall back to key hash
 	c := AccountID("volcengine", Credentials{APIKey: "k1"})
@@ -80,7 +89,14 @@ func TestSaveLoadPoolRoundTrip(t *testing.T) {
 	if len(out.Accounts) != 2 {
 		t.Fatalf("len = %d, want 2", len(out.Accounts))
 	}
-	if out.Accounts[0].ID != "id1" || out.Accounts[0].APIKey != "k1" || out.Accounts[0].Label != "home" {
+	// IDs are DERIVED from credentials on load, never free-form strings: the
+	// hand-assigned "id1" converges to the canonical hash (login always wrote
+	// AccountID; hand-written ids were never a supported path, and normalizing
+	// them is what migrates pre-hash volcengine pools).
+	if want := AccountID("zhipu", in.Accounts[0].Credentials()); out.Accounts[0].ID != want {
+		t.Fatalf("account0 id = %q, want derived %q", out.Accounts[0].ID, want)
+	}
+	if out.Accounts[0].APIKey != "k1" || out.Accounts[0].Label != "home" || out.Accounts[0].AddedAt != "2026-07-08T00:00:00Z" {
 		t.Fatalf("account0 = %+v", out.Accounts[0])
 	}
 }
@@ -552,5 +568,41 @@ func TestWithPoolLock_FreshLockIsBusy(t *testing.T) {
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("lockfile not cleaned up: %v", err)
+	}
+}
+
+// Regression (credential red line): pools written before the volcengine id
+// became a hash stored the raw access key as the account id; those ids flow
+// into virtual ids, logs, request-log JSONL and persisted runtime state.
+// Loading must converge them onto the hashed derivation — and collapse
+// old/new duplicates of the same credential — so existing installs stop
+// leaking without waiting for a re-login rewrite.
+func TestLoadSnapshotNormalizesLegacyVolcengineIDs(t *testing.T) {
+	store := newTestStore(t, t.TempDir())
+	body := `{"version":1,"accounts":[` +
+		`{"id":"AKSECRET123","label":"old","api_key":"k1","access_key":"AKSECRET123","secret_key":"s1","added_at":"x"},` +
+		`{"id":"` + AccountID("volcengine", Credentials{APIKey: "k1", AccessKey: "AKSECRET123", SecretKey: "s1"}) + `","label":"dup","api_key":"k1","access_key":"AKSECRET123","secret_key":"s1","added_at":"y"},` +
+		`{"id":"AKOTHER456","label":"second","api_key":"k2","access_key":"AKOTHER456","secret_key":"s2","added_at":"z"}]}`
+	if err := os.WriteFile(store.PoolPath("volcengine"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.LoadSnapshot("volcengine", "volcengine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Source != SourcePlural {
+		t.Fatalf("source = %v, want SourcePlural", snapshot.Source)
+	}
+	if got := len(snapshot.Pool.Accounts); got != 2 {
+		t.Fatalf("accounts = %d, want 2 (same-credential duplicate collapsed)", got)
+	}
+	for _, account := range snapshot.Pool.Accounts {
+		if strings.Contains(account.ID, "AKSECRET123") || strings.Contains(account.ID, "AKOTHER456") {
+			t.Fatalf("id %q still carries raw access key material", account.ID)
+		}
+		if want := AccountID("volcengine", account.Credentials()); account.ID != want {
+			t.Fatalf("id %q not normalized to %q", account.ID, want)
+		}
 	}
 }

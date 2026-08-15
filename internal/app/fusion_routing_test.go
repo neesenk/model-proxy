@@ -375,3 +375,46 @@ func TestFusionToolsUnsupportedDegradesDirectly(t *testing.T) {
 		t.Fatalf("direct degraded synthesis changed tool_choice:\n got: %v\nwant: %v", synthesis["tool_choice"], original["tool_choice"])
 	}
 }
+
+// Regression: a panel leg that already received its response headers but is
+// still streaming its body when quorum + grace cancels the panel must NOT be
+// recorded as a provider failure (docs/architecture/fusion-shadow-cache.md:
+// branches actively cancelled by quorum/grace don't count). Pre-fix the body
+// read error path lacked the Do path's cancellation guard and poisoned the
+// circuit + evFailures for a healthy upstream.
+func TestFusionLeg_CancelDuringBodyReadIsNotProviderFailure(t *testing.T) {
+	slowBody := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		// Truncated JSON body: headers delivered, body never completes.
+		io.WriteString(w, `{"id":"msg_slow","type":"message","role":"assistant","content":[{"type":"text","text":"slow"`)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	})
+	fast := newFakeUpstream(t, anthropicDraftResponder("draft-fast"))
+	synth := newFakeUpstream(t, anthropicSSEResponder("final"))
+	recipe := FusionConfig{
+		Panel: []RouteTarget{
+			{Provider: "slow", Model: "mslow"},
+			{Provider: "fast", Model: "mfast"},
+		},
+		Synthesizer: RouteTarget{Provider: "synth", Model: "msynth"},
+		MinPanel:    1, // fast leg alone satisfies quorum, then grace cuts slow
+	}
+	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"slow": slowBody, "fast": fast, "synth": synth})
+
+	previousGrace := fusionGracePeriod
+	fusionGracePeriod = 30 * time.Millisecond
+	defer func() { fusionGracePeriod = previousGrace }()
+
+	if out := postAnthropic(t, px, fusionClientBody); !strings.Contains(out, "final") {
+		t.Fatalf("client body missing synthesis: %s", out)
+	}
+	if m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "slow", Model: "mslow"}]; m.Failures != 0 || m.Failovers != 0 {
+		t.Errorf("cancelled leg metrics = failures %d failovers %d, want 0/0", m.Failures, m.Failovers)
+	}
+	if status, ok := proxy.runtimeState.Dashboard(time.Now()).Providers["slow"]; ok && status.ConsecutiveFailures != 0 {
+		t.Errorf("cancelled leg consecutiveFailures = %d, want 0", status.ConsecutiveFailures)
+	}
+}

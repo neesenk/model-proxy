@@ -78,12 +78,17 @@ func saveCache(path string, catalog *Catalog) error {
 
 type atomicWriteOps struct {
 	createTemp func(dir, pattern string) (*os.File, error)
+	sync       func(*os.File) error
 	rename     func(oldPath, newPath string) error
 }
 
+// fileSync flushes file contents to stable storage (power-loss safety).
+func fileSync(f *os.File) error { return f.Sync() }
+
 // writeAtomic uses a unique temporary file in the target directory. Unique
 // names keep independent model-proxy processes from clobbering one another's
-// in-progress cache writes; rename ensures readers observe a complete JSON file.
+// in-progress cache writes; fsync + rename ensures readers observe a complete
+// JSON file (and survive power loss).
 func writeAtomic(path string, data []byte) error {
 	return writeAtomicWith(path, data, atomicWriteOps{
 		createTemp: os.CreateTemp,
@@ -92,8 +97,13 @@ func writeAtomic(path string, data []byte) error {
 }
 
 func writeAtomicWith(path string, data []byte, ops atomicWriteOps) error {
+	if ops.sync == nil {
+		ops.sync = fileSync
+	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700 matches the credential-store standard (internal/accounts): the
+	// cache lives under ~/.model-proxy beside credential files.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := ops.createTemp(dir, "."+filepath.Base(path)+".tmp-*")
@@ -111,6 +121,12 @@ func writeAtomicWith(path string, data []byte, ops atomicWriteOps) error {
 		tmp.Close()
 		return err
 	}
+	// Sync before rename: a rename alone may be reordered/replayed after a
+	// crash with unflushed data, exposing a truncated cache.
+	if err := ops.sync(tmp); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
@@ -119,9 +135,16 @@ func writeAtomicWith(path string, data []byte, ops atomicWriteOps) error {
 
 // EnsureFresh returns a usable catalog while preserving stale-cache fallback:
 // fresh uses the cache; stale or forced sends a conditional request; 304
-// refreshes metadata; 200 rebuilds the catalog. A fetch error uses stale data
-// when available, otherwise returns an empty catalog together with the error.
+// refreshes metadata; 200 rebuilds the catalog. A non-positive TTL normalizes
+// to DefaultTTL. A fetch error uses stale data when available, otherwise
+// returns an empty catalog together with the error.
 func EnsureFresh(options RefreshOptions) (*Catalog, error) {
+	// A non-positive TTL normalizes to DefaultTTL (mirrors internal/catalog):
+	// TTL=0 must mean "default freshness", not "always stale / refetch every
+	// call".
+	if options.TTL <= 0 {
+		options.TTL = DefaultTTL
+	}
 	cached, _ := loadCache(options.CacheFile)
 	if !options.Force && cached != nil && time.Since(cached.FetchedAt) < options.TTL {
 		return cached, nil
@@ -157,11 +180,23 @@ func EnsureFresh(options RefreshOptions) (*Catalog, error) {
 		_ = saveCache(options.CacheFile, cached)
 		return cached, nil
 	case http.StatusOK:
-		catalog := parseOpenRouter(body)
-		catalog.FetchedAt = time.Now()
-		catalog.Etag = newEtag
-		_ = saveCache(options.CacheFile, catalog)
-		return catalog, nil
+		// A malformed/empty 200 (gateway error page, truncated body) must
+		// never overwrite a good cached catalog — fall back to the stale
+		// cache like every other fetch failure (mirrors internal/catalog).
+		fresh, err := parseOpenRouter(body)
+		if err != nil {
+			if cached != nil {
+				if options.Warnings != nil {
+					fmt.Fprintf(options.Warnings, "model-proxy: %v; using catalog cached %s ago\n", err, ageString(cached.FetchedAt))
+				}
+				return cached, nil
+			}
+			return Empty(), err
+		}
+		fresh.FetchedAt = time.Now()
+		fresh.Etag = newEtag
+		_ = saveCache(options.CacheFile, fresh)
+		return fresh, nil
 	default:
 		if cached != nil {
 			return cached, nil

@@ -86,6 +86,12 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 
 - `schedule` 跳过熔断、限频和模型锁定目标。
 - timeout、连接错误、5xx 和 refresh 后仍失败的 401 计入 provider 熔断。
+- **客户端取消不计熔断**：调用方断开（`exchange.Request.Context()` 取消，
+  含调用方自身 deadline）不是上游判决——不记 `RecordFailure`、不计
+  `evFailures`，executor 返回 `OutcomeClientGone`，`serveOnce` 立即终止
+  failover 链（不再把剩余 target 在死掉的 ctx 上各烧一次）并以 499 结束
+  live 事件。执行器自身 upstream timeout 触发的
+  `DeadlineExceeded`（父 ctx 仍存活）照常计入熔断。
 - exhausted 401 的观测只记 failover，不记 `evFailures`；熔断状态与请求 metric
   是不同语义，普通执行器和 Fusion leg 必须保持一致。
 - 429 进入 provider 限频冷却，不计熔断。

@@ -280,8 +280,7 @@ func CmdCodexLogin(provName string) {
 	if err := os.MkdirAll(DirOf(authFile), 0o700); err != nil {
 		log.Fatal(err)
 	}
-	b, _ := json.MarshalIndent(af, "", "  ")
-	if err := os.WriteFile(authFile, b, 0o600); err != nil {
+	if err := provider.WriteCodexAuthFile(authFile, af); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("✓ codex OAuth tokens saved to %s\n", authFile)

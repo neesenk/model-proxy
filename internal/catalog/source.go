@@ -165,8 +165,12 @@ func save(path string, catalog *Catalog) error {
 
 type atomicWriteOps struct {
 	createTemp func(dir, pattern string) (*os.File, error)
+	sync       func(*os.File) error
 	rename     func(oldPath, newPath string) error
 }
+
+// fileSync flushes file contents to stable storage (power-loss safety).
+func fileSync(f *os.File) error { return f.Sync() }
 
 func atomicWrite(path string, data []byte) error {
 	return atomicWriteWith(path, data, atomicWriteOps{
@@ -176,8 +180,13 @@ func atomicWrite(path string, data []byte) error {
 }
 
 func atomicWriteWith(path string, data []byte, ops atomicWriteOps) error {
+	if ops.sync == nil {
+		ops.sync = fileSync
+	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700 matches the credential-store standard (internal/accounts): the
+	// cache lives under ~/.model-proxy beside credential files.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := ops.createTemp(dir, ".models_cache-*")
@@ -191,6 +200,12 @@ func atomicWriteWith(path string, data []byte, ops atomicWriteOps) error {
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	// Sync before rename: a rename alone may be reordered/replayed after a
+	// crash with unflushed data, exposing a truncated cache.
+	if err := ops.sync(tmp); err != nil {
 		tmp.Close()
 		return err
 	}

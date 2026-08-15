@@ -58,14 +58,6 @@ func (p *Proxy) dispatchShadowAfterCommit(
 	}
 }
 
-// shouldShadow reports whether this request should be shadow-evaluated, based on
-// the currently-loaded shadow runtime's sample rate. Reload-aware: the runtime
-// pointer is swapped atomically, so a config change (e.g. sample_rate: 0) takes
-// effect immediately without a restart.
-func (p *Proxy) shouldShadow() bool {
-	return p.shadow.Load().ShouldSample()
-}
-
 // runShadow sends the same prompt to a candidate backend (shadow evaluation,
 // #12): fire-and-forget, the result is logged for offline comparison and NEVER
 // returned to the client. It shares targetexec.Plan request preparation but is
