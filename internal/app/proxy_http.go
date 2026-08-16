@@ -11,6 +11,7 @@ import (
 
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
+	webtransport "model-proxy/internal/web"
 )
 
 // reqIDPrefix is a per-process 8-hex-char nonce (generated once from crypto/rand
@@ -35,11 +36,21 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/debug/schedule" {
+		// Routing/pin/sticky metadata: same loopback trust boundary as the
+		// admin API for browser-shaped requests (CLI/curl passes untouched).
+		if !webtransport.GuardBrowserOrigin(w, r) {
+			return
+		}
 		w.Header().Set("content-type", "application/json")
 		w.Write(p.scheduleStatus())
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/events" {
+		// Only reachable with web.enabled=false (the web transport serves the
+		// endpoint through its guarded /api/ subtree otherwise).
+		if !webtransport.GuardBrowserOrigin(w, r) {
+			return
+		}
 		observeevents.ServeEvents(p.events, w, r)
 		return
 	}

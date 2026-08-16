@@ -20,12 +20,21 @@ type Options struct {
 	Assets    fs.FS
 	AssetRoot string
 	LogFile   func() string
+	// Events, when non-nil, serves the live SSE stream on GET /api/events.
+	// The endpoint belongs to the /api/ subtree this transport registers, so
+	// the composition root injects the hub-serving handler here — without it
+	// the mux dispatches /api/events into this transport's 404 default while
+	// the SSE branch in the proxy handler stays unreachable (web.enabled is
+	// the default). Routing it through serveAPI also puts guardBrowserOrigin
+	// in front of the stream.
+	Events http.HandlerFunc
 }
 
 // Server serves the admin UI and its JSON API.
 type Server struct {
 	reads     appapi.ReadAPI
 	commands  appapi.CommandAPI
+	events    http.HandlerFunc
 	version   string
 	assets    fs.FS
 	assetRoot string
@@ -46,7 +55,7 @@ func New(opts Options) (*Server, error) {
 	if root == "" {
 		root = "assets"
 	}
-	return &Server{reads: opts.Reads, commands: opts.Commands, version: opts.Version, assets: assets, assetRoot: root, logFile: opts.LogFile, tasks: newTaskOwner(), sessions: newSessionStore()}, nil
+	return &Server{reads: opts.Reads, commands: opts.Commands, events: opts.Events, version: opts.Version, assets: assets, assetRoot: root, logFile: opts.LogFile, tasks: newTaskOwner(), sessions: newSessionStore()}, nil
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
@@ -83,7 +92,10 @@ func (s *Server) Start() bool {
 
 func (s *Server) Close() { s.tasks.Close() }
 
-// guardBrowserOrigin enforces the loopback trust boundary for the unauthenticated
+// GuardBrowserOrigin enforces the loopback trust boundary for the
+// unauthenticated admin surface. Exported so the composition root can guard
+// browser-reachable endpoints that ride the proxy handler instead of this
+// transport (e.g. /debug/schedule, /api/events in web-disabled mode).
 // admin surface. Local CLI/curl clients send no Origin/Sec-Fetch-Site and pass
 // untouched; requests that carry BROWSER identity headers must:
 //
@@ -96,7 +108,7 @@ func (s *Server) Close() { s.tasks.Close() }
 //
 // GET /api/config answers with the verbatim YAML (static provider keys live in
 // it), so reads need the same protection as mutations.
-func guardBrowserOrigin(w http.ResponseWriter, r *http.Request) bool {
+func GuardBrowserOrigin(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	browser := origin != "" || r.Header.Get("Sec-Fetch-Site") != ""
 	if !browser {
@@ -137,7 +149,7 @@ func originHostPort(origin string) string {
 }
 
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
-	if !guardBrowserOrigin(w, r) {
+	if !GuardBrowserOrigin(w, r) {
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/ui/")
@@ -167,11 +179,13 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
-	if !guardBrowserOrigin(w, r) {
+	if !GuardBrowserOrigin(w, r) {
 		return
 	}
 	p := r.URL.Path
 	switch {
+	case p == "/api/events" && r.Method == http.MethodGet && s.events != nil:
+		s.events(w, r)
 	case p == "/api/status" && r.Method == http.MethodGet:
 		s.handleStatus(w, r)
 	case p == "/api/logs" && r.Method == http.MethodGet:

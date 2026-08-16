@@ -4,6 +4,7 @@ import (
 	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 
+	observeevents "model-proxy/internal/observe/events"
 	webtransport "model-proxy/internal/web"
 )
 
@@ -16,6 +17,7 @@ type WebServer struct {
 
 	configFile string
 	logFile    string
+	events     http.HandlerFunc
 
 	newAqpClientFn  func(storePath string) *clilogin.AqpClient
 	newCodexOptions func() *clilogin.CodexLoginServerOptions
@@ -38,6 +40,12 @@ func NewWebServer(proxy *Proxy, configFile string) *WebServer {
 	server.api.newCodexOptions = func() *clilogin.CodexLoginServerOptions {
 		return server.newCodexOptions()
 	}
+	// The live SSE stream is served by the web transport's /api/ subtree; the
+	// hub itself stays owned by the Proxy (snapshot/event producers publish
+	// there), so only the handler is injected. See webtransport.Options.Events.
+	server.events = func(w http.ResponseWriter, r *http.Request) {
+		observeevents.ServeEvents(proxy.events, w, r)
+	}
 	server.server = mustNewWebTransport(server)
 	return server
 }
@@ -47,6 +55,7 @@ func mustNewWebTransport(server *WebServer) *webtransport.Server {
 		Reads:    server.api,
 		Commands: server.api,
 		Version:  Version,
+		Events:   server.events,
 		LogFile: func() string {
 			return server.logFile
 		},

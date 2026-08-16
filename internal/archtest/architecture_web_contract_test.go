@@ -32,6 +32,7 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 		for _, violation := range exactFieldSetViolations(fields, map[string]bool{
 			"reads":     true,
 			"commands":  true,
+			"events":    true,
 			"version":   true,
 			"assets":    true,
 			"assetRoot": true,
@@ -40,6 +41,11 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 			"sessions":  true,
 		}) {
 			t.Errorf("internal/web.Server field boundary: %s", violation)
+		}
+		// events is the injected SSE port (the composition root binds the
+		// proxy-owned events hub; the transport only routes and guards it).
+		if !typeContainsIdent(fields["events"], "HandlerFunc") {
+			t.Errorf("Server.events type = %q, want http.HandlerFunc port", simpleTypeName(fields["events"]))
 		}
 		for name, fieldType := range fields {
 			if typeContainsIdent(fieldType, "Proxy") {
@@ -69,6 +75,7 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 			"api":             true,
 			"configFile":      true,
 			"logFile":         true,
+			"events":          true,
 			"newAqpClientFn":  true,
 			"newCodexOptions": true,
 		}) {
