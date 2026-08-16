@@ -43,8 +43,12 @@ func (l *Lifecycle) Run(task func(stop <-chan struct{})) bool {
 
 // runBeforeLogDrain admits finite background work that may still enqueue a
 // request-log record. Admission shares the lifecycle mutex with beginStop, so
-// Add cannot race Wait and no task can start after shutdown begins.
-func (l *Lifecycle) RunBeforeLogDrain(task func()) bool {
+// Add cannot race Wait and no task can start after shutdown begins. The task
+// receives the stop channel closed by BeginStop — it must observe it and
+// abort its work: nothing bounds WaitBeforeLogDrain otherwise, and the
+// supervisor SIGKILLs the worker 10s after SIGTERM, dropping every final
+// flush that follows this wait.
+func (l *Lifecycle) RunBeforeLogDrain(task func(stop <-chan struct{})) bool {
 	if l == nil {
 		return false
 	}
@@ -57,13 +61,13 @@ func (l *Lifecycle) RunBeforeLogDrain(task func()) bool {
 	l.mu.Unlock()
 	go func() {
 		defer l.beforeLogDrain.Done()
-		task()
+		task(l.stop)
 	}()
 	return true
 }
 
 // StopChannel returns the channel closed by BeginStop (read-only lifecycle
-// probe for tests; production never selects on it directly).
+// probe; production tasks receive it through their task function).
 func (l *Lifecycle) StopChannel() <-chan struct{} {
 	if l == nil {
 		return nil

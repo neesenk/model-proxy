@@ -196,6 +196,7 @@ func TestShadowDispatchEmptyModelPassesThrough(t *testing.T) {
 	p.runShadow(
 		runtime,
 		shadowRuntime,
+		nil,
 		"responses",
 		"responses",
 		"alias",
@@ -324,6 +325,7 @@ func TestRunShadowPartialResponseIsLogged(t *testing.T) {
 	proxy.runShadow(
 		proxy.SnapshotRuntime(),
 		proxy.shadow.Load(),
+		nil,
 		"openai",
 		"openai",
 		"alias",

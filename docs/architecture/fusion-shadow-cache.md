@@ -78,8 +78,10 @@ target 和 `targetexec.Plan`，再调用 `Runtime.Execute` 并映射 request log
 synthesizer 不经过这条 post-commit hook，禁止递归派发 Shadow。
 
 Shadow 作为 `internal/runtime.Lifecycle` 的有限 log-producing task 接纳：shutdown 开始后
-拒绝新任务，已接纳任务受 shadow HTTP timeout 约束并在 request logger drain
-前完成，避免 `Proxy.Close` 返回后仍向无人消费的 channel 写记录。
+拒绝新任务，已接纳任务持有 stop 信号并带 `shadowShutdownGrace`（2s）宽限——宽限内完成的
+评估照常在 request logger drain 前落记录；仍挂起的请求在宽限后取消，`Proxy.Close` 不会
+被拖过 supervisor 的 10s SIGTERM 强杀窗口（否则其后的 request-log drain、quota persist
+等 final flush 全部丢失）。
 
 显式 `protocol:` 在配置加载时同时校验 endpoint：`anthropic` 需要
 `anthropic_base_url`，`openai`/`responses` 需要 `openai_base_url`；不允许把

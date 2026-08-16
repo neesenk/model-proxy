@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"log"
+	"time"
+
 	"model-proxy/internal/observe/requestlog"
 
 	"model-proxy/internal/protocol"
@@ -40,11 +42,12 @@ func (p *Proxy) dispatchShadowAfterCommit(
 	if permit == nil {
 		return
 	}
-	if !p.lifecycle.RunBeforeLogDrain(func() {
+	if !p.lifecycle.RunBeforeLogDrain(func(stop <-chan struct{}) {
 		defer permit.Release()
 		p.runShadow(
 			runtime,
 			shadowRuntime,
+			stop,
 			proto,
 			backendProto,
 			calledModel,
@@ -58,6 +61,14 @@ func (p *Proxy) dispatchShadowAfterCommit(
 	}
 }
 
+// shadowShutdownGrace bounds how long Proxy.Close waits for an in-flight
+// shadow request after lifecycle stop before canceling it. Fast (normal)
+// shadow evaluations finish inside the grace window and their request-log
+// records are drained as usual; a hung upstream gets cut well before the
+// supervisor's 10s SIGTERM window, so every final flush behind
+// WaitBeforeLogDrain still runs.
+const shadowShutdownGrace = 2 * time.Second
+
 // runShadow sends the same prompt to a candidate backend (shadow evaluation,
 // #12): fire-and-forget, the result is logged for offline comparison and NEVER
 // returned to the client. It shares targetexec.Plan request preparation but is
@@ -66,11 +77,17 @@ func (p *Proxy) dispatchShadowAfterCommit(
 // by the primary attempt before launching the goroutine, so reload cannot mix
 // config/provider generation with a different semaphore/client bundle.
 //
+// The task observes the lifecycle stop channel with a grace window: shutdown
+// lets an in-flight evaluation finish (its record is drained by the logger
+// shutdown that follows), but a request still hanging past the grace is
+// canceled — WaitBeforeLogDrain must not be pinned for the full client
+// timeout, or the supervisor kill would drop every final flush behind it.
+//
 // `bodyProto` is the protocol of reqBody (the primary target's backend proto —
 // reqBody may already be converted from the client's proto). The shadow backend's
 // own protocol is shadowTarget.Protocol (defaulting to bodyProto); runShadow selects the
 // shadow base URL + path for THAT protocol and converts the body if it differs.
-func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Runtime, proto, bodyProto, calledModel, exposed string, shadowTarget ShadowTarget, reqBody []byte, primaryReqID string) {
+func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Runtime, stop <-chan struct{}, proto, bodyProto, calledModel, exposed string, shadowTarget ShadowTarget, reqBody []byte, primaryReqID string) {
 	if runtime.Cfg == nil {
 		// Defensive: RuntimeSnapshot is handed around as a plain value — a
 		// future call site that forgets to populate it must not nil-deref
@@ -106,7 +123,24 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		log.Printf("[shadow] %s: target plan failed: %v", target.Provider, err)
 		return
 	}
-	result := shadowRuntime.Execute(context.Background(), shadowexec.Job{
+	// Tie the shadow execution to the lifecycle stop channel with a grace
+	// window: BeginStop starts the clock, and a request still in flight past
+	// the grace is canceled so the final flushes behind WaitBeforeLogDrain
+	// still run before the supervisor's kill window closes.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-stop:
+			select {
+			case <-time.After(shadowShutdownGrace):
+				cancel()
+			case <-ctx.Done():
+			}
+		case <-ctx.Done():
+		}
+	}()
+	result := shadowRuntime.Execute(ctx, shadowexec.Job{
 		Plan:         plan,
 		Body:         reqBody,
 		CalledModel:  calledModel,

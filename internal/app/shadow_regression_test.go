@@ -232,7 +232,7 @@ func TestRunShadow_NilRuntimeConfig(t *testing.T) {
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
-	p.runShadow(RuntimeSnapshot{}, nil, "anthropic", "anthropic", "m", "g",
+	p.runShadow(RuntimeSnapshot{}, nil, nil, "anthropic", "anthropic", "m", "g",
 		ShadowTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid")
 	if !strings.Contains(buf.String(), "runtime snapshot has no config") {
 		t.Fatalf("expected the nil-cfg guard log, got %q", buf.String())

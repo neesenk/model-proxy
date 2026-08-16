@@ -33,7 +33,7 @@ func TestLifecycleRunBeforeLogDrain(t *testing.T) {
 	l := NewLifecycle()
 	release := make(chan struct{})
 	started := make(chan struct{})
-	if !l.RunBeforeLogDrain(func() {
+	if !l.RunBeforeLogDrain(func(<-chan struct{}) {
 		close(started)
 		<-release
 	}) {
@@ -57,7 +57,7 @@ func TestLifecycleRunBeforeLogDrain(t *testing.T) {
 
 func TestLifecycleNilSafe(t *testing.T) {
 	var l *Lifecycle
-	if l.Run(func(<-chan struct{}) {}) || l.RunBeforeLogDrain(func() {}) {
+	if l.Run(func(<-chan struct{}) {}) || l.RunBeforeLogDrain(func(<-chan struct{}) {}) {
 		t.Error("nil lifecycle must reject admission")
 	}
 	l.BeginStop()

@@ -85,7 +85,11 @@ func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	if !p.lifecycle.RunBeforeLogDrain(func() {
+	// The task deliberately ignores stop: the LIFECYCLE contract is that
+	// WaitBeforeLogDrain waits for admitted tasks unconditionally; bounding a
+	// hung task is runShadow's responsibility (grace + cancel), covered by
+	// TestCloseCancelsInFlightShadowRequest.
+	if !p.lifecycle.RunBeforeLogDrain(func(<-chan struct{}) {
 		close(started)
 		<-release
 		p.reqLog.Enqueue(p.reqLog.BuildRecord(requestlog.Input{
@@ -114,7 +118,7 @@ func TestProxyCloseWaitsForShadowBeforeDrainingRequestLogger(t *testing.T) {
 		t.Fatal("Close returned before the shadow task finished")
 	default:
 	}
-	if p.lifecycle.RunBeforeLogDrain(func() {}) {
+	if p.lifecycle.RunBeforeLogDrain(func(<-chan struct{}) {}) {
 		close(release)
 		t.Fatal("lifecycle admitted shadow work after shutdown began")
 	}

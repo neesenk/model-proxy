@@ -392,13 +392,14 @@ func shadowDispatchUsesCapturedRuntime(node ast.Node) bool {
 		return false
 	}
 	run := runCalls[0]
-	if !selectorOnIdent(run.Fun, "p", "runShadow") || len(run.Args) != 9 ||
+	if !selectorOnIdent(run.Fun, "p", "runShadow") || len(run.Args) != 10 ||
 		!identIs(run.Args[0], "runtime") || !identIs(run.Args[1], shadowRuntime) ||
-		!identIs(run.Args[2], "proto") || !identIs(run.Args[3], "backendProto") ||
-		!identIs(run.Args[4], "calledModel") || !identIs(run.Args[5], "exposed") ||
-		!identIs(run.Args[6], "shadow") ||
-		!zeroArgReceiverCall(run.Args[7], "commit", "RequestBody") ||
-		!identIs(run.Args[8], "primaryRequestID") {
+		!identIs(run.Args[2], "stop") ||
+		!identIs(run.Args[3], "proto") || !identIs(run.Args[4], "backendProto") ||
+		!identIs(run.Args[5], "calledModel") || !identIs(run.Args[6], "exposed") ||
+		!identIs(run.Args[7], "shadow") ||
+		!zeroArgReceiverCall(run.Args[8], "commit", "RequestBody") ||
+		!identIs(run.Args[9], "primaryRequestID") {
 		return false
 	}
 
@@ -1068,9 +1069,9 @@ func validShadow() {
 	shadowRuntime := runtime.Shadow
 	shadowRuntime.ShouldSample()
 	permit := shadowRuntime.TryAcquire()
-	p.lifecycle.RunBeforeLogDrain(func() {
+	p.lifecycle.RunBeforeLogDrain(func(stop <-chan struct{}) {
 		defer permit.Release()
-		p.runShadow(runtime, shadowRuntime, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID)
+		p.runShadow(runtime, shadowRuntime, stop, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID)
 	})
 	permit.Release()
 }
@@ -1079,9 +1080,9 @@ func invalidShadow() {
 	shadowRuntime.ShouldSample()
 	other := p.shadow.Load()
 	permit := other.TryAcquire()
-	p.lifecycle.RunBeforeLogDrain(func() {
+	p.lifecycle.RunBeforeLogDrain(func(stop <-chan struct{}) {
 		defer permit.Release()
-		p.runShadow(runtime, other, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID)
+		p.runShadow(runtime, other, stop, proto, backendProto, calledModel, exposed, shadow, commit.RequestBody(), primaryRequestID)
 	})
 	permit.Release()
 }
