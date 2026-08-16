@@ -234,11 +234,12 @@ func TestCooldownAndRecoveredState(t *testing.T) {
 	now := time.Date(2026, 7, 29, 14, 0, 0, 0, time.UTC)
 	targets := []Target{{Provider: "a"}, {Provider: "b"}}
 	m := NewManager(1)
+	quotaMaxAge := 15 * time.Minute
 
-	if down, rate, earliest := m.CooldownState(nil, now); down || rate || !earliest.IsZero() {
+	if down, rate, earliest := m.CooldownState(nil, now, quotaMaxAge); down || rate || !earliest.IsZero() {
 		t.Fatalf("empty cooldown state = %v %v %v", down, rate, earliest)
 	}
-	if down, rate, earliest := m.CooldownState(targets, now); down || rate || !earliest.IsZero() {
+	if down, rate, earliest := m.CooldownState(targets, now, quotaMaxAge); down || rate || !earliest.IsZero() {
 		t.Fatalf("healthy cooldown state = %v %v %v", down, rate, earliest)
 	}
 
@@ -246,7 +247,7 @@ func TestCooldownAndRecoveredState(t *testing.T) {
 	m.health["a"] = &providerHealth{rateLimitedUntil: now.Add(20 * time.Minute)}
 	m.health["b"] = &providerHealth{rateLimitedUntil: now.Add(10 * time.Minute)}
 	m.mu.Unlock()
-	down, rate, earliest := m.CooldownState(targets, now)
+	down, rate, earliest := m.CooldownState(targets, now, quotaMaxAge)
 	if !down || !rate || !earliest.Equal(now.Add(10*time.Minute)) {
 		t.Fatalf("all-rate cooldown = %v %v %v", down, rate, earliest)
 	}
@@ -258,7 +259,7 @@ func TestCooldownAndRecoveredState(t *testing.T) {
 	}
 	m.health["b"] = &providerHealth{circuitOpenUntil: now.Add(15 * time.Minute)}
 	m.mu.Unlock()
-	down, rate, earliest = m.CooldownState(targets, now)
+	down, rate, earliest = m.CooldownState(targets, now, quotaMaxAge)
 	if !down || rate || !earliest.Equal(now.Add(15*time.Minute)) {
 		t.Fatalf("mixed cooldown = %v %v %v", down, rate, earliest)
 	}
@@ -267,19 +268,114 @@ func TestCooldownAndRecoveredState(t *testing.T) {
 	m.health["a"] = &providerHealth{circuitOpenUntil: now.Add(-time.Minute)}
 	m.health["b"] = &providerHealth{circuitOpenUntil: now.Add(time.Minute)}
 	m.mu.Unlock()
-	if down, rate, earliest = m.CooldownState(targets, now); down || rate || !earliest.IsZero() {
+	if down, rate, earliest = m.CooldownState(targets, now, quotaMaxAge); down || rate || !earliest.IsZero() {
 		t.Fatalf("recovered provider did not short-circuit cooldown: %v %v %v", down, rate, earliest)
 	}
-	if !m.HasRecoveredUntried(targets, map[string]bool{"b": true}, now) {
+	if !m.HasRecoveredUntried(targets, map[string]bool{"b": true}, now, quotaMaxAge) {
 		t.Fatal("untried recovered provider was not detected")
 	}
-	if m.HasRecoveredUntried(targets, map[string]bool{"a": true, "b": true}, now) {
+	if m.HasRecoveredUntried(targets, map[string]bool{"a": true, "b": true}, now, quotaMaxAge) {
 		t.Fatal("fully tried target set reported a recovered untried provider")
 	}
 	m.mu.Lock()
 	m.health["a"].halfOpenInFlight = true
 	m.mu.Unlock()
-	if m.HasRecoveredUntried(targets, map[string]bool{}, now) {
+	if m.HasRecoveredUntried(targets, map[string]bool{}, now, quotaMaxAge) {
 		t.Fatal("busy/open targets reported a recovered untried provider")
+	}
+}
+
+// TestCooldownStateTreatsQuotaExhaustionAsRateLimitedDown: the scheduling skip
+// means an exhausted target never receives the upstream 429 that would teach
+// health, so CooldownState must fold the fresh snapshot in as a rate-limit
+// class down reason — otherwise an all-exhausted route reads "available" and
+// the forward loop terminates 502 with no Retry-After. Recovery is bounded by
+// the EARLIER of the window reset and the snapshot staleness horizon.
+func TestCooldownStateTreatsQuotaExhaustionAsRateLimitedDown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	maxAge := 15 * time.Minute
+	targets := []Target{{Provider: "plan"}}
+	m := NewManager(1)
+
+	exhausted := func(asOf time.Time, resetsAt time.Time) *provider.QuotaSnapshot {
+		return &provider.QuotaSnapshot{
+			Billing: provider.BillingPlan, AsOf: asOf,
+			Windows: []provider.QuotaWindow{{Ultimate: true, RemainingPct: 0, ResetsAt: resetsAt}},
+		}
+	}
+
+	// Fresh exhaustion, reset far in the future: recovery = staleness horizon.
+	m.SetQuota("plan", exhausted(now, now.Add(2*time.Hour)), 1)
+	down, rate, earliest := m.CooldownState(targets, now, maxAge)
+	if !down || !rate || !earliest.Equal(now.Add(maxAge)) {
+		t.Fatalf("fresh exhaustion cooldown = %v %v %v, want allDown+rateLimited until AsOf+maxAge", down, rate, earliest)
+	}
+	// Recovery within the horizon: the nearer window reset wins.
+	m.SetQuota("plan", exhausted(now, now.Add(5*time.Minute)), 1)
+	down, rate, earliest = m.CooldownState(targets, now, maxAge)
+	if !down || !rate || !earliest.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("near-reset cooldown = %v %v %v, want until the window reset", down, rate, earliest)
+	}
+	// Stale snapshot: proves nothing, fail open (target reads available).
+	m.SetQuota("plan", exhausted(now.Add(-maxAge-time.Minute), now.Add(time.Minute)), 1)
+	if down, rate, earliest = m.CooldownState(targets, now, maxAge); down || rate || !earliest.IsZero() {
+		t.Fatalf("stale exhaustion cooldown = %v %v %v, want fail-open", down, rate, earliest)
+	}
+
+	// Mixed: one exhausted + one healthy → not all down.
+	m.SetQuota("plan", exhausted(now, now.Add(5*time.Minute)), 1)
+	mixed := []Target{{Provider: "plan"}, {Provider: "healthy"}}
+	if down, rate, _ = m.CooldownState(mixed, now, maxAge); down || rate {
+		t.Fatalf("mixed cooldown = %v %v, want available sibling short-circuits", down, rate)
+	}
+
+	// Exhaustion combines with a health rate-limit: down until the LATER of the two.
+	m.mu.Lock()
+	m.health["plan"] = &providerHealth{rateLimitedUntil: now.Add(3 * time.Minute)}
+	m.mu.Unlock()
+	m.SetQuota("plan", exhausted(now, now.Add(5*time.Minute)), 1)
+	down, rate, earliest = m.CooldownState(targets, now, maxAge)
+	if !down || !rate || !earliest.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("quota+health cooldown = %v %v %v, want until the later reason clears", down, rate, earliest)
+	}
+
+	// A circuit-open sibling keeps the honest 502 class (allRateLimited=false);
+	// the target recovers only when BOTH reasons clear (the later one).
+	m.mu.Lock()
+	m.health["plan"] = &providerHealth{circuitOpenUntil: now.Add(4 * time.Minute)}
+	m.mu.Unlock()
+	down, rate, earliest = m.CooldownState(targets, now, maxAge)
+	if !down || rate || !earliest.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("quota+circuit cooldown = %v %v %v, want allDown+circuit class until the later reason clears", down, rate, earliest)
+	}
+}
+
+// TestHasRecoveredUntriedIgnoresQuotaExhausted: an exhausted target the
+// scheduler deliberately skipped is not a "recovered untried" target —
+// treating it as one spins idle rescheduling rounds on an all-exhausted route.
+func TestHasRecoveredUntriedIgnoresQuotaExhausted(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	maxAge := 15 * time.Minute
+	targets := []Target{{Provider: "plan"}}
+	m := NewManager(1)
+	m.SetQuota("plan", &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan, AsOf: now,
+		Windows: []provider.QuotaWindow{{Ultimate: true, RemainingPct: 0, ResetsAt: now.Add(time.Hour)}},
+	}, 1)
+	if m.HasRecoveredUntried(targets, map[string]bool{}, now, maxAge) {
+		t.Fatal("quota-exhausted untried target reported as recovered")
+	}
+	// Fail open on staleness: a stale snapshot must not suppress the ordinary
+	// TOCTOU recovery signal.
+	m.SetQuota("plan", &provider.QuotaSnapshot{
+		Billing: provider.BillingPlan, AsOf: now.Add(-maxAge - time.Minute),
+		Windows: []provider.QuotaWindow{{Ultimate: true, RemainingPct: 0, ResetsAt: now.Add(time.Hour)}},
+	}, 1)
+	if !m.HasRecoveredUntried(targets, map[string]bool{}, now, maxAge) {
+		t.Fatal("stale exhaustion suppressed the ordinary recovered-untried signal")
 	}
 }

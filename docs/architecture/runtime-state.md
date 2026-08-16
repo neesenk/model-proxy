@@ -185,10 +185,12 @@ config generation 时取得的这一个 DashboardSnapshot 计算，不得再次�
 排序键实际是 `score = surplus − qualityPenalty`：
 
 - 每个 provider 维护两个 EWMA（半衰期 2m，代码常量）：错误率（RecordFailure=1 /
-  RecordSuccess=0）与归一化 TTFT（Committed 成功提交时采样，10s 参考值封顶）。
-  模型级失败（RecordModelFailure）与 429 冷却不进错误率——它们各有独立机制，
-  重复计入会双重惩罚。
-- 决策时信号先衰减到 `now` 再计罚分：停止失败一段时间的 provider 不会背陈旧
+  RecordSuccess=0）与归一化 TTFT（Committed 成功 2xx 时采样，10s 参考值封顶）。
+  两个信号各自持有独立的采样锚点时间——错误样本只推进错误率锚点，TTFT 样本只推进
+  TTFT 锚点：共享锚点会让持续失败期把旧 TTFT 罚分"保鲜"，且恢复后的首个 TTFT 样本
+  以 dt≈0 混入而几乎不动陈旧罚分。模型级失败（RecordModelFailure）与 429 冷却不进
+  错误率——它们各有独立机制，重复计入会双重惩罚。
+- 决策时信号先各自衰减到 `now` 再计罚分：停止失败一段时间的 provider 不会背陈旧
   罚分；罚分 <1e-6 吸附为 0，渐近衰减的残余不得翻转原本精确打平的顺序。
 - 权重来自 `scheduling.quality_error_weight`（默认 100=1.0）/
   `quality_ttft_weight`（默认 20=0.2），指针语义：显式 0 关闭该信号，未设置用
@@ -204,6 +206,8 @@ config generation 时取得的这一个 DashboardSnapshot 计算，不得再次�
 route sticky 记录 current provider 和 since。在 `sticky_dwell` 内优先当前 provider；驻留期结束后，只有 tier、priority 或 surplus margin 足够更优才切换。
 
 availability 过滤（发生在 sticky 判定之前）除了熔断/限频/模型锁，还排除**配额已知耗尽**的 plan target：新鲜快照（`quota_poll_interval` 的 maxAge 内、无错误）的 ultimate RemainingPct==0 视为耗尽——粘住已知耗尽的账号只会白挨一轮确定性 429。快照过期或出错时 fail-open，退回反应式 429 冷却兜底；PayG/unknown 无窗口可耗尽，永不被此规则排除。PreviewOrder 走同一判定，Web 预览与真实调度一致。
+
+**耗尽信号必须传导到失败分类**（`Manager.CooldownState`/`HasRecoveredUntried` 消费同一 quotaExhaustedUntil 判定）：skip 意味着耗尽 target 永远收不到那记教会 health 的上游 429，若分类只看 health，全耗尽 route 会读成"全部可用"→ 终局 502 无 `Retry-After`，且 `hasRecoveredUntried` 空转重排。正确语义：quota 耗尽在分类中是 **rate-limit 类 down 原因**，恢复时间取 ultimate 窗口 `ResetsAt` 与快照失鲜边界（`AsOf+maxAge`）的**较早者**（失鲜后 fail-open 回落反应式 429 冷却，客户端按短周期回来重探而不是对着陈旧数据等一个可能很远的 reset）；与 health 限频/熔断并存时取较晚者（两因皆清才可用）。全耗尽 route 因此终局 **429 + `Retry-After`**，与 skip 之前客户端拿到的退避信号一致。
 
 session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 route key。session-keyed sticky 不落盘，route-keyed sticky 可落盘。session sticky 的 dwell 自**最近一次使用**起算（活跃会话每次请求刷新 since），因此连续活跃的会话会一直停留在当前 provider，直到闲置超过 `sticky_dwell` 或其失败熔断——"会话中不得仅因 quota surplus 边际变化迁移账号"（见 provider-pools.md）。
 

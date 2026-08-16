@@ -377,15 +377,39 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 // fail open to the reactive 429 cooldown, as must a stale or errored
 // snapshot. PayG/unknown billing has no window to exhaust.
 func quotaExhausted(snapshot *provider.QuotaSnapshot, now time.Time, maxAge time.Duration) bool {
+	return !quotaExhaustedUntil(snapshot, now, maxAge).IsZero()
+}
+
+// quotaExhaustedUntil reports when a freshly quota-exhausted target becomes
+// schedulable again, or the zero time when the target is not (provably)
+// exhausted. The recovery bound is the EARLIER of the ultimate window's
+// measured reset and the snapshot's staleness horizon (AsOf+maxAge): past the
+// horizon the snapshot proves nothing and the reactive 429 cooldown takes
+// over, so clients are told to re-probe rather than wait out a possibly
+// far-future reset on stale data. Like quotaExhausted, this reads only the
+// ultimate window (never the snapshot's top-level RemainingPct): a plan
+// snapshot without a measured ultimate window fails open, as do stale or
+// errored snapshots and non-plan billing.
+func quotaExhaustedUntil(snapshot *provider.QuotaSnapshot, now time.Time, maxAge time.Duration) time.Time {
 	if snapshot == nil || snapshot.Billing != provider.BillingPlan || snapshot.Err != "" {
-		return false
+		return time.Time{}
 	}
 	for i := range snapshot.Windows {
 		if window := &snapshot.Windows[i]; window.Ultimate && window.RemainingPct == 0 {
-			return now.Sub(snapshot.AsOf) <= maxAge
+			if now.Sub(snapshot.AsOf) > maxAge {
+				return time.Time{}
+			}
+			until := snapshot.AsOf.Add(maxAge)
+			if window.ResetsAt.After(now) && window.ResetsAt.Before(until) {
+				until = window.ResetsAt
+			}
+			if until.Before(now) {
+				until = now
+			}
+			return until
 		}
 	}
-	return false
+	return time.Time{}
 }
 
 // PreviewOrder derives a read-only schedule from this exact detached

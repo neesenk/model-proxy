@@ -176,7 +176,21 @@ func (m *Manager) RecordModelFailure(providerName, model string, lockout time.Du
 	entry.lockedUntil = now.Add(lockout)
 }
 
-func (m *Manager) CooldownState(targets []Target, now time.Time) (allDown, allRateLimited bool, earliest time.Time) {
+// CooldownState inspects a route's target providers for the wait-retry
+// decision: allDown = EVERY target is currently unavailable (rate-limited,
+// circuit-open / half-open probe in flight, OR skipped as freshly
+// quota-exhausted); allRateLimited = none of the down reasons is a circuit
+// (pure rate-limit/quota class — the honest terminal status is then 429, not
+// 502); earliest = soonest recovery across targets (clamped to now; quota
+// exhaustion recovers at the earlier of the window reset and the snapshot's
+// staleness horizon). Model-level locks are not consulted — they make schedule
+// drop the target, which leads here via the ordinary all-failed path.
+//
+// Quota exhaustion participates because the scheduling skip means an
+// exhausted target never receives the upstream 429 that would otherwise
+// teach health — without folding it in here, an all-exhausted route reads as
+// "everything available" and terminates as a bare 502 with no Retry-After.
+func (m *Manager) CooldownState(targets []Target, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(targets) == 0 {
@@ -184,7 +198,8 @@ func (m *Manager) CooldownState(targets []Target, now time.Time) (allDown, allRa
 	}
 	for _, target := range targets {
 		state := m.health[target.Provider]
-		if state == nil || state.available(now) {
+		if quotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge).IsZero() &&
+			(state == nil || state.available(now)) {
 			return false, false, time.Time{}
 		}
 	}
@@ -192,18 +207,29 @@ func (m *Manager) CooldownState(targets []Target, now time.Time) (allDown, allRa
 	allDown, allRateLimited = true, true
 	for _, target := range targets {
 		state := m.health[target.Provider]
-		rateLimited := now.Before(state.rateLimitedUntil)
-		circuitOpen := !state.circuitOpenUntil.IsZero() && now.Before(state.circuitOpenUntil)
+		// Quota exhaustion is a rate-limit-class down reason: the account IS
+		// limited, just measured proactively instead of via an upstream 429.
+		// A target is down while EITHER reason holds, so its recovery time is
+		// the later of the two.
+		var rateLimitUntil time.Time
+		if state != nil && now.Before(state.rateLimitedUntil) {
+			rateLimitUntil = state.rateLimitedUntil
+		}
+		if quotaUntil := quotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge); quotaUntil.After(rateLimitUntil) {
+			rateLimitUntil = quotaUntil
+		}
+		rateLimited := !rateLimitUntil.IsZero()
+		circuitOpen := state != nil && !state.circuitOpenUntil.IsZero() && now.Before(state.circuitOpenUntil)
 		var until time.Time
 		switch {
 		case rateLimited && circuitOpen:
 			allRateLimited = false
-			until = state.rateLimitedUntil
+			until = rateLimitUntil
 			if state.circuitOpenUntil.After(until) {
 				until = state.circuitOpenUntil
 			}
 		case rateLimited:
-			until = state.rateLimitedUntil
+			until = rateLimitUntil
 		case circuitOpen:
 			allRateLimited = false
 			until = state.circuitOpenUntil
@@ -221,11 +247,19 @@ func (m *Manager) CooldownState(targets []Target, now time.Time) (allDown, allRa
 	return allDown, allRateLimited, earliest
 }
 
-func (m *Manager) HasRecoveredUntried(targets []Target, tried map[string]bool, now time.Time) bool {
+// HasRecoveredUntried reports the TOCTOU case: a target is available now but
+// was NOT tried in the failed pass. A freshly quota-exhausted target never
+// counts as recovered — the skip means it was deliberately not called, and
+// treating it as "recovered" would spin idle rescheduling rounds on an
+// all-exhausted route.
+func (m *Manager) HasRecoveredUntried(targets []Target, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, target := range targets {
 		state := m.health[target.Provider]
+		if !quotaExhaustedUntil(m.quotas[target.Provider], now, quotaMaxAge).IsZero() {
+			continue
+		}
 		if (state == nil || state.available(now)) && !tried[target.Provider] {
 			return true
 		}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	configdomain "model-proxy/internal/config"
@@ -35,6 +36,9 @@ type QuotaTracker struct {
 	// generation identifies the Proxy config generation that owns provider
 	// snapshots. A nil callback means a standalone/test tracker with generation 0.
 	Generation func() uint64
+	// frozenMaxAge (nanoseconds) is the snapshot-freshness window captured at
+	// Start; atomic because request goroutines read it after serving begins.
+	frozenMaxAge atomic.Int64
 	// persistMu serializes persist() WITHIN one tracker. Cross-tracker
 	// contention (parallel test proxies, or the daemon vs a test) is handled by
 	// the unique temp file in persist() — the fixed ".tmp" name used to make a
@@ -129,10 +133,33 @@ func (t *QuotaTracker) Launch(fn func()) bool {
 	return true
 }
 
+// FreshnessMaxAge returns the quota-snapshot freshness window: frozen at
+// Start to the poll cadence the ticker captured, so a hot
+// quota_poll_interval change cannot split the window from the actual polling
+// (pitfalls #29 — the change needs a restart to affect either side). Before
+// Start (or with an unwired config) it falls back to the live 3× poll
+// interval / package default.
+func (t *QuotaTracker) FreshnessMaxAge() time.Duration {
+	if nanos := t.frozenMaxAge.Load(); nanos > 0 {
+		return time.Duration(nanos)
+	}
+	if t.cfg == nil || t.cfg() == nil {
+		return provider.DefaultEtaMaxGap
+	}
+	return 3 * t.cfg().Scheduling.PollInterval()
+}
+
 func (t *QuotaTracker) Start() {
 	t.Load() // baseline before first poll
+	// Freeze the freshness window to the SAME cadence the ticker uses:
+	// scheduling decisions and failure classification (quotaExhausted*)
+	// must not judge snapshots by a hot-changed window while polling
+	// keeps the Start-time cadence (pitfalls #29 — restart to change).
+	// Stored synchronously so the frozen value is visible the moment Start
+	// returns, matching the ticker that launches below.
+	interval := t.cfg().Scheduling.PollInterval()
+	t.frozenMaxAge.Store((3 * interval).Nanoseconds())
 	t.Launch(func() {
-		interval := t.cfg().Scheduling.PollInterval()
 		// bootstrap poll shortly after start, as a one-shot timer in the same
 		// goroutine — keeps the lifecycle to a single tracked goroutine (the
 		// bootstrap used to spawn a second, untracked one via pollAfter).

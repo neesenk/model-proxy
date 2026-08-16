@@ -261,11 +261,14 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 			checkTargets = targets
 		}
 		now := time.Now()
-		allDown, allRateLimited, earliest := p.cooldownState(checkTargets, now)
+		// Same freshness window the scheduler uses for its quota-exhausted
+		// skip — frozen to the poll cadence at quota-tracker Start.
+		quotaMaxAge := p.quotaFreshnessMaxAge(cfg)
+		allDown, allRateLimited, earliest := p.cooldownState(checkTargets, now, quotaMaxAge)
 		bypassWait := forcedProvider != ""
 		recoveredUntried := false
 		if !bypassWait && retryWait > 0 && round < 2 && !allDown {
-			recoveredUntried = p.hasRecoveredUntried(checkTargets, res.tried, now)
+			recoveredUntried = p.hasRecoveredUntried(checkTargets, res.tried, now, quotaMaxAge)
 		}
 		decision := routing.DecideFailure(routing.FailureInput{
 			SawHard:            sawHard,

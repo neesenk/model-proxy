@@ -214,3 +214,27 @@ func TestLoadMissingAndCorrupt(t *testing.T) {
 	tr2 := NewQuotaTracker(bad, nil, nil, NewManager(0))
 	tr2.Load() // must not panic
 }
+
+// TestQuotaTrackerFreshnessMaxAgeFrozenAtStart: the freshness window must be
+// frozen to the SAME poll interval the ticker captured at Start. A hot
+// quota_poll_interval change used to shrink the freshness window (read live
+// per request) while the ticker kept the old cadence — every poll cycle's
+// tail flagged fresh snapshots stale, flapping tiers and the
+// skip-quota-exhausted fail-open (pitfalls #29: the change needs a restart;
+// both sides must honor that).
+func TestQuotaTrackerFreshnessMaxAgeFrozenAtStart(t *testing.T) {
+	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "5m"}}
+	tracker := NewQuotaTracker("", func() *configdomain.Config { return cfg }, func() map[string]provider.Provider {
+		return nil
+	}, NewManager(0))
+	defer tracker.Stop()
+	if got := tracker.FreshnessMaxAge(); got != 15*time.Minute {
+		t.Fatalf("pre-Start FreshnessMaxAge = %v, want 3×5m (live-config fallback)", got)
+	}
+	tracker.Start()
+	// Hot-shrink the interval: the window must stay frozen at Start's cadence.
+	cfg.Scheduling.QuotaPollInterval = "1m"
+	if got := tracker.FreshnessMaxAge(); got != 15*time.Minute {
+		t.Fatalf("post-Start FreshnessMaxAge = %v, want frozen 15m despite hot change to 1m", got)
+	}
+}

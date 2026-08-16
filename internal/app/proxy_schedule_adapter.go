@@ -165,7 +165,7 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 		Dwell:             cfg.Scheduling.Dwell(),
 		SwitchMargin:      cfg.Scheduling.SwitchMargin(),
 		Now:               now,
-		QuotaMaxAge:       3 * cfg.Scheduling.PollInterval(),
+		QuotaMaxAge:       p.quotaFreshnessMaxAge(cfg),
 		QualityErrWeight:  cfg.Scheduling.QualityErrorWeightValue(),
 		QualityTTFTWeight: cfg.Scheduling.QualityTTFTWeightValue(),
 		Commit:            commit,

@@ -7,6 +7,18 @@ import (
 	"model-proxy/internal/targetexec"
 )
 
+// quotaFreshnessMaxAge keeps every consumer of the quota-snapshot freshness
+// window (scheduling skip, failure classification) on the SAME frozen source
+// the quota poll ticker captured at Start — a hot quota_poll_interval change
+// must not split the window from the actual polling cadence (pitfalls #29).
+// The fallback covers degenerate trackers in tests.
+func (p *Proxy) quotaFreshnessMaxAge(fallback *Config) time.Duration {
+	if p.quota != nil {
+		return p.quota.FreshnessMaxAge()
+	}
+	return 3 * fallback.Scheduling.PollInterval()
+}
+
 func (p *Proxy) takeHalfOpenSlot(name string, generations ...uint64) bool {
 	return p.runtimeState.TakeHalfOpenSlot(
 		name,
@@ -83,16 +95,12 @@ func (p *Proxy) resetHealth(name string) (cleared []string, locks int) {
 	return p.runtimeState.ResetHealth(name, parentOf)
 }
 
-// cooldownState inspects a route's target providers' health for the wait-retry
-// decision: allDown = EVERY target's provider is currently unavailable
-// (rate-limited or circuit-open / half-open probe in flight); allRateLimited =
-// none of the down providers is there for circuit reasons (pure rate-limit —
-// the honest terminal status is then 429, not 502); earliest = soonest
-// cooldown expiry (clamped to now for half-open probes, so callers don't wait
-// on a probe that's already deciding). Model-level locks are not consulted —
-// they make schedule drop the target, which leads here via the ordinary
-// all-failed path.
-func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time) (allDown, allRateLimited bool, earliest time.Time) {
+// cooldownState inspects a route's target providers' health (and quota
+// exhaustion — skipped targets never earn a health entry) for the wait-retry
+// decision: allDown = EVERY target is currently unavailable; allRateLimited =
+// every down reason is rate-limit/quota class (the honest terminal status is
+// then 429, not 502); earliest = soonest recovery across targets.
+func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time, quotaMaxAge time.Duration) (allDown, allRateLimited bool, earliest time.Time) {
 	runtimeTargets := make([]runtimestate.Target, len(targets))
 	for index, target := range targets {
 		runtimeTargets[index] = runtimestate.Target{
@@ -100,7 +108,7 @@ func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time) (allDown, al
 			Model:    target.Model,
 		}
 	}
-	return p.runtimeState.CooldownState(runtimeTargets, now)
+	return p.runtimeState.CooldownState(runtimeTargets, now, quotaMaxAge)
 }
 
 // hasRecoveredUntried reports the TOCTOU case: a target is available now but was
@@ -109,8 +117,9 @@ func (p *Proxy) cooldownState(targets []RouteTarget, now time.Time) (allDown, al
 // all. The caller answers with an immediate zero-wait re-schedule instead of a
 // terminal error. No "at least one other target still cooling" precondition: that
 // made the all-recover-simultaneously case terminally fail. The round budget in
-// forward (≤2 retries) bounds the loop.
-func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time) bool {
+// forward (≤2 retries) bounds the loop. Quota-exhausted (skipped) targets never
+// count as recovered.
+func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool, now time.Time, quotaMaxAge time.Duration) bool {
 	runtimeTargets := make([]runtimestate.Target, len(targets))
 	for index, target := range targets {
 		runtimeTargets[index] = runtimestate.Target{
@@ -118,7 +127,7 @@ func (p *Proxy) hasRecoveredUntried(targets []RouteTarget, tried map[string]bool
 			Model:    target.Model,
 		}
 	}
-	return p.runtimeState.HasRecoveredUntried(runtimeTargets, tried, now)
+	return p.runtimeState.HasRecoveredUntried(runtimeTargets, tried, now, quotaMaxAge)
 }
 
 // learnParamBlock records an upstream-rejected top-level request parameter for

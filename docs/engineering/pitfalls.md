@@ -68,7 +68,10 @@
     等待取消"时，不要依赖上游 handler 的 `r.Context().Done()` 传播，用测试自己
     控制的释放信号（见 `internal/app/client_cancel_test.go` 的 release channel）。
 29. `quota_poll_interval` 在 tracker `Start()` 时读取一次并冻结 ticker：reload
-    热改不生效，重启才生效（Web 配置编辑该键后需重启 daemon）。
+    热改不生效，重启才生效（Web 配置编辑该键后需重启 daemon）。快照失鲜窗口
+    （`QuotaTracker.FreshnessMaxAge`）在同一时刻以同一 cadence 冻结——调度 skip、
+    失败分类和轮询必须同源，否则热改会把窗口缩到比轮询周期短，周期尾部把新鲜快照
+    误判 stale、tier 在 plan/unknown 间抖动。
 30. sticky 落盘键不区分命名空间：客户端可控的 `x-claude-code-session-id` 与
     route 名共享同一键空间。会话 id 恰好等于某 route 名时，会话选择会按该 route
     的 sticky 落盘并在重启后恢复。route 名是操作者控制的，实践中撞名概率极低，

@@ -159,9 +159,9 @@ body hint 支持 `retry after N s/m/h`、`reset after 2h5m`、`Resets in 164h` �
 
 - 仅当全部实际候选目标都处于冷却且最早恢复时间不超过预算时等待；
 - 最多整体重试两次；
-- 已恢复但本轮未尝试的目标应零等待重新调度；
+- 已恢复但本轮未尝试的目标应零等待重新调度（配额已知耗尽、被 skip 的目标**不算**已恢复）；
 - `x-mp-force-provider` 和已断开的客户端不等待；
-- 终局分类应基于跨轮实际失败类别：纯限频返回 429 和 `Retry-After`，出现硬失败返回 502。
+- 终局分类应基于跨轮实际失败类别：纯限频返回 429 和 `Retry-After`，出现硬失败返回 502。配额已知耗尽（新鲜 plan 快照 ultimate RemainingPct==0）按限频类参与分类——全耗尽 route 终局 429，`Retry-After` 取窗口 reset 与快照失鲜边界的较早者（详见 `runtime-state.md` 的 Sticky/availability 一节）。
 
 ### 等待层目标来源
 
