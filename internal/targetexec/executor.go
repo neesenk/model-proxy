@@ -291,11 +291,11 @@ func (executor Executor) commit(
 	}
 	var converted []byte
 	if modeMismatch || (convert && !upstreamStream) {
-		all, err := io.ReadAll(io.LimitReader(response.Body, 64<<20))
+		all, readErr := readCapped(response.Body, maxConvertBufferBytes)
 		response.Body.Close()
-		if err != nil {
+		if readErr != nil {
 			log.Printf("[proto=%s provider=%s] %s→%s convert read failed: %v — failing closed",
-				plan.ClientProtocol(), dto.Target.Provider, plan.BackendProtocol(), plan.ClientProtocol(), err)
+				plan.ClientProtocol(), dto.Target.Provider, plan.BackendProtocol(), plan.ClientProtocol(), readErr)
 			http.Error(
 				exchange.Writer,
 				fmt.Sprintf("upstream response read failed during %s→%s conversion", plan.BackendProtocol(), plan.ClientProtocol()),
@@ -303,10 +303,10 @@ func (executor Executor) commit(
 			)
 			return Result{Committed: true}
 		}
-		converted, err = convertBuffered(all, response.StatusCode, convert, upstreamStream, clientWantsStream, plan, scope)
-		if err != nil {
+		converted, readErr = convertBuffered(all, response.StatusCode, convert, upstreamStream, clientWantsStream, plan, scope)
+		if readErr != nil {
 			log.Printf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
-				plan.ClientProtocol(), dto.Target.Provider, plan.BackendProtocol(), plan.ClientProtocol(), err)
+				plan.ClientProtocol(), dto.Target.Provider, plan.BackendProtocol(), plan.ClientProtocol(), readErr)
 			http.Error(
 				exchange.Writer,
 				fmt.Sprintf("response conversion %s→%s failed", plan.BackendProtocol(), plan.ClientProtocol()),
@@ -363,7 +363,10 @@ func (executor Executor) commit(
 		if converted != nil {
 			body = io.NopCloser(bytes.NewReader(converted))
 		} else if upstreamStream {
-			body = io.NopCloser(protocol.ConvertSSE(body, plan.ClientProtocol(), plan.BackendProtocol(), plan.Target().Model, scope.ResponseContext))
+			// The converter only reads; Close must still reach the upstream
+			// body (io.NopCloser would drop it — connection reuse lost and the
+			// net/http body contract broken).
+			body = &convertedStreamBody{reader: protocol.ConvertSSE(response.Body, plan.ClientProtocol(), plan.BackendProtocol(), plan.Target().Model, scope.ResponseContext), source: response.Body}
 		}
 	}
 	if plan.ClientProtocol() == protocol.Responses && executor.Responses != nil && len(scope.ResponsesHistory) > 0 && converted == nil && upstreamStream && response.StatusCode < 300 {
@@ -411,6 +414,43 @@ func (executor Executor) commit(
 		executor.Effects.Committed(dto)
 	}
 	return Result{Committed: true, Commit: NewCommit(dto.Body)}
+}
+
+// maxConvertBufferBytes caps the buffered conversion read. A body strictly
+// larger than this fails closed instead of being silently truncated — a
+// truncated JSON would convert into a corrupt "successful" response that the
+// recorder also marks complete and caches for replay.
+const maxConvertBufferBytes = 64 << 20
+
+// readCapped reads at most limit bytes; a longer body is an error (probe with
+// limit+1 so truncation is detected, never silently accepted).
+func readCapped(reader io.Reader, limit int64) ([]byte, error) {
+	all, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(all)) > limit {
+		return nil, fmt.Errorf("body exceeds the %d MiB conversion buffer", limit>>20)
+	}
+	return all, nil
+}
+
+// convertedStreamBody pairs a converted client byte stream with the upstream
+// body it was derived from: Close releases the upstream connection exactly
+// once. The buffered-conversion path (converted != nil) closes the upstream
+// body itself right after reading, so only the streaming leg needs this.
+type convertedStreamBody struct {
+	reader io.Reader
+	source io.Closer
+}
+
+func (c *convertedStreamBody) Read(p []byte) (int, error) { return c.reader.Read(p) }
+
+func (c *convertedStreamBody) Close() error {
+	if closer, ok := c.reader.(io.Closer); ok {
+		_ = closer.Close()
+	}
+	return c.source.Close()
 }
 
 func convertBuffered(all []byte, status int, convert, upstreamStream, clientWantsStream bool, plan Plan, scope Scope) ([]byte, error) {

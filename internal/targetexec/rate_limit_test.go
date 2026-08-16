@@ -208,3 +208,33 @@ func TestParseRateLimitPrecedenceAndBoundaries(t *testing.T) {
 		t.Fatalf("future clamp = %+v", future)
 	}
 }
+
+// TestParseRateLimitHeaderClamp: the header Retry-After path must obey the
+// same 7-day cap and overflow clamp as the body reset hints — an int64
+// overflow (seconds ≈ 1e14 wraps the duration into the past, silently
+// disabling the cooldown) or a far-future HTTP-date (freezes the provider
+// until restart) must both clamp to maxResetHint.
+func TestParseRateLimitHeaderClamp(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	scheduling := configdomain.Scheduling{RateLimitBackoff: "60s", QuotaCooldown: "2h"}
+
+	response := &http.Response{Header: http.Header{}}
+	response.Header.Set("Retry-After", "100000000000000") // 1e14s — overflows Duration×Second
+	decision := ParseRateLimit(response, nil, now, scheduling)
+	if until := decision.Until; until.Sub(now) > maxResetHint || until.Before(now) {
+		t.Errorf("overflow Retry-After = %v (Δ%v), want clamped to ≤ +7d and not in the past", until, until.Sub(now))
+	}
+
+	response.Header.Set("Retry-After", "10000000") // ~115.7 days — no overflow, over the cap
+	decision = ParseRateLimit(response, nil, now, scheduling)
+	if decision.Until.Sub(now) != maxResetHint {
+		t.Errorf("over-cap Retry-After = Δ%v, want +7d", decision.Until.Sub(now))
+	}
+
+	future := now.Add(30 * 24 * time.Hour)
+	response.Header.Set("Retry-After", future.UTC().Format(http.TimeFormat))
+	decision = ParseRateLimit(response, nil, now, scheduling)
+	if decision.Until.Sub(now) != maxResetHint {
+		t.Errorf("far-future HTTP-date = Δ%v, want +7d", decision.Until.Sub(now))
+	}
+}

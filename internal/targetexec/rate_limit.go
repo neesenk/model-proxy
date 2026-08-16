@@ -78,15 +78,25 @@ func ParseRateLimit(response *http.Response, bodyPeek []byte, now time.Time, sch
 	}
 	if response != nil {
 		if retryAfter := response.Header.Get("Retry-After"); retryAfter != "" {
+			// Same 7-day cap and overflow clamp as the body reset hints: a
+			// huge seconds value overflows time.Duration×Second into the
+			// past (silently disabling the cooldown) or freezes the provider
+			// until restart. Clamp the SECONDS before the multiplication.
 			if seconds, err := strconv.Atoi(retryAfter); err == nil {
 				if seconds < 0 {
 					seconds = 0
+				}
+				if cap := int(maxResetHint / time.Second); seconds > cap {
+					seconds = cap
 				}
 				return RateLimitDecision{Until: now.Add(time.Duration(seconds) * time.Second), Kind: kind}
 			}
 			if until, err := http.ParseTime(retryAfter); err == nil {
 				if until.Before(now) {
 					until = now
+				}
+				if max := now.Add(maxResetHint); until.After(max) {
+					until = max
 				}
 				return RateLimitDecision{Until: until, Kind: kind}
 			}
