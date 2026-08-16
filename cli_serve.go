@@ -21,10 +21,9 @@ import (
 //   - no subcommand: foreground proxy (or supervisor/worker if env role set)
 //   - "daemon": launch a detached supervisor
 //   - "stop": SIGTERM a running daemon
-func cmdServe(args []string) {
-	serveAssembly{}.command(args)
-}
-
+//
+// The serve driver is injected into the CLI command registry via
+// serveAssembly{}.command; see newApplication in app_assembly.go.
 func (assembly serveAssembly) command(args []string) {
 	// Worker/supervisor processes have envRole set — they always run their loop
 	// regardless of subcommand (the subcommand was consumed by the parent).
@@ -95,6 +94,11 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 				// stderr being a tty, but the MultiWriter writes the same bytes
 				// to both, and files must stay escape-free).
 				provider.LogColorEnabled = false
+			} else {
+				// Not fatal, but never silent: the operator asked for a log
+				// file and would otherwise discover the loss only when the
+				// file is empty or missing after a crash.
+				log.Printf("model-proxy: could not open log file %s: %v (logging to stderr only)", lf, err)
 			}
 			// Write a pid file so `login`/`logout` can SIGHUP this foreground
 			// serve to hot-reload new credentials. The daemon supervisor writes

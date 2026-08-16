@@ -117,3 +117,54 @@ func TestForward_CfgReadNoRaceWithReload(t *testing.T) {
 		t.Error("upstream received no requests; reload race test exercised no forwarding")
 	}
 }
+
+// TestResetStatsNoRaceWithReload: POST /api/tokens/reset reads p.cache while
+// Reload swaps it under p.mu — every other p.cache reader takes the RLock, so
+// resetStats must too (an unsynchronized pointer read is a data race even
+// though the outcome is benign). Run with -race.
+func TestResetStatsNoRaceWithReload(t *testing.T) {
+	useStaticProviderPools(t, "p")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgYAML := "listen: 127.0.0.1:0\n" +
+		"providers:\n  p:\n    openai_base_url: " + upstream.URL + "\n    provider_id: static\n" +
+		"routes:\n  m:\n    - {provider: p, model: m}\n" +
+		"scheduling:\n  sticky_dwell: 1ms\n  upstream_timeout: 1s\n  circuit_threshold: 10\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newTestProxyAt(t, cfg, filepath.Join(dir, "quota_state.json"))
+
+	var wg sync.WaitGroup
+	reloadErrs := make(chan error, 32)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 40; i++ {
+			if err := p.Reload(cfgPath); err != nil {
+				reloadErrs <- err
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 40; i++ {
+			_ = p.resetStats()
+		}
+	}()
+	wg.Wait()
+	close(reloadErrs)
+	for err := range reloadErrs {
+		t.Errorf("reload: %v", err)
+	}
+}

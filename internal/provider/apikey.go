@@ -90,8 +90,10 @@ func (b *ApiKeyBase) LoadKey() (string, error) {
 	return b.cached, nil
 }
 
-// SaveKey writes the API key to the auth file (0600, parent dir 0700).
-// A bound base is never the source of truth for the file → no-op.
+// SaveKey writes the API key to the auth file (0600, parent dir 0700) via
+// temp+fsync+rename — a crash mid-write must not destroy the only stored key
+// (pitfalls #18 pattern; os.WriteFile truncates first). A bound base is never
+// the source of truth for the file → no-op.
 func (b *ApiKeyBase) SaveKey(key string) error {
 	if b.bound {
 		return nil
@@ -100,7 +102,7 @@ func (b *ApiKeyBase) SaveKey(key string) error {
 		return err
 	}
 	data, _ := json.MarshalIndent(map[string]string{"api_key": key}, "", "  ")
-	return os.WriteFile(b.authFile, data, 0o600)
+	return atomicWriteFile(b.authFile, data, 0o600)
 }
 
 // DeleteKey removes the auth file (logout). A bound base is never the source of

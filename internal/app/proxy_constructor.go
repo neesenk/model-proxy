@@ -176,8 +176,13 @@ func (p *Proxy) resetStats() error {
 	}
 	// Response cache participates in the user-facing "reset counters" command,
 	// but is not stats persistence and therefore stays outside statsFlusher.
-	if p.cache != nil {
-		p.cache.Reset()
+	// p.cache is swapped by Reload under p.mu — read it under the same RLock
+	// every other reader takes (POST /api/tokens/reset may race a reload).
+	p.mu.RLock()
+	cache := p.cache
+	p.mu.RUnlock()
+	if cache != nil {
+		cache.Reset()
 	}
 	return nil
 }

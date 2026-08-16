@@ -81,7 +81,7 @@ func TestBudgetWatcher_GlobalThresholdFiresEventOnce(t *testing.T) {
 	flushBudgetUsage(t, p, "zhipu")
 	w := newBudgetTestWatcher(p)
 
-	w.check(w.now())
+	w.check(w.now(), nil)
 	events := budgetEvents(t, p)
 	if len(events) != 1 {
 		t.Fatalf("budget events = %d, want 1", len(events))
@@ -92,7 +92,7 @@ func TestBudgetWatcher_GlobalThresholdFiresEventOnce(t *testing.T) {
 	}
 
 	// Same (scope, month, threshold): no duplicate alert on the next check.
-	w.check(w.now())
+	w.check(w.now(), nil)
 	if got := budgetEvents(t, p); len(got) != 1 {
 		t.Fatalf("budget events after second check = %d, want 1 (dedup)", len(got))
 	}
@@ -103,7 +103,7 @@ func TestBudgetWatcher_BelowThresholdStaysQuiet(t *testing.T) {
 	flushBudgetUsage(t, p, "zhipu")
 	w := newBudgetTestWatcher(p)
 
-	w.check(w.now())
+	w.check(w.now(), nil)
 	if got := budgetEvents(t, p); len(got) != 0 {
 		t.Fatalf("budget events = %d, want 0 below threshold", len(got))
 	}
@@ -119,7 +119,7 @@ func TestBudgetWatcher_ProviderOverrideBeatsGlobal(t *testing.T) {
 	flushBudgetUsage(t, p, "zhipu")
 	w := newBudgetTestWatcher(p)
 
-	w.check(w.now())
+	w.check(w.now(), nil)
 	events := budgetEvents(t, p)
 	if len(events) != 1 {
 		t.Fatalf("budget events = %d, want exactly 1 (provider scope only)", len(events))
@@ -160,7 +160,7 @@ func TestBudgetWatcher_WebhookPostsPayload(t *testing.T) {
 	flushBudgetUsage(t, p, "zhipu")
 	w := newBudgetTestWatcher(p)
 
-	w.check(w.now())
+	w.check(w.now(), nil)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(bodies) != 1 {
@@ -190,5 +190,38 @@ func TestBudgetWatcher_StartedWhenConfigured(t *testing.T) {
 	p.startBudgetWatcher()
 	if p.budget == nil {
 		t.Fatal("budget watcher did not start with a configured threshold")
+	}
+}
+
+// TestBudgetWatcher_WebhookRetryAbortsOnStop: the webhook retry loop runs
+// inside a lifecycle task; an unresponsive webhook endpoint must not pin
+// Proxy.Close (worst case 3×5s timeouts + backoffs) — the in-flight request
+// and the retry sleep both abort when lifecycle stop closes.
+func TestBudgetWatcher_WebhookRetryAbortsOnStop(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	p := newBudgetTestProxy(t, configdomain.BudgetsConfig{MonthlyUSD: 1.0, WebhookURL: server.URL})
+	flushBudgetUsage(t, p, "zhipu")
+
+	stop := make(chan struct{})
+	watcher := newBudgetTestWatcher(p)
+	watcher.retryBackoff = 0 // all 3 attempts fail fast into the hanging POST
+	done := make(chan struct{})
+	go func() {
+		watcher.check(budgetTestNow, stop)
+		close(done)
+	}()
+	// Let the first POST park inside the hanging server, then stop.
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook retry did not abort on lifecycle stop — Close would be pinned ~17s")
 	}
 }

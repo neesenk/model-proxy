@@ -27,5 +27,8 @@
 - `takeover all` / `restore all` 遇到未安装客户端时跳过并继续；
 - 单独指定客户端而文件不存在时返回硬错误；
 - takeover 前必须备份，restore 后不得保留代理专属残片；
+- 所有客户端写回（JSON 改写、codex TOML 改写、restore）一律 temp+fsync+rename 原子写；
+  **保留目标文件既有权限位**（这些文件常含真实 API key，硬编码 0644 会把 0600 放宽成全局可读），
+  新建文件统一 0600；
 - URL 拼接回归需要覆盖 opencode 和 pi 的 `/v1` 差异。
 

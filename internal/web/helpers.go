@@ -1,9 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"model-proxy/internal/appapi"
 	"net/http"
 	"os"
@@ -49,18 +51,61 @@ func writePortErr(w http.ResponseWriter, fallback int, err error) {
 	writeJSONErr(w, fallback, err.Error())
 }
 
+// tailFile returns the last n lines of path. It reads BACKWARDS in chunks
+// from the end: daemon logs have no rotation and can reach GBs, so /api/logs
+// and `serve status --logs` must cost O(n lines), not O(whole file) in memory
+// and time. Trailing newlines are ignored and an empty (or newline-only) file
+// yields an empty list — same semantics as the previous whole-file read.
 func tailFile(path string, n int) ([]string, error) {
-	b, err := os.ReadFile(path)
+	if n <= 0 {
+		return []string{}, nil
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	trimmed := strings.TrimRight(string(b), "\n")
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	const chunkSize = 64 << 10
+	offset := info.Size()
+	newlines := 0
+	var chunks [][]byte
+	// Grow the window backwards until it holds n+1 newlines (n complete lines
+	// plus the partial head to drop) or the file start.
+	for offset > 0 && newlines <= n {
+		read := int64(chunkSize)
+		if read > offset {
+			read = offset
+		}
+		offset -= read
+		chunk := make([]byte, read)
+		if _, err := file.ReadAt(chunk, offset); err != nil && err != io.EOF {
+			return nil, err
+		}
+		newlines += bytes.Count(chunk, []byte("\n"))
+		chunks = append(chunks, chunk)
+	}
+	window := make([]byte, 0, info.Size()-offset)
+	for i := len(chunks) - 1; i >= 0; i-- {
+		window = append(window, chunks[i]...)
+	}
+
+	trimmed := strings.TrimRight(string(window), "\n")
 	if trimmed == "" {
 		// An empty (or newline-only) log file has no lines; "" would surface as
 		// a phantom blank entry in the /api/logs response.
 		return []string{}, nil
 	}
 	lines := strings.Split(trimmed, "\n")
+	if offset > 0 && len(lines) > 0 {
+		// The window's first line may be cut mid-line at the chunk boundary —
+		// n+1 newlines guarantee n complete lines remain after dropping it.
+		lines = lines[1:]
+	}
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
 	}

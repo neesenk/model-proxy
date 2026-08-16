@@ -231,7 +231,10 @@ requires_openai_auth = true
 	text = ReplaceOrAppendTOMLSection(text, header, section)
 	text = SetTOMLTopKey(text, "model_provider", fmt.Sprintf("%q", pid))
 
-	return writeFile(file, []byte(text), 0o644)
+	// Atomic like every other takeover writer: a crash mid-rewrite must not
+	// leave a truncated live config.toml (pitfalls #18), and the mode is
+	// preserved — never widened to a hardcoded 0644.
+	return atomicWriteFile(file, []byte(text), preserveMode(file, 0o600))
 }
 
 // SetTOMLTopKey sets a top-level bare key (placed before any [section]).
@@ -286,10 +289,6 @@ func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 	return text
 }
 
-// readFile/writeFile are tiny local I/O helpers kept here so the package has no
+// readFile is a tiny local I/O helper kept here so the package has no
 // application dependency.
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
-
-func writeFile(path string, data []byte, mode os.FileMode) error {
-	return os.WriteFile(path, data, mode)
-}

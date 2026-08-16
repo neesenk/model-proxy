@@ -125,3 +125,43 @@ func (r *closeTrackingReader) Close() error {
 	r.closed = true
 	return r.closeErr
 }
+
+// TestHeaderForCapturedBodyStripsHopByHop: the live forward path strips
+// hop-by-hop headers (RFC 9110 §7.6.1) before the client sees them; a cached
+// replay must not resurrect Connection/Trailer/etc. from the captured upstream
+// headers — including headers NAMED by Connection.
+func TestHeaderForCapturedBodyStripsHopByHop(t *testing.T) {
+	upstream := http.Header{
+		"Content-Type": {"application/json"},
+		"Connection":   {"close"},
+		"Trailer":      {"X-Checksum"},
+		"Keep-Alive":   {"timeout=5"},
+		"Upgrade":      {"h2c"},
+		"X-Other":      {"keep"},
+	}
+	captured := HeaderForCapturedBody(upstream, false, false, false)
+	for _, hop := range []string{"Connection", "Trailer", "Keep-Alive", "Upgrade"} {
+		if captured.Get(hop) != "" {
+			t.Errorf("hop-by-hop header %s survived capture: %v", hop, captured)
+		}
+	}
+	if captured.Get("X-Other") != "keep" || captured.Get("Content-Type") != "application/json" {
+		t.Errorf("end-to-end headers lost: %v", captured)
+	}
+
+	// Headers NAMED by Connection (e.g. "Connection: X-Custom") are
+	// connection-scoped too and must be stripped alongside.
+	named := http.Header{
+		"Content-Type": {"application/json"},
+		"Connection":   {"X-Custom"},
+		"X-Custom":     {"per-connection"},
+		"X-Keep":       {"yes"},
+	}
+	capturedNamed := HeaderForCapturedBody(named, false, false, false)
+	if capturedNamed.Get("X-Custom") != "" || capturedNamed.Get("Connection") != "" {
+		t.Errorf("Connection-named header survived capture: %v", capturedNamed)
+	}
+	if capturedNamed.Get("X-Keep") != "yes" {
+		t.Errorf("unnamed end-to-end header lost: %v", capturedNamed)
+	}
+}

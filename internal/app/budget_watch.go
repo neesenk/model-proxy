@@ -70,14 +70,15 @@ func (p *Proxy) startBudgetWatcher() {
 
 // loop checks once at startup, then right after each wall-clock minute
 // boundary (aligned with the stats flush cadence so the freshest minute is
-// already persisted).
+// already persisted). stop also aborts in-flight webhook retries so an
+// unresponsive endpoint cannot pin Proxy.Close.
 func (w *budgetWatcher) loop(stop <-chan struct{}) {
-	w.check(w.now())
+	w.check(w.now(), stop)
 	for {
 		timer := time.NewTimer(observestats.UntilNextMinute(w.now()))
 		select {
 		case <-timer.C:
-			w.check(w.now())
+			w.check(w.now(), stop)
 		case <-stop:
 			timer.Stop()
 			return
@@ -88,7 +89,7 @@ func (w *budgetWatcher) loop(stop <-chan struct{}) {
 // check evaluates every configured budget scope against the current local
 // month's accumulated equivalent cost and fires alerts for crossed
 // thresholds. Query or pricing failures are logged and retried next tick.
-func (w *budgetWatcher) check(now time.Time) {
+func (w *budgetWatcher) check(now time.Time, stop <-chan struct{}) {
 	p := w.proxy
 	// Capture reload-owned state once; the stats store and pricing carry
 	// their own leaf locks, so nothing here nests under p.mu.
@@ -135,7 +136,7 @@ func (w *budgetWatcher) check(now time.Time) {
 		w.maybeAlert(budgetAlertPayload{
 			Scope: "global", Month: month,
 			ThresholdUSD: budgets.MonthlyUSD, ActualUSD: total,
-		}, budgets.WebhookURL, now)
+		}, budgets.WebhookURL, now, stop)
 	}
 	for name, threshold := range budgets.Providers {
 		if threshold <= 0 {
@@ -144,14 +145,14 @@ func (w *budgetWatcher) check(now time.Time) {
 		w.maybeAlert(budgetAlertPayload{
 			Scope: name, Month: month,
 			ThresholdUSD: threshold, ActualUSD: perProvider[name],
-		}, budgets.WebhookURL, now)
+		}, budgets.WebhookURL, now, stop)
 	}
 }
 
 // maybeAlert fires the live event and the optional webhook exactly once per
 // (scope, month, threshold) per process. Crossing below the threshold again
 // (e.g. after stats reset) does not re-arm the alert within the process.
-func (w *budgetWatcher) maybeAlert(payload budgetAlertPayload, webhookURL string, now time.Time) {
+func (w *budgetWatcher) maybeAlert(payload budgetAlertPayload, webhookURL string, now time.Time, stop <-chan struct{}) {
 	if payload.ActualUSD < payload.ThresholdUSD {
 		return
 	}
@@ -182,19 +183,38 @@ func (w *budgetWatcher) maybeAlert(payload budgetAlertPayload, webhookURL string
 		payload.Scope, payload.Month, payload.ActualUSD, payload.ThresholdUSD)
 
 	if webhookURL != "" {
-		w.postWebhook(webhookURL, detail)
+		w.postWebhook(webhookURL, detail, stop)
 	}
 }
 
 // postWebhook delivers the alert payload with up to budgetWebhookRetries
 // retries on transport errors and 5xx. Failures are logged only — alerting
-// never disturbs the main path.
-func (w *budgetWatcher) postWebhook(url string, body []byte) {
+// never disturbs the main path. Both the retry sleep and the in-flight
+// request abort when stop closes, so a hanging endpoint cannot pin the
+// lifecycle wait (and the final flushes behind it) for the full retry budget.
+func (w *budgetWatcher) postWebhook(url string, body []byte, stop <-chan struct{}) {
+	baseCtx, baseCancel := context.WithCancel(context.Background())
+	defer baseCancel()
+	if stop != nil {
+		go func() {
+			select {
+			case <-stop:
+				baseCancel()
+			case <-baseCtx.Done():
+			}
+		}()
+	}
 	for attempt := 0; attempt <= budgetWebhookRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(w.retryBackoff)
+			select {
+			case <-time.After(w.retryBackoff):
+			case <-stop:
+				return
+			case <-baseCtx.Done():
+				return
+			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), budgetWebhookTimeout)
+		ctx, cancel := context.WithTimeout(baseCtx, budgetWebhookTimeout)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			cancel()
@@ -210,6 +230,9 @@ func (w *budgetWatcher) postWebhook(url string, body []byte) {
 			if resp.StatusCode < 500 {
 				return // delivered, or permanently rejected (4xx) — do not retry
 			}
+		}
+		if baseCtx.Err() != nil {
+			return
 		}
 	}
 	log.Printf("[budget] webhook POST %s failed after %d attempts", url, budgetWebhookRetries+1)

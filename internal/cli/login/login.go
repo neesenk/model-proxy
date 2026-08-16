@@ -122,7 +122,8 @@ func ApiKeyValidationURL(prov configdomain.Provider) string {
 // prompt BEFORE calling this; the web layer passes the client's choice.
 //
 // replace=false on an existing id returns "login cancelled" without modifying
-// the pool — callers surface that error as appropriate (CLI prints, web 409s).
+// the pool — callers surface that error as appropriate (CLI prints, the web
+// layer maps it to a 400).
 func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.Provider, cred accountCred, label string, replace bool) (string, error) {
 	key := strings.TrimSpace(cred.APIKey)
 	if key == "" {

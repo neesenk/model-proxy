@@ -37,6 +37,14 @@ func AtomicWrite(path string, data []byte) error {
 		os.Remove(temporary)
 		return err
 	}
+	// fsync before rename: a crash may otherwise persist the rename ahead of
+	// the data, leaving an empty/truncated config.yaml (same durability
+	// pattern as the provider/quota persistence paths).
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(temporary)
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(temporary)
 		return err

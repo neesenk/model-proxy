@@ -147,8 +147,10 @@ func (effects targetExecutionEffects) CaptureUsage(
 
 func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 	target := attempt.Target
-	if attempt.Response.StatusCode < 400 {
-		// Successful commit: fold TTFT into the scheduling quality EWMA.
+	if attempt.Response.StatusCode < 300 {
+		// Successful (2xx) commit: fold TTFT into the scheduling quality EWMA
+		// — "committed 2xx only", matching manager_quality and
+		// runtime-state.md (a committed 3xx is not a generation result).
 		// (Error EWMA already moved via RecordSuccess/RecordFailure upstream.)
 		effects.proxy.recordAttemptQuality(
 			target.Provider,

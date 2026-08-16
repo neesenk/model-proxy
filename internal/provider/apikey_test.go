@@ -3,6 +3,9 @@ package provider
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +73,37 @@ func TestApiKeyBaseWithKeySaveDeleteNoop(t *testing.T) {
 	got, err := b.LoadKey()
 	if err != nil || got != "BOUND" {
 		t.Fatalf("LoadKey after SaveKey = %q,%v want BOUND,nil", got, err)
+	}
+}
+
+// TestApiKeyBaseSaveKeyUnboundPersistsAtomically: the unbound (file-backed)
+// SaveKey writes the key durably — file mode 0600, JSON round-trips, and no
+// half-written temp file remains (temp+fsync+rename, pitfalls #18 pattern).
+func TestApiKeyBaseSaveKeyUnboundPersistsAtomically(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "sub", "auth.json")
+	b := &ApiKeyBase{authFile: authFile}
+	if err := b.SaveKey("sk-test-key-value"); err != nil {
+		t.Fatalf("SaveKey: %v", err)
+	}
+	got, err := b.LoadKey()
+	if err != nil || got != "sk-test-key-value" {
+		t.Fatalf("LoadKey after SaveKey = %q,%v", got, err)
+	}
+	info, err := os.Stat(authFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("auth file mode = %o, want 0600", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(filepath.Dir(authFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp") {
+			t.Fatalf("stray temp file left behind: %s", entry.Name())
+		}
 	}
 }

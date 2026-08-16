@@ -115,7 +115,19 @@ func Restore(file, bakDir, name string) error {
 	if err := verifyBackupIntegrity(bak, data); err != nil {
 		return err
 	}
-	return atomicWriteFile(file, data, 0o644)
+	return atomicWriteFile(file, data, preserveMode(file, 0o600))
+}
+
+// preserveMode returns the existing file's permission bits, or fallback when
+// the file does not exist yet. Takeover rewrites client configs that may hold
+// real API keys next to the injected proxy entry (claude settings.json, codex
+// config.toml, opencode.json): a hardcoded 0644 would widen a 0600 original to
+// world-readable, so the existing mode always wins and new files start at 0600.
+func preserveMode(path string, fallback os.FileMode) os.FileMode {
+	if info, err := os.Stat(path); err == nil {
+		return info.Mode().Perm()
+	}
+	return fallback
 }
 
 // verifyBackupIntegrity checks `data` against the sha256 Backup wrote to
@@ -303,5 +315,5 @@ func WriteJSONConfig(file string, v map[string]any) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return atomicWriteFile(file, out, 0o644)
+	return atomicWriteFile(file, out, preserveMode(file, 0o600))
 }
