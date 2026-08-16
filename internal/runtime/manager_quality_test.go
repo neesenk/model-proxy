@@ -25,7 +25,7 @@ func TestQualityEWMA(t *testing.T) {
 
 	// decayed() projects without mutating.
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
-	q := &providerQuality{errRate: 1, ttftNorm: 1, updated: now.Add(-qualityHalfLife)}
+	q := &providerQuality{errRate: 1, errAt: now.Add(-qualityHalfLife), ttftNorm: 1, ttftAt: now.Add(-qualityHalfLife)}
 	errRate, ttft := q.decayed(now)
 	if math.Abs(errRate-0.5) > 1e-9 || math.Abs(ttft-0.5) > 1e-9 {
 		t.Fatalf("decayed = %v/%v, want 0.5/0.5", errRate, ttft)
@@ -66,7 +66,7 @@ func TestDecideOrderAppliesQualityPenalty(t *testing.T) {
 
 	// A degrading provider (fresh 60% error EWMA) sinks below an equally
 	// provisioned healthy one.
-	m.quality["degrading"] = &providerQuality{errRate: .6, updated: now}
+	m.quality["degrading"] = &providerQuality{errRate: .6, errAt: now}
 	result := m.DecideOrder(input)
 	if !reflect.DeepEqual(result.Order, []int{1, 0}) {
 		t.Fatalf("degrading provider did not sink: %+v", result)
@@ -77,14 +77,14 @@ func TestDecideOrderAppliesQualityPenalty(t *testing.T) {
 
 	// The penalty expires with the EWMA: an hour-old failure burst no longer
 	// penalizes (decays ~0 at 30 half-lives), restoring the original order.
-	m.quality["degrading"].updated = now.Add(-time.Hour)
+	m.quality["degrading"].errAt = now.Add(-time.Hour)
 	if result = m.DecideOrder(input); result.Order[0] != 0 {
 		t.Fatalf("stale penalty did not expire: %+v", result)
 	}
 
 	// PreviewOrder (dashboard path) computes the same penalty from the
 	// detached snapshot as the live decision at the same state.
-	m.quality["degrading"].updated = now
+	m.quality["degrading"].errAt = now
 	live := m.DecideOrder(input)
 	preview := m.Dashboard(now).PreviewOrder(input)
 	if !reflect.DeepEqual(preview.Order, []int{1, 0}) ||
@@ -123,7 +123,7 @@ func TestDecideOrderStickyEscapesDegradingAccount(t *testing.T) {
 	}
 	// The sticky account's fresh 40% error EWMA pushes the score gap (0.4)
 	// past the margin (0.15): sticky escapes through the SAME margin gate.
-	m.quality["current"] = &providerQuality{errRate: .4, updated: now}
+	m.quality["current"] = &providerQuality{errRate: .4, errAt: now}
 	if result := m.DecideOrder(input); result.StickyProvider != "other" {
 		t.Fatalf("degrading sticky did not escape: %+v", result)
 	}
@@ -167,5 +167,26 @@ func TestQualityLifecycle(t *testing.T) {
 	m.RecordFailure("q", 3, time.Minute, 5)
 	if len(m.quality) != 0 {
 		t.Fatalf("stale generation mutated quality: %+v", m.quality)
+	}
+}
+
+// TestQualityTTFTDecaysDuringFailureStretch: a slow-TTFT penalty must decay
+// from its OWN last TTFT observation. A shared `updated` anchor let error
+// samples (a provider failing continuously) keep the timestamp fresh, so the
+// stale TTFT penalty never decayed at decision time and the recovery TTFT
+// sample blended in with dt≈0 (alpha≈0) — the freeze the review found.
+func TestQualityTTFTDecaysDuringFailureStretch(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	m := NewManager(1)
+	m.quality["p"] = &providerQuality{ttftNorm: 1, ttftAt: now}
+	// Ten minutes of continuous failures, no TTFT samples in between.
+	for i := 1; i <= 5; i++ {
+		m.recordQualityLocked("p", 1, now.Add(time.Duration(2*i)*time.Minute))
+	}
+	_, ttft := m.quality["p"].decayed(now.Add(10 * time.Minute))
+	if ttft > 0.1 {
+		t.Fatalf("TTFT penalty after a 10-minute failure stretch = %v, want decayed to ≤0.1 (half-life 2m)", ttft)
 	}
 }

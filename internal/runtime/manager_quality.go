@@ -20,10 +20,16 @@ const ttftReference = 10 * time.Second
 // Record* funnels that feed the circuit breaker. Deliberately per PROVIDER
 // (not per model): circuit health already works at that granularity, and
 // model-level faults have their own lock mechanism.
+//
+// Each signal carries its OWN anchor timestamp: a shared anchor let error
+// samples keep the timestamp fresh while an old TTFT penalty stayed frozen
+// (and the recovery TTFT sample blended in with dt≈0, alpha≈0). Decay is
+// measured from the signal's last observation.
 type providerQuality struct {
 	errRate  float64 // 0..1, sample 1 on RecordFailure, 0 on RecordSuccess
+	errAt    time.Time
 	ttftNorm float64 // 0..1, sample min(ttft/ttftReference, 1) on committed success
-	updated  time.Time
+	ttftAt   time.Time
 }
 
 // ewma applies one sample with time-based decay toward the previous value.
@@ -43,7 +49,7 @@ func (q *providerQuality) decayed(now time.Time) (errRate, ttftNorm float64) {
 	if q == nil {
 		return 0, 0
 	}
-	return ewma(q.errRate, 0, now.Sub(q.updated)), ewma(q.ttftNorm, 0, now.Sub(q.updated))
+	return ewma(q.errRate, 0, now.Sub(q.errAt)), ewma(q.ttftNorm, 0, now.Sub(q.ttftAt))
 }
 
 // recordSample applies one error-rate sample (0 success / 1 failure). Caller
@@ -55,12 +61,12 @@ func (m *Manager) recordQualityLocked(name string, sample float64, now time.Time
 		q = &providerQuality{}
 		m.quality[name] = q
 	}
-	if q.updated.IsZero() {
+	if q.errAt.IsZero() {
 		q.errRate = sample
 	} else {
-		q.errRate = ewma(q.errRate, sample, now.Sub(q.updated))
+		q.errRate = ewma(q.errRate, sample, now.Sub(q.errAt))
 	}
-	q.updated = now
+	q.errAt = now
 }
 
 // RecordAttemptQuality folds a committed attempt's TTFT into the provider's
@@ -89,10 +95,10 @@ func (m *Manager) RecordAttemptQuality(name string, ttft time.Duration, generati
 	if sample > 1 {
 		sample = 1
 	}
-	if q.updated.IsZero() {
+	if q.ttftAt.IsZero() {
 		q.ttftNorm = sample
 	} else {
-		q.ttftNorm = ewma(q.ttftNorm, sample, now.Sub(q.updated))
+		q.ttftNorm = ewma(q.ttftNorm, sample, now.Sub(q.ttftAt))
 	}
-	q.updated = now
+	q.ttftAt = now
 }
