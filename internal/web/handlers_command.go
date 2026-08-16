@@ -110,6 +110,25 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 }
 
+// handleConfigValidate lints a candidate config without persisting it, so the
+// Raw YAML editor can show errors as you type. Issues carry a best-effort
+// 1-based line (0 = not locatable); ok=true means the YAML would pass
+// SaveConfig's validation gate.
+func (s *Server) handleConfigValidate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		YAML string `json:"yaml"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	issues := s.commands.ValidateConfig([]byte(req.YAML))
+	if issues == nil {
+		issues = []appapi.ValidationIssue{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": len(issues) == 0, "errors": issues})
+}
+
 func (s *Server) handleConfigEdit(w http.ResponseWriter, r *http.Request) {
 	var req appapi.EditRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

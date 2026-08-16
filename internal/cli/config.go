@@ -28,6 +28,14 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		} else if !os.IsNotExist(err) {
 			log.Fatal(err)
 		}
+		// Interactive terminal: guided wizard (client detection, provider
+		// selection, optional takeover). Pipes/scripts keep the static template.
+		if configInitInteractive() {
+			if err := runConfigInitWizard(os.Stdin, os.Stdout); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
 		if err := os.WriteFile("config.yaml", []byte(configdomain.DefaultConfigYAML), 0o644); err != nil {
 			log.Fatal(err)
 		}

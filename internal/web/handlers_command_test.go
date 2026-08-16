@@ -23,6 +23,7 @@ type commandFake struct {
 	setPin      func(string, string, time.Duration) (appapi.Pin, bool)
 	clearPin    func(string) bool
 	save        func([]byte) error
+	validate    func([]byte) []appapi.ValidationIssue
 	edit        func(appapi.EditRequest) error
 	add         func(context.Context, string, appapi.AccountInput) (appapi.MutationResult, error)
 	probe       func(context.Context, string, string) (appapi.ProbeResult, error)
@@ -68,6 +69,13 @@ func (fake *commandFake) ClearPin(route string) bool {
 func (fake *commandFake) SaveConfig(contents []byte) error {
 	if fake.save != nil {
 		return fake.save(contents)
+	}
+	return nil
+}
+
+func (fake *commandFake) ValidateConfig(contents []byte) []appapi.ValidationIssue {
+	if fake.validate != nil {
+		return fake.validate(contents)
 	}
 	return nil
 }
@@ -317,6 +325,31 @@ func TestCommandConfigContract(t *testing.T) {
 			}
 		}
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/edit", `{"kind":"general","name":"broken"}`), http.StatusBadRequest, map[string]any{"error": "reload failed"})
+	})
+	t.Run("validate lints without saving", func(t *testing.T) {
+		var got []byte
+		server := newCommandTestServer(t, &commandFake{
+			validate: func(contents []byte) []appapi.ValidationIssue {
+				got = append([]byte(nil), contents...)
+				if strings.Contains(string(contents), "bad") {
+					return []appapi.ValidationIssue{{Line: 3, Message: "boom"}}
+				}
+				return nil
+			},
+			save: func([]byte) error {
+				t.Error("validate must not persist")
+				return nil
+			},
+		})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/validate", `{"yaml":"routes: []\n"}`), http.StatusOK, map[string]any{"ok": true, "errors": []any{}})
+		if string(got) != "routes: []\n" {
+			t.Fatalf("ValidateConfig body=%q", got)
+		}
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/validate", `{"yaml":"bad: ["}`), http.StatusOK, map[string]any{
+			"ok":     false,
+			"errors": []any{map[string]any{"line": float64(3), "message": "boom"}},
+		})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/validate", "{"), http.StatusBadRequest, map[string]any{"error": "invalid JSON body: unexpected EOF"})
 	})
 }
 

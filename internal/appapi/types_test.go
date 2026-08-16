@@ -73,6 +73,9 @@ func (fakeCommands) SetPin(string, string, time.Duration) (Pin, bool) {
 }
 func (fakeCommands) ClearPin(string) bool    { return false }
 func (fakeCommands) SaveConfig([]byte) error { return nil }
+func (fakeCommands) ValidateConfig([]byte) []ValidationIssue {
+	return nil
+}
 func (fakeCommands) EditConfig(EditRequest) error {
 	return nil
 }

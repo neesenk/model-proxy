@@ -49,6 +49,8 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 
+tracker 在每次 commit 新快照（pollAll/pollOne/429 refresh）时，以**上一次已 commit 快照**为基线计算 ultimate 窗口的耗尽预测：`rate = Δused/Δt`，`ExhaustionEta = as_of + remaining/rate`，挂到 `QuotaSnapshot.ExhaustionEta` 后进 Manager。以下情况不预测（零值）：首个快照无基线、任一侧带错误、速率 ≤0（空闲或窗口已 reset）、`Δt > 3 × quota_poll_interval`（轮询断档，基线陈旧）、窗口已耗尽或未测量。预测**仅展示用**（`usage` CLI 窗口行尾、Web Status 配额卡），调度不读，不落盘；重启后首轮 poll 可用从 quota_state.json 恢复的上一快照作基线（断档超界则不预测）。`usage` CLI 是独立进程、单次 live fetch，其基线是经 `provider.DecorateExhaustionEta` 读取的持久化快照（按普通 provider 名 keyed；池化虚拟账号 key 无 CLI 预测）。
+
 当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze 时写盘。`Proxy.Close` 先通过 lifecycle gate 停止接收新任务，再等待 poller goroutine（含 reload 的 `pollAsync` 与 429 的 `refreshAsync`）后做 final flush；dispatch 的 accepting 检查与 `WaitGroup.Add` 在同一把锁内，不得与 shutdown 的 `Wait` 竞争。
 
 ### config generation 一致性

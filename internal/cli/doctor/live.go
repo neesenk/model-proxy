@@ -100,12 +100,14 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 }
 
 // diagLine is one conclusion row: severity 0 = ✗ (down), 1 = ⚠ (risk), 2 = ✓
-// (healthy route landing). hint is an optional indented follow-up (the "what
-// to do about it").
+// (healthy route landing). hints are optional indented follow-ups (the "what
+// to do about it"), each carrying an action-level tag: [可立即执行] for a
+// ready-to-run CLI command, [需要凭据] for a fix that needs login, [需要改配置]
+// for one that names the config key to edit.
 type diagLine struct {
-	sev  int
-	text string
-	hint string
+	sev   int
+	text  string
+	hints []string
 }
 
 // renderDiagnosis applies the doctor --live verdict rules, most severe first:
@@ -138,7 +140,7 @@ func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []Cl
 			if ri.PinExpires != "" {
 				text += " (" + ri.PinExpires + ")"
 			}
-			warns = append(warns, diagLine{1, text, "unpin with: model-proxy unpin " + r})
+			warns = append(warns, diagLine{1, text, []string{"[可立即执行] model-proxy unpin " + r}})
 		}
 		if availN == 0 {
 			targets := LiveTargets(cfg, implicit, r)
@@ -149,33 +151,42 @@ func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []Cl
 				n = len(ri.Ordered)
 			}
 			text := fmt.Sprintf("route %q: %d %s all unavailable", r, n, cliframework.Plural(n, "target", "targets"))
-			hint := ""
+			var hints []string
 			if rec, ok := EarliestRecovery(st, targets, now); ok {
 				text += fmt.Sprintf(" — earliest recovery %s (%s, %s)",
 					rec.until.Local().Format("15:04"), rec.provider, rec.kind)
-				hint = "wait for recovery, or: model-proxy unfreeze " + rec.provider
+				hints = append(hints, "[可立即执行] model-proxy unfreeze "+poolParent(rec.provider)+"，或等冷却到期自动恢复")
+				if rec.kind == "quota cooldown" || rec.kind == "daily cooldown" {
+					hints = append(hints, quotaFixHint(cfg, poolParent(rec.provider), r))
+				}
 			}
-			errs = append(errs, diagLine{0, text, hint})
+			errs = append(errs, diagLine{0, text, hints})
 			continue
 		}
 		if q, ok := st.Quota[ri.First]; ok && q.RemainingPct >= 0 && q.RemainingPct <= 0.05 {
-			warns = append(warns, diagLine{1, fmt.Sprintf("route %q: %s quota nearly exhausted (%d%% remaining)",
-				r, ri.First, int(q.RemainingPct*100+0.5)), ""})
+			text := fmt.Sprintf("route %q: %s quota nearly exhausted (%d%% remaining)",
+				r, ri.First, int(q.RemainingPct*100+0.5))
+			var hints []string
+			if alt := availableAlt(ri, ri.First); alt != "" {
+				hints = append(hints, "[可立即执行] model-proxy pin "+r+" "+poolParent(alt)+"，临时钉到备用 provider（unpin 恢复）")
+			}
+			hints = append(hints, quotaFixHint(cfg, poolParent(ri.First), r))
+			warns = append(warns, diagLine{1, text, hints})
 		}
 		line := fmt.Sprintf("route %q → %s", r, ri.First)
 		if q, ok := st.Quota[ri.First]; ok && q.RemainingPct >= 0 {
 			line += fmt.Sprintf(" (%d%% remaining)", int(q.RemainingPct*100+0.5))
 		}
-		oks = append(oks, diagLine{2, line, ""})
+		oks = append(oks, diagLine{2, line, nil})
 	}
 	for _, w := range st.Warnings {
-		warns = append(warns, diagLine{1, w, ""})
+		warns = append(warns, diagLine{1, w, []string{"[需要改配置] 按提示修改 config.yaml，然后 model-proxy serve reload 生效"}})
 	}
 	for _, d := range drift {
 		if d.Taken && !d.OK {
 			warns = append(warns, diagLine{1, fmt.Sprintf("takeover drift: %s (%s points to %s, want %s)",
 				d.Client, d.File, d.Current, d.Expected),
-				"re-run: model-proxy takeover " + d.Client + " (or: model-proxy restore " + d.Client + ")"})
+				[]string{"[可立即执行] model-proxy takeover " + d.Client + "（要还原客户端则 model-proxy restore " + d.Client + "）"}})
 		}
 	}
 
@@ -193,8 +204,8 @@ func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []Cl
 			mark = provider.Yellow("⚠")
 		}
 		fmt.Fprintf(&b, "  %s %s\n", mark, l.text)
-		if l.hint != "" {
-			fmt.Fprintf(&b, "    %s\n", provider.Dim("→ "+l.hint))
+		for _, h := range l.hints {
+			fmt.Fprintf(&b, "    %s\n", provider.Dim("→ "+h))
 		}
 	}
 	for _, l := range errs {
@@ -207,6 +218,37 @@ func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []Cl
 		emit(l)
 	}
 	return b.String()
+}
+
+// poolParent maps a pooled virtual id ("parent#<account>") back to the config
+// provider name the CLI commands (login/pin/unfreeze) take.
+func poolParent(name string) string {
+	if i := strings.IndexByte(name, '#'); i > 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// availableAlt returns the first available schedule target whose provider
+// differs from first — the provider a temporary pin could move the route to.
+func availableAlt(ri appapi.StatusRoute, first string) string {
+	for _, t := range ri.Ordered {
+		if t.Available && t.Provider != first {
+			return t.Provider
+		}
+	}
+	return ""
+}
+
+// quotaFixHint suggests the right quota remedy: pool providers (everything
+// except the aqp/codex single-file logins) gain headroom from an extra
+// account via login; single-account providers need a config change (more
+// route targets) or must wait out the reset.
+func quotaFixHint(cfg *configdomain.Config, parent, route string) string {
+	if prov, ok := cfg.Providers[parent]; ok && prov.Provider != "aqp" && prov.Provider != "codex" {
+		return "[需要凭据] model-proxy login " + parent + "（账号池 provider 可再加一个账号分担配额）"
+	}
+	return "[需要改配置] config.yaml 的 routes." + route + " 增加备用 target，或等待配额重置"
 }
 
 // liveTargets expands a route's targets to the (provider, model) pairs the
@@ -313,6 +355,20 @@ func RenderDoctorFailures(body []byte) string {
 			}
 			fmt.Fprintf(&b, "  %s  %s → %s  %s  %dms\n",
 				provider.Dim(ts), route, r.Provider, statusColor(strconv.Itoa(r.Status)), r.LatencyMs)
+		}
+		// Actionable follow-ups, deduped per provider/route: a 429 points at a
+		// live cooldown (unfreeze), a 5xx at a link worth re-probing (test).
+		seen429 := map[string]bool{}
+		seen5xx := map[string]bool{}
+		for _, r := range rr.Records {
+			switch {
+			case r.Status == 429 && r.Provider != "" && !seen429[r.Provider]:
+				seen429[r.Provider] = true
+				fmt.Fprintf(&b, "  %s\n", provider.Dim("→ [可立即执行] model-proxy unfreeze "+poolParent(r.Provider)+"，若 "+r.Provider+" 仍在 429 冷却"))
+			case r.Status >= 500 && r.Exposed != "" && !seen5xx[r.Exposed]:
+				seen5xx[r.Exposed] = true
+				fmt.Fprintf(&b, "  %s\n", provider.Dim("→ [可立即执行] model-proxy test "+r.Exposed+"，探测该路由各 target 链路"))
+			}
 		}
 	}
 	return b.String()

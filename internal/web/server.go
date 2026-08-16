@@ -188,6 +188,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleConfigGet(w, r)
 	case p == "/api/config" && r.Method == http.MethodPost:
 		s.handleConfigPut(w, r)
+	case p == "/api/config/validate" && r.Method == http.MethodPost:
+		s.handleConfigValidate(w, r)
 	case p == "/api/config/edit" && r.Method == http.MethodPost:
 		s.handleConfigEdit(w, r)
 	case p == "/api/accounts" && r.Method == http.MethodGet:

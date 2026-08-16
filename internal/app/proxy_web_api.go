@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"model-proxy/internal/appapi"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/provider"
@@ -267,6 +268,17 @@ func (api *proxyWebAPI) ClearPin(route string) bool {
 
 func (api *proxyWebAPI) SaveConfig(data []byte) error {
 	return api.saveAndReload(data)
+}
+
+// ValidateConfig lints candidate config bytes via the shared
+// internal/config pipeline without touching disk or runtime state.
+func (api *proxyWebAPI) ValidateConfig(data []byte) []appapi.ValidationIssue {
+	issues := configdomain.ValidateYAML(data)
+	out := make([]appapi.ValidationIssue, 0, len(issues))
+	for _, issue := range issues {
+		out = append(out, appapi.ValidationIssue{Line: issue.Line, Message: issue.Message})
+	}
+	return out
 }
 
 func (api *proxyWebAPI) EditConfig(request appapi.EditRequest) error {

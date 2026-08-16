@@ -51,6 +51,12 @@ type QuotaSnapshot struct {
 	Notes        []string // provider-specific status lines for display
 	AsOf         time.Time
 	Err          string
+	// ExhaustionEta is the predicted ultimate-window exhaustion time, derived
+	// from the burn rate (Δused/Δt) between the previous and this snapshot —
+	// see EstimateExhaustionEta. Zero when there is no valid prediction (first
+	// snapshot, flat/decreasing usage, or a poll gap > 3×poll_interval).
+	// Display-only: scheduling never reads it, and it is not persisted.
+	ExhaustionEta time.Time
 }
 
 // Surplus is the scheduling pace-score derived from this snapshot:
@@ -227,6 +233,14 @@ var registry = map[string]Constructor{}
 
 func Register(providerID string, fn Constructor) {
 	registry[providerID] = fn
+}
+
+// IsRegistered reports whether providerID has a registered implementation.
+// Callers offering a choice of built-in providers (e.g. `config init`'s guided
+// setup) use this to skip template entries with no real backend.
+func IsRegistered(providerID string) bool {
+	_, ok := registry[providerID]
+	return ok
 }
 
 // New constructs a Provider from config. The main package must set cfg.Auth

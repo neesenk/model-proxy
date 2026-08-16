@@ -426,6 +426,13 @@ config init|print|check
 写 `config.yaml` 到 **CWD**。stdout：`wrote config.yaml`。失败 -> stderr + exit 1。
 **CWD 已存在 `config.yaml` 时拒绝覆盖**（保留原文件，stderr + exit 1）——避免一次误操作抹掉现有配置。
 
+**交互式向导**（仅当 stdin 是真实 TTY；管道/重定向/`/dev/null` 保持上面的静态模板行为不变，脚本无感）：依次做四件事——
+
+1. 探测本机已安装的编程客户端（claude/opencode/codex/pi 的 config 路径存在性，复用 takeover 包的路径知识），列出探测结果；
+2. 逐个询问启用哪些 provider（清单 = 内置模板 providers ∩ provider 注册表，不硬编码第二份），提示形如 `Enable zhipu (provider=zhipu, 10 models)? [y/N] `（一律默认 N，EOF = N）；
+3. 写出**最小 config.yaml**：只含选中 provider 的块，routes 过滤到选中 provider（整路由无存活 target 则删），claude_mapping 只留指向存活路由的别名；落盘前重新 validate（fail-closed）。一个都没选 -> stderr `no providers selected — config.yaml not written` + exit 1；
+4. 探测到客户端时询问 `Take over detected client configs now (...)? [y/N] `，确认则当场执行 takeover（幂等备份机制与 `takeover` 命令相同）；最后打印下一步命令：每个选中 provider 的 `model-proxy login <name>`、（未执行 takeover 时）每个探测到客户端的 `model-proxy takeover <client>`、`model-proxy serve`、`model-proxy test <model>`（首个存活路由名；无存活路由时为首个 provider 的首个模型，依赖隐式路由）。
+
 模板里的 `scheduling:` 整块默认是注释掉的（每行带 `(default N)`）：所有字段都有代码默认（`internal/config` 的 accessor），不写即用默认，需覆盖时取消注释对应行。`config check` 的 `scheduling:` 摘要行始终打印**生效值**（已覆盖则显覆盖值，未配则显代码默认）。`--config` 与其他命令一致、位置无关（`config --config X check` 与 `config check --config X` 等价）。
 
 ### `config print`
@@ -528,6 +535,22 @@ stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--granu
 逻辑（`internal/cli/stats.go` 的 `CmdStats` -> `RenderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
 
 > `--granularity day|month` 或 `--cost` 任一存在时，改走 `/api/analytics`（按自然日/月聚合，存储恒为 1 分钟），表格头与列由 `formatAnalyticsTable` 渲染（见下）。两者都省略时输出与原 `stats` 完全一致。
+
+### 摘要行（人类可读模式）
+
+所有人类可读（非 `--json`）输出的**第一行**是一句话摘要，由已取回的查询结果直接聚合，不再发第二次请求：
+
+```
+今天 214 请求 · 成功率 97.2% · 等价成本 $3.21 · kimi-code 承担 61%
+```
+
+- 窗口名：`[from, to]` 落在当天内显示 `今天`，否则 `MM-DD HH:MM ~ MM-DD HH:MM`。
+- `成功率` = `(requests − failures − 429) / requests`（`/api/stats`、`/api/agents` 路径；`/api/analytics` 无失败计数，该段省略），下限钳到 0.0%。
+- `等价成本`：仅 `/api/analytics` 且窗口内至少一个已定价点时出现（未定价点不计入）。
+- `承担 <P>%`：请求数占比最高的 provider（stats/analytics）；`--by-agent` 时为 input+output token 占比最高的 agent（与表格排序一致）。
+- 无数据：摘要行为 `<窗口> 暂无数据`（后续仍打印原有的 `(no stats in range ...)` 行）。
+
+`--json` 输出结构不变（原样透传，无摘要行）。
 
 ### stdout（表格，`formatStatsTable`）
 
@@ -686,23 +709,32 @@ model-proxy doctor --live · http://<LISTEN>
 
 Diagnosis
   ✗ route "<R>": <N> targets all unavailable — earliest recovery <HH:MM> (<PROVIDER>, <CAUSE>)
-    → wait for recovery, or: model-proxy unfreeze <PROVIDER>
+    → [可立即执行] model-proxy unfreeze <PROVIDER>，或等冷却到期自动恢复
+    → [需要凭据] model-proxy login <PROVIDER>（账号池 provider 可再加一个账号分担配额）   # CAUSE 为 quota/daily cooldown 且 provider 可池化时
+    → [需要改配置] config.yaml 的 routes.<R> 增加备用 target，或等待配额重置            # CAUSE 为 quota/daily cooldown 且 provider 为单账号（aqp/codex）时
   ⚠ route "<R>" pinned to <P> — no failover while pinned (…)        # pin 生效时
+    → [可立即执行] model-proxy unpin <R>
   ⚠ route "<R>": <P> quota nearly exhausted (<N>% remaining)        # 首选 provider RemainingPct ≤ 5%
+    → [可立即执行] model-proxy pin <R> <ALT>，临时钉到备用 provider（unpin 恢复）        # 存在其他可用 target 时
+    → [需要凭据] model-proxy login <P> / [需要改配置] config.yaml 的 routes.<R> …        # 同上按 provider 是否可池化二选一
   ⚠ <daemon warnings 原样透传>
+    → [需要改配置] 按提示修改 config.yaml，然后 model-proxy serve reload 生效
   ⚠ takeover drift: <CLIENT> (<FILE> points to <CURRENT>, want <EXPECTED>)
-    → re-run: model-proxy takeover <CLIENT> (or: model-proxy restore <CLIENT>)
+    → [可立即执行] model-proxy takeover <CLIENT>（要还原客户端则 model-proxy restore <CLIENT>）
   ✓ route "<R>" → <P> (<N>% remaining)                              # 健康 route 的当前落点
 
 Schedule (<N> routes)                                               # 与 serve status 的 Schedule 节同一渲染
 
 Recent failures
   <HH:MM:SS>  <ROUTE> → <PROVIDER>  <STATUS>  <LATENCY>ms           # request_log 开启时，最近 ≤5 条 status≥400
+  → [可立即执行] model-proxy unfreeze <PROVIDER>，若 <PROVIDER> 仍在 429 冷却          # 有 429 记录时（按 provider 去重）
+  → [可立即执行] model-proxy test <ROUTE>，探测该路由各 target 链路                   # 有 5xx 记录时（按 route 去重）
 
 Takeover
   claude ✓  ·  opencode ✗ drift  ·  codex not taken over  ·  pi ✓
 ```
 
+- 每条诊断发现的修复建议以分级标签开头：`[可立即执行]` = 现成 CLI 命令；`[需要凭据]` = 需要登录/账号的命令；`[需要改配置]` = 指出要改的 config 键。建议里的 provider 一律用池父名（虚拟 id `parent#<account>` 归一到 `parent`）。
 - 结论区按严重度排序：✗ route 全灭 -> ⚠（pin / 配额将尽 / warnings / takeover 漂移）-> ✓ 健康 route 落点；无 ✗/⚠ 时首行 `✓ no problems found`。
 - route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从 config routes + 隐式路由 + 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
 - `request_log` 未开启时 Recent failures 节是一行 dim 提示（`request_log disabled — …`），不算错误；无任何失败记录时显示 `none recorded`。

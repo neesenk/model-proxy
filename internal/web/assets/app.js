@@ -1249,6 +1249,151 @@ function setYamlValue(v) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Live validation + restart-required key hints (Raw YAML editor)
+// ---------------------------------------------------------------------------
+
+// yamlLint* backs the debounced POST /api/config/validate lint: yamlLintSeq
+// discards stale responses, yamlLintErrors holds the last {line, message}
+// list, and yamlSaving lets updateYamlSaveState arbitrate the Save button.
+let yamlLintTimer = 0;
+let yamlLintSeq = 0;
+let yamlLintErrors = [];
+let yamlSaving = false;
+// yamlSavedText is the last disk-loaded (or successfully saved) YAML — the
+// diff baseline for restart-required key detection.
+let yamlSavedText = '';
+
+// RESTART_KEYS are config keys a hot reload does NOT apply — edits only take
+// effect after a daemon restart. Code facts: the request_log logger and the
+// stats store are built once at startup (web-api.md request-log section,
+// internal/app/stats_runtime.go initStats), quota_poll_interval is frozen into
+// the tracker ticker at Start (pitfalls #29), and listen/log/web bind into the
+// process at boot. Keep in sync with docs/engineering/pitfalls.md.
+const RESTART_KEYS = [
+  { path: ['listen'], label: 'listen' },
+  { path: ['log_level'], label: 'log_level' },
+  { path: ['log_file'], label: 'log_file' },
+  { path: ['web', 'enabled'], label: 'web.enabled' },
+  { path: ['request_log'], label: 'request_log.*' },
+  { path: ['stats', 'db_path'], label: 'stats.db_path' },
+  { path: ['stats', 'retention'], label: 'stats.retention' },
+  { path: ['scheduling', 'quota_poll_interval'], label: 'scheduling.quota_poll_interval' },
+];
+
+// scanRestartKeyValues maps each RESTART_KEYS label present in text to a raw
+// value string: the full block for top-level keys (so any edit under e.g.
+// request_log: counts), or the child's trimmed line for nested keys. It is a
+// line scanner, not a YAML parser — good enough for a hint, validation stays
+// server-side.
+function scanRestartKeyValues(text) {
+  const blocks = new Map(); // top-level key → raw lines incl. the header line
+  let current = null;
+  for (const raw of (text || '').split('\n')) {
+    const top = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:/);
+    if (top) {
+      current = top[1];
+      blocks.set(current, [raw]);
+    } else if (current && /^[ \t]/.test(raw)) {
+      blocks.get(current).push(raw);
+    } else if (raw.trim() && !raw.trimStart().startsWith('#')) {
+      current = null;
+    }
+  }
+  const values = new Map();
+  for (const { path, label } of RESTART_KEYS) {
+    const block = blocks.get(path[0]);
+    if (!block) continue;
+    if (path.length === 1) {
+      values.set(label, block.join('\n'));
+      continue;
+    }
+    const childRe = new RegExp(`^\\s+${path[1]}\\s*:`);
+    const child = block.slice(1).find((line) => childRe.test(line));
+    if (child) values.set(label, child.trim());
+  }
+  return values;
+}
+
+// changedRestartKeys returns the RESTART_KEYS labels whose scanned value
+// differs from the saved baseline (added/removed keys count as changed).
+function changedRestartKeys() {
+  const text = getYamlValue();
+  if (text === null) return [];
+  const now = scanRestartKeyValues(text);
+  const saved = scanRestartKeyValues(yamlSavedText);
+  const changed = [];
+  for (const [label, value] of now) {
+    if (saved.get(label) !== value) changed.push(label);
+  }
+  return changed;
+}
+
+function renderRestartHint() {
+  const box = document.getElementById('yaml-restart-hint');
+  if (!box) return;
+  const changed = changedRestartKeys();
+  if (!changed.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = `<div class="msg warn">ⓘ ${esc(changed.join(', '))} only take effect after a daemon restart — saving reloads the rest, but these need a restart.</div>`;
+}
+
+function scheduleYamlLint() {
+  if (yamlLintTimer) clearTimeout(yamlLintTimer);
+  yamlLintTimer = setTimeout(runYamlLint, 500);
+}
+
+async function runYamlLint() {
+  yamlLintTimer = 0;
+  const text = getYamlValue();
+  if (text === null) return;
+  const seq = ++yamlLintSeq;
+  try {
+    const res = await apiPost('/api/config/validate', { yaml: text });
+    if (seq !== yamlLintSeq) return; // superseded by a newer edit
+    yamlLintErrors = (res && res.errors) || [];
+  } catch (e) {
+    if (seq !== yamlLintSeq) return;
+    // A transport failure must not block saving — the save path re-validates.
+    yamlLintErrors = [];
+  }
+  renderYamlLint();
+  renderRestartHint();
+  updateYamlSaveState();
+}
+
+function renderYamlLint() {
+  const box = document.getElementById('yaml-lint');
+  if (!box) return;
+  if (!yamlLintErrors.length) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = yamlLintErrors.map((issue) => {
+    const where = issue.line > 0 ? `line ${issue.line}: ` : '';
+    return `<div class="yaml-lint-err" data-line="${issue.line | 0}">${esc(where + issue.message)}</div>`;
+  }).join('');
+  box.querySelectorAll('.yaml-lint-err').forEach((el) => {
+    el.addEventListener('click', () => jumpToYamlLine(parseInt(el.dataset.line, 10)));
+  });
+}
+
+// jumpToYamlLine focuses the editor on a 1-based line (CodeMirror only).
+function jumpToYamlLine(line) {
+  if (!yamlEditor || !(line > 0)) return;
+  const pos = { line: line - 1, ch: 0 };
+  yamlEditor.setCursor(pos);
+  yamlEditor.scrollIntoView(pos, 80);
+  yamlEditor.focus();
+}
+
+function updateYamlSaveState() {
+  const btn = document.getElementById('btn-yaml-save');
+  if (btn) btn.disabled = yamlSaving || yamlLintErrors.length > 0;
+}
+
 async function renderConfigTab() {
   const panel = panels.config;
   panel.innerHTML =
@@ -1259,6 +1404,8 @@ async function renderConfigTab() {
        <header class="card-head"><h2>Raw YAML</h2><span class="meta" id="yaml-meta"></span></header>
        <div class="card-body">
          <div id="yaml-editor" class="yaml-cm-host"></div>
+         <div id="yaml-lint" aria-live="polite"></div>
+         <div id="yaml-restart-hint"></div>
          <div class="row-actions" style="margin-top: 10px;">
            <span class="spacer"></span>
            <button class="btn small" id="btn-yaml-reload">Reload from disk</button>
@@ -1272,6 +1419,14 @@ async function renderConfigTab() {
   // by the time this module runs. Created once per Config-tab render; the
   // instance is held in yamlEditor for setValue/getValue in load/save.
   initYamlEditor();
+  // Live validation: debounce edits into POST /api/config/validate. Loading
+  // text via setValue fires CodeMirror 'change' too, so the initial lint comes
+  // for free once loadConfigAll fills the editor.
+  if (yamlEditor) yamlEditor.on('change', scheduleYamlLint);
+  else {
+    const fb = document.getElementById('yaml-editor-fallback');
+    if (fb) fb.addEventListener('input', scheduleYamlLint);
+  }
   scheduleYamlEditorResize();
   document.getElementById('btn-yaml-reload').addEventListener('click', loadConfigYAML);
   document.getElementById('btn-yaml-save').addEventListener('click', saveConfigYAML);
@@ -1301,6 +1456,13 @@ async function loadConfigAll() {
        </div>
      </div>`;
   setYamlValue(cfg.yaml || '');
+  // Fresh baseline for restart-key diffing; the lint result for the loaded
+  // text arrives via the 'change'-triggered debounce.
+  yamlSavedText = cfg.yaml || '';
+  yamlLintErrors = [];
+  renderYamlLint();
+  renderRestartHint();
+  updateYamlSaveState();
   const meta = document.getElementById('yaml-meta');
   if (meta) meta.textContent = `${(cfg.yaml || '').length} bytes`;
 
@@ -1634,6 +1796,11 @@ async function loadConfigYAML() {
     const cfg = await apiGet('/api/config');
     configCache = cfg;
     setYamlValue(cfg.yaml || '');
+    yamlSavedText = cfg.yaml || '';
+    yamlLintErrors = [];
+    renderYamlLint();
+    renderRestartHint();
+    updateYamlSaveState();
     if (meta) meta.textContent = `${(cfg.yaml || '').length} bytes`;
     if (msg) showMsg(msg, 'ok', 'reloaded from disk');
   } catch (e) {
@@ -1643,19 +1810,25 @@ async function loadConfigYAML() {
 
 async function saveConfigYAML() {
   const msg = document.getElementById('yaml-msg');
-  const btn = document.getElementById('btn-yaml-save');
   const yaml = getYamlValue();
   if (yaml === null) return; // no editor mounted
-  btn.disabled = true;
+  if (yamlLintErrors.length) {
+    showMsg(msg, 'err', 'fix the validation errors above before saving');
+    return;
+  }
+  yamlSaving = true;
+  updateYamlSaveState();
   showMsg(msg, 'ok', 'validating + reloading…');
   try {
     await apiPost('/api/config', { yaml });
+    yamlSavedText = yaml;
     showMsg(msg, 'ok', 'saved & reloaded');
     await loadConfigAll();
   } catch (e) {
     showMsg(msg, 'err', e.message);
   } finally {
-    btn.disabled = false;
+    yamlSaving = false;
+    updateYamlSaveState();
   }
 }
 
@@ -2011,13 +2184,19 @@ function renderAccountUsage(p, snap) {
     const fillCls = p == null ? '' : (p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err'));
     const ulg = w.Ultimate ? ' · ultimate' : (w.Short ? ' · short' : '');
     const reset = hasReset(w.ResetsAt) ? `resets ${esc(fmtReset(w.ResetsAt))}` : '';
+    // Burn-rate exhaustion prediction (QuotaSnapshot.ExhaustionEta, set by the
+    // quota tracker; absent → no valid prediction: first poll, flat usage, or
+    // a poll gap). Ultimate window only, appended to the same meta line.
+    const etaMs = (w.Ultimate && snap.ExhaustionEta) ? new Date(snap.ExhaustionEta).getTime() - Date.now() : 0;
+    const eta = etaMs > 0 ? `exhausts in ~${esc(fmtDur(etaMs / 1000))} at current rate` : '';
+    const meta = [reset, eta].filter(Boolean).join(' · ');
     bars += `<div class="bar-row">
       <div class="bar-label">
         <span class="name">${esc(w.Label || 'quota')}${esc(ulg)}</span>
         <span class="pct">${p == null ? (w.Total > 0 ? fmtNum(w.Total) : '-') : (p * 100).toFixed(1) + '%'}</span>
       </div>
       <div class="bar-track"><div class="bar-fill ${fillCls}" style="width:${p == null ? 0 : Math.max(0, Math.min(1, p)) * 100}%"></div></div>
-      ${reset ? `<div class="bar-meta">${reset}</div>` : ''}
+      ${meta ? `<div class="bar-meta">${meta}</div>` : ''}
     </div>`;
     if (w.Details && w.Details.length && w.DetailLabel) {
       bars += `<div class="acct-detail">

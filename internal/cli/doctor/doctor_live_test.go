@@ -84,13 +84,20 @@ routes:
 		"Diagnosis",
 		`✗ route "claude": 2 targets all unavailable`,
 		"earliest recovery " + aqpLocal.Local().Format("15:04") + " (aqp, quota cooldown)",
-		"model-proxy unfreeze aqp",
+		"[可立即执行] model-proxy unfreeze aqp",
+		// aqp is a single-account login -> no pool to grow; the quota fix is a
+		// config change naming the exact route key.
+		"[需要改配置] config.yaml 的 routes.claude",
 		"request_log disabled",
 		"not taken over",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+	// aqp is not pool-capable: the [需要凭据] login hint must NOT appear.
+	if strings.Contains(out, "[需要凭据]") {
+		t.Errorf("single-account provider must not get a login hint:\n%s", out)
 	}
 	// The zhipu circuit expires later — it must NOT be quoted as the earliest.
 	if strings.Contains(out, "circuit breaker)") {
@@ -184,6 +191,10 @@ routes:
 		"pi → volc",
 		"502",
 		"429",
+		// Failure follow-ups: 429 -> unfreeze the cooling provider, 5xx ->
+		// re-probe the route's links with test.
+		"[可立即执行] model-proxy unfreeze volc",
+		"[可立即执行] model-proxy test pi",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
@@ -220,9 +231,13 @@ routes:
 	for _, want := range []string{
 		`⚠ route "claude" pinned to aqp`,
 		"no failover while pinned",
-		"model-proxy unpin claude",
+		"[可立即执行] model-proxy unpin claude",
 		`⚠ route "claude": aqp quota nearly exhausted (3% remaining)`,
+		// aqp = single-account provider -> config-key hint, no login hint.
+		"[需要改配置] config.yaml 的 routes.claude",
 		"served by 2 logged-in providers",
+		// Daemon warnings are config-driven -> tagged config hint.
+		"[需要改配置] 按提示修改 config.yaml，然后 model-proxy serve reload 生效",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
@@ -432,7 +447,8 @@ routes:
 		"takeover drift: opencode",
 		"http://127.0.0.1:9999/v1",
 		proxyURL + "/v1",
-		"model-proxy takeover opencode",
+		"[可立即执行] model-proxy takeover opencode",
+		"model-proxy restore opencode",
 		"claude ✓",
 		"opencode ✗ drift",
 		"codex not taken over",
@@ -441,5 +457,51 @@ routes:
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestRenderDoctorLiveQuotaHintsPoolProvider: a nearly-exhausted first choice
+// on a POOL-capable provider (zhipu) gets the [需要凭据] login hint, and with
+// another available target also the [可立即执行] temporary pin hint.
+func TestRenderDoctorLiveQuotaHintsPoolProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	statusJSON := func(addr string) string {
+		return fmt.Sprintf(`{
+		  "uptime":"1m0s","version":"0.4.2","listen":%q,
+		  "health":{"zhipu":{"circuit_state":"closed","available":true},"volc":{"circuit_state":"closed","available":true}},
+		  "quota":{"zhipu":{"RemainingPct":0.04},"volc":{"RemainingPct":0.9}},
+		  "schedule":{"models":{"claude":{"first":"zhipu","ordered":[
+		    {"provider":"zhipu","priority":1,"tier":"plan","surplus":0,"available":true},
+		    {"provider":"volc","priority":2,"tier":"plan","surplus":0,"available":true}
+		  ]}}},
+		  "model_locks":{}
+		}`, addr)
+	}
+	addr := doctorLiveTestServer(t, statusJSON, `{"enabled":false,"records":[]}`)
+	cfg := doctorLiveTestCfg(t, addr, `providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+  volc: {provider_id: volcengine, openai_base_url: https://y}
+routes:
+  claude:
+    - {provider: zhipu, model: glm-5.2, priority: 1}
+    - {provider: volc, model: glm-5.2, priority: 2}
+`)
+
+	out, err := clidoctor.RenderDoctorLive(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	if err != nil {
+		t.Fatalf("renderDoctorLive: %v", err)
+	}
+	for _, want := range []string{
+		`⚠ route "claude": zhipu quota nearly exhausted (4% remaining)`,
+		"[可立即执行] model-proxy pin claude volc",
+		"[需要凭据] model-proxy login zhipu",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// Pool-capable provider -> no config-key hint for the quota finding.
+	if strings.Contains(out, "[需要改配置] config.yaml 的 routes.claude") {
+		t.Errorf("pool provider should get the login hint, not a config change:\n%s", out)
 	}
 }

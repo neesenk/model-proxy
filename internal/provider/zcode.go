@@ -159,6 +159,7 @@ func (p *ZCodeProvider) Usage() error {
 		if s.Level != "" {
 			fmt.Printf("%s %s\n", Dim("Level:     "), Magenta(s.Level))
 		}
+		DecorateExhaustionEta(p.providerName, s)
 		printQuotaSnapshot(s)
 		return nil
 	}

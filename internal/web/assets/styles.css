@@ -415,6 +415,17 @@ textarea.yaml {
 .yaml-cm-host .CodeMirror .cm-def, .yaml-cm-host .CodeMirror .cm-keyword { color: var(--accent-ink); }
 .yaml-cm-host .CodeMirror-matchingbracket { color: var(--accent-ink); font-weight: 700; outline: 1px solid var(--accent); }
 
+/* Live validation + restart-key hints under the Raw YAML editor. */
+.yaml-lint-err {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--err-fg);
+  white-space: pre-wrap;
+  margin-top: 6px;
+  cursor: pointer; /* click jumps the editor to the flagged line */
+}
+.yaml-lint-err:hover { text-decoration: underline; }
+
 /* ---------- route-target rows ---------- */
 .route-targets { display: grid; gap: 8px; }
 .route-target-row {

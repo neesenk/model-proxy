@@ -43,7 +43,7 @@ scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w
 
 ## 配置
 
-`config.yaml`（`model-proxy config init` 生成模板）。查找顺序：`--config PATH` > `~/.model-proxy/config.yaml` > `./config.yaml`。路径字段支持 `~/` 展开 和 `env:ENV_VAR` 前缀（从环境变量读值，如 `log_file: env:MP_LOG_FILE`）。
+`config.yaml`（`model-proxy config init` 生成；TTY 下为交互向导——探测已装客户端、勾选 provider、可选立即 takeover，只写最小配置；管道/脚本下输出完整注释模板）。查找顺序：`--config PATH` > `~/.model-proxy/config.yaml` > `./config.yaml`。路径字段支持 `~/` 展开 和 `env:ENV_VAR` 前缀（从环境变量读值，如 `log_file: env:MP_LOG_FILE`）。
 
 ```yaml
 listen: 127.0.0.1:15721    # 强制回环（0.0.0.0/内网 IP/域名会被 validate 拒绝——/api/* 无鉴权）
@@ -103,6 +103,15 @@ routes:
 #   glm-5.2: {provider: kimi-code, sample_rate: 0.1, max_concurrent: 4}
 # request_log:              # 请求日志（完整 request/response body，默认关；Requests 页 + replay 的数据源）
 #   enabled: true
+# guard:                    # 出站秘密扫描（DLP-lite，默认 log）：转发前扫描请求 body 中的
+#   secrets: log            # 高置信秘密模式（PEM 私钥头、AWS/OpenAI/Anthropic/GitHub/Google token）。
+                            # log=放行并上报告警（live event + 计数器，只含模式类型名）；
+                            # redact=命中内容替换为 [REDACTED] 后放行；block=直接 400 拒绝；off=不扫
+# budgets:                  # 月度预算告警（默认关；启用需重启）：按 stats 用量 × 价格目录
+#   monthly_usd: 20         # 每分钟核对当月等价成本，越线发 "budget" live event（SSE /api/events），
+#   providers: {zhipu: 5}   # 可选 webhook_url 时附带 POST {scope, month, threshold_usd, actual_usd}
+                            # （2 次重试，失败只记日志）；providers 条目是该 provider 的独立阈值
+                            # （覆盖全局）；每 (scope, 月份, 阈值) 每进程只告警一次，重启可能重复
 ```
 
 > **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities`/`tool_call` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。网络、HTTP 或响应解析失败时已有缓存继续可用且不会被覆盖；无可用缓存时 `models pull` 明确报错，普通列表/刷新与 takeover 按原有 best-effort 语义使用保守默认值。匹配不到的模型会在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
@@ -136,6 +145,8 @@ model-proxy usage zhipu            # 5h/周/月配额 + token 消耗（池化时
 model-proxy usage deepseek         # 账户余额（is_available + 各币种）
 model-proxy usage volcengine       # Agent Plan 5h/日/周/月额度（需 AK/SK；否则列 config 模型）
 model-proxy usage qwen-plan        # 个人版 Credits 仅控制台可见（输出订阅页 URL + 列模型）
+# 有 daemon 轮询历史时，配额窗口行尾会按当前消耗速率预测耗尽时间（"按当前速率 ~40m 后耗尽"）；
+# Web Status 配额卡同样展示。速率 ≤0、无历史基线或轮询断档（>3×quota_poll_interval）时不显示。
 
 # 登出
 model-proxy logout aqp         # 清除凭据文件
@@ -157,7 +168,7 @@ model-proxy takeover opencode      # claude|opencode|codex|pi|all
 model-proxy restore opencode
 
 # 配置管理
-model-proxy config init            # 生成模板
+model-proxy config init            # TTY 下是引导式上手向导（探测客户端→选 provider→可选 takeover→打印下一步）；管道/脚本下生成完整注释模板
 model-proxy config print           # 打印生效配置
 model-proxy config check           # 校验配置
 

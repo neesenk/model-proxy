@@ -248,6 +248,15 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 		}(name, provImpl)
 	}
 	wg.Wait()
+	// Attach the exhaustion prediction (display-only) before committing: the
+	// burn rate needs the PREVIOUS committed snapshot as baseline. Computed
+	// here — the tracker owns quota polling — never inside the Manager lock.
+	maxGap := t.maxEtaGap()
+	for n, s := range results {
+		if s != nil {
+			s.ExhaustionEta = provider.EstimateExhaustionEta(t.runtime.Quota(n), s, maxGap)
+		}
+	}
 	if !t.runtime.MergeQuotas(results, generation) {
 		return // reload happened while the upstream polls were in flight
 	}
@@ -370,7 +379,21 @@ func (t *QuotaTracker) CommitSnapshot(generation uint64, name string, snapshot *
 	if t.CurrentGeneration() != generation {
 		return false
 	}
+	if snapshot != nil {
+		snapshot.ExhaustionEta = provider.EstimateExhaustionEta(t.runtime.Quota(name), snapshot, t.maxEtaGap())
+	}
 	return t.runtime.SetQuota(name, snapshot, generation)
+}
+
+// maxEtaGap is the snapshot gap beyond which the burn-rate baseline is
+// considered stale (a poll gap): 3× the configured poll interval — the same
+// bound after which a snapshot degrades to BillingUnknown. Falls back to the
+// provider package default when no config is wired (standalone/test trackers).
+func (t *QuotaTracker) maxEtaGap() time.Duration {
+	if t.cfg == nil || t.cfg() == nil {
+		return provider.DefaultEtaMaxGap
+	}
+	return 3 * t.cfg().Scheduling.PollInterval()
 }
 
 // fetchQuota polls a provider's Quota(), retrying transient errors (DNS "no

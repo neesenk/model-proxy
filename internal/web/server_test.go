@@ -60,8 +60,11 @@ func (testCommandAPI) ResetHealth(string) ([]string, int, error) { return nil, 0
 func (testCommandAPI) SetPin(string, string, time.Duration) (appapi.Pin, bool) {
 	return appapi.Pin{}, true
 }
-func (testCommandAPI) ClearPin(string) bool                { return true }
-func (testCommandAPI) SaveConfig([]byte) error             { return nil }
+func (testCommandAPI) ClearPin(string) bool    { return true }
+func (testCommandAPI) SaveConfig([]byte) error { return nil }
+func (testCommandAPI) ValidateConfig([]byte) []appapi.ValidationIssue {
+	return nil
+}
 func (testCommandAPI) EditConfig(appapi.EditRequest) error { return nil }
 func (testCommandAPI) AddAccount(context.Context, string, appapi.AccountInput) (appapi.MutationResult, error) {
 	return appapi.MutationResult{}, nil

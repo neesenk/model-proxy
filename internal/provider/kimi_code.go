@@ -163,8 +163,13 @@ func (p *KimiCodeProvider) Usage() error {
 		return nil
 	}
 	fmt.Printf("%s %s\n", Dim("Plan:       "), Magenta(Or(s.Plan, "Kimi Code membership")))
+	DecorateExhaustionEta(p.cfg.ProviderName, s)
 	for _, w := range s.Windows {
-		fmt.Println(formatQuotaWindowLine(w))
+		line := formatQuotaWindowLine(w)
+		if w.Ultimate {
+			line += exhaustionHint(s.ExhaustionEta, time.Now())
+		}
+		fmt.Println(line)
 		// Kimi Code token windows use an abstract 0-100 scale — the absolute
 		// used/total IS the percentage already shown by the bar, so it's
 		// redundant. Show the absolute line only for money windows (extra-usage

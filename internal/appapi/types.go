@@ -131,6 +131,14 @@ type AnalyticsQuery struct {
 	Granularity string
 }
 
+// ValidationIssue is one config lint finding returned by POST
+// /api/config/validate. Line is 1-based; 0 means the problem cannot be pinned
+// to a source line (whole-document errors such as "no providers configured").
+type ValidationIssue struct {
+	Line    int    `json:"line"`
+	Message string `json:"message"`
+}
+
 // EditRequest is a structured config mutation.
 type EditRequest struct {
 	Kind string         `json:"kind"`
@@ -232,6 +240,9 @@ type CommandAPI interface {
 	SetPin(route, provider string, ttl time.Duration) (Pin, bool)
 	ClearPin(route string) bool
 	SaveConfig([]byte) error
+	// ValidateConfig lints candidate config bytes without persisting anything;
+	// an empty result means valid.
+	ValidateConfig([]byte) []ValidationIssue
 	EditConfig(EditRequest) error
 	AddAccount(context.Context, string, AccountInput) (MutationResult, error)
 	ProbeAccount(context.Context, string, string) (ProbeResult, error)

@@ -21,7 +21,11 @@ import (
 // the per-provider formatters (bars, percentages, reset strings, detail labels).
 func printQuotaSnapshot(s *QuotaSnapshot) {
 	for _, w := range s.Windows {
-		fmt.Println(formatQuotaWindowLine(w))
+		line := formatQuotaWindowLine(w)
+		if w.Ultimate {
+			line += exhaustionHint(s.ExhaustionEta, time.Now())
+		}
+		fmt.Println(line)
 		if w.Total > 0 {
 			fmt.Printf("%s %.0f used / %.0f total (%.0f remaining)\n",
 				Dim(Pad("Usage:", 18)), w.Used, w.Total, w.Total-w.Used)
@@ -294,6 +298,7 @@ func (p *ZhipuProvider) Usage() error {
 		if s.Level != "" {
 			fmt.Printf("%s %s\n", Dim("Level:     "), Magenta(s.Level))
 		}
+		DecorateExhaustionEta(p.providerName, s)
 		printQuotaSnapshot(s)
 		return nil
 	}

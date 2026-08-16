@@ -155,7 +155,7 @@ func RenderStats(listen string, opts StatsOpts) (string, error) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return "", fmt.Errorf("parse stats response: %w", err)
 	}
-	return FormatStatsTable(resp), nil
+	return FormatStatsSummary(SummarizeStats(resp)) + "\n" + FormatStatsTable(resp), nil
 }
 
 // AnalyticsResp is the decoded /api/analytics shape (the subset the table needs;
@@ -217,7 +217,7 @@ func RenderAnalytics(listen string, opts StatsOpts) (string, error) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return "", fmt.Errorf("parse analytics response: %w", err)
 	}
-	return FormatAnalyticsTable(resp, opts.Cost), nil
+	return FormatStatsSummary(SummarizeAnalytics(resp)) + "\n" + FormatAnalyticsTable(resp, opts.Cost), nil
 }
 
 // formatAnalyticsTable renders analytics series as a compact terminal table.
@@ -364,7 +364,7 @@ func RenderAgents(listen string, opts StatsOpts) (string, error) {
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return "", fmt.Errorf("parse agents response: %w", err)
 	}
-	return FormatAgentsTable(resp), nil
+	return FormatStatsSummary(SummarizeAgents(resp)) + "\n" + FormatAgentsTable(resp), nil
 }
 
 // formatAgentsTable collapses agent-dimension buckets into one row per agent
@@ -420,4 +420,130 @@ func FormatAgentsTable(resp AgentResp) string {
 			CompactNum(avgLat), CompactNum(t.Failures))
 	}
 	return out
+}
+
+// StatsSummary is the pre-aggregated data behind the one-line human summary
+// prepended to every human-readable (non --json) stats output. It is computed
+// from the already-fetched query response — the CLI never issues a second
+// request for it. Segments with no data are simply omitted from the line.
+type StatsSummary struct {
+	From       int64
+	To         int64
+	Requests   uint64
+	Failures   uint64   // terminal failures + 429s; rendered only when HasSuccess
+	HasSuccess bool     // whether the query path reports failure counters at all
+	Cost       *float64 // equivalent cost; nil when nothing in range was priced
+	TopName    string   // heaviest provider (stats/analytics) or agent (--by-agent)
+	TopShare   float64  // TopName's share, 0..1 (of requests; of tokens for --by-agent)
+}
+
+// FormatStatsSummary renders the one-line summary, e.g.
+// "今天 214 请求 · 成功率 97.2% · 等价成本 $3.21 · kimi-code 承担 61%".
+// With no requests in range it returns "<窗口> 暂无数据".
+func FormatStatsSummary(s StatsSummary) string {
+	win := summaryWindowLabel(s.From, s.To)
+	if s.Requests == 0 {
+		return win + " 暂无数据"
+	}
+	parts := []string{fmt.Sprintf("%s %s 请求", win, CompactNum(s.Requests))}
+	if s.HasSuccess {
+		failed := s.Failures
+		if failed > s.Requests {
+			failed = s.Requests
+		}
+		parts = append(parts, fmt.Sprintf("成功率 %.1f%%", float64(s.Requests-failed)/float64(s.Requests)*100))
+	}
+	if s.Cost != nil {
+		parts = append(parts, fmt.Sprintf("等价成本 $%.2f", *s.Cost))
+	}
+	if s.TopName != "" {
+		parts = append(parts, fmt.Sprintf("%s 承担 %d%%", s.TopName, int(s.TopShare*100+0.5)))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// summaryWindowLabel names the query window: "今天" when [from, to] falls
+// inside the current local day, else an explicit "MM-DD HH:MM ~ MM-DD HH:MM"
+// range.
+func summaryWindowLabel(from, to int64) string {
+	f := time.Unix(from, 0)
+	t := time.Unix(to, 0)
+	now := time.Now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	if !f.Before(dayStart) && t.Before(dayStart.Add(24*time.Hour)) {
+		return "今天"
+	}
+	return f.Format("01-02 15:04") + " ~ " + t.Format("01-02 15:04")
+}
+
+// topShare returns the heaviest contributor in per and its share of total.
+// Ties break on the lexicographically smaller name for stable output.
+func topShare(per map[string]uint64, total uint64) (string, float64) {
+	best := ""
+	var bestN uint64
+	for name, n := range per {
+		if n > bestN || (n == bestN && n > 0 && (best == "" || name < best)) {
+			best, bestN = name, n
+		}
+	}
+	if best == "" || total == 0 {
+		return "", 0
+	}
+	return best, float64(bestN) / float64(total)
+}
+
+// SummarizeStats aggregates the /api/stats response for the summary line.
+// Success rate counts terminal failures and 429s as non-successful attempts.
+func SummarizeStats(resp StatsResp) StatsSummary {
+	s := StatsSummary{From: resp.From, To: resp.To, HasSuccess: true}
+	per := map[string]uint64{}
+	for _, b := range resp.Buckets {
+		s.Requests += b.Requests
+		s.Failures += b.Failures + b.RateLimited429
+		per[b.Provider] += b.Requests
+	}
+	s.TopName, s.TopShare = topShare(per, s.Requests)
+	return s
+}
+
+// SummarizeAnalytics aggregates the /api/analytics response: requests,
+// equivalent cost (only when at least one priced point exists) and the top
+// provider. The endpoint reports no failure counters, so the summary carries
+// no success-rate segment.
+func SummarizeAnalytics(resp AnalyticsResp) StatsSummary {
+	s := StatsSummary{From: resp.From, To: resp.To}
+	per := map[string]uint64{}
+	var cost *float64
+	for _, series := range resp.Series {
+		for _, p := range series.Points {
+			s.Requests += p.Requests
+			per[series.Provider] += p.Requests
+			if p.Cost != nil {
+				if cost == nil {
+					cost = new(float64)
+				}
+				*cost += *p.Cost
+			}
+		}
+	}
+	s.Cost = cost
+	s.TopName, s.TopShare = topShare(per, s.Requests)
+	return s
+}
+
+// SummarizeAgents aggregates the /api/agents response. The top contributor is
+// the heaviest agent by input+output tokens, matching the table's sort order.
+func SummarizeAgents(resp AgentResp) StatsSummary {
+	s := StatsSummary{From: resp.From, To: resp.To, HasSuccess: true}
+	perTokens := map[string]uint64{}
+	var totalTokens uint64
+	for _, b := range resp.Buckets {
+		s.Requests += b.Requests
+		s.Failures += b.Failures
+		tokens := b.Input + b.Output
+		perTokens[b.Agent] += tokens
+		totalTokens += tokens
+	}
+	s.TopName, s.TopShare = topShare(perTokens, totalTokens)
+	return s
 }

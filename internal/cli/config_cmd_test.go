@@ -7,28 +7,31 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	configdomain "model-proxy/internal/config"
 )
 
 // --- cmdConfig init: writes config.yaml in the CWD ---
 
+// Non-TTY regression: piped/redirected stdin (scripts, subprocesses) must keep
+// the original static behavior — the full annotated template, byte-identical,
+// with the exact "wrote config.yaml" stdout line. The subprocess's stdin is
+// /dev/null, which is NOT a terminal (the wizard only triggers on a real tty).
 func TestCLI_ConfigInit(t *testing.T) {
 	dir := t.TempDir()
-	// The subprocess runs `config init` which writes "config.yaml" in its CWD.
-	// We can't set CWD via runCLI directly; instead, use the helper subprocess
-	// but chdir via a wrapper. Simpler: call cmdConfig init in-process in a temp
-	// CWD (it doesn't os.Exit on success).
-	wd, _ := os.Getwd()
-	defer os.Chdir(wd)
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
+	stdout, _, code := runCLIInCWD(t, dir, "init")
+	if code != 0 {
+		t.Fatalf("config init exit=%d want 0", code)
 	}
-	RunConfig([]string{"init"})
+	if stdout != "wrote config.yaml\n" {
+		t.Errorf("stdout = %q, want exactly %q", stdout, "wrote config.yaml\n")
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
 	if err != nil {
 		t.Fatalf("config init did not write config.yaml: %v", err)
 	}
-	if !strings.Contains(string(data), "providers:") {
-		t.Errorf("config init wrote unexpected content:\n%s", data)
+	if string(data) != configdomain.DefaultConfigYAML {
+		t.Errorf("non-TTY config init must write the static template verbatim")
 	}
 }
 

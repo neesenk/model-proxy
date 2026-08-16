@@ -44,6 +44,14 @@ func TestRenderStatsCLI(t *testing.T) {
 			t.Errorf("rendered table missing %q:\n%s", want, out)
 		}
 	}
+	// Human-readable mode prepends the one-line summary (built from the same
+	// response, no second query): total requests, success rate, top provider.
+	firstLine := strings.SplitN(out, "\n", 2)[0]
+	for _, want := range []string{"7 请求", "成功率 100.0%", "zhipu 承担 100%"} {
+		if !strings.Contains(firstLine, want) {
+			t.Errorf("summary line missing %q:\n%s", want, firstLine)
+		}
+	}
 	// No --bucket flag -> query string omits bucket (server defaults to 1m).
 	if strings.Contains(gotQuery, "bucket=") {
 		t.Errorf("default query should omit bucket, got %q", gotQuery)
@@ -132,6 +140,76 @@ func TestParseStatsFlags(t *testing.T) {
 				t.Errorf("cli.ParseStatsFlags(%v) = %+v, want %+v", tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestFormatStatsSummary covers the one-line summary: segment omission when a
+// query path has no such data, the empty-range "暂无数据" line, window labels
+// (今天 vs explicit range), success-rate clamping, and top-contributor share.
+func TestFormatStatsSummary(t *testing.T) {
+	// No data -> 暂无数据, one line, no table fragments.
+	out := cli.FormatStatsSummary(cli.StatsSummary{From: 1700000000, To: 1700003600})
+	if !strings.Contains(out, "暂无数据") {
+		t.Errorf("empty summary missing 暂无数据: %q", out)
+	}
+	if strings.Contains(out, "请求 ·") || strings.Contains(out, "成功率") {
+		t.Errorf("empty summary should have no request/success segments: %q", out)
+	}
+	// Old timestamps -> explicit range label instead of 今天.
+	if !strings.Contains(out, " ~ ") {
+		t.Errorf("non-today window should render an explicit range: %q", out)
+	}
+
+	// Full line: today window, success rate, cost, top contributor.
+	now := time.Now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	cost := 3.21
+	s := cli.StatsSummary{
+		From: dayStart.Unix(), To: now.Unix(),
+		Requests: 214, Failures: 6, HasSuccess: true,
+		Cost: &cost, TopName: "kimi-code", TopShare: 0.61,
+	}
+	out = cli.FormatStatsSummary(s)
+	want := "今天 214 请求 · 成功率 97.2% · 等价成本 $3.21 · kimi-code 承担 61%"
+	if out != want {
+		t.Errorf("full summary:\ngot:  %s\nwant: %s", out, want)
+	}
+
+	// Segments drop when the data is absent (analytics: no success/cost).
+	out = cli.FormatStatsSummary(cli.StatsSummary{
+		From: dayStart.Unix(), To: now.Unix(), Requests: 8,
+		TopName: "deepseek", TopShare: 0.625,
+	})
+	if strings.Contains(out, "成功率") || strings.Contains(out, "等价成本") {
+		t.Errorf("missing data must omit the segment: %q", out)
+	}
+	if !strings.Contains(out, "deepseek 承担 63%") {
+		t.Errorf("top share rounding wrong: %q", out)
+	}
+
+	// Failures can exceed requests when 429s overlap terminal failures — clamp
+	// the success rate at 0.0% instead of going negative.
+	out = cli.FormatStatsSummary(cli.StatsSummary{
+		From: dayStart.Unix(), To: now.Unix(),
+		Requests: 10, Failures: 12, HasSuccess: true,
+	})
+	if !strings.Contains(out, "成功率 0.0%") {
+		t.Errorf("success rate should clamp at 0.0%%: %q", out)
+	}
+}
+
+// TestSummarizeStats verifies the /api/stats aggregation: requests, failures
+// (terminal + 429), and the top provider by requests.
+func TestSummarizeStats(t *testing.T) {
+	s := cli.SummarizeStats(cli.StatsResp{From: 1, To: 2, Buckets: []observestats.Bucket{
+		{Provider: "zhipu", Model: "glm-5", Requests: 7, Failures: 1, RateLimited429: 1},
+		{Provider: "kimi-code", Model: "k2", Requests: 3},
+	}})
+	if s.Requests != 10 || s.Failures != 2 || !s.HasSuccess {
+		t.Errorf("summarizeStats = %+v", s)
+	}
+	if s.TopName != "zhipu" || s.TopShare != 0.7 {
+		t.Errorf("top = %s %.2f, want zhipu 0.70", s.TopName, s.TopShare)
 	}
 }
 
@@ -229,6 +307,18 @@ func TestRenderStatsCLI_AnalyticsPath(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("analytics table missing %q:\n%s", want, out)
 		}
+	}
+	// Summary line (from the same analytics response): total requests,
+	// equivalent cost of priced points, top provider by requests (5/8 = 63%).
+	firstLine := strings.SplitN(out, "\n", 2)[0]
+	for _, want := range []string{"8 请求", "等价成本 $0.12", "deepseek 承担 63%"} {
+		if !strings.Contains(firstLine, want) {
+			t.Errorf("analytics summary missing %q:\n%s", want, firstLine)
+		}
+	}
+	// /api/analytics reports no failure counters -> no success-rate segment.
+	if strings.Contains(firstLine, "成功率") {
+		t.Errorf("analytics summary must not invent a success rate:\n%s", firstLine)
 	}
 
 	// --cost only (no granularity): defaults to day in the query string.
@@ -373,6 +463,14 @@ func TestRenderAgentsCLI(t *testing.T) {
 	// claude-code (5800 tokens) sorts above codex (250 tokens).
 	if strings.Index(out, "claude-code") > strings.Index(out, "codex") {
 		t.Errorf("heaviest agent not on top:\n%s", out)
+	}
+	// Summary line: total requests, success rate, and the top agent by tokens
+	// (claude-code 5800/6050 = 96%).
+	firstLine := strings.SplitN(out, "\n", 2)[0]
+	for _, want := range []string{"13 请求", "成功率 100.0%", "claude-code 承担 96%"} {
+		if !strings.Contains(firstLine, want) {
+			t.Errorf("agents summary missing %q:\n%s", want, firstLine)
+		}
 	}
 
 	outJSON, err := cli.RenderAgents(listen, cli.StatsOpts{ByAgent: true, JSON: true})
