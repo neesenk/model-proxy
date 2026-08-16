@@ -181,6 +181,13 @@ TTL/容量 store、客户端可见响应的 bounded recorder、header normalizat
 一次请求继续使用 `runtimeSnapshot.cache` 捕获的 Store，旧 generation 完成时不得
 向 reload 后的新 Store 写入。
 
+`internal/guard` 是无仓库内依赖的出站请求体秘密扫描（DLP-lite）叶子包，拥有
+高置信秘密模式表（PEM 私钥头、AWS/OpenAI/Anthropic/GitHub/Google token）与
+span 去重的 Scan/Redact。`internal/app/proxy_forward.go` 在请求体完整读取后、
+cache 查询与所有 forward 分支之前对共享 body 扫描一次，按 `guard.secrets`
+（log/redact/block/off）放行、替换 `[REDACTED]` 或 400 拒绝；命中只以模式
+类型名进入 live event 与 `("guard", <pattern>)` 计数器，命中内容永不落日志或事件。
+
 `internal/transport/bodycapture` 是无仓库内依赖的通用响应流捕获叶子包：
 字节原样透传，只保存有界 prefix，同时统计完整长度和截断状态，并在首次 Close
 执行一次回调。Responses state、request log 与 Shadow 共用这一 transport
@@ -306,6 +313,7 @@ catalog adapter / routing → internal/catalog
 request routing adapter → internal/routing → internal/catalog / internal/config / internal/provider
 accounts adapter / login / provider builder → internal/accounts
 live-event publishers / SSE adapter → internal/observe/events
+forward → internal/guard
 target executor / Fusion / Shadow / Web / CLI → internal/observe/requestlog
 stats flusher / proxyReadView → internal/observe/stats
 forward / target executor / cache adapter → internal/cache
@@ -323,11 +331,11 @@ application → serveAssembly → applicationRuntime → Proxy
 `internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`accounts`、`archtest`（纯测试包）、
-  `cache`、`catalog`、`configedit`、`daemonctl`、`httpx`、`observe/counters`、
+  `cache`、`catalog`、`configedit`、`daemonctl`、`guard`、`httpx`、`observe/counters`、
   `observe/events`、`observe/stats`、`pricing`、`protocol`、`provider`、
   `transport/bodycapture`；
 - `app → accounts, appapi, cache, catalog, cli/framework, cli/login, cli/serve,
-  config, configedit, fusion, httpx, observe/counters, observe/events,
+  config, configedit, fusion, guard, httpx, observe/counters, observe/events,
   observe/requestlog, observe/stats, pricing, probe, protocol, provider,
   routing, runtime, runtime/wirecap, shadow, targetexec, transport/bodycapture,
   web`；

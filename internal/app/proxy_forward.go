@@ -11,6 +11,7 @@ import (
 	"time"
 
 	responsecache "model-proxy/internal/cache"
+	"model-proxy/internal/guard"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
@@ -75,6 +76,39 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// force-provider/replay bypass).
 	force := p.pinForces(exposed, targets, parentOf)
 	forcedProvider := forcedProviderFromRequest(r)
+
+	// Outbound secret guard (DLP-lite): scan the SHARED request body once, here
+	// — after route resolution (so hits are attributable) and before the cache
+	// lookup and every forward branch. Cache, Fusion and Shadow all consume the
+	// (possibly redacted) origBody from this point on; no branch rescans. Only
+	// pattern TYPE NAMES are counted/emitted — matched bytes never leave the body
+	// (credential red line).
+	if action := cfg.Guard.SecretsAction(); action != "off" {
+		if names := guard.Scan(origBody); len(names) > 0 {
+			if p.metrics != nil {
+				for _, name := range names {
+					p.metrics.Inc("guard", name, counters.EvGuardHits)
+				}
+			}
+			p.events.Publish(observeevents.Event{
+				Type:      "guard",
+				Ts:        time.Now().UnixMilli(),
+				RequestID: requestID,
+				Agent:     counters.DetectAgent(r),
+				Protocol:  proto,
+				Exposed:   exposed,
+				Detail:    "secrets=" + strings.Join(names, ",") + " action=" + action,
+			})
+			switch action {
+			case "block":
+				p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+				http.Error(w, fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(names, ", ")), http.StatusBadRequest)
+				return
+			case "redact":
+				origBody = guard.Redact(origBody)
+			}
+		}
+	}
 
 	// Exact-match response cache (#10): a request byte-identical to a recently
 	// served one is replayed from cache with no upstream call. Computed before

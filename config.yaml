@@ -268,6 +268,21 @@ takeover:
 # prices:
 #   glm-5.2: {input: 0.60, output: 2.20, cache_read: 0.11}
 
+# Monthly budget alerts on the equivalent USD cost of observed token usage
+# (same pricing path as /api/analytics; unpriced models contribute nothing).
+# Checked once per minute against the current local month's accumulated cost.
+# On crossing: a "budget" live event (SSE /api/events) plus an optional
+# webhook POST of {scope, month, threshold_usd, actual_usd} (2 retries;
+# failures are only logged). Alerts fire once per (scope, month, threshold)
+# per process — a restart may re-alert. Enabling this block requires a
+# daemon restart (startup-only, like request_log); threshold value changes
+# apply on reload.
+# budgets:
+#   monthly_usd: 20                       # global monthly total threshold; 0/unset = off
+#   providers:                            # optional per-provider overrides
+#     zhipu: 5                            # replaces the global threshold for the zhipu scope
+#   webhook_url: https://hooks.example.com/budget  # optional; unset = live event only
+
 # Exact response cache: SHA-256(method+path+body) byte-exact match replays the
 # recorded response (x-mp-cache: hit). Disabled by default. Shields retries and
 # duplicate single-shot requests; multi-turn chats change the body every turn,
@@ -277,6 +292,18 @@ takeover:
 #   ttl: 10m                            # default
 #   max_entries: 1000                   # default
 #   max_body_bytes: 262144              # default 256KiB; larger responses not cached
+
+# Outbound secret guard (DLP-lite): scans the raw request body for
+# high-confidence secret patterns (PEM private-key headers, AWS/OpenAI/
+# Anthropic/GitHub/Google tokens) BEFORE forwarding upstream — coding agents
+# paste local files into prompts, and a leaked key should not leave the
+# machine. Request bodies only, never responses; one scan per request, shared
+# by cache/fusion/shadow. Hits are reported by pattern type name only (live
+# event + stats counter) — matched content is never logged.
+# guard:
+#   secrets: log      # log (default: allow + live event + counter) | redact
+#                     # (forward with matches replaced by [REDACTED]) | block
+#                     # (reject with 400) | off (no scan)
 
 # Shadow evaluation: after the primary response commits, re-send the same request
 # to a shadow backend, record-only — never affects the client, circuit breakers,

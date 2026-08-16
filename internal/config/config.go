@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -49,6 +50,54 @@ type Config struct {
 	Fusion  map[string]FusionConfig `yaml:"fusion"`
 	Pricing PricingConfig           `yaml:"pricing"`
 	Prices  map[string]PriceConfig  `yaml:"prices"`
+	// Guard configures the outbound request-body secret scan (DLP-lite).
+	Guard GuardConfig `yaml:"guard"`
+	// Budgets configures personal monthly equivalent-cost alerts.
+	Budgets BudgetsConfig `yaml:"budgets"`
+}
+
+// GuardConfig configures the outbound secret scan applied to the raw client
+// request body before forwarding. secrets selects the action on a hit:
+// "log" (default — allow + live event + counter), "redact" (replace the match
+// with [REDACTED] and forward), "block" (reject with 400), "off" (no scan).
+type GuardConfig struct {
+	Secrets string `yaml:"secrets"`
+}
+
+// SecretsAction returns the effective action, defaulting to "log".
+func (g GuardConfig) SecretsAction() string {
+	if g.Secrets == "" {
+		return "log"
+	}
+	return g.Secrets
+}
+
+// BudgetsConfig configures personal monthly spend alerts on the equivalent
+// USD cost of observed token usage (the same pricing path as /api/analytics).
+// monthly_usd is the global threshold on the month's total (0/unset = off);
+// providers sets an independent per-provider threshold (present = the
+// provider's own scope, replacing the global threshold for that provider;
+// 0 = no alert for that provider — its spend still counts toward the global
+// total). webhook_url is the HTTP POST target for alerts (unset = live event
+// only). Alerts fire once per (scope, month, threshold) per process; a
+// restart may re-alert.
+type BudgetsConfig struct {
+	MonthlyUSD float64            `yaml:"monthly_usd"`
+	Providers  map[string]float64 `yaml:"providers"`
+	WebhookURL string             `yaml:"webhook_url"`
+}
+
+// Enabled reports whether any budget threshold is active.
+func (b BudgetsConfig) Enabled() bool {
+	if b.MonthlyUSD > 0 {
+		return true
+	}
+	for _, threshold := range b.Providers {
+		if threshold > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // FusionConfig is one multi-model orchestration recipe: a panel of 2..4 draft
@@ -603,6 +652,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Fusion              map[string]FusionConfig `yaml:"fusion"`
 		Pricing             PricingConfig           `yaml:"pricing"`
 		Prices              map[string]PriceConfig  `yaml:"prices"`
+		Guard               GuardConfig             `yaml:"guard"`
+		Budgets             BudgetsConfig           `yaml:"budgets"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
@@ -638,6 +689,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Fusion = raw.Fusion
 	cfg.Pricing = raw.Pricing
 	cfg.Prices = raw.Prices
+	cfg.Guard = raw.Guard
+	cfg.Budgets = raw.Budgets
 	cfg.LogFile = ExpandPath(cfg.LogFile)
 	t := &cfg.Takeover
 	// Takeover paths default to each client's standard config location (and
@@ -875,6 +928,33 @@ func (c *Config) validate() error {
 	}
 	if c.ShadowMaxConcurrent < 0 {
 		return fmt.Errorf("shadow_max_concurrent %d must be >= 0", c.ShadowMaxConcurrent)
+	}
+	// guard.secrets: closed action set (default log).
+	switch c.Guard.SecretsAction() {
+	case "log", "redact", "block", "off":
+	default:
+		return fmt.Errorf("guard.secrets %q invalid — use log, redact, block, or off", c.Guard.Secrets)
+	}
+	// budgets: thresholds must be non-negative, provider overrides must name a
+	// configured provider (anything else is almost certainly a typo that would
+	// silently never alert), and the webhook target must be an absolute
+	// http(s) URL.
+	if c.Budgets.MonthlyUSD < 0 {
+		return fmt.Errorf("budgets.monthly_usd %v must be >= 0 (0/unset disables the global alert)", c.Budgets.MonthlyUSD)
+	}
+	for name, threshold := range c.Budgets.Providers {
+		if threshold < 0 {
+			return fmt.Errorf("budgets.providers[%q] %v must be >= 0 (0 disables that provider's alert)", name, threshold)
+		}
+		if _, ok := c.Providers[name]; !ok {
+			return fmt.Errorf("budgets.providers[%q]: provider not defined under providers: — check spelling or add the provider", name)
+		}
+	}
+	if c.Budgets.WebhookURL != "" {
+		parsed, err := url.Parse(c.Budgets.WebhookURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fmt.Errorf("budgets.webhook_url %q is not a valid http(s) URL", c.Budgets.WebhookURL)
+		}
 	}
 	// NOTE: duplicate priorities within a route are intentionally allowed. The
 	// scheduler (proxy.go decideOrder) ranks by tier -> priority -> surplus, so

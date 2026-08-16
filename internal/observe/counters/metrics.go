@@ -30,6 +30,11 @@ const (
 	// with zero schema change.
 	EvFusionRuns     MetricsEvent = "fusion_runs"
 	EvFusionDegraded MetricsEvent = "fusion_degraded"
+	// Guard (DLP-lite) secret-scan hits reuse the same trick: counted under the
+	// virtual key ("guard", <pattern type name>) so /api/stats gets a hit time
+	// series with zero schema change. The model column holds the pattern TYPE
+	// NAME only — matched secret bytes never reach any counter, log, or event.
+	EvGuardHits MetricsEvent = "guard_hits"
 )
 
 type ProviderMetrics struct {
@@ -104,6 +109,9 @@ func (s *MetricsStore) Inc(provider, model string, ev MetricsEvent) {
 		pm.LastRequestAt.Store(time.Now().Unix())
 	case EvFusionDegraded:
 		pm.Failovers.Add(1)
+	case EvGuardHits:
+		pm.Requests.Add(1)
+		pm.LastRequestAt.Store(time.Now().Unix())
 	}
 }
 

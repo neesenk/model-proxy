@@ -43,6 +43,7 @@ type Proxy struct {
 	catalog          *catalog.Catalog               // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
 	shadow           atomic.Pointer[shadow.Runtime] // reload-swappable detached Shadow runtime; captured with each request generation
 	pricingMu        sync.Mutex                     // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
+	budget           *budgetWatcher                 // monthly cost alert loop; nil unless budgets: configures a threshold
 	closeOnce        sync.Once
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,

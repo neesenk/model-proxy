@@ -39,6 +39,15 @@ generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 
 forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens 和稳定 request_id。cache hit、400/502 终局也必须产生 end。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
 
+出站秘密扫描（DLP-lite，`guard.secrets`）在 forward 读取完整请求体后、cache
+查询与所有 forward 分支之前对共享 body 扫描一次（`internal/guard` 的高置信
+模式表，只扫请求不扫响应，SSE/流式同样适用）。命中时额外产生一条
+`type:"guard"` 事件，`detail` 只含模式类型名与生效动作
+（`secrets=<名字,…> action=<log|redact|block>`），并按 `("guard", <模式类型名>)`
+虚拟键计数（requests 列为命中次数）——命中内容本身绝不进入事件、计数器、
+日志或 request log（redact 后 request log 看到的也是 `[REDACTED]` 占位）。
+`block` 动作返回 400 并照常产生终局 end 事件；`off` 完全不扫。
+
 ## Shadow
 
 每 route 可配置 shadow provider/model/protocol/sample_rate/max_concurrent。生产响应 commit 后 fire-and-forget：

@@ -19,6 +19,7 @@ type PeakSegment = configdomain.PeakSegment
 type PeakConfig = configdomain.PeakConfig
 type RouteTarget = configdomain.RouteTarget
 type Takeover = configdomain.Takeover
+type GuardConfig = configdomain.GuardConfig
 
 // LoadConfig delegates to internal/config.
 func LoadConfig(path string) (*Config, error) {

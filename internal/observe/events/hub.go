@@ -6,9 +6,13 @@ import "sync"
 const recentCap = 200
 
 // Event is one request lifecycle event. Type "start" fires when a request
-// enters forwarding; "end" fires when it commits or terminates early.
+// enters forwarding; "end" fires when it commits or terminates early; "guard"
+// fires when the outbound secret scan hits (Detail then carries the pattern
+// type names and the configured action — never the matched content); "budget"
+// fires when a configured monthly cost budget crosses (Detail carries the
+// JSON {scope, month, threshold_usd, actual_usd} payload).
 type Event struct {
-	Type          string `json:"type"` // "start" | "end"
+	Type          string `json:"type"` // "start" | "end" | "guard"
 	Ts            int64  `json:"ts"`   // unix milliseconds
 	RequestID     string `json:"request_id"`
 	Agent         string `json:"agent"`
@@ -20,6 +24,7 @@ type Event struct {
 	LatencyMs     int64  `json:"latency_ms"`
 	Input         uint64 `json:"input"`
 	Output        uint64 `json:"output"`
+	Detail        string `json:"detail,omitempty"` // free-form context for non-lifecycle types
 }
 
 // Hub fans events out to subscribers and retains a bounded recent-event ring.

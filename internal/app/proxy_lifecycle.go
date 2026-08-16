@@ -13,6 +13,12 @@ func (p *Proxy) StartRuntimeServices(cfg *Config) {
 		p.statsFlushLoop(stop)
 	})
 
+	// Monthly equivalent-cost alerts (budgets:). Conditional: no threshold
+	// configured → no background task at all. The loop is stopped and waited
+	// by the lifecycle in closeRuntimeServices; it owns no durable state, so
+	// there is no final flush.
+	p.startBudgetWatcher()
+
 	p.initRequestLog(cfg.RequestLog)
 	if p.reqLog != nil {
 		p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
