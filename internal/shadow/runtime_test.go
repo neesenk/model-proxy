@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -173,14 +174,21 @@ func TestExecuteRewritesAndCapturesDetachedRequest(t *testing.T) {
 	if got := gotHeader.Get("Content-Type"); got != "application/json" {
 		t.Errorf("content type = %q", got)
 	}
-	if want := `{"messages":[],"model":"replacement"}`; string(gotBody) != want {
-		t.Errorf("upstream body = %s, want %s", gotBody, want)
+	// Assert semantically (parsed fields), not on byte order: RewriteModel's
+	// in-place splice preserves the original key order instead of the old
+	// map-marshal's sorted order.
+	var rewritten struct {
+		Model    string          `json:"model"`
+		Messages json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(gotBody, &rewritten); err != nil || rewritten.Model != "replacement" || string(rewritten.Messages) != "[]" {
+		t.Errorf("upstream body = %s", gotBody)
 	}
 	if string(original) != `{"model":"called","messages":[]}` {
 		t.Errorf("original body mutated to %s", original)
 	}
-	if got := string(result.RequestBody); got != `{"messages":[],"model":"replacement"}` {
-		t.Errorf("result request body = %s", got)
+	if string(result.RequestBody) != string(gotBody) {
+		t.Errorf("result request body = %s, want the rewritten upstream body %s", result.RequestBody, gotBody)
 	}
 	if !bytes.Equal(result.Capture.Body, []byte("response")) || result.Capture.Total != 8 || result.Capture.Truncated {
 		t.Errorf("capture = %+v", result.Capture)

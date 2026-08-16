@@ -97,6 +97,63 @@ func TestPlanPreservesBodyWhenTargetModelEmptyOrBodyMalformed(t *testing.T) {
 	}
 }
 
+func TestPlanRewriteModelSplicesFirstKeyWithoutTouchingOtherBytes(t *testing.T) {
+	plan := NewPlan(PlanInput{
+		Target:         configdomain.RouteTarget{Model: "upstream"},
+		ClientProtocol: protocol.OpenAI, BackendProtocol: protocol.OpenAI,
+	})
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "compact", in: `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`, want: `{"model":"upstream","messages":[{"role":"user","content":"hi"}]}`},
+		{name: "spaced", in: "{  \"model\" : \"alias\" ,\n \"messages\" : [] }\n", want: "{  \"model\" : \"upstream\" ,\n \"messages\" : [] }\n"},
+		{name: "escaped value", in: `{"model":"al\"ias","messages":[]}`, want: `{"model":"upstream","messages":[]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := plan.RewriteModel([]byte(tt.in), "alias"); string(got) != tt.want {
+				t.Fatalf("RewriteModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	// Byte splice must hold on a body large enough that the old full
+	// unmarshal/marshal path dominated forward latency.
+	big := []byte(`{"model":"alias","messages":[{"role":"user","content":"` + string(bytes.Repeat([]byte("x"), 64*1024)) + `"}]}`)
+	got := plan.RewriteModel(big, "alias")
+	if !bytes.HasPrefix(got, []byte(`{"model":"upstream",`)) || len(got) != len(big)+len("upstream")-len("alias") {
+		t.Fatalf("big body splice wrong: prefix %.40q len %d (body %d)", got, len(got), len(big))
+	}
+}
+
+func TestPlanRewriteModelFallsBackWhenModelNotFirstKeyOrNotString(t *testing.T) {
+	plan := NewPlan(PlanInput{
+		Target:         configdomain.RouteTarget{Model: "upstream"},
+		ClientProtocol: protocol.OpenAI, BackendProtocol: protocol.OpenAI,
+	})
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{name: "model not first", in: `{"max_tokens":100,"model":"alias","messages":[]}`},
+		{name: "model absent", in: `{"messages":[]}`},
+		{name: "model non-string", in: `{"model":42,"messages":[]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := plan.RewriteModel([]byte(tt.in), "alias")
+			var parsed map[string]any
+			if err := json.Unmarshal(got, &parsed); err != nil {
+				t.Fatalf("fallback produced invalid JSON: %s", got)
+			}
+			if parsed["model"] != "upstream" {
+				t.Fatalf("fallback model = %v, want upstream (%s)", parsed["model"], got)
+			}
+		})
+	}
+}
+
 func TestPlanExtractResponseTextByBackendProtocol(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -18,10 +18,12 @@ var body50K = func() []byte {
 	tools := `[{"name":"bash","description":"Run a command","input_schema":{"type":"object","properties":{"command":{"type":"string","description":"The command"}},"required":["command"]}},{"name":"edit","description":"Edit a file","input_schema":{"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]}},{"name":"read","description":"Read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]`
 	b := `{"model":"claude-sonnet-4-20250514","max_tokens":8192,"system":"You are a helpful coding assistant. Always use tools to explore the codebase before making changes. Be thorough and precise. Follow the user's instructions carefully. Write clean, well-tested code. Explain your reasoning.",`
 	b += `"tools":` + tools + `,`
-	b += `"messages":` + msgs
-	// Pad with history to reach ~50KB
+	// Pad with history INSIDE the messages array to reach ~50KB (padding after
+	// the closing ] made the fixture invalid JSON, which only the Unmarshal
+	// benchmark — the one that parses the whole body — could detect).
+	b += `"messages":` + strings.TrimSuffix(msgs, "]")
 	b += strings.Repeat(`,{"role":"user","content":"Tell me more about this approach and why it works."},{"role":"assistant","content":"Sure, the key insight is that we can leverage the existing infrastructure while adding the new functionality on top. This way we minimize the risk of breaking existing behavior. The implementation follows the pattern already established in the codebase, using the same interfaces and conventions."}`, 15)
-	b += `}`
+	b += `]}`
 	return []byte(b)
 }()
 

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -102,9 +103,19 @@ func (reader *countingReadCloser) Read(buffer []byte) (int, error) {
 	return count, err
 }
 
+// flushBufPool recycles the 32KB streaming copy buffer: one fresh allocation
+// per forwarded response was the proxy's largest flat allocation source under
+// the forward benchmarks.
+var flushBufPool = sync.Pool{New: func() any {
+	buf := make([]byte, 32<<10)
+	return &buf
+}}
+
 func flushCopy(writer http.ResponseWriter, body io.ReadCloser) streamEnd {
 	flusher, _ := writer.(http.Flusher)
-	buf := make([]byte, 32<<10)
+	bufp := flushBufPool.Get().(*[]byte)
+	defer flushBufPool.Put(bufp)
+	buf := *bufp
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {

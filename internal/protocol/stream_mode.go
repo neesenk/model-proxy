@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	sonic "github.com/bytedance/sonic"
+	"github.com/bytedance/sonic/ast"
 )
 
 type wireSSEEvent struct {
@@ -15,9 +16,20 @@ type wireSSEEvent struct {
 	data  string
 }
 
+// requestWantsStream reads the single top-level "stream" boolean. It runs on
+// EVERY forwarded request, so a full map unmarshal here used to dominate the
+// forward path's allocations (~49KB/op on the WithMap benchmark — every
+// messages/tools value boxed). SearchByPath locates the one key without
+// materializing the rest of the body. Semantics match the old
+// `root["stream"] == true`: only a literal boolean true counts.
 func requestWantsStream(body []byte) bool {
-	var root map[string]any
-	return sonic.Unmarshal(body, &root) == nil && root["stream"] == true
+	node, err := ast.NewSearcher(string(body)).GetByPath("stream")
+	if err != nil {
+		return false
+	}
+	// node.Bool() coerces ("true", 1 -> true); the old map-unmarshal semantics
+	// accepted only a literal boolean true, so compare the node TYPE instead.
+	return node.Type() == ast.V_TRUE
 }
 
 func parseWireSSE(raw []byte) ([]wireSSEEvent, error) {

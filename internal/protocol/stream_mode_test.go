@@ -31,3 +31,34 @@ func TestAggregateAndSynthesizeAllProtocolStreams(t *testing.T) {
 		})
 	}
 }
+
+// requestWantsStream is on the per-request hot path and reads ONLY the
+// top-level "stream" key: a literal boolean true counts, coercible lookalikes
+// (string/number) and nested occurrences do not.
+func TestRequestWantsStreamTopLevelBoolOnly(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"true", `{"model":"m","stream":true,"messages":[]}`, true},
+		{"true first key", `{"stream":true}`, true},
+		{"true spaced", `{"stream": true}`, true},
+		{"false", `{"model":"m","stream":false}`, false},
+		{"absent", `{"model":"m"}`, false},
+		{"string true", `{"stream":"true"}`, false},
+		{"number one", `{"stream":1}`, false},
+		{"nested ignored", `{"messages":[{"content":"{\"stream\":true}"}]}`, false},
+		{"nested object ignored", `{"a":{"stream":true},"stream":false}`, false},
+		{"malformed", `not-json`, false},
+		{"empty object", `{}`, false},
+		{"array", `[1,2]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := requestWantsStream([]byte(tc.body)); got != tc.want {
+				t.Fatalf("requestWantsStream(%s) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}

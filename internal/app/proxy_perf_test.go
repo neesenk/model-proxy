@@ -2,7 +2,6 @@ package app
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -20,8 +19,8 @@ import (
 )
 
 // Performance tests: isolate proxy forwarding overhead with a mock upstream, no
-// dependency on the real AQP gateway. auth uses a stubbed AqpKeyProvider (empty
-// mint URL -> no network call), testing proxy logic purely.
+// dependency on the real AQP gateway. The AQP benchmarks use a mock mint server
+// plus a temp SSO cookie file, so no real credential or network is touched.
 
 // silenceLog mutes forward's per-request log so the bench isn't slowed/spammed
 // by log IO, then restores the process-global logger after the test/benchmark.
@@ -99,27 +98,28 @@ func smallBody() []byte {
 }
 
 // largeBody builds a ~64KB request body (large messages content), amplifying rewriteModel's json cost.
+// model is written as the FIRST key — the layout real LLM clients emit (same
+// assumption as protocol.ExtractModel); a map[string]any marshal would sort it
+// last and unrepresentatively force RewriteModel's fallback path.
 func largeBody() []byte {
 	pad := bytes.Repeat([]byte("x"), 60*1024)
-	v := map[string]any{
-		"model":      "claude-opus-4-7",
-		"max_tokens": 100,
-		"messages": []map[string]any{
-			{"role": "user", "content": string(pad)},
-		},
-	}
-	b, _ := json.Marshal(v)
+	b := []byte(`{"model":"claude-opus-4-7","max_tokens":100,"messages":[{"role":"user","content":"`)
+	b = append(b, pad...)
+	b = append(b, `"}]}`...)
 	return b
 }
 
 // --- benchmarks ---
 
-// BenchmarkProxy_Forward_NoMap: small body, no model_map hit (rewriteModel not triggered).
+// BenchmarkProxy_Forward_NoMap: small body, forward with NO model rewrite
+// (identity model_map: target model == called model, so RewriteModel is a
+// passthrough). A nil model_map would configure NO route at all and measure
+// the no-route error path instead of a real forward.
 func BenchmarkProxy_Forward_NoMap(b *testing.B) {
 	silenceLog(b)
 	up := newUpstream(jsonOK)
 	defer up.Close()
-	px := newProxyServer(b, up.URL, "static", nil)
+	px := newProxyServer(b, up.URL, "static", map[string]string{"claude-opus-4-7": "claude-opus-4-7"})
 	defer px.Close()
 	body := smallBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
@@ -130,6 +130,13 @@ func BenchmarkProxy_Forward_NoMap(b *testing.B) {
 		resp, err := cli.Post(px.URL+"/v1/messages", "application/json", bytes.NewReader(body))
 		if err != nil {
 			b.Fatal(err)
+		}
+		// A non-200 means the benchmark is measuring an error path (e.g. no
+		// matching route), not a real forward — fail loudly instead of
+		// reporting meaningless numbers.
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			b.Fatalf("forward returned %d", resp.StatusCode)
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
@@ -154,6 +161,13 @@ func BenchmarkProxy_Forward_WithMap(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		// A non-200 means the benchmark is measuring an error path (e.g. no
+		// matching route), not a real forward — fail loudly instead of
+		// reporting meaningless numbers.
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			b.Fatalf("forward returned %d", resp.StatusCode)
+		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
@@ -177,6 +191,13 @@ func BenchmarkProxy_Forward_WithMap_LargeBody(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		// A non-200 means the benchmark is measuring an error path (e.g. no
+		// matching route), not a real forward — fail loudly instead of
+		// reporting meaningless numbers.
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			b.Fatalf("forward returned %d", resp.StatusCode)
+		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
@@ -187,7 +208,7 @@ func BenchmarkProxy_Forward_SSE(b *testing.B) {
 	silenceLog(b)
 	up := newUpstream(sseOK)
 	defer up.Close()
-	px := newProxyServer(b, up.URL, "static", nil)
+	px := newProxyServer(b, up.URL, "static", map[string]string{"claude-opus-4-7": "claude-opus-4-7"})
 	defer px.Close()
 	body := smallBody()
 	cli := &http.Client{Timeout: 10 * time.Second}
@@ -198,6 +219,13 @@ func BenchmarkProxy_Forward_SSE(b *testing.B) {
 		resp, err := cli.Post(px.URL+"/v1/messages", "application/json", bytes.NewReader(body))
 		if err != nil {
 			b.Fatal(err)
+		}
+		// A non-200 means the benchmark is measuring an error path (e.g. no
+		// matching route), not a real forward — fail loudly instead of
+		// reporting meaningless numbers.
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			b.Fatalf("forward returned %d", resp.StatusCode)
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
@@ -214,7 +242,7 @@ func BenchmarkProxy_Forward_RequestLog_SmallBody(b *testing.B) {
 	silenceLog(b)
 	up := newUpstream(jsonOK)
 	defer up.Close()
-	pxp, px := newProxyServerP(b, up.URL, "static", nil)
+	pxp, px := newProxyServerP(b, up.URL, "static", map[string]string{"claude-opus-4-7": "claude-opus-4-7"})
 	defer px.Close()
 	// Wire a file-based request logger (running loop) onto the proxy.
 	dir := b.TempDir()
@@ -234,6 +262,13 @@ func BenchmarkProxy_Forward_RequestLog_SmallBody(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		// A non-200 means the benchmark is measuring an error path (e.g. no
+		// matching route), not a real forward — fail loudly instead of
+		// reporting meaningless numbers.
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			b.Fatalf("forward returned %d", resp.StatusCode)
+		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
@@ -249,7 +284,7 @@ func BenchmarkProxy_Forward_RequestLog_LargeBody(b *testing.B) {
 		w.Write(bytes.Repeat([]byte("y"), 64*1024))
 	})
 	defer up.Close()
-	pxp, px := newProxyServerP(b, up.URL, "static", nil)
+	pxp, px := newProxyServerP(b, up.URL, "static", map[string]string{"claude-opus-4-7": "claude-opus-4-7"})
 	defer px.Close()
 	dir := b.TempDir()
 	l := requestlog.New(requestlog.Options{
@@ -268,6 +303,13 @@ func BenchmarkProxy_Forward_RequestLog_LargeBody(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		// A non-200 means the benchmark is measuring an error path (e.g. no
+		// matching route), not a real forward — fail loudly instead of
+		// reporting meaningless numbers.
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			b.Fatalf("forward returned %d", resp.StatusCode)
+		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
@@ -284,7 +326,7 @@ func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
 		w.Write(bytes.Repeat([]byte("y"), 1024*1024))
 	})
 	defer up.Close()
-	pxp, px := newProxyServerP(b, up.URL, "static", nil)
+	pxp, px := newProxyServerP(b, up.URL, "static", map[string]string{"claude-opus-4-7": "claude-opus-4-7"})
 	defer px.Close()
 	dir := b.TempDir()
 	l := requestlog.New(requestlog.Options{
@@ -303,21 +345,39 @@ func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		// A non-200 means the benchmark is measuring an error path (e.g. no
+		// matching route), not a real forward — fail loudly instead of
+		// reporting meaningless numbers.
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			b.Fatalf("forward returned %d", resp.StatusCode)
+		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
 }
 
-// BenchmarkAuthInject_AQP_Static: AQP provider static-key injection (the proxy's per-request hot path).
-func BenchmarkAuthInject_AQP_Static(b *testing.B) {
+// BenchmarkAuthInject_AQP_ColdMint: AQP provider cache-miss path — every
+// iteration re-mints through the mock mint server (Refresh clears the cache),
+// complementing the Cached benchmark's per-request hot path.
+func BenchmarkAuthInject_AQP_ColdMint(b *testing.B) {
 	silenceLog(b)
-	p := provider.NewAqpKeyProvider("", "")
-	req, _ := http.NewRequest(http.MethodPost, "http://up/v1/messages", bytes.NewReader(smallBody()))
+	mint := newUpstream(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprint(w, `{"retcode":0,"data":{"api_key":"cold-key-0123456789abcdef","project_id":"p"}}`)
+	})
+	defer mint.Close()
+	dir := b.TempDir()
+	cookiePath := dir + "/cookie.json"
+	cookieFile := `{"sso_session_cookie":"SSO_C=fake"}`
+	if err := cliframework.WriteFile(cookiePath, []byte(cookieFile), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	p := provider.NewAqpKeyProvider(mint.URL, cookiePath)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		req.Header.Del("Authorization")
-		if err := p.Inject(req); err != nil {
+		if err := p.Refresh(); err != nil {
 			b.Fatal(err)
 		}
 	}

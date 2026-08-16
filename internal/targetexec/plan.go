@@ -3,6 +3,7 @@
 package targetexec
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 
@@ -93,6 +94,13 @@ func (plan Plan) RewriteModel(body []byte, calledModel string) []byte {
 	if plan.targetModel == "" || plan.targetModel == calledModel {
 		return body
 	}
+	// Fast path: model is the first top-level key in every known LLM client
+	// (same assumption as protocol.ExtractModel), so the value can be spliced
+	// in place — no full unmarshal/marshal of a body that is 99% unrelated
+	// messages/tools content.
+	if out, ok := spliceModelValue(body, plan.targetModel); ok {
+		return out
+	}
 	var value map[string]any
 	if err := json.Unmarshal(body, &value); err != nil {
 		return body
@@ -104,6 +112,60 @@ func (plan Plan) RewriteModel(body []byte, calledModel string) []byte {
 	}
 	return out
 }
+
+// spliceModelValue replaces the top-level "model" value in body when it is
+// the FIRST key and a string, returning the spliced bytes. It reports
+// ok=false for any other layout (model absent, not first, non-string value,
+// malformed JSON) so the caller falls back to a full parse.
+func spliceModelValue(body []byte, targetModel string) (out []byte, ok bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	keyTok, err := dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	if key, _ := keyTok.(string); key != "model" {
+		return nil, false
+	}
+	// dec.InputOffset() is now just past the key's closing quote; the value
+	// literal starts after the colon and any whitespace.
+	valueStart := int(dec.InputOffset())
+	for valueStart < len(body) && isJSONSpace(body[valueStart]) {
+		valueStart++
+	}
+	if valueStart >= len(body) || body[valueStart] != ':' {
+		return nil, false
+	}
+	valueStart++
+	for valueStart < len(body) && isJSONSpace(body[valueStart]) {
+		valueStart++
+	}
+	if valueStart >= len(body) || body[valueStart] != '"' {
+		return nil, false
+	}
+	valTok, err := dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	if _, isString := valTok.(string); !isString {
+		return nil, false
+	}
+	valueEnd := int(dec.InputOffset())
+	encoded, err := json.Marshal(targetModel)
+	if err != nil {
+		return nil, false
+	}
+	out = make([]byte, 0, len(body)-(valueEnd-valueStart)+len(encoded))
+	out = append(out, body[:valueStart]...)
+	out = append(out, encoded...)
+	out = append(out, body[valueEnd:]...)
+	return out, true
+}
+
+func isJSONSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' }
 
 // ConvertBody converts only cross-protocol traffic. Same-protocol bytes,
 // including native Responses traffic to Codex, pass through unchanged.
