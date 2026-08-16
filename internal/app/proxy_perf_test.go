@@ -61,6 +61,11 @@ func newProxyServerP(t testing.TB, upstreamURL, auth string, modelMap map[string
 			"t": {OpenAIBaseURL: upstreamURL, Provider: testProviderID, Models: provModels},
 		},
 		Routes: routes,
+		// The forward benchmarks measure rewrite/forward overhead; the secret
+		// guard scans the full body on every request (its own cost belongs to
+		// its own guard benchmarks). A zero-value Guard config defaults to
+		// "log" (scan on), which would silently dominate the LargeBody case.
+		Guard: GuardConfig{Secrets: "off"},
 	}
 	p := newTestProxy(t, cfg)
 	return p, httptest.NewServer(http.HandlerFunc(p.Handler))

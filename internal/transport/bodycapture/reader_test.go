@@ -234,3 +234,35 @@ func (r *closeTrackingReader) Close() error {
 	r.closes++
 	return r.closeErr
 }
+
+// TestPutCaptureBufferDropsOversized: buffers that grew past
+// maxPooledCaptureBytes are NOT returned to the free-list — the pool must not
+// pin megabyte capacities (8 × 2MB responses state captures would otherwise
+// stay resident forever, and every later small request would reuse them).
+func TestPutCaptureBufferDropsOversized(t *testing.T) {
+	captureBuffers.mu.Lock()
+	captureBuffers.buffers = nil
+	captureBuffers.mu.Unlock()
+
+	big := new(bytes.Buffer)
+	big.Write(make([]byte, maxPooledCaptureBytes+1))
+	putCaptureBuffer(big)
+	captureBuffers.mu.Lock()
+	pooled := len(captureBuffers.buffers)
+	captureBuffers.buffers = nil
+	captureBuffers.mu.Unlock()
+	if pooled != 0 {
+		t.Fatalf("oversized buffer pooled (len=%d), want dropped", pooled)
+	}
+
+	small := new(bytes.Buffer)
+	small.Write(make([]byte, 64))
+	putCaptureBuffer(small)
+	captureBuffers.mu.Lock()
+	pooled = len(captureBuffers.buffers)
+	captureBuffers.buffers = nil
+	captureBuffers.mu.Unlock()
+	if pooled != 1 {
+		t.Fatalf("small buffer not pooled (len=%d), want 1", pooled)
+	}
+}

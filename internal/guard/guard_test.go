@@ -136,3 +136,44 @@ func TestRedactKeepsJSONShape(t *testing.T) {
 		t.Errorf("Redact = %q, want %q", out, want)
 	}
 }
+
+// TestScanDetectsKeyBuriedAfterLargeCleanPrefix: the literal prefilter must
+// not weaken detection for secrets placed deep inside a large body — the
+// realistic accident shape (key pasted into a long prompt tail).
+func TestScanDetectsKeyBuriedAfterLargeCleanPrefix(t *testing.T) {
+	clean := strings.Repeat("the quick brown fox jumps over the lazy dog. ", 1536) // ~64KB
+	for _, tc := range positiveCases {
+		body := []byte(clean + tc.body)
+		got := Scan(body)
+		if len(got) != 1 || got[0] != tc.name {
+			t.Errorf("%s buried after 64KB clean prefix: Scan = %v", tc.name, got)
+		}
+		if redacted := string(Redact(body)); strings.Contains(redacted, strings.TrimSpace(tc.body)) ||
+			len(redacted) >= len(body) {
+			t.Errorf("%s buried after 64KB clean prefix: Redact did not replace the secret", tc.name)
+		}
+	}
+}
+
+func BenchmarkScanCleanBody64K(b *testing.B) {
+	body := []byte(strings.Repeat("the quick brown fox jumps over the lazy dog. ", 1536))
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if names := Scan(body); len(names) != 0 {
+			b.Fatalf("clean body reported %v", names)
+		}
+	}
+}
+
+func BenchmarkScanBody64KWithKey(b *testing.B) {
+	body := []byte(strings.Repeat("the quick brown fox jumps over the lazy dog. ", 1536) +
+		`"api_key": "sk-` + strings.Repeat("aB3", 16) + `"`)
+	b.SetBytes(int64(len(body)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if names := Scan(body); len(names) != 1 || names[0] != "openai_api_key" {
+			b.Fatalf("key body reported %v", names)
+		}
+	}
+}

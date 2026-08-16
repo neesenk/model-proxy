@@ -15,8 +15,14 @@ import (
 type Callback func(captured []byte, total int64, truncated bool)
 
 // maxPooledCaptureBuffers bounds how many capture buffers the free-list
-// retains; larger captures fall back to per-request allocation.
-const maxPooledCaptureBuffers = 8
+// retains, and maxPooledCaptureBytes bounds the CAPACITY of a pooled buffer:
+// a capture larger than the cap is dropped on return instead of pinned —
+// without it, a single max_body_bytes-sized response would leave the pool
+// holding (and every later small request reusing) megabyte buffers forever.
+const (
+	maxPooledCaptureBuffers = 8
+	maxPooledCaptureBytes   = 64 << 10
+)
 
 // captureBuffers is a small bounded free-list of capture buffers. Unlike
 // sync.Pool it survives GC cycles: large captures generate enough garbage
@@ -40,6 +46,10 @@ func getCaptureBuffer() *bytes.Buffer {
 }
 
 func putCaptureBuffer(buffer *bytes.Buffer) {
+	if buffer.Cap() > maxPooledCaptureBytes {
+		buffer.Reset() // drop the oversized capacity; GC reclaims it
+		return
+	}
 	buffer.Reset()
 	captureBuffers.mu.Lock()
 	defer captureBuffers.mu.Unlock()
