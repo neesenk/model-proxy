@@ -35,6 +35,14 @@ scripts/build.sh --strip all
 
 项目使用 pure-Go `modernc.org/sqlite`，跨平台构建为 `CGO_ENABLED=0`。涉及 build tags、平台探测、daemon 或文件路径时至少补 Linux/Windows amd64 build。
 
+## Benchmark 约束
+
+`go test ./...` 不执行 benchmark，坏掉的基准（fixture 失效、断言 Fatalf、测到错误路径）会长期静默失真——已有教训：四个转发基准曾因 nil model_map 一直在测"无路由错误路径"。规则：
+
+- 改动涉及基准覆盖的性能敏感路径（转发、转换、quota/调度、request log）时，追加 smoke：`go test ./... -run='^$' -bench=. -benchtime=1x`，必须全绿。
+- 转发类基准若经 HTTP round-trip，必须断言响应 status==200（否则可能在测错误路径）；断言语义必须可观察（如提取出的 model 值），不能只跑循环。
+- 基准 fixture 必须代表真实流量形态（如 LLM 客户端的 model 是首个 key）；偏离现实的 fixture 会逼出错误的优化方向。
+
 ## 断言要求
 
 ### Auth headers
@@ -208,6 +216,7 @@ forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通�
 | CLI 显示 | `CLI.md` 对应 stdout/stderr/exit code 测试 |
 | Provider parser | 成功、错误、空 body、认证隔离 |
 | SSE/转换 | client cancel、read error、trailing usage、逐字节输出 |
+| 性能敏感路径 | `go test ./... -run='^$' -bench=. -benchtime=1x` smoke（见「Benchmark 约束」） |
 
 ## 测试数据安全
 

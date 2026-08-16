@@ -22,6 +22,10 @@ yarn-error.log*
 /model-proxy-linux-*
 /model-proxy.exe
 
+# Test binaries dropped in the working dir by `go test -cpuprofile/-memprofile`
+# (named after the profiled package, e.g. app.test).
+*.test
+
 # Coverage artifacts from scripts/cover.sh
 /cov.out
 /coverage.html
