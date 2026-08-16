@@ -47,6 +47,13 @@ func (m *Manager) ResetHealth(name string, parentOf map[string]string) (cleared 
 			cleared = append(cleared, providerName)
 		}
 	}
+	// unfreeze is the operator saying "retry now": the quality EWMA must not
+	// keep demoting a provider the operator just cleared.
+	for providerName := range m.quality {
+		if match(providerName) {
+			delete(m.quality, providerName)
+		}
+	}
 	for key := range m.modelLocks {
 		if match(key.Provider) {
 			delete(m.modelLocks, key)
@@ -116,6 +123,7 @@ func (m *Manager) RecordSuccess(name, model string, generation uint64) {
 		state.halfOpenInFlight = false
 	}
 	delete(m.modelLocks, ModelKey{Provider: name, Model: model})
+	m.recordQualityLocked(name, 0, time.Now())
 }
 
 func (m *Manager) RecordFailure(name string, threshold int, cooldown time.Duration, generation uint64) {
@@ -136,6 +144,7 @@ func (m *Manager) RecordFailure(name string, threshold int, cooldown time.Durati
 	if state.consecutiveFailures >= threshold {
 		state.circuitOpenUntil = now.Add(cooldown)
 	}
+	m.recordQualityLocked(name, 1, now)
 }
 
 func (m *Manager) modelLockedLocked(providerName, model string, now time.Time) bool {

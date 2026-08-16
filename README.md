@@ -415,6 +415,7 @@ scheduling:
 - **三层 tier**：`plan`（按 surplus 排）< `unknown`（按 priority 排）< `pay-as-you-go`（严格兜底，仅当所有 plan provider 都不可用）。设 `billing: pay-as-you-go` 即兜底（如 DeepSeek）。排序 `(tier, priority asc, surplus desc)` —— **priority 压过 surplus，surplus 只在同 priority 间决定**。
 - **peak 只烧短窗口**：`peak_hours` 的 multiplier 只折算 provider 的短 rate-cap 窗口（5h 等）；没有短窗口的 provider（codex/aqp、未轮询的）高峰不打折。`peak_hours` 支持多段、每段独立 multiplier；multiplier=1 关闭。
 - **粘性切换**：路由停在一个 provider 至少 `sticky_dwell`（保 prompt cache）；到期后仅当另一 provider 在 **tier / priority / surplus 边际（`quota_switch_margin`，默认 15 pts）** 任一更优时才换 —— 既能短暂抖动后回首选，也能在他人明显领先时切换。
+- **质量打分**：每个 provider 的错误率与 TTFT 各维护一条 2m 半衰期 EWMA，折算成罚分从 surplus 中扣除（`quality_error_weight` 默认 100、`quality_ttft_weight` 默认 20，0 关闭）——持续报错/变慢的账号自动下沉，粘性账号恶化时经同一个 switch margin 逃逸；配额快照显示 ultimate 窗口已耗尽的 plan target 在粘性判定之前就被跳过（不再白挨一轮确定性 429）。
 
 ```yaml
 providers:

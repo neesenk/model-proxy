@@ -22,6 +22,7 @@ type Manager struct {
 	paramBlock map[ModelKey]map[string]bool
 	spread     map[string]uint64
 	quotas     map[string]*provider.QuotaSnapshot
+	quality    map[string]*providerQuality
 }
 
 func NewManager(generation uint64) *Manager {
@@ -52,6 +53,9 @@ func (m *Manager) ensureLocked() {
 	if m.quotas == nil {
 		m.quotas = make(map[string]*provider.QuotaSnapshot)
 	}
+	if m.quality == nil {
+		m.quality = make(map[string]*providerQuality)
+	}
 }
 
 func (m *Manager) generationMatchesLocked(generation uint64) bool {
@@ -77,6 +81,7 @@ func (m *Manager) ReplaceGeneration(generation uint64) {
 	m.paramBlock = make(map[ModelKey]map[string]bool)
 	m.spread = make(map[string]uint64)
 	m.quotas = make(map[string]*provider.QuotaSnapshot)
+	m.quality = make(map[string]*providerQuality)
 }
 
 // GenerationArg keeps compatibility with callers that omit a generation while

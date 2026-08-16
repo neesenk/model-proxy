@@ -147,6 +147,14 @@ func (effects targetExecutionEffects) CaptureUsage(
 
 func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 	target := attempt.Target
+	if attempt.Response.StatusCode < 400 {
+		// Successful commit: fold TTFT into the scheduling quality EWMA.
+		// (Error EWMA already moved via RecordSuccess/RecordFailure upstream.)
+		effects.proxy.recordAttemptQuality(
+			target.Provider,
+			time.Duration(attempt.TTFTMilliseconds)*time.Millisecond,
+		)
+	}
 	if effects.proxy.metrics != nil {
 		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvRequests)
 		effects.proxy.metrics.AddLatency(

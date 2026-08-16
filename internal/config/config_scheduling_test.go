@@ -40,6 +40,25 @@ func TestScheduling_DefaultsAndInvalid(t *testing.T) {
 	if s.SwitchMargin() != 0.15 {
 		t.Errorf("default switchMargin=%v want 0.15", s.SwitchMargin())
 	}
+	if s.QualityErrorWeightValue() != 1.0 {
+		t.Errorf("default qualityErrorWeight=%v want 1.0", s.QualityErrorWeightValue())
+	}
+	if s.QualityTTFTWeightValue() != 0.2 {
+		t.Errorf("default qualityTTFTWeight=%v want 0.2", s.QualityTTFTWeightValue())
+	}
+
+	// Explicit 0 disables the signal (pointer semantics); explicit values win.
+	zero, forty, five := 0, 40, 5
+	custom := Scheduling{QualityErrorWeight: &forty, QualityTTFTWeight: &five}
+	if custom.QualityErrorWeightValue() != 0.4 || custom.QualityTTFTWeightValue() != 0.05 {
+		t.Errorf("explicit weights = %v/%v, want 0.4/0.05",
+			custom.QualityErrorWeightValue(), custom.QualityTTFTWeightValue())
+	}
+	disabled := Scheduling{QualityErrorWeight: &zero, QualityTTFTWeight: &zero}
+	if disabled.QualityErrorWeightValue() != 0 || disabled.QualityTTFTWeightValue() != 0 {
+		t.Errorf("explicit 0 must disable: %v/%v",
+			disabled.QualityErrorWeightValue(), disabled.QualityTTFTWeightValue())
+	}
 
 	// Invalid duration strings fall back to defaults.
 	bad := Scheduling{

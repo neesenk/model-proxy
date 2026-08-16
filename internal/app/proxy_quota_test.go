@@ -180,6 +180,40 @@ func TestScheduleAdapter_AppliesPeakMultiplier(t *testing.T) {
 	}
 }
 
+// TestScheduleAdapter_AppliesQualityWeights verifies the root adapter projects
+// Scheduling quality weights into the runtime decision: with the default
+// weights a below-circuit-threshold failure burst sinks the provider; with the
+// error weight explicitly disabled the same failures leave the order intact.
+func TestScheduleAdapter_AppliesQualityWeights(t *testing.T) {
+	build := func(disableWeight bool) *Proxy {
+		p := newQuotaProxy(t,
+			map[string]Provider{"flaky": {}, "steady": {}},
+			map[string][]RouteTarget{"m": {{Provider: "flaky"}, {Provider: "steady"}}})
+		if disableWeight {
+			zero := 0
+			p.cfg.Scheduling.QualityErrorWeight = &zero
+		}
+		now := time.Now()
+		quota := &provider.QuotaSnapshot{Billing: provider.BillingPlan, RemainingPct: 0.5, AsOf: now}
+		p.quota.SetSnapshot("flaky", quota)
+		p.quota.SetSnapshot("steady", quota)
+		// Two failures: below the circuit threshold (3), so the provider stays
+		// available — only the quality penalty can reorder.
+		p.runtimeState.RecordFailure("flaky", 3, time.Minute, 0)
+		p.runtimeState.RecordFailure("flaky", 3, time.Minute, 0)
+		return p
+	}
+
+	// Two fresh proxies: schedule() commits sticky to the first winner, which
+	// would otherwise carry into the second phase.
+	if got := firstProvider(build(false), "m"); got != "steady" {
+		t.Errorf("default weights: first=%q, want steady (flaky penalized)", got)
+	}
+	if got := firstProvider(build(true), "m"); got != "flaky" {
+		t.Errorf("disabled weight: first=%q, want flaky (config order kept)", got)
+	}
+}
+
 func TestScheduleAdapter_ProjectsParentBillingAndMapsTargets(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	targets := []RouteTarget{

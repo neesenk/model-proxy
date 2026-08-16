@@ -221,6 +221,8 @@ routes:
 #   sticky_dwell: 10m # (default 10m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m # (default 5m) background quota poll cadence
 #   quota_switch_margin: 15 # (default 15) switch provider if another's effective remaining beats current by >= this many pct points
+#   quality_error_weight: 100 # (default 100 = 1.0) penalty per unit error-rate EWMA (2m half-life), subtracted from surplus; 0 disables
+#   quality_ttft_weight: 20 # (default 20 = 0.2) penalty per unit normalized TTFT EWMA (10s reference); 0 disables
 takeover:
   # provider_id is the single identifier used by takeover for every agent that
   # takes one (opencode, pi, codex, future agents). claude doesn't use it.

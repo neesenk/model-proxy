@@ -7,15 +7,33 @@ import (
 	"model-proxy/internal/provider"
 )
 
+// penalty combines the decayed quality signals into a surplus-units penalty.
+// Zero weights (config-disabled or no data) mean zero penalty, reproducing the
+// pre-quality ordering exactly. Penalties below 1e-6 snap to zero: EWMA decay
+// converges asymptotically, and a residual 1e-10 must not flip an otherwise
+// exact tie.
+func (q QualityStatus) penalty(errWeight, ttftWeight float64) float64 {
+	ttftNorm := float64(q.TTFTMilliseconds) / float64(ttftReference.Milliseconds())
+	if ttftNorm > 1 {
+		ttftNorm = 1
+	}
+	p := errWeight*q.ErrorRate + ttftWeight*ttftNorm
+	if p < 1e-6 {
+		return 0
+	}
+	return p
+}
+
 type scheduleCandidate struct {
-	target  Target
-	index   int
-	tier    int
-	surplus float64
+	target Target
+	index  int
+	tier   int
+	score  float64 // quota surplus − quality penalty: the actual ordering key
 }
 
 type scheduleState struct {
 	quotas          map[string]*provider.QuotaSnapshot
+	quality         map[string]QualityStatus
 	sticky          map[string]Sticky
 	pins            map[string]Pin
 	spread          map[string]uint64
@@ -74,18 +92,38 @@ func (m *Manager) DecideOrder(input ScheduleInput) ScheduleResult {
 	m.ensureLocked()
 
 	state := scheduleState{
-		quotas: m.quotas,
-		sticky: m.sticky,
-		pins:   m.pins,
-		spread: m.spread,
+		quotas:  m.quotas,
+		quality: m.qualityStatusLocked(input.Now),
+		sticky:  m.sticky,
+		pins:    m.pins,
+		spread:  m.spread,
 		targetAvailable: func(target Target, now time.Time) bool {
 			health := m.health[target.Provider]
 			return (health == nil || health.available(now)) &&
-				!m.modelLockedLocked(target.Provider, target.Model, now)
+				!m.modelLockedLocked(target.Provider, target.Model, now) &&
+				!quotaExhausted(m.quotas[target.Provider], now, input.QuotaMaxAge)
 		},
 	}
 	commit := input.Commit && m.generationMatchesLocked(input.Generation)
 	return decideOrder(input, state, commit)
+}
+
+// qualityStatusLocked projects the EWMA state to detached statuses decayed to
+// `now` (a provider that stopped failing must not carry a stale penalty).
+// Caller holds m.mu.
+func (m *Manager) qualityStatusLocked(now time.Time) map[string]QualityStatus {
+	if len(m.quality) == 0 {
+		return nil
+	}
+	out := make(map[string]QualityStatus, len(m.quality))
+	for name, q := range m.quality {
+		errRate, ttftNorm := q.decayed(now)
+		out[name] = QualityStatus{
+			ErrorRate:        errRate,
+			TTFTMilliseconds: int64(ttftNorm * float64(ttftReference.Milliseconds())),
+		}
+	}
+	return out
 }
 
 func decideOrder(input ScheduleInput, state scheduleState, commit bool) ScheduleResult {
@@ -113,11 +151,15 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 			input.Now,
 			input.QuotaMaxAge,
 		)
+		facts[i].QualityPenalty = state.quality[target.Provider].penalty(
+			input.QualityErrWeight,
+			input.QualityTTFTWeight,
+		)
 		candidates = append(candidates, scheduleCandidate{
-			target:  target,
-			index:   i,
-			tier:    schedulingTier(facts[i].Billing),
-			surplus: facts[i].Surplus,
+			target: target,
+			index:  i,
+			tier:   schedulingTier(facts[i].Billing),
+			score:  facts[i].Surplus - facts[i].QualityPenalty,
 		})
 	}
 
@@ -154,7 +196,7 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 		if left.target.Priority != right.target.Priority {
 			return left.target.Priority < right.target.Priority
 		}
-		return left.surplus > right.surplus
+		return left.score > right.score
 	})
 
 	current := state.sticky[stickyKey]
@@ -180,7 +222,10 @@ func decideOrder(input ScheduleInput, state scheduleState, commit bool) Schedule
 				keepSticky = false
 			case best.target.Priority < currentTarget.target.Priority:
 				keepSticky = false
-			case best.surplus-currentTarget.surplus >= input.SwitchMargin:
+			case best.score-currentTarget.score >= input.SwitchMargin:
+				// The quality penalty folds into the score, so a degrading
+				// sticky account escapes through the SAME margin gate — no
+				// separate escape path to keep in sync.
 				keepSticky = false
 			default:
 				keepSticky = true
@@ -267,6 +312,7 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 		Sticky:     make(map[string]Sticky, len(m.sticky)),
 		Pins:       make(map[string]Pin, len(m.pins)),
 		Quotas:     cloneQuotas(m.quotas),
+		Quality:    m.qualityStatusLocked(now),
 		capturedAt: now,
 		spread:     make(map[string]uint64, len(m.spread)),
 	}
@@ -322,6 +368,26 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 	return snapshot
 }
 
+// quotaExhausted reports whether a FRESH plan snapshot's ultimate budget
+// window is measured to exactly zero. Such a target is skipped BEFORE session
+// sticky is honored: sticking to a known-exhausted account just eats a
+// guaranteed 429 before failing over. The check reads the ultimate WINDOW
+// (never the snapshot's top-level RemainingPct): a plan snapshot without a
+// measured ultimate window — RemainingPct unset/-1 — proves nothing and must
+// fail open to the reactive 429 cooldown, as must a stale or errored
+// snapshot. PayG/unknown billing has no window to exhaust.
+func quotaExhausted(snapshot *provider.QuotaSnapshot, now time.Time, maxAge time.Duration) bool {
+	if snapshot == nil || snapshot.Billing != provider.BillingPlan || snapshot.Err != "" {
+		return false
+	}
+	for i := range snapshot.Windows {
+		if window := &snapshot.Windows[i]; window.Ultimate && window.RemainingPct == 0 {
+			return now.Sub(snapshot.AsOf) <= maxAge
+		}
+	}
+	return false
+}
+
 // PreviewOrder derives a read-only schedule from this exact detached
 // dashboard snapshot. It never re-enters Manager, so health/quota/pin/sticky
 // and the displayed order cannot come from different mutations or generations.
@@ -332,10 +398,11 @@ func (snapshot DashboardSnapshot) PreviewOrder(input ScheduleInput) ScheduleResu
 		input.Now = snapshot.capturedAt
 	}
 	state := scheduleState{
-		quotas: snapshot.Quotas,
-		sticky: snapshot.Sticky,
-		pins:   snapshot.Pins,
-		spread: snapshot.spread,
+		quotas:  snapshot.Quotas,
+		quality: snapshot.Quality,
+		sticky:  snapshot.Sticky,
+		pins:    snapshot.Pins,
+		spread:  snapshot.spread,
 		targetAvailable: func(target Target, now time.Time) bool {
 			if status, ok := snapshot.Providers[target.Provider]; ok && !status.Available {
 				return false
@@ -345,7 +412,7 @@ func (snapshot DashboardSnapshot) PreviewOrder(input ScheduleInput) ScheduleResu
 					return false
 				}
 			}
-			return true
+			return !quotaExhausted(snapshot.Quotas[target.Provider], now, input.QuotaMaxAge)
 		},
 	}
 	return decideOrder(input, state, false)

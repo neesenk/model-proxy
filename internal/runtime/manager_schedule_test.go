@@ -123,6 +123,56 @@ func TestDecideOrderStickyDwellAndSwitchMargin(t *testing.T) {
 	}
 }
 
+func TestDecideOrderSkipsQuotaExhaustedStickyAccount(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	m := NewManager(7)
+	targets := []Target{
+		{Provider: "fresh", Priority: 1},
+		{Provider: "exhausted", Priority: 1},
+	}
+	setScheduleQuota(t, m, "fresh", scheduleQuota(provider.BillingPlan, .5, now), 7)
+	setScheduleQuota(t, m, "exhausted", scheduleQuota(provider.BillingPlan, 0, now), 7)
+	m.SetSticky("session", Sticky{Provider: "exhausted", Since: now}, 7)
+	input := ScheduleInput{
+		Exposed: "route", SessionKey: "session", Targets: targets,
+		RouteKeys: map[string]bool{"route": true},
+		Dwell:     time.Hour, SwitchMargin: .15,
+		Now: now, QuotaMaxAge: time.Hour, Generation: 7,
+	}
+
+	// Sticking to a KNOWN-exhausted plan account just eats a guaranteed 429:
+	// sticky is skipped and the scored order takes over.
+	result := m.DecideOrder(input)
+	if !reflect.DeepEqual(result.Order, []int{0}) || result.StickyProvider != "fresh" {
+		t.Fatalf("exhausted sticky must be skipped: %+v", result)
+	}
+
+	// The dashboard preview must mirror the real decision exactly.
+	preview := m.Dashboard(now).PreviewOrder(input)
+	if !reflect.DeepEqual(preview.Order, []int{0}) {
+		t.Fatalf("preview did not mirror exhaustion skip: %+v", preview)
+	}
+
+	// A STALE exhausted snapshot proves nothing — fail open to the reactive
+	// 429 cooldown rather than dropping the sticky account on old data.
+	stale := scheduleQuota(provider.BillingPlan, 0, now)
+	stale.AsOf = now.Add(-2 * time.Hour)
+	setScheduleQuota(t, m, "exhausted", stale, 7)
+	result = m.DecideOrder(input)
+	if !reflect.DeepEqual(result.Order, []int{1, 0}) || result.StickyProvider != "exhausted" {
+		t.Fatalf("stale exhausted snapshot must fail open: %+v", result)
+	}
+
+	// PayG has no window to exhaust; RemainingPct==0 must never exclude it.
+	setScheduleQuota(t, m, "exhausted", scheduleQuota(provider.BillingPayG, 0, now), 7)
+	result = m.DecideOrder(input)
+	if result.Order[0] != 1 || result.StickyProvider != "exhausted" {
+		t.Fatalf("payg zero snapshot must not exclude: %+v", result)
+	}
+}
+
 func TestDecideOrderUsesAtomicQuotaHealthPinAndStickyState(t *testing.T) {
 	t.Parallel()
 

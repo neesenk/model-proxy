@@ -178,9 +178,30 @@ spread。请求路径不深拷贝 quota 的 Notes/Windows/Details，也不为 pr
 config generation 时取得的这一个 DashboardSnapshot 计算，不得再次进入 Manager；
 因此同一响应中的 health/quota/pin/sticky/order 属于同一时刻、同一 generation。
 
+## Quality 打分（error rate + TTFT）
+
+排序键实际是 `score = surplus − qualityPenalty`：
+
+- 每个 provider 维护两个 EWMA（半衰期 2m，代码常量）：错误率（RecordFailure=1 /
+  RecordSuccess=0）与归一化 TTFT（Committed 成功提交时采样，10s 参考值封顶）。
+  模型级失败（RecordModelFailure）与 429 冷却不进错误率——它们各有独立机制，
+  重复计入会双重惩罚。
+- 决策时信号先衰减到 `now` 再计罚分：停止失败一段时间的 provider 不会背陈旧
+  罚分；罚分 <1e-6 吸附为 0，渐近衰减的残余不得翻转原本精确打平的顺序。
+- 权重来自 `scheduling.quality_error_weight`（默认 100=1.0）/
+  `quality_ttft_weight`（默认 20=0.2），指针语义：显式 0 关闭该信号，未设置用
+  默认。两个权重都为 0 时排序与引入质量打分前逐字节一致。
+- 罚分同时进入 sticky 切换的 margin 比较——粘性账号质量恶化经同一个
+  `quota_switch_margin` 闸门逃逸，无独立逃逸路径。
+- quality 状态不持久化（重启后快速重建）；`unfreeze`/ResetHealth 一并清除——
+  操作员说"立即重试"时不得残留降权。Dashboard 携带 Quality，PreviewOrder parity
+  覆盖。
+
 ## Sticky
 
 route sticky 记录 current provider 和 since。在 `sticky_dwell` 内优先当前 provider；驻留期结束后，只有 tier、priority 或 surplus margin 足够更优才切换。
+
+availability 过滤（发生在 sticky 判定之前）除了熔断/限频/模型锁，还排除**配额已知耗尽**的 plan target：新鲜快照（`quota_poll_interval` 的 maxAge 内、无错误）的 ultimate RemainingPct==0 视为耗尽——粘住已知耗尽的账号只会白挨一轮确定性 429。快照过期或出错时 fail-open，退回反应式 429 冷却兜底；PayG/unknown 无窗口可耗尽，永不被此规则排除。PreviewOrder 走同一判定，Web 预览与真实调度一致。
 
 session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 route key。session-keyed sticky 不落盘，route-keyed sticky 可落盘。session sticky 的 dwell 自**最近一次使用**起算（活跃会话每次请求刷新 since），因此连续活跃的会话会一直停留在当前 provider，直到闲置超过 `sticky_dwell` 或其失败熔断——"会话中不得仅因 quota surplus 边际变化迁移账号"（见 provider-pools.md）。
 

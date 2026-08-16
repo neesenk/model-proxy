@@ -119,6 +119,13 @@ type ModelLockStatus struct {
 	LockedUntil time.Time
 }
 
+// QualityStatus is the detached per-provider quality EWMA state, decayed to
+// the snapshot's capture time.
+type QualityStatus struct {
+	ErrorRate        float64 // 0..1
+	TTFTMilliseconds int64
+}
+
 // DashboardSnapshot is an atomic, detached view for status presentation.
 type DashboardSnapshot struct {
 	Generation uint64
@@ -127,6 +134,7 @@ type DashboardSnapshot struct {
 	Sticky     map[string]Sticky
 	Pins       map[string]Pin
 	Quotas     map[string]*provider.QuotaSnapshot
+	Quality    map[string]QualityStatus
 
 	capturedAt time.Time
 	spread     map[string]uint64
@@ -154,8 +162,13 @@ type ScheduleInput struct {
 	SwitchMargin float64
 	Now          time.Time
 	QuotaMaxAge  time.Duration
-	Commit       bool
-	Generation   uint64
+	// Quality weights (surplus-units penalty per unit of decayed EWMA). Zero
+	// weights mean "no data / disabled" and reproduce the pre-quality ordering
+	// exactly.
+	QualityErrWeight  float64
+	QualityTTFTWeight float64
+	Commit            bool
+	Generation        uint64
 }
 
 // ScheduleFacts is the quota projection used for one input target. Facts stays
@@ -164,6 +177,9 @@ type ScheduleInput struct {
 type ScheduleFacts struct {
 	Billing provider.BillingClass
 	Surplus float64
+	// QualityPenalty is subtracted from Surplus for ordering (and the sticky
+	// switch-margin comparison); Surplus itself stays the pure quota pace score.
+	QualityPenalty float64
 }
 
 type ScheduleResult struct {

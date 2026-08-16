@@ -291,6 +291,13 @@ type Scheduling struct {
 	StickyDwell       string `yaml:"sticky_dwell"`        // min time on the chosen provider before re-evaluating (default 10m)
 	QuotaPollInterval string `yaml:"quota_poll_interval"` // background poll cadence (default 5m)
 	QuotaSwitchMargin int    `yaml:"quota_switch_margin"` // switch if another plan provider's effective remaining beats current by ≥ this many pct points (default 15)
+	// Quality scoring: per-provider error-rate / TTFT EWMAs (2m half-life,
+	// code constant) are subtracted from the quota surplus as an ordering
+	// penalty — degrading providers sink and sticky accounts escape through the
+	// same switch-margin gate. Percent-style weights; pointers so an explicit
+	// 0 DISABLES the signal while unset keeps the default.
+	QualityErrorWeight *int `yaml:"quality_error_weight"` // penalty per unit error-rate EWMA (default 100 = 1.0)
+	QualityTTFTWeight  *int `yaml:"quality_ttft_weight"`  // penalty per unit normalized TTFT EWMA, 10s reference (default 20 = 0.2)
 }
 
 func (s Scheduling) Threshold() int {
@@ -352,6 +359,21 @@ func (s Scheduling) SwitchMargin() float64 {
 		return float64(s.QuotaSwitchMargin) / 100.0
 	}
 	return 0.15
+}
+
+// QualityErrorWeightValue / QualityTTFTWeightValue return the surplus-penalty
+// weights: nil (unset) keeps the default, an explicit 0 disables the signal.
+func (s Scheduling) QualityErrorWeightValue() float64 {
+	if s.QualityErrorWeight == nil {
+		return 1.0
+	}
+	return float64(*s.QualityErrorWeight) / 100.0
+}
+func (s Scheduling) QualityTTFTWeightValue() float64 {
+	if s.QualityTTFTWeight == nil {
+		return 0.2
+	}
+	return float64(*s.QualityTTFTWeight) / 100.0
 }
 
 type Provider struct {

@@ -158,16 +158,18 @@ func (p *Proxy) decideOrder(cfg *Config, parentOf map[string]string, exposed, se
 		}
 	}
 	result := p.runtimeState.DecideOrder(runtimestate.ScheduleInput{
-		Exposed:      exposed,
-		SessionKey:   sessionKey,
-		Targets:      runtimeTargets,
-		RouteKeys:    routeKeys,
-		Dwell:        cfg.Scheduling.Dwell(),
-		SwitchMargin: cfg.Scheduling.SwitchMargin(),
-		Now:          now,
-		QuotaMaxAge:  3 * cfg.Scheduling.PollInterval(),
-		Commit:       commit,
-		Generation:   runtimestate.GenerationArg(generations),
+		Exposed:           exposed,
+		SessionKey:        sessionKey,
+		Targets:           runtimeTargets,
+		RouteKeys:         routeKeys,
+		Dwell:             cfg.Scheduling.Dwell(),
+		SwitchMargin:      cfg.Scheduling.SwitchMargin(),
+		Now:               now,
+		QuotaMaxAge:       3 * cfg.Scheduling.PollInterval(),
+		QualityErrWeight:  cfg.Scheduling.QualityErrorWeightValue(),
+		QualityTTFTWeight: cfg.Scheduling.QualityTTFTWeightValue(),
+		Commit:            commit,
+		Generation:        runtimestate.GenerationArg(generations),
 	})
 	ordered = make([]RouteTarget, 0, len(result.Order))
 	for _, index := range result.Order {

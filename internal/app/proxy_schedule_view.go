@@ -64,8 +64,11 @@ func scheduleStatusFromSnapshot(
 		Priority   int     `json:"priority"`
 		Tier       string  `json:"tier"`
 		Surplus    float64 `json:"surplus"`
-		Available  bool    `json:"available"`
-		Peak       bool    `json:"peak"`
+		// QualityPenalty is subtracted from Surplus for ordering — surfacing it
+		// explains WHY a quota-rich but degrading provider sank in the order.
+		QualityPenalty float64 `json:"quality_penalty"`
+		Available      bool    `json:"available"`
+		Peak           bool    `json:"peak"`
 	}
 	type poolInfo struct {
 		Parent    string `json:"parent"`
@@ -101,14 +104,16 @@ func scheduleStatusFromSnapshot(
 			}
 		}
 		decision := RuntimeSnapshot.PreviewOrder(runtimestate.ScheduleInput{
-			Exposed:      exposed,
-			Targets:      runtimeTargets,
-			RouteKeys:    routeKeys,
-			Dwell:        cfg.Scheduling.Dwell(),
-			SwitchMargin: cfg.Scheduling.SwitchMargin(),
-			Now:          now,
-			QuotaMaxAge:  3 * cfg.Scheduling.PollInterval(),
-			Generation:   RuntimeSnapshot.Generation,
+			Exposed:           exposed,
+			Targets:           runtimeTargets,
+			RouteKeys:         routeKeys,
+			Dwell:             cfg.Scheduling.Dwell(),
+			SwitchMargin:      cfg.Scheduling.SwitchMargin(),
+			Now:               now,
+			QuotaMaxAge:       3 * cfg.Scheduling.PollInterval(),
+			QualityErrWeight:  cfg.Scheduling.QualityErrorWeightValue(),
+			QualityTTFTWeight: cfg.Scheduling.QualityTTFTWeightValue(),
+			Generation:        RuntimeSnapshot.Generation,
 		})
 		ordered := make([]RouteTarget, 0, len(decision.Order))
 		for _, index := range decision.Order {
@@ -138,13 +143,14 @@ func scheduleStatusFromSnapshot(
 				parentSeen[parent] = true
 			}
 			ri.Ordered = append(ri.Ordered, provInfo{
-				Provider:   t.Provider,
-				PoolParent: parent,
-				Priority:   t.Priority,
-				Tier:       billingClassName(decision.Facts[targetIndex].Billing),
-				Surplus:    decision.Facts[targetIndex].Surplus,
-				Available:  avail(t.Provider),
-				Peak:       pconf.PeakMultiplier(now) > 1,
+				Provider:       t.Provider,
+				PoolParent:     parent,
+				Priority:       t.Priority,
+				Tier:           billingClassName(decision.Facts[targetIndex].Billing),
+				Surplus:        decision.Facts[targetIndex].Surplus,
+				QualityPenalty: decision.Facts[targetIndex].QualityPenalty,
+				Available:      avail(t.Provider),
+				Peak:           pconf.PeakMultiplier(now) > 1,
 			})
 		}
 		if len(parentSeen) > 0 {

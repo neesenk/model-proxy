@@ -29,6 +29,17 @@ func (p *Proxy) recordSuccess(name, model string, generations ...uint64) {
 	)
 }
 
+// recordAttemptQuality feeds a committed attempt's TTFT into the provider's
+// quality EWMA (scheduling penalty signal). Only called for successful
+// commits — terminal errors flow through recordFailure instead.
+func (p *Proxy) recordAttemptQuality(name string, ttft time.Duration, generations ...uint64) {
+	p.runtimeState.RecordAttemptQuality(
+		name,
+		ttft,
+		runtimestate.GenerationArg(generations),
+	)
+}
+
 // recordFailure increments a provider's consecutive failures and opens the
 // circuit (for cooldown) once the threshold is reached. Clears any half-open slot.
 func (p *Proxy) recordFailure(name string, sched Scheduling, generations ...uint64) {

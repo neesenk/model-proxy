@@ -171,6 +171,8 @@ routes:
 #   sticky_dwell: 10m           # (default 10m) min time on the chosen provider before re-evaluating
 #   quota_poll_interval: 5m     # (default 5m)  background quota poll cadence
 #   quota_switch_margin: 15     # (default 15)  switch provider if another's effective remaining beats current by >= this many pct points
+#   quality_error_weight: 100   # (default 100) penalty per unit error-rate EWMA (2m half-life), subtracted from surplus; 0 disables
+#   quality_ttft_weight: 20     # (default 20)  penalty per unit normalized TTFT EWMA (10s reference); 0 disables
 
 takeover:
   # All takeover fields default to standard client config locations when unset
