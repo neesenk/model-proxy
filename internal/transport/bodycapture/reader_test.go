@@ -152,6 +152,36 @@ func TestReaderDistinctInstancesAreRaceClean(t *testing.T) {
 	}
 }
 
+func TestReaderReusedPoolBufferStartsEmpty(t *testing.T) {
+	// First reader fills and returns a buffer to the pool.
+	first := New(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("A"), 4096))), 8192, func([]byte, int64, bool) {})
+	if _, err := io.Copy(io.Discard, first); err != nil {
+		t.Fatalf("first Copy: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	// A second reader may receive the same buffer; its capture must contain
+	// exactly its own bytes, not residue from the first reader.
+	want := []byte("short body")
+	var captured []byte
+	second := New(io.NopCloser(bytes.NewReader(want)), 8192, func(got []byte, _ int64, truncated bool) {
+		captured = append([]byte(nil), got...)
+		if truncated {
+			t.Error("unexpected truncation")
+		}
+	})
+	if _, err := io.Copy(io.Discard, second); err != nil {
+		t.Fatalf("second Copy: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if !bytes.Equal(captured, want) {
+		t.Errorf("captured = %q, want %q", captured, want)
+	}
+}
+
 func BenchmarkReaderTee(b *testing.B) {
 	for _, size := range []struct {
 		name string

@@ -3,8 +3,10 @@ package requestlog
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Record is one line in the JSONL request log.
@@ -121,4 +123,107 @@ func responseHeaders(header http.Header) string {
 		return ""
 	}
 	return string(data)
+}
+
+// appendRecordLine appends the JSONL encoding of rec to dst. The output is
+// byte-identical to json.Marshal(rec) followed by a newline; encoding by hand
+// lets the single writer encode onto its retained line buffer instead of
+// paying json.Marshal's per-record buffer allocation and copy for large
+// bodies. Field order and omitempty rules mirror the Record struct tags.
+func appendRecordLine(dst []byte, rec *Record) []byte {
+	dst = append(dst, `{"ts":`...)
+	dst = appendJSONString(dst, rec.Ts)
+	if rec.Shadow {
+		dst = append(dst, `,"shadow":true`...)
+	}
+	dst = append(dst, `,"request_id":`...)
+	dst = appendJSONString(dst, rec.RequestID)
+	dst = append(dst, `,"session_id":`...)
+	dst = appendJSONString(dst, rec.SessionID)
+	dst = append(dst, `,"protocol":`...)
+	dst = appendJSONString(dst, rec.Protocol)
+	dst = append(dst, `,"method":`...)
+	dst = appendJSONString(dst, rec.Method)
+	dst = append(dst, `,"path":`...)
+	dst = appendJSONString(dst, rec.Path)
+	dst = append(dst, `,"called_model":`...)
+	dst = appendJSONString(dst, rec.CalledModel)
+	dst = append(dst, `,"upstream_model":`...)
+	dst = appendJSONString(dst, rec.UpstreamModel)
+	dst = append(dst, `,"exposed":`...)
+	dst = appendJSONString(dst, rec.Exposed)
+	dst = append(dst, `,"provider":`...)
+	dst = appendJSONString(dst, rec.Provider)
+	dst = append(dst, `,"attempt":`...)
+	dst = strconv.AppendInt(dst, int64(rec.Attempt), 10)
+	dst = append(dst, `,"status":`...)
+	dst = strconv.AppendInt(dst, int64(rec.Status), 10)
+	dst = append(dst, `,"latency_ms":`...)
+	dst = strconv.AppendInt(dst, rec.LatencyMs, 10)
+	dst = append(dst, `,"request_size":`...)
+	dst = strconv.AppendInt(dst, int64(rec.RequestSize), 10)
+	dst = append(dst, `,"response_size":`...)
+	dst = strconv.AppendInt(dst, rec.ResponseSize, 10)
+	dst = append(dst, `,"request_body":`...)
+	dst = appendJSONString(dst, rec.RequestBody)
+	dst = append(dst, `,"response_body":`...)
+	dst = appendJSONString(dst, rec.ResponseBody)
+	if rec.ResponseHeaders != "" {
+		dst = append(dst, `,"response_headers":`...)
+		dst = appendJSONString(dst, rec.ResponseHeaders)
+	}
+	return append(dst, '}', '\n')
+}
+
+const hexDigits = "0123456789abcdef"
+
+// appendJSONString appends s as a JSON string with the exact escaping rules
+// of encoding/json (HTML escaping on): control characters, quote, backslash,
+// '<', '>' and '&' are escaped, invalid UTF-8 becomes U+FFFD, and
+// U+2028/U+2029 are escaped.
+func appendJSONString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); {
+		if b := s[i]; b < utf8.RuneSelf {
+			if b >= 0x20 && b != '"' && b != '\\' && b != '<' && b != '>' && b != '&' {
+				i++
+				continue
+			}
+			dst = append(dst, s[start:i]...)
+			switch b {
+			case '"', '\\':
+				dst = append(dst, '\\', b)
+			case '\n':
+				dst = append(dst, '\\', 'n')
+			case '\r':
+				dst = append(dst, '\\', 'r')
+			case '\t':
+				dst = append(dst, '\\', 't')
+			default:
+				dst = append(dst, '\\', 'u', '0', '0', hexDigits[b>>4], hexDigits[b&0xF])
+			}
+			i++
+			start = i
+			continue
+		}
+		c, size := utf8.DecodeRuneInString(s[i:])
+		if c == utf8.RuneError && size == 1 {
+			dst = append(dst, s[start:i]...)
+			dst = append(dst, `\ufffd`...)
+			i += size
+			start = i
+			continue
+		}
+		if c == '\u2028' || c == '\u2029' {
+			dst = append(dst, s[start:i]...)
+			dst = append(dst, '\\', 'u', '2', '0', '2', hexDigits[c&0xF])
+			i += size
+			start = i
+			continue
+		}
+		i += size
+	}
+	dst = append(dst, s[start:]...)
+	return append(dst, '"')
 }

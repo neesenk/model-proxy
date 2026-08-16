@@ -1,7 +1,6 @@
 package requestlog
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -24,6 +23,9 @@ type fileWriter struct {
 	day       string
 	size      int64
 	rotateSeq uint64
+	// line is the reusable encode buffer for one JSONL row; being
+	// single-goroutine-owned it needs no pool.
+	line []byte
 }
 
 func (w *fileWriter) open(now time.Time) {
@@ -80,11 +82,10 @@ func (w *fileWriter) write(rec *Record, now time.Time) error {
 			return fmt.Errorf("request_log: no open file")
 		}
 	}
-	line, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	line = append(line, '\n')
+	// Encode onto the retained line buffer: after the first large record its
+	// capacity is steady-state, so encoding adds no per-record allocation.
+	w.line = appendRecordLine(w.line[:0], rec)
+	line := w.line
 	dayChanged := now.Format("2006-01-02") != w.day
 	if (w.size > 0 && w.size+int64(len(line)) > w.maxSize) || dayChanged {
 		w.rotate(now)

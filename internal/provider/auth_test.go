@@ -37,13 +37,16 @@ func writeCodexAuth(t *testing.T, path, refresh string, exp time.Time) {
 
 func TestCodexOAuth_InjectValidToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth.json")
-	writeCodexAuth(t, path, "rt", time.Now().Add(time.Hour))
+	// One shared timestamp: computing time.Now() twice can straddle a second
+	// boundary and flake the exact-match assertion below.
+	exp := time.Now().Add(time.Hour)
+	writeCodexAuth(t, path, "rt", exp)
 	p := NewCodexOAuthProvider(path)
 	req, _ := http.NewRequest("POST", "http://x", nil)
 	if err := p.Inject(req); err != nil {
 		t.Fatal(err)
 	}
-	jwt := "head." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, time.Now().Add(time.Hour).Unix()))) + ".sig"
+	jwt := "head." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp.Unix()))) + ".sig"
 	// P0-1: assert exact values, not just "non-empty" - originator + Account-Id + exact Bearer
 	if got := req.Header.Get("Authorization"); got != "Bearer "+jwt {
 		t.Errorf("Authorization=%q, want %q", got, "Bearer "+jwt)
