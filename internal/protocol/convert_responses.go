@@ -1313,7 +1313,7 @@ func responsesToolChoiceToAnthropic(tc any) any {
 		return nil
 	}
 	if t, _ := tcm["type"].(string); t == "function" {
-		name := strOf(tcm["name"])
+		name := strOpt(tcm["name"])
 		if namespace := strOpt(tcm["namespace"]); namespace != "" {
 			name = nsFlattenName(namespace, name)
 		}
@@ -1410,7 +1410,7 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 			}
 			msgs = append(msgs, map[string]any{"role": "user", "content": []map[string]any{{
 				"type":        "tool_result",
-				"tool_use_id": strOf(item["call_id"]),
+				"tool_use_id": strOpt(item["call_id"]),
 				"content":     content,
 				"is_error":    isError,
 			}}})
@@ -1600,7 +1600,7 @@ func responsesToolChoiceToOpenAI(tc any) any {
 	}
 	switch t, _ := tcm["type"].(string); t {
 	case "function":
-		name := strOf(tcm["name"])
+		name := strOpt(tcm["name"])
 		if ns := strOpt(tcm["namespace"]); ns != "" {
 			name = nsFlattenName(ns, name)
 		}

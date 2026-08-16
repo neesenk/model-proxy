@@ -159,6 +159,23 @@ func (t *responsesSSEToAnthropicSSE) closeBlock(outIdx int) {
 	}
 }
 
+// closeLeftoverBlocks closes every still-open block in ascending ANTHROPIC
+// block index order (the index clients saw in content_block_start). Map
+// iteration is randomized — a strict client rejects stop(N) before stop(N-1).
+func (t *responsesSSEToAnthropicSSE) closeLeftoverBlocks() {
+	type pending struct{ outIdx, blockIdx int }
+	left := make([]pending, 0, len(t.blocks))
+	for outIdx, block := range t.blocks {
+		if block.opened {
+			left = append(left, pending{outIdx: outIdx, blockIdx: block.idx})
+		}
+	}
+	sort.Slice(left, func(i, j int) bool { return left[i].blockIdx < left[j].blockIdx })
+	for _, p := range left {
+		t.closeBlock(p.outIdx)
+	}
+}
+
 func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
 	for len(t.out) == 0 {
@@ -173,9 +190,7 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 				convertWarn("responses SSE scanner error: " + err.Error())
 			}
 			t.ensureStart()
-			for outIdx := range t.blocks {
-				t.closeBlock(outIdx)
-			}
+			t.closeLeftoverBlocks()
 			t.emit("error", map[string]any{"type": "error", "error": map[string]any{
 				"type": "api_error", "message": "upstream stream terminated before a terminal event",
 			}})
@@ -198,9 +213,7 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
 			t.ensureStart()
-			for outIdx := range t.blocks {
-				t.closeBlock(outIdx)
-			}
+			t.closeLeftoverBlocks()
 			t.emit("error", map[string]any{"type": "error", "error": map[string]any{
 				"type": "api_error", "message": "responses stream ended before response.completed",
 			}})
@@ -573,9 +586,7 @@ func (t *responsesSSEToAnthropicSSE) finish() {
 	}
 	t.done = true
 	t.ensureStart()
-	for outIdx := range t.blocks {
-		t.closeBlock(outIdx)
-	}
+	t.closeLeftoverBlocks()
 	if t.stopRsn == "" {
 		if t.hasToolUse {
 			t.stopRsn = "tool_use"
@@ -1691,10 +1702,11 @@ func chatSSEErrorOf(data map[string]any) (emsg, etype string) {
 }
 
 func (t *openaiSSEToResponsesSSE) handle(event string, data map[string]any) {
-	// OpenAI error chunk (data: {"error":{...}}) or an explicit `event: error`
-	// frame → response.failed. Never silently turn a mid-stream upstream
-	// error into a clean response.completed.
-	if asMap(data["error"]) != nil || event == "error" {
+	// OpenAI error chunk (data: {"error":{...}} — or the string form some
+	// gateways emit, which chatSSEErrorOf unwraps) or an explicit `event:
+	// error` frame → response.failed. Never silently turn a mid-stream
+	// upstream error into a clean response.completed.
+	if data["error"] != nil || event == "error" {
 		emsg, etype := chatSSEErrorOf(data)
 		t.ensureCreated()
 		t.emit("response.failed", map[string]any{

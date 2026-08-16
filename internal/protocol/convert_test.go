@@ -176,3 +176,18 @@ func TestConvertOpenAIResponseToAnthropic_PartsContentAnnotations(t *testing.T) 
 		t.Errorf("text = %q, want content + appended source link", text)
 	}
 }
+
+// TestOpenAIToAnthropicSSE_StringShapedError: a string-form error chunk
+// ({"error":"rate limited"} — small gateways emit this) must surface as an
+// anthropic error event, not be silently dropped by the object-only decoder.
+func TestOpenAIToAnthropicSSE_StringShapedError(t *testing.T) {
+	in := "data: {\"model\":\"gpt-x\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: {\"error\":\"rate limited\"}\n\n" +
+		"data: [DONE]\n\n"
+	r := newOpenAIToAnthropicSSE(strings.NewReader(in), "gpt-x")
+	out, _ := io.ReadAll(r)
+	s := string(out)
+	if !strings.Contains(s, "event: error") || !strings.Contains(s, `"message":"rate limited"`) {
+		t.Errorf("string-form error chunk not surfaced:\n%s", s)
+	}
+}

@@ -62,3 +62,14 @@ func TestRequestWantsStreamTopLevelBoolOnly(t *testing.T) {
 		})
 	}
 }
+
+// TestAggregateChatSSEStringShapedError: the SSE→JSON aggregation bridge must
+// treat a string-form error payload ({"error":"rate limited"}) as a terminal
+// error like the object form — not aggregate a "successful" response around it.
+func TestAggregateChatSSEStringShapedError(t *testing.T) {
+	raw := "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: {\"error\":\"rate limited\"}\n\n"
+	if _, err := aggregateSSEToResponse([]byte(raw), "openai"); err == nil {
+		t.Fatal("string-form error chunk aggregated as a clean response, want an error")
+	}
+}

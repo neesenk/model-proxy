@@ -593,3 +593,61 @@ func TestResponsesStream_R2A_CitationLinksDeduped(t *testing.T) {
 		}
 	}
 }
+
+// String-shaped error chunks ({"error":"rate limited"} — small gateways emit
+// this form) must be recognized on every conversion path, not just the object
+// form: chatSSEErrorOf already has the string fallback, the entry check must
+// let it through. A string error after finish_reason must NOT synthesize a
+// clean response.completed.
+func TestResponsesSynthesis_StringShapedChatError(t *testing.T) {
+	inC := "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: {\"error\":\"rate limited\"}\n\n"
+	eventsC := drainSSE(t, newOpenAIToResponsesSSE(strings.NewReader(inC), "gpt-x"))
+	failedC := sseFilter(eventsC, "response.failed")
+	if len(failedC) != 1 {
+		t.Fatalf("string error: response.failed count = %d, want 1: %v", len(failedC), sseEventTypes(eventsC))
+	}
+	if msg := strOf(asMap(asMap(sseDataMap(t, failedC[0])["response"])["error"])["message"]); msg != "rate limited" {
+		t.Errorf("string error message = %q, want \"rate limited\"", msg)
+	}
+	if got := sseCount(eventsC, "response.completed"); got != 0 {
+		t.Errorf("string error: response.completed count = %d, want 0", got)
+	}
+}
+
+// TestResponsesToAnthropic_LeftoverBlocksCloseInOrder: gateways that omit
+// output_item.done and jump straight to response.completed leave blocks open
+// at finish(); they must be closed in ASCENDING index order (Go map iteration
+// is randomized — a strict client rejects stop(1) before stop(0)). Looped so
+// the randomized order can't pass by luck.
+func TestResponsesToAnthropic_LeftoverBlocksCloseInOrder(t *testing.T) {
+	// function_call items open their anthropic block eagerly at added (text
+	// blocks open lazily on the first delta), so bare added frames leave
+	// three open blocks for finish() to close.
+	item := func(idx int) string {
+		return "event: response.output_item.added\n" +
+			`data: {"type":"response.output_item.added","output_index":` + itoa(idx) + `,"item":{"type":"function_call","call_id":"c` + itoa(idx) + `","name":"f","arguments":""}}` + "\n\n"
+	}
+	in := item(0) + item(1) + item(2) +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{}}}` + "\n\n"
+	for round := 0; round < 32; round++ {
+		events := drainSSE(t, newResponsesToAnthropicSSE(strings.NewReader(in), "gpt-x"))
+		lastIndex := -1
+		stops := 0
+		for _, ev := range events {
+			if ev.event != "content_block_stop" {
+				continue
+			}
+			stops++
+			idx := intOf(sseDataMap(t, ev)["index"])
+			if idx <= lastIndex {
+				t.Fatalf("round %d: content_block_stop index %d after %d (out of order): %v", round, idx, lastIndex, sseEventTypes(events))
+			}
+			lastIndex = idx
+		}
+		if stops != 3 {
+			t.Fatalf("round %d: content_block_stop count = %d, want 3: %v", round, stops, sseEventTypes(events))
+		}
+	}
+}

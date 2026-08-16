@@ -137,7 +137,10 @@ func aggregateChatSSE(events []wireSSEEvent) ([]byte, error) {
 		if sonic.UnmarshalString(event.data, &payload) != nil {
 			continue
 		}
-		if asMap(payload["error"]) != nil {
+		if payload["error"] != nil {
+			// Object AND string forms ({"error":"rate limited"}): either way the
+			// stream terminated with an upstream error — never aggregate a
+			// "successful" response around it.
 			return nil, fmt.Errorf("chat stream terminated with an error")
 		}
 		copyOpt(out, payload, "id", "model", "created", "system_fingerprint", "usage")

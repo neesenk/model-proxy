@@ -145,6 +145,65 @@ func TestConvertResponsesRequestToAnthropic(t *testing.T) {
 	}
 }
 
+// TestResponsesConversionMissingOptionalFieldsNeverEmitsLiteralNull: optional
+// id/name fields that are ABSENT must convert to "" (strOpt semantics), never
+// the literal string "null" (strOf(nil) renders JSON null → "null"), per the
+// Tool ID rule in docs/architecture/protocol-conversion.md. Covers
+// function_call_output.call_id and tool_choice.function.name on both the
+// responses→anthropic and responses→openai request paths.
+func TestResponsesConversionMissingOptionalFieldsNeverEmitsLiteralNull(t *testing.T) {
+	in := `{"model":"gpt-x","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},` +
+		`{"type":"function_call_output","output":"found"}],` +
+		`"tool_choice":{"type":"function","function":{}}}`
+
+	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), `"null"`) {
+		t.Errorf("responses→anthropic output contains a literal \"null\": %s", out)
+	}
+	m := unmarshalMap(t, out)
+	msgs, _ := m["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %d, want 1 (the user text and the user tool_result merge): %s", len(msgs), out)
+	}
+	// The tool_result block rides in the merged user message.
+	var resblk map[string]any
+	if content, ok := asMap(msgs[0])["content"].([]any); ok {
+		for _, part := range content {
+			if blk := asMap(part); blk["type"] == "tool_result" {
+				resblk = blk
+			}
+		}
+	}
+	if resblk == nil {
+		t.Fatalf("no tool_result block in %s", out)
+	}
+	if id, _ := resblk["tool_use_id"].(string); id != "" {
+		t.Errorf("tool_use_id for call_id-less function_call_output = %q, want \"\" (missing → empty, never \"null\")", id)
+	}
+	tc := asMap(m["tool_choice"])
+	if name, _ := tc["name"].(string); name != "" {
+		t.Errorf("tool_choice name for name-less function = %q, want \"\" (missing → empty, never \"null\")", name)
+	}
+
+	out2, err := convertResponsesRequestToOpenAI([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out2), `"null"`) {
+		t.Errorf("responses→openai output contains a literal \"null\": %s", out2)
+	}
+	m2 := unmarshalMap(t, out2)
+	tc2 := asMap(m2["tool_choice"])
+	fn := asMap(tc2["function"])
+	if name, _ := fn["name"].(string); name != "" {
+		t.Errorf("openai tool_choice.function.name for name-less function = %q, want \"\" (missing → empty, never \"null\")", name)
+	}
+}
+
 func TestConvertResponsesRequestToOpenAI(t *testing.T) {
 	in := `{"model":"gpt-x","max_output_tokens":100,"instructions":"be nice","input":[` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},` +

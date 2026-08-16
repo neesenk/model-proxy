@@ -1819,20 +1819,33 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		}
 		// OpenAI error chunk (data: {"error":{...}}) → anthropic error event.
 		// Never silently swallow a mid-stream upstream error as "normal finish".
+		// The string form ({"error":"rate limited"} — some gateways emit it) is
+		// recognized too: the object-only decode silently skips it.
 		var errChunk struct {
 			Error struct {
 				Message string `json:"message"`
 				Type    string `json:"type"`
 			} `json:"error"`
 		}
+		var errMessage, errType string
 		if sonic.Unmarshal([]byte(payload), &errChunk) == nil && (errChunk.Error.Message != "" || errChunk.Error.Type != "") {
+			errMessage, errType = errChunk.Error.Message, errChunk.Error.Type
+		} else {
+			var errString struct {
+				Error string `json:"error"`
+			}
+			if sonic.Unmarshal([]byte(payload), &errString) == nil && errString.Error != "" {
+				errMessage = errString.Error
+			}
+		}
+		if errMessage != "" || errType != "" {
 			t.ensureStart()
 			t.closeBlock()
-			et := errChunk.Error.Type
+			et := errType
 			if et == "" {
 				et = "api_error"
 			}
-			t.emit("error", map[string]any{"type": "error", "error": map[string]any{"type": et, "message": errChunk.Error.Message}})
+			t.emit("error", map[string]any{"type": "error", "error": map[string]any{"type": et, "message": errMessage}})
 			t.errored = true
 			t.closed = true
 			t.done = true
