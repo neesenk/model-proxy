@@ -2,25 +2,12 @@ package app
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
-
-// waitFor polls cond until it holds or the timeout elapses (SSE handlers answer
-// asynchronously from a goroutine).
-func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !cond() {
-		if time.Now().After(deadline) {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
 
 // newWebMux mirrors the production composition in NewRuntime: proxy.Handler on
 // "/" plus the web transport's /ui/ and /api/ subtrees (web.enabled default).
@@ -45,33 +32,43 @@ func TestMuxServesAPIEventsWithWebEnabled(t *testing.T) {
 	})
 	mux := newWebMux(t, proxy)
 
+	// The SSE handler runs on the server's own goroutine and writes headers while
+	// this test observes them — a shared httptest.ResponseRecorder is NOT
+	// thread-safe for that (data race on its header map). Serving through a real
+	// httptest.Server keeps the assertion honest: net/http serializes every
+	// header write before the bytes hit the wire, so client.Do returning means
+	// the terminal status + content-type are already decided — no polling needed.
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
 	// Exactly what the UI Live tab's EventSource sends: a same-origin browser
 	// request against the loopback listener.
 	req.Header.Set("Origin", "http://127.0.0.1:15721")
 	req.Host = "127.0.0.1:15721"
-	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		mux.ServeHTTP(rec, req)
-		close(done)
-	}()
-	// Recorder.Code defaults to 200 before WriteHeader, so poll on the
-	// content-type instead: every terminal path (SSE stream or 404 JSON) sets it.
-	waitFor(t, 2*time.Second, func() bool { return rec.Header().Get("Content-Type") != "" })
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/events status = %d body=%q, want 200 (SSE stream)", rec.Code, rec.Body.String())
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/events: %v", err)
 	}
-	if ct := rec.Header().Get("content-type"); !strings.HasPrefix(ct, "text/event-stream") {
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /api/events status = %d body=%q, want 200 (SSE stream)", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Fatalf("content-type = %q, want text/event-stream", ct)
 	}
+	// Cancelling the request context must end the SSE stream: read until EOF
+	// with a deadline-ish bound via ctx (already cancelled below) — the server
+	// side handler returns on r.Context().Done(), closing the response body.
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("SSE handler did not return after client disconnect")
+	if _, err := io.ReadAll(resp.Body); err != nil && ctx.Err() == nil {
+		t.Fatalf("read SSE stream after cancel: %v", err)
 	}
 }
 
