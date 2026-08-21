@@ -28,15 +28,17 @@ providers:
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - glm-5.2
+      - glm-5.3
       - kimi-k3
+      - gpt-5.6-luna
+      - gpt-5.6-sol
+      - gpt-5.6-terra
   codex:
     provider_id: codex
     openai_base_url: https://chatgpt.com/backend-api/codex
     models:
-      - gpt-5.5
-      - gpt-5.6-luna
       - gpt-5.6-sol
+      - gpt-5.6-luna
       - gpt-5.6-terra
   # External provider (Zhipu BigModel — API key via `login zhipu`)
   # /models endpoint only lists 8 chat models; multimodal models exist but
@@ -55,6 +57,7 @@ providers:
     models:
       - glm-5-turbo
       - glm-5.2
+      - glm-5.3
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
@@ -67,6 +70,9 @@ providers:
     openai_base_url: https://api.deepseek.com
     anthropic_base_url: https://api.deepseek.com/anthropic
     usage_url: https://api.deepseek.com/user/balance
+    peak_hours:
+      - {window: "9:00-12:00", multiplier: 4}
+      - {window: "14:00-18:00",multiplier: 4}
     models:
       - deepseek-v4-pro
       - deepseek-v4-flash
@@ -89,12 +95,8 @@ providers:
       - doubao-seed-2-1-turbo
       - doubao-seed-2.0-code
       - doubao-seed-2.0-pro
-      - glm-5.2
-      - kimi-k2.6
-      - kimi-k2.7-code
+      - glm-5.3
       - kimi-k3
-      - minimax-m2.7
-      - minimax-m3
   shopee:
     provider_id: static
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
@@ -102,10 +104,11 @@ providers:
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
-      - glm-5.2
-      - kimi-k2.7-code
+      - glm-5.3
       - kimi-k3
-      - minimax-m3
+      - gpt-5.6-luna
+      - gpt-5.6-sol
+      - gpt-5.6-terra
   # Kimi Code (Moonshot membership coding plan — NOT the pay-as-you-go 开放平台).
   # API key via `login kimi-code` (from https://www.kimi.com/code/console).
   # Two protocol bases under the same gateway: openai_base_url = .../coding/v1
@@ -131,26 +134,26 @@ providers:
   # = Anthropic-compatible base (no /v1; proxy keeps /v1/messages). No usage_url —
   # personal-edition Credits usage (5h/7d windows) is console-only (no public
   # API); `login qwen-plan` validates the key by probing openai_base_url/models.
-  qwen-plan:
-    provider_id: qwen-plan
-    openai_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-    anthropic_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
-    models:
-      - qwen3.8-max-preview
-      - qwen3.7-max
-      - qwen3.7-plus
-      - qwen3.6-flash
-      - glm-5.2
-      - deepseek-v4-pro
+  #qwen-plan:
+  #  provider_id: qwen-plan
+  #  openai_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  #  anthropic_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
+  #  models:
+  #    - qwen3.8-max-preview
+  #    - qwen3.7-max
+  #    - qwen3.7-plus
+  #    - qwen3.6-flash
+  #    - glm-5.2
+  #    - deepseek-v4-pro
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
 # exposed model name (looked up in routes below) before routing. If a called
 # anthropic model isn't listed, the called name is used as the exposed name.
 claude_mapping:
-  claude-opus-4-7: glm-5.2
-  claude-opus-4-8: glm-5.2
+  claude-opus-4-7: glm-5.3
+  claude-opus-4-8: glm-5.3
   claude-sonnet-4-6: deepseek-v4-pro
   claude-haiku-4-5: deepseek-v4-flash
-  opus: glm-5.2
+  opus: glm-5.3
   sonnet: deepseek-v4-pro
 # routes: exposed model name → ordered list of provider/model targets. The proxy
 # orders targets by billing tier (plan < unknown < pay-as-you-go), then priority
@@ -171,43 +174,39 @@ claude_mapping:
 #   {provider: fusion, model: <workflow>} — reference a fusion: workflow (see
 #     the fusion block at the bottom of this file).
 routes:
-  glm-5.2:
-    - {provider: zhipu, model: glm-5.2, priority: 1}
-    - {provider: volcengine, model: glm-5.2, priority: 1}
-    - {provider: aqp, model: glm-5.2, priority: 2}
-    - {provider: shopee, model: glm-5.2, priority: 3}
-  glm-5.1:
-    - {provider: zhipu, model: glm-5.1, priority: 1}
-    - {provider: shopee, model: glm-5.1, priority: 3}
-  deepseek-v4-pro:
-    - {provider: volcengine, model: deepseek-v4-pro, priority: 1}
-    - {provider: aqp, model: deepseek-v4-pro, priority: 1}
-    - {provider: shopee, model: deepseek-v4-pro, priority: 2}
-    - {provider: deepseek, model: deepseek-v4-pro, priority: 3}
-  deepseek-v4-flash:
-    - {provider: volcengine, model: deepseek-v4-flash, priority: 1}
-    - {provider: aqp, model: deepseek-v4-flash, priority: 1}
-    - {provider: shopee, model: deepseek-v4-flash, priority: 2}
-    - {provider: deepseek, model: deepseek-v4-flash, priority: 3}
-  kimi-k2.7-code:
-    - {provider: volcengine, model: kimi-k2.7-code, priority: 1}
-    - {provider: shopee, model: kimi-k2.7-code, priority: 3}
-  kimi-k2.6:
-    - {provider: volcengine, model: kimi-k2.6, priority: 1}
-    - {provider: shopee, model: kimi-k2.6, priority: 3}
-  minimax-m3:
-    - {provider: volcengine, model: minimax-m3, priority: 1}
-    - {provider: shopee, model: minimax-m3, priority: 3}
-  gpt-5.5:
-    - {provider: codex, model: gpt-5.5, priority: 1}
-  gpt-5.4:
-    - {provider: codex, model: gpt-5.4, priority: 1}
-  kimi-for-coding:
-    - {provider: kimi-code, model: kimi-for-coding, priority: 1}
-  kimi-for-coding-highspeed:
-    - {provider: kimi-code, model: kimi-for-coding-highspeed, priority: 1}
-  k3:
+  kimi-k3:
     - {provider: kimi-code, model: k3, priority: 1}
+    - {provider: aqp, model: kimi-k3, priority: 1}
+    - {provider: volcengine, model: kimi-k3, priority: 3}
+    - {provider: shopee, model: kimi-k3, priority: 3}
+  glm-5.3:
+    - {provider: zhipu, model: glm-5.3, priority: 1}
+    - {provider: aqp, model: glm-5.3, priority: 1}
+    - {provider: volcengine, model: glm-5.3, priority: 3}
+    - {provider: shopee, model: glm-5.3, priority: 3}
+  deepseek-v4-pro:
+    - {provider: aqp, model: deepseek-v4-pro, priority: 1}
+    - {provider: shopee, model: deepseek-v4-pro, priority: 3}
+    - {provider: volcengine, model: deepseek-v4-pro, priority: 3}
+    - {provider: deepseek, model: deepseek-v4-pro, priority: 4}
+  deepseek-v4-flash:
+    - {provider: aqp, model: deepseek-v4-flash, priority: 1}
+    - {provider: shopee, model: deepseek-v4-flash, priority: 3}
+    - {provider: volcengine, model: deepseek-v4-flash, priority: 3}
+    - {provider: deepseek, model: deepseek-v4-flash, priority: 4}
+  gpt-5.6-sol:
+    - {provider: codex, model: gpt-5.6-sol, priority: 1}
+    - {provider: aqp, model: gpt-5.6-sol, priority: 1}
+    - {provider: shopee, model: gpt-5.6-sol, priority: 3}
+  gpt-5.6-terra:
+    - {provider: codex, model: gpt-5.6-terra, priority: 1}
+    - {provider: aqp, model: gpt-5.6-terra, priority: 1}
+    - {provider: shopee, model: gpt-5.6-terra, priority: 3}
+  gpt-5.6-luna:
+    - {provider: codex, model: gpt-5.6-luna, priority: 1}
+    - {provider: aqp, model: gpt-5.6-luna, priority: 1}
+    - {provider: shopee, model: gpt-5.6-luna, priority: 3}
+
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.
 # scheduling:
