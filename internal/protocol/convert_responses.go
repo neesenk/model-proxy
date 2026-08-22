@@ -956,8 +956,18 @@ func chatResponseFormatToTextFormat(rf map[string]any) map[string]any {
 		if js == nil {
 			return nil
 		}
+		// The nested type never overrides the discriminator: a wrapper saying
+		// {"type":"json_schema","json_schema":{"type":"text"}} is still a
+		// json_schema request (Switchyard ports the same rule).
 		f := map[string]any{"type": "json_schema"}
 		copyOpt(f, js, "name", "description", "schema", "strict")
+		// An empty wrapper (no schema) has nothing to express: a bare
+		// {"type":"json_schema"} without schema is invalid upstream — drop the
+		// format observably and let the backend use its default.
+		if _, ok := f["schema"]; !ok {
+			convertWarn("dropping empty json_schema response_format (no schema)")
+			return nil
+		}
 		return f
 	}
 	return nil

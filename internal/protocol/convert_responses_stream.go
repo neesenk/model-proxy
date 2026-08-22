@@ -17,6 +17,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	sonic "github.com/bytedance/sonic"
 )
@@ -1427,7 +1428,8 @@ func (t *anthropicSSEToResponsesSSE) finish() {
 	}
 	resp := map[string]any{
 		"id": t.id, "object": "response", "status": status, "model": t.model, "output": doneItemsOutput(t.doneItems),
-		"usage": usage,
+		"created_at": time.Now().UTC().Format(time.RFC3339),
+		"usage":      usage,
 	}
 	event := "response.completed"
 	if status == "incomplete" {
@@ -2036,7 +2038,8 @@ func (t *openaiSSEToResponsesSSE) finish() {
 	}
 	resp := map[string]any{
 		"id": t.id, "object": "response", "status": status, "model": t.model, "output": doneItemsOutput(t.doneItems),
-		"usage": usage,
+		"created_at": time.Now().UTC().Format(time.RFC3339),
+		"usage":      usage,
 	}
 	event := "response.completed"
 	if status == "incomplete" {

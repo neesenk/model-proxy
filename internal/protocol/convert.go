@@ -947,13 +947,22 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 	raw, _ := src["messages"].([]any)
 	// Anthropic constrains tool_use ids to ^[a-zA-Z0-9_-]+$ while openai history
 	// may carry ids like "functions.Bash:0". Normalize with a per-call memo so a
-	// tool_use and its tool_result(s) map to the SAME sanitized id.
+	// tool_use and its tool_result(s) map to the SAME sanitized id. Two
+	// DIFFERENT hostile ids may sanitize to the same string ("call.a" and
+	// "call_a" both → "call_a") — a deterministic suffix keeps them apart so
+	// the upstream never sees colliding tool_use ids (Switchyard FNV-1a
+	// suffixes solve the same problem).
 	idMap := map[string]string{}
+	usedNorm := map[string]bool{}
 	normID := func(id string) string {
 		if n, ok := idMap[id]; ok {
 			return n
 		}
 		n := sanitizeToolUseID(id)
+		for i := 2; usedNorm[n]; i++ {
+			n = fmt.Sprintf("%s_%d", sanitizeToolUseID(id), i)
+		}
+		usedNorm[n] = true
 		idMap[id] = n
 		return n
 	}
@@ -1462,7 +1471,9 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		stopReason = mapFinishToStopReason(c.FinishReason)
 	}
 	if content == nil {
-		content = []map[string]any{}
+		// Anthropic rejects an assistant message with an empty content array;
+		// a genuine no-content answer still needs one (empty) text block.
+		content = []map[string]any{{"type": "text", "text": ""}}
 	}
 	// openai counts cached AND cache-creation tokens as a SUBSET of
 	// prompt_tokens; anthropic counts both separately from input_tokens. Split

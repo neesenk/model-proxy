@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	sonic "github.com/bytedance/sonic"
 	"github.com/bytedance/sonic/ast"
@@ -385,6 +386,9 @@ func responsesJSONToSSE(root map[string]any) ([]byte, error) {
 		event = "response.incomplete"
 	} else if status == "failed" || status == "cancelled" {
 		return nil, fmt.Errorf("cannot synthesize success SSE from response status %s", status)
+	}
+	if _, ok := root["created_at"]; !ok {
+		root["created_at"] = time.Now().UTC().Format(time.RFC3339)
 	}
 	emitWireSSE(&out, event, map[string]any{"type": event, "response": root})
 	return out.Bytes(), nil
