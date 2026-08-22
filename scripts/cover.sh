@@ -45,7 +45,7 @@ baseline=80
 # Historical packages below the repository-wide baseline have an explicit
 # floor. Unlike a blanket exemption, this makes any regression fail while the
 # remaining gap stays visible. Raise a floor whenever durable tests improve it.
-historical_floor_packages=" model-proxy/internal/cli model-proxy/internal/cli/framework model-proxy/internal/cli/login model-proxy/internal/cli/models model-proxy/internal/cli/serve model-proxy/internal/httpx model-proxy/internal/targetexec "
+historical_floor_packages=" model-proxy/internal/cli model-proxy/internal/cli/framework model-proxy/internal/cli/login model-proxy/internal/cli/models model-proxy/internal/cli/serve model-proxy/internal/httpx model-proxy/internal/targetexec model-proxy/scripts/soak "
 coverage_floor_for() {
   case "$1" in
     model-proxy/internal/cli) echo "78.8" ;;
@@ -55,6 +55,9 @@ coverage_floor_for() {
     model-proxy/internal/cli/serve) echo "29.7" ;;
     model-proxy/internal/httpx) echo "75.0" ;;
     model-proxy/internal/targetexec) echo "79.1" ;;
+    # CLI harness: main/flag parsing are interactive-only; the scenario
+    # builders and the run loop are covered by main_test.go.
+    model-proxy/scripts/soak) echo "56.7" ;;
     *) echo "$baseline" ;;
   esac
 }

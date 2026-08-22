@@ -259,6 +259,19 @@ Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会从协议包读取�
 
 协议能力和语义边界还必须覆盖：已知不支持字段的客户端原生 400 与 compatible-target failover；tool_search_output 的 discovered tools 物化；citation 非流式/SSE 六方向；signed/redacted reasoning replay；prompt cache key/retention；previous_response_id 命中、miss 修复、TTL、重启恢复及仅 token-limit incomplete 可缓存。
 
+## soak 压测工具（`scripts/soak`，手动运行）
+
+`go run ./scripts/soak` 是对**运行中的代理**做闭环稳态压测的工具（borrow 自
+Switchyard soak 的场景思路）：7 个可复现场景（short 非流式、stream SSE 到 EOF、
+longctx ≈48KiB 上下文、tools 工具流量、prefix 字节相同重复、errors 未知模型 502
+风暴、cancel 200ms 客户端中途断开），`-scenario mix` 全跑，输出每场景
+ok/err/错误率/p50/p95/p99/流式 TTFT/状态码分布，`-max-error-rate` 超阈退出非零
+（error/cancel 场景按预期结果反转不计错）。场景截止时刻在途的请求标记 `aborted`
+并剔除统计。它发送**真实请求**——`-model` 解析到的路由会消耗真实上游配额，长跑
+前先指向 mock/dev 后端。工具自身的场景构造器与 harness 循环由
+`scripts/soak/main_test.go` 用本地 httptest stub 验证（hermetic，不碰网络），属于
+`go test ./...` 常规矩阵；race gate 覆盖其并发汇总。
+
 ## live e2e（真实上游，默认跳过）
 
 `internal/app/live_e2e_test.go` 用**仓库根 `config.yaml`（可由 `MODEL_PROXY_LIVE_CONFIG` 覆盖）和 login 管理的真实凭据**（`~/.model-proxy`）端到端验证协议转换在真实 vendor 方言上的表现（mock 覆盖不了的差异：thinking 方言、视觉门控、custom 工具、占位 reasoning_content）。override 的绝对路径原样使用，相对路径按仓库根解析，不依赖 `go test` 的 package working directory。
