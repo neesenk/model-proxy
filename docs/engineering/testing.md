@@ -21,6 +21,12 @@ gofmt -l .
 scripts/cover.sh
 ```
 
+并发密集 package（per-request snapshot、reload swap、SSE fan-out、后台 flusher 所在的 `internal/app`、`internal/runtime/...`、`internal/targetexec`、`internal/fusion`、`internal/cache`、`internal/shadow`、`internal/guard`、`internal/accounts`、`internal/observe/...`）的快速 race 门禁由以下命令执行，适合提交前快速验证；全量 `go test -race ./...` 仍是权威门禁，不可被它替代：
+
+```bash
+scripts/race.sh
+```
+
 `scripts/cover.sh [threshold] [--no-enforce]` 生成 `cov.out` 和 `coverage.html`，默认列出低于 60% 的函数，并按 80% package baseline gate。底层 `go test` 任一 package 失败、缺少预期 package 输出或缺少覆盖率百分比时，脚本必须非零退出，已有或不完整的 `cov.out` 不得形成假绿。无可覆盖语句的纯测试包（`[no statements]`，如 `internal/archtest`）是合法例外；有生产 statements 但无测试文件的包会打印裸 `coverage: 0.0%` 行，默认必须判失败，只有组合入口等确实无需包内单测的 package 才能显式列入 `scripts/cover.sh` 的 `no_test_exemptions`（当前仅根 package main）。历史上尚未达到 80% 的 package 不再使用可降到 0% 的 blanket exemption，而在 `coverage_floor_for` 中逐包记录明确 floor；低于 floor 必须失败，达到 floor 但低于 80% 显示 `gap`，新增可靠测试后同步提高 floor。`scripts/cover.sh --self-test` 校验 coverage 行解析、普通 package 的 80% 合同，以及所有历史 floor 都拒绝 0% 和 `floor - 0.1%`。
 
 普通 package coverage 是包内测试视角；composition/integration 测试对 owner package 的执行归因需要按需使用 `go test -coverpkg=<owner packages> <test packages>` 复核，不能用跨包执行率替代逐包 floor。daemon process、浏览器 OAuth/SSO、交互 stdin 和真实上游 FetchModels 属于外部 I/O 路径；其控制状态机必须通过包内窄接口、可取消等待或受控 subprocess/fake 验证，不得为 coverage 向外暴露无约束 production hook，也不得向真实用户进程发送信号。
