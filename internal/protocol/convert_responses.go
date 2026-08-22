@@ -1681,6 +1681,22 @@ func (w *r2chatWalk) addMessage(item map[string]any) {
 		// NOW so it cannot leak across a user turn into the next assistant
 		// message (cc-switch transform_codex_chat.rs:1012-1045).
 		w.attachBackward()
+	} else if n := len(w.msgs); n > 0 && w.msgs[n-1]["role"] == "assistant" {
+		// An assistant message interleaved between a tool call and its output
+		// must not break the tool_calls→tool adjacency strict upstreams
+		// require: merge its text into the pending assistant tool-call message
+		// (content + tool_calls on one assistant message is valid chat).
+		if _, hasCalls := w.msgs[n-1]["tool_calls"].([]map[string]any); hasCalls {
+			if text, ok := responsesContentToChat(item["content"]).(string); ok && text != "" {
+				if prev := strOpt(w.msgs[n-1]["content"]); prev != "" {
+					w.msgs[n-1]["content"] = prev + "\n\n" + text
+				} else {
+					w.msgs[n-1]["content"] = text
+				}
+				w.attachBackward()
+				return
+			}
+		}
 	}
 	w.msgs = append(w.msgs, map[string]any{"role": role, "content": responsesContentToChat(item["content"])})
 	if role == "assistant" {

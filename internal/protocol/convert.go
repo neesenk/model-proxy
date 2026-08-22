@@ -706,13 +706,20 @@ func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
 		}
 		u, _ := iu["url"].(string)
 		if strings.HasPrefix(u, "data:") {
-			// data:<media>;base64,<data>
+			// data:<media>[;params];base64,<data> — keep only the bare MIME as
+			// media_type (parameters like charset would be rejected).
 			rest := strings.TrimPrefix(u, "data:")
 			semi := strings.Index(rest, ";base64,")
 			if semi < 0 {
+				// Percent-encoded (non-base64) data URI: no Anthropic source
+				// form can carry it — drop observably, not silently.
+				convertWarn("dropping non-base64 data URI image (no Anthropic equivalent)")
 				return nil
 			}
 			media := rest[:semi]
+			if i := strings.Index(media, ";"); i >= 0 {
+				media = media[:i]
+			}
 			data := rest[semi+len(";base64,"):]
 			return map[string]any{"type": "image", "source": map[string]any{
 				"type": "base64", "media_type": media, "data": data,
@@ -818,12 +825,20 @@ func parseToolArgs(args string) any {
 	}
 	var obj any
 	if err := sonic.Unmarshal([]byte(args), &obj); err == nil {
-		if _, isObj := obj.(map[string]any); isObj {
+		switch obj.(type) {
+		case map[string]any:
 			return obj
+		case nil:
+			return map[string]any{}
+		default:
+			// Valid JSON but not an object (array/scalar): Anthropic's
+			// tool_use input must be an object — wrap so the value survives.
+			return map[string]any{"value": obj}
 		}
 	}
-	convertWarn("tool_call arguments not a JSON object; using empty input")
-	return map[string]any{}
+	// Not JSON at all: keep the raw text recoverable instead of discarding it.
+	convertWarn("tool_call arguments not JSON; wrapping raw text as input")
+	return map[string]any{"raw": args}
 }
 
 // sanitizeToolUseID rewrites an openai tool_call id into anthropic's tool_use id

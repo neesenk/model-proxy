@@ -193,8 +193,9 @@ func TestConvertFault_ResponsesIncomplete(t *testing.T) {
 	}
 }
 
-// C5: a non-JSON function_call arguments string falls back to an empty input
-// object with a convertWarn (anthropic tool_use.input must be an object).
+// C5: a non-JSON function_call arguments string is wrapped recoverably as
+// {"raw": <text>} with a convertWarn (anthropic tool_use.input must be an
+// object — the raw text stays available to the tool instead of being lost).
 func TestConvertFault_NonJSONToolArgsFallback(t *testing.T) {
 	in := `{"model":"gpt-x","input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"not-json{"}]}`
 	var out []byte
@@ -205,7 +206,7 @@ func TestConvertFault_NonJSONToolArgsFallback(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(logs, "tool_call arguments not a JSON object") {
+	if !strings.Contains(logs, "tool_call arguments not JSON") {
 		t.Errorf("missing fallback warning, log = %q", logs)
 	}
 	// The input starts with a function_call, so a placeholder user message is
@@ -223,8 +224,8 @@ func TestConvertFault_NonJSONToolArgsFallback(t *testing.T) {
 		t.Fatalf("tool_use block not found: %s", out)
 	}
 	input := asMap(blk["input"])
-	if input == nil || len(input) != 0 {
-		t.Errorf("tool_use input = %v, want empty object", blk["input"])
+	if input == nil || input["raw"] != "not-json{" {
+		t.Errorf("tool_use input = %v, want {raw: not-json{}", blk["input"])
 	}
 }
 

@@ -55,7 +55,7 @@ Codex 后端只接受 Responses API，因此 `ProtocolHint("codex") = "responses
 - chat `response_format` ↔ responses `text.format`（`json_object` 直通；`json_schema` 拆装一层 `json_schema` 包装）；anthropic 无对应，r→a 丢弃 + `convertWarn`。
 - `parallel_tool_calls` ↔ anthropic `disable_parallel_tool_use`（responses 四方向均映射；r→a 在 tool_choice 缺省时合成 `{type:auto}`，无 tools 或 `none` 时不合成）。
 - r→a 与 chat→a 一样保证首消息为 user（input 以 function_call 开头时插入占位 user）。
-- r→chat 特有：连续 function_call 合并进**一条** assistant 消息（多 tool_calls）；reasoning item 的文本附挂到**相邻 assistant 消息**的 `reasoning_content`（前向附到后续 assistant，尾部回溯附到前一条；DeepSeek 类上游要求带 tool_calls 的 assistant 消息必带 reasoning_content；无 assistant 时退化为独立消息）。**user/system 回合边界处 pending reasoning 立即回溯附挂到上一条 assistant（已有内容时 `\n\n` 追加），禁止跨 user 回合泄漏到下一轮 assistant；无可附挂的 assistant 时丢弃 + convertWarn**（cc-switch transform_codex_chat.rs:1012-1045）；system/developer 消息全部提到头部（保序，MiniMax 类上游拒绝 mid-thread system）；tools 为空（或全部被过滤）时丢弃 `tool_choice` 和 `parallel_tool_calls`（上游会拒绝引用不存在工具的参数，cc-switch #3557）。
+- r→chat 特有：连续 function_call 合并进**一条** assistant 消息（多 tool_calls）；**穿插在 function_call 与其 output 之间的 assistant 消息并入该 assistant tool-call 消息的 `content`（"\n\n" 连接）**，保证 tool_calls→tool 相邻性（严格上游拒绝不相邻的 tool 消息，Switchyard deferred-message 同款目标）；reasoning item 的文本附挂到**相邻 assistant 消息**的 `reasoning_content`（前向附到后续 assistant，尾部回溯附到前一条；DeepSeek 类上游要求带 tool_calls 的 assistant 消息必带 reasoning_content；无 assistant 时退化为独立消息）。**user/system 回合边界处 pending reasoning 立即回溯附挂到上一条 assistant（已有内容时 `\n\n` 追加），禁止跨 user 回合泄漏到下一轮 assistant；无可附挂的 assistant 时丢弃 + convertWarn**（cc-switch transform_codex_chat.rs:1012-1045）；system/developer 消息全部提到头部（保序，MiniMax 类上游拒绝 mid-thread system）；tools 为空（或全部被过滤）时丢弃 `tool_choice` 和 `parallel_tool_calls`（上游会拒绝引用不存在工具的参数，cc-switch #3557）。
 - `stop`/`stop_sequences` 无 Responses 对应字段：→r 方向丢弃 + `convertWarn`。
 
 ## 流式映射（Responses 方向）
@@ -98,7 +98,7 @@ Responses → {anthropic, chat}（`responsesSSETo*`，读 `response.*` 事件）
 - user `tool_result` 转成独立 `role: tool`，其余 text/image 聚合回 user。
 - 连续 tool 消息合并到同一 user turn。
 - Anthropic role 必须交替；首消息不是 user 时插入占位。
-- image ↔ `image_url` data URL。
+- image ↔ `image_url` data URL；chat→a 方向 data URI 只认 `;base64,` 形态（media_type 取 `;base64,` 前的**裸 MIME**，charset 等参数截断），非 base64 的 percent-encoded data URI 丢弃 + `convertWarn`（无 Anthropic 等价 source 形态）。
 - `parallel_tool_calls` ↔ `disable_parallel_tool_use`。
 - `tool_choice=none` 不携带 disable_parallel_tool_use。
 - chat `max_completion_tokens` 优先于 `max_tokens`；`reasoning_effort` → `thinking`（best-effort budget 阶梯，与 responses 方向共用）。
@@ -173,7 +173,8 @@ reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔opena
 - 流式 6 方向均已覆盖：responses→{a,chat}、{a,chat}→responses 和 anthropic↔chat；`internal/protocol/convert_responses_stream_test.go` 用 `drainSSE`（`internal/protocol/convert_sse_test.go`）断言事件**序列**、合成 item id（`msg_item_/fc_item_/rs_item_`）和 added/done 配对，含并行交错 tool_calls、reasoning 流、EOF fail-closed 与错误事件。跨方向 EOF 矩阵和未闭合 tool arguments 见 `internal/protocol/convert_review_fix_test.go`。
 - 空/错误 content-type 的 framing 嗅探见 `internal/protocol/stream_mode_test.go`：除 event/data 外覆盖 id/retry/comment heartbeat、分段 marker、heartbeat 不阻塞，以及 heartbeat 后跨协议端到端流式转换，防止误入非流式 JSON 分支。
 - reasoning/encrypted_content 映射（`internal/protocol/convert_reasoning_test.go`）：`thinking`+`signature` ↔ reasoning `summary.text`+`encrypted_content` ↔ chat `reasoning_content`，请求/响应/流式三层 + `budget_tokens`↔`effort`。
-- 容错与终态（`internal/protocol/convert_fault_test.go`）：未知事件/畸形 JSON 帧跳过、`response.failed`/`response.incomplete` 分支、重复 `response.completed` 终态唯一、非 JSON arguments 兜底、孤儿 tool 对、末帧无尾换行、8MiB 行上限告警、responses 方向图片映射、未知 block/part/item/event 的 `convertWarn` 全覆盖（J）。
+- 容错与终态（`internal/protocol/convert_fault_test.go`）：未知事件/畸形 JSON 帧跳过、`response.failed`/`response.incomplete` 分支、重复 `response.completed` 终态唯一、非 JSON/非对象 arguments 保真包装（`{"raw":…}`/`{"value":…}`，`parseToolArgs`）、孤儿 tool 对、末帧无尾换行、8MiB 行上限告警、responses 方向图片映射、未知 block/part/item/event 的 `convertWarn` 全覆盖（J）。
+- Switchyard 移植用例（`internal/protocol/convert_borrowed_parity_test.go`）：done 帧全量 arguments 与 delta 流不重复（r→a/r→chat 双向）、裸 `message_stop` 不重置 max_tokens 终态、敌意 tool id 的 use/result 一致清洗、data-URI 变体（charset 参数取裸 MIME、非 base64 丢弃告警）、穿插 assistant 消息保持 tool_calls→tool 相邻、同一逻辑响应的缓冲与流式转换语义等价。
 - 三向审计补齐的映射（`internal/protocol/convert_gap_test.go`）：usage cache/reasoning details 四方向（流式+非流式）、`content_filter`/`refusal`/`incomplete_details.reason` 语义、failed/cancelled fail-closed、hosted web_search 保留与 unsupported server tools 过滤、r→a 首消息占位、`max_completion_tokens`、`response_format`↔`text.format`、responses 四方向 `parallel_tool_calls`；`redacted_thinking` 与 chat→a reasoning 见 `internal/protocol/convert_reasoning_test.go`。
 - tool_result 媒体改投（`internal/protocol/convert_media_test.go`）：a→chat / a→r / r→chat 三方向各覆盖纯图、多图（含 url source）、无图回归；视觉门控见 `internal/protocol/convert_fixups_test.go`（占位文本、能力查找顺序、三方向无视觉路径）。
 - 占位 reasoning_content 与 sequence_number（`internal/protocol/convert_fixups_test.go`）：thinking 方言注入/不覆盖/不越界注入，两个合成方向 0..N 连续递增。
