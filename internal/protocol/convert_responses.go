@@ -1618,184 +1618,176 @@ func convertResponsesRequestToOpenAI(body []byte) ([]byte, error) {
 // convertResponsesRequestToOpenAIFor is convertResponsesRequestToOpenAI with
 // per-target options (reasoning-effort dialect + vision gate for media
 // reinjection).
-func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byte, error) {
-	reasoningDialect := opts.ReasoningDialect
-	if reasoningDialect == "" {
-		reasoningDialect = ReasoningEffort
+// r2chatWalk carries the chat-message list being built while walking
+// Responses input items (the r→chat direction), plus the pending-reasoning
+// attachment state that must survive between items.
+type r2chatWalk struct {
+	msgs             []map[string]any
+	pendingReasoning string
+	lastAssistant    int  // msgs index of the last assistant message; -1 = none yet
+	imageOK          bool // target model accepts images (gates tool-output image re-injection)
+}
+
+// attachForward rides pendingReasoning on assistant message mi (cc-switch's
+// rule: reasoning_content must ride on the assistant message — DeepSeek-style
+// upstreams reject tool turns whose assistant message lacks it; a standalone
+// reasoning assistant message breaks role expectations).
+func (w *r2chatWalk) attachForward(mi int) {
+	if w.pendingReasoning != "" && mi >= 0 {
+		w.msgs[mi]["reasoning_content"] = w.pendingReasoning
+		w.pendingReasoning = ""
 	}
-	imageOK := opts.ImageOK
-	var src map[string]any
-	if err := sonic.Unmarshal(body, &src); err != nil {
-		return nil, fmt.Errorf("parse responses request: %w", err)
+}
+
+// attachBackward consumes pendingReasoning onto the LAST assistant message
+// (appending when it already carries reasoning_content, cc-switch's
+// append_reasoning_content "\n\n" separator). With no assistant to take it,
+// the reasoning is dropped + warned — never carried forward.
+func (w *r2chatWalk) attachBackward() {
+	if w.pendingReasoning == "" {
+		return
 	}
-	out := map[string]any{}
-	if v, ok := src["model"]; ok {
-		out["model"] = v
+	if w.lastAssistant < 0 {
+		convertWarn("dropping reasoning with no assistant message to attach to (r→chat)")
+		w.pendingReasoning = ""
+		return
 	}
-	var msgs []map[string]any
-	if ins, ok := src["instructions"].(string); ok && ins != "" {
-		msgs = append(msgs, map[string]any{"role": "system", "content": ins})
+	if prev := strOpt(w.msgs[w.lastAssistant]["reasoning_content"]); prev != "" {
+		w.msgs[w.lastAssistant]["reasoning_content"] = prev + "\n\n" + w.pendingReasoning
+	} else {
+		w.msgs[w.lastAssistant]["reasoning_content"] = w.pendingReasoning
 	}
-	// pendingReasoning accumulates reasoning item text until it can attach to
-	// an ASSISTANT message (cc-switch's rule: reasoning_content must ride on
-	// the assistant message — DeepSeek-style upstreams reject tool turns whose
-	// assistant message lacks it; a standalone reasoning assistant message
-	// breaks role expectations). At a USER-turn boundary the pending reasoning
-	// attaches BACKWARD to the previous assistant (reasoning must never leak
-	// across a user turn into the next assistant, cc-switch
-	// transform_codex_chat.rs:1012-1045); leftovers attach backward at the end.
-	pendingReasoning := ""
-	lastAssistant := -1 // msgs index of the last assistant message
-	attachReasoning := func(mi int) {
-		if pendingReasoning != "" && mi >= 0 {
-			msgs[mi]["reasoning_content"] = pendingReasoning
-			pendingReasoning = ""
+	w.pendingReasoning = ""
+}
+
+// addMessage converts one "message" input item into a chat message.
+func (w *r2chatWalk) addMessage(item map[string]any) {
+	role, _ := item["role"].(string)
+	if role == "" {
+		role = "user"
+	}
+	if role == "system" || role == "developer" {
+		role = "system"
+	}
+	if role != "assistant" {
+		// User/system turn boundary: consume pending reasoning backward
+		// NOW so it cannot leak across a user turn into the next assistant
+		// message (cc-switch transform_codex_chat.rs:1012-1045).
+		w.attachBackward()
+	}
+	w.msgs = append(w.msgs, map[string]any{"role": role, "content": responsesContentToChat(item["content"])})
+	if role == "assistant" {
+		w.lastAssistant = len(w.msgs) - 1
+		w.attachForward(w.lastAssistant)
+	}
+}
+
+// addToolCall converts one function / custom / hosted tool CALL item into an
+// assistant tool_calls entry.
+func (w *r2chatWalk) addToolCall(item map[string]any) {
+	callID := firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))
+	var name, arguments string
+	if item["type"] == "custom_tool_call" {
+		// Custom/freeform call: raw string input wrapped as
+		// {"input": <raw>} arguments for the wrapper function.
+		name = strOpt(item["name"])
+		arguments = wrapCustomCallArguments(strOpt(item["input"]))
+	} else if item["type"] == "tool_search_call" {
+		name = "tool_search"
+		arguments = hostedCallArguments(item)
+	} else if item["type"] == "web_search_call" {
+		name = "web_search"
+		arguments = hostedCallArguments(item)
+	} else {
+		// MCP namespace: history calls reference the flattened chat name;
+		// the namespace field does not cross over.
+		name = strOpt(item["name"])
+		if ns := strOpt(item["namespace"]); ns != "" {
+			name = nsFlattenName(ns, name)
 		}
+		arguments = firstNonEmpty(strKey(item, "arguments"), "{}")
 	}
-	// attachBackward consumes pendingReasoning onto the LAST assistant message
-	// (appending when it already carries reasoning_content, cc-switch's
-	// append_reasoning_content "\n\n" separator). With no assistant to take
-	// it, the reasoning is dropped + warned — never carried forward.
-	attachBackward := func() {
-		if pendingReasoning == "" {
+	tc := map[string]any{
+		"id": callID, "type": "function",
+		"function": map[string]any{
+			"name":      name,
+			"arguments": arguments,
+		},
+	}
+	// Append to the previous message if it is an assistant tool_calls
+	// message; otherwise start a new one.
+	if n := len(w.msgs); n > 0 && w.msgs[n-1]["role"] == "assistant" {
+		if tcs, ok := w.msgs[n-1]["tool_calls"].([]map[string]any); ok {
+			w.msgs[n-1]["tool_calls"] = append(tcs, tc)
 			return
 		}
-		if lastAssistant < 0 {
-			convertWarn("dropping reasoning with no assistant message to attach to (r→chat)")
-			pendingReasoning = ""
-			return
-		}
-		if prev := strOpt(msgs[lastAssistant]["reasoning_content"]); prev != "" {
-			msgs[lastAssistant]["reasoning_content"] = prev + "\n\n" + pendingReasoning
+	}
+	w.msgs = append(w.msgs, map[string]any{"role": "assistant", "tool_calls": []map[string]any{tc}})
+	w.lastAssistant = len(w.msgs) - 1
+	w.attachForward(w.lastAssistant)
+}
+
+// addToolOutput converts one tool OUTPUT item. The output may be a string OR
+// a parts array (input_text/input_image); images are reinjected as a
+// synthetic user message (cc-switch), gated on the target model's vision (#6).
+func (w *r2chatWalk) addToolOutput(item map[string]any) {
+	var text string
+	var imgs []map[string]any
+	if item["type"] == "tool_search_output" {
+		var isError bool
+		text, isError = responsesToolSearchOutputText(item)
+		text = markToolResultError(text, isError)
+	} else {
+		text, imgs = responsesOutputTextAndImages(item["output"])
+	}
+	if len(imgs) > 0 && !w.imageOK {
+		text = appendMediaPlaceholder(text)
+		imgs = nil
+	}
+	w.msgs = append(w.msgs, map[string]any{
+		"role":         "tool",
+		"tool_call_id": hostedCallID(item),
+		"content":      text,
+	})
+	if len(imgs) > 0 {
+		parts := []map[string]any{{"type": "text", "text": "[image returned by tool]"}}
+		parts = append(parts, imgs...)
+		w.msgs = append(w.msgs, map[string]any{"role": "user", "content": parts})
+	}
+}
+
+// addReasoning accumulates reasoning-item text until it can attach to an
+// assistant message (multi-item reasoning joins with "\n").
+func (w *r2chatWalk) addReasoning(item map[string]any) {
+	text, _ := responsesReasoningText(item)
+	if w.pendingReasoning != "" && text != "" {
+		w.pendingReasoning += "\n"
+	}
+	w.pendingReasoning += text
+}
+
+// finish normalizes the completed message list: trailing reasoning attaches
+// backward to the last assistant message (appended, same as the boundary
+// path); with no assistant at all, fall back to a standalone one (pinned our
+// semantics — cc-switch drops it). System messages are pulled to the head,
+// preserving relative order (cc-switch's collapse_system_messages_to_head —
+// MiniMax-style upstreams reject mid-thread system). Placeholder
+// reasoning_content (cc-switch): thinking-dialect upstreams (deepseek 400s
+// "reasoning_content must be passed back"; kimi/Moonshot likewise) require
+// EVERY assistant tool_calls message to carry it. Codex reasoning items are
+// empty-summary + encrypted_content, so the attached reasoning_content is
+// exactly empty here — inject the same placeholder cc-switch uses. Other
+// dialects don't inject.
+func (w *r2chatWalk) finish(reasoningDialect ReasoningDialect) []map[string]any {
+	if w.pendingReasoning != "" {
+		if w.lastAssistant >= 0 {
+			w.attachBackward()
 		} else {
-			msgs[lastAssistant]["reasoning_content"] = pendingReasoning
-		}
-		pendingReasoning = ""
-	}
-	for _, item := range responsesInputItems(src["input"]) {
-		switch item["type"] {
-		case "message":
-			role, _ := item["role"].(string)
-			if role == "" {
-				role = "user"
-			}
-			if role == "system" || role == "developer" {
-				role = "system"
-			}
-			if role != "assistant" {
-				// User/system turn boundary: consume pending reasoning backward
-				// NOW so it cannot leak into the next assistant message.
-				attachBackward()
-			}
-			msgs = append(msgs, map[string]any{"role": role, "content": responsesContentToChat(item["content"])})
-			if role == "assistant" {
-				lastAssistant = len(msgs) - 1
-				attachReasoning(lastAssistant)
-			}
-		case "function_call", "custom_tool_call", "tool_search_call", "web_search_call":
-			callID := firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))
-			var name, arguments string
-			if item["type"] == "custom_tool_call" {
-				// Custom/freeform call: raw string input wrapped as
-				// {"input": <raw>} arguments for the wrapper function.
-				name = strOpt(item["name"])
-				arguments = wrapCustomCallArguments(strOpt(item["input"]))
-			} else if item["type"] == "tool_search_call" {
-				name = "tool_search"
-				arguments = hostedCallArguments(item)
-			} else if item["type"] == "web_search_call" {
-				name = "web_search"
-				arguments = hostedCallArguments(item)
-			} else {
-				// MCP namespace: history calls reference the flattened chat name;
-				// the namespace field does not cross over.
-				name = strOpt(item["name"])
-				if ns := strOpt(item["namespace"]); ns != "" {
-					name = nsFlattenName(ns, name)
-				}
-				arguments = firstNonEmpty(strKey(item, "arguments"), "{}")
-			}
-			tc := map[string]any{
-				"id": callID, "type": "function",
-				"function": map[string]any{
-					"name":      name,
-					"arguments": arguments,
-				},
-			}
-			// Append to the previous message if it is an assistant tool_calls
-			// message; otherwise start a new one.
-			if n := len(msgs); n > 0 && msgs[n-1]["role"] == "assistant" {
-				if tcs, ok := msgs[n-1]["tool_calls"].([]map[string]any); ok {
-					msgs[n-1]["tool_calls"] = append(tcs, tc)
-					continue
-				}
-			}
-			msgs = append(msgs, map[string]any{"role": "assistant", "tool_calls": []map[string]any{tc}})
-			lastAssistant = len(msgs) - 1
-			attachReasoning(lastAssistant)
-		case "function_call_output", "custom_tool_call_output", "tool_search_output":
-			// output may be a string OR a parts array (input_text/input_image);
-			// images are reinjected as a synthetic user message (cc-switch),
-			// gated on the target model's vision (#6).
-			var text string
-			var imgs []map[string]any
-			if item["type"] == "tool_search_output" {
-				var isError bool
-				text, isError = responsesToolSearchOutputText(item)
-				text = markToolResultError(text, isError)
-			} else {
-				text, imgs = responsesOutputTextAndImages(item["output"])
-			}
-			if len(imgs) > 0 && !imageOK {
-				text = appendMediaPlaceholder(text)
-				imgs = nil
-			}
-			msgs = append(msgs, map[string]any{
-				"role":         "tool",
-				"tool_call_id": hostedCallID(item),
-				"content":      text,
-			})
-			if len(imgs) > 0 {
-				parts := []map[string]any{{"type": "text", "text": "[image returned by tool]"}}
-				parts = append(parts, imgs...)
-				msgs = append(msgs, map[string]any{"role": "user", "content": parts})
-			}
-		case "additional_tools":
-			// Tool declaration (codex 0.145+), consumed via
-			// responsesRequestTools — NOT a message; its role:"developer"
-			// must not enter the chat message stream.
-			continue
-		case "reasoning":
-			text, _ := responsesReasoningText(item)
-			if pendingReasoning != "" && text != "" {
-				pendingReasoning += "\n"
-			}
-			pendingReasoning += text
-		default:
-			convertWarn("dropping responses input item in r→chat request: " + strOf(item["type"]))
+			w.msgs = append(w.msgs, map[string]any{"role": "assistant", "reasoning_content": w.pendingReasoning})
+			w.pendingReasoning = ""
 		}
 	}
-	// Trailing reasoning attaches backward to the last assistant message
-	// (appended, same as the boundary path); with no assistant at all, fall
-	// back to a standalone one (pinned our semantics — cc-switch drops it).
-	if pendingReasoning != "" {
-		if lastAssistant >= 0 {
-			attachBackward()
-		} else {
-			msgs = append(msgs, map[string]any{"role": "assistant", "reasoning_content": pendingReasoning})
-			pendingReasoning = ""
-		}
-	}
-	// System messages must lead (MiniMax-style upstreams reject mid-thread
-	// system): pull them to the head, preserving relative order (cc-switch's
-	// collapse_system_messages_to_head).
-	msgs = collapseSystemToHead(msgs)
-	// Placeholder reasoning_content (cc-switch): thinking-dialect upstreams
-	// (deepseek 400s "reasoning_content must be passed back"; kimi/Moonshot
-	// likewise) require EVERY assistant tool_calls message to carry it. Codex
-	// reasoning items are empty-summary + encrypted_content, so the attached
-	// reasoning_content is exactly empty here — inject the same placeholder
-	// cc-switch uses. Other dialects don't inject.
+	msgs := collapseSystemToHead(w.msgs)
 	if reasoningDialect == ReasoningThinking {
 		for _, m := range msgs {
 			if m["role"] != "assistant" {
@@ -1810,15 +1802,19 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 			}
 		}
 	}
-	if len(msgs) > 0 {
-		out["messages"] = msgs
-	}
+	return msgs
+}
+
+// applyResponsesRequestChatFields maps the request-level (non-item) fields of
+// a Responses request onto the chat-completions output: tools (MCP namespace
+// flattening fails CLOSED — the forward layer turns a conversion error into a
+// 502), tool_choice, the vendor-specific reasoning-effort dialect, output
+// caps, response_format and sampling params.
+func applyResponsesRequestChatFields(out, src map[string]any, reasoningDialect ReasoningDialect) error {
 	if tools := responsesRequestTools(src); len(tools) > 0 {
-		// MCP namespace flattening: collisions fail CLOSED (the forward layer
-		// turns a conversion error into a 502).
 		ot, err := nsFlattenResponsesTools(tools)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if len(ot) > 0 {
 			out["tools"] = ot
@@ -1873,6 +1869,51 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 	if _, hasTools := out["tools"]; !hasTools {
 		delete(out, "tool_choice")
 		delete(out, "parallel_tool_calls")
+	}
+	return nil
+}
+
+func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byte, error) {
+	reasoningDialect := opts.ReasoningDialect
+	if reasoningDialect == "" {
+		reasoningDialect = ReasoningEffort
+	}
+	var src map[string]any
+	if err := sonic.Unmarshal(body, &src); err != nil {
+		return nil, fmt.Errorf("parse responses request: %w", err)
+	}
+	out := map[string]any{}
+	if v, ok := src["model"]; ok {
+		out["model"] = v
+	}
+	walk := &r2chatWalk{lastAssistant: -1, imageOK: opts.ImageOK}
+	if ins, ok := src["instructions"].(string); ok && ins != "" {
+		walk.msgs = append(walk.msgs, map[string]any{"role": "system", "content": ins})
+	}
+	for _, item := range responsesInputItems(src["input"]) {
+		switch item["type"] {
+		case "message":
+			walk.addMessage(item)
+		case "function_call", "custom_tool_call", "tool_search_call", "web_search_call":
+			walk.addToolCall(item)
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
+			walk.addToolOutput(item)
+		case "additional_tools":
+			// Tool declaration (codex 0.145+), consumed via
+			// responsesRequestTools — NOT a message; its role:"developer"
+			// must not enter the chat message stream.
+			continue
+		case "reasoning":
+			walk.addReasoning(item)
+		default:
+			convertWarn("dropping responses input item in r→chat request: " + strOf(item["type"]))
+		}
+	}
+	if msgs := walk.finish(reasoningDialect); len(msgs) > 0 {
+		out["messages"] = msgs
+	}
+	if err := applyResponsesRequestChatFields(out, src, reasoningDialect); err != nil {
+		return nil, err
 	}
 	return sonic.Marshal(out)
 }
