@@ -56,12 +56,15 @@ func AtomicWrite(path string, data []byte) error {
 	return os.Rename(temporary, path)
 }
 
-// BackupPath derives the timestamped backup path for a config file.
+// BackupPath derives the timestamped backup path for a config file. Backups
+// live under <configDir>/.model-proxy/back/ — the same hidden dot-dir
+// convention as takeover.BackupDir — so a repo-resident config.yaml does not
+// accumulate a visible back/ directory in the working tree.
 func BackupPath(configFile string) string {
 	directory := filepath.Dir(configFile)
 	base := filepath.Base(configFile)
 	stamp := time.Now().Format("20060102-150405")
-	return filepath.Join(directory, "back", base+"."+stamp+".bak")
+	return filepath.Join(directory, ".model-proxy", "back", base+"."+stamp+".bak")
 }
 
 // WriteConfigValidated writes config text after the caller's validation

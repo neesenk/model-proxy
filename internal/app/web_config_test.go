@@ -60,17 +60,17 @@ func TestConfigPutInvalidNoWrite(t *testing.T) {
 	if !bytes.Equal(got, original) {
 		t.Errorf("invalid write should not touch config; got %q", got)
 	}
-	if entries, _ := os.ReadDir(filepath.Join(filepath.Dir(cfgPath), "back")); len(entries) != 0 {
-		t.Errorf("invalid write should not create a backup; back/ has %d entries", len(entries))
+	if entries, _ := os.ReadDir(filepath.Join(filepath.Dir(cfgPath), ".model-proxy", "back")); len(entries) != 0 {
+		t.Errorf("invalid write should not create a backup; .model-proxy/back/ has %d entries", len(entries))
 	}
 }
 
-// readLatestBackup returns the contents of the most recent backup in the `back/`
-// directory sibling of cfgPath (timestamped names sort lexically = chronologically).
-// Fails the test if no backup exists.
+// readLatestBackup returns the contents of the most recent backup in the
+// `.model-proxy/back/` directory sibling of cfgPath (timestamped names sort
+// lexically = chronologically). Fails the test if no backup exists.
 func readLatestBackup(t *testing.T, cfgPath string) []byte {
 	t.Helper()
-	dir := filepath.Join(filepath.Dir(cfgPath), "back")
+	dir := filepath.Join(filepath.Dir(cfgPath), ".model-proxy", "back")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("no backup dir %s: %v", dir, err)

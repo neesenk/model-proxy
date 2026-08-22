@@ -203,7 +203,7 @@ model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历�
 代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；`listen` 由 validate 强制回环，无鉴权**（本地可信）。六个标签页：
 
 - **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。
-- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
+- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
 - **Analytics** — token + 等价成本趋势（日历日/月聚合；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a`）。
 - **Requests** — 请求日志查询（需 `request_log.enabled`）：按 model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。

@@ -148,7 +148,7 @@ func TestWriteConfigValidated(t *testing.T) {
 		t.Error("BackupConfig must skip missing source")
 	}
 
-	if got := BackupPath("/tmp/x/config.yaml"); filepath.Dir(got) != "/tmp/x/back" {
+	if got := BackupPath("/tmp/x/config.yaml"); filepath.Dir(got) != "/tmp/x/.model-proxy/back" {
 		t.Errorf("BackupPath = %q", got)
 	}
 }
