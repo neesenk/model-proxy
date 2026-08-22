@@ -180,6 +180,15 @@ spread。请求路径不深拷贝 quota 的 Notes/Windows/Details，也不为 pr
 config generation 时取得的这一个 DashboardSnapshot 计算，不得再次进入 Manager；
 因此同一响应中的 health/quota/pin/sticky/order 属于同一时刻、同一 generation。
 
+`POST /debug/route`（`internal/app/proxy_route_preview.go`，body = 客户端原样请求体，
+`?proto=` 覆盖协议，默认 anthropic）是**单请求版**的决策预览：复刻 forward 的早期
+步骤（model 提取、claude_mapping、route 查找、pin/force 收窄、cache 只读探测），
+排序同样走 `PreviewOrder`（`Commit=false`，不推进 spread、不落 sticky），并输出
+per-target 的 request-fit 判定（`routing.FitVerdict`，与 `Planner.Apply` 同语义，
+带 reason：能力缺失或 `estimated/context` 比例）。cache 探测以**预览请求自身**的
+header 计算 key——要得到与真实请求一致的 hit/miss 结论，调用方需带上同等的
+`anthropic-beta`/`accept-language`。预览不发起任何上游调用。
+
 ## Quality 打分（error rate + TTFT）
 
 排序键实际是 `score = surplus − qualityPenalty`：

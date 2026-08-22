@@ -2,6 +2,7 @@ package routing
 
 import (
 	"bytes"
+	"fmt"
 
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
@@ -27,35 +28,45 @@ func ProfileRequest(body []byte) Profile {
 // Fits reports whether model can serve profile according to an authoritative
 // per-model capability declaration and the models.dev catalog.
 func Fits(cat *catalog.Catalog, capabilities map[string][]string, model string, profile Profile) bool {
+	ok, _ := FitVerdict(cat, capabilities, model, profile)
+	return ok
+}
+
+// FitVerdict is Fits plus the reason for the verdict: declared capabilities
+// outrank the catalog, and the context check reports the estimate/window
+// ratio even on success. It backs the /debug/route preview; the scheduling
+// hot path uses Fits (same semantics, no reason strings).
+func FitVerdict(cat *catalog.Catalog, capabilities map[string][]string, model string, profile Profile) (bool, string) {
 	if declared, ok := capabilities[model]; ok {
 		if profile.HasImage && !hasCapability(declared, "image") {
-			return false
+			return false, "image capability not declared"
 		}
 		if profile.HasTools && !hasCapability(declared, "tools") {
-			return false
+			return false, "tools capability not declared"
 		}
 	} else if cat != nil {
 		if profile.HasImage {
 			modelMeta, ok := cat.Lookup(model)
 			if !ok || !supportsImage(modelMeta) {
-				return false
+				return false, "model metadata lacks image modality"
 			}
 		}
 		if profile.HasTools {
 			modelMeta, ok := cat.Lookup(model)
 			if !ok || !modelMeta.ToolCall {
-				return false
+				return false, "model metadata lacks tool calling"
 			}
 		}
 	}
 	if profile.EstimatedTokens > 0 {
-		if modelMeta, ok := lookupModelMeta(cat, model); ok &&
-			modelMeta.Context > 0 &&
-			profile.EstimatedTokens > modelMeta.Context {
-			return false
+		if modelMeta, ok := lookupModelMeta(cat, model); ok && modelMeta.Context > 0 {
+			if profile.EstimatedTokens > modelMeta.Context {
+				return false, fmt.Sprintf("estimated %d tokens exceed context window %d", profile.EstimatedTokens, modelMeta.Context)
+			}
+			return true, fmt.Sprintf("estimated %d / context %d tokens", profile.EstimatedTokens, modelMeta.Context)
 		}
 	}
-	return true
+	return true, ""
 }
 
 // FitsRequest profiles body and applies Fits without a manual capability

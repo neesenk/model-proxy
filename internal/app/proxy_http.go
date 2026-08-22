@@ -50,6 +50,12 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		w.Write(p.scheduleStatus())
 		return
 	}
+	if r.Method == http.MethodPost && r.URL.Path == "/debug/route" {
+		// Per-request routing decision preview: no upstream call, no scheduler
+		// mutation (see serveRoutePreview).
+		p.serveRoutePreview(w, r)
+		return
+	}
 	if p.pprofEnabled && strings.HasPrefix(r.URL.Path, "/debug/pprof") {
 		// Live profiling (MP_PPROF=1). Same browser-origin guard as the other
 		// debug surfaces; the pprof handlers self-register on DefaultServeMux.
