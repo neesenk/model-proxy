@@ -9,6 +9,16 @@ func (p *Proxy) buildExpandedRoutes() map[string][]RouteTarget {
 	return BuildExpandedRoutes(p.cfg, p.implicitRoutes, p.expandTarget)
 }
 
+// routeKeySet derives the schedule view's route-name key set from the expanded
+// route map. Built once per generation so the request hot path can share it.
+func routeKeySet(expanded map[string][]RouteTarget) map[string]bool {
+	keys := make(map[string]bool, len(expanded))
+	for k := range expanded {
+		keys[k] = true
+	}
+	return keys
+}
+
 // expandTarget fans a single route target out across a pooled provider's
 // virtuals via the unified routing resolver front door.
 func (p *Proxy) expandTarget(t RouteTarget) []RouteTarget {

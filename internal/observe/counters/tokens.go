@@ -126,19 +126,31 @@ func (s *UsageScanner) Commit() {
 	}
 }
 
+// usageMarker is the JSON key every counted event shape carries. Checking it
+// first lets plain delta lines skip both probe parses.
+var usageMarker = []byte(`"usage"`)
+
 // observe scans a chunk for complete lines, extracting usage. Partial line bytes
 // are held in s.line (capped); an over-long line is flushed (skipped) to bound memory.
 func (s *UsageScanner) observe(chunk []byte) {
-	for _, b := range chunk {
-		if b == '\n' {
-			s.parseLine(s.line)
-			s.line = s.line[:0]
-			continue
+	for len(chunk) > 0 {
+		i := bytes.IndexByte(chunk, '\n')
+		segment := chunk
+		if i >= 0 {
+			segment = chunk[:i]
 		}
-		if len(s.line) < scanLineCap {
-			s.line = append(s.line, b)
+		if room := scanLineCap - len(s.line); room > 0 {
+			if len(segment) > room {
+				segment = segment[:room]
+			}
+			s.line = append(s.line, segment...)
 		}
-		// else: drop the byte (oversized line) - still passed through via p.
+		if i < 0 {
+			return
+		}
+		s.parseLine(s.line)
+		s.line = s.line[:0]
+		chunk = chunk[i+1:]
 	}
 }
 
@@ -150,6 +162,11 @@ func (s *UsageScanner) parseLine(line []byte) {
 	}
 	payload := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
 	if len(payload) == 0 || payload[0] != '{' {
+		return
+	}
+	// Pre-filter: every counted event shape carries a "usage" key; a miss
+	// (ordinary delta lines) skips both probe parses below.
+	if !bytes.Contains(payload, usageMarker) {
 		return
 	}
 	// Try anthropic shapes first, then openai.

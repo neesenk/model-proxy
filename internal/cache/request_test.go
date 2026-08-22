@@ -47,3 +47,19 @@ func TestKeySeparatesResponseAffectingInputs(t *testing.T) {
 		t.Errorf("non-response-affecting header changed key: got %q, want %q", got, base)
 	}
 }
+
+// TestKeyEncodingIsStable pins the exact key encoding (length-prefixed
+// method/path/query/key-headers/body) with a golden value: a silent change to
+// the hash layout would invalidate every cached entry across upgrades.
+func TestKeyEncodingIsStable(t *testing.T) {
+	request, err := http.NewRequest(http.MethodPost, "http://example.invalid/v1/responses?beta=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("anthropic-beta", "output-128k")
+	got := Key(request, []byte(`{"model":"glm","stream":false}`))
+	const want = "8706438aff82a079d4a41b968dcbb5438cbaa520548a28a068d0396cfe1b880b"
+	if got != want {
+		t.Errorf("Key = %q, want %q", got, want)
+	}
+}

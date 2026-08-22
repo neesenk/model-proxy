@@ -34,18 +34,27 @@ func NewProxy(cfg *Config) *Proxy {
 // Proxy owns an isolated state file before the tracker loads or starts.
 func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
+	// http.DefaultTransport pools at most 2 idle connections per host; concurrent
+	// streams to one upstream would re-dial TLS after the first two close. The
+	// proxy fans out to a handful of upstream hosts, so pool generously instead.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 256
+	transport.MaxIdleConnsPerHost = 100
 	p := &Proxy{
 		lifecycle: runtimestate.NewLifecycle(),
 		cfg:       cfg,
 		providers: built.Providers,
-		client:    &http.Client{Timeout: 0},
+		client:    &http.Client{Timeout: 0, Transport: transport},
 		poolIndex: built.PoolIndex,
 		parentOf:  built.ParentOf,
+		// Read once here (not per request): MP_PPROF=1 turns on /debug/pprof/.
+		pprofEnabled: os.Getenv("MP_PPROF") == "1",
 	}
 	p.runtimeState.ReplaceGeneration(1)
 	p.configGeneration.Store(1)
 	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.Eligible)
 	p.expandedRoutes = p.buildExpandedRoutes()
+	p.routeKeys = routeKeySet(p.expandedRoutes)
 	// Config-time routing hazards (reasoning-replay models behind conversion,
 	// missing protocol: on hint providers): appended to the warnings channel
 	// (/api/status + `models` CLI) AND logged — the operator should see them at

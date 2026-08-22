@@ -1066,8 +1066,17 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 			}
 		}
 	}
-	if stops, ok := src["stop"].([]any); ok && len(stops) > 0 {
-		out["stop_sequences"] = stops
+	// OpenAI accepts `stop` as an array of strings or a single string;
+	// Anthropic only has the array form (stop_sequences).
+	switch stops := src["stop"].(type) {
+	case []any:
+		if len(stops) > 0 {
+			out["stop_sequences"] = stops
+		}
+	case string:
+		if stops != "" {
+			out["stop_sequences"] = []any{stops}
+		}
 	}
 	return sonic.Marshal(out)
 }
@@ -1821,21 +1830,25 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		// Never silently swallow a mid-stream upstream error as "normal finish".
 		// The string form ({"error":"rate limited"} — some gateways emit it) is
 		// recognized too: the object-only decode silently skips it.
-		var errChunk struct {
-			Error struct {
-				Message string `json:"message"`
-				Type    string `json:"type"`
-			} `json:"error"`
-		}
 		var errMessage, errType string
-		if sonic.Unmarshal([]byte(payload), &errChunk) == nil && (errChunk.Error.Message != "" || errChunk.Error.Type != "") {
-			errMessage, errType = errChunk.Error.Message, errChunk.Error.Type
-		} else {
-			var errString struct {
-				Error string `json:"error"`
+		// Both recognized error forms carry an "error" key; ordinary
+		// delta/usage chunks skip the probes entirely.
+		if strings.Contains(payload, `"error"`) {
+			var errChunk struct {
+				Error struct {
+					Message string `json:"message"`
+					Type    string `json:"type"`
+				} `json:"error"`
 			}
-			if sonic.Unmarshal([]byte(payload), &errString) == nil && errString.Error != "" {
-				errMessage = errString.Error
+			if sonic.UnmarshalString(payload, &errChunk) == nil && (errChunk.Error.Message != "" || errChunk.Error.Type != "") {
+				errMessage, errType = errChunk.Error.Message, errChunk.Error.Type
+			} else {
+				var errString struct {
+					Error string `json:"error"`
+				}
+				if sonic.UnmarshalString(payload, &errString) == nil && errString.Error != "" {
+					errMessage = errString.Error
+				}
 			}
 		}
 		if errMessage != "" || errType != "" {
@@ -1881,7 +1894,7 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 				CacheCreationInputTokens int `json:"cache_creation_input_tokens"` // direct spelling
 			} `json:"usage"`
 		}
-		if sonic.Unmarshal([]byte(payload), &chunk) != nil {
+		if sonic.UnmarshalString(payload, &chunk) != nil {
 			continue
 		}
 		if chunk.ID != "" {
@@ -2099,7 +2112,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				CacheCreate  *int `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 		}
-		if sonic.Unmarshal([]byte(payload), &ev) != nil {
+		if sonic.UnmarshalString(payload, &ev) != nil {
 			continue
 		}
 		if ev.Message.Model != "" {

@@ -6,8 +6,13 @@ import (
 	"model-proxy/internal/httpx"
 	"model-proxy/internal/observe/counters"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
+
+	// Registers the pprof handlers on http.DefaultServeMux; the Proxy handler
+	// dispatches into that mux only when MP_PPROF=1 was set at construction.
+	_ "net/http/pprof"
 
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
@@ -43,6 +48,15 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("content-type", "application/json")
 		w.Write(p.scheduleStatus())
+		return
+	}
+	if p.pprofEnabled && strings.HasPrefix(r.URL.Path, "/debug/pprof") {
+		// Live profiling (MP_PPROF=1). Same browser-origin guard as the other
+		// debug surfaces; the pprof handlers self-register on DefaultServeMux.
+		if !webtransport.GuardBrowserOrigin(w, r) {
+			return
+		}
+		http.DefaultServeMux.ServeHTTP(w, r)
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/events" {

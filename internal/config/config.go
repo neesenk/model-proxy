@@ -54,6 +54,20 @@ type Config struct {
 	Guard GuardConfig `yaml:"guard"`
 	// Budgets configures personal monthly equivalent-cost alerts.
 	Budgets BudgetsConfig `yaml:"budgets"`
+	// MaxRequestBodyBytes caps the accepted inbound request body; larger
+	// bodies are rejected with 413 before any routing work, bounding per-
+	// request memory (the body is fully buffered for routing/conversion).
+	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes"`
+}
+
+// MaxRequestBodyBytesValue returns the inbound request-body cap in bytes,
+// defaulting to 64 MiB (aligned with the upstream response read cap). Values
+// <= 0 fall back to the default.
+func (c Config) MaxRequestBodyBytesValue() int64 {
+	if c.MaxRequestBodyBytes > 0 {
+		return c.MaxRequestBodyBytes
+	}
+	return 64 << 20
 }
 
 // GuardConfig configures the outbound secret scan applied to the raw client
@@ -654,6 +668,9 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Prices              map[string]PriceConfig  `yaml:"prices"`
 		Guard               GuardConfig             `yaml:"guard"`
 		Budgets             BudgetsConfig           `yaml:"budgets"`
+		// Must mirror Config.MaxRequestBodyBytes (same silent-drop trap as the
+		// shadow knobs above).
+		MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
@@ -691,6 +708,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Prices = raw.Prices
 	cfg.Guard = raw.Guard
 	cfg.Budgets = raw.Budgets
+	cfg.MaxRequestBodyBytes = raw.MaxRequestBodyBytes
 	cfg.LogFile = ExpandPath(cfg.LogFile)
 	t := &cfg.Takeover
 	// Takeover paths default to each client's standard config location (and

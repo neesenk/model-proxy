@@ -1033,8 +1033,15 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 	} else if v, ok := src["max_tokens"]; ok {
 		out["max_output_tokens"] = v
 	}
-	if stops, ok := src["stop"].([]any); ok && len(stops) > 0 {
-		convertWarn("dropping stop (Responses API has no stop parameter)")
+	switch stops := src["stop"].(type) {
+	case []any:
+		if len(stops) > 0 {
+			convertWarn("dropping stop (Responses API has no stop parameter)")
+		}
+	case string:
+		if stops != "" {
+			convertWarn("dropping stop (Responses API has no stop parameter)")
+		}
 	}
 	if rf := asMap(src["response_format"]); rf != nil {
 		if f := chatResponseFormatToTextFormat(rf); f != nil {

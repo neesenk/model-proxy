@@ -46,6 +46,20 @@ func TestConvertOpenAIRequestToAnthropic(t *testing.T) {
 	}
 }
 
+// TestConvertOpenAIRequestToAnthropic_StopStringForm: OpenAI also accepts a
+// single-string `stop`; it must wrap into the one-element stop_sequences array
+// Anthropic requires instead of being silently dropped.
+func TestConvertOpenAIRequestToAnthropic_StopStringForm(t *testing.T) {
+	in := []byte(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}],"stop":"END"}`)
+	out, err := convertOpenAIRequestToAnthropic(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(out); !strings.Contains(s, `"stop_sequences":["END"]`) {
+		t.Errorf("string stop not converted to stop_sequences: %s", s)
+	}
+}
+
 // TestConvertOpenAIRequestToAnthropic_ResponsesInputFailsClosed (bug 2): the
 // OpenAI Responses API (/v1/responses) carries its payload in `input` (a list),
 // not Chat Completions' `messages`. Responses is now its own "responses" protocol

@@ -37,6 +37,7 @@ func (p *Proxy) Reload(configPath string) error {
 	p.parentOf = built.ParentOf
 	p.implicitRoutes = newImplicit
 	p.expandedRoutes = p.buildExpandedRoutes()
+	p.routeKeys = routeKeySet(p.expandedRoutes)
 	hw := ConfigRoutingWarnings(cfg, p.expandedRoutes)
 	p.routeWarnings = append(newWarnings, hw...)
 	// Rebuild the cache from the new config (pure in-memory, no goroutine/file

@@ -55,6 +55,7 @@ type Proxy struct {
 	poolIndex      map[string][]string      // parent name → sorted virtual ids (only multi-account parents)
 	parentOf       map[string]string        // virtual id → parent name
 	expandedRoutes map[string][]RouteTarget // exposed model → expanded targets (explicit + implicit)
+	routeKeys      map[string]bool          // key set of expandedRoutes; generation-owned, shared by the scheduling hot path
 	implicitRoutes map[string]RouteTarget   // exposed model → single target auto-derived from logged-in providers' model lists (for models not in cfg.Routes)
 	routeWarnings  []string                 // ambiguity warnings for implicit routes (multi-provider); surfaced in `models` CLI + /api/status
 
@@ -62,4 +63,9 @@ type Proxy struct {
 	// calls back into Proxy while locked and survives reload generations.
 	wireCaps  runtimewire.Store
 	wireProbe bool
+
+	// pprofEnabled (MP_PPROF=1 at construction) exposes /debug/pprof/ on the
+	// proxy handler for live profiling. Opt-in: profiles can carry request
+	// data in heap samples, so the endpoint is off by default.
+	pprofEnabled bool
 }

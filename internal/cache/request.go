@@ -29,6 +29,11 @@ func Key(request *http.Request, body []byte) string {
 			writeField(name + ":" + value)
 		}
 	}
-	writeField(string(body))
+	// Same length-prefixed encoding as writeField, but hashing the body bytes
+	// directly: converting to string first would copy the whole body twice.
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(body)))
+	hash.Write(length[:])
+	hash.Write(body)
 	return hex.EncodeToString(hash.Sum(nil))
 }

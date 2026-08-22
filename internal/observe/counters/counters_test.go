@@ -144,3 +144,38 @@ func TestUsageScannerCommit(t *testing.T) {
 		t.Errorf("Close = %v", err)
 	}
 }
+
+// sevenByteReader forces every Read to return at most 7 bytes so SSE lines
+// split across chunks — exercising the scanner's partial-line reassembly.
+type sevenByteReader struct{ r *strings.Reader }
+
+func (c *sevenByteReader) Read(p []byte) (int, error) {
+	if len(p) > 7 {
+		p = p[:7]
+	}
+	return c.r.Read(p)
+}
+
+// TestUsageScannerShapesAndChunking: anthropic message_start/message_delta and
+// openai usage lines all count (input sums both shapes' contributions); plain
+// delta lines without a "usage" key count nothing; lines split across Read
+// calls reassemble; an over-cap line is skipped without poisoning the next one.
+func TestUsageScannerShapesAndChunking(t *testing.T) {
+	tc := NewTokenCounter()
+	k := TokenKey{Provider: "p", Model: "m"}
+	stream := "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7,\"cache_read_input_tokens\":3}}}\n\n" +
+		"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"plain delta\"}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n" +
+		"data: {\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\n" +
+		"data: {\"pad\":\"" + strings.Repeat("x", 70*1024) + "\"}\n\n" +
+		"data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n"
+	s := NewUsageScanner(io.NopCloser(&sevenByteReader{r: strings.NewReader(stream)}), k, tc, nil)
+	if _, err := io.Copy(io.Discard, s); err != nil {
+		t.Fatal(err)
+	}
+	snap := tc.Snapshot()[k]
+	want := TokenUsage{Input: 17, Output: 7, CacheRead: 3, Requests: 1}
+	if snap != want {
+		t.Fatalf("committed = %+v, want %+v", snap, want)
+	}
+}

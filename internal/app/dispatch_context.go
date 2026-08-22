@@ -23,6 +23,7 @@ type RuntimeSnapshot struct {
 	PoolIndex      map[string][]string
 	ParentOf       map[string]string
 	ExpandedRoutes map[string][]RouteTarget
+	RouteKeys      map[string]bool
 	Catalog        *catalog.Catalog
 	Cache          *responsecache.Store
 	Shadow         *shadow.Runtime
@@ -41,6 +42,7 @@ func (p *Proxy) SnapshotRuntime() RuntimeSnapshot {
 		PoolIndex:      p.poolIndex,
 		ParentOf:       p.parentOf,
 		ExpandedRoutes: p.expandedRoutes,
+		RouteKeys:      p.routeKeys,
 		Catalog:        p.catalog,
 		Cache:          p.cache,
 		Shadow:         p.shadow.Load(),

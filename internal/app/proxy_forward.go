@@ -41,12 +41,25 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	parentOf := runtime.ParentOf
 	cache := runtime.Cache
 
-	origBody, err := io.ReadAll(r.Body)
+	// Bound per-request memory: the body is fully buffered for routing and
+	// conversion, so anything over max_request_body_bytes (default 64 MiB) is
+	// rejected before any routing work.
+	maxBody := cfg.MaxRequestBodyBytesValue()
+	origBody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	r.Body.Close()
+	if int64(len(origBody)) > maxBody {
+		p.publishTerminalEvent(requestID, r, proto, "", http.StatusRequestEntityTooLarge)
+		http.Error(w, fmt.Sprintf("request body exceeds max_request_body_bytes (%d bytes)", maxBody), http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// Detect the calling agent once (UA / known headers); attributed to guard
+	// and cache-hit events here and to whichever target commits downstream.
+	agent := counters.DetectAgent(r)
 
 	calledModel := protocol.ExtractModel(origBody)
 	if calledModel == "" {
@@ -94,7 +107,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 				Type:      "guard",
 				Ts:        time.Now().UnixMilli(),
 				RequestID: requestID,
-				Agent:     counters.DetectAgent(r),
+				Agent:     agent,
 				Protocol:  proto,
 				Exposed:   exposed,
 				Detail:    "secrets=" + strings.Join(names, ",") + " action=" + action,
@@ -126,7 +139,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 				Type:      "end",
 				Ts:        time.Now().UnixMilli(),
 				RequestID: requestID,
-				Agent:     counters.DetectAgent(r),
+				Agent:     agent,
 				Protocol:  proto,
 				// Same mapping as the start event above: with claude_mapping
 				// the live view must show ONE exposed name per request, not
@@ -173,17 +186,8 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	sessionKey := r.Header.Get("x-claude-code-session-id")
 	// routeKeys = all callable route names (explicit ∪ implicit) — used by
 	// decideOrder to tell route-name sticky keys (preserve) from session-id keys
-	// (evict after dwell). Built from the expanded map so implicit routes count.
-	routeKeys := make(map[string]bool, len(expanded))
-	for k := range expanded {
-		routeKeys[k] = true
-	}
-	// requestID groups this client request's failover attempts in the per-request
-	// access log + live events. Generated once at the handler top (so early
-	// terminal/cache-hit paths share it) and passed in here.
-	// Detect the calling agent once (from the UA / known headers); attributed to
-	// whichever target commits, in the parallel agent-stats pipeline.
-	agent := counters.DetectAgent(r)
+	// (evict after dwell). Generation-owned: rebuilt with expandedRoutes.
+	routeKeys := runtime.RouteKeys
 
 	// Live request monitor (#6): announce the in-flight request so the Web UI's
 	// live view sees who is sending + where it routed, before the response lands.

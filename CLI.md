@@ -143,6 +143,13 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
   quota，正常退出。8 秒内未 drain 时强制取消活动连接，并记录
   `[shutdown] HTTP drain exceeded 8s (...)`; handler 完成退栈后继续 final flush。
 
+### 性能剖析（可选）
+
+- 环境变量 `MP_PPROF=1` 启动(前台或 daemon 均继承)后,proxy handler 暴露
+  `http://127.0.0.1:<LISTEN>/debug/pprof/`(与 `/debug/schedule` 同一浏览器来源
+  防护)。默认关闭:heap profile 可能携带请求数据采样,仅调试时开启,配合
+  `go tool pprof` 使用。
+
 ---
 
 ## 2. `takeover <client>` — 接管客户端配置

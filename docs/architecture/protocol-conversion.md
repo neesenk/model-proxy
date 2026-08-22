@@ -93,6 +93,8 @@ Responses → {anthropic, chat}（`responsesSSETo*`，读 `response.*` 事件）
 
 - `tools` / `tool_choice` 双向映射，`any ↔ required`。
 - assistant `tool_use` ↔ OpenAI `tool_calls`，arguments 使用 JSON 字符串。
+- `stop_sequences` ↔ `stop`（数组）；chat 的单字符串 `stop`（OpenAI 合法形态）
+  包装为单元素数组，不再被静默丢弃；chat→r 方向字符串形态同样计入丢弃告警。
 - user `tool_result` 转成独立 `role: tool`，其余 text/image 聚合回 user。
 - 连续 tool 消息合并到同一 user turn。
 - Anthropic role 必须交替；首消息不是 user 时插入占位。
