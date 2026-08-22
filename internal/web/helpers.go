@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"log"
 	"model-proxy/internal/appapi"
 	"net/http"
 	"os"
@@ -29,12 +29,19 @@ func contentTypeFor(name string) string {
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("content-type", "application/json")
-	w.WriteHeader(code)
+	// Marshal BEFORE committing the status line: on failure we can still send
+	// a well-formed 500 instead of panicking (net/http recovers per-connection,
+	// so a panic would kill this response with an empty/truncated body). A
+	// marshal error means a handler passed an unsupported value type — a
+	// programming bug, not a client problem.
 	data, err := json.Marshal(v)
 	if err != nil {
-		panic(fmt.Sprintf("write JSON: %v", err))
+		log.Printf("[web] writeJSON: marshal %T: %v", v, err)
+		http.Error(w, "internal encoding error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(code)
 	_, _ = w.Write(data)
 }
 

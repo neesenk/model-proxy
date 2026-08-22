@@ -581,12 +581,14 @@ func TestReadHelperBranches(t *testing.T) {
 	if unavailable.Code != http.StatusServiceUnavailable || unavailable.Body.String() != `{"error":"catalog is unavailable"}` {
 		t.Fatalf("unavailable response = (%d, %q)", unavailable.Code, unavailable.Body.String())
 	}
-	defer func() {
-		if recover() == nil {
-			t.Fatal("writeJSON accepted a value json.Marshal cannot encode")
-		}
-	}()
-	writeJSON(httptest.NewRecorder(), http.StatusOK, math.NaN())
+	// An unmarshalable value (NaN) must degrade to a well-formed 500, NOT a
+	// panic: net/http would recover it per-connection, leaving the client an
+	// empty/truncated body instead of an explicit error.
+	bad := httptest.NewRecorder()
+	writeJSON(bad, http.StatusOK, math.NaN())
+	if bad.Code != http.StatusInternalServerError || bad.Body.String() == "" {
+		t.Fatalf("unmarshalable value = (%d, %q), want 500 with an error body", bad.Code, bad.Body.String())
+	}
 }
 
 func TestReadLogsUnavailableAndFailure(t *testing.T) {
