@@ -39,7 +39,10 @@ func serveEventsWithTicks(hub *Hub, w http.ResponseWriter, r *http.Request, tick
 		}
 		return
 	}
-	ch, recent, cancel := hub.Subscribe()
+	// SubscribeContext: the subscription dies with the request context even if
+	// a future refactor drops the explicit cancel below — a forgotten cancel
+	// would otherwise leak the buffered channel for the process lifetime.
+	ch, recent, cancel := hub.SubscribeContext(r.Context())
 	defer cancel()
 
 	writeEvent := func(e Event) bool {

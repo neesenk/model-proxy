@@ -1,7 +1,10 @@
 // Package events owns the in-memory live-request event stream.
 package events
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 const recentCap = 200
 
@@ -76,6 +79,20 @@ func (h *Hub) Subscribe() (<-chan Event, []Event, func()) {
 		h.mu.Unlock()
 	}
 	return ch, recent, cancel
+}
+
+// SubscribeContext is Subscribe plus an automatic release: the subscription
+// is removed when ctx is done, so a caller that forgets cancel cannot leak a
+// dead subscriber (and its buffered channel) for the process lifetime. The
+// returned cancel still works for explicit early cleanup and is safe to call
+// twice (AfterFunc's stop + the map delete are both idempotent).
+func (h *Hub) SubscribeContext(ctx context.Context) (<-chan Event, []Event, func()) {
+	ch, recent, cancel := h.Subscribe()
+	stop := context.AfterFunc(ctx, cancel)
+	return ch, recent, func() {
+		stop()
+		cancel()
+	}
 }
 
 // Snapshot returns a detached copy of the recent-event ring.
