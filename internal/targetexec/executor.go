@@ -120,7 +120,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			executor.failover(target)
 			return Result{Outcome: OutcomeFailedHard}
 		}
-		copyHeaderWhitelist(req.Header, exchange.Request.Header, "content-type", "accept", "user-agent", "x-session-id", "user_id", "x-claude-code-session-id", "x-interaction-type", "x-interaction-id", "prompt_cache_key", "x-anthropic-billing-header", "anthropic-beta", "accept-language")
+		copyHeaderWhitelist(req.Header, exchange.Request.Header, upstreamHeaderWhitelist...)
 		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		if err := providerImpl.AuthHeaders(req); err != nil {
 			log.Printf("[proto=%s provider=%s] auth error: %v", plan.ClientProtocol(), target.Provider, err)
@@ -494,6 +494,36 @@ func (executor Executor) release(provider string) {
 // forwarding ?force_provider=x leaks an internal knob to third parties and
 // strict-argument upstreams reject the request outright.
 var internalQueryKeys = map[string]bool{"force_provider": true}
+
+// upstreamHeaderWhitelist is the client → upstream header pass-through list.
+// Everything else (Cookie, Authorization, tracing/idempotency headers, ...) is
+// dropped: client credentials and ambient headers must not leak to a different
+// provider than the one they were issued for. Per entry:
+//
+//   - content-type / accept: payload and response-shape negotiation
+//   - user-agent: some backends gate on client identity (codex originator checks)
+//   - anthropic-beta: multi-valued beta-capability declarations (see
+//     copyHeaderWhitelist — values are Add-ed, never collapsed)
+//   - x-claude-code-session-id / user_id / x-session-id /
+//     x-interaction-type / x-interaction-id: session + agent attribution the
+//     backends echo for prompt-cache warmth and abuse accounting
+//   - prompt_cache_key: upstream prompt-cache shard selection
+//   - x-anthropic-billing-header: billing-plan attribution on anthropic bases
+//   - accept-language: locale-dependent model behavior
+var upstreamHeaderWhitelist = []string{
+	"content-type",
+	"accept",
+	"user-agent",
+	"x-session-id",
+	"user_id",
+	"x-claude-code-session-id",
+	"x-interaction-type",
+	"x-interaction-id",
+	"prompt_cache_key",
+	"x-anthropic-billing-header",
+	"anthropic-beta",
+	"accept-language",
+}
 
 // hopByHopHeaders must never be forwarded from the upstream response to the
 // client (RFC 9110 §7.6.1); headers named by the Connection header are

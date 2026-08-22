@@ -236,10 +236,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 			// Client went away before any commit — no terminal status is
 			// writable to a dead connection. Close the live event pair as 499
 			// (client closed request), same as the cooldown-wait cancel path.
-			p.events.Publish(observeevents.Event{
-				Type: "end", Ts: time.Now().UnixMilli(), RequestID: requestID,
-				Agent: agent, Protocol: proto, Exposed: exposed, Status: 499,
-			})
+			p.publishTerminalEvent(requestID, r, proto, exposed, statusClientGone)
 			return
 		}
 		if res.conversionErr != nil && len(res.tried) == 0 {
@@ -293,10 +290,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 			case <-r.Context().Done():
 				// Client gave up waiting — close the live event pair (499 =
 				// client closed request) and write nothing.
-				p.events.Publish(observeevents.Event{
-					Type: "end", Ts: time.Now().UnixMilli(), RequestID: requestID,
-					Agent: agent, Protocol: proto, Exposed: exposed, Status: 499,
-				})
+				p.publishTerminalEvent(requestID, r, proto, exposed, statusClientGone)
 				return
 			}
 		case routing.FailureRetryNow:
@@ -305,39 +299,56 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 			log.Printf("[proto=%s model=%s] a cooled-down target recovered; retrying immediately (round %d/2)", proto, exposed, round+1)
 			continue
 		}
-		// Terminal: every target failed. The status is honest about the CLASS of
-		// failures seen ACROSS ALL PASSES (not a racy health re-read — a target
-		// whose cooldown lapsed mid-request without a retry must not flip the
-		// verdict): pure rate-limit → 429 + Retry-After (the upstreams' own
-		// answer, per RFC 9110); any hard failure → 502. Attribute the failure
-		// to the calling agent so failing-only agents stay visible (first-tried
-		// target = where the request WAS directed).
-		if p.agents != nil && agent != "" && res.firstTried.Provider != "" {
-			p.agents.IncRequests(agent, res.firstTried.Provider, res.firstTried.Model)
-			p.agents.IncFailure(agent, res.firstTried.Provider, res.firstTried.Model)
-		}
-		status := http.StatusBadGateway
-		msg := fmt.Sprintf("all targets failed for model %q", exposed)
-		if decision.RateLimited {
-			w.Header().Set("Retry-After", strconv.Itoa(decision.RetryAfterSeconds))
-			status = http.StatusTooManyRequests
-			msg = fmt.Sprintf("all providers for model %q are rate-limited; retry after %ds", exposed, decision.RetryAfterSeconds)
-		}
-		// Live monitor (#6): every target failed → emit an end event so the live
-		// view surfaces the failure (a retry-looping agent that always errors is
-		// otherwise invisible — only starts, never ends).
-		p.events.Publish(observeevents.Event{
-			Type:      "end",
-			Ts:        time.Now().UnixMilli(),
-			RequestID: requestID,
-			Agent:     agent,
-			Protocol:  proto,
-			Exposed:   exposed,
-			Status:    status,
-		})
-		http.Error(w, msg, status)
+		// Terminal: every target failed across all passes — classify and answer.
+		p.writeAllTargetsFailed(w, r, requestID, proto, exposed, agent, res, decision)
 		return
 	}
+}
+
+// statusClientGone marks a request abandoned by the CALLER (client closed the
+// connection) before any terminal status was writable to the dead socket. The
+// live view uses it to distinguish "we failed" from "they left".
+const statusClientGone = 499
+
+// writeAllTargetsFailed answers the terminal response after every failover
+// pass failed, closing the live event pair. The status is honest about the
+// CLASS of failures seen ACROSS ALL PASSES (not a racy health re-read — a
+// target whose cooldown lapsed mid-request without a retry must not flip the
+// verdict): pure rate-limit → 429 + Retry-After (the upstreams' own answer,
+// per RFC 9110); any hard failure → 502. Attribute the failure to the calling
+// agent so failing-only agents stay visible (first-tried target = where the
+// request WAS directed).
+func (p *Proxy) writeAllTargetsFailed(
+	w http.ResponseWriter,
+	r *http.Request,
+	requestID, proto, exposed, agent string,
+	res serveResult,
+	decision routing.FailureDecision,
+) {
+	if p.agents != nil && agent != "" && res.firstTried.Provider != "" {
+		p.agents.IncRequests(agent, res.firstTried.Provider, res.firstTried.Model)
+		p.agents.IncFailure(agent, res.firstTried.Provider, res.firstTried.Model)
+	}
+	status := http.StatusBadGateway
+	msg := fmt.Sprintf("all targets failed for model %q", exposed)
+	if decision.RateLimited {
+		w.Header().Set("Retry-After", strconv.Itoa(decision.RetryAfterSeconds))
+		status = http.StatusTooManyRequests
+		msg = fmt.Sprintf("all providers for model %q are rate-limited; retry after %ds", exposed, decision.RetryAfterSeconds)
+	}
+	// Live monitor (#6): every target failed → emit an end event so the live
+	// view surfaces the failure (a retry-looping agent that always errors is
+	// otherwise invisible — only starts, never ends).
+	p.events.Publish(observeevents.Event{
+		Type:      "end",
+		Ts:        time.Now().UnixMilli(),
+		RequestID: requestID,
+		Agent:     agent,
+		Protocol:  proto,
+		Exposed:   exposed,
+		Status:    status,
+	})
+	http.Error(w, msg, status)
 }
 
 // serveState carries the two per-request pieces of state that must survive a
