@@ -34,4 +34,5 @@ yarn-error.log*
 .omx/
 *.swp
 .zcode/
-.orca
+.orca/
+.claude/
