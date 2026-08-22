@@ -149,6 +149,7 @@ reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔opena
 
 ## 接线要求
 
+- 跨协议请求的后处理(Anthropic cache breakpoint 注入、图片缩减、codex 参数剥离)共享同一次 decode/encode(UseNumber 保留数字字面量,防大整数雪球 id 损坏);树未变更时保留 pair 转换器的原始字节。
 - 响应转换必须是最内层 reader；logger、usage scanner、cache 只能看到客户端协议字节。
 - 非流式响应在 commit header 前转换，失败返回 502，禁止提交错误协议 body。上游 content-type 缺失/非 `text/event-stream` 时先嗅探帧格式（`event:`/`data:`/`id:`/`retry:` 字段或 `:` comment heartbeat；codex 实测空 CT 流式响应），按流式路径转换；usageScanner 同样吃嗅探结果。嗅探对所有 <300 响应执行（透传路径的 usageScanner/responses-state 也依赖它），但只保证读满首个可用数据块：首块已能定判（如 `: ping` 心跳）就立即按 SSE 处理，不再为填满 16 字节窗口而阻塞；仅当首块是空白或标记被截断（`ev`+`ent:`）时才继续读满窗口。
 - 跨协议请求内联图片默认限制为 4 MiB / 4096px；上游返回 413 时仅重试一次，以 1 MiB / 2048px 重新编码 JPEG。非图片字段不改写，无法解码或超过 64 MiB 的图片不在请求路径展开。

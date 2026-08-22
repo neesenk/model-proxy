@@ -247,10 +247,20 @@ func (planner Planner) Apply(
 	ordered []configdomain.RouteTarget,
 	body []byte,
 ) []configdomain.RouteTarget {
+	return planner.ApplyWithProfile(exposed, sessionKey, ordered, ProfileRequest(body))
+}
+
+// ApplyWithProfile is Apply with a pre-computed request profile: the forward
+// path profiles the (immutable) request body once and reuses it across the
+// wait-retry rounds and the context-overflow retry instead of re-scanning.
+func (planner Planner) ApplyWithProfile(
+	exposed, sessionKey string,
+	ordered []configdomain.RouteTarget,
+	profile Profile,
+) []configdomain.RouteTarget {
 	if planner.catalog == nil {
 		return ordered
 	}
-	profile := ProfileRequest(body)
 	inRoute := make([]configdomain.RouteTarget, 0, len(ordered))
 	for _, target := range ordered {
 		if target.Provider == "fusion" ||
@@ -295,6 +305,16 @@ func (planner Planner) ContextOverflowRetry(
 	tried []configdomain.RouteTarget,
 	body []byte,
 ) []configdomain.RouteTarget {
+	return planner.ContextOverflowRetryWithProfile(exposed, sessionKey, tried, ProfileRequest(body))
+}
+
+// ContextOverflowRetryWithProfile is ContextOverflowRetry over a shared
+// pre-computed profile (see ApplyWithProfile).
+func (planner Planner) ContextOverflowRetryWithProfile(
+	exposed, sessionKey string,
+	tried []configdomain.RouteTarget,
+	profile Profile,
+) []configdomain.RouteTarget {
 	if planner.catalog == nil {
 		return nil
 	}
@@ -308,7 +328,6 @@ func (planner Planner) ContextOverflowRetry(
 	if maxContext == 0 {
 		return nil
 	}
-	profile := ProfileRequest(body)
 	pool := CollectCrossRoute(
 		planner.expandedRoutes,
 		func(target configdomain.RouteTarget) bool {

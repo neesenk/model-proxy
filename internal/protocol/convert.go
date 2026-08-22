@@ -1112,30 +1112,42 @@ func convertRequestFor(body []byte, clientProto, targetProto string, opts conver
 	if conversion, ok := lookupProtocolConversion(clientProto, targetProto); ok {
 		out, err = conversion.request(body, opts)
 	}
-	if err == nil && needsConversion(clientProto, targetProto) && targetProto == "anthropic" {
-		out = injectAnthropicCacheBreakpoints(out)
-	}
-	if err == nil && needsConversion(clientProto, targetProto) {
-		out, _ = shrinkRequestImages(out, 4<<20, 4096)
-	}
-	if err != nil || !opts.CodexShaping || targetProto != "responses" {
+	if err != nil || !needsConversion(clientProto, targetProto) {
 		return out, err
 	}
-	// Codex backend strictness (cc-switch's codex shaping): it 400s on
-	// max_output_tokens ("Unsupported parameter") and the sampling knobs —
-	// strip them so the FIRST converted request doesn't have to fail for
-	// paramBlock to learn the same lesson. This shaping only runs on the
-	// cross-protocol conversion path: targetexec.Plan.ConvertBody short-circuits
-	// same-protocol responses→codex traffic to byte-identical passthrough,
-	// which self-heals via targetexec's 400→paramBlock learning retry.
-	var m map[string]any
-	if sonic.Unmarshal(out, &m) != nil {
+	// One decode/encode round for every post-conversion fixup (Anthropic cache
+	// breakpoints, image shrink, codex param strip): the passes used to
+	// re-parse the converted body one at a time. Number literals are preserved
+	// (UseNumber) so the re-marshal never corrupts large ids, and an unchanged
+	// tree keeps the converter's original bytes.
+	var root map[string]any
+	if sonicNumberLiteral.Unmarshal(out, &root) != nil {
 		return out, nil
 	}
-	for _, k := range []string{"max_output_tokens", "temperature", "top_p"} {
-		delete(m, k)
+	changed := false
+	if targetProto == "anthropic" {
+		changed = injectAnthropicCacheBreakpointsTree(root)
 	}
-	stripped, serr := sonic.Marshal(m)
+	changed = shrinkImageNode(root, 4<<20, 4096) || changed
+	if opts.CodexShaping && targetProto == "responses" {
+		// Codex backend strictness (cc-switch's codex shaping): it 400s on
+		// max_output_tokens ("Unsupported parameter") and the sampling knobs —
+		// strip them so the FIRST converted request doesn't have to fail for
+		// paramBlock to learn the same lesson. This shaping only runs on the
+		// cross-protocol conversion path: targetexec.Plan.ConvertBody short-circuits
+		// same-protocol responses→codex traffic to byte-identical passthrough,
+		// which self-heals via targetexec's 400→paramBlock learning retry.
+		for _, k := range []string{"max_output_tokens", "temperature", "top_p"} {
+			if _, present := root[k]; present {
+				delete(root, k)
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return out, nil
+	}
+	stripped, serr := sonicNumberLiteral.Marshal(root)
 	if serr != nil {
 		return out, nil
 	}
@@ -1150,10 +1162,25 @@ func injectAnthropicCacheBreakpoints(body []byte) []byte {
 	if sonic.Unmarshal(body, &root) != nil {
 		return body
 	}
+	if !injectAnthropicCacheBreakpointsTree(root) {
+		return body
+	}
+	out, err := sonic.Marshal(root)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// injectAnthropicCacheBreakpointsTree is the tree form used by the merged
+// post-conversion pass; it reports whether anything was injected.
+func injectAnthropicCacheBreakpointsTree(root map[string]any) bool {
+	changed := false
 	cache := map[string]any{"type": "ephemeral"}
 	if tools, ok := root["tools"].([]any); ok && len(tools) > 0 {
 		if last := asMap(tools[len(tools)-1]); last != nil {
 			last["cache_control"] = cache
+			changed = true
 		}
 	}
 	switch system := root["system"].(type) {
@@ -1162,11 +1189,13 @@ func injectAnthropicCacheBreakpoints(body []byte) []byte {
 			root["system"] = []map[string]any{{
 				"type": "text", "text": system, "cache_control": cache,
 			}}
+			changed = true
 		}
 	case []any:
 		if len(system) > 0 {
 			if last := asMap(system[len(system)-1]); last != nil {
 				last["cache_control"] = cache
+				changed = true
 			}
 		}
 	}
@@ -1182,22 +1211,20 @@ func injectAnthropicCacheBreakpoints(body []byte) []byte {
 					msg["content"] = []map[string]any{{
 						"type": "text", "text": content, "cache_control": cache,
 					}}
+					changed = true
 				}
 			case []any:
 				if len(content) > 0 {
 					if last := asMap(content[len(content)-1]); last != nil {
 						last["cache_control"] = cache
+						changed = true
 					}
 				}
 			}
 			break
 		}
 	}
-	out, err := sonic.Marshal(root)
-	if err != nil {
-		return body
-	}
-	return out
+	return changed
 }
 
 // --- response (non-streaming) ---

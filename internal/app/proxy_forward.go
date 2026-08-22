@@ -11,6 +11,7 @@ import (
 	"time"
 
 	responsecache "model-proxy/internal/cache"
+	"model-proxy/internal/catalog"
 	"model-proxy/internal/guard"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
@@ -360,6 +361,22 @@ func (p *Proxy) writeAllTargetsFailed(
 type serveState struct {
 	retriedForContext bool // the larger-context retry is one-shot per request
 	attempt           int  // monotonic tryTarget index for the request log (ti resets on a context retry)
+	profiled          bool // request profile computed (see requestProfile)
+	profile           routing.Profile
+}
+
+// requestProfile returns the request's routing profile, computed at most once
+// per request: the body is immutable, so the wait-retry rounds and the
+// context-overflow retry share the first scan instead of re-walking the body.
+func (p *Proxy) requestProfile(st *serveState, cat *catalog.Catalog, body []byte) routing.Profile {
+	if cat == nil {
+		return routing.Profile{}
+	}
+	if !st.profiled {
+		st.profile = routing.ProfileRequest(body)
+		st.profiled = true
+	}
+	return st.profile
 }
 
 // serveResult is the outcome of one serveOnce pass: where the request was
@@ -425,7 +442,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		// that fit the request (image capability + context window); if none in the
 		// route fit, fall back to a cross-route capable+fitting pool ranked by the
 		// normal scheduling policy. No-op when everything already fits.
-		ordered = planner.Apply(exposed, sessionKey, ordered, origBody)
+		ordered = planner.ApplyWithProfile(exposed, sessionKey, ordered, p.requestProfile(st, cat, origBody))
 	}
 	var firstTried RouteTarget
 	if len(ordered) > 0 {
@@ -528,7 +545,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			// context" threshold (they might be worth trying as the retry itself).
 			alreadyTried := ordered[:ti+1]
 			ctxRetry = func() []RouteTarget {
-				return planner.ContextOverflowRetry(exposed, sessionKey, alreadyTried, origBody)
+				return planner.ContextOverflowRetryWithProfile(exposed, sessionKey, alreadyTried, p.requestProfile(st, cat, origBody))
 			}
 		}
 		attempt := newTargetAttempt(

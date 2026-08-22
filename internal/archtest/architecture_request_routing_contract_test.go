@@ -125,9 +125,9 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 		forward, _ := parseGoFile(t, "internal/app/proxy_forward.go")
 		serveOnce := namedMethod(t, forward, "Proxy", "serveOnce")
 		for name, want := range map[string]int{
-			"requestRoutingPlanner": 1,
-			"Apply":                 1,
-			"ContextOverflowRetry":  1,
+			"requestRoutingPlanner":           1,
+			"ApplyWithProfile":                1,
+			"ContextOverflowRetryWithProfile": 1,
 		} {
 			if got := namedCallCountInNode(serveOnce.Body, name); got != want {
 				t.Errorf("Proxy.serveOnce %s calls = %d, want %d", name, got, want)

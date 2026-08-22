@@ -79,7 +79,7 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 		forward, _ := parseGoFile(t, "internal/app/proxy_forward.go")
 		serveOnce := namedMethod(t, forward, "Proxy", "serveOnce")
 		if !constructedPlannerOwnsRoutingCalls(serveOnce.Body) {
-			t.Error("Proxy.serveOnce must call Apply and ContextOverflowRetry exactly once on the value assigned from requestRoutingPlanner")
+			t.Error("Proxy.serveOnce must call ApplyWithProfile and ContextOverflowRetryWithProfile exactly once on the value assigned from requestRoutingPlanner")
 		}
 	})
 
@@ -290,7 +290,7 @@ func constructedPlannerOwnsRoutingCalls(node ast.Node) bool {
 	if !ok || identifierAssignmentCount(node, planner) != 1 {
 		return false
 	}
-	for _, method := range []string{"Apply", "ContextOverflowRetry"} {
+	for _, method := range []string{"ApplyWithProfile", "ContextOverflowRetryWithProfile"} {
 		if namedCallCountInNode(node, method) != 1 || receiverCallCount(node, planner, method) != 1 {
 			return false
 		}
@@ -990,18 +990,18 @@ func h() { planner.Apply(); other.Apply() }
 	plannerFile, err := parser.ParseFile(fset, "planner.go", `package main
 func validPlanner() {
 	route := requestRoutingPlanner()
-	route.Apply()
-	route.ContextOverflowRetry()
+	route.ApplyWithProfile()
+	route.ContextOverflowRetryWithProfile()
 }
 func invalidPlanner() {
 	route := requestRoutingPlanner()
-	route.Apply()
-	other.ContextOverflowRetry()
+	route.ApplyWithProfile()
+	other.ContextOverflowRetryWithProfile()
 }
 func invalidPlannerFactory() {
 	route := factory.requestRoutingPlanner()
-	route.Apply()
-	route.ContextOverflowRetry()
+	route.ApplyWithProfile()
+	route.ContextOverflowRetryWithProfile()
 }
 `, 0)
 	if err != nil {
