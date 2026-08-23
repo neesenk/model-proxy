@@ -515,7 +515,7 @@ func anthropicDocumentToResponsesPart(block map[string]any) map[string]any {
 		}
 	case "file":
 		if id := strOpt(src["file_id"]); id != "" {
-			return map[string]any{"type": "input_file", "file_id": id, "filename": filename}
+			return map[string]any{"type": "input_text", "text": degradeFileIDText(id, filename)}
 		}
 	case "text":
 		if text := strOpt(src["data"]); text != "" {
@@ -854,6 +854,10 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 				if fm == nil {
 					fm = pm
 				}
+				if id := strOpt(fm["file_id"]); id != "" && strOpt(fm["file_data"]) == "" && strOpt(fm["file_url"]) == "" {
+					parts = append(parts, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(fm["filename"]))})
+					continue
+				}
 				copyOpt(file, fm, "file_id", "file_data", "file_url", "filename")
 				if len(file) > 1 {
 					parts = append(parts, file)
@@ -1176,8 +1180,8 @@ func responsesInputFileToAnthropicDocument(part map[string]any) map[string]any {
 	var block map[string]any
 	if u := strOpt(part["file_url"]); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
 		block = map[string]any{"type": "document", "source": map[string]any{"type": "url", "url": u}}
-	} else if id := strOpt(part["file_id"]); id != "" {
-		block = map[string]any{"type": "document", "source": map[string]any{"type": "file", "file_id": id}}
+	} else if id := strOpt(part["file_id"]); id != "" && strOpt(part["file_data"]) == "" {
+		block = map[string]any{"type": "text", "text": degradeFileIDText(id, filename)}
 	} else if mt, data, ok := parseDataURL(strOpt(part["file_data"])); ok && data != "" {
 		block = map[string]any{"type": "document", "source": map[string]any{
 			"type": "base64", "media_type": mt, "data": data,
@@ -1585,6 +1589,10 @@ func responsesContentToChat(content any) any {
 				out = append(out, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
 			}
 		case "input_file", "file":
+			if id := strOpt(pm["file_id"]); id != "" && strOpt(pm["file_data"]) == "" {
+				out = append(out, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(pm["filename"]))})
+				break
+			}
 			file := map[string]any{}
 			copyOpt(file, pm, "file_id", "file_data", "filename")
 			if file["file_id"] != nil || file["file_data"] != nil {

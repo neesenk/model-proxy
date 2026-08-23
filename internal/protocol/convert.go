@@ -243,10 +243,7 @@ func anthropicContentBlockToOpenAIPart(blk map[string]any) map[string]any {
 			}}
 		case "file":
 			if id := strOpt(src["file_id"]); id != "" {
-				return map[string]any{"type": "file", "file": map[string]any{
-					"filename": filename,
-					"file_id":  id,
-				}}
+				return map[string]any{"type": "text", "text": degradeFileIDText(id, filename)}
 			}
 		case "url":
 			if u := strOpt(src["url"]); u != "" {
@@ -693,6 +690,17 @@ func openaiToolChoiceToAnthropic(tc any) any {
 	return nil
 }
 
+// degradeFileIDText renders the note replacing a file-id-only attachment on
+// cross-protocol conversion. A file_id is scoped to the provider it was
+// uploaded to; forwarding it through a protocol conversion (almost always a
+// provider change in this topology) would send the target an id its file
+// storage has never seen. Inline base64/URL sources are unaffected; the drop
+// is observable (convertWarn), never silent.
+func degradeFileIDText(id, filename string) string {
+	convertWarn("dropping cross-protocol file_id attachment " + id + " (provider-scoped; inline the file content instead)")
+	return "[document " + firstNonEmpty(filename, "file") + " attached as file_id " + id + " — not forwarded across providers]"
+}
+
 // openaiContentPartToAnthropicBlock maps an openai content part to an anthropic
 // content block (text or image_url→image base64).
 func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
@@ -735,8 +743,8 @@ func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
 		}
 		filename := strOpt(f["filename"])
 		var block map[string]any
-		if id := strOpt(f["file_id"]); id != "" {
-			block = map[string]any{"type": "document", "source": map[string]any{"type": "file", "file_id": id}}
+		if id := strOpt(f["file_id"]); id != "" && strOpt(f["file_data"]) == "" {
+			block = map[string]any{"type": "text", "text": degradeFileIDText(id, filename)}
 		} else if dataURL := strOpt(f["file_data"]); dataURL != "" {
 			if mt, data, ok := parseDataURL(dataURL); ok {
 				block = map[string]any{"type": "document", "source": map[string]any{

@@ -36,13 +36,16 @@ func TestConvertDocumentAndInputFileAcrossProtocols(t *testing.T) {
 	}
 	anthropicOut := unmarshalMap(t, anthropicRaw)
 	blocks := anySlice(asMap(anySlice(anthropicOut["messages"])[0])["content"])
-	if got := strOpt(asMap(asMap(blocks[0])["source"])["file_id"]); got != "file_1" {
-		t.Fatalf("r→a file_id = %q", got)
+	// A file-id-only attachment degrades to an observable text note: file_id is
+	// provider-scoped and would 404/400 at a different upstream. Inline and
+	// URL sources are unaffected and keep their document blocks.
+	if got := strOf(asMap(blocks[0])["type"]); got != "text" || !strings.Contains(strOf(asMap(blocks[0])["text"]), "file_1") {
+		t.Fatalf("r→a file_id degrade note = %#v", blocks[0])
 	}
-	if got := strOpt(asMap(asMap(blocks[1])["source"])["data"]); got != "cGRm" {
+	if got := strOf(asMap(asMap(blocks[1])["source"])["data"]); got != "cGRm" {
 		t.Fatalf("r→a base64 data = %q", got)
 	}
-	if got := strOpt(asMap(asMap(blocks[2])["source"])["url"]); got != "https://example.test/url.pdf" {
+	if got := strOf(asMap(asMap(blocks[2])["source"])["url"]); got != "https://example.test/url.pdf" {
 		t.Fatalf("r→a URL = %q", got)
 	}
 
