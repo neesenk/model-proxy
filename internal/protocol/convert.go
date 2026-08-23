@@ -849,6 +849,16 @@ func parseToolArgs(args string) any {
 	return map[string]any{"raw": args}
 }
 
+// appendSSEData folds one data:-line payload into the frame in progress:
+// consecutive data lines join with "\n" per the SSE spec (a single-line
+// frame — the only form LLM vendors emit — passes through unchanged).
+func appendSSEData(pend, payload string) string {
+	if pend == "" {
+		return payload
+	}
+	return pend + "\n" + payload
+}
+
 // sanitizeToolUseID rewrites an openai tool_call id into anthropic's tool_use id
 // charset (^[a-zA-Z0-9_-]+$): illegal characters become "_" and an empty id gets
 // a unique placeholder (toolu_empty_<counter>) so multiple empty-id tool calls in
@@ -1843,6 +1853,7 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 }
 
 func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
+	pendData := "" // folded data lines of the SSE frame in progress
 	for len(t.out) == 0 {
 		if t.done {
 			t.finish()
@@ -1851,7 +1862,16 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			}
 			break
 		}
-		if !t.sc.Scan() {
+		line := ""
+		if t.sc.Scan() {
+			line = strings.TrimSpace(t.sc.Text())
+		} else if pendData != "" {
+			// Scanner exhausted with a frame in progress: synthesize the
+			// dispatch blank line (the SSE spec delivers a trailing frame
+			// without its final blank line). The next iteration takes the
+			// normal exhaustion path with pendData empty.
+			line = ""
+		} else {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("SSE scanner error (line too long?): " + err.Error())
 				t.ensureStart()
@@ -1878,11 +1898,15 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		line := strings.TrimSpace(t.sc.Text())
-		if line == "" || !strings.HasPrefix(line, "data:") {
+		if strings.HasPrefix(line, "data:") {
+			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			continue
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if pendData == "" {
+			continue
+		}
+		payload := pendData
+		pendData = ""
 		if payload == "[DONE]" {
 			t.done = true
 			continue
@@ -2088,6 +2112,7 @@ func (t *anthropicSSEToOpenAISSE) ensureRole() {
 }
 
 func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
+	pendData := "" // folded data lines of the SSE frame in progress
 	for len(t.out) == 0 {
 		if t.done {
 			if !t.finished {
@@ -2103,7 +2128,16 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			}
 			break
 		}
-		if !t.sc.Scan() {
+		line := ""
+		if t.sc.Scan() {
+			line = strings.TrimSpace(t.sc.Text())
+		} else if pendData != "" {
+			// Scanner exhausted with a frame in progress: synthesize the
+			// dispatch blank line (the SSE spec delivers a trailing frame
+			// without its final blank line). The next iteration takes the
+			// normal exhaustion path with pendData empty.
+			line = ""
+		} else {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("SSE scanner error (line too long?): " + err.Error())
 				errObj, _ := sonic.Marshal(map[string]any{
@@ -2130,11 +2164,15 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		line := strings.TrimSpace(t.sc.Text())
-		if line == "" || !strings.HasPrefix(line, "data:") {
+		if strings.HasPrefix(line, "data:") {
+			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			continue
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if pendData == "" {
+			continue
+		}
+		payload := pendData
+		pendData = ""
 		var ev struct {
 			Type  string `json:"type"`
 			Index int    `json:"index"`

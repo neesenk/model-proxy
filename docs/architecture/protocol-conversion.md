@@ -141,8 +141,7 @@ OpenAI → Anthropic 的 tool use id 必须满足 `^[a-zA-Z0-9_-]+$`。同一调
 
 ## 有损字段
 
-SSE 读取为逐行 `data:` 语义（SSE 规范允许一个事件多行 `data:` 以 `\n` 拼接；
-LLM 上游实践全部单行，拼接未实现——含多行 data 的方言流会把每行当独立帧处理，属已知限制）。
+SSE 读取按规范折叠多行 `data:`（连续 `data:` 行在分派空行处以 `\n` 拼接为一个 payload，六个流式转换器与 `parseWireSSE` 聚合路径一致；无尾空行的尾帧在 EOF 分派）。LLM 上游实践全部单行，多行仅出现在方言网关。
 
 剩余有损项主要是尚未实现降级的 server tools（如 computer）、未知 role/content 和 chat `input_audio`。已知无法表达的请求特性优先由 capability scanner 拒绝；仅响应侧或可安全降级的差异使用 `convertWarn`。document/file、hosted web/tool search、tool_result 图片/错误标记、reasoning replay 和引用均已保留或采用明确降级。跨协议目标为 Anthropic 时，会在 system、最后一个 tool、最后一条 user content 注入 ephemeral cache breakpoint；原协议 cache_control 仍不逐点一一映射。
 

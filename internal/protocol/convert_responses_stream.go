@@ -179,6 +179,7 @@ func (t *responsesSSEToAnthropicSSE) closeLeftoverBlocks() {
 
 func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
+	pendData := "" // folded data lines of the SSE frame in progress
 	for len(t.out) == 0 {
 		if t.done {
 			if len(t.out) == 0 {
@@ -186,7 +187,16 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			}
 			break
 		}
-		if !t.sc.Scan() {
+		line := ""
+		if t.sc.Scan() {
+			line = strings.TrimSpace(t.sc.Text())
+		} else if pendData != "" {
+			// Scanner exhausted with a frame in progress: synthesize the
+			// dispatch blank line (the SSE spec delivers a trailing frame
+			// without its final blank line). The next iteration takes the
+			// normal exhaustion path with pendData empty.
+			line = ""
+		} else {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("responses SSE scanner error: " + err.Error())
 			}
@@ -199,19 +209,23 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		line := strings.TrimSpace(t.sc.Text())
+		if strings.HasPrefix(line, "data:") {
+			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			continue
+		}
+		// Classify the frame-terminating line first — it may open the NEXT
+		// frame's event type; the closing frame keeps its own.
+		frameEvent := pendingEvent
 		if line == "" {
 			pendingEvent = ""
-			continue
-		}
-		if strings.HasPrefix(line, "event:") {
+		} else if strings.HasPrefix(line, "event:") {
 			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		}
+		if pendData == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		payload := pendData
+		pendData = ""
 		if payload == "[DONE]" {
 			t.ensureStart()
 			t.closeLeftoverBlocks()
@@ -228,11 +242,11 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		}
 		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
 		// event: lines entirely — fall back to the payload's own "type".
-		if pendingEvent == "" {
-			pendingEvent = strKey(data, "type")
+		if frameEvent == "" {
+			frameEvent = strKey(data, "type")
 		}
-		t.handle(pendingEvent, data)
-		pendingEvent = ""
+		t.handle(frameEvent, data)
+		frameEvent = ""
 	}
 	n := copy(p, t.out)
 	t.out = t.out[n:]
@@ -670,6 +684,7 @@ func (t *responsesSSEToOpenAISSE) toolIndex(outIdx int) int {
 
 func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
+	pendData := "" // folded data lines of the SSE frame in progress
 	for len(t.out) == 0 {
 		if t.done {
 			if len(t.out) == 0 {
@@ -677,7 +692,16 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 			}
 			break
 		}
-		if !t.sc.Scan() {
+		line := ""
+		if t.sc.Scan() {
+			line = strings.TrimSpace(t.sc.Text())
+		} else if pendData != "" {
+			// Scanner exhausted with a frame in progress: synthesize the
+			// dispatch blank line (the SSE spec delivers a trailing frame
+			// without its final blank line). The next iteration takes the
+			// normal exhaustion path with pendData empty.
+			line = ""
+		} else {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("responses SSE scanner error: " + err.Error())
 			}
@@ -692,19 +716,23 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		line := strings.TrimSpace(t.sc.Text())
+		if strings.HasPrefix(line, "data:") {
+			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			continue
+		}
+		// Classify the frame-terminating line first — it may open the NEXT
+		// frame's event type; the closing frame keeps its own.
+		frameEvent := pendingEvent
 		if line == "" {
 			pendingEvent = ""
-			continue
-		}
-		if strings.HasPrefix(line, "event:") {
+		} else if strings.HasPrefix(line, "event:") {
 			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		}
+		if pendData == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		payload := pendData
+		pendData = ""
 		if payload == "[DONE]" {
 			sseEmitData(&t.out, map[string]any{
 				"id": t.id, "object": "chat.completion.chunk", "model": t.model,
@@ -723,11 +751,11 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 		}
 		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
 		// event: lines entirely — fall back to the payload's own "type".
-		if pendingEvent == "" {
-			pendingEvent = strKey(data, "type")
+		if frameEvent == "" {
+			frameEvent = strKey(data, "type")
 		}
-		t.handle(pendingEvent, data)
-		pendingEvent = ""
+		t.handle(frameEvent, data)
+		frameEvent = ""
 	}
 	n := copy(p, t.out)
 	t.out = t.out[n:]
@@ -1048,6 +1076,7 @@ func (t *anthropicSSEToResponsesSSE) ensureCreated() {
 
 func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
+	pendData := "" // folded data lines of the SSE frame in progress
 	for len(t.out) == 0 {
 		if t.done {
 			if len(t.out) == 0 {
@@ -1055,7 +1084,16 @@ func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
 			}
 			break
 		}
-		if !t.sc.Scan() {
+		line := ""
+		if t.sc.Scan() {
+			line = strings.TrimSpace(t.sc.Text())
+		} else if pendData != "" {
+			// Scanner exhausted with a frame in progress: synthesize the
+			// dispatch blank line (the SSE spec delivers a trailing frame
+			// without its final blank line). The next iteration takes the
+			// normal exhaustion path with pendData empty.
+			line = ""
+		} else {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("anthropic SSE scanner error: " + err.Error())
 				t.ensureCreated()
@@ -1084,19 +1122,23 @@ func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		line := strings.TrimSpace(t.sc.Text())
+		if strings.HasPrefix(line, "data:") {
+			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			continue
+		}
+		// Classify the frame-terminating line first — it may open the NEXT
+		// frame's event type; the closing frame keeps its own.
+		frameEvent := pendingEvent
 		if line == "" {
 			pendingEvent = ""
-			continue
-		}
-		if strings.HasPrefix(line, "event:") {
+		} else if strings.HasPrefix(line, "event:") {
 			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		}
+		if pendData == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		payload := pendData
+		pendData = ""
 		if payload == "[DONE]" {
 			t.finish()
 			continue
@@ -1107,11 +1149,11 @@ func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
 		}
 		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
 		// event: lines entirely — fall back to the payload's own "type".
-		if pendingEvent == "" {
-			pendingEvent = strKey(data, "type")
+		if frameEvent == "" {
+			frameEvent = strKey(data, "type")
 		}
-		t.handle(pendingEvent, data)
-		pendingEvent = ""
+		t.handle(frameEvent, data)
+		frameEvent = ""
 	}
 	n := copy(p, t.out)
 	t.out = t.out[n:]
@@ -1616,6 +1658,7 @@ func (t *openaiSSEToResponsesSSE) openReasoning() {
 
 func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
+	pendData := "" // folded data lines of the SSE frame in progress
 	for len(t.out) == 0 {
 		if t.done {
 			if len(t.out) == 0 {
@@ -1623,7 +1666,16 @@ func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
 			}
 			break
 		}
-		if !t.sc.Scan() {
+		line := ""
+		if t.sc.Scan() {
+			line = strings.TrimSpace(t.sc.Text())
+		} else if pendData != "" {
+			// Scanner exhausted with a frame in progress: synthesize the
+			// dispatch blank line (the SSE spec delivers a trailing frame
+			// without its final blank line). The next iteration takes the
+			// normal exhaustion path with pendData empty.
+			line = ""
+		} else {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("openai SSE scanner error: " + err.Error())
 				t.ensureCreated()
@@ -1652,22 +1704,23 @@ func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		line := strings.TrimSpace(t.sc.Text())
+		if strings.HasPrefix(line, "data:") {
+			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			continue
+		}
+		// Classify the frame-terminating line first — it may open the NEXT
+		// frame's event type; the closing frame keeps its own.
+		frameEvent := pendingEvent
 		if line == "" {
 			pendingEvent = ""
-			continue
-		}
-		// Chat streams are usually data-only, but some gateways DO send event:
-		// lines — an explicit `event: error` marks an error frame even when the
-		// payload has no top-level error key (cc-switch streaming_codex_chat).
-		if strings.HasPrefix(line, "event:") {
+		} else if strings.HasPrefix(line, "event:") {
 			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		}
+		if pendData == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		payload := pendData
+		pendData = ""
 		if payload == "[DONE]" {
 			t.finish()
 			continue
@@ -1676,8 +1729,8 @@ func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
 		if sonic.UnmarshalString(payload, &data) != nil {
 			continue
 		}
-		t.handle(pendingEvent, data)
-		pendingEvent = ""
+		t.handle(frameEvent, data)
+		frameEvent = ""
 	}
 	n := copy(p, t.out)
 	t.out = t.out[n:]
