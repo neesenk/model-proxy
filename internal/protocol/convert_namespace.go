@@ -11,6 +11,7 @@ package protocol
 
 import (
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	sonic "github.com/bytedance/sonic"
@@ -43,35 +44,45 @@ func nsFlattenName(namespace, name string) string {
 
 // responsesNamespaceRestoreMap rebuilds the flat→original mapping from a
 // responses request body (top-level tools + input additional_tools items —
-// codex 0.145 declares tools ONLY in additional_tools). Returns nil when no
-// tool carries a namespace — the common case costs nothing.
-func responsesNamespaceRestoreMap(reqBody []byte) map[string]nsRestore {
+// codex 0.145 declares tools ONLY in additional_tools). plain collects the
+// names of NON-namespaced function tools in the same walk (a bare echo of one
+// of those must never be restored to a namespace). Both return nil/empty when
+// no tool carries a namespace — the common case costs nothing.
+func responsesNamespaceRestoreMap(reqBody []byte) (m map[string]nsRestore, plain map[string]bool) {
 	var src map[string]any
 	if err := sonic.Unmarshal(reqBody, &src); err != nil {
-		return nil
+		return nil, nil
 	}
-	var out map[string]nsRestore
 	for _, e := range nsExpandTools(responsesRequestTools(src)) {
-		if strOf(e.tm["type"]) != "function" || e.namespace == "" {
+		if strOf(e.tm["type"]) != "function" {
 			continue
 		}
 		name := strOpt(e.tm["name"])
 		if name == "" {
 			continue
 		}
-		if out == nil {
-			out = map[string]nsRestore{}
+		if e.namespace == "" {
+			if plain == nil {
+				plain = map[string]bool{}
+			}
+			plain[name] = true
+			continue
 		}
-		out[nsFlattenName(e.namespace, name)] = nsRestore{Namespace: e.namespace, Name: name}
+		if m == nil {
+			m = map[string]nsRestore{}
+		}
+		m[nsFlattenName(e.namespace, name)] = nsRestore{Namespace: e.namespace, Name: name}
 	}
-	return out
+	return m, plain
 }
 
 // r2cCtx is the responses→chat conversion context, rebuilt STATELESSLY from
 // the original responses request body (cc-switch build context from request):
-// the MCP namespace restore map plus the custom/freeform tool name set.
+// the MCP namespace restore map, the plain (non-namespaced) tool name set,
+// and the custom/freeform tool name set.
 type r2cCtx struct {
 	ns     map[string]nsRestore
+	plain  map[string]bool
 	custom map[string]bool
 }
 
@@ -83,7 +94,8 @@ func r2cCtxFor(clientProto, backendProto string, origBody []byte) r2cCtx {
 	if clientProto != "responses" || (backendProto != "openai" && backendProto != "anthropic") || len(origBody) == 0 {
 		return r2cCtx{}
 	}
-	return r2cCtx{ns: responsesNamespaceRestoreMap(origBody), custom: responsesCustomToolSet(origBody)}
+	ns, plain := responsesNamespaceRestoreMap(origBody)
+	return r2cCtx{ns: ns, plain: plain, custom: responsesCustomToolSet(origBody)}
 }
 
 // nsRestoreName looks up a chat tool name in the restore map; ok=false (and
@@ -97,6 +109,33 @@ func nsRestoreName(nsMap map[string]nsRestore, flat string) (name, namespace str
 		return "", "", false
 	}
 	return r.Name, r.Namespace, true
+}
+
+// restoreName is the near-miss-tolerant restore used on the conversion paths:
+// an exact flattened-key hit first; otherwise a BARE name (no "__") that names
+// exactly ONE declared namespaced tool is restored — a gateway that strips the
+// namespace otherwise loses it. Ambiguity (two namespaces own the name, or the
+// bare name is itself a declared plain tool) passes the name through unchanged
+// — never guess (Switchyard's wrong-guess-dispatch prevention).
+func (c r2cCtx) restoreName(flat string) (name, namespace string, ok bool) {
+	if name, namespace, ok := nsRestoreName(c.ns, flat); ok {
+		return name, namespace, true
+	}
+	if c.ns == nil || strings.Contains(flat, "__") || c.plain[flat] {
+		return "", "", false
+	}
+	var match nsRestore
+	found := 0
+	for _, r := range c.ns {
+		if r.Name == flat {
+			found++
+			match = r
+		}
+	}
+	if found != 1 {
+		return "", "", false
+	}
+	return match.Name, match.Namespace, true
 }
 
 // nsToolEntry is one effective tool declaration after expanding namespace

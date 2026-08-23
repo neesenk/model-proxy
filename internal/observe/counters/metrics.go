@@ -35,6 +35,19 @@ const (
 	// series with zero schema change. The model column holds the pattern TYPE
 	// NAME only — matched secret bytes never reach any counter, log, or event.
 	EvGuardHits MetricsEvent = "guard_hits"
+	// Upstream attempt outcomes, counted under the virtual key ("attempts",
+	// <outcome>): ok = committed 2xx, hard = failure-class attempt, rate_limited
+	// = 429. attempts.ok − requests ≈ zero and attempts − ok = retry overhead;
+	// a per-outcome time series lands in /api/stats with zero schema change
+	// (Switchyard's upstream_attempts{outcome} equivalent).
+	EvAttemptOK          MetricsEvent = "attempt_ok"
+	EvAttemptHard        MetricsEvent = "attempt_hard"
+	EvAttemptRateLimited MetricsEvent = "attempt_rate_limited"
+	// Routing-decision duration, observed under the virtual key ("routing",
+	// "decision") via AddLatency: latency_ms_sum / requests there is the mean
+	// scheduling+planning time per request — the proxy's own overhead, separate
+	// from upstream TTFT.
+	EvRoutingObserved MetricsEvent = "routing_observed"
 )
 
 type ProviderMetrics struct {
@@ -110,6 +123,9 @@ func (s *MetricsStore) Inc(provider, model string, ev MetricsEvent) {
 	case EvFusionDegraded:
 		pm.Failovers.Add(1)
 	case EvGuardHits:
+		pm.Requests.Add(1)
+		pm.LastRequestAt.Store(time.Now().Unix())
+	case EvAttemptOK, EvAttemptHard, EvAttemptRateLimited, EvRoutingObserved:
 		pm.Requests.Add(1)
 		pm.LastRequestAt.Store(time.Now().Unix())
 	}

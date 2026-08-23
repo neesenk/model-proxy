@@ -17,10 +17,7 @@ func TestSubscribeContextAutoReleases(t *testing.T) {
 	cancel()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		h.mu.Lock()
-		n := len(h.subs)
-		h.mu.Unlock()
-		if n == 0 {
+		if n := len(*h.subs.Load()); n == 0 {
 			return
 		}
 		time.Sleep(time.Millisecond)
@@ -39,10 +36,7 @@ func TestSubscribeContextExplicitCancelIdempotent(t *testing.T) {
 		t.Fatalf("received event %+v after cancel", e)
 	default:
 	}
-	h.mu.Lock()
-	n := len(h.subs)
-	h.mu.Unlock()
-	if n != 0 {
+	if n := len(*h.subs.Load()); n != 0 {
 		t.Fatalf("subs = %d after explicit cancel", n)
 	}
 }

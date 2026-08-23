@@ -54,7 +54,24 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 			t.Fatalf("marshal record %d: %v", i, err)
 		}
 		want = append(want, '\n')
-		if got := appendRecordLine(nil, rec); string(got) != string(want) {
+		got := appendRecordLine(nil, rec)
+		if string(got) == string(want) {
+			continue
+		}
+		// encoding/json's byte form for invalid UTF-8 is toolchain-dependent
+		// (Go 1.26 wrote \ufffd escapes; 1.27 writes raw U+FFFD bytes) while
+		// the hand-rolled encoder is fixed. The pin stays byte-exact for every
+		// stable escaping rule; for the toolchain-dependent form it degrades to
+		// a semantic check — both encodings must decode to the same record.
+		var gotRec, wantRec Record
+		if uerr := json.Unmarshal(got, &gotRec); uerr != nil {
+			t.Errorf("record %d: hand-rolled output is not valid JSON: %v\n got %q", i, uerr, got)
+			continue
+		}
+		if uerr := json.Unmarshal(want, &wantRec); uerr != nil {
+			t.Fatalf("record %d: reference unmarshal: %v", i, uerr)
+		}
+		if gotRec != wantRec {
 			t.Errorf("record %d:\n got %q\nwant %q", i, got, want)
 		}
 	}

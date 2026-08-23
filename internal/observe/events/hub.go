@@ -4,6 +4,7 @@ package events
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 const recentCap = 200
@@ -34,12 +35,18 @@ type Event struct {
 // Publish never blocks on a slow subscriber.
 type Hub struct {
 	mu     sync.Mutex
-	subs   map[chan Event]struct{}
 	recent []Event
+	// subs is an immutable subscriber snapshot swapped copy-on-write under mu.
+	// Publish loads it without the mutex and without allocating — one slice
+	// per subscription change instead of one per event.
+	subs atomic.Pointer[[]chan Event]
 }
 
 func NewHub() *Hub {
-	return &Hub{subs: map[chan Event]struct{}{}}
+	h := &Hub{}
+	empty := []chan Event{}
+	h.subs.Store(&empty)
+	return h
 }
 
 // Publish appends e to the recent ring and offers it to every subscriber.
@@ -52,11 +59,8 @@ func (h *Hub) Publish(e Event) {
 	if len(h.recent) > recentCap {
 		h.recent = h.recent[len(h.recent)-recentCap:]
 	}
-	subs := make([]chan Event, 0, len(h.subs))
-	for ch := range h.subs {
-		subs = append(subs, ch)
-	}
 	h.mu.Unlock()
+	subs := *h.subs.Load()
 	for _, ch := range subs {
 		select {
 		case ch <- e:
@@ -70,12 +74,23 @@ func (h *Hub) Publish(e Event) {
 func (h *Hub) Subscribe() (<-chan Event, []Event, func()) {
 	ch := make(chan Event, 32)
 	h.mu.Lock()
-	h.subs[ch] = struct{}{}
+	current := *h.subs.Load()
+	next := make([]chan Event, len(current)+1)
+	copy(next, current)
+	next[len(current)] = ch
+	h.subs.Store(&next)
 	recent := append([]Event(nil), h.recent...)
 	h.mu.Unlock()
 	cancel := func() {
 		h.mu.Lock()
-		delete(h.subs, ch)
+		current := *h.subs.Load()
+		next := make([]chan Event, 0, len(current))
+		for _, existing := range current {
+			if existing != ch {
+				next = append(next, existing)
+			}
+		}
+		h.subs.Store(&next)
 		h.mu.Unlock()
 	}
 	return ch, recent, cancel

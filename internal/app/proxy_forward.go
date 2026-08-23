@@ -432,6 +432,10 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 	origBody := req.origBody
 
 	planner := requestRoutingPlanner(p, runtime, routeKeys)
+	// Routing-decision overhead (scheduling + request-aware planning), observed
+	// separately from upstream latency under the virtual ("routing","decision")
+	// row — sum/requests there is the mean decision time per request.
+	routeStart := time.Now()
 	ordered := p.schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
 	// `force` (pin) was computed before the cache. A pin is EXCLUSIVE: it
 	// overrides request-aware routing (no cross-route reroute away from the pinned
@@ -443,6 +447,10 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		// route fit, fall back to a cross-route capable+fitting pool ranked by the
 		// normal scheduling policy. No-op when everything already fits.
 		ordered = planner.ApplyWithProfile(exposed, sessionKey, ordered, p.requestProfile(st, cat, origBody))
+	}
+	if p.metrics != nil {
+		p.metrics.Inc("routing", "decision", counters.EvRoutingObserved)
+		p.metrics.AddLatency("routing", "decision", uint64(time.Since(routeStart).Milliseconds()), 0)
 	}
 	var firstTried RouteTarget
 	if len(ordered) > 0 {

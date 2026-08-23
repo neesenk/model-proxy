@@ -1168,7 +1168,7 @@ func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
 				"type": "function_call", "id": b.itemID, "status": "in_progress",
 				"call_id": b.callID, "name": name, "arguments": "",
 			}
-			if original, namespace, ok := nsRestoreName(t.r2c.ns, name); ok {
+			if original, namespace, ok := t.r2c.restoreName( name); ok {
 				item["name"] = original
 				item["namespace"] = namespace
 			}
@@ -1326,7 +1326,7 @@ func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
 				"name":      b.name,
 				"arguments": firstNonEmpty(b.acc, "{}"),
 			}
-			if original, namespace, ok := nsRestoreName(t.r2c.ns, b.name); ok {
+			if original, namespace, ok := t.r2c.restoreName( b.name); ok {
 				doneItem["name"] = original
 				doneItem["namespace"] = namespace
 			}
@@ -1843,7 +1843,7 @@ func (t *openaiSSEToResponsesSSE) openReadyToolCalls() {
 			"call_id": t.toolIDs[idx], "name": name, "arguments": "",
 		}
 		// MCP namespace restore on the added frame (done frames carry no name).
-		if orig, ns, ok := nsRestoreName(t.r2c.ns, name); ok {
+		if orig, ns, ok := t.r2c.restoreName( name); ok {
 			item["name"] = orig
 			item["namespace"] = ns
 		}
@@ -2160,7 +2160,7 @@ func (t *openaiSSEToResponsesSSE) closeItems() {
 				"arguments": firstNonEmpty(t.toolAcc[it.toolIdx], "{}"),
 			}
 			// MCP namespace restore on the done frame, mirroring added.
-			if orig, ns, ok := nsRestoreName(t.r2c.ns, t.toolNames[it.toolIdx]); ok {
+			if orig, ns, ok := t.r2c.restoreName( t.toolNames[it.toolIdx]); ok {
 				doneItem["name"] = orig
 				doneItem["namespace"] = ns
 			}

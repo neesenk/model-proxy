@@ -89,7 +89,7 @@ func TestNamespace_NoNamespaceNoOp(t *testing.T) {
 	if call == nil || asMap(call["function"])["name"] != "plain" {
 		t.Errorf("history call changed: %v", call)
 	}
-	if m := responsesNamespaceRestoreMap([]byte(in)); m != nil {
+	if m, _ := responsesNamespaceRestoreMap([]byte(in)); m != nil {
 		t.Errorf("restore map = %v, want nil without namespaces", m)
 	}
 }
@@ -110,7 +110,7 @@ func TestNamespace_RestoreMapLookup(t *testing.T) {
 	req := `{"model":"g","input":[],"tools":[` +
 		`{"type":"function","name":"read","namespace":"mcp__files__"},` +
 		`{"type":"function","name":"plain"}]}`
-	m := responsesNamespaceRestoreMap([]byte(req))
+	m, _ := responsesNamespaceRestoreMap([]byte(req))
 	if len(m) != 1 {
 		t.Fatalf("restore map = %v, want 1 entry", m)
 	}
@@ -123,6 +123,45 @@ func TestNamespace_RestoreMapLookup(t *testing.T) {
 	}
 	if _, _, ok := nsRestoreName(nil, "mcp__files____read"); ok {
 		t.Error("nil map must never hit")
+	}
+}
+
+// 5b. Near-miss restore: a bare echo (gateway stripped the namespace) restores
+// iff the bare name is owned by exactly one namespace AND is not itself a
+// declared plain tool; any ambiguity passes through unchanged.
+func TestNamespace_NearMissBareNameRestore(t *testing.T) {
+	unique := `{"model":"g","input":[],"tools":[` +
+		`{"type":"function","name":"search","namespace":"mcp__docs__"},` +
+		`{"type":"function","name":"other","namespace":"mcp__other__"}]}`
+	ctx := r2cCtxFor("responses", "openai", []byte(unique))
+	name, ns, ok := ctx.restoreName("search")
+	if !ok || name != "search" || ns != "mcp__docs__" {
+		t.Errorf("unique bare restore = (%q,%q,%v), want (search,mcp__docs__,true)", name, ns, ok)
+	}
+	// Exact flattened key still wins first.
+	name, ns, ok = ctx.restoreName("mcp__docs____search")
+	if !ok || ns != "mcp__docs__" {
+		t.Errorf("exact key restore = (%q,%q,%v)", name, ns, ok)
+	}
+
+	ambiguous := `{"model":"g","input":[],"tools":[` +
+		`{"type":"function","name":"search","namespace":"mcp__a__"},` +
+		`{"type":"function","name":"search","namespace":"mcp__b__"}]}`
+	ctx = r2cCtxFor("responses", "openai", []byte(ambiguous))
+	if _, _, ok := ctx.restoreName("search"); ok {
+		t.Errorf("ambiguous bare name restored — must pass through")
+	}
+
+	collision := `{"model":"g","input":[],"tools":[` +
+		`{"type":"function","name":"search","namespace":"mcp__a__"},` +
+		`{"type":"function","name":"search"}]}`
+	ctx = r2cCtxFor("responses", "openai", []byte(collision))
+	if _, _, ok := ctx.restoreName("search"); ok {
+		t.Errorf("bare name colliding with a plain tool restored — the echo most likely names the plain tool")
+	}
+	// The flattened key still restores in the collision case.
+	if _, _, ok := ctx.restoreName("mcp__a____search"); !ok {
+		t.Errorf("flattened key not restored in plain-collision case")
 	}
 }
 
@@ -141,7 +180,7 @@ func TestNamespace_RoundTrip(t *testing.T) {
 	}
 	// Upstream answers with a call to the FLAT name.
 	chatResp := `{"id":"c1","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"` + flat + `","arguments":"{\"path\":\"/tmp/x\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`
-	nsMap := responsesNamespaceRestoreMap([]byte(req))
+	nsMap, _ := responsesNamespaceRestoreMap([]byte(req))
 	out, err := convertOpenAIResponseToResponsesNS([]byte(chatResp), r2cCtx{ns: nsMap})
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +224,7 @@ func TestNamespace_LongNameTruncation(t *testing.T) {
 		t.Errorf("truncation not a plain prefix cut: %q", flat)
 	}
 	req := `{"model":"g","input":[],"tools":[{"type":"function","name":"` + name + `","namespace":"` + ns + `"}]}`
-	m := responsesNamespaceRestoreMap([]byte(req))
+	m, _ := responsesNamespaceRestoreMap([]byte(req))
 	r, ok := m[flat]
 	if !ok || r.Name != name || r.Namespace != ns {
 		t.Fatalf("restore map must key on the truncated flat name: %v", m)
@@ -332,7 +371,7 @@ func TestNSRestoreMap_NamespaceContainerInAdditionalTools(t *testing.T) {
 		`{"type":"custom","name":"exec"}]},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
 	// Restore map: container subtool recoverable by its flattened name.
-	r := responsesNamespaceRestoreMap(body)
+	r, _ := responsesNamespaceRestoreMap(body)
 	name, ns, ok := nsRestoreName(r, "collaboration__followup_task")
 	if !ok || name != "followup_task" || ns != "collaboration" {
 		t.Errorf("restore = %q/%q/%v, want followup_task/collaboration/true", name, ns, ok)
@@ -427,7 +466,7 @@ func TestNamespace_TruncationRuneBoundary(t *testing.T) {
 	}
 	// Determinism: flatten and the restore map agree on the truncated key.
 	req := `{"model":"g","input":[],"tools":[{"type":"function","name":"` + name + `","namespace":"` + ns + `"}]}`
-	m := responsesNamespaceRestoreMap([]byte(req))
+	m, _ := responsesNamespaceRestoreMap([]byte(req))
 	if r, ok := m[flat]; !ok || r.Name != name || r.Namespace != ns {
 		t.Errorf("restore map must key on the rune-boundary flat name: %v", m)
 	}

@@ -69,12 +69,14 @@ func (effects targetExecutionEffects) Failover(target configdomain.RouteTarget) 
 func (effects targetExecutionEffects) Failure(target configdomain.RouteTarget) {
 	if effects.proxy.metrics != nil {
 		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvFailures)
+		effects.proxy.metrics.Inc("attempts", "hard", counters.EvAttemptHard)
 	}
 }
 
 func (effects targetExecutionEffects) RateLimited(target configdomain.RouteTarget) {
 	if effects.proxy.metrics != nil {
 		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvRateLimited429)
+		effects.proxy.metrics.Inc("attempts", "rate_limited", counters.EvAttemptRateLimited)
 	}
 }
 
@@ -159,6 +161,7 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 	}
 	if effects.proxy.metrics != nil {
 		effects.proxy.metrics.Inc(target.Provider, target.Model, counters.EvRequests)
+		effects.proxy.metrics.Inc("attempts", "ok", counters.EvAttemptOK)
 		effects.proxy.metrics.AddLatency(
 			target.Provider,
 			target.Model,
