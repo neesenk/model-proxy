@@ -2372,7 +2372,7 @@ func convertAnthropicResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, err
 					"id": strOf(b["id"]), "call_id": strOf(b["id"]),
 					"name": name, "arguments": args,
 				}
-				if original, namespace, ok := r2c.restoreName( name); ok {
+				if original, namespace, ok := r2c.restoreName(name); ok {
 					item["name"] = original
 					item["namespace"] = namespace
 				}
@@ -2554,7 +2554,7 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 					}
 					// MCP namespace restore: a chat name that was flattened
 					// from {namespace, name} round-trips back to二维.
-					if orig, ns, ok := r2c.restoreName( name); ok {
+					if orig, ns, ok := r2c.restoreName(name); ok {
 						item["name"] = orig
 						item["namespace"] = ns
 					}

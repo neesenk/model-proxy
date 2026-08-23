@@ -45,28 +45,51 @@ func ewma(prev, sample float64, dt time.Duration) float64 {
 // decayed returns the signals projected to `now` WITHOUT mutating state: a
 // provider that stopped failing an hour ago must not carry a stale penalty
 // into the next scheduling decision.
-func (q *providerQuality) decayed(now time.Time) (errRate, ttftNorm float64) {
-	if q == nil {
-		return 0, 0
-	}
+func (q providerQuality) decayed(now time.Time) (errRate, ttftNorm float64) {
 	return ewma(q.errRate, 0, now.Sub(q.errAt)), ewma(q.ttftNorm, 0, now.Sub(q.ttftAt))
+}
+
+// qualitySnapshot loads the immutable quality state without the mutex (nil
+// maps become empty pre-first-record).
+func (m *Manager) qualitySnapshot() map[string]providerQuality {
+	if p := m.quality.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// storeQualityLocked publishes a copy-on-write quality map. Caller holds m.mu.
+func (m *Manager) storeQualityLocked(next map[string]providerQuality) {
+	m.quality.Store(&next)
+}
+
+// seedQuality replaces the whole quality state in one publication. Test and
+// restore paths only; record paths use the per-entry copy-on-write updates.
+func (m *Manager) seedQuality(state map[string]providerQuality) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	m.quality.Store(&state)
 }
 
 // recordSample applies one error-rate sample (0 success / 1 failure). Caller
 // holds m.mu and has passed the generation check.
 func (m *Manager) recordQualityLocked(name string, sample float64, now time.Time) {
 	m.ensureLocked()
-	q := m.quality[name]
-	if q == nil {
-		q = &providerQuality{}
-		m.quality[name] = q
-	}
+	cur := m.qualitySnapshot()
+	q := cur[name]
 	if q.errAt.IsZero() {
 		q.errRate = sample
 	} else {
 		q.errRate = ewma(q.errRate, sample, now.Sub(q.errAt))
 	}
 	q.errAt = now
+	next := make(map[string]providerQuality, len(cur)+1)
+	for k, v := range cur {
+		next[k] = v
+	}
+	next[name] = q
+	m.storeQualityLocked(next)
 }
 
 // RecordAttemptQuality folds a committed attempt's TTFT into the provider's
@@ -86,11 +109,8 @@ func (m *Manager) RecordAttemptQuality(name string, ttft time.Duration, generati
 		return
 	}
 	m.ensureLocked()
-	q := m.quality[name]
-	if q == nil {
-		q = &providerQuality{}
-		m.quality[name] = q
-	}
+	cur := m.qualitySnapshot()
+	q := cur[name]
 	sample := ttft.Seconds() / ttftReference.Seconds()
 	if sample > 1 {
 		sample = 1
@@ -101,4 +121,10 @@ func (m *Manager) RecordAttemptQuality(name string, ttft time.Duration, generati
 		q.ttftNorm = ewma(q.ttftNorm, sample, now.Sub(q.ttftAt))
 	}
 	q.ttftAt = now
+	next := make(map[string]providerQuality, len(cur)+1)
+	for k, v := range cur {
+		next[k] = v
+	}
+	next[name] = q
+	m.storeQualityLocked(next)
 }

@@ -49,9 +49,18 @@ func (m *Manager) ResetHealth(name string, parentOf map[string]string) (cleared 
 	}
 	// unfreeze is the operator saying "retry now": the quality EWMA must not
 	// keep demoting a provider the operator just cleared.
-	for providerName := range m.quality {
-		if match(providerName) {
-			delete(m.quality, providerName)
+	if cur := m.qualitySnapshot(); len(cur) > 0 {
+		next := make(map[string]providerQuality, len(cur))
+		pruned := false
+		for providerName, q := range cur {
+			if match(providerName) {
+				pruned = true
+				continue
+			}
+			next[providerName] = q
+		}
+		if pruned {
+			m.storeQualityLocked(next)
 		}
 	}
 	for key := range m.modelLocks {

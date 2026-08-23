@@ -87,13 +87,19 @@ func schedulingTier(billing provider.BillingClass) int {
 // committed, current-generation call. Sticky itself is never written here; the
 // caller commits StickyProvider with SetSticky after the decision.
 func (m *Manager) DecideOrder(input ScheduleInput) ScheduleResult {
+	// Project the decayed quality statuses BEFORE the lock: the state is
+	// copy-on-write immutable, so the map allocation + EWMA math per provider
+	// leaves the scheduling critical section. A record landing between the
+	// load and the lock is simply not part of THIS decision — the same
+	// one-decision staleness the locked projection already had.
+	quality := projectQuality(m.qualitySnapshot(), input.Now)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
 
 	state := scheduleState{
 		quotas:  m.quotas,
-		quality: m.qualityStatusLocked(input.Now),
+		quality: quality,
 		sticky:  m.sticky,
 		pins:    m.pins,
 		spread:  m.spread,
@@ -108,15 +114,15 @@ func (m *Manager) DecideOrder(input ScheduleInput) ScheduleResult {
 	return decideOrder(input, state, commit)
 }
 
-// qualityStatusLocked projects the EWMA state to detached statuses decayed to
-// `now` (a provider that stopped failing must not carry a stale penalty).
-// Caller holds m.mu.
-func (m *Manager) qualityStatusLocked(now time.Time) map[string]QualityStatus {
-	if len(m.quality) == 0 {
+// projectQuality projects an immutable EWMA snapshot to detached statuses
+// decayed to `now` (a provider that stopped failing must not carry a stale
+// penalty). Pure — no lock, no Manager state.
+func projectQuality(state map[string]providerQuality, now time.Time) map[string]QualityStatus {
+	if len(state) == 0 {
 		return nil
 	}
-	out := make(map[string]QualityStatus, len(m.quality))
-	for name, q := range m.quality {
+	out := make(map[string]QualityStatus, len(state))
+	for name, q := range state {
 		errRate, ttftNorm := q.decayed(now)
 		out[name] = QualityStatus{
 			ErrorRate:        errRate,
@@ -312,7 +318,7 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 		Sticky:     make(map[string]Sticky, len(m.sticky)),
 		Pins:       make(map[string]Pin, len(m.pins)),
 		Quotas:     cloneQuotas(m.quotas),
-		Quality:    m.qualityStatusLocked(now),
+		Quality:    projectQuality(m.qualitySnapshot(), now),
 		capturedAt: now,
 		spread:     make(map[string]uint64, len(m.spread)),
 	}

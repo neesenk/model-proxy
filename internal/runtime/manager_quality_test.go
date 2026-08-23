@@ -33,7 +33,7 @@ func TestQualityEWMA(t *testing.T) {
 	if q.errRate != 1 || q.ttftNorm != 1 {
 		t.Fatalf("decayed mutated state: %+v", q)
 	}
-	if errRate, _ := (*providerQuality)(nil).decayed(now); errRate != 0 {
+	if errRate, _ := (providerQuality{}).decayed(now); errRate != 0 {
 		t.Fatalf("nil quality = %v, want 0", errRate)
 	}
 }
@@ -66,7 +66,7 @@ func TestDecideOrderAppliesQualityPenalty(t *testing.T) {
 
 	// A degrading provider (fresh 60% error EWMA) sinks below an equally
 	// provisioned healthy one.
-	m.quality["degrading"] = &providerQuality{errRate: .6, errAt: now}
+	m.seedQuality(map[string]providerQuality{"degrading": {errRate: .6, errAt: now}})
 	result := m.DecideOrder(input)
 	if !reflect.DeepEqual(result.Order, []int{1, 0}) {
 		t.Fatalf("degrading provider did not sink: %+v", result)
@@ -77,14 +77,14 @@ func TestDecideOrderAppliesQualityPenalty(t *testing.T) {
 
 	// The penalty expires with the EWMA: an hour-old failure burst no longer
 	// penalizes (decays ~0 at 30 half-lives), restoring the original order.
-	m.quality["degrading"].errAt = now.Add(-time.Hour)
+	m.seedQuality(map[string]providerQuality{"degrading": {errRate: .6, errAt: now.Add(-time.Hour)}})
 	if result = m.DecideOrder(input); result.Order[0] != 0 {
 		t.Fatalf("stale penalty did not expire: %+v", result)
 	}
 
 	// PreviewOrder (dashboard path) computes the same penalty from the
 	// detached snapshot as the live decision at the same state.
-	m.quality["degrading"].errAt = now
+	m.seedQuality(map[string]providerQuality{"degrading": {errRate: .6, errAt: now}})
 	live := m.DecideOrder(input)
 	preview := m.Dashboard(now).PreviewOrder(input)
 	if !reflect.DeepEqual(preview.Order, []int{1, 0}) ||
@@ -123,7 +123,7 @@ func TestDecideOrderStickyEscapesDegradingAccount(t *testing.T) {
 	}
 	// The sticky account's fresh 40% error EWMA pushes the score gap (0.4)
 	// past the margin (0.15): sticky escapes through the SAME margin gate.
-	m.quality["current"] = &providerQuality{errRate: .4, errAt: now}
+	m.seedQuality(map[string]providerQuality{"current": {errRate: .4, errAt: now}})
 	if result := m.DecideOrder(input); result.StickyProvider != "other" {
 		t.Fatalf("degrading sticky did not escape: %+v", result)
 	}
@@ -138,7 +138,7 @@ func TestQualityLifecycle(t *testing.T) {
 	m.RecordFailure("p", 3, time.Minute, 5)
 	m.RecordFailure("p", 3, time.Minute, 5)
 	m.RecordSuccess("p", "m", 5)
-	if got := m.quality["p"].errRate; got <= 0 || got >= 1 {
+	if got := m.qualitySnapshot()["p"].errRate; got <= 0 || got >= 1 {
 		t.Fatalf("errRate after fail/fail/success = %v", got)
 	}
 
@@ -146,27 +146,27 @@ func TestQualityLifecycle(t *testing.T) {
 	// non-positive timings are ignored.
 	m.RecordAttemptQuality("r", 20*time.Second, 5)
 	m.RecordAttemptQuality("r", 0, 5)
-	if got := m.quality["r"].ttftNorm; got != 1 {
+	if got := m.qualitySnapshot()["r"].ttftNorm; got != 1 {
 		t.Fatalf("ttftNorm = %v, want clamped 1", got)
 	}
 
 	// unfreeze clears quality alongside health: the operator's "retry now"
 	// must not leave a stale demotion behind.
 	m.ResetHealth("p", nil)
-	if m.quality["p"] != nil {
-		t.Fatalf("ResetHealth kept quality: %+v", m.quality["p"])
+	if _, kept := m.qualitySnapshot()["p"]; kept {
+		t.Fatalf("ResetHealth kept quality: %+v", m.qualitySnapshot())
 	}
 
 	// Generation replace drops quality like the rest of the routing state.
 	m.RecordFailure("q", 3, time.Minute, 5)
 	m.ReplaceGeneration(6)
-	if len(m.quality) != 0 {
-		t.Fatalf("ReplaceGeneration kept quality: %+v", m.quality)
+	if len(m.qualitySnapshot()) != 0 {
+		t.Fatalf("ReplaceGeneration kept quality: %+v", m.qualitySnapshot())
 	}
 	// Stale-generation mutations are rejected.
 	m.RecordFailure("q", 3, time.Minute, 5)
-	if len(m.quality) != 0 {
-		t.Fatalf("stale generation mutated quality: %+v", m.quality)
+	if len(m.qualitySnapshot()) != 0 {
+		t.Fatalf("stale generation mutated quality: %+v", m.qualitySnapshot())
 	}
 }
 
@@ -180,12 +180,12 @@ func TestQualityTTFTDecaysDuringFailureStretch(t *testing.T) {
 
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	m := NewManager(1)
-	m.quality["p"] = &providerQuality{ttftNorm: 1, ttftAt: now}
+	m.seedQuality(map[string]providerQuality{"p": {ttftNorm: 1, ttftAt: now}})
 	// Ten minutes of continuous failures, no TTFT samples in between.
 	for i := 1; i <= 5; i++ {
 		m.recordQualityLocked("p", 1, now.Add(time.Duration(2*i)*time.Minute))
 	}
-	_, ttft := m.quality["p"].decayed(now.Add(10 * time.Minute))
+	_, ttft := m.qualitySnapshot()["p"].decayed(now.Add(10 * time.Minute))
 	if ttft > 0.1 {
 		t.Fatalf("TTFT penalty after a 10-minute failure stretch = %v, want decayed to ≤0.1 (half-life 2m)", ttft)
 	}

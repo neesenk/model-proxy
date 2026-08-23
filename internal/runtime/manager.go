@@ -5,6 +5,7 @@ package runtime
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"model-proxy/internal/provider"
 )
@@ -22,7 +23,13 @@ type Manager struct {
 	paramBlock map[ModelKey]map[string]bool
 	spread     map[string]uint64
 	quotas     map[string]*provider.QuotaSnapshot
-	quality    map[string]*providerQuality
+	// quality is copy-on-write: record paths (under m.mu) publish a NEW
+	// immutable map of providerQuality VALUES; readers load the pointer without
+	// the mutex so the scheduling critical section skips the decayed-status
+	// projection (map alloc + EWMA math per provider). Mutations are rare
+	// relative to DecideOrder calls, and each copies a map of provider-count
+	// size.
+	quality atomic.Pointer[map[string]providerQuality]
 }
 
 func NewManager(generation uint64) *Manager {
@@ -53,8 +60,9 @@ func (m *Manager) ensureLocked() {
 	if m.quotas == nil {
 		m.quotas = make(map[string]*provider.QuotaSnapshot)
 	}
-	if m.quality == nil {
-		m.quality = make(map[string]*providerQuality)
+	if m.quality.Load() == nil {
+		empty := map[string]providerQuality{}
+		m.quality.Store(&empty)
 	}
 }
 
@@ -81,7 +89,8 @@ func (m *Manager) ReplaceGeneration(generation uint64) {
 	m.paramBlock = make(map[ModelKey]map[string]bool)
 	m.spread = make(map[string]uint64)
 	m.quotas = make(map[string]*provider.QuotaSnapshot)
-	m.quality = make(map[string]*providerQuality)
+	empty := map[string]providerQuality{}
+	m.quality.Store(&empty)
 }
 
 // GenerationArg keeps compatibility with callers that omit a generation while
