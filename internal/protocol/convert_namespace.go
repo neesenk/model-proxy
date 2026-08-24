@@ -182,7 +182,7 @@ func nsExpandTools(tools []any) []nsToolEntry {
 // restore map. A flattened name colliding with ANY other tool name in the
 // list (plain, wrapped, or already flattened) is a fail-closed error —
 // silently serving a wrong-name tool is worse than a 502.
-func nsFlattenResponsesTools(tools []any) ([]map[string]any, error) {
+func nsFlattenResponsesTools(d *Diagnostics, tools []any) ([]map[string]any, error) {
 	var out []map[string]any
 	seen := map[string]bool{}
 	for _, e := range nsExpandTools(tools) {
@@ -240,7 +240,7 @@ func nsFlattenResponsesTools(tools []any) ([]map[string]any, error) {
 			// Unknown tool type: dropped, but named in a warning — silently
 			// vanishing tools are undebuggable.
 			if ty != "" {
-				convertWarn("dropping responses tool of unknown type in r→chat request: " + ty)
+				warnDiag(d, "unknown_tool_type", "dropping responses tool of unknown type in r→chat request: "+ty)
 			}
 		}
 	}

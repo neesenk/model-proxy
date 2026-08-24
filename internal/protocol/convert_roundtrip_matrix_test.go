@@ -100,10 +100,10 @@ func TestRoundtrip_TwoHopCycles(t *testing.T) {
 	before := projectAnthropicRequest(t, fixture)
 	convert := map[[2]string]func([]byte) ([]byte, error){
 		{"anthropic", "openai"}:    convertAnthropicRequestToOpenAI,
-		{"openai", "anthropic"}:    convertOpenAIRequestToAnthropic,
+		{"openai", "anthropic"}:    func(b []byte) ([]byte, error) { return convertOpenAIRequestToAnthropic(b, nil) },
 		{"anthropic", "responses"}: convertAnthropicRequestToResponses,
-		{"responses", "anthropic"}: convertResponsesRequestToAnthropic,
-		{"openai", "responses"}:    convertOpenAIRequestToResponses,
+		{"responses", "anthropic"}: func(b []byte) ([]byte, error) { return convertResponsesRequestToAnthropic(b, nil) },
+		{"openai", "responses"}:    func(b []byte) ([]byte, error) { return convertOpenAIRequestToResponses(b, nil) },
 		{"responses", "openai"}:    convertResponsesRequestToOpenAI,
 	}
 	cycles := [][2]string{{"anthropic", "openai"}, {"anthropic", "responses"}}
@@ -132,10 +132,10 @@ func TestRoundtrip_ThreeHopCycles(t *testing.T) {
 		legs []func([]byte) ([]byte, error)
 	}{
 		{"a→r→chat→a", []func([]byte) ([]byte, error){
-			convertAnthropicRequestToResponses, convertResponsesRequestToOpenAI, convertOpenAIRequestToAnthropic,
+			convertAnthropicRequestToResponses, convertResponsesRequestToOpenAI, func(b []byte) ([]byte, error) { return convertOpenAIRequestToAnthropic(b, nil) },
 		}},
 		{"a→chat→r→a", []func([]byte) ([]byte, error){
-			convertAnthropicRequestToOpenAI, convertOpenAIRequestToResponses, convertResponsesRequestToAnthropic,
+			convertAnthropicRequestToOpenAI, func(b []byte) ([]byte, error) { return convertOpenAIRequestToResponses(b, nil) }, func(b []byte) ([]byte, error) { return convertResponsesRequestToAnthropic(b, nil) },
 		}},
 	}
 	for _, s := range steps {

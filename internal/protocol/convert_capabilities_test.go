@@ -67,7 +67,7 @@ func TestAnthropicCustomTypeToolsConvertAsFunctions(t *testing.T) {
 		map[string]any{"type": "computer_20241022", "name": "computer"},
 	}
 
-	chat := anthropicToolsToOpenAI(tools)
+	chat := anthropicToolsToOpenAI(tools, nil)
 	if len(chat) != 2 {
 		t.Fatalf("chat tools = %v, want custom+untyped only", chat)
 	}
@@ -78,7 +78,7 @@ func TestAnthropicCustomTypeToolsConvertAsFunctions(t *testing.T) {
 		t.Fatalf("untyped tool not mapped to chat function: %v", chat[1])
 	}
 
-	resp := anthropicToolsToResponses(tools)
+	resp := anthropicToolsToResponses(tools, nil)
 	if len(resp) != 2 {
 		t.Fatalf("responses tools = %v, want custom+untyped only", resp)
 	}

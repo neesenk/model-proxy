@@ -60,7 +60,7 @@ func TestConvertOpenAIRequestToResponses_FoldsAllInstructions(t *testing.T) {
 		`{"role":"developer","content":"rule one"},` +
 		`{"role":"system","content":[{"type":"text","text":"rule two"}]},` +
 		`{"role":"user","content":"second"}]}`)
-	got, err := convertOpenAIRequestToResponses(in)
+	got, err := convertOpenAIRequestToResponses(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestConvertOpenAIRequestToResponses_FoldsAllInstructions(t *testing.T) {
 func TestResponsesContentToAnthropicBlocks_PreservesURLImage(t *testing.T) {
 	blocks := responsesContentToAnthropicBlocks([]any{
 		map[string]any{"type": "input_image", "image_url": "https://example.test/image.png"},
-	})
+	}, nil)
 	if len(blocks) != 1 {
 		t.Fatalf("blocks = %v", blocks)
 	}

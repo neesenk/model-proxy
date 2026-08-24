@@ -58,7 +58,20 @@ type Config struct {
 	// bodies are rejected with 413 before any routing work, bounding per-
 	// request memory (the body is fully buffered for routing/conversion).
 	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes"`
+	// Conversion tunes protocol-conversion behavior.
+	Conversion ConversionConfig `yaml:"conversion"`
 }
+
+// ConversionConfig configures protocol conversion. strict_lossy (default
+// false) refuses lossy-but-degradable request conversions — the target is
+// skipped exactly like a capability-scanner verdict, and a route with no
+// non-lossy target answers 400 instead of silently degrading content.
+type ConversionConfig struct {
+	StrictLossy bool `yaml:"strict_lossy"`
+}
+
+// StrictLossyValue reports whether strict-lossy mode is enabled.
+func (c ConversionConfig) StrictLossyValue() bool { return c.StrictLossy }
 
 // MaxRequestBodyBytesValue returns the inbound request-body cap in bytes,
 // defaulting to 64 MiB (aligned with the upstream response read cap). Values
@@ -670,7 +683,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Budgets             BudgetsConfig           `yaml:"budgets"`
 		// Must mirror Config.MaxRequestBodyBytes (same silent-drop trap as the
 		// shadow knobs above).
-		MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes"`
+		MaxRequestBodyBytes int64            `yaml:"max_request_body_bytes"`
+		Conversion          ConversionConfig `yaml:"conversion"`
 	}
 	raw := rawConfig{
 		Listen:   "127.0.0.1:15721",
@@ -709,6 +723,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Guard = raw.Guard
 	cfg.Budgets = raw.Budgets
 	cfg.MaxRequestBodyBytes = raw.MaxRequestBodyBytes
+	cfg.Conversion = raw.Conversion
 	cfg.LogFile = ExpandPath(cfg.LogFile)
 	t := &cfg.Takeover
 	// Takeover paths default to each client's standard config location (and

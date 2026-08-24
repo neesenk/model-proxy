@@ -33,6 +33,16 @@ type LogContext struct {
 	Attempt      int
 	Exposed      string
 	OriginalBody []byte
+	// Diagnostics carries the attempt's request-conversion diagnostics
+	// (structured lossy-conversion observations) into the request log.
+	Diagnostics []ConversionDiagnostic
+}
+
+// ConversionDiagnostic is the wire-independent projection of a protocol
+// conversion diagnostic.
+type ConversionDiagnostic struct {
+	Code   string
+	Detail string
 }
 
 // Scope contains request identity and protocol state that is neither target

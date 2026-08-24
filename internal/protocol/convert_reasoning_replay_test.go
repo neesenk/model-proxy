@@ -55,7 +55,7 @@ func TestSignedAnthropicReasoningEnvelopeRoundTripViaChat(t *testing.T) {
 		},
 	}
 	requestRaw, _ := jsonMarshal(replayRequest)
-	backRaw, err := convertOpenAIRequestToAnthropic(requestRaw)
+	backRaw, err := convertOpenAIRequestToAnthropic(requestRaw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

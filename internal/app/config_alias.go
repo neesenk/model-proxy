@@ -12,6 +12,7 @@ type StatsConfig = configdomain.StatsConfig
 type PricingConfig = configdomain.PricingConfig
 type PriceConfig = configdomain.PriceConfig
 type RequestLogConfig = configdomain.RequestLogConfig
+type ConversionConfig = configdomain.ConversionConfig
 type CacheConfig = configdomain.CacheConfig
 type Scheduling = configdomain.Scheduling
 type Provider = configdomain.Provider

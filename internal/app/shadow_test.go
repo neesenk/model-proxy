@@ -264,8 +264,15 @@ func TestShadow_LogsResult(t *testing.T) {
 		t.Errorf("client response = %s, want the primary's body", string(body))
 	}
 
-	// Proxy.Close first waits for the admitted Shadow task; Shutdown then drains
-	// every record it enqueued. The disk query therefore has no timing window.
+	// Shadow admission is asynchronous with respect to the client observing
+	// the response end (Go 1.27's scheduler reliably lets the client win that
+	// race), and Close only waits for ALREADY-admitted tasks — so wait for the
+	// shadow request to actually reach the candidate backend first. Close then
+	// waits for the admitted task; Shutdown drains every record it enqueued.
+	deadline := time.Now().Add(2 * time.Second)
+	for !shadowHit.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	p.Close()
 	shutdown()
 	var shadowRec *requestlog.Record

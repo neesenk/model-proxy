@@ -48,10 +48,10 @@ func FuzzConvertRequest(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// request direction
 		convertAnthropicRequestToOpenAI(data)
-		convertOpenAIRequestToAnthropic(data)
+		convertOpenAIRequestToAnthropic(data, nil)
 		convertAnthropicRequestToResponses(data)
-		convertOpenAIRequestToResponses(data)
-		convertResponsesRequestToAnthropic(data)
+		convertOpenAIRequestToResponses(data, nil)
+		convertResponsesRequestToAnthropic(data, nil)
 		convertResponsesRequestToOpenAI(data)
 		// response direction
 		convertOpenAIResponseToAnthropic(data)
@@ -199,10 +199,10 @@ func FuzzParseToolArgs(f *testing.F) {
 	f.Add(`[1,2,3]`)
 	f.Add(`"string"`)
 	f.Fuzz(func(t *testing.T, data string) {
-		a := parseToolArgs(data)
-		b := parseToolArgs(data)
+		a := parseToolArgs(data, nil)
+		b := parseToolArgs(data, nil)
 		if strOf(a) != strOf(b) {
-			t.Fatalf("parseToolArgs(%q) not deterministic: %v vs %v", data, a, b)
+			t.Fatalf("parseToolArgs(%q, nil) not deterministic: %v vs %v", data, a, b)
 		}
 	})
 }

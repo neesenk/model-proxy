@@ -126,7 +126,7 @@ func TestParity_LegacyAndUnknownRolesWarn(t *testing.T) {
 		var out []byte
 		logs := captureConvertLog(t, func() {
 			var err error
-			out, err = convertOpenAIRequestToAnthropic([]byte(body))
+			out, err = convertOpenAIRequestToAnthropic([]byte(body), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestParity_EmptyJsonSchemaWrapperDropped(t *testing.T) {
 	logs := captureConvertLog(t, func() {
 		var err error
 		out, err = convertOpenAIRequestToResponses([]byte(
-			`{"model":"m","messages":[{"role":"user","content":"x"}],"response_format":{"type":"json_schema","json_schema":{}}}`))
+			`{"model":"m","messages":[{"role":"user","content":"x"}],"response_format":{"type":"json_schema","json_schema":{}}}`), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -165,7 +165,7 @@ func TestParity_EmptyJsonSchemaWrapperDropped(t *testing.T) {
 
 	// Nested type override: still a json_schema request.
 	out, err := convertOpenAIRequestToResponses([]byte(
-		`{"model":"m","messages":[{"role":"user","content":"x"}],"response_format":{"type":"json_schema","json_schema":{"type":"text","name":"out","schema":{"type":"object"}}}}`))
+		`{"model":"m","messages":[{"role":"user","content":"x"}],"response_format":{"type":"json_schema","json_schema":{"type":"text","name":"out","schema":{"type":"object"}}}}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestParity_ToolIDCollisionDisambiguated(t *testing.T) {
 			{"id":"call_a","type":"function","function":{"name":"g","arguments":"{}"}}]},
 		{"role":"tool","tool_call_id":"call.a","content":"r1"},
 		{"role":"tool","tool_call_id":"call_a","content":"r2"}]}`)
-	out, err := convertOpenAIRequestToAnthropic(in)
+	out, err := convertOpenAIRequestToAnthropic(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestParity_KitchenSinkNoLeakage(t *testing.T) {
 	var out []byte
 	_ = captureConvertLog(t, func() {
 		var err error
-		out, err = convertOpenAIRequestToAnthropic(chatIn)
+		out, err = convertOpenAIRequestToAnthropic(chatIn, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

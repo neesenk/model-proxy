@@ -250,7 +250,7 @@ func aggregateAnthropicSSE(events []wireSSEEvent) ([]byte, error) {
 		case "content_block_stop":
 			index := intOf(payload["index"])
 			if raw := partialJSON[index]; raw != "" {
-				blocks[index]["input"] = parseToolArgs(raw)
+				blocks[index]["input"] = parseToolArgs(raw, nil)
 			}
 		case "message_delta":
 			if message == nil {

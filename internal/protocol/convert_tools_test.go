@@ -112,7 +112,7 @@ func TestConvertRequest_OpenAIToAnthropic_Tools(t *testing.T) {
 			{"role":"tool","tool_call_id":"t1","content":"sunny"}
 		]
 	}`)
-	out, err := convertOpenAIRequestToAnthropic(in)
+	out, err := convertOpenAIRequestToAnthropic(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestRoundTrip_AnthropicOpenAIAnthropic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, err := convertOpenAIRequestToAnthropic(openai)
+	back, err := convertOpenAIRequestToAnthropic(openai, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestConvertRequest_ConsecutiveRoleMerge(t *testing.T) {
 		{"role":"assistant","content":"x"},
 		{"role":"assistant","content":"y"}
 	]}`)
-	out, err := convertOpenAIRequestToAnthropic(in)
+	out, err := convertOpenAIRequestToAnthropic(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,25 +471,25 @@ func TestConvertRequest_ConsecutiveRoleMerge(t *testing.T) {
 // variants) — the branches the end-to-end tests don't reach.
 func TestConvert_ContentBlocksAndChoices(t *testing.T) {
 	// anthropic content blocks → openai parts.
-	if p := anthropicContentBlockToOpenAIPart(map[string]any{"type": "text", "text": "hi"}); p["text"] != "hi" {
+	if p := anthropicContentBlockToOpenAIPart(map[string]any{"type": "text", "text": "hi"}, nil); p["text"] != "hi" {
 		t.Errorf("text block: %+v", p)
 	}
-	img := anthropicContentBlockToOpenAIPart(map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "QUJD"}})
+	img := anthropicContentBlockToOpenAIPart(map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "QUJD"}}, nil)
 	if u, _ := img["image_url"].(map[string]any); u == nil || u["url"] != "data:image/png;base64,QUJD" {
 		t.Errorf("image block → %v", img)
 	}
-	if anthropicContentBlockToOpenAIPart(map[string]any{"type": "thinking", "thinking": "x"}) != nil {
+	if anthropicContentBlockToOpenAIPart(map[string]any{"type": "thinking", "thinking": "x"}, nil) != nil {
 		t.Error("thinking block should drop to nil")
 	}
-	if anthropicContentBlockToOpenAIPart(map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://i/x.png"}}) == nil {
+	if anthropicContentBlockToOpenAIPart(map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://i/x.png"}}, nil) == nil {
 		t.Error("image url source should map")
 	}
 
 	// openai content parts → anthropic blocks.
-	if b := openaiContentPartToAnthropicBlock(map[string]any{"type": "text", "text": "hi"}); b["text"] != "hi" {
+	if b := openaiContentPartToAnthropicBlock(map[string]any{"type": "text", "text": "hi"}, nil); b["text"] != "hi" {
 		t.Errorf("text part: %+v", b)
 	}
-	b := openaiContentPartToAnthropicBlock(map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,QUJD"}})
+	b := openaiContentPartToAnthropicBlock(map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,QUJD"}}, nil)
 	src, _ := b["source"].(map[string]any)
 	if src["type"] != "base64" || src["media_type"] != "image/png" || src["data"] != "QUJD" {
 		t.Errorf("image_url part → %v", b)
@@ -521,14 +521,14 @@ func TestConvert_ContentBlocksAndChoices(t *testing.T) {
 	}
 
 	// anthropic tool_result content (string + blocks; image inside dropped).
-	if got := anthropicToolResultText("done"); got != "done" {
+	if got := anthropicToolResultText("done", nil); got != "done" {
 		t.Errorf("tool_result string = %q", got)
 	}
 	if got := anthropicToolResultText([]any{
 		map[string]any{"type": "text", "text": "a"},
 		map[string]any{"type": "image", "source": map[string]any{}}, // dropped + warned
 		map[string]any{"type": "text", "text": "b"},
-	}); got != "ab" {
+	}, nil); got != "ab" {
 		t.Errorf("tool_result blocks = %q want ab", got)
 	}
 }

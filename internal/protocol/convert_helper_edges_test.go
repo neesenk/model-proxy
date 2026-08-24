@@ -24,14 +24,14 @@ func TestConvertHelpers(t *testing.T) {
 		}
 	}
 	// anthropicTextOf: string passthrough, array text joined with "\n", image skipped.
-	if got := anthropicTextOf("hi"); got != "hi" {
+	if got := anthropicTextOf("hi", nil); got != "hi" {
 		t.Errorf("string extract=%q", got)
 	}
 	if got := anthropicTextOf([]any{
 		map[string]any{"type": "text", "text": "a"},
 		map[string]any{"type": "image", "text": "ignored"},
 		map[string]any{"type": "text", "text": "b"},
-	}); got != "a\nb" {
+	}, nil); got != "a\nb" {
 		t.Errorf("array extract=%q want %q", got, "a\nb")
 	}
 	// backendPath by protocol.
@@ -59,13 +59,13 @@ func TestConvertRequestResponse_NoOp(t *testing.T) {
 // when the scanner commits (the agent token-attribution path).
 // TestOpenAIContentToAnthropicBlocks: nil, empty, and string content paths.
 func TestOpenAIContentToAnthropicBlocks(t *testing.T) {
-	if openaiContentToAnthropicBlocks(nil) != nil {
+	if openaiContentToAnthropicBlocks(nil, nil) != nil {
 		t.Error("nil content should return nil")
 	}
-	if openaiContentToAnthropicBlocks("hello") == nil {
+	if openaiContentToAnthropicBlocks("hello", nil) == nil {
 		t.Error("string content should return a text block")
 	}
-	if len(openaiContentToAnthropicBlocks("hello")) != 1 {
+	if len(openaiContentToAnthropicBlocks("hello", nil)) != 1 {
 		t.Error("string content should produce exactly one block")
 	}
 }

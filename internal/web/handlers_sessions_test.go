@@ -37,7 +37,7 @@ func (a sessionsReadAPI) Pricing() appapi.PricingSnapshot {
 func TestHandleSessions(t *testing.T) {
 	dir := t.TempDir()
 	record := map[string]any{
-		"ts": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		"ts":         time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
 		"request_id": "1", "session_id": "s1", "exposed": "glm",
 		"called_model": "glm", "upstream_model": "glm-4.7", "provider": "zhipu",
 		"status": 200, "latency_ms": 10,

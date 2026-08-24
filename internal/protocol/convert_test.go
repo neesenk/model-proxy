@@ -30,7 +30,7 @@ func TestConvertAnthropicRequestToOpenAI(t *testing.T) {
 
 func TestConvertOpenAIRequestToAnthropic(t *testing.T) {
 	in := []byte(`{"model":"gpt-x","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"}],"stop":["END"]}`)
-	out, err := convertOpenAIRequestToAnthropic(in)
+	out, err := convertOpenAIRequestToAnthropic(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestConvertOpenAIRequestToAnthropic(t *testing.T) {
 // Anthropic requires instead of being silently dropped.
 func TestConvertOpenAIRequestToAnthropic_StopStringForm(t *testing.T) {
 	in := []byte(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}],"stop":"END"}`)
-	out, err := convertOpenAIRequestToAnthropic(in)
+	out, err := convertOpenAIRequestToAnthropic(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,12 +70,12 @@ func TestConvertOpenAIRequestToAnthropic_StopStringForm(t *testing.T) {
 // conversion fail-closed).
 func TestConvertOpenAIRequestToAnthropic_ResponsesInputFailsClosed(t *testing.T) {
 	respBody := []byte(`{"model":"gpt-x","input":[{"role":"user","content":"hi"}],"stream":true}`)
-	if out, err := convertOpenAIRequestToAnthropic(respBody); err == nil {
+	if out, err := convertOpenAIRequestToAnthropic(respBody, nil); err == nil {
 		t.Fatalf("expected fail-closed error for Responses `input` body, got nil; out=%s", out)
 	}
 	// A genuine Chat Completions body must still convert cleanly.
 	chatBody := []byte(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`)
-	if _, err := convertOpenAIRequestToAnthropic(chatBody); err != nil {
+	if _, err := convertOpenAIRequestToAnthropic(chatBody, nil); err != nil {
 		t.Fatalf("chat-completions body must still convert: %v", err)
 	}
 }

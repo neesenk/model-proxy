@@ -371,7 +371,7 @@ func TestConvertRequest_ResponsesToAnthropic_FirstUserPlaceholder(t *testing.T) 
 	// input starting with a function_call would otherwise produce a leading
 	// assistant message (anthropic 400s).
 	in := `{"model":"gpt-x","input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"}]}`
-	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestConvertRequest_ResponsesToAnthropic_FirstUserPlaceholder(t *testing.T) 
 
 	// A leading user message gets NO placeholder (unchanged behavior).
 	in2 := `{"model":"gpt-x","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
-	out2, err := convertResponsesRequestToAnthropic([]byte(in2))
+	out2, err := convertResponsesRequestToAnthropic([]byte(in2), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestConvertRequest_ResponsesToAnthropic_FirstUserPlaceholder(t *testing.T) 
 func TestConvertRequest_MaxCompletionTokens(t *testing.T) {
 	// chat→a: max_completion_tokens wins over max_tokens; alone it still maps.
 	both := `{"model":"g","max_tokens":100,"max_completion_tokens":50,"messages":[{"role":"user","content":"hi"}]}`
-	out, err := convertOpenAIRequestToAnthropic([]byte(both))
+	out, err := convertOpenAIRequestToAnthropic([]byte(both), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestConvertRequest_MaxCompletionTokens(t *testing.T) {
 		t.Errorf("chat→a max_tokens = %v, want 50 (max_completion_tokens wins)", got)
 	}
 	only := `{"model":"g","max_completion_tokens":77,"messages":[{"role":"user","content":"hi"}]}`
-	out2, err := convertOpenAIRequestToAnthropic([]byte(only))
+	out2, err := convertOpenAIRequestToAnthropic([]byte(only), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestConvertRequest_MaxCompletionTokens(t *testing.T) {
 	}
 
 	// chat→r: same precedence into max_output_tokens.
-	out3, err := convertOpenAIRequestToResponses([]byte(both))
+	out3, err := convertOpenAIRequestToResponses([]byte(both), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestConvertRequest_MaxCompletionTokens(t *testing.T) {
 func TestConvertRequest_ResponseFormatTextFormat(t *testing.T) {
 	// chat→r: json_object.
 	out, err := convertOpenAIRequestToResponses([]byte(
-		`{"model":"g","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`))
+		`{"model":"g","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +448,7 @@ func TestConvertRequest_ResponseFormatTextFormat(t *testing.T) {
 
 	// chat→r: json_schema unwrapped.
 	out2, err := convertOpenAIRequestToResponses([]byte(
-		`{"model":"g","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"S","schema":{"type":"object"},"strict":true}}}`))
+		`{"model":"g","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"S","schema":{"type":"object"},"strict":true}}}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestConvertRequest_ResponseFormatTextFormat(t *testing.T) {
 	logs := captureConvertLog(t, func() {
 		var err error
 		out5, err = convertResponsesRequestToAnthropic([]byte(
-			`{"model":"g","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"text":{"format":{"type":"json_object"}}}`))
+			`{"model":"g","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"text":{"format":{"type":"json_object"}}}`), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -511,7 +511,7 @@ func TestConvertRequest_ParallelToolCallsResponses(t *testing.T) {
 
 	// chat→r: passthrough.
 	out2, err := convertOpenAIRequestToResponses([]byte(
-		`{"model":"g","messages":[{"role":"user","content":"hi"}],"parallel_tool_calls":false}`))
+		`{"model":"g","messages":[{"role":"user","content":"hi"}],"parallel_tool_calls":false}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +522,7 @@ func TestConvertRequest_ParallelToolCallsResponses(t *testing.T) {
 	// r→a: false → disable_parallel_tool_use (synthesized {type:auto} when the
 	// client gave no tool_choice; tools present).
 	out3, err := convertResponsesRequestToAnthropic([]byte(
-		`{"model":"g","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"parallel_tool_calls":false}`))
+		`{"model":"g","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}],"parallel_tool_calls":false}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +532,7 @@ func TestConvertRequest_ParallelToolCallsResponses(t *testing.T) {
 	}
 	// r→a: without tools → no synthesized tool_choice.
 	out4, err := convertResponsesRequestToAnthropic([]byte(
-		`{"model":"g","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"parallel_tool_calls":false}`))
+		`{"model":"g","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"parallel_tool_calls":false}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +650,7 @@ func TestConvertRequest_ToolChoiceCoverage(t *testing.T) {
 		{"unrecognized object", `{"type":"bogus","x":1}`, map[string]any{"type": "bogus", "x": float64(1)}},
 	} {
 		in := `{"model":"g","messages":[{"role":"user","content":"hi"}],"tool_choice":` + c.tc + `}`
-		out, err := convertOpenAIRequestToResponses([]byte(in))
+		out, err := convertOpenAIRequestToResponses([]byte(in), nil)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -688,7 +688,7 @@ func TestConvertRequest_ToolChoiceCoverage(t *testing.T) {
 		{"unrecognized string", `"bogus"`, "", ""},
 	} {
 		in := `{"model":"g","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"tool_choice":` + c.tc + `}`
-		out, err := convertResponsesRequestToAnthropic([]byte(in))
+		out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -750,13 +750,13 @@ func TestConvertGap_SingleImagePartKept(t *testing.T) {
 // string — never the literal "null" (the strOf(nil) trap, see
 // protocol-conversion.md "可选字段"). Parts-array content extracts its text.
 func TestConvertGap_ToolMessageContentExtraction(t *testing.T) {
-	out, err := convertOpenAIRequestToAnthropic([]byte(`{"model":"m","messages":[` +
-		`{"role":"user","content":"hi"},` +
-		`{"role":"assistant","tool_calls":[` +
-		`{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}},` +
-		`{"id":"c2","type":"function","function":{"name":"g","arguments":"{}"}}]},` +
-		`{"role":"tool","tool_call_id":"c1"},` +
-		`{"role":"tool","tool_call_id":"c2","content":[{"type":"text","text":"r1"},{"type":"text","text":"r2"}]}]}`))
+	out, err := convertOpenAIRequestToAnthropic([]byte(`{"model":"m","messages":[`+
+		`{"role":"user","content":"hi"},`+
+		`{"role":"assistant","tool_calls":[`+
+		`{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}},`+
+		`{"id":"c2","type":"function","function":{"name":"g","arguments":"{}"}}]},`+
+		`{"role":"tool","tool_call_id":"c1"},`+
+		`{"role":"tool","tool_call_id":"c2","content":[{"type":"text","text":"r1"},{"type":"text","text":"r2"}]}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,10 +790,10 @@ func TestConvertGap_ToolMessageContentExtraction(t *testing.T) {
 // multi-block anthropic system also joins blocks with "\n" (was verbatim
 // concatenation).
 func TestConvertGap_SystemContentExtraction(t *testing.T) {
-	out, err := convertOpenAIRequestToAnthropic([]byte(`{"model":"m","messages":[` +
-		`{"role":"system","content":[{"type":"text","text":"s1"},{"type":"text","text":"s2"}]},` +
-		`{"role":"system","content":"s3"},` +
-		`{"role":"user","content":"hi"}]}`))
+	out, err := convertOpenAIRequestToAnthropic([]byte(`{"model":"m","messages":[`+
+		`{"role":"system","content":[{"type":"text","text":"s1"},{"type":"text","text":"s2"}]},`+
+		`{"role":"system","content":"s3"},`+
+		`{"role":"user","content":"hi"}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

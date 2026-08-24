@@ -58,7 +58,7 @@ func TestConvertReasoning_ResponsesToAnthropicRequest(t *testing.T) {
 	in := `{"model":"gpt-x","input":[` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},` +
 		`{"type":"reasoning","summary":[{"type":"summary_text","text":"let me think"}],"encrypted_content":"sig_ABC-123+="}]}`
-	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestConvertReasoning_ChatRequest(t *testing.T) {
 	in := `{"model":"gpt-x","messages":[` +
 		`{"role":"user","content":"hi"},` +
 		`{"role":"assistant","content":"answer","reasoning_content":"thought"}]}`
-	out, err := convertOpenAIRequestToResponses([]byte(in))
+	out, err := convertOpenAIRequestToResponses([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestConvertReasoning_EffortMapping(t *testing.T) {
 
 	// r→a: effort → thinking config with the fixed budget ladder.
 	in2 := `{"model":"gpt-x","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
-	out2, err := convertResponsesRequestToAnthropic([]byte(in2))
+	out2, err := convertResponsesRequestToAnthropic([]byte(in2), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestConvertReasoning_RedactedThinking_FromResponses(t *testing.T) {
 	in := `{"model":"gpt-x","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},` +
 		`{"type":"reasoning","summary":[],"encrypted_content":"enc_ABC+="},` +
 		`{"type":"reasoning","summary":[{"type":"summary_text","text":"thought"}],"encrypted_content":"sig_x"}]}`
-	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestConvertReasoning_RedactedThinking_Stream(t *testing.T) {
 // ladder as the responses direction).
 func TestConvertReasoning_ChatToAnthropic_Request(t *testing.T) {
 	in := `{"model":"g","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
-	out, err := convertOpenAIRequestToAnthropic([]byte(in))
+	out, err := convertOpenAIRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestConvertReasoning_ChatToAnthropic_Request(t *testing.T) {
 		t.Errorf("chat→a thinking = %v, want enabled/24000", th)
 	}
 	// No effort → no thinking key.
-	out2, err := convertOpenAIRequestToAnthropic([]byte(`{"model":"g","messages":[{"role":"user","content":"hi"}]}`))
+	out2, err := convertOpenAIRequestToAnthropic([]byte(`{"model":"g","messages":[{"role":"user","content":"hi"}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

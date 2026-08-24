@@ -33,9 +33,9 @@ func ExtractUsage(body string) Usage {
 		} `json:"usage"`
 		Response *struct {
 			Usage *struct {
-				InputTokens   uint64 `json:"input_tokens"`
-				OutputTokens  uint64 `json:"output_tokens"`
-				InputDetails  *struct {
+				InputTokens  uint64 `json:"input_tokens"`
+				OutputTokens uint64 `json:"output_tokens"`
+				InputDetails *struct {
 					CachedTokens uint64 `json:"cached_tokens"`
 				} `json:"input_tokens_details"`
 			} `json:"usage"`

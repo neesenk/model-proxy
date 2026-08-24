@@ -10,6 +10,14 @@ log_level: info # debug | info | warn | error
 # anything larger is rejected with 413 before routing. Default 64 MiB:
 # max_request_body_bytes: 67108864
 
+# Protocol conversion. strict_lossy (default false) refuses lossy-but-degradable
+# request conversions: the converting target is skipped (capability-scanner
+# semantics) and a route with no non-lossy target answers 400 instead of
+# silently degrading content (e.g. dropping `stop` on anthropic→responses).
+# Diagnostics for every attempt land in the request log's `diagnostics` field.
+# conversion:
+#   strict_lossy: false
+
 # Providers — upstream backends. Token files are auto-managed by login/logout
 # at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).
 # Multi-account: for apikey providers (static/zhipu/zcode/deepseek/

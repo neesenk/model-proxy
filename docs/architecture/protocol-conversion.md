@@ -149,6 +149,23 @@ SSE 读取按规范折叠多行 `data:`（连续 `data:` 行在分派空行处�
 
 reasoner/thinking/MiMo 等需要 reasoning replay 的模型在 anthropic↔openai-chat 转换路由上仍会丢 thinking（replay cache 未实现）；经 responses 方向可保 reasoning。`configRoutingWarnings` 只负责警告，不代表已实现 replay cache。
 
+## 结构化转换诊断（diagnostics.go）
+
+请求侧的 convertWarn 站点已迁移为 `warnDiag(d, code, msg)` 双写：日志行为不变，同时按稳定
+code 收集进 `RequestOptions.Diag`（`targetexec.Plan` 每次尝试携带一个收集器，经
+`Scope.Log.Diagnostics` 落入 request log 的 `diagnostics` 字段）。code 清单：`stop_dropped`、
+`response_format_dropped`、`empty_json_schema_dropped`、`unknown_role_dropped`、
+`unknown_block`/`unknown_part`/`unknown_item`/`unknown_tool_type`、`non_text_block_dropped`/
+`non_text_part_dropped`、`server_tool_dropped`、`block_dropped`、`cache_control_dropped`、
+`data_uri_dropped`、`file_id_degraded`、`tool_args_raw`/`tool_args_wrapped`、
+`orphan_reasoning_dropped`、`reasoning_dropped`、`reasoning_context_dropped`、`tool_name_missing`。
+响应/流式路径与 responses_state 的孤儿修复仍走 convertWarn（Phase 2）。
+
+**strict 模式**（config `conversion.strict_lossy`，默认关）：任一诊断触发即以
+`unsupportedConversionError`（`Feature: strict_lossy:<codes>`）拒绝该次转换——完全复用
+capability scanner 的 target 跳过与 400 信封通道，proxy 无特判。strict 只作用于请求侧
+（提交后的响应转换无法回退，failover 无意义）。
+
 ## 接线要求
 
 - 跨协议请求的后处理(Anthropic cache breakpoint 注入、图片缩减、codex 参数剥离)共享同一次 decode/encode(UseNumber 保留数字字面量,防大整数雪球 id 损坏);树未变更时保留 pair 转换器的原始字节。

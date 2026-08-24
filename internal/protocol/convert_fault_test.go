@@ -201,7 +201,7 @@ func TestConvertFault_NonJSONToolArgsFallback(t *testing.T) {
 	var out []byte
 	logs := captureConvertLog(t, func() {
 		var err error
-		out, err = convertResponsesRequestToAnthropic([]byte(in))
+		out, err = convertResponsesRequestToAnthropic([]byte(in), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -234,7 +234,7 @@ func TestConvertFault_NonJSONToolArgsFallback(t *testing.T) {
 func TestConvertFault_OrphanToolPairs(t *testing.T) {
 	// responses→anthropic: orphan function_call_output.
 	out, err := convertResponsesRequestToAnthropic([]byte(
-		`{"model":"gpt-x","input":[{"type":"function_call_output","call_id":"call_9","output":"found"}]}`))
+		`{"model":"gpt-x","input":[{"type":"function_call_output","call_id":"call_9","output":"found"}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestConvertFault_OrphanToolPairs(t *testing.T) {
 
 	// openai→anthropic: orphan role:tool (id sanitized per Tool ID contract).
 	out2, err := convertOpenAIRequestToAnthropic([]byte(
-		`{"model":"gpt-x","messages":[{"role":"tool","tool_call_id":"orphan.id:1","content":"x"}]}`))
+		`{"model":"gpt-x","messages":[{"role":"tool","tool_call_id":"orphan.id:1","content":"x"}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestConvertFault_ResponsesImageMapping(t *testing.T) {
 
 	// responses→anthropic: input_image data URL → base64 image block.
 	out2, err := convertResponsesRequestToAnthropic([]byte(
-		`{"model":"gpt-x","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"` + dataURL + `"}]}]}`))
+		`{"model":"gpt-x","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"`+dataURL+`"}]}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestConvertFault_ResponsesImageMapping(t *testing.T) {
 
 	// openai→responses: chat image_url part → input_image.
 	out3, err := convertOpenAIRequestToResponses([]byte(
-		`{"model":"gpt-x","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + dataURL + `"}}]}]}`))
+		`{"model":"gpt-x","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+dataURL+`"}}]}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,16 +359,16 @@ func TestConvertFault_UnknownMappingWarns(t *testing.T) {
 		want string
 	}{
 		{"chat→r input_audio part", func() {
-			convertOpenAIRequestToResponses([]byte(`{"model":"g","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"x","format":"wav"}}]}]}`))
+			convertOpenAIRequestToResponses([]byte(`{"model":"g","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"x","format":"wav"}}]}]}`), nil)
 		}, "dropping chat content part in chat→r request: input_audio"},
 		{"chat→a input_audio part", func() {
-			convertOpenAIRequestToAnthropic([]byte(`{"model":"g","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"x","format":"wav"}}]}]}`))
+			convertOpenAIRequestToAnthropic([]byte(`{"model":"g","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"x","format":"wav"}}]}]}`), nil)
 		}, "dropping unknown openai content part: input_audio"},
 		{"a→r stop_sequences", func() {
 			convertAnthropicRequestToResponses([]byte(`{"model":"c","max_tokens":10,"stop_sequences":["END"],"messages":[{"role":"user","content":"hi"}]}`))
 		}, "dropping stop_sequences"},
 		{"chat→r stop", func() {
-			convertOpenAIRequestToResponses([]byte(`{"model":"g","stop":["END"],"messages":[{"role":"user","content":"hi"}]}`))
+			convertOpenAIRequestToResponses([]byte(`{"model":"g","stop":["END"],"messages":[{"role":"user","content":"hi"}]}`), nil)
 		}, "dropping stop (Responses API has no stop parameter)"},
 	}
 	for _, c := range cases {

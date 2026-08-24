@@ -76,7 +76,7 @@ func TestConvertRequest_OpenAIToAnthropic_ToolIDSanitize(t *testing.T) {
 		{"role":"assistant","tool_calls":[{"id":"functions.Bash:0","type":"function","function":{"name":"Bash","arguments":"{}"}}]},
 		{"role":"tool","tool_call_id":"functions.Bash:0","content":"ok"}
 	]}`)
-	out, err := convertOpenAIRequestToAnthropic(in)
+	out, err := convertOpenAIRequestToAnthropic(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestConvertRequest_OpenAIToAnthropic_ToolIDSanitize(t *testing.T) {
 		{"role":"assistant","tool_calls":[{"type":"function","function":{"name":"Bash","arguments":"{}"}}]},
 		{"role":"tool","content":"ok"}
 	]}`)
-	out2, err := convertOpenAIRequestToAnthropic(in2)
+	out2, err := convertOpenAIRequestToAnthropic(in2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestConvertRequest_ParallelToolCalls(t *testing.T) {
 
 	// openai → anthropic, with an existing tool_choice AND tools.
 	in2 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"tool_choice":"required","parallel_tool_calls":false}`)
-	out2, err := convertOpenAIRequestToAnthropic(in2)
+	out2, err := convertOpenAIRequestToAnthropic(in2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestConvertRequest_ParallelToolCalls(t *testing.T) {
 	// openai → anthropic, NO client tool_choice but WITH tools → synthesized
 	// {type:auto} + disable_parallel_tool_use (F1 fix: tools must be present).
 	in3 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"parallel_tool_calls":false}`)
-	out3, err := convertOpenAIRequestToAnthropic(in3)
+	out3, err := convertOpenAIRequestToAnthropic(in3, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestConvertRequest_ParallelToolCalls(t *testing.T) {
 	// F1 fix: parallel_tool_calls:false WITHOUT tools → no tool_choice synthesized
 	// (anthropic rejects a tool_choice with no tools).
 	in3b := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"parallel_tool_calls":false}`)
-	out3b, err := convertOpenAIRequestToAnthropic(in3b)
+	out3b, err := convertOpenAIRequestToAnthropic(in3b, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestConvertRequest_ParallelToolCalls(t *testing.T) {
 	// openai → anthropic, tool_choice none WITH tools must NOT carry the flag
 	// (anthropic rejects the combination).
 	in4 := []byte(`{"model":"g","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"tool_choice":"none","parallel_tool_calls":false}`)
-	out4, err := convertOpenAIRequestToAnthropic(in4)
+	out4, err := convertOpenAIRequestToAnthropic(in4, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 // system field (Anthropic messages themselves accept no developer role).
 func TestConvertRequest_DeveloperFoldsIntoSystem(t *testing.T) {
 	in := []byte(`{"model":"g","messages":[{"role":"developer","content":"x"},{"role":"user","content":"hi"}]}`)
-	out, err := convertOpenAIRequestToAnthropic(in)
+	out, err := convertOpenAIRequestToAnthropic(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

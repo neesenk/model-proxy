@@ -61,6 +61,13 @@ type RequestOptions struct {
 	ImageOK          bool
 	ReasoningDialect ReasoningDialect
 	CodexShaping     bool
+	// Diag, when set, collects the conversion's structured diagnostics
+	// (lossy-but-degraded mappings with stable codes). See diagnostics.go.
+	Diag *Diagnostics
+	// StrictLossy refuses the conversion when any lossy diagnostic fires —
+	// the target is skipped (capability-scanner semantics) instead of
+	// silently degrading request content.
+	StrictLossy bool
 }
 
 type convertReqOpts = RequestOptions

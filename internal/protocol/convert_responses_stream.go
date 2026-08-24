@@ -430,12 +430,12 @@ func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
 					"type": "content_block_start", "index": b.idx,
 					"content_block": map[string]any{
 						"type": "tool_use", "id": hostedCallID(item), "name": "tool_search",
-						"input": parseToolArgs(hostedCallArguments(item)),
+						"input": parseToolArgs(hostedCallArguments(item), nil),
 					},
 				})
 				t.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": b.idx})
 			} else {
-				for _, block := range responsesWebSearchToAnthropicBlocks(item) {
+				for _, block := range responsesWebSearchToAnthropicBlocks(item, nil) {
 					idx := b.idx
 					if block["type"] == "web_search_tool_result" {
 						idx = t.nextIdx

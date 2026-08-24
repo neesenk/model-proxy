@@ -24,6 +24,8 @@ type PlanInput struct {
 	ViaResponsesVerdict bool
 	ClientPath          string
 	ImageOK             bool
+	Diag                *protocol.Diagnostics
+	StrictLossy         bool
 }
 
 // Plan is an immutable wire plan for one resolved target.
@@ -39,6 +41,12 @@ type Plan struct {
 	baseURL             string
 	upstreamPath        string
 	imageOK             bool
+	// diag collects the request conversion's structured diagnostics; strict
+	// refuses lossy conversions (typed error → the forward path skips this
+	// target, capability-scanner semantics). Both come from application
+	// config via PlanInput.
+	diag        *protocol.Diagnostics
+	strictLossy bool
 }
 
 // NewPlan derives the upstream endpoint and retains the facts needed for
@@ -68,17 +76,23 @@ func NewPlan(input PlanInput) Plan {
 		baseURL:             baseURL,
 		upstreamPath:        upstreamPath,
 		imageOK:             input.ImageOK,
+		diag:                input.Diag,
+		strictLossy:         input.StrictLossy,
 	}
 }
 
-func (plan Plan) Target() configdomain.RouteTarget   { return plan.target }
-func (plan Plan) ProviderID() string                 { return plan.providerID }
-func (plan Plan) Provider() provider.Provider        { return plan.provider }
-func (plan Plan) BaseURL() string                    { return plan.baseURL }
-func (plan Plan) UpstreamPath() string               { return plan.upstreamPath }
-func (plan Plan) ClientProtocol() protocol.Protocol  { return plan.clientProtocol }
-func (plan Plan) BackendProtocol() protocol.Protocol { return plan.backendProtocol }
-func (plan Plan) ViaResponsesVerdict() bool          { return plan.viaResponsesVerdict }
+func (plan Plan) Target() configdomain.RouteTarget { return plan.target }
+func (plan Plan) ProviderID() string               { return plan.providerID }
+
+// ConversionDiag exposes the plan's diagnostics collector (nil when the
+// application did not enable diagnostic collection).
+func (plan Plan) ConversionDiag() *protocol.Diagnostics { return plan.diag }
+func (plan Plan) Provider() provider.Provider           { return plan.provider }
+func (plan Plan) BaseURL() string                       { return plan.baseURL }
+func (plan Plan) UpstreamPath() string                  { return plan.upstreamPath }
+func (plan Plan) ClientProtocol() protocol.Protocol     { return plan.clientProtocol }
+func (plan Plan) BackendProtocol() protocol.Protocol    { return plan.backendProtocol }
+func (plan Plan) ViaResponsesVerdict() bool             { return plan.viaResponsesVerdict }
 
 // ApplyConfiguredHeaders copies static target headers without exposing the
 // generation-owned provider config map for mutation.
@@ -178,6 +192,8 @@ func (plan Plan) ConvertBody(body []byte) ([]byte, error) {
 		ImageOK:          plan.imageOK,
 		ReasoningDialect: protocol.ReasoningDialect(provider.ChatReasoningMode(providerID)),
 		CodexShaping:     providerID == "codex",
+		Diag:             plan.diag,
+		StrictLossy:      plan.strictLossy,
 	})
 }
 

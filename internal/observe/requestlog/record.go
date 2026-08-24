@@ -30,6 +30,15 @@ type Record struct {
 	RequestBody     string `json:"request_body"`
 	ResponseBody    string `json:"response_body"`
 	ResponseHeaders string `json:"response_headers,omitempty"`
+	// Diagnostics lists the attempt's protocol-conversion diagnostics
+	// (structured lossy-conversion observations, stable codes).
+	Diagnostics []ConversionDiagnostic `json:"diagnostics,omitempty"`
+}
+
+// ConversionDiagnostic is the log projection of one conversion diagnostic.
+type ConversionDiagnostic struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // Input contains detached request/response facts used to build a Record.
@@ -52,6 +61,7 @@ type Input struct {
 	ResponseSize      int64
 	ResponseTruncated bool
 	ResponseHeader    http.Header
+	Diagnostics       []ConversionDiagnostic
 }
 
 const truncationMarker = "\n...[truncated by model-proxy request_log max_body_bytes]"
@@ -171,6 +181,22 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	if rec.ResponseHeaders != "" {
 		dst = append(dst, `,"response_headers":`...)
 		dst = appendJSONString(dst, rec.ResponseHeaders)
+	}
+	if len(rec.Diagnostics) > 0 {
+		dst = append(dst, `,"diagnostics":[`...)
+		for i, d := range rec.Diagnostics {
+			if i > 0 {
+				dst = append(dst, ',')
+			}
+			dst = append(dst, `{"code":`...)
+			dst = appendJSONString(dst, d.Code)
+			if d.Detail != "" {
+				dst = append(dst, `,"detail":`...)
+				dst = appendJSONString(dst, d.Detail)
+			}
+			dst = append(dst, '}')
+		}
+		dst = append(dst, ']')
 	}
 	return append(dst, '}', '\n')
 }

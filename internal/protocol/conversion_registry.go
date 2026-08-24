@@ -52,7 +52,7 @@ type protocolConversion struct {
 var protocolConversions = map[conversionPair]protocolConversion{
 	{client: protocolAnthropic, backend: protocolOpenAI}: {
 		request: func(body []byte, opts convertReqOpts) ([]byte, error) {
-			return convertAnthropicRequestToOpenAIV(body, opts.ImageOK)
+			return convertAnthropicRequestToOpenAIV(body, opts.ImageOK, opts.Diag)
 		},
 		response: func(body []byte, _ r2cCtx) ([]byte, error) {
 			return convertOpenAIResponseToAnthropic(body)
@@ -62,8 +62,8 @@ var protocolConversions = map[conversionPair]protocolConversion{
 		},
 	},
 	{client: protocolOpenAI, backend: protocolAnthropic}: {
-		request: func(body []byte, _ convertReqOpts) ([]byte, error) {
-			return convertOpenAIRequestToAnthropic(body)
+		request: func(body []byte, o convertReqOpts) ([]byte, error) {
+			return convertOpenAIRequestToAnthropic(body, o.Diag)
 		},
 		response: func(body []byte, _ r2cCtx) ([]byte, error) {
 			return convertAnthropicResponseToOpenAI(body)
@@ -74,7 +74,7 @@ var protocolConversions = map[conversionPair]protocolConversion{
 	},
 	{client: protocolAnthropic, backend: protocolResponses}: {
 		request: func(body []byte, opts convertReqOpts) ([]byte, error) {
-			return convertAnthropicRequestToResponsesV(body, opts.ImageOK)
+			return convertAnthropicRequestToResponsesV(body, opts.ImageOK, opts.Diag)
 		},
 		response: func(body []byte, _ r2cCtx) ([]byte, error) {
 			return convertResponsesToAnthropic(body)
@@ -84,8 +84,8 @@ var protocolConversions = map[conversionPair]protocolConversion{
 		},
 	},
 	{client: protocolOpenAI, backend: protocolResponses}: {
-		request: func(body []byte, _ convertReqOpts) ([]byte, error) {
-			return convertOpenAIRequestToResponses(body)
+		request: func(body []byte, o convertReqOpts) ([]byte, error) {
+			return convertOpenAIRequestToResponses(body, o.Diag)
 		},
 		response: func(body []byte, _ r2cCtx) ([]byte, error) {
 			return convertResponsesToOpenAI(body)
@@ -95,8 +95,8 @@ var protocolConversions = map[conversionPair]protocolConversion{
 		},
 	},
 	{client: protocolResponses, backend: protocolAnthropic}: {
-		request: func(body []byte, _ convertReqOpts) ([]byte, error) {
-			return convertResponsesRequestToAnthropic(body)
+		request: func(body []byte, o convertReqOpts) ([]byte, error) {
+			return convertResponsesRequestToAnthropic(body, o.Diag)
 		},
 		response: func(body []byte, context r2cCtx) ([]byte, error) {
 			return convertAnthropicResponseToResponsesNS(body, context)

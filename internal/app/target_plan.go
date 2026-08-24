@@ -48,5 +48,10 @@ func (p *Proxy) planTarget(input targetPlanInput) (targetexec.Plan, error) {
 		ViaResponsesVerdict: viaResponsesVerdict,
 		ClientPath:          input.clientPath,
 		ImageOK:             imageOK,
+		// One collector per target attempt: the attempt's conversion
+		// diagnostics ride the plan into the request log; strict refuses
+		// lossy conversions for this target when configured.
+		Diag:        protocol.NewDiagnostics(),
+		StrictLossy: input.runtime.Cfg.Conversion.StrictLossyValue(),
 	}), nil
 }

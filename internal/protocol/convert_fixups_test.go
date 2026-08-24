@@ -81,7 +81,7 @@ func TestConvertFixup_VisionGateConversion(t *testing.T) {
 
 	// a→chat.
 	out, err := convertAnthropicRequestToOpenAIV([]byte(
-		`{"model":"c","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}]}]}`), false)
+		`{"model":"c","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}]}]}`), false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestConvertFixup_VisionGateConversion(t *testing.T) {
 
 	// a→r.
 	out2, err := convertAnthropicRequestToResponsesV([]byte(
-		`{"model":"c","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}]}]}`), false)
+		`{"model":"c","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}]}]}`), false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

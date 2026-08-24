@@ -30,7 +30,7 @@ func TestConvertDocumentAndInputFileAcrossProtocols(t *testing.T) {
 		{"type":"input_file","filename":"id.pdf","file_id":"file_1"},
 		{"type":"input_file","filename":"inline.pdf","file_data":"data:application/pdf;base64,cGRm"},
 		{"type":"input_file","filename":"url.pdf","file_url":"https://example.test/url.pdf"}
-	]}]}`))
+	]}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestConvertDocumentAndInputFileAcrossProtocols(t *testing.T) {
 
 	backRaw, err := convertOpenAIRequestToAnthropic([]byte(`{"model":"m","messages":[{"role":"user","content":[
 		{"type":"file","file":{"filename":"inline.pdf","file_data":"data:application/pdf;base64,cGRm"}}
-	]}]}`))
+	]}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestConvertDocumentAndInputFileAcrossProtocols(t *testing.T) {
 	// responses input_file part (regression: nested fields were silently dropped).
 	chatToResponsesRaw, err := convertOpenAIRequestToResponses([]byte(`{"model":"m","messages":[{"role":"user","content":[
 		{"type":"file","file":{"filename":"inline.pdf","file_data":"data:application/pdf;base64,cGRm"}}
-	]}]}`))
+	]}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestConvertToolResultErrorMarkerRoundTrip(t *testing.T) {
 	if !strings.Contains(string(responsesRaw), toolResultErrorMarker) {
 		t.Fatalf("a→r missing error marker: %s", responsesRaw)
 	}
-	backRaw, err := convertResponsesRequestToAnthropic(responsesRaw)
+	backRaw, err := convertResponsesRequestToAnthropic(responsesRaw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestConvertToolResultErrorMarkerRoundTrip(t *testing.T) {
 	if !strings.Contains(string(chatRaw), toolResultErrorMarker) {
 		t.Fatalf("a→chat missing error marker: %s", chatRaw)
 	}
-	backChatRaw, err := convertOpenAIRequestToAnthropic(chatRaw)
+	backChatRaw, err := convertOpenAIRequestToAnthropic(chatRaw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestNormalizeAnthropicInputSchema(t *testing.T) {
 			{"type":"object","properties":{"a":{"type":"string","encrypted":true}}},
 			{"type":"object","properties":{"encrypted":{"type":"string"}}}
 		],"encrypted":true}
-	}]}`))
+	}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestConvertHostedToolsAndCalls(t *testing.T) {
 		{"type":"tool_search_call","id":"ts_1","call_id":"ts_1","arguments":{"query":"calendar","limit":3}},
 		{"type":"tool_search_output","call_id":"ts_1","output":"found"}
 	],"tools":[{"type":"web_search"},{"type":"tool_search"}],"tool_choice":{"type":"tool_search"}}`)
-	anthropicRaw, err := convertResponsesRequestToAnthropic(request)
+	anthropicRaw, err := convertResponsesRequestToAnthropic(request, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestResponsesToolSearchOutputLoadsDiscoveredTools(t *testing.T) {
 		]}
 	],"tools":[{"type":"tool_search"}]}`)
 
-	anthropicRaw, err := convertResponsesRequestToAnthropic(request)
+	anthropicRaw, err := convertResponsesRequestToAnthropic(request, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestResponsesToolSearchOutputStatusAndToolChoice(t *testing.T) {
 		{"type":"tool_search_call","call_id":"ts_fail","arguments":{"query":"missing"}},
 		{"type":"tool_search_output","call_id":"ts_fail","status":"failed","tools":[]}
 	],"tools":[{"type":"tool_search"}]}`)
-	anthropicRaw, err := convertResponsesRequestToAnthropic(failed)
+	anthropicRaw, err := convertResponsesRequestToAnthropic(failed, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestCrossProtocolExplicitPromptCacheControls(t *testing.T) {
 	if toChat["prompt_cache_key"] != "cohort-1" || toChat["prompt_cache_retention"] != "24h" {
 		t.Fatalf("r→chat cache controls = %s", toChatRaw)
 	}
-	backRaw, err := convertOpenAIRequestToResponses(toChatRaw)
+	backRaw, err := convertOpenAIRequestToResponses(toChatRaw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

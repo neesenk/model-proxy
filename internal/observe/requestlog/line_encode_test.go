@@ -3,6 +3,7 @@ package requestlog
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -48,6 +49,11 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 			ResponseHeaders: map[bool]string{true: `{"content-type":"application/json"}`, false: ""}[i%3 == 0],
 		})
 	}
+	// Diagnostics encode through the hand-rolled path too.
+	records = append(records, &Record{
+		Ts: "2026-08-16T10:00:00Z", RequestID: "rid-diag", SessionID: "s",
+		Diagnostics: []ConversionDiagnostic{{Code: "stop_dropped", Detail: "dropping stop"}},
+	})
 	for i, rec := range records {
 		want, err := json.Marshal(rec)
 		if err != nil {
@@ -71,7 +77,7 @@ func TestAppendRecordLineMatchesJSONMarshal(t *testing.T) {
 		if uerr := json.Unmarshal(want, &wantRec); uerr != nil {
 			t.Fatalf("record %d: reference unmarshal: %v", i, uerr)
 		}
-		if gotRec != wantRec {
+		if !reflect.DeepEqual(gotRec, wantRec) {
 			t.Errorf("record %d:\n got %q\nwant %q", i, got, want)
 		}
 	}

@@ -80,7 +80,7 @@ func strOpt(v any) string { s, _ := v.(string); return s }
 // backfillToolNames fills empty function_call names from earlier items with
 // the same call_id; names still missing afterwards get a convertWarn (an
 // empty name is a protocol violation upstream).
-func backfillToolNames(items []map[string]any) {
+func backfillToolNames(d *Diagnostics, items []map[string]any) {
 	names := map[string]string{}
 	for _, it := range items {
 		if it["type"] != "function_call" {
@@ -96,7 +96,7 @@ func backfillToolNames(items []map[string]any) {
 		if n, ok := names[id]; ok {
 			it["name"] = n
 		} else {
-			convertWarn("function_call missing name (call_id " + id + ")")
+			warnDiag(d, "tool_name_missing", "function_call missing name (call_id "+id+")")
 		}
 	}
 }
@@ -341,7 +341,7 @@ func reasoningDetailPartText(v any) string {
 // Responses `input` items. text/image blocks collect into a `message` item;
 // tool_use → function_call, tool_result → function_call_output, thinking →
 // reasoning — each its own item (Responses separates them out of the message).
-func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]any {
+func anthropicMsgToResponsesItems(m map[string]any, imageOK bool, d *Diagnostics) []map[string]any {
 	role, _ := m["role"].(string)
 	partType := "input_text"
 	if role == "assistant" {
@@ -396,7 +396,7 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 					}
 				}
 			case "document":
-				if file := anthropicDocumentToResponsesPart(b); file != nil {
+				if file := anthropicDocumentToResponsesPart(b, d); file != nil {
 					parts = append(parts, file)
 				}
 			case "tool_use":
@@ -413,7 +413,7 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 				if strOpt(b["name"]) == "web_search" {
 					webSearchInputs[strOpt(b["id"])] = asMap(b["input"])
 				} else {
-					convertWarn("dropping unsupported anthropic server_tool_use in a→r request: " + strOpt(b["name"]))
+					warnDiag(d, "server_tool_dropped", "dropping unsupported anthropic server_tool_use in a→r request: "+strOpt(b["name"]))
 				}
 			case "web_search_tool_result":
 				flush()
@@ -439,7 +439,7 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 				items = append(items, item)
 			case "tool_result":
 				flush()
-				txt := anthropicToolResultText(b["content"])
+				txt := anthropicToolResultText(b["content"], d)
 				imgs := anthropicToolResultImagesResponses(b["content"])
 				if len(imgs) > 0 && !imageOK {
 					txt = appendMediaPlaceholder(txt)
@@ -487,7 +487,7 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 				}
 				items = append(items, item)
 			default:
-				convertWarn("dropping anthropic content block in a→r request: " + strOf(b["type"]))
+				warnDiag(d, "block_dropped", "dropping anthropic content block in a→r request: "+strOf(b["type"]))
 			}
 		}
 	}
@@ -495,7 +495,7 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool) []map[string]a
 	return items
 }
 
-func anthropicDocumentToResponsesPart(block map[string]any) map[string]any {
+func anthropicDocumentToResponsesPart(block map[string]any, d *Diagnostics) map[string]any {
 	src := asMap(block["source"])
 	if src == nil {
 		return nil
@@ -515,7 +515,7 @@ func anthropicDocumentToResponsesPart(block map[string]any) map[string]any {
 		}
 	case "file":
 		if id := strOpt(src["file_id"]); id != "" {
-			return map[string]any{"type": "input_text", "text": degradeFileIDText(id, filename)}
+			return map[string]any{"type": "input_text", "text": degradeFileIDText(id, filename, d)}
 		}
 	case "text":
 		if text := strOpt(src["data"]); text != "" {
@@ -530,7 +530,7 @@ func anthropicDocumentToResponsesPart(block map[string]any) map[string]any {
 // function_call item to follow them — codex 400s "reasoning item without its
 // required following item" on thinking-only incomplete turns (cc-switch
 // transform_responses.rs does the same removal).
-func dropOrphanReasoningItems(items []map[string]any, start int) []map[string]any {
+func dropOrphanReasoningItems(d *Diagnostics, items []map[string]any, start int) []map[string]any {
 	for _, it := range items[start:] {
 		if it["type"] == "message" || it["type"] == "function_call" {
 			return items
@@ -539,7 +539,7 @@ func dropOrphanReasoningItems(items []map[string]any, start int) []map[string]an
 	out := items[:start]
 	for _, it := range items[start:] {
 		if it["type"] == "reasoning" {
-			convertWarn("dropping orphan reasoning item (no following message/function_call in the same assistant turn)")
+			warnDiag(d, "orphan_reasoning_dropped", "dropping orphan reasoning item (no following message/function_call in the same assistant turn)")
 			continue
 		}
 		out = append(out, it)
@@ -578,7 +578,7 @@ func anthropicToolResultImagesResponses(content any) []map[string]any {
 	return out
 }
 
-func anthropicToolsToResponses(tools []any) []map[string]any {
+func anthropicToolsToResponses(tools []any, d *Diagnostics) []map[string]any {
 	var out []map[string]any
 	for _, t := range tools {
 		tm := asMap(t)
@@ -637,12 +637,12 @@ func anthropicToolChoiceToResponses(tc any) any {
 }
 
 func convertAnthropicRequestToResponses(body []byte) ([]byte, error) {
-	return convertAnthropicRequestToResponsesV(body, true)
+	return convertAnthropicRequestToResponsesV(body, true, nil)
 }
 
 // convertAnthropicRequestToResponsesV is convertAnthropicRequestToResponses
 // with the target model's vision capability (media reinjection gate).
-func convertAnthropicRequestToResponsesV(body []byte, imageOK bool) ([]byte, error) {
+func convertAnthropicRequestToResponsesV(body []byte, imageOK bool, d *Diagnostics) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
@@ -653,7 +653,7 @@ func convertAnthropicRequestToResponsesV(body []byte, imageOK bool) ([]byte, err
 	}
 	var instructionParts []string
 	if sys, ok := src["system"]; ok {
-		if txt := anthropicTextOf(sys); txt != "" {
+		if txt := anthropicTextOf(sys, d); txt != "" {
 			instructionParts = append(instructionParts, txt)
 		}
 	}
@@ -668,15 +668,15 @@ func convertAnthropicRequestToResponsesV(body []byte, imageOK bool) ([]byte, err
 			// input rejects system-role message items (codex 400s "System
 			// messages are not allowed"; opencodex's inbound folds the same).
 			if role := strOpt(mm["role"]); role == "system" || role == "developer" {
-				if txt := anthropicTextOf(mm["content"]); txt != "" {
+				if txt := anthropicTextOf(mm["content"], d); txt != "" {
 					instructionParts = append(instructionParts, txt)
 				}
 				continue
 			}
 			start := len(input)
-			input = append(input, anthropicMsgToResponsesItems(mm, imageOK)...)
+			input = append(input, anthropicMsgToResponsesItems(mm, imageOK, d)...)
 			if strOpt(mm["role"]) == "assistant" {
-				input = dropOrphanReasoningItems(input, start)
+				input = dropOrphanReasoningItems(d, input, start)
 			}
 		}
 	}
@@ -687,7 +687,7 @@ func convertAnthropicRequestToResponsesV(body []byte, imageOK bool) ([]byte, err
 		out["input"] = input
 	}
 	if tools, ok := src["tools"].([]any); ok && len(tools) > 0 {
-		if rt := anthropicToolsToResponses(tools); len(rt) > 0 {
+		if rt := anthropicToolsToResponses(tools, d); len(rt) > 0 {
 			out["tools"] = rt
 		}
 	}
@@ -703,7 +703,7 @@ func convertAnthropicRequestToResponsesV(body []byte, imageOK bool) ([]byte, err
 		}
 	}
 	if stops, ok := src["stop_sequences"].([]any); ok && len(stops) > 0 {
-		convertWarn("dropping stop_sequences (Responses API has no stop parameter)")
+		warnDiag(d, "stop_dropped", "dropping stop_sequences (Responses API has no stop parameter)")
 	}
 	if thinking, ok := src["thinking"].(map[string]any); ok {
 		effort := ""
@@ -781,7 +781,7 @@ func anthropicHasExplicitCacheControl(v any) bool {
 // protocols cache prefixes automatically and have no per-block breakpoint,
 // so this preserves cache affinity without copying an invalid cache_control
 // field onto their wire format.
-func anthropicExplicitPromptCacheKey(src, converted map[string]any) string {
+func anthropicExplicitPromptCacheKey(src, converted map[string]any, d *Diagnostics) string {
 	if !anthropicHasExplicitCacheControl(src) {
 		return ""
 	}
@@ -790,7 +790,7 @@ func anthropicExplicitPromptCacheKey(src, converted map[string]any) string {
 	}
 	fp, _ := sonic.ConfigStd.MarshalToString(map[string]any{
 		"model":  strOpt(converted["model"]),
-		"system": anthropicTextOf(src["system"]),
+		"system": anthropicTextOf(src["system"], d),
 		"tools":  converted["tools"],
 	})
 	return sha256Hex32(fp)
@@ -803,7 +803,7 @@ func anthropicExplicitPromptCacheKey(src, converted map[string]any) string {
 // chatMsgToResponsesItems turns one OpenAI-chat message into one or more
 // Responses `input` items. tool_calls → function_call items; role:"tool" →
 // function_call_output; text/image content → a message item.
-func chatMsgToResponsesItems(m map[string]any) []map[string]any {
+func chatMsgToResponsesItems(m map[string]any, d *Diagnostics) []map[string]any {
 	role, _ := m["role"].(string)
 	if role == "tool" {
 		out := map[string]any{
@@ -855,7 +855,7 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 					fm = pm
 				}
 				if id := strOpt(fm["file_id"]); id != "" && strOpt(fm["file_data"]) == "" && strOpt(fm["file_url"]) == "" {
-					parts = append(parts, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(fm["filename"]))})
+					parts = append(parts, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(fm["filename"]), d)})
 					continue
 				}
 				copyOpt(file, fm, "file_id", "file_data", "file_url", "filename")
@@ -863,7 +863,7 @@ func chatMsgToResponsesItems(m map[string]any) []map[string]any {
 					parts = append(parts, file)
 				}
 			default:
-				convertWarn("dropping chat content part in chat→r request: " + strOf(pm["type"]))
+				warnDiag(d, "unknown_part", "dropping chat content part in chat→r request: "+strOf(pm["type"]))
 			}
 		}
 	}
@@ -951,7 +951,7 @@ func chatToolChoiceToResponses(tc any) any {
 // chatResponseFormatToTextFormat maps a chat response_format to a Responses
 // text.format: json_object passes through; json_schema is unwrapped one level
 // (name/schema/strict/description live directly on the format object).
-func chatResponseFormatToTextFormat(rf map[string]any) map[string]any {
+func chatResponseFormatToTextFormat(d *Diagnostics, rf map[string]any) map[string]any {
 	switch strOf(rf["type"]) {
 	case "json_object":
 		return map[string]any{"type": "json_object"}
@@ -969,7 +969,7 @@ func chatResponseFormatToTextFormat(rf map[string]any) map[string]any {
 		// {"type":"json_schema"} without schema is invalid upstream — drop the
 		// format observably and let the backend use its default.
 		if _, ok := f["schema"]; !ok {
-			convertWarn("dropping empty json_schema response_format (no schema)")
+			warnDiag(d, "empty_json_schema_dropped", "dropping empty json_schema response_format (no schema)")
 			return nil
 		}
 		return f
@@ -991,7 +991,7 @@ func textFormatToChatResponseFormat(f map[string]any) map[string]any {
 	return nil
 }
 
-func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
+func convertOpenAIRequestToResponses(body []byte, d *Diagnostics) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse openai request: %w", err)
@@ -1015,7 +1015,7 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 				}
 				continue
 			}
-			input = append(input, chatMsgToResponsesItems(mm)...)
+			input = append(input, chatMsgToResponsesItems(mm, d)...)
 		}
 	}
 	if len(instructions) > 0 {
@@ -1024,7 +1024,7 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 	// Replace-style clients resend a tool_call carrying only the id (no name)
 	// in later turns — backfill from earlier items with the same call_id
 	// (opencodex's chat inbound does the same).
-	backfillToolNames(input)
+	backfillToolNames(d, input)
 	if len(input) > 0 {
 		out["input"] = input
 	}
@@ -1050,15 +1050,15 @@ func convertOpenAIRequestToResponses(body []byte) ([]byte, error) {
 	switch stops := src["stop"].(type) {
 	case []any:
 		if len(stops) > 0 {
-			convertWarn("dropping stop (Responses API has no stop parameter)")
+			warnDiag(d, "stop_dropped", "dropping stop (Responses API has no stop parameter)")
 		}
 	case string:
 		if stops != "" {
-			convertWarn("dropping stop (Responses API has no stop parameter)")
+			warnDiag(d, "stop_dropped", "dropping stop (Responses API has no stop parameter)")
 		}
 	}
 	if rf := asMap(src["response_format"]); rf != nil {
-		if f := chatResponseFormatToTextFormat(rf); f != nil {
+		if f := chatResponseFormatToTextFormat(d, rf); f != nil {
 			out["text"] = map[string]any{"format": f}
 		}
 	}
@@ -1136,7 +1136,7 @@ func responsesToolSearchOutputText(item map[string]any) (string, bool) {
 
 // responsesContentToAnthropicBlocks turns a Responses message item's content
 // parts into anthropic content blocks.
-func responsesContentToAnthropicBlocks(content any) []map[string]any {
+func responsesContentToAnthropicBlocks(content any, d *Diagnostics) []map[string]any {
 	var out []map[string]any
 	parts, ok := content.([]any)
 	if !ok {
@@ -1165,23 +1165,23 @@ func responsesContentToAnthropicBlocks(content any) []map[string]any {
 				}})
 			}
 		case "input_file", "file":
-			if block := responsesInputFileToAnthropicDocument(pm); block != nil {
+			if block := responsesInputFileToAnthropicDocument(pm, d); block != nil {
 				out = append(out, block)
 			}
 		default:
-			convertWarn("dropping responses content part in r→a request: " + strOf(pm["type"]))
+			warnDiag(d, "unknown_part", "dropping responses content part in r→a request: "+strOf(pm["type"]))
 		}
 	}
 	return out
 }
 
-func responsesInputFileToAnthropicDocument(part map[string]any) map[string]any {
+func responsesInputFileToAnthropicDocument(part map[string]any, d *Diagnostics) map[string]any {
 	filename := strOpt(part["filename"])
 	var block map[string]any
 	if u := strOpt(part["file_url"]); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
 		block = map[string]any{"type": "document", "source": map[string]any{"type": "url", "url": u}}
 	} else if id := strOpt(part["file_id"]); id != "" && strOpt(part["file_data"]) == "" {
-		block = map[string]any{"type": "text", "text": degradeFileIDText(id, filename)}
+		block = map[string]any{"type": "text", "text": degradeFileIDText(id, filename, d)}
 	} else if mt, data, ok := parseDataURL(strOpt(part["file_data"])); ok && data != "" {
 		block = map[string]any{"type": "document", "source": map[string]any{
 			"type": "base64", "media_type": mt, "data": data,
@@ -1214,11 +1214,11 @@ func hostedCallArguments(item map[string]any) string {
 	return "{}"
 }
 
-func responsesWebSearchToAnthropicBlocks(item map[string]any) []map[string]any {
+func responsesWebSearchToAnthropicBlocks(item map[string]any, d *Diagnostics) []map[string]any {
 	id := firstNonEmpty(strOpt(item["id"]), strOpt(item["call_id"]), "web_search")
 	input := asMap(item["action"])
 	if input == nil {
-		input = parseToolArgs(hostedCallArguments(item)).(map[string]any)
+		input = parseToolArgs(hostedCallArguments(item), d).(map[string]any)
 	}
 	var result any = []any{}
 	if strOpt(item["status"]) == "failed" {
@@ -1346,7 +1346,7 @@ func responsesToolChoiceToAnthropic(tc any) any {
 	return nil
 }
 
-func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
+func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse responses request: %w", err)
@@ -1377,12 +1377,12 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 			if role == "" {
 				role = "user"
 			}
-			blocks := responsesContentToAnthropicBlocks(item["content"])
+			blocks := responsesContentToAnthropicBlocks(item["content"], d)
 			if role == "assistant" || role == "user" {
 				msgs = append(msgs, map[string]any{"role": role, "content": blocks})
 			}
 		case "function_call":
-			args := parseToolArgs(strOf(item["arguments"]))
+			args := parseToolArgs(strOf(item["arguments"]), d)
 			name := strOpt(item["name"])
 			if namespace := strOpt(item["namespace"]); namespace != "" {
 				name = nsFlattenName(namespace, name)
@@ -1396,7 +1396,7 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 		case "tool_search_call":
 			msgs = append(msgs, map[string]any{"role": "assistant", "content": []map[string]any{{
 				"type": "tool_use", "id": hostedCallID(item), "name": "tool_search",
-				"input": parseToolArgs(hostedCallArguments(item)),
+				"input": parseToolArgs(hostedCallArguments(item), d),
 			}}})
 		case "tool_search_output":
 			text, isError := responsesToolSearchOutputText(item)
@@ -1404,7 +1404,7 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 				"type": "tool_result", "tool_use_id": hostedCallID(item), "content": text, "is_error": isError,
 			}}})
 		case "web_search_call":
-			msgs = append(msgs, map[string]any{"role": "assistant", "content": responsesWebSearchToAnthropicBlocks(item)})
+			msgs = append(msgs, map[string]any{"role": "assistant", "content": responsesWebSearchToAnthropicBlocks(item, d)})
 		case "function_call_output":
 			// output may be a string OR a parts array (input_text/input_image);
 			// array parts become anthropic blocks — text into the tool_result
@@ -1454,7 +1454,7 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 			}
 			msgs = append(msgs, map[string]any{"role": "assistant", "content": []map[string]any{blk}})
 		default:
-			convertWarn("dropping responses input item in r→a request: " + strOf(item["type"]))
+			warnDiag(d, "unknown_item", "dropping responses input item in r→a request: "+strOf(item["type"]))
 		}
 	}
 	if len(systemParts) > 0 {
@@ -1499,7 +1499,7 @@ func convertResponsesRequestToAnthropic(body []byte) ([]byte, error) {
 		}
 	}
 	if f := asMap(asMap(src["text"])["format"]); f != nil {
-		convertWarn("dropping text.format (no anthropic equivalent)")
+		warnDiag(d, "response_format_dropped", "dropping text.format (no anthropic equivalent)")
 	}
 	if r := asMap(src["reasoning"]); r != nil {
 		if th := effortToThinking(strOf(r["effort"])); th != nil {
@@ -1563,7 +1563,7 @@ func responsesOutputTextAndImages(v any) (text string, imgs []map[string]any) {
 // chat message content: a plain string when text-only (the common shape), or
 // a parts array when images are present — an input_image must not be silently
 // dropped on the responses→chat hop.
-func responsesContentToChat(content any) any {
+func responsesContentToChat(content any, d *Diagnostics) any {
 	parts, ok := content.([]any)
 	if !ok {
 		return chatContentText(content)
@@ -1590,7 +1590,7 @@ func responsesContentToChat(content any) any {
 			}
 		case "input_file", "file":
 			if id := strOpt(pm["file_id"]); id != "" && strOpt(pm["file_data"]) == "" {
-				out = append(out, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(pm["filename"]))})
+				out = append(out, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(pm["filename"]), d)})
 				break
 			}
 			file := map[string]any{}
@@ -1602,7 +1602,7 @@ func responsesContentToChat(content any) any {
 				out = append(out, map[string]any{"type": "text", "text": "[document " + firstNonEmpty(strOpt(pm["filename"]), "file") + "] " + u})
 			}
 		default:
-			convertWarn("dropping responses content part in r→chat request: " + strOf(pm["type"]))
+			warnDiag(d, "unknown_part", "dropping responses content part in r→chat request: "+strOf(pm["type"]))
 		}
 	}
 	if !hasImage && !hasFile {
@@ -1648,6 +1648,7 @@ func convertResponsesRequestToOpenAI(body []byte) ([]byte, error) {
 // attachment state that must survive between items.
 type r2chatWalk struct {
 	msgs             []map[string]any
+	diag             *Diagnostics
 	pendingReasoning string
 	lastAssistant    int  // msgs index of the last assistant message; -1 = none yet
 	imageOK          bool // target model accepts images (gates tool-output image re-injection)
@@ -1673,7 +1674,7 @@ func (w *r2chatWalk) attachBackward() {
 		return
 	}
 	if w.lastAssistant < 0 {
-		convertWarn("dropping reasoning with no assistant message to attach to (r→chat)")
+		warnDiag(w.diag, "reasoning_dropped", "dropping reasoning with no assistant message to attach to (r→chat)")
 		w.pendingReasoning = ""
 		return
 	}
@@ -1705,7 +1706,7 @@ func (w *r2chatWalk) addMessage(item map[string]any) {
 		// require: merge its text into the pending assistant tool-call message
 		// (content + tool_calls on one assistant message is valid chat).
 		if _, hasCalls := w.msgs[n-1]["tool_calls"].([]map[string]any); hasCalls {
-			if text, ok := responsesContentToChat(item["content"]).(string); ok && text != "" {
+			if text, ok := responsesContentToChat(item["content"], w.diag).(string); ok && text != "" {
 				if prev := strOpt(w.msgs[n-1]["content"]); prev != "" {
 					w.msgs[n-1]["content"] = prev + "\n\n" + text
 				} else {
@@ -1716,7 +1717,7 @@ func (w *r2chatWalk) addMessage(item map[string]any) {
 			}
 		}
 	}
-	w.msgs = append(w.msgs, map[string]any{"role": role, "content": responsesContentToChat(item["content"])})
+	w.msgs = append(w.msgs, map[string]any{"role": role, "content": responsesContentToChat(item["content"], w.diag)})
 	if role == "assistant" {
 		w.lastAssistant = len(w.msgs) - 1
 		w.attachForward(w.lastAssistant)
@@ -1851,9 +1852,9 @@ func (w *r2chatWalk) finish(reasoningDialect ReasoningDialect) []map[string]any 
 // flattening fails CLOSED — the forward layer turns a conversion error into a
 // 502), tool_choice, the vendor-specific reasoning-effort dialect, output
 // caps, response_format and sampling params.
-func applyResponsesRequestChatFields(out, src map[string]any, reasoningDialect ReasoningDialect) error {
+func applyResponsesRequestChatFields(d *Diagnostics, out, src map[string]any, reasoningDialect ReasoningDialect) error {
 	if tools := responsesRequestTools(src); len(tools) > 0 {
-		ot, err := nsFlattenResponsesTools(tools)
+		ot, err := nsFlattenResponsesTools(d, tools)
 		if err != nil {
 			return err
 		}
@@ -1870,7 +1871,7 @@ func applyResponsesRequestChatFields(out, src map[string]any, reasoningDialect R
 		effort := strOf(r["effort"])
 		// reasoning.context (codex sends "all_turns") has no chat equivalent.
 		if strOpt(r["context"]) != "" {
-			convertWarn("dropping reasoning.context (no chat equivalent)")
+			warnDiag(d, "reasoning_context_dropped", "dropping reasoning.context (no chat equivalent)")
 		}
 		// Reasoning effort dialect: chat vendors disagree on the field shape,
 		// so the transport injects the target provider's dialect.
@@ -1927,7 +1928,7 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 	if v, ok := src["model"]; ok {
 		out["model"] = v
 	}
-	walk := &r2chatWalk{lastAssistant: -1, imageOK: opts.ImageOK}
+	walk := &r2chatWalk{lastAssistant: -1, imageOK: opts.ImageOK, diag: opts.Diag}
 	if ins, ok := src["instructions"].(string); ok && ins != "" {
 		walk.msgs = append(walk.msgs, map[string]any{"role": "system", "content": ins})
 	}
@@ -1947,13 +1948,13 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 		case "reasoning":
 			walk.addReasoning(item)
 		default:
-			convertWarn("dropping responses input item in r→chat request: " + strOf(item["type"]))
+			warnDiag(opts.Diag, "unknown_item", "dropping responses input item in r→chat request: "+strOf(item["type"]))
 		}
 	}
 	if msgs := walk.finish(reasoningDialect); len(msgs) > 0 {
 		out["messages"] = msgs
 	}
-	if err := applyResponsesRequestChatFields(out, src, reasoningDialect); err != nil {
+	if err := applyResponsesRequestChatFields(opts.Diag, out, src, reasoningDialect); err != nil {
 		return nil, err
 	}
 	return sonic.Marshal(out)
@@ -2105,18 +2106,18 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 				"type":  "tool_use",
 				"id":    firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
 				"name":  strOpt(item["name"]),
-				"input": parseToolArgs(strOf(item["arguments"])),
+				"input": parseToolArgs(strOf(item["arguments"]), nil),
 			})
 		case "tool_search_call":
 			flushText()
 			hasToolUse = true
 			blocks = append(blocks, map[string]any{
 				"type": "tool_use", "id": hostedCallID(item), "name": "tool_search",
-				"input": parseToolArgs(hostedCallArguments(item)),
+				"input": parseToolArgs(hostedCallArguments(item), nil),
 			})
 		case "web_search_call":
 			flushText()
-			blocks = append(blocks, responsesWebSearchToAnthropicBlocks(item)...)
+			blocks = append(blocks, responsesWebSearchToAnthropicBlocks(item, nil)...)
 		case "reasoning":
 			flushText()
 			text, sig := responsesReasoningText(item)

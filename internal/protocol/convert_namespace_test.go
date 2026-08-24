@@ -292,7 +292,7 @@ func TestNSFlatten_HostedToolFallbacks(t *testing.T) {
 		map[string]any{"type": "web_search"},
 		map[string]any{"type": "function", "name": "f", "parameters": map[string]any{"type": "object"}},
 	}
-	out, err := nsFlattenResponsesTools(tools)
+	out, err := nsFlattenResponsesTools(nil, tools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestNSFlatten_NamespaceContainer(t *testing.T) {
 			map[string]any{"type": "function", "name": "wait_agent", "parameters": map[string]any{"type": "object"}},
 		}},
 	}
-	out, err := nsFlattenResponsesTools(container)
+	out, err := nsFlattenResponsesTools(nil, container)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestNSFlatten_NamespaceContainer(t *testing.T) {
 	fieldForm := []any{
 		map[string]any{"type": "function", "name": "followup_task", "namespace": "collaboration", "parameters": map[string]any{"type": "object"}},
 	}
-	out2, err := nsFlattenResponsesTools(fieldForm)
+	out2, err := nsFlattenResponsesTools(nil, fieldForm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestNSFlatten_NamespaceContainer(t *testing.T) {
 			map[string]any{"type": "function", "name": "f", "namespace": "inner"},
 		}},
 	}
-	out3, err := nsFlattenResponsesTools(own)
+	out3, err := nsFlattenResponsesTools(nil, own)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestNSFlatten_NamespaceContainer(t *testing.T) {
 			map[string]any{"type": "namespace", "name": "b", "tools": []any{}},
 		}},
 	}
-	if _, err := nsFlattenResponsesTools(nested); err == nil {
+	if _, err := nsFlattenResponsesTools(nil, nested); err == nil {
 		t.Error("nested namespace container must fail closed")
 	}
 }
@@ -386,7 +386,7 @@ func TestNamespace_AnthropicRoundTrip(t *testing.T) {
 	request := []byte(`{"model":"m","input":[{"type":"function_call","call_id":"c1","name":"read","namespace":"mcp__files","arguments":"{}"}],` +
 		`"tool_choice":{"type":"function","name":"read","namespace":"mcp__files"},` +
 		`"tools":[{"type":"function","name":"read","namespace":"mcp__files","parameters":{"type":"object"}}]}`)
-	converted, err := convertResponsesRequestToAnthropic(request)
+	converted, err := convertResponsesRequestToAnthropic(request, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

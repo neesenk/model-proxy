@@ -14,10 +14,11 @@ import (
 // Reload generation remains owned by targetexec.Attempt.Runtime and is not
 // duplicated in this observation scope.
 type LogCtx struct {
-	RequestID string
-	Attempt   int
-	Exposed   string
-	OrigBody  []byte
+	RequestID   string
+	Attempt     int
+	Exposed     string
+	OrigBody    []byte
+	Diagnostics []ConversionDiagnostic
 }
 
 // BuildInput maps application-owned request/route state to the detached
@@ -51,6 +52,7 @@ func BuildInput(
 		Status:         response.StatusCode,
 		RequestBody:    requestBody,
 		ResponseHeader: response.Header.Clone(),
+		Diagnostics:    context.Diagnostics,
 	}
 }
 

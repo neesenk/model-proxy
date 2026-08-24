@@ -90,7 +90,7 @@ func BenchmarkConvertRequest_AnthropicToOpenAI(b *testing.B) {
 func BenchmarkConvertRequest_OpenAIToAnthropic(b *testing.B) {
 	b.SetBytes(int64(len(benchOpenAIReq)))
 	for i := 0; i < b.N; i++ {
-		if _, err := convertOpenAIRequestToAnthropic(benchOpenAIReq); err != nil {
+		if _, err := convertOpenAIRequestToAnthropic(benchOpenAIReq, nil); err != nil {
 			b.Fatal(err)
 		}
 	}

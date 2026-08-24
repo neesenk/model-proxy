@@ -105,6 +105,7 @@ func requiredConfigCompatAliases() map[string]string {
 	return map[string]string{
 		"CacheConfig":      "CacheConfig",
 		"Config":           "Config",
+		"ConversionConfig": "ConversionConfig",
 		"FusionConfig":     "FusionConfig",
 		"GuardConfig":      "GuardConfig",
 		"PeakConfig":       "PeakConfig",

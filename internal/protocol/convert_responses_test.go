@@ -72,7 +72,7 @@ func TestConvertOpenAIRequestToResponses(t *testing.T) {
 		`{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},` +
 		`{"role":"tool","tool_call_id":"c1","content":"r"}],` +
 		`"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}]}`
-	out, err := convertOpenAIRequestToResponses([]byte(in))
+	out, err := convertOpenAIRequestToResponses([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestConvertResponsesRequestToAnthropic(t *testing.T) {
 		`{"type":"function_call","call_id":"call_1","name":"search","arguments":"{\"q\":\"x\"}"},` +
 		`{"type":"function_call_output","call_id":"call_1","output":"found"}],` +
 		`"tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]}`
-	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestResponsesConversionMissingOptionalFieldsNeverEmitsLiteralNull(t *testin
 		`{"type":"function_call_output","output":"found"}],` +
 		`"tool_choice":{"type":"function","function":{}}}`
 
-	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,7 +487,7 @@ func TestConvertResponsesRequestToAnthropic_DefaultMaxTokens(t *testing.T) {
 		"absent": mk(""),
 		"null":   mk(`,"max_output_tokens":null`),
 	} {
-		out, err := convertResponsesRequestToAnthropic([]byte(in))
+		out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -497,7 +497,7 @@ func TestConvertResponsesRequestToAnthropic_DefaultMaxTokens(t *testing.T) {
 		}
 	}
 	// An explicit value still wins.
-	out, err := convertResponsesRequestToAnthropic([]byte(mk(`,"max_output_tokens":100`)))
+	out, err := convertResponsesRequestToAnthropic([]byte(mk(`,"max_output_tokens":100`)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +590,7 @@ func TestConvertResponsesRequestToAnthropic_SystemDeveloperFolded(t *testing.T) 
 		`{"type":"message","role":"system","content":[{"type":"input_text","text":"sys-note"}]},` +
 		`{"type":"message","role":"developer","content":[{"type":"input_text","text":"dev-note"}]},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
-	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -733,7 +733,7 @@ func TestConvertResponsesRequestToAnthropic_ToolOutputPartsArray(t *testing.T) {
 		`{"type":"input_text","text":"shot taken"},` +
 		`{"type":"input_image","image_url":"data:image/png;base64,` + png1x1 + `"},` +
 		`{"type":"input_image","image_url":"https://x/img.png"}]}]}`
-	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,9 +767,9 @@ func TestConvertResponsesRequestToAnthropic_ToolOutputPartsArray(t *testing.T) {
 		t.Errorf("url image block = %v", img2)
 	}
 	// String output still maps to a plain string (no regression).
-	out2, err := convertResponsesRequestToAnthropic([]byte(`{"model":"m","input":[` +
-		`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
-		`{"type":"function_call_output","call_id":"c1","output":"plain"}]}`))
+	out2, err := convertResponsesRequestToAnthropic([]byte(`{"model":"m","input":[`+
+		`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},`+
+		`{"type":"function_call_output","call_id":"c1","output":"plain"}]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +924,7 @@ func TestConvertResponsesRequestToAnthropic_AdditionalTools(t *testing.T) {
 		`{"type":"additional_tools","role":"developer","tools":[` +
 		`{"type":"function","name":"wait","description":"w","parameters":{"type":"object"},"strict":false}]},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
-	out, err := convertResponsesRequestToAnthropic([]byte(in))
+	out, err := convertResponsesRequestToAnthropic([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1068,7 +1068,7 @@ func sha256Hex32Ref(s string) string {
 func TestConvertOpenAIRequestToResponses_ToolStrict(t *testing.T) {
 	in := `{"model":"m","messages":[{"role":"user","content":"hi"}],` +
 		`"tools":[{"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object"},"strict":false}}]}`
-	out, err := convertOpenAIRequestToResponses([]byte(in))
+	out, err := convertOpenAIRequestToResponses([]byte(in), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

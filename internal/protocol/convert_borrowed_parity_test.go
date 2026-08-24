@@ -111,7 +111,7 @@ func TestParity_HostileToolIDConsistency(t *testing.T) {
 	in := []byte(`{"model":"gpt-x","max_tokens":16,"messages":[
 		{"role":"assistant","content":null,"tool_calls":[{"id":"call.bad:id 1","type":"function","function":{"name":"f","arguments":"{}"}}]},
 		{"role":"tool","tool_call_id":"call.bad:id 1","content":"result"}]}`)
-	out, err := convertOpenAIRequestToAnthropic(in)
+	out, err := convertOpenAIRequestToAnthropic(in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestParity_DataURIImageVariants(t *testing.T) {
 	var out []byte
 	logs := captureConvertLog(t, func() {
 		var err error
-		out, err = convertOpenAIRequestToAnthropic(in)
+		out, err = convertOpenAIRequestToAnthropic(in, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

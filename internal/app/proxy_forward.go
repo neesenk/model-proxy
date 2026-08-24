@@ -537,7 +537,15 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			continue
 		}
 
-		flc := forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, origBody: origBody}
+		// This attempt's conversion diagnostics ride the log context into the
+		// request log (empty for same-protocol passthrough).
+		var convDiags []targetexec.ConversionDiagnostic
+		if diag := plan.ConversionDiag(); diag != nil {
+			for _, item := range diag.Items() {
+				convDiags = append(convDiags, targetexec.ConversionDiagnostic{Code: item.Code, Detail: item.Detail})
+			}
+		}
+		flc := forwardLogCtx{requestID: requestID, attempt: st.attempt, exposed: exposed, origBody: origBody, diagnostics: convDiags}
 		st.attempt++
 		// One-shot larger-context retry: when this target answers a
 		// context-overflow 400, tryTarget calls ctxRetry for a strictly-larger-
@@ -573,6 +581,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 					Attempt:      flc.attempt,
 					Exposed:      flc.exposed,
 					OriginalBody: flc.origBody,
+					Diagnostics:  convDiags,
 				},
 				ResponseContext:  plan.ResponseContext(origBody),
 				ResponsesHistory: responsesHistory,

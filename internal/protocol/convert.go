@@ -103,7 +103,7 @@ func strOf(v any) string {
 // anthropicTextOf extracts concatenated text from an anthropic system or
 // tool_result content value (string, or array of text blocks). Non-text blocks
 // are warned + skipped (system/tool_result are inherently text-shaped).
-func anthropicTextOf(content any) string {
+func anthropicTextOf(content any, d *Diagnostics) string {
 	switch v := content.(type) {
 	case string:
 		return v
@@ -115,7 +115,7 @@ func anthropicTextOf(content any) string {
 				continue
 			}
 			if _, hasCC := m["cache_control"]; hasCC {
-				convertWarn("dropping cache_control breakpoint (no cross-protocol equivalent)")
+				warnDiag(d, "cache_control_dropped", "dropping cache_control breakpoint (no cross-protocol equivalent)")
 			}
 			t, _ := m["type"].(string)
 			if t == "text" || t == "" {
@@ -126,7 +126,7 @@ func anthropicTextOf(content any) string {
 					b.WriteString(s)
 				}
 			} else {
-				convertWarn("dropping non-text block in system/tool_result: " + t)
+				warnDiag(d, "non_text_block_dropped", "dropping non-text block in system/tool_result: "+t)
 			}
 		}
 		return b.String()
@@ -137,7 +137,7 @@ func anthropicTextOf(content any) string {
 // anthropicToolsToOpenAI maps anthropic tools to openai function tools. Built-in
 // server tools (web_search_*/computer/bash/text_editor/...) carry a `type` other
 // than the custom-tool shape and are dropped + warned.
-func anthropicToolsToOpenAI(tools []any) []map[string]any {
+func anthropicToolsToOpenAI(tools []any, d *Diagnostics) []map[string]any {
 	out := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
 		t := asMap(tool)
@@ -157,7 +157,7 @@ func anthropicToolsToOpenAI(tools []any) []map[string]any {
 				out = append(out, map[string]any{"type": "function", "function": fn})
 				continue
 			}
-			convertWarn("dropping server-side anthropic tool type: " + bt)
+			warnDiag(d, "server_tool_dropped", "dropping server-side anthropic tool type: "+bt)
 			continue
 		}
 		name, _ := t["name"].(string)
@@ -201,9 +201,9 @@ func anthropicToolChoiceToOpenAI(tc any) any {
 // anthropicContentBlockToOpenAIPart maps a single anthropic content block to an
 // openai content part. Returns nil for tool_use/tool_result (handled at message
 // level) and for dropped blocks (thinking/redacted_thinking).
-func anthropicContentBlockToOpenAIPart(blk map[string]any) map[string]any {
+func anthropicContentBlockToOpenAIPart(blk map[string]any, d *Diagnostics) map[string]any {
 	if _, hasCC := blk["cache_control"]; hasCC {
-		convertWarn("dropping cache_control breakpoint (no cross-protocol equivalent)")
+		warnDiag(d, "cache_control_dropped", "dropping cache_control breakpoint (no cross-protocol equivalent)")
 	}
 	switch blk["type"] {
 	case "text", "":
@@ -243,7 +243,7 @@ func anthropicContentBlockToOpenAIPart(blk map[string]any) map[string]any {
 			}}
 		case "file":
 			if id := strOpt(src["file_id"]); id != "" {
-				return map[string]any{"type": "text", "text": degradeFileIDText(id, filename)}
+				return map[string]any{"type": "text", "text": degradeFileIDText(id, filename, d)}
 			}
 		case "url":
 			if u := strOpt(src["url"]); u != "" {
@@ -260,10 +260,10 @@ func anthropicContentBlockToOpenAIPart(blk map[string]any) map[string]any {
 	case "tool_use", "tool_result":
 		return nil // handled at message level
 	case "thinking", "redacted_thinking":
-		convertWarn("dropping " + strOf(blk["type"]) + " block (no cross-protocol equivalent)")
+		warnDiag(d, "block_dropped", "dropping "+strOf(blk["type"])+" block (no cross-protocol equivalent)")
 		return nil
 	}
-	convertWarn("dropping unknown anthropic content block: " + strOf(blk["type"]))
+	warnDiag(d, "unknown_block", "dropping unknown anthropic content block: "+strOf(blk["type"]))
 	return nil
 }
 
@@ -272,7 +272,7 @@ func anthropicContentBlockToOpenAIPart(blk map[string]any) map[string]any {
 // `tool` messages (one per result) plus a `user` message for any text/image.
 // imageOK gates the media reinjection (#6): without vision the images collapse
 // to a placeholder line inside the tool message instead of image_url parts.
-func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
+func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool, d *Diagnostics) []map[string]any {
 	role, _ := m["role"].(string)
 	content := m["content"]
 	var out []map[string]any
@@ -324,7 +324,7 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 						annotations = append(annotations, anthropicCitationsToChat(blk["citations"], text, textOffset)...)
 						textOffset += len([]rune(text))
 					}
-					if p := anthropicContentBlockToOpenAIPart(blk); p != nil {
+					if p := anthropicContentBlockToOpenAIPart(blk, d); p != nil {
 						textParts = append(textParts, p)
 					}
 				}
@@ -368,8 +368,8 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 			}
 			if blk["type"] == "tool_result" {
 				id, _ := blk["tool_use_id"].(string)
-				txt := markToolResultError(anthropicToolResultText(blk["content"]), blk["is_error"] == true)
-				imgs := anthropicToolResultImages(blk["content"])
+				txt := markToolResultError(anthropicToolResultText(blk["content"], d), blk["is_error"] == true)
+				imgs := anthropicToolResultImages(blk["content"], d)
 				if len(imgs) > 0 && !imageOK {
 					// No vision on the target: no synthetic user message, no
 					// image_url parts (deepseek 400s on them) — placeholder text.
@@ -388,7 +388,7 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 				}
 				continue
 			}
-			if p := anthropicContentBlockToOpenAIPart(blk); p != nil {
+			if p := anthropicContentBlockToOpenAIPart(blk, d); p != nil {
 				parts = append(parts, p)
 			}
 		}
@@ -417,7 +417,7 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool) []map[string]any {
 // text blocks). Image blocks are skipped WITHOUT a warning — they are
 // re-delivered via anthropicToolResultImages (synthetic user message); other
 // non-text blocks are warned + dropped.
-func anthropicToolResultText(content any) string {
+func anthropicToolResultText(content any, d *Diagnostics) string {
 	if s, ok := content.(string); ok {
 		return s
 	}
@@ -436,7 +436,7 @@ func anthropicToolResultText(content any) string {
 			} else if t == "image" {
 				continue // reinjected, not dropped
 			} else {
-				convertWarn("dropping non-text block inside tool_result: " + t)
+				warnDiag(d, "non_text_block_dropped", "dropping non-text block inside tool_result: "+t)
 			}
 		}
 		return b.String()
@@ -447,7 +447,7 @@ func anthropicToolResultText(content any) string {
 // anthropicToolResultImages extracts image blocks from a tool_result content
 // value as openai image_url parts (base64 → data URL, url source kept) for
 // synthetic-user reinjection.
-func anthropicToolResultImages(content any) []map[string]any {
+func anthropicToolResultImages(content any, d *Diagnostics) []map[string]any {
 	blocks, ok := content.([]any)
 	if !ok {
 		return nil
@@ -458,7 +458,7 @@ func anthropicToolResultImages(content any) []map[string]any {
 		if m == nil || m["type"] != "image" {
 			continue
 		}
-		if p := anthropicContentBlockToOpenAIPart(m); p != nil {
+		if p := anthropicContentBlockToOpenAIPart(m, d); p != nil {
 			out = append(out, p)
 		}
 	}
@@ -481,12 +481,12 @@ func appendMediaPlaceholder(txt string) string {
 // convertAnthropicRequestToOpenAI transforms an Anthropic /v1/messages body into
 // an OpenAI /v1/chat/completions body (full tools support).
 func convertAnthropicRequestToOpenAI(body []byte) ([]byte, error) {
-	return convertAnthropicRequestToOpenAIV(body, true)
+	return convertAnthropicRequestToOpenAIV(body, true, nil)
 }
 
 // convertAnthropicRequestToOpenAIV is convertAnthropicRequestToOpenAI with the
 // target model's vision capability (media reinjection gate).
-func convertAnthropicRequestToOpenAIV(body []byte, imageOK bool) ([]byte, error) {
+func convertAnthropicRequestToOpenAIV(body []byte, imageOK bool, d *Diagnostics) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
@@ -505,20 +505,20 @@ func convertAnthropicRequestToOpenAIV(body []byte, imageOK bool) ([]byte, error)
 	}
 	var msgs []map[string]any
 	if sys, ok := src["system"]; ok {
-		if txt := anthropicTextOf(sys); txt != "" {
+		if txt := anthropicTextOf(sys, d); txt != "" {
 			msgs = append(msgs, map[string]any{"role": "system", "content": txt})
 		}
 	}
 	if raw, ok := src["messages"].([]any); ok {
 		for _, m := range raw {
 			if mm := asMap(m); mm != nil {
-				msgs = append(msgs, anthropicMsgToOpenAIMsgs(mm, imageOK)...)
+				msgs = append(msgs, anthropicMsgToOpenAIMsgs(mm, imageOK, d)...)
 			}
 		}
 	}
 	out["messages"] = msgs
 	if tools, ok := src["tools"].([]any); ok && len(tools) > 0 {
-		if ot := anthropicToolsToOpenAI(tools); len(ot) > 0 {
+		if ot := anthropicToolsToOpenAI(tools, d); len(ot) > 0 {
 			out["tools"] = ot
 		}
 	}
@@ -536,7 +536,7 @@ func convertAnthropicRequestToOpenAIV(body []byte, imageOK bool) ([]byte, error)
 	if stops, ok := src["stop_sequences"].([]any); ok && len(stops) > 0 {
 		out["stop"] = stops
 	}
-	if key := anthropicExplicitPromptCacheKey(src, out); key != "" {
+	if key := anthropicExplicitPromptCacheKey(src, out, d); key != "" {
 		out["prompt_cache_key"] = key
 	}
 	return sonic.Marshal(out)
@@ -696,14 +696,14 @@ func openaiToolChoiceToAnthropic(tc any) any {
 // provider change in this topology) would send the target an id its file
 // storage has never seen. Inline base64/URL sources are unaffected; the drop
 // is observable (convertWarn), never silent.
-func degradeFileIDText(id, filename string) string {
-	convertWarn("dropping cross-protocol file_id attachment " + id + " (provider-scoped; inline the file content instead)")
+func degradeFileIDText(id, filename string, d *Diagnostics) string {
+	warnDiag(d, "file_id_degraded", "dropping cross-protocol file_id attachment "+id+" (provider-scoped; inline the file content instead)")
 	return "[document " + firstNonEmpty(filename, "file") + " attached as file_id " + id + " — not forwarded across providers]"
 }
 
 // openaiContentPartToAnthropicBlock maps an openai content part to an anthropic
 // content block (text or image_url→image base64).
-func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
+func openaiContentPartToAnthropicBlock(part map[string]any, d *Diagnostics) map[string]any {
 	switch part["type"] {
 	case "text", "":
 		return map[string]any{"type": "text", "text": strOf(part["text"])}
@@ -721,7 +721,7 @@ func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
 			if semi < 0 {
 				// Percent-encoded (non-base64) data URI: no Anthropic source
 				// form can carry it — drop observably, not silently.
-				convertWarn("dropping non-base64 data URI image (no Anthropic equivalent)")
+				warnDiag(d, "data_uri_dropped", "dropping non-base64 data URI image (no Anthropic equivalent)")
 				return nil
 			}
 			media := rest[:semi]
@@ -744,7 +744,7 @@ func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
 		filename := strOpt(f["filename"])
 		var block map[string]any
 		if id := strOpt(f["file_id"]); id != "" && strOpt(f["file_data"]) == "" {
-			block = map[string]any{"type": "text", "text": degradeFileIDText(id, filename)}
+			block = map[string]any{"type": "text", "text": degradeFileIDText(id, filename, d)}
 		} else if dataURL := strOpt(f["file_data"]); dataURL != "" {
 			if mt, data, ok := parseDataURL(dataURL); ok {
 				block = map[string]any{"type": "document", "source": map[string]any{
@@ -764,14 +764,14 @@ func openaiContentPartToAnthropicBlock(part map[string]any) map[string]any {
 		}
 		return nil
 	default:
-		convertWarn("dropping unknown openai content part: " + strOf(part["type"]))
+		warnDiag(d, "unknown_part", "dropping unknown openai content part: "+strOf(part["type"]))
 	}
 	return nil
 }
 
 // openaiContentToAnthropicBlocks converts an openai message content (string or
 // parts array) into anthropic content blocks.
-func openaiContentToAnthropicBlocks(content any) []map[string]any {
+func openaiContentToAnthropicBlocks(content any, d *Diagnostics) []map[string]any {
 	if s, ok := content.(string); ok {
 		if s == "" {
 			return nil
@@ -784,7 +784,7 @@ func openaiContentToAnthropicBlocks(content any) []map[string]any {
 	}
 	var out []map[string]any
 	for _, p := range parts {
-		if blk := openaiContentPartToAnthropicBlock(asMap(p)); blk != nil {
+		if blk := openaiContentPartToAnthropicBlock(asMap(p), d); blk != nil {
 			out = append(out, blk)
 		}
 	}
@@ -795,7 +795,7 @@ func openaiContentToAnthropicBlocks(content any) []map[string]any {
 // content value (string, or array of text parts joined with "\n"). Non-text
 // parts are warned + skipped; nil/absent content yields "" — NEVER the literal
 // "null" that strOf(nil) would render.
-func openaiTextOf(content any) string {
+func openaiTextOf(content any, d *Diagnostics) string {
 	if s, ok := content.(string); ok {
 		return s
 	}
@@ -817,7 +817,7 @@ func openaiTextOf(content any) string {
 				b.WriteString(s)
 			}
 		} else {
-			convertWarn("dropping non-text part in system/tool content: " + t)
+			warnDiag(d, "non_text_part_dropped", "dropping non-text part in system/tool content: "+t)
 		}
 	}
 	return b.String()
@@ -826,7 +826,7 @@ func openaiTextOf(content any) string {
 // parseToolArgs parses an openai tool_call arguments JSON string into an object;
 // on failure returns an empty object + a warning (anthropic tool_use.input must be
 // an object).
-func parseToolArgs(args string) any {
+func parseToolArgs(args string, d *Diagnostics) any {
 	args = strings.TrimSpace(args)
 	if args == "" {
 		return map[string]any{}
@@ -841,11 +841,12 @@ func parseToolArgs(args string) any {
 		default:
 			// Valid JSON but not an object (array/scalar): Anthropic's
 			// tool_use input must be an object — wrap so the value survives.
+			warnDiag(d, "tool_args_wrapped", "tool_call arguments not a JSON object; wrapped as {value: …}")
 			return map[string]any{"value": obj}
 		}
 	}
 	// Not JSON at all: keep the raw text recoverable instead of discarding it.
-	convertWarn("tool_call arguments not JSON; wrapping raw text as input")
+	warnDiag(d, "tool_args_raw", "tool_call arguments not JSON; wrapping raw text as input")
 	return map[string]any{"raw": args}
 }
 
@@ -921,7 +922,7 @@ func anySlice(v any) []any {
 // convertOpenAIRequestToAnthropic transforms an OpenAI /v1/chat/completions body
 // into an Anthropic /v1/messages body (full tools support). max_tokens is required
 // by Anthropic; if absent a generous default is injected.
-func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
+func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error) {
 	var src map[string]any
 	if err := sonic.Unmarshal(body, &src); err != nil {
 		return nil, fmt.Errorf("parse openai request: %w", err)
@@ -991,7 +992,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 		blocks := make([]map[string]any, 0, len(pendingTool))
 		for _, tm := range pendingTool {
 			tid, _ := tm["tool_call_id"].(string)
-			content, isError := splitToolResultError(openaiTextOf(tm["content"]))
+			content, isError := splitToolResultError(openaiTextOf(tm["content"], d))
 			blocks = append(blocks, map[string]any{
 				"type":        "tool_result",
 				"tool_use_id": normID(tid),
@@ -1012,7 +1013,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 		case "system", "developer":
 			// Parts-array content extracts its text parts; multiple system
 			// messages join with "\n" (cc-switch/opencodex join the same way).
-			if sys := openaiTextOf(mm["content"]); sys != "" {
+			if sys := openaiTextOf(mm["content"], d); sys != "" {
 				if systemText != "" {
 					systemText += "\n"
 				}
@@ -1026,7 +1027,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 		flushPendingTool()
 		switch role {
 		case "user":
-			if blocks := openaiContentToAnthropicBlocks(mm["content"]); len(blocks) > 0 {
+			if blocks := openaiContentToAnthropicBlocks(mm["content"], d); len(blocks) > 0 {
 				msgs = append(msgs, map[string]any{"role": "user", "content": blocks})
 			}
 		case "assistant":
@@ -1035,7 +1036,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 			// Unsigned reasoning_content is intentionally not promoted to an
 			// Anthropic thinking block.
 			blocks := chatAnthropicThinkingReplay(mm)
-			if tb := openaiContentToAnthropicBlocks(mm["content"]); len(tb) > 0 {
+			if tb := openaiContentToAnthropicBlocks(mm["content"], d); len(tb) > 0 {
 				blocks = append(blocks, tb...)
 			}
 			if tcs, ok := mm["tool_calls"].([]any); ok {
@@ -1052,7 +1053,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 					args, _ := fn["arguments"].(string)
 					id, _ := tcm["id"].(string)
 					blocks = append(blocks, map[string]any{
-						"type": "tool_use", "id": normID(id), "name": name, "input": parseToolArgs(args),
+						"type": "tool_use", "id": normID(id), "name": name, "input": parseToolArgs(args, d),
 					})
 				}
 			}
@@ -1062,7 +1063,7 @@ func convertOpenAIRequestToAnthropic(body []byte) ([]byte, error) {
 		default:
 			// developer/function/... have no anthropic equivalent — never silently
 			// swallow a message.
-			convertWarn("dropping message with unknown role: " + role)
+			warnDiag(d, "unknown_role_dropped", "dropping message with unknown role: "+role)
 		}
 	}
 	flushPendingTool()
@@ -1139,8 +1140,29 @@ func convertRequestFor(body []byte, clientProto, targetProto string, opts conver
 	if conversion, ok := lookupProtocolConversion(clientProto, targetProto); ok {
 		out, err = conversion.request(body, opts)
 	}
-	if err != nil || !needsConversion(clientProto, targetProto) {
+	if err != nil {
 		return out, err
+	}
+	// Strict-lossy gate: refuse (typed error → the forward path skips this
+	// target exactly like a capability-scanner verdict) instead of degrading.
+	if opts.StrictLossy && opts.Diag != nil {
+		var codes []string
+		for _, item := range opts.Diag.Items() {
+			codes = append(codes, item.Code)
+		}
+		if len(codes) > 0 {
+			// Reuse the capability-scanner error channel: the forward path
+			// skips this target and, when no target converts, answers with
+			// the 400 unsupported envelope (no proxy changes needed).
+			return out, &unsupportedConversionError{
+				ClientProto: clientProto, TargetProto: targetProto,
+				Feature: "strict_lossy:" + strings.Join(codes, ","),
+				Detail:  "conversion.strict_lossy refuses lossy-but-degradable mappings",
+			}
+		}
+	}
+	if !needsConversion(clientProto, targetProto) {
+		return out, nil
 	}
 	// One decode/encode round for every post-conversion fixup (Anthropic cache
 	// breakpoints, image shrink, codex param strip): the passes used to
@@ -1374,7 +1396,7 @@ func mapStopReasonToFinish(reason string) string {
 
 // openaiToolCallsToAnthropic maps openai choice.tool_calls → anthropic tool_use
 // content blocks (arguments JSON string parsed to an input object).
-func openaiToolCallsToAnthropic(toolCalls []any) []map[string]any {
+func openaiToolCallsToAnthropic(toolCalls []any, d *Diagnostics) []map[string]any {
 	var out []map[string]any
 	for _, tc := range toolCalls {
 		tcm := asMap(tc)
@@ -1389,7 +1411,7 @@ func openaiToolCallsToAnthropic(toolCalls []any) []map[string]any {
 		args, _ := fn["arguments"].(string)
 		id, _ := tcm["id"].(string)
 		out = append(out, map[string]any{
-			"type": "tool_use", "id": sanitizeToolUseID(id), "name": name, "input": parseToolArgs(args),
+			"type": "tool_use", "id": sanitizeToolUseID(id), "name": name, "input": parseToolArgs(args, d),
 		})
 	}
 	return out
@@ -1454,7 +1476,7 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 				content = append(content, map[string]any{"type": "text", "text": responsesTextWithCitationLinks(part)})
 			} else if parts, ok := cv.([]any); ok {
 				for _, p := range parts {
-					if blk := openaiContentPartToAnthropicBlock(asMap(p)); blk != nil {
+					if blk := openaiContentPartToAnthropicBlock(asMap(p), nil); blk != nil {
 						content = append(content, blk)
 					}
 				}
@@ -1484,7 +1506,7 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 			content = append(content, map[string]any{"type": "text", "text": c.Message.Refusal})
 		}
 		if len(c.Message.ToolCalls) > 0 {
-			content = append(content, openaiToolCallsToAnthropic(c.Message.ToolCalls)...)
+			content = append(content, openaiToolCallsToAnthropic(c.Message.ToolCalls, nil)...)
 		}
 		stopReason = mapFinishToStopReason(c.FinishReason)
 	}

@@ -120,7 +120,7 @@ func TestCitationReplayInRequests(t *testing.T) {
 		t.Fatalf("a→r request citation = %s", responsesRaw)
 	}
 
-	backRaw, err := convertResponsesRequestToAnthropic(responsesRaw)
+	backRaw, err := convertResponsesRequestToAnthropic(responsesRaw, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

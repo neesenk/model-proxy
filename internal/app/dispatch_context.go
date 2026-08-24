@@ -84,6 +84,8 @@ type forwardLogCtx struct {
 	attempt   int
 	exposed   string
 	origBody  []byte
+	// diagnostics of THIS attempt's request conversion (empty on passthrough)
+	diagnostics []targetexec.ConversionDiagnostic
 }
 
 // newTargetAttempt is the single assembly point shared by normal routing and
@@ -126,12 +128,17 @@ func buildRequestLogInput(
 	startedAt time.Time,
 	upstreamRequestBody []byte,
 ) requestlog.Input {
+	diags := make([]requestlog.ConversionDiagnostic, 0, len(context.diagnostics))
+	for _, d := range context.diagnostics {
+		diags = append(diags, requestlog.ConversionDiagnostic{Code: d.Code, Detail: d.Detail})
+	}
 	return requestlog.BuildInput(
 		requestlog.LogCtx{
-			RequestID: context.requestID,
-			Attempt:   context.attempt,
-			Exposed:   context.exposed,
-			OrigBody:  context.origBody,
+			RequestID:   context.requestID,
+			Attempt:     context.attempt,
+			Exposed:     context.exposed,
+			OrigBody:    context.origBody,
+			Diagnostics: diags,
 		},
 		request,
 		protocol,
