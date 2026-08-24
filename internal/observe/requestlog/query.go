@@ -19,6 +19,7 @@ type Filter struct {
 	Status     int
 	ErrorsOnly bool
 	RequestID  string
+	Session    string
 	Shadow     string
 	From       time.Time
 	To         time.Time
@@ -27,6 +28,9 @@ type Filter struct {
 
 func (f Filter) matches(record Record) bool {
 	if f.RequestID != "" && record.RequestID != f.RequestID {
+		return false
+	}
+	if f.Session != "" && record.SessionID != f.Session {
 		return false
 	}
 	if f.Model != "" &&

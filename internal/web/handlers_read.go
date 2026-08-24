@@ -18,6 +18,42 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"uptime": v.Uptime, "version": s.version, "listen": v.Listen, "health": v.Health, "model_locks": v.ModelLocks, "quota": v.Quota, "schedule": v.Schedule, "counters": v.Counters, "cache": v.Cache, "warnings": v.Warnings})
 }
 
+// handleSessions serves GET /api/sessions: per-session aggregates (span,
+// requests/errors, providers/models, token totals, equivalent USD cost) from
+// the request log's newest records. Requires request_log to be enabled.
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	dir := s.reads.RequestLogDirectory()
+	if dir == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "sessions": []any{}})
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	// Same cost path as analytics and the budget watcher: config overrides
+	// first, then the cached catalog; unpriced models contribute nothing.
+	snapshot := s.reads.Pricing()
+	costOf := func(model string, usage requestlog.Usage) float64 {
+		entry, ok := pricing.Resolve(snapshot.Overrides, snapshot.Catalog, model)
+		if !ok {
+			return 0
+		}
+		return pricing.ComputeCost(usage.Input, usage.Output, usage.CacheRead, usage.CacheCreation, entry)
+	}
+	sessions, err := requestlog.SessionSummaries(dir, 2000, limit, costOf)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "session summary: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "sessions": sessions})
+}
+
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	p := ""
 	if s.logFile != nil {
