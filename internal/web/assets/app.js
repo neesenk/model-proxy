@@ -433,7 +433,8 @@ const liveRows = [];     // newest-first ring of rendered events (capped)
 // renderLiveTab opens an SSE connection to /api/events and prepends each event
 // as a row (newest on top). The connection is closed on leaving the tab
 // (stopLiveEvents). A start event (in-flight) is dimmed; an end event shows the
-// chosen provider, status, latency, and best-effort tokens.
+// chosen provider, status, latency, and best-effort tokens. Non-lifecycle
+// events (guard, budget) render as a single event line: type badge + detail.
 function renderLiveTab() {
   const panel = panels.live;
   if (!panel) return;
@@ -483,6 +484,15 @@ function addLiveRow(e) {
     <th>time</th><th>agent</th><th>model</th><th>provider</th>
     <th>status</th><th class="num">latency</th><th class="num">tokens</th></tr></thead>
     <tbody>${liveRows.map((r) => {
+      if (r.type !== 'start' && r.type !== 'end') {
+        // Non-lifecycle event (guard/budget): provider/status/latency carry no
+        // meaning, so render a single event line — type badge + agent + detail.
+        return `<tr>
+          <td class="mono">${esc(fmtTime(new Date(r.ts).toISOString()))}</td>
+          <td class="mono">${esc(r.agent || '—')}</td>
+          <td colspan="5"><span class="badge warn">⚑ ${esc(r.type)}</span> <span class="mono subdue">${esc(r.detail || '')}</span></td>
+        </tr>`;
+      }
       const sc = r.status >= 400 ? 'err' : (r.type === 'start' ? 'subdue' : '');
       const p = r.type === 'start' ? '…' : (r.provider || '—');
       const st = r.type === 'start' ? '···' : (r.status || '');

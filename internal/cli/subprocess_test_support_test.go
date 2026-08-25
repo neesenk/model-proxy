@@ -54,6 +54,8 @@ func TestHelperProcess(t *testing.T) {
 		RunModels(args)
 	case "doctor":
 		RunDoctor(args)
+	case "audit":
+		RunAudit(args)
 	case "test":
 		climodels.CmdTest(args)
 	case "schedule":

@@ -399,7 +399,10 @@ func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
 // level - the email lives in the id_token's `email` claim, and there is no
 // added-at timestamp (only last_refresh, a different semantic, which is not
 // surfaced here). Only these two fields are projected; the access/refresh/id
-// tokens never leave the provider package.
+// tokens never leave the provider package in serializable or loggable form.
+// The one explicit exception: internal/app reads the raw token values once per
+// generation (build) into the guard known-secret scanner — memory only, never
+// logged, persisted, or serialized.
 type CodexAccountInfo struct {
 	AccountID string
 	Email     string

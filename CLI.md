@@ -727,7 +727,7 @@ config 无效 -> **stdout** `✗ config invalid:  <ERR>`（红）+ exit 1（注�
 doctor --live [--config PATH]
 ```
 
-逻辑（`internal/cli/doctor/live.go` 的 `RenderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于 `takeover.proxy_url` 推导值），输出**结论先行**报告，回答「agent 为什么不动了」。纯只读；有 `--live` 时离线报告不再输出。
+逻辑（`internal/cli/doctor/live.go` 的 `RenderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于 `takeover.proxy_url` 推导值），输出**结论先行**报告，回答「agent 为什么不动了」。对 daemon 纯只读；唯一磁盘副作用：检出漂移的 client 在 `guard.audit` 开启时追加一条安全审计记录（见 §18）。有 `--live` 时离线报告不再输出。
 
 ### stdout
 
@@ -767,6 +767,7 @@ Takeover
 - route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从 config routes + 隐式路由 + 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
 - `request_log` 未开启时 Recent failures 节是一行 dim 提示（`request_log disabled — …`），不算错误；无任何失败记录时显示 `none recorded`。
 - takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi `providers[<pid>].baseUrl`。
+- 漂移审计：`guard.audit` 开启（默认）时，每个漂移 client 追加一条 `kind=drift`、`agent=doctor` 的安全审计记录（`seclog.AppendSync`），`detail` 只含 `client=<名> expected=<期望host> actual=<实际host>`——`net/url` 解析取 `Host`，永不含 URL 路径与查询串（非 URL 占位值归一为 `(no-url)`）。`guard.audit: false` 不写；append 失败只降级为 stderr `⚠ security audit append failed: <ERR>`，doctor 输出与 exit code 不变。
 
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
@@ -875,6 +876,30 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 - 非 2xx：状态码 + body 摘录（≤4KiB）写入 `<proto>_<provider>.err`，stderr `✗ <proto>: HTTP <status> — wrote <ERRFILE> (existing .sse untouched)`；**不覆盖已有 .sse**。任一端点失败则 exit 1。
 
 凭据来自 `login`（providerImplFor）；录制文件只含响应字节，但 prompt/模型输出仍可能敏感——提交前人工审查。
+
+---
+
+## 18. `audit` — 安全审计日志（离线，不需 daemon）
+
+```
+audit [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
+```
+
+逻辑（`internal/cli/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
+
+- `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。
+- `--kind`：`secret` | `path` | `drift`；其他值 -> stderr `✗ invalid --kind "<V>": must be secret, path, or drift` + exit 1。
+- `--limit N`：只保留最新 N 条（默认 50；`0`/负数 = 全部）。非整数 -> stderr `✗ invalid --limit: …` + exit 1。
+- `--json`：stdout 为 records 数组原样 JSON（`seclog.Record`，最新在前；空结果为 `[]`），供 jq。
+
+### stdout（表格，`FormatAuditTable`）
+
+```
+time           kind    agent         route             names                 action  detail
+<MM-DD HH:MM:SS(14)> <kind(7)> <agent(12)> <exposed(16)> <逗号连接(20)> <action(7)> <detail>
+```
+
+记录按时间倒序（最新在前）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数追加一行 `  (<N> unreadable line(s) skipped)`。
 
 ---
 

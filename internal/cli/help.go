@@ -39,6 +39,7 @@ Commands:
   unfreeze [provider]  Clear frozen provider state (circuit/rate-limit/model locks)
   stats                Show per-(provider, model) call statistics (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
+  audit                Show the security audit log (offline, no daemon)
   test <model>         End-to-end probe of a model's route targets (real upstream calls)
   replay <id> --to P   Re-answer a logged request with a different backend
   shadow report       Shadow-evaluation aggregation (primary vs shadow compare)
@@ -180,7 +181,23 @@ Subcommands:
            stuck right now: routes with all targets down (+ earliest recovery
            time), active pins, first-choice quota nearly exhausted, daemon
            warnings, takeover pointer drift, and recent failed requests
-           (request_log). Read-only.`,
+           (request_log). Read-only. Each drifted client is also appended to
+           the security audit log (kind=drift, hosts only) when guard.audit
+           is on.`,
+
+	"audit": `audit [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
+
+  Show the security audit log (secret/path hits and doctor takeover-drift
+  findings). Offline: reads the seclog files directly from guard.audit_path
+  (default ~/.model-proxy/security.log) — no daemon needed.
+
+  Flags:
+  --from TIME   range start: now, duration ago (1h, 30m), unix seconds, or
+                RFC3339 (default: unbounded)
+  --to TIME     range end (same forms; default: unbounded)
+  --kind KIND   filter to one kind: secret | path | drift
+  --limit N     newest N records (default 50; 0 = all)
+  --json        raw records JSON for jq`,
 
 	"test": `test <model> [--config PATH]
 

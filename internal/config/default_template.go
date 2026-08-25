@@ -246,15 +246,34 @@ takeover:
 #   max_entries: 1000                   # default
 #   max_body_bytes: 262144              # default 256KiB; larger responses not cached
 
-# Outbound secret guard (DLP-lite): scans the raw request body for
-# high-confidence secret patterns (PEM private-key headers, AWS/OpenAI/
-# Anthropic/GitHub/Google tokens) BEFORE forwarding upstream. Request bodies
-# only, never responses. Hits are reported by pattern type name only (live
-# event + stats counter) — matched content is never logged.
+# Outbound secret guard (DLP-lite): scans the raw request body BEFORE
+# forwarding upstream (request bodies only, never responses) for:
+#   - high-confidence secret patterns (PEM private-key headers, AWS/OpenAI/
+#     Anthropic/GitHub/Google tokens, plus the built-in rules table),
+#   - the exact credential values the proxy itself manages (known_secrets;
+#     pool API keys + OAuth tokens, matched in memory only — never written
+#     to disk or logs),
+#   - base64/hex/url-encoded forms of those patterns (decode),
+#   - high-confidence sensitive paths (~/.ssh, ~/.aws/credentials, .env, ...).
+# Hits are reported by pattern type name / path category only (live event +
+# stats counter + audit log) — matched secret content is never logged.
 # guard:
 #   secrets: log      # log (default: allow + live event + counter) | redact
 #                     # (forward with matches replaced by [REDACTED]) | block
 #                     # (reject with 400) | off (no scan)
+#   known_secrets: true   # default true; also match the proxy's own credentials
+#   decode: true          # default true; catch base64/hex/url-encoded forms
+#   paths: log            # log (default) | block | off — sensitive-path signal;
+#                         # redact intentionally unsupported (rewriting a path
+#                         # would corrupt legitimate coding work)
+#   audit: true           # default true; persist security events to the audit log
+#   audit_path: ""        # optional absolute path; default ~/.model-proxy/security.log
+#   extra_patterns:       # user secret formats (gitleaks extend-style)
+#     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}
+#                         # name: ^[a-z0-9_]{1,32}$; literal (optional) must be a
+#                         # guaranteed substring of every regex match (pre-filter)
+#   extra_paths:          # user sensitive paths, literal body match (~ kept literal)
+#     - ~/.company/secrets
 
 # Shadow evaluation: after the primary response commits, re-send the same request
 # to a shadow backend, record-only — never affects the client, circuit breakers,

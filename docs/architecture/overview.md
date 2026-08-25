@@ -173,6 +173,14 @@ retention/owner-only 权限、全文件流式 top-K 查询、list-safe Summary �
 Fusion/Shadow eligibility 继续由应用层编排。列表与 Shadow 必须调用强制丢弃
 body/header 的 metadata API，detail/replay 才能查询完整 Record。
 
+`internal/observe/seclog` 是无仓库内依赖的安全审计日志叶子包，拥有审计事件
+Record schema（kind: secret/path/drift）、JSONL 写入、按大小+按天轮转、retention
+sweep、owner-only 权限（文件 0600/目录 0700）、非阻塞队列与单 writer、离线 top-K
+查询，以及供 CLI 绕开 daemon 直接追加的 `AppendSync`。红线：`Record.Names` 只含
+模式类型名/路径类别名，秘密值永不进入 Record；drift 记录的 detail 只含客户端名与
+指针 host。应用层只注入纯值（命中名、动作、路由元数据），扫描、阈值与派发决策
+不进本包。
+
 `internal/cache` 是无仓库内依赖的精确响应缓存叶子包，拥有请求 key、
 TTL/容量 store、客户端可见响应的 bounded recorder、header normalization 与
 逐块 flush replay。应用层 `internal/app/proxy_constructor.go` 的 `NewResponseCache`
@@ -181,12 +189,17 @@ TTL/容量 store、客户端可见响应的 bounded recorder、header normalizat
 一次请求继续使用 `runtimeSnapshot.cache` 捕获的 Store，旧 generation 完成时不得
 向 reload 后的新 Store 写入。
 
-`internal/guard` 是无仓库内依赖的出站请求体秘密扫描（DLP-lite）叶子包，拥有
-高置信秘密模式表（PEM 私钥头、AWS/OpenAI/Anthropic/GitHub/Google token）与
-span 去重的 Scan/Redact。`internal/app/proxy_forward.go` 在请求体完整读取后、
+`internal/guard` 是无仓库内依赖的出站请求体安全扫描叶子包，拥有：嵌入式规则表
+`rules.json`（53 条高置信秘密模式，46 条精选自 gitleaks v8.28.0 并保留溯源与熵
+阈值，7 条本仓自有）、按生成期构建的不可变 `Scanner`（Aho-Corasick 字面量预过滤
++ 命中才精读的两阶段管线、known-secret 精确值变体集、规则前缀的 base64/hex 编码
+通道、敏感路径类别表、span 去重的 Scan/ScanPaths/Redact）。Scanner 以
+`runtimeSnapshot.Guard` 随 generation 原子交换；known-secret 凭据值只以内存形式
+存在，永不落盘/序列化/进事件。`internal/app/proxy_forward.go` 在请求体完整读取后、
 cache 查询与所有 forward 分支之前对共享 body 扫描一次，按 `guard.secrets`
-（log/redact/block/off）放行、替换 `[REDACTED]` 或 400 拒绝；命中只以模式
-类型名进入 live event 与 `("guard", <pattern>)` 计数器，命中内容永不落日志或事件。
+（log/redact/block/off）与 `guard.paths`（log/block/off，不支持 redact）放行、
+替换 `[REDACTED]` 或 400 拒绝；命中只以模式类型名/路径类别名进入 live event、
+`("guard", <名>)` 计数器与 seclog 审计记录，命中内容永不落日志或事件。
 
 `internal/transport/bodycapture` 是无仓库内依赖的通用响应流捕获叶子包：
 字节原样透传，只保存有界 prefix，同时统计完整长度和截断状态，并在首次 Close
@@ -315,6 +328,7 @@ accounts adapter / login / provider builder → internal/accounts
 live-event publishers / SSE adapter → internal/observe/events
 forward → internal/guard
 target executor / Fusion / Shadow / Web / CLI → internal/observe/requestlog
+forward guard 命中审计 / audit CLI / doctor drift → internal/observe/seclog
 stats flusher / proxyReadView → internal/observe/stats
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
@@ -332,20 +346,20 @@ application → serveAssembly → applicationRuntime → Proxy
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`accounts`、`archtest`（纯测试包）、
   `cache`、`catalog`、`configedit`、`daemonctl`、`guard`、`httpx`、`observe/counters`、
-  `observe/events`、`observe/stats`、`pricing`、`protocol`、`provider`、
+  `observe/events`、`observe/seclog`、`observe/stats`、`pricing`、`protocol`、`provider`、
   `transport/bodycapture`；
 - `app → accounts, appapi, cache, catalog, cli/framework, cli/login, cli/serve,
   config, configedit, fusion, guard, httpx, observe/counters, observe/events,
-  observe/requestlog, observe/stats, pricing, probe, protocol, provider,
+  observe/requestlog, observe/seclog, observe/stats, pricing, probe, protocol, provider,
   routing, runtime, runtime/wirecap, shadow, targetexec, transport/bodycapture,
   web`；
 - `appapi → fusion, observe/stats, pricing`；
 - `cli → cli/serve, cli/framework, accounts, app, appapi, cli/clicommon,
   cli/doctor, cli/login, cli/models, config, daemonctl, takeover,
-  observe/requestlog, observe/stats, provider`；
+  observe/requestlog, observe/seclog, observe/stats, provider`；
 - `cli/clicommon → appapi, daemonctl, provider`；
 - `cli/doctor → accounts, app, appapi, cli/clicommon, cli/framework,
-  cli/models, config, takeover, provider`；
+  cli/models, config, takeover, observe/seclog, provider`；
 - `cli/framework → accounts, config`；
 - `cli/serve → config`；
 - `cli/login → accounts, cli/framework, cli/serve, config, provider`；
@@ -425,6 +439,9 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
 - `internal/observe/requestlog` 反向依赖 Proxy、RouteTarget、Provider、
   protocol、Web/CLI 或 `config` 值类型之外的 `model-proxy/*` 包；根包重新声明 Record、writer、
   logger、query heap 或 Shadow 聚合；
+- `internal/observe/seclog` 反向依赖 Proxy、Guard、Config、Provider、Web/CLI
+  或任意 `model-proxy/*` 包；应用层不得把命中内容/秘密值塞进 Record，
+  或在根包重新声明 Record、writer、logger 或 query heap；
 - `internal/cache` 反向依赖 Config、Proxy、Provider、protocol、events
   或任意 `model-proxy/*` 包；根包重新声明 store、entry 或 recorder；
 - `internal/transport/bodycapture` 反向依赖 request log、protocol、Proxy、

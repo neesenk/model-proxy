@@ -83,6 +83,7 @@ func TestRunCLIArgsTopLevelContract(t *testing.T) {
 func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 	helpCommands := []string{
 		"add",
+		"audit",
 		"config",
 		"doctor",
 		"login",
@@ -206,6 +207,7 @@ func TestRunCLIArgsDispatchContract(t *testing.T) {
 func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 	wantTargets := map[string]string{
 		"add":      "RunAdd",
+		"audit":    "RunAudit",
 		"presets":  "RunPresets",
 		"config":   "RunConfig",
 		"doctor":   "RunDoctor",

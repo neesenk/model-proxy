@@ -8,6 +8,7 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
+	"model-proxy/internal/guard"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/shadow"
 	"model-proxy/internal/targetexec"
@@ -27,6 +28,10 @@ type RuntimeSnapshot struct {
 	Catalog        *catalog.Catalog
 	Cache          *responsecache.Store
 	Shadow         *shadow.Runtime
+	// Guard is this generation's outbound secret/path scanner (immutable,
+	// swapped atomically with cfg/providers on reload). It carries known-secret
+	// values in memory: NEVER serialize, log, or expose it via any DTO/Web API.
+	Guard *guard.Scanner
 }
 
 // snapshotRuntime captures every reload-owned dependency under one brief read
@@ -46,6 +51,7 @@ func (p *Proxy) SnapshotRuntime() RuntimeSnapshot {
 		Catalog:        p.catalog,
 		Cache:          p.cache,
 		Shadow:         p.shadow.Load(),
+		Guard:          p.guardScanner,
 	}
 }
 
