@@ -282,6 +282,33 @@ After logging in, the browser will try to redirect back to this machine:
 
 // CmdLogin is the process-level login entry: it loads config, dispatches the
 // provider login flow, and signals a running daemon to hot-reload.
+// RunProviderLogin runs the provider-specific login flow for an entry that
+// already exists in cfg.Providers. keyIn feeds API-key prompts ("" reads
+// stdin); label/replace pass through to the pool-aware apikey login. It
+// returns errors instead of exiting, so non-CLI orchestrators (the `add`
+// command) can drive the same dispatch. The codex case resolves the store
+// path here so renamed instances keep writing <provName>_oauth_auth.json.
+func RunProviderLogin(cfg *configdomain.Config, provName, keyIn, label string, replace bool) error {
+	prov := cfg.Providers[provName]
+	switch prov.Provider {
+	case "aqp":
+		return RunLogin(cfg, provName)
+	case "codex":
+		return runCodexLoginFlow(oauthAuthFilePath(HomeDir(), provName))
+	case "zcode":
+		fmt.Println("Opening BigModel login to fetch a Coding Plan API key…")
+		if err := OpenBrowser("https://bigmodel.cn/login"); err != nil {
+			fmt.Fprintf(os.Stderr, "(could not open browser: %v — open https://bigmodel.cn/login manually)\n", err)
+		}
+		return RunApiKeyLoginWithInput(cfg, provName, prov, keyIn, label, replace)
+	default:
+		if prov.Provider == "volcengine" {
+			return RunVolcengineLoginWithInput(cfg, provName, prov, "", "", "", label, replace)
+		}
+		return RunApiKeyLoginWithInput(cfg, provName, prov, keyIn, label, replace)
+	}
+}
+
 func CmdLogin(args []string) {
 	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
 	if err != nil {
@@ -296,38 +323,14 @@ func CmdLogin(args []string) {
 		}
 		return
 	}
-	prov, ok := cfg.Providers[provName]
-	if !ok {
+	if _, ok := cfg.Providers[provName]; !ok {
 		log.Fatalf("unknown provider %q; available: %s", provName, cliframework.ProviderNames(cfg))
 	}
 	label := cliframework.FlagStringValue(args, "--label")
 	replace := cliframework.HasFlagValue(args, "--replace")
 
-	switch prov.Provider {
-	case "aqp":
-		if err := RunLogin(cfg, provName); err != nil {
-			log.Fatalf("login failed: %v", err)
-		}
-	case "codex":
-		CmdCodexLogin(provName)
-	case "zcode":
-		fmt.Println("Opening BigModel login to fetch a Coding Plan API key…")
-		if err := OpenBrowser("https://bigmodel.cn/login"); err != nil {
-			fmt.Fprintf(os.Stderr, "(could not open browser: %v — open https://bigmodel.cn/login manually)\n", err)
-		}
-		if err := RunApiKeyLoginWithInput(cfg, provName, prov, "", label, replace); err != nil {
-			log.Fatalf("login failed: %v", err)
-		}
-	default:
-		var err error
-		if prov.Provider == "volcengine" {
-			err = RunVolcengineLoginWithInput(cfg, provName, prov, "", "", "", label, replace)
-		} else {
-			err = RunApiKeyLoginWithInput(cfg, provName, prov, "", label, replace)
-		}
-		if err != nil {
-			log.Fatalf("login failed: %v", err)
-		}
+	if err := RunProviderLogin(cfg, provName, "", label, replace); err != nil {
+		log.Fatalf("login failed: %v", err)
 	}
 	// After ANY successful login, signal a running serve to hot-reload. The
 	// full args are passed so a serve started with `--log-file` is found at the

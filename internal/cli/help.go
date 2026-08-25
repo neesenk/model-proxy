@@ -23,6 +23,8 @@ Commands:
   takeover <client>    Rewrite client config to point at the proxy
   restore <client>     Restore client config from backup
   login <provider>     Login to a provider (aqp | codex | zcode)
+  add <preset>         Add a provider preset to config.yaml and log in
+  presets list         List built-in provider presets
   logout <provider>    Clear provider credentials
   usage <provider>     Show usage / credits for a provider
   models               List models from all providers (from config)
@@ -89,6 +91,26 @@ Clients:
 	"login": `login <provider> [--config PATH]
 
   Authenticate with a provider.`,
+
+	"add": `add <preset> [--config PATH] [--label NAME] [--replace]
+                  [--api-key-env ENV] [--yes]
+
+  Add a built-in provider preset to config.yaml and log in to it in one step.
+  The preset supplies the provider block (endpoints, default models) from the
+  built-in template; login then stores credentials. A running daemon is
+  hot-reloaded afterwards.
+
+Flags:
+  --api-key-env ENV   Read the API key from this environment variable (non-interactive)
+  --label NAME        Label the logged-in account
+  --replace           Replace an already-logged-in account's key without prompting
+  --yes               Skip the interactive ambiguity confirmation (scripts)
+
+See also: presets list`,
+
+	"presets": `presets list [--config PATH]
+
+  List the built-in provider presets available to ` + "`model-proxy add`" + `.`,
 
 	"logout": `logout <provider> [--config PATH]
 

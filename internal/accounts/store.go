@@ -5,12 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"model-proxy/internal/credstore"
 )
 
 // Credentials is one account's raw credential tuple, independent of storage format.
@@ -86,7 +89,11 @@ func (s Store) ensureDirectory() error {
 // successful SourceMissing snapshot. SourcePlural remains authoritative even
 // when its pool is empty or malformed, so callers cannot silently fall back.
 func (s Store) LoadSnapshot(name, providerID string) (Snapshot, error) {
-	data, err := os.ReadFile(s.PoolPath(name))
+	// Plural pool reads go through credstore: in keychain mode the blob lives
+	// in the OS keychain and legacy plaintext files migrate lazily on first
+	// read. Legacy singular fallback stays a plain file read — it is read-only
+	// by contract and never migrated.
+	data, err := credstore.NewRef(s.PoolPath(name)).Load()
 	if err == nil {
 		var p Pool
 		if err := json.Unmarshal(data, &p); err != nil {
@@ -97,7 +104,7 @@ func (s Store) LoadSnapshot(name, providerID string) (Snapshot, error) {
 		}
 		return Snapshot{Pool: normalizePool(providerID, p), Source: SourcePlural}, nil
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, credstore.ErrNotFound) {
 		return Snapshot{Source: SourcePlural}, err
 	}
 	// Fall back to legacy singular file.
@@ -189,11 +196,11 @@ func (s Store) Load(name, providerID string) (Pool, error) {
 	return snapshot.Pool, err
 }
 
-// Save writes the pool atomically: marshal → write path+".tmp" → os.Rename
-// onto path. Rename makes the on-disk file appear whole or not at all, so a crash
-// mid-write never leaves a truncated pool file (the read side never observes a
-// half-written JSON). Mirrors quota.go:persist. The temp file is 0o600 and lives
-// in the same dir (MkdirAll 0o700), so rename is a same-directory atomic move.
+// Save writes the pool atomically through credstore: marshal → write via
+// temp file + fsync + rename onto the pool path (or into the OS keychain when
+// keychain mode is active). Rename makes the on-disk file appear whole or not
+// at all, so a crash mid-write never leaves a truncated pool file (the read
+// side never observes a half-written JSON).
 func (s Store) Save(name, providerID string, p Pool) error {
 	path := s.PoolPath(name)
 	if err := validatePool(providerID, p); err != nil {
@@ -210,32 +217,7 @@ func (s Store) Save(name, providerID string, p Pool) error {
 	if err != nil {
 		return fmt.Errorf("marshal pool %s: %w", name, err)
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	// fsync before rename: credentials must not survive a crash as a renamed
-	// file with unsynced (empty) contents.
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
+	return credstore.NewRef(path).Save(data)
 }
 
 // WithLock runs fn while holding a cross-process lock for the named pool.

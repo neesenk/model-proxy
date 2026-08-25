@@ -255,13 +255,22 @@ func ExchangeCodeForTokensContext(ctx context.Context, opts *CodexLoginServerOpt
 // writes codex-work_oauth_auth.json, not codex_oauth_auth.json.
 func CmdCodexLogin(provName string) {
 	authFile := oauthAuthFilePath(HomeDir(), provName)
+	if err := runCodexLoginFlow(authFile); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// runCodexLoginFlow performs the interactive device flow and persists tokens
+// to authFile. Errors are returned (no process exit), so non-CLI orchestrators
+// (the `add` command) can drive the same flow.
+func runCodexLoginFlow(authFile string) error {
 	opts := &CodexLoginServerOptions{}
 	opts.Defaults()
 
 	fmt.Println("Requesting device code from OpenAI...")
 	uc, err := RequestUserCode(opts, provider.CodexOAuthClientID)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("\n  Open this URL: %s\n", CodexOAuthVerifyURL)
 	fmt.Printf("  Enter code:   %s\n\n", uc.UserCode)
@@ -270,24 +279,25 @@ func CmdCodexLogin(provName string) {
 	interval, _ := strconv.Atoi(uc.Interval)
 	cs, err := PollForToken(opts, uc.DeviceAuthID, uc.UserCode, interval)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Println("Authorized. Exchanging code for tokens...")
 	af, err := ExchangeCodeForTokens(opts, provider.CodexOAuthClientID, cs.AuthorizationCode, cs.CodeVerifier)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := os.MkdirAll(DirOf(authFile), 0o700); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := provider.WriteCodexAuthFile(authFile, af); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("✓ codex OAuth tokens saved to %s\n", authFile)
 	if af.Tokens.AccountID != "" {
 		fmt.Printf("  account_id: %s\n", af.Tokens.AccountID)
 	}
 	fmt.Println("\nYou can now use codex-native models (gpt-5.5) through the proxy.")
+	return nil
 }
 
 // dirOf returns the directory of a path, or "." if none.

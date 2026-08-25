@@ -20,7 +20,7 @@ const internalImportPathPrefix = "model-proxy/internal/"
 // exhaustive: package discovery rejects both missing and stale classifications.
 func internalRepositoryImportPolicy() map[string]map[string]bool {
 	return map[string]map[string]bool{
-		"model-proxy/internal/accounts":              nil,
+		"model-proxy/internal/accounts":              {"model-proxy/internal/credstore": true},
 		"model-proxy/internal/archtest":              nil,
 		"model-proxy/internal/cache":                 nil,
 		"model-proxy/internal/catalog":               nil,
@@ -29,10 +29,12 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/cli/framework":         {"model-proxy/internal/accounts": true, "model-proxy/internal/config": true},
 		"model-proxy/internal/cli/login":             {"model-proxy/internal/accounts": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/cli/models":            {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/probe": true, "model-proxy/internal/provider": true},
-		"model-proxy/internal/cli":                   {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/doctor": true, "model-proxy/internal/cli/login": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/takeover": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/provider": true},
+		"model-proxy/internal/cli":                   {"model-proxy/internal/cli/serve": true, "model-proxy/internal/cli/framework": true, "model-proxy/internal/accounts": true, "model-proxy/internal/app": true, "model-proxy/internal/appapi": true, "model-proxy/internal/cli/clicommon": true, "model-proxy/internal/cli/doctor": true, "model-proxy/internal/cli/login": true, "model-proxy/internal/cli/models": true, "model-proxy/internal/cli/presets": true, "model-proxy/internal/config": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/takeover": true, "model-proxy/internal/observe/requestlog": true, "model-proxy/internal/observe/stats": true, "model-proxy/internal/provider": true},
+		"model-proxy/internal/cli/presets":           {"model-proxy/internal/cli/framework": true, "model-proxy/internal/cli/login": true, "model-proxy/internal/cli/serve": true, "model-proxy/internal/config": true, "model-proxy/internal/configedit": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/cli/clicommon":         {"model-proxy/internal/appapi": true, "model-proxy/internal/daemonctl": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/config":                {"model-proxy/internal/pricing": true, "model-proxy/internal/protocol": true},
 		"model-proxy/internal/configedit":            nil,
+		"model-proxy/internal/credstore":             nil,
 		"model-proxy/internal/daemonctl":             nil,
 		"model-proxy/internal/fusion":                {"model-proxy/internal/config": true},
 		"model-proxy/internal/guard":                 nil,
@@ -43,7 +45,7 @@ func internalRepositoryImportPolicy() map[string]map[string]bool {
 		"model-proxy/internal/pricing":               nil,
 		"model-proxy/internal/probe":                 {"model-proxy/internal/config": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/protocol":              nil,
-		"model-proxy/internal/provider":              nil,
+		"model-proxy/internal/provider":              {"model-proxy/internal/credstore": true},
 		"model-proxy/internal/routing":               {"model-proxy/internal/catalog": true, "model-proxy/internal/config": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/runtime":               {"model-proxy/internal/config": true, "model-proxy/internal/runtime/wirecap": true, "model-proxy/internal/provider": true},
 		"model-proxy/internal/runtime/wirecap":       {"model-proxy/internal/config": true, "model-proxy/internal/provider": true},

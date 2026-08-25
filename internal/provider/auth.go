@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"model-proxy/internal/credstore"
 )
 
 // auth.go holds the provider-owned auth injectors (aqp key minting, codex OAuth,
@@ -27,13 +30,10 @@ type authInjector interface {
 	Refresh() error
 }
 
-// removeAuthFile deletes a credential/auth file, treating "not exist" as success
-// (idempotent logout). Used by aqp/codex Logout (the oauth_auth.json store).
+// removeAuthFile deletes a credential/auth store via credstore (treating
+// "absent" as success — idempotent logout). Used by aqp/codex Logout.
 func removeAuthFile(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return credstore.NewRef(path).Delete()
 }
 
 // ---- AQP key provider ----
@@ -135,7 +135,7 @@ func ReadSSOCookie(path string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("sso_cookie_file not set")
 	}
-	data, err := os.ReadFile(path)
+	data, err := credstore.NewRef(path).Load()
 	if err != nil {
 		return "", err
 	}
@@ -179,6 +179,10 @@ type CodexOAuthProvider struct {
 func NewCodexOAuthProvider(authFile string) *CodexOAuthProvider {
 	return &CodexOAuthProvider{authFile: authFile, tokenURL: CodexOAuthTokenURL}
 }
+
+// codexCred derives the credential store ref from authFile at call time so
+// struct-literal construction (tests, ad-hoc instances) stays correct.
+func (p *CodexOAuthProvider) codexCred() credstore.Ref { return credstore.NewRef(p.authFile) }
 
 // CodexAuthFile is the on-disk format of codex_oauth_auth.json.
 type CodexAuthFile struct {
@@ -294,8 +298,13 @@ func emailFromIDToken(idToken string) string {
 }
 
 func (p *CodexOAuthProvider) load() (*CodexAuthFile, error) {
-	data, err := os.ReadFile(p.authFile)
+	data, err := p.codexCred().Load()
 	if err != nil {
+		if errors.Is(err, credstore.ErrNotFound) {
+			// Preserve the historical os.ReadFile-style sentinel so callers
+			// can still distinguish "never logged in" from parse errors.
+			return nil, &fsNotFoundError{path: p.authFile}
+		}
 		return nil, err
 	}
 	var af CodexAuthFile
@@ -357,16 +366,26 @@ func (p *CodexOAuthProvider) refreshLocked(af *CodexAuthFile) error {
 	return nil
 }
 
-// WriteCodexAuthFile atomically persists a codex OAuth auth file (0600): the
-// CLI's initial device-flow login and the provider's token-rotation refresh
-// both funnel through here so a crash mid-write can never truncate the file
-// holding the only copy of a rotated refresh token.
+// fsNotFoundError mimics os.IsNotExist semantics over credstore.ErrNotFound
+// for callers that inspect the error with os.IsNotExist.
+type fsNotFoundError struct{ path string }
+
+func (e *fsNotFoundError) Error() string {
+	return "open " + e.path + ": no such credential store entry"
+}
+
+func (e *fsNotFoundError) Is(target error) bool { return target == os.ErrNotExist }
+
+// WriteCodexAuthFile atomically persists the codex OAuth store through
+// credstore: the CLI's initial device-flow login and the provider's
+// token-rotation refresh both funnel through here so a crash mid-write can
+// never truncate the only copy of a rotated refresh token.
 func WriteCodexAuthFile(path string, af *CodexAuthFile) error {
 	b, err := json.MarshalIndent(af, "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, b, 0o600)
+	return credstore.NewRef(path).Save(b)
 }
 
 func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
@@ -391,9 +410,9 @@ type CodexAccountInfo struct {
 // if the file is absent. The account_id is tokens.account_id (stored) else
 // parsed from the id_token JWT; the email is parsed from the id_token JWT.
 func LoadCodexAccount(path string) (*CodexAccountInfo, error) {
-	b, err := os.ReadFile(path)
+	b, err := credstore.NewRef(path).Load()
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, credstore.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err

@@ -2,11 +2,12 @@ package provider
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"model-proxy/internal/credstore"
 )
 
 // aqp_store.go holds the aqp (compass) account-store layer: the persisted SSO
@@ -43,11 +44,11 @@ type AqpAccountData struct {
 	SSOSessionCookie string `json:"sso_session_cookie"` // full "SSO_C=<value>" or raw value
 }
 
-// LoadAqpAccount reads account data; returns nil, nil if the file is absent.
+// LoadAqpAccount reads account data; returns nil, nil if the store is absent.
 func LoadAqpAccount(path string) (*AqpAccountData, error) {
-	b, err := os.ReadFile(path)
+	b, err := credstore.NewRef(path).Load()
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, credstore.ErrNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -61,8 +62,8 @@ func LoadAqpAccount(path string) (*AqpAccountData, error) {
 	return &a, nil
 }
 
-// SaveAqpAccount writes account data (0600, parent dir 0700), filling in
-// timestamps.
+// SaveAqpAccount writes account data through credstore (0600 file mode,
+// keychain entry in keychain mode), filling in timestamps.
 func SaveAqpAccount(path string, a *AqpAccountData) error {
 	if a.CreatedAt == 0 {
 		a.CreatedAt = time.Now().Unix()
@@ -70,24 +71,17 @@ func SaveAqpAccount(path string, a *AqpAccountData) error {
 	if a.LastRefreshAt == 0 {
 		a.LastRefreshAt = time.Now().Unix()
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, b, 0o600)
+	return credstore.NewRef(path).Save(b)
 }
 
-// ClearAqpAccount removes the account file (logout). Treating "not exist" as
+// ClearAqpAccount removes the account store (logout). Treating "absent" as
 // success (idempotent).
 func ClearAqpAccount(path string) error {
-	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return credstore.NewRef(path).Delete()
 }
 
 // CookieHeader builds a Cookie header value from the stored sso_session_cookie.

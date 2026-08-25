@@ -198,7 +198,11 @@ restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 login <provider> [--label <name>] [--replace]
 ```
 
-逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。
+逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
+
+### 凭据存储后端（`internal/credstore`）
+
+所有凭据 I/O（apikey 池、codex/aqp OAuth store、单账号遗留文件）经 `credstore.Ref` 读写，后端由 `MP_CRED_STORE` 决定：`auto`（默认，keychain 可达则用 keychain）、`file`（历史行为：0600 明文文件 + temp+fsync+rename 原子写）、`keychain`（强制；后端不可达时操作 fail-closed 报错）。keychain 模式下首次读到遗留明文文件会懒迁移进 keychain 并把原文件改名为 `<path>.migrated.bak`（保留一代回滚）。测试二进制默认解析为 file 模式，绝不触碰真实 keychain。
 
 ### 通用
 
@@ -270,6 +274,23 @@ Volcengine Secret Access Key:
 - stderr（配了 `usage_url` 或填了 AK/SK）：`Validating credentials...`。校验在 `addVolcengineAccount` 内顺序执行：先 GET `/api/plan/v3/models` with `Authorization: Bearer <Ark key>`（**401/403 或网络错误** → `login failed: validation failed: ...`，exit 1，**不落盘**）；通过后，若 AK/SK 都非空，再签名 GetAFPUsage（失败 → 同上 exit 1，不落盘）。
 - AK/SK 可缺省（仅 chat 账号），但**必须成对**：只填 AK 不填 SK（或反之）→ `login failed: AccessKey and SecretKey must both be set, or both be empty for a chat-only account`（exit 1，不落盘）。
 - 成功同 apikey：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
+
+---
+
+## 4b. `presets list` / `add <preset>` — 预设目录与一键接入
+
+```
+presets list [--config PATH]
+add <preset> [--config PATH] [--label NAME] [--replace]
+             [--api-key-env ENV] [--yes]
+```
+
+逻辑（`internal/cli/presets/presets.go`）：
+
+- 目录**派生自内置注释模板**（`configdomain.DefaultConfigYAML`），过滤到已注册实现的 provider_id；`aqp` 因内网 SSO 端点不进公共目录。模板即权威，无第二份 endpoint/模型知识。
+- `add`：① 把模板的 `providers.<preset>` 块经 `configedit` 合并进用户 config.yaml（保结构/注释；块已存在则跳过合并，幂等）；② 合并后先 `LoadConfigFromBytes` 校验再原子写回（fail-closed）；③ 歧义门——preset 模型同时出现在其他已配置 provider 且无显式 `routes:` 条目时，非 TTY 拒绝 exit 1（提示 `--yes`），TTY 询问 y/N；④ 复用 `login.RunProviderLogin` 登录；⑤ `MaybeReloadDaemon` 热重载；⑥ 打印 `model-proxy test <首个模型>` 下一步。
+- `--api-key-env ENV`：从环境变量读 API key（脚本化，不落 stdin 历史）。变量为空 -> stderr 报错 exit 1。
+- 未知 preset -> stderr 列出全部可用 preset + exit 1。config.yaml 不存在 -> 提示 `config init` + exit 1。
 
 ---
 

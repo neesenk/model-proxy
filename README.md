@@ -26,7 +26,7 @@
 
 - **Provider 层**（`internal/provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
 - **Routes 层**：对外暴露模型名 → 一组 `provider/model` 目标。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由；目标可声明 `protocol:` 触发协议转换；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由
-- 凭据由 `login <provider>` 管理，存储在 `~/.model-proxy/<name>_<suffix>.json`，不落 config
+- 凭据由 `login <provider>` 管理，经 `internal/credstore` 统一存储（OS keychain 或 `~/.model-proxy/` 下 0600 文件，`MP_CRED_STORE` 可选），不落 config
 
 ## 构建
 
@@ -129,6 +129,13 @@ model-proxy login deepseek         # 输入 DeepSeek API key（可重复 -> 多�
 model-proxy login volcengine       # Ark API Key + AccessKey/SecretKey（可重复 -> 多账号）
 model-proxy login qwen-plan        # 千问 Token Plan 个人版 sk-sp- key（可重复 -> 多账号）
 model-proxy login zhipu --label work --replace   # 命名账号 / 覆盖已存在的同 id 账号
+
+# 预设接入（一条命令完成：合并 provider 块到 config.yaml + 登录 + 热重载）
+model-proxy presets list                          # 内置预设目录（来自内置模板，过滤未实现的 provider）
+model-proxy add zhipu                             # 交互式接入（TTY 下可选编号）
+model-proxy add deepseek --api-key-env DS_KEY     # 脚本化接入：API key 从环境变量读
+model-proxy add kimi-code --label work --replace  # 命名账号 / 覆盖已登录账号
+# 模型同时被其他已配置 provider 服务且无显式 route 时会告警；非 TTY 下拒绝执行，加 --yes 放行
 
 # 启动代理
 model-proxy serve                  # 前台
@@ -262,7 +269,7 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 
 ## Token 文件
 
-凭据由 `login` 管理，按 provider name 派生路径，不落 config：
+凭据由 `login` 管理，按 provider name 派生路径，不落 config。存储后端由 `MP_CRED_STORE` 选择：`auto`（默认）在 OS keychain 可用时把凭据条目存入 keychain（macOS Keychain / Windows 凭据管理器 / Linux secret service），并把遗留明文文件懒迁移过去（原文件改名为 `<path>.migrated.bak` 保留一代回滚）；不可用或显式 `file` 时按历史行为存 `0600` 明文文件。显式 `keychain` 而后端不可达时 fail-closed（操作报错，不静默降级）。测试二进制永远不触碰真实 keychain。
 
 | Provider | Token 文件 | 内容 |
 |---|---|---|

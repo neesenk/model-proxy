@@ -24,6 +24,8 @@ func NewApplication(serve func(args []string)) *Application {
 		"takeover": ProcessCommand(RunTakeover),
 		"restore":  ProcessCommand(RunRestore),
 		"login":    ProcessCommand(clilogin.CmdLogin),
+		"add":      ProcessCommand(RunAdd),
+		"presets":  ProcessCommand(RunPresets),
 		"logout":   ProcessCommand(RunLogout),
 		"usage":    ProcessCommand(RunUsage),
 		"models":   ProcessCommand(RunModels),

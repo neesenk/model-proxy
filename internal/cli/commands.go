@@ -9,6 +9,7 @@ import (
 	"log"
 	"model-proxy/internal/app"
 	clidoctor "model-proxy/internal/cli/doctor"
+	clipresets "model-proxy/internal/cli/presets"
 	"model-proxy/internal/takeover"
 	"os"
 
@@ -50,6 +51,16 @@ func RunShadowReport(args []string)  { CmdShadowReport(args, LoadCmdConfig(args)
 func RunWire(args []string)          { CmdWire(args, LoadCmdConfig(args)) }
 func RunWireRecordCLI(args []string) { CmdWireRecord(args, LoadCmdConfig(args)) }
 func RunServeStatus(args []string)   { CmdServeStatus(args, LoadCmdConfig(args)) }
+
+// RunAdd / RunPresets adapt the presets package's stream-parameterized
+// handlers to the process Command contract (exit code becomes the exit status).
+func RunAdd(args []string) {
+	os.Exit(clipresets.CmdAdd(args, os.Stdin, os.Stdout, os.Stderr))
+}
+
+func RunPresets(args []string) {
+	os.Exit(clipresets.CmdPresets(args, os.Stdin, os.Stdout, os.Stderr))
+}
 
 // Command is the process-level adapter for an existing command handler. The
 // stream parameters make the front-door contract explicit.
