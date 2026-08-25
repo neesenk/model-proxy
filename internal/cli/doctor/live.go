@@ -9,8 +9,10 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
+	observeseclog "model-proxy/internal/observe/seclog"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/takeover"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,7 +26,8 @@ import (
 // now" by aggregating the daemon's /api/status (health, model locks, quota,
 // schedule, warnings), the request log's recent failures, and local takeover
 // pointer drift into a conclusion-first report. Pure diagnosis — it changes
-// nothing on the daemon or on disk.
+// nothing on the daemon; the only disk write is the security-audit record for
+// a drifted client (guard.audit on, see auditTakeoverDrift).
 
 // statusModelLock decodes one entry of /api/status model_locks. The field is
 // decoded here (not in serve_status.go) because only doctor --live reads it.
@@ -86,6 +89,7 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 		return "", fmt.Errorf("parse status response: %v", err)
 	}
 	drift := CheckTakeoverDrift(cfg, takeover.BackupDir(cfgPath))
+	auditTakeoverDrift(cfg, drift)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s · %s\n", provider.Bold("model-proxy doctor --live"), provider.Dim(base))
@@ -423,6 +427,42 @@ func CheckTakeoverDrift(cfg *configdomain.Config, bakDir string) []ClientDrift {
 		out = append(out, d)
 	}
 	return out
+}
+
+// auditTakeoverDrift persists one security-audit record per drifted client
+// (kind=drift), so pointer drift leaves a durable trail even when nobody
+// reads the doctor output. Gated by guard.audit; an append failure degrades
+// to a stderr note only — doctor's output and exit code never change.
+func auditTakeoverDrift(cfg *configdomain.Config, drift []ClientDrift) {
+	if !cfg.Guard.AuditEnabled() {
+		return
+	}
+	dir := filepath.Dir(cfg.Guard.AuditPathValue(cliframework.HomeDir()))
+	for _, d := range drift {
+		if !d.Taken || d.OK {
+			continue
+		}
+		rec := &observeseclog.Record{
+			Kind:  observeseclog.KindDrift,
+			Agent: "doctor",
+			Detail: fmt.Sprintf("client=%s expected=%s actual=%s",
+				d.Client, driftHost(d.Expected), driftHost(d.Current)),
+		}
+		if err := observeseclog.AppendSync(dir, rec); err != nil {
+			fmt.Fprintf(os.Stderr, "%s security audit append failed: %v\n", provider.Yellow("⚠"), err)
+		}
+	}
+}
+
+// driftHost reduces a takeover pointer to its host[:port] so the audit
+// record never carries a URL path or query string. Pointers that are not
+// URLs (placeholders like "(file missing)") collapse to "(no-url)".
+func driftHost(pointer string) string {
+	u, err := url.Parse(pointer)
+	if err != nil || u.Host == "" {
+		return "(no-url)"
+	}
+	return u.Host
 }
 
 // takeoverPointer reads one client's current proxy pointer and computes the

@@ -26,6 +26,15 @@ func (p *Proxy) StartRuntimeServices(cfg *Config) {
 		})
 	}
 
+	// Security audit log (guard.audit): same lifecycle shape as the request
+	// log — startup-only, Run under the lifecycle, drained before Close returns.
+	p.initSecLog(cfg)
+	if p.secLog != nil {
+		p.secLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
+			p.secLog.Run()
+		})
+	}
+
 	// Startup catalog loading remains synchronous so the first request gets the
 	// best available routing metadata, matching the previous daemon behavior.
 	p.initCatalog()
@@ -38,11 +47,17 @@ func (p *Proxy) refreshCatalogAsync() {
 }
 
 // closeRuntimeServices establishes one shutdown order:
-// reject new Proxy-owned tasks → wait finite log-producing work → drain request
-// log → wait for periodic loops/refreshes → final stats/state flushes.
+// reject new Proxy-owned tasks → wait finite log-producing work → drain the
+// security audit log → drain request log → wait for periodic loops/refreshes →
+// final stats/state flushes.
 func (p *Proxy) closeRuntimeServices() {
 	p.lifecycle.BeginStop()
 	p.lifecycle.WaitBeforeLogDrain()
+	// Drain the security audit log before the request log: both must finish
+	// writing before Close returns, and no producer may outlive either.
+	if p.secLogStarted {
+		p.secLog.Shutdown()
+	}
 	if p.reqLogStarted {
 		p.reqLog.Shutdown()
 	}

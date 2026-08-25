@@ -31,6 +31,11 @@ func RunStats(args []string) {
 	os.Exit(CmdStats(args, cfg.Listen, os.Stdout, os.Stderr))
 }
 
+func RunAudit(args []string) {
+	cfg := LoadCmdConfig(args)
+	os.Exit(CmdAudit(args, cfg, os.Stdout, os.Stderr))
+}
+
 func RunModels(args []string) {
 	cfg := LoadCmdConfig(args)
 	climodels.CmdModels(args, cfg, cliframework.ConfigPath(args))

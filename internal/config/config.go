@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -87,8 +88,68 @@ func (c Config) MaxRequestBodyBytesValue() int64 {
 // request body before forwarding. secrets selects the action on a hit:
 // "log" (default — allow + live event + counter), "redact" (replace the match
 // with [REDACTED] and forward), "block" (reject with 400), "off" (no scan).
+// known_secrets (default true) additionally matches the exact credential
+// values the proxy itself manages (pool API keys + OAuth tokens, in memory
+// only — never written to disk or logs). decode (default true) also catches
+// base64/hex/url-encoded forms of the secret patterns. paths selects the
+// action for high-confidence sensitive-path literals (~/.ssh, .env, ...):
+// "log" (default) | "block" | "off" — "redact" is intentionally unsupported
+// (rewriting a path would corrupt legitimate coding work). audit (default
+// true) persists security events to the audit log at audit_path (default
+// ~/.model-proxy/security.log, resolved by the caller via AuditPathValue).
+// extra_patterns / extra_paths extend the built-in tables (gitleaks
+// [extend]-style). Hits are reported by pattern type name / path category
+// only — matched secret content is never logged.
 type GuardConfig struct {
 	Secrets string `yaml:"secrets"`
+	// KnownSecrets/Decode/Audit default to true; the defaults are applied at
+	// load time (rawConfig literal, same pattern as web.enabled).
+	KnownSecrets bool   `yaml:"known_secrets"`
+	Decode       bool   `yaml:"decode"`
+	Paths        string `yaml:"paths"`
+	Audit        bool   `yaml:"audit"`
+	// AuditPath is an optional absolute path for the security audit log;
+	// empty = AuditPathValue derives <home>/.model-proxy/security.log.
+	AuditPath     string         `yaml:"audit_path"`
+	ExtraPatterns []ExtraPattern `yaml:"extra_patterns"`
+	// ExtraPaths are literal sensitive-path strings matched against the
+	// request body (NOT filesystem paths — "~" is matched literally, never
+	// expanded).
+	ExtraPaths []string `yaml:"extra_paths"`
+}
+
+// ExtraPattern is one user-declared secret pattern (gitleaks extend-style).
+// Literal is an optional pre-filter: when set it must be a guaranteed
+// substring of every possible match of Regex, or the rule silently never
+// fires (validate rejects literals the regex itself doesn't match).
+type ExtraPattern struct {
+	Name    string `yaml:"name"`
+	Regex   string `yaml:"regex"`
+	Literal string `yaml:"literal"`
+}
+
+// extraPatternNameRE restricts user-declared pattern names to a log-safe
+// token (the name is what lands in counters, live events, and audit logs).
+var extraPatternNameRE = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+
+// literalConsistentWithRegex is a weak sanity check that literal can occur
+// inside some match of re: a literal pre-filter is typically a fixed
+// prefix/infix of the match (e.g. "mv-" for `\bmv-[A-Za-z0-9]{32,}`), so it
+// tries the literal itself and the literal padded on either side with runs
+// of common token characters. It cannot prove the "guaranteed substring of
+// every match" invariant — it only rejects obvious typos where no padded
+// candidate matches at all.
+func literalConsistentWithRegex(re *regexp.Regexp, literal string) bool {
+	if re.MatchString(literal) {
+		return true
+	}
+	for _, ch := range []string{"a", "A", "0", "_", "-", "/", "+", "="} {
+		fill := strings.Repeat(ch, 64)
+		if re.MatchString(literal+fill) || re.MatchString(fill+literal) {
+			return true
+		}
+	}
+	return false
 }
 
 // SecretsAction returns the effective action, defaulting to "log".
@@ -97,6 +158,36 @@ func (g GuardConfig) SecretsAction() string {
 		return "log"
 	}
 	return g.Secrets
+}
+
+// KnownSecretsEnabled reports whether exact-value matching of proxy-managed
+// credentials is active (default true, applied at load).
+func (g GuardConfig) KnownSecretsEnabled() bool { return g.KnownSecrets }
+
+// DecodeEnabled reports whether encoded-form (base64/hex/url) detection of
+// the secret patterns is active (default true, applied at load).
+func (g GuardConfig) DecodeEnabled() bool { return g.Decode }
+
+// PathsAction returns the effective sensitive-path action, defaulting to
+// "log".
+func (g GuardConfig) PathsAction() string {
+	if g.Paths == "" {
+		return "log"
+	}
+	return g.Paths
+}
+
+// AuditEnabled reports whether security events are persisted to the audit
+// log (default true, applied at load).
+func (g GuardConfig) AuditEnabled() bool { return g.Audit }
+
+// AuditPathValue returns the configured audit log path, or the default
+// <home>/.model-proxy/security.log when unset.
+func (g GuardConfig) AuditPathValue(home string) string {
+	if g.AuditPath != "" {
+		return g.AuditPath
+	}
+	return filepath.Join(home, ".model-proxy", "security.log")
 }
 
 // BudgetsConfig configures personal monthly spend alerts on the equivalent
@@ -691,6 +782,10 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		LogLevel: "info",
 		Web:      WebConfig{Enabled: true},
 		Pricing:  PricingConfig{Enabled: true},
+		// Guard bools default to true; yaml only overwrites fields present in
+		// the file, so an unset field keeps the default while an explicit
+		// false is honored (same pattern as Web.Enabled above).
+		Guard: GuardConfig{KnownSecrets: true, Decode: true, Audit: true},
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		// The most common breakage: a providers' `models:` block still in the
@@ -721,6 +816,20 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Pricing = raw.Pricing
 	cfg.Prices = raw.Prices
 	cfg.Guard = raw.Guard
+	// Normalize guard.extra_paths: drop exact duplicates (blank entries are a
+	// validation error in validate, not silently dropped).
+	if len(cfg.Guard.ExtraPaths) > 1 {
+		seen := make(map[string]bool, len(cfg.Guard.ExtraPaths))
+		paths := cfg.Guard.ExtraPaths[:0]
+		for _, p := range cfg.Guard.ExtraPaths {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			paths = append(paths, p)
+		}
+		cfg.Guard.ExtraPaths = paths
+	}
 	cfg.Budgets = raw.Budgets
 	cfg.MaxRequestBodyBytes = raw.MaxRequestBodyBytes
 	cfg.Conversion = raw.Conversion
@@ -967,6 +1076,45 @@ func (c *Config) validate() error {
 	case "log", "redact", "block", "off":
 	default:
 		return fmt.Errorf("guard.secrets %q invalid — use log, redact, block, or off", c.Guard.Secrets)
+	}
+	// guard.paths: closed action set (default log). "redact" is deliberately
+	// excluded — rewriting a file path inside a request body would corrupt
+	// legitimate coding work.
+	switch c.Guard.PathsAction() {
+	case "log", "block", "off":
+	default:
+		return fmt.Errorf("guard.paths %q invalid — use log, block, or off (redact is not supported for paths: rewriting a path would corrupt legitimate coding work)", c.Guard.Paths)
+	}
+	// guard.audit_path: when set it must be absolute (unset = the caller
+	// derives the default from the home dir, see AuditPathValue).
+	if c.Guard.AuditPath != "" && !filepath.IsAbs(c.Guard.AuditPath) {
+		return fmt.Errorf("guard.audit_path %q must be an absolute path (or unset for the default ~/.model-proxy/security.log)", c.Guard.AuditPath)
+	}
+	// guard.extra_patterns: a bad rule must fail at load, not silently never
+	// fire — name restricted to a log-safe token, regex must compile, and a
+	// literal pre-filter must be a guaranteed substring of every match.
+	for i, p := range c.Guard.ExtraPatterns {
+		where := fmt.Sprintf("guard.extra_patterns[%d]", i)
+		if !extraPatternNameRE.MatchString(p.Name) {
+			return fmt.Errorf("%s: name %q invalid — must match ^[a-z0-9_]{1,32}$", where, p.Name)
+		}
+		if p.Regex == "" {
+			return fmt.Errorf("%s (%s): regex must not be empty", where, p.Name)
+		}
+		re, err := regexp.Compile(p.Regex)
+		if err != nil {
+			return fmt.Errorf("%s (%s): regex does not compile: %w", where, p.Name, err)
+		}
+		if p.Literal != "" && !literalConsistentWithRegex(re, p.Literal) {
+			return fmt.Errorf("%s (%s): literal %q can never appear in a match of the regex — the literal must be a guaranteed substring of every possible match, otherwise the pre-filter silently disables the rule (check for typos)", where, p.Name, p.Literal)
+		}
+	}
+	// guard.extra_paths: literal body-match strings; blank entries are config
+	// errors (duplicates are already deduped at load).
+	for i, p := range c.Guard.ExtraPaths {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("guard.extra_paths[%d]: empty entry — remove it (entries are literal body-match strings, not filesystem paths)", i)
+		}
 	}
 	// budgets: thresholds must be non-negative, provider overrides must name a
 	// configured provider (anything else is almost certainly a typo that would

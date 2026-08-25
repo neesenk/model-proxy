@@ -609,6 +609,7 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
   text-align: center;
 }
 .badge.muted { opacity: .6; }
+.badge.warn { color: var(--warn-fg); background: var(--warn-bg); border-color: var(--warn-bg); }
 
 /* right pane: toolbar + account list */
 .acct-main { min-width: 0; }

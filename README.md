@@ -103,10 +103,19 @@ routes:
 #   glm-5.2: {provider: kimi-code, sample_rate: 0.1, max_concurrent: 4}
 # request_log:              # 请求日志（完整 request/response body，默认关；Requests 页 + replay 的数据源）
 #   enabled: true
-# guard:                    # 出站秘密扫描（DLP-lite，默认 log）：转发前扫描请求 body 中的
-#   secrets: log            # 高置信秘密模式（PEM 私钥头、AWS/OpenAI/Anthropic/GitHub/Google token）。
-                            # log=放行并上报告警（live event + 计数器，只含模式类型名）；
-                            # redact=命中内容替换为 [REDACTED] 后放行；block=直接 400 拒绝；off=不扫
+# guard:                    # 出站安全扫描（DLP，转发前扫描请求 body；详见下文「出站安全扫描与审计」）
+#   secrets: log            # 秘密扫描动作：log（默认，放行 + 告警）| redact（替换 [REDACTED] 后放行）
+#                           # | block（400 拒绝）| off（不扫）
+#   known_secrets: true     # 默认 true：把代理自己管理的凭据（账号池 key、OAuth token）加入扫描集，
+#                           # 请求体出现这些值（含 base64/hex/url 编码形态）即命中，零误报
+#   decode: true            # 默认 true：检测编码形态的秘密（base64/hex 前缀变体，解码后过原规则）
+#   paths: log              # 敏感路径信号：log（默认）| block | off（不支持 redact）
+#   audit: true             # 默认 true：命中持久化到安全审计日志（`model-proxy audit` 查询）
+#   audit_path: ~/.model-proxy/security.log   # 可选，默认即此
+#   extra_patterns:         # 自定义秘密格式（gitleaks extend 式，热 reload 生效）
+#     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}
+#   extra_paths:            # 自定义敏感路径（字面量）
+#     - ~/.company/secrets
 # budgets:                  # 月度预算告警（默认关；启用需重启）：按 stats 用量 × 价格目录
 #   monthly_usd: 20         # 每分钟核对当月等价成本，越线发 "budget" live event（SSE /api/events），
 #   providers: {zhipu: 5}   # 可选 webhook_url 时附带 POST {scope, month, threshold_usd, actual_usd}
@@ -196,6 +205,10 @@ model-proxy stats --json           # 原始 JSON（便于 jq）
 # 影子评测与重放（需 request_log.enabled）
 model-proxy shadow report          # 影子聚合对比：样本数/状态一致率/延迟差/大小比
 model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历史中任意一条请求
+
+# 安全审计（离线直读审计日志，不需 daemon）
+model-proxy audit                  # 最近的 guard 命中（秘密/路径）与 takeover 漂移记录
+model-proxy audit --kind drift --from 7d --json   # 过滤 + 原始 JSON
 ```
 
 ## Web UI
@@ -315,6 +328,21 @@ routes:
 `cache.enabled` 开启后，对**逐字节相同**的请求（SHA-256(method+path+body)）直接重放缓存的原始响应字节（SSE 也逐字节一致），不发上游、不烧配额。命中时响应带 `x-mp-cache: hit` 头，`/api/status` 和 Web UI Status 页展示命中率；`x-mp-force-provider`/pin 生效的请求跳过缓存（保证 replay/pin 语义）。客户端断开的半截响应不会入库。改 `cache.*` 配置 reload 即生效。
 
 **定位是「重试/重复请求盾牌」**：多轮对话 body 逐轮变长，正常会话命中率≈0；前缀复用的经济性由上游 prompt caching 覆盖，精确缓存接住的是客户端原地重试、CI/脚本里的重复单发。
+
+## 出站安全扫描与审计（guard）
+
+针对提示注入（prompt injection）偷凭据的场景：恶意内容诱使 agent 读取 `~/.ssh/id_rsa`、`.env`、API key 后，最常见的漏出通道是把秘密塞进发给 LLM 的请求——这道流量必经 model-proxy，因此代理在**转发前对请求 body 做一次出站扫描**，是凭据出域前的最后一道内容级闸门。（agent 直接 curl/DNS 出网的通道不经过代理，那是客户端沙箱的职责，见各家 CLI 的 sandbox/网络白名单设置。）
+
+四层检测，全部只在命中字面量预过滤后才精读，干净 body 零正则零解码：
+
+- **内置规则表**：53 条高置信秘密模式，其中 46 条精选自 gitleaks v8.28.0 规则集（MIT，溯源见 `internal/guard/rules.json`）——LLM 厂商 key、AWS/GCP/Azure、GitHub/GitLab/Slack/npm/PyPI token、JWT、PEM 私钥头等；上游带熵阈值的规则保留 Shannon 熵后置过滤压误报。
+- **known-secret（默认开）**：把代理自己管理的凭据（账号池 API key/AK/SK、codex/aqp OAuth 文件里的 token）加入扫描集，请求体出现这些值的**原文或 base64/hex/url 编码形态**即命中 `known_secret`——零误报，防注入偷代理自身凭据。匹配集只存在于内存，随 login/logout/reload 自动更新，无需任何规则维护；OAuth token 轮转后新值在下一次 reload 进集（`serve reload` 或 Web 任意写操作即刷新）。
+- **编码逃逸检测（默认开）**：规则前缀的 base64 三对齐/hex 变体命中后，解码外围 token 再过原规则（含熵过滤），不解码任意 span（不碰 base64 图片等正常负载）。
+- **敏感路径信号（默认 log）**：`~/.ssh`、`~/.aws/credentials`、`~/.model-proxy`、`~/.gnupg`、`~/.kube/config`、`~/.docker/config.json`、`~/.config/gcloud`、`.env` 出现在请求体里即按类别告警（`ssh`/`aws_creds`/`proxy_creds`/…）——在秘密出现之前给出"意图级"信号。只支持 log/block/off，不支持 redact（改路径会破坏正常编码工作）。
+
+动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器），匹配内容永不落日志、事件或测试输出。命中持久化到安全审计日志（默认 `~/.model-proxy/security*.log`，0600，30 天轮转），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
+
+规则维护：你的凭据免维护（自动派生）；新 key 格式用 `guard.extra_patterns`（config 热 reload 即时生效）或向上游同步内置表（升 `rules.json` 的 upstream pin → 重抽 → review）；敏感路径用 `guard.extra_paths`。
 
 ## 调试工具：`test` / `pin` / `replay`
 

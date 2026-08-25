@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"model-proxy/internal/fusion"
+	"model-proxy/internal/guard"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/provider"
@@ -34,6 +35,19 @@ func NewProxy(cfg *Config) *Proxy {
 // Proxy owns an isolated state file before the tracker loads or starts.
 func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
+	// Same scanner entry point as Reload: startup and reload build identical
+	// generations. An error is only reachable with an unvalidated Config
+	// (validate rejects bad guard.extra_patterns at load) — degrade to the
+	// embedded table + known secrets rather than start without any guard.
+	guardScanner, err := buildGuardScanner(cfg, built.Secrets)
+	if err != nil {
+		log.Printf("[startup] guard scanner: %v; falling back to built-in rules + known secrets", err)
+		secrets := built.Secrets
+		if !cfg.Guard.KnownSecretsEnabled() {
+			secrets = nil
+		}
+		guardScanner, _ = guard.NewScannerWithOptions(nil, secrets, cfg.Guard.ExtraPaths, guard.Options{Decode: cfg.Guard.DecodeEnabled()})
+	}
 	// http.DefaultTransport pools at most 2 idle connections per host; concurrent
 	// streams to one upstream would re-dial TLS after the first two close. The
 	// proxy fans out to a handful of upstream hosts, so pool generously instead.
@@ -52,6 +66,9 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	}
 	p.runtimeState.ReplaceGeneration(1)
 	p.configGeneration.Store(1)
+	// Reload-owned: assigned before any request/goroutine can read it, swapped
+	// under p.mu on reload.
+	p.guardScanner = guardScanner
 	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.Eligible)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.routeKeys = routeKeySet(p.expandedRoutes)

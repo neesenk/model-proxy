@@ -22,6 +22,15 @@ func (p *Proxy) Reload(configPath string) error {
 		return err
 	}
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
+	// Build the guard scanner OUTSIDE the lock (regexp compilation + secret
+	// variant precomputation); the lock below only swaps the immutable pointer.
+	// Fail-closed: a scanner that cannot be built rejects the whole reload, so
+	// a generation never runs with less protection than its config declares
+	// (validate rejects bad extra_patterns before this point).
+	scanner, err := buildGuardScanner(cfg, built.Secrets)
+	if err != nil {
+		return fmt.Errorf("build guard scanner: %w", err)
+	}
 	newImplicit, newWarnings := synthesizeImplicitRoutesFrom(cfg, built.Eligible)
 	// Switch config and runtime state as one generation. Persist snapshots take
 	// the same lock order, and request mutations carry the generation captured by
@@ -44,6 +53,10 @@ func (p *Proxy) Reload(configPath string) error {
 	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now
 	// takes effect immediately.
 	p.cache = NewResponseCache(cfg.Cache)
+	// Swap the guard scanner with the same generation: in-flight requests keep
+	// their snapshot's scanner; new requests see the new credential set
+	// (login adds protection, logout drops it, immediately at reload).
+	p.guardScanner = scanner
 	// Rebuild the shadow dispatch bundle so shadow_sample_rate /
 	// shadow_max_concurrent / client-timeout changes take effect at once — without
 	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until
@@ -86,6 +99,13 @@ func (p *Proxy) Reload(configPath string) error {
 	// active, so this isn't a silent no-op.
 	if cfg.RequestLog.Enabled && p.reqLog == nil {
 		log.Printf("[reload] request_log.enabled is true but logging is not active (reload cannot start it); restart the daemon to enable request logging")
+	}
+	// Same startup-only semantics for the security audit log: the forward path
+	// consults cfg.Guard.AuditEnabled() per generation (so audit:false via
+	// reload stops new records at once), but a logger that was never started
+	// cannot be created mid-flight.
+	if cfg.Guard.AuditEnabled() && p.secLog == nil {
+		log.Printf("[reload] guard.audit is true but the security audit log is not active (reload cannot start it); restart the daemon to enable it")
 	}
 	return appliedWarning
 }

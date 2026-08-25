@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -46,6 +47,11 @@ type Build struct {
 	PoolIndex map[string][]string
 	ParentOf  map[string]string
 	Eligible  map[string]bool
+	// Secrets are the proxy-managed credential values collected in the SAME
+	// pass (pool APIKey/AccessKey/SecretKey + codex/aqp OAuth tokens), handed
+	// to the guard known-secret scanner. Memory only: never logged, persisted,
+	// or serialized (credential red line).
+	Secrets []string
 }
 
 // BuildOptions carries the process-environment seams buildProviders needs:
@@ -65,10 +71,13 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 	poolIndex := map[string][]string{}
 	parentOf := map[string]string{}
 	eligible := map[string]bool{}
+	var secrets []string
 	for name, prov := range cfg.Providers {
 		if prov.Provider == "aqp" || prov.Provider == "codex" {
 			// OAuth/SSO providers own separate auth stores and never consult the
-			// API-key account pool namespace.
+			// API-key account pool namespace. Their tokens still join the guard
+			// known-secret set (best-effort, memory only).
+			secrets = append(secrets, collectOAuthSecrets(opts, name, prov.Provider)...)
 			if p := BuildOne(cfg, opts, name, prov, accounts.Credentials{}); p != nil {
 				m[name] = p
 			}
@@ -82,6 +91,15 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 			continue
 		}
 		pool := snapshot.Pool
+		// Guard known-secret collection: every account credential the proxy
+		// manages is a value a leak-out attempt would carry. Non-empty values
+		// only; length/dup filtering happens in guard.NewScanner. Legacy
+		// singular keys arrive as a wrapped 1-entry pool, so this one loop
+		// covers both sources without a second storage read.
+		for _, a := range pool.Accounts {
+			cred := a.Credentials()
+			secrets = appendNonEmpty(secrets, cred.APIKey, cred.AccessKey, cred.SecretKey)
+		}
 		if snapshot.Source != accounts.SourcePlural {
 			// Missing or legacy: API-key providers keep their historical
 			// file-backed path. static is plural-only and has no safe file-backed
@@ -140,7 +158,46 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		PoolIndex: poolIndex,
 		ParentOf:  parentOf,
 		Eligible:  eligible,
+		Secrets:   secrets,
 	}
+}
+
+// appendNonEmpty appends the non-empty values of vals to dst.
+func appendNonEmpty(dst []string, vals ...string) []string {
+	for _, v := range vals {
+		if v != "" {
+			dst = append(dst, v)
+		}
+	}
+	return dst
+}
+
+// collectOAuthSecrets best-effort reads one codex/aqp provider's OAuth/SSO
+// auth file (<home>/.model-proxy/<name>_oauth_auth.json — the same path
+// buildOne injects as OAuthAuthFile) and returns the token/cookie values for
+// the guard known-secret set. A missing or unreadable file means "not logged
+// in" — silently skip (there is no credential to protect). Parsed with the
+// provider package's own file types; values stay in memory only.
+func collectOAuthSecrets(opts BuildOptions, name, providerID string) []string {
+	b, err := os.ReadFile(filepath.Join(opts.HomeDir, ".model-proxy", name+"_oauth_auth.json"))
+	if err != nil {
+		return nil
+	}
+	switch providerID {
+	case "codex":
+		var af provider.CodexAuthFile
+		if err := json.Unmarshal(b, &af); err != nil {
+			return nil
+		}
+		return appendNonEmpty(nil, af.Tokens.AccessToken, af.Tokens.RefreshToken, af.Tokens.IDToken)
+	case "aqp":
+		var a provider.AqpAccountData
+		if err := json.Unmarshal(b, &a); err != nil {
+			return nil
+		}
+		return appendNonEmpty(nil, a.SSOSessionCookie)
+	}
+	return nil
 }
 
 // buildOne constructs a single provider instance (a real provider for the

@@ -20,6 +20,9 @@
 12. **wire 探测把 404 以外的 4xx 视为端点存在**：探测分类里 400/401/403/429 都判 yes——400 是请求形状争议而非路由缺失，401/403/429 更是端点存在的直接证据；只有 404 判 no（proxy 只探测已知 LLM 路径）。误判 yes 的兜底是运行时 404 纠正（翻转 verdict + 跳过模型锁），因此探测本身不做更细的形状校验。
 13. **Responses 跨协议 body 解析失败落 502 而非 400**：responses 客户端走跨协议 target 时 body 先经 `responsesState.expand` 做本地历史展开（proxy.go serveOnce）；body 本身是非法 JSON 时展开报错、当前 target 被跳过，所有 target 都失败后走统一的 all-targets-failed 路径返回 502，而不是 400。转发主路径不整体解析客户端 body（同协议字节透传），调度层无法区分「客户端 body 坏」和「单 target 处理失败」，保持 fail-closed 跳过语义。
 14. **唯一可转换 target 冷却中时立即 400 而非等待恢复**：本 pass 记录了 `conversionErr` 且 `tried` 为空时（请求转换被 capability scanner 拒绝的 target 不计入 tried；唯一能安全转换的 target 在冷却、未进本轮调度），直接返回 400 `unsupported_protocol_conversion`，跳过 cooldown wait-retry——不等待冷却恢复。重试中的 agent 下一轮自然会再命中已恢复的 target。
+15. **guard known-secret 凭据值进内存扫描器**：代理自身管理的凭据（池 key、OAuth token）以内存值形式进入 `guard.Scanner` 做出站精确匹配——不违反"凭据不进 config/代码/日志/测试输出"红线，因为匹配集永不落盘、不序列化、不进事件/DTO（命中只报 `known_secret` 类型名）。OAuth token 轮转后旧值仍被扫描（无害，旧值已失效），新值在下一次 reload 进集。
+16. **guard.paths 不支持 redact**：敏感路径命中只有 log/block/off——redact 会改写 `.env`、`~/.ssh` 等路径文本，破坏正常编码负载（读 .env 是 agent 的合法工作）；要阻断用 block，默认 log 只要可见性。
+17. **guard 命中永不含匹配内容**：live event、计数器、安全审计日志（seclog）只携带模式类型名/路径类别名，匹配到的秘密字节只允许出现在 redact 后的转发 body 里（被替换为 `[REDACTED]`）。审计日志因此可以安全长期保留。
 
 ## qwen-plan：用量仅控制台、不轮询（有意为之）
 

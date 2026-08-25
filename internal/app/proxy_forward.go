@@ -12,8 +12,8 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
-	"model-proxy/internal/guard"
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/observe/seclog"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
 	"model-proxy/internal/targetexec"
@@ -95,31 +95,64 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// — after route resolution (so hits are attributable) and before the cache
 	// lookup and every forward branch. Cache, Fusion and Shadow all consume the
 	// (possibly redacted) origBody from this point on; no branch rescans. Only
-	// pattern TYPE NAMES are counted/emitted — matched bytes never leave the body
-	// (credential red line).
-	if action := cfg.Guard.SecretsAction(); action != "off" {
-		if names := guard.Scan(origBody); len(names) > 0 {
-			if p.metrics != nil {
-				for _, name := range names {
-					p.metrics.Inc("guard", name, counters.EvGuardHits)
+	// pattern TYPE NAMES / path CATEGORY NAMES are counted/emitted — matched
+	// bytes never leave the body (credential red line). The scanner is this
+	// generation's snapshot (runtime.Guard): it carries the embedded rule
+	// table, config custom patterns/paths, and the known-secret values of the
+	// credential pool. nil only in degenerate hand-built proxies — skip then.
+	if sc := runtime.Guard; sc != nil {
+		if action := cfg.Guard.SecretsAction(); action != "off" {
+			if names := sc.Scan(origBody); len(names) > 0 {
+				if p.metrics != nil {
+					for _, name := range names {
+						p.metrics.Inc("guard", name, counters.EvGuardHits)
+					}
+				}
+				p.events.Publish(observeevents.Event{
+					Type:      "guard",
+					Ts:        time.Now().UnixMilli(),
+					RequestID: requestID,
+					Agent:     agent,
+					Protocol:  proto,
+					Exposed:   exposed,
+					Detail:    "secrets=" + strings.Join(names, ",") + " action=" + action,
+				})
+				p.auditGuardHit(cfg, seclog.KindSecret, names, action, requestID, agent, proto, exposed)
+				switch action {
+				case "block":
+					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+					http.Error(w, fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(names, ", ")), http.StatusBadRequest)
+					return
+				case "redact":
+					origBody = sc.Redact(origBody)
 				}
 			}
-			p.events.Publish(observeevents.Event{
-				Type:      "guard",
-				Ts:        time.Now().UnixMilli(),
-				RequestID: requestID,
-				Agent:     agent,
-				Protocol:  proto,
-				Exposed:   exposed,
-				Detail:    "secrets=" + strings.Join(names, ",") + " action=" + action,
-			})
-			switch action {
-			case "block":
-				p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-				http.Error(w, fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(names, ", ")), http.StatusBadRequest)
-				return
-			case "redact":
-				origBody = guard.Redact(origBody)
+		}
+		// Sensitive-path signal (S2): an intent-level alert fired before any
+		// secret value appears. Paths are never redacted (rewriting a path
+		// would corrupt legitimate coding work).
+		if pa := cfg.Guard.PathsAction(); pa != "off" {
+			if cats := sc.ScanPaths(origBody); len(cats) > 0 {
+				if p.metrics != nil {
+					for _, cat := range cats {
+						p.metrics.Inc("guard", cat, counters.EvGuardHits)
+					}
+				}
+				p.events.Publish(observeevents.Event{
+					Type:      "guard",
+					Ts:        time.Now().UnixMilli(),
+					RequestID: requestID,
+					Agent:     agent,
+					Protocol:  proto,
+					Exposed:   exposed,
+					Detail:    "paths=" + strings.Join(cats, ",") + " action=" + pa,
+				})
+				p.auditGuardHit(cfg, seclog.KindPath, cats, pa, requestID, agent, proto, exposed)
+				if pa == "block" {
+					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+					http.Error(w, fmt.Sprintf("blocked: request body references sensitive path %s (guard.paths=block)", strings.Join(cats, ", ")), http.StatusBadRequest)
+					return
+				}
 			}
 		}
 	}

@@ -1,0 +1,364 @@
+package app
+
+import (
+	"encoding/base64"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/seclog"
+)
+
+// Runtime-wired guard integration: the per-generation scanner carries the
+// credential pool's known secrets (Build.Secrets → reload/startup swap →
+// RuntimeSnapshot.Guard), the sensitive-path signal, and the security audit
+// log. All fixtures are synthetic — never real credentials (AGENTS.md
+// credential red line), and assertions must not echo fixture bytes into
+// failure output beyond what the test itself constructed.
+
+// guardPoolKey is a synthetic pool key that matches NO embedded rule (no
+// issuer literal) so only the known-secret channel can catch it.
+var guardPoolKey = "poolkey-" + strings.Repeat("wX9q", 8)
+
+func guardPoolRequestBody(secret string) string {
+	return `{"model":"glm","messages":[{"role":"user","content":"token: ` + secret + `"}]}`
+}
+
+// newGuardPoolProxy wires a one-route proxy in front of a raw-body-capturing
+// upstream, with a real plural pool (one account per key) feeding the guard
+// known-secret set. guardCfg is taken verbatim (tests choose the toggles).
+func newGuardPoolProxy(t *testing.T, guardCfg GuardConfig, poolKeys ...string) (p *Proxy, proxyURL string, upstreamBodies func() []string) {
+	t.Helper()
+	setPoolHome(t, t.TempDir())
+	writePoolFile(t, "static", testProviderID, poolKeys...)
+	var mu sync.Mutex
+	var bodies []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	t.Cleanup(up.Close)
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"static": {OpenAIBaseURL: up.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm": {{Provider: "static", Model: "glm"}},
+		},
+		Guard: guardCfg,
+	}
+	p = newProxyWithStatic(t, cfg, map[string]string{"static": "k"})
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(px.Close)
+	return p, px.URL, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), bodies...)
+	}
+}
+
+// (a) A pool key appearing verbatim in the request body hits the known-secret
+// channel: log action forwards unchanged, the event carries the TYPE NAME only
+// (never key bytes), and the counter is exact.
+func TestGuardKnownSecret_PoolKeyPlaintextHit(t *testing.T) {
+	p, proxyURL, bodies := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true}, guardPoolKey)
+
+	postOK(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
+
+	got := bodies()
+	if len(got) != 1 || !strings.Contains(got[0], guardPoolKey) {
+		t.Fatalf("log action must forward the unmodified body once (calls=%d)", len(got))
+	}
+	details := guardEventDetails(p)
+	if len(details) != 1 {
+		t.Fatalf("guard events = %v, want exactly 1", details)
+	}
+	if !strings.Contains(details[0], "known_secret") || !strings.Contains(details[0], "action=log") {
+		t.Errorf("guard event detail = %q, want known_secret + action=log", details[0])
+	}
+	if strings.Contains(details[0], guardPoolKey) {
+		t.Errorf("guard event leaked the pool key")
+	}
+	snap := p.metrics.Snapshot()
+	if n := snap[counters.PMKey{Provider: "guard", Model: "known_secret"}].Requests; n != 1 {
+		t.Errorf("known_secret counter = %d, want 1", n)
+	}
+}
+
+// (b) The base64 form of a pool key hits the encoded known-secret channel;
+// with secrets=redact the upstream must not receive the encoded span.
+func TestGuardKnownSecret_Base64FormRedacted(t *testing.T) {
+	p, proxyURL, bodies := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true}, guardPoolKey)
+
+	b64 := base64.StdEncoding.EncodeToString([]byte(guardPoolKey))
+	postOK(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(b64))
+
+	got := bodies()
+	if len(got) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", len(got))
+	}
+	if strings.Contains(got[0], b64) || strings.Contains(got[0], guardPoolKey) {
+		t.Errorf("redacted body still carries the encoded/plain pool key")
+	}
+	if !strings.Contains(got[0], "[REDACTED]") {
+		t.Errorf("redacted body lacks the [REDACTED] placeholder")
+	}
+	if !strings.Contains(got[0], `"model":"glm"`) {
+		t.Errorf("redacted body lost surrounding JSON content")
+	}
+	details := guardEventDetails(p)
+	if len(details) != 1 || !strings.Contains(details[0], "known_secret_encoded") {
+		t.Errorf("guard events = %v, want 1 event naming known_secret_encoded", details)
+	}
+	if strings.Contains(details[0], b64[:16]) {
+		t.Errorf("guard event leaked encoded key bytes")
+	}
+}
+
+// (c) Sensitive paths: default log action forwards + publishes a paths event;
+// block rejects with 400 naming the category and never reaches the upstream.
+func TestGuardPaths_LogThenBlock(t *testing.T) {
+	body := `{"model":"glm","messages":[{"role":"user","content":"please cat ~/.ssh/id_rsa"}]}`
+
+	p, proxyURL, bodies := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "log"})
+	postOK(t, proxyURL+"/v1/chat/completions", body)
+	if got := bodies(); len(got) != 1 {
+		t.Fatalf("paths=log must forward the body (calls=%d)", len(got))
+	}
+	details := guardEventDetails(p)
+	if len(details) != 1 || !strings.Contains(details[0], "paths=ssh") || !strings.Contains(details[0], "action=log") {
+		t.Errorf("guard events = %v, want 1 event with paths=ssh action=log", details)
+	}
+	snap := p.metrics.Snapshot()
+	if n := snap[counters.PMKey{Provider: "guard", Model: "ssh"}].Requests; n != 1 {
+		t.Errorf("ssh path counter = %d, want 1", n)
+	}
+
+	_, proxyURL2, bodies2 := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "off", KnownSecrets: true, Decode: true, Paths: "block"})
+	code, respBody := post(t, proxyURL2+"/v1/chat/completions", body)
+	if code != http.StatusBadRequest {
+		t.Fatalf("paths=block: status=%d body=%s, want 400", code, respBody)
+	}
+	if !strings.Contains(respBody, "ssh") || !strings.Contains(respBody, "guard.paths=block") {
+		t.Errorf("block response = %q, want category name + reason", respBody)
+	}
+	if got := bodies2(); len(got) != 0 {
+		t.Errorf("blocked request reached the upstream %d times, want 0", len(got))
+	}
+}
+
+// (d) Guard hits persist security audit records (kind=secret / kind=path) via
+// the seclog lifecycle; the audit file must never carry secret material.
+func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
+	p, proxyURL, _ := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, Paths: "log", Audit: true},
+		guardPoolKey)
+	dir := t.TempDir()
+	logger, err := seclog.New(dir, seclog.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go logger.Run()
+	p.secLog = logger
+
+	postOK(t, proxyURL+"/v1/chat/completions",
+		`{"model":"glm","messages":[{"role":"user","content":"key `+guardPoolKey+` then read ~/.ssh/config"}]}`)
+
+	// Shutdown drains every accepted record before returning.
+	logger.Shutdown()
+
+	result, err := seclog.Query(dir, seclog.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawSecret, sawPath bool
+	for _, rec := range result.Records {
+		switch rec.Kind {
+		case seclog.KindSecret:
+			sawSecret = true
+			if len(rec.Names) != 1 || rec.Names[0] != "known_secret" || rec.Action != "log" {
+				t.Errorf("secret record = %+v, want names=[known_secret] action=log", rec)
+			}
+			if rec.RequestID == "" || rec.Exposed != "glm" {
+				t.Errorf("secret record missing request attribution: %+v", rec)
+			}
+		case seclog.KindPath:
+			sawPath = true
+			if len(rec.Names) != 1 || rec.Names[0] != "ssh" {
+				t.Errorf("path record = %+v, want names=[ssh]", rec)
+			}
+		}
+	}
+	if !sawSecret || !sawPath {
+		t.Fatalf("audit records: secret=%v path=%v, want both (records=%v)", sawSecret, sawPath, result.Records)
+	}
+	// Raw file bytes must not contain the pool key in any field.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), guardPoolKey) {
+			t.Errorf("audit file %s contains the pool key", e.Name())
+		}
+	}
+}
+
+// (e) Toggles: known_secrets:false stops pool-key matching; decode:false
+// stops encoded forms while plaintext still hits.
+func TestGuardToggles_KnownSecretsAndDecode(t *testing.T) {
+	p, proxyURL, bodies := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "log", KnownSecrets: false, Decode: true}, guardPoolKey)
+	postOK(t, proxyURL+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
+	if got := bodies(); len(got) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", len(got))
+	}
+	if details := guardEventDetails(p); len(details) != 0 {
+		t.Errorf("known_secrets=false: guard events = %v, want none", details)
+	}
+	snap := p.metrics.Snapshot()
+	if n := snap[counters.PMKey{Provider: "guard", Model: "known_secret"}].Requests; n != 0 {
+		t.Errorf("known_secrets=false: known_secret counter = %d, want 0", n)
+	}
+
+	p2, proxyURL2, _ := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "log", KnownSecrets: true, Decode: false}, guardPoolKey)
+	b64 := base64.StdEncoding.EncodeToString([]byte(guardPoolKey))
+	postOK(t, proxyURL2+"/v1/chat/completions", guardPoolRequestBody(b64))
+	if details := guardEventDetails(p2); len(details) != 0 {
+		t.Errorf("decode=false: base64 form must not hit, events = %v", details)
+	}
+	postOK(t, proxyURL2+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
+	details := guardEventDetails(p2)
+	if len(details) != 1 || !strings.Contains(details[0], "known_secret") {
+		t.Errorf("decode=false: plaintext must still hit, events = %v", details)
+	}
+}
+
+// (f) A pool key added by reload joins the protected set immediately (the
+// scanner is rebuilt and swapped with the same config generation).
+func TestGuardKnownSecret_ReloadProtectsNewPoolKey(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	keyV1 := guardPoolKey + "-v1x"
+	keyV2 := guardPoolKey + "-v2x"
+	writePoolFile(t, "zhipu", "zhipu", keyV1)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	t.Cleanup(up.Close)
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	yaml := "listen: 127.0.0.1:0\n" +
+		"providers:\n  zhipu:\n    openai_base_url: " + up.URL + "\n    provider_id: zhipu\n" +
+		"routes:\n  glm:\n    - {provider: zhipu, model: glm}\n" +
+		"guard:\n  secrets: log\n"
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustLoadConfigFile(t, cfgPath)
+	p := newTestProxy(t, cfg)
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(px.Close)
+
+	// keyV2 is not in the pool yet: no hit.
+	postOK(t, px.URL+"/v1/chat/completions", guardPoolRequestBody(keyV2))
+	if details := guardEventDetails(p); len(details) != 0 {
+		t.Fatalf("pre-reload: keyV2 must not be protected yet, events = %v", details)
+	}
+
+	// Add keyV2 to the pool and reload the same config file.
+	writePoolFile(t, "zhipu", "zhipu", keyV1, keyV2)
+	if err := p.Reload(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	postOK(t, px.URL+"/v1/chat/completions", guardPoolRequestBody(keyV2))
+	details := guardEventDetails(p)
+	if len(details) != 1 || !strings.Contains(details[0], "known_secret") {
+		t.Fatalf("post-reload: keyV2 must hit known_secret, events = %v", details)
+	}
+	if strings.Contains(details[0], keyV2) {
+		t.Errorf("guard event leaked the pool key")
+	}
+	snap := p.metrics.Snapshot()
+	if n := snap[counters.PMKey{Provider: "guard", Model: "known_secret"}].Requests; n != 1 {
+		t.Errorf("post-reload known_secret counter = %d, want 1", n)
+	}
+}
+
+// (g) codex/aqp OAuth files join the known-secret set best-effort: a valid
+// file contributes its tokens; a missing or corrupt file is skipped silently
+// (no panic, build still succeeds).
+func TestGuardOAuthSecrets_BestEffortCollection(t *testing.T) {
+	home := t.TempDir()
+	setPoolHome(t, home)
+	credDir := filepath.Join(home, ".model-proxy")
+
+	writeFile := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(credDir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"codex": {Provider: "codex", OpenAIBaseURL: "http://x"},
+			"aqp":   {Provider: "aqp", OpenAIBaseURL: "http://x", AqpMintURL: "http://x/mint"},
+		},
+	}
+	collect := func() []string {
+		t.Helper()
+		return BuildProviders(cfg, AccountStore(), testBuildOpts()).Secrets
+	}
+
+	// Missing files: nothing to protect, no error.
+	if got := collect(); len(got) != 0 {
+		t.Errorf("missing OAuth files: Secrets = %d values, want 0", len(got))
+	}
+
+	// Corrupt files: skipped silently, build still succeeds.
+	writeFile("codex_oauth_auth.json", `{not json`)
+	writeFile("aqp_oauth_auth.json", `{"sso_session_cookie": 42}`)
+	if got := collect(); len(got) != 0 {
+		t.Errorf("corrupt OAuth files: Secrets = %d values, want 0 (skip silently)", len(got))
+	}
+
+	// Valid files: every token/cookie value is collected.
+	writeFile("codex_oauth_auth.json", `{"tokens":{"access_token":"`+guardPoolKey+`-at","refresh_token":"`+guardPoolKey+`-rt","id_token":"`+guardPoolKey+`-it","account_id":"acct"}}`)
+	writeFile("aqp_oauth_auth.json", `{"account_id":"a","sso_session_cookie":"SSO_C=`+guardPoolKey+`-cookie"}`)
+	got := collect()
+	want := []string{guardPoolKey + "-at", guardPoolKey + "-rt", guardPoolKey + "-it", "SSO_C=" + guardPoolKey + "-cookie"}
+	if len(got) != len(want) {
+		t.Fatalf("valid OAuth files: Secrets = %d values, want %d", len(got), len(want))
+	}
+	set := map[string]bool{}
+	for _, s := range got {
+		set[s] = true
+	}
+	for _, w := range want {
+		if !set[w] {
+			t.Errorf("valid OAuth files: expected secret value missing from collected set")
+		}
+	}
+}

@@ -9,8 +9,10 @@ import (
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
 	"model-proxy/internal/fusion"
+	"model-proxy/internal/guard"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/requestlog"
+	"model-proxy/internal/observe/seclog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/provider"
@@ -37,6 +39,9 @@ type Proxy struct {
 	reqLog           *requestlog.Logger             // per-request access log (full bodies); nil = disabled (default) or init failure
 	reqLogStarted    bool                           // lifecycle owns loop/shutdown only when started by startRuntimeServices
 	cache            *responsecache.Store           // exact-match response cache (prompt-hash + TTL); nil = disabled
+	guardScanner     *guard.Scanner                 // reload-owned immutable outbound secret/path scanner; never serialized or logged
+	secLog           *seclog.Logger                 // security audit log (guard hit records); nil = disabled; startup-only like reqLog
+	secLogStarted    bool                           // lifecycle owns Run/Shutdown only when started by startRuntimeServices
 	responsesState   *protocol.ResponsesStateStore  // previous_response_id replay for Responses clients bridged to stateless backends
 	events           *observeevents.Hub             // live request monitor fan-out hub (SSE /api/events); always non-nil
 	fusionReg        *fusion.Registry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events

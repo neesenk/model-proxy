@@ -34,6 +34,7 @@ func NewApplication(serve func(args []string)) *Application {
 		"unfreeze": ProcessCommand(RunUnfreeze),
 		"stats":    ProcessCommand(RunStats),
 		"doctor":   ProcessCommand(RunDoctor),
+		"audit":    ProcessCommand(RunAudit),
 		"test":     ProcessCommand(climodels.CmdTest),
 		"replay":   ProcessCommand(RunReplay),
 		"shadow":   ProcessCommand(RunShadow),

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -359,6 +360,71 @@ func BenchmarkProxy_Forward_RequestLog_1MB(b *testing.B) {
 		}
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
+	}
+}
+
+// BenchmarkProxy_Forward_Guard_LargeBody: clean ~64KB body with the guard
+// fully on (secrets=log + known secrets + decode + paths) — every request
+// pays the literal prefilter, so this sizes its cost on a large clean body.
+// Compare against BenchmarkProxy_Forward_WithMap_LargeBody (guard off).
+func BenchmarkProxy_Forward_Guard_LargeBody(b *testing.B) {
+	silenceLog(b)
+	up := newUpstream(jsonOK)
+	defer up.Close()
+	cfg := &Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]Provider{
+			"t": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"claude-opus-4-7"}},
+		},
+		Routes: map[string][]RouteTarget{"claude-opus-4-7": {{Provider: "t", Model: "claude-opus-4-7"}}},
+		Guard:  GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true, Paths: "log"},
+	}
+	p := newTestProxy(b, cfg)
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+	body := largeBody()
+	cli := &http.Client{Timeout: 10 * time.Second}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		resp, err := cli.Post(px.URL+"/v1/messages", "application/json", bytes.NewReader(body))
+		if err != nil {
+			b.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			b.Fatalf("forward returned %d", resp.StatusCode)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
+// TestProxy_Guard_CleanBodyScanBudget guards the guard: clean-body scanning
+// runs on EVERY request, so the literal prefilter must keep it cheap. The
+// guard package measures ~0.3ms per 64KB body; the budget (race-aware, see
+// race_budget_*_test.go) keeps >10x headroom so a loaded CI machine cannot
+// flake.
+func TestProxy_Guard_CleanBodyScanBudget(t *testing.T) {
+	sc, err := buildGuardScanner(&Config{Guard: GuardConfig{KnownSecrets: true, Decode: true}},
+		[]string{"poolkey-" + strings.Repeat("wX9q", 8)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := largeBody()
+	const scans = 20
+	start := time.Now()
+	for i := 0; i < scans; i++ {
+		if names := sc.Scan(body); len(names) != 0 {
+			t.Fatalf("clean body secret hit: %v", names)
+		}
+		if cats := sc.ScanPaths(body); len(cats) != 0 {
+			t.Fatalf("clean body path hit: %v", cats)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > guardScanBudget {
+		t.Errorf("guard clean-body scan: %d x 64KB took %s, budget %s", scans, elapsed, guardScanBudget)
 	}
 }
 

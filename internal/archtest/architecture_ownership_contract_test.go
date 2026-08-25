@@ -154,6 +154,10 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		buildFields := namedStructFields(t, rootPackage, "Build")
 		wantBuildFields := map[string]bool{
 			"Providers": true, "PoolIndex": true, "ParentOf": true, "Eligible": true,
+			// Secrets: proxy-managed credential values collected in the same
+			// LoadSnapshot pass (+ best-effort OAuth auth files) for the guard
+			// known-secret scanner. Memory only.
+			"Secrets": true,
 		}
 		if len(buildFields) != len(wantBuildFields) {
 			t.Errorf("app.Build fields = %v, want exactly %v", sortedFieldNames(buildFields), sortedBoolNames(wantBuildFields))
