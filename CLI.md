@@ -177,6 +177,11 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, all}
   ```
   warning: model <MODEL> at <PROVIDER>: no models.dev metadata - wrote defaults (ctx=200000 out=16384 text-only)
   ```
+- **stderr 漂移警示**（改写成功后立即对本次接管的 client 复检 proxy 指针，复用 `doctor --live` 的漂移检测；仅仍有漂移时每个 client 一行）：
+  ```
+    ⚠ <client> drift detected right after takeover: <FILE> points to <CURRENT>, want <EXPECTED>
+  ```
+  `guard.audit` 开启时按 doctor 同款语义追加一条 kind=drift 安全审计记录（agent=takeover，同日同 client 去重，见 §18）；审计追加失败只 stderr 提示。漂移不影响 exit code。`restore` 不做该校验（恢复原状是预期）。
 
 失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 备份失败 / 改写失败）。`client` 不在集合内由 `listClients` 决定（`all` 展开全部；未知名通常导致空集，静默返回 0）。`takeover:` 块整个可省略--四个 client 路径 + provider_id 有代码默认值，只有覆盖某项才需写。
 

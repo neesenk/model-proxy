@@ -46,6 +46,9 @@ func (testReadAPI) Fusion(string, time.Time) (map[string]fusion.WorkflowStats, [
 	return nil, nil
 }
 func (testReadAPI) Pins() []appapi.Pin { return nil }
+func (testReadAPI) Security(appapi.SecurityQuery) (appapi.SecurityResult, error) {
+	return appapi.SecurityResult{}, nil
+}
 func (testReadAPI) ConfigDocument() (appapi.ConfigDocument, error) {
 	return appapi.ConfigDocument{}, nil
 }

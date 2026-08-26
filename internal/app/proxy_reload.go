@@ -104,12 +104,10 @@ func (p *Proxy) Reload(configPath string) error {
 	if cfg.RequestLog.Enabled && p.reqLog == nil {
 		log.Printf("[reload] request_log.enabled is true but logging is not active (reload cannot start it); restart the daemon to enable request logging")
 	}
-	// Same startup-only semantics for the security audit log: the forward path
-	// consults cfg.Guard.AuditEnabled() per generation (so audit:false via
-	// reload stops new records at once), but a logger that was never started
-	// cannot be created mid-flight.
-	if cfg.Guard.AuditEnabled() && p.secLog == nil {
-		log.Printf("[reload] guard.audit is true but the security audit log is not active (reload cannot start it); restart the daemon to enable it")
-	}
+	// The security audit log IS reload-owned (unlike request_log): reconcile
+	// the logger with the new generation — audit off→on starts it now, on→off
+	// drains+stops it, an audit_path change swaps to the new file. In-flight
+	// requests keep their snapshot's logger until it drains.
+	p.reconcileSecLog(cfg)
 	return appliedWarning
 }

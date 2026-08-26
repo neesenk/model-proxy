@@ -438,6 +438,15 @@ func CheckTakeoverDrift(cfg *configdomain.Config, bakDir string) []ClientDrift {
 // has a drift record from today is not appended again (a failed dedup query
 // never blocks the append).
 func auditTakeoverDrift(cfg *configdomain.Config, drift []ClientDrift) {
+	AuditTakeoverDrift(cfg, drift, "doctor")
+}
+
+// AuditTakeoverDrift is the shared implementation behind auditTakeoverDrift,
+// exported so `model-proxy takeover`'s post-write drift check can persist the
+// same record shape (same dedup, same hosts-only detail) under its own agent
+// name. Same degradation rules: guard.audit off → no-op; append failure →
+// stderr note only, never an error.
+func AuditTakeoverDrift(cfg *configdomain.Config, drift []ClientDrift, agent string) {
 	if !cfg.Guard.AuditEnabled() {
 		return
 	}
@@ -461,7 +470,7 @@ func auditTakeoverDrift(cfg *configdomain.Config, drift []ClientDrift) {
 		}
 		rec := &observeseclog.Record{
 			Kind:  observeseclog.KindDrift,
-			Agent: "doctor",
+			Agent: agent,
 			Detail: fmt.Sprintf("client=%s expected=%s actual=%s",
 				d.Client, driftHost(d.Expected), driftHost(d.Current)),
 		}

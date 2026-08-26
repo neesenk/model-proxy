@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	observeseclog "model-proxy/internal/observe/seclog"
 )
 
 // This file extends the subprocess pattern (subprocess_test_support_test.go)
@@ -213,5 +215,153 @@ func TestCLI_TakeoverOpencode_WarnsDefault(t *testing.T) {
 	oc := string(b)
 	if !strings.Contains(oc, "200000") {
 		t.Errorf("opencode config should contain default ctx 200000:\n%s", oc)
+	}
+}
+
+// --- post-takeover drift verification (优化项 9) ---
+
+// driftSceneConfig writes a config with claude (file present) and codex (file
+// missing, but a pre-seeded .bak marker simulates a prior takeover whose
+// client config later vanished). backupDir = <configDir>/.model-proxy.
+func driftSceneConfig(t *testing.T, dir, claudeFile, codexFile, extra string) string {
+	t.Helper()
+	body := fmt.Sprintf(`listen: 127.0.0.1:15721
+%s
+takeover:
+  proxy_url: http://127.0.0.1:15721
+  claude: %s
+  codex: %s
+providers:
+  aqp:
+    openai_base_url: https://x
+    provider_id: aqp
+    models:
+      - glm-5.2
+routes:
+  glm-5.2:
+    - {provider: aqp, model: glm-5.2}
+`, extra, claudeFile, codexFile)
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// setupDriftScene builds the claude-ok / codex-drift scene and returns the
+// config path. A local 500 models.dev endpoint keeps the `all` metadata
+// hydrate offline; the codex .bak marker makes the drift check treat codex
+// as taken over even though its config file is gone.
+func setupDriftScene(t *testing.T, extra string) (cfgPath, home string) {
+	t.Helper()
+	dir := t.TempDir()
+	claudeFile := filepath.Join(dir, "claude.json")
+	if err := os.WriteFile(claudeFile, []byte(`{"env":{"FOO":"bar"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	codexFile := filepath.Join(dir, "codex.toml") // intentionally not created
+	bakDir := filepath.Join(dir, ".model-proxy")
+	if err := os.MkdirAll(bakDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bakDir, "codex.bak"), []byte("model_provider = \"openai\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	t.Cleanup(srv.Close)
+	t.Setenv("MP_MODELSDEV_URL", srv.URL)
+	return driftSceneConfig(t, dir, claudeFile, codexFile, extra), t.TempDir()
+}
+
+// securityLogFiles lists the security-*.log files under <home>/.model-proxy
+// (nil when the dir does not exist — nothing was ever appended).
+func securityLogFiles(t *testing.T, home string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(home, ".model-proxy"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "security-") {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// TestCLI_TakeoverClaudeNoDriftWarning: a healthy takeover passes the
+// post-write drift check — no warning line, no seclog drift record.
+func TestCLI_TakeoverClaudeNoDriftWarning(t *testing.T) {
+	dir := t.TempDir()
+	claudeFile := filepath.Join(dir, "claude.json")
+	if err := os.WriteFile(claudeFile, []byte(`{"env":{"FOO":"bar"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeTakeoverConfig(t, dir, claudeFile)
+	home := t.TempDir()
+
+	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "claude")
+	if code != 0 {
+		t.Fatalf("takeover claude exit=%d want 0\n--- stderr ---\n%s", code, stderr)
+	}
+	if strings.Contains(stderr, "drift") {
+		t.Errorf("healthy takeover must not warn about drift:\n%s", stderr)
+	}
+	if files := securityLogFiles(t, home); len(files) != 0 {
+		t.Errorf("no drift → no security audit log, got %v", files)
+	}
+}
+
+// TestCLI_TakeoverDriftWarnsAndAudits: `takeover all` rewrites claude fine,
+// but codex (taken over earlier, config file since vanished) still drifts
+// after the run → stderr warning + one seclog drift record (agent=takeover).
+// The drift must not fail the command: exit stays 0.
+func TestCLI_TakeoverDriftWarnsAndAudits(t *testing.T) {
+	cfgPath, home := setupDriftScene(t, "")
+
+	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "all")
+	if code != 0 {
+		t.Fatalf("takeover all exit=%d want 0\n--- stderr ---\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "codex drift detected right after takeover") ||
+		!strings.Contains(stderr, "(file missing)") {
+		t.Errorf("missing drift warning for codex:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "claude drift") {
+		t.Errorf("claude was rewritten successfully and must not drift:\n%s", stderr)
+	}
+
+	result, err := observeseclog.Query(filepath.Join(home, ".model-proxy"),
+		observeseclog.Filter{Kind: observeseclog.KindDrift})
+	if err != nil {
+		t.Fatalf("query audit log: %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("drift records = %d, want exactly 1 (only codex drifted)", len(result.Records))
+	}
+	rec := result.Records[0]
+	if rec.Agent != "takeover" || rec.Kind != observeseclog.KindDrift {
+		t.Errorf("record kind/agent = %q/%q, want drift/takeover", rec.Kind, rec.Agent)
+	}
+	if !strings.Contains(rec.Detail, "client=codex") {
+		t.Errorf("detail missing client=codex: %q", rec.Detail)
+	}
+}
+
+// TestCLI_TakeoverDriftAuditDisabled: guard.audit=false suppresses the seclog
+// append; the stderr drift warning still appears.
+func TestCLI_TakeoverDriftAuditDisabled(t *testing.T) {
+	cfgPath, home := setupDriftScene(t, "guard:\n  audit: false\n")
+
+	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "all")
+	if code != 0 {
+		t.Fatalf("takeover all exit=%d want 0\n--- stderr ---\n%s", code, stderr)
+	}
+	if !strings.Contains(stderr, "codex drift detected right after takeover") {
+		t.Errorf("audit off must not silence the drift warning:\n%s", stderr)
+	}
+	if files := securityLogFiles(t, home); len(files) != 0 {
+		t.Errorf("audit disabled but security log written: %v", files)
 	}
 }

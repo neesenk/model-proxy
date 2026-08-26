@@ -4,11 +4,15 @@ import (
 	"log"
 	"sort"
 	"time"
+
+	"model-proxy/internal/provider"
 )
 
 // guardSecretRefreshLoop periodically re-syncs the guard known-secret set with
 // the on-disk codex/aqp OAuth auth files (those providers refresh and rewrite
-// <name>_oauth_auth.json in place during serve). The beat is the CURRENT
+// <name>_oauth_auth.json in place during serve) and with the in-memory
+// credential values providers report (provider.SecretReporter: aqp's minted
+// key, codex's cached access_token — fresher than any file). The beat is the CURRENT
 // generation's scheduling.quota_poll_interval (default 5m, re-read every tick
 // so a reload changes the cadence without a restart) — the same cadence the
 // quota tracker polls upstream quotas on, so credential freshness follows the
@@ -36,12 +40,15 @@ func (p *Proxy) guardSecretRefreshLoop(stop <-chan struct{}) {
 }
 
 // refreshGuardKnownSecrets performs one re-sync pass: re-collect the OAuth
-// token values for the current config generation and, when the set changed,
-// rebuild the guard scanner and swap it in place.
+// token values for the current config generation (auth files + provider
+// in-memory reports) and, when the set changed, rebuild the guard scanner and
+// swap it in place.
 //
-// Locking: the generation snapshot (cfg, pool/OAuth secret subsets) is taken
-// under a brief read lock; all file I/O and scanner construction happen
-// OUTSIDE p.mu; the write lock below only swaps pointers, and only when the
+// Locking: the generation snapshot (cfg, pool/OAuth secret subsets, providers
+// map) is taken under a brief read lock; all file I/O, provider ReportSecrets
+// calls, and scanner construction happen OUTSIDE p.mu (the providers map is
+// generation-owned and immutable, so iterating the captured reference is
+// safe); the write lock below only swaps pointers, and only when the
 // generation captured before the I/O is still current. A reload that
 // interleaved already installed its own scanner and secret subsets, so a
 // stale rebuild is dropped — scanner contents never mix generations.
@@ -51,6 +58,7 @@ func (p *Proxy) refreshGuardKnownSecrets() {
 	generation := p.configGeneration.Load()
 	poolSecrets := p.guardPoolSecrets
 	prevOAuth := p.guardOAuthSecrets
+	providers := p.providers
 	p.mu.RUnlock()
 
 	if cfg == nil || !cfg.Guard.KnownSecretsEnabled() {
@@ -59,6 +67,10 @@ func (p *Proxy) refreshGuardKnownSecrets() {
 		return
 	}
 	freshOAuth := CollectOAuthSecrets(cfg, buildOpts())
+	// In-memory reports (aqp minted key, codex cached access_token) merge into
+	// the OAuth subset: like the file-derived values they can change without a
+	// reload, and the generation check below keeps both generation-consistent.
+	freshOAuth = append(freshOAuth, collectMemorySecrets(providers)...)
 	if equalSecretSets(freshOAuth, prevOAuth) {
 		return
 	}
@@ -79,6 +91,22 @@ func (p *Proxy) refreshGuardKnownSecrets() {
 	}
 	p.guardScanner = scanner
 	p.guardOAuthSecrets = freshOAuth
+}
+
+// collectMemorySecrets gathers the in-memory credential values providers
+// choose to report (provider.SecretReporter): aqp's minted managed key and
+// codex's cached access_token, which the on-disk collection cannot see (the
+// minted key exists in no file) or sees only stale (a fresher in-memory
+// token). The map must be a generation-owned snapshot captured under p.mu by
+// the caller. Reported values stay in process memory, guard scanning only.
+func collectMemorySecrets(providers map[string]provider.Provider) []string {
+	var out []string
+	for _, prov := range providers {
+		if r, ok := prov.(provider.SecretReporter); ok {
+			out = append(out, r.ReportSecrets()...)
+		}
+	}
+	return out
 }
 
 // equalSecretSets compares two secret sets order-insensitively (collection

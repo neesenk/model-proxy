@@ -28,6 +28,17 @@ func (p *CodexProvider) AuthHeaders(req *http.Request) error {
 func (p *CodexProvider) Refresh() error {
 	return p.auth.Refresh()
 }
+
+// ReportSecrets implements SecretReporter by delegating to the auth injector
+// when it reports in-memory secrets (the real CodexOAuthProvider reports its
+// cached access_token; test fakes report nothing). Values feed the guard
+// known-secret scanner only — memory only, never serialized or logged.
+func (p *CodexProvider) ReportSecrets() []string {
+	if r, ok := p.auth.(SecretReporter); ok {
+		return r.ReportSecrets()
+	}
+	return nil
+}
 func (p *CodexProvider) RewriteRequest(targetURL string, body []byte, path string) (string, []byte) {
 	// codex backend requires store:false in the request body. It is stateless
 	// (no server-side response storage), so reasoning.encrypted_content must

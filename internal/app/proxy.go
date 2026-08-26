@@ -41,9 +41,9 @@ type Proxy struct {
 	cache             *responsecache.Store           // exact-match response cache (prompt-hash + TTL); nil = disabled
 	guardScanner      *guard.Scanner                 // reload-owned immutable outbound secret/path scanner; never serialized or logged
 	guardPoolSecrets  []string                       // reload-owned: current generation's Build.PoolSecrets (base for OAuth re-syncs)
-	guardOAuthSecrets []string                       // reload-owned: OAuth known-secret values in guardScanner; refreshed in place on the poll beat
-	secLog            *seclog.Logger                 // security audit log (guard hit records); nil = disabled; startup-only like reqLog
-	secLogStarted     bool                           // lifecycle owns Run/Shutdown only when started by startRuntimeServices
+	guardOAuthSecrets []string                       // reload-owned: OAuth + provider memory-reported known-secret values in guardScanner; refreshed in place on the poll beat
+	secLog            *seclog.Logger                 // security audit log (guard hit records); reload-owned, swapped by reconcileSecLog; nil = audit off for this generation
+	secLogRunning     bool                           // current generation's secLog Run goroutine is live (lifecycle-admitted); guards Close's drain
 	responsesState    *protocol.ResponsesStateStore  // previous_response_id replay for Responses clients bridged to stateless backends
 	events            *observeevents.Hub             // live request monitor fan-out hub (SSE /api/events); always non-nil
 	fusionReg         *fusion.Registry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events

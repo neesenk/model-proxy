@@ -179,6 +179,7 @@ const panels = {
   accounts: document.getElementById('tab-accounts'),
   analytics: document.getElementById('tab-analytics'),
   requests: document.getElementById('tab-requests'),
+  security: document.getElementById('tab-security'),
   live: document.getElementById('tab-live'),
 };
 let activeTab = 'status';
@@ -200,7 +201,7 @@ let activeTab = 'status';
 function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [tab, ...rest] = raw.split('/');
-  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'live') {
+  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'security' || tab === 'live') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
@@ -254,6 +255,7 @@ function activateTab(name) {
   if (name === 'accounts') renderAccountsTab();
   if (name === 'analytics') renderAnalyticsTab();
   if (name === 'requests') renderRequestsTab();
+  if (name === 'security') renderSecurityTab();
   if (name === 'live') renderLiveTab();
   else stopLiveEvents();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
@@ -303,6 +305,7 @@ function activateTabSilent(name) {
   if (name === 'accounts') renderAccountsTab();
   if (name === 'analytics') renderAnalyticsTab();
   if (name === 'requests') renderRequestsTab();
+  if (name === 'security') renderSecurityTab();
   if (name === 'live') renderLiveTab();
   else stopLiveEvents();
 }
@@ -423,6 +426,92 @@ async function loadRequestDetail(id) {
     </div>`;
   }
   detail.innerHTML = html;
+}
+
+// ---------- Security tab (guard audit log) ----------
+
+// Per-tab filter state (kind only). Persists across re-renders within a
+// session so a refresh keeps the view.
+let securityFilter = { kind: '' };
+
+// fmtMs renders a unix-millisecond audit timestamp as "MM-DD HH:MM:SS" —
+// the audit log spans days (30d retention), so a time-only format is wrong.
+function fmtMs(ms) {
+  if (!ms) return '—';
+  const d = new Date(Number(ms));
+  if (isNaN(d.getTime())) return '—';
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${d.toLocaleTimeString('en-US', { hour12: false })}`;
+}
+
+// renderSecurityTab builds the guard audit-log view: a kind filter + Refresh
+// button and a table of audit records fetched from /api/security. On-demand
+// (no poll) — fetch happens on tab entry and on Refresh, like Requests.
+// Records carry pattern/path NAMES and the action only; matched content never
+// reaches the API, so every field is safe to render verbatim.
+async function renderSecurityTab() {
+  const panel = panels.security;
+  if (!panel) return;
+  panel.innerHTML = `<div class="card"><div class="card-body">
+    <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+      <select id="sec-kind" class="req-input">
+        <option value="" ${securityFilter.kind === '' ? 'selected' : ''}>all kinds</option>
+        <option value="secret" ${securityFilter.kind === 'secret' ? 'selected' : ''}>secret</option>
+        <option value="path" ${securityFilter.kind === 'path' ? 'selected' : ''}>path</option>
+        <option value="drift" ${securityFilter.kind === 'drift' ? 'selected' : ''}>drift</option>
+      </select>
+      <button id="sec-refresh" class="btn">Refresh</button>
+    </div>
+    <div id="sec-table"></div>
+  </div></div>`;
+  const refresh = () => {
+    securityFilter.kind = document.getElementById('sec-kind').value;
+    loadSecurity();
+  };
+  document.getElementById('sec-refresh').onclick = refresh;
+  document.getElementById('sec-kind').onchange = refresh;
+  loadSecurity();
+}
+
+async function loadSecurity() {
+  const tbl = document.getElementById('sec-table');
+  if (tbl) tbl.innerHTML = '<span class="hint">loading…</span>';
+  const q = new URLSearchParams();
+  if (securityFilter.kind) q.set('kind', securityFilter.kind);
+  q.set('limit', '200');
+  let resp;
+  try {
+    resp = await apiGet('/api/security?' + q.toString());
+  } catch (e) {
+    if (tbl) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    return;
+  }
+  if (!resp.enabled) {
+    if (tbl) tbl.innerHTML = '<div class="msg hint">Security audit is off. Enable <code>guard.audit</code> in config to persist guard hits (secret / path / drift) to the audit log.</div>';
+    return;
+  }
+  const recs = resp.records || [];
+  const skipped = resp.skipped > 0 ? `<div class="hint" style="margin-bottom:8px;">skipped ${fmtNum(resp.skipped)} unreadable line(s) while scanning</div>` : '';
+  if (!recs.length) {
+    if (tbl) tbl.innerHTML = skipped + '<div class="msg hint">No matching audit records.</div>';
+    return;
+  }
+  const kindBadge = { secret: 'warn', path: '', drift: 'muted' };
+  let rows = '';
+  for (const r of recs) {
+    rows += `<tr>
+      <td class="mono">${esc(fmtMs(r.ts))}</td>
+      <td><span class="badge ${kindBadge[r.kind] || ''}">${esc(r.kind)}</span></td>
+      <td class="mono">${esc(r.agent || '—')}</td>
+      <td class="mono">${esc(r.exposed || '—')}</td>
+      <td class="mono">${esc((r.names || []).join(', ') || '—')}</td>
+      <td>${esc(r.action || '—')}</td>
+      <td class="subdue">${esc(r.detail || '')}</td>
+    </tr>`;
+  }
+  if (tbl) tbl.innerHTML = skipped + `<table class="table">
+    <thead><tr><th>time</th><th>kind</th><th>agent</th><th>route</th>
+    <th>names</th><th>action</th><th>detail</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
 }
 
 // ---------- Live tab (real-time request monitor via SSE) ----------
@@ -2714,6 +2803,8 @@ if (bootTab === 'config') {
   activateTabSilent('accounts');
 } else if (bootTab === 'analytics') {
   activateTabSilent('analytics');
+} else if (bootTab === 'security') {
+  activateTabSilent('security');
 } else {
   activateTabSilent('status');
 }

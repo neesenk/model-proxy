@@ -33,6 +33,7 @@ type readAPIStub struct {
 	pricing   appapi.PricingSnapshot
 	fusion    func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	pins      []appapi.Pin
+	security  func(appapi.SecurityQuery) (appapi.SecurityResult, error)
 	config    func() (appapi.ConfigDocument, error)
 }
 
@@ -67,6 +68,12 @@ func (r *readAPIStub) Fusion(workflow string, now time.Time) (map[string]fusion.
 	return r.fusion(workflow, now)
 }
 func (r *readAPIStub) Pins() []appapi.Pin { return r.pins }
+func (r *readAPIStub) Security(q appapi.SecurityQuery) (appapi.SecurityResult, error) {
+	if r.security == nil {
+		return appapi.SecurityResult{}, nil
+	}
+	return r.security(q)
+}
 func (r *readAPIStub) ConfigDocument() (appapi.ConfigDocument, error) {
 	if r.config == nil {
 		return appapi.ConfigDocument{}, nil
@@ -607,6 +614,74 @@ func TestReadLogsUnavailableAndFailure(t *testing.T) {
 	decodeReadJSON(t, missing, &routeError)
 	if missing.Code != http.StatusInternalServerError || !strings.Contains(routeError.Error, "missing.log") {
 		t.Fatalf("missing log = (%d, %#v)", missing.Code, routeError)
+	}
+}
+
+func TestReadSecurityEndpoint(t *testing.T) {
+	var securityQuery appapi.SecurityQuery
+	reads := &readAPIStub{
+		security: func(q appapi.SecurityQuery) (appapi.SecurityResult, error) {
+			securityQuery = q
+			return appapi.SecurityResult{
+				Enabled: true,
+				Records: []appapi.SecurityRecord{
+					{Ts: 1700000000123, Kind: "secret", RequestID: "r1", Agent: "codex", Protocol: "anthropic", Exposed: "gpt-x", Names: []string{"aws-access-key"}, Action: "blocked"},
+				},
+				Skipped: 2,
+			}, nil
+		},
+	}
+	s := newReadServer(t, reads)
+
+	// Full query: kind passes through, from/to parse like /api/stats (unix
+	// seconds or RFC3339) and convert to the audit log's millisecond domain
+	// (to inclusive to the end of the named second); the response mirrors the
+	// read port's DTO verbatim.
+	ok := serveRead(t, s, http.MethodGet, "/api/security?kind=secret&from=1700000000&to=2023-11-14T22:13:30Z&limit=5")
+	var response struct {
+		Enabled bool                    `json:"enabled"`
+		Records []appapi.SecurityRecord `json:"records"`
+		Skipped int                     `json:"skipped"`
+	}
+	decodeReadJSON(t, ok, &response)
+	if ok.Code != http.StatusOK || securityQuery != (appapi.SecurityQuery{Kind: "secret", From: 1700000000000, To: 1700000010999, Limit: 5}) {
+		t.Fatalf("security = (%d, query=%#v)", ok.Code, securityQuery)
+	}
+	if !response.Enabled || response.Skipped != 2 || len(response.Records) != 1 ||
+		response.Records[0].Ts != 1700000000123 || response.Records[0].Kind != "secret" ||
+		response.Records[0].Agent != "codex" || response.Records[0].Exposed != "gpt-x" ||
+		len(response.Records[0].Names) != 1 || response.Records[0].Names[0] != "aws-access-key" ||
+		response.Records[0].Action != "blocked" {
+		t.Fatalf("security response = %#v", response)
+	}
+
+	// Defaults and caps: no params -> limit 100, unbounded time; limit is
+	// capped at 1000.
+	serveRead(t, s, http.MethodGet, "/api/security")
+	if securityQuery != (appapi.SecurityQuery{Limit: 100}) {
+		t.Fatalf("default security query = %#v", securityQuery)
+	}
+	serveRead(t, s, http.MethodGet, "/api/security?limit=5000")
+	if securityQuery != (appapi.SecurityQuery{Limit: 1000}) {
+		t.Fatalf("capped security query = %#v", securityQuery)
+	}
+
+	var routeError struct {
+		Error string `json:"error"`
+	}
+	invalid := serveRead(t, s, http.MethodGet, "/api/security?kind=tokens")
+	decodeReadJSON(t, invalid, &routeError)
+	if invalid.Code != http.StatusBadRequest || routeError.Error != "kind must be secret, path or drift" {
+		t.Fatalf("invalid kind = (%d, %#v)", invalid.Code, routeError)
+	}
+
+	reads.security = func(appapi.SecurityQuery) (appapi.SecurityResult, error) {
+		return appapi.SecurityResult{}, errors.New("audit dir unreadable")
+	}
+	failure := serveRead(t, s, http.MethodGet, "/api/security")
+	decodeReadJSON(t, failure, &routeError)
+	if failure.Code != http.StatusInternalServerError || routeError.Error != "security audit query: audit dir unreadable" {
+		t.Fatalf("security failure = (%d, %#v)", failure.Code, routeError)
 	}
 }
 

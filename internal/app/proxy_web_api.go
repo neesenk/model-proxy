@@ -13,9 +13,11 @@ import (
 	"strconv"
 	"time"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/appapi"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/fusion"
+	"model-proxy/internal/observe/seclog"
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/provider"
 )
@@ -198,6 +200,51 @@ func (api *proxyWebAPI) Pins() []appapi.Pin {
 		})
 	}
 	return out
+}
+
+// Security projects the guard audit log (seclog) into transport DTOs. The
+// audit directory derives from the current generation's guard config; audit
+// off or a missing directory yields an empty, disabled result (same
+// convention as the request log). The projection copies names/actions only —
+// seclog records never carry matched content.
+func (api *proxyWebAPI) Security(query appapi.SecurityQuery) (appapi.SecurityResult, error) {
+	disabled := appapi.SecurityResult{Records: []appapi.SecurityRecord{}}
+	cfg := api.reads.config()
+	if !cfg.Guard.AuditEnabled() {
+		return disabled, nil
+	}
+	dir := filepath.Dir(cfg.Guard.AuditPathValue(accounts.HomeDir()))
+	result, err := seclog.Query(dir, seclog.Filter{
+		Kind:  query.Kind,
+		From:  query.From,
+		To:    query.To,
+		Limit: query.Limit,
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return disabled, nil
+		}
+		return appapi.SecurityResult{}, err
+	}
+	out := appapi.SecurityResult{
+		Enabled: true,
+		Records: make([]appapi.SecurityRecord, 0, len(result.Records)),
+		Skipped: result.Skipped,
+	}
+	for _, record := range result.Records {
+		out.Records = append(out.Records, appapi.SecurityRecord{
+			Ts:        record.Ts,
+			Kind:      record.Kind,
+			RequestID: record.RequestID,
+			Agent:     record.Agent,
+			Protocol:  record.Protocol,
+			Exposed:   record.Exposed,
+			Names:     append([]string(nil), record.Names...),
+			Action:    record.Action,
+			Detail:    record.Detail,
+		})
+	}
+	return out, nil
 }
 
 func (api *proxyWebAPI) ConfigDocument() (appapi.ConfigDocument, error) {

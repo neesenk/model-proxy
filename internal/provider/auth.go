@@ -30,6 +30,20 @@ type authInjector interface {
 	Refresh() error
 }
 
+// SecretReporter is the opt-in interface for providers (or their auth
+// injectors) that cache credential values in memory which the on-disk guard
+// secret collection cannot see: aqp's managed API key is minted at runtime and
+// lives only in AqpKeyProvider's cache, and codex's in-memory access_token can
+// be fresher than the auth file between refreshes. The returned values feed
+// ONLY the in-process guard known-secret scanner (internal/app merges them on
+// the refresh beat): they must never be serialized, logged, persisted, or
+// exposed through any DTO/Web API. This is the first interface-level exposure
+// of provider credential values — the exception rationale is documented in
+// docs/decisions/intentional-behaviors.md item 15.
+type SecretReporter interface {
+	ReportSecrets() []string
+}
+
 // removeAuthFile deletes a credential/auth store via credstore (treating
 // "absent" as success — idempotent logout). Used by aqp/codex Logout.
 func removeAuthFile(path string) error {
@@ -39,7 +53,10 @@ func removeAuthFile(path string) error {
 // ---- AQP key provider ----
 
 // AqpKeyProvider mints an AQP API key from the persisted SSO cookie (the
-// compass /api_key/get_or_generate endpoint), caching it for 50 minutes.
+// compass /api_key/get_or_generate endpoint), caching it for 50 minutes. The
+// minted key exists only in this memory cache — no file ever stores it — so it
+// is additionally surfaced through SecretReporter for the in-process guard
+// known-secret scanner (memory only; see the interface's contract).
 type AqpKeyProvider struct {
 	mintURL  string
 	authFile string
@@ -78,6 +95,20 @@ func (p *AqpKeyProvider) key() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.keyLocked()
+}
+
+// ReportSecrets implements SecretReporter: the currently cached minted key, or
+// nothing when no key has been minted yet. The minted managed key exists only
+// in this in-memory cache (no file ever stores it), so without this hook the
+// guard known-secret set could not cover it. Memory only, guard scanning only
+// — never serialize or log the returned value.
+func (p *AqpKeyProvider) ReportSecrets() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cached == "" {
+		return nil
+	}
+	return []string{p.cached}
 }
 
 func (p *AqpKeyProvider) keyLocked() (string, error) {
@@ -216,6 +247,21 @@ func (p *CodexOAuthProvider) Inject(req *http.Request) error {
 // cached is missing/expired.
 func (p *CodexOAuthProvider) Token() (string, string, error) {
 	return p.token()
+}
+
+// ReportSecrets implements SecretReporter: the in-memory cached access_token,
+// or nothing when no token has been loaded/refreshed yet. The on-disk OAuth
+// collection already covers the file's tokens, but this cache is fresher than
+// the file in the window between an in-process refresh landing and the next
+// file re-collection. Memory only, guard scanning only — never serialize or
+// log the returned value.
+func (p *CodexOAuthProvider) ReportSecrets() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cached == "" {
+		return nil
+	}
+	return []string{p.cached}
 }
 
 func (p *CodexOAuthProvider) token() (string, string, error) {
@@ -400,9 +446,10 @@ func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
 // added-at timestamp (only last_refresh, a different semantic, which is not
 // surfaced here). Only these two fields are projected; the access/refresh/id
 // tokens never leave the provider package in serializable or loggable form.
-// The one explicit exception: internal/app reads the raw token values once per
-// generation (build) into the guard known-secret scanner — memory only, never
-// logged, persisted, or serialized.
+// The two explicit exceptions, both memory-only and never logged, persisted,
+// or serialized: internal/app reads the raw token values once per generation
+// (build) into the guard known-secret scanner, and SecretReporter exposes the
+// in-memory cached access_token to the same scanner on the refresh beat.
 type CodexAccountInfo struct {
 	AccountID string
 	Email     string

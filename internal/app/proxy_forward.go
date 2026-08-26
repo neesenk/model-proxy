@@ -119,7 +119,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					Exposed:   exposed,
 					Detail:    "secrets=" + strings.Join(names, ",") + " action=" + action,
 				})
-				p.auditGuardHit(cfg, seclog.KindSecret, names, action, requestID, agent, proto, exposed)
+				auditGuardHit(runtime.SecLog, seclog.KindSecret, names, action, requestID, agent, proto, exposed)
 				secretNames = names
 				if action == "redact" {
 					origBody = sc.Redact(origBody)
@@ -150,7 +150,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					Exposed:   exposed,
 					Detail:    "paths=" + strings.Join(cats, ",") + " action=" + pa,
 				})
-				p.auditGuardHit(cfg, seclog.KindPath, cats, pa, requestID, agent, proto, exposed)
+				auditGuardHit(runtime.SecLog, seclog.KindPath, cats, pa, requestID, agent, proto, exposed)
 				pathCats = cats
 			}
 		}

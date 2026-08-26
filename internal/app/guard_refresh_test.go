@@ -212,3 +212,161 @@ func TestGuardOAuthRefresh_ConcurrentReloadRace(t *testing.T) {
 		t.Error("post-race: retired v1 token must not survive in any generation's scanner")
 	}
 }
+
+// --- provider in-memory secrets (provider.SecretReporter) ---
+
+var (
+	aqpMintedKeyV1 = "aqmk-" + strings.Repeat("zX8v", 8) + "-v1"
+	aqpMintedKeyV2 = "aqmk-" + strings.Repeat("kQ2n", 8) + "-v2"
+)
+
+// newAqpMintRig builds the mock compass mint endpoint + SSO cookie store a
+// real aqp provider needs. currentKey controls which key the next mint
+// returns; flipped under a mutex so request-driving goroutines can race it.
+func newAqpMintRig(t *testing.T, home string) (mintURL *string, setKey func(string)) {
+	t.Helper()
+	var mu sync.Mutex
+	key := aqpMintedKeyV1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		k := key
+		mu.Unlock()
+		w.Header().Set("content-type", "application/json")
+		fmt.Fprintf(w, `{"retcode":0,"data":{"api_key":%q,"project_id":"p1"}}`, k)
+	}))
+	t.Cleanup(srv.Close)
+	cookie := `{"sso_session_cookie":"SSO_C=test"}`
+	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "aqp_oauth_auth.json"), []byte(cookie), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return &srv.URL, func(k string) { mu.Lock(); key = k; mu.Unlock() }
+}
+
+// newAqpGuardProxy builds a proxy routing one model to a REAL aqp provider
+// (real AqpKeyProvider minting against the rig) behind a capture upstream.
+func newAqpGuardProxy(t *testing.T, home, mintURL string) *Proxy {
+	t.Helper()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	t.Cleanup(up.Close)
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"aqp": {OpenAIBaseURL: up.URL, Provider: "aqp", AqpMintURL: mintURL},
+		},
+		Routes: map[string][]RouteTarget{
+			"aqp-m": {{Provider: "aqp", Model: "aqp-m"}},
+		},
+		Guard: GuardConfig{Secrets: "log", KnownSecrets: true, Decode: true},
+	}
+	return newTestProxy(t, cfg)
+}
+
+// The aqp managed key exists only in provider memory (minted at request time,
+// stored in no file): one refresh pass after the first request must bring it
+// into the known-secret set, and a re-mint must rotate it (old value out).
+func TestGuardMemorySecrets_AqpMintedKeyRescans(t *testing.T) {
+	home := t.TempDir()
+	setPoolHome(t, home)
+	mintURL, setKey := newAqpMintRig(t, home)
+	p := newAqpGuardProxy(t, home, *mintURL)
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(px.Close)
+
+	// Pre-mint: a re-sync finds nothing (the file carries only the SSO cookie,
+	// which IS collected — but the managed key is not minted yet).
+	p.refreshGuardKnownSecrets()
+	if guardKnownSecretHits(p, aqpMintedKeyV1) {
+		t.Fatal("pre-mint: the managed key must not be protected before it exists")
+	}
+
+	// First request mints the key (provider AuthHeaders → AqpKeyProvider).
+	postOK(t, px.URL+"/v1/chat/completions",
+		`{"model":"aqp-m","messages":[{"role":"user","content":"hi"}]}`)
+	p.refreshGuardKnownSecrets()
+	if !guardKnownSecretHits(p, aqpMintedKeyV1) {
+		t.Error("post-mint refresh: the in-memory minted key must hit known_secret")
+	}
+
+	// Rotate: the mint endpoint now issues v2; force a provider re-mint, then
+	// one refresh pass swaps the protected value.
+	setKey(aqpMintedKeyV2)
+	prov, ok := p.providers["aqp"]
+	if !ok {
+		t.Fatal("aqp provider missing from providers map")
+	}
+	if err := prov.Refresh(); err != nil {
+		t.Fatalf("provider re-mint: %v", err)
+	}
+	p.refreshGuardKnownSecrets()
+	if !guardKnownSecretHits(p, aqpMintedKeyV2) {
+		t.Error("post-rotation refresh: the rotated minted key must hit known_secret")
+	}
+	if guardKnownSecretHits(p, aqpMintedKeyV1) {
+		t.Error("post-rotation refresh: the retired minted key must no longer hit known_secret")
+	}
+}
+
+// Refresh passes racing live request traffic (which mints/reads the cached key
+// under the provider's own lock) must stay race-clean and converge on the
+// current minted value. Run under -race; the final assertion pins convergence.
+func TestGuardMemorySecrets_ConcurrentMintAndRefresh(t *testing.T) {
+	home := t.TempDir()
+	setPoolHome(t, home)
+	mintURL, setKey := newAqpMintRig(t, home)
+	p := newAqpGuardProxy(t, home, *mintURL)
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	t.Cleanup(px.Close)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { // live traffic keeps the minted-key cache hot
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if code, _ := post(t, px.URL+"/v1/chat/completions",
+				`{"model":"aqp-m","messages":[{"role":"user","content":"hi"}]}`); code != http.StatusOK {
+				t.Errorf("traffic during race: status = %d, want 200", code)
+				return
+			}
+		}
+	}()
+	go func() { // re-syncs + a mid-race key rotation
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			p.refreshGuardKnownSecrets()
+			if i == 10 {
+				setKey(aqpMintedKeyV2)
+				if prov := p.providers["aqp"]; prov != nil {
+					_ = prov.Refresh()
+				}
+			}
+		}
+	}()
+	waitUntil(t, "the rotated minted key joins the known-secret set mid-race", func() bool {
+		return guardKnownSecretHits(p, aqpMintedKeyV2)
+	})
+	close(stop)
+	wg.Wait()
+
+	// Converged: the current minted key is protected, the retired one is not.
+	p.refreshGuardKnownSecrets()
+	if !guardKnownSecretHits(p, aqpMintedKeyV2) {
+		t.Error("post-race: current minted key must hit known_secret")
+	}
+	if guardKnownSecretHits(p, aqpMintedKeyV1) {
+		t.Error("post-race: retired minted key must not survive in the scanner")
+	}
+}

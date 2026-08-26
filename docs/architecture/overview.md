@@ -179,7 +179,12 @@ sweep、owner-only 权限（文件 0600/目录 0700）、非阻塞队列与单 w
 查询，以及供 CLI 绕开 daemon 直接追加的 `AppendSync`。红线：`Record.Names` 只含
 模式类型名/路径类别名，秘密值永不进入 Record；drift 记录的 detail 只含客户端名与
 指针 host。应用层只注入纯值（命中名、动作、路由元数据），扫描、阈值与派发决策
-不进本包。
+不进本包。Logger 是 reload-owned：`internal/app/security_log_adapter.go` 的
+`reconcileSecLog` 在启动与每次 reload 按当前代调和（`guard.audit` off→on 当场建
+logger、on→off 置 nil、`audit_path` 变更换新目录），构建与 goroutine admission 在
+`p.mu` 外、换代后 drain 关停旧 logger；forward 经 `RuntimeSnapshot.SecLog` 写请求
+自己代的 logger，换代瞬间旧快照的迟到 enqueue 允许丢弃（见
+`docs/decisions/intentional-behaviors.md` 条目 19）。
 
 `internal/cache` 是无仓库内依赖的精确响应缓存叶子包，拥有请求 key、
 TTL/容量 store、客户端可见响应的 bounded recorder、header normalization 与
@@ -197,7 +202,11 @@ TTL/容量 store、客户端可见响应的 bounded recorder、header normalizat
 `runtimeSnapshot.Guard` 随 generation 原子交换；known-secret 凭据值只以内存形式
 存在，永不落盘/序列化/进事件。codex/aqp 在 serve 期间原地轮转 OAuth token，因此
 Proxy 另有一个 lifecycle 循环按 `scheduling.quota_poll_interval` 节拍重收 OAuth
-auth 文件、以当前代的池秘密基重建 scanner 并在 `p.mu` 下换代指针（文件 I/O 与构建
+auth 文件、并收集 provider 经 `provider.SecretReporter` 上报的内存凭据（aqp 的
+minted managed key 只存在于内存、codex 的缓存 access_token 可能比文件新——
+provider 凭据的首次接口级暴露，只读内存、只为扫描，见
+`docs/decisions/intentional-behaviors.md` 条目 15），以当前代的池秘密基重建
+scanner 并在 `p.mu` 下换代指针（文件 I/O 与构建
 在锁外；I/O 期间发生的 reload 由代检查判废，绝不跨代混用）。
 `internal/app/proxy_forward.go` 在请求体完整读取后、
 cache 查询与所有 forward 分支之前对共享 body 扫描一次，按 `guard.secrets`
