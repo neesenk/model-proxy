@@ -15,6 +15,12 @@ import (
 // set: shorter values are too likely to collide with ordinary text.
 const minSecretLen = 12
 
+// minKnownFrag is the minimum fragment length the split-exfiltration
+// (cross-request) channel credits: each piece of a fragmented known secret
+// must be at least this long, so a few coincidental bytes of a high-entropy
+// value cannot advance a session's fragment progress.
+const minKnownFrag = 8
+
 // maxEncodedSpan bounds the token span expanded around an encoded-literal
 // hit, so a pathological run of token bytes cannot make decoding quadratic.
 const maxEncodedSpan = 8 << 10
@@ -491,6 +497,135 @@ func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
 	}
 
 	return found, stats
+}
+
+// HasKnownSecrets reports whether the scanner carries any known-secret values
+// (proxy-managed credentials). ScanKnown on a scanner without secrets can
+// never hit; callers use this to skip per-session aggregation work entirely.
+func (s *Scanner) HasKnownSecrets() bool { return len(s.secrets) > 0 }
+
+// ScanKnown runs ONLY the known-secret channel — exact values and their
+// encoded (base64/hex/url) variants — skipping the embedded rule table,
+// custom patterns and sensitive paths. It returns "known_secret" and/or
+// "known_secret_encoded" (in that order), never secret bytes.
+//
+// Used by the split-exfiltration pass, which re-scans a session window
+// concatenation where rule-table matches were already reported per request;
+// only a known credential reassembled across requests is new signal. Phase 1
+// is the same single automaton pass as findAll (non-secret needles are
+// discarded in the callback), so a clean body costs one prefilter sweep.
+func (s *Scanner) ScanKnown(body []byte) []string {
+	if len(s.secrets) == 0 {
+		return nil
+	}
+	var secretHits map[int][]int // needle id → occurrence end offsets
+	s.ac.search(body, func(id, end int) {
+		ref := s.refs[id]
+		if ref.kind != needleSecretRaw && ref.kind != needleSecretEncoded {
+			return
+		}
+		if secretHits == nil {
+			secretHits = map[int][]int{}
+		}
+		secretHits[id] = append(secretHits[id], end)
+	})
+	if secretHits == nil {
+		return nil
+	}
+	var raw, encoded bool
+	for si := range s.secrets {
+		sec := &s.secrets[si]
+		if len(secretHits[sec.rawID]) > 0 {
+			raw = true
+		}
+		for _, id := range sec.encodedIDs {
+			if len(secretHits[id]) > 0 {
+				encoded = true
+			}
+		}
+	}
+	var names []string
+	if raw {
+		names = append(names, knownSecret)
+	}
+	if encoded {
+		names = append(names, knownSecretEncoded)
+	}
+	return names
+}
+
+// ScanKnownFragment advances per-secret split-fragment progress with one
+// request body and reports whether this body COMPLETES a known secret whose
+// earlier fragments arrived in previous requests of the session.
+//
+// Why not exact matching on a window+body concatenation: every body the
+// proxy forwards starts with '{' (ExtractModel requires a leading JSON
+// object), so two requests can never place fragments byte-contiguously
+// across the junction — realistic splits put each fragment somewhere inside
+// one request's JSON. This channel therefore tracks, per known secret
+// (indexed like progress), how long a prefix has been seen IN ORDER across
+// the session's requests: a body containing the next ≥minKnownFrag-byte
+// piece extends the progress; reaching the full length is fragmented. A
+// body containing the COMPLETE secret resets that secret's progress — the
+// per-request channel (Scan) reports it, and "fragmented" must stay
+// reserved for splits a single-request scan cannot see.
+//
+// progress is the session state returned by the previous call (nil on first
+// request or after a scanner-generation change / window truncation); the
+// returned slice is the state to store for the next request. Limitations
+// (documented): raw form only (no encoded variants), at most one fragment
+// credited per request, every fragment ≥ minKnownFrag bytes, fragments must
+// arrive in order.
+func (s *Scanner) ScanKnownFragment(body []byte, progress []int) (bool, []int) {
+	if len(s.secrets) == 0 {
+		return false, nil
+	}
+	next := make([]int, len(s.secrets))
+	fragmented := false
+	for i := range s.secrets {
+		raw := s.secrets[i].raw
+		n := len(raw)
+		if n < 2*minKnownFrag {
+			// Too short to split into two creditable fragments: only the
+			// per-request channel covers it.
+			continue
+		}
+		if bytes.Contains(body, raw) {
+			continue // complete in this body — per-request channel's signal
+		}
+		p := 0
+		if i < len(progress) {
+			p = progress[i]
+		}
+		if p > 0 && p < n {
+			if j := longestContainedPrefix(raw[p:], body); j > 0 {
+				if p+j == n {
+					fragmented = true // completed across requests; progress stays 0
+					continue
+				}
+				next[i] = p + j
+				continue
+			}
+		}
+		if j := longestContainedPrefix(raw, body); j > 0 && j < n {
+			next[i] = j
+		}
+	}
+	return fragmented, next
+}
+
+// longestContainedPrefix returns the longest prefix length of frag
+// (≥ minKnownFrag) that appears in body, or 0. The min-length prefilter
+// keeps this to one bytes.Contains on bodies with no fragment at all.
+func longestContainedPrefix(frag, body []byte) int {
+	if len(frag) < minKnownFrag || !bytes.Contains(body, frag[:minKnownFrag]) {
+		return 0
+	}
+	j := minKnownFrag
+	for j < len(frag) && bytes.Contains(body, frag[:j+1]) {
+		j++
+	}
+	return j
 }
 
 // Scan returns the deduplicated type names of the secrets found in body:

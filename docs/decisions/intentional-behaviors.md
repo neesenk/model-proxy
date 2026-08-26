@@ -25,6 +25,9 @@
 17. **guard 命中永不含匹配内容**：live event、计数器、安全审计日志（seclog）只携带模式类型名/路径类别名，匹配到的秘密字节只允许出现在 redact 后的转发 body 里（被替换为 `[REDACTED]`）。审计日志因此可以安全长期保留。
 18. **cache key 基于 redact 后的 body**：guard.secrets=redact 先把秘密替换为 `[REDACTED]`，响应缓存再对改写后的 body 取 key——因此两个仅秘密值不同的请求 redact 后共享同一条缓存条目（语义有意：缓存命中的应答本就不依赖被抹掉的秘密，且避免了把秘密派生进缓存 key）。pin/force-provider 仍按既有红线绕过缓存，不受此影响。
 19. **seclog 审计日志 reload 换代、换代瞬间允许丢尾记录**：`guard.audit` 开关与 `audit_path` 变更在 reload 时立即生效（off→on 当场开始写、on→off 当场停写、路径变更换新文件）——旧 logger 在换代时先 drain 再关停，forward 只写请求自己快照里的 logger。换代瞬间在途请求若仍持旧快照 enqueue，旧 logger 已 drain 完，这几条尾记录被静默丢弃（Enqueue 是非阻塞 offer，无人再消费）：审计日志是 best-effort 可见性通道，绝不为持久化阻塞或失败请求路径。
+20. **guard 分片检测的会话窗口存 redact 前原文**：`guard.session_scan` 的会话窗口（按 `x-claude-code-session-id`，每会话 32KiB 尾窗、LRU 256、≤8MiB）保存的是 redact 之前的请求 body——存 redact 后形态会让后续分片检测失效（被抹掉的分段永远拼不回来）。这是内存敏感性的有意取舍：窗口可能含凭据，因此只活在小锁保护的进程内存里，永不落盘/日志/序列化/API；有界性（截断即重置分片进度、LRU 整体淘汰）是它的暴露上限。它不进 RuntimeSnapshot（跨代运行时观察态，参照 metricsStore），reload 不清空，避免 reload 抹掉在途会话的分片上下文。
+21. **guard 分片命中 redact 降级为 log、block 只拦补齐段**：分片泄露的秘密横跨多条请求，没有任何单个 body 可以被改写——redact 对 `known_secret_fragmented` 有意降级为 log（event/audit 的 action 记为 log），block 则 400 拒绝补齐段所在的请求；此前的分段已放行，因为它们各自是不含完整秘密的干净请求，单请求扫描无从拦截。检测用「按序最长前缀进度」（每段 ≥8 字节、只覆盖 known-secret 原文）而非窗口拼接精确匹配：能转发的 body 都以 `{` 开头（ExtractModel 要求），两条 JSON 请求的分段在窗口拼接处永远不可能字节相邻，精确拼接匹配在真实流量上必然零命中。
+22. **apikey 池 keychain 模式不可用时 fail-closed，不回落明文**：`credentials: keychain` 是用户显式的安全选择——后端不可达（headless Linux 无 Secret Service、钥匙串被锁）或元数据账户的 keychain 条目丢失时，`accounts.Store` 的读写直接报错（`credstore.ErrUnavailable`/`ErrNotFound`），而不是悄悄退回读取明文池文件（回落会让"秘密已进钥匙串"的预期在故障时无声失效，且明文文件可能正是用户想摆脱的东西）。代价是 keychain 故障期间该 provider 整体不可用，需要修复后端或把 `credentials:` 改回 `file` 后重新 login。删除语义同样偏向不留孤儿：先删 keychain 条目成功才落元数据文件（删除失败则整个保存报错），宁可保留可重试的元数据，也不留"元数据没了、秘密还挂钥匙串"的孤儿条目。锁定测试：`internal/accounts/store_keychain_test.go`（`TestKeychainUnavailableFailsClosed` 等）。
 
 ## qwen-plan：用量仅控制台、不轮询（有意为之）
 

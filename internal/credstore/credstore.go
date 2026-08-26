@@ -158,7 +158,7 @@ func (r Ref) Save(blob []byte) error {
 		if err := os.MkdirAll(filepath.Dir(r.Path), 0o700); err != nil {
 			return err
 		}
-		return atomicWriteFile(r.Path, blob, 0o600)
+		return AtomicWriteFile(r.Path, blob, 0o600)
 	}
 	if err := keychainOps.Set(serviceName, r.Name, blob); err != nil {
 		return err
@@ -199,14 +199,16 @@ func backupMigrated(path string) {
 	_ = os.Rename(path, bak)
 }
 
-// atomicWriteFile writes via a unique temp file in the target directory plus
+// AtomicWriteFile writes via a unique temp file in the target directory plus
 // fsync and rename. Mirrors provider.persist.atomicWriteFile (which cannot be
 // imported here — provider depends on credstore, not the reverse). OAuth/SSO
 // stores are rewritten with ROTATED tokens mid-flight: a crash during a direct
 // write leaves a truncated file whose old refresh token is already invalidated
 // upstream and whose new token was never persisted — the account locks until a
-// full re-login (docs/engineering/pitfalls.md #18).
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+// full re-login (docs/engineering/pitfalls.md #18). Exported for the accounts
+// pool metadata file, which needs the same crash-safety without routing
+// through Ref (its backend is selected by config, not ResolvedMode).
+func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err

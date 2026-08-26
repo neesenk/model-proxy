@@ -40,6 +40,7 @@ type Proxy struct {
 	reqLogStarted     bool                           // lifecycle owns loop/shutdown only when started by startRuntimeServices
 	cache             *responsecache.Store           // exact-match response cache (prompt-hash + TTL); nil = disabled
 	guardScanner      *guard.Scanner                 // reload-owned immutable outbound secret/path scanner; never serialized or logged
+	sessionScan       *sessionScanStore              // split-exfiltration session windows; process-lifetime (survives reload like metrics), never serialized or logged
 	guardPoolSecrets  []string                       // reload-owned: current generation's Build.PoolSecrets (base for OAuth re-syncs)
 	guardOAuthSecrets []string                       // reload-owned: OAuth + provider memory-reported known-secret values in guardScanner; refreshed in place on the poll beat
 	secLog            *seclog.Logger                 // security audit log (guard hit records); reload-owned, swapped by reconcileSecLog; nil = audit off for this generation

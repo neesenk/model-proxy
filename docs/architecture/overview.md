@@ -148,8 +148,13 @@ captured runtime 做 eligibility/sample/acquire，再经 `internal/runtime.Lifec
 goroutine 内仅做 generation-bound resolver/plan、调用 `shadow.Runtime.Execute`
 并投影 request log。
 
-`internal/accounts` 是无仓库内依赖的 API-key 账号存储叶子包，拥有 credential
-tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进程锁。根
+`internal/accounts` 是无仓库内依赖的 API-key 账号存储叶子包（唯一例外：
+`internal/credstore`，keychain 后端经其实现），拥有 credential
+tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进程锁。存储后端由
+config `credentials:` 选择：`file`（默认，秘密值内联在 0600 池 JSON）或
+`keychain`（api_key/access_key/secret_key 经 credstore 进 OS keychain，池文件只留
+id/label/added_at 元数据；明文池与 legacy 文件首读懒迁移，keychain 不可达时
+fail-closed 报错而非回落明文）。根
 `internal/app/accounts_store.go` 只适配 HOME 并为登录、Web、Provider 构建保留
 窄兼容入口；`buildProviders` 以一次 `LoadSnapshot` 同时取得 pool 与来源，并在
 同一 build result 中派生 providers、pool identity 和 implicit-route eligibility，

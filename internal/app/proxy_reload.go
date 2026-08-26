@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/shadow"
 )
 
@@ -21,6 +22,9 @@ func (p *Proxy) Reload(configPath string) error {
 	if err != nil {
 		return err
 	}
+	// Re-apply the credentials backend before any pool I/O (same as the
+	// constructor): a `credentials:` change takes effect on this reload.
+	accounts.SetProcessBackend(accounts.BackendForMode(cfg.CredentialsMode()))
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
 	// Build the guard scanner OUTSIDE the lock (regexp compilation + secret
 	// variant precomputation); the lock below only swaps the immutable pointer.

@@ -26,7 +26,7 @@
 
 - **Provider 层**（`internal/provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
 - **Routes 层**：对外暴露模型名 → 一组 `provider/model` 目标。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由；目标可声明 `protocol:` 触发协议转换；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由
-- 凭据由 `login <provider>` 管理，经 `internal/credstore` 统一存储（OS keychain 或 `~/.model-proxy/` 下 0600 文件，`MP_CRED_STORE` 可选），不落 config
+- 凭据由 `login <provider>` 管理，不落 config；apikey 池可选 keychain 后端（config `credentials:`，秘密值进 OS keychain、池文件只留元数据），codex/aqp OAuth store 经 `internal/credstore` 统一存储（`MP_CRED_STORE` 可选，keychain 或 `~/.model-proxy/` 下 0600 文件）
 
 ## 构建
 
@@ -111,6 +111,8 @@ routes:
 #   decode: true            # 默认 true：检测编码形态的秘密（base64/hex 前缀变体，解码后过原规则）
 #   paths: log              # 敏感路径信号：log（默认）| block | off（不支持 redact）
 #   audit: true             # 默认 true：命中持久化到安全审计日志（`model-proxy audit` 查询）
+#   session_scan: true      # 默认 true：分片泄露检测——同一 session（x-claude-code-session-id）多条请求
+#                           # 拼出一个 known-secret 即命中 known_secret_fragmented（redact 对此降级为 log）
 #   audit_path: ""          # 默认派生 <home>/.model-proxy/security.log；自定义必须是绝对路径（不展开 ~）
 #   extra_patterns:         # 自定义秘密格式（gitleaks extend 式，热 reload 生效）
 #     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}
@@ -138,6 +140,10 @@ model-proxy login deepseek         # 输入 DeepSeek API key（可重复 -> 多�
 model-proxy login volcengine       # Ark API Key + AccessKey/SecretKey（可重复 -> 多账号）
 model-proxy login qwen-plan        # 千问 Token Plan 个人版 sk-sp- key（可重复 -> 多账号）
 model-proxy login zhipu --label work --replace   # 命名账号 / 覆盖已存在的同 id 账号
+# 免粘贴导入（值不回显、不落日志；成功输出只有掩码账号 id）
+model-proxy login codex --from-codex             # 复用官方 codex CLI 登录态（~/.codex/auth.json，access_token 过期会自动 refresh）
+model-proxy login zhipu --from-env ZHIPU_KEY     # 从环境变量读 API key（等价交互输入，支持 --label/--replace）
+model-proxy login volcengine --from-env VOLC_ARK_KEY --from-env-ak VOLC_AK --from-env-sk VOLC_SK   # AK/SK 可选
 
 # 预设接入（一条命令完成：合并 provider 块到 config.yaml + 登录 + 热重载）
 model-proxy presets list                          # 内置预设目录（来自内置模板，过滤未实现的 provider）
@@ -282,7 +288,12 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 
 ## Token 文件
 
-凭据由 `login` 管理，按 provider name 派生路径，不落 config。存储后端由 `MP_CRED_STORE` 选择：`auto`（默认）在 OS keychain 可用时把凭据条目存入 keychain（macOS Keychain / Windows 凭据管理器 / Linux secret service），并把遗留明文文件懒迁移过去（原文件改名为 `<path>.migrated.bak` 保留一代回滚）；不可用或显式 `file` 时按历史行为存 `0600` 明文文件。显式 `keychain` 而后端不可达时 fail-closed（操作报错，不静默降级）。测试二进制永远不触碰真实 keychain。
+凭据由 `login` 管理，按 provider name 派生路径，不落 config。两类凭据各有一个存储后端开关：
+
+- **apikey 池**（`login` 写入的 `<name>_apikeys.json`）由 config 顶层 `credentials:` 选择：`file`（默认，秘密值内联在 0600 池 JSON，历史行为）或 `keychain`（秘密值 api_key/access_key/secret_key 逐条存进 OS keychain——macOS Keychain / Windows 凭据管理器 / Linux Secret Service，条目键形如 `<providerName>/<accountId>/api_key`；池文件只留 `{id, label, added_at}` 元数据）。keychain 模式下明文池与遗留单账号文件在首次读取时懒迁移（池文件被重写为纯元数据，遗留文件改名为 `<path>.migrated.bak` 保留一代回滚）；keychain 不可达时 fail-closed——操作报错，不静默回落明文文件。启用方式：`config.yaml` 加 `credentials: keychain` 后重新 login（或等首次读取自动迁移）。注意：macOS 首次写入可能弹钥匙串授权框；headless Linux 需要 Secret Service（gnome-keyring 或 KWallet）在运行；从 keychain 切回 `file` 后池文件是元数据，需要重新 login。
+- **codex/aqp OAuth store**（下表前两类）经 `internal/credstore` 统一读写，后端由 `MP_CRED_STORE` 选择：`auto`（默认）在 OS keychain 可用时把整个凭据 blob 存入 keychain 并懒迁移遗留明文文件（原文件改名为 `<path>.migrated.bak`）；不可用或显式 `file` 时按历史行为存 `0600` 明文文件；显式 `keychain` 而后端不可达时 fail-closed。
+
+测试二进制永远不触碰真实 keychain。
 
 | Provider | Token 文件 | 内容 |
 |---|---|---|
@@ -340,12 +351,13 @@ routes:
 
 针对提示注入（prompt injection）偷凭据的场景：恶意内容诱使 agent 读取 `~/.ssh/id_rsa`、`.env`、API key 后，最常见的漏出通道是把秘密塞进发给 LLM 的请求——这道流量必经 model-proxy，因此代理在**转发前对请求 body 做一次出站扫描**，是凭据出域前的最后一道内容级闸门。（agent 直接 curl/DNS 出网的通道不经过代理，那是客户端沙箱的职责，见各家 CLI 的 sandbox/网络白名单设置。）
 
-四层检测，全部只在命中字面量预过滤后才精读，干净 body 零正则零解码：
+五层检测，全部只在命中字面量预过滤后才精读，干净 body 零正则零解码：
 
 - **内置规则表**：53 条高置信秘密模式，其中 46 条精选自 gitleaks v8.28.0 规则集（MIT，溯源见 `internal/guard/rules.json`）——LLM 厂商 key、AWS/GCP/Azure、GitHub/GitLab/Slack/npm/PyPI token、JWT、PEM 私钥头等；上游带熵阈值的规则保留 Shannon 熵后置过滤压误报。
 - **known-secret（默认开）**：把代理自己管理的凭据（账号池 API key/AK/SK、codex/aqp OAuth 文件里的 token）加入扫描集，请求体出现这些值的**原文或 base64/hex/url 编码形态**即命中 `known_secret`——零误报，防注入偷代理自身凭据。匹配集只存在于内存，随 login/logout/reload 自动更新，无需任何规则维护；OAuth token 进程内轮转（codex/aqp 原地刷新写回 auth 文件）后由后台节拍（`scheduling.quota_poll_interval`，默认 5m）自动重扫进集，最迟一个周期生效，无需 reload。
 - **编码逃逸检测（默认开）**：规则前缀的 base64 三对齐/hex 变体命中后，解码外围 token 再过原规则（含熵过滤），不解码任意 span（不碰 base64 图片等正常负载）。
 - **敏感路径信号（默认 log）**：`~/.ssh`、`~/.aws/credentials`、`~/.model-proxy`、`~/.gnupg`、`~/.kube/config`、`~/.docker/config.json`、`~/.config/gcloud`、`.env` 出现在请求体里即按类别告警（`ssh`/`aws_creds`/`proxy_creds`/…）——在秘密出现之前给出"意图级"信号。只支持 log/block/off，不支持 redact（改路径会破坏正常编码工作）。
+- **分片泄露检测（`guard.session_scan`，默认开）**：单请求扫描挡不住把秘密拆成多段、每次请求带一段的偷法。代理按 `x-claude-code-session-id` 会话头维护有界内存窗口（每会话保留最近请求 body 尾部 32KiB，LRU 上限 256 会话、总量 ≤8MiB，reload 不清、永不落盘/日志），跟踪每个 known-secret 在该会话中**按序出现的最长前缀**（每段 ≥8 字节）；后续请求补齐剩余部分即命中 `known_secret_fragmented`（计数器/live event/审计与单请求命中同通路）。只覆盖 known-secret（池凭据/OAuth token）原文形态；段间隔超过 32KiB 窗口或会话被淘汰后不追溯（有界启发式，非会话录像）；无会话头的请求不聚合（单请求扫描已覆盖）。**redact 对分片命中降级为 log**——秘密横跨多个请求，任何一个 body 都无法改写；block 拒绝补齐段所在请求（400），此前的分段已放行（它们各自是干净请求）。
 
 动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先。命中持久化到安全审计日志（默认 `~/.model-proxy/security*.log`，0600，按大小+按天轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
 

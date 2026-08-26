@@ -59,6 +59,13 @@ type Config struct {
 	// bodies are rejected with 413 before any routing work, bounding per-
 	// request memory (the body is fully buffered for routing/conversion).
 	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes"`
+	// Credentials selects where apikey-pool secret VALUES live: "file"
+	// (default — inline in the 0600 pool JSON, the historical layout) or
+	// "keychain" (OS keychain via internal/credstore; the pool file keeps
+	// metadata only). OAuth stores are NOT covered (they follow credstore's
+	// MP_CRED_STORE selection). Keychain mode is fail-closed: an unreachable
+	// backend errors instead of silently serving plaintext files.
+	Credentials string `yaml:"credentials"`
 	// Conversion tunes protocol-conversion behavior.
 	Conversion ConversionConfig `yaml:"conversion"`
 }
@@ -84,6 +91,17 @@ func (c Config) MaxRequestBodyBytesValue() int64 {
 	return 64 << 20
 }
 
+// CredentialsMode returns the apikey-pool storage backend: "file" when unset
+// (the default) or the configured value lowercased. validate restricts the
+// field to the closed set file|keychain.
+func (c Config) CredentialsMode() string {
+	mode := strings.ToLower(strings.TrimSpace(c.Credentials))
+	if mode == "" {
+		return "file"
+	}
+	return mode
+}
+
 // GuardConfig configures the outbound secret scan applied to the raw client
 // request body before forwarding. secrets selects the action on a hit:
 // "log" (default — allow + live event + counter), "redact" (replace the match
@@ -94,7 +112,12 @@ func (c Config) MaxRequestBodyBytesValue() int64 {
 // base64/hex/url-encoded forms of the secret patterns. paths selects the
 // action for high-confidence sensitive-path literals (~/.ssh, .env, ...):
 // "log" (default) | "block" | "off" — "redact" is intentionally unsupported
-// (rewriting a path would corrupt legitimate coding work). audit (default
+// (rewriting a path would corrupt legitimate coding work). session_scan
+// (default true) additionally detects a known credential fragmented across
+// multiple requests of one session (bounded in-memory tail windows, keyed by
+// x-claude-code-session-id; reported as known_secret_fragmented — redact
+// degrades to log there because a cross-request secret cannot be rewritten).
+// audit (default
 // true) persists security events to the audit log at audit_path (default
 // ~/.model-proxy/security.log, resolved by the caller via AuditPathValue).
 // extra_patterns / extra_paths extend the built-in tables (gitleaks
@@ -102,12 +125,17 @@ func (c Config) MaxRequestBodyBytesValue() int64 {
 // only — matched secret content is never logged.
 type GuardConfig struct {
 	Secrets string `yaml:"secrets"`
-	// KnownSecrets/Decode/Audit default to true; the defaults are applied at
-	// load time (rawConfig literal, same pattern as web.enabled).
+	// KnownSecrets/Decode/Audit/SessionScan default to true; the defaults are
+	// applied at load time (rawConfig literal, same pattern as web.enabled).
 	KnownSecrets bool   `yaml:"known_secrets"`
 	Decode       bool   `yaml:"decode"`
 	Paths        string `yaml:"paths"`
 	Audit        bool   `yaml:"audit"`
+	// SessionScan (default true) enables split-exfiltration detection: known
+	// credentials fragmented across multiple requests of one session
+	// (x-claude-code-session-id) are reassembled from a bounded in-memory
+	// window and reported as known_secret_fragmented.
+	SessionScan bool `yaml:"session_scan"`
 	// AuditPath is an optional absolute path for the security audit log;
 	// empty = AuditPathValue derives <home>/.model-proxy/security.log.
 	AuditPath     string         `yaml:"audit_path"`
@@ -181,6 +209,10 @@ func (g GuardConfig) PathsAction() string {
 // AuditEnabled reports whether security events are persisted to the audit
 // log (default true, applied at load).
 func (g GuardConfig) AuditEnabled() bool { return g.Audit }
+
+// SessionScanEnabled reports whether split-exfiltration (fragmented
+// known-secret) detection is active (default true, applied at load).
+func (g GuardConfig) SessionScanEnabled() bool { return g.SessionScan }
 
 // AuditPathValue returns the configured audit log path, or the default
 // <home>/.model-proxy/security.log when unset.
@@ -776,6 +808,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		// Must mirror Config.MaxRequestBodyBytes (same silent-drop trap as the
 		// shadow knobs above).
 		MaxRequestBodyBytes int64            `yaml:"max_request_body_bytes"`
+		Credentials         string           `yaml:"credentials"`
 		Conversion          ConversionConfig `yaml:"conversion"`
 	}
 	raw := rawConfig{
@@ -786,7 +819,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		// Guard bools default to true; yaml only overwrites fields present in
 		// the file, so an unset field keeps the default while an explicit
 		// false is honored (same pattern as Web.Enabled above).
-		Guard: GuardConfig{KnownSecrets: true, Decode: true, Audit: true},
+		Guard: GuardConfig{KnownSecrets: true, Decode: true, Audit: true, SessionScan: true},
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		// The most common breakage: a providers' `models:` block still in the
@@ -833,6 +866,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	}
 	cfg.Budgets = raw.Budgets
 	cfg.MaxRequestBodyBytes = raw.MaxRequestBodyBytes
+	cfg.Credentials = raw.Credentials
 	cfg.Conversion = raw.Conversion
 	cfg.LogFile = ExpandPath(cfg.LogFile)
 	t := &cfg.Takeover
@@ -893,6 +927,10 @@ func (c *Config) validate() error {
 	}
 	if err := requireLoopbackListen(c.Listen); err != nil {
 		return err
+	}
+	// credentials: closed backend set (default file).
+	if mode := c.CredentialsMode(); mode != "file" && mode != "keychain" {
+		return fmt.Errorf("credentials %q invalid — use file or keychain", c.Credentials)
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("no providers configured — add at least one under `providers:`")

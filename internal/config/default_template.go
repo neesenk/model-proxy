@@ -10,6 +10,16 @@ log_level: info            # debug | info | warn | error
 # Uncomment to override:
 # log_file: /var/log/model-proxy/model-proxy.log
 
+# credentials: file         # file (default) | keychain — where apikey-pool secret
+#                           # VALUES live. keychain moves api_key/access_key/secret_key
+#                           # into the OS keychain (macOS Keychain / Windows Credential
+#                           # Manager / Linux Secret Service); the pool file then keeps
+#                           # metadata only (id/label/added_at). Plaintext pools migrate
+#                           # lazily on first read. Keychain mode is fail-closed: an
+#                           # unreachable backend errors instead of silently reading
+#                           # plaintext files. OAuth stores (codex/aqp) are NOT covered
+#                           # (they follow credstore's MP_CRED_STORE selection).
+
 # Providers — upstream backends. Token files are auto-managed by login/logout
 # at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).
 providers:
@@ -267,6 +277,12 @@ takeover:
 #                         # redact intentionally unsupported (rewriting a path
 #                         # would corrupt legitimate coding work)
 #   audit: true           # default true; persist security events to the audit log
+#   session_scan: true    # default true; detect a known credential split into
+#                         # fragments across requests of one session
+#                         # (x-claude-code-session-id; bounded in-memory windows,
+#                         # reported as known_secret_fragmented — under secrets=redact
+#                         # a fragmented hit degrades to log: a cross-request secret
+#                         # cannot be rewritten)
 #   audit_path: ""        # optional absolute path; default ~/.model-proxy/security.log
 #   extra_patterns:       # user secret formats (gitleaks extend-style)
 #     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}

@@ -201,13 +201,18 @@ restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 
 ```
 login <provider> [--label <name>] [--replace]
+                 [--from-env VAR [--from-env-ak VAR --from-env-sk VAR] | --from-codex]
 ```
 
 逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
 
-### 凭据存储后端（`internal/credstore`）
+### 凭据存储后端（`internal/credstore` + config `credentials:`）
 
-所有凭据 I/O（apikey 池、codex/aqp OAuth store、单账号遗留文件）经 `credstore.Ref` 读写，后端由 `MP_CRED_STORE` 决定：`auto`（默认，keychain 可达则用 keychain）、`file`（历史行为：0600 明文文件 + temp+fsync+rename 原子写）、`keychain`（强制；后端不可达时操作 fail-closed 报错）。keychain 模式下首次读到遗留明文文件会懒迁移进 keychain 并把原文件改名为 `<path>.migrated.bak`（保留一代回滚）。测试二进制默认解析为 file 模式，绝不触碰真实 keychain。
+codex/aqp OAuth store 经 `credstore.Ref` 读写，后端由 `MP_CRED_STORE` 决定：`auto`（默认，keychain 可达则用 keychain）、`file`（历史行为：0600 明文文件 + temp+fsync+rename 原子写）、`keychain`（强制；后端不可达时操作 fail-closed 报错）。keychain 模式下首次读到遗留明文文件会懒迁移进 keychain 并把原文件改名为 `<path>.migrated.bak`（保留一代回滚）。
+
+apikey 池（`<name>_apikeys.json` 与遗留单账号文件）走另一条开关：config 顶层 `credentials: file|keychain`（默认 file）。`keychain` 模式下 `accounts.Store` 把 api_key/access_key/secret_key 逐条写入 OS keychain（经 credstore 的 entry API，service `model-proxy`，键 `<providerName>/<accountId>/<field>`），池文件只留 `{id, label, added_at}` 元数据；明文池与遗留文件在首次读取时懒迁移（池文件原地重写为纯元数据，遗留文件改名 `.migrated.bak`）。保存时先写 keychain 再写元数据；删除账号时先删 keychain 条目成功才落元数据，避免"元数据没了秘密还留钥匙串"的孤儿。keychain 不可达一律 fail-closed 报错，不静默回落明文。模式经 `accounts.SetProcessBackend` 在 config 加载点（`LoadCmdConfig`/`CmdLogin`/serve 构造与 reload）应用到进程，未加载 config 的调用点保持 file 默认。
+
+测试二进制默认解析为 file 模式，绝不触碰真实 keychain；keychain 语义测试用 `keyring.MockInit()` 内存 mock。
 
 ### 通用
 
@@ -279,6 +284,16 @@ Volcengine Secret Access Key:
 - stderr（配了 `usage_url` 或填了 AK/SK）：`Validating credentials...`。校验在 `addVolcengineAccount` 内顺序执行：先 GET `/api/plan/v3/models` with `Authorization: Bearer <Ark key>`（**401/403 或网络错误** → `login failed: validation failed: ...`，exit 1，**不落盘**）；通过后，若 AK/SK 都非空，再签名 GetAFPUsage（失败 → 同上 exit 1，不落盘）。
 - AK/SK 可缺省（仅 chat 账号），但**必须成对**：只填 AK 不填 SK（或反之）→ `login failed: AccessKey and SecretKey must both be set, or both be empty for a chat-only account`（exit 1，不落盘）。
 - 成功同 apikey：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
+
+### 凭据导入（`internal/cli/login/import.go`，免粘贴）
+
+两条非交互导入路径，成功后同样走 `MaybeReloadDaemon` 热重载。**安全约定：导入的 secret 值从不回显、不进日志/错误信息；错误只点名文件/字段/变量名；成功输出只有掩码账号 id。**
+
+- `login codex --from-codex`（`RunCodexImport`）：读取官方 codex CLI 登录态 `~/.codex/auth.json`（格式 `{"OPENAI_API_KEY", "tokens": {id_token, access_token, refresh_token, account_id}, "last_refresh"}`），三个 token 必须非空，经 `provider.WriteCodexAuthFile` 写入本代理的 `<provName>_oauth_auth.json`（`auth_mode=chatgpt`，`account_id` 缺省时从 id_token JWT 解析，`last_refresh` 沿用源文件）。仅对 `provider_id: codex` 的条目有效（其他 provider → `--from-codex is only valid for codex providers ...`，exit 1）；与 `--from-env*` 互斥。
+  - stdout：`✓ Imported codex CLI credentials → <AUTHFILE>` + `  account_id: <MASKED>` + 一行提示（导入的 access_token 可能已过期，代理在 refresh_token 有效时按需 refresh）。
+  - 文件缺失 → `codex CLI credentials not found at <PATH> (run \`codex login\` first, ...)`；非法 JSON → `<PATH> is not valid JSON (...)`（不引用文件内容）；缺 token → `<PATH> is missing tokens.<FIELD> (...)`；apikey 模式（有 `OPENAI_API_KEY` 无 tokens）→ `<PATH> is an apikey-mode codex CLI login ...`（改用交互 device flow）。均 exit 1、不落盘。
+- `login <provider> --from-env VAR`（`runFromEnvLogin`）：apikey 类 provider 从环境变量读 key，之后与交互登录完全同路（校验、去重、`--label`/`--replace`、重复 id 的 stdin 确认）。变量不存在或为空 → `environment variable <VAR> is not set or empty`（exit 1）。codex/aqp 不支持（报错并提示 `--from-codex`/SSO）。
+- volcengine 追加 `--from-env-ak VAR` / `--from-env-sk VAR`（可选、成对，语义同交互）：三值全从环境读，**不触发 AK/SK 的 stdin 提示**（`runVolcengineLoginFromEnv`）；单独用 ak/sk flag 而无 `--from-env`、或对非 volcengine 用 ak/sk flag 均报错 exit 1。
 
 ---
 

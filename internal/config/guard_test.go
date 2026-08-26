@@ -55,6 +55,9 @@ func TestGuardNewFieldDefaults(t *testing.T) {
 	if !cfg.Guard.AuditEnabled() {
 		t.Error("AuditEnabled() = false, want default true")
 	}
+	if !cfg.Guard.SessionScanEnabled() {
+		t.Error("SessionScanEnabled() = false, want default true")
+	}
 	if got := cfg.Guard.PathsAction(); got != "log" {
 		t.Errorf("PathsAction() = %q, want default %q", got, "log")
 	}
@@ -70,7 +73,7 @@ func TestGuardDefaultsSurvivePartialBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Guard.KnownSecretsEnabled() || !cfg.Guard.DecodeEnabled() || !cfg.Guard.AuditEnabled() {
+	if !cfg.Guard.KnownSecretsEnabled() || !cfg.Guard.DecodeEnabled() || !cfg.Guard.AuditEnabled() || !cfg.Guard.SessionScanEnabled() {
 		t.Errorf("partial guard block lost defaults: %+v", cfg.Guard)
 	}
 	if got := cfg.Guard.PathsAction(); got != "log" {
@@ -80,11 +83,11 @@ func TestGuardDefaultsSurvivePartialBlock(t *testing.T) {
 
 func TestGuardExplicitFalseHonored(t *testing.T) {
 	cfg, err := LoadConfigFromBytes("test", []byte(guardTestBaseYAML+
-		"guard: {known_secrets: false, decode: false, audit: false}\n"))
+		"guard: {known_secrets: false, decode: false, audit: false, session_scan: false}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Guard.KnownSecretsEnabled() || cfg.Guard.DecodeEnabled() || cfg.Guard.AuditEnabled() {
+	if cfg.Guard.KnownSecretsEnabled() || cfg.Guard.DecodeEnabled() || cfg.Guard.AuditEnabled() || cfg.Guard.SessionScanEnabled() {
 		t.Errorf("explicit false not honored: %+v", cfg.Guard)
 	}
 }

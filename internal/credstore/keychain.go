@@ -78,3 +78,30 @@ func keychainAvailable() bool {
 	}
 	return keychainOps.Available(serviceName)
 }
+
+// Entry-level keychain access for callers that keep their own metadata files
+// and store only secret VALUES in the keychain (the accounts apikey pools
+// under config `credentials: keychain`: pool file holds id/label/added_at,
+// api_key/access_key/secret_key live here under caller-chosen keys). Unlike
+// Ref, these never consult ResolvedMode and never touch the filesystem — the
+// caller selects the backend explicitly and treats ErrUnavailable/ErrNotFound
+// as fail-closed. Key material is never echoed into errors (mapKeyringErr
+// keeps only the error class).
+func KeychainGet(key string) (string, error) {
+	blob, err := keychainOps.Get(serviceName, key)
+	if err != nil {
+		return "", err
+	}
+	return string(blob), nil
+}
+
+// KeychainSet stores one secret value under key (see KeychainGet).
+func KeychainSet(key, value string) error {
+	return keychainOps.Set(serviceName, key, []byte(value))
+}
+
+// KeychainDelete removes one entry (see KeychainGet). ErrNotFound means the
+// entry was already absent.
+func KeychainDelete(key string) error {
+	return keychainOps.Delete(serviceName, key)
+}

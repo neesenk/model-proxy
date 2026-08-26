@@ -89,9 +89,24 @@ Clients:
 Clients:
   claude | opencode | codex | pi | all`,
 
-	"login": `login <provider> [--config PATH]
+	"login": `login <provider> [--config PATH] [--label NAME] [--replace]
+                 [--from-env VAR [--from-env-ak VAR --from-env-sk VAR]]
+                 [--from-codex]
 
-  Authenticate with a provider.`,
+  Authenticate with a provider. Interactive by default; the import shortcuts
+  below avoid pasting secrets into the terminal.
+
+Import flags:
+  --from-codex        codex only: import the official codex CLI login from
+                      ~/.codex/auth.json (OAuth tokens; the proxy refreshes the
+                      access_token on demand while the refresh_token is valid)
+  --from-env VAR      apikey-class providers: read the API key from env var VAR
+  --from-env-ak VAR   volcengine only: read the Access Key ID from VAR (optional)
+  --from-env-sk VAR   volcengine only: read the Secret Access Key from VAR (optional)
+
+  --label/--replace work the same as in interactive login. Imported values are
+  never echoed or written to logs; success output shows only a masked account
+  id. Missing files/variables and malformed credential files are errors.`,
 
 	"add": `add <preset> [--config PATH] [--label NAME] [--replace]
                   [--api-key-env ENV] [--yes]

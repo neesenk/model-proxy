@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/guard"
 	observeevents "model-proxy/internal/observe/events"
@@ -34,6 +35,10 @@ func NewProxy(cfg *Config) *Proxy {
 // NewProxyWithStatePath is the injectable constructor used by tests so every
 // Proxy owns an isolated state file before the tracker loads or starts.
 func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
+	// Apply the configured credentials backend (`credentials:`) before any
+	// pool I/O: AccountStore and the web/login save paths resolve stores
+	// through the accounts process default. Reload re-applies it per config.
+	accounts.SetProcessBackend(accounts.BackendForMode(cfg.CredentialsMode()))
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
 	// Same scanner entry point as Reload: startup and reload build identical
 	// generations. An error is only reachable with an unvalidated Config
@@ -77,6 +82,10 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// Reload-owned: assigned before any request/goroutine can read it, swapped
 	// under p.mu on reload.
 	p.guardScanner = guardScanner
+	// Split-exfiltration session windows: cross-generation observation state
+	// (like p.metrics below), NOT reload-owned — reload must not wipe in-flight
+	// session context. Never logged or persisted (see session_scan.go).
+	p.sessionScan = newSessionScanStore()
 	// The OAuth subset is tracked separately so the refresh loop can re-sync it
 	// (OAuth tokens rotate in place during serve) without re-running a full
 	// BuildProviders pass; the pool subset is the stable base of every rebuild.
