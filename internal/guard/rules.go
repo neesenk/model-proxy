@@ -12,13 +12,15 @@ import (
 // attribution fields in the file); the rest (source "model-proxy") are
 // hand-written for this proxy's traffic.
 //
-// Sync process for bumping the gitleaks selection: pin a new upstream tag,
-// pull config/gitleaks.toml from that tag, re-apply the selection criteria
-// (RE2-compatible, value carries a fixed literal prefix usable as a
-// bytes.Contains prefilter, no file-path/extension context, no generic
-// keywords like "api"/"key"), review the diff, update the rule fixtures in
-// scanner_rules_test.go. Extraction is a one-shot manual step — no TOML parser
-// in production code.
+// Sync process for bumping the gitleaks selection: run
+// scripts/sync_guard_rules.sh [tag] (default: the pinned upstream tag). The
+// script pulls config/gitleaks.toml from that tag, re-extracts the carried
+// gitleaks rules' regex/entropy, and diffs a regenerated candidate against
+// rules.json — review the diff, replace rules.json manually, update the rule
+// fixtures in scanner_rules_test.go. Selection criteria for adding upstream
+// rules: RE2-compatible, value carries a fixed literal prefix usable as a
+// prefilter, no file-path/extension context, no generic keywords like
+// "api"/"key". No TOML parser in production code.
 //
 //go:embed rules.json
 var rulesJSON []byte

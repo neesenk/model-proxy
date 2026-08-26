@@ -103,3 +103,42 @@ func TestScanPathsOrderAndDedup(t *testing.T) {
 		t.Errorf("ScanPaths = %v, want %v", got, want)
 	}
 }
+
+// id_rsa / id_ed25519 require dotenv-style path-char boundaries, so
+// "did_rsakey" does not fire while "id_rsa.pub" still does.
+func TestScanPathsSSHKeyFileBoundaries(t *testing.T) {
+	s := mustScanner(t, nil, nil, nil)
+	positives := []string{
+		"id_rsa",
+		"read id_ed25519 please",
+		"cat id_rsa.pub",
+		`open "id_ed25519"`,
+		"~/.ssh/id_rsa",
+	}
+	for _, body := range positives {
+		got := s.ScanPaths([]byte(body))
+		if len(got) != 1 || got[0] != "ssh" {
+			t.Errorf("ScanPaths(%q) = %v, want [ssh]", body, got)
+		}
+	}
+	negatives := []string{
+		"did_rsakey is just an identifier",
+		"my_id_rsa",
+		"id_ed25519_backup",
+		"xid_rsax",
+	}
+	for _, body := range negatives {
+		if got := s.ScanPaths([]byte(body)); len(got) != 0 {
+			t.Errorf("ScanPaths(%q) = %v, want no hits", body, got)
+		}
+	}
+}
+
+// The two ssh table entries (~/.ssh and the bounded key-file names) report
+// the category once even when both fire.
+func TestScanPathsSSHCategoryDedup(t *testing.T) {
+	s := mustScanner(t, nil, nil, nil)
+	if got := s.ScanPaths([]byte("cat ~/.ssh/id_rsa")); len(got) != 1 || got[0] != "ssh" {
+		t.Errorf("ScanPaths = %v, want exactly [ssh]", got)
+	}
+}

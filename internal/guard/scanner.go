@@ -54,13 +54,15 @@ type knownSecretSet struct {
 	encodedIDs []int
 }
 
-// encodedProbe is one precomputed encoded form of an embedded rule's literal:
-// when the variant bytes appear in a body, the surrounding token span is
-// decoded and the owning rule's regex is run on the decoded text.
+// encodedProbe is one precomputed encoded form of one or more embedded
+// rules' literals: when the variant bytes appear in a body, the surrounding
+// token span is decoded and every owning rule's regex is run on the decoded
+// text. Several rules can share a literal (e.g. AKIA in the two AWS rules)
+// and therefore a variant, so the probe keeps every owner in table order.
 type encodedProbe struct {
-	ruleIdx int
-	variant []byte
-	hexForm bool // hex variant; false = base64 variant
+	ruleIdxs []int
+	variant  []byte
+	hexForm  bool // hex variant; false = base64 variant
 }
 
 // needleKind classifies the prefilter needles in the automaton.
@@ -214,6 +216,16 @@ func buildSecretSet(secret string, decode bool) knownSecretSet {
 // base64 stream — i.e. a substring guaranteed to appear in the stream's
 // encoding. "" when the determined slice is too short to be a useful
 // prefilter.
+//
+// The [start,end) slice is fully lit-determined for ANY literal length by
+// construction (start rounds the leading pad-affected char up, end rounds the
+// trailing next-byte-affected char down); the threshold below is only a
+// usefulness floor. At 3, a 3-byte literal (sk-, hf_, eyJ, A3T, SG.)
+// contributes probes at all three alignments: align 0 yields 4 chars, aligns
+// 1/2 yield 3 chars, each fully determined by lit (e.g. align 1: chars 2..5
+// cover lit[0] low nibble through lit[2] top bits — no pad or follower bit).
+// A 3-char base64 probe collides with random text at ~1/262144 per position,
+// still specific enough for a prefilter.
 func b64Interior(enc *base64.Encoding, lit []byte, align int) string {
 	padded := make([]byte, 0, align+len(lit))
 	padded = append(padded, make([]byte, align)...)
@@ -221,7 +233,7 @@ func b64Interior(enc *base64.Encoding, lit []byte, align int) string {
 	full := enc.EncodeToString(padded)
 	start := (8*align + 5) / 6        // ceil(8*align/6)
 	end := (8*align + 8*len(lit)) / 6 // floor(8*(align+len(lit))/6)
-	if end-start < 4 {
+	if end-start < 3 {
 		return ""
 	}
 	return full[start:end]
@@ -229,26 +241,36 @@ func b64Interior(enc *base64.Encoding, lit []byte, align int) string {
 
 // buildProbes precomputes the encoded-channel probes for the embedded rule
 // table: for every rule literal, the base64 interior variants (standard and
-// URL alphabets × three byte alignments) and the lowercase hex form.
+// URL alphabets × three byte alignments) and the lowercase hex form. Identical
+// variants (shared literals across rules, or cross-literal collisions) merge
+// into one probe carrying every owning rule, so an encoded hit re-runs all of
+// them instead of only the first rule that happened to register the variant.
 func buildProbes(rules []rule) []encodedProbe {
 	var probes []encodedProbe
-	seen := map[string]bool{}
+	owner := map[string]int{} // variant string → probe index
+	add := func(variant string, hexForm bool, ruleIdx int) {
+		if i, ok := owner[variant]; ok {
+			for _, ri := range probes[i].ruleIdxs {
+				if ri == ruleIdx {
+					return
+				}
+			}
+			probes[i].ruleIdxs = append(probes[i].ruleIdxs, ruleIdx)
+			return
+		}
+		owner[variant] = len(probes)
+		probes = append(probes, encodedProbe{ruleIdxs: []int{ruleIdx}, variant: []byte(variant), hexForm: hexForm})
+	}
 	for i, r := range rules {
 		for _, lit := range r.literals {
 			for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
 				for align := 0; align < 3; align++ {
-					v := b64Interior(enc, lit, align)
-					if v != "" && !seen[v] {
-						seen[v] = true
-						probes = append(probes, encodedProbe{ruleIdx: i, variant: []byte(v)})
+					if v := b64Interior(enc, lit, align); v != "" {
+						add(v, false, i)
 					}
 				}
 			}
-			h := hex.EncodeToString(lit)
-			if !seen[h] {
-				seen[h] = true
-				probes = append(probes, encodedProbe{ruleIdx: i, variant: []byte(h), hexForm: true})
-			}
+			add(hex.EncodeToString(lit), true, i)
 		}
 	}
 	return probes
@@ -329,12 +351,24 @@ func decodeHexSpan(span []byte) ([]byte, bool) {
 	return out, true
 }
 
+// scanStats counts bounded decode attempts during one findAll pass — a
+// package-internal seam for tests asserting that adversarial bodies cannot
+// force quadratic decoding.
+type scanStats struct{ decodes int }
+
 // findAll returns every non-overlapping secret match in body. Phase 1 is a
 // single automaton pass over all literals; phase 2 claims spans in priority
 // order: known secrets (plaintext then encoded variants), the embedded rule
 // table in file order (plaintext then the encoded channel), then custom
 // patterns in declaration order.
 func (s *Scanner) findAll(body []byte) []match {
+	found, _ := s.findAllCounted(body)
+	return found
+}
+
+// findAllCounted is findAll plus the decode-attempt counter.
+func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
+	var stats scanStats
 	// Phase 1: literal prefilter, one pass for all needles.
 	ruleHit := make([]bool, len(s.rules))
 	var probeHits map[int][]int  // probe index → occurrence end offsets
@@ -393,14 +427,20 @@ func (s *Scanner) findAll(body []byte) []match {
 	}
 
 	// 3. Encoded channel: an encoded literal hit earns a bounded decode of
-	// the surrounding token span; the owning rule's regex (with its entropy
-	// post-filter) must still match the decoded text.
+	// the surrounding token span; the owning rules' regexes (with their
+	// entropy post-filters) must still match the decoded text. Hits whose
+	// expanded span is contained in the previously processed span are
+	// skipped — the decode result for that region is already decided, and
+	// re-decoding it per hit would let an adversarial body of repeated
+	// probe hits force quadratic work. The processed span is recorded
+	// whether or not the decode succeeded.
+	var lastSpanStart, lastSpanEnd int
+	haveLastSpan := false
 	for i, p := range s.probes {
 		ends := probeHits[i]
 		if len(ends) == 0 {
 			continue
 		}
-		r := s.rules[p.ruleIdx]
 		for _, end := range ends {
 			start := end - len(p.variant)
 			tok := isB64TokenByte
@@ -408,11 +448,16 @@ func (s *Scanner) findAll(body []byte) []match {
 				tok = isHexTokenByte
 			}
 			spanStart, spanEnd := expandSpan(body, start, end, tok)
+			if haveLastSpan && spanStart >= lastSpanStart && spanEnd <= lastSpanEnd {
+				continue
+			}
+			lastSpanStart, lastSpanEnd, haveLastSpan = spanStart, spanEnd, true
 			if overlaps(found, spanStart, spanEnd) {
 				continue
 			}
 			var decoded []byte
 			var ok bool
+			stats.decodes++
 			if p.hexForm {
 				decoded, ok = decodeHexSpan(body[spanStart:spanEnd])
 			} else {
@@ -421,8 +466,14 @@ func (s *Scanner) findAll(body []byte) []match {
 			if !ok {
 				continue
 			}
-			if len(r.findIn(decoded)) > 0 {
-				found = append(found, match{r.name, spanStart, spanEnd})
+			// A shared variant re-runs every owning rule; the first match in
+			// table order claims the span.
+			for _, ri := range p.ruleIdxs {
+				r := s.rules[ri]
+				if len(r.findIn(decoded)) > 0 {
+					found = append(found, match{r.name, spanStart, spanEnd})
+					break
+				}
 			}
 		}
 	}
@@ -439,7 +490,7 @@ func (s *Scanner) findAll(body []byte) []match {
 		}
 	}
 
-	return found
+	return found, stats
 }
 
 // Scan returns the deduplicated type names of the secrets found in body:
@@ -481,6 +532,14 @@ func (s *Scanner) Scan(body []byte) []string {
 // variants. A clean body is returned unchanged. The replacement is a pure
 // byte-substring substitution, so a match inside a JSON string stays valid
 // JSON. Sensitive-path hits are never redacted.
+//
+// Deliberate tradeoff: an encoded-channel hit redacts the ENTIRE expanded
+// token span (up to maxEncodedSpan = 8KiB around the probe hit), not just the
+// decoded secret's byte range — the encoded position of the secret inside the
+// span is not tracked, and partial rewriting would risk leaving secret
+// fragments behind. A base64/hex blob carrying a secret is therefore treated
+// as tainted as a whole; over-redacting an attachment is acceptable, leaking
+// is not (宁滥勿缺 on the redaction side, opposite of the detection side).
 func (s *Scanner) Redact(body []byte) []byte {
 	found := s.findAll(body)
 	if len(found) == 0 {
