@@ -101,7 +101,9 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// table, config custom patterns/paths, and the known-secret values of the
 	// credential pool. nil only in degenerate hand-built proxies — skip then.
 	if sc := runtime.Guard; sc != nil {
-		if action := cfg.Guard.SecretsAction(); action != "off" {
+		action := cfg.Guard.SecretsAction()
+		var secretNames []string
+		if action != "off" {
 			if names := sc.Scan(origBody); len(names) > 0 {
 				if p.metrics != nil {
 					for _, name := range names {
@@ -118,20 +120,21 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					Detail:    "secrets=" + strings.Join(names, ",") + " action=" + action,
 				})
 				p.auditGuardHit(cfg, seclog.KindSecret, names, action, requestID, agent, proto, exposed)
-				switch action {
-				case "block":
-					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-					http.Error(w, fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(names, ", ")), http.StatusBadRequest)
-					return
-				case "redact":
+				secretNames = names
+				if action == "redact" {
 					origBody = sc.Redact(origBody)
 				}
 			}
 		}
 		// Sensitive-path signal (S2): an intent-level alert fired before any
 		// secret value appears. Paths are never redacted (rewriting a path
-		// would corrupt legitimate coding work).
-		if pa := cfg.Guard.PathsAction(); pa != "off" {
+		// would corrupt legitimate coding work). This scan runs even when the
+		// secrets pass already hit — including secrets=block — so one request
+		// carrying both signals gets both counters/events/audit records; only
+		// the response action is decided afterwards (below).
+		pa := cfg.Guard.PathsAction()
+		var pathCats []string
+		if pa != "off" {
 			if cats := sc.ScanPaths(origBody); len(cats) > 0 {
 				if p.metrics != nil {
 					for _, cat := range cats {
@@ -148,12 +151,21 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					Detail:    "paths=" + strings.Join(cats, ",") + " action=" + pa,
 				})
 				p.auditGuardHit(cfg, seclog.KindPath, cats, pa, requestID, agent, proto, exposed)
-				if pa == "block" {
-					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-					http.Error(w, fmt.Sprintf("blocked: request body references sensitive path %s (guard.paths=block)", strings.Join(cats, ", ")), http.StatusBadRequest)
-					return
-				}
+				pathCats = cats
 			}
+		}
+		// Unified action evaluation after BOTH scans: a secrets block outranks
+		// a paths block and its message names only the secret patterns — the
+		// path hits of the same request are already counted/audited above.
+		if len(secretNames) > 0 && action == "block" {
+			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(secretNames, ", ")), http.StatusBadRequest)
+			return
+		}
+		if len(pathCats) > 0 && pa == "block" {
+			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("blocked: request body references sensitive path %s (guard.paths=block)", strings.Join(pathCats, ", ")), http.StatusBadRequest)
+			return
 		}
 	}
 

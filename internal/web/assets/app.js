@@ -488,7 +488,7 @@ function addLiveRow(e) {
         // Non-lifecycle event (guard/budget): provider/status/latency carry no
         // meaning, so render a single event line — type badge + agent + detail.
         return `<tr>
-          <td class="mono">${esc(fmtTime(new Date(r.ts).toISOString()))}</td>
+          <td class="mono">${esc(r.ts ? fmtTime(new Date(r.ts).toISOString()) : '')}</td>
           <td class="mono">${esc(r.agent || '—')}</td>
           <td colspan="5"><span class="badge warn">⚑ ${esc(r.type)}</span> <span class="mono subdue">${esc(r.detail || '')}</span></td>
         </tr>`;
@@ -499,7 +499,7 @@ function addLiveRow(e) {
       const lt = r.type === 'start' ? '' : (r.latency_ms != null ? r.latency_ms + 'ms' : '');
       const tk = (r.type === 'end' && (r.input || r.output)) ? `${fmtNum(r.input)}→${fmtNum(r.output)}` : '';
       return `<tr>
-        <td class="mono">${esc(fmtTime(new Date(r.ts).toISOString()))}</td>
+        <td class="mono">${esc(r.ts ? fmtTime(new Date(r.ts).toISOString()) : '')}</td>
         <td class="mono">${esc(r.agent || '—')}</td>
         <td>${esc(r.exposed || '—')}</td>
         <td class="mono">${esc(p)}</td>

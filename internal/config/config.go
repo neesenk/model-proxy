@@ -135,17 +135,18 @@ var extraPatternNameRE = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
 // literalConsistentWithRegex is a weak sanity check that literal can occur
 // inside some match of re: a literal pre-filter is typically a fixed
 // prefix/infix of the match (e.g. "mv-" for `\bmv-[A-Za-z0-9]{32,}`), so it
-// tries the literal itself and the literal padded on either side with runs
-// of common token characters. It cannot prove the "guaranteed substring of
+// tries the literal itself and the literal padded on either side (and on both
+// sides, for infix literals like "mv-" inside `[0-9]mv-[0-9]`) with runs of
+// common token characters. It cannot prove the "guaranteed substring of
 // every match" invariant — it only rejects obvious typos where no padded
 // candidate matches at all.
 func literalConsistentWithRegex(re *regexp.Regexp, literal string) bool {
 	if re.MatchString(literal) {
 		return true
 	}
-	for _, ch := range []string{"a", "A", "0", "_", "-", "/", "+", "="} {
+	for _, ch := range []string{"a", "A", "0", "_", "-", "/", "+", "=", ".", ":"} {
 		fill := strings.Repeat(ch, 64)
-		if re.MatchString(literal+fill) || re.MatchString(fill+literal) {
+		if re.MatchString(literal+fill) || re.MatchString(fill+literal) || re.MatchString(fill+literal+fill) {
 			return true
 		}
 	}
@@ -1093,11 +1094,19 @@ func (c *Config) validate() error {
 	// guard.extra_patterns: a bad rule must fail at load, not silently never
 	// fire — name restricted to a log-safe token, regex must compile, and a
 	// literal pre-filter must be a guaranteed substring of every match.
+	// Duplicate names are rejected too: the scanner constructor refuses them,
+	// so without this check a "valid" config would lose ALL extra_patterns to
+	// the startup degrade path while reloads fail outright.
+	seenPatternNames := map[string]int{}
 	for i, p := range c.Guard.ExtraPatterns {
 		where := fmt.Sprintf("guard.extra_patterns[%d]", i)
 		if !extraPatternNameRE.MatchString(p.Name) {
 			return fmt.Errorf("%s: name %q invalid — must match ^[a-z0-9_]{1,32}$", where, p.Name)
 		}
+		if prev, ok := seenPatternNames[p.Name]; ok {
+			return fmt.Errorf("%s: name %q duplicates guard.extra_patterns[%d] — pattern names must be unique (the scanner rejects duplicates, which would drop every extra_patterns rule)", where, p.Name, prev)
+		}
+		seenPatternNames[p.Name] = i
 		if p.Regex == "" {
 			return fmt.Errorf("%s (%s): regex must not be empty", where, p.Name)
 		}

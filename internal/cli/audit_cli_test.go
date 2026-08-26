@@ -33,6 +33,16 @@ func TestParseAuditFlags(t *testing.T) {
 			AuditOpts{From: "2026-08-01T00:00:00Z", Kind: "secret", Limit: 0}, false},
 		{"bad limit", []string{"--limit", "abc"}, AuditOpts{Limit: 50}, true},
 		{"bad limit equals", []string{"--limit="}, AuditOpts{Limit: 50}, true},
+		{"unknown flag", []string{"--bogus"}, AuditOpts{Limit: 50}, true},
+		{"unknown positional", []string{"drift"}, AuditOpts{Limit: 50}, true},
+		{"missing from value", []string{"--from"}, AuditOpts{Limit: 50}, true},
+		{"missing kind value", []string{"--json", "--kind"}, AuditOpts{Limit: 50, JSON: true}, true},
+		{"missing limit value", []string{"--limit"}, AuditOpts{Limit: 50}, true},
+		// --config is resolved by configPath from the full args; the parser
+		// only skips it (both forms) instead of flagging it unknown.
+		{"config space form skipped", []string{"--config", "/tmp/x.yaml", "--kind", "drift"},
+			AuditOpts{Kind: "drift", Limit: 50}, false},
+		{"config equals form skipped", []string{"--config=/tmp/x.yaml"}, AuditOpts{Limit: 50}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,6 +76,7 @@ func TestParseAuditTime(t *testing.T) {
 		{"30m", now.Add(-30 * time.Minute).UnixMilli(), false},
 		{"1750000000", 1750000000 * 1000, false},
 		{"2026-08-25T10:00:00Z", time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC).UnixMilli(), false},
+		{"-1h", 0, true}, // negative duration is a future timestamp — always a typo
 		{"garbage", 0, true},
 	}
 	for _, tc := range cases {
@@ -190,6 +201,12 @@ func TestRenderAudit(t *testing.T) {
 		!strings.Contains(err.Error(), "invalid --from") {
 		t.Errorf("invalid --from: got %v", err)
 	}
+	// --from after --to is an empty window — report it instead of rendering
+	// an empty table that looks like "no records".
+	if _, err := RenderAudit(dir, AuditOpts{From: "30m", To: "1h"}, now); err == nil ||
+		!strings.Contains(err.Error(), "--from is after --to") {
+		t.Errorf("--from > --to: got %v", err)
+	}
 
 	// Empty (existing) dir and missing dir both render a friendly note.
 	out, err = RenderAudit(t.TempDir(), AuditOpts{Limit: 50}, now)
@@ -224,6 +241,29 @@ func TestFormatAuditTableEmpty(t *testing.T) {
 	out := FormatAuditTable(nil, "/tmp/x")
 	if !strings.Contains(out, "(no security audit records in /tmp/x)") {
 		t.Errorf("empty table note wrong: %q", out)
+	}
+}
+
+// TestFormatAuditTableSanitizesDetail: control characters in a record's
+// detail (from a future producer, or a tampered log file) must never break
+// the table layout — they render as spaces on a single line.
+func TestFormatAuditTableSanitizesDetail(t *testing.T) {
+	records := []*observeseclog.Record{{
+		Ts:     time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC).UnixMilli(),
+		Kind:   observeseclog.KindDrift,
+		Agent:  "doctor",
+		Detail: "client=pi\nexpected=h1\tactual=h2\x1b[31m",
+	}}
+	out := FormatAuditTable(records, "/tmp/x")
+	if strings.Contains(out, "client=pi\n") || strings.ContainsAny(out, "\t\x1b") {
+		t.Errorf("detail control characters leaked into the table:\n%q", out)
+	}
+	if !strings.Contains(out, "client=pi expected=h1 actual=h2 [31m") {
+		t.Errorf("sanitized detail missing from the table:\n%q", out)
+	}
+	// Header + exactly one record line.
+	if lines := strings.Count(out, "\n"); lines != 2 {
+		t.Errorf("table lines = %d, want 2 (header + 1 record):\n%q", lines, out)
 	}
 }
 

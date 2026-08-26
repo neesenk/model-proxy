@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
@@ -35,29 +36,42 @@ type AuditOpts struct {
 
 // ParseAuditFlags scans `audit` flags: --from/--to (now | duration-ago like
 // 1h | unix seconds | RFC3339), --kind (secret|path|drift), --limit N,
-// --json. --config is left to configPath. An unparseable --limit value is an
-// immediate error (a silent 0 would mean "no cap" — never what the user
-// mistyped).
+// --json. --config is left to configPath (consumed here only to skip its
+// value). An unparseable --limit value, an unknown flag, and a flag missing
+// its value are immediate errors (a silent 0 would mean "no cap" — never
+// what the user mistyped, and a silently ignored flag hides typos).
 func ParseAuditFlags(args []string) (AuditOpts, error) {
 	o := AuditOpts{Limit: 50}
+	// value consumes the next arg as this flag's value; missing = error.
+	value := func(name string, i *int) (string, error) {
+		if *i+1 >= len(args) {
+			return "", fmt.Errorf("%s requires a value", name)
+		}
+		*i++
+		return args[*i], nil
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		value := func() string {
-			if i+1 < len(args) {
-				i++
-				return args[i]
-			}
-			return ""
-		}
+		var err error
 		switch {
 		case a == "--from":
-			o.From = value()
+			if o.From, err = value("--from", &i); err != nil {
+				return o, err
+			}
 		case a == "--to":
-			o.To = value()
+			if o.To, err = value("--to", &i); err != nil {
+				return o, err
+			}
 		case a == "--kind":
-			o.Kind = value()
+			if o.Kind, err = value("--kind", &i); err != nil {
+				return o, err
+			}
 		case a == "--limit":
-			n, err := strconv.Atoi(value())
+			v, verr := value("--limit", &i)
+			if verr != nil {
+				return o, verr
+			}
+			n, err := strconv.Atoi(v)
 			if err != nil {
 				return o, fmt.Errorf("invalid --limit: must be an integer (default 50, 0 = no cap)")
 			}
@@ -76,6 +90,15 @@ func ParseAuditFlags(args []string) (AuditOpts, error) {
 			o.Limit = n
 		case a == "--json":
 			o.JSON = true
+		case a == "--config":
+			// Resolved by configPath from the full arg list; skip its value.
+			if i+1 < len(args) {
+				i++
+			}
+		case strings.HasPrefix(a, "--config="):
+			// Resolved by configPath.
+		default:
+			return o, fmt.Errorf("unknown flag %q", a)
 		}
 	}
 	return o, nil
@@ -122,6 +145,9 @@ func RenderAudit(dir string, opts AuditOpts, now time.Time) (string, error) {
 	if filter.To, err = ParseAuditTime(opts.To, now); err != nil {
 		return "", fmt.Errorf("invalid --to %q: %v", opts.To, err)
 	}
+	if filter.From != 0 && filter.To != 0 && filter.From > filter.To {
+		return "", fmt.Errorf("--from is after --to (empty window)")
+	}
 	result, err := observeseclog.Query(dir, filter)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -159,6 +185,9 @@ func ParseAuditTime(v string, now time.Time) (int64, error) {
 		return now.UnixMilli(), nil
 	}
 	if d, err := time.ParseDuration(v); err == nil {
+		if d < 0 {
+			return 0, fmt.Errorf("duration must not be negative (got %s)", v)
+		}
 		return now.Add(-d).UnixMilli(), nil
 	}
 	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
@@ -183,7 +212,19 @@ func FormatAuditTable(records []*observeseclog.Record, dir string) string {
 	for _, r := range records {
 		out += fmt.Sprintf("%-14s %-7.7s %-12.12s %-16.16s %-20.20s %-7.7s %s\n",
 			time.UnixMilli(r.Ts).Format("01-02 15:04:05"),
-			r.Kind, r.Agent, r.Exposed, strings.Join(r.Names, ","), r.Action, r.Detail)
+			r.Kind, r.Agent, r.Exposed, strings.Join(r.Names, ","), r.Action, sanitizeAuditDetail(r.Detail))
 	}
 	return out
+}
+
+// sanitizeAuditDetail replaces control characters (newlines, tabs, ANSI
+// escapes, ...) with spaces so a future producer can never break the table
+// layout or inject terminal sequences through the detail column.
+func sanitizeAuditDetail(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
 }

@@ -7,6 +7,7 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	displaypkg "model-proxy/internal/provider"
 	"os"
+	"strings"
 
 	configdomain "model-proxy/internal/config"
 )
@@ -67,6 +68,7 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		s := cfg.Scheduling
 		fmt.Printf("  scheduling: threshold=%d cooldown=%s rate_backoff=%s timeout=%s dwell=%s\n",
 			s.Threshold(), s.Cooldown(), s.RateBackoff(), s.Timeout(), s.Dwell())
+		fmt.Print(RenderGuardSummary(cfg))
 		// Config-time routing hazards (explicit routes only — implicit routes are
 		// a daemon-side concept; the daemon logs these at boot/reload).
 		for _, w := range app.ConfigRoutingWarnings(cfg, cfg.Routes) {
@@ -76,6 +78,31 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		fmt.Fprintf(os.Stderr, "unknown config subcommand: %s\n", sub)
 		os.Exit(1)
 	}
+}
+
+// RenderGuardSummary renders the effective outbound secret-guard settings for
+// `config check`. The built-in rule tables are embedded in the binary
+// (internal/guard) — reporting only their presence keeps the CLI free of a
+// dependency edge on the guard package; custom extensions from
+// guard.extra_patterns / guard.extra_paths are counted and named. All values
+// are effective values (load-time defaults applied), same as scheduling.
+func RenderGuardSummary(cfg *configdomain.Config) string {
+	g := cfg.Guard
+	var b strings.Builder
+	fmt.Fprintf(&b, "  guard: secrets=%s known_secrets=%t decode=%t paths=%s audit=%t\n",
+		g.SecretsAction(), g.KnownSecretsEnabled(), g.DecodeEnabled(), g.PathsAction(), g.AuditEnabled())
+	fmt.Fprintf(&b, "    audit_path: %s\n", g.AuditPathValue(cliframework.HomeDir()))
+	names := make([]string, 0, len(g.ExtraPatterns))
+	for _, p := range g.ExtraPatterns {
+		names = append(names, p.Name)
+	}
+	fmt.Fprintf(&b, "    patterns: built-in tables (embedded) + %d custom", len(g.ExtraPatterns))
+	if len(names) > 0 {
+		fmt.Fprintf(&b, " (%s)", strings.Join(names, ", "))
+	}
+	b.WriteByte('\n')
+	fmt.Fprintf(&b, "    extra_paths: %d\n", len(g.ExtraPaths))
+	return b.String()
 }
 
 // CmdConfigRun is the process-level entry: it owns config loading (init skips

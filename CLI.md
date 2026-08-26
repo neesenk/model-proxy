@@ -490,7 +490,12 @@ claude_mapping: <N> aliases      # 仅当 >0
       ...
     claude_mapping: <N>
     scheduling: threshold=<T> cooldown=<D> rate_backoff=<D> timeout=<D> dwell=<D>
+    guard: secrets=<ACTION> known_secrets=<BOOL> decode=<BOOL> paths=<ACTION> audit=<BOOL>
+      audit_path: <PATH>
+      patterns: built-in tables (embedded) + <N> custom (<NAME>, ...)
+      extra_paths: <N>
   ```
+  guard 段为生效值（load 默认值已应用；`RenderGuardSummary`）：内置规则表嵌入在二进制里，只报「embedded」不报条数——这样 CLI 不需要依赖 internal/guard；自定义扩展（`guard.extra_patterns` 计数 + name 列表、`guard.extra_paths` 计数）来自 config 结构。
 
 ### 通用
 
@@ -767,7 +772,7 @@ Takeover
 - route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从 config routes + 隐式路由 + 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
 - `request_log` 未开启时 Recent failures 节是一行 dim 提示（`request_log disabled — …`），不算错误；无任何失败记录时显示 `none recorded`。
 - takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi `providers[<pid>].baseUrl`。
-- 漂移审计：`guard.audit` 开启（默认）时，每个漂移 client 追加一条 `kind=drift`、`agent=doctor` 的安全审计记录（`seclog.AppendSync`），`detail` 只含 `client=<名> expected=<期望host> actual=<实际host>`——`net/url` 解析取 `Host`，永不含 URL 路径与查询串（非 URL 占位值归一为 `(no-url)`）。`guard.audit: false` 不写；append 失败只降级为 stderr `⚠ security audit append failed: <ERR>`，doctor 输出与 exit code 不变。
+- 漂移审计：`guard.audit` 开启（默认）时，每个漂移 client 追加一条 `kind=drift`、`agent=doctor` 的安全审计记录（`seclog.AppendSync`），`detail` 只含 `client=<名> expected=<期望host> actual=<实际host>`——`net/url` 解析取 `Host`，永不含 URL 路径与查询串；无 scheme 的指针（`evil-host:8317/v1` 会被误解析为 scheme）回退取第一个 `/` 前的部分（过滤控制字符），非 URL 占位值（含空格/括号的 `(file missing)` 等）归一为 `(no-url)`。**同一 client 当天已有 drift 记录则不重复追加**（漂移通常持续到用户修复；去重查询失败不阻断追加）。`guard.audit: false` 不写；append 失败只降级为 stderr `⚠ security audit append failed: <ERR>`，doctor 输出与 exit code 不变。
 
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
@@ -887,10 +892,11 @@ audit [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PAT
 
 逻辑（`internal/cli/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
 
-- `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。
+- `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。负时长（如 `-1h`）报错；`--from` 晚于 `--to` -> `✗ --from is after --to (empty window)` + exit 1。
 - `--kind`：`secret` | `path` | `drift`；其他值 -> stderr `✗ invalid --kind "<V>": must be secret, path, or drift` + exit 1。
 - `--limit N`：只保留最新 N 条（默认 50；`0`/负数 = 全部）。非整数 -> stderr `✗ invalid --limit: …` + exit 1。
 - `--json`：stdout 为 records 数组原样 JSON（`seclog.Record`，最新在前；空结果为 `[]`），供 jq。
+- 未识别 flag/位置参数 -> `✗ unknown flag "<A>"` + exit 1；`--from`/`--to`/`--kind`/`--limit` 缺值 -> `✗ <FLAG> requires a value` + exit 1（`--config` 及其值由 configPath 消费，不算未知）。
 
 ### stdout（表格，`FormatAuditTable`）
 
@@ -899,7 +905,7 @@ time           kind    agent         route             names                 act
 <MM-DD HH:MM:SS(14)> <kind(7)> <agent(12)> <exposed(16)> <逗号连接(20)> <action(7)> <detail>
 ```
 
-记录按时间倒序（最新在前）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数追加一行 `  (<N> unreadable line(s) skipped)`。
+记录按时间倒序（最新在前）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数（含无法打开的日志文件，每个计 1）追加一行 `  (<N> unreadable line(s) skipped)`；文件末尾无换行符的半行是 daemon 写入中的撕裂尾行，直接忽略、不计入 skipped。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
 
 ---
 
@@ -912,5 +918,6 @@ time           kind    agent         route             names                 act
 - `internal/cli/models/models_check_test.go`：`PrintKeptModels` / `PrintFilterSummary` 输出。
 - `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
 - `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
+- `internal/cli/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

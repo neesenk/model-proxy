@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"container/heap"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,7 +42,11 @@ type Result struct {
 
 // Query streams every audit-log file in dir (active and rotated) and returns
 // matching records newest first. A positive limit retains only a timestamp
-// top-K in memory. Unparseable lines are skipped and counted in Skipped.
+// top-K in memory. Unparseable lines are skipped and counted in Skipped, as
+// are files that cannot be opened at all. One exception: a final line with no
+// trailing newline that ends at a clean EOF is a torn tail — the daemon is
+// mid-write into the active file — and is ignored silently instead of being
+// counted as unreadable.
 func Query(dir string, filter Filter) (*Result, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -66,12 +71,19 @@ func Query(dir string, filter Filter) (*Result, error) {
 	for i := len(names) - 1; i >= 0; i-- {
 		file, err := os.Open(filepath.Join(dir, names[i]))
 		if err != nil {
+			// An unreadable rotated file (e.g. damaged permissions) must
+			// surface in Skipped, not vanish silently.
+			result.Skipped++
 			continue
 		}
 		reader := bufio.NewReaderSize(file, 64*1024)
 		for {
 			line, readErr := reader.ReadBytes('\n')
-			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
+			// A non-newline-terminated last line read at a clean EOF is a
+			// torn tail: the daemon is mid-write into the active file. Drop
+			// it without counting Skipped — it will parse on the next run.
+			tornTail := readErr == io.EOF && len(line) > 0 && line[len(line)-1] != '\n'
+			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 && !tornTail {
 				var record Record
 				if err := json.Unmarshal(trimmed, &record); err != nil {
 					result.Skipped++

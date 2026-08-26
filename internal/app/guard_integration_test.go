@@ -17,8 +17,10 @@ import (
 // never real credentials (AGENTS.md credential red line), and failure messages
 // must not echo the fixture bytes either.
 
-// guardFixtureKey is a synthetic AWS-shaped access key id (all zeros).
-const guardFixtureKey = "AKIA" + "0000000000000000"
+// guardFixtureKey is a synthetic AWS-shaped access key id (the AWS docs
+// example suffix — high-entropy, as the rule requires; all-zeros no longer
+// matches since the embedded rule gained an entropy floor).
+const guardFixtureKey = "AKIA" + "IOSFODNN7EXAMPLE"
 
 func guardRequestBody() string {
 	return `{"model":"glm","messages":[{"role":"user","content":"here is my key ` + guardFixtureKey + `"}]}`

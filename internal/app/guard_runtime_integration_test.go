@@ -222,6 +222,75 @@ func TestGuardAudit_PersistsSecretAndPathRecords(t *testing.T) {
 	}
 }
 
+// (d2) secrets=block must NOT short-circuit the paths pass: one body hitting
+// both channels still gets both counters/events/audit records; only the
+// response action is secrets-first (400 names the secret patterns only).
+func TestGuardBlock_SecretsBlockStillScansPaths(t *testing.T) {
+	p, proxyURL, bodies := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "block", KnownSecrets: true, Decode: true, Paths: "log", Audit: true},
+		guardPoolKey)
+	dir := t.TempDir()
+	logger, err := seclog.New(dir, seclog.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go logger.Run()
+	p.secLog = logger
+
+	code, respBody := post(t, proxyURL+"/v1/chat/completions",
+		`{"model":"glm","messages":[{"role":"user","content":"key `+guardPoolKey+` then read ~/.ssh/config"}]}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("secrets=block: status=%d body=%s, want 400", code, respBody)
+	}
+	if !strings.Contains(respBody, "guard.secrets=block") || strings.Contains(respBody, "guard.paths=block") {
+		t.Errorf("block response = %q, want the secrets reason only (paths action stays secrets-first)", respBody)
+	}
+	if strings.Contains(respBody, guardPoolKey) {
+		t.Errorf("block response leaked matched content")
+	}
+	if got := bodies(); len(got) != 0 {
+		t.Errorf("blocked request reached the upstream %d times, want 0", len(got))
+	}
+
+	// Both channels counted + published, even though secrets=block.
+	snap := p.metrics.Snapshot()
+	if n := snap[counters.PMKey{Provider: "guard", Model: "known_secret"}].Requests; n != 1 {
+		t.Errorf("known_secret counter = %d, want 1", n)
+	}
+	if n := snap[counters.PMKey{Provider: "guard", Model: "ssh"}].Requests; n != 1 {
+		t.Errorf("ssh path counter = %d, want 1 (paths must scan even when secrets blocks)", n)
+	}
+	details := guardEventDetails(p)
+	if len(details) != 2 {
+		t.Fatalf("guard events = %v, want secrets + paths events", details)
+	}
+
+	// Both audit records persist.
+	logger.Shutdown()
+	result, err := seclog.Query(dir, seclog.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawSecret, sawPath bool
+	for _, rec := range result.Records {
+		switch rec.Kind {
+		case seclog.KindSecret:
+			sawSecret = true
+			if rec.Action != "block" {
+				t.Errorf("secret record action = %q, want block", rec.Action)
+			}
+		case seclog.KindPath:
+			sawPath = true
+			if len(rec.Names) != 1 || rec.Names[0] != "ssh" {
+				t.Errorf("path record = %+v, want names=[ssh]", rec)
+			}
+		}
+	}
+	if !sawSecret || !sawPath {
+		t.Fatalf("audit records: secret=%v path=%v, want both (records=%v)", sawSecret, sawPath, result.Records)
+	}
+}
+
 // (e) Toggles: known_secrets:false stops pool-key matching; decode:false
 // stops encoded forms while plaintext still hits.
 func TestGuardToggles_KnownSecretsAndDecode(t *testing.T) {

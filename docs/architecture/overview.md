@@ -195,10 +195,16 @@ TTL/容量 store、客户端可见响应的 bounded recorder、header normalizat
 + 命中才精读的两阶段管线、known-secret 精确值变体集、规则前缀的 base64/hex 编码
 通道、敏感路径类别表、span 去重的 Scan/ScanPaths/Redact）。Scanner 以
 `runtimeSnapshot.Guard` 随 generation 原子交换；known-secret 凭据值只以内存形式
-存在，永不落盘/序列化/进事件。`internal/app/proxy_forward.go` 在请求体完整读取后、
+存在，永不落盘/序列化/进事件。codex/aqp 在 serve 期间原地轮转 OAuth token，因此
+Proxy 另有一个 lifecycle 循环按 `scheduling.quota_poll_interval` 节拍重收 OAuth
+auth 文件、以当前代的池秘密基重建 scanner 并在 `p.mu` 下换代指针（文件 I/O 与构建
+在锁外；I/O 期间发生的 reload 由代检查判废，绝不跨代混用）。
+`internal/app/proxy_forward.go` 在请求体完整读取后、
 cache 查询与所有 forward 分支之前对共享 body 扫描一次，按 `guard.secrets`
 （log/redact/block/off）与 `guard.paths`（log/block/off，不支持 redact）放行、
-替换 `[REDACTED]` 或 400 拒绝；命中只以模式类型名/路径类别名进入 live event、
+替换 `[REDACTED]` 或 400 拒绝；secrets/paths 两类扫描都完成后才统一评估响应动作
+（secrets=block 不短路 paths 的计数/事件/审计，响应动作 secrets 优先），命中只以
+模式类型名/路径类别名进入 live event、
 `("guard", <名>)` 计数器与 seclog 审计记录，命中内容永不落日志或事件。
 
 `internal/transport/bodycapture` 是无仓库内依赖的通用响应流捕获叶子包：

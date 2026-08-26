@@ -55,8 +55,12 @@ func (p *Proxy) Reload(configPath string) error {
 	p.cache = NewResponseCache(cfg.Cache)
 	// Swap the guard scanner with the same generation: in-flight requests keep
 	// their snapshot's scanner; new requests see the new credential set
-	// (login adds protection, logout drops it, immediately at reload).
+	// (login adds protection, logout drops it, immediately at reload). The
+	// pool/OAuth secret subsets are stored alongside so the refresh loop's
+	// in-place re-syncs always rebuild from THIS generation's build.
 	p.guardScanner = scanner
+	p.guardPoolSecrets = built.PoolSecrets
+	p.guardOAuthSecrets = built.OAuthSecrets
 	// Rebuild the shadow dispatch bundle so shadow_sample_rate /
 	// shadow_max_concurrent / client-timeout changes take effect at once — without
 	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until

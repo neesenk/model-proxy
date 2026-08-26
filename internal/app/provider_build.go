@@ -52,6 +52,16 @@ type Build struct {
 	// to the guard known-secret scanner. Memory only: never logged, persisted,
 	// or serialized (credential red line).
 	Secrets []string
+	// PoolSecrets is the API-key-pool subset of Secrets. It is stable within a
+	// config generation (pool files are only re-read by BuildProviders), so the
+	// guard OAuth refresh loop reuses it as the base when re-collecting the
+	// rotating OAuth subset.
+	PoolSecrets []string
+	// OAuthSecrets is the codex/aqp subset of Secrets. OAuth providers rotate
+	// their tokens in place during serve (rewriting <name>_oauth_auth.json),
+	// so this is the only part of Secrets that can change WITHOUT a reload —
+	// the guard refresh loop re-collects it on the quota-poll beat.
+	OAuthSecrets []string
 }
 
 // BuildOptions carries the process-environment seams buildProviders needs:
@@ -71,13 +81,13 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 	poolIndex := map[string][]string{}
 	parentOf := map[string]string{}
 	eligible := map[string]bool{}
-	var secrets []string
+	var poolSecrets, oauthSecrets []string
 	for name, prov := range cfg.Providers {
 		if prov.Provider == "aqp" || prov.Provider == "codex" {
 			// OAuth/SSO providers own separate auth stores and never consult the
 			// API-key account pool namespace. Their tokens still join the guard
 			// known-secret set (best-effort, memory only).
-			secrets = append(secrets, collectOAuthSecrets(opts, name, prov.Provider)...)
+			oauthSecrets = append(oauthSecrets, collectOAuthSecrets(opts, name, prov.Provider)...)
 			if p := BuildOne(cfg, opts, name, prov, accounts.Credentials{}); p != nil {
 				m[name] = p
 			}
@@ -98,7 +108,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		// covers both sources without a second storage read.
 		for _, a := range pool.Accounts {
 			cred := a.Credentials()
-			secrets = appendNonEmpty(secrets, cred.APIKey, cred.AccessKey, cred.SecretKey)
+			poolSecrets = appendNonEmpty(poolSecrets, cred.APIKey, cred.AccessKey, cred.SecretKey)
 		}
 		if snapshot.Source != accounts.SourcePlural {
 			// Missing or legacy: API-key providers keep their historical
@@ -158,7 +168,12 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		PoolIndex: poolIndex,
 		ParentOf:  parentOf,
 		Eligible:  eligible,
-		Secrets:   secrets,
+		// Fresh slices: the caller stores PoolSecrets/OAuthSecrets as
+		// reload-owned state and later concatenates them for scanner rebuilds,
+		// so Secrets must not share a backing array with either subset.
+		Secrets:      append(append([]string(nil), poolSecrets...), oauthSecrets...),
+		PoolSecrets:  poolSecrets,
+		OAuthSecrets: oauthSecrets,
 	}
 }
 
@@ -170,6 +185,22 @@ func appendNonEmpty(dst []string, vals ...string) []string {
 		}
 	}
 	return dst
+}
+
+// CollectOAuthSecrets re-reads every codex/aqp provider's OAuth auth file and
+// returns the current token/cookie values. It is the refreshable counterpart
+// of the OAuth pass inside BuildProviders: OAuth providers rotate their tokens
+// in place during serve, so the guard refresh loop calls this on a beat to
+// re-sync the known-secret set without a full provider rebuild. Best-effort
+// like collectOAuthSecrets — missing/corrupt files contribute nothing.
+func CollectOAuthSecrets(cfg *configdomain.Config, opts BuildOptions) []string {
+	var out []string
+	for name, prov := range cfg.Providers {
+		if prov.Provider == "aqp" || prov.Provider == "codex" {
+			out = append(out, collectOAuthSecrets(opts, name, prov.Provider)...)
+		}
+	}
+	return out
 }
 
 // collectOAuthSecrets best-effort reads one codex/aqp provider's OAuth/SSO

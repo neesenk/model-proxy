@@ -46,7 +46,15 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 		if !cfg.Guard.KnownSecretsEnabled() {
 			secrets = nil
 		}
-		guardScanner, _ = guard.NewScannerWithOptions(nil, secrets, cfg.Guard.ExtraPaths, guard.Options{Decode: cfg.Guard.DecodeEnabled()})
+		// The fallback can only fail if the embedded rule table itself is
+		// broken (custom patterns are nil here, so config cannot be the cause).
+		// Degrade to nil — forward skips the guard entirely — rather than run
+		// a scanner we no longer trust; the warning makes the loss loud.
+		guardScanner, err = guard.NewScannerWithOptions(nil, secrets, cfg.Guard.ExtraPaths, guard.Options{Decode: cfg.Guard.DecodeEnabled()})
+		if err != nil {
+			log.Printf("[startup] guard fallback scanner failed: %v; outbound guard scanning is DISABLED for this process", err)
+			guardScanner = nil
+		}
 	}
 	// http.DefaultTransport pools at most 2 idle connections per host; concurrent
 	// streams to one upstream would re-dial TLS after the first two close. The
@@ -69,6 +77,11 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// Reload-owned: assigned before any request/goroutine can read it, swapped
 	// under p.mu on reload.
 	p.guardScanner = guardScanner
+	// The OAuth subset is tracked separately so the refresh loop can re-sync it
+	// (OAuth tokens rotate in place during serve) without re-running a full
+	// BuildProviders pass; the pool subset is the stable base of every rebuild.
+	p.guardPoolSecrets = built.PoolSecrets
+	p.guardOAuthSecrets = built.OAuthSecrets
 	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.Eligible)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.routeKeys = routeKeySet(p.expandedRoutes)
@@ -91,6 +104,13 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	p.quota.Generation = p.configGeneration.Load
 	p.quota.FullSnapshot = p.snapshotPersistedState
 	p.quota.Start()
+	// Guard OAuth known-secret re-sync: codex/aqp providers rotate their tokens
+	// in place during serve (rewriting <name>_oauth_auth.json), which would
+	// otherwise leave the boot-time scanner matching stale values until the
+	// next reload. The loop re-collects the OAuth files on the quota-poll beat
+	// and swaps the scanner in place, generation-consistent. Lifecycle-admitted
+	// like the other loops: stopped and waited by Close.
+	p.lifecycle.Run(p.guardSecretRefreshLoop)
 	p.metrics = counters.NewMetricsStore()
 	// SSE token counter. Persistence (baseline restore + per-minute flush) is
 	// projected by statsFlusher into internal/observe/stats.Store, opened only

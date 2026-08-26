@@ -111,7 +111,7 @@ routes:
 #   decode: true            # 默认 true：检测编码形态的秘密（base64/hex 前缀变体，解码后过原规则）
 #   paths: log              # 敏感路径信号：log（默认）| block | off（不支持 redact）
 #   audit: true             # 默认 true：命中持久化到安全审计日志（`model-proxy audit` 查询）
-#   audit_path: ~/.model-proxy/security.log   # 可选，默认即此
+#   audit_path: ""          # 默认派生 <home>/.model-proxy/security.log；自定义必须是绝对路径（不展开 ~）
 #   extra_patterns:         # 自定义秘密格式（gitleaks extend 式，热 reload 生效）
 #     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}
 #   extra_paths:            # 自定义敏感路径（字面量）
@@ -343,11 +343,11 @@ routes:
 四层检测，全部只在命中字面量预过滤后才精读，干净 body 零正则零解码：
 
 - **内置规则表**：53 条高置信秘密模式，其中 46 条精选自 gitleaks v8.28.0 规则集（MIT，溯源见 `internal/guard/rules.json`）——LLM 厂商 key、AWS/GCP/Azure、GitHub/GitLab/Slack/npm/PyPI token、JWT、PEM 私钥头等；上游带熵阈值的规则保留 Shannon 熵后置过滤压误报。
-- **known-secret（默认开）**：把代理自己管理的凭据（账号池 API key/AK/SK、codex/aqp OAuth 文件里的 token）加入扫描集，请求体出现这些值的**原文或 base64/hex/url 编码形态**即命中 `known_secret`——零误报，防注入偷代理自身凭据。匹配集只存在于内存，随 login/logout/reload 自动更新，无需任何规则维护；OAuth token 轮转后新值在下一次 reload 进集（`serve reload` 或 Web 任意写操作即刷新）。
+- **known-secret（默认开）**：把代理自己管理的凭据（账号池 API key/AK/SK、codex/aqp OAuth 文件里的 token）加入扫描集，请求体出现这些值的**原文或 base64/hex/url 编码形态**即命中 `known_secret`——零误报，防注入偷代理自身凭据。匹配集只存在于内存，随 login/logout/reload 自动更新，无需任何规则维护；OAuth token 进程内轮转（codex/aqp 原地刷新写回 auth 文件）后由后台节拍（`scheduling.quota_poll_interval`，默认 5m）自动重扫进集，最迟一个周期生效，无需 reload。
 - **编码逃逸检测（默认开）**：规则前缀的 base64 三对齐/hex 变体命中后，解码外围 token 再过原规则（含熵过滤），不解码任意 span（不碰 base64 图片等正常负载）。
 - **敏感路径信号（默认 log）**：`~/.ssh`、`~/.aws/credentials`、`~/.model-proxy`、`~/.gnupg`、`~/.kube/config`、`~/.docker/config.json`、`~/.config/gcloud`、`.env` 出现在请求体里即按类别告警（`ssh`/`aws_creds`/`proxy_creds`/…）——在秘密出现之前给出"意图级"信号。只支持 log/block/off，不支持 redact（改路径会破坏正常编码工作）。
 
-动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器），匹配内容永不落日志、事件或测试输出。命中持久化到安全审计日志（默认 `~/.model-proxy/security*.log`，0600，30 天轮转），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
+动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先。命中持久化到安全审计日志（默认 `~/.model-proxy/security*.log`，0600，按大小+按天轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
 
 规则维护：你的凭据免维护（自动派生）；新 key 格式用 `guard.extra_patterns`（config 热 reload 即时生效）或向上游同步内置表（升 `rules.json` 的 upstream pin → 重抽 → review）；敏感路径用 `guard.extra_paths`。
 

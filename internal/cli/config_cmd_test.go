@@ -121,6 +121,54 @@ func TestCLI_ConfigPrint(t *testing.T) {
 	}
 }
 
+// TestCLI_ConfigCheckGuardSummary: `config check` ends the summary with the
+// effective guard settings — actions/toggles, audit path (default derived
+// from HOME), and the custom pattern/path extensions counted and named. The
+// built-in rule tables are reported as embedded, not counted, so the CLI
+// stays free of an internal/guard dependency edge.
+func TestCLI_ConfigCheckGuardSummary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgPath := writeTempConfig(t, minimalConfig+`guard:
+  secrets: block
+  audit_path: `+filepath.Join(home, "sec", "security.log")+`
+  extra_patterns:
+    - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: mv-}
+    - {name: other_token, regex: '\bok-[A-Za-z0-9]{32,}'}
+  extra_paths:
+    - ~/.company/secrets
+`)
+	out := grabStdout(t, func() {
+		RunConfig([]string{"check", "--config", cfgPath})
+	})
+	for _, want := range []string{
+		"guard: secrets=block known_secrets=true decode=true paths=log audit=true",
+		"audit_path: " + filepath.Join(home, "sec", "security.log"),
+		"patterns: built-in tables (embedded) + 2 custom (myvendor_key, other_token)",
+		"extra_paths: 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("config check guard summary missing %q:\n%s", want, out)
+		}
+	}
+
+	// Defaults: no guard block -> all defaults effective, audit_path derived
+	// from HOME, no custom extensions.
+	out = grabStdout(t, func() {
+		RunConfig([]string{"check", "--config", writeTempConfig(t, minimalConfig)})
+	})
+	for _, want := range []string{
+		"guard: secrets=log known_secrets=true decode=true paths=log audit=true",
+		"audit_path: " + filepath.Join(home, ".model-proxy", "security.log"),
+		"patterns: built-in tables (embedded) + 0 custom",
+		"extra_paths: 0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("config check default guard summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // Regression: `model-proxy config --config X check` used to drop the leading
 // --config (ConfigPath(args[1:]) plus args[0]-based dispatch), so it failed
 // with "unknown config subcommand" or loaded the wrong config. The flag must
