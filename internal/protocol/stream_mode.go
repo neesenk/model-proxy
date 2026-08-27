@@ -398,7 +398,9 @@ func responsesJSONToSSE(root map[string]any) ([]byte, error) {
 		return nil, fmt.Errorf("cannot synthesize success SSE from response status %s", status)
 	}
 	if _, ok := root["created_at"]; !ok {
-		root["created_at"] = time.Now().UTC().Format(time.RFC3339)
+		// Responses wire contract: Unix seconds as a number (strongly-typed
+		// SDKs parse int64; an RFC3339 string would fail the whole frame).
+		root["created_at"] = time.Now().Unix()
 	}
 	emitWireSSE(&out, event, map[string]any{"type": event, "response": root})
 	return out.Bytes(), nil

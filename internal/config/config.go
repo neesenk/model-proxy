@@ -118,7 +118,9 @@ func (c Config) CredentialsMode() string {
 // known_secrets (default true) additionally matches the exact credential
 // values the proxy itself manages (pool API keys + OAuth tokens, in memory
 // only — never written to disk or logs). decode (default true) also catches
-// base64/hex/url-encoded forms of the secret patterns. paths selects the
+// encoded forms: base64/hex variants of the embedded rule-table patterns,
+// and base64/hex/url-encoded variants of known secrets (the url form applies
+// to the known-secret channel only). paths selects the
 // action for high-confidence sensitive-path literals (~/.ssh, .env, ...):
 // "log" (default) | "block" | "off" — "redact" is intentionally unsupported
 // (rewriting a path would corrupt legitimate coding work). session_scan
@@ -202,8 +204,9 @@ func (g GuardConfig) SecretsAction() string {
 // credentials is active (default true, applied at load).
 func (g GuardConfig) KnownSecretsEnabled() bool { return g.KnownSecrets }
 
-// DecodeEnabled reports whether encoded-form (base64/hex/url) detection of
-// the secret patterns is active (default true, applied at load).
+// DecodeEnabled reports whether encoded-form detection is active (default
+// true, applied at load): base64/hex variants of the embedded rule-table
+// patterns, plus base64/hex/url variants of known secrets.
 func (g GuardConfig) DecodeEnabled() bool { return g.Decode }
 
 // PathsAction returns the effective sensitive-path action, defaulting to

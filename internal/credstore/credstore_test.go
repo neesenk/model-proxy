@@ -489,3 +489,93 @@ func TestConfigMismatchNote(t *testing.T) {
 		})
 	}
 }
+
+// An oversized blob (ErrEntryTooLarge) physically cannot fit the backend.
+// The lazy migration must keep serving the plaintext copy instead of locking
+// the account out of credentials the process can still read — a
+// deterministic size limit, unlike a reachability failure, which keeps
+// failing closed (see TestRefLoadMigrationFailureKeepsPlaintextAuthoritative).
+func TestRefLoadOversizedBlobKeepsServingPlaintext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex_oauth_auth.json")
+	legacy := strings.Repeat("x", maxDarwinEntryBytes+1) // codex-sized OAuth archive
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeKeychain(true)
+	fake.setErr = ErrEntryTooLarge
+	useFakeKeychain(t, fake)
+
+	ref := NewRef(path)
+	got, err := ref.Load()
+	if err != nil {
+		t.Fatalf("oversized blob must keep serving the plaintext copy: %v", err)
+	}
+	if string(got) != legacy {
+		t.Fatalf("Load returned %d bytes, want the %d-byte plaintext", len(got), len(legacy))
+	}
+	if _, serr := os.Stat(path + migratedSuffix); !os.IsNotExist(serr) {
+		t.Fatal("no backup may be created when the store write was rejected")
+	}
+	// Retrying lands in the same place: the blob still does not fit.
+	if _, err = ref.Load(); err != nil || len(fake.entries) != 0 {
+		t.Fatalf("retry must stay on plaintext without keychain entries: (%v, %d entries)", err, len(fake.entries))
+	}
+}
+
+// mapKeyringErr keeps the size-limit error class distinct so callers (and
+// users) can tell "blob too large for this backend" apart from "backend
+// unreachable" — the former has a config-level remedy (file mode), the
+// latter needs the backend fixed.
+func TestMapKeyringErrPreservesSizeClass(t *testing.T) {
+	if err := mapKeyringErr(keyring.ErrSetDataTooBig); !errors.Is(err, ErrEntryTooLarge) {
+		t.Errorf("ErrSetDataTooBig must map to ErrEntryTooLarge, got %v", err)
+	}
+	if err := mapKeyringErr(keyring.ErrSetDataTooBig); errors.Is(err, ErrUnavailable) {
+		t.Error("size-limit errors must not be collapsed into ErrUnavailable")
+	}
+}
+
+// Logout after switching keychain→file must still remove the keychain
+// entry when the .migrated.bak archive marks that the blob once migrated
+// there — otherwise the stale secret lingers in the keychain forever
+// (decision: logout is the normal deletion path). Pure-file histories
+// (no archive) never touch the backend.
+func TestRefDeleteCleansKeychainAfterSwitchToFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aqp_oauth_auth.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeKeychain(true)
+	if err := fake.Set(serviceName, "aqp_oauth_auth.json", []byte(`{"sso_session_cookie":"c"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// File mode + fake backend (no env opt-in: the test binary stays file).
+	keychainOps = fake
+	resetResolution()
+	t.Cleanup(func() {
+		keychainOps = realKeychainProvider{}
+		resetResolution()
+	})
+	// No archive yet: file-mode Delete leaves the backend untouched.
+	if err := NewRef(path).Delete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.Get(serviceName, "aqp_oauth_auth.json"); err != nil {
+		t.Fatalf("pure-file delete touched the backend: %v", err)
+	}
+	// With the migration archive present, Delete removes the entry too.
+	if err := os.WriteFile(path+migratedSuffix, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewRef(path).Delete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.Get(serviceName, "aqp_oauth_auth.json"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("keychain entry survived logout after mode switch: %v", err)
+	}
+	if _, serr := os.Stat(path + migratedSuffix); !os.IsNotExist(serr) {
+		t.Fatal("archive not cleaned by delete")
+	}
+}

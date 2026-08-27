@@ -7,7 +7,7 @@
 - **多上游聚合 + 配额感知调度**：surplus 调度分 / 熔断 / 限频跳过 / 粘性驻留 / 多账号凭据池 + 会话粘性
 - **三协议转发 + 可选协议转换**：同协议字节级透传；路由目标声明 `protocol:` 即可在 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 间转换
 - **请求感知路由**：按图片/工具能力过滤目标、超长 prompt 自动改道大上下文模型、上游 400 溢出自动重试一次
-- **可观测性**：Web UI 六个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
+- **可观测性**：Web UI 七个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
 - **评测工具**：影子评测（真实负载双跑对比后端）、一键重放（replay）、端到端测活（`test` / UI 按钮）
 - **多模型编排（fusion）**：一条路由 fan-out 到多个后端并行生成候选答案，结果汇总模型融合成最终答案——困难问题要最好效果
 - **其他**：精确响应缓存、`pin` 运行期热切换、等价成本分析（OpenRouter 价格）
@@ -264,7 +264,7 @@ web:
   enabled: false
 ```
 
-JSON 接口在 `/api/*`（`status` / `logs` / `config` / `accounts`（含 `…/<id>/test`）/ `tokens` / `stats` / `agents` / `analytics` / `requests` / `shadow-report` / `events` / `pin` / `quota/refresh` / `login/*`）；底层契约（请求/响应 shape、stats 口径）见仓库根目录 `docs/web-api.md`。前端是嵌入式的静态资源（`internal/web/assets/`，`go:embed`），无独立构建步骤。
+JSON 接口在 `/api/*`（`status` / `logs` / `config` / `accounts`（含 `…/<id>/test`）/ `tokens` / `stats` / `agents` / `analytics` / `sessions` / `requests` / `security` / `shadow-report` / `events` / `pin` / `quota/refresh` / `login/*`）；底层契约（请求/响应 shape、stats 口径）见仓库根目录 `docs/web-api.md`。前端是嵌入式的静态资源（`internal/web/assets/`，`go:embed`），无独立构建步骤。
 
 ## `serve status`（终端状态面板）
 

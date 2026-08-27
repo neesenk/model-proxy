@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	responsecache "model-proxy/internal/cache"
 )
 
 // TestDebugRoute_Preview: POST /debug/route answers where a request would go
@@ -100,5 +103,52 @@ claude_mapping:
 	p.Handler(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("bad proto status = %d, want 400", rec.Code)
+	}
+}
+
+// The preview's cache probe is read-only: polling /debug/route must not book
+// misses into the operational hit-rate stats (Peek, not Lookup) — a poller
+// watching the preview would otherwise grind the metrics down.
+func TestDebugRoute_PreviewCacheProbeIsReadOnly(t *testing.T) {
+	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+routes:
+  glm: [{provider: zhipu, model: glm}]
+cache:
+  enabled: true
+  ttl: 1m
+`))
+	p := newTestProxy(t, cfg)
+	if p.cache == nil {
+		t.Fatal("config cache: section must enable the store")
+	}
+	body := `{"model":"glm","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	post := func() map[string]any {
+		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		p.Handler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("preview status = %d, body = %s", rec.Code, rec.Body)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("preview json: %v, body = %s", err, rec.Body)
+		}
+		return out
+	}
+
+	// Prime the store entry the preview's probe will resolve to.
+	keyReq := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(body))
+	p.cache.Put(responsecache.Key(keyReq, []byte(body)), http.StatusOK,
+		http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
+
+	for i := 0; i < 3; i++ {
+		if out := post(); out["cache"] != "hit" {
+			t.Fatalf("preview %d cache state = %v, want hit", i, out["cache"])
+		}
+	}
+	if got := p.cache.Stats(); got.Hits != 0 || got.Misses != 0 {
+		t.Errorf("preview probe mutated stats: %+v, want zero counters", got)
 	}
 }

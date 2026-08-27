@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -217,24 +216,24 @@ func CollectOAuthSecrets(cfg *configdomain.Config, opts BuildOptions) []string {
 // collectOAuthSecrets best-effort reads one codex/aqp provider's OAuth/SSO
 // auth file (<home>/.model-proxy/<name>_oauth_auth.json — the same path
 // buildOne injects as OAuthAuthFile) and returns the token/cookie values for
-// the guard known-secret set. A missing or unreadable file means "not logged
-// in" — silently skip (there is no credential to protect). Parsed with the
-// provider package's own file types; values stay in memory only.
+// the guard known-secret set. Reads go through the provider package's
+// credstore-backed loaders so keychain-mode credentials reach the set too —
+// there the plaintext file is archived as .migrated.bak and a direct
+// os.ReadFile would silently drop guard coverage the moment storage moves
+// off disk. A missing or unreadable store means "not logged in" — silently
+// skip (there is no credential to protect). Values stay in memory only.
 func collectOAuthSecrets(opts BuildOptions, name, providerID string) []string {
-	b, err := os.ReadFile(filepath.Join(opts.HomeDir, ".model-proxy", name+"_oauth_auth.json"))
-	if err != nil {
-		return nil
-	}
+	path := filepath.Join(opts.HomeDir, ".model-proxy", name+"_oauth_auth.json")
 	switch providerID {
 	case "codex":
-		var af provider.CodexAuthFile
-		if err := json.Unmarshal(b, &af); err != nil {
+		af, err := provider.LoadCodexAuthFile(path)
+		if err != nil {
 			return nil
 		}
 		return appendNonEmpty(nil, af.Tokens.AccessToken, af.Tokens.RefreshToken, af.Tokens.IDToken)
 	case "aqp":
-		var a provider.AqpAccountData
-		if err := json.Unmarshal(b, &a); err != nil {
+		a, err := provider.LoadAqpAccount(path)
+		if err != nil || a == nil {
 			return nil
 		}
 		return appendNonEmpty(nil, a.SSOSessionCookie)

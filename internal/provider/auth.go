@@ -360,6 +360,24 @@ func (p *CodexOAuthProvider) load() (*CodexAuthFile, error) {
 	return &af, nil
 }
 
+// LoadCodexAuthFile reads and parses one codex OAuth store through
+// credstore, without instantiating a provider. Callers that collect
+// credential material for the guard known-secret set use this so
+// keychain-mode credentials reach them too (the plaintext file is archived
+// as .migrated.bak there — a direct os.ReadFile would see nothing).
+// credstore.ErrNotFound means "not logged in".
+func LoadCodexAuthFile(path string) (*CodexAuthFile, error) {
+	data, err := credstore.NewRef(path).Load()
+	if err != nil {
+		return nil, err
+	}
+	var af CodexAuthFile
+	if err := json.Unmarshal(data, &af); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return &af, nil
+}
+
 // refreshLocked exchanges refresh_token for a new access_token and writes it
 // back to auth.json. Caller holds p.mu.
 func (p *CodexOAuthProvider) refreshLocked(af *CodexAuthFile) error {

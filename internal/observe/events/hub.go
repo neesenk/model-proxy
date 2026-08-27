@@ -37,8 +37,9 @@ type Hub struct {
 	mu     sync.Mutex
 	recent []Event
 	// subs is an immutable subscriber snapshot swapped copy-on-write under mu.
-	// Publish loads it without the mutex and without allocating — one slice
-	// per subscription change instead of one per event.
+	// Publish loads it under the same lock as its recent-ring append (see
+	// Publish for why the ordering matters) and without allocating — one
+	// slice per subscription change instead of one per event.
 	subs atomic.Pointer[[]chan Event]
 }
 
@@ -59,8 +60,15 @@ func (h *Hub) Publish(e Event) {
 	if len(h.recent) > recentCap {
 		h.recent = h.recent[len(h.recent)-recentCap:]
 	}
-	h.mu.Unlock()
+	// The subscriber snapshot must be loaded under the same lock as the
+	// append. Subscribe also holds mu while it registers the channel and
+	// copies the recent ring, so this orders the two exactly: either the
+	// subscriber's channel is in our snapshot (it gets e once, via delivery)
+	// or it is not (its recent copy already contains e). Loading after the
+	// Unlock instead would let a Subscribe land in between and deliver e
+	// twice — once from the snapshot, once from the channel.
 	subs := *h.subs.Load()
+	h.mu.Unlock()
 	for _, ch := range subs {
 		select {
 		case ch <- e:

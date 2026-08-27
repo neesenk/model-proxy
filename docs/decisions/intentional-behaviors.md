@@ -30,7 +30,13 @@
 22. **apikey 池 keychain 模式不可用时 fail-closed，不回落明文**：`credentials: keychain` 是用户显式的安全选择——后端不可达（headless Linux 无 Secret Service、钥匙串被锁）或元数据账户的 keychain 条目丢失时，`accounts.Store` 的读写直接报错（`credstore.ErrUnavailable`/`ErrNotFound`），而不是悄悄退回读取明文池文件（回落会让"秘密已进钥匙串"的预期在故障时无声失效，且明文文件可能正是用户想摆脱的东西）。代价是 keychain 故障期间该 provider 整体不可用，需要修复后端，或把 `credentials:` 改回 `file` 走条目 25 的回迁。删除语义同样偏向不留孤儿：先删 keychain 条目成功才落元数据文件（删除失败则整个保存报错），宁可保留可重试的元数据，也不留"元数据没了、秘密还挂钥匙串"的孤儿条目。锁定测试：`internal/accounts/store_keychain_test.go`（`TestKeychainUnavailableFailsClosed` 等）。
 23. **guard.paths 弱命中（正文提及）不 block、不发 live event**：敏感路径命中按结构位置分 strong/weak（`guard.ScanPathsContext`）——路径出现在工具调用/工具结果位（anthropic `tool_use.input`/`tool_result.content`、openai `tool_calls[].function.arguments` 与 `role:"tool"` content、responses `function_call.arguments`/`function_call_output.output`）是 strong，即"agent 通过工具读敏感文件"的 MCP Tool Poisoning 特征动作；普通正文/user 消息提及是 weak。coding agent 的正常对话大量讨论 `.env` 等路径，weak 若发 live event 会刷屏监控、若 block 会误伤正常负载；因此 weak 只计 `("guard", <类别>_text)` 计数器并写 action=`log-weak` 的审计记录保留可见性，live event 与 block 只对 strong 生效。body 非合法 JSON 或结构识别失败时一律降级 weak（宁低勿高），绝不因识别失败升级为 strong。锁定测试：`internal/guard/pathctx_test.go`、`internal/app/guard_runtime_integration_test.go`（`TestGuardPaths_WeakTextNeverBlocks` 等）。
 24. **凭据存储单一开关：`credentials:` 驱动池与 OAuth 两侧，env 只覆盖 OAuth**：收敛前池后端走 config `credentials:`、OAuth blob 走 env `MP_CRED_STORE`（默认 auto 探测），两套开关语义割裂。收敛后优先级为 **env `MP_CRED_STORE` 非空 > config `credentials:` > 默认 file**：config 同时应用到 `accounts` 池后端和 credstore OAuth 模式（config 加载点统一调 `accounts.SetProcessCredentialsMode`）；env 保留为已发布的显式 override，只作用于 OAuth 侧（`auto` 收敛为 opt-in 的探测语义，不再是默认）。env 与 config 不一致是唯一可能的分歧，`config check` 与启动/reload 日志各打一行说明两侧生效值与来源。代价是行为变更：此前未设开关、靠 auto 默认进 keychain 的 OAuth blob，升级后默认按 file 读取，需显式设 `credentials: keychain`（或 env）继续读原条目。锁定测试：`internal/credstore/credstore_test.go`（`TestResolveModePriorityMatrix`、`TestConfigMismatchNote`）、`internal/cli/config_cmd_test.go`（`TestCLI_ConfigCheckCredentialsSummary`）。
-25. **keychain→file 部分回迁：缺条目的账号保留元数据并要求重新 login，keychain 条目默认不删**：`credentials:` 切回 `file` 后，纯元数据池在首次 file 模式读取时按条目从 keychain 读回秘密、原子重写明文池（0600）——这是 file→keychain 懒迁移的反向。条目缺失（或后端不可达）的账号不拖累整体：其余账号正常回迁，缺失账号的元数据（id/label/added_at）保留在池文件与 `Snapshot.ReloginNeeded` 中报出，需重新 `login`；只有全部可回迁才重写池文件，部分回迁不动文件，让报告与元数据活到用户处理为止。回迁成功后 keychain 条目**有意保留**：读路径删除会在文件写丢失时毁掉唯一副本，且 `logout` 才是正常删除路径。混合池（部分条目有秘密）不视为模式切换产物，仍按 validate 报错。OAuth blob 一侧不做自动回迁（与历史 env 切换语义一致），切回 file 需重新 login。锁定测试：`internal/accounts/store_restore_test.go`。
+25. **keychain→file 部分回迁：缺条目的账号保留元数据并要求重新 login，keychain 条目默认不删**：`credentials:` 切回 `file` 后，纯元数据池在首次 file 模式读取时按条目从 keychain 读回秘密、原子重写明文池（0600）——这是 file→keychain 懒迁移的反向。条目缺失（或后端不可达）的账号不拖累整体：其余账号正常回迁，缺失账号的元数据（id/label/added_at）保留在池文件与 `Snapshot.ReloginNeeded` 中报出，需重新 `login`；只有全部可回迁才重写池文件，部分回迁不动文件，让报告与元数据活到用户处理为止。回迁成功后 keychain 条目**有意保留**：读路径删除会在文件写丢失时毁掉唯一副本，且 `logout` 才是正常删除路径。混合池（部分条目有秘密）不视为模式切换产物，仍按 validate 报错。OAuth blob 一侧不做自动回迁（与历史 env 切换语义一致），切回 file 需重新 login。
+logout 是正常删除路径、且跨模式收尾：`Ref.Delete` 在当前模式为 keychain、或 `.migrated.bak`
+档案标记该 blob 曾迁入钥匙串时，一并删除钥匙串条目——切回 file 后登出不在钥匙串里留旧秘密；
+纯 file 历史（无档案）永不触碰后端（测试二进制保持封闭）。锁定测试：
+`internal/credstore/credstore_test.go`（`TestRefDeleteCleansKeychainAfterSwitchToFile`）。
+26. **guard 扫描按次预算：对抗性 body 有界降级为漏报，不再无界耗时**：单次扫描的编码通道解码上限 256 次（`maxDecodesPerScan`）、命中声明上限 262144（`maxMatchesPerScan`）。对抗性构造（长 token run 内以字节间隔重复探针变体 → 滑动 span 每命中一次 8KiB 解码；重复同一秘密形状百万次 → 命中声明两两重叠检查）此前可把单请求扫描推到 100GB 级解码量或 O(n²) 比较——guard 默认开启且威胁模型内的恶意 agent 正是本地请求方。预算耗尽后编码通道/命中声明停止，方向是**有界漏报**（宁漏勿滥，与 redact 侧的宁滥勿缺相反）；`claimSet` 有序不交区间集 + 流式正则迭代保证正常负载路径线性。锁定测试：`internal/guard/scanner_budget_test.go`。
+27. **keychain 条目超限（ErrEntryTooLarge）时懒迁移保留明文服务，不锁死账号**：OS 钥串后端有物理条目上限（darwin 命令行预算 ~3000 原始字节、windows 凭据 blob 2560 字节；codex OAuth 档案典型 2.6-3.6KB，常超限）。`Ref.Load` 的懒迁移写入被拒时**返回明文数据**：尺寸超限是 blob+后端的确定性属性，不是可用性或降级问题，明文权威副本完好、后续每次 Load 都会重试并落回同处；此前一律 fail-closed 会让进程明明读得到的凭据变得不可读。写入路径（`Save`/`KeychainSet`）按平台预检尺寸、提前返回 `ErrEntryTooLarge`（darwin 超限命令会在进程已启动后才被拒、搁置子进程；错误类别与 `ErrUnavailable` 分开，排障与修复路径不同：前者改回 `credentials: file`，后者修后端）。这与条目 22 的"不可用 fail-closed"不冲突：可用性故障仍原样报错。锁定测试：`internal/credstore/credstore_test.go`（`TestRefLoadOversizedBlobKeepsServingPlaintext`、`TestMapKeyringErrPreservesSizeClass`）。
 
 ## qwen-plan：用量仅控制台、不轮询（有意为之）
 
@@ -45,9 +51,11 @@
 - 登录交互式输入 API key 时终端明文回显：stdin 同时服务管道/脚本输入
   （`echo key | model-proxy login ...`），`term.ReadPassword` 会破坏非终端输入。
   凭据不会进入日志，回显只存在于用户自己的终端缓冲。
-- `observe/events` 订阅后的短窗口内，同一条事件可能既出现在重放的 recent 快照
-  又出现在订阅流里（注册与 recent 复制在同一把锁内完成，publish 无需感知订阅时
-  点）。仅影响展示端去重，不丢事件。
+- `observe/events` 每条事件对每个订阅者**恰好投递一次**：订阅注册、recent
+  快照复制与 publish 的订阅者快照加载全部串行化在同一把锁内——一条事件要么
+  出现在订阅者的 recent 快照里，要么出现在订阅流里，不会两者都出现（COW 化
+  时曾在 Unlock 后才加载快照，重新打开过双投递窗口）。锁定测试：
+  `TestHubPublishSubscribeExactlyOnce`。
 - Fusion 面板全部以 429 冷却失败时，终局按 hard 处理返回 502 而非 429+
   Retry-After：fusion 伪 provider 无健康状态，`cooldownState` 判不出 allDown；
   代码注释自认 "opaque → hard"。收紧前先给 fusion 伪 provider 建立限频观测。

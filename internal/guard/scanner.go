@@ -8,6 +8,8 @@ import (
 	"math"
 	"net/url"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 )
 
@@ -24,6 +26,20 @@ const minKnownFrag = 8
 // maxEncodedSpan bounds the token span expanded around an encoded-literal
 // hit, so a pathological run of token bytes cannot make decoding quadratic.
 const maxEncodedSpan = 8 << 10
+
+// maxDecodesPerScan bounds encoded-channel decode attempts per scan. Real
+// bodies need a handful (one per encoded blob); an adversarial body of probe
+// variants repeated at byte intervals inside token runs longer than
+// maxEncodedSpan would otherwise force one ~maxEncodedSpan decode per hit.
+// When the budget runs out the encoded channel stops for the rest of the
+// scan — bounded under-detection, never over-detection (宁漏勿滥).
+const maxDecodesPerScan = 256
+
+// maxMatchesPerScan bounds the claimed-match table. Verdicts are name-based
+// and Redact has already replaced every span it claimed; only adversarial
+// repetition of one secret shape approaches the bound, and past it sources
+// stop claiming so span processing stays linear in body size.
+const maxMatchesPerScan = 1 << 18
 
 // Known-secret report names. The secret value itself is never returned.
 const (
@@ -292,14 +308,29 @@ type match struct {
 	start, end int
 }
 
-// overlaps reports whether [start,end) intersects any already-claimed match.
-func overlaps(found []match, start, end int) bool {
-	for _, m := range found {
-		if start < m.end && end > m.start {
-			return true
-		}
-	}
-	return false
+// claimSet tracks claimed match spans as sorted disjoint intervals. It
+// replaces the former pairwise scan over the match list: an adversarial body
+// repeating one secret shape produces millions of candidate spans, and the
+// linear overlap check made claiming quadratic. Each source emits spans in
+// increasing offset order, so inserts land at (or near) the back and total
+// insert cost stays linear per source.
+type claimSet struct {
+	starts, ends []int
+}
+
+// overlaps reports whether [start,end) intersects a claimed interval.
+func (c *claimSet) overlaps(start, end int) bool {
+	// Intervals are sorted and disjoint, so their ends are sorted too: the
+	// first interval ending after start is the only overlap candidate.
+	i := sort.Search(len(c.ends), func(i int) bool { return c.ends[i] > start })
+	return i < len(c.starts) && c.starts[i] < end
+}
+
+// claim records a non-overlapping interval (callers check overlaps first).
+func (c *claimSet) claim(start, end int) {
+	i := sort.Search(len(c.starts), func(i int) bool { return c.starts[i] > start })
+	c.starts = slices.Insert(c.starts, i, start)
+	c.ends = slices.Insert(c.ends, i, end)
 }
 
 // isB64TokenByte reports whether c can be part of a base64/base64url token
@@ -397,68 +428,95 @@ func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
 		}
 	})
 
-	// Phase 2: precise matching / span claiming.
+	// Phase 2: precise matching / span claiming. Work is bounded per scan:
+	// at most maxMatchesPerScan claimed spans and maxDecodesPerScan decode
+	// attempts in the encoded channel, so adversarial repetition of one
+	// secret shape degrades to under-reporting instead of unbounded work.
 	var found []match
+	var claimed claimSet
+	capped := func() bool { return len(found) >= maxMatchesPerScan }
+	claim := func(name string, start, end int) {
+		if capped() || claimed.overlaps(start, end) {
+			return
+		}
+		claimed.claim(start, end)
+		found = append(found, match{name, start, end})
+	}
 
 	// 1. Known secrets: exact values first, then their encoded variants.
-	claimOccurrences := func(needle []byte, ends []int, name string) {
-		for _, end := range ends {
-			start := end - len(needle)
-			if !overlaps(found, start, end) {
-				found = append(found, match{name, start, end})
-			}
+	for si := range s.secrets {
+		if capped() {
+			break
+		}
+		sec := &s.secrets[si]
+		for _, end := range secretHits[sec.rawID] {
+			claim(knownSecret, end-len(sec.raw), end)
 		}
 	}
 	for si := range s.secrets {
-		sec := &s.secrets[si]
-		claimOccurrences(sec.raw, secretHits[sec.rawID], knownSecret)
-	}
-	for si := range s.secrets {
+		if capped() {
+			break
+		}
 		sec := &s.secrets[si]
 		for vi, v := range sec.encoded {
-			claimOccurrences(v, secretHits[sec.encodedIDs[vi]], knownSecretEncoded)
+			for _, end := range secretHits[sec.encodedIDs[vi]] {
+				claim(knownSecretEncoded, end-len(v), end)
+			}
 		}
 	}
 
 	// 2. Embedded rule table, plaintext.
 	for i, r := range s.rules {
+		if capped() {
+			break
+		}
 		if !ruleHit[i] {
 			continue
 		}
-		for _, span := range r.findIn(body) {
-			if !overlaps(found, span[0], span[1]) {
-				found = append(found, match{r.name, span[0], span[1]})
-			}
-		}
+		r.findEach(body, func(start, end int) bool {
+			claim(r.name, start, end)
+			return !capped()
+		})
 	}
 
 	// 3. Encoded channel: an encoded literal hit earns a bounded decode of
 	// the surrounding token span; the owning rules' regexes (with their
-	// entropy post-filters) must still match the decoded text. Hits whose
-	// expanded span is contained in the previously processed span are
-	// skipped — the decode result for that region is already decided, and
-	// re-decoding it per hit would let an adversarial body of repeated
-	// probe hits force quadratic work. The processed span is recorded
-	// whether or not the decode succeeded.
-	var lastSpanStart, lastSpanEnd int
-	haveLastSpan := false
+	// entropy post-filters) must still match the decoded text. Containment
+	// dedup is tracked PER PROBE: hits of one probe whose expanded span falls
+	// inside that probe's previously processed span are skipped — the decode
+	// result for that region is already decided for this probe, and
+	// re-decoding per hit would let an adversarial body of repeated probe
+	// hits force quadratic work. A GLOBAL last-span would wrongly silence a
+	// later probe whose owners differ: two rules hitting the same token run
+	// (e.g. a truncated openai shape plus a complete gitlab token in one
+	// base64 blob) must each get their own decode. The processed span is
+	// recorded whether or not the decode succeeded. Spans that slide inside
+	// a run longer than maxEncodedSpan are bounded by the decode budget.
+	var lastStart, lastEnd []int
+	if probeHits != nil {
+		lastStart = make([]int, len(s.probes))
+		lastEnd = make([]int, len(s.probes))
+	}
 	for i, p := range s.probes {
-		ends := probeHits[i]
-		if len(ends) == 0 {
-			continue
+		if capped() || stats.decodes >= maxDecodesPerScan {
+			break
 		}
+		ends := probeHits[i]
 		for _, end := range ends {
+			if stats.decodes >= maxDecodesPerScan {
+				break
+			}
 			start := end - len(p.variant)
 			tok := isB64TokenByte
 			if p.hexForm {
 				tok = isHexTokenByte
 			}
 			spanStart, spanEnd := expandSpan(body, start, end, tok)
-			if haveLastSpan && spanStart >= lastSpanStart && spanEnd <= lastSpanEnd {
+			if spanStart >= lastStart[i] && spanEnd <= lastEnd[i] {
 				continue
 			}
-			lastSpanStart, lastSpanEnd, haveLastSpan = spanStart, spanEnd, true
-			if overlaps(found, spanStart, spanEnd) {
+			lastStart[i], lastEnd[i] = spanStart, spanEnd
+			if claimed.overlaps(spanStart, spanEnd) {
 				continue
 			}
 			var decoded []byte
@@ -478,20 +536,36 @@ func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
 				r := s.rules[ri]
 				if len(r.findIn(decoded)) > 0 {
 					found = append(found, match{r.name, spanStart, spanEnd})
+					claimed.claim(spanStart, spanEnd)
 					break
 				}
 			}
 		}
 	}
 
-	// 4. Custom patterns (plaintext only).
+	// 4. Custom patterns (plaintext only), streamed: an adversarial body can
+	// yield millions of matches, which FindAllIndex would materialize.
 	for _, c := range s.custom {
+		if capped() {
+			break
+		}
 		if len(c.literal) > 0 && !bytes.Contains(body, c.literal) {
 			continue
 		}
-		for _, loc := range c.re.FindAllIndex(body, -1) {
-			if !overlaps(found, loc[0], loc[1]) {
-				found = append(found, match{c.name, loc[0], loc[1]})
+		pos := 0
+		for pos <= len(body) {
+			loc := c.re.FindIndex(body[pos:])
+			if loc == nil {
+				break
+			}
+			claim(c.name, pos+loc[0], pos+loc[1])
+			if capped() {
+				break
+			}
+			if next := pos + loc[1]; next > pos+loc[0] {
+				pos = next
+			} else {
+				pos = pos + loc[0] + 1 // empty match: advance to make progress
 			}
 		}
 	}
@@ -681,12 +755,10 @@ func (s *Scanner) Redact(body []byte) []byte {
 		return body
 	}
 	// findAll claims spans in priority order, not byte order — sort by offset
-	// so the reconstruction walks the body left to right.
-	for i := 1; i < len(found); i++ {
-		for j := i; j > 0 && found[j-1].start > found[j].start; j-- {
-			found[j-1], found[j] = found[j], found[j-1]
-		}
-	}
+	// so the reconstruction walks the body left to right. sort.Slice (not the
+	// former insertion sort): the claimed table can hold six figures of spans
+	// under adversarial input.
+	sort.Slice(found, func(i, j int) bool { return found[i].start < found[j].start })
 	out := make([]byte, 0, len(body))
 	pos := 0
 	for _, m := range found {

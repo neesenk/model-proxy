@@ -504,9 +504,11 @@ func driftHost(pointer string) string {
 	// A scheme-less pointer misparses — url.Parse("evil-host:8317/v1") reads
 	// "evil-host" as the scheme and leaves Host empty — and a tampered
 	// pointer is the one most likely to lack a scheme. Fall back to the text
-	// before the first "/" with control characters stripped; anything that
-	// still doesn't look like a bare host (placeholders with spaces/parens)
-	// stays "(no-url)".
+	// before the first "/", "?" or "#" (a bare host never carries a query or
+	// fragment; keeping them would leak the pointer's query string into the
+	// audit record) with control characters stripped; anything that still
+	// doesn't look like a bare host (placeholders with spaces/parens) stays
+	// "(no-url)".
 	if !strings.Contains(pointer, "://") {
 		host := strings.Map(func(r rune) rune {
 			if unicode.IsControl(r) {
@@ -514,8 +516,10 @@ func driftHost(pointer string) string {
 			}
 			return r
 		}, pointer)
-		if i := strings.IndexByte(host, '/'); i >= 0 {
-			host = host[:i]
+		for _, cut := range []byte{'/', '?', '#'} {
+			if i := strings.IndexByte(host, cut); i >= 0 {
+				host = host[:i]
+			}
 		}
 		if host != "" && !strings.ContainsAny(host, " ()\"") {
 			return host

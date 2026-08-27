@@ -81,6 +81,21 @@ func (s *Store) Lookup(key string, now time.Time) (*Entry, bool) {
 	return entry, true
 }
 
+// Peek reports whether a live entry exists WITHOUT mutating the store: no
+// hit/miss counters, no lazy eviction. For read-only diagnostics (the
+// /debug/route preview) that must not skew the operational hit-rate metrics
+// a poller would otherwise grind down. A nil Store or an expired entry
+// reports a miss (the expired entry is left for a real Lookup to evict).
+func (s *Store) Peek(key string, now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.entries[key]
+	return ok && !now.After(entry.expiresAt)
+}
+
 // Put stores a detached response, evicting one arbitrary entry at capacity.
 // A nil Store or empty key is a no-op. Response eligibility, including whether
 // an empty body is cacheable, belongs to the caller.

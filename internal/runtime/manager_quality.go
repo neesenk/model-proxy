@@ -63,13 +63,20 @@ func (m *Manager) storeQualityLocked(next map[string]providerQuality) {
 	m.quality.Store(&next)
 }
 
-// seedQuality replaces the whole quality state in one publication. Test and
-// restore paths only; record paths use the per-entry copy-on-write updates.
+// seedQuality replaces the whole quality state in one publication. Test
+// paths only; record paths use the per-entry copy-on-write updates. The
+// state is copied before publishing: a caller that retains and mutates its
+// map must not be able to break the copy-on-write invariant (published maps
+// are never mutated in place).
 func (m *Manager) seedQuality(state map[string]providerQuality) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
-	m.quality.Store(&state)
+	cp := make(map[string]providerQuality, len(state))
+	for k, v := range state {
+		cp[k] = v
+	}
+	m.quality.Store(&cp)
 }
 
 // recordSample applies one error-rate sample (0 success / 1 failure). Caller

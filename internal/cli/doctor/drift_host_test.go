@@ -18,6 +18,11 @@ func TestDriftHost(t *testing.T) {
 		{"evil-host:8317/v1", "evil-host:8317"},
 		{"evil-host", "evil-host"},
 		{"evil-host/v1", "evil-host"},
+		// A scheme-less pointer must never leak its query or fragment into
+		// the audit record.
+		{"evil-host:8317/v1?session=abc", "evil-host:8317"},
+		{"evil-host?session=abc", "evil-host"},
+		{"evil-host#frag", "evil-host"},
 		// Control characters are stripped, never rendered into the log line.
 		{"evil\x01host:8317/v1", "evilhost:8317"},
 		// Placeholders from takeoverPointer collapse to "(no-url)".

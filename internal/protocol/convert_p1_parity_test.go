@@ -258,6 +258,11 @@ func TestParity_CompletedSnapshotCompleteness(t *testing.T) {
 			t.Errorf("response.completed missing required field %q:\n%v", field, resp)
 		}
 	}
+	// created_at is a Unix-seconds NUMBER on the Responses wire (int64 in
+	// strongly-typed SDKs); an RFC3339 string would fail the whole frame.
+	if ts, ok := resp["created_at"].(float64); !ok || ts <= 0 || ts != float64(int64(ts)) {
+		t.Errorf("created_at must be a Unix-seconds integer, got %T (%v)", resp["created_at"], resp["created_at"])
+	}
 	if usage := asMap(resp["usage"]); usage == nil {
 		t.Errorf("completed usage missing: %v", resp["usage"])
 	}

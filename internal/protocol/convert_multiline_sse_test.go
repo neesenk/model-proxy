@@ -71,3 +71,27 @@ func TestSSE_MultiLineDataResponsesSource(t *testing.T) {
 		t.Errorf("terminal lost:\n%s", out)
 	}
 }
+
+// TestSSE_NonDataLinesDoNotSplitFrames: per spec only a blank line dispatches
+// a frame. A comment or event: line interleaved with (or trailing) the data
+// lines must not dispatch the frame early — an early dispatch would cut the
+// JSON payload mid-object, lose the delta, and leak the event forward.
+func TestSSE_NonDataLinesDoNotSplitFrames(t *testing.T) {
+	in := "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\n" +
+		": heartbeat comment mid-frame\n" +
+		"data: \"delta\":{\"content\":\"kept whole\"},\"finish_reason\":null}]}\n" +
+		"event: trailing-label-after-data\n\n" +
+		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	raw, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(in), "m"))
+	out := string(raw)
+	if !strings.Contains(out, "kept whole") {
+		t.Errorf("frame split by comment/event lines — delta lost:\n%s", out)
+	}
+	if strings.Count(out, "kept whole") != 1 {
+		t.Errorf("frame dispatched more than once:\n%s", out)
+	}
+	if !strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Errorf("subsequent frame lost after non-data lines:\n%s", out)
+	}
+}

@@ -162,8 +162,11 @@ func oneRequest(ctx context.Context, client *http.Client, baseURL string, s scen
 	resp, err := client.Do(req)
 	if err != nil {
 		// A client-side cancel counts as the expected outcome of the cancel
-		// scenario, not as a proxy failure.
-		if s.cancelAfter > 0 && reqCtx.Err() != nil {
+		// scenario, not as a proxy failure — but only when OUR per-request
+		// timeout is what fired. The scenario/run deadline expiring
+		// propagates the same reqCtx.Err() and must stay "aborted"
+		// (excluded from stats), not silently count as ok.
+		if s.cancelAfter > 0 && ctx.Err() == nil && reqCtx.Err() != nil {
 			return result{ok: true, status: 0, ms: msSince(start)}
 		}
 		if reqCtx.Err() != nil {
@@ -183,6 +186,9 @@ func oneRequest(ctx context.Context, client *http.Client, baseURL string, s scen
 	_, _ = io.Copy(io.Discard, resp.Body)
 	total := msSince(start)
 	if s.cancelAfter > 0 {
+		// The cancel scenario measures the disconnect path: a request that
+		// completed before its cancel timer is fine regardless of status
+		// (the failure gate excludes this scenario by design).
 		return result{ok: true, status: resp.StatusCode, ms: total, ttftMS: ttft}
 	}
 	ok := resp.StatusCode == http.StatusOK

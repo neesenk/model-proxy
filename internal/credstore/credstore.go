@@ -63,6 +63,13 @@ var (
 	// reached (e.g. explicit keychain mode with no secret service). Fail-closed:
 	// callers surface it instead of falling back silently.
 	ErrUnavailable = errors.New("credential store unavailable")
+	// ErrEntryTooLarge reports that the blob exceeds the OS keychain backend's
+	// entry size ceiling (darwin ~3000 bytes of command-line budget, windows
+	// 2560 bytes of credential blob). Unlike ErrUnavailable this is a
+	// deterministic property of the blob+backend pair, never a reachability or
+	// downgrade problem — a lazy migration that hits it keeps serving the
+	// plaintext copy instead of locking the account out.
+	ErrEntryTooLarge = errors.New("credential entry too large for keychain backend")
 )
 
 // ModeSource records where the effective mode came from. Surfaced by
@@ -227,6 +234,15 @@ func (r Ref) Load() ([]byte, error) {
 		return nil, ferr
 	}
 	if serr := keychainOps.Set(serviceName, r.Name, data); serr != nil {
+		if errors.Is(serr, ErrEntryTooLarge) {
+			// The blob physically cannot fit this backend — deterministic,
+			// and nothing was destroyed. Keep serving the plaintext copy
+			// (every later Load retries and lands here again) instead of
+			// making credentials the process can still read unreadable.
+			// Migrate these blobs by staying on file mode (e.g. codex OAuth
+			// archives exceed the darwin/windows ceilings).
+			return data, nil
+		}
 		// Fail closed: keep serving the file next time, destroy nothing.
 		return nil, serr
 	}
@@ -257,10 +273,21 @@ func (r Ref) Save(blob []byte) error {
 
 // Delete removes the blob everywhere it may exist. Every step treats
 // "absent" as success — logout must be idempotent even across mode switches
-// (e.g. logged in under file mode, logging out under keychain mode).
+// (e.g. logged in under file mode, logging out under keychain mode). The
+// reverse switch also cleans up: the keychain entry is deleted when the
+// current mode is keychain, or when the .migrated.bak archive marks that the
+// lazy migration once moved this blob into the keychain — switching back to
+// file mode must not leave a stale secret behind on logout. Pure-file
+// histories never touch the backend (keeps every test binary hermetic).
 func (r Ref) Delete() error {
 	var firstErr error
-	if ResolvedMode() == ModeKeychain {
+	keychainInvolved := ResolvedMode() == ModeKeychain
+	if !keychainInvolved {
+		if _, err := os.Stat(r.Path + migratedSuffix); err == nil {
+			keychainInvolved = true
+		}
+	}
+	if keychainInvolved {
 		if err := keychainOps.Delete(serviceName, r.Name); err != nil && !errors.Is(err, ErrNotFound) && firstErr == nil {
 			firstErr = err
 		}

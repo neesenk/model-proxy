@@ -105,9 +105,13 @@ pending 的会话；否则 UI 会在后台任务仍可能落盘时提前得到 4
 
 `internal/observe/requestlog/sessions.go` 的 `SessionSummaries` 按最新 `scanLimit`（2000）条
 记录聚合出每个 `session_id` 的时间跨度、请求数（含 shadow 单列）、错误数、providers/models、
-token 总量（`ExtractUsage` 兼容 anthropic/chat/responses 三种响应体形状，cache read/creation
-单列）与等价 USD 成本；成本走与 `/api/analytics`、budget watcher 完全相同的
-`pricing.Resolve`（config `prices:` 覆盖优先）+ `ComputeCost` 路径，未定价模型贡献 0。
+token 总量（`ExtractUsage` 兼容 anthropic/chat/responses 三种响应体形状；流式响应按记录的
+SSE 文本逐帧提取、按字段取最大值合并——usage 帧以累计计数重复出现；cache read/creation
+单列，openai 形状的 `prompt_tokens`/`input_tokens` 内含 `cached_tokens`，提取时从 input 中
+扣除以免与 cache 桶双计）与等价 USD 成本；查询走 `Filter.UsageOnly` 投影——用量在逐行读取时
+解析、body 在 top-K 堆保留前剥离，2000 条扫描不会把全量 body（默认每侧至多 5MiB）钉在内存。
+成本走与 `/api/analytics`、budget watcher 完全相同的 `pricing.Resolve`（config `prices:`
+覆盖优先）+ `ComputeCost` 路径，未定价模型贡献 0。
 web 层 `handleSessions` 暴露 `GET /api/sessions?limit=50`（上限 200，按最近活跃排序），
 request_log 关闭时返回 `{enabled:false}`。`Filter.Session` 支持按 session id 精确过滤
 `QueryRecords`。shadow 请求计入所在会话（真实上游开销）并单列计数。

@@ -53,6 +53,12 @@ function avgLatencyMs(c) {
 }
 
 // fmtTime renders an RFC3339 string as a local HH:MM:SS.
+function fmtTimeSafe(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? String(ts) : fmtTime(d.toISOString());
+}
+
 function fmtTime(s) {
   if (!s) return '—';
   const d = new Date(s);
@@ -433,6 +439,7 @@ async function loadRequestDetail(id) {
 // Per-tab filter state (kind only). Persists across re-renders within a
 // session so a refresh keeps the view.
 let securityFilter = { kind: '' };
+let securityReqSeq = 0;
 
 // fmtMs renders a unix-millisecond audit timestamp as "MM-DD HH:MM:SS" —
 // the audit log spans days (30d retention), so a time-only format is wrong.
@@ -478,13 +485,17 @@ async function loadSecurity() {
   const q = new URLSearchParams();
   if (securityFilter.kind) q.set('kind', securityFilter.kind);
   q.set('limit', '200');
+  // Sequence guard: switching kind mid-flight races two fetches; a slow
+  // older response must not overwrite the newer one's rendering.
+  const seq = ++securityReqSeq;
   let resp;
   try {
     resp = await apiGet('/api/security?' + q.toString());
   } catch (e) {
-    if (tbl) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    if (seq === securityReqSeq && tbl) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
     return;
   }
+  if (seq !== securityReqSeq) return;
   if (!resp.enabled) {
     if (tbl) tbl.innerHTML = '<div class="msg hint">Security audit is off. Enable <code>guard.audit</code> in config to persist guard hits (secret / path / drift) to the audit log.</div>';
     return;
@@ -577,7 +588,7 @@ function addLiveRow(e) {
         // Non-lifecycle event (guard/budget): provider/status/latency carry no
         // meaning, so render a single event line — type badge + agent + detail.
         return `<tr>
-          <td class="mono">${esc(r.ts ? fmtTime(new Date(r.ts).toISOString()) : '')}</td>
+          <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
           <td class="mono">${esc(r.agent || '—')}</td>
           <td colspan="5"><span class="badge warn">⚑ ${esc(r.type)}</span> <span class="mono subdue">${esc(r.detail || '')}</span></td>
         </tr>`;
@@ -588,7 +599,7 @@ function addLiveRow(e) {
       const lt = r.type === 'start' ? '' : (r.latency_ms != null ? r.latency_ms + 'ms' : '');
       const tk = (r.type === 'end' && (r.input || r.output)) ? `${fmtNum(r.input)}→${fmtNum(r.output)}` : '';
       return `<tr>
-        <td class="mono">${esc(r.ts ? fmtTime(new Date(r.ts).toISOString()) : '')}</td>
+        <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
         <td class="mono">${esc(r.agent || '—')}</td>
         <td>${esc(r.exposed || '—')}</td>
         <td class="mono">${esc(p)}</td>

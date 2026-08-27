@@ -2,6 +2,8 @@ package events
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -55,5 +57,70 @@ func TestSubscribeContextStillDeliversUntilDone(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no event delivered to live subscription")
+	}
+}
+
+// Exactly-once delivery across snapshot + channel: a Subscribe that lands
+// while a Publish is in flight must receive that event either in its recent
+// snapshot or on its channel — never both. (Publish loads the subscriber
+// snapshot under the same lock as its ring append; loading it after the
+// Unlock reopened a duplicate-delivery window when this COW hub landed.)
+func TestHubPublishSubscribeExactlyOnce(t *testing.T) {
+	h := NewHub()
+	const publishers = 4
+	const perPublisher = 200
+	var pubWG sync.WaitGroup
+	start := make(chan struct{})
+	for p := 0; p < publishers; p++ {
+		pubWG.Add(1)
+		go func(p int) {
+			defer pubWG.Done()
+			<-start
+			for i := 0; i < perPublisher; i++ {
+				h.Publish(Event{Type: "start", RequestID: fmt.Sprintf("r-%d-%d", p, i)})
+			}
+		}(p)
+	}
+
+	type collector struct {
+		seen map[string]int
+		ch   <-chan Event
+	}
+	subscribe := func() collector {
+		ch, recent, cancel := h.Subscribe()
+		seen := make(map[string]int, len(recent))
+		for _, e := range recent {
+			seen[e.RequestID]++
+		}
+		cancel()
+		return collector{seen: seen, ch: ch}
+	}
+	const numCollectors = 6
+	collectors := make([]collector, numCollectors)
+	for i := range collectors {
+		collectors[i] = subscribe()
+	}
+
+	close(start)
+	pubWG.Wait()
+	// Publishers are done and every subscription is cancelled: the channels
+	// are quiescent, so a non-blocking drain is complete.
+	for _, c := range collectors {
+		drain := true
+		for drain {
+			select {
+			case e := <-c.ch:
+				c.seen[e.RequestID]++
+			default:
+				drain = false
+			}
+		}
+	}
+	for i := range collectors {
+		for id, n := range collectors[i].seen {
+			if n > 1 {
+				t.Fatalf("event %s delivered %d times to one subscriber (snapshot + channel overlap)", id, n)
+			}
+		}
 	}
 }

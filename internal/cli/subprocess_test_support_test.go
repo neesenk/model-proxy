@@ -125,8 +125,11 @@ func runCLIWithHome(t *testing.T, home, subcmd, cfgPath string, extraArgs ...str
 	cmd.Stdout = &out
 	cmd.Stderr = &errB
 	// Pin HOME (isolation from real ~/.model-proxy) and strip color so
-	// assertions don't depend on a tty.
-	cmd.Env = append(cmd.Env, "HOME="+home, "NO_COLOR=1", "TERM=dumb")
+	// assertions don't depend on a tty. TMPDIR is pinned too: commands like
+	// login/add finish with MaybeReloadDaemon, whose default pid file is
+	// <TMPDIR>/model-proxy.pid — without this, a developer's live serve
+	// daemon on the same machine would get a real SIGHUP from the test.
+	cmd.Env = append(cmd.Env, "HOME="+home, "NO_COLOR=1", "TERM=dumb", "TMPDIR="+t.TempDir())
 	err := cmd.Run()
 	exitCode = 0
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -176,7 +179,9 @@ func runCLIWithStdin(t *testing.T, stdin, home, subcmd, cfgPath string, extraArg
 	var out, errB bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errB
-	cmd.Env = append(cmd.Env, "HOME="+home, "NO_COLOR=1", "TERM=dumb")
+	// TMPDIR isolation: same MaybeReloadDaemon pid-file rationale as
+	// runCLIWithHome — never signal a developer's real serve daemon.
+	cmd.Env = append(cmd.Env, "HOME="+home, "NO_COLOR=1", "TERM=dumb", "TMPDIR="+t.TempDir())
 	err := cmd.Run()
 	exitCode = 0
 	if ee, ok := err.(*exec.ExitError); ok {

@@ -96,9 +96,21 @@ func (s Store) loadSnapshotKeychain(name, providerID string) (Snapshot, error) {
 		}
 		a.APIKey = apiKey
 		// access_key/secret_key are optional (volcengine only): absent entry
-		// means the account simply has none.
-		a.AccessKey = keychainGetOptional(name, a.ID, keychainFieldAccessKey)
-		a.SecretKey = keychainGetOptional(name, a.ID, keychainFieldSecretKey)
+		// means the account simply has none — but a backend error fails the
+		// load: a store that answered the api_key read moments ago flipping
+		// to unavailable is a mid-load inconsistency, and handing
+		// validatePool an account with empty AK/SK would silently degrade
+		// usage/quota later.
+		accessKey, err := s.keychainGetOptional(name, a.ID, keychainFieldAccessKey)
+		if err != nil {
+			return Snapshot{Source: SourcePlural}, err
+		}
+		a.AccessKey = accessKey
+		secretKey, err := s.keychainGetOptional(name, a.ID, keychainFieldSecretKey)
+		if err != nil {
+			return Snapshot{Source: SourcePlural}, err
+		}
+		a.SecretKey = secretKey
 	}
 	if err := validatePool(providerID, p); err != nil {
 		return Snapshot{Source: SourcePlural}, fmt.Errorf("validate %s: %w", s.PoolPath(name), err)
@@ -133,16 +145,18 @@ func (s Store) migrateSecrets(name, id string, c Credentials) error {
 	return nil
 }
 
-// keychainGetOptional reads an optional secret field; ErrNotFound degrades to
-// "" (the account has no such field), any other error also degrades to "" so a
-// transient failure on an optional field does not mask the account — the
-// authoritative api_key read already failed closed upstream.
-func keychainGetOptional(name, id, field string) string {
+// keychainGetOptional reads an optional secret field. ErrNotFound degrades
+// to "" (the account has no such field); every other error propagates —
+// optional FIELD, not optional backend (see the fail-closed rule above).
+func (s *Store) keychainGetOptional(name, id, field string) (string, error) {
 	value, err := credstore.KeychainGet(keychainKey(name, id, field))
-	if err != nil {
-		return ""
+	if err == nil {
+		return value, nil
 	}
-	return value
+	if errors.Is(err, credstore.ErrNotFound) {
+		return "", nil
+	}
+	return "", fmt.Errorf("keychain read for pool %s: %w", s.PoolPath(name), err)
 }
 
 // loadLegacyKeychain migrates the legacy singular <name>_apikey.json: secrets

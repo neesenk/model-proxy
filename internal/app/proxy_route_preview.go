@@ -124,7 +124,10 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 
 	cacheState := "off"
 	if cache != nil && forcedProvider == "" && !force {
-		if _, hit := cache.Lookup(responsecache.Key(r, body), now); hit {
+		// Peek, not Lookup: this endpoint is a read-only preview that gets
+		// polled, and Lookup books a miss (and lazily evicts) on every probe,
+		// grinding the operational hit-rate metrics down.
+		if cache.Peek(responsecache.Key(r, body), now) {
 			cacheState = "hit"
 		} else {
 			cacheState = "miss"

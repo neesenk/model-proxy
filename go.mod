@@ -3,6 +3,9 @@ module model-proxy
 go 1.26.4
 
 require (
+	// Pinned to the upstream main-branch commit that added native go1.27
+	// support (v1.15.2 silently falls back to encoding/json there). Replace
+	// with the tagged v1.15.3 release once it is out.
 	github.com/bytedance/sonic v1.15.3-0.20260730064818-2a36d6da63e2
 	github.com/mattn/go-isatty v0.0.20
 	github.com/zalando/go-keyring v0.2.8

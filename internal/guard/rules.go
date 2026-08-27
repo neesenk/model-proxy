@@ -86,6 +86,50 @@ func (r rule) findIn(body []byte) [][2]int {
 	return out
 }
 
+// findEach streams the spans of every re match in body that passes the
+// entropy post-filter to fn, without materializing the match list — scan
+// bodies can be adversarially large and FindAllIndex would allocate the full
+// span set up front. fn returning false stops iteration. Rescanning from each
+// previous match end keeps the total scan linear (same advancement rule as
+// FindAllIndex, one byte on empty matches).
+func (r rule) findEach(body []byte, fn func(start, end int) bool) {
+	for pos := 0; pos <= len(body); {
+		if r.entropy == nil {
+			loc := r.re.FindIndex(body[pos:])
+			if loc == nil {
+				return
+			}
+			if !fn(pos+loc[0], pos+loc[1]) {
+				return
+			}
+			if next := pos + loc[1]; next > pos+loc[0] {
+				pos = next
+			} else {
+				pos = pos + loc[0] + 1
+			}
+			continue
+		}
+		loc := r.re.FindSubmatchIndex(body[pos:])
+		if loc == nil {
+			return
+		}
+		gs, ge := loc[0], loc[1]
+		if len(loc) >= 4 && loc[2] >= 0 {
+			gs, ge = loc[2], loc[3]
+		}
+		if shannon(body[pos+gs:pos+ge]) >= *r.entropy {
+			if !fn(pos+loc[0], pos+loc[1]) {
+				return
+			}
+		}
+		if next := pos + loc[1]; next > pos+loc[0] {
+			pos = next
+		} else {
+			pos = pos + loc[0] + 1
+		}
+	}
+}
+
 // hasLiteral was the per-rule bytes.Contains prefilter; the Scanner now
 // prefilters all literals in one automaton pass (see matcher.go).
 

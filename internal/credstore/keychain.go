@@ -2,8 +2,10 @@ package credstore
 
 import (
 	"errors"
+	"math"
 	"os/exec"
 	"runtime"
+	"time"
 
 	"github.com/zalando/go-keyring"
 )
@@ -27,12 +29,39 @@ var keychainOps keychainServiceProvider = realKeychainProvider{}
 
 type realKeychainProvider struct{}
 
+// Per-backend entry size ceilings, pre-checked before touching the OS
+// keychain so oversized blobs fail fast with a deterministic error class
+// instead of pushing a doomed request into the backend (the darwin backend
+// shells out to `security -i` with the blob on the command line — a command
+// over 4096 bytes is rejected AFTER the process was started, stranding it;
+// base64 expansion plus command framing leaves roughly 3000 raw bytes. The
+// windows backend caps the credential blob at 2560 raw bytes.).
+const (
+	maxDarwinEntryBytes  = 3000
+	maxWindowsEntryBytes = 2560
+)
+
+// maxEntrySize returns this platform's keychain entry ceiling in raw blob
+// bytes. Linux/BSD secret service has no practical limit.
+func maxEntrySize() int {
+	switch runtime.GOOS {
+	case "windows":
+		return maxWindowsEntryBytes
+	case "darwin":
+		return maxDarwinEntryBytes
+	default:
+		return math.MaxInt
+	}
+}
+
 func mapKeyringErr(err error) error {
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, keyring.ErrNotFound):
 		return ErrNotFound
+	case errors.Is(err, keyring.ErrSetDataTooBig):
+		return ErrEntryTooLarge
 	case errors.Is(err, keyring.ErrUnsupportedPlatform):
 		return ErrUnavailable
 	default:
@@ -41,30 +70,90 @@ func mapKeyringErr(err error) error {
 	}
 }
 
+// keychainOpTimeout bounds one OS keychain operation. The backends shell out
+// (/usr/bin/security) or speak dbus with no context support, so a wedged
+// secret service would otherwise hang a credential load forever — including
+// the first request a provider serves (loads cache in memory after that) and
+// OAuth refresh beats. Generous enough for a human to unlock a locked
+// keychain through the GUI prompt; short enough that a dead backend fails
+// closed as ErrUnavailable instead of hanging the caller. The underlying
+// syscall is not cancellable: on timeout the goroutine is abandoned (bounded
+// — one per timed-out call, result discarded), the standard Go tradeoff for
+// uncancellable I/O.
+var keychainOpTimeout = 30 * time.Second
+
+func withKeychainTimeout(op func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- op() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(keychainOpTimeout):
+		return ErrUnavailable
+	}
+}
+
+func withKeychainTimeoutGet(op func() ([]byte, error)) ([]byte, error) {
+	type result struct {
+		blob []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() { blob, err := op(); done <- result{blob, err} }()
+	select {
+	case r := <-done:
+		return r.blob, r.err
+	case <-time.After(keychainOpTimeout):
+		return nil, ErrUnavailable
+	}
+}
+
+func withKeychainTimeoutBool(op func() bool) bool {
+	done := make(chan bool, 1)
+	go func() { done <- op() }()
+	select {
+	case ok := <-done:
+		return ok
+	case <-time.After(keychainOpTimeout):
+		return false
+	}
+}
+
 func (realKeychainProvider) Set(service, user string, password []byte) error {
-	return mapKeyringErr(keyring.Set(service, user, string(password)))
+	if len(password) > maxEntrySize() {
+		return ErrEntryTooLarge
+	}
+	return withKeychainTimeout(func() error {
+		return mapKeyringErr(keyring.Set(service, user, string(password)))
+	})
 }
 
 func (realKeychainProvider) Get(service, user string) ([]byte, error) {
-	s, err := keyring.Get(service, user)
-	if err != nil {
-		return nil, mapKeyringErr(err)
-	}
-	return []byte(s), nil
+	return withKeychainTimeoutGet(func() ([]byte, error) {
+		s, err := keyring.Get(service, user)
+		if err != nil {
+			return nil, mapKeyringErr(err)
+		}
+		return []byte(s), nil
+	})
 }
 
 func (realKeychainProvider) Delete(service, user string) error {
-	return mapKeyringErr(keyring.Delete(service, user))
+	return withKeychainTimeout(func() error {
+		return mapKeyringErr(keyring.Delete(service, user))
+	})
 }
 
 func (realKeychainProvider) Available(service string) bool {
-	_, err := keyring.Get(service, probeAccount)
-	if err == nil {
-		// Unexpected entry under the probe name: reachable either way.
-		_ = keyring.Delete(service, probeAccount)
-		return true
-	}
-	return errors.Is(err, keyring.ErrNotFound)
+	return withKeychainTimeoutBool(func() bool {
+		_, err := keyring.Get(service, probeAccount)
+		if err == nil {
+			// Unexpected entry under the probe name: reachable either way.
+			_ = keyring.Delete(service, probeAccount)
+			return true
+		}
+		return errors.Is(err, keyring.ErrNotFound)
+	})
 }
 
 // keychainAvailable reports whether auto mode may select the keychain.

@@ -56,8 +56,12 @@ func (s Store) restoreFromKeychain(name, providerID string, p Pool) (Snapshot, e
 			continue
 		}
 		a.APIKey = apiKey
-		a.AccessKey = keychainGetOptional(name, a.ID, keychainFieldAccessKey)
-		a.SecretKey = keychainGetOptional(name, a.ID, keychainFieldSecretKey)
+		// Restore degrades optional-field errors to "" (the api_key gate
+		// above already routed backend trouble to relogin for this account).
+		accessKey, _ := s.keychainGetOptional(name, a.ID, keychainFieldAccessKey)
+		a.AccessKey = accessKey
+		secretKey, _ := s.keychainGetOptional(name, a.ID, keychainFieldSecretKey)
+		a.SecretKey = secretKey
 		restored = append(restored, a)
 	}
 	if len(restored) == 0 {

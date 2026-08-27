@@ -307,6 +307,10 @@ func poolBandByID(
 }
 
 func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
+	// The quality map loads atomically; projecting (per-provider EWMA walk)
+	// outside m.mu keeps the lock critical section minimal — the same shape
+	// DecideOrder uses for its decayed projection.
+	quality := projectQuality(m.qualitySnapshot(), now)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
@@ -318,7 +322,7 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 		Sticky:     make(map[string]Sticky, len(m.sticky)),
 		Pins:       make(map[string]Pin, len(m.pins)),
 		Quotas:     cloneQuotas(m.quotas),
-		Quality:    projectQuality(m.qualitySnapshot(), now),
+		Quality:    quality,
 		capturedAt: now,
 		spread:     make(map[string]uint64, len(m.spread)),
 	}

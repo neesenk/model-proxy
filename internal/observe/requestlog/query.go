@@ -13,6 +13,11 @@ import (
 )
 
 // Filter narrows a request-log query. Shadow is "", "only", or "exclude".
+// UsageOnly strips the request/response bodies and the header blob as records
+// are read, after parsing each response body's usage into ParsedUsage — a
+// top-K of N records then holds metadata-sized records instead of N full
+// bodies (max_body_bytes is 5MiB per side by default, so N=2000 full records
+// could transiently pin gigabytes).
 type Filter struct {
 	Model      string
 	Provider   string
@@ -24,6 +29,7 @@ type Filter struct {
 	From       time.Time
 	To         time.Time
 	Limit      int
+	UsageOnly  bool
 }
 
 func (f Filter) matches(record Record) bool {
@@ -116,7 +122,10 @@ func query(dir string, filter Filter, metadataOnly bool) ([]Record, error) {
 			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
 				var record Record
 				if json.Unmarshal(trimmed, &record) == nil && filter.matches(record) {
-					if metadataOnly {
+					if metadataOnly || filter.UsageOnly {
+						if filter.UsageOnly {
+							record.ParsedUsage = ExtractUsage(record.ResponseBody)
+						}
 						record.RequestBody = ""
 						record.ResponseBody = ""
 						record.ResponseHeaders = ""
