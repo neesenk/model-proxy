@@ -31,10 +31,16 @@
 ## 安装
 
 ```bash
-brew tap neesenk/model-proxy && brew install --cask model-proxy
+brew tap neesenk/model-proxy
+brew trust neesenk/model-proxy        # 新版 Homebrew 对第三方 tap 的 cask 要求显式信任（首次）
+brew install --cask model-proxy
+
+# 首次运行前：二进制暂未做 Apple 公证，Gatekeeper 会拦截（进程挂起或弹窗），
+# 需手动移除 quarantine 属性（一次性）：
+xattr -d com.apple.quarantine "$(readlink -f "$(which model-proxy)")"
 ```
 
-也可从 [GitHub Releases](https://github.com/neesenk/model-proxy/releases) 直接下载对应平台的归档（含 checksums.txt），或 `go install github.com/neesenk/model-proxy@latest` 源码安装。
+也可从 [GitHub Releases](https://github.com/neesenk/model-proxy/releases) 直接下载对应平台的归档（含 checksums.txt；curl 下载不带 quarantine 可直接运行，浏览器下载同样需上面的 `xattr -d`），或 `go install github.com/neesenk/model-proxy@latest` 源码安装。签名公证已列入后续计划，完成后此步骤不再需要。
 
 ## 构建
 
@@ -234,17 +240,19 @@ model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历�
 # 安全审计（离线直读审计日志，不需 daemon）
 model-proxy audit                  # 最近的 guard 命中（秘密/路径）与 takeover 漂移记录
 model-proxy audit --kind drift --from 7d --json   # 过滤 + 原始 JSON
+model-proxy audit --stats --from 7d  # 聚合视图：by kind/命中名 top10/agent top10/action（--json 出结构化聚合）
 ```
 
 ## Web UI
 
-代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；`listen` 由 validate 强制回环，无鉴权**（本地可信）。六个标签页：
+代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；`listen` 由 validate 强制回环，无鉴权**（本地可信）。七个标签页：
 
 - **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
 - **Analytics** — token + 等价成本趋势（日历日/月聚合；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a`）。
 - **Requests** — 请求日志查询（需 `request_log.enabled`）：按 model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。
+- **Security** — 安全审计查询（需 `guard.audit`）：guard 命中（秘密/路径类型）与 takeover 漂移记录，按 kind/时间过滤；只展示类型名与路由元数据，匹配内容永不进入 UI。每个客户端会话的 token 等价成本汇总在 `/api/sessions`（Requests 页同源数据）。
 - **Live** — 实时请求监视（SSE 推送）：哪个 agent 正在发请求、路由到哪个上游、状态/token/耗时——抓「疯狂重试的 agent」就靠它。
 
 **所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态并重建响应缓存，所以 UI 改动也是"给卡住的 provider 复位"的手段。
@@ -374,6 +382,59 @@ routes:
 动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off；strong 按配置、weak 恒为计数+审计，见上）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器，weak 路径命中例外：不发 live event，计数器名带 `_text` 后缀），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先、paths=block 只阻断 strong 命中。命中持久化到安全审计日志（默认 `~/.model-proxy/security*.log`，0600，按大小+按天轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
 
 规则维护：你的凭据免维护（自动派生）；新 key 格式用 `guard.extra_patterns`（config 热 reload 即时生效）或向上游同步内置表（升 `rules.json` 的 upstream pin → 重抽 → review）；敏感路径用 `guard.extra_paths`。
+
+## 安全功能使用指南
+
+上面是机制，这里是按场景的用法。默认配置（全 log）下**装好即受保护、不打扰**——先跑起来观察，再按需收紧。
+
+### 上手：从零到受保护（5 分钟）
+
+```bash
+brew tap neesenk/model-proxy && brew trust neesenk/model-proxy && brew install --cask model-proxy
+xattr -d com.apple.quarantine "$(readlink -f "$(which model-proxy)")"   # 首次（未公证，见安装节）
+
+model-proxy add zhipu                      # 预设接入：一条命令完成 config + 登录（或 login codex --from-codex 复用官方登录态）
+model-proxy takeover claude                # 接管客户端（写完自动复检漂移，异常会警示并留审计记录）
+model-proxy serve daemon                   # 启动
+```
+
+此时 guard 已在工作：秘密/路径命中走 log——不阻断、只记录。
+
+### 日常观测：命中了怎么看
+
+- **Web UI**(`http://127.0.0.1:15721/ui/`):Live 页实时看 guard 事件（⚑ 徽标行）;Security 页按 kind/时间翻审计记录。
+- **终端**:`model-proxy audit` 翻记录；`model-proxy audit --stats --from 7d` 看聚合（哪类命中多、哪个 agent 在触发）;`stats` 里 `guard` 虚拟 provider 的计数器看趋势。
+- **漂移**:`model-proxy doctor --live`——客户端 BASE_URL 被改离代理（key 劫持手法）会有 ⚠ 提示并写 drift 审计。
+
+### 收紧防护（按需，别一上来就开）
+
+```yaml
+guard:
+  secrets: redact    # 观察期确认误报可接受后：命中内容替换 [REDACTED] 转发（agent 收到脱敏文本，工作不中断）
+  # secrets: block   # 最严：直接 400——agent 会报错重试，适合高敏环境；注意 redact/block 对分片命中分别降级为 log/仅拦补齐段
+  paths: block       # 只拦"工具调用里读敏感路径"（strong）；正文讨论 .env 永不阻断，可放心开
+```
+
+改完 `serve reload` 即生效。block 误伤了正常请求？把动作调回 log、或把该格式加进下一条的自定义排除（用更精确的 extra_patterns 名字区分）。
+
+### 自定义规则
+
+```yaml
+guard:
+  extra_patterns:    # 公司内部 token 格式，热 reload 生效
+    - {name: corp_token, regex: '\bct-[A-Za-z0-9]{32,}', literal: 'ct-'}
+  extra_paths: [~/.company/secrets]
+```
+
+`config check` 会显示 guard 生效摘要（内置表 + N 条自定义 + 各开关状态），写完规则先跑一下确认加载。
+
+### 凭据放系统钥匙串（可选）
+
+`config.yaml` 加 `credentials: keychain`——apikey 池秘密值进 OS keychain，池文件只留元数据；已有的明文池首次读取自动迁移并擦除。macOS 首次写入可能弹钥匙串授权框；切回 `file` 会自动从钥匙串回迁（个别账号条目缺失会提示重新 login）。keychain 不可用时操作直接报错，不会静默回落明文。
+
+### 边界（什么不归代理管）
+
+agent 被诱导**直接 curl/DNS 出网**偷数据不经过本代理——那是客户端沙箱的职责（Codex 默认关网络、Claude Code 的 sandbox 模式），guard 管的是"秘密混在发给 LLM 的请求里"这条最常见的通道。已知检测限制：分片检测只覆盖秘密原文形态（编码分片不覆盖）；段间隔超 32KiB 不追溯。
 
 ## 调试工具：`test` / `pin` / `replay`
 
