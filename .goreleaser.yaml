@@ -1,0 +1,53 @@
+version: 2
+
+project_name: model-proxy
+
+# Release pipeline for model-proxy: tag push (v*) -> .github/workflows/release.yml
+# -> goreleaser builds the static matrix, creates the GitHub release and updates
+# the homebrew formula in neesenk/homebrew-model-proxy.
+#
+# Local dry-run (no push, no tag needed):
+#   goreleaser release --snapshot --clean
+
+builds:
+  - id: model-proxy
+    binary: model-proxy
+    main: .
+    env:
+      - CGO_ENABLED=0 # pure-Go (modernc sqlite): fully static, no cross toolchain
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      # same version injection point as scripts/build.sh (overrides version.go "dev")
+      - -s -w -X main.version={{.Version}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: model-proxy
+    formats: ["tar.gz"]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: ["zip"]
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: neesenk
+    name: model-proxy
+
+# Homebrew ships precompiled CLIs as casks nowadays (goreleaser `brews` is
+# deprecated since v2.16), so the tap gets Casks/model-proxy.rb.
+homebrew_casks:
+  - name: model-proxy
+    repository:
+      owner: neesenk
+      name: homebrew-model-proxy
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/neesenk/model-proxy
+    description: "Multi-provider LLM proxy — unified Anthropic/OpenAI endpoints with quota-aware scheduling, protocol conversion and an outbound secret guard"
+    binaries:
+      - model-proxy

@@ -1,0 +1,39 @@
+name: release
+
+# Tag-triggered release pipeline:
+#   git tag v0.1.0 && git push origin v0.1.0   ->   goreleaser release --clean
+#
+# One-time setup (user actions, needs GitHub credentials):
+#   1. push this repo to github.com/neesenk/model-proxy
+#   2. create the public repo neesenk/homebrew-model-proxy
+#   3. Settings -> Secrets -> HOMEBREW_TAP_GITHUB_TOKEN: a token with write
+#      access to the tap repo (fine-grained PAT scoped to homebrew-model-proxy,
+#      contents: read/write)
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags/history needed for version resolution
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

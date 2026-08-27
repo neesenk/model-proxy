@@ -41,6 +41,8 @@ scripts/build.sh --strip all
 
 项目使用 pure-Go `modernc.org/sqlite`，跨平台构建为 `CGO_ENABLED=0`。涉及 build tags、平台探测、daemon 或文件路径时至少补 Linux/Windows amd64 build。
 
+发布流水线（`.goreleaser.yaml` + `.github/workflows/release.yml`，tag `v*` 触发）改动后跑 `goreleaser check` 与 `goreleaser release --snapshot --clean` 验证，勿推送 snapshot 产物。
+
 ## Benchmark 约束
 
 `go test ./...` 不执行 benchmark，坏掉的基准（fixture 失效、断言 Fatalf、测到错误路径）会长期静默失真——已有教训：四个转发基准曾因 nil model_map 一直在测"无路由错误路径"。规则：

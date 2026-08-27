@@ -28,6 +28,14 @@
 - **Routes 层**：对外暴露模型名 → 一组 `provider/model` 目标。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由；目标可声明 `protocol:` 触发协议转换；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由
 - 凭据由 `login <provider>` 管理，不落 config；config `credentials:` 统一选择 apikey 池与 codex/aqp OAuth store 的存储后端（`file` 默认 / `keychain`：秘密值进 OS keychain、池文件只留元数据），env `MP_CRED_STORE` 仅作为 OAuth 侧的显式 override
 
+## 安装
+
+```bash
+brew tap neesenk/model-proxy && brew install --cask model-proxy
+```
+
+也可从 [GitHub Releases](https://github.com/neesenk/model-proxy/releases) 直接下载对应平台的归档（含 checksums.txt），或 `go install github.com/neesenk/model-proxy@latest` 源码安装。
+
 ## 构建
 
 ```bash
@@ -40,6 +48,8 @@ scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w
 ```
 
 `scripts/build.sh` 从 `git describe --tags --always --dirty` 注入版本号（`-ldflags -X main.version`，覆盖 `version.go` 的 `dev` 默认值，显示在 `serve status` / `/api/status`）。每个目标写 `dist/model-proxy-<goos>-<goarch>`（windows 加 `.exe`）；host 构建额外复制到 `./model-proxy`（可原地运行）。Flag：`--version <v>`、`--out <dir>`（默认 `dist`）、`--strip`（`-s -w`）、`-v`。`dist/` 和 `./model-proxy` 都在 .gitignore 里。
+
+**发布**：打 `v*` tag 推送即触发 `.github/workflows/release.yml`（GoReleaser，配置见 `.goreleaser.yaml`）——同一全静态矩阵 + 归档 + checksums 上 GitHub Releases，并自动更新 `neesenk/homebrew-model-proxy` 的 cask。本地验证：`goreleaser release --snapshot --clean`（不推送）。首次启用需在仓库 Settings 配 `HOMEBREW_TAP_GITHUB_TOKEN`（对 tap 仓库有 contents 写权限）。
 
 ## 配置
 
