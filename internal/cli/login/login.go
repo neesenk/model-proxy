@@ -292,8 +292,8 @@ After logging in, the browser will try to redirect back to this machine:
 func RunProviderLogin(cfg *configdomain.Config, provName, keyIn, label string, replace bool) error {
 	// Backstop for callers that bypass CmdLogin (presets `add`, the web
 	// layer): the pool save paths resolve stores through the process default,
-	// so apply this config's credentials backend before any pool I/O.
-	accounts.SetProcessBackend(accounts.BackendForMode(cfg.CredentialsMode()))
+	// so apply this config's credentials mode (pools + OAuth) before any I/O.
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	prov := cfg.Providers[provName]
 	switch prov.Provider {
 	case "aqp":
@@ -319,9 +319,9 @@ func CmdLogin(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Apply the configured credentials backend before any pool I/O (the
+	// Apply the configured credentials mode before any pool/OAuth I/O (the
 	// login/logout save paths resolve stores through the process default).
-	accounts.SetProcessBackend(accounts.BackendForMode(cfg.CredentialsMode()))
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	provName := cliframework.Positional(args)
 	if provName == "" {
 		fmt.Println("usage: model-proxy login <provider> [--label <name>] [--replace] [--from-env VAR [--from-env-ak VAR --from-env-sk VAR] | --from-codex]")

@@ -133,16 +133,27 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		}
 		// Sensitive-path signal (S2): an intent-level alert fired before any
 		// secret value appears. Paths are never redacted (rewriting a path
-		// would corrupt legitimate coding work). This scan runs even when the
-		// secrets pass already hit — including secrets=block — so one request
-		// carrying both signals gets both counters/events/audit records; only
-		// the response action is decided afterwards (below).
+		// would corrupt legitimate coding work). Hits are context-split
+		// (guard.ScanPathsContext): a path inside a tool-call/tool-result
+		// position is STRONG — the structural signature of an agent reading a
+		// sensitive file through a tool (MCP Tool Poisoning shape) — and gets
+		// the configured guard.paths action: live event, ("guard", cat)
+		// counter, audit record, and it is the only kind block can 400. A path
+		// in ordinary prose is WEAK (coding agents legitimately discuss .env
+		// & friends all the time): it only increments ("guard", cat+"_text")
+		// and writes an audit record with action "log-weak" — no live event
+		// (would spam the monitor), never blocked (正文提及敏感路径不阻断).
+		// This scan runs even when the secrets pass already hit — including
+		// secrets=block — so one request carrying both signals gets both
+		// counters/events/audit records; only the response action is decided
+		// afterwards (below).
 		pa := cfg.Guard.PathsAction()
 		var pathCats []string
 		if pa != "off" {
-			if cats := sc.ScanPaths(origBody); len(cats) > 0 {
+			strong, weak := sc.ScanPathsContext(origBody)
+			if len(strong) > 0 {
 				if p.metrics != nil {
-					for _, cat := range cats {
+					for _, cat := range strong {
 						p.metrics.Inc("guard", cat, counters.EvGuardHits)
 					}
 				}
@@ -153,10 +164,18 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					Agent:     agent,
 					Protocol:  proto,
 					Exposed:   exposed,
-					Detail:    "paths=" + strings.Join(cats, ",") + " action=" + pa,
+					Detail:    "paths=" + strings.Join(strong, ",") + " action=" + pa,
 				})
-				auditGuardHit(runtime.SecLog, seclog.KindPath, cats, pa, requestID, agent, proto, exposed)
-				pathCats = cats
+				auditGuardHit(runtime.SecLog, seclog.KindPath, strong, pa, requestID, agent, proto, exposed)
+				pathCats = strong
+			}
+			if len(weak) > 0 {
+				if p.metrics != nil {
+					for _, cat := range weak {
+						p.metrics.Inc("guard", cat+"_text", counters.EvGuardHits)
+					}
+				}
+				auditGuardHit(runtime.SecLog, seclog.KindPath, weak, "log-weak", requestID, agent, proto, exposed)
 			}
 		}
 		// Split-exfiltration signal (fragmented known secret): a credential

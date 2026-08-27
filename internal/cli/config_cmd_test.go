@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 )
 
@@ -183,5 +184,43 @@ func TestCLI_ConfigCheckFlagBeforeSubcommand(t *testing.T) {
 	}
 	if !strings.Contains(out, "listen:") {
 		t.Errorf("config check with leading --config missing listen line:\n%s", out)
+	}
+}
+
+// TestCLI_ConfigCheckCredentialsSummary: `config check` reports both
+// credential stores' effective mode + source, and flags the one divergence
+// possible after switch convergence — MP_CRED_STORE overriding only the OAuth
+// side while pools follow config.
+func TestCLI_ConfigCheckCredentialsSummary(t *testing.T) {
+	cfgPath := writeTempConfig(t, "credentials: keychain\n"+minimalConfig)
+	// CmdConfigRun applies the config's credentials mode process-wide; restore
+	// the file default so later tests in this package are unaffected.
+	t.Cleanup(func() { accounts.SetProcessCredentialsMode("file") })
+
+	// Env override on the OAuth side only → visible mismatch line.
+	t.Setenv("MP_CRED_STORE", "file")
+	out := grabStdout(t, func() {
+		RunConfig([]string{"check", "--config", cfgPath})
+	})
+	for _, want := range []string{
+		"credentials: pools=keychain (config credentials:) oauth=file (env MP_CRED_STORE)",
+		"credentials mode mismatch",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("config check credentials summary missing %q:\n%s", want, out)
+		}
+	}
+
+	// No env override: config drives both sides — no mismatch line. (The
+	// test-binary guard keeps the OAuth side resolved to file/default.)
+	t.Setenv("MP_CRED_STORE", "")
+	out = grabStdout(t, func() {
+		RunConfig([]string{"check", "--config", cfgPath})
+	})
+	if !strings.Contains(out, "credentials: pools=keychain (config credentials:)") {
+		t.Errorf("config check credentials summary missing pools line:\n%s", out)
+	}
+	if strings.Contains(out, "credentials mode mismatch") {
+		t.Errorf("config check must not flag a mismatch without an env override:\n%s", out)
 	}
 }

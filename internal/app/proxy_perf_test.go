@@ -422,6 +422,11 @@ func TestProxy_Guard_CleanBodyScanBudget(t *testing.T) {
 		if cats := sc.ScanPaths(body); len(cats) != 0 {
 			t.Fatalf("clean body path hit: %v", cats)
 		}
+		// The context-aware scan must short-circuit on the same literal gate:
+		// a clean body never pays the JSON structure walk.
+		if strong, weak := sc.ScanPathsContext(body); len(strong) != 0 || len(weak) != 0 {
+			t.Fatalf("clean body path-context hit: %v/%v", strong, weak)
+		}
 	}
 	if elapsed := time.Since(start); elapsed > guardScanBudget {
 		t.Errorf("guard clean-body scan: %d x 64KB took %s, budget %s", scans, elapsed, guardScanBudget)

@@ -35,10 +35,15 @@ func NewProxy(cfg *Config) *Proxy {
 // NewProxyWithStatePath is the injectable constructor used by tests so every
 // Proxy owns an isolated state file before the tracker loads or starts.
 func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
-	// Apply the configured credentials backend (`credentials:`) before any
-	// pool I/O: AccountStore and the web/login save paths resolve stores
-	// through the accounts process default. Reload re-applies it per config.
-	accounts.SetProcessBackend(accounts.BackendForMode(cfg.CredentialsMode()))
+	// Apply the configured credentials mode (`credentials:`) before any pool
+	// I/O: AccountStore and the web/login save paths resolve stores through
+	// the accounts process default, and OAuth blob storage follows credstore's
+	// process mode. Reload re-applies both per config. A non-empty
+	// MP_CRED_STORE overriding only the OAuth side gets one visible line.
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
+	if note := accounts.CredentialMismatchNote(cfg.Credentials); note != "" {
+		log.Printf("[startup] ⚠ %s", note)
+	}
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
 	// Same scanner entry point as Reload: startup and reload build identical
 	// generations. An error is only reachable with an unvalidated Config

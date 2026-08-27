@@ -15,9 +15,12 @@
 // plaintext regex matches, exact known-secret values and their encoded
 // variants (base64/hex/url-escaped), an encoded-literal channel that decodes
 // bounded token spans and re-runs the owning rule, user custom patterns, and
-// a sensitive-path signal table (ScanPaths).
+// a sensitive-path signal table (ScanPaths, plus its context-aware form
+// ScanPathsContext which splits hits into strong tool-call positions and weak
+// prose mentions).
 //
-// Scan/Redact/ScanPaths report rule TYPE NAMES and path CATEGORY NAMES only.
+// Scan/Redact/ScanPaths/ScanPathsContext report rule TYPE NAMES and path
+// CATEGORY NAMES only.
 // Matched secret bytes are never returned beyond the redacted body itself, so
 // callers can log/count hits without any credential reaching logs, events, or
 // test output.

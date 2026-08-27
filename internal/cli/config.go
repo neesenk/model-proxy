@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"log"
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	displaypkg "model-proxy/internal/provider"
@@ -68,6 +69,11 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		s := cfg.Scheduling
 		fmt.Printf("  scheduling: threshold=%d cooldown=%s rate_backoff=%s timeout=%s dwell=%s\n",
 			s.Threshold(), s.Cooldown(), s.RateBackoff(), s.Timeout(), s.Dwell())
+		pools, oauth := accounts.CredentialModes(cfg.Credentials)
+		fmt.Printf("  credentials: pools=%s (%s) oauth=%s (%s)\n", pools.Mode, pools.Source, oauth.Mode, oauth.Source)
+		if note := accounts.CredentialMismatchNote(cfg.Credentials); note != "" {
+			fmt.Println(displaypkg.Yellow("  ⚠ " + note))
+		}
 		fmt.Print(RenderGuardSummary(cfg))
 		// Config-time routing hazards (explicit routes only — implicit routes are
 		// a daemon-side concept; the daemon logs these at boot/reload).
@@ -120,5 +126,8 @@ func CmdConfigRun(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Apply this config's credentials mode so the check summary reports the
+	// OAuth side's config-driven resolution (not a bare default).
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	CmdConfig(args, cfg)
 }

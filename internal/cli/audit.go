@@ -12,6 +12,8 @@ import (
 	"time"
 	"unicode"
 
+	"sort"
+
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	observeseclog "model-proxy/internal/observe/seclog"
@@ -24,20 +26,30 @@ import (
 // guard.audit_path (a file path whose basename is the security-*.log prefix
 // family), falling back to ~/.model-proxy/security.log.
 
+// auditStatsLimit caps how many filtered records `--stats` aggregates. Stats
+// must summarize the whole filtered set, so the table pager --limit does not
+// apply; this larger internal cap bounds the scan instead. Records beyond it
+// are dropped newest-first (Query top-K semantics), same as a huge --limit.
+const auditStatsLimit = 10000
+
+// auditStatsTopN is how many entries the top-names / top-agents lists keep.
+const auditStatsTopN = 10
+
 // AuditOpts holds parsed `audit` command flags. Limit defaults to 50; <= 0
-// means no cap.
+// means no cap. Stats switches to the aggregate view (which ignores Limit).
 type AuditOpts struct {
 	From  string
 	To    string
 	Kind  string
 	Limit int
 	JSON  bool
+	Stats bool
 }
 
 // ParseAuditFlags scans `audit` flags: --from/--to (now | duration-ago like
-// 1h | unix seconds | RFC3339), --kind (secret|path|drift), --limit N,
-// --json. --config is left to configPath (consumed here only to skip its
-// value). An unparseable --limit value, an unknown flag, and a flag missing
+// 1h or 7d | unix seconds | RFC3339), --kind (secret|path|drift), --limit N,
+// --stats, --json. --config is left to configPath (consumed here only to skip
+// its value). An unparseable --limit value, an unknown flag, and a flag missing
 // its value are immediate errors (a silent 0 would mean "no cap" — never
 // what the user mistyped, and a silently ignored flag hides typos).
 func ParseAuditFlags(args []string) (AuditOpts, error) {
@@ -90,6 +102,8 @@ func ParseAuditFlags(args []string) (AuditOpts, error) {
 			o.Limit = n
 		case a == "--json":
 			o.JSON = true
+		case a == "--stats":
+			o.Stats = true
 		case a == "--config":
 			// Resolved by configPath from the full arg list; skip its value.
 			if i+1 < len(args) {
@@ -138,6 +152,11 @@ func RenderAudit(dir string, opts AuditOpts, now time.Time) (string, error) {
 		return "", fmt.Errorf("invalid --kind %q: must be secret, path, or drift", opts.Kind)
 	}
 	filter := observeseclog.Filter{Kind: opts.Kind, Limit: opts.Limit}
+	if opts.Stats {
+		// Stats aggregates the whole filtered set: --limit (the table pager)
+		// must not truncate the counts, so a larger internal cap applies.
+		filter.Limit = auditStatsLimit
+	}
 	var err error
 	if filter.From, err = ParseAuditTime(opts.From, now); err != nil {
 		return "", fmt.Errorf("invalid --from %q: %v", opts.From, err)
@@ -154,6 +173,21 @@ func RenderAudit(dir string, opts AuditOpts, now time.Time) (string, error) {
 			return fmt.Sprintf("(no security audit records yet — %s does not exist)\n", dir), nil
 		}
 		return "", fmt.Errorf("read security audit log %s: %w", dir, err)
+	}
+	if opts.Stats {
+		stats := AggregateAuditStats(result.Records, filter.From, filter.To)
+		if opts.JSON {
+			data, err := json.Marshal(stats)
+			if err != nil {
+				return "", fmt.Errorf("encode audit stats: %w", err)
+			}
+			return string(data) + "\n", nil
+		}
+		out := FormatAuditStats(stats, dir)
+		if result.Skipped > 0 {
+			out += fmt.Sprintf("  (%d unreadable %s skipped)\n", result.Skipped, Plural(result.Skipped, "line", "lines"))
+		}
+		return out, nil
 	}
 	if opts.JSON {
 		records := result.Records
@@ -175,8 +209,9 @@ func RenderAudit(dir string, opts AuditOpts, now time.Time) (string, error) {
 
 // ParseAuditTime parses one --from/--to value into unix milliseconds (0 =
 // unbounded). Accepted forms: "now", a Go duration meaning "that long ago"
-// (1h, 30m), unix seconds, or RFC3339. stats has no reusable helper — its
-// --from is parsed server-side by the daemon — so the CLI forms live here.
+// (1h, 30m), a day count with a "d" suffix (7d), unix seconds, or RFC3339.
+// stats has no reusable helper — its --from is parsed server-side by the
+// daemon — so the CLI forms live here.
 func ParseAuditTime(v string, now time.Time) (int64, error) {
 	if v == "" {
 		return 0, nil
@@ -190,13 +225,22 @@ func ParseAuditTime(v string, now time.Time) (int64, error) {
 		}
 		return now.Add(-d).UnixMilli(), nil
 	}
+	// Go durations stop at hours; accept an integer day count (7d) too.
+	if strings.HasSuffix(v, "d") {
+		if n, err := strconv.Atoi(strings.TrimSuffix(v, "d")); err == nil {
+			if n < 0 {
+				return 0, fmt.Errorf("duration must not be negative (got %s)", v)
+			}
+			return now.AddDate(0, 0, -n).UnixMilli(), nil
+		}
+	}
 	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 		return n * 1000, nil
 	}
 	if t, err := time.Parse(time.RFC3339, v); err == nil {
 		return t.UnixMilli(), nil
 	}
-	return 0, fmt.Errorf("use now, a duration (1h), unix seconds, or RFC3339")
+	return 0, fmt.Errorf("use now, a duration (1h, 7d), unix seconds, or RFC3339")
 }
 
 // FormatAuditTable renders audit records (newest first, as Query returns
@@ -213,6 +257,121 @@ func FormatAuditTable(records []*observeseclog.Record, dir string) string {
 		out += fmt.Sprintf("%-14s %-7.7s %-12.12s %-16.16s %-20.20s %-7.7s %s\n",
 			time.UnixMilli(r.Ts).Format("01-02 15:04:05"),
 			r.Kind, r.Agent, r.Exposed, strings.Join(r.Names, ","), r.Action, sanitizeAuditDetail(r.Detail))
+	}
+	return out
+}
+
+// AuditStatCount is one (name, count) pair in a top-N list.
+type AuditStatCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// AuditStats is the aggregate view of a filtered audit record set: total
+// record count, hits by kind, top hit names (Record.Names expanded) and
+// agents, and counts by action. From/To echo the query window (0 =
+// unbounded, omitted from JSON). Lists are ordered by count desc, name asc,
+// so both the table and the JSON are deterministic.
+type AuditStats struct {
+	From      int64            `json:"from,omitempty"`
+	To        int64            `json:"to,omitempty"`
+	Total     int              `json:"total"`
+	ByKind    map[string]int   `json:"by_kind"`
+	ByAction  map[string]int   `json:"by_action"`
+	TopNames  []AuditStatCount `json:"top_names"`
+	TopAgents []AuditStatCount `json:"top_agents"`
+}
+
+// AggregateAuditStats counts the filtered records into an AuditStats. Records
+// with an empty agent or action are left out of those dimensions (their kind
+// and names still count).
+func AggregateAuditStats(records []*observeseclog.Record, from, to int64) *AuditStats {
+	stats := &AuditStats{
+		From:      from,
+		To:        to,
+		Total:     len(records),
+		ByKind:    map[string]int{},
+		ByAction:  map[string]int{},
+		TopNames:  []AuditStatCount{},
+		TopAgents: []AuditStatCount{},
+	}
+	names := map[string]int{}
+	agents := map[string]int{}
+	for _, r := range records {
+		stats.ByKind[r.Kind]++
+		if r.Action != "" {
+			stats.ByAction[r.Action]++
+		}
+		for _, name := range r.Names {
+			names[name]++
+		}
+		if r.Agent != "" {
+			agents[r.Agent]++
+		}
+	}
+	stats.TopNames = topAuditCounts(names, auditStatsTopN)
+	stats.TopAgents = topAuditCounts(agents, auditStatsTopN)
+	return stats
+}
+
+// topAuditCounts flattens a count map into pairs ordered by count desc, name
+// asc (deterministic ties), keeping at most n.
+func topAuditCounts(counts map[string]int, n int) []AuditStatCount {
+	pairs := make([]AuditStatCount, 0, len(counts))
+	for name, count := range counts {
+		pairs = append(pairs, AuditStatCount{Name: name, Count: count})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].Count != pairs[j].Count {
+			return pairs[i].Count > pairs[j].Count
+		}
+		return pairs[i].Name < pairs[j].Name
+	})
+	if len(pairs) > n {
+		pairs = pairs[:n]
+	}
+	return pairs
+}
+
+// FormatAuditStats renders the aggregate view: a header with the query window
+// and total record count, then compact count tables — by kind, top names,
+// top agents, by action. Empty result keeps the header and adds the same
+// no-records note as the raw table.
+func FormatAuditStats(stats *AuditStats, dir string) string {
+	window := func(v int64) string {
+		if v == 0 {
+			return "-"
+		}
+		return time.UnixMilli(v).Format("2006-01-02 15:04:05")
+	}
+	out := fmt.Sprintf("security audit stats  range: %s .. %s  total: %d %s\n",
+		window(stats.From), window(stats.To), stats.Total, Plural(stats.Total, "record", "records"))
+	if stats.Total == 0 {
+		return out + fmt.Sprintf("(no security audit records in %s)\n", dir)
+	}
+	out += formatAuditStatSection("by kind", topAuditCounts(stats.ByKind, len(stats.ByKind)))
+	out += formatAuditStatSection(fmt.Sprintf("top names (top %d)", auditStatsTopN), stats.TopNames)
+	out += formatAuditStatSection(fmt.Sprintf("top agents (top %d)", auditStatsTopN), stats.TopAgents)
+	out += formatAuditStatSection("by action", topAuditCounts(stats.ByAction, len(stats.ByAction)))
+	return out
+}
+
+// formatAuditStatSection renders one count table: an indented name column
+// sized to the longest entry, counts right-aligned. Empty sections are
+// omitted entirely.
+func formatAuditStatSection(title string, pairs []AuditStatCount) string {
+	if len(pairs) == 0 {
+		return ""
+	}
+	width := 0
+	for _, p := range pairs {
+		if len(p.Name) > width {
+			width = len(p.Name)
+		}
+	}
+	out := "\n" + title + "\n"
+	for _, p := range pairs {
+		out += fmt.Sprintf("  %-*s %6d\n", width, p.Name, p.Count)
 	}
 	return out
 }

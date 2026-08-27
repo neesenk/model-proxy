@@ -10,15 +10,22 @@ log_level: info            # debug | info | warn | error
 # Uncomment to override:
 # log_file: /var/log/model-proxy/model-proxy.log
 
-# credentials: file         # file (default) | keychain — where apikey-pool secret
-#                           # VALUES live. keychain moves api_key/access_key/secret_key
+# credentials: file         # file (default) | keychain — where credential secret
+#                           # VALUES live, for BOTH apikey pools and codex/aqp OAuth
+#                           # stores. keychain moves api_key/access_key/secret_key
 #                           # into the OS keychain (macOS Keychain / Windows Credential
-#                           # Manager / Linux Secret Service); the pool file then keeps
-#                           # metadata only (id/label/added_at). Plaintext pools migrate
+#                           # Manager / Linux Secret Service) per entry — the pool file
+#                           # then keeps metadata only — and stores each OAuth blob as a
+#                           # whole keychain entry. Plaintext pools/OAuth files migrate
 #                           # lazily on first read. Keychain mode is fail-closed: an
 #                           # unreachable backend errors instead of silently reading
-#                           # plaintext files. OAuth stores (codex/aqp) are NOT covered
-#                           # (they follow credstore's MP_CRED_STORE selection).
+#                           # plaintext files. Switching back to file restores pool
+#                           # secrets from the keychain (accounts missing their entry
+#                           # keep metadata and need a re-login); OAuth blobs are not
+#                           # restored — re-login after switching them back. env
+#                           # MP_CRED_STORE (file|keychain|auto) remains an explicit
+#                           # override on the OAuth side only; 'config check' flags it
+#                           # when it diverges from this setting.
 
 # Providers — upstream backends. Token files are auto-managed by login/logout
 # at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).

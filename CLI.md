@@ -206,11 +206,13 @@ login <provider> [--label <name>] [--replace]
 
 逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
 
-### 凭据存储后端（`internal/credstore` + config `credentials:`）
+### 凭据存储后端（config `credentials:` 统一开关 + env override）
 
-codex/aqp OAuth store 经 `credstore.Ref` 读写，后端由 `MP_CRED_STORE` 决定：`auto`（默认，keychain 可达则用 keychain）、`file`（历史行为：0600 明文文件 + temp+fsync+rename 原子写）、`keychain`（强制；后端不可达时操作 fail-closed 报错）。keychain 模式下首次读到遗留明文文件会懒迁移进 keychain 并把原文件改名为 `<path>.migrated.bak`（保留一代回滚）。
+两类凭据共用一个开关：config 顶层 `credentials: file|keychain`（默认 file），同时驱动 apikey 池与 codex/aqp OAuth store。env `MP_CRED_STORE`（`file|keychain|auto`）保留为**仅 OAuth 侧的显式 override**：优先级 env 非空 > config > 默认 file；`auto` = 按 keychain 可达性探测（收敛前的旧默认，现为 opt-in）。env 与 config 不一致时 `config check` 和启动/reload 日志各打一行，列出两侧生效值与来源（env/config/default）。
 
-apikey 池（`<name>_apikeys.json` 与遗留单账号文件）走另一条开关：config 顶层 `credentials: file|keychain`（默认 file）。`keychain` 模式下 `accounts.Store` 把 api_key/access_key/secret_key 逐条写入 OS keychain（经 credstore 的 entry API，service `model-proxy`，键 `<providerName>/<accountId>/<field>`），池文件只留 `{id, label, added_at}` 元数据；明文池与遗留文件在首次读取时懒迁移（池文件原地重写为纯元数据，遗留文件改名 `.migrated.bak`）。保存时先写 keychain 再写元数据；删除账号时先删 keychain 条目成功才落元数据，避免"元数据没了秘密还留钥匙串"的孤儿。keychain 不可达一律 fail-closed 报错，不静默回落明文。模式经 `accounts.SetProcessBackend` 在 config 加载点（`LoadCmdConfig`/`CmdLogin`/serve 构造与 reload）应用到进程，未加载 config 的调用点保持 file 默认。
+codex/aqp OAuth store 经 `credstore.Ref` 读写：`file` = 历史行为（0600 明文文件 + temp+fsync+rename 原子写）；`keychain` = 整 blob 一条 keychain 记录，后端不可达时 fail-closed 报错。keychain 模式下首次读到遗留明文文件会懒迁移进 keychain 并把原文件改名为 `<path>.migrated.bak`（保留一代回滚）。OAuth blob 不做 keychain→file 自动回迁（与历史 env 切换一致）——切回 file 需重新 login。
+
+apikey 池（`<name>_apikeys.json` 与遗留单账号文件）：`keychain` 模式下 `accounts.Store` 把 api_key/access_key/secret_key 逐条写入 OS keychain（经 credstore 的 entry API，service `model-proxy`，键 `<providerName>/<accountId>/<field>`），池文件只留 `{id, label, added_at}` 元数据；明文池与遗留文件在首次读取时懒迁移（池文件原地重写为纯元数据，遗留文件改名 `.migrated.bak`）。保存时先写 keychain 再写元数据；删除账号时先删 keychain 条目成功才落元数据，避免"元数据没了秘密还留钥匙串"的孤儿。keychain 不可达一律 fail-closed 报错，不静默回落明文。**反向回迁**：file 模式读到纯元数据池时按条目从 keychain 读回秘密并原子重写明文池（0600）；条目缺失的账号保留元数据并经 `Snapshot.ReloginNeeded`/启动日志报出需重新 login（部分回迁不整体失败）；回迁成功后 keychain 条目默认保留（防误删，`logout` 是正常删除路径）。模式经 `accounts.SetProcessCredentialsMode` 在 config 加载点（`LoadCmdConfig`/`CmdLogin`/`config check`/serve 构造与 reload）同时应用到池后端与 credstore OAuth 模式，未加载 config 的调用点保持 file 默认。
 
 测试二进制默认解析为 file 模式，绝不触碰真实 keychain；keychain 语义测试用 `keyring.MockInit()` 内存 mock。
 
@@ -907,15 +909,16 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 ## 18. `audit` — 安全审计日志（离线，不需 daemon）
 
 ```
-audit [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
+audit [--stats] [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
 ```
 
 逻辑（`internal/cli/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
 
-- `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。负时长（如 `-1h`）报错；`--from` 晚于 `--to` -> `✗ --from is after --to (empty window)` + exit 1。
+- `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"；另接受整数天数后缀 `7d`）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。负时长（如 `-1h`/`-7d`）报错；`--from` 晚于 `--to` -> `✗ --from is after --to (empty window)` + exit 1。
 - `--kind`：`secret` | `path` | `drift`；其他值 -> stderr `✗ invalid --kind "<V>": must be secret, path, or drift` + exit 1。
-- `--limit N`：只保留最新 N 条（默认 50；`0`/负数 = 全部）。非整数 -> stderr `✗ invalid --limit: …` + exit 1。
-- `--json`：stdout 为 records 数组原样 JSON（`seclog.Record`，最新在前；空结果为 `[]`），供 jq。
+- `--limit N`：只保留最新 N 条（默认 50；`0`/负数 = 全部；`--stats` 下忽略）。非整数 -> stderr `✗ invalid --limit: …` + exit 1。
+- `--stats`：聚合视图替代原始记录——对**过滤后的全集**统计（忽略 `--limit`，改用内部上限 10000 条，超出按最新优先截断）：总数 + 按 kind 命中数、命中名（`names` 展开）top 10、agent top 10、按 action 计数。可与 `--from`/`--to`/`--kind` 组合。
+- `--json`：stdout 为 records 数组原样 JSON（`seclog.Record`，最新在前；空结果为 `[]`），供 jq。与 `--stats` 组合时输出聚合对象：`{"from":ms,"to":ms,"total":N,"by_kind":{...},"by_action":{...},"top_names":[{"name","count"}],"top_agents":[...]}`（`from`/`to` 为查询窗口，`0`/不限则省略；列表按 count 降序、name 升序）。
 - 未识别 flag/位置参数 -> `✗ unknown flag "<A>"` + exit 1；`--from`/`--to`/`--kind`/`--limit` 缺值 -> `✗ <FLAG> requires a value` + exit 1（`--config` 及其值由 configPath 消费，不算未知）。
 
 ### stdout（表格，`FormatAuditTable`）
@@ -926,6 +929,23 @@ time           kind    agent         route             names                 act
 ```
 
 记录按时间倒序（最新在前）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数（含无法打开的日志文件，每个计 1）追加一行 `  (<N> unreadable line(s) skipped)`；文件末尾无换行符的半行是 daemon 写入中的撕裂尾行，直接忽略、不计入 skipped。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
+
+### stdout（`--stats` 聚合，`FormatAuditStats`）
+
+```
+security audit stats  range: <YYYY-MM-DD HH:MM:SS|-> .. <同上|->  total: <N> record(s)
+
+by kind
+  <kind>      <count(右对齐6)>
+top names (top 10)
+  <name>      <count>
+top agents (top 10)
+  <agent>     <count>
+by action
+  <action>    <count>
+```
+
+首行 range 是查询窗口（不限显示 `-`，非数据 min/max）。各段按 count 降序、name 升序；空段（如无 action）整段省略。`total` 为 0 时只输出首行 + `(no security audit records in <DIR>)`。
 
 ---
 

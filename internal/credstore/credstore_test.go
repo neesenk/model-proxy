@@ -86,8 +86,12 @@ func useFakeKeychain(t *testing.T, fake *fakeKeychain) {
 }
 
 func resetResolution() {
-	resolveOnce = sync.Once{}
+	modeMu.Lock()
+	defer modeMu.Unlock()
+	resolvedOK = false
 	resolved = ""
+	resolvedSource = ""
+	configMode = ""
 }
 
 func osUnsetenvCredStore(t *testing.T) {
@@ -384,5 +388,104 @@ func TestRefSaveFileModeMkdirFailurePropagates(t *testing.T) {
 	// Parent "directory" is actually a regular file → MkdirAll fails.
 	if err := NewRef(filepath.Join(blocker, "pool.json")).Save([]byte(`{}`)); err == nil {
 		t.Fatal("save under an unwritable parent must fail")
+	}
+}
+
+// TestResolveModePriorityMatrix pins the full selection contract:
+// non-empty MP_CRED_STORE > config `credentials:` (SetProcessMode) > default
+// file, plus the test-binary hermeticity guard. resolveMode is pure, so the
+// matrix runs without process state or a real keychain.
+func TestResolveModePriorityMatrix(t *testing.T) {
+	reachable := func() bool { return true }
+	unreachable := func() bool { return false }
+	cases := []struct {
+		name       string
+		env        string
+		cfgMode    Mode
+		testBinary bool
+		probe      func() bool
+		wantMode   Mode
+		wantSource ModeSource
+	}{
+		{"env file beats config keychain", "file", ModeKeychain, false, reachable, ModeFile, SourceEnv},
+		{"env keychain beats config file", "keychain", ModeFile, false, unreachable, ModeKeychain, SourceEnv},
+		{"env auto probes reachable", "auto", ModeFile, false, reachable, ModeKeychain, SourceEnv},
+		{"env auto probes unreachable", "auto", ModeKeychain, false, unreachable, ModeFile, SourceEnv},
+		{"unknown env fails safe to file", "bogus", ModeKeychain, false, reachable, ModeFile, SourceEnv},
+		{"config keychain applies without env", "", ModeKeychain, false, unreachable, ModeKeychain, SourceConfig},
+		{"config file applies without env", "", ModeFile, false, reachable, ModeFile, SourceDefault},
+		{"no env no config defaults file", "", "", false, reachable, ModeFile, SourceDefault},
+		{"test binary guards config keychain", "", ModeKeychain, true, reachable, ModeFile, SourceDefault},
+		{"test binary guards env auto probe", "auto", "", true, reachable, ModeFile, SourceEnv},
+		{"test binary allows explicit env keychain", "keychain", "", true, reachable, ModeKeychain, SourceEnv},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mode, source := resolveMode(tc.env, tc.cfgMode, tc.testBinary, tc.probe)
+			if mode != tc.wantMode || source != tc.wantSource {
+				t.Fatalf("resolveMode(env=%q cfg=%q test=%t) = (%q, %q), want (%q, %q)",
+					tc.env, tc.cfgMode, tc.testBinary, mode, source, tc.wantMode, tc.wantSource)
+			}
+		})
+	}
+}
+
+// TestSetProcessModeRearmsResolution pins that config load points can swap the
+// process mode and that the cached resolution re-arms (serve reload path).
+func TestSetProcessModeRearmsResolution(t *testing.T) {
+	t.Setenv(envCredStore, "") // no env override
+	resetResolution()
+	t.Cleanup(resetResolution)
+
+	SetProcessMode(ModeFile)
+	if mode, source := EffectiveMode(); mode != ModeFile || source != SourceDefault {
+		t.Fatalf("EffectiveMode after SetProcessMode(file) = (%q, %q), want (file, default)", mode, source)
+	}
+	// Under the test-binary guard config-keychain still resolves to file, but
+	// re-arming must actually recompute (the pure matrix above covers the
+	// production outcome).
+	SetProcessMode(ModeKeychain)
+	if mode, _ := EffectiveMode(); mode != ModeFile {
+		t.Fatalf("EffectiveMode under test guard = %q, want file", mode)
+	}
+	// An env override set later still wins once resolution re-arms.
+	t.Setenv(envCredStore, string(ModeKeychain))
+	resetResolution()
+	if mode, source := EffectiveMode(); mode != ModeKeychain || source != SourceEnv {
+		t.Fatalf("EffectiveMode with env override = (%q, %q), want (keychain, env MP_CRED_STORE)", mode, source)
+	}
+}
+
+// TestConfigMismatchNote pins the one-line diagnostic for the only divergence
+// possible after convergence: the env overrides OAuth stores while pools keep
+// following config/default.
+func TestConfigMismatchNote(t *testing.T) {
+	cases := []struct {
+		name      string
+		env       string
+		rawConfig string
+		want      string // "" = no note; otherwise a required substring
+	}{
+		{"no env never mismatches", "", "keychain", ""},
+		{"env file vs config keychain", "file", "keychain", "apikey pools use keychain (config credentials:), OAuth stores use file (env MP_CRED_STORE)"},
+		{"env keychain vs default file", "keychain", "", "apikey pools use file (default), OAuth stores use keychain (env MP_CRED_STORE)"},
+		{"env keychain vs config keychain", "keychain", "keychain", ""},
+		{"env file vs config file", "file", "file", ""},
+		{"env file vs default file", "file", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envCredStore, tc.env)
+			note := ConfigMismatchNote(tc.rawConfig)
+			if tc.want == "" {
+				if note != "" {
+					t.Fatalf("ConfigMismatchNote(env=%q cfg=%q) = %q, want none", tc.env, tc.rawConfig, note)
+				}
+				return
+			}
+			if !strings.Contains(note, tc.want) {
+				t.Fatalf("ConfigMismatchNote(env=%q cfg=%q) = %q, want substring %q", tc.env, tc.rawConfig, note, tc.want)
+			}
+		})
 	}
 }

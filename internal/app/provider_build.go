@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"model-proxy/internal/accounts"
@@ -99,6 +100,16 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		if poolErr != nil {
 			log.Printf("[proxy] pool %s unreadable: %v; disabling provider", name, poolErr)
 			continue
+		}
+		if len(snapshot.ReloginNeeded) > 0 {
+			// keychain→file switch with unrestorable entries: labels/ids only —
+			// no secret material exists for these accounts anymore.
+			labels := make([]string, 0, len(snapshot.ReloginNeeded))
+			for _, a := range snapshot.ReloginNeeded {
+				labels = append(labels, a.Label)
+			}
+			log.Printf("[proxy] pool %s: %d account(s) kept as metadata only after keychain→file switch (keychain entries missing); login again to re-add: %s",
+				name, len(labels), strings.Join(labels, ", "))
 		}
 		pool := snapshot.Pool
 		// Guard known-secret collection: every account credential the proxy

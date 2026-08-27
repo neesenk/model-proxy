@@ -59,12 +59,21 @@ type Config struct {
 	// bodies are rejected with 413 before any routing work, bounding per-
 	// request memory (the body is fully buffered for routing/conversion).
 	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes"`
-	// Credentials selects where apikey-pool secret VALUES live: "file"
-	// (default — inline in the 0600 pool JSON, the historical layout) or
-	// "keychain" (OS keychain via internal/credstore; the pool file keeps
-	// metadata only). OAuth stores are NOT covered (they follow credstore's
-	// MP_CRED_STORE selection). Keychain mode is fail-closed: an unreachable
-	// backend errors instead of silently serving plaintext files.
+	// Credentials selects where credential secret VALUES live: "file"
+	// (default — apikey pools keep secrets inline in the 0600 pool JSON, the
+	// historical layout; OAuth stores stay 0600 plaintext files) or "keychain"
+	// (apikey-pool secrets go to the OS keychain per entry via
+	// internal/credstore and the pool file keeps metadata only; codex/aqp
+	// OAuth blobs are stored as whole keychain entries). One config drives
+	// BOTH stores; env MP_CRED_STORE survives as an explicit override on the
+	// OAuth side only (empty env > config > default file), and a divergence
+	// is surfaced by `config check` / startup logs. Keychain mode is
+	// fail-closed: an unreachable backend errors instead of silently serving
+	// plaintext files. Switching keychain→file restores apikey-pool secrets
+	// from the keychain per entry (partial restore keeps metadata and asks
+	// for re-login of the missing accounts); OAuth blobs are NOT restored —
+	// switching them back to file requires a fresh login, same as the
+	// historical env-switch behavior.
 	Credentials string `yaml:"credentials"`
 	// Conversion tunes protocol-conversion behavior.
 	Conversion ConversionConfig `yaml:"conversion"`

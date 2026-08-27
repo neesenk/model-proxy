@@ -53,6 +53,12 @@ const (
 type Snapshot struct {
 	Pool   Pool
 	Source Source
+	// ReloginNeeded lists accounts whose metadata survived in the pool file
+	// but whose secrets could not be restored from the keychain during a
+	// keychain→file restore (mode switched to file, entries missing or
+	// backend unreachable). They are NOT in Pool — each needs a fresh `login`
+	// (entry metadata only: id/label/added_at, never secret material).
+	ReloginNeeded []Account
 }
 
 // Credentials returns the complete credential tuple bound to this account.
@@ -91,6 +97,53 @@ var processBackend atomic.Int32
 // SetProcessBackend selects the backend NewStore returns for the rest of the
 // process. Call once after loading config, before constructing stores.
 func SetProcessBackend(b Backend) { processBackend.Store(int32(b)) }
+
+// SetProcessCredentialsMode applies the config `credentials:` selection to
+// BOTH credential stores at once — the single converged semantics: the
+// apikey-pool backend (SetProcessBackend) and credstore's OAuth blob mode.
+// Every config load point (CLI commands, login, serve construct/reload) calls
+// this so the two switches can never drift apart from the config side. The
+// env MP_CRED_STORE remains an explicit override on the OAuth side only;
+// CredentialMismatchNote surfaces that divergence.
+func SetProcessCredentialsMode(mode string) {
+	SetProcessBackend(BackendForMode(mode))
+	oauthMode := credstore.ModeFile
+	if BackendForMode(mode) == BackendKeychain {
+		oauthMode = credstore.ModeKeychain
+	}
+	credstore.SetProcessMode(oauthMode)
+}
+
+// CredentialMismatchNote surfaces the one remaining divergence after switch
+// convergence: MP_CRED_STORE overriding only the OAuth side while pools follow
+// config/default. "" = consistent. Thin wrapper so callers (app startup log,
+// `config check`) need no credstore import edge.
+func CredentialMismatchNote(rawConfig string) string {
+	return credstore.ConfigMismatchNote(rawConfig)
+}
+
+// StoreMode describes one credential store's effective backend and where the
+// selection came from. Diagnostic only — carries no credential material.
+type StoreMode struct {
+	Mode   string // "file" | "keychain"
+	Source string // "config credentials:" | "env MP_CRED_STORE" | "default"
+}
+
+// CredentialModes reports both credential stores' effective selection for
+// `config check`. Pools follow config `credentials:` (default file); OAuth
+// stores follow credstore resolution (env MP_CRED_STORE > config > default).
+func CredentialModes(rawConfig string) (pools, oauth StoreMode) {
+	pools = StoreMode{Mode: "file", Source: "default"}
+	if BackendForMode(rawConfig) == BackendKeychain {
+		pools.Mode = "keychain"
+	}
+	if strings.TrimSpace(rawConfig) != "" {
+		pools.Source = "config credentials:"
+	}
+	mode, source := credstore.EffectiveMode()
+	oauth = StoreMode{Mode: string(mode), Source: string(source)}
+	return pools, oauth
+}
 
 // BackendForMode maps the config `credentials:` value onto a Backend. Unknown
 // values degrade to file (config validate rejects them before this is reached).
@@ -149,6 +202,12 @@ func (s Store) LoadSnapshot(name, providerID string) (Snapshot, error) {
 		var p Pool
 		if err := json.Unmarshal(data, &p); err != nil {
 			return Snapshot{Source: SourcePlural}, fmt.Errorf("parse %s: %w", s.PoolPath(name), err)
+		}
+		// A pure-metadata pool under the file backend means the config switched
+		// keychain→file after a keychain-mode save: restore secrets per entry
+		// (partial restore, see restoreFromKeychain).
+		if isMetadataOnly(p) {
+			return s.restoreFromKeychain(name, providerID, p)
 		}
 		if err := validatePool(providerID, p); err != nil {
 			return Snapshot{Source: SourcePlural}, fmt.Errorf("validate %s: %w", s.PoolPath(name), err)

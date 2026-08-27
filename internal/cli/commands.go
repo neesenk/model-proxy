@@ -20,15 +20,16 @@ import (
 )
 
 // LoadCmdConfig loads the CLI config or exits. It also applies the configured
-// credentials backend (`credentials:`) to this process's account stores, so
-// every command that reads pools (usage/logout/models/doctor/...) sees the
-// same backend without threading cfg through each call site.
+// credentials mode (`credentials:`) to this process's account stores AND OAuth
+// blob store, so every command that reads credentials (usage/logout/models/
+// doctor/...) sees the same backend without threading cfg through each call
+// site.
 func LoadCmdConfig(args []string) *configdomain.Config {
 	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
 	if err != nil {
 		log.Fatal(err)
 	}
-	accounts.SetProcessBackend(accounts.BackendForMode(cfg.CredentialsMode()))
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	return cfg
 }
 
@@ -137,7 +138,7 @@ func RunDoctor(args []string) {
 		fmt.Println("✗ config invalid: " + err.Error())
 		os.Exit(1)
 	}
-	accounts.SetProcessBackend(accounts.BackendForMode(cfg.CredentialsMode()))
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	clidoctor.CmdDoctor(args, cfg, cliframework.ConfigPath(args))
 }
 
