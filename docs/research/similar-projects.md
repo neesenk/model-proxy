@@ -66,6 +66,8 @@
 
 ## 5. 下一步建议（收益 + 解决方案）
 
+> **落地进展（2026-08 第二轮）**：S1 已实现（含 volcengine 接入与 doctor/status 可见性）；S2 已实现（`internal/webauth` + validate 门槛 + 双面鉴权）；S3 已实现（CLI + Web 向导 + FetchModels 交集校验）；S4 已实现 kimi（Gemini CLI 因代理不支持 Gemini wire 协议暂缓）；S5′ 已并入 doctor；S6 被 guard 审计提交超越；S7 已实现（`GET /metrics`）。细节见各设计文档的「实现记录」。
+
 定位不变，按「安全性 → 易用性 → 生态位」排序。
 
 ### S1. 凭据存储加密（安全性 P0）

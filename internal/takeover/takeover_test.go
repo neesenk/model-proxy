@@ -305,3 +305,75 @@ func TestProviderID(t *testing.T) {
 		t.Errorf("takeover.ProviderID(custom)=%q want custom", got)
 	}
 }
+
+// --- takeover.RewriteKimi: ~/.kimi/config.toml provider + model blocks ---
+
+func TestRewriteKimi(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testTakeoverConfig(t, dir)
+	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
+	os.WriteFile(cfg.Takeover.Kimi, []byte("[providers.\"existing\"]\ntype = \"kimi\"\n"), 0o644)
+
+	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(cfg.Takeover.Kimi)
+	text := string(b)
+
+	if !strings.Contains(text, `[providers."model-proxy"]`) {
+		t.Errorf("kimi config missing [providers.\"model-proxy\"] section:\n%s", text)
+	}
+	if !strings.Contains(text, `type = "openai_legacy"`) {
+		t.Errorf("kimi provider must declare openai_legacy (Chat Completions):\n%s", text)
+	}
+	if !strings.Contains(text, `base_url = "http://127.0.0.1:15721/v1"`) {
+		t.Errorf("kimi provider base_url must be the versioned proxy endpoint:\n%s", text)
+	}
+	if !strings.Contains(text, `api_key = "PROXY_MANAGED"`) {
+		t.Errorf("kimi provider must carry the sentinel key:\n%s", text)
+	}
+	if !strings.Contains(text, "[models.glm-5.2]") || !strings.Contains(text, `provider = "model-proxy"`) {
+		t.Errorf("exposed model missing its [models.<name>] block:\n%s", text)
+	}
+	// Pre-existing foreign provider sections are preserved (only our own block is replaced).
+	if !strings.Contains(text, `[providers."existing"]`) {
+		t.Errorf("foreign provider section dropped:\n%s", text)
+	}
+
+	// Idempotent re-run: same content, no duplicated blocks.
+	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	b2, _ := os.ReadFile(cfg.Takeover.Kimi)
+	if strings.Count(string(b2), `[providers."model-proxy"]`) != 1 {
+		t.Errorf("re-run duplicated the provider block:\n%s", b2)
+	}
+	if strings.Count(string(b2), "[models.glm-5.2]") != 1 {
+		t.Errorf("re-run duplicated the model block:\n%s", b2)
+	}
+}
+
+// TestRewriteKimi_ReplacesStaleOwnBlock pins replace-in-place: a previous
+// takeover under the same id with a stale base_url must not survive.
+func TestRewriteKimi_ReplacesStaleOwnBlock(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testTakeoverConfig(t, dir)
+	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
+	os.WriteFile(cfg.Takeover.Kimi, []byte(`
+[providers."model-proxy"]
+type = "openai_legacy"
+base_url = "http://127.0.0.1:99999/v1"
+api_key = "OLD"
+`), 0o644)
+
+	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(cfg.Takeover.Kimi)
+	if strings.Contains(string(b), "99999") || strings.Contains(string(b), "OLD") {
+		t.Errorf("stale own block survived rewrite:\n%s", b)
+	}
+	if strings.Count(string(b), `[providers."model-proxy"]`) != 1 {
+		t.Errorf("stale block not replaced in place:\n%s", b)
+	}
+}

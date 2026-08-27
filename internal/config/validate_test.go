@@ -144,3 +144,74 @@ func TestValidateYAML_ShadowSampleRateLine(t *testing.T) {
 		t.Fatalf("line=%d want 12 (message=%q)", issues[0].Line, issues[0].Message)
 	}
 }
+
+// --- S2 optional auth: non-loopback listen gates ---
+
+func TestNonLoopbackListenRequiresAuthFiles(t *testing.T) {
+	base := `listen: 127.0.0.1:15721
+log_level: info
+providers:
+  zhipu:
+    provider_id: zhipu
+    openai_base_url: https://open.bigmodel.cn/api/paas/v4
+    models: [glm-5.2]
+`
+	cases := []struct {
+		name    string
+		mutate  func(string) string
+		wantErr string
+	}{
+		{
+			name: "no auth → admin token gate",
+			mutate: func(s string) string {
+				return strings.Replace(s, "127.0.0.1:15721", "0.0.0.0:15721", 1)
+			},
+			wantErr: "admin_token_file",
+		},
+		{
+			name: "admin only → api keys gate",
+			mutate: func(s string) string {
+				return strings.Replace(s, "127.0.0.1:15721", "0.0.0.0:15721", 1) +
+					"web:\n  auth:\n    admin_token_file: /tmp/admin.tok\n"
+			},
+			wantErr: "api_keys_file",
+		},
+		{
+			name: "both configured → accepted",
+			mutate: func(s string) string {
+				return strings.Replace(s, "127.0.0.1:15721", "192.168.1.10:15721", 1) +
+					"web:\n  auth:\n    admin_token_file: /tmp/admin.tok\n    api_keys_file: /tmp/keys\n"
+			},
+			wantErr: "",
+		},
+		{
+			name: "invalid listen never passes via auth",
+			mutate: func(s string) string {
+				return strings.Replace(s, "127.0.0.1:15721", "no-host-port-here", 1) +
+					"web:\n  auth:\n    admin_token_file: /tmp/admin.tok\n    api_keys_file: /tmp/keys\n"
+			},
+			wantErr: "invalid",
+		},
+		{
+			name: "loopback without auth stays accepted",
+			mutate: func(s string) string {
+				return s
+			},
+			wantErr: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfigFromBytes("config.yaml", []byte(tc.mutate(base)))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}

@@ -176,16 +176,17 @@ routes:
 
 takeover:
   # All takeover fields default to standard client config locations when unset
-  # (claude/opencode/codex/pi paths + provider_id "model-proxy"), so you can
-  # omit this entire block unless overriding one. proxy_url defaults to
+  # (claude/opencode/codex/pi/kimi paths + provider_id "model-proxy"), so you
+  # can omit this entire block unless overriding one. proxy_url defaults to
   # http://<listen>. Uncomment any line to override.
   # proxy_url: http://127.0.0.1:15721
   # claude: ~/.claude/settings.json
   # opencode: ~/.config/opencode/opencode.json
   # codex: ~/.codex/config.toml
   # pi: ~/.pi/agent/models.json
+  # kimi: ~/.kimi/config.toml
   # provider_id is the single identifier used by takeover for every agent that
-  # takes one (opencode, pi, codex, future agents). claude doesn't use it.
+  # takes one (opencode, pi, codex, kimi, future agents). claude doesn't use it.
   # provider_id: model-proxy
 
 # Per-request access log: writes the full request + response body of each
@@ -204,6 +205,18 @@ takeover:
 # must stay loopback (enforced at startup). Uncomment to disable:
 # web:
 #   enabled: false
+#   # S2 可选鉴权（默认全部不配 = 回环免鉴权历史行为）。
+#   # 配置后管理面（/api /ui /metrics）要求 Bearer/x-api-key 匹配 admin 文件；
+#   # 转发面（/v1/* /messages /v1/models）要求匹配 api_keys 文件（每行一个 key，
+#   # 支持 # 注释；文件编辑后 ≤10s 生效，无需重启）。
+#   # 非 loopback listen 时两者必配，否则 validate 拒绝（fail-closed）。
+#   # auth:
+#   #   admin_token_file: ~/.model-proxy/admin_token
+#   #   api_keys_file: ~/.model-proxy/api_keys
+#
+# # Prometheus 指标（GET /metrics，文本 exposition；随 web.enabled，
+# # 未配 admin auth 时仅回环可信）：model_proxy_{requests,failures,failovers,
+# # rate_limited_429}_total 与 latency/ttft 毫秒累计，按 provider 标签聚合。
 
 # Call statistics (SQLite; per provider×model×minute buckets incl. latency/TTFT
 # and per-agent dims; powers the 'stats' CLI and Web UI Analytics/Requests

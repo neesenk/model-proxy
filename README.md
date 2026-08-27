@@ -46,7 +46,7 @@ scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w
 `config.yaml`（`model-proxy config init` 生成；TTY 下为交互向导——探测已装客户端、勾选 provider、可选立即 takeover，只写最小配置；管道/脚本下输出完整注释模板）。查找顺序：`--config PATH` > `~/.model-proxy/config.yaml` > `./config.yaml`。路径字段支持 `~/` 展开 和 `env:ENV_VAR` 前缀（从环境变量读值，如 `log_file: env:MP_LOG_FILE`）。
 
 ```yaml
-listen: 127.0.0.1:15721    # 强制回环（0.0.0.0/内网 IP/域名会被 validate 拒绝——/api/* 无鉴权）
+listen: 127.0.0.1:15721    # 默认回环；非回环需配置 web.auth（admin_token_file + api_keys_file），否则 validate 拒绝
 log_level: info
 
 providers:
@@ -180,7 +180,7 @@ model-proxy test glm-5.2           # 探测路由每个 target（路由 → 凭�
 # Web UI Accounts 页每个账号卡片还有 Test 按钮（POST /api/accounts/<p>/<id>/test），可测池化指定账号
 
 # 接管客户端配置
-model-proxy takeover opencode      # claude|opencode|codex|pi|all
+model-proxy takeover opencode      # claude|opencode|codex|pi|kimi|all
 model-proxy restore opencode
 
 # 配置管理
@@ -220,7 +220,7 @@ model-proxy audit --kind drift --from 7d --json   # 过滤 + 原始 JSON
 
 ## Web UI
 
-代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；`listen` 由 validate 强制回环，无鉴权**（本地可信）。六个标签页：
+代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；回环 `listen` 下无鉴权（本地可信）**。六个标签页（Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）：
 
 - **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
@@ -279,6 +279,25 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 ```
 
 输出列：`provider · model · <bucket> · reqs · failover · 429 · fail · lat(ms) · ttft(ms) · input · output`（紧凑数字；lat/ttft 是平均总时延/首字节时延，不含客户端慢读）。`--by-agent` 输出 `agent · provider · model · reqs · fail · lat · input · output`——回答「哪个 agent 在烧配额/哪个在疯狂失败」。空结果 -> `(no stats in range …)`。`POST /api/tokens/reset`（或 Web UI）可清零内存 + SQLite + flush 基线。配置：`config.stats.{db_path, retention}`（默认 `~/.model-proxy/stats.db`，30 天；`0` = 永久）。
+
+## 网络部署鉴权（可选）与 Prometheus 指标
+
+默认部署（回环 `listen`）保持零配置零鉴权。要在局域网/小团队共享代理时，配置 `web.auth` 后 `listen` 才允许非回环（validate fail-closed，两者必配）：
+
+```yaml
+listen: 0.0.0.0:15721          # 非回环——必须配 web.auth
+web:
+  auth:
+    admin_token_file: ~/.model-proxy/admin_token   # 管理面（/api /ui /metrics）
+    api_keys_file: ~/.model-proxy/api_keys         # 转发面（客户端 key，每行一个，支持 # 注释）
+```
+
+- 两个面独立鉴权：管理面校验 `admin_token_file`；转发端点（`/v1/*`、`/messages`、`/v1/models`）校验 `api_keys_file`。`Authorization: Bearer` 与 `x-api-key` 均接受。`/health` 保持开放（存活探针）。
+- 密钥比较 constant-time；文件编辑（换 key/撤销）≤10s 生效，无需重启。
+- 回环部署也可以单独开启任一面（例如本地也想给转发加 key）。
+- **takeover 注意**：开启 api_keys 后客户端配置里的 `PROXY_MANAGED` 占位符会被拒绝——把 takeover 写入的 key 换成 `api_keys_file` 中的一行。
+
+`GET /metrics` 输出 Prometheus 文本指标（随 `web.enabled`）：`model_proxy_{requests,failures,failovers,rate_limited_429}_total` 与 `model_proxy_{latency,ttft}_milliseconds_sum`，按 `provider` 标签聚合（虚拟键 guard/attempts/fusion/routing 与 `/api/stats` 同语义）。
 
 ## Token 文件
 

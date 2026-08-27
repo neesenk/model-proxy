@@ -155,7 +155,7 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 ## 2. `takeover <client>` — 接管客户端配置
 
 ```
-takeover <client>   # client ∈ {claude, opencode, codex, pi, all}
+takeover <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
 ```
 
 逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再改写指向代理。含隐式路由模型；opencode/pi 额外 hydrate models.dev 元数据。
@@ -178,7 +178,7 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, all}
   warning: model <MODEL> at <PROVIDER>: no models.dev metadata - wrote defaults (ctx=200000 out=16384 text-only)
   ```
 
-失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 备份失败 / 改写失败）。`client` 不在集合内由 `listClients` 决定（`all` 展开全部；未知名通常导致空集，静默返回 0）。`takeover:` 块整个可省略--四个 client 路径 + provider_id 有代码默认值，只有覆盖某项才需写。
+失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 备份失败 / 改写失败）。`client` 不在集合内由 `listClients` 决定（`all` 展开全部；未知名通常导致空集，静默返回 0）。`takeover:` 块整个可省略--五个 client 路径 + provider_id 有代码默认值，只有覆盖某项才需写。kimi 写 `~/.kimi/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai_legacy"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models.<name>]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
 
 ---
 

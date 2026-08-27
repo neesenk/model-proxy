@@ -33,6 +33,7 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 			"reads":     true,
 			"commands":  true,
 			"events":    true,
+			"adminAuth": true, // S2: injected closure sourcing the admin bearer check
 			"version":   true,
 			"assets":    true,
 			"assetRoot": true,
@@ -73,6 +74,7 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 		for _, violation := range exactFieldSetViolations(fields, map[string]bool{
 			"server":          true,
 			"api":             true,
+			"adminAuth":       true, // S2: injected closure sourcing the admin bearer check
 			"configFile":      true,
 			"logFile":         true,
 			"events":          true,

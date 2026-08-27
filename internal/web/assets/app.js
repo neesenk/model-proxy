@@ -1408,6 +1408,16 @@ async function renderConfigTab() {
   const panel = panels.config;
   panel.innerHTML =
     `<div id="config-summary" class="card"><div class="card-body"><span class="msg">loading…</span></div></div>
+     <div class="card" id="preset-card">
+       <header class="card-head"><h2>Add provider preset</h2></header>
+       <div class="card-body">
+         <div class="row-actions">
+           <select id="preset-select" aria-label="Provider preset"></select>
+           <button class="btn small" id="btn-preset-add">Add &amp; reload</button>
+         </div>
+         <div id="preset-msg" aria-live="polite"></div>
+       </div>
+     </div>
      <details class="editor" id="ed-provider"><summary>Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-route"><summary>Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <div class="card" id="yaml-card">
@@ -1440,6 +1450,7 @@ async function renderConfigTab() {
   scheduleYamlEditorResize();
   document.getElementById('btn-yaml-reload').addEventListener('click', loadConfigYAML);
   document.getElementById('btn-yaml-save').addEventListener('click', saveConfigYAML);
+  document.getElementById('btn-preset-add').addEventListener('click', addPresetFromWizard);
 
   try {
     await loadConfigAll();
@@ -1450,9 +1461,61 @@ async function renderConfigTab() {
   }
 }
 
+// --- Add provider preset wizard (S3) ---
+
+// loadPresetSelect fills the wizard dropdown from GET /api/presets. Options
+// carry the preset's model count; already-configured providers are marked so
+// the wizard reads honestly (adding is still allowed — it's idempotent and
+// the credential step may still be pending).
+async function loadPresetSelect() {
+  const sel = document.getElementById('preset-select');
+  if (!sel) return;
+  try {
+    const data = await apiGet('/api/presets');
+    const presets = (data && data.presets) || [];
+    const configured = new Set(Object.keys((configCache && configCache.provider_models) || {}));
+    sel.innerHTML = presets.map(p => {
+      const known = configured.has(p.name) ? ' (already in config)' : '';
+      return `<option value="${esc(p.name)}">${esc(p.name)} — ${p.models.length} models${known}</option>`;
+    }).join('') || '<option value="">(no presets)</option>';
+  } catch (e) {
+    sel.innerHTML = '<option value="">(presets unavailable)</option>';
+  }
+}
+
+// addPresetFromWizard POSTs /api/presets/<name>, surfaces the server's
+// ambiguity warnings verbatim (backend message is authoritative), then
+// refreshes the whole Config tab (summary + YAML baseline + provider
+// editors) so the merged block shows up everywhere at once.
+async function addPresetFromWizard() {
+  const sel = document.getElementById('preset-select');
+  const msg = document.getElementById('preset-msg');
+  const btn = document.getElementById('btn-preset-add');
+  if (!sel || !sel.value) return;
+  btn.disabled = true;
+  try {
+    const res = await apiPost('/api/presets/' + encodeURIComponent(sel.value));
+    const warns = (res && res.warnings) || [];
+    if (warns.length) {
+      showMsg(msg, 'warn',
+        `Added, but implicit routing is ambiguous for: ${warns.join(', ')} — add routes: entries to control failover.`);
+    } else {
+      showMsg(msg, 'ok', `Preset ${sel.value} added. Next: add its credential in Accounts (or login).`);
+    }
+    await loadConfigAll();
+  } catch (e) {
+    showMsg(msg, 'err', e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function loadConfigAll() {
   const cfg = await apiGet('/api/config');
   configCache = cfg;
+  // Fill the preset wizard select in the same pass (independent of the
+  // config body; failures leave the select empty without breaking the tab).
+  loadPresetSelect();
   const s = cfg.summary || {};
   document.getElementById('config-summary').outerHTML =
     `<div id="config-summary" class="card">

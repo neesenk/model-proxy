@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"model-proxy/internal/appapi"
+	"model-proxy/internal/webauth"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,6 +29,11 @@ type Options struct {
 	// the default). Routing it through serveAPI also puts guardBrowserOrigin
 	// in front of the stream.
 	Events http.HandlerFunc
+	// AdminAuth, when non-nil and enabled, is the S2 admin-surface bearer
+	// check applied to this transport's whole subtree (/api/, /ui/, /metrics).
+	// A closure (not a fixed Source) so reload-swapped config generations are
+	// picked up without rebuilding the transport.
+	AdminAuth func() *webauth.Source
 }
 
 // Server serves the admin UI and its JSON API.
@@ -35,6 +41,7 @@ type Server struct {
 	reads     appapi.ReadAPI
 	commands  appapi.CommandAPI
 	events    http.HandlerFunc
+	adminAuth func() *webauth.Source
 	version   string
 	assets    fs.FS
 	assetRoot string
@@ -55,16 +62,19 @@ func New(opts Options) (*Server, error) {
 	if root == "" {
 		root = "assets"
 	}
-	return &Server{reads: opts.Reads, commands: opts.Commands, events: opts.Events, version: opts.Version, assets: assets, assetRoot: root, logFile: opts.LogFile, tasks: newTaskOwner(), sessions: newSessionStore()}, nil
+	return &Server{reads: opts.Reads, commands: opts.Commands, events: opts.Events, adminAuth: opts.AdminAuth, version: opts.Version, assets: assets, assetRoot: root, logFile: opts.LogFile, tasks: newTaskOwner(), sessions: newSessionStore()}, nil
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("/ui/", http.HandlerFunc(s.serveUI))
 	mux.Handle("/api/", http.HandlerFunc(s.serveAPI))
+	mux.Handle("/metrics", http.HandlerFunc(s.handleMetrics))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case r.URL.Path == "/metrics":
+		s.handleMetrics(w, r)
 	case strings.HasPrefix(r.URL.Path, "/ui/"):
 		s.serveUI(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/"):
@@ -149,6 +159,9 @@ func originHostPort(origin string) string {
 }
 
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
+	if !s.guardAdminAuth(w, r) {
+		return
+	}
 	if !GuardBrowserOrigin(w, r) {
 		return
 	}
@@ -179,6 +192,9 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
+	if !s.guardAdminAuth(w, r) {
+		return
+	}
 	if !GuardBrowserOrigin(w, r) {
 		return
 	}
@@ -236,6 +252,10 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleAccountAdd(w, r)
 	case strings.HasPrefix(p, "/api/accounts/") && r.Method == http.MethodDelete:
 		s.handleAccountRemove(w, r)
+	case p == "/api/presets" && r.Method == http.MethodGet:
+		s.handlePresetsList(w, r)
+	case strings.HasPrefix(p, "/api/presets/") && r.Method == http.MethodPost:
+		s.handlePresetAdd(w, r)
 	case strings.HasPrefix(p, "/api/login/") && r.Method == http.MethodPost:
 		s.handleLoginStart(w, r)
 	case strings.HasPrefix(p, "/api/login/") && r.Method == http.MethodGet:
@@ -243,4 +263,26 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSONErr(w, http.StatusNotFound, "no api route for "+p)
 	}
+}
+
+// guardAdminAuth applies the S2 admin-surface bearer check to this
+// transport's subtree. Disabled (no Source / not Enabled) keeps the
+// historical loopback-trust behavior; validate rejects non-loopback listens
+// without an admin token file, so the open mode stays reachable only on
+// loopback. Same header conventions as the forward surface (Bearer or
+// x-api-key) so curl stays symmetrical.
+func (s *Server) guardAdminAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.adminAuth == nil {
+		return true
+	}
+	src := s.adminAuth()
+	if src == nil || !src.Enabled() {
+		return true
+	}
+	if !src.Accept(webauth.BearerFromRequest(r.Header.Get)) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="model-proxy-admin"`)
+		http.Error(w, "unauthorized: bad admin token", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }

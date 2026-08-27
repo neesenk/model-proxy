@@ -31,3 +31,6 @@ func LoadConfig(path string) (*Config, error) {
 func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	return configdomain.LoadConfigFromBytes(path, data)
 }
+
+// WebAuthConfig aliases the config-owned optional auth block (S2).
+type WebAuthConfig = configdomain.WebAuthConfig

@@ -326,6 +326,7 @@ providers:
 	// opencode: taken over, but the config now points at a stale port (drift).
 	os.WriteFile(cfg.Takeover.Opencode, []byte(`{"provider":{"model-proxy":{"options":{"baseURL":"http://127.0.0.1:9999/v1"}}}}`), 0o600)
 	// codex: never taken over (no .bak, no file).
+	// kimi: never taken over either — same expectation as codex.
 	// pi: taken over, but the config file vanished (client reinstall).
 	for _, name := range []string{"claude", "opencode", "pi"} {
 		if err := os.MkdirAll(bakDir, 0o700); err != nil {
@@ -341,8 +342,8 @@ providers:
 	for _, d := range drift {
 		byClient[d.Client] = d
 	}
-	if len(drift) != 4 {
-		t.Fatalf("want 4 clients, got %d", len(drift))
+	if len(drift) != 5 {
+		t.Fatalf("want 5 clients, got %d", len(drift))
 	}
 	if c := byClient["claude"]; !c.Taken || !c.OK {
 		t.Errorf("claude = %+v, want taken+ok", c)
@@ -353,6 +354,9 @@ providers:
 	}
 	if c := byClient["codex"]; c.Taken {
 		t.Errorf("codex = %+v, want not taken over", c)
+	}
+	if c := byClient["kimi"]; c.Taken {
+		t.Errorf("kimi = %+v, want not taken over", c)
 	}
 	if c := byClient["pi"]; !c.Taken || c.OK || c.Current != "(file missing)" {
 		t.Errorf("pi = %+v, want drift (file missing)", c)

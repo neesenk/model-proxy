@@ -6,6 +6,7 @@ import (
 
 	observeevents "model-proxy/internal/observe/events"
 	webtransport "model-proxy/internal/web"
+	"model-proxy/internal/webauth"
 )
 
 // webServer is the composition adapter around the transport-owned Web server.
@@ -14,7 +15,9 @@ import (
 type WebServer struct {
 	server *webtransport.Server
 	api    *proxyWebAPI
-
+	// adminAuth binds the proxy's S2 admin-auth source (reload-swapped); a
+	// closure, not a *Proxy retention, keeps the root adapter composition-only.
+	adminAuth  func() *webauth.Source
 	configFile string
 	logFile    string
 	events     http.HandlerFunc
@@ -25,6 +28,7 @@ type WebServer struct {
 
 func NewWebServer(proxy *Proxy, configFile string) *WebServer {
 	server := &WebServer{
+		adminAuth:       proxy.adminAuth.Load,
 		configFile:      configFile,
 		newAqpClientFn:  clilogin.NewAqpClient,
 		newCodexOptions: defaultCodexLoginOptions,
@@ -56,6 +60,9 @@ func mustNewWebTransport(server *WebServer) *webtransport.Server {
 		Commands: server.api,
 		Version:  Version,
 		Events:   server.events,
+		// S2 admin-surface auth follows the proxy's config generation (the
+		// transport is built once; the closure picks up reload-swapped sources).
+		AdminAuth: server.adminAuth,
 		LogFile: func() string {
 			return server.logFile
 		},

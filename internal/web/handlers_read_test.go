@@ -18,7 +18,9 @@ import (
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/presets"
 	"model-proxy/internal/pricing"
+	"model-proxy/internal/webauth"
 )
 
 type readAPIStub struct {
@@ -34,6 +36,7 @@ type readAPIStub struct {
 	fusion    func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	pins      []appapi.Pin
 	config    func() (appapi.ConfigDocument, error)
+	presets   []presets.Preset
 }
 
 func (r *readAPIStub) Dashboard(time.Time) appapi.Dashboard { return r.dashboard }
@@ -622,3 +625,137 @@ func TestReadServerStartStops(t *testing.T) {
 }
 
 var _ appapi.CommandAPI = testCommandAPI{}
+
+// --- GET /metrics (Prometheus text exposition, S7) ---
+
+// newMetricsTestServer builds a Server with stubbed reads carrying two
+// provider counters (one with traffic, one idle).
+func newMetricsTestServer(t *testing.T) *Server {
+	t.Helper()
+	reads := &readAPIStub{dashboard: appapi.Dashboard{
+		Counters: map[string]appapi.Metrics{
+			"zhipu":    {Requests: 5, Failures: 1, LatencySum: 1000, TTFTSum: 400},
+			"deepseek": {}, // idle: must not emit series
+		},
+	}}
+	s, err := New(Options{Reads: reads, Commands: &testCommandAPI{}, Version: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s
+}
+
+func TestMetricsEndpointPrometheusExposition(t *testing.T) {
+	s := newMetricsTestServer(t)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != 200 {
+		t.Fatalf("/metrics status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("content-type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("content-type = %q, want text/plain exposition", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`# TYPE model_proxy_requests_total counter`,
+		`model_proxy_requests_total{provider="zhipu"} 5`,
+		`model_proxy_failures_total{provider="zhipu"} 1`,
+		`model_proxy_latency_milliseconds_sum{provider="zhipu"} 1000`,
+		`model_proxy_ttft_milliseconds_sum{provider="zhipu"} 400`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("exposition missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `provider="deepseek"`) {
+		t.Errorf("idle provider must not emit series:\n%s", body)
+	}
+}
+
+func TestMetricsEndpointRejectsNonGet(t *testing.T) {
+	s := newMetricsTestServer(t)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest("POST", "/metrics", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /metrics status=%d, want 405", rec.Code)
+	}
+}
+
+func TestMetricsLabelEscaping(t *testing.T) {
+	v := appapi.Dashboard{Counters: map[string]appapi.Metrics{
+		`we"ird`: {Requests: 1},
+	}}
+	body := renderPrometheus(v)
+	if !strings.Contains(body, `provider="we\"ird"`) {
+		t.Errorf("label value not escaped:\n%s", body)
+	}
+}
+
+// --- S2 admin-surface auth on the web transport ---
+
+func newAuthedServer(t *testing.T, enabled bool) (*Server, *webauth.Source) {
+	t.Helper()
+	src := webauth.NewSource()
+	if enabled {
+		// Enabled-but-empty token file: accepts nothing until a token is added.
+		path := filepath.Join(t.TempDir(), "admin.tok")
+		if err := os.WriteFile(path, []byte("# admin tokens\nadm-secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		src = webauth.NewSource(path)
+	}
+	reads := &readAPIStub{dashboard: appapi.Dashboard{Counters: map[string]appapi.Metrics{}}}
+	s, err := New(Options{Reads: reads, Commands: &testCommandAPI{}, Version: "t",
+		AdminAuth: func() *webauth.Source { return src }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	return s, src
+}
+
+func TestAdminAuthGatesAPIUIAndMetrics(t *testing.T) {
+	s, _ := newAuthedServer(t, true)
+	for _, path := range []string{"/api/status", "/ui/", "/metrics"} {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET %s without token = %d, want 401", path, rec.Code)
+		}
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer adm-secret")
+		s.ServeHTTP(rec, req)
+		if rec.Code == http.StatusUnauthorized {
+			t.Errorf("GET %s with valid token = 401", path)
+		}
+	}
+	// Wrong token rejected.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/status", nil)
+	req.Header.Set("Authorization", "Bearer wrong")
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("wrong token = %d, want 401", rec.Code)
+	}
+	// x-api-key is accepted symmetrically with Bearer.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/api/status", nil)
+	req.Header.Set("x-api-key", "adm-secret")
+	s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusUnauthorized {
+		t.Error("x-api-key admin token rejected")
+	}
+}
+
+func TestAdminAuthDisabledKeepsLoopbackTrust(t *testing.T) {
+	s, _ := newAuthedServer(t, false)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("auth off: /api/status = %d, want 200 (loopback-trust default)", rec.Code)
+	}
+}
+
+func (r *readAPIStub) Presets() []presets.Preset { return r.presets }

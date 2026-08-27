@@ -1,105 +1,35 @@
-// Package presets owns the provider preset catalog and the guided `add`
-// command. The catalog is DERIVED from the annotated built-in template
-// (configdomain.DefaultConfigYAML) — the single authoritative source for
-// provider endpoints and default model lists — filtered to provider ids with
-// registered implementations. No endpoint or model knowledge is duplicated
-// here; adding a preset means editing the template (and, when new, the
-// provider implementation).
-//
-// `model-proxy presets list` prints the catalog. `model-proxy add <preset>`
-// merges the template's provider block into an existing config.yaml (via
-// configedit, preserving comments/structure), runs the provider's login flow,
-// and hot-reloads a running daemon — one command from zero to usable.
+// Package presets (cli) owns the `presets` and `add` CLI commands: terminal
+// UX over the shared config-level catalog (internal/presets) plus the login
+// orchestration and daemon hot-reload the web surface doesn't need.
 package presets
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/mattn/go-isatty"
-	"gopkg.in/yaml.v3"
 
 	"model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/configedit"
-	"model-proxy/internal/provider"
+	domainpresets "model-proxy/internal/presets"
 )
-
-// Preset is one catalog entry: a ready-to-use config providers block.
-type Preset struct {
-	// Name is the preset id AND the config providers: key.
-	Name       string   `json:"name"`
-	ProviderID string   `json:"provider_id"`
-	BaseURL    string   `json:"base_url"`
-	UsageURL   string   `json:"usage_url,omitempty"`
-	Billing    string   `json:"billing,omitempty"`
-	Models     []string `json:"models"`
-}
-
-// excludedPresets are template entries that must not surface in the public
-// catalog: aqp's SSO mint endpoint is internal-network only (design doc
-// design-s3-preset-wizard.md §3.1). Everything else with a registered
-// implementation is listed.
-var excludedPresets = map[string]bool{"aqp": true}
-
-// List derives the catalog from the built-in annotated template, sorted by
-// name. Returns an error if the shipped template itself fails to load — that
-// is a build-time defect, never user input.
-func List() ([]Preset, error) {
-	tpl, err := loadTemplate()
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(tpl.Providers))
-	for name := range tpl.Providers {
-		if !excludedPresets[name] && provider.IsRegistered(tpl.Providers[name].Provider) {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	out := make([]Preset, 0, len(names))
-	for _, name := range names {
-		p := tpl.Providers[name]
-		models := append([]string(nil), p.Models...)
-		sort.Strings(models)
-		out = append(out, Preset{
-			Name:       name,
-			ProviderID: p.Provider,
-			BaseURL:    p.OpenAIBaseURL,
-			UsageURL:   p.UsageURL,
-			Billing:    p.Billing,
-			Models:     models,
-		})
-	}
-	return out, nil
-}
-
-func loadTemplate() (*configdomain.Config, error) {
-	tpl, err := configdomain.LoadConfigFromBytes("config.yaml", []byte(configdomain.DefaultConfigYAML))
-	if err != nil {
-		return nil, fmt.Errorf("built-in config template is invalid: %w", err)
-	}
-	return tpl, nil
-}
 
 // CmdPresets implements `presets list` (the only subcommand today).
 func CmdPresets(args []string, _ io.Reader, stdout io.Writer, _ io.Writer) int {
-	presets, err := List()
+	catalog, err := domainpresets.List()
 	if err != nil {
 		fmt.Fprintln(stdout, "✗ "+err.Error())
 		return 1
 	}
 	fmt.Fprintln(stdout, "Available provider presets:")
 	fmt.Fprintln(stdout)
-	for _, p := range presets {
+	for _, p := range catalog {
 		billing := p.Billing
 		if billing == "" {
 			billing = "plan"
@@ -108,16 +38,8 @@ func CmdPresets(args []string, _ io.Reader, stdout io.Writer, _ io.Writer) int {
 	}
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Add one to your config:")
-	fmt.Fprintf(stdout, "  model-proxy add <%s>\n", strings.Join(presetNames(presets), "|"))
+	fmt.Fprintf(stdout, "  model-proxy add <%s>\n", domainpresets.Names(catalog))
 	return 0
-}
-
-func presetNames(presets []Preset) []string {
-	out := make([]string, len(presets))
-	for i, p := range presets {
-		out[i] = p.Name
-	}
-	return out
 }
 
 // CmdAdd implements `add <preset> [--label NAME] [--replace]
@@ -135,12 +57,7 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	tpl, err := loadTemplate()
-	if err != nil {
-		fmt.Fprintln(stderr, "✗ "+err.Error())
-		return 1
-	}
-	catalog, lerr := List()
+	catalog, lerr := domainpresets.List()
 	if lerr != nil {
 		fmt.Fprintln(stderr, "✗ "+lerr.Error())
 		return 1
@@ -158,11 +75,11 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if presetName == "" {
 		fmt.Fprintf(stderr, "usage: model-proxy add <%s> [flags]\nrun `model-proxy presets list` for the catalog\n",
-			strings.Join(presetNames(catalog), "|"))
+			domainpresets.Names(catalog))
 		return 1
 	}
-	tplProv, ok := tpl.Providers[presetName]
-	if !ok || !provider.IsRegistered(tplProv.Provider) {
+	tplProv, ok := domainpresets.Lookup(presetName)
+	if !ok {
 		fmt.Fprintf(stderr, "unknown preset %q — available:\n", presetName)
 		for _, p := range catalog {
 			fmt.Fprintf(stderr, "  %s\n", p.Name)
@@ -171,7 +88,7 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// 1. Merge the template provider block into the user config.
-	written, merr := mergePresetBlock(cfgPath, presetName)
+	written, merr := domainpresets.MergeBlock(cfgPath, presetName)
 	if merr != nil {
 		fmt.Fprintf(stderr, "✗ merge %s into %s: %v\n", presetName, filepath.Base(cfgPath), merr)
 		return 1
@@ -189,7 +106,7 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// 2. Ambiguity gate BEFORE any login side effects: models this provider
 	// serves that other configured providers also serve with no explicit route
 	// would resolve via implicit routing to whichever provider sorts first.
-	ambiguous := ambiguousModels(merged, presetName)
+	ambiguous := domainpresets.AmbiguousModels(merged, presetName)
 	if len(ambiguous) > 0 {
 		msg := fmt.Sprintf("model(s) %s are also served by other configured providers without explicit routes — "+
 			"implicit routing picks alphabetically. Add routes: entries to control failover.",
@@ -226,6 +143,15 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// 3b. Model-visibility cross-check (apikey providers only): fetch the
+	// account's visible models and warn when configured models are missing —
+	// a stale preset (upstream renamed models) must surface, not route 404s.
+	// Best-effort: probe errors stay silent (the endpoint may legitimately
+	// not exist; validation already accepted the key).
+	if clilogin.ApiKeyLike(merged.Providers[presetName].Provider) {
+		reportModelVisibility(stdout, merged, presetName)
+	}
+
 	// 4. Hot-reload a running daemon so the new provider is live immediately.
 	cliserve.MaybeReloadDaemon(args, merged)
 
@@ -238,104 +164,65 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if testModel != "" {
 		fmt.Fprintf(stdout, "  model-proxy test %s\n", testModel)
 	}
-	fmt.Fprintln(stdout, "  model-proxy takeover claude|opencode|codex|pi   # point a client at the proxy")
+	fmt.Fprintln(stdout, "  model-proxy takeover claude|opencode|codex|pi|kimi   # point a client at the proxy")
 	return 0
 }
 
-// mergePresetBlock copies the template's providers.<preset> node into the user
-// config (creating the providers: mapping when missing), validates the merged
-// YAML before writing (fail-closed), and writes back preserving file mode.
-// Idempotent: an existing block is left untouched (login still runs).
-func mergePresetBlock(cfgPath, presetName string) (bool, error) {
-	userRoot, err := configedit.LoadNode(cfgPath)
-	if err != nil {
-		return false, err
+// reportModelVisibility cross-checks the provider's configured models against
+// the account's visible /models list and prints a warning for configured
+// models the account cannot serve (stale preset / wrong plan). Best-effort:
+// any probe error is silent — validation already accepted the key, and an
+// endpoint that 404s (or an OAuth provider) says nothing about visibility.
+func reportModelVisibility(stdout io.Writer, merged *configdomain.Config, provName string) {
+	prov, ok := merged.Providers[provName]
+	if !ok || len(prov.Models) == 0 {
+		return
 	}
-	if configedit.MapNode(userRoot) == nil {
-		return false, errors.New("config is not a YAML mapping")
+	key := clilogin.LatestAPIKey(provName, prov.Provider)
+	if key == "" {
+		return
 	}
-	providersMap := configedit.ChildMap(userRoot, "providers")
-
-	existing := configedit.LookupChildMap(providersMap, presetName)
-	if existing != nil {
-		return false, nil // already configured — nothing to merge
+	visible, err := clilogin.FetchVisibleModels(prov, key)
+	if err != nil || len(visible) == 0 {
+		return
 	}
-
-	tplNode, err := loadTemplateProviderNode(presetName)
-	if err != nil {
-		return false, err
+	set := make(map[string]bool, len(visible))
+	for _, m := range visible {
+		set[m] = true
 	}
-	configedit.SetChildNode(providersMap, presetName, tplNode)
-
-	var buffer bytes.Buffer
-	encoder := yaml.NewEncoder(&buffer)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(userRoot); err != nil {
-		return true, err
+	var missing []string
+	for _, m := range prov.Models {
+		if !set[m] {
+			missing = append(missing, m)
+		}
 	}
-	if err := encoder.Close(); err != nil {
-		return true, err
+	if len(missing) == 0 {
+		return
 	}
-	// Validate BEFORE writing: a merged config that fails to load must never
-	// hit disk (fail-closed).
-	if _, verr := configdomain.LoadConfigFromBytes(cfgPath, buffer.Bytes()); verr != nil {
-		return true, fmt.Errorf("merged config invalid: %w", verr)
-	}
-	mode := os.FileMode(0o644)
-	if info, serr := os.Stat(cfgPath); serr == nil {
-		mode = info.Mode().Perm()
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(cfgPath), "."+filepath.Base(cfgPath)+".tmp-*")
-	if err != nil {
-		return true, err
-	}
-	tmpName := tmp.Name()
-	if _, werr := tmp.Write(buffer.Bytes()); werr != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return true, werr
-	}
-	if cerr := tmp.Close(); cerr != nil {
-		os.Remove(tmpName)
-		return true, cerr
-	}
-	if cerr := os.Chmod(tmpName, mode); cerr != nil {
-		os.Remove(tmpName)
-		return true, cerr
-	}
-	return true, os.Rename(tmpName, cfgPath)
+	sortStrings(missing)
+	fmt.Fprintf(stdout, "! %d configured model(s) not visible to this account (stale preset or different plan): %s\n",
+		len(missing), strings.Join(missing, ", "))
+	fmt.Fprintln(stdout, "  run `model-proxy models refresh "+provName+"` after fixing, or edit models: in config.yaml")
 }
 
-// loadTemplateProviderNode extracts providers.<preset> from the built-in
-// template as a deep-copied yaml.Node (round-trip through bytes — yaml.Node
-// has no Clone). The node carries the template's structure for that block.
-func loadTemplateProviderNode(presetName string) (*yaml.Node, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal([]byte(configdomain.DefaultConfigYAML), &root); err != nil {
-		return nil, fmt.Errorf("parse built-in template: %w", err)
-	}
-	mapping := root.Content[0]
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		if mapping.Content[i].Value != "providers" || mapping.Content[i+1].Kind != yaml.MappingNode {
-			continue
-		}
-		providers := mapping.Content[i+1]
-		for j := 0; j+1 < len(providers.Content); j += 2 {
-			if providers.Content[j].Value == presetName {
-				block := providers.Content[j+1]
-				encoded, err := yaml.Marshal(block)
-				if err != nil {
-					return nil, err
-				}
-				var clone yaml.Node
-				if err := yaml.Unmarshal(encoded, &clone); err != nil {
-					return nil, err
-				}
-				return clone.Content[0], nil
-			}
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
 		}
 	}
-	return nil, fmt.Errorf("preset %q not found in built-in template", presetName)
+}
+
+func cfgOrHint(path string) string {
+	if path == "" {
+		return "./config.yaml"
+	}
+	return path
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // firstPositional returns the first non-flag positional argument, skipping
@@ -365,11 +252,6 @@ func firstPositional(args []string) string {
 		return a
 	}
 	return ""
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }
 
 func stdinIsInteractive(stdin io.Reader) bool {
@@ -410,7 +292,7 @@ func bufioReadLine(r io.Reader) (string, error) {
 	}
 }
 
-func pickPresetInteractively(stdin io.Reader, stdout io.Writer, catalog []Preset) (string, error) {
+func pickPresetInteractively(stdin io.Reader, stdout io.Writer, catalog []domainpresets.Preset) (string, error) {
 	fmt.Fprintln(stdout, "Which provider do you want to add?")
 	for i, p := range catalog {
 		fmt.Fprintf(stdout, "  %d. %-12s %d models\n", i+1, p.Name, len(p.Models))
@@ -426,38 +308,4 @@ func pickPresetInteractively(stdin io.Reader, stdout io.Writer, catalog []Preset
 		return "", fmt.Errorf("invalid selection %q", line)
 	}
 	return catalog[idx-1].Name, nil
-}
-
-func cfgOrHint(path string) string {
-	if path == "" {
-		return "./config.yaml"
-	}
-	return path
-}
-
-// ambiguousModels returns preset models that appear in OTHER configured
-// providers' model lists while no explicit routes: entry maps them.
-func ambiguousModels(merged *configdomain.Config, presetName string) []string {
-	target := merged.Providers[presetName]
-	others := map[string]bool{}
-	for name, p := range merged.Providers {
-		if name == presetName {
-			continue
-		}
-		for _, m := range p.Models {
-			others[m] = true
-		}
-	}
-	seen := map[string]bool{}
-	var out []string
-	for _, m := range target.Models {
-		if others[m] && !seen[m] {
-			seen[m] = true
-			if _, routed := merged.Routes[m]; !routed {
-				out = append(out, m)
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
 }

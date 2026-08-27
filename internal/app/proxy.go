@@ -19,6 +19,7 @@ import (
 	runtimestate "model-proxy/internal/runtime"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/shadow"
+	"model-proxy/internal/webauth"
 )
 
 // Proxy holds the compiled provider instances + the config.
@@ -50,6 +51,11 @@ type Proxy struct {
 	pricingMu        sync.Mutex                     // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
 	budget           *budgetWatcher                 // monthly cost alert loop; nil unless budgets: configures a threshold
 	closeOnce        sync.Once
+	// adminAuth/apiKeys are the S2 optional-auth sources (webauth), swapped on
+	// reload with the config generation. Atomic pointers so the request path
+	// reads them without the repository lock.
+	adminAuth atomic.Pointer[webauth.Source]
+	apiKeys   atomic.Pointer[webauth.Source]
 
 	// Credential-pool unrolling (buildProviders). For a multi-account parent,
 	// poolIndex[parent] = its sorted virtual ids ("name#<id>") and parentOf is
@@ -73,4 +79,13 @@ type Proxy struct {
 	// proxy handler for live profiling. Opt-in: profiles can carry request
 	// data in heap samples, so the endpoint is off by default.
 	pprofEnabled bool
+}
+
+// applyAuthSources swaps the S2 auth sources to match a config generation.
+// Sources cache their token files internally (webauth cacheTTL), so swapping
+// here only re-points at (possibly changed) paths. Caller holds p.mu on
+// reload; the constructor calls it before serving.
+func (p *Proxy) applyAuthSources(cfg *Config) {
+	p.adminAuth.Store(webauth.NewSource(cfg.Web.Auth.AdminTokenFile))
+	p.apiKeys.Store(webauth.NewSource(cfg.Web.Auth.APIKeysFile))
 }

@@ -18,14 +18,14 @@ import (
 // --- listClients ---
 
 func TestListClients_All(t *testing.T) {
-	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d"}}
+	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d", Kimi: "e"}}
 	all := takeover.ListClients(cfg, "")
-	if len(all) != 4 {
-		t.Errorf("takeover.ListClients('') len=%d want 4", len(all))
+	if len(all) != 5 {
+		t.Errorf("takeover.ListClients('') len=%d want 5", len(all))
 	}
 	all = takeover.ListClients(cfg, "all")
-	if len(all) != 4 {
-		t.Errorf("takeover.ListClients('all') len=%d want 4", len(all))
+	if len(all) != 5 {
+		t.Errorf("takeover.ListClients('all') len=%d want 5", len(all))
 	}
 }
 

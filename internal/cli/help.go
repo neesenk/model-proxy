@@ -80,14 +80,14 @@ Options:
   Rewrite a client's config to point at the proxy (backs up the original).
 
 Clients:
-  claude | opencode | codex | pi | all`,
+  claude | opencode | codex | pi | kimi | all`,
 
 	"restore": `restore <client> [--config PATH]
 
   Restore a client's config from the backup created by takeover.
 
 Clients:
-  claude | opencode | codex | pi | all`,
+  claude | opencode | codex | pi | kimi | all`,
 
 	"login": `login <provider> [--config PATH]
 

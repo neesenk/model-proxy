@@ -261,9 +261,19 @@ type ShadowTarget struct {
 	Protocol string `yaml:"protocol"`
 }
 
+// WebAuthConfig configures the optional S2 auth layer. Both surfaces stay
+// UNauthenticated when unset (the loopback-trust default). Setting a file
+// enables constant-time bearer auth for that surface; `serve validate`
+// REQUIRES both files before a non-loopback listen is accepted.
+type WebAuthConfig struct {
+	AdminTokenFile string `yaml:"admin_token_file"`
+	APIKeysFile    string `yaml:"api_keys_file"`
+}
+
 // WebConfig toggles the admin UI (/ui + /api). Defaults to enabled.
 type WebConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool          `yaml:"enabled"`
+	Auth    WebAuthConfig `yaml:"auth"`
 }
 
 // StatsConfig configures SQLite-backed call-statistics persistence (per
@@ -708,8 +718,12 @@ type Takeover struct {
 	Opencode string `yaml:"opencode"`
 	Codex    string `yaml:"codex"`
 	Pi       string `yaml:"pi"`
+	// Kimi is the Kimi Code CLI config (~/.kimi/config.toml), a TOML provider
+	// catalog: [providers.<id>] + [models.<name>] blocks (docs/en/configuration/
+	// providers.md in MoonshotAI/kimi-cli).
+	Kimi string `yaml:"kimi"`
 	// ProviderID is the single provider identifier used by takeover for every
-	// agent that takes one (opencode, pi, codex, and future agents). claude
+	// agent that takes one (opencode, pi, codex, kimi, and future agents). claude
 	// doesn't use it (it writes env vars). Default "model-proxy".
 	ProviderID string `yaml:"provider_id"`
 }
@@ -806,6 +820,8 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Scheduling = raw.Scheduling
 	cfg.Takeover = raw.Takeover
 	cfg.Web = raw.Web
+	cfg.Web.Auth.AdminTokenFile = ExpandPath(cfg.Web.Auth.AdminTokenFile)
+	cfg.Web.Auth.APIKeysFile = ExpandPath(cfg.Web.Auth.APIKeysFile)
 	cfg.Stats = raw.Stats
 	cfg.RequestLog = raw.RequestLog
 	cfg.Cache = raw.Cache
@@ -854,10 +870,14 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	if t.Pi == "" {
 		t.Pi = "~/.pi/agent/models.json"
 	}
+	if t.Kimi == "" {
+		t.Kimi = "~/.kimi/config.toml"
+	}
 	t.Claude = ExpandPath(t.Claude)
 	t.Opencode = ExpandPath(t.Opencode)
 	t.Codex = ExpandPath(t.Codex)
 	t.Pi = ExpandPath(t.Pi)
+	t.Kimi = ExpandPath(t.Kimi)
 	if t.ProxyURL == "" && cfg.Listen != "" {
 		t.ProxyURL = "http://" + cfg.Listen
 	}
@@ -884,6 +904,42 @@ func requireLoopbackListen(listen string) error {
 	return fmt.Errorf("listen %q is not loopback — /api/* and /ui/ have no auth, refusing to expose them; use 127.0.0.1:PORT", listen)
 }
 
+// isLoopbackListen reports whether the listen address binds to loopback only.
+func isLoopbackListen(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// requireAuthForNonLoopback is the S2 gate: a non-loopback listen (LAN/team
+// deployment) is accepted ONLY when both serving surfaces are authenticated —
+// the admin surface (web.auth.admin_token_file; also guards the admin
+// endpoints that ride the proxy handler when web.enabled is false) and the
+// forward surface (web.auth.api_keys_file, one key per line — takeover
+// configs must carry a real key instead of the PROXY_MANAGED sentinel).
+// Loopback keeps the historical no-auth default with both files optional.
+func requireAuthForNonLoopback(c *Config) error {
+	if isLoopbackListen(c.Listen) {
+		return nil
+	}
+	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
+		return fmt.Errorf("listen %q is invalid (%v) — use HOST:PORT", c.Listen, err)
+	}
+	if c.Web.Auth.AdminTokenFile == "" {
+		return fmt.Errorf("listen %q is not loopback — set web.auth.admin_token_file before exposing the admin API/UI to a network", c.Listen)
+	}
+	if c.Web.Auth.APIKeysFile == "" {
+		return fmt.Errorf("listen %q is not loopback — set web.auth.api_keys_file before exposing the forward endpoints to a network", c.Listen)
+	}
+	return nil
+}
+
 // validate returns nil if the config is valid. On failure it returns an error
 // with a human-readable message including a hint for fixing the issue.
 func (c *Config) validate() error {
@@ -891,7 +947,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("listen is empty — set `listen: 127.0.0.1:PORT` in config")
 	}
 	if err := requireLoopbackListen(c.Listen); err != nil {
-		return err
+		if err2 := requireAuthForNonLoopback(c); err2 != nil {
+			return err2 // non-loopback without the S2 auth layer: report the actionable gate
+		}
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("no providers configured — add at least one under `providers:`")

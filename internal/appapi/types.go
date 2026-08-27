@@ -13,6 +13,7 @@ import (
 
 	"model-proxy/internal/fusion"
 	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/presets"
 	"model-proxy/internal/pricing"
 )
 
@@ -38,6 +39,9 @@ type Dashboard struct {
 	Counters   map[string]Metrics
 	Cache      map[string]any
 	Warnings   []string
+	// CredentialStore names the resolved credstore backend ("keychain" or
+	// "file") so the Status surface shows where credentials live at rest.
+	CredentialStore string
 }
 
 // Account is deliberately incapable of carrying a credential.
@@ -229,6 +233,9 @@ type ReadAPI interface {
 	Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	Pins() []Pin
 	ConfigDocument() (ConfigDocument, error)
+	// Presets lists the provider preset catalog (internal/presets) for the
+	// web Add-Provider wizard.
+	Presets() []presets.Preset
 }
 
 // CommandAPI is the complete mutation/active-probe capability consumed by the
@@ -248,6 +255,11 @@ type CommandAPI interface {
 	ProbeAccount(context.Context, string, string) (ProbeResult, error)
 	RemoveAccount(string, string) (MutationResult, error)
 	BeginLogin(context.Context, string) (LoginStart, error)
+	// AddPreset merges a preset's template provider block into the live
+	// config (fail-closed on validation) and hot-reloads; it returns the
+	// implicit-routing ambiguity warnings for the UI to surface. Credentials
+	// are added afterwards through AddAccount/BeginLogin as usual.
+	AddPreset(name string) ([]string, error)
 }
 
 // RequirePorts validates that both application ports are present. It is

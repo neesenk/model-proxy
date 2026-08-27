@@ -292,3 +292,37 @@ func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 // readFile is a tiny local I/O helper kept here so the package has no
 // application dependency.
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+// RewriteKimi: ~/.kimi/config.toml (Kimi Code CLI, MoonshotAI/kimi-cli).
+// Text edit mirroring codex's TOML handling: inject a [providers."<id>"]
+// block (openai_legacy = OpenAI Chat Completions, which the proxy speaks
+// natively; api_key is a sentinel — the proxy holds the real credential) and
+// one [models.<exposed>] block per exposed model pointing at the provider.
+// Re-runs replace both the provider block and every model block in place.
+func RewriteKimi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) error {
+	file := cfg.Takeover.Kimi
+	data, err := readFile(file)
+	if err != nil {
+		return err
+	}
+	text := string(data)
+	pid := ProviderID(cfg)
+
+	// openai_legacy expects the versioned base (e.g. https://api.openai.com/v1):
+	// kimi-cli appends /chat/completions itself.
+	base := strings.TrimRight(cfg.Takeover.ProxyURL, "/") + "/v1"
+	provSection := fmt.Sprintf(`
+[providers."%s"]
+type = "openai_legacy"
+base_url = "%s"
+api_key = "PROXY_MANAGED"
+`, pid, base)
+	text = ReplaceOrAppendTOMLSection(text, fmt.Sprintf("providers.%q", pid), provSection)
+
+	for _, m := range ExposedModels(cfg, meta, implicit) {
+		modelSection := fmt.Sprintf("\n[models.%s]\nprovider = %q\n", m.Exposed, pid)
+		text = ReplaceOrAppendTOMLSection(text, "models."+m.Exposed, modelSection)
+	}
+
+	return atomicWriteFile(file, []byte(text), preserveMode(file, 0o600))
+}

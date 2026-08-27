@@ -13,6 +13,7 @@ import (
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/fusion"
 	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/presets"
 	"model-proxy/internal/pricing"
 )
 
@@ -164,3 +165,7 @@ func TestServerLoginTransport(t *testing.T) {
 		t.Fatalf("login start status=%d body=%s", start.Code, start.Body.String())
 	}
 }
+
+func (testCommandAPI) AddPreset(string) ([]string, error) { return nil, nil }
+
+func (testReadAPI) Presets() []presets.Preset { return nil }

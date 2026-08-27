@@ -69,6 +69,7 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// Reload-owned: assigned before any request/goroutine can read it, swapped
 	// under p.mu on reload.
 	p.guardScanner = guardScanner
+	p.applyAuthSources(cfg)
 	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.Eligible)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.routeKeys = routeKeySet(p.expandedRoutes)

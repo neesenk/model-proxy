@@ -264,6 +264,9 @@ func ListClients(cfg *configdomain.Config, which string) []ClientSpec {
 		{Name: "pi", File: cfg.Takeover.Pi, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, imp map[string]configdomain.RouteTarget) error {
 			return RewritePi(c, m, imp)
 		}},
+		{Name: "kimi", File: cfg.Takeover.Kimi, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, imp map[string]configdomain.RouteTarget) error {
+			return RewriteKimi(c, m, imp)
+		}},
 	}
 	if which == "" || which == "all" {
 		return all

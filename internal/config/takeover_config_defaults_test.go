@@ -35,6 +35,9 @@ providers:
 	if cfg.Takeover.Pi != filepath.Join(home, ".pi/agent/models.json") {
 		t.Errorf("pi default=%q want under $HOME/.pi/agent", cfg.Takeover.Pi)
 	}
+	if cfg.Takeover.Kimi != filepath.Join(home, ".kimi/config.toml") {
+		t.Errorf("kimi default=%q want under $HOME/.kimi", cfg.Takeover.Kimi)
+	}
 	if cfg.Takeover.ProviderID != "model-proxy" {
 		t.Errorf("provider_id default=%q want model-proxy", cfg.Takeover.ProviderID)
 	}

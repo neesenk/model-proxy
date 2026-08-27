@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	domainpresets "model-proxy/internal/presets"
 )
 
 // runCmdAdd drives CmdAdd with explicit streams and returns (exit, stdout, stderr).
@@ -150,7 +152,7 @@ func TestCmdAdd_UnknownPresetListsCatalog(t *testing.T) {
 
 // TestCmdPresets_ListsAndSuggestsAdd checks the catalog command output shape.
 func TestCmdPresets_ListsAndSuggestsAdd(t *testing.T) {
-	catalog, err := List()
+	catalog, err := domainpresets.List()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,5 +164,46 @@ func TestCmdPresets_ListsAndSuggestsAdd(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), presetName) || !strings.Contains(out.String(), "model-proxy add") {
 		t.Fatalf("presets output missing entries/add hint: %q", out.String())
+	}
+}
+
+// TestCmdAdd_ModelVisibilityWarning pins the S3 cross-check: after login, a
+// configured model absent from the account's /models list surfaces as a
+// warning (stale preset), while visible models stay silent.
+func TestCmdAdd_ModelVisibilityWarning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.URL.Path == "/models" {
+			// The account can see glm-live only — glm-gone is configured but stale.
+			_, _ = w.Write([]byte(`{"data":[{"id":"glm-live"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "listen: 127.0.0.1:15799\nlog_level: error\n\nproviders:\n" +
+		"  zhipu:\n" +
+		"    provider_id: zhipu\n" +
+		"    openai_base_url: " + srv.URL + "\n" +
+		"    models: [glm-live, glm-gone]\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ADD_TEST_KEY", "sk-vis-key")
+
+	code, stdout, stderr := runCmdAdd([]string{"--config", cfgPath, "zhipu", "--api-key-env", "ADD_TEST_KEY"})
+	if code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "glm-gone") || !strings.Contains(stdout, "not visible") {
+		t.Fatalf("stale model must be named in the warning; stdout=%q", stdout)
+	}
+	if strings.Contains(stdout, "glm-live") && strings.Contains(stdout, "not visible") && !strings.Contains(stdout, "glm-gone") {
+		t.Fatalf("visible model must not be flagged; stdout=%q", stdout)
 	}
 }

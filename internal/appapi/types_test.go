@@ -8,6 +8,7 @@ import (
 
 	"model-proxy/internal/fusion"
 	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/presets"
 )
 
 func TestHTTPError(t *testing.T) {
@@ -91,3 +92,7 @@ func (fakeCommands) RemoveAccount(string, string) (MutationResult, error) {
 func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
 	return LoginStart{}, nil
 }
+
+func (fakeReads) Presets() []presets.Preset { return nil }
+
+func (fakeCommands) AddPreset(string) ([]string, error) { return nil, nil }

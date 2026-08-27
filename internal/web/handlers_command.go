@@ -247,3 +247,26 @@ func (s *Server) handleLoginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"state": v.State, "detail": v.Detail, "result": v.Result, "warning": v.Warning})
 }
+
+// handlePresetsList serves GET /api/presets: the shared preset catalog for
+// the Add-Provider wizard.
+func (s *Server) handlePresetsList(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"presets": s.reads.Presets()})
+}
+
+// handlePresetAdd serves POST /api/presets/<name>: merge the template block,
+// hot-reload, and return the ambiguity warnings for the UI to surface. The
+// credential step happens through the existing account/login endpoints.
+func (s *Server) handlePresetAdd(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/presets/")
+	if name == "" || strings.Contains(name, "/") {
+		writeJSONErr(w, http.StatusBadRequest, "expected /api/presets/<name>")
+		return
+	}
+	warnings, err := s.commands.AddPreset(name)
+	if err != nil {
+		writePortErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "added", "warnings": warnings})
+}

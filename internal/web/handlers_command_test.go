@@ -510,3 +510,5 @@ func TestCommandLoginContract(t *testing.T) {
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/login/aqp/start", ""), http.StatusServiceUnavailable, map[string]any{"error": "server is shutting down"})
 	})
 }
+
+func (*commandFake) AddPreset(string) ([]string, error) { return nil, nil }

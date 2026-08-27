@@ -57,6 +57,9 @@ func (p *Proxy) Reload(configPath string) error {
 	// their snapshot's scanner; new requests see the new credential set
 	// (login adds protection, logout drops it, immediately at reload).
 	p.guardScanner = scanner
+	// S2 auth sources follow the config generation (validate guarantees both
+	// files exist for non-loopback listens; loopback may have either unset).
+	p.applyAuthSources(cfg)
 	// Rebuild the shadow dispatch bundle so shadow_sample_rate /
 	// shadow_max_concurrent / client-timeout changes take effect at once — without
 	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until

@@ -17,6 +17,7 @@ import (
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
 	webtransport "model-proxy/internal/web"
+	"model-proxy/internal/webauth"
 )
 
 // reqIDPrefix is a per-process 8-hex-char nonce (generated once from crypto/rand
@@ -35,6 +36,25 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/health/status" || r.URL.Path == "/health" {
 		w.WriteHeader(200)
 		return
+	}
+	// S2 surface auth. Admin endpoints riding the proxy handler (web-disabled
+	// deployments) answer ONLY to the admin token; everything else under the
+	// handler is the forward surface — gated by the api-keys file when
+	// configured. /health stays open for liveness probes. Bearer and x-api-key
+	// are both accepted (OpenAI vs Anthropic client convention).
+	adminEndpoint := isAdminProxyEndpoint(r.URL.Path)
+	if adminEndpoint {
+		if admin := p.adminAuth.Load(); admin != nil && admin.Enabled() {
+			if !admin.Accept(webauth.BearerFromRequest(r.Header.Get)) {
+				http.Error(w, "unauthorized: bad admin token", http.StatusUnauthorized)
+				return
+			}
+		}
+	} else if keys := p.apiKeys.Load(); keys != nil && keys.Enabled() {
+		if !keys.Accept(webauth.BearerFromRequest(r.Header.Get)) {
+			http.Error(w, "unauthorized: unknown or missing API key", http.StatusUnauthorized)
+			return
+		}
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
 		p.serveModels(w, r)
@@ -162,4 +182,14 @@ func (p *Proxy) publishTerminalEvent(requestID string, r *http.Request, proto, e
 		Exposed:   exposed,
 		Status:    status,
 	})
+}
+
+// isAdminProxyEndpoint reports whether the path is an admin-surface endpoint
+// that rides the proxy handler (deployments with web.enabled=false): the
+// debug endpoints and the SSE events stream. The web transport applies the
+// same token check to its own subtree, so both routes to the surface enforce
+// the same boundary.
+func isAdminProxyEndpoint(path string) bool {
+	return path == "/debug/schedule" || path == "/debug/route" ||
+		strings.HasPrefix(path, "/debug/pprof") || path == "/api/events"
 }

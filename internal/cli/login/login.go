@@ -337,3 +337,16 @@ func CmdLogin(args []string) {
 	// pid file that flag derives.
 	cliserve.MaybeReloadDaemon(args, cfg)
 }
+
+// ApiKeyLike reports whether the provider's login flow is apikey-pool based
+// (vs OAuth/SSO device flows), which is exactly the set whose keys work for a
+// Bearer GET /models cross-check after login. Mirrors the CmdLogin dispatch:
+// volcengine is excluded (its /models needs V4 signing for plan endpoints).
+func ApiKeyLike(providerID string) bool {
+	switch providerID {
+	case "aqp", "codex", "volcengine":
+		return false
+	default:
+		return true
+	}
+}

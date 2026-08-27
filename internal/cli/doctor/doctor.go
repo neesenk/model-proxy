@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/credstore"
 	"model-proxy/internal/provider"
 )
 
@@ -43,6 +44,15 @@ func CmdDoctor(args []string, cfg *configdomain.Config, cfgPath string) {
 // count.
 func DoctorWithCfg(cfg *configdomain.Config) int {
 	fmt.Println(provider.Green("✓ config valid"))
+
+	// Credential storage backend (credstore): shows where credentials live
+	// at rest so a degraded keychain fallback is visible, not silent.
+	credBackend := string(credstore.ResolvedMode())
+	if credBackend == string(credstore.ModeKeychain) {
+		fmt.Printf("credentials: %s (OS keychain)\n", provider.Green(credBackend))
+	} else {
+		fmt.Printf("credentials: %s (0600 files under ~/.model-proxy)\n", provider.Gray(credBackend))
+	}
 
 	fmt.Printf("\n%s\n", provider.Bold("Providers"))
 	pnames := make([]string, 0, len(cfg.Providers))

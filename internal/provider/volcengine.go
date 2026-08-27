@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"regexp"
 	"time"
+
+	"model-proxy/internal/credstore"
 )
 
 // VolcengineProvider implements the Volcengine Ark (火山方舟) provider, including
@@ -239,10 +240,11 @@ func ValidateVolcengineAKSK(ak, sk string) error {
 
 // resolveVolcengineAKSK picks the AccessKey/SecretKey to sign GetAFPUsage with.
 // Bound keys (cfg.AccessKey/SecretKey, the pool-bound path) are used EXCLUSIVELY
-// - the on-disk file is never consulted, preserving per-account isolation (a
+// - the on-disk store is never consulted, preserving per-account isolation (a
 // sibling virtual's file must not leak into this account's quota call). When
-// unbound (the single-account / pre-pool path), the legacy file at
-// cfg.VolcengineCredFile is read for backward compatibility.
+// unbound (the single-account / pre-pool path), the legacy store at
+// cfg.VolcengineCredFile is read for backward compatibility — through
+// credstore, so keychain mode covers this path too (lazy migration applies).
 func (p *VolcengineProvider) resolveAKSK() (ak, sk string, err error) {
 	if p.cfg.AccessKey != "" && p.cfg.SecretKey != "" {
 		return p.cfg.AccessKey, p.cfg.SecretKey, nil
@@ -250,7 +252,7 @@ func (p *VolcengineProvider) resolveAKSK() (ak, sk string, err error) {
 	if p.cfg.VolcengineCredFile == "" {
 		return "", "", fmt.Errorf("AK/SK not configured")
 	}
-	b, err := os.ReadFile(p.cfg.VolcengineCredFile)
+	b, err := credstore.NewRef(p.cfg.VolcengineCredFile).Load()
 	if err != nil {
 		return "", "", fmt.Errorf("AK/SK not configured")
 	}

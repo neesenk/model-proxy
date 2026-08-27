@@ -305,3 +305,26 @@ func TestAPILogs(t *testing.T) {
 		t.Errorf("tail=2 should drop line1: %q", got)
 	}
 }
+
+// TestAPIStatusCredentialStore pins the S1 observability closeout: /api/status
+// carries credential_store naming the resolved credstore backend. Test binaries
+// resolve to file mode (credstore hermeticity guard), which the assertion pins.
+func TestAPIStatusCredentialStore(t *testing.T) {
+	w, _ := newTestWeb(t)
+	mux := http.NewServeMux()
+	w.Register(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200", rec.Code)
+	}
+	var v struct {
+		CredentialStore string `json:"credential_store"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatalf("parse status: %v", err)
+	}
+	if v.CredentialStore != "file" {
+		t.Fatalf("credential_store = %q, want \"file\" under the test-binary guard", v.CredentialStore)
+	}
+}

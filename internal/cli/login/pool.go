@@ -1,12 +1,15 @@
 package login
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"model-proxy/internal/accounts"
+	configdomain "model-proxy/internal/config"
 	displaypkg "model-proxy/internal/provider"
 )
 
@@ -71,4 +74,66 @@ func labelFor(pool accounts.Pool, id string) string {
 		}
 	}
 	return id
+}
+
+// FetchVisibleModels lists model ids the key can see at the provider's
+// OpenAI-style /models endpoint (Bearer GET, same probe semantics as
+// ValidateKeyBearerGET). Used by `add` to cross-check a preset's default model
+// list against what the account actually serves. Errors are non-fatal: the
+// caller degrades to "unknown" rather than failing the command (an endpoint
+// that 404s says nothing about the key).
+func FetchVisibleModels(prov configdomain.Provider, key string) ([]string, error) {
+	base := strings.TrimRight(prov.OpenAIBaseURL, "/")
+	if base == "" || key == "" {
+		return nil, fmt.Errorf("no base URL or key")
+	}
+	req, err := http.NewRequest(http.MethodGet, base+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	// Cap the read at 256KB: model lists are small; a hostile response must
+	// not be buffered in full.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(v.Data))
+	for _, m := range v.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
+// LatestAPIKey returns the most recently added pool account's API key for the
+// provider (best-effort, for the `add` model cross-check immediately after a
+// fresh login). Empty when there is no pool.
+func LatestAPIKey(provName, providerID string) string {
+	pool, err := loadPool(provName, providerID)
+	if err != nil || len(pool.Accounts) == 0 {
+		return ""
+	}
+	latest := pool.Accounts[0]
+	for _, a := range pool.Accounts[1:] {
+		if a.AddedAt > latest.AddedAt {
+			latest = a
+		}
+	}
+	return latest.APIKey
 }
