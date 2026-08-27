@@ -3,6 +3,7 @@ package credstore
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 )
@@ -115,5 +116,44 @@ func TestExplicitKeychainModeResolvable(t *testing.T) {
 	useFakeKeychain(t, newFakeKeychain(true))
 	if ResolvedMode() != ModeKeychain {
 		t.Fatalf("explicit keychain env resolved to %q, want keychain", ResolvedMode())
+	}
+}
+
+// The timeout wrapper bounds one uncancellable keychain backend call: a
+// wedged secret service must surface as ErrUnavailable, not hang the caller.
+// The abandoned op goroutine is still joined by the test (no leak).
+func TestKeychainTimeoutWrapper(t *testing.T) {
+	orig := keychainOpTimeout
+	keychainOpTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { keychainOpTimeout = orig })
+
+	release := make(chan struct{})
+	opReturned := make(chan struct{})
+	if err := withKeychainTimeout(func() error {
+		defer close(opReturned)
+		<-release
+		return nil
+	}); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("wedged op = %v, want ErrUnavailable after timeout", err)
+	}
+	close(release)
+	select {
+	case <-opReturned:
+	case <-time.After(time.Second):
+		t.Fatal("op goroutine did not exit after release")
+	}
+
+	// A prompt op's result (including backend error classes) passes through
+	// unchanged.
+	sentinel := errors.New("backend class")
+	if err := withKeychainTimeout(func() error { return sentinel }); !errors.Is(err, sentinel) {
+		t.Errorf("prompt op error = %v, want pass-through", err)
+	}
+	blob, err := withKeychainTimeoutGet(func() ([]byte, error) { return []byte("v"), nil })
+	if err != nil || string(blob) != "v" {
+		t.Errorf("prompt get = (%q, %v), want pass-through", blob, err)
+	}
+	if !withKeychainTimeoutBool(func() bool { return true }) {
+		t.Error("prompt bool = false, want true")
 	}
 }

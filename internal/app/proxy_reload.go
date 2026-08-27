@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/shadow"
 )
 
@@ -20,6 +21,12 @@ func (p *Proxy) Reload(configPath string) error {
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		return err
+	}
+	// Re-apply the credentials mode (pools + OAuth) before any pool I/O (same
+	// as the constructor): a `credentials:` change takes effect on this reload.
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
+	if note := accounts.CredentialMismatchNote(cfg.Credentials); note != "" {
+		log.Printf("[reload] ⚠ %s", note)
 	}
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
 	// Build the guard scanner OUTSIDE the lock (regexp compilation + secret
@@ -55,11 +62,15 @@ func (p *Proxy) Reload(configPath string) error {
 	p.cache = NewResponseCache(cfg.Cache)
 	// Swap the guard scanner with the same generation: in-flight requests keep
 	// their snapshot's scanner; new requests see the new credential set
-	// (login adds protection, logout drops it, immediately at reload).
+	// (login adds protection, logout drops it, immediately at reload). The
+	// pool/OAuth secret subsets are stored alongside so the refresh loop's
+	// in-place re-syncs always rebuild from THIS generation's build.
 	p.guardScanner = scanner
 	// S2 auth sources follow the config generation (validate guarantees both
 	// files exist for non-loopback listens; loopback may have either unset).
 	p.applyAuthSources(cfg)
+	p.guardPoolSecrets = built.PoolSecrets
+	p.guardOAuthSecrets = built.OAuthSecrets
 	// Rebuild the shadow dispatch bundle so shadow_sample_rate /
 	// shadow_max_concurrent / client-timeout changes take effect at once — without
 	// this, disabling shadow (sample_rate: 0) keeps firing paid requests until
@@ -103,12 +114,10 @@ func (p *Proxy) Reload(configPath string) error {
 	if cfg.RequestLog.Enabled && p.reqLog == nil {
 		log.Printf("[reload] request_log.enabled is true but logging is not active (reload cannot start it); restart the daemon to enable request logging")
 	}
-	// Same startup-only semantics for the security audit log: the forward path
-	// consults cfg.Guard.AuditEnabled() per generation (so audit:false via
-	// reload stops new records at once), but a logger that was never started
-	// cannot be created mid-flight.
-	if cfg.Guard.AuditEnabled() && p.secLog == nil {
-		log.Printf("[reload] guard.audit is true but the security audit log is not active (reload cannot start it); restart the daemon to enable it")
-	}
+	// The security audit log IS reload-owned (unlike request_log): reconcile
+	// the logger with the new generation — audit off→on starts it now, on→off
+	// drains+stops it, an audit_path change swaps to the new file. In-flight
+	// requests keep their snapshot's logger until it drains.
+	p.reconcileSecLog(cfg)
 	return appliedWarning
 }

@@ -370,3 +370,115 @@ func TestNewScannerDefaultsDecodeOn(t *testing.T) {
 		t.Errorf("decode on: base64 form must hit: Scan = %v, want [%s]", got, knownSecretEncoded)
 	}
 }
+
+// Encoded channel span dedup: probe hits whose expanded span falls inside
+// the previously processed span are skipped without decoding, so a body of
+// repeated probe hits cannot force quadratic decode work. The decodes
+// counter is a package-internal seam on findAllCounted.
+func TestEncodedChannelSpanDedup(t *testing.T) {
+	v := b64Interior(base64.RawStdEncoding, []byte("glpat-"), 0)
+	if v == "" {
+		t.Fatal("no align-0 probe variant for glpat-")
+	}
+	// The quadratic adversary: hundreds of probe hits dense inside ONE token
+	// run shorter than maxEncodedSpan, so every hit expands to the same span.
+	// Without dedup each hit re-expands and re-decodes that span (hits × span
+	// work for one region); '=' keeps the span undecodable. With dedup the
+	// first attempt settles the region and the rest of the hits are skipped.
+	dense := []byte(strings.Repeat(v+"=A=", 500)) // 5.5KB, ~500 hits, one span
+	s := mustScanner(t, nil, nil, nil)
+	found, stats := s.findAllCounted(dense)
+	if len(found) != 0 {
+		t.Errorf("undecodable adversarial body: found = %v, want no matches", found)
+	}
+	if stats.decodes > 3 {
+		t.Errorf("dense repeated probe hits in one span: decodes = %d, want <= 3 (span dedup)", stats.decodes)
+	}
+
+	// Correctness: hits in DISJOINT spans are still decoded and claimed —
+	// two copies of the same encoded secret are both redacted.
+	secret := "glpat-" + newFixtureRNG(0xdeed).chars(20, alphaWord)
+	blob := base64.StdEncoding.EncodeToString([]byte(secret))
+	mixed := "data: " + blob + " and again: " + blob + " end"
+	found, stats = s.findAllCounted([]byte(mixed))
+	if len(found) != 2 {
+		t.Errorf("two disjoint encoded secrets: found = %v, want 2 matches", found)
+	}
+	if stats.decodes < 2 {
+		t.Errorf("two disjoint encoded secrets: decodes = %d, want >= 2", stats.decodes)
+	}
+	out := string(s.Redact([]byte(mixed)))
+	if strings.Contains(out, blob) || strings.Count(out, RedactPlaceholder) != 2 {
+		t.Errorf("Redact = %q, want both blobs replaced", out)
+	}
+}
+
+// Encoded channel with several rules sharing one literal: the probe hit
+// re-runs EVERY owning rule on the decoded text, so an owner registered
+// after the first is not silently dropped.
+func TestEncodedChannelSharedLiteralOwners(t *testing.T) {
+	rules := []rule{
+		{name: "shared_first", re: regexp.MustCompile(`abc[0-9]{4}XX`), literals: [][]byte{[]byte("abc")}},
+		{name: "shared_second", re: regexp.MustCompile(`abc[0-9]{4}YY`), literals: [][]byte{[]byte("abc")}},
+	}
+	s := &Scanner{rules: rules, probes: buildProbes(rules)}
+	s.compilePrefilter()
+	// The shared literal must produce one probe with both owners.
+	var owners int
+	for _, p := range s.probes {
+		if len(p.ruleIdxs) == 2 {
+			owners++
+		}
+	}
+	if owners == 0 {
+		t.Fatal("buildProbes did not merge the shared literal's variants into multi-owner probes")
+	}
+	// A decoded text matching only the SECOND owner still reports.
+	blob := base64.StdEncoding.EncodeToString([]byte("abc1234YY"))
+	if got := s.Scan([]byte("data: " + blob)); len(got) != 1 || got[0] != "shared_second" {
+		t.Errorf("second-owner base64: Scan = %v, want [shared_second]", got)
+	}
+	hexBlob := hex.EncodeToString([]byte("abc1234YY"))
+	if got := s.Scan([]byte("hex: " + hexBlob)); len(got) != 1 || got[0] != "shared_second" {
+		t.Errorf("second-owner hex: Scan = %v, want [shared_second]", got)
+	}
+	// First-owner text claims as before, in table order.
+	firstBlob := base64.StdEncoding.EncodeToString([]byte("abc1234XX"))
+	if got := s.Scan([]byte("data: " + firstBlob)); len(got) != 1 || got[0] != "shared_first" {
+		t.Errorf("first-owner base64: Scan = %v, want [shared_first]", got)
+	}
+}
+
+// Short literals (3 chars) get base64 interior probes at all three byte
+// alignments since the threshold was lowered to 3: the determined slice is
+// fully literal-determined at aligns 1/2 as well (see b64Interior). Encode a
+// short-literal secret with 1- and 2-byte prefixes and require the encoded
+// channel to catch it.
+func TestEncodedChannelShortLiteralAlignments(t *testing.T) {
+	rng := newFixtureRNG(0xa119)
+	secrets := []struct {
+		name   string
+		secret string
+	}{
+		{"openai_api_key", "sk-" + rng.chars(24, alphaWord)},
+		{"huggingface_access_token", "hf_" + rng.chars(34, "abcdefghijklmnopqrstuvwxyz")},
+		{"jwt", "eyJ" + rng.chars(20, alphaAlnum) + ".eyJ" + rng.chars(20, alphaWord+"/") + "." + rng.chars(12, alphaWord+"/")},
+	}
+	s := mustScanner(t, nil, nil, nil)
+	for _, tc := range secrets {
+		for align := 1; align <= 2; align++ {
+			// NUL prefix bytes: non-word, so \b-anchored regexes still see a
+			// boundary on the decoded text.
+			raw := append(make([]byte, align), tc.secret...)
+			for encName, enc := range map[string]*base64.Encoding{
+				"std": base64.StdEncoding, "rawurl": base64.RawURLEncoding,
+			} {
+				blob := enc.EncodeToString(raw)
+				body := "data: " + blob + " end"
+				if got := s.Scan([]byte(body)); len(got) != 1 || got[0] != tc.name {
+					t.Errorf("%s align=%d enc=%s: Scan = %v, want [%s]", tc.name, align, encName, got, tc.name)
+				}
+			}
+		}
+	}
+}

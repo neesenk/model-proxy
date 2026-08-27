@@ -26,14 +26,10 @@ func (p *Proxy) StartRuntimeServices(cfg *Config) {
 		})
 	}
 
-	// Security audit log (guard.audit): same lifecycle shape as the request
-	// log — startup-only, Run under the lifecycle, drained before Close returns.
-	p.initSecLog(cfg)
-	if p.secLog != nil {
-		p.secLogStarted = p.lifecycle.Run(func(<-chan struct{}) {
-			p.secLog.Run()
-		})
-	}
+	// Security audit log (guard.audit): reload-owned. The boot generation
+	// reconciles here; Reload reconciles again per generation (audit off→on
+	// starts it, on→off drains+stops it, audit_path changes swap the file).
+	p.reconcileSecLog(cfg)
 
 	// Startup catalog loading remains synchronous so the first request gets the
 	// best available routing metadata, matching the previous daemon behavior.
@@ -54,9 +50,14 @@ func (p *Proxy) closeRuntimeServices() {
 	p.lifecycle.BeginStop()
 	p.lifecycle.WaitBeforeLogDrain()
 	// Drain the security audit log before the request log: both must finish
-	// writing before Close returns, and no producer may outlive either.
-	if p.secLogStarted {
-		p.secLog.Shutdown()
+	// writing before Close returns, and no producer may outlive either. Only
+	// the CURRENT generation's logger is drained here — reconcileSecLog already
+	// drained+stopped every swapped-out one.
+	p.mu.RLock()
+	secLog, secLogRunning := p.secLog, p.secLogRunning
+	p.mu.RUnlock()
+	if secLogRunning && secLog != nil {
+		secLog.Shutdown()
 	}
 	if p.reqLogStarted {
 		p.reqLog.Shutdown()

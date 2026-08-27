@@ -30,6 +30,7 @@ loopback 挡不住"借用户浏览器之手"的请求,所以凡携带浏览器�
 | GET | `/api/requests?model=&provider=&status=&errors=&from=&to=&limit=&shadow=` | — | `{enabled,records:[summary…]}` | request_log 查询（未启用 → `{enabled:false}`）。summary 含 `shadow` 布尔；`shadow=only\|exclude` 过滤影子记录。用 `bufio.Reader.ReadBytes` 流式扫描全部日志文件，limit 默认 100 上限 1000 |
 | GET | `/api/requests/<id>` | — | 完整 record（含 request/response body） | replay 的数据源；影子记录 id 为 `shadow-<原id>` |
 | GET | `/api/sessions?limit=` | — | `{enabled,sessions:[{session_id,first_ts,last_ts,requests,shadow_requests,errors,providers,models,usage,cost_usd}…]}` | 按会话聚合的最新请求日志（limit 默认 50 上限 200，最近活跃在前）；成本同 analytics 定价路径；request_log 关闭 → `{enabled:false}` |
+| GET | `/api/security?kind=&from=&to=&limit=` | — | `{enabled,records:[{ts,kind,request_id?,agent?,protocol?,exposed?,names?,action?,detail?}…],skipped}` | 安全审计日志查询（`internal/observe/seclog`，guard 命中的持久化记录）。`kind` 仅 `secret\|path\|drift`（其他值 400）；`from`/`to` 解析惯例同 `/api/stats`（unix 秒或 RFC3339，inclusive，内部转成审计日志的 unix 毫秒）；`limit` 默认 100 上限 1000，records 按 ts 新到旧；`skipped` 是扫描时跳过的不可读行数。审计目录由 `guard.audit_path`（默认 `~/.model-proxy/security.log`）的目录派生；`guard.audit: false` 或目录不存在 → `{enabled:false,records:[],skipped:0}`（惯例同 request_log 关闭）。**records 只含模式/路径类别名与动作，绝不含命中内容**（seclog 红线），DTO 不新增任何内容字段 |
 | GET | `/api/shadow-report?from=&to=` | — | `{from,to,entries:[{route,primary_provider,shadow_provider,samples,status_match_rate,primary_latency_ms,shadow_latency_ms,latency_diff_ms,primary_size_avg,shadow_size_avg}]}` | 影子评测聚合（按 `shadow-<父id>` 配对，仅成对样本计入） |
 | GET | `/api/fusion?workflow=` | — | `{workflows:{<名>:{runs,runs_today,quorum_met,degraded{原因:次数},panel_input/output,judge_input/output,synth_input/output,amplification}},runs:[{run_id,ts,route,workflow,agent,proto,quorum,drafts_used,degraded,legs[{provider,model,kind,status,latency_ms,input,output,err,cut}],judge_used,synth_committed,synth_status,synth_latency_ms,synth_input,synth_output}]}` | 编排观测（`internal/fusion.Registry` 纯内存，200 条 run 环形新到旧；汇总数据从 eventHub 回读，**不依赖 request_log**）。degraded 原因：`insufficient_proposers`/`tools_unsupported`/`body_build_failed`/`budget_exceeded`/`multi_turn`；`amplification`=(候选+judge+汇总)/汇总 token。时间序列走 `("fusion",<workflow>)` 分钟桶（requests=编排次数、failovers=降级次数） |
 | GET | `/api/events` | — | SSE 流 | 实时请求监视：先重放 200 条 recent ring 再推 start/end 事件（含 request_id/agent/provider/status/latency/tokens），15s keepalive。`web.enabled`（默认开）时由 web 层 `/api/` 子树服务并过 `guardBrowserOrigin`（组合根把 hub handler 注入 web transport——不能只在主 mux 的 proxy handler 挂分支：ServeMux 会把该路径分给更具体的 `/api/` 子树，Live 页在默认部署下 404）；`web.enabled: false` 时回落主 mux 的 proxy handler 分支（无 origin guard，行为同 CLI/curl 面）。guard.secrets 命中时另有 `type:"guard"` 事件（detail 仅含模式类型名与动作，绝不含命中内容）；`budgets:` 月度预算越线时另有 `type:"budget"` 事件（provider 字段=scope，detail 为 JSON `{scope, month, threshold_usd, actual_usd}`，每 (scope, 月份, 阈值) 每进程只发一次） |
@@ -83,7 +84,7 @@ loopback 挡不住"借用户浏览器之手"的请求,所以凡携带浏览器�
 
 HTTP/UI transport 统一归 `internal/web`。其 `Server` 不持有 `*Proxy`，只消费
 consumer-owned `ReadAPI` / `CommandAPI`：只读 handler 通过 `ReadAPI` 查询
-request log、tokens、stats、Fusion、pins、pricing 及 detached
+request log、安全审计日志（seclog 投影）、tokens、stats、Fusion、pins、pricing 及 detached
 dashboard/config/provider 快照；写操作和主动网络探测通过 `CommandAPI` 执行
 reset、quota refresh、health reset + persist、pin、reload 与 account probe。应用层的
 `internal/app/proxy_web_api.go` 是两个端口的唯一应用适配，负责 `proxyReadView` /
@@ -106,9 +107,13 @@ pending 的会话；否则 UI 会在后台任务仍可能落盘时提前得到 4
 
 `internal/observe/requestlog/sessions.go` 的 `SessionSummaries` 按最新 `scanLimit`（2000）条
 记录聚合出每个 `session_id` 的时间跨度、请求数（含 shadow 单列）、错误数、providers/models、
-token 总量（`ExtractUsage` 兼容 anthropic/chat/responses 三种响应体形状，cache read/creation
-单列）与等价 USD 成本；成本走与 `/api/analytics`、budget watcher 完全相同的
-`pricing.Resolve`（config `prices:` 覆盖优先）+ `ComputeCost` 路径，未定价模型贡献 0。
+token 总量（`ExtractUsage` 兼容 anthropic/chat/responses 三种响应体形状；流式响应按记录的
+SSE 文本逐帧提取、按字段取最大值合并——usage 帧以累计计数重复出现；cache read/creation
+单列，openai 形状的 `prompt_tokens`/`input_tokens` 内含 `cached_tokens`，提取时从 input 中
+扣除以免与 cache 桶双计）与等价 USD 成本；查询走 `Filter.UsageOnly` 投影——用量在逐行读取时
+解析、body 在 top-K 堆保留前剥离，2000 条扫描不会把全量 body（默认每侧至多 5MiB）钉在内存。
+成本走与 `/api/analytics`、budget watcher 完全相同的 `pricing.Resolve`（config `prices:`
+覆盖优先）+ `ComputeCost` 路径，未定价模型贡献 0。
 web 层 `handleSessions` 暴露 `GET /api/sessions?limit=50`（上限 200，按最近活跃排序），
 request_log 关闭时返回 `{enabled:false}`。`Filter.Session` 支持按 session id 精确过滤
 `QueryRecords`。shadow 请求计入所在会话（真实上游开销）并单列计数。

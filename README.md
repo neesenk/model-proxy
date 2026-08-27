@@ -7,7 +7,7 @@
 - **多上游聚合 + 配额感知调度**：surplus 调度分 / 熔断 / 限频跳过 / 粘性驻留 / 多账号凭据池 + 会话粘性
 - **三协议转发 + 可选协议转换**：同协议字节级透传；路由目标声明 `protocol:` 即可在 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 间转换
 - **请求感知路由**：按图片/工具能力过滤目标、超长 prompt 自动改道大上下文模型、上游 400 溢出自动重试一次
-- **可观测性**：Web UI 六个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
+- **可观测性**：Web UI 七个标签页、实时请求监视（SSE）、请求日志查询、延迟（LAT/TTFT）与按 agent 维度的统计
 - **评测工具**：影子评测（真实负载双跑对比后端）、一键重放（replay）、端到端测活（`test` / UI 按钮）
 - **多模型编排（fusion）**：一条路由 fan-out 到多个后端并行生成候选答案，结果汇总模型融合成最终答案——困难问题要最好效果
 - **其他**：精确响应缓存、`pin` 运行期热切换、等价成本分析（OpenRouter 价格）
@@ -26,7 +26,21 @@
 
 - **Provider 层**（`internal/provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
 - **Routes 层**：对外暴露模型名 → 一组 `provider/model` 目标。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由；目标可声明 `protocol:` 触发协议转换；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由
-- 凭据由 `login <provider>` 管理，经 `internal/credstore` 统一存储（OS keychain 或 `~/.model-proxy/` 下 0600 文件，`MP_CRED_STORE` 可选），不落 config
+- 凭据由 `login <provider>` 管理，不落 config；config `credentials:` 统一选择 apikey 池与 codex/aqp OAuth store 的存储后端（`file` 默认 / `keychain`：秘密值进 OS keychain、池文件只留元数据），env `MP_CRED_STORE` 仅作为 OAuth 侧的显式 override
+
+## 安装
+
+```bash
+brew tap neesenk/model-proxy
+brew trust neesenk/model-proxy        # 新版 Homebrew 对第三方 tap 的 cask 要求显式信任（首次）
+brew install --cask model-proxy
+
+# 首次运行前：二进制暂未做 Apple 公证，Gatekeeper 会拦截（进程挂起或弹窗），
+# 需手动移除 quarantine 属性（一次性）：
+xattr -d com.apple.quarantine "$(readlink -f "$(which model-proxy)")"
+```
+
+也可从 [GitHub Releases](https://github.com/neesenk/model-proxy/releases) 直接下载对应平台的归档（含 checksums.txt；curl 下载不带 quarantine 可直接运行，浏览器下载同样需上面的 `xattr -d`），或 `go install github.com/neesenk/model-proxy@latest` 源码安装。签名公证已列入后续计划，完成后此步骤不再需要。
 
 ## 构建
 
@@ -40,6 +54,8 @@ scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w
 ```
 
 `scripts/build.sh` 从 `git describe --tags --always --dirty` 注入版本号（`-ldflags -X main.version`，覆盖 `version.go` 的 `dev` 默认值，显示在 `serve status` / `/api/status`）。每个目标写 `dist/model-proxy-<goos>-<goarch>`（windows 加 `.exe`）；host 构建额外复制到 `./model-proxy`（可原地运行）。Flag：`--version <v>`、`--out <dir>`（默认 `dist`）、`--strip`（`-s -w`）、`-v`。`dist/` 和 `./model-proxy` 都在 .gitignore 里。
+
+**发布**：打 `v*` tag 推送即触发 `.github/workflows/release.yml`（GoReleaser，配置见 `.goreleaser.yaml`）——同一全静态矩阵 + 归档 + checksums 上 GitHub Releases，并自动更新 `neesenk/homebrew-model-proxy` 的 cask。本地验证：`goreleaser release --snapshot --clean`（不推送）。首次启用需在仓库 Settings 配 `HOMEBREW_TAP_GITHUB_TOKEN`（对 tap 仓库有 contents 写权限）。
 
 ## 配置
 
@@ -109,9 +125,13 @@ routes:
 #   known_secrets: true     # 默认 true：把代理自己管理的凭据（账号池 key、OAuth token）加入扫描集，
 #                           # 请求体出现这些值（含 base64/hex/url 编码形态）即命中，零误报
 #   decode: true            # 默认 true：检测编码形态的秘密（base64/hex 前缀变体，解码后过原规则）
-#   paths: log              # 敏感路径信号：log（默认）| block | off（不支持 redact）
+#   paths: log              # 敏感路径信号：log（默认）| block | off（不支持 redact）。命中按位置分
+#                           # 两级：工具调用/工具结果位（strong）按此动作处理；正文提及（weak）
+#                           # 只计数+审计（log-weak），不发 live event、永不 block
 #   audit: true             # 默认 true：命中持久化到安全审计日志（`model-proxy audit` 查询）
-#   audit_path: ~/.model-proxy/security.log   # 可选，默认即此
+#   session_scan: true      # 默认 true：分片泄露检测——同一 session（x-claude-code-session-id）多条请求
+#                           # 拼出一个 known-secret 即命中 known_secret_fragmented（redact 对此降级为 log）
+#   audit_path: ""          # 默认派生 <home>/.model-proxy/security.log；自定义必须是绝对路径（不展开 ~）
 #   extra_patterns:         # 自定义秘密格式（gitleaks extend 式，热 reload 生效）
 #     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}
 #   extra_paths:            # 自定义敏感路径（字面量）
@@ -138,6 +158,10 @@ model-proxy login deepseek         # 输入 DeepSeek API key（可重复 -> 多�
 model-proxy login volcengine       # Ark API Key + AccessKey/SecretKey（可重复 -> 多账号）
 model-proxy login qwen-plan        # 千问 Token Plan 个人版 sk-sp- key（可重复 -> 多账号）
 model-proxy login zhipu --label work --replace   # 命名账号 / 覆盖已存在的同 id 账号
+# 免粘贴导入（值不回显、不落日志；成功输出只有掩码账号 id）
+model-proxy login codex --from-codex             # 复用官方 codex CLI 登录态（~/.codex/auth.json，access_token 过期会自动 refresh）
+model-proxy login zhipu --from-env ZHIPU_KEY     # 从环境变量读 API key（等价交互输入，支持 --label/--replace）
+model-proxy login volcengine --from-env VOLC_ARK_KEY --from-env-ak VOLC_AK --from-env-sk VOLC_SK   # AK/SK 可选
 
 # 预设接入（一条命令完成：合并 provider 块到 config.yaml + 登录 + 热重载）
 model-proxy presets list                          # 内置预设目录（来自内置模板，过滤未实现的 provider）
@@ -216,17 +240,19 @@ model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历�
 # 安全审计（离线直读审计日志，不需 daemon）
 model-proxy audit                  # 最近的 guard 命中（秘密/路径）与 takeover 漂移记录
 model-proxy audit --kind drift --from 7d --json   # 过滤 + 原始 JSON
+model-proxy audit --stats --from 7d  # 聚合视图：by kind/命中名 top10/agent top10/action（--json 出结构化聚合）
 ```
 
 ## Web UI
 
-代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；回环 `listen` 下无鉴权（本地可信）**。六个标签页（Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）：
+代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；回环 `listen` 下无鉴权（本地可信，非回环需 `web.auth`，见「网络部署鉴权」）**。七个标签页（Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）：
 
 - **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
 - **Analytics** — token + 等价成本趋势（日历日/月聚合；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a`）。
 - **Requests** — 请求日志查询（需 `request_log.enabled`）：按 model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。
+- **Security** — 安全审计查询（需 `guard.audit`）：guard 命中（秘密/路径类型）与 takeover 漂移记录，按 kind/时间过滤；只展示类型名与路由元数据，匹配内容永不进入 UI。每个客户端会话的 token 等价成本汇总在 `/api/sessions`（Requests 页同源数据）。
 - **Live** — 实时请求监视（SSE 推送）：哪个 agent 正在发请求、路由到哪个上游、状态/token/耗时——抓「疯狂重试的 agent」就靠它。
 
 **所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态并重建响应缓存，所以 UI 改动也是"给卡住的 provider 复位"的手段。
@@ -238,7 +264,7 @@ web:
   enabled: false
 ```
 
-JSON 接口在 `/api/*`（`status` / `logs` / `config` / `accounts`（含 `…/<id>/test`）/ `tokens` / `stats` / `agents` / `analytics` / `requests` / `shadow-report` / `events` / `pin` / `quota/refresh` / `login/*`）；底层契约（请求/响应 shape、stats 口径）见仓库根目录 `docs/web-api.md`。前端是嵌入式的静态资源（`internal/web/assets/`，`go:embed`），无独立构建步骤。
+JSON 接口在 `/api/*`（`status` / `logs` / `config` / `accounts`（含 `…/<id>/test`）/ `tokens` / `stats` / `agents` / `analytics` / `sessions` / `requests` / `security` / `shadow-report` / `events` / `pin` / `quota/refresh` / `login/*`）；底层契约（请求/响应 shape、stats 口径）见仓库根目录 `docs/web-api.md`。前端是嵌入式的静态资源（`internal/web/assets/`，`go:embed`），无独立构建步骤。
 
 ## `serve status`（终端状态面板）
 
@@ -301,7 +327,12 @@ web:
 
 ## Token 文件
 
-凭据由 `login` 管理，按 provider name 派生路径，不落 config。存储后端由 `MP_CRED_STORE` 选择：`auto`（默认）在 OS keychain 可用时把凭据条目存入 keychain（macOS Keychain / Windows 凭据管理器 / Linux secret service），并把遗留明文文件懒迁移过去（原文件改名为 `<path>.migrated.bak` 保留一代回滚）；不可用或显式 `file` 时按历史行为存 `0600` 明文文件。显式 `keychain` 而后端不可达时 fail-closed（操作报错，不静默降级）。测试二进制永远不触碰真实 keychain。
+凭据由 `login` 管理，按 provider name 派生路径，不落 config。两类凭据（apikey 池、codex/aqp OAuth store）共用**一个**后端开关：config 顶层 `credentials:`（`file` 默认 | `keychain`）。env `MP_CRED_STORE`（`file|keychain|auto`）已发布，保留为**仅作用于 OAuth 侧的显式 override**——优先级：env 非空 > config > 默认 file；`auto` 表示按 keychain 可达性探测（收敛前的旧默认行为，现为显式 opt-in）。env 与 config 不一致时（env 只覆盖了 OAuth 侧），`config check` 与启动/reload 日志各给一行提示，说明两侧各自生效值与来源（env/config/default）。注意：收敛前未设任何开关、靠 auto 默认进过 keychain 的用户，升级后 OAuth blob 默认按 file 读取——显式设 `credentials: keychain`（或 env）即可继续读到原 keychain 条目。
+
+- **apikey 池**（`login` 写入的 `<name>_apikeys.json`）：`file`（默认）时秘密值内联在 0600 池 JSON（历史行为）；`keychain` 时秘密值 api_key/access_key/secret_key 逐条存进 OS keychain——macOS Keychain / Windows 凭据管理器 / Linux Secret Service，条目键形如 `<providerName>/<accountId>/api_key`，池文件只留 `{id, label, added_at}` 元数据。file→keychain 明文池与遗留单账号文件在首次读取时懒迁移（池文件被重写为纯元数据，遗留文件改名为 `<path>.migrated.bak` 保留一代回滚）；keychain 不可达时 fail-closed——操作报错，不静默回落明文文件。启用方式：`config.yaml` 加 `credentials: keychain` 后重新 login（或等首次读取自动迁移）。注意：macOS 首次写入可能弹钥匙串授权框；headless Linux 需要 Secret Service（gnome-keyring 或 KWallet）在运行。**keychain→file 切回有自动回迁**：池文件是纯元数据时，file 模式读取会按条目从 keychain 读回秘密并原子重写明文池（0600）；keychain 条目缺失的账号保留元数据、在 `Snapshot.ReloginNeeded`/启动日志中报出需重新 login（部分回迁，不整体失败），回迁后 keychain 条目默认保留（防误删，`logout` 是正常删除路径）。
+- **codex/aqp OAuth store**（下表前两类）经 `internal/credstore` 统一读写，同一个 `credentials:` 选择后端（env `MP_CRED_STORE` 可覆盖）：`keychain` 把整个凭据 blob 存为一条 keychain 记录并懒迁移遗留明文文件（原文件改名为 `<path>.migrated.bak`）；`file` 按历史行为存 `0600` 明文文件；显式 `keychain` 而后端不可达时 fail-closed。OAuth blob **不做 keychain→file 自动回迁**（与历史 env 切换行为一致）：切回 file 后需重新 login。
+
+测试二进制永远不触碰真实 keychain。
 
 | Provider | Token 文件 | 内容 |
 |---|---|---|
@@ -359,16 +390,70 @@ routes:
 
 针对提示注入（prompt injection）偷凭据的场景：恶意内容诱使 agent 读取 `~/.ssh/id_rsa`、`.env`、API key 后，最常见的漏出通道是把秘密塞进发给 LLM 的请求——这道流量必经 model-proxy，因此代理在**转发前对请求 body 做一次出站扫描**，是凭据出域前的最后一道内容级闸门。（agent 直接 curl/DNS 出网的通道不经过代理，那是客户端沙箱的职责，见各家 CLI 的 sandbox/网络白名单设置。）
 
-四层检测，全部只在命中字面量预过滤后才精读，干净 body 零正则零解码：
+五层检测，全部只在命中字面量预过滤后才精读，干净 body 零正则零解码：
 
 - **内置规则表**：53 条高置信秘密模式，其中 46 条精选自 gitleaks v8.28.0 规则集（MIT，溯源见 `internal/guard/rules.json`）——LLM 厂商 key、AWS/GCP/Azure、GitHub/GitLab/Slack/npm/PyPI token、JWT、PEM 私钥头等；上游带熵阈值的规则保留 Shannon 熵后置过滤压误报。
-- **known-secret（默认开）**：把代理自己管理的凭据（账号池 API key/AK/SK、codex/aqp OAuth 文件里的 token）加入扫描集，请求体出现这些值的**原文或 base64/hex/url 编码形态**即命中 `known_secret`——零误报，防注入偷代理自身凭据。匹配集只存在于内存，随 login/logout/reload 自动更新，无需任何规则维护；OAuth token 轮转后新值在下一次 reload 进集（`serve reload` 或 Web 任意写操作即刷新）。
+- **known-secret（默认开）**：把代理自己管理的凭据（账号池 API key/AK/SK、codex/aqp OAuth 文件里的 token）加入扫描集，请求体出现这些值的**原文或 base64/hex/url 编码形态**即命中 `known_secret`——零误报，防注入偷代理自身凭据。匹配集只存在于内存，随 login/logout/reload 自动更新，无需任何规则维护；OAuth token 进程内轮转（codex/aqp 原地刷新写回 auth 文件）后由后台节拍（`scheduling.quota_poll_interval`，默认 5m）自动重扫进集，最迟一个周期生效，无需 reload。
 - **编码逃逸检测（默认开）**：规则前缀的 base64 三对齐/hex 变体命中后，解码外围 token 再过原规则（含熵过滤），不解码任意 span（不碰 base64 图片等正常负载）。
-- **敏感路径信号（默认 log）**：`~/.ssh`、`~/.aws/credentials`、`~/.model-proxy`、`~/.gnupg`、`~/.kube/config`、`~/.docker/config.json`、`~/.config/gcloud`、`.env` 出现在请求体里即按类别告警（`ssh`/`aws_creds`/`proxy_creds`/…）——在秘密出现之前给出"意图级"信号。只支持 log/block/off，不支持 redact（改路径会破坏正常编码工作）。
+- **敏感路径信号（默认 log）**：`~/.ssh`、`~/.aws/credentials`、`~/.model-proxy`、`~/.gnupg`、`~/.kube/config`、`~/.docker/config.json`、`~/.config/gcloud`、`.env` 出现在请求体里即按类别告警（`ssh`/`aws_creds`/`proxy_creds`/…）——在秘密出现之前给出"意图级"信号。命中按出现位置分两级：**strong**（路径在工具调用/工具结果位——anthropic `tool_use.input`/`tool_result.content`、openai `tool_calls[].function.arguments` 与 `role:"tool"` 消息 content、responses `function_call.arguments`/`function_call_output.output`，即"agent 通过工具读敏感文件"的 MCP Tool Poisoning 特征动作）按 `guard.paths` 配置处理：live event + `("guard", <类别>)` 计数器 + 审计，block 只对 strong 生效；**weak**（正文/user 消息里提及——coding agent 讨论 `.env` 是常态）只计 `("guard", <类别>_text)` 计数器并写 action=`log-weak` 的审计记录，不发 live event（避免刷屏）、永不 block（正文提及敏感路径不阻断）。结构识别是字面量预过滤之后才做的一遍流式 JSON 扫描（干净 body 零成本）；body 非合法 JSON 或结构识别失败时全部按 weak 处理（宁低勿高）。只支持 log/block/off，不支持 redact（改路径会破坏正常编码工作）。
+- **分片泄露检测（`guard.session_scan`，默认开）**：单请求扫描挡不住把秘密拆成多段、每次请求带一段的偷法。代理按 `x-claude-code-session-id` 会话头维护有界内存窗口（每会话保留最近请求 body 尾部 32KiB，LRU 上限 256 会话、总量 ≤8MiB，reload 不清、永不落盘/日志），跟踪每个 known-secret 在该会话中**按序出现的最长前缀**（每段 ≥8 字节）；后续请求补齐剩余部分即命中 `known_secret_fragmented`（计数器/live event/审计与单请求命中同通路）。只覆盖 known-secret（池凭据/OAuth token）原文形态；段间隔超过 32KiB 窗口或会话被淘汰后不追溯（有界启发式，非会话录像）；无会话头的请求不聚合（单请求扫描已覆盖）。**redact 对分片命中降级为 log**——秘密横跨多个请求，任何一个 body 都无法改写；block 拒绝补齐段所在请求（400），此前的分段已放行（它们各自是干净请求）。
 
-动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器），匹配内容永不落日志、事件或测试输出。命中持久化到安全审计日志（默认 `~/.model-proxy/security*.log`，0600，30 天轮转），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
+动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off；strong 按配置、weak 恒为计数+审计，见上）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器，weak 路径命中例外：不发 live event，计数器名带 `_text` 后缀），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先、paths=block 只阻断 strong 命中。命中持久化到安全审计日志（默认 `~/.model-proxy/security*.log`，0600，按大小+按天轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
 
 规则维护：你的凭据免维护（自动派生）；新 key 格式用 `guard.extra_patterns`（config 热 reload 即时生效）或向上游同步内置表（升 `rules.json` 的 upstream pin → 重抽 → review）；敏感路径用 `guard.extra_paths`。
+
+## 安全功能使用指南
+
+上面是机制，这里是按场景的用法。默认配置（全 log）下**装好即受保护、不打扰**——先跑起来观察，再按需收紧。
+
+### 上手：从零到受保护（5 分钟）
+
+```bash
+brew tap neesenk/model-proxy && brew trust neesenk/model-proxy && brew install --cask model-proxy
+xattr -d com.apple.quarantine "$(readlink -f "$(which model-proxy)")"   # 首次（未公证，见安装节）
+
+model-proxy add zhipu                      # 预设接入：一条命令完成 config + 登录（或 login codex --from-codex 复用官方登录态）
+model-proxy takeover claude                # 接管客户端（写完自动复检漂移，异常会警示并留审计记录）
+model-proxy serve daemon                   # 启动
+```
+
+此时 guard 已在工作：秘密/路径命中走 log——不阻断、只记录。
+
+### 日常观测：命中了怎么看
+
+- **Web UI**(`http://127.0.0.1:15721/ui/`):Live 页实时看 guard 事件（⚑ 徽标行）;Security 页按 kind/时间翻审计记录。
+- **终端**:`model-proxy audit` 翻记录；`model-proxy audit --stats --from 7d` 看聚合（哪类命中多、哪个 agent 在触发）;`stats` 里 `guard` 虚拟 provider 的计数器看趋势。
+- **漂移**:`model-proxy doctor --live`——客户端 BASE_URL 被改离代理（key 劫持手法）会有 ⚠ 提示并写 drift 审计。
+
+### 收紧防护（按需，别一上来就开）
+
+```yaml
+guard:
+  secrets: redact    # 观察期确认误报可接受后：命中内容替换 [REDACTED] 转发（agent 收到脱敏文本，工作不中断）
+  # secrets: block   # 最严：直接 400——agent 会报错重试，适合高敏环境；注意 redact/block 对分片命中分别降级为 log/仅拦补齐段
+  paths: block       # 只拦"工具调用里读敏感路径"（strong）；正文讨论 .env 永不阻断，可放心开
+```
+
+改完 `serve reload` 即生效。block 误伤了正常请求？把动作调回 log、或把该格式加进下一条的自定义排除（用更精确的 extra_patterns 名字区分）。
+
+### 自定义规则
+
+```yaml
+guard:
+  extra_patterns:    # 公司内部 token 格式，热 reload 生效
+    - {name: corp_token, regex: '\bct-[A-Za-z0-9]{32,}', literal: 'ct-'}
+  extra_paths: [~/.company/secrets]
+```
+
+`config check` 会显示 guard 生效摘要（内置表 + N 条自定义 + 各开关状态），写完规则先跑一下确认加载。
+
+### 凭据放系统钥匙串（可选）
+
+`config.yaml` 加 `credentials: keychain`——apikey 池秘密值进 OS keychain，池文件只留元数据；已有的明文池首次读取自动迁移并擦除。macOS 首次写入可能弹钥匙串授权框；切回 `file` 会自动从钥匙串回迁（个别账号条目缺失会提示重新 login）。keychain 不可用时操作直接报错，不会静默回落明文。
+
+### 边界（什么不归代理管）
+
+agent 被诱导**直接 curl/DNS 出网**偷数据不经过本代理——那是客户端沙箱的职责（Codex 默认关网络、Claude Code 的 sandbox 模式），guard 管的是"秘密混在发给 LLM 的请求里"这条最常见的通道。已知检测限制：分片检测只覆盖秘密原文形态（编码分片不覆盖）；段间隔超 32KiB 不追溯。
 
 ## 调试工具：`test` / `pin` / `replay`
 

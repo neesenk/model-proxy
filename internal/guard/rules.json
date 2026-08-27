@@ -53,7 +53,7 @@
         "AKIA",
         "ASIA"
       ],
-      "entropy": null,
+      "entropy": 3,
       "source": "model-proxy",
       "source_rule": "aws_access_key_id"
     },
@@ -231,7 +231,7 @@
     },
     {
       "name": "grafana_api_key",
-      "regex": "(?i)\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "regex": "\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "literals": [
         "eyJrIjoi"
       ],
@@ -241,7 +241,7 @@
     },
     {
       "name": "grafana_cloud_api_token",
-      "regex": "(?i)\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "regex": "\\b((?:glc_|GLC_)[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "literals": [
         "glc_",
         "GLC_"
@@ -252,7 +252,7 @@
     },
     {
       "name": "grafana_service_account_token",
-      "regex": "(?i)\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "regex": "\\b((?:glsa_|GLSA_)[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "literals": [
         "glsa_",
         "GLSA_"
@@ -283,7 +283,7 @@
     },
     {
       "name": "jwt",
-      "regex": "\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "regex": "\\b(eyJ[a-zA-Z0-9]{16,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "literals": [
         "eyJ"
       ],
@@ -313,7 +313,7 @@
     },
     {
       "name": "npm_access_token",
-      "regex": "(?i)\\b(npm_[a-z0-9]{36})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "regex": "\\b((?:npm_|NPM_)[a-z0-9]{36})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
       "literals": [
         "npm_",
         "NPM_"
@@ -445,7 +445,7 @@
     },
     {
       "name": "slack_app_token",
-      "regex": "(?i)xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+",
+      "regex": "(?:xapp-|XAPP-)\\d-[A-Z0-9]+-\\d+-[a-z0-9]+",
       "literals": [
         "xapp-",
         "XAPP-"
@@ -466,10 +466,12 @@
     },
     {
       "name": "slack_config_access_token",
-      "regex": "(?i)xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}",
+      "regex": "(?:xoxe\\.xox[bp]-|XOXE\\.XOX[BP]-)\\d-[A-Z0-9]{163,166}",
       "literals": [
         "xoxe.xoxb-",
-        "xoxe.xoxp-"
+        "xoxe.xoxp-",
+        "XOXE.XOXB-",
+        "XOXE.XOXP-"
       ],
       "entropy": 2,
       "source": "gitleaks",
@@ -500,8 +502,7 @@
       "name": "sourcegraph_access_token",
       "regex": "sgp_(?:(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})",
       "literals": [
-        "sgp_",
-        "SGP_"
+        "sgp_"
       ],
       "entropy": 3,
       "source": "gitleaks",

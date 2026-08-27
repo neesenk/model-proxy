@@ -85,7 +85,7 @@ Responses → {anthropic, chat}（`responsesSSETo*`，读 `response.*` 事件）
 
 - `message_start`/首 chunk → `response.created`；content 块增量组装回 `output_item.added` + 对应 `*.delta` + `output_item.done`（added/done 按 item id + type 严格配对；从未发过 added 的空 text/thinking 块不发任何 done 帧）。**`output_item.done` 帧与 `response.completed.output` 携带完整 item**（message 带 content、function_call 带 name/call_id/arguments、reasoning 带 summary/encrypted_content、custom_tool_call 带 input，对齐真实上游 framing，cc-switch streaming_codex_chat 同款）。
 - 合成 item id：`msg_item_<idx>` / `fc_item_<idx>` / `rs_item_<idx>`。chat 侧 tool_call 的 `output_item.added` 延迟到 name 已知才发（空 name 是协议违规），且按连续 output_index 释放（前面的匿名 call 不跳过）；id/name 后到的碎片不覆盖已有 identity。
-- `message_stop`/finish → `response.completed`（带 usage）；status 为 `incomplete` 时事件名为 `response.incomplete` 并带 `incomplete_details.reason`（`max_tokens`/`length`→`max_output_tokens`，`refusal`/`content_filter`→`content_filter`）。**每个合成帧带递增 `sequence_number`（从 0 开始每帧 +1，对齐真实上游 framing）。** **合成的 completed/incomplete 快照带 `created_at`（RFC3339；JSON→SSE 桥接仅在上游体缺失时补齐）**——严格 SDK 解析必填。
+- `message_stop`/finish → `response.completed`（带 usage）；status 为 `incomplete` 时事件名为 `response.incomplete` 并带 `incomplete_details.reason`（`max_tokens`/`length`→`max_output_tokens`，`refusal`/`content_filter`→`content_filter`）。**每个合成帧带递增 `sequence_number`（从 0 开始每帧 +1，对齐真实上游 framing）。** **合成的 completed/incomplete 快照带 `created_at`（Unix 秒整数，Responses 线上契约；JSON→SSE 桥接仅在上游体缺失时补齐）**——严格 SDK 解析必填。
 - anthropic `redacted_thinking` 块 → 仅含 `encrypted_content` 的 reasoning item。
 - 上游 error event / chat error chunk → `response.failed`，绝不合成干净的 `response.completed`；chat 源流显式 `event: error` 行同样判错（payload 无 error 键时从 message/detail 提取，cc-switch extract_chat_sse_error）。
 
@@ -157,8 +157,10 @@ code 收集进 `RequestOptions.Diag`（`targetexec.Plan` 每次尝试携带一�
 `response_format_dropped`、`empty_json_schema_dropped`、`unknown_role_dropped`、
 `unknown_block`/`unknown_part`/`unknown_item`/`unknown_tool_type`、`non_text_block_dropped`/
 `non_text_part_dropped`、`server_tool_dropped`、`block_dropped`、`cache_control_dropped`、
-`data_uri_dropped`、`file_id_degraded`、`tool_args_raw`/`tool_args_wrapped`、
+`data_uri_dropped`、`file_id_degraded`、`media_degraded`（目标无视觉时 tool 结果图片塌缩为
+占位文本——strict 模式同样拒绝，能力门控不再是无感盲区）、`tool_args_raw`/`tool_args_wrapped`、
 `orphan_reasoning_dropped`、`reasoning_dropped`、`reasoning_context_dropped`、`tool_name_missing`。
+`StrictLossy` 未配 `Diag` 时 `convertRequestFor` 自动补一个收集器（否则静默失效）。
 响应/流式路径与 responses_state 的孤儿修复仍走 convertWarn（Phase 2）。
 
 **strict 模式**（config `conversion.strict_lossy`，默认关）：任一诊断触发即以

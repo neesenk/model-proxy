@@ -34,6 +34,10 @@ func TestCmdAdd_EndToEnd_LocalValidationServer(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// CmdAdd runs in-process and finishes with MaybeReloadDaemon, whose
+	// default pid file is <TMPDIR>/model-proxy.pid — pin TMPDIR so a
+	// developer's live serve daemon never gets a real SIGHUP from this test.
+	t.Setenv("TMPDIR", t.TempDir())
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -82,6 +86,10 @@ func TestCmdAdd_AmbiguityRefusesWithoutTTY(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// CmdAdd runs in-process and finishes with MaybeReloadDaemon, whose
+	// default pid file is <TMPDIR>/model-proxy.pid — pin TMPDIR so a
+	// developer's live serve daemon never gets a real SIGHUP from this test.
+	t.Setenv("TMPDIR", t.TempDir())
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")

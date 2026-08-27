@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"model-proxy/internal/accounts"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	"os"
@@ -289,6 +290,10 @@ After logging in, the browser will try to redirect back to this machine:
 // command) can drive the same dispatch. The codex case resolves the store
 // path here so renamed instances keep writing <provName>_oauth_auth.json.
 func RunProviderLogin(cfg *configdomain.Config, provName, keyIn, label string, replace bool) error {
+	// Backstop for callers that bypass CmdLogin (presets `add`, the web
+	// layer): the pool save paths resolve stores through the process default,
+	// so apply this config's credentials mode (pools + OAuth) before any I/O.
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	prov := cfg.Providers[provName]
 	switch prov.Provider {
 	case "aqp":
@@ -314,9 +319,12 @@ func CmdLogin(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Apply the configured credentials mode before any pool/OAuth I/O (the
+	// login/logout save paths resolve stores through the process default).
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	provName := cliframework.Positional(args)
 	if provName == "" {
-		fmt.Println("usage: model-proxy login <provider> [--label <name>] [--replace]")
+		fmt.Println("usage: model-proxy login <provider> [--label <name>] [--replace] [--from-env VAR [--from-env-ak VAR --from-env-sk VAR] | --from-codex]")
 		fmt.Println("available providers:")
 		for name, p := range cfg.Providers {
 			fmt.Printf("  %s (provider=%s)\n", name, p.Provider)
@@ -328,9 +336,34 @@ func CmdLogin(args []string) {
 	}
 	label := cliframework.FlagStringValue(args, "--label")
 	replace := cliframework.HasFlagValue(args, "--replace")
+	fromCodex := cliframework.HasFlagValue(args, "--from-codex")
+	fromEnv := cliframework.FlagStringValue(args, "--from-env")
+	fromEnvAK := cliframework.FlagStringValue(args, "--from-env-ak")
+	fromEnvSK := cliframework.FlagStringValue(args, "--from-env-sk")
 
-	if err := RunProviderLogin(cfg, provName, "", label, replace); err != nil {
-		log.Fatalf("login failed: %v", err)
+	// Import shortcuts: --from-codex reuses the official codex CLI login;
+	// --from-env* reads apikey-class secrets from environment variables. Both
+	// converge on the same save/reload path as interactive login.
+	prov := cfg.Providers[provName]
+	switch {
+	case fromCodex:
+		if fromEnv != "" || fromEnvAK != "" || fromEnvSK != "" {
+			log.Fatal("--from-codex cannot be combined with --from-env/--from-env-ak/--from-env-sk")
+		}
+		if prov.Provider != "codex" {
+			log.Fatalf("--from-codex is only valid for codex providers (%s is provider=%s)", provName, prov.Provider)
+		}
+		if err := RunCodexImport(provName); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+	case fromEnv != "" || fromEnvAK != "" || fromEnvSK != "":
+		if err := runFromEnvLogin(cfg, provName, prov, fromEnv, fromEnvAK, fromEnvSK, label, replace); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+	default:
+		if err := RunProviderLogin(cfg, provName, "", label, replace); err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
 	}
 	// After ANY successful login, signal a running serve to hot-reload. The
 	// full args are passed so a serve started with `--log-file` is found at the

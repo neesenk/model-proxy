@@ -195,6 +195,47 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"from": from, "to": to, "bucket": bucket, "buckets": bs})
 }
 
+// handleSecurity serves GET /api/security: guard audit-log records (secret /
+// path / drift hits) projected by the read port. kind is validated here so an
+// unknown value is a client error instead of a silently empty result; from/to
+// follow the /api/stats parsing convention (unix seconds or RFC3339) and are
+// converted to the audit log's unix-millisecond filter domain (to is
+// inclusive to the end of the named second).
+func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	query := appapi.SecurityQuery{Kind: q.Get("kind"), Limit: 100}
+	switch query.Kind {
+	case "", "secret", "path", "drift":
+	default:
+		writeJSONErr(w, http.StatusBadRequest, "kind must be secret, path or drift")
+		return
+	}
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			query.Limit = n
+		}
+	}
+	if query.Limit > 1000 {
+		query.Limit = 1000
+	}
+	if v := q.Get("from"); v != "" {
+		if n, ok := parseStatsTime(v); ok {
+			query.From = n * 1000
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if n, ok := parseStatsTime(v); ok {
+			query.To = n*1000 + 999
+		}
+	}
+	result, err := s.reads.Security(query)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "security audit query: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleShadowReport(w http.ResponseWriter, r *http.Request) {
 	dir := s.reads.RequestLogDirectory()
 	if dir == "" {

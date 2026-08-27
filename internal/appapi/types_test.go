@@ -60,6 +60,9 @@ func (fakeReads) Fusion(string, time.Time) (map[string]fusion.WorkflowStats, []f
 	return nil, nil
 }
 func (fakeReads) Pins() []Pin { return nil }
+func (fakeReads) Security(SecurityQuery) (SecurityResult, error) {
+	return SecurityResult{}, nil
+}
 func (fakeReads) ConfigDocument() (ConfigDocument, error) {
 	return ConfigDocument{}, nil
 }

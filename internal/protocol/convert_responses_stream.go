@@ -221,7 +221,11 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		} else if strings.HasPrefix(line, "event:") {
 			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		}
-		if pendData == "" {
+		if line != "" || pendData == "" {
+			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
+			// comment lines belong to the frame in progress even when they
+			// trail its data lines — dispatching on them would classify the
+			// frame under the previous event and leak the real one forward.
 			continue
 		}
 		payload := pendData
@@ -728,7 +732,11 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 		} else if strings.HasPrefix(line, "event:") {
 			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		}
-		if pendData == "" {
+		if line != "" || pendData == "" {
+			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
+			// comment lines belong to the frame in progress even when they
+			// trail its data lines — dispatching on them would classify the
+			// frame under the previous event and leak the real one forward.
 			continue
 		}
 		payload := pendData
@@ -1134,7 +1142,11 @@ func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
 		} else if strings.HasPrefix(line, "event:") {
 			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		}
-		if pendData == "" {
+		if line != "" || pendData == "" {
+			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
+			// comment lines belong to the frame in progress even when they
+			// trail its data lines — dispatching on them would classify the
+			// frame under the previous event and leak the real one forward.
 			continue
 		}
 		payload := pendData
@@ -1470,7 +1482,7 @@ func (t *anthropicSSEToResponsesSSE) finish() {
 	}
 	resp := map[string]any{
 		"id": t.id, "object": "response", "status": status, "model": t.model, "output": doneItemsOutput(t.doneItems),
-		"created_at": time.Now().UTC().Format(time.RFC3339),
+		"created_at": time.Now().Unix(),
 		"usage":      usage,
 	}
 	event := "response.completed"
@@ -1716,7 +1728,11 @@ func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
 		} else if strings.HasPrefix(line, "event:") {
 			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		}
-		if pendData == "" {
+		if line != "" || pendData == "" {
+			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
+			// comment lines belong to the frame in progress even when they
+			// trail its data lines — dispatching on them would classify the
+			// frame under the previous event and leak the real one forward.
 			continue
 		}
 		payload := pendData
@@ -2091,7 +2107,7 @@ func (t *openaiSSEToResponsesSSE) finish() {
 	}
 	resp := map[string]any{
 		"id": t.id, "object": "response", "status": status, "model": t.model, "output": doneItemsOutput(t.doneItems),
-		"created_at": time.Now().UTC().Format(time.RFC3339),
+		"created_at": time.Now().Unix(),
 		"usage":      usage,
 	}
 	event := "response.completed"

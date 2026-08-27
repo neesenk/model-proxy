@@ -10,10 +10,15 @@
 // keychain mode copies the blob into the keychain and renames the file to
 // <path>.migrated.bak (one rollback generation kept).
 //
-// Mode selection (MP_CRED_STORE):
-//   - "auto" (default): keychain when reachable, otherwise plain files.
-//   - "file": always plain files (identical to pre-credstore behavior).
-//   - "keychain": force keychain; an unreachable backend fails closed at op time.
+// Mode selection (env MP_CRED_STORE > config `credentials:` > default file):
+//   - env "file"/"keychain": explicit override of any config selection.
+//   - env "auto": explicit override that probes keychain reachability (the
+//     pre-config default behavior, kept as an opt-in).
+//   - env unset: the config `credentials:` value applied via SetProcessMode
+//     (file|keychain); with no config loaded, plain files.
+//
+// "keychain" (either source) is fail-closed: an unreachable backend errors at
+// op time instead of silently downgrading.
 //
 // Security invariants (AGENTS.md red line 3):
 //   - blobs never appear in logs, errors, or test output — errors carry only
@@ -25,6 +30,7 @@ package credstore
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,42 +63,129 @@ var (
 	// reached (e.g. explicit keychain mode with no secret service). Fail-closed:
 	// callers surface it instead of falling back silently.
 	ErrUnavailable = errors.New("credential store unavailable")
+	// ErrEntryTooLarge reports that the blob exceeds the OS keychain backend's
+	// entry size ceiling (darwin ~3000 bytes of command-line budget, windows
+	// 2560 bytes of credential blob). Unlike ErrUnavailable this is a
+	// deterministic property of the blob+backend pair, never a reachability or
+	// downgrade problem — a lazy migration that hits it keeps serving the
+	// plaintext copy instead of locking the account out.
+	ErrEntryTooLarge = errors.New("credential entry too large for keychain backend")
+)
+
+// ModeSource records where the effective mode came from. Surfaced by
+// `config check` and startup logs so a credentials-mode mismatch shows each
+// side's effective value AND origin.
+type ModeSource string
+
+const (
+	SourceEnv     ModeSource = "env MP_CRED_STORE"
+	SourceConfig  ModeSource = "config credentials:"
+	SourceDefault ModeSource = "default"
 )
 
 var (
-	resolveOnce sync.Once
-	resolved    Mode
+	// modeMu guards the process-level config mode and the cached resolution.
+	// SetProcessMode runs at config load points — including serve reload, while
+	// request-path readers may resolve concurrently — so the cache must be
+	// re-armable and race-clean (a sync.Once cannot).
+	modeMu         sync.Mutex
+	configMode     Mode
+	resolved       Mode
+	resolvedSource ModeSource
+	resolvedOK     bool
 )
 
-// ResolvedMode returns the effective storage mode, resolving once per process.
-// Resolution order: MP_CRED_STORE env > test-binary guard > availability probe.
-func ResolvedMode() Mode {
-	resolveOnce.Do(func() { resolved = computeMode() })
-	return resolved
+// SetProcessMode applies the config `credentials:` selection to OAuth blob
+// storage for the rest of the process. A non-empty MP_CRED_STORE remains an
+// explicit override on top of it. Config load points call this together with
+// the apikey-pool backend selection (accounts.SetProcessCredentialsMode wraps
+// both); re-calling on serve reload re-arms resolution so a `credentials:`
+// change takes effect without a restart.
+func SetProcessMode(mode Mode) {
+	modeMu.Lock()
+	defer modeMu.Unlock()
+	configMode = mode
+	resolvedOK = false
 }
 
-func computeMode() Mode {
-	switch strings.TrimSpace(strings.ToLower(os.Getenv(envCredStore))) {
+// ResolvedMode returns the effective storage mode, resolving once per process
+// (re-armed by SetProcessMode). Resolution order: MP_CRED_STORE env > config
+// mode > test-binary guard / default file.
+func ResolvedMode() Mode {
+	mode, _ := EffectiveMode()
+	return mode
+}
+
+// EffectiveMode returns the effective storage mode and where it came from.
+func EffectiveMode() (Mode, ModeSource) {
+	modeMu.Lock()
+	defer modeMu.Unlock()
+	if !resolvedOK {
+		resolved, resolvedSource = computeModeLocked()
+		resolvedOK = true
+	}
+	return resolved, resolvedSource
+}
+
+func computeModeLocked() (Mode, ModeSource) {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv(envCredStore)))
+	return resolveMode(env, configMode, testing.Testing(), keychainAvailable)
+}
+
+// resolveMode maps (env override, config mode, test-binary guard, keychain
+// probe) onto the effective mode and its source. Pure: tests drive the full
+// priority matrix without touching process state or the real keychain.
+func resolveMode(env string, cfgMode Mode, testBinary bool, probe func() bool) (Mode, ModeSource) {
+	switch env {
 	case string(ModeFile):
-		return ModeFile
+		return ModeFile, SourceEnv
 	case string(ModeKeychain):
 		// Explicit opt-in: no silent downgrade. An unreachable backend makes
 		// every operation fail closed (ErrUnavailable) until fixed.
-		return ModeKeychain
-	case "", string(ModeAuto):
+		return ModeKeychain, SourceEnv
+	case string(ModeAuto):
+		if !testBinary && probe() {
+			return ModeKeychain, SourceEnv
+		}
+		return ModeFile, SourceEnv
+	case "":
+		// No env override: config selects. Test binaries must never let config
+		// alone reach the real OS keychain — keychain-semantics tests inject
+		// fake ops AND set the env explicitly.
+		if !testBinary && cfgMode == ModeKeychain {
+			return ModeKeychain, SourceConfig
+		}
+		return ModeFile, SourceDefault
 	default:
 		// Unknown value: stay on the historical file layout rather than guess.
-		return ModeFile
+		return ModeFile, SourceEnv
 	}
-	if testing.Testing() {
-		// Test binaries must never probe or mutate the real OS keychain.
-		// Keychain-semantics tests inject fake ops AND set the env explicitly.
-		return ModeFile
+}
+
+// ConfigMismatchNote reports a one-line warning when MP_CRED_STORE (explicit
+// env override, OAuth blobs only) disagrees with the config `credentials:`
+// mode that drives the apikey-pool backend. rawConfig is the raw config value
+// ("" = unset → file). Returns "" when both sides converge: without an env
+// override, config/default drive both stores identically, so a mismatch is
+// only possible when the env is set. The note carries modes and sources only —
+// never credential material.
+func ConfigMismatchNote(rawConfig string) string {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv(envCredStore)))
+	if env == "" {
+		return ""
 	}
-	if keychainAvailable() {
-		return ModeKeychain
+	envMode, _ := resolveMode(env, ModeFile, testing.Testing(), keychainAvailable)
+	cfgMode := ModeFile
+	cfgSource := SourceDefault
+	if strings.EqualFold(strings.TrimSpace(rawConfig), string(ModeKeychain)) {
+		cfgMode = ModeKeychain
+		cfgSource = SourceConfig
 	}
-	return ModeFile
+	if envMode == cfgMode {
+		return ""
+	}
+	return fmt.Sprintf("credentials mode mismatch: apikey pools use %s (%s), OAuth stores use %s (%s) — MP_CRED_STORE overrides only OAuth stores; align `credentials:` or unset the env to converge",
+		cfgMode, cfgSource, envMode, SourceEnv)
 }
 
 const envCredStore = "MP_CRED_STORE"
@@ -141,6 +234,15 @@ func (r Ref) Load() ([]byte, error) {
 		return nil, ferr
 	}
 	if serr := keychainOps.Set(serviceName, r.Name, data); serr != nil {
+		if errors.Is(serr, ErrEntryTooLarge) {
+			// The blob physically cannot fit this backend — deterministic,
+			// and nothing was destroyed. Keep serving the plaintext copy
+			// (every later Load retries and lands here again) instead of
+			// making credentials the process can still read unreadable.
+			// Migrate these blobs by staying on file mode (e.g. codex OAuth
+			// archives exceed the darwin/windows ceilings).
+			return data, nil
+		}
 		// Fail closed: keep serving the file next time, destroy nothing.
 		return nil, serr
 	}
@@ -158,7 +260,7 @@ func (r Ref) Save(blob []byte) error {
 		if err := os.MkdirAll(filepath.Dir(r.Path), 0o700); err != nil {
 			return err
 		}
-		return atomicWriteFile(r.Path, blob, 0o600)
+		return AtomicWriteFile(r.Path, blob, 0o600)
 	}
 	if err := keychainOps.Set(serviceName, r.Name, blob); err != nil {
 		return err
@@ -171,10 +273,21 @@ func (r Ref) Save(blob []byte) error {
 
 // Delete removes the blob everywhere it may exist. Every step treats
 // "absent" as success — logout must be idempotent even across mode switches
-// (e.g. logged in under file mode, logging out under keychain mode).
+// (e.g. logged in under file mode, logging out under keychain mode). The
+// reverse switch also cleans up: the keychain entry is deleted when the
+// current mode is keychain, or when the .migrated.bak archive marks that the
+// lazy migration once moved this blob into the keychain — switching back to
+// file mode must not leave a stale secret behind on logout. Pure-file
+// histories never touch the backend (keeps every test binary hermetic).
 func (r Ref) Delete() error {
 	var firstErr error
-	if ResolvedMode() == ModeKeychain {
+	keychainInvolved := ResolvedMode() == ModeKeychain
+	if !keychainInvolved {
+		if _, err := os.Stat(r.Path + migratedSuffix); err == nil {
+			keychainInvolved = true
+		}
+	}
+	if keychainInvolved {
 		if err := keychainOps.Delete(serviceName, r.Name); err != nil && !errors.Is(err, ErrNotFound) && firstErr == nil {
 			firstErr = err
 		}
@@ -199,14 +312,16 @@ func backupMigrated(path string) {
 	_ = os.Rename(path, bak)
 }
 
-// atomicWriteFile writes via a unique temp file in the target directory plus
+// AtomicWriteFile writes via a unique temp file in the target directory plus
 // fsync and rename. Mirrors provider.persist.atomicWriteFile (which cannot be
 // imported here — provider depends on credstore, not the reverse). OAuth/SSO
 // stores are rewritten with ROTATED tokens mid-flight: a crash during a direct
 // write leaves a truncated file whose old refresh token is already invalidated
 // upstream and whose new token was never persisted — the account locks until a
-// full re-login (docs/engineering/pitfalls.md #18).
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+// full re-login (docs/engineering/pitfalls.md #18). Exported for the accounts
+// pool metadata file, which needs the same crash-safety without routing
+// through Ref (its backend is selected by config, not ResolvedMode).
+func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err

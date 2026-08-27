@@ -16,8 +16,8 @@ var positiveCases = []struct {
 	{"pem_private_key", "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==\n-----END OPENSSH PRIVATE KEY-----"},
 	{"pem_private_key", "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIF...\n-----END ENCRYPTED PRIVATE KEY-----"},
 	{"pem_private_key", "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\nxu4E...\n-----END PGP PRIVATE KEY BLOCK-----"},
-	{"aws_access_key_id", `aws_access_key_id = AKIA` + strings.Repeat("A1", 8)},
-	{"aws_access_key_id", `ASIA` + strings.Repeat("Z9", 8) + ` # temporary session key`},
+	{"aws_access_key_id", `aws_access_key_id = AKIA` + newFixtureRNG(0xa51a).chars(16, alphaUpper32)},
+	{"aws_access_key_id", `ASIA` + newFixtureRNG(0xb51a).chars(16, alphaUpper32) + ` # temporary session key`},
 	{"openai_api_key", `"api_key": "sk-` + strings.Repeat("aB3", 16) + `"`},
 	{"openai_api_key", `sk-proj-` + strings.Repeat("xY-_9z", 10)},
 	{"anthropic_api_key", `sk-ant-api03-` + strings.Repeat("qW7", 30)},
@@ -38,9 +38,13 @@ var negativeCases = []string{
 	`// loadPrivateKey reads the private key from disk`,
 	`return fmt.Errorf("invalid private key: %w", err)`,
 	// Short / truncated lookalikes.
-	`sk-` + strings.Repeat("ab", 6),         // too short
-	`sk-ant-` + strings.Repeat("x", 10),     // anthropic prefix, too short
-	`AKIA` + strings.Repeat("A", 10),        // AWS prefix, too short
+	`sk-` + strings.Repeat("ab", 6),     // too short
+	`sk-ant-` + strings.Repeat("x", 10), // anthropic prefix, too short
+	`AKIA` + strings.Repeat("A", 10),    // AWS prefix, too short
+	// Regex-shaped but below the entropy threshold (aws_access_key_id: 3.0) —
+	// the base64-attachment false-positive shape.
+	`AKIA` + strings.Repeat("A", 16),
+	`AKIA` + strings.Repeat("AB", 8),
 	`ghp_` + strings.Repeat("a1", 10),       // GitHub prefix, too short
 	`github_pat_` + strings.Repeat("b2", 5), // fine-grained PAT, too short
 	`AIza` + strings.Repeat("c3", 8),        // Google prefix, too short
@@ -104,7 +108,7 @@ func TestScanMultipleTypes(t *testing.T) {
 }
 
 func TestRedact(t *testing.T) {
-	secret := "AKIA" + strings.Repeat("A1", 8)
+	secret := "AKIA" + newFixtureRNG(0xedac).chars(16, alphaUpper32)
 	body := `{"model":"m","messages":[{"role":"user","content":"my key is ` + secret + `, and PEM:\n-----BEGIN PRIVATE KEY-----\nABC"}]}`
 	out := string(Redact([]byte(body)))
 	if strings.Contains(out, secret) || strings.Contains(out, "BEGIN PRIVATE KEY") {

@@ -55,6 +55,9 @@ func TestGuardNewFieldDefaults(t *testing.T) {
 	if !cfg.Guard.AuditEnabled() {
 		t.Error("AuditEnabled() = false, want default true")
 	}
+	if !cfg.Guard.SessionScanEnabled() {
+		t.Error("SessionScanEnabled() = false, want default true")
+	}
 	if got := cfg.Guard.PathsAction(); got != "log" {
 		t.Errorf("PathsAction() = %q, want default %q", got, "log")
 	}
@@ -70,7 +73,7 @@ func TestGuardDefaultsSurvivePartialBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Guard.KnownSecretsEnabled() || !cfg.Guard.DecodeEnabled() || !cfg.Guard.AuditEnabled() {
+	if !cfg.Guard.KnownSecretsEnabled() || !cfg.Guard.DecodeEnabled() || !cfg.Guard.AuditEnabled() || !cfg.Guard.SessionScanEnabled() {
 		t.Errorf("partial guard block lost defaults: %+v", cfg.Guard)
 	}
 	if got := cfg.Guard.PathsAction(); got != "log" {
@@ -80,11 +83,11 @@ func TestGuardDefaultsSurvivePartialBlock(t *testing.T) {
 
 func TestGuardExplicitFalseHonored(t *testing.T) {
 	cfg, err := LoadConfigFromBytes("test", []byte(guardTestBaseYAML+
-		"guard: {known_secrets: false, decode: false, audit: false}\n"))
+		"guard: {known_secrets: false, decode: false, audit: false, session_scan: false}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Guard.KnownSecretsEnabled() || cfg.Guard.DecodeEnabled() || cfg.Guard.AuditEnabled() {
+	if cfg.Guard.KnownSecretsEnabled() || cfg.Guard.DecodeEnabled() || cfg.Guard.AuditEnabled() || cfg.Guard.SessionScanEnabled() {
 		t.Errorf("explicit false not honored: %+v", cfg.Guard)
 	}
 }
@@ -150,6 +153,44 @@ func TestGuardExtraPatternsInvalid(t *testing.T) {
 				t.Errorf("err = %v, want a guard.extra_patterns error mentioning %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// Duplicate extra_patterns names must fail at load: the scanner constructor
+// rejects them, so without this check startup would silently drop ALL custom
+// rules (degrade path) while reload of the same file fails outright.
+func TestGuardExtraPatternsDuplicateName(t *testing.T) {
+	yaml := guardTestBaseYAML + `guard:
+  extra_patterns:
+    - {name: myvendor_key, regex: 'mv-[0-9]{32}'}
+    - {name: other_token, regex: 'ot-[0-9a-f]{16}'}
+    - {name: myvendor_key, regex: 'mv2-[0-9]{32}'}
+`
+	_, err := LoadConfigFromBytes("test", []byte(yaml))
+	if err == nil {
+		t.Fatal("duplicate extra_patterns name accepted, want a load error")
+	}
+	if !strings.Contains(err.Error(), "guard.extra_patterns[2]") || !strings.Contains(err.Error(), `"myvendor_key"`) || !strings.Contains(err.Error(), "duplicates guard.extra_patterns[0]") {
+		t.Errorf("err = %v, want the duplicate name and both indexes", err)
+	}
+}
+
+// An infix literal flanked by non-literal regex parts on BOTH sides is legal:
+// the padded candidates must cover fill+literal+fill (e.g. "mv-" inside
+// `[0-9]mv-[0-9]`), and token characters "." / ":" must work as fill.
+func TestGuardExtraPatternsInfixLiteral(t *testing.T) {
+	yaml := guardTestBaseYAML + `guard:
+  extra_patterns:
+    - {name: mv_pair, regex: '[0-9]mv-[0-9]', literal: 'mv-'}
+    - {name: dotted_key, regex: 'dk\.[a-z]{8}', literal: 'dk.'}
+    - {name: scheme_token, regex: 'st:[a-z]{8}', literal: 'st:'}
+`
+	cfg, err := LoadConfigFromBytes("test", []byte(yaml))
+	if err != nil {
+		t.Fatalf("infix/dotted/colon literals must validate: %v", err)
+	}
+	if len(cfg.Guard.ExtraPatterns) != 3 {
+		t.Fatalf("ExtraPatterns len = %d, want 3", len(cfg.Guard.ExtraPatterns))
 	}
 }
 

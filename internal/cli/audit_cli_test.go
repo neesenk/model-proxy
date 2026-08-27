@@ -3,6 +3,8 @@ package cli
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,10 +31,23 @@ func TestParseAuditFlags(t *testing.T) {
 		{"defaults", nil, AuditOpts{Limit: 50}, false},
 		{"space form", []string{"--from", "1h", "--to", "now", "--kind", "drift", "--limit", "10", "--json"},
 			AuditOpts{From: "1h", To: "now", Kind: "drift", Limit: 10, JSON: true}, false},
+		{"stats flag", []string{"--stats"}, AuditOpts{Limit: 50, Stats: true}, false},
+		{"stats combined", []string{"--stats", "--json", "--kind", "secret", "--from", "7d"},
+			AuditOpts{From: "7d", Kind: "secret", Limit: 50, JSON: true, Stats: true}, false},
 		{"equals form", []string{"--from=2026-08-01T00:00:00Z", "--kind=secret", "--limit=0"},
 			AuditOpts{From: "2026-08-01T00:00:00Z", Kind: "secret", Limit: 0}, false},
 		{"bad limit", []string{"--limit", "abc"}, AuditOpts{Limit: 50}, true},
 		{"bad limit equals", []string{"--limit="}, AuditOpts{Limit: 50}, true},
+		{"unknown flag", []string{"--bogus"}, AuditOpts{Limit: 50}, true},
+		{"unknown positional", []string{"drift"}, AuditOpts{Limit: 50}, true},
+		{"missing from value", []string{"--from"}, AuditOpts{Limit: 50}, true},
+		{"missing kind value", []string{"--json", "--kind"}, AuditOpts{Limit: 50, JSON: true}, true},
+		{"missing limit value", []string{"--limit"}, AuditOpts{Limit: 50}, true},
+		// --config is resolved by configPath from the full args; the parser
+		// only skips it (both forms) instead of flagging it unknown.
+		{"config space form skipped", []string{"--config", "/tmp/x.yaml", "--kind", "drift"},
+			AuditOpts{Kind: "drift", Limit: 50}, false},
+		{"config equals form skipped", []string{"--config=/tmp/x.yaml"}, AuditOpts{Limit: 50}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,8 +79,12 @@ func TestParseAuditTime(t *testing.T) {
 		{"now", now.UnixMilli(), false},
 		{"1h", now.Add(-time.Hour).UnixMilli(), false},
 		{"30m", now.Add(-30 * time.Minute).UnixMilli(), false},
+		{"7d", now.AddDate(0, 0, -7).UnixMilli(), false},
+		{"1d", now.AddDate(0, 0, -1).UnixMilli(), false},
 		{"1750000000", 1750000000 * 1000, false},
 		{"2026-08-25T10:00:00Z", time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC).UnixMilli(), false},
+		{"-1h", 0, true}, // negative duration is a future timestamp — always a typo
+		{"-7d", 0, true},
 		{"garbage", 0, true},
 	}
 	for _, tc := range cases {
@@ -190,6 +209,12 @@ func TestRenderAudit(t *testing.T) {
 		!strings.Contains(err.Error(), "invalid --from") {
 		t.Errorf("invalid --from: got %v", err)
 	}
+	// --from after --to is an empty window — report it instead of rendering
+	// an empty table that looks like "no records".
+	if _, err := RenderAudit(dir, AuditOpts{From: "30m", To: "1h"}, now); err == nil ||
+		!strings.Contains(err.Error(), "--from is after --to") {
+		t.Errorf("--from > --to: got %v", err)
+	}
 
 	// Empty (existing) dir and missing dir both render a friendly note.
 	out, err = RenderAudit(t.TempDir(), AuditOpts{Limit: 50}, now)
@@ -219,11 +244,176 @@ func TestRenderAudit(t *testing.T) {
 	}
 }
 
+// TestRenderAuditStats covers the --stats aggregate view: exact counts across
+// every dimension over the whole filtered set, kind/time filter combination,
+// --limit being ignored, empty results, and exact --json fields.
+func TestRenderAuditStats(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	write := func(ts time.Time, kind, agent string, names []string, action string) {
+		writeAuditRecord(t, dir, &observeseclog.Record{
+			Ts: ts.UnixMilli(), Kind: kind, Agent: agent, Names: names, Action: action,
+		})
+	}
+	write(now.Add(-10*time.Minute), "secret", "codex", []string{"aws_key", "known_secret"}, "block")
+	write(now.Add(-20*time.Minute), "secret", "claude-code", []string{"aws_key"}, "log")
+	write(now.Add(-30*time.Minute), "path", "codex", []string{"ssh"}, "log")
+	write(now.Add(-2*time.Hour), "drift", "doctor", nil, "")
+
+	// parseSection extracts one "  <name> <count>" count table into a map.
+	parseSection := func(out, title string) map[string]int {
+		t.Helper()
+		lines := strings.Split(out, "\n")
+		for i, line := range lines {
+			if line != title {
+				continue
+			}
+			counts := map[string]int{}
+			for _, row := range lines[i+1:] {
+				if row == "" {
+					return counts
+				}
+				fields := strings.Fields(row)
+				if len(fields) != 2 {
+					t.Fatalf("malformed stats row %q in section %q:\n%s", row, title, out)
+				}
+				n, err := strconv.Atoi(fields[1])
+				if err != nil {
+					t.Fatalf("non-integer count in row %q: %v", row, err)
+				}
+				counts[fields[0]] = n
+			}
+			return counts
+		}
+		t.Fatalf("section %q missing:\n%s", title, out)
+		return nil
+	}
+
+	// Full set: header + exact counts in every section.
+	out, err := RenderAudit(dir, AuditOpts{Stats: true}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "security audit stats  range: - .. -  total: 4 records") {
+		t.Errorf("stats header wrong:\n%s", out)
+	}
+	for title, want := range map[string]map[string]int{
+		"by kind":             {"secret": 2, "path": 1, "drift": 1},
+		"top names (top 10)":  {"aws_key": 2, "known_secret": 1, "ssh": 1},
+		"top agents (top 10)": {"codex": 2, "claude-code": 1, "doctor": 1},
+		"by action":           {"log": 2, "block": 1},
+	} {
+		if got := parseSection(out, title); !reflect.DeepEqual(got, want) {
+			t.Errorf("section %q = %v, want %v:\n%s", title, got, want, out)
+		}
+	}
+	// Ordering: count desc, then name asc for ties.
+	if strings.Index(out, "aws_key") > strings.Index(out, "known_secret") {
+		t.Errorf("top names not count-ordered:\n%s", out)
+	}
+	if strings.Index(out, "claude-code") > strings.Index(out, "doctor") {
+		t.Errorf("tied agents not name-ordered:\n%s", out)
+	}
+
+	// --stats ignores --limit (the table pager): the whole set is counted.
+	out, err = RenderAudit(dir, AuditOpts{Stats: true, Limit: 1}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "total: 4 records") {
+		t.Errorf("--stats must ignore --limit 1:\n%s", out)
+	}
+
+	// --kind narrows the aggregated set.
+	out, err = RenderAudit(dir, AuditOpts{Stats: true, Kind: "secret"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "total: 2 records") {
+		t.Errorf("--stats --kind secret total wrong:\n%s", out)
+	}
+	if got, want := parseSection(out, "by kind"), map[string]int{"secret": 2}; !reflect.DeepEqual(got, want) {
+		t.Errorf("--kind secret by kind = %v, want %v:\n%s", got, want, out)
+	}
+	if strings.Contains(out, "doctor") || strings.Contains(out, "ssh") {
+		t.Errorf("--kind secret leaked other kinds:\n%s", out)
+	}
+
+	// --from combines with --stats; the header echoes the query window.
+	out, err = RenderAudit(dir, AuditOpts{Stats: true, From: "1h"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "total: 3 records") {
+		t.Errorf("--stats --from 1h should drop the 2h-old record:\n%s", out)
+	}
+	window := time.UnixMilli(now.Add(-time.Hour).UnixMilli()).Format("2006-01-02 15:04:05")
+	if !strings.Contains(out, "range: "+window+" .. -") {
+		t.Errorf("stats header missing the --from window %q:\n%s", window, out)
+	}
+
+	// Empty result: header with total 0 plus the no-records note.
+	out, err = RenderAudit(t.TempDir(), AuditOpts{Stats: true}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "total: 0 records") || !strings.Contains(out, "(no security audit records in ") {
+		t.Errorf("empty --stats output wrong:\n%s", out)
+	}
+
+	// --json: parseable aggregate object with exact fields.
+	out, err = RenderAudit(dir, AuditOpts{Stats: true, JSON: true, Kind: "secret", From: "1h"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got AuditStats
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("--stats --json not parseable: %v\n%s", err, out)
+	}
+	want := AuditStats{
+		From:      now.Add(-time.Hour).UnixMilli(),
+		Total:     2,
+		ByKind:    map[string]int{"secret": 2},
+		ByAction:  map[string]int{"block": 1, "log": 1},
+		TopNames:  []AuditStatCount{{Name: "aws_key", Count: 2}, {Name: "known_secret", Count: 1}},
+		TopAgents: []AuditStatCount{{Name: "claude-code", Count: 1}, {Name: "codex", Count: 1}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("--stats --json = %+v, want %+v", got, want)
+	}
+	if !strings.Contains(out, `"by_kind":{"secret":2}`) || !strings.Contains(out, `"total":2`) {
+		t.Errorf("--stats --json field names wrong:\n%s", out)
+	}
+}
+
 // TestFormatAuditTableEmpty locks the no-records note.
 func TestFormatAuditTableEmpty(t *testing.T) {
 	out := FormatAuditTable(nil, "/tmp/x")
 	if !strings.Contains(out, "(no security audit records in /tmp/x)") {
 		t.Errorf("empty table note wrong: %q", out)
+	}
+}
+
+// TestFormatAuditTableSanitizesDetail: control characters in a record's
+// detail (from a future producer, or a tampered log file) must never break
+// the table layout — they render as spaces on a single line.
+func TestFormatAuditTableSanitizesDetail(t *testing.T) {
+	records := []*observeseclog.Record{{
+		Ts:     time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC).UnixMilli(),
+		Kind:   observeseclog.KindDrift,
+		Agent:  "doctor",
+		Detail: "client=pi\nexpected=h1\tactual=h2\x1b[31m",
+	}}
+	out := FormatAuditTable(records, "/tmp/x")
+	if strings.Contains(out, "client=pi\n") || strings.ContainsAny(out, "\t\x1b") {
+		t.Errorf("detail control characters leaked into the table:\n%q", out)
+	}
+	if !strings.Contains(out, "client=pi expected=h1 actual=h2 [31m") {
+		t.Errorf("sanitized detail missing from the table:\n%q", out)
+	}
+	// Header + exactly one record line.
+	if lines := strings.Count(out, "\n"); lines != 2 {
+		t.Errorf("table lines = %d, want 2 (header + 1 record):\n%q", lines, out)
 	}
 }
 
@@ -259,6 +449,16 @@ func TestAuditCLISubprocess(t *testing.T) {
 	}
 	if records[0].Kind != "drift" || records[0].Agent != "doctor" {
 		t.Errorf("audit --json record wrong: %+v", records[0])
+	}
+
+	stdout, stderr, code = runCLIWithHome(t, home, "audit", cfgPath, "--stats")
+	if code != 0 {
+		t.Fatalf("audit --stats exit = %d, stderr:\n%s", code, stderr)
+	}
+	for _, want := range []string{"total: 1 record", "by kind", "drift", "doctor"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("audit --stats stdout missing %q:\n%s", want, stdout)
+		}
 	}
 
 	stdout, stderr, code = runCLIWithHome(t, home, "audit", cfgPath, "--kind", "bogus")

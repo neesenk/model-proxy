@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -85,7 +86,7 @@ func ruleFixtures() []ruleFixture {
 		{"digitalocean_pat", kv("do", "dop_v1_"+c(64, alphaHex)), "dop_v1_" + c(20, alphaHex)},
 		{"doppler_api_token", kv("doppler", "dp.pt."+c(43, alphaLower36)), "dp.pt." + c(10, alphaLower36)},
 		{"dynatrace_api_token", kv("dynatrace", "dt0c01."+c(24, alphaLower36)+"."+c(64, alphaLower36)), "dt0c01." + c(10, alphaLower36)},
-		{"flyio_access_token", kv("fly", "fo1_"+c(43, alphaWord)), "fo1_" + c(10, alphaWord)},
+		{"flyio_access_token", kv("fly", "fo1_"+c(43, alphaAlnum)), "fo1_" + c(10, alphaWord)},
 		{"gitlab_pat", kv("gitlab", "glpat-"+c(20, alphaWord)), "glpat-" + c(10, alphaWord)},
 		{"gitlab_ptt", kv("gitlab", "glptt-"+c(40, alphaHex)), "glptt-" + c(10, alphaHex)},
 		{"gitlab_runner_authentication_token", kv("gitlab", "glrt-"+c(20, alphaWord)), "glrt-" + c(10, alphaWord)},
@@ -209,5 +210,160 @@ func TestRulesJSONSchema(t *testing.T) {
 				t.Errorf("rule %s: literal %q too short to be a useful prefilter", e.Name, lit)
 			}
 		}
+	}
+}
+
+// TestRuleLiteralsAreReachable is the reverse half of the prefilter
+// invariant: not only must every rule match contain a literal (enforced by
+// the positive fixtures through Scan), every literal must be contained in at
+// least one POSSIBLE match of its rule's regex. A literal the regex can never
+// produce (e.g. left over from a case-insensitive upstream regex after the
+// regex was made case-sensitive, or containing a byte the regex treats as a
+// wildcard) is dead weight and signals the forward invariant is broken for
+// the shapes it was meant to cover.
+//
+// Witnesses are derived from the rule's positive fixture: if the literal is
+// absent from every fixture match, substitute it for the fixture match's
+// literal and re-run the regex; candidates pad the post-literal remainder to
+// satisfy alternatives with different length quantifiers (e.g. A3T vs ABIA,
+// fm1a_ vs fo1_).
+func TestRuleLiteralsAreReachable(t *testing.T) {
+	fixtures := map[string]ruleFixture{}
+	for _, fx := range ruleFixtures() {
+		fixtures[fx.name] = fx
+	}
+	containsLiteral := func(body string, locs [][]int, lit string) bool {
+		for _, loc := range locs {
+			if strings.Contains(body[loc[0]:loc[1]], lit) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, r := range embeddedRules {
+		fx, ok := fixtures[r.name]
+		if !ok {
+			continue // missing fixture already reported by TestEmbeddedRuleFixtures
+		}
+		body := fx.positive
+		locs := r.re.FindAllStringIndex(body, -1)
+		// Anchor match: the first fixture match containing a literal.
+		var anchor []int
+		var anchorLit string
+		for _, loc := range locs {
+			for _, lit := range r.literals {
+				if strings.Contains(body[loc[0]:loc[1]], string(lit)) {
+					anchor, anchorLit = loc, string(lit)
+					break
+				}
+			}
+			if anchor != nil {
+				break
+			}
+		}
+		if anchor == nil {
+			t.Errorf("rule %s: no fixture-positive match contains any literal", r.name)
+			continue
+		}
+		whole := body[anchor[0]:anchor[1]]
+		cut := strings.Index(whole, anchorLit)
+		pre, post := whole[:cut], whole[cut+len(anchorLit):]
+		// postCore drops the trailing-context byte ([\x60'"\s;] and friends)
+		// many upstream regexes capture, so it can be repeated to satisfy
+		// longer length quantifiers.
+		postCore := strings.TrimRight(post, "`'\" \t\n\r;\\")
+		for _, litB := range r.literals {
+			lit := string(litB)
+			if containsLiteral(body, locs, lit) {
+				continue
+			}
+			candidates := []string{
+				body[:anchor[0]] + pre + lit + post + body[anchor[1]:],
+				body[:anchor[0]] + pre + lit + strings.Repeat(postCore, 4) + body[anchor[1]:],
+			}
+			for j := 1; j <= len(postCore); j++ {
+				candidates = append(candidates,
+					body[:anchor[0]]+pre+lit+post+postCore[:j]+body[anchor[1]:])
+			}
+			reachable := false
+			for _, cand := range candidates {
+				if containsLiteral(cand, r.re.FindAllStringIndex(cand, -1), lit) {
+					reachable = true
+					break
+				}
+			}
+			if !reachable {
+				t.Errorf("rule %s: literal %q is not a substring of any reachable regex match", r.name, lit)
+			}
+		}
+	}
+}
+
+// TestCaseVariantFixtures pins the case-sensitive alternation shape of the
+// rules whose upstream regex was (?i) while the prefilter literals are
+// case-sensitive: the enumerated case forms hit, everything else (mixed
+// case, wildcard-byte substitutions) is rejected by the regex itself.
+func TestCaseVariantFixtures(t *testing.T) {
+	rng := newFixtureRNG(0xca5e)
+	c := func(n int, alphabet string) string { return rng.chars(n, alphabet) }
+	kv := func(key, value string) string { return key + ` = "` + value + `"` }
+	upper36 := "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+	positives := []struct {
+		name string
+		body string
+	}{
+		{"grafana_cloud_api_token", kv("grafana", "GLC_"+c(40, alphaB64))},
+		{"grafana_service_account_token", kv("grafana", "GLSA_"+c(32, alphaAlnum)+"_"+c(8, alphaHex))},
+		{"npm_access_token", kv("npm", "NPM_"+c(36, alphaLower36))},
+		{"slack_app_token", kv("slack", "XAPP-1-"+c(12, upper36)+"-123456789-"+c(16, alphaLower36))},
+		{"slack_config_access_token", kv("slack", "XOXE.XOXB-1-"+c(164, upper36))},
+		{"slack_config_access_token", kv("slack", "XOXE.XOXP-1-"+c(164, upper36))},
+		{"slack_config_access_token", kv("slack", "xoxe.xoxp-1-"+c(164, upper36))},
+	}
+	for _, tc := range positives {
+		if got := Scan([]byte(tc.body)); len(got) != 1 || got[0] != tc.name {
+			t.Errorf("%s case-variant positive: Scan = %v, want exactly [%s]", tc.name, got, tc.name)
+		}
+	}
+
+	negatives := map[string]string{
+		"mixed-case glc_":        kv("grafana", "gLc_"+c(40, alphaB64)),
+		"mixed-case glsa_":       kv("grafana", "Glsa_"+c(32, alphaAlnum)+"_"+c(8, alphaHex)),
+		"mixed-case npm_":        kv("npm", "nPm_"+c(36, alphaLower36)),
+		"mixed-case xapp-":       kv("slack", "xApp-1-"+c(12, upper36)+"-123456789-"+c(16, alphaLower36)),
+		"uppercase eyJrIjoi":     kv("grafana", "EYJRIJOI"+c(80, alphaAlnum)+"="),
+		"wildcard dot":           kv("slack", "xoxeXxoxb-1-"+c(164, upper36)),
+		"jwt header not eyJ":     kv("token", "eyK"+c(20, alphaAlnum)+".eyJ"+c(20, alphaWord+"/")+"."+c(12, alphaWord+"/")),
+		"jwt header too short J": kv("token", "eyJ"+c(5, alphaAlnum)+".eyJ"+c(20, alphaWord+"/")+"."+c(12, alphaWord+"/")),
+	}
+	for name, body := range negatives {
+		if got := Scan([]byte(body)); len(got) != 0 {
+			t.Errorf("%s: Scan = %v, want no hits", name, got)
+		}
+	}
+}
+
+// TestAwsAccessKeyIDEntropyFilter: aws_access_key_id carries the gitleaks
+// 3.0 entropy threshold for its shape, so a regex-shaped but repetitive
+// AKIA/ASIA window inside base64 attachment content (line-wrapped, so the
+// \b anchors of the regex do see boundaries) is discarded, while a
+// high-entropy window in the same surroundings is still claimed.
+func TestAwsAccessKeyIDEntropyFilter(t *testing.T) {
+	rng := newFixtureRNG(0xba64)
+	blob := base64.StdEncoding.EncodeToString([]byte(rng.chars(256, alphaAlnum)))
+	// Random base64 attachment content alone is clean.
+	if got := Scan([]byte(blob)); len(got) != 0 {
+		t.Fatalf("random base64 blob: Scan = %v, want no hits", got)
+	}
+	// Repetitive (low-entropy) AKIA-shaped window on its own wrapped line.
+	low := blob[:40] + "\nAKIA" + strings.Repeat("AB", 8) + "\n" + blob[40:]
+	if got := Scan([]byte(low)); len(got) != 0 {
+		t.Errorf("low-entropy AKIA window in base64 content: Scan = %v, want no hits", got)
+	}
+	// High-entropy window in the same surroundings still reports.
+	high := blob[:40] + "\nAKIA" + rng.chars(16, alphaUpper32) + "\n" + blob[40:]
+	if got := Scan([]byte(high)); len(got) != 1 || got[0] != "aws_access_key_id" {
+		t.Errorf("high-entropy AKIA window in base64 content: Scan = %v, want [aws_access_key_id]", got)
 	}
 }

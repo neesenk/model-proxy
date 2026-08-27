@@ -356,6 +356,68 @@ func TestQuerySkipsCorruptLines(t *testing.T) {
 	}
 }
 
+// TestQueryIgnoresTornTail: the daemon appends to the active file, so the
+// last line can be half-written when a query races it. That torn tail must
+// not count as an unreadable line — but a corrupt line in the middle still
+// does.
+func TestQueryIgnoresTornTail(t *testing.T) {
+	dir := t.TempDir()
+	// Good line + torn tail (no trailing newline): nothing skipped.
+	content := `{"ts":1,"kind":"secret"}` + "\n" + `{"ts":2,"kind":`
+	if err := os.WriteFile(filepath.Join(dir, "security-20260101-000000.log"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := queryKinds(t, dir, Filter{})
+	if result.Skipped != 0 {
+		t.Errorf("skipped = %d, want 0 for a torn tail (daemon mid-write)", result.Skipped)
+	}
+	if len(result.Records) != 1 || result.Records[0].Ts != 1 {
+		t.Errorf("records = %+v, want the one complete line", result.Records)
+	}
+
+	// Corrupt line in the middle + torn tail: only the middle line counts.
+	content = `{"ts":1,"kind":"secret"}` + "\n" +
+		`{"ts":9,"kind":` + "\n" +
+		`{"ts":2,"kind":`
+	if err := os.WriteFile(filepath.Join(dir, "security-20260102-000000.log"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = queryKinds(t, dir, Filter{Kind: KindSecret})
+	if result.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1 (middle corrupt line; torn tail ignored)", result.Skipped)
+	}
+	if len(result.Records) != 2 {
+		t.Errorf("records = %d, want the two complete secret lines across both files", len(result.Records))
+	}
+}
+
+// TestQueryCountsUnopenableFile: a log file that cannot be opened (e.g.
+// damaged permissions on a rotated file) must surface in Skipped, not vanish.
+func TestQueryCountsUnopenableFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open chmod-000 files; permission failure is not observable")
+	}
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "security-20260101-000000.log")
+	if err := os.WriteFile(blocked, []byte(`{"ts":1,"kind":"secret"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "security-20260102-000000.log"),
+		[]byte(`{"ts":2,"kind":"drift"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := queryKinds(t, dir, Filter{})
+	if result.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1 for the unopenable file", result.Skipped)
+	}
+	if len(result.Records) != 1 || result.Records[0].Ts != 2 {
+		t.Errorf("records = %+v, want only the readable file's record", result.Records)
+	}
+}
+
 // TestRecordSchemaHasNoSecretFields pins the audit schema: pattern-type and
 // path-category names only, never a field that could carry secret material.
 func TestRecordSchemaHasNoSecretFields(t *testing.T) {

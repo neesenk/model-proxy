@@ -196,7 +196,8 @@ quality 状态是 **copy-on-write**：record 路径（持 `m.mu`）发布新的�
 衰减投影（map 分配 + 每 provider 的 EWMA 计算）移出调度临界区——锁内不再有 quality
 相关的分配；一条 record 恰好在加载与加锁之间落地的情形，只是本次决策看不到它，
 与原锁内投影已有的单决策级滞后同类。Dashboard 投影复用同一个纯函数
-（`projectQuality`）。
+（`projectQuality`），同样在取锁前加载并投影——Dashboard 临界区里也没有 quality
+相关的分配。
 
 排序键实际是 `score = surplus − qualityPenalty`：
 

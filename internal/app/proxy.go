@@ -24,33 +24,36 @@ import (
 
 // Proxy holds the compiled provider instances + the config.
 type Proxy struct {
-	lifecycle        *runtimestate.Lifecycle
-	mu               sync.RWMutex  // guards cfg/providers across reload (held by handler for the request)
-	configGeneration atomic.Uint64 // incremented on every successful reload
-	runtimeState     runtimestate.Manager
-	cfg              *Config
-	providers        map[string]provider.Provider // provider name → Provider (shared)
-	client           *http.Client
-	quota            *runtimestate.QuotaTracker     // background quota poller; nil only in degenerate tests
-	metrics          *obscounters.MetricsStore      // request counters (atomic); nil only in degenerate tests
-	tokens           *obscounters.TokenCounter      // SSE-scanned token usage; nil only in degenerate tests
-	agents           *obscounters.AgentCounter      // per-agent (UA) request/token counters; nil only in degenerate tests
-	stats            *observestats.Store            // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
-	flusher          *observestats.Flusher          // per-minute diff loop; nil in tests (runProxy starts it)
-	reqLog           *requestlog.Logger             // per-request access log (full bodies); nil = disabled (default) or init failure
-	reqLogStarted    bool                           // lifecycle owns loop/shutdown only when started by startRuntimeServices
-	cache            *responsecache.Store           // exact-match response cache (prompt-hash + TTL); nil = disabled
-	guardScanner     *guard.Scanner                 // reload-owned immutable outbound secret/path scanner; never serialized or logged
-	secLog           *seclog.Logger                 // security audit log (guard hit records); nil = disabled; startup-only like reqLog
-	secLogStarted    bool                           // lifecycle owns Run/Shutdown only when started by startRuntimeServices
-	responsesState   *protocol.ResponsesStateStore  // previous_response_id replay for Responses clients bridged to stateless backends
-	events           *observeevents.Hub             // live request monitor fan-out hub (SSE /api/events); always non-nil
-	fusionReg        *fusion.Registry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
-	catalog          *catalog.Catalog               // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
-	shadow           atomic.Pointer[shadow.Runtime] // reload-swappable detached Shadow runtime; captured with each request generation
-	pricingMu        sync.Mutex                     // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
-	budget           *budgetWatcher                 // monthly cost alert loop; nil unless budgets: configures a threshold
-	closeOnce        sync.Once
+	lifecycle         *runtimestate.Lifecycle
+	mu                sync.RWMutex  // guards cfg/providers across reload (held by handler for the request)
+	configGeneration  atomic.Uint64 // incremented on every successful reload
+	runtimeState      runtimestate.Manager
+	cfg               *Config
+	providers         map[string]provider.Provider // provider name → Provider (shared)
+	client            *http.Client
+	quota             *runtimestate.QuotaTracker     // background quota poller; nil only in degenerate tests
+	metrics           *obscounters.MetricsStore      // request counters (atomic); nil only in degenerate tests
+	tokens            *obscounters.TokenCounter      // SSE-scanned token usage; nil only in degenerate tests
+	agents            *obscounters.AgentCounter      // per-agent (UA) request/token counters; nil only in degenerate tests
+	stats             *observestats.Store            // SQLite persistence for per-minute buckets; nil in tests (runtime services open it)
+	flusher           *observestats.Flusher          // per-minute diff loop; nil in tests (runProxy starts it)
+	reqLog            *requestlog.Logger             // per-request access log (full bodies); nil = disabled (default) or init failure
+	reqLogStarted     bool                           // lifecycle owns loop/shutdown only when started by startRuntimeServices
+	cache             *responsecache.Store           // exact-match response cache (prompt-hash + TTL); nil = disabled
+	guardScanner      *guard.Scanner                 // reload-owned immutable outbound secret/path scanner; never serialized or logged
+	sessionScan       *sessionScanStore              // split-exfiltration session windows; process-lifetime (survives reload like metrics), never serialized or logged
+	guardPoolSecrets  []string                       // reload-owned: current generation's Build.PoolSecrets (base for OAuth re-syncs)
+	guardOAuthSecrets []string                       // reload-owned: OAuth + provider memory-reported known-secret values in guardScanner; refreshed in place on the poll beat
+	secLog            *seclog.Logger                 // security audit log (guard hit records); reload-owned, swapped by reconcileSecLog; nil = audit off for this generation
+	secLogRunning     bool                           // current generation's secLog Run goroutine is live (lifecycle-admitted); guards Close's drain
+	responsesState    *protocol.ResponsesStateStore  // previous_response_id replay for Responses clients bridged to stateless backends
+	events            *observeevents.Hub             // live request monitor fan-out hub (SSE /api/events); always non-nil
+	fusionReg         *fusion.Registry               // fusion orchestration observability (recent runs + per-workflow aggregates + daily budget); survives reload like events
+	catalog           *catalog.Catalog               // models.dev metadata (context window + modalities) for request-aware routing; nil = unavailable, degrade gracefully
+	shadow            atomic.Pointer[shadow.Runtime] // reload-swappable detached Shadow runtime; captured with each request generation
+	pricingMu         sync.Mutex                     // guards pricing during refresh (thundering-herd guard on pricing.EnsureFresh)
+	budget            *budgetWatcher                 // monthly cost alert loop; nil unless budgets: configures a threshold
+	closeOnce         sync.Once
 	// adminAuth/apiKeys are the S2 optional-auth sources (webauth), swapped on
 	// reload with the config generation. Atomic pointers so the request path
 	// reads them without the repository lock.

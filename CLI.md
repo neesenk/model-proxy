@@ -177,6 +177,11 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
   ```
   warning: model <MODEL> at <PROVIDER>: no models.dev metadata - wrote defaults (ctx=200000 out=16384 text-only)
   ```
+- **stderr 漂移警示**（改写成功后立即对本次接管的 client 复检 proxy 指针，复用 `doctor --live` 的漂移检测；仅仍有漂移时每个 client 一行）：
+  ```
+    ⚠ <client> drift detected right after takeover: <FILE> points to <CURRENT>, want <EXPECTED>
+  ```
+  `guard.audit` 开启时按 doctor 同款语义追加一条 kind=drift 安全审计记录（agent=takeover，同日同 client 去重，见 §18）；审计追加失败只 stderr 提示。漂移不影响 exit code。`restore` 不做该校验（恢复原状是预期）。
 
 失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 备份失败 / 改写失败）。`client` 不在集合内由 `listClients` 决定（`all` 展开全部；未知名通常导致空集，静默返回 0）。`takeover:` 块整个可省略--五个 client 路径 + provider_id 有代码默认值，只有覆盖某项才需写。kimi 写 `~/.kimi/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai_legacy"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models.<name>]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
 
@@ -196,13 +201,20 @@ restore <client>   # client ∈ {claude, opencode, codex, pi, all}
 
 ```
 login <provider> [--label <name>] [--replace]
+                 [--from-env VAR [--from-env-ak VAR --from-env-sk VAR] | --from-codex]
 ```
 
 逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
 
-### 凭据存储后端（`internal/credstore`）
+### 凭据存储后端（config `credentials:` 统一开关 + env override）
 
-所有凭据 I/O（apikey 池、codex/aqp OAuth store、单账号遗留文件）经 `credstore.Ref` 读写，后端由 `MP_CRED_STORE` 决定：`auto`（默认，keychain 可达则用 keychain）、`file`（历史行为：0600 明文文件 + temp+fsync+rename 原子写）、`keychain`（强制；后端不可达时操作 fail-closed 报错）。keychain 模式下首次读到遗留明文文件会懒迁移进 keychain 并把原文件改名为 `<path>.migrated.bak`（保留一代回滚）。测试二进制默认解析为 file 模式，绝不触碰真实 keychain。
+两类凭据共用一个开关：config 顶层 `credentials: file|keychain`（默认 file），同时驱动 apikey 池与 codex/aqp OAuth store。env `MP_CRED_STORE`（`file|keychain|auto`）保留为**仅 OAuth 侧的显式 override**：优先级 env 非空 > config > 默认 file；`auto` = 按 keychain 可达性探测（收敛前的旧默认，现为 opt-in）。env 与 config 不一致时 `config check` 和启动/reload 日志各打一行，列出两侧生效值与来源（env/config/default）。
+
+codex/aqp OAuth store 经 `credstore.Ref` 读写：`file` = 历史行为（0600 明文文件 + temp+fsync+rename 原子写）；`keychain` = 整 blob 一条 keychain 记录，后端不可达时 fail-closed 报错。keychain 模式下首次读到遗留明文文件会懒迁移进 keychain 并把原文件改名为 `<path>.migrated.bak`（保留一代回滚）。OAuth blob 不做 keychain→file 自动回迁（与历史 env 切换一致）——切回 file 需重新 login。
+
+apikey 池（`<name>_apikeys.json` 与遗留单账号文件）：`keychain` 模式下 `accounts.Store` 把 api_key/access_key/secret_key 逐条写入 OS keychain（经 credstore 的 entry API，service `model-proxy`，键 `<providerName>/<accountId>/<field>`），池文件只留 `{id, label, added_at}` 元数据；明文池与遗留文件在首次读取时懒迁移（池文件原地重写为纯元数据，遗留文件改名 `.migrated.bak`）。保存时先写 keychain 再写元数据；删除账号时先删 keychain 条目成功才落元数据，避免"元数据没了秘密还留钥匙串"的孤儿。keychain 不可达一律 fail-closed 报错，不静默回落明文。**反向回迁**：file 模式读到纯元数据池时按条目从 keychain 读回秘密并原子重写明文池（0600）；条目缺失的账号保留元数据并经 `Snapshot.ReloginNeeded`/启动日志报出需重新 login（部分回迁不整体失败）；回迁成功后 keychain 条目默认保留（防误删，`logout` 是正常删除路径）。模式经 `accounts.SetProcessCredentialsMode` 在 config 加载点（`LoadCmdConfig`/`CmdLogin`/`config check`/serve 构造与 reload）同时应用到池后端与 credstore OAuth 模式，未加载 config 的调用点保持 file 默认。
+
+测试二进制默认解析为 file 模式，绝不触碰真实 keychain；keychain 语义测试用 `keyring.MockInit()` 内存 mock。
 
 ### 通用
 
@@ -274,6 +286,16 @@ Volcengine Secret Access Key:
 - stderr（配了 `usage_url` 或填了 AK/SK）：`Validating credentials...`。校验在 `addVolcengineAccount` 内顺序执行：先 GET `/api/plan/v3/models` with `Authorization: Bearer <Ark key>`（**401/403 或网络错误** → `login failed: validation failed: ...`，exit 1，**不落盘**）；通过后，若 AK/SK 都非空，再签名 GetAFPUsage（失败 → 同上 exit 1，不落盘）。
 - AK/SK 可缺省（仅 chat 账号），但**必须成对**：只填 AK 不填 SK（或反之）→ `login failed: AccessKey and SecretKey must both be set, or both be empty for a chat-only account`（exit 1，不落盘）。
 - 成功同 apikey：`✓ Saved account <MASKED_ID> (<LABEL>)`（绿）。
+
+### 凭据导入（`internal/cli/login/import.go`，免粘贴）
+
+两条非交互导入路径，成功后同样走 `MaybeReloadDaemon` 热重载。**安全约定：导入的 secret 值从不回显、不进日志/错误信息；错误只点名文件/字段/变量名；成功输出只有掩码账号 id。**
+
+- `login codex --from-codex`（`RunCodexImport`）：读取官方 codex CLI 登录态 `~/.codex/auth.json`（格式 `{"OPENAI_API_KEY", "tokens": {id_token, access_token, refresh_token, account_id}, "last_refresh"}`），三个 token 必须非空，经 `provider.WriteCodexAuthFile` 写入本代理的 `<provName>_oauth_auth.json`（`auth_mode=chatgpt`，`account_id` 缺省时从 id_token JWT 解析，`last_refresh` 沿用源文件）。仅对 `provider_id: codex` 的条目有效（其他 provider → `--from-codex is only valid for codex providers ...`，exit 1）；与 `--from-env*` 互斥。
+  - stdout：`✓ Imported codex CLI credentials → <AUTHFILE>` + `  account_id: <MASKED>` + 一行提示（导入的 access_token 可能已过期，代理在 refresh_token 有效时按需 refresh）。
+  - 文件缺失 → `codex CLI credentials not found at <PATH> (run \`codex login\` first, ...)`；非法 JSON → `<PATH> is not valid JSON (...)`（不引用文件内容）；缺 token → `<PATH> is missing tokens.<FIELD> (...)`；apikey 模式（有 `OPENAI_API_KEY` 无 tokens）→ `<PATH> is an apikey-mode codex CLI login ...`（改用交互 device flow）。均 exit 1、不落盘。
+- `login <provider> --from-env VAR`（`runFromEnvLogin`）：apikey 类 provider 从环境变量读 key，之后与交互登录完全同路（校验、去重、`--label`/`--replace`、重复 id 的 stdin 确认）。变量不存在或为空 → `environment variable <VAR> is not set or empty`（exit 1）。codex/aqp 不支持（报错并提示 `--from-codex`/SSO）。
+- volcengine 追加 `--from-env-ak VAR` / `--from-env-sk VAR`（可选、成对，语义同交互）：三值全从环境读，**不触发 AK/SK 的 stdin 提示**（`runVolcengineLoginFromEnv`）；单独用 ak/sk flag 而无 `--from-env`、或对非 volcengine 用 ak/sk flag 均报错 exit 1。
 
 ---
 
@@ -490,7 +512,12 @@ claude_mapping: <N> aliases      # 仅当 >0
       ...
     claude_mapping: <N>
     scheduling: threshold=<T> cooldown=<D> rate_backoff=<D> timeout=<D> dwell=<D>
+    guard: secrets=<ACTION> known_secrets=<BOOL> decode=<BOOL> paths=<ACTION> audit=<BOOL>
+      audit_path: <PATH>
+      patterns: built-in tables (embedded) + <N> custom (<NAME>, ...)
+      extra_paths: <N>
   ```
+  guard 段为生效值（load 默认值已应用；`RenderGuardSummary`）：内置规则表嵌入在二进制里，只报「embedded」不报条数——这样 CLI 不需要依赖 internal/guard；自定义扩展（`guard.extra_patterns` 计数 + name 列表、`guard.extra_paths` 计数）来自 config 结构。
 
 ### 通用
 
@@ -767,7 +794,7 @@ Takeover
 - route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从 config routes + 隐式路由 + 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
 - `request_log` 未开启时 Recent failures 节是一行 dim 提示（`request_log disabled — …`），不算错误；无任何失败记录时显示 `none recorded`。
 - takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi `providers[<pid>].baseUrl`。
-- 漂移审计：`guard.audit` 开启（默认）时，每个漂移 client 追加一条 `kind=drift`、`agent=doctor` 的安全审计记录（`seclog.AppendSync`），`detail` 只含 `client=<名> expected=<期望host> actual=<实际host>`——`net/url` 解析取 `Host`，永不含 URL 路径与查询串（非 URL 占位值归一为 `(no-url)`）。`guard.audit: false` 不写；append 失败只降级为 stderr `⚠ security audit append failed: <ERR>`，doctor 输出与 exit code 不变。
+- 漂移审计：`guard.audit` 开启（默认）时，每个漂移 client 追加一条 `kind=drift`、`agent=doctor` 的安全审计记录（`seclog.AppendSync`），`detail` 只含 `client=<名> expected=<期望host> actual=<实际host>`——`net/url` 解析取 `Host`，永不含 URL 路径与查询串；无 scheme 的指针（`evil-host:8317/v1` 会被误解析为 scheme）回退取第一个 `/` 前的部分（过滤控制字符），非 URL 占位值（含空格/括号的 `(file missing)` 等）归一为 `(no-url)`。**同一 client 当天已有 drift 记录则不重复追加**（漂移通常持续到用户修复；去重查询失败不阻断追加）。`guard.audit: false` 不写；append 失败只降级为 stderr `⚠ security audit append failed: <ERR>`，doctor 输出与 exit code 不变。
 
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
@@ -882,15 +909,17 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 ## 18. `audit` — 安全审计日志（离线，不需 daemon）
 
 ```
-audit [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
+audit [--stats] [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
 ```
 
 逻辑（`internal/cli/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
 
-- `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。
+- `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"；另接受整数天数后缀 `7d`）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。负时长（如 `-1h`/`-7d`）报错；`--from` 晚于 `--to` -> `✗ --from is after --to (empty window)` + exit 1。
 - `--kind`：`secret` | `path` | `drift`；其他值 -> stderr `✗ invalid --kind "<V>": must be secret, path, or drift` + exit 1。
-- `--limit N`：只保留最新 N 条（默认 50；`0`/负数 = 全部）。非整数 -> stderr `✗ invalid --limit: …` + exit 1。
-- `--json`：stdout 为 records 数组原样 JSON（`seclog.Record`，最新在前；空结果为 `[]`），供 jq。
+- `--limit N`：只保留最新 N 条（默认 50；`0`/负数 = 全部；`--stats` 下忽略）。非整数 -> stderr `✗ invalid --limit: …` + exit 1。
+- `--stats`：聚合视图替代原始记录——对**过滤后的全集**统计（忽略 `--limit`，改用内部上限 10000 条，超出按最新优先截断）：总数 + 按 kind 命中数、命中名（`names` 展开）top 10、agent top 10、按 action 计数。可与 `--from`/`--to`/`--kind` 组合。
+- `--json`：stdout 为 records 数组原样 JSON（`seclog.Record`，最新在前；空结果为 `[]`），供 jq。与 `--stats` 组合时输出聚合对象：`{"from":ms,"to":ms,"total":N,"by_kind":{...},"by_action":{...},"top_names":[{"name","count"}],"top_agents":[...]}`（`from`/`to` 为查询窗口，`0`/不限则省略；列表按 count 降序、name 升序）。
+- 未识别 flag/位置参数 -> `✗ unknown flag "<A>"` + exit 1；`--from`/`--to`/`--kind`/`--limit` 缺值 -> `✗ <FLAG> requires a value` + exit 1（`--config` 及其值由 configPath 消费，不算未知）。
 
 ### stdout（表格，`FormatAuditTable`）
 
@@ -899,7 +928,24 @@ time           kind    agent         route             names                 act
 <MM-DD HH:MM:SS(14)> <kind(7)> <agent(12)> <exposed(16)> <逗号连接(20)> <action(7)> <detail>
 ```
 
-记录按时间倒序（最新在前）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数追加一行 `  (<N> unreadable line(s) skipped)`。
+记录按时间倒序（最新在前）。空结果 -> `(no security audit records in <DIR>)`；目录不存在 -> `(no security audit records yet — <DIR> does not exist)`（均 exit 0）。扫描中跳过的不可解析行数（含无法打开的日志文件，每个计 1）追加一行 `  (<N> unreadable line(s) skipped)`；文件末尾无换行符的半行是 daemon 写入中的撕裂尾行，直接忽略、不计入 skipped。detail 列渲染前过滤控制字符（`\n`/`\t`/ANSI 转义等 -> 空格），防生产者破坏表格。
+
+### stdout（`--stats` 聚合，`FormatAuditStats`）
+
+```
+security audit stats  range: <YYYY-MM-DD HH:MM:SS|-> .. <同上|->  total: <N> record(s)
+
+by kind
+  <kind>      <count(右对齐6)>
+top names (top 10)
+  <name>      <count>
+top agents (top 10)
+  <agent>     <count>
+by action
+  <action>    <count>
+```
+
+首行 range 是查询窗口（不限显示 `-`，非数据 min/max）。各段按 count 降序、name 升序；空段（如无 action）整段省略。`total` 为 0 时只输出首行 + `(no security audit records in <DIR>)`。
 
 ---
 
@@ -912,5 +958,6 @@ time           kind    agent         route             names                 act
 - `internal/cli/models/models_check_test.go`：`PrintKeptModels` / `PrintFilterSummary` 输出。
 - `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
 - `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
+- `internal/cli/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

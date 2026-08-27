@@ -148,8 +148,20 @@ captured runtime 做 eligibility/sample/acquire，再经 `internal/runtime.Lifec
 goroutine 内仅做 generation-bound resolver/plan、调用 `shadow.Runtime.Execute`
 并投影 request log。
 
-`internal/accounts` 是无仓库内依赖的 API-key 账号存储叶子包，拥有 credential
-tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进程锁。根
+`internal/accounts` 是无仓库内依赖的 API-key 账号存储叶子包（唯一例外：
+`internal/credstore`，keychain 后端经其实现），拥有 credential
+tuple、稳定账号 ID、plural/legacy 读取优先级、原子保存和跨进程锁。存储后端由
+config `credentials:` 选择：`file`（默认，秘密值内联在 0600 池 JSON）或
+`keychain`（api_key/access_key/secret_key 经 credstore 进 OS keychain，池文件只留
+id/label/added_at 元数据；明文池与 legacy 文件首读懒迁移，keychain 不可达时
+fail-closed 报错而非回落明文）。`credentials:` 是两类凭据的单一开关：
+config 加载点统一调 `accounts.SetProcessCredentialsMode`，同时设置池后端与
+credstore 的 OAuth blob 模式；env `MP_CRED_STORE` 仅作 OAuth 侧的显式 override
+（env 非空 > config > 默认 file），分歧由 `accounts.CredentialMismatchNote`
+在 `config check`/启动/reload 日志报出。keychain→file 切回有反向回迁：file 模式
+读到纯元数据池时按条目从 keychain 读回秘密并原子重写明文池，缺条目的账号保留
+元数据并经 `Snapshot.ReloginNeeded` 报出需重新 login（部分回迁不整体失败），
+回迁后 keychain 条目默认保留（`logout` 是正常删除路径）。根
 `internal/app/accounts_store.go` 只适配 HOME 并为登录、Web、Provider 构建保留
 窄兼容入口；`buildProviders` 以一次 `LoadSnapshot` 同时取得 pool 与来源，并在
 同一 build result 中派生 providers、pool identity 和 implicit-route eligibility，
@@ -179,7 +191,12 @@ sweep、owner-only 权限（文件 0600/目录 0700）、非阻塞队列与单 w
 查询，以及供 CLI 绕开 daemon 直接追加的 `AppendSync`。红线：`Record.Names` 只含
 模式类型名/路径类别名，秘密值永不进入 Record；drift 记录的 detail 只含客户端名与
 指针 host。应用层只注入纯值（命中名、动作、路由元数据），扫描、阈值与派发决策
-不进本包。
+不进本包。Logger 是 reload-owned：`internal/app/security_log_adapter.go` 的
+`reconcileSecLog` 在启动与每次 reload 按当前代调和（`guard.audit` off→on 当场建
+logger、on→off 置 nil、`audit_path` 变更换新目录），构建与 goroutine admission 在
+`p.mu` 外、换代后 drain 关停旧 logger；forward 经 `RuntimeSnapshot.SecLog` 写请求
+自己代的 logger，换代瞬间旧快照的迟到 enqueue 允许丢弃（见
+`docs/decisions/intentional-behaviors.md` 条目 19）。
 
 `internal/cache` 是无仓库内依赖的精确响应缓存叶子包，拥有请求 key、
 TTL/容量 store、客户端可见响应的 bounded recorder、header normalization 与
@@ -195,10 +212,20 @@ TTL/容量 store、客户端可见响应的 bounded recorder、header normalizat
 + 命中才精读的两阶段管线、known-secret 精确值变体集、规则前缀的 base64/hex 编码
 通道、敏感路径类别表、span 去重的 Scan/ScanPaths/Redact）。Scanner 以
 `runtimeSnapshot.Guard` 随 generation 原子交换；known-secret 凭据值只以内存形式
-存在，永不落盘/序列化/进事件。`internal/app/proxy_forward.go` 在请求体完整读取后、
+存在，永不落盘/序列化/进事件。codex/aqp 在 serve 期间原地轮转 OAuth token，因此
+Proxy 另有一个 lifecycle 循环按 `scheduling.quota_poll_interval` 节拍重收 OAuth
+auth 文件、并收集 provider 经 `provider.SecretReporter` 上报的内存凭据（aqp 的
+minted managed key 只存在于内存、codex 的缓存 access_token 可能比文件新——
+provider 凭据的首次接口级暴露，只读内存、只为扫描，见
+`docs/decisions/intentional-behaviors.md` 条目 15），以当前代的池秘密基重建
+scanner 并在 `p.mu` 下换代指针（文件 I/O 与构建
+在锁外；I/O 期间发生的 reload 由代检查判废，绝不跨代混用）。
+`internal/app/proxy_forward.go` 在请求体完整读取后、
 cache 查询与所有 forward 分支之前对共享 body 扫描一次，按 `guard.secrets`
 （log/redact/block/off）与 `guard.paths`（log/block/off，不支持 redact）放行、
-替换 `[REDACTED]` 或 400 拒绝；命中只以模式类型名/路径类别名进入 live event、
+替换 `[REDACTED]` 或 400 拒绝；secrets/paths 两类扫描都完成后才统一评估响应动作
+（secrets=block 不短路 paths 的计数/事件/审计，响应动作 secrets 优先），命中只以
+模式类型名/路径类别名进入 live event、
 `("guard", <名>)` 计数器与 seclog 审计记录，命中内容永不落日志或事件。
 
 `internal/transport/bodycapture` 是无仓库内依赖的通用响应流捕获叶子包：

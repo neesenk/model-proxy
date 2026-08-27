@@ -329,3 +329,66 @@ func TestAqpKeyProvider_NoSSOCookie(t *testing.T) {
 		t.Error("expected error when no SSO cookie")
 	}
 }
+
+// --- SecretReporter (in-memory credentials for the guard known-secret set) ---
+
+// The aqp minted key lives only in memory: ReportSecrets must return nothing
+// before the first mint, the cached key after minting, and only the NEW key
+// after a Refresh re-mint (the retired value must drop out).
+func TestAqpKeyProvider_ReportSecrets(t *testing.T) {
+	key := "minted-key-v1"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"retcode": 0,
+			"data":    map[string]any{"api_key": key, "project_id": "p1"},
+		})
+	}))
+	defer srv.Close()
+	store := filepath.Join(t.TempDir(), "store.json")
+	writeSSOCookie(t, store, "SSO_C=x")
+	p := NewAqpKeyProvider(srv.URL, store)
+
+	if got := p.ReportSecrets(); len(got) != 0 {
+		t.Errorf("pre-mint ReportSecrets = %v, want empty", got)
+	}
+
+	req, _ := http.NewRequest("POST", "http://x", nil)
+	if err := p.Inject(req); err != nil {
+		t.Fatal(err)
+	}
+	got := p.ReportSecrets()
+	if len(got) != 1 || got[0] != "minted-key-v1" {
+		t.Fatalf("post-mint ReportSecrets = %v, want [minted-key-v1]", got)
+	}
+
+	// Refresh clears the cache and re-mints: only the rotated value is reported.
+	key = "minted-key-v2"
+	if err := p.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	got = p.ReportSecrets()
+	if len(got) != 1 || got[0] != "minted-key-v2" {
+		t.Fatalf("post-Refresh ReportSecrets = %v, want [minted-key-v2]", got)
+	}
+}
+
+// codex: nothing before any token load, the cached access_token afterwards.
+func TestCodexOAuthProvider_ReportSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	exp := time.Now().Add(time.Hour)
+	writeCodexAuth(t, path, "rt", exp)
+	p := NewCodexOAuthProvider(path)
+
+	if got := p.ReportSecrets(); len(got) != 0 {
+		t.Errorf("pre-load ReportSecrets = %v, want empty", got)
+	}
+	req, _ := http.NewRequest("POST", "http://x", nil)
+	if err := p.Inject(req); err != nil {
+		t.Fatal(err)
+	}
+	jwt := "head." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp.Unix()))) + ".sig"
+	got := p.ReportSecrets()
+	if len(got) != 1 || got[0] != jwt {
+		t.Fatalf("post-load ReportSecrets = %v, want the cached access_token", got)
+	}
+}

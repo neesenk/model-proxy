@@ -101,7 +101,14 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 	// table, config custom patterns/paths, and the known-secret values of the
 	// credential pool. nil only in degenerate hand-built proxies — skip then.
 	if sc := runtime.Guard; sc != nil {
-		if action := cfg.Guard.SecretsAction(); action != "off" {
+		action := cfg.Guard.SecretsAction()
+		// preGuardBody is the body as received, before any redact rewrite
+		// below; the split-exfiltration window must store THIS form (storing
+		// the redacted form would destroy the very fragments that pass exists
+		// to reassemble). In-memory only, bounded — see session_scan.go.
+		preGuardBody := origBody
+		var secretNames []string
+		if action != "off" {
 			if names := sc.Scan(origBody); len(names) > 0 {
 				if p.metrics != nil {
 					for _, name := range names {
@@ -117,24 +124,36 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					Exposed:   exposed,
 					Detail:    "secrets=" + strings.Join(names, ",") + " action=" + action,
 				})
-				p.auditGuardHit(cfg, seclog.KindSecret, names, action, requestID, agent, proto, exposed)
-				switch action {
-				case "block":
-					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-					http.Error(w, fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(names, ", ")), http.StatusBadRequest)
-					return
-				case "redact":
+				auditGuardHit(runtime.SecLog, seclog.KindSecret, names, action, requestID, agent, proto, exposed)
+				secretNames = names
+				if action == "redact" {
 					origBody = sc.Redact(origBody)
 				}
 			}
 		}
 		// Sensitive-path signal (S2): an intent-level alert fired before any
 		// secret value appears. Paths are never redacted (rewriting a path
-		// would corrupt legitimate coding work).
-		if pa := cfg.Guard.PathsAction(); pa != "off" {
-			if cats := sc.ScanPaths(origBody); len(cats) > 0 {
+		// would corrupt legitimate coding work). Hits are context-split
+		// (guard.ScanPathsContext): a path inside a tool-call/tool-result
+		// position is STRONG — the structural signature of an agent reading a
+		// sensitive file through a tool (MCP Tool Poisoning shape) — and gets
+		// the configured guard.paths action: live event, ("guard", cat)
+		// counter, audit record, and it is the only kind block can 400. A path
+		// in ordinary prose is WEAK (coding agents legitimately discuss .env
+		// & friends all the time): it only increments ("guard", cat+"_text")
+		// and writes an audit record with action "log-weak" — no live event
+		// (would spam the monitor), never blocked (正文提及敏感路径不阻断).
+		// This scan runs even when the secrets pass already hit — including
+		// secrets=block — so one request carrying both signals gets both
+		// counters/events/audit records; only the response action is decided
+		// afterwards (below).
+		pa := cfg.Guard.PathsAction()
+		var pathCats []string
+		if pa != "off" {
+			strong, weak := sc.ScanPathsContext(origBody)
+			if len(strong) > 0 {
 				if p.metrics != nil {
-					for _, cat := range cats {
+					for _, cat := range strong {
 						p.metrics.Inc("guard", cat, counters.EvGuardHits)
 					}
 				}
@@ -145,15 +164,109 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					Agent:     agent,
 					Protocol:  proto,
 					Exposed:   exposed,
-					Detail:    "paths=" + strings.Join(cats, ",") + " action=" + pa,
+					Detail:    "paths=" + strings.Join(strong, ",") + " action=" + pa,
 				})
-				p.auditGuardHit(cfg, seclog.KindPath, cats, pa, requestID, agent, proto, exposed)
-				if pa == "block" {
-					p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
-					http.Error(w, fmt.Sprintf("blocked: request body references sensitive path %s (guard.paths=block)", strings.Join(cats, ", ")), http.StatusBadRequest)
-					return
+				auditGuardHit(runtime.SecLog, seclog.KindPath, strong, pa, requestID, agent, proto, exposed)
+				pathCats = strong
+			}
+			if len(weak) > 0 {
+				if p.metrics != nil {
+					for _, cat := range weak {
+						p.metrics.Inc("guard", cat+"_text", counters.EvGuardHits)
+					}
+				}
+				auditGuardHit(runtime.SecLog, seclog.KindPath, weak, "log-weak", requestID, agent, proto, exposed)
+			}
+		}
+		// Split-exfiltration signal (fragmented known secret): a credential
+		// smuggled out in pieces — one fragment per request — never hits the
+		// per-request scan above. When session_scan is on, this generation's
+		// scanner carries known secrets, and the request declares a session
+		// (x-claude-code-session-id), two channels run over the session's
+		// bounded state (known-secret channel only — rule-table/custom hits
+		// were already reported per request):
+		//  1. exact reassembly: the window tail + current PRE-REDACT body
+		//     scanned through ScanKnown; a joined hit that neither the tail
+		//     alone nor the current body alone (known via the already-computed
+		//     secretNames — known secrets are claimed first in the scanner, so
+		//     a current-body occurrence always lands there) produces counts as
+		//     fragmented. The tail-alone exclusion keeps a key fully seen in an
+		//     earlier request from re-firing "fragmented" on every later one.
+		//  2. fragment progress: realistic bodies all start with '{' (see
+		//     ExtractModel), so fragments can never sit byte-contiguously at
+		//     the junction — guard.ScanKnownFragment instead tracks each
+		//     secret's longest prefix seen in order across the session.
+		// secrets=off disables this pass together with the secrets channel.
+		var fragmented bool
+		sessionID := r.Header.Get("x-claude-code-session-id")
+		if action != "off" && cfg.Guard.SessionScanEnabled() && sc.HasKnownSecrets() &&
+			sessionID != "" && p.sessionScan != nil {
+			tail, progress := p.sessionScan.Snapshot(sessionID, sc)
+			knownInCurrent := false
+			for _, n := range secretNames {
+				if n == "known_secret" || n == "known_secret_encoded" {
+					knownInCurrent = true
+					break
 				}
 			}
+			var nextProgress []int
+			if len(tail) > 0 && !knownInCurrent {
+				joined := make([]byte, 0, len(tail)+len(preGuardBody))
+				joined = append(joined, tail...)
+				joined = append(joined, preGuardBody...)
+				if len(sc.ScanKnown(joined)) > 0 && len(sc.ScanKnown(tail)) == 0 {
+					fragmented = true
+				}
+			}
+			if !fragmented && !knownInCurrent {
+				fragmented, nextProgress = sc.ScanKnownFragment(preGuardBody, progress)
+			}
+			if fragmented {
+				fragAction := action
+				if fragAction == "redact" {
+					// The secret spans requests — no single body can be
+					// rewritten; degrade to alert-only (documented in
+					// docs/decisions/intentional-behaviors.md).
+					fragAction = "log"
+				}
+				if p.metrics != nil {
+					p.metrics.Inc("guard", "known_secret_fragmented", counters.EvGuardHits)
+				}
+				p.events.Publish(observeevents.Event{
+					Type:      "guard",
+					Ts:        time.Now().UnixMilli(),
+					RequestID: requestID,
+					Agent:     agent,
+					Protocol:  proto,
+					Exposed:   exposed,
+					Detail:    "secrets=known_secret_fragmented action=" + fragAction,
+				})
+				auditGuardHit(runtime.SecLog, seclog.KindSecret, []string{"known_secret_fragmented"}, fragAction, requestID, agent, proto, exposed)
+			}
+			// Merge the current body into the session window whether or not
+			// anything hit — later fragments depend on earlier ones being
+			// retained. The window stores the PRE-REDACT form and lives in
+			// memory only (bounded: 256 sessions × 32KiB tail; see
+			// session_scan.go for the red lines).
+			p.sessionScan.Add(sessionID, preGuardBody, sc, nextProgress)
+		}
+		// Unified action evaluation after BOTH scans: a secrets block outranks
+		// a paths block and its message names only the secret patterns — the
+		// path hits of the same request are already counted/audited above.
+		if len(secretNames) > 0 && action == "block" {
+			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("blocked: request body contains a secret matching %s (guard.secrets=block)", strings.Join(secretNames, ", ")), http.StatusBadRequest)
+			return
+		}
+		if fragmented && action == "block" {
+			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+			http.Error(w, "blocked: request completes a secret fragmented across requests matching known_secret_fragmented (guard.secrets=block)", http.StatusBadRequest)
+			return
+		}
+		if len(pathCats) > 0 && pa == "block" {
+			p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("blocked: request body references sensitive path %s (guard.paths=block)", strings.Join(pathCats, ", ")), http.StatusBadRequest)
+			return
 		}
 	}
 

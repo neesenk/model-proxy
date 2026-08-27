@@ -59,6 +59,22 @@ type Config struct {
 	// bodies are rejected with 413 before any routing work, bounding per-
 	// request memory (the body is fully buffered for routing/conversion).
 	MaxRequestBodyBytes int64 `yaml:"max_request_body_bytes"`
+	// Credentials selects where credential secret VALUES live: "file"
+	// (default — apikey pools keep secrets inline in the 0600 pool JSON, the
+	// historical layout; OAuth stores stay 0600 plaintext files) or "keychain"
+	// (apikey-pool secrets go to the OS keychain per entry via
+	// internal/credstore and the pool file keeps metadata only; codex/aqp
+	// OAuth blobs are stored as whole keychain entries). One config drives
+	// BOTH stores; env MP_CRED_STORE survives as an explicit override on the
+	// OAuth side only (empty env > config > default file), and a divergence
+	// is surfaced by `config check` / startup logs. Keychain mode is
+	// fail-closed: an unreachable backend errors instead of silently serving
+	// plaintext files. Switching keychain→file restores apikey-pool secrets
+	// from the keychain per entry (partial restore keeps metadata and asks
+	// for re-login of the missing accounts); OAuth blobs are NOT restored —
+	// switching them back to file requires a fresh login, same as the
+	// historical env-switch behavior.
+	Credentials string `yaml:"credentials"`
 	// Conversion tunes protocol-conversion behavior.
 	Conversion ConversionConfig `yaml:"conversion"`
 }
@@ -84,6 +100,17 @@ func (c Config) MaxRequestBodyBytesValue() int64 {
 	return 64 << 20
 }
 
+// CredentialsMode returns the apikey-pool storage backend: "file" when unset
+// (the default) or the configured value lowercased. validate restricts the
+// field to the closed set file|keychain.
+func (c Config) CredentialsMode() string {
+	mode := strings.ToLower(strings.TrimSpace(c.Credentials))
+	if mode == "" {
+		return "file"
+	}
+	return mode
+}
+
 // GuardConfig configures the outbound secret scan applied to the raw client
 // request body before forwarding. secrets selects the action on a hit:
 // "log" (default — allow + live event + counter), "redact" (replace the match
@@ -91,10 +118,17 @@ func (c Config) MaxRequestBodyBytesValue() int64 {
 // known_secrets (default true) additionally matches the exact credential
 // values the proxy itself manages (pool API keys + OAuth tokens, in memory
 // only — never written to disk or logs). decode (default true) also catches
-// base64/hex/url-encoded forms of the secret patterns. paths selects the
+// encoded forms: base64/hex variants of the embedded rule-table patterns,
+// and base64/hex/url-encoded variants of known secrets (the url form applies
+// to the known-secret channel only). paths selects the
 // action for high-confidence sensitive-path literals (~/.ssh, .env, ...):
 // "log" (default) | "block" | "off" — "redact" is intentionally unsupported
-// (rewriting a path would corrupt legitimate coding work). audit (default
+// (rewriting a path would corrupt legitimate coding work). session_scan
+// (default true) additionally detects a known credential fragmented across
+// multiple requests of one session (bounded in-memory tail windows, keyed by
+// x-claude-code-session-id; reported as known_secret_fragmented — redact
+// degrades to log there because a cross-request secret cannot be rewritten).
+// audit (default
 // true) persists security events to the audit log at audit_path (default
 // ~/.model-proxy/security.log, resolved by the caller via AuditPathValue).
 // extra_patterns / extra_paths extend the built-in tables (gitleaks
@@ -102,12 +136,17 @@ func (c Config) MaxRequestBodyBytesValue() int64 {
 // only — matched secret content is never logged.
 type GuardConfig struct {
 	Secrets string `yaml:"secrets"`
-	// KnownSecrets/Decode/Audit default to true; the defaults are applied at
-	// load time (rawConfig literal, same pattern as web.enabled).
+	// KnownSecrets/Decode/Audit/SessionScan default to true; the defaults are
+	// applied at load time (rawConfig literal, same pattern as web.enabled).
 	KnownSecrets bool   `yaml:"known_secrets"`
 	Decode       bool   `yaml:"decode"`
 	Paths        string `yaml:"paths"`
 	Audit        bool   `yaml:"audit"`
+	// SessionScan (default true) enables split-exfiltration detection: known
+	// credentials fragmented across multiple requests of one session
+	// (x-claude-code-session-id) are reassembled from a bounded in-memory
+	// window and reported as known_secret_fragmented.
+	SessionScan bool `yaml:"session_scan"`
 	// AuditPath is an optional absolute path for the security audit log;
 	// empty = AuditPathValue derives <home>/.model-proxy/security.log.
 	AuditPath     string         `yaml:"audit_path"`
@@ -135,17 +174,18 @@ var extraPatternNameRE = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
 // literalConsistentWithRegex is a weak sanity check that literal can occur
 // inside some match of re: a literal pre-filter is typically a fixed
 // prefix/infix of the match (e.g. "mv-" for `\bmv-[A-Za-z0-9]{32,}`), so it
-// tries the literal itself and the literal padded on either side with runs
-// of common token characters. It cannot prove the "guaranteed substring of
+// tries the literal itself and the literal padded on either side (and on both
+// sides, for infix literals like "mv-" inside `[0-9]mv-[0-9]`) with runs of
+// common token characters. It cannot prove the "guaranteed substring of
 // every match" invariant — it only rejects obvious typos where no padded
 // candidate matches at all.
 func literalConsistentWithRegex(re *regexp.Regexp, literal string) bool {
 	if re.MatchString(literal) {
 		return true
 	}
-	for _, ch := range []string{"a", "A", "0", "_", "-", "/", "+", "="} {
+	for _, ch := range []string{"a", "A", "0", "_", "-", "/", "+", "=", ".", ":"} {
 		fill := strings.Repeat(ch, 64)
-		if re.MatchString(literal+fill) || re.MatchString(fill+literal) {
+		if re.MatchString(literal+fill) || re.MatchString(fill+literal) || re.MatchString(fill+literal+fill) {
 			return true
 		}
 	}
@@ -164,8 +204,9 @@ func (g GuardConfig) SecretsAction() string {
 // credentials is active (default true, applied at load).
 func (g GuardConfig) KnownSecretsEnabled() bool { return g.KnownSecrets }
 
-// DecodeEnabled reports whether encoded-form (base64/hex/url) detection of
-// the secret patterns is active (default true, applied at load).
+// DecodeEnabled reports whether encoded-form detection is active (default
+// true, applied at load): base64/hex variants of the embedded rule-table
+// patterns, plus base64/hex/url variants of known secrets.
 func (g GuardConfig) DecodeEnabled() bool { return g.Decode }
 
 // PathsAction returns the effective sensitive-path action, defaulting to
@@ -180,6 +221,10 @@ func (g GuardConfig) PathsAction() string {
 // AuditEnabled reports whether security events are persisted to the audit
 // log (default true, applied at load).
 func (g GuardConfig) AuditEnabled() bool { return g.Audit }
+
+// SessionScanEnabled reports whether split-exfiltration (fragmented
+// known-secret) detection is active (default true, applied at load).
+func (g GuardConfig) SessionScanEnabled() bool { return g.SessionScan }
 
 // AuditPathValue returns the configured audit log path, or the default
 // <home>/.model-proxy/security.log when unset.
@@ -789,6 +834,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		// Must mirror Config.MaxRequestBodyBytes (same silent-drop trap as the
 		// shadow knobs above).
 		MaxRequestBodyBytes int64            `yaml:"max_request_body_bytes"`
+		Credentials         string           `yaml:"credentials"`
 		Conversion          ConversionConfig `yaml:"conversion"`
 	}
 	raw := rawConfig{
@@ -799,7 +845,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		// Guard bools default to true; yaml only overwrites fields present in
 		// the file, so an unset field keeps the default while an explicit
 		// false is honored (same pattern as Web.Enabled above).
-		Guard: GuardConfig{KnownSecrets: true, Decode: true, Audit: true},
+		Guard: GuardConfig{KnownSecrets: true, Decode: true, Audit: true, SessionScan: true},
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		// The most common breakage: a providers' `models:` block still in the
@@ -848,6 +894,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	}
 	cfg.Budgets = raw.Budgets
 	cfg.MaxRequestBodyBytes = raw.MaxRequestBodyBytes
+	cfg.Credentials = raw.Credentials
 	cfg.Conversion = raw.Conversion
 	cfg.LogFile = ExpandPath(cfg.LogFile)
 	t := &cfg.Takeover
@@ -950,6 +997,10 @@ func (c *Config) validate() error {
 		if err2 := requireAuthForNonLoopback(c); err2 != nil {
 			return err2 // non-loopback without the S2 auth layer: report the actionable gate
 		}
+	}
+	// credentials: closed backend set (default file).
+	if mode := c.CredentialsMode(); mode != "file" && mode != "keychain" {
+		return fmt.Errorf("credentials %q invalid — use file or keychain", c.Credentials)
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("no providers configured — add at least one under `providers:`")
@@ -1151,11 +1202,19 @@ func (c *Config) validate() error {
 	// guard.extra_patterns: a bad rule must fail at load, not silently never
 	// fire — name restricted to a log-safe token, regex must compile, and a
 	// literal pre-filter must be a guaranteed substring of every match.
+	// Duplicate names are rejected too: the scanner constructor refuses them,
+	// so without this check a "valid" config would lose ALL extra_patterns to
+	// the startup degrade path while reloads fail outright.
+	seenPatternNames := map[string]int{}
 	for i, p := range c.Guard.ExtraPatterns {
 		where := fmt.Sprintf("guard.extra_patterns[%d]", i)
 		if !extraPatternNameRE.MatchString(p.Name) {
 			return fmt.Errorf("%s: name %q invalid — must match ^[a-z0-9_]{1,32}$", where, p.Name)
 		}
+		if prev, ok := seenPatternNames[p.Name]; ok {
+			return fmt.Errorf("%s: name %q duplicates guard.extra_patterns[%d] — pattern names must be unique (the scanner rejects duplicates, which would drop every extra_patterns rule)", where, p.Name, prev)
+		}
+		seenPatternNames[p.Name] = i
 		if p.Regex == "" {
 			return fmt.Errorf("%s (%s): regex must not be empty", where, p.Name)
 		}

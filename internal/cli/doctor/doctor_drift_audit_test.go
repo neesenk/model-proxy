@@ -108,6 +108,37 @@ routes:
 	}
 }
 
+// TestRenderDoctorLiveDriftAuditDeduplicatesSameDay: drift usually persists
+// until the user fixes it, so repeated doctor --live runs must not append the
+// same client's record over and over — one record per client per day.
+func TestRenderDoctorLiveDriftAuditDeduplicatesSameDay(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	statusJSON := func(addr string) string { return fmt.Sprintf(driftAuditStatusJSON, addr) }
+	addr := doctorLiveTestServer(t, statusJSON, `{"enabled":false,"records":[]}`)
+	cfg := doctorLiveTestCfg(t, addr, `providers:
+  aqp: {provider_id: aqp, openai_base_url: https://x}
+routes:
+  glm-5.2:
+    - {provider: aqp, model: glm-5.2, priority: 1}
+`)
+	writeDriftScene(t, home, cfg, "http://"+addr)
+
+	for run := 1; run <= 2; run++ {
+		if _, err := clidoctor.RenderDoctorLive(cfg, filepath.Join(home, "config.yaml")); err != nil {
+			t.Fatalf("renderDoctorLive run %d: %v", run, err)
+		}
+	}
+	result, err := observeseclog.Query(filepath.Join(home, ".model-proxy"),
+		observeseclog.Filter{Kind: observeseclog.KindDrift})
+	if err != nil {
+		t.Fatalf("query audit log: %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("drift records after 2 runs = %d, want 1 (same-day dedup)", len(result.Records))
+	}
+}
+
 // TestRenderDoctorLiveDriftAuditDisabled: guard.audit=false suppresses the
 // audit append; doctor output is unchanged.
 func TestRenderDoctorLiveDriftAuditDisabled(t *testing.T) {

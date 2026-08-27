@@ -5,12 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"model-proxy/internal/credstore"
@@ -53,6 +53,12 @@ const (
 type Snapshot struct {
 	Pool   Pool
 	Source Source
+	// ReloginNeeded lists accounts whose metadata survived in the pool file
+	// but whose secrets could not be restored from the keychain during a
+	// keychain→file restore (mode switched to file, entries missing or
+	// backend unreachable). They are NOT in Pool — each needs a fresh `login`
+	// (entry metadata only: id/label/added_at, never secret material).
+	ReloginNeeded []Account
 }
 
 // Credentials returns the complete credential tuple bound to this account.
@@ -63,11 +69,104 @@ func (a Account) Credentials() Credentials {
 // Store resolves account files relative to one user home directory.
 type Store struct {
 	directory string
+	backend   Backend
+}
+
+// Backend selects where apikey secret VALUES live. The pool JSON schema is
+// identical either way; only the storage of api_key/access_key/secret_key
+// differs.
+type Backend uint8
+
+const (
+	// BackendFile keeps secrets inline in the pool JSON (historical layout:
+	// the whole pool is one 0600 plaintext file).
+	BackendFile Backend = iota
+	// BackendKeychain stores secret values in the OS keychain (via credstore,
+	// service "model-proxy"); the pool file carries metadata only
+	// ({version, accounts:[{id,label,added_at,...}]} with empty secret fields).
+	BackendKeychain
+)
+
+// processBackend is the backend NewStore resolves when the caller does not
+// pick one explicitly. CLI/serve entry points set it once from the loaded
+// config (`credentials:`); processes that never load credentials config keep
+// the file default. Atomic so a serve reload can swap it while request-path
+// readers construct stores.
+var processBackend atomic.Int32
+
+// SetProcessBackend selects the backend NewStore returns for the rest of the
+// process. Call once after loading config, before constructing stores.
+func SetProcessBackend(b Backend) { processBackend.Store(int32(b)) }
+
+// SetProcessCredentialsMode applies the config `credentials:` selection to
+// BOTH credential stores at once — the single converged semantics: the
+// apikey-pool backend (SetProcessBackend) and credstore's OAuth blob mode.
+// Every config load point (CLI commands, login, serve construct/reload) calls
+// this so the two switches can never drift apart from the config side. The
+// env MP_CRED_STORE remains an explicit override on the OAuth side only;
+// CredentialMismatchNote surfaces that divergence.
+func SetProcessCredentialsMode(mode string) {
+	SetProcessBackend(BackendForMode(mode))
+	oauthMode := credstore.ModeFile
+	if BackendForMode(mode) == BackendKeychain {
+		oauthMode = credstore.ModeKeychain
+	}
+	credstore.SetProcessMode(oauthMode)
+}
+
+// CredentialMismatchNote surfaces the one remaining divergence after switch
+// convergence: MP_CRED_STORE overriding only the OAuth side while pools follow
+// config/default. "" = consistent. Thin wrapper so callers (app startup log,
+// `config check`) need no credstore import edge.
+func CredentialMismatchNote(rawConfig string) string {
+	return credstore.ConfigMismatchNote(rawConfig)
+}
+
+// StoreMode describes one credential store's effective backend and where the
+// selection came from. Diagnostic only — carries no credential material.
+type StoreMode struct {
+	Mode   string // "file" | "keychain"
+	Source string // "config credentials:" | "env MP_CRED_STORE" | "default"
+}
+
+// CredentialModes reports both credential stores' effective selection for
+// `config check`. Pools follow config `credentials:` (default file); OAuth
+// stores follow credstore resolution (env MP_CRED_STORE > config > default).
+func CredentialModes(rawConfig string) (pools, oauth StoreMode) {
+	pools = StoreMode{Mode: "file", Source: "default"}
+	if BackendForMode(rawConfig) == BackendKeychain {
+		pools.Mode = "keychain"
+	}
+	if strings.TrimSpace(rawConfig) != "" {
+		pools.Source = "config credentials:"
+	}
+	mode, source := credstore.EffectiveMode()
+	oauth = StoreMode{Mode: string(mode), Source: string(source)}
+	return pools, oauth
+}
+
+// BackendForMode maps the config `credentials:` value onto a Backend. Unknown
+// values degrade to file (config validate rejects them before this is reached).
+func BackendForMode(mode string) Backend {
+	if strings.EqualFold(strings.TrimSpace(mode), "keychain") {
+		return BackendKeychain
+	}
+	return BackendFile
 }
 
 func NewStore(homeDir string) Store {
-	return Store{directory: filepath.Join(homeDir, ".model-proxy")}
+	return NewStoreWithBackend(homeDir, Backend(processBackend.Load()))
 }
+
+// NewStoreWithBackend builds a store on an explicit backend, bypassing the
+// process default. Tests use it to exercise keychain semantics against
+// keyring.MockInit without touching the real OS keychain.
+func NewStoreWithBackend(homeDir string, backend Backend) Store {
+	return Store{directory: filepath.Join(homeDir, ".model-proxy"), backend: backend}
+}
+
+// Backend reports where this store keeps secret values.
+func (s Store) Backend() Backend { return s.backend }
 
 func (s Store) PoolPath(name string) string {
 	return filepath.Join(s.directory, name+"_apikeys.json")
@@ -88,23 +187,34 @@ func (s Store) ensureDirectory() error {
 // singular <name>_apikey.json as a read-only 1-entry pool. A missing pool is a
 // successful SourceMissing snapshot. SourcePlural remains authoritative even
 // when its pool is empty or malformed, so callers cannot silently fall back.
+//
+// Backend dispatch: file mode reads the historical plaintext layout. Keychain
+// mode (loadSnapshotKeychain) hydrates secret values from the OS keychain and
+// lazily migrates any plaintext it finds (pool file and legacy file alike);
+// migration or read failures are fail-closed — the user explicitly chose the
+// keychain, so silently serving plaintext files would betray that choice.
 func (s Store) LoadSnapshot(name, providerID string) (Snapshot, error) {
-	// Plural pool reads go through credstore: in keychain mode the blob lives
-	// in the OS keychain and legacy plaintext files migrate lazily on first
-	// read. Legacy singular fallback stays a plain file read — it is read-only
-	// by contract and never migrated.
-	data, err := credstore.NewRef(s.PoolPath(name)).Load()
+	if s.backend == BackendKeychain {
+		return s.loadSnapshotKeychain(name, providerID)
+	}
+	data, err := os.ReadFile(s.PoolPath(name))
 	if err == nil {
 		var p Pool
 		if err := json.Unmarshal(data, &p); err != nil {
 			return Snapshot{Source: SourcePlural}, fmt.Errorf("parse %s: %w", s.PoolPath(name), err)
+		}
+		// A pure-metadata pool under the file backend means the config switched
+		// keychain→file after a keychain-mode save: restore secrets per entry
+		// (partial restore, see restoreFromKeychain).
+		if isMetadataOnly(p) {
+			return s.restoreFromKeychain(name, providerID, p)
 		}
 		if err := validatePool(providerID, p); err != nil {
 			return Snapshot{Source: SourcePlural}, fmt.Errorf("validate %s: %w", s.PoolPath(name), err)
 		}
 		return Snapshot{Pool: normalizePool(providerID, p), Source: SourcePlural}, nil
 	}
-	if !errors.Is(err, credstore.ErrNotFound) {
+	if !os.IsNotExist(err) {
 		return Snapshot{Source: SourcePlural}, err
 	}
 	// Fall back to legacy singular file.
@@ -196,11 +306,11 @@ func (s Store) Load(name, providerID string) (Pool, error) {
 	return snapshot.Pool, err
 }
 
-// Save writes the pool atomically through credstore: marshal → write via
-// temp file + fsync + rename onto the pool path (or into the OS keychain when
-// keychain mode is active). Rename makes the on-disk file appear whole or not
+// Save writes the pool atomically: marshal → write via temp file + fsync +
+// rename onto the pool path. Rename makes the on-disk file appear whole or not
 // at all, so a crash mid-write never leaves a truncated pool file (the read
-// side never observes a half-written JSON).
+// side never observes a half-written JSON). Keychain mode (saveKeychain)
+// writes secret values to the OS keychain first and persists only metadata.
 func (s Store) Save(name, providerID string, p Pool) error {
 	path := s.PoolPath(name)
 	if err := validatePool(providerID, p); err != nil {
@@ -213,11 +323,14 @@ func (s Store) Save(name, providerID string, p Pool) error {
 		p.Version = 1
 	}
 	sort.SliceStable(p.Accounts, func(i, j int) bool { return p.Accounts[i].ID < p.Accounts[j].ID })
+	if s.backend == BackendKeychain {
+		return s.saveKeychain(name, providerID, p)
+	}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal pool %s: %w", name, err)
 	}
-	return credstore.NewRef(path).Save(data)
+	return credstore.AtomicWriteFile(path, data, 0o600)
 }
 
 // WithLock runs fn while holding a cross-process lock for the named pool.

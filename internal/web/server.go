@@ -210,6 +210,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleRequestsList(w, r)
 	case p == "/api/sessions" && r.Method == http.MethodGet:
 		s.handleSessions(w, r)
+	case p == "/api/security" && r.Method == http.MethodGet:
+		s.handleSecurity(w, r)
 	case strings.HasPrefix(p, "/api/requests/") && r.Method == http.MethodGet:
 		s.handleRequestDetail(w, r)
 	case p == "/api/shadow-report" && r.Method == http.MethodGet:

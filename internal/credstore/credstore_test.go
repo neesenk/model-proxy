@@ -86,8 +86,12 @@ func useFakeKeychain(t *testing.T, fake *fakeKeychain) {
 }
 
 func resetResolution() {
-	resolveOnce = sync.Once{}
+	modeMu.Lock()
+	defer modeMu.Unlock()
+	resolvedOK = false
 	resolved = ""
+	resolvedSource = ""
+	configMode = ""
 }
 
 func osUnsetenvCredStore(t *testing.T) {
@@ -384,5 +388,194 @@ func TestRefSaveFileModeMkdirFailurePropagates(t *testing.T) {
 	// Parent "directory" is actually a regular file → MkdirAll fails.
 	if err := NewRef(filepath.Join(blocker, "pool.json")).Save([]byte(`{}`)); err == nil {
 		t.Fatal("save under an unwritable parent must fail")
+	}
+}
+
+// TestResolveModePriorityMatrix pins the full selection contract:
+// non-empty MP_CRED_STORE > config `credentials:` (SetProcessMode) > default
+// file, plus the test-binary hermeticity guard. resolveMode is pure, so the
+// matrix runs without process state or a real keychain.
+func TestResolveModePriorityMatrix(t *testing.T) {
+	reachable := func() bool { return true }
+	unreachable := func() bool { return false }
+	cases := []struct {
+		name       string
+		env        string
+		cfgMode    Mode
+		testBinary bool
+		probe      func() bool
+		wantMode   Mode
+		wantSource ModeSource
+	}{
+		{"env file beats config keychain", "file", ModeKeychain, false, reachable, ModeFile, SourceEnv},
+		{"env keychain beats config file", "keychain", ModeFile, false, unreachable, ModeKeychain, SourceEnv},
+		{"env auto probes reachable", "auto", ModeFile, false, reachable, ModeKeychain, SourceEnv},
+		{"env auto probes unreachable", "auto", ModeKeychain, false, unreachable, ModeFile, SourceEnv},
+		{"unknown env fails safe to file", "bogus", ModeKeychain, false, reachable, ModeFile, SourceEnv},
+		{"config keychain applies without env", "", ModeKeychain, false, unreachable, ModeKeychain, SourceConfig},
+		{"config file applies without env", "", ModeFile, false, reachable, ModeFile, SourceDefault},
+		{"no env no config defaults file", "", "", false, reachable, ModeFile, SourceDefault},
+		{"test binary guards config keychain", "", ModeKeychain, true, reachable, ModeFile, SourceDefault},
+		{"test binary guards env auto probe", "auto", "", true, reachable, ModeFile, SourceEnv},
+		{"test binary allows explicit env keychain", "keychain", "", true, reachable, ModeKeychain, SourceEnv},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mode, source := resolveMode(tc.env, tc.cfgMode, tc.testBinary, tc.probe)
+			if mode != tc.wantMode || source != tc.wantSource {
+				t.Fatalf("resolveMode(env=%q cfg=%q test=%t) = (%q, %q), want (%q, %q)",
+					tc.env, tc.cfgMode, tc.testBinary, mode, source, tc.wantMode, tc.wantSource)
+			}
+		})
+	}
+}
+
+// TestSetProcessModeRearmsResolution pins that config load points can swap the
+// process mode and that the cached resolution re-arms (serve reload path).
+func TestSetProcessModeRearmsResolution(t *testing.T) {
+	t.Setenv(envCredStore, "") // no env override
+	resetResolution()
+	t.Cleanup(resetResolution)
+
+	SetProcessMode(ModeFile)
+	if mode, source := EffectiveMode(); mode != ModeFile || source != SourceDefault {
+		t.Fatalf("EffectiveMode after SetProcessMode(file) = (%q, %q), want (file, default)", mode, source)
+	}
+	// Under the test-binary guard config-keychain still resolves to file, but
+	// re-arming must actually recompute (the pure matrix above covers the
+	// production outcome).
+	SetProcessMode(ModeKeychain)
+	if mode, _ := EffectiveMode(); mode != ModeFile {
+		t.Fatalf("EffectiveMode under test guard = %q, want file", mode)
+	}
+	// An env override set later still wins once resolution re-arms.
+	t.Setenv(envCredStore, string(ModeKeychain))
+	resetResolution()
+	if mode, source := EffectiveMode(); mode != ModeKeychain || source != SourceEnv {
+		t.Fatalf("EffectiveMode with env override = (%q, %q), want (keychain, env MP_CRED_STORE)", mode, source)
+	}
+}
+
+// TestConfigMismatchNote pins the one-line diagnostic for the only divergence
+// possible after convergence: the env overrides OAuth stores while pools keep
+// following config/default.
+func TestConfigMismatchNote(t *testing.T) {
+	cases := []struct {
+		name      string
+		env       string
+		rawConfig string
+		want      string // "" = no note; otherwise a required substring
+	}{
+		{"no env never mismatches", "", "keychain", ""},
+		{"env file vs config keychain", "file", "keychain", "apikey pools use keychain (config credentials:), OAuth stores use file (env MP_CRED_STORE)"},
+		{"env keychain vs default file", "keychain", "", "apikey pools use file (default), OAuth stores use keychain (env MP_CRED_STORE)"},
+		{"env keychain vs config keychain", "keychain", "keychain", ""},
+		{"env file vs config file", "file", "file", ""},
+		{"env file vs default file", "file", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envCredStore, tc.env)
+			note := ConfigMismatchNote(tc.rawConfig)
+			if tc.want == "" {
+				if note != "" {
+					t.Fatalf("ConfigMismatchNote(env=%q cfg=%q) = %q, want none", tc.env, tc.rawConfig, note)
+				}
+				return
+			}
+			if !strings.Contains(note, tc.want) {
+				t.Fatalf("ConfigMismatchNote(env=%q cfg=%q) = %q, want substring %q", tc.env, tc.rawConfig, note, tc.want)
+			}
+		})
+	}
+}
+
+// An oversized blob (ErrEntryTooLarge) physically cannot fit the backend.
+// The lazy migration must keep serving the plaintext copy instead of locking
+// the account out of credentials the process can still read — a
+// deterministic size limit, unlike a reachability failure, which keeps
+// failing closed (see TestRefLoadMigrationFailureKeepsPlaintextAuthoritative).
+func TestRefLoadOversizedBlobKeepsServingPlaintext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex_oauth_auth.json")
+	legacy := strings.Repeat("x", maxDarwinEntryBytes+1) // codex-sized OAuth archive
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeKeychain(true)
+	fake.setErr = ErrEntryTooLarge
+	useFakeKeychain(t, fake)
+
+	ref := NewRef(path)
+	got, err := ref.Load()
+	if err != nil {
+		t.Fatalf("oversized blob must keep serving the plaintext copy: %v", err)
+	}
+	if string(got) != legacy {
+		t.Fatalf("Load returned %d bytes, want the %d-byte plaintext", len(got), len(legacy))
+	}
+	if _, serr := os.Stat(path + migratedSuffix); !os.IsNotExist(serr) {
+		t.Fatal("no backup may be created when the store write was rejected")
+	}
+	// Retrying lands in the same place: the blob still does not fit.
+	if _, err = ref.Load(); err != nil || len(fake.entries) != 0 {
+		t.Fatalf("retry must stay on plaintext without keychain entries: (%v, %d entries)", err, len(fake.entries))
+	}
+}
+
+// mapKeyringErr keeps the size-limit error class distinct so callers (and
+// users) can tell "blob too large for this backend" apart from "backend
+// unreachable" — the former has a config-level remedy (file mode), the
+// latter needs the backend fixed.
+func TestMapKeyringErrPreservesSizeClass(t *testing.T) {
+	if err := mapKeyringErr(keyring.ErrSetDataTooBig); !errors.Is(err, ErrEntryTooLarge) {
+		t.Errorf("ErrSetDataTooBig must map to ErrEntryTooLarge, got %v", err)
+	}
+	if err := mapKeyringErr(keyring.ErrSetDataTooBig); errors.Is(err, ErrUnavailable) {
+		t.Error("size-limit errors must not be collapsed into ErrUnavailable")
+	}
+}
+
+// Logout after switching keychain→file must still remove the keychain
+// entry when the .migrated.bak archive marks that the blob once migrated
+// there — otherwise the stale secret lingers in the keychain forever
+// (decision: logout is the normal deletion path). Pure-file histories
+// (no archive) never touch the backend.
+func TestRefDeleteCleansKeychainAfterSwitchToFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aqp_oauth_auth.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeKeychain(true)
+	if err := fake.Set(serviceName, "aqp_oauth_auth.json", []byte(`{"sso_session_cookie":"c"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// File mode + fake backend (no env opt-in: the test binary stays file).
+	keychainOps = fake
+	resetResolution()
+	t.Cleanup(func() {
+		keychainOps = realKeychainProvider{}
+		resetResolution()
+	})
+	// No archive yet: file-mode Delete leaves the backend untouched.
+	if err := NewRef(path).Delete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.Get(serviceName, "aqp_oauth_auth.json"); err != nil {
+		t.Fatalf("pure-file delete touched the backend: %v", err)
+	}
+	// With the migration archive present, Delete removes the entry too.
+	if err := os.WriteFile(path+migratedSuffix, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewRef(path).Delete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.Get(serviceName, "aqp_oauth_auth.json"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("keychain entry survived logout after mode switch: %v", err)
+	}
+	if _, serr := os.Stat(path + migratedSuffix); !os.IsNotExist(serr) {
+		t.Fatal("archive not cleaned by delete")
 	}
 }

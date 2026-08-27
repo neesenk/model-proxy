@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"model-proxy/internal/observe/requestlog"
+	"model-proxy/internal/observe/seclog"
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
@@ -32,6 +33,11 @@ type RuntimeSnapshot struct {
 	// swapped atomically with cfg/providers on reload). It carries known-secret
 	// values in memory: NEVER serialize, log, or expose it via any DTO/Web API.
 	Guard *guard.Scanner
+	// SecLog is this generation's security audit logger (nil when guard.audit
+	// is off). Swapped with the generation like Guard: a request audits against
+	// the logger of its own generation, and an old logger is drained+stopped at
+	// swap time, so late enqueues from in-flight requests may be dropped.
+	SecLog *seclog.Logger
 }
 
 // snapshotRuntime captures every reload-owned dependency under one brief read
@@ -52,6 +58,7 @@ func (p *Proxy) SnapshotRuntime() RuntimeSnapshot {
 		Cache:          p.cache,
 		Shadow:         p.shadow.Load(),
 		Guard:          p.guardScanner,
+		SecLog:         p.secLog,
 	}
 }
 

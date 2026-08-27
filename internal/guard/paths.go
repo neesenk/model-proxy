@@ -30,8 +30,13 @@ type pathRule struct {
 
 // builtinPaths is the closed sensitive-path table (high-confidence locations
 // only — the false-positive cost of a vague path is paid on every request).
+// Entries sharing a category must stay adjacent: ScanPaths dedupes by
+// comparing with the last reported category.
 var builtinPaths = []pathRule{
-	{"ssh", pathLiterals("~/.ssh", "id_rsa", "id_ed25519"), false},
+	{"ssh", pathLiterals("~/.ssh"), false},
+	// Bare key-file names get dotenv-style boundaries, so "did_rsakey" or
+	// "my_id_rsa" do not fire while "id_rsa.pub" still does.
+	{"ssh", pathLiterals("id_rsa", "id_ed25519"), true},
 	{"aws_creds", pathLiterals("~/.aws/credentials"), false},
 	{"proxy_creds", pathLiterals("~/.model-proxy"), false},
 	{"gnupg", pathLiterals("~/.gnupg"), false},
@@ -89,7 +94,7 @@ func (p pathRule) hit(body []byte) bool {
 func (s *Scanner) ScanPaths(body []byte) []string {
 	var names []string
 	for _, p := range builtinPaths {
-		if p.hit(body) {
+		if p.hit(body) && (len(names) == 0 || names[len(names)-1] != p.category) {
 			names = append(names, p.category)
 		}
 	}

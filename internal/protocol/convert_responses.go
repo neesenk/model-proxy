@@ -442,6 +442,8 @@ func anthropicMsgToResponsesItems(m map[string]any, imageOK bool, d *Diagnostics
 				txt := anthropicToolResultText(b["content"], d)
 				imgs := anthropicToolResultImagesResponses(b["content"])
 				if len(imgs) > 0 && !imageOK {
+					warnDiagf(d, "media_degraded",
+						"target has no vision: %d tool-result image(s) collapsed to placeholder text", len(imgs))
 					txt = appendMediaPlaceholder(txt)
 					imgs = nil
 				}
@@ -789,8 +791,11 @@ func anthropicExplicitPromptCacheKey(src, converted map[string]any, d *Diagnosti
 		return sha256Hex32(uid)
 	}
 	fp, _ := sonic.ConfigStd.MarshalToString(map[string]any{
-		"model":  strOpt(converted["model"]),
-		"system": anthropicTextOf(src["system"], d),
+		"model": strOpt(converted["model"]),
+		// nil collector: the main conversion walk over the same system
+		// blocks already reports cache_control_dropped — collecting here
+		// too duplicated the diagnostic (convertWarn dedupes, Diag didn't).
+		"system": anthropicTextOf(src["system"], nil),
 		"tools":  converted["tools"],
 	})
 	return sha256Hex32(fp)
@@ -1590,6 +1595,13 @@ func responsesContentToChat(content any, d *Diagnostics) any {
 			}
 		case "input_file", "file":
 			if id := strOpt(pm["file_id"]); id != "" && strOpt(pm["file_data"]) == "" {
+				if u := strOpt(pm["file_url"]); strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+					// file_id + file_url: the URL is the transportable form
+					// for a chat target (r→a prefers it the same way); only
+					// the provider-scoped file_id itself degrades.
+					out = append(out, map[string]any{"type": "text", "text": "[document " + firstNonEmpty(strOpt(pm["filename"]), "file") + "] " + u})
+					break
+				}
 				out = append(out, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(pm["filename"]), d)})
 				break
 			}
@@ -1606,7 +1618,15 @@ func responsesContentToChat(content any, d *Diagnostics) any {
 		}
 	}
 	if !hasImage && !hasFile {
-		return chatContentText(content)
+		// Fold the PRODUCED parts back to a plain string — re-walking the
+		// original content (chatContentText) would drop the degrade/URL
+		// notes this converter just synthesized when a file part is the
+		// only content (degradations must stay observable).
+		var b strings.Builder
+		for _, p := range out {
+			b.WriteString(strOf(p["text"]))
+		}
+		return b.String()
 	}
 	return out
 }
@@ -1783,6 +1803,8 @@ func (w *r2chatWalk) addToolOutput(item map[string]any) {
 		text, imgs = responsesOutputTextAndImages(item["output"])
 	}
 	if len(imgs) > 0 && !w.imageOK {
+		warnDiagf(w.diag, "media_degraded",
+			"target has no vision: %d tool-output image(s) collapsed to placeholder text", len(imgs))
 		text = appendMediaPlaceholder(text)
 		imgs = nil
 	}

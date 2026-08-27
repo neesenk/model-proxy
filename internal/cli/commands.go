@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
 	clidoctor "model-proxy/internal/cli/doctor"
 	clipresets "model-proxy/internal/cli/presets"
@@ -18,12 +19,17 @@ import (
 	configdomain "model-proxy/internal/config"
 )
 
-// LoadCmdConfig loads the CLI config or exits.
+// LoadCmdConfig loads the CLI config or exits. It also applies the configured
+// credentials mode (`credentials:`) to this process's account stores AND OAuth
+// blob store, so every command that reads credentials (usage/logout/models/
+// doctor/...) sees the same backend without threading cfg through each call
+// site.
 func LoadCmdConfig(args []string) *configdomain.Config {
 	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
 	if err != nil {
 		log.Fatal(err)
 	}
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	return cfg
 }
 
@@ -132,6 +138,7 @@ func RunDoctor(args []string) {
 		fmt.Println("✗ config invalid: " + err.Error())
 		os.Exit(1)
 	}
+	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	clidoctor.CmdDoctor(args, cfg, cliframework.ConfigPath(args))
 }
 
@@ -139,9 +146,35 @@ func RunDoctor(args []string) {
 func RunTakeover(args []string) {
 	cfg := LoadCmdConfig(args)
 	which := cliframework.Positional(args)
-	if err := takeover.RunTakeover(cfg, which, takeover.BackupDir(cliframework.ConfigPath(args)), takeoverFacts(cfg, which)); err != nil {
+	bakDir := takeover.BackupDir(cliframework.ConfigPath(args))
+	if err := takeover.RunTakeover(cfg, which, bakDir, takeoverFacts(cfg, which)); err != nil {
 		log.Fatal(err)
 	}
+	verifyTakeoverDrift(cfg, which, bakDir)
+}
+
+// verifyTakeoverDrift re-checks the proxy pointer of every client this
+// takeover just rewrote, reusing doctor's drift check. A healthy takeover
+// shows no drift; a client that still does not point at the proxy (rewritten
+// back by another tool, a write that did not take effect, a vanished file)
+// gets a stderr warning and — when guard.audit is on — a seclog drift record
+// via doctor's shared audit helper. Verification never changes the exit
+// code: warnings and audit-append failures degrade to stderr notes only.
+func verifyTakeoverDrift(cfg *configdomain.Config, which, bakDir string) {
+	selected := map[string]bool{}
+	for _, c := range takeover.ListClients(cfg, which) {
+		selected[c.Name] = true
+	}
+	var drift []clidoctor.ClientDrift
+	for _, d := range clidoctor.CheckTakeoverDrift(cfg, bakDir) {
+		if !selected[d.Client] || !d.Taken || d.OK {
+			continue
+		}
+		drift = append(drift, d)
+		log.Printf("  ⚠ %s drift detected right after takeover: %s points to %s, want %s",
+			d.Client, d.File, d.Current, d.Expected)
+	}
+	clidoctor.AuditTakeoverDrift(cfg, drift, "takeover")
 }
 
 // RunRestore restores a client config from its takeover backup.

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // doctor_live.go implements `model-proxy doctor --live`: a read-only, live
@@ -433,18 +434,43 @@ func CheckTakeoverDrift(cfg *configdomain.Config, bakDir string) []ClientDrift {
 // (kind=drift), so pointer drift leaves a durable trail even when nobody
 // reads the doctor output. Gated by guard.audit; an append failure degrades
 // to a stderr note only — doctor's output and exit code never change.
+// Drift usually persists until the user fixes it, so a client that already
+// has a drift record from today is not appended again (a failed dedup query
+// never blocks the append).
 func auditTakeoverDrift(cfg *configdomain.Config, drift []ClientDrift) {
+	AuditTakeoverDrift(cfg, drift, "doctor")
+}
+
+// AuditTakeoverDrift is the shared implementation behind auditTakeoverDrift,
+// exported so `model-proxy takeover`'s post-write drift check can persist the
+// same record shape (same dedup, same hosts-only detail) under its own agent
+// name. Same degradation rules: guard.audit off → no-op; append failure →
+// stderr note only, never an error.
+func AuditTakeoverDrift(cfg *configdomain.Config, drift []ClientDrift, agent string) {
 	if !cfg.Guard.AuditEnabled() {
 		return
 	}
 	dir := filepath.Dir(cfg.Guard.AuditPathValue(cliframework.HomeDir()))
+	now := time.Now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	seen := map[string]bool{}
+	if result, err := observeseclog.Query(dir, observeseclog.Filter{
+		Kind: observeseclog.KindDrift,
+		From: dayStart.UnixMilli(),
+	}); err == nil {
+		for _, rec := range result.Records {
+			if client := driftDetailClient(rec.Detail); client != "" {
+				seen[client] = true
+			}
+		}
+	}
 	for _, d := range drift {
-		if !d.Taken || d.OK {
+		if !d.Taken || d.OK || seen[d.Client] {
 			continue
 		}
 		rec := &observeseclog.Record{
 			Kind:  observeseclog.KindDrift,
-			Agent: "doctor",
+			Agent: agent,
 			Detail: fmt.Sprintf("client=%s expected=%s actual=%s",
 				d.Client, driftHost(d.Expected), driftHost(d.Current)),
 		}
@@ -454,15 +480,52 @@ func auditTakeoverDrift(cfg *configdomain.Config, drift []ClientDrift) {
 	}
 }
 
+// driftDetailClient extracts the client name from a drift audit detail of the
+// form "client=<name> expected=<host> actual=<host>" ("" when the detail does
+// not carry one).
+func driftDetailClient(detail string) string {
+	rest, ok := strings.CutPrefix(detail, "client=")
+	if !ok {
+		return ""
+	}
+	if i := strings.IndexByte(rest, ' '); i >= 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
 // driftHost reduces a takeover pointer to its host[:port] so the audit
 // record never carries a URL path or query string. Pointers that are not
 // URLs (placeholders like "(file missing)") collapse to "(no-url)".
 func driftHost(pointer string) string {
-	u, err := url.Parse(pointer)
-	if err != nil || u.Host == "" {
-		return "(no-url)"
+	if u, err := url.Parse(pointer); err == nil && u.Host != "" {
+		return u.Host
 	}
-	return u.Host
+	// A scheme-less pointer misparses — url.Parse("evil-host:8317/v1") reads
+	// "evil-host" as the scheme and leaves Host empty — and a tampered
+	// pointer is the one most likely to lack a scheme. Fall back to the text
+	// before the first "/", "?" or "#" (a bare host never carries a query or
+	// fragment; keeping them would leak the pointer's query string into the
+	// audit record) with control characters stripped; anything that still
+	// doesn't look like a bare host (placeholders with spaces/parens) stays
+	// "(no-url)".
+	if !strings.Contains(pointer, "://") {
+		host := strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return -1
+			}
+			return r
+		}, pointer)
+		for _, cut := range []byte{'/', '?', '#'} {
+			if i := strings.IndexByte(host, cut); i >= 0 {
+				host = host[:i]
+			}
+		}
+		if host != "" && !strings.ContainsAny(host, " ()\"") {
+			return host
+		}
+	}
+	return "(no-url)"
 }
 
 // takeoverPointer reads one client's current proxy pointer and computes the

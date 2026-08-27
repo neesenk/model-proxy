@@ -33,6 +33,11 @@ type Record struct {
 	// Diagnostics lists the attempt's protocol-conversion diagnostics
 	// (structured lossy-conversion observations, stable codes).
 	Diagnostics []ConversionDiagnostic `json:"diagnostics,omitempty"`
+	// ParsedUsage is a query-time projection of ResponseBody (ExtractUsage)
+	// for aggregate views that strip bodies as they read (Filter.UsageOnly).
+	// Never persisted: the JSONL encoder does not write it and json:"-"
+	// keeps decoded lines from populating it.
+	ParsedUsage Usage `json:"-"`
 }
 
 // ConversionDiagnostic is the log projection of one conversion diagnostic.

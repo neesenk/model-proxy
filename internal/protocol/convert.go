@@ -373,6 +373,8 @@ func anthropicMsgToOpenAIMsgs(m map[string]any, imageOK bool, d *Diagnostics) []
 				if len(imgs) > 0 && !imageOK {
 					// No vision on the target: no synthetic user message, no
 					// image_url parts (deepseek 400s on them) — placeholder text.
+					warnDiagf(d, "media_degraded",
+						"target has no vision: %d tool-result image(s) collapsed to placeholder text", len(imgs))
 					txt = appendMediaPlaceholder(txt)
 					imgs = nil
 				}
@@ -1134,6 +1136,13 @@ func convertRequest(body []byte, clientProto, targetProto string) ([]byte, error
 func convertRequestFor(body []byte, clientProto, targetProto string, opts convertReqOpts) ([]byte, error) {
 	if err := validateConversionCapabilities(body, clientProto, targetProto); err != nil {
 		return nil, err
+	}
+	// Strict-lossy needs somewhere to collect codes; a caller that sets
+	// StrictLossy without Diag would otherwise opt out of the gate silently.
+	// Auto-provision instead of failing loud: internal wiring always pairs
+	// the two, this covers direct API use.
+	if opts.StrictLossy && opts.Diag == nil {
+		opts.Diag = NewDiagnostics()
 	}
 	out := body
 	var err error
@@ -1924,7 +1933,11 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			continue
 		}
-		if pendData == "" {
+		if line != "" || pendData == "" {
+			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
+			// comment lines belong to the frame in progress even when they
+			// trail its data lines — dispatching on them would classify the
+			// frame under the previous event and leak the real one forward.
 			continue
 		}
 		payload := pendData
@@ -2190,7 +2203,11 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			continue
 		}
-		if pendData == "" {
+		if line != "" || pendData == "" {
+			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
+			// comment lines belong to the frame in progress even when they
+			// trail its data lines — dispatching on them would classify the
+			// frame under the previous event and leak the real one forward.
 			continue
 		}
 		payload := pendData

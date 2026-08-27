@@ -458,3 +458,22 @@ func TestCrossProtocolExplicitPromptCacheControls(t *testing.T) {
 		t.Fatalf("r→a 24h retention error = %#v", err)
 	}
 }
+
+// r→chat: file_id + file_url together — the URL is the transportable form
+// and passes through as the document note instead of degrading the whole
+// attachment to a file_id remark (r→a prefers the URL the same way).
+func TestResponsesToChatFileIDWithURLPrefersURL(t *testing.T) {
+	chatRaw, err := convertResponsesRequestToOpenAI([]byte(`{"model":"m","input":[{"type":"message","role":"user","content":[
+		{"type":"input_file","filename":"combo.pdf","file_id":"file_9","file_url":"https://example.test/combo.pdf"}
+	]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A lone document note is a text part, so the converter folds the whole
+	// content back to a plain string (chatContentText fast path).
+	chat := unmarshalMap(t, chatRaw)
+	text := strOf(asMap(anySlice(chat["messages"])[0])["content"])
+	if !strings.Contains(text, "https://example.test/combo.pdf") || strings.Contains(text, "file_9") {
+		t.Fatalf("file_id+file_url note = %q, want the URL without a file_id remark", text)
+	}
+}

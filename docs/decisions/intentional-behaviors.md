@@ -20,9 +20,23 @@
 12. **wire 探测把 404 以外的 4xx 视为端点存在**：探测分类里 400/401/403/429 都判 yes——400 是请求形状争议而非路由缺失，401/403/429 更是端点存在的直接证据；只有 404 判 no（proxy 只探测已知 LLM 路径）。误判 yes 的兜底是运行时 404 纠正（翻转 verdict + 跳过模型锁），因此探测本身不做更细的形状校验。
 13. **Responses 跨协议 body 解析失败落 502 而非 400**：responses 客户端走跨协议 target 时 body 先经 `responsesState.expand` 做本地历史展开（proxy.go serveOnce）；body 本身是非法 JSON 时展开报错、当前 target 被跳过，所有 target 都失败后走统一的 all-targets-failed 路径返回 502，而不是 400。转发主路径不整体解析客户端 body（同协议字节透传），调度层无法区分「客户端 body 坏」和「单 target 处理失败」，保持 fail-closed 跳过语义。
 14. **唯一可转换 target 冷却中时立即 400 而非等待恢复**：本 pass 记录了 `conversionErr` 且 `tried` 为空时（请求转换被 capability scanner 拒绝的 target 不计入 tried；唯一能安全转换的 target 在冷却、未进本轮调度），直接返回 400 `unsupported_protocol_conversion`，跳过 cooldown wait-retry——不等待冷却恢复。重试中的 agent 下一轮自然会再命中已恢复的 target。
-15. **guard known-secret 凭据值进内存扫描器**：代理自身管理的凭据（池 key、OAuth token）以内存值形式进入 `guard.Scanner` 做出站精确匹配——不违反"凭据不进 config/代码/日志/测试输出"红线，因为匹配集永不落盘、不序列化、不进事件/DTO（命中只报 `known_secret` 类型名）。OAuth token 轮转后旧值仍被扫描（无害，旧值已失效），新值在下一次 reload 进集。
+15. **guard known-secret 凭据值进内存扫描器**：代理自身管理的凭据（池 key、OAuth token）以内存值形式进入 `guard.Scanner` 做出站精确匹配——不违反"凭据不进 config/代码/日志/测试输出"红线，因为匹配集永不落盘、不序列化、不进事件/DTO（命中只报 `known_secret` 类型名）。OAuth token 进程内轮转（codex/aqp 原地刷新写回 auth 文件）后，后台节拍（`scheduling.quota_poll_interval`，默认 5m）自动重收 OAuth 文件并按当前代重建换入扫描器，最迟一个周期生效；轮转的间隙里旧值仍被扫描（无害，旧值已失效）。重建只用当前代的池秘密基（reload-owned），跨代混用在代检查处丢弃。同一节拍还收集 provider 经 `provider.SecretReporter` 上报的**只存在于内存**的凭据：aqp 的 managed API key 是运行时经 SSO cookie mint 的，任何文件都不存；codex 的内存 access_token 也可能比文件新。这是 provider 凭据值的首次接口级暴露——例外成立的条件与扫描集相同：只读内存、只为出站扫描、永不序列化/日志/落盘（未 mint/未缓存时上报空集）。
 16. **guard.paths 不支持 redact**：敏感路径命中只有 log/block/off——redact 会改写 `.env`、`~/.ssh` 等路径文本，破坏正常编码负载（读 .env 是 agent 的合法工作）；要阻断用 block，默认 log 只要可见性。
 17. **guard 命中永不含匹配内容**：live event、计数器、安全审计日志（seclog）只携带模式类型名/路径类别名，匹配到的秘密字节只允许出现在 redact 后的转发 body 里（被替换为 `[REDACTED]`）。审计日志因此可以安全长期保留。
+18. **cache key 基于 redact 后的 body**：guard.secrets=redact 先把秘密替换为 `[REDACTED]`，响应缓存再对改写后的 body 取 key——因此两个仅秘密值不同的请求 redact 后共享同一条缓存条目（语义有意：缓存命中的应答本就不依赖被抹掉的秘密，且避免了把秘密派生进缓存 key）。pin/force-provider 仍按既有红线绕过缓存，不受此影响。
+19. **seclog 审计日志 reload 换代、换代瞬间允许丢尾记录**：`guard.audit` 开关与 `audit_path` 变更在 reload 时立即生效（off→on 当场开始写、on→off 当场停写、路径变更换新文件）——旧 logger 在换代时先 drain 再关停，forward 只写请求自己快照里的 logger。换代瞬间在途请求若仍持旧快照 enqueue，旧 logger 已 drain 完，这几条尾记录被静默丢弃（Enqueue 是非阻塞 offer，无人再消费）：审计日志是 best-effort 可见性通道，绝不为持久化阻塞或失败请求路径。
+20. **guard 分片检测的会话窗口存 redact 前原文**：`guard.session_scan` 的会话窗口（按 `x-claude-code-session-id`，每会话 32KiB 尾窗、LRU 256、≤8MiB）保存的是 redact 之前的请求 body——存 redact 后形态会让后续分片检测失效（被抹掉的分段永远拼不回来）。这是内存敏感性的有意取舍：窗口可能含凭据，因此只活在小锁保护的进程内存里，永不落盘/日志/序列化/API；有界性（截断即重置分片进度、LRU 整体淘汰）是它的暴露上限。它不进 RuntimeSnapshot（跨代运行时观察态，参照 metricsStore），reload 不清空，避免 reload 抹掉在途会话的分片上下文。
+21. **guard 分片命中 redact 降级为 log、block 只拦补齐段**：分片泄露的秘密横跨多条请求，没有任何单个 body 可以被改写——redact 对 `known_secret_fragmented` 有意降级为 log（event/audit 的 action 记为 log），block 则 400 拒绝补齐段所在的请求；此前的分段已放行，因为它们各自是不含完整秘密的干净请求，单请求扫描无从拦截。检测用「按序最长前缀进度」（每段 ≥8 字节、只覆盖 known-secret 原文）而非窗口拼接精确匹配：能转发的 body 都以 `{` 开头（ExtractModel 要求），两条 JSON 请求的分段在窗口拼接处永远不可能字节相邻，精确拼接匹配在真实流量上必然零命中。
+22. **apikey 池 keychain 模式不可用时 fail-closed，不回落明文**：`credentials: keychain` 是用户显式的安全选择——后端不可达（headless Linux 无 Secret Service、钥匙串被锁）或元数据账户的 keychain 条目丢失时，`accounts.Store` 的读写直接报错（`credstore.ErrUnavailable`/`ErrNotFound`），而不是悄悄退回读取明文池文件（回落会让"秘密已进钥匙串"的预期在故障时无声失效，且明文文件可能正是用户想摆脱的东西）。代价是 keychain 故障期间该 provider 整体不可用，需要修复后端，或把 `credentials:` 改回 `file` 走条目 25 的回迁。删除语义同样偏向不留孤儿：先删 keychain 条目成功才落元数据文件（删除失败则整个保存报错），宁可保留可重试的元数据，也不留"元数据没了、秘密还挂钥匙串"的孤儿条目。锁定测试：`internal/accounts/store_keychain_test.go`（`TestKeychainUnavailableFailsClosed` 等）。
+23. **guard.paths 弱命中（正文提及）不 block、不发 live event**：敏感路径命中按结构位置分 strong/weak（`guard.ScanPathsContext`）——路径出现在工具调用/工具结果位（anthropic `tool_use.input`/`tool_result.content`、openai `tool_calls[].function.arguments` 与 `role:"tool"` content、responses `function_call.arguments`/`function_call_output.output`）是 strong，即"agent 通过工具读敏感文件"的 MCP Tool Poisoning 特征动作；普通正文/user 消息提及是 weak。coding agent 的正常对话大量讨论 `.env` 等路径，weak 若发 live event 会刷屏监控、若 block 会误伤正常负载；因此 weak 只计 `("guard", <类别>_text)` 计数器并写 action=`log-weak` 的审计记录保留可见性，live event 与 block 只对 strong 生效。body 非合法 JSON 或结构识别失败时一律降级 weak（宁低勿高），绝不因识别失败升级为 strong。锁定测试：`internal/guard/pathctx_test.go`、`internal/app/guard_runtime_integration_test.go`（`TestGuardPaths_WeakTextNeverBlocks` 等）。
+24. **凭据存储单一开关：`credentials:` 驱动池与 OAuth 两侧，env 只覆盖 OAuth**：收敛前池后端走 config `credentials:`、OAuth blob 走 env `MP_CRED_STORE`（默认 auto 探测），两套开关语义割裂。收敛后优先级为 **env `MP_CRED_STORE` 非空 > config `credentials:` > 默认 file**：config 同时应用到 `accounts` 池后端和 credstore OAuth 模式（config 加载点统一调 `accounts.SetProcessCredentialsMode`）；env 保留为已发布的显式 override，只作用于 OAuth 侧（`auto` 收敛为 opt-in 的探测语义，不再是默认）。env 与 config 不一致是唯一可能的分歧，`config check` 与启动/reload 日志各打一行说明两侧生效值与来源。代价是行为变更：此前未设开关、靠 auto 默认进 keychain 的 OAuth blob，升级后默认按 file 读取，需显式设 `credentials: keychain`（或 env）继续读原条目。锁定测试：`internal/credstore/credstore_test.go`（`TestResolveModePriorityMatrix`、`TestConfigMismatchNote`）、`internal/cli/config_cmd_test.go`（`TestCLI_ConfigCheckCredentialsSummary`）。
+25. **keychain→file 部分回迁：缺条目的账号保留元数据并要求重新 login，keychain 条目默认不删**：`credentials:` 切回 `file` 后，纯元数据池在首次 file 模式读取时按条目从 keychain 读回秘密、原子重写明文池（0600）——这是 file→keychain 懒迁移的反向。条目缺失（或后端不可达）的账号不拖累整体：其余账号正常回迁，缺失账号的元数据（id/label/added_at）保留在池文件与 `Snapshot.ReloginNeeded` 中报出，需重新 `login`；只有全部可回迁才重写池文件，部分回迁不动文件，让报告与元数据活到用户处理为止。回迁成功后 keychain 条目**有意保留**：读路径删除会在文件写丢失时毁掉唯一副本，且 `logout` 才是正常删除路径。混合池（部分条目有秘密）不视为模式切换产物，仍按 validate 报错。OAuth blob 一侧不做自动回迁（与历史 env 切换语义一致），切回 file 需重新 login。
+logout 是正常删除路径、且跨模式收尾：`Ref.Delete` 在当前模式为 keychain、或 `.migrated.bak`
+档案标记该 blob 曾迁入钥匙串时，一并删除钥匙串条目——切回 file 后登出不在钥匙串里留旧秘密；
+纯 file 历史（无档案）永不触碰后端（测试二进制保持封闭）。锁定测试：
+`internal/credstore/credstore_test.go`（`TestRefDeleteCleansKeychainAfterSwitchToFile`）。
+26. **guard 扫描按次预算：对抗性 body 有界降级为漏报，不再无界耗时**：单次扫描的编码通道解码上限 256 次（`maxDecodesPerScan`）、命中声明上限 262144（`maxMatchesPerScan`）。对抗性构造（长 token run 内以字节间隔重复探针变体 → 滑动 span 每命中一次 8KiB 解码；重复同一秘密形状百万次 → 命中声明两两重叠检查）此前可把单请求扫描推到 100GB 级解码量或 O(n²) 比较——guard 默认开启且威胁模型内的恶意 agent 正是本地请求方。预算耗尽后编码通道/命中声明停止，方向是**有界漏报**（宁漏勿滥，与 redact 侧的宁滥勿缺相反）；`claimSet` 有序不交区间集 + 流式正则迭代保证正常负载路径线性。锁定测试：`internal/guard/scanner_budget_test.go`。
+27. **keychain 条目超限（ErrEntryTooLarge）时懒迁移保留明文服务，不锁死账号**：OS 钥串后端有物理条目上限（darwin 命令行预算 ~3000 原始字节、windows 凭据 blob 2560 字节；codex OAuth 档案典型 2.6-3.6KB，常超限）。`Ref.Load` 的懒迁移写入被拒时**返回明文数据**：尺寸超限是 blob+后端的确定性属性，不是可用性或降级问题，明文权威副本完好、后续每次 Load 都会重试并落回同处；此前一律 fail-closed 会让进程明明读得到的凭据变得不可读。写入路径（`Save`/`KeychainSet`）按平台预检尺寸、提前返回 `ErrEntryTooLarge`（darwin 超限命令会在进程已启动后才被拒、搁置子进程；错误类别与 `ErrUnavailable` 分开，排障与修复路径不同：前者改回 `credentials: file`，后者修后端）。这与条目 22 的"不可用 fail-closed"不冲突：可用性故障仍原样报错。锁定测试：`internal/credstore/credstore_test.go`（`TestRefLoadOversizedBlobKeepsServingPlaintext`、`TestMapKeyringErrPreservesSizeClass`）。
 
 ## qwen-plan：用量仅控制台、不轮询（有意为之）
 
@@ -37,9 +51,11 @@
 - 登录交互式输入 API key 时终端明文回显：stdin 同时服务管道/脚本输入
   （`echo key | model-proxy login ...`），`term.ReadPassword` 会破坏非终端输入。
   凭据不会进入日志，回显只存在于用户自己的终端缓冲。
-- `observe/events` 订阅后的短窗口内，同一条事件可能既出现在重放的 recent 快照
-  又出现在订阅流里（注册与 recent 复制在同一把锁内完成，publish 无需感知订阅时
-  点）。仅影响展示端去重，不丢事件。
+- `observe/events` 每条事件对每个订阅者**恰好投递一次**：订阅注册、recent
+  快照复制与 publish 的订阅者快照加载全部串行化在同一把锁内——一条事件要么
+  出现在订阅者的 recent 快照里，要么出现在订阅流里，不会两者都出现（COW 化
+  时曾在 Unlock 后才加载快照，重新打开过双投递窗口）。锁定测试：
+  `TestHubPublishSubscribeExactlyOnce`。
 - Fusion 面板全部以 429 冷却失败时，终局按 hard 处理返回 502 而非 429+
   Retry-After：fusion 伪 provider 无健康状态，`cooldownState` 判不出 allDown；
   代码注释自认 "opaque → hard"。收紧前先给 fusion 伪 provider 建立限频观测。

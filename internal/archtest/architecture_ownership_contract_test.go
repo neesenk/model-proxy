@@ -158,6 +158,11 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			// LoadSnapshot pass (+ best-effort OAuth auth files) for the guard
 			// known-secret scanner. Memory only.
 			"Secrets": true,
+			// PoolSecrets/OAuthSecrets split Secrets by stability: the pool
+			// subset is generation-stable and serves as the rebuild base; the
+			// OAuth subset rotates in place during serve, so the guard refresh
+			// loop re-collects just that part on the poll beat.
+			"PoolSecrets": true, "OAuthSecrets": true,
 		}
 		if len(buildFields) != len(wantBuildFields) {
 			t.Errorf("app.Build fields = %v, want exactly %v", sortedFieldNames(buildFields), sortedBoolNames(wantBuildFields))

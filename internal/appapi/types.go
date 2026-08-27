@@ -135,6 +135,39 @@ type AnalyticsQuery struct {
 	Granularity string
 }
 
+// SecurityQuery is the normalized audit-log query passed through the read
+// port. From/To are unix milliseconds, inclusive; zero means unbounded.
+type SecurityQuery struct {
+	Kind  string
+	From  int64
+	To    int64
+	Limit int
+}
+
+// SecurityRecord is the JSON-safe projection of one security audit record.
+// Names carries pattern/path-category names only — matched content never
+// enters this DTO (the seclog red line applies to the projection too).
+type SecurityRecord struct {
+	Ts        int64    `json:"ts"`
+	Kind      string   `json:"kind"`
+	RequestID string   `json:"request_id,omitempty"`
+	Agent     string   `json:"agent,omitempty"`
+	Protocol  string   `json:"protocol,omitempty"`
+	Exposed   string   `json:"exposed,omitempty"`
+	Names     []string `json:"names,omitempty"`
+	Action    string   `json:"action,omitempty"`
+	Detail    string   `json:"detail,omitempty"`
+}
+
+// SecurityResult is one audit-log query outcome: Enabled reports whether the
+// security audit log is persisted (guard.audit on and its directory present),
+// Records holds matches newest first, and Skipped counts unreadable lines.
+type SecurityResult struct {
+	Enabled bool             `json:"enabled"`
+	Records []SecurityRecord `json:"records"`
+	Skipped int              `json:"skipped"`
+}
+
 // ValidationIssue is one config lint finding returned by POST
 // /api/config/validate. Line is 1-based; 0 means the problem cannot be pinned
 // to a source line (whole-document errors such as "no providers configured").
@@ -232,6 +265,7 @@ type ReadAPI interface {
 	Pricing() PricingSnapshot
 	Fusion(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	Pins() []Pin
+	Security(SecurityQuery) (SecurityResult, error)
 	ConfigDocument() (ConfigDocument, error)
 	// Presets lists the provider preset catalog (internal/presets) for the
 	// web Add-Provider wizard.

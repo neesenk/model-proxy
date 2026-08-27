@@ -89,9 +89,24 @@ Clients:
 Clients:
   claude | opencode | codex | pi | kimi | all`,
 
-	"login": `login <provider> [--config PATH]
+	"login": `login <provider> [--config PATH] [--label NAME] [--replace]
+                 [--from-env VAR [--from-env-ak VAR --from-env-sk VAR]]
+                 [--from-codex]
 
-  Authenticate with a provider.`,
+  Authenticate with a provider. Interactive by default; the import shortcuts
+  below avoid pasting secrets into the terminal.
+
+Import flags:
+  --from-codex        codex only: import the official codex CLI login from
+                      ~/.codex/auth.json (OAuth tokens; the proxy refreshes the
+                      access_token on demand while the refresh_token is valid)
+  --from-env VAR      apikey-class providers: read the API key from env var VAR
+  --from-env-ak VAR   volcengine only: read the Access Key ID from VAR (optional)
+  --from-env-sk VAR   volcengine only: read the Secret Access Key from VAR (optional)
+
+  --label/--replace work the same as in interactive login. Imported values are
+  never echoed or written to logs; success output shows only a masked account
+  id. Missing files/variables and malformed credential files are errors.`,
 
 	"add": `add <preset> [--config PATH] [--label NAME] [--replace]
                   [--api-key-env ENV] [--yes]
@@ -185,19 +200,22 @@ Subcommands:
            the security audit log (kind=drift, hosts only) when guard.audit
            is on.`,
 
-	"audit": `audit [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
+	"audit": `audit [--stats] [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
 
   Show the security audit log (secret/path hits and doctor takeover-drift
   findings). Offline: reads the seclog files directly from guard.audit_path
   (default ~/.model-proxy/security.log) — no daemon needed.
 
   Flags:
-  --from TIME   range start: now, duration ago (1h, 30m), unix seconds, or
-                RFC3339 (default: unbounded)
+  --from TIME   range start: now, duration ago (1h, 30m, 7d), unix seconds,
+                or RFC3339 (default: unbounded)
   --to TIME     range end (same forms; default: unbounded)
   --kind KIND   filter to one kind: secret | path | drift
-  --limit N     newest N records (default 50; 0 = all)
-  --json        raw records JSON for jq`,
+  --limit N     newest N records (default 50; 0 = all; ignored by --stats)
+  --stats       aggregate view instead of raw records: total + counts by kind,
+                top 10 hit names / agents, counts by action, over the whole
+                filtered set (--limit ignored; internal cap 10000 records)
+  --json        raw records JSON for jq; with --stats, the aggregate as JSON`,
 
 	"test": `test <model> [--config PATH]
 

@@ -241,8 +241,11 @@ func TestLoadSnapshotRejectsInvalidAccounts(t *testing.T) {
 			want: "reserved '#'",
 		},
 		{
+			// Mixed plaintext/metadata entries are NOT a keychain→file restore
+			// candidate (a fully metadata-only pool is) — validatePool still
+			// rejects the empty secret.
 			name: "empty api key",
-			body: `{"version":1,"accounts":[{"id":"one","api_key":""}]}`,
+			body: `{"version":1,"accounts":[{"id":"one","api_key":"key"},{"id":"two","api_key":""}]}`,
 			want: "api_key is empty",
 		},
 		{
