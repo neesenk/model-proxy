@@ -288,3 +288,38 @@ func BenchmarkScanPathsContext_LargeBodyStrongHit(b *testing.B) {
 		s.ScanPathsContext(body)
 	}
 }
+
+// The structure walk decodes escaped keys and marker values exactly like the
+// encoding/json walk it replaced: escaped "type"/"input" forms still classify
+// strong, while bodies encoding/json would reject (bad escape, raw control
+// character, malformed or float64-overflowing numbers, excessive nesting)
+// must fail the walk and classify weak — never strong.
+func TestScanPathsContextWalkParity(t *testing.T) {
+	s := mustScanner(t, nil, nil, nil)
+	wantCtx(t,
+		`{"messages":[{"content":[{"typ\u0065":"tool_use","inpu\u0074":{"p":"~/.ssh/id_rsa"}}]}]}`,
+		s, []string{"ssh"}, nil)
+	wantCtx(t,
+		`{"messages":[{"content":[{"type":"tool_\u0075se","input":{"p":"~/.ssh/id_rsa"}}]}]}`,
+		s, []string{"ssh"}, nil)
+	wantCtx(t,
+		`{"messages":[{"tool_calls":[{"function":{"arguments":"bad \x escape ~/.ssh/id_rsa"}}]}]}`,
+		s, nil, []string{"ssh"})
+	wantCtx(t,
+		"{\"messages\":[{\"tool_calls\":[{\"function\":{\"arguments\":\"raw \x01 ctrl ~/.ssh/id_rsa\"}}]}]}",
+		s, nil, []string{"ssh"})
+	wantCtx(t,
+		`{"messages":[{"tool_calls":[{"function":{"arguments":"cat ~/.ssh/id_rsa"}}]}],"n":1e999}`,
+		s, nil, []string{"ssh"})
+	wantCtx(t,
+		`{"messages":[{"tool_calls":[{"function":{"arguments":"cat ~/.ssh/id_rsa"}}]}],"n":1.}`,
+		s, nil, []string{"ssh"})
+}
+
+// Nesting past encoding/json's maxNestingDepth fails the walk (and bounds the
+// recursion): the hit classifies weak, never strong.
+func TestScanPathsContextDepthLimit(t *testing.T) {
+	s := mustScanner(t, nil, nil, nil)
+	body := strings.Repeat("[", 10001) + strings.Repeat("]", 10001) + " ~/.ssh/id_rsa"
+	wantCtx(t, body, s, nil, []string{"ssh"})
+}

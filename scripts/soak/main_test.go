@@ -96,3 +96,21 @@ func TestReportPercentiles(t *testing.T) {
 		t.Errorf("error rate = %f, want 0", rate)
 	}
 }
+
+// TestNewClientPoolsPerWorker pins the harness client's connection pooling:
+// with fewer idle connections than workers the client dials per request,
+// which at soak rates exhausts ephemeral ports and measures the OS instead
+// of the proxy (observed as mass "can't assign requested address" errors).
+func TestNewClientPoolsPerWorker(t *testing.T) {
+	client := newClient(8)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.MaxIdleConnsPerHost != 8 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 8 (one idle conn per worker)", transport.MaxIdleConnsPerHost)
+	}
+	if client.Timeout != 10*time.Minute {
+		t.Errorf("Timeout = %s, want 10m", client.Timeout)
+	}
+}

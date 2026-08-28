@@ -56,9 +56,10 @@ coverage_floor_for() {
     model-proxy/internal/httpx) echo "75.0" ;;
     model-proxy/internal/targetexec) echo "79.1" ;;
     # CLI harness: main/flag parsing are interactive-only; the scenario
-    # builders and the run loop are covered by main_test.go. Floor re-measured
-    # under go1.27 (statement-counting drift vs the go1.26-era 56.7).
-    model-proxy/scripts/soak) echo "54.1" ;;
+    # builders, the run loop and the pooled client constructor are covered by
+    # main_test.go. Floor re-measured under go1.27 (statement-counting drift
+    # vs the go1.26-era 56.7).
+    model-proxy/scripts/soak) echo "55.0" ;;
     *) echo "$baseline" ;;
   esac
 }

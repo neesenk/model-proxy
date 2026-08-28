@@ -202,6 +202,17 @@ func msSince(t time.Time) float64 {
 	return float64(time.Since(t).Microseconds()) / 1000
 }
 
+// newClient builds the harness HTTP client. http.DefaultTransport pools only
+// 2 idle connections per host, so the workers would dial a fresh connection
+// for almost every request; at soak rates that exhausts ephemeral ports
+// (connect: can't assign requested address) and measures the OS, not the
+// proxy. Pool one idle connection per worker instead.
+func newClient(concurrency int) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = concurrency
+	return &http.Client{Timeout: 10 * time.Minute, Transport: transport}
+}
+
 func percentile(sorted []float64, p float64) float64 {
 	if len(sorted) == 0 {
 		return 0
@@ -284,7 +295,7 @@ func main() {
 	}
 	perScenario := *duration / time.Duration(len(selected))
 	fmt.Printf("soak %s model=%s concurrency=%d per-scenario=%s\n", *baseURL, *model, *concurrency, perScenario)
-	client := &http.Client{Timeout: 10 * time.Minute}
+	client := newClient(*concurrency)
 	failed := false
 	for _, s := range selected {
 		ctx, cancel := context.WithTimeout(context.Background(), perScenario)
