@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"model-proxy/internal/appapi"
@@ -45,8 +46,11 @@ func TestWebPresetsListAndAdd(t *testing.T) {
 		t.Fatalf("AddPreset(zhipu): %v", err)
 	}
 	merged, err := os.ReadFile(cfgPath)
-	if err != nil || !contains(string(merged), "zhipu:") || !contains(string(merged), "deepseek:") {
-		t.Fatalf("config file after AddPreset missing provider block:\n%s", merged)
+	if err != nil {
+		t.Fatalf("read merged config: %v", err)
+	}
+	if m := string(merged); !strings.Contains(m, "zhipu:") || !strings.Contains(m, "deepseek:") {
+		t.Fatalf("config file after AddPreset missing provider block:\n%s", m)
 	}
 
 	// Idempotent: second AddPreset succeeds without duplicating.
@@ -108,17 +112,6 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (func() bool {
-		for i := 0; i+len(sub) <= len(s); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
-		}
-		return false
-	})()
 }
 
 func editReqForProviderModels(provider, model string) appapi.EditRequest {

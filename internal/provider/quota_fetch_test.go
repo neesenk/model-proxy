@@ -129,6 +129,14 @@ func TestCodexProvider_Quota_MalformedBody(t *testing.T) {
 
 func TestZhipuProvider_Quota_Parsed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Auth isolation: zhipu is Bearer-only — no x-api-key header may ride
+		// along (the deepseek/volcengine dual-scheme must not leak in).
+		if got := r.Header.Get("Authorization"); got != "Bearer k" {
+			t.Errorf("zhipu quota Authorization = %q, want exact Bearer k", got)
+		}
+		if got := r.Header.Get("x-api-key"); got != "" {
+			t.Errorf("zhipu quota must not send x-api-key, got %q", got)
+		}
 		w.Write([]byte(`{"success":true,"data":{"level":"GLM Coding Plan","limits":[` +
 			`{"type":"TOKENS_LIMIT","unit":6,"percentage":70,"nextResetTime":1750000000000,"usage":200000,"currentValue":140000,"remaining":60000}]}}`))
 	}))
@@ -143,6 +151,21 @@ func TestZhipuProvider_Quota_Parsed(t *testing.T) {
 	}
 	if s.RemainingPct != 0.3 {
 		t.Errorf("RemainingPct=%v want 0.3", s.RemainingPct)
+	}
+}
+
+func TestZhipuProvider_Quota_EmptyBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200) // empty body
+	}))
+	defer srv.Close()
+	p := &ZhipuProvider{ApiKeyBase: NewApiKeyBaseWithKey("zhipu", "k"), cfg: &Config{UsageURL: srv.URL}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Billing != BillingUnknown || s.Err == "" {
+		t.Errorf("empty body: got %+v, want BillingUnknown with a non-empty parse error", s)
 	}
 }
 
@@ -208,6 +231,21 @@ func TestDeepSeekProvider_Quota_Parsed(t *testing.T) {
 	// gates the Details section on a non-empty DetailLabel).
 	if s.Windows[0].DetailLabel != "" {
 		t.Errorf("DetailLabel=%q want empty (no breakdown in UI)", s.Windows[0].DetailLabel)
+	}
+}
+
+func TestDeepSeekProvider_Quota_EmptyBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200) // empty body
+	}))
+	defer srv.Close()
+	p := &DeepSeekProvider{ApiKeyBase: NewApiKeyBaseWithKey("deepseek", "k"), cfg: &Config{UsageURL: srv.URL}}
+	s, err := p.Quota()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Billing != BillingUnknown || s.Err == "" {
+		t.Errorf("empty body: got %+v, want BillingUnknown with a non-empty parse error", s)
 	}
 }
 
@@ -363,13 +401,17 @@ func TestVolcengineProvider_Quota_NoCreds(t *testing.T) {
 }
 
 func TestVolcengineProvider_Quota_BoundGetAFPFails(t *testing.T) {
-	// Bound AK/SK, but getAFPUsage targets the hardcoded real Volcengine host;
-	// force a dead proxy so the signed request fails fast -> BillingUnknown.
-	deadSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	addr := deadSrv.Listener.Addr().String()
-	deadSrv.Close()
-	t.Setenv("HTTPS_PROXY", "http://"+addr)
-	t.Setenv("HTTP_PROXY", "http://"+addr)
+	// Inject the failure via the OpenAPI base (an HTTP 500 mock) — not via
+	// HTTP_PROXY env: http.ProxyFromEnvironment caches the proxy config
+	// process-wide, so env-based injection silently degrades into a REAL call
+	// to the production endpoint (see TestVolcengineUsage_GetAFPFailsFallsBack).
+	orig := volcengineOpenAPIBase
+	defer func() { volcengineOpenAPIBase = orig }()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	}))
+	defer bad.Close()
+	volcengineOpenAPIBase = bad.URL
 	p := &VolcengineProvider{cfg: &Config{AccessKey: "AK", SecretKey: "SK"}}
 	s, _ := p.Quota()
 	if s.Billing != BillingUnknown || s.Err == "" {

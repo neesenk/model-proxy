@@ -2,6 +2,7 @@ package web
 
 import (
 	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -17,15 +18,42 @@ func mustWebAsset(t *testing.T, name string) string {
 	return string(b)
 }
 
-func TestWebAssetsJavaScriptSyntax(t *testing.T) {
+// requireNode resolves the node binary. Without node the JS gates skip —
+// UNLESS MP_REQUIRE_NODE=1 (CI), where a missing node is a hard failure: an
+// explicitly enabled gate must never degrade into a silent skip.
+func requireNode(t *testing.T) string {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skip("node is not installed; run the required node --check validation separately")
+		if os.Getenv("MP_REQUIRE_NODE") == "1" {
+			t.Fatal("MP_REQUIRE_NODE=1 but node is not installed; the JS syntax/unit gates must not be skipped in CI")
+		}
+		t.Skip("node is not installed; run the required node --check / node --test validation separately")
 	}
-	assetPath := filepath.Join("assets", "app.js")
-	cmd := exec.Command(node, "--check", assetPath)
+	return node
+}
+
+func TestWebAssetsJavaScriptSyntax(t *testing.T) {
+	node := requireNode(t)
+	for _, assetPath := range []string{
+		filepath.Join("assets", "app.js"),
+		filepath.Join("assets", "pure.js"),
+	} {
+		cmd := exec.Command(node, "--check", assetPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("node --check internal/web/%s: %v\n%s", assetPath, err, out)
+		}
+	}
+}
+
+// TestWebAssetsPureJSUnitTests runs the behavioral unit tests for the
+// DOM-free helpers (assets/pure.js) with Node's built-in test runner — no
+// framework dependency. Same node gate as the syntax check.
+func TestWebAssetsPureJSUnitTests(t *testing.T) {
+	node := requireNode(t)
+	cmd := exec.Command(node, "--test", filepath.Join("jstests", "pure.test.mjs"))
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("node --check internal/web/assets/app.js: %v\n%s", err, out)
+		t.Fatalf("node --test jstests/pure.test.mjs: %v\n%s", err, out)
 	}
 }
 
@@ -58,10 +86,21 @@ func TestWebAssetsLogGutterAndSelectionContract(t *testing.T) {
 func TestWebAssetsYAMLVisibleHeightContract(t *testing.T) {
 	css := mustWebAsset(t, "styles.css")
 	js := mustWebAsset(t, "app.js")
+	// The height algorithm itself lives in pure.js (behavior-tested by
+	// jstests/pure.test.mjs); app.js keeps the measurement and call sites.
+	pure := mustWebAsset(t, "pure.js")
 	for _, want := range []string{
 		"const YAML_EDITOR_MIN_HEIGHT = 480",
 		"function visibleYamlEditorHeight(viewportHeight, editorTop, spaceBelow)",
 		"Math.max(YAML_EDITOR_MIN_HEIGHT,",
+	} {
+		if !strings.Contains(pure, want) {
+			t.Errorf("pure.js missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"from './pure.js'",
+		"visibleYamlEditorHeight(",
 		"getBoundingClientRect()",
 		"yamlEditor.setSize(null, height)",
 		"window.addEventListener('resize', scheduleYamlEditorResize)",
@@ -115,7 +154,7 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 
 func TestWebAssetsEmbeddedAndOffline(t *testing.T) {
 	for _, name := range []string{
-		"index.html", "app.js", "styles.css", "vendor/codemirror.min.js",
+		"index.html", "app.js", "pure.js", "styles.css", "vendor/codemirror.min.js",
 		"vendor/codemirror.min.css", "vendor/uPlot.min.js", "vendor/uPlot.min.css",
 		"vendor/yaml.min.js", "vendor/closebrackets.min.js", "vendor/matchbrackets.min.js",
 		"vendor/README.md",
@@ -124,7 +163,7 @@ func TestWebAssetsEmbeddedAndOffline(t *testing.T) {
 			t.Errorf("embedded asset %s is empty", name)
 		}
 	}
-	for _, name := range []string{"index.html", "app.js", "styles.css"} {
+	for _, name := range []string{"index.html", "app.js", "pure.js", "styles.css"} {
 		if strings.Contains(mustWebAsset(t, name), "https://") || strings.Contains(mustWebAsset(t, name), "http://") {
 			t.Errorf("%s contains a runtime CDN URL", name)
 		}

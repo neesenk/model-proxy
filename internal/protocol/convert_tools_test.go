@@ -206,7 +206,7 @@ func TestStreaming_OpenAIToolCallsToAnthropic(t *testing.T) {
 		"data: {\"model\":\"gpt\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n" +
 		"data: [DONE]\n\n"
 	r := newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt")
-	out, _ := io.ReadAll(r)
+	out := readAllChecked(t, r)
 	s := string(out)
 	for _, want := range []string{
 		"event: message_start",
@@ -233,7 +233,7 @@ func TestStreaming_AnthropicToolUseToOpenAI(t *testing.T) {
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":2}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	r := newAnthropicToOpenAISSE(strings.NewReader(stream), "claude")
-	out, _ := io.ReadAll(r)
+	out := readAllChecked(t, r)
 	s := string(out)
 	for _, want := range []string{
 		`"object":"chat.completion.chunk"`,
@@ -340,7 +340,7 @@ func TestStreaming_OpenAIInterleavedParallelTools(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"y\"}}]}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\":1}\"}},{\"index\":1,\"function\":{\"arguments\":\"\\\":2}\"}}]}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
-	out, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt"))
+	out := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt"))
 	s := string(out)
 	// Both tools present, complete, in index order (fa before fb).
 	if strings.Index(s, `"name":"fa"`) < 0 || strings.Index(s, `"name":"fb"`) < 0 {
@@ -353,11 +353,14 @@ func TestStreaming_OpenAIInterleavedParallelTools(t *testing.T) {
 	if !strings.Contains(s, `"partial_json":"{\"x\":1}"`) || !strings.Contains(s, `"partial_json":"{\"y\":2}"`) {
 		t.Errorf("interleaved args not concatenated per tool:\n%s", s)
 	}
-	// No content_block_stop should appear BEFORE the first content_block_start
-	// (the invalid resume sequence the buffer approach eliminates). Count: starts
-	// >= stops (each block starts before it stops).
-	if strings.Count(s, "content_block_start") < strings.Count(s, "content_block_stop") {
-		t.Errorf("a stop preceded its start (invalid sequence):\n%s", s)
+	// No content_block_stop may appear BEFORE the first content_block_start —
+	// the invalid resume sequence the buffer approach eliminates. Position, not
+	// count: equal counts with a stop-first order silently pass a count check.
+	if strings.Index(s, "content_block_stop") < strings.Index(s, "content_block_start") {
+		t.Errorf("a stop preceded the first start (invalid sequence):\n%s", s)
+	}
+	if strings.Count(s, "content_block_start") != strings.Count(s, "content_block_stop") {
+		t.Errorf("content_block_start/stop counts differ (unpaired blocks):\n%s", s)
 	}
 }
 
@@ -369,7 +372,7 @@ func TestStreaming_AnthropicEmptyToolArgs(t *testing.T) {
 		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	out, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
+	out := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
 	if !strings.Contains(string(out), `"arguments":"{}"`) {
 		t.Errorf("empty-args tool_use did not get a {} arguments fallback:\n%s", string(out))
 	}
@@ -382,7 +385,7 @@ func TestStreaming_AnthropicDuplicateMessageDelta(t *testing.T) {
 	stream := "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	out, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
+	out := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(stream), "c"))
 	if n := strings.Count(string(out), `"finish_reason":"stop"`); n != 1 {
 		t.Errorf("duplicate message_delta produced %d finish chunks, want 1:\n%s", n, string(out))
 	}
@@ -393,7 +396,7 @@ func TestStreaming_AnthropicDuplicateMessageDelta(t *testing.T) {
 func TestStreaming_NoUsageNoDone(t *testing.T) {
 	stream := "data: {\"model\":\"gpt\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
 	r := newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt")
-	out, _ := io.ReadAll(r)
+	out := readAllChecked(t, r)
 	s := string(out)
 	if !strings.Contains(s, "event: error") || strings.Contains(s, "event: message_stop") {
 		t.Errorf("truncated stream did not fail closed:\n%s", s)
@@ -407,7 +410,7 @@ func TestStreaming_ErrorEvents(t *testing.T) {
 	// forward: openai error → anthropic error event
 	fwd := "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
 		"data: {\"error\":{\"message\":\"rate limited\",\"type\":\"rate_limit_exceeded\"}}\n\n"
-	out, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(fwd), "gpt"))
+	out := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(fwd), "gpt"))
 	s := string(out)
 	if !strings.Contains(s, "event: error") || !strings.Contains(s, "rate limited") || !strings.Contains(s, "rate_limit_exceeded") {
 		t.Errorf("forward error not propagated:\n%s", s)
@@ -415,7 +418,7 @@ func TestStreaming_ErrorEvents(t *testing.T) {
 
 	// reverse: anthropic error → openai error chunk + [DONE]
 	rev := "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}\n\n"
-	out2, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(rev), "claude"))
+	out2 := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(rev), "claude"))
 	s2 := string(out2)
 	if !strings.Contains(s2, `"error"`) || !strings.Contains(s2, "overloaded") || !strings.Contains(s2, "data: [DONE]") {
 		t.Errorf("reverse error not propagated:\n%s", s2)
@@ -427,12 +430,12 @@ func TestStreaming_ErrorEvents(t *testing.T) {
 // id; reverse: anthropic message.id → openai chunk id.
 func TestStreaming_MessageIdPassthrough(t *testing.T) {
 	fwd := "data: {\"id\":\"chatcmpl-real\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
-	out, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(fwd), "gpt"))
+	out := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(fwd), "gpt"))
 	if !strings.Contains(string(out), `"id":"chatcmpl-real"`) {
 		t.Errorf("forward did not pass through message id:\n%s", string(out))
 	}
 	rev := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_real\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	out2, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(rev), "claude"))
+	out2 := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(rev), "claude"))
 	if !strings.Contains(string(out2), `"id":"msg_real"`) {
 		t.Errorf("reverse did not pass through message id:\n%s", string(out2))
 	}

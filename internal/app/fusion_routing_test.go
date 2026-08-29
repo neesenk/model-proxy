@@ -50,11 +50,11 @@ func TestFusion_PooledParentMembers(t *testing.T) {
 	if !strings.Contains(out, "pooled synthesis ok") {
 		t.Fatalf("client missing synthesis — pooled Fusion members not resolved to virtuals: %s", out)
 	}
-	if draftUp.hits() == 0 {
-		t.Error("pooled panel member (zhipu-draft) never hit — resolver did not resolve it to a virtual")
+	if draftUp.hits() != 1 {
+		t.Errorf("pooled panel member (zhipu-draft) hits = %d, want exactly 1 (double fan-out regression)", draftUp.hits())
 	}
-	if synthUp.hits() == 0 {
-		t.Error("pooled synthesizer (zhipu-synth) never hit — resolver did not resolve it to a virtual")
+	if synthUp.hits() != 1 {
+		t.Errorf("pooled synthesizer (zhipu-synth) hits = %d, want exactly 1", synthUp.hits())
 	}
 }
 
@@ -219,8 +219,8 @@ func TestFusion_SynthesizerPoolExhaustedFailsClosed(t *testing.T) {
 	if synthUp.hits() != 0 {
 		t.Errorf("synthesizer upstream hit %d times — a bare unauthenticated request leaked", synthUp.hits())
 	}
-	if draftUp.hits() == 0 {
-		t.Error("panel member should still have been tried")
+	if draftUp.hits() != 1 {
+		t.Errorf("panel member hits = %d, want exactly 1 (still tried once)", draftUp.hits())
 	}
 }
 

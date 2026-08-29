@@ -166,14 +166,24 @@ func newFusionRig(t *testing.T, recipe FusionConfig, ups map[string]*fakeUpstrea
 	return proxy, px
 }
 
+// postAnthropic posts to the proxy's anthropic endpoint and returns the full
+// response body. Streaming reads must fail fast (client timeout) and surface
+// read errors instead of silently returning a truncated prefix.
 func postAnthropic(t *testing.T, px *httptest.Server, body string) string {
 	t.Helper()
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(body))
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
+	b, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("postAnthropic: read response: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("postAnthropic: close response: %v", closeErr)
+	}
 	return string(b)
 }
 

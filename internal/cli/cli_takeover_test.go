@@ -146,14 +146,19 @@ routes:
 func TestCLI_TakeoverOpencode(t *testing.T) {
 	dir := t.TempDir()
 	opencodeFile := filepath.Join(dir, "opencode.json")
-	os.WriteFile(opencodeFile, []byte(`{}`), 0o644)
+	if err := os.WriteFile(opencodeFile, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  opencode: %s\n  provider_id: model-proxy\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", opencodeFile)
 	cfgPath := writeTempConfig(t, cfgBody)
 	_, _, code := runCLI(t, "takeover", cfgPath, "opencode")
 	if code != 0 {
 		t.Fatalf("takeover opencode: exit=%d want 0", code)
 	}
-	data, _ := os.ReadFile(opencodeFile)
+	data, err := os.ReadFile(opencodeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(string(data), "model-proxy") || !strings.Contains(string(data), "/v1") {
 		t.Errorf("opencode not rewritten:\n%s", data)
 	}
@@ -164,7 +169,9 @@ func TestCLI_TakeoverOpencode(t *testing.T) {
 func TestCLI_RestoreClaudeRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	claudeFile := filepath.Join(dir, "claude.json")
-	os.WriteFile(claudeFile, []byte(`{"env":{"ORIGINAL":"1"}}`), 0o644)
+	if err := os.WriteFile(claudeFile, []byte(`{"env":{"ORIGINAL":"1"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	// backupDir = <configDir>/.model-proxy — config lives in dir, so backup in dir/.model-proxy.
 	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  claude: %s\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", claudeFile)
 	cfgPath := writeTempConfig(t, cfgBody)
@@ -175,7 +182,10 @@ func TestCLI_RestoreClaudeRoundTrip(t *testing.T) {
 	if _, _, code := runCLI(t, "restore", cfgPath, "claude"); code != 0 {
 		t.Fatalf("restore claude: exit=%d", code)
 	}
-	data, _ := os.ReadFile(claudeFile)
+	data, err := os.ReadFile(claudeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(string(data), "ORIGINAL") {
 		t.Errorf("restore did not bring back original:\n%s", data)
 	}
@@ -194,7 +204,9 @@ func TestCLI_TakeoverOpencode_WarnsDefault(t *testing.T) {
 	os.MkdirAll(credDir, 0o700)
 	// fresh EMPTY cache (no models) → gpt-5.5 unmatched → default
 	cache := `{"fetched_at":"` + time.Now().Format(time.RFC3339) + `","etag":"","by_name":{},"by_endpoint":{}}`
-	os.WriteFile(filepath.Join(credDir, "models_cache.json"), []byte(cache), 0o600)
+	if err := os.WriteFile(filepath.Join(credDir, "models_cache.json"), []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
 	defer srv.Close()

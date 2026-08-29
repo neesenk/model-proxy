@@ -6,17 +6,21 @@ import (
 )
 
 // TestRateLimitPolicyArchitecture keeps 429 classification and horizon policy
-// leaf-owned. Root may only adapt the precomputed decision to runtime state.
+// leaf-owned. The composition root (internal/app, plus the thin root package)
+// may only adapt the precomputed decision to runtime state — the duplicate
+// ban must cover internal/app, where the composition root lives today.
 func TestRateLimitPolicyArchitecture(t *testing.T) {
 	forbiddenRoot := map[string]bool{
 		"classify429": true, "parseResetHint": true, "hintDuration": true, "parseRateLimit": true,
 	}
-	for _, path := range productionGoFilesIn(t, ".") {
-		file, fileSet := parseGoFile(t, path)
-		for _, declaration := range file.Decls {
-			function, ok := declaration.(*ast.FuncDecl)
-			if ok && forbiddenRoot[function.Name.Name] {
-				t.Errorf("root production policy duplicate %s at %s", function.Name.Name, describe(fileSet, function, "function"))
+	for _, dir := range []string{".", "internal/app"} {
+		for _, path := range productionGoFilesIn(t, dir) {
+			file, fileSet := parseGoFile(t, path)
+			for _, declaration := range file.Decls {
+				function, ok := declaration.(*ast.FuncDecl)
+				if ok && forbiddenRoot[function.Name.Name] {
+					t.Errorf("composition-root policy duplicate %s at %s", function.Name.Name, describe(fileSet, function, "function"))
+				}
 			}
 		}
 	}

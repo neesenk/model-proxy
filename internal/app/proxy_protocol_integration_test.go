@@ -37,7 +37,7 @@ func TestUC_AnthropicMappingAndPathKept(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post(t, px.URL+"/v1/messages", `{"model":"claude-opus-4-8","messages":[]}`)
+	postOK(t, px.URL+"/v1/messages", `{"model":"claude-opus-4-8","messages":[]}`)
 
 	if hitModel != "glm-5.2" {
 		t.Errorf("upstream model=%q want glm-5.2 (claude_mapping should translate)", hitModel)
@@ -68,7 +68,7 @@ func TestUC_OpenAIStripsV1Prefix(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post(t, px.URL+"/v1/chat/completions", `{"model":"gpt-5.5","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"gpt-5.5","messages":[]}`)
 
 	if hitPath != "/chat/completions" {
 		t.Errorf("upstream path=%q want /chat/completions (openai strips /v1)", hitPath)

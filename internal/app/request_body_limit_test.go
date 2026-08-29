@@ -19,7 +19,10 @@ routes:
   glm: [{provider: zhipu, model: glm}]
 `
 	newProxy := func(extra string) *Proxy {
-		cfg, _ := LoadConfigFromBytes("test", []byte(base+extra))
+		cfg, err := LoadConfigFromBytes("test", []byte(base+extra))
+		if err != nil {
+			t.Fatal(err)
+		}
 		return newTestProxy(t, cfg)
 	}
 	post := func(p *Proxy, pad int) int {
@@ -30,11 +33,12 @@ routes:
 		return rec.Code
 	}
 
-	// Default cap: an ordinary request passes the gate (it then fails on the
-	// unroutable test upstream — any non-413 status proves the gate opened).
+	// Default cap: an ordinary request passes the gate, then fails on the
+	// unroutable test upstream with a deterministic 502 — exactly that status
+	// proves the gate opened (413 = gate rejected; anything else = new bug).
 	p := newProxy("")
-	if code := post(p, 1024); code == http.StatusRequestEntityTooLarge {
-		t.Errorf("default cap: ordinary request rejected with 413, status=%d", code)
+	if code := post(p, 1024); code != http.StatusBadGateway {
+		t.Errorf("default cap: status=%d, want 502 (gate opened, unroutable upstream)", code)
 	}
 
 	// Explicit cap: a body larger than the cap is rejected with 413 up front.
@@ -42,8 +46,8 @@ routes:
 	if code := post(p, 2048); code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized body: status=%d, want 413", code)
 	}
-	// A body under the explicit cap passes the gate.
-	if code := post(p, 16); code == http.StatusRequestEntityTooLarge {
-		t.Errorf("small body rejected with 413, status=%d", code)
+	// A body under the explicit cap passes the gate (deterministic 502 again).
+	if code := post(p, 16); code != http.StatusBadGateway {
+		t.Errorf("small body: status=%d, want 502 (gate opened, unroutable upstream)", code)
 	}
 }

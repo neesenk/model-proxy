@@ -224,7 +224,7 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 	for i := 0; i < 3; i++ { // trip primary circuit (3 failures)
 		post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	}
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary open → fallback, sticky=fallback
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary open → fallback, sticky=fallback
 	fbAfterFailover := fHits.Load()
 	stickyFrom := time.Now()
 
@@ -235,7 +235,7 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 		h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]
 		return ok && h.Available
 	})
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	if got := fHits.Load(); got != fbAfterFailover+1 {
 		t.Errorf("within dwell: fallback should still serve (sticky), got fHits %d→%d", fbAfterFailover, got)
 	}
@@ -248,7 +248,7 @@ func TestStickyDwell_HoldsThenReEvaluates(t *testing.T) {
 	if rest := time.Until(stickyFrom.Add(200 * time.Millisecond)); rest > 0 {
 		time.Sleep(rest)
 	}
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	if got := pHits.Load(); got != 4 {
 		t.Errorf("after dwell: primary should be re-evaluated (half-open probe), got pHits %d (want 4)", got)
 	}
@@ -368,10 +368,88 @@ func TestHalfOpen_4xxReleasesSlot(t *testing.T) {
 	if !h.Available {
 		t.Error("primary must be available again after the 4xx probe released the slot")
 	}
-	// Next request reaches the primary again (single-flight freed).
+	// Next request reaches the primary again (single-flight freed). The
+	// upstream always answers 400 here, so the client sees the committed 400.
 	before := pHits.Load()
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 400 {
+		t.Fatalf("post-release request: status = %d, want 400 (committed upstream client error)", st)
+	}
 	if pHits.Load() != before+1 {
 		t.Errorf("primary not retried after slot release: hits %d → %d", before, pHits.Load())
+	}
+}
+
+// TestHalfOpen_FailedProbeReopensCircuit (P0): the missing half-open terminal.
+// A probe that gets a 5xx must re-open the circuit with a fresh cooldown AND
+// release the single-flight slot — otherwise later requests would either keep
+// hitting the dead primary or starve on a stuck slot. The unit-level manager
+// test covers the state transition; this is the HTTP-level end state.
+func TestHalfOpen_FailedProbeReopensCircuit(t *testing.T) {
+	primary, pHits := newHitServer(func(c int) (int, string, http.Header, time.Duration) {
+		return 500, `{"e":"broken"}`, nil, 0 // trips the circuit AND fails the probe
+	})
+	defer primary.Close()
+	fallback, _ := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+		return 200, `{"ok":true}`, nil, 0
+	})
+	defer fallback.Close()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"primary":  {OpenAIBaseURL: primary.URL, Provider: testProviderID},
+			"fallback": {OpenAIBaseURL: fallback.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]RouteTarget{
+			"m1": {
+				{Provider: "primary", Model: "m1", Priority: 1},
+				{Provider: "fallback", Model: "m1", Priority: 2},
+			},
+		},
+		Scheduling: schedCfg(3, "50ms", "10s", "5s", "0s"),
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["primary"] = &testProv{key: "p"}
+	p.providers["fallback"] = &testProv{key: "f"}
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	// Trip the circuit (3× 500 → open), then wait out the cooldown.
+	for i := 0; i < 3; i++ {
+		postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	}
+	waitUntil(t, "primary circuit cooldown → half-open", func() bool {
+		h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]
+		return ok && h.Available
+	})
+
+	// The half-open probe goes to the primary, gets 500, and the request
+	// still succeeds via the fallback (client-visible outcome is a 200).
+	probeHits := pHits.Load()
+	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
+		t.Fatalf("probe request: status = %d, want 200 (fallback serves)", st)
+	}
+	if got := pHits.Load(); got != probeHits+1 {
+		t.Fatalf("probe hits: primary %d → %d, want exactly one probe", probeHits, got)
+	}
+
+	// The failed probe must re-open the circuit with a fresh cooldown and
+	// release the single-flight slot.
+	h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]
+	if !ok {
+		t.Fatal("primary health missing")
+	}
+	if h.Available || !h.CircuitOpenUntil.After(time.Now()) {
+		t.Errorf("failed probe did not re-open the circuit: %+v", h)
+	}
+	if h.HalfOpenInFlight {
+		t.Error("half-open slot stuck after a failed probe")
+	}
+
+	// While re-opened, the next request must skip the primary entirely.
+	before := pHits.Load()
+	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`); st != 200 {
+		t.Fatalf("post-reopen request: status = %d, want 200", st)
+	}
+	if pHits.Load() != before {
+		t.Errorf("primary hit after circuit re-opened: %d → %d", before, pHits.Load())
 	}
 }

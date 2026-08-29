@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"fmt"
 	observestats "model-proxy/internal/observe/stats"
 )
 
@@ -402,7 +403,7 @@ func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	sink := &observestats.FailOnceSink{Store: store, FailNext: true}
+	sink := &failOnceStatsSink{Store: store}
 	proxy := &Proxy{
 		lifecycle: runtimestate.NewLifecycle(),
 		metrics:   metrics,
@@ -415,7 +416,7 @@ func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 	addRuntimeStats(metrics, tokens, agents, 2, 20)
 
 	proxy.Close()
-	if sink.FailNext {
+	if sink.failNext {
 		t.Fatal("shutdown did not exercise the injected final-flush failure")
 	}
 
@@ -566,4 +567,24 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 		t.Fatalf("failed reset mutated live state: metrics=%+v tokens=%+v agents=%+v cache=%+v",
 			metrics.Snapshot(), tokens.Snapshot(), agents.Snapshot(), cache.Stats())
 	}
+}
+
+// failOnceStatsSink injects one FlushContext failure — the transient-failure
+// seam for the shutdown/reset integration tests. Test-side only: production
+// packages carry no test-only hooks (testing.md "模块归属").
+type failOnceStatsSink struct {
+	*observestats.Store
+	failNext bool
+}
+
+func (s *failOnceStatsSink) FlushContext(
+	ctx context.Context,
+	minute int64,
+	deltas map[observestats.Key]observestats.Counters,
+) error {
+	if s.failNext {
+		s.failNext = false
+		return fmt.Errorf("injected stats flush failure")
+	}
+	return s.Store.FlushContext(ctx, minute, deltas)
 }

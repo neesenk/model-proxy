@@ -1,11 +1,12 @@
 package app
 
 import (
-	cliframework "model-proxy/internal/cli/framework"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	cliframework "model-proxy/internal/cli/framework"
 	"model-proxy/internal/provider"
 )
 
@@ -27,11 +28,22 @@ func TestBuildProviders_AllProviderIDs(t *testing.T) {
 		},
 	}
 	m := BuildProviders(cfg, AccountStore(), testBuildOpts()).Providers
-	// P1-3: not just nil-check — also verify the concrete type matches the
-	// expected provider_id (catches a bug where all providers instantiate as zhipu).
-	for _, name := range []string{"aqp", "codex", "zhipu", "deepseek", "volcengine"} {
+	// P1-3: not just nil-check — verify the concrete type matches the expected
+	// provider_id (catches a bug where all providers instantiate as zhipu).
+	wantType := map[string]string{
+		"aqp":        "*provider.AqpProvider",
+		"codex":      "*provider.CodexProvider",
+		"zhipu":      "*provider.ZhipuProvider",
+		"deepseek":   "*provider.DeepSeekProvider",
+		"volcengine": "*provider.VolcengineProvider",
+	}
+	for name, want := range wantType {
 		if m[name] == nil {
 			t.Errorf("buildProviders: %s is nil", name)
+			continue
+		}
+		if got := fmt.Sprintf("%T", m[name]); got != want {
+			t.Errorf("buildProviders: %s instantiated as %s, want %s", name, got, want)
 		}
 	}
 	// Verify QuotaFn is wired for each (non-nil Quota() returns a snapshot, not error)

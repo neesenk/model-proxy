@@ -46,13 +46,51 @@ func TestAcceptParsesCommentsAndBlankLines(t *testing.T) {
 
 func TestUnreadableFileFailsClosed(t *testing.T) {
 	dir := t.TempDir()
-	// Path exists as a directory → read fails → empty set → accept nothing.
-	s := NewSource(filepath.Join(dir, "missing-or-dir"))
-	if s.Enabled() != true {
-		t.Fatal("a configured path reports enabled even when unreadable")
+	// A missing path and a directory path both fail os.ReadFile → the cached
+	// set becomes empty → accept nothing (fail closed, never open).
+	for _, name := range []string{"missing-file", "a-directory"} {
+		path := filepath.Join(dir, name)
+		if name == "a-directory" {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s := NewSource(path)
+		if !s.Enabled() {
+			t.Fatalf("%s: a configured path reports enabled even when unreadable", name)
+		}
+		if s.Accept("sk-anything") {
+			t.Fatalf("%s: unreadable token file must fail closed, not open", name)
+		}
 	}
-	if s.Accept("sk-anything") {
-		t.Fatal("unreadable token file must fail closed, not open")
+}
+
+// TestMultiFileSourceUnionsTokens: NewSource accepts several token files and
+// unions them; one unreadable file must not switch off the OTHER file's tokens
+// (per-file fail-closed, set-level union).
+func TestMultiFileSourceUnionsTokens(t *testing.T) {
+	dir := t.TempDir()
+	good := writeTokenFile(t, dir, "good", "sk-good\n")
+	other := writeTokenFile(t, dir, "other", "sk-other\n")
+	badDir := filepath.Join(dir, "unreadable")
+	if err := os.Mkdir(badDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewSource(good, other, badDir)
+	if !s.Enabled() {
+		t.Fatal("multi-file source with at least one path reports enabled")
+	}
+	if !s.Accept("sk-good") || !s.Accept("sk-other") {
+		t.Fatal("tokens from BOTH readable files must be accepted")
+	}
+	if s.Accept("sk-unknown") {
+		t.Fatal("unknown token must be rejected")
+	}
+	// A readable-but-empty cached set from the unreadable file must not erase
+	// the union (the per-file failure is local).
+	if s.Accept("") {
+		t.Fatal("empty token never accepted")
 	}
 }
 

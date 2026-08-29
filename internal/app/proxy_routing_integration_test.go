@@ -37,21 +37,35 @@ func TestUC_ModelsEndpointUnion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/models: status = %d, want 200", resp.StatusCode)
+	}
 	var out struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	json.NewDecoder(resp.Body).Decode(&out)
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("GET /v1/models: decode: %v", err)
+	}
 	resp.Body.Close()
 
+	// Exact set: routes ∪ claude_mapping — a leak of any other name (over
+	//exposure) is as wrong as a missing one.
+	want := map[string]bool{
+		"glm-5.2": true, "deepseek-v4-pro": true,
+		"claude-opus-4-8": true, "claude-sonnet-4-6": true,
+	}
 	got := map[string]bool{}
 	for _, m := range out.Data {
+		if !want[m.ID] {
+			t.Errorf("GET /v1/models exposed unexpected model %q (over-exposure); got %v", m.ID, out.Data)
+		}
 		got[m.ID] = true
 	}
-	for _, want := range []string{"glm-5.2", "deepseek-v4-pro", "claude-opus-4-8", "claude-sonnet-4-6"} {
-		if !got[want] {
-			t.Errorf("GET /v1/models missing %q (routes ∪ claude_mapping); got %v", want, got)
+	for name := range want {
+		if !got[name] {
+			t.Errorf("GET /v1/models missing %q (routes ∪ claude_mapping); got %v", name, got)
 		}
 	}
 }
@@ -78,7 +92,7 @@ func TestUC_DebugScheduleReportsSticky(t *testing.T) {
 	defer px.Close()
 
 	// Send a request so the route parks sticky on provider "a".
-	post(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`)
+	postOK(t, px.URL+"/v1/responses", `{"model":"m1","input":[]}`)
 
 	resp, err := http.Get(px.URL + "/debug/schedule")
 	if err != nil {
@@ -189,7 +203,7 @@ func TestUC_AqpBetaAndHeaders(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post(t, px.URL+"/v1/messages", `{"model":"glm-5.2","messages":[]}`)
+	postOK(t, px.URL+"/v1/messages", `{"model":"glm-5.2","messages":[]}`)
 
 	if !strings.Contains(gotURL, "beta=true") {
 		t.Errorf("upstream URL=%q missing beta=true (aqp /messages needs it)", gotURL)
@@ -231,7 +245,7 @@ func TestUC_CodexStoreFalseInjected(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post(t, px.URL+"/v1/responses", `{"model":"gpt-5.5","input":[]}`)
+	postOK(t, px.URL+"/v1/responses", `{"model":"gpt-5.5","input":[]}`)
 
 	var m struct {
 		Store bool `json:"store"`
@@ -277,8 +291,8 @@ func TestUC_DeepSeekDualProtocolBaseURL(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post(t, px.URL+"/v1/messages", `{"model":"deepseek-v4-pro","messages":[]}`)
-	post(t, px.URL+"/v1/chat/completions", `{"model":"deepseek-v4-pro","messages":[]}`)
+	postOK(t, px.URL+"/v1/messages", `{"model":"deepseek-v4-pro","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"deepseek-v4-pro","messages":[]}`)
 
 	if anthropicHit == "" {
 		t.Error("anthropic request did not hit anthropic_base_url upstream")
@@ -363,9 +377,10 @@ func TestUC_UnparseableBody400(t *testing.T) {
 // --- UC extra: header whitelist — client Authorization is NOT forwarded ---
 
 func TestUC_ClientAuthNotForwarded(t *testing.T) {
-	var gotAuth string
+	var gotAuth, gotCookie string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
+		gotCookie = r.Header.Get("Cookie")
 		w.Write([]byte(`{}`))
 	}))
 	defer up.Close()
@@ -388,6 +403,9 @@ func TestUC_ClientAuthNotForwarded(t *testing.T) {
 
 	if gotAuth != "Bearer proxy-key" {
 		t.Errorf("upstream Authorization=%q want Bearer proxy-key (client secret must not leak)", gotAuth)
+	}
+	if gotCookie != "" {
+		t.Errorf("upstream Cookie=%q want empty (client cookie must not leak through the header whitelist)", gotCookie)
 	}
 }
 

@@ -272,8 +272,8 @@ func TestLiveEvents_CacheHitAndAllFailed(t *testing.T) {
 	defer cancel()
 	pxc := httptest.NewServer(http.HandlerFunc(pc.Handler))
 	defer pxc.Close()
-	post(t, pxc.URL+"/v1/responses", `{"model":"glm","input":[]}`) // prime
-	post(t, pxc.URL+"/v1/responses", `{"model":"glm","input":[]}`) // cache hit
+	postOK(t, pxc.URL+"/v1/responses", `{"model":"glm","input":[]}`) // prime
+	postOK(t, pxc.URL+"/v1/responses", `{"model":"glm","input":[]}`) // cache hit
 	gotCache := false
 	deadline := time.After(time.Second)
 	for !gotCache {

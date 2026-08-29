@@ -236,7 +236,7 @@ func TestBuildProvidersSingleEntryPluralPoolBindsKey(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post(t, px.URL+"/v1/chat/completions", `{"model":"glm-4.6","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"glm-4.6","messages":[]}`)
 
 	if upstreamHit.auth != "Bearer ONLY" {
 		t.Fatalf("upstream Authorization = %q, want Bearer ONLY (the bound pool key)", upstreamHit.auth)

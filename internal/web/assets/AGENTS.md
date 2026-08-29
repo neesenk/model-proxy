@@ -17,8 +17,13 @@
 ## 验证
 
 ```bash
-node --check internal/web/assets/app.js
+node --check internal/web/assets/app.js internal/web/assets/pure.js
+node --test internal/web/jstests/pure.test.mjs
 go test ./internal/web -count=1
 ```
+
+`pure.js` 只收零 DOM 依赖的纯函数（esc、格式化、YAML 高度计算等），
+`app.js` 从 `./pure.js` import；新增纯逻辑先进 pure.js 并在
+`jstests/pure.test.mjs` 加行为用例，locale/时区相关的渲染留在 app.js。
 
 布局改动还需检查窄窗口、短窗口、长日志、长 YAML 和 hover/selection 状态。

@@ -103,8 +103,10 @@ func ParseDeepseekQuota(body []byte) *QuotaSnapshot {
 	}
 	s := &QuotaSnapshot{Billing: BillingPayG, RemainingPct: -1, AsOf: time.Now()}
 	if err := json.Unmarshal(body, &u); err != nil {
-		s.Err = err.Error()
-		return s
+		// Same contract as every other failure in Quota(): BillingUnknown with
+		// the error — a snapshot that claims PayG while carrying an error
+		// contradicts the function's own failure contract.
+		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}
 	}
 	if !u.IsAvailable {
 		s.Notes = append(s.Notes, "insufficient balance")

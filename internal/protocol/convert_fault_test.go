@@ -276,7 +276,7 @@ func TestConvertFault_OrphanToolPairs(t *testing.T) {
 // (bufio.Scanner yields the final token).
 func TestConvertFault_FinalFrameNoTrailingNewline(t *testing.T) {
 	in := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]"
-	out, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(in), "gpt"))
+	out := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(in), "gpt"))
 	s := string(out)
 	if !strings.Contains(s, "event: message_stop") || !strings.Contains(s, `"text":"hi"`) {
 		t.Errorf("unterminated stream did not convert cleanly:\n%s", s)
@@ -472,7 +472,7 @@ func TestConvertFault_NoNullStringPollution(t *testing.T) {
 	streamIn := "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{}}]}}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	raw, _ := io.ReadAll(newOpenAIToResponsesSSE(strings.NewReader(streamIn), "m"))
+	raw := readAllChecked(t, newOpenAIToResponsesSSE(strings.NewReader(streamIn), "m"))
 	if strings.Contains(string(raw), `"null"`) {
 		t.Errorf("chat→r stream leaked literal null:\n%s", raw)
 	}
@@ -490,7 +490,7 @@ func TestConvertFault_NoNullStringPollution(t *testing.T) {
 		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
 		"event: message_stop\n" +
 		`data: {"type":"message_stop"}` + "\n\n"
-	rawA, _ := io.ReadAll(newAnthropicToResponsesSSE(strings.NewReader(streamA), "m"))
+	rawA := readAllChecked(t, newAnthropicToResponsesSSE(strings.NewReader(streamA), "m"))
 	if strings.Contains(string(rawA), `"null"`) {
 		t.Errorf("a→r stream leaked literal null:\n%s", rawA)
 	}
@@ -507,7 +507,7 @@ func TestConvertFault_NoNullStringPollution(t *testing.T) {
 func TestConvertFault_SSELineBoundary(t *testing.T) {
 	// boundary-ε: passes and converts.
 	small := "data: {\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("x", sseScanBuf-64) + "\"}}]}\n\ndata: [DONE]\n\n"
-	out, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(small), "g"))
+	out := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(small), "g"))
 	if !strings.Contains(string(out), "event: message_stop") {
 		t.Errorf("boundary-ε line did not convert (len=%d)", len("data: {\"choices\":[{\"delta\":{\"content\":\"")+sseScanBuf-64)
 	}

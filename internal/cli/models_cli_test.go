@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,10 +283,12 @@ func TestCLI_ModelsDisplay_HydratesFromCache(t *testing.T) {
 	cache := `{"fetched_at":"` + time.Now().Format(time.RFC3339) + `","etag":"\"v1\"","by_name":{"glm-4.6":{"ctx":204800,"out":131072,"in":["text"],"out_mod":["text"]}},"by_endpoint":{"https://open.bigmodel.cn/api/paas/v4":["glm-4.6"]}}`
 	os.WriteFile(filepath.Join(credDir, "models_cache.json"), []byte(cache), 0o600)
 
-	// endpoint that FAILS if contacted (proves the fresh cache was used instead)
-	called := false
+	// endpoint that FAILS if contacted (proves the fresh cache was used instead).
+	// The handler runs on the server goroutine while the CLI runs in a
+	// subprocess — atomic so the read below is race-free either way.
+	var called atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
+		called.Store(true)
 		w.WriteHeader(500)
 	}))
 	defer srv.Close()
@@ -295,7 +298,7 @@ func TestCLI_ModelsDisplay_HydratesFromCache(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("models display exit=%d", code)
 	}
-	if called {
+	if called.Load() {
 		t.Error("fresh cache should NOT have fetched from endpoint")
 	}
 	if !strings.Contains(stdout, "glm-4.6") || !strings.Contains(stdout, "models.dev") {

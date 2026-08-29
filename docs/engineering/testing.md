@@ -218,7 +218,7 @@ forward/Fusion/reload/HTTP/CLI/persistence/quota poll 编排；集成测试通�
 
 | 改动 | 追加验证 |
 |---|---|
-| Web JS | `node --check internal/web/assets/app.js` |
+| Web JS | `node --check internal/web/assets/app.js internal/web/assets/pure.js` + `node --test internal/web/jstests/pure.test.mjs`（Go 侧 `TestWebAssets*` 驱动；无 node 时 Skip，`MP_REQUIRE_NODE=1` 时缺 node 必须 FAIL，CI 以该开关运行） |
 | 并发、reload、持久化 | 定向 `go test -race -run ... -count=20` |
 | build tags/平台代码 | Linux + Windows cross build |
 | CLI 显示 | `CLI.md` 对应 stdout/stderr/exit code 测试 |

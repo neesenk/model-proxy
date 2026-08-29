@@ -57,20 +57,21 @@ func TestGuardBlocksDNSRebinding(t *testing.T) {
 }
 
 func TestGuardAllowsSameOriginBrowserAndPlainClients(t *testing.T) {
-	// Same-origin browser fetch: Origin matches the loopback Host.
-	if got := guardRequest(t, http.MethodGet, "/api/config", "http://127.0.0.1:8123", "127.0.0.1:8123").Code; got == http.StatusForbidden {
-		t.Errorf("same-origin browser request was rejected (%d)", got)
+	// Same-origin browser fetch: Origin matches the loopback Host. Assert the
+	// exact 200 — `!= 403` would also pass a 500 from a broken handler.
+	if got := guardRequest(t, http.MethodGet, "/api/config", "http://127.0.0.1:8123", "127.0.0.1:8123").Code; got != http.StatusOK {
+		t.Errorf("same-origin browser request = %d, want 200", got)
 	}
-	if got := guardRequest(t, http.MethodGet, "/api/config", "http://localhost:8123", "localhost:8123").Code; got == http.StatusForbidden {
-		t.Errorf("localhost same-origin request was rejected (%d)", got)
+	if got := guardRequest(t, http.MethodGet, "/api/config", "http://localhost:8123", "localhost:8123").Code; got != http.StatusOK {
+		t.Errorf("localhost same-origin request = %d, want 200", got)
 	}
-	if got := guardRequest(t, http.MethodGet, "/api/config", "http://[::1]:8123", "[::1]:8123").Code; got == http.StatusForbidden {
-		t.Errorf("ipv6 loopback same-origin request was rejected (%d)", got)
+	if got := guardRequest(t, http.MethodGet, "/api/config", "http://[::1]:8123", "[::1]:8123").Code; got != http.StatusOK {
+		t.Errorf("ipv6 loopback same-origin request = %d, want 200", got)
 	}
 	// CLI/curl (no Origin, no Sec-Fetch-Site) with an arbitrary Host: the
 	// daemonctl client and scripts address the port directly.
-	if got := guardRequest(t, http.MethodGet, "/api/config", "", "").Code; got == http.StatusForbidden {
-		t.Errorf("plain client request was rejected (%d)", got)
+	if got := guardRequest(t, http.MethodGet, "/api/config", "", "").Code; got != http.StatusOK {
+		t.Errorf("plain client request = %d, want 200", got)
 	}
 }
 

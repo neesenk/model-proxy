@@ -20,7 +20,7 @@ func TestParity_TotalTokensRecomputed(t *testing.T) {
 	in := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":5}}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	raw, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
 	if !strings.Contains(string(raw), `"total_tokens":8`) {
 		t.Errorf("total_tokens not recomputed as input+output:\n%s", raw)
 	}
@@ -37,7 +37,7 @@ func TestParity_AnthropicSourceDoneTerminator(t *testing.T) {
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n" +
 		"data: [DONE]\n\n" +
 		"data: {\"garbage\":\"after done\"}\n\n"
-	raw, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
 	out := string(raw)
 	if !strings.Contains(out, `"finish_reason":"stop"`) {
 		t.Errorf("[DONE]-terminated anthropic stream produced no clean finish:\n%s", out)
@@ -59,14 +59,14 @@ func TestParity_SSEParserRobustness(t *testing.T) {
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"héllo ☃\"}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	want, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	want := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
 
 	oneByte := &oneByteReader{r: strings.NewReader(in)}
-	got, _ := io.ReadAll(newAnthropicToOpenAISSE(oneByte, "m"))
+	got := readAllChecked(t, newAnthropicToOpenAISSE(oneByte, "m"))
 	assertSemanticallyEqualSSE(t, "1-byte chunked feed", string(want), string(got))
 
 	crlf := strings.ReplaceAll(in, "\n", "\r\n")
-	gotCRLF, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(crlf), "m"))
+	gotCRLF := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(crlf), "m"))
 	assertSemanticallyEqualSSE(t, "CRLF feed", string(want), string(gotCRLF))
 }
 
@@ -239,7 +239,7 @@ func TestParity_CompletedSnapshotCompleteness(t *testing.T) {
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	raw, _ := io.ReadAll(newAnthropicToResponsesSSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newAnthropicToResponsesSSE(strings.NewReader(in), "m"))
 	var completed map[string]any
 	for _, ev := range drainSSE(t, strings.NewReader(string(raw))) {
 		if ev.event == "response.completed" {

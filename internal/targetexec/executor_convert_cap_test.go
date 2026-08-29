@@ -11,7 +11,7 @@ import (
 	"model-proxy/internal/protocol"
 )
 
-// infiniteZeroReader is an endless zero-byte source (cheaper than a 64MiB slice).
+// infiniteZeroReader is an endless source of 'a' bytes (cheaper than a 64MiB slice).
 type infiniteZeroReader struct{}
 
 func (infiniteZeroReader) Read(p []byte) (int, error) {

@@ -246,9 +246,14 @@ func TestMergePresetBlock_MissingConfigFileFails(t *testing.T) {
 }
 
 func TestAmbiguousModels_MissingProviderIsNil(t *testing.T) {
-	cfg, err := configdomain.LoadConfigFromBytes("c", []byte(minimalConfig+"\nproviders: {}\n"))
-	if err != nil {
-		t.Skip("providers:{} may be rejected by validate; nil-safety arm is still covered by the call path")
+	// Construct the config directly: `providers: {}` is rejected by config
+	// validate ("no providers configured"), so loading it from YAML would make
+	// this test skip unconditionally. AmbiguousModels is a pure function and
+	// must stay nil-safe for a preset name that is simply absent.
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"zhipu": {OpenAIBaseURL: "http://x", Provider: "zhipu", Models: []string{"glm"}},
+		},
 	}
 	if got := AmbiguousModels(cfg, "absent"); got != nil {
 		t.Fatalf("AmbiguousModels for missing provider = %v, want nil", got)

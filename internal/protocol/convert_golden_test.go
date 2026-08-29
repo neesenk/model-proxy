@@ -260,9 +260,13 @@ func assertReplayInvariants(t *testing.T, raw, target string) {
 			t.Errorf("terminal events: finish=%d error=%d, want exactly one:\n%s", finish, errs, raw)
 		}
 	case "responses":
-		term := sseCount(events, "response.completed") + sseCount(events, "response.incomplete") + sseCount(events, "response.failed")
+		// Same caliber as the fuzz invariants: a bare `error` event is also a
+		// terminal — a converter emitting error + completed would otherwise
+		// pass this count.
+		term := sseCount(events, "response.completed") + sseCount(events, "response.incomplete") +
+			sseCount(events, "response.failed") + sseCount(events, "error")
 		if term != 1 {
-			t.Errorf("terminal events: completed+incomplete+failed = %d, want 1:\n%s", term, raw)
+			t.Errorf("terminal events: completed+incomplete+failed+error = %d, want 1:\n%s", term, raw)
 		}
 		// added/done pairing only when the stream ended cleanly (a failed
 		// stream legitimately leaves items open).
@@ -306,9 +310,16 @@ func assertScenarioSurvival(t *testing.T, file, src, target, input, output strin
 		!strings.Contains(out, toolOf[target]) {
 		t.Errorf("%s: input carries a tool call but the %s output lost it", file, target)
 	}
-	thinkOf := map[string]string{"anthropic": "thinking", "chat": "reasoning_content", "responses": "reasoning"}
+	// Precise markers, same discipline as toolOf above: bare "thinking" would
+	// false-positive when the visible text merely mentions the word. The lists
+	// cover every shape our converters emit for each target protocol.
+	thinkOf := map[string][]string{
+		"anthropic": {`"type":"thinking"`, `"type":"thinking_delta"`, `"type":"redacted_thinking"`},
+		"chat":      {`"reasoning_content":`},
+		"responses": {`"type":"reasoning"`, `"reasoning_summary"`},
+	}
 	if containsAny(in, []string{`"type":"thinking"`, "thinking_delta", `"reasoning_content":"`, `"reasoning":"`, `"type":"reasoning"`, "reasoning_summary", "reasoning_text"}) &&
-		!strings.Contains(out, thinkOf[target]) {
+		!containsAny(out, thinkOf[target]) {
 		t.Errorf("%s: input carries reasoning but the %s output lost it", file, target)
 	}
 }

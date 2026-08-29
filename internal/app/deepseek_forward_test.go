@@ -63,7 +63,7 @@ func TestForward_DeepSeekRoutesByProtocol(t *testing.T) {
 	defer px.Close()
 
 	// 1) anthropic POST /v1/messages → anthropic_base_url, NOT the openai base.
-	post(t, px.URL+"/v1/messages", `{"model":"deepseek-v4-pro","messages":[]}`)
+	postOK(t, px.URL+"/v1/messages", `{"model":"deepseek-v4-pro","messages":[]}`)
 	if anthropicHit.path == "" {
 		t.Error("anthropic request: expected to hit anthropic upstream")
 	}
@@ -82,7 +82,7 @@ func TestForward_DeepSeekRoutesByProtocol(t *testing.T) {
 
 	// 2) openai POST /v1/chat/completions → openai_base_url, NOT anthropic_base_url.
 	openaiHit, anthropicHit = dsHit{}, dsHit{}
-	post(t, px.URL+"/v1/chat/completions", `{"model":"deepseek-v4-pro","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"deepseek-v4-pro","messages":[]}`)
 	if openaiHit.path == "" {
 		t.Error("openai request: expected to hit openai upstream")
 	}

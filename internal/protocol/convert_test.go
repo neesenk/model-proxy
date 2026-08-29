@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"io"
 	"strings"
 	"testing"
 )
@@ -114,7 +113,7 @@ func TestOpenAIToAnthropicSSE(t *testing.T) {
 		"data: {\"model\":\"gpt-x\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":2}}\n\n" +
 		"data: [DONE]\n\n"
 	r := newOpenAIToAnthropicSSE(strings.NewReader(in), "gpt-x")
-	out, _ := io.ReadAll(r)
+	out := readAllChecked(t, r)
 	s := string(out)
 	for _, want := range []string{"event: message_start", "event: content_block_start", "event: content_block_delta", `"text":"hel"`, `"text":"lo"`, "event: content_block_stop", "event: message_delta", `"stop_reason":"end_turn"`, "event: message_stop"} {
 		if !strings.Contains(s, want) {
@@ -129,7 +128,7 @@ func TestAnthropicToOpenAISSE(t *testing.T) {
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	r := newAnthropicToOpenAISSE(strings.NewReader(in), "claude")
-	out, _ := io.ReadAll(r)
+	out := readAllChecked(t, r)
 	s := string(out)
 	for _, want := range []string{`"object":"chat.completion.chunk"`, `"content":"hi"`, `"finish_reason":"stop"`, "data: [DONE]"} {
 		if !strings.Contains(s, want) {
@@ -199,7 +198,7 @@ func TestOpenAIToAnthropicSSE_StringShapedError(t *testing.T) {
 		"data: {\"error\":\"rate limited\"}\n\n" +
 		"data: [DONE]\n\n"
 	r := newOpenAIToAnthropicSSE(strings.NewReader(in), "gpt-x")
-	out, _ := io.ReadAll(r)
+	out := readAllChecked(t, r)
 	s := string(out)
 	if !strings.Contains(s, "event: error") || !strings.Contains(s, `"message":"rate limited"`) {
 		t.Errorf("string-form error chunk not surfaced:\n%s", s)

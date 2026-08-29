@@ -50,7 +50,7 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 
 	// 1) gpt-5.5 → codex provider
 	codexHit, gwHit = requestHit{}, requestHit{}
-	post(t, px.URL+"/v1/responses", `{"model":"gpt-5.5","input":[]}`)
+	postOK(t, px.URL+"/v1/responses", `{"model":"gpt-5.5","input":[]}`)
 	if codexHit.path == "" {
 		t.Error("gpt-5.5: expected to hit codex backend")
 	}
@@ -67,7 +67,7 @@ func TestForward_ProviderRouting_SplitsByModel(t *testing.T) {
 
 	// 2) glm-5.2 → aqp provider
 	codexHit, gwHit = requestHit{}, requestHit{}
-	post(t, px.URL+"/v1/responses", `{"model":"glm-5.2","input":[]}`)
+	postOK(t, px.URL+"/v1/responses", `{"model":"glm-5.2","input":[]}`)
 	if gwHit.path == "" {
 		t.Error("glm-5.2: expected to hit aqp backend")
 	}
@@ -133,8 +133,14 @@ func post(t *testing.T, url, body string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	b, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("post %s: read response: %v", url, readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("post %s: close response: %v", url, closeErr)
+	}
 	return resp.StatusCode, string(b)
 }
 

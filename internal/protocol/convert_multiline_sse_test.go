@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"io"
 	"strings"
 	"testing"
 )
@@ -18,7 +17,7 @@ func TestSSE_MultiLineDataChatSource(t *testing.T) {
 		"data: \"delta\":{\"content\":\"hello world\"},\"finish_reason\":null}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	raw, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(in), "m"))
 	out := string(raw)
 	if !strings.Contains(out, `"text_delta"`) || !strings.Contains(out, "hello world") {
 		t.Errorf("folded chat frame lost its delta:\n%s", out)
@@ -41,7 +40,7 @@ func TestSSE_MultiLineDataAnthropicSource(t *testing.T) {
 		"data: \"delta\":{\"type\":\"text_delta\",\"text\":\"hi there\"}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	raw, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
 	out := string(raw)
 	if !strings.Contains(out, `"content":"hi there"`) {
 		t.Errorf("folded anthropic frame lost its delta:\n%s", out)
@@ -59,7 +58,7 @@ func TestSSE_MultiLineDataResponsesSource(t *testing.T) {
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m\",\"output_index\":0,\n" +
 		"data: \"delta\":\"folded text\"}\n\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
-	raw, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	out := string(raw)
 	if !strings.Contains(out, `"text_delta"`) || !strings.Contains(out, "folded text") {
 		t.Errorf("folded responses frame lost its delta:\n%s", out)
@@ -83,7 +82,7 @@ func TestSSE_NonDataLinesDoNotSplitFrames(t *testing.T) {
 		"event: trailing-label-after-data\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	raw, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(in), "m"))
 	out := string(raw)
 	if !strings.Contains(out, "kept whole") {
 		t.Errorf("frame split by comment/event lines — delta lost:\n%s", out)

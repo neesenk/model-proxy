@@ -3,6 +3,7 @@ package archtest
 import (
 	"go/ast"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -13,9 +14,17 @@ func TestFusionShadowArchitecture(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/fusion")
 		for _, path := range productionGoFilesIn(t, "internal/fusion") {
 			file, fileSet := parseGoFile(t, path)
+			// Transport-free is enforced on the net/http IMPORT PATH, not on an
+			// `http` ident: `import nethttp "net/http"` hides the ident but not
+			// the import. (counters/requestlog package deps are closed off by
+			// the DAG allowlist.)
+			for _, spec := range file.Imports {
+				if importPath := strings.Trim(spec.Path.Value, `"`); importPath == "net/http" {
+					t.Errorf("%s imports net/http; Fusion orchestration must stay transport-free", path)
+				}
+			}
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{
-				"Proxy": true, "RuntimeSnapshot": true, "counters.MetricsStore": true,
-				"counters.TokenCounter": true, "requestlog": true, "http": true,
+				"Proxy": true, "RuntimeSnapshot": true,
 			}); len(got) != 0 {
 				t.Errorf("%s crosses the Fusion orchestration boundary: %v", path, got)
 			}
@@ -69,10 +78,12 @@ func TestFusionShadowArchitecture(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/shadow")
 		for _, path := range productionGoFilesIn(t, "internal/shadow") {
 			file, fileSet := parseGoFile(t, path)
+			// (counters/requestlog package deps are closed off by the DAG
+			// allowlist; dotted names like "counters.MetricsStore" can never
+			// match a bare identifier and were dead rules.)
 			if got := forbiddenIdentifierSites(file, fileSet, map[string]bool{
 				"Proxy": true, "proxyLifecycle": true, "RuntimeSnapshot": true,
-				"Manager": true, "requestlog": true, "counters.MetricsStore": true,
-				"Executor": true,
+				"Manager": true, "Executor": true,
 			}); len(got) != 0 {
 				t.Errorf("%s crosses the detached Shadow boundary: %v", path, got)
 			}

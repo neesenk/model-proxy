@@ -361,8 +361,13 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 		Records []any `json:"records"`
 	}
 	decodeReadJSON(t, disabled, &gotDisabled)
-	if disabled.Code != http.StatusOK || gotDisabled.Enabled || len(gotDisabled.Records) != 0 {
-		t.Fatalf("disabled request logging = %#v", gotDisabled)
+	// The contract is a NON-NULL empty array: `len(...) != 0` alone would also
+	// pass a JSON null (nil slice), so pin the raw bytes too.
+	if disabled.Code != http.StatusOK || gotDisabled.Enabled || gotDisabled.Records == nil {
+		t.Fatalf("disabled request logging = %#v (records must be a non-null empty array)", gotDisabled)
+	}
+	if body := disabled.Body.String(); !strings.Contains(body, `"records":[]`) {
+		t.Fatalf("disabled request logging body must serialize records as []: %s", body)
 	}
 	noDetail := serveRead(t, s, http.MethodGet, "/api/requests/")
 	decodeReadJSON(t, noDetail, &routeError)
@@ -407,8 +412,11 @@ func TestReadShadowReportAndErrors(t *testing.T) {
 		Entries []any `json:"entries"`
 	}
 	decodeReadJSON(t, disabled, &empty)
-	if disabled.Code != http.StatusOK || empty.Enabled || len(empty.Entries) != 0 {
-		t.Fatalf("disabled report = %#v", empty)
+	if disabled.Code != http.StatusOK || empty.Enabled || empty.Entries == nil {
+		t.Fatalf("disabled report = %#v (entries must be a non-null empty array)", empty)
+	}
+	if body := disabled.Body.String(); !strings.Contains(body, `"entries":[]`) {
+		t.Fatalf("disabled report body must serialize entries as []: %s", body)
 	}
 
 	reads.logDir = filepath.Join(t.TempDir(), "missing")
@@ -802,8 +810,9 @@ func TestAdminAuthGatesAPIUIAndMetrics(t *testing.T) {
 		req := httptest.NewRequest("GET", path, nil)
 		req.Header.Set("Authorization", "Bearer adm-secret")
 		s.ServeHTTP(rec, req)
-		if rec.Code == http.StatusUnauthorized {
-			t.Errorf("GET %s with valid token = 401", path)
+		// Exact 200: `!= 401` would also pass a 500 from a broken handler.
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s with valid token = %d, want 200 (body=%s)", path, rec.Code, rec.Body.String())
 		}
 	}
 	// Wrong token rejected.

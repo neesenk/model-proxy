@@ -2,6 +2,7 @@ package cache
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -86,6 +87,37 @@ func TestStoreEvictsAtCapacity(t *testing.T) {
 	if got := store.MaxBodyBytes(); got != 10 {
 		t.Errorf("MaxBodyBytes = %d, want 10", got)
 	}
+}
+
+// TestStorePutDoesNotEnforceMaxBodyBytes pins the eligibility split: the
+// Store never truncates or rejects on MaxBodyBytes — body-size eligibility is
+// the CALLER's decision (the recorder truncates, the root decides whether to
+// Put). If Store.Put ever grew its own cap, this test goes red and the split
+// must be re-decided deliberately.
+func TestStorePutDoesNotEnforceMaxBodyBytes(t *testing.T) {
+	store := New(Options{TTL: time.Hour, MaxEntries: 2, MaxBodyBytes: 4})
+	now := time.Unix(1000, 0)
+	big := []byte("0123456789abcdef") // 16 bytes > MaxBodyBytes 4
+	store.Put("k", 200, nil, big, now)
+	if _, ok := store.Lookup("k", now); !ok {
+		t.Fatal("oversized-vs-MaxBodyBytes body must still be stored (caller owns eligibility)")
+	}
+	rec := httptest.NewRecorder()
+	if err := Replay(rec, mustLookup(t, store, "k", now)); err != nil {
+		t.Fatalf("replay oversized entry: %v", err)
+	}
+	if got := rec.Body.String(); got != string(big) {
+		t.Fatalf("replayed body = %q, want the caller's bytes verbatim", got)
+	}
+}
+
+func mustLookup(t *testing.T, store *Store, key string, now time.Time) *Entry {
+	t.Helper()
+	e, ok := store.Lookup(key, now)
+	if !ok {
+		t.Fatalf("lookup %q: missing", key)
+	}
+	return e
 }
 
 // Peek is the read-only probe for diagnostics: it reports live entries

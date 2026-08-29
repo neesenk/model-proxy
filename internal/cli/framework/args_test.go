@@ -37,4 +37,12 @@ func TestConfigPath_LookupOrder(t *testing.T) {
 	if got != homeCfg {
 		t.Errorf("user-level: got %q want %q", got, homeCfg)
 	}
+
+	// 3. CWD fallback: no flag and no user-level file → ./config.yaml relative
+	// path. Without this branch pinned, deleting it would go unnoticed.
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+	if got := ConfigPath(nil); got != "config.yaml" {
+		t.Errorf("CWD fallback: got %q, want relative config.yaml", got)
+	}
 }

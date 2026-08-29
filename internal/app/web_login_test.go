@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,9 +92,10 @@ func TestAqpLoginFlow(t *testing.T) {
 	}
 }
 
-// TestAqpLoginFlow_Error asserts the goroutine sets state="error" when the
-// bootstrap itself fails (the mock returns no login URL). Guards against a
-// silent hang where startAqpLogin returns 502 but the session never resolves.
+// TestAqpLoginFlow_Error asserts a bootstrap failure surfaces as a 502 with
+// NO session created (BeginLogin fails before handleLoginStart creates one —
+// there is nothing to poll, so leaking a pending session id here would be the
+// bug).
 func TestAqpLoginFlow_Error(t *testing.T) {
 	setPoolHome(t, t.TempDir())
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +115,58 @@ func TestAqpLoginFlow_Error(t *testing.T) {
 	w.Serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("start status=%d want 502 body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "session_id") {
+		t.Errorf("failed bootstrap must not create a login session, body=%s", rec.Body.String())
+	}
+}
+
+// TestAqpLoginFlow_JobErrorResolvesSession covers the REAL hang guard: the
+// session is created (start returns 200), but the background job fails
+// mid-flight (API-key provisioning) — the session must resolve to
+// state="error" instead of staying "pending" forever.
+func TestAqpLoginFlow_JobErrorResolvesSession(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/compass-api/v1/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		fmt.Fprint(w, `{"result":"https://soup.shopee.io/login"}`)
+	})
+	mux.HandleFunc("/compass-api/v1/auth/info", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: provider.SsoCookieName, Value: "test-sso-c", Path: "/"})
+		fmt.Fprint(w, `{"retcode":0,"data":{"user":{"userid":1,"email":"u@x.com","is_active":true}}}`)
+	})
+	// Key provisioning fails → the job's FetchAPIKeyContext error path fires.
+	mux.HandleFunc("/api/v1/cqp/ccswitch/api_key/get_or_generate", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "provisioning down", http.StatusInternalServerError)
+	})
+	up := httptest.NewServer(mux)
+	defer up.Close()
+
+	w, p := newTestWeb(t)
+	p.mu.Lock()
+	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
+	p.mu.Unlock()
+	w.newAqpClientFn = func(store string) *clilogin.AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
+
+	rec := httptest.NewRecorder()
+	w.Serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
+	if rec.Code != 200 {
+		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var start struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || start.SessionID == "" {
+		t.Fatalf("bad start response: %v: %s", err, rec.Body.String())
+	}
+
+	state := waitForLoginTerminal(t, w, start.SessionID)
+	if state.State != "error" {
+		t.Fatalf("terminal state=%q want error (job failure must resolve the session)", state.State)
+	}
+	if !strings.Contains(state.Result, "api key provisioning") {
+		t.Errorf("error result=%q want the provisioning failure detail", state.Result)
 	}
 }
 
@@ -251,6 +304,46 @@ type loginPollState struct {
 	Warning string `json:"warning"`
 }
 
+// waitForLoginTerminal polls until the login session reaches ANY terminal
+// state ("done" or "error") and returns it — for tests that assert the error
+// resolution itself.
+func waitForLoginTerminal(t *testing.T, server *WebServer, sessionID string) loginPollState {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		recorder := httptest.NewRecorder()
+		server.Serve(
+			recorder,
+			httptest.NewRequest(http.MethodGet, "/api/login/"+sessionID+"/poll", nil),
+		)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf(
+				"login poll status=%d want 200 body=%s",
+				recorder.Code,
+				recorder.Body.String(),
+			)
+		}
+		var state loginPollState
+		if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
+			t.Fatalf("decode login poll response: %v: %s", err, recorder.Body.String())
+		}
+		switch state.State {
+		case "done", "error":
+			return state
+		case "pending":
+		default:
+			t.Fatalf("login poll returned invalid state %q: %s", state.State, recorder.Body.String())
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("login session %s never resolved (silent hang): %v", sessionID, ctx.Err())
+		default:
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+}
+
 func waitForLoginDone(t *testing.T, server *WebServer, sessionID string) loginPollState {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -285,7 +378,7 @@ func waitForLoginDone(t *testing.T, server *WebServer, sessionID string) loginPo
 		case <-ctx.Done():
 			t.Fatalf("login session %s did not complete: %v", sessionID, ctx.Err())
 		default:
-			runtime.Gosched()
+			time.Sleep(2 * time.Millisecond)
 		}
 	}
 }

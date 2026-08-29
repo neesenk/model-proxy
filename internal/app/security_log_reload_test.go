@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +53,13 @@ func newSecLogRig(t *testing.T, audit bool, auditPath string) *seclogRig {
 // writeConfig rewrites the rig's YAML with the given audit settings.
 func (r *seclogRig) writeConfig(t *testing.T, audit bool, auditPath string) {
 	t.Helper()
+	if err := os.WriteFile(r.cfgPath, []byte(r.configYAML(audit, auditPath)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// configYAML renders the rig's config for the given audit settings.
+func (r *seclogRig) configYAML(audit bool, auditPath string) string {
 	yaml := "listen: 127.0.0.1:0\n" +
 		"providers:\n  zhipu:\n    openai_base_url: " + r.upURL + "\n    provider_id: zhipu\n" +
 		"routes:\n  glm:\n    - {provider: zhipu, model: glm}\n" +
@@ -64,9 +72,7 @@ func (r *seclogRig) writeConfig(t *testing.T, audit bool, auditPath string) {
 	} else {
 		yaml += "  audit: false\n"
 	}
-	if err := os.WriteFile(r.cfgPath, []byte(yaml), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	return yaml
 }
 
 // reload swaps the rig's config generation to the given audit settings.
@@ -82,6 +88,32 @@ func (r *seclogRig) reload(t *testing.T, audit bool, auditPath string) {
 func (r *seclogRig) guardHit(t *testing.T) {
 	t.Helper()
 	postOK(t, r.url+"/v1/chat/completions", guardPoolRequestBody(guardPoolKey))
+}
+
+// reloadErr and guardHitErr are the goroutine-safe variants of reload/guardHit:
+// they return errors instead of calling t.Fatal, which is only legal on the
+// test goroutine.
+func (r *seclogRig) reloadErr(audit bool, auditPath string) error {
+	if err := os.WriteFile(r.cfgPath, []byte(r.configYAML(audit, auditPath)), 0o600); err != nil {
+		return err
+	}
+	return r.proxy.Reload(r.cfgPath)
+}
+
+func (r *seclogRig) guardHitErr() error {
+	resp, err := http.Post(r.url+"/v1/chat/completions", "application/json", stringReader(guardPoolRequestBody(guardPoolKey)))
+	if err != nil {
+		return err
+	}
+	b, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("guard hit: status=%d body=%s", resp.StatusCode, b)
+	}
+	return nil
 }
 
 // seclogRecordCount returns how many audit records dir holds (0 if absent).
@@ -190,6 +222,7 @@ func TestSecLogReload_ConcurrentHitsAndReloads(t *testing.T) {
 	rig := newSecLogRig(t, true, filepath.Join(dirA, "security.log"))
 
 	stop := make(chan struct{})
+	errCh := make(chan error, 8)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -200,7 +233,13 @@ func TestSecLogReload_ConcurrentHitsAndReloads(t *testing.T) {
 				return
 			default:
 			}
-			rig.guardHit(t)
+			if err := rig.guardHitErr(); err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
+			}
 		}
 	}()
 	go func() {
@@ -211,13 +250,21 @@ func TestSecLogReload_ConcurrentHitsAndReloads(t *testing.T) {
 				return
 			default:
 			}
+			var err error
 			switch i % 3 {
 			case 0:
-				rig.reload(t, true, filepath.Join(dirA, "security.log"))
+				err = rig.reloadErr(true, filepath.Join(dirA, "security.log"))
 			case 1:
-				rig.reload(t, false, "")
+				err = rig.reloadErr(false, "")
 			case 2:
-				rig.reload(t, true, filepath.Join(dirB, "security.log"))
+				err = rig.reloadErr(true, filepath.Join(dirB, "security.log"))
+			}
+			if err != nil {
+				select {
+				case errCh <- err:
+				default:
+				}
+				return
 			}
 		}
 	}()
@@ -228,6 +275,11 @@ func TestSecLogReload_ConcurrentHitsAndReloads(t *testing.T) {
 	})
 	close(stop)
 	wg.Wait()
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
 
 	rig.reload(t, true, filepath.Join(dirB, "security.log"))
 	before := seclogRecordCount(t, dirB)

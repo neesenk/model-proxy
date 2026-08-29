@@ -2,9 +2,11 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -234,5 +236,81 @@ func TestForward_ResponsesTruncatedStreamDoesNotRecordContinuationState(t *testi
 	}
 	if hit {
 		t.Fatal("truncated stream unexpectedly created continuation state")
+	}
+}
+
+// TestForward_ResponsesPreviousIDRestoresAcrossRestart proves the state store
+// is a RESTART boundary, not an in-memory cache: the first proxy instance
+// records chat_1 and persists it to the shared state path; a second instance
+// booted on the same path expands previous_response_id from the PERSISTED
+// state — the new upstream call carries the full restored history.
+func TestForward_ResponsesPreviousIDRestoresAcrossRestart(t *testing.T) {
+	var hits atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch hits.Add(1) {
+		case 1:
+			w.Header().Set("content-type", "application/json")
+			io.WriteString(w, `{"id":"chat_1","model":"g","choices":[{"message":{"role":"assistant","content":"asked"},"finish_reason":"stop"}]}`)
+		case 2:
+			var req map[string]any
+			json.Unmarshal(body, &req)
+			msgs, _ := req["messages"].([]any)
+			if len(msgs) != 3 {
+				t.Fatalf("restored messages after restart = %d, want 3 (user/assistant/user): %s", len(msgs), body)
+			}
+			if asMap(msgs[1])["role"] != "assistant" || !strings.Contains(fmt.Sprint(asMap(msgs[1])), "asked") {
+				t.Fatalf("restored assistant turn missing: %s", body)
+			}
+			w.Header().Set("content-type", "application/json")
+			io.WriteString(w, `{"id":"chat_2","model":"g","choices":[{"message":{"role":"assistant","content":"restored"},"finish_reason":"stop"}]}`)
+		default:
+			t.Fatalf("unexpected upstream request %d", hits.Load())
+		}
+	}))
+	defer up.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]RouteTarget{"g": {{Provider: "p", Model: "g", Protocol: "openai"}}},
+	}
+	// One shared state path for both instances — the persisted
+	// previous_response_id bridge must survive the swap.
+	statePath := filepath.Join(t.TempDir(), "quota_state.json")
+
+	p1 := newTestProxyAt(t, cfg, statePath)
+	p1.providers["p"] = &testProv{key: "k"}
+	px1 := httptest.NewServer(http.HandlerFunc(p1.Handler))
+	first, err := http.Post(px1.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"g","input":"ping"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstBody, _ := io.ReadAll(first.Body)
+	first.Body.Close()
+	if first.StatusCode != 200 || !strings.Contains(string(firstBody), "chat_1") {
+		t.Fatalf("first instance response: %d %s", first.StatusCode, firstBody)
+	}
+	// Drain instance one completely so instance two boots on a quiescent state
+	// file (persist is scheduled asynchronously; Close flushes it).
+	px1.Close()
+	p1.Close()
+
+	p2 := newTestProxyAt(t, cfg, statePath)
+	p2.providers["p"] = &testProv{key: "k"}
+	px2 := httptest.NewServer(http.HandlerFunc(p2.Handler))
+	defer px2.Close()
+	second, err := http.Post(px2.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"g","previous_response_id":"chat_1","input":"pong"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBody, _ := io.ReadAll(second.Body)
+	second.Body.Close()
+	if second.StatusCode != 200 {
+		t.Fatalf("restart continuation status = %d body=%s", second.StatusCode, secondBody)
+	}
+	if !strings.Contains(string(secondBody), "restored") || hits.Load() != 2 {
+		t.Fatalf("previous_response_id did not restore across restart: body=%s hits=%d", secondBody, hits.Load())
 	}
 }

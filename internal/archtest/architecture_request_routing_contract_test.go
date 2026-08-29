@@ -112,12 +112,17 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			"isBase64Char":             true,
 			"isBase64Run":              true,
 		}
-		for _, path := range productionGoFiles(t) {
-			file, fileSet := parseGoFile(t, path)
-			for _, declaration := range file.Decls {
-				function, ok := declaration.(*ast.FuncDecl)
-				if ok && forbiddenRoot[function.Name.Name] {
-					t.Errorf("root request policy duplicate %s at %s", function.Name.Name, describe(fileSet, function, "function"))
+		// The composition root lives in internal/app today; the duplicate ban
+		// must scan it alongside the thin root package (a root-only scan went
+		// vacuous when the composition root moved).
+		for _, dir := range []string{".", "internal/app"} {
+			for _, path := range productionGoFilesIn(t, dir) {
+				file, fileSet := parseGoFile(t, path)
+				for _, declaration := range file.Decls {
+					function, ok := declaration.(*ast.FuncDecl)
+					if ok && forbiddenRoot[function.Name.Name] {
+						t.Errorf("composition-root request policy duplicate %s at %s", function.Name.Name, describe(fileSet, function, "function"))
+					}
 				}
 			}
 		}

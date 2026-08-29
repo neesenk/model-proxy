@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"model-proxy/internal/observe/requestlog"
 )
@@ -398,5 +399,78 @@ func TestReload_NoWarnWhenRequestLogDisabled(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "request_log.enabled is true") {
 		t.Errorf("reload warned even though request logging is disabled:\n%s", output.String())
+	}
+}
+
+// TestRequestLog_SmallCapTruncatesBodiesEndToEnd (P1): every other fixture
+// uses a 1 MiB cap that never truncates. With a tiny max_body_bytes the
+// captured request/response bodies must be cut to the cap and carry the
+// truncation marker — the exact flag the CLI replay path refuses to replay —
+// while the CLIENT still receives the full response (logging must never
+// truncate the live stream).
+func TestRequestLog_SmallCapTruncatesBodiesEndToEnd(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"full":"` + strings.Repeat("y", 4096) + `"}`))
+	}))
+	defer up.Close()
+	cfg := &Config{
+		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]RouteTarget{"m": {{Provider: "p", Model: "m"}}},
+	}
+	proxy := newTestProxy(t, cfg)
+	proxy.providers["p"] = &testProv{key: "k"}
+	dir := t.TempDir()
+	logger := requestlog.New(requestlog.Options{
+		Directory:    dir,
+		MaxFileSize:  1 << 30,
+		MaxBodyBytes: 64,
+	})
+	go logger.Run()
+	proxy.reqLog = logger
+	t.Cleanup(func() {
+		proxy.Close()
+		logger.Shutdown()
+	})
+	px := httptest.NewServer(http.HandlerFunc(proxy.Handler))
+	defer px.Close()
+
+	bigBody := `{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("x", 4096) + `"}]}`
+	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", strings.NewReader(bigBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// The live client response is NOT truncated by the log cap.
+	if resp.StatusCode != 200 || len(clientBody) < 4096 {
+		t.Fatalf("client response truncated by request-log cap: status=%d len=%d", resp.StatusCode, len(clientBody))
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	var rec *requestlog.Record
+	for time.Now().Before(deadline) && rec == nil {
+		for _, r := range allRecords(t, dir) {
+			if r.Provider == "p" {
+				rr := r
+				rec = &rr
+			}
+		}
+		if rec == nil {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if rec == nil {
+		t.Fatal("no request-log record for the oversized request")
+	}
+	if !rec.RequestBodyTruncated() {
+		t.Errorf("request body not marked truncated (len=%d, cap=64): %q…", len(rec.RequestBody), rec.RequestBody[:min(64, len(rec.RequestBody))])
+	}
+	if len(rec.RequestBody) != 64+len("...[truncated by model-proxy request_log max_body_bytes]")+1 {
+		t.Errorf("truncated request body length = %d, want cap+marker", len(rec.RequestBody))
+	}
+	if !strings.HasSuffix(rec.ResponseBody, "]") || !strings.Contains(rec.ResponseBody, "truncated by model-proxy request_log") {
+		t.Errorf("response body not marker-terminated: %q…", rec.ResponseBody[:min(64, len(rec.ResponseBody))])
 	}
 }

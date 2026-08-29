@@ -500,11 +500,31 @@ func TestPendingCountsContext(t *testing.T) {
 	_ = locked // may still win the TryLock race; only assert no deadlock
 }
 
+// failOnceSink wraps a Store and fails the next FlushContext once — the
+// failure-injection seam for the shutdown/retry tests (test-side only; the
+// production package carries no test hooks).
+type failOnceSink struct {
+	*Store
+	failNext bool
+}
+
+func (sink *failOnceSink) FlushContext(
+	ctx context.Context,
+	minute int64,
+	deltas map[Key]Counters,
+) error {
+	if sink.failNext {
+		sink.failNext = false
+		return fmt.Errorf("injected stats flush failure")
+	}
+	return sink.Store.FlushContext(ctx, minute, deltas)
+}
+
 // TestFlushForShutdownDrainsPending covers the shutdown retry loop: a sink
 // that fails once must still be drained within the retry window.
 func TestFlushForShutdownDrainsPending(t *testing.T) {
 	ss := openFlusherTestStore(t)
-	sink := &FailOnceSink{Store: ss, FailNext: true}
+	sink := &failOnceSink{Store: ss, failNext: true}
 	m := obscounters.NewMetricsStore()
 	f := NewFlusher(sink, m, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil)
 	m.Inc("a", "x", obscounters.EvRequests)

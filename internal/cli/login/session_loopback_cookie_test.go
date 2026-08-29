@@ -1,6 +1,7 @@
 package login
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -47,8 +48,10 @@ func TestWaitForCookie_ErrorReceived(t *testing.T) {
 	go func() {
 		ls.ErrCh <- errBoom
 	}()
-	if _, err := ls.WaitForCookie(500 * time.Millisecond); err == nil {
-		t.Error("WaitForCookie with errCh signal: want error, got nil")
+	// Assert the sentinel itself: err != nil alone would also pass via the
+	// timeout branch (deleting the ErrCh case entirely would stay green).
+	if _, err := ls.WaitForCookie(500 * time.Millisecond); !errors.Is(err, errBoom) {
+		t.Errorf("WaitForCookie with errCh signal: got %v, want the errBoom sentinel", err)
 	}
 }
 

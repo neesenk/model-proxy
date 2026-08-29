@@ -231,14 +231,23 @@ func TestWireCap_Forward_AnthropicToResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
 
 	if gotPath != "/responses" {
 		t.Errorf("upstream path = %q, want /responses", gotPath)
 	}
 	if !strings.Contains(gotBody, `"input"`) || strings.Contains(gotBody, `"messages"`) {
 		t.Errorf("upstream got non-responses body: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"model":"gpt-x"`) {
+		t.Errorf("upstream model not rewritten: %s", gotBody)
 	}
 	if !strings.Contains(string(body), `"type":"message"`) {
 		t.Errorf("client did not get an anthropic response: %s", body)
@@ -270,14 +279,27 @@ func TestWireCap_Forward_ResponsesToChatWhenNo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.Copy(io.Discard, resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
 
 	if gotPath != "/chat/completions" {
 		t.Errorf("upstream path = %q, want /chat/completions", gotPath)
 	}
 	if !strings.Contains(gotBody, `"messages"`) {
 		t.Errorf("upstream got non-chat body: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"model":"gpt-x"`) {
+		t.Errorf("upstream model not rewritten: %s", gotBody)
+	}
+	// Converted back to a responses-shaped client answer.
+	if !strings.Contains(string(body), `"object":"response"`) {
+		t.Errorf("client did not get a responses object: %s", body)
 	}
 }
 
@@ -307,10 +329,21 @@ func TestWireCap_Forward_AnthropicPassthroughWhenGateway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.Copy(io.Discard, resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
 	if gotBody != sent {
 		t.Errorf("gateway-accepting provider did not get byte-identical body:\n got: %s\nwant: %s", gotBody, sent)
+	}
+	// Passthrough must also hold on the response side: byte-identical upstream
+	// answer, no protocol conversion applied.
+	if want := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`; string(body) != want {
+		t.Errorf("client body not byte-identical passthrough:\n got: %s\nwant: %s", body, want)
 	}
 }
 
@@ -352,6 +385,9 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("request 1 client status = %d, want 404 (committed upstream verdict miss)", resp.StatusCode)
+	}
 	if len(bodies) != 1 || !strings.HasPrefix(bodies[0], "/responses ") {
 		t.Fatalf("request 1 upstream bodies = %v, want one /responses call", bodies)
 	}
@@ -373,8 +409,14 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body2, _ := io.ReadAll(resp2.Body)
+	body2, readErr2 := io.ReadAll(resp2.Body)
 	resp2.Body.Close()
+	if readErr2 != nil {
+		t.Fatalf("read response 2: %v", readErr2)
+	}
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("request 2 client status = %d, want 200: %s", resp2.StatusCode, body2)
+	}
 	if len(bodies) != 2 || !strings.HasPrefix(bodies[1], "/chat/completions ") {
 		t.Fatalf("request 2 upstream bodies = %v, want a /chat/completions call", bodies)
 	}

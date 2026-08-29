@@ -102,7 +102,7 @@ func TestModelLock_404FailsOverWithoutCircuit(t *testing.T) {
 	}
 
 	// Next m1 request skips the locked model entirely.
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	if got := pHits.Load(); got != 1 {
 		t.Errorf("primary hits after lock = %d, want 1 (locked model skipped)", got)
 	}
@@ -129,7 +129,7 @@ func TestModelLock_OtherModelUnaffected(t *testing.T) {
 	cfg := modelLockCfg(primary, fallback)
 	_, px := newModelLockProxy(t, cfg)
 
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // 404 → lock (primary,m1)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // 404 → lock (primary,m1)
 	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"m2","messages":[]}`); st != 200 {
 		t.Fatalf("m2 request: status = %d, want 200 (primary still serves m2)", st)
 	}
@@ -215,7 +215,7 @@ func TestModelLock_SuccessClears(t *testing.T) {
 	cfg.Scheduling.ModelLockout = "50ms"
 	p, px := newModelLockProxy(t, cfg)
 
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // 404 → lock
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // 404 → lock
 	if _, locked := p.modelLockState("primary", "m1"); !locked {
 		t.Fatal("expected (primary,m1) locked")
 	}
@@ -224,7 +224,7 @@ func TestModelLock_SuccessClears(t *testing.T) {
 		_, locked := p.modelLockState("primary", "m1")
 		return !locked
 	})
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary serves → clear
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // primary serves → clear
 	if _, locked := p.modelLockState("primary", "m1"); locked {
 		t.Error("model lock should be cleared after a served response")
 	}
@@ -260,7 +260,7 @@ func TestEmpty200_PreflightFailsOver(t *testing.T) {
 	}
 
 	// Next request skips the locked model.
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`)
 	if got := pHits.Load(); got != 1 {
 		t.Errorf("primary hits = %d, want 1 (locked after empty 200)", got)
 	}
@@ -298,7 +298,7 @@ func TestEmpty200_PostCommitLearned(t *testing.T) {
 		t.Error("(primary,m1) should be locked by the post-commit zero-byte 200")
 	}
 
-	post(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // fails over now
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"m1","messages":[]}`) // fails over now
 	if got := pHits.Load(); got != 1 {
 		t.Errorf("primary hits = %d, want 1 (locked after post-commit learning)", got)
 	}
@@ -410,7 +410,26 @@ func TestEmpty200_ClientCancelNoLock(t *testing.T) {
 	if err == nil {
 		resp.Body.Close()
 	}
-	time.Sleep(300 * time.Millisecond) // let the proxy observe the cancellation
+	// Deterministic hand-off, not a fixed sleep: the zero-byte learning
+	// decision happens in the executor right before Effects.Committed fires the
+	// request's "end" event, so once that event appears the lock decision for
+	// this request is final. The upstream handler returns (EOF) at 500ms, well
+	// after the client's 150ms timeout, which is what forces the cancel path.
+	committed := func() bool {
+		for _, e := range p.events.Snapshot() {
+			if e.Type == "end" && e.Provider == "primary" {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !committed() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !committed() {
+		t.Fatal("committed stream never produced an end event — cancel path did not settle")
+	}
 	n := 0
 	for _, locks := range p.runtimeState.Dashboard(time.Now()).ModelLocks {
 		n += len(locks)

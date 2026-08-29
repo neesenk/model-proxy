@@ -26,4 +26,12 @@ func TestWebServesUI(t *testing.T) {
 	if rec2.Code != 200 {
 		t.Fatalf("GET /ui/app.js status=%d want 200", rec2.Code)
 	}
+
+	// app.js is an ES module importing './pure.js' — that target must be
+	// served too, with the JS content type, or the SPA fails to load.
+	rec3 := httptest.NewRecorder()
+	mux.ServeHTTP(rec3, httptest.NewRequest("GET", "/ui/pure.js", nil))
+	if rec3.Code != 200 || !strings.Contains(rec3.Header().Get("content-type"), "javascript") {
+		t.Fatalf("GET /ui/pure.js status=%d content-type=%q — the app.js import target must be served", rec3.Code, rec3.Header().Get("content-type"))
+	}
 }

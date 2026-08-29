@@ -124,10 +124,20 @@ func assertSniffReturnsOnShortField(t *testing.T, chunks []string, prefix string
 	case <-time.After(time.Second):
 		t.Fatal("sniff waited to fill its window after a decisive field")
 	}
+	writeErr := make(chan error, 2)
 	go func() {
-		writer.Write([]byte("event: x\n\n"))
-		writer.Close()
+		if _, err := writer.Write([]byte("event: x\n\n")); err != nil {
+			writeErr <- err
+		}
+		writeErr <- writer.Close()
 	}()
+	select {
+	case err := <-writeErr:
+		if err != nil {
+			t.Fatalf("pipe write/close: %v", err)
+		}
+	default:
+	}
 	restored, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatal(err)

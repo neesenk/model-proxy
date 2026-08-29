@@ -6,7 +6,6 @@ package protocol
 // comment says so.
 
 import (
-	"io"
 	"strings"
 	"testing"
 )
@@ -20,14 +19,14 @@ func TestParity_DoneOnlyArgumentsFallback(t *testing.T) {
 		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}` + "\n\n"
 
 	// r→anthropic: the args must arrive as input_json_delta before block stop.
-	rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	outA := string(rawA)
 	if !strings.Contains(outA, `"input_json_delta"`) || !strings.Contains(outA, `{\"q\":\"x\"}`) {
 		t.Errorf("r→a: done-only arguments lost:\n%s", outA)
 	}
 
 	// r→chat: the args must arrive as an arguments chunk.
-	rawC, _ := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(in), "m"))
+	rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(in), "m"))
 	outC := string(rawC)
 	if !strings.Contains(outC, `"arguments":"{\"q\":\"x\"}"`) {
 		t.Errorf("r→chat: done-only arguments lost:\n%s", outC)
@@ -43,7 +42,7 @@ func TestParity_DuplicateAddedKeepsBlock(t *testing.T) {
 		`data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"\"x\"}"}` + "\n\n" +
 		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1"}}` + "\n\n" +
 		`data: {"type":"response.completed","response":{"id":"r1","status":"completed"}}` + "\n\n"
-	raw, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	events := drainSSE(t, strings.NewReader(string(raw)))
 	if n := sseCount(events, "content_block_start"); n != 1 {
 		t.Errorf("content_block_start = %d, want 1 (duplicate added must not reopen):\n%s", n, raw)
@@ -67,13 +66,13 @@ func TestParity_CompletedWithFailedStatus(t *testing.T) {
 		`data: {"type":"response.output_text.delta","output_index":0,"delta":"partial"}` + "\n\n" +
 		`data: {"type":"response.completed","response":{"id":"r1","status":"failed","error":{"message":"boom","type":"server_error"}}}` + "\n\n"
 
-	rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	eventsA := drainSSE(t, strings.NewReader(string(rawA)))
 	if sseCount(eventsA, "error") != 1 || sseCount(eventsA, "message_stop") != 0 {
 		t.Errorf("r→a: completed+failed must emit error without message_stop: %v", sseEventTypes(eventsA))
 	}
 
-	rawC, _ := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(in), "m"))
+	rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(in), "m"))
 	outC := string(rawC)
 	if !strings.Contains(outC, `"error"`) || strings.Contains(outC, `[DONE]`) {
 		t.Errorf("r→chat: completed+failed must emit error chunk without [DONE]:\n%s", outC)
@@ -87,7 +86,7 @@ func TestParity_EmptyFragmentKeepsIdentity(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"function\":{\"name\":\"\",\"arguments\":\"\\\"cmd\\\":\\\"date\\\"}\"}}]}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	raw, _ := io.ReadAll(newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
 	out := string(raw)
 	events := drainSSE(t, strings.NewReader(out))
 	if n := sseCount(events, "response.output_item.added"); n != 1 {
@@ -112,7 +111,7 @@ func TestParity_SparseToolIndex(t *testing.T) {
 	in := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":2,\"id\":\"call_2\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	raw, _ := io.ReadAll(newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
 	events := drainSSE(t, strings.NewReader(string(raw)))
 	assertResponsesItemPairing(t, events)
 	if sseCount(events, "response.completed") != 1 {
@@ -130,7 +129,7 @@ func TestParity_ParallelLateNameOrder(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"first\",\"arguments\":\"\\\"v\\\":1}\"}}]}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	raw, _ := io.ReadAll(newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
 	events := drainSSE(t, strings.NewReader(string(raw)))
 	var addedIDs []string
 	for _, ev := range events {
@@ -161,7 +160,7 @@ func TestParity_UTF8BoundarySplit(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
 	// 7-byte fixed chunks slice through multi-byte characters.
-	raw, _ := io.ReadAll(newOpenAIToResponsesSSE(&fixedChunksReader{b: []byte(in), n: 7}, "m"))
+	raw := readAllChecked(t, newOpenAIToResponsesSSE(&fixedChunksReader{b: []byte(in), n: 7}, "m"))
 	out := string(raw)
 	if !strings.Contains(out, "你好，世界") {
 		t.Errorf("multi-byte content corrupted:\n%s", out)
@@ -426,7 +425,7 @@ func TestParity_DoneOnlyToolCallSynthesized(t *testing.T) {
 
 	// r→anthropic: a complete tool_use block (start → args delta → stop) and a
 	// tool_use stop_reason.
-	rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	eventsA := drainSSE(t, strings.NewReader(string(rawA)))
 	assertEventSequence(t, eventsA, []string{
 		"message_start",
@@ -448,7 +447,7 @@ func TestParity_DoneOnlyToolCallSynthesized(t *testing.T) {
 	}
 
 	// r→chat: one tool_calls chunk carrying id+name+arguments, finish tool_calls.
-	rawC, _ := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(in), "m"))
+	rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(in), "m"))
 	outC := string(rawC)
 	if !strings.Contains(outC, `"id":"call_1"`) || !strings.Contains(outC, `"name":"search"`) ||
 		!strings.Contains(outC, `"arguments":"{\"q\":\"x\"}"`) {
@@ -472,7 +471,7 @@ func TestParity_ArgsDeltaBeforeAdded(t *testing.T) {
 
 	// r→anthropic: the early delta lands on the opened block, in order — the
 	// concatenated partial_json is the complete arguments.
-	rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	eventsA := drainSSE(t, strings.NewReader(string(rawA)))
 	var argsA strings.Builder
 	for _, ev := range eventsA {
@@ -490,7 +489,7 @@ func TestParity_ArgsDeltaBeforeAdded(t *testing.T) {
 	}
 
 	// r→chat: concatenated arguments chunks reconstruct the full JSON.
-	rawC, _ := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(in), "m"))
+	rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(in), "m"))
 	eventsC := drainSSE(t, strings.NewReader(string(rawC)))
 	var argsC strings.Builder
 	for _, ev := range eventsC {
@@ -581,7 +580,7 @@ func TestParity_IncompleteCarriesUsage(t *testing.T) {
 	in := `data: {"type":"response.output_text.delta","output_index":0,"delta":"partial"}` + "\n\n" +
 		`data: {"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":11,"output_tokens":7,"input_tokens_details":{"cached_tokens":3}}}}` + "\n\n"
 
-	rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	eventsA := drainSSE(t, strings.NewReader(string(rawA)))
 	var usageA map[string]any
 	for _, ev := range eventsA {
@@ -593,7 +592,7 @@ func TestParity_IncompleteCarriesUsage(t *testing.T) {
 		t.Errorf("r→a incomplete usage = %v, want 8/7 cached 3", usageA)
 	}
 
-	rawC, _ := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(in), "m"))
+	rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(in), "m"))
 	eventsC := drainSSE(t, strings.NewReader(string(rawC)))
 	var usageC map[string]any
 	var finish string
@@ -639,12 +638,12 @@ func TestParity_CompletedCancelledOrErrorIsError(t *testing.T) {
 		"errorNonNull": `{"id":"r1","status":"completed","error":{"message":"late failure","type":"server_error"}}`,
 	}
 	for name, resp := range cases {
-		rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(mk(resp)), "m"))
+		rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(mk(resp)), "m"))
 		eventsA := drainSSE(t, strings.NewReader(string(rawA)))
 		if sseCount(eventsA, "error") != 1 || sseCount(eventsA, "message_stop") != 0 {
 			t.Errorf("%s: r→a must emit error without message_stop: %v", name, sseEventTypes(eventsA))
 		}
-		rawC, _ := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(mk(resp)), "m"))
+		rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(mk(resp)), "m"))
 		outC := string(rawC)
 		if !strings.Contains(outC, `"error"`) || strings.Contains(outC, `[DONE]`) {
 			t.Errorf("%s: r→chat must emit error chunk without [DONE]:\n%s", name, outC)
@@ -660,7 +659,7 @@ func TestParity_RefusalDeltaStreamsAsText(t *testing.T) {
 		`data: {"type":"response.refusal.delta","output_index":0,"delta":"help with that."}` + "\n\n" +
 		`data: {"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"content_filter"}}}` + "\n\n"
 
-	rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	eventsA := drainSSE(t, strings.NewReader(string(rawA)))
 	var textA strings.Builder
 	for _, ev := range eventsA {
@@ -682,7 +681,7 @@ func TestParity_RefusalDeltaStreamsAsText(t *testing.T) {
 		t.Errorf("r→a stop_reason = %q, want refusal", stopA)
 	}
 
-	rawC, _ := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(in), "m"))
+	rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(in), "m"))
 	outC := string(rawC)
 	if !strings.Contains(outC, `"content":"I cannot "`) || !strings.Contains(outC, `"content":"help with that."`) {
 		t.Errorf("r→chat refusal content lost:\n%s", outC)

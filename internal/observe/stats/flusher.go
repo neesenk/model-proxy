@@ -5,7 +5,6 @@ package stats
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"path/filepath"
 	"sync"
@@ -484,24 +483,4 @@ func UntilNextMinute(now time.Time) time.Duration {
 // boot (migration source; never written).
 func LegacyTokensPath(homeDir string) string {
 	return filepath.Join(homeDir, ".model-proxy", "token_usage.json")
-}
-
-// FailOnceSink wraps a Store and fails the next FlushContext once — a test
-// seam shared by the root-package shutdown/reset integration tests.
-type FailOnceSink struct {
-	*Store
-	FailNext bool
-}
-
-// FlushContext fails once when FailNext is set, then delegates.
-func (sink *FailOnceSink) FlushContext(
-	ctx context.Context,
-	minute int64,
-	deltas map[Key]Counters,
-) error {
-	if sink.FailNext {
-		sink.FailNext = false
-		return fmt.Errorf("injected stats flush failure")
-	}
-	return sink.Store.FlushContext(ctx, minute, deltas)
 }

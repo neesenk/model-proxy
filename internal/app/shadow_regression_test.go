@@ -2,7 +2,6 @@ package app
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -15,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"model-proxy/internal/observe/requestlog"
 	shadowexec "model-proxy/internal/shadow"
 )
 
@@ -239,35 +237,10 @@ func TestRunShadow_NilRuntimeConfig(t *testing.T) {
 	}
 }
 
-// TestCmdShadowReport_InProcess: the `shadow report` CLI renders the daemon's
-// /api/shadow-report response. Covers cmdShadow + cmdShadowReport.
-func TestCmdShadowReport_InProcess(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{
-			"enabled": true,
-			"entries": []requestlog.ShadowReportEntry{
-				{Route: "glm", PrimaryProvider: "zhipu", ShadowProvider: "codex", Samples: 5, StatusMatchRate: 0.8, PrimaryLatencyMs: 100, ShadowLatencyMs: 150, LatencyDiffMs: 50, PrimarySizeAvg: 200, ShadowSizeAvg: 180},
-			},
-		})
-	}))
-	defer srv.Close()
-	listen := strings.TrimPrefix(srv.URL, "http://")
-	cfgPath := writeTempConfig(t, "listen: "+listen+"\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: http://x}\nroutes:\n  glm: [{provider: zhipu, model: glm}]\n")
-
-	cfg, err := LoadConfig(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := renderShadowReportForTest(t, cfg)
-	for _, want := range []string{"glm", "zhipu", "codex", "SAMPLES", "5", "80%"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("shadow report output missing %q:\n%s", want, out)
-		}
-	}
-}
-
 // TestHandleShadowReport_API: the /api/shadow-report endpoint returns
-// enabled=false when request_log is off, and entries when on.
+// enabled=false when request_log is off. The CLI-side rendering of this
+// endpoint is covered by internal/cli/shadow_report_render_test.go against
+// the production renderer.
 func TestHandleShadowReport_API(t *testing.T) {
 	// Off → enabled=false.
 	w := NewWebServer(newTestProxy(t, &Config{
@@ -281,28 +254,4 @@ func TestHandleShadowReport_API(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"enabled":false`) {
 		t.Errorf("shadow-report off: code=%d body=%s", rec.Code, rec.Body.String())
 	}
-}
-
-// renderShadowReportForTest fetches and renders the shadow report the same way
-// the CLI does, without crossing the app→cli import boundary.
-func renderShadowReportForTest(t *testing.T, cfg *Config) string {
-	t.Helper()
-	resp, err := http.Get("http://" + cfg.Listen + "/api/shadow-report")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var out struct {
-		Enabled bool                           `json:"enabled"`
-		Entries []requestlog.ShadowReportEntry `json:"entries"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "%-16s %-12s %-12s %8s %6s\n", "ROUTE", "PRIMARY", "SHADOW", "SAMPLES", "MATCH")
-	for _, e := range out.Entries {
-		fmt.Fprintf(&b, "%-16s %-12s %-12s %8d %5.0f%%\n", e.Route, e.PrimaryProvider, e.ShadowProvider, e.Samples, e.StatusMatchRate*100)
-	}
-	return b.String()
 }

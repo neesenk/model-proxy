@@ -1,0 +1,45 @@
+name: ci
+
+# Push/PR test pipeline: the testing.md baseline gates plus the JS gates.
+# MP_REQUIRE_NODE=1 turns "node missing" from a silent skip into a hard
+# failure, so the node --check / node --test gates are actually enforced here.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^$' || true)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: vet + tests (JS gates enforced)
+        run: |
+          go vet ./...
+          MP_REQUIRE_NODE=1 go test ./... -count=1
+
+      - name: race
+        run: go test -race ./... -count=1
+
+      - name: coverage gate
+        run: scripts/cover.sh

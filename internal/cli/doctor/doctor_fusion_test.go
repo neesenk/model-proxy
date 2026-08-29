@@ -38,7 +38,7 @@ routes:
 	if err != nil {
 		t.Fatalf("config rejected: %v", err)
 	}
-	out := captureStdout(t, func() { DoctorWithCfg(cfg) })
+	out := grabStdout(t, func() { DoctorWithCfg(cfg) })
 	for _, want := range []string{"Fusion", "panel=2", "quorum=2", "synthesizer=s/ms", "budget=50/day", "first_turn_only", "judge=j/mj", "custom instruction"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor output missing %q:\n%s", want, out)

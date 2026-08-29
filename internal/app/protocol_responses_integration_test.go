@@ -38,8 +38,14 @@ func TestForward_AnthropicToResponses_NonStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
 
 	// Backend received a Responses-format request (input list, no `messages`).
 	if !strings.Contains(gotReq, `"input"`) || strings.Contains(gotReq, `"messages"`) {
@@ -85,8 +91,14 @@ func TestForward_AnthropicToResponses_AutoResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
 
 	// Backend received a Responses body (input list) — conversion auto-activated.
 	if !strings.Contains(gotReq, `"input"`) || strings.Contains(gotReq, `"messages"`) {
@@ -123,8 +135,14 @@ func TestForward_OpenAIToResponses_NonStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
 
 	if !strings.Contains(gotReq, `"input"`) {
 		t.Errorf("backend got non-Responses request: %s", gotReq)
@@ -285,5 +303,67 @@ func TestForward_PooledResponsesConversionStreamsTerminalUsage(t *testing.T) {
 	}
 	if usage["prompt_tokens"] != float64(3) || usage["completion_tokens"] != float64(2) || usage["total_tokens"] != float64(5) {
 		t.Errorf("Chat stream usage = %v, want prompt=3 completion=2 total=5", usage)
+	}
+}
+
+// TestForward_ResponsesToAnthropic_NonStream completes the sixth conversion
+// direction at the integration layer: a Responses-protocol client against an
+// explicit anthropic backend. Instructions lift to the top-level system field,
+// the request goes to /v1/messages with the model rewritten, and the client
+// receives a Responses-shaped answer.
+func TestForward_ResponsesToAnthropic_NonStream(t *testing.T) {
+	var gotReq, gotPath string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotReq, gotPath = string(b), r.URL.Path
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hello back"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`)
+	}))
+	defer up.Close()
+	cfg := &Config{
+		Providers: map[string]Provider{"ant": {AnthropicBaseURL: up.URL, Provider: testProviderID}},
+		Routes:    map[string][]RouteTarget{"r-x": {{Provider: "ant", Model: "claude-x", Protocol: "anthropic"}}},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["ant"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(
+		`{"model":"r-x","instructions":"be nice","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
+
+	// Backend received an Anthropic request: /v1/messages path (kept for
+	// anthropic), instructions lifted into the top-level system block list,
+	// model rewritten to the target's upstream model, input list → messages.
+	if gotPath != "/v1/messages" {
+		t.Errorf("backend path = %q, want /v1/messages", gotPath)
+	}
+	// (Order-insensitive markers: Go map marshaling shuffles JSON keys, so
+	// the system block's key order must not be pinned.)
+	for _, want := range []string{`"system":[`, `"text":"be nice"`, `"model":"claude-x"`, `"messages":[`, `"text":"hi"`} {
+		if !strings.Contains(gotReq, want) {
+			t.Errorf("backend request missing %q: %s", want, gotReq)
+		}
+	}
+	if strings.Contains(gotReq, `"input":[`) {
+		t.Errorf("backend request still carries the responses input list: %s", gotReq)
+	}
+
+	// Client received a Responses-shaped answer.
+	for _, want := range []string{`"object":"response"`, `"text":"hello back"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("client response missing %q: %s", want, body)
+		}
 	}
 }

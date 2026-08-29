@@ -161,11 +161,11 @@ func TestStreamEOFWithoutTerminalFailsClosed_AllDirections(t *testing.T) {
 func TestOpenAIStream_IncompleteToolArgumentsFailsClosed(t *testing.T) {
 	in := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n" +
 		"data: [DONE]\n\n"
-	outA, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(in), "gpt-x"))
+	outA := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(in), "gpt-x"))
 	if !bytes.Contains(outA, []byte("event: error")) || bytes.Contains(outA, []byte("event: message_stop")) {
 		t.Fatalf("chat→anthropic accepted incomplete tool JSON:\n%s", outA)
 	}
-	outR, _ := io.ReadAll(newOpenAIToResponsesSSE(strings.NewReader(in), "gpt-x"))
+	outR := readAllChecked(t, newOpenAIToResponsesSSE(strings.NewReader(in), "gpt-x"))
 	if !bytes.Contains(outR, []byte("event: response.failed")) || bytes.Contains(outR, []byte("event: response.completed")) {
 		t.Fatalf("chat→responses accepted incomplete tool JSON:\n%s", outR)
 	}

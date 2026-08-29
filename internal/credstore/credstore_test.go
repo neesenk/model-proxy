@@ -210,9 +210,21 @@ func TestRefLoadLazyMigratesPlaintextToKeychain(t *testing.T) {
 	if got2, err := ref.Load(); err != nil || string(got2) != string(legacy) {
 		t.Fatalf("post-migration Load from keychain: (%q, %v)", got2, err)
 	}
-	// A second Ref round-trips through the keychain without the file at all.
-	if got3, err := NewRef(filepath.Join(dir, "other.json")).Load(); err == nil {
-		_ = got3
+	// A second Ref with NO plaintext file at all: an empty Load is a clean
+	// ErrNotFound (fail-closed), and after Save the round-trip goes purely
+	// through the keychain — still without any plaintext file.
+	other := NewRef(filepath.Join(dir, "other.json"))
+	if _, err := other.Load(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("empty Ref Load = %v, want ErrNotFound", err)
+	}
+	if err := other.Save([]byte(`{"second":true}`)); err != nil {
+		t.Fatalf("Save under keychain mode (file-free ref): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "other.json")); !os.IsNotExist(err) {
+		t.Fatalf("keychain-mode Save must not create a plaintext file (err=%v)", err)
+	}
+	if got3, err := other.Load(); err != nil || string(got3) != `{"second":true}` {
+		t.Fatalf("file-free keychain round-trip: (%q, %v)", got3, err)
 	}
 	// Save updates the keychain entry, not a plaintext file.
 	if err := ref.Save([]byte(`{"version":1}`)); err != nil {

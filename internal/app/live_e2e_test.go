@@ -487,8 +487,25 @@ func TestLive_AnthropicToChat_MediaVisionGate(t *testing.T) {
 		`{"role":"user","content":"describe it briefly"}]}`
 	status, raw := livePost(t, srv, "/v1/messages", body)
 	liveStatusOK(t, status, raw)
-	if !strings.Contains(raw, `"text"`) {
-		t.Fatalf("live: no text content in response:\n%s", liveExcerpt(raw))
+	// Parse the anthropic response and require a NON-EMPTY text block — a raw
+	// `"text"` substring also matches error envelopes and media_type fields.
+	var msg struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		t.Fatalf("live: response is not an anthropic message JSON: %v\n%s", err, liveExcerpt(raw))
+	}
+	textLen := 0
+	for _, c := range msg.Content {
+		if c.Type == "text" {
+			textLen += len(c.Text)
+		}
+	}
+	if textLen == 0 {
+		t.Fatalf("live: no non-empty text content block in response:\n%s", liveExcerpt(raw))
 	}
 }
 

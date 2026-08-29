@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,13 +23,18 @@ func TestRenderStatsCLI(t *testing.T) {
 	}}
 	raw, _ := json.Marshal(resp)
 
+	// The handler runs on the server's goroutine; guard shared state with a
+	// mutex so the test goroutine's reads are race-free.
+	var mu sync.Mutex
 	var gotQuery string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/stats" {
 			http.NotFound(w, r)
 			return
 		}
+		mu.Lock()
 		gotQuery = r.URL.RawQuery
+		mu.Unlock()
 		io.WriteString(w, string(raw))
 	}))
 	defer up.Close()
@@ -53,16 +59,22 @@ func TestRenderStatsCLI(t *testing.T) {
 		}
 	}
 	// No --bucket flag -> query string omits bucket (server defaults to 1m).
-	if strings.Contains(gotQuery, "bucket=") {
-		t.Errorf("default query should omit bucket, got %q", gotQuery)
+	mu.Lock()
+	query := gotQuery
+	mu.Unlock()
+	if strings.Contains(query, "bucket=") {
+		t.Errorf("default query should omit bucket, got %q", query)
 	}
 
 	// --bucket 10m is forwarded to the daemon's query string.
 	if _, err := cli.RenderStats(listen, cli.StatsOpts{Bucket: "10m"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotQuery, "bucket=10m") {
-		t.Errorf("--bucket 10m not forwarded, query=%q", gotQuery)
+	mu.Lock()
+	query = gotQuery
+	mu.Unlock()
+	if !strings.Contains(query, "bucket=10m") {
+		t.Errorf("--bucket 10m not forwarded, query=%q", query)
 	}
 
 	// --json passes the raw body through.
@@ -271,17 +283,24 @@ func TestRenderStatsCLI_AnalyticsPath(t *testing.T) {
 		`],"totals":{"input":1200,"output":580,"cost":0.12},` +
 		`"price_coverage":{"priced":["deepseek-chat"],"unpriced":["glm-5"]}}`
 
+	// Handler-side writes vs test-side reads: guard with a mutex (the CLI
+	// client may run in a subprocess, so no in-process edge synchronizes them).
+	var mu sync.Mutex
 	var sawAnalytics, sawStats bool
 	var lastQuery string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/analytics" {
+			mu.Lock()
 			sawAnalytics = true
 			lastQuery = r.URL.RawQuery
+			mu.Unlock()
 			io.WriteString(w, body)
 			return
 		}
 		if r.URL.Path == "/api/stats" {
+			mu.Lock()
 			sawStats = true
+			mu.Unlock()
 		}
 		http.NotFound(w, r)
 	}))
@@ -294,14 +313,17 @@ func TestRenderStatsCLI_AnalyticsPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sawAnalytics {
+	mu.Lock()
+	analyticsHit, statsHit, query := sawAnalytics, sawStats, lastQuery
+	mu.Unlock()
+	if !analyticsHit {
 		t.Error("expected request to /api/analytics")
 	}
-	if sawStats {
+	if statsHit {
 		t.Error("did not expect request to /api/stats when granularity/cost set")
 	}
-	if !strings.Contains(lastQuery, "granularity=month") {
-		t.Errorf("query missing granularity=month: %q", lastQuery)
+	if !strings.Contains(query, "granularity=month") {
+		t.Errorf("query missing granularity=month: %q", query)
 	}
 	for _, want := range []string{"deepseek", "deepseek-chat", "$0.12", "n/a", "month"} {
 		if !strings.Contains(out, want) {
@@ -322,15 +344,20 @@ func TestRenderStatsCLI_AnalyticsPath(t *testing.T) {
 	}
 
 	// --cost only (no granularity): defaults to day in the query string.
+	mu.Lock()
 	sawAnalytics = false
+	mu.Unlock()
 	if _, err := cli.RenderStats(listen, cli.StatsOpts{Cost: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !sawAnalytics {
+	mu.Lock()
+	analyticsHit, query = sawAnalytics, lastQuery
+	mu.Unlock()
+	if !analyticsHit {
 		t.Error("--cost alone should still route to /api/analytics")
 	}
-	if !strings.Contains(lastQuery, "granularity=day") {
-		t.Errorf("--cost alone should default granularity=day in query: %q", lastQuery)
+	if !strings.Contains(query, "granularity=day") {
+		t.Errorf("--cost alone should default granularity=day in query: %q", query)
 	}
 }
 

@@ -94,12 +94,20 @@ func TestRunTakeover_UnknownClientNoOps(t *testing.T) {
 func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 	// Keep the models.dev catalog fetch offline: takeover.RunTakeover("all") refreshes
 	// the catalog for opencode/pi model metadata — point it at a local stub.
+	// The stub must be a VALID catalog (at least one provider): an empty one
+	// fails parsing, and with HOME isolated below there is no cached catalog
+	// to fall back to.
 	md := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
-		fmt.Fprint(w, `{}`)
+		fmt.Fprint(w, `{"zhipuai":{"models":{"glm-4.7":{"limit":{"context":128000,"output":8192}}}}}`)
 	}))
 	defer md.Close()
 	t.Setenv("MP_MODELSDEV_URL", md.URL)
+	// Isolate HOME: LoadModelsCatalog persists the fetched catalog to
+	// <home>/.model-proxy/models_cache.json and the accounts store reads
+	// <home>/.model-proxy — without this the test would overwrite the real
+	// user cache (or silently depend on its freshness).
+	t.Setenv("HOME", t.TempDir())
 
 	dir := t.TempDir()
 	bakDir := filepath.Join(dir, ".mp")
@@ -117,9 +125,14 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 			Pi:       filepath.Join(dir, "pi.json"),
 		},
 	}
-	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644)
+	if err := os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	cat, _ := app.LoadModelsCatalog(cliframework.HomeDir(), false)
+	cat, err := app.LoadModelsCatalog(cliframework.HomeDir(), false)
+	if err != nil {
+		t.Fatalf("load models catalog: %v", err)
+	}
 	meta, sources := app.HydrateModels(cfg, cat)
 	factsSources := make(map[string]map[string]int, len(sources))
 	for provider, models := range sources {

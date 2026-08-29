@@ -373,7 +373,7 @@ func TestConvertOpenAIResponseToResponses(t *testing.T) {
 // ===========================================================================
 
 // readAll (io.Reader → []byte) is defined in models_check_test.go; stream tests
-// below use string(readAll(r)).
+// below use string(readAllChecked(t, r)).
 
 const responsesTextSSE = "event: response.created\n" +
 	`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","model":"gpt-x"}}` + "\n\n" +
@@ -389,7 +389,7 @@ const responsesTextSSE = "event: response.created\n" +
 	`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","model":"gpt-x","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}` + "\n\n"
 
 func TestResponsesSSEToAnthropic(t *testing.T) {
-	got := string(readAll(newResponsesToAnthropicSSE(strings.NewReader(responsesTextSSE), "gpt-x")))
+	got := string(readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(responsesTextSSE), "gpt-x")))
 	for _, want := range []string{
 		"event: message_start",
 		"event: content_block_start",
@@ -411,7 +411,7 @@ func TestResponsesSSEToAnthropic(t *testing.T) {
 }
 
 func TestResponsesSSEToOpenAI(t *testing.T) {
-	got := string(readAll(newResponsesToOpenAISSE(strings.NewReader(responsesTextSSE), "gpt-x")))
+	got := string(readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(responsesTextSSE), "gpt-x")))
 	for _, want := range []string{
 		"chat.completion.chunk",
 		`"role":"assistant"`,
@@ -441,7 +441,7 @@ const responsesToolSSE = "event: response.created\n" +
 	`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1,"output_tokens":3,"total_tokens":4}}}` + "\n\n"
 
 func TestResponsesSSEToAnthropic_ToolCall(t *testing.T) {
-	got := string(readAll(newResponsesToAnthropicSSE(strings.NewReader(responsesToolSSE), "gpt-x")))
+	got := string(readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(responsesToolSSE), "gpt-x")))
 	for _, want := range []string{
 		`"type":"tool_use"`,
 		`"id":"call_1"`,
@@ -458,7 +458,7 @@ func TestResponsesSSEToAnthropic_ToolCall(t *testing.T) {
 }
 
 func TestResponsesSSEToOpenAI_ToolCall(t *testing.T) {
-	got := string(readAll(newResponsesToOpenAISSE(strings.NewReader(responsesToolSSE), "gpt-x")))
+	got := string(readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(responsesToolSSE), "gpt-x")))
 	for _, want := range []string{
 		`"tool_calls"`,
 		`"id":"call_1"`,

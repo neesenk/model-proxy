@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -70,6 +71,7 @@ func TestHubPublishSubscribeExactlyOnce(t *testing.T) {
 	const publishers = 4
 	const perPublisher = 200
 	var pubWG sync.WaitGroup
+	var published atomic.Int64
 	start := make(chan struct{})
 	for p := 0; p < publishers; p++ {
 		pubWG.Add(1)
@@ -78,6 +80,7 @@ func TestHubPublishSubscribeExactlyOnce(t *testing.T) {
 			<-start
 			for i := 0; i < perPublisher; i++ {
 				h.Publish(Event{Type: "start", RequestID: fmt.Sprintf("r-%d-%d", p, i)})
+				published.Add(1)
 			}
 		}(p)
 	}
@@ -95,26 +98,43 @@ func TestHubPublishSubscribeExactlyOnce(t *testing.T) {
 		cancel()
 		return collector{seen: seen, ch: ch}
 	}
+
+	// Subscriptions must overlap live publishing, otherwise this test guards
+	// nothing (the regression window only exists while a Publish is in flight).
+	// Release the publishers, then wait for proof that events are flowing
+	// before collecting.
+	close(start)
+	deadline := time.Now().Add(time.Second)
+	for published.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if published.Load() == 0 {
+		t.Fatal("publishers made no progress; overlap precondition failed")
+	}
 	const numCollectors = 6
 	collectors := make([]collector, numCollectors)
 	for i := range collectors {
 		collectors[i] = subscribe()
 	}
 
-	close(start)
 	pubWG.Wait()
 	// Publishers are done and every subscription is cancelled: the channels
 	// are quiescent, so a non-blocking drain is complete.
-	for _, c := range collectors {
+	total := 0
+	for i := range collectors {
 		drain := true
 		for drain {
 			select {
-			case e := <-c.ch:
-				c.seen[e.RequestID]++
+			case e := <-collectors[i].ch:
+				collectors[i].seen[e.RequestID]++
 			default:
 				drain = false
 			}
 		}
+		total += len(collectors[i].seen)
+	}
+	if total == 0 {
+		t.Fatal("no collector observed any event; snapshot+channel overlap was never exercised")
 	}
 	for i := range collectors {
 		for id, n := range collectors[i].seen {

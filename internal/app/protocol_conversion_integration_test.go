@@ -41,8 +41,14 @@ func TestForward_AnthropicToOpenAI_NonStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
 
 	// Backend received an OpenAI-format request (system message, /chat/completions).
 	if !strings.Contains(gotOpenAIReq, `"role":"system"`) || !strings.Contains(gotOpenAIReq, `"content":"be nice"`) || !strings.Contains(gotOpenAIReq, `"model":"gpt-x"`) {
@@ -210,8 +216,14 @@ func TestForward_OpenAIToAnthropic_NonStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
+	}
 
 	if !strings.Contains(gotAnthropicReq, `"text":"s"`) || !strings.Contains(gotAnthropicReq, `"model":"claude"`) || !strings.Contains(gotAnthropicReq, `"max_tokens":100`) {
 		t.Errorf("backend got non-Anthropic request: %s", gotAnthropicReq)
@@ -299,8 +311,14 @@ func TestForward_Convert_LogsClientProtocolBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientBody, _ := io.ReadAll(resp.Body)
+	clientBody, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, clientBody)
+	}
 
 	// Client received the Anthropic conversion.
 	if !strings.Contains(string(clientBody), `"type":"message"`) || !strings.Contains(string(clientBody), `"text":"hello"`) {

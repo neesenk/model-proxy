@@ -146,7 +146,10 @@ func TestCLI_LogoutInteractiveRemovesAccount(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, "https://zhipu.invalid/u")
 
-	pool, _ := app.LoadPool("zhipu", "zhipu")
+	pool, err := app.LoadPool("zhipu", "zhipu")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(pool.Accounts) != 2 {
 		t.Fatalf("setup: want 2 accounts, got %d", len(pool.Accounts))
 	}
@@ -211,7 +214,10 @@ func TestCLI_LogoutByLabel(t *testing.T) {
 
 	RunLogout([]string{"zhipu", "--label", "K1", "--config", cfgPath})
 
-	pool, _ := app.LoadPool("zhipu", "zhipu")
+	pool, err := app.LoadPool("zhipu", "zhipu")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(pool.Accounts) != 1 {
 		t.Fatalf("want 1 account after --label logout, got %d: %+v", len(pool.Accounts), pool.Accounts)
 	}

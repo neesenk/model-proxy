@@ -52,14 +52,14 @@ func TestForward_ClaudeMapping(t *testing.T) {
 
 	// 1) anthropic claude-sonnet-4-6 → mapped to glm-5.2 → upstream sees glm-5.2.
 	*seen = nil
-	post(t, px.URL+"/v1/messages", `{"model":"claude-sonnet-4-6","messages":[]}`)
+	postOK(t, px.URL+"/v1/messages", `{"model":"claude-sonnet-4-6","messages":[]}`)
 	if len(*seen) != 1 || (*seen)[0] != "glm-5.2" {
 		t.Errorf("anthropic mapped name: upstream model=%v, want [glm-5.2]", *seen)
 	}
 
 	// 2) anthropic glm-5.2 (not in claude_mapping) → used as-is → upstream sees glm-5.2.
 	*seen = nil
-	post(t, px.URL+"/v1/messages", `{"model":"glm-5.2","messages":[]}`)
+	postOK(t, px.URL+"/v1/messages", `{"model":"glm-5.2","messages":[]}`)
 	if len(*seen) != 1 || (*seen)[0] != "glm-5.2" {
 		t.Errorf("anthropic unmapped name: upstream model=%v, want [glm-5.2]", *seen)
 	}

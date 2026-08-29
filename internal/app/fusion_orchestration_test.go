@@ -2,7 +2,9 @@ package app
 
 import (
 	"encoding/json"
+	"io"
 	"model-proxy/internal/observe/counters"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -337,4 +339,69 @@ func TestFusion_QuorumGrace(t *testing.T) {
 			t.Errorf("cancelled straggler consecutiveFailures = %d, want 0", failures)
 		}
 	})
+}
+
+// TestFusion_SynthesizerUpstream5xxIsHardEndpoint pins the fusion failure
+// contract ("a failed synthesis leg is a hard endpoint"): the panel reaches
+// quorum, but a 5xx synthesizer upstream does NOT retry elsewhere or fall back
+// to a draft — the client receives the synthesizer's failure as the terminal
+// answer, every panel member was still drafted exactly once, and the run is
+// recorded as committed-with-synth-failure rather than vanishing.
+func TestFusion_SynthesizerUpstream5xxIsHardEndpoint(t *testing.T) {
+	pa := newFakeUpstream(t, anthropicDraftResponder("draft-A"))
+	pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
+	ps := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(500)
+		io.WriteString(w, `{"e":"synth down"}`)
+	})
+	recipe := FusionConfig{
+		Panel: []RouteTarget{
+			{Provider: "pa", Model: "ma"},
+			{Provider: "pb", Model: "mb"},
+		},
+		Synthesizer: RouteTarget{Provider: "ps", Model: "ms"},
+	}
+	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"pa": pa, "pb": pb, "ps": ps})
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(fusionClientBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	// The synthesizer's 5xx is a hard failure of the fusion route's single
+	// remaining target: no draft fallback, no verbatim 500 commit — the proxy
+	// answers with its all-targets-failed 502. That IS the hard-endpoint
+	// contract; falling back to a draft here would be the bug.
+	if resp.StatusCode != 502 {
+		t.Fatalf("client status = %d body=%s, want 502 (hard endpoint, no draft fallback)", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "all targets failed") {
+		t.Errorf("client body = %s, want the all-targets-failed error", body)
+	}
+
+	// Drafts still ran exactly once per member; the synthesizer was tried
+	// exactly once (no retry storm around the hard endpoint).
+	if pa.hits() != 1 || pb.hits() != 1 {
+		t.Errorf("panel hits = pa:%d pb:%d, want 1/1 (quorum drafted before the synth failure)", pa.hits(), pb.hits())
+	}
+	if ps.hits() != 1 {
+		t.Errorf("synthesizer hits = %d, want exactly 1", ps.hits())
+	}
+
+	// Terminal state is observable: a 502 end event closes the request.
+	saw502 := false
+	for _, e := range proxy.events.Snapshot() {
+		if e.Type == "end" && e.Status == 502 {
+			saw502 = true
+		}
+	}
+	if !saw502 {
+		t.Error("no 502 end event closed the failed fusion request")
+	}
 }

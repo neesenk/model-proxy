@@ -85,7 +85,9 @@ func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
 		Object string `json:"object"`
 		Data   []any  `json:"data"`
 	}
-	json.NewDecoder(resp.Body).Decode(&list)
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
 	if list.Object != "list" || len(list.Data) != 0 {
 		t.Errorf("expected empty list, got %+v", list)
 	}

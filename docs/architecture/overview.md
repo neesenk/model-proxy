@@ -371,23 +371,25 @@ application → serveAssembly → applicationRuntime → Proxy
 该清单与 `internal/archtest/architecture_dependency_dag_contract_test.go` 的
 `internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
-- 叶子包（不得依赖其他 `model-proxy/*` 包）：`accounts`、`archtest`（纯测试包）、
-  `cache`、`catalog`、`configedit`、`daemonctl`、`guard`、`httpx`、`observe/counters`、
-  `observe/events`、`observe/seclog`、`observe/stats`、`pricing`、`protocol`、`provider`、
-  `transport/bodycapture`；
+- 叶子包（不得依赖其他 `model-proxy/*` 包）：`archtest`（纯测试包）、`cache`、
+  `catalog`、`configedit`、`credstore`、`daemonctl`、`guard`、`httpx`、
+  `observe/counters`、`observe/events`、`observe/seclog`、`pricing`、`protocol`、
+  `transport/bodycapture`、`webauth`；
+- `accounts → credstore`；
 - `app → accounts, appapi, cache, catalog, cli/framework, cli/login, cli/serve,
-  config, configedit, fusion, guard, httpx, observe/counters, observe/events,
-  observe/requestlog, observe/seclog, observe/stats, pricing, probe, protocol, provider,
-  routing, runtime, runtime/wirecap, shadow, targetexec, transport/bodycapture,
-  web`；
-- `appapi → fusion, observe/stats, pricing`；
+  config, configedit, credstore, fusion, guard, httpx, observe/counters,
+  observe/events, observe/requestlog, observe/seclog, observe/stats, presets,
+  pricing, probe, protocol, provider, routing, runtime, runtime/wirecap, shadow,
+  targetexec, transport/bodycapture, web, webauth`；
+- `appapi → fusion, observe/stats, presets, pricing`；
 - `cli → cli/serve, cli/framework, accounts, app, appapi, cli/clicommon,
-  cli/doctor, cli/login, cli/models, config, daemonctl, takeover,
+  cli/doctor, cli/login, cli/models, cli/presets, config, daemonctl, takeover,
   observe/requestlog, observe/seclog, observe/stats, provider`；
 - `cli/clicommon → appapi, daemonctl, provider`；
 - `cli/doctor → accounts, app, appapi, cli/clicommon, cli/framework,
-  cli/models, config, takeover, observe/seclog, provider`；
+  cli/models, config, credstore, takeover, observe/seclog, provider`；
 - `cli/framework → accounts, config`；
+- `cli/presets → cli/framework, cli/login, cli/serve, config, presets, provider`；
 - `cli/serve → config`；
 - `cli/login → accounts, cli/framework, cli/serve, config, provider`；
 - `cli/models → cli/serve, cli/framework, accounts, app, catalog, config,
@@ -395,14 +397,17 @@ application → serveAssembly → applicationRuntime → Proxy
 - `config → pricing, protocol`；
 - `fusion → config`；
 - `observe/requestlog → config`（生效值 accessor 所需的值类型）；
+- `observe/stats → observe/counters`；
+- `presets → config, configedit, provider`；
 - `probe → config, provider`；
+- `provider → credstore`；
 - `routing → catalog, config, provider`（均为值类型消费）；
 - `runtime → config, runtime/wirecap, provider`；
 - `runtime/wirecap → config, provider`；
 - `takeover → catalog, config`；
 - `shadow → targetexec, transport/bodycapture`；
 - `targetexec → cache, config, protocol, transport/bodycapture, provider`；
-- `web → appapi, observe/requestlog, observe/stats, pricing`。
+- `web → appapi, observe/requestlog, observe/stats, pricing, webauth`。
 
 `internal/takeover` 拥有客户端配置的备份、改写与恢复（claude/opencode/codex/pi），
 只消费 config DTO 与 catalog 元数据；implicit routes、catalog 加载与 source 标记

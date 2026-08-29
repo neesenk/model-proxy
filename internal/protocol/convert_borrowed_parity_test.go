@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"io"
 	"regexp"
 	"strings"
 	"testing"
@@ -27,7 +26,7 @@ func TestParity_DoneFrameArgumentsNotDuplicated(t *testing.T) {
 		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}` + "\n\n"
 
 	// r→anthropic: concatenated input_json_delta payloads equal the original.
-	rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
 	var anthropicArgs strings.Builder
 	for _, ev := range drainSSE(t, strings.NewReader(string(rawA))) {
 		if ev.event != "content_block_delta" {
@@ -42,7 +41,7 @@ func TestParity_DoneFrameArgumentsNotDuplicated(t *testing.T) {
 	}
 
 	// r→chat: concatenated tool_calls argument fragments equal the original.
-	rawC, _ := io.ReadAll(newResponsesToOpenAISSE(strings.NewReader(in), "m"))
+	rawC := readAllChecked(t, newResponsesToOpenAISSE(strings.NewReader(in), "m"))
 	var chatArgs strings.Builder
 	for _, line := range strings.Split(string(rawC), "\n") {
 		if !strings.HasPrefix(line, "data: {") {
@@ -82,7 +81,7 @@ func TestParity_BareMessageStopKeepsMaxTokens(t *testing.T) {
 		`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n" +
 		`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":4}}` + "\n\n" +
 		`event: message_stop` + "\n" + `data: {"type":"message_stop"}` + "\n\n"
-	raw, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	raw := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
 	var lengthStops, otherStops int
 	for _, line := range strings.Split(string(raw), "\n") {
 		if !strings.Contains(line, `"finish_reason":"length"`) {
@@ -267,7 +266,7 @@ func TestParity_BufferedAndStreamedEquivalence(t *testing.T) {
 		`data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":2,"delta":"{\"q\":\"x\"}"}` + "\n\n" +
 		`data: {"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":"{\"q\":\"x\"}"}}` + "\n\n" +
 		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":5,"output_tokens":7}}}` + "\n\n"
-	rawA, _ := io.ReadAll(newResponsesToAnthropicSSE(strings.NewReader(stream), "m"))
+	rawA := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(stream), "m"))
 
 	var sblocks []block
 	cur := block{}

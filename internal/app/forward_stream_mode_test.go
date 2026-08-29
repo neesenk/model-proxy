@@ -26,13 +26,17 @@ func TestForwardAdaptsUpstreamSSEToClientJSON(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(
 		`{"model":"claude-x","max_tokens":16,"stream":false,"messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("content-type"), "application/json") {
 		t.Fatalf("status=%d content-type=%q body=%s", resp.StatusCode, resp.Header.Get("content-type"), body)
 	}
@@ -56,13 +60,17 @@ func TestForwardAdaptsUpstreamJSONToClientSSE(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(
 		`{"model":"codex-x","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
 	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("content-type"), "text/event-stream") {
 		t.Fatalf("status=%d content-type=%q body=%s", resp.StatusCode, resp.Header.Get("content-type"), body)
 	}

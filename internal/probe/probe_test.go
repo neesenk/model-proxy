@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
@@ -84,12 +85,16 @@ func TestCallableTransportError(t *testing.T) {
 }
 
 func TestExchangeMeasuresLatency(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	// The handler stalls 30ms so a real wall-clock measurement must land
+	// strictly above that floor — proving Latency measures the exchange.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+	}))
 	defer srv.Close()
 	res := Exchange(context.Background(), srv.Client(),
 		configdomain.Provider{OpenAIBaseURL: srv.URL}, stubImpl{}, "m")
-	if !res.OK || res.Latency < 0 {
-		t.Errorf("Exchange = %+v", res)
+	if !res.OK || res.Latency < 30*time.Millisecond {
+		t.Errorf("Exchange = %+v, want OK with latency >= 30ms handler stall", res)
 	}
 }
 

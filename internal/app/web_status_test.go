@@ -22,11 +22,15 @@ func TestAPIStatus(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status=%d want 200", rec.Code)
 	}
-	body := rec.Body.String()
-	// Exact structural fields must be present (shape check on key presence).
-	for _, want := range []string{`"uptime"`, `"version"`, `"listen"`, `"health"`, `"schedule"`, `"counters"`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("status body missing %s: %s", want, body)
+	var status map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("status body is not a JSON object: %v: %s", err, rec.Body.String())
+	}
+	// Exact structural fields must be present (parsed key presence — a raw
+	// substring would also match keys nested inside values).
+	for _, want := range []string{"uptime", "version", "listen", "health", "schedule", "counters"} {
+		if _, ok := status[want]; !ok {
+			t.Errorf("status body missing %q: %s", want, rec.Body.String())
 		}
 	}
 }

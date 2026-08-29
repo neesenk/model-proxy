@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,5 +93,10 @@ func TestHandleSessions(t *testing.T) {
 	server2.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
 	if rec2.Code != http.StatusOK || !bytes.Contains(rec2.Body.Bytes(), []byte(`"enabled":false`)) {
 		t.Fatalf("disabled status = %d body = %s", rec2.Code, rec2.Body)
+	}
+	// Disabled must serialize a NON-NULL empty array — `null` would break the
+	// UI's iteration contract the same way as on /api/requests.
+	if body := rec2.Body.String(); !strings.Contains(body, `"sessions":[]`) {
+		t.Fatalf("disabled sessions body must carry sessions:[] — got %s", body)
 	}
 }

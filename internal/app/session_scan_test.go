@@ -295,8 +295,8 @@ func TestSessionScan_ConcurrentSameSession(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if n := fragmentedCount(p); n < 1 {
-		t.Errorf("fragmented counter = %d, want ≥ 1 (the completing request fired)", n)
+	if n := fragmentedCount(p); n != 1 {
+		t.Errorf("fragmented counter = %d, want exactly 1 (only the completing request fires; more = double-reporting)", n)
 	}
 }
 

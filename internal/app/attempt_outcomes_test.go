@@ -63,14 +63,14 @@ func TestForward_AttemptOutcomeCounters(t *testing.T) {
 	if snap[counters.PMKey{Provider: "good-prov", Model: "m"}].Requests != 1 {
 		t.Errorf("good-prov requests = %d, want 1", snap[counters.PMKey{Provider: "good-prov", Model: "m"}].Requests)
 	}
-	if snap[counters.PMKey{Provider: "bad-prov", Model: "m"}].Failures < 1 {
-		t.Errorf("bad-prov failures = %d, want ≥1", snap[counters.PMKey{Provider: "bad-prov", Model: "m"}].Failures)
+	if snap[counters.PMKey{Provider: "bad-prov", Model: "m"}].Failures != 1 {
+		t.Errorf("bad-prov failures = %d, want exactly 1 (double-accounting regression)", snap[counters.PMKey{Provider: "bad-prov", Model: "m"}].Failures)
 	}
 
 	// Routing-decision overhead: one observation per request under the virtual
 	// ("routing","decision") row, latency sum populated.
 	routing := snap[counters.PMKey{Provider: "routing", Model: "decision"}]
-	if routing.Requests < 1 {
-		t.Errorf("routing observations = %d, want ≥1", routing.Requests)
+	if routing.Requests != 1 {
+		t.Errorf("routing observations = %d, want exactly 1 (one decision per request)", routing.Requests)
 	}
 }

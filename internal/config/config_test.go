@@ -9,11 +9,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestConfig_ProviderBaseURLs validates each provider's base URLs produce the
-// correct upstream path for both protocols. This catches:
-//   - openai_base_url missing its version segment (proxy strips /v1 → double path)
-//   - anthropic_base_url including /v1 (proxy keeps /v1/messages → double /v1)
-//   - wrong base URL patterns
+// TestConfig_ProviderBaseURLs validates the repository config.yaml's base URLs
+// against the two path-construction mistakes the proxy's URL joining can hit:
+//   - openai_base_url ending in /v1 (the proxy already strips the client's /v1
+//     and would append onto it → double path)
+//   - anthropic_base_url ending in /v1 (the proxy keeps /v1/messages → double /v1)
+//
+// It does NOT validate version-segment presence in general (e.g. zhipu's
+// /api/paas/v4 has its own shape) — only the doubling regressions above.
 func TestConfig_ProviderBaseURLs(t *testing.T) {
 	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
 	if err != nil {
@@ -93,34 +96,6 @@ func TestConfig_ClaudeMapping(t *testing.T) {
 		}
 		if _, ok := cfg.Routes[exposed]; !ok {
 			t.Errorf("claude_mapping %q → %q: target not in routes", claude, exposed)
-		}
-	}
-}
-
-// TestConfig_UpstreamURLPreview prints the exact upstream URLs the proxy would
-// build for each provider×protocol. Useful for manual review — run with -v.
-func TestConfig_UpstreamURLPreview(t *testing.T) {
-	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if len(cfg.Providers) == 0 {
-		t.Fatal("no providers configured")
-	}
-	for name, prov := range cfg.Providers {
-		// P1-2: assert no double /v1 (real assertion, not just t.Logf)
-		openaiURL := strings.TrimRight(prov.OpenAIBaseURL, "/") + "/chat/completions"
-		if strings.Contains(openaiURL, "/v1/v1") {
-			t.Errorf("provider %s: openai URL has double /v1: %s", name, openaiURL)
-		}
-		if prov.AnthropicBaseURL != "" {
-			anthropicURL := strings.TrimRight(prov.AnthropicBaseURL, "/") + "/v1/messages"
-			if strings.Contains(anthropicURL, "/v1/v1") {
-				t.Errorf("provider %s: anthropic URL has double /v1: %s", name, anthropicURL)
-			}
-			if !strings.HasSuffix(anthropicURL, "/v1/messages") {
-				t.Errorf("provider %s: anthropic URL doesn't end with /v1/messages: %s", name, anthropicURL)
-			}
 		}
 	}
 }

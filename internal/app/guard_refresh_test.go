@@ -27,10 +27,16 @@ var (
 // codex provider's in-process token refresh does.
 func writeCodexAuthFile(t *testing.T, home, accessToken string) {
 	t.Helper()
-	content := `{"tokens":{"access_token":"` + accessToken + `","refresh_token":"","id_token":"","account_id":"acct"}}`
-	if err := os.WriteFile(filepath.Join(home, ".model-proxy", "codex_oauth_auth.json"), []byte(content), 0o600); err != nil {
+	if err := writeCodexAuthFileErr(home, accessToken); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeCodexAuthFileErr is the goroutine-safe variant: it returns the error
+// instead of calling t.Fatal, which is only legal on the test goroutine.
+func writeCodexAuthFileErr(home, accessToken string) error {
+	content := `{"tokens":{"access_token":"` + accessToken + `","refresh_token":"","id_token":"","account_id":"acct"}}`
+	return os.WriteFile(filepath.Join(home, ".model-proxy", "codex_oauth_auth.json"), []byte(content), 0o600)
 }
 
 // guardScanNames runs the current generation's scanner over a body containing
@@ -175,7 +181,11 @@ func TestGuardOAuthRefresh_ConcurrentReloadRace(t *testing.T) {
 				return
 			}
 			if i%5 == 4 {
-				writeCodexAuthFile(t, home, fmt.Sprintf("%s-r%d", oauthTokV2, i))
+				// t.Fatal is illegal off the test goroutine — report and bail.
+				if err := writeCodexAuthFileErr(home, fmt.Sprintf("%s-r%d", oauthTokV2, i)); err != nil {
+					t.Errorf("rotate auth file: %v", err)
+					return
+				}
 			}
 		}
 	}()
@@ -331,9 +341,18 @@ func TestGuardMemorySecrets_ConcurrentMintAndRefresh(t *testing.T) {
 				return
 			default:
 			}
-			if code, _ := post(t, px.URL+"/v1/chat/completions",
-				`{"model":"aqp-m","messages":[{"role":"user","content":"hi"}]}`); code != http.StatusOK {
-				t.Errorf("traffic during race: status = %d, want 200", code)
+			// t.Fatal is illegal off the test goroutine: use the raw client
+			// and t.Errorf so a transport failure is a clean test failure.
+			resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
+				stringReader(`{"model":"aqp-m","messages":[{"role":"user","content":"hi"}]}`))
+			if err != nil {
+				t.Errorf("traffic during race: %v", err)
+				return
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("traffic during race: status = %d, want 200", resp.StatusCode)
 				return
 			}
 		}

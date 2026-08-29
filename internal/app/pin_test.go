@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -57,7 +58,7 @@ func TestPin_ForcesProvider(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`)
+	postOK(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`)
 	if !deepHit {
 		t.Error("pinned provider deepseek was not hit")
 	}
@@ -196,16 +197,28 @@ func TestHandlePinAPI(t *testing.T) {
 		Provider string `json:"provider"`
 		Expires  string `json:"expires_at"`
 	}
-	json.Unmarshal(rec2.Body.Bytes(), &set)
+	if err := json.Unmarshal(rec2.Body.Bytes(), &set); err != nil {
+		t.Fatalf("parse pin response: %v: %s", err, rec2.Body.String())
+	}
 	if set.Provider != "zhipu" || set.Expires == "" {
 		t.Errorf("pin response=%+v want provider zhipu + an expiry", set)
 	}
 
-	// GET list contains the pin.
+	// GET list contains exactly the pinned route→provider pair (parsed, not
+	// substring — "glm" alone would also match "glm-4.6").
 	rec3 := httptest.NewRecorder()
 	mux.ServeHTTP(rec3, httptest.NewRequest("GET", "/api/pin", nil))
-	if !strings.Contains(rec3.Body.String(), `"glm"`) || !strings.Contains(rec3.Body.String(), `"zhipu"`) {
-		t.Errorf("pin list missing the pin: %s", rec3.Body.String())
+	var listResp struct {
+		Pins []struct {
+			Route    string `json:"route"`
+			Provider string `json:"provider"`
+		} `json:"pins"`
+	}
+	if err := json.Unmarshal(rec3.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("parse pin list: %v: %s", err, rec3.Body.String())
+	}
+	if pins := listResp.Pins; len(pins) != 1 || pins[0].Route != "glm" || pins[0].Provider != "zhipu" {
+		t.Errorf("pin list = %+v, want exactly [glm→zhipu]", pins)
 	}
 
 	// DELETE removes it.
@@ -216,8 +229,8 @@ func TestHandlePinAPI(t *testing.T) {
 	}
 	rec5 := httptest.NewRecorder()
 	mux.ServeHTTP(rec5, httptest.NewRequest("GET", "/api/pin", nil))
-	if strings.Contains(rec5.Body.String(), `"glm"`) {
-		t.Errorf("pin still present after delete: %s", rec5.Body.String())
+	if body := rec5.Body.String(); strings.Contains(body, `"glm"`) {
+		t.Errorf("pin still present after delete: %s", body)
 	}
 }
 
@@ -334,12 +347,90 @@ func TestPin_ForcesThroughCircuit(t *testing.T) {
 
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
-	post(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`)
+	postOK(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`)
 
 	if !bHit {
 		t.Error("pinned + circuit-open provider b was NOT hit — pin must force through the circuit")
 	}
 	if aHit {
 		t.Error("provider a was hit — pin must NOT fail over when the pinned provider is circuit-open")
+	}
+}
+
+// TestPin_TTLExpiryRestoresScheduling (P0): the pin state machine's fourth
+// terminal. While pinned, the route is a hard choice (no failover, forces
+// through the circuit); after the TTL lapses, the pin disappears and normal
+// scheduling — including circuit failover — resumes.
+func TestPin_TTLExpiryRestoresScheduling(t *testing.T) {
+	var aHits atomic.Int64
+	aUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		aHits.Add(1)
+		w.Write([]byte(`{"from":"a"}`))
+	}))
+	defer aUp.Close()
+	bUp, bHits := newHitServer(func(int) (int, string, http.Header, time.Duration) {
+		return 500, `{"e":"b broken"}`, nil, 0
+	})
+	defer bUp.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: aUp.URL, Provider: testProviderID},
+			"b": {OpenAIBaseURL: bUp.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm": {
+				{Provider: "a", Model: "glm", Priority: 1},
+				{Provider: "b", Model: "glm", Priority: 2},
+			},
+		},
+		Scheduling: Scheduling{CircuitThreshold: 3, RetryWait: "0"},
+	}
+	p := newProxyWithStatic(t, cfg, map[string]string{"a": "ka", "b": "kb"})
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	// Pin glm → b with a short TTL. While pinned, b is a hard choice: its 500s
+	// do NOT fail over to a; the single pinned target failing hard answers
+	// with the proxy's all-targets-failed 502 (4xx commits verbatim, 5xx does
+	// not), and the failures still trip b's circuit.
+	if !setPinForTest(p, "glm", "b", 400*time.Millisecond) {
+		t.Fatal("setPin with TTL failed")
+	}
+	for i := 0; i < 3; i++ {
+		if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"glm","messages":[]}`); st != 502 {
+			t.Fatalf("pinned request %d: status = %d, want 502 (pinned 5xx, no failover)", i+1, st)
+		}
+	}
+	if got := bHits.Load(); got != 3 {
+		t.Fatalf("pinned b hits = %d, want 3", got)
+	}
+	if got := aHits.Load(); got != 0 {
+		t.Fatalf("a hit %d time(s) while pinned — pin must not fail over", got)
+	}
+	if h, ok := p.runtimeState.Dashboard(time.Now()).Providers["b"]; !ok || h.Available {
+		t.Fatalf("b circuit should be open after 3 failures while pinned: %+v", h)
+	}
+
+	// A fourth request while STILL pinned forces through b's open circuit.
+	if st := postStatus(t, px.URL+"/v1/chat/completions", `{"model":"glm","messages":[]}`); st != 502 {
+		t.Fatalf("pinned-through-circuit request: status = %d, want 502", st)
+	}
+
+	// TTL lapse is observable in the runtime snapshot — poll for it, no sleep.
+	waitUntil(t, "pin TTL expiry", func() bool {
+		_, active := p.runtimeState.Dashboard(time.Now()).Pins["glm"]
+		return !active
+	})
+
+	// Pin gone: b's open circuit now routes the request to a (failover restored).
+	if st, body := post(t, px.URL+"/v1/chat/completions", `{"model":"glm","messages":[]}`); st != 200 || body != `{"from":"a"}` {
+		t.Fatalf("post-expiry request: status=%d body=%s, want 200 from a", st, body)
+	}
+	if got := aHits.Load(); got != 1 {
+		t.Errorf("a hits after expiry = %d, want 1 (scheduling restored)", got)
+	}
+	if got := bHits.Load(); got != 4 {
+		t.Errorf("b hits after expiry = %d, want 4 (unpinned b skipped via circuit)", got)
 	}
 }

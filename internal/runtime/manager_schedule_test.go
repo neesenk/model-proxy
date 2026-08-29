@@ -66,12 +66,17 @@ func TestDecideOrderStickyDwellAndSwitchMargin(t *testing.T) {
 		{Provider: "current", Priority: 1},
 	}
 	base := ScheduleInput{
-		Exposed:      "route",
-		SessionKey:   "session",
-		Targets:      targets,
-		RouteKeys:    map[string]bool{"route": true},
-		Dwell:        time.Hour,
-		SwitchMargin: 40,
+		Exposed:    "route",
+		SessionKey: "session",
+		Targets:    targets,
+		RouteKeys:  map[string]bool{"route": true},
+		Dwell:      time.Hour,
+		// SwitchMargin is a FRACTION of remaining quota (config converts
+		// percentage points via /100). The quota gap here is 1.0-0.7=0.3:
+		// margin 0.5 keeps sticky only under the fractional reading — if the
+		// implementation ever compared percentage points (or dropped the /100
+		// conversion), 30 >= 0.5 would switch and both keep-cases below fail.
+		SwitchMargin: 0.5,
 		Now:          now,
 		QuotaMaxAge:  time.Hour,
 		Generation:   2,
@@ -94,7 +99,8 @@ func TestDecideOrderStickyDwellAndSwitchMargin(t *testing.T) {
 		t.Fatalf("below-margin result = %+v", result)
 	}
 
-	base.SwitchMargin = .29
+	// Below the fractional margin (0.2 < gap 0.3): the better plan wins.
+	base.SwitchMargin = 0.2
 	result = m.DecideOrder(base)
 	if !reflect.DeepEqual(result.Order, []int{0, 1}) ||
 		result.StickyProvider != "best" {

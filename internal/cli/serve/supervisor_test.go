@@ -194,6 +194,40 @@ func TestStopDaemonProcess_WaitsForExitAfterKill(t *testing.T) {
 	}
 }
 
+// TestRunSupervisorSIGINTAlsoShutsDown: the signal dispatch must treat SIGINT
+// as a graceful shutdown exactly like SIGTERM (Ctrl-C on a foreground serve).
+// A dispatch table that only lists SIGTERM would leave the supervisor deaf to
+// Ctrl-C without any test noticing.
+func TestRunSupervisorSIGINTAlsoShutsDown(t *testing.T) {
+	env, sa, _ := supervisorTestEnv(t)
+	sigCh := make(chan os.Signal, 1)
+	worker := newFakeSupervisorWorker(7061, true)
+
+	spawned := make(chan struct{}, 1)
+	deps := supervisorDeps{
+		spawn: func(DaemonEnv, Args) supervisorWorker {
+			spawned <- struct{}{}
+			return worker
+		},
+		signals: sigCh,
+		after: func(d time.Duration) <-chan time.Time {
+			return neverTimer()
+		},
+		now: time.Now,
+		pid: func() int { return 7060 },
+	}
+	done := make(chan error, 1)
+	go func() { done <- runSupervisor(env, sa, deps) }()
+	// Send only after the worker exists: a signal that lands before spawn is
+	// (by design) consumed by the pre-spawn exit check and never forwarded.
+	<-spawned
+	sigCh <- syscall.SIGINT
+	if got := waitTestSignal(t, worker.signals); got != syscall.SIGTERM {
+		t.Fatalf("worker signal after supervisor SIGINT = %v, want forwarded SIGTERM", got)
+	}
+	waitSupervisorResult(t, done)
+}
+
 func TestRunSupervisorSpawnFailureBackoff(t *testing.T) {
 	env, sa, _ := supervisorTestEnv(t)
 	sigCh := make(chan os.Signal, 1)

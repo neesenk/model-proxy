@@ -77,8 +77,20 @@ func TestForward_ContextCrossRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	gotBody, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close response: %v", closeErr)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d body=%s, want 200 (big-prov answers)", resp.StatusCode, gotBody)
+	}
+	if string(gotBody) != `{}` {
+		t.Fatalf("client body = %q, want the upstream body verbatim", gotBody)
+	}
 
 	if !bigHit {
 		t.Error("cross-route fallback did not hit big-prov (the only model that fits)")
@@ -127,25 +139,36 @@ func TestForward_CapabilityCrossRoute(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post := func(body string) {
+	post := func(body string) (int, string) {
 		textHit, visionHit = false, false
 		req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(body))
 		resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		got, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read response: %v", readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close response: %v", closeErr)
+		}
+		return resp.StatusCode, string(got)
 	}
 
 	// Image request to "glm" (text-only route) → text doesn't fit → cross-route
 	// pool picks vision → vision-p hit.
-	post(`{"model":"glm","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`)
+	if st, body := post(`{"model":"glm","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`); st != 200 || body != `{}` {
+		t.Fatalf("image request: status=%d body=%q, want 200 with upstream body", st, body)
+	}
 	if !visionHit || textHit {
 		t.Errorf("image request: text=%v vision=%v, want cross-route to vision only", textHit, visionHit)
 	}
 	// Text request to "glm" → text fits → stays in-route.
-	post(`{"model":"glm","messages":[{"role":"user","content":"hi"}]}`)
+	if st, body := post(`{"model":"glm","messages":[{"role":"user","content":"hi"}]}`); st != 200 || body != `{}` {
+		t.Fatalf("text request: status=%d body=%q, want 200 with upstream body", st, body)
+	}
 	if !textHit || visionHit {
 		t.Errorf("text request: text=%v vision=%v, want in-route text only", textHit, visionHit)
 	}
@@ -191,24 +214,35 @@ func TestForward_CapabilityFilter_E2E(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post := func(body string) {
+	post := func(body string) (int, string) {
 		textHit, visionHit = false, false
 		req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(body))
 		resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		got, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read response: %v", readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close response: %v", closeErr)
+		}
+		return resp.StatusCode, string(got)
 	}
 
 	// Image request → vision-p (the only image-capable target).
-	post(`{"model":"glm","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`)
+	if st, body := post(`{"model":"glm","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`); st != 200 || body != `{}` {
+		t.Fatalf("image request: status=%d body=%q, want 200 with upstream body", st, body)
+	}
 	if !visionHit || textHit {
 		t.Errorf("image request: text=%v vision=%v, want vision only", textHit, visionHit)
 	}
 	// Text request → text-p (priority 1, no filtering).
-	post(`{"model":"glm","messages":[{"role":"user","content":"hi"}]}`)
+	if st, body := post(`{"model":"glm","messages":[{"role":"user","content":"hi"}]}`); st != 200 || body != `{}` {
+		t.Fatalf("text request: status=%d body=%q, want 200 with upstream body", st, body)
+	}
 	if !textHit || visionHit {
 		t.Errorf("text request: text=%v vision=%v, want text only", textHit, visionHit)
 	}
@@ -260,24 +294,35 @@ func TestForward_CapabilitiesOverride_E2E(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	post := func(body string) {
+	post := func(body string) (int, string) {
 		textHit, blindHit = false, false
 		req, _ := http.NewRequest(http.MethodPost, px.URL+"/v1/responses", strings.NewReader(body))
 		resp, err := http.DefaultClient.Do(req.WithContext(context.Background()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		got, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read response: %v", readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close response: %v", closeErr)
+		}
+		return resp.StatusCode, string(got)
 	}
 
 	// Image request → blind-p (declared image-capable; the only fitting target).
-	post(`{"model":"glm","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`)
+	if st, body := post(`{"model":"glm","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64"}}]}]}`); st != 200 || body != `{}` {
+		t.Fatalf("image request: status=%d body=%q, want 200 with upstream body", st, body)
+	}
 	if !blindHit || textHit {
 		t.Errorf("image request: text=%v blind=%v, want blind only (capabilities override)", textHit, blindHit)
 	}
 	// Text request → text-p (priority 1, no capability filtering).
-	post(`{"model":"glm","messages":[{"role":"user","content":"hi"}]}`)
+	if st, body := post(`{"model":"glm","messages":[{"role":"user","content":"hi"}]}`); st != 200 || body != `{}` {
+		t.Fatalf("text request: status=%d body=%q, want 200 with upstream body", st, body)
+	}
 	if !textHit || blindHit {
 		t.Errorf("text request: text=%v blind=%v, want text only", textHit, blindHit)
 	}

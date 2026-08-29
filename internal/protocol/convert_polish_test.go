@@ -140,7 +140,7 @@ func TestConvertResponse_ToolIDSanitize(t *testing.T) {
 
 	stream := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"x.y:2\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
-	out, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt"))
+	out := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(stream), "gpt"))
 	if !strings.Contains(string(out), `"id":"x_y_2"`) {
 		t.Errorf("stream tool_use id not sanitized:\n%s", string(out))
 	}
@@ -258,7 +258,7 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 	fwd := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\n" +
 		"data: [DONE]\n\n"
-	out, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(fwd), "gpt"))
+	out := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(fwd), "gpt"))
 	s := string(out)
 	if !strings.Contains(s, `"input_tokens":7`) || !strings.Contains(s, `"cache_read_input_tokens":3`) {
 		t.Errorf("o→a stream usage missing cache split:\n%s", s)
@@ -267,7 +267,7 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 	// o→a stream clamp: cached > prompt → input 0.
 	fwdClamp := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"prompt_tokens_details\":{\"cached_tokens\":9}}}\n\n" +
 		"data: [DONE]\n\n"
-	out2, _ := io.ReadAll(newOpenAIToAnthropicSSE(strings.NewReader(fwdClamp), "gpt"))
+	out2 := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(fwdClamp), "gpt"))
 	s2 := string(out2)
 	if !strings.Contains(s2, `"input_tokens":0`) || !strings.Contains(s2, `"cache_read_input_tokens":9`) {
 		t.Errorf("o→a stream clamp wrong:\n%s", s2)
@@ -277,7 +277,7 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 	rev := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	out3, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(rev), "c"))
+	out3 := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(rev), "c"))
 	s3 := string(out3)
 	for _, want := range []string{`"prompt_tokens":10`, `"completion_tokens":4`, `"total_tokens":14`, `"prompt_tokens_details":{"cached_tokens":3}`} {
 		if !strings.Contains(s3, want) {
@@ -292,7 +292,7 @@ func TestConvertResponse_CacheTokens_Stream(t *testing.T) {
 	revTerminal := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":90,\"cache_read_input_tokens\":1,\"cache_creation_input_tokens\":2}}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":0,\"cache_read_input_tokens\":93,\"output_tokens\":4}}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
-	out4, _ := io.ReadAll(newAnthropicToOpenAISSE(strings.NewReader(revTerminal), "c"))
+	out4 := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(revTerminal), "c"))
 	s4 := string(out4)
 	for _, want := range []string{`"prompt_tokens":95`, `"completion_tokens":4`, `"total_tokens":99`, `"prompt_tokens_details":{"cached_tokens":93}`} {
 		if !strings.Contains(s4, want) {

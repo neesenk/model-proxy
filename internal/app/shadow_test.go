@@ -286,8 +286,10 @@ func TestShadow_LogsResult(t *testing.T) {
 	if shadowRec == nil {
 		t.Fatalf("shadow record not logged (shadowHit=%v)", shadowHit.Load())
 	}
+	// A durable shadow record implies the shadow request completed: the
+	// candidate backend must have been observed.
 	if !shadowHit.Load() {
-		t.Fatal("shadow record was durable even though the candidate backend was not observed")
+		t.Fatal("shadow record durable but the candidate backend was never observed")
 	}
 	if shadowRec.UpstreamModel != "glm-shadow" || shadowRec.Status != 200 {
 		t.Errorf("shadow record = %+v want model glm-shadow / 200", shadowRec)
@@ -516,3 +518,90 @@ func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
 		t.Errorf("shadow log response body = %s, want exact shadow response %s", shadowRecord.ResponseBody, shadowBody)
 	}
 }
+
+// TestShadow_ConcurrencyGateSaturatesAndDrops (P1): with shadow_max_concurrent
+// at 1 and an in-flight shadow request, the SECOND request's shadow must be
+// DROPPED by the gate (not queued behind the permit) while both primaries
+// answer normally. Ordering is deterministic: the first shadow's upstream
+// blocks until released, and the test waits for it to have acquired the permit
+// before sending the second request.
+func TestShadow_ConcurrencyGateSaturatesAndDrops(t *testing.T) {
+	acquired := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var shadowHits atomic.Int32
+	primaryUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"primary":true}`))
+	}))
+	defer primaryUp.Close()
+	shadowUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if shadowHits.Add(1) == 1 {
+			acquired <- struct{}{} // the permit holder signals before blocking
+			<-release
+		}
+		w.Write([]byte(`{"shadow":true}`))
+	}))
+	defer shadowUp.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"primary": {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
+			"shadowp": {OpenAIBaseURL: shadowUp.URL, Provider: testProviderID},
+		},
+		Routes:              map[string][]RouteTarget{"glm": {{Provider: "primary", Model: "glm"}}},
+		Shadow:              map[string]ShadowTarget{"glm": {Provider: "shadowp", Model: "glm-shadow"}},
+		ShadowSampleRate:    ptrFloat(1.0),
+		ShadowMaxConcurrent: 1,
+	}
+	p, dir, shutdown := newReqLogProxy(t, cfg)
+	p.providers["primary"] = &testProv{key: "p"}
+	p.providers["shadowp"] = &testProv{key: "s"}
+	defer shutdown()
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	// Request 1: primary answers; its shadow acquires the only permit and
+	// parks inside the shadow upstream.
+	if code, body := post(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`); code != 200 || !strings.Contains(body, `"primary":true`) {
+		t.Fatalf("request 1: status=%d body=%s, want primary 200", code, body)
+	}
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first shadow never acquired the permit")
+	}
+
+	// Request 2 while the gate is saturated: primary still answers 200 and
+	// the shadow is DROPPED — the candidate upstream is not hit again.
+	if code, body := post(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`); code != 200 || !strings.Contains(body, `"primary":true`) {
+		t.Fatalf("request 2 (gate saturated): status=%d body=%s, want primary 200", code, body)
+	}
+	if got := shadowHits.Load(); got != 1 {
+		t.Fatalf("shadow upstream hits while saturated = %d, want 1 (second shadow must be dropped, not queued)", got)
+	}
+
+	// Release the parked shadow; it completes, exactly ONE shadow record
+	// lands in the request log, and nothing else fires.
+	close(release)
+	waitUntil(t, "parked shadow completes", func() bool {
+		for _, r := range allRecords(t, dir) {
+			if r.Shadow && r.Provider == "shadowp" {
+				return true
+			}
+		}
+		return false
+	})
+	if got := shadowHits.Load(); got != 1 {
+		t.Errorf("shadow upstream hits after release = %d, want 1 (dropped shadow stayed dropped)", got)
+	}
+	shadowRecords := 0
+	for _, r := range allRecords(t, dir) {
+		if r.Shadow {
+			shadowRecords++
+		}
+	}
+	if shadowRecords != 1 {
+		t.Errorf("shadow records = %d, want exactly 1 (the dropped shadow must not be recorded)", shadowRecords)
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }
