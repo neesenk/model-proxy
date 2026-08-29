@@ -45,9 +45,14 @@ baseline=80
 # Historical packages below the repository-wide baseline have an explicit
 # floor. Unlike a blanket exemption, this makes any regression fail while the
 # remaining gap stays visible. Raise a floor whenever durable tests improve it.
-historical_floor_packages=" model-proxy/internal/cli model-proxy/internal/cli/framework model-proxy/internal/cli/login model-proxy/internal/cli/models model-proxy/internal/cli/serve model-proxy/internal/httpx model-proxy/internal/targetexec model-proxy/scripts/soak "
+historical_floor_packages=" model-proxy model-proxy/internal/cli model-proxy/internal/cli/framework model-proxy/internal/cli/login model-proxy/internal/cli/models model-proxy/internal/cli/serve model-proxy/internal/httpx model-proxy/internal/targetexec model-proxy/scripts/soak "
 coverage_floor_for() {
   case "$1" in
+    # Root package main is process-entry/composition-only (signal/listener/
+    # drain orchestration is interactive-only); it previously held the explicit
+    # no-test exemption. main_test.go pins the build-version wiring; the floor
+    # keeps that non-regressing. Measured 2.6% under go1.27.
+    model-proxy) echo "2.5" ;;
     model-proxy/internal/cli) echo "78.8" ;;
     model-proxy/internal/cli/framework) echo "74.6" ;;
     model-proxy/internal/cli/login) echo "62.7" ;;

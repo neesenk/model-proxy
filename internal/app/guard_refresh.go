@@ -1,7 +1,7 @@
 package app
 
 import (
-	"log"
+	"model-proxy/internal/observe/logx"
 	"sort"
 	"time"
 
@@ -79,7 +79,7 @@ func (p *Proxy) refreshGuardKnownSecrets() {
 	scanner, err := buildGuardScanner(cfg, append(append([]string(nil), poolSecrets...), freshOAuth...))
 	if err != nil {
 		// Only reachable with an unvalidated Config; keep the previous scanner.
-		log.Printf("[guard] OAuth secret re-sync: rebuild failed: %v (keeping previous scanner)", err)
+		logx.Warnf("[guard] OAuth secret re-sync: rebuild failed: %v (keeping previous scanner)", err)
 		return
 	}
 	p.mu.Lock()

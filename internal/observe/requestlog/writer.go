@@ -2,7 +2,7 @@ package requestlog
 
 import (
 	"fmt"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,13 +34,13 @@ func (w *fileWriter) open(now time.Time) {
 	w.path = filepath.Join(w.dir, fmt.Sprintf("requests-%s.log", now.Format(fileTimeLayout)))
 	file, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, logFileMode)
 	if err != nil {
-		log.Printf("[request_log] open %s: %v", w.path, err)
+		logx.Warnf("[request_log] open %s: %v", w.path, err)
 		w.file = nil
 		return
 	}
 	// OpenFile does not narrow permissions on an existing same-second file.
 	if err := file.Chmod(logFileMode); err != nil {
-		log.Printf("[request_log] chmod %s: %v", w.path, err)
+		logx.Warnf("[request_log] chmod %s: %v", w.path, err)
 		_ = file.Close()
 		w.file = nil
 		return
@@ -66,10 +66,10 @@ func (w *fileWriter) rotate(now time.Time) {
 				w.rotateSeq,
 			))
 			if err := os.Rename(w.path, archive); err != nil {
-				log.Printf("[request_log] rename %s -> %s: %v", w.path, archive, err)
+				logx.Warnf("[request_log] rename %s -> %s: %v", w.path, archive, err)
 			}
 		} else if err := os.Remove(w.path); err != nil && !os.IsNotExist(err) {
-			log.Printf("[request_log] remove empty %s: %v", w.path, err)
+			logx.Warnf("[request_log] remove empty %s: %v", w.path, err)
 		}
 	}
 	w.open(now)

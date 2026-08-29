@@ -9,11 +9,6 @@ import (
 	"testing"
 )
 
-// models_extra_test.go covers printAllModels / printProviderModels /
-// fetchProviderModels / listArkAgentPlanModelIDs (error paths) + the
-// exposedModels/displayName edge cases. grabStdout is the shared root-package
-// stdout-capture helper for in-process CLI tests.
-
 // grabStdout captures everything written to os.Stdout during fn. Restores
 // os.Stdout even on failure.
 func grabStdout(t *testing.T, fn func()) string {
@@ -74,32 +69,5 @@ func TestPrintAllModels_EmptyContext(t *testing.T) {
 	out := grabStdout(t, func() { climodels.PrintAllModels(cfg, "", nil, nil) })
 	if !strings.Contains(out, "—") {
 		t.Errorf("no metadata should show ctx/out as —:\n%s", out)
-	}
-}
-
-// --- printProviderModels ---
-
-func TestPrintProviderModels_Empty(t *testing.T) {
-	out := grabStdout(t, func() { climodels.PrintProviderModels("x", nil) })
-	if !strings.Contains(out, "no models") {
-		t.Errorf("empty models should print '(no models)':\n%s", out)
-	}
-}
-
-func TestPrintProviderModels_WithEntries(t *testing.T) {
-	entries := []climodels.ModelEntry{
-		{ID: "b-model", Object: "model", OwnedBy: "x"},
-		{ID: "a-model", Object: "model", OwnedBy: "x", ContextWindow: 200000},
-	}
-	out := grabStdout(t, func() { climodels.PrintProviderModels("x", entries) })
-	if !strings.Contains(out, "a-model") || !strings.Contains(out, "b-model") {
-		t.Errorf("missing model ids:\n%s", out)
-	}
-	if !strings.Contains(out, "2 models") {
-		t.Errorf("missing count:\n%s", out)
-	}
-	// Verify sorted order (a-model before b-model).
-	if strings.Index(out, "a-model") > strings.Index(out, "b-model") {
-		t.Errorf("models not sorted:\n%s", out)
 	}
 }

@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+// defaultRulesScanner scans with the embedded rule table only (no known
+// secrets, custom patterns, or extra paths) — the configuration the removed
+// package-level Scan/Redact shims delegated to.
+var defaultRulesScanner = mustDefaultScanner()
+
+func mustDefaultScanner() *Scanner {
+	s, err := NewScanner(nil, nil, nil)
+	if err != nil {
+		panic(err) // impossible: no custom input to reject
+	}
+	return s
+}
+
 // Positive fixtures are synthetic secrets shaped like real ones (no real
 // credentials anywhere in tests — AGENTS.md credential red line).
 var positiveCases = []struct {
@@ -60,7 +73,7 @@ var negativeCases = []string{
 
 func TestScanPositives(t *testing.T) {
 	for _, tc := range positiveCases {
-		got := Scan([]byte(tc.body))
+		got := defaultRulesScanner.Scan([]byte(tc.body))
 		if len(got) != 1 || got[0] != tc.name {
 			t.Errorf("Scan(%q prefix) = %v, want exactly [%s]", tc.body[:min(24, len(tc.body))], got, tc.name)
 		}
@@ -69,7 +82,7 @@ func TestScanPositives(t *testing.T) {
 
 func TestScanNegatives(t *testing.T) {
 	for _, body := range negativeCases {
-		if got := Scan([]byte(body)); len(got) != 0 {
+		if got := defaultRulesScanner.Scan([]byte(body)); len(got) != 0 {
 			t.Errorf("Scan(%q…) = %v, want no hits", body[:min(32, len(body))], got)
 		}
 	}
@@ -77,7 +90,7 @@ func TestScanNegatives(t *testing.T) {
 
 func TestScanCleanBody(t *testing.T) {
 	body := `{"model":"glm-5.2","messages":[{"role":"user","content":"explain the observer pattern in Go"}]}`
-	if got := Scan([]byte(body)); len(got) != 0 {
+	if got := defaultRulesScanner.Scan([]byte(body)); len(got) != 0 {
 		t.Errorf("Scan(normal request) = %v, want no hits", got)
 	}
 }
@@ -86,7 +99,7 @@ func TestScanCleanBody(t *testing.T) {
 // more specific anthropic_api_key (span claiming, no double report).
 func TestScanOverlapClaimsMoreSpecificPattern(t *testing.T) {
 	body := `key = sk-ant-api03-` + strings.Repeat("qW7", 30)
-	got := Scan([]byte(body))
+	got := defaultRulesScanner.Scan([]byte(body))
 	if len(got) != 1 || got[0] != "anthropic_api_key" {
 		t.Errorf("Scan(sk-ant key) = %v, want exactly [anthropic_api_key]", got)
 	}
@@ -95,7 +108,7 @@ func TestScanOverlapClaimsMoreSpecificPattern(t *testing.T) {
 // Multiple different secrets in one body report every type once, in table order.
 func TestScanMultipleTypes(t *testing.T) {
 	body := "ghp_" + strings.Repeat("Ab12", 9) + "\n-----BEGIN RSA PRIVATE KEY-----\nx"
-	got := Scan([]byte(body))
+	got := defaultRulesScanner.Scan([]byte(body))
 	want := []string{"github_token", "pem_private_key"}
 	if len(got) != len(want) {
 		t.Fatalf("Scan = %v, want %v", got, want)
@@ -110,7 +123,7 @@ func TestScanMultipleTypes(t *testing.T) {
 func TestRedact(t *testing.T) {
 	secret := "AKIA" + newFixtureRNG(0xedac).chars(16, alphaUpper32)
 	body := `{"model":"m","messages":[{"role":"user","content":"my key is ` + secret + `, and PEM:\n-----BEGIN PRIVATE KEY-----\nABC"}]}`
-	out := string(Redact([]byte(body)))
+	out := string(defaultRulesScanner.Redact([]byte(body)))
 	if strings.Contains(out, secret) || strings.Contains(out, "BEGIN PRIVATE KEY") {
 		t.Errorf("Redact left secret material in body")
 	}
@@ -124,7 +137,7 @@ func TestRedact(t *testing.T) {
 
 func TestRedactCleanBodyUnchanged(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[]}`)
-	out := Redact(body)
+	out := defaultRulesScanner.Redact(body)
 	if string(out) != string(body) {
 		t.Errorf("Redact(clean) = %q, want unchanged %q", out, body)
 	}
@@ -134,7 +147,7 @@ func TestRedactCleanBodyUnchanged(t *testing.T) {
 // inside the string without breaking the quotes around it.
 func TestRedactKeepsJSONShape(t *testing.T) {
 	body := `{"model":"m","key":"sk-` + strings.Repeat("aB3", 16) + `"}`
-	out := string(Redact([]byte(body)))
+	out := string(defaultRulesScanner.Redact([]byte(body)))
 	want := `{"model":"m","key":"` + RedactPlaceholder + `"}`
 	if out != want {
 		t.Errorf("Redact = %q, want %q", out, want)
@@ -148,11 +161,11 @@ func TestScanDetectsKeyBuriedAfterLargeCleanPrefix(t *testing.T) {
 	clean := strings.Repeat("the quick brown fox jumps over the lazy dog. ", 1536) // ~64KB
 	for _, tc := range positiveCases {
 		body := []byte(clean + tc.body)
-		got := Scan(body)
+		got := defaultRulesScanner.Scan(body)
 		if len(got) != 1 || got[0] != tc.name {
 			t.Errorf("%s buried after 64KB clean prefix: Scan = %v", tc.name, got)
 		}
-		if redacted := string(Redact(body)); strings.Contains(redacted, strings.TrimSpace(tc.body)) ||
+		if redacted := string(defaultRulesScanner.Redact(body)); strings.Contains(redacted, strings.TrimSpace(tc.body)) ||
 			len(redacted) >= len(body) {
 			t.Errorf("%s buried after 64KB clean prefix: Redact did not replace the secret", tc.name)
 		}
@@ -164,7 +177,7 @@ func BenchmarkScanCleanBody64K(b *testing.B) {
 	b.SetBytes(int64(len(body)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if names := Scan(body); len(names) != 0 {
+		if names := defaultRulesScanner.Scan(body); len(names) != 0 {
 			b.Fatalf("clean body reported %v", names)
 		}
 	}
@@ -176,7 +189,7 @@ func BenchmarkScanBody64KWithKey(b *testing.B) {
 	b.SetBytes(int64(len(body)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if names := Scan(body); len(names) != 1 || names[0] != "openai_api_key" {
+		if names := defaultRulesScanner.Scan(body); len(names) != 1 || names[0] != "openai_api_key" {
 			b.Fatalf("key body reported %v", names)
 		}
 	}

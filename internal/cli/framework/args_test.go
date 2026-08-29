@@ -46,3 +46,59 @@ func TestConfigPath_LookupOrder(t *testing.T) {
 		t.Errorf("CWD fallback: got %q, want relative config.yaml", got)
 	}
 }
+
+// TestFlagStringValue pins both flag forms and the absent/trailing-flag
+// fallbacks ("" so callers can distinguish "flag missing" cleanly).
+func TestFlagStringValue(t *testing.T) {
+	args := []string{"cmd", "--name", "value", "--other=x"}
+	if got := FlagStringValue(args, "--name"); got != "value" {
+		t.Errorf("space form: got %q, want value", got)
+	}
+	if got := FlagStringValue(args, "--other"); got != "x" {
+		t.Errorf("= form: got %q, want x", got)
+	}
+	if got := FlagStringValue(args, "--missing"); got != "" {
+		t.Errorf("absent: got %q, want empty", got)
+	}
+	if got := FlagStringValue([]string{"--name"}, "--name"); got != "" {
+		t.Errorf("trailing flag without value: got %q, want empty", got)
+	}
+}
+
+// TestHasFlagValue pins exact and =-form matching, including that a longer
+// flag sharing the prefix does NOT match.
+func TestHasFlagValue(t *testing.T) {
+	args := []string{"cmd", "--force", "--ttl=60"}
+	if !HasFlagValue(args, "--force") {
+		t.Error("exact flag: want true")
+	}
+	if !HasFlagValue(args, "--ttl") {
+		t.Error("= form: want true")
+	}
+	if HasFlagValue(args, "--tt") {
+		t.Error("prefix of a longer flag must not match")
+	}
+	if HasFlagValue(args, "--missing") {
+		t.Error("absent: want false")
+	}
+}
+
+func TestPlural(t *testing.T) {
+	if got := Plural(1, "account", "accounts"); got != "account" {
+		t.Errorf("n=1: got %q, want singular", got)
+	}
+	for _, n := range []int{0, 2, -1} {
+		if got := Plural(n, "account", "accounts"); got != "accounts" {
+			t.Errorf("n=%d: got %q, want plural", n, got)
+		}
+	}
+}
+
+// TestHomeDir pins that HOME is read per call (tests isolate it via Setenv).
+func TestHomeDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	if got := HomeDir(); got != dir {
+		t.Errorf("HomeDir()=%q, want %q", got, dir)
+	}
+}

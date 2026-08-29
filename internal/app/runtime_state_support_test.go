@@ -18,20 +18,6 @@ const (
 	rlDaily     = runtimestate.Daily
 )
 
-func runtimeStatus(
-	t testing.TB,
-	p *Proxy,
-	providerName string,
-	now time.Time,
-) runtimestate.ProviderStatus {
-	t.Helper()
-	status, ok := p.runtimeState.Dashboard(now).Providers[providerName]
-	if !ok {
-		t.Fatalf("runtime status for %q is missing", providerName)
-	}
-	return status
-}
-
 func seedRuntimeRateLimit(
 	t testing.TB,
 	p *Proxy,
@@ -62,14 +48,6 @@ func seedRuntimeCircuit(
 	)
 }
 
-func seedRuntimeHalfOpen(t testing.TB, p *Proxy, providerName string) {
-	t.Helper()
-	seedRuntimeCircuit(t, p, providerName, time.Now().Add(-time.Second))
-	if !p.runtimeState.TakeHalfOpenSlot(providerName, 0) {
-		t.Fatalf("seed half-open slot for %q was rejected", providerName)
-	}
-}
-
 func seedRuntimeSticky(
 	t testing.TB,
 	p *Proxy,
@@ -84,13 +62,4 @@ func seedRuntimeSticky(
 	) {
 		t.Fatalf("seed sticky %q was rejected", key)
 	}
-}
-
-func runtimeSticky(t testing.TB, p *Proxy, key string) runtimestate.Sticky {
-	t.Helper()
-	sticky, ok := p.runtimeState.Sticky(key)
-	if !ok {
-		t.Fatalf("runtime sticky %q is missing", key)
-	}
-	return sticky
 }

@@ -10,7 +10,7 @@ import (
 	"model-proxy/internal/provider"
 )
 
-// loggedInProviders returns the provider parents whose authoritative account
+// LoggedInProviders returns the provider parents whose authoritative account
 // snapshot can produce a runtime credential. Used to decide which providers can
 // serve an implicit route; corrupt/empty plural pools and static legacy files
 // remain fail-closed exactly as they do in buildProviders.
@@ -77,7 +77,7 @@ func SynthesizeImplicitRoutesFrom(cfg *configdomain.Config, loggedIn map[string]
 // ProtocolHint > wire probe verdict > client-protocol passthrough. Used by
 // forward, fusion, and shadow so the resolution rule is one place.
 
-// synthesizeImplicitRoutes derives login status then delegates to the pure core.
+// SynthesizeImplicitRoutes derives login status then delegates to the pure core.
 func SynthesizeImplicitRoutes(cfg *configdomain.Config, store accounts.Store) (map[string]configdomain.RouteTarget, []string) {
 	return SynthesizeImplicitRoutesFrom(cfg, LoggedInProviders(cfg, store))
 }

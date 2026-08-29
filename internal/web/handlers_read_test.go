@@ -105,10 +105,18 @@ func newReadServer(t *testing.T, reads *readAPIStub, opts ...func(*Options)) *Se
 	return s
 }
 
+// serveWebRequest dispatches one request through the mux routes Register
+// installs — the same dispatch production uses.
+func serveWebRequest(s *Server, w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	s.Register(mux)
+	mux.ServeHTTP(w, r)
+}
+
 func serveRead(t *testing.T, s *Server, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	s.ServeHTTP(recorder, httptest.NewRequest(method, path, nil))
+	serveWebRequest(s, recorder, httptest.NewRequest(method, path, nil))
 	return recorder
 }
 
@@ -595,7 +603,7 @@ func TestReadHelperBranches(t *testing.T) {
 	}
 
 	unavailable := httptest.NewRecorder()
-	newReadServer(t, &readAPIStub{}).unavailable(unavailable, "catalog")
+	writeJSONErr(unavailable, http.StatusServiceUnavailable, "catalog is unavailable")
 	if unavailable.Code != http.StatusServiceUnavailable || unavailable.Body.String() != `{"error":"catalog is unavailable"}` {
 		t.Fatalf("unavailable response = (%d, %q)", unavailable.Code, unavailable.Body.String())
 	}
@@ -732,7 +740,7 @@ func newMetricsTestServer(t *testing.T) *Server {
 func TestMetricsEndpointPrometheusExposition(t *testing.T) {
 	s := newMetricsTestServer(t)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	serveWebRequest(s, rec, httptest.NewRequest("GET", "/metrics", nil))
 	if rec.Code != 200 {
 		t.Fatalf("/metrics status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -759,7 +767,7 @@ func TestMetricsEndpointPrometheusExposition(t *testing.T) {
 func TestMetricsEndpointRejectsNonGet(t *testing.T) {
 	s := newMetricsTestServer(t)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest("POST", "/metrics", nil))
+	serveWebRequest(s, rec, httptest.NewRequest("POST", "/metrics", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /metrics status=%d, want 405", rec.Code)
 	}
@@ -802,14 +810,14 @@ func TestAdminAuthGatesAPIUIAndMetrics(t *testing.T) {
 	s, _ := newAuthedServer(t, true)
 	for _, path := range []string{"/api/status", "/ui/", "/metrics"} {
 		rec := httptest.NewRecorder()
-		s.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		serveWebRequest(s, rec, httptest.NewRequest("GET", path, nil))
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET %s without token = %d, want 401", path, rec.Code)
 		}
 		rec = httptest.NewRecorder()
 		req := httptest.NewRequest("GET", path, nil)
 		req.Header.Set("Authorization", "Bearer adm-secret")
-		s.ServeHTTP(rec, req)
+		serveWebRequest(s, rec, req)
 		// Exact 200: `!= 401` would also pass a 500 from a broken handler.
 		if rec.Code != http.StatusOK {
 			t.Errorf("GET %s with valid token = %d, want 200 (body=%s)", path, rec.Code, rec.Body.String())
@@ -819,7 +827,7 @@ func TestAdminAuthGatesAPIUIAndMetrics(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/status", nil)
 	req.Header.Set("Authorization", "Bearer wrong")
-	s.ServeHTTP(rec, req)
+	serveWebRequest(s, rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("wrong token = %d, want 401", rec.Code)
 	}
@@ -827,7 +835,7 @@ func TestAdminAuthGatesAPIUIAndMetrics(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest("GET", "/api/status", nil)
 	req.Header.Set("x-api-key", "adm-secret")
-	s.ServeHTTP(rec, req)
+	serveWebRequest(s, rec, req)
 	if rec.Code == http.StatusUnauthorized {
 		t.Error("x-api-key admin token rejected")
 	}
@@ -836,7 +844,7 @@ func TestAdminAuthGatesAPIUIAndMetrics(t *testing.T) {
 func TestAdminAuthDisabledKeepsLoopbackTrust(t *testing.T) {
 	s, _ := newAuthedServer(t, false)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))
+	serveWebRequest(s, rec, httptest.NewRequest("GET", "/api/status", nil))
 	if rec.Code != 200 {
 		t.Fatalf("auth off: /api/status = %d, want 200 (loopback-trust default)", rec.Code)
 	}

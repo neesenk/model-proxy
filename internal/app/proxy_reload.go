@@ -2,7 +2,7 @@ package app
 
 import (
 	"fmt"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"time"
 
 	"model-proxy/internal/accounts"
@@ -26,7 +26,7 @@ func (p *Proxy) Reload(configPath string) error {
 	// as the constructor): a `credentials:` change takes effect on this reload.
 	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	if note := accounts.CredentialMismatchNote(cfg.Credentials); note != "" {
-		log.Printf("[reload] ⚠ %s", note)
+		logx.Warnf("[reload] ⚠ %s", note)
 	}
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
 	// Build the guard scanner OUTSIDE the lock (regexp compilation + secret
@@ -83,7 +83,7 @@ func (p *Proxy) Reload(configPath string) error {
 	p.runtimeState.ReplaceGeneration(generation)
 	p.mu.Unlock()
 	for _, w := range hw {
-		log.Printf("[reload] ⚠ %s", w)
+		logx.Warnf("[reload] ⚠ %s", w)
 	}
 	// Persist the cleared state synchronously so empty-health + the new
 	// fingerprint land on disk now (survives a crash right after reload — the
@@ -112,7 +112,7 @@ func (p *Proxy) Reload(configPath string) error {
 	// restart. Warn when the operator clearly expects logging but it isn't
 	// active, so this isn't a silent no-op.
 	if cfg.RequestLog.Enabled && p.reqLog == nil {
-		log.Printf("[reload] request_log.enabled is true but logging is not active (reload cannot start it); restart the daemon to enable request logging")
+		logx.Warnf("[reload] request_log.enabled is true but logging is not active (reload cannot start it); restart the daemon to enable request logging")
 	}
 	// The security audit log IS reload-owned (unlike request_log): reconcile
 	// the logger with the new generation — audit off→on starts it now, on→off

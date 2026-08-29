@@ -24,7 +24,8 @@ func TestWebCloseCancelsAqpLoginBeforeCredentialCommit(t *testing.T) {
 	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://unused.invalid"}
 	p.mu.Unlock()
 	w.newAqpClientFn = func(storePath string) *clilogin.AqpClient {
-		client := clilogin.NewAqpClientWithBase(storePath, "https://aqp.invalid")
+		client := clilogin.NewAqpClient(storePath)
+		client.Base = "https://aqp.invalid"
 		client.HTTP.Transport = webLifecycleRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			switch req.URL.Path {
 			case clilogin.AqpAuthLoginPath:
@@ -43,7 +44,7 @@ func TestWebCloseCancelsAqpLoginBeforeCredentialCommit(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest(http.MethodPost, "/api/login/aqp/start", nil))
+	serveWeb(w, rec, httptest.NewRequest(http.MethodPost, "/api/login/aqp/start", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("start status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -93,7 +94,7 @@ func TestWebCloseCancelsCodexLoginBeforeCredentialCommit(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest(http.MethodPost, "/api/login/codex/start", nil))
+	serveWeb(w, rec, httptest.NewRequest(http.MethodPost, "/api/login/codex/start", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("start status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -152,7 +153,7 @@ func waitForSignal(t *testing.T, signal <-chan struct{}, failure string) {
 func assertLoginCancelledWithoutCredential(t *testing.T, w *WebServer, sessionID, path string) {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	w.Serve(
+	serveWeb(w,
 		recorder,
 		httptest.NewRequest(http.MethodGet, "/api/login/"+sessionID+"/poll", nil),
 	)

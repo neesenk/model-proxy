@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
 	"net/http"
 	"strings"
@@ -54,7 +54,7 @@ var (
 // and the synthesizer call (all snapshotted by forward under p.mu).
 type fusionCtx struct {
 	runtime     RuntimeSnapshot
-	proto       string // client protocol ("anthropic"|"openai")
+	proto       string // client protocol ("anthropic"|"openai"|"responses")
 	calledModel string
 	upPath      string // client request path (/v1 stripped for openai)
 	agent       string
@@ -317,7 +317,7 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 				if stripped, changed := targetexec.StripTopLevelParam(body, param); changed {
 					body = stripped
 					strippedParam = true
-					log.Printf("[fusion provider=%s] 400 unsupported parameter %q — stripped, retrying",
+					logx.Warnf("[fusion provider=%s] 400 unsupported parameter %q — stripped, retrying",
 						m.Provider, param)
 					continue
 				}
@@ -358,8 +358,15 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		// Flip the verdict (persisted; later legs use chat) and skip the model
 		// lock so the model doesn't take the blame for our protocol choice.
 		if plan.ViaResponsesVerdict() && resp.StatusCode == http.StatusNotFound {
-			p.noteWireResponsesMiss(m.Provider)
-			log.Printf("[fusion provider=%s] /responses 404 after wire verdict — provider responses downgraded to no (model NOT locked)",
+			// Resolve the pool parent from the REQUEST snapshot (nil-safe), not
+			// from live p.parentOf: this in-flight leg belongs to fc.runtime's
+			// generation (single-snapshot red line).
+			parent := m.Provider
+			if par, ok := fc.runtime.ParentOf[m.Provider]; ok {
+				parent = par
+			}
+			p.noteWireResponsesMiss(parent)
+			logx.Warnf("[fusion provider=%s] /responses 404 after wire verdict — provider responses downgraded to no (model NOT locked)",
 				m.Provider)
 		} else {
 			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.Generation)
@@ -442,7 +449,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		fc.runtime.Generation,
 	).Pick(st, fc.sessionKey)
 	if !ok {
-		log.Printf("[fusion] %s: synthesizer %s/%s unavailable (unknown provider, not logged in, or no healthy pooled account) — aborting synthesis",
+		logx.Warnf("[fusion] %s: synthesizer %s/%s unavailable (unknown provider, not logged in, or no healthy pooled account) — aborting synthesis",
 			fc.flc.exposed, st.Provider, st.Model)
 		return false
 	}
@@ -451,11 +458,11 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		runtime: fc.runtime, target: st, clientProto: fc.proto, clientPath: fc.upPath,
 	})
 	if err != nil {
-		log.Printf("[fusion] %s: synthesizer target plan failed: %v", fc.flc.exposed, err)
+		logx.Warnf("[fusion] %s: synthesizer target plan failed: %v", fc.flc.exposed, err)
 		return false
 	}
 	if plan.Provider() == nil {
-		log.Printf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
+		logx.Warnf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
 		return false
 	}
 	// Responses chain expansion (same rule as forward): expand + orphan repair
@@ -472,7 +479,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	if err != nil {
 		// Fail CLOSED: a conversion failure must not send the unconverted body
 		// to a different backend protocol.
-		log.Printf("[fusion] synthesizer %s/%s %s→%s convert failed: %v — aborting synthesis",
+		logx.Warnf("[fusion] synthesizer %s/%s %s→%s convert failed: %v — aborting synthesis",
 			st.Provider, st.Model, fc.proto, plan.BackendProtocol(), err)
 		return false
 	}
@@ -503,7 +510,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		},
 		targetexec.Policy{LastTarget: true},
 	)
-	return p.targetExecutor(attempt.Runtime()).Execute(attempt).Committed
+	return p.targetExecutor(attempt.Runtime(), fc.runtime.ParentOf).Execute(attempt).Committed
 }
 
 // expandFusionResponses mirrors forward's responses-state expansion for one
@@ -521,11 +528,11 @@ func (p *Proxy) expandFusionResponses(fc fusionCtx, backendProto string, body []
 	}
 	expanded, history, hit, err := p.responsesState.Expand(body, fc.sessionKey)
 	if err != nil {
-		log.Printf("[fusion] %s: responses state expansion failed: %v — sending unexpanded body", fc.flc.exposed, err)
+		logx.Warnf("[fusion] %s: responses state expansion failed: %v — sending unexpanded body", fc.flc.exposed, err)
 		return body, nil
 	}
 	if p.responsesPreviousID(body) != "" && !hit {
-		log.Printf("[fusion] %s: previous_response_id cache miss; repaired orphaned continuation items", fc.flc.exposed)
+		logx.Infof("[fusion] %s: previous_response_id cache miss; repaired orphaned continuation items", fc.flc.exposed)
 	}
 	return expanded, history
 }

@@ -2177,15 +2177,6 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 	return sonic.Marshal(out)
 }
 
-// joinTextParts concatenates the `text` field of content-part maps.
-func joinTextParts(parts []map[string]any) string {
-	var b strings.Builder
-	for _, p := range parts {
-		b.WriteString(strOf(p["text"]))
-	}
-	return b.String()
-}
-
 // responsesUsageToAnthropic maps a Responses usage object to anthropic usage.
 // responses input_tokens INCLUDES cached AND cache-write tokens
 // (input_tokens_details); anthropic counts both separately from input_tokens —

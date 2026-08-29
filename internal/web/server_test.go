@@ -102,7 +102,10 @@ func TestServeUITraversalGuard(t *testing.T) {
 	}
 	defer s.Close()
 	bad := httptest.NewRecorder()
-	s.ServeHTTP(bad, httptest.NewRequest(http.MethodGet, "/ui/../secret", nil))
+	// serveUI itself must reject the traversal before touching the FS — going
+	// through the mux would let ServeMux's path cleaning redirect first, which
+	// is a different layer than the one this test pins.
+	s.serveUI(bad, httptest.NewRequest(http.MethodGet, "/ui/../secret", nil))
 	if bad.Code != http.StatusNotFound {
 		t.Fatalf("traversal status=%d want 404", bad.Code)
 	}
@@ -110,7 +113,7 @@ func TestServeUITraversalGuard(t *testing.T) {
 		t.Fatalf("traversal request reached asset filesystem: %q", assets.opened)
 	}
 	good := httptest.NewRecorder()
-	s.ServeHTTP(good, httptest.NewRequest(http.MethodGet, "/ui/app.js", nil))
+	serveWebRequest(s, good, httptest.NewRequest(http.MethodGet, "/ui/app.js", nil))
 	if good.Code != http.StatusOK || good.Body.String() != "SECRET" {
 		t.Fatalf("normal asset status=%d body=%q", good.Code, good.Body.String())
 	}
@@ -138,7 +141,7 @@ func TestServeUICacheHeadersOnIndex(t *testing.T) {
 	}
 	defer s.Close()
 	recorder := httptest.NewRecorder()
-	s.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/ui/", nil))
+	serveWebRequest(s, recorder, httptest.NewRequest(http.MethodGet, "/ui/", nil))
 	if recorder.Code != http.StatusOK || recorder.Body.String() != "ok" {
 		t.Fatalf("index status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
@@ -163,7 +166,7 @@ func TestServerLoginTransport(t *testing.T) {
 	}
 	defer s.Close()
 	start := httptest.NewRecorder()
-	s.ServeHTTP(start, httptest.NewRequest(http.MethodPost, "/api/login/aqp/start", nil))
+	serveWebRequest(s, start, httptest.NewRequest(http.MethodPost, "/api/login/aqp/start", nil))
 	if start.Code != http.StatusOK {
 		t.Fatalf("login start status=%d body=%s", start.Code, start.Body.String())
 	}

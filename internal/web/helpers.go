@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"model-proxy/internal/appapi"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"os"
 	"sort"
@@ -36,7 +36,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	// programming bug, not a client problem.
 	data, err := json.Marshal(v)
 	if err != nil {
-		log.Printf("[web] writeJSON: marshal %T: %v", v, err)
+		logx.Warnf("[web] writeJSON: marshal %T: %v", v, err)
 		http.Error(w, "internal encoding error", http.StatusInternalServerError)
 		return
 	}

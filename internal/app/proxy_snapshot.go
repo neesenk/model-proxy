@@ -1,8 +1,8 @@
 package app
 
 import (
-	"log"
 	cliframework "model-proxy/internal/cli/framework"
+	"model-proxy/internal/observe/logx"
 	runtimestate "model-proxy/internal/runtime"
 	"os"
 	"time"
@@ -89,7 +89,7 @@ func (p *Proxy) initCatalog() {
 	cat, err := LoadModelsCatalog(cliframework.HomeDir(), false)
 	if err != nil || cat == nil {
 		if err != nil {
-			log.Printf("[models] catalog load failed: %v - running without request-aware routing", err)
+			logx.Warnf("[models] catalog load failed: %v - running without request-aware routing", err)
 		}
 		return
 	}

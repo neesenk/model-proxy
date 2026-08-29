@@ -49,10 +49,14 @@ func TestAqpLoginFlow(t *testing.T) {
 	// Seam: point the AQP client at the mock base so BootstrapLoginURL /
 	// PollSession / fetchAPIKey hit the httptest.Server instead of the real
 	// compass backend.
-	w.newAqpClientFn = func(store string) *clilogin.AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
+	w.newAqpClientFn = func(store string) *clilogin.AqpClient {
+		client := clilogin.NewAqpClient(store)
+		client.Base = up.URL
+		return client
+	}
 
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
 	if rec.Code != 200 {
 		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -109,10 +113,14 @@ func TestAqpLoginFlow_Error(t *testing.T) {
 	p.mu.Lock()
 	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
-	w.newAqpClientFn = func(store string) *clilogin.AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
+	w.newAqpClientFn = func(store string) *clilogin.AqpClient {
+		client := clilogin.NewAqpClient(store)
+		client.Base = up.URL
+		return client
+	}
 
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("start status=%d want 502 body=%s", rec.Code, rec.Body.String())
 	}
@@ -147,10 +155,14 @@ func TestAqpLoginFlow_JobErrorResolvesSession(t *testing.T) {
 	p.mu.Lock()
 	p.cfg.Providers["aqp"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
-	w.newAqpClientFn = func(store string) *clilogin.AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
+	w.newAqpClientFn = func(store string) *clilogin.AqpClient {
+		client := clilogin.NewAqpClient(store)
+		client.Base = up.URL
+		return client
+	}
 
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/login/aqp/start", nil))
 	if rec.Code != 200 {
 		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -260,7 +272,7 @@ func TestCodexLoginFlow(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/login/codex/start", nil))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/login/codex/start", nil))
 	if rec.Code != 200 {
 		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -313,7 +325,7 @@ func waitForLoginTerminal(t *testing.T, server *WebServer, sessionID string) log
 	defer cancel()
 	for {
 		recorder := httptest.NewRecorder()
-		server.Serve(
+		serveWeb(server,
 			recorder,
 			httptest.NewRequest(http.MethodGet, "/api/login/"+sessionID+"/poll", nil),
 		)
@@ -350,7 +362,7 @@ func waitForLoginDone(t *testing.T, server *WebServer, sessionID string) loginPo
 	defer cancel()
 	for {
 		recorder := httptest.NewRecorder()
-		server.Serve(
+		serveWeb(server,
 			recorder,
 			httptest.NewRequest(http.MethodGet, "/api/login/"+sessionID+"/poll", nil),
 		)
@@ -409,10 +421,14 @@ func TestLoginStartByProviderID(t *testing.T) {
 	p.mu.Lock()
 	p.cfg.Providers["aqp-alt"] = Provider{Provider: "aqp", OpenAIBaseURL: "https://x"}
 	p.mu.Unlock()
-	w.newAqpClientFn = func(store string) *clilogin.AqpClient { return clilogin.NewAqpClientWithBase(store, up.URL) }
+	w.newAqpClientFn = func(store string) *clilogin.AqpClient {
+		client := clilogin.NewAqpClient(store)
+		client.Base = up.URL
+		return client
+	}
 
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/login/aqp-alt/start", nil))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/login/aqp-alt/start", nil))
 	if rec.Code != 200 {
 		t.Fatalf("start status=%d want 200 (must dispatch by provider_id, not URL name): %s", rec.Code, rec.Body.String())
 	}

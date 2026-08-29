@@ -355,11 +355,20 @@ func exactTargetExecutorAttempt(call *ast.CallExpr) (string, bool) {
 		return "", false
 	}
 	factory, ok := execute.X.(*ast.CallExpr)
-	if !ok || len(factory.Args) != 1 || !selectorOnIdent(factory.Fun, "p", "targetExecutor") {
+	if !ok || len(factory.Args) < 1 || len(factory.Args) > 2 || !selectorOnIdent(factory.Fun, "p", "targetExecutor") {
 		return "", false
 	}
 	if !zeroArgReceiverCall(factory.Args[0], attempt.Name, "Runtime") {
 		return "", false
+	}
+	if len(factory.Args) == 2 {
+		// The wire-verdict parent projection threaded alongside the runtime must
+		// be a ParentOf selector; same-snapshot provenance is locked by
+		// executorRuntimeBoundToAttempt.
+		parentOf, ok := factory.Args[1].(*ast.SelectorExpr)
+		if !ok || parentOf.Sel.Name != "ParentOf" || requestRoutingExprPath(parentOf.X) == "" {
+			return "", false
+		}
 	}
 	return attempt.Name, true
 }
@@ -611,27 +620,6 @@ func importedTypeMethodCallSitesInFiles(
 		}
 	}
 	return sites
-}
-
-func importedTypeMethodReferenceSitesAcrossProduction(
-	t *testing.T,
-	importPath string,
-	typeName string,
-	method string,
-) []interactionSite {
-	t.Helper()
-	var files []struct {
-		path string
-		file *ast.File
-	}
-	for _, path := range productionGoFilesRecursively(t, ".") {
-		file, _ := parseGoFile(t, path)
-		files = append(files, struct {
-			path string
-			file *ast.File
-		}{path: filepath.ToSlash(path), file: file})
-	}
-	return importedTypeMethodReferenceSitesInFiles(files, importPath, typeName, method)
 }
 
 func importedTypeMethodReferenceSitesInFiles(

@@ -22,7 +22,7 @@ func TestConfigPutValid(t *testing.T) {
 	edited := []byte("listen: 127.0.0.1:17001\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n")
 	rec := httptest.NewRecorder()
 	body := `{"yaml":"` + strings.ReplaceAll(strings.ReplaceAll(string(edited), "\n", "\\n"), `"`, `\"`) + `"}`
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d want 200 body=%s", rec.Code, rec.Body.String())
 	}
@@ -52,7 +52,7 @@ func TestConfigPutInvalidNoWrite(t *testing.T) {
 	bad := []byte("listen: 127.0.0.1:17000\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\nroutes:\n  m: [{provider: ghost, model: m}]\n")
 	rec := httptest.NewRecorder()
 	body := `{"yaml":"` + strings.ReplaceAll(strings.ReplaceAll(string(bad), "\n", "\\n"), `"`, `\"`) + `"}`
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
 	if rec.Code != 400 {
 		t.Fatalf("status=%d want 400 body=%s", rec.Code, rec.Body.String())
 	}
@@ -102,7 +102,7 @@ func TestConfigEditPreservesComments(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := `{"kind":"scheduling","data":{"circuit_threshold":5}}`
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d want 200 body=%s", rec.Code, rec.Body.String())
 	}
@@ -129,7 +129,7 @@ func TestConfigEditGeneral(t *testing.T) {
 	w, _ := newTestWeb(t)
 	w.configFile = cfgPath
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(`{"kind":"general","data":{"listen":"127.0.0.1:18000"}}`)))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(`{"kind":"general","data":{"listen":"127.0.0.1:18000"}}`)))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -148,7 +148,7 @@ func TestConfigEditUnknownKind(t *testing.T) {
 	for _, kind := range []string{"bogus"} {
 		rec := httptest.NewRecorder()
 		body := `{"kind":"` + kind + `","name":"x","data":{}}`
-		w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
+		serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
 		if rec.Code != 400 {
 			t.Errorf("kind=%s status=%d want 400 body=%s", kind, rec.Code, rec.Body.String())
 		}
@@ -162,7 +162,7 @@ func TestConfigEditProviderBilling(t *testing.T) {
 	w, _ := newTestWeb(t)
 	w.configFile = cfgPath
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit",
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit",
 		strings.NewReader(`{"kind":"provider","name":"deepseek","data":{"billing":"plan"}}`)))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -185,7 +185,7 @@ func TestConfigEditProviderModels(t *testing.T) {
 
 	// Set models to a new list -> the old entry is replaced, order preserved.
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit",
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit",
 		strings.NewReader(`{"kind":"provider","name":"zhipu","data":{"models":["glm-4.6","glm-4.5-air"]}}`)))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -204,7 +204,7 @@ func TestConfigEditProviderModels(t *testing.T) {
 
 	// An edit WITHOUT models must leave the list intact (non-destructive).
 	rec2 := httptest.NewRecorder()
-	w.Serve(rec2, httptest.NewRequest("POST", "/api/config/edit",
+	serveWeb(w, rec2, httptest.NewRequest("POST", "/api/config/edit",
 		strings.NewReader(`{"kind":"provider","name":"zhipu","data":{"billing":"plan"}}`)))
 	if rec2.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec2.Code, rec2.Body.String())
@@ -224,7 +224,7 @@ func TestConfigGetProviderModels(t *testing.T) {
 	w, _ := newTestWeb(t)
 	w.configFile = cfgPath
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("GET", "/api/config", nil))
+	serveWeb(w, rec, httptest.NewRequest("GET", "/api/config", nil))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -252,7 +252,7 @@ func TestConfigGetRoutes(t *testing.T) {
 	w, _ := newTestWeb(t)
 	w.configFile = cfgPath
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("GET", "/api/config", nil))
+	serveWeb(w, rec, httptest.NewRequest("GET", "/api/config", nil))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -291,7 +291,7 @@ func TestConfigEditProviderAddWithProviderID(t *testing.T) {
 	w, _ := newTestWeb(t)
 	w.configFile = cfgPath
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit",
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit",
 		strings.NewReader(`{"kind":"provider","name":"zhipu-work","data":{"provider_id":"zhipu","openai_base_url":"https://open.bigmodel.cn/api/paas/v4","billing":"plan"}}`)))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -321,7 +321,7 @@ func TestConfigEditProviderAddMissingProviderID(t *testing.T) {
 	w, _ := newTestWeb(t)
 	w.configFile = cfgPath
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit",
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit",
 		strings.NewReader(`{"kind":"provider","name":"ghost","data":{"openai_base_url":"https://x"}}`)))
 	if rec.Code != 400 {
 		t.Fatalf("status=%d want 400 (provider_id missing), body=%s", rec.Code, rec.Body.String())
@@ -348,7 +348,7 @@ func TestConfigEditRouteCRUD(t *testing.T) {
 	w, _ := newTestWeb(t)
 	w.configFile = cfgPath
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit",
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit",
 		strings.NewReader(`{"kind":"route","name":"m","data":{"targets":[{"provider":"zhipu","model":"m","priority":1}]}}`)))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -387,7 +387,7 @@ func TestConfigEditSchedulingNewIntKey(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := `{"kind":"scheduling","data":{"circuit_threshold":5}}`
-	w.Serve(rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/config/edit", strings.NewReader(body)))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d want 200 body=%s", rec.Code, rec.Body.String())
 	}

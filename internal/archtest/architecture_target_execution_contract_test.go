@@ -209,7 +209,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 		adapter, adapterSet := parseGoFile(t, "internal/app/targetexec_adapter.go")
 		factory := namedMethod(t, adapter, "Proxy", "targetExecutor")
 		adapterForbidden := map[string]bool{
-			"Do": true, "ConvertRequest": true, "ConvertResponse": true,
+			"Do": true, "ConvertResponse": true,
 			"ConvertSSE": true, "flushCopy": true, "contextOverflowRetry": true,
 			"dispatchShadowAfterCommit": true, "runShadow": true,
 		}

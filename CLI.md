@@ -181,7 +181,7 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
   ```
     ⚠ <client> drift detected right after takeover: <FILE> points to <CURRENT>, want <EXPECTED>
   ```
-  `guard.audit` 开启时按 doctor 同款语义追加一条 kind=drift 安全审计记录（agent=takeover，同日同 client 去重，见 §18）；审计追加失败只 stderr 提示。漂移不影响 exit code。`restore` 不做该校验（恢复原状是预期）。
+  `guard.audit` 开启时按 doctor 同款语义追加一条 kind=drift 安全审计记录（agent=takeover，同日同 client 去重，见 §19）；审计追加失败只 stderr 提示。漂移不影响 exit code。`restore` 不做该校验（恢复原状是预期）。
 
 失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 备份失败 / 改写失败）。`client` 不在集合内由 `listClients` 决定（`all` 展开全部；未知名通常导致空集，静默返回 0）。`takeover:` 块整个可省略--五个 client 路径 + provider_id 有代码默认值，只有覆盖某项才需写。kimi 写 `~/.kimi/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai_legacy"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models.<name>]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
 
@@ -190,7 +190,7 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
 ## 3. `restore <client>` — 还原客户端配置
 
 ```
-restore <client>   # client ∈ {claude, opencode, codex, pi, all}
+restore <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
 ```
 
 逻辑（`internal/takeover/takeover.go` 的 `RunRestore`）：从 `<BAKDIR>/<client>.bak` verbatim 复制回原路径。输出同 §2 的 restore 行。失败：`log.Fatal` -> stderr + exit 1（无备份 -> `no backup for <client> in <BAKDIR>: ...`）。
@@ -240,7 +240,7 @@ Once you've finished logging in (or the redirect above succeeded), come back her
 Login complete. You can now run `model-proxy serve`.
 ```
 
-### codex（OAuth device flow，`internal/cli/login/codex_login.go` 的 `CmdCodexLogin`）
+### codex（OAuth device flow，`internal/cli/login/codex_login.go` 的 `runCodexLoginFlow`，由 `login.go` 的 `RunProviderLogin` 分派）
 
 stdout：
 ```
@@ -540,7 +540,7 @@ routes:
   - 已保留：文档/文件、`tool_result` 图片与 `is_error`、Responses `web_search`/`tool_search`、跨协议到 Anthropic 时自动生成的 cache breakpoint。剩余有损项主要是 anthropic↔chat 的 thinking、尚无降级实现的 server tool（如 computer）和 chat `input_audio`。`doctor` 会列出转换路由与剩余有损项。
   - 纯 anthropic 后端可只配 `anthropic_base_url`（provider 校验已放宽为「至少一个 base URL」）。
 
-### `shadow:` （配置驱动，非 CLI）
+### `shadow:` （发送配置驱动；聚合报告见 §16 `shadow report`）
 
 ```yaml
 shadow:
@@ -754,7 +754,7 @@ config 无效 -> **stdout** `✗ config invalid:  <ERR>`（红）+ exit 1（注�
 doctor --live [--config PATH]
 ```
 
-逻辑（`internal/cli/doctor/live.go` 的 `RenderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于 `takeover.proxy_url` 推导值），输出**结论先行**报告，回答「agent 为什么不动了」。对 daemon 纯只读；唯一磁盘副作用：检出漂移的 client 在 `guard.audit` 开启时追加一条安全审计记录（见 §18）。有 `--live` 时离线报告不再输出。
+逻辑（`internal/cli/doctor/live.go` 的 `RenderDoctorLive`）：连 daemon `GET /api/status` + `GET /api/requests?errors=1&limit=5`，叠加本地 takeover 漂移检查（`<configDir>/.model-proxy/<client>.bak` 存在 = 已接管，校验该 client 配置里的 proxy 指针是否仍等于 `takeover.proxy_url` 推导值），输出**结论先行**报告，回答「agent 为什么不动了」。对 daemon 纯只读；唯一磁盘副作用：检出漂移的 client 在 `guard.audit` 开启时追加一条安全审计记录（见 §19）。有 `--live` 时离线报告不再输出。
 
 ### stdout
 
@@ -864,11 +864,38 @@ replay <id> --to <provider> [--config PATH]
 - 记录无 body：`record <ID> has no captured request body`
 - 上游 ≥400：`✗ <BODY_TRUNC_400>`
 
-> 影子评测（shadow，配置驱动，非 CLI）：`shadow: {<route>: {provider: <P>, model: <M>}}` 时，路由每次已交付请求会**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget），只记录（`request_id` 前缀 `shadow-`，provider 为影子 provider）不返回。在 Requests 页按 provider 过滤即可与主后端并排比较；`GET /api/requests` 另有 `shadow=only|exclude` 参数（仅影子 / 排除影子，空=全部，其它值忽略），Requests 页过滤行有对应下拉，影子行 provider 名后带 `shadow` 徽标。需 `request_log.enabled`。
+> 影子评测（shadow，发送由 `shadow:` 配置驱动）：`shadow: {<route>: {provider: <P>, model: <M>}}` 时，路由每次已交付请求会**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget），只记录（`request_id` 前缀 `shadow-`，provider 为影子 provider）不返回。在 Requests 页按 provider 过滤即可与主后端并排比较；`GET /api/requests` 另有 `shadow=only|exclude` 参数（仅影子 / 排除影子，空=全部，其它值忽略），Requests 页过滤行有对应下拉，影子行 provider 名后带 `shadow` 徽标。聚合对比报告走 `shadow report` CLI（§16，消费 `GET /api/shadow-report`）。需 `request_log.enabled`。
 
 ---
 
-## 16. `unfreeze` — 清理冻结的 provider 状态（需 daemon + web.enabled）
+## 16. `shadow report` — 影子评测聚合报告（需 daemon + request_log）
+
+```
+shadow report [--from TIME] [--to TIME] [--config PATH]
+```
+
+逻辑（`internal/cli/shadow_report.go` 的 `CmdShadow` -> `CmdShadowReport`）：GET `http://<LISTEN>/api/shadow-report?from=&to=`，渲染按 `shadow-<父id>` 配对样本聚合的主/影子后端对比表（聚合口径见 `docs/web-api.md` 的 `/api/shadow-report` 行）。`--from`/`--to` 原样透传为 query 参数（`MakeURLQuery`；服务端解析惯例同 `/api/stats`）。`CmdShadow` 的子命令分派：无参数 -> stderr `✗ usage: model-proxy shadow report [--from --to --config]` + exit 1；未知子命令 -> stderr `✗ unknown shadow subcommand: <SUB> (try 'report')` + exit 1。
+
+### stdout（表格）
+
+表头：
+```
+ROUTE            PRIMARY      SHADOW       SAMPLES   MATCH   P_LAT   S_LAT    P_BYTES    S_BYTES
+```
+每行 = 一个 (route, primary, shadow) 聚合：ROUTE/PRIMARY/SHADOW 左对齐 16/12/12 列（超出截断到列宽，`%-16.16s` 等）；SAMPLES 右对齐整数；MATCH = `status_match_rate × 100` 的整数百分比（如 `80%`、`42%`）；P_LAT/S_LAT = 平均延迟 `<N>ms`；P_BYTES/S_BYTES = 平均响应大小（`compactNum`，如 `1.5M`/`450k`）。
+
+- request_log 未启用（`enabled:false`）-> stdout `(request logging is off — enable request_log to collect shadow data)` + exit 0。
+- 窗口内无成对样本 -> stdout `(no paired shadow samples in range)` + exit 0（不渲染表格）。
+
+### 失败（stderr `✗ <ERR>` + exit 1）
+
+- 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
+- 非 200：`daemon returned HTTP <CODE>`
+- 解析失败：`parse response: <ERR>`
+
+---
+
+## 17. `unfreeze` — 清理冻结的 provider 状态（需 daemon + web.enabled）
 
 ```
 unfreeze [provider] [--config PATH]
@@ -888,7 +915,7 @@ unfreeze [provider] [--config PATH]
 
 ---
 
-## 17. `wire record` — 录制上游 SSE 黄金流（离线，凭据来自 login）
+## 18. `wire record` — 录制上游 SSE 黄金流（离线，凭据来自 login）
 
 ```
 wire record <provider> [--model M] [--prompt P] [--out DIR]
@@ -906,7 +933,7 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 
 ---
 
-## 18. `audit` — 安全审计日志（离线，不需 daemon）
+## 19. `audit` — 安全审计日志（离线，不需 daemon）
 
 ```
 audit [--stats] [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
@@ -959,5 +986,6 @@ by action
 - `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
 - `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
 - `internal/cli/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
+- `internal/cli/shadow_report_render_test.go`：`shadow report` 表头/数据列/截断/紧凑数字与 disabled/empty 提示文案；`internal/cli/shadow_report_cmd_test.go`：`--from`/`--to` query 透传（`MakeURLQuery`）。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

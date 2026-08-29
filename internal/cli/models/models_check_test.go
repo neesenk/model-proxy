@@ -398,7 +398,7 @@ func TestRouteModelsForProvider(t *testing.T) {
 	}}
 	// aqp is targeted by 3 distinct models across routes; glm-5.2 appears in
 	// two routes but must be deduped. Sorted for deterministic order.
-	got := RouteModelsForProvider(cfg, "aqp")
+	got := app.RouteModelsForProvider(cfg, "aqp")
 	want := []string{"deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2"}
 	if len(got) != len(want) {
 		t.Fatalf("RouteModelsForProvider(aqp)=%v want %v", got, want)
@@ -409,11 +409,11 @@ func TestRouteModelsForProvider(t *testing.T) {
 		}
 	}
 	// A provider not targeted by any route -> empty (no panic).
-	if got := RouteModelsForProvider(cfg, "volcengine"); len(got) != 0 {
+	if got := app.RouteModelsForProvider(cfg, "volcengine"); len(got) != 0 {
 		t.Errorf("RouteModelsForProvider(volcengine)=%v want empty", got)
 	}
 	// No routes at all -> empty.
-	if got := RouteModelsForProvider(&configdomain.Config{}, "aqp"); len(got) != 0 {
+	if got := app.RouteModelsForProvider(&configdomain.Config{}, "aqp"); len(got) != 0 {
 		t.Errorf("RouteModelsForProvider(no-routes)=%v want empty", got)
 	}
 }

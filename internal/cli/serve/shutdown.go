@@ -5,7 +5,7 @@ package serve
 import (
 	"context"
 	"errors"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"net"
 	"net/http"
 	"os"
@@ -162,9 +162,9 @@ func ServeHTTPUntilShutdown(
 	shutdownErr := server.Shutdown(ctx)
 	cancel()
 	if shutdownErr != nil {
-		log.Printf("[shutdown] HTTP drain exceeded %s (%v); forcing active connections closed", timeout, shutdownErr)
+		logx.Warnf("[shutdown] HTTP drain exceeded %s (%v); forcing active connections closed", timeout, shutdownErr)
 		if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
-			log.Printf("[shutdown] force-close failed: %v", closeErr)
+			logx.Warnf("[shutdown] force-close failed: %v", closeErr)
 		}
 	}
 

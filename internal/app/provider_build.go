@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -97,7 +97,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		// plural file is never downgraded to the legacy singular key.
 		snapshot, poolErr := store.LoadSnapshot(name, prov.Provider)
 		if poolErr != nil {
-			log.Printf("[proxy] pool %s unreadable: %v; disabling provider", name, poolErr)
+			logx.Warnf("[proxy] pool %s unreadable: %v; disabling provider", name, poolErr)
 			continue
 		}
 		if len(snapshot.ReloginNeeded) > 0 {
@@ -107,7 +107,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 			for _, a := range snapshot.ReloginNeeded {
 				labels = append(labels, a.Label)
 			}
-			log.Printf("[proxy] pool %s: %d account(s) kept as metadata only after keychain→file switch (keychain entries missing); login again to re-add: %s",
+			logx.Warnf("[proxy] pool %s: %d account(s) kept as metadata only after keychain→file switch (keychain entries missing); login again to re-add: %s",
 				name, len(labels), strings.Join(labels, ", "))
 		}
 		pool := snapshot.Pool
@@ -138,7 +138,7 @@ func BuildProviders(cfg *configdomain.Config, store accounts.Store, opts BuildOp
 		if len(pool.Accounts) == 0 {
 			// An empty plural file is an authoritative credential tombstone.
 			// Do not construct an unbound provider that could re-read legacy.
-			log.Printf("[proxy] pool %s exists but has 0 accounts; disabling provider", name)
+			logx.Warnf("[proxy] pool %s exists but has 0 accounts; disabling provider", name)
 			continue
 		}
 		if len(pool.Accounts) == 1 {
@@ -280,7 +280,7 @@ func BuildOne(cfg *configdomain.Config, opts BuildOptions, name string, prov con
 	}
 	p, err := provider.New(pcfg, name)
 	if err != nil {
-		log.Printf("[proxy] failed to build provider %s: %v (using auth-only)", name, err)
+		logx.Warnf("[proxy] failed to build provider %s: %v (using auth-only)", name, err)
 		return nil
 	}
 	return p

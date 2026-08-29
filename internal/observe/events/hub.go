@@ -16,7 +16,7 @@ const recentCap = 200
 // fires when a configured monthly cost budget crosses (Detail carries the
 // JSON {scope, month, threshold_usd, actual_usd} payload).
 type Event struct {
-	Type          string `json:"type"` // "start" | "end" | "guard"
+	Type          string `json:"type"` // "start" | "end" | "guard" | "budget"
 	Ts            int64  `json:"ts"`   // unix milliseconds
 	RequestID     string `json:"request_id"`
 	Agent         string `json:"agent"`

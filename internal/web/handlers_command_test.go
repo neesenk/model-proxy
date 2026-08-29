@@ -128,7 +128,10 @@ func newCommandTestServer(t *testing.T, commands *commandFake) *Server {
 func commandRequest(server *Server, method, path, body string) *httptest.ResponseRecorder {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
-	server.ServeHTTP(recorder, request)
+	// serveAPI is the handler Register installs at /api/; call it directly so
+	// malformed paths ("///", "//start") reach serveAPI's own path parsing —
+	// a ServeMux would clean-redirect them before dispatch.
+	server.serveAPI(recorder, request)
 	return recorder
 }
 
@@ -377,7 +380,7 @@ func TestCommandAccountContract(t *testing.T) {
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp", "{"), http.StatusBadRequest, map[string]any{"error": "unexpected EOF"})
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/api/accounts/aqp", strings.NewReader(`{"api_key":"secret","label":"one","replace":true}`)).WithContext(context.WithValue(context.Background(), "request", "add-context"))
-		server.ServeHTTP(recorder, request)
+		serveWebRequest(server, recorder, request)
 		requireCommandResponse(t, recorder, http.StatusOK, map[string]any{"id": "acct-1", "status": "added", "warning": "reload deferred"})
 		if provider != "aqp" || input.APIKey != "secret" || input.Label != "one" || !input.Replace || contextValue != "add-context" {
 			t.Fatalf("AddAccount args provider=%q input=%#v context=%v", provider, input, contextValue)
@@ -401,7 +404,7 @@ func TestCommandAccountContract(t *testing.T) {
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/accounts/aqp/failed/test", ""), http.StatusOK, map[string]any{"status": "failed", "reason": "rate limited", "http_status": float64(429), "latency_ms": float64(1750), "provider": "aqp", "account_id": "failed", "model": "m"})
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/api/accounts/aqp/one/test", nil).WithContext(context.WithValue(context.Background(), "request", "probe-context"))
-		server.ServeHTTP(recorder, request)
+		serveWebRequest(server, recorder, request)
 		requireCommandResponse(t, recorder, http.StatusOK, map[string]any{"status": "ok", "http_status": float64(200), "latency_ms": float64(3), "provider": "aqp", "account_id": "one", "model": "m"})
 		if provider != "aqp" || id != "one" || contextValue != "probe-context" {
 			t.Fatalf("ProbeAccount args=(%q,%q,%v)", provider, id, contextValue)

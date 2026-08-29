@@ -1,7 +1,7 @@
 package app
 
 import (
-	"log"
+	"model-proxy/internal/observe/logx"
 
 	"model-proxy/internal/observe/requestlog"
 )
@@ -18,7 +18,7 @@ func (p *Proxy) initRequestLog(config RequestLogConfig) {
 		MaxBodyBytes: config.MaxBodyBytesValue(),
 		Retention:    config.RetentionDuration(),
 	})
-	log.Printf(
+	logx.Infof(
 		"[request_log] enabled -> %s (max_file_size %d bytes, max_body %d bytes, retention %s)",
 		config.ResolvedDir(),
 		config.MaxFileSizeBytes(),

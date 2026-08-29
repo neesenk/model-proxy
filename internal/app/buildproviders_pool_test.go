@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/provider"
 )
 
@@ -26,13 +27,13 @@ func writePoolFile(t *testing.T, name, providerID string, keys ...string) {
 	for _, k := range keys {
 		c := AccountCred{APIKey: k}
 		p.Accounts = append(p.Accounts, PoolAccount{
-			ID:      AccountIDFor(providerID, c),
+			ID:      accounts.AccountID(providerID, c),
 			Label:   k,
 			APIKey:  k,
 			AddedAt: "2026-07-08",
 		})
 	}
-	if err := SavePool(name, providerID, p); err != nil {
+	if err := AccountStore().Save(name, providerID, p); err != nil {
 		t.Fatal(err)
 	}
 }

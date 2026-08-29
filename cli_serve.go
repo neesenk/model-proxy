@@ -8,6 +8,7 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/provider"
 	"net"
 	"net/http"
@@ -81,6 +82,9 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 	if err != nil {
 		return err
 	}
+	// log_level is startup-only (reload does not re-read it): apply it once
+	// here, before any runtime log line is emitted.
+	logx.SetLevel(cfg.LogLevel)
 	pidPath := "" // foreground-only pid file (login/logout SIGHUP); removed on exit
 	// In true foreground mode (no role env), mirror logs to the configured file.
 	// The worker's stdio is already the log file (set by the supervisor), so it
@@ -98,7 +102,7 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 				// Not fatal, but never silent: the operator asked for a log
 				// file and would otherwise discover the loss only when the
 				// file is empty or missing after a crash.
-				log.Printf("model-proxy: could not open log file %s: %v (logging to stderr only)", lf, err)
+				logx.Warnf("model-proxy: could not open log file %s: %v (logging to stderr only)", lf, err)
 			}
 			// Write a pid file so `login`/`logout` can SIGHUP this foreground
 			// serve to hot-reload new credentials. The daemon supervisor writes
@@ -140,7 +144,7 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 	shutdownCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
-	log.Printf("model-proxy listening on %s (routes: %s)",
+	logx.Infof("model-proxy listening on %s (routes: %s)",
 		runtime.StartupConfig.Listen, cliframework.RouteNames(runtime.StartupConfig))
 	return cliserve.ServeHTTPUntilShutdown(
 		server,

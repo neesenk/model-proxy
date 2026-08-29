@@ -5,7 +5,7 @@ package stats
 
 import (
 	"context"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"path/filepath"
 	"sync"
 	"time"
@@ -269,7 +269,7 @@ func (f *Flusher) enqueue(batch Batch) {
 	f.pending = f.pending[1:]
 	f.coalesced++
 	if f.coalesced == 1 || f.coalesced%60 == 0 {
-		log.Printf(
+		logx.Warnf(
 			"[stats] provider backlog exceeded %d batches; coalesced %d old minute batches",
 			MaxPendingStatsBatches,
 			f.coalesced,
@@ -287,7 +287,7 @@ func (f *Flusher) enqueueAgent(batch AgentBatch) {
 	f.agentQueue = f.agentQueue[1:]
 	f.agentCoalesced++
 	if f.agentCoalesced == 1 || f.agentCoalesced%60 == 0 {
-		log.Printf(
+		logx.Warnf(
 			"[stats] agent backlog exceeded %d batches; coalesced %d old minute batches",
 			MaxPendingStatsBatches,
 			f.agentCoalesced,
@@ -339,7 +339,7 @@ func (f *Flusher) flushPending(ctx context.Context, limit int) bool {
 		if err := f.stats.FlushContext(ctx, batch.minute, batch.deltas); err != nil {
 			f.flushFailures++
 			if f.flushFailures == 1 || f.flushFailures%60 == 0 {
-				log.Printf(
+				logx.Warnf(
 					"[stats] flush failed: %v (minute %d retained; attempt %d)",
 					err,
 					batch.minute,
@@ -357,7 +357,7 @@ func (f *Flusher) flushPending(ctx context.Context, limit int) bool {
 		if err := f.stats.FlushAgentsContext(ctx, batch.minute, batch.deltas); err != nil {
 			f.agentFlushFailures++
 			if f.agentFlushFailures == 1 || f.agentFlushFailures%60 == 0 {
-				log.Printf(
+				logx.Warnf(
 					"[stats] agent flush failed: %v (minute %d retained; attempt %d)",
 					err,
 					batch.minute,
@@ -399,14 +399,14 @@ func (f *Flusher) FlushForShutdown(timeout time.Duration) {
 	for {
 		providerPending, agentPending, locked := f.PendingCountsContext(ctx)
 		if !locked {
-			log.Printf("[stats] shutdown retry window exhausted while waiting for the flusher lock")
+			logx.Warnf("[stats] shutdown retry window exhausted while waiting for the flusher lock")
 			return
 		}
 		if providerPending == 0 && agentPending == 0 {
 			return
 		}
 		if ctx.Err() != nil {
-			log.Printf(
+			logx.Warnf(
 				"[stats] shutdown retry window exhausted with %d provider and %d agent batches pending",
 				providerPending,
 				agentPending,
@@ -428,7 +428,7 @@ func (f *Flusher) prune(ctx context.Context, now time.Time) {
 	if err := f.stats.PruneContext(ctx, now); err != nil {
 		f.pruneFailures++
 		if f.pruneFailures == 1 || f.pruneFailures%60 == 0 {
-			log.Printf("[stats] prune failed: %v (attempt %d)", err, f.pruneFailures)
+			logx.Warnf("[stats] prune failed: %v (attempt %d)", err, f.pruneFailures)
 		}
 		return
 	}

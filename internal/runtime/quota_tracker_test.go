@@ -47,7 +47,7 @@ func (f *flakyProv) Quota() (*provider.QuotaSnapshot, error) {
 }
 
 func TestCurrentGeneration(t *testing.T) {
-	tr := NewQuotaTracker("", nil, nil, NewManager(0))
+	tr := NewQuotaTracker("", nil, nil, newTestManager(0))
 	if got := tr.CurrentGeneration(); got != 0 {
 		t.Errorf("nil Generation func = %d, want 0", got)
 	}
@@ -62,7 +62,7 @@ func TestPollAllMergesAndPersists(t *testing.T) {
 	tr := NewQuotaTracker(path,
 		func() *configdomain.Config { return &configdomain.Config{} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": &snapshotProv{rem: 0.5}} },
-		NewManager(0))
+		newTestManager(0))
 	tr.PollAll(time.Now())
 	if s := tr.Snapshot("x"); s == nil || s.RemainingPct != 0.5 {
 		t.Fatalf("PollAll snapshot = %+v", s)
@@ -76,7 +76,7 @@ func TestPollAllMergesAndPersists(t *testing.T) {
 	fresh := NewQuotaTracker(path,
 		func() *configdomain.Config { return &configdomain.Config{} },
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": &snapshotProv{rem: 0}} },
-		NewManager(0))
+		newTestManager(0))
 	fresh.Load()
 	if s := fresh.Snapshot("x"); s == nil || s.RemainingPct != 0.5 {
 		t.Fatalf("Load snapshot = %+v", s)
@@ -98,7 +98,7 @@ func TestPollAllMergesAndPersists(t *testing.T) {
 
 func TestPollOneUnknownKey(t *testing.T) {
 	tr := NewQuotaTracker("", nil,
-		func() map[string]provider.Provider { return nil }, NewManager(0))
+		func() map[string]provider.Provider { return nil }, newTestManager(0))
 	if tr.PollOne("missing") {
 		t.Error("PollOne on unknown key must return false")
 	}
@@ -107,7 +107,7 @@ func TestPollOneUnknownKey(t *testing.T) {
 func TestPollOneCommits(t *testing.T) {
 	tr := NewQuotaTracker("", nil,
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": &snapshotProv{rem: 0.9}} },
-		NewManager(0))
+		newTestManager(0))
 	if !tr.PollOne("x") {
 		t.Fatal("PollOne returned false for live provider")
 	}
@@ -117,7 +117,7 @@ func TestPollOneCommits(t *testing.T) {
 }
 
 func TestCommitSnapshotGenerationGate(t *testing.T) {
-	tr := NewQuotaTracker("", nil, nil, NewManager(3))
+	tr := NewQuotaTracker("", nil, nil, newTestManager(3))
 	tr.Generation = func() uint64 { return 3 }
 	if tr.CommitSnapshot(2, "x", &provider.QuotaSnapshot{}) {
 		t.Error("stale generation commit must be rejected")
@@ -128,7 +128,7 @@ func TestCommitSnapshotGenerationGate(t *testing.T) {
 }
 
 func TestFetchQuotaRetriesTransient(t *testing.T) {
-	tr := NewQuotaTracker("", nil, nil, NewManager(0))
+	tr := NewQuotaTracker("", nil, nil, newTestManager(0))
 	tr.SetRetryBackoff(time.Millisecond)
 	p := &flakyProv{snapshotProv: snapshotProv{rem: 0.3}, errs: []string{"timeout", "connection refused"}}
 	s := tr.FetchQuota(p, time.Now())
@@ -141,7 +141,7 @@ func TestFetchQuotaRetriesTransient(t *testing.T) {
 }
 
 func TestFetchQuotaNoRetryPermanent(t *testing.T) {
-	tr := NewQuotaTracker("", nil, nil, NewManager(0))
+	tr := NewQuotaTracker("", nil, nil, newTestManager(0))
 	tr.SetRetryBackoff(time.Millisecond)
 	p := &flakyProv{errs: []string{"http 401 unauthorized"}}
 	s := tr.FetchQuota(p, time.Now())
@@ -168,7 +168,7 @@ func TestIsTransientQuotaErr(t *testing.T) {
 }
 
 func TestSetSnapshotAndStopChannel(t *testing.T) {
-	tr := NewQuotaTracker("", nil, nil, NewManager(0))
+	tr := NewQuotaTracker("", nil, nil, newTestManager(0))
 	tr.SetSnapshot("a", &provider.QuotaSnapshot{RemainingPct: 0.1})
 	if s := tr.Snapshot("a"); s == nil || s.RemainingPct != 0.1 {
 		t.Fatalf("SetSnapshot = %+v", s)
@@ -196,7 +196,7 @@ func TestSetSnapshotAndStopChannel(t *testing.T) {
 }
 
 func TestPersistInMemoryNoop(t *testing.T) {
-	tr := NewQuotaTracker("", nil, nil, NewManager(0))
+	tr := NewQuotaTracker("", nil, nil, newTestManager(0))
 	if err := tr.Persist(); err != nil {
 		t.Errorf("in-memory Persist = %v, want nil", err)
 	}
@@ -204,14 +204,14 @@ func TestPersistInMemoryNoop(t *testing.T) {
 
 func TestLoadMissingAndCorrupt(t *testing.T) {
 	dir := t.TempDir()
-	tr := NewQuotaTracker(filepath.Join(dir, "absent.json"), nil, nil, NewManager(0))
+	tr := NewQuotaTracker(filepath.Join(dir, "absent.json"), nil, nil, newTestManager(0))
 	tr.Load() // must not panic
 
 	bad := filepath.Join(dir, "bad.json")
 	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	tr2 := NewQuotaTracker(bad, nil, nil, NewManager(0))
+	tr2 := NewQuotaTracker(bad, nil, nil, newTestManager(0))
 	tr2.Load() // must not panic
 }
 
@@ -226,7 +226,7 @@ func TestQuotaTrackerFreshnessMaxAgeFrozenAtStart(t *testing.T) {
 	cfg := &configdomain.Config{Scheduling: configdomain.Scheduling{QuotaPollInterval: "5m"}}
 	tracker := NewQuotaTracker("", func() *configdomain.Config { return cfg }, func() map[string]provider.Provider {
 		return nil
-	}, NewManager(0))
+	}, newTestManager(0))
 	defer tracker.Stop()
 	if got := tracker.FreshnessMaxAge(); got != 15*time.Minute {
 		t.Fatalf("pre-Start FreshnessMaxAge = %v, want 3×5m (live-config fallback)", got)

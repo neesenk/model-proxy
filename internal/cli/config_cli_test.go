@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,9 @@ routes:
     - {provider: zhipu, model: glm-5.2}
 `), 0o644)
 
-	out := grabStdout(t, func() { PrintConfigProviders([]string{"--config", cfgPath}) })
+	var buf bytes.Buffer
+	PrintConfigProvidersTo(&buf, []string{"--config", cfgPath})
+	out := buf.String()
 	if !strings.Contains(out, "zhipu") {
 		t.Errorf("printConfigProviders missing zhipu:\n%s", out)
 	}
@@ -35,10 +38,9 @@ routes:
 
 func TestPrintConfigProviders_NoConfig(t *testing.T) {
 	// Missing config → LoadConfig errors → early return (no output, no panic).
-	out := grabStdout(t, func() {
-		PrintConfigProviders([]string{"--config", filepath.Join(t.TempDir(), "nope.yaml")})
-	})
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("PrintConfigProviders(missing config) should print nothing: %q", out)
+	var buf bytes.Buffer
+	PrintConfigProvidersTo(&buf, []string{"--config", filepath.Join(t.TempDir(), "nope.yaml")})
+	if strings.TrimSpace(buf.String()) != "" {
+		t.Errorf("PrintConfigProviders(missing config) should print nothing: %q", buf.String())
 	}
 }

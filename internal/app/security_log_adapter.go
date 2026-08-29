@@ -1,7 +1,7 @@
 package app
 
 import (
-	"log"
+	"model-proxy/internal/observe/logx"
 	"path/filepath"
 	"time"
 
@@ -51,12 +51,12 @@ func (p *Proxy) reconcileSecLog(cfg *Config) {
 		if err != nil {
 			// seclog.New only fails on an empty directory (unreachable via
 			// AuditPathValue, defensive). Keep the previous logger state.
-			log.Printf("[seclog] init failed: %v — security audit logger unchanged", err)
+			logx.Warnf("[seclog] init failed: %v — security audit logger unchanged", err)
 			return
 		}
 		if !p.lifecycle.Run(func(<-chan struct{}) { next.Run() }) {
 			// The lifecycle is stopping: nothing may outlive Close.
-			log.Printf("[seclog] lifecycle stopping — security audit logger not swapped")
+			logx.Warnf("[seclog] lifecycle stopping — security audit logger not swapped")
 			return
 		}
 	}

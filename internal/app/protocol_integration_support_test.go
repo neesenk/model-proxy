@@ -23,14 +23,6 @@ func asMap(value any) map[string]any {
 	return result
 }
 
-func asSlice(value any, index int) any {
-	items, ok := value.([]any)
-	if !ok || index < 0 || index >= len(items) {
-		return nil
-	}
-	return items[index]
-}
-
 func strOpt(value any) string {
 	result, _ := value.(string)
 	return result

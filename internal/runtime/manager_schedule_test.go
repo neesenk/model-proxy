@@ -35,7 +35,7 @@ func TestDecideOrderSortsTierPriorityAndSurplus(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 15, 0, 0, 0, time.UTC)
-	m := NewManager(1)
+	m := newTestManager(1)
 	setScheduleQuota(t, m, "tier-2", scheduleQuota(provider.BillingPayG, 1, now), 1)
 	setScheduleQuota(t, m, "priority-2", scheduleQuota(provider.BillingPlan, 1, now), 1)
 	setScheduleQuota(t, m, "surplus-low", scheduleQuota(provider.BillingPlan, .1, now), 1)
@@ -82,7 +82,7 @@ func TestDecideOrderStickyDwellAndSwitchMargin(t *testing.T) {
 		Generation:   2,
 	}
 
-	m := NewManager(2)
+	m := newTestManager(2)
 	setScheduleQuota(t, m, "best", scheduleQuota(provider.BillingPlan, 1, now), 2)
 	setScheduleQuota(t, m, "current", scheduleQuota(provider.BillingPlan, .7, now), 2)
 	m.SetSticky("session", Sticky{Provider: "current", Since: now.Add(-30 * time.Minute)}, 2)
@@ -133,7 +133,7 @@ func TestDecideOrderSkipsQuotaExhaustedStickyAccount(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
-	m := NewManager(7)
+	m := newTestManager(7)
 	targets := []Target{
 		{Provider: "fresh", Priority: 1},
 		{Provider: "exhausted", Priority: 1},
@@ -183,7 +183,7 @@ func TestDecideOrderUsesAtomicQuotaHealthPinAndStickyState(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 16, 30, 0, 0, time.UTC)
-	m := NewManager(5)
+	m := newTestManager(5)
 	targets := []Target{{Provider: "plan", Model: "m"}, {Provider: "pinned", Model: "m"}}
 	setScheduleQuota(t, m, "plan", scheduleQuota(provider.BillingPlan, .9, now), 5)
 
@@ -217,7 +217,7 @@ func TestDecideOrderFiltersAndPinOverride(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 17, 0, 0, 0, time.UTC)
-	m := NewManager(3)
+	m := newTestManager(3)
 	targets := []Target{
 		{Provider: "rate", Model: "m"},
 		{Provider: "circuit", Model: "m"},
@@ -277,7 +277,7 @@ func TestDecideOrderMarksStaleAndErroredQuotaUnknownAndAppliesPeakMultiplier(t *
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 18, 30, 0, 0, time.UTC)
-	m := NewManager(8)
+	m := newTestManager(8)
 	peak := scheduleQuota(provider.BillingPlan, .8, now)
 	peak.Windows = append(peak.Windows, provider.QuotaWindow{Short: true, RemainingPct: .5, Total: 20})
 	stale := scheduleQuota(provider.BillingPlan, .9, now.Add(-2*time.Hour))
@@ -311,7 +311,7 @@ func TestDecideOrderComparesSurplusAcrossUltimatePeriods(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 18, 30, 0, 0, time.UTC)
-	m := NewManager(8)
+	m := newTestManager(8)
 	weekly := scheduleQuota(provider.BillingPlan, .5, now)
 	weekly.Windows[0].Duration = 7 * 24 * time.Hour
 	weekly.Windows[0].ResetsAt = now.Add(24 * time.Hour)
@@ -339,7 +339,7 @@ func TestDecideOrderBillingOverrideBeatsFreshQuotaBilling(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 18, 30, 0, 0, time.UTC)
-	m := NewManager(8)
+	m := newTestManager(8)
 	setScheduleQuota(t, m, "plan", scheduleQuota(provider.BillingPlan, .5, now), 8)
 	setScheduleQuota(t, m, "override", scheduleQuota(provider.BillingPlan, .9, now), 8)
 
@@ -363,7 +363,7 @@ func TestDecideOrderPoolSpreadCommitAndGeneration(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC)
-	m := NewManager(7)
+	m := newTestManager(7)
 	targets := []Target{
 		{Provider: "pool#b", Parent: "pool"},
 		{Provider: "pool#a", Parent: "pool"},
@@ -407,7 +407,7 @@ func TestDecideOrderPoolSpreadStaysWithinWinningRank(t *testing.T) {
 	now := time.Date(2026, 7, 29, 18, 15, 0, 0, time.UTC)
 	t.Run("lower-ranked pool cannot leapfrog non-pool winner", func(t *testing.T) {
 		t.Parallel()
-		m := NewManager(12)
+		m := newTestManager(12)
 		setScheduleQuota(t, m, "plan", scheduleQuota(provider.BillingPlan, .2, now), 12)
 		setScheduleQuota(t, m, "pool#a", scheduleQuota(provider.BillingPlan, .9, now), 12)
 
@@ -434,7 +434,7 @@ func TestDecideOrderPoolSpreadStaysWithinWinningRank(t *testing.T) {
 
 	t.Run("pool rotation excludes lower tier and priority siblings", func(t *testing.T) {
 		t.Parallel()
-		m := NewManager(13)
+		m := newTestManager(13)
 		setScheduleQuota(t, m, "pool#a", scheduleQuota(provider.BillingPlan, .3, now), 13)
 		setScheduleQuota(t, m, "pool#c", scheduleQuota(provider.BillingPlan, .8, now), 13)
 
@@ -460,7 +460,7 @@ func TestDecideOrderEvictsOnlyCommittedCurrentStaleSticky(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 19, 0, 0, 0, time.UTC)
-	m := NewManager(10)
+	m := newTestManager(10)
 	old := Sticky{Provider: "p", Since: now.Add(-2 * time.Hour)}
 	m.SetSticky("old-session", old, 10)
 	m.SetSticky("route", old, 10)
@@ -498,7 +498,7 @@ func TestDecideOrderEvictsOnlyCommittedCurrentStaleSticky(t *testing.T) {
 
 func BenchmarkDecideOrder(b *testing.B) {
 	now := time.Date(2026, 7, 29, 22, 0, 0, 0, time.UTC)
-	m := NewManager(1)
+	m := newTestManager(1)
 	for _, name := range []string{"a", "b", "c", "d"} {
 		m.SetQuota(name, scheduleQuota(provider.BillingPlan, .5, now), 1)
 	}

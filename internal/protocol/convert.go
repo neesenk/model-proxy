@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"sort"
 	"strings"
@@ -77,7 +77,7 @@ var convertWarnSeen sync.Map
 
 func convertWarn(msg string) {
 	if _, loaded := convertWarnSeen.LoadOrStore(msg, struct{}{}); !loaded {
-		log.Printf("[convert] WARN: %s (suppressed further occurrences)", msg)
+		logx.Warnf("[convert] WARN: %s (suppressed further occurrences)", msg)
 	}
 }
 
@@ -1210,24 +1210,6 @@ func convertRequestFor(body []byte, clientProto, targetProto string, opts conver
 		return out, nil
 	}
 	return stripped, nil
-}
-
-// injectAnthropicCacheBreakpoints adds stable ephemeral breakpoints to the
-// converted request's system prompt, final tool declaration and last user
-// content block. Same-protocol traffic remains byte-identical.
-func injectAnthropicCacheBreakpoints(body []byte) []byte {
-	var root map[string]any
-	if sonic.Unmarshal(body, &root) != nil {
-		return body
-	}
-	if !injectAnthropicCacheBreakpointsTree(root) {
-		return body
-	}
-	out, err := sonic.Marshal(root)
-	if err != nil {
-		return body
-	}
-	return out
 }
 
 // injectAnthropicCacheBreakpointsTree is the tree form used by the merged

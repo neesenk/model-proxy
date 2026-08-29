@@ -47,7 +47,7 @@ func newEtaTracker(p *etaProv) *QuotaTracker {
 	return NewQuotaTracker("",
 		func() *configdomain.Config { return &configdomain.Config{} }, // default 5m poll interval → 15m max gap
 		func() map[string]provider.Provider { return map[string]provider.Provider{"x": p} },
-		NewManager(0))
+		newTestManager(0))
 }
 
 func TestPollAll_ComputesExhaustionEta(t *testing.T) {

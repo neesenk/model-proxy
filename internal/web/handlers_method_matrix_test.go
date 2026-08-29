@@ -70,7 +70,7 @@ func TestAdminAuthGatesMutationEndpoints(t *testing.T) {
 	for _, m := range mutations {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(m.method, m.path, strings.NewReader(m.body))
-		s.ServeHTTP(rec, req)
+		serveWebRequest(s, rec, req)
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s without token = %d, want 401 (auth precedes dispatch)", m.method, m.path, rec.Code)
 		}
@@ -82,7 +82,7 @@ func TestAdminAuthGatesMutationEndpoints(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer adm-secret")
 	req.Header.Set("Origin", "http://evil.example")
 	req.Host = "127.0.0.1:8123"
-	s.ServeHTTP(rec, req)
+	serveWebRequest(s, rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("valid-token cross-origin mutation = %d, want 403", rec.Code)
 	}
@@ -94,7 +94,7 @@ func TestAdminAuthGatesMutationEndpoints(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(m.method, m.path, strings.NewReader(m.body))
 		req.Header.Set("Authorization", "Bearer adm-secret")
-		s.ServeHTTP(rec, req)
+		serveWebRequest(s, rec, req)
 		if rec.Code != http.StatusOK {
 			t.Errorf("%s %s with valid token = %d body=%s, want 200 (stub command)", m.method, m.path, rec.Code, rec.Body.String())
 		}
@@ -129,7 +129,7 @@ func TestEventsRouteThroughTransportGuards(t *testing.T) {
 
 	// No token → 401 before the SSE handler runs.
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+	serveWebRequest(s, rec, httptest.NewRequest(http.MethodGet, "/api/events", nil))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("GET /api/events without token = %d, want 401", rec.Code)
 	}
@@ -139,7 +139,7 @@ func TestEventsRouteThroughTransportGuards(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer adm-secret")
 	req.Header.Set("Origin", "http://evil.example")
 	req.Host = "127.0.0.1:8123"
-	s.ServeHTTP(rec, req)
+	serveWebRequest(s, rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("GET /api/events cross-origin = %d, want 403", rec.Code)
 	}
@@ -147,7 +147,7 @@ func TestEventsRouteThroughTransportGuards(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	req.Header.Set("Authorization", "Bearer adm-secret")
-	s.ServeHTTP(rec, req)
+	serveWebRequest(s, rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/events with token = %d, want 200", rec.Code)
 	}
@@ -173,7 +173,7 @@ func TestMetricsEmptyDashboard(t *testing.T) {
 	}
 	t.Cleanup(s.Close)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	serveWebRequest(s, rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /metrics = %d, want 200", rec.Code)
 	}

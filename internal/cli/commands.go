@@ -11,6 +11,7 @@ import (
 	"model-proxy/internal/app"
 	clidoctor "model-proxy/internal/cli/doctor"
 	clipresets "model-proxy/internal/cli/presets"
+	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/takeover"
 	"os"
 
@@ -51,17 +52,15 @@ func RunModels(args []string) {
 func RunUsage(args []string)  { CmdUsage(args, LoadCmdConfig(args)) }
 func RunLogout(args []string) { CmdLogout(args, LoadCmdConfig(args)) }
 
-func RunConfig(args []string)        { CmdConfigRun(args) }
-func RunSchedule(args []string)      { CmdSchedule(args, LoadCmdConfig(args)) }
-func RunPin(args []string)           { CmdPin(args, LoadCmdConfig(args)) }
-func RunUnpin(args []string)         { CmdUnpin(args, LoadCmdConfig(args)) }
-func RunUnfreeze(args []string)      { CmdUnfreeze(args, LoadCmdConfig(args)) }
-func RunReplay(args []string)        { CmdReplay(args, LoadCmdConfig(args)) }
-func RunShadow(args []string)        { CmdShadow(args, LoadCmdConfig(args)) }
-func RunShadowReport(args []string)  { CmdShadowReport(args, LoadCmdConfig(args)) }
-func RunWire(args []string)          { CmdWire(args, LoadCmdConfig(args)) }
-func RunWireRecordCLI(args []string) { CmdWireRecord(args, LoadCmdConfig(args)) }
-func RunServeStatus(args []string)   { CmdServeStatus(args, LoadCmdConfig(args)) }
+func RunConfig(args []string)      { CmdConfigRun(args) }
+func RunSchedule(args []string)    { CmdSchedule(args, LoadCmdConfig(args)) }
+func RunPin(args []string)         { CmdPin(args, LoadCmdConfig(args)) }
+func RunUnpin(args []string)       { CmdUnpin(args, LoadCmdConfig(args)) }
+func RunUnfreeze(args []string)    { CmdUnfreeze(args, LoadCmdConfig(args)) }
+func RunReplay(args []string)      { CmdReplay(args, LoadCmdConfig(args)) }
+func RunShadow(args []string)      { CmdShadow(args, LoadCmdConfig(args)) }
+func RunWire(args []string)        { CmdWire(args, LoadCmdConfig(args)) }
+func RunServeStatus(args []string) { CmdServeStatus(args, LoadCmdConfig(args)) }
 
 // RunAdd / RunPresets adapt the presets package's stream-parameterized
 // handlers to the process Command contract (exit code becomes the exit status).
@@ -171,7 +170,7 @@ func verifyTakeoverDrift(cfg *configdomain.Config, which, bakDir string) {
 			continue
 		}
 		drift = append(drift, d)
-		log.Printf("  ⚠ %s drift detected right after takeover: %s points to %s, want %s",
+		logx.Warnf("  ⚠ %s drift detected right after takeover: %s points to %s, want %s",
 			d.Client, d.File, d.Current, d.Expected)
 	}
 	clidoctor.AuditTakeoverDrift(cfg, drift, "takeover")

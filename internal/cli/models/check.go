@@ -161,28 +161,6 @@ func MergeStringIDs(a, b []string) []string {
 	return merged
 }
 
-// routeModelsForProvider returns the model ids targeting `provName` in `routes`
-// - the `model` field of each RouteTarget whose provider is `provName` - deduped
-// and sorted. These are the candidate ids for the route-probe fallback used when
-// a provider has no /models endpoint: the operator has wired these models in
-// routes, so probing them discovers which the provider actually serves. Sorted
-// because `routes` is a map (random iteration order); a deterministic candidate
-// order keeps probe/display/drop output stable across runs.
-func RouteModelsForProvider(cfg *configdomain.Config, provName string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, targets := range cfg.Routes {
-		for _, t := range targets {
-			if t.Provider == provName && !seen[t.Model] {
-				seen[t.Model] = true
-				out = append(out, t.Model)
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // printKeptModels prints the final (post-filter) model list to stdout as a
 // table with models.dev metadata (context/output/input modalities/source) -
 // matching the `model-proxy models` display. Shown BEFORE the filter summary.

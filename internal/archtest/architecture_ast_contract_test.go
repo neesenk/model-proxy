@@ -264,102 +264,6 @@ func isDirectConfigLoadWrapper(fn *ast.FuncDecl, packageName string) bool {
 	return true
 }
 
-func isAccountsAdapterWrapper(fn *ast.FuncDecl) bool {
-	if fn.Recv != nil || fn.Body == nil || len(fn.Body.List) != 1 {
-		return false
-	}
-	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
-	if !ok || len(ret.Results) != 1 {
-		return false
-	}
-	call, ok := ret.Results[0].(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-
-	switch fn.Name.Name {
-	case "accountStore":
-		// accounts owns its home-dir seam: either the package cliframework.HomeDir() wrapper
-		// or a direct os.UserHomeDir() inline.
-		if !selectorCallMatches(call, "accounts", "NewStore") || len(call.Args) != 1 {
-			return false
-		}
-		arg := call.Args[0]
-		if zeroArgIdentCall(arg, "homeDir") {
-			return true
-		}
-		if inner, ok := arg.(*ast.CallExpr); ok {
-			// The home-dir seam lives in internal/cli/framework (HomeDir).
-			return selectorCallMatches(inner, "os", "UserHomeDir") ||
-				selectorCallMatches(inner, "cliframework", "HomeDir")
-		}
-		return false
-	case "nowTS":
-		return selectorCallMatches(call, "accounts", "Timestamp") &&
-			len(call.Args) == 1 && zeroArgSelectorCall(call.Args[0], "time", "Now")
-	case "accountIDFor":
-		return selectorCallMatches(call, "accounts", "AccountID") &&
-			identArgumentsMatch(call.Args, "providerID", "cred")
-	}
-
-	wantMethod := map[string]string{
-		"poolPath":     "PoolPath",
-		"loadPool":     "Load",
-		"savePool":     "Save",
-		"withPoolLock": "WithLock",
-	}[fn.Name.Name]
-	wantArgs := map[string][]string{
-		"poolPath":     {"name"},
-		"loadPool":     {"name", "providerID"},
-		"savePool":     {"name", "providerID", "pool"},
-		"withPoolLock": {"name", "fn"},
-	}[fn.Name.Name]
-	if wantMethod == "" {
-		return false
-	}
-	selector, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || selector.Sel.Name != wantMethod || !zeroArgIdentCall(selector.X, "accountStore") {
-		return false
-	}
-	return identArgumentsMatch(call.Args, wantArgs...)
-}
-
-func selectorCallMatches(call *ast.CallExpr, packageName, method string) bool {
-	selector, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok || selector.Sel.Name != method {
-		return false
-	}
-	pkg, ok := selector.X.(*ast.Ident)
-	return ok && pkg.Name == packageName
-}
-
-func zeroArgIdentCall(expr ast.Expr, name string) bool {
-	call, ok := expr.(*ast.CallExpr)
-	if !ok || len(call.Args) != 0 {
-		return false
-	}
-	ident, ok := call.Fun.(*ast.Ident)
-	return ok && ident.Name == name
-}
-
-func zeroArgSelectorCall(expr ast.Expr, packageName, method string) bool {
-	call, ok := expr.(*ast.CallExpr)
-	return ok && len(call.Args) == 0 && selectorCallMatches(call, packageName, method)
-}
-
-func identArgumentsMatch(args []ast.Expr, names ...string) bool {
-	if len(args) != len(names) {
-		return false
-	}
-	for i, arg := range args {
-		ident, ok := arg.(*ast.Ident)
-		if !ok || ident.Name != names[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // TestArchitectureBoundaryChecker is the positive control for the AST rules
 // above: the real checks pass vacuously when the tree is clean, so feed the
 // checkers synthetic sources that violate each rule (including the `q := w.p`
@@ -728,6 +632,33 @@ func (p *Proxy) mismatched() {
 	}
 	if executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "mismatched").Body, "targetExecutor", "Execute") {
 		t.Error("executor runtime binding accepted a different attempt")
+	}
+
+	// The threaded ParentOf projection must come from the SAME snapshot the
+	// attempt was built from (newTargetAttempt's first argument).
+	f, _ = parse(`type snapshotValue struct{ ParentOf int }
+type attemptValue struct{}
+func (attemptValue) Runtime() int { return 0 }
+type executorValue struct{}
+func (executorValue) Execute(attemptValue) {}
+func newTargetAttempt(snapshotValue) attemptValue { return attemptValue{} }
+func (p *Proxy) targetExecutor(int, int) executorValue { return executorValue{} }
+func (p *Proxy) sameSnapshot() {
+	runtime := snapshotValue{}
+	attempt := newTargetAttempt(runtime)
+	p.targetExecutor(attempt.Runtime(), runtime.ParentOf).Execute(attempt)
+}
+func (p *Proxy) crossSnapshot() {
+	runtime := snapshotValue{}
+	other := snapshotValue{}
+	attempt := newTargetAttempt(runtime)
+	p.targetExecutor(attempt.Runtime(), other.ParentOf).Execute(attempt)
+}`)
+	if !executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "sameSnapshot").Body, "targetExecutor", "Execute") {
+		t.Error("executor parent projection positive control rejected the attempt's own snapshot")
+	}
+	if executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "crossSnapshot").Body, "targetExecutor", "Execute") {
+		t.Error("executor parent projection accepted a different snapshot's ParentOf")
 	}
 
 	f, _ = parse(`func (p *Proxy) execute() {}
@@ -1280,14 +1211,6 @@ func identifierAliases(n ast.Node, root string) map[string]bool {
 	return aliases
 }
 
-func describeExprNodes(fset *token.FileSet, nodes []ast.Expr, what string) []string {
-	out := make([]string, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, describe(fset, n, what))
-	}
-	return out
-}
-
 // assignedFactoryValueExecuted follows the direct local dataflow used by the
 // production paths: an attempt returned by the assembly factory must be the
 // exact value passed to the executor. Merely having unrelated factory and
@@ -1332,13 +1255,37 @@ func assignedFactoryValueExecuted(n ast.Node, factory, receiverFactory, terminal
 }
 
 // executorRuntimeBoundToAttempt proves that the adapter factory is parameterized
-// by the same attempt's Runtime value that is passed to Execute:
+// by the same attempt's Runtime value that is passed to Execute — and, when the
+// pool parent projection is threaded for the wire-verdict 404 correction, that
+// the projection comes from the SAME RuntimeSnapshot the attempt was built
+// from:
 //
-//	p.targetExecutor(attempt.Runtime()).Execute(attempt)
+//	attempt := newTargetAttempt(runtime, …)
+//	p.targetExecutor(attempt.Runtime(), runtime.ParentOf).Execute(attempt)
 //
 // This prevents a caller from pairing one generation's typed attempt with
-// another generation's root State adapter.
+// another generation's root State adapter or parent projection.
 func executorRuntimeBoundToAttempt(n ast.Node, receiverFactory, terminal string) bool {
+	// Snapshot path (newTargetAttempt's first argument) each attempt identifier
+	// was built from.
+	snapshotOf := map[string]string{}
+	ast.Inspect(n, func(node ast.Node) bool {
+		assign, ok := node.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != len(assign.Rhs) {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			call, ok := rhs.(*ast.CallExpr)
+			if !ok || callableName(call.Fun) != "newTargetAttempt" || len(call.Args) == 0 {
+				continue
+			}
+			if lhs, ok := assign.Lhs[i].(*ast.Ident); ok {
+				snapshotOf[lhs.Name] = requestRoutingExprPath(call.Args[0])
+			}
+		}
+		return true
+	})
+
 	bound := false
 	ast.Inspect(n, func(node ast.Node) bool {
 		if bound {
@@ -1357,7 +1304,7 @@ func executorRuntimeBoundToAttempt(n ast.Node, receiverFactory, terminal string)
 			return true
 		}
 		factoryCall, ok := terminalSelector.X.(*ast.CallExpr)
-		if !ok || len(factoryCall.Args) != 1 {
+		if !ok || len(factoryCall.Args) < 1 || len(factoryCall.Args) > 2 {
 			return true
 		}
 		runtimeCall, ok := factoryCall.Args[0].(*ast.CallExpr)
@@ -1369,8 +1316,22 @@ func executorRuntimeBoundToAttempt(n ast.Node, receiverFactory, terminal string)
 			return true
 		}
 		runtimeAttempt, ok := runtimeSelector.X.(*ast.Ident)
-		bound = ok && runtimeAttempt.Name == attempt.Name
-		return !bound
+		if !ok || runtimeAttempt.Name != attempt.Name {
+			return true
+		}
+		if len(factoryCall.Args) == 2 {
+			// The parent projection must be the SAME snapshot's ParentOf.
+			parentOf, ok := factoryCall.Args[1].(*ast.SelectorExpr)
+			if !ok || parentOf.Sel.Name != "ParentOf" {
+				return true
+			}
+			snapshot := snapshotOf[attempt.Name]
+			if snapshot == "" || requestRoutingExprPath(parentOf.X) != snapshot {
+				return true
+			}
+		}
+		bound = true
+		return false
 	})
 	return bound
 }

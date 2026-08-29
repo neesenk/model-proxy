@@ -24,5 +24,9 @@ func newApplicationRuntime(cfg *configdomain.Config, args cliserve.Args) *applic
 type application = clicmd.Application
 
 func newApplication() *application {
+	// Forward the build-time -ldflags version stamp (main.version) to the app
+	// package so /api/status and `serve status` report the release version
+	// instead of the package default "dev".
+	appdomain.Version = version
 	return clicmd.NewApplication(serveAssembly{}.command)
 }

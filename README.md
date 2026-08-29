@@ -63,7 +63,7 @@ scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w
 
 ```yaml
 listen: 127.0.0.1:15721    # 默认回环；非回环需配置 web.auth（admin_token_file + api_keys_file），否则 validate 拒绝
-log_level: info
+log_level: info                # debug|info|warn|error 级别过滤（低于所配级别的日志被丢弃）；非法值启动报错；startup-only，改后需重启
 
 providers:
   aqp:

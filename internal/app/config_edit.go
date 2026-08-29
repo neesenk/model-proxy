@@ -13,7 +13,6 @@ import (
 // root web/test call sites stable while the web API migrates behind appapi.
 func loadConfigNode(path string) (*yaml.Node, error) { return configedit.LoadNode(path) }
 func mapNode(root *yaml.Node) *yaml.Node             { return configedit.MapNode(root) }
-func scalarNode(value string) *yaml.Node             { return configedit.ScalarNode(value) }
 func setScalar(root *yaml.Node, key, value string)   { configedit.SetScalar(root, key, value) }
 func childMap(root *yaml.Node, key string) *yaml.Node {
 	return configedit.ChildMap(root, key)

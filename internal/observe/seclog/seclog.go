@@ -10,7 +10,7 @@ package seclog
 
 import (
 	"fmt"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,7 +113,7 @@ func (l *Logger) Enqueue(record *Record) {
 	default:
 		n := atomic.AddUint64(&l.dropped, 1)
 		if n == 1 || n%1000 == 0 {
-			log.Printf("[seclog] queue full, dropped %d records total", n)
+			logx.Warnf("[seclog] queue full, dropped %d records total", n)
 		}
 	}
 }
@@ -142,11 +142,11 @@ func (l *Logger) Run() {
 	}
 	defer close(l.closed)
 	if err := os.MkdirAll(l.dir, dirMode); err != nil {
-		log.Printf("[seclog] mkdir %s: %v - logging disabled", l.dir, err)
+		logx.Warnf("[seclog] mkdir %s: %v - logging disabled", l.dir, err)
 		return
 	}
 	if err := os.Chmod(l.dir, dirMode); err != nil {
-		log.Printf("[seclog] chmod %s: %v - logging disabled", l.dir, err)
+		logx.Warnf("[seclog] chmod %s: %v - logging disabled", l.dir, err)
 		return
 	}
 	writer := &fileWriter{dir: l.dir, maxSize: l.maxBytes}
@@ -185,7 +185,7 @@ func (l *Logger) write(writer *fileWriter, record *Record, now time.Time) {
 	if err != nil {
 		n := atomic.AddUint64(&l.writeErrors, 1)
 		if n == 1 || n%1000 == 0 {
-			log.Printf("[seclog] write failed (lost %d records total): %v", n, err)
+			logx.Warnf("[seclog] write failed (lost %d records total): %v", n, err)
 		}
 	}
 }
@@ -199,7 +199,7 @@ func (l *Logger) sweep(now time.Time, activePath string) {
 	cutoff := now.Add(-l.retention)
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
-		log.Printf("[seclog] sweep readdir %s: %v", l.dir, err)
+		logx.Warnf("[seclog] sweep readdir %s: %v", l.dir, err)
 		return
 	}
 	for _, entry := range entries {
@@ -216,7 +216,7 @@ func (l *Logger) sweep(now time.Time, activePath string) {
 		}
 		if info.ModTime().Before(cutoff) {
 			if err := os.Remove(path); err != nil {
-				log.Printf("[seclog] sweep remove %s: %v", entry.Name(), err)
+				logx.Warnf("[seclog] sweep remove %s: %v", entry.Name(), err)
 			}
 		}
 	}

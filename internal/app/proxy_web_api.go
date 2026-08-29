@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	cliframework "model-proxy/internal/cli/framework"
 	clilogin "model-proxy/internal/cli/login"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -483,13 +483,13 @@ func (api *proxyWebAPI) reloadAfterMutation() string {
 	}
 	var applied *ReloadAppliedWarning
 	if errors.As(err, &applied) {
-		log.Printf(
+		logx.Warnf(
 			"[accounts] %v — credentials and runtime config are live, but runtime-state durability is degraded",
 			err,
 		)
 		return err.Error()
 	}
-	log.Printf(
+	logx.Warnf(
 		"[accounts] reload after mutation failed: %v — credentials persisted, but the runtime keeps the old set until config.yaml is fixed and reloaded",
 		err,
 	)

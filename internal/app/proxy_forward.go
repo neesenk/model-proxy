@@ -3,8 +3,8 @@ package app
 import (
 	"fmt"
 	"io"
-	"log"
 	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"strconv"
 	"strings"
@@ -434,7 +434,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		})
 		switch decision.Action {
 		case routing.FailureWait:
-			log.Printf("[proto=%s model=%s] all targets cooling down; retry %d/2 in %s", proto, exposed, round+1, decision.Wait.Round(time.Millisecond))
+			logx.Debugf("[proto=%s model=%s] all targets cooling down; retry %d/2 in %s", proto, exposed, round+1, decision.Wait.Round(time.Millisecond))
 			select {
 			case <-time.After(decision.Wait):
 				continue
@@ -447,7 +447,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		case routing.FailureRetryNow:
 			// TOCTOU: a target recovered between scheduling and this terminal
 			// check but was never tried in the failed pass.
-			log.Printf("[proto=%s model=%s] a cooled-down target recovered; retrying immediately (round %d/2)", proto, exposed, round+1)
+			logx.Debugf("[proto=%s model=%s] a cooled-down target recovered; retrying immediately (round %d/2)", proto, exposed, round+1)
 			continue
 		}
 		// Terminal: every target failed across all passes — classify and answer.
@@ -619,7 +619,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		if t.Provider == "fusion" && forcedProvider == "" {
 			recipe, ok := cfg.Fusion[t.Model]
 			if !ok {
-				log.Printf("[proto=%s model=%s] target %d: fusion recipe %q not defined, skipping", proto, exposed, ti, t.Model)
+				logx.Warnf("[proto=%s model=%s] target %d: fusion recipe %q not defined, skipping", proto, exposed, ti, t.Model)
 				continue
 			}
 			fc := fusionCtx{
@@ -636,14 +636,14 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 				return res // committed: response written to the client
 			}
 			res.sawHard = true // a failed fusion run is opaque → treat as hard
-			log.Printf("[proto=%s model=%s] target %d (fusion/%s) failed; trying next", proto, exposed, ti, t.Model)
+			logx.Warnf("[proto=%s model=%s] target %d (fusion/%s) failed; trying next", proto, exposed, ti, t.Model)
 			continue
 		}
 		plan, err := p.planTarget(targetPlanInput{
 			runtime: runtime, target: t, clientProto: proto, clientPath: upPath,
 		})
 		if err != nil {
-			log.Printf("[proto=%s model=%s] target %d: %v, skipping", proto, exposed, ti, err)
+			logx.Warnf("[proto=%s model=%s] target %d: %v, skipping", proto, exposed, ti, err)
 			continue
 		}
 
@@ -654,12 +654,12 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		if proto == "responses" && plan.BackendProtocol() != protocol.Responses && p.responsesState != nil {
 			expandedBody, history, hit, err := p.responsesState.Expand(body, sessionKey)
 			if err != nil {
-				log.Printf("[proto=%s model=%s] target %d (%s/%s) responses state expansion failed: %v — skipping",
+				logx.Warnf("[proto=%s model=%s] target %d (%s/%s) responses state expansion failed: %v — skipping",
 					proto, exposed, ti, t.Provider, t.Model, err)
 				continue
 			}
 			if protocol.PreviousResponseID(body) != "" && !hit {
-				log.Printf("[proto=%s model=%s] previous_response_id cache miss; repaired orphaned continuation items", proto, exposed)
+				logx.Infof("[proto=%s model=%s] previous_response_id cache miss; repaired orphaned continuation items", proto, exposed)
 			}
 			body = expandedBody
 			responsesHistory = history
@@ -670,7 +670,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 				if res.conversionErr == nil {
 					res.conversionErr = unsupported
 				}
-				log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s unsupported feature %s — trying another target",
+				logx.Warnf("[proto=%s model=%s] target %d (%s/%s) %s→%s unsupported feature %s — trying another target",
 					proto, exposed, ti, t.Provider, t.Model, proto, plan.BackendProtocol(), unsupported.Feature)
 				continue
 			}
@@ -678,7 +678,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 			// body to the backend (that ships an Anthropic body to an OpenAI
 			// endpoint, or vice versa). Skip this target and try the next; if
 			// none serve, the loop's all-targets-failed path returns a 502.
-			log.Printf("[proto=%s model=%s] target %d (%s/%s) %s→%s request convert failed: %v — skipping",
+			logx.Warnf("[proto=%s model=%s] target %d (%s/%s) %s→%s request convert failed: %v — skipping",
 				proto, exposed, ti, t.Provider, t.Model, proto, plan.BackendProtocol(), err)
 			continue
 		}
@@ -739,7 +739,7 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 				ContextRetry: ctxRetry,
 			},
 		)
-		result := p.targetExecutor(attempt.Runtime()).Execute(attempt)
+		result := p.targetExecutor(attempt.Runtime(), runtime.ParentOf).Execute(attempt)
 		res.tried[t.Provider] = true
 		switch result.Outcome {
 		case targetexec.OutcomeFailedHard:
@@ -768,12 +768,12 @@ func (p *Proxy) serveOnce(req serveRequest, st *serveState) serveResult {
 		}
 		if result.Retried != nil {
 			st.retriedForContext = true
-			log.Printf("[proto=%s model=%s] target %d (%s/%s) context overflow; retrying with larger-context targets", proto, exposed, ti, t.Provider, t.Model)
+			logx.Warnf("[proto=%s model=%s] target %d (%s/%s) context overflow; retrying with larger-context targets", proto, exposed, ti, t.Provider, t.Model)
 			ordered = result.Retried
 			ti = -1 // restart at the first replacement target (post-statement ti++ → 0)
 			continue
 		}
-		log.Printf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
+		logx.Warnf("[proto=%s model=%s] target %d (%s/%s) failed; trying next", proto, exposed, ti, t.Provider, t.Model)
 	}
 	// Record the target set actually considered this pass (post scheduling /
 	// request-aware narrowing / context retry) so forward's cooldown + TOCTOU

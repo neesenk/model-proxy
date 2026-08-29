@@ -16,24 +16,6 @@ type pinEntry struct {
 	expiresAt time.Time
 }
 
-// active reports whether the pin is still in effect at now (zero expiresAt =
-// never expires).
-func (e pinEntry) active(now time.Time) bool {
-	return e.expiresAt.IsZero() || now.Before(e.expiresAt)
-}
-
-// expiresLabel returns "" (no expiry), a "expires <relative>" hint, or "expired".
-func (e pinEntry) expiresLabel(now time.Time) string {
-	if e.expiresAt.IsZero() {
-		return ""
-	}
-	d := e.expiresAt.Sub(now)
-	if d <= 0 {
-		return "expired"
-	}
-	return "expires in " + d.Round(time.Second).String()
-}
-
 func configuredBillingOverride(value string) provider.BillingClass {
 	if value == "pay-as-you-go" {
 		return provider.BillingPayG

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -248,21 +247,13 @@ func ExchangeCodeForTokensContext(ctx context.Context, opts *CodexLoginServerOpt
 	return af, nil
 }
 
-// cmdCodexLogin runs the codex OAuth device flow and stores the resulting
-// tokens. provName is the config top-level key (NOT the provider_id "codex"),
-// so credentials land in <provName>_oauth_auth.json — the same path the forward
-// path / web UI / logout read. A renamed instance (e.g. "codex-work") thus
-// writes codex-work_oauth_auth.json, not codex_oauth_auth.json.
-func CmdCodexLogin(provName string) {
-	authFile := oauthAuthFilePath(HomeDir(), provName)
-	if err := runCodexLoginFlow(authFile); err != nil {
-		log.Fatal(err)
-	}
-}
-
 // runCodexLoginFlow performs the interactive device flow and persists tokens
 // to authFile. Errors are returned (no process exit), so non-CLI orchestrators
-// (the `add` command) can drive the same flow.
+// (the `add` command) can drive the same flow. The caller derives authFile from
+// the config top-level key (NOT the provider_id "codex") via oauthAuthFilePath,
+// so credentials land in <provName>_oauth_auth.json — the same path the forward
+// path / web UI / logout read (a renamed instance like "codex-work" writes
+// codex-work_oauth_auth.json).
 func runCodexLoginFlow(authFile string) error {
 	opts := &CodexLoginServerOptions{}
 	opts.Defaults()

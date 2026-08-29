@@ -1,7 +1,6 @@
 package web
 
 import (
-	"fmt"
 	"model-proxy/internal/appapi"
 	"net/http"
 	"strconv"
@@ -367,8 +366,4 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"yaml": d.YAML, "summary": d.Summary, "provider_models": d.ProviderModels, "routes": d.Routes})
-}
-
-func (s *Server) unavailable(w http.ResponseWriter, what string) {
-	writeJSONErr(w, http.StatusServiceUnavailable, fmt.Sprintf("%s is unavailable", what))
 }

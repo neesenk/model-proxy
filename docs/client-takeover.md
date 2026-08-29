@@ -4,7 +4,7 @@
 
 修改 `takeover` / `restore`、客户端配置路径、provider_id 或 baseURL 生成时必读。
 
-实现归属：备份/改写/恢复与四个客户端的 rewrite 归 `internal/takeover`
+实现归属：备份/改写/恢复与五个客户端的 rewrite 归 `internal/takeover`
 （`RunTakeover` / `RunRestore` / `ListClients` / `BackupDir`）；`internal/cli`
 （`commands.go` 的 `RunTakeover` / `RunRestore` / `takeoverFacts`）
 只解析参数、加载 config 并用 `takeoverFacts` 注入 implicit routes 与 models.dev
@@ -12,6 +12,7 @@
 
 | 客户端 | baseURL 格式 | 关键差异 |
 |---|---|---|
+| claude | `http://<proxy>`（不带 `/v1`） | `~/.claude/settings.json` 写 `env.ANTHROPIC_BASE_URL` + `env.ANTHROPIC_AUTH_TOKEN: "PROXY_MANAGED"` 占位；Claude Code 自拼 `/v1/messages` |
 | opencode | `http://<proxy>/v1` | `@ai-sdk/anthropic` 拼接 `baseURL + /messages` |
 | pi | `http://<proxy>` | pi 自行拼 `/v1/messages`，baseURL 不能再带 `/v1` |
 | codex | 按 Responses API 客户端配置 | 不经过 Chat Completions 协议转换 |

@@ -182,8 +182,8 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 				t.Errorf("%s must pass exactly (cfg, built.Eligible), matches = %d", owner, got)
 			}
 			for _, forbidden := range []string{
-				"LoggedInProviders", "loggedInProviders",
-				"SynthesizeImplicitRoutes", "synthesizeImplicitRoutes",
+				"LoggedInProviders",
+				"SynthesizeImplicitRoutes",
 			} {
 				if got := namedCallCountInNode(body, forbidden); got != 0 {
 					t.Errorf("%s calls %s %d time(s), re-reading account eligibility", owner, forbidden, got)
@@ -249,7 +249,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 
 		adapter, _ := parseGoFile(t, "internal/app/request_log_adapter.go")
 		wantImports := map[string]bool{
-			"log": true,
+			"model-proxy/internal/observe/logx":       true,
 			"model-proxy/internal/observe/requestlog": true,
 		}
 		wantFunctions := map[string]int{

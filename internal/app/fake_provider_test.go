@@ -1,7 +1,6 @@
 package app
 
 import (
-	"io"
 	"net/http"
 	"sync"
 
@@ -40,9 +39,3 @@ func (f *fakeProviderImpl) ProbeRequest(modelID string) provider.ProbeRequest {
 }
 func (f *fakeProviderImpl) ExtraHeaders(req *http.Request, path string)          {}
 func (f *fakeProviderImpl) FilterModelIDs(ids []string) (kept, dropped []string) { return ids, nil }
-
-// readAll is a tiny test helper (io.ReadAll without the import noise at call sites).
-func readAll(r io.Reader) []byte {
-	b, _ := io.ReadAll(r)
-	return b
-}

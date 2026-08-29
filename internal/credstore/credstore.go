@@ -313,9 +313,8 @@ func backupMigrated(path string) {
 }
 
 // AtomicWriteFile writes via a unique temp file in the target directory plus
-// fsync and rename. Mirrors provider.persist.atomicWriteFile (which cannot be
-// imported here — provider depends on credstore, not the reverse). OAuth/SSO
-// stores are rewritten with ROTATED tokens mid-flight: a crash during a direct
+// fsync and rename. OAuth/SSO stores are rewritten with ROTATED tokens
+// mid-flight: a crash during a direct
 // write leaves a truncated file whose old refresh token is already invalidated
 // upstream and whose new token was never persisted — the account locks until a
 // full re-login (docs/engineering/pitfalls.md #18). Exported for the accounts

@@ -2,8 +2,8 @@ package app
 
 import (
 	"io"
-	"log"
 	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/provider"
 	"strconv"
@@ -17,8 +17,14 @@ import (
 )
 
 // proxyHealthGate adapts the root Proxy to targetexec.HealthGate (the narrow
-// scheduling capability used by GateState).
-type proxyHealthGate struct{ proxy *Proxy }
+// scheduling capability used by GateState). parentOf is the request snapshot's
+// pool-virtual→parent projection (RuntimeSnapshot.ParentOf, immutable): the
+// wire-verdict 404 correction resolves the parent from it instead of
+// re-reading reload-owned state on the request path.
+type proxyHealthGate struct {
+	proxy    *Proxy
+	parentOf map[string]string
+}
 
 func (g proxyHealthGate) ModelLocked(provider, model string, now time.Time) bool {
 	return g.proxy.modelLocked(provider, model, now)
@@ -48,14 +54,25 @@ func (g proxyHealthGate) ApplyParamBlock(provider, model string, body []byte) []
 	return g.proxy.applyParamBlock(provider, model, body)
 }
 func (g proxyHealthGate) NoteWireResponsesMiss(provider string) {
-	g.proxy.noteWireResponsesMiss(provider)
+	// Resolve the pool parent from the REQUEST SNAPSHOT projection (nil-safe),
+	// not from live p.parentOf: a pre-reload in-flight request must record the
+	// verdict under its own generation's parent name.
+	parent := provider
+	if par, ok := g.parentOf[provider]; ok {
+		parent = par
+	}
+	g.proxy.noteWireResponsesMiss(parent)
 }
 
 // targetExecutionEffects maps semantic target-execution observations to the
 // application-owned metrics, logging, token, agent, request-log and live-event
 // stores. The internal package sees only the targetexec.Effects port.
+// generation is the request snapshot's runtime generation: quality samples
+// recorded here are generation-gated like the error-rate samples, so a
+// pre-reload in-flight commit cannot write into the new generation's state.
 type targetExecutionEffects struct {
-	proxy *Proxy
+	proxy      *Proxy
+	generation uint64
 }
 
 var _ targetexec.Effects = targetExecutionEffects{}
@@ -81,7 +98,7 @@ func (effects targetExecutionEffects) RateLimited(target configdomain.RouteTarge
 }
 
 func (effects targetExecutionEffects) LogAttempt(attempt targetexec.AttemptDTO) {
-	log.Printf(
+	logx.Infof(
 		"[proto=%s provider=%s] %s %s model=%s→%s status=%s %dms bytes=%d",
 		attempt.Protocol,
 		attempt.Target.Provider,
@@ -157,6 +174,7 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 		effects.proxy.recordAttemptQuality(
 			target.Provider,
 			time.Duration(attempt.TTFTMilliseconds)*time.Millisecond,
+			effects.generation,
 		)
 	}
 	if effects.proxy.metrics != nil {
@@ -196,15 +214,19 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 	}
 }
 
-func (p *Proxy) targetExecutor(runtime targetexec.Runtime) targetexec.Executor {
+// targetExecutor assembles the per-attempt executor. parentOf is the request
+// snapshot's pool-virtual→parent projection (RuntimeSnapshot.ParentOf): it is
+// threaded into the health gate so the wire-verdict 404 correction stays on
+// the request's own generation (single-snapshot red line).
+func (p *Proxy) targetExecutor(runtime targetexec.Runtime, parentOf map[string]string) targetexec.Executor {
 	return targetexec.Executor{
 		Client: p.client,
 		State: targetexec.GateState{
-			Gate:       proxyHealthGate{proxy: p},
+			Gate:       proxyHealthGate{proxy: p, parentOf: parentOf},
 			Runtime:    runtime,
 			Scheduling: runtime.Scheduling,
 		},
-		Effects:   targetExecutionEffects{proxy: p},
+		Effects:   targetExecutionEffects{proxy: p, generation: runtime.Generation},
 		Responses: p.responsesState,
 	}
 }

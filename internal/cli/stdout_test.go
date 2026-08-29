@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
 	"model-proxy/internal/provider"
 	"testing"
@@ -56,11 +57,11 @@ func writePoolFile(t *testing.T, name, providerID string, keys ...string) {
 	pool := app.CredentialPool{Version: 1}
 	for _, key := range keys {
 		pool.Accounts = append(pool.Accounts, app.PoolAccount{
-			ID:    app.AccountIDFor(providerID, app.AccountCred{APIKey: key}),
+			ID:    accounts.AccountID(providerID, app.AccountCred{APIKey: key}),
 			Label: key, APIKey: key, AddedAt: "2026-07-08",
 		})
 	}
-	if err := app.SavePool(name, providerID, pool); err != nil {
+	if err := app.AccountStore().Save(name, providerID, pool); err != nil {
 		t.Fatal(err)
 	}
 }

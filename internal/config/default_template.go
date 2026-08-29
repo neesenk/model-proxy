@@ -218,8 +218,9 @@ takeover:
 #   max_body_bytes: 5242880             # 5MB cap per body (truncates past it)
 #   retention: 720h                     # 30d; delete rotated files older than this; 0 = forever
 
-# Web admin UI + JSON API (/ui/ + /api/). Enabled by default; no auth, so listen
-# must stay loopback (enforced at startup). Uncomment to disable:
+# Web admin UI + JSON API (/ui/ + /api/). Enabled by default. Without the
+# optional auth block below, listen must stay loopback (enforced at startup);
+# configuring both auth files allows a non-loopback listen. Uncomment to disable:
 # web:
 #   enabled: false
 #   # S2 可选鉴权（默认全部不配 = 回环免鉴权历史行为）。

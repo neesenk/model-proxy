@@ -1,7 +1,7 @@
 package requestlog
 
 import (
-	"log"
+	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,9 +64,9 @@ func (l *Logger) Enqueue(record *Record) {
 		n := atomic.AddUint64(&l.dropped, 1)
 		if n == 1 || n%1000 == 0 {
 			if atomic.LoadUint32(&l.dead) == 1 {
-				log.Printf("[request_log] logger is dead (setup failed); dropped %d records total", n)
+				logx.Warnf("[request_log] logger is dead (setup failed); dropped %d records total", n)
 			} else {
-				log.Printf("[request_log] channel full, dropped %d records total", n)
+				logx.Warnf("[request_log] channel full, dropped %d records total", n)
 			}
 		}
 	}
@@ -80,12 +80,12 @@ func (l *Logger) Run() {
 	}
 	defer close(l.closed)
 	if err := os.MkdirAll(l.dir, 0o700); err != nil {
-		log.Printf("[request_log] mkdir %s: %v - logging disabled", l.dir, err)
+		logx.Warnf("[request_log] mkdir %s: %v - logging disabled", l.dir, err)
 		atomic.StoreUint32(&l.dead, 1)
 		return
 	}
 	if err := os.Chmod(l.dir, 0o700); err != nil {
-		log.Printf("[request_log] chmod %s: %v - logging disabled", l.dir, err)
+		logx.Warnf("[request_log] chmod %s: %v - logging disabled", l.dir, err)
 		atomic.StoreUint32(&l.dead, 1)
 		return
 	}
@@ -128,7 +128,7 @@ func (l *Logger) write(writer *fileWriter, record *Record, now time.Time) {
 	if err != nil {
 		n := atomic.AddUint64(&l.writeErrors, 1)
 		if n == 1 || n%1000 == 0 {
-			log.Printf("[request_log] write failed (lost %d records total): %v", n, err)
+			logx.Warnf("[request_log] write failed (lost %d records total): %v", n, err)
 		}
 	}
 }
@@ -140,7 +140,7 @@ func (l *Logger) sweep(now time.Time, activePath string) {
 	cutoff := now.Add(-l.retention)
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
-		log.Printf("[request_log] sweep readdir %s: %v", l.dir, err)
+		logx.Warnf("[request_log] sweep readdir %s: %v", l.dir, err)
 		return
 	}
 	for _, entry := range entries {
@@ -161,7 +161,7 @@ func (l *Logger) sweep(now time.Time, activePath string) {
 		}
 		if info.ModTime().Before(cutoff) {
 			if err := os.Remove(path); err != nil {
-				log.Printf("[request_log] sweep remove %s: %v", name, err)
+				logx.Warnf("[request_log] sweep remove %s: %v", name, err)
 			}
 		}
 	}

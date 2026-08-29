@@ -28,29 +28,3 @@ package guard
 
 // RedactPlaceholder replaces every matched secret in the redacted body.
 const RedactPlaceholder = "[REDACTED]"
-
-// defaultScanner backs the package-level Scan/Redact: the embedded rule table
-// only, without known secrets, custom patterns, or extra paths.
-var defaultScanner = mustDefaultScanner()
-
-func mustDefaultScanner() *Scanner {
-	s, err := NewScanner(nil, nil, nil)
-	if err != nil {
-		panic(err) // impossible: no custom input to reject
-	}
-	return s
-}
-
-// Scan returns the deduplicated type names of the secret patterns found in
-// body, in rule-table order (an sk-ant- key reports anthropic_api_key only,
-// not also the looser openai_api_key shape). An empty result means the body
-// is clean (as far as this high-confidence table can tell).
-func Scan(body []byte) []string {
-	return defaultScanner.Scan(body)
-}
-
-// Redact returns body with every matched secret replaced by
-// RedactPlaceholder. A clean body is returned unchanged.
-func Redact(body []byte) []byte {
-	return defaultScanner.Redact(body)
-}

@@ -12,5 +12,7 @@ func newStandaloneQuotaTracker(
 	cfg func() *Config,
 	provs func() map[string]provider.Provider,
 ) *runtime.QuotaTracker {
-	return runtime.NewQuotaTracker(path, cfg, provs, runtime.NewManager(0))
+	manager := &runtime.Manager{}
+	manager.ReplaceGeneration(0)
+	return runtime.NewQuotaTracker(path, cfg, provs, manager)
 }

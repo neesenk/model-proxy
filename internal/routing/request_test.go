@@ -44,45 +44,45 @@ func TestModelFitsRequest(t *testing.T) {
 	big := []byte(`{"input":"` + strings.Repeat("qwxz!", 8000) + `"}`)
 	tools := []byte(`{"messages":[{"content":"hi"}],"tools":[{"name":"f"}]}`)
 
-	if !FitsRequest(cat, "text", text) {
+	if !Fits(cat, nil, "text", ProfileRequest(text)) {
 		t.Error("text model + text request should fit")
 	}
-	if FitsRequest(cat, "text", image) {
+	if Fits(cat, nil, "text", ProfileRequest(image)) {
 		t.Error("text model + image request should NOT fit")
 	}
-	if FitsRequest(cat, "text", big) {
+	if Fits(cat, nil, "text", ProfileRequest(big)) {
 		t.Error("text model + big request should NOT fit (exceeds 8000)")
 	}
-	if !FitsRequest(cat, "vision", image) {
+	if !Fits(cat, nil, "vision", ProfileRequest(image)) {
 		t.Error("vision model + image request should fit")
 	}
-	if FitsRequest(cat, "vision", big) {
+	if Fits(cat, nil, "vision", ProfileRequest(big)) {
 		t.Error("vision model + big request should NOT fit (exceeds 8000)")
 	}
-	if !FitsRequest(cat, "big", big) {
+	if !Fits(cat, nil, "big", ProfileRequest(big)) {
 		t.Error("big model + big request should fit")
 	}
-	if !FitsRequest(cat, "vision", tools) {
+	if !Fits(cat, nil, "vision", ProfileRequest(tools)) {
 		t.Error("tools-capable model + tools request should fit")
 	}
-	if FitsRequest(cat, "text", tools) {
+	if Fits(cat, nil, "text", ProfileRequest(tools)) {
 		t.Error("tool-blind model + tools request should NOT fit")
 	}
-	if FitsRequest(cat, "unknown", tools) {
+	if Fits(cat, nil, "unknown", ProfileRequest(tools)) {
 		t.Error("unknown model + tools request should NOT fit")
 	}
 
 	exact := []byte(`{"input":"` + strings.Repeat("qwxz!", 6398) + `"}`)
-	if !FitsRequest(cat, "text", exact) {
+	if !Fits(cat, nil, "text", ProfileRequest(exact)) {
 		t.Error("est == context window should fit")
 	}
-	if !FitsRequest(nil, "anything", image) {
+	if !Fits(nil, nil, "anything", ProfileRequest(image)) {
 		t.Error("nil catalog should fit")
 	}
-	if FitsRequest(cat, "unknown", image) {
+	if Fits(cat, nil, "unknown", ProfileRequest(image)) {
 		t.Error("unknown model + image should NOT fit")
 	}
-	if !FitsRequest(cat, "unknown", big) {
+	if !Fits(cat, nil, "unknown", ProfileRequest(big)) {
 		t.Error("unknown model + unknown context should fit")
 	}
 }
@@ -326,7 +326,7 @@ func TestPlannerApply(t *testing.T) {
 		scheduler := &recordingScheduler{}
 		ordered := []configdomain.RouteTarget{text}
 		planner := NewPlanner(PlannerInput{Scheduler: scheduler})
-		got := planner.Apply("route", "session", ordered, imageBody)
+		got := planner.ApplyWithProfile("route", "session", ordered, ProfileRequest(imageBody))
 		if !reflect.DeepEqual(got, ordered) || len(scheduler.calls) != 0 {
 			t.Fatalf("got=%+v calls=%+v, want original and no scheduling", got, scheduler.calls)
 		}
@@ -335,11 +335,11 @@ func TestPlannerApply(t *testing.T) {
 	t.Run("partial in-route match preserves order without scheduling", func(t *testing.T) {
 		scheduler := &recordingScheduler{}
 		planner := NewPlanner(PlannerInput{Catalog: cat, Scheduler: scheduler})
-		got := planner.Apply(
+		got := planner.ApplyWithProfile(
 			"route",
 			"session",
 			[]configdomain.RouteTarget{text, vision},
-			imageBody,
+			ProfileRequest(imageBody),
 		)
 		if !reflect.DeepEqual(got, []configdomain.RouteTarget{vision}) {
 			t.Fatalf("filtered = %+v, want vision only", got)
@@ -352,11 +352,11 @@ func TestPlannerApply(t *testing.T) {
 	t.Run("fusion always fits", func(t *testing.T) {
 		scheduler := &recordingScheduler{}
 		planner := NewPlanner(PlannerInput{Catalog: cat, Scheduler: scheduler})
-		got := planner.Apply(
+		got := planner.ApplyWithProfile(
 			"route",
 			"session",
 			[]configdomain.RouteTarget{text, fusion},
-			imageBody,
+			ProfileRequest(imageBody),
 		)
 		if !reflect.DeepEqual(got, []configdomain.RouteTarget{fusion}) {
 			t.Fatalf("filtered = %+v, want fusion only", got)
@@ -377,7 +377,7 @@ func TestPlannerApply(t *testing.T) {
 			},
 			Scheduler: scheduler,
 		})
-		got := planner.Apply("public", "session-1", []configdomain.RouteTarget{text}, imageBody)
+		got := planner.ApplyWithProfile("public", "session-1", []configdomain.RouteTarget{text}, ProfileRequest(imageBody))
 		if !reflect.DeepEqual(got, []configdomain.RouteTarget{vision}) {
 			t.Fatalf("scheduled = %+v, want vision", got)
 		}
@@ -401,7 +401,7 @@ func TestPlannerApply(t *testing.T) {
 			ExpandedRoutes: map[string][]configdomain.RouteTarget{"vision": {vision}},
 			Scheduler:      scheduler,
 		})
-		got := planner.Apply("public", "", ordered, imageBody)
+		got := planner.ApplyWithProfile("public", "", ordered, ProfileRequest(imageBody))
 		if !reflect.DeepEqual(got, ordered) {
 			t.Fatalf("empty fallback = %+v, want original %+v", got, ordered)
 		}
@@ -440,7 +440,7 @@ func TestPlannerContextOverflowRetry(t *testing.T) {
 		},
 		Scheduler: scheduler,
 	})
-	got := planner.ContextOverflowRetry("public", "session-2", []configdomain.RouteTarget{small}, imageBody)
+	got := planner.ContextOverflowRetryWithProfile("public", "session-2", []configdomain.RouteTarget{small}, ProfileRequest(imageBody))
 	if !reflect.DeepEqual(got, []configdomain.RouteTarget{large}) {
 		t.Fatalf("retry = %+v, want large", got)
 	}
@@ -456,11 +456,11 @@ func TestPlannerContextOverflowRetry(t *testing.T) {
 	}
 
 	scheduler.calls = nil
-	got = planner.ContextOverflowRetry(
+	got = planner.ContextOverflowRetryWithProfile(
 		"public",
 		"session-2",
 		[]configdomain.RouteTarget{{Provider: "missing", Model: "missing"}},
-		imageBody,
+		ProfileRequest(imageBody),
 	)
 	if got != nil || len(scheduler.calls) != 0 {
 		t.Fatalf("unknown tried context: got=%+v calls=%+v, want nil/no call", got, scheduler.calls)

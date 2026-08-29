@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"model-proxy/internal/accounts"
 )
 
 // TestForward_AnthropicToResponses_NonStream: an Anthropic client hitting a
@@ -196,8 +198,8 @@ func TestForward_PooledResponsesConversionStreamsTerminalUsage(t *testing.T) {
 	}
 	selectedVirtual := virtuals[0]
 	keyForVirtual := map[string]string{
-		"zhipu#" + AccountIDFor("zhipu", AccountCred{APIKey: "KEY-A"}): "KEY-A",
-		"zhipu#" + AccountIDFor("zhipu", AccountCred{APIKey: "KEY-B"}): "KEY-B",
+		"zhipu#" + accounts.AccountID("zhipu", AccountCred{APIKey: "KEY-A"}): "KEY-A",
+		"zhipu#" + accounts.AccountID("zhipu", AccountCred{APIKey: "KEY-B"}): "KEY-B",
 	}
 	selectedKey, ok := keyForVirtual[selectedVirtual]
 	if !ok {

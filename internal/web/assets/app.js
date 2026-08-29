@@ -1321,8 +1321,10 @@ let yamlSavedText = '';
 // effect after a daemon restart. Code facts: the request_log logger and the
 // stats store are built once at startup (web-api.md request-log section,
 // internal/app/stats_runtime.go initStats), quota_poll_interval is frozen into
-// the tracker ticker at Start (pitfalls #29), and listen/log/web bind into the
-// process at boot. Keep in sync with docs/engineering/pitfalls.md.
+// the tracker ticker at Start (pitfalls #29), the budgets watcher binds its
+// config snapshot at startup (internal/app/budget_watch.go startBudgetWatcher),
+// and listen/log/web bind into the process at boot. Keep in sync with
+// docs/engineering/pitfalls.md.
 const RESTART_KEYS = [
   { path: ['listen'], label: 'listen' },
   { path: ['log_level'], label: 'log_level' },
@@ -1331,6 +1333,7 @@ const RESTART_KEYS = [
   { path: ['request_log'], label: 'request_log.*' },
   { path: ['stats', 'db_path'], label: 'stats.db_path' },
   { path: ['stats', 'retention'], label: 'stats.retention' },
+  { path: ['budgets'], label: 'budgets' },
   { path: ['scheduling', 'quota_poll_interval'], label: 'scheduling.quota_poll_interval' },
 ];
 

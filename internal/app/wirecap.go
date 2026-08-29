@@ -28,7 +28,7 @@
 package app
 
 import (
-	"log"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"sync"
 	"time"
@@ -168,7 +168,7 @@ func (p *Proxy) probeAllWireCaps() {
 				ProbedAt:  time.Now(),
 			}
 			p.setWireCaps(name, caps)
-			log.Printf("[wirecap] provider %s probed: responses=%s anthropic=%s", name, caps.Responses, caps.Anthropic)
+			logx.Debugf("[wirecap] provider %s probed: responses=%s anthropic=%s", name, caps.Responses, caps.Anthropic)
 		}(name, provCfg, impl)
 	}
 	wg.Wait()
@@ -205,7 +205,7 @@ func (p *Proxy) persistWireCaps() {
 			return
 		}
 		if err := p.quota.Persist(); err != nil {
-			log.Printf("[wirecap] persist failed: %v", err)
+			logx.Warnf("[wirecap] persist failed: %v", err)
 		}
 	})
 }
@@ -215,18 +215,13 @@ func (p *Proxy) persistWireCaps() {
 // the route doesn't exist (stale verdict, or a per-model gateway). This is
 // OUR protocol-choice miss, not a missing model, so tryTarget skips
 // recordModelFailure for it; subsequent requests fall back to chat.
-func (p *Proxy) noteWireResponsesMiss(name string) {
-	// Verdicts are keyed by parent name; a pool virtual shares the parent's
-	// base URL. parentOf is reload-guarded (p.mu); grab the reference first —
-	// reload swaps maps, never mutates them in place (same pattern as
-	// resetHealth). tryTarget callers do NOT hold p.mu here.
-	p.mu.RLock()
-	parentOf := p.parentOf
-	p.mu.RUnlock()
-	parent := name
-	if par, ok := parentOf[name]; ok {
-		parent = par
-	}
+//
+// Verdicts are keyed by parent name; a pool virtual shares the parent's base
+// URL. `parent` is the ALREADY-RESOLVED parent name: callers project it from
+// their request snapshot (RuntimeSnapshot.ParentOf, nil-safe) so a pre-reload
+// in-flight request records the verdict under ITS generation's parent instead
+// of re-reading reload-owned state here (single-snapshot red line).
+func (p *Proxy) noteWireResponsesMiss(parent string) {
 	p.wireCaps.MarkResponsesUnsupported(parent, time.Now())
 	p.persistWireCaps()
 }

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	cliframework "model-proxy/internal/cli/framework"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -446,7 +446,7 @@ func BenchmarkAuthInject_AQP_ColdMint(b *testing.B) {
 	dir := b.TempDir()
 	cookiePath := dir + "/cookie.json"
 	cookieFile := `{"sso_session_cookie":"SSO_C=fake"}`
-	if err := cliframework.WriteFile(cookiePath, []byte(cookieFile), 0o600); err != nil {
+	if err := os.WriteFile(cookiePath, []byte(cookieFile), 0o600); err != nil {
 		b.Fatal(err)
 	}
 	p := provider.NewAqpKeyProvider(mint.URL, cookiePath)
@@ -472,7 +472,7 @@ func BenchmarkAuthInject_AQP_Cached(b *testing.B) {
 	dir := b.TempDir()
 	cookiePath := dir + "/cookie.json"
 	cookieFile := `{"sso_session_cookie":"SSO_C=fake"}`
-	if err := cliframework.WriteFile(cookiePath, []byte(cookieFile), 0o600); err != nil {
+	if err := os.WriteFile(cookiePath, []byte(cookieFile), 0o600); err != nil {
 		b.Fatal(err)
 	}
 	p := provider.NewAqpKeyProvider(mint.URL, cookiePath)

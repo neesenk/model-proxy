@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	cliframework "model-proxy/internal/cli/framework"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -58,15 +58,6 @@ func NewAqpClient(storePath string) *AqpClient {
 		StorePath: storePath,
 		Base:      provider.AqpBase,
 	}
-}
-
-// newAqpClientWithBase builds an AQP client pointing at an arbitrary base URL.
-// Used by the web login flow's test seam (httptest mock); production callers use
-// newAqpClient (base = provider.AqpBase, identical to pre-seam behavior).
-func NewAqpClientWithBase(storePath, base string) *AqpClient {
-	c := NewAqpClient(storePath)
-	c.Base = base
-	return c
 }
 
 // cookieHeader moved to the provider package (provider.CookieHeader).
@@ -364,4 +355,4 @@ func ExtractLoginURL(body string) string {
 
 // ---- helpers ----
 
-func logf(format string, args ...any) { log.Printf(format, args...) }
+func logf(format string, args ...any) { logx.Infof(format, args...) }

@@ -32,12 +32,6 @@ type Manager struct {
 	quality atomic.Pointer[map[string]providerQuality]
 }
 
-func NewManager(generation uint64) *Manager {
-	m := &Manager{generation: generation}
-	m.ensureLocked()
-	return m
-}
-
 func (m *Manager) ensureLocked() {
 	if m.health == nil {
 		m.health = make(map[string]*providerHealth)

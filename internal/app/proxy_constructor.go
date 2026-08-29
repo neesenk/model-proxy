@@ -2,9 +2,9 @@ package app
 
 import (
 	"fmt"
-	"log"
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/observe/counters"
+	"model-proxy/internal/observe/logx"
 	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"os"
@@ -42,7 +42,7 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// MP_CRED_STORE overriding only the OAuth side gets one visible line.
 	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
 	if note := accounts.CredentialMismatchNote(cfg.Credentials); note != "" {
-		log.Printf("[startup] ⚠ %s", note)
+		logx.Warnf("[startup] ⚠ %s", note)
 	}
 	built := BuildProviders(cfg, AccountStore(), buildOpts())
 	// Same scanner entry point as Reload: startup and reload build identical
@@ -51,7 +51,7 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// embedded table + known secrets rather than start without any guard.
 	guardScanner, err := buildGuardScanner(cfg, built.Secrets)
 	if err != nil {
-		log.Printf("[startup] guard scanner: %v; falling back to built-in rules + known secrets", err)
+		logx.Warnf("[startup] guard scanner: %v; falling back to built-in rules + known secrets", err)
 		secrets := built.Secrets
 		if !cfg.Guard.KnownSecretsEnabled() {
 			secrets = nil
@@ -62,7 +62,7 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 		// a scanner we no longer trust; the warning makes the loss loud.
 		guardScanner, err = guard.NewScannerWithOptions(nil, secrets, cfg.Guard.ExtraPaths, guard.Options{Decode: cfg.Guard.DecodeEnabled()})
 		if err != nil {
-			log.Printf("[startup] guard fallback scanner failed: %v; outbound guard scanning is DISABLED for this process", err)
+			logx.Warnf("[startup] guard fallback scanner failed: %v; outbound guard scanning is DISABLED for this process", err)
 			guardScanner = nil
 		}
 	}
@@ -107,7 +107,7 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	if hw := ConfigRoutingWarnings(cfg, p.expandedRoutes); len(hw) > 0 {
 		p.routeWarnings = append(p.routeWarnings, hw...)
 		for _, w := range hw {
-			log.Printf("[startup] ⚠ %s", w)
+			logx.Warnf("[startup] ⚠ %s", w)
 		}
 	}
 	// The tracker reads cfg/providers asynchronously via the snapshot closures

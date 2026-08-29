@@ -71,19 +71,6 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.Handle("/metrics", http.HandlerFunc(s.handleMetrics))
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch {
-	case r.URL.Path == "/metrics":
-		s.handleMetrics(w, r)
-	case strings.HasPrefix(r.URL.Path, "/ui/"):
-		s.serveUI(w, r)
-	case strings.HasPrefix(r.URL.Path, "/api/"):
-		s.serveAPI(w, r)
-	default:
-		http.NotFound(w, r)
-	}
-}
-
 // Start begins transport-owned maintenance. It returns false after Close.
 func (s *Server) Start() bool {
 	return s.tasks.Run(func(ctx context.Context) {

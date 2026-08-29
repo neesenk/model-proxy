@@ -27,11 +27,13 @@ kimi-code 根据 Duration 自动选择最长窗口；zhipu 通过 unit 映射 5h
 它以一把 mutex 统一持有 generation、provider health、route/session sticky、
 operator pin、model lock、model-scoped paramBlock、pool spread counter 和 quota
 snapshot，并在同一临界区内完成 schedule、cooldown、resolver health gate、
-persistence snapshot 与 Web dashboard snapshot。所有复合 snapshot 都是 detached
+persistence snapshot 与 Web dashboard snapshot；quality 子状态（EWMA errRate/TTFT）
+经 `atomic.Pointer` copy-on-write 发布，写入持锁、读取免锁（见下文「Quality 打分」）。
+所有复合 snapshot 都是 detached
 copy；调用方不得保留或修改 Manager 内部 map/slice。
 
 Manager 只依赖 `provider` 的 quota 值类型。Config 适配、HTTP、状态文件编码、
-Web DTO 映射和 lifecycle 都留在根包；Manager 持锁时不得回调这些外部职责。
+Web DTO 映射和 lifecycle 都留在应用层（`internal/app`）；Manager 持锁时不得回调这些外部职责。
 
 `quotaTracker` 默认每 5 分钟并行轮询，负责 provider `Quota()` 调用、manual/429
 refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` 的文件
@@ -45,7 +47,7 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 - model locks；
 - model-scoped paramBlock；
 - config fingerprint；
-- 顶层 `wire_caps`：wire 探测 verdict（`{base_url, responses, anthropic, probed_at}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在且记录的 `base_url` 与当前 config 一致，不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——persist 经 fullSnapshot 取 `p.mu.RLock`，handler 已持有该锁，可能撞 reload 写者死锁）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `Proxy.mu → runtime.Manager` 锁序。
+- 顶层 `wire_caps`：wire 探测 verdict（`{base_url, responses, anthropic, probed_at}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在且记录的 `base_url` 与当前 config 一致，不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——forward 不持 `p.mu` 转发，但 persist 经 fullSnapshot 取 `p.mu.RLock`，同步调用会排在 pending reload writer 之后阻塞请求路径，故一律异步）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `Proxy.mu → runtime.Manager` 锁序。
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 
@@ -57,12 +59,13 @@ tracker 在每次 commit 新快照（pollAll/pollOne/429 refresh）时，以**�
 
 Proxy 为每次成功 reload 分配单调递增的 config generation。forward、Fusion、
 resolver spread 和 quota poll 都携带开始时的 generation；health、sticky、
-modelLock、paramBlock、spread 和 quota mutation 由 Manager 在同一锁内校验
+modelLock、paramBlock、spread、quota 和 quality（错误率与 TTFT 样本同 gate）
+mutation 由 Manager 在同一锁内校验
 generation，旧请求和慢 poll 的结果直接丢弃。
 
 reload 按 `Proxy.mu → runtime.Manager` 一次性切换 cfg/providers/routes generation；
 `Manager.ReplaceGeneration` 原子清空旧 health、sticky、model lock、paramBlock、
-spread 和 quota，operator pin 有意跨 reload 保留。`persist()` 按同一锁顺序捕获
+spread、quota 和 quality（发布空 quality map），operator pin 有意跨 reload 保留。`persist()` 按同一锁顺序捕获
 config fingerprint 和 Manager 的 `generation + quota + health + route-keyed
 sticky` 原子 snapshot，不允许分别读取后拼装。reload 交换完成后同步写入「新
 fingerprint + 空 generation-scoped 运行态」；写盘失败以“配置已生效但 durability
@@ -90,7 +93,7 @@ fingerprint + 空 generation-scoped 运行态」；写盘失败以“配置已�
 ## Proxy 生命周期
 
 `internal/runtime.Lifecycle` 是 Proxy 级后台任务的唯一 owner。daemon 只调用
-`startRuntimeServices` 和 `Proxy.Close`，不得自行启动或关闭 stats flusher、
+`StartRuntimeServices` 和 `Proxy.Close`，不得自行启动或关闭 stats flusher、
 request logger、catalog refresh。生命周期 gate 在同一 mutex 内完成
 accepting 检查与 `WaitGroup.Add`；shutdown 顺序为：
 
@@ -102,7 +105,7 @@ accepting 检查与 `WaitGroup.Add`；shutdown 顺序为：
 6. 停止 quota tracker 并持久化 quota/health/wire state。
 
 `Proxy.Close` 幂等。测试直接构造 Proxy 时仍必须注册 cleanup；只有通过
-`startRuntimeServices` 启动的 request logger 才由 lifecycle 关闭，测试手工注入
+`StartRuntimeServices` 启动的 request logger 才由 lifecycle 关闭，测试手工注入
 但未启动的 logger 不得在 Close 中等待一个不存在的 loop。
 
 ### HTTP transport 关闭

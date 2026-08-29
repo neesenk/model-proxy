@@ -16,14 +16,6 @@ import (
 	"model-proxy/internal/provider"
 )
 
-// runApiKeyLogin is a no-label/no-replace convenience wrapper over
-// runApiKeyLoginWithInput (prompts on stdin, writes the plural credential pool
-// <name>_apikeys.json so repeated logins accumulate accounts). Kept for the
-// login_cmd tests; the `login` CLI calls runApiKeyLoginWithInput directly.
-func RunApiKeyLogin(cfg *configdomain.Config, provName string, prov configdomain.Provider) error {
-	return RunApiKeyLoginWithInput(cfg, provName, prov, "", "", false)
-}
-
 // runApiKeyLoginWithInput performs a pool-aware apikey login. The key may be
 // passed directly (tests, or a future --key flag) or, when empty, prompted on
 // stdin. The key is validated against the provider's usage_url if configured

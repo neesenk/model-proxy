@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/observe/requestlog"
 	shadowexec "model-proxy/internal/shadow"
 )
@@ -488,7 +489,7 @@ func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
 	// The upstream handler proves the asynchronous request reached the candidate.
 	// Close waits for the fire-and-forget runner, then the logger shutdown drains
 	// its record before the disk query.
-	wantProvider := "shadow-pool#" + AccountIDFor("zhipu", AccountCred{APIKey: observedKey})
+	wantProvider := "shadow-pool#" + accounts.AccountID("zhipu", AccountCred{APIKey: observedKey})
 	p.Close()
 	shutdownLogger()
 	var shadowRecord *requestlog.Record

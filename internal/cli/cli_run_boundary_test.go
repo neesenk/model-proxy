@@ -95,6 +95,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		"restore",
 		"schedule",
 		"serve",
+		"shadow",
 		"stats",
 		"takeover",
 		"test",

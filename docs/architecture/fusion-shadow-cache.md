@@ -27,7 +27,7 @@ request log、`internal/cache`、
 缓存机制由 `internal/cache` 叶子包拥有：request key、TTL/容量 store、
 bounded recorder、转换后 header normalization 与逐块 flush replay。
 `internal/app/proxy_constructor.go` 的 `NewResponseCache` 只注入配置生效值；
-请求通过 `runtimeSnapshot.cache` 保持
+请求通过 `RuntimeSnapshot.Cache` 保持
 generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 
 缓存定位是重复请求/重试盾牌，不是多轮对话前缀缓存。
@@ -35,7 +35,9 @@ generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 ## Live events
 
 `internal/observe/events.Hub` 保存最近 200 条事件并做非阻塞 fan-out。慢订阅者
-丢事件，不能反压请求路径；`/api/events` 的 SSE/keepalive 由 `internal/observe/events` 直接服务。
+丢事件，不能反压请求路径；`/api/events` 的 SSE/keepalive 由应用层
+`internal/app/proxy_http.go` 与 `internal/web/server.go` 服务（events 包只提供
+`ServeEvents` handler，不拥有 HTTP 路由）。
 
 forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens 和稳定 request_id。cache hit、400/502 终局也必须产生 end。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
 
@@ -50,7 +52,9 @@ forward 产生 start/end，包含 agent、protocol、provider、status、latency
 
 ## Shadow
 
-每 route 可配置 shadow provider/model/protocol/sample_rate/max_concurrent。生产响应 commit 后 fire-and-forget：
+每 route 的 `shadow:` 条目（`config.ShadowTarget`）只声明 provider/model/protocol；
+`shadow_sample_rate` 与 `shadow_max_concurrent` 是顶层全局配置（不随 route 变），
+`shadow.Runtime` 是进程级单例。生产响应 commit 后 fire-and-forget：
 
 - sample rate 的 nil 表示 1.0，显式 0 表示关闭；
 - semaphore 满时丢弃 shadow；
@@ -71,7 +75,7 @@ conversion、provider rewrite/auth/header、HTTP drain 和 bounded capture，不
 eligibility → sample → non-blocking acquire → lifecycle admission 的顺序接纳，
 `TryAcquire` 返回一次性、幂等释放的 permit，admission 拒绝与任务完成路径各自
 释放同一 permit，禁止直接操作共享 semaphore。adapter 在启动 goroutine 前同时
-捕获 `runtimeSnapshot` 与 `*shadow.Runtime`。
+捕获 `RuntimeSnapshot` 与 `*shadow.Runtime`。
 goroutine 内由 `internal/app/proxy_shadow.go` 使用 captured provider/pool/generation 解析 virtual
 target 和 `targetexec.Plan`，再调用 `Runtime.Execute` 并映射 request log；
 禁止重新读取 `p.cfg`/`p.providers`/`p.catalog` 或再次 load `p.shadow`。Fusion
@@ -125,7 +129,7 @@ tool capability、非流式 leg 和 client-facing synthesis；应用层 `runFusi
 ### Panel
 
 每个成员独立 goroutine、独立 timeout。整个 Fusion 请求持有与普通 route 相同的
-`runtimeSnapshot`；goroutine 由 `internal/fusion.Engine` 启动，实际 leg 由应用层
+`RuntimeSnapshot`；goroutine 由 `internal/fusion.Engine` 启动，实际 leg 由应用层
 generation-bound adapter 执行。panel、judge、synthesizer 与普通 route 均通过
 `targetexec.Plan` 完成 provider config/runtime impl、backend protocol、model
 rewrite、协议转换及 base URL/path 选择，Fusion 不得重新读取 reload-owned

@@ -1,6 +1,10 @@
 package app
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func newTestWeb(t *testing.T) (*WebServer, *Proxy) {
 	t.Helper()
@@ -10,4 +14,13 @@ providers:
 `))
 	p := newTestProxy(t, cfg)
 	return NewWebServer(p, "test-config.yaml"), p
+}
+
+// serveWeb dispatches one request through the mux the WebServer registers on —
+// the same routing production uses — for tests that exercise endpoints without
+// a listener.
+func serveWeb(w *WebServer, recorder *httptest.ResponseRecorder, req *http.Request) {
+	mux := http.NewServeMux()
+	w.Register(mux)
+	mux.ServeHTTP(recorder, req)
 }

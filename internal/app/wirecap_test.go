@@ -425,6 +425,50 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 	}
 }
 
+// TestWireCap_MissVerdictUsesRequestSnapshotParent (A2 regression): the
+// wire-verdict 404 correction must resolve the pool parent from the REQUEST
+// snapshot's ParentOf projection, not from live p.parentOf. Pre-fix
+// noteWireResponsesMiss re-read the reload-owned map, so a pre-reload
+// in-flight request whose virtual's parent changed across reload recorded
+// the verdict under the NEW generation's parent name (single-snapshot red
+// line violation).
+func TestWireCap_MissVerdictUsesRequestSnapshotParent(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"parent-old": {OpenAIBaseURL: "http://example.invalid", Provider: testProviderID},
+			"parent-new": {OpenAIBaseURL: "http://example.invalid", Provider: testProviderID},
+		},
+		Routes: map[string][]RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+
+	// Generation 1: virtual "v" belongs to parent-old; the request captures
+	// its snapshot here.
+	p.mu.Lock()
+	p.parentOf = map[string]string{"v": "parent-old"}
+	p.mu.Unlock()
+	snap := p.SnapshotRuntime()
+
+	// Reload swaps the generation-owned map: "v" now belongs to parent-new.
+	p.mu.Lock()
+	p.parentOf = map[string]string{"v": "parent-new"}
+	p.mu.Unlock()
+
+	// The in-flight (generation-1) request's 404 correction resolves the
+	// parent through its own snapshot — this is the gate targetExecutor binds
+	// at assembly from RuntimeSnapshot.ParentOf.
+	gate := proxyHealthGate{proxy: p, parentOf: snap.ParentOf}
+	gate.NoteWireResponsesMiss("v")
+
+	caps, ok := p.wireVerdict("parent-old")
+	if !ok || caps.Responses != triNo {
+		t.Errorf("verdict under request-generation parent = %+v (ok=%v), want responses=no", caps, ok)
+	}
+	if _, ok := p.wireVerdict("parent-new"); ok {
+		t.Error("verdict recorded under the NEW generation's parent — request snapshot was bypassed")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // persistence
 // ---------------------------------------------------------------------------

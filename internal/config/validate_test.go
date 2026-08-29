@@ -215,3 +215,37 @@ providers:
 		})
 	}
 }
+
+// --- log_level enum ---
+
+func TestLogLevelValidation(t *testing.T) {
+	base := `listen: 127.0.0.1:15721
+providers:
+  zhipu:
+    provider_id: zhipu
+    openai_base_url: https://open.bigmodel.cn/api/paas/v4
+    models: [glm-5.2]
+`
+	// Every accepted value passes; empty (key absent) keeps the info default.
+	for _, level := range []string{"debug", "info", "warn", "error"} {
+		if _, err := LoadConfigFromBytes("config.yaml", []byte("log_level: "+level+"\n"+base)); err != nil {
+			t.Errorf("log_level %q must be accepted, got %v", level, err)
+		}
+	}
+	cfg, err := LoadConfigFromBytes("config.yaml", []byte(base))
+	if err != nil {
+		t.Fatalf("absent log_level must stay valid, got %v", err)
+	}
+	if cfg.LogLevel != "info" {
+		t.Fatalf("absent log_level default = %q, want info", cfg.LogLevel)
+	}
+	if _, err := LoadConfigFromBytes("config.yaml", []byte("log_level: \"\"\n"+base)); err != nil {
+		t.Fatalf("explicit empty log_level must stay valid, got %v", err)
+	}
+	for _, level := range []string{"verbose", "INFO", "warning", "0"} {
+		_, err := LoadConfigFromBytes("config.yaml", []byte("log_level: "+level+"\n"+base))
+		if err == nil || !strings.Contains(err.Error(), "log_level") {
+			t.Errorf("log_level %q: want a log_level validation error, got %v", level, err)
+		}
+	}
+}

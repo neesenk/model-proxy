@@ -34,7 +34,12 @@
 16. 跨域锁顺序是 `Proxy.mu → internal/runtime.Manager`；Manager 持锁时禁止回调
     Proxy、quota tracker、wirecap Store 或外部 I/O。
 17. 后台 goroutine 必须有 owner、stop、wait 和 final flush。测试创建 owner 后必须注册 cleanup。
-18. 原子文件写不能在多个实例间共享固定 `.tmp` 名。
+18. 原子文件写不能在多个实例/进程间共享固定 `.tmp` 名：daemon 的 Web 配置编辑器
+    与 CLI 是不同进程，可并发写同一 config.yaml——共享 `.tmp` 名会让一个进程把另一个
+    进程写了一半的文件 rename 走。现行实现：`internal/configedit.AtomicWrite` 用
+    `os.CreateTemp` 生成唯一 `.<base>.tmp-*` 临时名（fsync + chmod 0644 + rename），
+    credstore 的凭据写同模式；provider/persist.go 旧 `atomicWriteFile` 已删除，勿恢复
+    固定名写法。
 19. reload 中 config generation 与运行态 snapshot/fingerprint 必须一致。
 20. `internal/cli/serve/supervisor.go` 的 supervisor `SpawnWorker` 可能返回 nil，调用方必须检查。
 21. Proxy 级 goroutine 必须经 `Lifecycle.Run` 接纳；serve process 只能通过

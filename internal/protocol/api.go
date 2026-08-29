@@ -72,11 +72,6 @@ type RequestOptions struct {
 
 type convertReqOpts = RequestOptions
 
-// ConvertRequest converts a request with the permissive default image policy.
-func ConvertRequest(body []byte, client, backend Protocol) ([]byte, error) {
-	return convertRequestFor(body, string(client), string(backend), RequestOptions{ImageOK: true})
-}
-
 // ConvertRequestWithOptions converts a request using target-specific options.
 func ConvertRequestWithOptions(body []byte, client, backend Protocol, opts RequestOptions) ([]byte, error) {
 	return convertRequestFor(body, string(client), string(backend), opts)

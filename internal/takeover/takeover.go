@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
 	"time"
@@ -138,14 +138,14 @@ func preserveMode(path string, fallback os.FileMode) os.FileMode {
 func verifyBackupIntegrity(bak string, data []byte) error {
 	mb, err := os.ReadFile(bak + ".meta")
 	if err != nil {
-		log.Printf("takeover: restore %s: no readable meta (%v) — restoring without integrity check", bak, err)
+		logx.Warnf("takeover: restore %s: no readable meta (%v) — restoring without integrity check", bak, err)
 		return nil
 	}
 	var meta struct {
 		Sha256 string `json:"sha256"`
 	}
 	if err := json.Unmarshal(mb, &meta); err != nil || meta.Sha256 == "" {
-		log.Printf("takeover: restore %s: meta has no usable sha256 — restoring without integrity check", bak)
+		logx.Warnf("takeover: restore %s: meta has no usable sha256 — restoring without integrity check", bak)
 		return nil
 	}
 	if got := Sha256hex(data); got != meta.Sha256 {
@@ -196,10 +196,10 @@ func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFact
 	batch := which == "" || which == "all"
 
 	for _, c := range clients {
-		log.Printf("takeover %s: %s (backup -> %s/)", c.Name, c.File, bakDir)
+		logx.Infof("takeover %s: %s (backup -> %s/)", c.Name, c.File, bakDir)
 		if err := Backup(c.File, bakDir, c.Name); err != nil {
 			if batch && errors.Is(err, ErrNoFile) {
-				log.Printf("  ~ %s skipped (config not present: %s)", c.Name, c.File)
+				logx.Infof("  ~ %s skipped (config not present: %s)", c.Name, c.File)
 				continue
 			}
 			return fmt.Errorf("%s backup: %w", c.Name, err)
@@ -207,7 +207,7 @@ func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFact
 		if err := c.Rewrite(cfg, meta, implicit); err != nil {
 			return fmt.Errorf("%s rewrite: %w", c.Name, err)
 		}
-		log.Printf("  ✓ %s done", c.Name)
+		logx.Infof("  ✓ %s done", c.Name)
 	}
 	return nil
 }
@@ -231,15 +231,15 @@ func RunRestore(cfg *configdomain.Config, which, bakDir string) error {
 	clients := ListClients(cfg, which)
 	batch := which == "" || which == "all"
 	for _, c := range clients {
-		log.Printf("restore %s: %s (from %s/)", c.Name, c.File, bakDir)
+		logx.Infof("restore %s: %s (from %s/)", c.Name, c.File, bakDir)
 		if err := Restore(c.File, bakDir, c.Name); err != nil {
 			if batch && errors.Is(err, ErrNoFile) {
-				log.Printf("  ~ %s skipped (no backup in %s/)", c.Name, bakDir)
+				logx.Infof("  ~ %s skipped (no backup in %s/)", c.Name, bakDir)
 				continue
 			}
 			return fmt.Errorf("%s restore: %w", c.Name, err)
 		}
-		log.Printf("  ✓ %s restored", c.Name)
+		logx.Infof("  ✓ %s restored", c.Name)
 	}
 	return nil
 }

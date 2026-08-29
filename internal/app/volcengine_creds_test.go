@@ -71,7 +71,7 @@ func TestLoadVolcengineCreds_BadJSON(t *testing.T) {
 func writeVolcenginePool(t *testing.T, name string, accts ...PoolAccount) {
 	t.Helper()
 	p := CredentialPool{Version: 1, Accounts: accts}
-	if err := SavePool(name, "volcengine", p); err != nil {
+	if err := AccountStore().Save(name, "volcengine", p); err != nil {
 		t.Fatal(err)
 	}
 }

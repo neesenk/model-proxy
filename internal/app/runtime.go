@@ -2,7 +2,7 @@ package app
 
 import (
 	"errors"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 
 	cliframework "model-proxy/internal/cli/framework"
@@ -53,18 +53,18 @@ func NewRuntime(cfg *Config, args cliserve.Args) *Runtime {
 
 // Reload applies a SIGHUP config reload and logs the outcome.
 func (runtime *Runtime) Reload() {
-	log.Printf("[reload] SIGHUP received, reloading config from %s", runtime.ConfigPath)
+	logx.Infof("[reload] SIGHUP received, reloading config from %s", runtime.ConfigPath)
 	if err := runtime.Proxy.Reload(runtime.ConfigPath); err != nil {
 		var applied *ReloadAppliedWarning
 		if errors.As(err, &applied) {
-			log.Printf("[reload] WARNING: %v", err)
+			logx.Warnf("[reload] WARNING: %v", err)
 		} else {
-			log.Printf("[reload] FAILED: %v (keeping old config)", err)
+			logx.Warnf("[reload] FAILED: %v (keeping old config)", err)
 		}
 		return
 	}
 	snapshot := runtime.Proxy.SnapshotRuntime()
-	log.Printf("[reload] config reloaded successfully (providers: %s, routes: %s)",
+	logx.Infof("[reload] config reloaded successfully (providers: %s, routes: %s)",
 		cliframework.ProviderNames(snapshot.Cfg), cliframework.RouteNames(snapshot.Cfg))
 }
 

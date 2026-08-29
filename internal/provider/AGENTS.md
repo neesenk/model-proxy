@@ -6,13 +6,13 @@
 
 - 每个 provider 实现 `provider.Provider`：
   `AuthHeaders`、`Refresh`、`RewriteRequest`、`Logout`、`Usage`、`FetchModels`、`Quota`、`ProbeRequest`、`ExtraHeaders`、`FilterModelIDs`。
-- `Login` 不属于接口，交互登录由 main 包 CLI 编排。
+- `Login` 不属于接口，交互登录由 `internal/cli/login` 编排（组合根在 `internal/app`）。
 - 共享默认行为通过 `ApiKeyBase` 和 `baseProbe` 组合：默认 probe 是 OpenAI `POST /chat/completions`，默认 ExtraHeaders no-op，默认 model filter 透传。
 - provider 专属 auth、endpoint、request rewrite、quota/usage parser、probe header 和 model filter 全部留在本包。
 - 禁止要求 main 包根据 provider id 分支处理这些知识。
 - `ProbeRequest`、`ExtraHeaders`、`FilterModelIDs` 的默认实现集中在 `baseProbe`。
 - `Surplus` 是 `QuotaSnapshot` 方法，不属于 Provider interface。
-- Auth、Logout、Usage、Quota 的 fetch 和 parse 由 provider struct 自己承载。main 的 `buildOne` 只允许保留无法泛化的窄回调，例如 volcengine V4 `FetchModelsFn`。
+- Auth、Logout、Usage、Quota 的 fetch 和 parse 由 provider struct 自己承载。`internal/app` 的 `BuildOne`（provider_build.go）只允许保留无法泛化的窄回调，例如 volcengine V4 `FetchModelsFn`。
 
 ## 凭据
 
@@ -26,7 +26,7 @@
 - `ProtocolHint` 只有在现有转换器真实支持目标 wire shape 时才能返回值。
 - Codex 是 Responses API，不得标记成 Chat Completions `openai` hint。
 - 不可表达的 wire protocol 使用 `WireProtocolNote` 警告，不得伪装成可转换。
-- `ChatReasoningMode`（protocol_hint.go，与 ProtocolHint 并列）：r→chat 转换时 reasoning.effort 的方言形状（`reasoning_effort`/`thinking`/`enable_thinking`/`openrouter`）。新 provider 的 chat 端点 reasoning 字段形状不是平铺 `reasoning_effort` 时才登记，默认不要加条目。
+- `ChatReasoningMode`（protocol_hint.go，与 ProtocolHint 并列）：r→chat 转换时 reasoning.effort 的方言形状（`reasoning_effort`/`thinking`/`enable_thinking`/`openrouter`；当前登记 `zhipu`/`volcengine`/`kimi-code`/`deepseek`→`thinking`，`qwen-plan`→`enable_thinking`，`aqp` 及其别名 `shopee`→`openrouter`）。新 provider 的 chat 端点 reasoning 字段形状不是平铺 `reasoning_effort` 时才登记，默认不要加条目。
 
 ## 修改要求
 

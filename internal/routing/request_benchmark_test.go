@@ -14,6 +14,17 @@ var benchmarkBody1K = bytes.Repeat(
 	25,
 )
 
+// passthroughScheduler returns the candidate pool unchanged.
+type passthroughScheduler struct{}
+
+func (passthroughScheduler) Schedule(
+	_ string,
+	_ string,
+	targets []configdomain.RouteTarget,
+) []configdomain.RouteTarget {
+	return targets
+}
+
 func BenchmarkEstimateInputTokens(b *testing.B) {
 	b.SetBytes(int64(len(benchmarkBody1K)))
 	for b.Loop() {
@@ -57,17 +68,11 @@ func BenchmarkPlannerApply(b *testing.B) {
 	planner := NewPlanner(PlannerInput{
 		Catalog:        cat,
 		ExpandedRoutes: expanded,
-		Scheduler: SchedulerFunc(func(
-			_ string,
-			_ string,
-			targets []configdomain.RouteTarget,
-		) []configdomain.RouteTarget {
-			return targets
-		}),
+		Scheduler:      passthroughScheduler{},
 	})
 	body := []byte(`{"messages":[{"content":[{"type":"image"}]}],"tools":[{"name":"lookup"}]}`)
 	b.ReportAllocs()
 	for b.Loop() {
-		_ = planner.Apply("public", "session", ordered, body)
+		_ = planner.ApplyWithProfile("public", "session", ordered, ProfileRequest(body))
 	}
 }

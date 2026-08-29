@@ -177,29 +177,6 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 	}
 }
 
-// printProviderModels prints models fetched live from a provider's /models endpoint.
-func PrintProviderModels(provName string, entries []ModelEntry) {
-	if len(entries) == 0 {
-		fmt.Println(provider.Yellow("(no models)"))
-		return
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
-	fmt.Printf("%s  %s  %s  %s\n",
-		provider.Dim(provider.Pad("MODEL ID", 22)), provider.Dim(provider.Pad("NAME", 20)),
-		provider.Dim(provider.Pad("CTX", 10)), provider.Dim(provider.Pad("OWNED BY", 12)))
-	for _, m := range entries {
-		name := m.ID
-		ctx := "—"
-		if m.ContextWindow > 0 {
-			ctx = fmt.Sprintf("%d", m.ContextWindow)
-		}
-		fmt.Printf("%s  %s  %s  %s\n",
-			provider.Cyan(provider.Pad(m.ID, 22)), provider.Green(provider.Pad(name, 20)),
-			provider.Gray(provider.Pad(ctx, 10)), provider.Gray(provider.Pad(m.OwnedBy, 12)))
-	}
-	fmt.Printf("\n%s %s: %d models\n", provider.Dim("provider:"), provName, len(entries))
-}
-
 // fetchProviderModels fetches the live model list from a provider. Delegates to
 // the provider's FetchModels() implementation (which lives in the provider/ layer).
 func FetchProviderModels(cfg *configdomain.Config, provName string) ([]ModelEntry, error) {

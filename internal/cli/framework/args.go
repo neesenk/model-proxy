@@ -6,9 +6,7 @@ package framework
 import (
 	"model-proxy/internal/accounts"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 
@@ -128,24 +126,6 @@ func Plural(n int, sing, plur string) string {
 	}
 	return plur
 }
-
-// ReadFile/WriteFile are thin os wrappers kept for the remaining CLI callers.
-func ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
-
-func WriteFile(path string, data []byte, mode os.FileMode) error {
-	return os.WriteFile(path, data, mode)
-}
-
-// RuntimeOS returns runtime.GOOS (browser-launch dispatch).
-func RuntimeOS() string { return runtime.GOOS }
-
-// RunCmd starts a process without waiting (browser launchers, daemon spawn).
-func RunCmd(name string, args ...string) error {
-	return exec.Command(name, args...).Start()
-}
-
-// EnvOrEmpty returns os.Getenv (named for call-site readability).
-func EnvOrEmpty(k string) string { return os.Getenv(k) }
 
 // HomeDir resolves the user home directory (credential files live under
 // ~/.model-proxy).

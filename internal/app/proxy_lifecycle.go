@@ -1,7 +1,7 @@
 package app
 
 import (
-	"log"
+	"model-proxy/internal/observe/logx"
 	observestats "model-proxy/internal/observe/stats"
 )
 
@@ -69,7 +69,7 @@ func (p *Proxy) closeRuntimeServices() {
 	}
 	if p.stats != nil {
 		if err := p.stats.Close(); err != nil {
-			log.Printf("[stats] close failed: %v", err)
+			logx.Warnf("[stats] close failed: %v", err)
 		}
 	}
 	if p.responsesState != nil {
@@ -79,7 +79,7 @@ func (p *Proxy) closeRuntimeServices() {
 		p.quota.Stop()
 		if p.quota.Path != "" {
 			if err := p.quota.Persist(); err != nil {
-				log.Printf("[quota] final persist on close failed: %v", err)
+				logx.Warnf("[quota] final persist on close failed: %v", err)
 			}
 		}
 	}

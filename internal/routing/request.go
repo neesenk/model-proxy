@@ -69,12 +69,6 @@ func FitVerdict(cat *catalog.Catalog, capabilities map[string][]string, model st
 	return true, ""
 }
 
-// FitsRequest profiles body and applies Fits without a manual capability
-// override.
-func FitsRequest(cat *catalog.Catalog, model string, body []byte) bool {
-	return Fits(cat, nil, model, ProfileRequest(body))
-}
-
 // CapabilitiesFor returns the provider-level capability declaration for target.
 // Credential-pool virtual provider IDs resolve through parentOf.
 func CapabilitiesFor(
@@ -205,17 +199,6 @@ type Scheduler interface {
 	Schedule(routeName, sessionKey string, targets []configdomain.RouteTarget) []configdomain.RouteTarget
 }
 
-// SchedulerFunc adapts a function to Scheduler.
-type SchedulerFunc func(routeName, sessionKey string, targets []configdomain.RouteTarget) []configdomain.RouteTarget
-
-// Schedule implements Scheduler.
-func (schedule SchedulerFunc) Schedule(
-	routeName, sessionKey string,
-	targets []configdomain.RouteTarget,
-) []configdomain.RouteTarget {
-	return schedule(routeName, sessionKey, targets)
-}
-
 // Planner owns request-aware filtering and context-overflow replacement policy.
 // Its inputs are one immutable runtime generation; stateful ordering is
 // delegated through Scheduler.
@@ -250,20 +233,12 @@ func NewPlanner(input PlannerInput) Planner {
 	}
 }
 
-// Apply narrows ordered to in-route targets that fit the request. If none fit,
-// it schedules a cross-route pool under the synthetic "#req" route key. A nil
-// catalog is a complete no-op, and an empty scheduled fallback returns ordered.
-func (planner Planner) Apply(
-	exposed, sessionKey string,
-	ordered []configdomain.RouteTarget,
-	body []byte,
-) []configdomain.RouteTarget {
-	return planner.ApplyWithProfile(exposed, sessionKey, ordered, ProfileRequest(body))
-}
-
-// ApplyWithProfile is Apply with a pre-computed request profile: the forward
-// path profiles the (immutable) request body once and reuses it across the
-// wait-retry rounds and the context-overflow retry instead of re-scanning.
+// ApplyWithProfile narrows ordered to in-route targets that fit a pre-computed
+// request profile: the forward path profiles the (immutable) request body once
+// and reuses it across the wait-retry rounds and the context-overflow retry
+// instead of re-scanning. If none fit, it schedules a cross-route pool under
+// the synthetic "#req" route key. A nil catalog is a complete no-op, and an
+// empty scheduled fallback returns ordered.
 func (planner Planner) ApplyWithProfile(
 	exposed, sessionKey string,
 	ordered []configdomain.RouteTarget,
@@ -308,19 +283,10 @@ func (planner Planner) ApplyWithProfile(
 	return scheduled
 }
 
-// ContextOverflowRetry schedules cross-route targets whose known context is
+// ContextOverflowRetryWithProfile schedules, over a shared pre-computed
+// profile (see ApplyWithProfile), cross-route targets whose known context is
 // strictly larger than the largest known context among tried and whose
 // capability/context profile still fits. It uses the synthetic "#ctx" key.
-func (planner Planner) ContextOverflowRetry(
-	exposed, sessionKey string,
-	tried []configdomain.RouteTarget,
-	body []byte,
-) []configdomain.RouteTarget {
-	return planner.ContextOverflowRetryWithProfile(exposed, sessionKey, tried, ProfileRequest(body))
-}
-
-// ContextOverflowRetryWithProfile is ContextOverflowRetry over a shared
-// pre-computed profile (see ApplyWithProfile).
 func (planner Planner) ContextOverflowRetryWithProfile(
 	exposed, sessionKey string,
 	tried []configdomain.RouteTarget,

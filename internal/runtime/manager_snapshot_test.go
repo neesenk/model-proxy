@@ -12,7 +12,7 @@ func TestDashboardCompleteSortedAndDetached(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 20, 0, 0, 0, time.UTC)
-	m := NewManager(12)
+	m := newTestManager(12)
 	m.mu.Lock()
 	m.health["open"] = &providerHealth{
 		consecutiveFailures: 3,
@@ -111,7 +111,7 @@ func TestDashboardPreviewMatchesNonCommittingDecisionAndIsFullyDetached(t *testi
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 21, 0, 0, 0, time.UTC)
-	m := NewManager(13)
+	m := newTestManager(13)
 	quota := &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan, AsOf: now, RemainingPct: .8,
 		Notes: []string{"quota note"},

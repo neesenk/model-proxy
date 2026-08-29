@@ -71,7 +71,7 @@ func TestZeroValueAndGenerationReplacement(t *testing.T) {
 		t.Fatal("zero-value quota set failed")
 	}
 
-	m := NewManager(1)
+	m := newTestManager(1)
 	m.SetPin("route", Pin{Provider: "pinned"})
 	if !m.SetSticky("route", Sticky{Provider: "old"}, 1) {
 		t.Fatal("current sticky rejected")
@@ -116,7 +116,7 @@ func TestZeroValueAndGenerationReplacement(t *testing.T) {
 func TestGenerationGatesStaleMutations(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager(8)
+	m := newTestManager(8)
 	if m.SetSticky("s", Sticky{Provider: "stale"}, 7) {
 		t.Fatal("stale sticky mutation committed")
 	}
@@ -179,7 +179,7 @@ func TestGenerationGatesStaleMutations(t *testing.T) {
 func TestQuotaDetachmentAndGating(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager(3)
+	m := newTestManager(3)
 	input := &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan,
 		Account: "account",
@@ -245,7 +245,7 @@ func TestRestoreAndPersistSnapshotSemantics(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 29, 11, 0, 0, 0, time.UTC)
-	m := NewManager(11)
+	m := newTestManager(11)
 	m.RestoreSticky(map[string]Sticky{
 		"route":   {Provider: "a", Since: now.Add(-time.Minute)},
 		"session": {Provider: "b", Since: now.Add(-time.Minute)},
@@ -349,7 +349,7 @@ func TestRestoreAndPersistSnapshotSemantics(t *testing.T) {
 }
 
 func TestAtomicSnapshotsNeverMixGenerations(t *testing.T) {
-	m := NewManager(1)
+	m := newTestManager(1)
 	routeKeys := map[string]bool{"route": true}
 
 	const generations = 600

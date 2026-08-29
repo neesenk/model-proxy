@@ -165,9 +165,6 @@ func NewStoreWithBackend(homeDir string, backend Backend) Store {
 	return Store{directory: filepath.Join(homeDir, ".model-proxy"), backend: backend}
 }
 
-// Backend reports where this store keeps secret values.
-func (s Store) Backend() Backend { return s.backend }
-
 func (s Store) PoolPath(name string) string {
 	return filepath.Join(s.directory, name+"_apikeys.json")
 }

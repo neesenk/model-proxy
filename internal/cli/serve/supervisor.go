@@ -7,6 +7,7 @@ package serve
 import (
 	"fmt"
 	"log"
+	"model-proxy/internal/observe/logx"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -172,10 +173,10 @@ func SpawnWorker(env DaemonEnv, sa Args) *exec.Cmd {
 	cmd.Stdout = env.Stdout
 	cmd.Stderr = env.Stderr
 	if err := cmd.Start(); err != nil {
-		log.Printf("[supervisor] failed to spawn worker: %v", err)
+		logx.Warnf("[supervisor] failed to spawn worker: %v", err)
 		return nil
 	}
-	log.Printf("[supervisor] spawned worker pid=%d", cmd.Process.Pid)
+	logx.Infof("[supervisor] spawned worker pid=%d", cmd.Process.Pid)
 	return cmd
 }
 
@@ -210,7 +211,7 @@ func runSupervisor(env DaemonEnv, sa Args, deps supervisorDeps) error {
 	pidPath := PidFilePath(logFile)
 	pidWritten := false
 	if err := WritePidFile(pidPath, deps.pid()); err != nil {
-		log.Printf("[supervisor] warn: write pid file %s: %v", pidPath, err)
+		logx.Warnf("[supervisor] warn: write pid file %s: %v", pidPath, err)
 	} else {
 		pidWritten = true
 	}
@@ -218,7 +219,7 @@ func runSupervisor(env DaemonEnv, sa Args, deps supervisorDeps) error {
 		defer os.Remove(pidPath)
 	}
 
-	log.Printf("[supervisor] started pid=%d log=%s", deps.pid(), logFile)
+	logx.Infof("[supervisor] started pid=%d log=%s", deps.pid(), logFile)
 
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
@@ -231,7 +232,7 @@ func runSupervisor(env DaemonEnv, sa Args, deps supervisorDeps) error {
 			if sig == syscall.SIGHUP {
 				continue
 			}
-			log.Printf("[supervisor] received %v, exiting", sig)
+			logx.Infof("[supervisor] received %v, exiting", sig)
 			return nil
 		default:
 		}
@@ -239,7 +240,7 @@ func runSupervisor(env DaemonEnv, sa Args, deps supervisorDeps) error {
 		worker := deps.spawn(env, sa)
 		if worker == nil {
 			// Spawn failed — treat as immediate exit, backoff and retry.
-			log.Printf("[supervisor] worker spawn failed, retrying in %s", backoff)
+			logx.Warnf("[supervisor] worker spawn failed, retrying in %s", backoff)
 			if !waitSupervisorBackoff(deps.signals, deps.after(backoff)) {
 				return nil
 			}
@@ -257,28 +258,28 @@ func runSupervisor(env DaemonEnv, sa Args, deps supervisorDeps) error {
 				if sig == syscall.SIGHUP {
 					// Remain in this worker's wait loop after forwarding. Starting
 					// another worker here would race the still-running listener.
-					log.Printf("[supervisor] received SIGHUP, forwarding to worker pid=%d", worker.PID())
+					logx.Infof("[supervisor] received SIGHUP, forwarding to worker pid=%d", worker.PID())
 					_ = worker.Signal(syscall.SIGHUP)
 					continue
 				}
 				// Graceful shutdown: forward SIGTERM, wait up to 10s, then SIGKILL.
-				log.Printf("[supervisor] received %v, stopping worker pid=%d", sig, worker.PID())
+				logx.Infof("[supervisor] received %v, stopping worker pid=%d", sig, worker.PID())
 				_ = worker.Signal(syscall.SIGTERM)
 				select {
 				case <-exitCh:
 				case <-deps.after(SupervisorWorkerStopWait):
-					log.Printf("[supervisor] worker pid=%d did not exit, killing", worker.PID())
+					logx.Warnf("[supervisor] worker pid=%d did not exit, killing", worker.PID())
 					_ = worker.Kill()
 					<-exitCh
 				}
-				log.Printf("[supervisor] exiting")
+				logx.Infof("[supervisor] exiting")
 				return nil
 			case err := <-exitCh:
 				lived := deps.now().Sub(started)
 				if lived >= uptimeReset {
 					backoff = time.Second // sustained uptime → reset backoff
 				}
-				log.Printf("[supervisor] worker pid=%d exited after %s: %v — restarting in %s",
+				logx.Warnf("[supervisor] worker pid=%d exited after %s: %v — restarting in %s",
 					worker.PID(), lived, err, backoff)
 				workerExited = true
 			}
@@ -299,7 +300,7 @@ func waitSupervisorBackoff(signals <-chan os.Signal, elapsed <-chan time.Time) b
 			if sig == syscall.SIGHUP {
 				continue
 			}
-			log.Printf("[supervisor] received %v during backoff, exiting", sig)
+			logx.Infof("[supervisor] received %v during backoff, exiting", sig)
 			return false
 		case <-elapsed:
 			return true

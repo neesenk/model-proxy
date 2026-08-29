@@ -299,7 +299,7 @@ const fusionInstructionMaxRunes = 4000
 type ShadowTarget struct {
 	Provider string `yaml:"provider"`
 	Model    string `yaml:"model"`
-	// Protocol declares the shadow backend's protocol ("anthropic"|"openai"). Empty
+	// Protocol declares the shadow backend's protocol ("anthropic"|"openai"|"responses"). Empty
 	// = same as the request body's protocol (the primary target's backend proto).
 	// Set it when the shadow backend speaks a different protocol than the body the
 	// shadow request is built from — runShadow converts + routes accordingly.
@@ -1001,6 +1001,12 @@ func (c *Config) validate() error {
 	// credentials: closed backend set (default file).
 	if mode := c.CredentialsMode(); mode != "file" && mode != "keychain" {
 		return fmt.Errorf("credentials %q invalid — use file or keychain", c.Credentials)
+	}
+	// log_level: closed enum (empty = the info default applied by Load).
+	switch c.LogLevel {
+	case "", "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log_level %q invalid — use debug, info, warn or error", c.LogLevel)
 	}
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("no providers configured — add at least one under `providers:`")

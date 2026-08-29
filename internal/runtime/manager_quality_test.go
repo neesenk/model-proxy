@@ -53,7 +53,7 @@ func TestDecideOrderAppliesQualityPenalty(t *testing.T) {
 		QualityErrWeight: 1.0, QualityTTFTWeight: 0.2,
 	}
 
-	m := NewManager(3)
+	m := newTestManager(3)
 	setScheduleQuota(t, m, "degrading", quota, 3)
 	setScheduleQuota(t, m, "healthy", quota, 3)
 
@@ -65,8 +65,9 @@ func TestDecideOrderAppliesQualityPenalty(t *testing.T) {
 	}
 
 	// A degrading provider (fresh 60% error EWMA) sinks below an equally
-	// provisioned healthy one.
-	m.seedQuality(map[string]providerQuality{"degrading": {errRate: .6, errAt: now}})
+	// provisioned healthy one. Quality state is published through the same
+	// copy-on-write pointer the record paths use.
+	m.quality.Store(&map[string]providerQuality{"degrading": {errRate: .6, errAt: now}})
 	result := m.DecideOrder(input)
 	if !reflect.DeepEqual(result.Order, []int{1, 0}) {
 		t.Fatalf("degrading provider did not sink: %+v", result)
@@ -77,14 +78,14 @@ func TestDecideOrderAppliesQualityPenalty(t *testing.T) {
 
 	// The penalty expires with the EWMA: an hour-old failure burst no longer
 	// penalizes (decays ~0 at 30 half-lives), restoring the original order.
-	m.seedQuality(map[string]providerQuality{"degrading": {errRate: .6, errAt: now.Add(-time.Hour)}})
+	m.quality.Store(&map[string]providerQuality{"degrading": {errRate: .6, errAt: now.Add(-time.Hour)}})
 	if result = m.DecideOrder(input); result.Order[0] != 0 {
 		t.Fatalf("stale penalty did not expire: %+v", result)
 	}
 
 	// PreviewOrder (dashboard path) computes the same penalty from the
 	// detached snapshot as the live decision at the same state.
-	m.seedQuality(map[string]providerQuality{"degrading": {errRate: .6, errAt: now}})
+	m.quality.Store(&map[string]providerQuality{"degrading": {errRate: .6, errAt: now}})
 	live := m.DecideOrder(input)
 	preview := m.Dashboard(now).PreviewOrder(input)
 	if !reflect.DeepEqual(preview.Order, []int{1, 0}) ||
@@ -100,7 +101,7 @@ func TestDecideOrderStickyEscapesDegradingAccount(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 8, 1, 13, 0, 0, 0, time.UTC)
-	m := NewManager(4)
+	m := newTestManager(4)
 	targets := []Target{
 		{Provider: "current", Priority: 1},
 		{Provider: "other", Priority: 1},
@@ -123,7 +124,7 @@ func TestDecideOrderStickyEscapesDegradingAccount(t *testing.T) {
 	}
 	// The sticky account's fresh 40% error EWMA pushes the score gap (0.4)
 	// past the margin (0.15): sticky escapes through the SAME margin gate.
-	m.seedQuality(map[string]providerQuality{"current": {errRate: .4, errAt: now}})
+	m.quality.Store(&map[string]providerQuality{"current": {errRate: .4, errAt: now}})
 	if result := m.DecideOrder(input); result.StickyProvider != "other" {
 		t.Fatalf("degrading sticky did not escape: %+v", result)
 	}
@@ -132,7 +133,7 @@ func TestDecideOrderStickyEscapesDegradingAccount(t *testing.T) {
 func TestQualityLifecycle(t *testing.T) {
 	t.Parallel()
 
-	m := NewManager(5)
+	m := newTestManager(5)
 
 	// Record* funnels move the error EWMA.
 	m.RecordFailure("p", 3, time.Minute, 5)
@@ -168,6 +169,11 @@ func TestQualityLifecycle(t *testing.T) {
 	if len(m.qualitySnapshot()) != 0 {
 		t.Fatalf("stale generation mutated quality: %+v", m.qualitySnapshot())
 	}
+	// TTFT samples pass the same generation gate as the error-rate samples.
+	m.RecordAttemptQuality("q", time.Second, 5)
+	if len(m.qualitySnapshot()) != 0 {
+		t.Fatalf("stale generation mutated quality via TTFT: %+v", m.qualitySnapshot())
+	}
 }
 
 // TestQualityTTFTDecaysDuringFailureStretch: a slow-TTFT penalty must decay
@@ -179,8 +185,8 @@ func TestQualityTTFTDecaysDuringFailureStretch(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
-	m := NewManager(1)
-	m.seedQuality(map[string]providerQuality{"p": {ttftNorm: 1, ttftAt: now}})
+	m := newTestManager(1)
+	m.quality.Store(&map[string]providerQuality{"p": {ttftNorm: 1, ttftAt: now}})
 	// Ten minutes of continuous failures, no TTFT samples in between.
 	for i := 1; i <= 5; i++ {
 		m.recordQualityLocked("p", 1, now.Add(time.Duration(2*i)*time.Minute))

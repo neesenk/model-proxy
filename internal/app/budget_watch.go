@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"strconv"
 	"sync"
@@ -109,7 +109,7 @@ func (w *budgetWatcher) check(now time.Time, stop <-chan struct{}) {
 	month := monthStart.Format("2006-01")
 	buckets, err := p.stats.QueryAnalytics(monthStart.Unix(), now.Unix(), "", "", "month")
 	if err != nil {
-		log.Printf("[budget] stats query failed: %v", err)
+		logx.Warnf("[budget] stats query failed: %v", err)
 		return
 	}
 	// Same pricing snapshot as the analytics read view: config overrides
@@ -167,7 +167,7 @@ func (w *budgetWatcher) maybeAlert(payload budgetAlertPayload, webhookURL string
 
 	detail, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("[budget] marshal alert payload failed: %v", err)
+		logx.Warnf("[budget] marshal alert payload failed: %v", err)
 		return
 	}
 	event := observeevents.Event{
@@ -179,7 +179,7 @@ func (w *budgetWatcher) maybeAlert(payload budgetAlertPayload, webhookURL string
 		event.Provider = payload.Scope
 	}
 	w.proxy.events.Publish(event)
-	log.Printf("[budget] %s %s: actual $%.2f >= threshold $%.2f",
+	logx.Warnf("[budget] %s %s: actual $%.2f >= threshold $%.2f",
 		payload.Scope, payload.Month, payload.ActualUSD, payload.ThresholdUSD)
 
 	if webhookURL != "" {
@@ -218,7 +218,7 @@ func (w *budgetWatcher) postWebhook(url string, body []byte, stop <-chan struct{
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			cancel()
-			log.Printf("[budget] webhook request build failed: %v", err)
+			logx.Warnf("[budget] webhook request build failed: %v", err)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -235,5 +235,5 @@ func (w *budgetWatcher) postWebhook(url string, body []byte, stop <-chan struct{
 			return
 		}
 	}
-	log.Printf("[budget] webhook POST %s failed after %d attempts", url, budgetWebhookRetries+1)
+	logx.Warnf("[budget] webhook POST %s failed after %d attempts", url, budgetWebhookRetries+1)
 }

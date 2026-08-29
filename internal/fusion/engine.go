@@ -2,7 +2,7 @@ package fusion
 
 import (
 	"context"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"time"
 
 	configdomain "model-proxy/internal/config"
@@ -82,19 +82,19 @@ func (engine Engine) Run(ctx context.Context, request Request, ports Ports) Resu
 	}
 	if request.Recipe.FirstTurnOnly && HasAssistantTurn(request.OriginalBody) {
 		run.Degraded = DegradedMultiTurn
-		log.Printf("[fusion] %s: workflow %s is first_turn_only and the conversation is multi-turn; answering directly (fusion_multi_turn)",
+		logx.Infof("[fusion] %s: workflow %s is first_turn_only and the conversation is multi-turn; answering directly (fusion_multi_turn)",
 			request.Route, request.Workflow)
 		return engine.finish(&run, request.Recipe.Synthesizer, request.OriginalBody, ports)
 	}
 	if request.HasTools && !ports.SupportsTools(request.Recipe.Synthesizer) {
 		run.Degraded = DegradedToolsUnsupported
-		log.Printf("[fusion] %s: synthesizer %s/%s lacks tool support; answering directly (fusion_tools_unsupported)",
+		logx.Warnf("[fusion] %s: synthesizer %s/%s lacks tool support; answering directly (fusion_tools_unsupported)",
 			request.Route, request.Recipe.Synthesizer.Provider, request.Recipe.Synthesizer.Model)
 		return engine.finish(&run, request.Recipe.Synthesizer, request.OriginalBody, ports)
 	}
 	if !engine.Registry.Admit(request.Workflow, request.Recipe.MaxRunsPerDay, time.Now()) {
 		run.Degraded = DegradedBudgetExceeded
-		log.Printf("[fusion] %s: workflow %s daily orchestration budget exhausted (%d/day); answering directly (fusion_budget_exceeded)",
+		logx.Warnf("[fusion] %s: workflow %s daily orchestration budget exhausted (%d/day); answering directly (fusion_budget_exceeded)",
 			request.Route, request.Workflow, request.Recipe.MaxRunsPerDay)
 		return engine.finish(&run, request.Recipe.Synthesizer, request.OriginalBody, ports)
 	}
@@ -131,7 +131,7 @@ func (engine Engine) Run(ctx context.Context, request Request, ports Ports) Resu
 	run.Legs = ReconcileLegs(request.Recipe.Panel, received)
 	if len(successes) < quorum {
 		run.Degraded = DegradedInsufficientProposers
-		log.Printf("[fusion] %s: fusion_insufficient_proposers (%d/%d drafts, quorum %d); answering directly via synthesizer",
+		logx.Warnf("[fusion] %s: fusion_insufficient_proposers (%d/%d drafts, quorum %d); answering directly via synthesizer",
 			request.Route, len(successes), len(request.Recipe.Panel), quorum)
 		return engine.finish(&run, request.Recipe.Synthesizer, request.OriginalBody, ports)
 	}
@@ -150,7 +150,7 @@ func (engine Engine) Run(ctx context.Context, request Request, ports Ports) Resu
 				Kind:     "judge",
 				Err:      "cannot build judge body",
 			})
-			log.Printf("[fusion] %s: cannot build judge body; synthesizing without judge report", request.Route)
+			logx.Warnf("[fusion] %s: cannot build judge body; synthesizing without judge report", request.Route)
 		} else {
 			judge := ports.CallLeg(ctx, LegCall{
 				Index:  -1,
@@ -160,7 +160,7 @@ func (engine Engine) Run(ctx context.Context, request Request, ports Ports) Resu
 			})
 			run.Legs = append(run.Legs, ObservationFromResult(judge, "judge"))
 			if judge.Err != nil {
-				log.Printf("[fusion] %s: judge %s/%s failed: %v; synthesizing without judge report",
+				logx.Warnf("[fusion] %s: judge %s/%s failed: %v; synthesizing without judge report",
 					request.Route, request.Recipe.Judge.Provider, request.Recipe.Judge.Model, judge.Err)
 			} else {
 				judgeReport = judge.Text
@@ -178,10 +178,10 @@ func (engine Engine) Run(ctx context.Context, request Request, ports Ports) Resu
 	)
 	if !ok {
 		run.Degraded = DegradedBodyBuildFailed
-		log.Printf("[fusion] %s: cannot build synthesis body; answering directly via synthesizer", request.Route)
+		logx.Warnf("[fusion] %s: cannot build synthesis body; answering directly via synthesizer", request.Route)
 		return engine.finish(&run, request.Recipe.Synthesizer, request.OriginalBody, ports)
 	}
-	log.Printf("[fusion] %s: synthesizing from %d/%d drafts (quorum %d)",
+	logx.Infof("[fusion] %s: synthesizing from %d/%d drafts (quorum %d)",
 		request.Route, len(successes), len(request.Recipe.Panel), quorum)
 	return engine.finish(&run, request.Recipe.Synthesizer, synthesisBody, ports)
 }

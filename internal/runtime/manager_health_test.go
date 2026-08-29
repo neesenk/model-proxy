@@ -12,7 +12,7 @@ func TestPinsResetAndResolverHelpers(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	m := NewManager(4)
+	m := newTestManager(4)
 	targets := []Target{
 		{Provider: "direct"},
 		{Provider: "pool#a", Parent: "pool"},
@@ -84,7 +84,7 @@ func TestHealthCircuitHalfOpenAndSuccess(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	m := NewManager(9)
+	m := newTestManager(9)
 	if !m.TargetHealthy("new", "m", now) {
 		t.Fatal("unknown provider should be healthy")
 	}
@@ -184,7 +184,7 @@ func TestModelParamAndRateLimitGenerationResults(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	m := NewManager(5)
+	m := newTestManager(5)
 	if m.ModelLocked("p", "m", now) {
 		t.Fatal("missing model lock reported active")
 	}
@@ -233,7 +233,7 @@ func TestCooldownAndRecoveredState(t *testing.T) {
 
 	now := time.Date(2026, 7, 29, 14, 0, 0, 0, time.UTC)
 	targets := []Target{{Provider: "a"}, {Provider: "b"}}
-	m := NewManager(1)
+	m := newTestManager(1)
 	quotaMaxAge := 15 * time.Minute
 
 	if down, rate, earliest := m.CooldownState(nil, now, quotaMaxAge); down || rate || !earliest.IsZero() {
@@ -297,7 +297,7 @@ func TestCooldownStateTreatsQuotaExhaustionAsRateLimitedDown(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	maxAge := 15 * time.Minute
 	targets := []Target{{Provider: "plan"}}
-	m := NewManager(1)
+	m := newTestManager(1)
 
 	exhausted := func(asOf time.Time, resetsAt time.Time) *provider.QuotaSnapshot {
 		return &provider.QuotaSnapshot{
@@ -361,7 +361,7 @@ func TestHasRecoveredUntriedIgnoresQuotaExhausted(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	maxAge := 15 * time.Minute
 	targets := []Target{{Provider: "plan"}}
-	m := NewManager(1)
+	m := newTestManager(1)
 	m.SetQuota("plan", &provider.QuotaSnapshot{
 		Billing: provider.BillingPlan, AsOf: now,
 		Windows: []provider.QuotaWindow{{Ultimate: true, RemainingPct: 0, ResetsAt: now.Add(time.Hour)}},

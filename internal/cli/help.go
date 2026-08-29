@@ -6,7 +6,6 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
-	"os"
 	"sort"
 )
 
@@ -22,11 +21,11 @@ Commands:
   serve status         Show running daemon status (providers/schedule/quota/tokens)
   takeover <client>    Rewrite client config to point at the proxy
   restore <client>     Restore client config from backup
-  login <provider>     Login to a provider (aqp | codex | zcode)
+  login <provider>     Login to a provider (aqp | codex | zcode | zhipu | deepseek | kimi-code | qwen-plan | volcengine)
   add <preset>         Add a provider preset to config.yaml and log in
   presets list         List built-in provider presets
   logout <provider>    Clear provider credentials
-  usage <provider>     Show usage / credits for a provider
+  usage [provider]     Show usage / credits (no provider = all configured)
   models               List models from all providers (from config)
   models <provider>    List models for one provider
   models refresh <provider>  Fetch live model list from a provider
@@ -132,9 +131,10 @@ See also: presets list`,
 
   Clear stored credentials for a provider.`,
 
-	"usage": `usage <provider> [--config PATH]
+	"usage": `usage [provider] [--config PATH]
 
-  Show usage / credits for a provider.`,
+  Show usage / credits for a provider. With no provider, shows all
+  configured providers.`,
 
 	"models": `models [subcommand] [provider] [--config PATH]
 
@@ -258,6 +258,13 @@ Flags:
   endpoint lands in a .err file instead and never overwrites a good .sse.
   Credentials come from login. Review recordings for sensitive content
   before committing them.`,
+
+	"shadow": `shadow report [--from TIME] [--to TIME] [--config PATH]
+
+  Shadow-evaluation aggregation from the running daemon's
+  /api/shadow-report endpoint: per (route, primary, shadow) samples,
+  status-match rate, latency diff and response-size ratio. Requires a
+  running daemon with shadow routes configured and request_log enabled.`,
 }
 
 // takesProvider reports whether the command requires a <provider> argument
@@ -270,13 +277,9 @@ func TakesProvider(cmd string) bool {
 	return false
 }
 
-// printConfigProviders loads the config (best-effort) and lists the providers
-// defined under providers:, so the user knows what to pass as <provider>.
-// Silently skips if no config is available or it has no providers.
-func PrintConfigProviders(args []string) {
-	PrintConfigProvidersTo(os.Stdout, args)
-}
-
+// PrintConfigProvidersTo loads the config (best-effort) and lists the
+// providers defined under providers:, so the user knows what to pass as
+// <provider>. Silently skips if no config is available or it has no providers.
 func PrintConfigProvidersTo(out io.Writer, args []string) {
 	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
 	if err != nil || len(cfg.Providers) == 0 {

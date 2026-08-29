@@ -7,14 +7,15 @@ import (
 	"strings"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/provider"
 )
 
 func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	// IDs are derived from credentials (AccountID), like login does.
-	accountID := AccountIDFor("static", AccountCred{APIKey: "test-key"})
-	if err := SavePool("up", "static", CredentialPool{Accounts: []PoolAccount{{
+	accountID := accounts.AccountID("static", AccountCred{APIKey: "test-key"})
+	if err := AccountStore().Save("up", "static", CredentialPool{Accounts: []PoolAccount{{
 		ID:     accountID,
 		APIKey: "test-key",
 	}}}); err != nil {
@@ -53,7 +54,7 @@ func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.
 
 	w := NewWebServer(p, "test-config.yaml")
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest(
+	serveWeb(w, rec, httptest.NewRequest(
 		http.MethodPost,
 		"/api/accounts/up/"+accountID+"/test",
 		strings.NewReader(""),

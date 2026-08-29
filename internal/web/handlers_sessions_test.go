@@ -57,7 +57,7 @@ func TestHandleSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	serveWebRequest(server, rec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 	}
@@ -90,7 +90,7 @@ func TestHandleSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server2.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	serveWebRequest(server2, rec2, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
 	if rec2.Code != http.StatusOK || !bytes.Contains(rec2.Body.Bytes(), []byte(`"enabled":false`)) {
 		t.Fatalf("disabled status = %d body = %s", rec2.Code, rec2.Body)
 	}

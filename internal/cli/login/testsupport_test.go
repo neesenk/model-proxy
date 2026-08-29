@@ -34,16 +34,6 @@ func writePoolFile(t *testing.T, name, providerID string, keys ...string) {
 	}
 }
 
-// writeTempConfig writes a YAML config body into a temp dir.
-func writeTempConfig(t *testing.T, body string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 // minimalConfig is the shared one-provider login fixture.
 const minimalConfig = `listen: 127.0.0.1:15721
 providers:
@@ -69,26 +59,6 @@ func grabStdout(t *testing.T, fn func()) string {
 	}
 	os.Stdout = w
 	defer func() { os.Stdout = orig }()
-	done := make(chan string)
-	go func() {
-		b, _ := io.ReadAll(r)
-		done <- string(b)
-	}()
-	fn()
-	w.Close()
-	return <-done
-}
-
-// grabStderr captures os.Stderr during fn.
-func grabStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-	defer func() { os.Stderr = orig }()
 	done := make(chan string)
 	go func() {
 		b, _ := io.ReadAll(r)

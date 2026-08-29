@@ -244,6 +244,7 @@ takeover:
   opencode: ~/.config/opencode/opencode.json
   codex: ~/.codex/config.toml
   pi: ~/.pi/agent/models.json
+  # kimi: ~/.kimi/config.toml
 
 # Per-request access log: writes the full request + response body of each
 # committed upstream call as one JSONL line to a rotating file under dir, for
@@ -257,10 +258,15 @@ takeover:
 #   max_body_bytes: 5242880             # 5MB cap per body (truncates past it)
 #   retention: 720h                     # 30d; delete rotated files older than this; 0 = forever
 
-# Web admin UI + JSON API (/ui/ + /api/). Enabled by default; no auth, so listen
-# must stay loopback (enforced at startup). Uncomment to disable:
+# Web admin UI + JSON API (/ui/ + /api/). Enabled by default. Without the
+# optional auth below, listen must stay loopback (enforced at startup);
+# configuring both auth files allows a non-loopback listen. Uncomment to
+# disable, or to enable auth:
 # web:
 #   enabled: false
+#   auth:
+#     admin_token_file: ~/.model-proxy/admin_token
+#     api_keys_file: ~/.model-proxy/api_keys
 
 # Call statistics (SQLite; per provider×model×minute buckets incl. latency/TTFT
 # and per-agent dims; powers the `stats` CLI and Web UI Analytics/Requests

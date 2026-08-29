@@ -123,7 +123,6 @@ type LoopbackServer struct {
 	CookieCh chan string
 	ErrCh    chan error
 	srv      *http.Server
-	port     int
 	ln       net.Listener
 }
 
@@ -139,15 +138,11 @@ func NewLoopbackServer() (*LoopbackServer, error) {
 	addr := ln.Addr().(*net.TCPAddr)
 	return &LoopbackServer{
 		addr:     fmt.Sprintf("127.0.0.1:%d", addr.Port),
-		port:     addr.Port,
 		ln:       ln,
 		CookieCh: make(chan string, 1),
 		ErrCh:    make(chan error, 1),
 	}, nil
 }
-
-// Port returns the bound port.
-func (l *LoopbackServer) Port() int { return l.port }
 
 // CallbackURL returns the full callback URL.
 func (l *LoopbackServer) CallbackURL() string {
@@ -218,18 +213,6 @@ func (l *LoopbackServer) handle(w http.ResponseWriter, r *http.Request) {
 	select {
 	case l.CookieCh <- cookie:
 	default:
-	}
-}
-
-// WaitForCookie blocks until the cookie arrives or times out.
-func (l *LoopbackServer) WaitForCookie(timeout time.Duration) (string, error) {
-	select {
-	case c := <-l.CookieCh:
-		return c, nil
-	case err := <-l.ErrCh:
-		return "", err
-	case <-time.After(timeout):
-		return "", fmt.Errorf("login success page timed out")
 	}
 }
 

@@ -16,6 +16,15 @@ provider，单数 `<name>_apikey.json` 仅作为只读 fallback，包装成一�
 不得自行读取 HOME，也不得依赖 Config、Provider、Proxy、Web/CLI 或执行网络
 验证。`internal/app/accounts_store.go` 只负责 HOME 适配和兼容入口。
 
+存储后端由 config `credentials:` 选择（`accounts.Backend`）：`file`（默认）把
+秘密值内联在 0600 pool JSON；`keychain` 经 credstore 把 api_key/access_key/
+secret_key 写入 OS keychain（service "model-proxy"），pool 文件只含 metadata
+（`{version, accounts:[{id,label,added_at,...}]}`，秘密字段为空）——读写路径为
+`saveKeychain`/`loadSnapshotKeychain`，keychain 不可达或缺条目 fail-closed。
+keychain→file 切回有反向回迁（`restoreFromKeychain`）：file 模式读到纯 metadata
+池时按条目从 keychain 读回秘密并原子重写明文池，缺条目的账号保留 metadata 并经
+`Snapshot.ReloginNeeded` 报出需重新 login。
+
 `Store.Save` 与 `Store.LoadSnapshot` 使用同一套账号语义校验；保存调用必须传入
 provider ID。非法 ID、空 key、重复 ID 或不完整的 Volcengine AK/SK 在写临时文件
 前即失败，不能覆盖磁盘上已有的有效 pool。
@@ -78,7 +87,7 @@ resolver 负责 identity mapping 和健康预过滤，不负责占用 half-open 
 
 resolver 不持有 composition root `*Proxy`；它只依赖 `resolverState` 暴露的
 Manager health gate 与 generation-aware spread index 能力，以及当前
-`runtimeSnapshot` 的 provider/pool map。无 session 的 spread 推进必须携带该
+`RuntimeSnapshot` 的 provider/pool map。无 session 的 spread 推进必须携带该
 snapshot 的 generation；reload 后到达的旧请求不得改变新 generation 的轮询
 位置。因此 pooled identity 选择不能顺带访问 reload、完整调度、Web 或其他
 Proxy 状态，也不得自行持有 health/spread map。

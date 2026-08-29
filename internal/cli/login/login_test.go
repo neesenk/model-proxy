@@ -95,8 +95,12 @@ func TestLogin_FullFlowWithMockAqp(t *testing.T) {
 		}
 		resp.Body.Close()
 	}()
-	if _, err := ls.WaitForCookie(5 * time.Second); err != nil {
+	select {
+	case <-ls.CookieCh:
+	case err := <-ls.ErrCh:
 		t.Fatalf("wait callback: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait callback: timed out")
 	}
 
 	// 3. Poll session (jar carries SSO_A; mock upgrades to SSO_C).
@@ -226,7 +230,11 @@ func TestLoopbackServer_RejectsForeignHost(t *testing.T) {
 	if gresp.StatusCode != http.StatusOK {
 		t.Errorf("genuine callback status=%d want %d", gresp.StatusCode, http.StatusOK)
 	}
-	if _, err := ls.WaitForCookie(time.Second); err != nil {
+	select {
+	case <-ls.CookieCh:
+	case err := <-ls.ErrCh:
 		t.Fatalf("login did not complete after hostile probe: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("login did not complete after hostile probe: timed out")
 	}
 }

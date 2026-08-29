@@ -139,7 +139,7 @@ func TestResolve(t *testing.T) {
 
 func TestStoreSnapshotCorrectionAndRestore(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	store := NewStore()
+	store := &Store{}
 	store.Put("a", Capabilities{
 		BaseURL: "https://a", Responses: Yes, Anthropic: No, ProbedAt: now,
 	})
@@ -193,7 +193,7 @@ func TestStoreSnapshotCorrectionAndRestore(t *testing.T) {
 }
 
 func TestStoreConcurrentAccess(t *testing.T) {
-	store := NewStore()
+	store := &Store{}
 	start := make(chan struct{})
 	done := make(chan struct{}, 2)
 	for i := 0; i < 2; i++ {

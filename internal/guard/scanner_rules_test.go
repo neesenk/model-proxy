@@ -146,13 +146,13 @@ func TestEmbeddedRuleFixtures(t *testing.T) {
 			continue
 		}
 		delete(fixtures, r.name)
-		if got := Scan([]byte(fx.positive)); len(got) != 1 || got[0] != r.name {
+		if got := defaultRulesScanner.Scan([]byte(fx.positive)); len(got) != 1 || got[0] != r.name {
 			t.Errorf("%s positive: Scan = %v, want exactly [%s]", r.name, got, r.name)
 		}
-		if got := Scan([]byte(fx.negative)); len(got) != 0 {
+		if got := defaultRulesScanner.Scan([]byte(fx.negative)); len(got) != 0 {
 			t.Errorf("%s negative: Scan = %v, want no hits", r.name, got)
 		}
-		if redacted := Redact([]byte(fx.positive)); strings.Contains(string(redacted), fx.positive) {
+		if redacted := defaultRulesScanner.Redact([]byte(fx.positive)); strings.Contains(string(redacted), fx.positive) {
 			t.Errorf("%s positive: Redact left the secret in the body", r.name)
 		}
 	}
@@ -166,13 +166,13 @@ func TestEmbeddedRuleFixtures(t *testing.T) {
 func TestEntropyPostFilter(t *testing.T) {
 	// gitlab_pat has entropy 3; 20 identical chars score 0.
 	low := "glpat-" + strings.Repeat("a", 20)
-	if got := Scan([]byte(low)); len(got) != 0 {
+	if got := defaultRulesScanner.Scan([]byte(low)); len(got) != 0 {
 		t.Errorf("Scan(low-entropy glpat lookalike) = %v, want no hits", got)
 	}
 	// A rule without an entropy threshold (model-proxy anthropic) still hits
 	// on the same low-entropy shape — the filter is per-rule.
 	noEntropy := "sk-ant-" + strings.Repeat("a", 25)
-	if got := Scan([]byte(noEntropy)); len(got) != 1 || got[0] != "anthropic_api_key" {
+	if got := defaultRulesScanner.Scan([]byte(noEntropy)); len(got) != 1 || got[0] != "anthropic_api_key" {
 		t.Errorf("Scan(low-entropy sk-ant) = %v, want [anthropic_api_key]", got)
 	}
 }
@@ -322,7 +322,7 @@ func TestCaseVariantFixtures(t *testing.T) {
 		{"slack_config_access_token", kv("slack", "xoxe.xoxp-1-"+c(164, upper36))},
 	}
 	for _, tc := range positives {
-		if got := Scan([]byte(tc.body)); len(got) != 1 || got[0] != tc.name {
+		if got := defaultRulesScanner.Scan([]byte(tc.body)); len(got) != 1 || got[0] != tc.name {
 			t.Errorf("%s case-variant positive: Scan = %v, want exactly [%s]", tc.name, got, tc.name)
 		}
 	}
@@ -338,7 +338,7 @@ func TestCaseVariantFixtures(t *testing.T) {
 		"jwt header too short J": kv("token", "eyJ"+c(5, alphaAlnum)+".eyJ"+c(20, alphaWord+"/")+"."+c(12, alphaWord+"/")),
 	}
 	for name, body := range negatives {
-		if got := Scan([]byte(body)); len(got) != 0 {
+		if got := defaultRulesScanner.Scan([]byte(body)); len(got) != 0 {
 			t.Errorf("%s: Scan = %v, want no hits", name, got)
 		}
 	}
@@ -353,17 +353,17 @@ func TestAwsAccessKeyIDEntropyFilter(t *testing.T) {
 	rng := newFixtureRNG(0xba64)
 	blob := base64.StdEncoding.EncodeToString([]byte(rng.chars(256, alphaAlnum)))
 	// Random base64 attachment content alone is clean.
-	if got := Scan([]byte(blob)); len(got) != 0 {
+	if got := defaultRulesScanner.Scan([]byte(blob)); len(got) != 0 {
 		t.Fatalf("random base64 blob: Scan = %v, want no hits", got)
 	}
 	// Repetitive (low-entropy) AKIA-shaped window on its own wrapped line.
 	low := blob[:40] + "\nAKIA" + strings.Repeat("AB", 8) + "\n" + blob[40:]
-	if got := Scan([]byte(low)); len(got) != 0 {
+	if got := defaultRulesScanner.Scan([]byte(low)); len(got) != 0 {
 		t.Errorf("low-entropy AKIA window in base64 content: Scan = %v, want no hits", got)
 	}
 	// High-entropy window in the same surroundings still reports.
 	high := blob[:40] + "\nAKIA" + rng.chars(16, alphaUpper32) + "\n" + blob[40:]
-	if got := Scan([]byte(high)); len(got) != 1 || got[0] != "aws_access_key_id" {
+	if got := defaultRulesScanner.Scan([]byte(high)); len(got) != 1 || got[0] != "aws_access_key_id" {
 		t.Errorf("high-entropy AKIA window in base64 content: Scan = %v, want [aws_access_key_id]", got)
 	}
 }

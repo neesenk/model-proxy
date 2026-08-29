@@ -215,11 +215,11 @@ func TestRestoreFromKeychainMixedPoolStillRejected(t *testing.T) {
 func TestSetProcessCredentialsModeAppliesPoolBackend(t *testing.T) {
 	SetProcessCredentialsMode("keychain")
 	t.Cleanup(func() { SetProcessCredentialsMode("file") })
-	if got := NewStore(t.TempDir()).Backend(); got != BackendKeychain {
+	if got := NewStore(t.TempDir()).backend; got != BackendKeychain {
 		t.Fatalf("NewStore backend after SetProcessCredentialsMode(keychain) = %v, want keychain", got)
 	}
 	SetProcessCredentialsMode("file")
-	if got := NewStore(t.TempDir()).Backend(); got != BackendFile {
+	if got := NewStore(t.TempDir()).backend; got != BackendFile {
 		t.Fatalf("NewStore backend after SetProcessCredentialsMode(file) = %v, want file", got)
 	}
 }

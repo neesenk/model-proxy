@@ -27,7 +27,7 @@ func guardRequest(t *testing.T, method, path, origin, host string) *httptest.Res
 		request.Host = host
 	}
 	recorder := httptest.NewRecorder()
-	server.ServeHTTP(recorder, request)
+	serveWebRequest(server, recorder, request)
 	return recorder
 }
 
@@ -81,7 +81,7 @@ func TestGuardServesUIDenyListing(t *testing.T) {
 	request.Header.Set("Origin", "http://attacker.rebound:8123")
 	request.Host = "attacker.rebound:8123"
 	recorder := httptest.NewRecorder()
-	newGuardServer(t).ServeHTTP(recorder, request)
+	serveWebRequest(newGuardServer(t), recorder, request)
 	if recorder.Code != http.StatusForbidden {
 		t.Errorf("ui via rebinding: status=%d, want 403", recorder.Code)
 	}

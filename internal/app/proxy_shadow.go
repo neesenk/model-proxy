@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"time"
 
 	"model-proxy/internal/observe/requestlog"
@@ -92,7 +92,7 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		// Defensive: RuntimeSnapshot is handed around as a plain value — a
 		// future call site that forgets to populate it must not nil-deref
 		// below (runtime.Cfg.Scheduling.Timeout()). Log loudly and skip.
-		log.Printf("[shadow] %s: skipped — runtime snapshot has no config (caller bug)", shadowTarget.Provider)
+		logx.Warnf("[shadow] %s: skipped — runtime snapshot has no config (caller bug)", shadowTarget.Provider)
 		return
 	}
 	logger := p.reqLog
@@ -112,7 +112,7 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		runtime.Generation,
 	).Pick(target, "")
 	if !ok {
-		log.Printf("[shadow] %s: provider not available (no runnable healthy virtual)", shadowTarget.Provider)
+		logx.Warnf("[shadow] %s: provider not available (no runnable healthy virtual)", shadowTarget.Provider)
 		return
 	}
 	target = picked
@@ -120,7 +120,7 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		runtime: runtime, target: target, clientProto: bodyProto, clientPath: protocol.BackendPath(protocol.Protocol(bodyProto)),
 	})
 	if err != nil {
-		log.Printf("[shadow] %s: target plan failed: %v", target.Provider, err)
+		logx.Warnf("[shadow] %s: target plan failed: %v", target.Provider, err)
 		return
 	}
 	// Tie the shadow execution to the lifecycle stop channel with a grace
@@ -147,7 +147,7 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		MaxBodyBytes: logger.MaxBodyBytes(),
 	})
 	if result.Err != nil {
-		log.Printf("[shadow] %s/%s execution failed: %v", target.Provider, target.Model, result.Err)
+		logx.Warnf("[shadow] %s/%s execution failed: %v", target.Provider, target.Model, result.Err)
 		// Once upstream response headers exist, preserve the historical
 		// best-effort request-log record even when draining the body times out or
 		// is cut short. Preparation/transport failures have no response to log.

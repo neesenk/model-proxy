@@ -85,10 +85,6 @@ func (server *WebServer) Close() {
 	server.server.Close()
 }
 
-func (server *WebServer) Serve(response http.ResponseWriter, request *http.Request) {
-	server.server.ServeHTTP(response, request)
-}
-
 // SetLogFile records the daemon log path shown in the UI.
 func (server *WebServer) SetLogFile(path string) { server.logFile = path }
 

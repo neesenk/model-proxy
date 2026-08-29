@@ -1,7 +1,7 @@
 package stats
 
 import (
-	"log"
+	"model-proxy/internal/observe/logx"
 	"time"
 
 	obscounters "model-proxy/internal/observe/counters"
@@ -30,19 +30,19 @@ func Bootstrap(
 ) BootstrapResult {
 	store, err := Open(Options{Path: path, Retention: retention})
 	if err != nil {
-		log.Printf("[stats] open failed (%s): %v - running without persisted stats", path, err)
+		logx.Warnf("[stats] open failed (%s): %v - running without persisted stats", path, err)
 		return BootstrapResult{}
 	}
 
 	if count, err := store.ImportLegacyTokens(LegacyTokensPath(homeDir)); err != nil {
-		log.Printf("[stats] legacy token_usage.json migration failed: %v", err)
+		logx.Warnf("[stats] legacy token_usage.json migration failed: %v", err)
 	} else if count > 0 {
-		log.Printf("[stats] imported %d entries from legacy token_usage.json", count)
+		logx.Infof("[stats] imported %d entries from legacy token_usage.json", count)
 	}
 
 	baseline, err := store.LoadCumulative()
 	if err != nil {
-		log.Printf("[stats] load baseline failed: %v", err)
+		logx.Warnf("[stats] load baseline failed: %v", err)
 		baseline = map[Key]Counters{}
 	}
 	for key, base := range baseline {

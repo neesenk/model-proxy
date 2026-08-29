@@ -11,7 +11,7 @@
 | zhipu / zcode / deepseek / kimi-code / qwen-plan | apikey | `~/.model-proxy/<name>_apikeys.json`（账号池）；旧单数 `_apikey.json` 仅只读 fallback |
 | volcengine | apikey | `~/.model-proxy/<name>_apikeys.json` — 每账号 `{api_key, access_key, secret_key}`；旧单数仅 fallback |
 
-路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `codex-work`）。多账号见 `docs/architecture/provider-pools.md`。所有路径（CLI `login`、`buildOne`、web 异步登录、`logout`）一律用 config name，**包括 aqp/codex**（`runLogin`/`cmdCodexLogin` 接收 `provName` → `authFilePath(provName, "oauth_auth")`）；曾有的「CLI login 硬编码 provider_id → 非同名实例读写错位」bug 已修，`TestAqpCodexLogin_UsesConfigNameForAuthFile` 守护。
+路径从 provider name（config 一级 key）派生，支持多实例（如 `zhipu-personal` / `codex-work`）。多账号见 `docs/architecture/provider-pools.md`。所有路径（CLI `login`、`BuildOne`、web 异步登录、`logout`）一律用 config name，**包括 aqp/codex**（`RunLogin`/`runCodexLoginFlow` 接收 `provName` → login 内部 `oauthAuthFilePath(HomeDir(), provName)`，与 `internal/accounts` 的 `AuthFilePath(provName, "oauth_auth")` 同一路径）；曾有的「CLI login 硬编码 provider_id → 非同名实例读写错位」bug 已修，`TestAqpCodexLogin_UsesConfigNameForAuthFile` 守护。
 
 ## compass 网关契约（实测）
 

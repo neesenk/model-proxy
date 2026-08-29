@@ -10,16 +10,17 @@ import (
 	"strings"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/provider"
 )
 
 func TestAccountsListMasked(t *testing.T) {
 	setPoolHome(t, t.TempDir())
-	if err := SavePool("zhipu", "zhipu", CredentialPool{
+	if err := AccountStore().Save("zhipu", "zhipu", CredentialPool{
 		Version: 1,
 		Accounts: []PoolAccount{{
 			// ID is derived from the credential (AccountID), like login does.
-			ID:        AccountIDFor("zhipu", AccountCred{APIKey: "sk-secret-key-1234567890"}),
+			ID:        accounts.AccountID("zhipu", AccountCred{APIKey: "sk-secret-key-1234567890"}),
 			Label:     "work",
 			APIKey:    "sk-secret-key-1234567890",
 			AccessKey: "AK-LEAK-12345",
@@ -31,7 +32,7 @@ func TestAccountsListMasked(t *testing.T) {
 	}
 	w, _ := newTestWeb(t)
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("GET", "/api/accounts", nil))
+	serveWeb(w, rec, httptest.NewRequest("GET", "/api/accounts", nil))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -54,7 +55,7 @@ func TestAccountsListMasked(t *testing.T) {
 	}
 	// The real account id MUST be present (unmasked) — the UI sends it back on
 	// remove, so masking it would break deletion.
-	if want := AccountIDFor("zhipu", AccountCred{APIKey: "sk-secret-key-1234567890"}); !strings.Contains(body, `"id":"`+want+`"`) {
+	if want := accounts.AccountID("zhipu", AccountCred{APIKey: "sk-secret-key-1234567890"}); !strings.Contains(body, `"id":"`+want+`"`) {
 		t.Errorf("real id (for removal) missing:\n%s", body)
 	}
 	if !strings.Contains(body, `"label":"work"`) {
@@ -92,7 +93,7 @@ func TestAccountsListCodex(t *testing.T) {
 	p.mu.Unlock()
 
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("GET", "/api/accounts", nil))
+	serveWeb(w, rec, httptest.NewRequest("GET", "/api/accounts", nil))
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -182,7 +183,7 @@ func TestAccountsAddRemove(t *testing.T) {
 	// from accidentally swallowing these into the apikey path.
 	for _, name := range []string{"aqp", "codex"} {
 		rec := httptest.NewRecorder()
-		w.Serve(rec, httptest.NewRequest("POST", "/api/accounts/"+name,
+		serveWeb(w, rec, httptest.NewRequest("POST", "/api/accounts/"+name,
 			strings.NewReader(`{"api_key":"x"}`)))
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s add status=%d want 400 (async flow): %s", name, rec.Code, rec.Body.String())
@@ -194,7 +195,7 @@ func TestAccountsAddRemove(t *testing.T) {
 
 	// unknown provider add → 404 (route table + 404 contract intact).
 	rec404 := httptest.NewRecorder()
-	w.Serve(rec404, httptest.NewRequest("POST", "/api/accounts/nope",
+	serveWeb(w, rec404, httptest.NewRequest("POST", "/api/accounts/nope",
 		strings.NewReader(`{"api_key":"x"}`)))
 	if rec404.Code != http.StatusNotFound {
 		t.Errorf("unknown provider add status=%d want 404", rec404.Code)
@@ -202,7 +203,7 @@ func TestAccountsAddRemove(t *testing.T) {
 
 	// apikey add: validate (200 from usage mock) → save to pool → reload (best-effort).
 	rec := httptest.NewRecorder()
-	w.Serve(rec, httptest.NewRequest("POST", "/api/accounts/zhipu",
+	serveWeb(w, rec, httptest.NewRequest("POST", "/api/accounts/zhipu",
 		strings.NewReader(`{"api_key":"sk-test-1234567890","label":"work"}`)))
 	if rec.Code != 200 {
 		t.Fatalf("add status=%d body=%s", rec.Code, rec.Body.String())
@@ -218,7 +219,7 @@ func TestAccountsAddRemove(t *testing.T) {
 
 	// remove → pool emptied.
 	rec2 := httptest.NewRecorder()
-	w.Serve(rec2, httptest.NewRequest("DELETE", "/api/accounts/zhipu/"+id, nil))
+	serveWeb(w, rec2, httptest.NewRequest("DELETE", "/api/accounts/zhipu/"+id, nil))
 	if rec2.Code != 200 {
 		t.Fatalf("remove status=%d body=%s", rec2.Code, rec2.Body.String())
 	}
@@ -229,21 +230,21 @@ func TestAccountsAddRemove(t *testing.T) {
 
 	// remove with a missing id segment → 400 (not a panic / 500).
 	rec3 := httptest.NewRecorder()
-	w.Serve(rec3, httptest.NewRequest("DELETE", "/api/accounts/zhipu", nil))
+	serveWeb(w, rec3, httptest.NewRequest("DELETE", "/api/accounts/zhipu", nil))
 	if rec3.Code != http.StatusBadRequest {
 		t.Errorf("malformed remove status=%d want 400: %s", rec3.Code, rec3.Body.String())
 	}
 
 	// remove on unknown provider → 404 (route table intact).
 	rec404b := httptest.NewRecorder()
-	w.Serve(rec404b, httptest.NewRequest("DELETE", "/api/accounts/nope/x", nil))
+	serveWeb(w, rec404b, httptest.NewRequest("DELETE", "/api/accounts/nope/x", nil))
 	if rec404b.Code != http.StatusNotFound {
 		t.Errorf("remove unknown provider status=%d want 404", rec404b.Code)
 	}
 
 	// add JSON decode failure → 400.
 	recBad := httptest.NewRecorder()
-	w.Serve(recBad, httptest.NewRequest("POST", "/api/accounts/zhipu",
+	serveWeb(w, recBad, httptest.NewRequest("POST", "/api/accounts/zhipu",
 		strings.NewReader(`{not-json`)))
 	if recBad.Code != http.StatusBadRequest {
 		t.Errorf("bad-json add status=%d want 400: %s", recBad.Code, recBad.Body.String())
@@ -261,7 +262,7 @@ func TestAccountsAddRemove(t *testing.T) {
 	p.cfg.Providers["zhipu"] = Provider{Provider: "zhipu", OpenAIBaseURL: "https://x", UsageURL: badUp.URL}
 	p.mu.Unlock()
 	recVal := httptest.NewRecorder()
-	w.Serve(recVal, httptest.NewRequest("POST", "/api/accounts/zhipu",
+	serveWeb(w, recVal, httptest.NewRequest("POST", "/api/accounts/zhipu",
 		strings.NewReader(`{"api_key":"sk-bad"}`)))
 	if recVal.Code != http.StatusBadRequest {
 		t.Errorf("validation-failed add status=%d want 400: %s", recVal.Code, recVal.Body.String())

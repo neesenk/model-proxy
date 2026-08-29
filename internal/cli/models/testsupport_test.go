@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
 )
 
@@ -24,23 +25,13 @@ func writePoolFile(t *testing.T, name, providerID string, keys ...string) {
 	pool := app.CredentialPool{Version: 1}
 	for _, key := range keys {
 		pool.Accounts = append(pool.Accounts, app.PoolAccount{
-			ID:    app.AccountIDFor(providerID, app.AccountCred{APIKey: key}),
+			ID:    accounts.AccountID(providerID, app.AccountCred{APIKey: key}),
 			Label: key, APIKey: key, AddedAt: "2026-07-08",
 		})
 	}
-	if err := app.SavePool(name, providerID, pool); err != nil {
+	if err := app.AccountStore().Save(name, providerID, pool); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// writeTempConfig writes a YAML config body into a temp dir.
-func writeTempConfig(t *testing.T, body string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 
 // minimalConfig is the shared one-provider models fixture.

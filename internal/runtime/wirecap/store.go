@@ -62,14 +62,11 @@ type Capabilities struct {
 }
 
 // Store owns the leaf lock and provider-parent keyed capability map.
-// Methods never call application code while holding the lock.
+// Methods never call application code while holding the lock. The zero value
+// is ready for use; the map is allocated lazily by Put.
 type Store struct {
 	mu   sync.RWMutex
 	caps map[string]Capabilities
-}
-
-func NewStore() *Store {
-	return &Store{caps: map[string]Capabilities{}}
 }
 
 func (store *Store) Get(parent string) (Capabilities, bool) {

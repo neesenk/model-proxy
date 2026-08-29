@@ -183,25 +183,6 @@ func assertPersistedGeneration(t *testing.T, p *Proxy, providerName string, empt
 	}
 }
 
-func assertSnapshotGeneration(t *testing.T, state runtimestate.PersistedFullSnapshot, cfg *Config, providerName string) {
-	t.Helper()
-	if got, want := state.HealthFP, healthConfigFingerprint(cfg); got != want {
-		t.Fatalf("snapshot fingerprint = %q, want %q", got, want)
-	}
-	if len(state.Providers) != 1 || state.Providers[providerName].Billing != provider.BillingPlan {
-		t.Fatalf("snapshot quota is mixed or missing for %q: %+v", providerName, state.Providers)
-	}
-	if len(state.Health) != 1 {
-		t.Fatalf("snapshot health is mixed or missing for %q: %+v", providerName, state.Health)
-	}
-	if _, ok := state.Health[providerName]; !ok {
-		t.Fatalf("snapshot health missing %q: %+v", providerName, state.Health)
-	}
-	if len(state.Sticky) != 1 || state.Sticky["m"].Provider != providerName {
-		t.Fatalf("snapshot sticky is mixed or missing for %q: %+v", providerName, state.Sticky)
-	}
-}
-
 // TestReload_PersistedSnapshotMatchesGeneration deterministically verifies the
 // complete persisted tuple. Each reload must first write the new fingerprint
 // with empty quota/health/sticky, then a seeded current-generation snapshot must

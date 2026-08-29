@@ -63,22 +63,6 @@ func (m *Manager) storeQualityLocked(next map[string]providerQuality) {
 	m.quality.Store(&next)
 }
 
-// seedQuality replaces the whole quality state in one publication. Test
-// paths only; record paths use the per-entry copy-on-write updates. The
-// state is copied before publishing: a caller that retains and mutates its
-// map must not be able to break the copy-on-write invariant (published maps
-// are never mutated in place).
-func (m *Manager) seedQuality(state map[string]providerQuality) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ensureLocked()
-	cp := make(map[string]providerQuality, len(state))
-	for k, v := range state {
-		cp[k] = v
-	}
-	m.quality.Store(&cp)
-}
-
 // recordSample applies one error-rate sample (0 success / 1 failure). Caller
 // holds m.mu and has passed the generation check.
 func (m *Manager) recordQualityLocked(name string, sample float64, now time.Time) {
@@ -102,9 +86,11 @@ func (m *Manager) recordQualityLocked(name string, sample float64, now time.Time
 // RecordAttemptQuality folds a committed attempt's TTFT into the provider's
 // quality EWMA. Called from the effects layer on committed 2xx responses only
 // (terminal errors already flow through RecordFailure); TTFTMilliseconds <= 0
-// (no timing captured) updates nothing. Quality is heuristic state, so a
-// generation-less call applies to the current generation like other
-// GenerationArg-0 callers.
+// (no timing captured) updates nothing. TTFT samples pass the SAME generation
+// gate as the error-rate samples: the effects layer binds the request's
+// captured runtime generation, so a pre-reload in-flight commit cannot write
+// into the new generation's quality map. Generation-less (0) callers — outside
+// the request path — still apply to the current generation.
 func (m *Manager) RecordAttemptQuality(name string, ttft time.Duration, generation uint64) {
 	if ttft <= 0 {
 		return

@@ -3,6 +3,7 @@ package login
 import (
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -37,14 +38,18 @@ func TestLoopbackServer_PortHeldFromConstruction(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("callback status=%d want %d", resp.StatusCode, http.StatusOK)
 	}
-	if _, err := ls.WaitForCookie(time.Second); err != nil {
+	select {
+	case <-ls.CookieCh:
+	case err := <-ls.ErrCh:
 		t.Fatalf("self-callback did not complete the login signal: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("self-callback did not complete the login signal: timed out")
 	}
 }
 
-// --- LoopbackServer.Port ---
+// --- LoopbackServer.CallbackURL ---
 
-func TestLoopbackServer_Port(t *testing.T) {
+func TestLoopbackServer_CallbackURL(t *testing.T) {
 	ls, err := NewLoopbackServer()
 	if err != nil {
 		t.Fatal(err)
@@ -53,10 +58,10 @@ func TestLoopbackServer_Port(t *testing.T) {
 	if err := ls.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if ls.Port() == 0 {
-		t.Error("Port()=0 want non-zero after Start")
+	if !strings.HasPrefix(ls.CallbackURL(), "http://127.0.0.1:") {
+		t.Errorf("CallbackURL()=%q want a 127.0.0.1 loopback URL with the bound port", ls.CallbackURL())
 	}
-	if ls.CallbackURL() == "" {
-		t.Error("CallbackURL() empty after Start")
+	if !strings.HasSuffix(ls.CallbackURL(), LoginCompletePath) {
+		t.Errorf("CallbackURL()=%q want suffix %q", ls.CallbackURL(), LoginCompletePath)
 	}
 }

@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"net/http"
 	"net/url"
 	"strings"
@@ -86,7 +86,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 	timedWriter := newTimingResponseWriter(exchange.Writer)
 	exchange.Writer = timedWriter
 	if providerImpl == nil {
-		log.Printf("[proto=%s provider=%s] no runtime provider implementation (not logged in / unresolved pooled parent) — failing closed",
+		logx.Warnf("[proto=%s provider=%s] no runtime provider implementation (not logged in / unresolved pooled parent) — failing closed",
 			plan.ClientProtocol(), target.Provider)
 		executor.failover(target)
 		return Result{Outcome: OutcomeFailedHard}
@@ -115,7 +115,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		}
 		req, err := http.NewRequestWithContext(ctx, exchange.Request.Method, targetURL, bytes.NewReader(body))
 		if err != nil {
-			log.Printf("[proto=%s provider=%s] build upstream req: %v", plan.ClientProtocol(), target.Provider, err)
+			logx.Warnf("[proto=%s provider=%s] build upstream req: %v", plan.ClientProtocol(), target.Provider, err)
 			executor.release(target.Provider)
 			executor.failover(target)
 			return Result{Outcome: OutcomeFailedHard}
@@ -123,7 +123,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		copyHeaderWhitelist(req.Header, exchange.Request.Header, upstreamHeaderWhitelist...)
 		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		if err := providerImpl.AuthHeaders(req); err != nil {
-			log.Printf("[proto=%s provider=%s] auth error: %v", plan.ClientProtocol(), target.Provider, err)
+			logx.Warnf("[proto=%s provider=%s] auth error: %v", plan.ClientProtocol(), target.Provider, err)
 			executor.release(target.Provider)
 			executor.failover(target)
 			return Result{Outcome: OutcomeFailedHard}
@@ -144,7 +144,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 				executor.release(target.Provider)
 				return Result{Outcome: OutcomeClientGone}
 			}
-			log.Printf("[proto=%s provider=%s] upstream error: %v", plan.ClientProtocol(), target.Provider, err)
+			logx.Warnf("[proto=%s provider=%s] upstream error: %v", plan.ClientProtocol(), target.Provider, err)
 			executor.failure(target, true)
 			return Result{Outcome: OutcomeFailedHard}
 		}
@@ -161,11 +161,11 @@ func (executor Executor) Execute(attempt Attempt) Result {
 		if response.StatusCode == http.StatusUnauthorized {
 			response.Body.Close()
 			if authAttempt == 0 {
-				log.Printf("[proto=%s provider=%s] 401, refreshing auth", plan.ClientProtocol(), target.Provider)
+				logx.Debugf("[proto=%s provider=%s] 401, refreshing auth", plan.ClientProtocol(), target.Provider)
 				if refreshErr := providerImpl.Refresh(); refreshErr == nil {
 					continue
 				} else {
-					log.Printf("[proto=%s provider=%s] auth refresh failed: %v", plan.ClientProtocol(), target.Provider, refreshErr)
+					logx.Warnf("[proto=%s provider=%s] auth refresh failed: %v", plan.ClientProtocol(), target.Provider, refreshErr)
 				}
 			}
 			executor.failure(target, false)
@@ -178,7 +178,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			if executor.State != nil {
 				executor.State.RecordRateLimit(target.Provider, decision)
 				if decision.Kind != "" && decision.Kind != RateLimitTransient {
-					log.Printf("[proto=%s provider=%s] 429 classified %s — skipped until %s",
+					logx.Infof("[proto=%s provider=%s] 429 classified %s — skipped until %s",
 						plan.ClientProtocol(), target.Provider, decision.Kind, decision.Until.Format(time.RFC3339))
 				}
 			}
@@ -294,7 +294,7 @@ func (executor Executor) commit(
 		all, readErr := readCapped(response.Body, maxConvertBufferBytes)
 		response.Body.Close()
 		if readErr != nil {
-			log.Printf("[proto=%s provider=%s] %s→%s convert read failed: %v — failing closed",
+			logx.Warnf("[proto=%s provider=%s] %s→%s convert read failed: %v — failing closed",
 				plan.ClientProtocol(), dto.Target.Provider, plan.BackendProtocol(), plan.ClientProtocol(), readErr)
 			http.Error(
 				exchange.Writer,
@@ -305,7 +305,7 @@ func (executor Executor) commit(
 		}
 		converted, readErr = convertBuffered(all, response.StatusCode, convert, upstreamStream, clientWantsStream, plan, scope)
 		if readErr != nil {
-			log.Printf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
+			logx.Warnf("[proto=%s provider=%s] %s→%s convert response failed: %v — failing closed (would return wrong-protocol body)",
 				plan.ClientProtocol(), dto.Target.Provider, plan.BackendProtocol(), plan.ClientProtocol(), readErr)
 			http.Error(
 				exchange.Writer,
@@ -399,7 +399,7 @@ func (executor Executor) commit(
 		if executor.State != nil {
 			executor.State.RecordModelFailure(dto.Target)
 		}
-		log.Printf("[proto=%s provider=%s] 200 with zero-byte body — model locked post-commit; next request fails over",
+		logx.Warnf("[proto=%s provider=%s] 200 with zero-byte body — model locked post-commit; next request fails over",
 			plan.ClientProtocol(), dto.Target.Provider)
 	}
 	if recorder != nil && recorder.Complete() && len(recorder.Body()) > 0 {

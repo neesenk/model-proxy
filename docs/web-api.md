@@ -2,16 +2,34 @@
 
 > 从 AGENTS.md 拆出。**改 web/API/stats 前必读**。
 
-`web.enabled`（默认 true）时 daemon 同一 mux 挂 `/ui/`（embed 静态资源）和 `/api/`（JSON）。**无鉴权**；loopback 由 `internal/config` 校验强制——`requireLoopbackListen` 拒绝一切非回环 `listen`（`0.0.0.0`、空 host `:PORT`、`[::]`、内网 IP、域名），只放行 `127.x`/`[::1]`/`localhost`。
+`web.enabled`（默认 true）时 daemon 同一 mux 挂 `/ui/`（embed 静态资源）、`/api/`（JSON）和 `/metrics`（Prometheus exposition）。鉴权是**可选的 S2 层**（`web.auth`，见下节）：默认（loopback 部署）两个面都无鉴权，`internal/config` 的 `requireLoopbackListen` 拒绝非回环 `listen`（`0.0.0.0`、空 host `:PORT`、`[::]`、内网 IP、域名），只放行 `127.x`/`[::1]`/`localhost`；**配齐两个 auth 文件后非回环 listen 被允许**（`requireAuthForNonLoopback`：validate 先跑 loopback 检查，失败再看 S2 gate），面向 LAN/团队部署。
+
+## `web.auth`（S2 可选鉴权，`internal/webauth`）
+
+两个面各自独立开关，文件不配置 = 该面无鉴权（历史 loopback-trust 行为）：
+
+```yaml
+web:
+  auth:
+    admin_token_file: ~/.model-proxy/admin_token.txt   # admin 面：/ui/、/api/*、/metrics，及 web.enabled=false 时骑在 proxy handler 上的 admin 端点（/debug/*、/api/events）
+    api_keys_file: ~/.model-proxy/api_keys.txt          # 转发面：/v1/*、/v1/messages、/v1/models；/health 保持开放供 liveness 探针
+```
+
+- **文件格式**：一行一个 token；空行与 `#` 注释忽略（`webauth.loadTokens`）。
+- **校验细节**：token 从 `Authorization: Bearer <token>` 或 `x-api-key` 头提取（`BearerFromRequest`，OpenAI/Anthropic 客户端惯例都接受）；对整个 token 集做 constant-time compare（逐条 `subtle.ConstantTimeCompare` 后 OR），计时不泄漏命中位置。已配置但内容为空的集合拒绝一切。
+- **TTL 缓存 + fail-closed**：token 集缓存 10s（`cacheTTL`），文件编辑（轮换/吊销）无需重启/reload 即生效，hot path 不每请求读盘；文件**缺失或读不出来**时该文件贡献空集（拒绝一切）——被轮换走/未创建的文件绝不会意外打开服务面，而是把该面锁死到文件就位。
+- **生效点与换代**：admin 面检查在 `internal/web` transport 的 `guardAdminAuth`（覆盖 `/ui/`、`/api/`、`/metrics` 整个子树，经 `Options.AdminAuth` 闭包取当前代 Source，reload 换代无需重建 transport）和 `internal/app/proxy_http.go` 的 `Handler` 入口（web-disabled 部署的 admin 端点只认 admin token）；转发面检查同在 `Handler` 入口（`apiKeys` Source）。两个 Source 由 `applyAuthSources` 随 config generation 整体换入（原子指针，只换路径引用；token 内容的 10s TTL 缓存独立于 reload）。拒绝响应 401：admin 面带 `WWW-Authenticate: Bearer realm="model-proxy-admin"`。
+- **非回环门槛**：`requireAuthForNonLoopback`（`internal/config`）只在两个文件都配置时放行非回环 `listen`；loopback 保留无鉴权默认，两文件均可选。开启 `api_keys_file` 后，takeover 写入客户端配置的 `PROXY_MANAGED` 占位 key 必须换成文件里的真实 key。
 
 **浏览器侧防线**（`internal/web` `guardBrowserOrigin`，挂在 `serveUI`/`serveAPI` 入口）：
 loopback 挡不住"借用户浏览器之手"的请求,所以凡携带浏览器身份头（`Origin` 或 `Sec-Fetch-Site`）的请求额外要求 (1) `Host` 头的 host 部分是回环地址——封 DNS rebinding(rebound 域名对浏览器是 same-origin,只有 Host 检查能拦),GET `/api/config` 原文返回含 static provider key 的 YAML,读与写同等防护;(2) `Origin` 与请求 `Host` 一致——封 CSRF(evil.com 的跨站 fetch 是 CORS simple request,`text/plain` body 不触发 preflight 也能直达 POST handler)。无浏览器头的本地 CLI/curl(`daemonctl`、脚本)不受影响。
 
-**前端布局契约**：Status→Logs 每条日志是「行号 gutter + 正文」两列网格；行号与 gutter 右边框留 2px，gutter 背景只覆盖行号列，鼠标悬停标出整条逻辑行，单击选中该行（改变行号前景色，不干预原生选择）。Config→Raw YAML **硬最小高度 480px**，按编辑器 viewport top + 卡片下方 chrome 重新计算，可见空间大于 480px 铺满、不足仍 480px 并允许滚动，绝不靠固定 `100vh - 常量` 推测。Raw YAML 编辑时 500ms 防抖调 `/api/config/validate` 内联报错（校验失败不阻塞到保存才暴露，有错禁用 Save；点击错误跳转对应行）。编辑器还维护一份**需重启键名单**（`listen`、`log_level`、`log_file`、`web.enabled`、`request_log.*`、`stats.db_path`、`stats.retention`、`scheduling.quota_poll_interval`——依据 pitfalls #29、`initStats` "startup-only" 与 request_log/logger 启动期构建的代码事实）：当前文本相对磁盘基线改动到这些键时显示 ⓘ "需重启 daemon 生效" 提示；名单是前端常量（app.js `RESTART_KEYS`），行扫描只做提示、校验权威仍在服务端。
+**前端布局契约**：Status→Logs 每条日志是「行号 gutter + 正文」两列网格；行号与 gutter 右边框留 2px，gutter 背景只覆盖行号列，鼠标悬停标出整条逻辑行，单击选中该行（改变行号前景色，不干预原生选择）。Config→Raw YAML **硬最小高度 480px**，按编辑器 viewport top + 卡片下方 chrome 重新计算，可见空间大于 480px 铺满、不足仍 480px 并允许滚动，绝不靠固定 `100vh - 常量` 推测。Raw YAML 编辑时 500ms 防抖调 `/api/config/validate` 内联报错（校验失败不阻塞到保存才暴露，有错禁用 Save；点击错误跳转对应行）。编辑器还维护一份**需重启键名单**（`listen`、`log_level`、`log_file`、`web.enabled`、`request_log.*`、`stats.db_path`、`stats.retention`、`budgets`、`scheduling.quota_poll_interval`——依据 pitfalls #29/#31、`initStats` "startup-only"、`budget_watch.go` watcher 启动期创建与 request_log/logger 启动期构建的代码事实）：当前文本相对磁盘基线改动到这些键时显示 ⓘ "需重启 daemon 生效" 提示；名单是前端常量（app.js `RESTART_KEYS`），行扫描只做提示、校验权威仍在服务端。
 
 | 方法 | 路径 | 请求 | 响应 | 备注 |
 |---|---|---|---|---|
 | GET | `/api/status` | — | `{uptime,version,listen,health{...},model_locks{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | handler 只消费 `proxyReadView.dashboard` 的脱离式快照；read view 按 `Proxy.mu → internal/runtime.Manager` 捕获同一 config generation 的 listen/warnings/cache 与 health/model-lock/quota/pin/sticky/spread，`schedule` 通过该 snapshot 的只读 `PreviewOrder` 计算，不再次读取 Manager，故同一响应的 health/quota/pin/sticky/order 不会混代或跨 mutation。内部 map 不外泄。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）；`quota[name].ExhaustionEta` 是 tracker 按 Δused/Δt 速率算出的 ultimate 窗口耗尽预测（零值=无预测：首快照/速率≤0/断档，语义见 `docs/architecture/runtime-state.md`），配额卡在 ultimate 窗口行尾展示，调度不使用。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出）。`model_locks[provider]` = `[{model,until}]`（仅生效中的模型锁，与 health 同一 Manager dashboard 快照，过期不输出；`doctor --live` 用它解释 route 全灭） |
+| GET | `/metrics` | — | Prometheus text exposition（`text/plain; version=0.0.4`） | per-provider 计数器快照（`model_proxy_requests_total`/`failures_total`/`failovers_total`/`rate_limited_429_total` + `latency_milliseconds_sum`/`ttft_milliseconds_sum`），派生自与 `/api/status` 相同的 detached Dashboard 快照（无新锁面）；虚拟计数键（guard、attempts、fusion、routing）以普通 provider 出现，语义同 `/api/stats`；零流量 provider 不出序列。过 `guardAdminAuth` + `GuardBrowserOrigin`（scraper 不带浏览器头，不受影响）；仅 GET，其余方法 405 |
 | GET | `/api/logs?tail=N` | — | `{lines:[…]}` | 读 log 文件末尾 N 行（默认 200，上限 1000）；无 log 路径 → 404 |
 | GET | `/api/config` | — | `{yaml, summary, provider_models, routes}` | 原文件 verbatim round-trip |
 | POST | `/api/config` | `{yaml}` | `{status:"reloaded"}` / 400 | `saveAndReload`：validate → backup `<configDir>/.model-proxy/back/<base>.<ts>.bak` → atomicWrite → reload。校验失败不落盘；reload 失败从当次备份回滚 |
@@ -34,7 +52,7 @@ loopback 挡不住"借用户浏览器之手"的请求,所以凡携带浏览器�
 | GET | `/api/shadow-report?from=&to=` | — | `{from,to,entries:[{route,primary_provider,shadow_provider,samples,status_match_rate,primary_latency_ms,shadow_latency_ms,latency_diff_ms,primary_size_avg,shadow_size_avg}]}` | 影子评测聚合（按 `shadow-<父id>` 配对，仅成对样本计入） |
 | GET | `/api/fusion?workflow=` | — | `{workflows:{<名>:{runs,runs_today,quorum_met,degraded{原因:次数},panel_input/output,judge_input/output,synth_input/output,amplification}},runs:[{run_id,ts,route,workflow,agent,proto,quorum,drafts_used,degraded,legs[{provider,model,kind,status,latency_ms,input,output,err,cut}],judge_used,synth_committed,synth_status,synth_latency_ms,synth_input,synth_output}]}` | 编排观测（`internal/fusion.Registry` 纯内存，200 条 run 环形新到旧；汇总数据从 eventHub 回读，**不依赖 request_log**）。degraded 原因：`insufficient_proposers`/`tools_unsupported`/`body_build_failed`/`budget_exceeded`/`multi_turn`；`amplification`=(候选+judge+汇总)/汇总 token。时间序列走 `("fusion",<workflow>)` 分钟桶（requests=编排次数、failovers=降级次数） |
 | GET | `/api/events` | — | SSE 流 | 实时请求监视：先重放 200 条 recent ring 再推 start/end 事件（含 request_id/agent/provider/status/latency/tokens），15s keepalive。`web.enabled`（默认开）时由 web 层 `/api/` 子树服务并过 `guardBrowserOrigin`（组合根把 hub handler 注入 web transport——不能只在主 mux 的 proxy handler 挂分支：ServeMux 会把该路径分给更具体的 `/api/` 子树，Live 页在默认部署下 404）；`web.enabled: false` 时回落主 mux 的 proxy handler 分支（无 origin guard，行为同 CLI/curl 面）。guard.secrets 命中时另有 `type:"guard"` 事件（detail 仅含模式类型名与动作，绝不含命中内容）；`budgets:` 月度预算越线时另有 `type:"budget"` 事件（provider 字段=scope，detail 为 JSON `{scope, month, threshold_usd, actual_usd}`，每 (scope, 月份, 阈值) 每进程只发一次） |
-| GET/POST/DELETE | `/api/pin` | POST `{route,provider,ttl?}` | `{pins:[...]}` / `{status:"pinned"}` / `{status:"unpinned"}` | 运行期 pin（见 `docs/architecture/runtime-state.md`）；GET 列表、DELETE `{route}` 清除 |
+| GET/POST/DELETE | `/api/pin` | POST `{route,provider,ttl_seconds?}` | GET `{pins:[{route,provider,expires_at}]}` / POST `{route,provider,expires_at,status:"pinned"}` / DELETE `{route,removed:bool}` | 运行期 pin（见 `docs/architecture/runtime-state.md`）；`ttl_seconds` >0 时换算为 TTL（省略/0 = 不过期），`expires_at` 为 RFC3339（无过期时为空串）；DELETE 用 query 参数 `?route=<名>` 清除，`removed` 表示是否确有 pin 被移除 |
 | GET | `/api/analytics?from=&to=&provider=&model=&granularity=day\|month` | — | `{granularity,from,to,series:[{provider,model,points:[{bucket,requests,input,output,cache_creation,cache_read,cost,priced}]}],totals:{input,output,cost},price_coverage:{priced:[],unpriced:[]}}` | 日历日/月聚合 + **服务端现算等价 payg 成本**（见下「Analytics 等价成本」） |
 | POST | `/api/quota/refresh` | 空 body 或 `{"provider":key}` | `{status:"refreshed"[,provider]}` / 400 / 404 | 同步刷新配额缓存（可立即重查 `/api/status`）：空 → `pollAll`，指定 → `pollOne`（key 即 `name` 或 `name#accountID`），未知 key 404；malformed JSON body → 400（与 `/api/health/reset` 一致，不触发全量 poll） |
 | POST | `/api/health/reset` | 空 body 或 `{"provider":key}` | `{cleared:[names],model_locks_cleared:n}` | 清冻结运行态（熔断开路冷却、429 限频冷却、模型锁定），目标立即重试；空=全部，池化父名清全部虚拟；**不清** sticky/pin/剥参 blocklist。`unfreeze` CLI 与 UI Providers 卡 unfreeze 按钮 |

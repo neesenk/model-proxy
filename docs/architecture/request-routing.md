@@ -12,15 +12,15 @@ catalog、context overflow retry、implicit routes 或 route warnings 时必读�
 
 - `HasImage`：扫描已知图片标记；
 - `HasTools`：识别 tools；
-- `EstimatedTokens`：CJK 每 rune 约 1 token，其他文本约 bytes/4，跳过超过
-  100 字符的 base64 run。
+- `EstimatedTokens`：CJK 每 rune 约 1 token，其他文本约 bytes/4，跳过长度
+  ≥100 字符的 base64 run。
 
 ## 模块边界
 
-`internal/routing` 是无状态策略包，只允许依赖 `internal/catalog` 与
-`internal/config` 值类型，不得依赖 `Proxy`、`internal/runtime`、
+`internal/routing` 是无状态策略包，只允许依赖 `internal/catalog`、
+`internal/config` 与 `internal/provider` 值/接口类型，不得依赖 `Proxy`、`internal/runtime`、
 `internal/targetexec` 或任何 I/O owner。`routing.NewPlanner(PlannerInput)`
-隐藏内部字段；输入来自一次 `runtimeSnapshot`，generation-owned map 在 reload
+隐藏内部字段；输入来自一次 `RuntimeSnapshot`，generation-owned map 在 reload
 时只交换、不原地修改。
 
 `internal/app/request_routing_adapter.go` 是唯一边界桥：它从 HTTP request 提取
@@ -83,18 +83,23 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 
 - 多 provider 同名模型存在歧义时，选择按字母排序的首个 provider，并产生 warning；
 - 单 provider 隐式路由静默；
-- login 状态来自 `loadPool(...).Accounts > 0`；
+- login 状态由 `LoggedInProviders`（`internal/app/implicit_routes.go`）经
+  `store.LoadSnapshot` 判定：`SourcePlural`，或 `SourceLegacy` 且 provider 非
+  static；损坏 plural fail-closed、static legacy 不算、aqp/codex 不经 pool
+  （其 OAuth/SSO 登录态归各自 store）；
 - 隐式路由只在 daemon 侧生成，doctor 离线只看显式配置；
 - route-name sticky 可持久化，session sticky 不持久化；
-- protocol 只能使用 provider 的真实 ProtocolHint；当前没有 provider 返回 hint。
+- protocol 只能使用 provider 的真实 ProtocolHint；`codex` 返回 `"responses"`
+  （`internal/provider/protocol_hint.go`），隐式路由经它填充 target 的 protocol
+  （`internal/app/implicit_routes.go`）。
 
 ## 配置风险警告
 
-`configRoutingWarnings` 只警告、不阻止启动：
+`ConfigRoutingWarnings`（`internal/app/route_warnings.go`）只警告、不阻止启动：
 
 - reasoning replay 模型使用协议转换；
-- provider wire protocol 无法由当前两值协议表达，例如 codex Responses；
-- provider 存在可靠 hint 而显式目标未声明 protocol。
+- provider wire protocol 无法表达且无法转换（当前无实例：codex Responses 已可
+  转换，`provider.WireProtocolNote` 现对所有 provider 返回空，此类为 inert marker）。
 
 warning 同时出现在 daemon log、`/api/status.warnings`、models、doctor 和 config check。
 

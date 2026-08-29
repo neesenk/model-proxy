@@ -6,21 +6,25 @@ import (
 	"time"
 )
 
-// loopback_test.go covers LoopbackServer.WaitForCookie's three branches
-// (cookie received, error received, timeout).
+// This file covers the LoopbackServer completion channels (CookieCh/ErrCh):
+// cookie received, error received, and no-signal stays silent.
 
-func TestWaitForCookie_Timeout(t *testing.T) {
+func TestLoopbackSignal_NoSignalStaysSilent(t *testing.T) {
 	ls, err := NewLoopbackServer()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ls.Stop()
-	if _, err := ls.WaitForCookie(20 * time.Millisecond); err == nil {
-		t.Error("WaitForCookie with no signal: want timeout error, got nil")
+	select {
+	case cookie := <-ls.CookieCh:
+		t.Errorf("no signal: unexpected cookie %q", cookie)
+	case err := <-ls.ErrCh:
+		t.Errorf("no signal: unexpected error %v", err)
+	case <-time.After(20 * time.Millisecond):
 	}
 }
 
-func TestWaitForCookie_CookieReceived(t *testing.T) {
+func TestLoopbackSignal_CookieReceived(t *testing.T) {
 	ls, err := NewLoopbackServer()
 	if err != nil {
 		t.Fatal(err)
@@ -30,16 +34,19 @@ func TestWaitForCookie_CookieReceived(t *testing.T) {
 	go func() {
 		ls.CookieCh <- "SSO_C=got-it"
 	}()
-	got, err := ls.WaitForCookie(500 * time.Millisecond)
-	if err != nil {
+	select {
+	case got := <-ls.CookieCh:
+		if got != "SSO_C=got-it" {
+			t.Errorf("CookieCh=%q want SSO_C=got-it", got)
+		}
+	case err := <-ls.ErrCh:
 		t.Fatal(err)
-	}
-	if got != "SSO_C=got-it" {
-		t.Errorf("WaitForCookie=%q want SSO_C=got-it", got)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("cookie signal never arrived")
 	}
 }
 
-func TestWaitForCookie_ErrorReceived(t *testing.T) {
+func TestLoopbackSignal_ErrorReceived(t *testing.T) {
 	ls, err := NewLoopbackServer()
 	if err != nil {
 		t.Fatal(err)
@@ -50,8 +57,15 @@ func TestWaitForCookie_ErrorReceived(t *testing.T) {
 	}()
 	// Assert the sentinel itself: err != nil alone would also pass via the
 	// timeout branch (deleting the ErrCh case entirely would stay green).
-	if _, err := ls.WaitForCookie(500 * time.Millisecond); !errors.Is(err, errBoom) {
-		t.Errorf("WaitForCookie with errCh signal: got %v, want the errBoom sentinel", err)
+	select {
+	case err := <-ls.ErrCh:
+		if !errors.Is(err, errBoom) {
+			t.Errorf("ErrCh: got %v, want the errBoom sentinel", err)
+		}
+	case cookie := <-ls.CookieCh:
+		t.Fatalf("unexpected cookie %q, want the errBoom sentinel", cookie)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("error signal never arrived")
 	}
 }
 

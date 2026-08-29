@@ -2,47 +2,11 @@ package framework
 
 import (
 	"model-proxy/internal/provider"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
 // --- util.go ---
-
-func TestEnvOrEmpty(t *testing.T) {
-	if got := EnvOrEmpty("MP_TEST_UNSET_VAR"); got != "" {
-		t.Errorf("EnvOrEmpty(unset)=%q want empty", got)
-	}
-	t.Setenv("MP_TEST_SET", "hello")
-	if got := EnvOrEmpty("MP_TEST_SET"); got != "hello" {
-		t.Errorf("EnvOrEmpty(set)=%q want hello", got)
-	}
-}
-
-func TestRuntimeOS(t *testing.T) {
-	if got := RuntimeOS(); got != runtime.GOOS {
-		t.Errorf("RuntimeOS()=%q want %q", got, runtime.GOOS)
-	}
-}
-
-func TestReadFile_Missing(t *testing.T) {
-	if _, err := ReadFile(filepath.Join(t.TempDir(), "nope")); err == nil {
-		t.Error("ReadFile(missing): want error, got nil")
-	}
-}
-
-func TestWriteFile_ReadFile_RoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "f.txt")
-	if err := WriteFile(p, []byte("hi"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err := ReadFile(p)
-	if err != nil || string(got) != "hi" {
-		t.Errorf("round-trip: got=%q err=%v", got, err)
-	}
-}
 
 func TestMask_ShortAndEmpty(t *testing.T) {
 	if got := Mask(""); got != "(empty)" {

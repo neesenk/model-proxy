@@ -13,7 +13,7 @@
 - `Proxy.forward` / `serveOnce` / `targetexec.Executor.Execute`
 - `internal/app/proxy_health_adapter.go`：应用执行层到 runtime health/cooldown/param/rate-limit
   状态端口的适配
-- `internal/app/dispatch_context.go`：`runtimeSnapshot`、`serveRequest` 与
+- `internal/app/dispatch_context.go`：`RuntimeSnapshot`、`serveRequest` 与
   `targetexec.Attempt` 的 snapshot 投影/唯一 assembly adapter
 - `internal/targetexec.Plan`：已解析目标的不可变 model/body/base URL/path wire
   preparation；`internal/app/target_plan.go` 的 `planTarget` 只做 snapshot-owned facts 的投影
@@ -31,7 +31,7 @@
 
 ## 基本路由语义
 
-一次客户端请求在 `forward` 开始时只捕获一次 `runtimeSnapshot`。该快照包含
+一次客户端请求在 `forward` 开始时只捕获一次 `RuntimeSnapshot`。该快照包含
 同一 config generation 的 config、provider implementations、pool identity、
 expanded routes、models.dev catalog 与 response cache；reload 只交换新对象，
 不得原地修改快照持有的 map。`serveRequest` 是一次完整 schedule/failover pass
@@ -48,7 +48,7 @@ target、context retry）。两条调用链只能经
 model rewrite、state expansion 或协议转换。普通/Fusion/Shadow 不得复制
 endpoint、model rewrite 或 conversion-option 逻辑。执行器必须从 typed
 Runtime 与 Plan 读取事实，禁止在 scope/log 中复制第二份 generation、嵌入完整
-`runtimeSnapshot`、使用 `any` 或重新查 Proxy。
+`RuntimeSnapshot`、使用 `any` 或重新查 Proxy。
 
 `targetexec.Executor` 只允许依赖 generation-frozen `targetexec.State` 暴露的
 健康、参数学习和 wire 能力，以及 typed `Effects/Responses` 端口；不得 import
@@ -62,7 +62,7 @@ executor 外完成，Fusion synthesizer 丢弃该 commit 元数据，禁止递�
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 
-后端协议解析优先级（`(*Proxy).resolvedBackendProto`，wirecap.go）：显式 `protocol:` > `ProtocolHint`（codex→responses）> **wire 探测 verdict** > 客户端协议透传。wire verdict 由 `wirecap.go` 在 boot/reload 时异步探测并按 parent provider 名缓存。探测请求：`/responses` 每 provider 一个；`/v1/messages` **仅当 provider 无 anthropic_base_url 时**才探（此时探测 URL 正是 anthropic 透传会打的 openai base 地址；有 anthropic_base_url 时矩阵直接短路到专用 base，绝不在 openai base 上拼 /v1/messages）。分类：404→no，2xx/400/401/403/429→yes，超时/连接错误/5xx→unknown。verdict 生效的决策矩阵：
+后端协议解析优先级（`(*Proxy).resolvedBackendProto`，wirecap.go）：显式 `protocol:` > `ProtocolHint`（codex→responses）> **wire 探测 verdict** > 客户端协议透传。wire verdict 由 `wirecap.go` 在 boot/reload 时异步探测并按 parent provider 名缓存。探测请求：`/responses` 每 provider 一个；`/v1/messages` **仅当 provider 无 anthropic_base_url 时**才探（此时探测 URL 正是 anthropic 透传会打的 openai base 地址；有 anthropic_base_url 时矩阵直接短路到专用 base，绝不在 openai base 上拼 /v1/messages）。分类：404→no，其余 2xx–4xx（含 3xx 与 400/401/403/429）→yes，超时/连接错误/5xx→unknown。verdict 生效的决策矩阵：
 
 | 客户端协议 | 条件 | 后端协议 |
 |---|---|---|
@@ -116,7 +116,7 @@ cooldown 与 detached dashboard/persistence snapshot 看到一致状态；reload
 2. `Retry-After`；
 3. 分类默认值。
 
-body hint 支持 `retry after N s/m/h`、`reset after 2h5m`、`Resets in 164h` 和 reset/retry 关键词邻近的 RFC3339。上限 7 天；duration 在乘法前必须 clamp，防止溢出。
+body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`（`days?|d|hours?|minutes?|seconds?` 等单位）和 reset/retry 关键词邻近的 RFC3339。上限 7 天；duration 在乘法前必须 clamp，防止溢出。
 
 分类与 horizon 只由 `internal/targetexec.ParseRateLimit` 计算；普通
 `targetexec.Executor` 与 Fusion leg 必须调用同一入口，再把预计算的

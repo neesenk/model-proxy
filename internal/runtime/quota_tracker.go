@@ -2,7 +2,7 @@ package runtime
 
 import (
 	"encoding/json"
-	"log"
+	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
 	"strings"
@@ -288,7 +288,7 @@ func (t *QuotaTracker) PollAllGeneration(now time.Time, generation uint64) {
 		return // reload happened while the upstream polls were in flight
 	}
 	if err := t.Persist(); err != nil {
-		log.Printf("[quota] persist after pollAll failed: %v", err)
+		logx.Warnf("[quota] persist after pollAll failed: %v", err)
 	}
 }
 
@@ -314,7 +314,7 @@ func (t *QuotaTracker) PollOne(key string) bool {
 		return false
 	}
 	if err := t.Persist(); err != nil {
-		log.Printf("[quota] persist after pollOne(%s) failed: %v", key, err)
+		logx.Warnf("[quota] persist after pollOne(%s) failed: %v", key, err)
 	}
 	return true
 }
@@ -351,7 +351,7 @@ func (t *QuotaTracker) RefreshOne(name string, generations ...uint64) {
 		s := t.FetchQuota(p, time.Now())
 		if t.CommitSnapshot(generation, name, s) {
 			if err := t.Persist(); err != nil {
-				log.Printf("[quota] persist after refreshOne(%s) failed: %v", name, err)
+				logx.Warnf("[quota] persist after refreshOne(%s) failed: %v", name, err)
 			}
 			refreshed = true
 		}
@@ -570,7 +570,7 @@ func (t *QuotaTracker) Persist() error {
 		return err
 	}
 	if err := os.Rename(tmp, t.Path); err != nil {
-		log.Printf("[quota] persist rename failed: %v", err)
+		logx.Warnf("[quota] persist rename failed: %v", err)
 		remove()
 		return err
 	}

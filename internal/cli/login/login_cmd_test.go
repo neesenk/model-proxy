@@ -39,7 +39,7 @@ func TestRunApiKeyLogin_EmptyKey(t *testing.T) {
 	w.Close()
 
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu"}}}
-	err := RunApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"])
+	err := RunApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "", "", false)
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Errorf("empty key: err=%v want 'empty' error", err)
 	}
@@ -70,7 +70,7 @@ func TestRunApiKeyLogin_ValidKeyMockValidation(t *testing.T) {
 			"zhipu": {Provider: "zhipu", UsageURL: srv.URL},
 		},
 	}
-	if err := RunApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"]); err != nil {
+	if err := RunApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "", "", false); err != nil {
 		t.Fatalf("runApiKeyLogin: %v", err)
 	}
 	// The key should have been saved to the PLURAL pool file
@@ -112,7 +112,7 @@ func TestRunApiKeyLogin_Validation401(t *testing.T) {
 	w.Close()
 
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"zhipu": {Provider: "zhipu", UsageURL: srv.URL}}}
-	err := RunApiKeyLogin(cfg, "zhipu", cfg.Providers["zhipu"])
+	err := RunApiKeyLoginWithInput(cfg, "zhipu", cfg.Providers["zhipu"], "", "", false)
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Errorf("401 validation: err=%v want 'validation failed'", err)
 	}
@@ -446,7 +446,51 @@ func TestAqpCodexLogin_UsesConfigNameForAuthFile(t *testing.T) {
 		}
 	}
 	assertLoginUsesOAuthAuthFilePath(t, "internal/cli/login/login.go", "RunLogin", "storePath")
-	assertLoginUsesOAuthAuthFilePath(t, "internal/cli/login/codex_login.go", "CmdCodexLogin", "authFile")
+	assertCodexLoginFlowUsesOAuthAuthFilePath(t, "internal/cli/login/login.go", "RunProviderLogin")
+}
+
+// assertCodexLoginFlowUsesOAuthAuthFilePath re-anchors the codex half of the
+// wiring guard on the production dispatch: the runCodexLoginFlow call inside
+// functionName must pass exactly oauthAuthFilePath(HomeDir(), provName) as its
+// auth file (a renamed instance keeps writing <provName>_oauth_auth.json),
+// never a directly constructed path.
+func assertCodexLoginFlowUsesOAuthAuthFilePath(t *testing.T, relativePath, functionName string) {
+	t.Helper()
+	src := readLoginRepositoryFile(t, relativePath)
+	file, err := parser.ParseFile(token.NewFileSet(), relativePath, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", relativePath, err)
+	}
+	var body *ast.BlockStmt
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == functionName {
+			body = fn.Body
+			break
+		}
+	}
+	if body == nil {
+		t.Fatalf("%s: function %s not found", relativePath, functionName)
+	}
+	flowCalls := 0
+	ast.Inspect(body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := call.Fun.(*ast.Ident)
+		if !ok || ident.Name != "runCodexLoginFlow" {
+			return true
+		}
+		flowCalls++
+		if len(call.Args) != 1 || !isExactOAuthAuthFilePathCall(call.Args[0]) {
+			t.Errorf("%s %s: runCodexLoginFlow auth file must be oauthAuthFilePath(HomeDir(), provName)", relativePath, functionName)
+		}
+		return true
+	})
+	if flowCalls != 1 {
+		t.Errorf("%s %s: runCodexLoginFlow calls = %d, want exactly 1", relativePath, functionName, flowCalls)
+	}
 }
 
 // assertLoginUsesOAuthAuthFilePath is a structural wiring guard around the two
@@ -627,7 +671,7 @@ func TestRunApiKeyLogin_KimiCode_Validation401(t *testing.T) {
 	w.Close()
 
 	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"kimi-code": {Provider: "kimi-code", UsageURL: srv.URL}}}
-	err := RunApiKeyLogin(cfg, "kimi-code", cfg.Providers["kimi-code"])
+	err := RunApiKeyLoginWithInput(cfg, "kimi-code", cfg.Providers["kimi-code"], "", "", false)
 	if err == nil || !strings.Contains(err.Error(), "validation failed") {
 		t.Errorf("kimi-code 401: err=%v want 'validation failed'", err)
 	}

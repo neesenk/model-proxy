@@ -11,8 +11,8 @@ import (
 // probe.go provides the default implementations of ProbeRequest / ExtraHeaders /
 // FilterModelIDs via baseProbe, which every provider embeds. This keeps each
 // provider's probe/filter special knowledge inside its own file (override) or in
-// the shared default here - never in the main package's `if prov.Provider == ...`
-// branches.
+// the shared default here - never in `if prov.Provider == ...` branches of the
+// internal/app composition root.
 
 // baseProbe is the default implementation of ProbeRequest / ExtraHeaders /
 // FilterModelIDs. Embed it in a provider to get OpenAI-style defaults; override

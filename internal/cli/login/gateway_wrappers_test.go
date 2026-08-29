@@ -12,9 +12,9 @@ import (
 )
 
 // Covers the thin production wrappers the web login flow relies on:
-// NewAqpClientWithBase must produce a working client against its base URL
-// (BootstrapLoginURL hits Base + AqpAuthLoginPath), and PoolPath must resolve
-// the plural pool file under the caller's HOME.
+// NewAqpClient with a test Base override must produce a working client against
+// that base URL (BootstrapLoginURL hits Base + AqpAuthLoginPath), and PoolPath
+// must resolve the plural pool file under the caller's HOME.
 func TestAqpClientWithBaseBootstrapsAndPoolPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -29,7 +29,8 @@ func TestAqpClientWithBaseBootstrapsAndPoolPath(t *testing.T) {
 	}))
 	defer aqp.Close()
 
-	client := NewAqpClientWithBase(filepath.Join(home, "google_oauth_auth.json"), aqp.URL)
+	client := NewAqpClient(filepath.Join(home, "google_oauth_auth.json"))
+	client.Base = aqp.URL
 	if client.Base != aqp.URL {
 		t.Fatalf("Base = %q, want %q", client.Base, aqp.URL)
 	}
@@ -71,7 +72,8 @@ func TestAqpConvenienceWrappersRoundTrip(t *testing.T) {
 	}))
 	defer aqp.Close()
 
-	client := NewAqpClientWithBase(filepath.Join(home, "google_oauth_auth.json"), aqp.URL)
+	client := NewAqpClient(filepath.Join(home, "google_oauth_auth.json"))
+	client.Base = aqp.URL
 	authed, err := client.PollSession(2 * time.Second)
 	if err != nil {
 		t.Fatalf("PollSession: %v", err)

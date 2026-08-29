@@ -296,8 +296,8 @@ func TestCLI_UsagePoolPrintsAllAccounts(t *testing.T) {
 	}
 
 	// Per-account headers: each label + masked id appears.
-	id1 := app.AccountIDFor("zhipu", app.AccountCred{APIKey: "K1"})
-	id2 := app.AccountIDFor("zhipu", app.AccountCred{APIKey: "K2"})
+	id1 := accounts.AccountID("zhipu", app.AccountCred{APIKey: "K1"})
+	id2 := accounts.AccountID("zhipu", app.AccountCred{APIKey: "K2"})
 	if !strings.Contains(out, "K1") {
 		t.Errorf("output missing K1 label:\n%s", out)
 	}

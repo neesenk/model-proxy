@@ -85,13 +85,13 @@ func TestBuildProviders_CorruptPluralFailsClosedWithoutLegacyFallback(t *testing
 	if err := os.WriteFile(legacyPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(PoolPath(name), []byte(`{`), 0o600); err != nil {
+	if err := os.WriteFile(AccountStore().PoolPath(name), []byte(`{`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "zhipu", upstream.server.URL)
-	if loggedInProviders(cfg)[name] {
+	if LoggedInProviders(cfg, AccountStore())[name] {
 		t.Fatal("corrupt plural must not be reported as logged in")
 	}
 	p := newTestProxy(t, cfg)
@@ -104,14 +104,14 @@ func TestBuildProviders_EmptyAPIKeyPluralFailsClosedWithoutLegacyFallback(t *tes
 	if err := os.WriteFile(legacyPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(PoolPath(name),
+	if err := os.WriteFile(AccountStore().PoolPath(name),
 		[]byte(`{"version":1,"accounts":[{"id":"invalid","api_key":""}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "zhipu", upstream.server.URL)
-	if loggedInProviders(cfg)[name] {
+	if LoggedInProviders(cfg, AccountStore())[name] {
 		t.Fatal("invalid plural must not be reported as logged in")
 	}
 	p := newTestProxy(t, cfg)
@@ -124,13 +124,13 @@ func TestBuildProviders_EmptyPluralIsCredentialTombstone(t *testing.T) {
 	if err := os.WriteFile(legacyPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := SavePool(name, "zhipu", CredentialPool{Version: 1}); err != nil {
+	if err := AccountStore().Save(name, "zhipu", CredentialPool{Version: 1}); err != nil {
 		t.Fatal(err)
 	}
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "zhipu", upstream.server.URL)
-	if loggedInProviders(cfg)[name] {
+	if LoggedInProviders(cfg, AccountStore())[name] {
 		t.Fatal("empty plural tombstone must not be reported as logged in")
 	}
 	p := newTestProxy(t, cfg)
@@ -143,13 +143,13 @@ func TestBuildProviders_LegacyOnlyRemainsFileBacked(t *testing.T) {
 	if err := os.WriteFile(legacyPoolPath(name), []byte(`{"api_key":"LEGACY"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(PoolPath(name)); !os.IsNotExist(err) {
+	if _, err := os.Stat(AccountStore().PoolPath(name)); !os.IsNotExist(err) {
 		t.Fatalf("plural precondition failed: %v", err)
 	}
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "zhipu", upstream.server.URL)
-	if !loggedInProviders(cfg)[name] {
+	if !LoggedInProviders(cfg, AccountStore())[name] {
 		t.Fatal("valid zhipu legacy credential must be reported as logged in")
 	}
 	p := newTestProxy(t, cfg)
@@ -185,7 +185,7 @@ func TestBuildProviders_StaticProviderUsesPluralCredentialWithoutLegacyFile(t *t
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "static", upstream.server.URL)
-	if !loggedInProviders(cfg)[name] {
+	if !LoggedInProviders(cfg, AccountStore())[name] {
 		t.Fatal("valid static plural credential must be reported as logged in")
 	}
 	p := newTestProxy(t, cfg)
@@ -229,7 +229,7 @@ func TestBuildProviders_StaticInvalidCredentialSourcesFailClosed(t *testing.T) {
 		{
 			name: "corrupt plural",
 			prepare: func(t *testing.T, providerName string) {
-				if err := os.WriteFile(PoolPath(providerName), []byte(`{`), 0o600); err != nil {
+				if err := os.WriteFile(AccountStore().PoolPath(providerName), []byte(`{`), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -237,7 +237,7 @@ func TestBuildProviders_StaticInvalidCredentialSourcesFailClosed(t *testing.T) {
 		{
 			name: "empty plural",
 			prepare: func(t *testing.T, providerName string) {
-				if err := SavePool(providerName, "static", CredentialPool{Version: 1}); err != nil {
+				if err := AccountStore().Save(providerName, "static", CredentialPool{Version: 1}); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -254,7 +254,7 @@ func TestBuildProviders_StaticInvalidCredentialSourcesFailClosed(t *testing.T) {
 
 			upstream := newCredentialBoundaryUpstream(t)
 			cfg := credentialBoundaryConfig(name, "static", upstream.server.URL)
-			if loggedInProviders(cfg)[name] {
+			if LoggedInProviders(cfg, AccountStore())[name] {
 				t.Fatalf("static %s source must not be reported as a runnable login", tc.name)
 			}
 			p := newTestProxy(t, cfg)
@@ -290,7 +290,7 @@ func TestBuildProviders_OAuthProviderIgnoresAccountPoolFiles(t *testing.T) {
 			name: {Provider: "codex", OpenAIBaseURL: "https://example.invalid"},
 		},
 	}
-	if loggedInProviders(cfg)[name] {
+	if LoggedInProviders(cfg, AccountStore())[name] {
 		t.Fatal("API-key pool must not make an OAuth provider eligible for implicit routes")
 	}
 	p := newTestProxy(t, cfg)
