@@ -176,6 +176,37 @@ func TestQualityLifecycle(t *testing.T) {
 	}
 }
 
+func TestQualityProjectionRevalidatesAcrossGenerationReplacement(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	m := newTestManager(1)
+	old := map[string]providerQuality{
+		"old-provider": {errRate: 1, errAt: now},
+	}
+	m.quality.Store(&old)
+	projected := m.projectQualitySnapshot(now)
+	if projected.status["old-provider"].ErrorRate == 0 {
+		t.Fatal("precondition: detached projection did not contain old quality")
+	}
+
+	// Deterministically model the only dangerous interleaving: projection from
+	// generation 1, then ReplaceGeneration publishes generation 2 before the
+	// reader takes m.mu. Revalidation must discard the old projection.
+	m.ReplaceGeneration(2)
+	m.mu.Lock()
+	m.ensureLocked()
+	quality := m.reconcileQualityProjectionLocked(projected, now)
+	generation := m.generation
+	m.mu.Unlock()
+	if generation != 2 {
+		t.Fatalf("generation = %d, want 2", generation)
+	}
+	if len(quality) != 0 {
+		t.Fatalf("generation 2 reused generation 1 quality: %+v", quality)
+	}
+}
+
 // TestQualityTTFTDecaysDuringFailureStretch: a slow-TTFT penalty must decay
 // from its OWN last TTFT observation. A shared `updated` anchor let error
 // samples (a provider failing continuously) keep the timestamp fresh, so the

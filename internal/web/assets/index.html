@@ -51,6 +51,27 @@
 
   <dialog id="add-modal" aria-labelledby="add-title"></dialog>
 
+  <dialog id="admin-auth-modal" aria-labelledby="admin-auth-title">
+    <form id="admin-auth-form">
+      <header class="modal-head">
+        <h2 id="admin-auth-title">Admin authentication</h2>
+      </header>
+      <div class="modal-body">
+        <p>This proxy requires an admin token before runtime data can be shown.</p>
+        <div class="field">
+          <label for="admin-auth-token">Admin token</label>
+          <input id="admin-auth-token" name="token" type="password"
+                 autocomplete="current-password" spellcheck="false" required>
+          <span class="hint">The token is exchanged for an HttpOnly browser-session cookie and is not stored by JavaScript.</span>
+        </div>
+        <div id="admin-auth-msg" class="msg" role="status" aria-live="polite"></div>
+        <div class="modal-actions">
+          <button id="admin-auth-submit" class="btn primary" type="submit">Unlock</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
   <!-- CodeMirror 5 (UMD globals) for the Raw YAML editor. Plain scripts, loaded
        before the deferred app.js module so window.CodeMirror is defined when the
        module runs. Vendored offline (no CDN) under assets/vendor/. -->

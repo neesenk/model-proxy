@@ -166,20 +166,7 @@ func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.P
 // pool under the cross-process lock. No-op if the id is absent (no error). No
 // stdin, no stdout — symmetric with addApikeyAccount, reused by the web layer.
 func RemoveApikeyAccount(name, providerID, id string) error {
-	return withPoolLock(name, func() error {
-		pool, err := loadPool(name, providerID)
-		if err != nil {
-			return fmt.Errorf("load pool: %w", err)
-		}
-		out := pool.Accounts[:0]
-		for _, a := range pool.Accounts {
-			if a.ID != id {
-				out = append(out, a)
-			}
-		}
-		pool.Accounts = out
-		return savePool(name, providerID, pool)
-	})
+	return accountStoreEnv().RemoveAccount(name, providerID, id)
 }
 
 // oauthAuthFilePath resolves the OAuth credential file from the config-level

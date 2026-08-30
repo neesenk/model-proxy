@@ -48,7 +48,7 @@ func (s Store) restoreFromKeychain(name, providerID string, p Pool) (Snapshot, e
 	var relogin []Account
 	for _, a := range p.Accounts {
 		apiKey, err := credstore.KeychainGet(keychainKey(name, a.ID, keychainFieldAPIKey))
-		if err != nil {
+		if err != nil || apiKey == "" {
 			// Missing entry OR unreachable backend: the user chose file mode,
 			// so keychain trouble must not take the restorable accounts down
 			// with it — report and continue.
@@ -56,12 +56,44 @@ func (s Store) restoreFromKeychain(name, providerID string, p Pool) (Snapshot, e
 			continue
 		}
 		a.APIKey = apiKey
-		// Restore degrades optional-field errors to "" (the api_key gate
-		// above already routed backend trouble to relogin for this account).
-		accessKey, _ := s.keychainGetOptional(name, a.ID, keychainFieldAccessKey)
-		a.AccessKey = accessKey
-		secretKey, _ := s.keychainGetOptional(name, a.ID, keychainFieldSecretKey)
-		a.SecretKey = secretKey
+		if providerID != "volcengine" {
+			// Metadata ids are also keychain namespaces. A non-canonical id
+			// cannot be normalized only in the plaintext pool: the retained
+			// keychain secret would remain under the old (possibly sensitive)
+			// namespace with no safe cleanup provenance. Keep the metadata
+			// authoritative and require re-login instead.
+			if AccountID(providerID, Credentials{APIKey: apiKey}) != a.ID {
+				a.APIKey = ""
+				relogin = append(relogin, a)
+				continue
+			}
+		} else {
+			// A Volcengine API-only account is identified by the stored metadata
+			// id matching the API-key-only derivation AND both optional keychain
+			// fields being absent. Any present AK/SK material must be complete and
+			// derive the same stored id; otherwise a formerly AK-bound account
+			// could silently downgrade to API-only.
+			apiOnlyID := AccountID(providerID, Credentials{APIKey: apiKey})
+			accessKey, accessErr := s.keychainGetOptional(name, a.ID, keychainFieldAccessKey)
+			secretKey, secretErr := s.keychainGetOptional(name, a.ID, keychainFieldSecretKey)
+			if accessErr != nil || secretErr != nil {
+				a.APIKey = ""
+				relogin = append(relogin, a)
+				continue
+			}
+			if a.ID == apiOnlyID && accessKey == "" && secretKey == "" {
+				restored = append(restored, a)
+				continue
+			}
+			cred := Credentials{APIKey: apiKey, AccessKey: accessKey, SecretKey: secretKey}
+			if accessKey == "" || secretKey == "" || AccountID(providerID, cred) != a.ID {
+				a.APIKey = ""
+				relogin = append(relogin, a)
+				continue
+			}
+			a.AccessKey = accessKey
+			a.SecretKey = secretKey
+		}
 		restored = append(restored, a)
 	}
 	if len(restored) == 0 {
@@ -82,10 +114,13 @@ func (s Store) restoreFromKeychain(name, providerID string, p Pool) (Snapshot, e
 		// intact so the missing accounts' labels/ids survive for re-login.
 		return Snapshot{Pool: pool, Source: SourcePlural, ReloginNeeded: relogin}, nil
 	}
-	// Full restore: rewrite the pool as a plaintext file with the same atomic
-	// 0600 write as a normal save. Fail-closed on the write: the secrets are
-	// still safe in the keychain and the metadata file stays authoritative, so
-	// an error here loses nothing.
+	// Full restore: first atomically persist secretless keychain provenance, then
+	// rewrite the pool as a plaintext file with the same atomic 0600 write as a
+	// normal save. The marker lets an explicit later logout clean the retained
+	// keychain copy without making pure file-mode histories touch keychain.
+	if err := s.writeRestoredKeychainMarker(name, pool); err != nil {
+		return Snapshot{Source: SourcePlural}, err
+	}
 	data, err := json.MarshalIndent(pool, "", "  ")
 	if err != nil {
 		return Snapshot{Source: SourcePlural}, fmt.Errorf("marshal pool %s: %w", s.PoolPath(name), err)

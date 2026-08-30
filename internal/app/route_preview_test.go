@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -124,8 +125,8 @@ cache:
 		t.Fatal("config cache: section must enable the store")
 	}
 	body := `{"model":"glm","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
-	post := func() map[string]any {
-		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(body))
+	post := func(query string) map[string]any {
+		req := httptest.NewRequest(http.MethodPost, "/debug/route"+query, strings.NewReader(body))
 		rec := httptest.NewRecorder()
 		p.Handler(rec, req)
 		if rec.Code != http.StatusOK {
@@ -138,17 +139,122 @@ cache:
 		return out
 	}
 
-	// Prime the store entry the preview's probe will resolve to.
-	keyReq := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(body))
-	p.cache.Put(responsecache.Key(keyReq, []byte(body)), http.StatusOK,
-		http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
-
-	for i := 0; i < 3; i++ {
-		if out := post(); out["cache"] != "hit" {
-			t.Fatalf("preview %d cache state = %v, want hit", i, out["cache"])
+	// Prime entries for the REAL inbound endpoints. The diagnostic path and its
+	// ?proto control query must never participate in the key.
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
+		keyReq := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		p.cache.Put(responsecache.Key(keyReq, []byte(body)), http.StatusOK,
+			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
+	}
+	for _, query := range []string{"", "?proto=openai", "?proto=responses"} {
+		for i := 0; i < 3; i++ {
+			if out := post(query); out["cache"] != "hit" {
+				t.Fatalf("preview %s #%d cache state = %v, want hit", query, i, out["cache"])
+			}
 		}
 	}
 	if got := p.cache.Stats(); got.Hits != 0 || got.Misses != 0 {
 		t.Errorf("preview probe mutated stats: %+v, want zero counters", got)
 	}
+}
+
+func TestDebugRoute_PreviewAppliesGuardBeforeCache(t *testing.T) {
+	base := `listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+routes:
+  glm: [{provider: zhipu, model: glm}]
+cache: {enabled: true, ttl: 1m}
+guard: {secrets: %s, audit: false}
+`
+	body := []byte(guardRequestBody())
+	preview := func(t *testing.T, action string, primeBody []byte) map[string]any {
+		t.Helper()
+		cfg, err := LoadConfigFromBytes("test", []byte(fmt.Sprintf(base, action)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := newTestProxy(t, cfg)
+		keyReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(primeBody)))
+		p.cache.Put(responsecache.Key(keyReq, primeBody), http.StatusOK,
+			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
+		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(string(body)))
+		rec := httptest.NewRecorder()
+		p.Handler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("preview status = %d, body = %s", rec.Code, rec.Body)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("preview json: %v", err)
+		}
+		return out
+	}
+
+	t.Run("redact hashes forwarded body", func(t *testing.T) {
+		cfg, err := LoadConfigFromBytes("test", []byte(fmt.Sprintf(base, "redact")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := newTestProxy(t, cfg)
+		redacted := p.guardScanner.Redact(body)
+		out := preview(t, "redact", redacted)
+		if out["cache"] != "hit" {
+			t.Fatalf("redacted cache state = %v, want hit", out["cache"])
+		}
+		guardState := out["guard"].(map[string]any)
+		if guardState["body_redacted"] != true || guardState["blocked"] != false {
+			t.Fatalf("redact guard state = %+v", guardState)
+		}
+	})
+
+	t.Run("block bypasses cache and scheduling", func(t *testing.T) {
+		out := preview(t, "block", body)
+		if out["cache"] != "bypass (guard block)" {
+			t.Fatalf("block cache state = %v", out["cache"])
+		}
+		if ordered, ok := out["ordered"].([]any); !ok || len(ordered) != 0 {
+			t.Fatalf("blocked preview ordered = %#v, want empty", out["ordered"])
+		}
+		guardState := out["guard"].(map[string]any)
+		if guardState["blocked"] != true {
+			t.Fatalf("block guard state = %+v", guardState)
+		}
+	})
+
+	t.Run("strong path block bypasses cache", func(t *testing.T) {
+		pathBody := []byte(`{"model":"glm","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"~/.ssh/id_rsa"}}]}]}`)
+		cfg, err := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+routes:
+  glm: [{provider: zhipu, model: glm}]
+cache: {enabled: true, ttl: 1m}
+guard: {secrets: off, paths: block, audit: false}
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := newTestProxy(t, cfg)
+		keyReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(pathBody)))
+		p.cache.Put(responsecache.Key(keyReq, pathBody), http.StatusOK,
+			http.Header{"Content-Type": {"application/json"}}, []byte(`{}`), time.Now())
+		req := httptest.NewRequest(http.MethodPost, "/debug/route", strings.NewReader(string(pathBody)))
+		rec := httptest.NewRecorder()
+		p.Handler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("path preview status = %d, body = %s", rec.Code, rec.Body)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out["cache"] != "bypass (guard block)" {
+			t.Fatalf("path block cache state = %v", out["cache"])
+		}
+		guardState := out["guard"].(map[string]any)
+		if guardState["blocked"] != true || guardState["strong_paths"] == nil {
+			t.Fatalf("path block guard state = %+v", guardState)
+		}
+	})
 }

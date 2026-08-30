@@ -452,6 +452,13 @@ func WriteCodexAuthFile(path string, af *CodexAuthFile) error {
 	return credstore.NewRef(path).Save(b)
 }
 
+// ClearCodexAccount removes the codex OAuth store through credstore. This is
+// the shared logout/delete boundary for file and keychain modes; absence is
+// success so CLI and Web account deletion remain idempotent.
+func ClearCodexAccount(path string) error {
+	return removeAuthFile(path)
+}
+
 func (p *CodexOAuthProvider) save(af *CodexAuthFile) error {
 	return WriteCodexAuthFile(p.authFile, af)
 }

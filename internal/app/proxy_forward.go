@@ -3,8 +3,6 @@ package app
 import (
 	"fmt"
 	"io"
-	"model-proxy/internal/observe/counters"
-	"model-proxy/internal/observe/logx"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,7 +10,9 @@ import (
 
 	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
+	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
+	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/seclog"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
@@ -107,30 +107,26 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		// the redacted form would destroy the very fragments that pass exists
 		// to reassemble). In-memory only, bounded — see session_scan.go.
 		preGuardBody := origBody
-		var secretNames []string
-		if action != "off" {
-			if names := sc.Scan(origBody); len(names) > 0 {
-				if p.metrics != nil {
-					for _, name := range names {
-						p.metrics.Inc("guard", name, counters.EvGuardHits)
-					}
-				}
-				p.events.Publish(observeevents.Event{
-					Type:      "guard",
-					Ts:        time.Now().UnixMilli(),
-					RequestID: requestID,
-					Agent:     agent,
-					Protocol:  proto,
-					Exposed:   exposed,
-					Detail:    "secrets=" + strings.Join(names, ",") + " action=" + action,
-				})
-				auditGuardHit(runtime.SecLog, seclog.KindSecret, names, action, requestID, agent, proto, exposed)
-				secretNames = names
-				if action == "redact" {
-					origBody = sc.Redact(origBody)
+		guardDecision := evaluateRequestGuard(cfg.Guard, sc, origBody)
+		secretNames := guardDecision.secrets
+		if len(secretNames) > 0 {
+			if p.metrics != nil {
+				for _, name := range secretNames {
+					p.metrics.Inc("guard", name, counters.EvGuardHits)
 				}
 			}
+			p.events.Publish(observeevents.Event{
+				Type:      "guard",
+				Ts:        time.Now().UnixMilli(),
+				RequestID: requestID,
+				Agent:     agent,
+				Protocol:  proto,
+				Exposed:   exposed,
+				Detail:    "secrets=" + strings.Join(secretNames, ",") + " action=" + action,
+			})
+			auditGuardHit(runtime.SecLog, seclog.KindSecret, secretNames, action, requestID, agent, proto, exposed)
 		}
+		origBody = guardDecision.forwardBody
 		// Sensitive-path signal (S2): an intent-level alert fired before any
 		// secret value appears. Paths are never redacted (rewriting a path
 		// would corrupt legitimate coding work). Hits are context-split
@@ -148,12 +144,11 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		// counters/events/audit records; only the response action is decided
 		// afterwards (below).
 		pa := cfg.Guard.PathsAction()
-		var pathCats []string
+		pathCats := guardDecision.strongPath
 		if pa != "off" {
-			strong, weak := sc.ScanPathsContext(origBody)
-			if len(strong) > 0 {
+			if len(pathCats) > 0 {
 				if p.metrics != nil {
-					for _, cat := range strong {
+					for _, cat := range pathCats {
 						p.metrics.Inc("guard", cat, counters.EvGuardHits)
 					}
 				}
@@ -164,18 +159,17 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 					Agent:     agent,
 					Protocol:  proto,
 					Exposed:   exposed,
-					Detail:    "paths=" + strings.Join(strong, ",") + " action=" + pa,
+					Detail:    "paths=" + strings.Join(pathCats, ",") + " action=" + pa,
 				})
-				auditGuardHit(runtime.SecLog, seclog.KindPath, strong, pa, requestID, agent, proto, exposed)
-				pathCats = strong
+				auditGuardHit(runtime.SecLog, seclog.KindPath, pathCats, pa, requestID, agent, proto, exposed)
 			}
-			if len(weak) > 0 {
+			if len(guardDecision.weakPath) > 0 {
 				if p.metrics != nil {
-					for _, cat := range weak {
+					for _, cat := range guardDecision.weakPath {
 						p.metrics.Inc("guard", cat+"_text", counters.EvGuardHits)
 					}
 				}
-				auditGuardHit(runtime.SecLog, seclog.KindPath, weak, "log-weak", requestID, agent, proto, exposed)
+				auditGuardHit(runtime.SecLog, seclog.KindPath, guardDecision.weakPath, "log-weak", requestID, agent, proto, exposed)
 			}
 		}
 		// Split-exfiltration signal (fragmented known secret): a credential

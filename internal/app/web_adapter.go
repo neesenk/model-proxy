@@ -1,9 +1,9 @@
 package app
 
 import (
-	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 
+	clilogin "model-proxy/internal/cli/login"
 	observeevents "model-proxy/internal/observe/events"
 	webtransport "model-proxy/internal/web"
 	"model-proxy/internal/webauth"
@@ -27,6 +27,11 @@ type WebServer struct {
 }
 
 func NewWebServer(proxy *Proxy, configFile string) *WebServer {
+	runtime := proxy.SnapshotRuntime()
+	browserListen := ""
+	if runtime.Cfg != nil {
+		browserListen = runtime.Cfg.Listen
+	}
 	server := &WebServer{
 		adminAuth:       proxy.adminAuth.Load,
 		configFile:      configFile,
@@ -50,11 +55,11 @@ func NewWebServer(proxy *Proxy, configFile string) *WebServer {
 	server.events = func(w http.ResponseWriter, r *http.Request) {
 		observeevents.ServeEvents(proxy.events, w, r)
 	}
-	server.server = mustNewWebTransport(server)
+	server.server = mustNewWebTransport(server, browserListen)
 	return server
 }
 
-func mustNewWebTransport(server *WebServer) *webtransport.Server {
+func mustNewWebTransport(server *WebServer, browserListen string) *webtransport.Server {
 	transport, err := webtransport.New(webtransport.Options{
 		Reads:    server.api,
 		Commands: server.api,
@@ -62,7 +67,8 @@ func mustNewWebTransport(server *WebServer) *webtransport.Server {
 		Events:   server.events,
 		// S2 admin-surface auth follows the proxy's config generation (the
 		// transport is built once; the closure picks up reload-swapped sources).
-		AdminAuth: server.adminAuth,
+		AdminAuth:     server.adminAuth,
+		BrowserListen: browserListen,
 		LogFile: func() string {
 			return server.logFile
 		},

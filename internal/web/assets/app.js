@@ -1,9 +1,8 @@
 // model-proxy admin SPA. Vanilla JS module — no framework, no CDN.
 //
-// Drives the four tabs (#tab-status / #tab-config / #tab-accounts /
-// #tab-analytics) and two modals (#login-modal for async aqp/codex login,
-// #add-modal for apikey add) defined in index.html. All backend calls go to
-// same-origin /api/* endpoints.
+// Drives the admin tabs and three modals (#admin-auth-modal for the browser
+// session, #login-modal for async aqp/codex login, #add-modal for apikey add)
+// defined in index.html. All backend calls go to same-origin /api/* endpoints.
 //
 // Security posture: every value interpolated into innerHTML is run through
 // esc() first. We prefer textContent (inherently safe) wherever no markup is
@@ -110,9 +109,64 @@ async function apiParse(r) {
   try { data = txt ? JSON.parse(txt) : null; } catch (_) { data = null; }
   if (!r.ok) {
     const msg = (data && data.error) || txt || (`HTTP ${r.status}`);
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = r.status;
+    throw err;
   }
   return data;
+}
+
+// The static UI is intentionally public when admin auth is configured so it
+// can bootstrap a browser. A valid bearer is exchanged exactly once for an
+// HttpOnly, SameSite=Strict, /api-scoped session cookie; JavaScript clears the
+// input immediately and never persists the bearer in storage or a URL.
+async function establishAdminSessionIfRequired() {
+  try {
+    await apiGet('/api/status');
+    return;
+  } catch (e) {
+    if (e.status !== 401) return; // daemon/network errors render normally
+  }
+
+  const dialog = document.getElementById('admin-auth-modal');
+  const form = document.getElementById('admin-auth-form');
+  const input = document.getElementById('admin-auth-token');
+  const submit = document.getElementById('admin-auth-submit');
+  const msg = document.getElementById('admin-auth-msg');
+  if (!dialog || !form || !input || !submit || !msg) return;
+
+  setConn('warn', 'admin authentication required');
+  dialog.showModal();
+  input.focus();
+  await new Promise((resolve) => {
+    const authenticate = async (event) => {
+      event.preventDefault();
+      let token = input.value;
+      input.value = '';
+      submit.disabled = true;
+      msg.className = 'msg';
+      msg.textContent = 'authenticating…';
+      try {
+        const response = await fetch('/api/auth/session', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          cache: 'no-store',
+        });
+        await apiParse(response);
+        form.removeEventListener('submit', authenticate);
+        dialog.close();
+        resolve();
+      } catch (e) {
+        msg.className = 'msg err';
+        msg.textContent = e.message || 'authentication failed';
+        input.focus();
+      } finally {
+        token = '';
+        submit.disabled = false;
+      }
+    };
+    form.addEventListener('submit', authenticate);
+  });
 }
 
 // ---------- connectivity + brand meta ----------
@@ -2816,29 +2870,32 @@ if (loginModalEl) loginModalEl.addEventListener('cancel', () => {
   if (loginPollTimer) { clearInterval(loginPollTimer); loginPollTimer = null; }
 });
 
-// Initial render: activate the tab the URL hash names (so a refresh or shared
-// link lands on the same view), defaulting to Status. For #accounts/<provider>,
-// preset the selection so renderAccountsNav lands on it after the fetch.
-const { tab: bootTab, sub: bootSub } = parseHash();
-if (bootTab === 'accounts' && bootSub) {
-  accountsSelectedProvider = bootSub;
+async function boot() {
+  await establishAdminSessionIfRequired();
+
+  // Initial render: activate the tab the URL hash names (so a refresh or shared
+  // link lands on the same view), defaulting to Status. For
+  // #accounts/<provider>, preset the selection before the fetch.
+  const { tab: bootTab, sub: bootSub } = parseHash();
+  if (bootTab === 'accounts' && bootSub) {
+    accountsSelectedProvider = bootSub;
+  }
+  if (bootTab === 'status' && bootSub && STATUS_SECTIONS.some((s) => s.key === bootSub)) {
+    statusSelected = bootSub;
+  }
+  if (bootTab === 'config') {
+    activateTabSilent('config');
+  } else if (bootTab === 'accounts') {
+    activateTabSilent('accounts');
+  } else if (bootTab === 'analytics') {
+    activateTabSilent('analytics');
+  } else if (bootTab === 'security') {
+    activateTabSilent('security');
+  } else {
+    activateTabSilent('status');
+  }
+  // Update the header connection indicator regardless of the landing tab.
+  refreshConnIndicator();
 }
-if (bootTab === 'status' && bootSub && STATUS_SECTIONS.some((s) => s.key === bootSub)) {
-  statusSelected = bootSub;
-}
-if (bootTab === 'config') {
-  activateTabSilent('config');
-} else if (bootTab === 'accounts') {
-  activateTabSilent('accounts');
-} else if (bootTab === 'analytics') {
-  activateTabSilent('analytics');
-} else if (bootTab === 'security') {
-  activateTabSilent('security');
-} else {
-  activateTabSilent('status');
-}
-// Update the header connection indicator regardless of the landing tab. The
-// Status tab sets it via renderStatusTab, but #config/#accounts skip that, so
-// without this the header would stay on "connecting…" until the user opens
-// Status.
-refreshConnIndicator();
+
+boot();

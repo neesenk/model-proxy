@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 
 	"model-proxy/internal/credstore"
 )
@@ -111,6 +112,14 @@ func (s Store) loadSnapshotKeychain(name, providerID string) (Snapshot, error) {
 			return Snapshot{Source: SourcePlural}, err
 		}
 		a.SecretKey = secretKey
+		// The metadata id is also the keychain namespace. Hydration must not
+		// silently normalize it to a different identity: doing so would make the
+		// runtime use one id while the retained secrets remain under another.
+		// This also prevents a Volcengine AK-bound account whose optional fields
+		// disappeared from degrading into an API-only account.
+		if AccountID(providerID, a.Credentials()) != a.ID {
+			return Snapshot{Source: SourcePlural}, fmt.Errorf("validate %s: accounts[%d] credentials do not match metadata identity", s.PoolPath(name), i)
+		}
 	}
 	if err := validatePool(providerID, p); err != nil {
 		return Snapshot{Source: SourcePlural}, fmt.Errorf("validate %s: %w", s.PoolPath(name), err)
@@ -218,6 +227,15 @@ func (s Store) loadLegacyKeychain(name, providerID string) (Snapshot, error) {
 // unreadable account the next save can fix — so a deletion failure aborts the
 // save with the old metadata file intact.
 func (s Store) saveKeychain(name, providerID string, p Pool) error {
+	// In keychain mode the persisted id is also the secret namespace. Reject a
+	// noncanonical pool before the first backend write; otherwise Save could
+	// succeed but the next Load would either change identity in memory or leave
+	// the secret stranded under an unowned namespace.
+	for i, a := range p.Accounts {
+		if AccountID(providerID, a.Credentials()) != a.ID {
+			return fmt.Errorf("validate pool %s: accounts[%d] credentials do not match metadata identity", name, i)
+		}
+	}
 	for _, a := range p.Accounts {
 		if err := credstore.KeychainSet(keychainKey(name, a.ID, keychainFieldAPIKey), a.APIKey); err != nil {
 			return fmt.Errorf("keychain write for pool %s: %w", s.PoolPath(name), err)
@@ -289,10 +307,31 @@ func (s Store) deleteRemovedEntries(name, providerID string, p Pool) error {
 		if _, ok := kept[id]; ok {
 			continue
 		}
-		for _, field := range []string{keychainFieldAPIKey, keychainFieldAccessKey, keychainFieldSecretKey} {
-			if err := credstore.KeychainDelete(keychainKey(name, id, field)); err != nil && !errors.Is(err, credstore.ErrNotFound) {
-				return fmt.Errorf("keychain delete for pool %s: %w", s.PoolPath(name), err)
-			}
+		if err := s.deleteKeychainAccount(name, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s Store) deleteKeychainAccounts(name string, ids map[string]struct{}) error {
+	ordered := make([]string, 0, len(ids))
+	for id := range ids {
+		ordered = append(ordered, id)
+	}
+	sort.Strings(ordered)
+	for _, id := range ordered {
+		if err := s.deleteKeychainAccount(name, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s Store) deleteKeychainAccount(name, id string) error {
+	for _, field := range []string{keychainFieldAPIKey, keychainFieldAccessKey, keychainFieldSecretKey} {
+		if err := credstore.KeychainDelete(keychainKey(name, id, field)); err != nil && !errors.Is(err, credstore.ErrNotFound) {
+			return fmt.Errorf("keychain delete for pool %s: %w", s.PoolPath(name), err)
 		}
 	}
 	return nil

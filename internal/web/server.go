@@ -2,14 +2,22 @@ package web
 
 import (
 	"context"
+	"encoding/base64"
 	"io/fs"
-	"model-proxy/internal/appapi"
-	"model-proxy/internal/webauth"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"model-proxy/internal/appapi"
+	"model-proxy/internal/webauth"
+)
+
+const (
+	adminSessionCookie       = "mp_admin_session"
+	adminSessionCookiePath   = "/api"
+	maxAdminSessionCookieLen = 3800
 )
 
 // Options supplies the application ports and immutable presentation inputs for
@@ -21,6 +29,10 @@ type Options struct {
 	Assets    fs.FS
 	AssetRoot string
 	LogFile   func() string
+	// BrowserListen is the configured daemon listen address. When admin auth is
+	// enabled, its exact hostname is trusted in addition to IP-literal Hosts;
+	// arbitrary DNS names remain blocked against rebinding.
+	BrowserListen string
 	// Events, when non-nil, serves the live SSE stream on GET /api/events.
 	// The endpoint belongs to the /api/ subtree this transport registers, so
 	// the composition root injects the hub-serving handler here — without it
@@ -29,25 +41,34 @@ type Options struct {
 	// the default). Routing it through serveAPI also puts guardBrowserOrigin
 	// in front of the stream.
 	Events http.HandlerFunc
-	// AdminAuth, when non-nil and enabled, is the S2 admin-surface bearer
-	// check applied to this transport's whole subtree (/api/, /ui/, /metrics).
-	// A closure (not a fixed Source) so reload-swapped config generations are
-	// picked up without rebuilding the transport.
+	// AdminAuth, when non-nil and enabled, gates /api/ and /metrics. /ui/ remains
+	// a secret-free bootstrap document; it exchanges a valid bearer token for
+	// an HttpOnly /api-scoped browser-session cookie. A closure (not a fixed
+	// Source) lets reload-swapped config generations and token revocation take
+	// effect without rebuilding the transport.
 	AdminAuth func() *webauth.Source
 }
 
 // Server serves the admin UI and its JSON API.
 type Server struct {
-	reads     appapi.ReadAPI
-	commands  appapi.CommandAPI
-	events    http.HandlerFunc
-	adminAuth func() *webauth.Source
-	version   string
-	assets    fs.FS
-	assetRoot string
-	logFile   func() string
-	tasks     *taskOwner
-	sessions  *sessionStore
+	reads         appapi.ReadAPI
+	commands      appapi.CommandAPI
+	events        http.HandlerFunc
+	adminAuth     func() *webauth.Source
+	version       string
+	assets        fs.FS
+	assetRoot     string
+	logFile       func() string
+	browserListen string
+	tasks         *taskOwner
+	sessions      *sessionStore
+}
+
+// adminAuthSnapshot captures the reload-swapped Source once for one transport
+// request. Auth and LAN-origin policy must not observe different generations.
+type adminAuthSnapshot struct {
+	source  *webauth.Source
+	enabled bool
 }
 
 func New(opts Options) (*Server, error) {
@@ -62,7 +83,7 @@ func New(opts Options) (*Server, error) {
 	if root == "" {
 		root = "assets"
 	}
-	return &Server{reads: opts.Reads, commands: opts.Commands, events: opts.Events, adminAuth: opts.AdminAuth, version: opts.Version, assets: assets, assetRoot: root, logFile: opts.LogFile, tasks: newTaskOwner(), sessions: newSessionStore()}, nil
+	return &Server{reads: opts.Reads, commands: opts.Commands, events: opts.Events, adminAuth: opts.AdminAuth, version: opts.Version, assets: assets, assetRoot: root, logFile: opts.LogFile, browserListen: opts.BrowserListen, tasks: newTaskOwner(), sessions: newSessionStore()}, nil
 }
 
 func (s *Server) Register(mux *http.ServeMux) {
@@ -93,8 +114,8 @@ func (s *Server) Close() { s.tasks.Close() }
 // unauthenticated admin surface. Exported so the composition root can guard
 // browser-reachable endpoints that ride the proxy handler instead of this
 // transport (e.g. /debug/schedule, /api/events in web-disabled mode).
-// admin surface. Local CLI/curl clients send no Origin/Sec-Fetch-Site and pass
-// untouched; requests that carry BROWSER identity headers must:
+// Local CLI/curl clients send no Origin/Sec-Fetch-Site and pass untouched;
+// requests that carry BROWSER identity headers must:
 //
 //   - carry a LOOPBACK Host (DNS rebinding serves attacker domains that resolve
 //     here — same-origin from the browser's view, so only the Host check stops
@@ -106,13 +127,31 @@ func (s *Server) Close() { s.tasks.Close() }
 // GET /api/config answers with the verbatim YAML (static provider keys live in
 // it), so reads need the same protection as mutations.
 func GuardBrowserOrigin(w http.ResponseWriter, r *http.Request) bool {
+	return guardBrowserOrigin(w, r, false, "")
+}
+
+// GuardAdminBrowserOrigin applies the authenticated LAN variant to admin
+// endpoints owned outside this transport (for example proxy-owned /debug/*).
+// The caller must pass authEnabled and trustedHostPort from one captured config
+// boundary; this function only evaluates browser identity headers.
+func GuardAdminBrowserOrigin(w http.ResponseWriter, r *http.Request, authEnabled bool, trustedHostPort string) bool {
+	return guardBrowserOrigin(w, r, authEnabled, trustedHostPort)
+}
+
+func guardBrowserOrigin(w http.ResponseWriter, r *http.Request, allowAuthenticatedHost bool, trustedHostPort string) bool {
 	origin := r.Header.Get("Origin")
-	browser := origin != "" || r.Header.Get("Sec-Fetch-Site") != ""
+	fetchSite := r.Header.Get("Sec-Fetch-Site")
+	browser := origin != "" || fetchSite != ""
 	if !browser {
 		return true
 	}
-	if !isLoopbackHostHeader(r.Host) {
-		http.Error(w, "admin API host must be a loopback address", http.StatusForbidden)
+	if strings.EqualFold(fetchSite, "cross-site") {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		return false
+	}
+	authenticatedHost := allowAuthenticatedHost && (isIPHostHeader(r.Host) || sameHostPort(r.Host, trustedHostPort))
+	if !isLoopbackHostHeader(r.Host) && !authenticatedHost {
+		http.Error(w, "admin API host must be loopback, an authenticated LAN IP, or the configured listen host", http.StatusForbidden)
 		return false
 	}
 	if origin != "" {
@@ -123,6 +162,19 @@ func GuardBrowserOrigin(w http.ResponseWriter, r *http.Request) bool {
 		}
 	}
 	return true
+}
+
+func sameHostPort(got, configured string) bool {
+	return configured != "" && strings.EqualFold(got, configured)
+}
+
+func isIPHostHeader(hostPort string) bool {
+	host := hostPort
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		host = h
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	return net.ParseIP(host) != nil
 }
 
 func isLoopbackHostHeader(hostPort string) bool {
@@ -146,10 +198,11 @@ func originHostPort(origin string) string {
 }
 
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
-	if !s.guardAdminAuth(w, r) {
-		return
-	}
-	if !GuardBrowserOrigin(w, r) {
+	// Embedded assets contain no runtime data or credential. Under admin auth
+	// they form the bootstrap page that collects a token and creates an
+	// HttpOnly API session; data endpoints remain fail-closed below.
+	auth := s.captureAdminAuth()
+	if !guardBrowserOrigin(w, r, auth.enabled, s.browserListen) {
 		return
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/ui/")
@@ -179,13 +232,28 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
-	if !s.guardAdminAuth(w, r) {
-		return
-	}
-	if !GuardBrowserOrigin(w, r) {
-		return
-	}
+	auth := s.captureAdminAuth()
 	p := r.URL.Path
+	if p == "/api/auth/session" {
+		if !guardBrowserOrigin(w, r, auth.enabled, s.browserListen) {
+			return
+		}
+		switch r.Method {
+		case http.MethodPost:
+			s.handleAdminSessionCreate(w, r, auth)
+		case http.MethodDelete:
+			s.clearAdminSession(w, r)
+		default:
+			writeJSONErr(w, http.StatusMethodNotAllowed, "POST or DELETE only")
+		}
+		return
+	}
+	if !s.guardAdminAuth(w, r, auth) {
+		return
+	}
+	if !guardBrowserOrigin(w, r, auth.enabled, s.browserListen) {
+		return
+	}
 	switch {
 	case p == "/api/events" && r.Method == http.MethodGet && s.events != nil:
 		s.events(w, r)
@@ -260,18 +328,93 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 // without an admin token file, so the open mode stays reachable only on
 // loopback. Same header conventions as the forward surface (Bearer or
 // x-api-key) so curl stays symmetrical.
-func (s *Server) guardAdminAuth(w http.ResponseWriter, r *http.Request) bool {
-	if s.adminAuth == nil {
+func (s *Server) guardAdminAuth(w http.ResponseWriter, r *http.Request, auth adminAuthSnapshot) bool {
+	if !auth.enabled {
 		return true
 	}
-	src := s.adminAuth()
-	if src == nil || !src.Enabled() {
-		return true
+	presented := webauth.BearerFromRequest(r.Header.Get)
+	// An explicitly supplied header is authoritative: a bad header must not be
+	// masked by a valid ambient browser cookie.
+	headerPresented := r.Header.Get("Authorization") != "" || r.Header.Get("x-api-key") != ""
+	if !headerPresented && presented == "" && strings.HasPrefix(r.URL.Path, adminSessionCookiePath+"/") {
+		presented = adminSessionToken(r)
 	}
-	if !src.Accept(webauth.BearerFromRequest(r.Header.Get)) {
+	if !auth.source.Accept(presented) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="model-proxy-admin"`)
 		http.Error(w, "unauthorized: bad admin token", http.StatusUnauthorized)
 		return false
 	}
 	return true
+}
+
+func (s *Server) captureAdminAuth() adminAuthSnapshot {
+	if s.adminAuth == nil {
+		return adminAuthSnapshot{}
+	}
+	src := s.adminAuth()
+	return adminAuthSnapshot{source: src, enabled: src != nil && src.Enabled()}
+}
+
+func adminSessionToken(r *http.Request) string {
+	cookie, err := r.Cookie(adminSessionCookie)
+	if err != nil || cookie.Value == "" || len(cookie.Value) > maxAdminSessionCookieLen {
+		return ""
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(cookie.Value)
+	if err != nil {
+		return ""
+	}
+	return string(decoded)
+}
+
+func (s *Server) handleAdminSessionCreate(w http.ResponseWriter, r *http.Request, auth adminAuthSnapshot) {
+	if !auth.enabled {
+		writeJSONErr(w, http.StatusBadRequest, "admin auth is disabled")
+		return
+	}
+	// Session bootstrap deliberately requires the Authorization bearer form;
+	// x-api-key remains valid for direct API clients but cannot mint an ambient
+	// browser credential through an accidentally inherited header convention.
+	authorization := r.Header.Get("Authorization")
+	token := webauth.BearerFromRequest(func(name string) string {
+		if strings.EqualFold(name, "Authorization") {
+			return authorization
+		}
+		return ""
+	})
+	if !auth.source.Accept(token) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="model-proxy-admin"`)
+		http.Error(w, "unauthorized: bad admin token", http.StatusUnauthorized)
+		return
+	}
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(token))
+	if len(encoded) > maxAdminSessionCookieLen {
+		writeJSONErr(w, http.StatusBadRequest, "admin token is too long for a browser session")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminSessionCookie,
+		Value:    encoded,
+		Path:     adminSessionCookiePath,
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) clearAdminSession(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminSessionCookie,
+		Value:    "",
+		Path:     adminSessionCookiePath,
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+	})
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
 }

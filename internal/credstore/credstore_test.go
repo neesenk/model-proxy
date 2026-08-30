@@ -19,6 +19,8 @@ type fakeKeychain struct {
 	setErr    error
 	getErr    error
 	delErr    error
+	setCalls  int
+	delCalls  int
 }
 
 func newFakeKeychain(available bool) *fakeKeychain {
@@ -28,14 +30,15 @@ func newFakeKeychain(available bool) *fakeKeychain {
 func (f *fakeKeychain) key(service, user string) string { return service + "\x00" + user }
 
 func (f *fakeKeychain) Set(service, user string, password []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setCalls++
 	if f.setErr != nil {
 		return f.setErr
 	}
 	if !f.available {
 		return ErrUnavailable
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.entries[f.key(service, user)] = append([]byte(nil), password...)
 	return nil
 }
@@ -57,14 +60,15 @@ func (f *fakeKeychain) Get(service, user string) ([]byte, error) {
 }
 
 func (f *fakeKeychain) Delete(service, user string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delCalls++
 	if f.delErr != nil {
 		return f.delErr
 	}
 	if !f.available {
 		return ErrUnavailable
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	delete(f.entries, f.key(service, user))
 	return nil
 }
@@ -226,6 +230,13 @@ func TestRefLoadLazyMigratesPlaintextToKeychain(t *testing.T) {
 	if got3, err := other.Load(); err != nil || string(got3) != `{"second":true}` {
 		t.Fatalf("file-free keychain round-trip: (%q, %v)", got3, err)
 	}
+	marker, err := os.ReadFile(other.Path + keychainOriginSuffix)
+	if err != nil || string(marker) != keychainOriginContent {
+		t.Fatalf("keychain-only Save origin marker = (%q, %v)", marker, err)
+	}
+	if info, err := os.Stat(other.Path + keychainOriginSuffix); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("keychain-only Save origin marker mode = (%v, %v), want 0600", info, err)
+	}
 	// Save updates the keychain entry, not a plaintext file.
 	if err := ref.Save([]byte(`{"version":1}`)); err != nil {
 		t.Fatalf("Save under keychain mode: %v", err)
@@ -263,6 +274,24 @@ func TestRefLoadMigrationFailureKeepsPlaintextAuthoritative(t *testing.T) {
 	}
 	if _, err := os.Stat(path + migratedSuffix); !os.IsNotExist(err) {
 		t.Fatal("no backup may be created when the store write failed")
+	}
+}
+
+func TestRefLoadBackfillsOriginForLegacyKeychainOnlyEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex_oauth_auth.json")
+	fake := newFakeKeychain(true)
+	if err := fake.Set(serviceName, filepath.Base(path), []byte(`{"tokens":{"access_token":"legacy"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	useFakeKeychain(t, fake)
+
+	if _, err := NewRef(path).Load(); err != nil {
+		t.Fatalf("Load legacy keychain-only entry: %v", err)
+	}
+	marker, err := os.ReadFile(path + keychainOriginSuffix)
+	if err != nil || string(marker) != keychainOriginContent {
+		t.Fatalf("backfilled keychain origin marker = (%q, %v)", marker, err)
 	}
 }
 
@@ -331,6 +360,29 @@ func TestRefSaveUnderKeychainModeArchivesLegacyPlaintext(t *testing.T) {
 	}
 }
 
+func TestRefSaveKeychainOriginFailureDoesNotWriteSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex_oauth_auth.json")
+	if err := os.Mkdir(path+keychainOriginSuffix, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeKeychain(true)
+	useFakeKeychain(t, fake)
+
+	if err := NewRef(path).Save([]byte(`{"tokens":{"access_token":"secret"}}`)); err == nil {
+		t.Fatal("Save must fail when the keychain origin marker cannot be persisted")
+	}
+	fake.mu.Lock()
+	setCalls := fake.setCalls
+	fake.mu.Unlock()
+	if setCalls != 0 {
+		t.Fatalf("keychain Set calls = %d, want 0 after marker failure", setCalls)
+	}
+	if _, err := fake.Get(serviceName, filepath.Base(path)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("secret reached keychain after marker failure: %v", err)
+	}
+}
+
 func TestRefDeleteKeychainErrorPropagatesButFilesStillCleaned(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "deepseek_apikeys.json")
@@ -346,6 +398,23 @@ func TestRefDeleteKeychainErrorPropagatesButFilesStillCleaned(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("plaintext cleanup must proceed even when keychain delete fails")
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); err != nil {
+		t.Fatalf("failed keychain delete must retain retry provenance: %v", err)
+	}
+
+	// A later file-mode delete must still retry the keychain cleanup even
+	// though this legacy entry had no marker before the failed first attempt.
+	t.Setenv(envCredStore, string(ModeFile))
+	resetResolution()
+	fake.mu.Lock()
+	fake.delErr = nil
+	fake.mu.Unlock()
+	if err := NewRef(path).Delete(); err != nil {
+		t.Fatalf("file-mode retry after keychain delete failure: %v", err)
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); !os.IsNotExist(err) {
+		t.Fatalf("successful retry retained keychain origin marker: %v", err)
 	}
 }
 
@@ -577,17 +646,113 @@ func TestRefDeleteCleansKeychainAfterSwitchToFile(t *testing.T) {
 	if _, err := fake.Get(serviceName, "aqp_oauth_auth.json"); err != nil {
 		t.Fatalf("pure-file delete touched the backend: %v", err)
 	}
-	// With the migration archive present, Delete removes the entry too.
+	// With the legacy migration archive present, a failed first Delete must
+	// first convert that provenance into the durable origin marker. Delete still
+	// cleans the archive, but a later file-mode retry must not lose the evidence
+	// that a keychain copy remains.
 	if err := os.WriteFile(path+migratedSuffix, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	fake.mu.Lock()
+	fake.delErr = errors.New("delete rejected")
+	fake.mu.Unlock()
+	if err := NewRef(path).Delete(); err == nil {
+		t.Fatal("legacy migration cleanup failure must propagate")
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); err != nil {
+		t.Fatalf("legacy archive failure did not leave retry provenance: %v", err)
+	}
+	if _, serr := os.Stat(path + migratedSuffix); !os.IsNotExist(serr) {
+		t.Fatal("archive cleanup must proceed after provenance is persisted")
+	}
+	fake.mu.Lock()
+	fake.delErr = nil
+	fake.mu.Unlock()
 	if err := NewRef(path).Delete(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("retry legacy migration cleanup: %v", err)
 	}
 	if _, err := fake.Get(serviceName, "aqp_oauth_auth.json"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("keychain entry survived logout after mode switch: %v", err)
 	}
-	if _, serr := os.Stat(path + migratedSuffix); !os.IsNotExist(serr) {
-		t.Fatal("archive not cleaned by delete")
+	if _, serr := os.Stat(path + keychainOriginSuffix); !os.IsNotExist(serr) {
+		t.Fatal("origin marker not cleaned by successful retry")
+	}
+}
+
+func TestRefDeleteCleansKeychainOnlySaveAfterSwitchToFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex_oauth_auth.json")
+	fake := newFakeKeychain(true)
+	useFakeKeychain(t, fake)
+	ref := NewRef(path)
+
+	if err := ref.Save([]byte(`{"tokens":{"access_token":"secret"}}`)); err != nil {
+		t.Fatalf("keychain-only Save: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("keychain-only Save created plaintext file: %v", err)
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); err != nil {
+		t.Fatalf("keychain-only Save did not persist origin marker: %v", err)
+	}
+
+	t.Setenv(envCredStore, string(ModeFile))
+	resetResolution()
+	fake.mu.Lock()
+	fake.delErr = errors.New("delete rejected")
+	fake.mu.Unlock()
+	if err := ref.Delete(); err == nil {
+		t.Fatal("keychain delete failure must propagate after mode switch")
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); err != nil {
+		t.Fatalf("origin marker must survive failed keychain delete: %v", err)
+	}
+	fake.mu.Lock()
+	fake.delErr = nil
+	fake.mu.Unlock()
+	if err := ref.Delete(); err != nil {
+		t.Fatalf("Delete after keychain to file switch: %v", err)
+	}
+	if _, err := fake.Get(serviceName, ref.Name); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("keychain entry survived mode switch delete: %v", err)
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); !os.IsNotExist(err) {
+		t.Fatalf("origin marker survived successful delete: %v", err)
+	}
+
+	if err := ref.Delete(); err != nil {
+		t.Fatalf("idempotent second Delete: %v", err)
+	}
+	fake.mu.Lock()
+	deleteCalls := fake.delCalls
+	fake.mu.Unlock()
+	if deleteCalls != 2 {
+		t.Fatalf("keychain Delete calls = %d, want failed attempt plus one retry", deleteCalls)
+	}
+}
+
+func TestRefDeletePureFileHistoryNeverTouchesKeychain(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex_oauth_auth.json")
+	fake := newFakeKeychain(true)
+	keychainOps = fake
+	t.Cleanup(func() { keychainOps = realKeychainProvider{} })
+	forceFileMode(t)
+	ref := NewRef(path)
+
+	if err := ref.Save([]byte(`{"tokens":{"access_token":"secret"}}`)); err != nil {
+		t.Fatalf("file Save: %v", err)
+	}
+	if _, err := os.Stat(path + keychainOriginSuffix); !os.IsNotExist(err) {
+		t.Fatalf("pure-file Save created keychain origin marker: %v", err)
+	}
+	if err := ref.Delete(); err != nil {
+		t.Fatalf("file Delete: %v", err)
+	}
+	fake.mu.Lock()
+	deleteCalls := fake.delCalls
+	fake.mu.Unlock()
+	if deleteCalls != 0 {
+		t.Fatalf("pure-file Delete touched keychain %d times", deleteCalls)
 	}
 }

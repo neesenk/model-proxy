@@ -30,6 +30,7 @@ func newAuthForwardProxy(t *testing.T) *Proxy {
 		t.Fatal(err)
 	}
 	cfg := &Config{
+		Listen:    "192.0.2.10:8123",
 		Providers: map[string]Provider{"a": {OpenAIBaseURL: "http://127.0.0.1:1", Provider: "a", Models: []string{"m"}}},
 		Web:       WebConfig{Auth: WebAuthConfig{AdminTokenFile: adminFile, APIKeysFile: keysFile}},
 	}
@@ -135,6 +136,40 @@ func TestForwardAuthAdminEndpointsRidingProxyHandler(t *testing.T) {
 	res2.Body.Close()
 	if res2.StatusCode == http.StatusUnauthorized {
 		t.Fatal("/debug/schedule with valid admin token rejected")
+	}
+}
+
+func TestForwardAuthAdminDebugEndpointsAllowLANAndRejectRebinding(t *testing.T) {
+	p := newAuthForwardProxy(t)
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "schedule", method: http.MethodGet, path: "/debug/schedule"},
+		{name: "route", method: http.MethodPost, path: "/debug/route", body: `{"model":"m","messages":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := func(host string) *http.Request {
+				req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+				req.Host = host
+				req.Header.Set("Origin", "http://"+host)
+				req.Header.Set("Authorization", "Bearer adm-1")
+				return req
+			}
+			allowed := httptest.NewRecorder()
+			p.Handler(allowed, request("192.0.2.10:8123"))
+			if allowed.Code != http.StatusOK {
+				t.Fatalf("LAN request = %d body=%q, want 200", allowed.Code, allowed.Body.String())
+			}
+
+			rebound := httptest.NewRecorder()
+			p.Handler(rebound, request("attacker.rebound:8123"))
+			if rebound.Code != http.StatusForbidden {
+				t.Fatalf("rebound request = %d body=%q, want 403", rebound.Code, rebound.Body.String())
+			}
+		})
 	}
 }
 

@@ -314,11 +314,12 @@ model-proxy stats --json                      # 原始 JSON（便于 jq）
 listen: 0.0.0.0:15721          # 非回环——必须配 web.auth
 web:
   auth:
-    admin_token_file: ~/.model-proxy/admin_token   # 管理面（/api /ui /metrics）
+    admin_token_file: ~/.model-proxy/admin_token   # 管理数据面（/api /metrics；UI 用它建立会话）
     api_keys_file: ~/.model-proxy/api_keys         # 转发面（客户端 key，每行一个，支持 # 注释）
 ```
 
-- 两个面独立鉴权：管理面校验 `admin_token_file`；转发端点（`/v1/*`、`/messages`、`/v1/models`）校验 `api_keys_file`。`Authorization: Bearer` 与 `x-api-key` 均接受。`/health` 保持开放（存活探针）。
+- 两个面独立鉴权：管理 API/metrics 校验 `admin_token_file`；转发端点（`/v1/*`、`/messages`、`/v1/models`）校验 `api_keys_file`。`Authorization: Bearer` 与 `x-api-key` 均接受。`/health` 保持开放（存活探针）。
+- 浏览器可直接打开 `http://<LAN-IP>:15721/ui/`（或 config `listen` 指定的同名 hostname:port）：静态 UI 是无秘密 bootstrap，首次访问会要求 admin token，并换取 `HttpOnly`、`SameSite=Strict`、仅限 `/api` 的会话 cookie，Live/EventSource 也可正常使用。其他 DNS Host 仍被拒绝以防 DNS rebinding；反向代理应把上游 Host 固定为配置的 listen host 或 IP/loopback。直接 HTTP 无法防同网段窃听，团队部署优先 VPN、SSH tunnel 或 TLS。
 - 密钥比较 constant-time；文件编辑（换 key/撤销）≤10s 生效，无需重启。
 - 回环部署也可以单独开启任一面（例如本地也想给转发加 key）。
 - **takeover 注意**：开启 api_keys 后客户端配置里的 `PROXY_MANAGED` 占位符会被拒绝——把 takeover 写入的 key 换成 `api_keys_file` 中的一行。
@@ -329,8 +330,8 @@ web:
 
 凭据由 `login` 管理，按 provider name 派生路径，不落 config。两类凭据（apikey 池、codex/aqp OAuth store）共用**一个**后端开关：config 顶层 `credentials:`（`file` 默认 | `keychain`）。env `MP_CRED_STORE`（`file|keychain|auto`）已发布，保留为**仅作用于 OAuth 侧的显式 override**——优先级：env 非空 > config > 默认 file；`auto` 表示按 keychain 可达性探测（收敛前的旧默认行为，现为显式 opt-in）。env 与 config 不一致时（env 只覆盖了 OAuth 侧），`config check` 与启动/reload 日志各给一行提示，说明两侧各自生效值与来源（env/config/default）。注意：收敛前未设任何开关、靠 auto 默认进过 keychain 的用户，升级后 OAuth blob 默认按 file 读取——显式设 `credentials: keychain`（或 env）即可继续读到原 keychain 条目。
 
-- **apikey 池**（`login` 写入的 `<name>_apikeys.json`）：`file`（默认）时秘密值内联在 0600 池 JSON（历史行为）；`keychain` 时秘密值 api_key/access_key/secret_key 逐条存进 OS keychain——macOS Keychain / Windows 凭据管理器 / Linux Secret Service，条目键形如 `<providerName>/<accountId>/api_key`，池文件只留 `{id, label, added_at}` 元数据。file→keychain 明文池与遗留单账号文件在首次读取时懒迁移（池文件被重写为纯元数据，遗留文件改名为 `<path>.migrated.bak` 保留一代回滚）；keychain 不可达时 fail-closed——操作报错，不静默回落明文文件。启用方式：`config.yaml` 加 `credentials: keychain` 后重新 login（或等首次读取自动迁移）。注意：macOS 首次写入可能弹钥匙串授权框；headless Linux 需要 Secret Service（gnome-keyring 或 KWallet）在运行。**keychain→file 切回有自动回迁**：池文件是纯元数据时，file 模式读取会按条目从 keychain 读回秘密并原子重写明文池（0600）；keychain 条目缺失的账号保留元数据、在 `Snapshot.ReloginNeeded`/启动日志中报出需重新 login（部分回迁，不整体失败），回迁后 keychain 条目默认保留（防误删，`logout` 是正常删除路径）。
-- **codex/aqp OAuth store**（下表前两类）经 `internal/credstore` 统一读写，同一个 `credentials:` 选择后端（env `MP_CRED_STORE` 可覆盖）：`keychain` 把整个凭据 blob 存为一条 keychain 记录并懒迁移遗留明文文件（原文件改名为 `<path>.migrated.bak`）；`file` 按历史行为存 `0600` 明文文件；显式 `keychain` 而后端不可达时 fail-closed。OAuth blob **不做 keychain→file 自动回迁**（与历史 env 切换行为一致）：切回 file 后需重新 login。
+- **apikey 池**（`login` 写入的 `<name>_apikeys.json`）：`file`（默认）时秘密值内联在 0600 池 JSON（历史行为）；`keychain` 时秘密值 api_key/access_key/secret_key 逐条存进 OS keychain——macOS Keychain / Windows 凭据管理器 / Linux Secret Service，条目键形如 `<providerName>/<accountId>/api_key`，池文件只留 `{id, label, added_at}` 元数据。file→keychain 明文池与遗留单账号文件在首次读取时懒迁移（池文件被重写为纯元数据，遗留文件改名为 `<path>.migrated.bak` 保留一代回滚）；keychain 不可达时 fail-closed——操作报错，不静默回落明文文件。启用方式：`config.yaml` 加 `credentials: keychain` 后重新 login（或等首次读取自动迁移）。注意：macOS 首次写入可能弹钥匙串授权框；headless Linux 需要 Secret Service（gnome-keyring 或 KWallet）在运行。**keychain→file 切回有自动回迁**：池文件是纯元数据时，file 模式按条目读回秘密；只有全量恢复且账号 ID 与原 keychain namespace 一致才原子写入 0600 明文池。缺条目、不完整 Volcengine AK/SK 或非规范 ID 的账号保留元数据并报告需重新 login；未处理元数据不能被一次普通 Save 静默丢弃。完整回迁会留下仅含 canonical ID 的 0600 `<pool>.keychain-origin`，读取时仍保留 keychain 副本；之后 `logout`/Web 删除按该标记清理，失败可重试。纯 file 历史无标记时不访问 keychain。
+- **codex/aqp OAuth store**（下表前两类）经 `internal/credstore` 统一读写，同一个 `credentials:` 选择后端（env `MP_CRED_STORE` 可覆盖）：`keychain` 把整个凭据 blob 存为一条 keychain 记录并懒迁移遗留明文文件（原文件改名为 `<path>.migrated.bak`），同时写无秘密的 0600 `<authfile>.keychain-origin`；`file` 按历史行为存 `0600` 明文文件；显式 `keychain` 而后端不可达时 fail-closed。OAuth blob **不做 keychain→file 自动回迁**（与历史 env 切换行为一致）：切回 file 后需重新 login；但 logout/Web 删除会通过 credstore 清理旧 keychain 条目，失败时保留来源标记供下次重试，纯 file 历史不触碰 keychain。
 
 测试二进制永远不触碰真实 keychain。
 
@@ -342,7 +343,7 @@ web:
 | deepseek | `~/.model-proxy/deepseek_apikey.json` | API key（同上） |
 | volcengine | `~/.model-proxy/volcengine_apikey.json` | `{api_key, access_key, secret_key}`（同上） |
 
-**多账号凭据池**：apikey 类 provider（static/zhipu/zcode/deepseek/volcengine/kimi-code/qwen-plan）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine=access_key，其余=sha256(api_key)[:16]）去重。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。plural pool 是权威凭据来源：损坏或空 pool 会禁用该 provider，不会降级读取旧 singular key。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
+**多账号凭据池**：apikey 类 provider（static/zhipu/zcode/deepseek/volcengine/kimi-code/qwen-plan）重复 `login` 会把账号累积进**池文件** `~/.model-proxy/<name>_apikeys.json`（`{version, accounts:[{id, label, api_key, (access_key, secret_key), added_at}]}`），按账号 id（volcengine 优先 `sha256(access_key)[:16]`，无 AK 时回落 `sha256(api_key)[:16]`；其余为 `sha256(api_key)[:16]`）去重，ID 永不携带原始凭据。运行时每个池被展开成 N 个虚拟 provider（`<name>#<accountId>`），共享父配置但各绑自己的凭据；路由目标命名父 provider 会 fan-out 到全部账号。plural pool 是权威凭据来源：损坏或空 pool 会禁用该 provider，不会降级读取旧 singular key。**路由跨池是会话粘性的**：按请求的 `x-claude-code-session-id` 粘同一个账号（保 prompt cache），新会话 round-robin 分到不同账号（并发散开）；只有 429/熔断才换账号。`usage <provider>` 逐账号展示全部账号。aqp/codex 是单凭据（不入池）。`login --label`/`--replace`、`logout --label`/`--all` 管理池内账号；Web UI Accounts 标签页也能增删。
 
 多实例支持：同一 `provider_id` 可有多个不同 name（如 `zhipu-personal` / `zhipu-work`），各自独立凭据文件/池。
 

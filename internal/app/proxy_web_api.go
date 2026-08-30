@@ -451,8 +451,7 @@ func (api *proxyWebAPI) RemoveAccount(name, id string) (appapi.MutationResult, e
 			)
 		}
 	case "codex":
-		err := os.Remove(cliframework.AuthFilePath(name, "oauth_auth"))
-		if err != nil && !os.IsNotExist(err) {
+		if err := provider.ClearCodexAccount(cliframework.AuthFilePath(name, "oauth_auth")); err != nil {
 			return appapi.MutationResult{}, appapi.NewHTTPError(
 				http.StatusInternalServerError,
 				err.Error(),
@@ -589,12 +588,10 @@ func (job *codexLoginJob) Run(ctx context.Context) appapi.LoginUpdate {
 	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}
-	path := cliframework.AuthFilePath(job.name, "oauth_auth")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fail(err)
-	}
-	data, _ := json.MarshalIndent(authFile, "", "  ")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := provider.WriteCodexAuthFile(
+		cliframework.AuthFilePath(job.name, "oauth_auth"),
+		authFile,
+	); err != nil {
 		return fail(err)
 	}
 	return appapi.LoginUpdate{

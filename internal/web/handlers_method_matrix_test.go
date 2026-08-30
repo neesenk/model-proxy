@@ -157,6 +157,23 @@ func TestEventsRouteThroughTransportGuards(t *testing.T) {
 	if body := rec.Body.String(); !strings.Contains(body, "event: end") {
 		t.Errorf("SSE body missing the injected event: %q", body)
 	}
+
+	// Browser EventSource cannot set Authorization headers. Establish the
+	// HttpOnly /api session, then prove the SSE route accepts its cookie.
+	sessionRec := httptest.NewRecorder()
+	sessionReq := httptest.NewRequest(http.MethodPost, "/api/auth/session", nil)
+	sessionReq.Header.Set("Authorization", "Bearer adm-secret")
+	serveWebRequest(s, sessionRec, sessionReq)
+	if sessionRec.Code != http.StatusNoContent || len(sessionRec.Result().Cookies()) != 1 {
+		t.Fatalf("create browser session = %d cookies=%d", sessionRec.Code, len(sessionRec.Result().Cookies()))
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	req.AddCookie(sessionRec.Result().Cookies()[0])
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("content-type") != "text/event-stream" {
+		t.Fatalf("GET /api/events with session = %d content-type=%q, want SSE", rec.Code, rec.Header().Get("content-type"))
+	}
 }
 
 // TestMetricsEmptyDashboard: with zero counters the exposition still renders

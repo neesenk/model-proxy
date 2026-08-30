@@ -166,7 +166,11 @@ credstore 的 OAuth blob 模式；env `MP_CRED_STORE` 仅作 OAuth 侧的显式 
 在 `config check`/启动/reload 日志报出。keychain→file 切回有反向回迁：file 模式
 读到纯元数据池时按条目从 keychain 读回秘密并原子重写明文池，缺条目的账号保留
 元数据并经 `Snapshot.ReloginNeeded` 报出需重新 login（部分回迁不整体失败），
-回迁后 keychain 条目默认保留（`logout` 是正常删除路径）。
+仅在全量恢复且 identity 与原 keychain namespace 一致时写明文；写前落一个无秘密、
+0600 的 `.keychain-origin` marker。读取回迁保留 keychain 副本，显式
+`Store.RemoveAccount` / `Store.RemoveAllAccounts` 才按 marker 清理，失败保留
+pool/marker 供重试；纯 file 历史无 marker 时不访问 keychain。metadata-only 普通
+Save 必须覆盖并 canonical 地恢复全部原 ID，未处理账号只能通过显式删除移除。
 `internal/app/accounts_store.go` 只适配 HOME 并为登录、Web、Provider 构建保留
 窄兼容入口；`buildProviders` 以一次 `LoadSnapshot` 同时取得 pool 与来源，并在
 同一 build result 中派生 providers、pool identity 和 implicit-route eligibility，

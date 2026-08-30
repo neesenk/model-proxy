@@ -12,24 +12,49 @@ provider，单数 `<name>_apikey.json` 仅作为只读 fallback，包装成一�
 `static` 从引入起只使用 plural pool，没有可运行的 legacy singular 路径。
 
 文件 schema、稳定账号 ID、plural 优先/legacy fallback、原子保存和跨进程锁由
-无仓库内依赖的 `internal/accounts` 统一拥有。该包接收已解析的 home directory，
-不得自行读取 HOME，也不得依赖 Config、Provider、Proxy、Web/CLI 或执行网络
-验证。`internal/app/accounts_store.go` 只负责 HOME 适配和兼容入口。
+`internal/accounts` 统一拥有；它只允许向存储叶子 `internal/credstore` 依赖以访问
+keychain/原子文件能力。该包接收已解析的 home directory，不得自行读取 HOME，
+也不得依赖 Config、Provider、Proxy、Web/CLI 或执行网络验证。
+`internal/app/accounts_store.go` 只负责 HOME 适配和兼容入口。
 
 存储后端由 config `credentials:` 选择（`accounts.Backend`）：`file`（默认）把
 秘密值内联在 0600 pool JSON；`keychain` 经 credstore 把 api_key/access_key/
 secret_key 写入 OS keychain（service "model-proxy"），pool 文件只含 metadata
 （`{version, accounts:[{id,label,added_at,...}]}`，秘密字段为空）——读写路径为
-`saveKeychain`/`loadSnapshotKeychain`，keychain 不可达或缺条目 fail-closed。
+`saveKeychain`/`loadSnapshotKeychain`，keychain 不可达、缺条目或 hydrated 凭据
+无法推导出原 metadata namespace 时 fail-closed，不能在内存中静默换 ID；这也禁止
+Volcengine AK-bound 账号因两个 AK/SK 条目同时丢失而降级成 API-only。
 keychain→file 切回有反向回迁（`restoreFromKeychain`）：file 模式读到纯 metadata
 池时按条目从 keychain 读回秘密并原子重写明文池，缺条目的账号保留 metadata 并经
-`Snapshot.ReloginNeeded` 报出需重新 login。
+`Snapshot.ReloginNeeded` 报出需重新 login。只有全部账号都恢复成功、且秘密推导出的
+canonical ID 与原 metadata/keychain namespace 完全一致时，才允许写明文池；
+Volcengine 的非 API-only 身份必须同时恢复 AK/SK 并复核同一 ID，缺任一字段不得
+降级成 API-only。部分恢复或非 canonical ID 均保持原 metadata 文件不变，也不生成
+完整恢复标记。
+
+完整回迁在写明文前先原子写入 0600 的 `<pool>.keychain-origin`：marker 只含
+`version=1` 和 canonical account IDs，不含任何凭据值。读取回迁不会删除 keychain
+副本；显式 `Store.RemoveAccount` / `Store.RemoveAllAccounts` 才消费 marker 并先清理
+对应 keychain 字段。清理失败时 pool 与 marker 保持可重试；纯 file 历史没有 marker，
+删除绝不访问 keychain。部分回迁时原 metadata 本身是 authority，Store 的删除路径
+直接在该原始 metadata 上移除所选 ID，不能使用丢失 `ReloginNeeded` 的 hydrated pool。
+metadata-only 删除始终清理当前被移除 ID 的 keychain namespace；marker 只补充历史
+provenance（例如 `RemoveAllAccounts` 清掉已不在当前 metadata 的旧 ID），即使切回
+keychain 后 marker 变旧，也不能压制新账号的实际删除。
+
+metadata-only pool 转成普通 file `Save` 前有全量守卫：原 metadata 的每个 ID 必须都
+出现在新 pool 中，并由新凭据推导出同一 canonical ID；否则拒绝写明文与 marker。
+因此多账号逐个重新 login 不会静默丢掉尚未处理的 metadata；用户要放弃某条记录时
+必须先显式 remove/logout。
 
 `Store.Save` 与 `Store.LoadSnapshot` 使用同一套账号语义校验；保存调用必须传入
 provider ID。非法 ID、空 key、重复 ID 或不完整的 Volcengine AK/SK 在写临时文件
-前即失败，不能覆盖磁盘上已有的有效 pool。
+前即失败，不能覆盖磁盘上已有的有效 pool；keychain Save 还必须在第一次后端写入
+前验证每条凭据可推导出其 metadata/keychain namespace ID。
 
-写操作必须在跨进程锁内重新读取当前 pool，再按账号 ID 修改并保存；stdin、
+写操作必须在跨进程锁内重新读取当前 pool，再按账号 ID 修改并保存；账号删除由
+`Store.RemoveAccount` / `Store.RemoveAllAccounts` 统一拥有 keychain provenance 与
+metadata-only 语义，CLI/Web 不得自行 `os.Remove` 或重写 pool。stdin、
 浏览器和上游凭据验证必须在锁外完成。目录保持 `0700`，pool/lock 文件保持
 `0600`，保存使用同目录临时文件后 rename，避免读到半写 JSON。
 
@@ -50,9 +75,11 @@ provider。只有 missing/legacy 来源允许普通 API-key provider 保持旧 f
 - 其他 API key provider 使用 `sha256(api_key)[:16]`。
 
 ID 永远是 hash：virtual id 会进入日志、request log 与持久化状态，不得携带
-凭据材料。`accounts.Store.LoadSnapshot` 在读取时把存量 ID 归一到当前推导
-（修复历史版本把 volcengine 明文 access key 当 ID 的池文件），并在下一次
-Save 时写回归一后的 ID。
+凭据材料。`accounts.Store.LoadSnapshot` 在读取 plaintext 存量池时把 ID 归一到当前
+推导（修复历史版本把 volcengine 明文 access key 当 ID 的池文件），并在下一次
+Save 时写回；metadata-only 池的 ID 同时是现有 keychain namespace，不能只归一化
+文件侧，否则旧 namespace 会失去清理依据，因此此类非 canonical ID 要求显式
+remove 后重新 login。
 
 API-key provider（当前包括 static、zhipu、zcode、deepseek、volcengine、
 kimi-code、qwen-plan）支持池化；aqp、codex 使用各自 OAuth/SSO 单账号文件，
@@ -118,6 +145,9 @@ volcengine `FetchModels` 尚未按账号完全绑定；池化时 `models refresh
 - 单账号池、多账号池和 legacy fallback。
 - plural 与 legacy 并存时只用 plural；损坏/空 plural 必须零上游请求。
 - 空 key、空/重复/含 `#` 的账号 ID 和不完整 Volcengine AK/SK 必须拒绝。
+- keychain→file 的 Volcengine AK/SK 缺半、非 canonical ID、部分恢复、逐个重新
+  login 与显式删除；marker 必须无秘密、0600、失败可重试，纯 file 无 marker 不碰
+  keychain。
 - legacy-only 普通 provider 保持 file-backed；static 只接受 bound plural key。
 - BoundAPIKey 不读取虚拟名字对应的不存在文件。
 - session 稳定、不同 session 分流、账号冷却 failover，以及 pool spread 不跨

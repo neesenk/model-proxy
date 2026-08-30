@@ -219,6 +219,9 @@ func (r Ref) Load() ([]byte, error) {
 	blob, err := keychainOps.Get(serviceName, r.Name)
 	switch {
 	case err == nil:
+		if _, markerErr := r.persistKeychainOrigin(); markerErr != nil {
+			return nil, markerErr
+		}
 		return blob, nil
 	case errors.Is(err, ErrUnavailable):
 		return nil, err
@@ -233,7 +236,12 @@ func (r Ref) Load() ([]byte, error) {
 		}
 		return nil, ferr
 	}
+	hadOrigin, err := r.persistKeychainOrigin()
+	if err != nil {
+		return nil, err
+	}
 	if serr := keychainOps.Set(serviceName, r.Name, data); serr != nil {
+		r.rollbackNewKeychainOrigin(hadOrigin)
 		if errors.Is(serr, ErrEntryTooLarge) {
 			// The blob physically cannot fit this backend — deterministic,
 			// and nothing was destroyed. Keep serving the plaintext copy
@@ -262,7 +270,12 @@ func (r Ref) Save(blob []byte) error {
 		}
 		return AtomicWriteFile(r.Path, blob, 0o600)
 	}
+	hadOrigin, err := r.persistKeychainOrigin()
+	if err != nil {
+		return err
+	}
 	if err := keychainOps.Set(serviceName, r.Name, blob); err != nil {
+		r.rollbackNewKeychainOrigin(hadOrigin)
 		return err
 	}
 	if _, err := os.Stat(r.Path); err == nil {
@@ -275,21 +288,40 @@ func (r Ref) Save(blob []byte) error {
 // "absent" as success — logout must be idempotent even across mode switches
 // (e.g. logged in under file mode, logging out under keychain mode). The
 // reverse switch also cleans up: the keychain entry is deleted when the
-// current mode is keychain, or when the .migrated.bak archive marks that the
-// lazy migration once moved this blob into the keychain — switching back to
-// file mode must not leave a stale secret behind on logout. Pure-file
-// histories never touch the backend (keeps every test binary hermetic).
+// current mode is keychain, when a non-secret origin marker records a direct
+// keychain save/load, or when the .migrated.bak archive records a lazy
+// migration. Switching back to file mode must not leave a stale secret behind
+// on logout. Pure-file histories never touch the backend (keeps every test
+// binary hermetic).
 func (r Ref) Delete() error {
 	var firstErr error
-	keychainInvolved := ResolvedMode() == ModeKeychain
+	keychainMode := ResolvedMode() == ModeKeychain
+	keychainInvolved := keychainMode
 	if !keychainInvolved {
-		if _, err := os.Stat(r.Path + migratedSuffix); err == nil {
-			keychainInvolved = true
+		originExists, err := pathExists(r.Path + keychainOriginSuffix)
+		if err != nil {
+			return err
+		}
+		migrationExists, err := pathExists(r.Path + migratedSuffix)
+		if err != nil {
+			return err
+		}
+		keychainInvolved = originExists || migrationExists
+	}
+	// Older keychain-only entries predate the origin marker. Establish durable
+	// provenance before attempting deletion so a transient backend failure is
+	// still retryable after the process later switches to file mode.
+	if keychainInvolved {
+		if _, err := r.persistKeychainOrigin(); err != nil {
+			return err
 		}
 	}
+	keychainDeleteOK := !keychainInvolved
 	if keychainInvolved {
-		if err := keychainOps.Delete(serviceName, r.Name); err != nil && !errors.Is(err, ErrNotFound) && firstErr == nil {
+		if err := keychainOps.Delete(serviceName, r.Name); err != nil && !errors.Is(err, ErrNotFound) {
 			firstErr = err
+		} else {
+			keychainDeleteOK = true
 		}
 	}
 	for _, path := range []string{r.Path, r.Path + migratedSuffix} {
@@ -297,10 +329,68 @@ func (r Ref) Delete() error {
 			firstErr = err
 		}
 	}
+	// Keep the provenance marker when the keychain deletion failed so a later
+	// idempotent Delete (including after another mode switch) retries the secret
+	// cleanup. Once the backend confirms deletion/absence, remove the marker too.
+	if keychainDeleteOK {
+		if err := os.Remove(r.Path + keychainOriginSuffix); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
-const migratedSuffix = ".migrated.bak"
+const (
+	migratedSuffix        = ".migrated.bak"
+	keychainOriginSuffix  = ".keychain-origin"
+	keychainOriginContent = "model-proxy:keychain\n"
+)
+
+// persistKeychainOrigin durably records that this credential name has a
+// keychain representation. The marker contains no credential material. It is
+// written before the keychain entry so a successful secret write can never be
+// left without the provenance needed for cleanup after switching to file mode.
+// The bool reports whether a marker already existed, allowing a failed backend
+// write to roll back only state created by that attempt.
+func (r Ref) persistKeychainOrigin() (bool, error) {
+	markerPath := r.Path + keychainOriginSuffix
+	info, err := os.Lstat(markerPath)
+	hadOrigin := err == nil
+	if err == nil && !info.Mode().IsRegular() {
+		return true, fmt.Errorf("persist keychain origin %s: marker is not a regular file", markerPath)
+	}
+	if err == nil && info.Mode().Perm() == 0o600 {
+		return true, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("inspect keychain origin %s: %w", markerPath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(r.Path), 0o700); err != nil {
+		return hadOrigin, fmt.Errorf("create credential directory for %s: %w", r.Path, err)
+	}
+	if err := AtomicWriteFile(markerPath, []byte(keychainOriginContent), 0o600); err != nil {
+		return hadOrigin, fmt.Errorf("persist keychain origin %s: %w", markerPath, err)
+	}
+	return hadOrigin, nil
+}
+
+func (r Ref) rollbackNewKeychainOrigin(hadOrigin bool) {
+	if !hadOrigin {
+		_ = os.Remove(r.Path + keychainOriginSuffix)
+	}
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case os.IsNotExist(err):
+		return false, nil
+	default:
+		return false, err
+	}
+}
 
 // backupMigrated moves a legacy plaintext credential file to
 // <path>.migrated.bak, keeping exactly one rollback generation. Best-effort:

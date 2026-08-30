@@ -28,7 +28,8 @@ type Manager struct {
 	// the mutex so the scheduling critical section skips the decayed-status
 	// projection (map alloc + EWMA math per provider). Mutations are rare
 	// relative to DecideOrder calls, and each copies a map of provider-count
-	// size.
+	// size. Readers revalidate the loaded pointer after taking m.mu so a
+	// concurrent publication cannot cross a generation boundary unnoticed.
 	quality atomic.Pointer[map[string]providerQuality]
 }
 

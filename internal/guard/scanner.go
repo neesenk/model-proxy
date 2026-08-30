@@ -41,6 +41,21 @@ const maxDecodesPerScan = 256
 // stop claiming so span processing stays linear in body size.
 const maxMatchesPerScan = 1 << 18
 
+// Phase 1 retains occurrence offsets only for channels whose phase-2 work
+// needs them. Keep an independent cap for each priority tier: encoded probes
+// must not displace known-secret hits, and encoded known-secret hits must not
+// displace the higher-priority plaintext form. Once a tier is full, later
+// occurrences in that tier are ignored (bounded under-detection, never a
+// false positive). The caps deliberately match the maximum number of spans
+// phase 2 can claim; candidates beyond them may be missed when earlier
+// occurrences overlap, which is the intentional bounded-under-detection side
+// of this resource limit.
+const (
+	maxPhase1ProbePositionsPerScan        = maxMatchesPerScan
+	maxPhase1KnownRawPositionsPerScan     = maxMatchesPerScan
+	maxPhase1KnownEncodedPositionsPerScan = maxMatchesPerScan
+)
+
 // Known-secret report names. The secret value itself is never returned.
 const (
 	knownSecret        = "known_secret"
@@ -409,10 +424,15 @@ func decodeHexSpan(span []byte) ([]byte, bool) {
 	return out, true
 }
 
-// scanStats counts bounded decode attempts during one findAll pass — a
-// package-internal seam for tests asserting that adversarial bodies cannot
-// force quadratic decoding.
-type scanStats struct{ decodes int }
+// scanStats counts bounded phase-1 retention and decode attempts during one
+// findAll pass — a package-internal seam for tests asserting that adversarial
+// bodies cannot force unbounded offset materialization or quadratic decoding.
+type scanStats struct {
+	decodes                     int
+	phase1ProbePositions        int
+	phase1KnownRawPositions     int
+	phase1KnownEncodedPositions int
+}
 
 // findAll returns every non-overlapping secret match in body. Phase 1 is a
 // single automaton pass over all literals; phase 2 claims spans in priority
@@ -437,15 +457,32 @@ func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
 		case needleRuleLiteral:
 			ruleHit[ref.idx] = true
 		case needleProbe:
+			if stats.phase1ProbePositions >= maxPhase1ProbePositionsPerScan {
+				return
+			}
 			if probeHits == nil {
 				probeHits = map[int][]int{}
 			}
 			probeHits[ref.idx] = append(probeHits[ref.idx], end)
-		case needleSecretRaw, needleSecretEncoded:
+			stats.phase1ProbePositions++
+		case needleSecretRaw:
+			if stats.phase1KnownRawPositions >= maxPhase1KnownRawPositionsPerScan {
+				return
+			}
 			if secretHits == nil {
 				secretHits = map[int][]int{}
 			}
 			secretHits[id] = append(secretHits[id], end)
+			stats.phase1KnownRawPositions++
+		case needleSecretEncoded:
+			if stats.phase1KnownEncodedPositions >= maxPhase1KnownEncodedPositionsPerScan {
+				return
+			}
+			if secretHits == nil {
+				secretHits = map[int][]int{}
+			}
+			secretHits[id] = append(secretHits[id], end)
+			stats.phase1KnownEncodedPositions++
 		}
 	})
 
@@ -610,35 +647,36 @@ func (s *Scanner) HasKnownSecrets() bool { return len(s.secrets) > 0 }
 // is the same single automaton pass as findAll (non-secret needles are
 // discarded in the callback), so a clean body costs one prefilter sweep.
 func (s *Scanner) ScanKnown(body []byte) []string {
+	names, _ := s.scanKnownCounted(body)
+	return names
+}
+
+// knownScanStats exposes the amount of phase-1 state retained by ScanKnown to
+// package tests. ScanKnown only needs channel presence, so it retains at most
+// two booleans and never materializes occurrence offsets.
+type knownScanStats struct{ phase1Presence int }
+
+func (s *Scanner) scanKnownCounted(body []byte) ([]string, knownScanStats) {
+	var stats knownScanStats
 	if len(s.secrets) == 0 {
-		return nil
-	}
-	var secretHits map[int][]int // needle id → occurrence end offsets
-	s.ac.search(body, func(id, end int) {
-		ref := s.refs[id]
-		if ref.kind != needleSecretRaw && ref.kind != needleSecretEncoded {
-			return
-		}
-		if secretHits == nil {
-			secretHits = map[int][]int{}
-		}
-		secretHits[id] = append(secretHits[id], end)
-	})
-	if secretHits == nil {
-		return nil
+		return nil, stats
 	}
 	var raw, encoded bool
-	for si := range s.secrets {
-		sec := &s.secrets[si]
-		if len(secretHits[sec.rawID]) > 0 {
-			raw = true
-		}
-		for _, id := range sec.encodedIDs {
-			if len(secretHits[id]) > 0 {
+	s.ac.search(body, func(id, _ int) {
+		ref := s.refs[id]
+		switch ref.kind {
+		case needleSecretRaw:
+			if !raw {
+				raw = true
+				stats.phase1Presence++
+			}
+		case needleSecretEncoded:
+			if !encoded {
 				encoded = true
+				stats.phase1Presence++
 			}
 		}
-	}
+	})
 	var names []string
 	if raw {
 		names = append(names, knownSecret)
@@ -646,7 +684,7 @@ func (s *Scanner) ScanKnown(body []byte) []string {
 	if encoded {
 		names = append(names, knownSecretEncoded)
 	}
-	return names
+	return names, stats
 }
 
 // ScanKnownFragment advances per-secret split-fragment progress with one

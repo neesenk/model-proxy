@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	responsecache "model-proxy/internal/cache"
@@ -13,7 +14,6 @@ import (
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
 	runtimestate "model-proxy/internal/runtime"
-	webtransport "model-proxy/internal/web"
 )
 
 // serveRoutePreview answers "where would this request go RIGHT NOW?" — the
@@ -24,12 +24,9 @@ import (
 // POST the body exactly as the client would send it; ?proto= overrides the
 // protocol (default anthropic) and the x-mp-force-provider /
 // x-claude-code-session-id headers participate like in a real request. The
-// cache probe keys on THIS request's headers — forward the cache-relevant
-// ones (anthropic-beta, accept-language) for an exact verdict.
+// cache probe maps the selected protocol to its real client endpoint and uses
+// THIS request's cache-relevant headers (anthropic-beta, accept-language).
 func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
-	if !webtransport.GuardBrowserOrigin(w, r) {
-		return
-	}
 	writeJSON := func(status int, v any) {
 		data, err := json.Marshal(v)
 		if err != nil {
@@ -61,6 +58,7 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	cat := p.catalog
 	dash := p.runtimeState.Dashboard(now)
 	cache := p.cache
+	guardScanner := p.guardScanner
 	p.mu.RUnlock()
 
 	maxBody := cfg.MaxRequestBodyBytesValue()
@@ -103,10 +101,14 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	out["route_found"] = true
 
-	force := p.pinForces(exposed, targets, parentOf)
-	if force {
-		if pin, ok := dash.Pins[exposed]; ok {
-			out["pinned"] = pin.Provider
+	force := false
+	if pin, ok := dash.Pins[exposed]; ok {
+		for _, target := range targets {
+			if target.Provider == pin.Provider || parentOf[target.Provider] == pin.Provider {
+				force = true
+				out["pinned"] = pin.Provider
+				break
+			}
 		}
 	}
 	forcedProvider := forcedProviderFromRequest(r)
@@ -122,12 +124,45 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 		targets = narrowed
 	}
 
+	// The live path applies the outbound guard before both cache lookup and
+	// request-profile planning. Reuse its pure per-request decision here, but
+	// deliberately omit live-only observation/session mutation.
+	guardDecision := evaluateRequestGuard(cfg.Guard, guardScanner, body)
+	blockKind, blockNames := guardDecision.blocks(cfg.Guard)
+	guardState := map[string]any{
+		"secrets_action": cfg.Guard.SecretsAction(),
+		"paths_action":   cfg.Guard.PathsAction(),
+		"blocked":        blockKind != "",
+	}
+	if len(guardDecision.secrets) > 0 {
+		guardState["secrets"] = guardDecision.secrets
+	}
+	if len(guardDecision.strongPath) > 0 {
+		guardState["strong_paths"] = guardDecision.strongPath
+	}
+	if len(guardDecision.weakPath) > 0 {
+		guardState["weak_paths"] = guardDecision.weakPath
+	}
+	if len(guardDecision.secrets) > 0 && cfg.Guard.SecretsAction() == "redact" {
+		guardState["body_redacted"] = true
+	}
+	out["guard"] = guardState
+	body = guardDecision.forwardBody
+	if blockKind != "" {
+		out["cache"] = "bypass (guard block)"
+		out["ordered"] = []any{}
+		out["error"] = fmt.Sprintf("guard would block %s: %s", blockKind, strings.Join(blockNames, ", "))
+		writeJSON(http.StatusOK, out)
+		return
+	}
+
 	cacheState := "off"
 	if cache != nil && forcedProvider == "" && !force {
 		// Peek, not Lookup: this endpoint is a read-only preview that gets
 		// polled, and Lookup books a miss (and lazily evicts) on every probe,
 		// grinding the operational hit-rate metrics down.
-		if cache.Peek(responsecache.Key(r, body), now) {
+		cacheRequest := routePreviewCacheRequest(r, proto)
+		if cache.Peek(responsecache.Key(cacheRequest, body), now) {
 			cacheState = "hit"
 		} else {
 			cacheState = "miss"
@@ -222,4 +257,23 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 		out["sticky"] = cur.Provider
 	}
 	writeJSON(http.StatusOK, out)
+}
+
+// routePreviewCacheRequest translates the diagnostic endpoint into the actual
+// inbound protocol endpoint used by forward. /debug/route's own ?proto query
+// is control metadata, not part of a real cache key.
+func routePreviewCacheRequest(preview *http.Request, proto string) *http.Request {
+	request := preview.Clone(preview.Context())
+	request.Method = http.MethodPost
+	request.URL.RawPath = ""
+	request.URL.RawQuery = ""
+	switch proto {
+	case "openai":
+		request.URL.Path = "/v1/chat/completions"
+	case "responses":
+		request.URL.Path = "/v1/responses"
+	default:
+		request.URL.Path = "/v1/messages"
+	}
+	return request
 }

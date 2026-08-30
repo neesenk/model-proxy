@@ -38,6 +38,39 @@ func poolFileBytes(t *testing.T, s Store, name string) string {
 	return string(data)
 }
 
+// seedLegacyKeychainPool constructs a pre-fix metadata/keychain state that
+// current Save correctly refuses (for example a noncanonical namespace). It
+// uses the storage primitives directly so tests can prove load/restore stays
+// fail-closed for data written by an older release.
+func seedLegacyKeychainPool(t *testing.T, dir, name string, pool Pool) Store {
+	t.Helper()
+	s := keychainStore(dir)
+	if err := s.ensureDirectory(); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range pool.Accounts {
+		for _, field := range []struct {
+			name  string
+			value string
+		}{
+			{keychainFieldAPIKey, a.APIKey},
+			{keychainFieldAccessKey, a.AccessKey},
+			{keychainFieldSecretKey, a.SecretKey},
+		} {
+			if field.value == "" {
+				continue
+			}
+			if err := credstore.KeychainSet(keychainKey(name, a.ID, field.name), field.value); err != nil {
+				t.Fatalf("seed legacy keychain field %s: %v", field.name, err)
+			}
+		}
+	}
+	if err := s.writeMetadataFile(name, pool); err != nil {
+		t.Fatalf("seed legacy metadata: %v", err)
+	}
+	return s
+}
+
 func TestKeychainRoundTrip(t *testing.T) {
 	keyring.MockInit()
 	dir := t.TempDir()
@@ -273,6 +306,55 @@ func TestKeychainMissingEntryFailsClosed(t *testing.T) {
 	}
 }
 
+func TestKeychainMetadataIdentityMismatchFailsClosed(t *testing.T) {
+	t.Run("noncanonical api-key namespace", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		s := keychainStore(dir)
+		cred := Credentials{APIKey: "sk-noncanonical-keychain"}
+		pool := Pool{Version: 1, Accounts: []Account{{
+			ID: "legacy-id", Label: "legacy", APIKey: cred.APIKey, AddedAt: "2026-08-26",
+		}}}
+		if err := s.Save("prov", "zhipu", pool); err == nil || !strings.Contains(err.Error(), "credentials do not match metadata identity") {
+			t.Fatalf("noncanonical Save error = %v, want identity mismatch", err)
+		}
+		if _, err := os.Stat(s.PoolPath("prov")); !os.IsNotExist(err) {
+			t.Fatalf("rejected noncanonical Save wrote metadata: %v", err)
+		}
+		s = seedLegacyKeychainPool(t, dir, "prov", pool)
+		if _, err := s.LoadSnapshot("prov", "zhipu"); err == nil || !strings.Contains(err.Error(), "credentials do not match metadata identity") {
+			t.Fatalf("LoadSnapshot error = %v, want identity mismatch", err)
+		}
+	})
+
+	t.Run("volcengine AK fields both missing", func(t *testing.T) {
+		keyring.MockInit()
+		dir := t.TempDir()
+		s := keychainStore(dir)
+		cred := Credentials{APIKey: "ark-keychain-bound", AccessKey: "AK-KEYCHAIN-BOUND", SecretKey: "SK-KEYCHAIN-BOUND"}
+		id := AccountID("volcengine", cred)
+		pool := Pool{Version: 1, Accounts: []Account{{
+			ID: id, Label: "bound", APIKey: cred.APIKey,
+			AccessKey: cred.AccessKey, SecretKey: cred.SecretKey, AddedAt: "2026-08-26",
+		}}}
+		if err := s.Save("vol", "volcengine", pool); err != nil {
+			t.Fatalf("seed Volcengine metadata: %v", err)
+		}
+		for _, field := range []string{keychainFieldAccessKey, keychainFieldSecretKey} {
+			if err := credstore.KeychainDelete(keychainKey("vol", id, field)); err != nil {
+				t.Fatalf("delete %s fixture: %v", field, err)
+			}
+		}
+		if _, err := s.LoadSnapshot("vol", "volcengine"); err == nil || !strings.Contains(err.Error(), "credentials do not match metadata identity") {
+			t.Fatalf("LoadSnapshot error = %v, want fail-closed identity mismatch", err)
+		}
+		content := poolFileBytes(t, s, "vol")
+		if !strings.Contains(content, id) || strings.Contains(content, cred.APIKey) {
+			t.Fatalf("failed keychain load changed metadata file: %s", content)
+		}
+	})
+}
+
 func TestFileBackendIgnoresKeychainMode(t *testing.T) {
 	// Zero-regression: the file backend never consults the keychain, even with
 	// a broken backend injected.
@@ -295,5 +377,14 @@ func TestFileBackendIgnoresKeychainMode(t *testing.T) {
 	}
 	if content := poolFileBytes(t, s, "prov"); !strings.Contains(content, cred.APIKey) {
 		t.Fatalf("file backend stripped the plaintext secret")
+	}
+	// A pure file-mode history has no restore provenance, so explicit removal
+	// must remain independent of an unavailable keychain backend.
+	if err := s.RemoveAccount("prov", "zhipu", pool.Accounts[0].ID); err != nil {
+		t.Fatalf("pure file RemoveAccount consulted keychain: %v", err)
+	}
+	after, err := s.Load("prov", "zhipu")
+	if err != nil || len(after.Accounts) != 0 {
+		t.Fatalf("pure file pool after RemoveAccount = (%+v, %v)", after, err)
 	}
 }

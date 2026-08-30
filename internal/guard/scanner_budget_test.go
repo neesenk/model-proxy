@@ -70,6 +70,57 @@ func TestEncodedChannelDecodeBudget(t *testing.T) {
 	}
 }
 
+// Phase 1 must stop retaining cheap probe occurrences before phase 2. A
+// three-byte probe separated into distinct token spans produces one offset per
+// unit; the body deliberately exceeds the retention cap.
+func TestPhase1ProbePositionBudget(t *testing.T) {
+	s := &Scanner{probes: []encodedProbe{{variant: []byte("aaa")}}}
+	s.compilePrefilter()
+	body := []byte(strings.Repeat("aaa.", maxPhase1ProbePositionsPerScan+17))
+
+	found, stats := s.findAllCounted(body)
+	if len(found) != 0 {
+		t.Fatalf("probe-only scanner found matches: %v", found)
+	}
+	if stats.phase1ProbePositions != maxPhase1ProbePositionsPerScan {
+		t.Errorf("retained probe positions = %d, want cap %d",
+			stats.phase1ProbePositions, maxPhase1ProbePositionsPerScan)
+	}
+	if stats.decodes > maxDecodesPerScan {
+		t.Errorf("probe decodes = %d, want <= %d", stats.decodes, maxDecodesPerScan)
+	}
+}
+
+// Repeated exact known-secret hits exercise both consumers of the automaton:
+// findAll retains only a bounded raw-position tier, while ScanKnown retains no
+// positions at all (one presence bit for the raw channel).
+func TestPhase1KnownSecretPositionBudget(t *testing.T) {
+	secret := strings.Repeat("a", minSecretLen)
+	s := &Scanner{secrets: []knownSecretSet{buildSecretSet(secret, false)}}
+	s.compilePrefilter()
+	body := []byte(strings.Repeat("a", maxPhase1KnownRawPositionsPerScan+minSecretLen+17))
+
+	found, stats := s.findAllCounted(body)
+	if stats.phase1KnownRawPositions != maxPhase1KnownRawPositionsPerScan {
+		t.Errorf("retained raw known-secret positions = %d, want cap %d",
+			stats.phase1KnownRawPositions, maxPhase1KnownRawPositionsPerScan)
+	}
+	if stats.phase1KnownEncodedPositions != 0 {
+		t.Errorf("retained encoded known-secret positions = %d, want 0", stats.phase1KnownEncodedPositions)
+	}
+	if len(found) == 0 || found[0].name != knownSecret {
+		t.Fatalf("findAll known-secret matches = %v, want at least one %q match", found, knownSecret)
+	}
+
+	names, knownStats := s.scanKnownCounted(body)
+	if len(names) != 1 || names[0] != knownSecret {
+		t.Errorf("ScanKnown = %v, want [%s]", names, knownSecret)
+	}
+	if knownStats.phase1Presence != 1 {
+		t.Errorf("ScanKnown retained presence state = %d, want 1", knownStats.phase1Presence)
+	}
+}
+
 // Per-probe span dedup: a token run whose decoded text holds a truncated
 // openai shape AND a complete gitlab token. openai_api_key sits earlier in
 // the rule table, so its probe settles the shared span first and fails its

@@ -323,6 +323,9 @@ func (s Store) Save(name, providerID string, p Pool) error {
 	if s.backend == BackendKeychain {
 		return s.saveKeychain(name, providerID, p)
 	}
+	if err := s.prepareMetadataToFileSave(name, providerID, p); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal pool %s: %w", name, err)

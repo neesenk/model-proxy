@@ -38,8 +38,11 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 			"assets":    true,
 			"assetRoot": true,
 			"logFile":   true,
-			"tasks":     true,
-			"sessions":  true,
+			// Immutable startup input used only by the transport-owned browser
+			// origin guard; the composition adapter does not retain it.
+			"browserListen": true,
+			"tasks":         true,
+			"sessions":      true,
 		}) {
 			t.Errorf("internal/web.Server field boundary: %s", violation)
 		}

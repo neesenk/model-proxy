@@ -806,16 +806,23 @@ func newAuthedServer(t *testing.T, enabled bool) (*Server, *webauth.Source) {
 	return s, src
 }
 
-func TestAdminAuthGatesAPIUIAndMetrics(t *testing.T) {
+func TestAdminAuthGatesDataButServesUIBootstrap(t *testing.T) {
 	s, _ := newAuthedServer(t, true)
-	for _, path := range []string{"/api/status", "/ui/", "/metrics"} {
+	// Embedded UI assets contain no runtime data and must load so a browser can
+	// establish its HttpOnly API session. Data and metrics stay fail-closed.
+	ui := httptest.NewRecorder()
+	serveWebRequest(s, ui, httptest.NewRequest(http.MethodGet, "/ui/", nil))
+	if ui.Code != http.StatusOK {
+		t.Fatalf("GET /ui/ without token = %d, want bootstrap 200", ui.Code)
+	}
+	for _, path := range []string{"/api/status", "/metrics"} {
 		rec := httptest.NewRecorder()
-		serveWebRequest(s, rec, httptest.NewRequest("GET", path, nil))
+		serveWebRequest(s, rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET %s without token = %d, want 401", path, rec.Code)
 		}
 		rec = httptest.NewRecorder()
-		req := httptest.NewRequest("GET", path, nil)
+		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer adm-secret")
 		serveWebRequest(s, rec, req)
 		// Exact 200: `!= 401` would also pass a 500 from a broken handler.
@@ -838,6 +845,197 @@ func TestAdminAuthGatesAPIUIAndMetrics(t *testing.T) {
 	serveWebRequest(s, rec, req)
 	if rec.Code == http.StatusUnauthorized {
 		t.Error("x-api-key admin token rejected")
+	}
+}
+
+func TestAdminBrowserSessionAuthenticatesAPIAndCanBeCleared(t *testing.T) {
+	s, _ := newAuthedServer(t, true)
+
+	// Session creation is itself same-origin guarded and requires an explicit
+	// bearer token; no ambient cookie can bootstrap a new credential.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", nil)
+	req.Host = "192.0.2.10:8123"
+	req.Header.Set("Origin", "http://192.0.2.10:8123")
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("session without bearer = %d, want 401", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/session", nil)
+	req.Host = "192.0.2.10:8123"
+	req.Header.Set("Origin", "http://192.0.2.10:8123")
+	req.Header.Set("x-api-key", "adm-secret")
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("session with x-api-key = %d, want explicit bearer rejection", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/session", nil)
+	req.Host = "192.0.2.10:8123"
+	req.Header.Set("Origin", "http://192.0.2.10:8123")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Authorization", "Bearer adm-secret")
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("session create = %d, want 204 (body=%s)", rec.Code, rec.Body.String())
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("session cookies = %d, want 1", len(cookies))
+	}
+	session := cookies[0]
+	if session.Name != adminSessionCookie || session.Value == "adm-secret" {
+		t.Fatalf("session cookie name/value shape = %q/%q", session.Name, session.Value)
+	}
+	if !session.HttpOnly || session.Path != adminSessionCookiePath || session.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("session cookie attributes = %+v", session)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("session Cache-Control = %q, want no-store", got)
+	}
+
+	// The browser cookie authorizes ordinary fetch and EventSource requests
+	// under /api without exposing the token to JavaScript.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Host = "192.0.2.10:8123"
+	req.Header.Set("Origin", "http://192.0.2.10:8123")
+	req.AddCookie(session)
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cookie-authenticated status = %d, want 200", rec.Code)
+	}
+
+	// The same cookie is deliberately not an authentication mechanism outside
+	// /api, even when a non-browser client manually violates Cookie.Path.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.AddCookie(session)
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("session cookie on /metrics = %d, want explicit bearer 401", rec.Code)
+	}
+
+	// Explicit credentials take precedence over ambient cookies, so a bad
+	// header cannot be hidden by a good session.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Header.Set("Authorization", "Bearer wrong")
+	req.AddCookie(session)
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad header plus good cookie = %d, want 401", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/api/auth/session", nil)
+	req.Host = "192.0.2.10:8123"
+	req.Header.Set("Origin", "http://192.0.2.10:8123")
+	req.AddCookie(session)
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("session clear = %d, want 204", rec.Code)
+	}
+	cleared := rec.Result().Cookies()
+	if len(cleared) != 1 || cleared[0].MaxAge >= 0 || cleared[0].Path != adminSessionCookiePath {
+		t.Fatalf("cleared cookie = %+v", cleared)
+	}
+}
+
+func TestAdminAuthAllowsSameOriginLANIPButRejectsDNSRebindingHost(t *testing.T) {
+	s, _ := newAuthedServer(t, true)
+	for _, path := range []string{"/ui/", "/api/status"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = "192.0.2.10:8123"
+		req.Header.Set("Origin", "http://192.0.2.10:8123")
+		if path != "/ui/" {
+			req.Header.Set("Authorization", "Bearer adm-secret")
+		}
+		serveWebRequest(s, rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("LAN GET %s = %d, want 200 (body=%s)", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Host = "attacker.rebound:8123"
+	req.Header.Set("Origin", "http://attacker.rebound:8123")
+	req.Header.Set("Authorization", "Bearer adm-secret")
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("authenticated rebinding host = %d, want 403", rec.Code)
+	}
+}
+
+func TestAdminAuthAllowsConfiguredListenHostnameOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admin.tok")
+	if err := os.WriteFile(path, []byte("adm-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := webauth.NewSource(path)
+	s, err := New(Options{
+		Reads:         &readAPIStub{dashboard: appapi.Dashboard{Counters: map[string]appapi.Metrics{}}},
+		Commands:      &testCommandAPI{},
+		AdminAuth:     func() *webauth.Source { return src },
+		BrowserListen: "proxy.team.test:8123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	for _, tc := range []struct {
+		host string
+		want int
+	}{
+		{host: "proxy.team.test:8123", want: http.StatusOK},
+		{host: "attacker.rebound:8123", want: http.StatusForbidden},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		req.Host = tc.host
+		req.Header.Set("Origin", "http://"+tc.host)
+		req.Header.Set("Authorization", "Bearer adm-secret")
+		rec := httptest.NewRecorder()
+		serveWebRequest(s, rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("Host %s = %d, want %d", tc.host, rec.Code, tc.want)
+		}
+	}
+}
+
+func TestAdminAuthSourceCapturedOncePerRequest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admin.tok")
+	if err := os.WriteFile(path, []byte("adm-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := webauth.NewSource(path)
+	calls := 0
+	s, err := New(Options{
+		Reads:    &readAPIStub{dashboard: appapi.Dashboard{Counters: map[string]appapi.Metrics{}}},
+		Commands: &testCommandAPI{},
+		AdminAuth: func() *webauth.Source {
+			calls++
+			return src
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Header.Set("Authorization", "Bearer adm-secret")
+	req.Header.Set("Origin", "http://192.0.2.10:8123")
+	req.Host = "192.0.2.10:8123"
+	rec := httptest.NewRecorder()
+	serveWebRequest(s, rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if calls != 1 {
+		t.Fatalf("AdminAuth closure calls = %d, want one request snapshot", calls)
 	}
 }
 

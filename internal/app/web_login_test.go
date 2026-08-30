@@ -4,9 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	cliframework "model-proxy/internal/cli/framework"
-	clilogin "model-proxy/internal/cli/login"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zalando/go-keyring"
+
+	cliframework "model-proxy/internal/cli/framework"
+	clilogin "model-proxy/internal/cli/login"
+	"model-proxy/internal/credstore"
 	"model-proxy/internal/provider"
 )
 
@@ -306,6 +310,80 @@ func TestCodexLoginFlow(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("codex auth file perm=%o want 0600", perm)
+	}
+}
+
+func TestCodexLoginFlowKeychainCommitAndDelete(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	keyring.MockInit()
+	t.Cleanup(keyring.MockInit)
+	t.Setenv("MP_CRED_STORE", string(credstore.ModeKeychain))
+	credstore.SetProcessMode(credstore.ModeFile)
+	t.Cleanup(func() { credstore.SetProcessMode(credstore.ModeFile) })
+
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-keychain"}}`))
+	fakeIDToken := "h." + payload + ".s"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/usercode", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"device_auth_id":"daid","user_code":"CODE","interval":"1"}`)
+	})
+	mux.HandleFunc("/devtok", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"authorization_code":"ac","code_challenge":"cc","code_verifier":"cv"}`)
+	})
+	mux.HandleFunc("/tok", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"access_token":"at","refresh_token":"rt","id_token":"`+fakeIDToken+`"}`)
+	})
+	up := httptest.NewServer(mux)
+	defer up.Close()
+
+	w, p := newTestWeb(t)
+	p.mu.Lock()
+	p.cfg.Providers["codex"] = Provider{Provider: "codex", OpenAIBaseURL: "https://x"}
+	p.mu.Unlock()
+	w.newCodexOptions = func() *clilogin.CodexLoginServerOptions {
+		o := &clilogin.CodexLoginServerOptions{}
+		o.Defaults()
+		o.UsercodeURL = up.URL + "/usercode"
+		o.DeviceTokURL = up.URL + "/devtok"
+		o.TokenURL = up.URL + "/tok"
+		return o
+	}
+
+	rec := httptest.NewRecorder()
+	serveWeb(w, rec, httptest.NewRequest(http.MethodPost, "/api/login/codex/start", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var start struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil {
+		t.Fatalf("parse start response: %v", err)
+	}
+	state := waitForLoginDone(t, w, start.SessionID)
+	if state.Result != "acct-keychain" {
+		t.Fatalf("poll result=%q want acct-keychain", state.Result)
+	}
+
+	path := cliframework.AuthFilePath("codex", "oauth_auth")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("keychain-mode Web login created plaintext auth file: %v", err)
+	}
+	auth, err := provider.LoadCodexAuthFile(path)
+	if err != nil {
+		t.Fatalf("load keychain auth after Web login: %v", err)
+	}
+	if auth.Tokens.AccountID != "acct-keychain" {
+		t.Fatalf("keychain auth account id = %q, want acct-keychain", auth.Tokens.AccountID)
+	}
+
+	deleted := httptest.NewRecorder()
+	serveWeb(w, deleted, httptest.NewRequest(http.MethodDelete, "/api/accounts/codex/acct-keychain", nil))
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if _, err := provider.LoadCodexAuthFile(path); !errors.Is(err, credstore.ErrNotFound) {
+		t.Fatalf("keychain credential survived Web delete: %v", err)
 	}
 }
 

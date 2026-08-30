@@ -46,6 +46,14 @@ func TestGuardBlocksCrossOriginBrowserRequests(t *testing.T) {
 	if got := guardRequest(t, http.MethodPost, "/api/pin", "null", "127.0.0.1:8123").Code; got != http.StatusForbidden {
 		t.Errorf("null origin: status=%d, want 403", got)
 	}
+	request := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+	request.Host = "127.0.0.1:8123"
+	recorder := httptest.NewRecorder()
+	serveWebRequest(newGuardServer(t), recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("Sec-Fetch-Site cross-site without Origin: status=%d, want 403", recorder.Code)
+	}
 }
 
 func TestGuardBlocksDNSRebinding(t *testing.T) {

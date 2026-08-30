@@ -89,13 +89,14 @@ func schedulingTier(billing provider.BillingClass) int {
 func (m *Manager) DecideOrder(input ScheduleInput) ScheduleResult {
 	// Project the decayed quality statuses BEFORE the lock: the state is
 	// copy-on-write immutable, so the map allocation + EWMA math per provider
-	// leaves the scheduling critical section. A record landing between the
-	// load and the lock is simply not part of THIS decision — the same
-	// one-decision staleness the locked projection already had.
-	quality := projectQuality(m.qualitySnapshot(), input.Now)
+	// normally stays outside the scheduling critical section. The source
+	// pointer is revalidated under m.mu so a concurrent publication (especially
+	// ReplaceGeneration) cannot pair newer locked state with older quality.
+	projectedQuality := m.projectQualitySnapshot(input.Now)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
+	quality := m.reconcileQualityProjectionLocked(projectedQuality, input.Now)
 
 	state := scheduleState{
 		quotas:  m.quotas,
@@ -308,12 +309,13 @@ func poolBandByID(
 
 func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 	// The quality map loads atomically; projecting (per-provider EWMA walk)
-	// outside m.mu keeps the lock critical section minimal — the same shape
-	// DecideOrder uses for its decayed projection.
-	quality := projectQuality(m.qualitySnapshot(), now)
+	// outside m.mu keeps the common-path lock critical section minimal. The
+	// source pointer is revalidated after locking, matching DecideOrder.
+	projectedQuality := m.projectQualitySnapshot(now)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
+	quality := m.reconcileQualityProjectionLocked(projectedQuality, now)
 
 	snapshot := DashboardSnapshot{
 		Generation: m.generation,

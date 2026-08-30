@@ -18,10 +18,11 @@ import (
 // /api/stats semantics. GuardBrowserOrigin applies: scrapers send no browser
 // identity headers and pass untouched.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	if !s.guardAdminAuth(w, r) {
+	auth := s.captureAdminAuth()
+	if !s.guardAdminAuth(w, r, auth) {
 		return
 	}
-	if !GuardBrowserOrigin(w, r) {
+	if !guardBrowserOrigin(w, r, auth.enabled, s.browserListen) {
 		return
 	}
 	if r.Method != http.MethodGet {

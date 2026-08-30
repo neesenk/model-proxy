@@ -3,8 +3,6 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"model-proxy/internal/httpx"
-	"model-proxy/internal/observe/counters"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -14,6 +12,8 @@ import (
 	// dispatches into that mux only when MP_PPROF=1 was set at construction.
 	_ "net/http/pprof"
 
+	"model-proxy/internal/httpx"
+	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
 	webtransport "model-proxy/internal/web"
@@ -43,8 +43,20 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 	// configured. /health stays open for liveness probes. Bearer and x-api-key
 	// are both accepted (OpenAI vs Anthropic client convention).
 	adminEndpoint := isAdminProxyEndpoint(r.URL.Path)
+	var adminAuthEnabled bool
+	var adminBrowserListen string
 	if adminEndpoint {
-		if admin := p.adminAuth.Load(); admin != nil && admin.Enabled() {
+		// Auth source and configured LAN hostname are swapped under p.mu during
+		// reload. Capture both once so authentication and browser-origin policy
+		// cannot observe different config generations.
+		p.mu.RLock()
+		admin := p.adminAuth.Load()
+		if p.cfg != nil {
+			adminBrowserListen = p.cfg.Listen
+		}
+		p.mu.RUnlock()
+		adminAuthEnabled = admin != nil && admin.Enabled()
+		if adminAuthEnabled {
 			if !admin.Accept(webauth.BearerFromRequest(r.Header.Get)) {
 				http.Error(w, "unauthorized: bad admin token", http.StatusUnauthorized)
 				return
@@ -61,9 +73,9 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/debug/schedule" {
-		// Routing/pin/sticky metadata: same loopback trust boundary as the
-		// admin API for browser-shaped requests (CLI/curl passes untouched).
-		if !webtransport.GuardBrowserOrigin(w, r) {
+		// Routing/pin/sticky metadata: authenticated LAN browsers may use the
+		// configured listen host/IP; unauthenticated mode remains loopback-only.
+		if !webtransport.GuardAdminBrowserOrigin(w, r, adminAuthEnabled, adminBrowserListen) {
 			return
 		}
 		w.Header().Set("content-type", "application/json")
@@ -73,13 +85,16 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.URL.Path == "/debug/route" {
 		// Per-request routing decision preview: no upstream call, no scheduler
 		// mutation (see serveRoutePreview).
+		if !webtransport.GuardAdminBrowserOrigin(w, r, adminAuthEnabled, adminBrowserListen) {
+			return
+		}
 		p.serveRoutePreview(w, r)
 		return
 	}
 	if p.pprofEnabled && strings.HasPrefix(r.URL.Path, "/debug/pprof") {
 		// Live profiling (MP_PPROF=1). Same browser-origin guard as the other
 		// debug surfaces; the pprof handlers self-register on DefaultServeMux.
-		if !webtransport.GuardBrowserOrigin(w, r) {
+		if !webtransport.GuardAdminBrowserOrigin(w, r, adminAuthEnabled, adminBrowserListen) {
 			return
 		}
 		http.DefaultServeMux.ServeHTTP(w, r)
@@ -88,7 +103,7 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && r.URL.Path == "/api/events" {
 		// Only reachable with web.enabled=false (the web transport serves the
 		// endpoint through its guarded /api/ subtree otherwise).
-		if !webtransport.GuardBrowserOrigin(w, r) {
+		if !webtransport.GuardAdminBrowserOrigin(w, r, adminAuthEnabled, adminBrowserListen) {
 			return
 		}
 		observeevents.ServeEvents(p.events, w, r)

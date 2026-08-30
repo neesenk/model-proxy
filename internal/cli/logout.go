@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 
-	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
 	clilogin "model-proxy/internal/cli/login"
 	configdomain "model-proxy/internal/config"
@@ -66,26 +65,33 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	// Locking: the interactive/label/all SELECTION (read pool, list accounts,
 	// prompt for a number) runs OUTSIDE the cross-process lock; it captures the
 	// selected account's ID (not index) from the displayed list. The mutation
-	// (re-load under the lock → remove by id → save / os.Remove) runs INSIDE
-	// withPoolLock. Removing by id re-resolved under the lock is correct even if
-	// the pool changed between display and lock: a concurrently-removed target is
-	// a no-op save; a concurrently-added account is preserved.
+	// (re-load under the Store lock → remove by id → save) runs inside the
+	// Store-owned removal method. Removing by id re-resolved under the lock is
+	// correct even if the pool changed between display and lock: a concurrently
+	// removed target is a no-op save; a concurrently-added account is preserved.
 	pool, err := accountStore().Load(provName, providerID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "logout failed: %v\n", err)
 		os.Exit(1)
 	}
+	all := hasFlagValue(args, "--all")
 	if len(pool.Accounts) == 0 {
 		// Pool file exists but is empty: an authoritative credential
 		// TOMBSTONE (provider-pools.md) — it must stay on disk. Removing it
 		// would re-open the legacy singular fallback and resurrect an old key
-		// after "removed all accounts".
+		// after "removed all accounts". --all still enters the Store removal
+		// boundary so stale restore provenance from an older writer is cleaned.
+		if all {
+			if err := accountStore().RemoveAllAccounts(provName, providerID); err != nil {
+				fmt.Fprintf(os.Stderr, "logout failed: %v\n", err)
+				os.Exit(1)
+			}
+		}
 		fmt.Println(displaypkg.Yellow("Not logged in."))
 		return
 	}
 
 	label := flagStringValue(args, "--label")
-	all := hasFlagValue(args, "--all")
 	// removeAll: --all clears every account. rmID: specific account id to drop.
 	var rmID string
 	removeAll := false
@@ -122,33 +128,15 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 		rmID = pool.Accounts[n-1].ID
 	}
 
-	if err := accountStore().WithLock(provName, func() error {
-		cur, err := accountStore().Load(provName, providerID)
-		if err != nil {
-			return err
-		}
-		if removeAll {
-			cur.Accounts = nil
-		} else {
-			out := make([]accounts.Account, 0, len(cur.Accounts))
-			for _, a := range cur.Accounts {
-				if a.ID == rmID {
-					continue // drop the selected id
-				}
-				out = append(out, a)
-			}
-			cur.Accounts = out
-		}
-		// An empty pool is SAVED, not removed: the empty plural file is the
-		// authoritative credential tombstone that also blocks the legacy
-		// singular fallback. Deleting it here would let a stale
-		// <name>_apikey.json resurrect old credentials after logout.
-		if err := accountStore().Save(provName, providerID, cur); err != nil {
-			return fmt.Errorf("save pool: %w", err)
-		}
-		return nil
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "logout failed: %v\n", err)
+	store := accountStore()
+	var removeErr error
+	if removeAll {
+		removeErr = store.RemoveAllAccounts(provName, providerID)
+	} else {
+		removeErr = store.RemoveAccount(provName, providerID, rmID)
+	}
+	if removeErr != nil {
+		fmt.Fprintf(os.Stderr, "logout failed: %v\n", removeErr)
 		os.Exit(1)
 	}
 

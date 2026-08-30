@@ -58,6 +58,39 @@ func (m *Manager) qualitySnapshot() map[string]providerQuality {
 	return nil
 }
 
+// qualityProjection pairs a detached, decayed view with the exact immutable
+// copy-on-write pointer it came from. DecideOrder and Dashboard do the costly
+// projection before taking m.mu, then revalidate this pointer under the lock:
+// a concurrent record or generation replacement must not be combined with the
+// rest of the newer locked runtime state.
+type qualityProjection struct {
+	source *map[string]providerQuality
+	status map[string]QualityStatus
+}
+
+func (m *Manager) projectQualitySnapshot(now time.Time) qualityProjection {
+	source := m.quality.Load()
+	if source == nil {
+		return qualityProjection{}
+	}
+	return qualityProjection{source: source, status: projectQuality(*source, now)}
+}
+
+// reconcileQualityProjectionLocked returns the precomputed view when its
+// source is still current. The uncommon concurrent-publication path reprojects
+// while holding m.mu so the returned quality state belongs to the same locked
+// generation as health, quota, sticky, pins, and spread. Caller holds m.mu.
+func (m *Manager) reconcileQualityProjectionLocked(projected qualityProjection, now time.Time) map[string]QualityStatus {
+	current := m.quality.Load()
+	if current == projected.source {
+		return projected.status
+	}
+	if current == nil {
+		return nil
+	}
+	return projectQuality(*current, now)
+}
+
 // storeQualityLocked publishes a copy-on-write quality map. Caller holds m.mu.
 func (m *Manager) storeQualityLocked(next map[string]providerQuality) {
 	m.quality.Store(&next)

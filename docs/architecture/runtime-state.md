@@ -185,22 +185,26 @@ config generation 时取得的这一个 DashboardSnapshot 计算，不得再次�
 
 `POST /debug/route`（`internal/app/proxy_route_preview.go`，body = 客户端原样请求体，
 `?proto=` 覆盖协议，默认 anthropic）是**单请求版**的决策预览：复刻 forward 的早期
-步骤（model 提取、claude_mapping、route 查找、pin/force 收窄、cache 只读探测），
+步骤（model 提取、claude_mapping、route 查找、pin/force 收窄、同一纯 guard 判定、
+cache 只读探测），
 排序同样走 `PreviewOrder`（`Commit=false`，不推进 spread、不落 sticky），并输出
 per-target 的 request-fit 判定（`routing.FitVerdict`，与 `Planner.Apply` 同语义，
-带 reason：能力缺失或 `estimated/context` 比例）。cache 探测以**预览请求自身**的
-header 计算 key——要得到与真实请求一致的 hit/miss 结论，调用方需带上同等的
-`anthropic-beta`/`accept-language`。预览不发起任何上游调用。
+带 reason：能力缺失或 `estimated/context` 比例）。cache 探测把 `proto` 映射为真实
+客户端入口（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`），去掉
+`/debug/route` 自身的控制 query，并沿用预览请求的 `anthropic-beta`/
+`accept-language`；`guard.secrets=redact` 时以重写后的 body 查 key，secret 或强路径
+命中 block 时在 cache/scheduling 前返回 `bypass (guard block)`。预览不发起上游调用，
+也不写 guard counter/event/audit/session fragment 状态。
 
 ## Quality 打分（error rate + TTFT）
 
 quality 状态是 **copy-on-write**：record 路径（持 `m.mu`）发布新的不可变
-`map[string]providerQuality`（值类型），读侧（`DecideOrder`）**不持锁**加载指针并把
-衰减投影（map 分配 + 每 provider 的 EWMA 计算）移出调度临界区——锁内不再有 quality
-相关的分配；一条 record 恰好在加载与加锁之间落地的情形，只是本次决策看不到它，
-与原锁内投影已有的单决策级滞后同类。Dashboard 投影复用同一个纯函数
-（`projectQuality`），同样在取锁前加载并投影——Dashboard 临界区里也没有 quality
-相关的分配。
+`map[string]providerQuality`（值类型），读侧（`DecideOrder`）先不持锁加载指针并把
+衰减投影（map 分配 + 每 provider 的 EWMA 计算）移出调度临界区；取得 `m.mu` 后必须
+复核该指针仍是当前值。常见路径锁内不做 quality 分配；若 record 或
+`ReplaceGeneration` 恰好在预投影与加锁之间发布了新指针，则在锁内从新指针重做一次
+投影，禁止把旧 generation 的 quality 与新的 quota/health/sticky 等状态拼接。
+Dashboard 复用同一预投影与指针复核流程。
 
 排序键实际是 `score = surplus − qualityPenalty`：
 

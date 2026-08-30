@@ -1,6 +1,7 @@
 package login
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zalando/go-keyring"
 
 	"model-proxy/internal/accounts"
 	cliframework "model-proxy/internal/cli/framework"
@@ -361,6 +364,37 @@ func TestAddVolcengineAccountCore(t *testing.T) {
 	pool3, _ := accounts.NewStore(accounts.HomeDir()).Load("vol", "volcengine")
 	if len(pool3.Accounts) != 0 {
 		t.Fatalf("pool not emptied: %+v", pool3.Accounts)
+	}
+}
+
+func TestRemoveApikeyAccountCleansRestoredKeychainEntry(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	cred := accounts.Credentials{APIKey: "sk-restored-remove-core"}
+	id := accounts.AccountID("zhipu", cred)
+	pool := accounts.Pool{Version: 1, Accounts: []accounts.Account{{
+		ID: id, Label: "restored", APIKey: cred.APIKey, AddedAt: "2026-08-26",
+	}}}
+	if err := accounts.NewStoreWithBackend(dir, accounts.BackendKeychain).Save("prov", "zhipu", pool); err != nil {
+		t.Fatalf("seed keychain pool: %v", err)
+	}
+	fileStore := accounts.NewStoreWithBackend(dir, accounts.BackendFile)
+	if _, err := fileStore.LoadSnapshot("prov", "zhipu"); err != nil {
+		t.Fatalf("restore keychain pool to file: %v", err)
+	}
+	originalStoreEnv := accountStoreEnv
+	accountStoreEnv = func() accounts.Store { return fileStore }
+	t.Cleanup(func() { accountStoreEnv = originalStoreEnv })
+
+	if err := RemoveApikeyAccount("prov", "zhipu", id); err != nil {
+		t.Fatalf("RemoveApikeyAccount: %v", err)
+	}
+	if _, err := keyring.Get("model-proxy", "prov/"+id+"/api_key"); !errors.Is(err, keyring.ErrNotFound) {
+		t.Fatalf("restored keychain api_key after RemoveApikeyAccount: err = %v, want ErrNotFound", err)
+	}
+	after, err := fileStore.Load("prov", "zhipu")
+	if err != nil || len(after.Accounts) != 0 {
+		t.Fatalf("file pool after RemoveApikeyAccount = (%+v, %v)", after, err)
 	}
 }
 
