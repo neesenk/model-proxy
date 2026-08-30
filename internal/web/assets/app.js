@@ -1530,9 +1530,11 @@ async function loadPresetSelect() {
 }
 
 // addPresetFromWizard POSTs /api/presets/<name>, surfaces the server's
-// ambiguity warnings verbatim (backend message is authoritative), then
-// refreshes the whole Config tab (summary + YAML baseline + provider
-// editors) so the merged block shows up everywhere at once.
+// ambiguity warnings verbatim (backend message is authoritative), renders a
+// reload failure as its own sentence (reload_warning is an error string,
+// never a model name), then refreshes the whole Config tab (summary + YAML
+// baseline + provider editors) so the merged block shows up everywhere at
+// once.
 async function addPresetFromWizard() {
   const sel = document.getElementById('preset-select');
   const msg = document.getElementById('preset-msg');
@@ -1542,9 +1544,16 @@ async function addPresetFromWizard() {
   try {
     const res = await apiPost('/api/presets/' + encodeURIComponent(sel.value));
     const warns = (res && res.warnings) || [];
+    const reloadWarn = (res && res.reload_warning) || '';
+    const parts = [];
     if (warns.length) {
-      showMsg(msg, 'warn',
-        `Added, but implicit routing is ambiguous for: ${warns.join(', ')} — add routes: entries to control failover.`);
+      parts.push(`implicit routing is ambiguous for: ${warns.join(', ')} — add routes: entries to control failover.`);
+    }
+    if (reloadWarn) {
+      parts.push(`hot-reload failed: ${reloadWarn} — the block is saved; the daemon picks it up once config.yaml is fixed and reloaded.`);
+    }
+    if (parts.length) {
+      showMsg(msg, 'warn', `Added, but ${parts.join(' Also, ')}`);
     } else {
       showMsg(msg, 'ok', `Preset ${sel.value} added. Next: add its credential in Accounts (or login).`);
     }

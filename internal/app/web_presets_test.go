@@ -42,7 +42,8 @@ func TestWebPresetsListAndAdd(t *testing.T) {
 	}
 
 	// AddPreset merges the block into the real config file.
-	if _, err := w.api.AddPreset("zhipu"); err != nil {
+	genBefore := p.configGeneration.Load()
+	if _, _, err := w.api.AddPreset("zhipu"); err != nil {
 		t.Fatalf("AddPreset(zhipu): %v", err)
 	}
 	merged, err := os.ReadFile(cfgPath)
@@ -53,13 +54,26 @@ func TestWebPresetsListAndAdd(t *testing.T) {
 		t.Fatalf("config file after AddPreset missing provider block:\n%s", m)
 	}
 
+	// Regression: AddPreset must hot-reload like every other mutation path —
+	// the running proxy serves the new provider immediately, not only after
+	// some later mutation happens to reload.
+	if gen := p.configGeneration.Load(); gen <= genBefore {
+		t.Fatalf("config generation after AddPreset = %d, want > %d (no hot-reload)", gen, genBefore)
+	}
+	p.mu.RLock()
+	_, live := p.cfg.Providers["zhipu"]
+	p.mu.RUnlock()
+	if !live {
+		t.Fatal("live config after AddPreset missing zhipu provider (no hot-reload)")
+	}
+
 	// Idempotent: second AddPreset succeeds without duplicating.
-	if _, err := w.api.AddPreset("zhipu"); err != nil {
+	if _, _, err := w.api.AddPreset("zhipu"); err != nil {
 		t.Fatalf("idempotent AddPreset: %v", err)
 	}
 
 	// Unknown preset fails closed.
-	if _, err := w.api.AddPreset("no-such-preset"); err == nil {
+	if _, _, err := w.api.AddPreset("no-such-preset"); err == nil {
 		t.Fatal("unknown preset must error")
 	}
 }
@@ -85,7 +99,7 @@ func TestWebAddPresetSurfacesAmbiguity(t *testing.T) {
 	// Seed a second provider that also serves shared-model, then add the
 	// zhipu preset (template models are disjoint from shared-model, so seed
 	// the overlap via deepseek whose template block we merge first).
-	if _, err := w.api.AddPreset("deepseek"); err != nil {
+	if _, _, err := w.api.AddPreset("deepseek"); err != nil {
 		t.Fatalf("AddPreset(deepseek): %v", err)
 	}
 	// Direct the overlap: patch deepseek's models to include shared-model via
@@ -94,9 +108,12 @@ func TestWebAddPresetSurfacesAmbiguity(t *testing.T) {
 	if err := w.api.EditConfig(editReqForProviderModels("deepseek", "shared-model")); err != nil {
 		t.Fatalf("edit deepseek models: %v", err)
 	}
-	warnings, err := w.api.AddPreset("zhipu")
+	warnings, reloadWarning, err := w.api.AddPreset("zhipu")
 	if err != nil {
 		t.Fatalf("AddPreset(zhipu): %v", err)
+	}
+	if reloadWarning != "" {
+		t.Fatalf("reload warning on healthy reload = %q, want empty", reloadWarning)
 	}
 	// zhipu (seeded) serves shared-model; deepseek now also serves it with no
 	// explicit route → exactly that model must surface as a warning.

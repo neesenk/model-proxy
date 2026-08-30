@@ -690,12 +690,15 @@ func (api *proxyWebAPI) Presets() []domainpresets.Preset {
 }
 
 // AddPreset merges the preset's template provider block into the live config
-// and hot-reloads (same pipeline as EditConfig). Returns the ambiguity
-// warnings (models also served by other providers without explicit routes).
-func (api *proxyWebAPI) AddPreset(name string) ([]string, error) {
+// and hot-reloads (same reload pipeline as every other mutation). warnings
+// are the ambiguity model names (models also served by other providers
+// without explicit routes); a reload failure is reported separately as
+// reloadWarning — the merged block is already persisted at that point, and
+// callers must not render it as a model name.
+func (api *proxyWebAPI) AddPreset(name string) (warnings []string, reloadWarning string, err error) {
 	catalog, err := domainpresets.List()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	known := false
 	for _, p := range catalog {
@@ -705,17 +708,21 @@ func (api *proxyWebAPI) AddPreset(name string) ([]string, error) {
 		}
 	}
 	if !known {
-		return nil, fmt.Errorf("unknown preset %q", name)
+		return nil, "", fmt.Errorf("unknown preset %q", name)
 	}
 	cfgPath := api.currentConfigFile()
 	written, err := domainpresets.MergeBlock(cfgPath, name)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	_ = written // idempotent: an existing block is fine, login still proceeds
 	merged, err := configdomain.LoadConfig(cfgPath)
 	if err != nil {
-		return nil, fmt.Errorf("reload merged config: %w", err)
+		return nil, "", fmt.Errorf("reload merged config: %w", err)
 	}
-	return domainpresets.AmbiguousModels(merged, name), nil
+	// Same hot-reload as every other config mutation path: without it the
+	// daemon would keep serving the old generation (new models 502, the new
+	// provider missing from the UI) until some later mutation happened to
+	// reload.
+	return domainpresets.AmbiguousModels(merged, name), api.reloadAfterMutation(), nil
 }

@@ -30,8 +30,6 @@ func NewProxy(cfg *Config) *Proxy {
 	return p
 }
 
-// newProxyWithStatePath is the injectable constructor used by tests so every
-// Proxy owns an isolated state file before the tracker loads or starts.
 // NewProxyWithStatePath is the injectable constructor used by tests so every
 // Proxy owns an isolated state file before the tracker loads or starts.
 func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {

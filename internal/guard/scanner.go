@@ -95,13 +95,14 @@ const (
 	needleProbe
 	needleSecretRaw
 	needleSecretEncoded
+	needleSecretFrag
 )
 
 // needleRef maps an automaton needle id back to its owner.
 type needleRef struct {
 	kind needleKind
 	idx  int // rule index, probe index, or secret index
-	vidx int // variant index within the secret (needleSecretEncoded only)
+	vidx int // variant index (needleSecretEncoded) or infix offset in the raw secret (needleSecretFrag)
 }
 
 // Scanner is an immutable per-generation secret scanner: the embedded rule
@@ -176,9 +177,20 @@ func NewScannerWithOptions(custom []CustomPattern, secrets, extraPaths []string,
 	return s, nil
 }
 
+// maxFragNeedles bounds the split-fragment infix needles registered per
+// Scanner build: each trackable secret contributes len(raw)-minKnownFrag+1
+// needles (~8 trie nodes each worst case), so the cap bounds automaton growth
+// for very large credential pools. Secrets past the budget keep exact
+// per-request matching but lose cross-request fragment tracking — bounded
+// under-detection, same direction as maxDecodesPerScan.
+const maxFragNeedles = 1 << 15
+
 // compilePrefilter builds the phase-1 automaton over every literal the scan
 // pipeline can match on: rule prefilter literals, encoded-channel probe
-// variants, and known-secret variants.
+// variants, known-secret variants, and — for secrets long enough to split
+// into two creditable fragments — every minKnownFrag-byte infix of the raw
+// value, which lets ScanKnownFragment track split fragments in the same
+// single automaton pass instead of per-secret bytes.Contains sweeps.
 func (s *Scanner) compilePrefilter() {
 	b := newACBuilder()
 	addRef := func(kind needleKind, idx, vidx int, needle []byte) int {
@@ -195,9 +207,18 @@ func (s *Scanner) compilePrefilter() {
 	for i, p := range s.probes {
 		addRef(needleProbe, i, -1, p.variant)
 	}
+	fragBudget := maxFragNeedles
 	for si := range s.secrets {
 		sec := &s.secrets[si]
 		sec.rawID = addRef(needleSecretRaw, si, -1, sec.raw)
+		// All-or-nothing per secret: a partial infix set would make fragment
+		// tracking depend on which offset a split happened to start at.
+		if n := len(sec.raw); n >= 2*minKnownFrag && n-minKnownFrag+1 <= fragBudget {
+			for k := 0; k+minKnownFrag <= n; k++ {
+				addRef(needleSecretFrag, si, k, sec.raw[k:k+minKnownFrag])
+			}
+			fragBudget -= n - minKnownFrag + 1
+		}
 		sec.encodedIDs = make([]int, len(sec.encoded))
 		for vi, v := range sec.encoded {
 			sec.encodedIDs[vi] = addRef(needleSecretEncoded, si, vi, v)
@@ -644,6 +665,22 @@ func (s *Scanner) ScanKnown(body []byte) []string {
 // per-request channel (Scan) reports it, and "fragmented" must stay
 // reserved for splits a single-request scan cannot see.
 //
+// Mechanism: the prefilter automaton already carries every
+// minKnownFrag-byte infix of each trackable raw secret (compilePrefilter),
+// so ONE search pass over body yields every infix occurrence. Progress can
+// only advance from two anchors — 0 (a fresh prefix) and the current
+// progress p (continuation of the in-flight prefix) — so only occurrences
+// of those two infixes are extended, byte by byte against the raw secret
+// and never by re-scanning body: the longest extension of an infix-p
+// occurrence is exactly the longest raw[p:]-prefix contained in body (any
+// occurrence of a longer raw[p:]-prefix is an occurrence of its
+// minKnownFrag-prefix, and the extension from that position reaches at
+// least as far). Extension work is capped by a per-call budget of
+// max(64KiB, len(body)) comparisons — about one extra body pass — after
+// which anchors stop extending: bounded under-detection, same direction as
+// maxDecodesPerScan. A body containing the complete secret (needleSecretRaw
+// hit) resets that secret's progress instead.
+//
 // progress is the session state returned by the previous call (nil on first
 // request or after a scanner-generation change / window truncation); the
 // returned slice is the state to store for the next request. Limitations
@@ -654,52 +691,91 @@ func (s *Scanner) ScanKnownFragment(body []byte, progress []int) (bool, []int) {
 	if len(s.secrets) == 0 {
 		return false, nil
 	}
-	next := make([]int, len(s.secrets))
-	fragmented := false
+	// anchor is one infix offset whose occurrences can advance a secret's
+	// progress in this call; best is the longest extension seen (≥
+	// minKnownFrag once any occurrence was extended).
+	type anchor struct {
+		k    int
+		best int
+	}
+	k0 := make([]*anchor, len(s.secrets))
+	kp := make([]*anchor, len(s.secrets))
 	for i := range s.secrets {
-		raw := s.secrets[i].raw
-		n := len(raw)
-		if n < 2*minKnownFrag {
+		if len(s.secrets[i].raw) < 2*minKnownFrag {
 			// Too short to split into two creditable fragments: only the
 			// per-request channel covers it.
 			continue
 		}
-		if bytes.Contains(body, raw) {
-			continue // complete in this body — per-request channel's signal
-		}
+		k0[i] = &anchor{k: 0}
 		p := 0
 		if i < len(progress) {
 			p = progress[i]
 		}
-		if p > 0 && p < n {
-			if j := longestContainedPrefix(raw[p:], body); j > 0 {
-				if p+j == n {
-					fragmented = true // completed across requests; progress stays 0
-					continue
-				}
-				next[i] = p + j
-				continue
+		if p > 0 && p+minKnownFrag <= len(s.secrets[i].raw) {
+			kp[i] = &anchor{k: p}
+		}
+	}
+	full := make([]bool, len(s.secrets))
+	budget := len(body)
+	if budget < 1<<16 {
+		budget = 1 << 16
+	}
+	exhausted := false
+	s.ac.search(body, func(id, end int) {
+		ref := s.refs[id]
+		switch ref.kind {
+		case needleSecretRaw:
+			full[ref.idx] = true
+		case needleSecretFrag:
+			if exhausted {
+				return
+			}
+			si, k := ref.idx, ref.vidx
+			var a *anchor
+			if k == 0 {
+				a = k0[si]
+			} else if kp[si] != nil && kp[si].k == k {
+				a = kp[si]
+			}
+			if a == nil || full[si] {
+				return
+			}
+			// The hit fixes body[end-minKnownFrag:end] == raw[k:k+minKnownFrag];
+			// extend forward along the same alignment.
+			raw := s.secrets[si].raw
+			j := minKnownFrag
+			for k+j < len(raw) && end+j-minKnownFrag < len(body) && raw[k+j] == body[end+j-minKnownFrag] {
+				j++
+			}
+			if budget -= j - minKnownFrag + 1; budget < 0 {
+				exhausted = true
+			}
+			if j > a.best {
+				a.best = j
 			}
 		}
-		if j := longestContainedPrefix(raw, body); j > 0 && j < n {
-			next[i] = j
+	})
+	next := make([]int, len(s.secrets))
+	fragmented := false
+	for i := range s.secrets {
+		n := len(s.secrets[i].raw)
+		if n < 2*minKnownFrag || full[i] {
+			continue // complete in this body — per-request channel's signal
+		}
+		if kp[i] != nil && kp[i].best > 0 {
+			p := kp[i].k
+			if p+kp[i].best == n {
+				fragmented = true // completed across requests; progress stays 0
+				continue
+			}
+			next[i] = p + kp[i].best
+			continue
+		}
+		if k0[i] != nil && k0[i].best > 0 && k0[i].best < n {
+			next[i] = k0[i].best
 		}
 	}
 	return fragmented, next
-}
-
-// longestContainedPrefix returns the longest prefix length of frag
-// (≥ minKnownFrag) that appears in body, or 0. The min-length prefilter
-// keeps this to one bytes.Contains on bodies with no fragment at all.
-func longestContainedPrefix(frag, body []byte) int {
-	if len(frag) < minKnownFrag || !bytes.Contains(body, frag[:minKnownFrag]) {
-		return 0
-	}
-	j := minKnownFrag
-	for j < len(frag) && bytes.Contains(body, frag[:j+1]) {
-		j++
-	}
-	return j
 }
 
 // Scan returns the deduplicated type names of the secrets found in body:

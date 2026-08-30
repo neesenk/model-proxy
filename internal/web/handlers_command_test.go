@@ -514,4 +514,4 @@ func TestCommandLoginContract(t *testing.T) {
 	})
 }
 
-func (*commandFake) AddPreset(string) ([]string, error) { return nil, nil }
+func (*commandFake) AddPreset(string) ([]string, string, error) { return nil, "", nil }

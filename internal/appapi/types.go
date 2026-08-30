@@ -290,10 +290,12 @@ type CommandAPI interface {
 	RemoveAccount(string, string) (MutationResult, error)
 	BeginLogin(context.Context, string) (LoginStart, error)
 	// AddPreset merges a preset's template provider block into the live
-	// config (fail-closed on validation) and hot-reloads; it returns the
-	// implicit-routing ambiguity warnings for the UI to surface. Credentials
-	// are added afterwards through AddAccount/BeginLogin as usual.
-	AddPreset(name string) ([]string, error)
+	// config (fail-closed on validation) and hot-reloads; warnings are the
+	// implicit-routing ambiguity model names for the UI to surface, and a
+	// failed reload is reported separately as reloadWarning (the merged
+	// block is already persisted). Credentials are added afterwards through
+	// AddAccount/BeginLogin as usual.
+	AddPreset(name string) (warnings []string, reloadWarning string, err error)
 }
 
 // RequirePorts validates that both application ports are present. It is

@@ -255,18 +255,24 @@ func (s *Server) handlePresetsList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePresetAdd serves POST /api/presets/<name>: merge the template block,
-// hot-reload, and return the ambiguity warnings for the UI to surface. The
-// credential step happens through the existing account/login endpoints.
+// hot-reload, and return the ambiguity warnings for the UI to surface. A
+// failed reload rides in a separate reload_warning field — warnings stays
+// model-name-only. The credential step happens through the existing
+// account/login endpoints.
 func (s *Server) handlePresetAdd(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/presets/")
 	if name == "" || strings.Contains(name, "/") {
 		writeJSONErr(w, http.StatusBadRequest, "expected /api/presets/<name>")
 		return
 	}
-	warnings, err := s.commands.AddPreset(name)
+	warnings, reloadWarning, err := s.commands.AddPreset(name)
 	if err != nil {
 		writePortErr(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "added", "warnings": warnings})
+	resp := map[string]any{"status": "added", "warnings": warnings}
+	if reloadWarning != "" {
+		resp["reload_warning"] = reloadWarning
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

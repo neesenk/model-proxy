@@ -172,6 +172,6 @@ func TestServerLoginTransport(t *testing.T) {
 	}
 }
 
-func (testCommandAPI) AddPreset(string) ([]string, error) { return nil, nil }
+func (testCommandAPI) AddPreset(string) ([]string, string, error) { return nil, "", nil }
 
 func (testReadAPI) Presets() []presets.Preset { return nil }
