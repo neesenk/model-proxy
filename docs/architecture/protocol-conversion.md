@@ -141,7 +141,7 @@ OpenAI → Anthropic 的 tool use id 必须满足 `^[a-zA-Z0-9_-]+$`。同一调
 
 ## 有损字段
 
-SSE 读取按规范折叠多行 `data:`（连续 `data:` 行在分派空行处以 `\n` 拼接为一个 payload，六个流式转换器与 `parseWireSSE` 聚合路径一致；无尾空行的尾帧在 EOF 分派）。LLM 上游实践全部单行，多行仅出现在方言网关。
+SSE 读取按规范折叠多行 `data:`（连续 `data:` 行在分派空行处以 `\n` 拼接为一个 payload，六个流式转换器与 `parseWireSSE` 聚合路径一致；无尾空行的尾帧在 EOF 分派）。LLM 上游实践全部单行，多行仅出现在方言网关。对漏写帧间空行、导致多个完整 JSON payload 被折叠到同一帧的非规范网关，解析器逐 data 行恢复；每个恢复帧使用该 data 行读取时对应的 `event:`，不能把最后一个 event 套给全部 payload，遇到协议终态后不再处理同一折叠帧中的后续数据。
 
 剩余有损项主要是尚未实现降级的 server tools（如 computer）、未知 role/content 和 chat `input_audio`。已知无法表达的请求特性优先由 capability scanner 拒绝；仅响应侧或可安全降级的差异使用 `convertWarn`。document/file、hosted web/tool search、tool_result 图片/错误标记、reasoning replay 和引用均已保留或采用明确降级。跨协议目标为 Anthropic 时，会在 system、最后一个 tool、最后一条 user content 注入 ephemeral cache breakpoint；原协议 cache_control 仍不逐点一一映射。
 
@@ -166,7 +166,9 @@ code 收集进 `RequestOptions.Diag`（`targetexec.Plan` 每次尝试携带一�
 **strict 模式**（config `conversion.strict_lossy`，默认关）：任一诊断触发即以
 `unsupportedConversionError`（`Feature: strict_lossy:<codes>`）拒绝该次转换——完全复用
 capability scanner 的 target 跳过与 400 信封通道，proxy 无特判。strict 只作用于请求侧
-（提交后的响应转换无法回退，failover 无意义）。
+（提交后的响应转换无法回退，failover 无意义）。拒绝集就是**全部**已收集 code 的集合，
+包括语义上无损的项（`cache_control_dropped`、`tool_args_wrapped` 等）：strict 的契约是
+“零诊断”而非“零数据损失”，属有意设计；新增诊断 code 默认进入拒绝集。
 
 ## 接线要求
 

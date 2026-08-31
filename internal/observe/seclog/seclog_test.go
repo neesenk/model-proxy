@@ -607,3 +607,91 @@ func TestQueryEarlyTerminationSkippedFileDoesNotCountCorruptLines(t *testing.T) 
 		t.Errorf("skipped = %d, want 1 — From admits the file, so it is scanned", result.Skipped)
 	}
 }
+
+// TestQueryReportsTruncation pins the Truncated contract: it is true exactly
+// when a positive Limit evicted at least one matching record, false when the
+// limit is not reached or there is no limit at all. This is what `audit
+// --stats` relies on to flag that its counts are a newest-first prefix, not
+// the whole filtered set.
+func TestQueryReportsTruncation(t *testing.T) {
+	dir := t.TempDir()
+	for ts := int64(1); ts <= 5; ts++ {
+		if err := AppendSync(dir, &Record{Ts: ts, Kind: KindDrift, Agent: "doctor", Detail: "n"}); err != nil {
+			t.Fatalf("AppendSync ts=%d: %v", ts, err)
+		}
+	}
+
+	result, err := Query(dir, Filter{Limit: 2})
+	if err != nil {
+		t.Fatalf("Query limit=2: %v", err)
+	}
+	if len(result.Records) != 2 {
+		t.Fatalf("records = %d, want 2", len(result.Records))
+	}
+	if !result.Truncated {
+		t.Error("Truncated = false with 5 matches and limit 2, want true")
+	}
+
+	// Limit exactly reached: nothing was dropped, so no truncation.
+	result, err = Query(dir, Filter{Limit: 5})
+	if err != nil {
+		t.Fatalf("Query limit=5: %v", err)
+	}
+	if len(result.Records) != 5 || result.Truncated {
+		t.Fatalf("limit=5: records = %d, Truncated = %v; want 5, false", len(result.Records), result.Truncated)
+	}
+
+	// No limit: everything is retained, truncation is meaningless.
+	result, err = Query(dir, Filter{})
+	if err != nil {
+		t.Fatalf("Query unlimited: %v", err)
+	}
+	if len(result.Records) != 5 || result.Truncated {
+		t.Fatalf("unlimited: records = %d, Truncated = %v; want 5, false", len(result.Records), result.Truncated)
+	}
+
+	// No matches at all: never truncated.
+	result, err = Query(dir, Filter{Kind: KindSecret, Limit: 2})
+	if err != nil {
+		t.Fatalf("Query kind=secret: %v", err)
+	}
+	if len(result.Records) != 0 || result.Truncated {
+		t.Fatalf("kind=secret: records = %d, Truncated = %v; want 0, false", len(result.Records), result.Truncated)
+	}
+}
+
+// TestQueryReportsTruncationForEarlyTerminatedRotatedFile covers the case
+// where the newest file alone fills the heap and an older file is skipped.
+// Its records do not change the retained top-K, but they are still matching
+// records dropped by Limit and therefore must set Truncated.
+func TestQueryReportsTruncationForEarlyTerminatedRotatedFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, kind string, first, last int64) {
+		t.Helper()
+		var buffer strings.Builder
+		for ts := first; ts <= last; ts++ {
+			fmt.Fprintf(&buffer, `{"ts":%d,"kind":%q}`+"\n", ts, kind)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(buffer.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("security-20260101-000000.log", KindSecret, 1, 10)
+	write("security-20260102-000000.log", KindDrift, 11, 20)
+
+	result := queryKinds(t, dir, Filter{Limit: 10})
+	if len(result.Records) != 10 || result.Records[0].Ts != 20 || result.Records[9].Ts != 11 {
+		t.Fatalf("records = %#v, want newest ts 20..11", result.Records)
+	}
+	if !result.Truncated {
+		t.Fatal("Truncated = false after an older matching file was skipped")
+	}
+
+	// A kind-filtered query scans the older file when its kind cannot be
+	// inferred from timestamp peeks. Since that file contains no drift rows,
+	// exactly ten matches exist and Truncated must remain false.
+	result = queryKinds(t, dir, Filter{Kind: KindDrift, Limit: 10})
+	if len(result.Records) != 10 || result.Truncated {
+		t.Fatalf("kind-filtered records = %d, Truncated = %v; want 10, false", len(result.Records), result.Truncated)
+	}
+}

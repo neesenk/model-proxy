@@ -34,10 +34,14 @@ func (f Filter) matches(record *Record) bool {
 }
 
 // Result is the outcome of a Query: matching records newest first, plus how
-// many unreadable lines were skipped while scanning.
+// many unreadable lines were skipped while scanning. Truncated reports that
+// a positive Limit dropped at least one matching record (top-K eviction or a
+// file-level skip after proving that file contains a match), so the returned
+// set is a newest-first prefix, not the whole filtered set.
 type Result struct {
-	Records []*Record
-	Skipped int
+	Records   []*Record
+	Skipped   int
+	Truncated bool
 }
 
 // Query streams every audit-log file in dir (active and rotated) and returns
@@ -84,6 +88,7 @@ func Query(dir string, filter Filter) (*Result, error) {
 	if filter.Limit > 0 {
 		newest = &timestampMinHeap{}
 	}
+	matched := 0
 	for i := len(names) - 1; i >= 0; i-- {
 		path := filepath.Join(dir, names[i])
 		lastTs, lastOK := peekLastCompleteTs(path)
@@ -91,14 +96,24 @@ func Query(dir string, filter Filter) (*Result, error) {
 		if lastOK && firstOK && firstTs <= lastTs {
 			// Ordering verified: the file's NEWEST complete record bounds
 			// everything in it. A full heap makes every strictly-older
-			// record a push-then-evict no-op, and From is an inclusive lower
-			// bound (matches drops only Ts < From) — either way the whole
-			// file is provably irrelevant once that record qualifies.
-			if newest != nil && newest.Len() >= filter.Limit && lastTs < (*newest)[0].Ts {
-				continue
-			}
+			// record a push-then-evict no-op. Time bounds that exclude the
+			// whole file are checked first and do not imply truncation.
 			if filter.From != 0 && lastTs < filter.From {
 				continue
+			}
+			if filter.To != 0 && firstTs > filter.To {
+				continue
+			}
+			if newest != nil && newest.Len() >= filter.Limit && lastTs < (*newest)[0].Ts {
+				// With no kind filter, the last record itself proves that the
+				// skipped file contains a match when it is also within To (or
+				// To is unbounded). Record that dropped match before skipping.
+				// A kind filter, or a To bound below lastTs, needs a real scan
+				// to keep Truncated exact rather than merely conservative.
+				if filter.Kind == "" && (filter.To == 0 || lastTs <= filter.To) {
+					result.Truncated = true
+					continue
+				}
 			}
 		}
 		file, err := os.Open(path)
@@ -120,6 +135,7 @@ func Query(dir string, filter Filter) (*Result, error) {
 				if err := json.Unmarshal(trimmed, &record); err != nil {
 					result.Skipped++
 				} else if filter.matches(&record) {
+					matched++
 					if newest == nil {
 						result.Records = append(result.Records, &record)
 					} else {
@@ -139,6 +155,10 @@ func Query(dir string, filter Filter) (*Result, error) {
 	if newest != nil {
 		result.Records = *newest
 	}
+	// Truncated is exact: it is set either when a skipped file was proven to
+	// contain a matching record, or when streaming observed more matches than
+	// the top-K limit retains.
+	result.Truncated = result.Truncated || filter.Limit > 0 && matched > filter.Limit
 	sort.SliceStable(result.Records, func(i, j int) bool { return result.Records[i].Ts > result.Records[j].Ts })
 	return result, nil
 }

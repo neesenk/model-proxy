@@ -81,10 +81,13 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 		// would re-open the legacy singular fallback and resurrect an old key
 		// after "removed all accounts". --all still enters the Store removal
 		// boundary so stale restore provenance from an older writer is cleaned.
+		// The pool is already empty, so the user IS logged out: a cleanup
+		// failure here (e.g. keychain backend unreachable) must not turn an
+		// idempotent "not logged in" into a hard error — warn and stay
+		// successful. Provenance cleanup is retried on the next logout.
 		if all {
 			if err := accountStore().RemoveAllAccounts(provName, providerID); err != nil {
-				fmt.Fprintf(os.Stderr, "logout failed: %v\n", err)
-				os.Exit(1)
+				fmt.Fprintf(os.Stderr, "warning: stale credential cleanup failed (already logged out): %v\n", err)
 			}
 		}
 		fmt.Println(displaypkg.Yellow("Not logged in."))

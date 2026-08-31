@@ -25,6 +25,13 @@
 
 ## 配置
 
+12b. config.yaml 的全部写路径必须进入同一个 `configedit.WithConfigLock` 边界：
+    load→mutate→write（web 配置编辑器 `editConfigNode`、`AddPreset`/CLI `add` 的
+    `MergeBlock`、`WriteProviderModels`）持锁覆盖**整个** RMW 区间，Web `/api/config`
+    的 whole-document `SaveConfig` 也必须持锁到 reload/回滚结束，才能与 RMW writer
+    串行。temp+rename 原子写只保证文件不损坏，不阻止后写者的 rename 静默丢弃先写者
+    的变更（lost update；CLI 与 daemon 是不同进程，进程内互斥不够）。锁文件是
+    `<config>.lock`（advisory flock，Windows 用 LockFileEx），只阻塞其他写者、从不阻塞读。
 13. 新顶层配置字段必须六步同步：`internal/config.Config` → `rawConfig` → 拷贝段 → validate → 该包的 YAML 加载测试（yaml.v3 会静默忽略未知键，不能只直接构造 Config）→ 示例与文档（`config.yaml` 模板/README）。根包不承载字段或默认值逻辑（`config_compat.go` 已删除）。
 14. duration 字段除明确允许的 `retry_wait: "0"` 外应验证为正数；任何允许零/负数的字段都要写入契约。
 15. `BillingClass` iota 不是调度顺序，必须通过独立 `tierRank` 映射 `plan < unknown < payg`。

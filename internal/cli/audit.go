@@ -49,9 +49,11 @@ type AuditOpts struct {
 // ParseAuditFlags scans `audit` flags: --from/--to (now | duration-ago like
 // 1h or 7d | unix seconds | RFC3339), --kind (secret|path|drift), --limit N,
 // --stats, --json. --config is left to configPath (consumed here only to skip
-// its value). An unparseable --limit value, an unknown flag, and a flag missing
-// its value are immediate errors (a silent 0 would mean "no cap" — never
-// what the user mistyped, and a silently ignored flag hides typos).
+// its value). An unparseable or NEGATIVE --limit value, an unknown flag, and
+// a flag missing its value are immediate errors (a silent 0 would mean
+// "no cap" — never what the user mistyped, a negative value silently meaning
+// "no cap" hides the typo the same way, and a silently ignored flag hides
+// typos).
 func ParseAuditFlags(args []string) (AuditOpts, error) {
 	o := AuditOpts{Limit: 50}
 	// value consumes the next arg as this flag's value; missing = error.
@@ -84,8 +86,8 @@ func ParseAuditFlags(args []string) (AuditOpts, error) {
 				return o, verr
 			}
 			n, err := strconv.Atoi(v)
-			if err != nil {
-				return o, fmt.Errorf("invalid --limit: must be an integer (default 50, 0 = no cap)")
+			if err != nil || n < 0 {
+				return o, fmt.Errorf("invalid --limit: must be a non-negative integer (default 50, 0 = no cap)")
 			}
 			o.Limit = n
 		case strings.HasPrefix(a, "--from="):
@@ -96,8 +98,8 @@ func ParseAuditFlags(args []string) (AuditOpts, error) {
 			o.Kind = strings.TrimPrefix(a, "--kind=")
 		case strings.HasPrefix(a, "--limit="):
 			n, err := strconv.Atoi(strings.TrimPrefix(a, "--limit="))
-			if err != nil {
-				return o, fmt.Errorf("invalid --limit: must be an integer (default 50, 0 = no cap)")
+			if err != nil || n < 0 {
+				return o, fmt.Errorf("invalid --limit: must be a non-negative integer (default 50, 0 = no cap)")
 			}
 			o.Limit = n
 		case a == "--json":
@@ -176,6 +178,10 @@ func RenderAudit(dir string, opts AuditOpts, now time.Time) (string, error) {
 	}
 	if opts.Stats {
 		stats := AggregateAuditStats(result.Records, filter.From, filter.To)
+		// The internal auditStatsLimit top-K may have dropped older records:
+		// surface that so a partial "total" is never mistaken for the whole
+		// filtered count.
+		stats.Truncated = result.Truncated
 		if opts.JSON {
 			data, err := json.Marshal(stats)
 			if err != nil {
@@ -184,6 +190,9 @@ func RenderAudit(dir string, opts AuditOpts, now time.Time) (string, error) {
 			return string(data) + "\n", nil
 		}
 		out := FormatAuditStats(stats, dir)
+		if result.Truncated {
+			out += fmt.Sprintf("  (truncated at %d newest records — counts cover only those)\n", auditStatsLimit)
+		}
 		if result.Skipped > 0 {
 			out += fmt.Sprintf("  (%d unreadable %s skipped)\n", result.Skipped, Plural(result.Skipped, "line", "lines"))
 		}
@@ -270,12 +279,15 @@ type AuditStatCount struct {
 // AuditStats is the aggregate view of a filtered audit record set: total
 // record count, hits by kind, top hit names (Record.Names expanded) and
 // agents, and counts by action. From/To echo the query window (0 =
-// unbounded, omitted from JSON). Lists are ordered by count desc, name asc,
-// so both the table and the JSON are deterministic.
+// unbounded, omitted from JSON). Truncated marks that the aggregation saw
+// only the newest auditStatsLimit records of the filtered set, so Total and
+// every count are lower bounds (omitted when false). Lists are ordered by
+// count desc, name asc, so both the table and the JSON are deterministic.
 type AuditStats struct {
 	From      int64            `json:"from,omitempty"`
 	To        int64            `json:"to,omitempty"`
 	Total     int              `json:"total"`
+	Truncated bool             `json:"truncated,omitempty"`
 	ByKind    map[string]int   `json:"by_kind"`
 	ByAction  map[string]int   `json:"by_action"`
 	TopNames  []AuditStatCount `json:"top_names"`

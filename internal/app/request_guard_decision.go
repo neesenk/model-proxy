@@ -22,24 +22,27 @@ func evaluateRequestGuard(cfg GuardConfig, scanner *guard.Scanner, body []byte) 
 	action := cfg.SecretsAction()
 	pathsOn := cfg.PathsAction() != "off"
 	switch {
+	case action == "redact" && pathsOn:
+		// One scan claims the secret spans once; names and the redacted body
+		// both come from that single claimed table (no second full scan for
+		// Redact). Paths classify the POST-REDACT body (unchanged contract):
+		// redaction rewrites bytes, so a pre-redact gate/classification
+		// cannot be reused.
+		decision.secrets, decision.forwardBody = scanner.ScanAndRedact(body)
+		decision.strongPath, decision.weakPath = scanner.ScanPathsContext(decision.forwardBody)
 	case action != "off" && pathsOn:
 		// Both channels over the SAME body: one shared automaton pass — the
 		// paths gate verdict rides the secrets scan's phase 1 instead of
 		// paying ~10 per-literal bytes.Contains sweeps afterwards.
 		decision.secrets, decision.strongPath, decision.weakPath = scanner.ScanSecretsAndPaths(body)
 	case action != "off":
-		decision.secrets = scanner.Scan(body)
+		if action == "redact" {
+			decision.secrets, decision.forwardBody = scanner.ScanAndRedact(body)
+		} else {
+			decision.secrets = scanner.Scan(body)
+		}
 	case pathsOn:
 		decision.strongPath, decision.weakPath = scanner.ScanPathsContext(decision.forwardBody)
-	}
-	if len(decision.secrets) > 0 && action == "redact" {
-		decision.forwardBody = scanner.Redact(body)
-		if pathsOn {
-			// Paths classify the POST-REDACT body (unchanged contract):
-			// redaction rewrote bytes, so the pre-redact gate/classification
-			// cannot be reused.
-			decision.strongPath, decision.weakPath = scanner.ScanPathsContext(decision.forwardBody)
-		}
 	}
 	return decision
 }

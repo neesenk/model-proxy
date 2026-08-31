@@ -50,3 +50,25 @@ func TestRenderPrometheusEscapesProviderLabel(t *testing.T) {
 		t.Fatalf("exposition contains Go-style \\t escaping (invalid Prometheus);\nbody:\n%s", body)
 	}
 }
+
+// A provider key containing a newline and non-ASCII (Chinese) characters must
+// also render a legal exposition: newline escaped as \n, multibyte UTF-8
+// passing through raw.
+func TestRenderPrometheusEscapesNewlineAndUnicodeLabel(t *testing.T) {
+	name := "智谱\nAI"
+	v := appapi.Dashboard{
+		Counters: map[string]appapi.Metrics{
+			name: {Requests: 3, LatencySum: 30},
+		},
+	}
+	body := renderPrometheus(v)
+	want := "model_proxy_requests_total{provider=\"智谱\\nAI\"} 3\n"
+	if !strings.Contains(body, want) {
+		t.Fatalf("exposition missing exactly-escaped series line %q;\nbody:\n%s", want, body)
+	}
+	// The raw newline must never reach the exposition: it would terminate the
+	// sample line and corrupt parsing.
+	if strings.Contains(body, "智谱\nAI") {
+		t.Fatalf("exposition contains raw newline inside label;\nbody:\n%s", body)
+	}
+}

@@ -1,11 +1,13 @@
 package web
 
 import (
-	"model-proxy/internal/appapi"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"model-proxy/internal/appapi"
 
 	"model-proxy/internal/observe/requestlog"
 	observestats "model-proxy/internal/observe/stats"
@@ -47,7 +49,10 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	sessions, err := requestlog.SessionSummaries(dir, 2000, limit, costOf)
 	if err != nil {
-		writeJSONErr(w, http.StatusInternalServerError, "session summary: "+err.Error())
+		// The underlying error may embed local paths; log it server-side and
+		// return only a generic message to the client.
+		log.Printf("web: session summary failed: %v", err)
+		writeJSONErr(w, http.StatusInternalServerError, "failed to list sessions")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "sessions": sessions})
@@ -229,7 +234,10 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.reads.Security(query)
 	if err != nil {
-		writeJSONErr(w, http.StatusInternalServerError, "security audit query: "+err.Error())
+		// The underlying error may embed local paths; log it server-side and
+		// return only a generic message to the client.
+		log.Printf("web: security audit query failed: %v", err)
+		writeJSONErr(w, http.StatusInternalServerError, "failed to query security log")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

@@ -165,3 +165,114 @@ func TestSSE_LeadingEmptyDataLineStillConverts(t *testing.T) {
 		t.Errorf("subsequent frame lost after the empty-line frame:\n%s", out)
 	}
 }
+
+// TestSSE_MergedFramesMissingBlankLineFallBackPerLine: a non-spec gateway that
+// omits the blank line between frames folds DISTINCT frames into one payload.
+// The merged payload does not parse, but the reader must not silently drop the
+// frames — it retries each folded line individually (with a warn).
+func TestSSE_MergedFramesMissingBlankLineFallBackPerLine(t *testing.T) {
+	in := "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":null}]}\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"second\"},\"finish_reason\":null}]}\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	raw := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(in), "m"))
+	out := string(raw)
+	if !strings.Contains(out, "first") || !strings.Contains(out, "second") {
+		t.Errorf("merged frames were dropped instead of parsed per-line:\n%s", out)
+	}
+	if !strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Errorf("finish lost:\n%s", out)
+	}
+}
+
+// TestSSE_ResponsesMergedFramesFallBackPerLine: same gateway defect against the
+// responses reader — each folded JSON line dispatches its own event.
+func TestSSE_ResponsesMergedFramesFallBackPerLine(t *testing.T) {
+	in := "event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m\",\"output_index\":0,\"delta\":\"one\"}\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m\",\"output_index\":0,\"delta\":\"two\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+	raw := readAllChecked(t, newResponsesToAnthropicSSE(strings.NewReader(in), "m"))
+	out := string(raw)
+	if !strings.Contains(out, "one") || !strings.Contains(out, "two") {
+		t.Errorf("merged responses frames were dropped:\n%s", out)
+	}
+	if !strings.Contains(out, "message_stop") {
+		t.Errorf("terminal lost:\n%s", out)
+	}
+}
+
+// TestSSE_MergedFramesKeepPerDataEventAssociation: when a non-spec gateway
+// omits every inter-frame blank line, each recovered data payload must retain
+// the event label that preceded THAT data line. Reusing the final event label
+// drops message/tool history and can terminate the stream before earlier
+// frames are processed.
+func TestSSE_MergedFramesKeepPerDataEventAssociation(t *testing.T) {
+	in := "event: message_start\n" +
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-real\",\"model\":\"m-real\",\"usage\":{\"input_tokens\":7}}}\n" +
+		"event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n" +
+		"event: message_delta\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n" +
+		"event: message_stop\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+
+	raw := readAllChecked(t, newAnthropicToResponsesSSE(strings.NewReader(in), "fallback-model"))
+	events, err := parseWireSSE(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := 0
+	for _, event := range events {
+		if event.event == "response.completed" {
+			completed++
+		}
+	}
+	if got := completed; got != 1 {
+		t.Fatalf("response.completed frames = %d, want 1:\n%s", got, raw)
+	}
+	out := string(raw)
+	for _, want := range []string{"msg-real", "m-real", "hello", `"input_tokens":7`, `"output_tokens":2`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("recovered event sequence lost %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestSSE_ChatTerminalStopsRecoveredContentButKeepsUsage pins Chat's
+// finish_reason as a semantic terminal inside a missing-blank folded payload.
+// Later content is invalid and must not leak, while a trailing usage-only
+// chunk remains observable for terminal accounting before [DONE].
+func TestSSE_ChatTerminalStopsRecoveredContentButKeepsUsage(t *testing.T) {
+	in := "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"before\"},\"finish_reason\":null}]}\n" +
+		"data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n" +
+		"data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"after\"},\"finish_reason\":null}]}\n" +
+		"data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n" +
+		"data: [DONE]\n\n"
+
+	t.Run("anthropic target", func(t *testing.T) {
+		raw := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(in), "m"))
+		out := string(raw)
+		if !strings.Contains(out, "before") || strings.Contains(out, "after") {
+			t.Fatalf("terminal content boundary violated:\n%s", out)
+		}
+		if !strings.Contains(out, `"input_tokens":3`) || !strings.Contains(out, `"output_tokens":2`) {
+			t.Fatalf("trailing usage-only chunk was lost:\n%s", out)
+		}
+	})
+
+	t.Run("responses target", func(t *testing.T) {
+		raw := readAllChecked(t, newOpenAIToResponsesSSE(strings.NewReader(in), "m"))
+		out := string(raw)
+		if !strings.Contains(out, "before") || strings.Contains(out, "after") {
+			t.Fatalf("terminal content boundary violated:\n%s", out)
+		}
+		if !strings.Contains(out, `"input_tokens":3`) || !strings.Contains(out, `"output_tokens":2`) {
+			t.Fatalf("trailing usage-only chunk was lost:\n%s", out)
+		}
+	})
+}

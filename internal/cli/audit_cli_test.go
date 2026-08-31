@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -43,6 +44,11 @@ func TestParseAuditFlags(t *testing.T) {
 		{"missing from value", []string{"--from"}, AuditOpts{Limit: 50}, true},
 		{"missing kind value", []string{"--json", "--kind"}, AuditOpts{Limit: 50, JSON: true}, true},
 		{"missing limit value", []string{"--limit"}, AuditOpts{Limit: 50}, true},
+		// A negative limit must error, not silently mean "no cap": the user
+		// mistyped a value, and a silently ignored sign hides the typo the
+		// same way an unparseable value would.
+		{"negative limit", []string{"--limit", "-5"}, AuditOpts{Limit: 50}, true},
+		{"negative limit equals", []string{"--limit=-3"}, AuditOpts{Limit: 50}, true},
 		// --config is resolved by configPath from the full args; the parser
 		// only skips it (both forms) instead of flagging it unknown.
 		{"config space form skipped", []string{"--config", "/tmp/x.yaml", "--kind", "drift"},
@@ -495,5 +501,71 @@ func TestAuditCLIRespectsConfigAuditPath(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "known_secret") || !strings.Contains(stdout, "block") {
 		t.Errorf("audit did not read guard.audit_path:\n%s", stdout)
+	}
+}
+
+// TestRenderAuditStatsTruncation: --stats caps its scan at auditStatsLimit
+// (newest first). When more records match than the cap retains, the output
+// must say so — a bare "total" below the real count is misleading. Both
+// renderings are asserted: the JSON gains "truncated": true and the table
+// gains an explicit truncation note. Below the cap neither marker appears.
+func TestRenderAuditStatsTruncation(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	write := func(dir string, n int) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			writeAuditRecord(t, dir, &observeseclog.Record{
+				Ts:   now.Add(time.Duration(i) * time.Second).UnixMilli(),
+				Kind: observeseclog.KindDrift, Agent: "doctor", Action: "warn",
+			})
+		}
+	}
+
+	// Over the cap: truncated in both renderings.
+	dir := t.TempDir()
+	write(dir, auditStatsLimit+1)
+	opts := AuditOpts{Stats: true, JSON: true}
+	out, err := RenderAudit(dir, opts, now)
+	if err != nil {
+		t.Fatalf("RenderAudit JSON: %v", err)
+	}
+	var stats AuditStats
+	if err := json.Unmarshal([]byte(out), &stats); err != nil {
+		t.Fatalf("parse stats JSON: %v\n%s", err, out)
+	}
+	if !stats.Truncated {
+		t.Errorf("stats JSON missing \"truncated\": true:\n%s", out)
+	}
+	if stats.Total != auditStatsLimit {
+		t.Errorf("stats.Total = %d, want %d (the retained newest prefix)", stats.Total, auditStatsLimit)
+	}
+
+	opts.JSON = false
+	out, err = RenderAudit(dir, opts, now)
+	if err != nil {
+		t.Fatalf("RenderAudit table: %v", err)
+	}
+	if want := fmt.Sprintf("truncated at %d newest records", auditStatsLimit); !strings.Contains(out, want) {
+		t.Errorf("stats table missing %q:\n%s", want, out)
+	}
+
+	// Below the cap: no truncation markers in either rendering.
+	small := t.TempDir()
+	write(small, 3)
+	opts.JSON = true
+	out, err = RenderAudit(small, opts, now)
+	if err != nil {
+		t.Fatalf("RenderAudit small JSON: %v", err)
+	}
+	if strings.Contains(out, "truncated") {
+		t.Errorf("small stats JSON unexpectedly truncated:\n%s", out)
+	}
+	opts.JSON = false
+	out, err = RenderAudit(small, opts, now)
+	if err != nil {
+		t.Fatalf("RenderAudit small table: %v", err)
+	}
+	if strings.Contains(out, "truncated") {
+		t.Errorf("small stats table unexpectedly truncated:\n%s", out)
 	}
 }

@@ -482,3 +482,38 @@ func TestEncodedChannelShortLiteralAlignments(t *testing.T) {
 		}
 	}
 }
+
+// ScanAndRedact is the one-pass form of Scan + Redact: names and the redacted
+// body must be byte-identical to running the two scans separately, for clean
+// bodies, plaintext rule hits, encoded-channel hits, known secrets and custom
+// patterns alike.
+func TestScanAndRedactMatchesSeparateCalls(t *testing.T) {
+	custom := []CustomPattern{{
+		Name: "custom_bearer",
+		RE:   regexp.MustCompile(`(?i)bearer [a-z0-9]{20}`),
+	}}
+	secret := syntheticSecret("tok_", 24)
+	s := mustScanner(t, custom, []string{secret}, nil)
+	rng := newFixtureRNG(0x1a2b3c)
+	openai := "sk-" + rng.chars(32, alphaAlnum)
+	blob := base64.StdEncoding.EncodeToString([]byte("token: glpat-" + rng.chars(20, alphaWord)))
+	bodies := []string{
+		"nothing to see here",
+		`{"msg": "here is ` + openai + ` ok"}`,
+		"payload " + blob + " end",
+		"known: " + secret,
+		"auth: Bearer " + strings.Repeat("ab", 12),
+		"mixed: " + openai + " and " + secret + " and " + blob,
+	}
+	for _, body := range bodies {
+		wantNames := s.Scan([]byte(body))
+		wantRedacted := s.Redact([]byte(body))
+		gotNames, gotRedacted := s.ScanAndRedact([]byte(body))
+		if strings.Join(gotNames, "\x00") != strings.Join(wantNames, "\x00") {
+			t.Errorf("ScanAndRedact names = %v, want %v (body %q)", gotNames, wantNames, body)
+		}
+		if string(gotRedacted) != string(wantRedacted) {
+			t.Errorf("ScanAndRedact body mismatch (body %q)\n got: %q\nwant: %q", body, gotRedacted, wantRedacted)
+		}
+	}
+}

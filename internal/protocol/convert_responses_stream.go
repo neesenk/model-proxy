@@ -181,6 +181,7 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
 	pendData := ""    // folded data lines of the SSE frame in progress
 	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
+	var pendEvents []string
 	for len(t.out) == 0 {
 		if t.done {
 			if len(t.out) == 0 {
@@ -212,6 +213,7 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		}
 		if strings.HasPrefix(line, "data:") {
 			pendData = appendSSEData(pendData, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendEvents = append(pendEvents, pendingEvent)
 			pendOpen = true
 			continue
 		}
@@ -232,6 +234,8 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		}
 		payload := pendData
 		pendData, pendOpen = "", false
+		dataEvents := pendEvents
+		pendEvents = nil
 		if payload == "[DONE]" {
 			t.ensureStart()
 			t.closeLeftoverBlocks()
@@ -242,17 +246,19 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		var data map[string]any
-		if sonic.UnmarshalString(payload, &data) != nil {
-			continue
+		for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
+			data := parsed.value
+			event := foldedSSEFrameEvent(frameEvent, dataEvents, parsed.line)
+			// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
+			// event: lines entirely — fall back to the payload's own "type".
+			if event == "" {
+				event = strKey(data, "type")
+			}
+			t.handle(event, data)
+			if t.done {
+				break
+			}
 		}
-		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
-		// event: lines entirely — fall back to the payload's own "type".
-		if frameEvent == "" {
-			frameEvent = strKey(data, "type")
-		}
-		t.handle(frameEvent, data)
-		frameEvent = ""
 	}
 	n := copy(p, t.out)
 	t.out = t.out[n:]
@@ -692,6 +698,7 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
 	pendData := ""    // folded data lines of the SSE frame in progress
 	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
+	var pendEvents []string
 	for len(t.out) == 0 {
 		if t.done {
 			if len(t.out) == 0 {
@@ -725,6 +732,7 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 		}
 		if strings.HasPrefix(line, "data:") {
 			pendData = appendSSEData(pendData, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendEvents = append(pendEvents, pendingEvent)
 			pendOpen = true
 			continue
 		}
@@ -745,6 +753,8 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 		}
 		payload := pendData
 		pendData, pendOpen = "", false
+		dataEvents := pendEvents
+		pendEvents = nil
 		if payload == "[DONE]" {
 			sseEmitData(&t.out, map[string]any{
 				"id": t.id, "object": "chat.completion.chunk", "model": t.model,
@@ -757,17 +767,19 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		var data map[string]any
-		if sonic.UnmarshalString(payload, &data) != nil {
-			continue
+		for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
+			data := parsed.value
+			event := foldedSSEFrameEvent(frameEvent, dataEvents, parsed.line)
+			// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
+			// event: lines entirely — fall back to the payload's own "type".
+			if event == "" {
+				event = strKey(data, "type")
+			}
+			t.handle(event, data)
+			if t.done {
+				break
+			}
 		}
-		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
-		// event: lines entirely — fall back to the payload's own "type".
-		if frameEvent == "" {
-			frameEvent = strKey(data, "type")
-		}
-		t.handle(frameEvent, data)
-		frameEvent = ""
 	}
 	n := copy(p, t.out)
 	t.out = t.out[n:]
@@ -1090,6 +1102,7 @@ func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
 	pendData := ""    // folded data lines of the SSE frame in progress
 	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
+	var pendEvents []string
 	for len(t.out) == 0 {
 		if t.done {
 			if len(t.out) == 0 {
@@ -1137,6 +1150,7 @@ func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
 		}
 		if strings.HasPrefix(line, "data:") {
 			pendData = appendSSEData(pendData, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendEvents = append(pendEvents, pendingEvent)
 			pendOpen = true
 			continue
 		}
@@ -1157,21 +1171,25 @@ func (t *anthropicSSEToResponsesSSE) Read(p []byte) (int, error) {
 		}
 		payload := pendData
 		pendData, pendOpen = "", false
+		dataEvents := pendEvents
+		pendEvents = nil
 		if payload == "[DONE]" {
 			t.finish()
 			continue
 		}
-		var data map[string]any
-		if sonic.UnmarshalString(payload, &data) != nil {
-			continue
+		for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
+			data := parsed.value
+			event := foldedSSEFrameEvent(frameEvent, dataEvents, parsed.line)
+			// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
+			// event: lines entirely — fall back to the payload's own "type".
+			if event == "" {
+				event = strKey(data, "type")
+			}
+			t.handle(event, data)
+			if t.done {
+				break
+			}
 		}
-		// Some providers (OpenRouter-style, e.g. aqp's /responses) omit SSE
-		// event: lines entirely — fall back to the payload's own "type".
-		if frameEvent == "" {
-			frameEvent = strKey(data, "type")
-		}
-		t.handle(frameEvent, data)
-		frameEvent = ""
 	}
 	n := copy(p, t.out)
 	t.out = t.out[n:]
@@ -1678,6 +1696,7 @@ func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
 	pendingEvent := ""
 	pendData := ""    // folded data lines of the SSE frame in progress
 	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
+	var pendEvents []string
 	for len(t.out) == 0 {
 		if t.done {
 			if len(t.out) == 0 {
@@ -1725,6 +1744,7 @@ func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
 		}
 		if strings.HasPrefix(line, "data:") {
 			pendData = appendSSEData(pendData, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendEvents = append(pendEvents, pendingEvent)
 			pendOpen = true
 			continue
 		}
@@ -1745,16 +1765,19 @@ func (t *openaiSSEToResponsesSSE) Read(p []byte) (int, error) {
 		}
 		payload := pendData
 		pendData, pendOpen = "", false
+		dataEvents := pendEvents
+		pendEvents = nil
 		if payload == "[DONE]" {
 			t.finish()
 			continue
 		}
-		var data map[string]any
-		if sonic.UnmarshalString(payload, &data) != nil {
-			continue
+		for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
+			event := foldedSSEFrameEvent(frameEvent, dataEvents, parsed.line)
+			t.handle(event, parsed.value)
+			if t.done {
+				break
+			}
 		}
-		t.handle(frameEvent, data)
-		frameEvent = ""
 	}
 	n := copy(p, t.out)
 	t.out = t.out[n:]
@@ -1781,6 +1804,18 @@ func chatSSEErrorOf(data map[string]any) (emsg, etype string) {
 }
 
 func (t *openaiSSEToResponsesSSE) handle(event string, data map[string]any) {
+	if id := strOpt(data["id"]); id != "" {
+		t.id = id
+	}
+	if m := strOpt(data["model"]); m != "" {
+		t.model = m
+	}
+	if u := asMap(data["usage"]); u != nil {
+		t.inTok = intOf(u["prompt_tokens"])
+		t.outTok = intOf(u["completion_tokens"])
+		t.cachedTok = intOf(asMap(u["prompt_tokens_details"])["cached_tokens"])
+		t.rsTok = intOf(asMap(u["completion_tokens_details"])["reasoning_tokens"])
+	}
 	// OpenAI error chunk (data: {"error":{...}} — or the string form some
 	// gateways emit, which chatSSEErrorOf unwraps) or an explicit `event:
 	// error` frame → response.failed. Never silently turn a mid-stream
@@ -1795,17 +1830,12 @@ func (t *openaiSSEToResponsesSSE) handle(event string, data map[string]any) {
 		t.done = true
 		return
 	}
-	if id := strOpt(data["id"]); id != "" {
-		t.id = id
-	}
-	if m := strOpt(data["model"]); m != "" {
-		t.model = m
-	}
-	if u := asMap(data["usage"]); u != nil {
-		t.inTok = intOf(u["prompt_tokens"])
-		t.outTok = intOf(u["completion_tokens"])
-		t.cachedTok = intOf(asMap(u["prompt_tokens_details"])["cached_tokens"])
-		t.rsTok = intOf(asMap(u["completion_tokens_details"])["reasoning_tokens"])
+	// finish_reason ends normal Chat content. Continue reading so a
+	// conventional trailing usage-only chunk can update accounting and a
+	// later explicit error can still fail closed, but never expose normal
+	// content/tools emitted after the terminal.
+	if t.finishRsn != "" {
+		return
 	}
 	choices, ok := data["choices"].([]any)
 	if !ok || len(choices) == 0 {

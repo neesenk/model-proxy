@@ -84,18 +84,13 @@ func TestUnreadableFileFailsClosed(t *testing.T) {
 }
 
 // TestMultiFileSourceUnionsTokens: NewSource accepts several token files and
-// unions them; one unreadable file must not switch off the OTHER file's tokens
-// (per-file fail-closed, set-level union).
+// unions them into one accepted set.
 func TestMultiFileSourceUnionsTokens(t *testing.T) {
 	dir := t.TempDir()
 	good := writeTokenFile(t, dir, "good", "sk-good\n")
 	other := writeTokenFile(t, dir, "other", "sk-other\n")
-	badDir := filepath.Join(dir, "unreadable")
-	if err := os.Mkdir(badDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 
-	s := NewSource(good, other, badDir)
+	s := NewSource(good, other)
 	if !s.Enabled() {
 		t.Fatal("multi-file source with at least one path reports enabled")
 	}
@@ -105,11 +100,103 @@ func TestMultiFileSourceUnionsTokens(t *testing.T) {
 	if s.Accept("sk-unknown") {
 		t.Fatal("unknown token must be rejected")
 	}
-	// A readable-but-empty cached set from the unreadable file must not erase
-	// the union (the per-file failure is local).
 	if s.Accept("") {
 		t.Fatal("empty token never accepted")
 	}
+}
+
+// TestMissingFileFailsClosedWholeSet: one missing file empties the WHOLE set —
+// a rotated-away file must never keep the surface open (fail closed, set
+// level, even though the other file still reads fine).
+func TestMissingFileFailsClosedWholeSet(t *testing.T) {
+	dir := t.TempDir()
+	good := writeTokenFile(t, dir, "good", "sk-good\n")
+	missing := filepath.Join(dir, "missing")
+
+	s := NewSource(good, missing)
+	if s.Accept("sk-good") {
+		t.Fatal("token from the sibling file must not survive a missing file")
+	}
+}
+
+// TestTransientReadErrorServesLastGoodCache: a non-ErrNotExist read failure
+// (simulated with a symlink loop — ELOOP, no root-dependence like chmod 000)
+// after a successful load must keep serving the last good set instead of
+// 401-ing every token for up to cacheTTL.
+func TestTransientReadErrorServesLastGoodCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys")
+	writeTokenFile(t, dir, "keys", "sk-live\n")
+	s := NewSource(path)
+	if !s.Accept("sk-live") {
+		t.Fatal("initial load must accept the configured token")
+	}
+
+	// Turn the path into a self-referential symlink: os.ReadFile now fails
+	// with something other than ErrNotExist.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, path); err != nil {
+		t.Fatal(err)
+	}
+	forceCacheExpiry(s)
+	if !s.Accept("sk-live") {
+		t.Fatal("transient read error must keep serving the last good set")
+	}
+}
+
+// TestTransientReadErrorGraceDoesNotSlide: repeated read failures must not
+// renew the stale-cache grace forever. Once the fixed grace measured from the
+// FIRST failure expires, the old token is rejected until a successful reload.
+func TestTransientReadErrorGraceDoesNotSlide(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys")
+	writeTokenFile(t, dir, "keys", "sk-old\n")
+	s := NewSource(path)
+	if !s.Accept("sk-old") {
+		t.Fatal("initial load must accept the configured token")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, path); err != nil {
+		t.Fatal(err)
+	}
+
+	forceCacheExpiry(s)
+	if !s.Accept("sk-old") {
+		t.Fatal("first transient failure must receive the bounded stale-cache grace")
+	}
+	s.mu.Lock()
+	s._errorSince = time.Now().Add(-cacheTTL - time.Second)
+	s.mu.Unlock()
+	if s.Accept("sk-old") {
+		t.Fatal("persistent read failure kept the stale token valid beyond the fixed grace")
+	}
+}
+
+// TestTransientReadErrorColdCacheRejects: the same transient read error on a
+// source with NO prior successful load must reject (fail closed), never open.
+func TestTransientReadErrorColdCacheRejects(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "loop")
+	if err := os.Symlink(path, path); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSource(path)
+	if !s.Enabled() {
+		t.Fatal("configured path reports enabled")
+	}
+	if s.Accept("sk-anything") {
+		t.Fatal("cold cache plus transient read error must reject")
+	}
+}
+
+func forceCacheExpiry(s *Source) {
+	s.mu.Lock()
+	s._loaded = time.Now().Add(-cacheTTL - time.Second)
+	s.mu.Unlock()
 }
 
 func TestRevocationTakesEffectAfterTTL(t *testing.T) {

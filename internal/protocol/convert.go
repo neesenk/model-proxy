@@ -904,6 +904,53 @@ func appendSSEData(pend string, open bool, payload string) string {
 	return pend + "\n" + payload
 }
 
+type parsedFoldedSSEFrame[T any] struct {
+	value T
+	// line is -1 when the whole folded payload parsed as one spec-compliant
+	// frame. For the missing-blank-line fallback it identifies the original
+	// data-line index, allowing callers to recover the event paired with that
+	// line instead of applying the final event to every recovered frame.
+	line int
+}
+
+func foldedSSEFrameEvent(frameEvent string, dataEvents []string, line int) string {
+	if line >= 0 && line < len(dataEvents) {
+		return dataEvents[line]
+	}
+	return frameEvent
+}
+
+// parseFoldedSSEFrames parses a folded SSE data payload into frames. In a
+// spec-compliant stream the fold joins only the data lines of ONE frame, so
+// the merged payload parses directly. Gateways that omit the blank line
+// between frames fold DISTINCT frames together and the merged payload no
+// longer parses; in that case retry each folded line as its own frame so the
+// frames are not silently dropped, and warn either way (the warn dedup cap
+// keeps a persistently malformed stream from flooding diagnostics).
+func parseFoldedSSEFrames[T any](payload string) []parsedFoldedSSEFrame[T] {
+	var first T
+	if sonic.UnmarshalString(payload, &first) == nil {
+		return []parsedFoldedSSEFrame[T]{{value: first, line: -1}}
+	}
+	if !strings.Contains(payload, "\n") {
+		convertWarn("dropping unparseable SSE data payload")
+		return nil
+	}
+	var frames []parsedFoldedSSEFrame[T]
+	for lineIndex, line := range strings.Split(payload, "\n") {
+		var f T
+		if sonic.UnmarshalString(line, &f) == nil {
+			frames = append(frames, parsedFoldedSSEFrame[T]{value: f, line: lineIndex})
+		}
+	}
+	if len(frames) > 0 {
+		convertWarn(fmt.Sprintf("SSE frames merged by a non-spec gateway (missing blank line between frames); parsed %d frames individually", len(frames)))
+	} else {
+		convertWarn("dropping unparseable SSE data payload")
+	}
+	return frames
+}
+
 // sanitizeToolUseID rewrites an openai tool_call id into anthropic's tool_use id
 // charset (^[a-zA-Z0-9_-]+$): illegal characters become "_" and an empty id gets
 // a unique placeholder (toolu_empty_<counter>) so multiple empty-id tool calls in
@@ -2010,7 +2057,7 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		var chunk struct {
+		type chatSSEChunk struct {
 			ID      string `json:"id"`
 			Model   string `json:"model"`
 			Choices []struct {
@@ -2040,55 +2087,62 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 				CacheCreationInputTokens int `json:"cache_creation_input_tokens"` // direct spelling
 			} `json:"usage"`
 		}
-		if sonic.UnmarshalString(payload, &chunk) != nil {
-			continue
-		}
-		if chunk.ID != "" {
-			t.id = chunk.ID // pass the upstream's real message id through
-		}
-		if chunk.Model != "" {
-			t.model = chunk.Model
-		}
-		if chunk.Usage != nil {
-			t.inTok = chunk.Usage.PromptTokens
-			t.outTok = chunk.Usage.CompletionTokens
-			t.cachedTok = chunk.Usage.PromptDetails.CachedTokens
-			t.createTok = chunk.Usage.CacheCreationInputTokens
-			if t.createTok == 0 {
-				t.createTok = chunk.Usage.PromptDetails.CacheWriteTokens
+		for _, parsed := range parseFoldedSSEFrames[chatSSEChunk](payload) {
+			chunk := parsed.value
+			if chunk.ID != "" {
+				t.id = chunk.ID // pass the upstream's real message id through
 			}
-		}
-		t.ensureStart()
-		if len(chunk.Choices) > 0 {
-			c := chunk.Choices[0]
-			if rc := firstNonEmpty(c.Delta.ReasoningContent, c.Delta.Reasoning); rc != "" {
-				t.openThinking()
-				t.emit("content_block_delta", map[string]any{
-					"type": "content_block_delta", "index": t.curIdx,
-					"delta": map[string]any{"type": "thinking_delta", "thinking": rc},
-				})
+			if chunk.Model != "" {
+				t.model = chunk.Model
 			}
-			if c.Delta.Content != "" {
-				t.openText()
-				t.emit("content_block_delta", map[string]any{
-					"type": "content_block_delta", "index": t.curIdx,
-					"delta": map[string]any{"type": "text_delta", "text": c.Delta.Content},
-				})
+			if chunk.Usage != nil {
+				t.inTok = chunk.Usage.PromptTokens
+				t.outTok = chunk.Usage.CompletionTokens
+				t.cachedTok = chunk.Usage.PromptDetails.CachedTokens
+				t.createTok = chunk.Usage.CacheCreationInputTokens
+				if t.createTok == 0 {
+					t.createTok = chunk.Usage.PromptDetails.CacheWriteTokens
+				}
 			}
-			// Refusal deltas stream as plain text (anthropic has no refusal
-			// block; the finish_reason already maps to stop_reason refusal).
-			if c.Delta.Refusal != "" {
-				t.openText()
-				t.emit("content_block_delta", map[string]any{
-					"type": "content_block_delta", "index": t.curIdx,
-					"delta": map[string]any{"type": "text_delta", "text": c.Delta.Refusal},
-				})
+			// A non-empty finish_reason is Chat's semantic terminal. Keep
+			// accepting later usage-only chunks until [DONE]/EOF, but ignore
+			// any content/tool frames a malformed upstream emits after it —
+			// including frames recovered from the same missing-blank payload.
+			if t.stopRsn != "" {
+				continue
 			}
-			for _, tc := range c.Delta.ToolCalls {
-				t.bufferTool(tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
-			}
-			if c.FinishReason != "" {
-				t.stopRsn = mapFinishToStopReason(c.FinishReason)
+			t.ensureStart()
+			if len(chunk.Choices) > 0 {
+				c := chunk.Choices[0]
+				if rc := firstNonEmpty(c.Delta.ReasoningContent, c.Delta.Reasoning); rc != "" {
+					t.openThinking()
+					t.emit("content_block_delta", map[string]any{
+						"type": "content_block_delta", "index": t.curIdx,
+						"delta": map[string]any{"type": "thinking_delta", "thinking": rc},
+					})
+				}
+				if c.Delta.Content != "" {
+					t.openText()
+					t.emit("content_block_delta", map[string]any{
+						"type": "content_block_delta", "index": t.curIdx,
+						"delta": map[string]any{"type": "text_delta", "text": c.Delta.Content},
+					})
+				}
+				// Refusal deltas stream as plain text (anthropic has no refusal
+				// block; the finish_reason already maps to stop_reason refusal).
+				if c.Delta.Refusal != "" {
+					t.openText()
+					t.emit("content_block_delta", map[string]any{
+						"type": "content_block_delta", "index": t.curIdx,
+						"delta": map[string]any{"type": "text_delta", "text": c.Delta.Refusal},
+					})
+				}
+				for _, tc := range c.Delta.ToolCalls {
+					t.bufferTool(tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
+				}
+				if c.FinishReason != "" {
+					t.stopRsn = mapFinishToStopReason(c.FinishReason)
+				}
 			}
 		}
 	}
@@ -2249,7 +2303,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			t.done = true
 			continue
 		}
-		var ev struct {
+		type anthropicSSEEvent struct {
 			Type  string `json:"type"`
 			Index int    `json:"index"`
 			Delta struct {
@@ -2287,131 +2341,134 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				CacheCreate  *int `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 		}
-		if sonic.UnmarshalString(payload, &ev) != nil {
-			continue
-		}
-		if ev.Message.Model != "" {
-			t.model = ev.Message.Model
-		}
-		switch ev.Type {
-		case "message_start":
-			updateUsageValue(ev.Message.Usage.InputTokens, &t.inputTokens)
-			updateUsageValue(ev.Message.Usage.CacheRead, &t.cacheRead)
-			updateUsageValue(ev.Message.Usage.CacheCreate, &t.cacheCreate)
-			if ev.Message.ID != "" {
-				t.id = ev.Message.ID // pass the upstream's real message id through
+		for _, parsed := range parseFoldedSSEFrames[anthropicSSEEvent](payload) {
+			ev := parsed.value
+			if ev.Message.Model != "" {
+				t.model = ev.Message.Model
 			}
-		case "error":
-			// anthropic error event → openai error chunk + [DONE]. Don't silently
-			// turn an upstream error into a clean finish.
-			et := ev.Error.Type
-			if et == "" {
-				et = "api_error"
-			}
-			errObj, _ := sonic.Marshal(map[string]any{"message": ev.Error.Message, "type": et, "param": nil, "code": nil})
-			t.out = append(t.out, []byte("data: {\"error\":")...)
-			t.out = append(t.out, errObj...)
-			t.out = append(t.out, []byte("}\n\n")...)
-			t.finished = true
-			t.done = true
-		case "content_block_start":
-			t.curBlock = ev.Index
-			t.curType = ev.ContentBlock.Type
-			if ev.ContentBlock.Type == "text" {
-				t.curTextStart = t.textRunes
-				t.curText = ""
-			} else if ev.ContentBlock.Type == "thinking" {
-				t.curThinking = ""
-				t.curSignature = ""
-			} else if ev.ContentBlock.Type == "redacted_thinking" {
-				t.curRedacted = ev.ContentBlock.Data
-			}
-			if ev.ContentBlock.Type == "tool_use" {
-				tcIdx := t.nextTool
-				t.nextTool++
-				t.toolCallIdx[ev.Index] = tcIdx
-				t.ensureRole()
-				t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
-					"index": tcIdx, "id": ev.ContentBlock.ID, "type": "function",
-					"function": map[string]any{"name": ev.ContentBlock.Name, "arguments": ""},
-				}}}, nil, nil)
-			}
-		case "content_block_delta":
-			switch ev.Delta.Type {
-			case "text_delta":
-				if ev.Delta.Text != "" {
-					t.ensureRole()
-					t.emitChunk(map[string]any{"content": ev.Delta.Text}, nil, nil)
-					t.curText += ev.Delta.Text
-					t.textRunes += len([]rune(ev.Delta.Text))
+			switch ev.Type {
+			case "message_start":
+				updateUsageValue(ev.Message.Usage.InputTokens, &t.inputTokens)
+				updateUsageValue(ev.Message.Usage.CacheRead, &t.cacheRead)
+				updateUsageValue(ev.Message.Usage.CacheCreate, &t.cacheCreate)
+				if ev.Message.ID != "" {
+					t.id = ev.Message.ID // pass the upstream's real message id through
 				}
-			case "citations_delta":
-				annotations := anthropicCitationsToChat([]any{ev.Delta.Citation}, t.curText, t.curTextStart)
-				if len(annotations) > 0 {
-					t.ensureRole()
-					t.emitChunk(map[string]any{"annotations": annotations}, nil, nil)
+			case "error":
+				// anthropic error event → openai error chunk + [DONE]. Don't silently
+				// turn an upstream error into a clean finish.
+				et := ev.Error.Type
+				if et == "" {
+					et = "api_error"
 				}
-			case "thinking_delta":
-				if thinking := firstNonEmpty(ev.Delta.Thinking, ev.Delta.Text); thinking != "" {
-					t.ensureRole()
-					t.emitChunk(map[string]any{"reasoning_content": thinking}, nil, nil)
-					t.curThinking += thinking
+				errObj, _ := sonic.Marshal(map[string]any{"message": ev.Error.Message, "type": et, "param": nil, "code": nil})
+				t.out = append(t.out, []byte("data: {\"error\":")...)
+				t.out = append(t.out, errObj...)
+				t.out = append(t.out, []byte("}\n\n")...)
+				t.finished = true
+				t.done = true
+			case "content_block_start":
+				t.curBlock = ev.Index
+				t.curType = ev.ContentBlock.Type
+				if ev.ContentBlock.Type == "text" {
+					t.curTextStart = t.textRunes
+					t.curText = ""
+				} else if ev.ContentBlock.Type == "thinking" {
+					t.curThinking = ""
+					t.curSignature = ""
+				} else if ev.ContentBlock.Type == "redacted_thinking" {
+					t.curRedacted = ev.ContentBlock.Data
 				}
-			case "signature_delta":
-				t.curSignature += ev.Delta.Signature
-			case "input_json_delta":
-				if ev.Delta.PartialJSON != "" {
-					if tcIdx, ok := t.toolCallIdx[t.curBlock]; ok && t.curType == "tool_use" {
-						t.toolArgsSeen[t.curBlock] = true
+				if ev.ContentBlock.Type == "tool_use" {
+					tcIdx := t.nextTool
+					t.nextTool++
+					t.toolCallIdx[ev.Index] = tcIdx
+					t.ensureRole()
+					t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
+						"index": tcIdx, "id": ev.ContentBlock.ID, "type": "function",
+						"function": map[string]any{"name": ev.ContentBlock.Name, "arguments": ""},
+					}}}, nil, nil)
+				}
+			case "content_block_delta":
+				switch ev.Delta.Type {
+				case "text_delta":
+					if ev.Delta.Text != "" {
+						t.ensureRole()
+						t.emitChunk(map[string]any{"content": ev.Delta.Text}, nil, nil)
+						t.curText += ev.Delta.Text
+						t.textRunes += len([]rune(ev.Delta.Text))
+					}
+				case "citations_delta":
+					annotations := anthropicCitationsToChat([]any{ev.Delta.Citation}, t.curText, t.curTextStart)
+					if len(annotations) > 0 {
+						t.ensureRole()
+						t.emitChunk(map[string]any{"annotations": annotations}, nil, nil)
+					}
+				case "thinking_delta":
+					if thinking := firstNonEmpty(ev.Delta.Thinking, ev.Delta.Text); thinking != "" {
+						t.ensureRole()
+						t.emitChunk(map[string]any{"reasoning_content": thinking}, nil, nil)
+						t.curThinking += thinking
+					}
+				case "signature_delta":
+					t.curSignature += ev.Delta.Signature
+				case "input_json_delta":
+					if ev.Delta.PartialJSON != "" {
+						if tcIdx, ok := t.toolCallIdx[t.curBlock]; ok && t.curType == "tool_use" {
+							t.toolArgsSeen[t.curBlock] = true
+							t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
+								"index": tcIdx, "function": map[string]any{"arguments": ev.Delta.PartialJSON},
+							}}}, nil, nil)
+						}
+					}
+				default:
+					// thinking_delta/signature_delta/... have no openai equivalent.
+					if ev.Delta.Type != "" {
+						convertWarn("dropping " + ev.Delta.Type + " delta (no cross-protocol equivalent)")
+					}
+				}
+			case "content_block_stop":
+				if t.curType == "thinking" && t.curSignature != "" {
+					t.emitChunk(map[string]any{"reasoning_details": []map[string]any{{
+						"type": "anthropic_thinking", "thinking": t.curThinking, "signature": t.curSignature,
+					}}}, nil, nil)
+				} else if t.curType == "redacted_thinking" && t.curRedacted != "" {
+					t.emitChunk(map[string]any{"reasoning_details": []map[string]any{{
+						"type": "anthropic_redacted_thinking", "data": t.curRedacted,
+					}}}, nil, nil)
+				}
+				// Empty-args fallback: a tool_use block with no input_json_delta still
+				// gets a "{}" arguments fragment (openai requires valid JSON arguments).
+				if t.curType == "tool_use" {
+					if tcIdx, ok := t.toolCallIdx[t.curBlock]; ok && !t.toolArgsSeen[t.curBlock] {
 						t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
-							"index": tcIdx, "function": map[string]any{"arguments": ev.Delta.PartialJSON},
+							"index": tcIdx, "function": map[string]any{"arguments": "{}"},
 						}}}, nil, nil)
 					}
 				}
-			default:
-				// thinking_delta/signature_delta/... have no openai equivalent.
-				if ev.Delta.Type != "" {
-					convertWarn("dropping " + ev.Delta.Type + " delta (no cross-protocol equivalent)")
+				t.curType = ""
+			case "message_delta":
+				// Vendors differ on where final usage lands: some put input/cache
+				// only on message_delta, while Kimi moves input into cache_read at
+				// the terminal event. Update by field presence (including explicit
+				// zero), otherwise keep the message_start value.
+				updateUsageValue(ev.Usage.InputTokens, &t.inputTokens)
+				updateUsageValue(ev.Usage.CacheRead, &t.cacheRead)
+				updateUsageValue(ev.Usage.CacheCreate, &t.cacheCreate)
+				updateUsageValue(ev.Usage.OutputTokens, &t.outputTokens)
+				// The finish chunk carries usage so the OpenAI-protocol usage scanner
+				// attributes tokens. Guard: a malformed stream with >1 message_delta
+				// must not emit >1 finish chunk.
+				if !t.finished {
+					t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), t.usagePayload())
+					t.finished = true
 				}
+			case "message_stop":
+				t.done = true
 			}
-		case "content_block_stop":
-			if t.curType == "thinking" && t.curSignature != "" {
-				t.emitChunk(map[string]any{"reasoning_details": []map[string]any{{
-					"type": "anthropic_thinking", "thinking": t.curThinking, "signature": t.curSignature,
-				}}}, nil, nil)
-			} else if t.curType == "redacted_thinking" && t.curRedacted != "" {
-				t.emitChunk(map[string]any{"reasoning_details": []map[string]any{{
-					"type": "anthropic_redacted_thinking", "data": t.curRedacted,
-				}}}, nil, nil)
+			if t.done {
+				break
 			}
-			// Empty-args fallback: a tool_use block with no input_json_delta still
-			// gets a "{}" arguments fragment (openai requires valid JSON arguments).
-			if t.curType == "tool_use" {
-				if tcIdx, ok := t.toolCallIdx[t.curBlock]; ok && !t.toolArgsSeen[t.curBlock] {
-					t.emitChunk(map[string]any{"tool_calls": []map[string]any{{
-						"index": tcIdx, "function": map[string]any{"arguments": "{}"},
-					}}}, nil, nil)
-				}
-			}
-			t.curType = ""
-		case "message_delta":
-			// Vendors differ on where final usage lands: some put input/cache
-			// only on message_delta, while Kimi moves input into cache_read at
-			// the terminal event. Update by field presence (including explicit
-			// zero), otherwise keep the message_start value.
-			updateUsageValue(ev.Usage.InputTokens, &t.inputTokens)
-			updateUsageValue(ev.Usage.CacheRead, &t.cacheRead)
-			updateUsageValue(ev.Usage.CacheCreate, &t.cacheCreate)
-			updateUsageValue(ev.Usage.OutputTokens, &t.outputTokens)
-			// The finish chunk carries usage so the OpenAI-protocol usage scanner
-			// attributes tokens. Guard: a malformed stream with >1 message_delta
-			// must not emit >1 finish chunk.
-			if !t.finished {
-				t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), t.usagePayload())
-				t.finished = true
-			}
-		case "message_stop":
-			t.done = true
 		}
 	}
 	n := copy(p, t.out)

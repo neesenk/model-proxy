@@ -60,9 +60,6 @@ func renderPrometheus(v appapi.Dashboard) string {
 	help := func(name, help string) {
 		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
 	}
-	helpSum := func(name, help string) {
-		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
-	}
 
 	names := make([]string, 0, len(v.Counters))
 	for name := range v.Counters {
@@ -95,7 +92,7 @@ func renderPrometheus(v appapi.Dashboard) string {
 		{"model_proxy_ttft_milliseconds_sum", func(m appapi.Metrics) uint64 { return m.TTFTSum }},
 	}
 	for _, se := range sums {
-		helpSum(se.metric, "Cumulative millisecond sum over committed responses; average = sum / requests_total.")
+		help(se.metric, "Cumulative millisecond sum over committed responses; average = sum / requests_total.")
 		for _, name := range names {
 			m := v.Counters[name]
 			if m.Requests == 0 {

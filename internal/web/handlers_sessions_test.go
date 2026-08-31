@@ -100,3 +100,34 @@ func TestHandleSessions(t *testing.T) {
 		t.Fatalf("disabled sessions body must carry sessions:[] — got %s", body)
 	}
 }
+
+// TestHandleSessionsErrorNotLeaked points the request-log directory at a
+// non-directory: the underlying error (an os PathError embedding the local
+// path) must be logged server-side and NOT echoed to the client.
+func TestHandleSessionsErrorNotLeaked(t *testing.T) {
+	notDir := filepath.Join(t.TempDir(), "requests.log")
+	if err := os.WriteFile(notDir, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(Options{Reads: sessionsReadAPI{dir: notDir}, Commands: testCommandAPI{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	serveWebRequest(server, rec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error != "failed to list sessions" {
+		t.Fatalf("error message = %q, want generic failed to list sessions", payload.Error)
+	}
+	if strings.Contains(rec.Body.String(), notDir) {
+		t.Fatalf("response leaks local path: %s", rec.Body)
+	}
+}

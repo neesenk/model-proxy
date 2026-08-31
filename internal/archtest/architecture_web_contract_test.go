@@ -148,6 +148,29 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 			t.Errorf("newProxyWebAPI Proxy calls = %v, want [adminCommands readView]", got)
 		}
 	})
+
+	t.Run("all app config writers share one lock boundary", func(t *testing.T) {
+		wholeWriteFile := mustParseFile(t, "internal/app/config_write.go")
+		wholeWrite := namedMethod(t, wholeWriteFile, "proxyWebAPI", "saveAndReload")
+		if got := namedCallCountInNode(wholeWrite.Body, "WithConfigLock"); got != 1 {
+			t.Errorf("saveAndReload WithConfigLock calls = %d, want 1", got)
+		}
+		if got := namedCallCountInNode(wholeWrite.Body, "saveAndReloadUnderLock"); got != 1 {
+			t.Errorf("saveAndReload saveAndReloadUnderLock calls = %d, want 1", got)
+		}
+
+		structuredFile := mustParseFile(t, "internal/app/config_edit.go")
+		structuredWrite := namedMethod(t, structuredFile, "proxyWebAPI", "editConfigNode")
+		if got := namedCallCountInNode(structuredWrite.Body, "WithConfigLock"); got != 1 {
+			t.Errorf("editConfigNode WithConfigLock calls = %d, want 1", got)
+		}
+		if got := namedCallCountInNode(structuredWrite.Body, "saveAndReloadUnderLock"); got != 1 {
+			t.Errorf("editConfigNode saveAndReloadUnderLock calls = %d, want 1", got)
+		}
+		if got := namedCallCountInNode(structuredWrite.Body, "saveAndReload"); got != 0 {
+			t.Errorf("editConfigNode nested saveAndReload calls = %d, want 0", got)
+		}
+	})
 }
 
 func selectorSitesNamed(file *ast.File, fset *token.FileSet, name string) []string {

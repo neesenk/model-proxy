@@ -100,11 +100,20 @@ func Lookup(name string) (configdomain.Provider, bool) {
 // Idempotent: an existing block is left untouched. Returns whether a write
 // happened.
 func MergeBlock(cfgPath, presetName string) (bool, error) {
-	changed, merged, err := PreviewMergeBlock(cfgPath, presetName)
-	if err != nil || !changed {
-		return changed, err
-	}
-	return true, writeConfigAtomic(cfgPath, merged)
+	// Preview + write run as ONE locked read-modify-write: the daemon's web
+	// config editor RMWs the same config.yaml (from another process for the
+	// CLI `add` path) — an unlocked preview-then-write would let a concurrent
+	// writer's change be silently discarded by the rename.
+	var changed bool
+	err := configedit.WithConfigLock(cfgPath, func() error {
+		merged, merr := []byte(nil), error(nil)
+		changed, merged, merr = PreviewMergeBlock(cfgPath, presetName)
+		if merr != nil || !changed {
+			return merr
+		}
+		return writeConfigAtomic(cfgPath, merged)
+	})
+	return changed, err
 }
 
 // PreviewMergeBlock is the dry-run form of MergeBlock: the SAME merge and

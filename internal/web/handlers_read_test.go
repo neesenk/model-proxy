@@ -699,7 +699,9 @@ func TestReadSecurityEndpoint(t *testing.T) {
 	}
 	failure := serveRead(t, s, http.MethodGet, "/api/security")
 	decodeReadJSON(t, failure, &routeError)
-	if failure.Code != http.StatusInternalServerError || routeError.Error != "security audit query: audit dir unreadable" {
+	// The underlying error (which may embed local paths) must NOT reach the
+	// client — only the generic message is exposed.
+	if failure.Code != http.StatusInternalServerError || routeError.Error != "failed to query security log" {
 		t.Fatalf("security failure = (%d, %#v)", failure.Code, routeError)
 	}
 }

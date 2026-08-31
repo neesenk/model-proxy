@@ -436,38 +436,47 @@ func (s *responsesStateStore) recordJSON(session string, requestHistory []any, b
 	return s.recordResponse(session, requestHistory, resp)
 }
 
+// handleParsedFrame processes one parsed SSE frame for recordSSE; it returns
+// true once a terminal response frame has been recorded.
+func (s *responsesStateStore) handleParsedFrame(session string, requestHistory []any, event string, data map[string]any, doneItems *[]any) bool {
+	if event == "" {
+		event = strOpt(data["type"])
+	}
+	if event == "response.output_item.done" {
+		if item := asMap(data["item"]); item != nil {
+			*doneItems = append(*doneItems, item)
+		}
+		return false
+	}
+	if event == "response.completed" || event == "response.incomplete" {
+		resp := asMap(data["response"])
+		if resp == nil {
+			return false
+		}
+		if _, ok := resp["output"].([]any); !ok && len(*doneItems) > 0 {
+			resp["output"] = *doneItems
+		}
+		return s.recordResponse(session, requestHistory, resp)
+	}
+	return false
+}
+
 func (s *responsesStateStore) recordSSE(session string, requestHistory []any, body []byte) bool {
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
 	pending := ""
 	pendData := ""    // folded data lines of the SSE frame in progress
 	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
+	var pendEvents []string
 	var doneItems []any
 	// handleFrame processes one assembled frame; it returns true once a
 	// terminal response frame has been recorded.
-	handleFrame := func(event, payload string) bool {
-		var data map[string]any
-		if sonic.UnmarshalString(payload, &data) != nil {
-			return false
-		}
-		if event == "" {
-			event = strOpt(data["type"])
-		}
-		if event == "response.output_item.done" {
-			if item := asMap(data["item"]); item != nil {
-				doneItems = append(doneItems, item)
+	handleFrame := func(event, payload string, dataEvents []string) bool {
+		for _, parsed := range parseFoldedSSEFrames[map[string]any](payload) {
+			frameEvent := foldedSSEFrameEvent(event, dataEvents, parsed.line)
+			if s.handleParsedFrame(session, requestHistory, frameEvent, parsed.value, &doneItems) {
+				return true
 			}
-			return false
-		}
-		if event == "response.completed" || event == "response.incomplete" {
-			resp := asMap(data["response"])
-			if resp == nil {
-				return false
-			}
-			if _, ok := resp["output"].([]any); !ok && len(doneItems) > 0 {
-				resp["output"] = doneItems
-			}
-			return s.recordResponse(session, requestHistory, resp)
 		}
 		return false
 	}
@@ -477,6 +486,7 @@ func (s *responsesStateStore) recordSSE(session string, requestHistory []any, bo
 			// Fold consecutive data: lines with "\n" per the SSE spec — a
 			// spec-folded multi-line frame only parses once assembled.
 			pendData = appendSSEData(pendData, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendEvents = append(pendEvents, pending)
 			pendOpen = true
 			continue
 		}
@@ -495,13 +505,15 @@ func (s *responsesStateStore) recordSSE(session string, requestHistory []any, bo
 		}
 		payload := pendData
 		pendData, pendOpen = "", false
-		if handleFrame(frameEvent, payload) {
+		dataEvents := pendEvents
+		pendEvents = nil
+		if handleFrame(frameEvent, payload, dataEvents) {
 			return true
 		}
 	}
 	// A trailing frame without its final blank line still dispatches.
 	if pendOpen {
-		return handleFrame(pending, pendData)
+		return handleFrame(pending, pendData, pendEvents)
 	}
 	return false
 }

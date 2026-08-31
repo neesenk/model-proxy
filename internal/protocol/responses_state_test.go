@@ -260,3 +260,33 @@ func TestResponsesState_RecordsFoldedSSEFrames(t *testing.T) {
 		t.Fatalf("folded output_item.done item lost from recorded history: %#v", expanded)
 	}
 }
+
+// TestResponsesState_MergedFramesKeepPerDataEventAssociation covers the same
+// missing-blank-line gateway defect in the state recorder. The function-call
+// item must be handled as output_item.done before the following completed
+// event records the response; assigning both payloads the final event loses
+// the tool history used by previous_response_id expansion.
+func TestResponsesState_MergedFramesKeepPerDataEventAssociation(t *testing.T) {
+	s := newResponsesStateStore("")
+	history := []any{map[string]any{"type": "message", "role": "user"}}
+	stream := "event: response.output_item.done\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc1\",\"call_id\":\"c1\",\"name\":\"lookup\",\"arguments\":\"{}\"}}\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n"
+	if !s.recordSSE("sess", history, []byte(stream)) {
+		t.Fatal("merged SSE stream was not recorded")
+	}
+	_, expanded, hit, err := s.expand([]byte(`{"model":"g","previous_response_id":"r1","input":"next"}`), "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hit {
+		t.Fatal("merged stream history not expanded")
+	}
+	for _, item := range expanded {
+		if strOpt(asMap(item)["call_id"]) == "c1" {
+			return
+		}
+	}
+	t.Fatalf("output_item.done lost from merged stream history: %#v", expanded)
+}

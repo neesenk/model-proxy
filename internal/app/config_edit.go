@@ -27,24 +27,31 @@ func setChildNode(parent *yaml.Node, key string, value *yaml.Node) {
 func mustEncode(value any) *yaml.Node { return configedit.MustEncode(value) }
 
 func (api *proxyWebAPI) editConfigNode(mutate func(*yaml.Node)) error {
-	root, err := loadConfigNode(api.currentConfigFile())
-	if err != nil {
-		return err
-	}
-	if mapNode(root) == nil {
-		return fmt.Errorf("config is not a YAML mapping")
-	}
-	mutate(root)
-	var buffer bytes.Buffer
-	encoder := yaml.NewEncoder(&buffer)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(root); err != nil {
-		return err
-	}
-	if err := encoder.Close(); err != nil {
-		return err
-	}
-	return api.saveAndReload(buffer.Bytes())
+	// The whole load→mutate→write span runs under the config file lock:
+	// AddPreset and the CLI `add` command RMW the same config.yaml (the CLI
+	// from another process); without the lock the later writer's rename
+	// silently discards the earlier writer's change.
+	configFile := api.currentConfigFile()
+	return configedit.WithConfigLock(configFile, func() error {
+		root, err := loadConfigNode(configFile)
+		if err != nil {
+			return err
+		}
+		if mapNode(root) == nil {
+			return fmt.Errorf("config is not a YAML mapping")
+		}
+		mutate(root)
+		var buffer bytes.Buffer
+		encoder := yaml.NewEncoder(&buffer)
+		encoder.SetIndent(2)
+		if err := encoder.Encode(root); err != nil {
+			return err
+		}
+		if err := encoder.Close(); err != nil {
+			return err
+		}
+		return api.saveAndReloadUnderLock(configFile, buffer.Bytes())
+	})
 }
 
 func (api *proxyWebAPI) editGeneral(data map[string]any) error {

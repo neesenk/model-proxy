@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/zalando/go-keyring"
 
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
@@ -203,6 +207,77 @@ func TestCLI_LogoutAllClearsPool(t *testing.T) {
 	if snapshot.Source != accounts.SourcePlural {
 		t.Errorf("source = %v, want SourcePlural (tombstone must override legacy)", snapshot.Source)
 	}
+}
+
+// Test: `logout zhipu --all` on an EMPTY pool stays idempotent even when the
+// keychain backend is unreachable. The empty pool already proves the user is
+// logged out; RemoveAllAccounts only cleans stale restore provenance there,
+// so its failure must surface as a warning, not a hard exit. The go-keyring
+// mock is driven to always fail — no real keychain I/O. Not parallel: the
+// mock is process-global.
+func TestCLI_LogoutAllEmptyPoolCleanupFailureWarnsOnly(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	// Empty plural pool (the tombstone) plus a stale keychain-restore marker
+	// left by an older writer: file-mode RemoveAllAccounts follows that
+	// provenance into keychain deletion.
+	if err := app.AccountStore().Save("zhipu", "zhipu", app.CredentialPool{Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := app.AccountStore().PoolPath("zhipu") + ".keychain-origin"
+	if err := os.WriteFile(markerPath, []byte(`{"version":1,"account_ids":["stale-restore-id"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeZhipuPoolConfig(t, "https://zhipu.invalid/u")
+
+	keyring.MockInitWithError(errors.New("secret service unreachable"))
+	defer keyring.MockInit() // restore a working mock for later tests
+
+	// Capture both streams: the success message goes to stdout, the cleanup
+	// warning to stderr. RunLogout must NOT os.Exit on this path.
+	var stderr string
+	stdout := grabStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			RunLogout([]string{"zhipu", "--all", "--config", cfgPath})
+		})
+	})
+
+	if !strings.Contains(stdout, "Not logged in") {
+		t.Errorf("stdout missing 'Not logged in':\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "warning: stale credential cleanup failed (already logged out)") {
+		t.Errorf("stderr missing cleanup warning:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "credential store unavailable") {
+		t.Errorf("stderr warning missing the underlying keychain failure:\n%s", stderr)
+	}
+	// The failed cleanup leaves the provenance intact for a later retry.
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Errorf("restore marker disappeared despite failed cleanup: %v", err)
+	}
+}
+
+// captureStderr captures everything written to os.Stderr during fn, mirroring
+// grabStdout, and returns the captured text.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	var buf strings.Builder
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
+	fn()
+	os.Stderr = orig
+	_ = w.Close()
+	<-done
+	return buf.String()
 }
 
 // Test: `logout zhipu --label K1` removes only K1, leaves K2.

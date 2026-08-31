@@ -8,10 +8,20 @@ import (
 	"model-proxy/internal/configedit"
 )
 
-// saveAndReload validates, backs up, atomically writes, then hot-reloads the
-// config; on reload failure the previous file is restored from the backup.
+// saveAndReload serializes every whole-document config replacement against
+// the structured and CLI read-modify-write paths. Without the common lock, a
+// raw /api/config save can race a structured edit and silently overwrite it.
 func (api *proxyWebAPI) saveAndReload(data []byte) error {
 	configFile := api.currentConfigFile()
+	return configedit.WithConfigLock(configFile, func() error {
+		return api.saveAndReloadUnderLock(configFile, data)
+	})
+}
+
+// saveAndReloadUnderLock validates, backs up, atomically writes, then
+// hot-reloads the config; on reload failure the previous file is restored from
+// the backup. The caller must hold configFile's configedit lock.
+func (api *proxyWebAPI) saveAndReloadUnderLock(configFile string, data []byte) error {
 	backup, err := configedit.WriteConfigValidated(configFile, string(data), func(path string, raw []byte) error {
 		_, err := configdomain.LoadConfigFromBytes(path, raw)
 		return err

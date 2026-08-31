@@ -61,6 +61,21 @@
   代价（让一个请求独占探测权），与"短冷却等待优于立即报错"的整体取向的偏差是
   已知且接受的。
 
+## 有意的 Web 与 guard 行为
+
+- `AddPreset` 落盘后 reload 失败**不回滚**（保留合并块、返回 `reload_warning`）：
+  preset wizard 流程要继续走 login，而 `saveAndReload` 路径 reload 失败会从备份恢复
+  原文件。同一 config.yaml 上两条 mutation 路径失败语义相反是有意的——wizard 的
+  合并块不含凭据、可幂等重试，回滚反而会丢掉用户刚确认的 provider 配置。
+- 分片外传检测（`known_secret_fragmented`）的会话键来自客户端可控的
+  `x-claude-code-session-id`：任一客户端可用随机 id 挤出 256 条 LRU 里的其他会话
+  窗口，使检测**有界漏检**（与 guard 扫描器各资源上限同向）。这是有界内存的
+  固有取舍，不是可修的缺陷。
+- admin 会话 cookie 直接承载 admin token 本身（base64，非一次性 session id）：
+  cookie 泄露等价于 token 泄露且无法单独吊销。已由 HttpOnly + SameSite=Strict +
+  强制 `Authorization: Bearer` 铸造（防 `x-api-key` 意外铸造）+ validate 层非回环
+  监听强制鉴权缓解；引入独立 session 存储前该取舍保持不变。
+
 ## 修改要求
 
 - 改变任一决策必须同步更新本文件、实现注释和回归测试。

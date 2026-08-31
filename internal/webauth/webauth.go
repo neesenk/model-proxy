@@ -11,9 +11,10 @@
 //
 // The zero-value/disabled Source (no files configured) accepts nothing and
 // reports Enabled()==false — callers treat that as "auth off" (the historical
-// loopback-trust behavior). A configured file that cannot be READ fails closed:
-// its cached set becomes empty (accept nothing) rather than open; a MISSING
-// file is a configuration error surface at validate time, not here.
+// loopback-trust behavior). A configured file that has gone MISSING fails
+// closed: the set becomes empty (accept nothing) rather than open. Other read
+// errors are treated as transient: the last successfully loaded set keeps
+// serving, and with no prior cache the caller rejects.
 package webauth
 
 import (
@@ -33,9 +34,15 @@ const cacheTTL = 10 * time.Second
 type Source struct {
 	paths []string
 
-	mu      sync.Mutex
-	cached  []string
-	_loaded time.Time
+	mu        sync.Mutex
+	cached    []string
+	haveCache bool
+	_loaded   time.Time
+	// _errorSince starts a non-sliding stale-cache grace window after the
+	// first transient reload failure. It is deliberately separate from
+	// _loaded: refreshing the success timestamp on every failure would keep
+	// revoked tokens valid forever while the file remains unreadable.
+	_errorSince time.Time
 }
 
 // NewSource builds a Source over the given token files. Zero paths (or all
@@ -55,27 +62,51 @@ func (s *Source) Enabled() bool {
 	return s != nil && len(s.paths) > 0
 }
 
-// tokens returns the cached token set, reloading when the TTL expired.
-func (s *Source) tokens() []string {
+// tokens returns the cached token set, reloading when the TTL expired. A
+// MISSING file fails closed: the set becomes empty (accept nothing). Any other
+// read error is treated as transient: the last successfully loaded set keeps
+// serving for a fixed, non-sliding cacheTTL grace measured from the first
+// failure, so a blip does not invalidate every token — including the forward
+// surface's 401s. With no prior cache, or after the grace, the caller rejects.
+func (s *Source) tokens() ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if time.Since(s._loaded) < cacheTTL && s._loaded.After(time.Time{}.Add(time.Second)) {
-		return s.cached
+	now := time.Now()
+	if s.haveCache && now.Sub(s._loaded) < cacheTTL {
+		return s.cached, nil
 	}
-	s.cached = loadTokens(s.paths)
-	s._loaded = time.Now()
-	return s.cached
+	toks, err := loadTokens(s.paths)
+	if err != nil {
+		if s.haveCache {
+			if s._errorSince.IsZero() {
+				s._errorSince = now
+			}
+			if now.Sub(s._errorSince) < cacheTTL {
+				return s.cached, nil
+			}
+		}
+		return nil, err
+	}
+	s.cached = toks
+	s.haveCache = true
+	s._loaded = now
+	s._errorSince = time.Time{}
+	return s.cached, nil
 }
 
-// loadTokens reads every file and returns the parsed token set. Read failures
-// yield an empty contribution (fail closed) — a rotated-away file must never
-// open the surface.
-func loadTokens(paths []string) []string {
+// loadTokens reads every file and returns the parsed token set. A missing file
+// (os.ErrNotExist) yields an EMPTY set with no error — fail closed — because a
+// rotated-away file must never keep the surface open. Any other read failure is
+// returned to the caller as a transient error.
+func loadTokens(paths []string) ([]string, error) {
 	var out []string
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				return nil, nil
+			}
+			return nil, err
 		}
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
@@ -85,7 +116,7 @@ func loadTokens(paths []string) []string {
 			out = append(out, line)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // Accept reports whether the presented token matches the configured set.
@@ -96,8 +127,14 @@ func (s *Source) Accept(presented string) bool {
 	if !s.Enabled() || presented == "" {
 		return false
 	}
+	toks, err := s.tokens()
+	if err != nil {
+		// Cold cache plus a transient read error: no trustworthy set exists,
+		// so reject rather than guess.
+		return false
+	}
 	match := 0
-	for _, tok := range s.tokens() {
+	for _, tok := range toks {
 		match |= subtle.ConstantTimeCompare([]byte(presented), []byte(tok))
 	}
 	return match == 1

@@ -14,6 +14,7 @@ import (
 	"model-proxy/internal/app"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/configedit"
 	"model-proxy/internal/provider"
 )
 
@@ -302,26 +303,30 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 // running daemon via maybeReloadDaemon so the new names take effect for implicit
 // routing without a manual `serve reload`.
 func WriteProviderModels(configFile, provName string, names []string) error {
-	root, err := loadConfigNode(configFile)
-	if err != nil {
-		return err
-	}
-	p := childMap(childMap(root, "providers"), provName)
-	if p == nil {
-		return fmt.Errorf("provider %q not found in %s", provName, configFile)
-	}
-	setChildNode(p, "models", mustEncode(names))
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(root); err != nil {
-		return err
-	}
-	enc.Close()
-	if _, err := writeConfigValidated(configFile, buf.String()); err != nil {
-		return fmt.Errorf("writing config: %w", err)
-	}
-	return nil
+	// Locked load→mutate→write: the daemon's web config editor and preset
+	// merges RMW the same config.yaml concurrently.
+	return configedit.WithConfigLock(configFile, func() error {
+		root, err := loadConfigNode(configFile)
+		if err != nil {
+			return err
+		}
+		p := childMap(childMap(root, "providers"), provName)
+		if p == nil {
+			return fmt.Errorf("provider %q not found in %s", provName, configFile)
+		}
+		setChildNode(p, "models", mustEncode(names))
+		var buf bytes.Buffer
+		enc := yaml.NewEncoder(&buf)
+		enc.SetIndent(2)
+		if err := enc.Encode(root); err != nil {
+			return err
+		}
+		enc.Close()
+		if _, err := writeConfigValidated(configFile, buf.String()); err != nil {
+			return fmt.Errorf("writing config: %w", err)
+		}
+		return nil
+	})
 }
 
 // refreshProviderModels fetches the live model list for a provider exactly once.

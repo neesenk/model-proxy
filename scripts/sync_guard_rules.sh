@@ -44,6 +44,12 @@ print(upstream.split()[-1])
 PY
 )"
 fi
+# TAG is interpolated into URL paths and query strings below; reject anything
+# outside [A-Za-z0-9._-] so '/', '?', '#' etc. cannot inject into the URL.
+if [[ ! "$TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "error: invalid gitleaks tag '$TAG': only [A-Za-z0-9._-] allowed" >&2
+  exit 1
+fi
 echo "upstream tag: $TAG" >&2
 
 TOML="$(mktemp -t gitleaks.toml.XXXXXX)"

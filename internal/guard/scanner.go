@@ -969,7 +969,22 @@ func (s *Scanner) ScanSecretsAndPaths(body []byte) (secrets, strong, weak []stri
 // as tainted as a whole; over-redacting an attachment is acceptable, leaking
 // is not (宁滥勿缺 on the redaction side, opposite of the detection side).
 func (s *Scanner) Redact(body []byte) []byte {
+	return s.redactSpans(s.findAll(body), body)
+}
+
+// ScanAndRedact is the one-pass form of Scan + Redact for callers that need
+// both the secret names and the redacted body (the live redact-mode request
+// path): one findAll pass claims the spans once, and both results are derived
+// from that single claimed table. The results are exactly Scan(body) and
+// Redact(body) run separately — a clean body comes back unchanged with no
+// names.
+func (s *Scanner) ScanAndRedact(body []byte) (names []string, redacted []byte) {
 	found := s.findAll(body)
+	return s.matchNames(found), s.redactSpans(found, body)
+}
+
+// redactSpans rewrites every claimed span to RedactPlaceholder.
+func (s *Scanner) redactSpans(found []match, body []byte) []byte {
 	if len(found) == 0 {
 		return body
 	}
