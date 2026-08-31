@@ -179,13 +179,19 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		// (x-claude-code-session-id), two channels run over the session's
 		// bounded state (known-secret channel only — rule-table/custom hits
 		// were already reported per request):
-		//  1. exact reassembly: the window tail + current PRE-REDACT body
-		//     scanned through ScanKnown; a joined hit that neither the tail
-		//     alone nor the current body alone (known via the already-computed
-		//     secretNames — known secrets are claimed first in the scanner, so
-		//     a current-body occurrence always lands there) produces counts as
-		//     fragmented. The tail-alone exclusion keeps a key fully seen in an
-		//     earlier request from re-firing "fragmented" on every later one.
+		//  1. exact reassembly: an occurrence present in tail+body but in
+		//     NEITHER alone must span the junction, so only the junction
+		//     region (the last MaxKnownNeedleLen-1 bytes of the tail plus the
+		//     first MaxKnownNeedleLen-1 bytes of the current PRE-REDACT body)
+		//     is scanned through ScanKnown — same verdict as scanning the
+		//     whole concatenation without copying up to 64MiB+32KiB per
+		//     request. The tail-alone verdict comes from the session entry's
+		//     cache (refreshed at Add time; a miss rescans the tail) and
+		//     excludes a key fully seen in an earlier request from re-firing
+		//     "fragmented" on every later one; the current-body-alone verdict
+		//     is the already-computed secretNames (known secrets are claimed
+		//     first in the scanner, so a current-body occurrence always lands
+		//     there).
 		//  2. fragment progress: realistic bodies all start with '{' (see
 		//     ExtractModel), so fragments can never sit byte-contiguously at
 		//     the junction — guard.ScanKnownFragment instead tracks each
@@ -195,7 +201,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		sessionID := r.Header.Get("x-claude-code-session-id")
 		if action != "off" && cfg.Guard.SessionScanEnabled() && sc.HasKnownSecrets() &&
 			sessionID != "" && p.sessionScan != nil {
-			tail, progress := p.sessionScan.Snapshot(sessionID, sc)
+			tail, progress, tailKnown, tailKnownOK := p.sessionScan.Snapshot(sessionID, sc)
 			knownInCurrent := false
 			for _, n := range secretNames {
 				if n == "known_secret" || n == "known_secret_encoded" {
@@ -204,16 +210,25 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 				}
 			}
 			var nextProgress []int
+			var progressReset []bool
 			if len(tail) > 0 && !knownInCurrent {
-				joined := make([]byte, 0, len(tail)+len(preGuardBody))
-				joined = append(joined, tail...)
-				joined = append(joined, preGuardBody...)
-				if len(sc.ScanKnown(joined)) > 0 && len(sc.ScanKnown(tail)) == 0 {
-					fragmented = true
+				if !tailKnownOK {
+					tailKnown = len(sc.ScanKnown(tail)) > 0
+				}
+				if !tailKnown {
+					span := sc.MaxKnownNeedleLen() - 1
+					start := max(len(tail)-span, 0)
+					end := min(span, len(preGuardBody))
+					junction := make([]byte, 0, len(tail)-start+end)
+					junction = append(junction, tail[start:]...)
+					junction = append(junction, preGuardBody[:end]...)
+					if len(sc.ScanKnown(junction)) > 0 {
+						fragmented = true
+					}
 				}
 			}
 			if !fragmented && !knownInCurrent {
-				fragmented, nextProgress = sc.ScanKnownFragment(preGuardBody, progress)
+				fragmented, nextProgress, progressReset = sc.ScanKnownFragment(preGuardBody, progress)
 			}
 			if fragmented {
 				fragAction := action
@@ -242,7 +257,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 			// retained. The window stores the PRE-REDACT form and lives in
 			// memory only (bounded: 256 sessions × 32KiB tail; see
 			// session_scan.go for the red lines).
-			p.sessionScan.Add(sessionID, preGuardBody, sc, nextProgress)
+			p.sessionScan.Add(sessionID, preGuardBody, sc, nextProgress, progressReset, knownInCurrent)
 		}
 		// Unified action evaluation after BOTH scans: a secrets block outranks
 		// a paths block and its message names only the secret patterns — the

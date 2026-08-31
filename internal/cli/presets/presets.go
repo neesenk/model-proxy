@@ -87,15 +87,23 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// 1. Merge the template provider block into the user config.
-	written, merr := domainpresets.MergeBlock(cfgPath, presetName)
+	// 1. Compute the would-be-merged config WITHOUT writing: the ambiguity
+	// gate below runs against the merged result BEFORE anything hits disk,
+	// so refusing the gate leaves config.yaml byte-identical (a credential-
+	// less provider block must never reach the next reload).
+	changed, mergedYAML, merr := domainpresets.PreviewMergeBlock(cfgPath, presetName)
 	if merr != nil {
 		fmt.Fprintf(stderr, "✗ merge %s into %s: %v\n", presetName, filepath.Base(cfgPath), merr)
 		return 1
 	}
-	merged, err := configdomain.LoadConfig(cfgPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "✗ reload merged config: %v\n", err)
+	var merged *configdomain.Config
+	if changed {
+		merged, merr = configdomain.LoadConfigFromBytes(cfgPath, mergedYAML)
+	} else {
+		merged, merr = configdomain.LoadConfig(cfgPath)
+	}
+	if merr != nil {
+		fmt.Fprintf(stderr, "✗ reload merged config: %v\n", merr)
 		return 1
 	}
 	if _, ok := merged.Providers[presetName]; !ok {
@@ -103,9 +111,10 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// 2. Ambiguity gate BEFORE any login side effects: models this provider
-	// serves that other configured providers also serve with no explicit route
-	// would resolve via implicit routing to whichever provider sorts first.
+	// 2. Ambiguity gate BEFORE the write and any login side effects: models
+	// this provider serves that other configured providers also serve with
+	// no explicit route would resolve via implicit routing to whichever
+	// provider sorts first.
 	ambiguous := domainpresets.AmbiguousModels(merged, presetName)
 	if len(ambiguous) > 0 {
 		msg := fmt.Sprintf("model(s) %s are also served by other configured providers without explicit routes — "+
@@ -121,15 +130,24 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case interactive:
 			fmt.Fprintf(stdout, "! %s\n", msg)
 		default:
-			// Non-TTY cannot confirm → fail closed, do NOT login.
+			// Non-TTY cannot confirm → fail closed, do NOT write or login.
 			fmt.Fprintf(stderr, "✗ %s\nre-run with --yes to proceed\n", msg)
 			return 1
 		}
-	} else if written {
+	}
+
+	// 3. The gate passed — NOW persist the merged block (idempotent no-op
+	// when the block already existed).
+	written, werr := domainpresets.MergeBlock(cfgPath, presetName)
+	if werr != nil {
+		fmt.Fprintf(stderr, "✗ merge %s into %s: %v\n", presetName, filepath.Base(cfgPath), werr)
+		return 1
+	}
+	if written && len(ambiguous) == 0 {
 		fmt.Fprintf(stdout, "✓ added provider %s to %s (%d models)\n", presetName, filepath.Base(cfgPath), len(tplProv.Models))
 	}
 
-	// 3. Login (key from env for scripts; prompt/stdin flow interactively).
+	// 4. Login (key from env for scripts; prompt/stdin flow interactively).
 	keyIn := ""
 	if apiKeyEnv != "" {
 		keyIn = os.Getenv(apiKeyEnv)
@@ -143,7 +161,7 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// 3b. Model-visibility cross-check (apikey providers only): fetch the
+	// 4b. Model-visibility cross-check (apikey providers only): fetch the
 	// account's visible models and warn when configured models are missing —
 	// a stale preset (upstream renamed models) must surface, not route 404s.
 	// Best-effort: probe errors stay silent (the endpoint may legitimately
@@ -152,10 +170,10 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		reportModelVisibility(stdout, merged, presetName)
 	}
 
-	// 4. Hot-reload a running daemon so the new provider is live immediately.
+	// 5. Hot-reload a running daemon so the new provider is live immediately.
 	cliserve.MaybeReloadDaemon(args, merged)
 
-	// 5. Next steps — suggest a model actually configured on this provider.
+	// 6. Next steps — suggest a model actually configured on this provider.
 	testModel := ""
 	if p := merged.Providers[presetName]; len(p.Models) > 0 {
 		testModel = p.Models[0]

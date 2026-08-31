@@ -220,6 +220,48 @@ func TestSetTOMLTopKey_Append(t *testing.T) {
 	}
 }
 
+// --- setTOMLTopKey: whitespace-tolerant replace (no spaces around `=`) ---
+
+// Regression: matching only the spaced prefix `model_provider = ` missed a
+// pre-existing `model_provider="old"` line, so a second key was inserted —
+// a TOML duplicate-key parse error that bricks the codex config.
+func TestSetTOMLTopKey_ReplaceWithoutSpaces(t *testing.T) {
+	for _, in := range []string{
+		"model_provider=\"old\"\n[some]\nx = 1\n",
+		"model_provider =\"old\"\n",
+		"model_provider= \"old\"\n",
+		"  model_provider  =  \"old\"\n",
+		"\"model_provider\" = \"old\"\n", // quoted key: same TOML key
+	} {
+		out := takeover.SetTOMLTopKey(in, "model_provider", `"new"`)
+		if strings.Contains(out, `"old"`) {
+			t.Errorf("setTOMLTopKey did not replace %q:\n%s", in, out)
+		}
+		if strings.Count(out, "model_provider") != 1 {
+			t.Errorf("setTOMLTopKey duplicated the key for %q:\n%s", in, out)
+		}
+		if !strings.Contains(out, `model_provider = "new"`) {
+			t.Errorf("setTOMLTopKey replace %q:\n%s", in, out)
+		}
+	}
+}
+
+// --- setTOMLTopKey: a quoted VALUE mentioning the key is not a false match ---
+
+func TestSetTOMLTopKey_QuotedValueNotCorrupted(t *testing.T) {
+	in := `note = "model_provider = keepme"
+[some]
+x = 1
+`
+	out := takeover.SetTOMLTopKey(in, "model_provider", `"mp"`)
+	if !strings.Contains(out, `note = "model_provider = keepme"`) {
+		t.Errorf("setTOMLTopKey corrupted an unrelated quoted value:\n%s", out)
+	}
+	if strings.Count(out, "model_provider = \"mp\"") != 1 {
+		t.Errorf("setTOMLTopKey did not insert the key exactly once:\n%s", out)
+	}
+}
+
 // --- replaceOrAppendTOMLSection: appends a new section ---
 
 func TestReplaceOrAppendTOMLSection_Append(t *testing.T) {
@@ -257,6 +299,51 @@ new = "y"
 	}
 	if strings.Contains(out, `old = "x"`) {
 		t.Errorf("replace did not drop old key:\n%s", out)
+	}
+	if !strings.Contains(out, `keep = true`) {
+		t.Errorf("replace clobbered the NEXT [other] section:\n%s", out)
+	}
+}
+
+// --- replaceOrAppendTOMLSection: a header inside a quoted value is not a match ---
+
+// Regression: the old substring search matched the header text anywhere in
+// the file, so a quoted value containing "[foo]" was treated as the section
+// header and the file was corrupted. The header must match a whole line.
+func TestReplaceOrAppendTOMLSection_HeaderInQuotedValue(t *testing.T) {
+	section := `
+[foo]
+new = "y"
+`
+
+	// Append case: no real [foo] section, only a quoted mention — the value
+	// must survive untouched and the section must be appended, not "replaced".
+	in := `x = "[foo]"
+`
+	out := takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	if !strings.Contains(out, `x = "[foo]"`) {
+		t.Errorf("quoted value corrupted:\n%s", out)
+	}
+	if strings.Count(out, "[foo]") != 2 { // the value + the appended header
+		t.Errorf("section not appended exactly once:\n%s", out)
+	}
+
+	// Replace case: both a quoted mention and a real [foo] section — only the
+	// real section is replaced.
+	in = `x = "[foo]"
+
+[foo]
+old = "x"
+
+[other]
+keep = true
+`
+	out = takeover.ReplaceOrAppendTOMLSection(in, "foo", section)
+	if !strings.Contains(out, `x = "[foo]"`) {
+		t.Errorf("quoted value corrupted on replace:\n%s", out)
+	}
+	if !strings.Contains(out, `new = "y"`) || strings.Contains(out, `old = "x"`) {
+		t.Errorf("real section not replaced:\n%s", out)
 	}
 	if !strings.Contains(out, `keep = true`) {
 		t.Errorf("replace clobbered the NEXT [other] section:\n%s", out)
@@ -332,8 +419,22 @@ func TestRewriteKimi(t *testing.T) {
 	if !strings.Contains(text, `api_key = "PROXY_MANAGED"`) {
 		t.Errorf("kimi provider must carry the sentinel key:\n%s", text)
 	}
-	if !strings.Contains(text, "[models.glm-5.2]") || !strings.Contains(text, `provider = "model-proxy"`) {
-		t.Errorf("exposed model missing its [models.<name>] block:\n%s", text)
+	// kimi-cli's LLMModel schema requires provider + model + max_context_size,
+	// and the dotted exposed name must be quoted ([models.glm-5.2] would parse
+	// as nested tables models → glm-5 → "2").
+	if !strings.Contains(text, `[models."glm-5.2"]`) {
+		t.Errorf("exposed model missing its quoted [models.\"<name>\"] block:\n%s", text)
+	}
+	if strings.Contains(text, "[models.glm-5.2]") {
+		t.Errorf("dotted model name written unquoted (parses as nested tables):\n%s", text)
+	}
+	if !strings.Contains(text, `provider = "model-proxy"`) || !strings.Contains(text, `model = "glm-5.2"`) {
+		t.Errorf("model block must carry provider + model (wire id):\n%s", text)
+	}
+	// No catalog metadata was supplied → the required max_context_size falls
+	// back to the conservative default (omitting it fails kimi-cli validation).
+	if !strings.Contains(text, "max_context_size = 200000") {
+		t.Errorf("model block missing required max_context_size fallback:\n%s", text)
 	}
 	// Pre-existing foreign provider sections are preserved (only our own block is replaced).
 	if !strings.Contains(text, `[providers."existing"]`) {
@@ -348,8 +449,61 @@ func TestRewriteKimi(t *testing.T) {
 	if strings.Count(string(b2), `[providers."model-proxy"]`) != 1 {
 		t.Errorf("re-run duplicated the provider block:\n%s", b2)
 	}
-	if strings.Count(string(b2), "[models.glm-5.2]") != 1 {
+	if strings.Count(string(b2), `[models."glm-5.2"]`) != 1 {
 		t.Errorf("re-run duplicated the model block:\n%s", b2)
+	}
+}
+
+// TestRewriteKimi_UsesCatalogContext: hydrated models.dev metadata wins over
+// the fallback for the required max_context_size.
+func TestRewriteKimi_UsesCatalogContext(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testTakeoverConfig(t, dir)
+	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
+	os.WriteFile(cfg.Takeover.Kimi, []byte(""), 0o644)
+	meta := map[string]map[string]catalog.Model{
+		"aqp": {"glm-5.2": {Context: 131072, Output: 8192}},
+	}
+
+	if err := takeover.RewriteKimi(cfg, meta, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(cfg.Takeover.Kimi)
+	text := string(b)
+	if !strings.Contains(text, "max_context_size = 131072") {
+		t.Errorf("max_context_size must come from catalog metadata:\n%s", text)
+	}
+	if strings.Contains(text, "max_context_size = 200000") {
+		t.Errorf("fallback context written despite catalog metadata:\n%s", text)
+	}
+}
+
+// TestRewriteKimi_DropsLegacyUnquotedBlock: the old writer emitted
+// [models.glm-5.2] (nested tables, fails kimi-cli validation). A re-run must
+// remove that leftover block, not just append the corrected quoted one.
+func TestRewriteKimi_DropsLegacyUnquotedBlock(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testTakeoverConfig(t, dir)
+	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
+	os.WriteFile(cfg.Takeover.Kimi, []byte(`[providers."model-proxy"]
+type = "openai_legacy"
+base_url = "http://127.0.0.1:15721/v1"
+api_key = "PROXY_MANAGED"
+
+[models.glm-5.2]
+provider = "model-proxy"
+`), 0o644)
+
+	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(cfg.Takeover.Kimi)
+	text := string(b)
+	if strings.Contains(text, "[models.glm-5.2]") {
+		t.Errorf("legacy unquoted model block survived rewrite:\n%s", text)
+	}
+	if strings.Count(text, `[models."glm-5.2"]`) != 1 {
+		t.Errorf("quoted model block missing or duplicated:\n%s", text)
 	}
 }
 

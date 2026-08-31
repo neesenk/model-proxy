@@ -763,9 +763,13 @@ type Takeover struct {
 	Opencode string `yaml:"opencode"`
 	Codex    string `yaml:"codex"`
 	Pi       string `yaml:"pi"`
-	// Kimi is the Kimi Code CLI config (~/.kimi/config.toml), a TOML provider
-	// catalog: [providers.<id>] + [models.<name>] blocks (docs/en/configuration/
-	// providers.md in MoonshotAI/kimi-cli).
+	// Kimi is the Kimi Code CLI config (~/.kimi/config.toml) — the target
+	// client is MoonshotAI/kimi-cli (branded "Kimi Code CLI"). The TOML
+	// provider catalog is [providers."<id>"] + [models."<name>"] blocks; the
+	// provider type written is "openai_legacy", kimi-cli's name for the
+	// OpenAI Chat Completions protocol (not a legacy client), and each model
+	// block carries provider/model/max_context_size per kimi-cli's LLMModel
+	// schema (docs/en/configuration/providers.md in MoonshotAI/kimi-cli).
 	Kimi string `yaml:"kimi"`
 	// ProviderID is the single provider identifier used by takeover for every
 	// agent that takes one (opencode, pi, codex, kimi, and future agents). claude

@@ -188,17 +188,20 @@ keepalive 由应用层 `internal/app/proxy_http.go` 与 `internal/web/server.go`
 `internal/observe/requestlog` 是只依赖 `internal/config` 值类型（生效值
 accessor）的请求访问日志数据面叶子包，拥有
 JSONL Record schema、body/header 截断与白名单、非阻塞队列、单 writer 的轮转/
-retention/owner-only 权限、全文件流式 top-K 查询、list-safe Summary 和 Shadow
-聚合。应用层 `internal/app/request_log_adapter.go` 只把 `RequestLogConfig` 生效值及
+retention/owner-only 权限、流式 top-K 查询（带文件级提前终止：peek 文件末尾记录
+Ts 为上界，堆满或越 From 下界的文件整文件跳过，peek 异常回退全量流扫）、list-safe
+Summary 和 Shadow 聚合。应用层 `internal/app/request_log_adapter.go` 只把 `RequestLogConfig` 生效值及
 `forwardLogCtx`/HTTP/RouteTarget 映射为纯值输入；capture 在转换器外层的位置、
 `internal/runtime.Lifecycle` 的 Shadow-before-drain 顺序、Web 参数、CLI replay policy 和
 Fusion/Shadow eligibility 继续由应用层编排。列表与 Shadow 必须调用强制丢弃
 body/header 的 metadata API，detail/replay 才能查询完整 Record。
 
-`internal/observe/seclog` 是无仓库内依赖的安全审计日志叶子包，拥有审计事件
+`internal/observe/seclog` 是只依赖 `observe/logx`（本身为叶子）的安全审计日志叶子包，拥有审计事件
 Record schema（kind: secret/path/drift）、JSONL 写入、按大小+按天轮转、retention
 sweep、owner-only 权限（文件 0600/目录 0700）、非阻塞队列与单 writer、离线 top-K
-查询，以及供 CLI 绕开 daemon 直接追加的 `AppendSync`。红线：`Record.Names` 只含
+查询（与 requestlog 同形的文件级提前终止：peek 最后一条完整记录——torn tail 不算——
+作为全文件 Ts 上界；被跳过文件内的 corrupt 行不再计入 Skipped，打不开的文件仍计入），
+以及供 CLI 绕开 daemon 直接追加的 `AppendSync`。红线：`Record.Names` 只含
 模式类型名/路径类别名，秘密值永不进入 Record；drift 记录的 detail 只含客户端名与
 指针 host。应用层只注入纯值（命中名、动作、路由元数据），扫描、阈值与派发决策
 不进本包。Logger 是 reload-owned：`internal/app/security_log_adapter.go` 的
@@ -220,7 +223,11 @@ TTL/容量 store、客户端可见响应的 bounded recorder、header normalizat
 `rules.json`（53 条高置信秘密模式，46 条精选自 gitleaks v8.28.0 并保留溯源与熵
 阈值，7 条本仓自有）、按生成期构建的不可变 `Scanner`（Aho-Corasick 字面量预过滤
 + 命中才精读的两阶段管线、known-secret 精确值变体集、规则前缀的 base64/hex 编码
-通道、敏感路径类别表、span 去重的 Scan/ScanPaths/Redact）。Scanner 以
+通道、敏感路径类别表——路径字面量同为自动机 needle、span 去重的
+Scan/ScanPaths/Redact，以及双通道同体的 `ScanSecretsAndPaths`：live 请求路径用它让
+路径 gate 判定搭 secrets 扫描的同一趟自动机 pass，standalone 的 ScanPaths/
+ScanPathsContext 保留 per-literal memchr gate——单独立趟时 memchr 每字节便宜约 25 倍、
+字面量只有约 10 个，专用自动机 pass 反而更慢）。Scanner 以
 `RuntimeSnapshot.Guard` 随 generation 原子交换；known-secret 凭据值只以内存形式
 存在，永不落盘/序列化/进事件。codex/aqp 在 serve 期间原地轮转 OAuth token，因此
 Proxy 另有一个 lifecycle 循环按 `scheduling.quota_poll_interval` 节拍重收 OAuth

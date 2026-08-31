@@ -61,6 +61,28 @@ func isPathChar(c byte) bool {
 		c == '_' || c == '-'
 }
 
+// pathNeedleHit post-filters one automaton hit of a path needle ending at
+// end, reporting whether it counts as an occurrence. Boundary rules require
+// non-path characters on both sides — the exact check the per-literal
+// bytes.Contains gate applies (so ".env" still ignores "foo.env"). Used when
+// the gate verdict rides a shared automaton pass (findAllGated).
+func (s *Scanner) pathNeedleHit(body []byte, ref needleRef, end int) bool {
+	switch ref.kind {
+	case needlePath:
+		p := builtinPaths[ref.idx]
+		if !p.boundary {
+			return true
+		}
+		start := end - len(p.literals[ref.vidx])
+		beforeOK := start == 0 || !isPathChar(body[start-1])
+		afterOK := end == len(body) || !isPathChar(body[end])
+		return beforeOK && afterOK
+	case needlePathExtra:
+		return true
+	}
+	return false
+}
+
 // hit reports whether the rule matches body.
 func (p pathRule) hit(body []byte) bool {
 	for _, lit := range p.literals {
@@ -91,6 +113,12 @@ func (p pathRule) hit(body []byte) bool {
 // ScanPaths returns the deduplicated category names of the sensitive paths
 // found in body, in table order. extra_paths hits report as "custom_path".
 // Category names are safe to log (they contain no secret material).
+//
+// Standalone, the per-literal bytes.Contains gate beats a dedicated automaton
+// pass (memchr is ~25x cheaper per byte than the automaton walk, and there
+// are only ~10 literals); the live request path never pays this gate at all —
+// it runs ScanSecretsAndPaths, where the gate verdict rides the secrets
+// scan's automaton pass for free.
 func (s *Scanner) ScanPaths(body []byte) []string {
 	var names []string
 	for _, p := range builtinPaths {

@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -169,6 +170,71 @@ func TestScanDetectsKeyBuriedAfterLargeCleanPrefix(t *testing.T) {
 			len(redacted) >= len(body) {
 			t.Errorf("%s buried after 64KB clean prefix: Redact did not replace the secret", tc.name)
 		}
+	}
+}
+
+// TestRedactCaptureGroupSpanKeepsJSONValid: gitleaks-derived rules capture the
+// secret in group 1 and consume a trailing context byte (quote/whitespace/;)
+// in a NON-captured group of the full match. The claim/redact span must be the
+// group span: claiming the full match makes Redact eat the closing quote of a
+// JSON string value, and the corrupted body forwarded upstream is invalid JSON
+// (it also breaks the ScanPathsContext structure walk downstream — see the
+// app-level TestGuardRedactKeepsPathBlockChain). For every representative
+// rule: the redacted body must stay valid JSON, carry no secret bytes, and
+// equal the exact group-span substitution.
+func TestRedactCaptureGroupSpanKeepsJSONValid(t *testing.T) {
+	rng := newFixtureRNG(0x9a1e)
+	c := func(n int, alphabet string) string { return rng.chars(n, alphabet) }
+	cases := []struct {
+		name   string // expected pattern type name
+		secret string
+	}{
+		{"stripe_access_token", "sk_live_" + c(24, alphaAlnum)},
+		{"huggingface_access_token", "hf_" + c(34, "abcdefghijklmnopqrstuvwxyz")},
+		{"npm_access_token", "npm_" + c(36, alphaLower36)},
+		{"grafana_service_account_token", "glsa_" + c(32, alphaAlnum) + "_" + c(8, alphaHex)},
+	}
+	for _, tc := range cases {
+		// Secret at the end of a JSON string value, mid-object and as the
+		// last value: both shapes put a closing quote right after the secret,
+		// which the full-match span would consume.
+		for _, body := range []string{
+			`{"api_key":"` + tc.secret + `","other":1}`,
+			`{"api_key":"` + tc.secret + `"}`,
+		} {
+			if got := defaultRulesScanner.Scan([]byte(body)); len(got) != 1 || got[0] != tc.name {
+				t.Errorf("%s: Scan = %v, want exactly [%s]", tc.name, got, tc.name)
+			}
+			out := defaultRulesScanner.Redact([]byte(body))
+			if !json.Valid(out) {
+				t.Errorf("%s: redacted body is not valid JSON: %s", tc.name, out)
+			}
+			if strings.Contains(string(out), tc.secret) {
+				t.Errorf("%s: redacted body still carries the secret", tc.name)
+			}
+			want := strings.Replace(body, tc.secret, RedactPlaceholder, 1)
+			if string(out) != want {
+				t.Errorf("%s: Redact = %q, want exact group-span substitution %q", tc.name, out, want)
+			}
+		}
+	}
+}
+
+// TestRedactNoCaptureGroupClaimsFullMatch: a rule whose regex has no capture
+// group keeps claiming the FULL match — the regex itself is the secret shape,
+// so nothing less would remove the secret. gitlab_pat is the entropy-carrying
+// no-group representative (openai_api_key covers the no-entropy case in
+// TestRedactKeepsJSONShape).
+func TestRedactNoCaptureGroupClaimsFullMatch(t *testing.T) {
+	secret := "glpat-" + newFixtureRNG(0xf011).chars(20, alphaWord)
+	body := `{"token":"` + secret + `","other":1}`
+	out := string(defaultRulesScanner.Redact([]byte(body)))
+	want := `{"token":"` + RedactPlaceholder + `","other":1}`
+	if out != want {
+		t.Errorf("Redact = %q, want %q", out, want)
+	}
+	if !json.Valid([]byte(out)) || strings.Contains(out, secret) {
+		t.Errorf("redacted body invalid or still carries the secret: %q", out)
 	}
 }
 

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"strings"
@@ -9,9 +10,8 @@ import (
 )
 
 // captureConvertLog runs fn with the log output captured and the convertWarn
-// dedup map cleared, returning everything convertWarn emitted. The map is
-// mutated in place (sync.Map must not be copied): keys are saved, deleted,
-// then restored.
+// dedup set cleared, returning everything convertWarn emitted. The set is
+// swapped under its mutex: keys are saved, cleared, then restored.
 func captureConvertLog(t *testing.T, fn func()) string {
 	t.Helper()
 	var buf bytes.Buffer
@@ -19,24 +19,16 @@ func captureConvertLog(t *testing.T, fn func()) string {
 	oldFlags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
-	var saved []string
-	convertWarnSeen.Range(func(k, _ any) bool {
-		if s, ok := k.(string); ok {
-			saved = append(saved, s)
-		}
-		convertWarnSeen.Delete(k)
-		return true
-	})
+	convertWarnSeen.mu.Lock()
+	saved := convertWarnSeen.seen
+	convertWarnSeen.seen = make(map[string]struct{}, len(saved))
+	convertWarnSeen.mu.Unlock()
 	defer func() {
 		log.SetOutput(oldOut)
 		log.SetFlags(oldFlags)
-		convertWarnSeen.Range(func(k, _ any) bool {
-			convertWarnSeen.Delete(k)
-			return true
-		})
-		for _, k := range saved {
-			convertWarnSeen.Store(k, struct{}{})
-		}
+		convertWarnSeen.mu.Lock()
+		convertWarnSeen.seen = saved
+		convertWarnSeen.mu.Unlock()
 	}()
 	fn()
 	return buf.String()
@@ -336,5 +328,34 @@ func TestStreaming_ThinkingDeltaPreserved(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("reasoning replay missing %s:\n%s", want, raw)
 		}
+	}
+}
+
+// TestConvertWarnDedupCapped: the convertWarn dedup set is capped — warning
+// strings embed client-/upstream-controlled values (raw file ids, unknown
+// type names), so it must not grow without bound. Past the cap a message is
+// simply not deduped (best-effort log-spam control, never correctness): it
+// still logs on every occurrence, while in-cap messages stay deduped.
+func TestConvertWarnDedupCapped(t *testing.T) {
+	var n int
+	out := captureConvertLog(t, func() {
+		for i := 0; i < convertWarnSeenCap+64; i++ {
+			convertWarn(fmt.Sprintf("cap-fill-%d", i))
+		}
+		convertWarnSeen.mu.Lock()
+		n = len(convertWarnSeen.seen)
+		convertWarnSeen.mu.Unlock()
+		convertWarn("overflow-msg")
+		convertWarn("overflow-msg")
+		convertWarn("cap-fill-0") // already inside the cap: stays deduped
+	})
+	if n != convertWarnSeenCap {
+		t.Fatalf("dedup set size = %d, want exactly the %d cap", n, convertWarnSeenCap)
+	}
+	if c := strings.Count(out, "overflow-msg"); c != 2 {
+		t.Fatalf("past-cap message logged %d times, want 2 (not silently deduped)", c)
+	}
+	if c := strings.Count(out, "cap-fill-0"); c != 1 {
+		t.Fatalf("in-cap message logged %d times, want 1 (dedup still active)", c)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bytedance/sonic"
 )
@@ -318,5 +319,107 @@ func TestParity_KitchenSinkNoLeakage(t *testing.T) {
 	}
 	if !strings.Contains(string(outR), `"content":"hi"`) && !strings.Contains(string(outR), `"text":"hi"`) {
 		t.Errorf("known item lost: %s", outR)
+	}
+}
+
+// TestParity_AnthropicDoneTerminatorIgnoresLaterFrames: [DONE] is an explicit
+// terminator — a RECOGNIZED event frame after it must not be processed. The
+// finish chunk is emitted exactly once, by the [DONE] itself.
+func TestParity_AnthropicDoneTerminatorIgnoresLaterFrames(t *testing.T) {
+	in := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":5}}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
+		"data: [DONE]\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"after\"}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n"
+	raw := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	out := string(raw)
+	if strings.Contains(out, "after") {
+		t.Errorf("content delta after [DONE] leaked into the client stream:\n%s", out)
+	}
+	// Exactly role + content + finish chunks and one [DONE]: the post-[DONE]
+	// message_delta must not emit a second finish chunk (nor its usage).
+	if n := strings.Count(out, "chat.completion.chunk"); n != 3 {
+		t.Errorf("chunk count = %d, want 3 (role, content, finish):\n%s", n, out)
+	}
+	if n := strings.Count(out, `"finish_reason":"stop"`); n != 1 {
+		t.Errorf("finish chunk count = %d, want 1:\n%s", n, out)
+	}
+	if strings.Contains(out, `"output_tokens":9`) || strings.Contains(out, `"completion_tokens":9`) {
+		t.Errorf("usage from a post-[DONE] message_delta leaked:\n%s", out)
+	}
+	if !strings.Contains(out, "data: [DONE]") {
+		t.Errorf("client stream missing the [DONE] marker:\n%s", out)
+	}
+}
+
+// holdOpenReader yields data once, then blocks until release — mimics a
+// gateway that sends [DONE] and then holds the connection open.
+type holdOpenReader struct {
+	data    []byte
+	off     int
+	release <-chan struct{}
+}
+
+func (h *holdOpenReader) Read(p []byte) (int, error) {
+	if h.off < len(h.data) {
+		n := copy(p, h.data[h.off:])
+		h.off += n
+		return n, nil
+	}
+	<-h.release
+	return 0, io.EOF
+}
+
+// TestParity_AnthropicDoneTerminatorNoEOFWait: the finish chunk + data: [DONE]
+// must reach the client as soon as the upstream [DONE] arrives, without
+// waiting for the upstream to close the connection.
+func TestParity_AnthropicDoneTerminatorNoEOFWait(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release) // unblocks the reader goroutine if the assertion times out
+	in := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":5}}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
+		"data: [DONE]\n\n"
+	tr := newAnthropicToOpenAISSE(&holdOpenReader{data: []byte(in), release: release}, "m")
+	done := make(chan string, 1)
+	go func() {
+		var out strings.Builder
+		buf := make([]byte, 4096)
+		for !strings.Contains(out.String(), "data: [DONE]") {
+			n, err := tr.Read(buf)
+			out.Write(buf[:n])
+			if err != nil {
+				break
+			}
+		}
+		done <- out.String()
+	}()
+	select {
+	case out := <-done:
+		if !strings.Contains(out, `"content":"hi"`) || !strings.Contains(out, `"finish_reason":"stop"`) {
+			t.Errorf("stream before upstream EOF = %q, want content + finish chunk", out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("transformer blocked waiting for upstream EOF after [DONE]")
+	}
+}
+
+// TestParity_AnthropicDoneTerminatorNoTerminalEvent: a [DONE]-terminated
+// stream without message_delta is a CLEAN dialect termination — the finish
+// chunk is synthesized from what arrived, and no "terminated before a
+// terminal event" error chunk follows the already-delivered content.
+func TestParity_AnthropicDoneTerminatorNoTerminalEvent(t *testing.T) {
+	in := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":5}}}\n\n" +
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n" +
+		"data: [DONE]\n\n"
+	raw := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(in), "m"))
+	out := string(raw)
+	if !strings.Contains(out, `"content":"hi"`) || !strings.Contains(out, `"finish_reason":"stop"`) || !strings.Contains(out, "data: [DONE]") {
+		t.Errorf("clean [DONE] termination incomplete (content/finish/[DONE]):\n%s", out)
+	}
+	if strings.Contains(out, "terminated before a terminal event") || strings.Contains(out, `"error"`) {
+		t.Errorf("spurious error chunk after a [DONE]-terminated stream:\n%s", out)
 	}
 }

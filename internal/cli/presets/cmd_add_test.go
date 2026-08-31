@@ -126,6 +126,60 @@ func TestCmdAdd_AmbiguityRefusesWithoutTTY(t *testing.T) {
 	}
 }
 
+// TestCmdAdd_AmbiguityRefusalLeavesConfigUntouched pins the gate-before-write
+// ordering: the ambiguity gate runs against the WOULD-BE-MERGED config, so a
+// refusal (the non-TTY fail-closed path here) must leave config.yaml
+// byte-identical — otherwise the next reload activates a credential-less
+// provider block whose models join implicit routing. The added preset's
+// template model is deliberately placed on an existing provider to trigger
+// the gate; the preset block itself is NOT yet configured.
+func TestCmdAdd_AmbiguityRefusalLeavesConfigUntouched(t *testing.T) {
+	tplProv, ok := domainpresets.Lookup("deepseek")
+	if !ok || len(tplProv.Models) == 0 {
+		t.Fatal("deepseek preset missing from the built-in template")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Keep MaybeReloadDaemon's pid file away from any live daemon (not
+	// reached on the refusal path, but pin it like the other add tests).
+	t.Setenv("TMPDIR", t.TempDir())
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := "listen: 127.0.0.1:15799\nlog_level: error\n\nproviders:\n" +
+		"  zhipu:\n" +
+		"    provider_id: zhipu\n" +
+		"    openai_base_url: http://127.0.0.1:9\n" +
+		"    models: [" + tplProv.Models[0] + "]\n"
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ADD_TEST_KEY", "sk-x")
+
+	code, _, stderr := runCmdAdd([]string{
+		"--config", cfgPath,
+		"deepseek",
+		"--api-key-env", "ADD_TEST_KEY",
+	})
+	if code != 1 {
+		t.Fatalf("ambiguous add must exit 1 without TTY; got %d", code)
+	}
+	if !strings.Contains(stderr, "--yes") {
+		t.Fatalf("refusal must point at --yes; stderr=%q", stderr)
+	}
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != content {
+		t.Fatalf("refused add must leave config.yaml byte-identical;\nbefore:\n%s\nafter:\n%s", content, after)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".model-proxy")); !os.IsNotExist(err) {
+		t.Fatal("no credentials may be written when the ambiguity gate refuses")
+	}
+}
+
 // TestCmdAdd_MissingConfigHintsInit checks the onboarding error path.
 func TestCmdAdd_MissingConfigHintsInit(t *testing.T) {
 	home := t.TempDir()

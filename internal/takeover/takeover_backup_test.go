@@ -71,6 +71,28 @@ func TestBackup_MissingSource(t *testing.T) {
 	}
 }
 
+// Regression: Backup treated ANY os.Stat error on the .bak as "no backup
+// exists" and entered the create/overwrite path — a permission/IO error
+// would overwrite an existing backup with the post-takeover file, losing
+// the user's original config. Only os.IsNotExist may create; other Stat
+// errors must fail closed.
+func TestBackup_StatErrorFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "s.json")
+	if err := os.WriteFile(src, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A NUL byte in the backup path makes os.Stat fail with EINVAL — an
+	// error that is NOT os.IsNotExist — deterministically, on every platform.
+	err := takeover.Backup(src, filepath.Join(dir, ".mp"), "bad\x00name")
+	if err == nil {
+		t.Fatal("Backup with an un-stat-able backup path: want error, got nil")
+	}
+	if err == takeover.ErrNoFile {
+		t.Fatalf("Backup returned ErrNoFile for a stat failure on the backup: %v", err)
+	}
+}
+
 // --- restore: copies .bak back ---
 
 func TestRestore_WritesBack(t *testing.T) {
@@ -130,6 +152,51 @@ func TestRestore_ShaMismatchRefuses(t *testing.T) {
 	}
 	if string(got) != "current" {
 		t.Fatalf("restore overwrote target despite integrity failure: %q", got)
+	}
+	// Fail-closed also means the takeover marker survives: the client is
+	// still taken over (its config still points at the proxy), so the .bak
+	// must remain for a future retry.
+	if _, statErr := os.Stat(filepath.Join(bakDir, "c.bak")); statErr != nil {
+		t.Fatalf("refused restore removed the backup marker: %v", statErr)
+	}
+}
+
+// Regression (M3): restore never cleared the takeover marker, so a
+// deliberately restored client kept its .bak and CheckTakeoverDrift reported
+// it as taken over (and drifted) forever. A successful restore ends the
+// takeover: content comes back AND the .bak/.meta markers are removed.
+func TestRestore_RemovesMarker(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "s.json")
+	if err := os.WriteFile(src, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bakDir := filepath.Join(dir, ".mp")
+	if err := takeover.Backup(src, bakDir, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("taken-over"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := takeover.Restore(src, bakDir, "c"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("restored content = %q, want original", got)
+	}
+	for _, marker := range []string{"c.bak", "c.bak.meta"} {
+		if _, err := os.Stat(filepath.Join(bakDir, marker)); !os.IsNotExist(err) {
+			t.Errorf("restore left takeover marker %s behind (stat err=%v)", marker, err)
+		}
+	}
+	// A second restore now reports "no backup" — the client is not taken over.
+	if err := takeover.Restore(src, bakDir, "c"); err != takeover.ErrNoFile {
+		t.Errorf("second Restore err = %v, want ErrNoFile", err)
 	}
 }
 

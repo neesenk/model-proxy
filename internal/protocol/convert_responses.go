@@ -859,11 +859,17 @@ func chatMsgToResponsesItems(m map[string]any, d *Diagnostics) []map[string]any 
 				if fm == nil {
 					fm = pm
 				}
-				if id := strOpt(fm["file_id"]); id != "" && strOpt(fm["file_data"]) == "" && strOpt(fm["file_url"]) == "" {
-					parts = append(parts, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(fm["filename"]), d)})
-					continue
+				if id := strOpt(fm["file_id"]); id != "" {
+					if strOpt(fm["file_data"]) == "" && strOpt(fm["file_url"]) == "" {
+						parts = append(parts, map[string]any{"type": "text", "text": degradeFileIDText(id, strOpt(fm["filename"]), d)})
+						continue
+					}
+					// file_id alongside an inline/URL source: the source is the
+					// transportable form, so keep it and drop only the
+					// provider-scoped id (r→chat/r→a prefer it the same way).
+					warnFileIDDropped(id, d)
 				}
-				copyOpt(file, fm, "file_id", "file_data", "file_url", "filename")
+				copyOpt(file, fm, "file_data", "file_url", "filename")
 				if len(file) > 1 {
 					parts = append(parts, file)
 				}

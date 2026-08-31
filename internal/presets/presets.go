@@ -100,23 +100,37 @@ func Lookup(name string) (configdomain.Provider, bool) {
 // Idempotent: an existing block is left untouched. Returns whether a write
 // happened.
 func MergeBlock(cfgPath, presetName string) (bool, error) {
+	changed, merged, err := PreviewMergeBlock(cfgPath, presetName)
+	if err != nil || !changed {
+		return changed, err
+	}
+	return true, writeConfigAtomic(cfgPath, merged)
+}
+
+// PreviewMergeBlock is the dry-run form of MergeBlock: the SAME merge and
+// validation, returned as the would-be config content without touching the
+// file. changed=false (merged nil) means the preset block already exists and
+// MergeBlock would be a no-op. Callers that gate on the merged result (the
+// CLI add ambiguity gate) preview first, then persist via MergeBlock only
+// after the gate passes — a refusal must leave config.yaml byte-identical.
+func PreviewMergeBlock(cfgPath, presetName string) (changed bool, merged []byte, err error) {
 	userRoot, err := configedit.LoadNode(cfgPath)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if configedit.MapNode(userRoot) == nil {
-		return false, errors.New("config is not a YAML mapping")
+		return false, nil, errors.New("config is not a YAML mapping")
 	}
 	providersMap := configedit.ChildMap(userRoot, "providers")
 
 	existing := configedit.LookupChildMap(providersMap, presetName)
 	if existing != nil {
-		return false, nil // already configured — nothing to merge
+		return false, nil, nil // already configured — nothing to merge
 	}
 
 	tplNode, err := loadTemplateProviderNode(presetName)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	configedit.SetChildNode(providersMap, presetName, tplNode)
 
@@ -124,39 +138,45 @@ func MergeBlock(cfgPath, presetName string) (bool, error) {
 	encoder := yaml.NewEncoder(&buffer)
 	encoder.SetIndent(2)
 	if err := encoder.Encode(userRoot); err != nil {
-		return true, err
+		return true, nil, err
 	}
 	if err := encoder.Close(); err != nil {
-		return true, err
+		return true, nil, err
 	}
-	// Validate BEFORE writing: a merged config that fails to load must never
-	// hit disk (fail-closed).
+	// Validate: a merged config that fails to load must never hit disk
+	// (fail-closed) — MergeBlock writes only what passed this check.
 	if _, verr := configdomain.LoadConfigFromBytes(cfgPath, buffer.Bytes()); verr != nil {
-		return true, fmt.Errorf("merged config invalid: %w", verr)
+		return true, nil, fmt.Errorf("merged config invalid: %w", verr)
 	}
+	return true, buffer.Bytes(), nil
+}
+
+// writeConfigAtomic persists merged config content via a same-directory temp
+// file + rename, preserving the original file mode.
+func writeConfigAtomic(cfgPath string, data []byte) error {
 	mode := os.FileMode(0o644)
 	if info, serr := os.Stat(cfgPath); serr == nil {
 		mode = info.Mode().Perm()
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(cfgPath), "."+filepath.Base(cfgPath)+".tmp-*")
 	if err != nil {
-		return true, err
+		return err
 	}
 	tmpName := tmp.Name()
-	if _, werr := tmp.Write(buffer.Bytes()); werr != nil {
+	if _, werr := tmp.Write(data); werr != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return true, werr
+		return werr
 	}
 	if cerr := tmp.Close(); cerr != nil {
 		os.Remove(tmpName)
-		return true, cerr
+		return cerr
 	}
 	if cerr := os.Chmod(tmpName, mode); cerr != nil {
 		os.Remove(tmpName)
-		return true, cerr
+		return cerr
 	}
-	return true, os.Rename(tmpName, cfgPath)
+	return os.Rename(tmpName, cfgPath)
 }
 
 // loadTemplateProviderNode extracts providers.<preset> from the built-in

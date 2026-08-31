@@ -323,3 +323,30 @@ func TestScanPathsContextDepthLimit(t *testing.T) {
 	body := strings.Repeat("[", 10001) + strings.Repeat("]", 10001) + " ~/.ssh/id_rsa"
 	wantCtx(t, body, s, nil, []string{"ssh"})
 }
+
+// ScanSecretsAndPaths must return exactly Scan and ScanPathsContext run
+// separately — the shared automaton pass only saves the second sweep.
+func TestScanSecretsAndPathsMatchesSeparateScans(t *testing.T) {
+	s := mustScanner(t, nil, []string{syntheticSecret("poolkey-", 32)}, []string{"~/.company/secrets"})
+	secret := s.secrets[0].raw
+	bodies := [][]byte{
+		[]byte(`{"model":"m","messages":[{"role":"user","content":"explain ssh tunneling"}]}`),
+		[]byte(`{"messages":[{"role":"assistant","tool_calls":[{"function":{"arguments":"cat ~/.ssh/id_rsa"}}]}]}`),
+		[]byte(`{"messages":[{"role":"user","content":"how do I load .env in compose?"}]}`),
+		[]byte(`{"messages":[{"role":"user","content":"cat foo.env and my_id_rsa are not hits"}]}`),
+		[]byte(`{"messages":[{"role":"user","content":"token ` + string(secret) + ` and cat ~/.aws/credentials please"}]}`),
+		[]byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","input":{"p":"~/.company/secrets/prod.yaml"}}]}]}`),
+		[]byte("not json at all ~/.kube/config"),
+	}
+	for i, body := range bodies {
+		wantSecrets := s.Scan(body)
+		wantStrong, wantWeak := s.ScanPathsContext(body)
+		gotSecrets, gotStrong, gotWeak := s.ScanSecretsAndPaths(body)
+		if strings.Join(gotSecrets, ",") != strings.Join(wantSecrets, ",") ||
+			strings.Join(gotStrong, ",") != strings.Join(wantStrong, ",") ||
+			strings.Join(gotWeak, ",") != strings.Join(wantWeak, ",") {
+			t.Errorf("body %d: combined = (%v, %v, %v), separate = (%v, %v, %v)",
+				i, gotSecrets, gotStrong, gotWeak, wantSecrets, wantStrong, wantWeak)
+		}
+	}
+}

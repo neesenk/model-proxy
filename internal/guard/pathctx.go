@@ -35,11 +35,16 @@ import (
 // (宁低勿高 — a structure-recognition failure must never upgrade a hit to
 // strong).
 //
-// Cost: the ScanPaths literal gate runs first; only a body WITH a path hit
-// pays one JSON structure pass to locate the strong value spans, so a clean
-// body costs exactly what ScanPaths costs today. Every pass is linear
-// (nesting depth is bounded by the walker's maxCtxDepth, mirroring
-// encoding/json's maxNestingDepth).
+// Cost: the literal gate runs first; only a body WITH a path hit pays one
+// JSON structure pass to locate the strong value spans, so a clean body costs
+// exactly what ScanPaths costs today. The gate stays a per-literal
+// bytes.Contains sweep here because STANDALONE that beats an extra automaton
+// pass (memchr is ~25x cheaper per byte than the automaton walk, and there
+// are only ~10 literals); the live request path never pays this gate at all —
+// it runs ScanSecretsAndPaths, where the gate verdict rides the secrets
+// scan's automaton pass for free. Every pass is linear (nesting depth is
+// bounded by the walker's maxCtxDepth, mirroring encoding/json's
+// maxNestingDepth).
 //
 // strong and weak are disjoint — a category with at least one strong
 // occurrence reports strong only. Both lists follow ScanPaths ordering: the
@@ -65,10 +70,14 @@ func (s *Scanner) ScanPathsContext(body []byte) (strong, weak []string) {
 	if !gate {
 		return nil, nil
 	}
+	return s.classifyPathHits(body)
+}
 
-	// Phase 2: locate the strong value spans once (nil on any walk failure →
-	// everything classifies weak), then classify each occurrence by span
-	// intersection.
+// classifyPathHits is ScanPathsContext's phase 2 for a body whose gate
+// already opened: locate the strong value spans once (nil on any walk
+// failure → everything classifies weak), then classify each occurrence by
+// span intersection.
+func (s *Scanner) classifyPathHits(body []byte) (strong, weak []string) {
 	spans := strongValueSpans(body)
 
 	classify := func(cat string, each func(fn func(start, end int))) {

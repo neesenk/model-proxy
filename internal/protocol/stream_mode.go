@@ -39,17 +39,19 @@ func parseWireSSE(raw []byte) ([]wireSSEEvent, error) {
 	var out []wireSSEEvent
 	event := ""
 	pend := ""
+	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
 	for scanner.Scan() {
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		switch {
 		case strings.HasPrefix(line, "data:"):
-			pend = appendSSEData(pend, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pend = appendSSEData(pend, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendOpen = true
 		case line == "":
 			// Blank line dispatches the folded frame (multi-line data joins
 			// with "\n" per the SSE spec) and closes its event scope.
-			if pend != "" {
+			if pendOpen {
 				out = append(out, wireSSEEvent{event: event, data: pend})
-				pend = ""
+				pend, pendOpen = "", false
 			}
 			event = ""
 		case strings.HasPrefix(line, "event:"):
@@ -60,7 +62,7 @@ func parseWireSSE(raw []byte) ([]wireSSEEvent, error) {
 		return nil, err
 	}
 	// A trailing frame without its final blank line still dispatches.
-	if pend != "" {
+	if pendOpen {
 		out = append(out, wireSSEEvent{event: event, data: pend})
 	}
 	return out, nil

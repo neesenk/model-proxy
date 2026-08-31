@@ -94,3 +94,74 @@ func TestSSE_NonDataLinesDoNotSplitFrames(t *testing.T) {
 		t.Errorf("subsequent frame lost after non-data lines:\n%s", out)
 	}
 }
+
+// TestSSE_EmptyDataLinesFoldPerSpec: an empty data: line is a real payload
+// line, not "no frame yet". Per the HTML spec each data line contributes its
+// value plus "\n" and the final "\n" is stripped at dispatch, so
+// `data:` + `data: x` folds to "\nx" (the old pend=="" sentinel dropped the
+// leading empty line) and `data: x` + `data:` folds to "x\n".
+func TestSSE_EmptyDataLinesFoldPerSpec(t *testing.T) {
+	pend, open := "", false
+	pend = appendSSEData(pend, open, "")
+	open = true
+	pend = appendSSEData(pend, open, "x")
+	if pend != "\nx" {
+		t.Errorf("data: + data: x folded to %q, want %q", pend, "\nx")
+	}
+
+	pend, open = "", false
+	pend = appendSSEData(pend, open, "x")
+	open = true
+	pend = appendSSEData(pend, open, "")
+	if pend != "x\n" {
+		t.Errorf("data: x + data: folded to %q, want %q", pend, "x\n")
+	}
+}
+
+// TestSSE_LeadingEmptyDataLineOpensFrame: through the real frame assembly
+// (parseWireSSE), a frame whose first data: line is empty keeps that line in
+// the folded payload, a lone empty data line still dispatches a frame, and a
+// trailing frame without its final blank line dispatches too.
+func TestSSE_LeadingEmptyDataLineOpensFrame(t *testing.T) {
+	events, err := parseWireSSE([]byte("data:\ndata: x\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].data != "\nx" {
+		t.Fatalf("leading-empty-line frame = %#v, want one frame with data %q", events, "\nx")
+	}
+
+	events, err = parseWireSSE([]byte("data:\n\ndata: y\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].data != "" || events[1].data != "y" {
+		t.Fatalf("lone empty data line = %#v, want an empty-payload frame then %q", events, "y")
+	}
+
+	events, err = parseWireSSE([]byte("data:\ndata: z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].data != "\nz" {
+		t.Fatalf("trailing frame without blank line = %#v, want one frame with data %q", events, "\nz")
+	}
+}
+
+// TestSSE_LeadingEmptyDataLineStillConverts: end-to-end through a transformer
+// — a frame folded with a leading empty data line ("\n{...}" is still valid
+// JSON) converts as one frame, exactly like the same payload on one line.
+func TestSSE_LeadingEmptyDataLineStillConverts(t *testing.T) {
+	in := "data:\n" +
+		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lead\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	raw := readAllChecked(t, newOpenAIToAnthropicSSE(strings.NewReader(in), "m"))
+	out := string(raw)
+	if strings.Count(out, "lead") != 1 || !strings.Contains(out, `"text_delta"`) {
+		t.Errorf("frame with a leading empty data line lost or duplicated its delta:\n%s", out)
+	}
+	if !strings.Contains(out, `"stop_reason":"end_turn"`) {
+		t.Errorf("subsequent frame lost after the empty-line frame:\n%s", out)
+	}
+}

@@ -44,6 +44,24 @@ func TestAcceptParsesCommentsAndBlankLines(t *testing.T) {
 	}
 }
 
+// TestAcceptDuplicateTokenLines pins that a token listed twice in the file
+// still authenticates: the match bits are OR-accumulated across the whole set
+// (constant-time), so duplicate lines must be harmless, not count twice.
+func TestAcceptDuplicateTokenLines(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTokenFile(t, dir, "keys", "sk-dup\nsk-dup\nsk-other\n")
+	s := NewSource(path)
+	if !s.Accept("sk-dup") {
+		t.Fatal("a token appearing on two lines must still be accepted")
+	}
+	if !s.Accept("sk-other") {
+		t.Fatal("the other token must still be accepted")
+	}
+	if s.Accept("sk-unknown") {
+		t.Fatal("unknown token must be rejected")
+	}
+}
+
 func TestUnreadableFileFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	// A missing path and a directory path both fail os.ReadFile → the cached

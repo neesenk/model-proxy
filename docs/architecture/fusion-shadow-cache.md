@@ -107,7 +107,7 @@ Close-once 回调，日志 schema、入队与 replay 判断不进入 transport �
   shadow report 上限 10000 均只保留 metadata，调用方没有可忘记设置的开关。
 - detail/replay 才调用 `requestlog.QueryRecords` 保留完整 body。
 
-扫描全部 `requests-*.log`（不假设文件名顺序等于 record timestamp 严格顺序，孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。
+扫描 `requests-*.log` 时不假设文件名顺序等于 record timestamp 严格顺序（孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。查询带**文件级提前终止**：单 writer 向同一文件按 Ts 非降序追加，因此文件最后一条可采纳记录是全文件上界——top-K 堆满后，最新记录仍严格老于堆底的文件不可能改变结果，直接跳过不流式读取；最新记录老于 From 下界（含边界，matches 只丢严格小于 From 的记录）的文件同理无命中。该顺序前提**逐文件验证而非假设**：每个文件独立 peek 首条（头部 128KiB）与末条（尾部 128KiB）记录，首条晚于末条（手工构造/损坏文件）或任何异常（打不开、行超长、JSON 解析失败）都回退为完整流式扫描；跨文件乱序仍被容忍。
 
 JSONL schema、writer/rotation/retention、查询 heap、Summary 与 Shadow 聚合由
 `internal/observe/requestlog` 拥有；`internal/app/request_log_adapter.go` 只完成 config

@@ -70,6 +70,13 @@ func Backup(file, bakDir, name string) error {
 	}
 	bak := filepath.Join(bakDir, name+".bak")
 	if _, err := os.Stat(bak); err != nil {
+		// Only "backup does not exist" enters the create path. Any other
+		// Stat error (permissions, I/O, invalid path) must fail closed —
+		// treating it as "no backup" would overwrite an existing backup
+		// with the post-takeover file and lose the user's original config.
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("stat backup %s: %w", bak, err)
+		}
 		data, err := os.ReadFile(file)
 		if err != nil {
 			return err
@@ -103,6 +110,11 @@ func Backup(file, bakDir, name string) error {
 // lost) must stay restorable.
 // The restored file is written atomically — a crash mid-restore must not
 // destroy the last copy of the user's config.
+// A successful restore ends the takeover: the .bak marker and its .meta are
+// removed, so the drift check (which treats .bak existence as the taken-over
+// marker) reports the client as not taken over, and a later takeover takes a
+// fresh backup instead of keeping a stale one. Marker removal failures are
+// non-fatal — the config is already restored — and only warned about.
 func Restore(file, bakDir, name string) error {
 	bak := filepath.Join(bakDir, name+".bak")
 	data, err := os.ReadFile(bak)
@@ -115,7 +127,15 @@ func Restore(file, bakDir, name string) error {
 	if err := verifyBackupIntegrity(bak, data); err != nil {
 		return err
 	}
-	return atomicWriteFile(file, data, preserveMode(file, 0o600))
+	if err := atomicWriteFile(file, data, preserveMode(file, 0o600)); err != nil {
+		return err
+	}
+	for _, marker := range []string{bak, bak + ".meta"} {
+		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+			logx.Warnf("takeover: restore %s: could not remove backup marker %s: %v", name, marker, err)
+		}
+	}
+	return nil
 }
 
 // preserveMode returns the existing file's permission bits, or fallback when
@@ -213,7 +233,7 @@ func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFact
 }
 
 // EmitTakeoverWarnings prints a stderr warning for each default-sourced model
-// that a metadata-writing client (opencode, pi) in this takeover set will emit.
+// that a metadata-writing client (opencode, pi, kimi) in this takeover set will emit.
 // claude/codex don't write per-model metadata, so they are skipped to avoid noise.
 func EmitTakeoverWarnings(clients []ClientSpec, cfg *configdomain.Config, meta map[string]map[string]catalog.Model, facts ModelFacts) {
 	if !WritesMetadata(clients) || facts.SourceDefault < 0 {
@@ -280,10 +300,11 @@ func ListClients(cfg *configdomain.Config, which string) []ClientSpec {
 }
 
 // WritesMetadata reports whether any client in the set writes per-model
-// metadata (opencode, pi). Used to skip the models.dev fetch for claude/codex.
+// metadata (opencode, pi, kimi). Used to skip the models.dev fetch for
+// claude/codex.
 func WritesMetadata(clients []ClientSpec) bool {
 	for _, c := range clients {
-		if c.Name == "opencode" || c.Name == "pi" {
+		if c.Name == "opencode" || c.Name == "pi" || c.Name == "kimi" {
 			return true
 		}
 	}

@@ -310,7 +310,7 @@ add <preset> [--config PATH] [--label NAME] [--replace]
 逻辑（`internal/cli/presets/presets.go`）：
 
 - 目录**派生自内置注释模板**（`configdomain.DefaultConfigYAML`），过滤到已注册实现的 provider_id；`aqp` 因内网 SSO 端点不进公共目录。模板即权威，无第二份 endpoint/模型知识。
-- `add`：① 把模板的 `providers.<preset>` 块经 `configedit` 合并进用户 config.yaml（保结构/注释；块已存在则跳过合并，幂等）；② 合并后先 `LoadConfigFromBytes` 校验再原子写回（fail-closed）；③ 歧义门——preset 模型同时出现在其他已配置 provider 且无显式 `routes:` 条目时，非 TTY 拒绝 exit 1（提示 `--yes`），TTY 询问 y/N；④ 复用 `login.RunProviderLogin` 登录；⑤ `MaybeReloadDaemon` 热重载；⑥ 打印 `model-proxy test <首个模型>` 下一步。
+- `add`：① 干跑合并——经 `configedit` 算出"模板 `providers.<preset>` 块并入用户 config 后"的结果（`PreviewMergeBlock`，与 `MergeBlock` 同一合并逻辑）并 `LoadConfigFromBytes` 校验，**不落盘**；② 歧义门——对合并后配置计算：preset 模型同时出现在其他已配置 provider 且无显式 `routes:` 条目时，非 TTY 拒绝 exit 1（提示 `--yes`），TTY 询问 y/N；拒绝时 config.yaml 字节不变（无凭据的 provider 块绝不能进入下一次 reload）；③ 门通过才经 `MergeBlock` 原子写回（保结构/注释/文件权限；块已存在则跳过，幂等）；④ 复用 `login.RunProviderLogin` 登录；⑤ `MaybeReloadDaemon` 热重载；⑥ 打印 `model-proxy test <首个模型>` 下一步。
 - `--api-key-env ENV`：从环境变量读 API key（脚本化，不落 stdin 历史）。变量为空 -> stderr 报错 exit 1。
 - 未知 preset -> stderr 列出全部可用 preset + exit 1。config.yaml 不存在 -> 提示 `config init` + exit 1。
 

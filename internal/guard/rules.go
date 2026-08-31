@@ -60,12 +60,24 @@ type rule struct {
 	// when re has one, the whole match otherwise. Lower-entropy hits are
 	// discarded as false positives.
 	entropy *float64
+	// group reports whether re has at least one capture group. Gitleaks
+	// imports capture the secret in group 1 and leave a trailing context
+	// byte (quote/whitespace/;) in a non-captured group of the full match;
+	// the claimed span must then be the GROUP span — redacting the full
+	// match would eat the delimiter and corrupt enclosing JSON (a string
+	// losing its closing quote no longer parses, which also downgrades
+	// downstream ScanPathsContext strong hits to weak). Rules without a
+	// capture group keep claiming the full match: their regex IS the secret
+	// shape. Recorded at load so the hot path pays FindSubmatchIndex only
+	// for rules that need group coordinates.
+	group bool
 }
 
-// findIn returns the spans of every re match in body that passes the entropy
-// post-filter.
+// findIn returns the claim spans of every re match in body that passes the
+// entropy post-filter — the group-1 span for rules with a capture group (see
+// the group field), the full match otherwise.
 func (r rule) findIn(body []byte) [][2]int {
-	if r.entropy == nil {
+	if !r.group && r.entropy == nil {
 		locs := r.re.FindAllIndex(body, -1)
 		out := make([][2]int, 0, len(locs))
 		for _, loc := range locs {
@@ -76,56 +88,58 @@ func (r rule) findIn(body []byte) [][2]int {
 	var out [][2]int
 	for _, loc := range r.re.FindAllSubmatchIndex(body, -1) {
 		gs, ge := loc[0], loc[1]
-		if len(loc) >= 4 && loc[2] >= 0 {
+		if r.group && len(loc) >= 4 && loc[2] >= 0 {
 			gs, ge = loc[2], loc[3]
 		}
-		if shannon(body[gs:ge]) >= *r.entropy {
-			out = append(out, [2]int{loc[0], loc[1]})
+		if r.entropy == nil || shannon(body[gs:ge]) >= *r.entropy {
+			out = append(out, [2]int{gs, ge})
 		}
 	}
 	return out
 }
 
-// findEach streams the spans of every re match in body that passes the
+// findEach streams the claim spans of every re match in body that passes the
 // entropy post-filter to fn, without materializing the match list — scan
 // bodies can be adversarially large and FindAllIndex would allocate the full
 // span set up front. fn returning false stops iteration. Rescanning from each
 // previous match end keeps the total scan linear (same advancement rule as
 // FindAllIndex, one byte on empty matches).
+//
+// The claim span is the group-1 span when re has a capture group (the
+// gitleaks trailing-context delimiter belongs to the match but not to the
+// secret — claiming it would make Redact eat a closing quote/semicolon and
+// corrupt enclosing JSON), the full match otherwise. Iteration still advances
+// past the FULL match end, so the trailing context cannot start a second
+// overlapping claim.
 func (r rule) findEach(body []byte, fn func(start, end int) bool) {
 	for pos := 0; pos <= len(body); {
-		if r.entropy == nil {
+		// ms/me: full match span (drives advancement); gs/ge: claim span.
+		var ms, me, gs, ge int
+		if r.group {
+			loc := r.re.FindSubmatchIndex(body[pos:])
+			if loc == nil {
+				return
+			}
+			ms, me, gs, ge = loc[0], loc[1], loc[0], loc[1]
+			if len(loc) >= 4 && loc[2] >= 0 {
+				gs, ge = loc[2], loc[3]
+			}
+		} else {
 			loc := r.re.FindIndex(body[pos:])
 			if loc == nil {
 				return
 			}
-			if !fn(pos+loc[0], pos+loc[1]) {
-				return
-			}
-			if next := pos + loc[1]; next > pos+loc[0] {
-				pos = next
-			} else {
-				pos = pos + loc[0] + 1
-			}
-			continue
+			ms, me, gs, ge = loc[0], loc[1], loc[0], loc[1]
 		}
-		loc := r.re.FindSubmatchIndex(body[pos:])
-		if loc == nil {
-			return
-		}
-		gs, ge := loc[0], loc[1]
-		if len(loc) >= 4 && loc[2] >= 0 {
-			gs, ge = loc[2], loc[3]
-		}
-		if shannon(body[pos+gs:pos+ge]) >= *r.entropy {
-			if !fn(pos+loc[0], pos+loc[1]) {
+		if r.entropy == nil || shannon(body[pos+gs:pos+ge]) >= *r.entropy {
+			if !fn(pos+gs, pos+ge) {
 				return
 			}
 		}
-		if next := pos + loc[1]; next > pos+loc[0] {
+		if next := pos + me; next > pos+ms {
 			pos = next
 		} else {
-			pos = pos + loc[0] + 1
+			pos = pos + ms + 1
 		}
 	}
 }
@@ -156,7 +170,7 @@ func mustLoadRules() []rule {
 		if len(e.Literals) == 0 {
 			panic(fmt.Sprintf("guard: rule %q has no prefilter literals", e.Name))
 		}
-		r := rule{name: e.Name, re: re, entropy: e.Entropy}
+		r := rule{name: e.Name, re: re, entropy: e.Entropy, group: re.NumSubexp() > 0}
 		for _, lit := range e.Literals {
 			if lit == "" {
 				panic(fmt.Sprintf("guard: rule %q has an empty literal", e.Name))

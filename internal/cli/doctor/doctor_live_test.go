@@ -4,6 +4,7 @@ import (
 	"fmt"
 	clidoctor "model-proxy/internal/cli/doctor"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/takeover"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -302,7 +303,8 @@ func TestDoctorLiveFlag(t *testing.T) {
 
 // TestCheckTakeoverDrift: the three takeover states — not taken over (no .bak),
 // ok (pointer matches what takeover would write today), drift (mismatch or
-// missing file). opencode's expected pointer carries the /v1 suffix.
+// missing file). opencode's expected pointer carries the /v1 suffix; kimi's
+// pointer is the base_url inside its [providers."<id>"] TOML section.
 func TestCheckTakeoverDrift(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", t.TempDir()) // isolate any pool-file reads
@@ -313,6 +315,7 @@ takeover:
   opencode: `+filepath.Join(home, "opencode.json")+`
   codex: `+filepath.Join(home, "config.toml")+`
   pi: `+filepath.Join(home, "models.json")+`
+  kimi: `+filepath.Join(home, "kimi.toml")+`
 providers:
   aqp: {provider_id: aqp, openai_base_url: https://x}
 `))
@@ -326,9 +329,14 @@ providers:
 	// opencode: taken over, but the config now points at a stale port (drift).
 	os.WriteFile(cfg.Takeover.Opencode, []byte(`{"provider":{"model-proxy":{"options":{"baseURL":"http://127.0.0.1:9999/v1"}}}}`), 0o600)
 	// codex: never taken over (no .bak, no file).
-	// kimi: never taken over either — same expectation as codex.
+	// kimi: taken over, provider base_url matches what RewriteKimi writes.
+	os.WriteFile(cfg.Takeover.Kimi, []byte(`[providers."model-proxy"]
+type = "openai_legacy"
+base_url = "`+proxyURL+`/v1"
+api_key = "PROXY_MANAGED"
+`), 0o600)
 	// pi: taken over, but the config file vanished (client reinstall).
-	for _, name := range []string{"claude", "opencode", "pi"} {
+	for _, name := range []string{"claude", "opencode", "kimi", "pi"} {
 		if err := os.MkdirAll(bakDir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -355,11 +363,53 @@ providers:
 	if c := byClient["codex"]; c.Taken {
 		t.Errorf("codex = %+v, want not taken over", c)
 	}
-	if c := byClient["kimi"]; c.Taken {
-		t.Errorf("kimi = %+v, want not taken over", c)
+	if c := byClient["kimi"]; !c.Taken || !c.OK ||
+		c.Current != proxyURL+"/v1" || c.Expected != proxyURL+"/v1" {
+		t.Errorf("kimi = %+v, want taken+ok with current=expected=%s/v1", c, proxyURL)
 	}
 	if c := byClient["pi"]; !c.Taken || c.OK || c.Current != "(file missing)" {
 		t.Errorf("pi = %+v, want drift (file missing)", c)
+	}
+}
+
+// TestCheckTakeoverDrift_AfterRestore (M3): a deliberately restored client is
+// NOT taken over anymore — Restore removes the .bak marker, so the drift
+// check must not report the client as taken (let alone drifted) forever.
+func TestCheckTakeoverDrift_AfterRestore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", t.TempDir()) // isolate any pool-file reads
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:8314
+takeover:
+  claude: `+filepath.Join(home, "claude.json")+`
+providers:
+  aqp: {provider_id: aqp, openai_base_url: https://x}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	bakDir := filepath.Join(home, ".model-proxy")
+
+	// Takeover: back up the original, then rewrite the client file at the proxy.
+	if err := os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"ORIGINAL":"1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := takeover.Backup(cfg.Takeover.Claude, bakDir, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if err := takeover.RewriteClaude(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if d := clidoctor.CheckTakeoverDrift(cfg, bakDir)[0]; !d.Taken || !d.OK {
+		t.Fatalf("after takeover: %+v, want taken+ok", d)
+	}
+
+	// Restore: content comes back and the client is no longer "taken over".
+	if err := takeover.Restore(cfg.Takeover.Claude, bakDir, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	d := clidoctor.CheckTakeoverDrift(cfg, bakDir)[0]
+	if d.Taken {
+		t.Errorf("after restore: %+v, want not taken over (no drift)", d)
 	}
 }
 
@@ -398,6 +448,60 @@ wire_api = "responses"
 	}
 
 	if cur, _ := clidoctor.CodexPointer(filepath.Join(dir, "nope.toml"), "model-proxy", proxyURL); cur != "(file missing)" {
+		t.Errorf("missing file: current=%q", cur)
+	}
+}
+
+// TestKimiPointer: the kimi drift check — the pointer is the base_url inside
+// the [providers."<pid>"] TOML section RewriteKimi writes, expected to equal
+// the versioned proxy endpoint (proxyURL + /v1). Before this case existed,
+// TakeoverPointer fell through to "(unknown client)" and every successful
+// kimi takeover reported drift forever.
+func TestKimiPointer(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "config.toml")
+	proxyURL := "http://127.0.0.1:8314"
+
+	// Produce the file with the real rewrite, not a hand-written copy.
+	cfg, err := configdomain.LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:8314
+takeover:
+  proxy_url: `+proxyURL+`
+  kimi: `+file+`
+providers:
+  aqp: {provider_id: aqp, openai_base_url: https://x, models: [glm-5.2]}
+routes:
+  glm-5.2:
+    - {provider: aqp, model: glm-5.2, priority: 1}
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := os.WriteFile(file, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// After a kimi takeover rewrite: current is the written base_url and
+	// equals the expected versioned endpoint → no drift.
+	cur, exp := clidoctor.TakeoverPointer("kimi", file, "model-proxy", proxyURL)
+	if exp != proxyURL+"/v1" {
+		t.Errorf("expected=%q, want %s/v1", exp, proxyURL)
+	}
+	if cur != exp {
+		t.Errorf("after rewrite: current=%q expected=%q, want equal (no drift)", cur, exp)
+	}
+
+	// Point the provider elsewhere → drift.
+	data, _ := os.ReadFile(file)
+	os.WriteFile(file, []byte(strings.Replace(string(data), `base_url = "`+proxyURL+`/v1"`, `base_url = "http://127.0.0.1:9999/v1"`, 1)), 0o600)
+	if cur, exp := clidoctor.TakeoverPointer("kimi", file, "model-proxy", proxyURL); cur == exp {
+		t.Errorf("stale base_url must drift: current=%q expected=%q", cur, exp)
+	}
+
+	// Missing file → placeholder current, which can never equal expected.
+	if cur, _ := clidoctor.KimiPointer(filepath.Join(dir, "nope.toml"), "model-proxy", proxyURL); cur != "(file missing)" {
 		t.Errorf("missing file: current=%q", cur)
 	}
 }

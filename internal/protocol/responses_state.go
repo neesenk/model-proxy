@@ -440,41 +440,68 @@ func (s *responsesStateStore) recordSSE(session string, requestHistory []any, bo
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
 	pending := ""
+	pendData := ""    // folded data lines of the SSE frame in progress
+	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
 	var doneItems []any
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if strings.HasPrefix(line, "event:") {
-			pending = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
+	// handleFrame processes one assembled frame; it returns true once a
+	// terminal response frame has been recorded.
+	handleFrame := func(event, payload string) bool {
 		var data map[string]any
-		if sonic.UnmarshalString(strings.TrimSpace(strings.TrimPrefix(line, "data:")), &data) != nil {
-			continue
+		if sonic.UnmarshalString(payload, &data) != nil {
+			return false
 		}
-		event := pending
 		if event == "" {
 			event = strOpt(data["type"])
 		}
-		pending = ""
 		if event == "response.output_item.done" {
 			if item := asMap(data["item"]); item != nil {
 				doneItems = append(doneItems, item)
 			}
-			continue
+			return false
 		}
 		if event == "response.completed" || event == "response.incomplete" {
 			resp := asMap(data["response"])
 			if resp == nil {
-				continue
+				return false
 			}
 			if _, ok := resp["output"].([]any); !ok && len(doneItems) > 0 {
 				resp["output"] = doneItems
 			}
 			return s.recordResponse(session, requestHistory, resp)
 		}
+		return false
+	}
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "data:") {
+			// Fold consecutive data: lines with "\n" per the SSE spec — a
+			// spec-folded multi-line frame only parses once assembled.
+			pendData = appendSSEData(pendData, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendOpen = true
+			continue
+		}
+		// Classify the frame-terminating line first — it may open the NEXT
+		// frame's event type; the closing frame keeps its own.
+		frameEvent := pending
+		if line == "" {
+			pending = ""
+		} else if strings.HasPrefix(line, "event:") {
+			pending = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		}
+		if line != "" || !pendOpen {
+			// Only a blank line dispatches a frame (SSE spec); comment lines
+			// belong to the frame in progress.
+			continue
+		}
+		payload := pendData
+		pendData, pendOpen = "", false
+		if handleFrame(frameEvent, payload) {
+			return true
+		}
+	}
+	// A trailing frame without its final blank line still dispatches.
+	if pendOpen {
+		return handleFrame(pending, pendData)
 	}
 	return false
 }

@@ -1,7 +1,8 @@
 // Package seclog is the security audit log leaf package. It owns the audit
 // Record schema, JSONL persistence with owner-only permissions (files 0600,
 // directory 0700), size/day rotation, retention sweeps and offline top-K
-// queries. It is a pure leaf: standard library only, no model-proxy imports.
+// queries. Its only model-proxy import is the logx level-filtering leaf
+// (observe/logx); it depends on nothing else in the repo.
 //
 // Red line: Record.Names carries pattern-type or path-category names only.
 // Secret values never enter a Record — this package never inspects payloads,

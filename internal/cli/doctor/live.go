@@ -530,12 +530,16 @@ func driftHost(pointer string) string {
 
 // takeoverPointer reads one client's current proxy pointer and computes the
 // expected one, mirroring exactly what the client's rewrite in clients.go
-// writes (including opencode's /v1 suffix and pi's trimmed base). A missing
-// file, unreadable JSON, or absent key yields a descriptive placeholder as
-// current, which can never equal the expected URL — i.e. drift.
+// writes (including opencode's /v1 suffix, pi's trimmed base and kimi's
+// versioned base). A missing file, unreadable JSON, or absent key yields a
+// descriptive placeholder as current, which can never equal the expected
+// URL — i.e. drift.
 func TakeoverPointer(client, file, pid, proxyURL string) (current, expected string) {
-	if client == "codex" {
+	switch client {
+	case "codex":
 		return CodexPointer(file, pid, proxyURL)
+	case "kimi":
+		return KimiPointer(file, pid, proxyURL)
 	}
 	var path []string
 	switch client {
@@ -614,6 +618,37 @@ func CodexPointer(file, pid, proxyURL string) (current, expected string) {
 			return "model_provider (missing)", expected
 		}
 		return "model_provider = " + strconv.Quote(modelProvider), expected
+	}
+	if baseURL == "" {
+		return "(missing)", expected
+	}
+	return baseURL, expected
+}
+
+// KimiPointer is the kimi-cli variant of CodexPointer: drift when the
+// [providers."<pid>"] section's base_url no longer equals the versioned
+// proxy endpoint RewriteKimi writes (TrimRight(proxyURL,"/")+"/v1" — kimi-cli
+// appends /chat/completions itself). kimi-cli has no top-level provider
+// selector, so the provider section's base_url is the whole pointer. Text
+// scan only, matching the shape RewriteKimi writes.
+func KimiPointer(file, pid, proxyURL string) (current, expected string) {
+	expected = strings.TrimRight(proxyURL, "/") + "/v1"
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return "(file missing)", expected
+	}
+	baseURL := ""
+	inSection := false
+	for _, line := range strings.Split(string(data), "\n") {
+		l := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(l, "["):
+			inSection = l == `[providers."`+pid+`"]`
+		case inSection && strings.HasPrefix(l, "base_url"):
+			if i := strings.Index(l, "="); i >= 0 {
+				baseURL = strings.Trim(strings.TrimSpace(l[i+1:]), `"`)
+			}
+		}
 	}
 	if baseURL == "" {
 		return "(missing)", expected

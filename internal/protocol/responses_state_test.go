@@ -224,3 +224,39 @@ func TestResponsesState_RestoreComputesCachedSize(t *testing.T) {
 		t.Fatalf("restored cached size = %d, re-marshal = %d", e.size, got)
 	}
 }
+
+// TestResponsesState_RecordsFoldedSSEFrames: a spec-folded multi-line data
+// frame (payload split across data: lines) must parse once assembled —
+// line-by-line parsing fails JSON on every fragment and silently loses both
+// the response.output_item.done items and the terminal response.completed.
+func TestResponsesState_RecordsFoldedSSEFrames(t *testing.T) {
+	s := newResponsesStateStore("")
+	history := []any{map[string]any{"type": "message", "role": "user"}}
+	stream := "event: response.output_item.done\n" +
+		"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\n" +
+		"data: \"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"lookup\",\"arguments\":\"{}\"}}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\n" +
+		"data: \"status\":\"completed\"}}\n\n"
+	if !s.recordSSE("sess", history, []byte(stream)) {
+		t.Fatal("folded SSE stream was not recorded")
+	}
+	_, expanded, hit, err := s.expand([]byte(`{"model":"g","previous_response_id":"r1","input":"next"}`), "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hit {
+		t.Fatal("folded stream history not expanded")
+	}
+	// The completed frame carried no output array, so the recorded output must
+	// come from the folded response.output_item.done item.
+	found := false
+	for _, item := range expanded {
+		if strOpt(asMap(item)["call_id"]) == "c1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("folded output_item.done item lost from recorded history: %#v", expanded)
+	}
+}

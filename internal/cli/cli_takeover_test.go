@@ -189,6 +189,13 @@ func TestCLI_RestoreClaudeRoundTrip(t *testing.T) {
 	if !strings.Contains(string(data), "ORIGINAL") {
 		t.Errorf("restore did not bring back original:\n%s", data)
 	}
+	// Restore ends the takeover: the .bak marker is removed, so the drift
+	// check treats the client as not taken over and a future takeover takes
+	// a fresh backup. (backupDir = <configDir>/.model-proxy)
+	bakDir := filepath.Join(filepath.Dir(cfgPath), ".model-proxy")
+	if _, err := os.Stat(filepath.Join(bakDir, "claude.bak")); !os.IsNotExist(err) {
+		t.Errorf("restore left the takeover marker behind (stat err=%v)", err)
+	}
 }
 
 // --- takeover opencode: warns on default-sourced models ---
@@ -300,6 +307,53 @@ func securityLogFiles(t *testing.T, home string) []string {
 		}
 	}
 	return out
+}
+
+// TestCLI_TakeoverKimiNoDriftWarning: a kimi takeover writes a pointer
+// TakeoverPointer can read back — the post-write drift check must stay
+// silent (before the kimi case existed, every kimi takeover warned about
+// drift forever). Regression for the missing "kimi" drift case.
+func TestCLI_TakeoverKimiNoDriftWarning(t *testing.T) {
+	dir := t.TempDir()
+	kimiFile := filepath.Join(dir, "kimi.toml")
+	if err := os.WriteFile(kimiFile, []byte("[providers.\"existing\"]\ntype = \"kimi\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfgBody := fmt.Sprintf(`listen: 127.0.0.1:15721
+takeover:
+  proxy_url: http://127.0.0.1:15721
+  kimi: %s
+providers:
+  aqp:
+    openai_base_url: https://x
+    provider_id: aqp
+    models:
+      - glm-5.2
+routes:
+  glm-5.2:
+    - {provider: aqp, model: glm-5.2, priority: 1}
+`, kimiFile)
+	cfgPath := writeTempConfig(t, cfgBody)
+	home := t.TempDir()
+
+	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "kimi")
+	if code != 0 {
+		t.Fatalf("takeover kimi exit=%d want 0\n--- stderr ---\n%s", code, stderr)
+	}
+	if strings.Contains(stderr, "drift") {
+		t.Errorf("healthy kimi takeover must not warn about drift:\n%s", stderr)
+	}
+	if files := securityLogFiles(t, home); len(files) != 0 {
+		t.Errorf("no drift → no security audit log, got %v", files)
+	}
+	// The rewritten file carries the schema-correct quoted model block.
+	b, err := os.ReadFile(kimiFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `[models."glm-5.2"]`) || !strings.Contains(string(b), "max_context_size") {
+		t.Errorf("kimi config missing quoted model block with max_context_size:\n%s", b)
+	}
 }
 
 // TestCLI_TakeoverClaudeNoDriftWarning: a healthy takeover passes the

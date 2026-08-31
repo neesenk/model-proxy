@@ -102,19 +102,25 @@ func TestScanKnownFragment_TwoRequestSplit(t *testing.T) {
 	s := mustScanner(t, nil, []string{secret}, nil)
 	frag1, frag2 := secret[:20], secret[20:]
 
-	fired, progress := s.ScanKnownFragment([]byte(`{"content":"`+frag1+`"}`), nil)
+	fired, progress, reset := s.ScanKnownFragment([]byte(`{"content":"`+frag1+`"}`), nil)
 	if fired {
 		t.Fatal("first fragment must not fire")
 	}
 	if len(progress) != 1 || progress[0] != 20 {
 		t.Fatalf("progress after frag1 = %v, want [20]", progress)
 	}
-	fired, progress = s.ScanKnownFragment([]byte(`{"content":"`+frag2+`"}`), progress)
+	if reset != nil {
+		t.Errorf("no completion yet: reset = %v, want nil", reset)
+	}
+	fired, progress, reset = s.ScanKnownFragment([]byte(`{"content":"`+frag2+`"}`), progress)
 	if !fired {
 		t.Fatal("completing fragment must fire")
 	}
 	if progress[0] != 0 {
 		t.Errorf("progress after completion = %d, want reset to 0", progress[0])
+	}
+	if len(reset) != 1 || !reset[0] {
+		t.Errorf("reset after completion = %v, want [true]", reset)
 	}
 }
 
@@ -124,7 +130,7 @@ func TestScanKnownFragment_ThreeRequestSplit(t *testing.T) {
 	parts := []string{secret[:14], secret[14:28], secret[28:]}
 	var progress []int
 	for i, part := range parts {
-		fired, next := s.ScanKnownFragment([]byte("payload "+part), progress)
+		fired, next, _ := s.ScanKnownFragment([]byte("payload "+part), progress)
 		progress = next
 		if i < len(parts)-1 && fired {
 			t.Fatalf("fragment %d must not fire", i+1)
@@ -140,13 +146,36 @@ func TestScanKnownFragment_FullKeyResetsWithoutFiring(t *testing.T) {
 	s := mustScanner(t, nil, []string{secret}, nil)
 	// Seed progress from an earlier fragment, then send the whole key in one
 	// body: the per-request channel owns that signal; no fragmented fire.
-	_, progress := s.ScanKnownFragment([]byte(secret[:20]), nil)
-	fired, progress := s.ScanKnownFragment([]byte("token "+secret), progress)
+	_, progress, _ := s.ScanKnownFragment([]byte(secret[:20]), nil)
+	fired, progress, reset := s.ScanKnownFragment([]byte("token "+secret), progress)
 	if fired {
 		t.Error("a body containing the complete secret must not fire fragmented")
 	}
 	if progress[0] != 0 {
 		t.Errorf("progress after complete key = %d, want 0", progress[0])
+	}
+	if len(reset) != 1 || !reset[0] {
+		t.Errorf("reset after complete key = %v, want [true] (deliberate zeroing)", reset)
+	}
+}
+
+// Once a secret completed (and the caller honored the returned reset), a
+// later body carrying only a suffix fragment must NOT fire again — the
+// completion is a terminal state, not a rolling one.
+func TestScanKnownFragment_SuffixAfterCompletionDoesNotRefire(t *testing.T) {
+	secret := syntheticSecret("poolkey-", 32)
+	s := mustScanner(t, nil, []string{secret}, nil)
+	_, progress, _ := s.ScanKnownFragment([]byte(secret[:20]), nil)
+	fired, progress, _ := s.ScanKnownFragment([]byte(secret[20:]), progress)
+	if !fired {
+		t.Fatal("completing fragment must fire")
+	}
+	fired, progress, _ = s.ScanKnownFragment([]byte("replay "+secret[20:]), progress)
+	if fired {
+		t.Error("suffix fragment after an honored completion reset must not re-fire")
+	}
+	if progress[0] != 0 {
+		t.Errorf("suffix fragment after completion advanced progress to %d, want 0", progress[0])
 	}
 }
 
@@ -155,12 +184,12 @@ func TestScanKnownFragment_OutOfOrderNeverCompletes(t *testing.T) {
 	s := mustScanner(t, nil, []string{secret}, nil)
 	frag1, frag2 := secret[:20], secret[20:]
 	// Suffix first: not a prefix, no progress.
-	_, progress := s.ScanKnownFragment([]byte(frag2), nil)
+	_, progress, _ := s.ScanKnownFragment([]byte(frag2), nil)
 	if progress[0] != 0 {
 		t.Fatalf("suffix first: progress = %d, want 0", progress[0])
 	}
 	// Then the prefix: progress advances but the suffix is gone — no fire.
-	fired, _ := s.ScanKnownFragment([]byte(frag1), progress)
+	fired, _, _ := s.ScanKnownFragment([]byte(frag1), progress)
 	if fired {
 		t.Error("out-of-order fragments must not fire")
 	}
@@ -170,13 +199,13 @@ func TestScanKnownFragment_ShortFragmentsNotCredited(t *testing.T) {
 	secret := syntheticSecret("poolkey-", 32)
 	s := mustScanner(t, nil, []string{secret}, nil)
 	// A 6-byte first fragment is below minKnownFrag: no progress.
-	_, progress := s.ScanKnownFragment([]byte(secret[:6]), nil)
+	_, progress, _ := s.ScanKnownFragment([]byte(secret[:6]), nil)
 	if progress[0] != 0 {
 		t.Errorf("sub-minKnownFrag fragment credited: progress = %d", progress[0])
 	}
 	// A 6-byte completing fragment is below minKnownFrag: no completion.
-	_, progress = s.ScanKnownFragment([]byte(secret[:34]), nil)
-	fired, _ := s.ScanKnownFragment([]byte(secret[34:]), progress)
+	_, progress, _ = s.ScanKnownFragment([]byte(secret[:34]), nil)
+	fired, _, _ := s.ScanKnownFragment([]byte(secret[34:]), progress)
 	if fired {
 		t.Error("completing fragment below minKnownFrag must not fire")
 	}
@@ -184,7 +213,7 @@ func TestScanKnownFragment_ShortFragmentsNotCredited(t *testing.T) {
 
 func TestScanKnownFragment_NoSecrets(t *testing.T) {
 	s := mustScanner(t, nil, nil, nil)
-	fired, next := s.ScanKnownFragment([]byte("anything"), nil)
+	fired, next, _ := s.ScanKnownFragment([]byte("anything"), nil)
 	if fired || next != nil {
 		t.Errorf("secretless scanner = (%v, %v), want (false, nil)", fired, next)
 	}

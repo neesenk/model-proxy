@@ -140,6 +140,37 @@ func TestEncodedChannelPerProbeSpanDedup(t *testing.T) {
 	}
 }
 
+// The encoded channel claims through the same capped path as every other
+// source: with the claimed-match table one short of maxMatchesPerScan, the
+// FIRST encoded hit still lands (filling the table) and the SECOND is
+// dropped — a direct append would push the table past the bound the
+// constant promises.
+func TestEncodedChannelClaimsRespectMatchCap(t *testing.T) {
+	secret := strings.Repeat("a", minSecretLen)
+	s := mustScanner(t, nil, []string{secret}, nil)
+	mk := func(seed uint64) string {
+		gl := "glpat-" + newFixtureRNG(seed).chars(20, alphaWord)
+		return base64.StdEncoding.EncodeToString([]byte("token: " + gl))
+	}
+	// cap-1 disjoint plaintext known-secret claims, then two encoded blobs.
+	body := []byte(strings.Repeat(secret+" ", maxMatchesPerScan-1) + mk(0xB10B1) + " " + mk(0xB10B2))
+
+	found, _ := s.findAllCounted(body)
+	if len(found) != maxMatchesPerScan {
+		t.Fatalf("claimed matches = %d, want exactly the cap %d (encoded channel must not exceed it)",
+			len(found), maxMatchesPerScan)
+	}
+	encoded := 0
+	for _, m := range found {
+		if m.name == "gitlab_pat" {
+			encoded++
+		}
+	}
+	if encoded != 1 {
+		t.Fatalf("encoded-channel claims at the cap boundary = %d, want 1 (first lands, second capped)", encoded)
+	}
+}
+
 // Linear claiming: a body repeating one secret shape tens of thousands of
 // times used to cost quadratic overlap checks (each hit scanned the whole
 // claimed list). With the interval set every occurrence is still claimed and

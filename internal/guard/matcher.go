@@ -2,12 +2,12 @@ package guard
 
 // matcher.go: the phase-1 literal prefilter. All prefilter literals of a
 // Scanner (rule literals, encoded-channel probe variants, known-secret
-// variants) are compiled into one Aho-Corasick automaton, so a clean body
-// costs a single pass over the input instead of one bytes.Contains per
-// literal — the automaton is a pure internal detail of the package (same
-// prefilter semantics as bytes.Contains on every literal: identical hit
-// sets). Construction happens once per Scanner build (reload), never on the
-// request path.
+// variants, sensitive-path literals) are compiled into one Aho-Corasick
+// automaton, so a clean body costs a single pass over the input instead of
+// one bytes.Contains per literal — the automaton is a pure internal detail
+// of the package (same prefilter semantics as bytes.Contains on every
+// literal: identical hit sets). Construction happens once per Scanner build
+// (reload), never on the request path.
 
 // acEdge is one trie transition.
 type acEdge struct {

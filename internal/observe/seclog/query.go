@@ -47,6 +47,22 @@ type Result struct {
 // trailing newline that ends at a clean EOF is a torn tail — the daemon is
 // mid-write into the active file — and is ignored silently instead of being
 // counted as unreadable.
+//
+// Early termination (file granularity): a single writer appends records to
+// one file in non-decreasing Ts order, so a file's last complete record
+// bounds everything in it. Once the top-K heap is full, a record strictly
+// older than the heap floor is pushed and immediately evicted — a no-op — so
+// a file whose newest record is older than the floor cannot change the
+// result and is skipped without streaming; likewise a file whose newest
+// record is older than the From bound holds no match. The ordering premise
+// is VERIFIED per file, not assumed: both the first and the last complete
+// record are peeked, and any anomaly — unopenable file, oversized record,
+// unparseable JSON, or firstTs > lastTs (hand-built or corrupted file) —
+// falls back to streaming the file as before. A skipped file's corrupt lines
+// are NOT counted in Skipped (the file was provably irrelevant); files that
+// cannot even be opened still count, because the peek falls back to the
+// streaming path on any anomaly. Cross-file disorder stays tolerated: every
+// file is peeked independently.
 func Query(dir string, filter Filter) (*Result, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -69,7 +85,23 @@ func Query(dir string, filter Filter) (*Result, error) {
 		newest = &timestampMinHeap{}
 	}
 	for i := len(names) - 1; i >= 0; i-- {
-		file, err := os.Open(filepath.Join(dir, names[i]))
+		path := filepath.Join(dir, names[i])
+		lastTs, lastOK := peekLastCompleteTs(path)
+		firstTs, firstOK := peekFirstCompleteTs(path)
+		if lastOK && firstOK && firstTs <= lastTs {
+			// Ordering verified: the file's NEWEST complete record bounds
+			// everything in it. A full heap makes every strictly-older
+			// record a push-then-evict no-op, and From is an inclusive lower
+			// bound (matches drops only Ts < From) — either way the whole
+			// file is provably irrelevant once that record qualifies.
+			if newest != nil && newest.Len() >= filter.Limit && lastTs < (*newest)[0].Ts {
+				continue
+			}
+			if filter.From != 0 && lastTs < filter.From {
+				continue
+			}
+		}
+		file, err := os.Open(path)
 		if err != nil {
 			// An unreadable rotated file (e.g. damaged permissions) must
 			// surface in Skipped, not vanish silently.
@@ -109,6 +141,110 @@ func Query(dir string, filter Filter) (*Result, error) {
 	}
 	sort.SliceStable(result.Records, func(i, j int) bool { return result.Records[i].Ts > result.Records[j].Ts })
 	return result, nil
+}
+
+// peekLastCompleteTs reads only the trailing chunk of the JSONL file at path
+// and returns the Ts of the last COMPLETE (newline-terminated) record — a
+// torn tail is not a record yet and must not bound the file. ok=false on any
+// anomaly — unreadable or empty file, a final record longer than the peek
+// chunk, unparseable JSON — in which case the caller must stream the file as
+// before.
+func peekLastCompleteTs(path string) (int64, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || info.Size() == 0 {
+		return 0, false
+	}
+	const chunk = 64 << 10
+	size := info.Size()
+	offset := int64(0)
+	if size > chunk {
+		offset = size - chunk
+	}
+	buf := make([]byte, size-offset)
+	if _, err := file.ReadAt(buf, offset); err != nil {
+		return 0, false
+	}
+	// Walk back over complete lines (anything after the last '\n' is a torn
+	// tail) until a non-empty one parses.
+	end := bytes.LastIndexByte(buf, '\n')
+	if end < 0 {
+		return 0, false
+	}
+	line := buf[:end]
+	for {
+		start := bytes.LastIndexByte(line, '\n')
+		candidate := line[start+1:]
+		if len(bytes.TrimSpace(candidate)) > 0 {
+			if start < 0 && offset > 0 {
+				// The record begins before the chunk: do not trust it as a
+				// bound.
+				return 0, false
+			}
+			var record struct {
+				Ts int64 `json:"ts"`
+			}
+			if json.Unmarshal(candidate, &record) != nil {
+				return 0, false
+			}
+			return record.Ts, true
+		}
+		if start < 0 {
+			return 0, false
+		}
+		line = line[:start]
+	}
+}
+
+// peekFirstCompleteTs reads only the leading chunk of the JSONL file at path
+// and returns the Ts of the FIRST complete (newline-terminated) record.
+// Together with peekLastCompleteTs it verifies the single-writer append-order
+// premise the file-level early termination relies on: firstTs > lastTs means
+// a hand-built or corrupted file, and the caller must stream it. ok=false on
+// any anomaly — unreadable or empty file, a first record longer than the
+// peek chunk (or still unterminated — e.g. the daemon is mid-write into a
+// fresh active file), unparseable JSON — in which case the caller must
+// stream the file as before.
+func peekFirstCompleteTs(path string) (int64, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || info.Size() == 0 {
+		return 0, false
+	}
+	const chunk = 64 << 10
+	size := info.Size()
+	if size > chunk {
+		size = chunk
+	}
+	buf := make([]byte, size)
+	if _, err := file.ReadAt(buf, 0); err != nil {
+		return 0, false
+	}
+	end := bytes.IndexByte(buf, '\n')
+	if end < 0 {
+		// No complete line within the chunk: the first record is longer
+		// than the chunk or still being written — unverifiable.
+		return 0, false
+	}
+	line := bytes.TrimSpace(buf[:end])
+	if len(line) == 0 {
+		return 0, false
+	}
+	var record struct {
+		Ts int64 `json:"ts"`
+	}
+	if json.Unmarshal(line, &record) != nil {
+		return 0, false
+	}
+	return record.Ts, true
 }
 
 type timestampMinHeap []*Record

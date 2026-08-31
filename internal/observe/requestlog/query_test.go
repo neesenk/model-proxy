@@ -313,3 +313,175 @@ func TestQueryRecordsMissingDirectoryReturnsError(t *testing.T) {
 		t.Errorf("error = %q, want missing path context", err)
 	}
 }
+
+// peekLastRecordTs bounds a file by its last admissible record; every anomaly
+// must report ok=false so the caller falls back to streaming.
+func TestPeekLastRecordTs(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	marshal := func(record Record) string {
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	// Newline-terminated file: the last line's Ts.
+	path := write("terminated.log", marshal(Record{Ts: "2026-07-18T10:00:00Z"})+"\n"+marshal(Record{Ts: "2026-07-18T10:01:00Z"})+"\n")
+	if ts, ok := peekLastRecordTs(path); !ok || ts != "2026-07-18T10:01:00Z" {
+		t.Errorf("terminated file = (%q, %v), want (2026-07-18T10:01:00Z, true)", ts, ok)
+	}
+	// An unterminated final line is still an admissible record for the
+	// streaming reader, so it bounds the file.
+	path = write("unterminated.log", marshal(Record{Ts: "2026-07-18T10:00:00Z"})+"\n"+marshal(Record{Ts: "2026-07-18T10:02:00Z"}))
+	if ts, ok := peekLastRecordTs(path); !ok || ts != "2026-07-18T10:02:00Z" {
+		t.Errorf("unterminated final line = (%q, %v), want (2026-07-18T10:02:00Z, true)", ts, ok)
+	}
+	// Anomalies → not ok: missing file, empty file, blank-only file, corrupt
+	// last line, and a final line longer than the peek chunk.
+	if _, ok := peekLastRecordTs(filepath.Join(dir, "missing.log")); ok {
+		t.Error("missing file must not peek ok")
+	}
+	if _, ok := peekLastRecordTs(write("empty.log", "")); ok {
+		t.Error("empty file must not peek ok")
+	}
+	if _, ok := peekLastRecordTs(write("blank.log", "\n\n")); ok {
+		t.Error("blank-only file must not peek ok")
+	}
+	if _, ok := peekLastRecordTs(write("corrupt.log", marshal(Record{Ts: "2026-07-18T10:00:00Z"})+"\n"+`{"ts":`+"\n")); ok {
+		t.Error("corrupt last line must not peek ok")
+	}
+	bigLine := marshal(Record{Ts: "2026-07-18T10:00:00Z", RequestBody: strings.Repeat("x", 200<<10)}) + "\n"
+	if _, ok := peekLastRecordTs(write("bigline.log", bigLine)); ok {
+		t.Error("final line longer than the peek chunk must not peek ok")
+	}
+}
+
+// Early termination must return exactly the top-K the full scan would,
+// whether the heap fills inside the newest file (older files skipped) or only
+// across several files (older files still streamed because the heap is not
+// full yet).
+func TestQueryRecordsEarlyTerminationEquivalentResults(t *testing.T) {
+	dir := t.TempDir()
+	timestamp := func(second int64) string {
+		return time.Unix(second, 0).UTC().Format(time.RFC3339)
+	}
+	write := func(name string, count, baseTimestamp int64) {
+		t.Helper()
+		var buffer bytes.Buffer
+		encoder := json.NewEncoder(&buffer)
+		for i := int64(0); i < count; i++ {
+			if err := encoder.Encode(Record{RequestID: name, Ts: timestamp(baseTimestamp + i)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), buffer.Bytes(), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("requests-20260701-000000.log", 50, 1000)
+	write("requests-20260702-000000.log", 50, 2000)
+	write("requests-20260703-000000.log", 200, 3000)
+
+	// Heap fills inside the newest file: both older files are skippable.
+	records, err := QueryRecords(dir, Filter{Limit: 150})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 150 {
+		t.Fatalf("records = %d, want 150", len(records))
+	}
+	if records[0].Ts != timestamp(3199) || records[len(records)-1].Ts != timestamp(3050) {
+		t.Errorf("top-150 span = %q..%q, want %q..%q",
+			records[len(records)-1].Ts, records[0].Ts, timestamp(3050), timestamp(3199))
+	}
+
+	// Heap does NOT fill within the newest file (200 < 250): the middle
+	// file's records still make the cut and must not be skipped away.
+	records, err = QueryRecords(dir, Filter{Limit: 250})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 250 {
+		t.Fatalf("records = %d, want 250", len(records))
+	}
+	if records[0].Ts != timestamp(3199) || records[len(records)-1].Ts != timestamp(2000) {
+		t.Errorf("top-250 span = %q..%q, want %q..%q",
+			records[len(records)-1].Ts, records[0].Ts, timestamp(2000), timestamp(3199))
+	}
+
+	// A From bound older than the two oldest files' newest records excludes
+	// them entirely.
+	from := time.Unix(2500, 0).UTC()
+	records, err = QueryRecords(dir, Filter{From: from, Limit: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 200 {
+		t.Fatalf("From query records = %d, want only the newest file's 200", len(records))
+	}
+	for _, record := range records {
+		if record.Ts < timestamp(3000) {
+			t.Errorf("From query returned %q, older than the bound", record.Ts)
+		}
+	}
+}
+
+// A peek anomaly (here: corrupt last line in an older file) must fall back to
+// streaming even when the heap is already full — a record newer than the heap
+// floor buried in that file (within-file disorder) must still make the top-K,
+// exactly as the full scan would return it.
+func TestQueryRecordsEarlyTerminationPeekFallback(t *testing.T) {
+	dir := t.TempDir()
+	marshal := func(record Record) string {
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	ts := func(second int64) string {
+		return time.Unix(second, 0).UTC().Format(time.RFC3339)
+	}
+	var newest bytes.Buffer
+	for i := 0; i < 30; i++ {
+		newest.WriteString(marshal(Record{RequestID: "new", Ts: ts(3000 + int64(i))}) + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260702-000000.log"), newest.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var older bytes.Buffer
+	for i := 0; i < 20; i++ {
+		older.WriteString(marshal(Record{RequestID: "old", Ts: ts(1000 + int64(i))}) + "\n")
+	}
+	// Newer than the heap floor but NOT the file's last record; a corrupt
+	// last line then breaks the peek, forcing the streaming fallback.
+	older.WriteString(marshal(Record{RequestID: "buried-new", Ts: ts(4000)}) + "\n")
+	older.WriteString(`{"ts":`)
+	if err := os.WriteFile(filepath.Join(dir, "requests-20260701-000000.log"), older.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	records, err := QueryRecords(dir, Filter{Limit: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 30 {
+		t.Fatalf("records = %d, want 30", len(records))
+	}
+	if records[0].RequestID != "buried-new" {
+		t.Errorf("top-1 = %+v, want the buried newer record from the peek-broken file", records[0])
+	}
+	for i, record := range records[1:] {
+		if record.RequestID != "new" {
+			t.Errorf("record %d = %q, want the 29 newest records of the newest file", i+1, record.RequestID)
+		}
+	}
+}

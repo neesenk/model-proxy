@@ -60,7 +60,11 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 		// a scanner we no longer trust; the warning makes the loss loud.
 		guardScanner, err = guard.NewScannerWithOptions(nil, secrets, cfg.Guard.ExtraPaths, guard.Options{Decode: cfg.Guard.DecodeEnabled()})
 		if err != nil {
-			logx.Warnf("[startup] guard fallback scanner failed: %v; outbound guard scanning is DISABLED for this process", err)
+			// Errorf, not Warnf: this announces a security control is OFF, so
+			// it must survive even log_level: error (level filtering, 063b2f9).
+			// The sibling warn above keeps a working fallback scanner, so it
+			// stays level-filtered.
+			logx.Errorf("[startup] guard fallback scanner failed: %v; outbound guard scanning is DISABLED for this process", err)
 			guardScanner = nil
 		}
 	}

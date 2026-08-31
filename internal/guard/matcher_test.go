@@ -99,6 +99,14 @@ func TestPrefilterCoversAllNeedles(t *testing.T) {
 			needles[len(needles)] = v
 		}
 	}
+	for _, p := range builtinPaths {
+		for _, lit := range p.literals {
+			needles[len(needles)] = lit
+		}
+	}
+	for _, lit := range s.extraPaths {
+		needles[len(needles)] = lit
+	}
 	// Concatenate with a non-token separator and require every needle to be
 	// found at least once.
 	parts := make([][]byte, 0, len(needles))

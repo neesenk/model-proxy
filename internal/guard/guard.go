@@ -9,9 +9,10 @@
 // (variable names, short ids, docs) does not match. It is a safety net for
 // obvious accidents, not a general DLP engine.
 //
-// Scan happens in two phases: a pure bytes.Contains literal prefilter (clean
-// bodies — the vast majority — run zero regexes and zero decodes), then a
-// precise pass limited to rules whose literals hit. The precise pass covers
+// Scan happens in two phases: a single Aho-Corasick pass over every prefilter
+// literal (clean bodies — the vast majority — run zero regexes and zero
+// decodes), then a precise pass limited to rules whose literals hit. The
+// precise pass covers
 // plaintext regex matches, exact known-secret values and their encoded
 // variants (base64/hex/url-escaped), an encoded-literal channel that decodes
 // bounded token spans and re-runs the owning rule, user custom patterns, and

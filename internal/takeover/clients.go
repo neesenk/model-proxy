@@ -238,6 +238,13 @@ requires_openai_auth = true
 }
 
 // SetTOMLTopKey sets a top-level bare key (placed before any [section]).
+// The match is whitespace-tolerant: a pre-existing `key="x"` line (no spaces
+// around `=`) is replaced in place just like `key = "x"` — matching only the
+// spaced prefix would insert a duplicate key, which TOML rejects with a
+// parse error (bricking the whole client config). The scan stays
+// line-oriented and conservative: only a line whose pre-`=` token is exactly
+// the key (optionally quoted, since TOML treats "key" and key alike)
+// qualifies; a `=` inside a value can never produce that shape.
 func SetTOMLTopKey(text, key, val string) string {
 	lines := strings.Split(text, "\n")
 	firstSection := -1
@@ -252,7 +259,16 @@ func SetTOMLTopKey(text, key, val string) string {
 		if firstSection >= 0 && i >= firstSection {
 			break
 		}
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), prefix) {
+		l := strings.TrimSpace(lines[i])
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		eq := strings.IndexByte(l, '=')
+		if eq < 0 {
+			continue
+		}
+		k := strings.Trim(strings.TrimSpace(l[:eq]), `"`)
+		if k == key {
 			lines[i] = prefix + val
 			return strings.Join(lines, "\n")
 		}
@@ -267,20 +283,33 @@ func SetTOMLTopKey(text, key, val string) string {
 }
 
 // ReplaceOrAppendTOMLSection replaces an existing [section] block, or appends a new one.
+// The header must match a whole (trimmed) line — a substring search would also
+// hit the header text embedded in a quoted value (e.g. `x = "[foo]"`) and
+// corrupt the file.
 func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 	header := "[" + sectionHeader + "]"
-	idx := strings.Index(text, header)
-	if idx >= 0 {
-		rest := text[idx+len(header):]
-		nextSec := strings.Index(rest, "\n[")
-		var end int
-		if nextSec >= 0 {
-			end = idx + len(header) + nextSec
-		} else {
-			end = len(text)
+	lines := strings.Split(text, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == header {
+			start = i
+			break
 		}
-		text = text[:idx] + strings.TrimSpace(section) + "\n" + text[end:]
-		return text
+	}
+	if start >= 0 {
+		// The old section body runs until the next header line (or EOF).
+		end := len(lines)
+		for i := start + 1; i < len(lines); i++ {
+			if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
+				end = i
+				break
+			}
+		}
+		out := make([]string, 0, len(lines))
+		out = append(out, lines[:start]...)
+		out = append(out, strings.Split(strings.TrimSpace(section), "\n")...)
+		out = append(out, lines[end:]...)
+		return strings.Join(out, "\n")
 	}
 	if len(text) > 0 && !strings.HasSuffix(text, "\n") {
 		text += "\n"
@@ -289,15 +318,52 @@ func ReplaceOrAppendTOMLSection(text, sectionHeader, section string) string {
 	return text
 }
 
+// removeTOMLSection drops an entire [section] block (header + body up to the
+// next header line or EOF). No-op when the header is absent.
+func removeTOMLSection(text, sectionHeader string) string {
+	header := "[" + sectionHeader + "]"
+	lines := strings.Split(text, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == header {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return text
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "[") {
+			end = i
+			break
+		}
+	}
+	out := make([]string, 0, len(lines))
+	out = append(out, lines[:start]...)
+	out = append(out, lines[end:]...)
+	return strings.Join(out, "\n")
+}
+
 // readFile is a tiny local I/O helper kept here so the package has no
 // application dependency.
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
-// RewriteKimi: ~/.kimi/config.toml (Kimi Code CLI, MoonshotAI/kimi-cli).
+// kimiFallbackContextSize is the max_context_size written when a model has no
+// catalog metadata. kimi-cli's LLMModel schema REQUIRES max_context_size (no
+// default — omitting it fails config validation), so the value mirrors the
+// conservative default the proxy uses everywhere else
+// (app.DefaultModelMetadata.Context = 200000; takeover cannot import app).
+const kimiFallbackContextSize = 200000
+
+// RewriteKimi: ~/.kimi/config.toml (Kimi Code CLI — the MoonshotAI/kimi-cli
+// client; "openai_legacy" below names kimi-cli's OpenAI Chat Completions
+// provider type, not a legacy client).
 // Text edit mirroring codex's TOML handling: inject a [providers."<id>"]
 // block (openai_legacy = OpenAI Chat Completions, which the proxy speaks
 // natively; api_key is a sentinel — the proxy holds the real credential) and
-// one [models.<exposed>] block per exposed model pointing at the provider.
+// one [models."<exposed>"] block per exposed model pointing at the provider.
 // Re-runs replace both the provider block and every model block in place.
 func RewriteKimi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) error {
 	file := cfg.Takeover.Kimi
@@ -320,8 +386,25 @@ api_key = "PROXY_MANAGED"
 	text = ReplaceOrAppendTOMLSection(text, fmt.Sprintf("providers.%q", pid), provSection)
 
 	for _, m := range ExposedModels(cfg, meta, implicit) {
-		modelSection := fmt.Sprintf("\n[models.%s]\nprovider = %q\n", m.Exposed, pid)
-		text = ReplaceOrAppendTOMLSection(text, "models."+m.Exposed, modelSection)
+		// kimi-cli's LLMModel schema requires provider, model (the wire model
+		// id — the exposed name the proxy routes) and max_context_size; the
+		// dotted exposed name must be quoted or TOML reads [models.glm-5.2]
+		// as nested tables (models → glm-5 → "2").
+		// Drop the unquoted block the old writer emitted, if still present:
+		// left behind it would parse as a nested table that fails kimi-cli's
+		// model validation (provider/model missing at that path).
+		text = removeTOMLSection(text, "models."+m.Exposed)
+		// max_context_size is REQUIRED by kimi-cli (no schema default —
+		// omitting it fails config validation), so an unknown context size
+		// falls back to the same conservative 200k the proxy uses elsewhere
+		// (app.DefaultModelMetadata.Context) rather than dropping the key.
+		ctx := m.PM.Context
+		if ctx <= 0 {
+			ctx = kimiFallbackContextSize
+		}
+		modelSection := fmt.Sprintf("\n[models.%q]\nprovider = %q\nmodel = %q\nmax_context_size = %d\n",
+			m.Exposed, pid, m.Exposed, ctx)
+		text = ReplaceOrAppendTOMLSection(text, fmt.Sprintf("models.%q", m.Exposed), modelSection)
 	}
 
 	return atomicWriteFile(file, []byte(text), preserveMode(file, 0o600))

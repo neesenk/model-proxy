@@ -477,3 +477,55 @@ func TestResponsesToChatFileIDWithURLPrefersURL(t *testing.T) {
 		t.Fatalf("file_id+file_url note = %q, want the URL without a file_id remark", text)
 	}
 }
+
+// chat→r: file_id alongside file_url/file_data — the inline/URL source is the
+// transportable form and survives on the cross-protocol input_file; only the
+// provider-scoped file_id is dropped, observably (r→chat/r→a prefer the
+// source the same way). A file-id-only attachment still degrades to the
+// observable text note, as before.
+func TestChatToResponsesFileIDWithSourceDropsID(t *testing.T) {
+	d := NewDiagnostics()
+	raw, err := convertOpenAIRequestToResponses([]byte(`{"model":"m","messages":[{"role":"user","content":[
+		{"type":"file","file":{"filename":"combo.pdf","file_id":"file_9","file_url":"https://example.test/combo.pdf"}},
+		{"type":"file","file":{"filename":"inline.pdf","file_id":"file_8","file_data":"data:application/pdf;base64,cGRm"}}
+	]}]}`), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := unmarshalMap(t, raw)
+	parts := anySlice(asMap(anySlice(body["input"])[0])["content"])
+	if len(parts) != 2 {
+		t.Fatalf("chat→r content parts = %#v, want 2", parts)
+	}
+	urlPart, dataPart := asMap(parts[0]), asMap(parts[1])
+	if urlPart["type"] != "input_file" || strOpt(urlPart["file_url"]) != "https://example.test/combo.pdf" {
+		t.Fatalf("file_id+file_url part = %#v, want input_file carrying the URL", urlPart)
+	}
+	if dataPart["type"] != "input_file" || strOpt(dataPart["file_data"]) != "data:application/pdf;base64,cGRm" {
+		t.Fatalf("file_id+file_data part = %#v, want input_file carrying the inline data", dataPart)
+	}
+	for _, part := range []map[string]any{urlPart, dataPart} {
+		if _, ok := part["file_id"]; ok {
+			t.Fatalf("provider-scoped file_id leaked across protocols: %#v", part)
+		}
+	}
+	if !d.HasCode("file_id_degraded") {
+		t.Fatalf("file_id drop not observable: diagnostics = %#v", d.Items())
+	}
+
+	d2 := NewDiagnostics()
+	raw2, err := convertOpenAIRequestToResponses([]byte(`{"model":"m","messages":[{"role":"user","content":[
+		{"type":"file","file":{"filename":"id.pdf","file_id":"file_1"}}
+	]}]}`), d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2 := unmarshalMap(t, raw2)
+	part2 := asMap(anySlice(asMap(anySlice(body2["input"])[0])["content"])[0])
+	if part2["type"] != "text" || !strings.Contains(strOf(part2["text"]), "file_1") {
+		t.Fatalf("file_id-only degrade note = %#v", part2)
+	}
+	if !d2.HasCode("file_id_degraded") {
+		t.Fatalf("file_id-only degrade not observable: diagnostics = %#v", d2.Items())
+	}
+}

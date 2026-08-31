@@ -458,3 +458,152 @@ func TestNilLoggerIsSafe(t *testing.T) {
 		t.Error("nil logger must be a no-op")
 	}
 }
+
+// peekLastCompleteTs bounds a file by its last COMPLETE record: a torn tail
+// must not count, and every anomaly must report ok=false so the caller falls
+// back to streaming.
+func TestPeekLastCompleteTs(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	path := write("terminated.log", `{"ts":11,"kind":"secret"}`+"\n"+`{"ts":12,"kind":"drift"}`+"\n")
+	if ts, ok := peekLastCompleteTs(path); !ok || ts != 12 {
+		t.Errorf("terminated file = (%d, %v), want (12, true)", ts, ok)
+	}
+	// A torn tail is not a record yet: the last COMPLETE line bounds the file.
+	path = write("torn.log", `{"ts":11,"kind":"secret"}`+"\n"+`{"ts":99,"kind":`)
+	if ts, ok := peekLastCompleteTs(path); !ok || ts != 11 {
+		t.Errorf("torn tail = (%d, %v), want (11, true)", ts, ok)
+	}
+	// Blank trailing lines are skipped backwards to the last record.
+	path = write("blanktail.log", `{"ts":11,"kind":"secret"}`+"\n\n\n")
+	if ts, ok := peekLastCompleteTs(path); !ok || ts != 11 {
+		t.Errorf("blank tail = (%d, %v), want (11, true)", ts, ok)
+	}
+	// Anomalies → not ok: missing file, empty file, blank-only file, corrupt
+	// last complete line, and a final record longer than the peek chunk.
+	if _, ok := peekLastCompleteTs(filepath.Join(dir, "missing.log")); ok {
+		t.Error("missing file must not peek ok")
+	}
+	if _, ok := peekLastCompleteTs(write("empty.log", "")); ok {
+		t.Error("empty file must not peek ok")
+	}
+	if _, ok := peekLastCompleteTs(write("blank.log", "\n\n")); ok {
+		t.Error("blank-only file must not peek ok")
+	}
+	if _, ok := peekLastCompleteTs(write("corrupt.log", `{"ts":11,"kind":`+"\n")); ok {
+		t.Error("corrupt last complete line must not peek ok")
+	}
+	bigLine := `{"ts":11,"kind":"secret","detail":"` + strings.Repeat("x", 100<<10) + `"}` + "\n"
+	if _, ok := peekLastCompleteTs(write("bigline.log", bigLine)); ok {
+		t.Error("final record longer than the peek chunk must not peek ok")
+	}
+}
+
+// Early termination across rotated files must return exactly the top-K / time
+// window the full scan would — whether the heap fills inside the newest file
+// or only across files.
+func TestQueryEarlyTerminationAcrossRotatedFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, from, to int64) {
+		t.Helper()
+		var buffer strings.Builder
+		for ts := from; ts <= to; ts++ {
+			fmt.Fprintf(&buffer, `{"ts":%d,"kind":"secret","action":"log"}`+"\n", ts)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(buffer.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("security-20260101-000000.log", 1, 10)
+	write("security-20260102-000000.log", 11, 20)
+	write("security-20260103-000000.log", 21, 30)
+
+	// Heap fills inside the newest file: both older files are skippable.
+	result := queryKinds(t, dir, Filter{Limit: 15})
+	if len(result.Records) != 15 {
+		t.Fatalf("records = %d, want 15", len(result.Records))
+	}
+	if result.Records[0].Ts != 30 || result.Records[len(result.Records)-1].Ts != 16 {
+		t.Errorf("top-15 span = %d..%d, want 30..16",
+			result.Records[0].Ts, result.Records[len(result.Records)-1].Ts)
+	}
+
+	// Heap does NOT fill within the newest file (10 < 25): the older files'
+	// records still make the cut and must not be skipped away.
+	result = queryKinds(t, dir, Filter{Limit: 25})
+	if len(result.Records) != 25 {
+		t.Fatalf("records = %d, want 25", len(result.Records))
+	}
+	if result.Records[0].Ts != 30 || result.Records[len(result.Records)-1].Ts != 6 {
+		t.Errorf("top-25 span = %d..%d, want 30..6",
+			result.Records[0].Ts, result.Records[len(result.Records)-1].Ts)
+	}
+
+	// A From bound past the older files' newest records excludes them
+	// entirely (From is inclusive: ts=25 survives).
+	result = queryKinds(t, dir, Filter{From: 25, Limit: 100})
+	if len(result.Records) != 6 {
+		t.Fatalf("From query records = %d, want 6 (ts 25..30)", len(result.Records))
+	}
+	for _, record := range result.Records {
+		if record.Ts < 25 {
+			t.Errorf("From query returned ts %d, older than the bound", record.Ts)
+		}
+	}
+}
+
+// A corrupt line inside a file skipped by early termination is not counted in
+// Skipped (the file provably could not change the result); the same file IS
+// scanned — and its corrupt line counted — when the heap never fills.
+func TestQueryEarlyTerminationSkippedFileDoesNotCountCorruptLines(t *testing.T) {
+	dir := t.TempDir()
+	var newest strings.Builder
+	for ts := int64(21); ts <= 30; ts++ {
+		fmt.Fprintf(&newest, `{"ts":%d,"kind":"secret"}`+"\n", ts)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "security-20260102-000000.log"), []byte(newest.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	older := `{"ts":11,"kind":"secret"}` + "\n" +
+		`{"ts":12,"kind":` + "\n" + // corrupt line
+		`{"ts":13,"kind":"secret"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "security-20260101-000000.log"), []byte(older), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Full heap (floor 21) + older file's newest record (13) below it: the
+	// file is skipped, its corrupt line uncounted.
+	result := queryKinds(t, dir, Filter{Limit: 10})
+	if len(result.Records) != 10 || result.Records[len(result.Records)-1].Ts != 21 {
+		t.Fatalf("records = %d, want the 10 newest (ts 21..30)", len(result.Records))
+	}
+	if result.Skipped != 0 {
+		t.Errorf("skipped = %d, want 0 — the corrupt line sits in a provably irrelevant file", result.Skipped)
+	}
+
+	// Without a limit the same file streams: records appear, corrupt line counts.
+	result = queryKinds(t, dir, Filter{})
+	if len(result.Records) != 12 {
+		t.Fatalf("unlimited records = %d, want 12", len(result.Records))
+	}
+	if result.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1 corrupt line counted when the file is scanned", result.Skipped)
+	}
+
+	// A From bound below the file's newest record also streams it.
+	result = queryKinds(t, dir, Filter{From: 13})
+	if len(result.Records) != 11 {
+		t.Fatalf("From=13 records = %d, want 11 (ts 13 and 21..30)", len(result.Records))
+	}
+	if result.Skipped != 1 {
+		t.Errorf("skipped = %d, want 1 — From admits the file, so it is scanned", result.Skipped)
+	}
+}

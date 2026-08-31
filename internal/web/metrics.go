@@ -35,6 +35,22 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
+// escapeLabel escapes a Prometheus text-exposition label value: only
+// backslash, double-quote and newline are escaped (\\, \" and \n are the only
+// sequences the format defines); every other byte passes through raw. Go's
+// %q is NOT valid here — it emits \t, \u0007 etc., which a Prometheus parser
+// rejects.
+func escapeLabel(s string) string {
+	if !strings.ContainsAny(s, "\\\"\n") {
+		return s
+	}
+	return strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+		"\n", "\\n",
+	).Replace(s)
+}
+
 // renderPrometheus renders the exposition body. Provider label values are
 // config keys / virtual ids; escapeLabel keeps the output well-formed even if
 // a name ever contains reserved characters.
@@ -71,7 +87,7 @@ func renderPrometheus(v appapi.Dashboard) string {
 			if m.Requests == 0 && m.Failures == 0 && m.Failovers == 0 && m.RateLimited429 == 0 {
 				continue // no traffic on this provider — skip zero series
 			}
-			fmt.Fprintf(&b, "%s{provider=%q} %d\n", se.metric, name, se.value(m))
+			fmt.Fprintf(&b, "%s{provider=\"%s\"} %d\n", se.metric, escapeLabel(name), se.value(m))
 		}
 	}
 	sums := []series{
@@ -85,7 +101,7 @@ func renderPrometheus(v appapi.Dashboard) string {
 			if m.Requests == 0 {
 				continue
 			}
-			fmt.Fprintf(&b, "%s{provider=%q} %d\n", se.metric, name, se.value(m))
+			fmt.Fprintf(&b, "%s{provider=\"%s\"} %d\n", se.metric, escapeLabel(name), se.value(m))
 		}
 	}
 	return b.String()

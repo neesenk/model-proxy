@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -198,6 +199,72 @@ func TestGuardPaths_WeakTextNeverBlocks(t *testing.T) {
 	snap2 := p2.metrics.Snapshot()
 	if n := snap2[counters.PMKey{Provider: "guard", Model: "ssh_text"}].Requests; n != 1 {
 		t.Errorf("weak hit counter ssh_text under block = %d, want 1", n)
+	}
+}
+
+// (c3) Chain regression: under secrets=redact + paths=block, a gitleaks-shaped
+// secret (capture group + consumed trailing context byte) sitting at the end
+// of a JSON string value must not break the paths pass. Redact claims the
+// group span only, so the redacted body stays valid JSON and
+// ScanPathsContext still recognizes the tool-call position as STRONG —
+// paths=block must reject. (Before the group-span fix, Redact ate the closing
+// quote, the structure walk failed, and the strong hit silently downgraded to
+// weak — which never blocks.)
+func TestGuardRedactKeepsPathBlockChain(t *testing.T) {
+	// 8-symbol period → Shannon entropy 3.0 ≥ the stripe rule's 2.0 gate.
+	stripeKey := "sk_live_" + strings.Repeat("aB3xY9zQ", 3)
+	body := `{"model":"glm","messages":[` +
+		`{"role":"user","content":"stripe key ` + stripeKey + `"},` +
+		`{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"~/.ssh/id_rsa\"}"}}]}]}`
+
+	p, proxyURL, bodies := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true, Paths: "block"})
+	code, respBody := post(t, proxyURL+"/v1/chat/completions", body)
+	if code != http.StatusBadRequest {
+		t.Fatalf("paths=block after redact: status=%d body=%s, want 400 (strong tool-call path hit must survive redaction)", code, respBody)
+	}
+	if !strings.Contains(respBody, "ssh") || !strings.Contains(respBody, "guard.paths=block") {
+		t.Errorf("block response = %q, want category name + guard.paths=block reason", respBody)
+	}
+	if strings.Contains(respBody, "guard.secrets") {
+		t.Errorf("block response = %q, secrets=redact must not be the blocking reason", respBody)
+	}
+	if strings.Contains(respBody, stripeKey) {
+		t.Errorf("block response leaked the secret")
+	}
+	if got := bodies(); len(got) != 0 {
+		t.Errorf("blocked request reached the upstream %d times, want 0", len(got))
+	}
+	details := guardEventDetails(p)
+	if len(details) != 2 {
+		t.Fatalf("guard events = %v, want secrets(stripe) + paths(ssh) events", details)
+	}
+
+	// Same body under paths=log forwards, and the forwarded body is the
+	// redacted-but-valid-JSON form: no secret bytes, placeholders inside the
+	// string, structure intact.
+	p2, proxyURL2, bodies2 := newGuardPoolProxy(t,
+		GuardConfig{Secrets: "redact", KnownSecrets: true, Decode: true, Paths: "log"})
+	postOK(t, proxyURL2+"/v1/chat/completions", body)
+	got := bodies2()
+	if len(got) != 1 {
+		t.Fatalf("paths=log must forward the redacted body once (calls=%d)", len(got))
+	}
+	if strings.Contains(got[0], stripeKey) {
+		t.Errorf("forwarded body still carries the stripe key")
+	}
+	if !json.Valid([]byte(got[0])) {
+		t.Errorf("forwarded redacted body is not valid JSON: %s", got[0])
+	}
+	if !strings.Contains(got[0], `"stripe key [REDACTED]"`) {
+		t.Errorf("forwarded body lost the JSON string shape around the placeholder: %s", got[0])
+	}
+	snap2 := p2.metrics.Snapshot()
+	if n := snap2[counters.PMKey{Provider: "guard", Model: "ssh"}].Requests; n != 1 {
+		t.Errorf("strong ssh path counter on the redacted body = %d, want 1 (must not downgrade to weak)", n)
+	}
+	if n := snap2[counters.PMKey{Provider: "guard", Model: "stripe_access_token"}].Requests; n != 1 {
+		t.Errorf("stripe_access_token counter = %d, want 1", n)
 	}
 }
 

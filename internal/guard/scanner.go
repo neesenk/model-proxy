@@ -111,13 +111,20 @@ const (
 	needleSecretRaw
 	needleSecretEncoded
 	needleSecretFrag
+	// needlePath / needlePathExtra are the sensitive-path literals (builtin
+	// table and config extra_paths). They join the same automaton so the
+	// paths gate costs one shared pass instead of one bytes.Contains sweep
+	// per literal; only the paths channels (ScanPaths/ScanPathsContext)
+	// consume them, the secret channels ignore them in their callbacks.
+	needlePath
+	needlePathExtra
 )
 
 // needleRef maps an automaton needle id back to its owner.
 type needleRef struct {
 	kind needleKind
-	idx  int // rule index, probe index, or secret index
-	vidx int // variant index (needleSecretEncoded) or infix offset in the raw secret (needleSecretFrag)
+	idx  int // rule index, probe index, secret index, builtin-path rule index, or extra-path index
+	vidx int // variant index (needleSecretEncoded), infix offset in the raw secret (needleSecretFrag), or literal index (needlePath)
 }
 
 // Scanner is an immutable per-generation secret scanner: the embedded rule
@@ -130,8 +137,12 @@ type Scanner struct {
 	custom     []customRule
 	secrets    []knownSecretSet
 	extraPaths [][]byte
-	ac         *acMatcher
-	refs       []needleRef
+	// maxKnownNeedle is the length of the longest needle the known-secret
+	// channel can match (longest raw value or encoded variant; 0 without
+	// known secrets) — see MaxKnownNeedleLen.
+	maxKnownNeedle int
+	ac             *acMatcher
+	refs           []needleRef
 }
 
 // Options selects the optional Scanner channels. The zero value disables
@@ -177,7 +188,16 @@ func NewScannerWithOptions(custom []CustomPattern, secrets, extraPaths []string,
 			continue
 		}
 		seenSecrets[sec] = true
-		s.secrets = append(s.secrets, buildSecretSet(sec, opts.Decode))
+		set := buildSecretSet(sec, opts.Decode)
+		if len(set.raw) > s.maxKnownNeedle {
+			s.maxKnownNeedle = len(set.raw)
+		}
+		for _, v := range set.encoded {
+			if len(v) > s.maxKnownNeedle {
+				s.maxKnownNeedle = len(v)
+			}
+		}
+		s.secrets = append(s.secrets, set)
 	}
 	seenPaths := map[string]bool{}
 	for _, p := range extraPaths {
@@ -202,10 +222,13 @@ const maxFragNeedles = 1 << 15
 
 // compilePrefilter builds the phase-1 automaton over every literal the scan
 // pipeline can match on: rule prefilter literals, encoded-channel probe
-// variants, known-secret variants, and — for secrets long enough to split
-// into two creditable fragments — every minKnownFrag-byte infix of the raw
-// value, which lets ScanKnownFragment track split fragments in the same
-// single automaton pass instead of per-secret bytes.Contains sweeps.
+// variants, known-secret variants, the sensitive-path literals (builtin table
+// and extra_paths — one shared gate pass in ScanPaths/ScanPathsContext
+// instead of one bytes.Contains sweep per literal), and — for secrets long
+// enough to split into two creditable fragments — every minKnownFrag-byte
+// infix of the raw value, which lets ScanKnownFragment track split fragments
+// in the same single automaton pass instead of per-secret bytes.Contains
+// sweeps.
 func (s *Scanner) compilePrefilter() {
 	b := newACBuilder()
 	addRef := func(kind needleKind, idx, vidx int, needle []byte) int {
@@ -238,6 +261,14 @@ func (s *Scanner) compilePrefilter() {
 		for vi, v := range sec.encoded {
 			sec.encodedIDs[vi] = addRef(needleSecretEncoded, si, vi, v)
 		}
+	}
+	for i, p := range builtinPaths {
+		for li, lit := range p.literals {
+			addRef(needlePath, i, li, lit)
+		}
+	}
+	for i, lit := range s.extraPaths {
+		addRef(needlePathExtra, i, -1, lit)
 	}
 	s.ac = b.compile()
 }
@@ -446,7 +477,18 @@ func (s *Scanner) findAll(body []byte) []match {
 
 // findAllCounted is findAll plus the decode-attempt counter.
 func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
+	found, stats, _ := s.findAllGated(body)
+	return found, stats
+}
+
+// findAllGated is findAllCounted plus the sensitive-path gate verdict: the
+// path literals are needles in the same automaton, so the phase-1 pass that
+// prefilters the secret channels also answers whether ScanPathsContext's
+// gate would open on this exact body — a caller running both channels over
+// one body (the live request path) sweeps it once instead of twice.
+func (s *Scanner) findAllGated(body []byte) ([]match, scanStats, bool) {
 	var stats scanStats
+	pathGate := false
 	// Phase 1: literal prefilter, one pass for all needles.
 	ruleHit := make([]bool, len(s.rules))
 	var probeHits map[int][]int  // probe index → occurrence end offsets
@@ -483,6 +525,10 @@ func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
 			}
 			secretHits[id] = append(secretHits[id], end)
 			stats.phase1KnownEncodedPositions++
+		case needlePath, needlePathExtra:
+			if !pathGate && s.pathNeedleHit(body, ref, end) {
+				pathGate = true
+			}
 		}
 	})
 
@@ -589,12 +635,13 @@ func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
 				continue
 			}
 			// A shared variant re-runs every owning rule; the first match in
-			// table order claims the span.
+			// table order claims the span. Goes through claim (not a direct
+			// append) so the maxMatchesPerScan cap binds this channel like
+			// every other source.
 			for _, ri := range p.ruleIdxs {
 				r := s.rules[ri]
 				if len(r.findIn(decoded)) > 0 {
-					found = append(found, match{r.name, spanStart, spanEnd})
-					claimed.claim(spanStart, spanEnd)
+					claim(r.name, spanStart, spanEnd)
 					break
 				}
 			}
@@ -628,13 +675,22 @@ func (s *Scanner) findAllCounted(body []byte) ([]match, scanStats) {
 		}
 	}
 
-	return found, stats
+	return found, stats, pathGate
 }
 
 // HasKnownSecrets reports whether the scanner carries any known-secret values
 // (proxy-managed credentials). ScanKnown on a scanner without secrets can
 // never hit; callers use this to skip per-session aggregation work entirely.
 func (s *Scanner) HasKnownSecrets() bool { return len(s.secrets) > 0 }
+
+// MaxKnownNeedleLen returns the length of the longest needle the known-secret
+// channel (ScanKnown) can match — the longest raw known secret or encoded
+// variant — or 0 when the scanner carries no known secrets. Windowed
+// reassembly scans use it to bound the junction region: an occurrence
+// spanning two concatenated buffers lies entirely within the last
+// MaxKnownNeedleLen-1 bytes of the first plus the first MaxKnownNeedleLen-1
+// bytes of the second.
+func (s *Scanner) MaxKnownNeedleLen() int { return s.maxKnownNeedle }
 
 // ScanKnown runs ONLY the known-secret channel — exact values and their
 // encoded (base64/hex/url) variants — skipping the embedded rule table,
@@ -691,11 +747,15 @@ func (s *Scanner) scanKnownCounted(body []byte) ([]string, knownScanStats) {
 // request body and reports whether this body COMPLETES a known secret whose
 // earlier fragments arrived in previous requests of the session.
 //
-// Why not exact matching on a window+body concatenation: every body the
+// Why this channel exists alongside exact matching on a window+body
+// concatenation (the app's channel 1, ScanKnown over tail+current body — see
+// decision 21 for the authoritative two-channel definition): every body the
 // proxy forwards starts with '{' (ExtractModel requires a leading JSON
 // object), so two requests can never place fragments byte-contiguously
-// across the junction — realistic splits put each fragment somewhere inside
-// one request's JSON. This channel therefore tracks, per known secret
+// across the junction — the concat pass is near-dead on real JSON traffic
+// and stays only as a fail-closed backstop, while realistic splits put each
+// fragment somewhere inside one request's JSON. This channel therefore
+// tracks, per known secret
 // (indexed like progress), how long a prefix has been seen IN ORDER across
 // the session's requests: a body containing the next ≥minKnownFrag-byte
 // piece extends the progress; reaching the full length is fragmented. A
@@ -721,13 +781,19 @@ func (s *Scanner) scanKnownCounted(body []byte) ([]string, knownScanStats) {
 //
 // progress is the session state returned by the previous call (nil on first
 // request or after a scanner-generation change / window truncation); the
-// returned slice is the state to store for the next request. Limitations
-// (documented): raw form only (no encoded variants), at most one fragment
-// credited per request, every fragment ≥ minKnownFrag bytes, fragments must
-// arrive in order.
-func (s *Scanner) ScanKnownFragment(body []byte, progress []int) (bool, []int) {
+// returned slice next is the state to store for the next request. The third
+// return, reset, marks the secrets whose progress this call DELIBERATELY
+// zeroed — a secret that completed across requests (fired) or whose complete
+// value appeared in this body — so a caller that merges next with
+// concurrently-stored progress (e.g. element-wise max) can honor the reset
+// for exactly those indices instead of resurrecting stale progress (which
+// would re-fire a later suffix fragment). reset is nil when nothing was
+// deliberately zeroed. Limitations (documented): raw form only (no encoded
+// variants), at most one fragment credited per request, every fragment ≥
+// minKnownFrag bytes, fragments must arrive in order.
+func (s *Scanner) ScanKnownFragment(body []byte, progress []int) (bool, []int, []bool) {
 	if len(s.secrets) == 0 {
-		return false, nil
+		return false, nil, nil
 	}
 	// anchor is one infix offset whose occurrences can advance a secret's
 	// progress in this call; best is the longest extension seen (≥
@@ -795,15 +861,31 @@ func (s *Scanner) ScanKnownFragment(body []byte, progress []int) (bool, []int) {
 	})
 	next := make([]int, len(s.secrets))
 	fragmented := false
+	var reset []bool
+	markReset := func(i int) {
+		if reset == nil {
+			reset = make([]bool, len(s.secrets))
+		}
+		reset[i] = true
+	}
 	for i := range s.secrets {
 		n := len(s.secrets[i].raw)
-		if n < 2*minKnownFrag || full[i] {
-			continue // complete in this body — per-request channel's signal
+		if n < 2*minKnownFrag {
+			// Too short to split into two creditable fragments: only the
+			// per-request channel covers it.
+			continue
+		}
+		if full[i] {
+			// Complete in this body — the per-request channel owns that
+			// signal; the progress zeroing is deliberate (see the doc).
+			markReset(i)
+			continue
 		}
 		if kp[i] != nil && kp[i].best > 0 {
 			p := kp[i].k
 			if p+kp[i].best == n {
-				fragmented = true // completed across requests; progress stays 0
+				fragmented = true // completed across requests; progress resets to 0
+				markReset(i)
 				continue
 			}
 			next[i] = p + kp[i].best
@@ -813,7 +895,7 @@ func (s *Scanner) ScanKnownFragment(body []byte, progress []int) (bool, []int) {
 			next[i] = k0[i].best
 		}
 	}
-	return fragmented, next
+	return fragmented, next, reset
 }
 
 // Scan returns the deduplicated type names of the secrets found in body:
@@ -822,7 +904,12 @@ func (s *Scanner) ScanKnownFragment(body []byte, progress []int) (bool, []int) {
 // result means the body is clean (as far as this high-confidence table can
 // tell). Secret values are never returned.
 func (s *Scanner) Scan(body []byte) []string {
-	found := s.findAll(body)
+	return s.matchNames(s.findAll(body))
+}
+
+// matchNames projects claimed matches to the deduplicated, ordered type-name
+// list documented on Scan.
+func (s *Scanner) matchNames(found []match) []string {
 	if len(found) == 0 {
 		return nil
 	}
@@ -848,6 +935,24 @@ func (s *Scanner) Scan(body []byte) []string {
 		}
 	}
 	return names
+}
+
+// ScanSecretsAndPaths is the one-pass form of Scan + ScanPathsContext for
+// callers that run BOTH channels over the same body (the live request path):
+// the path literals are needles in the prefilter automaton, so the phase-1
+// pass that prefilters the secret channels already answers the paths gate —
+// the body is swept once instead of paying Scan's automaton pass plus the
+// gate's per-literal bytes.Contains sweeps. The results are exactly Scan(body)
+// and ScanPathsContext(body) run separately; the gate verdict only decides
+// whether the JSON structure walk runs.
+func (s *Scanner) ScanSecretsAndPaths(body []byte) (secrets, strong, weak []string) {
+	found, _, gate := s.findAllGated(body)
+	secrets = s.matchNames(found)
+	if !gate {
+		return secrets, nil, nil
+	}
+	strong, weak = s.classifyPathHits(body)
+	return secrets, strong, weak
 }
 
 // Redact returns body with every matched secret replaced by

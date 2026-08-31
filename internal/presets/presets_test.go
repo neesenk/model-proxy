@@ -135,6 +135,44 @@ func TestMergePresetBlock_CreatesProvidersMapWhenMissing(t *testing.T) {
 	}
 }
 
+// --- PreviewMergeBlock ---
+
+// TestPreviewMergeBlock_DryRunMatchesWrite pins the single-source contract:
+// the preview computes exactly what MergeBlock later writes, and the preview
+// itself never touches the file (the CLI add ambiguity gate relies on the
+// latter: refusing the gate must leave config.yaml byte-identical).
+func TestPreviewMergeBlock_DryRunMatchesWrite(t *testing.T) {
+	path := writeMinimalConfig(t)
+	before, _ := os.ReadFile(path)
+
+	changed, preview, err := PreviewMergeBlock(path, "deepseek")
+	if err != nil || !changed {
+		t.Fatalf("preview: changed=%v err=%v", changed, err)
+	}
+	if _, err := configdomain.LoadConfigFromBytes(path, preview); err != nil {
+		t.Fatalf("preview content invalid: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("preview must not touch the config file")
+	}
+
+	written, err := MergeBlock(path, "deepseek")
+	if err != nil || !written {
+		t.Fatalf("merge after preview: written=%v err=%v", written, err)
+	}
+	onDisk, _ := os.ReadFile(path)
+	if !bytes.Equal(preview, onDisk) {
+		t.Fatal("MergeBlock must write exactly the previewed content")
+	}
+
+	// The block now exists: preview is a no-op, like MergeBlock.
+	changed, merged, err := PreviewMergeBlock(path, "deepseek")
+	if err != nil || changed || merged != nil {
+		t.Fatalf("preview of existing block: changed=%v merged=%v err=%v", changed, merged, err)
+	}
+}
+
 // --- AmbiguousModels ---
 
 func ambiguousFixture(t *testing.T, extra string) *configdomain.Config {

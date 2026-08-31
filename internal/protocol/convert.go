@@ -72,13 +72,45 @@ func needsConversion(clientProto, targetProto string) bool {
 
 // convertWarn logs a conversion warning once per process per message (rate-limited
 // dedup) so a flood of identical warnings doesn't spam the log, but the operator
-// still sees each distinct dropped/unmappable field at least once.
-var convertWarnSeen sync.Map
+// still sees each distinct dropped/unmappable field at least once. The dedup set
+// is capped: warning strings embed client-/upstream-controlled values (raw file
+// ids, unknown type names, scanner errors), so an unbounded map would grow with
+// request content. Past the cap new messages are simply not deduped — dedup is
+// best-effort log-spam control, never correctness.
+const convertWarnSeenCap = 1024
+
+var convertWarnSeen = &convertWarnDedup{seen: make(map[string]struct{})}
+
+type convertWarnDedup struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// mark reports whether msg was already deduped. capped reports whether the
+// dedup set is full (msg is then NOT remembered — every occurrence logs).
+func (w *convertWarnDedup) mark(msg string) (dup, capped bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.seen[msg]; ok {
+		return true, false
+	}
+	if len(w.seen) >= convertWarnSeenCap {
+		return false, true
+	}
+	w.seen[msg] = struct{}{}
+	return false, false
+}
 
 func convertWarn(msg string) {
-	if _, loaded := convertWarnSeen.LoadOrStore(msg, struct{}{}); !loaded {
-		logx.Warnf("[convert] WARN: %s (suppressed further occurrences)", msg)
+	dup, capped := convertWarnSeen.mark(msg)
+	if dup {
+		return
 	}
+	if capped {
+		logx.Warnf("[convert] WARN: %s", msg)
+		return
+	}
+	logx.Warnf("[convert] WARN: %s (suppressed further occurrences)", msg)
 }
 
 // asMap type-asserts v to map[string]any, returning nil if it isn't one.
@@ -692,14 +724,21 @@ func openaiToolChoiceToAnthropic(tc any) any {
 	return nil
 }
 
-// degradeFileIDText renders the note replacing a file-id-only attachment on
-// cross-protocol conversion. A file_id is scoped to the provider it was
-// uploaded to; forwarding it through a protocol conversion (almost always a
-// provider change in this topology) would send the target an id its file
-// storage has never seen. Inline base64/URL sources are unaffected; the drop
-// is observable (convertWarn), never silent.
-func degradeFileIDText(id, filename string, d *Diagnostics) string {
+// warnFileIDDropped emits the shared diagnostic for a dropped cross-protocol
+// file_id. A file_id is scoped to the provider it was uploaded to; forwarding
+// it through a protocol conversion (almost always a provider change in this
+// topology) would send the target an id its file storage has never seen.
+// Inline base64/URL sources are unaffected; the drop is observable
+// (convertWarn + Diagnostics), never silent.
+func warnFileIDDropped(id string, d *Diagnostics) {
 	warnDiag(d, "file_id_degraded", "dropping cross-protocol file_id attachment "+id+" (provider-scoped; inline the file content instead)")
+}
+
+// degradeFileIDText renders the note replacing a file-id-only attachment on
+// cross-protocol conversion (the whole attachment degrades when no inline
+// base64/URL source exists to carry it).
+func degradeFileIDText(id, filename string, d *Diagnostics) string {
+	warnFileIDDropped(id, d)
 	return "[document " + firstNonEmpty(filename, "file") + " attached as file_id " + id + " — not forwarded across providers]"
 }
 
@@ -854,9 +893,12 @@ func parseToolArgs(args string, d *Diagnostics) any {
 
 // appendSSEData folds one data:-line payload into the frame in progress:
 // consecutive data lines join with "\n" per the SSE spec (a single-line
-// frame — the only form LLM vendors emit — passes through unchanged).
-func appendSSEData(pend, payload string) string {
-	if pend == "" {
+// frame — the only form LLM vendors emit — passes through unchanged). open
+// distinguishes "no frame yet" from a frame whose data lines so far folded to
+// "" (a lone empty `data:` line), so empty payloads fold spec-consistently:
+// `data:` + `data: x` is "\nx", not "x".
+func appendSSEData(pend string, open bool, payload string) string {
+	if !open {
 		return payload
 	}
 	return pend + "\n" + payload
@@ -1866,7 +1908,8 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 }
 
 func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
-	pendData := "" // folded data lines of the SSE frame in progress
+	pendData := ""    // folded data lines of the SSE frame in progress
+	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
 	for len(t.out) == 0 {
 		if t.done {
 			t.finish()
@@ -1878,11 +1921,11 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		line := ""
 		if t.sc.Scan() {
 			line = strings.TrimSpace(t.sc.Text())
-		} else if pendData != "" {
+		} else if pendOpen {
 			// Scanner exhausted with a frame in progress: synthesize the
 			// dispatch blank line (the SSE spec delivers a trailing frame
 			// without its final blank line). The next iteration takes the
-			// normal exhaustion path with pendData empty.
+			// normal exhaustion path with no frame open.
 			line = ""
 		} else {
 			if err := t.sc.Err(); err != nil {
@@ -1912,10 +1955,11 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "data:") {
-			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendData = appendSSEData(pendData, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendOpen = true
 			continue
 		}
-		if line != "" || pendData == "" {
+		if line != "" || !pendOpen {
 			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
 			// comment lines belong to the frame in progress even when they
 			// trail its data lines — dispatching on them would classify the
@@ -1923,7 +1967,7 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			continue
 		}
 		payload := pendData
-		pendData = ""
+		pendData, pendOpen = "", false
 		if payload == "[DONE]" {
 			t.done = true
 			continue
@@ -2129,7 +2173,8 @@ func (t *anthropicSSEToOpenAISSE) ensureRole() {
 }
 
 func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
-	pendData := "" // folded data lines of the SSE frame in progress
+	pendData := ""    // folded data lines of the SSE frame in progress
+	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
 	for len(t.out) == 0 {
 		if t.done {
 			if !t.finished {
@@ -2148,11 +2193,11 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 		line := ""
 		if t.sc.Scan() {
 			line = strings.TrimSpace(t.sc.Text())
-		} else if pendData != "" {
+		} else if pendOpen {
 			// Scanner exhausted with a frame in progress: synthesize the
 			// dispatch blank line (the SSE spec delivers a trailing frame
 			// without its final blank line). The next iteration takes the
-			// normal exhaustion path with pendData empty.
+			// normal exhaustion path with no frame open.
 			line = ""
 		} else {
 			if err := t.sc.Err(); err != nil {
@@ -2182,10 +2227,11 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "data:") {
-			pendData = appendSSEData(pendData, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendData = appendSSEData(pendData, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendOpen = true
 			continue
 		}
-		if line != "" || pendData == "" {
+		if line != "" || !pendOpen {
 			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
 			// comment lines belong to the frame in progress even when they
 			// trail its data lines — dispatching on them would classify the
@@ -2193,7 +2239,16 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			continue
 		}
 		payload := pendData
-		pendData = ""
+		pendData, pendOpen = "", false
+		if payload == "[DONE]" {
+			// [DONE] terminates the stream in the chat dialect; some gateways
+			// append it to anthropic-event streams (OpenRouter-style). Treat
+			// it as a clean terminal exactly like the sibling directions: the
+			// done-branch above emits the finish chunk (when message_delta
+			// hasn't) + data: [DONE], and later frames are never scanned.
+			t.done = true
+			continue
+		}
 		var ev struct {
 			Type  string `json:"type"`
 			Index int    `json:"index"`
