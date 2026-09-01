@@ -93,6 +93,24 @@
     daemon；已有 watcher 时阈值数值热改生效（每次 check 读当前 cfg 快照）。去重
     记录是进程内的，重启后同一 (scope, 月份, 阈值) 会重新告警一次。
 
+## 测试与 CI
+
+32. 客户端读完响应 ≠ 服务端 commit 效应落账：带 Content-Length 的响应，客户端
+    收满字节即返回，handler goroutine 此时可能还没执行 `flushCopy` 之后的效应
+    （`Effects.Committed` 的 Requests/latency/attempts-ok、agent 计数、
+    body.Close 触发的 request log 入队、fusion 的 run 计数）。本机核多负载低
+    几乎永不踩中，CI（2 vCPU + race/coverage 插桩拖慢 handler 收尾）窗口被
+    放大，同一竞态会在不同步骤轮流挂不同的测试。断言这类状态必须轮询等待
+    （`internal/app` 的 `awaitCommitMetrics`/`waitUntil`），不得赌调度顺序；
+    断言 commit 前效应（failures/failovers/guard 命中）或用
+    `httptest.ResponseRecorder` 同步驱动 handler 的测试不受影响。注意 fake
+    upstream 一次性 `Write` 的 "SSE" 同样带 Content-Length，不享流式豁免。
+33. 覆盖率口径以 CI 工具链为准：CI 经 `go-version-file: go.mod` 用 go1.26.4，
+    本机更高版本的语句计数不同（实测 `internal/cli/models` 本地 63.4% vs CI
+    60.3%，足以跌破 floor）。floor/baseline 验证用
+    `GOTOOLCHAIN=go1.26.4 scripts/cover.sh`；`go test` 结果缓存会掩盖重测，
+    本地压测与复跑一律 `-count=1`。
+
 ## 回归要求
 
 - 每个陷阱应有测试或明确的测试缺口。
