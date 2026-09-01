@@ -113,11 +113,8 @@ func TestForward_ContextOverflowRetry(t *testing.T) {
 	}
 	// The client can finish reading a Content-Length body before the server
 	// handler goroutine runs the post-copy Committed effect that records
-	// metrics — poll instead of asserting on a racy snapshot.
-	waitUntil(t, "big-prov commit metrics", func() bool {
-		return p.metrics.Snapshot()[counters.PMKey{Provider: "big-prov", Model: "big"}].Requests == 1
-	})
-	m := p.metrics.Snapshot()
+	// metrics — wait for it instead of asserting on a racy snapshot.
+	m := awaitCommitMetrics(t, p, counters.PMKey{Provider: "big-prov", Model: "big"})
 	if s := m[counters.PMKey{Provider: "small-prov", Model: "small"}]; s.Failovers != 1 || s.Requests != 0 || s.Failures != 0 {
 		t.Errorf("small metrics = %+v, want failovers=1 requests=0 failures=0", s)
 	}
@@ -288,12 +285,9 @@ func TestForward_ContextOverflowRetry_Ordinary400(t *testing.T) {
 	if smallHits != 1 || bigHits != 0 {
 		t.Errorf("small=%d big=%d, want small only (an ordinary 400 never retries)", smallHits, bigHits)
 	}
-	// Same commit-metrics race as above: poll until the server-side Committed
-	// effect has recorded the request before asserting the snapshot.
-	waitUntil(t, "small-prov commit metrics", func() bool {
-		return p.metrics.Snapshot()[counters.PMKey{Provider: "small-prov", Model: "small"}].Requests == 1
-	})
-	m := p.metrics.Snapshot()
+	// Same commit-metrics race as above: wait for the server-side Committed
+	// effect before asserting the snapshot.
+	m := awaitCommitMetrics(t, p, counters.PMKey{Provider: "small-prov", Model: "small"})
 	if s := m[counters.PMKey{Provider: "small-prov", Model: "small"}]; s.Failovers != 0 {
 		t.Errorf("small metrics = %+v, want failovers=0 (committed 4xx)", s)
 	}

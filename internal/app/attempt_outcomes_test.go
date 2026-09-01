@@ -51,7 +51,10 @@ func TestForward_AttemptOutcomeCounters(t *testing.T) {
 		t.Fatalf("status = %d, want failover to good-prov and 200", resp.StatusCode)
 	}
 
-	snap := p.metrics.Snapshot()
+	// Wait for the server-side Committed effect (attempts/ok + good-prov
+	// Requests land post-copy in the handler goroutine; a Content-Length
+	// client can finish reading first) before asserting the snapshot.
+	snap := awaitCommitMetrics(t, p, counters.PMKey{Provider: "good-prov", Model: "m"})
 	hard := snap[counters.PMKey{Provider: "attempts", Model: "hard"}].Requests
 	ok := snap[counters.PMKey{Provider: "attempts", Model: "ok"}].Requests
 	rateLimited := snap[counters.PMKey{Provider: "attempts", Model: "rate_limited"}].Requests

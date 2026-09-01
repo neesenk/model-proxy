@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/provider"
 )
 
@@ -110,4 +111,19 @@ func waitUntil(t *testing.T, what string, condition func() bool) {
 	if !condition() {
 		t.Fatalf("timed out waiting for %s", what)
 	}
+}
+
+// awaitCommitMetrics waits until the server-side Committed effect for key
+// (target Requests, attempts/ok, latency/TTFT) has been recorded, then
+// returns the metrics snapshot. A client can finish reading a Content-Length
+// (non-streaming) body before the handler goroutine runs the post-copy
+// Committed effect, so snapshotting right after ReadAll races on loaded
+// machines. Streaming responses don't need this: their terminating chunk
+// only reaches the client after the handler returns.
+func awaitCommitMetrics(t *testing.T, p *Proxy, key counters.PMKey) map[counters.PMKey]counters.ProviderMetricsSnapshot {
+	t.Helper()
+	waitUntil(t, "commit metrics for "+key.Provider+"/"+key.Model, func() bool {
+		return p.metrics.Snapshot()[key].Requests >= 1
+	})
+	return p.metrics.Snapshot()
 }

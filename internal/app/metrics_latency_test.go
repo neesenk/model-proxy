@@ -72,7 +72,9 @@ func TestForward_RecordsLatency(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	snap := p.metrics.Snapshot()[counters.PMKey{Provider: "z", Model: "glm-rt"}]
+	// Commit metrics (Requests/LatencySum/TTFTSum) land in the post-copy
+	// Committed effect — wait for it before asserting the snapshot.
+	snap := awaitCommitMetrics(t, p, counters.PMKey{Provider: "z", Model: "glm-rt"})[counters.PMKey{Provider: "z", Model: "glm-rt"}]
 	if snap.Requests != 1 {
 		t.Errorf("requests=%d want 1", snap.Requests)
 	}
