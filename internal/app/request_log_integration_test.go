@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
 )
 
@@ -122,6 +123,11 @@ func TestForward_RequestLog_CapturesBodies_NonSSE(t *testing.T) {
 		t.Fatalf("upstream path = %q, want /responses", upstreamPath)
 	}
 
+	// The request-log record is completed at response-body Close inside the
+	// post-copy commit path — a Content-Length client can finish reading
+	// first. Wait for the commit metrics (recorded right after) so shutdown()
+	// below actually drains the record.
+	awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "backend", Model: upstreamModel})
 	shutdown()
 	records := allRecords(t, dir)
 	if len(records) != 1 {
@@ -250,6 +256,10 @@ func TestForward_RequestLog_CapturesBodies_SSE(t *testing.T) {
 		t.Fatalf("upstream path = %q, want /chat/completions", upstreamPath)
 	}
 
+	// Same commit-path race as the non-SSE variant: the upstream wrote the
+	// stream in one shot (Content-Length), so the client can finish before
+	// the handler closes the captured body and enqueues the record.
+	awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "backend", Model: "backend-model"})
 	shutdown()
 	records := allRecords(t, dir)
 	if len(records) != 1 {
