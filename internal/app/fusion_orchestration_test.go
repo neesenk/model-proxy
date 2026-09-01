@@ -97,8 +97,10 @@ func TestFusion_FanOutSynthesis(t *testing.T) {
 	}
 	// Metrics + tokens: one committed request per member and the synthesizer;
 	// draft-leg usage (anthropic shape) and synthesizer usage (SSE scan) both
-	// land in the token counter.
-	metrics := proxy.metrics.Snapshot()
+	// land in the token counter. The synthesizer's commit metrics land in the
+	// post-copy Committed effect — wait for them before snapshotting (a
+	// Content-Length client can finish reading first).
+	metrics := awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "ps", Model: "ms"})
 	for _, k := range []counters.PMKey{{Provider: "pa", Model: "ma"}, {Provider: "pb", Model: "mb"}, {Provider: "pc", Model: "mc"}, {Provider: "ps", Model: "ms"}} {
 		if metrics[k].Requests != 1 {
 			t.Errorf("metrics %v requests = %d, want 1", k, metrics[k].Requests)

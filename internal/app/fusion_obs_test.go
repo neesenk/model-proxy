@@ -113,8 +113,10 @@ func TestAPIFusion(t *testing.T) {
 				t.Errorf("leg = %+v, want clean panel 200 with draft usage", l)
 			}
 		}
-		// Metrics: ("fusion", recipe) run counted, no degrade.
-		m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "fusion", Model: "recipe"}]
+		// Metrics: ("fusion", recipe) run counted, no degrade. The Inc runs
+		// after engine.Run returns (post-commit) — wait for it instead of
+		// racing the handler goroutine.
+		m := awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "fusion", Model: "recipe"})[counters.PMKey{Provider: "fusion", Model: "recipe"}]
 		if m.Requests != 1 || m.Failovers != 0 {
 			t.Errorf("fusion metrics = requests %d failovers %d, want 1/0", m.Requests, m.Failovers)
 		}
@@ -169,7 +171,7 @@ func TestAPIFusion(t *testing.T) {
 		if !run.SynthCommitted || run.SynthStatus != 200 {
 			t.Errorf("degraded synth = committed %v status %d", run.SynthCommitted, run.SynthStatus)
 		}
-		m := proxy.metrics.Snapshot()[counters.PMKey{Provider: "fusion", Model: "recipe"}]
+		m := awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "fusion", Model: "recipe"})[counters.PMKey{Provider: "fusion", Model: "recipe"}]
 		if m.Requests != 1 || m.Failovers != 1 {
 			t.Errorf("fusion metrics = requests %d failovers %d, want 1/1", m.Requests, m.Failovers)
 		}
