@@ -143,14 +143,6 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Errorf("app.BuildProviders re-reads or probes account storage outside its snapshot: %s", violation)
 		}
 
-		loggedIn := namedFunction(t, rootPackage, "LoggedInProviders")
-		if got := namedCallCountInNode(loggedIn.Body, "LoadSnapshot"); got != 1 {
-			t.Errorf("app.LoggedInProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
-		}
-		for _, violation := range forbiddenCallSites(loggedIn.Body, rootSet, forbiddenStorageProbes, nil) {
-			t.Errorf("app.LoggedInProviders re-reads or probes account storage outside its snapshot: %s", violation)
-		}
-
 		buildFields := namedStructFields(t, rootPackage, "Build")
 		wantBuildFields := map[string]bool{
 			"Providers": true, "PoolIndex": true, "ParentOf": true, "Eligible": true,
@@ -173,27 +165,28 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			}
 		}
 
-		assertUsesBuildEligibility := func(owner string, body ast.Node) {
+		assertUsesConfigDerivedRoutes := func(owner string, body ast.Node) {
 			t.Helper()
-			if got := namedCallCountInNode(body, "synthesizeImplicitRoutesFrom"); got != 1 {
-				t.Errorf("%s synthesizeImplicitRoutesFrom calls = %d, want 1 build-derived eligibility use", owner, got)
+			if got := namedCallCountInNode(body, "DeriveRoutesFrom"); got != 1 {
+				t.Errorf("%s DeriveRoutesFrom calls = %d, want exactly 1 config-only derivation", owner, got)
 			}
-			if got := namedCallWithArgsCount(body, "synthesizeImplicitRoutesFrom", "cfg", "built", "Eligible"); got != 1 {
-				t.Errorf("%s must pass exactly (cfg, built.Eligible), matches = %d", owner, got)
+			if got := singleIdentArgCallCount(body, "DeriveRoutesFrom", "cfg"); got != 1 {
+				t.Errorf("%s must derive from cfg alone, matches = %d", owner, got)
 			}
 			for _, forbidden := range []string{
 				"LoggedInProviders",
 				"SynthesizeImplicitRoutes",
+				"LoadSnapshot",
 			} {
 				if got := namedCallCountInNode(body, forbidden); got != 0 {
-					t.Errorf("%s calls %s %d time(s), re-reading account eligibility", owner, forbidden, got)
+					t.Errorf("%s calls %s %d time(s), re-reading account storage for routing", owner, forbidden, got)
 				}
 			}
 		}
 		constructor := namedFunction(t, rootPackage, "NewProxyWithStatePath")
-		assertUsesBuildEligibility("NewProxyWithStatePath", constructor.Body)
+		assertUsesConfigDerivedRoutes("NewProxyWithStatePath", constructor.Body)
 		reload := namedMethod(t, rootPackage, "Proxy", "Reload")
-		assertUsesBuildEligibility("Proxy.Reload", reload.Body)
+		assertUsesConfigDerivedRoutes("Proxy.Reload", reload.Body)
 	})
 
 	t.Run("internal pricing remains a repository-leaf package", func(t *testing.T) {

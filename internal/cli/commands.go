@@ -185,13 +185,13 @@ func RunRestore(args []string) {
 	}
 }
 
-// takeoverFacts computes the application-owned implicit routes and (only when a
+// takeoverFacts computes the application-owned route table (derived from
+// provider model lists, explicit routes overriding) and (only when a
 // metadata-writing client is selected) hydrated models.dev metadata for the
 // takeover package.
 func takeoverFacts(cfg *configdomain.Config, which string) takeover.ModelFacts {
-	implicit, _ := app.SynthesizeImplicitRoutes(cfg, app.AccountStore())
 	facts := takeover.ModelFacts{
-		Implicit:      implicit,
+		Routes:        app.RouteTable(cfg),
 		SourceDefault: -1,
 	}
 	if takeover.WritesMetadata(takeover.ListClients(cfg, which)) {

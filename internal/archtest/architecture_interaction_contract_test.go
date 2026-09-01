@@ -162,8 +162,30 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 	t.Run("application owns command registration and main only crosses the OS boundary", func(t *testing.T) {
 		app, _ := parseGoFile(t, "internal/cli/app.go")
 		constructor := namedFunction(t, app, "NewApplication")
-		if got := namedCallCountInNode(constructor.Body, "ProcessCommand"); got != 21 {
-			t.Errorf("newApplication processCLICommand registrations = %d, want 21 concrete command bindings", got)
+		// Every entry in the Commands registry literal must carry exactly one
+		// ProcessCommand binding and vice versa — the count is derived from the
+		// literal itself so adding/removing a command cannot drift past this
+		// check via a stale hardcoded number.
+		registryEntries := 0
+		ast.Inspect(constructor.Body, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok || len(lit.Elts) == 0 {
+				return true
+			}
+			mt, ok := lit.Type.(*ast.MapType)
+			if !ok {
+				return true
+			}
+			if ident, ok := mt.Value.(*ast.Ident); ok && ident.Name == "Command" {
+				registryEntries = len(lit.Elts)
+			}
+			return true
+		})
+		if registryEntries == 0 {
+			t.Fatal("no Commands map literal found in NewApplication — registry-count contract is blind")
+		}
+		if got := namedCallCountInNode(constructor.Body, "ProcessCommand"); got != registryEntries {
+			t.Errorf("newApplication: %d ProcessCommand registrations for %d Commands registry entries — every registered command needs a binding and vice versa", got, registryEntries)
 		}
 
 		sites := rootFunctionReferenceSites(t, "newApplication")

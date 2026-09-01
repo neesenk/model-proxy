@@ -2,7 +2,6 @@ package takeover_test
 
 import (
 	"fmt"
-	"model-proxy/internal/accounts"
 	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
@@ -141,9 +140,8 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 			factsSources[provider][model] = int(source)
 		}
 	}
-	implicit, _ := app.SynthesizeImplicitRoutes(cfg, accounts.NewStore(cliframework.HomeDir()))
 	facts := takeover.ModelFacts{
-		Implicit:       implicit,
+		Routes:         app.RouteTable(cfg),
 		Meta:           meta,
 		Sources:        factsSources,
 		SourceDefault:  int(app.SrcDefault),

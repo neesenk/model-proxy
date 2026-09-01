@@ -25,7 +25,7 @@
 ```
 
 - **Provider 层**（`internal/provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
-- **Routes 层**：对外暴露模型名 → 一组 `provider/model` 目标。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由；目标可声明 `protocol:` 触发协议转换；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由
+- **Routes 层**：routes 自动推导 —— 每个 provider 的 models 按模型名聚合为「对外暴露名 → 一组 `provider/model` 目标」（provider 的 `alias` 可把上游模型改名统一暴露，`priority` 继承 provider 的 priority，lower wins）。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由；显式 `routes:` 仅用于覆盖（fusion 目标、`protocol:` 协议转换、特殊排序）；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由。查看：`model-proxy routes [model]` / Web UI Config
 - 凭据由 `login <provider>` 管理，不落 config；config `credentials:` 统一选择 apikey 池与 codex/aqp OAuth store 的存储后端（`file` 默认 / `keychain`：秘密值进 OS keychain、池文件只留元数据），env `MP_CRED_STORE` 仅作为 OAuth 侧的显式 override
 
 ## 安装
@@ -92,12 +92,9 @@ claude_mapping:
   claude-opus-4-7: glm-5.2          # anthropic-only: claude 别名 → 对外模型名
   claude-sonnet-4-6: deepseek-v4-pro
 
-routes:
-  glm-5.2:
-    - {provider: aqp, model: glm-5.2, priority: 1}
-    - {provider: zhipu,   model: glm-5.2, priority: 2}   # failover 备选
-  gpt-5.5:
-    - {provider: codex, model: gpt-5.5, priority: 1}
+# routes 自动推导：每个 provider 的 models 按暴露名聚合（alias 可改名），
+# priority 继承 provider 的 priority（lower wins，失败逐一 failover）。
+# 查看：model-proxy routes [model]
 
 # takeover:              # 接管客户端配置（全部字段有默认值，可省略整块）
 #   claude: ~/.claude/settings.json
@@ -145,7 +142,7 @@ routes:
 
 > **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities`/`tool_call` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。网络、HTTP 或响应解析失败时已有缓存继续可用且不会被覆盖；无可用缓存时 `models pull` 明确报错，普通列表/刷新与 takeover 按原有 best-effort 语义使用保守默认值。匹配不到的模型会在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
 >
-> **隐式路由**：某个模型即使没在 `routes` 里配，只要某个**已登录** provider 的 `models:` 列了它，代理会自动按模型名路由到（字母序）首个 provider。若多个已登录 provider 都提供且无显式 route，只用首个并在 `models` 命令 / Web UI 发出歧义告警。显式 `routes` 永远优先（要做 failover/优先级控制仍需显式配置）。
+> **路由推导**：`routes` 块默认完全不用写。每个 provider `models:` 里列出的模型自动按暴露名聚合成多目标路由（多个 provider 提供同名模型即自动 failover 组），`priority` 继承 provider 的 `priority:`（lower wins），provider 的 `alias:` 可把上游模型改名后统一暴露（如 kimi-code 的 `k3` → `kimi-k3`）。显式 `routes:` 仅用于覆盖：fusion 目标、`protocol:` 转换声明、特殊排序。查看生效表：`model-proxy routes [model]`、Web UI Config 页或 `GET /api/config`。
 
 ## 用法
 
@@ -211,6 +208,7 @@ model-proxy restore opencode
 model-proxy config init            # TTY 下是引导式上手向导（探测客户端→选 provider→可选 takeover→打印下一步）；管道/脚本下生成完整注释模板
 model-proxy config print           # 打印生效配置
 model-proxy config check           # 校验配置
+model-proxy routes [model]         # 查看（自动推导的）路由表：全部暴露模型或单个模型的有序目标
 
 # 调度诊断
 model-proxy schedule               # 查询运行中的 daemon：每 model 当前调度到哪个 provider（GET /debug/schedule）
@@ -355,17 +353,18 @@ web:
 |---|---|---|
 | Anthropic | `POST /v1/messages` | provider 的 `/messages` |
 | OpenAI | `POST /v1/responses`, `/v1/chat/completions` | provider 的同路径 |
-| 模型列表 | `GET /v1/models` | 合并 routes + 隐式路由 + claude_mapping 的模型名 |
+| 模型列表 | `GET /v1/models` | 合并推导路由 + claude_mapping 的模型名 |
 
 **按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。两个协议对客户端 `/v1` 前缀的处理相反：OpenAI 协议会剥掉客户端的 `/v1`，故 `openai_base_url` 自带版本段（如 `…/v1`、`…/paas/v4`）；Anthropic 协议保留客户端的 `/v1/messages`，故 `anthropic_base_url` **不带** `/v1`（如 `…/anthropic`、`…/api/plan`）。
 
 **协议转换（opt-in）**：路由目标声明 `protocol:` 且与客户端协议不同时，代理自动做 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 三种协议的双向转换（请求 + 响应 + 流式，**tools 全链路**：`tools`/`tool_choice`/`tool_use`/`tool_result` 结构映射、流式增量事件互转、usage/cache token 透传）——比如让 Claude Code（Anthropic 协议）直连只有 OpenAI 端点的后端：
 
 ```yaml
+# 显式 routes 仅在需要覆盖推导时写（如声明跨协议转换）：
 routes:
   glm-5.2:
     # 客户端说 anthropic，zhipu 这条走它的 openai 端点 → 自动转换
-    - {provider: zhipu, model: glm-5.2, priority: 1, protocol: openai}
+    - {provider: zhipu, model: glm-5.2, protocol: openai}
 ```
 
 转换是 per-target 的；同协议目标通常保持字节级透传，Codex Responses 例外：会清理其明确拒绝的采样/输出上限参数。Responses 客户端跨协议使用 `previous_response_id` 时，proxy 以 30 分钟短期本地状态展开完整历史（有界、0600 原子持久化；只缓存 completed/token-limit incomplete）。客户端 `stream` 与上游实际模式相反时会聚合 SSE 或合成 SSE。跨协议 4xx 保留 HTTP 状态和错误信息并改写为客户端错误格式；已知无法无损表达的请求先尝试兼容 target，最终按客户端格式返回 400 `unsupported_protocol_conversion`；缺协议终止事件、scanner 失败或工具 arguments JSON 未闭合时 fail-closed。document/input_file/file、tool_result 图片与 `is_error`、hosted web_search/tool_search（含发现工具物化）、citations 和 signed/redacted reasoning replay 均可转换或采用明确可见降级；到 Anthropic 的转换自动生成 prompt-cache breakpoints，Chat↔Responses 保留 cache key/retention。内联图片跨协议时限制为 4 MiB/4096px，413 时仅压缩重试一次（1 MiB/2048px）。MCP namespace 经 Chat/Anthropic 目标均可双向压平与恢复；custom/freeform 工具经 Chat 双向保留，经 Anthropic 时因没有等价 raw-input 契约而明确拒绝。reasoning effort 按 provider 方言渲染。unsupported server tools、audio、多 choice/logprobs 等不可表达特性会被能力扫描器拒绝，不再静默丢弃。
@@ -515,10 +514,11 @@ fusion:
     judge: {provider: zhipu, model: glm-5.2}   # 可选：汇总前先出「共识/冲突/遗漏」评审报告
     # instruction: "..."                  # 可选：覆盖内置的结果汇总指令模板
 
+# fusion 目标通过显式 routes 暴露（推导不含 fusion）：
 routes:
   hard-question:
-    - {provider: fusion, model: hard-coding, priority: 1}
-    - {provider: zhipu, model: glm-5.2, priority: 2}   # 可叠普通 target 兜底
+    - {provider: fusion, model: hard-coding}
+    - {provider: zhipu, model: glm-5.2}   # 可叠普通 target 兜底
 ```
 
 工作机制与语义：
@@ -628,9 +628,8 @@ providers:
 claude_mapping:
   claude-opus-4-8: deepseek-v4-pro   # DeepSeek 服务端也会自动映射 claude-opus*→v4-pro
 
-routes:                     # 可选：不配 routes 时，models 里且已 login 的模型会自动隐式路由
-  deepseek-v4-pro:
-    - {provider: deepseek, model: deepseek-v4-pro, priority: 1}
+# routes 自动推导：models 里列出的模型即自动暴露为路由（priority 继承
+# provider 的 priority；不需要写 routes 块）。
 ```
 
 ```bash
@@ -651,10 +650,7 @@ providers:
     usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
     models:
       - doubao-seed-1-8-251228
-
-routes:
-  doubao-seed-1-8-251228:
-    - {provider: volcengine, model: doubao-seed-1-8-251228, priority: 1}
+# routes 自动推导：无需 routes 块。
 ```
 
 ```bash

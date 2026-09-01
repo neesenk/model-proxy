@@ -243,8 +243,9 @@ func TestConfigGetProviderModels(t *testing.T) {
 
 // TestConfigGetRoutes asserts /api/config surfaces structured routes
 // (exposed -> [{provider, model, priority}]) so the Routes form can prefill +
-// edit each route's targets as provider/model/priority rows. Priority is always
-// emitted (0 when unset in config).
+// edit each route's targets as provider/model/priority rows. A target that
+// omits priority inherits its provider's priority (0 when the provider sets
+// none either).
 func TestConfigGetRoutes(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
@@ -399,5 +400,52 @@ func TestConfigEditSchedulingNewIntKey(t *testing.T) {
 	got, _ := os.ReadFile(cfgPath)
 	if strings.Contains(string(got), "!!str") {
 		t.Errorf("emitted YAML has explicit !!str tag (should infer int):\n%s", got)
+	}
+}
+
+// TestConfigGetDerivedRoutesAndProviderMeta asserts /api/config surfaces the
+// EFFECTIVE route table: models derived from provider model lists (aliases
+// applied, priority inherited per provider) alongside explicit routes, plus
+// provider_meta (priority + alias) for the UI.
+func TestConfigGetDerivedRoutesAndProviderMeta(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.yaml"
+	os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:0\nproviders:\n  kimi-code:\n    provider_id: kimi-code\n    openai_base_url: https://x\n    priority: 1\n    alias: {k3: kimi-k3}\n    models: [k3]\n  aqp:\n    provider_id: aqp\n    openai_base_url: https://y\n    priority: 2\n    models: [kimi-k3]\n"), 0o644)
+	w, _ := newTestWeb(t)
+	w.configFile = cfgPath
+	rec := httptest.NewRecorder()
+	serveWeb(w, rec, httptest.NewRequest("GET", "/api/config", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ProviderMeta map[string]struct {
+			Priority int               `json:"priority"`
+			Alias    map[string]string `json:"alias"`
+		} `json:"provider_meta"`
+		Routes map[string][]struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			Priority int    `json:"priority"`
+		} `json:"routes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+	}
+	if pm := resp.ProviderMeta["kimi-code"]; pm.Priority != 1 || pm.Alias["k3"] != "kimi-k3" {
+		t.Errorf("provider_meta[kimi-code] = %+v, want priority 1 + alias k3→kimi-k3", pm)
+	}
+	got := resp.Routes["kimi-k3"]
+	if len(got) != 2 {
+		t.Fatalf("routes[kimi-k3] = %d targets, want 2 (aggregated): %+v", len(got), got)
+	}
+	if got[0].Provider != "kimi-code" || got[0].Model != "k3" || got[0].Priority != 1 {
+		t.Errorf("target[0] = %+v, want kimi-code/k3 with inherited priority 1", got[0])
+	}
+	if got[1].Provider != "aqp" || got[1].Model != "kimi-k3" || got[1].Priority != 2 {
+		t.Errorf("target[1] = %+v, want aqp/kimi-k3 with provider priority 2", got[1])
+	}
+	if _, aliasedAway := resp.Routes["k3"]; aliasedAway {
+		t.Errorf("aliased-away k3 must not appear as its own route: %+v", resp.Routes)
 	}
 }

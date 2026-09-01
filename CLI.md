@@ -158,7 +158,7 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 takeover <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
 ```
 
-逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再改写指向代理。含隐式路由模型；opencode/pi 额外 hydrate models.dev 元数据。
+逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再改写指向代理。含推导路由模型；opencode/pi 额外 hydrate models.dev 元数据。
 
 ### 输出
 
@@ -412,11 +412,6 @@ PROVIDER       MODEL ID               NAME                 CTX         OUTPUT   
 列宽：PROVIDER 12 / MODEL ID 22 / NAME 20 / CTX 10 / OUTPUT 8 / MODALITIES 16 / SRC 10（`pad`，左对齐）。每 provider 一组模型（config 名 ∪ hydrate 元数据键，排序）。`SRC` = `models.dev` / `default` / 空。
 
 - 未知 provider -> stderr `unknown provider "<NAME>"; available: <providerNames>` + exit 1。
-- 末尾（有歧义隐式路由时）stderr：
-  ```
-  ⚠ implicit-route warnings:
-    <WARNING>
-  ```
 
 ### `models pull`（强制刷新 models.dev 缓存）
 
@@ -481,7 +476,7 @@ config init|print|check
 1. 探测本机已安装的编程客户端（claude/opencode/codex/pi 的 config 路径存在性，复用 takeover 包的路径知识），列出探测结果；
 2. 逐个询问启用哪些 provider（清单 = 内置模板 providers ∩ provider 注册表，不硬编码第二份），提示形如 `Enable zhipu (provider=zhipu, 10 models)? [y/N] `（一律默认 N，EOF = N）；
 3. 写出**最小 config.yaml**：只含选中 provider 的块，routes 过滤到选中 provider（整路由无存活 target 则删），claude_mapping 只留指向存活路由的别名；落盘前重新 validate（fail-closed）。一个都没选 -> stderr `no providers selected — config.yaml not written` + exit 1；
-4. 探测到客户端时询问 `Take over detected client configs now (...)? [y/N] `，确认则当场执行 takeover（幂等备份机制与 `takeover` 命令相同）；最后打印下一步命令：每个选中 provider 的 `model-proxy login <name>`、（未执行 takeover 时）每个探测到客户端的 `model-proxy takeover <client>`、`model-proxy serve`、`model-proxy test <model>`（首个存活路由名；无存活路由时为首个 provider 的首个模型，依赖隐式路由）。
+4. 探测到客户端时询问 `Take over detected client configs now (...)? [y/N] `，确认则当场执行 takeover（幂等备份机制与 `takeover` 命令相同）；最后打印下一步命令：每个选中 provider 的 `model-proxy login <name>`、（未执行 takeover 时）每个探测到客户端的 `model-proxy takeover <client>`、`model-proxy serve`、`model-proxy test <model>`（首个选中 provider 的首个模型，暴露名含 alias）。
 
 模板里的 `scheduling:` 整块默认是注释掉的（每行带 `(default N)`）：所有字段都有代码默认（`internal/config` 的 accessor），不写即用默认，需覆盖时取消注释对应行。`config check` 的 `scheduling:` 摘要行始终打印**生效值**（已覆盖则显覆盖值，未配则显代码默认）。`--config` 与其他命令一致、位置无关（`config --config X check` 与 `config check --config X` 等价）。
 
@@ -547,6 +542,44 @@ shadow:
   <exposed>: {provider: <P>, model: <M>, protocol: <anthropic|openai>}
 ```
 路由每次已交付请求**另发一份**相同 prompt 到 `<P>/<M>`（fire-and-forget，只记录不返回，`request_id` 前缀 `shadow-`）。`protocol` 可选：声明影子后端的协议（默认与请求 body 的协议一致）；不同则 shadow 请求会做对应转换。需 `request_log.enabled`。`replay <id> --to <P>` 见 §15。
+
+---
+
+## 8b. `routes [model]` — 路由表查询（离线，不需 daemon）
+
+```
+routes            # 列出全部暴露模型的推导路由表
+routes <model>    # 单个模型的路由详情
+```
+
+逻辑（`internal/cli/routes.go` 的 `CmdRoutes`）：纯 config 计算（`app.RouteTable` —— provider models 按暴露名聚合，alias 改名，priority 继承 provider；显式 `routes:` 覆盖同名推导路由），不访问 daemon。
+
+### stdout（列表模式）
+
+```
+MODEL                        TARGETS (in scheduling order)
+glm-5.3                      zhipu/glm-5.3 → aqp/glm-5.3 → shopee/glm-5.3 → volcengine/glm-5.3
+kimi-k3                      kimi-code/k3 → aqp/kimi-k3 → shopee/kimi-k3 → volcengine/kimi-k3
+```
+- 目标按 `(priority, provider)` 排序；`provider/上游真实模型名`，别名模型显示真实名。
+- 无路由 -> `(no routes)` + exit 0。
+
+### stdout（详情模式）
+
+```
+route kimi-k3 — 4 target(s)
+  alias of kimi-code/k3
+  • kimi-code    model=k3                       priority=1 tier=plan
+  • aqp          model=kimi-k3                  priority=2 tier=plan
+```
+- 第二行来源说明：alias / `derived from provider model lists` / `explicit routes: entry (overrides derivation)`。
+- 目标声明协议时追加 `protocol: <P> (declared)` 行。
+
+### 失败（stderr + exit 1）
+
+| 场景 | 文案 |
+|---|---|
+| 未知模型 | `✗ no route for model "<M>"; available: <SORTED_NAMES>` |
 
 ---
 
@@ -681,9 +714,9 @@ model-proxy  v<VERSION> · <UPTIME> · <LISTEN>
 ```
 `q.Err` 非空 -> `      no data (<ERR>)`(dim)。`<BAR>` = `progressBar(usedPct, 16)`。`<PCT>` 为已用百分比，保留小数点后一位（如 `40.0%`）。`resets` 仅当 `ResetsAt` 非零（`formatResetAt`）。
 
-**implicit-route warnings**（仅当有 `st.Warnings`）：
+**routing warnings**（仅当有 `st.Warnings`）：
 ```
-⚠  implicit-route warnings
+⚠  routing warnings
   <WARNING>
 ```
 
@@ -791,7 +824,7 @@ Takeover
 
 - 每条诊断发现的修复建议以分级标签开头：`[可立即执行]` = 现成 CLI 命令；`[需要凭据]` = 需要登录/账号的命令；`[需要改配置]` = 指出要改的 config 键。建议里的 provider 一律用池父名（虚拟 id `parent#<account>` 归一到 `parent`）。
 - 结论区按严重度排序：✗ route 全灭 -> ⚠（pin / 配额将尽 / warnings / takeover 漂移）-> ✓ 健康 route 落点；无 ✗/⚠ 时首行 `✓ no problems found`。
-- route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从 config routes + 隐式路由 + 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
+- route 全灭判定：schedule `ordered` 中 `available=true` 数为 0。daemon 的 decideOrder 只返回当前可调度目标（全灭时 `ordered` 为空），故 target 数与恢复时间候选由 CLI 端从生效路由表（推导 + 显式 routes）+ 池展开推导；`<CAUSE>` = `quota cooldown` / `daily cooldown` / `rate-limit cooldown` / `circuit breaker` / `model lock`，跨目标取最早恢复（模型锁按 target 的 model 精确匹配，数据源为 `/api/status` 的 `model_locks`）。
 - `request_log` 未开启时 Recent failures 节是一行 dim 提示（`request_log disabled — …`），不算错误；无任何失败记录时显示 `none recorded`。
 - takeover 三态：`not taken over`（无 .bak）/ `✓`（指针相符）/ `✗ drift`（指针不符、文件丢失或不可读；漂移细节进结论区）。各 client 期望值与 takeover 写入完全一致：claude `env.ANTHROPIC_BASE_URL`、opencode `provider[<pid>].options.baseURL`（含 `/v1` 后缀）、codex `model_provider` + `[model_providers."<pid>"]` 的 `base_url`、pi `providers[<pid>].baseUrl`。
 - 漂移审计：`guard.audit` 开启（默认）时，每个漂移 client 追加一条 `kind=drift`、`agent=doctor` 的安全审计记录（`seclog.AppendSync`），`detail` 只含 `client=<名> expected=<期望host> actual=<实际host>`——`net/url` 解析取 `Host`，永不含 URL 路径与查询串；无 scheme 的指针（`evil-host:8317/v1` 会被误解析为 scheme）回退取第一个 `/` 前的部分（过滤控制字符），非 URL 占位值（含空格/括号的 `(file missing)` 等）归一为 `(no-url)`。**同一 client 当天已有 drift 记录则不重复追加**（漂移通常持续到用户修复；去重查询失败不阻断追加）。`guard.audit: false` 不写；append 失败只降级为 stderr `⚠ security audit append failed: <ERR>`，doctor 输出与 exit code 不变。
@@ -808,7 +841,7 @@ Takeover
 test <model> [--config PATH]
 ```
 
-逻辑（`internal/cli/models/test.go` 的 `CmdTest`）：离线解析 `<model>` 的路由目标（claude_mapping 别名先翻译；显式 routes 按 priority 升序；无显式路由则回退隐式路由），对**每个**目标由 `probeRouteTarget` 调用 `internal/probe.Exchange` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线）。不查询/不改动运行态。
+逻辑（`internal/cli/models/test.go` 的 `CmdTest`）：离线解析 `<model>` 的路由目标（claude_mapping 别名先翻译；生效路由表 = 推导聚合 + 显式 routes 覆盖，按 priority 升序），对**每个**目标由 `probeRouteTarget` 调用 `internal/probe.Exchange` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线）。不查询/不改动运行态。
 
 ### stdout（每目标一行）
 
@@ -980,12 +1013,14 @@ by action
 
 改契约时，除更新本文档外，还需同步这些测试断言（`strings.Contains` 精确文案）：
 
-- `internal/cli/models_cli_test.go`：`models refresh` 的 `config: added/removed ...`、fallback 通知、`models` 歧义告警、`models pull`；`internal/cli/cli_takeover_test.go`：takeover/restore。
+- `internal/cli/models_cli_test.go`：`models refresh` 的 `config: added/removed ...`、fallback 通知、`models pull`；`internal/cli/cli_takeover_test.go`：takeover/restore。
 - `internal/cli/models_cli_test.go`：`models refresh` 未知/无参数 provider；`internal/cli/cli_subcommands_test.go`：`config` 子命令。
 - `internal/cli/models/models_check_test.go`：`PrintKeptModels` / `PrintFilterSummary` 输出。
 - `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
 - `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
 - `internal/cli/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
 - `internal/cli/shadow_report_render_test.go`：`shadow report` 表头/数据列/截断/紧凑数字与 disabled/empty 提示文案；`internal/cli/shadow_report_cmd_test.go`：`--from`/`--to` query 透传（`MakeURLQuery`）。
+- `internal/cli/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约。
+- `internal/app/webapi_docs_contract_test.go` + `internal/web/jstests/contract.test.mjs`：`GET /api/config` 文档键 ↔ `appapi.ConfigDocument` 字段 ↔ 前端 `configCache` 读取字段的同步契约。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

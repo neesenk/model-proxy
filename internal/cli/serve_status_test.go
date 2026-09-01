@@ -234,9 +234,9 @@ func TestRenderWarnings(t *testing.T) {
 		t.Errorf("empty warnings should render nothing, got %q", got)
 	}
 	out := cli.RenderWarnings(&cli.StatusResp{Warnings: []string{
-		`model "foo" served by 2 logged-in providers (aqp, zhipu); auto-routing to aqp`,
+		`route "foo": reasoning model kimi-k2-thinking behind declared protocol conversion`,
 	}})
-	for _, want := range []string{"implicit-route warnings", "foo", "aqp", "zhipu"} {
+	for _, want := range []string{"routing warnings", "foo", "reasoning"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("warnings render missing %q:\n%s", want, out)
 		}

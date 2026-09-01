@@ -61,19 +61,14 @@ func CmdTest(args []string) {
 	}
 }
 
-// testTargetsFor resolves the probe target list for an exposed model: explicit
-// routes sorted by priority asc (lower = tried first); when the model has no
-// explicit route, the implicit-route fallback (auto-derived from logged-in
-// providers' model lists, same as forward). Nil when no route covers the model.
+// testTargetsFor resolves the probe target list for an exposed model from the
+// complete route table (derived routes aggregated from provider model lists,
+// explicit routes overriding), sorted by priority asc (lower = tried first).
+// Nil when no route covers the model.
 func testTargetsFor(cfg *configdomain.Config, model string) []configdomain.RouteTarget {
-	targets, ok := cfg.Routes[model]
+	targets, ok := app.RouteTable(cfg)[model]
 	if !ok {
-		implicit, _ := app.SynthesizeImplicitRoutes(cfg, app.AccountStore())
-		t, found := implicit[model]
-		if !found {
-			return nil
-		}
-		targets = []configdomain.RouteTarget{t}
+		return nil
 	}
 	out := append([]configdomain.RouteTarget(nil), targets...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })

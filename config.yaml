@@ -30,6 +30,7 @@ log_level: info # debug | info | warn | error
 providers:
   aqp:
     provider_id: aqp
+    priority: 2 # provider-wide route priority (lower = tried first within a tier/quota band)
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     anthropic_base_url: https://compass.llm.shopee.io/compass-api # same base without /v1; proxy keeps the client /v1/messages path
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
@@ -40,12 +41,15 @@ providers:
       - deepseek-v4-flash
       - deepseek-v4-pro
       - glm-5.2
+      - glm-5.3
+      - glm-5.3-flash
       - kimi-k3
       - gpt-5.6-luna
       - gpt-5.6-sol
       - gpt-5.6-terra
   codex:
     provider_id: codex
+    priority: 2
     openai_base_url: https://chatgpt.com/backend-api/codex
     models:
       - gpt-5.6-sol
@@ -57,6 +61,7 @@ providers:
   # (context/output/modalities) is auto-sourced from models.dev at runtime.
   zhipu:
     provider_id: zhipu
+    priority: 1
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     # capabilities:                    # optional: per-model capability declaration for request-aware
@@ -73,11 +78,12 @@ providers:
   # DeepSeek (API key via `login deepseek`). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
-  # To expose models, add routes (e.g. anthropic/openai: deepseek-v4-pro: deepseek/deepseek-v4-pro).
+  # Models listed above are auto-exposed as routes (see routes: below).
   # DeepSeek's anthropic endpoint also auto-maps claude-opus*→deepseek-v4-pro and
   # claude-sonnet*/claude-haiku*→deepseek-v4-flash server-side.
   deepseek:
     provider_id: deepseek
+    priority: 4
     billing: pay-as-you-go
     openai_base_url: https://api.deepseek.com
     anthropic_base_url: https://api.deepseek.com/anthropic
@@ -92,9 +98,10 @@ providers:
   # Volcengine Ark (火山方舟, including "Agent Plan"). API key via `login volcengine`.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
   # Ark Anthropic-compatible base (no /v1; proxy keeps /v1/messages).
-  # No routes by default — add as needed (e.g. doubao-seed-1-8-251228: volcengine/doubao-seed-1-8-251228).
+  # All listed models are auto-exposed as routes (see routes: below).
   volcengine:
     provider_id: volcengine
+    priority: 2
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
     # usage_url is the login-time key-validation endpoint: `login volcengine` GETs it
@@ -109,15 +116,19 @@ providers:
       - doubao-seed-2.0-code
       - doubao-seed-2.0-pro
       - glm-5.3
+      - glm-5.3-flash
       - kimi-k3
   shopee:
     provider_id: static
+    priority: 3
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     billing: pay-as-you-go
     models:
       - deepseek-v4-flash
       - deepseek-v4-pro
+      - glm-5.2
       - glm-5.3
+      - glm-5.3-flash
       - kimi-k3
       - gpt-5.6-luna
       - gpt-5.6-sol
@@ -133,6 +144,12 @@ providers:
   # (same static-usage_url property as zhipu/deepseek). Poolable (repeat `login`).
   kimi-code:
     provider_id: kimi-code
+    priority: 1
+    # Model alias: expose k3 under the unified third-party name kimi-k3, so the
+    # kimi-k3 route aggregates kimi-code with aqp/volcengine/shopee. The alias
+    # only renames the exposed route key; upstream still receives "k3".
+    alias:
+      k3: kimi-k3
     openai_base_url: https://api.kimi.com/coding/v1
     anthropic_base_url: https://api.kimi.com/coding
     usage_url: https://api.kimi.com/coding/v1/usages
@@ -159,8 +176,9 @@ providers:
   #    - glm-5.2
   #    - deepseek-v4-pro
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
-# exposed model name (looked up in routes below) before routing. If a called
-# anthropic model isn't listed, the called name is used as the exposed name.
+# exposed model name (from the auto-derived route table below) before routing.
+# If a called anthropic model isn't listed, the called name is used as the
+# exposed name.
 claude_mapping:
   claude-opus-4-7: glm-5.3
   claude-opus-4-8: glm-5.3
@@ -168,57 +186,20 @@ claude_mapping:
   claude-haiku-4-5: deepseek-v4-flash
   opus: glm-5.3
   sonnet: deepseek-v4-pro
-# routes: exposed model name → ordered list of provider/model targets. The proxy
-# orders targets by billing tier (plan < unknown < pay-as-you-go), then priority
-# (lower wins), then quota surplus; applies session-sticky routing + circuit-
-# breaker filtering; fails over to the next on error. Either protocol may reach
-# any exposed model; the protocol (from the request path) only selects the
-# upstream path + base URL. A pooled provider (multiple `login`s) fans a target
-# out to its accounts, round-robin across conversations. Set peak_hours on a
-# provider (see providers above) to deprioritize it during its peak window.
-# Per-target options:
-#   protocol: anthropic|openai — declare when the target's protocol differs from
-#     the client's to trigger protocol conversion (same protocol = byte-level
-#     passthrough). When omitted, the proxy's wire probe verdict picks the
-#     default (supports /responses → responses, else chat; unknown → passthrough);
-#     an explicit protocol: always wins. E.g. let a Claude Code (anthropic)
-#     client hit codex:
-#     gpt-5.5: [{provider: codex, model: gpt-5.5, priority: 1, protocol: openai}]
-#   {provider: fusion, model: <workflow>} — reference a fusion: workflow (see
-#     the fusion block at the bottom of this file).
-routes:
-  kimi-k3:
-    - {provider: kimi-code, model: k3, priority: 1}
-    - {provider: aqp, model: kimi-k3, priority: 1}
-    - {provider: volcengine, model: kimi-k3, priority: 3}
-    - {provider: shopee, model: kimi-k3, priority: 3}
-  glm-5.3:
-    - {provider: zhipu, model: glm-5.3, priority: 1}
-    - {provider: aqp, model: glm-5.3, priority: 1}
-    - {provider: volcengine, model: glm-5.3, priority: 3}
-    - {provider: shopee, model: glm-5.3, priority: 3}
-  deepseek-v4-pro:
-    - {provider: aqp, model: deepseek-v4-pro, priority: 1}
-    - {provider: shopee, model: deepseek-v4-pro, priority: 3}
-    - {provider: volcengine, model: deepseek-v4-pro, priority: 3}
-    - {provider: deepseek, model: deepseek-v4-pro, priority: 4}
-  deepseek-v4-flash:
-    - {provider: aqp, model: deepseek-v4-flash, priority: 1}
-    - {provider: shopee, model: deepseek-v4-flash, priority: 3}
-    - {provider: volcengine, model: deepseek-v4-flash, priority: 3}
-    - {provider: deepseek, model: deepseek-v4-flash, priority: 4}
-  gpt-5.6-sol:
-    - {provider: codex, model: gpt-5.6-sol, priority: 1}
-    - {provider: aqp, model: gpt-5.6-sol, priority: 1}
-    - {provider: shopee, model: gpt-5.6-sol, priority: 3}
-  gpt-5.6-terra:
-    - {provider: codex, model: gpt-5.6-terra, priority: 1}
-    - {provider: aqp, model: gpt-5.6-terra, priority: 1}
-    - {provider: shopee, model: gpt-5.6-terra, priority: 3}
-  gpt-5.6-luna:
-    - {provider: codex, model: gpt-5.6-luna, priority: 1}
-    - {provider: aqp, model: gpt-5.6-luna, priority: 1}
-    - {provider: shopee, model: gpt-5.6-luna, priority: 3}
+# routes: AUTO-DERIVED. Every provider model is exposed under its model name
+# (or its provider-level alias) and all providers serving the same name
+# aggregate into one route, ordered by provider priority (lower first, then
+# billing tier and quota surplus — see scheduling below). A pooled provider
+# (multiple `login`s) fans a target out to its accounts, round-robin across
+# conversations. Either protocol may reach any exposed model; the protocol
+# (from the request path) selects the upstream path + base URL, and the wire
+# probe picks the backend shape when a provider serves only one.
+# Inspect the derived table: `model-proxy routes [model]` or the Web UI Config
+# tab. An explicit `routes:` block is only needed for overrides — a fusion
+# target, a declared protocol conversion, or a special ordering — and it
+# replaces the derived route for that exposed name wholesale, e.g.:
+# routes:
+#   gpt-5.6: [{provider: codex, model: gpt-5.6, protocol: openai}]
 
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.

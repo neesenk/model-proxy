@@ -34,6 +34,7 @@ providers:
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1
     anthropic_base_url: https://compass.llm.shopee.io/compass-api  # same base without /v1; proxy keeps the client /v1/messages path
     provider_id: aqp
+    priority: 1   # provider-wide route priority (lower = tried first within a tier/quota band)
     aqp_mint_url: https://compass.llm.shopee.io/api/v1/cqp/ccswitch/api_key/get_or_generate
     # peak_hours:                       # multi-segment, per-segment multiplier
     #   - {window: "14:00-18:00", multiplier: 2}
@@ -45,6 +46,7 @@ providers:
     openai_base_url: https://chatgpt.com/backend-api/codex
     # client_version: "0.144.1"   # optional; auto-detected from codex CLI if omitted
     provider_id: codex
+    priority: 1
     models:
       - gpt-5.5
   # External provider (Zhipu BigModel — API key via login zhipu)
@@ -55,6 +57,7 @@ providers:
     openai_base_url: https://open.bigmodel.cn/api/paas/v4
     anthropic_base_url: https://open.bigmodel.cn/api/anthropic
     provider_id: zhipu
+    priority: 2
     # capabilities:                    # optional: per-model capability declaration for request-aware
     #   glm-4v-plus: [image, tools]    # routing (values: image, tools). A model listed here is
                                        # authoritative — models.dev metadata is ignored for it.
@@ -73,13 +76,14 @@ providers:
   # DeepSeek (API key via 'login deepseek'). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
-  # To expose models, add routes (e.g. anthropic/openai: deepseek-v4-pro: deepseek/deepseek-v4-pro).
+  # Listed models are auto-exposed as routes (see routes: below).
   # DeepSeek's anthropic endpoint also auto-maps claude-opus*→deepseek-v4-pro and
   # claude-sonnet*/claude-haiku*→deepseek-v4-flash server-side.
   deepseek:
     openai_base_url: https://api.deepseek.com
     anthropic_base_url: https://api.deepseek.com/anthropic
     provider_id: deepseek
+    priority: 3
     billing: pay-as-you-go
     usage_url: https://api.deepseek.com/user/balance
     models:
@@ -92,6 +96,7 @@ providers:
   # login-time key-validation endpoint (GET /models with Bearer; 401/403 rejects).
   volcengine:
     provider_id: volcengine
+    priority: 3
     openai_base_url: https://ark.cn-beijing.volces.com/api/plan/v3
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
     usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
@@ -110,9 +115,15 @@ providers:
   # auto-derive at runtime). Poolable (repeat 'login').
   kimi-code:
     provider_id: kimi-code
+    priority: 1
     openai_base_url: https://api.kimi.com/coding/v1
     anthropic_base_url: https://api.kimi.com/coding
     usage_url: https://api.kimi.com/coding/v1/usages
+    # alias exposes k3 under the unified third-party name kimi-k3 (upstream
+    # still receives "k3"), so providers naming the same model differently
+    # aggregate into one route.
+    alias:
+      k3: kimi-k3
     models:
       - kimi-for-coding
       - kimi-for-coding-highspeed
@@ -137,8 +148,9 @@ providers:
       - deepseek-v4-pro
 
 # claude_mapping: anthropic-only. Translates a claude-* client model name to an
-# exposed model name (looked up in routes below) before routing. If a called
-# anthropic model isn't listed, the called name is used as the exposed name.
+# exposed model name (from the auto-derived route table below) before routing.
+# If a called anthropic model isn't listed, the called name is used as the
+# exposed name.
 claude_mapping:
   claude-opus-4-7: glm-5.2
   claude-opus-4-8: glm-5.2
@@ -147,31 +159,24 @@ claude_mapping:
   sonnet: deepseek-v4-pro
   claude-haiku-4-5: deepseek-v4-flash
 
-# routes: exposed model name → ordered list of provider/model targets. The proxy
-# schedules non-peak providers first, then by priority (lower wins), and fails
-# over to the next on error. Either protocol may reach any exposed model; the
-# protocol (from the request path) only selects the upstream path + base URL.
-# Set peak_hours on a provider (see providers above) to deprioritize it during
-# its peak window.
-# Per-target options:
-#   protocol: anthropic|openai — declare when the target's protocol differs from
-#     the client's to trigger protocol conversion (same protocol = byte-level
-#     passthrough). E.g. let a Claude Code (anthropic) client hit codex:
-#     gpt-5.5: [{provider: codex, model: gpt-5.5, priority: 1, protocol: openai}]
+# routes: AUTO-DERIVED — this block is intentionally omitted. Every provider
+# model is exposed under its model name (or its provider-level alias) and all
+# providers serving the same name aggregate into one route, ordered by provider
+# priority (lower first), then billing tier and quota surplus; the proxy fails
+# over to the next target on error. Either protocol may reach any exposed
+# model; the protocol (from the request path) selects the upstream path + base
+# URL. Set peak_hours on a provider to deprioritize it during its peak window.
+# Inspect the derived table: 'model-proxy routes [model]' or the Web UI
+# Config tab. An explicit routes: block is only needed for overrides — it
+# replaces
+# the derived route for that exposed name wholesale:
+#   protocol: anthropic|openai — declare when the target requires cross-protocol
+#     conversion, e.g. a Claude Code (anthropic) client hitting codex:
+#     gpt-5.5: [{provider: codex, model: gpt-5.5, protocol: openai}]
 #   {provider: fusion, model: <workflow>} — reference a fusion: workflow (see
 #     the fusion block at the bottom of this file).
-routes:
-  glm-5.2:
-    - {provider: aqp, model: glm-5.2, priority: 1}
-    - {provider: zhipu,   model: glm-5.2, priority: 2}
-  deepseek-v4-pro:
-    - {provider: aqp,  model: deepseek-v4-pro, priority: 1}
-    - {provider: deepseek, model: deepseek-v4-pro, priority: 2}
-  deepseek-v4-flash:
-    - {provider: aqp,  model: deepseek-v4-flash, priority: 1}
-    - {provider: deepseek, model: deepseek-v4-flash, priority: 2}
-  gpt-5.5:
-    - {provider: codex, model: gpt-5.5, priority: 1}
+# routes:
+#   gpt-5.5: [{provider: codex, model: gpt-5.5, protocol: openai}]
 
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.
 # Every field has a code default (owned by internal/config), so this entire

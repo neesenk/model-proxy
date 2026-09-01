@@ -56,9 +56,9 @@ func Probe(client *http.Client, prov configdomain.Provider, impl provider.Provid
 }
 
 // ProbeModel picks the model id used in probe bodies: the provider's first
-// configured model, else the first route target pointing at it, else the
-// implicit route for it.
-func ProbeModel(cfg *configdomain.Config, implicit map[string]configdomain.RouteTarget, provName string) string {
+// configured model, else the first route target pointing at it, else a
+// derived route target for it.
+func ProbeModel(cfg *configdomain.Config, derived map[string][]configdomain.RouteTarget, provName string) string {
 	if ms := cfg.Providers[provName].Models; len(ms) > 0 {
 		return ms[0]
 	}
@@ -69,9 +69,11 @@ func ProbeModel(cfg *configdomain.Config, implicit map[string]configdomain.Route
 			}
 		}
 	}
-	for _, t := range implicit {
-		if t.Provider == provName {
-			return t.Model
+	for _, targets := range derived {
+		for _, t := range targets {
+			if t.Provider == provName {
+				return t.Model
+			}
 		}
 	}
 	return ""

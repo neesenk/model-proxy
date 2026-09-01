@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"io"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/takeover"
@@ -8,110 +9,111 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-// implicit_routes_test.go covers synthesizeImplicitRoutesFrom (login-aware
-// auto-routing for models not in routes). login status is injected directly so
-// the pure core is tested without credential files.
+// implicit_routes_test.go covers DeriveRoutesFrom / RouteTable /
+// BuildExpandedRoutes (config-only route derivation: per-provider priority,
+// model aliases, aggregation by exposed name, explicit-route override).
 
-func TestSynthesizeImplicitRoutes_SingleProviderAutoRoute(t *testing.T) {
+func TestDeriveRoutesFrom_AggregatesByExposedNameWithProviderPriority(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"zhipu": {Provider: "zhipu", Models: []string{"glm-4.6", "glm-5.2"}},
+			"kimi-code":  {Provider: "kimi-code", Models: []string{"k3", "kimi-for-coding"}, Priority: 1, Alias: map[string]string{"k3": "kimi-k3"}},
+			"aqp":        {Provider: "aqp", Models: []string{"kimi-k3", "glm-5.3"}, Priority: 2},
+			"volcengine": {Provider: "volcengine", Models: []string{"kimi-k3"}, Priority: 3},
+		},
+	}
+	derived := DeriveRoutesFrom(cfg)
+
+	// kimi-k3 aggregates three providers (kimi-code under its k3 alias); each
+	// target keeps the REAL upstream model name and inherits its provider's
+	// priority; ordering is (priority, provider).
+	want := []RouteTarget{
+		{Provider: "kimi-code", Model: "k3", Priority: 1},
+		{Provider: "aqp", Model: "kimi-k3", Priority: 2},
+		{Provider: "volcengine", Model: "kimi-k3", Priority: 3},
+	}
+	if got := derived["kimi-k3"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("derived kimi-k3 = %+v, want %+v", got, want)
+	}
+	// Non-aliased models keep their own name.
+	if got := derived["glm-5.3"]; len(got) != 1 || got[0].Provider != "aqp" || got[0].Model != "glm-5.3" {
+		t.Errorf("derived glm-5.3 = %+v, want single aqp target", got)
+	}
+	if _, aliased := derived["k3"]; aliased {
+		t.Error("aliased model k3 must not stay exposed under its real name")
+	}
+	if _, ok := derived["kimi-for-coding"]; !ok {
+		t.Error("kimi-for-coding should be derived under its own name")
+	}
+}
+
+func TestRouteTable_ExplicitRouteOverridesDerived(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"aqp":   {Provider: "aqp", Models: []string{"foo"}, Priority: 2},
+			"zhipu": {Provider: "zhipu", Models: []string{"foo", "bar"}, Priority: 1},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}}, // explicit
+			// Explicit override wins wholesale for this name.
+			"foo": {{Provider: "zhipu", Model: "foo"}},
+			// An explicit name with no derived counterpart is kept as-is.
+			"hard": {{Provider: "fusion", Model: "hard-coding"}},
 		},
 	}
-	implicit, warnings := synthesizeImplicitRoutesFrom(cfg, map[string]bool{"zhipu": true})
-
-	// glm-4.6: not routed, single logged-in provider → implicit route, no warning.
-	got, ok := implicit["glm-4.6"]
-	if !ok {
-		t.Fatal("glm-4.6 should get an implicit route")
+	table := RouteTable(cfg)
+	if got := table["foo"]; len(got) != 1 || got[0].Provider != "zhipu" {
+		t.Errorf("explicit foo route should override the derived aggregation, got %+v", got)
 	}
-	if got.Provider != "zhipu" || got.Model != "glm-4.6" {
-		t.Errorf("implicit glm-4.6 = %+v, want provider=zhipu model=glm-4.6", got)
+	// Explicit targets without their own priority inherit the provider's.
+	if got := table["foo"]; len(got) != 1 || got[0].Priority != 1 {
+		t.Errorf("explicit foo target should inherit zhipu priority 1, got %+v", got)
 	}
-	// glm-5.2 is explicitly routed → no implicit.
-	if _, dup := implicit["glm-5.2"]; dup {
-		t.Error("explicitly-routed glm-5.2 should not get an implicit route")
+	if got := table["bar"]; len(got) != 1 || got[0].Provider != "zhipu" || got[0].Priority != 1 {
+		t.Errorf("derived bar = %+v, want single zhipu target with priority 1", got)
 	}
-	if len(warnings) != 0 {
-		t.Errorf("single-provider implicit route should not warn: %v", warnings)
+	if got := table["hard"]; len(got) != 1 || got[0].Provider != "fusion" || got[0].Model != "hard-coding" {
+		t.Errorf("explicit fusion route = %+v", got)
 	}
 }
 
-func TestSynthesizeImplicitRoutes_MultipleProvidersWarnsAndPicksFirst(t *testing.T) {
+func TestBuildExpandedRoutes_FansOutDerivedAndExplicit(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"aqp":   {Provider: "aqp", Models: []string{"foo"}}, // alphabetically first
-			"zhipu": {Provider: "zhipu", Models: []string{"foo"}},
+			"aqp":   {Provider: "aqp", Models: []string{"m1"}, Priority: 2},
+			"zhipu": {Provider: "zhipu", Models: []string{"m1"}, Priority: 1},
+		},
+		Routes: map[string][]RouteTarget{
+			"m2": {{Provider: "aqp", Model: "m1"}},
 		},
 	}
-	implicit, warnings := synthesizeImplicitRoutesFrom(cfg, map[string]bool{"aqp": true, "zhipu": true})
-
-	got, ok := implicit["foo"]
-	if !ok || got.Provider != "aqp" {
-		t.Errorf("foo should auto-route to alphabetically-first 'aqp', got %+v ok=%v", got, ok)
+	expand := func(t RouteTarget) []RouteTarget {
+		if t.Provider == "zhipu" {
+			return []RouteTarget{{Provider: "zhipu", Model: t.Model, Priority: t.Priority}, {Provider: "zhipu#2", Model: t.Model, Priority: t.Priority}}
+		}
+		return []RouteTarget{t}
 	}
-	if len(warnings) != 1 {
-		t.Fatalf("want 1 ambiguity warning, got %d: %v", len(warnings), warnings)
+	out := BuildExpandedRoutes(cfg, DeriveRoutesFrom(cfg), expand)
+	if got := out["m1"]; len(got) != 3 {
+		t.Errorf("derived m1 should fan out to 3 targets, got %+v", got)
 	}
-	w := warnings[0]
-	if !strings.Contains(w, "foo") || !strings.Contains(w, "aqp") || !strings.Contains(w, "zhipu") {
-		t.Errorf("warning should name model + both providers: %q", w)
+	if got := out["m2"]; len(got) != 1 || got[0].Provider != "aqp" || got[0].Priority != 2 {
+		t.Errorf("explicit m2 = %+v, want aqp target with inherited priority 2", got)
 	}
 }
 
-func TestSynthesizeImplicitRoutes_SkipsNotLoggedIn(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"zhipu": {Provider: "zhipu", Models: []string{"glm-4.6"}},
-		},
-	}
-	// zhipu NOT logged in → no implicit route, no warning.
-	implicit, warnings := synthesizeImplicitRoutesFrom(cfg, map[string]bool{})
-	if len(implicit) != 0 {
-		t.Errorf("no logged-in providers → no implicit routes, got %v", implicit)
-	}
-	if len(warnings) != 0 {
-		t.Errorf("no logged-in providers → no warnings, got %v", warnings)
-	}
-}
-
-func TestSynthesizeImplicitRoutes_PrefersLoggedInAmongMultiple(t *testing.T) {
-	cfg := &Config{
-		Providers: map[string]Provider{
-			"aqp":   {Provider: "aqp", Models: []string{"foo"}},   // not logged in
-			"zhipu": {Provider: "zhipu", Models: []string{"foo"}}, // logged in
-		},
-	}
-	// Only zhipu logged in → route to zhipu, single candidate → no warning.
-	implicit, warnings := synthesizeImplicitRoutesFrom(cfg, map[string]bool{"zhipu": true})
-	got, ok := implicit["foo"]
-	if !ok || got.Provider != "zhipu" {
-		t.Errorf("foo should route to the only logged-in provider zhipu, got %+v ok=%v", got, ok)
-	}
-	if len(warnings) != 0 {
-		t.Errorf("single logged-in candidate → no warning, got %v", warnings)
-	}
-}
-
-// TestImplicitRoute_ForwardsUnroutedLoggedInModel: an end-to-end check that a
-// model NOT in routes but in a logged-in provider's models list is forwarded
-// (was 502 before implicit routes). Uses a zhipu apikey provider + a mock
-// upstream /chat/completions, with a real cred file under a temp HOME.
-func TestImplicitRoute_ForwardsUnroutedLoggedInModel(t *testing.T) {
-	// upstream records the model name it receives.
+// TestDerivedRoute_ForwardsAliasedModel end-to-end: a model exposed under an
+// alias is forwarded under its REAL upstream name.
+func TestDerivedRoute_ForwardsAliasedModel(t *testing.T) {
 	var gotModel string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		gotModel = protocol.ExtractModel(b)
 		w.Header().Set("content-type", "application/json")
-		w.Write([]byte(`{"id":"x","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+		fmt.Fprint(w, `{"id":"x","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"hi"}}]}`)
 	}))
 	defer up.Close()
 
@@ -124,67 +126,61 @@ func TestImplicitRoute_ForwardsUnroutedLoggedInModel(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"zhipu": {Provider: "zhipu", OpenAIBaseURL: up.URL, Models: []string{"glm-5.2", "glm-4.6"}},
-		},
-		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}}, // explicit; glm-4.6 is NOT routed
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: up.URL, Models: []string{"k3"}, Priority: 1, Alias: map[string]string{"k3": "kimi-k3"}},
 		},
 	}
 	p := newTestProxy(t, cfg)
-	// glm-4.6 should have been auto-routed to zhipu.
-	if _, ok := p.implicitRoutes["glm-4.6"]; !ok {
-		t.Fatalf("expected implicit route for glm-4.6, got implicit=%v", p.implicitRoutes)
+	if _, ok := p.derivedRoutes["kimi-k3"]; !ok {
+		t.Fatalf("expected derived route for kimi-k3, got derived=%v", p.derivedRoutes)
 	}
 
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}`))
+		strings.NewReader(`{"model":"kimi-k3","messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatalf("glm-4.6 (implicit route) status=%d want 200", resp.StatusCode)
+		t.Fatalf("kimi-k3 (derived route) status=%d want 200", resp.StatusCode)
 	}
-	if gotModel != "glm-4.6" {
-		t.Errorf("upstream received model=%q want glm-4.6", gotModel)
+	if gotModel != "k3" {
+		t.Errorf("upstream received model=%q want real name k3", gotModel)
 	}
 
-	// scheduleStatus should list the implicit route.
-	st := string(p.scheduleStatus())
-	if !strings.Contains(st, "glm-4.6") {
-		t.Errorf("scheduleStatus should list implicit route glm-4.6: %s", st)
+	if st := string(p.scheduleStatus()); !strings.Contains(st, "kimi-k3") {
+		t.Errorf("scheduleStatus should list derived route kimi-k3: %s", st)
 	}
 }
 
-// TestTakeover_IncludesImplicitRoutes: a model served only via an implicit
-// route must appear in the opencode takeover config (parity with /v1/models).
-func TestTakeover_IncludesImplicitRoutes(t *testing.T) {
+// TestTakeover_IncludesDerivedRoutes: a model exposed only via a derived route
+// must appear in the opencode takeover config (parity with /v1/models).
+func TestTakeover_IncludesDerivedRoutes(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{
 		Providers: map[string]Provider{
-			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-5.2", "glm-4.6"}},
-		},
-		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}}, // explicit; glm-4.6 implicit-only
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-4.6"}},
 		},
 		Takeover: Takeover{Opencode: filepath.Join(dir, "oc.json"), ProxyURL: "http://x", ProviderID: "model-proxy"},
 	}
 	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
-	implicit := map[string]RouteTarget{"glm-4.6": {Provider: "zhipu", Model: "glm-4.6", Priority: 1}}
-	if err := takeover.RewriteOpencode(cfg, nil, implicit); err != nil {
+	routes := RouteTable(cfg)
+	if _, ok := routes["glm-4.6"]; !ok {
+		t.Fatalf("route table should include glm-4.6: %v", routes)
+	}
+	if err := takeover.RewriteOpencode(cfg, nil, routes); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Opencode)
 	if !strings.Contains(string(b), "glm-4.6") {
-		t.Errorf("opencode config should include implicit-route model glm-4.6:\n%s", b)
+		t.Errorf("opencode config should include derived-route model glm-4.6:\n%s", b)
 	}
 }
 
-// TestImplicitRoute_ListedInV1Models: implicitly-routable models appear in
-// GET /v1/models so clients can discover them.
-func TestImplicitRoute_ListedInV1Models(t *testing.T) {
+// TestDerivedRoute_ListedInV1Models: derived models appear in GET /v1/models
+// so clients can discover them.
+func TestDerivedRoute_ListedInV1Models(t *testing.T) {
 	home := t.TempDir()
 	credDir := filepath.Join(home, ".model-proxy")
 	os.MkdirAll(credDir, 0o700)
@@ -194,10 +190,10 @@ func TestImplicitRoute_ListedInV1Models(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
 		Providers: map[string]Provider{
-			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-5.2", "glm-4.6"}},
+			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-5.2", "glm-4.6"}, Alias: map[string]string{"glm-5.2": "glm-main"}},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "zhipu", Model: "glm-5.2", Priority: 1}},
+			"glm-explicit": {{Provider: "zhipu", Model: "glm-5.2"}},
 		},
 	}
 	p := newTestProxy(t, cfg)
@@ -209,10 +205,12 @@ func TestImplicitRoute_ListedInV1Models(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "glm-4.6") {
-		t.Errorf("/v1/models should list implicit route glm-4.6: %s", body)
+	for _, id := range []string{"glm-main", "glm-4.6", "glm-explicit"} {
+		if !strings.Contains(string(body), fmt.Sprintf("%q", id)) {
+			t.Errorf("/v1/models should list %s: %s", id, body)
+		}
 	}
-	if !strings.Contains(string(body), "glm-5.2") {
-		t.Errorf("/v1/models should still list explicit glm-5.2: %s", body)
+	if strings.Contains(string(body), `"glm-5.2"`) {
+		t.Errorf("/v1/models should not list aliased-away glm-5.2: %s", body)
 	}
 }

@@ -47,13 +47,14 @@ func TestWebAssetsJavaScriptSyntax(t *testing.T) {
 }
 
 // TestWebAssetsPureJSUnitTests runs the behavioral unit tests for the
-// DOM-free helpers (assets/pure.js) with Node's built-in test runner — no
-// framework dependency. Same node gate as the syntax check.
+// DOM-free helpers (assets/pure.js) plus the docs/frontend field contracts
+// (jstests/contract.test.mjs) with Node's built-in test runner — no framework
+// dependency. Same node gate as the syntax check.
 func TestWebAssetsPureJSUnitTests(t *testing.T) {
 	node := requireNode(t)
-	cmd := exec.Command(node, "--test", filepath.Join("jstests", "pure.test.mjs"))
+	cmd := exec.Command(node, "--test", "jstests")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("node --test jstests/pure.test.mjs: %v\n%s", err, out)
+		t.Fatalf("node --test jstests: %v\n%s", err, out)
 	}
 }
 

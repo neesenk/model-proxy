@@ -63,10 +63,6 @@ func assertCredentialBoundaryUnavailable(t *testing.T, p *Proxy, upstream *crede
 	if len(p.poolIndex) != 0 || len(p.parentOf) != 0 {
 		t.Fatalf("unavailable provider populated pool identity maps: %v / %v", p.poolIndex, p.parentOf)
 	}
-	if _, ok := p.implicitRoutes["target-model"]; ok {
-		t.Fatal("unavailable provider became eligible for an implicit route")
-	}
-
 	proxyServer := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer proxyServer.Close()
 	status, body := post(t, proxyServer.URL+"/v1/chat/completions",
@@ -91,9 +87,6 @@ func TestBuildProviders_CorruptPluralFailsClosedWithoutLegacyFallback(t *testing
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "zhipu", upstream.server.URL)
-	if LoggedInProviders(cfg, AccountStore())[name] {
-		t.Fatal("corrupt plural must not be reported as logged in")
-	}
 	p := newTestProxy(t, cfg)
 	assertCredentialBoundaryUnavailable(t, p, upstream, name)
 }
@@ -111,9 +104,6 @@ func TestBuildProviders_EmptyAPIKeyPluralFailsClosedWithoutLegacyFallback(t *tes
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "zhipu", upstream.server.URL)
-	if LoggedInProviders(cfg, AccountStore())[name] {
-		t.Fatal("invalid plural must not be reported as logged in")
-	}
 	p := newTestProxy(t, cfg)
 	assertCredentialBoundaryUnavailable(t, p, upstream, name)
 }
@@ -130,9 +120,6 @@ func TestBuildProviders_EmptyPluralIsCredentialTombstone(t *testing.T) {
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "zhipu", upstream.server.URL)
-	if LoggedInProviders(cfg, AccountStore())[name] {
-		t.Fatal("empty plural tombstone must not be reported as logged in")
-	}
 	p := newTestProxy(t, cfg)
 	assertCredentialBoundaryUnavailable(t, p, upstream, name)
 }
@@ -149,15 +136,9 @@ func TestBuildProviders_LegacyOnlyRemainsFileBacked(t *testing.T) {
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "zhipu", upstream.server.URL)
-	if !LoggedInProviders(cfg, AccountStore())[name] {
-		t.Fatal("valid zhipu legacy credential must be reported as logged in")
-	}
 	p := newTestProxy(t, cfg)
 	if _, ok := p.providers[name]; !ok {
 		t.Fatal("legacy-only zhipu must retain its file-backed runtime provider")
-	}
-	if route, ok := p.implicitRoutes["target-model"]; !ok || route.Provider != name {
-		t.Fatalf("legacy-only provider implicit route = %+v, found=%v", route, ok)
 	}
 	proxyServer := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer proxyServer.Close()
@@ -185,15 +166,9 @@ func TestBuildProviders_StaticProviderUsesPluralCredentialWithoutLegacyFile(t *t
 
 	upstream := newCredentialBoundaryUpstream(t)
 	cfg := credentialBoundaryConfig(name, "static", upstream.server.URL)
-	if !LoggedInProviders(cfg, AccountStore())[name] {
-		t.Fatal("valid static plural credential must be reported as logged in")
-	}
 	p := newTestProxy(t, cfg)
 	if _, ok := p.providers[name]; !ok {
 		t.Fatal("single plural static account must bind to the plain provider name")
-	}
-	if route, ok := p.implicitRoutes["target-model"]; !ok || route.Provider != name {
-		t.Fatalf("static plural implicit route = %+v, found=%v", route, ok)
 	}
 	proxyServer := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer proxyServer.Close()
@@ -254,9 +229,6 @@ func TestBuildProviders_StaticInvalidCredentialSourcesFailClosed(t *testing.T) {
 
 			upstream := newCredentialBoundaryUpstream(t)
 			cfg := credentialBoundaryConfig(name, "static", upstream.server.URL)
-			if LoggedInProviders(cfg, AccountStore())[name] {
-				t.Fatalf("static %s source must not be reported as a runnable login", tc.name)
-			}
 			p := newTestProxy(t, cfg)
 			assertCredentialBoundaryUnavailable(t, p, upstream, name)
 		})
@@ -289,9 +261,6 @@ func TestBuildProviders_OAuthProviderIgnoresAccountPoolFiles(t *testing.T) {
 		Providers: map[string]Provider{
 			name: {Provider: "codex", OpenAIBaseURL: "https://example.invalid"},
 		},
-	}
-	if LoggedInProviders(cfg, AccountStore())[name] {
-		t.Fatal("API-key pool must not make an OAuth provider eligible for implicit routes")
 	}
 	p := newTestProxy(t, cfg)
 	if _, ok := p.providers[name]; !ok {

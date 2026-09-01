@@ -122,7 +122,7 @@ type diagLine struct {
 // check; nothing is probed live.
 func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []ClientDrift) string {
 	now := time.Now()
-	implicit, _ := app.SynthesizeImplicitRoutes(cfg, accountStore())
+	routeTable := app.RouteTable(cfg)
 
 	routes := make([]string, 0, len(st.Schedule.Models))
 	for r := range st.Schedule.Models {
@@ -148,7 +148,7 @@ func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []Cl
 			warns = append(warns, diagLine{1, text, []string{"[可立即执行] model-proxy unpin " + r}})
 		}
 		if availN == 0 {
-			targets := LiveTargets(cfg, implicit, r)
+			targets := LiveTargets(cfg, routeTable, r)
 			n := len(targets)
 			if n == 0 {
 				// Route unknown to this config (CLI and daemon configs differ):
@@ -260,14 +260,10 @@ func quotaFixHint(cfg *configdomain.Config, parent, route string) string {
 // daemon schedules over: pool parents become their virtual account ids,
 // matching the keys /api/status uses in health and model_locks. Returns nil
 // when the route is unknown to this config.
-func LiveTargets(cfg *configdomain.Config, implicit map[string]configdomain.RouteTarget, route string) []configdomain.RouteTarget {
-	targets, ok := cfg.Routes[route]
+func LiveTargets(cfg *configdomain.Config, routeTable map[string][]configdomain.RouteTarget, route string) []configdomain.RouteTarget {
+	targets, ok := routeTable[route]
 	if !ok {
-		if t, found := implicit[route]; found {
-			targets = []configdomain.RouteTarget{t}
-		} else {
-			return nil
-		}
+		return nil
 	}
 	var out []configdomain.RouteTarget
 	for _, t := range targets {

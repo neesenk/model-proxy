@@ -1,9 +1,9 @@
-# 请求感知与隐式路由
+# 请求感知与路由推导
 
 ## 适用范围
 
 修改 `internal/routing/request.go`、`internal/app/request_routing_adapter.go`、models.dev
-catalog、context overflow retry、implicit routes 或 route warnings 时必读。
+catalog、context overflow retry、route derivation（隐式路由的继任者）或 route warnings 时必读。
 
 ## 请求画像
 
@@ -77,21 +77,26 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 - 只计 failover，不计 served request/latency；
 - effective targets 必须回传 cooldown/retry 层，不能继续按原 route 判定。
 
-## 隐式路由
+## 路由推导（routes 自动化）
 
-已登录 provider 的 `models:` 中某模型没有显式 route 时，daemon 自动生成单目标 route。显式 route 永远优先。
+路由表完全由 config 推导（`DeriveRoutesFrom` / `RouteTable`，
+`internal/app/implicit_routes.go`）：每个 provider 的 `models:` 按暴露名聚合为
+多目标 route —— 暴露名 = 模型名，或 provider 的 `alias:` 改名（如 kimi-code 的
+`k3` 暴露为 `kimi-k3`，与其他 provider 的同名模型聚合）；target 保留上游真实
+模型名，priority 继承 provider 的 `priority:`（lower wins），并按
+`(priority, provider)` 排序保证确定性。
 
-- 多 provider 同名模型存在歧义时，选择按字母排序的首个 provider，并产生 warning；
-- 单 provider 隐式路由静默；
-- login 状态由 `LoggedInProviders`（`internal/app/implicit_routes.go`）经
-  `store.LoadSnapshot` 判定：`SourcePlural`，或 `SourceLegacy` 且 provider 非
-  static；损坏 plural fail-closed、static legacy 不算、aqp/codex 不经 pool
-  （其 OAuth/SSO 登录态归各自 store）；
-- 隐式路由只在 daemon 侧生成，doctor 离线只看显式配置；
+- 推导是纯 config 计算：不读凭据/login 状态（构造与 reload 各恰好一次
+  `DeriveRoutesFrom(cfg)`，由 `internal/archtest` 的 owner 契约保护）；CLI
+  （`routes`、`models`、`test`、doctor、takeover）与 daemon 用同一 `RouteTable`；
+- 显式 `routes:` 条目**整条覆盖**同名推导路由（用于 fusion 目标、`protocol:`
+  协议转换声明、特殊排序）；target 省略 priority 时同样继承 provider priority；
+- `claude_mapping` / `shadow` 的 key 校验对象是「显式 route key ∪ 推导暴露名」
+  （`Config.RouteExposedNames`）；alias 的 key 必须在该 provider 的 `models:`
+  中，且一个 provider 内一个暴露名只能映射一个上游模型（validate 报错）；
 - route-name sticky 可持久化，session sticky 不持久化；
-- protocol 只能使用 provider 的真实 ProtocolHint；`codex` 返回 `"responses"`
-  （`internal/provider/protocol_hint.go`），隐式路由经它填充 target 的 protocol
-  （`internal/app/implicit_routes.go`）。
+- codex 的推导 target 经 `ProtocolHint` 填充 `protocol:"responses"`
+  （`internal/provider/protocol_hint.go`）。
 
 ## 配置风险警告
 
@@ -112,7 +117,7 @@ warning 同时出现在 daemon log、`/api/status.warnings`、models、doctor �
 - force-provider 是代理内部控制参数：`?force_provider=` query 由 executor 从
   上游 URL 剥除（`stripInternalQuery`），不透传给上游 API。
 - context overflow 的单次重试与 body 恢复。
-- implicit route 单 provider、多 provider 歧义、未登录 provider。
+- 路由推导：按名聚合、alias 改名、priority 继承、显式 routes 覆盖、fusion 显式路由。
 - reasoning/codex protocol warnings。
 - catalog fresh/stale/force、ETag 304、malformed 200、非 2xx、损坏 cache 与并发
   原子写。

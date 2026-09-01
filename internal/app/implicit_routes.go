@@ -1,75 +1,71 @@
 package app
 
 import (
-	"fmt"
 	"sort"
-	"strings"
 
-	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
 )
 
-// LoggedInProviders returns the provider parents whose authoritative account
-// snapshot can produce a runtime credential. Used to decide which providers can
-// serve an implicit route; corrupt/empty plural pools and static legacy files
-// remain fail-closed exactly as they do in buildProviders.
-func LoggedInProviders(cfg *configdomain.Config, store accounts.Store) map[string]bool {
-	out := map[string]bool{}
+// DeriveRoutesFrom is the pure, testable core of route derivation: every
+// provider model is exposed under its exposed name (alias applied) and the
+// providers serving it aggregate into one multi-target route. Each target
+// carries the provider's priority and keeps the REAL upstream model name (the
+// alias only renames the exposed key), plus the wire-protocol hint for
+// providers whose API shape differs from the client's (codex: responses).
+// Targets are ordered by (priority, provider name) so the table is
+// deterministic; explicit cfg.Routes entries override derived ones per name
+// (see RouteTable).
+func DeriveRoutesFrom(cfg *configdomain.Config) map[string][]configdomain.RouteTarget {
+	out := map[string][]configdomain.RouteTarget{}
 	for name, prov := range cfg.Providers {
-		if prov.Provider == "aqp" || prov.Provider == "codex" {
-			// OAuth/SSO login state belongs to their own stores; an unrelated
-			// API-key pool must never make them eligible for implicit routes.
-			continue
+		for _, m := range prov.Models {
+			tgt := configdomain.RouteTarget{Provider: name, Model: m, Priority: prov.Priority}
+			if hint := provider.ProtocolHint(prov.Provider, m); hint != "" {
+				tgt.Protocol = hint
+			}
+			exposed := prov.ExposedModelName(m)
+			out[exposed] = append(out[exposed], tgt)
 		}
-		snapshot, err := store.LoadSnapshot(name, prov.Provider)
-		if err != nil || len(snapshot.Pool.Accounts) == 0 {
-			continue
-		}
-		if snapshot.Source == accounts.SourcePlural ||
-			(snapshot.Source == accounts.SourceLegacy && prov.Provider != "static") {
-			out[name] = true
-		}
+	}
+	for _, targets := range out {
+		sort.Slice(targets, func(i, j int) bool {
+			if targets[i].Priority != targets[j].Priority {
+				return targets[i].Priority < targets[j].Priority
+			}
+			return targets[i].Provider < targets[j].Provider
+		})
 	}
 	return out
 }
 
-// synthesizeImplicitRoutesFrom is the pure, testable core. For each model name
-// that is NOT already an explicit route key AND is served by ≥1 logged-in
-// provider, it creates a single-target implicit route to the alphabetically-first
-// logged-in provider that serves it; if >1 logged-in provider serves it, the
-// others are dropped and a warning is emitted. Explicit routes always win.
-func SynthesizeImplicitRoutesFrom(cfg *configdomain.Config, loggedIn map[string]bool) (implicit map[string]configdomain.RouteTarget, warnings []string) {
-	// model → sorted list of logged-in providers that serve it
-	claims := map[string][]string{}
-	for name, prov := range cfg.Providers {
-		if !loggedIn[name] {
-			continue
+// FillTargetPriorities backfills the provider's priority into explicit route
+// targets that omit their own (priority is now provider-level; an explicit
+// target only sets priority to override it).
+func FillTargetPriorities(cfg *configdomain.Config, targets []configdomain.RouteTarget) []configdomain.RouteTarget {
+	out := make([]configdomain.RouteTarget, len(targets))
+	for i, t := range targets {
+		if t.Priority == 0 {
+			if prov, ok := cfg.Providers[t.Provider]; ok {
+				t.Priority = prov.Priority
+			}
 		}
-		for _, m := range prov.Models {
-			claims[m] = append(claims[m], name)
-		}
+		out[i] = t
 	}
-	implicit = map[string]configdomain.RouteTarget{}
-	for model, provs := range claims {
-		if _, explicit := cfg.Routes[model]; explicit {
-			continue // explicit route wins
-		}
-		sort.Strings(provs)
-		tgt := configdomain.RouteTarget{Provider: provs[0], Model: model, Priority: 1}
-		// Fill the wire-protocol hint for providers whose API shape differs from
-		// the client's (codex: responses) — without it an anthropic/chat client
-		// would send an unconverted body to a responses-only upstream.
-		if hint := provider.ProtocolHint(cfg.Providers[provs[0]].Provider, model); hint != "" {
-			tgt.Protocol = hint
-		}
-		implicit[model] = tgt
-		if len(provs) > 1 {
-			warnings = append(warnings, fmt.Sprintf("model %q served by %d logged-in providers (%s); auto-routing to %s — add an explicit route to choose",
-				model, len(provs), strings.Join(provs, ", "), provs[0]))
-		}
+	return out
+}
+
+// RouteTable is the complete callable route table: derived routes for every
+// exposed provider model, with explicit cfg.Routes entries overriding the
+// derived ones wholesale (fusion targets, protocol overrides, special
+// ordering). CLI listing / probing uses this; the Proxy uses
+// BuildExpandedRoutes with the same inputs plus pool fan-out.
+func RouteTable(cfg *configdomain.Config) map[string][]configdomain.RouteTarget {
+	out := DeriveRoutesFrom(cfg)
+	for exposed, targets := range cfg.Routes {
+		out[exposed] = FillTargetPriorities(cfg, append([]configdomain.RouteTarget(nil), targets...))
 	}
-	return implicit, warnings
+	return out
 }
 
 // The backend protocol for a route target is resolved by
@@ -77,46 +73,45 @@ func SynthesizeImplicitRoutesFrom(cfg *configdomain.Config, loggedIn map[string]
 // ProtocolHint > wire probe verdict > client-protocol passthrough. Used by
 // forward, fusion, and shadow so the resolution rule is one place.
 
-// SynthesizeImplicitRoutes derives login status then delegates to the pure core.
-func SynthesizeImplicitRoutes(cfg *configdomain.Config, store accounts.Store) (map[string]configdomain.RouteTarget, []string) {
-	return SynthesizeImplicitRoutesFrom(cfg, LoggedInProviders(cfg, store))
-}
-
 // BuildExpandedRoutes returns routes with pooled targets fanned out to their
 // virtual children: a target whose provider is a pooled parent (key present in
 // poolIndex) is replaced by its N virtuals, each with the SAME Model + Priority
 // as the original; non-pooled targets pass through unchanged. Routes with no
-// pooled targets are returned as-is (same slice contents). Implicit routes
-// (auto-derived for unrouted models served by a logged-in provider) merge under
-// explicit routes and fan out the same way.
+// pooled targets are returned as-is (same slice contents). Derived routes
+// (auto-aggregated from provider model lists) merge under explicit routes and
+// fan out the same way.
 func BuildExpandedRoutes(
 	cfg *configdomain.Config,
-	implicit map[string]configdomain.RouteTarget,
+	derived map[string][]configdomain.RouteTarget,
 	expand func(configdomain.RouteTarget) []configdomain.RouteTarget,
 ) map[string][]configdomain.RouteTarget {
 	out := make(map[string][]configdomain.RouteTarget, len(cfg.Routes))
 	for exposed, targets := range cfg.Routes {
 		var exp []configdomain.RouteTarget
-		for _, t := range targets {
+		for _, t := range FillTargetPriorities(cfg, targets) {
 			exp = append(exp, expand(t)...)
 		}
 		out[exposed] = exp
 	}
-	for exposed, t := range implicit {
+	for exposed, ts := range derived {
 		if _, explicit := out[exposed]; explicit {
 			continue
 		}
-		out[exposed] = expand(t)
+		var exp []configdomain.RouteTarget
+		for _, t := range ts {
+			exp = append(exp, expand(t)...)
+		}
+		out[exposed] = exp
 	}
 	return out
 }
 
 // RouteModelsForProvider returns the sorted distinct upstream model ids that
-// routes assign to one provider.
+// routes assign to one provider (explicit + derived targets).
 func RouteModelsForProvider(cfg *configdomain.Config, provName string) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, targets := range cfg.Routes {
+	for _, targets := range RouteTable(cfg) {
 		for _, t := range targets {
 			if t.Provider == provName && !seen[t.Model] {
 				seen[t.Model] = true

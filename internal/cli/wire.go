@@ -247,9 +247,9 @@ func StripGlobalFlags(args []string) []string {
 }
 
 // wireProbeModelLocal picks the model id used in probe bodies: the provider's
-// first configured model, else the first route target pointing at it, else the
-// implicit route for it (same rule as the wirecap package).
-func wireProbeModelLocal(cfg *configdomain.Config, implicit map[string]configdomain.RouteTarget, provName string) string {
+// first configured model, else the first route target pointing at it, else a
+// derived route target for it (same rule as the wirecap package).
+func wireProbeModelLocal(cfg *configdomain.Config, derived map[string][]configdomain.RouteTarget, provName string) string {
 	if ms := cfg.Providers[provName].Models; len(ms) > 0 {
 		return ms[0]
 	}
@@ -260,9 +260,11 @@ func wireProbeModelLocal(cfg *configdomain.Config, implicit map[string]configdom
 			}
 		}
 	}
-	for _, t := range implicit {
-		if t.Provider == provName {
-			return t.Model
+	for _, targets := range derived {
+		for _, t := range targets {
+			if t.Provider == provName {
+				return t.Model
+			}
 		}
 	}
 	return ""

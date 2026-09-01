@@ -106,11 +106,11 @@ func TestProbeModel(t *testing.T) {
 	if got := ProbeModel(cfg, nil, "p"); got != "m0" {
 		t.Errorf("provider.Models wins = %q, want m0", got)
 	}
-	// Implicit route fallback when neither provider models nor routes name it.
+	// Derived route fallback when neither provider models nor routes name it.
 	bare := &configdomain.Config{Providers: map[string]configdomain.Provider{"p": {}}}
-	implicit := map[string]configdomain.RouteTarget{"mi": {Provider: "p", Model: "mi"}}
-	if got := ProbeModel(bare, implicit, "p"); got != "mi" {
-		t.Errorf("implicit fallback = %q, want mi", got)
+	derived := map[string][]configdomain.RouteTarget{"mi": {{Provider: "p", Model: "mi"}}}
+	if got := ProbeModel(bare, derived, "p"); got != "mi" {
+		t.Errorf("derived fallback = %q, want mi", got)
 	}
 	if got := ProbeModel(bare, nil, "p"); got != "" {
 		t.Errorf("empty fallback = %q, want \"\"", got)

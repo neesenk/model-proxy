@@ -99,11 +99,22 @@ type ConfigSummary struct {
 	RouteCount    int    `json:"route_count"`
 }
 
+// ConfigProviderMeta is the per-provider routing metadata paired with the
+// model lists: the provider-level priority every derived target inherits and
+// the model → exposed-name alias map.
+type ConfigProviderMeta struct {
+	Priority int               `json:"priority"`
+	Alias    map[string]string `json:"alias"`
+}
+
 // ConfigDocument is the complete transport projection for GET /api/config.
+// Routes is the EFFECTIVE table (derived from provider model lists, explicit
+// routes: entries overriding per name), so every callable model appears.
 type ConfigDocument struct {
 	YAML           string                         `json:"yaml"`
 	Summary        ConfigSummary                  `json:"summary"`
 	ProviderModels map[string][]string            `json:"provider_models"`
+	ProviderMeta   map[string]ConfigProviderMeta  `json:"provider_meta"`
 	Routes         map[string][]ConfigRouteTarget `json:"routes"`
 }
 

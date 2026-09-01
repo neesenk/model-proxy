@@ -65,7 +65,7 @@ provider。只有 missing/legacy 来源允许普通 API-key provider 保持旧 f
 路径；`static` 是 plural-only，missing/legacy 时同样不构建。
 
 同一次 `buildProviders` pass 必须同时产出 runtime providers、`poolIndex`、
-`parentOf` 和 implicit-route eligibility；startup/reload 将该 eligibility 直接
+`parentOf`；startup/reload 将 build 结果直接
 传给 `synthesizeImplicitRoutesFrom`，不得再读取账号文件。这样一次 generation
 不会出现“新 route eligibility + 旧 provider key”或反向组合。
 

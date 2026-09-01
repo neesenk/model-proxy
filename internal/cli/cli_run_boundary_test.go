@@ -93,6 +93,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		"presets",
 		"replay",
 		"restore",
+		"routes",
 		"schedule",
 		"serve",
 		"shadow",
@@ -227,6 +228,7 @@ func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 		"unfreeze": "RunUnfreeze",
 		"unpin":    "RunUnpin",
 		"usage":    "RunUsage",
+		"routes":   "RunRoutes",
 		"wire":     "RunWire",
 	}
 	app := NewApplication(serveStub)

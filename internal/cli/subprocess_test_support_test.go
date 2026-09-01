@@ -62,6 +62,8 @@ func TestHelperProcess(t *testing.T) {
 		RunSchedule(args)
 	case "config":
 		RunConfig(args)
+	case "routes":
+		RunRoutes(args)
 	case "usage":
 		RunUsage(args)
 	case "takeover":

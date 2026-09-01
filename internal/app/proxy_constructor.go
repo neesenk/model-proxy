@@ -99,7 +99,7 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// BuildProviders pass; the pool subset is the stable base of every rebuild.
 	p.guardPoolSecrets = built.PoolSecrets
 	p.guardOAuthSecrets = built.OAuthSecrets
-	p.implicitRoutes, p.routeWarnings = synthesizeImplicitRoutesFrom(cfg, built.Eligible)
+	p.derivedRoutes = DeriveRoutesFrom(cfg)
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.routeKeys = routeKeySet(p.expandedRoutes)
 	// Config-time routing hazards (reasoning-replay models behind conversion,

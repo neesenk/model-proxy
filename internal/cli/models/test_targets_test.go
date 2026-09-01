@@ -9,7 +9,7 @@ import (
 	configdomain "model-proxy/internal/config"
 )
 
-// --- testTargetsFor (in-process): explicit sort, implicit fallback, miss ---
+// --- testTargetsFor (in-process): explicit sort, derived fallback, miss ---
 
 func TestTestTargetsFor(t *testing.T) {
 	dir := t.TempDir()
@@ -34,13 +34,13 @@ func TestTestTargetsFor(t *testing.T) {
 		t.Errorf("explicit targets=%+v want priority-sorted [glm-5.1 glm-5.2]", got)
 	}
 
-	// No explicit route: implicit fallback (logged-in provider serves the model).
+	// No explicit route: derived fallback (provider's model list).
 	got = testTargetsFor(cfg, "glm-implicit")
-	if len(got) != 1 || got[0] != (configdomain.RouteTarget{Provider: "zhipu", Model: "glm-implicit", Priority: 1}) {
-		t.Errorf("implicit targets=%+v want single zhipu target", got)
+	if len(got) != 1 || got[0] != (configdomain.RouteTarget{Provider: "zhipu", Model: "glm-implicit"}) {
+		t.Errorf("derived targets=%+v want single zhipu target", got)
 	}
 
-	// Neither explicit nor implicit: nil.
+	// Neither explicit nor derived: nil.
 	if got := testTargetsFor(cfg, "nope"); got != nil {
 		t.Errorf("unrouted model targets=%+v want nil", got)
 	}

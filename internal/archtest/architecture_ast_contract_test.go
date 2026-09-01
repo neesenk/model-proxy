@@ -1583,3 +1583,20 @@ func callableName(expr ast.Expr) string {
 		return ""
 	}
 }
+
+// singleIdentArgCallCount counts calls shaped exactly as name(argIdent) — the
+// one-argument counterpart of namedCallWithArgsCount.
+func singleIdentArgCallCount(n ast.Node, name, argIdent string) int {
+	count := 0
+	ast.Inspect(n, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || callableName(call.Fun) != name || len(call.Args) != 1 {
+			return true
+		}
+		if arg, ok := call.Args[0].(*ast.Ident); ok && arg.Name == argIdent {
+			count++
+		}
+		return true
+	})
+	return count
+}

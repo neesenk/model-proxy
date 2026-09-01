@@ -616,6 +616,17 @@ type Provider struct {
 	// modalities) is NOT stored here; it is sourced at runtime from models.dev
 	// (or conservative defaults) by hydrateModels.
 	Models []string `yaml:"models"`
+	// Priority is the provider-wide route-target priority inherited by every
+	// model this provider serves (lower = tried first within a tier/quota
+	// band). Auto-derived routes always use it; an explicit route target that
+	// omits its own priority falls back to it as well.
+	Priority int `yaml:"priority"`
+	// Alias renames one real model for routing: key = a model name in Models,
+	// value = the exposed name clients call. The route target still forwards
+	// the real upstream model name, so providers that name the same model
+	// differently (e.g. kimi-code's "k3" vs everyone else's "kimi-k3") can be
+	// aggregated under one exposed name.
+	Alias map[string]string `yaml:"alias"`
 	// Capabilities is a manual per-model capability override — the escape hatch
 	// for models the models.dev catalog doesn't know (codex/aqp/volcengine blind
 	// spots). Keys are model names (validate requires them to appear in Models);
@@ -633,6 +644,41 @@ type Provider struct {
 	// Billing is "plan" (default, quota-bound) or "pay-as-you-go" (strict
 	// last-resort: used only when all plan providers are unavailable).
 	Billing string `yaml:"billing"`
+}
+
+// ExposedModelName returns the name a model of this provider is exposed as:
+// its alias when one is configured, the model name itself otherwise. Route
+// derivation aggregates targets under this name while the target's Model field
+// keeps forwarding the real upstream name.
+func (p Provider) ExposedModelName(model string) string {
+	if a, ok := p.Alias[model]; ok && a != "" {
+		return a
+	}
+	return model
+}
+
+// ExposedModelNames returns the set of exposed model names derived from every
+// provider's models (aliases applied). Explicit route keys extend this set at
+// the call site (see Config.RouteExposedNames).
+func (c *Config) ExposedModelNames() map[string]bool {
+	out := make(map[string]bool)
+	for _, prov := range c.Providers {
+		for _, m := range prov.Models {
+			out[prov.ExposedModelName(m)] = true
+		}
+	}
+	return out
+}
+
+// RouteExposedNames returns every callable exposed model name: explicit route
+// keys plus the names derived from providers. claude_mapping and shadow keys
+// are validated against this set.
+func (c *Config) RouteExposedNames() map[string]bool {
+	out := c.ExposedModelNames()
+	for exposed := range c.Routes {
+		out[exposed] = true
+	}
+	return out
 }
 
 // PeakSegment is one peak-hours window with its consumption multiplier.
@@ -747,9 +793,9 @@ func parseHHMM(value string) (int, bool) {
 // (by tier/quota band, peak folded into effective remaining) and fails over to the
 // next on error.
 type RouteTarget struct {
-	Provider string `yaml:"provider"` // config providers[] key
-	Model    string `yaml:"model"`    // real model name at that provider
-	Priority int    `yaml:"priority"` // lower = tried first within a tier/quota band (default 0)
+	Provider string `yaml:"provider"`           // config providers[] key
+	Model    string `yaml:"model"`              // real model name at that provider
+	Priority int    `yaml:"priority,omitempty"` // lower = tried first within a tier/quota band; unset (0) inherits the provider's priority
 	// Protocol declares the backend wire protocol ("anthropic", "openai", or
 	// "responses"). Empty means the client protocol is forwarded unchanged.
 	// Set it only when the target requires cross-protocol conversion; the exact
@@ -1061,6 +1107,31 @@ func (c *Config) validate() error {
 		if p.Billing != "" && p.Billing != "plan" && p.Billing != "pay-as-you-go" {
 			return fmt.Errorf("provider %q: billing %q invalid — use \"plan\" or \"pay-as-you-go\"", name, p.Billing)
 		}
+		// alias: keys must name a model in models: and produce distinct exposed
+		// names — anything else is a typo that would silently never aggregate.
+		seenExposed := map[string]string{}
+		for _, m := range p.Models {
+			if e := p.ExposedModelName(m); seenExposed[e] != "" && seenExposed[e] != m {
+				return fmt.Errorf("provider %q: alias exposes %q for both %q and %q — one exposed name must map to one upstream model", name, e, seenExposed[e], m)
+			} else if e != m {
+				seenExposed[e] = m
+			}
+		}
+		for model, exposed := range p.Alias {
+			if exposed == "" {
+				return fmt.Errorf("provider %q: alias[%q] is empty — set it to the exposed model name or drop the entry", name, model)
+			}
+			inModels := false
+			for _, m := range p.Models {
+				if m == model {
+					inModels = true
+					break
+				}
+			}
+			if !inModels {
+				return fmt.Errorf("provider %q: alias key %q is not in its models: list — likely a typo; add the model to models: or fix the key", name, model)
+			}
+		}
 		// capabilities: keys must name a model in models: (anything else is
 		// almost certainly a typo that would silently never match); values must
 		// be known capability names.
@@ -1122,19 +1193,21 @@ func (c *Config) validate() error {
 			}
 		}
 	}
-	// claude_mapping values must reference a route key.
+	// claude_mapping values must reference a callable exposed model name
+	// (explicit route key or a name derived from providers).
+	routeNames := c.RouteExposedNames()
 	for claude, exposed := range c.ClaudeMapping {
 		if exposed == "" {
 			return fmt.Errorf("claude_mapping %q: target is empty — set it to a route name", claude)
 		}
-		if _, ok := c.Routes[exposed]; !ok {
-			return fmt.Errorf("claude_mapping %q → %q: target %q not found in routes — add a route named %q or fix the mapping", claude, exposed, exposed, exposed)
+		if !routeNames[exposed] {
+			return fmt.Errorf("claude_mapping %q → %q: target %q not found — no route or provider model is exposed as %q; fix the mapping or the model name", claude, exposed, exposed, exposed)
 		}
 	}
 	// Shadow validation: each entry references a real route + provider + valid
 	// protocol; sample rate in [0,1]; max_concurrent >= 0.
 	for route, sh := range c.Shadow {
-		if _, ok := c.Routes[route]; !ok {
+		if !routeNames[route] {
 			return fmt.Errorf("shadow %q: route not found in routes: — add a route named %q", route, route)
 		}
 		if sh.Provider == "fusion" {

@@ -92,8 +92,8 @@ func wireProbe(client *http.Client, prov Provider, impl provider.Provider, path 
 }
 
 // wireProbeModel delegates to runtimewire.ProbeModel.
-func wireProbeModel(cfg *Config, implicit map[string]RouteTarget, provName string) string {
-	return runtimewire.ProbeModel(cfg, implicit, provName)
+func wireProbeModel(cfg *Config, derived map[string][]RouteTarget, provName string) string {
+	return runtimewire.ProbeModel(cfg, derived, provName)
 }
 
 // probeAllWireCaps probes every eligible provider once (skipping providers
@@ -106,7 +106,7 @@ func (p *Proxy) probeAllWireCaps() {
 	cfg := p.cfg
 	provs := p.providers
 	poolIndex := p.poolIndex
-	implicit := p.implicitRoutes
+	derived := p.derivedRoutes
 	p.mu.RUnlock()
 
 	client := &http.Client{Timeout: wireCapProbeTimeout}
@@ -142,7 +142,7 @@ func (p *Proxy) probeAllWireCaps() {
 		if impl == nil {
 			continue // not logged in / not built — nothing to probe with
 		}
-		model := wireProbeModel(cfg, implicit, name)
+		model := wireProbeModel(cfg, derived, name)
 		probed = true
 		wg.Add(1)
 		go func(name string, provCfg Provider, impl provider.Provider) {

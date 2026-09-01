@@ -186,14 +186,15 @@ func BackupDir(configPath string) string {
 
 // ---- top-level dispatch ----
 
-// ModelFacts carries the application-computed implicit routes and models.dev
-// metadata used by metadata-writing clients. The application owns catalog
-// loading, hydration and its source markers; this package only rewrites client
-// files and emits warnings from the supplied facts.
+// ModelFacts carries the application-computed route table (derived routes
+// aggregated from provider model lists, explicit routes overriding) and
+// models.dev metadata used by metadata-writing clients. The application owns
+// catalog loading, hydration and its source markers; this package only
+// rewrites client files and emits warnings from the supplied facts.
 type ModelFacts struct {
-	Implicit map[string]configdomain.RouteTarget
-	Meta     map[string]map[string]catalog.Model
-	Sources  map[string]map[string]int
+	Routes  map[string][]configdomain.RouteTarget
+	Meta    map[string]map[string]catalog.Model
+	Sources map[string]map[string]int
 	// SourceDefault is the application's "metadata came from conservative
 	// defaults" marker value in Sources; a negative value disables warnings.
 	SourceDefault int
@@ -205,7 +206,7 @@ type ModelFacts struct {
 
 func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts) error {
 	clients := ListClients(cfg, which)
-	implicit := facts.Implicit
+	routes := facts.Routes
 	meta := facts.Meta
 	EmitTakeoverWarnings(clients, cfg, meta, facts)
 
@@ -224,7 +225,7 @@ func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFact
 			}
 			return fmt.Errorf("%s backup: %w", c.Name, err)
 		}
-		if err := c.Rewrite(cfg, meta, implicit); err != nil {
+		if err := c.Rewrite(cfg, meta, routes); err != nil {
 			return fmt.Errorf("%s rewrite: %w", c.Name, err)
 		}
 		logx.Infof("  ✓ %s done", c.Name)
@@ -239,7 +240,7 @@ func EmitTakeoverWarnings(clients []ClientSpec, cfg *configdomain.Config, meta m
 	if !WritesMetadata(clients) || facts.SourceDefault < 0 {
 		return
 	}
-	for _, m := range ExposedModels(cfg, meta, facts.Implicit) {
+	for _, m := range ExposedModels(cfg, meta, facts.Routes) {
 		if facts.Sources[m.Provider] != nil && facts.Sources[m.Provider][m.RealModel] == facts.SourceDefault {
 			fmt.Fprintf(os.Stderr, "warning: model %s at %s: no models.dev metadata — wrote defaults (ctx=%d out=%d text-only)\n",
 				m.RealModel, m.Provider, facts.DefaultContext, facts.DefaultOutput)
@@ -267,25 +268,25 @@ func RunRestore(cfg *configdomain.Config, which, bakDir string) error {
 type ClientSpec struct {
 	Name    string
 	File    string
-	Rewrite func(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) error
+	Rewrite func(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error
 }
 
 func ListClients(cfg *configdomain.Config, which string) []ClientSpec {
 	all := []ClientSpec{
-		{Name: "claude", File: cfg.Takeover.Claude, Rewrite: func(c *configdomain.Config, _ map[string]map[string]catalog.Model, _ map[string]configdomain.RouteTarget) error {
+		{Name: "claude", File: cfg.Takeover.Claude, Rewrite: func(c *configdomain.Config, _ map[string]map[string]catalog.Model, _ map[string][]configdomain.RouteTarget) error {
 			return RewriteClaude(c)
 		}},
-		{Name: "opencode", File: cfg.Takeover.Opencode, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, imp map[string]configdomain.RouteTarget) error {
-			return RewriteOpencode(c, m, imp)
+		{Name: "opencode", File: cfg.Takeover.Opencode, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, rts map[string][]configdomain.RouteTarget) error {
+			return RewriteOpencode(c, m, rts)
 		}},
-		{Name: "codex", File: cfg.Takeover.Codex, Rewrite: func(c *configdomain.Config, _ map[string]map[string]catalog.Model, _ map[string]configdomain.RouteTarget) error {
+		{Name: "codex", File: cfg.Takeover.Codex, Rewrite: func(c *configdomain.Config, _ map[string]map[string]catalog.Model, _ map[string][]configdomain.RouteTarget) error {
 			return RewriteCodex(c)
 		}},
-		{Name: "pi", File: cfg.Takeover.Pi, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, imp map[string]configdomain.RouteTarget) error {
-			return RewritePi(c, m, imp)
+		{Name: "pi", File: cfg.Takeover.Pi, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, rts map[string][]configdomain.RouteTarget) error {
+			return RewritePi(c, m, rts)
 		}},
-		{Name: "kimi", File: cfg.Takeover.Kimi, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, imp map[string]configdomain.RouteTarget) error {
-			return RewriteKimi(c, m, imp)
+		{Name: "kimi", File: cfg.Takeover.Kimi, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, rts map[string][]configdomain.RouteTarget) error {
+			return RewriteKimi(c, m, rts)
 		}},
 	}
 	if which == "" || which == "all" {

@@ -1518,6 +1518,10 @@ async function renderConfigTab() {
          <div id="preset-msg" aria-live="polite"></div>
        </div>
      </div>
+     <div class="card" id="effective-routes-card">
+       <header class="card-head"><h2>Effective routes</h2></header>
+       <div class="card-body"><span class="msg">loading…</span></div>
+     </div>
      <details class="editor" id="ed-provider"><summary>Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-route"><summary>Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <div class="card" id="yaml-card">
@@ -1601,7 +1605,7 @@ async function addPresetFromWizard() {
     const reloadWarn = (res && res.reload_warning) || '';
     const parts = [];
     if (warns.length) {
-      parts.push(`implicit routing is ambiguous for: ${warns.join(', ')} — add routes: entries to control failover.`);
+      parts.push(`these models are now served by multiple providers: ${warns.join(', ')} — set each provider's priority to control failover order.`);
     }
     if (reloadWarn) {
       parts.push(`hot-reload failed: ${reloadWarn} — the block is saved; the daemon picks it up once config.yaml is fixed and reloaded.`);
@@ -1637,6 +1641,7 @@ async function loadConfigAll() {
          </dl>
        </div>
      </div>`;
+  renderEffectiveRoutes(cfg);
   setYamlValue(cfg.yaml || '');
   // Fresh baseline for restart-key diffing; the lint result for the loaded
   // text arrives via the 'change'-triggered debounce.
@@ -1834,7 +1839,7 @@ function buildRouteForm(editorId) {
      </div>
      <div class="field"><label>targets</label>
        <div class="route-targets" id="route-targets"></div>
-       <span class="hint">Each row is one failover target. Provider options come from configured providers; model options from that provider's models. Priority lower = tried first; empty = 0.</span>
+       <span class="hint">Each row is one failover target. Provider options come from configured providers; model options from that provider's models. Priority lower = tried first; empty = inherit the provider's priority.</span>
      </div>
      <div class="row-actions">
        <button class="btn small" id="btn-route-addrow" type="button">+ add target</button>
@@ -1854,6 +1859,29 @@ function buildRouteForm(editorId) {
   if (!document.getElementById('route-targets').children.length) {
     addRouteTargetRow({ provider: '', model: '', priority: '' });
   }
+}
+
+// renderEffectiveRoutes draws the read-only route table from /api/config
+// (derived routes aggregated from provider model lists with provider-level
+// priorities + aliases; explicit routes: entries override per name).
+function renderEffectiveRoutes(cfg) {
+  const card = document.getElementById('effective-routes-card');
+  if (!card) return;
+  const routes = (cfg && cfg.routes) || {};
+  const names = Object.keys(routes).sort();
+  if (!names.length) {
+    card.querySelector('.card-body').innerHTML = '<span class="msg">no routes</span>';
+    return;
+  }
+  const rows = names.map((name) => {
+    const targets = (routes[name] || []).map((t) => {
+      const alias = t.Model !== name ? ` <span class="meta">(alias of ${t.Model})</span>` : '';
+      return `${esc(t.provider)}/${esc(t.Model)}<span class="meta"> p${t.priority}</span>${alias}`;
+    }).join(' → ');
+    return `<tr><td>${esc(name)}</td><td>${targets || '—'}</td></tr>`;
+  }).join('');
+  card.querySelector('.card-body').innerHTML =
+    `<table class="table"><thead><tr><th>model</th><th>targets (scheduling order, priority asc)</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 // providerOptions / modelsForProvider read the cached config so every row shares

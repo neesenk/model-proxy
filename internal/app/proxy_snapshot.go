@@ -107,13 +107,13 @@ func (p *Proxy) providerSnapshot() map[string]provider.Provider {
 
 func runtimeRouteKeys(
 	routes map[string][]RouteTarget,
-	implicit map[string]RouteTarget,
+	derived map[string][]RouteTarget,
 ) map[string]bool {
-	keys := make(map[string]bool, len(routes)+len(implicit))
+	keys := make(map[string]bool, len(routes)+len(derived))
 	for route := range routes {
 		keys[route] = true
 	}
-	for route := range implicit {
+	for route := range derived {
 		keys[route] = true
 	}
 	return keys
@@ -133,7 +133,7 @@ func healthConfigFingerprint(cfg *Config) string {
 func (p *Proxy) snapshotPersistedState() runtimestate.PersistedFullSnapshot {
 	p.mu.RLock()
 	RuntimeSnapshot := p.runtimeState.SnapshotForPersist(
-		runtimeRouteKeys(p.cfg.Routes, p.implicitRoutes),
+		runtimeRouteKeys(p.cfg.Routes, p.derivedRoutes),
 		time.Now(),
 	)
 	providers := make(map[string]runtimestate.PersistedQuotaSnapshot, len(RuntimeSnapshot.Quotas))

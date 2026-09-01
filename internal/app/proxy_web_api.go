@@ -262,11 +262,17 @@ func (api *proxyWebAPI) ConfigDocument() (appapi.ConfigDocument, error) {
 		return appapi.ConfigDocument{}, err
 	}
 	providerModels := make(map[string][]string, len(config.Providers))
+	providerMeta := make(map[string]appapi.ConfigProviderMeta, len(config.Providers))
 	for name, providerConfig := range config.Providers {
 		providerModels[name] = append([]string(nil), providerConfig.Models...)
+		providerMeta[name] = appapi.ConfigProviderMeta{
+			Priority: providerConfig.Priority,
+			Alias:    providerConfig.Alias,
+		}
 	}
-	routes := make(map[string][]appapi.ConfigRouteTarget, len(config.Routes))
-	for exposed, targets := range config.Routes {
+	table := RouteTable(config)
+	routes := make(map[string][]appapi.ConfigRouteTarget, len(table))
+	for exposed, targets := range table {
 		row := make([]appapi.ConfigRouteTarget, 0, len(targets))
 		for _, target := range targets {
 			row = append(row, appapi.ConfigRouteTarget{
@@ -282,9 +288,10 @@ func (api *proxyWebAPI) ConfigDocument() (appapi.ConfigDocument, error) {
 		Summary: appapi.ConfigSummary{
 			Listen:        config.Listen,
 			ProviderCount: len(config.Providers),
-			RouteCount:    len(config.Routes),
+			RouteCount:    len(table),
 		},
 		ProviderModels: providerModels,
+		ProviderMeta:   providerMeta,
 		Routes:         routes,
 	}, nil
 }

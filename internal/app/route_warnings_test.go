@@ -24,20 +24,20 @@ func TestProtocolHint(t *testing.T) {
 	}
 }
 
-// TestImplicitRoute_ProtocolHintFilled: implicit codex routes auto-declare
+// TestDerivedRoute_ProtocolHintFilled: derived codex routes auto-declare
 // protocol:"responses" (so an anthropic/chat client is converted, not left to
 // send a body codex rejects); non-codex providers stay unset.
-func TestImplicitRoute_ProtocolHintFilled(t *testing.T) {
+func TestDerivedRoute_ProtocolHintFilled(t *testing.T) {
 	cfg := &Config{Providers: map[string]Provider{
 		"codex": {Provider: "codex", OpenAIBaseURL: "https://x", Models: []string{"gpt-5.6"}},
 		"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://y", Models: []string{"glm-5"}},
 	}}
-	implicit, _ := synthesizeImplicitRoutesFrom(cfg, map[string]bool{"codex": true, "zhipu": true})
-	if got := implicit["gpt-5.6"].Protocol; got != "responses" {
-		t.Errorf("codex implicit protocol = %q, want \"responses\"", got)
+	derived := DeriveRoutesFrom(cfg)
+	if got := derived["gpt-5.6"][0].Protocol; got != "responses" {
+		t.Errorf("codex derived protocol = %q, want \"responses\"", got)
 	}
-	if got := implicit["glm-5"].Protocol; got != "" {
-		t.Errorf("zhipu implicit protocol = %q, want unset", got)
+	if got := derived["glm-5"][0].Protocol; got != "" {
+		t.Errorf("zhipu derived protocol = %q, want unset", got)
 	}
 }
 

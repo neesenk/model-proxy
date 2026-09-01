@@ -86,10 +86,11 @@ func HasFlagValue(args []string, flag string) bool {
 	return false
 }
 
-// RouteNames returns sorted route names for status/error messages.
+// RouteNames returns sorted callable exposed model names (explicit routes plus
+// names derived from provider model lists) for status/error messages.
 func RouteNames(cfg *configdomain.Config) string {
-	names := make([]string, 0, len(cfg.Routes))
-	for n := range cfg.Routes {
+	names := make([]string, 0, len(cfg.RouteExposedNames()))
+	for n := range cfg.RouteExposedNames() {
 		names = append(names, n)
 	}
 	sort.Strings(names)

@@ -74,26 +74,29 @@ func TestConfigInitWizard_SelectProviders(t *testing.T) {
 	if len(cfg.Providers) != 2 || cfg.Providers["deepseek"].Provider != "deepseek" || cfg.Providers["zhipu"].Provider != "zhipu" {
 		t.Fatalf("providers = %v, want exactly deepseek+zhipu", cfg.Providers)
 	}
-	// Routes must reference only selected providers; routes whose targets all
-	// dropped out (gpt-5.5) must be gone entirely.
-	for exposed, targets := range cfg.Routes {
-		if exposed == "gpt-5.5" {
-			t.Errorf("route gpt-5.5 survived although codex was not selected")
-		}
-		for _, tgt := range targets {
-			if tgt.Provider != "deepseek" && tgt.Provider != "zhipu" {
-				t.Errorf("route %s keeps target for unselected provider %s", exposed, tgt.Provider)
-			}
+	// No explicit routes are written; the table is derived from the selected
+	// providers, so unselected providers (codex/gpt-5.5) contribute nothing.
+	if len(cfg.Routes) != 0 {
+		t.Errorf("wizard wrote explicit routes %v, want none (routes are derived)", cfg.Routes)
+	}
+	derived := map[string]bool{}
+	for _, prov := range cfg.Providers {
+		for _, m := range prov.Models {
+			derived[prov.ExposedModelName(m)] = true
 		}
 	}
-	// claude_mapping entries pointing at surviving routes stay; the rest drop.
+	if derived["gpt-5.5"] {
+		t.Errorf("gpt-5.5 derived although codex was not selected")
+	}
+	// claude_mapping entries pointing at derivable exposed names stay; the
+	// rest drop.
 	for alias, exposed := range cfg.ClaudeMapping {
-		if _, ok := cfg.Routes[exposed]; !ok {
-			t.Errorf("claude_mapping %s -> %s but route %s was dropped", alias, exposed, exposed)
+		if !derived[exposed] {
+			t.Errorf("claude_mapping %s -> %s but %s is not derivable from the selected providers", alias, exposed, exposed)
 		}
 	}
 
-	for _, want := range []string{"model-proxy login deepseek", "model-proxy login zhipu", "model-proxy serve", "model-proxy test deepseek-v4-flash"} {
+	for _, want := range []string{"model-proxy login deepseek", "model-proxy login zhipu", "model-proxy serve", "model-proxy test deepseek-v4-pro"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing next-step %q:\n%s", want, out)
 		}

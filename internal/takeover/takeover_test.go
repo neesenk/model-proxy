@@ -94,7 +94,7 @@ func TestRewriteOpencode(t *testing.T) {
 	cfg := testTakeoverConfig(t, dir)
 	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
 
-	if err := takeover.RewriteOpencode(cfg, nil, nil); err != nil {
+	if err := takeover.RewriteOpencode(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
@@ -370,7 +370,7 @@ func TestExposedModels_PicksBestPriority(t *testing.T) {
 		"a": {"m1": {Context: 1000, Output: 2000}},
 		"b": {"m1": {Context: 3000, Output: 4000}},
 	}
-	got := takeover.ExposedModels(cfg, meta, nil)
+	got := takeover.ExposedModels(cfg, meta, cfg.Routes)
 	if len(got) != 1 {
 		t.Fatalf("exposedModels len=%d want 1", len(got))
 	}
@@ -401,7 +401,7 @@ func TestRewriteKimi(t *testing.T) {
 	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
 	os.WriteFile(cfg.Takeover.Kimi, []byte("[providers.\"existing\"]\ntype = \"kimi\"\n"), 0o644)
 
-	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+	if err := takeover.RewriteKimi(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Kimi)
@@ -442,7 +442,7 @@ func TestRewriteKimi(t *testing.T) {
 	}
 
 	// Idempotent re-run: same content, no duplicated blocks.
-	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+	if err := takeover.RewriteKimi(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
 	b2, _ := os.ReadFile(cfg.Takeover.Kimi)
@@ -465,7 +465,7 @@ func TestRewriteKimi_UsesCatalogContext(t *testing.T) {
 		"aqp": {"glm-5.2": {Context: 131072, Output: 8192}},
 	}
 
-	if err := takeover.RewriteKimi(cfg, meta, nil); err != nil {
+	if err := takeover.RewriteKimi(cfg, meta, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Kimi)
@@ -494,7 +494,7 @@ api_key = "PROXY_MANAGED"
 provider = "model-proxy"
 `), 0o644)
 
-	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+	if err := takeover.RewriteKimi(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Kimi)
@@ -520,7 +520,7 @@ base_url = "http://127.0.0.1:99999/v1"
 api_key = "OLD"
 `), 0o644)
 
-	if err := takeover.RewriteKimi(cfg, nil, nil); err != nil {
+	if err := takeover.RewriteKimi(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(cfg.Takeover.Kimi)

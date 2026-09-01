@@ -29,9 +29,11 @@ Commands:
   models               List models from all providers (from config)
   models <provider>    List models for one provider
   models refresh <provider>  Fetch live model list from a provider
+  models pull         Force-refresh the models.dev metadata cache
   config init          Generate a config.yaml template
   config print         Print the effective config
   config check         Validate config and print a summary
+  routes [model]       Show the derived route table (all exposed models, or one model's targets)
   schedule             Show current per-model provider (queries the running daemon)
   pin <route> <prov>   Temporarily force a route onto one provider (no failover)
   unpin <route>        Remove a pin
@@ -143,7 +145,8 @@ See also: presets list`,
 Usage:
   models              List all models from all providers (from config).
   models <provider>   List models for one provider.
-  models refresh <provider>  Fetch live model list from a provider's server.`,
+  models refresh <provider>  Fetch live model list from a provider's server.
+  models pull         Force-refresh the models.dev metadata cache.`,
 
 	"config": `config <subcommand> [--config PATH]
 
@@ -153,6 +156,18 @@ Subcommands:
   init      Generate a config.yaml template in the current directory.
   print     Print the effective config.
   check     Validate the config and print a summary.`,
+
+	"routes": `routes [model] [--config PATH]
+
+  Show the derived route table (offline, no daemon): every provider model is
+  exposed under its model name (or its provider's alias:) and aggregated per
+  exposed name with the provider's priority; explicit routes: entries
+  override the derived route for that name.
+
+Usage:
+  routes            List all exposed models with their ordered targets.
+  routes <model>    One model's targets in detail (provider, upstream model,
+                    priority, billing tier; alias/explicit origin).`,
 
 	"schedule": `schedule [--config PATH]
 
@@ -219,9 +234,10 @@ Subcommands:
 
 	"test": `test <model> [--config PATH]
 
-  End-to-end link test: resolve the model's route targets (explicit routes,
-  then the implicit-route fallback; claude_mapping aliases are translated
-  first) and probe each target once with a real minimal upstream call.
+  End-to-end link test: resolve the model's route targets (the derived route
+  table — provider models aggregated per exposed name with explicit routes:
+  overriding; claude_mapping aliases are translated first) and probe each
+  target once with a real minimal upstream call.
   Exit status is 0 when at least one target answers 2xx, 1 when all fail.`,
 
 	"stats": `stats [flags] [--config PATH]

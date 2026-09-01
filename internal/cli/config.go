@@ -45,9 +45,9 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 	case "print":
 		fmt.Printf("listen: %s\n", cfg.Listen)
 		for name, prov := range cfg.Providers {
-			fmt.Printf("provider %s: openai_base_url=%s provider_id=%s (%d models)\n", name, prov.OpenAIBaseURL, prov.Provider, len(prov.Models))
+			fmt.Printf("provider %s: openai_base_url=%s provider_id=%s priority=%d (%d models)\n", name, prov.OpenAIBaseURL, prov.Provider, prov.Priority, len(prov.Models))
 		}
-		for exposed, targets := range cfg.Routes {
+		for exposed, targets := range app.RouteTable(cfg) {
 			fmt.Printf("route %s: %d targets\n", exposed, len(targets))
 		}
 		if len(cfg.ClaudeMapping) > 0 {
@@ -61,9 +61,12 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		for name, prov := range cfg.Providers {
 			fmt.Printf("    %s: %s (%s, %d models)\n", name, prov.OpenAIBaseURL, prov.Provider, len(prov.Models))
 		}
-		fmt.Printf("  routes:    %d\n", len(cfg.Routes))
-		for exposed, targets := range cfg.Routes {
-			fmt.Printf("    %s: %d targets\n", exposed, len(targets))
+		table := app.RouteTable(cfg)
+		fmt.Printf("  routes:    %d (derived from provider model lists; explicit routes override)\n", len(table))
+		for _, name := range strings.Split(cliframework.RouteNames(cfg), ", ") {
+			if name != "" {
+				fmt.Printf("    %s: %d targets\n", name, len(table[name]))
+			}
 		}
 		fmt.Printf("  claude_mapping: %d\n", len(cfg.ClaudeMapping))
 		s := cfg.Scheduling

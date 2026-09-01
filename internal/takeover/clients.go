@@ -45,7 +45,7 @@ type ExposedModel struct {
 	PM        catalog.Model
 }
 
-func ExposedModels(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) []ExposedModel {
+func ExposedModels(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) []ExposedModel {
 	var out []ExposedModel
 	add := func(exposed string, t configdomain.RouteTarget) {
 		if _, ok := cfg.Providers[t.Provider]; !ok {
@@ -62,7 +62,7 @@ func ExposedModels(cfg *configdomain.Config, meta map[string]map[string]catalog.
 			PM:        pm,
 		})
 	}
-	for exposed, targets := range cfg.Routes {
+	for exposed, targets := range routes {
 		if len(targets) == 0 {
 			continue
 		}
@@ -76,15 +76,6 @@ func ExposedModels(cfg *configdomain.Config, meta map[string]map[string]catalog.
 		}
 		add(exposed, best)
 	}
-	// Implicit routes (auto-derived from logged-in providers' model lists) are
-	// callable through the proxy and listed in /v1/models — include them so the
-	// takeover client config matches. Explicit routes win on name collision.
-	for exposed, t := range implicit {
-		if _, explicit := cfg.Routes[exposed]; explicit {
-			continue
-		}
-		add(exposed, t)
-	}
 	return out
 }
 
@@ -97,7 +88,7 @@ func DisplayName(id string) string {
 // RewriteOpencode: ~/.config/opencode/opencode.json
 // Writes a provider entry pointing at the proxy, with all exposed models from
 // the config's routes + provider model metadata (context/output/modalities).
-func RewriteOpencode(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) error {
+func RewriteOpencode(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
 	file := cfg.Takeover.Opencode
 	pid := ProviderID(cfg)
 	v, err := ReadJSONConfig(file)
@@ -118,7 +109,7 @@ func RewriteOpencode(cfg *configdomain.Config, meta map[string]map[string]catalo
 			"apiKey":  "PROXY_MANAGED",
 			"baseURL": baseURL,
 		},
-		"models": opencodeModels(cfg, meta, implicit),
+		"models": opencodeModels(cfg, meta, routes),
 	}
 	v["provider"] = prov
 	return WriteJSONConfig(file, v)
@@ -127,8 +118,8 @@ func RewriteOpencode(cfg *configdomain.Config, meta map[string]map[string]catalo
 // opencodeModels builds the opencode model map from the config's exposed
 // models (routes + hydrated metadata). Each model gets name, limit.{context,
 // output}, modalities.{input,output}.
-func opencodeModels(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) map[string]any {
-	models := ExposedModels(cfg, meta, implicit)
+func opencodeModels(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) map[string]any {
+	models := ExposedModels(cfg, meta, routes)
 	out := make(map[string]any, len(models))
 	for _, m := range models {
 		name := DisplayName(m.Exposed)
@@ -162,7 +153,7 @@ func opencodeModels(cfg *configdomain.Config, meta map[string]map[string]catalog
 // RewritePi: ~/.pi/agent/models.json
 // providers.<name> = { baseUrl, api: anthropic-messages, apiKey: PROXY_MANAGED,
 // models:[{id, name, contextWindow, input, maxTokens}] }
-func RewritePi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) error {
+func RewritePi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
 	file := cfg.Takeover.Pi
 	name := ProviderID(cfg)
 	v, err := ReadJSONConfig(file)
@@ -173,7 +164,7 @@ func RewritePi(cfg *configdomain.Config, meta map[string]map[string]catalog.Mode
 	if prov == nil {
 		prov = map[string]any{}
 	}
-	models := ExposedModels(cfg, meta, implicit)
+	models := ExposedModels(cfg, meta, routes)
 	piModels := []map[string]any{}
 	for _, m := range models {
 		entry := map[string]any{
@@ -365,7 +356,7 @@ const kimiFallbackContextSize = 200000
 // natively; api_key is a sentinel — the proxy holds the real credential) and
 // one [models."<exposed>"] block per exposed model pointing at the provider.
 // Re-runs replace both the provider block and every model block in place.
-func RewriteKimi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, implicit map[string]configdomain.RouteTarget) error {
+func RewriteKimi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
 	file := cfg.Takeover.Kimi
 	data, err := readFile(file)
 	if err != nil {
@@ -385,7 +376,7 @@ api_key = "PROXY_MANAGED"
 `, pid, base)
 	text = ReplaceOrAppendTOMLSection(text, fmt.Sprintf("providers.%q", pid), provSection)
 
-	for _, m := range ExposedModels(cfg, meta, implicit) {
+	for _, m := range ExposedModels(cfg, meta, routes) {
 		// kimi-cli's LLMModel schema requires provider, model (the wire model
 		// id — the exposed name the proxy routes) and max_context_size; the
 		// dotted exposed name must be quoted or TOML reads [models.glm-5.2]

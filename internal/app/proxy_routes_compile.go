@@ -4,7 +4,7 @@ package app
 // pool fan-out from the unified routing resolver. Caller holds p.mu (write) —
 // in NewProxy / reload, after buildProviders has populated poolIndex.
 func (p *Proxy) buildExpandedRoutes() map[string][]RouteTarget {
-	return BuildExpandedRoutes(p.cfg, p.implicitRoutes, p.expandTarget)
+	return BuildExpandedRoutes(p.cfg, p.derivedRoutes, p.expandTarget)
 }
 
 // routeKeySet derives the schedule view's route-name key set from the expanded
@@ -21,9 +21,4 @@ func routeKeySet(expanded map[string][]RouteTarget) map[string]bool {
 // virtuals via the unified routing resolver front door.
 func (p *Proxy) expandTarget(t RouteTarget) []RouteTarget {
 	return newResolver(p, p.providers, p.poolIndex).Expand(t)
-}
-
-// synthesizeImplicitRoutesFrom is the pure, testable core in internal/app.
-func synthesizeImplicitRoutesFrom(cfg *Config, loggedIn map[string]bool) (map[string]RouteTarget, []string) {
-	return SynthesizeImplicitRoutesFrom(cfg, loggedIn)
 }

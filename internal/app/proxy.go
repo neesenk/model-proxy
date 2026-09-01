@@ -68,10 +68,10 @@ type Proxy struct {
 	// runtimeState.
 	poolIndex      map[string][]string      // parent name → sorted virtual ids (only multi-account parents)
 	parentOf       map[string]string        // virtual id → parent name
-	expandedRoutes map[string][]RouteTarget // exposed model → expanded targets (explicit + implicit)
+	expandedRoutes map[string][]RouteTarget // exposed model → expanded targets (explicit + derived)
 	routeKeys      map[string]bool          // key set of expandedRoutes; generation-owned, shared by the scheduling hot path
-	implicitRoutes map[string]RouteTarget   // exposed model → single target auto-derived from logged-in providers' model lists (for models not in cfg.Routes)
-	routeWarnings  []string                 // ambiguity warnings for implicit routes (multi-provider); surfaced in `models` CLI + /api/status
+	derivedRoutes  map[string][]RouteTarget // exposed model → targets auto-aggregated from provider model lists (for names not in cfg.Routes)
+	routeWarnings  []string                 // routing hazard warnings; surfaced in `models` CLI + /api/status
 
 	// Runtime wire capabilities have their own leaf Store. The Store never
 	// calls back into Proxy while locked and survives reload generations.

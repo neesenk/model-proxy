@@ -38,7 +38,7 @@ func (p *Proxy) Reload(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("build guard scanner: %w", err)
 	}
-	newImplicit, newWarnings := synthesizeImplicitRoutesFrom(cfg, built.Eligible)
+	newDerived := DeriveRoutesFrom(cfg)
 	// Switch config and runtime state as one generation. Persist snapshots take
 	// the same lock order, and request mutations carry the generation captured by
 	// forward, so an old in-flight request cannot repopulate the cleared maps.
@@ -51,11 +51,11 @@ func (p *Proxy) Reload(configPath string) error {
 	// the read lock) see a consistent cfg/providers/poolIndex/expandedRoutes.
 	p.poolIndex = built.PoolIndex
 	p.parentOf = built.ParentOf
-	p.implicitRoutes = newImplicit
+	p.derivedRoutes = newDerived
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.routeKeys = routeKeySet(p.expandedRoutes)
 	hw := ConfigRoutingWarnings(cfg, p.expandedRoutes)
-	p.routeWarnings = append(newWarnings, hw...)
+	p.routeWarnings = hw
 	// Rebuild the cache from the new config (pure in-memory, no goroutine/file
 	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now
 	// takes effect immediately.

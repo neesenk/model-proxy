@@ -317,7 +317,7 @@ func RenderWarnings(st *StatusResp) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s  implicit-route warnings\n", provider.Yellow("⚠"))
+	fmt.Fprintf(&b, "%s  routing warnings\n", provider.Yellow("⚠"))
 	for _, w := range st.Warnings {
 		fmt.Fprintf(&b, "  %s\n", w)
 	}

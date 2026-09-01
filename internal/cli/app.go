@@ -30,6 +30,7 @@ func NewApplication(serve func(args []string)) *Application {
 		"usage":    ProcessCommand(RunUsage),
 		"models":   ProcessCommand(RunModels),
 		"config":   ProcessCommand(RunConfig),
+		"routes":   ProcessCommand(RunRoutes),
 		"schedule": ProcessCommand(RunSchedule),
 		"pin":      ProcessCommand(RunPin),
 		"unpin":    ProcessCommand(RunUnpin),

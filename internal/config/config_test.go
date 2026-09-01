@@ -55,15 +55,30 @@ func TestConfig_ProviderBaseURLs(t *testing.T) {
 	}
 }
 
-// TestConfig_RouteTargets verifies every route target references an existing
-// provider and has a non-empty model name.
+// TestConfig_RouteTargets verifies the derived route table is non-empty and
+// every target references an existing provider with a non-empty model name.
 func TestConfig_RouteTargets(t *testing.T) {
 	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if len(cfg.Routes) == 0 {
+	exposedNames := cfg.RouteExposedNames()
+	if len(exposedNames) == 0 {
 		t.Fatal("no routes configured")
+	}
+	derived := cfg.ExposedModelNames()
+	for name := range derived {
+		found := false
+		for _, prov := range cfg.Providers {
+			for _, m := range prov.Models {
+				if prov.ExposedModelName(m) == name {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("exposed name %q not derivable from any provider model", name)
+		}
 	}
 	for exposed, targets := range cfg.Routes {
 		if len(targets) == 0 {
@@ -84,18 +99,23 @@ func TestConfig_RouteTargets(t *testing.T) {
 	}
 }
 
-// TestConfig_ClaudeMapping verifies claude_mapping values reference existing routes.
+// TestConfig_ClaudeMapping verifies claude_mapping values reference callable
+// exposed model names (explicit routes or derived provider models).
 func TestConfig_ClaudeMapping(t *testing.T) {
 	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
+	routeNames := cfg.RouteExposedNames()
+	if len(routeNames) == 0 {
+		t.Fatal("no callable exposed model names")
+	}
 	for claude, exposed := range cfg.ClaudeMapping {
 		if exposed == "" {
 			t.Errorf("claude_mapping %q → empty target", claude)
 		}
-		if _, ok := cfg.Routes[exposed]; !ok {
-			t.Errorf("claude_mapping %q → %q: target not in routes", claude, exposed)
+		if !routeNames[exposed] {
+			t.Errorf("claude_mapping %q → %q: target is not a callable exposed model name", claude, exposed)
 		}
 	}
 }
@@ -159,7 +179,7 @@ func TestConfig_ValidateErrors(t *testing.T) {
 			}, ClaudeMapping: map[string]string{
 				"claude-x": "no-such-route",
 			}},
-			wantSub: "target \"no-such-route\" not found in routes",
+			wantSub: "no route or provider model is exposed as \"no-such-route\"",
 		},
 	}
 

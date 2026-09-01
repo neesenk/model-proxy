@@ -37,7 +37,7 @@ panel/judge 的 target policy adapter 与 synthesizer 的正常 target executor
 接线；fan-out、quorum/grace、judge/body 构造、budget 和 registry 归
 `internal/fusion`；
 `internal/app/provider_build.go` 以一次账号 snapshot 同时构建 provider、pool identity 和
-implicit-route eligibility；
+route derivation（见 request-routing 文档）；
 `internal/app/proxy_constructor.go` 负责 Proxy 内部组件装配、状态恢复、Close 委派和 stats reset；
 `internal/app/proxy_lifecycle.go` 承载 `StartRuntimeServices`/`closeRuntimeServices` 的进程级后台服务
 启停编排（`Close` 经 `closeOnce` 委派至此）；
@@ -45,7 +45,7 @@ implicit-route eligibility；
 加载 wrapper，根 `package main` 不得重建）；
 `internal/app/proxy_snapshot.go` 集中 config/provider/catalog/pricing 读取与 generation 一致的
 持久化快照；
-`internal/app/proxy_routes_compile.go` 只编译 explicit/implicit route 与 pool fan-out；
+`internal/app/proxy_routes_compile.go` 只编译 explicit/derived route 与 pool fan-out；
 `internal/app/proxy_reload.go` 执行 generation 原子交换及交换后的持久化/刷新编排；
 `internal/app/proxy_http.go` 只承载主代理 HTTP 路由、models 响应和早期终态事件；
 `internal/app/proxy_schedule_view.go` 从单个 detached dashboard snapshot 投影调度状态；
@@ -173,7 +173,7 @@ pool/marker 供重试；纯 file 历史无 marker 时不访问 keychain。metada
 Save 必须覆盖并 canonical 地恢复全部原 ID，未处理账号只能通过显式删除移除。
 `internal/app/accounts_store.go` 只适配 HOME 并为登录、Web、Provider 构建保留
 窄兼容入口；`buildProviders` 以一次 `LoadSnapshot` 同时取得 pool 与来源，并在
-同一 build result 中派生 providers、pool identity 和 implicit-route eligibility，
+同一 build result 中派生 providers、pool identity 和 route-derivation 输入，
 避免二次文件探测改变同一 runtime generation 的 authority 决策。网络验证、
 交互、reload、运行时虚拟化和健康选择不进入存储包。legacy singular 路径只由
 `accounts.Store` 的读取兼容逻辑拥有，`internal/app/accounts_store.go` 不再导出路径 wrapper。
@@ -438,7 +438,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `web → appapi, observe/logx, observe/requestlog, observe/stats, pricing, webauth`。
 
 `internal/takeover` 拥有客户端配置的备份、改写与恢复（claude/opencode/codex/pi），
-只消费 config DTO 与 catalog 元数据；implicit routes、catalog 加载与 source 标记
+只消费 config DTO 与 catalog 元数据；route derivation、catalog 加载与 source 标记
 由 `internal/cli` 的 `takeoverFacts` 计算并以 `ModelFacts` 注入，包内不读取
 应用运行时。
 
