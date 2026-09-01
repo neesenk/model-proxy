@@ -107,8 +107,16 @@ func TestForward_RecordsAgent(t *testing.T) {
 	do("claude-cli/1.0.0")
 	do("codex_cli_rs/0.144.1")
 
-	// Give the scanner's async-ish commit a beat (it commits on Close, which is
-	// synchronous in forward, so the snapshot is already final here).
+	// The client can finish reading a Content-Length body before the server
+	// handler goroutine runs the post-copy Committed effect that increments
+	// the agent Requests/latency cells (same race as awaitCommitMetrics in
+	// 811d074; token cells are filled earlier, during the body scan) — poll
+	// for both agents' requests instead of asserting a racy snapshot.
+	waitUntil(t, "agent commit requests", func() bool {
+		snap := p.agents.Snapshot()
+		return snap[counters.AgentKey{Agent: "claude-code", Provider: "aqp", Model: "claude-sonnet-4"}].Requests >= 1 &&
+			snap[counters.AgentKey{Agent: "codex", Provider: "aqp", Model: "claude-sonnet-4"}].Requests >= 1
+	})
 	snap := p.agents.Snapshot()
 	cc := snap[counters.AgentKey{Agent: "claude-code", Provider: "aqp", Model: "claude-sonnet-4"}]
 	if cc.Requests != 1 {
