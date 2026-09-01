@@ -46,15 +46,21 @@ func TestWebAssetsJavaScriptSyntax(t *testing.T) {
 	}
 }
 
-// TestWebAssetsPureJSUnitTests runs the behavioral unit tests for the
-// DOM-free helpers (assets/pure.js) plus the docs/frontend field contracts
-// (jstests/contract.test.mjs) with Node's built-in test runner — no framework
-// dependency. Same node gate as the syntax check.
+// TestWebAssetsPureJSUnitTests runs every jstests/*.test.mjs file with
+// Node's built-in test runner — the pure.js helper tests plus the
+// docs/frontend field contracts — no framework dependency. Files are
+// enumerated here (not via `node --test <dir>`, whose directory-argument
+// support varies across node versions). Same node gate as the syntax check.
 func TestWebAssetsPureJSUnitTests(t *testing.T) {
 	node := requireNode(t)
-	cmd := exec.Command(node, "--test", "jstests")
+	files, err := filepath.Glob(filepath.Join("jstests", "*.test.mjs"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob jstests/*.test.mjs: %v (found %d)", err, len(files))
+	}
+	args := append([]string{"--test"}, files...)
+	cmd := exec.Command(node, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("node --test jstests: %v\n%s", err, out)
+		t.Fatalf("node --test %s: %v\n%s", strings.Join(files, " "), err, out)
 	}
 }
 
