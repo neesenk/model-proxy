@@ -112,7 +112,8 @@
     本机更高版本的语句计数不同（实测 `internal/cli/models` 本地 63.4% vs CI
     60.3%，足以跌破 floor）。floor/baseline 验证用
     `GOTOOLCHAIN=go1.26.4 scripts/cover.sh`；`go test` 结果缓存会掩盖重测，
-    本地压测与复跑一律 `-count=1`。
+    本地压测与复跑一律 `-count=1`。cover.sh 在本地工具链与 go.mod 不一致时
+    会打印漂移警告（不 fail，CI 口径仍是权威）。
 
 ## 回归要求
 

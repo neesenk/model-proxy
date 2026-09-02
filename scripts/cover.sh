@@ -42,6 +42,16 @@ if ! [[ "$threshold" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
 fi
 baseline=80
 
+# Coverage statement counting is toolchain-sensitive (docs/engineering/
+# pitfalls.md #33): CI pins the toolchain via go-version-file: go.mod, so a
+# different local toolchain can shift per-package numbers by a few points.
+# Warn (never fail) on a mismatch — the CI measurement stays authoritative.
+gomod_go=$(awk '/^go /{print $2; exit}' go.mod)
+local_go=$(go version | awk '{print $3}' | sed 's/^go//')
+if [ -n "$gomod_go" ] && [ "$local_go" != "$gomod_go" ]; then
+  echo "⚠ cover.sh: toolchain mismatch (local go$local_go, go.mod go$gomod_go) — coverage numbers may drift from CI; the CI measurement is authoritative" >&2
+fi
+
 # Historical packages below the repository-wide baseline have an explicit
 # floor. Unlike a blanket exemption, this makes any regression fail while the
 # remaining gap stays visible. Raise a floor whenever durable tests improve it.
