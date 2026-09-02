@@ -42,33 +42,33 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 
 	t.Run("target executor is assembled only by its root adapter", func(t *testing.T) {
 		planSites := importedFunctionCallSitesAcrossProduction(t, "model-proxy/internal/targetexec", "NewPlan")
-		if len(planSites) != 1 || planSites[0].file != "internal/app/target_plan.go" || planSites[0].function != "planTarget" {
-			t.Errorf("targetexec.NewPlan production call sites = %v, want only target_plan.go:planTarget", planSites)
+		if len(planSites) != 1 || planSites[0].file != "internal/app/target_pipeline.go" || planSites[0].function != "planTarget" {
+			t.Errorf("targetexec.NewPlan production call sites = %v, want only target_pipeline.go:planTarget", planSites)
 		}
 		if sites := packageLocalFunctionCallSites(t, "internal/targetexec", "NewPlan"); len(sites) != 0 {
 			t.Errorf("targetexec package-local NewPlan calls = %v, want none outside the root plan owner", sites)
 		}
 		if sites := importedFunctionReferenceSitesAcrossProduction(t, "model-proxy/internal/targetexec", "NewPlan"); len(sites) != 1 ||
-			sites[0].file != "internal/app/target_plan.go" || sites[0].function != "planTarget" {
-			t.Errorf("targetexec.NewPlan production reference sites = %v, want only target_plan.go:planTarget direct call", sites)
+			sites[0].file != "internal/app/target_pipeline.go" || sites[0].function != "planTarget" {
+			t.Errorf("targetexec.NewPlan production reference sites = %v, want only target_pipeline.go:planTarget direct call", sites)
 		}
 
 		sites := importedCompositeLiteralSites(t, "model-proxy/internal/targetexec", "Executor")
-		if len(sites) != 1 || sites[0].file != "internal/app/targetexec_adapter.go" || sites[0].function != "targetExecutor" {
-			t.Errorf("targetexec.Executor production composites = %v, want only targetexec_adapter.go:targetExecutor", sites)
+		if len(sites) != 1 || sites[0].file != "internal/app/target_pipeline.go" || sites[0].function != "targetExecutor" {
+			t.Errorf("targetexec.Executor production composites = %v, want only target_pipeline.go:targetExecutor", sites)
 		}
 		if sites := packageLocalCompositeLiteralSites(t, "internal/targetexec", "Executor"); len(sites) != 0 {
 			t.Errorf("targetexec package-local Executor composites = %v, want none outside the root adapter", sites)
 		}
 		if sites := importedTypeValueReferenceSitesAcrossProduction(t, "model-proxy/internal/targetexec", "Executor"); len(sites) != 1 ||
-			sites[0].file != "internal/app/targetexec_adapter.go" || sites[0].function != "targetExecutor" {
-			t.Errorf("targetexec.Executor production value references = %v, want only targetexec_adapter.go:targetExecutor direct composite", sites)
+			sites[0].file != "internal/app/target_pipeline.go" || sites[0].function != "targetExecutor" {
+			t.Errorf("targetexec.Executor production value references = %v, want only target_pipeline.go:targetExecutor direct composite", sites)
 		}
 		if sites := importedTypeDeclarationSitesAcrossProduction(t, "model-proxy/internal/targetexec", "Executor"); len(sites) != 0 {
 			t.Errorf("targetexec.Executor type aliases = %v, want none", sites)
 		}
 
-		adapter, _ := parseGoFile(t, "internal/app/targetexec_adapter.go")
+		adapter, _ := parseGoFile(t, "internal/app/target_pipeline.go")
 		factory := namedMethod(t, adapter, "Proxy", "targetExecutor")
 		if got := selectorCompositeCountInNode(factory.Body, "targetexec", "GateState"); got != 1 {
 			t.Errorf("Proxy.targetExecutor targetexec.GateState composites = %d, want one frozen-state adapter", got)
@@ -117,7 +117,7 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 
 		shadowSites := importedFunctionCallSitesAcrossProduction(t, "model-proxy/internal/shadow", "NewRuntime")
 		if len(shadowSites) != 2 ||
-			shadowSites[0].file != "internal/app/proxy_constructor.go" || shadowSites[0].function != "NewProxyWithStatePath" ||
+			shadowSites[0].file != "internal/app/proxy.go" || shadowSites[0].function != "NewProxyWithStatePath" ||
 			shadowSites[1].file != "internal/app/proxy_reload.go" || shadowSites[1].function != "Reload" {
 			t.Errorf("shadow.NewRuntime production call sites = %v, want constructor and Proxy.Reload only", shadowSites)
 		}
@@ -125,7 +125,7 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 			t.Errorf("shadow package-local NewRuntime calls = %v, want none outside the root generation owners", sites)
 		}
 		if sites := importedFunctionReferenceSitesAcrossProduction(t, "model-proxy/internal/shadow", "NewRuntime"); len(sites) != 2 ||
-			sites[0].file != "internal/app/proxy_constructor.go" || sites[0].function != "NewProxyWithStatePath" ||
+			sites[0].file != "internal/app/proxy.go" || sites[0].function != "NewProxyWithStatePath" ||
 			sites[1].file != "internal/app/proxy_reload.go" || sites[1].function != "Reload" {
 			t.Errorf("shadow.NewRuntime production reference sites = %v, want constructor and Proxy.Reload direct calls only", sites)
 		}

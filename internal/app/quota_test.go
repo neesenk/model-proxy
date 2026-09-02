@@ -1,6 +1,9 @@
 package app
 
 import (
+	"model-proxy/internal/provider"
+	"model-proxy/internal/runtime"
+	runtimestate "model-proxy/internal/runtime"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -8,10 +11,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"model-proxy/internal/provider"
-	runtimestate "model-proxy/internal/runtime"
 )
+
+// ---- quota_test.go ----
 
 // The Parse*Quota parser tests moved to the provider package in Phase 1
 // (provider/quota_parse_test.go) so go test ./provider covers the parsers.
@@ -342,5 +344,90 @@ func TestQuotaTracker_PollOneSingleAccount(t *testing.T) {
 	}
 	if got := bCalls.Load(); got != before {
 		t.Errorf("unknown-key pollOne polled %d extra times", got-before)
+	}
+}
+
+// ---- quota_test_support_test.go ----
+
+// newStandaloneQuotaTracker builds a QuotaTracker with an isolated Manager for
+// tests (no Proxy lifecycle).
+func newStandaloneQuotaTracker(
+	path string,
+	cfg func() *Config,
+	provs func() map[string]provider.Provider,
+) *runtime.QuotaTracker {
+	manager := &runtime.Manager{}
+	manager.ReplaceGeneration(0)
+	return runtime.NewQuotaTracker(path, cfg, provs, manager)
+}
+
+// ---- quota_poll_test.go ----
+
+// TestPollAll_PollsPooledVirtuals (bug 1): a multi-account provider is unrolled
+// into "name#<accountID>" virtuals in the RUNTIME map; the parent name is NOT a
+// runtime key. pollAll must iterate the runtime map (the runnable instances) —
+// iterating cfg.Providers (parent names) looked the parent up and found nil, so
+// every pooled account stayed BillingUnknown and was never polled, defeating
+// surplus/tier scheduling and persistence for the whole pool.
+func TestPollAll_PollsPooledVirtuals(t *testing.T) {
+	// cfg.Providers carries only the PARENT name, exactly as a pooled provider
+	// appears in config; the runtime map carries the unrolled virtuals.
+	cfg := &Config{Providers: map[string]Provider{"zhipu": {Provider: "zhipu"}}}
+	provs := map[string]provider.Provider{
+		"zhipu#a": &testProv{key: "zhipu#a"},
+		"zhipu#b": &testProv{key: "zhipu#b"},
+	}
+	tr := newStandaloneQuotaTracker("", func() *Config { return cfg }, func() map[string]provider.Provider { return provs })
+	tr.PollAll(time.Now())
+	for _, vid := range []string{"zhipu#a", "zhipu#b"} {
+		if tr.Snapshot(vid) == nil {
+			t.Errorf("%s: pooled virtual has no snapshot after pollAll (poller skipped it)", vid)
+		}
+	}
+	// The parent name is not runnable and must NOT be polled as a key.
+	if tr.Snapshot("zhipu") != nil {
+		t.Errorf("parent name should not appear as a polled runtime key")
+	}
+}
+
+// ---- quota_tracker_lifecycle_test.go ----
+
+// --- runtimestate.QuotaTracker.stop / pollAfter ---
+
+func TestQuotaTracker_Stop(t *testing.T) {
+	dir := t.TempDir()
+	cfg := func() *Config { return &Config{} }
+	provs := func() map[string]provider.Provider { return nil }
+	tr := newStandaloneQuotaTracker(dir+"/q.json", cfg, provs)
+	tr.Start()
+	// stop must be idempotent and not block.
+	tr.Stop()
+	tr.Stop() // second stop is a no-op (sync.Once)
+}
+
+func TestQuotaTracker_PollAfter(t *testing.T) {
+	dir := t.TempDir()
+	cfg := func() *Config { return &Config{} }
+	var called atomic.Int32
+	provs := func() map[string]provider.Provider {
+		called.Add(1)
+		return nil
+	}
+	tr := newStandaloneQuotaTracker(dir+"/q.json", cfg, provs)
+	tr.Start()
+	defer tr.Stop()
+	// pollAfter → pollAll → provs(). Measure the delta: start()'s bootstrap poll
+	// (10s) and the ticker (5m default) can't fire within this window, so any
+	// provs() call after dispatch must come from the pollAfter path.
+	before := called.Load()
+	tr.PollAfter(50 * time.Millisecond)
+	// Deadline poll instead of a fixed sleep: on a slow machine the poll fires
+	// after the fixed window and the assertion flakes.
+	deadline := time.Now().Add(5 * time.Second)
+	for called.Load()-before < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := called.Load() - before; got < 1 {
+		t.Errorf("pollAfter did not trigger a poll: provs called %d more times", got)
 	}
 }

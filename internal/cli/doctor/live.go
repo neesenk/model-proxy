@@ -3,7 +3,6 @@ package doctor
 import (
 	"encoding/json"
 	"fmt"
-	"model-proxy/internal/app"
 	"model-proxy/internal/appapi"
 	clicommon "model-proxy/internal/cli/clicommon"
 	cliframework "model-proxy/internal/cli/framework"
@@ -11,6 +10,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	observeseclog "model-proxy/internal/observe/seclog"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/routing"
 	"model-proxy/internal/takeover"
 	"net/url"
 	"os"
@@ -122,7 +122,7 @@ type diagLine struct {
 // check; nothing is probed live.
 func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []ClientDrift) string {
 	now := time.Now()
-	routeTable := app.RouteTable(cfg)
+	routeTable := routing.RouteTable(cfg)
 
 	routes := make([]string, 0, len(st.Schedule.Models))
 	for r := range st.Schedule.Models {

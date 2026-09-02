@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"log"
 	"model-proxy/internal/accounts"
-	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	displaypkg "model-proxy/internal/provider"
+	"model-proxy/internal/routing"
 	"os"
 	"strings"
 
@@ -47,7 +47,7 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		for name, prov := range cfg.Providers {
 			fmt.Printf("provider %s: openai_base_url=%s provider_id=%s priority=%d (%d models)\n", name, prov.OpenAIBaseURL, prov.Provider, prov.Priority, len(prov.Models))
 		}
-		for exposed, targets := range app.RouteTable(cfg) {
+		for exposed, targets := range routing.RouteTable(cfg) {
 			fmt.Printf("route %s: %d targets\n", exposed, len(targets))
 		}
 		if len(cfg.ClaudeMapping) > 0 {
@@ -61,9 +61,9 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		for name, prov := range cfg.Providers {
 			fmt.Printf("    %s: %s (%s, %d models)\n", name, prov.OpenAIBaseURL, prov.Provider, len(prov.Models))
 		}
-		table := app.RouteTable(cfg)
+		table := routing.RouteTable(cfg)
 		fmt.Printf("  routes:    %d (derived from provider model lists; explicit routes override)\n", len(table))
-		for _, name := range strings.Split(cliframework.RouteNames(cfg), ", ") {
+		for _, name := range strings.Split(cfg.RouteNames(), ", ") {
 			if name != "" {
 				fmt.Printf("    %s: %d targets\n", name, len(table[name]))
 			}
@@ -80,7 +80,7 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		fmt.Print(RenderGuardSummary(cfg))
 		// Config-time routing hazards (explicit routes only — implicit routes are
 		// a daemon-side concept; the daemon logs these at boot/reload).
-		for _, w := range app.ConfigRoutingWarnings(cfg, cfg.Routes) {
+		for _, w := range routing.ConfigRoutingWarnings(cfg, cfg.Routes) {
 			fmt.Println(displaypkg.Yellow("  ⚠ " + w))
 		}
 	default:

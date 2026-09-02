@@ -8,24 +8,6 @@ import (
 
 // --- util.go ---
 
-func TestMask_ShortAndEmpty(t *testing.T) {
-	if got := Mask(""); got != "(empty)" {
-		t.Errorf("Mask(empty)=%q want (empty)", got)
-	}
-	if got := Mask("short"); got != "****" {
-		t.Errorf("Mask(short)=%q want ****", got)
-	}
-	if got := Mask("ab"); got != "****" {
-		t.Errorf("Mask(2-char)=%q want ****", got)
-	}
-}
-
-func TestMask_Long(t *testing.T) {
-	if got := Mask("abcdefghijklmnop"); got != "ab…op" {
-		t.Errorf("Mask(long)=%q want ab…op", got)
-	}
-}
-
 func TestAuthFilePath(t *testing.T) {
 	got := AuthFilePath("zhipu-work", "apikey")
 	if !strings.Contains(got, "zhipu-work_apikey.json") || !strings.Contains(got, ".model-proxy") {

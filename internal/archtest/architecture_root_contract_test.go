@@ -24,13 +24,18 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 	})
 
 	t.Run("account probe captures one runtime generation", func(t *testing.T) {
-		admin, _ := parseGoFile(t, "internal/app/proxy_admin_commands.go")
-		if got := methodCallCount(admin, "accountProbe", "SnapshotRuntime"); got != 1 {
-			t.Errorf("proxyAdminCommands.accountProbe SnapshotRuntime calls = %d, want exactly 1", got)
+		commands, _ := parseGoFile(t, "internal/admin/commands.go")
+		if got := methodCallCount(commands, "accountProbe", "ProbeRuntime"); got != 1 {
+			t.Errorf("admin.Service.accountProbe ProbeRuntime calls = %d, want exactly 1", got)
 		}
-		readView, _ := parseGoFile(t, "internal/app/proxy_read_view.go")
-		if methodDeclared(readView, "runtimeProvider") {
-			t.Error("proxyReadView.runtimeProvider must not exist; account probes use one RuntimeSnapshot")
+		read, _ := parseGoFile(t, "internal/admin/read.go")
+		if methodDeclared(read, "runtimeProvider") {
+			t.Error("admin read side must not grow a per-name runtime provider lookup; account probes use one runtime snapshot")
+		}
+		ports, _ := parseGoFile(t, "internal/app/web_adapter.go")
+		adminPorts := namedMethod(t, ports, "Proxy", "adminPorts")
+		if got := namedCallCountInNode(adminPorts.Body, "SnapshotRuntime"); got != 1 {
+			t.Errorf("web_adapter.go adminPorts SnapshotRuntime calls = %d, want exactly 1 (the ProbeRuntime port)", got)
 		}
 	})
 
@@ -96,6 +101,57 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 		}
 		if got := callCountWithLastSelector(serve, "ServeHTTPUntilShutdown", "runtime", "Close"); got != 1 {
 			t.Errorf("cliserve.ServeHTTPUntilShutdown(..., runtime.Close) calls = %d, want exactly 1 final-flush callback", got)
+		}
+	})
+
+	t.Run("Proxy fields are grouped into reload generation and process services", func(t *testing.T) {
+		// Proxy's own (non-promoted) fields are exactly the cross-group process
+		// state; everything else lives in one of the two embedded groups so the
+		// reload swap unit is visible at the type level.
+		wantProxyFields := map[string]bool{
+			"mu": true, "configGeneration": true,
+			"pricingMu": true, "closeOnce": true, "pprofEnabled": true,
+		}
+		if got := structContractViolations(
+			namedStructFields(t, rootPackage, "Proxy"), wantProxyFields, nil,
+		); len(got) != 0 {
+			t.Errorf("Proxy top-level fields must be exactly the cross-group process state: %v", got)
+		}
+		embeds := structEmbeddedTypes(t, rootPackage, "Proxy")
+		if len(embeds) != 2 || embeds[0] != "generationState" || embeds[1] != "processServices" {
+			t.Errorf("Proxy embedded groups = %v, want exactly [generationState processServices]", embeds)
+		}
+
+		// generationState is the reload swap unit (proxy_reload.go's locked
+		// section is the swap definition); processServices survives reload.
+		// New fields must land in the right group, never sprawl onto Proxy.
+		wantGeneration := map[string]bool{
+			"cfg": true, "providers": true,
+			"cache": true, "guardScanner": true,
+			"guardPoolSecrets": true, "guardOAuthSecrets": true,
+			"secLog": true, "secLogRunning": true,
+			"poolIndex": true, "parentOf": true,
+			"expandedRoutes": true, "routeKeys": true,
+			"derivedRoutes": true, "routeWarnings": true,
+			"shadow": true, "adminAuth": true, "apiKeys": true,
+		}
+		if got := structContractViolations(
+			namedStructFields(t, rootPackage, "generationState"), wantGeneration, nil,
+		); len(got) != 0 {
+			t.Errorf("generationState must hold exactly the reload swap unit: %v", got)
+		}
+		wantServices := map[string]bool{
+			"lifecycle": true, "runtimeState": true, "client": true,
+			"quota": true, "metrics": true, "tokens": true, "agents": true,
+			"stats": true, "flusher": true, "reqLog": true, "reqLogStarted": true,
+			"sessionScan": true, "responsesState": true, "events": true,
+			"fusionReg": true, "catalog": true, "budget": true,
+			"wireCaps": true, "wireProbe": true,
+		}
+		if got := structContractViolations(
+			namedStructFields(t, rootPackage, "processServices"), wantServices, nil,
+		); len(got) != 0 {
+			t.Errorf("processServices must hold exactly the process-lifetime services: %v", got)
 		}
 	})
 
@@ -179,4 +235,41 @@ func selectorCountOnIdent(file *ast.File, receiver, method string) int {
 		return true
 	})
 	return count
+}
+
+// structEmbeddedTypes returns the embedded (anonymous) field type names of a
+// struct in declaration order. namedStructFields skips embedded fields (they
+// have no Names), so group-membership contracts need this separate view.
+func structEmbeddedTypes(t *testing.T, f *ast.File, name string) []string {
+	t.Helper()
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok || typeSpec.Name.Name != name {
+				continue
+			}
+			st, ok := typeSpec.Type.(*ast.StructType)
+			if !ok {
+				t.Fatalf("%s is not a struct", name)
+			}
+			var embeds []string
+			for _, field := range st.Fields.List {
+				if len(field.Names) != 0 {
+					continue
+				}
+				ident, ok := field.Type.(*ast.Ident)
+				if !ok {
+					t.Fatalf("%s embeds non-identifier type %T", name, field.Type)
+				}
+				embeds = append(embeds, ident.Name)
+			}
+			return embeds
+		}
+	}
+	t.Fatalf("struct %s not found", name)
+	return nil
 }

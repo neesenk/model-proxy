@@ -94,12 +94,12 @@ OAuth device flow（从 codex-rs 源码确认）：issuer `https://auth.openai.c
 ## models.dev 元数据契约（`internal/catalog`，实测）
 
 - 数据源 `GET https://models.dev/api.json`（raw 3.05 MB）。gzip 后 ~286 KB（Go Transport 自动 gzip——**勿手动设 Accept-Encoding**，否则关掉自动解压）；`If-None-Match`→304 返回 0 字节。磁盘缓存只存去重 slim 投影（`by_name` 244 项，~150 KB），**绝不存 3 MB blob**。
-- 缓存 `~/.model-proxy/models_cache.json`，TTL 24h；写入使用目标目录中的唯一临时文件再 atomic rename，多个进程不会争用固定 `.tmp`。`catalog.EnsureFresh`：fresh→用；stale/force→conditional GET；304→刷新并持久化 `fetched_at`/ETag；合法 200→重建并持久化。fetch 错误、非 2xx 或 malformed 200 有旧 cache 时告警并回落旧值，无旧 cache 时返回空 catalog + error，绝不以坏响应覆盖旧数据。`MP_MODELSDEV_URL` 由 `internal/app/catalog_adapter.go` 覆盖端点。
+- 缓存 `~/.model-proxy/models_cache.json`，TTL 24h；写入使用目标目录中的唯一临时文件再 atomic rename，多个进程不会争用固定 `.tmp`。`catalog.EnsureFresh`：fresh→用；stale/force→conditional GET；304→刷新并持久化 `fetched_at`/ETag；合法 200→重建并持久化。fetch 错误、非 2xx 或 malformed 200 有旧 cache 时告警并回落旧值，无旧 cache 时返回空 catalog + error，绝不以坏响应覆盖旧数据。`MP_MODELSDEV_URL` 由 `internal/config/modelscatalog.go` 覆盖端点。
 - 匹配：`Catalog.Lookup()` 纯全局精确名查找，未命中→default（无 endpoint/后缀匹配逻辑）。借名模型（aqp 借的 `glm-*`/`deepseek-*`）靠 parse 期 `by_name` 去重时 canonical owner 胜出解析。
 - **`models:` 只配名字；元数据全来自 models.dev**（context/output/modalities/`tool_call` 运行时由 `hydrateModels` 补，失败→default；slim 投影含 `tool_call` 供能力路由）。effective = config 名字 ∪ routes 引用模型。
 - **`models refresh <provider>` 写 config**：拉 upstream 列表 + 现有 `models:` 合并去重 → 逐个 endpoint 通过 `internal/probe.Exchange` 探测（复刻 forward 的 base/path/auth）→ 仅 2xx 保留 → **覆盖写**回 `models:`（非 append-only）。`FilterModelIDs` 做静态策略过滤。探测 infra 不可用→写未校验合并集；**全部失败→保留 config 不清空+告警**。写是保注释的 yaml.Node 往返。**只有 `models refresh` 写 config.yaml；`models`/`takeover` 显示永不写**。
 - 覆盖盲区：models.dev **没有** aqp/compass、codex/ChatGPT、volcengine；未命中→default（能力路由的逃生口：provider config `capabilities:`，见 `docs/architecture/request-routing.md`）。
-- 作用域：`models`/`takeover` CLI 经 `internal/app/catalog_adapter.go` 调 `catalog.EnsureFresh` +
-  `HydrateModels`（只改内存 cfg，不进 `LoadConfig`）；daemon 启动/reload 经
+- 作用域：`models`/`takeover` CLI 经 `internal/config/modelscatalog.go` 调 `catalog.EnsureFresh` +
+  `internal/routing.HydrateModels`（只改内存 cfg，不进 `LoadConfig`）；daemon 启动/reload 经
   `initCatalog` 加载供请求感知路由用（失败→nil，路由功能 no-op）。`models`
   显示 `SRC` 列（`models.dev`/`default`）。

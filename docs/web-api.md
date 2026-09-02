@@ -25,12 +25,12 @@ web:
 **浏览器侧防线**（`internal/web` `guardBrowserOrigin`，挂在 `serveUI`/`serveAPI` 入口；proxy-owned admin 端点经 `GuardAdminBrowserOrigin` 复用）：
 loopback 挡不住“借用户浏览器之手”的请求，所以凡携带浏览器身份头（`Origin` 或 `Sec-Fetch-Site`）的请求额外要求：(1) `Sec-Fetch-Site: cross-site` 一律拒绝；(2) `Origin` 与请求 `Host` 一致，封住 evil.com 发起的 CORS simple request；(3) 未启用 admin auth 时 `Host` 只能是 loopback；启用后额外允许 LAN **IP literal**（如 `192.168.1.20:15721`）或与 config `listen` 完全相同的 hostname:port，但仍拒绝其他 DNS host，避免 rebound 域名在同源视角下绕过。GET `/api/config` 原文可能含 static provider key，读与写同等防护。无浏览器头的 CLI/curl（`daemonctl`、脚本）仍以 bearer 为权威，不受浏览器 Host 规则影响。
 
-**前端布局契约**：Status→Logs 每条日志是「行号 gutter + 正文」两列网格；行号与 gutter 右边框留 2px，gutter 背景只覆盖行号列，鼠标悬停标出整条逻辑行，单击选中该行（改变行号前景色，不干预原生选择）。Config→Raw YAML **硬最小高度 480px**，按编辑器 viewport top + 卡片下方 chrome 重新计算，可见空间大于 480px 铺满、不足仍 480px 并允许滚动，绝不靠固定 `100vh - 常量` 推测。Raw YAML 编辑时 500ms 防抖调 `/api/config/validate` 内联报错（校验失败不阻塞到保存才暴露，有错禁用 Save；点击错误跳转对应行）。编辑器还维护一份**需重启键名单**（`listen`、`log_level`、`log_file`、`web.enabled`、`request_log.*`、`stats.db_path`、`stats.retention`、`budgets`、`scheduling.quota_poll_interval`——依据 pitfalls #29/#31、`initStats` "startup-only"、`budget_watch.go` watcher 启动期创建与 request_log/logger 启动期构建的代码事实）：当前文本相对磁盘基线改动到这些键时显示 ⓘ "需重启 daemon 生效" 提示；名单是前端常量（app.js `RESTART_KEYS`），行扫描只做提示、校验权威仍在服务端。
+**前端布局契约**：Status→Logs 每条日志是「行号 gutter + 正文」两列网格；行号与 gutter 右边框留 2px，gutter 背景只覆盖行号列，鼠标悬停标出整条逻辑行，单击选中该行（改变行号前景色，不干预原生选择）。Config→Raw YAML **硬最小高度 480px**，按编辑器 viewport top + 卡片下方 chrome 重新计算，可见空间大于 480px 铺满、不足仍 480px 并允许滚动，绝不靠固定 `100vh - 常量` 推测。Raw YAML 编辑时 500ms 防抖调 `/api/config/validate` 内联报错（校验失败不阻塞到保存才暴露，有错禁用 Save；点击错误跳转对应行）。编辑器还维护一份**需重启键名单**（`listen`、`log_level`、`log_file`、`web.enabled`、`request_log.*`、`stats.db_path`、`stats.retention`、`budgets`、`scheduling.quota_poll_interval`——依据 pitfalls #29/#31、`initStats` "startup-only"、`proxy_lifecycle.go` watcher 启动期创建与 request_log/logger 启动期构建的代码事实）：当前文本相对磁盘基线改动到这些键时显示 ⓘ "需重启 daemon 生效" 提示；名单是前端常量（app.js `RESTART_KEYS`），行扫描只做提示、校验权威仍在服务端。
 
 | 方法 | 路径 | 请求 | 响应 | 备注 |
 |---|---|---|---|---|
 | POST/DELETE | `/api/auth/session` | POST：`Authorization: Bearer <admin token>`；DELETE：— | 204 + Set-Cookie | 浏览器 admin 会话建立/清除；POST 必须显式 bearer 且同源，cookie 为 HttpOnly/SameSite=Strict/`Path=/api`，响应 `Cache-Control: no-store`；admin auth 未启用时 POST 400 |
-| GET | `/api/status` | — | `{uptime,version,listen,health{...},model_locks{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | handler 只消费 `proxyReadView.dashboard` 的脱离式快照；read view 按 `Proxy.mu → internal/runtime.Manager` 捕获同一 config generation 的 listen/warnings/cache 与 health/model-lock/quota/pin/sticky/spread，`schedule` 通过该 snapshot 的只读 `PreviewOrder` 计算，不再次读取 Manager，故同一响应的 health/quota/pin/sticky/order 不会混代或跨 mutation。内部 map 不外泄。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）；`quota[name].ExhaustionEta` 是 tracker 按 Δused/Δt 速率算出的 ultimate 窗口耗尽预测（零值=无预测：首快照/速率≤0/断档，语义见 `docs/architecture/runtime-state.md`），配额卡在 ultimate 窗口行尾展示，调度不使用。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出）。`model_locks[provider]` = `[{model,until}]`（仅生效中的模型锁，与 health 同一 Manager dashboard 快照，过期不输出；`doctor --live` 用它解释 route 全灭） |
+| GET | `/api/status` | — | `{uptime,version,listen,health{...},model_locks{...},quota{...},schedule{...},counters{...},cache{...},warnings}` | handler 只消费 admin dashboard 投影的脱离式快照；`internal/app/web_adapter.go` 的 DashboardState 端口按 `Proxy.mu → internal/runtime.Manager` 捕获同一 config generation 的 listen/warnings/cache 与 health/model-lock/quota/pin/sticky/spread，`schedule` 通过该 snapshot 的只读 `PreviewOrder` 计算，不再次读取 Manager，故同一响应的 health/quota/pin/sticky/order 不会混代或跨 mutation。内部 map 不外泄。`quota` 是 `QuotaSnapshot` 原样序列化（无 json tag → **PascalCase**）；`quota[name].ExhaustionEta` 是 tracker 按 Δused/Δt 速率算出的 ultimate 窗口耗尽预测（零值=无预测：首快照/速率≤0/断档，语义见 `docs/architecture/runtime-state.md`），配额卡在 ultimate 窗口行尾展示，调度不使用。`cache` = `{enabled,hits,misses,entries}`（响应缓存观测）。`health[name]` 含 `circuit_state`/`available`/`circuit_until?`/`rate_limited_until?`/`rate_limit_kind?`（429 分类 transient/quota/daily，仅限频中输出）。`model_locks[provider]` = `[{model,until}]`（仅生效中的模型锁，与 health 同一 Manager dashboard 快照，过期不输出；`doctor --live` 用它解释 route 全灭） |
 | GET | `/metrics` | — | Prometheus text exposition（`text/plain; version=0.0.4`） | per-provider 计数器快照（`model_proxy_requests_total`/`failures_total`/`failovers_total`/`rate_limited_429_total` + `latency_milliseconds_sum`/`ttft_milliseconds_sum`），派生自与 `/api/status` 相同的 detached Dashboard 快照（无新锁面）；虚拟计数键（guard、attempts、fusion、routing）以普通 provider 出现，语义同 `/api/stats`；零流量 provider 不出序列。过 `guardAdminAuth` + browser-origin guard；scraper 显式带 bearer，浏览器 session cookie 因 `Path=/api` 不会发送；仅 GET，其余方法 405 |
 | GET | `/api/logs?tail=N` | — | `{lines:[…]}` | 读 log 文件末尾 N 行（默认 200，上限 1000）；无 log 路径 → 404 |
 | GET | `/api/config` | — | `{yaml, summary, provider_models, provider_meta, routes}` | 原文件 verbatim round-trip。`routes` 是**生效路由表**（provider models 推导 + alias 聚合 + priority 继承，显式 `routes:` 覆盖同名条目）；`provider_meta` 为每 provider 的 `{priority, alias}`；`summary.route_count` 按生效表计 |
@@ -42,7 +42,7 @@ loopback 挡不住“借用户浏览器之手”的请求，所以凡携带浏�
 | GET | `/api/accounts` | — | `{providers:[{name,provider_id,billing,accounts:[{id,label,added_at,[email]}]}]}` | **响应无任何 key 字段**（无法泄漏）；id 不掩码（UI 要用它删）。codex 的 `added_at` 恒为空：codex OAuth 文件不落创建时间戳（只有语义不同的 `last_refresh`），不伪造数据 |
 | POST | `/api/accounts/<provider>` | `{api_key, access_key?, secret_key?, label?, replace?}` | `{id,status:"added",warning?}` | 仅 apikey 类；aqp/codex 返 400 指向 async login。volcengine 走 `addVolcengineAccount`（探 usage_url 验 Ark API Key + 可选 AK/SK 经签名 GetAFPUsage），其余（含 kimi-code）探 usage_url。落盘后 best-effort reload；reload 失败（config.yaml 不可读/非法，非本次操作所致）时账号已存盘，响应带 `warning`，runtime 保持旧集直到 config 修复并 reload |
 | DELETE | `/api/accounts/<provider>/<id>` | — | `{status:"removed",warning?}` | apikey 类经 `accounts.Store.RemoveAccount`；aqp `provider.ClearAqpAccount`；codex `provider.ClearCodexAccount`。三类都走各自 store/provider owner，不能由 Web 直接删文件；file/keychain 跨模式来源与失败重试语义由底层统一处理。落盘后 best-effort reload；失败同上，响应带 `warning` |
-| POST | `/api/accounts/<provider>/<id>/test` | — | `{status:"ok"\|"failed",http_status,reason,latency_ms,provider,account_id,model}` | 账号粒度测活（probeModelCallable 真实最小请求，复用 provider 的 ProbeRequest/ExtraHeaders）；`proxyAdminCommands` 一次 `snapshotRuntime` 同代捕获 config/impl，模型取该 provider 首个路由目标否则 models[0]；只读不 reload，请求取消会取消上游 probe。UI 账号卡片 Test 按钮 |
+| POST | `/api/accounts/<provider>/<id>/test` | — | `{status:"ok"\|"failed",http_status,reason,latency_ms,provider,account_id,model}` | 账号粒度测活（probeModelCallable 真实最小请求，复用 provider 的 ProbeRequest/ExtraHeaders）；admin 经 `ProbeRuntime` 端口一次 runtime 快照同代捕获 config/impl，模型取该 provider 首个路由目标否则 models[0]；只读不 reload，请求取消会取消上游 probe。UI 账号卡片 Test 按钮 |
 | GET | `/api/tokens` | — | `{usage:[{provider,model,input,output,cache_creation,cache_read,requests}]}` | SSE 扫描器累计的观测用量（flat 数组） |
 | POST | `/api/tokens/reset` | — | `{status:"reset"}`；durable reset 失败时 500 | 先清 SQLite，再清内存 + flusher 基线（注意：也清空响应缓存）；持久化失败时保留 live counters/cache，避免重启后历史复活 |
 | GET | `/api/stats?from=&to=&provider=&model=&bucket=` | — | `{from,to,bucket,buckets:[...]}` | 存储 1 分钟桶；`bucket` 仅展示聚合（SQL GROUP BY）。buckets 含 `avg_latency_ms`/`avg_ttft_ms` |
@@ -70,7 +70,7 @@ loopback 挡不住“借用户浏览器之手”的请求，所以凡携带浏�
 
 `usageScanner` 是 `io.ReadCloser`，仅当 `isSSE(resp.Header)` 包在 `resp.Body` 外，字节**原样透传**（不修改/缓冲/阻塞）；失败静默。bounded 64KB 行缓冲（防 OOM）。commit-on-EOF/close（含客户端断开，`forward` 在 `flushCopy` 后显式 `body.Close()`）。解析只看 `data:` + 首字符 `{` 的行：anthropic shape（`message_start`→input/cache、`message_delta`→output）或 openai shape（`prompt_tokens`/`completion_tokens`，best-effort——`usage` 仅当客户端发 `stream_options.include_usage` 才有；协议转换路径由转换器注入）。`tokenCounter` 纯内存；持久化由 SQLite stats 接管。其内嵌 `mu` 是独立叶子锁，不与 `Proxy.mu` 或 `runtime.Manager` 嵌套。
 
-## 调用统计持久化（`internal/observe/stats` + `internal/app/stats_runtime.go`）
+## 调用统计持久化（`internal/observe/stats` + `internal/app/observe_adapters.go`）
 
 `metricsStore`（per-(provider,model) 原子计数器）+ `tokenCounter` 在 hot path 纯内存，**hot path 不碰 SQLite**。应用层 `statsFlusher` 按墙钟分钟边界 tick，快照 metrics/tokens/agents 并与上次 baseline diff；每一路 delta 先进入带原始 minute 的 pending batch，再按时间顺序写 Store，故某一路瞬时失败不会把累计量挪到后一个时间桶。每路最多保留 360 个 exact-minute batch；更长故障会把最老两桶合并并归到最早 minute 边界（累计量不丢，只降低最老区间的时间分辨率），恢复时每个 tick 每路最多 drain 30 桶，避免长期持有 flusher 锁。`internal/observe/stats.Store` 独占 SQLite schema、additive migration、分钟桶 upsert、查询、retention 和 legacy JSON import。非零 delta 写入 `~/.model-proxy/stats.db`（`minute_buckets` 表，`ON CONFLICT DO UPDATE` 累加，`last_request_at` 用 `MAX`）。`modernc.org/sqlite` 纯 Go（`CGO_ENABLED=0`）；stats 连接的 SQLite busy timeout 为 250ms，避免外部写锁让 flusher 卡满原先的 5 秒；`config.stats.{db_path, retention}` 默认 30d。空闲 tick 仍会重试 pending batch 并执行 retention prune；SIGINT/SIGTERM 会取消正在执行的周期 Store 调用，在 lifecycle loop 停止后 final flush，并在 2 秒 best-effort retry window 内重试 pending 后关闭 Store；永久失败记录剩余批次数。context 可取消普通 Begin/Exec，但 modernc busy handler 和底层文件系统调用不提供绝对 hard deadline，因此契约不承诺 `Proxy.Close` 必在 2 秒内返回。查询 `GET /api/stats`（`bucket` 聚合，存储恒 1 分钟）+ `model-proxy stats` CLI。锁纪律：metrics/token/agent/flusher 都是独立叶子锁，不与其它嵌套；Store 不反向持有 runtime owner。
 
@@ -82,7 +82,7 @@ loopback 挡不住“借用户浏览器之手”的请求，所以凡携带浏�
 
 `GET /api/analytics?from=&to=&provider=&model=&granularity=day|month` 在 SQLite stats 之上做**日历日/月聚合**（存储恒 1 分钟）：`stats.Store.QueryAnalytics` 用 SQL `date(minute,'unixepoch','localtime','start of day'/'start of month')` GROUP BY；bucket = 本地时区自然日/月初的 unix instant，由 Store 经 `time.ParseInLocation(...,time.Local)` 转——不用 `strftime('%s',…)`（会把本地日期误读为 UTC 当天 0 点，偏移一个时区）。每个 point 现算**等价 payg 成本**：price × tokens，**不落盘、不伪造**；未知价 → `cost:null, priced:false`。响应：`{granularity, from, to, series:[{provider, model, points:[…]}], totals:{input, output, cost}, price_coverage:{priced:[], unpriced:[]}}`。
 
-**价格优先级**（`pricing.Resolve`）：config `prices:` 在 `proxyReadView.pricing()` 边界复制并转换为 USD/M override，查询时 ÷1e6 转 USD/token；命中后覆盖 `pricing.Catalog`（OpenRouter 目录，bare-name 精确匹配，无 endpoint/后缀模糊匹配）。OpenRouter 目录在 parse 期按 vendor rank 去重（canonical vendor 胜出，如 `deepseek/deepseek-v4-pro` 击败 `openrouter/deepseek-v4-pro`；tilde 别名 `~openai/gpt-5.6-luna` 剥成 bare 名 `gpt-5.6-luna`）。`pricing.ComputeCost`：`input×Prompt + output×Completion + cacheRead×CacheRead + cacheCreation×CacheWrite`。
+**价格优先级**（`pricing.Resolve`）：config `prices:` 在组合根 `detachedPricing` 边界复制并转换为 USD/M override，查询时 ÷1e6 转 USD/token；命中后覆盖 `pricing.Catalog`（OpenRouter 目录，bare-name 精确匹配，无 endpoint/后缀模糊匹配）。OpenRouter 目录在 parse 期按 vendor rank 去重（canonical vendor 胜出，如 `deepseek/deepseek-v4-pro` 击败 `openrouter/deepseek-v4-pro`；tilde 别名 `~openai/gpt-5.6-luna` 剥成 bare 名 `gpt-5.6-luna`）。`pricing.ComputeCost`：`input×Prompt + output×Completion + cacheRead×CacheRead + cacheCreation×CacheWrite`。
 
 **新配置**（`internal/config`）：
 - 顶层 `pricing:{enabled, ttl, source_url}` — 默认 `enabled:true` / TTL `24h` / `source_url` 默认 `https://openrouter.ai/api/v1/models`（`pricing.DefaultEndpoint`）。`enabled:false` → `pricingSnapshot` 返回 nil 且不抓取目录；显式 `prices:` override 仍可定价，未命中 override 的模型显示 n/a。
@@ -98,7 +98,7 @@ loopback 挡不住“借用户浏览器之手”的请求，所以凡携带浏�
 
 **CLI**：`stats --granularity day|month` 或 `--cost` 任一 → `renderAnalytics` 改打 `/api/analytics`（`formatAnalyticsTable`：每 (provider,model) 一行 = 窗口内 SUM，`--cost` 才出 cost 列，未定价 `n/a`；`--json` 原样）。两者都省略 → 走 `/api/stats`，输出与原 `stats` **字节一致**（CLI 契约不变，append-only）。
 
-**锁与依赖纪律**：`Proxy.pricingMu` 独立叶子锁；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入。`internal/pricing` 不依赖 main 包的 YAML 配置、Proxy 或 Web；`proxyReadView.pricing()` 是 `PriceConfig → pricing.Override` 的复制/单位边界。无 stats store → `series:[]`（nil-safe）。
+**锁与依赖纪律**：`Proxy.pricingMu` 独立叶子锁；`pricingSnapshot`/`priceOverrides` 经 `cfgSnapshot()` RLock 读 cfg，不持 `p.mu` 调入。`internal/pricing` 不依赖 main 包的 YAML 配置、Proxy 或 Web；组合根的 `detachedPricing`（`internal/app/proxy_snapshot.go`）是 `PriceConfig → pricing.Override` 的复制/单位边界，admin 端口与 budget watcher 共用。无 stats store → `series:[]`（nil-safe）。
 
 ## Web 运行时边界
 
@@ -107,13 +107,13 @@ consumer-owned `ReadAPI` / `CommandAPI`：只读 handler 通过 `ReadAPI` 查询
 request log、安全审计日志（seclog 投影）、tokens、stats、Fusion、pins、pricing 及 detached
 dashboard/config/provider 快照；写操作和主动网络探测通过 `CommandAPI` 执行
 reset、quota refresh、health reset + persist、pin、reload 与 account probe。应用层的
-`internal/app/proxy_web_api.go` 是两个端口的唯一应用适配，负责 `proxyReadView` /
-`proxyAdminCommands` 到 transport DTO/命令的映射；`internal/app/web_adapter.go` 只负责
+`internal/admin`（`admin.Service`）是两个端口的唯一应用适配，负责把组合根经
+`internal/app/web_adapter.go` 注入的窄端口映射到 transport DTO/命令；`internal/app/web_adapter.go` 只负责
 composition 与 mux 挂载。任何 transport handler 都不得绕过端口直接访问 Proxy。
 
-账号测活必须在 admin capability 内只调用一次 `snapshotRuntime`，从同一 generation
+账号测活必须在 admin capability 内只调用一次 runtime 快照端口（`ProbeRuntime`），从同一 generation
 取得 config 和 provider implementation；凭据文件检查及上游网络 I/O 在快照完成、
-锁已释放后执行。`proxyReadView` 不提供按名字单独读取 runtime provider 的入口，
+锁已释放后执行。admin 读侧不提供按名字单独读取 runtime provider 的入口，
 避免 reload 期间把旧 config 与新 impl 混用。
 
 Web 生命周期也归 `internal/web`：task owner 是后台工作的唯一 admission gate，
@@ -147,7 +147,7 @@ request_log 关闭时返回 `{enabled:false}`。`Filter.Session` 支持按 sessi
 （`jq`/`grep`）与查询 API。**默认 `enabled: false`**（零开销：不 wrap、
 不开文件、不起 goroutine）；改 `enabled` 需**重启**（reload 不重建 logger）。
 
-热路径：`internal/app/request_log_adapter.go` 先把请求、route target 与 response header
+热路径：`internal/app/observe_adapters.go` 先把请求、route target 与 response header
 快照映射为纯值 Input；`p.reqLog != nil` 时 `resp.Body`（**协议转换后**的字节）
 包 `internal/transport/bodycapture.Reader`（有界 tee，`max_body_bytes` 封顶，
 超限停捕获但字节仍透传）→ 非阻塞 enqueue 到 buffered chan（cap 2048，满则计数

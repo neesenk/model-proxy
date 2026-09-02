@@ -105,7 +105,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 		// preGuardBody is the body as received, before any redact rewrite
 		// below; the split-exfiltration window must store THIS form (storing
 		// the redacted form would destroy the very fragments that pass exists
-		// to reassemble). In-memory only, bounded — see session_scan.go.
+		// to reassemble). In-memory only, bounded — see internal/guard/session.
 		preGuardBody := origBody
 		guardDecision := evaluateRequestGuard(cfg.Guard, sc, origBody)
 		secretNames := guardDecision.secrets
@@ -256,7 +256,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 			// anything hit — later fragments depend on earlier ones being
 			// retained. The window stores the PRE-REDACT form and lives in
 			// memory only (bounded: 256 sessions × 32KiB tail; see
-			// session_scan.go for the red lines).
+			// internal/guard/session for the red lines).
 			p.sessionScan.Add(sessionID, preGuardBody, sc, nextProgress, progressReset, knownInCurrent)
 		}
 		// Unified action evaluation after BOTH scans: a secrets block outranks

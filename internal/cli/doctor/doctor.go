@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"fmt"
-	"model-proxy/internal/app"
 	climodels "model-proxy/internal/cli/models"
 	"os"
 	"sort"
@@ -12,6 +11,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/credstore"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/routing"
 )
 
 // cmdDoctor runs an OFFLINE diagnostic of the scheduling setup from config (no
@@ -112,7 +112,7 @@ func DoctorWithCfg(cfg *configdomain.Config) int {
 				// Reasoning-replay marker (#9): for models that REQUIRE reasoning
 				// content echoed back, the dropped thinking/reasoning is fatal to
 				// multi-turn tool calls, not just lossy.
-				if app.ReasoningReplayModel(t.Model) && t.Protocol == "openai" {
+				if routing.ReasoningReplayModel(t.Model) && t.Protocol == "openai" {
 					fmt.Printf("        %s reasoning-required model behind openai-chat conversion — Anthropic thinking is dropped; multi-turn tool calls may 400 upstream (replay cache not implemented)\n",
 						provider.Yellow("⚠"))
 					warns++

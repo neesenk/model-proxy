@@ -3,13 +3,22 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"model-proxy/internal/accounts"
+	"model-proxy/internal/appapi"
+	"model-proxy/internal/provider"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 )
+
+// ---- web_config_test.go ----
 
 func TestConfigPutValid(t *testing.T) {
 	dir := t.TempDir()
@@ -447,5 +456,455 @@ func TestConfigGetDerivedRoutesAndProviderMeta(t *testing.T) {
 	}
 	if _, aliasedAway := resp.Routes["k3"]; aliasedAway {
 		t.Errorf("aliased-away k3 must not appear as its own route: %+v", resp.Routes)
+	}
+}
+
+// ---- web_presets_test.go ----
+
+// web_presets_test.go pins the S3 web preset endpoints against the REAL
+// proxyWebAPI adapter (not a stub): list derives the shared catalog, and
+// AddPreset merges + validates + surfaces ambiguity through the same
+// configedit pipeline the CLI uses.
+
+func TestWebPresetsListAndAdd(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("listen: 127.0.0.1:0\nproviders:\n  deepseek: {provider_id: deepseek, openai_base_url: https://d}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigFromBytes(cfgPath, mustReadFile(t, cfgPath))
+	if err != nil {
+		t.Fatalf("base config invalid: %v", err)
+	}
+	p := newTestProxy(t, cfg)
+	w := NewWebServer(p, cfgPath)
+
+	catalog := w.api.Presets()
+	if len(catalog) == 0 {
+		t.Fatal("Presets() returned an empty catalog")
+	}
+	found := false
+	for _, pr := range catalog {
+		if pr.Name == "zhipu" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("catalog missing zhipu preset")
+	}
+
+	// AddPreset merges the block into the real config file.
+	genBefore := p.configGeneration.Load()
+	if _, _, err := w.api.AddPreset("zhipu"); err != nil {
+		t.Fatalf("AddPreset(zhipu): %v", err)
+	}
+	merged, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read merged config: %v", err)
+	}
+	if m := string(merged); !strings.Contains(m, "zhipu:") || !strings.Contains(m, "deepseek:") {
+		t.Fatalf("config file after AddPreset missing provider block:\n%s", m)
+	}
+
+	// Regression: AddPreset must hot-reload like every other mutation path —
+	// the running proxy serves the new provider immediately, not only after
+	// some later mutation happens to reload.
+	if gen := p.configGeneration.Load(); gen <= genBefore {
+		t.Fatalf("config generation after AddPreset = %d, want > %d (no hot-reload)", gen, genBefore)
+	}
+	p.mu.RLock()
+	_, live := p.cfg.Providers["zhipu"]
+	p.mu.RUnlock()
+	if !live {
+		t.Fatal("live config after AddPreset missing zhipu provider (no hot-reload)")
+	}
+
+	// Idempotent: second AddPreset succeeds without duplicating.
+	if _, _, err := w.api.AddPreset("zhipu"); err != nil {
+		t.Fatalf("idempotent AddPreset: %v", err)
+	}
+
+	// Unknown preset fails closed.
+	if _, _, err := w.api.AddPreset("no-such-preset"); err == nil {
+		t.Fatal("unknown preset must error")
+	}
+}
+
+// TestWebAddPresetSurfacesAmbiguity pins the warning contract: adding a
+// preset whose models overlap another configured provider without explicit
+// routes returns those models for the UI to surface.
+func TestWebAddPresetSurfacesAmbiguity(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	base := "listen: 127.0.0.1:0\nproviders:\n" +
+		"  zhipu:\n    provider_id: zhipu\n    openai_base_url: https://x\n    models: [shared-model]\n"
+	if err := os.WriteFile(cfgPath, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigFromBytes(cfgPath, mustReadFile(t, cfgPath))
+	if err != nil {
+		t.Fatalf("base config invalid: %v", err)
+	}
+	p := newTestProxy(t, cfg)
+	w := NewWebServer(p, cfgPath)
+
+	// Seed a second provider that also serves shared-model, then add the
+	// zhipu preset (template models are disjoint from shared-model, so seed
+	// the overlap via deepseek whose template block we merge first).
+	if _, _, err := w.api.AddPreset("deepseek"); err != nil {
+		t.Fatalf("AddPreset(deepseek): %v", err)
+	}
+	// Direct the overlap: patch deepseek's models to include shared-model via
+	// the structured edit port, then re-derive ambiguity by adding zhipu
+	// (already present → merge no-op, ambiguity still computed).
+	if err := w.api.EditConfig(editReqForProviderModels("deepseek", "shared-model")); err != nil {
+		t.Fatalf("edit deepseek models: %v", err)
+	}
+	warnings, reloadWarning, err := w.api.AddPreset("zhipu")
+	if err != nil {
+		t.Fatalf("AddPreset(zhipu): %v", err)
+	}
+	if reloadWarning != "" {
+		t.Fatalf("reload warning on healthy reload = %q, want empty", reloadWarning)
+	}
+	// zhipu (seeded) serves shared-model; deepseek now also serves it with no
+	// explicit route → exactly that model must surface as a warning.
+	if len(warnings) != 1 || warnings[0] != "shared-model" {
+		t.Fatalf("warnings = %v, want [shared-model]", warnings)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func editReqForProviderModels(provider, model string) appapi.EditRequest {
+	return appapi.EditRequest{
+		Kind: "provider",
+		Name: provider,
+		Data: map[string]any{"models": []any{model}},
+	}
+}
+
+// ---- webapi_docs_contract_test.go ----
+
+// This file pins docs sync for the /api/config surface (docs/web-api.md 契约:
+// "新增或修改 /api/* 字段时先更新 docs/web-api.md，再更新前端"): the JSON keys
+// the response struct emits must be exactly the keys documented in the
+// endpoint table row, in both directions. Adding a field without documenting
+// it — or documenting a removed field — fails here.
+
+// documentedConfigKeys extracts the `{a, b, ...}` key list from the
+// `| GET | `/api/config` | ... |` row of docs/web-api.md.
+func documentedConfigKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile("../../docs/web-api.md")
+	if err != nil {
+		t.Fatalf("read docs/web-api.md: %v", err)
+	}
+	var row string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "| GET |") && strings.Contains(line, "`/api/config`") {
+			row = line
+			break
+		}
+	}
+	if row == "" {
+		t.Fatal("docs/web-api.md has no `| GET | `/api/config` |` row — docs contract is blind")
+	}
+	m := regexp.MustCompile(`\{([^{}]*)\}`).FindStringSubmatch(row)
+	if m == nil {
+		t.Fatalf("api/config row documents no `{...}` key list: %s", row)
+	}
+	out := map[string]bool{}
+	for _, k := range strings.FieldsFunc(m[1], func(r rune) bool { return r == ',' || r == ' ' }) {
+		if k != "" {
+			out[k] = true
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("api/config row documents an empty key list: %s", row)
+	}
+	return out
+}
+
+func configDocumentJSONKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	typ := reflect.TypeOf(appapi.ConfigDocument{})
+	out := map[string]bool{}
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name == "" || name == "-" {
+			t.Fatalf("ConfigDocument field %s has no json tag — every field is API surface", typ.Field(i).Name)
+		}
+		out[name] = true
+	}
+	return out
+}
+
+func TestAPIConfigDocsMatchResponseStruct(t *testing.T) {
+	docs := documentedConfigKeys(t)
+	code := configDocumentJSONKeys(t)
+
+	var missingDocs, staleDocs []string
+	for k := range code {
+		if !docs[k] {
+			missingDocs = append(missingDocs, k)
+		}
+	}
+	for k := range docs {
+		if !code[k] {
+			staleDocs = append(staleDocs, k)
+		}
+	}
+	sort.Strings(missingDocs)
+	sort.Strings(staleDocs)
+	if len(missingDocs) > 0 {
+		t.Errorf("GET /api/config emits undocumented field(s) %s — document them in docs/web-api.md first (assets/AGENTS.md rule)", strings.Join(missingDocs, ", "))
+	}
+	if len(staleDocs) > 0 {
+		t.Errorf("docs/web-api.md documents field(s) %s that GET /api/config no longer emits — stale docs?", strings.Join(staleDocs, ", "))
+	}
+}
+
+// ---- proxy_admin_commands_test.go ----
+
+func TestWebAccountProbeUsesAdminCapabilityAndPreservesResponseShape(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// IDs are derived from credentials (AccountID), like login does.
+	accountID := accounts.AccountID("static", accounts.Credentials{APIKey: "test-key"})
+	if err := accounts.NewStore(accounts.HomeDir()).Save("up", "static", accounts.Pool{Accounts: []accounts.Account{{
+		ID:     accountID,
+		APIKey: "test-key",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		gotModel = body.Model
+		if got := r.Header.Get("Authorization"); got != "Bearer TEST" {
+			t.Errorf("Authorization = %q, want exact fake-provider header", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	p := newTestProxy(t, &Config{
+		Providers: map[string]Provider{
+			"up": {
+				Provider:      testProviderID,
+				OpenAIBaseURL: upstream.URL,
+				Models:        []string{"configured-model"},
+			},
+		},
+	})
+	p.mu.Lock()
+	p.providers = map[string]provider.Provider{"up": &fakeProviderImpl{}}
+	p.mu.Unlock()
+
+	w := NewWebServer(p, "test-config.yaml")
+	rec := httptest.NewRecorder()
+	serveWeb(w, rec, httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/up/"+accountID+"/test",
+		strings.NewReader(""),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Status     string `json:"status"`
+		HTTPStatus int    `json:"http_status"`
+		Provider   string `json:"provider"`
+		AccountID  string `json:"account_id"`
+		Model      string `json:"model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "ok" || got.HTTPStatus != http.StatusOK ||
+		got.Provider != "up" || got.AccountID != accountID ||
+		got.Model != "configured-model" || gotModel != "configured-model" {
+		t.Fatalf("probe response/upstream mismatch: response=%+v upstreamModel=%q", got, gotModel)
+	}
+}
+
+// ---- request_body_limit_test.go ----
+
+// TestForward_RequestBodyLimit: the inbound body is fully buffered for routing
+// and conversion, so anything over max_request_body_bytes must be rejected with
+// 413 BEFORE any routing work. The default cap (64 MiB) must keep ordinary
+// requests flowing; an explicit small cap must be honored.
+func TestForward_RequestBodyLimit(t *testing.T) {
+	base := `listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+routes:
+  glm: [{provider: zhipu, model: glm}]
+`
+	newProxy := func(extra string) *Proxy {
+		cfg, err := LoadConfigFromBytes("test", []byte(base+extra))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return newTestProxy(t, cfg)
+	}
+	post := func(p *Proxy, pad int) int {
+		body := `{"model":"glm","stream":false,"pad":"` + strings.Repeat("x", pad) + `"}`
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		p.Handler(rec, req)
+		return rec.Code
+	}
+
+	// Default cap: an ordinary request passes the gate, then fails on the
+	// unroutable test upstream with a deterministic 502 — exactly that status
+	// proves the gate opened (413 = gate rejected; anything else = new bug).
+	p := newProxy("")
+	if code := post(p, 1024); code != http.StatusBadGateway {
+		t.Errorf("default cap: status=%d, want 502 (gate opened, unroutable upstream)", code)
+	}
+
+	// Explicit cap: a body larger than the cap is rejected with 413 up front.
+	p = newProxy("max_request_body_bytes: 512\n")
+	if code := post(p, 2048); code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body: status=%d, want 413", code)
+	}
+	// A body under the explicit cap passes the gate (deterministic 502 again).
+	if code := post(p, 16); code != http.StatusBadGateway {
+		t.Errorf("small body: status=%d, want 502 (gate opened, unroutable upstream)", code)
+	}
+}
+
+// ---- models_test.go ----
+
+// TestServeModels_ListsExposedModels verifies /v1/models lists exposed model
+// names (routes' keys) plus claude_mapping aliases.
+func TestServeModels_ListsExposedModels(t *testing.T) {
+	cfg := &Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]Provider{
+			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp",
+				Models: []string{"glm-5.2"}},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
+		},
+		ClaudeMapping: map[string]string{
+			"claude-opus-4-7":  "glm-5.2",
+			"claude-haiku-4-5": "glm-5.2",
+		},
+	}
+	p := newTestProxy(t, cfg)
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	resp, err := http.Get(px.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	var list struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatalf("parse: %v body=%s", err, string(body))
+	}
+	if list.Object != "list" || len(list.Data) != 3 {
+		t.Errorf("expected 3 models (1 route + 2 claude aliases), got %+v", list)
+	}
+	ids := map[string]bool{}
+	for _, m := range list.Data {
+		ids[m.ID] = true
+	}
+	for _, want := range []string{"glm-5.2", "claude-opus-4-7", "claude-haiku-4-5"} {
+		if !ids[want] {
+			t.Errorf("expected %s in %v", want, ids)
+		}
+	}
+}
+
+// TestServeModels_NoRoutesReturnsEmpty verifies /v1/models returns an empty list
+// when there are no routes.
+func TestServeModels_NoRoutesReturnsEmpty(t *testing.T) {
+	cfg := &Config{
+		Listen: "127.0.0.1:0",
+		Providers: map[string]Provider{
+			"other": {OpenAIBaseURL: "http://x", Provider: testProviderID},
+		},
+		Routes: map[string][]RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	resp, err := http.Get(px.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	var list struct {
+		Object string `json:"object"`
+		Data   []any  `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Object != "list" || len(list.Data) != 0 {
+		t.Errorf("expected empty list, got %+v", list)
+	}
+}
+
+// ---- pprof_endpoint_test.go ----
+
+// TestHandler_PprofEndpointIsOptIn: /debug/pprof/ must be unreachable by
+// default (falls through to the unknown-path 502) and served when the proxy
+// was constructed with MP_PPROF=1.
+func TestHandler_PprofEndpointIsOptIn(t *testing.T) {
+	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+`))
+	get := func(p *Proxy, path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		p.Handler(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+
+	p := newTestProxy(t, cfg)
+	if rec := get(p, "/debug/pprof/"); rec.Code == http.StatusOK {
+		t.Errorf("pprof index served without MP_PPROF: status=%d", rec.Code)
+	}
+
+	t.Setenv("MP_PPROF", "1")
+	pOn := newTestProxy(t, cfg)
+	rec := get(pOn, "/debug/pprof/")
+	if rec.Code != http.StatusOK {
+		t.Errorf("pprof index: status=%d, want 200", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "profiles") {
+		t.Errorf("pprof index body does not look like the profile list: %q", body)
 	}
 }

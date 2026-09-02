@@ -12,8 +12,10 @@ import (
 	"sync"
 	"testing"
 
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/seclog"
+	"model-proxy/internal/providerbuild"
 )
 
 // Runtime-wired guard integration: the per-generation scanner carries the
@@ -516,7 +518,7 @@ func TestGuardOAuthSecrets_BestEffortCollection(t *testing.T) {
 	}
 	collect := func() []string {
 		t.Helper()
-		return BuildProviders(cfg, AccountStore(), testBuildOpts()).Secrets
+		return providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), testBuildOpts()).Secrets
 	}
 
 	// Missing files: nothing to protect, no error.

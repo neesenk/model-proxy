@@ -8,10 +8,10 @@ import (
 	"io"
 	"log"
 	"model-proxy/internal/accounts"
-	"model-proxy/internal/app"
 	clidoctor "model-proxy/internal/cli/doctor"
 	clipresets "model-proxy/internal/cli/presets"
 	"model-proxy/internal/observe/logx"
+	"model-proxy/internal/routing"
 	"model-proxy/internal/takeover"
 	"os"
 
@@ -191,12 +191,12 @@ func RunRestore(args []string) {
 // takeover package.
 func takeoverFacts(cfg *configdomain.Config, which string) takeover.ModelFacts {
 	facts := takeover.ModelFacts{
-		Routes:        app.RouteTable(cfg),
+		Routes:        routing.RouteTable(cfg),
 		SourceDefault: -1,
 	}
 	if takeover.WritesMetadata(takeover.ListClients(cfg, which)) {
-		cat, _ := app.LoadModelsCatalog(cliframework.HomeDir(), false)
-		meta, sources := app.HydrateModels(cfg, cat)
+		cat, _ := configdomain.LoadModelsCatalog(cliframework.HomeDir(), false)
+		meta, sources := routing.HydrateModels(cfg, cat)
 		facts.Meta = meta
 		facts.Sources = make(map[string]map[string]int, len(sources))
 		for provider, models := range sources {
@@ -205,9 +205,9 @@ func takeoverFacts(cfg *configdomain.Config, which string) takeover.ModelFacts {
 				facts.Sources[provider][model] = int(source)
 			}
 		}
-		facts.SourceDefault = int(app.SrcDefault)
-		facts.DefaultContext = app.DefaultModelMetadata.Context
-		facts.DefaultOutput = app.DefaultModelMetadata.Output
+		facts.SourceDefault = int(routing.SrcDefault)
+		facts.DefaultContext = routing.DefaultModelMetadata.Context
+		facts.DefaultOutput = routing.DefaultModelMetadata.Output
 	}
 	return facts
 }

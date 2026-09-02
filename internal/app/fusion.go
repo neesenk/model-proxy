@@ -1,16 +1,13 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
 	"net/http"
-	"strings"
 	"time"
 
 	"model-proxy/internal/fusion"
@@ -242,89 +239,60 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 
 	legCtx, cancelLeg := context.WithTimeout(ctx, sched.Timeout())
 	defer cancelLeg()
-	var (
-		req           *http.Request
-		resp          *http.Response
-		respBody      []byte
-		refreshedAuth bool
-		strippedParam bool
-	)
-	// Match the normal target pipeline's unsupported-parameter behavior: apply
-	// learned blocks before send, then learn/strip/retry one newly reported
-	// top-level parameter immediately.
-	for {
-		targetURL := strings.TrimRight(plan.BaseURL(), "/") + plan.UpstreamPath()
-		targetURL, body = impl.RewriteRequest(targetURL, body, plan.UpstreamPath())
-		body = p.applyParamBlock(m.Provider, m.Model, body)
-		req, err = http.NewRequestWithContext(legCtx, http.MethodPost, targetURL, bytes.NewReader(body))
-		if err != nil {
-			res.Err = err
-			return
-		}
-		req.Header.Set("content-type", "application/json")
-		if err := impl.AuthHeaders(req); err != nil {
-			res.Err = fmt.Errorf("auth: %w", err)
-			return
-		}
-		plan.ApplyConfiguredHeaders(req.Header)
-		impl.ExtraHeaders(req, plan.UpstreamPath())
-
-		resp, err = p.client.Do(req)
-		if err != nil {
-			// A fusion-level cancel (grace expired / quorum unreachable / client
-			// disconnect) is NOT a provider failure — the leg was simply cut.
-			if ctx.Err() == context.Canceled {
-				res.Err = errFusionLegUnavailable
-				return
-			}
-			p.recordFailure(m.Provider, sched, fc.runtime.Generation)
-			if p.metrics != nil {
-				p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
-				p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
-			}
-			res.Err = err
-			return
-		}
-		status = resp.StatusCode
-		respBody, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-		resp.Body.Close()
-		if err != nil {
-			// Same rule as the Do path above: a fusion-level cancel (grace
-			// expired / quorum reached / client disconnect) cutting the leg
-			// mid-body is NOT a provider failure — the upstream never got to
-			// finish, it was simply abandoned.
-			if ctx.Err() == context.Canceled {
-				res.Err = errFusionLegUnavailable
-				return
-			}
-			p.recordFailure(m.Provider, sched, fc.runtime.Generation)
-			if p.metrics != nil {
-				p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
-				p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
-			}
-			res.Err = err
-			return
-		}
-		if resp.StatusCode == http.StatusUnauthorized && !refreshedAuth {
-			refreshedAuth = true
-			if refreshErr := impl.Refresh(); refreshErr == nil {
-				continue
-			}
-		}
-		if resp.StatusCode == http.StatusBadRequest && !strippedParam {
-			if param, found := targetexec.ParseUnsupportedParam(respBody); found {
-				p.learnParamBlock(m.Provider, m.Model, param, fc.runtime.Generation)
-				if stripped, changed := targetexec.StripTopLevelParam(body, param); changed {
-					body = stripped
-					strippedParam = true
-					logx.Warnf("[fusion provider=%s] 400 unsupported parameter %q — stripped, retrying",
-						m.Provider, param)
-					continue
-				}
-			}
-		}
-		break
+	// The leg transport (URL build, provider rewrite, param-block application,
+	// send, one-shot 401 refresh / 400 param learn-strip retries) is owned by
+	// targetexec.BufferedLeg — the headless counterpart of the streaming
+	// Executor. Effect recording (circuit/metrics/rate-limit) stays here.
+	exchange := &targetexec.BufferedLegExchange{}
+	legStatus, respBody, err := targetexec.BufferedLeg{
+		Client:  p.client,
+		Plan:    plan,
+		MaxBody: 64 << 20,
+		ApplyParamBlock: func(body []byte) []byte {
+			return p.applyParamBlock(m.Provider, m.Model, body)
+		},
+		LearnParamBlock: func(param string) {
+			p.learnParamBlock(m.Provider, m.Model, param, fc.runtime.Generation)
+		},
+		OnStripParam: func(param string) {
+			logx.Warnf("[fusion provider=%s] 400 unsupported parameter %q — stripped, retrying",
+				m.Provider, param)
+		},
+		Capture: exchange,
+	}.Do(legCtx, body)
+	// status only advances on a real upstream response; pre-upstream failures
+	// (build/auth/transport with no earlier response) keep the 502 default.
+	if legStatus != 0 {
+		status = legStatus
 	}
+	if err != nil {
+		// Pre-wire failures (request build / auth header construction) drop the
+		// leg without recording a provider failure — the upstream was never
+		// contacted.
+		var buildErr *targetexec.BufferedLegBuildError
+		if errors.As(err, &buildErr) {
+			res.Err = err
+			return
+		}
+		// A fusion-level cancel (grace expired / quorum unreachable / client
+		// disconnect) is NOT a provider failure — the leg was simply cut. The
+		// same rule covers a cancel cutting the leg mid-body: the upstream
+		// never got to finish, it was simply abandoned.
+		if ctx.Err() == context.Canceled {
+			res.Err = errFusionLegUnavailable
+			return
+		}
+		p.recordFailure(m.Provider, sched, fc.runtime.Generation)
+		if p.metrics != nil {
+			p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
+			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
+		}
+		res.Err = err
+		return
+	}
+	req := exchange.Request
+	resp := exchange.Response
+	body = exchange.SentBody
 	switch {
 	case resp.StatusCode == 429:
 		peek := respBody

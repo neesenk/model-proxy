@@ -26,7 +26,7 @@ request log、`internal/cache`、
 
 缓存机制由 `internal/cache` 叶子包拥有：request key、TTL/容量 store、
 bounded recorder、转换后 header normalization 与逐块 flush replay。
-`internal/app/proxy_constructor.go` 的 `NewResponseCache` 只注入配置生效值；
+`internal/app/proxy.go` 的 `NewResponseCache` 只注入配置生效值；
 请求通过 `RuntimeSnapshot.Cache` 保持
 generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 
@@ -110,7 +110,7 @@ Close-once 回调，日志 schema、入队与 replay 判断不进入 transport �
 扫描 `requests-*.log` 时不假设文件名顺序等于 record timestamp 严格顺序（孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。查询带**文件级提前终止**：单 writer 向同一文件按 Ts 非降序追加，因此文件最后一条可采纳记录是全文件上界——top-K 堆满后，最新记录仍严格老于堆底的文件不可能改变结果，直接跳过不流式读取；最新记录老于 From 下界（含边界，matches 只丢严格小于 From 的记录）的文件同理无命中。该顺序前提**逐文件验证而非假设**：每个文件独立 peek 首条（头部 128KiB）与末条（尾部 128KiB）记录，首条晚于末条（手工构造/损坏文件）或任何异常（打不开、行超长、JSON 解析失败）都回退为完整流式扫描；跨文件乱序仍被容忍。
 
 JSONL schema、writer/rotation/retention、查询 heap、Summary 与 Shadow 聚合由
-`internal/observe/requestlog` 拥有；`internal/app/request_log_adapter.go` 只完成 config
+`internal/observe/requestlog` 拥有；`internal/app/observe_adapters.go` 只完成 config
 和执行上下文到纯值 Input 的映射。通用 stream capture 留在
 `internal/transport/bodycapture`，两者不反向依赖。
 
@@ -138,7 +138,11 @@ catalog/config。
 panel/judge 在此共享 plan 上执行非流式、tool-free 分支，并应用与普通目标一致的
 half-open、401 refresh、paramBlock 预应用及即时学习重试、429/5xx、
 model-denied/404、empty-200 模型锁、metrics、usage、live event 和 request log
-策略。verdict 驱动的 /responses leg 遇 404 时同样翻转 wire verdict
+策略。leg 的发送循环（URL 构建、provider rewrite、paramBlock 预应用、POST、
+一次性 401 refresh / 400 参数 learn-strip 重试、响应上限读取）由
+`targetexec.BufferedLeg` 拥有——Executor 的 headless 非流式对应物；circuit、
+metrics、rate-limit 记录与 request log 仍留在 `internal/app/fusion.go`（最终
+exchange 经 `BufferedLeg.Capture` 回填）。verdict 驱动的 /responses leg 遇 404 时同样翻转 wire verdict
 （`noteWireResponsesMiss`）且**不锁模型**——verdict 判错而非模型缺失。metrics
 口径与 tryTarget 对齐：被放弃的 leg 记 evFailovers（连接错误/5xx 另记
 evFailures；401 只记 evFailovers）。候选文本按 leg 的 backendProto 解析

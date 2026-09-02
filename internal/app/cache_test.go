@@ -576,8 +576,8 @@ func TestForward_ForcedPooledProviderBypassesCache(t *testing.T) {
 	// accepting either key alone would miss a credential swap between accounts.
 	specificVirtual := p.poolIndex["pooled"][0]
 	keyByVirtual := map[string]string{
-		"pooled#" + accounts.AccountID("zhipu", AccountCred{APIKey: "POOL-KEY-A"}): "POOL-KEY-A",
-		"pooled#" + accounts.AccountID("zhipu", AccountCred{APIKey: "POOL-KEY-B"}): "POOL-KEY-B",
+		"pooled#" + accounts.AccountID("zhipu", accounts.Credentials{APIKey: "POOL-KEY-A"}): "POOL-KEY-A",
+		"pooled#" + accounts.AccountID("zhipu", accounts.Credentials{APIKey: "POOL-KEY-B"}): "POOL-KEY-B",
 	}
 	specificKey, ok := keyByVirtual[specificVirtual]
 	if !ok {

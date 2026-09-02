@@ -9,11 +9,12 @@ import (
 	"strings"
 	"sync"
 
-	"model-proxy/internal/app"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
+	"model-proxy/internal/routing"
 )
 
 // models_check.go implements the endpoint probe used by `models refresh`: after
@@ -102,7 +103,7 @@ func ProviderImplFor(cfg *configdomain.Config, provName string) (provider.Provid
 	if _, ok := cfg.Providers[provName]; !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	provMap := app.BuildProviders(cfg, accountStore(), buildOpts()).Providers
+	provMap := providerbuild.BuildProviders(cfg, accountStore(), buildOpts()).Providers
 	target := provName
 	if vids, pooled := PoolVirtuals(cfg, provName); pooled {
 		target = vids[0]
@@ -165,7 +166,7 @@ func MergeStringIDs(a, b []string) []string {
 // table with models.dev metadata (context/output/input modalities/source) -
 // matching the `model-proxy models` display. Shown BEFORE the filter summary.
 // `meta`/`sources` come from hydrateModels (keyed by provider -> model id).
-func PrintKeptModels(provName string, kept []string, meta map[string]map[string]catalog.Model, sources map[string]map[string]app.ModelSource) {
+func PrintKeptModels(provName string, kept []string, meta map[string]map[string]catalog.Model, sources map[string]map[string]routing.ModelSource) {
 	if len(kept) == 0 {
 		fmt.Println(provider.Yellow("(no models)"))
 		return
@@ -195,9 +196,9 @@ func PrintKeptModels(provName string, kept []string, meta map[string]map[string]
 		src := ""
 		if sources != nil {
 			switch sources[provName][id] {
-			case app.SrcModelsDev:
+			case routing.SrcModelsDev:
 				src = "models.dev"
-			case app.SrcDefault:
+			case routing.SrcDefault:
 				src = "default"
 			}
 		}

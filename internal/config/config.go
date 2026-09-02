@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -679,6 +680,27 @@ func (c *Config) RouteExposedNames() map[string]bool {
 		out[exposed] = true
 	}
 	return out
+}
+
+// RouteNames returns sorted callable exposed model names (explicit routes plus
+// names derived from provider model lists) for status/error messages.
+func (c *Config) RouteNames() string {
+	names := make([]string, 0, len(c.RouteExposedNames()))
+	for n := range c.RouteExposedNames() {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// ProviderNames returns sorted config provider names for error messages.
+func (c *Config) ProviderNames() string {
+	names := make([]string, 0, len(c.Providers))
+	for n := range c.Providers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // PeakSegment is one peak-hours window with its consumption multiplier.

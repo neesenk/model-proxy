@@ -2,24 +2,24 @@
 
 ## 适用范围
 
-修改 `internal/app/proxy_forward.go`、`internal/app/targetexec_adapter.go`、
+修改 `internal/app/proxy_forward.go`、`internal/app/target_pipeline.go`、
 `internal/targetexec/executor.go`、`internal/targetexec/rate_limit.go`、
-`internal/routing/retry.go`、`internal/app/proxy_health_adapter.go`、
-`internal/app/resolve.go`、`internal/app/health_test.go`、
+`internal/routing/retry.go`、`internal/app/proxy_read_endpoints.go`、
+`internal/app/target_pipeline.go`、`internal/app/health_test.go`、
 `internal/app/model_lock_test.go` 或 cooldown/retry 行为时必读。
 
 ## 实现入口
 
 - `Proxy.forward` / `serveOnce` / `targetexec.Executor.Execute`
-- `internal/app/proxy_health_adapter.go`：应用执行层到 runtime health/cooldown/param/rate-limit
+- `internal/app/proxy_read_endpoints.go`：应用执行层到 runtime health/cooldown/param/rate-limit
   状态端口的适配
 - `internal/app/dispatch_context.go`：`RuntimeSnapshot`、`serveRequest` 与
   `targetexec.Attempt` 的 snapshot 投影/唯一 assembly adapter
 - `internal/targetexec.Plan`：已解析目标的不可变 model/body/base URL/path wire
-  preparation；`internal/app/target_plan.go` 的 `planTarget` 只做 snapshot-owned facts 的投影
+  preparation；`internal/app/target_pipeline.go` 的 `planTarget` 只做 snapshot-owned facts 的投影
 - `internal/targetexec/executor.go`：完整单目标 I/O、401/参数/图片 retry、
   failure classification、response conversion/capture/cache pipeline
-- `internal/app/targetexec_adapter.go`：captured generation/scheduling 的 `targetexec.State`
+- `internal/app/target_pipeline.go`：captured generation/scheduling 的 `targetexec.State`
   与 metrics/tokens/request-log/events 的 `targetexec.Effects` 应用适配
 - `internal/routing.DecideFailure`：跨 pass 失败类别、短 cooldown wait、
   recovered-untried 与 429/502 终局的纯策略
@@ -53,7 +53,7 @@ Runtime 与 Plan 读取事实，禁止在 scope/log 中复制第二份 generatio
 `targetexec.Executor` 只允许依赖 generation-frozen `targetexec.State` 暴露的
 健康、参数学习和 wire 能力，以及 typed `Effects/Responses` 端口；不得 import
 或持有完整 `*Proxy`，也不得访问调度、reload、Web、lifecycle 或 Shadow。
-`internal/app/targetexec_adapter.go` 从 `Attempt.Runtime()` 绑定 generation/scheduling，再把
+`internal/app/target_pipeline.go` 从 `Attempt.Runtime()` 绑定 generation/scheduling，再把
 根 metrics/token/request-log/events 映射为语义 effect，不得包含 `client.Do`、
 转换、retry 或 failover pipeline。`internal/app/proxy_forward.go` 只负责编排和调用。
 executor commit 后只返回含实际上游请求体的最小 `targetexec.Commit`；Shadow

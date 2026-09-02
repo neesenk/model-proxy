@@ -1,12 +1,21 @@
+// web_adapter.go — Web/admin composition adapter: the transport-owned Web server shell and the Proxy-to-admin narrow copy-by-value ports.
 package app
 
 import (
-	"net/http"
-
-	clilogin "model-proxy/internal/cli/login"
+	"errors"
+	"model-proxy/internal/admin"
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/fusion"
+	"model-proxy/internal/login"
+	obscounters "model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
+	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/pricing"
+	"model-proxy/internal/provider"
 	webtransport "model-proxy/internal/web"
 	"model-proxy/internal/webauth"
+	"net/http"
+	"time"
 )
 
 // webServer is the composition adapter around the transport-owned Web server.
@@ -14,7 +23,7 @@ import (
 // sessions, assets, and background-task ownership live in internal/web.
 type WebServer struct {
 	server *webtransport.Server
-	api    *proxyWebAPI
+	api    *admin.Service
 	// adminAuth binds the proxy's S2 admin-auth source (reload-swapped); a
 	// closure, not a *Proxy retention, keeps the root adapter composition-only.
 	adminAuth  func() *webauth.Source
@@ -22,8 +31,8 @@ type WebServer struct {
 	logFile    string
 	events     http.HandlerFunc
 
-	newAqpClientFn  func(storePath string) *clilogin.AqpClient
-	newCodexOptions func() *clilogin.CodexLoginServerOptions
+	newAqpClientFn  func(storePath string) *login.AqpClient
+	newCodexOptions func() *login.CodexLoginServerOptions
 }
 
 func NewWebServer(proxy *Proxy, configFile string) *WebServer {
@@ -35,20 +44,22 @@ func NewWebServer(proxy *Proxy, configFile string) *WebServer {
 	server := &WebServer{
 		adminAuth:       proxy.adminAuth.Load,
 		configFile:      configFile,
-		newAqpClientFn:  clilogin.NewAqpClient,
+		newAqpClientFn:  login.NewAqpClient,
 		newCodexOptions: defaultCodexLoginOptions,
 	}
-	server.api = newProxyWebAPI(proxy, func() string {
-		return server.configFile
-	})
 	// Keep test endpoint overrides dynamic: tests replace these hooks after
-	// construction, while the application adapter reads them at login start.
-	server.api.newAqpClientFn = func(path string) *clilogin.AqpClient {
-		return server.newAqpClientFn(path)
-	}
-	server.api.newCodexOptions = func() *clilogin.CodexLoginServerOptions {
-		return server.newCodexOptions()
-	}
+	// construction, while the admin service reads them at login start.
+	server.api = admin.New(proxy.adminPorts(
+		func() string {
+			return server.configFile
+		},
+		func(path string) *login.AqpClient {
+			return server.newAqpClientFn(path)
+		},
+		func() *login.CodexLoginServerOptions {
+			return server.newCodexOptions()
+		},
+	))
 	// The live SSE stream is served by the web transport's /api/ subtree; the
 	// hub itself stays owned by the Proxy (snapshot/event producers publish
 	// there), so only the handler is injected. See webtransport.Options.Events.
@@ -95,8 +106,157 @@ func (server *WebServer) Close() {
 func (server *WebServer) SetLogFile(path string) { server.logFile = path }
 
 // defaultCodexLoginOptions wires production codex OAuth endpoints.
-func defaultCodexLoginOptions() *clilogin.CodexLoginServerOptions {
-	options := &clilogin.CodexLoginServerOptions{}
+func defaultCodexLoginOptions() *login.CodexLoginServerOptions {
+	options := &login.CodexLoginServerOptions{}
 	options.Defaults()
 	return options
+}
+
+// adminPorts adapts Proxy state to the admin service's narrow copy-by-value
+// ports. Every closure owns lock discipline (p.mu / SnapshotRuntime stays
+// here) and returns detached snapshots — never live map references into
+// reload-owned state — so internal/admin never touches locks, generations, or
+// the composition root directly.
+func (p *Proxy) adminPorts(
+	configFile func() string,
+	newAqpClient func(storePath string) *login.AqpClient,
+	newCodexOptions func() *login.CodexLoginServerOptions,
+) admin.Ports {
+	return admin.Ports{
+		ConfigFile: configFile,
+		Config:     p.snapshotConfig,
+		ProviderConfig: func(name string) (configdomain.Provider, bool) {
+			p.mu.RLock()
+			defer p.mu.RUnlock()
+			config, ok := p.cfg.Providers[name]
+			return config, ok
+		},
+		ProviderConfigs: func() map[string]configdomain.Provider {
+			p.mu.RLock()
+			defer p.mu.RUnlock()
+			configs := make(map[string]configdomain.Provider, len(p.cfg.Providers))
+			for name, config := range p.cfg.Providers {
+				configs[name] = config
+			}
+			return configs
+		},
+		LogFile: func() string {
+			p.mu.RLock()
+			defer p.mu.RUnlock()
+			return p.cfg.LogFile
+		},
+		DashboardState: func(now time.Time) admin.DashboardState {
+			// Capture reload-owned values and the Manager dashboard under the
+			// repository lock order so config and generation-scoped state
+			// cannot cross generations; the schedule preview derives from the
+			// same capture (shared with /debug/schedule).
+			p.mu.RLock()
+			cfg := p.cfg
+			warnings := append([]string(nil), p.routeWarnings...)
+			cache := p.cache
+			expanded := p.expandedRoutes
+			parentOf := p.parentOf
+			poolIndex := p.poolIndex
+			runtimeSnapshot := p.runtimeState.Dashboard(now)
+			p.mu.RUnlock()
+			return admin.DashboardState{
+				Listen:        cfg.Listen,
+				RouteWarnings: warnings,
+				Cache:         cache,
+				Runtime:       runtimeSnapshot,
+				QuotaEnabled:  p.quota != nil,
+				StartedAt:     p.metrics.StartedAt(),
+				Counters:      p.metrics.AggregateByProvider(),
+				Schedule: scheduleStatusFromSnapshot(
+					cfg,
+					expanded,
+					parentOf,
+					poolIndex,
+					runtimeSnapshot,
+					now,
+				),
+			}
+		},
+		RequestLogDirectory: func() string {
+			return p.reqLog.Directory()
+		},
+		TokenUsage: func() map[obscounters.TokenKey]obscounters.TokenUsage {
+			if p.tokens == nil {
+				return nil
+			}
+			return p.tokens.Snapshot()
+		},
+		StatsRange: func(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error) {
+			if p.stats == nil {
+				return []observestats.Bucket{}, nil
+			}
+			return p.stats.QueryRange(from, to, provider, model, bucketSecs)
+		},
+		AgentStats: func(from, to int64, agent, provider, model string, bucketSecs int64) ([]observestats.AgentBucket, error) {
+			if p.stats == nil {
+				return []observestats.AgentBucket{}, nil
+			}
+			return p.stats.QueryAgents(from, to, agent, provider, model, bucketSecs)
+		},
+		Analytics: func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error) {
+			if p.stats == nil {
+				return []observestats.AnalyticsBucket{}, nil
+			}
+			return p.stats.QueryAnalytics(from, to, provider, model, granularity)
+		},
+		FusionSnapshot: func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
+			return p.fusionReg.Snapshot(workflow, now)
+		},
+		Pins: func() map[string]admin.PinState {
+			pins := p.listPins()
+			out := make(map[string]admin.PinState, len(pins))
+			for route, pin := range pins {
+				out[route] = admin.PinState{Provider: pin.provider, ExpiresAt: pin.expiresAt}
+			}
+			return out
+		},
+		Pricing: func() (*pricing.Catalog, map[string]pricing.Override) {
+			overrides, catalog := p.detachedPricing()
+			return catalog, overrides
+		},
+		ResetStats:  p.resetStats,
+		ResetHealth: p.resetHealth,
+		QuotaEnabled: func() bool {
+			return p.quota != nil
+		},
+		QuotaPollOne: func(name string) bool {
+			return p.quota.PollOne(name)
+		},
+		QuotaPollAll: func(now time.Time) {
+			p.quota.PollAll(now)
+		},
+		QuotaPersist: func() error {
+			return p.quota.Persist()
+		},
+		SetPin: func(route, provider string, ttl time.Duration) (time.Time, bool) {
+			entry, ok := p.setPin(route, provider, ttl)
+			return entry.expiresAt, ok
+		},
+		ClearPin: p.clearPin,
+		Reload: func(configFile string) error {
+			// Convert the root's applied-warning into the admin-visible type
+			// at the port boundary so internal/admin never imports app; the
+			// message format is unchanged.
+			err := p.Reload(configFile)
+			if err == nil {
+				return nil
+			}
+			var applied *ReloadAppliedWarning
+			if errors.As(err, &applied) {
+				return &admin.ReloadAppliedWarning{Err: applied.Err}
+			}
+			return err
+		},
+		ProbeRuntime: func() (*configdomain.Config, map[string]provider.Provider) {
+			runtime := p.SnapshotRuntime()
+			return runtime.Cfg, runtime.Providers
+		},
+		NewAqpClient:    newAqpClient,
+		NewCodexOptions: newCodexOptions,
+	}
 }

@@ -64,6 +64,9 @@ mutation 由 Manager 在同一锁内校验
 generation，旧请求和慢 poll 的结果直接丢弃。
 
 reload 按 `Proxy.mu → runtime.Manager` 一次性切换 cfg/providers/routes generation；
+`Proxy` 的字段按所有权分组成两个内嵌结构：`generationState` 是这次交换的完整
+reload swap unit（本段列出的全部字段），`processServices` 是跨 reload 存活的进程级
+服务；archtest 钉死两个分组的精确成员，新字段不得直接落在 `Proxy` 顶层。
 `Manager.ReplaceGeneration` 原子清空旧 health、sticky、model lock、paramBlock、
 spread、quota 和 quality（发布空 quality map），operator pin 有意跨 reload 保留。`persist()` 按同一锁顺序捕获
 config fingerprint 和 Manager 的 `generation + quota + health + route-keyed
@@ -183,7 +186,7 @@ spread。请求路径不深拷贝 quota 的 Notes/Windows/Details，也不为 pr
 config generation 时取得的这一个 DashboardSnapshot 计算，不得再次进入 Manager；
 因此同一响应中的 health/quota/pin/sticky/order 属于同一时刻、同一 generation。
 
-`POST /debug/route`（`internal/app/proxy_route_preview.go`，body = 客户端原样请求体，
+`POST /debug/route`（`internal/app/proxy_read_endpoints.go`，body = 客户端原样请求体，
 `?proto=` 覆盖协议，默认 anthropic）是**单请求版**的决策预览：复刻 forward 的早期
 步骤（model 提取、claude_mapping、route 查找、pin/force 收窄、同一纯 guard 判定、
 cache 只读探测），

@@ -54,18 +54,46 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			t.Errorf("fusion.Engine.Run goroutines = %d, want one fan-out site", got)
 		}
 		callLeg := namedMethod(t, root, "Proxy", "callFusionLeg")
-		configuredPos := firstNamedCallPos(callLeg.Body, "ApplyConfiguredHeaders")
-		extraPos := firstNamedCallPos(callLeg.Body, "ExtraHeaders")
+		// The leg send loop is owned by targetexec.BufferedLeg: callFusionLeg
+		// wires exactly one BufferedLeg and must not re-grow transport steps.
+		bufferedLegs := 0
+		ast.Inspect(callLeg.Body, func(node ast.Node) bool {
+			literal, ok := node.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			if name, ok := configSelectorName(literal.Type, "targetexec"); ok && name == "BufferedLeg" {
+				bufferedLegs++
+			}
+			return true
+		})
+		if bufferedLegs != 1 {
+			t.Errorf("Proxy.callFusionLeg targetexec.BufferedLeg composites = %d, want exactly 1", bufferedLegs)
+		}
+		if got := namedCallCountInNode(callLeg.Body, "Do"); got != 1 {
+			t.Errorf("Proxy.callFusionLeg Do calls = %d, want exactly one BufferedLeg.Do (no parallel client pipeline)", got)
+		}
+		if got := forbiddenCallSites(callLeg.Body, rootSet, map[string]bool{
+			"RewriteRequest": true, "AuthHeaders": true,
+			"ApplyConfiguredHeaders": true, "ExtraHeaders": true,
+			"NewRequestWithContext": true, "ReadAll": true,
+		}, nil); len(got) != 0 {
+			t.Errorf("Proxy.callFusionLeg duplicates leg transport owned by targetexec.BufferedLeg: %v", got)
+		}
+		legFile, _ := parseGoFile(t, "internal/targetexec/buffered_leg.go")
+		legDo := namedMethod(t, legFile, "BufferedLeg", "Do")
+		configuredPos := firstNamedCallPos(legDo.Body, "ApplyConfiguredHeaders")
+		extraPos := firstNamedCallPos(legDo.Body, "ExtraHeaders")
 		if !configuredPos.IsValid() || !extraPos.IsValid() || configuredPos >= extraPos {
 			t.Errorf(
-				"Fusion headers must apply configured values before provider extras (configured=%v extra=%v)",
+				"Fusion leg headers must apply configured values before provider extras (configured=%v extra=%v)",
 				configuredPos,
 				extraPos,
 			)
 		}
 
 		proxy, _ := parseGoFile(t, "internal/app/proxy.go")
-		field := namedStructFields(t, proxy, "Proxy")["fusionReg"]
+		field := namedStructFields(t, proxy, "processServices")["fusionReg"]
 		pointer, ok := field.(*ast.StarExpr)
 		if !ok {
 			t.Errorf("Proxy.fusionReg type = %T, want *fusion.Registry", field)

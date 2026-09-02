@@ -88,9 +88,12 @@
     route 名共享同一键空间。会话 id 恰好等于某 route 名时，会话选择会按该 route
     的 sticky 落盘并在重启后恢复。route 名是操作者控制的，实践中撞名概率极低，
     但新增 route 命名时避开常见会话 id 形态。
-31. `budgets:` 的预算告警 watcher 只在 `StartRuntimeServices` 按启动配置决定
+31. `budgets:` 的预算告警 watcher（tick 循环归 `internal/observe/budget`，startup
+    准入与 lifecycle 接线归 `internal/app/proxy_lifecycle.go`）只在
+    `StartRuntimeServices` 按启动配置决定
     是否创建（与 request_log 同为 startup-only）：从无到有加 `budgets:` 需重启
-    daemon；已有 watcher 时阈值数值热改生效（每次 check 读当前 cfg 快照）。去重
+    daemon；已有 watcher 时阈值数值热改生效（每次 check 经端口读当前 cfg 快照
+    拷贝）。去重
     记录是进程内的，重启后同一 (scope, 月份, 阈值) 会重新告警一次。
 
 ## 测试与 CI

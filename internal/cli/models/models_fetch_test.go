@@ -1,8 +1,8 @@
 package models
 
 import (
-	"model-proxy/internal/app"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/providerbuild"
 	"strings"
 	"testing"
 )
@@ -28,7 +28,7 @@ func TestListArkAgentPlanModelIDs_NoCreds(t *testing.T) {
 	// loadVolcengineCreds reads ~/.model-proxy/<provName>_apikey.json. With HOME
 	// in a temp dir, the file is absent → error.
 	t.Setenv("HOME", t.TempDir())
-	_, err := app.ListArkAgentPlanModelIDs("volcengine")
+	_, err := providerbuild.ListArkAgentPlanModelIDs("volcengine")
 	if err == nil || !strings.Contains(err.Error(), "AK/SK") {
 		t.Errorf("no creds: err=%v want AK/SK error", err)
 	}

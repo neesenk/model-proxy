@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/admin"
 	"model-proxy/internal/provider"
 	runtimestate "model-proxy/internal/runtime"
 )
 
-func TestProxyReadViewReturnsDetachedSnapshots(t *testing.T) {
+func TestAdminServiceReturnsDetachedSnapshots(t *testing.T) {
 	p := newTestProxy(t, &Config{
 		Listen: "127.0.0.1:1234",
 		Providers: map[string]Provider{
@@ -19,10 +20,11 @@ func TestProxyReadViewReturnsDetachedSnapshots(t *testing.T) {
 	p.routeWarnings = []string{"warning-one"}
 	p.recordModelFailure("up", "m", Scheduling{ModelLockout: "1h"})
 
-	view := p.readView()
-	dashboard := view.dashboard(time.Now())
-	providers := view.providerConfigs()
-	dashboard.warnings[0] = "changed"
+	ports := p.adminPorts(func() string { return "" }, nil, nil)
+	service := admin.New(ports)
+	dashboard := service.Dashboard(time.Now())
+	providers := ports.ProviderConfigs()
+	dashboard.Warnings[0] = "changed"
 	providers["up"] = Provider{Provider: "changed"}
 
 	p.mu.RLock()
@@ -30,15 +32,15 @@ func TestProxyReadViewReturnsDetachedSnapshots(t *testing.T) {
 	providerID := p.cfg.Providers["up"].Provider
 	p.mu.RUnlock()
 	if warning != "warning-one" || providerID != testProviderID {
-		t.Fatalf("read view leaked mutable runtime references: warning=%q provider=%q", warning, providerID)
+		t.Fatalf("admin service leaked mutable runtime references: warning=%q provider=%q", warning, providerID)
 	}
-	if dashboard.listen != "127.0.0.1:1234" ||
-		len(dashboard.modelLocks["up"]) != 1 {
-		t.Fatalf("incomplete read view: %+v", dashboard)
+	if dashboard.Listen != "127.0.0.1:1234" ||
+		len(dashboard.ModelLocks["up"]) != 1 {
+		t.Fatalf("incomplete dashboard projection: %+v", dashboard)
 	}
 }
 
-func TestProxyReadViewDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T) {
+func TestAdminDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T) {
 	now := time.Date(2026, 7, 29, 18, 0, 0, 0, time.UTC)
 	p := newTestProxy(t, &Config{
 		Providers: map[string]Provider{
@@ -100,7 +102,8 @@ func TestProxyReadViewDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T)
 		t.Fatalf("captured schedule mixed live state: %+v", got)
 	}
 
-	fresh := decode(p.readView().dashboard(now).schedule)
+	service := admin.New(p.adminPorts(func() string { return "" }, nil, nil))
+	fresh := decode(service.Dashboard(now).Schedule)
 	if got := fresh.Models["m"]; got.First != "b" || got.Pin != "b" {
 		t.Fatalf("fresh schedule did not observe current state: %+v", got)
 	}

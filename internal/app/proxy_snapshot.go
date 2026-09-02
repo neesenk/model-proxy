@@ -1,15 +1,17 @@
 package app
 
 import (
-	cliframework "model-proxy/internal/cli/framework"
+	"model-proxy/internal/accounts"
 	"model-proxy/internal/observe/logx"
 	runtimestate "model-proxy/internal/runtime"
 	"os"
 	"time"
 
 	"model-proxy/internal/catalog"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
 )
 
 // cfgSnapshot returns the current config under a brief read lock. Used by the
@@ -35,7 +37,7 @@ func (p *Proxy) pricingSnapshot() *pricing.Catalog {
 	p.pricingMu.Lock()
 	defer p.pricingMu.Unlock()
 	cat, err := pricing.EnsureFresh(pricing.RefreshOptions{
-		CacheFile: pricing.CachePath(cliframework.HomeDir()),
+		CacheFile: pricing.CachePath(accounts.HomeDir()),
 		Endpoint:  cfg.Pricing.ResolvedSourceURL(),
 		Fetch:     pricing.FetchHTTP,
 		TTL:       cfg.Pricing.TTLDuration(),
@@ -54,6 +56,29 @@ func (p *Proxy) priceOverrides() map[string]PriceConfig {
 		return nil
 	}
 	return cfg.Prices
+}
+
+// detachedPricing returns the current pricing catalog plus a detached COPY of
+// the configured price overrides (config `prices:` values are generation-
+// immutable, but callers must never receive the live map). Shared by the
+// admin ports and the budget watcher so the PriceConfig → pricing.Override
+// conversion has exactly one owner.
+func (p *Proxy) detachedPricing() (map[string]pricing.Override, *pricing.Catalog) {
+	catalog := p.pricingSnapshot()
+	overrides := p.priceOverrides()
+	var detached map[string]pricing.Override
+	if overrides != nil {
+		detached = make(map[string]pricing.Override, len(overrides))
+		for model, price := range overrides {
+			detached[model] = pricing.Override{
+				Input:      price.Input,
+				Output:     price.Output,
+				CacheRead:  price.CacheRead,
+				CacheWrite: price.CacheWrite,
+			}
+		}
+	}
+	return detached, catalog
 }
 
 // snapshotConfig returns a shallow copy of the current config under a brief
@@ -86,7 +111,7 @@ func (p *Proxy) catalogSnapshot() *catalog.Catalog {
 // runProxy only — direct NewProxy callers (tests) stay offline; tests that need
 // metadata set p.catalog directly.
 func (p *Proxy) initCatalog() {
-	cat, err := LoadModelsCatalog(cliframework.HomeDir(), false)
+	cat, err := configdomain.LoadModelsCatalog(accounts.HomeDir(), false)
 	if err != nil || cat == nil {
 		if err != nil {
 			logx.Warnf("[models] catalog load failed: %v - running without request-aware routing", err)
@@ -119,9 +144,9 @@ func runtimeRouteKeys(
 	return keys
 }
 
-// healthConfigFingerprint delegates to internal/HealthConfigFingerprint.
+// healthConfigFingerprint delegates to providerbuild.HealthConfigFingerprint.
 func healthConfigFingerprint(cfg *Config) string {
-	return HealthConfigFingerprint(cfg)
+	return providerbuild.HealthConfigFingerprint(cfg)
 }
 
 // snapshotPersistedState takes the one authoritative persistence snapshot under

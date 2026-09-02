@@ -8,11 +8,11 @@ import (
 	"sort"
 	"time"
 
-	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/routing"
 )
 
 // CmdTest implements `model-proxy test <model>`: probe each route target once.
@@ -35,7 +35,7 @@ func CmdTest(args []string) {
 	}
 	targets := testTargetsFor(cfg, model)
 	if len(targets) == 0 {
-		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", provider.Red("✗"), model, cliframework.RouteNames(cfg))
+		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", provider.Red("✗"), model, cfg.RouteNames())
 		os.Exit(1)
 	}
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
@@ -66,7 +66,7 @@ func CmdTest(args []string) {
 // explicit routes overriding), sorted by priority asc (lower = tried first).
 // Nil when no route covers the model.
 func testTargetsFor(cfg *configdomain.Config, model string) []configdomain.RouteTarget {
-	targets, ok := app.RouteTable(cfg)[model]
+	targets, ok := routing.RouteTable(cfg)[model]
 	if !ok {
 		return nil
 	}

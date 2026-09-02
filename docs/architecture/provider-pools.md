@@ -2,8 +2,8 @@
 
 ## 适用范围
 
-修改 `internal/accounts/*`、`internal/app/accounts_store.go`、`internal/routing/resolver.go`、
-`buildProviders`、登录/登出、多账号 quota 或 Fusion/Shadow provider 解析时必读。
+修改 `internal/accounts/*`、`internal/routing/resolver.go`、
+`internal/providerbuild`、登录/登出、多账号 quota 或 Fusion/Shadow provider 解析时必读。
 
 ## 凭据文件
 
@@ -15,7 +15,6 @@ provider，单数 `<name>_apikey.json` 仅作为只读 fallback，包装成一�
 `internal/accounts` 统一拥有；它只允许向存储叶子 `internal/credstore` 依赖以访问
 keychain/原子文件能力。该包接收已解析的 home directory，不得自行读取 HOME，
 也不得依赖 Config、Provider、Proxy、Web/CLI 或执行网络验证。
-`internal/app/accounts_store.go` 只负责 HOME 适配和兼容入口。
 
 存储后端由 config `credentials:` 选择（`accounts.Backend`）：`file`（默认）把
 秘密值内联在 0600 pool JSON；`keychain` 经 credstore 把 api_key/access_key/
@@ -64,7 +63,7 @@ metadata-only 语义，CLI/Web 不得自行 `os.Remove` 或重写 pool。stdin�
 provider。只有 missing/legacy 来源允许普通 API-key provider 保持旧 file-backed
 路径；`static` 是 plural-only，missing/legacy 时同样不构建。
 
-同一次 `buildProviders` pass 必须同时产出 runtime providers、`poolIndex`、
+同一次 `providerbuild.BuildProviders` pass 必须同时产出 runtime providers、`poolIndex`、
 `parentOf`；startup/reload 将 build 结果直接
 传给 `synthesizeImplicitRoutesFrom`，不得再读取账号文件。这样一次 generation
 不会出现“新 route eligibility + 旧 provider key”或反向组合。

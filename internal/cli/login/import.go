@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	cliframework "model-proxy/internal/cli/framework"
+	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
+	logincore "model-proxy/internal/login"
 	"model-proxy/internal/provider"
 )
 
@@ -99,7 +100,7 @@ func RunCodexImport(provName string) error {
 		return err
 	}
 	authFile := oauthAuthFilePath(HomeDir(), provName)
-	if err := os.MkdirAll(DirOf(authFile), 0o700); err != nil {
+	if err := os.MkdirAll(logincore.DirOf(authFile), 0o700); err != nil {
 		return err
 	}
 	if err := provider.WriteCodexAuthFile(authFile, af); err != nil {
@@ -107,7 +108,7 @@ func RunCodexImport(provName string) error {
 	}
 	fmt.Printf("✓ Imported codex CLI credentials → %s\n", authFile)
 	if af.Tokens.AccountID != "" {
-		fmt.Printf("  account_id: %s\n", cliframework.Mask(af.Tokens.AccountID))
+		fmt.Printf("  account_id: %s\n", accounts.Mask(af.Tokens.AccountID))
 	}
 	fmt.Println("Note: the imported access_token may already be expired — the proxy refreshes it on demand while the refresh_token is valid.")
 	return nil
@@ -173,9 +174,9 @@ func runFromEnvLogin(cfg *configdomain.Config, provName string, prov configdomai
 // replace confirmation (the only remaining stdin interaction), validation,
 // dedup, save and confirmation print are identical to the interactive flow.
 func runVolcengineLoginFromEnv(cfg *configdomain.Config, provName string, prov configdomain.Provider, apiKey, ak, sk, label string, replace bool) error {
-	id := accountIDFor(prov.Provider, accountCred{APIKey: apiKey, AccessKey: ak})
+	id := accounts.AccountID(prov.Provider, accounts.Credentials{APIKey: apiKey, AccessKey: ak})
 	if !replace {
-		existing, err := loadPool(provName, prov.Provider)
+		existing, err := logincore.LoadPool(provName, prov.Provider)
 		if err != nil {
 			return fmt.Errorf("load pool: %w", err)
 		}
@@ -195,10 +196,10 @@ func runVolcengineLoginFromEnv(cfg *configdomain.Config, provName string, prov c
 	if prov.UsageURL != "" || (ak != "" && sk != "") {
 		fmt.Fprintf(os.Stderr, "Validating credentials...\n")
 	}
-	if _, err := AddVolcengineAccount(cfg, provName, prov, accountCred{APIKey: apiKey, AccessKey: ak, SecretKey: sk}, label, replace); err != nil {
+	if _, err := logincore.AddVolcengineAccount(cfg, provName, prov, accounts.Credentials{APIKey: apiKey, AccessKey: ak, SecretKey: sk}, label, replace); err != nil {
 		return err
 	}
-	pool, _ := loadPool(provName, prov.Provider)
-	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(cliframework.Mask(id)+" ("+labelFor(pool, id)+")"))
+	pool, _ := logincore.LoadPool(provName, prov.Provider)
+	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
 	return nil
 }

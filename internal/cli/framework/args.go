@@ -7,10 +7,7 @@ import (
 	"model-proxy/internal/accounts"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-
-	configdomain "model-proxy/internal/config"
 )
 
 // ConfigPath resolves the config file path: --config flag > ~/.model-proxy/
@@ -84,40 +81,6 @@ func HasFlagValue(args []string, flag string) bool {
 		}
 	}
 	return false
-}
-
-// RouteNames returns sorted callable exposed model names (explicit routes plus
-// names derived from provider model lists) for status/error messages.
-func RouteNames(cfg *configdomain.Config) string {
-	names := make([]string, 0, len(cfg.RouteExposedNames()))
-	for n := range cfg.RouteExposedNames() {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
-}
-
-// ProviderNames returns sorted config provider names for error messages.
-func ProviderNames(cfg *configdomain.Config) string {
-	names := make([]string, 0, len(cfg.Providers))
-	for n := range cfg.Providers {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
-}
-
-// Mask redacts a credential/id for display: short secrets fully masked,
-// longer ones show first 2 + … + last 2. Never log raw secrets.
-func Mask(s string) string {
-	if s == "" {
-		return "(empty)"
-	}
-	const minReveal = 8
-	if len(s) < minReveal {
-		return "****"
-	}
-	return s[:2] + "…" + s[len(s)-2:]
 }
 
 // Plural returns sing for n==1 else plur.

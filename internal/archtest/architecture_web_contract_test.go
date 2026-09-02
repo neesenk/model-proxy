@@ -3,7 +3,6 @@ package archtest
 import (
 	"go/ast"
 	"go/token"
-	"strings"
 	"testing"
 )
 
@@ -71,8 +70,9 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 		if !typeContainsIdent(fields["server"], "Server") {
 			t.Error("WebServer.server must retain internal/web.Server")
 		}
-		if got := simpleTypeName(fields["api"]); got != "*proxyWebAPI" {
-			t.Errorf("WebServer.api type = %q, want *proxyWebAPI", got)
+		apiType, ok := fields["api"].(*ast.StarExpr)
+		if !ok || expressionPath(apiType.X) != "admin.Service" {
+			t.Errorf("WebServer.api type = %q, want *admin.Service", simpleTypeName(fields["api"]))
 		}
 		for _, violation := range exactFieldSetViolations(fields, map[string]bool{
 			"server":          true,
@@ -108,50 +108,50 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 		}
 	})
 
-	t.Run("application adapter retains capabilities not Proxy", func(t *testing.T) {
-		adapter, fset := parseGoFile(t, "internal/app/proxy_web_api.go")
-		fields := namedStructFields(t, adapter, "proxyWebAPI")
-		if got := simpleTypeName(fields["reads"]); got != "proxyReadView" {
-			t.Errorf("proxyWebAPI.reads type = %q, want proxyReadView", got)
-		}
-		if got := simpleTypeName(fields["commands"]); got != "proxyAdminCommands" {
-			t.Errorf("proxyWebAPI.commands type = %q, want proxyAdminCommands", got)
-		}
+	t.Run("admin service owns the application ports", func(t *testing.T) {
+		assertInternalPackageImportPolicy(t, "internal/admin")
+
+		// The read/command logic lives in internal/admin: Service carries only
+		// its consumer-owned ports and implements both appapi interfaces (the
+		// compile-time assertions in commands.go keep this honest).
+		adminPackage, adminSet := parseGoPackage(t, "internal/admin")
+		fields := namedStructFields(t, adminPackage, "Service")
 		for _, violation := range exactFieldSetViolations(fields, map[string]bool{
-			"reads":           true,
-			"commands":        true,
-			"configFile":      true,
-			"newAqpClientFn":  true,
-			"newCodexOptions": true,
+			"ports": true,
 		}) {
-			t.Errorf("proxyWebAPI field boundary: %s", violation)
+			t.Errorf("admin.Service field boundary: %s", violation)
 		}
 		for name, fieldType := range fields {
 			if typeContainsIdent(fieldType, "Proxy") {
-				t.Errorf("proxyWebAPI.%s must not retain *Proxy", name)
+				t.Errorf("admin.Service.%s must not retain *Proxy", name)
 			}
 		}
-		for name := range receiverMethodNames(t, []string{"internal/app/proxy_web_api.go"}, "proxyWebAPI") {
-			if strings.HasPrefix(name, "handle") || strings.HasPrefix(name, "serve") {
-				t.Errorf("proxy_web_api.go restores HTTP transport method %s", name)
+		for _, sentinel := range []string{"Dashboard", "Accounts", "SaveConfig", "EditConfig", "BeginLogin", "AddPreset"} {
+			if !methodDeclared(adminPackage, sentinel) {
+				t.Errorf("internal/admin no longer owns application port method %s", sentinel)
 			}
 		}
 		for _, forbidden := range []string{"ResponseWriter", "Request", "ServeMux", "ServeHTTP"} {
-			for _, site := range selectorSitesNamed(adapter, fset, forbidden) {
-				t.Errorf("proxy_web_api.go depends on HTTP transport %s: %s", forbidden, site)
+			for _, site := range selectorSitesNamed(adminPackage, adminSet, forbidden) {
+				t.Errorf("internal/admin depends on HTTP transport %s: %s", forbidden, site)
 			}
 		}
-		if got := goStatementCount(adapter); got != 0 {
-			t.Errorf("proxy_web_api.go starts %d bare goroutine(s)", got)
+		if got := goStatementCount(adminPackage); got != 0 {
+			t.Errorf("internal/admin starts %d bare goroutine(s)", got)
 		}
-		if got := selectorCallsOnIdent(adapter, "proxy"); !sameNames(got, []string{"adminCommands", "readView"}) {
-			t.Errorf("newProxyWebAPI Proxy calls = %v, want [adminCommands readView]", got)
+
+		// The composition root must not re-grow the old in-app adapter types.
+		rootPackage, _ := parseGoPackage(t, "internal/app")
+		for _, legacy := range []string{"proxyWebAPI", "proxyReadView", "proxyAdminCommands"} {
+			if typeDeclared(rootPackage, legacy) {
+				t.Errorf("internal/app re-declares web adapter type %s; the admin service lives in internal/admin", legacy)
+			}
 		}
 	})
 
-	t.Run("all app config writers share one lock boundary", func(t *testing.T) {
-		wholeWriteFile := mustParseFile(t, "internal/app/config_write.go")
-		wholeWrite := namedMethod(t, wholeWriteFile, "proxyWebAPI", "saveAndReload")
+	t.Run("all admin config writers share one lock boundary", func(t *testing.T) {
+		wholeWriteFile := mustParseFile(t, "internal/admin/config_write.go")
+		wholeWrite := namedMethod(t, wholeWriteFile, "Service", "saveAndReload")
 		if got := namedCallCountInNode(wholeWrite.Body, "WithConfigLock"); got != 1 {
 			t.Errorf("saveAndReload WithConfigLock calls = %d, want 1", got)
 		}
@@ -159,8 +159,8 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 			t.Errorf("saveAndReload saveAndReloadUnderLock calls = %d, want 1", got)
 		}
 
-		structuredFile := mustParseFile(t, "internal/app/config_edit.go")
-		structuredWrite := namedMethod(t, structuredFile, "proxyWebAPI", "editConfigNode")
+		structuredFile := mustParseFile(t, "internal/admin/config_edit.go")
+		structuredWrite := namedMethod(t, structuredFile, "Service", "editConfigNode")
 		if got := namedCallCountInNode(structuredWrite.Body, "WithConfigLock"); got != 1 {
 			t.Errorf("editConfigNode WithConfigLock calls = %d, want 1", got)
 		}
@@ -173,6 +173,23 @@ func TestArchitectureWebBoundaries(t *testing.T) {
 	})
 }
 
+// typeDeclared reports whether the package view declares a type with the
+// given name.
+func typeDeclared(file *ast.File, name string) bool {
+	for _, decl := range file.Decls {
+		generic, ok := decl.(*ast.GenDecl)
+		if !ok || generic.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range generic.Specs {
+			if typeSpec, ok := spec.(*ast.TypeSpec); ok && typeSpec.Name.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func selectorSitesNamed(file *ast.File, fset *token.FileSet, name string) []string {
 	var sites []string
 	ast.Inspect(file, func(node ast.Node) bool {
@@ -183,38 +200,6 @@ func selectorSitesNamed(file *ast.File, fset *token.FileSet, name string) []stri
 		return true
 	})
 	return sites
-}
-
-func selectorCallsOnIdent(file *ast.File, receiver string) []string {
-	var names []string
-	ast.Inspect(file, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		identifier, ok := selector.X.(*ast.Ident)
-		if ok && identifier.Name == receiver {
-			names = append(names, selector.Sel.Name)
-		}
-		return true
-	})
-	return sortedNames(names)
-}
-
-func sameNames(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for index := range got {
-		if got[index] != want[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func exactFieldSetViolations(fields map[string]ast.Expr, allowed map[string]bool) []string {

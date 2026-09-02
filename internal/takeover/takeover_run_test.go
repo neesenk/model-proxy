@@ -2,9 +2,9 @@ package takeover_test
 
 import (
 	"fmt"
-	"model-proxy/internal/app"
-	cliframework "model-proxy/internal/cli/framework"
+	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/routing"
 	"model-proxy/internal/takeover"
 	"net/http"
 	"net/http/httptest"
@@ -128,11 +128,11 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cat, err := app.LoadModelsCatalog(cliframework.HomeDir(), false)
+	cat, err := configdomain.LoadModelsCatalog(accounts.HomeDir(), false)
 	if err != nil {
 		t.Fatalf("load models catalog: %v", err)
 	}
-	meta, sources := app.HydrateModels(cfg, cat)
+	meta, sources := routing.HydrateModels(cfg, cat)
 	factsSources := make(map[string]map[string]int, len(sources))
 	for provider, models := range sources {
 		factsSources[provider] = make(map[string]int, len(models))
@@ -141,12 +141,12 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 		}
 	}
 	facts := takeover.ModelFacts{
-		Routes:         app.RouteTable(cfg),
+		Routes:         routing.RouteTable(cfg),
 		Meta:           meta,
 		Sources:        factsSources,
-		SourceDefault:  int(app.SrcDefault),
-		DefaultContext: app.DefaultModelMetadata.Context,
-		DefaultOutput:  app.DefaultModelMetadata.Output,
+		SourceDefault:  int(routing.SrcDefault),
+		DefaultContext: routing.DefaultModelMetadata.Context,
+		DefaultOutput:  routing.DefaultModelMetadata.Output,
 	}
 	if err := takeover.RunTakeover(cfg, "all", bakDir, facts); err != nil {
 		t.Fatalf("runTakeover all with missing files: want nil, got %v", err)

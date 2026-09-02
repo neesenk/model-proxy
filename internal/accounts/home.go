@@ -18,3 +18,16 @@ func HomeDir() string {
 func AuthFilePath(providerName, suffix string) string {
 	return filepath.Join(HomeDir(), ".model-proxy", providerName+"_"+suffix+".json")
 }
+
+// Mask redacts a credential/id for display: short secrets fully masked,
+// longer ones show first 2 + … + last 2. Never log raw secrets.
+func Mask(s string) string {
+	if s == "" {
+		return "(empty)"
+	}
+	const minReveal = 8
+	if len(s) < minReveal {
+		return "****"
+	}
+	return s[:2] + "…" + s[len(s)-2:]
+}

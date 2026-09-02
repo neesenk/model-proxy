@@ -4,15 +4,14 @@ package cli
 
 import (
 	"fmt"
-	cliframework "model-proxy/internal/cli/framework"
+	"model-proxy/internal/accounts"
 	displaypkg "model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
 	"os"
 	"sort"
 	"strings"
 	"sync"
 
-	"model-proxy/internal/accounts"
-	"model-proxy/internal/app"
 	configdomain "model-proxy/internal/config"
 )
 
@@ -34,7 +33,7 @@ func CmdUsage(args []string, cfg *configdomain.Config) {
 		return
 	}
 	if _, ok := cfg.Providers[provName]; !ok {
-		fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cliframework.ProviderNames(cfg))
+		fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cfg.ProviderNames())
 		os.Exit(1)
 	}
 	PrintProviderUsage(cfg, provName)
@@ -68,9 +67,9 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 			if ai > 0 {
 				fmt.Println(displaypkg.Dim(UsageDivider))
 			}
-			fmt.Printf("%s (%s)\n", displaypkg.Bold(displaypkg.Cyan(a.Label)), cliframework.Mask(a.ID))
+			fmt.Printf("%s (%s)\n", displaypkg.Bold(displaypkg.Cyan(a.Label)), accounts.Mask(a.ID))
 			cred := a.Credentials()
-			if p := app.BuildOne(cfg, buildOpts(), provName, prov, cred); p != nil {
+			if p := providerbuild.BuildOne(cfg, buildOpts(), provName, prov, cred); p != nil {
 				if err := p.Usage(); err != nil {
 					fmt.Println(displaypkg.Yellow("  (usage unavailable: " + err.Error() + ")"))
 				}
@@ -79,7 +78,7 @@ func PrintProviderUsage(cfg *configdomain.Config, provName string) {
 		return
 	}
 	// Single-account / non-pooled / aqp / codex: build one provider + call Usage.
-	provMap := app.BuildProviders(cfg, accountStore(), buildOpts()).Providers
+	provMap := providerbuild.BuildProviders(cfg, accountStore(), buildOpts()).Providers
 	p := provMap[provName]
 	if p == nil {
 		return
@@ -113,12 +112,12 @@ func accountStore() accounts.Store {
 	return usageStore
 }
 
-func buildOpts() app.BuildOptions {
-	return app.BuildOptions{
+func buildOpts() providerbuild.BuildOptions {
+	return providerbuild.BuildOptions{
 		HomeDir:                  homeDir(),
-		CodexCLIVersion:          app.CodexCLIVersion,
-		CodexCacheVersion:        app.CodexCacheVersion,
-		ListArkAgentPlanModelIDs: app.ListArkAgentPlanModelIDs,
+		CodexCLIVersion:          providerbuild.CodexCLIVersion,
+		CodexCacheVersion:        providerbuild.CodexCacheVersion,
+		ListArkAgentPlanModelIDs: providerbuild.ListArkAgentPlanModelIDs,
 	}
 }
 

@@ -3,16 +3,16 @@ package cli
 import (
 	"bufio"
 	"fmt"
-	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
 	displaypkg "model-proxy/internal/provider"
 	"os"
 	"strconv"
 	"strings"
 
-	"model-proxy/internal/app"
-	clilogin "model-proxy/internal/cli/login"
+	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/login"
+	"model-proxy/internal/providerbuild"
 )
 
 // hasPoolFile reports whether the plural credential pool file
@@ -20,7 +20,7 @@ import (
 // path (operate on the pool) and the singular path (legacy single-file removal,
 // including aqp/codex oauth files).
 func hasPoolFile(name string) bool {
-	_, err := os.Stat(clilogin.PoolPath(name))
+	_, err := os.Stat(login.PoolPath(name))
 	return err == nil
 }
 
@@ -36,7 +36,7 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	}
 	prov, ok := cfg.Providers[provName]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cliframework.ProviderNames(cfg))
+		fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cfg.ProviderNames())
 		os.Exit(1)
 	}
 	providerID := prov.Provider
@@ -46,10 +46,10 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	// goes through the singular removal path (backward compat: the legacy
 	// singular <name>_apikey.json is removed by clearApiKey).
 	if providerID == "aqp" || providerID == "codex" || !hasPoolFile(provName) {
-		provMap := app.BuildProviders(cfg, accountStore(), buildOpts()).Providers
+		provMap := providerbuild.BuildProviders(cfg, accountStore(), buildOpts()).Providers
 		p := provMap[provName]
 		if p == nil {
-			fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cliframework.ProviderNames(cfg))
+			fmt.Fprintf(os.Stderr, "unknown provider %q; available: %s\n", provName, cfg.ProviderNames())
 			os.Exit(1)
 		}
 		if err := p.Logout(); err != nil {
@@ -118,7 +118,7 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 		// Interactive: list + pick a number.
 		fmt.Printf("Accounts for %s:\n", provName)
 		for i, a := range pool.Accounts {
-			fmt.Printf("  %d) %s  (#%s  added %s)\n", i+1, a.Label, cliframework.Mask(a.ID), a.AddedAt)
+			fmt.Printf("  %d) %s  (#%s  added %s)\n", i+1, a.Label, accounts.Mask(a.ID), a.AddedAt)
 		}
 		fmt.Print("Remove which (number)? ")
 		reader := bufio.NewReader(os.Stdin)
@@ -146,7 +146,7 @@ func CmdLogout(args []string, cfg *configdomain.Config) {
 	if all {
 		fmt.Println(displaypkg.Green("✓ Removed all accounts from " + provName))
 	} else {
-		fmt.Println(displaypkg.Green("✓ Removed account " + cliframework.Mask(rmID)))
+		fmt.Println(displaypkg.Green("✓ Removed account " + accounts.Mask(rmID)))
 	}
 	cliserve.MaybeReloadDaemon(args, cfg)
 }

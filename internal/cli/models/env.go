@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	"model-proxy/internal/accounts"
-	"model-proxy/internal/app"
+	"model-proxy/internal/providerbuild"
 )
 
 // Environment seams for the models command group. The account store is
@@ -28,12 +28,12 @@ func accountStore() accounts.Store {
 	return accountStoreV
 }
 
-func buildOpts() app.BuildOptions {
-	return app.BuildOptions{
+func buildOpts() providerbuild.BuildOptions {
+	return providerbuild.BuildOptions{
 		HomeDir:                  homeDir(),
-		CodexCLIVersion:          app.CodexCLIVersion,
-		CodexCacheVersion:        app.CodexCacheVersion,
-		ListArkAgentPlanModelIDs: app.ListArkAgentPlanModelIDs,
+		CodexCLIVersion:          providerbuild.CodexCLIVersion,
+		CodexCacheVersion:        providerbuild.CodexCacheVersion,
+		ListArkAgentPlanModelIDs: providerbuild.ListArkAgentPlanModelIDs,
 	}
 }
 

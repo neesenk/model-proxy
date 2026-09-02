@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	logincore "model-proxy/internal/login"
 )
 
 // Regression (TOCTOU): NewLoopbackServer used to bind a port, read the number,
@@ -61,7 +63,7 @@ func TestLoopbackServer_CallbackURL(t *testing.T) {
 	if !strings.HasPrefix(ls.CallbackURL(), "http://127.0.0.1:") {
 		t.Errorf("CallbackURL()=%q want a 127.0.0.1 loopback URL with the bound port", ls.CallbackURL())
 	}
-	if !strings.HasSuffix(ls.CallbackURL(), LoginCompletePath) {
-		t.Errorf("CallbackURL()=%q want suffix %q", ls.CallbackURL(), LoginCompletePath)
+	if !strings.HasSuffix(ls.CallbackURL(), logincore.LoginCompletePath) {
+		t.Errorf("CallbackURL()=%q want suffix %q", ls.CallbackURL(), logincore.LoginCompletePath)
 	}
 }

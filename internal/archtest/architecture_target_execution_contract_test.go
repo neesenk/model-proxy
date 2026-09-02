@@ -206,7 +206,7 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			t.Errorf("internal/targetexec/executor.go imports outside its execution leaves: %v", got)
 		}
 
-		adapter, adapterSet := parseGoFile(t, "internal/app/targetexec_adapter.go")
+		adapter, adapterSet := parseGoFile(t, "internal/app/target_pipeline.go")
 		factory := namedMethod(t, adapter, "Proxy", "targetExecutor")
 		adapterForbidden := map[string]bool{
 			"Do": true, "ConvertResponse": true,

@@ -14,16 +14,19 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 		assertInternalPackageImportPolicy(t, "internal/runtime")
 
 		proxyFile := rootPackage
-		proxyFields := namedStructFields(t, proxyFile, "Proxy")
+		proxyFields := namedStructFields(t, proxyFile, "processServices")
 		if name, ok := configSelectorName(proxyFields["runtimeState"], "runtimestate"); !ok || name != "Manager" {
-			t.Error("Proxy.runtimeState must be runtimestate.Manager")
+			t.Error("Proxy.processServices.runtimeState must be runtimestate.Manager")
 		}
-		for _, forbidden := range []string{
-			"healthMu", "runtimeGeneration", "health", "sticky", "pins",
-			"modelLocks", "paramBlock", "spreadCtr",
-		} {
-			if _, ok := proxyFields[forbidden]; ok {
-				t.Errorf("Proxy must not re-own runtime field %s", forbidden)
+		for _, group := range []string{"Proxy", "generationState", "processServices"} {
+			groupFields := namedStructFields(t, proxyFile, group)
+			for _, forbidden := range []string{
+				"healthMu", "runtimeGeneration", "health", "sticky", "pins",
+				"modelLocks", "paramBlock", "spreadCtr",
+			} {
+				if _, ok := groupFields[forbidden]; ok {
+					t.Errorf("Proxy must not re-own runtime field %s (found on %s)", forbidden, group)
+				}
 			}
 		}
 
@@ -139,8 +142,10 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			t.Error("snapshotPersistedState must hold p.mu.RLock across its single Manager snapshot")
 		}
 		for _, testOnly := range []string{"scheduleHook", "persistSnapshotHook"} {
-			if _, ok := namedStructFields(t, proxyFile, "Proxy")[testOnly]; ok {
-				t.Errorf("Proxy must not retain test-only field %s", testOnly)
+			for _, group := range []string{"Proxy", "generationState", "processServices"} {
+				if _, ok := namedStructFields(t, proxyFile, group)[testOnly]; ok {
+					t.Errorf("Proxy must not retain test-only field %s (found on %s)", testOnly, group)
+				}
 			}
 		}
 		for _, legacy := range []string{"allSnapshots", "snapshotHealth", "snapshotSticky"} {
@@ -152,27 +157,36 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			}
 		}
 
-		readView, _ := parseGoFile(t, "internal/app/proxy_read_view.go")
-		dashboard := namedMethod(t, readView, "proxyReadView", "dashboard")
-		if got := namedCallCountInNode(dashboard.Body, "Dashboard"); got != 1 {
-			t.Errorf("proxyReadView.dashboard Manager.Dashboard calls = %d, want exactly 1", got)
+		portsFile, _ := parseGoFile(t, "internal/app/web_adapter.go")
+		dashboardCapture := keyedFuncLitBody(t, portsFile, "DashboardState")
+		if got := namedCallCountInNode(dashboardCapture, "Dashboard"); got != 1 {
+			t.Errorf("admin DashboardState port Manager.Dashboard calls = %d, want exactly 1", got)
 		}
-		if got := namedCallCountInNode(dashboard.Body, "scheduleStatusFromSnapshot"); got != 1 {
+		if got := namedCallCountInNode(dashboardCapture, "scheduleStatusFromSnapshot"); got != 1 {
 			t.Errorf(
-				"proxyReadView.dashboard scheduleStatusFromSnapshot calls = %d, want exactly 1",
+				"admin DashboardState port scheduleStatusFromSnapshot calls = %d, want exactly 1",
 				got,
 			)
 		}
-		if got := namedCallCountInNode(dashboard.Body, "scheduleStatus"); got != 0 {
-			t.Errorf("proxyReadView.dashboard rereads runtime through scheduleStatus %d time(s)", got)
+		if got := namedCallCountInNode(dashboardCapture, "scheduleStatus"); got != 0 {
+			t.Errorf("admin DashboardState port rereads runtime through scheduleStatus %d time(s)", got)
 		}
 		assertCallPathBetween(
 			t,
-			dashboard.Body,
+			dashboardCapture,
 			"p.runtimeState.Dashboard",
 			"p.mu.RLock",
 			"p.mu.RUnlock",
 		)
+
+		adminRead, _ := parseGoFile(t, "internal/admin/read.go")
+		adminDashboard := namedMethod(t, adminRead, "Service", "Dashboard")
+		if got := namedCallCountInNode(adminDashboard.Body, "DashboardState"); got != 1 {
+			t.Errorf("admin.Service.Dashboard DashboardState port calls = %d, want exactly 1", got)
+		}
+		if got := namedCallCountInNode(adminDashboard.Body, "scheduleStatus"); got != 0 {
+			t.Errorf("admin.Service.Dashboard re-derives the schedule %d time(s)", got)
+		}
 
 		scheduleStatus := namedMethod(t, proxyFile, "Proxy", "scheduleStatus")
 		if got := namedCallCountInNode(scheduleStatus.Body, "Dashboard"); got != 1 {
@@ -235,9 +249,9 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 	t.Run("internal runtime wirecap owns endpoint capability state", func(t *testing.T) {
 
 		proxy := rootPackage
-		wireStoreType := namedStructFields(t, proxy, "Proxy")["wireCaps"]
+		wireStoreType := namedStructFields(t, proxy, "processServices")["wireCaps"]
 		if name, ok := configSelectorName(wireStoreType, "runtimewire"); !ok || name != "Store" {
-			t.Error("Proxy.wireCaps must be runtimewire.Store")
+			t.Error("Proxy.processServices.wireCaps must be runtimewire.Store")
 		}
 
 		adapter, _ := parseGoFile(t, "internal/app/wirecap.go")
@@ -302,4 +316,35 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 			}
 		}
 	})
+}
+
+// keyedFuncLitBody returns the body of the func literal assigned to key in a
+// composite literal (e.g. the DashboardState: func(...) {...} port entry), so
+// contract assertions can target one port closure exactly.
+func keyedFuncLitBody(t *testing.T, file *ast.File, key string) *ast.BlockStmt {
+	t.Helper()
+	var body *ast.BlockStmt
+	ast.Inspect(file, func(node ast.Node) bool {
+		if body != nil {
+			return false
+		}
+		kv, ok := node.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		ident, ok := kv.Key.(*ast.Ident)
+		if !ok || ident.Name != key {
+			return true
+		}
+		literal, ok := kv.Value.(*ast.FuncLit)
+		if !ok {
+			return true
+		}
+		body = literal.Body
+		return false
+	})
+	if body == nil {
+		t.Fatalf("no func literal assigned to key %s", key)
+	}
+	return body
 }

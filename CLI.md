@@ -206,6 +206,8 @@ login <provider> [--label <name>] [--replace]
 
 逻辑（`internal/cli/login/login.go` 的 `CmdLogin`）：经 `RunProviderLogin` 按 `provider_id` 分派。aqp=SSO、codex=OAuth device flow、static/zhipu/deepseek/kimi-code/qwen-plan=apikey 池、volcengine=apikey+AK/SK 三元组池、zcode=BigModel Coding Plan（开 bigmodel.cn/login + apikey 池）。成功后 `MaybeReloadDaemon`（热重载运行中的 serve，无 daemon 时静默 no-op）。`add` 命令复用同一分派。
 
+包切分：`internal/cli/login` 只是交互 shell（命令编排、flag 解析、stdin 提示、终端输出、loopback 回调页、daemon nudge）；传输中立核心在 `internal/login`（codex device flow、AQP SSO 客户端、apikey/volcengine 池的校验/去重/写入/删除），Web 层（`internal/app`）与 shell 驱动同一核心。
+
 ### 凭据存储后端（config `credentials:` 统一开关 + env override）
 
 两类凭据共用一个开关：config 顶层 `credentials: file|keychain`（默认 file），同时驱动 apikey 池与 codex/aqp OAuth store。env `MP_CRED_STORE`（`file|keychain|auto`）保留为**仅 OAuth 侧的显式 override**：优先级 env 非空 > config > 默认 file；`auto` = 按 keychain 可达性探测（收敛前的旧默认，现为 opt-in）。env 与 config 不一致时 `config check` 和启动/reload 日志各打一行，列出两侧生效值与来源（env/config/default）。
@@ -552,7 +554,7 @@ routes            # 列出全部暴露模型的推导路由表
 routes <model>    # 单个模型的路由详情
 ```
 
-逻辑（`internal/cli/routes.go` 的 `CmdRoutes`）：纯 config 计算（`app.RouteTable` —— provider models 按暴露名聚合，alias 改名，priority 继承 provider；显式 `routes:` 覆盖同名推导路由），不访问 daemon。
+逻辑（`internal/cli/routes.go` 的 `CmdRoutes`）：纯 config 计算（`routing.RouteTable` —— provider models 按暴露名聚合，alias 改名，priority 继承 provider；显式 `routes:` 覆盖同名推导路由），不访问 daemon。
 
 ### stdout（列表模式）
 

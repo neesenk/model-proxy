@@ -20,7 +20,9 @@ const GracefulShutdownTimeout = 8 * time.Second
 
 // TransportTask is process transport work whose lifetime is bounded by the
 // HTTP server, rather than by Proxy. Tasks must return when stop is closed.
-type TransportTask func(stop <-chan struct{})
+// It is an alias so composition layers (e.g. internal/app Runtime) can hold
+// task slices without importing the process layer.
+type TransportTask = func(stop <-chan struct{})
 
 // RunReloadLoop owns process SIGHUP handling. The double stop check gives
 // shutdown priority over an already-buffered SIGHUP, while an in-progress

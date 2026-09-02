@@ -7,6 +7,7 @@ import (
 
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/routing"
 )
 
 // RewriteClaude: ~/.claude/settings.json
@@ -341,12 +342,10 @@ func removeTOMLSection(text, sectionHeader string) string {
 // application dependency.
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
-// kimiFallbackContextSize is the max_context_size written when a model has no
-// catalog metadata. kimi-cli's LLMModel schema REQUIRES max_context_size (no
-// default — omitting it fails config validation), so the value mirrors the
-// conservative default the proxy uses everywhere else
-// (app.DefaultModelMetadata.Context = 200000; takeover cannot import app).
-const kimiFallbackContextSize = 200000
+// The kimi fallback context below mirrors routing.DefaultModelMetadata.Context:
+// kimi-cli's LLMModel schema REQUIRES max_context_size (no default — omitting
+// it fails config validation), so the value is the same conservative default
+// the proxy uses everywhere else, taken from its routing-package owner.
 
 // RewriteKimi: ~/.kimi/config.toml (Kimi Code CLI — the MoonshotAI/kimi-cli
 // client; "openai_legacy" below names kimi-cli's OpenAI Chat Completions
@@ -387,11 +386,11 @@ api_key = "PROXY_MANAGED"
 		text = removeTOMLSection(text, "models."+m.Exposed)
 		// max_context_size is REQUIRED by kimi-cli (no schema default —
 		// omitting it fails config validation), so an unknown context size
-		// falls back to the same conservative 200k the proxy uses elsewhere
-		// (app.DefaultModelMetadata.Context) rather than dropping the key.
+		// falls back to the same conservative default the proxy uses elsewhere
+		// (routing.DefaultModelMetadata.Context) rather than dropping the key.
 		ctx := m.PM.Context
 		if ctx <= 0 {
-			ctx = kimiFallbackContextSize
+			ctx = routing.DefaultModelMetadata.Context
 		}
 		modelSection := fmt.Sprintf("\n[models.%q]\nprovider = %q\nmodel = %q\nmax_context_size = %d\n",
 			m.Exposed, pid, m.Exposed, ctx)

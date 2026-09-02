@@ -6,10 +6,10 @@ import (
 	"sort"
 	"strings"
 
-	"model-proxy/internal/app"
 	cliframework "model-proxy/internal/cli/framework"
 	configdomain "model-proxy/internal/config"
 	displaypkg "model-proxy/internal/provider"
+	"model-proxy/internal/routing"
 )
 
 // CmdRoutes prints the effective route table: derived routes (aggregated from
@@ -17,7 +17,7 @@ import (
 // explicit routes overriding. `routes` lists every exposed model; `routes
 // <model>` prints one model's ordered targets in detail.
 func CmdRoutes(args []string, cfg *configdomain.Config) {
-	table := app.RouteTable(cfg)
+	table := routing.RouteTable(cfg)
 	model := cliframework.Positional(args)
 
 	names := make([]string, 0, len(table))
@@ -46,7 +46,7 @@ func CmdRoutes(args []string, cfg *configdomain.Config) {
 	targets, ok := table[model]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "%s no route for model %q; available: %s\n",
-			displaypkg.Red("✗"), model, cliframework.RouteNames(cfg))
+			displaypkg.Red("✗"), model, cfg.RouteNames())
 		os.Exit(1)
 	}
 	fmt.Printf("%s %s — %d target(s)\n", displaypkg.Bold("route"), model, len(targets))

@@ -16,7 +16,7 @@ type serveAssembly struct{}
 type applicationRuntime = appdomain.Runtime
 
 func newApplicationRuntime(cfg *configdomain.Config, args cliserve.Args) *applicationRuntime {
-	return appdomain.NewRuntime(cfg, args)
+	return appdomain.NewRuntime(cfg, args.Config, cliserve.ResolveLogFile(args, cfg))
 }
 
 // application is the process composition owner; the command registry lives in

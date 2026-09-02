@@ -7,6 +7,7 @@ import (
 	"model-proxy/internal/accounts"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
+	logincore "model-proxy/internal/login"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,25 +20,25 @@ import (
 // runApiKeyLoginWithInput performs a pool-aware apikey login. The key may be
 // passed directly (tests, or a future --key flag) or, when empty, prompted on
 // stdin. The key is validated against the provider's usage_url if configured
-// (401/403 rejects). The account is deduped by id (accountIDFor): a new id
-// appends; an existing id with replace=true (or an interactive `y` on stdin
+// (401/403 rejects). The account is deduped by id (accounts.AccountID): a new
+// id appends; an existing id with replace=true (or an interactive `y` on stdin
 // when replace=false) overwrites the entry's key/label in place; an existing
 // id without confirmation aborts with "login cancelled". The entry's label
 // defaults to the id when not supplied. The pool is written to
-// ~/.model-proxy/<name>_apikeys.json via savePool.
+// ~/.model-proxy/<name>_apikeys.json via the login core.
 //
 // Locking: ALL stdin (key prompt + replace confirmation) and the usage-URL
 // validation happen BEFORE the cross-process lock — a holder who walks away
 // mid-prompt would otherwise stall every other login/logout for the 60s stale
-// window. The replace confirmation is resolved with a read-only loadPool before
-// the lock; the authoritative load→dedup→save then runs under withPoolLock (in
-// addApikeyAccount). The read-twice is safe: the inside-lock load re-finds the
-// entry by id (which may have changed between the two loads), so a concurrent
-// mutation is reconciled rather than clobbered.
+// window. The replace confirmation is resolved with a read-only LoadPool before
+// the lock; the authoritative load→dedup→save then runs under the pool lock (in
+// logincore.AddApikeyAccount). The read-twice is safe: the inside-lock load
+// re-finds the entry by id (which may have changed between the two loads), so a
+// concurrent mutation is reconciled rather than clobbered.
 //
 // This is the CLI wrapper: it owns stdin prompting + stdout printing, then
-// delegates the validate→dedup→save core to addApikeyAccount (reused by the
-// web layer, Task 12).
+// delegates the validate→dedup→save core to logincore.AddApikeyAccount (reused
+// by the web layer, Task 12).
 func RunApiKeyLoginWithInput(cfg *configdomain.Config, provName string, prov configdomain.Provider, in, label string, replace bool) error {
 	// === BEFORE LOCK: key prompt ===
 	key := strings.TrimSpace(in)
@@ -53,16 +54,16 @@ func RunApiKeyLoginWithInput(cfg *configdomain.Config, provName string, prov con
 	if key == "" {
 		return fmt.Errorf("empty API key")
 	}
-	if ApiKeyValidationURL(prov) != "" {
+	if logincore.ApiKeyValidationURL(prov) != "" {
 		fmt.Fprintf(os.Stderr, "Validating API key...\n")
 	}
 
 	// Resolve the replace confirmation BEFORE the lock (stdin must never block
-	// the cross-process lock). A read-only loadPool + scan for the id decides
+	// the cross-process lock). A read-only LoadPool + scan for the id decides
 	// whether to prompt; if the user declines, abort without acquiring the lock.
-	id := accountIDFor(prov.Provider, accountCred{APIKey: key})
+	id := accounts.AccountID(prov.Provider, accounts.Credentials{APIKey: key})
 	if !replace {
-		existing, err := loadPool(provName, prov.Provider)
+		existing, err := logincore.LoadPool(provName, prov.Provider)
 		if err != nil {
 			return fmt.Errorf("load pool: %w", err)
 		}
@@ -80,93 +81,14 @@ func RunApiKeyLoginWithInput(cfg *configdomain.Config, provName string, prov con
 		replace = true // user confirmed; tell the core to overwrite
 	}
 
-	if _, err := AddApikeyAccount(cfg, provName, prov, accountCred{APIKey: key}, label, replace); err != nil {
+	if _, err := logincore.AddApikeyAccount(cfg, provName, prov, accounts.Credentials{APIKey: key}, label, replace); err != nil {
 		return err
 	}
 	// Print the confirmation line (label resolved from the freshly-saved pool,
-	// which may have been re-sorted by savePool).
-	pool, _ := loadPool(provName, prov.Provider)
-	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(cliframework.Mask(id)+" ("+labelFor(pool, id)+")"))
+	// which may have been re-sorted by the pool save).
+	pool, _ := logincore.LoadPool(provName, prov.Provider)
+	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
 	return nil
-}
-
-// apiKeyValidationURL returns the endpoint used to validate an API key at login:
-// prov.UsageURL when set, otherwise openai_base_url + "/models" (the natural
-// Bearer-GET probe), or "" when neither is set (login skips validation). It is
-// field-based (not provider_id-based): providers with a real usage API set
-// usage_url (zhipu/deepseek/volcengine/kimi-code → unchanged); providers without
-// one (qwen-plan) validate against openai_base_url/models. Shared by the
-// "Validating…" message gate and addApikeyAccount's validateKeyBearerGET call.
-func ApiKeyValidationURL(prov configdomain.Provider) string {
-	if prov.UsageURL != "" {
-		return prov.UsageURL
-	}
-	if prov.OpenAIBaseURL != "" {
-		return strings.TrimRight(prov.OpenAIBaseURL, "/") + "/models"
-	}
-	return ""
-}
-
-// addApikeyAccount is the non-printing core extracted from
-// runApiKeyLoginWithInput: it validates the key against usage_url (if set),
-// dedups by id under the cross-process lock, and writes the pool. Returns the
-// account id. No stdin, no stdout — the CLI wrapper (or the web layer) handles
-// UX. Callers decide replace semantics: the CLI resolves it via an interactive
-// prompt BEFORE calling this; the web layer passes the client's choice.
-//
-// replace=false on an existing id returns "login cancelled" without modifying
-// the pool — callers surface that error as appropriate (CLI prints, the web
-// layer maps it to a 400).
-func AddApikeyAccount(cfg *configdomain.Config, name string, prov configdomain.Provider, cred accountCred, label string, replace bool) (string, error) {
-	key := strings.TrimSpace(cred.APIKey)
-	if key == "" {
-		return "", fmt.Errorf("empty API key")
-	}
-	// Validate against the usage endpoint if configured. 401/403 = key invalid;
-	// anything else (200, 404, etc.) = key accepted (the endpoint may not exist,
-	// but the key itself was not rejected).
-	if err := ValidateKeyBearerGET(ApiKeyValidationURL(prov), key); err != nil {
-		return "", err
-	}
-	id := accountIDFor(prov.Provider, accountCred{APIKey: key})
-	return id, withPoolLock(name, func() error {
-		pool, err := loadPool(name, prov.Provider)
-		if err != nil {
-			return fmt.Errorf("load pool: %w", err)
-		}
-		now := nowTS()
-		idx := -1
-		for i, a := range pool.Accounts {
-			if a.ID == id {
-				idx = i
-				break
-			}
-		}
-		if idx >= 0 {
-			if !replace {
-				return fmt.Errorf("login cancelled")
-			}
-			pool.Accounts[idx].APIKey = key
-			if label != "" {
-				pool.Accounts[idx].Label = label
-			}
-			pool.Accounts[idx].AddedAt = now
-		} else {
-			lbl := label
-			if lbl == "" {
-				lbl = id
-			}
-			pool.Accounts = append(pool.Accounts, poolAccount{ID: id, Label: lbl, APIKey: key, AddedAt: now})
-		}
-		return savePool(name, prov.Provider, pool)
-	})
-}
-
-// removeApikeyAccount removes the account with the given id from the named
-// pool under the cross-process lock. No-op if the id is absent (no error). No
-// stdin, no stdout — symmetric with addApikeyAccount, reused by the web layer.
-func RemoveApikeyAccount(name, providerID, id string) error {
-	return accountStoreEnv().RemoveAccount(name, providerID, id)
 }
 
 // oauthAuthFilePath resolves the OAuth credential file from the config-level
@@ -178,7 +100,7 @@ func oauthAuthFilePath(homeDir, providerName string) string {
 
 func RunLogin(cfg *configdomain.Config, provName string) error {
 	storePath := oauthAuthFilePath(HomeDir(), provName)
-	c := NewAqpClient(storePath)
+	c := logincore.NewAqpClient(storePath)
 
 	// 1. Bootstrap: get the login URL + SSO_A cookie.
 	loginURL, err := c.BootstrapLoginURL()
@@ -311,7 +233,7 @@ func CmdLogin(args []string) {
 		return
 	}
 	if _, ok := cfg.Providers[provName]; !ok {
-		log.Fatalf("unknown provider %q; available: %s", provName, cliframework.ProviderNames(cfg))
+		log.Fatalf("unknown provider %q; available: %s", provName, cfg.ProviderNames())
 	}
 	label := cliframework.FlagStringValue(args, "--label")
 	replace := cliframework.HasFlagValue(args, "--replace")
@@ -348,17 +270,4 @@ func CmdLogin(args []string) {
 	// full args are passed so a serve started with `--log-file` is found at the
 	// pid file that flag derives.
 	cliserve.MaybeReloadDaemon(args, cfg)
-}
-
-// ApiKeyLike reports whether the provider's login flow is apikey-pool based
-// (vs OAuth/SSO device flows), which is exactly the set whose keys work for a
-// Bearer GET /models cross-check after login. Mirrors the CmdLogin dispatch:
-// volcengine is excluded (its /models needs V4 signing for plan endpoints).
-func ApiKeyLike(providerID string) bool {
-	switch providerID {
-	case "aqp", "codex", "volcengine":
-		return false
-	default:
-		return true
-	}
 }

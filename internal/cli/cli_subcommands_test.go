@@ -13,8 +13,6 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"model-proxy/internal/accounts"
-	"model-proxy/internal/app"
-	cliframework "model-proxy/internal/cli/framework"
 )
 
 // -- C1: `models` lists all exposed models from config ---
@@ -150,7 +148,7 @@ func TestCLI_LogoutInteractiveRemovesAccount(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	cfgPath := writeZhipuPoolConfig(t, "https://zhipu.invalid/u")
 
-	pool, err := app.LoadPool("zhipu", "zhipu")
+	pool, err := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +161,7 @@ func TestCLI_LogoutInteractiveRemovesAccount(t *testing.T) {
 	setStdin(t, "1\n") // pick the first account (1-based)
 	RunLogout([]string{"zhipu", "--config", cfgPath})
 
-	pool2, _ := app.LoadPool("zhipu", "zhipu")
+	pool2, _ := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
 	if len(pool2.Accounts) != 1 {
 		t.Fatalf("after logout want 1 account, got %d: %+v", len(pool2.Accounts), pool2.Accounts)
 	}
@@ -183,7 +181,7 @@ func TestCLI_LogoutAllClearsPool(t *testing.T) {
 	writePoolFile(t, "zhipu", "zhipu", "K1", "K2")
 	// A stale legacy singular file from before pooling: it must NOT come back
 	// to life after `logout --all` removes the pool accounts.
-	if err := os.WriteFile(app.AccountStore().LegacyPath("zhipu"), []byte(`{"api_key":"ancient"}`), 0o600); err != nil {
+	if err := os.WriteFile(accounts.NewStore(accounts.HomeDir()).LegacyPath("zhipu"), []byte(`{"api_key":"ancient"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfgPath := writeZhipuPoolConfig(t, "https://zhipu.invalid/u")
@@ -193,14 +191,14 @@ func TestCLI_LogoutAllClearsPool(t *testing.T) {
 	// The empty plural file stays as the authoritative credential tombstone
 	// (provider-pools.md) — removing it would re-open the legacy fallback and
 	// resurrect the old key.
-	pool, err := app.AccountStore().Load("zhipu", "zhipu")
+	pool, err := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
 	if err != nil {
 		t.Fatalf("tombstone pool unreadable: %v", err)
 	}
 	if len(pool.Accounts) != 0 {
 		t.Errorf("pool accounts = %d, want 0", len(pool.Accounts))
 	}
-	snapshot, err := app.AccountStore().LoadSnapshot("zhipu", "zhipu")
+	snapshot, err := accounts.NewStore(accounts.HomeDir()).LoadSnapshot("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,10 +219,10 @@ func TestCLI_LogoutAllEmptyPoolCleanupFailureWarnsOnly(t *testing.T) {
 	// Empty plural pool (the tombstone) plus a stale keychain-restore marker
 	// left by an older writer: file-mode RemoveAllAccounts follows that
 	// provenance into keychain deletion.
-	if err := app.AccountStore().Save("zhipu", "zhipu", app.CredentialPool{Version: 1}); err != nil {
+	if err := accounts.NewStore(accounts.HomeDir()).Save("zhipu", "zhipu", accounts.Pool{Version: 1}); err != nil {
 		t.Fatal(err)
 	}
-	markerPath := app.AccountStore().PoolPath("zhipu") + ".keychain-origin"
+	markerPath := accounts.NewStore(accounts.HomeDir()).PoolPath("zhipu") + ".keychain-origin"
 	if err := os.WriteFile(markerPath, []byte(`{"version":1,"account_ids":["stale-restore-id"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +287,7 @@ func TestCLI_LogoutByLabel(t *testing.T) {
 
 	RunLogout([]string{"zhipu", "--label", "K1", "--config", cfgPath})
 
-	pool, err := app.LoadPool("zhipu", "zhipu")
+	pool, err := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,18 +369,18 @@ func TestCLI_UsagePoolPrintsAllAccounts(t *testing.T) {
 	}
 
 	// Per-account headers: each label + masked id appears.
-	id1 := accounts.AccountID("zhipu", app.AccountCred{APIKey: "K1"})
-	id2 := accounts.AccountID("zhipu", app.AccountCred{APIKey: "K2"})
+	id1 := accounts.AccountID("zhipu", accounts.Credentials{APIKey: "K1"})
+	id2 := accounts.AccountID("zhipu", accounts.Credentials{APIKey: "K2"})
 	if !strings.Contains(out, "K1") {
 		t.Errorf("output missing K1 label:\n%s", out)
 	}
 	if !strings.Contains(out, "K2") {
 		t.Errorf("output missing K2 label:\n%s", out)
 	}
-	if m := cliframework.Mask(id1); !strings.Contains(out, m) {
+	if m := accounts.Mask(id1); !strings.Contains(out, m) {
 		t.Errorf("output missing masked id for K1 (%q):\n%s", m, out)
 	}
-	if m := cliframework.Mask(id2); !strings.Contains(out, m) {
+	if m := accounts.Mask(id2); !strings.Contains(out, m) {
 		t.Errorf("output missing masked id for K2 (%q):\n%s", m, out)
 	}
 	// Two account blocks → at least two divider lines.

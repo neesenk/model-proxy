@@ -12,7 +12,7 @@
 - 禁止要求 main 包根据 provider id 分支处理这些知识。
 - `ProbeRequest`、`ExtraHeaders`、`FilterModelIDs` 的默认实现集中在 `baseProbe`。
 - `Surplus` 是 `QuotaSnapshot` 方法，不属于 Provider interface。
-- Auth、Logout、Usage、Quota 的 fetch 和 parse 由 provider struct 自己承载。`internal/app` 的 `BuildOne`（provider_build.go）只允许保留无法泛化的窄回调，例如 volcengine V4 `FetchModelsFn`。
+- Auth、Logout、Usage、Quota 的 fetch 和 parse 由 provider struct 自己承载。`internal/providerbuild` 的 `BuildOne` 只允许保留无法泛化的窄回调，例如 volcengine V4 `FetchModelsFn`；本包保持 provider 实现的叶子地位。
 
 ## 凭据
 

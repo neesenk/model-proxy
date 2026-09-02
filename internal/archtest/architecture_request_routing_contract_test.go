@@ -52,7 +52,7 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 	})
 
 	t.Run("root adapter freezes generation and is the only constructor", func(t *testing.T) {
-		adapter, _ := parseGoFile(t, "internal/app/request_routing_adapter.go")
+		adapter, _ := parseGoFile(t, "internal/app/target_pipeline.go")
 		schedulerFields := namedStructFields(t, adapter, "requestRoutingScheduler")
 		want := map[string]bool{
 			"proxy": true, "config": true, "parentOf": true,
@@ -79,9 +79,9 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			"NewPlanner",
 		)
 		if len(constructorSites) != 1 ||
-			constructorSites[0].file != "internal/app/request_routing_adapter.go" ||
+			constructorSites[0].file != "internal/app/target_pipeline.go" ||
 			constructorSites[0].function != "requestRoutingPlanner" {
-			t.Errorf("routing.NewPlanner production reference sites = %v, want only request_routing_adapter.go:requestRoutingPlanner direct call", constructorSites)
+			t.Errorf("routing.NewPlanner production reference sites = %v, want only target_pipeline.go:requestRoutingPlanner direct call", constructorSites)
 		}
 		if sites := packageLocalFunctionCallSites(t, "internal/routing", "NewPlanner"); len(sites) != 0 {
 			t.Errorf("routing package-local NewPlanner calls = %v, want none outside the root adapter", sites)

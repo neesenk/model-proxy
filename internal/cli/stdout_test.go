@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"model-proxy/internal/accounts"
-	"model-proxy/internal/app"
 	"model-proxy/internal/provider"
 	"testing"
 )
@@ -54,14 +53,14 @@ func setPoolHome(t *testing.T, dir string) {
 // writePoolFile writes a plural credential pool for `name` with the given keys.
 func writePoolFile(t *testing.T, name, providerID string, keys ...string) {
 	t.Helper()
-	pool := app.CredentialPool{Version: 1}
+	pool := accounts.Pool{Version: 1}
 	for _, key := range keys {
-		pool.Accounts = append(pool.Accounts, app.PoolAccount{
-			ID:    accounts.AccountID(providerID, app.AccountCred{APIKey: key}),
+		pool.Accounts = append(pool.Accounts, accounts.Account{
+			ID:    accounts.AccountID(providerID, accounts.Credentials{APIKey: key}),
 			Label: key, APIKey: key, AddedAt: "2026-07-08",
 		})
 	}
-	if err := app.AccountStore().Save(name, providerID, pool); err != nil {
+	if err := accounts.NewStore(accounts.HomeDir()).Save(name, providerID, pool); err != nil {
 		t.Fatal(err)
 	}
 }

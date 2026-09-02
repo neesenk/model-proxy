@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `internal/routing/request.go`、`internal/app/request_routing_adapter.go`、models.dev
+修改 `internal/routing/request.go`、`internal/app/target_pipeline.go`、models.dev
 catalog、context overflow retry、route derivation（隐式路由的继任者）或 route warnings 时必读。
 
 ## 请求画像
@@ -23,7 +23,7 @@ catalog、context overflow retry、route derivation（隐式路由的继任者�
 隐藏内部字段；输入来自一次 `RuntimeSnapshot`，generation-owned map 在 reload
 时只交换、不原地修改。
 
-`internal/app/request_routing_adapter.go` 是唯一边界桥：它从 HTTP request 提取
+`internal/app/target_pipeline.go` 是唯一边界桥：它从 HTTP request 提取
 force-provider 字符串；`requestRoutingScheduler` 捕获同一快照的 config、parent
 identity、route keys 与 generation，并通过 `Proxy.schedule` 进入
 `internal/runtime.Manager`。`serveOnce` 每个 pass 只构造一个 Planner，同时用于
@@ -31,8 +31,9 @@ identity、route keys 与 generation，并通过 `Proxy.schedule` 进入
 generation。
 
 `internal/catalog` 作为无仓库内依赖叶子包拥有 models.dev slim projection、
-canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存。`internal/app/catalog_adapter.go` 只注入 HOME
-cache path、`MP_MODELSDEV_URL` 与 Config 中的 provider/route 名单。daemon
+canonical-owner 去重、HTTP/ETag/TTL 刷新和磁盘缓存。`internal/config/modelscatalog.go` 只注入 HOME
+cache path 与 `MP_MODELSDEV_URL`；Config 中的 provider/route 名单遍历与
+fallback/source 策略由 `internal/routing/model_metadata.go`（`HydrateModels`）拥有。daemon
 启动时同步加载 catalog（最多受 source HTTP timeout 限制），reload 后的刷新才经
 lifecycle gate 异步执行；catalog 为 nil 时请求感知路由整体 no-op，不能因此把
 所有目标过滤为空。
@@ -80,7 +81,7 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 ## 路由推导（routes 自动化）
 
 路由表完全由 config 推导（`DeriveRoutesFrom` / `RouteTable`，
-`internal/app/implicit_routes.go`）：每个 provider 的 `models:` 按暴露名聚合为
+`internal/routing/implicit_routes.go`）：每个 provider 的 `models:` 按暴露名聚合为
 多目标 route —— 暴露名 = 模型名，或 provider 的 `alias:` 改名（如 kimi-code 的
 `k3` 暴露为 `kimi-k3`，与其他 provider 的同名模型聚合）；target 保留上游真实
 模型名，priority 继承 provider 的 `priority:`（lower wins），并按
@@ -100,7 +101,7 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 
 ## 配置风险警告
 
-`ConfigRoutingWarnings`（`internal/app/route_warnings.go`）只警告、不阻止启动：
+`ConfigRoutingWarnings`（`internal/routing/route_warnings.go`）只警告、不阻止启动：
 
 - reasoning replay 模型使用协议转换；
 - provider wire protocol 无法表达且无法转换（当前无实例：codex Responses 已可

@@ -1,20 +1,26 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
+	"model-proxy/internal/accounts"
+	"model-proxy/internal/observe/requestlog"
+	shadowexec "model-proxy/internal/shadow"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"model-proxy/internal/accounts"
-	"model-proxy/internal/observe/requestlog"
-	shadowexec "model-proxy/internal/shadow"
 )
+
+// ---- shadow_test.go ----
 
 // TestForceProvider_OverridesRouting: a request with x-mp-force-provider is
 // narrowed to that provider, bypassing the normal schedule (which would pick the
@@ -489,7 +495,7 @@ func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
 	// The upstream handler proves the asynchronous request reached the candidate.
 	// Close waits for the fire-and-forget runner, then the logger shutdown drains
 	// its record before the disk query.
-	wantProvider := "shadow-pool#" + accounts.AccountID("zhipu", AccountCred{APIKey: observedKey})
+	wantProvider := "shadow-pool#" + accounts.AccountID("zhipu", accounts.Credentials{APIKey: observedKey})
 	p.Close()
 	shutdownLogger()
 	var shadowRecord *requestlog.Record
@@ -606,3 +612,323 @@ func TestShadow_ConcurrencyGateSaturatesAndDrops(t *testing.T) {
 }
 
 func ptrFloat(v float64) *float64 { return &v }
+
+// ---- shadow_regression_test.go ----
+
+// TestShouldShadow: rate=0 → false, rate>=1 → true, rate between → probabilistic.
+func TestShouldShadow(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
+		Routes:    map[string][]RouteTarget{"m": {{Provider: "z", Model: "m"}}},
+	}
+	// rate >= 1 → always true.
+	p := newTestProxy(t, cfg)
+	one := 1.0
+	p.shadow.Store(shadowexec.NewRuntime(shadowexec.Options{SampleRate: &one, MaxConcurrent: 1}))
+	if !p.shadow.Load().ShouldSample() {
+		t.Error("rate=1.0 should return true")
+	}
+	// rate <= 0 → always false.
+	zero := 0.0
+	p.shadow.Store(shadowexec.NewRuntime(shadowexec.Options{SampleRate: &zero, MaxConcurrent: 1}))
+	if p.shadow.Load().ShouldSample() {
+		t.Error("rate=0 should return false")
+	}
+	// nil runtime → false.
+	p.shadow.Store(nil)
+	if p.shadow.Load().ShouldSample() {
+		t.Error("nil shadow runtime should return false")
+	}
+}
+
+// TestReload_ShadowDisabledStopsFiring (regression #6): the shadow sample rate /
+// concurrency cap / client must update on reload. Disabling shadow via
+// shadow_sample_rate: 0 + reload must stop firing shadow requests immediately —
+// pre-fix the sample rate was cached at startup, so paid shadow requests kept
+// firing until restart.
+func TestReload_ShadowDisabledStopsFiring(t *testing.T) {
+	useStaticProviderPools(t, "main", "cand")
+	var candHits atomic.Int64
+	mainUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer mainUp.Close()
+	candUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		candHits.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer candUp.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	reqDir := filepath.Join(t.TempDir(), "requests")
+	base := fmt.Sprintf("listen: 127.0.0.1:0\n"+
+		"providers:\n"+
+		"  main:\n    openai_base_url: %s\n    provider_id: static\n"+
+		"  cand:\n    openai_base_url: %s\n    provider_id: static\n"+
+		"routes:\n  m:\n    - {provider: main, model: m}\n"+
+		"shadow:\n  m:\n    provider: cand\n    model: m\n"+
+		"request_log:\n  enabled: true\n  dir: %s\n", mainUp.URL, candUp.URL, reqDir)
+	write := func(extra string) {
+		if err := os.WriteFile(cfgPath, []byte(base+extra), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("shadow_sample_rate: 1.0\n")
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newTestProxy(t, cfg)
+	p.initRequestLog(cfg.RequestLog) // shadow only fires when reqLog is active
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	send := func() {
+		resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"m","input":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	// 1) shadow enabled → the candidate IS hit (fire-and-forget, so poll).
+	send()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && candHits.Load() < 1 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if first := candHits.Load(); first != 1 {
+		t.Fatalf("shadow should have fired once after first send; candHits=%d", first)
+	}
+
+	// 2) disable shadow via reload (sample_rate: 0).
+	write("shadow_sample_rate: 0.0\n")
+	if err := p.Reload(cfgPath); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	send()
+	// Sampling is checked synchronously before lifecycle admission. The captured
+	// post-reload runtime must therefore reject the request deterministically.
+	if p.shadow.Load().ShouldSample() {
+		t.Fatal("post-reload shadow runtime still samples at rate 0")
+	}
+	if got := candHits.Load(); got != 1 {
+		t.Errorf("after disabling shadow via reload, candHits=%d, want 1 (shadow kept firing — sample rate not reload-aware)", got)
+	}
+}
+
+// TestShadow_PooledProvider (regression for the unified resolver, #10): a shadow
+// target that names a POOLED parent must still be sampled. Pre-fix runShadow did
+// provs[shadow.Provider] (nil for a parent) → "provider not available" → shadow
+// silently stopped the moment a second account was added. After the fix the
+// resolver picks one of the parent's virtuals.
+func TestShadow_PooledProvider(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+	writePoolFile(t, "zhipu-shadow", "zhipu", "SA", "SB")
+
+	var shadowHits atomic.Int64
+	mainUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer mainUp.Close()
+	shadowUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		shadowHits.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer shadowUp.Close()
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"main":         {OpenAIBaseURL: mainUp.URL, Provider: testProviderID},
+			"zhipu-shadow": {OpenAIBaseURL: shadowUp.URL, Provider: "zhipu"},
+		},
+		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
+		Shadow: map[string]ShadowTarget{"m": {Provider: "zhipu-shadow", Model: "glm"}},
+	}
+	p := newTestProxy(t, cfg)
+	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	resp, err := http.Post(px.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"m","input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// Shadow is fire-and-forget; poll for the hit.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && shadowHits.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if shadowHits.Load() == 0 {
+		t.Fatal("pooled shadow target (zhipu-shadow) never sampled — resolver did not resolve it to a virtual")
+	}
+}
+
+// TestShadow_ConvertFail_Closed (regression #C): when a cross-protocol shadow
+// request's conversion fails, the shadow must be SKIPPED — not sent with the
+// unconverted body (which would ship an Anthropic body to an OpenAI endpoint or
+// vice versa). Pre-fix runShadow logged the error and forwarded the raw body.
+func TestShadow_ConvertFail_Closed(t *testing.T) {
+	var shadowHits atomic.Int64
+	mainUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`)) // primary 2xx so the shadow dispatch fires
+	}))
+	defer mainUp.Close()
+	shadowUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		shadowHits.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer shadowUp.Close()
+
+	cfg := &Config{
+		Listen: "127.0.0.1:1",
+		Providers: map[string]Provider{
+			"main":        {OpenAIBaseURL: mainUp.URL, Provider: testProviderID},
+			"shadow-prov": {AnthropicBaseURL: shadowUp.URL, Provider: testProviderID}, // cross-proto (anthropic) shadow
+		},
+		Routes: map[string][]RouteTarget{"m": {{Provider: "main", Model: "m"}}},
+		Shadow: map[string]ShadowTarget{"m": {Provider: "shadow-prov", Model: "sm", Protocol: "anthropic"}},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["main"] = &testProv{key: "main"}
+	p.providers["shadow-prov"] = &testProv{key: "shadow-prov"}
+	p.initRequestLog(RequestLogConfig{Enabled: true, Dir: filepath.Join(t.TempDir(), "requests")})
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	// extractModel returns "m" (fast path reads 3 tokens), but the full JSON is
+	// malformed → the shadow's openai→anthropic convertRequest fails.
+	resp, err := http.Post(px.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"m","input":[BAD`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// Close waits for the admitted detached task, so the zero-hit assertion has
+	// no asynchronous timing window.
+	p.Close()
+	if got := shadowHits.Load(); got != 0 {
+		t.Errorf("shadow backend hit %d time(s) with an unconverted body after convert failure (fail-open); want 0", got)
+	}
+}
+
+// TestRunShadow_NilRuntimeConfig: a zero-value RuntimeSnapshot (a future call
+// site forgetting to populate targetexec.Attempt.Runtime) must log + return instead
+// of panicking on runtime.cfg deep in runShadow.
+func TestRunShadow_NilRuntimeConfig(t *testing.T) {
+	p := newTestProxy(t, &Config{Providers: map[string]Provider{}})
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	p.runShadow(RuntimeSnapshot{}, nil, nil, "anthropic", "anthropic", "m", "g",
+		ShadowTarget{Provider: "p", Model: "m"}, []byte(`{}`), "rid")
+	if !strings.Contains(buf.String(), "runtime snapshot has no config") {
+		t.Fatalf("expected the nil-cfg guard log, got %q", buf.String())
+	}
+}
+
+// TestHandleShadowReport_API: the /api/shadow-report endpoint returns
+// enabled=false when request_log is off. The CLI-side rendering of this
+// endpoint is covered by internal/cli/shadow_report_render_test.go against
+// the production renderer.
+func TestHandleShadowReport_API(t *testing.T) {
+	// Off → enabled=false.
+	w := NewWebServer(newTestProxy(t, &Config{
+		Providers: map[string]Provider{"z": {OpenAIBaseURL: "https://x", Provider: testProviderID}},
+		Routes:    map[string][]RouteTarget{"glm": {{Provider: "z", Model: "glm"}}},
+	}), "test-config.yaml")
+	mux := http.NewServeMux()
+	w.Register(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/shadow-report", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"enabled":false`) {
+		t.Errorf("shadow-report off: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---- shadow_shutdown_test.go ----
+
+// TestCloseCancelsInFlightShadowRequest: shutdown must cancel an in-flight
+// shadow dispatch instead of waiting out the shadow client's full upstream
+// timeout. The supervisor SIGKILLs the worker 10s after SIGTERM — an
+// unbounded WaitBeforeLogDrain would drop every final flush that follows it
+// (request-log drain, quota persist, stats flush). Red line: background tasks
+// need owner, stop, wait AND a stop signal the task actually observes.
+func TestCloseCancelsInFlightShadowRequest(t *testing.T) {
+	release := make(chan struct{})
+	shadowHit := make(chan struct{}, 1)
+	shadowUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case shadowHit <- struct{}{}:
+		default:
+		}
+		<-release
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer shadowUp.Close()
+	// LIFO: release the parked handler BEFORE shadowUp.Close() waits it out.
+	defer close(release)
+	primaryUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer primaryUp.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"primary":   {OpenAIBaseURL: primaryUp.URL, Provider: testProviderID},
+			"candidate": {OpenAIBaseURL: shadowUp.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]RouteTarget{
+			"alias": {{Provider: "primary", Model: "primary-model", Protocol: "openai"}},
+		},
+		Shadow: map[string]ShadowTarget{
+			"alias": {Provider: "candidate", Model: "shadow-model", Protocol: "openai"},
+		},
+		// The shadow client's only bound absent cancellation: Close must not
+		// wait anywhere near this out.
+		Scheduling: Scheduling{UpstreamTimeout: "30s"},
+	}
+	p := newTestProxy(t, cfg)
+	p.reqLog = requestlog.New(requestlog.Options{
+		Directory: t.TempDir(), MaxFileSize: 1 << 20, MaxBodyBytes: 1 << 10,
+	})
+	p.reqLogStarted = p.lifecycle.Run(func(<-chan struct{}) { p.reqLog.Run() })
+	if !p.reqLogStarted {
+		t.Fatal("request logger loop was not started")
+	}
+
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+	resp := postForStatus(t, px.URL+"/v1/chat/completions", `{"model":"alias","messages":[{"role":"user","content":"hi"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("primary status = %d, want 200", resp.StatusCode)
+	}
+	// The shadow dispatch has reached its (hanging) upstream — the request is
+	// now parked inside the shadow client for as long as we hold `release`.
+	select {
+	case <-shadowHit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shadow upstream was never called")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		p.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Proxy.Close blocked on an in-flight shadow request — no stop signal reaches the shadow client")
+	}
+}

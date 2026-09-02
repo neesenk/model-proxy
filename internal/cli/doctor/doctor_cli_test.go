@@ -1,7 +1,7 @@
 package doctor
 
 import (
-	"model-proxy/internal/app"
+	"model-proxy/internal/accounts"
 	"os"
 	"strings"
 	"testing"
@@ -40,7 +40,7 @@ routes:
 		t.Errorf("doctor output missing '3 accounts':\n%s", out)
 	}
 	// Each virtual id from the pool appears (parent is shown expanded).
-	pool, _ := app.LoadPool("zhipu", "zhipu")
+	pool, _ := accounts.NewStore(accounts.HomeDir()).Load("zhipu", "zhipu")
 	for _, a := range pool.Accounts {
 		vid := "zhipu#" + a.ID
 		if !strings.Contains(out, vid) {

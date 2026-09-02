@@ -16,7 +16,7 @@
 | opencode | `http://<proxy>/v1` | `@ai-sdk/anthropic` 拼接 `baseURL + /messages` |
 | pi | `http://<proxy>` | pi 自行拼 `/v1/messages`，baseURL 不能再带 `/v1` |
 | codex | 按 Responses API 客户端配置 | 不经过 Chat Completions 协议转换 |
-| kimi | `http://<proxy>/v1` | 目标客户端是 MoonshotAI/kimi-cli（品牌名 "Kimi Code CLI"）`~/.kimi/config.toml`；`openai_legacy` 是 kimi-cli 对 OpenAI Chat Completions 协议的 provider 类型名（不是"旧版客户端"），kimi-cli 自拼 `/chat/completions`，所以 base_url 带 `/v1`。每个暴露模型写 `[models."<name>"]` 块（点号名必须加引号，否则 TOML 解析成嵌套表），按 kimi-cli 的 LLMModel schema 携带 `provider`/`model`/`max_context_size`；`max_context_size` 为必填，无元数据时回落到保守默认 200000（与 `app.DefaultModelMetadata.Context` 一致） |
+| kimi | `http://<proxy>/v1` | 目标客户端是 MoonshotAI/kimi-cli（品牌名 "Kimi Code CLI"）`~/.kimi/config.toml`；`openai_legacy` 是 kimi-cli 对 OpenAI Chat Completions 协议的 provider 类型名（不是"旧版客户端"），kimi-cli 自拼 `/chat/completions`，所以 base_url 带 `/v1`。每个暴露模型写 `[models."<name>"]` 块（点号名必须加引号，否则 TOML 解析成嵌套表），按 kimi-cli 的 LLMModel schema 携带 `provider`/`model`/`max_context_size`；`max_context_size` 为必填，无元数据时回落到保守默认 200000（`routing.DefaultModelMetadata.Context`，takeover 直接引用） |
 
 `provider_id` 默认统一为 `model-proxy`，opencode、pi、codex、kimi 共用。备份位于：
 

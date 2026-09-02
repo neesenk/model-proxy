@@ -1,8 +1,14 @@
+// proxy_lifecycle.go — process-owned runtime services lifecycle (start, shutdown/drain order) plus the budget watcher startup.
 package app
 
 import (
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/observe/budget"
+	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
 	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/pricing"
+	"net/http"
 )
 
 // startRuntimeServices initializes and starts process-owned optional services.
@@ -83,4 +89,56 @@ func (p *Proxy) closeRuntimeServices() {
 			}
 		}
 	}
+}
+
+// budgetPorts adapts Proxy state to the budget watcher's narrow copy-by-value
+// ports. Every closure returns per-tick copies — never live map references
+// into reload-owned state.
+func (p *Proxy) budgetPorts() budget.Ports {
+	return budget.Ports{
+		BudgetState: func() (configdomain.BudgetsConfig, map[string]string, bool) {
+			// Capture reload-owned state once; the stats store and pricing
+			// carry their own leaf locks, so nothing here nests under p.mu.
+			p.mu.RLock()
+			defer p.mu.RUnlock()
+			if p.cfg == nil || !p.cfg.Budgets.Enabled() || p.stats == nil {
+				return configdomain.BudgetsConfig{}, nil, false
+			}
+			budgets := p.cfg.Budgets
+			providers := make(map[string]float64, len(budgets.Providers))
+			for name, threshold := range budgets.Providers {
+				providers[name] = threshold
+			}
+			budgets.Providers = providers
+			parentOf := make(map[string]string, len(p.parentOf))
+			for id, parent := range p.parentOf {
+				parentOf[id] = parent
+			}
+			return budgets, parentOf, true
+		},
+		QueryAnalytics: func(from, to int64) ([]observestats.AnalyticsBucket, error) {
+			return p.stats.QueryAnalytics(from, to, "", "", "month")
+		},
+		PricingSnapshot: func() (map[string]pricing.Override, *pricing.Catalog) {
+			return p.detachedPricing()
+		},
+		Publish: func(event observeevents.Event) {
+			p.events.Publish(event)
+		},
+	}
+}
+
+// startBudgetWatcher starts the per-minute budget alert loop when any
+// threshold is configured; it is a no-op otherwise, so an unconfigured proxy
+// runs no background task at all. Threshold changes apply on reload (each
+// check reads the current config snapshot), but enabling budgets from scratch
+// requires a restart — same startup-only rule as request_log.
+func (p *Proxy) startBudgetWatcher() {
+	cfg := p.cfgSnapshot()
+	if cfg == nil || !cfg.Budgets.Enabled() {
+		return
+	}
+	watcher := budget.NewWatcher(p.budgetPorts(), &http.Client{})
+	p.budget = watcher
+	p.lifecycle.Run(watcher.Loop)
 }

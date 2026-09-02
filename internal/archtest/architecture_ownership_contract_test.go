@@ -46,47 +46,67 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			}
 		}
 
-		adapter, _ := parseGoFile(t, "internal/app/catalog_adapter.go")
+		// The app adapter shell is dissolved: endpoint/cache-location policy is
+		// config-domain behavior (mirrors MP_PRICING_URL), metadata hydration is
+		// routing policy.
+		if _, err := os.Stat(repoRooted(t, "internal/app/catalog_adapter.go")); err == nil {
+			t.Error("internal/app/catalog_adapter.go must not exist; endpoint/cache policy belongs in internal/config, hydration in internal/routing")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat internal/app/catalog_adapter.go: %v", err)
+		}
+
+		loader, _ := parseGoFile(t, "internal/config/modelscatalog.go")
 		wantImports := map[string]bool{
 			"os":                           true,
 			"path/filepath":                true,
 			"model-proxy/internal/catalog": true,
-			"model-proxy/internal/config":  true,
 		}
-		for _, spec := range adapter.Imports {
+		for _, spec := range loader.Imports {
 			importPath := strings.Trim(spec.Path.Value, `"`)
 			if !wantImports[importPath] {
-				t.Errorf("app catalog_adapter.go has unexpected import %q", importPath)
+				t.Errorf("config modelscatalog.go has unexpected import %q", importPath)
 			}
 			delete(wantImports, importPath)
 		}
 		for missing := range wantImports {
-			t.Errorf("app catalog_adapter.go is missing required import %q", missing)
+			t.Errorf("config modelscatalog.go is missing required import %q", missing)
 		}
 		wantFunctions := map[string]int{
 			"ModelsCatalogEndpoint": 0,
 			"ModelsCatalogPath":     0,
 			"LoadModelsCatalog":     0,
-			"HydrateModels":         0,
 		}
-		for _, decl := range adapter.Decls {
+		for _, decl := range loader.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
 			if fn.Recv != nil {
-				t.Errorf("app catalog_adapter.go has unexpected method %s", fn.Name.Name)
+				t.Errorf("config modelscatalog.go has unexpected method %s", fn.Name.Name)
 				continue
 			}
 			if _, allowed := wantFunctions[fn.Name.Name]; !allowed {
-				t.Errorf("app catalog_adapter.go has unexpected function %s; source/cache logic belongs in internal/catalog", fn.Name.Name)
+				t.Errorf("config modelscatalog.go has unexpected function %s; source/cache logic belongs in internal/catalog", fn.Name.Name)
 				continue
 			}
 			wantFunctions[fn.Name.Name]++
 		}
 		for name, count := range wantFunctions {
 			if count != 1 {
-				t.Errorf("app catalog_adapter.go %s declarations = %d, want exactly 1", name, count)
+				t.Errorf("config modelscatalog.go %s declarations = %d, want exactly 1", name, count)
+			}
+		}
+
+		// Metadata hydration (config traversal + fallback/source policy) is
+		// routing-owned; the composition root must not re-declare it.
+		hydration, _ := parseGoFile(t, "internal/routing/model_metadata.go")
+		if got := namedCallCountInNode(hydration, "Lookup"); got != 1 {
+			t.Errorf("routing model_metadata.go catalog Lookup calls = %d, want exactly 1 metadata lookup", got)
+		}
+		namedFunction(t, hydration, "HydrateModels")
+		for _, decl := range rootPackage.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "HydrateModels" {
+				t.Error("internal/app must not declare HydrateModels; hydration policy belongs in internal/routing")
 			}
 		}
 
@@ -102,7 +122,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			"EnsureFresh": true, "FetchHTTP": true, "loadModelsCatalog": true,
 			"modelsCatalogEndpoint": true, "modelsCatalogPath": true,
 		}
-		for _, path := range []string{"internal/routing/request.go", "internal/app/request_routing_adapter.go"} {
+		for _, path := range []string{"internal/routing/request.go", "internal/app/target_pipeline.go"} {
 			routingFile, routingSet := parseGoFile(t, path)
 			for _, violation := range forbiddenCallSites(routingFile, routingSet, forbiddenRefresh, nil) {
 				t.Errorf("%s refreshes or re-reads catalog instead of using RuntimeSnapshot: %s", path, violation)
@@ -118,10 +138,10 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Fatalf("stat pool.go: %v", err)
 		}
 
-		// The root accounts adapter shell is gone: callers use internal/app's
-		// account-store wrappers (or internal/accounts directly).
+		// The root accounts adapter shell is gone: callers use internal/accounts
+		// directly.
 		if _, err := os.Stat(repoRooted(t, "accounts_adapter.go")); err == nil {
-			t.Error("legacy root accounts_adapter.go must not exist; use internal/app account wrappers")
+			t.Error("legacy root accounts_adapter.go must not exist; use internal/accounts directly")
 		} else if !os.IsNotExist(err) {
 			t.Fatalf("stat accounts_adapter.go: %v", err)
 		}
@@ -130,20 +150,21 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		// authoritative account snapshot per provider. Keep these structural
 		// guards here so moving the assembly code cannot silently re-introduce a
 		// second filesystem probe (and a generation-local TOCTOU decision).
-		builder := namedFunction(t, rootPackage, "BuildProviders")
+		buildPackage, buildSet := parseGoPackage(t, "internal/providerbuild")
+		builder := namedFunction(t, buildPackage, "BuildProviders")
 		if got := namedCallCountInNode(builder.Body, "LoadSnapshot"); got != 1 {
-			t.Errorf("app.BuildProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
+			t.Errorf("providerbuild.BuildProviders LoadSnapshot calls = %d, want exactly 1 storage decision point", got)
 		}
 		forbiddenStorageProbes := map[string]bool{
 			"loadPool": true, "poolPath": true, "singularPoolPath": true,
 			"Load": true, "PoolPath": true, "LegacyPath": true,
 			"Stat": true, "ReadFile": true, "Open": true, "OpenFile": true, "ReadDir": true,
 		}
-		for _, violation := range forbiddenCallSites(builder.Body, rootSet, forbiddenStorageProbes, nil) {
-			t.Errorf("app.BuildProviders re-reads or probes account storage outside its snapshot: %s", violation)
+		for _, violation := range forbiddenCallSites(builder.Body, buildSet, forbiddenStorageProbes, nil) {
+			t.Errorf("providerbuild.BuildProviders re-reads or probes account storage outside its snapshot: %s", violation)
 		}
 
-		buildFields := namedStructFields(t, rootPackage, "Build")
+		buildFields := namedStructFields(t, buildPackage, "Build")
 		wantBuildFields := map[string]bool{
 			"Providers": true, "PoolIndex": true, "ParentOf": true, "Eligible": true,
 			// Secrets: proxy-managed credential values collected in the same
@@ -157,11 +178,11 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			"PoolSecrets": true, "OAuthSecrets": true,
 		}
 		if len(buildFields) != len(wantBuildFields) {
-			t.Errorf("app.Build fields = %v, want exactly %v", sortedFieldNames(buildFields), sortedBoolNames(wantBuildFields))
+			t.Errorf("providerbuild.Build fields = %v, want exactly %v", sortedFieldNames(buildFields), sortedBoolNames(wantBuildFields))
 		}
 		for name := range wantBuildFields {
 			if _, ok := buildFields[name]; !ok {
-				t.Errorf("app.Build missing %q", name)
+				t.Errorf("providerbuild.Build missing %q", name)
 			}
 		}
 
@@ -223,7 +244,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		}
 
 		proxy := rootPackage
-		eventsType := namedStructFields(t, proxy, "Proxy")["events"]
+		eventsType := namedStructFields(t, proxy, "processServices")["events"]
 		pointer, ok := eventsType.(*ast.StarExpr)
 		if !ok {
 			t.Errorf("Proxy.events type = %T, want *observeevents.Hub", eventsType)
@@ -240,48 +261,27 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Fatalf("stat request_log.go: %v", err)
 		}
 
-		adapter, _ := parseGoFile(t, "internal/app/request_log_adapter.go")
-		wantImports := map[string]bool{
-			"model-proxy/internal/observe/logx":       true,
-			"model-proxy/internal/observe/requestlog": true,
-		}
-		wantFunctions := map[string]int{
-			"initRequestLog": 0,
-		}
-		for _, spec := range adapter.Imports {
-			importPath := strings.Trim(spec.Path.Value, `"`)
-			if !wantImports[importPath] {
-				t.Errorf("request_log_adapter.go has unexpected import %q", importPath)
-			}
-			delete(wantImports, importPath)
-		}
-		for missing := range wantImports {
-			t.Errorf("request_log_adapter.go is missing required import %q", missing)
-		}
-		for _, decl := range adapter.Decls {
-			switch decl := decl.(type) {
-			case *ast.GenDecl:
-				if decl.Tok != token.IMPORT {
-					t.Error("request_log_adapter.go must not declare types or package state")
-				}
-			case *ast.FuncDecl:
-				if _, ok := wantFunctions[decl.Name.Name]; !ok {
-					t.Errorf("request_log_adapter.go has unexpected function %s", decl.Name.Name)
-					continue
-				}
-				wantFunctions[decl.Name.Name]++
-			default:
-				t.Errorf("request_log_adapter.go has unexpected top-level declaration %T", decl)
+		// Symbol-level pins (the adapter concerns merged into observe_adapters.go):
+		// initRequestLog stays the single requestlog construction entry in package
+		// app, and the merged adapter file adds no types or package state.
+		initCount := 0
+		for _, decl := range rootPackage.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "initRequestLog" {
+				initCount++
 			}
 		}
-		for name, count := range wantFunctions {
-			if count != 1 {
-				t.Errorf("request_log_adapter.go %s declarations = %d, want exactly 1", name, count)
+		if initCount != 1 {
+			t.Errorf("package app initRequestLog declarations = %d, want exactly 1", initCount)
+		}
+		adapters, _ := parseGoFile(t, "internal/app/observe_adapters.go")
+		for _, decl := range adapters.Decls {
+			if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok != token.IMPORT {
+				t.Error("observe_adapters.go must not declare types or package state")
 			}
 		}
 
 		proxy := rootPackage
-		loggerType := namedStructFields(t, proxy, "Proxy")["reqLog"]
+		loggerType := namedStructFields(t, proxy, "processServices")["reqLog"]
 		pointer, ok := loggerType.(*ast.StarExpr)
 		if !ok {
 			t.Errorf("Proxy.reqLog type = %T, want *requestlog.Logger", loggerType)
@@ -299,14 +299,14 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 		}
 
 		proxy := rootPackage
-		storeType := namedStructFields(t, proxy, "Proxy")["stats"]
+		storeType := namedStructFields(t, proxy, "processServices")["stats"]
 		pointer, ok := storeType.(*ast.StarExpr)
 		if !ok {
 			t.Errorf("Proxy.stats type = %T, want *observestats.Store", storeType)
 		} else if name, ok := configSelectorName(pointer.X, "observestats"); !ok || name != "Store" {
 			t.Error("Proxy.stats must be *observestats.Store")
 		}
-		flusherType := namedStructFields(t, proxy, "Proxy")["flusher"]
+		flusherType := namedStructFields(t, proxy, "processServices")["flusher"]
 		pointer, ok = flusherType.(*ast.StarExpr)
 		if !ok {
 			t.Errorf("Proxy.flusher type = %T, want *observestats.Flusher", flusherType)
@@ -333,9 +333,9 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			t.Fatalf("stat cache.go: %v", err)
 		}
 
-		adapter, _ := parseGoFile(t, "internal/app/proxy_constructor.go")
+		adapter, _ := parseGoFile(t, "internal/app/proxy.go")
 		if got := namedCallCount(adapter, "NewResponseCache"); got != 1 {
-			t.Errorf("proxy_constructor.go NewResponseCache declarations = %d, want exactly 1", got)
+			t.Errorf("proxy.go NewResponseCache declarations = %d, want exactly 1", got)
 		}
 
 		assertCacheStoreFieldNamed := func(parsed *ast.File, owner, field string) {
@@ -348,7 +348,7 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 				t.Errorf("%s.Cache must be *responsecache.Store", owner)
 			}
 		}
-		assertCacheStoreFieldNamed(rootPackage, "Proxy", "cache")
+		assertCacheStoreFieldNamed(rootPackage, "generationState", "cache")
 		dispatchContext, _ := parseGoFile(t, "internal/app/dispatch_context.go")
 		assertCacheStoreFieldNamed(dispatchContext, "RuntimeSnapshot", "Cache")
 

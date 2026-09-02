@@ -1,12 +1,14 @@
+// proxy_reload.go — SIGHUP reload generation swap, plus route compilation (explicit/derived route build and pool fan-out) shared by startup and reload.
 package app
 
 import (
 	"fmt"
-	"model-proxy/internal/observe/logx"
-	"time"
-
 	"model-proxy/internal/accounts"
+	"model-proxy/internal/observe/logx"
+	"model-proxy/internal/providerbuild"
+	"model-proxy/internal/routing"
 	"model-proxy/internal/shadow"
+	"time"
 )
 
 // ReloadAppliedWarning means the new config is already live, but a required
@@ -28,7 +30,7 @@ func (p *Proxy) Reload(configPath string) error {
 	if note := accounts.CredentialMismatchNote(cfg.Credentials); note != "" {
 		logx.Warnf("[reload] ⚠ %s", note)
 	}
-	built := BuildProviders(cfg, AccountStore(), buildOpts())
+	built := providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), providerbuild.BuildOpts())
 	// Build the guard scanner OUTSIDE the lock (regexp compilation + secret
 	// variant precomputation); the lock below only swaps the immutable pointer.
 	// Fail-closed: a scanner that cannot be built rejects the whole reload, so
@@ -38,7 +40,7 @@ func (p *Proxy) Reload(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("build guard scanner: %w", err)
 	}
-	newDerived := DeriveRoutesFrom(cfg)
+	newDerived := routing.DeriveRoutesFrom(cfg)
 	// Switch config and runtime state as one generation. Persist snapshots take
 	// the same lock order, and request mutations carry the generation captured by
 	// forward, so an old in-flight request cannot repopulate the cleared maps.
@@ -54,7 +56,7 @@ func (p *Proxy) Reload(configPath string) error {
 	p.derivedRoutes = newDerived
 	p.expandedRoutes = p.buildExpandedRoutes()
 	p.routeKeys = routeKeySet(p.expandedRoutes)
-	hw := ConfigRoutingWarnings(cfg, p.expandedRoutes)
+	hw := routing.ConfigRoutingWarnings(cfg, p.expandedRoutes)
 	p.routeWarnings = hw
 	// Rebuild the cache from the new config (pure in-memory, no goroutine/file
 	// lifecycle to drain — safe to swap). cache.enabled toggled via reload now
@@ -120,4 +122,27 @@ func (p *Proxy) Reload(configPath string) error {
 	// requests keep their snapshot's logger until it drains.
 	p.reconcileSecLog(cfg)
 	return appliedWarning
+}
+
+// buildExpandedRoutes delegates to routing.BuildExpandedRoutes with the
+// pool fan-out from the unified routing resolver. Caller holds p.mu (write) —
+// in NewProxy / reload, after buildProviders has populated poolIndex.
+func (p *Proxy) buildExpandedRoutes() map[string][]RouteTarget {
+	return routing.BuildExpandedRoutes(p.cfg, p.derivedRoutes, p.expandTarget)
+}
+
+// routeKeySet derives the schedule view's route-name key set from the expanded
+// route map. Built once per generation so the request hot path can share it.
+func routeKeySet(expanded map[string][]RouteTarget) map[string]bool {
+	keys := make(map[string]bool, len(expanded))
+	for k := range expanded {
+		keys[k] = true
+	}
+	return keys
+}
+
+// expandTarget fans a single route target out across a pooled provider's
+// virtuals via the unified routing resolver front door.
+func (p *Proxy) expandTarget(t RouteTarget) []RouteTarget {
+	return newResolver(p, p.providers, p.poolIndex).Expand(t)
 }

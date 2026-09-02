@@ -3,7 +3,6 @@ package models
 import (
 	"context"
 	"io"
-	"model-proxy/internal/app"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/protocol"
@@ -17,6 +16,7 @@ import (
 
 	"model-proxy/internal/catalog"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/routing"
 )
 
 // models_check_test.go covers the endpoint probe (models_check.go):
@@ -398,7 +398,7 @@ func TestRouteModelsForProvider(t *testing.T) {
 	}}
 	// aqp is targeted by 3 distinct models across routes; glm-5.2 appears in
 	// two routes but must be deduped. Sorted for deterministic order.
-	got := app.RouteModelsForProvider(cfg, "aqp")
+	got := routing.RouteModelsForProvider(cfg, "aqp")
 	want := []string{"deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2"}
 	if len(got) != len(want) {
 		t.Fatalf("RouteModelsForProvider(aqp)=%v want %v", got, want)
@@ -409,11 +409,11 @@ func TestRouteModelsForProvider(t *testing.T) {
 		}
 	}
 	// A provider not targeted by any route -> empty (no panic).
-	if got := app.RouteModelsForProvider(cfg, "volcengine"); len(got) != 0 {
+	if got := routing.RouteModelsForProvider(cfg, "volcengine"); len(got) != 0 {
 		t.Errorf("RouteModelsForProvider(volcengine)=%v want empty", got)
 	}
 	// No routes at all -> empty.
-	if got := app.RouteModelsForProvider(&configdomain.Config{}, "aqp"); len(got) != 0 {
+	if got := routing.RouteModelsForProvider(&configdomain.Config{}, "aqp"); len(got) != 0 {
 		t.Errorf("RouteModelsForProvider(no-routes)=%v want empty", got)
 	}
 }
@@ -472,8 +472,8 @@ func TestPrintKeptModels(t *testing.T) {
 			"kimi-k2.6": {}, // no metadata -> defaults (text, "-")
 		},
 	}
-	sources := map[string]map[string]app.ModelSource{
-		"volcengine": {"glm-5.2": app.SrcModelsDev, "kimi-k2.6": app.SrcDefault},
+	sources := map[string]map[string]routing.ModelSource{
+		"volcengine": {"glm-5.2": routing.SrcModelsDev, "kimi-k2.6": routing.SrcDefault},
 	}
 	out := grabStdout(t, func() { PrintKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources) })
 	if !strings.Contains(out, "glm-5.2") || !strings.Contains(out, "kimi-k2.6") {

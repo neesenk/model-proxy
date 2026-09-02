@@ -17,6 +17,7 @@ import (
 	clilogin "model-proxy/internal/cli/login"
 	cliserve "model-proxy/internal/cli/serve"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/login"
 	domainpresets "model-proxy/internal/presets"
 )
 
@@ -166,7 +167,7 @@ func CmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// a stale preset (upstream renamed models) must surface, not route 404s.
 	// Best-effort: probe errors stay silent (the endpoint may legitimately
 	// not exist; validation already accepted the key).
-	if clilogin.ApiKeyLike(merged.Providers[presetName].Provider) {
+	if login.ApiKeyLike(merged.Providers[presetName].Provider) {
 		reportModelVisibility(stdout, merged, presetName)
 	}
 
@@ -196,11 +197,11 @@ func reportModelVisibility(stdout io.Writer, merged *configdomain.Config, provNa
 	if !ok || len(prov.Models) == 0 {
 		return
 	}
-	key := clilogin.LatestAPIKey(provName, prov.Provider)
+	key := login.LatestAPIKey(provName, prov.Provider)
 	if key == "" {
 		return
 	}
-	visible, err := clilogin.FetchVisibleModels(prov, key)
+	visible, err := login.FetchVisibleModels(prov, key)
 	if err != nil || len(visible) == 0 {
 		return
 	}

@@ -1,0 +1,154 @@
+// Package admin owns the Web admin application service: it implements the
+// consumer-owned appapi.ReadAPI / appapi.CommandAPI ports consumed by
+// internal/web, projecting detached runtime snapshots into JSON-safe DTOs and
+// executing all credential/config mutations. It never imports the composition
+// root, the HTTP transport, or the CLI: every Proxy touchpoint reaches the
+// package through the narrow copy-by-value Ports below, whose closures capture
+// *Proxy and own lock discipline (p.mu / SnapshotRuntime) in internal/app.
+package admin
+
+import (
+	"time"
+
+	responsecache "model-proxy/internal/cache"
+	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/fusion"
+	"model-proxy/internal/login"
+	obscounters "model-proxy/internal/observe/counters"
+	observestats "model-proxy/internal/observe/stats"
+	"model-proxy/internal/pricing"
+	"model-proxy/internal/provider"
+	runtimestate "model-proxy/internal/runtime"
+)
+
+// Ports are the narrow capabilities the admin service needs from the
+// composition root. Closures capture *Proxy in internal/app and take
+// p.mu / SnapshotRuntime internally, so this package never touches locks or
+// reload-owned state directly. Functions returning maps/slices derived from
+// reload-owned state must return copies — never live map references (the same
+// copy-by-value contract as internal/observe/budget).
+type Ports struct {
+	// ConfigFile returns the daemon config path (flag-owned, not
+	// reload-owned). A nil func reports the empty path.
+	ConfigFile func() string
+
+	// Config returns a shallow copy of the current generation's config; the
+	// Providers/Routes maps are generation-immutable and read-only to callers.
+	Config func() *configdomain.Config
+	// ProviderConfig resolves one provider entry from the current generation.
+	ProviderConfig func(name string) (configdomain.Provider, bool)
+	// ProviderConfigs returns a fresh map copy of the current generation's
+	// provider entries.
+	ProviderConfigs func() map[string]configdomain.Provider
+	// LogFile returns the current generation's configured log path.
+	LogFile func() string
+
+	// DashboardState captures one generation-consistent dashboard snapshot:
+	// exactly one runtime Manager dashboard read under one root read lock,
+	// with the schedule preview derived from that same capture (the schedule
+	// projection is shared with the proxy's /debug/schedule surface and stays
+	// composition-root owned).
+	DashboardState func(now time.Time) DashboardState
+
+	// RequestLogDirectory reports the request-log directory ("" when the
+	// request log is disabled).
+	RequestLogDirectory func() string
+	// TokenUsage returns the token counter snapshot (nil when disabled).
+	TokenUsage func() map[obscounters.TokenKey]obscounters.TokenUsage
+	// StatsRange/AgentStats/Analytics query the stats store; the closures
+	// return empty (non-nil) slices when the store is disabled.
+	StatsRange func(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error)
+	AgentStats func(from, to int64, agent, provider, model string, bucketSecs int64) ([]observestats.AgentBucket, error)
+	Analytics  func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error)
+	// FusionSnapshot returns the fusion registry projection for one workflow.
+	FusionSnapshot func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
+	// Pins returns the active pins (expired ones already dropped).
+	Pins func() map[string]PinState
+	// Pricing returns the pricing catalog (immutable after publication) plus
+	// a detached copy of the configured overrides.
+	Pricing func() (catalog *pricing.Catalog, overrides map[string]pricing.Override)
+
+	// ResetStats clears request counters and persisted stats.
+	ResetStats func() error
+	// ResetHealth clears circuit/model-lock health for one provider (or all
+	// when name is empty) and reports the cleared entries.
+	ResetHealth func(name string) (cleared []string, locks int)
+	// Quota* drive the background quota tracker; QuotaEnabled reports whether
+	// the tracker exists at all (degenerate configs run without one).
+	QuotaEnabled func() bool
+	QuotaPollOne func(name string) bool
+	QuotaPollAll func(now time.Time)
+	QuotaPersist func() error
+	// SetPin pins a route to one provider; ok is false when the route is
+	// unknown or the provider is not one of its targets.
+	SetPin func(route, provider string, ttl time.Duration) (expiresAt time.Time, ok bool)
+	// ClearPin removes a route pin.
+	ClearPin func(route string) bool
+	// Reload hot-reloads the config file. A *ReloadAppliedWarning error means
+	// the new generation is live but runtime-state durability is degraded;
+	// any other error means the runtime kept the old generation.
+	Reload func(configFile string) error
+	// ProbeRuntime captures config and provider implementations from exactly
+	// one runtime snapshot, so an account probe can never pair one config
+	// generation with another generation's impl.
+	ProbeRuntime func() (cfg *configdomain.Config, providers map[string]provider.Provider)
+
+	// Login constructor seams. Production wires the login package defaults;
+	// tests point them at stub endpoints after construction.
+	NewAqpClient    func(storePath string) *login.AqpClient
+	NewCodexOptions func() *login.CodexLoginServerOptions
+}
+
+// DashboardState is one generation-consistent capture behind Dashboard. Every
+// field derives from a single root read lock plus the process-lifetime
+// counter/cache leaves, so config and runtime state cannot cross generations.
+type DashboardState struct {
+	Listen        string
+	RouteWarnings []string
+	// Cache is the current generation's cache store (nil = disabled); the
+	// store is concurrency-safe and survives its generation, so reading its
+	// stats after capture cannot mix state.
+	Cache        *responsecache.Store
+	Runtime      runtimestate.DashboardSnapshot
+	QuotaEnabled bool
+	StartedAt    time.Time
+	Counters     map[string]obscounters.ProviderMetricsSnapshot
+	// Schedule is the schedule preview JSON derived from Runtime by the
+	// composition root (shared with /debug/schedule).
+	Schedule []byte
+}
+
+// PinState is the detached projection of one active route pin.
+type PinState struct {
+	Provider  string
+	ExpiresAt time.Time
+}
+
+// ReloadAppliedWarning marks a reload that applied the new generation but
+// degraded runtime-state durability. The composition root converts its own
+// applied-warning error into this type at the port boundary; the message
+// format is part of the HTTP surface and must stay stable.
+type ReloadAppliedWarning struct{ Err error }
+
+func (e *ReloadAppliedWarning) Error() string { return "reload applied with warning: " + e.Err.Error() }
+func (e *ReloadAppliedWarning) Unwrap() error { return e.Err }
+
+// Service is the Web admin application service consumed by internal/web
+// through appapi.ReadAPI / appapi.CommandAPI. It owns projection from
+// root-private runtime values to JSON-safe DTOs and all credential/config
+// mutations; it does not own HTTP routing, sessions, or locks.
+type Service struct {
+	ports Ports
+}
+
+// New builds the admin service around the given composition-root ports.
+func New(ports Ports) *Service {
+	return &Service{ports: ports}
+}
+
+func (s *Service) currentConfigFile() string {
+	if s == nil || s.ports.ConfigFile == nil {
+		return ""
+	}
+	return s.ports.ConfigFile()
+}

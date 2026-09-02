@@ -46,7 +46,7 @@ func TestApplicationRuntimeConcreteAssemblyContract(t *testing.T) {
 		}
 		literals++
 		want := map[string]string{
-			"ConfigPath":    "args.Config",
+			"ConfigPath":    "configPath",
 			"StartupConfig": "cfg",
 			"Proxy":         "proxy",
 			"Handler":       "mux",

@@ -4,18 +4,18 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	cliframework "model-proxy/internal/cli/framework"
 	"os"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
-	"model-proxy/internal/app"
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
+	"model-proxy/internal/routing"
 )
 
 // Model entry as returned by the gateway's /models endpoint (OpenAI-style).
@@ -36,7 +36,7 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 	rest := NonFlagArgs(args)
 	if len(rest) > 0 && rest[0] == "pull" {
 		// models pull — force-refresh the global models.dev catalog cache.
-		cat, ferr := app.LoadModelsCatalog(homeDir(), true)
+		cat, ferr := configdomain.LoadModelsCatalog(homeDir(), true)
 		if ferr != nil {
 			log.Fatal(ferr)
 		}
@@ -55,7 +55,7 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 		}
 		provName := rest[1]
 		if _, ok := cfg.Providers[provName]; !ok {
-			log.Fatalf("unknown provider %q; available: %s", provName, cliframework.ProviderNames(cfg))
+			log.Fatalf("unknown provider %q; available: %s", provName, cfg.ProviderNames())
 		}
 		fmt.Fprintf(os.Stderr, "Refreshing models from %s...\n", provName)
 		existing := cfg.Providers[provName].Models
@@ -72,7 +72,7 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 			// unavailable) keep config intact on a total outage, so a
 			// down/not-logged-in provider never wipes models:.
 			fmt.Fprintf(os.Stderr, "models endpoint unavailable for %s (%v); probing route-configured models instead\n", provName, err)
-			merged = MergeStringIDs(existing, app.RouteModelsForProvider(cfg, provName))
+			merged = MergeStringIDs(existing, routing.RouteModelsForProvider(cfg, provName))
 			if len(merged) == 0 {
 				fmt.Fprintf(os.Stderr, "no models to probe for %s (no /models endpoint and no routes target it); add routes targeting %s first\n", provName, provName)
 			}
@@ -93,18 +93,18 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 	if len(rest) > 0 {
 		provFilter = rest[0]
 		if _, ok := cfg.Providers[provFilter]; !ok {
-			log.Fatalf("unknown provider %q; available: %s", provFilter, cliframework.ProviderNames(cfg))
+			log.Fatalf("unknown provider %q; available: %s", provFilter, cfg.ProviderNames())
 		}
 	}
-	cat, _ := app.LoadModelsCatalog(homeDir(), false)
-	meta, sources := app.HydrateModels(cfg, cat)
+	cat, _ := configdomain.LoadModelsCatalog(homeDir(), false)
+	meta, sources := routing.HydrateModels(cfg, cat)
 	PrintAllModels(cfg, provFilter, meta, sources)
 }
 
 // printAllModels prints all models with their hydrated metadata. `meta` maps
 // provider→model→metadata (nil in legacy callers → names shown without ctx/out).
 // `sources` drives a trailing SRC tag: models.dev / default.
-func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string]map[string]catalog.Model, sources map[string]map[string]app.ModelSource) {
+func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string]map[string]catalog.Model, sources map[string]map[string]routing.ModelSource) {
 	names := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
 		if provFilter != "" && n != provFilter {
@@ -156,9 +156,9 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 			src := ""
 			if sources != nil {
 				switch sources[pn][mid] {
-				case app.SrcModelsDev:
+				case routing.SrcModelsDev:
 					src = "models.dev"
-				case app.SrcDefault:
+				case routing.SrcDefault:
 					src = "default"
 				}
 			}
@@ -220,8 +220,8 @@ func productionProbeAndWriteModelsOps() probeAndWriteModelsOps {
 		filter: ApplyProviderModelFilter,
 		probe:  CheckProviderModels,
 		display: func(cfg *configdomain.Config, provName string, policyDropped []string, dropped []DropReason, perr error, allProbeFailed bool) {
-			cat, _ := app.LoadModelsCatalog(homeDir(), false)
-			meta, sources := app.HydrateModels(cfg, cat)
+			cat, _ := configdomain.LoadModelsCatalog(homeDir(), false)
+			meta, sources := routing.HydrateModels(cfg, cat)
 			PrintKeptModels(provName, cfg.Providers[provName].Models, meta, sources)
 			PrintFilterSummary(policyDropped, dropped, perr, allProbeFailed)
 		},
@@ -334,7 +334,7 @@ func RefreshProviderModels(cfg *configdomain.Config, provName string) ([]string,
 	if _, ok := cfg.Providers[provName]; !ok {
 		return nil, fmt.Errorf("unknown provider %q", provName)
 	}
-	provMap := app.BuildProviders(cfg, accountStore(), buildOpts()).Providers
+	provMap := providerbuild.BuildProviders(cfg, accountStore(), buildOpts()).Providers
 	target := provName
 	if vids, pooled := PoolVirtuals(cfg, provName); pooled {
 		target = vids[0] // first virtual by account-id order

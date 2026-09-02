@@ -121,9 +121,11 @@ func TestInitStatsRestoresAllRuntimeFieldsWithoutDuplicateFlush(t *testing.T) {
 	}
 
 	proxy := &Proxy{
-		metrics: obscounters.NewMetricsStore(),
-		tokens:  obscounters.NewTokenCounter(),
-		agents:  obscounters.NewAgentCounter(),
+		processServices: processServices{
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			agents:  obscounters.NewAgentCounter(),
+		},
 	}
 	proxy.initStats(StatsConfig{DBPath: path, Retention: "0"})
 	if proxy.stats == nil || proxy.flusher == nil {
@@ -179,8 +181,10 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 	agents := obscounters.NewAgentCounter()
 	flusher := observestats.NewFlusher(sink, metrics, tokens, agents, nil)
 	proxy := &Proxy{
-		metrics: metrics, tokens: tokens, agents: agents,
-		stats: store, flusher: flusher,
+		processServices: processServices{
+			metrics: metrics, tokens: tokens, agents: agents,
+			stats: store, flusher: flusher,
+		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 3, 30)
 
@@ -349,12 +353,14 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 	agents := obscounters.NewAgentCounter()
 	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil)
 	proxy := &Proxy{
-		lifecycle: runtimestate.NewLifecycle(),
-		metrics:   metrics,
-		tokens:    tokens,
-		agents:    agents,
-		stats:     store,
-		flusher:   flusher,
+		processServices: processServices{
+			lifecycle: runtimestate.NewLifecycle(),
+			metrics:   metrics,
+			tokens:    tokens,
+			agents:    agents,
+			stats:     store,
+			flusher:   flusher,
+		},
 	}
 	t.Cleanup(proxy.Close)
 
@@ -405,12 +411,14 @@ func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 	agents := obscounters.NewAgentCounter()
 	sink := &failOnceStatsSink{Store: store}
 	proxy := &Proxy{
-		lifecycle: runtimestate.NewLifecycle(),
-		metrics:   metrics,
-		tokens:    tokens,
-		agents:    agents,
-		stats:     store,
-		flusher:   observestats.NewFlusher(sink, metrics, tokens, agents, nil),
+		processServices: processServices{
+			lifecycle: runtimestate.NewLifecycle(),
+			metrics:   metrics,
+			tokens:    tokens,
+			agents:    agents,
+			stats:     store,
+			flusher:   observestats.NewFlusher(sink, metrics, tokens, agents, nil),
+		},
 	}
 	t.Cleanup(proxy.Close)
 	addRuntimeStats(metrics, tokens, agents, 2, 20)
@@ -491,8 +499,13 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
 	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil)
 	proxy := &Proxy{
-		metrics: metrics, tokens: tokens, agents: agents,
-		stats: store, flusher: flusher, cache: cache,
+		generationState: generationState{
+			cache: cache,
+		},
+		processServices: processServices{
+			metrics: metrics, tokens: tokens, agents: agents,
+			stats: store, flusher: flusher,
+		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 2, 20)
 	if !flusher.Flush(time.Unix(120, 0)) {
@@ -543,8 +556,13 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 		&resetErrorSink{Store: store}, metrics, tokens, agents, nil,
 	)
 	proxy := &Proxy{
-		metrics: metrics, tokens: tokens, agents: agents,
-		stats: store, flusher: flusher, cache: cache,
+		generationState: generationState{
+			cache: cache,
+		},
+		processServices: processServices{
+			metrics: metrics, tokens: tokens, agents: agents,
+			stats: store, flusher: flusher,
+		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 1, 5)
 	cache.Put("key", http.StatusOK, nil, []byte("body"), time.Now())

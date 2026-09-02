@@ -1,12 +1,10 @@
+// runtime.go — application runtime assembly around one Proxy generation (HTTP mux/Web wiring, reload projection, transport tasks) plus the process version string.
 package app
 
 import (
 	"errors"
 	"model-proxy/internal/observe/logx"
 	"net/http"
-
-	cliframework "model-proxy/internal/cli/framework"
-	cliserve "model-proxy/internal/cli/serve"
 )
 
 // Runtime is the concrete application runtime assembled around one Proxy
@@ -17,12 +15,14 @@ type Runtime struct {
 	StartupConfig  *Config // immutable listen/startup-log view; reload state lives in Proxy
 	Proxy          *Proxy
 	Handler        http.Handler
-	TransportTasks []cliserve.TransportTask
+	TransportTasks []func(stop <-chan struct{})
 }
 
 // NewRuntime assembles the runtime: one Proxy, its process-owned services, and
-// the HTTP mux with the Web admin when enabled.
-func NewRuntime(cfg *Config, args cliserve.Args) *Runtime {
+// the HTTP mux with the Web admin when enabled. configPath/logFile are
+// resolved by the process layer (cli/serve) before assembly so the composition
+// root never imports the CLI packages.
+func NewRuntime(cfg *Config, configPath, logFile string) *Runtime {
 	proxy := NewProxy(cfg)
 	// Start all process-owned optional services through the Proxy lifecycle
 	// owner (stats flusher, request logger, startup catalog load).
@@ -31,14 +31,14 @@ func NewRuntime(cfg *Config, args cliserve.Args) *Runtime {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", proxy.Handler)
 	runtime := &Runtime{
-		ConfigPath:    args.Config,
+		ConfigPath:    configPath,
 		StartupConfig: cfg,
 		Proxy:         proxy,
 		Handler:       mux,
 	}
 	if cfg.Web.Enabled {
-		web := NewWebServer(proxy, args.Config)
-		web.SetLogFile(cliserve.ResolveLogFile(args, cfg))
+		web := NewWebServer(proxy, configPath)
+		web.SetLogFile(logFile)
 		web.Register(mux)
 		runtime.TransportTasks = append(runtime.TransportTasks, func(stop <-chan struct{}) {
 			if !web.Start() {
@@ -65,10 +65,14 @@ func (runtime *Runtime) Reload() {
 	}
 	snapshot := runtime.Proxy.SnapshotRuntime()
 	logx.Infof("[reload] config reloaded successfully (providers: %s, routes: %s)",
-		cliframework.ProviderNames(snapshot.Cfg), cliframework.RouteNames(snapshot.Cfg))
+		snapshot.Cfg.ProviderNames(), snapshot.Cfg.RouteNames())
 }
 
 // Close releases the Proxy (final lifecycle flushes).
 func (runtime *Runtime) Close() {
 	runtime.Proxy.Close()
 }
+
+// Version is the process version string, set by main at boot from the
+// build-time-injected root version.
+var Version = "dev"

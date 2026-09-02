@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"time"
 
+	logincore "model-proxy/internal/login"
 	"model-proxy/internal/provider"
 )
 
@@ -146,7 +147,7 @@ func NewLoopbackServer() (*LoopbackServer, error) {
 
 // CallbackURL returns the full callback URL.
 func (l *LoopbackServer) CallbackURL() string {
-	return fmt.Sprintf("http://%s%s", l.addr, LoginCompletePath)
+	return fmt.Sprintf("http://%s%s", l.addr, logincore.LoginCompletePath)
 }
 
 // Start begins serving (non-blocking) on the listener bound at construction,
@@ -157,7 +158,7 @@ func (l *LoopbackServer) Start() error {
 		return fmt.Errorf("loopback server already started")
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc(LoginCompletePath, l.handle)
+	mux.HandleFunc(logincore.LoginCompletePath, l.handle)
 	l.srv = &http.Server{Handler: mux}
 	go func() {
 		if err := l.srv.Serve(l.ln); err != nil && err != http.ErrServerClosed {
@@ -244,8 +245,8 @@ func ValidateOrigin(r *http.Request) error {
 	if host != "127.0.0.1" && host != "localhost" {
 		return fmt.Errorf("unsupported callback origin host: %s", host)
 	}
-	if r.URL.Path != LoginCompletePath {
-		return fmt.Errorf("callback origin must not include path beyond %s", LoginCompletePath)
+	if r.URL.Path != logincore.LoginCompletePath {
+		return fmt.Errorf("callback origin must not include path beyond %s", logincore.LoginCompletePath)
 	}
 	return nil
 }

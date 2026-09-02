@@ -11,6 +11,7 @@ import (
 
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
+	logincore "model-proxy/internal/login"
 	"model-proxy/internal/provider"
 )
 
@@ -295,9 +296,9 @@ func TestRunVolcengineLoginFromEnv_NoAKSKPins(t *testing.T) {
 	cfg, _ := configdomain.LoadConfigFromBytes("test", []byte("providers:\n  vol:\n    provider_id: volcengine\n    openai_base_url: https://x\n    usage_url: "+up.URL+"\n"))
 	prov := cfg.Providers["vol"]
 
-	orig := VolcengineAKSKValidator
-	defer func() { VolcengineAKSKValidator = orig }()
-	VolcengineAKSKValidator = func(string, string) error {
+	orig := logincore.VolcengineAKSKValidator
+	defer func() { logincore.VolcengineAKSKValidator = orig }()
+	logincore.VolcengineAKSKValidator = func(string, string) error {
 		t.Fatal("validator must not run when AK/SK absent")
 		return nil
 	}
@@ -324,5 +325,37 @@ func TestRunVolcengineLoginFromEnv_PartialAKSKRejected(t *testing.T) {
 	err := runVolcengineLoginFromEnv(cfg, "vol", prov, "ark-key", "AK9", "", "", false)
 	if err == nil || !strings.Contains(err.Error(), "both be set") {
 		t.Fatalf("err = %v, want 'both be set'", err)
+	}
+}
+
+// TestRunVolcengineLoginFromEnv_ReplaceConfirmPrompt covers the only stdin
+// interaction of the env path: an existing id with replace=false prompts
+// "[y/N]"; "y" confirms and the core overwrites the triple in place.
+func TestRunVolcengineLoginFromEnv_ReplaceConfirmPrompt(t *testing.T) {
+	setPoolHome(t, t.TempDir())
+	stubVolcengineValidator(t)
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{"vol": {Provider: "volcengine"}}}
+	prov := cfg.Providers["vol"]
+	if err := runVolcengineLoginFromEnv(cfg, "vol", prov, "old-ark", "AK9", "old-sk", "first", false); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	defer func() { os.Stdin = orig }()
+	w.Write([]byte("y\n"))
+	w.Close()
+
+	if err := runVolcengineLoginFromEnv(cfg, "vol", prov, "new-ark", "AK9", "new-sk", "renamed", false); err != nil {
+		t.Fatalf("confirmed replace: %v", err)
+	}
+	pool, _ := accounts.NewStore(accounts.HomeDir()).Load("vol", "volcengine")
+	if len(pool.Accounts) != 1 {
+		t.Fatalf("confirmed replace should keep size 1: %+v", pool.Accounts)
+	}
+	a := pool.Accounts[0]
+	if a.APIKey != "new-ark" || a.SecretKey != "new-sk" || a.Label != "renamed" {
+		t.Fatalf("confirmed replace did not overwrite: %+v", a)
 	}
 }
