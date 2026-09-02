@@ -7,6 +7,7 @@ import (
 	"io"
 	responsecache "model-proxy/internal/cache"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
@@ -277,7 +278,7 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	forcedProvider := forcedProviderFromRequest(r)
+	forcedProvider := forward.ForcedProviderFromRequest(r)
 	if forcedProvider != "" {
 		out["force_provider"] = forcedProvider
 		narrowed := routing.FilterTargetsByProvider(targets, parentOf, forcedProvider)
@@ -293,27 +294,27 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 	// The live path applies the outbound guard before both cache lookup and
 	// request-profile planning. Reuse its pure per-request decision here, but
 	// deliberately omit live-only observation/session mutation.
-	guardDecision := evaluateRequestGuard(cfg.Guard, guardScanner, body)
-	blockKind, blockNames := guardDecision.blocks(cfg.Guard)
+	guardDecision := forward.EvaluateRequestGuard(cfg.Guard, guardScanner, body)
+	blockKind, blockNames := guardDecision.Blocks(cfg.Guard)
 	guardState := map[string]any{
 		"secrets_action": cfg.Guard.SecretsAction(),
 		"paths_action":   cfg.Guard.PathsAction(),
 		"blocked":        blockKind != "",
 	}
-	if len(guardDecision.secrets) > 0 {
-		guardState["secrets"] = guardDecision.secrets
+	if len(guardDecision.Secrets) > 0 {
+		guardState["secrets"] = guardDecision.Secrets
 	}
-	if len(guardDecision.strongPath) > 0 {
-		guardState["strong_paths"] = guardDecision.strongPath
+	if len(guardDecision.StrongPath) > 0 {
+		guardState["strong_paths"] = guardDecision.StrongPath
 	}
-	if len(guardDecision.weakPath) > 0 {
-		guardState["weak_paths"] = guardDecision.weakPath
+	if len(guardDecision.WeakPath) > 0 {
+		guardState["weak_paths"] = guardDecision.WeakPath
 	}
-	if len(guardDecision.secrets) > 0 && cfg.Guard.SecretsAction() == "redact" {
+	if len(guardDecision.Secrets) > 0 && cfg.Guard.SecretsAction() == "redact" {
 		guardState["body_redacted"] = true
 	}
 	out["guard"] = guardState
-	body = guardDecision.forwardBody
+	body = guardDecision.ForwardBody
 	if blockKind != "" {
 		out["cache"] = "bypass (guard block)"
 		out["ordered"] = []any{}

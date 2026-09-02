@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `internal/routing/request.go`、`internal/app/target_pipeline.go`、models.dev
+修改 `internal/routing/request.go`、`internal/forward/plan.go`、models.dev
 catalog、context overflow retry、route derivation（隐式路由的继任者）或 route warnings 时必读。
 
 ## 请求画像
@@ -23,10 +23,11 @@ catalog、context overflow retry、route derivation（隐式路由的继任者�
 隐藏内部字段；输入来自一次 `RuntimeSnapshot`，generation-owned map 在 reload
 时只交换、不原地修改。
 
-`internal/app/target_pipeline.go` 是唯一边界桥：它从 HTTP request 提取
-force-provider 字符串；`requestRoutingScheduler` 捕获同一快照的 config、parent
-identity、route keys 与 generation，并通过 `Proxy.schedule` 进入
-`internal/runtime.Manager`。`serveOnce` 每个 pass 只构造一个 Planner，同时用于
+`internal/forward` 是唯一边界桥：`forward.ForcedProviderFromRequest` 从 HTTP request 提取
+force-provider 字符串；`internal/forward/plan.go` 的 `requestRoutingScheduler` 捕获同一快照的
+config、parent identity、route keys 与 generation，并经注入的 schedule 端口
+（app: `Proxy.schedule`）进入 `internal/runtime.Manager`。`serveOnce` 每个 pass 只构造一个
+Planner，同时用于
 主动 `Apply` 与反应式 `ContextOverflowRetry`，禁止重新读取 Proxy 或构造第二份
 generation。
 

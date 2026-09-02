@@ -1,4 +1,4 @@
-package app
+package forward
 
 import (
 	"context"
@@ -13,11 +13,10 @@ import (
 	"model-proxy/internal/fusion"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/routing"
-	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/internal/targetexec"
 )
 
-// fusion.go adapts one captured application runtime to internal/fusion.Engine.
+// fusion.go adapts one captured runtime snapshot to internal/fusion.Engine.
 // The engine owns gates, fan-out, quorum/grace, judge/body construction and
 // registry recording; this file owns generation-bound leg execution and normal
 // target-executor delivery for the client-facing synthesizer.
@@ -37,10 +36,10 @@ const (
 	fusionCandidateMaxChars = 24000
 )
 
-// fusionGracePeriod is how long draft collection keeps waiting AFTER the quorum
+// FusionGracePeriod is how long draft collection keeps waiting AFTER the quorum
 // is met, to absorb nearly-finished stragglers. A var (not a const) so tests
 // can shrink it.
-var fusionGracePeriod = fusion.DefaultGracePeriod
+var FusionGracePeriod = fusion.DefaultGracePeriod
 
 var (
 	errFusionLegUnavailable = errors.New("fusion leg unavailable")
@@ -48,45 +47,46 @@ var (
 )
 
 // fusionCtx bundles the per-request values the engine threads into panel legs
-// and the synthesizer call (all snapshotted by forward under p.mu).
+// and the synthesizer call (all from the single snapshot captured for the
+// request — the single-snapshot red line).
 type fusionCtx struct {
-	runtime     RuntimeSnapshot
+	runtime     Snapshot
 	proto       string // client protocol ("anthropic"|"openai"|"responses")
 	calledModel string
 	upPath      string // client request path (/v1 stripped for openai)
 	agent       string
 	sessionKey  string // client session id — makes pooled members/synthesizer session-sticky (cache-warm)
 	origBody    []byte
-	flc         forwardLogCtx // parent request id + exposed route
+	flc         LogCtx // parent request id + exposed route
 }
 
 // runFusion executes one fusion recipe for the client request. It returns true
 // when the synthesizer leg committed a response to the client (success or a
 // committed upstream error); false means "nothing committed — fail over to the
 // route's next target". workflow is the recipe name (registry/metrics key).
-func (p *Proxy) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
-	engine := fusion.Engine{Registry: p.fusionReg, GracePeriod: fusionGracePeriod}
+func (p pipeline) runFusion(fc fusionCtx, workflow string, recipe FusionConfig, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
+	engine := fusion.Engine{Registry: p.svc.FusionReg, GracePeriod: FusionGracePeriod}
 	result := engine.Run(r.Context(), fusion.Request{
 		Workflow:     workflow,
-		RunID:        fc.flc.requestID,
-		Route:        fc.flc.exposed,
+		RunID:        fc.flc.RequestID,
+		Route:        fc.flc.Exposed,
 		Agent:        fc.agent,
 		Protocol:     fc.proto,
 		OriginalBody: fc.origBody,
 		HasTools:     routing.RequestHasTools(fc.origBody),
 		Recipe:       recipe,
-	}, fusionAdapter{proxy: p, context: fc, writer: w, request: r, cacheKey: cacheKey})
-	if p.metrics != nil {
-		p.metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionRuns)
+	}, fusionAdapter{pipe: p, context: fc, writer: w, request: r, cacheKey: cacheKey})
+	if p.svc.Metrics != nil {
+		p.svc.Metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionRuns)
 		if result.Run.Degraded != "" {
-			p.metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionDegraded)
+			p.svc.Metrics.Inc("fusion", result.Run.Workflow, counters.EvFusionDegraded)
 		}
 	}
 	return result.Committed
 }
 
 type fusionAdapter struct {
-	proxy    *Proxy
+	pipe     pipeline
 	context  fusionCtx
 	writer   http.ResponseWriter
 	request  *http.Request
@@ -96,17 +96,17 @@ type fusionAdapter struct {
 var _ fusion.Ports = fusionAdapter{}
 
 func (adapter fusionAdapter) SupportsTools(target RouteTarget) bool {
-	return adapter.proxy.fusionSynthesizerSupportsTools(adapter.context, target)
+	return adapter.pipe.fusionSynthesizerSupportsTools(adapter.context, target)
 }
 
 func (adapter fusionAdapter) CallLeg(ctx context.Context, call fusion.LegCall) fusion.LegResult {
 	tag := "fusion-" + call.Kind
-	return adapter.proxy.callFusionLeg(ctx, adapter.context, call.Index, tag, call.Target, call.Body)
+	return adapter.pipe.callFusionLeg(ctx, adapter.context, call.Index, tag, call.Target, call.Body)
 }
 
 func (adapter fusionAdapter) Synthesize(target RouteTarget, body []byte) fusion.SynthesisResult {
 	result := fusion.SynthesisResult{
-		Committed: adapter.proxy.callFusionSynthesizer(
+		Committed: adapter.pipe.callFusionSynthesizer(
 			adapter.context,
 			target,
 			body,
@@ -116,7 +116,7 @@ func (adapter fusionAdapter) Synthesize(target RouteTarget, body []byte) fusion.
 		),
 	}
 	if result.Committed {
-		if event, ok := adapter.proxy.events.FindEnd(adapter.context.flc.requestID); ok {
+		if event, ok := adapter.pipe.svc.Events.FindEnd(adapter.context.flc.RequestID); ok {
 			result.Status = event.Status
 			result.LatencyMs = event.LatencyMs
 			result.Input = event.Input
@@ -129,7 +129,7 @@ func (adapter fusionAdapter) Synthesize(target RouteTarget, body []byte) fusion.
 // fusionSynthesizerSupportsTools reports whether the synthesizer model handles
 // tool calls, judged by the provider's capabilities override first, then the
 // models.dev catalog (nil catalog → fits, the graceful default).
-func (p *Proxy) fusionSynthesizerSupportsTools(fc fusionCtx, st RouteTarget) bool {
+func (p pipeline) fusionSynthesizerSupportsTools(fc fusionCtx, st RouteTarget) bool {
 	return routing.Fits(
 		fc.runtime.Catalog,
 		routing.CapabilitiesFor(fc.runtime.Cfg, fc.runtime.ParentOf, st),
@@ -146,15 +146,15 @@ func (p *Proxy) fusionSynthesizerSupportsTools(fc fusionCtx, st RouteTarget) boo
 // shapes the request-log id ("fusion-panel-<i>-<parent>" /
 // "fusion-judge-<parent>") and the live-event provider marker
 // ("<tag>:<model>").
-func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag string, m RouteTarget, srcBody []byte) (res fusion.LegResult) {
+func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag string, m RouteTarget, srcBody []byte) (res fusion.LegResult) {
 	// Resolve the member's provider to a runnable virtual via the unified resolver
 	// (pooled parent → one healthy account, session-sticky via fc.sessionKey with
 	// failover to a sibling). A pooled parent name has no runtime instance, so
 	// without this a multi-account member was always dropped as "not available" the
 	// moment a second account was added. On !ok (unknown / not logged in / all
 	// accounts unhealthy) leave m as-is and let the build gate below report it.
-	if picked, ok := newResolver(
-		p,
+	if picked, ok := routing.NewResolver(
+		p.svc.ResolverState,
 		fc.runtime.Providers,
 		fc.runtime.PoolIndex,
 		fc.runtime.Generation,
@@ -162,34 +162,34 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		m = picked
 	}
 	res = fusion.LegResult{Index: idx, Provider: m.Provider, Model: m.Model}
-	legID := tag + "-" + fc.flc.requestID
+	legID := tag + "-" + fc.flc.RequestID
 	if idx >= 0 {
-		legID = fmt.Sprintf("%s-%d-%s", tag, idx, fc.flc.requestID)
+		legID = fmt.Sprintf("%s-%d-%s", tag, idx, fc.flc.RequestID)
 	}
 	marker := tag + ":" + m.Model
 	start := time.Now()
 	status := http.StatusBadGateway // pre-upstream failures report as 502
 	// Live monitor: fusion legs are visible while they run (progressive reveal),
 	// marked "<tag>:<model>" to distinguish them from direct targets.
-	p.events.Publish(observeevents.Event{
+	p.svc.Events.Publish(observeevents.Event{
 		Type:      "start",
 		Ts:        start.UnixMilli(),
 		RequestID: legID,
 		Agent:     fc.agent,
 		Protocol:  fc.proto,
-		Exposed:   fc.flc.exposed,
+		Exposed:   fc.flc.Exposed,
 		Provider:  marker,
 	})
 	defer func() {
 		res.Status = status
 		res.LatencyMs = time.Since(start).Milliseconds()
-		p.events.Publish(observeevents.Event{
+		p.svc.Events.Publish(observeevents.Event{
 			Type:          "end",
 			Ts:            time.Now().UnixMilli(),
 			RequestID:     legID,
 			Agent:         fc.agent,
 			Protocol:      fc.proto,
-			Exposed:       fc.flc.exposed,
+			Exposed:       fc.flc.Exposed,
 			Provider:      marker,
 			UpstreamModel: m.Model,
 			Status:        status,
@@ -201,8 +201,8 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 
 	// Credential/build gate (fail closed): an unbuildable member is dropped
 	// BEFORE any upstream call and only counts into the quorum math.
-	plan, err := p.planTarget(targetPlanInput{
-		runtime: fc.runtime, target: m, clientProto: fc.proto, clientPath: fc.upPath,
+	plan, err := p.planTarget(PlanInput{
+		Runtime: fc.runtime, Target: m, ClientProto: fc.proto, ClientPath: fc.upPath,
 	})
 	if err != nil {
 		res.Err = err
@@ -214,13 +214,17 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		return
 	}
 	// Circuit gate (same availability rule as targetexec.Executor): skip members the
-	// breaker has open. record* below all clear the half-open slot; the deferred
-	// release is idempotent and covers the paths that don't record.
-	if !p.takeHalfOpenSlot(m.Provider, fc.runtime.Generation) {
+	// breaker has open. Record* below all clear the half-open slot; the deferred
+	// release is idempotent and covers the paths that don't record. The gate is
+	// bound to the REQUEST snapshot's parent projection (single-snapshot red
+	// line): the wire-verdict 404 correction below records under this
+	// generation's parent name.
+	gate := p.svc.NewHealthGate(fc.runtime.ParentOf)
+	if !gate.TakeHalfOpenSlot(m.Provider, fc.runtime.Generation) {
 		res.Err = errFusionLegUnavailable
 		return
 	}
-	defer p.releaseHalfOpenSlot(m.Provider, fc.runtime.Generation)
+	defer gate.ReleaseHalfOpenSlot(m.Provider, fc.runtime.Generation)
 	sched := fc.runtime.Cfg.Scheduling
 
 	// Responses chain expansion (same rule as forward): only when the client
@@ -245,14 +249,14 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 	// Executor. Effect recording (circuit/metrics/rate-limit) stays here.
 	exchange := &targetexec.BufferedLegExchange{}
 	legStatus, respBody, err := targetexec.BufferedLeg{
-		Client:  p.client,
+		Client:  p.svc.Client,
 		Plan:    plan,
 		MaxBody: 64 << 20,
 		ApplyParamBlock: func(body []byte) []byte {
-			return p.applyParamBlock(m.Provider, m.Model, body)
+			return gate.ApplyParamBlock(m.Provider, m.Model, body)
 		},
 		LearnParamBlock: func(param string) {
-			p.learnParamBlock(m.Provider, m.Model, param, fc.runtime.Generation)
+			gate.LearnParamBlock(m.Provider, m.Model, param, fc.runtime.Generation)
 		},
 		OnStripParam: func(param string) {
 			logx.Warnf("[fusion provider=%s] 400 unsupported parameter %q — stripped, retrying",
@@ -282,10 +286,10 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			res.Err = errFusionLegUnavailable
 			return
 		}
-		p.recordFailure(m.Provider, sched, fc.runtime.Generation)
-		if p.metrics != nil {
-			p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
-			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
+		gate.RecordFailure(m.Provider, sched, fc.runtime.Generation)
+		if p.svc.Metrics != nil {
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailures)
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like a direct target
 		}
 		res.Err = err
 		return
@@ -300,54 +304,50 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 			peek = peek[:8<<10]
 		}
 		decision := targetexec.ParseRateLimit(resp, peek, time.Now(), sched)
-		p.recordRateLimit(m.Provider, decision.Until, runtimestate.ParseRateLimitKind(string(decision.Kind)), fc.runtime.Generation)
-		if p.metrics != nil {
-			p.metrics.Inc(m.Provider, m.Model, counters.EvRateLimited429)
-			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
+		gate.RecordRateLimit(m.Provider, decision.Until, string(decision.Kind), fc.runtime.Generation)
+		if p.svc.Metrics != nil {
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvRateLimited429)
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like a direct target
 		}
 		res.Err = errFusionLegUnavailable
 	case resp.StatusCode >= 500:
-		p.recordFailure(m.Provider, sched, fc.runtime.Generation)
-		if p.metrics != nil {
-			p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
-			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget
+		gate.RecordFailure(m.Provider, sched, fc.runtime.Generation)
+		if p.svc.Metrics != nil {
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailures)
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like a direct target
 		}
 		res.Err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	case resp.StatusCode == http.StatusUnauthorized:
-		p.recordFailure(m.Provider, sched, fc.runtime.Generation)
-		if p.metrics != nil {
-			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // like tryTarget: failover only, no counters.EvFailures
+		gate.RecordFailure(m.Provider, sched, fc.runtime.Generation)
+		if p.svc.Metrics != nil {
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // like a direct target: failover only, no counters.EvFailures
 		}
 		res.Err = fmt.Errorf("upstream status %d after auth refresh", resp.StatusCode)
 	case resp.StatusCode == http.StatusNotFound || targetexec.IsModelDenied(resp.StatusCode, respBody):
-		// Wire-verdict 404 correction (same as tryTarget): this leg was
+		// Wire-verdict 404 correction (same as a direct target): this leg was
 		// converted to /responses because the probe verdict said the endpoint
 		// supports it — a 404 here means the VERDICT was wrong, not the model.
 		// Flip the verdict (persisted; later legs use chat) and skip the model
 		// lock so the model doesn't take the blame for our protocol choice.
 		if plan.ViaResponsesVerdict() && resp.StatusCode == http.StatusNotFound {
-			// Resolve the pool parent from the REQUEST snapshot (nil-safe), not
-			// from live p.parentOf: this in-flight leg belongs to fc.runtime's
-			// generation (single-snapshot red line).
-			parent := m.Provider
-			if par, ok := fc.runtime.ParentOf[m.Provider]; ok {
-				parent = par
-			}
-			p.noteWireResponsesMiss(parent)
+			// The gate resolves the pool parent from the REQUEST snapshot
+			// projection it was bound with (nil-safe): this in-flight leg
+			// belongs to fc.runtime's generation (single-snapshot red line).
+			gate.NoteWireResponsesMiss(m.Provider)
 			logx.Warnf("[fusion provider=%s] /responses 404 after wire verdict — provider responses downgraded to no (model NOT locked)",
 				m.Provider)
 		} else {
-			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.Generation)
+			gate.RecordModelFailure(m.Provider, m.Model, sched, fc.runtime.Generation)
 		}
-		if p.metrics != nil {
-			p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget's failover
+		if p.svc.Metrics != nil {
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like a direct target's failover
 		}
 		res.Err = fmt.Errorf("model unavailable (status %d)", resp.StatusCode)
 	case resp.StatusCode >= 300:
 		// 4xx (non-429): client-class error — no candidate, but the provider is
 		// healthy; don't poison the circuit.
-		if p.metrics != nil {
-			p.metrics.Inc(m.Provider, m.Model, counters.EvFailures)
+		if p.svc.Metrics != nil {
+			p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailures)
 		}
 		res.Err = fmt.Errorf("upstream status %d", resp.StatusCode)
 	default:
@@ -355,16 +355,16 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 		res.Text = fusion.TruncateRunes(plan.ExtractResponseText(respBody), fusionCandidateMaxChars)
 		if res.Text == "" {
 			res.Err = errFusionEmptyDraft
-			p.recordModelFailure(m.Provider, m.Model, sched, fc.runtime.Generation)
-			if p.metrics != nil {
-				p.metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like tryTarget's empty-200 failover
+			gate.RecordModelFailure(m.Provider, m.Model, sched, fc.runtime.Generation)
+			if p.svc.Metrics != nil {
+				p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvFailovers) // leg abandoned, like a direct target's empty-200 failover
 			}
 		} else {
-			p.recordSuccess(m.Provider, m.Model, fc.runtime.Generation)
-			if p.metrics != nil {
-				p.metrics.Inc(m.Provider, m.Model, counters.EvRequests)
+			gate.RecordSuccess(m.Provider, m.Model, fc.runtime.Generation)
+			if p.svc.Metrics != nil {
+				p.svc.Metrics.Inc(m.Provider, m.Model, counters.EvRequests)
 				latencyMs := time.Since(start).Milliseconds()
-				p.metrics.AddLatency(m.Provider, m.Model, uint64(latencyMs), uint64(latencyMs))
+				p.svc.Metrics.AddLatency(m.Provider, m.Model, uint64(latencyMs), uint64(latencyMs))
 			}
 			// Usage is accounted per leg (internal books stay accurate; the
 			// client's own usage comes from the synthesizer, unmodified).
@@ -374,20 +374,20 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 				CacheCreation: res.Usage.CacheCreation,
 				CacheRead:     res.Usage.CacheRead,
 			}
-			if p.tokens != nil {
-				p.tokens.Commit(counters.TokenKey{Provider: m.Provider, Model: m.Model}, usage)
+			if p.svc.Tokens != nil {
+				p.svc.Tokens.Commit(counters.TokenKey{Provider: m.Provider, Model: m.Model}, usage)
 			}
-			if p.agents != nil {
-				p.agents.AddTokens(fc.agent, m.Provider, m.Model, usage)
+			if p.svc.Agents != nil {
+				p.svc.Agents.AddTokens(fc.agent, m.Provider, m.Model, usage)
 			}
 		}
 	}
 	// Request log: each leg records under its own id (fusion-panel-<i>-<parent>
 	// / fusion-judge-<parent>) so per-leg detail is filterable by prefix in the
 	// log / API.
-	if logger := p.reqLog; logger != nil {
-		logInput := buildRequestLogInput(
-			forwardLogCtx{requestID: legID, exposed: fc.flc.exposed},
+	if logger := p.svc.ReqLog; logger != nil {
+		logInput := BuildRequestLogInput(
+			LogCtx{RequestID: legID, Exposed: fc.flc.Exposed},
 			req,
 			fc.proto,
 			fc.calledModel,
@@ -404,33 +404,33 @@ func (p *Proxy) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag st
 // callFusionSynthesizer sends the (possibly synthesis-augmented) body to the
 // synthesizer model through the normal targetexec.Executor path — streaming, conversion,
 // auth, metrics, latency, live events, request log and cache all apply.
-func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
+func (p pipeline) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte, w http.ResponseWriter, r *http.Request, cacheKey string) bool {
 	// Resolve to a runnable virtual (pooled parent → one healthy account,
 	// session-sticky so a conversation reuses one synthesizer account), same as
 	// the panel legs — otherwise a multi-account synthesizer has no impl and fails.
 	// FAIL CLOSED on resolver failure: proceeding with the unresolved (pooled
 	// parent) name would hand targetexec.Executor a nil impl and fail closed.
-	picked, ok := newResolver(
-		p,
+	picked, ok := routing.NewResolver(
+		p.svc.ResolverState,
 		fc.runtime.Providers,
 		fc.runtime.PoolIndex,
 		fc.runtime.Generation,
 	).Pick(st, fc.sessionKey)
 	if !ok {
 		logx.Warnf("[fusion] %s: synthesizer %s/%s unavailable (unknown provider, not logged in, or no healthy pooled account) — aborting synthesis",
-			fc.flc.exposed, st.Provider, st.Model)
+			fc.flc.Exposed, st.Provider, st.Model)
 		return false
 	}
 	st = picked
-	plan, err := p.planTarget(targetPlanInput{
-		runtime: fc.runtime, target: st, clientProto: fc.proto, clientPath: fc.upPath,
+	plan, err := p.planTarget(PlanInput{
+		Runtime: fc.runtime, Target: st, ClientProto: fc.proto, ClientPath: fc.upPath,
 	})
 	if err != nil {
-		logx.Warnf("[fusion] %s: synthesizer target plan failed: %v", fc.flc.exposed, err)
+		logx.Warnf("[fusion] %s: synthesizer target plan failed: %v", fc.flc.Exposed, err)
 		return false
 	}
 	if plan.Provider() == nil {
-		logx.Warnf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.exposed, st.Provider)
+		logx.Warnf("[fusion] %s: synthesizer provider %q has no runtime implementation (not logged in)", fc.flc.Exposed, st.Provider)
 		return false
 	}
 	// Responses chain expansion (same rule as forward): expand + orphan repair
@@ -453,7 +453,7 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 	}
 	// The log ctx carries NO origBody so the request log stores the actual
 	// synthesis body (with the candidate sections), not the client's original.
-	flc := forwardLogCtx{requestID: fc.flc.requestID, attempt: fc.flc.attempt, exposed: fc.flc.exposed}
+	flc := LogCtx{RequestID: fc.flc.RequestID, Attempt: fc.flc.Attempt, Exposed: fc.flc.Exposed}
 	attempt := newTargetAttempt(
 		fc.runtime,
 		plan,
@@ -467,10 +467,10 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 			Agent:       fc.agent,
 			CacheKey:    cacheKey,
 			Log: targetexec.LogContext{
-				RequestID:    flc.requestID,
-				Attempt:      flc.attempt,
-				Exposed:      flc.exposed,
-				OriginalBody: flc.origBody,
+				RequestID:    flc.RequestID,
+				Attempt:      flc.Attempt,
+				Exposed:      flc.Exposed,
+				OriginalBody: flc.OrigBody,
 			},
 			ResponseContext:  plan.ResponseContext(fc.origBody),
 			ResponsesHistory: responsesHistory,
@@ -479,28 +479,4 @@ func (p *Proxy) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byte,
 		targetexec.Policy{LastTarget: true},
 	)
 	return p.targetExecutor(attempt.Runtime(), fc.runtime.ParentOf).Execute(attempt).Committed
-}
-
-// expandFusionResponses mirrors forward's responses-state expansion for one
-// fusion sub-call body (panel leg / judge / synthesizer): it applies only when
-// the client spoke the responses protocol AND this leg's backend is stateless
-// (backendProto != responses) — a native-responses backend keeps
-// previous_response_id passthrough and its own server-side chain. On expansion
-// failure the UNEXPANDED body is sent: a broken chain degrades context but must
-// not kill the whole run (forward fails closed per-target; fusion has no
-// per-leg target list to fall through). Returns the body to send plus the
-// merged history for post-response recording (nil when not applicable).
-func (p *Proxy) expandFusionResponses(fc fusionCtx, backendProto string, body []byte) ([]byte, []any) {
-	if fc.proto != "responses" || backendProto == "responses" || p.responsesState == nil {
-		return body, nil
-	}
-	expanded, history, hit, err := p.responsesState.Expand(body, fc.sessionKey)
-	if err != nil {
-		logx.Warnf("[fusion] %s: responses state expansion failed: %v — sending unexpanded body", fc.flc.exposed, err)
-		return body, nil
-	}
-	if p.responsesPreviousID(body) != "" && !hit {
-		logx.Infof("[fusion] %s: previous_response_id cache miss; repaired orphaned continuation items", fc.flc.exposed)
-	}
-	return expanded, history
 }

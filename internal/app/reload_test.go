@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/seclog"
 	"model-proxy/internal/provider"
 	runtimestate "model-proxy/internal/runtime"
@@ -777,7 +778,7 @@ func TestSecLogReload_CloseDrainsCurrentGeneration(t *testing.T) {
 		t.Fatalf("records after Close = %d, want %d (Close must drain)", got, hits)
 	}
 	// A late enqueue against the drained logger is dropped, never written.
-	auditGuardHit(logger, seclog.KindSecret, []string{"known_secret"}, "log", "late", "agent", "openai", "glm")
+	forward.AuditGuardHit(logger, seclog.KindSecret, []string{"known_secret"}, "log", "late", "agent", "openai", "glm")
 	if got := seclogRecordCount(t, dir); got != hits {
 		t.Errorf("records after late enqueue = %d, want %d (no writes after Close)", got, hits)
 	}

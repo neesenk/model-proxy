@@ -7,6 +7,7 @@ import (
 
 	"model-proxy/internal/observe/requestlog"
 
+	"model-proxy/internal/forward"
 	"model-proxy/internal/protocol"
 	shadowexec "model-proxy/internal/shadow"
 	"model-proxy/internal/targetexec"
@@ -116,8 +117,8 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		return
 	}
 	target = picked
-	plan, err := p.planTarget(targetPlanInput{
-		runtime: runtime, target: target, clientProto: bodyProto, clientPath: protocol.BackendPath(protocol.Protocol(bodyProto)),
+	plan, err := forward.PlanTarget(p.forwardServices(), forward.PlanInput{
+		Runtime: runtime, Target: target, ClientProto: bodyProto, ClientPath: protocol.BackendPath(protocol.Protocol(bodyProto)),
 	})
 	if err != nil {
 		logx.Warnf("[shadow] %s: target plan failed: %v", target.Provider, err)
@@ -155,8 +156,8 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 			return
 		}
 	}
-	logInput := buildRequestLogInput(
-		forwardLogCtx{requestID: "shadow-" + primaryReqID, exposed: exposed},
+	logInput := forward.BuildRequestLogInput(
+		forward.LogCtx{RequestID: "shadow-" + primaryReqID, Exposed: exposed},
 		result.Request,
 		proto,
 		calledModel,

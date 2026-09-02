@@ -110,25 +110,8 @@ func (p *Proxy) reconcileSecLog(cfg *Config) {
 	}
 }
 
-// auditGuardHit enqueues one security audit record for a guard hit on the
-// request's snapshot logger (nil when the request's generation has audit off).
-// The record carries pattern/path NAMES and the action only — matched content
-// never enters any field (credential red line).
-func auditGuardHit(logger *seclog.Logger, kind string, names []string, action, requestID, agent, proto, exposed string) {
-	if logger == nil {
-		return
-	}
-	logger.Enqueue(&seclog.Record{
-		Kind:      kind,
-		Ts:        time.Now().UnixMilli(),
-		RequestID: requestID,
-		Agent:     agent,
-		Protocol:  proto,
-		Exposed:   exposed,
-		Names:     names,
-		Action:    action,
-	})
-}
+// The guard-hit audit enqueue (auditGuardHit) lives in internal/forward
+// (AuditGuardHit) next to the live guard pass that calls it.
 
 func (p *Proxy) statsFlushLoop(stop <-chan struct{}) {
 	if p.flusher == nil {

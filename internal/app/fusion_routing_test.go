@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"io"
+	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/counters"
 	"net/http"
 	"net/http/httptest"
@@ -406,9 +407,9 @@ func TestFusionLeg_CancelDuringBodyReadIsNotProviderFailure(t *testing.T) {
 	}
 	proxy, px := newFusionRig(t, recipe, map[string]*fakeUpstream{"slow": slowBody, "fast": fast, "synth": synth})
 
-	previousGrace := fusionGracePeriod
-	fusionGracePeriod = 30 * time.Millisecond
-	defer func() { fusionGracePeriod = previousGrace }()
+	previousGrace := forward.FusionGracePeriod
+	forward.FusionGracePeriod = 30 * time.Millisecond
+	defer func() { forward.FusionGracePeriod = previousGrace }()
 
 	if out := postAnthropic(t, px, fusionClientBody); !strings.Contains(out, "final") {
 		t.Fatalf("client body missing synthesis: %s", out)

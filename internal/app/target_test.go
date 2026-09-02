@@ -1,10 +1,9 @@
 package app
 
 import (
-	responsecache "model-proxy/internal/cache"
 	"model-proxy/internal/catalog"
+	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/requestlog"
-	"model-proxy/internal/protocol"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/targetexec"
 	"net/http"
@@ -26,11 +25,11 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 			},
 		},
 	})
-	plan, err := p.planTarget(targetPlanInput{
-		runtime:     p.SnapshotRuntime(),
-		target:      RouteTarget{Provider: "up", Model: "claude", Protocol: "anthropic"},
-		clientProto: "openai",
-		clientPath:  "/chat/completions",
+	plan, err := forward.PlanTarget(p.forwardServices(), forward.PlanInput{
+		Runtime:     p.SnapshotRuntime(),
+		Target:      RouteTarget{Provider: "up", Model: "claude", Protocol: "anthropic"},
+		ClientProto: "openai",
+		ClientPath:  "/chat/completions",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -50,9 +49,9 @@ func TestTargetPlanOwnsWirePreparation(t *testing.T) {
 
 func TestTargetPlanRejectsUnknownProvider(t *testing.T) {
 	p := newTestProxy(t, &Config{})
-	if _, err := p.planTarget(targetPlanInput{
-		runtime: p.SnapshotRuntime(),
-		target:  RouteTarget{Provider: "missing", Model: "m"},
+	if _, err := forward.PlanTarget(p.forwardServices(), forward.PlanInput{
+		Runtime: p.SnapshotRuntime(),
+		Target:  RouteTarget{Provider: "missing", Model: "m"},
 	}); err == nil {
 		t.Fatal("unknown provider unexpectedly produced a target plan")
 	}
@@ -60,83 +59,8 @@ func TestTargetPlanRejectsUnknownProvider(t *testing.T) {
 
 // ---- target_attempt_test.go ----
 
-func TestNewTargetAttemptOnlyGroupsPreparedInputs(t *testing.T) {
-	cfg := &Config{}
-	cache := responsecache.New(responsecache.Options{
-		TTL: time.Hour, MaxEntries: 1, MaxBodyBytes: 1,
-	})
-	runtime := RuntimeSnapshot{Cfg: cfg, Generation: 41, Cache: cache}
-	plan := targetexec.NewPlan(targetexec.PlanInput{
-		Target:          RouteTarget{Provider: "upstream", Model: "target-model"},
-		ProviderConfig:  Provider{OpenAIBaseURL: "https://example.invalid", Provider: testProviderID},
-		ClientProtocol:  protocol.Responses,
-		BackendProtocol: protocol.OpenAI,
-		ClientPath:      "/v1/responses",
-		ImageOK:         true,
-	})
-	req := httptest.NewRequest("POST", "/v1/responses", nil)
-	writer := httptest.NewRecorder()
-	body := []byte(`{"model":"client-model"}`)
-	retryTarget := RouteTarget{Provider: "retry", Model: "larger"}
-
-	attempt := newTargetAttempt(
-		runtime,
-		plan,
-		targetexec.Exchange{Request: req, Writer: writer, Body: body},
-		targetexec.Scope{
-			CalledModel:      "client-model",
-			Agent:            "test-agent",
-			CacheKey:         "cache-key",
-			Log:              targetexec.LogContext{RequestID: "req-1", Exposed: "public-model"},
-			ResponsesHistory: []any{"history"},
-			ResponsesSession: "session-1",
-		},
-		targetexec.Policy{
-			Force:      true,
-			LastTarget: true,
-			ContextRetry: func() []RouteTarget {
-				return []RouteTarget{retryTarget}
-			},
-		},
-	)
-
-	attemptRuntime := attempt.Runtime()
-	if attemptRuntime.Cache != cache || attemptRuntime.Generation != 41 ||
-		attemptRuntime.Scheduling != cfg.Scheduling {
-		t.Fatalf("runtime group changed: %+v", attemptRuntime)
-	}
-	attemptPlan := attempt.Plan()
-	if attemptPlan.Target() != plan.Target() ||
-		attemptPlan.ClientProtocol() != protocol.Responses ||
-		attemptPlan.BackendProtocol() != protocol.OpenAI ||
-		attemptPlan.BaseURL() != plan.BaseURL() ||
-		attemptPlan.UpstreamPath() != plan.UpstreamPath() {
-		t.Fatalf("plan group changed: %+v", attemptPlan)
-	}
-	exchange := attempt.Exchange()
-	if exchange.Request != req || exchange.Writer != writer || string(exchange.Body) != string(body) {
-		t.Fatalf("exchange group changed: %+v", exchange)
-	}
-	scope := attempt.Scope()
-	if scope.CalledModel != "client-model" ||
-		scope.Agent != "test-agent" ||
-		scope.CacheKey != "cache-key" ||
-		scope.Log.RequestID != "req-1" ||
-		scope.ResponsesSession != "session-1" {
-		t.Fatalf("scope group changed: %+v", scope)
-	}
-	policy := attempt.Policy()
-	if !policy.Force || !policy.LastTarget {
-		t.Fatalf("policy group changed: %+v", policy)
-	}
-	retried := policy.ContextRetry()
-	if len(retried) != 1 || retried[0] != retryTarget {
-		t.Fatalf("context retry = %+v, want %+v", retried, retryTarget)
-	}
-	if string(exchange.Body) != `{"model":"client-model"}` {
-		t.Fatalf("factory rewrote body: %s", exchange.Body)
-	}
-}
+// TestNewTargetAttemptOnlyGroupsPreparedInputs moved to internal/forward
+// (attempt_test.go) with the newTargetAttempt factory it exercises.
 
 func TestFusionSynthesizerDoesNotDispatchShadow(t *testing.T) {
 	panelA := newFakeUpstream(t, anthropicDraftResponder("draft-a"))

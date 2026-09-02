@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `internal/app/proxy_forward.go`、`internal/app/target_pipeline.go`、
+修改 `internal/forward/forward.go`、`internal/forward/plan.go`、
 `internal/targetexec/executor.go`、`internal/targetexec/rate_limit.go`、
 `internal/routing/retry.go`、`internal/app/proxy_read_endpoints.go`、
 `internal/app/target_pipeline.go`、`internal/app/health_test.go`、
@@ -10,13 +10,15 @@
 
 ## 实现入口
 
-- `Proxy.forward` / `serveOnce` / `targetexec.Executor.Execute`
+- `Proxy.forward`（app 薄 shim）→ `internal/forward.Serve` / `serveOnce` / `targetexec.Executor.Execute`
 - `internal/app/proxy_read_endpoints.go`：应用执行层到 runtime health/cooldown/param/rate-limit
   状态端口的适配
-- `internal/app/dispatch_context.go`：`RuntimeSnapshot`、`serveRequest` 与
-  `targetexec.Attempt` 的 snapshot 投影/唯一 assembly adapter
+- `internal/forward/snapshot.go` / `internal/app/dispatch_context.go`：`Snapshot`
+  （app 别名 `RuntimeSnapshot`，单次捕获红线在 `Proxy.SnapshotRuntime`）；
+  `internal/forward/forward.go` 的 `serveRequest` 与 `internal/forward/attempt.go` 的
+  `targetexec.Attempt` 唯一 assembly adapter
 - `internal/targetexec.Plan`：已解析目标的不可变 model/body/base URL/path wire
-  preparation；`internal/app/target_pipeline.go` 的 `planTarget` 只做 snapshot-owned facts 的投影
+  preparation；`internal/forward/plan.go` 的 `planTarget` 只做 snapshot-owned facts 的投影
 - `internal/targetexec/executor.go`：完整单目标 I/O、401/参数/图片 retry、
   failure classification、response conversion/capture/cache pipeline
 - `internal/app/target_pipeline.go`：captured generation/scheduling 的 `targetexec.State`
@@ -55,7 +57,8 @@ Runtime 与 Plan 读取事实，禁止在 scope/log 中复制第二份 generatio
 或持有完整 `*Proxy`，也不得访问调度、reload、Web、lifecycle 或 Shadow。
 `internal/app/target_pipeline.go` 从 `Attempt.Runtime()` 绑定 generation/scheduling，再把
 根 metrics/token/request-log/events 映射为语义 effect，不得包含 `client.Do`、
-转换、retry 或 failover pipeline。`internal/app/proxy_forward.go` 只负责编排和调用。
+转换、retry 或 failover pipeline；`internal/forward/plan.go` 只组装这些端口。
+`internal/forward/forward.go` 只负责编排和调用。
 executor commit 后只返回含实际上游请求体的最小 `targetexec.Commit`；Shadow
 sampling、semaphore、lifecycle admission 与 dispatch 由 `serveOnce` 在
 executor 外完成，Fusion synthesizer 丢弃该 commit 元数据，禁止递归触发 Shadow。

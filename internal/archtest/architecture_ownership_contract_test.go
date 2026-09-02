@@ -110,22 +110,22 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			}
 		}
 
-		snapshot, _ := parseGoFile(t, "internal/app/dispatch_context.go")
-		catalogType := namedStructFields(t, snapshot, "RuntimeSnapshot")["Catalog"]
+		snapshot, _ := parseGoFile(t, "internal/forward/snapshot.go")
+		catalogType := namedStructFields(t, snapshot, "Snapshot")["Catalog"]
 		pointer, ok := catalogType.(*ast.StarExpr)
 		if !ok {
-			t.Errorf("RuntimeSnapshot.Catalog type = %T, want *catalog.Catalog", catalogType)
+			t.Errorf("forward.Snapshot.Catalog type = %T, want *catalog.Catalog", catalogType)
 		} else if name, ok := configSelectorName(pointer.X, "catalog"); !ok || name != "Catalog" {
-			t.Errorf("RuntimeSnapshot.Catalog must be *catalog.Catalog")
+			t.Errorf("forward.Snapshot.Catalog must be *catalog.Catalog")
 		}
 		forbiddenRefresh := map[string]bool{
 			"EnsureFresh": true, "FetchHTTP": true, "loadModelsCatalog": true,
 			"modelsCatalogEndpoint": true, "modelsCatalogPath": true,
 		}
-		for _, path := range []string{"internal/routing/request.go", "internal/app/target_pipeline.go"} {
+		for _, path := range []string{"internal/routing/request.go", "internal/forward/plan.go"} {
 			routingFile, routingSet := parseGoFile(t, path)
 			for _, violation := range forbiddenCallSites(routingFile, routingSet, forbiddenRefresh, nil) {
-				t.Errorf("%s refreshes or re-reads catalog instead of using RuntimeSnapshot: %s", path, violation)
+				t.Errorf("%s refreshes or re-reads catalog instead of using the runtime snapshot: %s", path, violation)
 			}
 		}
 	})
@@ -349,8 +349,37 @@ func TestArchitectureOwnershipBoundaries(t *testing.T) {
 			}
 		}
 		assertCacheStoreFieldNamed(rootPackage, "generationState", "cache")
+		forwardSnapshot, _ := parseGoFile(t, "internal/forward/snapshot.go")
+		assertCacheStoreFieldNamed(forwardSnapshot, "Snapshot", "Cache")
+
+		// The canonical snapshot type lives in internal/forward; the app side
+		// keeps only the alias so reload/lock ownership stays at Proxy.
 		dispatchContext, _ := parseGoFile(t, "internal/app/dispatch_context.go")
-		assertCacheStoreFieldNamed(dispatchContext, "RuntimeSnapshot", "Cache")
+		aliasFound := false
+		for _, decl := range dispatchContext.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				typeSpec, ok := spec.(*ast.TypeSpec)
+				if !ok || typeSpec.Name.Name != "RuntimeSnapshot" {
+					continue
+				}
+				aliasFound = true
+				if !typeSpec.Assign.IsValid() {
+					t.Error("RuntimeSnapshot must be an alias (= forward.Snapshot), not a defined type")
+					continue
+				}
+				selector, ok := typeSpec.Type.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "Snapshot" {
+					t.Errorf("RuntimeSnapshot alias target = %T, want forward.Snapshot", typeSpec.Type)
+				}
+			}
+		}
+		if !aliasFound {
+			t.Error("internal/app/dispatch_context.go must keep the RuntimeSnapshot = forward.Snapshot alias")
+		}
 
 		forbidden := map[string]bool{
 			"responseCache": true,

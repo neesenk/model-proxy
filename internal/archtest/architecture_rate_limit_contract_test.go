@@ -6,14 +6,15 @@ import (
 )
 
 // TestRateLimitPolicyArchitecture keeps 429 classification and horizon policy
-// leaf-owned. The composition root (internal/app, plus the thin root package)
-// may only adapt the precomputed decision to runtime state — the duplicate
-// ban must cover internal/app, where the composition root lives today.
+// leaf-owned. The composition root (internal/app, the forward pipeline in
+// internal/forward, plus the thin root package) may only adapt the precomputed
+// decision to runtime state — the duplicate ban must cover internal/app and
+// internal/forward, where the request path lives today.
 func TestRateLimitPolicyArchitecture(t *testing.T) {
 	forbiddenRoot := map[string]bool{
 		"classify429": true, "parseResetHint": true, "hintDuration": true, "parseRateLimit": true,
 	}
-	for _, dir := range []string{".", "internal/app"} {
+	for _, dir := range []string{".", "internal/app", "internal/forward"} {
 		for _, path := range productionGoFilesIn(t, dir) {
 			file, fileSet := parseGoFile(t, path)
 			for _, declaration := range file.Decls {
@@ -42,8 +43,8 @@ func TestRateLimitPolicyArchitecture(t *testing.T) {
 		t.Errorf("Executor.Execute ParseRateLimit calls = %d, want 1", got)
 	}
 
-	fusion, fusionSet := parseGoFile(t, "internal/app/fusion.go")
-	calls := importedFunctionCallSites(fusion, fusionSet, "fusion.go", "model-proxy/internal/targetexec", "ParseRateLimit")
+	fusion, fusionSet := parseGoFile(t, "internal/forward/fusion.go")
+	calls := importedFunctionCallSites(fusion, fusionSet, "internal/forward/fusion.go", "model-proxy/internal/targetexec", "ParseRateLimit")
 	if len(calls) != 1 {
 		t.Errorf("Fusion ParseRateLimit call sites = %v, want exactly one", calls)
 	}

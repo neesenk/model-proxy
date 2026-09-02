@@ -52,10 +52,10 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 	})
 
 	t.Run("root adapter freezes generation and is the only constructor", func(t *testing.T) {
-		adapter, _ := parseGoFile(t, "internal/app/target_pipeline.go")
+		adapter, _ := parseGoFile(t, "internal/forward/plan.go")
 		schedulerFields := namedStructFields(t, adapter, "requestRoutingScheduler")
 		want := map[string]bool{
-			"proxy": true, "config": true, "parentOf": true,
+			"pipe": true, "config": true, "parentOf": true,
 			"routeKeys": true, "generation": true,
 		}
 		if got := structContractViolations(schedulerFields, want, nil); len(got) != 0 {
@@ -63,7 +63,7 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 		}
 		schedule := namedMethod(t, adapter, "requestRoutingScheduler", "Schedule")
 		if !scheduleCallUsesCapturedGeneration(schedule.Body) {
-			t.Error("requestRoutingScheduler.Schedule must pass captured config/identity/generation to Proxy.schedule")
+			t.Error("requestRoutingScheduler.Schedule must pass captured config/identity/generation to the pipeline schedule port")
 		}
 		constructor := namedFunction(t, adapter, "requestRoutingPlanner")
 		if got := namedCallCountInNode(constructor.Body, "NewPlanner"); got != 1 {
@@ -79,12 +79,12 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			"NewPlanner",
 		)
 		if len(constructorSites) != 1 ||
-			constructorSites[0].file != "internal/app/target_pipeline.go" ||
+			constructorSites[0].file != "internal/forward/plan.go" ||
 			constructorSites[0].function != "requestRoutingPlanner" {
-			t.Errorf("routing.NewPlanner production reference sites = %v, want only target_pipeline.go:requestRoutingPlanner direct call", constructorSites)
+			t.Errorf("routing.NewPlanner production reference sites = %v, want only forward/plan.go:requestRoutingPlanner direct call", constructorSites)
 		}
 		if sites := packageLocalFunctionCallSites(t, "internal/routing", "NewPlanner"); len(sites) != 0 {
-			t.Errorf("routing package-local NewPlanner calls = %v, want none outside the root adapter", sites)
+			t.Errorf("routing package-local NewPlanner calls = %v, want none outside the forward adapter", sites)
 		}
 	})
 
@@ -112,10 +112,11 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			"isBase64Char":             true,
 			"isBase64Run":              true,
 		}
-		// The composition root lives in internal/app today; the duplicate ban
-		// must scan it alongside the thin root package (a root-only scan went
-		// vacuous when the composition root moved).
-		for _, dir := range []string{".", "internal/app"} {
+		// The composition root lives in internal/app and the request pipeline in
+		// internal/forward; the duplicate ban must scan both alongside the thin
+		// root package (a root-only scan went vacuous when the composition root
+		// moved).
+		for _, dir := range []string{".", "internal/app", "internal/forward"} {
 			for _, path := range productionGoFilesIn(t, dir) {
 				file, fileSet := parseGoFile(t, path)
 				for _, declaration := range file.Decls {
@@ -127,15 +128,15 @@ func TestRequestRoutingPolicyArchitecture(t *testing.T) {
 			}
 		}
 
-		forward, _ := parseGoFile(t, "internal/app/proxy_forward.go")
-		serveOnce := namedMethod(t, forward, "Proxy", "serveOnce")
+		forward, _ := parseGoFile(t, "internal/forward/forward.go")
+		serveOnce := namedMethod(t, forward, "pipeline", "serveOnce")
 		for name, want := range map[string]int{
 			"requestRoutingPlanner":           1,
 			"ApplyWithProfile":                1,
 			"ContextOverflowRetryWithProfile": 1,
 		} {
 			if got := namedCallCountInNode(serveOnce.Body, name); got != want {
-				t.Errorf("Proxy.serveOnce %s calls = %d, want %d", name, got, want)
+				t.Errorf("pipeline.serveOnce %s calls = %d, want %d", name, got, want)
 			}
 		}
 	})
@@ -152,9 +153,9 @@ func scheduleCallUsesCapturedGeneration(node ast.Node) bool {
 		if !ok || selector.Sel.Name != "schedule" {
 			return true
 		}
-		proxyField, ok := selector.X.(*ast.SelectorExpr)
-		proxyOwner, ownerOK := proxyField.X.(*ast.Ident)
-		if !ok || !ownerOK || proxyOwner.Name != "scheduler" || proxyField.Sel.Name != "proxy" {
+		pipeField, ok := selector.X.(*ast.SelectorExpr)
+		pipeOwner, ownerOK := pipeField.X.(*ast.Ident)
+		if !ok || !ownerOK || pipeOwner.Name != "scheduler" || pipeField.Sel.Name != "pipe" {
 			return true
 		}
 		wantFields := []string{
@@ -208,7 +209,7 @@ func plannerConstructorUsesRuntimeSnapshot(node ast.Node) bool {
 	}
 	schedulerFields := requestRoutingCompositeFields(scheduler)
 	return len(schedulerFields) == 5 &&
-		requestRoutingExprPath(schedulerFields["proxy"]) == "proxy" &&
+		requestRoutingExprPath(schedulerFields["pipe"]) == "p" &&
 		requestRoutingExprPath(schedulerFields["config"]) == "runtime.Cfg" &&
 		requestRoutingExprPath(schedulerFields["parentOf"]) == "runtime.ParentOf" &&
 		requestRoutingExprPath(schedulerFields["routeKeys"]) == "routeKeys" &&

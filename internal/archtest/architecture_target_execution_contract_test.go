@@ -11,6 +11,7 @@ import (
 // executor, and pool resolution reaches health only through resolverState.
 func TestTargetExecutionArchitecture(t *testing.T) {
 	rootPackage, _ := parseGoPackage(t, "internal/app")
+	forwardPackage, _ := parseGoPackage(t, "internal/forward")
 
 	t.Run("targetexec Attempt has only its five execution contract fields", func(t *testing.T) {
 		f, _ := parseGoFile(t, "internal/targetexec/attempt.go")
@@ -136,30 +137,30 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			"NewAttempt",
 		)
 		if len(constructorCalls) != 1 ||
-			constructorCalls[0].file != "internal/app/dispatch_context.go" || constructorCalls[0].function != "newTargetAttempt" {
-			t.Errorf("targetexec.NewAttempt production reference sites = %v, want only dispatch_context.go:newTargetAttempt direct call", constructorCalls)
+			constructorCalls[0].file != "internal/forward/attempt.go" || constructorCalls[0].function != "newTargetAttempt" {
+			t.Errorf("targetexec.NewAttempt production reference sites = %v, want only forward/attempt.go:newTargetAttempt direct call", constructorCalls)
 		}
 		if sites := packageLocalFunctionCallSites(t, "internal/targetexec", "NewAttempt"); len(sites) != 0 {
-			t.Errorf("targetexec package-local NewAttempt calls = %v, want none outside the root factory", sites)
+			t.Errorf("targetexec package-local NewAttempt calls = %v, want none outside the forward factory", sites)
 		}
-		serveOnce := namedMethod(t, rootPackage, "Proxy", "serveOnce")
+		serveOnce := namedMethod(t, forwardPackage, "pipeline", "serveOnce")
 		if !assignedFactoryValueExecuted(serveOnce.Body, "newTargetAttempt", "targetExecutor", "Execute") {
-			t.Error("Proxy.serveOnce must pass the attempt assigned from newTargetAttempt to targetexec.Executor.Execute")
+			t.Error("pipeline.serveOnce must pass the attempt assigned from newTargetAttempt to targetexec.Executor.Execute")
 		}
 		if !executorRuntimeBoundToAttempt(serveOnce.Body, "targetExecutor", "Execute") {
-			t.Error("Proxy.serveOnce must bind targetExecutor to the exact attempt.Runtime generation")
+			t.Error("pipeline.serveOnce must bind targetExecutor to the exact attempt.Runtime generation")
 		}
 		executePos := firstNamedCallPos(serveOnce.Body, "Execute")
 		shadowPos := firstNamedCallPos(serveOnce.Body, "dispatchShadowAfterCommit")
 		if !executePos.IsValid() || !shadowPos.IsValid() || shadowPos <= executePos {
-			t.Errorf("Proxy.serveOnce must dispatch post-commit Shadow after execute (execute=%v shadow=%v)", executePos, shadowPos)
+			t.Errorf("pipeline.serveOnce must dispatch post-commit Shadow after execute (execute=%v shadow=%v)", executePos, shadowPos)
 		}
 
-		fusionFile, fusionSet := parseGoFile(t, "internal/app/fusion.go")
+		fusionFile, fusionSet := parseGoFile(t, "internal/forward/fusion.go")
 		if got := compositeLiteralSites(fusionFile, "Attempt"); len(got) != 0 {
 			t.Errorf("fusion.go must call newTargetAttempt, not construct targetexec.Attempt: %s", describeNodes(fusionSet, got, "Attempt literal"))
 		}
-		synth := namedMethod(t, fusionFile, "Proxy", "callFusionSynthesizer")
+		synth := namedMethod(t, fusionFile, "pipeline", "callFusionSynthesizer")
 		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "Execute") {
 			t.Error("callFusionSynthesizer must pass the attempt assigned from newTargetAttempt to targetexec.Executor.Execute")
 		}
@@ -206,8 +207,8 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			t.Errorf("internal/targetexec/executor.go imports outside its execution leaves: %v", got)
 		}
 
-		adapter, adapterSet := parseGoFile(t, "internal/app/target_pipeline.go")
-		factory := namedMethod(t, adapter, "Proxy", "targetExecutor")
+		adapter, adapterSet := parseGoFile(t, "internal/forward/plan.go")
+		factory := namedMethod(t, adapter, "pipeline", "targetExecutor")
 		adapterForbidden := map[string]bool{
 			"Do": true, "ConvertResponse": true,
 			"ConvertSSE": true, "flushCopy": true, "contextOverflowRetry": true,
@@ -219,8 +220,8 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 	})
 
 	t.Run("Fusion synthesizer delegates client delivery to target executor", func(t *testing.T) {
-		f, fset := parseGoFile(t, "internal/app/fusion.go")
-		synth := namedMethod(t, f, "Proxy", "callFusionSynthesizer")
+		f, fset := parseGoFile(t, "internal/forward/fusion.go")
+		synth := namedMethod(t, f, "pipeline", "callFusionSynthesizer")
 		if !assignedFactoryValueExecuted(synth.Body, "newTargetAttempt", "targetExecutor", "Execute") {
 			t.Error("callFusionSynthesizer must execute the exact value returned by newTargetAttempt")
 		}
@@ -254,11 +255,11 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			t.Error("NewResolver must receive ResolverState, not *Proxy")
 		}
 
-		countGenerationBoundResolvers := func(node ast.Node) (calls, bound int) {
+		countGenerationBoundResolvers := func(node ast.Node, factory string) (calls, bound int) {
 			t.Helper()
 			ast.Inspect(node, func(node ast.Node) bool {
 				call, ok := node.(*ast.CallExpr)
-				if !ok || callableName(call.Fun) != "newResolver" {
+				if !ok || callableName(call.Fun) != factory {
 					return true
 				}
 				calls++
@@ -273,12 +274,12 @@ func TestTargetExecutionArchitecture(t *testing.T) {
 			})
 			return calls, bound
 		}
-		fusion, _ := parseGoFile(t, "internal/app/fusion.go")
-		if calls, bound := countGenerationBoundResolvers(fusion); calls != 2 || bound != calls {
+		fusion, _ := parseGoFile(t, "internal/forward/fusion.go")
+		if calls, bound := countGenerationBoundResolvers(fusion, "NewResolver"); calls != 2 || bound != calls {
 			t.Errorf("Fusion resolver calls must bind runtime generation: calls=%d bound=%d", calls, bound)
 		}
 		shadow := namedMethod(t, rootPackage, "Proxy", "runShadow")
-		if calls, bound := countGenerationBoundResolvers(shadow.Body); calls != 1 || bound != calls {
+		if calls, bound := countGenerationBoundResolvers(shadow.Body, "newResolver"); calls != 1 || bound != calls {
 			t.Errorf("Shadow resolver call must bind runtime generation: calls=%d bound=%d", calls, bound)
 		}
 	})

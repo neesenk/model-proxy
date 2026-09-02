@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/forward"
 	"model-proxy/internal/fusion"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
@@ -289,9 +290,9 @@ func TestFusion_ToolRound(t *testing.T) {
 // grace window for nearly-done stragglers — one inside the window joins the
 // synthesis; one outside is cancelled and excluded.
 func TestFusion_QuorumGrace(t *testing.T) {
-	old := fusionGracePeriod
-	fusionGracePeriod = 200 * time.Millisecond
-	defer func() { fusionGracePeriod = old }()
+	old := forward.FusionGracePeriod
+	forward.FusionGracePeriod = 200 * time.Millisecond
+	defer func() { forward.FusionGracePeriod = old }()
 
 	build := func(t *testing.T, stragglerDelay time.Duration) (*Proxy, *fakeUpstream, *httptest.Server) {
 		pa := newFakeUpstream(t, anthropicDraftResponder("draft-A"))
@@ -768,9 +769,9 @@ func TestAPIFusion(t *testing.T) {
 	})
 
 	t.Run("grace-cut leg recorded", func(t *testing.T) {
-		old := fusionGracePeriod
-		fusionGracePeriod = 150 * time.Millisecond
-		defer func() { fusionGracePeriod = old }()
+		old := forward.FusionGracePeriod
+		forward.FusionGracePeriod = 150 * time.Millisecond
+		defer func() { forward.FusionGracePeriod = old }()
 		pa := newFakeUpstream(t, anthropicDraftResponder("draft-A"))
 		pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
 		pc := newFakeUpstream(t, delayedResponder(600*time.Millisecond, anthropicDraftResponder("draft-C")))

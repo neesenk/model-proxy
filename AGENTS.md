@@ -4,7 +4,7 @@
 
 ## 定位与边界
 
-model-proxy 是单进程模块化单体：根 `package main` 只负责进程入口，`internal/app` 是组合根，`internal/cli*` 拥有命令和进程生命周期，其余 `internal/` package 各自拥有领域实现，`internal/web` 拥有 Web/API transport。完整 owner 与依赖图见 `docs/architecture/overview.md`。
+model-proxy 是单进程模块化单体：根 `package main` 只负责进程入口，`internal/app` 是组合根，`internal/forward` 拥有请求转发管线（snapshot + HTTP 请求 → 响应 commit 或终态错误），`internal/cli*` 拥有命令和进程生命周期，其余 `internal/` package 各自拥有领域实现，`internal/web` 拥有 Web/API transport。完整 owner 与依赖图见 `docs/architecture/overview.md`。
 
 ## 红线
 

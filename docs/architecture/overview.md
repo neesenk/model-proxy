@@ -25,16 +25,19 @@ main (OS args/streams/exit)
 `app_assembly.go`（把 serve 驱动注入 `internal/cli.Application`）、`cli_serve.go`
 （serve/daemon 角色分发、signal/listener/drain 编排）与 `version.go`
 （构建注入的版本号）。CLI 命令实现、参数解析与调度循环归 `internal/cli*`；
-组合根、Proxy、forward 链与 Web/API 适配归 `internal/app`。
+组合根、Proxy 与 Web/API 适配归 `internal/app`；请求转发管线（guard/cache/schedule/
+failover/Fusion 编排与 target plan/executor 装配）归 `internal/forward`。
 
 `internal/app` 的物理布局按职责收敛：`internal/app/proxy.go` 只保留应用运行时聚合对象
 （`Proxy` 字段分组成内嵌的 `generationState`——reload swap unit——与
 `processServices`——跨 reload 的进程级服务）；
-`internal/app/proxy_forward.go` 集中主请求的 forward/serve 调度、failover 与 commit 编排；
+`internal/forward/forward.go` 集中主请求的 forward/serve 调度、failover 与 commit 编排，
+`internal/app/proxy_forward.go` 只是薄 shim：每请求一次 `SnapshotRuntime` 捕获、一次
+`forward.Services` 装配、一次 `forward.Serve` 调用（管线永远看不到 Proxy、不碰 p.mu）；
 `internal/app/proxy_shadow.go` 只保留 Shadow post-commit policy、lifecycle admission、
 generation-bound resolver/plan 与 request-log 投影；可热重载 sampling/
 concurrency/client 及 detached HTTP 执行归 `internal/shadow`；
-`internal/app/fusion.go` 是 captured runtime 到 `internal/fusion.Engine` 的应用适配，并保留
+`internal/forward/fusion.go` 是 captured snapshot 到 `internal/fusion.Engine` 的适配，并保留
 panel/judge 的 target policy adapter 与 synthesizer 的正常 target executor
 接线；fan-out、quorum/grace、judge/body 构造、budget 和 registry 归
 `internal/fusion`；
@@ -58,11 +61,11 @@ runtime Manager，并保留 429 后 quota refresh 编排；
 注入的窄端口（copy-by-value、自带锁纪律）投影为 `internal/appapi` consumer-owned
 `ReadAPI` / `CommandAPI`，包括 JSON-safe DTO 和全部凭据/配置 mutation；
 `internal/app/web_adapter.go` 只装配 `internal/web.Server` 并挂载到主 mux；
-`internal/app/target_pipeline.go` 只把一次 runtime snapshot 的 config、parent
-identity、route keys 与 generation 绑定到 `internal/routing.Planner` 的 scheduler
-端口；
 `internal/app/target_pipeline.go` 只把 captured generation/scheduling 与应用 observability
-映射到 `targetexec.State/Effects`；SSE/HTTP 流识别、复制和 ResponseWriter
+映射到 `targetexec.State/Effects`（`proxyHealthGate` 与 `targetExecutionEffects`，经
+`forward.Services` 的 `NewHealthGate`/`NewEffects` 端口注入管线）；一次 runtime snapshot 的
+config、parent identity、route keys 与 generation 到 `internal/routing.Planner` scheduler
+端口的绑定随管线归 `internal/forward/plan.go`；SSE/HTTP 流识别、复制和 ResponseWriter
 primitive 归 `internal/targetexec/transport.go`；
 `internal/app/runtime.go`（`Runtime`）只在配置及进程日志准备好后构造 Proxy、启动运行时服务、
 注册根 handler/Web、保存 reload 投影和 transport tasks，并以 `Close` 委派给 Proxy。
@@ -80,11 +83,11 @@ HTTP handler
   → provider.Provider
 ```
 
-- `RuntimeSnapshot`：一次请求只捕获一个 reload generation 的 config、
+- `RuntimeSnapshot`（canonical 类型 `internal/forward.Snapshot`，app 侧保留别名）：一次请求只捕获一个 reload generation 的 config、
   provider implementations、pool identity、expanded routes、catalog、cache 和
-  Shadow dispatch runtime。
+  Shadow dispatch runtime；锁纪律（单次捕获）留在 `Proxy.SnapshotRuntime`。
 - `serveRequest`：一次 schedule/failover pass 的稳定输入。
-- `internal/targetexec.Plan`：应用层 `internal/app/target_pipeline.go` 的 `planTarget` 只解析同一 `RuntimeSnapshot` 中的
+- `internal/targetexec.Plan`：`internal/forward/plan.go` 的 `planTarget` 只解析同一 `Snapshot` 中的
   provider implementation、backend protocol、wire verdict 与视觉能力；不可变
   的 model/body/base URL/path wire preparation 和 target/provider facts 由该
   Plan 拥有，普通 route、Fusion、Shadow 共用。
@@ -96,7 +99,8 @@ HTTP handler
 - `internal/targetexec.Executor`：拥有完整单目标 HTTP/retry/response pipeline，
   只通过 generation-frozen `targetexec.State` 修改健康、参数学习和 wire state；
   metrics、tokens、request log、Responses state、events 只经 typed
-  `targetexec.Effects/Responses` 注入。应用层 `internal/app/target_pipeline.go` 只组装这些端口，
+  `targetexec.Effects/Responses` 注入。`internal/forward/plan.go` 只组装这些端口（app 侧
+  `proxyHealthGate`/`targetExecutionEffects` 经 Services 端口注入），
   不执行 I/O、转换或 failover。commit 后只返回最小 `targetexec.Commit`，不持有
   生命周期或 Shadow 调度能力。
 - `internal/targetexec.BufferedLeg`：Executor 的 headless 非流式对应物，面向需要
@@ -106,7 +110,7 @@ HTTP handler
   留在调用方，最终 exchange 经 `Capture` 回填给调用方的 request log。
 
 `RuntimeSnapshot` 与 `internal/targetexec.Plan` 是执行器内
-reload-owned/config/provider/protocol 事实的唯一来源；`internal/app` assembly 只把 snapshot
+reload-owned/config/provider/protocol 事实的唯一来源；`internal/forward` 只把 snapshot
 投影为 typed `targetexec.Runtime`，不得在普通/Fusion/Shadow 分支各自重算
 endpoint 或 conversion options。exchange 只承载 HTTP request/writer/body，
 scope 只承载本次请求身份与 Responses 上下文，policy 只承载
@@ -119,7 +123,7 @@ identity、六组 pairwise codec、request/response/SSE registry、SSE↔JSON �
 桥接、跨协议图片约束，以及 Responses `previous_response_id` 的有界状态。
 每个 client→backend pair 必须同时提供 request、反向 response、反向 SSE codec；
 专用 pair codec 保留 hosted tools、reasoning 方言和 namespace 等协议特有语义。
-Provider 方言和目标视觉能力由 `internal/app/target_pipeline.go` 的 `planTarget` 解析后作为纯值注入
+Provider 方言和目标视觉能力由 `internal/forward/plan.go` 的 `planTarget` 解析后作为纯值注入
 `internal/targetexec.Plan` 的窄 request options；
 具体 `http.ResponseWriter` 错误 envelope 仍由 transport 层负责。
 
@@ -147,8 +151,8 @@ replacement 和跨 pass cooldown 终局决策，以及 config→route table 推�
 和 config-time route warnings（reasoning-replay marker 等启动期 hazard），以及 models.dev
 元数据 hydration（`HydrateModels`：config provider/route 名单遍历 + catalog 查找 +
 fallback/source 策略）。`routing.Planner` 只能由
-`requestRoutingPlanner` 通过 constructor 装配；`internal/app/target_pipeline.go` 捕获 generation 并
-调用 `Proxy.schedule`，策略包不得 import Proxy、runtime Manager、target executor
+`requestRoutingPlanner` 通过 constructor 装配；`internal/forward/plan.go` 捕获 generation 并
+调用注入的 schedule 端口（app: `Proxy.schedule`），策略包不得 import Proxy、runtime Manager、target executor
 或任何 I/O owner。
 
 `internal/fusion` 是只依赖 `internal/config` 值类型的编排包：
@@ -157,7 +161,7 @@ judge、三协议 synthesis body 构造和 run 记录时序；`Registry` 拥有 
 run ring、per-workflow aggregate 与 local-day budget。该包只经
 `fusion.Ports` 请求 generation-bound leg/synthesis 能力，不得访问 `Proxy`、
 HTTP client、runtime Manager、metrics/events/request log 或 reload-owned
-对象。应用层 `fusionAdapter` 在一次 `fusionCtx.runtime` 上实现这些端口；
+对象。管线侧 `fusionAdapter`（`internal/forward/fusion.go`）在一次 `fusionCtx.runtime` 上实现这些端口；
 panel/judge 仍使用共享 `targetexec.Plan`，synthesizer 仍通过唯一
 `newTargetAttempt → targetexec.Executor` 返回客户端。
 
@@ -218,8 +222,9 @@ accessor）的请求访问日志数据面叶子包，拥有
 JSONL Record schema、body/header 截断与白名单、非阻塞队列、单 writer 的轮转/
 retention/owner-only 权限、流式 top-K 查询（带文件级提前终止：peek 文件末尾记录
 Ts 为上界，堆满或越 From 下界的文件整文件跳过，peek 异常回退全量流扫）、list-safe
-Summary 和 Shadow 聚合。应用层 `internal/app/observe_adapters.go` 只把 `RequestLogConfig` 生效值及
-`forwardLogCtx`/HTTP/RouteTarget 映射为纯值输入；capture 在转换器外层的位置、
+Summary 和 Shadow 聚合。应用层 `internal/app/observe_adapters.go` 只把 `RequestLogConfig` 生效值
+适配为纯值输入；`forward.LogCtx`/HTTP/RouteTarget 到 Record 的映射归
+`internal/forward.BuildRequestLogInput`；capture 在转换器外层的位置、
 `internal/runtime.Lifecycle` 的 Shadow-before-drain 顺序、Web 参数、CLI replay policy 和
 Fusion/Shadow eligibility 继续由应用层编排。列表与 Shadow 必须调用强制丢弃
 body/header 的 metadata API，detail/replay 才能查询完整 Record。
@@ -273,7 +278,7 @@ provider 凭据的首次接口级暴露，只读内存、只为扫描，见
 `docs/decisions/intentional-behaviors.md` 条目 15），以当前代的池秘密基重建
 scanner 并在 `p.mu` 下换代指针（文件 I/O 与构建
 在锁外；I/O 期间发生的 reload 由代检查判废，绝不跨代混用）。
-`internal/app/proxy_forward.go` 在请求体完整读取后、
+`internal/forward/forward.go` 在请求体完整读取后、
 cache 查询与所有 forward 分支之前对共享 body 扫描一次，按 `guard.secrets`
 （log/redact/block/off）与 `guard.paths`（log/block/off，不支持 redact）放行、
 替换 `[REDACTED]` 或 400 拒绝；secrets/paths 两类扫描都完成后才统一评估响应动作
@@ -286,6 +291,18 @@ Store：按 `x-claude-code-session-id` 的有界 LRU（256 会话 × 32KiB 尾�
 redact 前请求体尾部与跨请求分片进度。窗口可能含凭据，只活在进程内存，永不日志/
 序列化/落盘/API；它是进程生命期的跨代观察态（不进 RuntimeSnapshot，reload 不清空），
 红线与启发式边界见 `docs/decisions/intentional-behaviors.md` 条目 20/21。
+
+`internal/forward` 是请求转发管线包：从「snapshot + HTTP 请求」到「响应 commit 或终态错误」
+的全部编排归它——body 读取与上限、claude_mapping/route 解析、pin/force-provider 硬选择
+（含 cache bypass）、outbound guard 扫描与统一动作评估、精确响应 cache、schedule →
+request-aware routing → per-target failover（`serveOnce`）、cooldown wait-retry 与终局
+分类、Fusion 编排适配，以及 target plan / `targetexec.Executor` / request `routing.Planner`
+的装配。进程级依赖只经 `forward.Services`（client/metrics/tokens/agents/events/sessionScan/
+responsesState/fusionReg/reqLog + `NewHealthGate`/`NewEffects`/`Schedule`/`ShadowDispatch`/
+`ResolveBackendProto`/`ResolverState` 端口）注入；pin/cooldown 查询只经 consumer-owned
+`forward.RouteState`。管线不得 import `internal/app`、不得持有 Proxy 或触碰 `p.mu`——
+单次快照红线由调用方（app 的 `Proxy.forward` shim）拥有，Fusion/Shadow 分支只见到同一个
+`forward.Snapshot`。
 
 `internal/transport/bodycapture` 是无仓库内依赖的通用响应流捕获叶子包：
 字节原样透传，只保存有界 prefix，同时统计完整长度和截断状态，并在首次 Close
@@ -320,7 +337,7 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`internal/runti
 ## 编排与异步分支
 
 - Fusion 全程持有主请求的 `RuntimeSnapshot`。`internal/fusion.Engine` 拥有
-  gates/fan-out/quorum/judge/registry，`internal/app/fusion.go` 让 panel/judge 共用非流式
+  gates/fan-out/quorum/judge/registry，`internal/forward/fusion.go` 让 panel/judge 共用非流式
   target policy，并让 synthesizer 通过正常
   `targetexec.Attempt → targetexec.Executor` 返回客户端。
 - Shadow 由 `serveOnce` 在主请求 commit 后根据 `targetexec.Commit` 接纳和派发，同时
@@ -464,7 +481,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `accounts → credstore`；
 - `guard/session → guard`；
 - `app → accounts, admin, appapi, cache, catalog,
-  config, configedit, credstore, display, fusion, guard, guard/session, httpx, login, observe/budget,
+  config, configedit, credstore, display, forward, fusion, guard, guard/session, httpx, login, observe/budget,
   observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets,
   pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
   targetexec, transport/bodycapture, web, webauth`；
@@ -495,6 +512,10 @@ application → serveAssembly → applicationRuntime → Proxy
 - `login → accounts, config, display, provider, observe/logx`；
 - `config → catalog, pricing, protocol`；
 - `fusion → config, observe/logx`；
+- `forward → cache, catalog, config, fusion, guard, guard/session, observe/counters,
+  observe/events, observe/logx, observe/requestlog, observe/seclog, protocol, provider, routing,
+  shadow, targetexec`（请求转发管线：guard/cache/schedule/failover/Fusion 编排与 target
+  plan/executor 装配；不得回依赖 app/web/cli）；
 - `observe/budget → config, observe/events, observe/logx, observe/stats, pricing`（config 是
   budgets 生效值所需的值类型，stats 是 analytics bucket 值类型与分钟对齐 seam）；
 - `observe/requestlog → config, observe/logx`（config 是生效值 accessor 所需的值类型）；
@@ -533,12 +554,13 @@ route derivation、catalog 加载（`internal/config`）与 source 标记
 先证明 owner 边界仍成立并更新本节，不能只放宽测试。
 
 模块构造入口是闭合的：`internal/app/runtime.go` 独占 serve process 的
-`NewProxy` / `StartRuntimeServices` / `NewWebServer` 装配；`internal/app/target_pipeline.go` 构造
-`targetexec.Plan`，`internal/app/dispatch_context.go` 构造 `targetexec.Attempt`，
-`internal/app/target_pipeline.go` 绑定 `targetexec.Executor`；`internal/app/target_pipeline.go`
-构造 request `routing.Planner`；`internal/app/fusion.go` 绑定 `fusion.Engine` 及其 ports；
+`NewProxy` / `StartRuntimeServices` / `NewWebServer` 装配；`internal/forward/plan.go` 构造
+`targetexec.Plan`，`internal/forward/attempt.go` 构造 `targetexec.Attempt`，
+`internal/forward/plan.go` 绑定 `targetexec.Executor`；`internal/forward/plan.go`
+构造 request `routing.Planner`；`internal/forward/fusion.go` 绑定 `fusion.Engine` 及其 ports；
 `internal/app/proxy.go` / `internal/app/proxy_reload.go` 构造启动与 reload generation 的 Shadow
-runtime；`internal/app/web_adapter.go` 构造 `internal/web.Server`。其他 `internal/app` 文件只能消费这些 seam，
+runtime；`internal/app/web_adapter.go` 构造 `internal/web.Server`。其他 `internal/app`/`internal/forward`
+文件只能消费这些 seam，
 不得建立第二套 owner。owner 符号只能通过已审查的直接形态引用（`pkg.F(...)` /
 `pkg.T{...}` / `receiver.Method(...)` / 裸标识符调用）；function value、method value、
 type alias 和 method expression 都会被守卫计为新的引用点并判定违规。
@@ -559,7 +581,8 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
 - request、response、SSE 各自维护协议方向 switch；
 - `targetexec.Executor` import/持有 `Proxy`、application composition owner 或其他
   runtime aggregate；
-- `internal/app/target_pipeline.go` 重新实现 HTTP、转换、retry 或 Shadow 编排；
+- `internal/forward` 重新实现 HTTP、转换、retry 或 Shadow 编排，或回依赖
+  `internal/app`/Proxy/`p.mu`；
 - 普通 route/Fusion 绕过 `newTargetAttempt` 直接拼装执行器输入；
 - `cli_serve.go` / `internal/cli/serve` / reload 绕过 `internal/runtime.Lifecycle` 启动 Proxy 级
   goroutine；

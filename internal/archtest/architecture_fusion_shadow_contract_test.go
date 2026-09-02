@@ -35,25 +35,25 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			t.Fatalf("stat fusion_obs.go: %v", err)
 		}
 
-		root, rootSet := parseGoFile(t, "internal/app/fusion.go")
-		run := namedMethod(t, root, "Proxy", "runFusion")
+		root, rootSet := parseGoFile(t, "internal/forward/fusion.go")
+		run := namedMethod(t, root, "pipeline", "runFusion")
 		if got := namedCallCountInNode(run.Body, "Run"); got != 1 {
-			t.Errorf("Proxy.runFusion Engine.Run calls = %d, want exactly 1", got)
+			t.Errorf("pipeline.runFusion Engine.Run calls = %d, want exactly 1", got)
 		}
 		if got := goStatementsIn(run.Body); got != 0 {
-			t.Errorf("Proxy.runFusion starts %d goroutines; fan-out belongs in internal/fusion.Engine", got)
+			t.Errorf("pipeline.runFusion starts %d goroutines; fan-out belongs in internal/fusion.Engine", got)
 		}
 		if got := forbiddenCallSites(run.Body, rootSet, map[string]bool{
 			"Admit": true, "Record": true, "CollectResults": true,
 			"BuildSynthesisBody": true, "BuildJudgeBody": true,
 		}, nil); len(got) != 0 {
-			t.Errorf("Proxy.runFusion duplicates engine policy: %v", got)
+			t.Errorf("pipeline.runFusion duplicates engine policy: %v", got)
 		}
 		engine, _ := parseGoFile(t, "internal/fusion/engine.go")
 		if got := goStatementsIn(namedMethod(t, engine, "Engine", "Run").Body); got != 1 {
 			t.Errorf("fusion.Engine.Run goroutines = %d, want one fan-out site", got)
 		}
-		callLeg := namedMethod(t, root, "Proxy", "callFusionLeg")
+		callLeg := namedMethod(t, root, "pipeline", "callFusionLeg")
 		// The leg send loop is owned by targetexec.BufferedLeg: callFusionLeg
 		// wires exactly one BufferedLeg and must not re-grow transport steps.
 		bufferedLegs := 0
@@ -68,17 +68,17 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			return true
 		})
 		if bufferedLegs != 1 {
-			t.Errorf("Proxy.callFusionLeg targetexec.BufferedLeg composites = %d, want exactly 1", bufferedLegs)
+			t.Errorf("pipeline.callFusionLeg targetexec.BufferedLeg composites = %d, want exactly 1", bufferedLegs)
 		}
 		if got := namedCallCountInNode(callLeg.Body, "Do"); got != 1 {
-			t.Errorf("Proxy.callFusionLeg Do calls = %d, want exactly one BufferedLeg.Do (no parallel client pipeline)", got)
+			t.Errorf("pipeline.callFusionLeg Do calls = %d, want exactly one BufferedLeg.Do (no parallel client pipeline)", got)
 		}
 		if got := forbiddenCallSites(callLeg.Body, rootSet, map[string]bool{
 			"RewriteRequest": true, "AuthHeaders": true,
 			"ApplyConfiguredHeaders": true, "ExtraHeaders": true,
 			"NewRequestWithContext": true, "ReadAll": true,
 		}, nil); len(got) != 0 {
-			t.Errorf("Proxy.callFusionLeg duplicates leg transport owned by targetexec.BufferedLeg: %v", got)
+			t.Errorf("pipeline.callFusionLeg duplicates leg transport owned by targetexec.BufferedLeg: %v", got)
 		}
 		legFile, _ := parseGoFile(t, "internal/targetexec/buffered_leg.go")
 		legDo := namedMethod(t, legFile, "BufferedLeg", "Do")
@@ -152,13 +152,13 @@ func TestFusionShadowArchitecture(t *testing.T) {
 			)
 		}
 
-		snapshot, _ := parseGoFile(t, "internal/app/dispatch_context.go")
-		field := namedStructFields(t, snapshot, "RuntimeSnapshot")["Shadow"]
+		snapshot, _ := parseGoFile(t, "internal/forward/snapshot.go")
+		field := namedStructFields(t, snapshot, "Snapshot")["Shadow"]
 		pointer, ok := field.(*ast.StarExpr)
 		if !ok {
-			t.Errorf("RuntimeSnapshot.shadow type = %T, want *shadow.Runtime", field)
+			t.Errorf("Snapshot.Shadow type = %T, want *shadow.Runtime", field)
 		} else if name, ok := configSelectorName(pointer.X, "shadow"); !ok || name != "Runtime" {
-			t.Error("RuntimeSnapshot.shadow must be *shadow.Runtime")
+			t.Error("Snapshot.Shadow must be *shadow.Runtime")
 		}
 	})
 }

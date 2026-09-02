@@ -1,22 +1,20 @@
-// target_pipeline.go — request-to-target pipeline wiring: routing planner adapter, pool resolver aliases, per-target plan construction, and the targetexec executor/effects adapter.
+// target_pipeline.go — app-side targetexec adapters: the health/circuit gate and the observability effects bound to one runtime generation, plus the pool resolver aliases.
 package app
 
 import (
-	"fmt"
 	"io"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/display"
+	"model-proxy/internal/forward"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
 	"model-proxy/internal/observe/requestlog"
-	"model-proxy/internal/protocol"
 	"model-proxy/internal/provider"
 	"model-proxy/internal/routing"
 	runtimestate "model-proxy/internal/runtime"
 	"model-proxy/internal/targetexec"
 	"model-proxy/internal/transport/bodycapture"
-	"net/http"
 	"strconv"
 	"time"
 )
@@ -125,13 +123,13 @@ func (effects targetExecutionEffects) CaptureResponse(
 	if logger == nil {
 		return body
 	}
-	logContext := forwardLogCtx{
-		requestID: attempt.Scope.Log.RequestID,
-		attempt:   attempt.Scope.Log.Attempt,
-		exposed:   attempt.Scope.Log.Exposed,
-		origBody:  attempt.Scope.Log.OriginalBody,
+	logContext := forward.LogCtx{
+		RequestID: attempt.Scope.Log.RequestID,
+		Attempt:   attempt.Scope.Log.Attempt,
+		Exposed:   attempt.Scope.Log.Exposed,
+		OrigBody:  attempt.Scope.Log.OriginalBody,
 	}
-	input := buildRequestLogInput(
+	input := forward.BuildRequestLogInput(
 		logContext,
 		attempt.Request,
 		string(attempt.Protocol),
@@ -217,135 +215,6 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			Output:        attempt.Usage.Output,
 		})
 	}
-}
-
-// targetExecutor assembles the per-attempt executor. parentOf is the request
-// snapshot's pool-virtual→parent projection (RuntimeSnapshot.ParentOf): it is
-// threaded into the health gate so the wire-verdict 404 correction stays on
-// the request's own generation (single-snapshot red line).
-func (p *Proxy) targetExecutor(runtime targetexec.Runtime, parentOf map[string]string) targetexec.Executor {
-	return targetexec.Executor{
-		Client: p.client,
-		State: targetexec.GateState{
-			Gate:       proxyHealthGate{proxy: p, parentOf: parentOf},
-			Runtime:    runtime,
-			Scheduling: runtime.Scheduling,
-		},
-		Effects:   targetExecutionEffects{proxy: p, generation: runtime.Generation},
-		Responses: p.responsesState,
-	}
-}
-
-type targetPlanInput struct {
-	runtime     RuntimeSnapshot
-	target      RouteTarget
-	clientProto string
-	clientPath  string
-}
-
-// planTarget resolves snapshot-owned provider, protocol, endpoint-capability,
-// and runtime implementation facts, then freezes them in targetexec.Plan.
-func (p *Proxy) planTarget(input targetPlanInput) (targetexec.Plan, error) {
-	providerCfg, ok := configdomain.ProviderConfig(input.runtime.Cfg, input.runtime.ParentOf, input.target.Provider)
-	if !ok {
-		return targetexec.Plan{}, fmt.Errorf("unknown provider %q", input.target.Provider)
-	}
-	backendProtoName, viaResponsesVerdict := p.resolvedBackendProto(
-		input.target.Protocol,
-		input.target.Provider,
-		providerCfg,
-		input.target.Model,
-		input.clientProto,
-		input.runtime.ParentOf,
-	)
-	clientProto := protocol.Protocol(input.clientProto)
-	backendProto := protocol.Protocol(backendProtoName)
-	imageOK := routing.ImageOKForTarget(
-		input.runtime.Cfg,
-		input.runtime.ParentOf,
-		input.runtime.Catalog,
-		input.target,
-	)
-	return targetexec.NewPlan(targetexec.PlanInput{
-		Target:              input.target,
-		ProviderConfig:      providerCfg,
-		Provider:            input.runtime.Providers[input.target.Provider],
-		ClientProtocol:      clientProto,
-		BackendProtocol:     backendProto,
-		ViaResponsesVerdict: viaResponsesVerdict,
-		ClientPath:          input.clientPath,
-		ImageOK:             imageOK,
-		// One collector per target attempt: the attempt's conversion
-		// diagnostics ride the plan into the request log; strict refuses
-		// lossy conversions for this target when configured.
-		Diag:        protocol.NewDiagnostics(),
-		StrictLossy: input.runtime.Cfg.Conversion.StrictLossyValue(),
-	}), nil
-}
-
-// forcedProviderFromRequest extracts the HTTP boundary value used by replay.
-// Header wins over query. The policy package receives only the resulting value.
-func forcedProviderFromRequest(request *http.Request) string {
-	if request == nil {
-		return ""
-	}
-	if value := request.Header.Get("x-mp-force-provider"); value != "" {
-		return value
-	}
-	if request.URL == nil {
-		return ""
-	}
-	return request.URL.Query().Get("force_provider")
-}
-
-// requestRoutingScheduler is the stateful scheduling port used by the
-// stateless request-routing planner. Every field belongs to the runtime
-// generation captured once at the start of forward; a reload cannot mix new
-// config or pool identity into an in-flight cross-route decision.
-type requestRoutingScheduler struct {
-	proxy      *Proxy
-	config     *Config
-	parentOf   map[string]string
-	routeKeys  map[string]bool
-	generation uint64
-}
-
-func (scheduler requestRoutingScheduler) Schedule(
-	routeName, sessionKey string,
-	targets []RouteTarget,
-) []RouteTarget {
-	return scheduler.proxy.schedule(
-		scheduler.config,
-		scheduler.parentOf,
-		routeName,
-		sessionKey,
-		targets,
-		scheduler.routeKeys,
-		scheduler.generation,
-	)
-}
-
-// requestRoutingPlanner projects one immutable runtime snapshot into the pure
-// policy package and binds only the narrow scheduler port that may mutate
-// sticky/round-robin state.
-func requestRoutingPlanner(
-	proxy *Proxy,
-	runtime RuntimeSnapshot,
-	routeKeys map[string]bool,
-) routing.Planner {
-	return routing.NewPlanner(routing.PlannerInput{
-		Config:         runtime.Cfg,
-		ParentOf:       runtime.ParentOf,
-		Catalog:        runtime.Catalog,
-		ExpandedRoutes: runtime.ExpandedRoutes,
-		Scheduler: requestRoutingScheduler{
-			proxy:      proxy,
-			config:     runtime.Cfg,
-			parentOf:   runtime.ParentOf,
-			routeKeys:  routeKeys,
-			generation: runtime.Generation,
-		},
-	})
 }
 
 // resolver is the root alias for routing.Resolver; resolution logic lives in

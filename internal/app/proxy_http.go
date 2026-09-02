@@ -6,14 +6,13 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	// Registers the pprof handlers on http.DefaultServeMux; the Proxy handler
 	// dispatches into that mux only when MP_PPROF=1 was set at construction.
 	_ "net/http/pprof"
 
+	"model-proxy/internal/forward"
 	"model-proxy/internal/httpx"
-	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
 	webtransport "model-proxy/internal/web"
@@ -124,10 +123,6 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 	p.forward(proto, w, r, requestID)
 }
 
-func (*Proxy) responsesPreviousID(body []byte) string {
-	return protocol.PreviousResponseID(body)
-}
-
 // serveModels lists all exposed models (from routes) merged with provider
 // metadata (context/output from providers[].models).
 func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
@@ -188,15 +183,7 @@ func writeModels(w http.ResponseWriter, data []byte) {
 // events still pair with a stable id (the contract: 400/502 终局也必须产生 end
 // 且带稳定 request_id).
 func (p *Proxy) publishTerminalEvent(requestID string, r *http.Request, proto, exposed string, status int) {
-	p.events.Publish(observeevents.Event{
-		Type:      "end",
-		Ts:        time.Now().UnixMilli(),
-		RequestID: requestID,
-		Agent:     counters.DetectAgent(r),
-		Protocol:  proto,
-		Exposed:   exposed,
-		Status:    status,
-	})
+	forward.PublishTerminalEvent(p.events, requestID, r, proto, exposed, status)
 }
 
 // isAdminProxyEndpoint reports whether the path is an admin-surface endpoint

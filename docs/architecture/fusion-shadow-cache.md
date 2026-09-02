@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-修改 `internal/app/fusion.go`、`internal/fusion`、`internal/app/proxy_shadow.go`、`internal/shadow`、
+修改 `internal/forward/fusion.go`、`internal/fusion`、`internal/app/proxy_shadow.go`、`internal/shadow`、
 request log、`internal/cache`、
 `internal/transport/bodycapture`、live events 或 replay 时必读。API 字段另见
 `docs/web-api.md`。
@@ -122,14 +122,14 @@ JSONL schema、writer/rotation/retention、查询 heap、Summary 与 Shadow 聚�
 panel fan-out、quorum/grace、judge、候选注入、degrade 和 registry 记录；
 `Registry` 拥有有界 run ring、aggregate 与 daily admission。Engine 只消费
 `fusion.Ports`，不持有 HTTP、Proxy、runtime state 或 observability stores。
-`internal/app/fusion.go` 的 `fusionAdapter` 把同一个 `fusionCtx.runtime` 绑定为三个窄能力：
-tool capability、非流式 leg 和 client-facing synthesis；应用层 `runFusion` 不再
+`internal/forward/fusion.go` 的 `fusionAdapter` 把同一个 `fusionCtx.runtime` 绑定为三个窄能力：
+tool capability、非流式 leg 和 client-facing synthesis；管线侧 `runFusion` 不再
 启动 goroutine、计算 quorum 或维护 registry。
 
 ### Panel
 
 每个成员独立 goroutine、独立 timeout。整个 Fusion 请求持有与普通 route 相同的
-`RuntimeSnapshot`；goroutine 由 `internal/fusion.Engine` 启动，实际 leg 由应用层
+`RuntimeSnapshot`；goroutine 由 `internal/fusion.Engine` 启动，实际 leg 由管线侧
 generation-bound adapter 执行。panel、judge、synthesizer 与普通 route 均通过
 `targetexec.Plan` 完成 provider config/runtime impl、backend protocol、model
 rewrite、协议转换及 base URL/path 选择，Fusion 不得重新读取 reload-owned
@@ -141,7 +141,7 @@ model-denied/404、empty-200 模型锁、metrics、usage、live event 和 reques
 策略。leg 的发送循环（URL 构建、provider rewrite、paramBlock 预应用、POST、
 一次性 401 refresh / 400 参数 learn-strip 重试、响应上限读取）由
 `targetexec.BufferedLeg` 拥有——Executor 的 headless 非流式对应物；circuit、
-metrics、rate-limit 记录与 request log 仍留在 `internal/app/fusion.go`（最终
+metrics、rate-limit 记录与 request log 仍留在 `internal/forward/fusion.go`（最终
 exchange 经 `BufferedLeg.Capture` 回填）。verdict 驱动的 /responses leg 遇 404 时同样翻转 wire verdict
 （`noteWireResponsesMiss`）且**不锁模型**——verdict 判错而非模型缺失。metrics
 口径与 tryTarget 对齐：被放弃的 leg 记 evFailovers（连接错误/5xx 另记

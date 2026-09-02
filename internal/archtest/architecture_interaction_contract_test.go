@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,54 +41,54 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 		}
 	})
 
-	t.Run("target executor is assembled only by its root adapter", func(t *testing.T) {
+	t.Run("target executor is assembled only by its forward adapter", func(t *testing.T) {
 		planSites := importedFunctionCallSitesAcrossProduction(t, "model-proxy/internal/targetexec", "NewPlan")
-		if len(planSites) != 1 || planSites[0].file != "internal/app/target_pipeline.go" || planSites[0].function != "planTarget" {
-			t.Errorf("targetexec.NewPlan production call sites = %v, want only target_pipeline.go:planTarget", planSites)
+		if len(planSites) != 1 || planSites[0].file != "internal/forward/plan.go" || planSites[0].function != "planTarget" {
+			t.Errorf("targetexec.NewPlan production call sites = %v, want only forward/plan.go:planTarget", planSites)
 		}
 		if sites := packageLocalFunctionCallSites(t, "internal/targetexec", "NewPlan"); len(sites) != 0 {
-			t.Errorf("targetexec package-local NewPlan calls = %v, want none outside the root plan owner", sites)
+			t.Errorf("targetexec package-local NewPlan calls = %v, want none outside the forward plan owner", sites)
 		}
 		if sites := importedFunctionReferenceSitesAcrossProduction(t, "model-proxy/internal/targetexec", "NewPlan"); len(sites) != 1 ||
-			sites[0].file != "internal/app/target_pipeline.go" || sites[0].function != "planTarget" {
-			t.Errorf("targetexec.NewPlan production reference sites = %v, want only target_pipeline.go:planTarget direct call", sites)
+			sites[0].file != "internal/forward/plan.go" || sites[0].function != "planTarget" {
+			t.Errorf("targetexec.NewPlan production reference sites = %v, want only forward/plan.go:planTarget direct call", sites)
 		}
 
 		sites := importedCompositeLiteralSites(t, "model-proxy/internal/targetexec", "Executor")
-		if len(sites) != 1 || sites[0].file != "internal/app/target_pipeline.go" || sites[0].function != "targetExecutor" {
-			t.Errorf("targetexec.Executor production composites = %v, want only target_pipeline.go:targetExecutor", sites)
+		if len(sites) != 1 || sites[0].file != "internal/forward/plan.go" || sites[0].function != "targetExecutor" {
+			t.Errorf("targetexec.Executor production composites = %v, want only forward/plan.go:targetExecutor", sites)
 		}
 		if sites := packageLocalCompositeLiteralSites(t, "internal/targetexec", "Executor"); len(sites) != 0 {
-			t.Errorf("targetexec package-local Executor composites = %v, want none outside the root adapter", sites)
+			t.Errorf("targetexec package-local Executor composites = %v, want none outside the forward adapter", sites)
 		}
 		if sites := importedTypeValueReferenceSitesAcrossProduction(t, "model-proxy/internal/targetexec", "Executor"); len(sites) != 1 ||
-			sites[0].file != "internal/app/target_pipeline.go" || sites[0].function != "targetExecutor" {
-			t.Errorf("targetexec.Executor production value references = %v, want only target_pipeline.go:targetExecutor direct composite", sites)
+			sites[0].file != "internal/forward/plan.go" || sites[0].function != "targetExecutor" {
+			t.Errorf("targetexec.Executor production value references = %v, want only forward/plan.go:targetExecutor direct composite", sites)
 		}
 		if sites := importedTypeDeclarationSitesAcrossProduction(t, "model-proxy/internal/targetexec", "Executor"); len(sites) != 0 {
 			t.Errorf("targetexec.Executor type aliases = %v, want none", sites)
 		}
 
-		adapter, _ := parseGoFile(t, "internal/app/target_pipeline.go")
-		factory := namedMethod(t, adapter, "Proxy", "targetExecutor")
+		adapter, _ := parseGoFile(t, "internal/forward/plan.go")
+		factory := namedMethod(t, adapter, "pipeline", "targetExecutor")
 		if got := selectorCompositeCountInNode(factory.Body, "targetexec", "GateState"); got != 1 {
-			t.Errorf("Proxy.targetExecutor targetexec.GateState composites = %d, want one frozen-state adapter", got)
+			t.Errorf("pipeline.targetExecutor targetexec.GateState composites = %d, want one frozen-state adapter", got)
 		}
 	})
 
 	t.Run("forward uses its constructed routing planner", func(t *testing.T) {
-		forward, _ := parseGoFile(t, "internal/app/proxy_forward.go")
-		serveOnce := namedMethod(t, forward, "Proxy", "serveOnce")
+		forward, _ := parseGoFile(t, "internal/forward/forward.go")
+		serveOnce := namedMethod(t, forward, "pipeline", "serveOnce")
 		if !constructedPlannerOwnsRoutingCalls(serveOnce.Body) {
-			t.Error("Proxy.serveOnce must call ApplyWithProfile and ContextOverflowRetryWithProfile exactly once on the value assigned from requestRoutingPlanner")
+			t.Error("pipeline.serveOnce must call ApplyWithProfile and ContextOverflowRetryWithProfile exactly once on the value assigned from requestRoutingPlanner")
 		}
 	})
 
 	t.Run("normal delivery gates Shadow on its exact committed result", func(t *testing.T) {
-		forward, _ := parseGoFile(t, "internal/app/proxy_forward.go")
-		serveOnce := namedMethod(t, forward, "Proxy", "serveOnce")
+		forward, _ := parseGoFile(t, "internal/forward/forward.go")
+		serveOnce := namedMethod(t, forward, "pipeline", "serveOnce")
 		if !normalDeliveryShadowDispatchValid(serveOnce.Body) {
-			t.Error("Proxy.serveOnce must dispatch Shadow only inside the exact executor-result Committed branch and pass that result's Commit")
+			t.Error("pipeline.serveOnce must dispatch Shadow only inside the exact executor-result Committed branch and pass that result's Commit")
 		}
 	})
 
@@ -101,15 +102,15 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 
 	t.Run("fusion engine and shadow runtime have one owner each", func(t *testing.T) {
 		fusionSites := importedCompositeLiteralSites(t, "model-proxy/internal/fusion", "Engine")
-		if len(fusionSites) != 1 || fusionSites[0].file != "internal/app/fusion.go" || fusionSites[0].function != "runFusion" {
-			t.Errorf("fusion.Engine production composites = %v, want only fusion.go:runFusion", fusionSites)
+		if len(fusionSites) != 1 || fusionSites[0].file != "internal/forward/fusion.go" || fusionSites[0].function != "runFusion" {
+			t.Errorf("fusion.Engine production composites = %v, want only forward/fusion.go:runFusion", fusionSites)
 		}
 		if sites := packageLocalCompositeLiteralSites(t, "internal/fusion", "Engine"); len(sites) != 0 {
-			t.Errorf("fusion package-local Engine composites = %v, want none outside the root adapter", sites)
+			t.Errorf("fusion package-local Engine composites = %v, want none outside the forward adapter", sites)
 		}
 		if sites := importedTypeValueReferenceSitesAcrossProduction(t, "model-proxy/internal/fusion", "Engine"); len(sites) != 1 ||
-			sites[0].file != "internal/app/fusion.go" || sites[0].function != "runFusion" {
-			t.Errorf("fusion.Engine production value references = %v, want only fusion.go:runFusion direct composite", sites)
+			sites[0].file != "internal/forward/fusion.go" || sites[0].function != "runFusion" {
+			t.Errorf("fusion.Engine production value references = %v, want only forward/fusion.go:runFusion direct composite", sites)
 		}
 		if sites := importedTypeDeclarationSitesAcrossProduction(t, "model-proxy/internal/fusion", "Engine"); len(sites) != 0 {
 			t.Errorf("fusion.Engine type aliases = %v, want none", sites)
@@ -156,6 +157,48 @@ func TestArchitectureRootInteractionContracts(t *testing.T) {
 		if sites := importedFunctionReferenceSitesAcrossProduction(t, "model-proxy/internal/web", "New"); len(sites) != 1 ||
 			sites[0].file != "internal/app/web_adapter.go" || sites[0].function != "mustNewWebTransport" {
 			t.Errorf("web.New production reference sites = %v, want only web_adapter.go:mustNewWebTransport direct call", sites)
+		}
+	})
+
+	t.Run("forward pipeline symbols have one owner", func(t *testing.T) {
+		// forward must never reach back into the composition root (also closed
+		// structurally by the dependency DAG: app → forward would cycle).
+		for _, path := range productionGoFilesIn(t, "internal/forward") {
+			file, _ := parseGoFile(t, path)
+			for _, spec := range file.Imports {
+				if strings.Trim(spec.Path.Value, `"`) == "model-proxy/internal/app" {
+					t.Errorf("%s imports internal/app; the pipeline consumes Snapshot/Services/RouteState ports only", path)
+				}
+			}
+		}
+		// The app side keeps only the shim (Proxy.forward) and the port
+		// adapters; moved pipeline symbols must not be re-declared there.
+		moved := map[string]bool{
+			"serveOnce": true, "serveRequest": true, "serveState": true, "serveResult": true,
+			"requestProfile": true, "writeAllTargetsFailed": true, "statusClientGone": true,
+			"runFusion": true, "fusionCtx": true, "fusionAdapter": true,
+			"fusionSynthesizerSupportsTools": true, "callFusionLeg": true,
+			"callFusionSynthesizer": true, "expandFusionResponses": true,
+			"newTargetAttempt": true, "forwardLogCtx": true, "buildRequestLogInput": true,
+			"targetPlanInput": true, "planTarget": true, "targetExecutor": true,
+			"forcedProviderFromRequest": true,
+			"requestRoutingScheduler":   true, "requestRoutingPlanner": true,
+			"evaluateRequestGuard": true, "requestGuardDecision": true, "auditGuardHit": true,
+		}
+		appPackage, _ := parseGoPackage(t, "internal/app")
+		for _, decl := range appPackage.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if moved[d.Name.Name] {
+					t.Errorf("internal/app re-declares moved pipeline symbol %s", d.Name.Name)
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok && moved[ts.Name.Name] {
+						t.Errorf("internal/app re-declares moved pipeline type %s", ts.Name.Name)
+					}
+				}
+			}
 		}
 	})
 
