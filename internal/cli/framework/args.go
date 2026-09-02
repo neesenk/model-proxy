@@ -1,6 +1,8 @@
-// Package framework owns CLI-wide arg parsing helpers shared by every command
-// wrapper: --config resolution and positional extraction. Environment reads
-// (HOME) happen per call so tests can isolate them.
+// Package framework owns the CLI-wide helpers shared by every command
+// package: --config resolution and positional extraction, process-level
+// config loading (LoadCmdConfig), and terminal number formatting (CompactNum,
+// Plural). Environment reads (HOME) happen per call so tests can isolate
+// them.
 package framework
 
 import (
@@ -101,4 +103,26 @@ func HomeDir() string {
 // (<home>/.model-proxy/<name>_<suffix>.json).
 func AuthFilePath(providerName, suffix string) string {
 	return accounts.AuthFilePath(providerName, suffix)
+}
+
+// PositionalArgs returns every non-flag positional arg in order: --flag value
+// pairs and --flag=value forms are skipped (used by pin/unpin/replay to pull
+// <route> [<provider>] / <id>).
+func PositionalArgs(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--config" {
+			i++ // skip its value
+			continue
+		}
+		if strings.HasPrefix(a, "--") {
+			if !strings.Contains(a, "=") {
+				i++ // skip --flag value
+			}
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }

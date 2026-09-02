@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/display"
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
@@ -110,7 +111,7 @@ func (effects targetExecutionEffects) LogAttempt(attempt targetexec.AttemptDTO) 
 		attempt.Request.URL.Path,
 		attempt.Scope.CalledModel,
 		attempt.Target.Model,
-		provider.StatusColor(attempt.Response.StatusCode, strconv.Itoa(attempt.Response.StatusCode)),
+		display.StatusColor(attempt.Response.StatusCode, strconv.Itoa(attempt.Response.StatusCode)),
 		time.Since(attempt.Started).Milliseconds(),
 		len(attempt.Body),
 	)

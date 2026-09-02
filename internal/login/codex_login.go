@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"net/url"
 	"strings"
@@ -89,14 +90,14 @@ func RequestUserCodeContext(ctx context.Context, opts *CodexLoginServerOptions, 
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("request user code: HTTP %d: %s", resp.StatusCode, provider.Truncate(string(rb), 200))
+		return nil, fmt.Errorf("request user code: HTTP %d: %s", resp.StatusCode, display.Truncate(string(rb), 200))
 	}
 	var uc UserCodeResponse
 	if err := json.Unmarshal(rb, &uc); err != nil {
 		return nil, fmt.Errorf("parse user code response: %w", err)
 	}
 	if uc.DeviceAuthID == "" || uc.UserCode == "" {
-		return nil, fmt.Errorf("user code response missing fields: %s", provider.Truncate(string(rb), 200))
+		return nil, fmt.Errorf("user code response missing fields: %s", display.Truncate(string(rb), 200))
 	}
 	return &uc, nil
 }
@@ -177,7 +178,7 @@ func PollForTokenContext(ctx context.Context, opts *CodexLoginServerOptions, dev
 		case "deviceauth_authorization_denied", "access_denied":
 			return nil, fmt.Errorf("user denied the authorization")
 		default:
-			return nil, fmt.Errorf("device token poll: HTTP %d: %s", resp.StatusCode, provider.Truncate(string(rb), 200))
+			return nil, fmt.Errorf("device token poll: HTTP %d: %s", resp.StatusCode, display.Truncate(string(rb), 200))
 		}
 
 		timer := time.NewTimer(time.Duration(interval) * time.Second)
@@ -223,7 +224,7 @@ func ExchangeCodeForTokensContext(ctx context.Context, opts *CodexLoginServerOpt
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("exchange code: HTTP %d: %s", resp.StatusCode, provider.Truncate(string(rb), 200))
+		return nil, fmt.Errorf("exchange code: HTTP %d: %s", resp.StatusCode, display.Truncate(string(rb), 200))
 	}
 	var tok struct {
 		AccessToken  string `json:"access_token"`
@@ -234,7 +235,7 @@ func ExchangeCodeForTokensContext(ctx context.Context, opts *CodexLoginServerOpt
 		return nil, fmt.Errorf("parse token response: %w", err)
 	}
 	if tok.AccessToken == "" {
-		return nil, fmt.Errorf("token response missing access_token: %s", provider.Truncate(string(rb), 200))
+		return nil, fmt.Errorf("token response missing access_token: %s", display.Truncate(string(rb), 200))
 	}
 	af := &provider.CodexAuthFile{AuthMode: "chatgpt"}
 	af.Tokens.AccessToken = tok.AccessToken

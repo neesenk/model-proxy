@@ -4,12 +4,12 @@ import (
 	"context"
 	"io"
 	"log"
-	clicmd "model-proxy/internal/cli"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
+	clistatus "model-proxy/internal/cli/status"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/display"
 	"model-proxy/internal/observe/logx"
-	"model-proxy/internal/provider"
 	"net"
 	"net/http"
 	"os"
@@ -49,11 +49,11 @@ func (assembly serveAssembly) command(args []string) {
 			log.Fatal(err)
 		}
 	case "stop":
-		cliserve.CmdStop(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
+		cliserve.CmdStop(daemonEnv(), cliserve.ParseArgs(args), display.Yellow, display.Gray, display.Green)
 	case "reload":
-		cliserve.CmdReload(daemonEnv(), cliserve.ParseArgs(args), provider.Yellow, provider.Gray, provider.Green)
+		cliserve.CmdReload(daemonEnv(), cliserve.ParseArgs(args), display.Yellow, display.Gray, display.Green)
 	case "status":
-		clicmd.RunServeStatus(args)
+		clistatus.RunServeStatus(args)
 	default:
 		// No subcommand — foreground serve.
 		sa := cliserve.ParseArgs(args)
@@ -97,7 +97,7 @@ func (serveAssembly) runProxyProcess(sa cliserve.Args) error {
 				// don't pollute the file (logColorEnabled was set at init from
 				// stderr being a tty, but the MultiWriter writes the same bytes
 				// to both, and files must stay escape-free).
-				provider.LogColorEnabled = false
+				display.LogColorEnabled = false
 			} else {
 				// Not fatal, but never silent: the operator asked for a log
 				// file and would otherwise discover the loss only when the

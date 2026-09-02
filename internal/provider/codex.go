@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"strings"
 	"time"
@@ -189,8 +190,8 @@ func ParseCodexQuota(body []byte, account, plan string) (*QuotaSnapshot, error) 
 	}
 	s := &QuotaSnapshot{
 		Billing: BillingPlan,
-		Account: Or(u.Email, account),
-		Plan:    Or(u.PlanType, plan),
+		Account: display.Or(u.Email, account),
+		Plan:    display.Or(u.PlanType, plan),
 		AsOf:    time.Now(),
 	}
 	now := time.Now()

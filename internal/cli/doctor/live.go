@@ -8,8 +8,8 @@ import (
 	cliframework "model-proxy/internal/cli/framework"
 	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/display"
 	observeseclog "model-proxy/internal/observe/seclog"
-	"model-proxy/internal/provider"
 	"model-proxy/internal/routing"
 	"model-proxy/internal/takeover"
 	"net/url"
@@ -78,7 +78,7 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 		return "", fmt.Errorf("web UI endpoints not available — is web.enabled true on the daemon?")
 	}
 	if status != 200 {
-		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, provider.Truncate(string(statusBody), 200))
+		return "", fmt.Errorf("daemon returned HTTP %d: %s", status, display.Truncate(string(statusBody), 200))
 	}
 
 	// Recent failures are context, not verdict: a fetch failure or a disabled
@@ -93,8 +93,8 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 	auditTakeoverDrift(cfg, drift)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s · %s\n", provider.Bold("model-proxy doctor --live"), provider.Dim(base))
-	fmt.Fprintf(&b, "%s daemon running (v%s, uptime %s)\n\n", provider.Green("✓"), st.Version, st.Uptime)
+	fmt.Fprintf(&b, "%s · %s\n", display.Bold("model-proxy doctor --live"), display.Dim(base))
+	fmt.Fprintf(&b, "%s daemon running (v%s, uptime %s)\n\n", display.Green("✓"), st.Version, st.Uptime)
 	clicommon.AppendSection(&b, RenderDiagnosis(cfg, &st, drift))
 	clicommon.AppendSection(&b, clicommon.RenderSchedule(&st))
 	if reqErr == nil && reqStatus == 200 {
@@ -196,21 +196,21 @@ func RenderDiagnosis(cfg *configdomain.Config, st *appapi.StatusResp, drift []Cl
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", provider.Bold("Diagnosis"))
+	fmt.Fprintf(&b, "%s\n", display.Bold("Diagnosis"))
 	if len(errs) == 0 && len(warns) == 0 {
-		fmt.Fprintf(&b, "  %s\n", provider.Green("✓ no problems found"))
+		fmt.Fprintf(&b, "  %s\n", display.Green("✓ no problems found"))
 	}
 	emit := func(l diagLine) {
-		mark := provider.Green("✓")
+		mark := display.Green("✓")
 		switch l.sev {
 		case 0:
-			mark = provider.Red("✗")
+			mark = display.Red("✗")
 		case 1:
-			mark = provider.Yellow("⚠")
+			mark = display.Yellow("⚠")
 		}
 		fmt.Fprintf(&b, "  %s %s\n", mark, l.text)
 		for _, h := range l.hints {
-			fmt.Fprintf(&b, "    %s\n", provider.Dim("→ "+h))
+			fmt.Fprintf(&b, "    %s\n", display.Dim("→ "+h))
 		}
 	}
 	for _, l := range errs {
@@ -334,28 +334,28 @@ func RenderDoctorFailures(body []byte) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n", provider.Bold("Recent failures"))
+	fmt.Fprintf(&b, "%s\n", display.Bold("Recent failures"))
 	switch {
 	case !rr.Enabled:
-		fmt.Fprintf(&b, "  %s\n", provider.Dim("request_log disabled — set request_log.enabled in config to record requests"))
+		fmt.Fprintf(&b, "  %s\n", display.Dim("request_log disabled — set request_log.enabled in config to record requests"))
 	case len(rr.Records) == 0:
-		fmt.Fprintf(&b, "  %s\n", provider.Dim("none recorded"))
+		fmt.Fprintf(&b, "  %s\n", display.Dim("none recorded"))
 	default:
 		for _, r := range rr.Records {
 			ts := r.Ts
 			if t, err := time.Parse(time.RFC3339, r.Ts); err == nil {
 				ts = t.Local().Format("15:04:05")
 			}
-			statusColor := provider.Yellow
+			statusColor := display.Yellow
 			if r.Status >= 500 {
-				statusColor = provider.Red
+				statusColor = display.Red
 			}
 			route := r.Exposed
 			if route == "" {
-				route = provider.Dim("(no route)")
+				route = display.Dim("(no route)")
 			}
 			fmt.Fprintf(&b, "  %s  %s → %s  %s  %dms\n",
-				provider.Dim(ts), route, r.Provider, statusColor(strconv.Itoa(r.Status)), r.LatencyMs)
+				display.Dim(ts), route, r.Provider, statusColor(strconv.Itoa(r.Status)), r.LatencyMs)
 		}
 		// Actionable follow-ups, deduped per provider/route: a 429 points at a
 		// live cooldown (unfreeze), a 5xx at a link worth re-probing (test).
@@ -365,10 +365,10 @@ func RenderDoctorFailures(body []byte) string {
 			switch {
 			case r.Status == 429 && r.Provider != "" && !seen429[r.Provider]:
 				seen429[r.Provider] = true
-				fmt.Fprintf(&b, "  %s\n", provider.Dim("→ [可立即执行] model-proxy unfreeze "+poolParent(r.Provider)+"，若 "+r.Provider+" 仍在 429 冷却"))
+				fmt.Fprintf(&b, "  %s\n", display.Dim("→ [可立即执行] model-proxy unfreeze "+poolParent(r.Provider)+"，若 "+r.Provider+" 仍在 429 冷却"))
 			case r.Status >= 500 && r.Exposed != "" && !seen5xx[r.Exposed]:
 				seen5xx[r.Exposed] = true
-				fmt.Fprintf(&b, "  %s\n", provider.Dim("→ [可立即执行] model-proxy test "+r.Exposed+"，探测该路由各 target 链路"))
+				fmt.Fprintf(&b, "  %s\n", display.Dim("→ [可立即执行] model-proxy test "+r.Exposed+"，探测该路由各 target 链路"))
 			}
 		}
 	}
@@ -382,14 +382,14 @@ func RenderDoctorTakeover(drift []ClientDrift) string {
 	for _, d := range drift {
 		switch {
 		case !d.Taken:
-			parts = append(parts, d.Client+" "+provider.Dim("not taken over"))
+			parts = append(parts, d.Client+" "+display.Dim("not taken over"))
 		case d.OK:
-			parts = append(parts, d.Client+" "+provider.Green("✓"))
+			parts = append(parts, d.Client+" "+display.Green("✓"))
 		default:
-			parts = append(parts, d.Client+" "+provider.Red("✗ drift"))
+			parts = append(parts, d.Client+" "+display.Red("✗ drift"))
 		}
 	}
-	return provider.Bold("Takeover") + "\n  " + strings.Join(parts, "  ·  ") + "\n"
+	return display.Bold("Takeover") + "\n  " + strings.Join(parts, "  ·  ") + "\n"
 }
 
 // ClientDrift is the takeover state of one agent client: taken (a backup
@@ -471,7 +471,7 @@ func AuditTakeoverDrift(cfg *configdomain.Config, drift []ClientDrift, agent str
 				d.Client, driftHost(d.Expected), driftHost(d.Current)),
 		}
 		if err := observeseclog.AppendSync(dir, rec); err != nil {
-			fmt.Fprintf(os.Stderr, "%s security audit append failed: %v\n", provider.Yellow("⚠"), err)
+			fmt.Fprintf(os.Stderr, "%s security audit append failed: %v\n", display.Yellow("⚠"), err)
 		}
 	}
 }

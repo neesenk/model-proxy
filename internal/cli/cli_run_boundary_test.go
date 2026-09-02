@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"model-proxy/internal/cli/clitest"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -114,7 +115,7 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 		t.Fatalf("Help keys = %q, want exactly %q; update the exhaustive help cases", got, want)
 	}
 
-	configFile := writeTempConfig(t, minimalConfig)
+	configFile := clitest.WriteTempConfig(t, clitest.MinimalConfig)
 	providerAppendix := fmt.Sprintf(
 		"\nProviders (from config):\n  %-14s  provider=%-12s  %s\n",
 		"aqp",
@@ -208,28 +209,28 @@ func TestRunCLIArgsDispatchContract(t *testing.T) {
 
 func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 	wantTargets := map[string]string{
-		"add":      "RunAdd",
-		"audit":    "RunAudit",
-		"presets":  "RunPresets",
-		"config":   "RunConfig",
-		"doctor":   "RunDoctor",
+		"add":      "clipresets.RunAdd",
+		"audit":    "cliaudit.RunAudit",
+		"presets":  "clipresets.RunPresets",
+		"config":   "cliconfig.CmdConfigRun",
+		"doctor":   "clidoctor.RunDoctor",
 		"login":    "clilogin.CmdLogin",
-		"logout":   "RunLogout",
-		"models":   "RunModels",
-		"pin":      "RunPin",
-		"replay":   "RunReplay",
+		"logout":   "cliaccount.RunLogout",
+		"models":   "climodels.RunModels",
+		"pin":      "cliadmin.RunPin",
+		"replay":   "clidiag.RunReplay",
 		"restore":  "RunRestore",
-		"schedule": "RunSchedule",
+		"schedule": "clistatus.RunSchedule",
 		"serve":    "app.Serve",
-		"shadow":   "RunShadow",
-		"stats":    "RunStats",
+		"shadow":   "clidiag.RunShadow",
+		"stats":    "clistats.RunStats",
 		"takeover": "RunTakeover",
 		"test":     "climodels.CmdTest",
-		"unfreeze": "RunUnfreeze",
-		"unpin":    "RunUnpin",
-		"usage":    "RunUsage",
-		"routes":   "RunRoutes",
-		"wire":     "RunWire",
+		"unfreeze": "cliadmin.RunUnfreeze",
+		"unpin":    "cliadmin.RunUnpin",
+		"usage":    "clistats.RunUsage",
+		"routes":   "clistatus.RunRoutes",
+		"wire":     "clidiag.RunWire",
 	}
 	app := NewApplication(serveStub)
 	gotCommands := make([]string, 0, len(app.Commands))

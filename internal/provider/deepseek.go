@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"strconv"
 	"time"
@@ -114,7 +115,7 @@ func ParseDeepseekQuota(body []byte) *QuotaSnapshot {
 	for _, b := range u.BalanceInfos {
 		total, _ := strconv.ParseFloat(b.TotalBalance, 64)
 		s.Windows = append(s.Windows, QuotaWindow{
-			Label: Or(b.Currency, "Balance"), Kind: "money",
+			Label: display.Or(b.Currency, "Balance"), Kind: "money",
 			Total: total, RemainingPct: -1,
 		})
 	}

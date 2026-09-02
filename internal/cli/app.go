@@ -3,8 +3,17 @@ package cli
 import (
 	"io"
 
+	cliaccount "model-proxy/internal/cli/account"
+	cliadmin "model-proxy/internal/cli/admin"
+	cliaudit "model-proxy/internal/cli/audit"
+	cliconfig "model-proxy/internal/cli/config"
+	clidiag "model-proxy/internal/cli/diag"
+	clidoctor "model-proxy/internal/cli/doctor"
 	clilogin "model-proxy/internal/cli/login"
 	climodels "model-proxy/internal/cli/models"
+	clipresets "model-proxy/internal/cli/presets"
+	clistats "model-proxy/internal/cli/stats"
+	clistatus "model-proxy/internal/cli/status"
 )
 
 // Application is the CLI process composition owner: it binds the concrete
@@ -24,24 +33,24 @@ func NewApplication(serve func(args []string)) *Application {
 		"takeover": ProcessCommand(RunTakeover),
 		"restore":  ProcessCommand(RunRestore),
 		"login":    ProcessCommand(clilogin.CmdLogin),
-		"add":      ProcessCommand(RunAdd),
-		"presets":  ProcessCommand(RunPresets),
-		"logout":   ProcessCommand(RunLogout),
-		"usage":    ProcessCommand(RunUsage),
-		"models":   ProcessCommand(RunModels),
-		"config":   ProcessCommand(RunConfig),
-		"routes":   ProcessCommand(RunRoutes),
-		"schedule": ProcessCommand(RunSchedule),
-		"pin":      ProcessCommand(RunPin),
-		"unpin":    ProcessCommand(RunUnpin),
-		"unfreeze": ProcessCommand(RunUnfreeze),
-		"stats":    ProcessCommand(RunStats),
-		"doctor":   ProcessCommand(RunDoctor),
-		"audit":    ProcessCommand(RunAudit),
+		"add":      ProcessCommand(clipresets.RunAdd),
+		"presets":  ProcessCommand(clipresets.RunPresets),
+		"logout":   ProcessCommand(cliaccount.RunLogout),
+		"usage":    ProcessCommand(clistats.RunUsage),
+		"models":   ProcessCommand(climodels.RunModels),
+		"config":   ProcessCommand(cliconfig.CmdConfigRun),
+		"routes":   ProcessCommand(clistatus.RunRoutes),
+		"schedule": ProcessCommand(clistatus.RunSchedule),
+		"pin":      ProcessCommand(cliadmin.RunPin),
+		"unpin":    ProcessCommand(cliadmin.RunUnpin),
+		"unfreeze": ProcessCommand(cliadmin.RunUnfreeze),
+		"stats":    ProcessCommand(clistats.RunStats),
+		"doctor":   ProcessCommand(clidoctor.RunDoctor),
+		"audit":    ProcessCommand(cliaudit.RunAudit),
 		"test":     ProcessCommand(climodels.CmdTest),
-		"replay":   ProcessCommand(RunReplay),
-		"shadow":   ProcessCommand(RunShadow),
-		"wire":     ProcessCommand(RunWire),
+		"replay":   ProcessCommand(clidiag.RunReplay),
+		"shadow":   ProcessCommand(clidiag.RunShadow),
+		"wire":     ProcessCommand(clidiag.RunWire),
 	}
 	return app
 }

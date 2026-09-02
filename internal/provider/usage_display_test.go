@@ -2,6 +2,7 @@ package provider
 
 import (
 	"io"
+	"model-proxy/internal/display"
 	"os"
 	"sort"
 	"testing"
@@ -13,7 +14,7 @@ import (
 // main in Phase 3. In package provider, the unexported helpers are called
 // directly. Color is forced off via SetColorEnabled.
 
-func init() { SetColorEnabled(false) }
+func init() { display.SetColorEnabled(false) }
 
 func TestPrintQuotaSnapshot(t *testing.T) {
 	s := &QuotaSnapshot{

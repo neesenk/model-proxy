@@ -51,10 +51,10 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
 
 两套独立开关：
 
-- `provider.ColorEnabled`（`internal/provider/display.go`）— stdout 着色；根 CLI 仅保留
-  实际使用的 `cGreen`/`cRed`/`cYellow`/`cDim`/`cBold`/`cBlue`/`cCyan`/`cGray`
-  等薄包装。
-- `logColorEnabled` — stderr/log 着色（`cl(...)`，运行时日志用）。
+- `display.ColorEnabled`（`internal/display/display.go`）— stdout 着色；CLI 与 provider
+  usage 输出直接使用该包的 `Green`/`Red`/`Yellow`/`Dim`/`Bold`/`Blue`/`Cyan`/`Gray`
+  等 helper。
+- `display.LogColorEnabled` — stderr/log 着色（`LogColor`/`StatusColor`，运行时日志用）。
 
 两者都遵循：`NO_COLOR` 非空 -> 关；`CLICOLOR_FORCE` 非 0/空 -> 开；否则按 fd 是否 tty 自动。**管道/重定向到文件时着色自动关闭**，故脚本看到的 stdout 是纯文本。契约文案里的 `cGreen("✓")` 等表示「着色开启时包 ANSI，关闭时原样」。
 
@@ -350,7 +350,7 @@ logout <provider> [--label <name>] [--all]
 usage [provider]   # 无参数 = 所有已配置 provider
 ```
 
-逻辑（`internal/cli/usage.go` 的 `CmdUsage` -> `PrintProviderUsage` -> `provider.Provider.Usage()`）：无参数时
+逻辑（`internal/cli/stats/usage.go` 的 `CmdUsage` -> `PrintProviderUsage` -> `provider.Provider.Usage()`）：无参数时
 按 provider 名排序逐个打印，块间用 `usageDivider` 分隔。未知 provider -> stderr
 `unknown provider ...` + exit 1。
 
@@ -554,7 +554,7 @@ routes            # 列出全部暴露模型的推导路由表
 routes <model>    # 单个模型的路由详情
 ```
 
-逻辑（`internal/cli/routes.go` 的 `CmdRoutes`）：纯 config 计算（`routing.RouteTable` —— provider models 按暴露名聚合，alias 改名，priority 继承 provider；显式 `routes:` 覆盖同名推导路由），不访问 daemon。
+逻辑（`internal/cli/status/routes.go` 的 `CmdRoutes`）：纯 config 计算（`routing.RouteTable` —— provider models 按暴露名聚合，alias 改名，priority 继承 provider；显式 `routes:` 覆盖同名推导路由），不访问 daemon。
 
 ### stdout（列表模式）
 
@@ -591,7 +591,7 @@ route kimi-k3 — 4 target(s)
 schedule   # 查询运行中 daemon 的 GET /debug/schedule
 ```
 
-逻辑（`internal/cli/schedule.go` 的 `CmdSchedule`）：HTTP GET `http://<LISTEN>/debug/schedule`，10s 超时，渲染 `RenderScheduleRoutes`（`internal/cli/status.go`，与 `serve status` 共享）。
+逻辑（`internal/cli/status/schedule.go` 的 `CmdSchedule`）：HTTP GET `http://<LISTEN>/debug/schedule`，10s 超时，渲染 `RenderScheduleRoutes`（`internal/cli/status/status.go`，与 `serve status` 共享）。
 
 ### stdout（`renderScheduleRoutes`，每路由一块）
 
@@ -622,7 +622,7 @@ schedule   # 查询运行中 daemon 的 GET /debug/schedule
 stats [--from TIME] [--to TIME] [--provider P] [--model M] [--bucket B] [--granularity day|month] [--cost] [--json]
 ```
 
-逻辑（`internal/cli/stats.go` 的 `CmdStats` -> `RenderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
+逻辑（`internal/cli/stats/stats.go` 的 `CmdStats` -> `RenderStats`）：GET `http://<LISTEN>/api/stats?...`，10s 超时。`--from`/`--to` = unix 秒或 RFC3339；默认 60min 前..now；`--bucket` 仅展示聚合（`1m`/`10m`/`1h`，存储恒为 1 分钟）；`--json` 原样返回。
 
 > `--granularity day|month` 或 `--cost` 任一存在时，改走 `/api/analytics`（按自然日/月聚合，存储恒为 1 分钟），表格头与列由 `formatAnalyticsTable` 渲染（见下）。两者都省略时输出与原 `stats` 完全一致。
 
@@ -691,7 +691,7 @@ agent                reqs        input       output
 serve status [--logs [N]] [--json] [--config PATH]
 ```
 
-逻辑（`internal/cli/status.go` 的 `CmdServeStatus` -> `RenderStatus`）：GET `/api/status` + `/api/tokens`（带 `--logs` 再加 `/api/logs?tail=N`，默认 N=20）。`--json` 合并 `{status, tokens[, logs]}` 原样输出。
+逻辑（`internal/cli/status/status.go` 的 `CmdServeStatus` -> `RenderStatus`）：GET `/api/status` + `/api/tokens`（带 `--logs` 再加 `/api/logs?tail=N`，默认 N=20）。`--json` 合并 `{status, tokens[, logs]}` 原样输出。
 
 ### stdout（渲染，各段由 `appendSection` 以空行分隔）
 
@@ -862,7 +862,7 @@ pin [<route> <provider>] [--ttl DUR] [--config PATH]
 unpin <route> [--config PATH]
 ```
 
-逻辑（`internal/cli/pin.go` 的 `CmdPin`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin` 由 `internal/web` transport 的 `CommandAPI` 写入 daemon 的 `internal/runtime.Manager`；`Manager.DecideOrder` 在 availability 过滤前对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）；operator pin 有意跨 config reload 保留。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
+逻辑（`internal/cli/admin/pin.go` 的 `CmdPin`）：不改 yaml，临时把某路由钉到一个 provider。`pin` 经 `POST /api/pin` 由 `internal/web` transport 的 `CommandAPI` 写入 daemon 的 `internal/runtime.Manager`；`Manager.DecideOrder` 在 availability 过滤前对该路由做独占过滤——**只保留被钉 provider 的 target，不故障转移**（池化 provider 按父名钉，如 `zhipu` 钉住所有 `zhipu#<id>` 虚拟）。`--ttl` 到期 / `unpin` / daemon 重启即失效（纯内存）；operator pin 有意跨 config reload 保留。`pin`（无参数）`GET /api/pin` 列出活跃 pin；`unpin` `DELETE /api/pin?route=`。活跃 pin 在 `schedule` / `/debug/schedule` 每路由块标 `pinned: <PROVIDER> (<expires in …>)`。
 
 ### stdout
 
@@ -882,7 +882,7 @@ unpin <route> [--config PATH]
 replay <id> --to <provider> [--config PATH]
 ```
 
-逻辑（`internal/cli/replay.go` 的 `CmdReplay`）：从 daemon 的 `GET /api/requests/<id>` 取回原请求（method/path/body，需 `request_log.enabled`），再以 `x-mp-force-provider: <provider>` 头把同一 body 重发到 proxy（该头对**这一条请求**做一次性 provider 钉死，不动全局 pin），把新后端的响应写 stdout，用于并排对比。
+逻辑（`internal/cli/diag/replay.go` 的 `CmdReplay`）：从 daemon 的 `GET /api/requests/<id>` 取回原请求（method/path/body，需 `request_log.enabled`），再以 `x-mp-force-provider: <provider>` 头把同一 body 重发到 proxy（该头对**这一条请求**做一次性 provider 钉死，不动全局 pin），把新后端的响应写 stdout，用于并排对比。
 
 ### stdout
 
@@ -909,7 +909,7 @@ replay <id> --to <provider> [--config PATH]
 shadow report [--from TIME] [--to TIME] [--config PATH]
 ```
 
-逻辑（`internal/cli/shadow_report.go` 的 `CmdShadow` -> `CmdShadowReport`）：GET `http://<LISTEN>/api/shadow-report?from=&to=`，渲染按 `shadow-<父id>` 配对样本聚合的主/影子后端对比表（聚合口径见 `docs/web-api.md` 的 `/api/shadow-report` 行）。`--from`/`--to` 原样透传为 query 参数（`MakeURLQuery`；服务端解析惯例同 `/api/stats`）。`CmdShadow` 的子命令分派：无参数 -> stderr `✗ usage: model-proxy shadow report [--from --to --config]` + exit 1；未知子命令 -> stderr `✗ unknown shadow subcommand: <SUB> (try 'report')` + exit 1。
+逻辑（`internal/cli/diag/shadow_report.go` 的 `CmdShadow` -> `CmdShadowReport`）：GET `http://<LISTEN>/api/shadow-report?from=&to=`，渲染按 `shadow-<父id>` 配对样本聚合的主/影子后端对比表（聚合口径见 `docs/web-api.md` 的 `/api/shadow-report` 行）。`--from`/`--to` 原样透传为 query 参数（`MakeURLQuery`；服务端解析惯例同 `/api/stats`）。`CmdShadow` 的子命令分派：无参数 -> stderr `✗ usage: model-proxy shadow report [--from --to --config]` + exit 1；未知子命令 -> stderr `✗ unknown shadow subcommand: <SUB> (try 'report')` + exit 1。
 
 ### stdout（表格）
 
@@ -936,7 +936,7 @@ ROUTE            PRIMARY      SHADOW       SAMPLES   MATCH   P_LAT   S_LAT    P_
 unfreeze [provider] [--config PATH]
 ```
 
-逻辑（`internal/cli/unfreeze.go` 的 `CmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
+逻辑（`internal/cli/admin/unfreeze.go` 的 `CmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
 
 ### stdout
 
@@ -956,7 +956,7 @@ unfreeze [provider] [--config PATH]
 wire record <provider> [--model M] [--prompt P] [--out DIR]
 ```
 
-逻辑（`internal/cli/wire.go` 的 `CmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `internal/protocol/convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（强制工具调用：`get_weather` + `tool_choice` 强制）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
+逻辑（`internal/cli/diag/wire.go` 的 `CmdWireRecord`）：对 provider 的三个端点各发 `stream=true` 最小请求（`/responses`、`/chat/completions` 走 `openai_base_url`；`/v1/messages` 走 `anthropic_base_url`，缺省回落 `openai_base_url`），把**原始响应字节**写入 `<out>/<proto>_<provider><scenario>.sse`（`--out` 默认 `testdata/wire/`，供 `internal/protocol/convert_golden_test.go` 回放）。每端点录 3 个场景：**text**（无后缀，prompt 一句话）、**`_tool`**（强制工具调用：`get_weather` + `tool_choice` 强制）、**`_thinking`**（开启推理：responses 用 `reasoning.effort:low`、chat 用 `reasoning_effort:low`、anthropic 用 `thinking.budget_tokens`）——后两个覆盖工具调用/思考流这些纯文本流碰不到的转换硬路径，不支持的场景按失败写 `.err`。请求构造与 forward 同序：RewriteRequest → AuthHeaders → 配置 `headers` → ExtraHeaders（`/v1/messages` 预置 `anthropic-version`）；单请求 30s 超时；`--model` 缺省取 provider 首个模型/首个路由目标。responses 请求的两个特殊性：input 用 list 形式（codex 拒绝字符串简写）、不带 `max_output_tokens`（codex 400）。
 
 ### stdout / stderr
 
@@ -974,7 +974,7 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 audit [--stats] [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
 ```
 
-逻辑（`internal/cli/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
+逻辑（`internal/cli/audit/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
 
 - `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"；另接受整数天数后缀 `7d`）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。负时长（如 `-1h`/`-7d`）报错；`--from` 晚于 `--to` -> `✗ --from is after --to (empty window)` + exit 1。
 - `--kind`：`secret` | `path` | `drift`；其他值 -> stderr `✗ invalid --kind "<V>": must be secret, path, or drift` + exit 1。
@@ -1015,14 +1015,14 @@ by action
 
 改契约时，除更新本文档外，还需同步这些测试断言（`strings.Contains` 精确文案）：
 
-- `internal/cli/models_cli_test.go`：`models refresh` 的 `config: added/removed ...`、fallback 通知、`models pull`；`internal/cli/cli_takeover_test.go`：takeover/restore。
-- `internal/cli/models_cli_test.go`：`models refresh` 未知/无参数 provider；`internal/cli/cli_subcommands_test.go`：`config` 子命令。
+- `internal/cli/models/models_cli_test.go`：`models refresh` 的 `config: added/removed ...`、fallback 通知、`models pull`；`internal/cli/cli_takeover_test.go`：takeover/restore。
+- `internal/cli/models/models_cli_test.go`：`models refresh` 未知/无参数 provider；`internal/cli/config/subcommand_test.go`：`config` 子命令。
 - `internal/cli/models/models_check_test.go`：`PrintKeptModels` / `PrintFilterSummary` 输出。
 - `internal/cli` 的 serve status / stats `render*` 函数均有 httptest 单测锁文案。
 - `internal/provider/*_test.go`：`usage` 展示的 `Provider:` 首行 + 配额窗口标记。
 - `internal/cli/audit_cli_test.go`：`audit` 表格/`--json` 输出、flag 与时间解析错误文案；`internal/cli/doctor/doctor_drift_audit_test.go`：漂移审计记录（host-only detail、当日去重、audit 关闭）。
-- `internal/cli/shadow_report_render_test.go`：`shadow report` 表头/数据列/截断/紧凑数字与 disabled/empty 提示文案；`internal/cli/shadow_report_cmd_test.go`：`--from`/`--to` query 透传（`MakeURLQuery`）。
-- `internal/cli/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约。
+- `internal/cli/diag/shadow_report_render_test.go`：`shadow report` 表头/数据列/截断/紧凑数字与 disabled/empty 提示文案；`internal/cli/diag/shadow_report_cmd_test.go`：`--from`/`--to` query 透传（`MakeURLQuery`）。
+- `internal/cli/status/routes_cmd_test.go`：`routes` 列表/详情/未知模型输出；`internal/cli/help_sync_test.go`：命令注册表 ↔ `-h` 清单/`Help` map/CLI.md 章节/测试子进程分发的双向同步契约；`internal/archtest` 的 `NewApplication` 注册数 ↔ `Commands` 字面量条目数自洽契约。
 - `internal/app/webapi_docs_contract_test.go` + `internal/web/jstests/contract.test.mjs`：`GET /api/config` 文档键 ↔ `appapi.ConfigDocument` 字段 ↔ 前端 `configCache` 读取字段的同步契约。
 
 新增列/字段允许（追加式，向后兼容）；改动既有列宽、既有文案、退出码、stdout/stderr 归属**需先与用户确认**。

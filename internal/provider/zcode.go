@@ -3,6 +3,7 @@ package provider
 import (
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"os"
 	"runtime"
@@ -135,10 +136,10 @@ func (p *ZCodeProvider) Quota() (*QuotaSnapshot, error) {
 // Usage prints "Provider:  zcode" first (interface contract), then the parsed
 // quota snapshot. Byte-for-byte the zhipu display logic (same BigModel backend).
 func (p *ZCodeProvider) Usage() error {
-	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue(p.providerName)))
+	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.providerName)))
 	req, _ := http.NewRequest("GET", p.cfg.UsageURL, nil)
 	if err := p.AuthHeaders(req); err != nil {
-		fmt.Println(Yellow("Not logged in.") + " Run: " + Cyan("model-proxy login "+p.providerName))
+		fmt.Println(display.Yellow("Not logged in.") + " Run: " + display.Cyan("model-proxy login "+p.providerName))
 		return nil
 	}
 	for k, v := range p.cfg.Headers {
@@ -146,24 +147,24 @@ func (p *ZCodeProvider) Usage() error {
 	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		fmt.Println(Red("Error: usage request: " + err.Error()))
+		fmt.Println(display.Red("Error: usage request: " + err.Error()))
 		return nil
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		fmt.Printf("%s HTTP %d: %s\n", Red("Error:"), resp.StatusCode, Truncate(string(body), 200))
+		fmt.Printf("%s HTTP %d: %s\n", display.Red("Error:"), resp.StatusCode, display.Truncate(string(body), 200))
 		return nil
 	}
 	if s, _ := ParseZhipuQuota(body, ""); s != nil {
 		if s.Level != "" {
-			fmt.Printf("%s %s\n", Dim("Level:     "), Magenta(s.Level))
+			fmt.Printf("%s %s\n", display.Dim("Level:     "), display.Magenta(s.Level))
 		}
 		DecorateExhaustionEta(p.providerName, s)
 		printQuotaSnapshot(s)
 		return nil
 	}
-	fmt.Println(Yellow("Quota unavailable (not BigModel format)."))
+	fmt.Println(display.Yellow("Quota unavailable (not BigModel format)."))
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/display"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +201,6 @@ func runVolcengineLoginFromEnv(cfg *configdomain.Config, provName string, prov c
 		return err
 	}
 	pool, _ := logincore.LoadPool(provName, prov.Provider)
-	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
+	fmt.Println(display.Green("✓ Saved account ") + display.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
 	return nil
 }

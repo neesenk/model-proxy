@@ -405,6 +405,20 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 
 这是根 package main 内的真实进程装配收敛，不改变任何用户可见 CLI 或 serve 行为。
 
+`internal/cli` 本身是 registry + 进程级 shell：`app.go` 绑定命令表，
+`commands.go` 只保留调度循环、`Command` 契约与 takeover/restore 进程入口，
+`help.go` 拥有 usage/help 渲染。每个命令域拥有一个子包并导出自身的进程入口
+（`Run<Command>`，自查配置）；子包只能向下依赖 `cli/framework`（arg/config 加载/
+数字格式化等 CLI 公共 helper）与 `cli/clicommon`（daemon fetch/section 渲染），
+不得回依赖根 `cli`（DAG guard 强制）：`cli/login`（login/import）、
+`cli/models`（models/test）、`cli/doctor`（doctor）、`cli/presets`（add/presets）、
+`cli/stats`（stats/usage）、`cli/audit`（audit）、`cli/status`（serve
+status/schedule/routes）、`cli/admin`（pin/unpin/unfreeze）、`cli/diag`
+（wire/replay/shadow）、`cli/config`（config init|print|check）、
+`cli/account`（logout）、`cli/serve`（daemon/stop/reload 编排）。
+`cli/clitest` 是纯测试支撑包：拥有子进程 harness（TestHelperProcess 分发）与共享
+fixture，只被各命令包的测试 import。
+
 ## 依赖规则
 
 允许：
@@ -444,13 +458,13 @@ application → serveAssembly → applicationRuntime → Proxy
 `internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`archtest`（纯测试包）、`cache`、
-  `catalog`、`configedit`、`credstore`、`daemonctl`、`guard`、`httpx`、
+  `catalog`、`configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、
   `observe/counters`、`observe/events`、`observe/logx`、`pricing`、
   `transport/bodycapture`、`webauth`；
 - `accounts → credstore`；
 - `guard/session → guard`；
 - `app → accounts, admin, appapi, cache, catalog,
-  config, configedit, credstore, fusion, guard, guard/session, httpx, login, observe/budget,
+  config, configedit, credstore, display, fusion, guard, guard/session, httpx, login, observe/budget,
   observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets,
   pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
   targetexec, transport/bodycapture, web, webauth`；
@@ -458,19 +472,27 @@ application → serveAssembly → applicationRuntime → Proxy
   observe/counters, observe/logx, observe/seclog, observe/stats, presets, pricing, probe,
   provider, routing, runtime`（Web admin 应用服务；不得回依赖 app/web/cli）；
 - `appapi → fusion, observe/stats, presets, pricing`；
-- `cli → cli/serve, cli/framework, accounts, app, appapi, cli/clicommon,
-  cli/doctor, cli/login, cli/models, cli/presets, config, daemonctl, login, routing, takeover,
-  observe/logx, observe/requestlog, observe/seclog, observe/stats, provider, providerbuild`；
-- `cli/clicommon → appapi, daemonctl, provider`；
-- `cli/doctor → accounts, app, appapi, cli/clicommon, cli/framework,
-  cli/models, config, credstore, routing, takeover, observe/seclog, provider`；
-- `cli/framework → accounts`；
+- `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
+  cli/framework, cli/login, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
+  observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
+- `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
+- `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`）；
+- `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
+- `cli/clicommon → appapi, daemonctl, display, provider`；
+- `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
+- `cli/config → accounts, cli/framework, config, display, provider, routing, takeover`（`config init|print|check`）；
+- `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, provider`（`wire`/`replay`/`shadow`）；
+- `cli/doctor → accounts, appapi, cli/clicommon, cli/framework,
+  cli/models, config, credstore, display, routing, takeover, observe/seclog, provider`；
+- `cli/framework → accounts, config`；
 - `cli/presets → cli/framework, cli/login, cli/serve, config, login, presets`；
+- `cli/stats → accounts, cli/framework, config, daemonctl, display, observe/stats, providerbuild`（`stats`/`usage`）；
+- `cli/status → appapi, cli/clicommon, cli/framework, config, daemonctl, display, routing`（`serve status`/`schedule`/`routes`）；
 - `cli/serve → config, observe/logx`；
-- `cli/login → accounts, cli/framework, cli/serve, config, login, provider`；
-- `cli/models → cli/serve, cli/framework, accounts, app, catalog, config,
-  configedit, probe, provider, providerbuild, routing`；
-- `login → accounts, config, provider, observe/logx`；
+- `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider`；
+- `cli/models → cli/serve, cli/framework, accounts, catalog, config,
+  configedit, display, probe, provider, providerbuild, routing`；
+- `login → accounts, config, display, provider, observe/logx`；
 - `config → catalog, pricing, protocol`；
 - `fusion → config, observe/logx`；
 - `observe/budget → config, observe/events, observe/logx, observe/stats, pricing`（config 是
@@ -481,8 +503,8 @@ application → serveAssembly → applicationRuntime → Proxy
 - `presets → config, configedit, provider`；
 - `probe → config, provider`；
 - `protocol → observe/logx`；
-- `provider → credstore`；
-- `providerbuild → accounts, config, provider, observe/logx`；
+- `provider → credstore, display`（display 是终端着色/文本格式化叶子工具包）；
+- `providerbuild → accounts, config, display, provider, observe/logx`；
 - `routing → catalog, config, protocol, provider`（均为值类型消费）；
 - `runtime → config, runtime/wirecap, provider, observe/logx`；
 - `runtime/wirecap → config, provider`；
@@ -491,11 +513,16 @@ application → serveAssembly → applicationRuntime → Proxy
 - `targetexec → cache, config, protocol, transport/bodycapture, provider, observe/logx`；
 - `web → appapi, observe/logx, observe/requestlog, observe/stats, pricing, webauth`。
 
+`internal/display` 拥有终端 stdout/stderr 着色状态与文本格式化工具（`C`/`Green` 等
+颜色 helper、`ProgressBar`、`Money`、`Format*`、`Pad`、`Or`、`Truncate`、
+`StatusColor`），是纯标准库叶子包，任何层都可 import；`internal/provider` 回归
+后端实现 owner，不再持有 display helper。
+
 `internal/takeover` 拥有客户端配置的备份、改写与恢复（claude/opencode/codex/pi），
 只消费 config DTO、catalog 元数据与 `routing.DefaultModelMetadata` 保守回落；
 route derivation、catalog 加载（`internal/config`）与 source 标记
-（`internal/routing.HydrateModels`）由 `internal/cli` 的 `takeoverFacts` 计算并以
-`ModelFacts` 注入，包内不读取
+（`internal/routing.HydrateModels`）由本包的 `ModelFactsFor` 计算并注入
+`RunTakeover`（调用方传入 HOME seam 以定位 catalog 缓存），包内不读取
 应用运行时。
 
 `internal/archtest` 是架构契约测试的 owner：纯测试包、仓内零依赖，经 `repoRoot`

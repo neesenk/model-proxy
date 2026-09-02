@@ -188,9 +188,10 @@ func BackupDir(configPath string) string {
 
 // ModelFacts carries the application-computed route table (derived routes
 // aggregated from provider model lists, explicit routes overriding) and
-// models.dev metadata used by metadata-writing clients. The application owns
-// catalog loading, hydration and its source markers; this package only
-// rewrites client files and emits warnings from the supplied facts.
+// models.dev metadata used by metadata-writing clients. ModelFactsFor
+// computes the facts (catalog loading, hydration, source markers); the CLI
+// callers pass them in, and RunTakeover only rewrites client files and emits
+// warnings from the supplied facts.
 type ModelFacts struct {
 	Routes  map[string][]configdomain.RouteTarget
 	Meta    map[string]map[string]catalog.Model

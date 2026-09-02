@@ -6,7 +6,7 @@
 ## 1. 现状与问题
 
 - 接入新 provider = 手写 YAML：`openai_base_url`、`models:`、`usage_url`、routes……知识散在 README 示例和 backend-contracts 里，认知负担是上手流失主因。
-- 已有资产可直接复用：`config init` 的 TTY 向导模式（`internal/cli/config_init.go`）、`cli/login` 编排、`configedit`（保结构 YAML node 编辑）、probe/test 测活、takeover。
+- 已有资产可直接复用：`config init` 的 TTY 向导模式（`internal/cli/config/config_init.go`）、`cli/login` 编排、`configedit`（保结构 YAML node 编辑）、probe/test 测活、takeover。
 
 ## 2. 目标 / 非目标
 

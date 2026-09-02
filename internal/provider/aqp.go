@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"strings"
 	"time"
@@ -97,7 +98,7 @@ func (p *AqpProvider) fetchMonthlyUsage() (*MonthlyProjectUsage, error) {
 		var e struct {
 			Message string `json:"message"`
 		}
-		msg := Truncate(string(body), 120)
+		msg := display.Truncate(string(body), 120)
 		if json.Unmarshal(body, &e) == nil && e.Message != "" {
 			msg = e.Message
 		}

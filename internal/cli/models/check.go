@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"fmt"
+	"model-proxy/internal/display"
 	"net/http"
 	"os"
 	"sort"
@@ -168,13 +169,13 @@ func MergeStringIDs(a, b []string) []string {
 // `meta`/`sources` come from hydrateModels (keyed by provider -> model id).
 func PrintKeptModels(provName string, kept []string, meta map[string]map[string]catalog.Model, sources map[string]map[string]routing.ModelSource) {
 	if len(kept) == 0 {
-		fmt.Println(provider.Yellow("(no models)"))
+		fmt.Println(display.Yellow("(no models)"))
 		return
 	}
 	fmt.Printf("%s  %s  %s  %s  %s  %s\n",
-		provider.Dim(provider.Pad("MODEL ID", 26)), provider.Dim(provider.Pad("NAME", 20)),
-		provider.Dim(provider.Pad("CTX", 10)), provider.Dim(provider.Pad("OUTPUT", 8)),
-		provider.Dim(provider.Pad("INPUT MODALITIES", 18)), provider.Dim(provider.Pad("SRC", 10)))
+		display.Dim(display.Pad("MODEL ID", 26)), display.Dim(display.Pad("NAME", 20)),
+		display.Dim(display.Pad("CTX", 10)), display.Dim(display.Pad("OUTPUT", 8)),
+		display.Dim(display.Pad("INPUT MODALITIES", 18)), display.Dim(display.Pad("SRC", 10)))
 	for _, id := range kept {
 		var m catalog.Model
 		if meta != nil && meta[provName] != nil {
@@ -203,11 +204,11 @@ func PrintKeptModels(provName string, kept []string, meta map[string]map[string]
 			}
 		}
 		fmt.Printf("%s  %s  %s  %s  %s  %s\n",
-			provider.Cyan(provider.Pad(id, 26)), provider.Green(provider.Pad(name, 20)),
-			provider.Gray(provider.Pad(ctx, 10)), provider.Gray(provider.Pad(out, 8)),
-			provider.Gray(provider.Pad(mod, 18)), provider.Gray(provider.Pad(src, 10)))
+			display.Cyan(display.Pad(id, 26)), display.Green(display.Pad(name, 20)),
+			display.Gray(display.Pad(ctx, 10)), display.Gray(display.Pad(out, 8)),
+			display.Gray(display.Pad(mod, 18)), display.Gray(display.Pad(src, 10)))
 	}
-	fmt.Printf("\n%s %s: %d models\n", provider.Dim("provider:"), provName, len(kept))
+	fmt.Printf("\n%s %s: %d models\n", display.Dim("provider:"), provName, len(kept))
 }
 
 // printFilterSummary prints the filter summary to stderr AFTER the final list.

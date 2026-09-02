@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"model-proxy/internal/accounts"
+	"model-proxy/internal/display"
 	logincore "model-proxy/internal/login"
 	"os"
 	"strings"
 
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/provider"
 )
 
 // runVolcengineLoginWithInput performs a pool-aware volcengine login. The
@@ -90,6 +90,6 @@ func RunVolcengineLoginWithInput(cfg *configdomain.Config, provName string, prov
 	// Print the confirmation line (label resolved from the freshly-saved pool,
 	// which may have been re-sorted by the pool save).
 	pool, _ := logincore.LoadPool(provName, prov.Provider)
-	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
+	fmt.Println(display.Green("✓ Saved account ") + display.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
 	return nil
 }

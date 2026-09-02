@@ -3,6 +3,7 @@ package clicommon_test
 import (
 	"errors"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"reflect"
 	"strings"
@@ -11,7 +12,6 @@ import (
 	"model-proxy/internal/appapi"
 	"model-proxy/internal/cli/clicommon"
 	"model-proxy/internal/daemonctl"
-	"model-proxy/internal/provider"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -91,9 +91,9 @@ func TestAppendSectionExactSeparators(t *testing.T) {
 }
 
 func TestRenderScheduleExactOutput(t *testing.T) {
-	originalColor := provider.ColorEnabled
-	provider.SetColorEnabled(false)
-	t.Cleanup(func() { provider.SetColorEnabled(originalColor) })
+	originalColor := display.ColorEnabled
+	display.SetColorEnabled(false)
+	t.Cleanup(func() { display.SetColorEnabled(originalColor) })
 
 	status := &appapi.StatusResp{Schedule: appapi.StatusSchedule{Models: map[string]appapi.StatusRoute{
 		"beta": {
@@ -139,9 +139,9 @@ func TestRenderScheduleExactOutput(t *testing.T) {
 }
 
 func TestRenderScheduleEmptyAndSingular(t *testing.T) {
-	originalColor := provider.ColorEnabled
-	provider.SetColorEnabled(false)
-	t.Cleanup(func() { provider.SetColorEnabled(originalColor) })
+	originalColor := display.ColorEnabled
+	display.SetColorEnabled(false)
+	t.Cleanup(func() { display.SetColorEnabled(originalColor) })
 
 	if got := clicommon.RenderSchedule(&appapi.StatusResp{}); got != "" {
 		t.Fatalf("empty schedule = %q, want empty", got)

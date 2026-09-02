@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"net/url"
 	"os"
@@ -138,7 +139,7 @@ func (p *AqpKeyProvider) keyLocked() (string, error) {
 	if resp.StatusCode != 200 {
 		// Truncated like the codex refresh error: the body may be a large
 		// error page and must not flood logs/errors.
-		return "", fmt.Errorf("mint aqp key: HTTP %d: %s", resp.StatusCode, Truncate(string(rb), 200))
+		return "", fmt.Errorf("mint aqp key: HTTP %d: %s", resp.StatusCode, display.Truncate(string(rb), 200))
 	}
 	var parsed struct {
 		Retcode int `json:"retcode"`
@@ -400,7 +401,7 @@ func (p *CodexOAuthProvider) refreshLocked(af *CodexAuthFile) error {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("codex oauth refresh: HTTP %d: %s", resp.StatusCode, Truncate(string(rb), 200))
+		return fmt.Errorf("codex oauth refresh: HTTP %d: %s", resp.StatusCode, display.Truncate(string(rb), 200))
 	}
 	var tok struct {
 		AccessToken  string `json:"access_token"`

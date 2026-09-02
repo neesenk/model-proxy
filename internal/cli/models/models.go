@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"model-proxy/internal/display"
 	"os"
 	"sort"
 	"strings"
@@ -13,7 +14,6 @@ import (
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/configedit"
-	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
 )
@@ -115,9 +115,9 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 	sort.Strings(names)
 
 	fmt.Printf("%s  %s  %s  %s  %s  %s  %s\n",
-		provider.Dim(provider.Pad("PROVIDER", 12)), provider.Dim(provider.Pad("MODEL ID", 22)),
-		provider.Dim(provider.Pad("NAME", 20)), provider.Dim(provider.Pad("CTX", 10)),
-		provider.Dim(provider.Pad("OUTPUT", 8)), provider.Dim(provider.Pad("MODALITIES", 16)), provider.Dim(provider.Pad("SRC", 10)))
+		display.Dim(display.Pad("PROVIDER", 12)), display.Dim(display.Pad("MODEL ID", 22)),
+		display.Dim(display.Pad("NAME", 20)), display.Dim(display.Pad("CTX", 10)),
+		display.Dim(display.Pad("OUTPUT", 8)), display.Dim(display.Pad("MODALITIES", 16)), display.Dim(display.Pad("SRC", 10)))
 	for _, pn := range names {
 		// Effective model set: hydrated metadata keys ∪ the config name list
 		// (config names show even when meta is nil — e.g. legacy callers).
@@ -163,9 +163,9 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 				}
 			}
 			fmt.Printf("%s  %s  %s  %s  %s  %s  %s\n",
-				provider.Blue(provider.Pad(pn, 12)), provider.Cyan(provider.Pad(mid, 22)),
-				provider.Green(provider.Pad(name, 20)), provider.Gray(provider.Pad(ctx, 10)),
-				provider.Gray(provider.Pad(out, 8)), provider.Gray(provider.Pad(mod, 16)), provider.Gray(provider.Pad(src, 10)))
+				display.Blue(display.Pad(pn, 12)), display.Cyan(display.Pad(mid, 22)),
+				display.Green(display.Pad(name, 20)), display.Gray(display.Pad(ctx, 10)),
+				display.Gray(display.Pad(out, 8)), display.Gray(display.Pad(mod, 16)), display.Gray(display.Pad(src, 10)))
 		}
 	}
 }

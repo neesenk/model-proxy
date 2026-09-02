@@ -1,7 +1,7 @@
 package framework
 
 import (
-	"model-proxy/internal/provider"
+	"model-proxy/internal/display"
 	"strings"
 	"testing"
 )
@@ -22,8 +22,8 @@ func TestColorHelpers_NoColorPassthrough(t *testing.T) {
 	// return the input verbatim. Assert the exact string rather than Contains,
 	// which would also pass with ANSI codes around the input.
 	for _, s := range []string{"x", "hello", "test-123"} {
-		if got := provider.Yellow(s); got != s {
-			t.Errorf("provider.Yellow(%q)=%q, want exact %q (no ANSI in test env)", s, got, s)
+		if got := display.Yellow(s); got != s {
+			t.Errorf("display.Yellow(%q)=%q, want exact %q (no ANSI in test env)", s, got, s)
 		}
 	}
 }

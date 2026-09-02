@@ -1,76 +1,21 @@
-// commands.go owns the process-level CLI entries: each loads config (when
-// needed) and delegates to the command implementation. The composition root
-// (main) only registers these by name.
+// commands.go owns the process-level CLI entries that stay at the root: the
+// dispatch loop, the Command contract, and the takeover/restore client-config
+// rewrites. Every other command's process entry lives in its own subpackage
+// (cli/<domain>.Run<Command>); the composition root (main) only registers
+// these by name.
 package cli
 
 import (
 	"fmt"
 	"io"
 	"log"
-	"model-proxy/internal/accounts"
+
 	clidoctor "model-proxy/internal/cli/doctor"
-	clipresets "model-proxy/internal/cli/presets"
-	"model-proxy/internal/observe/logx"
-	"model-proxy/internal/routing"
-	"model-proxy/internal/takeover"
-	"os"
-
 	cliframework "model-proxy/internal/cli/framework"
-	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/observe/logx"
+	"model-proxy/internal/takeover"
 )
-
-// LoadCmdConfig loads the CLI config or exits. It also applies the configured
-// credentials mode (`credentials:`) to this process's account stores AND OAuth
-// blob store, so every command that reads credentials (usage/logout/models/
-// doctor/...) sees the same backend without threading cfg through each call
-// site.
-func LoadCmdConfig(args []string) *configdomain.Config {
-	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
-	if err != nil {
-		log.Fatal(err)
-	}
-	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
-	return cfg
-}
-
-func RunStats(args []string) {
-	cfg := LoadCmdConfig(args)
-	os.Exit(CmdStats(args, cfg.Listen, os.Stdout, os.Stderr))
-}
-
-func RunAudit(args []string) {
-	cfg := LoadCmdConfig(args)
-	os.Exit(CmdAudit(args, cfg, os.Stdout, os.Stderr))
-}
-
-func RunModels(args []string) {
-	cfg := LoadCmdConfig(args)
-	climodels.CmdModels(args, cfg, cliframework.ConfigPath(args))
-}
-
-func RunUsage(args []string)  { CmdUsage(args, LoadCmdConfig(args)) }
-func RunLogout(args []string) { CmdLogout(args, LoadCmdConfig(args)) }
-
-func RunConfig(args []string)      { CmdConfigRun(args) }
-func RunSchedule(args []string)    { CmdSchedule(args, LoadCmdConfig(args)) }
-func RunPin(args []string)         { CmdPin(args, LoadCmdConfig(args)) }
-func RunUnpin(args []string)       { CmdUnpin(args, LoadCmdConfig(args)) }
-func RunUnfreeze(args []string)    { CmdUnfreeze(args, LoadCmdConfig(args)) }
-func RunReplay(args []string)      { CmdReplay(args, LoadCmdConfig(args)) }
-func RunShadow(args []string)      { CmdShadow(args, LoadCmdConfig(args)) }
-func RunWire(args []string)        { CmdWire(args, LoadCmdConfig(args)) }
-func RunServeStatus(args []string) { CmdServeStatus(args, LoadCmdConfig(args)) }
-
-// RunAdd / RunPresets adapt the presets package's stream-parameterized
-// handlers to the process Command contract (exit code becomes the exit status).
-func RunAdd(args []string) {
-	os.Exit(clipresets.CmdAdd(args, os.Stdin, os.Stdout, os.Stderr))
-}
-
-func RunPresets(args []string) {
-	os.Exit(clipresets.CmdPresets(args, os.Stdin, os.Stdout, os.Stderr))
-}
 
 // Command is the process-level adapter for an existing command handler. The
 // stream parameters make the front-door contract explicit.
@@ -130,23 +75,12 @@ func HasHelpFlag(args []string) bool {
 	return false
 }
 
-// RunDoctor runs the offline/live scheduling diagnostic.
-func RunDoctor(args []string) {
-	cfg, err := configdomain.LoadConfig(cliframework.ConfigPath(args))
-	if err != nil {
-		fmt.Println("✗ config invalid: " + err.Error())
-		os.Exit(1)
-	}
-	accounts.SetProcessCredentialsMode(cfg.CredentialsMode())
-	clidoctor.CmdDoctor(args, cfg, cliframework.ConfigPath(args))
-}
-
 // RunTakeover rewrites a client config to point at the proxy.
 func RunTakeover(args []string) {
-	cfg := LoadCmdConfig(args)
+	cfg := cliframework.LoadCmdConfig(args)
 	which := cliframework.Positional(args)
 	bakDir := takeover.BackupDir(cliframework.ConfigPath(args))
-	if err := takeover.RunTakeover(cfg, which, bakDir, takeoverFacts(cfg, which)); err != nil {
+	if err := takeover.RunTakeover(cfg, which, bakDir, takeover.ModelFactsFor(cfg, which, cliframework.HomeDir())); err != nil {
 		log.Fatal(err)
 	}
 	verifyTakeoverDrift(cfg, which, bakDir)
@@ -178,36 +112,9 @@ func verifyTakeoverDrift(cfg *configdomain.Config, which, bakDir string) {
 
 // RunRestore restores a client config from its takeover backup.
 func RunRestore(args []string) {
-	cfg := LoadCmdConfig(args)
+	cfg := cliframework.LoadCmdConfig(args)
 	which := cliframework.Positional(args)
 	if err := takeover.RunRestore(cfg, which, takeover.BackupDir(cliframework.ConfigPath(args))); err != nil {
 		log.Fatal(err)
 	}
-}
-
-// takeoverFacts computes the application-owned route table (derived from
-// provider model lists, explicit routes overriding) and (only when a
-// metadata-writing client is selected) hydrated models.dev metadata for the
-// takeover package.
-func takeoverFacts(cfg *configdomain.Config, which string) takeover.ModelFacts {
-	facts := takeover.ModelFacts{
-		Routes:        routing.RouteTable(cfg),
-		SourceDefault: -1,
-	}
-	if takeover.WritesMetadata(takeover.ListClients(cfg, which)) {
-		cat, _ := configdomain.LoadModelsCatalog(cliframework.HomeDir(), false)
-		meta, sources := routing.HydrateModels(cfg, cat)
-		facts.Meta = meta
-		facts.Sources = make(map[string]map[string]int, len(sources))
-		for provider, models := range sources {
-			facts.Sources[provider] = make(map[string]int, len(models))
-			for model, source := range models {
-				facts.Sources[provider][model] = int(source)
-			}
-		}
-		facts.SourceDefault = int(routing.SrcDefault)
-		facts.DefaultContext = routing.DefaultModelMetadata.Context
-		facts.DefaultOutput = routing.DefaultModelMetadata.Output
-	}
-	return facts
 }

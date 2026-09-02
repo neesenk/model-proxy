@@ -108,8 +108,9 @@ forward/cache/Fusion 发布语义及 `/api/events` SSE 契约。测试不得为�
 而恢复根包 type alias、访问模块互斥锁或暴露 test-only 生产接口。
 
 根包不再保留测试文件。CLI 子命令与进程生命周期集成测试归 `internal/cli`
-（os.Exit/log.Fatal 命令经 `subprocess_test_support_test.go` 的
-`TestHelperProcess` / `runCLI*` subprocess harness 覆盖）；`app.NewRuntime`
+（os.Exit/log.Fatal 命令经 subprocess harness 覆盖：共享实现在
+`internal/cli/clitest`（`HelperProcess` / `RunCLI*` / 共享 fixture），每个命令包以
+自己的 `TestHelperProcess` 注册本包 handler）；`app.NewRuntime`
 装配行为测试归 `internal/app/runtime_assembly_test.go`；架构 AST 契约测试归
 `internal/archtest`（纯测试包，经 `repoRoot` 定位模块根，调用点写模块根相对路径）。
 跨文件共享 fixture 只保留在各包的 `*_test_support_test.go`，不得复制 helper 或

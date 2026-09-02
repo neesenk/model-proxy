@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"model-proxy/internal/observe/logx"
 	"net/http"
 	"path/filepath"
@@ -339,7 +340,7 @@ func ListArkAgentPlanModelIDs(provName string) ([]string, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("ListArkAgentPlanModel HTTP %d: %s", resp.StatusCode, provider.Truncate(string(body), 300))
+		return nil, fmt.Errorf("ListArkAgentPlanModel HTTP %d: %s", resp.StatusCode, display.Truncate(string(body), 300))
 	}
 	var wrap struct {
 		ResponseMetadata json.RawMessage `json:"ResponseMetadata"`

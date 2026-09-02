@@ -88,9 +88,9 @@ func TestHelpCoversRegisteredCommands(t *testing.T) {
 }
 
 // TestSubprocessDispatchCasesAreRegisteredCommands pins the test-infrastructure
-// side of the same wiring: every `case "<cmd>":` in the helper-process
+// side of the same wiring: every `"<cmd>":` handler key in the helper-process
 // dispatch (subprocess_test_support_test.go) must name a registered command.
-// runCLI tests route through that switch, so a stale or mistyped case either
+// runCLI tests route through that map, so a stale or mistyped key either
 // silently never runs or 2s with "unknown MP_SUBCMD".
 func TestSubprocessDispatchCasesAreRegisteredCommands(t *testing.T) {
 	data, err := os.ReadFile("subprocess_test_support_test.go")
@@ -101,7 +101,7 @@ func TestSubprocessDispatchCasesAreRegisteredCommands(t *testing.T) {
 	// stop/reload are `serve` subcommands with direct dispatch entries here
 	// (their handlers are cliserve.Cmd*), not top-level registry commands.
 	serveSubcommands := map[string]bool{"stop": true, "reload": true}
-	re := regexp.MustCompile(`(?m)^\tcase "([a-z]+)":`)
+	re := regexp.MustCompile(`(?m)^\t\t"([a-z]+)":`)
 	seen := map[string]bool{}
 	for _, m := range re.FindAllStringSubmatch(string(data), -1) {
 		cmd := m[1]

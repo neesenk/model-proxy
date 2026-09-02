@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"model-proxy/internal/display"
 	"os"
 	"path/filepath"
 	"time"
@@ -77,7 +78,7 @@ func exhaustionHint(eta, now time.Time) string {
 	if secs <= 0 {
 		return ""
 	}
-	return Gray(" · 按当前速率 ~" + FormatDuration(secs) + " 后耗尽")
+	return display.Gray(" · 按当前速率 ~" + display.FormatDuration(secs) + " 后耗尽")
 }
 
 // DecorateExhaustionEta sets s.ExhaustionEta for the `usage` CLI: the CLI

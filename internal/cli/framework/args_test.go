@@ -102,3 +102,17 @@ func TestHomeDir(t *testing.T) {
 		t.Errorf("HomeDir()=%q, want %q", got, dir)
 	}
 }
+
+// TestPositionalArgs: --flag value pairs are skipped; bare positionals are kept
+// in order (used by pin/unpin/replay to pull <route> [<provider>] / <id>).
+func TestPositionalArgs(t *testing.T) {
+	got := PositionalArgs([]string{"glm", "--config", "x.yaml", "zhipu", "--ttl", "1h"})
+	if len(got) != 2 || got[0] != "glm" || got[1] != "zhipu" {
+		t.Errorf("positionalArgs=%v want [glm zhipu]", got)
+	}
+	// --flag=value form doesn't consume a following bare token.
+	got = PositionalArgs([]string{"--config=x.yaml", "glm"})
+	if len(got) != 1 || got[0] != "glm" {
+		t.Errorf("positionalArgs=%v want [glm]", got)
+	}
+}

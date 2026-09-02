@@ -1,18 +1,10 @@
 package models
 
 import (
-	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/provider"
 	"testing"
+
+	configdomain "model-proxy/internal/config"
 )
-
-// --- pad edge cases (models.go) ---
-
-func TestPad_AlreadyLong(t *testing.T) {
-	if got := provider.Pad("toolongalready", 5); got != "toolongalready" {
-		t.Errorf("provider.Pad(long,5)=%q want passthrough", got)
-	}
-}
 
 // --- nonFlagArgs: --config= form + flags interspersed ---
 

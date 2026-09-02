@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"model-proxy/internal/cli/clitest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,7 @@ import (
 
 func TestCLI_StopNoDaemon(t *testing.T) {
 	cfgPath := writeDaemonConfig(t)
-	stdout, _, code := runCLI(t, "stop", cfgPath)
+	stdout, _, code := clitest.RunCLI(t, "stop", cfgPath)
 	if code != 0 {
 		t.Fatalf("stop (no daemon) exit=%d want 0\n--- stdout ---\n%s", code, stdout)
 	}
@@ -25,7 +26,7 @@ func TestCLI_StopNoDaemon(t *testing.T) {
 
 func TestCLI_ReloadNoDaemon(t *testing.T) {
 	cfgPath := writeDaemonConfig(t)
-	stdout, _, code := runCLI(t, "reload", cfgPath)
+	stdout, _, code := clitest.RunCLI(t, "reload", cfgPath)
 	if code != 0 {
 		t.Fatalf("reload (no daemon) exit=%d want 0\n--- stdout ---\n%s", code, stdout)
 	}

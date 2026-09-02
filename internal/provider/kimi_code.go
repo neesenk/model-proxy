@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/display"
 	"net/http"
 	"strings"
 	"time"
@@ -150,19 +151,19 @@ func (p *KimiCodeProvider) Quota() (*QuotaSnapshot, error) {
 // Usage prints the Kimi Code membership quota. On fetch failure falls back to
 // listing config models (volcengine pattern) so `usage kimi-code` is never mute.
 func (p *KimiCodeProvider) Usage() error {
-	fmt.Printf("%s %s\n", Dim("Provider:  "), Bold(Blue(p.cfg.ProviderName)))
+	fmt.Printf("%s %s\n", display.Dim("Provider:  "), display.Bold(display.Blue(p.cfg.ProviderName)))
 	s, err := p.Quota()
 	if err != nil || s == nil || s.Billing != BillingPlan {
 		why := "unavailable"
 		if s != nil && s.Err != "" {
 			why = s.Err
 		}
-		fmt.Printf("%s %s\n", Dim("Usage:      "), Red("("+why+")"))
-		fmt.Printf("%s check quota at %s or via the Kimi Code CLI /usage command\n", Dim("            "), Cyan("https://www.kimi.com/code/console"))
+		fmt.Printf("%s %s\n", display.Dim("Usage:      "), display.Red("("+why+")"))
+		fmt.Printf("%s check quota at %s or via the Kimi Code CLI /usage command\n", display.Dim("            "), display.Cyan("https://www.kimi.com/code/console"))
 		listConfigModels(p.cfg.Models)
 		return nil
 	}
-	fmt.Printf("%s %s\n", Dim("Plan:       "), Magenta(Or(s.Plan, "Kimi Code membership")))
+	fmt.Printf("%s %s\n", display.Dim("Plan:       "), display.Magenta(display.Or(s.Plan, "Kimi Code membership")))
 	DecorateExhaustionEta(p.cfg.ProviderName, s)
 	for _, w := range s.Windows {
 		line := formatQuotaWindowLine(w)
@@ -176,7 +177,7 @@ func (p *KimiCodeProvider) Usage() error {
 		// wallet / monthly cap), where the amount is meaningful.
 		if w.Kind == "money" && w.Total > 0 {
 			fmt.Printf("%s %.0f used / %.0f total (%.0f remaining)\n",
-				Dim(Pad("Usage:", 18)), w.Used, w.Total, w.Total-w.Used)
+				display.Dim(display.Pad("Usage:", 18)), w.Used, w.Total, w.Total-w.Used)
 		}
 	}
 	return nil

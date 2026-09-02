@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"model-proxy/internal/cli/clitest"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,7 +33,7 @@ func TestCLI_TakeoverClaude(t *testing.T) {
 	}
 	cfgPath := writeTakeoverConfig(t, dir, claudeFile)
 
-	stdout, _, code := runCLI(t, "takeover", cfgPath, "claude")
+	stdout, _, code := clitest.RunCLI(t, "takeover", cfgPath, "claude")
 	if code != 0 {
 		t.Fatalf("takeover claude exit=%d want 0\n--- stdout ---\n%s", code, stdout)
 	}
@@ -85,7 +86,7 @@ func TestCLI_RestoreClaude(t *testing.T) {
 	}
 	cfgPath := writeTakeoverConfig(t, dir, claudeFile)
 
-	stdout, _, code := runCLI(t, "restore", cfgPath, "claude")
+	stdout, _, code := clitest.RunCLI(t, "restore", cfgPath, "claude")
 	if code != 0 {
 		t.Fatalf("restore claude exit=%d want 0\n--- stdout ---\n%s", code, stdout)
 	}
@@ -104,7 +105,7 @@ func TestCLI_RestoreClaude(t *testing.T) {
 func TestCLI_TakeoverUnknownClient(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := writeTakeoverConfig(t, dir, filepath.Join(dir, "claude.json"))
-	_, _, code := runCLI(t, "takeover", cfgPath, "nope")
+	_, _, code := clitest.RunCLI(t, "takeover", cfgPath, "nope")
 	// RunTakeover on an unknown client is a no-op (listClients returns nil →
 	// the loop body never runs → nil error → exit 0). This is the product
 	// behavior; takeover doesn't validate the client name up front.
@@ -150,8 +151,8 @@ func TestCLI_TakeoverOpencode(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  opencode: %s\n  provider_id: model-proxy\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", opencodeFile)
-	cfgPath := writeTempConfig(t, cfgBody)
-	_, _, code := runCLI(t, "takeover", cfgPath, "opencode")
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
+	_, _, code := clitest.RunCLI(t, "takeover", cfgPath, "opencode")
 	if code != 0 {
 		t.Fatalf("takeover opencode: exit=%d want 0", code)
 	}
@@ -174,12 +175,12 @@ func TestCLI_RestoreClaudeRoundTrip(t *testing.T) {
 	}
 	// backupDir = <configDir>/.model-proxy — config lives in dir, so backup in dir/.model-proxy.
 	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  claude: %s\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", claudeFile)
-	cfgPath := writeTempConfig(t, cfgBody)
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
 	// First takeover (creates backup + rewrites), then restore.
-	if _, _, code := runCLI(t, "takeover", cfgPath, "claude"); code != 0 {
+	if _, _, code := clitest.RunCLI(t, "takeover", cfgPath, "claude"); code != 0 {
 		t.Fatalf("takeover claude: exit=%d", code)
 	}
-	if _, _, code := runCLI(t, "restore", cfgPath, "claude"); code != 0 {
+	if _, _, code := clitest.RunCLI(t, "restore", cfgPath, "claude"); code != 0 {
 		t.Fatalf("restore claude: exit=%d", code)
 	}
 	data, err := os.ReadFile(claudeFile)
@@ -204,7 +205,7 @@ func TestCLI_TakeoverOpencode_WarnsDefault(t *testing.T) {
 	ocPath := filepath.Join(t.TempDir(), "oc.json")
 	os.WriteFile(ocPath, []byte(`{}`), 0o644) // takeover backs up the target first; it must exist
 	cfgBody := "listen: 127.0.0.1:15721\ntakeover:\n  provider_id: model-proxy\n  opencode: " + ocPath + "\nproviders:\n  codex:\n    provider_id: codex\n    openai_base_url: https://chatgpt.com/backend-api/codex\nroutes:\n  gpt-5.5:\n    - {provider: codex, model: gpt-5.5}\n"
-	cfgPath := writeTempConfig(t, cfgBody)
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
 
 	home := t.TempDir()
 	credDir := filepath.Join(home, ".model-proxy")
@@ -219,7 +220,7 @@ func TestCLI_TakeoverOpencode_WarnsDefault(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("MP_MODELSDEV_URL", srv.URL)
 
-	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "opencode")
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "opencode")
 	if code != 0 {
 		t.Fatalf("takeover exit=%d", code)
 	}
@@ -333,10 +334,10 @@ routes:
   glm-5.2:
     - {provider: aqp, model: glm-5.2, priority: 1}
 `, kimiFile)
-	cfgPath := writeTempConfig(t, cfgBody)
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
 	home := t.TempDir()
 
-	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "kimi")
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "kimi")
 	if code != 0 {
 		t.Fatalf("takeover kimi exit=%d want 0\n--- stderr ---\n%s", code, stderr)
 	}
@@ -367,7 +368,7 @@ func TestCLI_TakeoverClaudeNoDriftWarning(t *testing.T) {
 	cfgPath := writeTakeoverConfig(t, dir, claudeFile)
 	home := t.TempDir()
 
-	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "claude")
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "claude")
 	if code != 0 {
 		t.Fatalf("takeover claude exit=%d want 0\n--- stderr ---\n%s", code, stderr)
 	}
@@ -386,7 +387,7 @@ func TestCLI_TakeoverClaudeNoDriftWarning(t *testing.T) {
 func TestCLI_TakeoverDriftWarnsAndAudits(t *testing.T) {
 	cfgPath, home := setupDriftScene(t, "")
 
-	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "all")
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "all")
 	if code != 0 {
 		t.Fatalf("takeover all exit=%d want 0\n--- stderr ---\n%s", code, stderr)
 	}
@@ -420,7 +421,7 @@ func TestCLI_TakeoverDriftWarnsAndAudits(t *testing.T) {
 func TestCLI_TakeoverDriftAuditDisabled(t *testing.T) {
 	cfgPath, home := setupDriftScene(t, "guard:\n  audit: false\n")
 
-	_, stderr, code := runCLIWithHome(t, home, "takeover", cfgPath, "all")
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "all")
 	if code != 0 {
 		t.Fatalf("takeover all exit=%d want 0\n--- stderr ---\n%s", code, stderr)
 	}

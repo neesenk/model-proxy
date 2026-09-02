@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"model-proxy/internal/cli/clitest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,9 +25,9 @@ func TestCLI_StopStalePidFile(t *testing.T) {
 	}
 
 	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - m\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
-	cfgPath := writeTempConfig(t, cfgBody)
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
 	// Use a HOME whose .model-proxy won't be touched; pass the config via --config.
-	stdout, _, code := runCLI(t, "stop", cfgPath)
+	stdout, _, code := clitest.RunCLI(t, "stop", cfgPath)
 	if code != 0 {
 		t.Fatalf("stop stale pid exit=%d want 0\n%s", code, stdout)
 	}
@@ -50,8 +51,8 @@ func TestCLI_StopInvalidPid(t *testing.T) {
 	}
 
 	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - m\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
-	cfgPath := writeTempConfig(t, cfgBody)
-	_, stderr, code := runCLI(t, "stop", cfgPath)
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
+	_, stderr, code := clitest.RunCLI(t, "stop", cfgPath)
 	if code != 1 {
 		t.Errorf("stop invalid pid: exit=%d want 1", code)
 	}
@@ -71,8 +72,8 @@ func TestCLI_ReloadStalePidFile(t *testing.T) {
 	}
 
 	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\nlog_file: %s\nproviders:\n  zhipu:\n    openai_base_url: https://x\n    provider_id: zhipu\n    models:\n      - m\nroutes:\n  m:\n    - {provider: zhipu, model: m}\n", logFile)
-	cfgPath := writeTempConfig(t, cfgBody)
-	stdout, _, code := runCLI(t, "reload", cfgPath)
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
+	stdout, _, code := clitest.RunCLI(t, "reload", cfgPath)
 	if code != 0 {
 		t.Fatalf("reload stale pid exit=%d want 0\n%s", code, stdout)
 	}

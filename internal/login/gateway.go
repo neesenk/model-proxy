@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"model-proxy/internal/accounts"
+	"model-proxy/internal/display"
 	"model-proxy/internal/observe/logx"
 	"net/http"
 	"net/http/cookiejar"
@@ -119,7 +120,7 @@ func (c *AqpClient) BootstrapAtContext(ctx context.Context, endpoint string) (st
 	loginURL := ExtractLoginURL(string(body))
 	if loginURL == "" {
 		return "", fmt.Errorf("aqp sso bootstrap missing login URL: status=%d, body=%s",
-			resp.StatusCode, provider.Truncate(string(body), 300))
+			resp.StatusCode, display.Truncate(string(body), 300))
 	}
 	for _, ck := range c.PublicCookies() {
 		logf("[GoogleGateway] bootstrap jar cookie: %s=%s", ck.Name, accounts.Mask(ck.Value))
@@ -206,7 +207,7 @@ func (c *AqpClient) CheckSessionAtContext(ctx context.Context, endpoint string) 
 	logf("[GoogleGateway] auth/info status=%d body=%dB", resp.StatusCode, len(body))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("aqp sso session check failed: status=%d body=%s",
-			resp.StatusCode, provider.Truncate(string(body), 200))
+			resp.StatusCode, display.Truncate(string(body), 200))
 	}
 	var air AuthInfoResponse
 	if err := json.Unmarshal(body, &air); err != nil {

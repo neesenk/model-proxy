@@ -7,6 +7,7 @@ import (
 	"model-proxy/internal/accounts"
 	cliframework "model-proxy/internal/cli/framework"
 	cliserve "model-proxy/internal/cli/serve"
+	"model-proxy/internal/display"
 	logincore "model-proxy/internal/login"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func RunApiKeyLoginWithInput(cfg *configdomain.Config, provName string, prov con
 	// Print the confirmation line (label resolved from the freshly-saved pool,
 	// which may have been re-sorted by the pool save).
 	pool, _ := logincore.LoadPool(provName, prov.Provider)
-	fmt.Println(provider.Green("✓ Saved account ") + provider.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
+	fmt.Println(display.Green("✓ Saved account ") + display.Gray(accounts.Mask(id)+" ("+logincore.AccountLabel(pool, id)+")"))
 	return nil
 }
 
@@ -176,9 +177,9 @@ After logging in, the browser will try to redirect back to this machine:
 		return fmt.Errorf("failed to persist account: %w", err)
 	}
 
-	fmt.Printf("%s login complete: %s (project=%s)\n", provider.Green("[GoogleGateway]"), provider.Bold(provider.Cyan(a.Email)), provider.Gray(a.ProjectID))
-	fmt.Printf("  %s %s\n", provider.Dim("store:"), provider.Gray(storePath))
-	fmt.Printf("\n%s You can now run `%s`.\n", provider.Green("Login complete."), provider.Cyan("model-proxy serve"))
+	fmt.Printf("%s login complete: %s (project=%s)\n", display.Green("[GoogleGateway]"), display.Bold(display.Cyan(a.Email)), display.Gray(a.ProjectID))
+	fmt.Printf("  %s %s\n", display.Dim("store:"), display.Gray(storePath))
+	fmt.Printf("\n%s You can now run `%s`.\n", display.Green("Login complete."), display.Cyan("model-proxy serve"))
 	return nil
 }
 
