@@ -1,0 +1,19 @@
+description: kimi-cli(Kimi Code CLI)— config.toml 注入 openai_legacy provider + 每暴露模型一个 models 段
+file: ~/.kimi/config.toml
+format: toml
+base_url: v1
+toml:
+  sections:
+    - name: 'providers."{{provider_id}}"'
+      body: |
+        type = "openai_legacy"
+        base_url = "{{base_url}}"
+        api_key = "{{token}}"
+models:
+  shape: kimi
+  toml_section: 'models."{{model.id}}"'
+  toml_body: |
+    provider = "{{provider_id}}"
+    model = "{{model.id}}"
+    max_context_size = {{model.context}}
+  also_remove: 'models.{{model.id}}'

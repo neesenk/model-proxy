@@ -73,12 +73,15 @@ func runConfigInitWizard(in io.Reader, out io.Writer) error {
 	fmt.Fprintln(out, "model-proxy config init — guided setup")
 	fmt.Fprintln(out)
 
-	// 1. Detect installed coding clients via the takeover package's path
-	// knowledge (template defaults == standard client config locations).
+	// 1. Detect installed coding clients via the takeover package's template
+	// path knowledge (template file defaults == standard client config
+	// locations). Template resolution failures just mean "nothing detected".
 	var detected []takeover.ClientSpec
-	for _, c := range takeover.ListClients(tpl, "all") {
-		if _, err := os.Stat(c.File); err == nil {
-			detected = append(detected, c)
+	if clients, err := takeover.ListClients(tpl, "all", ""); err == nil {
+		for _, c := range clients {
+			if _, err := os.Stat(c.File); err == nil {
+				detected = append(detected, c)
+			}
 		}
 	}
 	if len(detected) > 0 {
@@ -141,7 +144,7 @@ func runConfigInitWizard(in io.Reader, out io.Writer) error {
 				return fmt.Errorf("reload written config: %w", err)
 			}
 			for _, c := range detected {
-				if err := takeover.RunTakeover(cfg, c.Name, takeover.BackupDir("config.yaml"), takeover.ModelFactsFor(cfg, c.Name, cliframework.HomeDir())); err != nil {
+				if err := takeover.RunTakeover(cfg, c.Name, takeover.BackupDir("config.yaml"), takeover.ModelFactsFor(cfg, c.Name, cliframework.HomeDir(), ""), ""); err != nil {
 					fmt.Fprintf(os.Stderr, "takeover %s failed: %v\n", c.Name, err)
 				}
 			}

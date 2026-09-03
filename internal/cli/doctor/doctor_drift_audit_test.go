@@ -15,27 +15,25 @@ import (
 // writeDriftScene builds the two-client takeover scene used by the drift
 // audit tests: claude taken over with an intact pointer (✓), opencode taken
 // over with a stale pointer that carries a path AND a query string (drift).
-// The .bak markers live in <home>/.model-proxy — the same dir the audit log
+// Client files land at the preset template locations under the isolated home;
+// the .bak markers live in <home>/.model-proxy — the same dir the audit log
 // resolves to when cfgPath is <home>/config.yaml.
 func writeDriftScene(t *testing.T, home string, cfg *configdomain.Config, proxyURL string) {
 	t.Helper()
+	write := func(rel, content string) {
+		p := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// claude: taken over, pointer intact.
-	if err := os.MkdirAll(filepath.Dir(cfg.Takeover.Claude), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cfg.Takeover.Claude,
-		[]byte(`{"env":{"ANTHROPIC_BASE_URL":"`+proxyURL+`"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	write(".claude/settings.json", `{"env":{"ANTHROPIC_BASE_URL":"`+proxyURL+`"}}`)
 	// opencode: taken over, stale pointer with path + query — the audit record
 	// must keep only the host.
-	if err := os.MkdirAll(filepath.Dir(cfg.Takeover.Opencode), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cfg.Takeover.Opencode,
-		[]byte(`{"provider":{"model-proxy":{"options":{"baseURL":"http://127.0.0.1:9999/v1?session=abc"}}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	write(".config/opencode/opencode.json", `{"provider":{"model-proxy":{"options":{"baseURL":"http://127.0.0.1:9999/v1?session=abc"}}}}`)
 	bakDir := filepath.Join(home, ".model-proxy")
 	for _, name := range []string{"claude", "opencode"} {
 		if err := os.MkdirAll(bakDir, 0o700); err != nil {

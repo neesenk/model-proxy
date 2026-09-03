@@ -155,10 +155,11 @@ reload 结果在 daemon 的 **log 文件**里（`[reload] config reloaded succes
 ## 2. `takeover <client>` — 接管客户端配置
 
 ```
-takeover <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
+takeover <client>   # client = 模板名（takeover list 查看）| all
+takeover list       # 可用模板:内置预设 + ~/.model-proxy/takeover-templates 覆盖
 ```
 
-逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再改写指向代理。含推导路由模型；opencode/pi 额外 hydrate models.dev 元数据。
+逻辑（`internal/takeover/takeover.go` 的 `RunTakeover`）：备份每个客户端配置（verbatim + sha256 meta，幂等）到 `<configDir>/.model-proxy/`，再按**模板**改写指向代理。客户端集合来自模板解析（`internal/takeover` 的内嵌 presets + `~/.model-proxy/takeover-templates/<name>.yaml` 用户覆盖/新增，同名覆盖预设），不再读 config 的 `takeover:` 块（已移除，残留即报迁移错误）。模板声明：目标 `file`、`format`（json|toml|env）、`base_url`（bare|v1）、`provider_id`、`proxy_url`（默认 http://<listen>）、格式专属补丁（json.set / toml.top_keys+sections / env.set，支持 `{{base_url}}/{{token}}/{{provider_id}}/{{display_name}}/{{proxy_url}}` 占位）与可选 `models:` 块（opencode/pi/kimi 三种模型元数据形状，hydrate models.dev）。未知 client 名是硬错误（列出可用模板）。
 
 ### 输出
 
@@ -173,24 +174,24 @@ takeover <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
     ~ <client> skipped (config not present: <FILE>)
   ```
   `restore all` 对应：`  ~ <client> skipped (no backup in <BAKDIR>/)`。单客户端（`takeover <client>`）缺文件仍是硬错误。
-- **stderr 告警**（仅 opencode/pi，某个模型无 models.dev 元数据时，每个模型一行）：
+- **stderr 告警**（仅带 models: 块的模板，某个模型无 models.dev 元数据时，每个模型一行）：
   ```
   warning: model <MODEL> at <PROVIDER>: no models.dev metadata - wrote defaults (ctx=200000 out=16384 text-only)
   ```
-- **stderr 漂移警示**（改写成功后立即对本次接管的 client 复检 proxy 指针，复用 `doctor --live` 的漂移检测；仅仍有漂移时每个 client 一行）：
+- **stderr 漂移警示**（改写成功后立即对本次接管的 client 复检 proxy 指针，复用 `doctor --live` 的模板化漂移检测；仅仍有漂移时每个 client 一行）：
   ```
     ⚠ <client> drift detected right after takeover: <FILE> points to <CURRENT>, want <EXPECTED>
   ```
   `guard.audit` 开启时按 doctor 同款语义追加一条 kind=drift 安全审计记录（agent=takeover，同日同 client 去重，见 §19）；审计追加失败只 stderr 提示。漂移不影响 exit code。`restore` 不做该校验（恢复原状是预期）。
 
-失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 备份失败 / 改写失败）。`client` 不在集合内由 `listClients` 决定（`all` 展开全部；未知名通常导致空集，静默返回 0）。`takeover:` 块整个可省略--五个 client 路径 + provider_id 有代码默认值，只有覆盖某项才需写。kimi 写 `~/.kimi/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai_legacy"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models.<name>]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
+失败：`log.Fatal(err)` -> stderr + exit 1（config 加载失败 / 模板解析失败 / 未知 client / 备份失败 / 改写失败）。kimi 模板写 `~/.kimi/config.toml`：注入 `[providers."model-proxy"]`（`type = "openai_legacy"`，base_url 带 `/v1`）+ 每个暴露模型一个 `[models."<name>"]` 块；开启 `web.auth.api_keys_file` 后需把 `PROXY_MANAGED` 占位 key 换成文件里的真实 key。
 
 ---
 
 ## 3. `restore <client>` — 还原客户端配置
 
 ```
-restore <client>   # client ∈ {claude, opencode, codex, pi, kimi, all}
+restore <client>   # client = 模板名（takeover list 查看）| all
 ```
 
 逻辑（`internal/takeover/takeover.go` 的 `RunRestore`）：从 `<BAKDIR>/<client>.bak` verbatim 复制回原路径。输出同 §2 的 restore 行。失败：`log.Fatal` -> stderr + exit 1（无备份 -> `no backup for <client> in <BAKDIR>: ...`）。

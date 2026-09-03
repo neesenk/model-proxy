@@ -1,40 +1,16 @@
 package takeover
 
 import (
-	"fmt"
 	"os"
 	"strings"
 
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
-	"model-proxy/internal/routing"
 )
 
-// RewriteClaude: ~/.claude/settings.json
-// Sets env.ANTHROPIC_BASE_URL → proxy, env.ANTHROPIC_AUTH_TOKEN → PROXY_MANAGED.
-func RewriteClaude(cfg *configdomain.Config) error {
-	file := cfg.Takeover.Claude
-	v, err := ReadJSONConfig(file)
-	if err != nil {
-		return err
-	}
-	env, _ := v["env"].(map[string]any)
-	if env == nil {
-		env = map[string]any{}
-	}
-	env["ANTHROPIC_BASE_URL"] = cfg.Takeover.ProxyURL
-	env["ANTHROPIC_AUTH_TOKEN"] = "PROXY_MANAGED"
-	v["env"] = env
-	return WriteJSONConfig(file, v)
-}
-
-// ProviderID returns the configured provider id (default "model-proxy").
-func ProviderID(cfg *configdomain.Config) string {
-	if cfg.Takeover.ProviderID != "" {
-		return cfg.Takeover.ProviderID
-	}
-	return "model-proxy"
-}
+// 客户端改写已模板化(template.go + presets/)。本文件保留模板引擎与外部
+// 共用的纯函数:暴露模型枚举、JSON 模型集合渲染器(opencode/pi 形状)、
+// TOML 文本编辑 helper 与文件 I/O helper。
 
 // ExposedModels returns all exposed model names across all protocol routes,
 // with their provider model metadata (context/output/modalities). Each entry
@@ -86,41 +62,10 @@ func DisplayName(id string) string {
 	return id
 }
 
-// RewriteOpencode: ~/.config/opencode/opencode.json
-// Writes a provider entry pointing at the proxy, with all exposed models from
-// the config's routes + provider model metadata (context/output/modalities).
-func RewriteOpencode(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
-	file := cfg.Takeover.Opencode
-	pid := ProviderID(cfg)
-	v, err := ReadJSONConfig(file)
-	if err != nil {
-		return err
-	}
-	prov, _ := v["provider"].(map[string]any)
-	if prov == nil {
-		prov = map[string]any{}
-	}
-	// opencode's @ai-sdk/anthropic appends /messages to baseURL, so baseURL
-	// ends with /v1 (→ <proxy>/v1/messages). Needs npm for non-built-in id.
-	baseURL := strings.TrimRight(cfg.Takeover.ProxyURL, "/") + "/v1"
-	prov[pid] = map[string]any{
-		"name": "model-proxy",
-		"npm":  "@ai-sdk/anthropic",
-		"options": map[string]any{
-			"apiKey":  "PROXY_MANAGED",
-			"baseURL": baseURL,
-		},
-		"models": opencodeModels(cfg, meta, routes),
-	}
-	v["provider"] = prov
-	return WriteJSONConfig(file, v)
-}
-
-// opencodeModels builds the opencode model map from the config's exposed
+// opencodeModelsCollection builds the opencode model map from the exposed
 // models (routes + hydrated metadata). Each model gets name, limit.{context,
 // output}, modalities.{input,output}.
-func opencodeModels(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) map[string]any {
-	models := ExposedModels(cfg, meta, routes)
+func opencodeModelsCollection(models []ExposedModel) map[string]any {
 	out := make(map[string]any, len(models))
 	for _, m := range models {
 		name := DisplayName(m.Exposed)
@@ -151,21 +96,10 @@ func opencodeModels(cfg *configdomain.Config, meta map[string]map[string]catalog
 	return out
 }
 
-// RewritePi: ~/.pi/agent/models.json
-// providers.<name> = { baseUrl, api: anthropic-messages, apiKey: PROXY_MANAGED,
-// models:[{id, name, contextWindow, input, maxTokens}] }
-func RewritePi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
-	file := cfg.Takeover.Pi
-	name := ProviderID(cfg)
-	v, err := ReadJSONConfig(file)
-	if err != nil {
-		return err
-	}
-	prov, _ := v["providers"].(map[string]any)
-	if prov == nil {
-		prov = map[string]any{}
-	}
-	models := ExposedModels(cfg, meta, routes)
+// piModelsCollection builds pi's model list: {id, name, input, maxTokens,
+// contextWindow} per exposed model, with conservative defaults for missing
+// metadata and one fallback entry when the route table is empty.
+func piModelsCollection(models []ExposedModel) []map[string]any {
 	piModels := []map[string]any{}
 	for _, m := range models {
 		entry := map[string]any{
@@ -188,45 +122,7 @@ func RewritePi(cfg *configdomain.Config, meta map[string]map[string]catalog.Mode
 	if len(piModels) == 0 {
 		piModels = []map[string]any{{"id": "glm-5.2", "name": "glm-5.2", "input": []string{"text"}, "maxTokens": 4096}}
 	}
-	// pi's api: anthropic-messages appends /v1/messages, so baseUrl is bare proxy URL.
-	baseURL := strings.TrimRight(cfg.Takeover.ProxyURL, "/")
-	prov[name] = map[string]any{
-		"baseUrl": baseURL,
-		"api":     "anthropic-messages",
-		"apiKey":  "PROXY_MANAGED",
-		"models":  piModels,
-	}
-	v["providers"] = prov
-	return WriteJSONConfig(file, v)
-}
-
-// RewriteCodex: ~/.codex/config.toml
-// Text edit: set top-level model_provider=<id> and inject a [model_providers."<id>"] section.
-func RewriteCodex(cfg *configdomain.Config) error {
-	file := cfg.Takeover.Codex
-	data, err := readFile(file)
-	if err != nil {
-		return err
-	}
-	text := string(data)
-	pid := ProviderID(cfg)
-	header := fmt.Sprintf(`model_providers."%s"`, pid)
-
-	section := fmt.Sprintf(`
-[model_providers."%s"]
-name = "model-proxy"
-base_url = "%s"
-wire_api = "responses"
-requires_openai_auth = true
-`, pid, cfg.Takeover.ProxyURL)
-
-	text = ReplaceOrAppendTOMLSection(text, header, section)
-	text = SetTOMLTopKey(text, "model_provider", fmt.Sprintf("%q", pid))
-
-	// Atomic like every other takeover writer: a crash mid-rewrite must not
-	// leave a truncated live config.toml (pitfalls #18), and the mode is
-	// preserved — never widened to a hardcoded 0644.
-	return atomicWriteFile(file, []byte(text), preserveMode(file, 0o600))
+	return piModels
 }
 
 // SetTOMLTopKey sets a top-level bare key (placed before any [section]).
@@ -346,56 +242,3 @@ func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 // kimi-cli's LLMModel schema REQUIRES max_context_size (no default — omitting
 // it fails config validation), so the value is the same conservative default
 // the proxy uses everywhere else, taken from its routing-package owner.
-
-// RewriteKimi: ~/.kimi/config.toml (Kimi Code CLI — the MoonshotAI/kimi-cli
-// client; "openai_legacy" below names kimi-cli's OpenAI Chat Completions
-// provider type, not a legacy client).
-// Text edit mirroring codex's TOML handling: inject a [providers."<id>"]
-// block (openai_legacy = OpenAI Chat Completions, which the proxy speaks
-// natively; api_key is a sentinel — the proxy holds the real credential) and
-// one [models."<exposed>"] block per exposed model pointing at the provider.
-// Re-runs replace both the provider block and every model block in place.
-func RewriteKimi(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
-	file := cfg.Takeover.Kimi
-	data, err := readFile(file)
-	if err != nil {
-		return err
-	}
-	text := string(data)
-	pid := ProviderID(cfg)
-
-	// openai_legacy expects the versioned base (e.g. https://api.openai.com/v1):
-	// kimi-cli appends /chat/completions itself.
-	base := strings.TrimRight(cfg.Takeover.ProxyURL, "/") + "/v1"
-	provSection := fmt.Sprintf(`
-[providers."%s"]
-type = "openai_legacy"
-base_url = "%s"
-api_key = "PROXY_MANAGED"
-`, pid, base)
-	text = ReplaceOrAppendTOMLSection(text, fmt.Sprintf("providers.%q", pid), provSection)
-
-	for _, m := range ExposedModels(cfg, meta, routes) {
-		// kimi-cli's LLMModel schema requires provider, model (the wire model
-		// id — the exposed name the proxy routes) and max_context_size; the
-		// dotted exposed name must be quoted or TOML reads [models.glm-5.2]
-		// as nested tables (models → glm-5 → "2").
-		// Drop the unquoted block the old writer emitted, if still present:
-		// left behind it would parse as a nested table that fails kimi-cli's
-		// model validation (provider/model missing at that path).
-		text = removeTOMLSection(text, "models."+m.Exposed)
-		// max_context_size is REQUIRED by kimi-cli (no schema default —
-		// omitting it fails config validation), so an unknown context size
-		// falls back to the same conservative default the proxy uses elsewhere
-		// (routing.DefaultModelMetadata.Context) rather than dropping the key.
-		ctx := m.PM.Context
-		if ctx <= 0 {
-			ctx = routing.DefaultModelMetadata.Context
-		}
-		modelSection := fmt.Sprintf("\n[models.%q]\nprovider = %q\nmodel = %q\nmax_context_size = %d\n",
-			m.Exposed, pid, m.Exposed, ctx)
-		text = ReplaceOrAppendTOMLSection(text, fmt.Sprintf("models.%q", m.Exposed), modelSection)
-	}
-
-	return atomicWriteFile(file, []byte(text), preserveMode(file, 0o600))
-}

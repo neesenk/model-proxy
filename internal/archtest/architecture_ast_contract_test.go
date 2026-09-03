@@ -118,7 +118,6 @@ func requiredConfigCompatAliases() map[string]string {
 		"Scheduling":       "Scheduling",
 		"ShadowTarget":     "ShadowTarget",
 		"StatsConfig":      "StatsConfig",
-		"Takeover":         "Takeover",
 		"WebAuthConfig":    "WebAuthConfig",
 		"WebConfig":        "WebConfig",
 	}

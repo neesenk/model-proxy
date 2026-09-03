@@ -32,7 +32,6 @@ type Config struct {
 	// provider's proxy_url overrides it for that provider's forwarded traffic.
 	Proxy      string           `yaml:"proxy"`
 	Scheduling Scheduling       `yaml:"scheduling"`
-	Takeover   Takeover         `yaml:"takeover"`
 	Web        WebConfig        `yaml:"web"`
 	Stats      StatsConfig      `yaml:"stats"`
 	RequestLog RequestLogConfig `yaml:"request_log"`
@@ -856,26 +855,6 @@ func (t *RouteTarget) UnmarshalYAML(value *yaml.Node) error {
 	return value.Decode((*plain)(t))
 }
 
-type Takeover struct {
-	ProxyURL string `yaml:"proxy_url"`
-	Claude   string `yaml:"claude"`
-	Opencode string `yaml:"opencode"`
-	Codex    string `yaml:"codex"`
-	Pi       string `yaml:"pi"`
-	// Kimi is the Kimi Code CLI config (~/.kimi/config.toml) — the target
-	// client is MoonshotAI/kimi-cli (branded "Kimi Code CLI"). The TOML
-	// provider catalog is [providers."<id>"] + [models."<name>"] blocks; the
-	// provider type written is "openai_legacy", kimi-cli's name for the
-	// OpenAI Chat Completions protocol (not a legacy client), and each model
-	// block carries provider/model/max_context_size per kimi-cli's LLMModel
-	// schema (docs/en/configuration/providers.md in MoonshotAI/kimi-cli).
-	Kimi string `yaml:"kimi"`
-	// ProviderID is the single provider identifier used by takeover for every
-	// agent that takes one (opencode, pi, codex, kimi, and future agents). claude
-	// doesn't use it (it writes env vars). Default "model-proxy".
-	ProviderID string `yaml:"provider_id"`
-}
-
 // ExpandPath expands ~ and the env: prefix.
 func ExpandPath(p string) string {
 	if p == "" {
@@ -924,13 +903,16 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		// explicit routes now, or set the model client-side). Keeping the raw
 		// key lets load fail with a migration hint instead of silently
 		// dropping the mapping (the classic silent-drop trap).
-		ClaudeMapping map[string]string       `yaml:"claude_mapping"`
-		Takeover      Takeover                `yaml:"takeover"`
-		Web           WebConfig               `yaml:"web"`
-		Stats         StatsConfig             `yaml:"stats"`
-		RequestLog    RequestLogConfig        `yaml:"request_log"`
-		Cache         CacheConfig             `yaml:"cache"`
-		Shadow        map[string]ShadowTarget `yaml:"shadow"`
+		ClaudeMapping map[string]string `yaml:"claude_mapping"`
+		// Tombstone: the takeover: block was removed — client targets come from
+		// templates now (internal/takeover presets + user overrides in
+		// ~/.model-proxy/takeover-templates). Same silent-drop rationale.
+		Takeover   map[string]any          `yaml:"takeover"`
+		Web        WebConfig               `yaml:"web"`
+		Stats      StatsConfig             `yaml:"stats"`
+		RequestLog RequestLogConfig        `yaml:"request_log"`
+		Cache      CacheConfig             `yaml:"cache"`
+		Shadow     map[string]ShadowTarget `yaml:"shadow"`
 		// Must mirror Config's shadow knobs — without these the file-loaded
 		// values are silently dropped (and validate's range checks never fire).
 		ShadowSampleRate    *float64                `yaml:"shadow_sample_rate"`
@@ -969,6 +951,9 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	if len(raw.ClaudeMapping) > 0 {
 		return nil, fmt.Errorf("claude_mapping is no longer supported: map a claude-* alias with an explicit routes: entry (e.g. `routes: {claude-haiku-4-5: [<P>/<M>]}`), or set the target model in the client config instead")
 	}
+	if len(raw.Takeover) > 0 {
+		return nil, fmt.Errorf("the takeover: block is no longer supported: client targets now come from templates — embedded presets (see `model-proxy takeover list`) or your own YAML in ~/.model-proxy/takeover-templates/<name>.yaml (override a preset by reusing its name; set file/provider_id/proxy_url there)")
+	}
 	cfg.Listen = raw.Listen
 	cfg.LogLevel = raw.LogLevel
 	cfg.LogFile = raw.LogFile
@@ -976,7 +961,6 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Routes = raw.Routes
 	cfg.Proxy = raw.Proxy
 	cfg.Scheduling = raw.Scheduling
-	cfg.Takeover = raw.Takeover
 	cfg.Web = raw.Web
 	cfg.Web.Auth.AdminTokenFile = ExpandPath(cfg.Web.Auth.AdminTokenFile)
 	cfg.Web.Auth.APIKeysFile = ExpandPath(cfg.Web.Auth.APIKeysFile)
@@ -1009,37 +993,6 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.Credentials = raw.Credentials
 	cfg.Conversion = raw.Conversion
 	cfg.LogFile = ExpandPath(cfg.LogFile)
-	t := &cfg.Takeover
-	// Takeover paths default to each client's standard config location (and
-	// provider_id to "model-proxy"), so config.yaml can omit the entire
-	// `takeover:` block unless overriding one. Set before expandPath so the
-	// `~` in the defaults is expanded (same as explicitly-configured paths).
-	if t.ProviderID == "" {
-		t.ProviderID = "model-proxy"
-	}
-	if t.Claude == "" {
-		t.Claude = "~/.claude/settings.json"
-	}
-	if t.Opencode == "" {
-		t.Opencode = "~/.config/opencode/opencode.json"
-	}
-	if t.Codex == "" {
-		t.Codex = "~/.codex/config.toml"
-	}
-	if t.Pi == "" {
-		t.Pi = "~/.pi/agent/models.json"
-	}
-	if t.Kimi == "" {
-		t.Kimi = "~/.kimi/config.toml"
-	}
-	t.Claude = ExpandPath(t.Claude)
-	t.Opencode = ExpandPath(t.Opencode)
-	t.Codex = ExpandPath(t.Codex)
-	t.Pi = ExpandPath(t.Pi)
-	t.Kimi = ExpandPath(t.Kimi)
-	if t.ProxyURL == "" && cfg.Listen != "" {
-		t.ProxyURL = "http://" + cfg.Listen
-	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}

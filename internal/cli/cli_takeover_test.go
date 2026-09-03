@@ -20,20 +20,133 @@ import (
 //
 // The subprocess dispatcher (TestHelperProcess) covers "takeover" and
 // "restore" cases; runCLI pins HOME to a fresh temp dir (isolation), and
-// runCLIWithHome lets a test pin HOME to a pre-populated dir.
+// runCLIWithHome lets a test pin HOME to a pre-populated dir. Client targets
+// come from user template overrides in <home>/.model-proxy/takeover-templates
+// (the same mechanism production resolves).
+
+// writeTakeoverTemplates writes user template overrides into
+// <home>/.model-proxy/takeover-templates for the given name→target-file map.
+// Bodies mirror the embedded presets (the override REPLACES the preset).
+func writeTakeoverTemplates(t *testing.T, home string, files map[string]string) {
+	t.Helper()
+	dir := filepath.Join(home, ".model-proxy", "takeover-templates")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bodies := map[string]func(file string) string{
+		"claude": func(f string) string {
+			return "file: " + f + `
+format: json
+json:
+  set:
+    env.ANTHROPIC_BASE_URL: "{{base_url}}"
+    env.ANTHROPIC_AUTH_TOKEN: "{{token}}"
+  drift_path: env.ANTHROPIC_BASE_URL
+`
+		},
+		"opencode": func(f string) string {
+			return "file: " + f + `
+format: json
+base_url: v1
+json:
+  set:
+    provider.{{provider_id}}:
+      name: "model-proxy"
+      npm: "@ai-sdk/anthropic"
+      options: {apiKey: "{{token}}", baseURL: "{{base_url}}"}
+  drift_path: provider.{{provider_id}}.options.baseURL
+models:
+  shape: opencode
+  json_path: provider.{{provider_id}}.models
+`
+		},
+		"codex": func(f string) string {
+			return "file: " + f + `
+format: toml
+base_url: bare
+toml:
+  top_keys:
+    model_provider: '"{{provider_id}}"'
+  sections:
+    - name: 'model_providers."{{provider_id}}"'
+      body: |
+        name = "model-proxy"
+        base_url = "{{base_url}}"
+        wire_api = "responses"
+        requires_openai_auth = true
+`
+		},
+		"kimi": func(f string) string {
+			return "file: " + f + `
+format: toml
+base_url: v1
+toml:
+  sections:
+    - name: 'providers."{{provider_id}}"'
+      body: |
+        type = "openai_legacy"
+        base_url = "{{base_url}}"
+        api_key = "{{token}}"
+models:
+  shape: kimi
+  toml_section: 'models."{{model.id}}"'
+  toml_body: |
+    provider = "{{provider_id}}"
+    model = "{{model.id}}"
+    max_context_size = {{model.context}}
+  also_remove: 'models.{{model.id}}'
+`
+		},
+	}
+	for name, f := range files {
+		body, ok := bodies[name]
+		if !ok {
+			t.Fatalf("no override body for %s", name)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(body(f)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// writePlainConfig writes a valid takeover-less config into dir/config.yaml
+// (backupDir = <configDir>/.model-proxy; proxy_url defaults to http://listen).
+func writePlainConfig(t *testing.T, dir string) string {
+	t.Helper()
+	body := `listen: 127.0.0.1:15721
+providers:
+  aqp:
+    openai_base_url: https://example.invalid/compass-api/v1
+    anthropic_base_url: https://example.invalid/compass-api
+    provider_id: aqp
+    aqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
+    models:
+      - glm-5.2
+routes:
+  glm-5.2:
+    - {provider: aqp, model: glm-5.2, priority: 1}
+`
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 // -- T1: `takeover claude` backs up the original and rewrites it ---
 
 func TestCLI_TakeoverClaude(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
 	claudeFile := filepath.Join(dir, "claude.json")
 	original := `{"env":{"FOO":"bar"}}`
 	if err := os.WriteFile(claudeFile, []byte(original), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfgPath := writeTakeoverConfig(t, dir, claudeFile)
+	cfgPath := writePlainConfig(t, dir)
+	writeTakeoverTemplates(t, home, map[string]string{"claude": claudeFile})
 
-	stdout, _, code := clitest.RunCLI(t, "takeover", cfgPath, "claude")
+	stdout, _, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "claude")
 	if code != 0 {
 		t.Fatalf("takeover claude exit=%d want 0\n--- stdout ---\n%s", code, stdout)
 	}
@@ -68,6 +181,7 @@ func TestCLI_TakeoverClaude(t *testing.T) {
 
 func TestCLI_RestoreClaude(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
 	claudeFile := filepath.Join(dir, "claude.json")
 	original := `{"env":{"FOO":"bar"}}`
 	// Simulate a post-takeover client file (proxy env injected).
@@ -84,9 +198,10 @@ func TestCLI_RestoreClaude(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bakDir, "claude.bak"), []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfgPath := writeTakeoverConfig(t, dir, claudeFile)
+	cfgPath := writePlainConfig(t, dir)
+	writeTakeoverTemplates(t, home, map[string]string{"claude": claudeFile})
 
-	stdout, _, code := clitest.RunCLI(t, "restore", cfgPath, "claude")
+	stdout, _, code := clitest.RunCLIWithHome(t, home, "restore", cfgPath, "claude")
 	if code != 0 {
 		t.Fatalf("restore claude exit=%d want 0\n--- stdout ---\n%s", code, stdout)
 	}
@@ -100,59 +215,31 @@ func TestCLI_RestoreClaude(t *testing.T) {
 	}
 }
 
-// -- T3: `takeover <unknown>` exits non-zero (no client matched) ---
+// -- T3: `takeover <unknown>` exits non-zero (unknown template is a hard error) ---
 
 func TestCLI_TakeoverUnknownClient(t *testing.T) {
 	dir := t.TempDir()
-	cfgPath := writeTakeoverConfig(t, dir, filepath.Join(dir, "claude.json"))
+	cfgPath := writePlainConfig(t, dir)
 	_, _, code := clitest.RunCLI(t, "takeover", cfgPath, "nope")
-	// RunTakeover on an unknown client is a no-op (listClients returns nil →
-	// the loop body never runs → nil error → exit 0). This is the product
-	// behavior; takeover doesn't validate the client name up front.
-	if code != 0 {
-		t.Errorf("takeover nope: exit=%d want 0 (no-op for unknown client)", code)
+	// An unknown client name fails template resolution (log.Fatal) — a typo
+	// must never no-op silently.
+	if code == 0 {
+		t.Error("takeover nope: exit=0, want non-zero (unknown template is a hard error)")
 	}
-}
-
-// writeTakeoverConfig writes a valid config into dir/config.yaml whose
-// takeover.claude points at claudeFile. The config dir is also where the
-// backup lands (backupDir = <configDir>/.model-proxy).
-func writeTakeoverConfig(t *testing.T, dir, claudeFile string) string {
-	t.Helper()
-	body := fmt.Sprintf(`listen: 127.0.0.1:15721
-takeover:
-  proxy_url: http://127.0.0.1:15721
-  claude: %s
-providers:
-  aqp:
-    openai_base_url: https://example.invalid/compass-api/v1
-    anthropic_base_url: https://example.invalid/compass-api
-    provider_id: aqp
-    aqp_mint_url: https://example.invalid/api/v1/cqp/ccswitch/api_key/get_or_generate
-    models:
-      - glm-5.2
-routes:
-  glm-5.2:
-    - {provider: aqp, model: glm-5.2, priority: 1}
-`, claudeFile)
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 
 // --- takeover opencode: rewrites opencode config ---
 
 func TestCLI_TakeoverOpencode(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
 	opencodeFile := filepath.Join(dir, "opencode.json")
 	if err := os.WriteFile(opencodeFile, []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  opencode: %s\n  provider_id: model-proxy\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", opencodeFile)
-	cfgPath := clitest.WriteTempConfig(t, cfgBody)
-	_, _, code := clitest.RunCLI(t, "takeover", cfgPath, "opencode")
+	cfgPath := writePlainConfig(t, dir)
+	writeTakeoverTemplates(t, home, map[string]string{"opencode": opencodeFile})
+	_, _, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "opencode")
 	if code != 0 {
 		t.Fatalf("takeover opencode: exit=%d want 0", code)
 	}
@@ -169,18 +256,18 @@ func TestCLI_TakeoverOpencode(t *testing.T) {
 
 func TestCLI_RestoreClaudeRoundTrip(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
 	claudeFile := filepath.Join(dir, "claude.json")
 	if err := os.WriteFile(claudeFile, []byte(`{"env":{"ORIGINAL":"1"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// backupDir = <configDir>/.model-proxy — config lives in dir, so backup in dir/.model-proxy.
-	cfgBody := fmt.Sprintf("listen: 127.0.0.1:15721\ntakeover:\n  claude: %s\nproviders:\n  aqp:\n    openai_base_url: https://x\n    provider_id: aqp\n    models:\n      - glm-5.2\nroutes:\n  glm-5.2:\n    - {provider: aqp, model: glm-5.2}\n", claudeFile)
-	cfgPath := clitest.WriteTempConfig(t, cfgBody)
+	cfgPath := writePlainConfig(t, dir)
+	writeTakeoverTemplates(t, home, map[string]string{"claude": claudeFile})
 	// First takeover (creates backup + rewrites), then restore.
-	if _, _, code := clitest.RunCLI(t, "takeover", cfgPath, "claude"); code != 0 {
+	if _, _, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "claude"); code != 0 {
 		t.Fatalf("takeover claude: exit=%d", code)
 	}
-	if _, _, code := clitest.RunCLI(t, "restore", cfgPath, "claude"); code != 0 {
+	if _, _, code := clitest.RunCLIWithHome(t, home, "restore", cfgPath, "claude"); code != 0 {
 		t.Fatalf("restore claude: exit=%d", code)
 	}
 	data, err := os.ReadFile(claudeFile)
@@ -202,12 +289,14 @@ func TestCLI_RestoreClaudeRoundTrip(t *testing.T) {
 // --- takeover opencode: warns on default-sourced models ---
 
 func TestCLI_TakeoverOpencode_WarnsDefault(t *testing.T) {
-	ocPath := filepath.Join(t.TempDir(), "oc.json")
+	dir := t.TempDir()
+	ocPath := filepath.Join(dir, "oc.json")
 	os.WriteFile(ocPath, []byte(`{}`), 0o644) // takeover backs up the target first; it must exist
-	cfgBody := "listen: 127.0.0.1:15721\ntakeover:\n  provider_id: model-proxy\n  opencode: " + ocPath + "\nproviders:\n  codex:\n    provider_id: codex\n    openai_base_url: https://chatgpt.com/backend-api/codex\nroutes:\n  gpt-5.5:\n    - {provider: codex, model: gpt-5.5}\n"
+	cfgBody := "listen: 127.0.0.1:15721\nproviders:\n  codex:\n    provider_id: codex\n    openai_base_url: https://chatgpt.com/backend-api/codex\nroutes:\n  gpt-5.5:\n    - {provider: codex, model: gpt-5.5}\n"
 	cfgPath := clitest.WriteTempConfig(t, cfgBody)
 
 	home := t.TempDir()
+	writeTakeoverTemplates(t, home, map[string]string{"opencode": ocPath})
 	credDir := filepath.Join(home, ".model-proxy")
 	os.MkdirAll(credDir, 0o700)
 	// fresh EMPTY cache (no models) → gpt-5.5 unmatched → default
@@ -240,46 +329,20 @@ func TestCLI_TakeoverOpencode_WarnsDefault(t *testing.T) {
 
 // --- post-takeover drift verification (优化项 9) ---
 
-// driftSceneConfig writes a config with claude (file present) and codex (file
-// missing, but a pre-seeded .bak marker simulates a prior takeover whose
-// client config later vanished). backupDir = <configDir>/.model-proxy.
-func driftSceneConfig(t *testing.T, dir, claudeFile, codexFile, extra string) string {
-	t.Helper()
-	body := fmt.Sprintf(`listen: 127.0.0.1:15721
-%s
-takeover:
-  proxy_url: http://127.0.0.1:15721
-  claude: %s
-  codex: %s
-providers:
-  aqp:
-    openai_base_url: https://x
-    provider_id: aqp
-    models:
-      - glm-5.2
-routes:
-  glm-5.2:
-    - {provider: aqp, model: glm-5.2}
-`, extra, claudeFile, codexFile)
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
 // setupDriftScene builds the claude-ok / codex-drift scene and returns the
-// config path. A local 500 models.dev endpoint keeps the `all` metadata
-// hydrate offline; the codex .bak marker makes the drift check treat codex
-// as taken over even though its config file is gone.
+// config path + home. A local 500 models.dev endpoint keeps the `all`
+// metadata hydrate offline; the codex .bak marker makes the drift check
+// treat codex as taken over even though its config file is gone.
 func setupDriftScene(t *testing.T, extra string) (cfgPath, home string) {
 	t.Helper()
 	dir := t.TempDir()
+	home = t.TempDir()
 	claudeFile := filepath.Join(dir, "claude.json")
 	if err := os.WriteFile(claudeFile, []byte(`{"env":{"FOO":"bar"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	codexFile := filepath.Join(dir, "codex.toml") // intentionally not created
+	writeTakeoverTemplates(t, home, map[string]string{"claude": claudeFile, "codex": codexFile})
 	bakDir := filepath.Join(dir, ".model-proxy")
 	if err := os.MkdirAll(bakDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -290,7 +353,24 @@ func setupDriftScene(t *testing.T, extra string) (cfgPath, home string) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
 	t.Cleanup(srv.Close)
 	t.Setenv("MP_MODELSDEV_URL", srv.URL)
-	return driftSceneConfig(t, dir, claudeFile, codexFile, extra), t.TempDir()
+
+	body := fmt.Sprintf(`listen: 127.0.0.1:15721
+%s
+providers:
+  aqp:
+    openai_base_url: https://x
+    provider_id: aqp
+    models:
+      - glm-5.2
+routes:
+  glm-5.2:
+    - {provider: aqp, model: glm-5.2}
+`, extra)
+	cfgPath = filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath, home
 }
 
 // securityLogFiles lists the security-*.log files under <home>/.model-proxy
@@ -310,32 +390,19 @@ func securityLogFiles(t *testing.T, home string) []string {
 	return out
 }
 
-// TestCLI_TakeoverKimiNoDriftWarning: a kimi takeover writes a pointer
-// TakeoverPointer can read back — the post-write drift check must stay
+// TestCLI_TakeoverKimiNoDriftWarning: a kimi takeover writes a pointer the
+// template Pointer can read back — the post-write drift check must stay
 // silent (before the kimi case existed, every kimi takeover warned about
 // drift forever). Regression for the missing "kimi" drift case.
 func TestCLI_TakeoverKimiNoDriftWarning(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
 	kimiFile := filepath.Join(dir, "kimi.toml")
 	if err := os.WriteFile(kimiFile, []byte("[providers.\"existing\"]\ntype = \"kimi\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfgBody := fmt.Sprintf(`listen: 127.0.0.1:15721
-takeover:
-  proxy_url: http://127.0.0.1:15721
-  kimi: %s
-providers:
-  aqp:
-    openai_base_url: https://x
-    provider_id: aqp
-    models:
-      - glm-5.2
-routes:
-  glm-5.2:
-    - {provider: aqp, model: glm-5.2, priority: 1}
-`, kimiFile)
-	cfgPath := clitest.WriteTempConfig(t, cfgBody)
-	home := t.TempDir()
+	cfgPath := writePlainConfig(t, dir)
+	writeTakeoverTemplates(t, home, map[string]string{"kimi": kimiFile})
 
 	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "kimi")
 	if code != 0 {
@@ -361,12 +428,13 @@ routes:
 // post-write drift check — no warning line, no seclog drift record.
 func TestCLI_TakeoverClaudeNoDriftWarning(t *testing.T) {
 	dir := t.TempDir()
+	home := t.TempDir()
 	claudeFile := filepath.Join(dir, "claude.json")
 	if err := os.WriteFile(claudeFile, []byte(`{"env":{"FOO":"bar"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfgPath := writeTakeoverConfig(t, dir, claudeFile)
-	home := t.TempDir()
+	cfgPath := writePlainConfig(t, dir)
+	writeTakeoverTemplates(t, home, map[string]string{"claude": claudeFile})
 
 	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "claude")
 	if code != 0 {

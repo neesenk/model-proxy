@@ -559,8 +559,10 @@ application → serveAssembly → applicationRuntime → Proxy
 `StatusColor`），是纯标准库叶子包，任何层都可 import；`internal/provider` 回归
 后端实现 owner，不再持有 display helper。
 
-`internal/takeover` 拥有客户端配置的备份、改写与恢复（claude/opencode/codex/pi），
-只消费 config DTO、catalog 元数据与 `routing.DefaultModelMetadata` 保守回落；
+`internal/takeover` 拥有客户端配置的备份、模板化改写与恢复：客户端集合由
+模板解析（内嵌 `presets/*.yaml` + `~/.model-proxy/takeover-templates` 用户覆盖，
+模板契约见 `docs/client-takeover.md`），只消费 config DTO、catalog 元数据与
+`routing.DefaultModelMetadata` 保守回落；
 route derivation、catalog 加载（`internal/config`）与 source 标记
 （`internal/routing.HydrateModels`）由本包的 `ModelFactsFor` 计算并注入
 `RunTakeover`（调用方传入 HOME seam 以定位 catalog 缓存），包内不读取

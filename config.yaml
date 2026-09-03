@@ -260,18 +260,10 @@ providers:
 #   quota_switch_margin: 15 # (default 15) switch provider if another's effective remaining beats current by >= this many pct points
 #   quality_error_weight: 100 # (default 100 = 1.0) penalty per unit error-rate EWMA (2m half-life), subtracted from surplus; 0 disables
 #   quality_ttft_weight: 20 # (default 20 = 0.2) penalty per unit normalized TTFT EWMA (10s reference); 0 disables
-takeover:
-  # provider_id is the single identifier used by takeover for every agent that
-  # takes one (opencode, pi, codex, future agents). claude doesn't use it.
-  provider_id: model-proxy
-  # proxy_url defaults to http://<listen> when unset — leave it commented so
-  # changing `listen` above is enough. Uncomment to override.
-  # proxy_url: http://127.0.0.1:15721
-  claude: ~/.claude/settings.json
-  opencode: ~/.config/opencode/opencode.json
-  codex: ~/.codex/config.toml
-  pi: ~/.pi/agent/models.json
-  # kimi: ~/.kimi/config.toml
+# takeover: client targets come from templates now — embedded presets
+# (`model-proxy takeover list`) or your own YAML in
+# ~/.model-proxy/takeover-templates/<name>.yaml (same name overrides a preset;
+# set file/provider_id/proxy_url there). The old takeover: block was removed.
 
 # Per-request access log: writes the full request + response body of each
 # committed upstream call as one JSONL line to a rotating file under dir, for

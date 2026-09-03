@@ -14,32 +14,121 @@ import (
 	"testing"
 )
 
+// writeTemplateOverrides writes user templates for the given name→target-file
+// map into a fresh templates dir, exercising the user-override mechanism the
+// same way production resolves it. Bodies mirror the embedded presets.
+func writeTemplateOverrides(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	bodies := map[string]func(file string) string{
+		"claude": func(f string) string {
+			return "file: " + f + `
+format: json
+json:
+  set:
+    env.ANTHROPIC_BASE_URL: "{{base_url}}"
+    env.ANTHROPIC_AUTH_TOKEN: "{{token}}"
+  drift_path: env.ANTHROPIC_BASE_URL
+`
+		},
+		"opencode": func(f string) string {
+			return "file: " + f + `
+format: json
+base_url: v1
+json:
+  set:
+    provider.{{provider_id}}:
+      name: "model-proxy"
+      npm: "@ai-sdk/anthropic"
+      options: {apiKey: "{{token}}", baseURL: "{{base_url}}"}
+  drift_path: provider.{{provider_id}}.options.baseURL
+models:
+  shape: opencode
+  json_path: provider.{{provider_id}}.models
+`
+		},
+		"pi": func(f string) string {
+			return "file: " + f + `
+format: json
+base_url: bare
+json:
+  set:
+    providers.{{provider_id}}:
+      baseUrl: "{{base_url}}"
+      api: "anthropic-messages"
+      apiKey: "{{token}}"
+  drift_path: providers.{{provider_id}}.baseUrl
+models:
+  shape: pi
+  json_path: providers.{{provider_id}}.models
+`
+		},
+		"codex": func(f string) string {
+			return "file: " + f + `
+format: toml
+base_url: bare
+toml:
+  top_keys:
+    model_provider: '"{{provider_id}}"'
+  sections:
+    - name: 'model_providers."{{provider_id}}"'
+      body: |
+        name = "model-proxy"
+        base_url = "{{base_url}}"
+        wire_api = "responses"
+        requires_openai_auth = true
+`
+		},
+	}
+	for name, f := range files {
+		body, ok := bodies[name]
+		if !ok {
+			t.Fatalf("no override body for %s", name)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name+".yaml"), []byte(body(f)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
 // --- listClients ---
 
 func TestListClients_All(t *testing.T) {
-	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d", Kimi: "e"}}
-	all := takeover.ListClients(cfg, "")
-	if len(all) != 5 {
-		t.Errorf("takeover.ListClients('') len=%d want 5", len(all))
+	cfg := &configdomain.Config{}
+	all, err := takeover.ListClients(cfg, "", "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	all = takeover.ListClients(cfg, "all")
-	if len(all) != 5 {
-		t.Errorf("takeover.ListClients('all') len=%d want 5", len(all))
+	// Every embedded preset resolves; the set is sorted by name.
+	if len(all) < 5 {
+		t.Fatalf("ListClients('') len=%d want the preset set (>=5)", len(all))
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i-1].Name >= all[i].Name {
+			t.Errorf("ListClients not sorted: %q before %q", all[i-1].Name, all[i].Name)
+		}
+	}
+	again, err := takeover.ListClients(cfg, "all", "")
+	if err != nil || len(again) != len(all) {
+		t.Errorf("ListClients('all') len=%d err=%v, want %d", len(again), err, len(all))
 	}
 }
 
 func TestListClients_OneByName(t *testing.T) {
-	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a", Opencode: "b", Codex: "c", Pi: "d"}}
-	one := takeover.ListClients(cfg, "codex")
+	one, err := takeover.ListClients(&configdomain.Config{}, "codex", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(one) != 1 || one[0].Name != "codex" {
-		t.Errorf("takeover.ListClients('codex')=%+v want [codex]", one)
+		t.Errorf("ListClients('codex')=%+v want [codex]", one)
 	}
 }
 
-func TestListClients_UnknownReturnsNil(t *testing.T) {
-	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a"}}
-	if got := takeover.ListClients(cfg, "nope"); got != nil {
-		t.Errorf("takeover.ListClients('nope')=%+v want nil", got)
+func TestListClients_UnknownErrors(t *testing.T) {
+	if _, err := takeover.ListClients(&configdomain.Config{}, "nope", ""); err == nil ||
+		!strings.Contains(err.Error(), `unknown takeover client "nope"`) {
+		t.Errorf("ListClients('nope'): want unknown-client error, got %v", err)
 	}
 }
 
@@ -47,21 +136,23 @@ func TestListClients_UnknownReturnsNil(t *testing.T) {
 
 func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 	dir := t.TempDir()
+	claudeFile := filepath.Join(dir, "claude.json")
+	templatesDir := writeTemplateOverrides(t, map[string]string{"claude": claudeFile})
 	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
 		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
 		},
-		Routes:   map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
-		Takeover: configdomain.Takeover{ProxyURL: "http://127.0.0.1:15721", Claude: filepath.Join(dir, "claude.json")},
+		Routes: map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
 	}
 	bakDir := filepath.Join(dir, ".mp")
 
 	// Seed an existing claude config, then takeover rewrites it (after backing up).
-	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644)
-	if err := takeover.RunTakeover(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}); err != nil {
+	os.WriteFile(claudeFile, []byte(`{"env":{"OLD":"1"}}`), 0o644)
+	if err := takeover.RunTakeover(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir); err != nil {
 		t.Fatal(err)
 	}
-	rewritten, _ := os.ReadFile(cfg.Takeover.Claude)
+	rewritten, _ := os.ReadFile(claudeFile)
 	if !strings.Contains(string(rewritten), "ANTHROPIC_BASE_URL") {
 		t.Errorf("takeover did not rewrite claude: %s", rewritten)
 	}
@@ -71,20 +162,19 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 		t.Errorf("backup did not preserve original: %s", bak)
 	}
 	// Restore brings the original back.
-	if err := takeover.RunRestore(cfg, "claude", bakDir); err != nil {
+	if err := takeover.RunRestore(cfg, "claude", bakDir, templatesDir); err != nil {
 		t.Fatal(err)
 	}
-	restored, _ := os.ReadFile(cfg.Takeover.Claude)
+	restored, _ := os.ReadFile(claudeFile)
 	if !strings.Contains(string(restored), "OLD") || strings.Contains(string(restored), "ANTHROPIC_BASE_URL") {
 		t.Errorf("restore did not revert: %s", restored)
 	}
 }
 
-func TestRunTakeover_UnknownClientNoOps(t *testing.T) {
-	cfg := &configdomain.Config{Takeover: configdomain.Takeover{Claude: "a"}}
-	// "nope" → listClients returns nil → loop body never runs → nil error.
-	if err := takeover.RunTakeover(cfg, "nope", t.TempDir(), takeover.ModelFacts{SourceDefault: -1}); err != nil {
-		t.Errorf("runTakeover unknown client: want nil, got %v", err)
+func TestRunTakeover_UnknownClientErrors(t *testing.T) {
+	// "nope" is a hard resolution error — a typo'd client must not no-op silently.
+	if err := takeover.RunTakeover(&configdomain.Config{}, "nope", t.TempDir(), takeover.ModelFacts{SourceDefault: -1}, ""); err == nil {
+		t.Error("runTakeover unknown client: want error, got nil")
 	}
 }
 
@@ -92,7 +182,7 @@ func TestRunTakeover_UnknownClientNoOps(t *testing.T) {
 
 func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 	// Keep the models.dev catalog fetch offline: takeover.RunTakeover("all") refreshes
-	// the catalog for opencode/pi model metadata — point it at a local stub.
+	// the catalog for metadata-writing templates — point it at a local stub.
 	// The stub must be a VALID catalog (at least one provider): an empty one
 	// fails parsing, and with HOME isolated below there is no cached catalog
 	// to fall back to.
@@ -105,26 +195,23 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 	// Isolate HOME: LoadModelsCatalog persists the fetched catalog to
 	// <home>/.model-proxy/models_cache.json and the accounts store reads
 	// <home>/.model-proxy — without this the test would overwrite the real
-	// user cache (or silently depend on its freshness).
-	t.Setenv("HOME", t.TempDir())
+	// user cache (or silently depend on its freshness). The remaining presets
+	// also resolve under this fake HOME (and are absent → skipped).
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
 
 	dir := t.TempDir()
 	bakDir := filepath.Join(dir, ".mp")
+	claudeFile := filepath.Join(dir, "claude.json")
+	templatesDir := writeTemplateOverrides(t, map[string]string{"claude": claudeFile})
 	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
 		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
 		},
 		Routes: map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
-		// Only claude exists; opencode/codex/pi point at non-existent paths.
-		Takeover: configdomain.Takeover{
-			ProxyURL: "http://127.0.0.1:15721",
-			Claude:   filepath.Join(dir, "claude.json"),
-			Opencode: filepath.Join(dir, "opencode.json"),
-			Codex:    filepath.Join(dir, "codex.toml"),
-			Pi:       filepath.Join(dir, "pi.json"),
-		},
 	}
-	if err := os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OLD":"1"}}`), 0o644); err != nil {
+	if err := os.WriteFile(claudeFile, []byte(`{"env":{"OLD":"1"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -148,18 +235,21 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 		DefaultContext: routing.DefaultModelMetadata.Context,
 		DefaultOutput:  routing.DefaultModelMetadata.Output,
 	}
-	if err := takeover.RunTakeover(cfg, "all", bakDir, facts); err != nil {
+	if err := takeover.RunTakeover(cfg, "all", bakDir, facts, templatesDir); err != nil {
 		t.Fatalf("runTakeover all with missing files: want nil, got %v", err)
 	}
 	// claude was rewritten (backup + rewrite succeeded).
-	b, _ := os.ReadFile(cfg.Takeover.Claude)
+	b, _ := os.ReadFile(claudeFile)
 	if !strings.Contains(string(b), "ANTHROPIC_BASE_URL") {
 		t.Errorf("claude not rewritten: %s", b)
 	}
 	// Missing clients' files were NOT created (skipped, not rewritten to defaults).
-	for _, p := range []string{cfg.Takeover.Opencode, cfg.Takeover.Codex, cfg.Takeover.Pi} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("missing client file %s should not have been created", p)
+	if entries, _ := os.ReadDir(fakeHome); len(entries) > 0 {
+		for _, e := range entries {
+			if e.Name() == ".model-proxy" {
+				continue // catalog cache, expected
+			}
+			t.Errorf("unexpected file created under fake HOME: %s", e.Name())
 		}
 	}
 }
@@ -168,17 +258,15 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 
 func TestRunTakeover_SingleMissingFileErrors(t *testing.T) {
 	dir := t.TempDir()
+	templatesDir := writeTemplateOverrides(t, map[string]string{"pi": filepath.Join(dir, "nonexistent.json")})
 	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
 		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
 		},
 		Routes: map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
-		Takeover: configdomain.Takeover{
-			ProxyURL: "http://127.0.0.1:15721",
-			Pi:       filepath.Join(dir, "nonexistent.json"),
-		},
 	}
-	if err := takeover.RunTakeover(cfg, "pi", dir, takeover.ModelFacts{SourceDefault: -1}); err == nil {
+	if err := takeover.RunTakeover(cfg, "pi", dir, takeover.ModelFacts{SourceDefault: -1}, templatesDir); err == nil {
 		t.Error("runTakeover pi with missing file: want error, got nil (single client must not be skipped)")
 	}
 }
@@ -186,28 +274,27 @@ func TestRunTakeover_SingleMissingFileErrors(t *testing.T) {
 // --- runRestore all: skips a client with no backup (symmetric with takeover) ---
 
 func TestRunRestore_AllSkipsMissingBackup(t *testing.T) {
+	// Isolate HOME: the non-overridden presets resolve there — restore must
+	// never touch the real user configs.
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	bakDir := filepath.Join(dir, ".mp")
 	os.MkdirAll(bakDir, 0o700)
 	// Only a claude backup exists.
 	os.WriteFile(filepath.Join(bakDir, "claude.bak"), []byte(`{"env":{"OLD":"1"}}`), 0o600)
+	claudeFile := filepath.Join(dir, "claude.json")
+	templatesDir := writeTemplateOverrides(t, map[string]string{"claude": claudeFile})
 	cfg := &configdomain.Config{
+		Listen: "127.0.0.1:15721",
 		Providers: map[string]configdomain.Provider{
 			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
 		},
 		Routes: map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
-		Takeover: configdomain.Takeover{
-			ProxyURL: "http://127.0.0.1:15721",
-			Claude:   filepath.Join(dir, "claude.json"),
-			Opencode: filepath.Join(dir, "opencode.json"),
-			Codex:    filepath.Join(dir, "codex.toml"),
-			Pi:       filepath.Join(dir, "pi.json"),
-		},
 	}
-	if err := takeover.RunRestore(cfg, "all", bakDir); err != nil {
+	if err := takeover.RunRestore(cfg, "all", bakDir, templatesDir); err != nil {
 		t.Fatalf("runRestore all with missing backups: want nil, got %v", err)
 	}
-	b, _ := os.ReadFile(cfg.Takeover.Claude)
+	b, _ := os.ReadFile(claudeFile)
 	if !strings.Contains(string(b), "OLD") {
 		t.Errorf("claude not restored from backup: %s", b)
 	}

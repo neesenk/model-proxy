@@ -1,0 +1,9 @@
+description: Claude Code — env injection into settings.json (claude 自拼 /v1/messages,base_url 用 bare)
+file: ~/.claude/settings.json
+format: json
+base_url: bare
+json:
+  set:
+    env.ANTHROPIC_BASE_URL: "{{base_url}}"
+    env.ANTHROPIC_AUTH_TOKEN: "{{token}}"
+  drift_path: env.ANTHROPIC_BASE_URL

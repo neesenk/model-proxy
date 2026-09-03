@@ -201,20 +201,14 @@ providers:
 #   quality_error_weight: 100   # (default 100) penalty per unit error-rate EWMA (2m half-life), subtracted from surplus; 0 disables
 #   quality_ttft_weight: 20     # (default 20)  penalty per unit normalized TTFT EWMA (10s reference); 0 disables
 
-takeover:
-  # All takeover fields default to standard client config locations when unset
-  # (claude/opencode/codex/pi/kimi paths + provider_id "model-proxy"), so you
-  # can omit this entire block unless overriding one. proxy_url defaults to
-  # http://<listen>. Uncomment any line to override.
-  # proxy_url: http://127.0.0.1:15721
-  # claude: ~/.claude/settings.json
-  # opencode: ~/.config/opencode/opencode.json
-  # codex: ~/.codex/config.toml
-  # pi: ~/.pi/agent/models.json
-  # kimi: ~/.kimi/config.toml
-  # provider_id is the single identifier used by takeover for every agent that
-  # takes one (opencode, pi, codex, kimi, future agents). claude doesn't use it.
-  # provider_id: model-proxy
+# takeover: client targets come from templates — embedded presets
+# (see 'model-proxy takeover list': claude/opencode/opencode-openai/pi/pi-openai/
+# pi-responses/codex/kimi/gemini-cli) or your own YAML in
+# ~/.model-proxy/takeover-templates/<name>.yaml (same name overrides a preset).
+# Template fields: file (client config path), format (json|toml|env),
+# base_url (bare|v1), provider_id, proxy_url, json.set / toml.top_keys+sections /
+# env.set with {{base_url}}/{{token}}/{{provider_id}} placeholders, and an
+# optional models: block (per-exposed-model metadata shapes).
 
 # Per-request access log: writes the full request + response body of each
 # committed upstream call as one JSONL line to a rotating file under dir, for

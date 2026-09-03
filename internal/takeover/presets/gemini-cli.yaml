@@ -1,0 +1,8 @@
+description: gemini-cli — ~/.gemini/.env 写入 GOOGLE_GEMINI_BASE_URL(带 /v1)与占位 API key
+file: ~/.gemini/.env
+format: env
+base_url: v1
+env:
+  set:
+    GOOGLE_GEMINI_BASE_URL: "{{base_url}}"
+    GEMINI_API_KEY: "{{token}}"

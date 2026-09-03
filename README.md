@@ -101,12 +101,8 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 # priority 继承 provider 的 priority（lower wins，失败逐一 failover）。
 # 查看：model-proxy routes [model]
 
-# takeover:              # 接管客户端配置（全部字段有默认值，可省略整块）
-#   claude: ~/.claude/settings.json
-#   opencode: ~/.config/opencode/opencode.json
-#   codex: ~/.codex/config.toml
-#   pi: ~/.pi/agent/models.json
-#   provider_id: model-proxy
+# takeover: 接管客户端配置走模板（内置预设见 `model-proxy takeover list`；
+# 自定义/覆盖放 ~/.model-proxy/takeover-templates/<name>.yaml），不在 config 配置
 
 # web:                      # 管理后台（默认开启，仅 loopback，无鉴权）
 #   enabled: true
@@ -206,7 +202,8 @@ model-proxy test glm-5.2           # 探测路由每个 target（路由 → 凭�
 # Web UI Accounts 页每个账号卡片还有 Test 按钮（POST /api/accounts/<p>/<id>/test），可测池化指定账号
 
 # 接管客户端配置
-model-proxy takeover opencode      # claude|opencode|codex|pi|kimi|all
+model-proxy takeover list            # 可用模板（内置预设 + ~/.model-proxy/takeover-templates 自定义覆盖）
+model-proxy takeover opencode      # claude|opencode|opencode-openai|pi|pi-openai|pi-responses|codex|kimi|gemini-cli|all
 model-proxy restore opencode
 
 # 配置管理

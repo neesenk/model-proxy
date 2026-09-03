@@ -89,7 +89,7 @@ func RenderDoctorLive(cfg *configdomain.Config, cfgPath string) (string, error) 
 	if err := json.Unmarshal(statusBody, &st); err != nil {
 		return "", fmt.Errorf("parse status response: %v", err)
 	}
-	drift := CheckTakeoverDrift(cfg, takeover.BackupDir(cfgPath))
+	drift := CheckTakeoverDrift(cfg, takeover.BackupDir(cfgPath), "")
 	auditTakeoverDrift(cfg, drift)
 
 	var b strings.Builder
@@ -408,18 +408,23 @@ type ClientDrift struct {
 // the value takeover would write today. Drift happens when a client upgrade
 // rewrites its config or the proxy's listen address changes — the agent then
 // silently talks to a dead endpoint, which looks exactly like "agent stuck".
-// Local files only, read-only.
-func CheckTakeoverDrift(cfg *configdomain.Config, bakDir string) []ClientDrift {
-	pid := takeover.ProviderID(cfg)
+// Local files only, read-only. The pointer is template-driven (drift probe
+// declared by each takeover template; templatesDir "" = DefaultTemplatesDir).
+func CheckTakeoverDrift(cfg *configdomain.Config, bakDir, templatesDir string) []ClientDrift {
 	out := []ClientDrift{}
-	for _, c := range takeover.ListClients(cfg, "") {
+	clients, err := takeover.ListClients(cfg, "", templatesDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: takeover templates: %v\n", err)
+		return out
+	}
+	for _, c := range clients {
 		d := ClientDrift{Client: c.Name, File: c.File}
 		if _, err := os.Stat(filepath.Join(bakDir, c.Name+".bak")); err != nil {
 			out = append(out, d) // no backup marker → not taken over
 			continue
 		}
 		d.Taken = true
-		d.Current, d.Expected = TakeoverPointer(c.Name, c.File, pid, cfg.Takeover.ProxyURL)
+		d.Current, d.Expected = c.Template.Pointer(cfg)
 		d.OK = d.Current == d.Expected
 		out = append(out, d)
 	}
@@ -522,132 +527,4 @@ func driftHost(pointer string) string {
 		}
 	}
 	return "(no-url)"
-}
-
-// takeoverPointer reads one client's current proxy pointer and computes the
-// expected one, mirroring exactly what the client's rewrite in clients.go
-// writes (including opencode's /v1 suffix, pi's trimmed base and kimi's
-// versioned base). A missing file, unreadable JSON, or absent key yields a
-// descriptive placeholder as current, which can never equal the expected
-// URL — i.e. drift.
-func TakeoverPointer(client, file, pid, proxyURL string) (current, expected string) {
-	switch client {
-	case "codex":
-		return CodexPointer(file, pid, proxyURL)
-	case "kimi":
-		return KimiPointer(file, pid, proxyURL)
-	}
-	var path []string
-	switch client {
-	case "claude":
-		path, expected = []string{"env", "ANTHROPIC_BASE_URL"}, proxyURL
-	case "opencode":
-		path, expected = []string{"provider", pid, "options", "baseURL"}, strings.TrimRight(proxyURL, "/")+"/v1"
-	case "pi":
-		path, expected = []string{"providers", pid, "baseUrl"}, strings.TrimRight(proxyURL, "/")
-	default:
-		return "(unknown client)", proxyURL
-	}
-	if _, err := os.Stat(file); err != nil {
-		return "(file missing)", expected
-	}
-	v, err := takeover.ReadJSONConfig(file)
-	if err != nil {
-		return "(unreadable: " + err.Error() + ")", expected
-	}
-	s, ok := JSONNestedString(v, path...)
-	if !ok {
-		return "(missing)", expected
-	}
-	return s, expected
-}
-
-// jsonNestedString walks v along path and returns the terminal string.
-func JSONNestedString(v map[string]any, path ...string) (string, bool) {
-	cur := v
-	for i, k := range path {
-		if i == len(path)-1 {
-			s, ok := cur[k].(string)
-			return s, ok
-		}
-		next, ok := cur[k].(map[string]any)
-		if !ok {
-			return "", false
-		}
-		cur = next
-	}
-	return "", false
-}
-
-// codexPointer is the TOML variant of takeoverPointer: drift when the top-level
-// model_provider no longer selects our section, or the section's base_url no
-// longer equals the proxy URL. Text scan only (the repo has no TOML decoder);
-// it matches the shape rewriteCodex writes, which is all takeover needs.
-func CodexPointer(file, pid, proxyURL string) (current, expected string) {
-	expected = proxyURL
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return "(file missing)", expected
-	}
-	modelProvider := ""
-	baseURL := ""
-	seenSection := false
-	inSection := false
-	for _, line := range strings.Split(string(data), "\n") {
-		l := strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(l, "["):
-			seenSection = true
-			inSection = l == `[model_providers."`+pid+`"]`
-		case !seenSection && strings.HasPrefix(l, "model_provider"):
-			if i := strings.Index(l, "="); i >= 0 {
-				modelProvider = strings.Trim(strings.TrimSpace(l[i+1:]), `"`)
-			}
-		case inSection && strings.HasPrefix(l, "base_url"):
-			if i := strings.Index(l, "="); i >= 0 {
-				baseURL = strings.Trim(strings.TrimSpace(l[i+1:]), `"`)
-			}
-		}
-	}
-	if modelProvider != pid {
-		if modelProvider == "" {
-			return "model_provider (missing)", expected
-		}
-		return "model_provider = " + strconv.Quote(modelProvider), expected
-	}
-	if baseURL == "" {
-		return "(missing)", expected
-	}
-	return baseURL, expected
-}
-
-// KimiPointer is the kimi-cli variant of CodexPointer: drift when the
-// [providers."<pid>"] section's base_url no longer equals the versioned
-// proxy endpoint RewriteKimi writes (TrimRight(proxyURL,"/")+"/v1" — kimi-cli
-// appends /chat/completions itself). kimi-cli has no top-level provider
-// selector, so the provider section's base_url is the whole pointer. Text
-// scan only, matching the shape RewriteKimi writes.
-func KimiPointer(file, pid, proxyURL string) (current, expected string) {
-	expected = strings.TrimRight(proxyURL, "/") + "/v1"
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return "(file missing)", expected
-	}
-	baseURL := ""
-	inSection := false
-	for _, line := range strings.Split(string(data), "\n") {
-		l := strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(l, "["):
-			inSection = l == `[providers."`+pid+`"]`
-		case inSection && strings.HasPrefix(l, "base_url"):
-			if i := strings.Index(l, "="); i >= 0 {
-				baseURL = strings.Trim(strings.TrimSpace(l[i+1:]), `"`)
-			}
-		}
-	}
-	if baseURL == "" {
-		return "(missing)", expected
-	}
-	return baseURL, expected
 }

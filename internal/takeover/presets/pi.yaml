@@ -1,0 +1,14 @@
+description: pi — anthropic-messages provider(pi 自拼 /v1/messages,base_url 用 bare)+ 全量暴露模型
+file: ~/.pi/agent/models.json
+format: json
+base_url: bare
+json:
+  set:
+    providers.{{provider_id}}:
+      baseUrl: "{{base_url}}"
+      api: "anthropic-messages"
+      apiKey: "{{token}}"
+  drift_path: providers.{{provider_id}}.baseUrl
+models:
+  shape: pi
+  json_path: providers.{{provider_id}}.models

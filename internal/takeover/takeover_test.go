@@ -12,13 +12,14 @@ import (
 	"model-proxy/internal/catalog"
 )
 
-// takeover_test.go covers the client-config rewrite functions (takeover.RewriteClaude,
-// takeover.RewriteOpencode, takeover.RewritePi, takeover.RewriteCodex) and their TOML helpers. These are
-// pure file/string operations against the takeover target files — fully
-// testable with temp dirs.
+// takeover_test.go covers the takeover client templates (presets rendered by
+// the engine: json/toml/env formats + model shapes) and the TOML text helpers.
+// These are pure file/string operations against the takeover target files —
+// fully testable with temp dirs.
 
-func testTakeoverConfig(t *testing.T, dir string) *configdomain.Config {
+func baseCfg() *configdomain.Config {
 	return &configdomain.Config{
+		Listen: "127.0.0.1:15721",
 		Providers: map[string]configdomain.Provider{
 			"aqp": {
 				OpenAIBaseURL: "http://x", Provider: "aqp",
@@ -28,30 +29,34 @@ func testTakeoverConfig(t *testing.T, dir string) *configdomain.Config {
 		Routes: map[string][]configdomain.RouteTarget{
 			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2", Priority: 1}},
 		},
-		Takeover: configdomain.Takeover{
-			ProxyURL:   "http://127.0.0.1:15721",
-			Claude:     filepath.Join(dir, "claude.json"),
-			Opencode:   filepath.Join(dir, "opencode.json"),
-			Codex:      filepath.Join(dir, "codex.toml"),
-			Pi:         filepath.Join(dir, "pi.json"),
-			ProviderID: "model-proxy",
-		},
 	}
 }
 
-// --- takeover.RewriteClaude: sets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN ---
+// presetFor loads a preset template and points its File at a temp path.
+func presetFor(t *testing.T, name, file string) *takeover.Template {
+	t.Helper()
+	tpl, err := takeover.TemplateByName(name, "")
+	if err != nil {
+		t.Fatalf("preset %s: %v", name, err)
+	}
+	tpl.File = file
+	return tpl
+}
 
-func TestRewriteClaude(t *testing.T) {
+// --- claude template: sets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN ---
+
+func TestTemplateClaude(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
+	cfg := baseCfg()
+	file := filepath.Join(dir, "claude.json")
 	// Start with an existing settings.json (possibly with other env keys).
-	os.WriteFile(cfg.Takeover.Claude, []byte(`{"env":{"OTHER":"x"},"theme":"dark"}`), 0o644)
+	os.WriteFile(file, []byte(`{"env":{"OTHER":"x"},"theme":"dark"}`), 0o644)
 
-	if err := takeover.RewriteClaude(cfg); err != nil {
+	if err := presetFor(t, "claude", file).Rewrite(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
-	b, _ := os.ReadFile(cfg.Takeover.Claude)
+	b, _ := os.ReadFile(file)
 	if err := json.Unmarshal(b, &v); err != nil {
 		t.Fatal(err)
 	}
@@ -70,15 +75,16 @@ func TestRewriteClaude(t *testing.T) {
 	}
 }
 
-// --- takeover.RewriteClaude on a missing file: creates a new one (or errors predictably) ---
+// --- claude template on a missing file: creates a new one ---
 
-func TestRewriteClaude_NewFile(t *testing.T) {
+func TestTemplateClaude_NewFile(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
-	if err := takeover.RewriteClaude(cfg); err != nil {
+	cfg := baseCfg()
+	file := filepath.Join(dir, "claude.json")
+	if err := presetFor(t, "claude", file).Rewrite(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(cfg.Takeover.Claude)
+	b, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatalf("claude file not created: %v", err)
 	}
@@ -87,18 +93,19 @@ func TestRewriteClaude_NewFile(t *testing.T) {
 	}
 }
 
-// --- takeover.RewriteOpencode: writes provider entry with /v1 baseURL + models ---
+// --- opencode template: writes provider entry with /v1 baseURL + models ---
 
-func TestRewriteOpencode(t *testing.T) {
+func TestTemplateOpencode(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
-	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
+	cfg := baseCfg()
+	file := filepath.Join(dir, "opencode.json")
+	os.WriteFile(file, []byte(`{}`), 0o644)
 
-	if err := takeover.RewriteOpencode(cfg, nil, cfg.Routes); err != nil {
+	if err := presetFor(t, "opencode", file).Rewrite(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
-	b, _ := os.ReadFile(cfg.Takeover.Opencode)
+	b, _ := os.ReadFile(file)
 	json.Unmarshal(b, &v)
 	prov, _ := v["provider"].(map[string]any)
 	p, _ := prov["model-proxy"].(map[string]any)
@@ -119,18 +126,19 @@ func TestRewriteOpencode(t *testing.T) {
 	}
 }
 
-// --- takeover.RewritePi: writes provider with bare baseURL (no /v1) + anthropic-messages api ---
+// --- pi template: writes provider with bare baseURL (no /v1) + anthropic-messages api ---
 
-func TestRewritePi(t *testing.T) {
+func TestTemplatePi(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
-	os.WriteFile(cfg.Takeover.Pi, []byte(`{}`), 0o644)
+	cfg := baseCfg()
+	file := filepath.Join(dir, "pi.json")
+	os.WriteFile(file, []byte(`{}`), 0o644)
 
-	if err := takeover.RewritePi(cfg, nil, nil); err != nil {
+	if err := presetFor(t, "pi", file).Rewrite(cfg, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var v map[string]any
-	b, _ := os.ReadFile(cfg.Takeover.Pi)
+	b, _ := os.ReadFile(file)
 	json.Unmarshal(b, &v)
 	prov, _ := v["providers"].(map[string]any)
 	p, _ := prov["model-proxy"].(map[string]any)
@@ -150,20 +158,21 @@ func TestRewritePi(t *testing.T) {
 	}
 }
 
-// --- takeover.RewriteCodex: injects [model_providers."id"] + sets top-level model_provider ---
+// --- codex template: injects [model_providers."id"] + sets top-level model_provider ---
 
-func TestRewriteCodex(t *testing.T) {
+func TestTemplateCodex(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
-	os.WriteFile(cfg.Takeover.Codex, []byte(`model_provider = "old"
+	cfg := baseCfg()
+	file := filepath.Join(dir, "codex.toml")
+	os.WriteFile(file, []byte(`model_provider = "old"
 [model_providers."old"]
 name = "old"
 `), 0o644)
 
-	if err := takeover.RewriteCodex(cfg); err != nil {
+	if err := presetFor(t, "codex", file).Rewrite(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(cfg.Takeover.Codex)
+	b, _ := os.ReadFile(file)
 	text := string(b)
 
 	if !strings.Contains(text, `model_provider = "model-proxy"`) {
@@ -172,8 +181,8 @@ name = "old"
 	if !strings.Contains(text, `[model_providers."model-proxy"]`) {
 		t.Errorf("codex config missing [model_providers.\"model-proxy\"] section:\n%s", text)
 	}
-	// Note: takeover.RewriteCodex does NOT remove a pre-existing provider section under
-	// a different id; it only injects/replaces its own. The top-level
+	// Note: the codex template does NOT remove a pre-existing provider section
+	// under a different id; it only injects/replaces its own. The top-level
 	// model_provider key is what selects the active provider.
 }
 
@@ -382,29 +391,39 @@ func TestExposedModels_PicksBestPriority(t *testing.T) {
 	}
 }
 
-// --- providerID: default + override ---
+// --- provider id: template default + per-template override ---
 
-func TestProviderID(t *testing.T) {
-	if got := takeover.ProviderID(&configdomain.Config{}); got != "model-proxy" {
-		t.Errorf("takeover.ProviderID(empty)=%q want model-proxy", got)
+func TestTemplateProviderID(t *testing.T) {
+	tpl := presetFor(t, "pi", filepath.Join(t.TempDir(), "pi.json"))
+	if got := tpl.ProviderIDValue(); got != "model-proxy" {
+		t.Errorf("ProviderIDValue(default)=%q want model-proxy", got)
 	}
-	if got := takeover.ProviderID(&configdomain.Config{Takeover: configdomain.Takeover{ProviderID: "custom"}}); got != "custom" {
-		t.Errorf("takeover.ProviderID(custom)=%q want custom", got)
+	tpl.ProviderID = "custom"
+	if got := tpl.ProviderIDValue(); got != "custom" {
+		t.Errorf("ProviderIDValue(custom)=%q want custom", got)
+	}
+	// Variants writing into the same client file must carry distinct ids.
+	for _, name := range []string{"pi", "pi-openai", "pi-responses"} {
+		other := presetFor(t, name, filepath.Join(t.TempDir(), "x.json"))
+		if name != "pi" && other.ProviderIDValue() == "model-proxy" {
+			t.Errorf("%s must override provider_id to coexist with pi", name)
+		}
 	}
 }
 
-// --- takeover.RewriteKimi: ~/.kimi/config.toml provider + model blocks ---
+// --- kimi template: ~/.kimi/config.toml provider + model blocks ---
 
-func TestRewriteKimi(t *testing.T) {
+func TestTemplateKimi(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
-	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
-	os.WriteFile(cfg.Takeover.Kimi, []byte("[providers.\"existing\"]\ntype = \"kimi\"\n"), 0o644)
+	cfg := baseCfg()
+	file := filepath.Join(dir, "kimi.toml")
+	os.WriteFile(file, []byte("[providers.\"existing\"]\ntype = \"kimi\"\n"), 0o644)
 
-	if err := takeover.RewriteKimi(cfg, nil, cfg.Routes); err != nil {
+	kimi := presetFor(t, "kimi", file)
+	if err := kimi.Rewrite(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(cfg.Takeover.Kimi)
+	b, _ := os.ReadFile(file)
 	text := string(b)
 
 	if !strings.Contains(text, `[providers."model-proxy"]`) {
@@ -442,10 +461,10 @@ func TestRewriteKimi(t *testing.T) {
 	}
 
 	// Idempotent re-run: same content, no duplicated blocks.
-	if err := takeover.RewriteKimi(cfg, nil, cfg.Routes); err != nil {
+	if err := kimi.Rewrite(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
-	b2, _ := os.ReadFile(cfg.Takeover.Kimi)
+	b2, _ := os.ReadFile(file)
 	if strings.Count(string(b2), `[providers."model-proxy"]`) != 1 {
 		t.Errorf("re-run duplicated the provider block:\n%s", b2)
 	}
@@ -454,21 +473,21 @@ func TestRewriteKimi(t *testing.T) {
 	}
 }
 
-// TestRewriteKimi_UsesCatalogContext: hydrated models.dev metadata wins over
+// TestTemplateKimi_UsesCatalogContext: hydrated models.dev metadata wins over
 // the fallback for the required max_context_size.
-func TestRewriteKimi_UsesCatalogContext(t *testing.T) {
+func TestTemplateKimi_UsesCatalogContext(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
-	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
-	os.WriteFile(cfg.Takeover.Kimi, []byte(""), 0o644)
+	cfg := baseCfg()
+	file := filepath.Join(dir, "kimi.toml")
+	os.WriteFile(file, []byte(""), 0o644)
 	meta := map[string]map[string]catalog.Model{
 		"aqp": {"glm-5.2": {Context: 131072, Output: 8192}},
 	}
 
-	if err := takeover.RewriteKimi(cfg, meta, cfg.Routes); err != nil {
+	if err := presetFor(t, "kimi", file).Rewrite(cfg, meta, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(cfg.Takeover.Kimi)
+	b, _ := os.ReadFile(file)
 	text := string(b)
 	if !strings.Contains(text, "max_context_size = 131072") {
 		t.Errorf("max_context_size must come from catalog metadata:\n%s", text)
@@ -478,14 +497,14 @@ func TestRewriteKimi_UsesCatalogContext(t *testing.T) {
 	}
 }
 
-// TestRewriteKimi_DropsLegacyUnquotedBlock: the old writer emitted
+// TestTemplateKimi_DropsLegacyUnquotedBlock: the old writer emitted
 // [models.glm-5.2] (nested tables, fails kimi-cli validation). A re-run must
 // remove that leftover block, not just append the corrected quoted one.
-func TestRewriteKimi_DropsLegacyUnquotedBlock(t *testing.T) {
+func TestTemplateKimi_DropsLegacyUnquotedBlock(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
-	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
-	os.WriteFile(cfg.Takeover.Kimi, []byte(`[providers."model-proxy"]
+	cfg := baseCfg()
+	file := filepath.Join(dir, "kimi.toml")
+	os.WriteFile(file, []byte(`[providers."model-proxy"]
 type = "openai_legacy"
 base_url = "http://127.0.0.1:15721/v1"
 api_key = "PROXY_MANAGED"
@@ -494,10 +513,10 @@ api_key = "PROXY_MANAGED"
 provider = "model-proxy"
 `), 0o644)
 
-	if err := takeover.RewriteKimi(cfg, nil, cfg.Routes); err != nil {
+	if err := presetFor(t, "kimi", file).Rewrite(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(cfg.Takeover.Kimi)
+	b, _ := os.ReadFile(file)
 	text := string(b)
 	if strings.Contains(text, "[models.glm-5.2]") {
 		t.Errorf("legacy unquoted model block survived rewrite:\n%s", text)
@@ -507,23 +526,23 @@ provider = "model-proxy"
 	}
 }
 
-// TestRewriteKimi_ReplacesStaleOwnBlock pins replace-in-place: a previous
+// TestTemplateKimi_ReplacesStaleOwnBlock pins replace-in-place: a previous
 // takeover under the same id with a stale base_url must not survive.
-func TestRewriteKimi_ReplacesStaleOwnBlock(t *testing.T) {
+func TestTemplateKimi_ReplacesStaleOwnBlock(t *testing.T) {
 	dir := t.TempDir()
-	cfg := testTakeoverConfig(t, dir)
-	cfg.Takeover.Kimi = filepath.Join(dir, "kimi.toml")
-	os.WriteFile(cfg.Takeover.Kimi, []byte(`
+	cfg := baseCfg()
+	file := filepath.Join(dir, "kimi.toml")
+	os.WriteFile(file, []byte(`
 [providers."model-proxy"]
 type = "openai_legacy"
 base_url = "http://127.0.0.1:99999/v1"
 api_key = "OLD"
 `), 0o644)
 
-	if err := takeover.RewriteKimi(cfg, nil, cfg.Routes); err != nil {
+	if err := presetFor(t, "kimi", file).Rewrite(cfg, nil, cfg.Routes); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(cfg.Takeover.Kimi)
+	b, _ := os.ReadFile(file)
 	if strings.Contains(string(b), "99999") || strings.Contains(string(b), "OLD") {
 		t.Errorf("stale own block survived rewrite:\n%s", b)
 	}

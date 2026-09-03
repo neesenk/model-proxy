@@ -76,11 +76,27 @@ func HasHelpFlag(args []string) bool {
 }
 
 // RunTakeover rewrites a client config to point at the proxy.
+// `takeover list` prints the available client templates (preset + user).
 func RunTakeover(args []string) {
 	cfg := cliframework.LoadCmdConfig(args)
 	which := cliframework.Positional(args)
+	if which == "list" {
+		clients, err := takeover.ListClients(cfg, "", "")
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, c := range clients {
+			desc := c.Template.Description
+			if desc == "" {
+				desc = "-"
+			}
+			fmt.Printf("%-18s %-8s %-10s %s\n", c.Name, c.Template.Format, c.Template.Source, desc)
+			fmt.Printf("%-18s %s\n", "", c.File)
+		}
+		return
+	}
 	bakDir := takeover.BackupDir(cliframework.ConfigPath(args))
-	if err := takeover.RunTakeover(cfg, which, bakDir, takeover.ModelFactsFor(cfg, which, cliframework.HomeDir())); err != nil {
+	if err := takeover.RunTakeover(cfg, which, bakDir, takeover.ModelFactsFor(cfg, which, cliframework.HomeDir(), ""), ""); err != nil {
 		log.Fatal(err)
 	}
 	verifyTakeoverDrift(cfg, which, bakDir)
@@ -95,11 +111,16 @@ func RunTakeover(args []string) {
 // code: warnings and audit-append failures degrade to stderr notes only.
 func verifyTakeoverDrift(cfg *configdomain.Config, which, bakDir string) {
 	selected := map[string]bool{}
-	for _, c := range takeover.ListClients(cfg, which) {
+	clients, err := takeover.ListClients(cfg, which, "")
+	if err != nil {
+		logx.Warnf("takeover: list clients: %v", err)
+		return
+	}
+	for _, c := range clients {
 		selected[c.Name] = true
 	}
 	var drift []clidoctor.ClientDrift
-	for _, d := range clidoctor.CheckTakeoverDrift(cfg, bakDir) {
+	for _, d := range clidoctor.CheckTakeoverDrift(cfg, bakDir, "") {
 		if !selected[d.Client] || !d.Taken || d.OK {
 			continue
 		}
@@ -114,7 +135,7 @@ func verifyTakeoverDrift(cfg *configdomain.Config, which, bakDir string) {
 func RunRestore(args []string) {
 	cfg := cliframework.LoadCmdConfig(args)
 	which := cliframework.Positional(args)
-	if err := takeover.RunRestore(cfg, which, takeover.BackupDir(cliframework.ConfigPath(args))); err != nil {
+	if err := takeover.RunRestore(cfg, which, takeover.BackupDir(cliframework.ConfigPath(args)), ""); err != nil {
 		log.Fatal(err)
 	}
 }

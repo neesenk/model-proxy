@@ -337,20 +337,26 @@ func TestDerivedRoute_ForwardsAliasedModel(t *testing.T) {
 func TestTakeover_IncludesDerivedRoutes(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{
+		Listen: "127.0.0.1:15721",
 		Providers: map[string]Provider{
 			"zhipu": {Provider: "zhipu", OpenAIBaseURL: "http://x", Models: []string{"glm-4.6"}},
 		},
-		Takeover: Takeover{Opencode: filepath.Join(dir, "oc.json"), ProxyURL: "http://x", ProviderID: "model-proxy"},
 	}
-	os.WriteFile(cfg.Takeover.Opencode, []byte(`{}`), 0o644)
+	file := filepath.Join(dir, "oc.json")
+	os.WriteFile(file, []byte(`{}`), 0o644)
 	routes := routing.RouteTable(cfg)
 	if _, ok := routes["glm-4.6"]; !ok {
 		t.Fatalf("route table should include glm-4.6: %v", routes)
 	}
-	if err := takeover.RewriteOpencode(cfg, nil, routes); err != nil {
+	tpl, err := takeover.TemplateByName("opencode", "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(cfg.Takeover.Opencode)
+	tpl.File = file
+	if err := tpl.Rewrite(cfg, nil, routes); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(file)
 	if !strings.Contains(string(b), "glm-4.6") {
 		t.Errorf("opencode config should include derived-route model glm-4.6:\n%s", b)
 	}

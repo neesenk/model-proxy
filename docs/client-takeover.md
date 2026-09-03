@@ -2,39 +2,93 @@
 
 ## 适用范围
 
-修改 `takeover` / `restore`、客户端配置路径、provider_id 或 baseURL 生成时必读。
+修改 `takeover` / `restore`、客户端模板、模板解析或渲染引擎时必读。
 
-实现归属：备份/改写/恢复与五个客户端的 rewrite 归 `internal/takeover`
-（`RunTakeover` / `RunRestore` / `ListClients` / `BackupDir`）；`internal/cli`
-（`commands.go` 的 `RunTakeover` / `RunRestore` / `takeoverFacts`）
-只解析参数、加载 config 并用 `takeoverFacts` 注入 implicit routes 与 models.dev
-元数据（catalog 加载与 source 标记留在 CLI 层）。
+实现归属：备份/恢复、模板引擎与内嵌预设归 `internal/takeover`
+（`RunTakeover` / `RunRestore` / `ListClients` / `LoadTemplates` / `TemplateByName` /
+`BackupDir`；引擎在 `template.go`，预设在 `presets/*.yaml`）；`internal/cli`
+（`commands.go` 的 `RunTakeover` / `RunRestore`）只解析参数、加载 config 并注入
+模型事实（catalog 加载与 source 标记留在 CLI 层）；doctor 的漂移检测
+（`CheckTakeoverDrift`）读模板的 drift 探针。
 
-| 客户端 | baseURL 格式 | 关键差异 |
-|---|---|---|
-| claude | `http://<proxy>`（不带 `/v1`） | `~/.claude/settings.json` 写 `env.ANTHROPIC_BASE_URL` + `env.ANTHROPIC_AUTH_TOKEN: "PROXY_MANAGED"` 占位；Claude Code 自拼 `/v1/messages` |
-| opencode | `http://<proxy>/v1` | `@ai-sdk/anthropic` 拼接 `baseURL + /messages` |
-| pi | `http://<proxy>` | pi 自行拼 `/v1/messages`，baseURL 不能再带 `/v1` |
-| codex | 按 Responses API 客户端配置 | 不经过 Chat Completions 协议转换 |
-| kimi | `http://<proxy>/v1` | 目标客户端是 MoonshotAI/kimi-cli（品牌名 "Kimi Code CLI"）`~/.kimi/config.toml`；`openai_legacy` 是 kimi-cli 对 OpenAI Chat Completions 协议的 provider 类型名（不是"旧版客户端"），kimi-cli 自拼 `/chat/completions`，所以 base_url 带 `/v1`。每个暴露模型写 `[models."<name>"]` 块（点号名必须加引号，否则 TOML 解析成嵌套表），按 kimi-cli 的 LLMModel schema 携带 `provider`/`model`/`max_context_size`；`max_context_size` 为必填，无元数据时回落到保守默认 200000（`routing.DefaultModelMetadata.Context`，takeover 直接引用） |
+## 模板机制
 
-`provider_id` 默认统一为 `model-proxy`，opencode、pi、codex、kimi 共用。备份位于：
+每个客户端一个 YAML 模板。解析顺序：内嵌预设（`internal/takeover/presets/`）
+← 用户覆盖（`~/.model-proxy/takeover-templates/<name>.yaml`，同名替换预设，
+新名新增客户端）。模板名 = 文件名去 `.yaml`。`takeover list` 显示解析结果
+（含来源 preset/用户目录）。config.yaml 的 `takeover:` 块已移除（tombstone：
+残留即报迁移错误）——改路径/provider_id/proxy_url 一律通过模板。
 
-```text
-<configDir>/.model-proxy/<client>.bak
+```yaml
+description: 人类可读描述(takeover list 显示)
+file: ~/.claude/settings.json     # 客户端配置文件(~ 展开),必填
+format: json                       # json | toml | env,必填
+base_url: bare                     # bare(默认) | v1(追加 /v1)
+provider_id: model-proxy           # 默认 model-proxy;写同一文件的变体必须用不同 id
+proxy_url: ""                      # 可选;默认 http://<listen>
+display_name: model-proxy          # 可选,TOML name = "..." 用
+
+json:                              # format=json:dotted.path → 值(嵌套 map/list 皆可)
+  set:
+    env.ANTHROPIC_BASE_URL: "{{base_url}}"
+    env.ANTHROPIC_AUTH_TOKEN: "{{token}}"
+  drift_path: env.ANTHROPIC_BASE_URL   # doctor 漂移探针(JSON 路径,期望值为 base_url)
+
+toml:                              # format=toml:文本行编辑(无 TOML decoder)
+  top_keys: {model_provider: '"{{provider_id}}"'}   # 顶层键(值原样写入,字符串自带引号)
+  sections:                        # replace-or-append
+    - name: 'model_providers."{{provider_id}}"'
+      body: |
+        name = "{{display_name}}"
+        base_url = "{{base_url}}"
+        wire_api = "responses"
+
+env:                               # format=env:KEY=VALUE 文件(注释/未管键保留)
+  set: {GOOGLE_GEMINI_BASE_URL: "{{base_url}}", GEMINI_API_KEY: "{{token}}"}
+
+models:                            # 可选:按暴露模型逐个输出元数据
+  shape: opencode | pi | kimi      # 集合渲染器(含元数据默认值)
+  json_path: provider.{{provider_id}}.models   # opencode/pi:集合注入点
+  toml_section: 'models."{{model.id}}"'        # kimi:每模型段名
+  toml_body: |                     # 支持 {{model.id}} {{model.context}} {{model.output}} {{provider_id}}
+    provider = "{{provider_id}}"
+    model = "{{model.id}}"
+    max_context_size = {{model.context}}
+  also_remove: 'models.{{model.id}}'           # 可选:写前清理旧段(如未加引号的遗留块)
 ```
 
-`takeover:` 配置块可省略；客户端路径和 provider_id 在配置加载器中有默认值，只在覆盖时配置。
+占位符：`{{proxy_url}}` `{{base_url}}` `{{token}}`(= `PROXY_MANAGED`)
+`{{provider_id}}` `{{display_name}}`；模型循环内另有 `{{model.id}}`
+`{{model.context}}` `{{model.output}}`。
 
-- `takeover all` / `restore all` 遇到未安装客户端时跳过并继续；
-- 单独指定客户端而文件不存在时返回硬错误；
+## 内嵌预设
+
+| 模板 | file | format | 要点 |
+|---|---|---|---|
+| claude | `~/.claude/settings.json` | json | env 注入 `ANTHROPIC_BASE_URL`(bare)+ `ANTHROPIC_AUTH_TOKEN`；Claude Code 自拼 `/v1/messages` |
+| opencode | `~/.config/opencode/opencode.json` | json | `@ai-sdk/anthropic`(自拼 `/messages`,base_url 带 /v1)+ 全量模型(opencode 形状) |
+| opencode-openai | 同上 | json | `@ai-sdk/openai` 变体,provider_id `model-proxy-openai` |
+| pi | `~/.pi/agent/models.json` | json | `anthropic-messages`,base_url 裸(pi 自拼 `/v1/messages`)+ 全量模型(pi 形状) |
+| pi-openai / pi-responses | 同上 | json | `openai-completions` / `openai-responses` 变体(base_url 带 /v1,独立 provider_id) |
+| codex | `~/.codex/config.toml` | toml | `[model_providers."<id>"]`(wire_api=responses)+ 顶层 `model_provider` 选择器 |
+| kimi | `~/.kimi/config.toml` | toml | `[providers."<id>"]`(`openai_legacy`,带 /v1)+ 每模型 `[models."<name>"]`(provider/model/max_context_size,点号名必须引号;无元数据回退 `routing.DefaultModelMetadata.Context`) |
+| gemini-cli | `~/.gemini/.env` | env | `GOOGLE_GEMINI_BASE_URL`(带 /v1)+ `GEMINI_API_KEY` 占位 |
+
+凭据一律占位符 `PROXY_MANAGED`,真实 key 只在代理侧。
+
+## 机制契约（与模板机制无关的部分不变）
+
+- 备份位于 `<configDir>/.model-proxy/<client>.bak`(+ sha256 meta)；
+- `takeover all` / `restore all` 遇到未安装客户端时跳过并继续；单独指定客户端而文件不存在时返回硬错误；未知模板名是硬错误（列出可用模板）；
 - takeover 前必须备份，restore 后不得保留代理专属残片；
 - restore 成功即结束接管：删除 `<client>.bak` 与 `<client>.bak.meta` 标记，
   drift 检查（以 `.bak` 是否存在作为"已接管"标记）随后报告该客户端未接管，
   再次 takeover 会重新备份而不是沿用陈旧备份；恢复前的 sha256 完整性校验
   （fail-closed）不受影响；
-- 所有客户端写回（JSON 改写、codex TOML 改写、restore）一律 temp+fsync+rename 原子写；
+- 所有客户端写回（JSON 改写、TOML 改写、env 改写、restore）一律 temp+fsync+rename 原子写；
   **保留目标文件既有权限位**（这些文件常含真实 API key，硬编码 0644 会把 0600 放宽成全局可读），
   新建文件统一 0600；
-- URL 拼接回归需要覆盖 opencode 和 pi 的 `/v1` 差异。
-
+- 渲染幂等：重复 takeover 不产生重复段/键（replace-or-append / key set）；
+- 漂移探针模板驱动：json 用 `drift_path`，toml 有 `model_provider` top_key 时
+  codex 式（选择器 + 段 base_url）否则 kimi 式（首个段 base_url），env 取渲染值
+  等于 base_url 的键；无探针信息的自定义模板显示 `(no drift probe)`。

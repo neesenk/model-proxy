@@ -45,17 +45,17 @@ func TestTakeoverWritersPreserveFileMode(t *testing.T) {
 			t.Fatalf("mode of new file = %o, want 0600", got)
 		}
 	})
-	t.Run("RewriteCodex preserves 0600", func(t *testing.T) {
+	t.Run("codex template rewrite preserves 0600", func(t *testing.T) {
 		dir := t.TempDir()
-		cfg := testTakeoverConfig(t, dir)
-		if err := os.WriteFile(cfg.Takeover.Codex, []byte("model_provider = \"old\"\n"), 0o600); err != nil {
+		file := filepath.Join(dir, "codex.toml")
+		if err := os.WriteFile(file, []byte("model_provider = \"old\"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := takeover.RewriteCodex(cfg); err != nil {
+		if err := presetFor(t, "codex", file).Rewrite(baseCfg(), nil, nil); err != nil {
 			t.Fatal(err)
 		}
-		if got := fileMode(t, cfg.Takeover.Codex); got != 0o600 {
-			t.Fatalf("mode after RewriteCodex = %o, want 0600 preserved", got)
+		if got := fileMode(t, file); got != 0o600 {
+			t.Fatalf("mode after codex template rewrite = %o, want 0600 preserved", got)
 		}
 	})
 	t.Run("Restore preserves 0600", func(t *testing.T) {

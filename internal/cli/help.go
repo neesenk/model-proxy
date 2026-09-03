@@ -80,15 +80,19 @@ Options:
 
   Rewrite a client's config to point at the proxy (backs up the original).
 
+  takeover list shows the available client templates (embedded presets +
+  user overrides in ~/.model-proxy/takeover-templates/<name>.yaml).
+
 Clients:
-  claude | opencode | codex | pi | kimi | all`,
+  claude | opencode | opencode-openai | pi | pi-openai | pi-responses |
+  codex | kimi | gemini-cli | all`,
 
 	"restore": `restore <client> [--config PATH]
 
   Restore a client's config from the backup created by takeover.
 
 Clients:
-  claude | opencode | codex | pi | kimi | all`,
+  same template names as takeover (see: takeover list) | all`,
 
 	"login": `login <provider> [--config PATH] [--label NAME] [--replace]
                  [--from-env VAR [--from-env-ak VAR --from-env-sk VAR]]

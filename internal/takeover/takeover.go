@@ -9,6 +9,7 @@ import (
 	"model-proxy/internal/observe/logx"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"model-proxy/internal/catalog"
@@ -205,8 +206,11 @@ type ModelFacts struct {
 	DefaultOutput  int
 }
 
-func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts) error {
-	clients := ListClients(cfg, which)
+func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string) error {
+	clients, err := ListClients(cfg, which, templatesDir)
+	if err != nil {
+		return err
+	}
 	routes := facts.Routes
 	meta := facts.Meta
 	EmitTakeoverWarnings(clients, cfg, meta, facts)
@@ -249,8 +253,11 @@ func EmitTakeoverWarnings(clients []ClientSpec, cfg *configdomain.Config, meta m
 	}
 }
 
-func RunRestore(cfg *configdomain.Config, which, bakDir string) error {
-	clients := ListClients(cfg, which)
+func RunRestore(cfg *configdomain.Config, which, bakDir, templatesDir string) error {
+	clients, err := ListClients(cfg, which, templatesDir)
+	if err != nil {
+		return err
+	}
 	batch := which == "" || which == "all"
 	for _, c := range clients {
 		logx.Infof("restore %s: %s (from %s/)", c.Name, c.File, bakDir)
@@ -270,43 +277,59 @@ type ClientSpec struct {
 	Name    string
 	File    string
 	Rewrite func(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error
+	// Template is the resolved client template (preset or user-defined) —
+	// doctor's drift probe and facts' metadata decision read it.
+	Template *Template
 }
 
-func ListClients(cfg *configdomain.Config, which string) []ClientSpec {
-	all := []ClientSpec{
-		{Name: "claude", File: cfg.Takeover.Claude, Rewrite: func(c *configdomain.Config, _ map[string]map[string]catalog.Model, _ map[string][]configdomain.RouteTarget) error {
-			return RewriteClaude(c)
-		}},
-		{Name: "opencode", File: cfg.Takeover.Opencode, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, rts map[string][]configdomain.RouteTarget) error {
-			return RewriteOpencode(c, m, rts)
-		}},
-		{Name: "codex", File: cfg.Takeover.Codex, Rewrite: func(c *configdomain.Config, _ map[string]map[string]catalog.Model, _ map[string][]configdomain.RouteTarget) error {
-			return RewriteCodex(c)
-		}},
-		{Name: "pi", File: cfg.Takeover.Pi, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, rts map[string][]configdomain.RouteTarget) error {
-			return RewritePi(c, m, rts)
-		}},
-		{Name: "kimi", File: cfg.Takeover.Kimi, Rewrite: func(c *configdomain.Config, m map[string]map[string]catalog.Model, rts map[string][]configdomain.RouteTarget) error {
-			return RewriteKimi(c, m, rts)
-		}},
+// ListClients resolves the client set for which ("" / "all" = every template,
+// sorted by name; otherwise the single named template) from embedded presets
+// overridden by user templates in templatesDir ("" = DefaultTemplatesDir()).
+// An unknown name is a hard error listing the available templates.
+func ListClients(cfg *configdomain.Config, which, templatesDir string) ([]ClientSpec, error) {
+	if templatesDir == "" {
+		templatesDir = DefaultTemplatesDir()
 	}
-	if which == "" || which == "all" {
-		return all
+	templates, err := LoadTemplates(templatesDir)
+	if err != nil {
+		return nil, err
 	}
-	for _, c := range all {
-		if c.Name == which {
-			return []ClientSpec{c}
+	if which != "" && which != "all" {
+		var found *Template
+		for _, t := range templates {
+			if t.Name == which {
+				found = t
+				break
+			}
 		}
+		if found == nil {
+			names := make([]string, 0, len(templates))
+			for _, t := range templates {
+				names = append(names, t.Name)
+			}
+			return nil, fmt.Errorf("unknown takeover client %q — available templates: %s", which, strings.Join(names, ", "))
+		}
+		templates = []*Template{found}
 	}
-	return nil
+	out := make([]ClientSpec, 0, len(templates))
+	for _, t := range templates {
+		t := t
+		out = append(out, ClientSpec{
+			Name:     t.Name,
+			File:     t.File,
+			Template: t,
+			Rewrite:  t.Rewrite,
+		})
+	}
+	return out, nil
 }
 
 // WritesMetadata reports whether any client in the set writes per-model
-// metadata (opencode, pi, kimi). Used to skip the models.dev fetch for
-// claude/codex.
+// metadata (templates with a models: block). Used to skip the models.dev fetch for
+// claude/codex-only takeovers.
 func WritesMetadata(clients []ClientSpec) bool {
 	for _, c := range clients {
-		if c.Name == "opencode" || c.Name == "pi" || c.Name == "kimi" {
+		if c.Template != nil && c.Template.Models != nil {
 			return true
 		}
 	}
