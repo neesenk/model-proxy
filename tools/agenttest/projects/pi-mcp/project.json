@@ -1,0 +1,30 @@
+{
+  "name": "pi-mcp",
+  "description": "真实 pi coding agent + pi-mcp-adapter + 本地 MCP stdio server:MCP 工具(directTools 直挂)经代理三协议转换;覆盖数值参数调用与文件内容返回",
+  "timeoutSec": 420,
+  "taskFile": "task.md",
+  "command": [
+    "{{node}}",
+    "{{agenttest}}/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+    "--provider", "mp-{{protocol}}",
+    "--model", "{{model}}",
+    "--thinking", "off",
+    "--no-approve",
+    "--offline",
+    "--no-session",
+    "--no-extensions",
+    "--no-skills",
+    "--no-context-files",
+    "-e", "{{agenttest}}/node_modules/pi-mcp-adapter",
+    "-p", "{{prompt}}"
+  ],
+  "env": {
+    "PI_CODING_AGENT_DIR": "{{project}}/agent"
+  },
+  "assert": {
+    "files": [
+      { "path": "result.txt", "match": "^\\s*1234\\s*$" }
+    ],
+    "stdoutMatch": "DONE"
+  }
+}

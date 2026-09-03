@@ -1,0 +1,29 @@
+{
+  "name": "pi-coding",
+  "description": "真实 pi coding agent:用 write/bash 工具完成 fizzbuzz 编码任务,覆盖 read/bash/edit/write 工具链的协议转换",
+  "timeoutSec": 420,
+  "taskFile": "task.md",
+  "command": [
+    "{{node}}",
+    "{{agenttest}}/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+    "--provider", "mp-{{protocol}}",
+    "--model", "{{model}}",
+    "--thinking", "off",
+    "--no-approve",
+    "--offline",
+    "--no-session",
+    "--no-extensions",
+    "--no-skills",
+    "--no-context-files",
+    "-p", "{{prompt}}"
+  ],
+  "env": {
+    "PI_CODING_AGENT_DIR": "{{project}}/agent"
+  },
+  "assert": {
+    "files": [
+      { "path": "fizzbuzz.py" },
+      { "path": "result.txt", "match": "^\\s*20\\s*$" }
+    ]
+  }
+}

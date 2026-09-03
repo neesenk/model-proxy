@@ -1,0 +1,30 @@
+{
+  "name": "pi-vision",
+  "description": "真实 pi coding agent 的多模态+文件任务:read 工具读 PNG 图片(image tool_result)、处理 CSV 数据文件。当前 config 的 anthropic 协议 claude-haiku-4-5 被 model_map 改写为不支持图片的 deepseek-v4-flash,故默认只跑 chat/responses;models.json 里钉 x-mp-force-provider: aqp 保证落到真 claude",
+  "requires": ["vision"],
+  "protocols": ["chat", "responses"],
+  "timeoutSec": 420,
+  "taskFile": "task.md",
+  "command": [
+    "{{node}}",
+    "{{agenttest}}/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+    "--provider", "mpv-{{protocol}}",
+    "--model", "{{model}}",
+    "--thinking", "off",
+    "--no-approve",
+    "--offline",
+    "--no-session",
+    "--no-extensions",
+    "--no-skills",
+    "--no-context-files",
+    "-p", "{{prompt}}"
+  ],
+  "env": {
+    "PI_CODING_AGENT_DIR": "{{project}}/agent"
+  },
+  "assert": {
+    "files": [
+      { "path": "result.txt", "match": "^\\s*187,red,42\\s*$" }
+    ]
+  }
+}

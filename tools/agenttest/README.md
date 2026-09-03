@@ -1,0 +1,126 @@
+# agenttest — model-proxy 协议转换交互式测试工具
+
+基于 pi 的 agent 接口([`@earendil-works/pi-agent-core`](https://www.npmjs.com/package/@earendil-works/pi-agent-core) + `pi-ai`)驱动**真实** agent loop(多轮会话 + 工具调用 + thinking + 流式),从三种 ingress 协议打进运行中的 model-proxy,端到端验证协议转换链路。比 `examples/demo.py` 的单发请求覆盖更真实:tool_use/tool_calls/function_call 的往返、多轮上下文、思考块都会实际经过转换器。
+
+## 前置
+
+1. `model-proxy serve` 在跑(默认 `127.0.0.1:15722`),且目标 provider 已 `login`
+2. Node ≥ 20,首次 `npm install`(本目录)
+
+## 用法
+
+```bash
+# 交互式 REPL(默认 anthropic 协议 + claude-haiku-4-5)
+node agenttest.mjs
+
+# 单发模式
+node agenttest.mjs --protocol chat --model glm-5.2 --prompt "hello"
+
+# 批量自检:3 协议 × 2 模型 × 4 场景,任一失败退出码 1
+node agenttest.mjs --matrix --protocols anthropic,chat,responses \
+  --models claude-haiku-4-5,gpt-5.5 --with-thinking
+
+# 抓原始报文做跨协议 diff
+node agenttest.mjs --protocol anthropic --prompt "hi" --dump-dir /tmp/wire
+```
+
+三种 `--protocol` 对应代理的三个 ingress 路径:
+
+| protocol | pi-ai api | 打到代理的路径 |
+|---|---|---|
+| `anthropic` | `anthropic-messages` | `POST /v1/messages` |
+| `chat` | `openai-completions` | `POST /v1/chat/completions` |
+| `responses` | `openai-responses` | `POST /v1/responses` |
+
+## REPL 命令
+
+```
+/protocol <anthropic|chat|responses>   切换 ingress 协议(重置会话)
+/model <id>                            切换模型/路由别名(重置会话)
+/thinking <off|minimal|low|medium|high|xhigh|max>
+/tools [on|off]                        开关工具(默认 on)
+/raw [on|off]                          控制台 dump 出站 payload
+/vision [prompt]                       发一条带四象限测试图的消息(默认问左上角颜色)
+/state  /reset  /matrix  /help  /quit
+```
+
+其他输入直接作为 prompt 发送;工具调用自动执行并流式渲染(thinking 灰色、tool_call/result 青色、末尾 stop/usage/耗时)。Ctrl-C 中断当前请求,再按一次退出。
+
+内置工具刻意覆盖不同参数形状:`get_time`(无参)、`calc`(字符串)、`read_file`(限 cwd 内、8KB 截断,制造多行 tool_result)、`make_test_image`(返回四象限 PNG,制造图片 tool_result)。
+
+## matrix 场景
+
+| 场景 | 断言 |
+|---|---|
+| `ping` | 回复含 pong(基础连通) |
+| `tool` | 模型真实发起 calc 工具调用且最终答案含 42(tool_call → tool_result 往返) |
+| `memory` | 两轮会话后仍记得 4242(多轮上下文转换) |
+| `thinking` | 响应含 thinking block 且回复 pong(thinking 转换;需 `--with-thinking`) |
+| `vision` | 用户消息带四象限 PNG,答出左上角为 red(image block 入站转换;需 `--with-vision`) |
+| `vision_tool` | 模型调用 make_test_image 工具,从**图片工具结果**读出 red(tool_result 内 image content 转换;需 `--with-vision`) |
+
+每个场景注入随机 `test-ref` nonce 撞开代理响应 cache,保证真实打到上游转换链路。模型不支持 thinking/vision 时对应场景会 FAIL —— 按需用 `--with-thinking`/`--with-vision` 开启,并用 `--force-provider <P>`(代理 `x-mp-force-provider` 头)把流量钉到具备能力的后端。
+
+> 环境提示:若路由的 model_map 把某协议的模型别名改写到不支持图片的上游(如本仓 config 把 anthropic 协议的 claude-haiku-4-5 映射为 deepseek-v4-flash),该协议的 vision 场景会拿到上游 400 `Model do not support image input` —— 这是配置事实,不是转换缺陷;换协议或钉到多模态后端再验。
+
+## 注意
+
+- REPL/单发模式下重复发**完全相同**的 prompt 可能命中代理响应 cache(表现为 usage=0、秒回),这是代理的正常行为;排查转换问题时换措辞或加随机后缀。
+- `--dump-dir` 写的是 pi-ai 出站 payload(客户端侧视角);代理入站/上游的原始字节录制用 `model-proxy wire record`。
+- 凭据由代理持有,工具只发占位 key(`getApiKey: "agenttest-placeholder"`),不读任何真实凭据。
+
+## e2e 整合 runner(`e2e.mjs`)
+
+一个命令串起全链路:**真实 agent 项目 × 协议 × 模型 → matrix 批量自检 → 代理后端日志/内部数据分析 → 汇总退出码**。
+
+```bash
+node e2e.mjs                                        # 全量(vision 项目自动跳过)
+node e2e.mjs --protocols anthropic --skip-matrix    # 快速冒烟
+node e2e.mjs --with-vision --force-provider aqp     # 含图片用例,钉多模态后端
+node e2e.mjs --projects pi-coding --with-thinking
+```
+
+内置项目:
+
+| 项目 | 覆盖 |
+|---|---|
+| `pi-coding` | 真实 pi coding agent 完成 fizzbuzz 编码任务:write/bash/read 工具链 × 3 协议 |
+| `pi-mcp` | pi + pi-mcp-adapter + 本地 MCP stdio server:MCP 工具(directTools 直挂)的调用与文件内容返回 × 3 协议 |
+| `pi-vision` | read 工具读 PNG(image tool_result)+ CSV 文件处理;`requires:["vision"]`,需 `--with-vision`,manifest 声明只跑 chat/responses(见 matrix 节的环境提示),models.json 内钉 `x-mp-force-provider: aqp` |
+
+项目 manifest 可声明 `requires`(如 `vision`,未加对应 flag 时 SKIP)和 `protocols`(与 CLI `--protocols` 取交集)。
+
+后端分析内容:
+
+- **运行日志**(解析顺序: `--log-file` > config `log_file` > `$TMPDIR/model-proxy.log`):按字节 offset 只分析窗口内新行,解析每请求行 `[proto=X provider=Y] POST /path model=A→B status=N`,按 proto×status 聚合(只统计本次 `--models` 的流量,其它流量单列计数),status≥500 判 FAIL、≥400 判 warn,并扫描 panic/FAILED/error 可疑行。
+- **内部运行数据**(`GET /api/status`):diff 窗口前后每 provider 的 `requests/failures/rate_limited_429` 计数器,failures 增长判 FAIL、429 增长判 warn。
+- **request_log**(`GET /api/requests`):检测是否开启;未开启时给出开启提示(config `request_log` 段,需重启 daemon)。
+
+判定:项目运行全过 + matrix 过 + 后端无异常 ⇒ `E2E PASS`(exit 0),否则 exit 1。
+
+## 插入新的测试项目(`projects/<name>/`)
+
+runner 自动发现 `projects/` 下所有含 `project.json` 的目录。新项目放一个目录即可,参照 `projects/pi-coding/`:
+
+```jsonc
+// project.json
+{
+  "name": "my-agent",
+  "description": "...",
+  "timeoutSec": 300,
+  "taskFile": "task.md",          // 或内联 "task": "..."
+  "requires": ["vision"],         // 可选:未加 --with-vision 时 SKIP
+  "protocols": ["chat", "responses"], // 可选:只跑这些协议(与 CLI --protocols 取交集)
+  "command": ["{{node}}", "...", "{{prompt}}"],   // 模板变量见下
+  "env": { "SOME_DIR": "{{project}}/agent" },
+  "assert": {
+    "files": [{ "path": "out.txt", "match": "^ok$" }],  // 在 workspace 内断言
+    "stdoutMatch": "DONE"                                  // 可选,正则
+  }
+}
+```
+
+- 每次运行使用独立 workspace:`projects/<name>/workspace/<protocol>--<model>/`,跑前自动清空(`--keep-workspace` 可保留),进程完整输出落 `workspace/.../run.log`。
+- 模板变量:`{{node}} {{agenttest}} {{project}} {{workspace}} {{protocol}} {{model}} {{origin}} {{prompt}}`。
+- 可选 `setup.mjs`(default export async `setup(ctx)`):每次运行前调用,用于渲染配置等,`ctx = { projectDir, workspace, protocol, model, origin, log }`。pi-coding 用它生成 pi 的 `models.json`(三协议 provider 指向代理)。
+- 进程默认 cwd 是 workspace;命令应把代理地址经 `{{origin}}` 注入(注意 anthropic 类客户端 baseUrl 不带 `/v1`,openai 类带 `/v1`,参考 pi-coding/setup.mjs)。
