@@ -28,9 +28,8 @@ providers:
   zhipu: {provider_id: zhipu, openai_base_url: https://x}
   deepseek: {provider_id: deepseek, openai_base_url: https://y}
 routes:
+  claude-glm: [{provider: zhipu, model: glm}, {provider: deepseek, model: ds}]
   glm: [{provider: zhipu, model: glm}, {provider: deepseek, model: ds}]
-claude_mapping:
-  claude-glm: glm
 `))
 	p := newTestProxy(t, cfg)
 	post := func(body string, headers map[string]string) map[string]any {
@@ -50,10 +49,10 @@ claude_mapping:
 		return out
 	}
 
-	// anthropic default proto: claude_mapping resolves to the route.
+	// anthropic default proto: the claude-* alias is an explicit route.
 	out := post(`{"model":"claude-glm","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`, nil)
-	if out["route_found"] != true || out["exposed"] != "glm" {
-		t.Fatalf("mapping preview = %v", out)
+	if out["route_found"] != true || out["exposed"] != "claude-glm" {
+		t.Fatalf("alias route preview = %v", out)
 	}
 	ordered, ok := out["ordered"].([]any)
 	if !ok || len(ordered) != 2 {
@@ -65,6 +64,17 @@ claude_mapping:
 	}
 	if _, has := first["fits"]; !has {
 		t.Errorf("fit verdict missing: %v", first)
+	}
+
+	// provider/model prefix: decomposed to the bare route, narrowed to that
+	// provider, and reported like a force-provider.
+	out = post(`{"model":"deepseek/glm","messages":[]}`, nil)
+	if out["route_found"] != true || out["exposed"] != "glm" || out["provider_prefix"] != "deepseek" {
+		t.Fatalf("provider-prefixed preview = %v", out)
+	}
+	ordered = out["ordered"].([]any)
+	if len(ordered) != 1 || ordered[0].(map[string]any)["provider"] != "deepseek" {
+		t.Fatalf("provider-prefixed ordered = %v", out["ordered"])
 	}
 
 	// Unknown model: route_found false, no error status.

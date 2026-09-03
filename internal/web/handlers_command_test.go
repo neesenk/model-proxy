@@ -321,7 +321,7 @@ func TestCommandConfigContract(t *testing.T) {
 		if got.Kind != "route" || got.Name != "fast" || len(got.Data) != 1 || got.Data["model"] != "gpt" {
 			t.Fatalf("EditConfig request=%#v", got)
 		}
-		for _, kind := range []string{"general", "scheduling", "provider", "claude_mapping"} {
+		for _, kind := range []string{"general", "scheduling", "provider", "route"} {
 			requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/edit", `{"kind":"`+kind+`"}`), http.StatusOK, map[string]any{"status": "reloaded"})
 			if got.Kind != kind {
 				t.Fatalf("EditConfig kind=%q want %q", got.Kind, kind)

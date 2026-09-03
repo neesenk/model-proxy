@@ -704,7 +704,7 @@ func TestForward_UnsupportedTargetFallsThroughToCompatibleProtocol(t *testing.T)
 
 // ---- proxy_protocol_integration_test.go ----
 
-// --- UC1: anthropic request translated via claude_mapping + forwarded with /v1 kept ---
+// --- UC1: anthropic request resolved via explicit alias route + forwarded with /v1 kept ---
 
 func TestUC_AnthropicMappingAndPathKept(t *testing.T) {
 	var hitPath string
@@ -725,9 +725,8 @@ func TestUC_AnthropicMappingAndPathKept(t *testing.T) {
 			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: "aqp"},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
+			"claude-opus-4-8": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
-		ClaudeMapping: map[string]string{"claude-opus-4-8": "glm-5.2"},
 	}
 	p := newProxyWithStatic(t, cfg, map[string]string{"aqp": "k"})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
@@ -736,7 +735,7 @@ func TestUC_AnthropicMappingAndPathKept(t *testing.T) {
 	postOK(t, px.URL+"/v1/messages", `{"model":"claude-opus-4-8","messages":[]}`)
 
 	if hitModel != "glm-5.2" {
-		t.Errorf("upstream model=%q want glm-5.2 (claude_mapping should translate)", hitModel)
+		t.Errorf("upstream model=%q want glm-5.2 (alias route target model)", hitModel)
 	}
 	if hitPath != "/v1/messages" {
 		t.Errorf("upstream path=%q want /v1/messages (anthropic keeps /v1)", hitPath)

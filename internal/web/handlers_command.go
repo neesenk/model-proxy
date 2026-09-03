@@ -135,7 +135,7 @@ func (s *Server) handleConfigEdit(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Kind != "general" && req.Kind != "scheduling" && req.Kind != "provider" && req.Kind != "route" && req.Kind != "claude_mapping" {
+	if req.Kind != "general" && req.Kind != "scheduling" && req.Kind != "provider" && req.Kind != "route" {
 		writeJSONErr(w, http.StatusBadRequest, "unknown edit kind: "+req.Kind)
 		return
 	}

@@ -3,6 +3,7 @@ package routing
 import (
 	"bytes"
 	"fmt"
+	"strings"
 
 	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
@@ -156,6 +157,23 @@ func FilterTargetsByProvider(
 		}
 	}
 	return filtered
+}
+
+// SplitProviderPrefix decomposes a "provider/model" called name into its
+// provider prefix and bare model — but only when the prefix is a configured
+// provider, so model names that legitimately contain "/" (and have no
+// matching provider) pass through untouched. Callers must try the exact
+// route key FIRST: an explicit route named "p/m" always wins over the
+// provider-prefix reading.
+func SplitProviderPrefix(providers map[string]configdomain.Provider, calledModel string) (provider, model string, ok bool) {
+	p, m, found := strings.Cut(calledModel, "/")
+	if !found || p == "" || m == "" {
+		return "", "", false
+	}
+	if _, isProvider := providers[p]; !isProvider {
+		return "", "", false
+	}
+	return p, m, true
 }
 
 // CollectCrossRoute gathers matching concrete targets from all expanded routes.

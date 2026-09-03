@@ -131,8 +131,7 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // exposedModelsJSON builds an OpenAI-style model list from all exposed model
-// names (routes' keys) plus the claude_mapping keys (so anthropic clients can
-// discover claude-* aliases too).
+// names (explicit route keys plus derived-routable provider model names).
 func (p *Proxy) exposedModelsJSON() []byte {
 	p.mu.RLock()
 	cfg := p.cfg
@@ -157,9 +156,6 @@ func (p *Proxy) exposedModelsJSON() []byte {
 	}
 	for exposed := range derived { // derived-routable models are callable → listable
 		add(exposed)
-	}
-	for claude := range cfg.ClaudeMapping {
-		add(claude)
 	}
 	out, _ := json.Marshal(map[string]any{"object": "list", "data": models})
 	return out

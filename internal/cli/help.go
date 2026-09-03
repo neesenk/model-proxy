@@ -236,7 +236,7 @@ Usage:
 
   End-to-end link test: resolve the model's route targets (the derived route
   table — provider models aggregated per exposed name with explicit routes:
-  overriding; claude_mapping aliases are translated first) and probe each
+  overriding) and probe each
   target once with a real minimal upstream call.
   Exit status is 0 when at least one target answers 2xx, 1 when all fail.`,
 

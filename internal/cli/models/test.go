@@ -28,12 +28,6 @@ func CmdTest(args []string) {
 		fmt.Fprintf(os.Stderr, "%s usage: model-proxy test <model> [--config PATH]\n", display.Red("✗"))
 		os.Exit(1)
 	}
-	// claude_mapping translates a claude alias to the exposed model name first,
-	// mirroring forward's routing order.
-	if mapped, ok := cfg.ClaudeMapping[model]; ok {
-		fmt.Printf("%s %s → %s\n", display.Dim("claude_mapping:"), model, mapped)
-		model = mapped
-	}
 	targets := testTargetsFor(cfg, model)
 	if len(targets) == 0 {
 		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", display.Red("✗"), model, cfg.RouteNames())

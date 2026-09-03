@@ -286,6 +286,32 @@ func TestFilterTargetsByProvider(t *testing.T) {
 	}
 }
 
+func TestSplitProviderPrefix(t *testing.T) {
+	providers := map[string]configdomain.Provider{
+		"deepseek": {},
+		"zhipu":    {},
+	}
+	cases := []struct {
+		called          string
+		provider, model string
+		ok              bool
+	}{
+		{"deepseek/deepseek-v4-pro", "deepseek", "deepseek-v4-pro", true},
+		{"zhipu/openai/gpt-5", "zhipu", "openai/gpt-5", true}, // model may contain "/"
+		{"openai/gpt-5", "", "", false},                       // prefix not a provider
+		{"deepseek-v4-pro", "", "", false},                    // no slash
+		{"deepseek/", "", "", false},                          // empty model
+		{"/glm", "", "", false},                               // empty provider
+	}
+	for _, tc := range cases {
+		p, m, ok := SplitProviderPrefix(providers, tc.called)
+		if ok != tc.ok || p != tc.provider || m != tc.model {
+			t.Errorf("SplitProviderPrefix(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.called, p, m, ok, tc.provider, tc.model, tc.ok)
+		}
+	}
+}
+
 type scheduleCall struct {
 	routeName string
 	session   string

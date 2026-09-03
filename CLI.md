@@ -479,7 +479,7 @@ config init|print|check
 
 1. 探测本机已安装的编程客户端（claude/opencode/codex/pi 的 config 路径存在性，复用 takeover 包的路径知识），列出探测结果；
 2. 逐个询问启用哪些 provider（清单 = 内置模板 providers ∩ provider 注册表，不硬编码第二份），提示形如 `Enable zhipu (provider=zhipu, 10 models)? [y/N] `（一律默认 N，EOF = N）；
-3. 写出**最小 config.yaml**：只含选中 provider 的块，routes 过滤到选中 provider（整路由无存活 target 则删），claude_mapping 只留指向存活路由的别名；落盘前重新 validate（fail-closed）。一个都没选 -> stderr `no providers selected — config.yaml not written` + exit 1；
+3. 写出**最小 config.yaml**：只含选中 provider 的块（routes 全部自动推导）；落盘前重新 validate（fail-closed）。一个都没选 -> stderr `no providers selected — config.yaml not written` + exit 1；
 4. 探测到客户端时询问 `Take over detected client configs now (...)? [y/N] `，确认则当场执行 takeover（幂等备份机制与 `takeover` 命令相同）；最后打印下一步命令：每个选中 provider 的 `model-proxy login <name>`、（未执行 takeover 时）每个探测到客户端的 `model-proxy takeover <client>`、`model-proxy serve`、`model-proxy test <model>`（首个选中 provider 的首个模型，暴露名含 alias）。
 
 模板里的 `scheduling:` 整块默认是注释掉的（每行带 `(default N)`）：所有字段都有代码默认（`internal/config` 的 accessor），不写即用默认，需覆盖时取消注释对应行。`config check` 的 `scheduling:` 摘要行始终打印**生效值**（已覆盖则显覆盖值，未配则显代码默认）。`--config` 与其他命令一致、位置无关（`config --config X check` 与 `config check --config X` 等价）。
@@ -493,7 +493,6 @@ provider <NAME>: openai_base_url=<URL> provider_id=<ID> (<N> models)
 ...
 route <EXPOSED>: <N> targets
 ...
-claude_mapping: <N> aliases      # 仅当 >0
 ```
 
 ### `config check`
@@ -509,7 +508,6 @@ claude_mapping: <N> aliases      # 仅当 >0
     routes:    <N>
       <EXPOSED>: <N> targets
       ...
-    claude_mapping: <N>
     scheduling: threshold=<T> cooldown=<D> rate_backoff=<D> timeout=<D> dwell=<D>
     guard: secrets=<ACTION> known_secrets=<BOOL> decode=<BOOL> paths=<ACTION> audit=<BOOL>
       audit_path: <PATH>
@@ -845,11 +843,11 @@ Takeover
 test <model> [--config PATH]
 ```
 
-逻辑（`internal/cli/models/test.go` 的 `CmdTest`）：离线解析 `<model>` 的路由目标（claude_mapping 别名先翻译；生效路由表 = 推导聚合 + 显式 routes 覆盖，按 priority 升序），对**每个**目标由 `probeRouteTarget` 调用 `internal/probe.Exchange` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线）。不查询/不改动运行态。
+逻辑（`internal/cli/models/test.go` 的 `CmdTest`）：离线解析 `<model>` 的路由目标（生效路由表 = 推导聚合 + 显式 routes 覆盖，按 priority 升序），对**每个**目标由 `probeRouteTarget` 调用 `internal/probe.Exchange` 发一次真实最小上游请求（复用 `models refresh` 的 per-provider base/path/auth 接线）。不查询/不改动运行态。
 
 ### stdout（每目标一行）
 
-成功：`✓ <MODEL> → <PROVIDER> (<UPSTREAM_MODEL>) — HTTP <CODE> (<LATENCY>)`（绿）。失败：`✗ <MODEL> → <PROVIDER> (<UPSTREAM_MODEL>) — HTTP <CODE>: <REASON> (<LATENCY>)`（红，有上游响应时）或 `✗ … — <REASON> (<LATENCY>)`（无上游响应，如 build/auth/网络错误，不显示伪造的 `HTTP 0`）。claude_mapping 命中时先打印 `claude_mapping: <ALIAS> → <EXPOSED>`。
+成功：`✓ <MODEL> → <PROVIDER> (<UPSTREAM_MODEL>) — HTTP <CODE> (<LATENCY>)`（绿）。失败：`✗ <MODEL> → <PROVIDER> (<UPSTREAM_MODEL>) — HTTP <CODE>: <REASON> (<LATENCY>)`（红，有上游响应时）或 `✗ … — <REASON> (<LATENCY>)`（无上游响应，如 build/auth/网络错误，不显示伪造的 `HTTP 0`）。
 
 ### 退出码
 

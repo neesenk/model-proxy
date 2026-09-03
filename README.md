@@ -25,7 +25,7 @@
 ```
 
 - **Provider 层**（`internal/provider/` 包）：每个上游后端是一个 Provider 实现，封装鉴权、请求改写、登录、用量查询
-- **Routes 层**：routes 自动推导 —— 每个 provider 的 models 按模型名聚合为「对外暴露名 → 一组 `provider/model` 目标」（provider 的 `alias` 可把上游模型改名统一暴露，`priority` 继承 provider 的 priority，lower wins）。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。anthropic 协议先经 `claude_mapping` 把 claude-* 别名翻译成对外模型名，再查路由；显式 `routes:` 仅用于覆盖（fusion 目标、`protocol:` 协议转换、特殊排序）；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由。查看：`model-proxy routes [model]` / Web UI Config
+- **Routes 层**：routes 自动推导 —— 每个 provider 的 models 按模型名聚合为「对外暴露名 → 一组 `provider/model` 目标」（provider 的 `alias` 可把上游模型改名统一暴露，`priority` 继承 provider 的 priority，lower wins）。调度先看非高峰（provider 的 `peak_hours`），再看 `priority`，失败逐一 failover。claude-* 别名就是普通的显式 `routes:` 条目（全协议生效），或在客户端配置里直接写目标模型名（takeover 模板方式）；请求模型名也支持 `provider/model` 前缀（如 `deepseek/deepseek-v4-pro`）按裸模型路由并钉到该 provider；显式 `routes:` 仅用于覆盖（fusion 目标、`protocol:` 协议转换、特殊排序、claude 别名）；调度后还会按请求内容（图片/工具/上下文长度）做请求感知路由。查看：`model-proxy routes [model]` / Web UI Config
 - 凭据由 `login <provider>` 管理，不落 config；config `credentials:` 统一选择 apikey 池与 codex/aqp OAuth store 的存储后端（`file` 默认 / `keychain`：秘密值进 OS keychain、池文件只留元数据），env `MP_CRED_STORE` 仅作为 OAuth 侧的显式 override
 
 ## 安装
@@ -93,9 +93,9 @@ providers:
     models:
       - glm-5.2
 
-claude_mapping:
-  claude-opus-4-7: glm-5.2          # anthropic-only: claude 别名 → 对外模型名
-  claude-sonnet-4-6: deepseek-v4-pro
+routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在客户端配置目标模型名
+  claude-opus-4-7: [zhipu/glm-5.2]          # 紧凑形式 "provider/model"
+  claude-sonnet-4-6: [zhipu/glm-5.2]
 
 # routes 自动推导：每个 provider 的 models 按暴露名聚合（alias 可改名），
 # priority 继承 provider 的 priority（lower wins，失败逐一 failover）。
@@ -251,7 +251,7 @@ model-proxy audit --stats --from 7d  # 聚合视图：by kind/命中名 top10/ag
 代理内置一个管理后台（admin UI），在 `http://127.0.0.1:<listen>/ui/`（如 `listen: 127.0.0.1:15721` → <http://127.0.0.1:15721/ui/>）。**默认开启；回环 `listen` 下无鉴权（本地可信，非回环需 `web.auth`，见「网络部署鉴权」）**。七个标签页（Config 页含 Add provider preset 向导：选内置预设 → 合并+热重载 → Accounts 加凭据）：
 
 - **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。Models 小节展示启动期协议探测的每 provider×model 三协议能力矩阵（chat/anthropic/responses 的 yes/no/unknown，数据源 `GET /api/models`）。
-- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route` / `claude_mapping`，通过 yaml.Node API **保留注释与键序**）。
+- **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route`，通过 yaml.Node API **保留注释与键序**）。
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
 - **Analytics** — token + 等价成本趋势（日历日/月聚合；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a`）。
 - **Requests** — 请求日志查询（需 `request_log.enabled`）：按 model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。
@@ -358,7 +358,7 @@ web:
 |---|---|---|
 | Anthropic | `POST /v1/messages` | provider 的 `/messages` |
 | OpenAI | `POST /v1/responses`, `/v1/chat/completions` | provider 的同路径 |
-| 模型列表 | `GET /v1/models` | 合并推导路由 + claude_mapping 的模型名 |
+| 模型列表 | `GET /v1/models` | 合并显式路由 + 推导路由的模型名 |
 
 **按协议转发到不同 endpoint**：provider 用 `openai_base_url`（默认 base，用于 OpenAI 协议 + `/models` + `usage`）和可选的 `anthropic_base_url`（覆盖 anthropic 协议；不设则用 `openai_base_url`）。如 DeepSeek 的 OpenAI 与 Anthropic 是两个不同 base。两个协议对客户端 `/v1` 前缀的处理相反：OpenAI 协议会剥掉客户端的 `/v1`，故 `openai_base_url` 自带版本段（如 `…/v1`、`…/paas/v4`）；Anthropic 协议保留客户端的 `/v1/messages`，故 `anthropic_base_url` **不带** `/v1`（如 `…/anthropic`、`…/api/plan`）。
 
@@ -615,6 +615,11 @@ python3 examples/demo.py --port 15721 "hello" glm-5.2
 python3 examples/demo.py --port 15721 --protocol codex "hello" gpt-5.5
 ```
 
+交互式协议转换测试工具（基于 pi agent 接口，真实多轮 + 工具调用 + thinking + 图片 + MCP 覆盖
+anthropic/chat/responses 三协议 ingress）见 `tools/agenttest/README.md`；
+`tools/agenttest/e2e.mjs` 一键串起真实 agent 项目（`projects/` 可插拔）+ matrix
++ 代理后端日志与 `/api/status` 内部数据分析。
+
 ## DeepSeek（内置，双协议）
 
 DeepSeek 已内置（`provider_id: deepseek`），一个 API key 同时服务 OpenAI 与 Anthropic 协议。两个 endpoint 用 `openai_base_url`（OpenAI base）和 `anthropic_base_url`（Anthropic base，**不带 `/v1`**，代理保留客户端的 `/v1/messages`）分别配置；代理按调用协议转发到对应 endpoint。默认 config 含 provider 定义但**不含 routes**——按需添加：
@@ -630,11 +635,11 @@ providers:
       - deepseek-v4-pro
       - deepseek-v4-flash
 
-claude_mapping:
-  claude-opus-4-8: deepseek-v4-pro   # DeepSeek 服务端也会自动映射 claude-opus*→v4-pro
+routes:  # claude 别名 = 普通显式路由（全协议生效），可选
+  claude-opus-4-8: [deepseek/deepseek-v4-pro]  # DeepSeek 服务端也会自动映射 claude-opus*→v4-pro
 
 # routes 自动推导：models 里列出的模型即自动暴露为路由（priority 继承
-# provider 的 priority；不需要写 routes 块）。
+# provider 的 priority；不声明 claude 别名时不需要写 routes 块）。
 ```
 
 ```bash

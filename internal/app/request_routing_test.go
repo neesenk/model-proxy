@@ -459,10 +459,10 @@ func newCaptureUpstream(status int, body string) (*httptest.Server, *[]string) {
 	return srv, &seen
 }
 
-// TestForward_ClaudeMapping: anthropic translates claude-sonnet-4-6 via
-// claude_mapping to the exposed "glm-5.2" route (and rewrites the body model);
-// a name not in the mapping is used as-is; openai skips the mapping entirely.
-func TestForward_ClaudeMapping(t *testing.T) {
+// TestForward_ClaudeAliasRoute: a claude-* alias exposed as an explicit route
+// resolves for every protocol (routes are protocol-agnostic — the old
+// anthropic-only claude_mapping is gone); an unrouted name still 502s.
+func TestForward_ClaudeAliasRoute(t *testing.T) {
 	up, seen := newCaptureUpstream(200, `{}`)
 	defer up.Close()
 	cfg := &Config{
@@ -470,10 +470,8 @@ func TestForward_ClaudeMapping(t *testing.T) {
 			"aqp": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
-		},
-		ClaudeMapping: map[string]string{
-			"claude-sonnet-4-6": "glm-5.2",
+			"glm-5.2":           {{Provider: "aqp", Model: "glm-5.2"}},
+			"claude-sonnet-4-6": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
 	p := newTestProxy(t, cfg)
@@ -481,28 +479,35 @@ func TestForward_ClaudeMapping(t *testing.T) {
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	// 1) anthropic claude-sonnet-4-6 → mapped to glm-5.2 → upstream sees glm-5.2.
+	// 1) anthropic claude-sonnet-4-6 → alias route → upstream sees glm-5.2.
 	*seen = nil
 	postOK(t, px.URL+"/v1/messages", `{"model":"claude-sonnet-4-6","messages":[]}`)
 	if len(*seen) != 1 || (*seen)[0] != "glm-5.2" {
-		t.Errorf("anthropic mapped name: upstream model=%v, want [glm-5.2]", *seen)
+		t.Errorf("anthropic alias name: upstream model=%v, want [glm-5.2]", *seen)
 	}
 
-	// 2) anthropic glm-5.2 (not in claude_mapping) → used as-is → upstream sees glm-5.2.
+	// 2) anthropic glm-5.2 (direct route) → upstream sees glm-5.2.
 	*seen = nil
 	postOK(t, px.URL+"/v1/messages", `{"model":"glm-5.2","messages":[]}`)
 	if len(*seen) != 1 || (*seen)[0] != "glm-5.2" {
-		t.Errorf("anthropic unmapped name: upstream model=%v, want [glm-5.2]", *seen)
+		t.Errorf("anthropic direct name: upstream model=%v, want [glm-5.2]", *seen)
 	}
 
-	// 3) openai claude-sonnet-4-6 → no mapping → not in routes → 502.
-	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"claude-sonnet-4-6","messages":[]}`))
+	// 3) openai claude-sonnet-4-6 → alias route applies to openai too now.
+	*seen = nil
+	postOK(t, px.URL+"/v1/chat/completions", `{"model":"claude-sonnet-4-6","messages":[]}`)
+	if len(*seen) != 1 || (*seen)[0] != "glm-5.2" {
+		t.Errorf("openai alias name: upstream model=%v, want [glm-5.2]", *seen)
+	}
+
+	// 4) an unrouted name still 502s.
+	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(`{"model":"no-such-model","messages":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != 502 {
-		t.Errorf("openai claude name (no mapping): status=%d, want 502", resp.StatusCode)
+		t.Errorf("unrouted name: status=%d, want 502", resp.StatusCode)
 	}
 }
 

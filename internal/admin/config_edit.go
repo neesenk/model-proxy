@@ -74,10 +74,6 @@ func (s *Service) editStructured(kind, name string, data map[string]any) error {
 				configedit.DeleteKey(configedit.ChildMap(root, "providers"), name)
 			case "route":
 				configedit.DeleteKey(configedit.ChildMap(root, "routes"), name)
-			case "claude_mapping":
-				if alias, ok := data["alias"].(string); ok {
-					configedit.DeleteKey(configedit.ChildMap(root, "claude_mapping"), alias)
-				}
 			}
 		})
 	}
@@ -102,12 +98,6 @@ func (s *Service) editStructured(kind, name string, data map[string]any) error {
 		case "route":
 			if targets, ok := data["targets"]; ok {
 				configedit.SetChildNode(configedit.ChildMap(root, "routes"), name, configedit.MustEncode(targets))
-			}
-		case "claude_mapping":
-			alias, aliasOK := data["alias"].(string)
-			route, routeOK := data["route"].(string)
-			if aliasOK && routeOK {
-				configedit.SetChildScalar(configedit.ChildMap(root, "claude_mapping"), alias, route)
 			}
 		}
 	})

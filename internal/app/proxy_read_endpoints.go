@@ -184,7 +184,7 @@ func (p *Proxy) recordRateLimit(name string, until time.Time, kind runtimestate.
 }
 
 // serveRoutePreview answers "where would this request go RIGHT NOW?" — the
-// same early forward steps (model extraction, claude_mapping, route lookup,
+// same early forward steps (model extraction, route lookup,
 // pin / force narrowing, cache probe, scheduling preview, per-target
 // request-fit verdicts) with NO upstream call and NO scheduler mutation (the
 // ordering comes from the detached Manager preview, same as /debug/schedule).
@@ -253,14 +253,20 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	exposed := calledModel
-	if proto == "anthropic" && cfg.ClaudeMapping != nil {
-		if mapped, ok := cfg.ClaudeMapping[calledModel]; ok && mapped != "" {
-			exposed = mapped
+	targets := expanded[exposed]
+	prefixForced := ""
+	if len(targets) == 0 {
+		if pref, bare, isPrefix := routing.SplitProviderPrefix(cfg.Providers, calledModel); isPrefix {
+			exposed = bare
+			prefixForced = pref
+			targets = routing.FilterTargetsByProvider(expanded[exposed], parentOf, pref)
 		}
 	}
 	out["exposed"] = exposed
+	if prefixForced != "" {
+		out["provider_prefix"] = prefixForced
+	}
 
-	targets := expanded[exposed]
 	if len(targets) == 0 {
 		out["route_found"] = false
 		writeJSON(http.StatusOK, out)
@@ -279,6 +285,9 @@ func (p *Proxy) serveRoutePreview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	forcedProvider := forward.ForcedProviderFromRequest(r)
+	if forcedProvider == "" {
+		forcedProvider = prefixForced
+	}
 	if forcedProvider != "" {
 		out["force_provider"] = forcedProvider
 		narrowed := routing.FilterTargetsByProvider(targets, parentOf, forcedProvider)

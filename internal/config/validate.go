@@ -92,7 +92,7 @@ var (
 	// report the dotted field path at the message start).
 	dottedFieldRe = regexp.MustCompile(`^((?:scheduling|cache|pricing|stats|request_log)\.[a-z_]+):`)
 	// `provider "x": ...` / `route "x" target N: ...` / `shadow "x": ...` etc.
-	sectionKeyRe  = regexp.MustCompile(`^(provider|route|claude_mapping|shadow|fusion) "([^"]+)"`)
+	sectionKeyRe  = regexp.MustCompile(`^(provider|route|shadow|fusion) "([^"]+)"`)
 	routeTargetRe = regexp.MustCompile(`^route "[^"]+" target (\d+)`)
 )
 

@@ -149,7 +149,7 @@ func TestConfigEditGeneral(t *testing.T) {
 }
 
 // TestConfigEditUnknownKind asserts a bogus kind returns 400, not 500 or a
-// panic. provider/route/claude_mapping are valid kinds as of Task 9
+// panic. provider/route are valid kinds as of Task 9
 // (covered by TestConfigEditProviderBilling / TestConfigEditRouteCRUD), so this
 // test now only covers the genuinely unknown case.
 func TestConfigEditUnknownKind(t *testing.T) {
@@ -793,7 +793,7 @@ routes:
 // ---- models_test.go ----
 
 // TestServeModels_ListsExposedModels verifies /v1/models lists exposed model
-// names (routes' keys) plus claude_mapping aliases.
+// names: explicit route keys (including claude-* alias routes) ∪ derived names.
 func TestServeModels_ListsExposedModels(t *testing.T) {
 	cfg := &Config{
 		Listen: "127.0.0.1:0",
@@ -802,11 +802,9 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 				Models: []string{"glm-5.2"}},
 		},
 		Routes: map[string][]RouteTarget{
-			"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}},
-		},
-		ClaudeMapping: map[string]string{
-			"claude-opus-4-7":  "glm-5.2",
-			"claude-haiku-4-5": "glm-5.2",
+			"glm-5.2":          {{Provider: "aqp", Model: "glm-5.2"}},
+			"claude-opus-4-7":  {{Provider: "aqp", Model: "glm-5.2"}},
+			"claude-haiku-4-5": {{Provider: "aqp", Model: "glm-5.2"}},
 		},
 	}
 	p := newTestProxy(t, cfg)
@@ -830,7 +828,7 @@ func TestServeModels_ListsExposedModels(t *testing.T) {
 		t.Fatalf("parse: %v body=%s", err, string(body))
 	}
 	if list.Object != "list" || len(list.Data) != 3 {
-		t.Errorf("expected 3 models (1 route + 2 claude aliases), got %+v", list)
+		t.Errorf("expected 3 models (1 route + 2 claude alias routes), got %+v", list)
 	}
 	ids := map[string]bool{}
 	for _, m := range list.Data {

@@ -20,10 +20,9 @@ import (
 )
 
 // Serve runs the request-forwarding pipeline: it proxies a request to the
-// upstream selected by the route for the requested model. Routing is two-step:
-// for anthropic, the called model name is first translated via claude_mapping
-// (if the called name is mapped); openai uses the called name directly. The
-// (translated) name is then looked up in routes, which maps it to an ordered
+// upstream selected by the route for the requested model. Routing looks the
+// called model name up in routes (alias translation, if any, happens
+// client-side), which maps it to an ordered
 // list of provider/model targets. The proxy schedules the route's sticky
 // provider first (within its dwell window), else the best available by
 // (non-peak, priority); providers with an open circuit or active rate-limit
@@ -74,19 +73,26 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		return
 	}
 
-	// Two-step lookup: anthropic translates claude-* names via claude_mapping
-	// (if the called name is mapped); openai uses the called name as-is. Computed
+	// The called name is the exposed route key, for every protocol. Computed
 	// early so the pin check (and cache bypass) can run before any upstream work.
+	// A "provider/model" called name (prefix = a configured provider, no exact
+	// route match) decomposes: route by the bare model, narrowed to that
+	// provider with full force-provider semantics (cache bypass, no cross-route
+	// reroute) — the request explicitly names its backend.
 	exposed := calledModel
-	if proto == "anthropic" && cfg.ClaudeMapping != nil {
-		if mapped, ok := cfg.ClaudeMapping[calledModel]; ok && mapped != "" {
-			exposed = mapped
+	targets, ok := expanded[exposed]
+	prefixForced := ""
+	if !ok || len(targets) == 0 {
+		if pref, bare, isPrefix := routing.SplitProviderPrefix(cfg.Providers, calledModel); isPrefix {
+			exposed = bare
+			prefixForced = pref
+			targets = routing.FilterTargetsByProvider(expanded[exposed], parentOf, pref)
+			ok = len(targets) > 0
 		}
 	}
-	targets, ok := expanded[exposed]
 	if !ok || len(targets) == 0 {
 		p.publishTerminalEvent(requestID, r, proto, exposed, http.StatusBadGateway)
-		http.Error(w, fmt.Sprintf("model %q not found in routes", exposed), http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("model %q not found in routes", calledModel), http.StatusBadGateway)
 		return
 	}
 	// A pin on this route forces the pinned provider (exclusive) — compute early
@@ -95,6 +101,9 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// force-provider/replay bypass).
 	force := p.pinForces(exposed, targets, parentOf)
 	forcedProvider := ForcedProviderFromRequest(r)
+	if forcedProvider == "" {
+		forcedProvider = prefixForced
+	}
 
 	// Outbound secret guard (DLP-lite): scan the SHARED request body once, here
 	// — after route resolution (so hits are attributable) and before the cache
@@ -303,9 +312,9 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 				RequestID: requestID,
 				Agent:     agent,
 				Protocol:  proto,
-				// Same mapping as the start event above: with claude_mapping
-				// the live view must show ONE exposed name per request, not
-				// the called name on start and the mapped name on end.
+				// Same exposed name as the start event above: the live view
+				// must show ONE exposed name per request, not different
+				// names on start and end.
 				Exposed:  exposed,
 				Provider: "(cache)",
 				Status:   e.Status(),

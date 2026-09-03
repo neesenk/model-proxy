@@ -87,7 +87,7 @@ func (s *Service) EditConfig(request appapi.EditRequest) error {
 		return s.editGeneral(request.Data)
 	case "scheduling":
 		return s.editScheduling(request.Data)
-	case "provider", "route", "claude_mapping":
+	case "provider", "route":
 		return s.editStructured(request.Kind, request.Name, request.Data)
 	default:
 		return appapi.NewHTTPError(

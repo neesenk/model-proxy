@@ -293,7 +293,7 @@ redact 前请求体尾部与跨请求分片进度。窗口可能含凭据，只�
 红线与启发式边界见 `docs/decisions/intentional-behaviors.md` 条目 20/21。
 
 `internal/forward` 是请求转发管线包：从「snapshot + HTTP 请求」到「响应 commit 或终态错误」
-的全部编排归它——body 读取与上限、claude_mapping/route 解析、pin/force-provider 硬选择
+的全部编排归它——body 读取与上限、route 解析、pin/force-provider 硬选择
 （含 cache bypass）、outbound guard 扫描与统一动作评估、精确响应 cache、schedule →
 request-aware routing → per-target failover（`serveOnce`）、cooldown wait-retry 与终局
 分类、Fusion 编排适配，以及 target plan / `targetexec.Executor` / request `routing.Planner`

@@ -52,9 +52,6 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 		for exposed, targets := range routing.RouteTable(cfg) {
 			fmt.Printf("route %s: %d targets\n", exposed, len(targets))
 		}
-		if len(cfg.ClaudeMapping) > 0 {
-			fmt.Printf("claude_mapping: %d aliases\n", len(cfg.ClaudeMapping))
-		}
 	case "check":
 		fmt.Println(display.Green("✓ config valid"))
 		fmt.Printf("  listen:    %s\n", cfg.Listen)
@@ -70,7 +67,6 @@ func CmdConfig(args []string, cfg *configdomain.Config) {
 				fmt.Printf("    %s: %d targets\n", name, len(table[name]))
 			}
 		}
-		fmt.Printf("  claude_mapping: %d\n", len(cfg.ClaudeMapping))
 		s := cfg.Scheduling
 		fmt.Printf("  scheduling: threshold=%d cooldown=%s rate_backoff=%s timeout=%s dwell=%s\n",
 			s.Threshold(), s.Cooldown(), s.RateBackoff(), s.Timeout(), s.Dwell())

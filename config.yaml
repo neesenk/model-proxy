@@ -200,34 +200,24 @@ providers:
       - k3-256k
       - kimi-for-coding
       - kimi-for-coding-highspeed
-      # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
-      # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
-      # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
-      # = Anthropic-compatible base (no /v1; proxy keeps /v1/messages). No usage_url —
-      # personal-edition Credits usage (5h/7d windows) is console-only (no public
-      # API); `login qwen-plan` validates the key by probing openai_base_url/models.
-      #qwen-plan:
-      #  provider_id: qwen-plan
-      #  openai_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-      #  anthropic_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
-      #  models:
-      #    - qwen3.8-max-preview
-      #    - qwen3.7-max
-      #    - qwen3.7-plus
-      #    - qwen3.6-flash
-      #    - glm-5.2
-      #    - deepseek-v4-pro
-# claude_mapping: anthropic-only. Translates a claude-* client model name to an
-# exposed model name (from the auto-derived route table below) before routing.
-# If a called anthropic model isn't listed, the called name is used as the
-# exposed name.
-claude_mapping:
-  claude-opus-4-7: glm-5.3
-  claude-opus-4-8: glm-5.3
-  claude-sonnet-4-6: deepseek-v4-pro
-  claude-haiku-4-5: deepseek-v4-flash
-  opus: glm-5.3
-  sonnet: deepseek-v4-pro
+
+    # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
+    # `login qwen-plan` (from the Token Plan console; key format sk-sp-…). Two
+    # protocol bases: openai_base_url = OpenAI-compatible base, anthropic_base_url
+    # = Anthropic-compatible base (no /v1; proxy keeps /v1/messages). No usage_url —
+    # personal-edition Credits usage (5h/7d windows) is console-only (no public
+    # API); `login qwen-plan` validates the key by probing openai_base_url/models.
+    #qwen-plan:
+    #  provider_id: qwen-plan
+    #  openai_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    #  anthropic_base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
+    #  models:
+    #    - qwen3.8-max-preview
+    #    - qwen3.7-max
+    #    - qwen3.7-plus
+    #    - qwen3.6-flash
+    #    - glm-5.2
+    #    - deepseek-v4-pro
 # routes: AUTO-DERIVED. Every provider model is exposed under its model name
 # (or its provider-level alias) and all providers serving the same name
 # aggregate into one route, ordered by provider priority (lower first, then
@@ -239,9 +229,21 @@ claude_mapping:
 # Inspect the derived table: `model-proxy routes [model]` or the Web UI Config
 # tab. An explicit `routes:` block is only needed for overrides — a fusion
 # target, a declared protocol conversion, or a special ordering — and it
-# replaces the derived route for that exposed name wholesale, e.g.:
+# replaces the derived route for that exposed name wholesale. Targets accept a
+# compact "provider/model" string; the {provider, model, ...} map form is only
+# needed when setting priority/protocol, e.g.:
 # routes:
 #   gpt-5.6: [{provider: codex, model: gpt-5.6, protocol: openai}]
+# claude-* aliases for anthropic clients are explicit routes too (the old
+# anthropic-only claude_mapping was removed). NOTE: an alias route applies to
+# EVERY protocol — claude-opus-4-8 / claude-haiku-4-5 are intentionally NOT
+# aliased here so they keep resolving to the derived real-claude route; point
+# the client at glm-5.3 / deepseek-v4-flash directly for the cheap backends.
+# routes:
+#  claude-opus-4-7: [zhipu/glm-5.3, aqp/glm-5.3, volcengine/glm-5.3, shopee/glm-5.3]
+#  opus: [zhipu/glm-5.3, aqp/glm-5.3, volcengine/glm-5.3, shopee/glm-5.3]
+#  claude-sonnet-4-6: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
+#  sonnet: [aqp/deepseek-v4-pro, volcengine/deepseek-v4-pro, shopee/deepseek-v4-pro, deepseek/deepseek-v4-pro]
 
 # Scheduling: every field has a code default (config.go accessors), so this
 # block can be omitted entirely. Uncomment a line to override.

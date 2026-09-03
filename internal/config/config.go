@@ -30,14 +30,13 @@ type Config struct {
 	// "off" to force direct). Empty = automatic chain: environment variables
 	// (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) → OS system proxy → direct. A
 	// provider's proxy_url overrides it for that provider's forwarded traffic.
-	Proxy         string            `yaml:"proxy"`
-	ClaudeMapping map[string]string `yaml:"claude_mapping"`
-	Scheduling    Scheduling        `yaml:"scheduling"`
-	Takeover      Takeover          `yaml:"takeover"`
-	Web           WebConfig         `yaml:"web"`
-	Stats         StatsConfig       `yaml:"stats"`
-	RequestLog    RequestLogConfig  `yaml:"request_log"`
-	Cache         CacheConfig       `yaml:"cache"`
+	Proxy      string           `yaml:"proxy"`
+	Scheduling Scheduling       `yaml:"scheduling"`
+	Takeover   Takeover         `yaml:"takeover"`
+	Web        WebConfig        `yaml:"web"`
+	Stats      StatsConfig      `yaml:"stats"`
+	RequestLog RequestLogConfig `yaml:"request_log"`
+	Cache      CacheConfig      `yaml:"cache"`
 	// Shadow maps an exposed model to a candidate backend to evaluate: each
 	// committed request to the route is ALSO sent to the shadow provider (same
 	// prompt, the shadow's model), logged for quality/latency comparison, and the
@@ -684,8 +683,8 @@ func (c *Config) ExposedModelNames() map[string]bool {
 }
 
 // RouteExposedNames returns every callable exposed model name: explicit route
-// keys plus the names derived from providers. claude_mapping and shadow keys
-// are validated against this set.
+// keys plus the names derived from providers. shadow keys are validated
+// against this set.
 func (c *Config) RouteExposedNames() map[string]bool {
 	out := c.ExposedModelNames()
 	for exposed := range c.Routes {
@@ -837,6 +836,26 @@ type RouteTarget struct {
 	Protocol string `yaml:"protocol"`
 }
 
+// UnmarshalYAML accepts the compact scalar form "provider/model" (model may
+// itself contain "/") or the full map form — the map form is required when
+// setting priority/protocol. Integer/bool scalars are rejected explicitly:
+// yaml.v3 would otherwise coerce them into a bogus provider name.
+func (t *RouteTarget) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		if value.Tag != "!!str" && value.Tag != "" {
+			return fmt.Errorf("route target %q: must be a \"provider/model\" string or a {provider, model, ...} map (got %s)", value.Value, value.Tag)
+		}
+		provider, model, ok := strings.Cut(value.Value, "/")
+		if !ok || provider == "" || model == "" {
+			return fmt.Errorf("route target %q: compact form must be \"provider/model\"", value.Value)
+		}
+		t.Provider, t.Model = provider, model
+		return nil
+	}
+	type plain RouteTarget
+	return value.Decode((*plain)(t))
+}
+
 type Takeover struct {
 	ProxyURL string `yaml:"proxy_url"`
 	Claude   string `yaml:"claude"`
@@ -899,9 +918,13 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		Providers map[string]Provider      `yaml:"providers"`
 		Routes    map[string][]RouteTarget `yaml:"routes"`
 		// Must mirror Config.Proxy (same silent-drop trap as the shadow knobs).
-		Proxy         string                  `yaml:"proxy"`
+		Proxy      string     `yaml:"proxy"`
+		Scheduling Scheduling `yaml:"scheduling"`
+		// Tombstone: claude_mapping was removed (anthropic aliases are plain
+		// explicit routes now, or set the model client-side). Keeping the raw
+		// key lets load fail with a migration hint instead of silently
+		// dropping the mapping (the classic silent-drop trap).
 		ClaudeMapping map[string]string       `yaml:"claude_mapping"`
-		Scheduling    Scheduling              `yaml:"scheduling"`
 		Takeover      Takeover                `yaml:"takeover"`
 		Web           WebConfig               `yaml:"web"`
 		Stats         StatsConfig             `yaml:"stats"`
@@ -943,13 +966,15 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 		}
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
+	if len(raw.ClaudeMapping) > 0 {
+		return nil, fmt.Errorf("claude_mapping is no longer supported: map a claude-* alias with an explicit routes: entry (e.g. `routes: {claude-haiku-4-5: [<P>/<M>]}`), or set the target model in the client config instead")
+	}
 	cfg.Listen = raw.Listen
 	cfg.LogLevel = raw.LogLevel
 	cfg.LogFile = raw.LogFile
 	cfg.Providers = raw.Providers
 	cfg.Routes = raw.Routes
 	cfg.Proxy = raw.Proxy
-	cfg.ClaudeMapping = raw.ClaudeMapping
 	cfg.Scheduling = raw.Scheduling
 	cfg.Takeover = raw.Takeover
 	cfg.Web = raw.Web
@@ -1236,19 +1261,9 @@ func (c *Config) validate() error {
 			}
 		}
 	}
-	// claude_mapping values must reference a callable exposed model name
-	// (explicit route key or a name derived from providers).
-	routeNames := c.RouteExposedNames()
-	for claude, exposed := range c.ClaudeMapping {
-		if exposed == "" {
-			return fmt.Errorf("claude_mapping %q: target is empty — set it to a route name", claude)
-		}
-		if !routeNames[exposed] {
-			return fmt.Errorf("claude_mapping %q → %q: target %q not found — no route or provider model is exposed as %q; fix the mapping or the model name", claude, exposed, exposed, exposed)
-		}
-	}
 	// Shadow validation: each entry references a real route + provider + valid
 	// protocol; sample rate in [0,1]; max_concurrent >= 0.
+	routeNames := c.RouteExposedNames()
 	for route, sh := range c.Shadow {
 		if !routeNames[route] {
 			return fmt.Errorf("shadow %q: route not found in routes: — add a route named %q", route, route)

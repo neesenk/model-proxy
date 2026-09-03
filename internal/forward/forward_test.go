@@ -104,19 +104,18 @@ func TestServeRejectsBeforeRouting(t *testing.T) {
 	}
 }
 
-// TestServeClaudeMapping: an anthropic client's claude-* name is translated
-// via claude_mapping before route lookup; the upstream sees the mapped route's
-// target model.
-func TestServeClaudeMapping(t *testing.T) {
+// TestServeClaudeAliasRoute: an anthropic client's claude-* name resolves via
+// an explicit alias route; the upstream sees the route's target model (the
+// post-claude_mapping alias mechanism).
+func TestServeClaudeAliasRoute(t *testing.T) {
 	up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
 	})
 	h := newHarness()
 	cfg := &Config{
-		Providers:     map[string]Provider{"up": {AnthropicBaseURL: up.srv.URL, Provider: "test-static"}},
-		Routes:        map[string][]RouteTarget{"glm": {{Provider: "up", Model: "glm-5"}}},
-		ClaudeMapping: map[string]string{"claude-sonnet": "glm"},
+		Providers: map[string]Provider{"up": {AnthropicBaseURL: up.srv.URL, Provider: "test-static"}},
+		Routes:    map[string][]RouteTarget{"claude-sonnet": {{Provider: "up", Model: "glm-5"}}},
 	}
 	body := `{"model":"claude-sonnet","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`
 	w := h.serve(h.snapshot(cfg), "anthropic", "/v1/messages", body, nil)
@@ -124,10 +123,74 @@ func TestServeClaudeMapping(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
 	}
 	if !strings.Contains(up.lastBody(), "glm-5") {
-		t.Errorf("upstream body = %s, want mapped target model glm-5", up.lastBody())
+		t.Errorf("upstream body = %s, want alias route target model glm-5", up.lastBody())
 	}
 	if up.paths[0] != "/v1/messages" {
 		t.Errorf("anthropic keeps /v1 prefix: path = %s", up.paths[0])
+	}
+}
+
+// TestServeProviderPrefixedModel: a "provider/model" called name (no exact
+// route key) decomposes — route by the bare model narrowed to the named
+// provider; an exact route key named "p/m" still wins; unknown prefixes and
+// providers not serving the model 502.
+func TestServeProviderPrefixedModel(t *testing.T) {
+	upA := newFakeUpstream(t, openaiOKResponder("from-a"))
+	upB := newFakeUpstream(t, openaiOKResponder("from-b"))
+	h := newHarness()
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"a": {OpenAIBaseURL: upA.srv.URL, Provider: "test-static"},
+			"b": {OpenAIBaseURL: upB.srv.URL, Provider: "test-static"},
+		},
+		Routes: map[string][]RouteTarget{
+			"glm":  {{Provider: "a", Model: "glm-a"}, {Provider: "b", Model: "glm-b"}},
+			"solo": {{Provider: "a", Model: "x"}},
+		},
+	}
+	snap := h.snapshot(cfg)
+	chat := func(model string) string {
+		return `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}]}`
+	}
+
+	// 1) "b/glm" → only b is hit, upstream sees the target's real model.
+	w := h.serve(snap, "openai", "/v1/chat/completions", chat("b/glm"), nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "from-b") {
+		t.Fatalf("b/glm: status = %d body = %s", w.Code, w.Body.String())
+	}
+	if upA.hits() != 0 || upB.hits() != 1 {
+		t.Errorf("hits a=%d b=%d, want 0/1", upA.hits(), upB.hits())
+	}
+	if !strings.Contains(upB.lastBody(), "glm-b") {
+		t.Errorf("upstream body = %s, want glm-b", upB.lastBody())
+	}
+
+	// 2) unknown prefix → treated as a plain (unrouted) model name → 502.
+	w = h.serve(snap, "openai", "/v1/chat/completions", chat("ghost/glm"), nil)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("ghost/glm: status = %d, want 502", w.Code)
+	}
+
+	// 3) provider not serving the model → 502, no upstream call.
+	w = h.serve(snap, "openai", "/v1/chat/completions", chat("b/solo"), nil)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("b/solo: status = %d, want 502", w.Code)
+	}
+	if upA.hits() != 0 || upB.hits() != 1 {
+		t.Errorf("after misses: hits a=%d b=%d, want 0/1", upA.hits(), upB.hits())
+	}
+
+	// 4) an exact route key literally named "b/glm" wins over decomposition.
+	cfgExact := &Config{
+		Providers: cfg.Providers,
+		Routes: map[string][]RouteTarget{
+			"glm":   cfg.Routes["glm"],
+			"b/glm": {{Provider: "a", Model: "glm-a"}},
+		},
+	}
+	w = h.serve(h.snapshot(cfgExact), "openai", "/v1/chat/completions", chat("b/glm"), nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "from-a") {
+		t.Errorf("exact route precedence: status = %d body = %s, want from-a", w.Code, w.Body.String())
 	}
 }
 

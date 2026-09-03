@@ -92,8 +92,15 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
   `DeriveRoutesFrom(cfg)`，由 `internal/archtest` 的 owner 契约保护）；CLI
   （`routes`、`models`、`test`、doctor、takeover）与 daemon 用同一 `RouteTable`；
 - 显式 `routes:` 条目**整条覆盖**同名推导路由（用于 fusion 目标、`protocol:`
-  协议转换声明、特殊排序）；target 省略 priority 时同样继承 provider priority；
-- `claude_mapping` / `shadow` 的 key 校验对象是「显式 route key ∪ 推导暴露名」
+  协议转换声明、特殊排序、claude-* 别名）；target 写紧凑形式 `"provider/model"`
+  字符串即可，仅当要设 `priority`/`protocol` 时才用 `{provider, model, ...}`
+  map 形式；target 省略 priority 时同样继承 provider priority；
+- 请求里的模型名也可直接写 `"provider/model"`（如 `deepseek/deepseek-v4-pro`）：
+  没有同名精确路由、且前缀是已配置 provider 时，按裸模型名查路由并把目标收窄到
+  该 provider，语义等同一次性 force-provider（绕过响应 cache、禁止跨 route 改道）；
+  精确同名路由永远优先，前缀不是 provider 时整串按普通模型名处理（兼容
+  openrouter 风格带 `/` 的模型名）；
+- `shadow` 的 key 校验对象是「显式 route key ∪ 推导暴露名」
   （`Config.RouteExposedNames`）；alias 的 key 必须在该 provider 的 `models:`
   中，且一个 provider 内一个暴露名只能映射一个上游模型（validate 报错）；
 - route-name sticky 可持久化，session sticky 不持久化；

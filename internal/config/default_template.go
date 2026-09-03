@@ -161,18 +161,6 @@ providers:
       - glm-5.2
       - deepseek-v4-pro
 
-# claude_mapping: anthropic-only. Translates a claude-* client model name to an
-# exposed model name (from the auto-derived route table below) before routing.
-# If a called anthropic model isn't listed, the called name is used as the
-# exposed name.
-claude_mapping:
-  claude-opus-4-7: glm-5.2
-  claude-opus-4-8: glm-5.2
-  opus: glm-5.2
-  claude-sonnet-4-6: deepseek-v4-pro
-  sonnet: deepseek-v4-pro
-  claude-haiku-4-5: deepseek-v4-flash
-
 # routes: AUTO-DERIVED — this block is intentionally omitted. Every provider
 # model is exposed under its model name (or its provider-level alias) and all
 # providers serving the same name aggregate into one route, ordered by provider
@@ -183,13 +171,16 @@ claude_mapping:
 # Inspect the derived table: 'model-proxy routes [model]' or the Web UI
 # Config tab. An explicit routes: block is only needed for overrides — it
 # replaces
-# the derived route for that exposed name wholesale:
+# the derived route for that exposed name wholesale. A target is written as a
+# compact "provider/model" string; the {provider, model, ...} map form is only
+# needed when setting priority or protocol:
 #   protocol: anthropic|openai — declare when the target requires cross-protocol
 #     conversion, e.g. a Claude Code (anthropic) client hitting codex:
 #     gpt-5.5: [{provider: codex, model: gpt-5.5, protocol: openai}]
 #   {provider: fusion, model: <workflow>} — reference a fusion: workflow (see
 #     the fusion block at the bottom of this file).
 # routes:
+#   glm-5.2: [zhipu/glm-5.2, aqp/glm-5.2]
 #   gpt-5.5: [{provider: codex, model: gpt-5.5, protocol: openai}]
 
 # Scheduling: failover health (circuit breaker, rate-limit skip) + sticky routing.

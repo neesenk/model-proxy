@@ -8,6 +8,52 @@ import (
 // config_extra_test.go covers the validate error branches and Scheduling /
 // expandPath / PeakConfig edges not exercised by config_test.go.
 
+// TestRouteTarget_CompactForm: a route target accepts the compact
+// "provider/model" scalar (split at the FIRST slash, so models may contain
+// "/") alongside the full map form; malformed scalars fail loudly.
+func TestRouteTarget_CompactForm(t *testing.T) {
+	cfg, err := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:1
+providers:
+  z: {provider_id: zhipu, openai_base_url: "https://x", models: [glm-5.2]}
+  o: {provider_id: zhipu, openai_base_url: "https://y", models: ["openai/gpt-5"]}
+routes:
+  mixed: [z/glm-5.2, "o/openai/gpt-5", {provider: z, model: glm-5.2, priority: 9, protocol: openai}]
+`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromBytes: %v", err)
+	}
+	targets := cfg.Routes["mixed"]
+	if len(targets) != 3 {
+		t.Fatalf("targets = %v", targets)
+	}
+	if targets[0] != (RouteTarget{Provider: "z", Model: "glm-5.2"}) {
+		t.Errorf("compact target = %+v", targets[0])
+	}
+	if targets[1].Provider != "o" || targets[1].Model != "openai/gpt-5" {
+		t.Errorf("slashed model target = %+v", targets[1])
+	}
+	if targets[2].Priority != 9 || targets[2].Protocol != "openai" {
+		t.Errorf("map form target = %+v", targets[2])
+	}
+
+	for _, doc := range []string{
+		"z-no-slash", // missing "/"
+		"z/",         // empty model
+		"/glm-5.2",   // empty provider
+		"42",         // non-string scalar
+	} {
+		bad := `listen: 127.0.0.1:1
+providers:
+  z: {provider_id: zhipu, openai_base_url: "https://x", models: [glm-5.2]}
+routes:
+  m: [` + doc + `]
+`
+		if _, err := LoadConfigFromBytes("test", []byte(bad)); err == nil {
+			t.Errorf("malformed target %q: want parse error", doc)
+		}
+	}
+}
+
 func TestValidate_NoProviders(t *testing.T) {
 	err := (&Config{Listen: "127.0.0.1:1"}).validate()
 	if err == nil || !strings.Contains(err.Error(), "no providers") {
@@ -105,18 +151,6 @@ func TestValidate_RouteTargetEmptyModel(t *testing.T) {
 	}).validate()
 	if err == nil || !strings.Contains(err.Error(), "model is empty") {
 		t.Errorf("route empty model: err=%v", err)
-	}
-}
-
-func TestValidate_ClaudeMappingEmptyTarget(t *testing.T) {
-	err := (&Config{
-		Listen:        "127.0.0.1:1",
-		Providers:     map[string]Provider{"x": {OpenAIBaseURL: "https://x", Provider: "zhipu"}},
-		Routes:        map[string][]RouteTarget{"m": {{Provider: "x", Model: "m"}}},
-		ClaudeMapping: map[string]string{"claude-x": ""},
-	}).validate()
-	if err == nil || !strings.Contains(err.Error(), "target is empty") {
-		t.Errorf("claude_mapping empty target: err=%v", err)
 	}
 }
 

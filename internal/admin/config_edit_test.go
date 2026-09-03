@@ -159,7 +159,7 @@ func TestEditConfigProvider(t *testing.T) {
 	}
 }
 
-func TestEditConfigRouteAndClaudeMapping(t *testing.T) {
+func TestEditConfigRoute(t *testing.T) {
 	path := writeTestConfig(t)
 	spy := &reloadSpy{}
 	service := editService(t, path, spy)
@@ -172,14 +172,8 @@ func TestEditConfigRouteAndClaudeMapping(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.EditConfig(appapi.EditRequest{
-		Kind: "claude_mapping",
-		Data: map[string]any{"alias": "sonnet", "route": "glm"},
-	}); err != nil {
-		t.Fatal(err)
-	}
 	content := readConfig(t, path)
-	if !strings.Contains(content, "glm-air") || !strings.Contains(content, "sonnet: glm") {
+	if !strings.Contains(content, "glm-air") {
 		t.Errorf("edited config:\n%s", content)
 	}
 }
@@ -197,14 +191,6 @@ func TestEditConfigDelete(t *testing.T) {
 	}
 	if content := readConfig(t, path); strings.Contains(content, "routes:\n    glm") {
 		t.Errorf("route delete did not apply:\n%s", content)
-	}
-
-	// claude_mapping deletes by alias, not by request name.
-	if err := service.EditConfig(appapi.EditRequest{
-		Kind: "claude_mapping",
-		Data: map[string]any{"delete": true, "alias": "sonnet"},
-	}); err != nil {
-		t.Fatal(err)
 	}
 }
 

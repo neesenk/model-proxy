@@ -88,13 +88,6 @@ func TestConfigInitWizard_SelectProviders(t *testing.T) {
 	if derived["gpt-5.5"] {
 		t.Errorf("gpt-5.5 derived although codex was not selected")
 	}
-	// claude_mapping entries pointing at derivable exposed names stay; the
-	// rest drop.
-	for alias, exposed := range cfg.ClaudeMapping {
-		if !derived[exposed] {
-			t.Errorf("claude_mapping %s -> %s but %s is not derivable from the selected providers", alias, exposed, exposed)
-		}
-	}
 
 	for _, want := range []string{"model-proxy login deepseek", "model-proxy login zhipu", "model-proxy serve", "model-proxy test deepseek-v4-pro"} {
 		if !strings.Contains(out, want) {

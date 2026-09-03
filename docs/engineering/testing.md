@@ -4,6 +4,8 @@
 
 修改 Go 实现、构建脚本、并发状态机、Provider 或 Web UI 时按本文件选择验证范围。测试使用标准库 `testing`、`httptest`，不引入 testify。
 
+真实代理上的交互式端到端验证（多轮 + 工具调用 + thinking × anthropic/chat/responses 三协议 ingress）不属于 Go 测试体系，用 `tools/agenttest`（基于 pi agent 接口，用法见其 README）；`tools/agenttest/e2e.mjs` 一键串联 `projects/` 下可插拔的真实 agent 项目、matrix 与后端日志/`/api/status` 分析。Go 单测不得依赖它或真实上游。
+
 ## 基线命令
 
 所有 Go 命令从仓库根目录运行：

@@ -89,10 +89,10 @@ func TestCLI_TestNoRoute(t *testing.T) {
 	}
 }
 
-// TestCLI_TestClaudeMapping: a claude alias is translated through
-// claude_mapping before route resolution; the translation is announced and the
-// mapped route is probed.
-func TestCLI_TestClaudeMapping(t *testing.T) {
+// TestCLI_TestClaudeAliasRoute: a claude-* alias exposed via an explicit route
+// resolves and probes that route's targets (the post-claude_mapping way to
+// serve claude client aliases).
+func TestCLI_TestClaudeAliasRoute(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 		w.Write([]byte(`{}`))
@@ -102,20 +102,19 @@ func TestCLI_TestClaudeMapping(t *testing.T) {
 	home := t.TempDir()
 	setPoolHome(t, home)
 	writePoolFile(t, "zhipu", "zhipu", "KEY-A")
-	cfgPath := clitest.WriteTempConfig(t, testCLIConfig(srv.URL)+`
-claude_mapping:
-  claude-sonnet-x: glm-test
+	cfgPath := clitest.WriteTempConfig(t, `listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: `+srv.URL+`, models: [glm-5.2]}
+routes:
+  claude-sonnet-x: [{provider: zhipu, model: glm-5.2}]
 `)
 
 	stdout, _, code := clitest.RunCLIWithHome(t, home, "test", cfgPath, "claude-sonnet-x")
 	if code != 0 {
 		t.Fatalf("test exit=%d want 0", code)
 	}
-	if !strings.Contains(stdout, "claude_mapping: claude-sonnet-x → glm-test") {
-		t.Errorf("stdout missing mapping announcement:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "✓ glm-test → zhipu (glm-5.2)") {
-		t.Errorf("stdout missing ✓ probe line for mapped route:\n%s", stdout)
+	if !strings.Contains(stdout, "✓ claude-sonnet-x → zhipu (glm-5.2)") {
+		t.Errorf("stdout missing ✓ probe line for alias route:\n%s", stdout)
 	}
 }
 

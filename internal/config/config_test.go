@@ -99,24 +99,19 @@ func TestConfig_RouteTargets(t *testing.T) {
 	}
 }
 
-// TestConfig_ClaudeMapping verifies claude_mapping values reference callable
-// exposed model names (explicit routes or derived provider models).
-func TestConfig_ClaudeMapping(t *testing.T) {
-	cfg, err := LoadConfig(filepath.Join("..", "..", "config.yaml"))
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	routeNames := cfg.RouteExposedNames()
-	if len(routeNames) == 0 {
-		t.Fatal("no callable exposed model names")
-	}
-	for claude, exposed := range cfg.ClaudeMapping {
-		if exposed == "" {
-			t.Errorf("claude_mapping %q → empty target", claude)
-		}
-		if !routeNames[exposed] {
-			t.Errorf("claude_mapping %q → %q: target is not a callable exposed model name", claude, exposed)
-		}
+// TestConfig_ClaudeMappingRemoved: the claude_mapping key was removed — a
+// config still carrying it must fail to load with a migration hint instead of
+// silently dropping the mapping (tombstone in LoadConfigFromBytes).
+func TestConfig_ClaudeMappingRemoved(t *testing.T) {
+	doc := []byte(`listen: 127.0.0.1:1
+providers:
+  a: {openai_base_url: "https://x", provider_id: zhipu, models: [glm-5.2]}
+claude_mapping:
+  claude-haiku-4-5: glm-5.2
+`)
+	if _, err := LoadConfigFromBytes("config.yaml", doc); err == nil ||
+		!strings.Contains(err.Error(), "claude_mapping is no longer supported") {
+		t.Errorf("claude_mapping tombstone: want migration error, got %v", err)
 	}
 }
 
@@ -169,17 +164,6 @@ func TestConfig_ValidateErrors(t *testing.T) {
 				"m": {{Provider: "nonexistent", Model: "m", Priority: 1}},
 			}},
 			wantSub: "provider \"nonexistent\" not defined",
-		},
-		{
-			name: "claude_mapping bad target",
-			cfg: &Config{Listen: "127.0.0.1:1", Providers: map[string]Provider{
-				"a": {OpenAIBaseURL: "https://x", Provider: "zhipu"},
-			}, Routes: map[string][]RouteTarget{
-				"m": {{Provider: "a", Model: "m", Priority: 1}},
-			}, ClaudeMapping: map[string]string{
-				"claude-x": "no-such-route",
-			}},
-			wantSub: "no route or provider model is exposed as \"no-such-route\"",
 		},
 	}
 

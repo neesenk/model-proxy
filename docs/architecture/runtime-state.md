@@ -189,7 +189,7 @@ config generation 时取得的这一个 DashboardSnapshot 计算，不得再次�
 
 `POST /debug/route`（`internal/app/proxy_read_endpoints.go`，body = 客户端原样请求体，
 `?proto=` 覆盖协议，默认 anthropic）是**单请求版**的决策预览：复刻 forward 的早期
-步骤（model 提取、claude_mapping、route 查找、pin/force 收窄、同一纯 guard 判定、
+步骤（model 提取、route 查找、pin/force 收窄、同一纯 guard 判定、
 cache 只读探测），
 排序同样走 `PreviewOrder`（`Commit=false`，不推进 spread、不落 sticky），并输出
 per-target 的 request-fit 判定（`routing.FitVerdict`，与 `Planner.Apply` 同语义，

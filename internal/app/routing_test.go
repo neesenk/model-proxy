@@ -510,7 +510,7 @@ func TestExpandTarget_PreservesProtocol(t *testing.T) {
 
 // ---- proxy_routing_integration_test.go ----
 
-// --- UC10: GET /v1/models returns exposed names ∪ claude_mapping keys ---
+// --- UC10: GET /v1/models returns exposed names (explicit routes ∪ derived) ---
 
 func TestUC_ModelsEndpointUnion(t *testing.T) {
 	cfg := &Config{
@@ -520,10 +520,10 @@ func TestUC_ModelsEndpointUnion(t *testing.T) {
 		Routes: map[string][]RouteTarget{
 			"glm-5.2":         {{Provider: "aqp", Model: "glm-5.2"}},
 			"deepseek-v4-pro": {{Provider: "aqp", Model: "deepseek-v4-pro"}},
-		},
-		ClaudeMapping: map[string]string{
-			"claude-opus-4-8":   "glm-5.2",
-			"claude-sonnet-4-6": "deepseek-v4-pro",
+			// claude-* aliases are plain explicit routes now — listable like any
+			// other exposed name.
+			"claude-opus-4-8":   {{Provider: "aqp", Model: "glm-5.2"}},
+			"claude-sonnet-4-6": {{Provider: "aqp", Model: "deepseek-v4-pro"}},
 		},
 	}
 	p := newTestProxy(t, cfg)
@@ -547,7 +547,7 @@ func TestUC_ModelsEndpointUnion(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Exact set: routes ∪ claude_mapping — a leak of any other name (over
+	// Exact set: explicit routes ∪ derived — a leak of any other name (over
 	//exposure) is as wrong as a missing one.
 	want := map[string]bool{
 		"glm-5.2": true, "deepseek-v4-pro": true,
@@ -562,7 +562,7 @@ func TestUC_ModelsEndpointUnion(t *testing.T) {
 	}
 	for name := range want {
 		if !got[name] {
-			t.Errorf("GET /v1/models missing %q (routes ∪ claude_mapping); got %v", name, got)
+			t.Errorf("GET /v1/models missing %q (routes ∪ derived); got %v", name, got)
 		}
 	}
 }
