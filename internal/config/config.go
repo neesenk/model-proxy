@@ -15,23 +15,29 @@ import (
 
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/upstreamproxy"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Listen        string                   `yaml:"listen"`
-	LogLevel      string                   `yaml:"log_level"`
-	LogFile       string                   `yaml:"log_file"`
-	Providers     map[string]Provider      `yaml:"providers"`
-	Routes        map[string][]RouteTarget `yaml:"routes"`
-	ClaudeMapping map[string]string        `yaml:"claude_mapping"`
-	Scheduling    Scheduling               `yaml:"scheduling"`
-	Takeover      Takeover                 `yaml:"takeover"`
-	Web           WebConfig                `yaml:"web"`
-	Stats         StatsConfig              `yaml:"stats"`
-	RequestLog    RequestLogConfig         `yaml:"request_log"`
-	Cache         CacheConfig              `yaml:"cache"`
+	Listen    string                   `yaml:"listen"`
+	LogLevel  string                   `yaml:"log_level"`
+	LogFile   string                   `yaml:"log_file"`
+	Providers map[string]Provider      `yaml:"providers"`
+	Routes    map[string][]RouteTarget `yaml:"routes"`
+	// Proxy is the global upstream proxy default (http/https/socks5 URL, or
+	// "off" to force direct). Empty = automatic chain: environment variables
+	// (HTTPS_PROXY/HTTP_PROXY/NO_PROXY) → OS system proxy → direct. A
+	// provider's proxy_url overrides it for that provider's forwarded traffic.
+	Proxy         string            `yaml:"proxy"`
+	ClaudeMapping map[string]string `yaml:"claude_mapping"`
+	Scheduling    Scheduling        `yaml:"scheduling"`
+	Takeover      Takeover          `yaml:"takeover"`
+	Web           WebConfig         `yaml:"web"`
+	Stats         StatsConfig       `yaml:"stats"`
+	RequestLog    RequestLogConfig  `yaml:"request_log"`
+	Cache         CacheConfig       `yaml:"cache"`
 	// Shadow maps an exposed model to a candidate backend to evaluate: each
 	// committed request to the route is ALSO sent to the shadow provider (same
 	// prompt, the shadow's model), logged for quality/latency comparison, and the
@@ -605,13 +611,19 @@ type Provider struct {
 	// optionally overrides it for anthropic (/v1/messages) requests; if unset,
 	// OpenAIBaseURL serves both protocols. Both must include their version segment
 	// (e.g. .../v1, .../anthropic/v1) since the proxy strips the client's /v1.
-	OpenAIBaseURL    string            `yaml:"openai_base_url"`
-	AnthropicBaseURL string            `yaml:"anthropic_base_url"`
-	Provider         string            `yaml:"provider_id"`
-	AqpMintURL       string            `yaml:"aqp_mint_url"` // aqp only
-	ClientVersion    string            `yaml:"client_version,omitempty"`
-	Headers          map[string]string `yaml:"headers"`
-	UsageURL         string            `yaml:"usage_url"`
+	OpenAIBaseURL    string `yaml:"openai_base_url"`
+	AnthropicBaseURL string `yaml:"anthropic_base_url"`
+	Provider         string `yaml:"provider_id"`
+	// ProxyURL overrides the top-level proxy for this provider's forwarded
+	// traffic (http/https/socks5 URL, or "off" to force direct). Empty =
+	// follow the global chain. Applies to forward/fusion/shadow upstream
+	// requests; account-maintenance calls (usage/quota/login) follow the
+	// global chain only.
+	ProxyURL      string            `yaml:"proxy_url"`
+	AqpMintURL    string            `yaml:"aqp_mint_url"` // aqp only
+	ClientVersion string            `yaml:"client_version,omitempty"`
+	Headers       map[string]string `yaml:"headers"`
+	UsageURL      string            `yaml:"usage_url"`
 	// Models is the list of real model names this provider serves — a managed
 	// whitelist (kept in sync by `models refresh`). Metadata (context/output/
 	// modalities) is NOT stored here; it is sourced at runtime from models.dev
@@ -881,19 +893,21 @@ func LoadConfig(path string) (*Config, error) {
 func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg := &Config{}
 	type rawConfig struct {
-		Listen        string                   `yaml:"listen"`
-		LogLevel      string                   `yaml:"log_level"`
-		LogFile       string                   `yaml:"log_file"`
-		Providers     map[string]Provider      `yaml:"providers"`
-		Routes        map[string][]RouteTarget `yaml:"routes"`
-		ClaudeMapping map[string]string        `yaml:"claude_mapping"`
-		Scheduling    Scheduling               `yaml:"scheduling"`
-		Takeover      Takeover                 `yaml:"takeover"`
-		Web           WebConfig                `yaml:"web"`
-		Stats         StatsConfig              `yaml:"stats"`
-		RequestLog    RequestLogConfig         `yaml:"request_log"`
-		Cache         CacheConfig              `yaml:"cache"`
-		Shadow        map[string]ShadowTarget  `yaml:"shadow"`
+		Listen    string                   `yaml:"listen"`
+		LogLevel  string                   `yaml:"log_level"`
+		LogFile   string                   `yaml:"log_file"`
+		Providers map[string]Provider      `yaml:"providers"`
+		Routes    map[string][]RouteTarget `yaml:"routes"`
+		// Must mirror Config.Proxy (same silent-drop trap as the shadow knobs).
+		Proxy         string                  `yaml:"proxy"`
+		ClaudeMapping map[string]string       `yaml:"claude_mapping"`
+		Scheduling    Scheduling              `yaml:"scheduling"`
+		Takeover      Takeover                `yaml:"takeover"`
+		Web           WebConfig               `yaml:"web"`
+		Stats         StatsConfig             `yaml:"stats"`
+		RequestLog    RequestLogConfig        `yaml:"request_log"`
+		Cache         CacheConfig             `yaml:"cache"`
+		Shadow        map[string]ShadowTarget `yaml:"shadow"`
 		// Must mirror Config's shadow knobs — without these the file-loaded
 		// values are silently dropped (and validate's range checks never fire).
 		ShadowSampleRate    *float64                `yaml:"shadow_sample_rate"`
@@ -934,6 +948,7 @@ func LoadConfigFromBytes(path string, data []byte) (*Config, error) {
 	cfg.LogFile = raw.LogFile
 	cfg.Providers = raw.Providers
 	cfg.Routes = raw.Routes
+	cfg.Proxy = raw.Proxy
 	cfg.ClaudeMapping = raw.ClaudeMapping
 	cfg.Scheduling = raw.Scheduling
 	cfg.Takeover = raw.Takeover
@@ -1083,6 +1098,9 @@ func (c *Config) validate() error {
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("no providers configured — add at least one under `providers:`")
 	}
+	if err := upstreamproxy.ValidateSetting(c.Proxy); err != nil {
+		return fmt.Errorf("proxy: %w", err)
+	}
 	for name, p := range c.Providers {
 		// A provider needs at least one upstream base URL. openai_base_url is the
 		// default (same-protocol openai forwarding); anthropic_base_url is used by
@@ -1111,6 +1129,9 @@ func (c *Config) validate() error {
 		// usage_url should use https.
 		if p.UsageURL != "" && !strings.HasPrefix(p.UsageURL, "https://") && !strings.HasPrefix(p.UsageURL, "http://") {
 			return fmt.Errorf("provider %q: usage_url %q is not a valid URL", name, p.UsageURL)
+		}
+		if err := upstreamproxy.ValidateSetting(p.ProxyURL); err != nil {
+			return fmt.Errorf("provider %q: proxy_url: %w", name, err)
 		}
 		// peak_hours: each segment window must be a valid HH:MM-HH:MM range.
 		for i, seg := range p.PeakHours {

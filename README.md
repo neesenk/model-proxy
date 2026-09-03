@@ -64,6 +64,11 @@ scripts/build.sh --strip all       # 全矩阵（linux/darwin/windows），-s -w
 ```yaml
 listen: 127.0.0.1:15721    # 默认回环；非回环需配置 web.auth（admin_token_file + api_keys_file），否则 validate 拒绝
 log_level: info                # debug|info|warn|error 级别过滤（低于所配级别的日志被丢弃）；非法值启动报错；startup-only，改后需重启
+# proxy: http://127.0.0.1:7890   # 全局上游代理：http/https/socks5 URL 或 off（强制直连）。
+                               # 留空 = 自动链：环境变量(HTTPS_PROXY/HTTP_PROXY/NO_PROXY) → 系统代理 → 直连。
+                               # providers.<name>.proxy_url 可逐 provider 覆盖（作用于转发/fusion/shadow 流量）；
+                               # 系统代理由 internal/upstreamproxy 每进程探测一次，自动来源(env/系统)对 loopback 恒绕过，
+                               # 显式配置的代理 URL 对 loopback 同样生效；PAC/WPAD 不解析
 
 providers:
   aqp:

@@ -35,6 +35,7 @@ import (
 	"model-proxy/internal/probe"
 	"model-proxy/internal/provider"
 	runtimewire "model-proxy/internal/runtime/wirecap"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // Compatibility aliases keep the application adapter readable while the
@@ -94,7 +95,7 @@ func (p *Proxy) probeAllWireCaps() {
 	derived := p.derivedRoutes
 	p.mu.RUnlock()
 
-	client := &http.Client{Timeout: wireCapProbeTimeout}
+	client := &http.Client{Timeout: wireCapProbeTimeout, Transport: upstreamproxy.AutoTransport()}
 	sem := make(chan struct{}, wireCapProbeConcurrency)
 	var wg sync.WaitGroup
 	probed := false

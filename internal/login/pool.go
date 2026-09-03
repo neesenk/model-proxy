@@ -11,6 +11,7 @@ import (
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/display"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // Account-store seams, resolved lazily so tests can isolate HOME via
@@ -51,7 +52,7 @@ func ValidateKeyBearerGET(url, key string) error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 15 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
@@ -92,7 +93,7 @@ func FetchVisibleModels(prov configdomain.Provider, key string) ([]string, error
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 15 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return nil, err
 	}

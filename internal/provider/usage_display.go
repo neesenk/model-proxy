@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"model-proxy/internal/display"
+	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"sort"
 	"strings"
@@ -173,7 +174,7 @@ func (p *CodexProvider) Usage() error {
 		fmt.Println(display.Yellow("Not logged in.") + " Run: " + display.Cyan("model-proxy login codex"))
 		return nil
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		fmt.Println(display.Red("Error: usage request: " + err.Error()))
 		return nil
@@ -284,7 +285,7 @@ func (p *ZhipuProvider) Usage() error {
 	for k, v := range p.cfg.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		fmt.Println(display.Red("Error: usage request: " + err.Error()))
 		return nil
@@ -337,7 +338,7 @@ func (p *DeepSeekProvider) Usage() error {
 		fmt.Println(display.Yellow("Not logged in.") + " Run: " + display.Cyan("model-proxy login "+p.cfg.ProviderName))
 		return nil
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		fmt.Println(display.Red("Error: usage request: " + err.Error()))
 		return nil

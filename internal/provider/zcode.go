@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"model-proxy/internal/display"
+	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"os"
 	"runtime"
@@ -117,7 +118,7 @@ func (p *ZCodeProvider) Quota() (*QuotaSnapshot, error) {
 	for k, v := range p.cfg.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}
@@ -145,7 +146,7 @@ func (p *ZCodeProvider) Usage() error {
 	for k, v := range p.cfg.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		fmt.Println(display.Red("Error: usage request: " + err.Error()))
 		return nil

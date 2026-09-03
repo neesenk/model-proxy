@@ -613,19 +613,23 @@ func (p *Proxy) serveOnce() {
 	if assignedFactoryValueExecuted(falseGreen.Body, "newTargetAttempt", "targetExecutor", "execute") {
 		t.Error("factory-to-executor dataflow accepted unrelated factory/execute calls")
 	}
-	f, _ = parse(`type attemptValue struct{}
+	f, _ = parse(`type snapshotValue struct{ Cfg int; ParentOf int }
+type attemptValue struct{}
 func (attemptValue) Runtime() int { return 0 }
 type executorValue struct{}
 func (executorValue) Execute(attemptValue) {}
-func (p *Proxy) targetExecutor(int) executorValue { return executorValue{} }
+func newTargetAttempt(snapshotValue) attemptValue { return attemptValue{} }
+func (p *Proxy) targetExecutor(int, int, int, int) executorValue { return executorValue{} }
 func (p *Proxy) bound() {
-	attempt := attemptValue{}
-	p.targetExecutor(attempt.Runtime()).Execute(attempt)
+	runtime := snapshotValue{}
+	attempt := newTargetAttempt(runtime)
+	p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 }
 func (p *Proxy) mismatched() {
-	attempt := attemptValue{}
-	other := attemptValue{}
-	p.targetExecutor(other.Runtime()).Execute(attempt)
+	runtime := snapshotValue{}
+	attempt := newTargetAttempt(runtime)
+	other := newTargetAttempt(runtime)
+	p.targetExecutor(other.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 }`)
 	if !executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "bound").Body, "targetExecutor", "Execute") {
 		t.Error("executor runtime binding positive control rejected the same attempt")
@@ -634,25 +638,25 @@ func (p *Proxy) mismatched() {
 		t.Error("executor runtime binding accepted a different attempt")
 	}
 
-	// The threaded ParentOf projection must come from the SAME snapshot the
-	// attempt was built from (newTargetAttempt's first argument).
-	f, _ = parse(`type snapshotValue struct{ ParentOf int }
+	// The threaded Cfg/ParentOf proxy-chain inputs must come from the SAME
+	// snapshot the attempt was built from (newTargetAttempt's first argument).
+	f, _ = parse(`type snapshotValue struct{ Cfg int; ParentOf int }
 type attemptValue struct{}
 func (attemptValue) Runtime() int { return 0 }
 type executorValue struct{}
 func (executorValue) Execute(attemptValue) {}
 func newTargetAttempt(snapshotValue) attemptValue { return attemptValue{} }
-func (p *Proxy) targetExecutor(int, int) executorValue { return executorValue{} }
+func (p *Proxy) targetExecutor(int, int, int, int) executorValue { return executorValue{} }
 func (p *Proxy) sameSnapshot() {
 	runtime := snapshotValue{}
 	attempt := newTargetAttempt(runtime)
-	p.targetExecutor(attempt.Runtime(), runtime.ParentOf).Execute(attempt)
+	p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 }
 func (p *Proxy) crossSnapshot() {
 	runtime := snapshotValue{}
 	other := snapshotValue{}
 	attempt := newTargetAttempt(runtime)
-	p.targetExecutor(attempt.Runtime(), other.ParentOf).Execute(attempt)
+	p.targetExecutor(attempt.Runtime(), other.Cfg, other.ParentOf, t.Provider).Execute(attempt)
 }`)
 	if !executorRuntimeBoundToAttempt(namedMethod(t, f, "Proxy", "sameSnapshot").Body, "targetExecutor", "Execute") {
 		t.Error("executor parent projection positive control rejected the attempt's own snapshot")
@@ -1304,7 +1308,7 @@ func executorRuntimeBoundToAttempt(n ast.Node, receiverFactory, terminal string)
 			return true
 		}
 		factoryCall, ok := terminalSelector.X.(*ast.CallExpr)
-		if !ok || len(factoryCall.Args) < 1 || len(factoryCall.Args) > 2 {
+		if !ok || len(factoryCall.Args) != 4 {
 			return true
 		}
 		runtimeCall, ok := factoryCall.Args[0].(*ast.CallExpr)
@@ -1319,16 +1323,25 @@ func executorRuntimeBoundToAttempt(n ast.Node, receiverFactory, terminal string)
 		if !ok || runtimeAttempt.Name != attempt.Name {
 			return true
 		}
-		if len(factoryCall.Args) == 2 {
-			// The parent projection must be the SAME snapshot's ParentOf.
-			parentOf, ok := factoryCall.Args[1].(*ast.SelectorExpr)
-			if !ok || parentOf.Sel.Name != "ParentOf" {
-				return true
-			}
-			snapshot := snapshotOf[attempt.Name]
-			if snapshot == "" || requestRoutingExprPath(parentOf.X) != snapshot {
-				return true
-			}
+		// The proxy-chain inputs must come from the SAME snapshot as the
+		// attempt: cfg is args[1] (<snapshot>.Cfg), the parent projection
+		// args[2] (<snapshot>.ParentOf), and the provider args[3] a route/plan
+		// target's .Provider.
+		snapshot := snapshotOf[attempt.Name]
+		if snapshot == "" {
+			return true
+		}
+		cfg, ok := factoryCall.Args[1].(*ast.SelectorExpr)
+		if !ok || cfg.Sel.Name != "Cfg" || requestRoutingExprPath(cfg.X) != snapshot {
+			return true
+		}
+		parentOf, ok := factoryCall.Args[2].(*ast.SelectorExpr)
+		if !ok || parentOf.Sel.Name != "ParentOf" || requestRoutingExprPath(parentOf.X) != snapshot {
+			return true
+		}
+		provider, ok := factoryCall.Args[3].(*ast.SelectorExpr)
+		if !ok || provider.Sel.Name != "Provider" {
+			return true
 		}
 		bound = true
 		return false

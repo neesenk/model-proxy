@@ -34,3 +34,4 @@
 - 修改 endpoint、header、body、认证或 quota parser 时同步更新 `backend-contracts.md`。
 - 新 provider 优先复用 shared helper，不复制 Bearer `/models`、probe body 或 display 逻辑。
 - 增加 provider-specific 行为时补正例、错误响应、空响应和 credential isolation 测试。
+- 出站 HTTP client 一律带 `Transport: upstreamproxy.AutoTransport()`（config 全局 → env → 系统代理链），不得再用裸 `&http.Client{Timeout: ...}`。

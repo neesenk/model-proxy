@@ -20,6 +20,7 @@ import (
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
 	runtimewire "model-proxy/internal/runtime/wirecap"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // models_check.go implements the endpoint probe used by `models refresh`: after
@@ -70,7 +71,7 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string
 		return nil, nil, nil, err
 	}
 
-	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
+	client := &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()}
 
 	type result struct {
 		idx      int

@@ -420,20 +420,26 @@ func exactTargetExecutorAttempt(call *ast.CallExpr) (string, bool) {
 		return "", false
 	}
 	factory, ok := execute.X.(*ast.CallExpr)
-	if !ok || len(factory.Args) < 1 || len(factory.Args) > 2 || !selectorOnIdent(factory.Fun, "p", "targetExecutor") {
+	if !ok || len(factory.Args) != 4 || !selectorOnIdent(factory.Fun, "p", "targetExecutor") {
 		return "", false
 	}
 	if !zeroArgReceiverCall(factory.Args[0], attempt.Name, "Runtime") {
 		return "", false
 	}
-	if len(factory.Args) == 2 {
-		// The wire-verdict parent projection threaded alongside the runtime must
-		// be a ParentOf selector; same-snapshot provenance is locked by
-		// executorRuntimeBoundToAttempt.
-		parentOf, ok := factory.Args[1].(*ast.SelectorExpr)
-		if !ok || parentOf.Sel.Name != "ParentOf" || requestRoutingExprPath(parentOf.X) == "" {
-			return "", false
-		}
+	// The proxy-chain inputs threaded alongside the runtime must be the same
+	// snapshot's Cfg/ParentOf plus a route/plan target's .Provider;
+	// same-snapshot provenance is locked by executorRuntimeBoundToAttempt.
+	cfg, ok := factory.Args[1].(*ast.SelectorExpr)
+	if !ok || cfg.Sel.Name != "Cfg" || requestRoutingExprPath(cfg.X) == "" {
+		return "", false
+	}
+	parentOf, ok := factory.Args[2].(*ast.SelectorExpr)
+	if !ok || parentOf.Sel.Name != "ParentOf" || requestRoutingExprPath(parentOf.X) == "" {
+		return "", false
+	}
+	provider, ok := factory.Args[3].(*ast.SelectorExpr)
+	if !ok || provider.Sel.Name != "Provider" {
+		return "", false
 	}
 	return attempt.Name, true
 }
@@ -1073,14 +1079,14 @@ func invalidPlannerFactory() {
 	commitFile, err := parser.ParseFile(fset, "commit.go", `package main
 func validCommit() {
 	attempt := makeAttempt()
-	result := p.targetExecutor(attempt.Runtime()).Execute(attempt)
+	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
 		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, result.Commit)
 	}
 }
 func invalidCommit() {
 	attempt := makeAttempt()
-	result := p.targetExecutor(attempt.Runtime()).Execute(attempt)
+	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if other.Committed {
 		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, result.Commit)
 	}
@@ -1088,14 +1094,14 @@ func invalidCommit() {
 func invalidExecutorBinding() {
 	attempt := makeAttempt()
 	other := makeAttempt()
-	result := p.targetExecutor(other.Runtime()).Execute(attempt)
+	result := p.targetExecutor(other.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
 		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, result.Commit)
 	}
 }
 func invalidCommitPayload() {
 	attempt := makeAttempt()
-	result := p.targetExecutor(attempt.Runtime()).Execute(attempt)
+	result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 	if result.Committed {
 		p.dispatchShadowAfterCommit(runtime, proto, string(plan.BackendProtocol()), calledModel, exposed, t, requestID, other.Commit)
 	}

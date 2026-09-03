@@ -478,6 +478,7 @@ budget watcher adapter → internal/observe/budget → internal/observe/stats / 
 应用 / CLI / observe / fusion 等组件的日志调用点 → internal/observe/logx（级别过滤叶子包，serve 启动时 SetLevel 一次）
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
+config / app / provider / providerbuild / login / pricing / CLI 出站调用 → internal/upstreamproxy（上游代理策略叶子包）
 probe 执行（daemon 探测 pass / CLI / Web 测活）→ internal/probe → config / provider
 wire verdict / target plan → internal/runtime/wirecap → config / provider（值类型）
 schedule / health / resolver / quota adapter → internal/runtime
@@ -492,8 +493,8 @@ application → serveAssembly → applicationRuntime → Proxy
 `internalRepositoryImportPolicy` 互为镜像——两处必须同步修改：
 
 - 叶子包（不得依赖其他 `model-proxy/*` 包）：`archtest`（纯测试包）、`cache`、
-  `catalog`、`configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、
-  `observe/counters`、`observe/events`、`observe/logx`、`pricing`、
+  `configedit`、`credstore`、`daemonctl`、`display`、`guard`、`httpx`、
+  `observe/counters`、`observe/events`、`observe/logx`、`upstreamproxy`、
   `transport/bodycapture`、`webauth`；
 - `accounts → credstore`；
 - `guard/session → guard`；
@@ -501,7 +502,7 @@ application → serveAssembly → applicationRuntime → Proxy
   config, configedit, credstore, display, forward, fusion, guard, guard/session, httpx, login, observe/budget,
   observe/counters, observe/events, observe/logx, observe/requestlog, observe/seclog, observe/stats, presets,
   pricing, probe, protocol, provider, providerbuild, routing, runtime, runtime/wirecap, shadow,
-  targetexec, transport/bodycapture, web, webauth`；
+  targetexec, transport/bodycapture, upstreamproxy, web, webauth`；
 - `admin → accounts, appapi, cache, config, configedit, credstore, fusion, login,
   observe/counters, observe/logx, observe/seclog, observe/stats, presets, pricing, probe,
   provider, routing, runtime, runtime/wirecap`（Web admin 应用服务；不得回依赖 app/web/cli）；
@@ -509,13 +510,14 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
   cli/framework, cli/login, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
   observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
+- `catalog → upstreamproxy`；
 - `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
 - `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`）；
 - `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
 - `cli/clicommon → appapi, daemonctl, display, provider`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
 - `cli/config → accounts, cli/framework, config, display, provider, routing, takeover`（`config init|print|check`）；
-- `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, probe, provider`（`wire`/`replay`/`shadow`）；
+- `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, probe, provider, upstreamproxy`（`wire`/`replay`/`shadow`）；
 - `cli/doctor → accounts, appapi, cli/clicommon, cli/framework,
   cli/models, config, credstore, display, routing, takeover, observe/seclog, provider`；
 - `cli/framework → accounts, config`；
@@ -525,9 +527,9 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/serve → config, observe/logx`；
 - `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider`；
 - `cli/models → cli/serve, cli/framework, accounts, catalog, config,
-  configedit, display, probe, provider, providerbuild, routing, runtime/wirecap`；
-- `login → accounts, config, display, provider, observe/logx`；
-- `config → catalog, pricing, protocol`；
+  configedit, display, probe, provider, providerbuild, routing, runtime/wirecap, upstreamproxy`；
+- `login → accounts, config, display, provider, observe/logx, upstreamproxy`；
+- `config → catalog, pricing, protocol, upstreamproxy`；
 - `fusion → config, observe/logx`；
 - `forward → cache, catalog, config, fusion, guard, guard/session, observe/counters,
   observe/events, observe/logx, observe/requestlog, observe/seclog, protocol, provider, routing,
@@ -541,8 +543,9 @@ application → serveAssembly → applicationRuntime → Proxy
 - `presets → config, configedit, provider`；
 - `probe → config, provider`；
 - `protocol → observe/logx`；
-- `provider → credstore, display`（display 是终端着色/文本格式化叶子工具包）；
-- `providerbuild → accounts, config, display, provider, observe/logx`；
+- `pricing → upstreamproxy`；
+- `provider → credstore, display, upstreamproxy`（display 是终端着色/文本格式化叶子工具包）；
+- `providerbuild → accounts, config, display, provider, observe/logx, upstreamproxy`；
 - `routing → catalog, config, protocol, provider`（均为值类型消费）；
 - `runtime → config, runtime/wirecap, provider, observe/logx`；
 - `runtime/wirecap → config, provider`；
@@ -562,6 +565,18 @@ route derivation、catalog 加载（`internal/config`）与 source 标记
 （`internal/routing.HydrateModels`）由本包的 `ModelFactsFor` 计算并注入
 `RunTakeover`（调用方传入 HOME seam 以定位 catalog 缓存），包内不读取
 应用运行时。
+
+`internal/upstreamproxy` 拥有全部出站调用的上游代理策略：解析链
+`providers.<name>.proxy_url → 顶层 proxy → HTTPS_PROXY/HTTP_PROXY(+NO_PROXY) 环境变量
+→ OS 系统代理 → 直连`，`off`/`direct` 在该级强制直连并终止回落；支持
+http/https/socks5 URL；自动来源（env NO_PROXY / 系统代理）对 loopback 恒绕过，显式配置的
+代理 URL 对 loopback 同样生效；PAC/WPAD 不解析。系统代理
+每进程探测一次（`Resolver` 内 sync.Once，改动需重启）；macOS 读 `scutil --proxy`、
+Windows 读注册表 Internet Settings、Linux best-effort 读 gsettings。转发/fusion/
+shadow 流量由 app 的 `Proxy.clientFor` 按请求快照解析、按生效代理身份池化
+transport（`internal/app/proxy_transport.go`）；usage/quota/login/pricing 等维护类
+调用走 `AutoTransport()`（config 全局值经 `SetDefaultProxy` 由组合根在启动/reload
+发布），不做 per-provider 区分。
 
 `internal/archtest` 是架构契约测试的 owner：纯测试包、仓内零依赖，经 `repoRoot`
 （`runtime.Caller` 定位模块根）以模块根相对路径扫描全仓生产文件。其中的

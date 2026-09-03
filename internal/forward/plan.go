@@ -68,10 +68,12 @@ func PlanTarget(svc Services, input PlanInput) (targetexec.Plan, error) {
 // targetExecutor assembles the per-attempt executor. parentOf is the request
 // snapshot's pool-virtual→parent projection (Snapshot.ParentOf): it is
 // threaded into the health gate so the wire-verdict 404 correction stays on
-// the request's own generation (single-snapshot red line).
-func (p pipeline) targetExecutor(runtime targetexec.Runtime, parentOf map[string]string) targetexec.Executor {
+// the request's own generation (single-snapshot red line). cfg is the same
+// snapshot's config: the per-target client resolution (proxy chain) must read
+// it from here, never from reload-owned state.
+func (p pipeline) targetExecutor(runtime targetexec.Runtime, cfg *Config, parentOf map[string]string, provider string) targetexec.Executor {
 	return targetexec.Executor{
-		Client: p.svc.Client,
+		Client: p.clientFor(cfg, parentOf, provider),
 		State: targetexec.GateState{
 			Gate:       p.svc.NewHealthGate(parentOf),
 			Runtime:    runtime,

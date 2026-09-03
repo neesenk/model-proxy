@@ -249,7 +249,7 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 	// Executor. Effect recording (circuit/metrics/rate-limit) stays here.
 	exchange := &targetexec.BufferedLegExchange{}
 	legStatus, respBody, err := targetexec.BufferedLeg{
-		Client:  p.svc.Client,
+		Client:  p.clientFor(fc.runtime.Cfg, fc.runtime.ParentOf, m.Provider),
 		Plan:    plan,
 		MaxBody: 64 << 20,
 		ApplyParamBlock: func(body []byte) []byte {
@@ -478,5 +478,5 @@ func (p pipeline) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byt
 		},
 		targetexec.Policy{LastTarget: true},
 	)
-	return p.targetExecutor(attempt.Runtime(), fc.runtime.ParentOf).Execute(attempt).Committed
+	return p.targetExecutor(attempt.Runtime(), fc.runtime.Cfg, fc.runtime.ParentOf, plan.Target().Provider).Execute(attempt).Committed
 }

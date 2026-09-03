@@ -123,9 +123,14 @@ func (permit *Permit) Release() {
 // Job is the root-prepared input to one detached Shadow execution. Body is the
 // primary attempt's committed upstream body; Execute never mutates it.
 type Job struct {
-	Plan         targetexec.Plan
-	Body         []byte
-	CalledModel  string
+	Plan        targetexec.Plan
+	Body        []byte
+	CalledModel string
+	// Client optionally overrides the runtime default client. internal/app
+	// sets it so the shadow request follows the shadow provider's proxy chain
+	// (providers.<name>.proxy_url → global proxy → env → system) with shadow's
+	// own timeout budget. Nil keeps the runtime default.
+	Client       *http.Client
 	MaxBodyBytes int
 }
 
@@ -198,7 +203,11 @@ func (runtime *Runtime) Execute(ctx context.Context, job Job) Result {
 
 	result.Request = req
 	result.Started = time.Now()
-	response, err := runtime.client.Do(req)
+	client := runtime.client
+	if job.Client != nil {
+		client = job.Client
+	}
+	response, err := client.Do(req)
 	result.Response = response
 	if err != nil {
 		result.Err = err

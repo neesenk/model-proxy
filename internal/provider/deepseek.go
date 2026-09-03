@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"model-proxy/internal/display"
+	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"strconv"
 	"time"
@@ -73,7 +74,7 @@ func (p *DeepSeekProvider) Quota() (*QuotaSnapshot, error) {
 	if err := p.AuthHeaders(req); err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}

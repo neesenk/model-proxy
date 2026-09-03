@@ -13,6 +13,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/probe"
 	"model-proxy/internal/routing"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // CmdTest implements `model-proxy test <model>`: probe each route target once.
@@ -38,7 +39,7 @@ func CmdTest(args []string) {
 		fmt.Fprintf(os.Stderr, "%s no route for model %q; available routes: %s\n", display.Red("✗"), model, cfg.RouteNames())
 		os.Exit(1)
 	}
-	client := &http.Client{Timeout: cfg.Scheduling.Timeout()}
+	client := &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()}
 	anyOK := false
 	for _, t := range targets {
 		ok, status, reason, latency := probeRouteTarget(client, cfg, t)

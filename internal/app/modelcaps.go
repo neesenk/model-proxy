@@ -25,6 +25,7 @@ import (
 	"model-proxy/internal/provider"
 	"model-proxy/internal/providerbuild"
 	runtimewire "model-proxy/internal/runtime/wirecap"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // protocolFingerprints computes every configured provider's protocol-relevant
@@ -82,7 +83,7 @@ func (p *Proxy) probeAllModelCaps() {
 	derived := p.derivedRoutes
 	p.mu.RUnlock()
 
-	client := &http.Client{Timeout: wireCapProbeTimeout}
+	client := &http.Client{Timeout: wireCapProbeTimeout, Transport: upstreamproxy.AutoTransport()}
 	sem := make(chan struct{}, wireCapProbeConcurrency)
 	var wg sync.WaitGroup
 	probed := false

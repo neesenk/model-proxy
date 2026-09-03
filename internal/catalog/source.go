@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"model-proxy/internal/upstreamproxy"
 )
 
 const (
@@ -39,7 +41,7 @@ func FetchHTTP(endpoint, etag string) (int, []byte, string, error) {
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 10 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return 0, nil, "", err
 	}

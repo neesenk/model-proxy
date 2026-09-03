@@ -24,6 +24,7 @@ import (
 	runtimestate "model-proxy/internal/runtime"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 	"model-proxy/internal/shadow"
+	"model-proxy/internal/upstreamproxy"
 	"model-proxy/internal/webauth"
 	"net/http"
 	"os"
@@ -91,6 +92,13 @@ type processServices struct {
 	catalog        *catalog.Catalog              // models.dev metadata (context window + modalities) for request-aware routing; survives reload; refreshed async best-effort; nil = unavailable, degrade gracefully
 	budget         *budget.Watcher               // monthly cost alert loop; nil unless budgets: configures a threshold
 
+	// Upstream proxy resolution (internal/upstreamproxy): the resolver caches
+	// OS system-proxy detection once per process; the transport pool is keyed
+	// by effective proxy identity and survives reload like the default client.
+	proxyResolver *upstreamproxy.Resolver
+	transportsMu  sync.Mutex
+	transports    map[string]*http.Transport
+
 	// Runtime wire capabilities have their own leaf Store. The Store never
 	// calls back into Proxy while locked and survives reload generations.
 	wireCaps  runtimewire.Store
@@ -147,6 +155,10 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	if note := accounts.CredentialMismatchNote(cfg.Credentials); note != "" {
 		logx.Warnf("[startup] ⚠ %s", note)
 	}
+	// Publish the config-level global proxy for the automatic chain
+	// (env → system → direct) used by non-forwarding outbound calls
+	// (usage/quota/login/pricing). Reload re-publishes it per generation.
+	upstreamproxy.SetDefaultProxy(cfg.Proxy)
 	built := providerbuild.BuildProviders(cfg, accounts.NewStore(accounts.HomeDir()), providerbuild.BuildOpts())
 	// Same scanner entry point as Reload: startup and reload build identical
 	// generations. An error is only reachable with an unvalidated Config
@@ -187,8 +199,10 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 			parentOf:  built.ParentOf,
 		},
 		processServices: processServices{
-			lifecycle: runtimestate.NewLifecycle(),
-			client:    &http.Client{Timeout: 0, Transport: transport},
+			lifecycle:     runtimestate.NewLifecycle(),
+			client:        &http.Client{Timeout: 0, Transport: transport},
+			proxyResolver: upstreamproxy.NewResolver(),
+			transports:    map[string]*http.Transport{},
 		},
 		// Read once here (not per request): MP_PPROF=1 turns on /debug/pprof/.
 		pprofEnabled: os.Getenv("MP_PPROF") == "1",

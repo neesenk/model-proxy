@@ -10,6 +10,18 @@ log_level: info            # debug | info | warn | error
 # Uncomment to override:
 # log_file: /var/log/model-proxy/model-proxy.log
 
+# Upstream proxy. Resolution chain per request: providers.<name>.proxy_url ->
+# this global setting -> HTTPS_PROXY/HTTP_PROXY env (+ NO_PROXY) -> OS system
+# proxy -> direct. Value: http/https/socks5 URL (userinfo allowed), or 'off'
+# to force direct and stop the chain. Auto-detected sources (env NO_PROXY /
+# system proxy) bypass loopback destinations; an explicitly configured proxy
+# URL applies to loopback too (e.g. a local debugging proxy). The OS system
+# proxy is detected once per process
+# (restart after changing it); PAC/WPAD is not evaluated. Account-maintenance
+# calls (usage/quota/login) follow this global chain only — a provider's
+# proxy_url applies to its forwarded traffic (forward/fusion/shadow).
+# proxy: http://127.0.0.1:7890
+
 # credentials: file         # file (default) | keychain — where credential secret
 #                           # VALUES live, for BOTH apikey pools and codex/aqp OAuth
 #                           # stores. keychain moves api_key/access_key/secret_key
@@ -29,6 +41,8 @@ log_level: info            # debug | info | warn | error
 
 # Providers — upstream backends. Token files are auto-managed by login/logout
 # at ~/.model-proxy/<provider_name>_<suffix>.json (no config needed).
+# Optional per-provider upstream proxy: 'proxy_url: http://...' (or 'off')
+# overrides the global proxy chain for that provider's forwarded traffic.
 providers:
   aqp:
     openai_base_url: https://compass.llm.shopee.io/compass-api/v1

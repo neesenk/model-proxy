@@ -146,6 +146,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"stats": true, "flusher": true, "reqLog": true, "reqLogStarted": true,
 			"sessionScan": true, "responsesState": true, "events": true,
 			"fusionReg": true, "catalog": true, "budget": true,
+			"proxyResolver": true, "transports": true, "transportsMu": true,
 			"wireCaps": true, "wireProbe": true,
 			"modelCaps": true, "modelCapsPath": true,
 		}

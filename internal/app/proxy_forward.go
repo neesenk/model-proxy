@@ -29,6 +29,7 @@ func (p *Proxy) forward(proto string, w http.ResponseWriter, r *http.Request, re
 func (p *Proxy) forwardServices() forward.Services {
 	return forward.Services{
 		Client:         p.client,
+		ClientFor:      p.clientFor,
 		Metrics:        p.metrics,
 		Tokens:         p.tokens,
 		Agents:         p.agents,

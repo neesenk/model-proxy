@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"model-proxy/internal/provider"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // Core of AQP SSO: a single cookie jar carried across the whole login flow. Both the
@@ -54,7 +55,7 @@ type AqpClient struct {
 func NewAqpClient(storePath string) *AqpClient {
 	jar, _ := cookiejar.New(nil)
 	return &AqpClient{
-		HTTP:      &http.Client{Timeout: 30 * time.Second, Jar: jar},
+		HTTP:      &http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport(), Jar: jar},
 		Jar:       jar,
 		StorePath: storePath,
 		Base:      provider.AqpBase,

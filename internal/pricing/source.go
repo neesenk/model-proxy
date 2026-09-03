@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,7 +34,7 @@ func FetchHTTP(endpoint, etag string) (int, []byte, string, error) {
 	if etag != "" {
 		request.Header.Set("If-None-Match", etag)
 	}
-	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	response, err := (&http.Client{Timeout: 10 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(request)
 	if err != nil {
 		return 0, nil, "", err
 	}

@@ -22,7 +22,7 @@ import (
 // (config, providers, routes, cache, guard) never appear here — they ride the
 // per-request Snapshot.
 type Services struct {
-	Client         targetexec.Doer               // upstream HTTP client
+	Client         targetexec.Doer               // upstream HTTP client (default / fallback)
 	Metrics        *counters.MetricsStore        // request counters; nil only in degenerate setups
 	Tokens         *counters.TokenCounter        // SSE-scanned token usage; nil only in degenerate setups
 	Agents         *counters.AgentCounter        // per-agent (UA) counters; nil only in degenerate setups
@@ -31,6 +31,11 @@ type Services struct {
 	ResponsesState *protocol.ResponsesStateStore // previous_response_id replay; nil = off
 	FusionReg      *fusion.Registry              // fusion orchestration observability
 	ReqLog         *requestlog.Logger            // per-request access log; nil = disabled
+
+	// ClientFor resolves the upstream client for one route target from the
+	// request snapshot's config (app: Proxy.clientFor — per-provider proxy_url
+	// → global proxy → env → system → direct). Nil falls back to Client.
+	ClientFor func(cfg *Config, parentOf map[string]string, provider string) targetexec.Doer
 
 	// NewHealthGate binds the app-owned health/circuit adapter
 	// (targetexec.HealthGate) to the request snapshot's pool-virtual→parent
@@ -91,6 +96,17 @@ type pipeline struct {
 // schedule delegates to the injected scheduler port.
 func (p pipeline) schedule(cfg *Config, parentOf map[string]string, exposed, sessionKey string, targets []RouteTarget, routeKeys map[string]bool, generation uint64) []RouteTarget {
 	return p.svc.Schedule(cfg, parentOf, exposed, sessionKey, targets, routeKeys, generation)
+}
+
+// clientFor resolves the per-target upstream client, falling back to the
+// bundle-wide default when no resolver is installed.
+func (p pipeline) clientFor(cfg *Config, parentOf map[string]string, provider string) targetexec.Doer {
+	if p.svc.ClientFor != nil {
+		if client := p.svc.ClientFor(cfg, parentOf, provider); client != nil {
+			return client
+		}
+	}
+	return p.svc.Client
 }
 
 // pinForces reports whether an active pin for `exposed` is in effect over the

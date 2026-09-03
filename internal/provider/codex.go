@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"model-proxy/internal/display"
+	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"strings"
 	"time"
@@ -62,7 +63,7 @@ func (p *CodexProvider) Quota() (*QuotaSnapshot, error) {
 	if err := p.AuthHeaders(req); err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return &QuotaSnapshot{Billing: BillingUnknown, Err: err.Error()}, nil
 	}
@@ -117,7 +118,7 @@ func (p *CodexProvider) FetchModels() ([]string, error) {
 	if err := p.AuthHeaders(req); err != nil {
 		return nil, fmt.Errorf("codex models auth: %w", err)
 	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 10 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch codex models: %w", err)
 	}

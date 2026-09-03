@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"model-proxy/internal/observe/logx"
+	"net/http"
 	"time"
 
 	"model-proxy/internal/observe/requestlog"
@@ -142,9 +143,12 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		}
 	}()
 	result := shadowRuntime.Execute(ctx, shadowexec.Job{
-		Plan:         plan,
-		Body:         reqBody,
-		CalledModel:  calledModel,
+		Plan:        plan,
+		Body:        reqBody,
+		CalledModel: calledModel,
+		// Per-provider proxy: same resolution chain as the live pipeline, but
+		// with shadow's own timeout budget (the pooled clients run Timeout 0).
+		Client:       &http.Client{Transport: p.transportFor(runtime.Cfg, runtime.ParentOf, target.Provider), Timeout: runtime.Cfg.Scheduling.Timeout()},
 		MaxBodyBytes: logger.MaxBodyBytes(),
 	})
 	if result.Err != nil {

@@ -10,6 +10,18 @@ log_level: info # debug | info | warn | error
 # anything larger is rejected with 413 before routing. Default 64 MiB:
 # max_request_body_bytes: 67108864
 
+# Upstream proxy. Resolution chain per request: providers.<name>.proxy_url ->
+# this global setting -> HTTPS_PROXY/HTTP_PROXY env (+ NO_PROXY) -> OS system
+# proxy -> direct. Value: http/https/socks5 URL (userinfo allowed), or `off`
+# to force direct and stop the chain. Auto-detected sources (env NO_PROXY /
+# system proxy) bypass loopback destinations; an explicitly configured proxy
+# URL applies to loopback too (e.g. a local debugging proxy). The OS system
+# proxy is detected once per process
+# (restart after changing it); PAC/WPAD is not evaluated. Account-maintenance
+# calls (usage/quota/login) follow this global chain only — a provider's
+# proxy_url applies to its forwarded traffic (forward/fusion/shadow).
+# proxy: http://127.0.0.1:7890
+
 # Protocol conversion. strict_lossy (default false) refuses lossy-but-degradable
 # request conversions: the converting target is skipped (capability-scanner
 # semantics) and a route with no non-lossy target answers 400 instead of
@@ -27,6 +39,8 @@ log_level: info # debug | info | warn | error
 # per-account virtual providers; Claude Code conversations are spread across
 # them (session-sticky) while staying cache-warm within a conversation. No
 # config change needed — just `login` again. aqp/codex stay single-account.
+# Optional per-provider upstream proxy: `proxy_url: http://...` (or `off`)
+# overrides the global proxy chain for that provider's forwarded traffic.
 providers:
   aqp:
     provider_id: aqp

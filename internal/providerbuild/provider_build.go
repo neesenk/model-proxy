@@ -22,6 +22,7 @@ import (
 	"model-proxy/internal/accounts"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // BuildProviders creates provider.Provider instances from config. Each provider
@@ -353,7 +354,7 @@ func ListArkAgentPlanModelIDs(provName string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("ListArkAgentPlanModel: %w", err)
 	}

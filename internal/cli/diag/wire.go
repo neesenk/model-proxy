@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"model-proxy/internal/provider"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // wireRecordTimeout caps one recording request.
@@ -137,7 +138,7 @@ func RunWireRecord(provName, model, prompt, outDir string, cfg *configdomain.Con
 		endpoint{"anthropic", "_thinking", anthropicBase, "/v1/messages", []byte(`{"model":` + qm + `,"max_tokens":2048,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":` + qp + `}],"stream":true}`)},
 	)
 
-	client := &http.Client{Timeout: wireRecordTimeout}
+	client := &http.Client{Timeout: wireRecordTimeout, Transport: upstreamproxy.AutoTransport()}
 	failed := 0
 	for _, ep := range endpoints {
 		if ep.baseURL == "" {

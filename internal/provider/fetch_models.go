@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"model-proxy/internal/upstreamproxy"
 	"net/http"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ func fetchModelsBearer(cfg *Config, auth func(*http.Request) error) ([]string, e
 	if err := auth(req); err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch models: %w", err)
 	}

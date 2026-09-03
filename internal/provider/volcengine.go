@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"model-proxy/internal/credstore"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // VolcengineProvider implements the Volcengine Ark (火山方舟) provider, including
@@ -198,7 +199,7 @@ func getAFPUsage(ak, sk string) (*AfpUsage, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GetAFPUsage: %w", err)
 	}

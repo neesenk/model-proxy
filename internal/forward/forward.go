@@ -754,7 +754,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				ContextRetry: ctxRetry,
 			},
 		)
-		result := p.targetExecutor(attempt.Runtime(), runtime.ParentOf).Execute(attempt)
+		result := p.targetExecutor(attempt.Runtime(), runtime.Cfg, runtime.ParentOf, t.Provider).Execute(attempt)
 		res.tried[t.Provider] = true
 		switch result.Outcome {
 		case targetexec.OutcomeFailedHard:

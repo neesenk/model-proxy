@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"model-proxy/internal/provider"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // codex OAuth device flow (independent tokens, not shared with codex CLI).
@@ -51,7 +52,7 @@ func (o *CodexLoginServerOptions) Defaults() {
 		o.TokenURL = provider.CodexOAuthTokenURL
 	}
 	if o.HTTPClient == nil {
-		o.HTTPClient = &http.Client{Timeout: 30 * time.Second}
+		o.HTTPClient = &http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
 	"model-proxy/internal/shadow"
+	"model-proxy/internal/upstreamproxy"
 	"time"
 )
 
@@ -84,6 +85,9 @@ func (p *Proxy) Reload(configPath string) error {
 	}))
 	p.runtimeState.ReplaceGeneration(generation)
 	p.mu.Unlock()
+	// Re-publish the config-level global proxy for the automatic chain used by
+	// non-forwarding outbound calls (see NewProxyWithStatePath).
+	upstreamproxy.SetDefaultProxy(cfg.Proxy)
 	for _, w := range hw {
 		logx.Warnf("[reload] ⚠ %s", w)
 	}

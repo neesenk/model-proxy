@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"model-proxy/internal/credstore"
+	"model-proxy/internal/upstreamproxy"
 )
 
 // auth.go holds the provider-owned auth injectors (aqp key minting, codex OAuth,
@@ -129,7 +130,7 @@ func (p *AqpKeyProvider) keyLocked() (string, error) {
 	req.Header.Set("content-type", "application/json")
 	// sso_session_cookie value already includes the SSO_C= prefix; use it as the whole Cookie header.
 	req.Header.Set("Cookie", cookie)
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("mint aqp key: %w", err)
@@ -394,7 +395,7 @@ func (p *CodexOAuthProvider) refreshLocked(af *CodexAuthFile) error {
 	}
 	req, _ := http.NewRequest(http.MethodPost, u, strings.NewReader(body))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second, Transport: upstreamproxy.AutoTransport()}).Do(req)
 	if err != nil {
 		return fmt.Errorf("codex oauth refresh: %w", err)
 	}
