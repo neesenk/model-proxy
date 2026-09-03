@@ -6,9 +6,10 @@ package diag
 // wire_record_cmd.go implements `model-proxy wire record <provider>`: capture
 // RAW upstream SSE streams (responses/chat/anthropic) into testdata/wire/ as
 // <proto>_<provider>.sse, for the golden-replay tests in internal/protocol.
-// One minimal stream=true request per endpoint, built with the provider's own
-// call rules (RewriteRequest → AuthHeaders → prov.Headers → ExtraHeaders, same
-// order as probeModelCallable). Credentials come from `login` — never from
+// One minimal stream=true request per endpoint, built through the shared
+// probe engine (probe.Do: RewriteRequest → AuthHeaders → prov.Headers →
+// ExtraHeaders, with Accept: text/event-stream and a full-body read).
+// Credentials come from `login` — never from
 // flags, and the recorded files contain no auth material (response bytes only;
 // still review prompts before committing recordings).
 //
@@ -18,13 +19,13 @@ package diag
 // excerpt) and never overwrites an existing good .sse file.
 
 import (
-	"bytes"
+	"context"
 	"flag"
 	"fmt"
-	"io"
 	climodels "model-proxy/internal/cli/models"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/display"
+	"model-proxy/internal/probe"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -85,7 +86,7 @@ func RunWireRecord(provName, model, prompt, outDir string, cfg *configdomain.Con
 	}
 	m := model
 	if m == "" {
-		m = wireProbeModelLocal(cfg, nil, provName)
+		m = probe.PickModel(cfg, nil, provName)
 	}
 	if m == "" {
 		return fmt.Errorf("no model for provider %q (pass --model)", provName)
@@ -154,51 +155,37 @@ func RunWireRecord(provName, model, prompt, outDir string, cfg *configdomain.Con
 	return nil
 }
 
-// recordEndpoint streams one minimal request and writes the raw response to
-// <out>/<proto>_<provider><scenario>.sse (or .err on non-2xx, without touching
-// an existing .sse). The golden replay keys the source protocol off the first
-// "_" segment, so proto stays the prefix and scenario the suffix.
+// recordEndpoint streams one minimal request (via the shared probe engine)
+// and writes the raw response to <out>/<proto>_<provider><scenario>.sse (or
+// .err on non-2xx, without touching an existing .sse). The golden replay keys
+// the source protocol off the first "_" segment, so proto stays the prefix
+// and scenario the suffix.
 func RecordEndpoint(client *http.Client, provCfg configdomain.Provider, impl provider.Provider, proto, scenario, baseURL, path string, body []byte, provName, outDir string) error {
-	targetURL := strings.TrimRight(baseURL, "/") + path
-	targetURL, body = impl.RewriteRequest(targetURL, body, path)
-	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+	rep, err := probe.Do(context.Background(), client, provCfg, impl, probe.Request{
+		BaseURL: baseURL,
+		Path:    path,
+		Body:    body,
+		Accept:  "text/event-stream",
+		// .sse recordings must be complete — read the full stream, not the
+		// default 16KB probe cap.
+		BodyLimit: 64 << 20,
+	})
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	if path == "/v1/messages" {
-		req.Header.Set("anthropic-version", "2023-06-01")
-	}
-	if err := impl.AuthHeaders(req); err != nil {
-		return fmt.Errorf("auth: %w", err)
-	}
-	for k, v := range provCfg.Headers {
-		req.Header.Set(k, v)
-	}
-	impl.ExtraHeaders(req, path)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
+	raw := rep.Body
 
 	stem := filepath.Join(outDir, proto+"_"+provName+scenario)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if rep.Status < 200 || rep.Status >= 300 {
 		excerpt := raw
 		if len(excerpt) > 1<<12 {
 			excerpt = excerpt[:1<<12]
 		}
 		errFile := stem + ".err"
-		if err := os.WriteFile(errFile, []byte(fmt.Sprintf("status: %d\n\n%s", resp.StatusCode, excerpt)), 0o600); err != nil {
+		if err := os.WriteFile(errFile, []byte(fmt.Sprintf("status: %d\n\n%s", rep.Status, excerpt)), 0o600); err != nil {
 			return err
 		}
-		return fmt.Errorf("HTTP %d — wrote %s (existing .sse untouched)", resp.StatusCode, errFile)
+		return fmt.Errorf("HTTP %d — wrote %s (existing .sse untouched)", rep.Status, errFile)
 	}
 	sseFile := stem + ".sse"
 	if err := os.WriteFile(sseFile, raw, 0o600); err != nil {
@@ -248,28 +235,4 @@ func StripGlobalFlags(args []string) []string {
 		out = append(out, a)
 	}
 	return out
-}
-
-// wireProbeModelLocal picks the model id used in probe bodies: the provider's
-// first configured model, else the first route target pointing at it, else a
-// derived route target for it (same rule as the wirecap package).
-func wireProbeModelLocal(cfg *configdomain.Config, derived map[string][]configdomain.RouteTarget, provName string) string {
-	if ms := cfg.Providers[provName].Models; len(ms) > 0 {
-		return ms[0]
-	}
-	for _, targets := range cfg.Routes {
-		for _, t := range targets {
-			if t.Provider == provName {
-				return t.Model
-			}
-		}
-	}
-	for _, targets := range derived {
-		for _, t := range targets {
-			if t.Provider == provName {
-				return t.Model
-			}
-		}
-	}
-	return ""
 }

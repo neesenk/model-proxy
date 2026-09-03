@@ -7,7 +7,7 @@ route、流式转换或工具调用映射时必读。
 
 ## 边界
 
-目标未声明 `protocol:` 时，上游协议按 `(*Proxy).resolvedBackendProto` 解析：显式 `protocol:` > `ProtocolHint`（codex→responses）> wire 探测 verdict（`internal/app/wirecap.go`，boot/reload 时探测 `/responses` 与 `/v1/messages`）> 客户端协议透传。只有解析出的后端协议与客户端不同，才启用转换；verdict unknown 时维持透传（boot 窗口期行为不变），verdict 说 `/responses` 不存在时 anthropic/responses 客户端自动转 chat。
+目标未声明 `protocol:` 时，上游协议按 `(*Proxy).resolvedBackendProto` 解析：显式 `protocol:` > `ProtocolHint`（codex→responses）> 模型级协议矩阵 > provider 级 wire 探测 verdict（`internal/app/wirecap.go`，boot/reload 时在 openai base 上探测 `/chat/completions` 与 `/responses`；anthropic 支持由 `anthropic_base_url` 声明，不探测）> 客户端协议透传。完整两级决策矩阵与探测分类见 `routing-and-failure.md`。只有解析出的后端协议与客户端不同，才启用转换；verdict unknown 时维持透传（boot 窗口期行为不变），verdict 说 `/responses` 不存在时 anthropic/responses 客户端自动转 chat。
 
 三个协议值：
 

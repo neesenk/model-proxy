@@ -118,6 +118,30 @@ type ConfigDocument struct {
 	Routes         map[string][]ConfigRouteTarget `json:"routes"`
 }
 
+// ModelProtocols is one model's three-protocol probe verdict matrix, with each
+// leg as the stable verdict string ("yes"/"no"/"unknown").
+type ModelProtocols struct {
+	Chat      string `json:"chat"`
+	Anthropic string `json:"anthropic"`
+	Responses string `json:"responses"`
+}
+
+// ProviderModelCaps is one provider's probed model-capability projection for
+// GET /api/models. Fingerprint invalidates the whole entry on protocol-relevant
+// config change; ProbedAt is the provider's latest probe/correction time.
+type ProviderModelCaps struct {
+	Fingerprint string                    `json:"fingerprint"`
+	ProbedAt    time.Time                 `json:"probed_at"`
+	Models      map[string]ModelProtocols `json:"models"`
+}
+
+// ModelsDocument is the transport projection for GET /api/models: the startup
+// protocol probe's verdicts per provider and model. Providers with no probe
+// data are omitted; an empty store projects `{"providers":{}}`.
+type ModelsDocument struct {
+	Providers map[string]ProviderModelCaps `json:"providers"`
+}
+
 // StatsQuery is the normalized query passed through the read port.
 type StatsQuery struct {
 	From       int64
@@ -278,6 +302,9 @@ type ReadAPI interface {
 	Pins() []Pin
 	Security(SecurityQuery) (SecurityResult, error)
 	ConfigDocument() (ConfigDocument, error)
+	// ModelsDocument projects the startup protocol probe's per-provider model
+	// capability matrix (internal/runtime/wirecap ModelStore snapshot).
+	ModelsDocument() ModelsDocument
 	// Presets lists the provider preset catalog (internal/presets) for the
 	// web Add-Provider wizard.
 	Presets() []presets.Preset

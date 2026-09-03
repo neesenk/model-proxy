@@ -340,8 +340,8 @@ func TestCallFusionLegFailureClasses(t *testing.T) {
 		if res.Err == nil || res.Status != 404 {
 			t.Fatalf("res = %+v, want the 404 leg failure", res)
 		}
-		if len(h.gate.wireMisses) != 1 || h.gate.wireMisses[0] != "p" {
-			t.Errorf("wire misses = %v, want [p]", h.gate.wireMisses)
+		if len(h.gate.wireMisses) != 1 || h.gate.wireMisses[0] != "p/mm" {
+			t.Errorf("wire misses = %v, want [p/mm]", h.gate.wireMisses)
 		}
 		if h.gate.modelFailures["p/mm"] != 0 {
 			t.Errorf("model failures = %d, want 0 (verdict wrong, not model)", h.gate.modelFailures["p/mm"])

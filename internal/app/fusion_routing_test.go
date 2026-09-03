@@ -521,7 +521,7 @@ func TestFusionLeg_WireVerdict404Correction(t *testing.T) {
 	for _, name := range []string{"pa", "pb", "ps"} {
 		proxy.providers[name] = &testProv{key: name}
 	}
-	proxy.setWireCaps("pa", wireCaps{BaseURL: pa.srv.URL, Responses: triYes, Anthropic: triUnknown, ProbedAt: time.Now()})
+	proxy.setWireCaps("pa", wireCaps{BaseURL: pa.srv.URL, Responses: triYes, Chat: triUnknown, ProbedAt: time.Now()})
 	px := httptest.NewServer(http.HandlerFunc(proxy.Handler))
 	defer px.Close()
 

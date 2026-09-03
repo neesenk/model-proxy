@@ -47,7 +47,8 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 - model locks；
 - model-scoped paramBlock；
 - config fingerprint；
-- 顶层 `wire_caps`：wire 探测 verdict（`{base_url, responses, anthropic, probed_at}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在且记录的 `base_url` 与当前 config 一致，不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——forward 不持 `p.mu` 转发，但 persist 经 fullSnapshot 取 `p.mu.RLock`，同步调用会排在 pending reload writer 之后阻塞请求路径，故一律异步）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `Proxy.mu → runtime.Manager` 锁序。
+- 顶层 `wire_caps`：provider 级 wire 探测 verdict（`{base_url, chat, responses, probed_at}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘；旧版 `anthropic` 字段已随「anthropic 支持改由 config `anthropic_base_url` 声明」移除，旧文件里的该字段读取时忽略），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在且记录的 `base_url` 与当前 config 一致，不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——forward 不持 `p.mu` 转发，但 persist 经 fullSnapshot 取 `p.mu.RLock`，同步调用会排在 pending reload writer 之后阻塞请求路径，故一律异步）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `Proxy.mu → runtime.Manager` 锁序。
+- 独立文件 `model_caps.json`（quota_state.json 的 sibling，路径经 `runtimewire.ModelCapsPath(qpath)` 派生）：模型级三协议矩阵（`{version:1, providers:{<name>:{fingerprint, probed_at, models:{<id>:{chat, anthropic, responses}}}}}`，三态同 `wire_caps` 字符串）。与 `wire_caps` 同文件共存不同，模型级能力有自己的文件生命周期；原子写沿用 quota 模式（同目录唯一临时文件 + fsync + rename，目录 0700、文件 0644）。**失效只按 fingerprint，无 TTL**：fingerprint = `providerbuild.ProtocolConfigFingerprint`（provider_id|openai_base_url|anthropic_base_url|sorted(headers) 的 sha256 前 16 hex），boot 只恢复 fingerprint 仍匹配当前 config 的条目，provider 从 config 删除即丢；结论为 unknown 的腿下一轮探测 pass 重探。探测完成与模型级 404 纠正时 async persist（quota-tracked goroutine，死锁理由同上）。并发 map 归 `internal/runtime/wirecap.ModelStore`（leaf RWMutex、nil-safe，与 Store 同纪律；跨 reload 存活，不进 `Proxy.mu → runtime.Manager` 锁序）。CLI `models` 列表/refresh 表对它做**只读**投影（fingerprint 必须匹配当前 config；文件缺失/畸形静默降级为无数据，PROTOCOLS 列显示 `-`）。
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 
@@ -140,7 +141,7 @@ Proxy.mu → runtime.Manager
 ```
 
 Manager 内部只有一把状态锁，不存在 health/quota 的嵌套锁。Manager 持锁时不得
-回调 Proxy、quota tracker、wirecap Store 或外部 I/O；持久化和 Web 先取得 atomic
+回调 Proxy、quota tracker、wirecap Store/ModelStore 或外部 I/O；持久化和 Web 先取得 atomic
 detached snapshot，再在锁外完成 JSON、文件或响应编码。
 
 ## 调度分

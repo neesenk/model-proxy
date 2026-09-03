@@ -186,11 +186,23 @@ SQLite 写锁测试必须证明 Store 的短 busy timeout 将单次锁等待限�
 HTTP 测试必须覆盖筛选参数接线、nil Store 空数组与 Store 错误 500，CLI
 `--json` 必须断言响应 body 字节级透传。
 
-wire capability 的 verdict JSON、freshness、HTTP status 分类、协议选择矩阵、
-detached snapshot、404 纠正和按当前 provider/base URL 恢复的纯测试归
-`internal/runtime/wirecap/*_test.go`；根包只保留真实 HTTP probe、认证/header、
-boot/reload、forward 协议选择、runtime 404 纠正与持久化 round trip。恢复测试
-必须覆盖“未知 parent + 空 base URL”不得被缺省 map lookup 误接纳。
+探测执行的纯测试归 `internal/probe/*_test.go`：`Do` 的请求构造配方
+（Accept/BodyLimit、`/v1/messages` 的 anthropic-version 预置）、
+max_completion_tokens 改名重试、`ProbeModelProtocols` 的三腿 base/body 规则
+（未配置 base 的腿不探、impl 方言 body 优先、按腿重试）与 `PickModel` 的
+选取顺序。wire capability 的 verdict JSON、freshness、provider 级与模型级
+HTTP status 分类（`ClassifyStatus`/`ClassifyModelStatus` 表驱动）、两级协议
+选择矩阵（`Resolve`/`ResolveModel`）、detached snapshot、404 纠正、按当前
+provider/base URL 恢复，以及 ModelStore 与 model_caps.json 文件 round trip
+的纯测试归 `internal/runtime/wirecap/*_test.go`（store_test.go、
+modelstore_test.go）；`internal/app` 保留真实 HTTP probe、认证/header、
+boot/reload 探测 pass（wirecap_test.go、modelcaps_test.go，含 fingerprint
+变更重探、unknown 腿重探、ProtocolHint 合成矩阵）、forward 的两级协议选择、
+runtime 404 纠正（provider 级与模型粒度）与持久化 round trip 的集成测试。
+恢复测试必须覆盖“未知 parent + 空 base URL”不得被缺省 map lookup 误接纳。
+CLI 侧的矩阵探测保留/丢弃判定、PROTOCOLS 列渲染与 model_caps.json 只读
+投影（fingerprint 门控、畸形文件静默降级）测试归
+`internal/cli/models/*_test.go`。
 
 generation-scoped health、sticky、pin、model lock、paramBlock、spread、quota、
 schedule、persist/dashboard snapshot 的纯状态机测试归

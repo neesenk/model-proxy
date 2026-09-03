@@ -56,7 +56,7 @@ func (g proxyHealthGate) LearnParamBlock(provider, model, parameter string, gene
 func (g proxyHealthGate) ApplyParamBlock(provider, model string, body []byte) []byte {
 	return g.proxy.applyParamBlock(provider, model, body)
 }
-func (g proxyHealthGate) NoteWireResponsesMiss(provider string) {
+func (g proxyHealthGate) NoteWireResponsesMiss(provider, model string) {
 	// Resolve the pool parent from the REQUEST SNAPSHOT projection (nil-safe),
 	// not from live p.parentOf: a pre-reload in-flight request must record the
 	// verdict under its own generation's parent name.
@@ -64,7 +64,7 @@ func (g proxyHealthGate) NoteWireResponsesMiss(provider string) {
 	if par, ok := g.parentOf[provider]; ok {
 		parent = par
 	}
-	g.proxy.noteWireResponsesMiss(parent)
+	g.proxy.noteWireResponsesMiss(parent, model)
 }
 
 // targetExecutionEffects maps semantic target-execution observations to the

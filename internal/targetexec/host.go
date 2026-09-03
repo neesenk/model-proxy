@@ -19,7 +19,7 @@ type HealthGate interface {
 	RecordRateLimit(provider string, until time.Time, kind string, generation uint64)
 	LearnParamBlock(provider, model, parameter string, generation uint64) bool
 	ApplyParamBlock(provider, model string, body []byte) []byte
-	NoteWireResponsesMiss(provider string)
+	NoteWireResponsesMiss(provider, model string)
 }
 
 // GateState adapts a HealthGate to the executor State port, freezing the
@@ -68,6 +68,6 @@ func (state GateState) ApplyParamBlock(target configdomain.RouteTarget, body []b
 	return state.Gate.ApplyParamBlock(target.Provider, target.Model, body)
 }
 
-func (state GateState) NoteWireResponsesMiss(provider string) {
-	state.Gate.NoteWireResponsesMiss(provider)
+func (state GateState) NoteWireResponsesMiss(target configdomain.RouteTarget) {
+	state.Gate.NoteWireResponsesMiss(target.Provider, target.Model)
 }

@@ -38,6 +38,7 @@ type readAPIStub struct {
 	security  func(appapi.SecurityQuery) (appapi.SecurityResult, error)
 	config    func() (appapi.ConfigDocument, error)
 	presets   []presets.Preset
+	models    appapi.ModelsDocument
 }
 
 func (r *readAPIStub) Dashboard(time.Time) appapi.Dashboard { return r.dashboard }
@@ -127,6 +128,62 @@ func decodeReadJSON(t *testing.T, recorder *httptest.ResponseRecorder, out any) 
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), out); err != nil {
 		t.Fatalf("decode JSON %q: %v", recorder.Body.String(), err)
+	}
+}
+
+// TestReadModelsEndpoint pins GET /api/models: 200 with the documented
+// {providers:{name:{fingerprint,probed_at,models:{id:{chat,anthropic,responses}}}}}
+// shape, and an empty store projecting {"providers":{}} (never null).
+func TestReadModelsEndpoint(t *testing.T) {
+	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	reads := &readAPIStub{models: appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{
+		"up": {
+			Fingerprint: "0123456789abcdef",
+			ProbedAt:    probed,
+			Models: map[string]appapi.ModelProtocols{
+				"m1": {Chat: "yes", Anthropic: "no", Responses: "unknown"},
+			},
+		},
+	}}}
+	s := newReadServer(t, reads)
+
+	rec := serveRead(t, s, http.MethodGet, "/api/models")
+	var got struct {
+		Providers map[string]struct {
+			Fingerprint string `json:"fingerprint"`
+			ProbedAt    string `json:"probed_at"`
+			Models      map[string]struct {
+				Chat      string `json:"chat"`
+				Anthropic string `json:"anthropic"`
+				Responses string `json:"responses"`
+			} `json:"models"`
+		} `json:"providers"`
+	}
+	decodeReadJSON(t, rec, &got)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/models = %d, want 200", rec.Code)
+	}
+	up, ok := got.Providers["up"]
+	if !ok || up.Fingerprint != "0123456789abcdef" || up.ProbedAt != "2026-09-01T10:00:00Z" {
+		t.Fatalf("providers[up] = %+v", got.Providers["up"])
+	}
+	if m := up.Models["m1"]; m.Chat != "yes" || m.Anthropic != "no" || m.Responses != "unknown" {
+		t.Errorf("models[m1] = %+v, want yes/no/unknown", m)
+	}
+
+	// Empty store → {"providers":{}} (non-null object).
+	reads.models = appapi.ModelsDocument{}
+	rec = serveRead(t, s, http.MethodGet, "/api/models")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty store: GET /api/models = %d, want 200", rec.Code)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{}}` {
+		t.Errorf("empty store body = %s, want {\"providers\":{}}", body)
+	}
+
+	// GET-only route: POST falls through to the JSON 404 like every read endpoint.
+	if rec := serveRead(t, s, http.MethodPost, "/api/models"); rec.Code != http.StatusNotFound {
+		t.Errorf("POST /api/models = %d, want 404 (no route for this method)", rec.Code)
 	}
 }
 
@@ -1051,3 +1108,10 @@ func TestAdminAuthDisabledKeepsLoopbackTrust(t *testing.T) {
 }
 
 func (r *readAPIStub) Presets() []presets.Preset { return r.presets }
+
+func (r *readAPIStub) ModelsDocument() appapi.ModelsDocument {
+	if r.models.Providers == nil {
+		return appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}}
+	}
+	return r.models
+}

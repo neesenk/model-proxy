@@ -4,11 +4,13 @@ import (
 	"testing"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/probe"
 )
 
-// TestWireProbeModelLocal: model pick order is provider's first configured
-// model → first route target → first derived route target → "".
-func TestWireProbeModelLocal(t *testing.T) {
+// TestWireProbePickModel: the model pick used by `wire record` is
+// probe.PickModel — provider's first configured model → first route target →
+// first derived route target → "".
+func TestWireProbePickModel(t *testing.T) {
 	cfg := &configdomain.Config{
 		Providers: map[string]configdomain.Provider{
 			"with-models": {Provider: "static", Models: []string{"m1", "m2"}},
@@ -31,8 +33,8 @@ func TestWireProbeModelLocal(t *testing.T) {
 		{"via-derived", "derived-model"},
 		{"none", ""},
 	} {
-		if got := wireProbeModelLocal(cfg, derived, tc.prov); got != tc.want {
-			t.Errorf("wireProbeModelLocal(%s) = %q, want %q", tc.prov, got, tc.want)
+		if got := probe.PickModel(cfg, derived, tc.prov); got != tc.want {
+			t.Errorf("probe.PickModel(%s) = %q, want %q", tc.prov, got, tc.want)
 		}
 	}
 }

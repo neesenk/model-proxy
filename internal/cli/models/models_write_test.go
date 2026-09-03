@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
-
-	"model-proxy/internal/configedit"
 )
 
 // TestWriteProviderModelsRewritesModelsSequence: the locked load→mutate→write
@@ -64,9 +62,13 @@ routes:
 		t.Errorf("routes = %v, want preserved", decoded.Routes)
 	}
 
-	backup := configedit.BackupPath(configFile)
-	if _, err := os.Stat(backup); err != nil {
-		t.Errorf("backup of previous config missing at %s: %v", backup, err)
+	// BackupPath embeds a second-resolution timestamp captured inside the
+	// write; recomputing it here can land one second later. Glob the back dir
+	// instead - the assertion (exactly one .bak of the previous file) is the
+	// same, without the second-boundary flake.
+	baks, err := filepath.Glob(filepath.Join(filepath.Dir(configFile), ".model-proxy", "back", "config.yaml.*.bak"))
+	if err != nil || len(baks) != 1 {
+		t.Errorf("want exactly 1 backup of previous config, got %v (err=%v)", baks, err)
 	}
 }
 

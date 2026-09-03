@@ -19,7 +19,7 @@ import (
 // the methods that differ.
 //
 // Defaults:
-//   - ProbeRequest: POST /chat/completions + openAIProbeBody (minimal OpenAI chat)
+//   - ProbeRequest: POST /chat/completions + OpenAIProbeBody (minimal OpenAI chat)
 //   - ExtraHeaders: no-op
 //   - FilterModelIDs: passthrough (no static drops)
 type baseProbe struct{}
@@ -31,7 +31,7 @@ func (baseProbe) ProbeRequest(modelID string) ProbeRequest {
 	return ProbeRequest{
 		Method: http.MethodPost,
 		Path:   "/chat/completions",
-		Body:   openAIProbeBody(modelID),
+		Body:   OpenAIProbeBody(modelID),
 	}
 }
 
@@ -58,8 +58,8 @@ func newRequestID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// openAIProbeBody is a minimal non-streaming OpenAI chat request.
-func openAIProbeBody(model string) []byte {
+// OpenAIProbeBody is a minimal non-streaming OpenAI chat request.
+func OpenAIProbeBody(model string) []byte {
 	b, _ := json.Marshal(map[string]any{
 		"model":      model,
 		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
@@ -69,13 +69,27 @@ func openAIProbeBody(model string) []byte {
 	return b
 }
 
-// anthropicProbeBody is a minimal Anthropic messages request (no
+// AnthropicProbeBody is a minimal Anthropic messages request (no
 // anthropic-version in body - it's a header, set by the provider's ExtraHeaders).
-func anthropicProbeBody(model string) []byte {
+func AnthropicProbeBody(model string) []byte {
 	b, _ := json.Marshal(map[string]any{
 		"model":      model,
 		"max_tokens": 1,
 		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	return b
+}
+
+// ResponsesProbeBody is a minimal OpenAI Responses API request in the GENERIC
+// shape (string input, no streaming). Providers whose responses endpoint
+// demands a dialect (codex: input list + stream:true) keep their own shape in
+// their ProbeRequest override, which the probe layer prefers over this one.
+func ResponsesProbeBody(model string) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"model":             model,
+		"input":             "hi",
+		"max_output_tokens": 16,
+		"store":             false,
 	})
 	return b
 }

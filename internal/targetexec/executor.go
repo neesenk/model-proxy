@@ -34,7 +34,7 @@ type State interface {
 	RecordRateLimit(string, RateLimitDecision)
 	LearnParamBlock(configdomain.RouteTarget, string) bool
 	ApplyParamBlock(configdomain.RouteTarget, []byte) []byte
-	NoteWireResponsesMiss(string)
+	NoteWireResponsesMiss(configdomain.RouteTarget)
 }
 
 // AttemptDTO is the stable, leaf-owned description passed to optional effects.
@@ -215,7 +215,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 			if response.StatusCode == http.StatusNotFound || IsModelDenied(response.StatusCode, peek) {
 				if plan.ViaResponsesVerdict() && response.StatusCode == http.StatusNotFound {
 					if executor.State != nil {
-						executor.State.NoteWireResponsesMiss(target.Provider)
+						executor.State.NoteWireResponsesMiss(target)
 					}
 				} else if executor.State != nil {
 					executor.State.RecordModelFailure(target)

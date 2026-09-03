@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/protocol"
+	"model-proxy/internal/providerbuild"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // --- models refresh: no provider → usage + available providers ---
@@ -105,13 +108,40 @@ func TestCLI_ModelsRefresh_PersistsNewModels(t *testing.T) {
 	if !strings.Contains(cfg, "- glm-5.2") || !strings.Contains(cfg, "routes:") {
 		t.Errorf("config lost existing model or routes:\n%s", cfg)
 	}
+	// The fresh 3-protocol matrix was persisted to model_caps.json (sibling of
+	// quota_state.json under the isolated HOME), fingerprinted with the
+	// provider's current protocol config.
+	loaded, err := runtimewire.LoadModelCapsFile(filepath.Join(home, ".model-proxy", "model_caps.json"))
+	if err != nil {
+		t.Fatalf("LoadModelCapsFile: %v", err)
+	}
+	entry, ok := loaded["zhipu"]
+	if !ok {
+		t.Fatalf("model_caps.json missing zhipu entry: %v", loaded)
+	}
+	wantFP := providerbuild.ProtocolConfigFingerprint(configdomain.Provider{Provider: "zhipu", OpenAIBaseURL: srv.URL})
+	if entry.Fingerprint != wantFP {
+		t.Errorf("caps fingerprint=%q want %q", entry.Fingerprint, wantFP)
+	}
+	for _, id := range []string{"glm-5.2", "glm-new-model"} {
+		mp, ok := entry.Models[id]
+		if !ok {
+			t.Errorf("caps models missing %s: %v", id, entry.Models)
+			continue
+		}
+		// The mock answers 200 on every path: chat + responses Yes, anthropic
+		// No (no anthropic_base_url configured).
+		if mp.Chat != runtimewire.Yes || mp.Responses != runtimewire.Yes || mp.Anthropic != runtimewire.No {
+			t.Errorf("caps %s = chat:%s ant:%s resp:%s, want yes/no/yes", id, mp.Chat, mp.Anthropic, mp.Responses)
+		}
+	}
 }
 
 // --- models refresh: FetchModels unavailable -> route-probe fallback ---
 //
 // When the provider has no /models endpoint (FetchModels 404s), refresh falls
-// back to probing route-configured models + existing config models against the
-// provider's own chat endpoint. Callable 2xx models are written to models:;
+// back to probing route-configured models + existing config models with the
+// 3-protocol matrix. Models callable on ANY leg are written to models:;
 // non-callable ones are dropped. Mirrors the FetchModels path's write semantics.
 
 func TestCLI_ModelsRefreshFallback_RouteProbe(t *testing.T) {
@@ -123,7 +153,8 @@ func TestCLI_ModelsRefreshFallback_RouteProbe(t *testing.T) {
 			w.Write([]byte(`{"error":{"code":"NotFound","message":"no models endpoint"}}`))
 			return
 		}
-		// /chat/completions probe: 2xx for callable models, 404 (+ error body) otherwise.
+		// Probe legs (/chat/completions, /responses): 2xx for callable models,
+		// 404 (+ error body) otherwise.
 		model := protocol.ExtractModel(readAll(r.Body))
 		if callable[model] {
 			w.WriteHeader(200)
@@ -279,5 +310,71 @@ func TestCLI_ModelsDisplay_HydratesFromCache(t *testing.T) {
 	// ctx 204800 came from the cache, not config (config had no models:)
 	if !strings.Contains(stdout, "204800") {
 		t.Errorf("display should show cached context 204800:\n%s", stdout)
+	}
+}
+
+// --- models display: PROTOCOLS column from a seeded model_caps.json ---
+//
+// The column is a read-only projection of model_caps.json: a provider's entry
+// is used ONLY when its stored fingerprint matches the provider's current
+// protocol config; stale entries degrade to "-".
+
+func TestCLI_ModelsDisplay_ProtocolsColumn(t *testing.T) {
+	cfgBody := "listen: 127.0.0.1:15721\n" +
+		"providers:\n" +
+		"  zhipu:\n    openai_base_url: https://zhipu.invalid/v1\n    provider_id: zhipu\n    models:\n      - glm-5.2\n" +
+		"  aqp:\n    openai_base_url: https://aqp.invalid/v1\n    provider_id: aqp\n    models:\n      - m-stale\n" +
+		"routes:\n  glm-5.2:\n    - {provider: zhipu, model: glm-5.2}\n"
+	cfgPath := clitest.WriteTempConfig(t, cfgBody)
+
+	home := t.TempDir()
+	credDir := filepath.Join(home, ".model-proxy")
+	os.MkdirAll(credDir, 0o700)
+	// Fresh empty models.dev cache so hydrateModels doesn't hit the network.
+	os.WriteFile(filepath.Join(credDir, "models_cache.json"),
+		[]byte(`{"fetched_at":"`+time.Now().Format(time.RFC3339)+`","etag":"","by_name":{},"by_endpoint":{}}`), 0o600)
+	mdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer mdSrv.Close()
+	t.Setenv("MP_MODELSDEV_URL", mdSrv.URL)
+
+	// Seed model_caps.json: zhipu with the CURRENT fingerprint (projected),
+	// aqp with a STALE one (different base url -> must be ignored).
+	matrix := map[string]runtimewire.ModelProtocols{
+		"glm-5.2": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.Yes},
+	}
+	err := runtimewire.SaveModelCapsFile(filepath.Join(credDir, "model_caps.json"), map[string]runtimewire.ProviderModelCaps{
+		"zhipu": {
+			Fingerprint: providerbuild.ProtocolConfigFingerprint(configdomain.Provider{Provider: "zhipu", OpenAIBaseURL: "https://zhipu.invalid/v1"}),
+			ProbedAt:    time.Now(),
+			Models:      matrix,
+		},
+		"aqp": {
+			Fingerprint: providerbuild.ProtocolConfigFingerprint(configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://OLD.invalid/v1"}),
+			ProbedAt:    time.Now(),
+			Models:      map[string]runtimewire.ModelProtocols{"m-stale": {Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.Yes}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := clitest.RunCLIWithHome(t, home, "models", cfgPath)
+	if code != 0 {
+		t.Fatalf("models display exit=%d", code)
+	}
+	if !strings.Contains(stdout, "PROTOCOLS") {
+		t.Errorf("display should show the PROTOCOLS column:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "chat/resp") {
+		t.Errorf("glm-5.2 should render chat/resp from the seeded caps:\n%s", stdout)
+	}
+	// aqp's entry is fingerprint-stale -> its model must NOT render the seeded
+	// verdicts (projection treats it as no data -> "-").
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.Contains(line, "m-stale") {
+			if strings.Contains(line, "chat") || strings.Contains(line, "ant") || strings.Contains(line, "resp") {
+				t.Errorf("stale-fingerprint row should render '-' in PROTOCOLS, got: %q", line)
+			}
+		}
 	}
 }

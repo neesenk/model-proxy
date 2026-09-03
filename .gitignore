@@ -36,3 +36,6 @@ yarn-error.log*
 .zcode/
 .orca/
 .claude/
+
+# runtime config write lock
+config.yaml.lock

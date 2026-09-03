@@ -8,6 +8,7 @@ import (
 	"model-proxy/internal/admin"
 	"model-proxy/internal/provider"
 	runtimestate "model-proxy/internal/runtime"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 func TestAdminServiceReturnsDetachedSnapshots(t *testing.T) {
@@ -106,5 +107,50 @@ func TestAdminDashboardScheduleUsesCapturedRuntimeSnapshot(t *testing.T) {
 	fresh := decode(service.Dashboard(now).Schedule)
 	if got := fresh.Models["m"]; got.First != "b" || got.Pin != "b" {
 		t.Fatalf("fresh schedule did not observe current state: %+v", got)
+	}
+}
+
+// TestAdminModelCapsPortProjectsDetachedSnapshot: the ModelCapsSnapshot port
+// reads the process-lifetime ModelStore (its own leaf lock, no p.mu) and
+// returns a detached deep copy the admin projection can map freely.
+func TestAdminModelCapsPortProjectsDetachedSnapshot(t *testing.T) {
+	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	p := newTestProxy(t, &Config{
+		Providers: map[string]Provider{
+			"up": {Provider: testProviderID, OpenAIBaseURL: "https://example.test", Models: []string{"m1"}},
+		},
+	})
+
+	// Empty store → empty, non-nil map (JSON {"providers":{}} downstream).
+	ports := p.adminPorts(func() string { return "" }, nil, nil)
+	if snapshot := ports.ModelCapsSnapshot(); snapshot == nil || len(snapshot) != 0 {
+		t.Fatalf("empty store snapshot = %+v", snapshot)
+	}
+
+	p.modelCaps.Put("up", "0123456789abcdef", "m1",
+		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triUnknown}, probed)
+
+	snapshot := ports.ModelCapsSnapshot()
+	caps, ok := snapshot["up"]
+	if !ok || caps.Fingerprint != "0123456789abcdef" || !caps.ProbedAt.Equal(probed) {
+		t.Fatalf("snapshot[up] = %+v", caps)
+	}
+	if mp := caps.Models["m1"]; mp.Chat != triYes || mp.Anthropic != triNo || mp.Responses != triUnknown {
+		t.Errorf("snapshot matrix = %+v, want yes/no/unknown", mp)
+	}
+
+	// The projection must be detached: mutating it cannot touch the store.
+	caps.Models["m1"] = runtimewire.ModelProtocols{Chat: triNo, Anthropic: triNo, Responses: triNo}
+	snapshot["up"] = caps
+	delete(snapshot, "up")
+	mp, ok := p.modelCaps.Get("up", "m1")
+	if !ok || mp.Chat != triYes || mp.Anthropic != triNo {
+		t.Fatalf("port snapshot aliased the store: %+v ok=%v", mp, ok)
+	}
+
+	// The admin read method maps the same port to verdict strings.
+	document := admin.New(ports).ModelsDocument()
+	if got := document.Providers["up"].Models["m1"]; got.Chat != "yes" || got.Anthropic != "no" || got.Responses != "unknown" {
+		t.Errorf("ModelsDocument = %+v, want yes/no/unknown strings", got)
 	}
 }

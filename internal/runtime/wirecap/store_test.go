@@ -89,8 +89,8 @@ func TestClassifyStatus(t *testing.T) {
 }
 
 func TestResolve(t *testing.T) {
-	caps := func(responses, anthropic Verdict) Capabilities {
-		return Capabilities{Responses: responses, Anthropic: anthropic}
+	caps := func(chat, responses Verdict) Capabilities {
+		return Capabilities{Chat: chat, Responses: responses}
 	}
 	cases := []struct {
 		name               string
@@ -103,18 +103,20 @@ func TestResolve(t *testing.T) {
 	}{
 		{"chat passthrough", "openai", false, caps(No, No), true, "openai", false},
 		{"responses unknown", "responses", false, caps(Unknown, Unknown), false, "responses", false},
-		{"responses verdict ignored without store hit", "responses", false, caps(No, Yes), false, "responses", false},
-		{"responses yes", "responses", false, caps(Yes, Unknown), true, "responses", false},
+		{"responses verdict ignored without store hit", "responses", false, caps(Yes, No), false, "responses", false},
+		{"responses yes", "responses", false, caps(Unknown, Yes), true, "responses", false},
 		{"responses no", "responses", false, caps(No, No), true, "openai", false},
-		{"anthropic base", "anthropic", true, caps(Yes, No), true, "anthropic", false},
-		{"anthropic accepted", "anthropic", false, caps(Unknown, Yes), true, "anthropic", false},
-		{"anthropic accepted before responses fallback", "anthropic", false, caps(No, Yes), true, "anthropic", false},
-		{"anthropic to responses", "anthropic", false, caps(Yes, Unknown), true, "responses", true},
-		{"anthropic to chat", "anthropic", false, caps(No, Unknown), true, "openai", false},
+		{"anthropic base", "anthropic", true, caps(No, Yes), true, "anthropic", false},
+		{"anthropic to responses", "anthropic", false, caps(Unknown, Yes), true, "responses", true},
+		{"anthropic to chat", "anthropic", false, caps(Unknown, No), true, "openai", false},
 		{"anthropic negative legs", "anthropic", false, caps(No, No), true, "openai", false},
 		{"anthropic unknown", "anthropic", false, caps(Unknown, Unknown), true, "anthropic", false},
-		{"anthropic explicit no without responses verdict", "anthropic", false, caps(Unknown, No), true, "anthropic", false},
 		{"anthropic verdicts ignored without store hit", "anthropic", false, caps(Yes, Yes), false, "anthropic", false},
+		// No anthropic base means anthropic is unsupported by definition: no
+		// passthrough of anthropic bodies onto the openai base, even when the
+		// chat leg concluded yes (the gateway might have accepted it — the
+		// proxy now always converts instead).
+		{"anthropic never passthrough on openai base", "anthropic", false, caps(Yes, No), true, "openai", false},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -137,14 +139,96 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+func TestClassifyModelStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		probed bool
+		status int
+		err    error
+		body   string
+		want   Verdict
+	}{
+		{"unprobed leg is definitionally no", false, 0, nil, "", No},
+		{"transport error", true, 0, errors.New("dial"), "", Unknown},
+		{"2xx", true, 200, nil, "", Yes},
+		{"404", true, 404, nil, "", No},
+		{"400 shape dispute", true, 400, nil, `{"error":{"message":"Unsupported parameter: 'stream'"}}`, Yes},
+		{"400 model not found", true, 400, nil, `{"error":{"message":"model not found: m1"}}`, No},
+		{"400 does not exist", true, 400, nil, `The model 'm1' does not exist`, No},
+		{"400 unsupported model", true, 400, nil, `unsupported model`, No},
+		{"400 invalid model", true, 400, nil, `invalid model`, No},
+		{"400 not supported with this model", true, 400, nil, `Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.`, No},
+		{"400 case insensitive", true, 400, nil, `MODEL NOT FOUND`, No},
+		{"401 auth", true, 401, nil, "", Unknown},
+		{"429 quota", true, 429, nil, "", Unknown},
+		{"500", true, 500, nil, "", Unknown},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := ClassifyModelStatus(testCase.probed, testCase.status, testCase.err, []byte(testCase.body))
+			if got != testCase.want {
+				t.Errorf("ClassifyModelStatus = %s, want %s", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestResolveModel(t *testing.T) {
+	mp := func(chat, anthropic, responses Verdict) ModelProtocols {
+		return ModelProtocols{Chat: chat, Anthropic: anthropic, Responses: responses}
+	}
+	providerCaps := Capabilities{Chat: Unknown, Responses: Yes}
+	cases := []struct {
+		name             string
+		clientProtocol   string
+		hasAnthropicBase bool
+		modelCaps        ModelProtocols
+		mok              bool
+		wantProtocol     string
+		wantVia          bool
+	}{
+		// Model-level miss → provider-level Resolve (responses=yes here).
+		{"miss falls back to provider", "anthropic", false, ModelProtocols{}, false, "responses", true},
+		// anthropic client.
+		{"anthropic yes with base", "anthropic", true, mp(Yes, Yes, No), true, "anthropic", false},
+		{"model absent from anthropic base, responses yes", "anthropic", true, mp(Yes, No, Yes), true, "responses", true},
+		{"no anthropic base, responses yes", "anthropic", false, mp(Yes, No, Yes), true, "responses", true},
+		{"no anthropic base, responses no, chat yes", "anthropic", false, mp(Yes, No, No), true, "openai", false},
+		{"all no falls to chat", "anthropic", false, mp(No, No, No), true, "openai", false},
+		{"unknown legs fall back to provider", "anthropic", false, mp(Unknown, No, Unknown), true, "responses", true},
+		{"anthropic yes but no base must not passthrough", "anthropic", false, mp(Yes, Yes, No), true, "openai", false},
+		// responses client.
+		{"responses client yes", "responses", false, mp(Yes, No, Yes), true, "responses", false},
+		{"responses client no", "responses", false, mp(Yes, No, No), true, "openai", false},
+		{"responses client unknown falls back", "responses", false, mp(Unknown, No, Unknown), true, "responses", false},
+		// chat client never switches.
+		{"chat client passthrough", "openai", false, mp(No, No, Yes), true, "openai", false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			protocol, via := ResolveModel(
+				testCase.clientProtocol,
+				testCase.hasAnthropicBase,
+				testCase.modelCaps,
+				testCase.mok,
+				providerCaps,
+				true,
+			)
+			if protocol != testCase.wantProtocol || via != testCase.wantVia {
+				t.Errorf("ResolveModel = (%q, %v), want (%q, %v)", protocol, via, testCase.wantProtocol, testCase.wantVia)
+			}
+		})
+	}
+}
+
 func TestStoreSnapshotCorrectionAndRestore(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	store := &Store{}
 	store.Put("a", Capabilities{
-		BaseURL: "https://a", Responses: Yes, Anthropic: No, ProbedAt: now,
+		BaseURL: "https://a", Responses: Yes, Chat: No, ProbedAt: now,
 	})
 	store.Put("b", Capabilities{
-		BaseURL: "https://old-b", Responses: No, Anthropic: Yes, ProbedAt: now,
+		BaseURL: "https://old-b", Responses: No, Chat: Yes, ProbedAt: now,
 	})
 	store.MarkResponsesUnsupported("a", now.Add(time.Minute))
 	got, ok := store.Get("a")
@@ -164,7 +248,7 @@ func TestStoreSnapshotCorrectionAndRestore(t *testing.T) {
 	})
 	want := map[string]Capabilities{
 		"a": {
-			BaseURL: "https://a", Responses: No, Anthropic: No,
+			BaseURL: "https://a", Responses: No, Chat: No,
 			ProbedAt: now.Add(time.Minute),
 		},
 	}

@@ -309,10 +309,26 @@ responsesState/fusionReg/reqLog + `NewHealthGate`/`NewEffects`/`Schedule`/`Shado
 执行一次回调。Responses state、request log 与 Shadow 共用这一 transport
 primitive；各自的持久化和业务判断不得反向塞进通用 reader。
 
-`internal/runtime/wirecap` 是端点协议能力包，拥有三态 verdict、JSON 持久化
-表示、协议选择纯策略、probe 请求构造，以及 parent provider keyed 的并发
-Store。`internal/app/wirecap.go` 只保留 Proxy 侧的探测编排、404 纠正触发和
-异步持久化；Store 的 lock 内不得回调应用代码。
+`internal/probe` 拥有全仓所有探测执行：唯一的请求构造+发送配方 `probe.Do`
+（URL join → `RewriteRequest` → headers（`/v1/messages` 预置 `anthropic-version`）→
+`AuthHeaders` → `prov.Headers` → `ExtraHeaders`）、模型可调性探测
+`Callable`/`Exchange`（CLI `test`、`models refresh` 与 Web 账号测活端口共用）、
+三协议矩阵探测 `ProbeModelProtocols`（daemon 启动/reload 能力探测与
+`models refresh` 共用）、探测模型选择 `PickModel`（provider models[0] → 显式
+route target → derived target）和 max_tokens→max_completion_tokens 改名重试。
+daemon 的 wirecap/modelcaps 探测 pass 与 `wire record`（`internal/cli/diag`，
+`Accept: text/event-stream` + 64MB BodyLimit）都经 `probe.Do` 发送。该包只执行
+交换并报告原始结果——verdict 分类与存储归 `internal/runtime/wirecap`，provider
+构建与凭据绑定留在应用层。
+
+`internal/runtime/wirecap` 是端点协议能力包，拥有三态 verdict、两级并发 verdict
+Store（provider 级 `Store` 与模型级 `ModelStore`，均 parent provider keyed、
+leaf lock、持锁不回调应用代码）、协议选择纯策略（`ClassifyStatus`/
+`ClassifyModelStatus`/`Resolve`/`ResolveModel`）、quota_state.json 顶层
+`wire_caps` 的 JSON 表示，以及独立文件 `model_caps.json` 的格式与原子读写
+（`ModelCapsPath`/`LoadModelCapsFile`/`SaveModelCapsFile`）。
+`internal/app/wirecap.go` 与 `internal/app/modelcaps.go` 只保留 Proxy 侧的探测
+编排、404 纠正触发和异步持久化。
 
 `internal/runtime.Manager` 是 config generation 内可变路由状态的唯一 owner，
 以单 mutex 统一 health、sticky、pin、model lock、paramBlock、spread、quota、
@@ -364,7 +380,7 @@ Manager 的物理文件按职责拆分，但不形成多 owner：`internal/runti
   请求排序在同一次临界区内完成 quota projection 与 health/pin/sticky/spread
   选择；Web/调试调度从同一个 detached DashboardSnapshot 做只读 preview，
   禁止为 order 二次读取 Manager。
-- `internal/runtime/wirecap.Store`、metrics/tokens/agents、stats flusher、
+- `internal/runtime/wirecap.Store`/`ModelStore`、metrics/tokens/agents、stats flusher、
   cache、pricing 各有独立 owner/leaf lock；SQLite Store 与 wire-capability
   Store 均不拥有或回调应用运行时。
 - 跨域锁顺序仅允许 `Proxy.mu → runtime.Manager`。Manager 持锁时不得回调
@@ -462,7 +478,8 @@ budget watcher adapter → internal/observe/budget → internal/observe/stats / 
 应用 / CLI / observe / fusion 等组件的日志调用点 → internal/observe/logx（级别过滤叶子包，serve 启动时 SetLevel 一次）
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
-wire probe / target plan → internal/runtime/wirecap → config / provider（值类型）
+probe 执行（daemon 探测 pass / CLI / Web 测活）→ internal/probe → config / provider
+wire verdict / target plan → internal/runtime/wirecap → config / provider（值类型）
 schedule / health / resolver / quota adapter → internal/runtime
 target plan / target executor → internal/protocol
 composition root → internal/config → internal/pricing / internal/protocol
@@ -487,7 +504,7 @@ application → serveAssembly → applicationRuntime → Proxy
   targetexec, transport/bodycapture, web, webauth`；
 - `admin → accounts, appapi, cache, config, configedit, credstore, fusion, login,
   observe/counters, observe/logx, observe/seclog, observe/stats, presets, pricing, probe,
-  provider, routing, runtime`（Web admin 应用服务；不得回依赖 app/web/cli）；
+  provider, routing, runtime, runtime/wirecap`（Web admin 应用服务；不得回依赖 app/web/cli）；
 - `appapi → fusion, observe/stats, presets, pricing`；
 - `cli → cli/account, cli/admin, cli/audit, cli/config, cli/diag, cli/doctor,
   cli/framework, cli/login, cli/models, cli/presets, cli/stats, cli/status, config, display, takeover,
@@ -498,7 +515,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/clicommon → appapi, daemonctl, display, provider`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
 - `cli/config → accounts, cli/framework, config, display, provider, routing, takeover`（`config init|print|check`）；
-- `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, provider`（`wire`/`replay`/`shadow`）；
+- `cli/diag → cli/framework, cli/models, config, daemonctl, display, observe/requestlog, probe, provider`（`wire`/`replay`/`shadow`）；
 - `cli/doctor → accounts, appapi, cli/clicommon, cli/framework,
   cli/models, config, credstore, display, routing, takeover, observe/seclog, provider`；
 - `cli/framework → accounts, config`；
@@ -508,7 +525,7 @@ application → serveAssembly → applicationRuntime → Proxy
 - `cli/serve → config, observe/logx`；
 - `cli/login → accounts, cli/framework, cli/serve, config, display, login, provider`；
 - `cli/models → cli/serve, cli/framework, accounts, catalog, config,
-  configedit, display, probe, provider, providerbuild, routing`；
+  configedit, display, probe, provider, providerbuild, routing, runtime/wirecap`；
 - `login → accounts, config, display, provider, observe/logx`；
 - `config → catalog, pricing, protocol`；
 - `fusion → config, observe/logx`；
@@ -613,7 +630,8 @@ type alias 和 method expression 都会被守卫计为新的引用点并判定�
 - `internal/transport/bodycapture` 反向依赖 request log、protocol、Proxy、
   Config、Provider 或任意 `model-proxy/*` 包；
 - `internal/runtime/wirecap` 反向依赖 Proxy、HTTP/Web/CLI 或 `config` /
-  `provider` 值类型之外的 `model-proxy/*` 包；应用层重新声明 verdict、capabilities map 或其锁；
+  `provider` 值类型之外的 `model-proxy/*` 包；应用层重新声明 verdict、
+  provider/model 级 capabilities map、其锁或 model_caps.json 文件格式；
 - `internal/runtime` 依赖 `config`/`provider` 值类型与 `runtime/wirecap` 之外的
   Proxy、HTTP/Web/CLI 或持久化实现；应用层恢复 health/sticky/pin/model-lock/paramBlock/spread/quota
   的第二份 map 或互斥锁；

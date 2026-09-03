@@ -66,6 +66,7 @@ func (fakeReads) Security(SecurityQuery) (SecurityResult, error) {
 func (fakeReads) ConfigDocument() (ConfigDocument, error) {
 	return ConfigDocument{}, nil
 }
+func (fakeReads) ModelsDocument() ModelsDocument { return ModelsDocument{} }
 
 type fakeCommands struct{}
 

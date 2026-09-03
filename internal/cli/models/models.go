@@ -16,6 +16,7 @@ import (
 	"model-proxy/internal/configedit"
 	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // Model entry as returned by the gateway's /models endpoint (OpenAI-style).
@@ -66,11 +67,11 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 			// not logged in, or the network is down). Fall back to route-based
 			// probing: candidates = route models targeting this provider + the
 			// existing config models. The endpoint probe then validates each
-			// candidate against the provider's own chat endpoint, and the
-			// callable subset is written back via the same tail as the
-			// FetchModels path. Safety nets (all-probe-failed, probe-infra-
-			// unavailable) keep config intact on a total outage, so a
-			// down/not-logged-in provider never wipes models:.
+			// candidate with the 3-protocol matrix (chat/anthropic/responses),
+			// and the callable subset (ANY leg Yes) is written back via the
+			// same tail as the FetchModels path. Safety nets (all-probe-failed,
+			// probe-infra-unavailable) keep config intact on a total outage,
+			// so a down/not-logged-in provider never wipes models:.
 			fmt.Fprintf(os.Stderr, "models endpoint unavailable for %s (%v); probing route-configured models instead\n", provName, err)
 			merged = MergeStringIDs(existing, routing.RouteModelsForProvider(cfg, provName))
 			if len(merged) == 0 {
@@ -81,8 +82,8 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 			// (existing first, then new ids in fetch order, deduped). The endpoint
 			// probe below validates the merged set and writes only the callable
 			// subset back - so refresh both adds newly-discovered models AND
-			// removes ids that fail a live 2xx check (e.g. non-chat models the
-			// upstream's /models lists but its chat endpoint rejects).
+			// removes ids no protocol leg classifies Yes (e.g. non-chat models
+			// the upstream's /models lists but its endpoints reject).
 			merged = MergeModelIDs(existing, entries)
 		}
 		ProbeAndWriteModels(cfg, provName, merged, existing, args, configFile)
@@ -98,13 +99,15 @@ func CmdModels(args []string, cfg *configdomain.Config, configFile string) {
 	}
 	cat, _ := configdomain.LoadModelsCatalog(homeDir(), false)
 	meta, sources := routing.HydrateModels(cfg, cat)
-	PrintAllModels(cfg, provFilter, meta, sources)
+	PrintAllModels(cfg, provFilter, meta, sources, loadModelCapsProjection(cfg))
 }
 
-// printAllModels prints all models with their hydrated metadata. `meta` maps
+// printAllModels prints all models with their hydrated metadata plus a trailing
+// PROTOCOLS column (read-only projection of model_caps.json). `meta` maps
 // provider→model→metadata (nil in legacy callers → names shown without ctx/out).
-// `sources` drives a trailing SRC tag: models.dev / default.
-func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string]map[string]catalog.Model, sources map[string]map[string]routing.ModelSource) {
+// `sources` drives a SRC tag: models.dev / default. `protocols` maps
+// provider→model→the 3-protocol verdict matrix (nil/stale entries → "-").
+func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string]map[string]catalog.Model, sources map[string]map[string]routing.ModelSource, protocols map[string]map[string]runtimewire.ModelProtocols) {
 	names := make([]string, 0, len(cfg.Providers))
 	for n := range cfg.Providers {
 		if provFilter != "" && n != provFilter {
@@ -114,10 +117,11 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 	}
 	sort.Strings(names)
 
-	fmt.Printf("%s  %s  %s  %s  %s  %s  %s\n",
+	fmt.Printf("%s  %s  %s  %s  %s  %s  %s  %s\n",
 		display.Dim(display.Pad("PROVIDER", 12)), display.Dim(display.Pad("MODEL ID", 22)),
 		display.Dim(display.Pad("NAME", 20)), display.Dim(display.Pad("CTX", 10)),
-		display.Dim(display.Pad("OUTPUT", 8)), display.Dim(display.Pad("MODALITIES", 16)), display.Dim(display.Pad("SRC", 10)))
+		display.Dim(display.Pad("OUTPUT", 8)), display.Dim(display.Pad("MODALITIES", 16)),
+		display.Dim(display.Pad("SRC", 10)), display.Dim(display.Pad("PROTOCOLS", 12)))
 	for _, pn := range names {
 		// Effective model set: hydrated metadata keys ∪ the config name list
 		// (config names show even when meta is nil — e.g. legacy callers).
@@ -162,10 +166,12 @@ func PrintAllModels(cfg *configdomain.Config, provFilter string, meta map[string
 					src = "default"
 				}
 			}
-			fmt.Printf("%s  %s  %s  %s  %s  %s  %s\n",
+			mp, pok := protocols[pn][mid]
+			fmt.Printf("%s  %s  %s  %s  %s  %s  %s  %s\n",
 				display.Blue(display.Pad(pn, 12)), display.Cyan(display.Pad(mid, 22)),
 				display.Green(display.Pad(name, 20)), display.Gray(display.Pad(ctx, 10)),
-				display.Gray(display.Pad(out, 8)), display.Gray(display.Pad(mod, 16)), display.Gray(display.Pad(src, 10)))
+				display.Gray(display.Pad(out, 8)), display.Gray(display.Pad(mod, 16)),
+				display.Gray(display.Pad(src, 10)), display.Gray(display.Pad(protocolsCell(mp, pok), 12)))
 		}
 	}
 }
@@ -190,9 +196,10 @@ func FetchProviderModels(cfg *configdomain.Config, provName string) ([]ModelEntr
 // the normal path, or from routes on the no-/models fallback); `existing` is the
 // provider's current config models (for the change-diff + skip-write-if-unchanged).
 //
-// It policy-filters the candidates, probes each against the provider's own
-// base_url, prints the kept list + a drop summary, and overwrites `models:` with
-// the callable subset (hot-reloading a running daemon) when it changed.
+// It policy-filters the candidates, probes each with the 3-protocol matrix
+// (chat/anthropic/responses, keeping a model when ANY leg classifies Yes),
+// prints the kept list + a drop summary, and overwrites `models:` with the
+// callable subset (hot-reloading a running daemon) when it changed.
 //
 // Safety nets: if the probe infra is unavailable (perr != nil) or EVERY probe
 // failed (allProbeFailed - likely not-logged-in / network), the candidate set is
@@ -209,8 +216,8 @@ func ProbeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 // without exposing mutable production hooks or reaching a real provider.
 type probeAndWriteModelsOps struct {
 	filter  func(*configdomain.Config, string, []string) ([]string, []string)
-	probe   func(*configdomain.Config, string, []string) ([]string, []DropReason, error)
-	display func(*configdomain.Config, string, []string, []DropReason, error, bool)
+	probe   func(*configdomain.Config, string, []string) ([]string, []DropReason, map[string]runtimewire.ModelProtocols, error)
+	display func(*configdomain.Config, string, []string, []DropReason, map[string]runtimewire.ModelProtocols, error, bool)
 	write   func(string, string, []string) error
 	reload  func([]string, *configdomain.Config)
 }
@@ -219,10 +226,13 @@ func productionProbeAndWriteModelsOps() probeAndWriteModelsOps {
 	return probeAndWriteModelsOps{
 		filter: ApplyProviderModelFilter,
 		probe:  CheckProviderModels,
-		display: func(cfg *configdomain.Config, provName string, policyDropped []string, dropped []DropReason, perr error, allProbeFailed bool) {
+		display: func(cfg *configdomain.Config, provName string, policyDropped []string, dropped []DropReason, protocols map[string]runtimewire.ModelProtocols, perr error, allProbeFailed bool) {
 			cat, _ := configdomain.LoadModelsCatalog(homeDir(), false)
 			meta, sources := routing.HydrateModels(cfg, cat)
-			PrintKeptModels(provName, cfg.Providers[provName].Models, meta, sources)
+			// Refresh just computed the matrix — pass it directly (no file
+			// round-trip; the PROTOCOLS column shows the fresh verdicts).
+			byProvider := map[string]map[string]runtimewire.ModelProtocols{provName: protocols}
+			PrintKeptModels(provName, cfg.Providers[provName].Models, meta, sources, byProvider)
 			PrintFilterSummary(policyDropped, dropped, perr, allProbeFailed)
 		},
 		write:  WriteProviderModels,
@@ -236,9 +246,9 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 	// ones so a stale config is cleaned up too). Currently volcengine drops
 	// *-latest / doubao-seed-1-* / lite / mini by policy regardless of
 	// callability. The endpoint probe below is the second, general pass
-	// (callable on the provider base_url?).
+	// (callable on ANY of the provider's protocol legs?).
 	policyKept, policyDropped := ops.filter(cfg, provName, merged)
-	kept, dropped, perr := ops.probe(cfg, provName, policyKept)
+	kept, dropped, protocols, perr := ops.probe(cfg, provName, policyKept)
 	allProbeFailed := perr == nil && len(policyKept) > 0 && len(kept) == 0
 	if perr != nil {
 		// Probe infra unavailable (e.g. provider not logged in). Fall back to
@@ -264,7 +274,7 @@ func probeAndWriteModels(cfg *configdomain.Config, provName string, merged, exis
 	cfg.Providers[provName] = provCfg
 
 	// Output order: final list FIRST, then the filter summary with reasons.
-	ops.display(cfg, provName, policyDropped, dropped, perr, allProbeFailed)
+	ops.display(cfg, provName, policyDropped, dropped, protocols, perr, allProbeFailed)
 
 	// Write the validated list (overwrite, not append-only). writeProviderModels
 	// re-encodes the whole models: sequence, so ids absent from `kept` (both

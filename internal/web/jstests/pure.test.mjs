@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import {
   esc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
+  verdictBadge, modelCapMatrix,
 } from '../assets/pure.js';
 
 test('esc escapes all five HTML-significant chars', () => {
@@ -88,4 +89,52 @@ test('visibleYamlEditorHeight uses remaining space but never under the floor', (
   assert.equal(visibleYamlEditorHeight(800, -50, 50), 750);
   // Fractional remaining space floors to whole pixels.
   assert.equal(visibleYamlEditorHeight(801, 100, 50), 651);
+});
+
+test('verdictBadge maps yes/no to concluded pills, everything else to unknown', () => {
+  assert.deepEqual(verdictBadge('yes'), { cls: 'ok', glyph: '✓', label: 'yes' });
+  assert.deepEqual(verdictBadge('no'), { cls: 'err', glyph: '✗', label: 'no' });
+  // unknown (probe pending / retry next pass) must render distinctly from no.
+  const unknown = verdictBadge('unknown');
+  assert.equal(unknown.cls, 'muted');
+  assert.equal(unknown.glyph, '?');
+  assert.equal(unknown.label, 'unknown');
+  assert.notEqual(unknown.cls, verdictBadge('no').cls);
+  // Missing/garbage verdicts degrade to unknown, never to a concluded state.
+  assert.equal(verdictBadge('').cls, 'muted');
+  assert.equal(verdictBadge(undefined).cls, 'muted');
+  assert.equal(verdictBadge(null).cls, 'muted');
+  assert.equal(verdictBadge('YES').cls, 'muted');
+});
+
+test('modelCapMatrix sorts providers and models, normalizing fields', () => {
+  const matrix = modelCapMatrix({
+    zeta: {
+      fingerprint: 'fp-z', probed_at: '2026-09-01T10:00:00Z',
+      models: {
+        'm-b': { chat: 'yes', anthropic: 'no', responses: 'unknown' },
+        'm-a': { chat: 'no', anthropic: 'no', responses: 'no' },
+      },
+    },
+    alpha: { fingerprint: 'fp-a', probed_at: '2026-09-01T09:00:00Z', models: {} },
+  });
+  assert.deepEqual(matrix.map((p) => p.name), ['alpha', 'zeta']);
+  assert.deepEqual(matrix[1].models.map((m) => m.id), ['m-a', 'm-b']);
+  assert.deepEqual(matrix[1].models[1], { id: 'm-b', chat: 'yes', anthropic: 'no', responses: 'unknown' });
+  assert.deepEqual(matrix[1].fingerprint, 'fp-z');
+  assert.deepEqual(matrix[1].probedAt, '2026-09-01T10:00:00Z');
+  // A probed provider with no recorded models keeps an empty list.
+  assert.deepEqual(matrix[0], { name: 'alpha', fingerprint: 'fp-a', probedAt: '2026-09-01T09:00:00Z', models: [] });
+});
+
+test('modelCapMatrix tolerates empty and malformed providers maps', () => {
+  assert.deepEqual(modelCapMatrix(null), []);
+  assert.deepEqual(modelCapMatrix(undefined), []);
+  assert.deepEqual(modelCapMatrix({}), []);
+  assert.deepEqual(modelCapMatrix({ up: null }),
+    [{ name: 'up', fingerprint: '', probedAt: '', models: [] }]);
+  // A model entry without verdict fields surfaces undefined legs, which
+  // verdictBadge renders as unknown.
+  const [p] = modelCapMatrix({ up: { models: { m: null } } });
+  assert.deepEqual(p.models, [{ id: 'm', chat: undefined, anthropic: undefined, responses: undefined }]);
 });

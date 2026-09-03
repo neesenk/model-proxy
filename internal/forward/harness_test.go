@@ -115,10 +115,10 @@ func (g *fakeHealthGate) LearnParamBlock(provider, model, parameter string, gene
 	return true
 }
 func (g *fakeHealthGate) ApplyParamBlock(provider, model string, body []byte) []byte { return body }
-func (g *fakeHealthGate) NoteWireResponsesMiss(provider string) {
+func (g *fakeHealthGate) NoteWireResponsesMiss(provider, model string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.wireMisses = append(g.wireMisses, provider)
+	g.wireMisses = append(g.wireMisses, provider+"/"+model)
 }
 
 var _ targetexec.HealthGate = (*fakeHealthGate)(nil)

@@ -80,3 +80,33 @@ export function visibleYamlEditorHeight(viewportHeight, editorTop, spaceBelow) {
     Math.floor(viewportHeight - Math.max(0, editorTop) - spaceBelow),
   );
 }
+
+// verdictBadge maps one startup-probe verdict string ("yes"/"no"/"unknown",
+// GET /api/models) to its badge presentation: pill class + glyph + label.
+// unknown is deliberately distinct from no — no is a concluded negative (or
+// unsupported by definition, e.g. anthropic without anthropic_base_url), while
+// unknown means the probe has not concluded and will retry on the next pass.
+export function verdictBadge(v) {
+  if (v === 'yes') return { cls: 'ok', glyph: '✓', label: 'yes' };
+  if (v === 'no') return { cls: 'err', glyph: '✗', label: 'no' };
+  return { cls: 'muted', glyph: '?', label: 'unknown' };
+}
+
+// modelCapMatrix normalizes the GET /api/models providers map into a
+// deterministic view model: providers sorted by name, each provider's models
+// sorted by id. Missing fields normalize to empty values (verdict rendering
+// falls back to "unknown" via verdictBadge); a provider with no recorded
+// models keeps an empty list so the UI can show "probed, no models".
+export function modelCapMatrix(providers) {
+  const out = [];
+  for (const name of Object.keys(providers || {}).sort()) {
+    const caps = providers[name] || {};
+    const models = [];
+    for (const id of Object.keys(caps.models || {}).sort()) {
+      const mp = caps.models[id] || {};
+      models.push({ id, chat: mp.chat, anthropic: mp.anthropic, responses: mp.responses });
+    }
+    out.push({ name, fingerprint: caps.fingerprint || '', probedAt: caps.probed_at || '', models });
+  }
+  return out;
+}

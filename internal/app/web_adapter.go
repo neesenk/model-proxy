@@ -12,6 +12,7 @@ import (
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/provider"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 	webtransport "model-proxy/internal/web"
 	"model-proxy/internal/webauth"
 	"net/http"
@@ -214,6 +215,12 @@ func (p *Proxy) adminPorts(
 				out[route] = admin.PinState{Provider: pin.provider, ExpiresAt: pin.expiresAt}
 			}
 			return out
+		},
+		ModelCapsSnapshot: func() map[string]runtimewire.ProviderModelCaps {
+			// modelCaps is process-lifetime (not reload-owned) and Snapshot owns
+			// the store's leaf lock, so this closure deliberately takes no p.mu —
+			// it cannot observe a mixed config generation.
+			return p.modelCaps.Snapshot()
 		},
 		Pricing: func() (*pricing.Catalog, map[string]pricing.Override) {
 			overrides, catalog := p.detachedPricing()

@@ -695,6 +695,14 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
 .prov-account.prov-acct-c2 { background: var(--acct-c2-bg); border-left-color: var(--acct-c2-bd); }
 .prov-account.prov-acct-c3 { background: var(--acct-c3-bg); border-left-color: var(--acct-c3-bd); }
 .prov-accounts-row + tr > td { border-top: none; }
+
+/* Models card (Status → Models): one block per probed provider — a head row
+   with the config fingerprint + last probe time, then a model × protocol
+   verdict table. Verdict pills reuse the shared .pill ok/err/muted palette. */
+.model-caps-provider + .model-caps-provider { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-2); }
+.model-caps-head { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; padding: 2px 2px 8px; }
+.model-caps-head .subdue { color: var(--muted); font-size: 12px; }
+.model-caps-empty { color: var(--muted); }
 @media (max-width: 720px) {
   .status-layout { grid-template-columns: 1fr; }
   .status-nav {

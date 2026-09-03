@@ -74,7 +74,7 @@ func (p *VolcengineProvider) ProbeRequest(modelID string) ProbeRequest {
 	return ProbeRequest{
 		Method: http.MethodPost,
 		Path:   "/v1/messages",
-		Body:   anthropicProbeBody(modelID),
+		Body:   AnthropicProbeBody(modelID),
 	}
 }
 

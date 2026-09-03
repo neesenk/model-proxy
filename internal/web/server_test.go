@@ -53,6 +53,7 @@ func (testReadAPI) Security(appapi.SecurityQuery) (appapi.SecurityResult, error)
 func (testReadAPI) ConfigDocument() (appapi.ConfigDocument, error) {
 	return appapi.ConfigDocument{}, nil
 }
+func (testReadAPI) ModelsDocument() appapi.ModelsDocument { return appapi.ModelsDocument{} }
 
 type testCommandAPI struct {
 	begin func(context.Context, string) (appapi.LoginStart, error)

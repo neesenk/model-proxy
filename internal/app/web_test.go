@@ -8,6 +8,7 @@ import (
 	"model-proxy/internal/accounts"
 	"model-proxy/internal/login"
 	"model-proxy/internal/observe/counters"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,55 @@ func TestAPIStatus(t *testing.T) {
 		if _, ok := status[want]; !ok {
 			t.Errorf("status body missing %q: %s", want, rec.Body.String())
 		}
+	}
+}
+
+// TestAPIModelsEndToEnd: GET /api/models serves the startup protocol probe's
+// capability matrix through the REAL chain (Proxy.modelCaps → admin port
+// closure → admin projection → web transport): verdict strings, fingerprint,
+// probed_at — and an empty store projecting {"providers":{}}.
+func TestAPIModelsEndToEnd(t *testing.T) {
+	w, p := newTestWeb(t)
+
+	// Empty store → {"providers":{}} (non-null object).
+	rec := httptest.NewRecorder()
+	serveWeb(w, rec, httptest.NewRequest("GET", "/api/models", nil))
+	if rec.Code != 200 {
+		t.Fatalf("empty store: status=%d want 200", rec.Code)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"providers":{}}` {
+		t.Fatalf("empty store body = %s, want {\"providers\":{}}", body)
+	}
+
+	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	p.modelCaps.Put("zhipu", "0123456789abcdef", "glm",
+		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triUnknown}, probed)
+
+	rec = httptest.NewRecorder()
+	serveWeb(w, rec, httptest.NewRequest("GET", "/api/models", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d want 200", rec.Code)
+	}
+	var got struct {
+		Providers map[string]struct {
+			Fingerprint string `json:"fingerprint"`
+			ProbedAt    string `json:"probed_at"`
+			Models      map[string]struct {
+				Chat      string `json:"chat"`
+				Anthropic string `json:"anthropic"`
+				Responses string `json:"responses"`
+			} `json:"models"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("body is not the models document: %v: %s", err, rec.Body.String())
+	}
+	zhipu, ok := got.Providers["zhipu"]
+	if !ok || zhipu.Fingerprint != "0123456789abcdef" || zhipu.ProbedAt != "2026-09-01T10:00:00Z" {
+		t.Fatalf("providers[zhipu] = %+v (%s)", zhipu, rec.Body.String())
+	}
+	if m := zhipu.Models["glm"]; m.Chat != "yes" || m.Anthropic != "no" || m.Responses != "unknown" {
+		t.Errorf("models[glm] = %+v, want yes/no/unknown verdict strings", m)
 	}
 }
 

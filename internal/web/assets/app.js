@@ -18,6 +18,7 @@
 import {
   esc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
+  verdictBadge, modelCapMatrix,
 } from './pure.js';
 
 function el(tag, opts = {}) {
@@ -654,11 +655,16 @@ const LOG_SNAP_THRESHOLD = 4; // px — "at the bottom" within sub-pixel roundin
 const STATUS_SECTIONS = [
   { key: 'schedule', label: 'Schedule' },
   { key: 'providers', label: 'Providers' },
+  { key: 'models', label: 'Models' },
   { key: 'tokens', label: 'Token Usage' },
   { key: 'agents', label: 'Agents' },
   { key: 'logs', label: 'Logs' },
 ];
 let statusCache = { st: null, tok: [], logs: [], accounts: [], agents: [] };
+// modelsCache is the last GET /api/models response ({providers:{…}}): the
+// startup protocol probe's per-provider capability matrix. Read only through
+// modelsCache.<field> so jstests/contract.test.mjs pins the documented fields.
+let modelsCache = { providers: {} };
 let statusSelected = 'schedule';
 
 function stopStatusRefresh() {
@@ -690,15 +696,17 @@ async function renderStatusTab() {
   if (statusInflight) return;
   statusInflight = true;
   try {
-    const [st, tok, logs, acc, agents] = await Promise.all([
+    const [st, tok, logs, acc, agents, modelsDoc] = await Promise.all([
       apiGet('/api/status'),
       apiGet('/api/tokens').catch(() => ({ usage: [] })),
       apiGet('/api/logs?tail=200').catch(() => ({ lines: [] })),
       apiGet('/api/accounts').catch(() => ({ providers: [] })),
       apiGet('/api/agents').catch(() => ({ buckets: [] })),
+      apiGet('/api/models').catch(() => ({ providers: {} })),
     ]);
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '—'} · ${st.listen || ''}`);
     statusCache = { st, tok: tok.usage || [], logs: logs.lines || [], accounts: acc.providers || [], agents: agents.buckets || [] };
+    modelsCache = modelsDoc;
     renderStatusPanel();
   } catch (e) {
     setConn('err', 'connection lost');
@@ -793,6 +801,10 @@ function renderStatusSection(key) {
     case 'providers':
       main.innerHTML = '';
       if (st) renderProvidersCard(main, st);
+      break;
+    case 'models':
+      main.innerHTML = '';
+      renderModelsCard(main, modelsCache.providers || {});
       break;
     case 'tokens':
       main.innerHTML = '';
@@ -1026,6 +1038,58 @@ async function unfreezeAll() {
     if (btn) { btn.disabled = false; btn.textContent = 'Unfreeze all'; }
     window.alert('unfreeze failed: ' + e.message);
   }
+}
+
+// renderModelsCard draws the startup protocol probe's capability matrix
+// (GET /api/models, cached in modelsCache): one block per provider showing its
+// config fingerprint + last probe time, with one row per model and a pill per
+// protocol leg (chat / anthropic / responses). Verdicts are backend-owned —
+// the UI never re-derives support, it renders yes ✓ / no ✗ / unknown ? with
+// unknown (muted, probe pending) visually distinct from no (err, concluded
+// negative or unsupported by definition). Providers with no probe data are
+// omitted server-side; an empty store renders a hint instead of a blank card.
+function renderModelsCard(target, providers) {
+  const entries = modelCapMatrix(providers);
+  if (!entries.length) {
+    target.insertAdjacentHTML('beforeend', buildCard('Models', '',
+      '<div class="model-caps-empty">no probe data yet — provider models are probed for protocol support at daemon startup</div>'));
+    return;
+  }
+  let blocks = '';
+  for (const p of entries) {
+    let rows = '';
+    for (const m of p.models) {
+      rows += `<tr>
+        <td class="mono">${esc(m.id)}</td>
+        <td>${protoVerdictPill(m.chat)}</td>
+        <td>${protoVerdictPill(m.anthropic)}</td>
+        <td>${protoVerdictPill(m.responses)}</td>
+      </tr>`;
+    }
+    if (!p.models.length) {
+      rows = '<tr><td colspan="4" class="subdue">probed, no models recorded</td></tr>';
+    }
+    blocks += `<div class="model-caps-provider">
+      <div class="model-caps-head">
+        <span class="mono">${esc(p.name)}</span>
+        <span class="mono subdue">fp ${esc(p.fingerprint || '—')}</span>
+        <span class="subdue">probed ${esc(fmtTimeSafe(p.probedAt) || '—')}</span>
+      </div>
+      <table class="table">
+        <thead><tr><th>model</th><th>chat</th><th>anthropic</th><th>responses</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  }
+  target.insertAdjacentHTML('beforeend',
+    buildCard('Models', `${entries.length} provider${entries.length === 1 ? '' : 's'} probed`, blocks, 'flush'));
+}
+
+// protoVerdictPill renders one protocol leg's probe verdict as a pill:
+// yes → ok ✓, no → err ✗, unknown → muted ? (see verdictBadge in pure.js).
+function protoVerdictPill(v) {
+  const b = verdictBadge(v);
+  return `<span class="pill ${esc(b.cls)}"><span class="dot"></span>${esc(b.glyph)} ${esc(b.label)}</span>`;
 }
 
 // renderScheduleCard builds the per-route schedule view: each route shows its

@@ -151,6 +151,13 @@ func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAccountsList(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"providers": s.reads.Accounts()})
 }
+
+// handleModels serves GET /api/models: the startup protocol probe's
+// per-provider model capability matrix (see docs/web-api.md). The read port
+// already projects a detached snapshot with verdict strings.
+func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.reads.ModelsDocument())
+}
 func (s *Server) handleTokens(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"usage": s.reads.Tokens()})
 }

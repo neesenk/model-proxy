@@ -25,6 +25,9 @@ func TestWireRecord_Run(t *testing.T) {
 		"/chat/completions": "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
 	}
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept") != "text/event-stream" {
+			t.Errorf("%s: Accept = %q, want text/event-stream", r.URL.Path, r.Header.Get("Accept"))
+		}
 		if body, ok := bodies[r.URL.Path]; ok {
 			if r.Header.Get("Authorization") == "" {
 				t.Errorf("record request missing auth header")

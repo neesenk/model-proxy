@@ -1,19 +1,17 @@
 // wirecap.go — wire capability probing: the proxy actively probes each
-// provider's openai_base_url for /responses support (and /v1/messages ONLY
-// when the provider has no anthropic_base_url — then the probe URL is the
-// exact URL an anthropic passthrough would hit; with a dedicated anthropic
-// base the matrix short-circuits and /v1/messages is never fabricated on the
-// openai base), and uses
-// the verdict as the DEFAULT backend protocol when a route target declares no
-// explicit `protocol:` and no ProtocolHint applies (explicit protocol: remains
-// the top-priority escape hatch). See docs/architecture/routing-and-failure.md.
+// provider's openai_base_url for /chat/completions and /responses support and
+// uses the verdict as the DEFAULT backend protocol when a route target
+// declares no explicit `protocol:` and no ProtocolHint applies (explicit
+// protocol: remains the top-priority escape hatch). Anthropic support is NOT
+// probed: a provider declares it by configuring anthropic_base_url.
+// See docs/architecture/routing-and-failure.md.
 //
 // Rationale: openai_base_url contractually serves BOTH /chat/completions and
-// /responses (internal/config), but many third-party endpoints implement only chat.
-// Without a verdict, an anthropic client defaults to byte-level passthrough of
-// an anthropic body to an openai base — right only for gateways that accept
-// anthropic. A probe verdict lets the proxy convert instead (responses first —
-// the responses-direction converters preserve reasoning/usage details — then
+// /responses (internal/config), but many third-party endpoints implement only
+// chat. Without a verdict, an anthropic client defaults to byte-level
+// passthrough of an anthropic body to an openai base — usually wrong. A probe
+// verdict lets the proxy convert instead (responses first — the
+// responses-direction converters preserve reasoning/usage details — then
 // chat), with zero user configuration.
 //
 // Lifecycle: probed once asynchronously at boot (production NewProxy only —
@@ -28,11 +26,13 @@
 package app
 
 import (
+	"context"
 	"model-proxy/internal/observe/logx"
 	"net/http"
 	"sync"
 	"time"
 
+	"model-proxy/internal/probe"
 	"model-proxy/internal/provider"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 )
@@ -81,21 +81,6 @@ func classifyWireStatus(status int, err error) triState {
 	return runtimewire.ClassifyStatus(status, err)
 }
 
-// wireProbeBodies delegates to runtimewire.ProbeBodies.
-func wireProbeBodies(model string) (responsesBody, anthropicBody []byte) {
-	return runtimewire.ProbeBodies(model)
-}
-
-// wireProbe delegates to runtimewire.Probe.
-func wireProbe(client *http.Client, prov Provider, impl provider.Provider, path string, body []byte) (int, error) {
-	return runtimewire.Probe(client, prov, impl, path, body)
-}
-
-// wireProbeModel delegates to runtimewire.ProbeModel.
-func wireProbeModel(cfg *Config, derived map[string][]RouteTarget, provName string) string {
-	return runtimewire.ProbeModel(cfg, derived, provName)
-}
-
 // probeAllWireCaps probes every eligible provider once (skipping providers
 // with a fresh verdict) and persists the results. Eligible: has an
 // openai_base_url AND no ProtocolHint (codex is already hint-covered — its
@@ -120,15 +105,12 @@ func (p *Proxy) probeAllWireCaps() {
 		if provider.ProtocolHint(provCfg.Provider, "") != "" {
 			continue // protocol already known via hint (codex → responses)
 		}
-		// Skip providers with a fresh verdict: same base_url and every PROBED
-		// capability concluded and still trusted (unknown or expired negative
-		// legs are re-probed — no negative conclusion is final). With
-		// anthropic_base_url set the anthropic leg is never probed (the
-		// decision matrix short-circuits to the dedicated base), so only
-		// responses counts for freshness.
+		// Skip providers with a fresh verdict: same base_url and both PROBED
+		// legs concluded and still trusted (unknown or expired negative legs
+		// are re-probed — no negative conclusion is final).
 		if cur, ok := p.wireVerdict(name); ok && cur.BaseURL == provCfg.OpenAIBaseURL &&
-			wireLegFresh(cur.Responses, cur.ProbedAt) &&
-			(provCfg.AnthropicBaseURL != "" || wireLegFresh(cur.Anthropic, cur.ProbedAt)) {
+			wireLegFresh(cur.Chat, cur.ProbedAt) &&
+			wireLegFresh(cur.Responses, cur.ProbedAt) {
 			continue
 		}
 		// Resolve the implementation like providerImplFor, but from the live
@@ -142,33 +124,31 @@ func (p *Proxy) probeAllWireCaps() {
 		if impl == nil {
 			continue // not logged in / not built — nothing to probe with
 		}
-		model := wireProbeModel(cfg, derived, name)
+		model := probe.PickModel(cfg, derived, name)
 		probed = true
 		wg.Add(1)
 		go func(name string, provCfg Provider, impl provider.Provider) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			responsesBody, anthropicBody := wireProbeBodies(model)
-			rs, rErr := wireProbe(client, provCfg, impl, "/responses", responsesBody)
-			// Anthropic leg: only probed on the OPENAI base when the provider
-			// has no dedicated anthropic_base_url — the probe URL is then the
-			// exact URL forward would passthrough to. With anthropic_base_url
-			// set, the matrix short-circuits to it and /v1/messages must NOT
-			// be fabricated on the openai base (e.g. zhipu's /api/paas/v4).
-			anth := triUnknown
-			if provCfg.AnthropicBaseURL == "" {
-				as, aErr := wireProbe(client, provCfg, impl, "/v1/messages", anthropicBody)
-				anth = classifyWireStatus(as, aErr)
-			}
+			chatRep, chatErr := probe.Do(context.Background(), client, provCfg, impl, probe.Request{
+				BaseURL: provCfg.OpenAIBaseURL,
+				Path:    "/chat/completions",
+				Body:    provider.OpenAIProbeBody(model),
+			})
+			responsesRep, responsesErr := probe.Do(context.Background(), client, provCfg, impl, probe.Request{
+				BaseURL: provCfg.OpenAIBaseURL,
+				Path:    "/responses",
+				Body:    provider.ResponsesProbeBody(model),
+			})
 			caps := wireCaps{
 				BaseURL:   provCfg.OpenAIBaseURL,
-				Responses: classifyWireStatus(rs, rErr),
-				Anthropic: anth,
+				Chat:      classifyWireStatus(chatRep.Status, chatErr),
+				Responses: classifyWireStatus(responsesRep.Status, responsesErr),
 				ProbedAt:  time.Now(),
 			}
 			p.setWireCaps(name, caps)
-			logx.Debugf("[wirecap] provider %s probed: responses=%s anthropic=%s", name, caps.Responses, caps.Anthropic)
+			logx.Debugf("[wirecap] provider %s probed: chat=%s responses=%s", name, caps.Chat, caps.Responses)
 		}(name, provCfg, impl)
 	}
 	wg.Wait()
@@ -210,18 +190,32 @@ func (p *Proxy) persistWireCaps() {
 	})
 }
 
-// noteWireResponsesMiss flips a provider's responses verdict to no after a
-// verdict-driven /responses request came back 404 — the probe said yes but
-// the route doesn't exist (stale verdict, or a per-model gateway). This is
-// OUR protocol-choice miss, not a missing model, so tryTarget skips
-// recordModelFailure for it; subsequent requests fall back to chat.
+// noteWireResponsesMiss records that a verdict-driven /responses request came
+// back 404 — the probe said yes but the route doesn't exist for THIS model
+// (stale verdict, or a per-model gateway). With a model id the model-level
+// verdict is flipped; without one (passthrough target) the provider-level
+// verdict is. This is OUR protocol-choice miss, not a missing model, so
+// tryTarget skips recordModelFailure for it; subsequent requests fall back to
+// chat.
 //
 // Verdicts are keyed by parent name; a pool virtual shares the parent's base
 // URL. `parent` is the ALREADY-RESOLVED parent name: callers project it from
 // their request snapshot (RuntimeSnapshot.ParentOf, nil-safe) so a pre-reload
 // in-flight request records the verdict under ITS generation's parent instead
 // of re-reading reload-owned state here (single-snapshot red line).
-func (p *Proxy) noteWireResponsesMiss(parent string) {
+func (p *Proxy) noteWireResponsesMiss(parent, model string) {
+	if model != "" {
+		// Flip the MODEL-level verdict when the model has an entry — the 404
+		// proves this model can't do /responses regardless of what the
+		// provider-level verdict says (more precise than poisoning the whole
+		// provider). Without a model entry the choice was provider-driven, so
+		// the provider-level verdict is the one to correct.
+		if _, ok := p.modelCaps.Get(parent, model); ok {
+			p.modelCaps.MarkResponsesUnsupported(parent, model, time.Now())
+			p.persistModelCaps()
+			return
+		}
+	}
 	p.wireCaps.MarkResponsesUnsupported(parent, time.Now())
 	p.persistWireCaps()
 }
@@ -239,6 +233,7 @@ func (p *Proxy) startWireCapProbe() {
 			return
 		}
 		p.probeAllWireCaps()
+		p.probeAllModelCaps()
 	})
 }
 
@@ -246,28 +241,19 @@ func (p *Proxy) startWireCapProbe() {
 // an explicit protocol: nor a ProtocolHint decided. Returns the backend
 // protocol and whether the choice was a VERDICT-DRIVEN switch to responses
 // (the only case the runtime 404 correction rewinds).
-//
-//	anthropic client + provider has anthropic_base_url → passthrough (unchanged)
-//	anthropic client + verdict.anthropic == yes        → passthrough (gateway accepts anthropic)
-//	anthropic client + verdict.responses == yes        → convert to responses (reasoning preserved)
-//	anthropic client + verdict.responses == no (and anthropic ≠ yes) → convert to chat
-//	  (chat is openai_base_url's definitional protocol; this covers both "both no"
-//	  and the post-correction state responses=no / anthropic unknown)
-//	anthropic client + verdict otherwise unknown       → passthrough (status quo while probing)
-//	responses client + verdict.responses == no         → convert to chat
-//	responses client + otherwise                       → passthrough (unchanged)
-//	chat client                                        → passthrough (unchanged)
 func resolveByWire(clientProto string, hasAnthropicBase bool, caps wireCaps, ok bool) (proto string, viaResponsesVerdict bool) {
 	return runtimewire.Resolve(clientProto, hasAnthropicBase, caps, ok)
 }
 
 // resolvedBackendProto determines the backend protocol for a route target (or
 // a fusion/shadow leg): the declared `protocol:`, else the provider's
-// ProtocolHint (codex→responses), else the wire probe verdict, else the
-// client's protocol (byte-level passthrough). provName may be a pool virtual
-// ("name#<id>") — the verdict is looked up by parent name via the caller's
-// parentOf snapshot (grabbed under p.mu earlier; passing it in avoids taking
-// p.mu here, which callers may or may not hold).
+// ProtocolHint (codex→responses), else the MODEL-level capability verdict,
+// else the provider-level wire probe verdict, else the client's protocol
+// (byte-level passthrough). provName may be a pool virtual ("name#<id>") —
+// verdicts are looked up by parent name via the caller's parentOf snapshot
+// (grabbed under p.mu earlier; passing it in avoids taking p.mu here, which
+// callers may or may not hold). model is the UPSTREAM model id; an empty model
+// (passthrough target) skips the model-level lookup.
 func (p *Proxy) resolvedBackendProto(declared, provName string, provCfg Provider, model, clientProto string, parentOf map[string]string) (proto string, viaResponsesVerdict bool) {
 	if declared != "" {
 		return declared, false
@@ -279,6 +265,11 @@ func (p *Proxy) resolvedBackendProto(declared, provName string, provCfg Provider
 	if par, ok := parentOf[provName]; ok {
 		parent = par
 	}
-	caps, ok := p.wireVerdict(parent)
-	return resolveByWire(clientProto, provCfg.AnthropicBaseURL != "", caps, ok)
+	var mc runtimewire.ModelProtocols
+	mok := false
+	if model != "" {
+		mc, mok = p.modelCaps.Get(parent, model)
+	}
+	caps, cok := p.wireVerdict(parent)
+	return runtimewire.ResolveModel(clientProto, provCfg.AnthropicBaseURL != "", mc, mok, caps, cok)
 }

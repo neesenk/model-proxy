@@ -223,6 +223,34 @@ func (s *Service) Pins() []appapi.Pin {
 	return out
 }
 
+// ModelsDocument projects the startup protocol probe's capability matrix into
+// the transport DTO. The port already returns a detached deep copy; this method
+// owns only the Verdict → string presentation mapping. Providers present in the
+// snapshot with no models keep their fingerprint/probed_at with an empty (never
+// nil) models map so the UI can show "probed, no models recorded".
+func (s *Service) ModelsDocument() appapi.ModelsDocument {
+	document := appapi.ModelsDocument{Providers: map[string]appapi.ProviderModelCaps{}}
+	if s.ports.ModelCapsSnapshot == nil {
+		return document
+	}
+	for name, caps := range s.ports.ModelCapsSnapshot() {
+		models := make(map[string]appapi.ModelProtocols, len(caps.Models))
+		for model, mp := range caps.Models {
+			models[model] = appapi.ModelProtocols{
+				Chat:      mp.Chat.String(),
+				Anthropic: mp.Anthropic.String(),
+				Responses: mp.Responses.String(),
+			}
+		}
+		document.Providers[name] = appapi.ProviderModelCaps{
+			Fingerprint: caps.Fingerprint,
+			ProbedAt:    caps.ProbedAt,
+			Models:      models,
+		}
+	}
+	return document
+}
+
 // Security projects the guard audit log (seclog) into transport DTOs. The
 // audit directory derives from the current generation's guard config; audit
 // off or a missing directory yields an empty, disabled result (same

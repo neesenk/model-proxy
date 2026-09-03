@@ -66,7 +66,7 @@ func (s *executorState) LearnParamBlock(configdomain.RouteTarget, string) bool {
 	return true
 }
 func (*executorState) ApplyParamBlock(_ configdomain.RouteTarget, body []byte) []byte { return body }
-func (s *executorState) NoteWireResponsesMiss(string)                                 { s.wireMisses++ }
+func (s *executorState) NoteWireResponsesMiss(configdomain.RouteTarget)               { s.wireMisses++ }
 
 type executorEffects struct {
 	failovers, failures, rateLimits, logs, commits int

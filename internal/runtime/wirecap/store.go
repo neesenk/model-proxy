@@ -1,8 +1,9 @@
 // Package wirecap owns the endpoint wire-capability domain: the concurrency-safe,
-// persisted verdict store, the protocol-selection policy over those verdicts,
-// and the probe request construction (config lookup + provider auth values in,
-// plain requests out). Executing probes, 404-correction triggers and async
-// persistence scheduling remain application concerns (internal/app/wirecap.go).
+// persisted verdict stores (provider-level Store and model-level ModelStore),
+// the protocol-selection policy over those verdicts, and the model_caps.json
+// file format. Executing probes, 404-correction triggers and async persistence
+// scheduling remain application concerns (internal/app/wirecap.go,
+// internal/app/modelcaps.go); probe execution itself lives in internal/probe.
 package wirecap
 
 import (
@@ -53,11 +54,14 @@ func (verdict *Verdict) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Capabilities is one endpoint's persisted wire-capability verdict.
+// Capabilities is one endpoint's persisted wire-capability verdict. Anthropic
+// support is NOT probed: a provider declares it by configuring
+// anthropic_base_url (the decision matrix short-circuits on that), so only the
+// two openai-base legs are stored.
 type Capabilities struct {
 	BaseURL   string    `json:"base_url"`
+	Chat      Verdict   `json:"chat"`
 	Responses Verdict   `json:"responses"`
-	Anthropic Verdict   `json:"anthropic"`
 	ProbedAt  time.Time `json:"probed_at"`
 }
 

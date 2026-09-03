@@ -333,7 +333,7 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 			// The gate resolves the pool parent from the REQUEST snapshot
 			// projection it was bound with (nil-safe): this in-flight leg
 			// belongs to fc.runtime's generation (single-snapshot red line).
-			gate.NoteWireResponsesMiss(m.Provider)
+			gate.NoteWireResponsesMiss(m.Provider, m.Model)
 			logx.Warnf("[fusion provider=%s] /responses 404 after wire verdict — provider responses downgraded to no (model NOT locked)",
 				m.Provider)
 		} else {

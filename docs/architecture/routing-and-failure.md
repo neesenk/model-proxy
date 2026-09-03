@@ -5,7 +5,8 @@
 修改 `internal/forward/forward.go`、`internal/forward/plan.go`、
 `internal/targetexec/executor.go`、`internal/targetexec/rate_limit.go`、
 `internal/routing/retry.go`、`internal/app/proxy_read_endpoints.go`、
-`internal/app/target_pipeline.go`、`internal/app/health_test.go`、
+`internal/app/target_pipeline.go`、`internal/app/wirecap.go`、
+`internal/app/modelcaps.go`、`internal/probe/`、`internal/app/health_test.go`、
 `internal/app/model_lock_test.go` 或 cooldown/retry 行为时必读。
 
 ## 实现入口
@@ -65,22 +66,37 @@ executor 外完成，Fusion synthesizer 丢弃该 commit 元数据，禁止递�
 
 默认“客户端协议 = 上游协议”，同协议请求和响应字节级透传。目标声明 `protocol:` 时才进行协议转换。
 
-后端协议解析优先级（`(*Proxy).resolvedBackendProto`，wirecap.go）：显式 `protocol:` > `ProtocolHint`（codex→responses）> **wire 探测 verdict** > 客户端协议透传。wire verdict 由 `wirecap.go` 在 boot/reload 时异步探测并按 parent provider 名缓存。探测请求：`/responses` 每 provider 一个；`/v1/messages` **仅当 provider 无 anthropic_base_url 时**才探（此时探测 URL 正是 anthropic 透传会打的 openai base 地址；有 anthropic_base_url 时矩阵直接短路到专用 base，绝不在 openai base 上拼 /v1/messages）。分类：404→no，其余 2xx–4xx（含 3xx 与 400/401/403/429）→yes，超时/连接错误/5xx→unknown。verdict 生效的决策矩阵：
+后端协议解析优先级（`(*Proxy).resolvedBackendProto`，`internal/app/wirecap.go`）：显式 `protocol:` > `ProtocolHint`（codex→responses）> **模型级协议矩阵**（`runtimewire.ResolveModel`）> **provider 级 wire 探测 verdict**（`runtimewire.Resolve`）> 客户端协议透传。空 `target.Model`（透传 target）跳过模型级查询，直接进入 provider 级。
+
+provider 级 wire verdict 由 `probeAllWireCaps` 在 boot/reload 时异步探测并按 parent provider 名缓存。探测只有 openai base 上的两条腿：`/chat/completions` 与 `/responses` 各一个请求（经 `probe.Do` 构造，配方见 overview.md 的 `internal/probe` 条目）。**anthropic 支持是 config 声明、永不探测**：provider 配置 `anthropic_base_url` 即支持（声明 = 事实），未配置即定义上不支持；旧的「在无 anthropic_base_url 时对 openai base 探 `/v1/messages`、网关接受 anthropic 则字节透传」分支已删除——探测绝不在 openai base 上伪造 anthropic 请求体。分类：404→no，其余 2xx–4xx（含 3xx 与 400/401/403/429）→yes，超时/连接错误/5xx→unknown。provider 级 verdict 生效的决策矩阵：
 
 | 客户端协议 | 条件 | 后端协议 |
 |---|---|---|
 | openai(chat) | — | 透传 |
 | responses | verdict.responses ≠ no | 透传 |
 | responses | verdict.responses == no | 转 chat |
-| anthropic | provider 有 anthropic_base_url | 透传 |
-| anthropic | verdict.anthropic == yes | 透传（网关接受 anthropic） |
+| anthropic | provider 有 anthropic_base_url | 透传（专用 base） |
 | anthropic | verdict.responses == yes | 转 responses（reasoning 保留） |
-| anthropic | verdict.responses == no 且 anthropic ≠ yes | 转 chat |
-| anthropic | verdict unknown | 透传（维持现状） |
+| anthropic | verdict.responses == no | 转 chat |
+| anthropic | verdict unknown | 透传（维持现状，探测窗口期不改变行为） |
 
-**运行时 404 纠正**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss` 将 verdict.responses 置 no 并持久化，**跳过 recordModelFailure**，按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。Fusion leg 共享同一纠正（`planTarget` 已算出 `viaResponsesVerdict`，见 fusion-shadow-cache.md）。yes 结论永久信任（错误 yes 由上述运行时路径纠正）；**no 结论有 24h TTL**（`wireCapNegativeTTL`），到期后下一次 boot/reload 探测 pass 重探——一次性错误 no（上游发布中临时 404 等）不会永久降级该 provider。
+**模型级协议矩阵**：boot/reload 的探测 pass（`(*Proxy).probeAllModelCaps`，`internal/app/modelcaps.go`，与 `probeAllWireCaps` 同由 `startWireCapProbe` 派发，并发上限 4）对每个 provider 的 model 集合（config models ∪ 显式 route target ∪ derived target）经 `probe.ProbeModelProtocols` 并发探三条腿：chat → POST {openai_base}/chat/completions，responses → POST {openai_base}/responses，anthropic → POST {anthropic_base}/v1/messages；腿的 base 未配置则不探（`LegResult.Probed=false`）。impl 的 `ProbeRequest` 路径与腿的 canonical 路径一致时（如 codex 的 /responses 方言），impl 的 body 优先于通用最小 body；max_tokens→max_completion_tokens 改名重试按腿适用。ProtocolHint 覆盖的 provider（codex）不探，直接合成 `{responses:yes, chat:no, anthropic:no}`。分类（`runtimewire.ClassifyModelStatus`）与 provider 级不同：未探腿→no（定义上不支持）；2xx→yes；404→no；400 带模型拒绝措辞（"model not found"/"does not exist"/"unsupported model"/"invalid model"/"model is not supported"/"unknown model"/"no such model"/"not supported with this model"，大小写不敏感）→no，其余 400→yes（形状争议反证该路由服务此模型，刻意粗粒度）；401/403/429→unknown（auth/quota 回答证明路由存在，但说明不了该模型）；5xx/3xx/网络→unknown（与 provider 级 3xx→yes 不同）。unknown 腿在下一次探测 pass 重探。模型级矩阵的生效规则（`runtimewire.ResolveModel`，先于 provider 级）：
 
-**判定的不对称兜底**：`classifyWireStatus` 把 404 以外的全部 4xx（含 401/403/405/429）一律判 yes，而运行时纠正只认 404。对 `/responses` 需要不同鉴权、或对未实现路径返 405 的网关会产生 wrong-yes 且不会被自动翻转——此时只能显式声明 `protocol:` 兜底，绕过 verdict。
+| 客户端协议 | 条件 | 后端协议 |
+|---|---|---|
+| anthropic | 有 anthropic_base_url 且 model.anthropic == yes | 透传 |
+| anthropic | model.responses == yes | 转 responses（含「有 anthropic base 但该模型不在其上」） |
+| anthropic | 矩阵全部已结论且 responses ≠ yes | 转 chat |
+| responses | model.responses == yes | 透传 |
+| responses | model.responses == no | 转 chat |
+| openai(chat) | — | 透传 |
+| 任意 | 模型无条目或相关腿未结论 | 回落 provider 级矩阵 |
+
+**运行时 404 纠正（模型粒度）**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss(parent, model)` 经 `targetexec` State/HealthGate 传导（executor 与 Fusion leg 共用）：该 model 在模型级矩阵有条目时**只翻转模型级** responses verdict 并持久化 model_caps.json（provider 级不动）；无模型条目（透传 target）才翻转 provider 级 verdict（legacy 路径）。两种情况都**跳过 recordModelFailure**（这是我们的协议选择失误，不是模型的失败），按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。Fusion leg 共享同一纠正（`planTarget` 已算出 `viaResponsesVerdict`，见 fusion-shadow-cache.md）。
+
+provider 级 yes 结论永久信任（错误 yes 由上述运行时路径纠正）；**provider 级 no 结论有 24h TTL**（`wireCapNegativeTTL`），到期后下一次 boot/reload 探测 pass 重探——一次性错误 no（上游发布中临时 404 等）不会永久降级该 provider。模型级矩阵**无 TTL**：失效只由 config fingerprint（`providerbuild.ProtocolConfigFingerprint`）触发，fingerprint 匹配即复用结论（持久化格式与恢复门控见 `runtime-state.md`）。
+
+**判定的不对称兜底**：provider 级 `classifyWireStatus` 把 404 以外的全部 4xx（含 401/403/405/429）一律判 yes，而运行时纠正只认 404。对 `/responses` 需要不同鉴权、或对未实现路径返 405 的网关会产生 wrong-yes 且不会被自动翻转——此时只能显式声明 `protocol:` 兜底，绕过 verdict。模型级的 400 措辞嗅探与 401/403/429→unknown 是有意的口径差异，见 `docs/decisions/intentional-behaviors.md`。
 
 运行态健康、模型锁和调度状态统一位于 `internal/runtime.Manager`。Manager 以
 单锁和 generation gate 保证健康 mutation、availability 过滤、schedule、

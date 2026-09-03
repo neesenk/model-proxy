@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +17,9 @@ import (
 
 	"model-proxy/internal/catalog"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
 	"model-proxy/internal/routing"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // models_check_test.go covers the endpoint probe (models_check.go):
@@ -253,26 +256,34 @@ func TestProbeModelCallable_500RawBody(t *testing.T) {
 // the probe FLOW (2xx callable / 4xx reason extraction / 5xx raw body) with a
 // fake impl that returns a fixed OpenAI-style probe.
 
-// --- checkProviderModels: kept/dropped split + stable order + reasons ---
+// --- checkProviderModels: 3-leg kept/dropped split + stable order + reasons + caps persist ---
 
 func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 	dir := t.TempDir()
 	setPoolHome(t, dir)
 	writePoolFile(t, "zhipu", "zhipu", "KEY")
 
-	// Map model -> status. Ordering of ids passed in must be preserved in output.
-	behaviors := map[string]int{
-		"keep-a": 200,
-		"drop-b": 404,
-		"keep-c": 200,
-		"drop-d": 500,
-		"keep-e": 200,
+	// Per (path, model) status table. The 3-leg probe hits /chat/completions and
+	// /responses on the openai base (the anthropic leg is unprobed - no
+	// anthropic_base_url). A model is KEPT when ANY leg classifies Yes (2xx
+	// here); 404 -> No, 500 -> Unknown, both drop the model. Input order must be
+	// preserved in the outputs.
+	type legKey struct{ path, model string }
+	statuses := map[legKey]int{
+		{"/chat/completions", "keep-a"}:      200,
+		{"/responses", "keep-a"}:             200,
+		{"/chat/completions", "drop-b"}:      404,
+		{"/responses", "drop-b"}:             404,
+		{"/chat/completions", "resp-only-c"}: 404,
+		{"/responses", "resp-only-c"}:        200,
+		{"/chat/completions", "drop-d"}:      500,
+		{"/responses", "drop-d"}:             500,
+		{"/chat/completions", "keep-e"}:      200,
+		{"/responses", "keep-e"}:             404,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// extract model from body
-		body := readAll(r.Body)
-		model := protocol.ExtractModel(body)
-		code, ok := behaviors[model]
+		model := protocol.ExtractModel(readAll(r.Body))
+		code, ok := statuses[legKey{r.URL.Path, model}]
 		if !ok {
 			code = 404
 		}
@@ -290,14 +301,14 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"},
 		},
 	}
-	ids := []string{"keep-a", "drop-b", "keep-c", "drop-d", "keep-e"}
-	kept, dropped, err := CheckProviderModels(cfg, "zhipu", ids)
+	ids := []string{"keep-a", "drop-b", "resp-only-c", "drop-d", "keep-e"}
+	kept, dropped, protocols, err := CheckProviderModels(cfg, "zhipu", ids)
 	if err != nil {
 		t.Fatalf("checkProviderModels: %v", err)
 	}
-	wantKept := []string{"keep-a", "keep-c", "keep-e"}
+	wantKept := []string{"keep-a", "resp-only-c", "keep-e"}
 	if len(kept) != len(wantKept) {
-		t.Fatalf("kept=%v want %v", kept, wantKept)
+		t.Fatalf("kept=%v want %v (a model is kept when ANY leg is callable)", kept, wantKept)
 	}
 	for i, m := range wantKept {
 		if kept[i] != m {
@@ -315,6 +326,48 @@ func TestCheckProviderModels_KeptDroppedOrder(t *testing.T) {
 		if dropped[i].Reason == "" {
 			t.Errorf("dropped[%d] (%s) reason empty", i, m)
 		}
+	}
+	// drop-b: 404 on both probed legs -> per-leg summary with the chat status
+	// surfaced, the anthropic leg reported as unprobed, and the upstream's
+	// error code+message extracted per leg.
+	if dropped[0].Status != 404 {
+		t.Errorf("drop-b status=%d want 404 (chat leg's)", dropped[0].Status)
+	}
+	for _, want := range []string{"chat HTTP 404: Bad: nope", "anthropic not probed (no base)", "responses HTTP 404: Bad: nope"} {
+		if !strings.Contains(dropped[0].Reason, want) {
+			t.Errorf("drop-b reason=%q missing %q", dropped[0].Reason, want)
+		}
+	}
+	if dropped[1].Status != 500 {
+		t.Errorf("drop-d status=%d want 500", dropped[1].Status)
+	}
+	// The returned matrix records the per-leg verdicts: resp-only-c is kept
+	// BECAUSE the responses leg classified Yes despite the chat 404.
+	mp, ok := protocols["resp-only-c"]
+	if !ok {
+		t.Fatalf("protocols missing resp-only-c: %v", protocols)
+	}
+	if mp.Chat != runtimewire.No || mp.Anthropic != runtimewire.No || mp.Responses != runtimewire.Yes {
+		t.Errorf("resp-only-c matrix = chat:%s ant:%s resp:%s, want no/no/yes", mp.Chat, mp.Anthropic, mp.Responses)
+	}
+	// The fresh matrix was persisted to model_caps.json under the isolated HOME,
+	// fingerprinted with the provider's current protocol config.
+	loaded, err := runtimewire.LoadModelCapsFile(filepath.Join(dir, ".model-proxy", "model_caps.json"))
+	if err != nil {
+		t.Fatalf("LoadModelCapsFile: %v", err)
+	}
+	entry, ok := loaded["zhipu"]
+	if !ok {
+		t.Fatalf("model_caps.json missing zhipu entry: %v", loaded)
+	}
+	if want := providerbuild.ProtocolConfigFingerprint(cfg.Providers["zhipu"]); entry.Fingerprint != want {
+		t.Errorf("caps fingerprint=%q want %q", entry.Fingerprint, want)
+	}
+	if len(entry.Models) != len(ids) {
+		t.Errorf("caps models=%v want one entry per probed id (%d)", entry.Models, len(ids))
+	}
+	if got := entry.Models["resp-only-c"]; got.Responses != runtimewire.Yes {
+		t.Errorf("persisted resp-only-c.responses=%s want yes", got.Responses)
 	}
 }
 
@@ -338,18 +391,24 @@ func TestCheckProviderModels_NotLoggedInAllDropped(t *testing.T) {
 			"zhipu": {OpenAIBaseURL: srv.URL, Provider: "zhipu"},
 		},
 	}
-	kept, dropped, err := CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"})
+	kept, dropped, _, err := CheckProviderModels(cfg, "zhipu", []string{"glm-5.2"})
 	if err != nil {
 		t.Fatalf("not-logged-in: want no error (impl builds file-backed), got %v", err)
 	}
 	if len(kept) != 0 {
-		t.Errorf("not-logged-in: kept=%v want empty (auth fails)", kept)
+		t.Errorf("not-logged-in: kept=%v want empty (auth fails on every leg)", kept)
 	}
 	if len(dropped) != 1 || dropped[0].Model != "glm-5.2" {
 		t.Errorf("not-logged-in: dropped=%+v want [glm-5.2]", dropped)
 	}
+	// Every probed leg failed at the auth step (no HTTP exchange -> status 0);
+	// the per-leg summary carries each leg's auth error, and the anthropic leg
+	// is reported as unprobed (no anthropic_base_url configured).
 	if dropped[0].Status != 0 || !strings.Contains(dropped[0].Reason, "auth") {
 		t.Errorf("not-logged-in: dropped reason=%q status=%d want auth error / status 0", dropped[0].Reason, dropped[0].Status)
+	}
+	if !strings.Contains(dropped[0].Reason, "anthropic not probed (no base)") {
+		t.Errorf("not-logged-in: dropped reason=%q want the anthropic leg marked unprobed", dropped[0].Reason)
 	}
 }
 
@@ -475,7 +534,15 @@ func TestPrintKeptModels(t *testing.T) {
 	sources := map[string]map[string]routing.ModelSource{
 		"volcengine": {"glm-5.2": routing.SrcModelsDev, "kimi-k2.6": routing.SrcDefault},
 	}
-	out := grabStdout(t, func() { PrintKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources) })
+	protocols := map[string]map[string]runtimewire.ModelProtocols{
+		"volcengine": {
+			"glm-5.2": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.Yes},
+			// kimi-k2.6 has no entry -> "-"
+		},
+	}
+	out := grabStdout(t, func() {
+		PrintKeptModels("volcengine", []string{"glm-5.2", "kimi-k2.6"}, meta, sources, protocols)
+	})
 	if !strings.Contains(out, "glm-5.2") || !strings.Contains(out, "kimi-k2.6") {
 		t.Errorf("printKeptModels missing models: %q", out)
 	}
@@ -495,10 +562,18 @@ func TestPrintKeptModels(t *testing.T) {
 	if !strings.Contains(out, "models.dev") {
 		t.Errorf("printKeptModels missing SRC=models.dev: %q", out)
 	}
+	// PROTOCOLS column: header, the Yes legs in chat/ant/resp order, "-" for the
+	// model without an entry.
+	if !strings.Contains(out, "PROTOCOLS") {
+		t.Errorf("printKeptModels missing PROTOCOLS header: %q", out)
+	}
+	if !strings.Contains(out, "chat/resp") {
+		t.Errorf("printKeptModels missing PROTOCOLS=chat/resp for glm-5.2: %q", out)
+	}
 }
 
 func TestPrintKeptModels_Empty(t *testing.T) {
-	out := grabStdout(t, func() { PrintKeptModels("x", nil, nil, nil) })
+	out := grabStdout(t, func() { PrintKeptModels("x", nil, nil, nil, nil) })
 	if !strings.Contains(out, "(no models)") {
 		t.Errorf("empty printKeptModels=%q want (no models)", out)
 	}
@@ -519,7 +594,7 @@ func TestPrintFilterSummary_PolicyAndProbe(t *testing.T) {
 	if !strings.Contains(out, "glm-latest") || !strings.Contains(out, "excluded by filter rule") {
 		t.Errorf("summary missing policy drop + reason: %q", out)
 	}
-	if !strings.Contains(out, "doubao-seedance-2.0") || !strings.Contains(out, "not callable on base_url") {
+	if !strings.Contains(out, "doubao-seedance-2.0") || !strings.Contains(out, "not callable on any protocol") {
 		t.Errorf("summary missing probe drop + reason: %q", out)
 	}
 	if !strings.Contains(out, "AccessDenied") {
@@ -542,5 +617,81 @@ func TestPrintFilterSummary_AllFailedWarning(t *testing.T) {
 	}
 	if !strings.Contains(out, "login/network") {
 		t.Errorf("all-failed summary=%q want login/network hint", out)
+	}
+}
+
+// --- protocolsCell: PROTOCOLS column rendering ---
+
+func TestProtocolsCell(t *testing.T) {
+	cases := []struct {
+		name string
+		mp   runtimewire.ModelProtocols
+		ok   bool
+		want string
+	}{
+		{"no entry", runtimewire.ModelProtocols{}, false, "-"},
+		{"chat+responses yes", runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.Yes}, true, "chat/resp"},
+		{"all three yes in chat/ant/resp order", runtimewire.ModelProtocols{Chat: runtimewire.Yes, Anthropic: runtimewire.Yes, Responses: runtimewire.Yes}, true, "chat/ant/resp"},
+		{"anthropic only", runtimewire.ModelProtocols{Chat: runtimewire.No, Anthropic: runtimewire.Yes, Responses: runtimewire.No}, true, "ant"},
+		{"all no", runtimewire.ModelProtocols{Chat: runtimewire.No, Anthropic: runtimewire.No, Responses: runtimewire.No}, true, "none"},
+		{"all unknown", runtimewire.ModelProtocols{}, true, "-"},
+		{"mixed no+unknown, no yes", runtimewire.ModelProtocols{Chat: runtimewire.No, Anthropic: runtimewire.Unknown, Responses: runtimewire.Unknown}, true, "-"},
+	}
+	for _, tc := range cases {
+		if got := protocolsCell(tc.mp, tc.ok); got != tc.want {
+			t.Errorf("%s: protocolsCell=%q want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// --- loadModelCapsProjection: fingerprint-gated read of model_caps.json ---
+
+func TestLoadModelCapsProjection(t *testing.T) {
+	dir := t.TempDir()
+	setPoolHome(t, dir)
+
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
+		"zhipu": {Provider: "zhipu", OpenAIBaseURL: "https://o"},
+		"aqp":   {Provider: "aqp", OpenAIBaseURL: "https://a"},
+	}}
+	matrix := map[string]runtimewire.ModelProtocols{
+		"glm-5.2": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.Yes},
+	}
+	capsPath := filepath.Join(dir, ".model-proxy", "model_caps.json")
+	err := runtimewire.SaveModelCapsFile(capsPath, map[string]runtimewire.ProviderModelCaps{
+		// Matches the current zhipu config -> projected.
+		"zhipu": {Fingerprint: providerbuild.ProtocolConfigFingerprint(cfg.Providers["zhipu"]), ProbedAt: time.Now(), Models: matrix},
+		// Stale fingerprint (different base url) -> dropped.
+		"aqp": {Fingerprint: providerbuild.ProtocolConfigFingerprint(configdomain.Provider{Provider: "aqp", OpenAIBaseURL: "https://OLD"}), ProbedAt: time.Now(), Models: matrix},
+		// Provider no longer in config -> dropped.
+		"gone": {Fingerprint: "whatever", ProbedAt: time.Now(), Models: matrix},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proj := loadModelCapsProjection(cfg)
+	if len(proj) != 1 {
+		t.Fatalf("projection providers=%v want only [zhipu]", proj)
+	}
+	if got := proj["zhipu"]["glm-5.2"]; got != matrix["glm-5.2"] {
+		t.Errorf("projection zhipu/glm-5.2=%+v want %+v", got, matrix["glm-5.2"])
+	}
+
+	// Missing file -> nil, no error surfaced.
+	setPoolHome(t, t.TempDir())
+	if got := loadModelCapsProjection(cfg); got != nil {
+		t.Errorf("missing file: projection=%v want nil", got)
+	}
+
+	// Malformed file -> nil, no error surfaced.
+	dir2 := t.TempDir()
+	setPoolHome(t, dir2)
+	bad := filepath.Join(dir2, ".model-proxy", "model_caps.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadModelCapsProjection(cfg); got != nil {
+		t.Errorf("malformed file: projection=%v want nil", got)
 	}
 }

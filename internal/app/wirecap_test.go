@@ -18,15 +18,18 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"model-proxy/internal/probe"
 )
 
 // ---------------------------------------------------------------------------
 // probe execution
 // ---------------------------------------------------------------------------
 
-// TestWireCap_ProbeProviders: eligible providers are probed (both legs, model
-// from provider.Models[0]); codex (ProtocolHint-covered) is skipped; a fresh
-// verdict is not re-probed.
+// TestWireCap_ProbeProviders: eligible providers are probed (chat + responses
+// legs on the openai base, model from provider.Models[0]); codex
+// (ProtocolHint-covered) is skipped; a fresh verdict is not re-probed.
+// Anthropic is NOT probed — it's config-declared via anthropic_base_url.
 func TestWireCap_ProbeProviders(t *testing.T) {
 	type hit struct{ path, body string }
 	var hits []hit
@@ -38,7 +41,7 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 			w.Write([]byte(`{"id":"r1","status":"completed","output":[]}`))
 			return
 		}
-		w.WriteHeader(http.StatusNotFound) // /v1/messages does not exist
+		w.WriteHeader(http.StatusNotFound) // /chat/completions does not exist
 	}))
 	defer up.Close()
 	var codexHits int
@@ -65,8 +68,8 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 	if !ok {
 		t.Fatal("provider p not probed")
 	}
-	if caps.Responses != triYes || caps.Anthropic != triNo {
-		t.Errorf("verdict = responses:%s anthropic:%s, want yes/no", caps.Responses, caps.Anthropic)
+	if caps.Responses != triYes || caps.Chat != triNo {
+		t.Errorf("verdict = responses:%s chat:%s, want yes/no", caps.Responses, caps.Chat)
 	}
 	if caps.BaseURL != up.URL {
 		t.Errorf("verdict base_url = %q", caps.BaseURL)
@@ -79,7 +82,7 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 		if !strings.Contains(h.body, `"m-probe"`) {
 			t.Errorf("probe body missing model m-probe: %s", h.body)
 		}
-		if h.path != "/responses" && h.path != "/v1/messages" {
+		if h.path != "/responses" && h.path != "/chat/completions" {
 			t.Errorf("unexpected probe path %q", h.path)
 		}
 	}
@@ -98,12 +101,12 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 	}
 }
 
-// TestWireCap_ProbeSkipsAnthropicLegWithBase: a provider WITH anthropic_base_url
-// must not get /v1/messages probed on its openai base (the matrix short-circuits
-// to the dedicated base; the fabricated URL is nonsense, e.g. zhipu's
-// /api/paas/v4/v1/messages). The anthropic verdict stays unknown, and the
-// freshness check still skips re-probes (only the responses leg counts).
-func TestWireCap_ProbeSkipsAnthropicLegWithBase(t *testing.T) {
+// TestWireCap_ProbeNeverFabricatesAnthropicOnOpenAIBase: the anthropic
+// protocol is never probed on the openai base — even for a provider WITH
+// anthropic_base_url (anthropic support is config-declared; the model-level
+// pass probes it on the anthropic base instead). Both openai legs are probed
+// and the freshness check skips re-probes.
+func TestWireCap_ProbeNeverFabricatesAnthropicOnOpenAIBase(t *testing.T) {
 	var paths []string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -123,20 +126,25 @@ func TestWireCap_ProbeSkipsAnthropicLegWithBase(t *testing.T) {
 
 	p.probeAllWireCaps()
 
-	if len(paths) != 1 || paths[0] != "/responses" {
-		t.Fatalf("probe paths = %v, want exactly [/responses]", paths)
+	if len(paths) != 2 {
+		t.Fatalf("probe paths = %v, want exactly [/chat/completions /responses]", paths)
+	}
+	for _, path := range paths {
+		if path == "/v1/messages" {
+			t.Fatalf("anthropic fabricated on the openai base: %v", paths)
+		}
 	}
 	caps, ok := p.wireVerdict("p")
 	if !ok {
 		t.Fatal("provider p not probed")
 	}
-	if caps.Responses != triYes || caps.Anthropic != triUnknown {
-		t.Errorf("verdict = responses:%s anthropic:%s, want yes/unknown", caps.Responses, caps.Anthropic)
+	if caps.Responses != triYes || caps.Chat != triYes {
+		t.Errorf("verdict = responses:%s chat:%s, want yes/yes", caps.Responses, caps.Chat)
 	}
-	// Fresh despite the unknown anthropic leg (base set → never probed).
+	// Fresh → second pass is a no-op.
 	p.probeAllWireCaps()
-	if len(paths) != 1 {
-		t.Errorf("re-probe hit upstream %d times, want 1 total (fresh verdict skipped)", len(paths))
+	if len(paths) != 2 {
+		t.Errorf("re-probe hit upstream %d times, want 2 total (fresh verdict skipped)", len(paths))
 	}
 }
 
@@ -161,7 +169,7 @@ func TestWireCap_StaleNegativeVerdictIsReprobed(t *testing.T) {
 	p := newTestProxy(t, cfg)
 	p.providers["p"] = &testProv{key: "k"}
 
-	p.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triNo, Anthropic: triNo,
+	p.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triNo, Chat: triNo,
 		ProbedAt: time.Now().Add(-2 * wireCapNegativeTTL)})
 	p.probeAllWireCaps()
 	if hits.Load() == 0 {
@@ -173,7 +181,7 @@ func TestWireCap_StaleNegativeVerdictIsReprobed(t *testing.T) {
 	}
 
 	hits.Store(0)
-	p.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triNo, Anthropic: triNo, ProbedAt: time.Now()})
+	p.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triNo, Chat: triYes, ProbedAt: time.Now()})
 	p.probeAllWireCaps()
 	if hits.Load() != 0 {
 		t.Fatalf("fresh negative verdict re-probed (%d hits), want 0", hits.Load())
@@ -181,7 +189,7 @@ func TestWireCap_StaleNegativeVerdictIsReprobed(t *testing.T) {
 }
 
 // TestWireCap_ProbeModelSelection: without provider.Models, the probe model
-// comes from the first route target.
+// comes from the first route target (probe.PickModel, shared with wire record).
 func TestWireCap_ProbeModelSelection(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -192,12 +200,12 @@ func TestWireCap_ProbeModelSelection(t *testing.T) {
 		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID}},
 		Routes:    map[string][]RouteTarget{"m1": {{Provider: "p", Model: "m1"}}},
 	}
-	if got := wireProbeModel(cfg, nil, "p"); got != "m1" {
-		t.Errorf("wireProbeModel = %q, want m1 (route target)", got)
+	if got := probe.PickModel(cfg, nil, "p"); got != "m1" {
+		t.Errorf("PickModel = %q, want m1 (route target)", got)
 	}
 	cfg.Providers["p"] = Provider{OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m0"}}
-	if got := wireProbeModel(cfg, nil, "p"); got != "m0" {
-		t.Errorf("wireProbeModel = %q, want m0 (provider.Models[0] wins)", got)
+	if got := probe.PickModel(cfg, nil, "p"); got != "m0" {
+		t.Errorf("PickModel = %q, want m0 (provider.Models[0] wins)", got)
 	}
 }
 
@@ -223,7 +231,7 @@ func TestWireCap_Forward_AnthropicToResponses(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
-	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triYes, Anthropic: triNo, ProbedAt: time.Now()})
+	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triYes, Chat: triNo, ProbedAt: time.Now()})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
@@ -271,7 +279,7 @@ func TestWireCap_Forward_ResponsesToChatWhenNo(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
-	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triNo, Anthropic: triNo, ProbedAt: time.Now()})
+	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triNo, Chat: triYes, ProbedAt: time.Now()})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
@@ -303,16 +311,18 @@ func TestWireCap_Forward_ResponsesToChatWhenNo(t *testing.T) {
 	}
 }
 
-// TestWireCap_Forward_AnthropicPassthroughWhenGateway: verdict.anthropic==yes
-// keeps byte-level passthrough (gateways that accept anthropic natively).
-func TestWireCap_Forward_AnthropicPassthroughWhenGateway(t *testing.T) {
-	sent := `{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`
-	var gotBody string
+// TestWireCap_Forward_AnthropicConvertsToChatWithoutAnthropicBase: without an
+// anthropic_base_url the anthropic protocol is unsupported BY DEFINITION — the
+// proxy converts to chat (responses verdict no) instead of byte-passthrough'ing
+// an anthropic body onto the openai base (the old gateway-passthrough branch
+// is gone).
+func TestWireCap_Forward_AnthropicConvertsToChatWithoutAnthropicBase(t *testing.T) {
+	var gotBody, gotPath string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		gotBody = string(b)
+		gotBody, gotPath = string(b), r.URL.Path
 		w.Header().Set("content-type", "application/json")
-		w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+		w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer up.Close()
 	cfg := &Config{
@@ -321,11 +331,11 @@ func TestWireCap_Forward_AnthropicPassthroughWhenGateway(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
-	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triNo, Anthropic: triYes, ProbedAt: time.Now()})
+	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triNo, Chat: triYes, ProbedAt: time.Now()})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
-	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(sent))
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,13 +347,14 @@ func TestWireCap_Forward_AnthropicPassthroughWhenGateway(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("client status = %d, want 200: %s", resp.StatusCode, body)
 	}
-	if gotBody != sent {
-		t.Errorf("gateway-accepting provider did not get byte-identical body:\n got: %s\nwant: %s", gotBody, sent)
+	if gotPath != "/chat/completions" {
+		t.Errorf("upstream path = %q, want /chat/completions (converted, not passthrough)", gotPath)
 	}
-	// Passthrough must also hold on the response side: byte-identical upstream
-	// answer, no protocol conversion applied.
-	if want := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`; string(body) != want {
-		t.Errorf("client body not byte-identical passthrough:\n got: %s\nwant: %s", body, want)
+	if !strings.Contains(gotBody, `"messages"`) {
+		t.Errorf("upstream got non-chat body: %s", gotBody)
+	}
+	if !strings.Contains(string(body), `"type":"message"`) {
+		t.Errorf("client did not get an anthropic response: %s", body)
 	}
 }
 
@@ -374,7 +385,7 @@ func TestWireCap_Forward_404Correction(t *testing.T) {
 	}
 	p := newTestProxy(t, cfg)
 	p.providers["oai"] = &testProv{key: "k"}
-	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triYes, Anthropic: triUnknown, ProbedAt: time.Now()})
+	p.setWireCaps("oai", wireCaps{BaseURL: up.URL, Responses: triYes, Chat: triUnknown, ProbedAt: time.Now()})
 	px := httptest.NewServer(http.HandlerFunc(p.Handler))
 	defer px.Close()
 
@@ -458,7 +469,7 @@ func TestWireCap_MissVerdictUsesRequestSnapshotParent(t *testing.T) {
 	// parent through its own snapshot — this is the gate targetExecutor binds
 	// at assembly from RuntimeSnapshot.ParentOf.
 	gate := proxyHealthGate{proxy: p, parentOf: snap.ParentOf}
-	gate.NoteWireResponsesMiss("v")
+	gate.NoteWireResponsesMiss("v", "")
 
 	caps, ok := p.wireVerdict("parent-old")
 	if !ok || caps.Responses != triNo {
@@ -490,7 +501,7 @@ func TestWireCap_PersistRoundTrip(t *testing.T) {
 	}
 
 	p1 := newTestProxyAt(t, mkCfg(up.URL), statePath)
-	p1.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triYes, Anthropic: triNo, ProbedAt: time.Now()})
+	p1.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triYes, Chat: triNo, ProbedAt: time.Now()})
 	if err := p1.quota.Persist(); err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +516,7 @@ func TestWireCap_PersistRoundTrip(t *testing.T) {
 	// Boot a second proxy on the same file: verdict restored.
 	p2 := newTestProxyAt(t, mkCfg(up.URL), statePath)
 	caps, ok := p2.wireVerdict("p")
-	if !ok || caps.Responses != triYes || caps.Anthropic != triNo {
+	if !ok || caps.Responses != triYes || caps.Chat != triNo {
 		t.Errorf("restored verdict = %+v (ok=%v), want yes/no", caps, ok)
 	}
 
@@ -552,7 +563,7 @@ func TestWireCap_ProbeTimeoutUnknown(t *testing.T) {
 	if !ok {
 		t.Fatal("provider not probed")
 	}
-	if caps.Responses != triUnknown || caps.Anthropic != triUnknown {
-		t.Errorf("timeout verdict = responses:%s anthropic:%s, want unknown/unknown (no negative conclusion cached)", caps.Responses, caps.Anthropic)
+	if caps.Responses != triUnknown || caps.Chat != triUnknown {
+		t.Errorf("timeout verdict = responses:%s chat:%s, want unknown/unknown (no negative conclusion cached)", caps.Responses, caps.Chat)
 	}
 }

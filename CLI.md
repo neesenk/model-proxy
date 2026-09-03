@@ -409,9 +409,9 @@ models pull
 
 stdout 表格（`printAllModels`），表头：
 ```
-PROVIDER       MODEL ID               NAME                 CTX         OUTPUT    MODALITIES        SRC
+PROVIDER       MODEL ID               NAME                 CTX         OUTPUT    MODALITIES        SRC         PROTOCOLS
 ```
-列宽：PROVIDER 12 / MODEL ID 22 / NAME 20 / CTX 10 / OUTPUT 8 / MODALITIES 16 / SRC 10（`pad`，左对齐）。每 provider 一组模型（config 名 ∪ hydrate 元数据键，排序）。`SRC` = `models.dev` / `default` / 空。
+列宽：PROVIDER 12 / MODEL ID 22 / NAME 20 / CTX 10 / OUTPUT 8 / MODALITIES 16 / SRC 10 / PROTOCOLS 12（`pad`，左对齐）。每 provider 一组模型（config 名 ∪ hydrate 元数据键，排序）。`SRC` = `models.dev` / `default` / 空。`PROTOCOLS` 是 `~/.model-proxy/model_caps.json` 的只读投影（`loadModelCapsProjection`）：仅当存储的 fingerprint 与 provider 当前 protocol 配置（`providerbuild.ProtocolConfigFingerprint`）一致时使用，否则视为无数据；文件缺失/malformed 静默降级。每模型渲染 Yes 腿按 chat/ant/resp 顺序以 `/` 连接（如 `chat/resp`）；无条目或全 unknown -> `-`；全 No -> `none`。
 
 - 未知 provider -> stderr `unknown provider "<NAME>"; available: <providerNames>` + exit 1。
 
@@ -437,19 +437,21 @@ no models to probe for <PROVNAME> (no /models endpoint and no routes target it);
 
 **stdout（`printKeptModels`，最终保留列表，先于摘要）**：
 ```
-MODEL ID                       NAME                  CTX         OUTPUT    INPUT MODALITIES    SRC
+MODEL ID                       NAME                  CTX         OUTPUT    INPUT MODALITIES    SRC         PROTOCOLS
 <kept rows>
 provider: <PROVNAME>: <N> models
 ```
-列宽：MODEL ID 26 / NAME 20 / CTX 10 / OUTPUT 8 / INPUT MODALITIES 18 / SRC 10。空集 -> stdout `(no models)`（黄）。
+列宽：MODEL ID 26 / NAME 20 / CTX 10 / OUTPUT 8 / INPUT MODALITIES 18 / SRC 10 / PROTOCOLS 12。空集 -> stdout `(no models)`（黄）。`PROTOCOLS` 直接取本次探测刚算出的矩阵（不经文件往返），渲染规则同 `models` 列表。
+
+**探测与 model_caps.json**：`checkProviderModels` 对每个候选 id 跑 3 协议矩阵探测（`probe.ProbeModelProtocols`：chat / anthropic / responses 腿，anthropic 腿仅在配置 `anthropic_base_url` 时探测），每腿经 `wirecap.ClassifyModelStatus` 归类 Yes/No/Unknown。**任一腿 Yes 即保留**，否则 drop。探测成功后把该 provider 的新鲜矩阵**整体替换式**写入 `~/.model-proxy/model_caps.json`（fingerprint = `providerbuild.ProtocolConfigFingerprint`，best-effort：失败仅 stderr 告警，不影响 refresh；`perr` 时不写）。
 
 **stderr 摘要（`printFilterSummary`，列表之后）**：先空行；有 drop 时：
 ```
 filtered out <N> model(s):
   <MODEL>                       excluded by filter rule          # 策略（regex）drop
-  <MODEL>                       not callable on base_url - <REASON>   # 探测 drop
+  <MODEL>                       not callable on any protocol - <LEGS SUMMARY>   # 探测 drop
 ```
-全失败（`allProbeFailed`）时表头改为 `filtered out <N> model(s) - probe failed for ALL (likely not logged in / network):`，每行 reason 前缀 `probe failed (login/network?) - `。探测 infra 不可用（`perr != nil`）-> `endpoint probe skipped (<ERR>); list written unvalidated`。
+`<LEGS SUMMARY>` 为逐腿摘要，以 ` / ` 连接，如 `chat HTTP 404: <code>: <msg> / anthropic not probed (no base) / responses HTTP 400: invalid model`。全失败（`allProbeFailed`）时表头改为 `filtered out <N> model(s) - probe failed for ALL (likely not logged in / network):`，每行 reason 前缀 `probe failed (login/network?) - `。探测 infra 不可用（`perr != nil`）-> `endpoint probe skipped (<ERR>); list written unvalidated`。
 
 **stderr diff 行（`writeProviderModels` 写盘后，仅当 `kept != existing`）**：
 ```

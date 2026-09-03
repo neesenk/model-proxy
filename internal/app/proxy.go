@@ -95,6 +95,11 @@ type processServices struct {
 	// calls back into Proxy while locked and survives reload generations.
 	wireCaps  runtimewire.Store
 	wireProbe bool
+	// Model-level protocol capabilities (chat/anthropic/responses per model),
+	// persisted in their own model_caps.json (path derived from the quota
+	// state path). Same leaf-lock + survives-reload discipline as wireCaps.
+	modelCaps     runtimewire.ModelStore
+	modelCapsPath string
 }
 
 // Proxy holds the compiled provider instances + the config.
@@ -244,6 +249,7 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	// the default (off) path and direct-NewProxy tests pay zero overhead.
 	p.cache = NewResponseCache(cfg.Cache)
 	p.responsesState = protocol.NewResponsesStateStore(protocol.ResponsesStatePath(qpath))
+	p.modelCapsPath = runtimewire.ModelCapsPath(qpath)
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
 	// UI client subscribes; publish is non-blocking so it never stalls forward.
 	p.events = observeevents.NewHub()
@@ -298,6 +304,15 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 			baseURLs[name] = prov.OpenAIBaseURL
 		}
 		p.wireCaps.RestoreMatching(loaded, baseURLs)
+	}
+	// Restore model-level protocol capabilities from model_caps.json. A
+	// provider's entry is honored only while its protocol-relevant config
+	// fingerprint (base urls / provider_id / headers) still matches — an
+	// unchanged fingerprint means the verdicts are reused with NO re-probe.
+	if loaded, err := runtimewire.LoadModelCapsFile(p.modelCapsPath); err != nil {
+		logx.Warnf("[modelcaps] %v; starting empty", err)
+	} else if len(loaded) > 0 {
+		p.modelCaps.Restore(loaded, protocolFingerprints(cfg))
 	}
 	return p
 }

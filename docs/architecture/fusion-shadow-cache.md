@@ -142,8 +142,9 @@ model-denied/404、empty-200 模型锁、metrics、usage、live event 和 reques
 一次性 401 refresh / 400 参数 learn-strip 重试、响应上限读取）由
 `targetexec.BufferedLeg` 拥有——Executor 的 headless 非流式对应物；circuit、
 metrics、rate-limit 记录与 request log 仍留在 `internal/forward/fusion.go`（最终
-exchange 经 `BufferedLeg.Capture` 回填）。verdict 驱动的 /responses leg 遇 404 时同样翻转 wire verdict
-（`noteWireResponsesMiss`）且**不锁模型**——verdict 判错而非模型缺失。metrics
+exchange 经 `BufferedLeg.Capture` 回填）。verdict 驱动的 /responses leg 遇 404 时同样经
+`noteWireResponsesMiss` 翻转 verdict（模型粒度：模型级矩阵有条目时只翻转模型级，否则翻转
+provider 级，见 routing-and-failure.md）且**不锁模型**——verdict 判错而非模型缺失。metrics
 口径与 tryTarget 对齐：被放弃的 leg 记 evFailovers（连接错误/5xx 另记
 evFailures；401 只记 evFailovers）。候选文本按 leg 的 backendProto 解析
 （anthropic content[]、chat choices[] 或原生 responses output[] 的

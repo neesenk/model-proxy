@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/provider"
 	runtimestate "model-proxy/internal/runtime"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 func TestDashboardProjection(t *testing.T) {
@@ -326,6 +328,92 @@ func TestPinsProjection(t *testing.T) {
 	out := service.Pins()
 	if len(out) != 1 || out[0].Route != "m" || out[0].Provider != "up" || !out[0].ExpiresAt.Equal(expires) {
 		t.Errorf("pins = %v", out)
+	}
+}
+
+func TestModelsDocumentProjection(t *testing.T) {
+	probed := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	service := New(Ports{
+		ModelCapsSnapshot: func() map[string]runtimewire.ProviderModelCaps {
+			return map[string]runtimewire.ProviderModelCaps{
+				"up": {
+					Fingerprint: "0123456789abcdef",
+					ProbedAt:    probed,
+					Models: map[string]runtimewire.ModelProtocols{
+						"m1": {Chat: runtimewire.Yes, Anthropic: runtimewire.No, Responses: runtimewire.Unknown},
+					},
+				},
+				// Provider probed but with no recorded models keeps its
+				// fingerprint/probed_at and projects an empty, non-nil map.
+				"empty": {Fingerprint: "fedcba9876543210", ProbedAt: probed},
+			}
+		},
+	})
+
+	document := service.ModelsDocument()
+
+	up, ok := document.Providers["up"]
+	if !ok || up.Fingerprint != "0123456789abcdef" || !up.ProbedAt.Equal(probed) {
+		t.Fatalf("providers[up] = %+v", document.Providers["up"])
+	}
+	m1 := up.Models["m1"]
+	if m1.Chat != "yes" || m1.Anthropic != "no" || m1.Responses != "unknown" {
+		t.Errorf("verdict strings = %+v, want yes/no/unknown", m1)
+	}
+	empty, ok := document.Providers["empty"]
+	if !ok || empty.Models == nil || len(empty.Models) != 0 {
+		t.Errorf("providers[empty] = %+v, want present with an empty non-nil models map", empty)
+	}
+
+	// JSON shape: the wire contract keys, never Go field names.
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Providers map[string]struct {
+			Fingerprint string `json:"fingerprint"`
+			ProbedAt    string `json:"probed_at"`
+			Models      map[string]struct {
+				Chat      string `json:"chat"`
+				Anthropic string `json:"anthropic"`
+				Responses string `json:"responses"`
+			} `json:"models"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("document JSON = %s: %v", data, err)
+	}
+	wire := decoded.Providers["up"]
+	if wire.Fingerprint != "0123456789abcdef" || wire.ProbedAt != "2026-09-01T10:00:00Z" ||
+		wire.Models["m1"].Chat != "yes" || wire.Models["m1"].Anthropic != "no" || wire.Models["m1"].Responses != "unknown" {
+		t.Errorf("wire projection = %+v (%s)", wire, data)
+	}
+}
+
+func TestModelsDocumentEmptyStore(t *testing.T) {
+	// Empty snapshot → {"providers":{}} (non-nil, never null).
+	service := New(Ports{
+		ModelCapsSnapshot: func() map[string]runtimewire.ProviderModelCaps {
+			return map[string]runtimewire.ProviderModelCaps{}
+		},
+	})
+	document := service.ModelsDocument()
+	if document.Providers == nil || len(document.Providers) != 0 {
+		t.Errorf("empty store document = %+v", document)
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"providers":{}}` {
+		t.Errorf("empty store JSON = %s, want {\"providers\":{}}", data)
+	}
+
+	// A missing port degrades to the same empty document.
+	document = New(Ports{}).ModelsDocument()
+	if document.Providers == nil || len(document.Providers) != 0 {
+		t.Errorf("nil port document = %+v", document)
 	}
 }
 

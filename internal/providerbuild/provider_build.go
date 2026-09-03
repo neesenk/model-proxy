@@ -311,6 +311,26 @@ func HealthConfigFingerprint(cfg *configdomain.Config) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
+// ProtocolConfigFingerprint identifies one provider's protocol-relevant
+// config: provider_id, both base URLs, and the static headers (sent on every
+// upstream request, so a header change can change protocol behavior). The
+// persisted model_caps.json entry for a provider restores only on an exact
+// match — an unchanged fingerprint means the cached protocol verdicts are
+// reused without re-probing (no TTL).
+func ProtocolConfigFingerprint(p configdomain.Provider) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s|%s|%s\n", p.Provider, p.OpenAIBaseURL, p.AnthropicBaseURL)
+	keys := make([]string, 0, len(p.Headers))
+	for k := range p.Headers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(h, "%s=%s\n", k, p.Headers[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
 // BuildOpts wires the production environment seams (home dir, codex version
 // probes, volcengine signed model list) for BuildProviders.
 func BuildOpts() BuildOptions {

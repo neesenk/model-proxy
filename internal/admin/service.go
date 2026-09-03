@@ -19,6 +19,7 @@ import (
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/provider"
 	runtimestate "model-proxy/internal/runtime"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // Ports are the narrow capabilities the admin service needs from the
@@ -64,6 +65,11 @@ type Ports struct {
 	FusionSnapshot func(workflow string, now time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
 	// Pins returns the active pins (expired ones already dropped).
 	Pins func() map[string]PinState
+	// ModelCapsSnapshot returns the startup protocol probe's detached
+	// per-provider model capability matrix (empty, non-nil map when nothing
+	// was probed yet). The ModelStore owns its own leaf lock, so the closure
+	// does not take p.mu.
+	ModelCapsSnapshot func() map[string]runtimewire.ProviderModelCaps
 	// Pricing returns the pricing catalog (immutable after publication) plus
 	// a detached copy of the configured overrides.
 	Pricing func() (catalog *pricing.Catalog, overrides map[string]pricing.Override)
