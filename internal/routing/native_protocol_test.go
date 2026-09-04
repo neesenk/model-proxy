@@ -39,3 +39,40 @@ func TestNativeProtocols(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeProtocolsWithVerdict(t *testing.T) {
+	cfg := &configdomain.Config{Providers: map[string]configdomain.Provider{
+		"both":        {OpenAIBaseURL: "https://x/v1", AnthropicBaseURL: "https://x/anthropic/v1"},
+		"openai-only": {OpenAIBaseURL: "https://x/v1"},
+	}}
+	v := func(chat, anth, resp Tri) *ModelProtocolVerdict {
+		return &ModelProtocolVerdict{Chat: chat, Anthropic: anth, Responses: resp}
+	}
+	cases := []struct {
+		name   string
+		target configdomain.RouteTarget
+		v      *ModelProtocolVerdict
+		want   map[string]bool
+	}{
+		{"nil verdict = static (both endpoints)", configdomain.RouteTarget{Provider: "both", Model: "m"}, nil, map[string]bool{"anthropic": true, "openai": true}},
+		{"probe no overrides declared endpoint", configdomain.RouteTarget{Provider: "both", Model: "m"}, v(TriNo, TriYes, TriUnknown), map[string]bool{"anthropic": true}},
+		{"probe yes claims responses statically unclaimable", configdomain.RouteTarget{Provider: "openai-only", Model: "m"}, v(TriYes, TriNo, TriYes), map[string]bool{"openai": true, "responses": true}},
+		{"probe no on undeclared endpoint stays empty", configdomain.RouteTarget{Provider: "openai-only", Model: "m"}, v(TriYes, TriNo, TriNo), map[string]bool{"openai": true}},
+		{"unknown leg falls back to declaration", configdomain.RouteTarget{Provider: "both", Model: "m"}, v(TriUnknown, TriNo, TriUnknown), map[string]bool{"openai": true}},
+		{"explicit protocol ignores verdict", configdomain.RouteTarget{Provider: "both", Model: "m", Protocol: "responses"}, v(TriYes, TriYes, TriNo), map[string]bool{"responses": true}},
+		{"all legs no = empty set (abstain)", configdomain.RouteTarget{Provider: "both", Model: "m"}, v(TriNo, TriNo, TriNo), map[string]bool{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := NativeProtocolsWithVerdict(cfg, c.target, c.v)
+			if len(got) != len(c.want) {
+				t.Fatalf("NativeProtocolsWithVerdict = %v, want %v", got, c.want)
+			}
+			for proto := range c.want {
+				if !got[proto] {
+					t.Errorf("NativeProtocolsWithVerdict = %v, missing %q", got, proto)
+				}
+			}
+		})
+	}
+}

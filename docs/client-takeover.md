@@ -74,9 +74,11 @@ pi-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
 `docs/architecture/protocol-conversion.md`）。`--mode` 决定多协议族怎么写：
 
 - **unified（默认）**：按族选一个变体写入。统计每条暴露路由首选目标
-  （priority 最小）的原生协议（`routing.NativeProtocols`，纯静态判定：
-  显式 `protocol:` > `ProtocolHint` > 声明的 `anthropic_base_url`/
-  `openai_base_url`；responses 无探测结果时不静态声明），覆盖最多的协议
+  （priority 最小）的原生协议（`routing.NativeProtocolsWithVerdict`，判定
+  顺序：显式 `protocol:` > `ProtocolHint` > daemon 逐模型探测结论
+  （`model_caps.json`，fingerprint 校验防陈旧：探测 no 推翻端点声明、yes
+  可补出静态拿不到的 responses 腿）> 声明的 `anthropic_base_url`/
+  `openai_base_url`（responses 无探测结果时不静态声明）），覆盖最多的协议
   胜出，平手（含完全无信号）回退与族同名的默认变体；覆盖之外的模型走
   协议转换。选择理由与仍需转换的模型会打在日志里。
 - **split**：每种原生协议写一个配置项，暴露模型按原生协议划分到各配置项

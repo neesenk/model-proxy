@@ -36,8 +36,10 @@ type ProtocolCoverage struct {
 }
 
 // protocolCoverage computes coverage over primary targets (lowest priority,
-// same rule ExposedModels uses for metadata).
-func protocolCoverage(cfg *configdomain.Config, routes map[string][]configdomain.RouteTarget) *ProtocolCoverage {
+// same rule ExposedModels uses for metadata), enriched by the daemon's
+// per-model probe verdicts when a usable model_caps.json exists (caps may be
+// nil → static endpoint declarations only).
+func protocolCoverage(cfg *configdomain.Config, routes map[string][]configdomain.RouteTarget, caps map[string]map[string]routing.ModelProtocolVerdict) *ProtocolCoverage {
 	cov := &ProtocolCoverage{
 		Counts: map[string]int{},
 		native: map[string]map[string]bool{},
@@ -47,7 +49,8 @@ func protocolCoverage(cfg *configdomain.Config, routes map[string][]configdomain
 			continue
 		}
 		cov.Total++
-		set := routing.NativeProtocols(cfg, primaryTarget(targets))
+		primary := primaryTarget(targets)
+		set := routing.NativeProtocolsWithVerdict(cfg, primary, verdictFor(caps, primary))
 		cov.native[exposed] = set
 		if len(set) == 0 {
 			cov.Unknown = append(cov.Unknown, exposed)
@@ -301,7 +304,7 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 			families = []string{which}
 		}
 	}
-	cov := protocolCoverage(cfg, routing.RouteTable(cfg))
+	cov := protocolCoverage(cfg, routing.RouteTable(cfg), probeCaps(cfg))
 	out := make([]ClientSpec, 0, len(families))
 	for _, family := range families {
 		variants := byFamily[family]
