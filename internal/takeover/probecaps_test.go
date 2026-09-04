@@ -26,7 +26,7 @@ func writeModelCaps(t *testing.T, home, provName string, prov configdomain.Provi
 		fingerprint = providerbuild.ProtocolConfigFingerprint(prov)
 	}
 	doc := map[string]any{
-		"version": 1,
+		"version": runtimewire.ModelCapsFileVersion,
 		"providers": map[string]any{
 			provName: map[string]any{
 				"fingerprint": fingerprint,

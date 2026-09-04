@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"sync"
 	"time"
@@ -95,6 +96,7 @@ func probeLeg(ctx context.Context, client *http.Client, prov configdomain.Provid
 	if pr.Path == path && len(pr.Body) > 0 {
 		body = pr.Body // provider-owned dialect wins (codex /responses)
 	}
+	body = attachProbeTool(body, leg)
 	rep, err := doCallability(ctx, client, prov, impl, Request{
 		BaseURL: base,
 		Method:  pr.Method,
@@ -106,6 +108,47 @@ func probeLeg(ctx context.Context, client *http.Client, prov configdomain.Provid
 }
 
 // legBody returns the generic minimal probe body for a protocol leg.
+// attachProbeTool adds one trivial function-tool declaration to a leg's
+// probe body, making the verdict AGENT-GRADE: coding agents always send
+// tools, and real gateways exist whose endpoint answers a bare ping but
+// rejects tools for the same model (aqp's gpt-5.6 series: chat/anthropic
+// accept a ping, yet the backend only serves tools on /v1/responses). The
+// declaration is leg-shaped (chat/anthropic/responses tool envelopes differ)
+// and is merged into whatever body won — including provider dialect bodies —
+// so dialect-required legs are measured with tools too. Unparseable bodies
+// are sent unchanged rather than dropped.
+func attachProbeTool(body []byte, leg Leg) []byte {
+	var tool any
+	params := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"city": map[string]any{"type": "string"}},
+		"required":   []string{"city"},
+	}
+	switch leg {
+	case LegChat:
+		tool = map[string]any{"type": "function", "function": map[string]any{
+			"name": "get_weather", "description": "Get the weather for a city", "parameters": params}}
+	case LegAnthropic:
+		tool = map[string]any{
+			"name": "get_weather", "description": "Get the weather for a city", "input_schema": params}
+	case LegResponses:
+		tool = map[string]any{"type": "function",
+			"name": "get_weather", "description": "Get the weather for a city", "parameters": params}
+	default:
+		return body
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return body
+	}
+	doc["tools"] = []any{tool}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func legBody(leg Leg, model string) []byte {
 	switch leg {
 	case LegChat:

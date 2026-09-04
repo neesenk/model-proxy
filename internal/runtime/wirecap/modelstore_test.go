@@ -153,3 +153,33 @@ func TestModelProtocolsConcluded(t *testing.T) {
 		t.Error("all-final matrix must be concluded")
 	}
 }
+
+func TestLoadModelCapsFileVersionMismatchDiscards(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "model_caps.json")
+	// v1 file (pre tools-attached probe legs): verdict semantics changed, so
+	// a version mismatch must read as ABSENT (re-probe), not as data and not
+	// as corruption.
+	legacy := `{"version":1,"providers":{"aqp":{"fingerprint":"fp","models":{"m":{"chat":"yes","anthropic":"yes","responses":"yes"}}}}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadModelCapsFile(path)
+	if err != nil {
+		t.Fatalf("version mismatch must not error, got %v", err)
+	}
+	if loaded != nil {
+		t.Errorf("v1 file under v%d semantics must be discarded, got %v", ModelCapsFileVersion, loaded)
+	}
+	// Current version round-trips.
+	now := time.Now()
+	if err := SaveModelCapsFile(path, map[string]ProviderModelCaps{
+		"aqp": {Fingerprint: "fp", ProbedAt: now, Models: map[string]ModelProtocols{"m": {Chat: Yes}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = LoadModelCapsFile(path)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("current-version round-trip failed: loaded=%v err=%v", loaded, err)
+	}
+}

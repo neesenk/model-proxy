@@ -13,8 +13,10 @@ import (
 // from the quota state path so tests isolated via NewProxyWithStatePath get an
 // isolated caps file for free.
 
-// ModelCapsFileVersion is the current file format version.
-const ModelCapsFileVersion = 1
+// ModelCapsFileVersion is the current file format version. Bump history:
+// 2 — probe legs attach a function-tool declaration (agent-grade
+// callability); v1 verdicts measured bare pings and must be re-probed.
+const ModelCapsFileVersion = 2
 
 // ModelCapsPath derives the model_caps.json path as a sibling of the quota
 // state file (mirrors ResponsesStatePath).
@@ -41,6 +43,11 @@ func LoadModelCapsFile(path string) (map[string]ProviderModelCaps, error) {
 	var f modelCapsFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("model caps file %s: %w", path, err)
+	}
+	if f.Version != ModelCapsFileVersion {
+		// Verdict semantics changed across versions — treat the file as
+		// absent (not corrupt) so everything re-probes under the new rules.
+		return nil, nil
 	}
 	return f.Providers, nil
 }

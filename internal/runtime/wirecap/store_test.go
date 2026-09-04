@@ -159,6 +159,7 @@ func TestClassifyModelStatus(t *testing.T) {
 		{"400 invalid model", true, 400, nil, `invalid model`, No},
 		{"400 not supported with this model", true, 400, nil, `Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.`, No},
 		{"400 case insensitive", true, 400, nil, `MODEL NOT FOUND`, No},
+		{"400 tools not supported for model on leg", true, 400, nil, `Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.`, No},
 		{"401 auth", true, 401, nil, "", Unknown},
 		{"429 quota", true, 429, nil, "", Unknown},
 		{"500", true, 500, nil, "", Unknown},

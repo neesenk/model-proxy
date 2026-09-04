@@ -52,6 +52,12 @@ var modelRejectionPhrases = []string{
 	"unknown model",
 	"no such model",
 	"not supported with this model",
+	// "<feature> is/are not supported for <model> in <path>" — the gateway
+	// rejects the model ON THIS LEG (aqp: "Function tools with
+	// reasoning_effort are not supported for gpt-5.6-luna in
+	// /v1/chat/completions"), which is precisely what the tools-attached
+	// probe leg must record as unsupported.
+	"not supported for",
 }
 
 // ClassifyModelStatus maps one protocol-leg probe outcome to a model-level

@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -221,4 +222,81 @@ func TestDoBodyLimitAndAccept(t *testing.T) {
 	if rep.Latency <= 0 {
 		t.Errorf("Latency = %v, want measured", rep.Latency)
 	}
+}
+
+func TestAttachProbeToolShapesPerLeg(t *testing.T) {
+	cases := []struct {
+		leg      Leg
+		body     string
+		wantPath []string // dotted key path to the tools array
+		wantKey  string   // distinguishing key inside the tool object
+	}{
+		{LegChat, `{"model":"m","messages":[]}`, nil, "function"},
+		{LegAnthropic, `{"model":"m","messages":[],"max_tokens":1}`, nil, "input_schema"},
+		{LegResponses, `{"model":"m","input":"hi"}`, nil, "parameters"},
+	}
+	for _, c := range cases {
+		out := attachProbeTool([]byte(c.body), c.leg)
+		var doc map[string]any
+		if err := json.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("%s: result not JSON: %v", c.leg, err)
+		}
+		if doc["model"] != "m" {
+			t.Errorf("%s: original fields lost: %s", c.leg, out)
+		}
+		tools, ok := doc["tools"].([]any)
+		if !ok || len(tools) != 1 {
+			t.Fatalf("%s: tools = %v, want exactly one declaration", c.leg, doc["tools"])
+		}
+		tool := tools[0].(map[string]any)
+		if c.leg == LegChat {
+			if _, ok := tool["function"].(map[string]any); !ok {
+				t.Errorf("chat leg: tool missing function envelope: %v", tool)
+			}
+		} else if _, ok := tool[c.wantKey]; !ok {
+			t.Errorf("%s leg: tool missing %q: %v", c.leg, c.wantKey, tool)
+		}
+	}
+	// Unparseable body passes through unchanged.
+	raw := []byte("not-json")
+	if got := attachProbeTool(raw, LegChat); string(got) != string(raw) {
+		t.Errorf("invalid body must pass through, got %s", got)
+	}
+}
+
+func TestProbeLegAttachesToolsToDialectBody(t *testing.T) {
+	// A provider dialect body (path matches the leg) wins, but the tool
+	// declaration must still be merged in — the tools-attached measurement
+	// applies to dialect legs too.
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		fmt.Fprint(w, `{"choices":[]}`)
+	}))
+	defer srv.Close()
+	impl := dialectImpl{path: "/chat/completions", body: `{"model":"m","dialect":true}`}
+	prov := configdomain.Provider{OpenAIBaseURL: srv.URL}
+	res := probeLeg(context.Background(), srv.Client(), prov, impl, impl.ProbeRequest("m"), "m", LegChat)
+	if !res.Probed || res.Status != 200 {
+		t.Fatalf("probeLeg = %+v, want probed 200", res)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(gotBody, &doc); err != nil {
+		t.Fatalf("upstream got non-JSON: %s", gotBody)
+	}
+	if doc["dialect"] != true {
+		t.Errorf("dialect body lost: %s", gotBody)
+	}
+	if _, ok := doc["tools"].([]any); !ok {
+		t.Errorf("tools not attached to dialect body: %s", gotBody)
+	}
+}
+
+type dialectImpl struct {
+	stubImpl
+	path, body string
+}
+
+func (d dialectImpl) ProbeRequest(modelID string) provider.ProbeRequest {
+	return provider.ProbeRequest{Method: http.MethodPost, Path: d.path, Body: []byte(d.body)}
 }
