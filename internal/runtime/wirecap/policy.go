@@ -38,6 +38,31 @@ func ClassifyStatus(status int, err error) Verdict {
 	return Unknown
 }
 
+// ClassifyProviderStatus maps one PROVIDER-level probe outcome to a
+// capability conclusion. Differs from ClassifyStatus in exactly one case: a
+// 400 whose body carries a model/tool rejection wording is No, not yes.
+// Provider-level legs are probed with a function tool attached (agent-grade,
+// same as model legs), and a 400 like "Function tools ... are not supported
+// for gpt-5.6-luna in /v1/chat/completions" means the endpoint exists but
+// the tools-attached leg is not callable — claiming yes would replay the
+// bare-ping false positive the tool attachment exists to catch. A provider
+// no expires via negativeTTL, so a wrong phrase match self-heals on the next
+// probe pass (unlike model-level nos, which are fingerprint-gated).
+func ClassifyProviderStatus(status int, err error, body []byte) Verdict {
+	if err != nil {
+		return Unknown
+	}
+	if status == 400 {
+		lower := strings.ToLower(string(body))
+		for _, phrase := range modelRejectionPhrases {
+			if strings.Contains(lower, phrase) {
+				return No
+			}
+		}
+	}
+	return ClassifyStatus(status, err)
+}
+
 // modelRejectionPhrases are the 400-error wordings that mean "this model is
 // not served here" rather than a request-shape dispute. Matched
 // case-insensitively against the (possibly gateway-wrapped) error body. Bare
@@ -151,6 +176,10 @@ func Resolve(
 //	anthropic client + hasAnthropicBase + model.anthropic == yes → passthrough
 //	anthropic client + model.responses == yes                    → convert to responses
 //	  (covers both "no anthropic base" and "model absent from the anthropic base")
+//	anthropic client + model.anthropic == no                     → convert to chat
+//	  (a probed no overrides the base declaration — the leg is dead for THIS
+//	  model; same rule as routing.NativeProtocolsWithVerdict, so takeover and
+//	  forward never disagree)
 //	anthropic client + model fully concluded, responses != yes   → convert to chat
 //	responses client + model.responses == no                     → convert to chat
 //	responses client + model.responses == yes                    → passthrough
@@ -171,10 +200,24 @@ func ResolveModel(
 				return "anthropic", false
 			case modelCaps.Responses == Yes:
 				return "responses", true
+			case modelCaps.Anthropic == No:
+				// A probed model-level no overrides the endpoint declaration
+				// (routing.NativeProtocolsWithVerdict's settle treats it the
+				// same way) — the anthropic leg is dead for this model, so
+				// never fall back to provider-level anthropic passthrough.
+				// The openai base takes over, preferring responses when the
+				// provider-level verdict backs it and the model-level
+				// responses leg did not conclude no (a model-level no beats
+				// a provider-level yes — rewindable via the 404 correction);
+				// otherwise chat, worth one attempt even when unconcluded
+				// (unknown ≠ dead).
+				if cok && capabilities.Responses == Yes && modelCaps.Responses != No {
+					return "responses", true
+				}
+				return "openai", false
 			case modelCaps.Concluded():
-				// Anthropic unavailable (no base or model-level no) and
-				// responses concluded not-yes → chat is the definitional
-				// openai-base fallback.
+				// No anthropic base and responses concluded not-yes → chat is
+				// the definitional openai-base fallback.
 				return "openai", false
 			}
 		case "responses":

@@ -3,6 +3,7 @@ package wirecap
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -192,6 +193,7 @@ func TestResolveModel(t *testing.T) {
 		{"miss falls back to provider", "anthropic", false, ModelProtocols{}, false, "responses", true},
 		// anthropic client.
 		{"anthropic yes with base", "anthropic", true, mp(Yes, Yes, No), true, "anthropic", false},
+		{"anthropic no with base, provider responses yes", "anthropic", true, mp(Yes, No, Unknown), true, "responses", true},
 		{"model absent from anthropic base, responses yes", "anthropic", true, mp(Yes, No, Yes), true, "responses", true},
 		{"no anthropic base, responses yes", "anthropic", false, mp(Yes, No, Yes), true, "responses", true},
 		{"no anthropic base, responses no, chat yes", "anthropic", false, mp(Yes, No, No), true, "openai", false},
@@ -226,10 +228,10 @@ func TestStoreSnapshotCorrectionAndRestore(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	store := &Store{}
 	store.Put("a", Capabilities{
-		BaseURL: "https://a", Responses: Yes, Chat: No, ProbedAt: now,
+		BaseURL: "https://a", Responses: Yes, Chat: No, ProbedAt: now, ProbeVersion: ProbeVersion,
 	})
 	store.Put("b", Capabilities{
-		BaseURL: "https://old-b", Responses: No, Chat: Yes, ProbedAt: now,
+		BaseURL: "https://old-b", Responses: No, Chat: Yes, ProbedAt: now, ProbeVersion: ProbeVersion,
 	})
 	store.MarkResponsesUnsupported("a", now.Add(time.Minute))
 	got, ok := store.Get("a")
@@ -250,7 +252,7 @@ func TestStoreSnapshotCorrectionAndRestore(t *testing.T) {
 	want := map[string]Capabilities{
 		"a": {
 			BaseURL: "https://a", Responses: No, Chat: No,
-			ProbedAt: now.Add(time.Minute),
+			ProbedAt: now.Add(time.Minute), ProbeVersion: ProbeVersion,
 		},
 	}
 	if restored := store.Snapshot(); !reflect.DeepEqual(restored, want) {
@@ -299,5 +301,50 @@ func TestStoreConcurrentAccess(t *testing.T) {
 
 	if _, ok := store.Get("provider"); !ok {
 		t.Fatal("concurrent writers lost the provider entry")
+	}
+}
+
+// TestResolveModelAnthropicNoNeverPassthroughs pins the layer-agreement fix:
+// a concluded model-level anthropic no must not fall through to provider-level
+// anthropic passthrough even when the provider-level legs are unconcluded
+// (routing.NativeProtocolsWithVerdict excludes the leg, so forward must too).
+func TestResolveModelAnthropicNoNeverPassthroughs(t *testing.T) {
+	caps := Capabilities{Chat: Unknown, Responses: Unknown}
+	for _, hasBase := range []bool{true, false} {
+		proto, via := ResolveModel("anthropic", hasBase,
+			ModelProtocols{Chat: Unknown, Anthropic: No, Responses: Unknown}, true, caps, true)
+		if proto == "anthropic" {
+			t.Fatalf("hasBase=%v: ResolveModel passthroughs dead anthropic leg (%q, via=%v)", hasBase, proto, via)
+		}
+	}
+}
+
+// TestClassifyProviderStatus pins the provider-level agent-grade 400 rule:
+// tool/model rejection wording → No, any other 400 keeps the generic
+// "shape dispute proves the route exists" yes.
+func TestClassifyProviderStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		err    error
+		body   string
+		want   Verdict
+	}{
+		{"200", 200, nil, "", Yes},
+		{"404", 404, nil, "", No},
+		{"plain 400 shape dispute", 400, nil, `Unsupported parameter: 'temperature'`, Yes},
+		{"400 tool rejection wording", 400, nil, `Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions`, No},
+		{"400 model not found", 400, nil, `Model not found: m1`, No},
+		{"401", 401, nil, "", Yes},
+		{"500", 500, nil, "", Unknown},
+		{"network error", 0, fmt.Errorf("dial"), "", Unknown},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := ClassifyProviderStatus(testCase.status, testCase.err, []byte(testCase.body))
+			if got != testCase.want {
+				t.Errorf("ClassifyProviderStatus = %s, want %s", got, testCase.want)
+			}
+		})
 	}
 }

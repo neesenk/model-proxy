@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"model-proxy/internal/probe"
+	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
 // ---------------------------------------------------------------------------
@@ -501,7 +502,7 @@ func TestWireCap_PersistRoundTrip(t *testing.T) {
 	}
 
 	p1 := newTestProxyAt(t, mkCfg(up.URL), statePath)
-	p1.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triYes, Chat: triNo, ProbedAt: time.Now()})
+	p1.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triYes, Chat: triNo, ProbedAt: time.Now(), ProbeVersion: runtimewire.ProbeVersion})
 	if err := p1.quota.Persist(); err != nil {
 		t.Fatal(err)
 	}
@@ -526,15 +527,28 @@ func TestWireCap_PersistRoundTrip(t *testing.T) {
 		t.Error("verdict restored despite base_url mismatch — must be invalidated")
 	}
 
+	// stale probe semantics (v1 bare-ping entries) → dropped so the next
+	// pass re-probes agent-grade; a bare-ping "yes" must not be trusted
+	// indefinitely.
+	p1.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triYes, Chat: triYes, ProbedAt: time.Now(), ProbeVersion: runtimewire.ProbeVersion - 1})
+	if err := p1.quota.Persist(); err != nil {
+		t.Fatal(err)
+	}
+	if p4 := newTestProxyAt(t, mkCfg(up.URL), statePath); func() bool { _, ok := p4.wireVerdict("p"); return ok }() {
+		t.Error("verdict restored despite stale probe version — must be invalidated")
+	}
+	// p1's in-memory entry is also stale now; re-stamp for the reload check.
+	p1.setWireCaps("p", wireCaps{BaseURL: up.URL, Responses: triYes, Chat: triNo, ProbedAt: time.Now(), ProbeVersion: runtimewire.ProbeVersion})
+
 	// reload keeps the in-memory verdict (wireCaps is not cleared health state).
 	cfgFile := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(cfgFile, []byte("providers:\n  p: {provider_id: static, openai_base_url: "+up.URL+"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := p2.Reload(cfgFile); err != nil {
+	if err := p1.Reload(cfgFile); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := p2.wireVerdict("p"); !ok {
+	if _, ok := p1.wireVerdict("p"); !ok {
 		t.Error("verdict lost across reload — wireCaps must survive (unlike health)")
 	}
 }
@@ -565,5 +579,43 @@ func TestWireCap_ProbeTimeoutUnknown(t *testing.T) {
 	}
 	if caps.Responses != triUnknown || caps.Chat != triUnknown {
 		t.Errorf("timeout verdict = responses:%s chat:%s, want unknown/unknown (no negative conclusion cached)", caps.Responses, caps.Chat)
+	}
+}
+
+// TestWireCap_ProbeAgentGradeRejectionToNo pins the provider-level agent-grade
+// rule end to end: a gateway that answers bare pings but rejects the probe's
+// function tool with 400 "<feature> not supported for <model> in <path>" must
+// get a No verdict — not the generic "shape dispute proves the route" yes
+// that produced bare-ping false positives on the provider fallback path.
+func TestWireCap_ProbeAgentGradeRejectionToNo(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		if r.URL.Path == "/chat/completions" && strings.Contains(string(b), `"get_weather"`) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"Function tools with reasoning_effort are not supported for m-probe in /v1/chat/completions — use /v1/responses"}}`))
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+	cfg := &Config{
+		Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, Provider: testProviderID, Models: []string{"m-probe"}}},
+		Routes:    map[string][]RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+	p.probeAllWireCaps()
+	caps, ok := p.wireVerdict("p")
+	if !ok {
+		t.Fatal("provider p not probed")
+	}
+	if caps.Chat != triNo {
+		t.Errorf("chat verdict = %s, want no (tool rejection 400)", caps.Chat)
+	}
+	if caps.Responses != triYes {
+		t.Errorf("responses verdict = %s, want yes (bare-shaped 200)", caps.Responses)
+	}
+	if caps.ProbeVersion != runtimewire.ProbeVersion {
+		t.Errorf("probe_version = %d, want %d", caps.ProbeVersion, runtimewire.ProbeVersion)
 	}
 }

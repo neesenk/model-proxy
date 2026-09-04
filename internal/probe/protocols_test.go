@@ -300,3 +300,43 @@ type dialectImpl struct {
 func (d dialectImpl) ProbeRequest(modelID string) provider.ProbeRequest {
 	return provider.ProbeRequest{Method: http.MethodPost, Path: d.path, Body: []byte(d.body)}
 }
+
+// TestProbeProviderOpenAILegsAgentGrade pins the provider-level convergence:
+// both openai legs go through the same pipeline as model-level probes —
+// function-tool declaration attached, impl dialect merged, max_completion_tokens
+// retry applied — so a provider-level yes means callable WITH tools.
+func TestProbeProviderOpenAILegsAgentGrade(t *testing.T) {
+	var bodiesMu sync.Mutex
+	bodies := map[string]string{}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodiesMu.Lock()
+		bodies[r.URL.Path] = string(b)
+		bodiesMu.Unlock()
+		if strings.Contains(string(b), `"max_tokens"`) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens' instead."}}`))
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer up.Close()
+
+	prov := configdomain.Provider{OpenAIBaseURL: up.URL}
+	impl := stubImpl{}
+	chat, responses := ProbeProviderOpenAILegs(context.Background(), http.DefaultClient, prov, impl, "m1")
+	if chat.Err != nil || responses.Err != nil {
+		t.Fatalf("probe errors: chat=%v responses=%v", chat.Err, responses.Err)
+	}
+	if chat.Status != 200 || responses.Status != 200 {
+		t.Fatalf("statuses = chat:%d responses:%d, want 200/200 after max_completion_tokens retry", chat.Status, responses.Status)
+	}
+	for path, body := range bodies {
+		if !strings.Contains(body, `"get_weather"`) {
+			t.Errorf("leg %s probe body is not agent-grade (no function tool): %s", path, body)
+		}
+	}
+	if len(bodies) != 2 {
+		t.Errorf("probed paths = %v, want chat + responses", bodies)
+	}
+}

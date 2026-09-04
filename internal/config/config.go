@@ -1130,13 +1130,16 @@ func (c *Config) validate() error {
 		}
 		// alias: keys must name a model in models: and produce distinct exposed
 		// names — anything else is a typo that would silently never aggregate.
+		// Every exposed name is recorded, native ones included, so the check
+		// is order-independent (an alias colliding with another model's
+		// native name is caught whichever comes first in models:).
 		seenExposed := map[string]string{}
 		for _, m := range p.Models {
-			if e := p.ExposedModelName(m); seenExposed[e] != "" && seenExposed[e] != m {
+			e := p.ExposedModelName(m)
+			if seenExposed[e] != "" && seenExposed[e] != m {
 				return fmt.Errorf("provider %q: alias exposes %q for both %q and %q — one exposed name must map to one upstream model", name, e, seenExposed[e], m)
-			} else if e != m {
-				seenExposed[e] = m
 			}
+			seenExposed[e] = m
 		}
 		for model, exposed := range p.Alias {
 			if exposed == "" {

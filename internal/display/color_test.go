@@ -99,3 +99,17 @@ func TestIsTerminal_NonTTYAndStatError(t *testing.T) {
 		t.Error("stat error (closed file) must report not-a-terminal")
 	}
 }
+
+// TestIsTerminalExcludesDevNull pins the char-device approximation's one
+// documented exclusion: /dev/null is a char device but never interactive, so
+// color must stay off when stdout is redirected there.
+func TestIsTerminalExcludesDevNull(t *testing.T) {
+	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Skipf("cannot open %s: %v", os.DevNull, err)
+	}
+	defer f.Close()
+	if isTerminal(f) {
+		t.Errorf("isTerminal(%s) = true, want false", os.DevNull)
+	}
+}

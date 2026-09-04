@@ -107,6 +107,32 @@ func probeLeg(ctx context.Context, client *http.Client, prov configdomain.Provid
 	return res
 }
 
+// ProbeProviderOpenAILegs probes the provider-level callability of the two
+// openai-base legs (chat, responses) — the provider-level subset of
+// ProbeModelProtocols: anthropic support stays config-declared
+// (anthropic_base_url), never fabricated on the openai base. The legs go
+// through the SAME agent-grade pipeline as model-level probes (impl dialect
+// merge, function-tool attachment, max_completion_tokens retry), so a
+// provider-level yes means the leg is callable WITH tools — the false
+// positive where a gateway answers a bare ping but rejects function tools
+// (aqp's gpt-5.6 series) cannot recur on the provider fallback path.
+// `model` is the probe body's model id (PickModel's choice).
+func ProbeProviderOpenAILegs(ctx context.Context, client *http.Client, prov configdomain.Provider, impl provider.Provider, model string) (chat, responses LegResult) {
+	pr := impl.ProbeRequest(model)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		chat = probeLeg(ctx, client, prov, impl, pr, model, LegChat)
+	}()
+	go func() {
+		defer wg.Done()
+		responses = probeLeg(ctx, client, prov, impl, pr, model, LegResponses)
+	}()
+	wg.Wait()
+	return chat, responses
+}
+
 // legBody returns the generic minimal probe body for a protocol leg.
 // attachProbeTool adds one trivial function-tool declaration to a leg's
 // probe body, making the verdict AGENT-GRADE: coding agents always send

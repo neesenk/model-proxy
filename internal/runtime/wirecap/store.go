@@ -54,15 +54,24 @@ func (verdict *Verdict) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ProbeVersion is the provider-level probe semantics version persisted in
+// every Capabilities entry. Bump history:
+//
+//	2 — legs are probed with a function tool attached (agent-grade
+//	callability, mirroring model_caps.json version 2); v1 verdicts measured
+//	bare pings and are discarded on restore so everything re-probes.
+const ProbeVersion = 2
+
 // Capabilities is one endpoint's persisted wire-capability verdict. Anthropic
 // support is NOT probed: a provider declares it by configuring
 // anthropic_base_url (the decision matrix short-circuits on that), so only the
 // two openai-base legs are stored.
 type Capabilities struct {
-	BaseURL   string    `json:"base_url"`
-	Chat      Verdict   `json:"chat"`
-	Responses Verdict   `json:"responses"`
-	ProbedAt  time.Time `json:"probed_at"`
+	BaseURL      string    `json:"base_url"`
+	Chat         Verdict   `json:"chat"`
+	Responses    Verdict   `json:"responses"`
+	ProbedAt     time.Time `json:"probed_at"`
+	ProbeVersion int       `json:"probe_version"`
 }
 
 // Store owns the leaf lock and provider-parent keyed capability map.
@@ -127,7 +136,11 @@ func (store *Store) Snapshot() map[string]Capabilities {
 }
 
 // RestoreMatching replaces the store with persisted entries whose base URL
-// still matches the current provider configuration.
+// still matches the current provider configuration AND whose probe semantics
+// are current (ProbeVersion). Stale-semantics verdicts — e.g. v1 bare-ping
+// "yes" entries that never measured tools — are dropped so the next probe
+// pass re-measures them agent-grade; a wrong v1 yes is trusted indefinitely
+// otherwise (yes never expires, only the runtime 404 correction rewrites it).
 func (store *Store) RestoreMatching(
 	loaded map[string]Capabilities,
 	baseURLs map[string]string,
@@ -138,7 +151,7 @@ func (store *Store) RestoreMatching(
 	next := make(map[string]Capabilities, len(loaded))
 	for parent, capabilities := range loaded {
 		baseURL, configured := baseURLs[parent]
-		if configured && baseURL == capabilities.BaseURL {
+		if configured && baseURL == capabilities.BaseURL && capabilities.ProbeVersion == ProbeVersion {
 			next[parent] = capabilities
 		}
 	}

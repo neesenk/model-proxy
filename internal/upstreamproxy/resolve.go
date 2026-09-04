@@ -95,18 +95,30 @@ func isOff(s string) bool {
 	return strings.EqualFold(s, "off") || strings.EqualFold(s, "direct")
 }
 
+// redactSetting strips userinfo for error reporting: proxy URLs may embed
+// credentials ("socks5h://user:pass@host" is a legal setting), and the parse
+// errors here surface in config-validation output and proxy-side warn logs —
+// the credentials must not ride along.
+func redactSetting(s string) string {
+	if u, err := url.Parse(s); err == nil && u.User != nil {
+		u.User = nil
+		return u.String()
+	}
+	return s
+}
+
 func parseProxyURL(s string) (*url.URL, error) {
 	u, err := url.Parse(s)
 	if err != nil {
-		return nil, fmt.Errorf("invalid proxy URL %q: %w", s, err)
+		return nil, fmt.Errorf("invalid proxy URL %q: %w", redactSetting(s), err)
 	}
 	switch u.Scheme {
 	case "http", "https", "socks5":
 	default:
-		return nil, fmt.Errorf("invalid proxy URL %q: scheme must be http, https or socks5", s)
+		return nil, fmt.Errorf("invalid proxy URL %q: scheme must be http, https or socks5", redactSetting(s))
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("invalid proxy URL %q: missing host", s)
+		return nil, fmt.Errorf("invalid proxy URL %q: missing host", redactSetting(s))
 	}
 	return u, nil
 }
@@ -137,10 +149,11 @@ func isLoopback(host string) bool {
 		return true
 	}
 	switch host {
-	case "127.0.0.1", "::1":
+	case "127.0.0.1", "::1", "0:0:0:0:0:0:0:1":
 		return true
 	}
-	if strings.HasPrefix(host, "127.") {
+	lower := strings.ToLower(host)
+	if strings.HasPrefix(lower, "127.") || strings.HasPrefix(lower, "::ffff:127.") {
 		return true
 	}
 	return false

@@ -204,3 +204,25 @@ func TestValidate_Budgets(t *testing.T) {
 		t.Errorf("bad webhook_url: err=%v", err)
 	}
 }
+
+// TestValidateAliasExposedNameCollisionOrderIndependent pins the
+// order-independent alias collision check: an alias exposed name colliding
+// with another model's native name is rejected in BOTH models: orders —
+// previously only the alias-first order was caught and the reverse silently
+// produced one exposed name mapping to two upstream models.
+func TestValidateAliasExposedNameCollisionOrderIndependent(t *testing.T) {
+	build := func(models string) string {
+		return "listen: 127.0.0.1:1\nproviders:\n  z: {provider_id: zhipu, openai_base_url: \"https://x\", models: [" + models + "], alias: {k3: kimi-k3}}\n"
+	}
+	for name, models := range map[string]string{
+		"native first": "kimi-k3, k3",
+		"alias first":  "k3, kimi-k3",
+	} {
+		_, err := LoadConfigFromBytes("test", []byte(build(models)))
+		if err == nil {
+			t.Errorf("%s: load accepted alias/native exposed-name collision", name)
+		} else if !strings.Contains(err.Error(), "alias exposes") {
+			t.Errorf("%s: unexpected error: %v", name, err)
+		}
+	}
+}

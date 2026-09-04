@@ -3,6 +3,7 @@ package upstreamproxy
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -165,5 +166,49 @@ func TestAutoTransportHonorsChain(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://env-proxy:3128")
 	if got := proxyOf("https://api.example.com"); got == nil || got.String() != "http://env-proxy:3128" {
 		t.Fatalf("with env proxy, proxy = %v, want http://env-proxy:3128", got)
+	}
+}
+
+// TestValidateSettingRedactsUserinfo pins the credential rule: proxy URLs may
+// carry userinfo, and parse errors surface in config validation and warn
+// logs — the error must never echo the credentials back.
+func TestValidateSettingRedactsUserinfo(t *testing.T) {
+	for _, bad := range []string{
+		"socks5h://user:secret@proxy.example.com", // unsupported scheme
+		"http://user:secret@",                     // missing host
+	} {
+		err := ValidateSetting(bad)
+		if err == nil {
+			t.Fatalf("ValidateSetting(%q) = nil, want error", bad)
+		}
+		if strings.Contains(err.Error(), "user:secret") || strings.Contains(err.Error(), "secret") {
+			t.Errorf("ValidateSetting(%q) error leaks credentials: %v", bad, err)
+		}
+	}
+}
+
+func TestIsLoopback(t *testing.T) {
+	for _, host := range []string{
+		"localhost", "LOCALHOST", "127.0.0.1", "127.1.2.3", "::1",
+		"0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "::FFFF:127.0.0.1",
+	} {
+		if !isLoopback(host) {
+			t.Errorf("isLoopback(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{"example.com", "10.0.0.1", "::ffff:10.0.0.1", "128.0.0.1"} {
+		if isLoopback(host) {
+			t.Errorf("isLoopback(%q) = true, want false", host)
+		}
+	}
+}
+
+// TestAutoTransportSharedInstance pins the connection-reuse contract:
+// AutoTransport must return the same process-lifetime transport on every
+// call, so maintenance call sites share its connection pool instead of each
+// cloning and discarding one.
+func TestAutoTransportSharedInstance(t *testing.T) {
+	if AutoTransport() != AutoTransport() {
+		t.Fatal("AutoTransport() returned distinct transports; call sites cannot share the pool")
 	}
 }

@@ -6,6 +6,14 @@
 // probed: a provider declares it by configuring anthropic_base_url.
 // See docs/architecture/routing-and-failure.md.
 //
+// Probes are agent-grade: every provider-level leg carries a function-tool
+// declaration and goes through the same pipeline as model-level probes
+// (probe.ProbeProviderOpenAILegs), so a "yes" means callable WITH tools — a
+// gateway that answers a bare ping but rejects function tools cannot produce
+// a false positive here either. Verdict entries carry a probe-semantics
+// version (runtimewire.ProbeVersion); entries persisted under older probe
+// semantics are discarded on restore and re-probed.
+//
 // Rationale: openai_base_url contractually serves BOTH /chat/completions and
 // /responses (internal/config), but many third-party endpoints implement only
 // chat. Without a verdict, an anthropic client defaults to byte-level
@@ -82,6 +90,16 @@ func classifyWireStatus(status int, err error) triState {
 	return runtimewire.ClassifyStatus(status, err)
 }
 
+// classifyProviderWireStatus is classifyWireStatus with the agent-grade 400
+// rule: provider legs are probed with a function tool attached, and a 400
+// carrying a model/tool rejection wording ("Function tools ... are not
+// supported for <model> in <path>") means the leg is not callable for
+// agentic traffic — No, not the generic "shape dispute proves the route"
+// yes. See runtimewire.ClassifyProviderStatus.
+func classifyProviderWireStatus(status int, err error, body []byte) triState {
+	return runtimewire.ClassifyProviderStatus(status, err, body)
+}
+
 // probeAllWireCaps probes every eligible provider once (skipping providers
 // with a fresh verdict) and persists the results. Eligible: has an
 // openai_base_url AND no ProtocolHint (codex is already hint-covered — its
@@ -132,21 +150,13 @@ func (p *Proxy) probeAllWireCaps() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			chatRep, chatErr := probe.Do(context.Background(), client, provCfg, impl, probe.Request{
-				BaseURL: provCfg.OpenAIBaseURL,
-				Path:    "/chat/completions",
-				Body:    provider.OpenAIProbeBody(model),
-			})
-			responsesRep, responsesErr := probe.Do(context.Background(), client, provCfg, impl, probe.Request{
-				BaseURL: provCfg.OpenAIBaseURL,
-				Path:    "/responses",
-				Body:    provider.ResponsesProbeBody(model),
-			})
+			chatLeg, responsesLeg := probe.ProbeProviderOpenAILegs(context.Background(), client, provCfg, impl, model)
 			caps := wireCaps{
-				BaseURL:   provCfg.OpenAIBaseURL,
-				Chat:      classifyWireStatus(chatRep.Status, chatErr),
-				Responses: classifyWireStatus(responsesRep.Status, responsesErr),
-				ProbedAt:  time.Now(),
+				BaseURL:      provCfg.OpenAIBaseURL,
+				Chat:         classifyProviderWireStatus(chatLeg.Status, chatLeg.Err, chatLeg.Body),
+				Responses:    classifyProviderWireStatus(responsesLeg.Status, responsesLeg.Err, responsesLeg.Body),
+				ProbedAt:     time.Now(),
+				ProbeVersion: runtimewire.ProbeVersion,
 			}
 			p.setWireCaps(name, caps)
 			logx.Debugf("[wirecap] provider %s probed: chat=%s responses=%s", name, caps.Chat, caps.Responses)

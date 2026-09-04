@@ -84,6 +84,12 @@ func (p *Proxy) Reload(configPath string) error {
 		Timeout:       cfg.Scheduling.Timeout(),
 	}))
 	p.runtimeState.ReplaceGeneration(generation)
+	// Re-validate model-level protocol verdicts against the new generation's
+	// fingerprints: entries whose protocol-relevant config changed are dropped
+	// now (under the same lock the snapshot readers serialize on), and the
+	// fingerprint map arms ModelStore.Put's stale-generation guard so a still
+	// in-flight pre-reload probe pass cannot write its verdicts back.
+	p.modelCaps.Restore(p.modelCaps.Snapshot(), protocolFingerprints(cfg))
 	p.mu.Unlock()
 	// Re-publish the config-level global proxy for the automatic chain used by
 	// non-forwarding outbound calls (see NewProxyWithStatePath).

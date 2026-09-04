@@ -34,9 +34,16 @@ type ProviderModelCaps struct {
 // ModelStore owns the leaf lock and the (provider-parent, model) keyed
 // capability map. Methods never call application code while holding the lock.
 // The zero value is ready for use; the map is allocated lazily by Put.
+//
+// The expected-fingerprint map (installed by Restore) is the write guard: a
+// probe pass from a superseded config generation must not write its verdicts
+// back over the current generation's state. Put silently drops writes whose
+// fingerprint does not match the expected one, so a slow old-generation pass
+// racing a reload cannot resurrect stale verdicts.
 type ModelStore struct {
-	mu   sync.RWMutex
-	caps map[string]ProviderModelCaps
+	mu       sync.RWMutex
+	caps     map[string]ProviderModelCaps
+	expected map[string]string
 }
 
 // Get returns one model's protocol matrix.
@@ -66,13 +73,19 @@ func (store *ModelStore) ProviderFingerprint(parent string) (string, bool) {
 }
 
 // Put records one model's protocol matrix, stamping the provider's
-// fingerprint and probe time.
+// fingerprint and probe time. The write is dropped when Restore installed an
+// expected fingerprint for the provider and this one differs — the writer is
+// a probe pass from a superseded config generation (pre-reload capture), and
+// its verdicts describe a base URL the current config no longer has.
 func (store *ModelStore) Put(parent, fingerprint, model string, mp ModelProtocols, now time.Time) {
 	if store == nil {
 		return
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if want, ok := store.expected[parent]; ok && want != fingerprint {
+		return
+	}
 	if store.caps == nil {
 		store.caps = map[string]ProviderModelCaps{}
 	}
@@ -135,7 +148,10 @@ func (store *ModelStore) Snapshot() map[string]ProviderModelCaps {
 
 // Restore replaces the store with persisted entries whose fingerprint still
 // matches the provider's current protocol-relevant config. Providers absent
-// from fingerprints (deleted from config) are dropped.
+// from fingerprints (deleted from config) are dropped. The fingerprint map is
+// ALSO installed as the store's expected fingerprints, arming Put's
+// stale-generation guard — callers must therefore re-Run Restore on every
+// config generation swap (boot AND reload), not just at first load.
 func (store *ModelStore) Restore(loaded map[string]ProviderModelCaps, fingerprints map[string]string) {
 	if store == nil {
 		return
@@ -147,7 +163,12 @@ func (store *ModelStore) Restore(loaded map[string]ProviderModelCaps, fingerprin
 			next[parent] = entry
 		}
 	}
+	expected := make(map[string]string, len(fingerprints))
+	for parent, fp := range fingerprints {
+		expected[parent] = fp
+	}
 	store.mu.Lock()
 	store.caps = next
+	store.expected = expected
 	store.mu.Unlock()
 }

@@ -378,21 +378,26 @@ func (t *Template) rewriteJSON(ctx renderContext) error {
 }
 
 // substituteValue walks decoded YAML values, substituting placeholders in
-// every string leaf.
+// every string leaf. Pure: containers are rebuilt, never mutated in place —
+// t.JSON.Set values belong to the shared *Template, and a caller reusing the
+// template (TemplateByName encourages it) must not see the first render's
+// substitutions baked into the second.
 func substituteValue(v any, sub func(string) string) any {
 	switch x := v.(type) {
 	case string:
 		return sub(x)
 	case map[string]any:
+		out := make(map[string]any, len(x))
 		for k, e := range x {
-			x[k] = substituteValue(e, sub)
+			out[k] = substituteValue(e, sub)
 		}
-		return x
+		return out
 	case []any:
+		out := make([]any, len(x))
 		for i, e := range x {
-			x[i] = substituteValue(e, sub)
+			out[i] = substituteValue(e, sub)
 		}
-		return x
+		return out
 	}
 	return v
 }
@@ -617,13 +622,17 @@ func nestedString(v map[string]any, path ...string) (string, bool) {
 }
 
 // tomlTopKeyValue reads a top-level TOML string key (before any [section]).
+// The key match is exact ("model" must not hit "model_provider") and any line
+// after the first "[" belongs to a table, not the top level.
 func tomlTopKeyValue(text, key string) (string, bool) {
+	prefix := key + " "
+	prefixTab := key + "\t"
 	for _, line := range strings.Split(text, "\n") {
 		l := strings.TrimSpace(line)
 		if strings.HasPrefix(l, "[") {
 			break
 		}
-		if !strings.HasPrefix(l, key) {
+		if !strings.HasPrefix(l, prefix) && !strings.HasPrefix(l, prefixTab) {
 			continue
 		}
 		if i := strings.Index(l, "="); i >= 0 {

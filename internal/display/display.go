@@ -6,6 +6,7 @@ package display
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -43,12 +44,21 @@ func decideColor(f *os.File) bool {
 }
 
 // isTerminal approximates whether the fd is a terminal (char device).
+// /dev/null is also a char device but never interactive — exclude it so
+// redirecting stdout to /dev/null doesn't turn color escape codes on. Kept
+// stdlib-only (this package is a zero-dependency leaf); interactive TTYs are
+// char devices too, so this stays an approximation.
 func isTerminal(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {
 		return false
 	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	if fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	// File.Stat basenames the path, so compare against /dev/null's base name
+	// (os.DevNull is "/dev/null" on unix, "NUL" on windows).
+	return fi.Name() != filepath.Base(os.DevNull) && fi.Name() != "NUL"
 }
 
 // SetColorEnabled lets tests and embedding callers override stdout color.

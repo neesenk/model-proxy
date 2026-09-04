@@ -183,3 +183,32 @@ func TestLoadModelCapsFileVersionMismatchDiscards(t *testing.T) {
 		t.Fatalf("current-version round-trip failed: loaded=%v err=%v", loaded, err)
 	}
 }
+
+// TestModelStorePutRejectsSupersededGeneration pins the stale-generation write
+// guard: after Restore installs expected fingerprints (boot/reload), a Put
+// carrying a pre-reload fingerprint — a probe pass that captured the old
+// config and finished after the swap — must be dropped, while a Put matching
+// the current generation lands.
+func TestModelStorePutRejectsSupersededGeneration(t *testing.T) {
+	store := &ModelStore{}
+	now := time.Unix(1_700_000_000, 0)
+	store.Restore(nil, map[string]string{"p": "fp-old"})
+	store.Put("p", "fp-old", "m", ModelProtocols{Chat: Yes}, now)
+	if mp, ok := store.Get("p", "m"); !ok || mp.Chat != Yes {
+		t.Fatalf("matching-generation Put dropped: %+v ok=%v", mp, ok)
+	}
+
+	// Reload: fingerprint changed, stale entry dropped, expectation re-armed.
+	store.Restore(store.Snapshot(), map[string]string{"p": "fp-new"})
+	if _, ok := store.Get("p", "m"); ok {
+		t.Fatal("stale-fingerprint entry survived Restore")
+	}
+	store.Put("p", "fp-old", "m", ModelProtocols{Chat: No}, now)
+	if mp, ok := store.Get("p", "m"); ok {
+		t.Fatalf("superseded-generation Put resurrected stale verdict: %+v", mp)
+	}
+	store.Put("p", "fp-new", "m", ModelProtocols{Chat: Yes, Responses: No}, now)
+	if mp, ok := store.Get("p", "m"); !ok || mp.Chat != Yes || mp.Responses != No {
+		t.Fatalf("current-generation Put dropped: %+v ok=%v", mp, ok)
+	}
+}
