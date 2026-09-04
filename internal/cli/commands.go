@@ -70,6 +70,39 @@ func RunArgsWithCommands(
 	return run(args[1:], stdin, stdout, stderr)
 }
 
+// init drops the standard logger's date/time prefix when the CLI process runs
+// on an interactive terminal (init-time os.Stderr decision, mirroring
+// display.DecideLogColor — the dispatch layer itself stays free of process
+// globals per the archtest entry contract). serve-family commands override
+// this at startup with their own explicit
+// log.SetFlags(LstdFlags|Lmicroseconds), so daemon and foreground-serve
+// operational logs always carry timestamps.
+func init() {
+	stripLogTimestampsForTerminal(os.Stderr, stdIsTerminal)
+}
+
+// stripLogTimestampsForTerminal drops the standard logger's date/time prefix
+// when the CLI writes to an interactive terminal: logx lines there are
+// user-facing command output (takeover progress, doctor findings, prompts),
+// not log-file records, and a "2026/09/04 16:42:25 " prefix on every line is
+// noise. Pipes and files keep the default LstdFlags timestamps (CI logs,
+// redirected output). serve-family commands override this with their own
+// explicit log.SetFlags(LstdFlags|Lmicroseconds) at startup, so daemon and
+// foreground-serve operational logs always carry timestamps.
+func stripLogTimestampsForTerminal(stderr io.Writer, isTTY func(fd uintptr) bool) {
+	f, ok := stderr.(*os.File)
+	if !ok || !isTTY(f.Fd()) {
+		return
+	}
+	log.SetFlags(0)
+}
+
+// stdIsTerminal is the production terminal detector (ioctl-verified, so
+// /dev/null and pipes don't count); tests inject a fake.
+func stdIsTerminal(fd uintptr) bool {
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
+}
+
 // HasHelpFlag reports whether args include -h/--help.
 func HasHelpFlag(args []string) bool {
 	for _, arg := range args {

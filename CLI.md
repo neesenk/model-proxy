@@ -45,6 +45,12 @@ detach 属性的平台差异位于 `internal/cli/serve/detach_unix.go` / `intern
 
 - **stdout** = 命令的结果数据（表格、列表、JSON、状态行）。脚本应只读 stdout。
 - **stderr** = 进度提示、告警、错误、`log.*` 输出。面向人，不面向脚本。
+- **时间戳**：stderr 是交互终端（isatty）时，CLI 命令的 log 行不带日期时间前缀
+  （`stripLogTimestampsForTerminal`，cli 包 init 按 os.Stderr 判定，与
+  `display.DecideLogColor` 同款 init 时机）——面向人的输出不应该是日志文件格式；
+  管道/重定向/文件保留标准库默认 `LstdFlags` 时间戳（CI、收集场景）。
+  serve 系命令启动时显式 `log.SetFlags(LstdFlags|Lmicroseconds)` 覆盖该判定，运行日志
+  恒带时间戳。
 - 例外：`takeover`/`restore` 的逐客户端进度走 `log.Printf`（stderr）；`models refresh` 的 diff 行（`config: added/removed ...`）和 fallback 通知走 stderr；`config check` 的 `✗ config invalid` 走 **stdout**（`fmt.Println`，见下）。
 
 ### 着色

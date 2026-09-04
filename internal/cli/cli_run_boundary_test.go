@@ -7,7 +7,9 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"log"
 	"model-proxy/internal/cli/clitest"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -390,5 +392,40 @@ func expressionName(expression ast.Expr) string {
 		return expressionName(value.X)
 	default:
 		return ""
+	}
+}
+
+// stripLogTimestampsForTerminal: log flags only change for an interactive
+// terminal — buffers, /dev/null and pipes keep the default timestamps.
+func TestStripLogTimestampsForTerminal(t *testing.T) {
+	saved := log.Flags()
+	t.Cleanup(func() { log.SetFlags(saved) })
+
+	yes := func(uintptr) bool { return true }
+	no := func(uintptr) bool { return false }
+
+	// Non-file writer (test buffers, dispatch streams): never strips.
+	log.SetFlags(log.LstdFlags)
+	stripLogTimestampsForTerminal(&bytes.Buffer{}, yes)
+	if log.Flags() != log.LstdFlags {
+		t.Errorf("buffer stderr: flags changed to %d, want untouched", log.Flags())
+	}
+
+	// A real file that is NOT a terminal (/dev/null): never strips.
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	stripLogTimestampsForTerminal(devnull, no)
+	if log.Flags() != log.LstdFlags {
+		t.Errorf("non-tty file: flags changed to %d, want untouched", log.Flags())
+	}
+
+	// A terminal: timestamps stripped so CLI output reads like command
+	// output, not a log file.
+	stripLogTimestampsForTerminal(devnull, yes)
+	if log.Flags() != 0 {
+		t.Errorf("tty: flags = %d, want 0 (no timestamp prefix)", log.Flags())
 	}
 }
