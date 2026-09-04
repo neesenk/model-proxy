@@ -80,16 +80,24 @@ Options:
 
   Rewrite a client's config to point at the proxy (backs up the original).
 
+  <client> is a template name or a client family. For agents supporting
+  several protocols (families with template variants: pi, opencode), takeover
+  auto-selects the variant whose protocol the route providers serve NATIVELY
+  — avoiding cross-protocol conversion. An exact template name (pi-openai)
+  always pins that variant.
+
   takeover list shows the available client templates (embedded presets +
-  user overrides in ~/.model-proxy/takeover-templates/<name>.yaml).
+  user overrides in ~/.model-proxy/takeover-templates/<name>.yaml), marking
+  the auto-selected variant of each family with *.
 
 Clients:
-  claude | opencode | opencode-openai | pi | pi-openai | pi-responses |
-  codex | kimi | gemini-cli | all`,
+  claude | opencode | pi | codex | kimi | gemini-cli | all
+  (variants: opencode-openai | pi-openai | pi-responses)`,
 
 	"restore": `restore <client> [--config PATH]
 
   Restore a client's config from the backup created by takeover.
+  A client family restores every taken-over variant of that family.
 
 Clients:
   same template names as takeover (see: takeover list) | all`,

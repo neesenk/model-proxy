@@ -1,6 +1,8 @@
 description: kimi-cli(Kimi Code CLI)— config.toml 注入 openai_legacy provider + 每暴露模型一个 models 段
 file: ~/.kimi/config.toml
 format: toml
+client: kimi
+protocol: openai
 base_url: v1
 toml:
   sections:

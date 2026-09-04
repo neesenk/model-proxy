@@ -38,6 +38,19 @@ type Template struct {
 	ProxyURL    string `yaml:"proxy_url"`
 	DisplayName string `yaml:"display_name"` // default "model-proxy"
 
+	// Client groups the variants of one agent family (pi / pi-openai /
+	// pi-responses all carry client: pi). Empty defaults to the template
+	// name — a family of one. `takeover <family>` and `takeover all`
+	// auto-select ONE variant per family (see select.go).
+	Client string `yaml:"client"`
+	// Protocol declares the agent-facing wire protocol this variant writes:
+	// anthropic | openai | responses. Selection prefers the variant whose
+	// protocol the route providers serve natively (routing.NativeProtocols),
+	// so the agent talks the protocol that needs no conversion. Required —
+	// and unique — within multi-variant families; optional for a
+	// single-variant family (informational only).
+	Protocol string `yaml:"protocol"`
+
 	JSON   *JSONTemplate   `yaml:"json"`
 	TOML   *TOMLTemplate   `yaml:"toml"`
 	Env    *EnvTemplate    `yaml:"env"`
@@ -149,6 +162,11 @@ func ParseTemplate(name, source string, data []byte) (*Template, error) {
 	if t.BaseURL != "" && t.BaseURL != "bare" && t.BaseURL != "v1" {
 		return nil, fmt.Errorf("template %s: base_url must be bare|v1, got %q", name, t.BaseURL)
 	}
+	switch t.Protocol {
+	case "", "anthropic", "openai", "responses":
+	default:
+		return nil, fmt.Errorf("template %s: protocol must be anthropic|openai|responses, got %q", name, t.Protocol)
+	}
 	if t.Models != nil {
 		switch t.Models.Shape {
 		case "opencode", "pi":
@@ -202,7 +220,47 @@ func LoadTemplates(userDir string) ([]*Template, error) {
 		out = append(out, t)
 	}
 	sortTemplates(out)
+	if err := validateFamilies(out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// ClientFamily returns the family this template belongs to: the explicit
+// client: id, or the template name itself (family of one).
+func (t *Template) ClientFamily() string {
+	if t.Client != "" {
+		return t.Client
+	}
+	return t.Name
+}
+
+// validateFamilies enforces the multi-variant family contract: every variant
+// of a family with more than one member must declare a protocol, and the
+// protocols must be distinct — otherwise protocol-based auto-selection has
+// nothing (or an ambiguous something) to key on.
+func validateFamilies(templates []*Template) error {
+	families := map[string][]*Template{}
+	for _, t := range templates {
+		f := t.ClientFamily()
+		families[f] = append(families[f], t)
+	}
+	for family, variants := range families {
+		if len(variants) < 2 {
+			continue
+		}
+		seen := map[string]string{}
+		for _, v := range variants {
+			if v.Protocol == "" {
+				return fmt.Errorf("template %s: family %q has %d variants — each must declare a protocol", v.Name, family, len(variants))
+			}
+			if prev, dup := seen[v.Protocol]; dup {
+				return fmt.Errorf("templates %s and %s: family %q declares protocol %q twice — variants must be protocol-distinct", prev, v.Name, family, v.Protocol)
+			}
+			seen[v.Protocol] = v.Name
+		}
+	}
+	return nil
 }
 
 // TemplateByName resolves one template (preset, or user override in

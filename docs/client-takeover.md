@@ -23,6 +23,8 @@
 description: 人类可读描述(takeover list 显示)
 file: ~/.claude/settings.json     # 客户端配置文件(~ 展开),必填
 format: json                       # json | toml | env,必填
+client: claude                     # 客户端族(默认 = 模板名,即单变体族)
+protocol: anthropic                # anthropic | openai | responses;多变体族必填且互不相同
 base_url: bare                     # bare(默认) | v1(追加 /v1)
 provider_id: model-proxy           # 默认 model-proxy;写同一文件的变体必须用不同 id
 proxy_url: ""                      # 可选;默认 http://<listen>
@@ -61,6 +63,28 @@ models:                            # 可选:按暴露模型逐个输出元数据
 `{{provider_id}}` `{{display_name}}`；模型循环内另有 `{{model.id}}`
 `{{model.context}}` `{{model.output}}`。
 
+## 协议感知变体选择
+
+同一 agent 支持多种协议时，每种协议一个模板变体，用 `client:` 归族、
+`protocol:` 标注（如 pi 族：pi=anthropic / pi-openai=openai /
+pi-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
+协议直连模型**——协议与上游一致时是字节级透传，不一致才走
+`internal/protocol` 转换（开销与兼容性边界见
+`docs/architecture/protocol-conversion.md`）。
+
+- `takeover <族名>`（pi、opencode）与 `takeover all` 按族自动选择一个变体：
+  统计每条暴露路由首选手目标（priority 最小）的原生协议
+  （`routing.NativeProtocols`，纯静态判定：显式 `protocol:` >
+  `ProtocolHint` > 声明的 `anthropic_base_url`/`openai_base_url`；
+  responses 无探测结果时不静态声明），覆盖最多的协议胜出；
+  平手（含完全无信号）回退到与族同名的默认变体。选择理由与仍需转换的
+  模型会打在日志里。
+- 精确模板名（pi-openai）始终钉住该变体，不参与自动选择。
+- 多变体族的校验是硬约束：族内每个变体必须声明 `protocol` 且互不相同，
+  否则 LoadTemplates 直接报错（fail-closed，不猜）。
+- restore 不做协议选择：备份标记属于当初实际接管的变体，配置可能已变，
+  族名恢复会展开到族内全部变体、跳过无备份者。
+
 ## 内嵌预设
 
 | 模板 | file | format | 要点 |
@@ -79,7 +103,7 @@ models:                            # 可选:按暴露模型逐个输出元数据
 ## 机制契约（与模板机制无关的部分不变）
 
 - 备份位于 `<configDir>/.model-proxy/<client>.bak`(+ sha256 meta)；
-- `takeover all` / `restore all` 遇到未安装客户端时跳过并继续；单独指定客户端而文件不存在时返回硬错误；未知模板名是硬错误（列出可用模板）；
+- `takeover all` / `restore all` 遇到未安装客户端时跳过并继续；单独指定客户端而文件不存在时返回硬错误；未知模板/族名是硬错误（列出可用模板与族）；`takeover all` 每族只应用自动选中的一个变体（见上文协议感知变体选择）；
 - takeover 前必须备份，restore 后不得保留代理专属残片；
 - restore 成功即结束接管：删除 `<client>.bak` 与 `<client>.bak.meta` 标记，
   drift 检查（以 `.bak` 是否存在作为"已接管"标记）随后报告该客户端未接管，

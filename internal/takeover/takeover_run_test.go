@@ -34,6 +34,8 @@ json:
 		"opencode": func(f string) string {
 			return "file: " + f + `
 format: json
+client: opencode
+protocol: anthropic
 base_url: v1
 json:
   set:
@@ -50,6 +52,8 @@ models:
 		"pi": func(f string) string {
 			return "file: " + f + `
 format: json
+client: pi
+protocol: anthropic
 base_url: bare
 json:
   set:
@@ -257,14 +261,19 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 // --- runTakeover single named client: missing file is a hard error (not skipped) ---
 
 func TestRunTakeover_SingleMissingFileErrors(t *testing.T) {
+	// Isolate HOME: family resolution may pick a NON-overridden preset
+	// variant, whose file path must never resolve to the real user config.
+	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
 	templatesDir := writeTemplateOverrides(t, map[string]string{"pi": filepath.Join(dir, "nonexistent.json")})
+	// Anthropic-native provider → family pi resolves to the overridden
+	// anthropic variant (named "pi"), whose file is missing.
 	cfg := &configdomain.Config{
 		Listen: "127.0.0.1:15721",
 		Providers: map[string]configdomain.Provider{
-			"aqp": {OpenAIBaseURL: "http://x", Provider: "aqp", Models: []string{"glm-5.2"}},
+			"claude-up": {AnthropicBaseURL: "http://x/anthropic/v1", Provider: "claude-up", Models: []string{"claude-x"}},
 		},
-		Routes: map[string][]configdomain.RouteTarget{"glm-5.2": {{Provider: "aqp", Model: "glm-5.2"}}},
+		Routes: map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "claude-up", Model: "claude-x"}}},
 	}
 	if err := takeover.RunTakeover(cfg, "pi", dir, takeover.ModelFacts{SourceDefault: -1}, templatesDir); err == nil {
 		t.Error("runTakeover pi with missing file: want error, got nil (single client must not be skipped)")

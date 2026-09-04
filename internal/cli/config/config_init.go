@@ -76,10 +76,20 @@ func runConfigInitWizard(in io.Reader, out io.Writer) error {
 	// 1. Detect installed coding clients via the takeover package's template
 	// path knowledge (template file defaults == standard client config
 	// locations). Template resolution failures just mean "nothing detected".
+	// Detection dedupes to one entry per client family — protocol variants
+	// of a family share the same config file, and the variant is chosen at
+	// takeover time against the written config (native-protocol selection).
 	var detected []takeover.ClientSpec
+	seenFamily := map[string]bool{}
 	if clients, err := takeover.ListClients(tpl, "all", ""); err == nil {
 		for _, c := range clients {
+			family := c.Template.ClientFamily()
+			if seenFamily[family] {
+				continue
+			}
 			if _, err := os.Stat(c.File); err == nil {
+				seenFamily[family] = true
+				c.Name = family
 				detected = append(detected, c)
 			}
 		}

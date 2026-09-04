@@ -47,6 +47,8 @@ json:
 		"opencode": func(f string) string {
 			return "file: " + f + `
 format: json
+client: opencode
+protocol: anthropic
 base_url: v1
 json:
   set:
@@ -498,5 +500,41 @@ func TestCLI_TakeoverDriftAuditDisabled(t *testing.T) {
 	}
 	if files := securityLogFiles(t, home); len(files) != 0 {
 		t.Errorf("audit disabled but security log written: %v", files)
+	}
+}
+
+// TestCLI_TakeoverListShowsProtocolSelection: `takeover list` prints every
+// template with family + protocol columns and marks (*) the variant
+// auto-selected for each multi-variant family — here an openai-only provider
+// pulls the pi family to pi-openai, not the anthropic default.
+func TestCLI_TakeoverListShowsProtocolSelection(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := `listen: 127.0.0.1:15721
+providers:
+  zhipu:
+    openai_base_url: https://example.invalid/api/paas/v4
+    provider_id: zhipu
+    models:
+      - glm-5.3
+`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "list")
+	if code != 0 {
+		t.Fatalf("takeover list exit=%d want 0\n--- stderr ---\n%s", code, stderr)
+	}
+	for _, want := range []string{"* pi-openai", "pi-responses", "* claude", "anthropic", "openai", "auto-selected"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("takeover list output missing %q:\n%s", want, stdout)
+		}
+	}
+	// The anthropic default variant of the pi family must be unmarked here
+	// ("* pi  " with padding — "* pi-openai" has no double space after "pi").
+	if strings.Contains(stdout, "* pi  ") {
+		t.Errorf("openai-native config must not mark the anthropic pi variant:\n%s", stdout)
 	}
 }

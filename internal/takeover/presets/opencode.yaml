@@ -1,6 +1,8 @@
 description: opencode — @ai-sdk/anthropic provider(自拼 /messages,base_url 带 /v1)+ 全量暴露模型
 file: ~/.config/opencode/opencode.json
 format: json
+client: opencode
+protocol: anthropic
 base_url: v1
 json:
   set:

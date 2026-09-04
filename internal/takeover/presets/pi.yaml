@@ -1,6 +1,8 @@
 description: pi — anthropic-messages provider(pi 自拼 /v1/messages,base_url 用 bare)+ 全量暴露模型
 file: ~/.pi/agent/models.json
 format: json
+client: pi
+protocol: anthropic
 base_url: bare
 json:
   set:

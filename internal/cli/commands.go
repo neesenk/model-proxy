@@ -85,14 +85,26 @@ func RunTakeover(args []string) {
 		if err != nil {
 			log.Fatal(err)
 		}
+		// Mark the variant `takeover <family>` / `takeover all` would pick
+		// for each multi-template family (native-protocol auto-selection).
+		selected := takeover.AutoSelectedNames(cfg, "")
 		for _, c := range clients {
 			desc := c.Template.Description
 			if desc == "" {
 				desc = "-"
 			}
-			fmt.Printf("%-18s %-8s %-10s %s\n", c.Name, c.Template.Format, c.Template.Source, desc)
-			fmt.Printf("%-18s %s\n", "", c.File)
+			mark := " "
+			if selected[c.Name] {
+				mark = "*"
+			}
+			proto := c.Template.Protocol
+			if proto == "" {
+				proto = "-"
+			}
+			fmt.Printf("%s %-17s %-12s %-10s %-8s %-10s %s\n", mark, c.Name, c.Template.ClientFamily(), proto, c.Template.Format, c.Template.Source, desc)
+			fmt.Printf("%-21s%s\n", "", c.File)
 		}
+		fmt.Println("\n* = variant auto-selected for its client family (protocol the route providers serve natively)")
 		return
 	}
 	bakDir := takeover.BackupDir(cliframework.ConfigPath(args))
@@ -111,7 +123,7 @@ func RunTakeover(args []string) {
 // code: warnings and audit-append failures degrade to stderr notes only.
 func verifyTakeoverDrift(cfg *configdomain.Config, which, bakDir string) {
 	selected := map[string]bool{}
-	clients, err := takeover.ListClients(cfg, which, "")
+	clients, err := takeover.ResolveClients(cfg, which, "")
 	if err != nil {
 		logx.Warnf("takeover: list clients: %v", err)
 		return

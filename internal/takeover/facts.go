@@ -17,7 +17,7 @@ func ModelFactsFor(cfg *configdomain.Config, which, homeDir, templatesDir string
 	}
 	// Resolution errors (bad user template) surface properly in RunTakeover;
 	// here they just mean "no metadata client resolved".
-	clients, _ := ListClients(cfg, which, templatesDir)
+	clients, _ := ResolveClients(cfg, which, templatesDir)
 	if WritesMetadata(clients) {
 		cat, _ := configdomain.LoadModelsCatalog(homeDir, false)
 		meta, sources := routing.HydrateModels(cfg, cat)

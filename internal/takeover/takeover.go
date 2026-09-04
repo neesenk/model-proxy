@@ -207,7 +207,7 @@ type ModelFacts struct {
 }
 
 func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string) error {
-	clients, err := ListClients(cfg, which, templatesDir)
+	clients, err := ResolveClients(cfg, which, templatesDir)
 	if err != nil {
 		return err
 	}
@@ -223,6 +223,9 @@ func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFact
 
 	for _, c := range clients {
 		logx.Infof("takeover %s: %s (backup -> %s/)", c.Name, c.File, bakDir)
+		if c.Note != "" {
+			logx.Infof("  %s", c.Note)
+		}
 		if err := Backup(c.File, bakDir, c.Name); err != nil {
 			if batch && errors.Is(err, ErrNoFile) {
 				logx.Infof("  ~ %s skipped (config not present: %s)", c.Name, c.File)
@@ -254,11 +257,10 @@ func EmitTakeoverWarnings(clients []ClientSpec, cfg *configdomain.Config, meta m
 }
 
 func RunRestore(cfg *configdomain.Config, which, bakDir, templatesDir string) error {
-	clients, err := ListClients(cfg, which, templatesDir)
+	clients, batch, err := restoreClients(cfg, which, templatesDir)
 	if err != nil {
 		return err
 	}
-	batch := which == "" || which == "all"
 	for _, c := range clients {
 		logx.Infof("restore %s: %s (from %s/)", c.Name, c.File, bakDir)
 		if err := Restore(c.File, bakDir, c.Name); err != nil {
@@ -273,6 +275,48 @@ func RunRestore(cfg *configdomain.Config, which, bakDir, templatesDir string) er
 	return nil
 }
 
+// restoreClients resolves the client set for restore — deliberately WITHOUT
+// protocol auto-selection: a backup marker belongs to whichever variant a
+// past takeover applied, and the config may have changed since, so re-running
+// selection could pick a variant that was never taken over. A multi-variant
+// family name (or ""/"all") expands to EVERY variant of the family with
+// batch semantics (missing backups are skipped); any other exact name
+// restores that one strictly (missing backup is a hard error).
+func restoreClients(cfg *configdomain.Config, which, templatesDir string) ([]ClientSpec, bool, error) {
+	clients, err := ListClients(cfg, "", templatesDir)
+	if err != nil {
+		return nil, false, err
+	}
+	if which == "" || which == "all" {
+		return clients, true, nil
+	}
+	families := map[string][]ClientSpec{}
+	for _, c := range clients {
+		f := c.Template.ClientFamily()
+		families[f] = append(families[f], c)
+	}
+	if variants, ok := families[which]; ok && len(variants) > 1 {
+		return variants, true, nil
+	}
+	for _, c := range clients {
+		if c.Name == which {
+			return []ClientSpec{c}, false, nil
+		}
+	}
+	if variants, ok := families[which]; ok {
+		return variants, false, nil // single-variant family named differently
+	}
+	return nil, false, fmt.Errorf("unknown takeover client %q — available templates: %s", which, clientNames(clients))
+}
+
+func clientNames(clients []ClientSpec) string {
+	names := make([]string, 0, len(clients))
+	for _, c := range clients {
+		names = append(names, c.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
 type ClientSpec struct {
 	Name    string
 	File    string
@@ -280,6 +324,10 @@ type ClientSpec struct {
 	// Template is the resolved client template (preset or user-defined) —
 	// doctor's drift probe and facts' metadata decision read it.
 	Template *Template
+	// Note carries the auto-selection rationale when ResolveClients picked
+	// this variant from a multi-template family ("" for exact-name or
+	// single-variant resolution). RunTakeover logs it.
+	Note string
 }
 
 // ListClients resolves the client set for which ("" / "all" = every template,

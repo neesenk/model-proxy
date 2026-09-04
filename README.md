@@ -202,8 +202,8 @@ model-proxy test glm-5.2           # 探测路由每个 target（路由 → 凭�
 # Web UI Accounts 页每个账号卡片还有 Test 按钮（POST /api/accounts/<p>/<id>/test），可测池化指定账号
 
 # 接管客户端配置
-model-proxy takeover list            # 可用模板（内置预设 + ~/.model-proxy/takeover-templates 自定义覆盖）
-model-proxy takeover opencode      # claude|opencode|opencode-openai|pi|pi-openai|pi-responses|codex|kimi|gemini-cli|all
+model-proxy takeover list            # 可用模板（内置预设 + ~/.model-proxy/takeover-templates 自定义覆盖；* 标记各族按 provider 原生协议自动选中的变体）
+model-proxy takeover opencode      # 族名 claude|opencode|pi|codex|kimi|gemini-cli|all：多协议 agent 自动选 provider 原生协议的变体（减少协议转换）；精确模板名（pi-openai、opencode-openai、pi-responses）钉住变体
 model-proxy restore opencode
 
 # 配置管理

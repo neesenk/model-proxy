@@ -44,16 +44,21 @@ func ExposedModels(cfg *configdomain.Config, meta map[string]map[string]catalog.
 			continue
 		}
 		// Use the highest-priority target's provider/model for metadata.
-		// Sort by priority (same logic as schedule, minus peak/circuit filtering).
-		best := targets[0]
-		for _, t := range targets[1:] {
-			if t.Priority < best.Priority {
-				best = t
-			}
-		}
-		add(exposed, best)
+		add(exposed, primaryTarget(targets))
 	}
 	return out
+}
+
+// primaryTarget returns the target a request tries first (lowest priority
+// value — the same rule schedule applies, minus peak/circuit filtering).
+func primaryTarget(targets []configdomain.RouteTarget) configdomain.RouteTarget {
+	best := targets[0]
+	for _, t := range targets[1:] {
+		if t.Priority < best.Priority {
+			best = t
+		}
+	}
+	return best
 }
 
 // DisplayName returns a human-readable name for a model.

@@ -1,6 +1,8 @@
 description: codex — config.toml 注入 [model_providers] 段(wire_api=responses)并置顶层 model_provider
 file: ~/.codex/config.toml
 format: toml
+client: codex
+protocol: responses
 base_url: bare
 toml:
   top_keys:
