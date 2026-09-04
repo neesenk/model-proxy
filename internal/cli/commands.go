@@ -6,9 +6,14 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"strings"
+
+	"github.com/mattn/go-isatty"
 
 	clidoctor "model-proxy/internal/cli/doctor"
 	cliframework "model-proxy/internal/cli/framework"
@@ -108,10 +113,46 @@ func RunTakeover(args []string) {
 		return
 	}
 	bakDir := takeover.BackupDir(cliframework.ConfigPath(args))
-	if err := takeover.RunTakeover(cfg, which, bakDir, takeover.ModelFactsFor(cfg, which, cliframework.HomeDir(), ""), ""); err != nil {
+	mode := takeoverMode(args, cfg, which)
+	if err := takeover.RunTakeover(cfg, which, bakDir, takeover.ModelFactsFor(cfg, which, cliframework.HomeDir(), "", mode), "", mode); err != nil {
 		log.Fatal(err)
 	}
-	verifyTakeoverDrift(cfg, which, bakDir)
+	verifyTakeoverDrift(cfg, which, bakDir, mode)
+}
+
+// takeoverMode resolves unified|split for a takeover run: the --mode flag
+// wins; on a real terminal with no flag and routes that span several native
+// protocols (SplitWouldChange), the user picks interactively; anything else
+// (pipes, scripts, single-protocol fleets) stays unified — the historical
+// default.
+func takeoverMode(args []string, cfg *configdomain.Config, which string) takeover.ResolveMode {
+	switch mode := takeover.ResolveMode(cliframework.FlagStringValue(args, "--mode")); mode {
+	case takeover.ModeUnified, takeover.ModeSplit:
+		return mode
+	case "":
+	default:
+		log.Fatalf("takeover: unknown --mode %q (want unified|split)", mode)
+	}
+	fd := os.Stdin.Fd()
+	if (isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)) && takeover.SplitWouldChange(cfg, which, "") {
+		return askTakeoverMode()
+	}
+	return takeover.ModeUnified
+}
+
+// askTakeoverMode is the interactive unified-vs-split choice for a
+// multi-protocol agent whose routes span several native protocols.
+func askTakeoverMode() takeover.ResolveMode {
+	fmt.Println("This agent supports several protocols and your routes span several native protocols:")
+	fmt.Println("  [u] unified — write ONE protocol entry (best coverage; the rest rides protocol conversion)")
+	fmt.Println("  [s] split   — write one entry per native protocol (every model passes through unchanged)")
+	fmt.Print("Choice [U/s]: ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.TrimSpace(strings.ToLower(line)) {
+	case "s", "split":
+		return takeover.ModeSplit
+	}
+	return takeover.ModeUnified
 }
 
 // verifyTakeoverDrift re-checks the proxy pointer of every client this
@@ -121,9 +162,9 @@ func RunTakeover(args []string) {
 // gets a stderr warning and — when guard.audit is on — a seclog drift record
 // via doctor's shared audit helper. Verification never changes the exit
 // code: warnings and audit-append failures degrade to stderr notes only.
-func verifyTakeoverDrift(cfg *configdomain.Config, which, bakDir string) {
+func verifyTakeoverDrift(cfg *configdomain.Config, which, bakDir string, mode takeover.ResolveMode) {
 	selected := map[string]bool{}
-	clients, err := takeover.ResolveClients(cfg, which, "")
+	clients, err := takeover.ResolveClientsMode(cfg, which, "", mode)
 	if err != nil {
 		logx.Warnf("takeover: list clients: %v", err)
 		return

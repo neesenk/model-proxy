@@ -65,21 +65,29 @@ models:                            # 可选:按暴露模型逐个输出元数据
 
 ## 协议感知变体选择
 
-同一 agent 支持多种协议时，每种协议一个模板变体，用 `client:` 归族、
+单协议 agent（claude、codex、gemini-cli）只有一种写法，按它支持的协议写。
+多协议 agent（pi、opencode）每种协议一个模板变体，用 `client:` 归族、
 `protocol:` 标注（如 pi 族：pi=anthropic / pi-openai=openai /
 pi-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
 协议直连模型**——协议与上游一致时是字节级透传，不一致才走
 `internal/protocol` 转换（开销与兼容性边界见
-`docs/architecture/protocol-conversion.md`）。
+`docs/architecture/protocol-conversion.md`）。`--mode` 决定多协议族怎么写：
 
-- `takeover <族名>`（pi、opencode）与 `takeover all` 按族自动选择一个变体：
-  统计每条暴露路由首选手目标（priority 最小）的原生协议
-  （`routing.NativeProtocols`，纯静态判定：显式 `protocol:` >
-  `ProtocolHint` > 声明的 `anthropic_base_url`/`openai_base_url`；
-  responses 无探测结果时不静态声明），覆盖最多的协议胜出；
-  平手（含完全无信号）回退到与族同名的默认变体。选择理由与仍需转换的
-  模型会打在日志里。
-- 精确模板名（pi-openai）始终钉住该变体，不参与自动选择。
+- **unified（默认）**：按族选一个变体写入。统计每条暴露路由首选目标
+  （priority 最小）的原生协议（`routing.NativeProtocols`，纯静态判定：
+  显式 `protocol:` > `ProtocolHint` > 声明的 `anthropic_base_url`/
+  `openai_base_url`；responses 无探测结果时不静态声明），覆盖最多的协议
+  胜出，平手（含完全无信号）回退与族同名的默认变体；覆盖之外的模型走
+  协议转换。选择理由与仍需转换的模型会打在日志里。
+- **split**：每种原生协议写一个配置项，暴露模型按原生协议划分到各配置项
+  （`splitAssignment`：多原生/未知协议模型归默认变体，无模型的变体不产出
+  空配置项），每个模型都是透传。共享同一客户端文件的多个变体顺序写入，
+  因此 RunTakeover 一律两阶段执行（先全部备份再全部改写），保证每个变体的
+  备份都是原始文件而不是上一个变体的改写结果。
+- **交互选择**：TTY 下未给 `--mode` 且 split 会写出与 unified 不同的配置项
+  集合（`SplitWouldChange`，即路由横跨多种原生协议）时，takeover 提示用户
+  二选一；管道/脚本默认 unified。
+- 精确模板名（pi-openai）始终钉住该变体，不参与模式与自动选择。
 - 多变体族的校验是硬约束：族内每个变体必须声明 `protocol` 且互不相同，
   否则 LoadTemplates 直接报错（fail-closed，不猜）。
 - restore 不做协议选择：备份标记属于当初实际接管的变体，配置可能已变，

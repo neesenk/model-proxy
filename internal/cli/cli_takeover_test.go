@@ -538,3 +538,75 @@ providers:
 		t.Errorf("openai-native config must not mark the anthropic pi variant:\n%s", stdout)
 	}
 }
+
+// TestCLI_TakeoverModeSplit: --mode split writes one provider entry per
+// natively-spoken protocol and partitions the models among them.
+func TestCLI_TakeoverModeSplit(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	piFile := filepath.Join(home, ".pi", "agent", "models.json")
+	if err := os.MkdirAll(filepath.Dir(piFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(piFile, []byte(`{"providers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := `listen: 127.0.0.1:15721
+providers:
+  zhipu:
+    anthropic_base_url: https://example.invalid/api/anthropic
+    provider_id: zhipu
+    models:
+      - glm-5.3
+  codex:
+    openai_base_url: https://example.invalid/backend-api/codex
+    provider_id: codex
+    models:
+      - gpt-5.4-mini
+`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "pi", "--mode", "split")
+	if code != 0 {
+		t.Fatalf("takeover --mode split pi exit=%d want 0\n--- stderr ---\n%s", code, stderr)
+	}
+	data, err := os.ReadFile(piFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{`"model-proxy"`, `"model-proxy-responses"`, `"anthropic-messages"`, `"openai-responses"`, `"glm-5.3"`, `"gpt-5.4-mini"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("split result missing %s:\n%s", want, text)
+		}
+	}
+	// The openai variant had no exclusively-openai models → no entry.
+	if strings.Contains(text, "model-proxy-openai") {
+		t.Errorf("empty openai variant must not be written:\n%s", text)
+	}
+	// Models partitioned, not duplicated.
+	if n := strings.Count(text, `"id": "glm-5.3"`); n != 1 {
+		t.Errorf("glm-5.3 appears %d times, want 1:\n%s", n, text)
+	}
+	if !strings.Contains(stderr, "split by native protocol") {
+		t.Errorf("selection note missing from log:\n%s", stderr)
+	}
+}
+
+// TestCLI_TakeoverModeInvalid: a bogus --mode value fails fast.
+func TestCLI_TakeoverModeInvalid(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	cfgPath := writePlainConfig(t, dir)
+
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "pi", "--mode", "bogus")
+	if code == 0 {
+		t.Fatalf("takeover --mode bogus exit=0, want non-zero")
+	}
+	if !strings.Contains(stderr, "unknown --mode") {
+		t.Errorf("want unknown-mode error, got:\n%s", stderr)
+	}
+}

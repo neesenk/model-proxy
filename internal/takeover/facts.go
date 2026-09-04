@@ -10,14 +10,14 @@ import (
 // selected — hydrated models.dev metadata for RunTakeover. homeDir locates
 // the models.dev catalog cache (callers pass the CLI's HOME seam so tests can
 // isolate it).
-func ModelFactsFor(cfg *configdomain.Config, which, homeDir, templatesDir string) ModelFacts {
+func ModelFactsFor(cfg *configdomain.Config, which, homeDir, templatesDir string, mode ResolveMode) ModelFacts {
 	facts := ModelFacts{
 		Routes:        routing.RouteTable(cfg),
 		SourceDefault: -1,
 	}
 	// Resolution errors (bad user template) surface properly in RunTakeover;
 	// here they just mean "no metadata client resolved".
-	clients, _ := ResolveClients(cfg, which, templatesDir)
+	clients, _ := ResolveClientsMode(cfg, which, templatesDir, mode)
 	if WritesMetadata(clients) {
 		cat, _ := configdomain.LoadModelsCatalog(homeDir, false)
 		meta, sources := routing.HydrateModels(cfg, cat)

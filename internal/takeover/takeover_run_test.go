@@ -153,7 +153,7 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 
 	// Seed an existing claude config, then takeover rewrites it (after backing up).
 	os.WriteFile(claudeFile, []byte(`{"env":{"OLD":"1"}}`), 0o644)
-	if err := takeover.RunTakeover(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir); err != nil {
+	if err := takeover.RunTakeover(cfg, "claude", bakDir, takeover.ModelFacts{SourceDefault: -1}, templatesDir, takeover.ModeUnified); err != nil {
 		t.Fatal(err)
 	}
 	rewritten, _ := os.ReadFile(claudeFile)
@@ -177,7 +177,7 @@ func TestRunTakeover_AndRestore_Claude(t *testing.T) {
 
 func TestRunTakeover_UnknownClientErrors(t *testing.T) {
 	// "nope" is a hard resolution error — a typo'd client must not no-op silently.
-	if err := takeover.RunTakeover(&configdomain.Config{}, "nope", t.TempDir(), takeover.ModelFacts{SourceDefault: -1}, ""); err == nil {
+	if err := takeover.RunTakeover(&configdomain.Config{}, "nope", t.TempDir(), takeover.ModelFacts{SourceDefault: -1}, "", takeover.ModeUnified); err == nil {
 		t.Error("runTakeover unknown client: want error, got nil")
 	}
 }
@@ -239,7 +239,7 @@ func TestRunTakeover_AllSkipsMissingFiles(t *testing.T) {
 		DefaultContext: routing.DefaultModelMetadata.Context,
 		DefaultOutput:  routing.DefaultModelMetadata.Output,
 	}
-	if err := takeover.RunTakeover(cfg, "all", bakDir, facts, templatesDir); err != nil {
+	if err := takeover.RunTakeover(cfg, "all", bakDir, facts, templatesDir, takeover.ModeUnified); err != nil {
 		t.Fatalf("runTakeover all with missing files: want nil, got %v", err)
 	}
 	// claude was rewritten (backup + rewrite succeeded).
@@ -275,7 +275,7 @@ func TestRunTakeover_SingleMissingFileErrors(t *testing.T) {
 		},
 		Routes: map[string][]configdomain.RouteTarget{"claude-x": {{Provider: "claude-up", Model: "claude-x"}}},
 	}
-	if err := takeover.RunTakeover(cfg, "pi", dir, takeover.ModelFacts{SourceDefault: -1}, templatesDir); err == nil {
+	if err := takeover.RunTakeover(cfg, "pi", dir, takeover.ModelFacts{SourceDefault: -1}, templatesDir, takeover.ModeUnified); err == nil {
 		t.Error("runTakeover pi with missing file: want error, got nil (single client must not be skipped)")
 	}
 }

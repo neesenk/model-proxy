@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	configdomain "model-proxy/internal/config"
+	"model-proxy/internal/routing"
 	"model-proxy/internal/takeover"
 )
 
@@ -249,4 +250,143 @@ func TestRunRestore_FamilyRestoresEveryTakenVariant(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(bakDir, "pi-openai.bak")); !os.IsNotExist(err) {
 		t.Errorf("backup marker should be removed after restore, stat err=%v", err)
 	}
+}
+
+// --- split mode ---
+
+// mixedNativeCfg exposes three models whose primary targets natively speak
+// anthropic (claude-up), openai (zhipu) and responses (codex, via hint).
+func mixedNativeCfg() *configdomain.Config {
+	return cfgWith(
+		map[string]configdomain.Provider{
+			"claude-up": {AnthropicBaseURL: "https://c/anthropic/v1", Models: []string{"claude-x"}},
+			"zhipu":     {OpenAIBaseURL: "https://z/v1", Models: []string{"glm-5.3"}},
+			"codex":     {OpenAIBaseURL: "https://x/v1", Provider: "codex", Models: []string{"gpt-5.4-mini"}},
+		},
+		nil)
+}
+
+func TestResolveClients_SplitPartitionsByNativeProtocol(t *testing.T) {
+	clients, err := takeover.ResolveClientsMode(mixedNativeCfg(), "pi", t.TempDir(), takeover.ModeSplit)
+	if err != nil {
+		t.Fatalf("ResolveClientsMode(pi, split): %v", err)
+	}
+	want := []string{"pi", "pi-openai", "pi-responses"}
+	if got := namesOf(clients); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("split resolved %v, want %v (one entry per native protocol)", got, want)
+	}
+	if !takeover.SplitWouldChange(mixedNativeCfg(), "pi", t.TempDir()) {
+		t.Error("mixed native protocols: SplitWouldChange must be true (CLI prompts)")
+	}
+}
+
+func TestResolveClients_SplitSkipsUnassignedVariants(t *testing.T) {
+	// Everything natively openai → split resolves to just the openai variant
+	// (no empty anthropic/responses entries) and matches unified → no prompt.
+	cfg := cfgWith(
+		map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://z/v1", Models: []string{"glm-5.3"}}},
+		nil)
+	clients, err := takeover.ResolveClientsMode(cfg, "pi", t.TempDir(), takeover.ModeSplit)
+	if err != nil {
+		t.Fatalf("ResolveClientsMode(pi, split): %v", err)
+	}
+	if got := namesOf(clients); len(got) != 1 || got[0] != "pi-openai" {
+		t.Fatalf("split resolved %v, want [pi-openai]", got)
+	}
+	if takeover.SplitWouldChange(cfg, "pi", t.TempDir()) {
+		t.Error("uniform native protocol: SplitWouldChange must be false (no prompt)")
+	}
+}
+
+func TestResolveClients_SplitNoRoutesFallsBackToDefault(t *testing.T) {
+	clients, err := takeover.ResolveClientsMode(&configdomain.Config{}, "pi", t.TempDir(), takeover.ModeSplit)
+	if err != nil {
+		t.Fatalf("ResolveClientsMode(pi, split) on empty config: %v", err)
+	}
+	if got := namesOf(clients); len(got) != 1 || got[0] != "pi" {
+		t.Fatalf("split with no routes resolved %v, want default variant [pi]", got)
+	}
+}
+
+func TestResolveClients_MultiNativeModelLandsOnDefaultVariant(t *testing.T) {
+	// Provider declares BOTH endpoints → the model is native in anthropic and
+	// openai; split must file it under the default variant (pi), and
+	// pi-openai (nothing exclusively openai) disappears.
+	cfg := cfgWith(
+		map[string]configdomain.Provider{
+			"both": {OpenAIBaseURL: "https://x/v1", AnthropicBaseURL: "https://x/anthropic/v1", Models: []string{"glm-5.3"}},
+		},
+		nil)
+	clients, err := takeover.ResolveClientsMode(cfg, "pi", t.TempDir(), takeover.ModeSplit)
+	if err != nil {
+		t.Fatalf("ResolveClientsMode(pi, split): %v", err)
+	}
+	if got := namesOf(clients); len(got) != 1 || got[0] != "pi" {
+		t.Fatalf("multi-native split resolved %v, want [pi] (default absorbs multi-native)", got)
+	}
+	if takeover.SplitWouldChange(cfg, "pi", t.TempDir()) {
+		t.Error("all models on the default variant: SplitWouldChange must be false")
+	}
+}
+
+func TestRunTakeover_SplitWritesPartitionedEntries(t *testing.T) {
+	// Isolate HOME: preset pi variants resolve under it.
+	t.Setenv("HOME", t.TempDir())
+	home, _ := os.UserHomeDir()
+	piFile := filepath.Join(home, ".pi", "agent", "models.json")
+	if err := os.MkdirAll(filepath.Dir(piFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := `{"providers":{"user-entry":{"api":"anthropic-messages"}}}`
+	if err := os.WriteFile(piFile, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mixedNativeCfg()
+	cfg.Listen = "127.0.0.1:15721"
+	bakDir := filepath.Join(t.TempDir(), ".mp")
+
+	if err := takeover.RunTakeover(cfg, "pi", bakDir, takeover.ModelFacts{SourceDefault: -1, Routes: routesOf(cfg)}, t.TempDir(), takeover.ModeSplit); err != nil {
+		t.Fatalf("RunTakeover(pi, split): %v", err)
+	}
+
+	data, err := os.ReadFile(piFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	// Both natively-spoken protocols got their own entry; the user's
+	// pre-existing entry survived; the openai variant (nothing exclusively
+	// openai-native... zhipu IS openai-native) — glm-5.3 must sit under the
+	// openai entry, claude-x under the anthropic entry, gpt-5.4-mini under
+	// responses.
+	for _, want := range []string{`"user-entry"`, `"model-proxy"`, `"model-proxy-openai"`, `"model-proxy-responses"`,
+		`"anthropic-messages"`, `"openai-completions"`, `"openai-responses"`,
+		`"claude-x"`, `"glm-5.3"`, `"gpt-5.4-mini"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("split result missing %s:\n%s", want, text)
+		}
+	}
+	// Models are partitioned, not duplicated: each exposed model appears
+	// exactly once as a model id.
+	for _, m := range []string{`"id": "claude-x"`, `"id": "glm-5.3"`, `"id": "gpt-5.4-mini"`} {
+		if n := strings.Count(text, m); n != 1 {
+			t.Errorf("model %s appears %d times, want exactly 1 (partitioned):\n%s", m, n, text)
+		}
+	}
+	// Two-phase backup: BOTH variant backups hold the ORIGINAL file — an
+	// interleaved backup→rewrite would have captured the pi rewrite into
+	// pi-openai.bak.
+	for _, name := range []string{"pi", "pi-openai", "pi-responses"} {
+		b, err := os.ReadFile(filepath.Join(bakDir, name+".bak"))
+		if err != nil {
+			t.Fatalf("missing backup %s.bak: %v", name, err)
+		}
+		if string(b) != original {
+			t.Errorf("backup %s.bak = %s, want the original file (two-phase backup)", name, b)
+		}
+	}
+}
+
+func routesOf(cfg *configdomain.Config) map[string][]configdomain.RouteTarget {
+	return routing.RouteTable(cfg)
 }

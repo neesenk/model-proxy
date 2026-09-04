@@ -206,8 +206,8 @@ type ModelFacts struct {
 	DefaultOutput  int
 }
 
-func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string) error {
-	clients, err := ResolveClients(cfg, which, templatesDir)
+func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFacts, templatesDir string, mode ResolveMode) error {
+	clients, err := ResolveClientsMode(cfg, which, templatesDir, mode)
 	if err != nil {
 		return err
 	}
@@ -221,6 +221,12 @@ func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFact
 	// - the user asked for that one specifically.
 	batch := which == "" || which == "all"
 
+	// Two phases: ALL backups first, then all rewrites. Split mode emits
+	// several specs sharing one client file (one per protocol variant) —
+	// interleaved backup→rewrite would capture the already-rewritten file as
+	// the next variant's "original", and a later restore would resurrect
+	// another variant's provider entry.
+	var survivors []ClientSpec
 	for _, c := range clients {
 		logx.Infof("takeover %s: %s (backup -> %s/)", c.Name, c.File, bakDir)
 		if c.Note != "" {
@@ -233,6 +239,9 @@ func RunTakeover(cfg *configdomain.Config, which, bakDir string, facts ModelFact
 			}
 			return fmt.Errorf("%s backup: %w", c.Name, err)
 		}
+		survivors = append(survivors, c)
+	}
+	for _, c := range survivors {
 		if err := c.Rewrite(cfg, meta, routes); err != nil {
 			return fmt.Errorf("%s rewrite: %w", c.Name, err)
 		}

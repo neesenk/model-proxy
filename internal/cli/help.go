@@ -76,15 +76,20 @@ Options:
   --config PATH     Config file (default lookup: ~/.model-proxy/config.yaml > ./config.yaml)
   --log-file PATH   Log file path (overrides config log_file)`,
 
-	"takeover": `takeover <client> [--config PATH]
+	"takeover": `takeover <client> [--config PATH] [--mode unified|split]
 
   Rewrite a client's config to point at the proxy (backs up the original).
 
-  <client> is a template name or a client family. For agents supporting
-  several protocols (families with template variants: pi, opencode), takeover
-  auto-selects the variant whose protocol the route providers serve NATIVELY
-  — avoiding cross-protocol conversion. An exact template name (pi-openai)
-  always pins that variant.
+  <client> is a template name or a client family. Single-protocol agents
+  (claude, codex, ...) are written in the one protocol they support. For
+  agents supporting several protocols (families with template variants: pi,
+  opencode), --mode decides how the config is written:
+    unified (default) — ONE entry, the protocol the route providers serve
+                        natively for the most models; the rest converts.
+    split             — one entry per natively-spoken protocol, models
+                        partitioned among them (every model passes through).
+  On a TTY with routes spanning several native protocols, takeover asks.
+  An exact template name (pi-openai) always pins that variant.
 
   takeover list shows the available client templates (embedded presets +
   user overrides in ~/.model-proxy/takeover-templates/<name>.yaml), marking

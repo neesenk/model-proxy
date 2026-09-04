@@ -334,7 +334,24 @@ func (c renderContext) substitute(s string) string {
 // Rewrite renders the template into the client config file (creating it when
 // absent), preserving unrelated content. ClientSpec.Rewrite adapter.
 func (t *Template) Rewrite(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
+	return t.RewriteFiltered(cfg, meta, routes, nil)
+}
+
+// RewriteFiltered is Rewrite with an optional exposed-model filter: when only
+// is non-nil, the rendered models collection contains just those exposed
+// names. Split mode uses it to give each protocol variant of a family its own
+// native-protocol model subset; nil renders every exposed model (unified).
+func (t *Template) RewriteFiltered(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget, only map[string]bool) error {
 	ctx := t.contextFor(cfg, meta, routes)
+	if only != nil {
+		filtered := make([]ExposedModel, 0, len(only))
+		for _, m := range ctx.models {
+			if only[m.Exposed] {
+				filtered = append(filtered, m)
+			}
+		}
+		ctx.models = filtered
+	}
 	switch t.Format {
 	case "json":
 		return t.rewriteJSON(ctx)

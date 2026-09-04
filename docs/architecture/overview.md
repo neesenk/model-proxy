@@ -562,9 +562,9 @@ application → serveAssembly → applicationRuntime → Proxy
 `internal/takeover` 拥有客户端配置的备份、模板化改写与恢复：客户端集合由
 模板解析（内嵌 `presets/*.yaml` + `~/.model-proxy/takeover-templates` 用户覆盖，
 模板契约见 `docs/client-takeover.md`），多协议 agent 的模板变体按
-`routing.NativeProtocols` 的静态原生协议覆盖度自动选择（让 agent 用 provider
-原生协议直连，减少协议转换），只消费 config DTO、catalog 元数据与
-`routing.DefaultModelMetadata` 保守回落；
+`routing.NativeProtocols` 的静态原生协议覆盖度做 unified/split 两种写入
+（单协议归一 vs 按原生协议拆分配置项，让 agent 尽量走字节级透传），只消费
+config DTO、catalog 元数据与 `routing.DefaultModelMetadata` 保守回落；
 route derivation、catalog 加载（`internal/config`）与 source 标记
 （`internal/routing.HydrateModels`）由本包的 `ModelFactsFor` 计算并注入
 `RunTakeover`（调用方传入 HOME seam 以定位 catalog 缓存），包内不读取

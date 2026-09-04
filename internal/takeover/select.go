@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"model-proxy/internal/catalog"
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/routing"
 )
@@ -74,6 +75,74 @@ func (c *ProtocolCoverage) converts(proto string) []string {
 	return out
 }
 
+// ResolveMode selects how a multi-variant client family is written.
+type ResolveMode string
+
+const (
+	// ModeUnified writes ONE variant per family — the protocol with the best
+	// native coverage; the remaining models ride protocol conversion.
+	ModeUnified ResolveMode = "unified"
+	// ModeSplit writes one config entry per natively-spoken protocol and
+	// partitions the exposed models among them, so every model is a
+	// byte-level passthrough. Models with unknown native protocol (and
+	// multi-native models) land on the family's default variant.
+	ModeSplit ResolveMode = "split"
+)
+
+// splitAssignment partitions the exposed models of a family across its
+// variants by native protocol. Preference order: the default variant (named
+// like the family) first, then the rest by name — a model whose provider
+// natively speaks several protocols (or whose native protocol is unknown, or
+// matches no variant) always lands on the default. Variants assigned no
+// models are dropped by the caller.
+func splitAssignment(family string, variants []*Template, cov *ProtocolCoverage) map[string]map[string]bool {
+	ordered := make([]*Template, 0, len(variants))
+	for _, v := range variants {
+		if v.Name == family {
+			ordered = append([]*Template{v}, ordered...)
+		} else {
+			ordered = append(ordered, v)
+		}
+	}
+	def := ordered[0]
+	out := map[string]map[string]bool{}
+	for exposed, set := range cov.native {
+		picked := def
+		if len(set) > 0 {
+			for _, v := range ordered {
+				if set[v.Protocol] {
+					picked = v
+					break
+				}
+			}
+		}
+		if out[picked.Name] == nil {
+			out[picked.Name] = map[string]bool{}
+		}
+		out[picked.Name][exposed] = true
+	}
+	return out
+}
+
+// splitNote summarizes the partition for the log, one segment per variant.
+func splitNote(family string, assignment map[string]map[string]bool) string {
+	names := make([]string, 0, len(assignment))
+	for name := range assignment {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		models := make([]string, 0, len(assignment[name]))
+		for m := range assignment[name] {
+			models = append(models, m)
+		}
+		sort.Strings(models)
+		parts = append(parts, fmt.Sprintf("%s: [%s]", name, strings.Join(models, ", ")))
+	}
+	return fmt.Sprintf("client %s: split by native protocol — %s", family, strings.Join(parts, "; "))
+}
+
 // selectVariant picks one template from a family: the variant whose declared
 // protocol has the best native coverage. Ties (including "no signal at all")
 // break to the default variant — the one named exactly like the family — then
@@ -140,16 +209,30 @@ func AutoSelectedNames(cfg *configdomain.Config, templatesDir string) map[string
 	return out
 }
 
-// ResolveClients resolves the client set for a takeover run. A client-family
-// name with several template variants (pi, opencode) — or ""/"all" —
-// auto-selects ONE variant per family by native-protocol coverage over the
-// route table, so a multi-protocol agent is configured with the protocol its
-// providers speak natively instead of every variant at once (which wrote
-// several provider entries into the same client file). An exact template
-// name that is not a multi-variant family (pi-openai, claude) pins that
-// template. The selection rationale rides on ClientSpec.Note for RunTakeover
-// to log.
+// ResolveClients resolves the client set for a takeover run in unified mode
+// (see ResolveClientsMode).
 func ResolveClients(cfg *configdomain.Config, which, templatesDir string) ([]ClientSpec, error) {
+	return ResolveClientsMode(cfg, which, templatesDir, ModeUnified)
+}
+
+// ResolveClientsMode resolves the client set for a takeover run. A
+// client-family name with several template variants (pi, opencode) — or
+// ""/"all" — resolves per family by native-protocol coverage over the route
+// table:
+//
+//   - ModeUnified picks ONE variant per family (best native coverage, ties
+//     break to the default variant), so a multi-protocol agent is configured
+//     with the protocol its providers serve natively instead of every variant
+//     at once (which wrote several provider entries into the same client
+//     file). Models outside that protocol ride protocol conversion.
+//   - ModeSplit emits one spec per natively-spoken protocol, each carrying
+//     only its assigned exposed models (splitAssignment) — every model is a
+//     passthrough. Variants assigned no models are skipped.
+//
+// An exact template name that is not a multi-variant family (pi-openai,
+// claude) pins that template regardless of mode. The selection rationale
+// rides on ClientSpec.Note for RunTakeover to log.
+func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mode ResolveMode) ([]ClientSpec, error) {
 	if templatesDir == "" {
 		templatesDir = DefaultTemplatesDir()
 	}
@@ -185,6 +268,32 @@ func ResolveClients(cfg *configdomain.Config, which, templatesDir string) ([]Cli
 	out := make([]ClientSpec, 0, len(families))
 	for _, family := range families {
 		variants := byFamily[family]
+		if len(variants) > 1 && mode == ModeSplit && cov.Total > 0 {
+			assignment := splitAssignment(family, variants, cov)
+			note := splitNote(family, assignment)
+			noted := false
+			for _, v := range variants {
+				models := assignment[v.Name]
+				if len(models) == 0 {
+					continue // no empty provider entries
+				}
+				v := v
+				spec := ClientSpec{
+					Name:     v.Name,
+					File:     v.File,
+					Template: v,
+					Rewrite: func(cfg *configdomain.Config, meta map[string]map[string]catalog.Model, routes map[string][]configdomain.RouteTarget) error {
+						return v.RewriteFiltered(cfg, meta, routes, models)
+					},
+				}
+				if !noted {
+					spec.Note = note
+					noted = true
+				}
+				out = append(out, spec)
+			}
+			continue
+		}
 		picked := variants[0]
 		note := ""
 		if len(variants) > 1 {
@@ -200,4 +309,28 @@ func ResolveClients(cfg *configdomain.Config, which, templatesDir string) ([]Cli
 		})
 	}
 	return out, nil
+}
+
+// SplitWouldChange reports whether split mode would resolve a different
+// client set than unified for this config — the condition under which the
+// CLI asks the user to choose. Resolution failures degrade to false (no
+// prompt; unified stays the default).
+func SplitWouldChange(cfg *configdomain.Config, which, templatesDir string) bool {
+	unified, err := ResolveClientsMode(cfg, which, templatesDir, ModeUnified)
+	if err != nil {
+		return false
+	}
+	split, err := ResolveClientsMode(cfg, which, templatesDir, ModeSplit)
+	if err != nil {
+		return false
+	}
+	if len(split) != len(unified) {
+		return true
+	}
+	for i := range unified {
+		if unified[i].Name != split[i].Name {
+			return true
+		}
+	}
+	return false
 }
