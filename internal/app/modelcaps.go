@@ -145,6 +145,15 @@ func (p *Proxy) probeAllModelCaps() {
 				mp := runtimewire.ModelProtocols{}
 				for _, leg := range legs {
 					v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
+					if v == runtimewire.Unknown {
+						// Unknown is the only verdict with no persisted cause —
+						// without this line a transient (upstream 429/5xx vs a
+						// proxy-side dial/timeout) is indistinguishable after
+						// the fact. Status/err only; the body may carry
+						// sensitive text.
+						logx.Warnf("[modelcaps] %s/%s leg %s inconclusive: status=%d err=%v (will re-probe next pass)",
+							name, model, leg.Leg, leg.Status, leg.Err)
+					}
 					switch leg.Leg {
 					case probe.LegChat:
 						mp.Chat = v
