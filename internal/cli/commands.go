@@ -120,18 +120,23 @@ func RunTakeover(args []string) {
 	verifyTakeoverDrift(cfg, which, bakDir, mode)
 }
 
-// takeoverMode resolves unified|split for a takeover run: the --mode flag
-// wins; on a real terminal with no flag and routes that span several native
-// protocols (SplitWouldChange), the user picks interactively; anything else
-// (pipes, scripts, single-protocol fleets) stays unified — the historical
-// default.
+// takeoverMode resolves unified|split|<protocol> for a takeover run: the
+// --mode flag wins (a protocol value unifies into that protocol where the
+// family has a variant for it, falling back to auto-selection where it
+// doesn't); on a real terminal with no flag and routes that span several
+// native protocols (SplitWouldChange), the user picks interactively;
+// anything else (pipes, scripts, single-protocol fleets) stays unified —
+// the historical default.
 func takeoverMode(args []string, cfg *configdomain.Config, which string) takeover.ResolveMode {
 	switch mode := takeover.ResolveMode(cliframework.FlagStringValue(args, "--mode")); mode {
 	case takeover.ModeUnified, takeover.ModeSplit:
 		return mode
 	case "":
 	default:
-		log.Fatalf("takeover: unknown --mode %q (want unified|split)", mode)
+		if !mode.IsProtocol() {
+			log.Fatalf("takeover: unknown --mode %q (want unified|split|anthropic|openai|responses)", mode)
+		}
+		return mode
 	}
 	fd := os.Stdin.Fd()
 	if (isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)) && takeover.SplitWouldChange(cfg, which, "") {

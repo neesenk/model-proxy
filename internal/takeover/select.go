@@ -89,6 +89,29 @@ const (
 	ModeSplit ResolveMode = "split"
 )
 
+// IsProtocol reports whether m pins a concrete wire protocol
+// (anthropic|openai|responses): unified mode with a preference — a family
+// that HAS a variant for the protocol is unified into it regardless of
+// native coverage; a family that doesn't falls back to the normal
+// auto-selection ("没有就用默认方式").
+func (m ResolveMode) IsProtocol() bool {
+	switch m {
+	case "anthropic", "openai", "responses":
+		return true
+	}
+	return false
+}
+
+// variantForProtocol returns the family variant declaring proto, or nil.
+func variantForProtocol(variants []*Template, proto string) *Template {
+	for _, v := range variants {
+		if v.Protocol == proto {
+			return v
+		}
+	}
+	return nil
+}
+
 // splitAssignment partitions the exposed models of a family across its
 // variants by native protocol. Preference order: the default variant (named
 // like the family) first, then the rest by name — a model whose provider
@@ -228,6 +251,10 @@ func ResolveClients(cfg *configdomain.Config, which, templatesDir string) ([]Cli
 //   - ModeSplit emits one spec per natively-spoken protocol, each carrying
 //     only its assigned exposed models (splitAssignment) — every model is a
 //     passthrough. Variants assigned no models are skipped.
+//   - A protocol value (anthropic|openai|responses) is unified with a
+//     pinned preference: families with a variant for that protocol use it
+//     regardless of coverage; families without one fall back to
+//     ModeUnified auto-selection.
 //
 // An exact template name that is not a multi-variant family (pi-openai,
 // claude) pins that template regardless of mode. The selection rationale
@@ -240,6 +267,13 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 	if err != nil {
 		return nil, err
 	}
+	switch mode {
+	case ModeUnified, ModeSplit:
+	default:
+		if !mode.IsProtocol() {
+			return nil, fmt.Errorf("unknown takeover mode %q (want unified|split|anthropic|openai|responses)", mode)
+		}
+	}
 	families, byFamily := groupFamilies(templates)
 	if which != "" && which != "all" {
 		if variants, ok := byFamily[which]; ok && len(variants) > 1 {
@@ -249,6 +283,9 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 		} else {
 			for _, t := range templates {
 				if t.Name == which {
+					if mode.IsProtocol() && t.Protocol != "" && t.Protocol != string(mode) {
+						return nil, fmt.Errorf("template %s speaks protocol %q, not %q — drop --mode or name the %s variant", t.Name, t.Protocol, mode, mode)
+					}
 					return []ClientSpec{{Name: t.Name, File: t.File, Template: t, Rewrite: t.Rewrite}}, nil
 				}
 			}
@@ -268,6 +305,30 @@ func ResolveClientsMode(cfg *configdomain.Config, which, templatesDir string, mo
 	out := make([]ClientSpec, 0, len(families))
 	for _, family := range families {
 		variants := byFamily[family]
+		if mode.IsProtocol() {
+			picked := variantForProtocol(variants, string(mode))
+			note := ""
+			switch {
+			case picked != nil:
+				note = fmt.Sprintf("client %s: using %s — protocol %s pinned by --mode", family, picked.Name, mode)
+				if conv := cov.converts(string(mode)); len(conv) > 0 {
+					note += fmt.Sprintf("; conversion needed for: %s", strings.Join(conv, ", "))
+				}
+			case len(variants) > 1:
+				picked = selectVariant(family, variants, cov)
+				note = selectionNote(family, picked, cov) + fmt.Sprintf(" (no %s variant — auto-selected)", mode)
+			default:
+				picked = variants[0]
+			}
+			out = append(out, ClientSpec{
+				Name:     picked.Name,
+				File:     picked.File,
+				Template: picked,
+				Rewrite:  picked.Rewrite,
+				Note:     note,
+			})
+			continue
+		}
 		if len(variants) > 1 && mode == ModeSplit && cov.Total > 0 {
 			assignment := splitAssignment(family, variants, cov)
 			note := splitNote(family, assignment)

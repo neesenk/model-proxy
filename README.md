@@ -204,7 +204,7 @@ model-proxy test glm-5.2           # 探测路由每个 target（路由 → 凭�
 # 接管客户端配置
 model-proxy takeover list            # 可用模板（内置预设 + ~/.model-proxy/takeover-templates 自定义覆盖；* 标记各族按 provider 原生协议自动选中的变体）
 model-proxy takeover opencode      # 族名 claude|opencode|pi|codex|kimi|gemini-cli|all：多协议 agent 按 provider 原生协议写配置；精确模板名（pi-openai、opencode-openai、pi-responses）钉住变体
-# --mode unified(默认)=每族一个协议项(覆盖最多,其余走转换) | split=每种原生协议一个配置项(模型按协议划分,全部透传)；TTY 下横跨多协议时会交互询问
+# --mode unified(默认)=每族一个协议项(覆盖最多,其余走转换) | split=每种原生协议一个配置项(模型按协议划分,全部透传) | anthropic|openai|responses=归一到指定协议(族里没有该变体则回退自动选择)；TTY 下横跨多协议时会交互询问
 model-proxy restore opencode
 
 # 配置管理

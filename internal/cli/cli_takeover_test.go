@@ -610,3 +610,49 @@ func TestCLI_TakeoverModeInvalid(t *testing.T) {
 		t.Errorf("want unknown-mode error, got:\n%s", stderr)
 	}
 }
+
+// TestCLI_TakeoverModeProtocol: --mode <protocol> unifies the family into
+// that protocol's variant even when the routes are natively another
+// protocol; the log explains what will ride conversion.
+func TestCLI_TakeoverModeProtocol(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	piFile := filepath.Join(home, ".pi", "agent", "models.json")
+	if err := os.MkdirAll(filepath.Dir(piFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(piFile, []byte(`{"providers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := `listen: 127.0.0.1:15721
+providers:
+  zhipu:
+    anthropic_base_url: https://example.invalid/api/anthropic
+    provider_id: zhipu
+    models:
+      - glm-5.3
+`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := clitest.RunCLIWithHome(t, home, "takeover", cfgPath, "pi", "--mode", "openai")
+	if code != 0 {
+		t.Fatalf("takeover --mode openai pi exit=%d want 0\n--- stderr ---\n%s", code, stderr)
+	}
+	data, err := os.ReadFile(piFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"model-proxy-openai"`) || !strings.Contains(text, `"openai-completions"`) {
+		t.Errorf("protocol mode must write the openai variant:\n%s", text)
+	}
+	if strings.Contains(text, `"anthropic-messages"`) {
+		t.Errorf("pinned openai must not also write the anthropic variant:\n%s", text)
+	}
+	if !strings.Contains(stderr, "pinned by --mode") || !strings.Contains(stderr, "conversion needed for: glm-5.3") {
+		t.Errorf("log must explain the pin and its conversion cost:\n%s", stderr)
+	}
+}

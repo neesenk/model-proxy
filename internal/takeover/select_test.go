@@ -390,3 +390,106 @@ func TestRunTakeover_SplitWritesPartitionedEntries(t *testing.T) {
 func routesOf(cfg *configdomain.Config) map[string][]configdomain.RouteTarget {
 	return routing.RouteTable(cfg)
 }
+
+// --- protocol-pinned unified mode (--mode <protocol>) ---
+
+func TestResolveClients_ProtocolModePinsRegardlessOfCoverage(t *testing.T) {
+	// Everything is anthropic-native, but --mode openai pins the openai
+	// variant anyway; the note must say pinned and list what will convert.
+	cfg := cfgWith(
+		map[string]configdomain.Provider{
+			"claude-up": {AnthropicBaseURL: "https://c/anthropic/v1", Models: []string{"claude-x"}},
+		},
+		nil)
+	clients, err := takeover.ResolveClientsMode(cfg, "pi", t.TempDir(), "openai")
+	if err != nil {
+		t.Fatalf("ResolveClientsMode(pi, openai): %v", err)
+	}
+	if got := namesOf(clients); len(got) != 1 || got[0] != "pi-openai" {
+		t.Fatalf("protocol mode resolved %v, want [pi-openai]", got)
+	}
+	if !strings.Contains(clients[0].Note, "pinned") || !strings.Contains(clients[0].Note, "claude-x") {
+		t.Errorf("note must say pinned and list converting models: %q", clients[0].Note)
+	}
+}
+
+func TestResolveClients_ProtocolModeFallsBackWhenNoVariant(t *testing.T) {
+	// A family without an anthropic variant (user-defined) falls back to the
+	// unified auto-selection — "没有就用默认方式".
+	dir := t.TempDir()
+	body := `file: /tmp/x.json
+format: json
+client: famx
+protocol: openai
+json:
+  set: {a: b}
+`
+	if err := os.WriteFile(filepath.Join(dir, "famx.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body2 := `file: /tmp/y.json
+format: json
+client: famx
+protocol: responses
+json:
+  set: {a: b}
+`
+	if err := os.WriteFile(filepath.Join(dir, "famx-r.yaml"), []byte(body2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := cfgWith(
+		map[string]configdomain.Provider{"zhipu": {OpenAIBaseURL: "https://z/v1", Models: []string{"glm-5.3"}}},
+		nil)
+	clients, err := takeover.ResolveClientsMode(cfg, "famx", dir, "anthropic")
+	if err != nil {
+		t.Fatalf("ResolveClientsMode(famx, anthropic): %v", err)
+	}
+	if got := namesOf(clients); len(got) != 1 || got[0] != "famx" {
+		t.Fatalf("fallback resolved %v, want [famx] (openai variant, best coverage)", got)
+	}
+	if !strings.Contains(clients[0].Note, "no anthropic variant") {
+		t.Errorf("fallback must be explained in the note: %q", clients[0].Note)
+	}
+}
+
+func TestResolveClients_ProtocolModeAllMixesPinAndFallback(t *testing.T) {
+	// `all --mode openai`: pi/opencode pin their openai variants;
+	// single-protocol families (claude, codex, kimi, gemini-cli) have no
+	// choice to make and stay on their one template.
+	clients, err := takeover.ResolveClientsMode(mixedNativeCfg(), "all", t.TempDir(), "openai")
+	if err != nil {
+		t.Fatalf("ResolveClientsMode(all, openai): %v", err)
+	}
+	got := map[string]bool{}
+	for _, c := range clients {
+		got[c.Name] = true
+	}
+	for _, want := range []string{"pi-openai", "opencode-openai", "claude", "codex", "kimi", "gemini-cli"} {
+		if !got[want] {
+			t.Errorf("all --mode openai missing %s in %v", want, namesOf(clients))
+		}
+	}
+	if got["pi"] || got["opencode"] {
+		t.Errorf("families with an openai variant must pin it, got %v", namesOf(clients))
+	}
+}
+
+func TestResolveClients_ProtocolModeExactNameMismatchFails(t *testing.T) {
+	// An exact template name that speaks a different protocol than the
+	// pinned one is a contradiction — fail closed, don't silently pick.
+	_, err := takeover.ResolveClientsMode(mixedNativeCfg(), "pi-responses", t.TempDir(), "openai")
+	if err == nil || !strings.Contains(err.Error(), "protocol") {
+		t.Fatalf("exact name + mismatched protocol mode: want error, got %v", err)
+	}
+	clients, err := takeover.ResolveClientsMode(mixedNativeCfg(), "pi-openai", t.TempDir(), "openai")
+	if err != nil || len(clients) != 1 || clients[0].Name != "pi-openai" {
+		t.Fatalf("exact name + matching protocol mode = %v, %v, want [pi-openai]", namesOf(clients), err)
+	}
+}
+
+func TestResolveClients_UnknownModeFails(t *testing.T) {
+	if _, err := takeover.ResolveClientsMode(&configdomain.Config{}, "pi", t.TempDir(), "bogus"); err == nil ||
+		!strings.Contains(err.Error(), "unknown takeover mode") {
+		t.Fatalf("unknown mode: want error, got %v", err)
+	}
+}

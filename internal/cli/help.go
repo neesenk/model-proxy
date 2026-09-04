@@ -76,7 +76,7 @@ Options:
   --config PATH     Config file (default lookup: ~/.model-proxy/config.yaml > ./config.yaml)
   --log-file PATH   Log file path (overrides config log_file)`,
 
-	"takeover": `takeover <client> [--config PATH] [--mode unified|split]
+	"takeover": `takeover <client> [--config PATH] [--mode unified|split|anthropic|openai|responses]
 
   Rewrite a client's config to point at the proxy (backs up the original).
 
@@ -88,6 +88,9 @@ Options:
                         natively for the most models; the rest converts.
     split             — one entry per natively-spoken protocol, models
                         partitioned among them (every model passes through).
+    <protocol>        — unified pinned to that protocol where the family has
+                        a variant for it; families without one fall back to
+                        the unified auto-selection.
   On a TTY with routes spanning several native protocols, takeover asks.
   An exact template name (pi-openai) always pins that variant.
 

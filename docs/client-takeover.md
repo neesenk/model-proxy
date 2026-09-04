@@ -84,6 +84,9 @@ pi-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
   空配置项），每个模型都是透传。共享同一客户端文件的多个变体顺序写入，
   因此 RunTakeover 一律两阶段执行（先全部备份再全部改写），保证每个变体的
   备份都是原始文件而不是上一个变体的改写结果。
+- **协议值（anthropic|openai|responses）**：带协议偏好的 unified——族里
+  有该协议的变体就钉到它（不看原生覆盖率，其余模型走转换，日志列出）；
+  没有该变体的族回退 unified 自动选择（没有就用默认方式）。
 - **交互选择**：TTY 下未给 `--mode` 且 split 会写出与 unified 不同的配置项
   集合（`SplitWouldChange`，即路由横跨多种原生协议）时，takeover 提示用户
   二选一；管道/脚本默认 unified。
