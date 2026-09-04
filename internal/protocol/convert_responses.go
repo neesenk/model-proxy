@@ -117,6 +117,13 @@ func responsesInputItems(v any) []map[string]any {
 		var out []map[string]any
 		for _, it := range raw {
 			if m := asMap(it); m != nil {
+				// The Responses API accepts message items in shorthand form
+				// {role, content} with no type key (pi-ai/openai-responses
+				// sends this); normalize so every type-dispatch downstream
+				// sees them as messages instead of dropping them as unknown.
+				if strOpt(m["type"]) == "" && strOpt(m["role"]) != "" {
+					m["type"] = "message"
+				}
 				out = append(out, m)
 			}
 		}
@@ -1151,6 +1158,11 @@ func responsesContentToAnthropicBlocks(content any, d *Diagnostics) []map[string
 	var out []map[string]any
 	parts, ok := content.([]any)
 	if !ok {
+		// String shorthand ({role, content: "…"} message items) becomes a
+		// single text block, mirroring responsesMessageText.
+		if s := strOpt(content); s != "" {
+			out = append(out, map[string]any{"type": "text", "text": s})
+		}
 		return out
 	}
 	for _, p := range parts {

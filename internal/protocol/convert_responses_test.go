@@ -145,6 +145,63 @@ func TestConvertResponsesRequestToAnthropic(t *testing.T) {
 	}
 }
 
+// TestConvertResponsesRequest_TypesLessMessageItems: the Responses API accepts
+// message items in shorthand form — {role, content} with NO type key (pi-ai's
+// openai-responses provider sends exactly this). They must convert as message
+// items on both r→a and r→chat; dropping them empties the upstream message
+// list (zhipu 400 "输入不能为空", code 1214). String content shorthand becomes
+// a plain text block/message.
+func TestConvertResponsesRequest_TypesLessMessageItems(t *testing.T) {
+	in := `{"model":"glm-5.3","max_output_tokens":8192,"input":[` +
+		`{"role":"system","content":"be nice"},` +
+		`{"role":"user","content":[{"type":"input_text","text":"Reply with exactly: pong"}]},` +
+		`{"role":"assistant","content":"pong"},` +
+		`{"role":"user","content":"thanks"}]}`
+
+	outA, err := convertResponsesRequestToAnthropic([]byte(in), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ma := unmarshalMap(t, outA)
+	if ma["system"] != "be nice" {
+		t.Errorf("r→a system = %v", ma["system"])
+	}
+	msgsA, _ := ma["messages"].([]any)
+	if len(msgsA) != 3 {
+		t.Fatalf("r→a messages = %d, want 3 (user, assistant, user): %s", len(msgsA), outA)
+	}
+	if asMap(msgsA[0])["role"] != "user" {
+		t.Errorf("r→a msg[0] role = %v", asMap(msgsA[0])["role"])
+	}
+	blk := asMap(asSlice(asMap(msgsA[1])["content"], 0))
+	if blk["type"] != "text" || blk["text"] != "pong" {
+		t.Errorf("r→a assistant string-content block = %v", blk)
+	}
+	blk2 := asMap(asSlice(asMap(msgsA[2])["content"], 0))
+	if blk2["type"] != "text" || blk2["text"] != "thanks" {
+		t.Errorf("r→a user string-content block = %v", blk2)
+	}
+
+	outC, err := convertResponsesRequestToOpenAI([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mc := unmarshalMap(t, outC)
+	msgsC, _ := mc["messages"].([]any)
+	if len(msgsC) != 4 {
+		t.Fatalf("r→chat messages = %d, want 4 (system, user, assistant, user): %s", len(msgsC), outC)
+	}
+	if asMap(msgsC[0])["role"] != "system" || asMap(msgsC[0])["content"] != "be nice" {
+		t.Errorf("r→chat system msg = %v", msgsC[0])
+	}
+	if asMap(msgsC[2])["role"] != "assistant" || asMap(msgsC[2])["content"] != "pong" {
+		t.Errorf("r→chat assistant msg = %v", msgsC[2])
+	}
+	if asMap(msgsC[3])["role"] != "user" || asMap(msgsC[3])["content"] != "thanks" {
+		t.Errorf("r→chat user msg = %v", msgsC[3])
+	}
+}
+
 // TestResponsesConversionMissingOptionalFieldsNeverEmitsLiteralNull: optional
 // id/name fields that are ABSENT must convert to "" (strOpt semantics), never
 // the literal string "null" (strOf(nil) renders JSON null → "null"), per the
