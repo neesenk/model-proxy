@@ -16,7 +16,13 @@ import (
 // ModelCapsFileVersion is the current file format version. Bump history:
 // 2 — probe legs attach a function-tool declaration (agent-grade
 // callability); v1 verdicts measured bare pings and must be re-probed.
-const ModelCapsFileVersion = 2
+// 3 — model-rejection phrases gained "model not supported" / "not supported
+// by this endpoint" (shopee's retcode 40403 wording); v2 verdicts that
+// misread such 400s as shape-dispute yes must be re-probed.
+// 4 — the bare "not supported for" substring was narrowed to the gateway
+// wording regex ("not supported for <model> in <path>"); v3 nos produced by
+// the over-broad substring (e.g. plan-tier rejections) must be re-probed.
+const ModelCapsFileVersion = 4
 
 // ModelCapsPath derives the model_caps.json path as a sibling of the quota
 // state file (mirrors ResponsesStatePath).

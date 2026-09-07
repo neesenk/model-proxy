@@ -19,6 +19,7 @@ type Model struct {
 	Output     int
 	Modalities Modalities
 	ToolCall   bool
+	Reasoning  bool
 }
 
 // Catalog is an immutable, globally name-keyed models.dev projection.
@@ -35,11 +36,12 @@ type diskCatalog struct {
 }
 
 type diskModel struct {
-	Context  int64    `json:"ctx"`
-	Output   int      `json:"out"`
-	Input    []string `json:"in"`
-	OutMods  []string `json:"out_mod"`
-	ToolCall bool     `json:"tool_call"`
+	Context   int64    `json:"ctx"`
+	Output    int      `json:"out"`
+	Input     []string `json:"in"`
+	OutMods   []string `json:"out_mod"`
+	ToolCall  bool     `json:"tool_call"`
+	Reasoning bool     `json:"reasoning"`
 }
 
 // New creates a catalog from name-keyed metadata. Both the map and modality
@@ -99,6 +101,7 @@ func (c *Catalog) marshalJSON() ([]byte, error) {
 			Context: model.Context, Output: model.Output,
 			Input:   append([]string(nil), model.Modalities.Input...),
 			OutMods: append([]string(nil), model.Modalities.Output...), ToolCall: model.ToolCall,
+			Reasoning: model.Reasoning,
 		}
 	}
 	return json.Marshal(diskCatalog{FetchedAt: c.fetchedAt, ETag: c.etag, ByName: byName})
@@ -116,7 +119,7 @@ func unmarshalCatalog(data []byte) (*Catalog, error) {
 	for name, model := range disk.ByName {
 		models[name] = Model{Context: model.Context, Output: model.Output, Modalities: Modalities{
 			Input: append([]string(nil), model.Input...), Output: append([]string(nil), model.OutMods...),
-		}, ToolCall: model.ToolCall}
+		}, ToolCall: model.ToolCall, Reasoning: model.Reasoning}
 	}
 	return &Catalog{fetchedAt: disk.FetchedAt, etag: disk.ETag, byName: models}, nil
 }
@@ -154,6 +157,7 @@ func parse(data []byte) (*Catalog, error) {
 			Features struct {
 				ToolCall *bool `json:"tool_call"`
 			} `json:"features"`
+			Reasoning *bool `json:"reasoning"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -179,6 +183,7 @@ func parse(data []byte) (*Catalog, error) {
 				Context: source.Limit.Context, Output: int(source.Limit.Output),
 				Modalities: Modalities{Input: source.Modalities.Input, Output: source.Modalities.Output},
 				ToolCall:   source.Features.ToolCall != nil && *source.Features.ToolCall,
+				Reasoning:  source.Reasoning != nil && *source.Reasoning,
 			}
 			ranks[name] = rank
 		}

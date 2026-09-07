@@ -96,3 +96,31 @@ func TestParseEqualRankCollisionIsDeterministic(t *testing.T) {
 		t.Fatalf("canonical owner lost to sorted-first reseller: %+v", m)
 	}
 }
+
+func TestParseReasoning(t *testing.T) {
+	c, err := parse([]byte(`{"p": {"models": {
+		"m-think": {"reasoning": true, "limit": {"context": 1, "output": 1}},
+		"m-plain": {"limit": {"context": 1, "output": 1}}
+	}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := c.Lookup("m-think"); !m.Reasoning {
+		t.Error("m-think Reasoning = false, want true")
+	}
+	if m, _ := c.Lookup("m-plain"); m.Reasoning {
+		t.Error("m-plain Reasoning = true, want false")
+	}
+	// Disk round-trip must preserve it.
+	data, err := c.marshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := unmarshalCatalog(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := c2.Lookup("m-think"); !m.Reasoning {
+		t.Error("Reasoning lost across disk round-trip")
+	}
+}

@@ -88,8 +88,9 @@ provider 级 wire verdict 由 `probeAllWireCaps` 在 boot/reload 时异步探测
 | anthropic | model.responses == yes | 转 responses（含「有 anthropic base 但该模型不在其上」） |
 | anthropic | 矩阵全部已结论且 responses ≠ yes | 转 chat |
 | responses | model.responses == yes | 透传 |
-| responses | model.responses == no | 转 chat |
-| openai(chat) | — | 透传 |
+| responses | model.responses == no | 转首个 probed-yes 替代腿（chat，再 anthropic）；替代腿未结论（unknown）优先于已知死腿（unknown ≠ dead）；全 no 维持 chat，让上游错误干净浮现 |
+| openai(chat) | model.chat == no | 转首个 probed-yes 替代腿（responses，再 anthropic），其次 unknown 替代腿；全 no 维持透传，让上游错误干净浮现 |
+| openai(chat) | 其他 | 透传 |
 | 任意 | 模型无条目或相关腿未结论 | 回落 provider 级矩阵 |
 
 **运行时 404 纠正（模型粒度）**：因 verdict 转到 `/responses` 的请求若上游 404，说明 verdict 有误而非模型缺失——`noteWireResponsesMiss(parent, model)` 经 `targetexec` State/HealthGate 传导（executor 与 Fusion leg 共用）：该 model 在模型级矩阵有条目时**只翻转模型级** responses verdict 并持久化 model_caps.json（provider 级不动）；无模型条目（透传 target）才翻转 provider 级 verdict（legacy 路径）。两种情况都**跳过 recordModelFailure**（这是我们的协议选择失误，不是模型的失败），按正常失败走 failover；后续请求自动转 chat。非 verdict 驱动的 404 行为不变（模型锁）。Fusion leg 共享同一纠正（`planTarget` 已算出 `viaResponsesVerdict`，见 fusion-shadow-cache.md）。
@@ -165,6 +166,13 @@ body hint 支持 `retry after N s/m/h/d`、`reset after 2h5m`、`Resets in 164h`
 2. 提取违规顶层字段；
 3. 当次剥离并重试一次；
 4. 后续请求在 `RewriteRequest` 后预防性剥离。
+
+同一学习-重试家族还有两条**改写型**课程（`internal/targetexec/failure.go`，只在本上游真的拒绝后才改写——接受该形状的上游永不被碰）：
+
+- `developer_role`：chat 方言拒绝 OpenAI `developer` role（volcengine "invalid value: \`developer\`"、deepseek "unknown variant"、kimi-code "not a valid role"、zhipu "角色信息不正确"）→ 把 `messages[].role` 的 `developer` 改写为 `system` 后重试一次。
+- `thinking_adaptive`：anthropic 方言拒绝 budget 式 thinking（shopee claude 网关 "thinking.type.enabled is not supported … Use thinking.type.adaptive"）→ 把 `thinking` 改写为 `{"type":"adaptive"}` 后重试一次。
+
+两条课程与剥参一样持久化在 `(provider, model)` 的 paramBlock 里，经 `applyParamBlock` 在后续请求上预先应用。
 
 以下字段永不自动剥离：
 

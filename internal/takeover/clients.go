@@ -101,6 +101,23 @@ func opencodeModelsCollection(models []ExposedModel) map[string]any {
 	return out
 }
 
+// piInputModalities projects catalog input modalities onto pi's models.json
+// schema, which only accepts "text" and "image" (Literal union). models.dev
+// also lists "pdf"/"video" for many models — passing those through writes an
+// invalid models.json and pi refuses to START, so anything else is dropped.
+func piInputModalities(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, m := range in {
+		if m == "text" || m == "image" {
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"text"}
+	}
+	return out
+}
+
 // piModelsCollection builds pi's model list: {id, name, input, maxTokens,
 // contextWindow} per exposed model, with conservative defaults for missing
 // metadata and one fallback entry when the route table is empty.
@@ -110,11 +127,14 @@ func piModelsCollection(models []ExposedModel) []map[string]any {
 		entry := map[string]any{
 			"name":      DisplayName(m.Exposed),
 			"id":        m.Exposed,
-			"input":     m.PM.Modalities.Input,
+			"input":     piInputModalities(m.PM.Modalities.Input),
 			"maxTokens": m.PM.Output,
 		}
-		if len(m.PM.Modalities.Input) == 0 {
-			entry["input"] = []string{"text"}
+		// reasoning is what makes pi send reasoning params and surface
+		// thinking blocks; omitting it silently disables thinking for
+		// reasoning-capable models. Only asserted true — pi defaults false.
+		if m.PM.Reasoning {
+			entry["reasoning"] = true
 		}
 		if m.PM.Output == 0 {
 			entry["maxTokens"] = 4096

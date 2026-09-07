@@ -160,6 +160,13 @@ func TestClassifyModelStatus(t *testing.T) {
 		{"400 invalid model", true, 400, nil, `invalid model`, No},
 		{"400 not supported with this model", true, 400, nil, `Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.`, No},
 		{"400 case insensitive", true, 400, nil, `MODEL NOT FOUND`, No},
+		// v3 additions — shopee's retcode 40403 envelope, both spellings.
+		{"400 retcode model not supported", true, 400, nil, `{"retcode":40403,"message":"Model not supported by this endpoint"}`, No},
+		{"400 model not supported without is", true, 400, nil, `Model not supported on this plan`, No},
+		// Reverse: "supported" substrings that are NOT model rejections must
+		// stay shape-dispute yes.
+		{"400 streaming not supported is not model denial", true, 400, nil, `Streaming is not supported for this plan tier`, Yes},
+		{"400 parameter not supported is shape dispute", true, 400, nil, `Unsupported parameter: 'temperature' is not supported`, Yes},
 		{"400 tools not supported for model on leg", true, 400, nil, `Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.`, No},
 		{"401 auth", true, 401, nil, "", Unknown},
 		{"429 quota", true, 429, nil, "", Unknown},
@@ -204,8 +211,17 @@ func TestResolveModel(t *testing.T) {
 		{"responses client yes", "responses", false, mp(Yes, No, Yes), true, "responses", false},
 		{"responses client no", "responses", false, mp(Yes, No, No), true, "openai", false},
 		{"responses client unknown falls back", "responses", false, mp(Unknown, No, Unknown), true, "responses", false},
-		// chat client never switches.
-		{"chat client passthrough", "openai", false, mp(No, No, Yes), true, "openai", false},
+		// unknown alternative beats a known-dead leg (low-11 contract)
+		{"responses dead tries unknown anthropic", "responses", false, mp(No, Unknown, No), true, "anthropic", false},
+		{"responses dead all-no stays chat", "responses", false, mp(No, No, No), true, "openai", false},
+		{"chat dead tries unknown responses", "openai", false, mp(No, Unknown, Unknown), true, "responses", true},
+		{"chat dead all-no stays passthrough", "openai", false, mp(No, No, No), true, "openai", false},
+		// chat client: a probed chat no converts to the first probed-yes leg
+		// instead of passthroughing the dead chat leg.
+		{"chat client converts off dead chat leg", "openai", false, mp(No, No, Yes), true, "responses", true},
+		{"chat client converts to anthropic when only leg", "openai", true, mp(No, Yes, No), true, "anthropic", false},
+		{"chat client unconcluded stays passthrough", "openai", false, mp(Unknown, No, Unknown), true, "openai", false},
+		{"chat client all-no stays passthrough", "openai", false, mp(No, No, No), true, "openai", false},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -335,6 +351,10 @@ func TestClassifyProviderStatus(t *testing.T) {
 		{"plain 400 shape dispute", 400, nil, `Unsupported parameter: 'temperature'`, Yes},
 		{"400 tool rejection wording", 400, nil, `Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions`, No},
 		{"400 model not found", 400, nil, `Model not found: m1`, No},
+		// v3 additions — the shopee envelope that used to read as a
+		// shape-dispute yes (the false-positive that motivated v3).
+		{"400 retcode not supported by this endpoint", 400, nil, `{"retcode":40403,"message":"Model not supported by this endpoint"}`, No},
+		{"400 streaming not supported stays yes", 400, nil, `Streaming is not supported for this plan tier`, Yes},
 		{"401", 401, nil, "", Yes},
 		{"500", 500, nil, "", Unknown},
 		{"network error", 0, fmt.Errorf("dial"), "", Unknown},

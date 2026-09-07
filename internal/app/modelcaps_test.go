@@ -399,3 +399,78 @@ func TestModelCaps_PersistRoundTrip(t *testing.T) {
 		t.Error("matrix restored despite fingerprint mismatch — must be invalidated")
 	}
 }
+
+// TestModelCaps_Forward_UnknownLegBeatsDeadLeg pins intentional behavior #31
+// end to end at the wire level: a chat client whose model-level chat leg is
+// probed no, with the anthropic leg probed yes, is CONVERTED to the anthropic
+// leg (request hits /v1_messages, not the dead /chat/completions); with an
+// UNCONCLUDED anthropic leg the request still tries it (unknown ≠ dead); with
+// every leg concluded no the request rides chat so the upstream error surfaces.
+func TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E(t *testing.T) {
+	makeProxy := func(t *testing.T, up *httptest.Server, mp runtimewire.ModelProtocols) (*Proxy, *httptest.Server) {
+		cfg := &Config{
+			Providers: map[string]Provider{"p": {OpenAIBaseURL: up.URL, AnthropicBaseURL: up.URL, Provider: testProviderID}},
+			Routes:    map[string][]RouteTarget{"m": {{Provider: "p", Model: "m"}}},
+		}
+		p := newTestProxy(t, cfg)
+		p.providers["p"] = &testProv{key: "k"}
+		p.modelCaps.Put("p", "fp", "m", mp, time.Now())
+		px := httptest.NewServer(http.HandlerFunc(p.Handler))
+		t.Cleanup(px.Close)
+		return p, px
+	}
+	post := func(t *testing.T, px *httptest.Server) {
+		resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"ping"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+
+	t.Run("anthropic yes beats dead chat leg", func(t *testing.T) {
+		var paths []string
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths = append(paths, r.URL.Path)
+			w.Header().Set("content-type", "application/json")
+			w.Write([]byte(`{"id":"m1","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+		}))
+		defer up.Close()
+		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triYes, Responses: triNo})
+		post(t, px)
+		if len(paths) != 1 || paths[0] != "/v1/messages" {
+			t.Errorf("upstream paths = %v, want one /v1/messages (converted off the dead chat leg)", paths)
+		}
+	})
+
+	t.Run("anthropic unknown beats dead chat leg", func(t *testing.T) {
+		var paths []string
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths = append(paths, r.URL.Path)
+			w.Header().Set("content-type", "application/json")
+			w.Write([]byte(`{"id":"m1","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+		}))
+		defer up.Close()
+		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triUnknown, Responses: triNo})
+		post(t, px)
+		if len(paths) != 1 || paths[0] != "/v1/messages" {
+			t.Errorf("upstream paths = %v, want one /v1/messages (unknown leg tried before the dead one)", paths)
+		}
+	})
+
+	t.Run("all no rides chat so the error surfaces", func(t *testing.T) {
+		var paths []string
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			paths = append(paths, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"retcode":40403,"message":"Model not supported by this endpoint"}`))
+		}))
+		defer up.Close()
+		_, px := makeProxy(t, up, runtimewire.ModelProtocols{Chat: triNo, Anthropic: triNo, Responses: triNo})
+		post(t, px)
+		if len(paths) != 1 || paths[0] != "/chat/completions" {
+			t.Errorf("upstream paths = %v, want one /chat/completions (error surfaced, no leg-hopping)", paths)
+		}
+	})
+}

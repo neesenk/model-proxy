@@ -1,6 +1,7 @@
 package wirecap
 
 import (
+	"regexp"
 	"strings"
 	"time"
 )
@@ -59,6 +60,11 @@ func ClassifyProviderStatus(status int, err error, body []byte) Verdict {
 				return No
 			}
 		}
+		for _, re := range modelRejectionREs {
+			if re.MatchString(lower) {
+				return No
+			}
+		}
 	}
 	return ClassifyStatus(status, err)
 }
@@ -68,21 +74,33 @@ func ClassifyProviderStatus(status int, err error, body []byte) Verdict {
 // case-insensitively against the (possibly gateway-wrapped) error body. Bare
 // "model" is deliberately NOT enough — shape disputes mention the model too
 // ("... with this model").
+// modelRejectionREs carry wordings too specific for plain substring
+// matching. The bare "not supported for" substring was retired in v4: it
+// also matched plan-tier rejections ("Streaming is not supported for this
+// plan") and a model-level no has no TTL — one misread locked the leg until
+// the config fingerprint changed.
+var modelRejectionREs = []*regexp.Regexp{
+	// aqp gateway: "<feature> ... are not supported for <model> in <path>" —
+	// the model is rejected ON THIS LEG ("Function tools with
+	// reasoning_effort are not supported for gpt-5.6-luna in
+	// /v1/chat/completions").
+	regexp.MustCompile(`(?i)not supported for [a-z0-9][a-z0-9._*-]* in /`),
+}
+
 var modelRejectionPhrases = []string{
 	"model not found",
 	"does not exist",
 	"unsupported model",
 	"invalid model",
 	"model is not supported",
+	// shopee gateway: {"retcode":40403,"message":"Model not supported by
+	// this endpoint"} — the endpoint exists but refuses THIS model; without
+	// these entries the probe misreads the 400 as a shape dispute (yes).
+	"model not supported",
+	"not supported by this endpoint",
 	"unknown model",
 	"no such model",
 	"not supported with this model",
-	// "<feature> is/are not supported for <model> in <path>" — the gateway
-	// rejects the model ON THIS LEG (aqp: "Function tools with
-	// reasoning_effort are not supported for gpt-5.6-luna in
-	// /v1/chat/completions"), which is precisely what the tools-attached
-	// probe leg must record as unsupported.
-	"not supported for",
 }
 
 // ClassifyModelStatus maps one protocol-leg probe outcome to a model-level
@@ -111,6 +129,11 @@ func ClassifyModelStatus(probed bool, status int, err error, body []byte) Verdic
 		lower := strings.ToLower(string(body))
 		for _, phrase := range modelRejectionPhrases {
 			if strings.Contains(lower, phrase) {
+				return No
+			}
+		}
+		for _, re := range modelRejectionREs {
+			if re.MatchString(lower) {
 				return No
 			}
 		}
@@ -181,9 +204,15 @@ func Resolve(
 //	  model; same rule as routing.NativeProtocolsWithVerdict, so takeover and
 //	  forward never disagree)
 //	anthropic client + model fully concluded, responses != yes   → convert to chat
-//	responses client + model.responses == no                     → convert to chat
 //	responses client + model.responses == yes                    → passthrough
-//	chat client                                                  → passthrough
+//	responses client + model.responses == no                     → first probed-yes
+//	  alternative (chat, then anthropic); an unconcluded alternative beats the
+//	  known-dead legs (unknown ≠ dead); all-no stays chat so the upstream
+//	  error surfaces cleanly
+//	chat client + model.chat == no                               → first probed-yes
+//	  alternative (responses, then anthropic), unknown alternatives next;
+//	  all-no stays passthrough so the upstream error surfaces cleanly
+//	chat client otherwise                                         → passthrough
 func ResolveModel(
 	clientProtocol string,
 	hasAnthropicBase bool,
@@ -225,9 +254,49 @@ func ResolveModel(
 			case Yes:
 				return "responses", false
 			case No:
+				// The responses leg is dead — fall to the first probed-yes
+				// alternative (shopee's claude models are anthropic-only).
+				// An UNCONCLUDED alternative beats the known-dead legs too
+				// (unknown ≠ dead, same philosophy as the anthropic branch's
+				// chat fallback); only when every leg concluded no does the
+				// choice stay chat, letting the upstream error surface.
+				if modelCaps.Chat == Yes {
+					return "openai", false
+				}
+				if modelCaps.Anthropic == Yes {
+					return "anthropic", false
+				}
+				if modelCaps.Chat == Unknown {
+					return "openai", false
+				}
+				if modelCaps.Anthropic == Unknown {
+					return "anthropic", false
+				}
 				return "openai", false
 			}
 		default:
+			// Chat client: passthrough is the default, but a probed model-level
+			// chat no is authoritative — the same rule the anthropic branch
+			// applies (routing.NativeProtocolsWithVerdict excludes the leg).
+			// Convert to the first probed-yes alternative instead of riding a
+			// dead leg; unconcluded or all-no stays passthrough (status quo
+			// while probing / the upstream error surfaces and is now cleanly
+			// translatable).
+			if modelCaps.Chat == No {
+				if modelCaps.Responses == Yes {
+					return "responses", true
+				}
+				if modelCaps.Anthropic == Yes {
+					return "anthropic", false
+				}
+				// Unknown alternatives beat the known-dead chat leg.
+				if modelCaps.Responses == Unknown {
+					return "responses", true
+				}
+				if modelCaps.Anthropic == Unknown {
+					return "anthropic", false
+				}
+			}
 			return clientProtocol, false
 		}
 	}

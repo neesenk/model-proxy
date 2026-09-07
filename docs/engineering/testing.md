@@ -272,9 +272,29 @@ Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会从协议包读取�
 必须失败，不能静默假绿。每次 `wire record` 录制的真实流自动成为 fuzz 输入，
 无需手工同步。`internal/protocol/convert_golden_test.go` 还必须消费全部 `*.err`：
 识别的 JSON error envelope 在每个跨协议目标下校验结构，HTML/空/未知 body
-必须明确 fail-closed。
+必须降级合成目标协议 envelope（携带截断原文），不得使转换失败（见下方 e2e 契约表）。
 
 协议能力和语义边界还必须覆盖：已知不支持字段的客户端原生 400 与 compatible-target failover；tool_search_output 的 discovered tools 物化；citation 非流式/SSE 六方向；signed/redacted reasoning replay；prompt cache key/retention；previous_response_id 命中、miss 修复、TTL、重启恢复及仅 token-limit incomplete 可缓存。
+
+## 转发管线端到端契约（forward e2e，app 包）
+
+走完整 `proxy.Handler → forward → targetexec` 链路的端到端契约。命名一律
+`…E2E` 后缀；下表是这些行为的**权威清单**——修改行为必须同步更新本表、
+实现注释与 `docs/decisions/intentional-behaviors.md` 对应条目，并保持锁定
+测试绿；新增同类行为时必须同时新增 E2E 用例并登记本表。
+
+| 契约 | 可观察行为 | 锁定测试（`internal/app/`） |
+|---|---|---|
+| developer-role 学习重试 | chat 上游 400 拒绝 `developer` role → 当次改写为 `system` 重试一次；课程持久化；后续请求预改写 | `TestForward_LearnsDeveloperRoleRename` |
+| thinking_adaptive 学习重试 | anthropic 上游 400 要 adaptive thinking → 当次改写 `{"type":"adaptive"}` 重试一次；课程持久化；后续请求预改写 | `TestForward_LearnsThinkingAdaptiveE2E` |
+| 错误体降级可见 | 跨协议客户端收到上游 4xx 的翻译 envelope（含 detail/空 body 的合成文案），status 保留、绝不升级 502 | `TestForward_ErrorDegradationVisibleE2E` |
+| 模型拒绝新措辞边界 | retcode 40403 措辞计入模型拒绝（锁模型+failover）；相邻套餐层 "not supported" 措辞不锁 | `TestForward_ModelDeniedNewWordingE2E` |
+| 腿选择（unknown 优先于死腿） | 模型级当前腿 no 且存在 probed-yes/unknown 替代腿 → 请求实际打到替代腿的 wire 路径；全 no 维持原协议让错误浮现 | `TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E` |
+| 跨层一致性 | forward 与 takeover 在全部 verdict 叉积上都不使用 probed-no 腿（all-no 例外见条目 31） | `internal/takeover` 的 `TestProtocolLayersNeverPassThroughProbedNoLegs` |
+
+真实上游维度的对应验证由 `tools/agenttest` 承担（`sweep.mjs` 参数矩阵、
+`codews.mjs` 编码工程、`compare.mjs` 原生/转换对比），发现的上游措辞回归
+按上表沉淀为 E2E 用例。
 
 ## soak 压测工具（`scripts/soak`，手动运行）
 

@@ -33,7 +33,7 @@ func consistencyConfig(hasAnthropicBase bool) *configdomain.Config {
 // concluded-no leg.
 func TestProtocolLayersNeverPassThroughProbedNoLegs(t *testing.T) {
 	verdicts := []runtimewire.Verdict{runtimewire.Unknown, runtimewire.Yes, runtimewire.No}
-	clientProtos := []string{"anthropic", "responses"}
+	clientProtos := []string{"anthropic", "responses", "openai"}
 	for _, clientProto := range clientProtos {
 		for _, hasBase := range []bool{true, false} {
 			cfg := consistencyConfig(hasBase)
@@ -61,8 +61,13 @@ func TestProtocolLayersNeverPassThroughProbedNoLegs(t *testing.T) {
 									leg, clientProto, hasBase, mc)
 							}
 							passthrough := got == clientProto && !viaResponses
-							if passthrough && got == leg {
-								t.Errorf("forward passthroughs %s despite probed no (client=%s base=%v verdicts=%+v got=%q)",
+							// A probed-no leg may only be ridden when NO probed-yes
+							// or unconcluded alternative exists (all-no: forward
+							// deliberately lets the upstream error surface —
+							// intentional behavior #31).
+							hasAlternative := chat != runtimewire.No || anth != runtimewire.No || resp != runtimewire.No
+							if passthrough && got == leg && hasAlternative {
+								t.Errorf("forward passthroughs %s despite probed no while an alternative leg exists (client=%s base=%v verdicts=%+v got=%q)",
 									leg, clientProto, hasBase, mc, got)
 							}
 						}

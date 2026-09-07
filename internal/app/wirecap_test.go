@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,9 +35,12 @@ import (
 func TestWireCap_ProbeProviders(t *testing.T) {
 	type hit struct{ path, body string }
 	var hits []hit
+	var hitsMu sync.Mutex
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
+		hitsMu.Lock()
 		hits = append(hits, hit{r.URL.Path, string(b)})
+		hitsMu.Unlock()
 		if r.URL.Path == "/responses" {
 			w.Header().Set("content-type", "application/json")
 			w.Write([]byte(`{"id":"r1","status":"completed","output":[]}`))
@@ -76,9 +80,12 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 		t.Errorf("verdict base_url = %q", caps.BaseURL)
 	}
 	// Both legs probed with provider.Models[0].
+	hitsMu.Lock()
 	if len(hits) != 2 {
+		hitsMu.Unlock()
 		t.Fatalf("upstream hits = %d, want 2: %+v", len(hits), hits)
 	}
+	hitsMu.Unlock()
 	for _, h := range hits {
 		if !strings.Contains(h.body, `"m-probe"`) {
 			t.Errorf("probe body missing model m-probe: %s", h.body)
@@ -97,6 +104,8 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 
 	// Fresh verdict → second pass is a no-op.
 	p.probeAllWireCaps()
+	hitsMu.Lock()
+	defer hitsMu.Unlock()
 	if len(hits) != 2 {
 		t.Errorf("re-probe hit upstream %d times, want 2 total (fresh verdict skipped)", len(hits))
 	}
@@ -109,9 +118,12 @@ func TestWireCap_ProbeProviders(t *testing.T) {
 // and the freshness check skips re-probes.
 func TestWireCap_ProbeNeverFabricatesAnthropicOnOpenAIBase(t *testing.T) {
 	var paths []string
+	var pathsMu sync.Mutex
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
+		pathsMu.Lock()
 		paths = append(paths, r.URL.Path)
+		pathsMu.Unlock()
 		w.Header().Set("content-type", "application/json")
 		w.Write([]byte(`{"id":"r1","status":"completed","output":[]}`))
 	}))
@@ -127,6 +139,8 @@ func TestWireCap_ProbeNeverFabricatesAnthropicOnOpenAIBase(t *testing.T) {
 
 	p.probeAllWireCaps()
 
+	pathsMu.Lock()
+	defer pathsMu.Unlock()
 	if len(paths) != 2 {
 		t.Fatalf("probe paths = %v, want exactly [/chat/completions /responses]", paths)
 	}

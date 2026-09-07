@@ -3,6 +3,8 @@ package takeover
 import (
 	"strings"
 	"testing"
+
+	"model-proxy/internal/catalog"
 )
 
 // TestSubstituteValueDoesNotMutateSharedTemplate pins the purity fix: the
@@ -42,5 +44,66 @@ func TestTomlTopKeyValueExactKeyMatch(t *testing.T) {
 	}
 	if _, ok := tomlTopKeyValue("modelx = \"y\"", "model"); ok {
 		t.Error("tomlTopKeyValue(model) matched key modelx")
+	}
+}
+
+// TestPiInputModalitiesSchemaConformant pins the pi models.json contract:
+// pi's ModelDefinitionSchema accepts input values "text" and "image" ONLY —
+// catalog modalities like "pdf"/"video" must be dropped, and an all-dropped
+// (or empty) list falls back to ["text"]. A regression here writes an invalid
+// models.json and pi refuses to start.
+func TestPiInputModalitiesSchemaConformant(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want []string
+	}{
+		{[]string{"text"}, []string{"text"}},
+		{[]string{"text", "image"}, []string{"text", "image"}},
+		{[]string{"text", "image", "pdf"}, []string{"text", "image"}},
+		{[]string{"text", "image", "video"}, []string{"text", "image"}},
+		{[]string{"pdf", "video"}, []string{"text"}},
+		{nil, []string{"text"}},
+	}
+	for _, testCase := range cases {
+		got := piInputModalities(testCase.in)
+		if len(got) != len(testCase.want) {
+			t.Errorf("piInputModalities(%v) = %v, want %v", testCase.in, got, testCase.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != testCase.want[i] {
+				t.Errorf("piInputModalities(%v) = %v, want %v", testCase.in, got, testCase.want)
+				break
+			}
+		}
+	}
+}
+
+// TestPiModelsCollectionReasoningAndInput pins the pi models.json contract:
+// reasoning-capable catalog models must carry "reasoning": true (without it
+// pi never sends reasoning params and thinking is silently disabled), and
+// input modalities are projected to pi's text|image schema.
+func TestPiModelsCollectionReasoningAndInput(t *testing.T) {
+	models := []ExposedModel{
+		{Exposed: "thinker", PM: catalog.Model{Reasoning: true, Modalities: catalog.Modalities{Input: []string{"text", "image", "pdf"}}}},
+		{Exposed: "plain", PM: catalog.Model{Modalities: catalog.Modalities{Input: []string{"text"}}}},
+		{Exposed: "bare"},
+	}
+	got := piModelsCollection(models)
+	byID := map[string]map[string]any{}
+	for _, e := range got {
+		byID[e["id"].(string)] = e
+	}
+	if r, ok := byID["thinker"]["reasoning"]; !ok || r != true {
+		t.Errorf("thinker reasoning = %v (ok=%v), want true", r, ok)
+	}
+	if _, ok := byID["plain"]["reasoning"]; ok {
+		t.Error("plain model must not carry reasoning (pi defaults false)")
+	}
+	if in := byID["thinker"]["input"].([]string); len(in) != 2 || in[0] != "text" || in[1] != "image" {
+		t.Errorf("thinker input = %v, want [text image]", in)
+	}
+	if in := byID["bare"]["input"].([]string); len(in) != 1 || in[0] != "text" {
+		t.Errorf("bare input = %v, want [text] fallback", in)
 	}
 }
