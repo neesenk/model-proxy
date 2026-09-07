@@ -188,12 +188,15 @@ func (plan Plan) ConvertBody(body []byte) ([]byte, error) {
 		return body, nil
 	}
 	providerID := plan.providerID
+	effortProfile := provider.ChatEffortProfile(providerID, plan.targetModel)
 	return protocol.ConvertRequestWithOptions(body, plan.clientProtocol, plan.backendProtocol, protocol.RequestOptions{
-		ImageOK:          plan.imageOK,
-		ReasoningDialect: protocol.ReasoningDialect(provider.ChatReasoningMode(providerID)),
-		CodexShaping:     providerID == "codex",
-		Diag:             plan.diag,
-		StrictLossy:      plan.strictLossy,
+		ImageOK:             plan.imageOK,
+		ReasoningDialect:    protocol.ReasoningDialect(provider.ChatReasoningMode(providerID)),
+		ReasoningEffortEnum: effortProfile.Enum,
+		ReasoningEffortOnly: effortProfile.EnumOnly,
+		CodexShaping:        providerID == "codex",
+		Diag:                plan.diag,
+		StrictLossy:         plan.strictLossy,
 	})
 }
 
