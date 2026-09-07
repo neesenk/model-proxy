@@ -46,17 +46,26 @@ func TestDifferential_AnthropicSignatureDelta(t *testing.T) {
 	if item["type"] != "reasoning" {
 		t.Errorf("done item type = %v, want reasoning", item["type"])
 	}
-	// The done-part item carries the accumulated summary + verbatim signature.
+	// The done item carries the accumulated summary + verbatim signature.
+	if item["encrypted_content"] != "AbCdEf1234567890sig==" {
+		t.Errorf("encrypted_content = %v, want verbatim signature", item["encrypted_content"])
+	}
+	if strOf(asMap(asSlice(item["summary"], 0))["text"]) != "let me think" {
+		t.Errorf("summary = %v", item["summary"])
+	}
+	// The summary part.done carries the summary_text PART (spec shape), keyed
+	// to the same item id.
 	parts := sseFilter(events, "response.reasoning_summary_part.done")
 	if len(parts) != 1 {
 		t.Fatalf("reasoning_summary_part.done = %d", len(parts))
 	}
-	pItem := asMap(sseDataMap(t, parts[0])["item"])
-	if pItem["encrypted_content"] != "AbCdEf1234567890sig==" {
-		t.Errorf("encrypted_content = %v, want verbatim signature", pItem["encrypted_content"])
+	partData := sseDataMap(t, parts[0])
+	if strOf(partData["item_id"]) != strOf(item["id"]) {
+		t.Errorf("part.done item_id = %v, want %v", partData["item_id"], item["id"])
 	}
-	if strOf(asMap(asSlice(pItem["summary"], 0))["text"]) != "let me think" {
-		t.Errorf("summary = %v", pItem["summary"])
+	part := asMap(partData["part"])
+	if part["type"] != "summary_text" || strOf(part["text"]) != "let me think" {
+		t.Errorf("part.done part = %v, want summary_text 'let me think'", part)
 	}
 }
 

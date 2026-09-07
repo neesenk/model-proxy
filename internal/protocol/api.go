@@ -60,7 +60,18 @@ const (
 type RequestOptions struct {
 	ImageOK          bool
 	ReasoningDialect ReasoningDialect
-	CodexShaping     bool
+	// ReasoningEffortEnum maps canonical effort levels
+	// (minimal|low|medium|high|xhigh|max, and "none" where the vendor
+	// expresses off as an enum value) to the vendor-accepted string for the
+	// target chat endpoint. nil = the endpoint has no level knob beyond the
+	// ReasoningDialect switch. Plain data threaded from
+	// provider.ChatEffortProfile — the protocol package has no provider
+	// dependency.
+	ReasoningEffortEnum map[string]string
+	// ReasoningEffortOnly emits ReasoningEffortEnum INSTEAD of the thinking
+	// switch (kimi-k3 rejects thinking+reasoning_effort together).
+	ReasoningEffortOnly bool
+	CodexShaping        bool
 	// Diag, when set, collects the conversion's structured diagnostics
 	// (lossy-but-degraded mappings with stable codes). See diagnostics.go.
 	Diag *Diagnostics

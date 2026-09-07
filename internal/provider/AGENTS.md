@@ -28,6 +28,7 @@
 - Codex 是 Responses API，不得标记成 Chat Completions `openai` hint。
 - 不可表达的 wire protocol 使用 `WireProtocolNote` 警告，不得伪装成可转换。
 - `ChatReasoningMode`（protocol_hint.go，与 ProtocolHint 并列）：r→chat 转换时 reasoning.effort 的方言形状（`reasoning_effort`/`thinking`/`enable_thinking`/`openrouter`；当前登记 `zhipu`/`volcengine`/`kimi-code`/`deepseek`→`thinking`，`qwen-plan`→`enable_thinking`，`aqp` 及其别名 `shopee`→`openrouter`）。新 provider 的 chat 端点 reasoning 字段形状不是平铺 `reasoning_effort` 时才登记，默认不要加条目。
+- `ChatEffortProfile`（reasoning_effort.go，与 ChatReasoningMode 并列）：chat 端点在 switch 形状之上接受的 effort 档位枚举（canonical → vendor 字符串映射；`EnumOnly` 表示枚举**替代** thinking switch，如 kimi-k3 拒绝 thinking+reasoning_effort 同发）。仅当 vendor 的 chat 端点接受非透传枚举或替代 switch 时才登记（当前 `deepseek`、`zhipu` 按 glm-5.3/5.2 门控、`kimi-code` 按 kimi-k3 门控、`qwen-plan` 按 qwen3.8 门控）；枚举按 model 子集碎片化的（volcengine）或原生透传的（aqp/shopee）保持 nil，默认不要加条目。登记时在注释中引用 vendor 文档 URL。
 
 ## 修改要求
 

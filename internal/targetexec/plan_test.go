@@ -189,3 +189,69 @@ func TestPlanSameProtocolCodexPassthrough(t *testing.T) {
 		t.Fatalf("same-protocol body = %s, err = %v", got, err)
 	}
 }
+
+// ConvertBody threads provider.ChatEffortProfile into the r→chat conversion:
+// deepseek gets its effort enum alongside the thinking switch; kimi-k3's
+// EnumOnly profile replaces the switch; kimi-k2.6 stays a pure switch.
+func TestPlanConvertBodyThreadsEffortProfile(t *testing.T) {
+	mkPlan := func(providerID, model string) Plan {
+		return NewPlan(PlanInput{
+			Target:          configdomain.RouteTarget{Model: model},
+			ProviderConfig:  configdomain.Provider{Provider: providerID, OpenAIBaseURL: "https://chat.example/v1"},
+			ClientProtocol:  protocol.Responses,
+			BackendProtocol: protocol.OpenAI,
+			ClientPath:      "/v1/responses",
+			ImageOK:         true,
+		})
+	}
+	body := []byte(`{"model":"x","reasoning":{"effort":"medium"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+	decode := func(out []byte) map[string]any {
+		t.Helper()
+		m := map[string]any{}
+		if err := json.Unmarshal(out, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	// deepseek: thinking switch enabled + mapped reasoning_effort.
+	out, err := mkPlan("deepseek", "deepseek-chat").ConvertBody(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := decode(out)
+	if got := m["reasoning_effort"]; got != "high" {
+		t.Errorf("deepseek reasoning_effort = %v, want \"high\"", got)
+	}
+	th, _ := m["thinking"].(map[string]any)
+	if th["type"] != "enabled" {
+		t.Errorf("deepseek thinking = %v, want enabled", m["thinking"])
+	}
+
+	// kimi-k3: EnumOnly — reasoning_effort present, no thinking key.
+	out, err = mkPlan("kimi-code", "kimi-k3").ConvertBody(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = decode(out)
+	if got := m["reasoning_effort"]; got != "high" {
+		t.Errorf("kimi-k3 reasoning_effort = %v, want \"high\"", got)
+	}
+	if _, has := m["thinking"]; has {
+		t.Errorf("kimi-k3 must not emit thinking (EnumOnly), got %v", m["thinking"])
+	}
+
+	// kimi-k2.6: no profile — pure switch, no reasoning_effort.
+	out, err = mkPlan("kimi-code", "kimi-k2.6").ConvertBody(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = decode(out)
+	if _, has := m["reasoning_effort"]; has {
+		t.Errorf("kimi-k2.6 must not emit reasoning_effort (no profile), got %v", m["reasoning_effort"])
+	}
+	th, _ = m["thinking"].(map[string]any)
+	if th["type"] != "enabled" {
+		t.Errorf("kimi-k2.6 thinking = %v, want enabled", m["thinking"])
+	}
+}

@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	sonic "github.com/bytedance/sonic"
@@ -41,6 +42,34 @@ import (
 // source request carries no cap — Anthropic 400s "max_tokens required"
 // otherwise. Same value as the chat→a direction (convert.go).
 const defaultAnthropicMaxTokens = 4096
+
+// responsesRequiredKeys backfills the Response-object fields the official
+// schema requires but a synthesized non-streaming response does not otherwise
+// populate: created_at (unix seconds; strongly-typed SDKs parse it as a
+// no-default int64), error, incomplete_details, tools, tool_choice,
+// parallel_tool_calls and metadata. hasIncomplete keeps a real
+// incomplete_details set by the caller.
+func responsesRequiredKeys(out map[string]any, hasIncomplete bool) {
+	out["created_at"] = time.Now().Unix()
+	out["error"] = nil
+	if !hasIncomplete {
+		out["incomplete_details"] = nil
+	}
+	out["tools"] = []any{}
+	out["tool_choice"] = "auto"
+	out["parallel_tool_calls"] = false
+	out["metadata"] = map[string]any{}
+}
+
+// responsesCreatedAt reads a Responses object's created_at for the chat
+// `created` field; falls back to now when absent (chat.completion requires
+// created).
+func responsesCreatedAt(src map[string]any) any {
+	if v := src["created_at"]; v != nil {
+		return v
+	}
+	return time.Now().Unix()
+}
 
 // copyOpt copies optional top-level keys from src to out when present.
 func copyOpt(out, src map[string]any, keys ...string) {
@@ -59,6 +88,51 @@ func firstNonEmpty(s ...string) string {
 		}
 	}
 	return ""
+}
+
+// toolIDNormalizer maps raw Responses call_ids to anthropic-charset tool_use
+// ids — the same contract as chat→a's normID/normResultID pair (convert.go):
+// one raw id always yields the same sanitized id within a conversion
+// (tool_use/tool_result pairing survives); two DIFFERENT raw ids that sanitize
+// to the same string ("call.a" vs "call_a") get _2/_3 suffixes in order of
+// first appearance; id-less uses get a FRESH placeholder per occurrence and
+// id-less results consume those placeholders positionally.
+type toolIDNormalizer struct {
+	idMap        map[string]string
+	usedNorm     map[string]bool
+	emptyUses    []string
+	emptyResults int
+}
+
+func newToolIDNormalizer() *toolIDNormalizer {
+	return &toolIDNormalizer{idMap: map[string]string{}, usedNorm: map[string]bool{}}
+}
+
+func (t *toolIDNormalizer) use(id string) string {
+	if id == "" {
+		n := sanitizeToolUseID("")
+		t.emptyUses = append(t.emptyUses, n)
+		return n
+	}
+	if n, ok := t.idMap[id]; ok {
+		return n
+	}
+	n := sanitizeToolUseID(id)
+	for i := 2; t.usedNorm[n]; i++ {
+		n = fmt.Sprintf("%s_%d", sanitizeToolUseID(id), i)
+	}
+	t.usedNorm[n] = true
+	t.idMap[id] = n
+	return n
+}
+
+func (t *toolIDNormalizer) result(id string) string {
+	if id == "" && t.emptyResults < len(t.emptyUses) {
+		n := t.emptyUses[t.emptyResults]
+		t.emptyResults++
+		return n
+	}
+	return t.use(id)
 }
 
 // strKey returns m[key] as a string, "" when m or the key is absent (unlike
@@ -167,21 +241,40 @@ func parseDataURL(s string) (mediaType, data string, ok bool) {
 
 // thinkingBudgetToEffort maps an anthropic thinking config {type, budget_tokens}
 // to a Responses reasoning.effort (best-effort; budget↔effort is not 1:1).
-// "" means "do not set reasoning".
+// "" means "do not set reasoning". Thresholds sit at the effortToThinking
+// ladder values so each ladder rung round-trips to its own effort.
 func thinkingBudgetToEffort(thinking map[string]any) string {
 	if t, _ := thinking["type"].(string); t != "" && t != "enabled" {
 		return ""
 	}
 	budget, _ := thinking["budget_tokens"].(float64)
 	switch {
-	case budget >= 10000:
+	case budget >= 32000:
+		return "xhigh"
+	case budget >= 16384:
 		return "high"
-	case budget >= 5000:
+	case budget >= 8192:
 		return "medium"
-	case budget > 0:
+	case budget >= 2048:
 		return "low"
+	case budget > 0:
+		return "minimal"
 	}
 	return "medium"
+}
+
+// normalizeReasoningEffort clamps a non-empty effort outside the canonical
+// enum (none|minimal|low|medium|high|xhigh|max) down to "high" — the industry
+// clamp-down convention for vendor-specific levels (e.g. codex "persistent").
+// "" passes through (no effort expressed); the warning fires at this callsite
+// layer so effortToThinking stays pure.
+func normalizeReasoningEffort(d *Diagnostics, effort string) string {
+	switch effort {
+	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return effort
+	}
+	warnDiagf(d, "unknown_effort", "unknown reasoning effort %q, clamping to high", effort)
+	return "high"
 }
 
 // outputConfigEffort reads the adaptive-thinking effort level from an
@@ -190,24 +283,53 @@ func thinkingBudgetToEffort(thinking map[string]any) string {
 func outputConfigEffort(outputConfig any) string {
 	effort := strOpt(asMap(outputConfig)["effort"])
 	switch effort {
-	case "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 		return effort
+	case "ultra":
+		// Not in the Responses reasoning.effort enum — map to the highest rung.
+		return "max"
 	}
 	return ""
 }
 
 // effortToThinking maps a Responses reasoning.effort back to an anthropic
-// thinking config (best-effort budget). nil means "do not set thinking".
-func effortToThinking(effort string) map[string]any {
+// thinking config (best-effort budget). nil means "do not set thinking"
+// (covers "" and "none"); unknown non-empty values clamp down to high — the
+// industry convention for vendor-specific levels (callsites warn via
+// normalizeReasoningEffort; this function stays pure). The ladder rungs sit
+// on the real client budget clusters (pi 1024/2048/8192/16384, opencode
+// 16000, kimi 32000). maxTokens is the EFFECTIVE anthropic max_tokens (after
+// any default injection): Anthropic requires 1024 ≤ budget_tokens <
+// max_tokens, so the ladder value is clamped below maxTokens; when maxTokens
+// ≤ 1024 thinking cannot be expressed legally at all and is silently disabled
+// (deterministic best-effort, no warning).
+func effortToThinking(effort string, maxTokens int) map[string]any {
 	budget := 0
 	switch effort {
+	case "max":
+		// Top out just below the output cap (clamped again below; with
+		// maxTokens ≤ 1024 the < 1024 check disables thinking).
+		budget = maxTokens - 1
+	case "xhigh":
+		budget = 32000
 	case "high":
-		budget = 24000
+		budget = 16384
 	case "medium":
-		budget = 8000
+		budget = 8192
 	case "low":
-		budget = 2000
+		budget = 2048
+	case "minimal":
+		budget = 1024
+	case "", "none":
+		return nil
 	default:
+		// Unknown non-empty effort (e.g. codex "persistent") → clamp to high.
+		budget = 16384
+	}
+	if maxTokens > 0 && budget > maxTokens-1 {
+		budget = maxTokens - 1
+	}
+	if budget < 1024 {
 		return nil
 	}
 	return map[string]any{"type": "enabled", "budget_tokens": budget}
@@ -601,7 +723,18 @@ func anthropicToolsToResponses(tools []any, d *Diagnostics) []map[string]any {
 		if bt, ok := tm["type"].(string); ok && bt != "" && bt != "custom" {
 			if strings.HasPrefix(bt, "web_search") {
 				rt := map[string]any{"type": "web_search"}
-				copyOpt(rt, tm, "max_uses", "allowed_domains", "blocked_domains")
+				// The Responses web_search tool schema takes
+				// filters.allowed_domains and has no max_uses/blocked_domains —
+				// those anthropic-only fields drop with a warning rather than
+				// landing as invalid top-level Responses fields.
+				if domains, ok := tm["allowed_domains"].([]any); ok && len(domains) > 0 {
+					rt["filters"] = map[string]any{"allowed_domains": domains}
+				}
+				for _, k := range []string{"max_uses", "blocked_domains"} {
+					if _, ok := tm[k]; ok {
+						convertWarn("dropping anthropic-only web_search tool field in a→r request: " + k)
+					}
+				}
 				out = append(out, rt)
 				continue
 			}
@@ -825,6 +958,24 @@ func chatMsgToResponsesItems(m map[string]any, d *Diagnostics) []map[string]any 
 		}
 		return []map[string]any{out}
 	}
+	if role == "function" {
+		// Legacy pre-tool_calls shape: Responses has no "function" role
+		// (passing it through as a message role 400s upstream). A named
+		// function result rides as a function_call_output item; legacy
+		// messages carry no call id, so the caller pairs it with the matching
+		// earlier function_call by name (pairLegacyFunctionOutputs).
+		name := strOpt(m["name"])
+		if name == "" || m["content"] == nil {
+			convertWarn("dropping legacy role:function message without name/content in chat→r request")
+			return nil
+		}
+		return []map[string]any{{
+			"type":    "function_call_output",
+			"call_id": strOpt(m["tool_call_id"]),
+			"name":    name, // pairing marker, stripped by pairLegacyFunctionOutputs
+			"output":  chatContentText(m["content"]),
+		}}
+	}
 	partType := "input_text"
 	if role == "assistant" {
 		partType = "output_text"
@@ -857,7 +1008,12 @@ func chatMsgToResponsesItems(m map[string]any, d *Diagnostics) []map[string]any 
 				if u, ok := pm["image_url"].(string); ok && u != "" {
 					parts = append(parts, map[string]any{"type": "input_image", "image_url": u})
 				} else if ium := asMap(pm["image_url"]); ium != nil {
-					parts = append(parts, map[string]any{"type": "input_image", "image_url": strOf(ium["url"])})
+					part := map[string]any{"type": "input_image", "image_url": strOf(ium["url"])}
+					// Responses input_image supports detail — preserve it.
+					if detail := strOpt(ium["detail"]); detail != "" {
+						part["detail"] = detail
+					}
+					parts = append(parts, part)
 				}
 			case "input_file", "file":
 				file := map[string]any{"type": "input_file"}
@@ -914,7 +1070,71 @@ func chatMsgToResponsesItems(m map[string]any, d *Diagnostics) []map[string]any 
 			})
 		}
 	}
+	// Legacy pre-tool_calls assistant function_call (no tool_calls array):
+	// map to a function_call item when name+arguments are present; the
+	// synthesized call_id lets a following legacy role:"function" message
+	// pair with it by name.
+	if role == "assistant" {
+		if tcs, ok := m["tool_calls"].([]any); !ok || len(tcs) == 0 {
+			if fc := asMap(m["function_call"]); fc != nil {
+				name := strOpt(fc["name"])
+				args := strOpt(fc["arguments"])
+				if name == "" || args == "" {
+					convertWarn("dropping assistant legacy function_call without name/arguments in chat→r request: " + firstNonEmpty(name, "<unnamed>"))
+				} else {
+					items = append(items, map[string]any{
+						"type":      "function_call",
+						"call_id":   "legacy_fc_" + name,
+						"name":      name,
+						"arguments": args,
+					})
+				}
+			}
+		}
+	}
 	return items
+}
+
+// pairLegacyFunctionOutputs pairs legacy role:"function" results (converted
+// to function_call_output items carrying a name but no call_id) with the most
+// recent earlier function_call of the same name; unpairable ones drop + warn
+// (a function_call_output without call_id 400s upstream). The temporary
+// "name" pairing marker is always stripped.
+func pairLegacyFunctionOutputs(items []map[string]any) []map[string]any {
+	hasLegacy := false
+	for _, it := range items {
+		if it["type"] == "function_call_output" && strOpt(it["name"]) != "" {
+			hasLegacy = true
+			break
+		}
+	}
+	if !hasLegacy {
+		return items
+	}
+	lastByName := map[string]string{}
+	out := make([]map[string]any, 0, len(items))
+	for _, it := range items {
+		switch it["type"] {
+		case "function_call":
+			if n := strOpt(it["name"]); n != "" {
+				lastByName[n] = strOpt(it["call_id"])
+			}
+		case "function_call_output":
+			if name := strOpt(it["name"]); name != "" {
+				delete(it, "name")
+				if strOpt(it["call_id"]) == "" {
+					id := lastByName[name]
+					if id == "" {
+						convertWarn("dropping legacy role:function message with no matching function_call in chat→r request: " + name)
+						continue
+					}
+					it["call_id"] = id
+				}
+			}
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 // fnMap returns the value for key from a function map (nil-safe).
@@ -1043,8 +1263,18 @@ func convertOpenAIRequestToResponses(body []byte, d *Diagnostics) ([]byte, error
 	// in later turns — backfill from earlier items with the same call_id
 	// (opencodex's chat inbound does the same).
 	backfillToolNames(d, input)
+	// Legacy role:"function" results pair with their function_call by name.
+	input = pairLegacyFunctionOutputs(input)
 	if len(input) > 0 {
 		out["input"] = input
+	}
+	// Legacy request-level params have no Responses equivalent (tools/
+	// tool_choice replaced them); never pass them through silently.
+	if _, ok := src["functions"]; ok {
+		convertWarn("dropping legacy `functions` parameter in chat→r request (declare `tools` instead)")
+	}
+	if _, ok := src["function_call"]; ok {
+		convertWarn("dropping legacy `function_call` parameter in chat→r request (use `tool_choice` instead)")
 	}
 	if tools, ok := src["tools"].([]any); ok && len(tools) > 0 {
 		if rt := chatToolsToResponses(tools); len(rt) > 0 {
@@ -1175,7 +1405,11 @@ func responsesContentToAnthropicBlocks(content any, d *Diagnostics) []map[string
 		}
 		switch pm["type"] {
 		case "input_text", "output_text", "text":
-			out = append(out, map[string]any{"type": "text", "text": responsesTextWithCitationLinks(pm)})
+			// Empty text violates anthropic's minLength:1 — skip it (an empty
+			// part carries no information; citation links make text non-empty).
+			if text := responsesTextWithCitationLinks(pm); text != "" {
+				out = append(out, map[string]any{"type": "text", "text": text})
+			}
 		case "input_image", "image", "image_url":
 			url := strOf(pm["image_url"])
 			if ium := asMap(pm["image_url"]); ium != nil {
@@ -1385,6 +1619,10 @@ func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, er
 	if ins, ok := src["instructions"].(string); ok && ins != "" {
 		systemParts = append(systemParts, ins)
 	}
+	// Anthropic constrains tool_use ids to ^[a-zA-Z0-9_-]+$; responses call_ids
+	// are free-form ("call.a"). The memo keeps use/result pairing identical to
+	// the chat→a direction.
+	normID := newToolIDNormalizer()
 	var msgs []map[string]any
 	for _, item := range responsesInputItems(src["input"]) {
 		switch item["type"] {
@@ -1404,7 +1642,10 @@ func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, er
 				role = "user"
 			}
 			blocks := responsesContentToAnthropicBlocks(item["content"], d)
-			if role == "assistant" || role == "user" {
+			// Empty content (e.g. a single empty text part) must not emit
+			// "content":null / an empty blocks array — same len guard as the
+			// chat→a sibling (convert.go).
+			if (role == "assistant" || role == "user") && len(blocks) > 0 {
 				msgs = append(msgs, map[string]any{"role": role, "content": blocks})
 			}
 		case "function_call":
@@ -1415,7 +1656,7 @@ func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, er
 			}
 			msgs = append(msgs, map[string]any{"role": "assistant", "content": []map[string]any{{
 				"type":  "tool_use",
-				"id":    firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
+				"id":    normID.use(firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))),
 				"name":  name,
 				"input": args,
 			}}})
@@ -1440,7 +1681,12 @@ func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, er
 			text, isError := splitToolResultError(text)
 			var content any = text
 			if len(imgs) > 0 {
-				blocks := []map[string]any{{"type": "text", "text": text}}
+				var blocks []map[string]any
+				// An empty leading text block violates anthropic's minLength:1
+				// (parts array carrying only images leaves text "").
+				if text != "" {
+					blocks = append(blocks, map[string]any{"type": "text", "text": text})
+				}
 				for _, im := range imgs {
 					url := strKey(asMap(im["image_url"]), "url")
 					if mt, data, ok := parseDataURL(url); ok {
@@ -1453,11 +1699,16 @@ func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, er
 						}})
 					}
 				}
-				content = blocks
+				// All images unparseable and no text: keep the (possibly empty)
+				// string form — a valid tool_result — rather than an empty
+				// content array.
+				if len(blocks) > 0 {
+					content = blocks
+				}
 			}
 			msgs = append(msgs, map[string]any{"role": "user", "content": []map[string]any{{
 				"type":        "tool_result",
-				"tool_use_id": strOpt(item["call_id"]),
+				"tool_use_id": normID.result(strOpt(item["call_id"])),
 				"content":     content,
 				"is_error":    isError,
 			}}})
@@ -1468,6 +1719,12 @@ func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, er
 			continue
 		case "reasoning":
 			text, sig := responsesReasoningText(item)
+			if text == "" && sig == "" {
+				// Anthropic may reject an empty thinking block with no
+				// signature — drop the item observably.
+				warnDiag(d, "reasoning_dropped", "dropping empty reasoning item in r→a request (no summary, no encrypted_content)")
+				continue
+			}
 			var blk map[string]any
 			if text == "" && sig != "" {
 				// encrypted-only reasoning ↔ redacted_thinking (data verbatim).
@@ -1527,18 +1784,19 @@ func convertResponsesRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, er
 	if f := asMap(asMap(src["text"])["format"]); f != nil {
 		warnDiag(d, "response_format_dropped", "dropping text.format (no anthropic equivalent)")
 	}
-	if r := asMap(src["reasoning"]); r != nil {
-		if th := effortToThinking(strOf(r["effort"])); th != nil {
-			out["thinking"] = th
-		}
-	}
 	// Anthropic requires max_tokens; codex clients routinely omit
 	// max_output_tokens (or send an explicit null), so inject the same
-	// generous default the chat→a direction uses (convert.go).
+	// generous default the chat→a direction uses (convert.go). Computed
+	// BEFORE reasoning: the thinking budget clamps below this value.
 	if v, ok := src["max_output_tokens"]; ok && v != nil {
 		out["max_tokens"] = v
 	} else {
 		out["max_tokens"] = defaultAnthropicMaxTokens
+	}
+	if r := asMap(src["reasoning"]); r != nil {
+		if th := effortToThinking(normalizeReasoningEffort(d, strOf(r["effort"])), intOf(out["max_tokens"])); th != nil {
+			out["thinking"] = th
+		}
 	}
 	copyOpt(out, src, "temperature", "top_p", "stream")
 	return sonic.Marshal(out)
@@ -1893,9 +2151,11 @@ func (w *r2chatWalk) finish(reasoningDialect ReasoningDialect) []map[string]any 
 // applyResponsesRequestChatFields maps the request-level (non-item) fields of
 // a Responses request onto the chat-completions output: tools (MCP namespace
 // flattening fails CLOSED — the forward layer turns a conversion error into a
-// 502), tool_choice, the vendor-specific reasoning-effort dialect, output
-// caps, response_format and sampling params.
-func applyResponsesRequestChatFields(d *Diagnostics, out, src map[string]any, reasoningDialect ReasoningDialect) error {
+// 502), tool_choice, the vendor-specific reasoning-effort dialect (switch
+// shape from ReasoningDialect, plus the provider effort-enum layer from
+// ReasoningEffortEnum/ReasoningEffortOnly), output caps, response_format and
+// sampling params.
+func applyResponsesRequestChatFields(d *Diagnostics, out, src map[string]any, reasoningDialect ReasoningDialect, opts convertReqOpts) error {
 	if tools := responsesRequestTools(src); len(tools) > 0 {
 		ot, err := nsFlattenResponsesTools(d, tools)
 		if err != nil {
@@ -1911,22 +2171,55 @@ func applyResponsesRequestChatFields(d *Diagnostics, out, src map[string]any, re
 		}
 	}
 	if r := asMap(src["reasoning"]); r != nil {
-		effort := strOf(r["effort"])
+		// Unknown non-empty efforts (codex "persistent" etc.) clamp down to
+		// high before any dialect renders them.
+		effort := normalizeReasoningEffort(d, strOf(r["effort"]))
+		enum := opts.ReasoningEffortEnum
 		// reasoning.context (codex sends "all_turns") has no chat equivalent.
 		if strOpt(r["context"]) != "" {
 			warnDiag(d, "reasoning_context_dropped", "dropping reasoning.context (no chat equivalent)")
 		}
 		// Reasoning effort dialect: chat vendors disagree on the field shape,
-		// so the transport injects the target provider's dialect.
+		// so the transport injects the target provider's dialect. On top of
+		// the switch shape, providers whose chat endpoint accepts a
+		// NON-pass-through effort enum (internal/provider.ChatEffortProfile)
+		// also emit the mapped reasoning_effort value.
 		switch reasoningDialect {
 		case ReasoningThinking:
-			if effort == "none" || effort == "minimal" {
+			if opts.ReasoningEffortOnly {
+				// The enum REPLACES the thinking switch (kimi-k3 rejects
+				// thinking+reasoning_effort together).
+				if v, ok := enum[effort]; ok && effort != "" {
+					out["reasoning_effort"] = v
+				} else {
+					if effort != "" {
+						warnDiagf(d, "unknown_effort", "effort profile has no entry for %q, falling back to thinking switch", effort)
+					}
+					if effort == "none" {
+						out["thinking"] = map[string]any{"type": "disabled"}
+					} else {
+						out["thinking"] = map[string]any{"type": "enabled"}
+					}
+				}
+				break
+			}
+			// With an enum the minimal rung maps to a real low level, so only
+			// "none" disables; without one keep the legacy none/minimal→disabled.
+			if effort == "none" || (effort == "minimal" && enum == nil) {
 				out["thinking"] = map[string]any{"type": "disabled"}
 			} else {
 				out["thinking"] = map[string]any{"type": "enabled"}
 			}
+			if v, ok := enum[effort]; ok && effort != "" {
+				out["reasoning_effort"] = v
+			}
 		case ReasoningEnableThinking:
-			out["enable_thinking"] = effort != "none" && effort != "minimal"
+			out["enable_thinking"] = effort != "none"
+			if effort != "none" {
+				if v, ok := enum[effort]; ok && effort != "" {
+					out["reasoning_effort"] = v
+				}
+			}
 		case ReasoningOpenRouter:
 			out["reasoning"] = map[string]any{"effort": effort}
 		default:
@@ -1997,7 +2290,7 @@ func convertResponsesRequestToOpenAIFor(body []byte, opts convertReqOpts) ([]byt
 	if msgs := walk.finish(reasoningDialect); len(msgs) > 0 {
 		out["messages"] = msgs
 	}
-	if err := applyResponsesRequestChatFields(opts.Diag, out, src, reasoningDialect); err != nil {
+	if err := applyResponsesRequestChatFields(opts.Diag, out, src, reasoningDialect, opts); err != nil {
 		return nil, err
 	}
 	return sonic.Marshal(out)
@@ -2059,7 +2352,10 @@ func responsesStatusToOpenAIFinish(status, incReason string, hasToolUse bool) st
 // no Responses equivalent — best-effort completed.
 func anthropicStopToResponsesDetail(stop string) (status, reason string) {
 	switch stop {
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
+		// Both are truncations; the Responses incomplete-details enum has no
+		// context-window value, so context exhaustion reports as
+		// max_output_tokens (same value as the streaming direction).
 		return "incomplete", "max_output_tokens"
 	case "refusal":
 		return "incomplete", "content_filter"
@@ -2115,6 +2411,9 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 	}
 	var blocks []map[string]any
 	hasToolUse := false
+	// Anthropic tool_use id charset is ^[a-zA-Z0-9_-]+$; sanitize free-form
+	// call_ids with the same per-conversion memo as the request direction.
+	normID := newToolIDNormalizer()
 	var textParts []map[string]any
 	flushText := func() {
 		for _, part := range textParts {
@@ -2147,7 +2446,7 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 			hasToolUse = true
 			blocks = append(blocks, map[string]any{
 				"type":  "tool_use",
-				"id":    firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
+				"id":    normID.use(firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))),
 				"name":  strOpt(item["name"]),
 				"input": parseToolArgs(strOf(item["arguments"]), nil),
 			})
@@ -2162,8 +2461,15 @@ func convertResponsesToAnthropic(body []byte) ([]byte, error) {
 			flushText()
 			blocks = append(blocks, responsesWebSearchToAnthropicBlocks(item, nil)...)
 		case "reasoning":
-			flushText()
 			text, sig := responsesReasoningText(item)
+			if text == "" && sig == "" {
+				// Anthropic may reject an empty thinking block with no
+				// signature — drop the item observably (same rule as the
+				// reasoning_details replay path).
+				convertWarn("dropping empty reasoning item in r→a response (no summary, no encrypted_content)")
+				continue
+			}
+			flushText()
 			var blk map[string]any
 			if text == "" && sig != "" {
 				blk = map[string]any{"type": "redacted_thinking", "data": sig}
@@ -2292,7 +2598,7 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 				"type": "function",
 				"function": map[string]any{
 					"name":      strOpt(item["name"]),
-					"arguments": strOf(item["arguments"]),
+					"arguments": firstNonEmpty(strOpt(item["arguments"]), "{}"),
 				},
 			})
 		case "tool_search_call", "web_search_call":
@@ -2337,6 +2643,7 @@ func convertResponsesToOpenAI(body []byte) ([]byte, error) {
 	out := map[string]any{
 		"id":      strOf(src["id"]),
 		"object":  "chat.completion",
+		"created": responsesCreatedAt(src),
 		"choices": []map[string]any{choice},
 	}
 	if m, ok := src["model"]; ok {
@@ -2384,12 +2691,18 @@ func convertAnthropicResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, err
 	var output []map[string]any
 	webSearchInputs := map[string]map[string]any{}
 	var textParts []map[string]any
+	// Synthesized items carry stable ids in the same msg_item_/rs_item_
+	// convention the streaming converters use (ResponseOutputMessage and
+	// ReasoningItem both REQUIRE id; ReasoningItem also requires summary).
+	msgSeq, rsSeq := 0, 0
 	flushText := func() {
 		if len(textParts) > 0 {
 			output = append(output, map[string]any{
+				"id":   "msg_item_" + itoa(msgSeq),
 				"type": "message", "role": "assistant", "status": "completed",
 				"content": textParts,
 			})
+			msgSeq++
 			textParts = nil
 		}
 	}
@@ -2401,7 +2714,9 @@ func convertAnthropicResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, err
 			}
 			switch b["type"] {
 			case "text":
-				part := map[string]any{"type": "output_text", "text": strOf(b["text"])}
+				// annotations is REQUIRED on ResponseOutputText (real upstreams
+				// always send it, empty when there are no citations).
+				part := map[string]any{"type": "output_text", "text": strOf(b["text"]), "annotations": []any{}}
 				if annotations := anthropicCitationsToResponses(b["citations"], strOf(b["text"])); len(annotations) > 0 {
 					part["annotations"] = annotations
 				}
@@ -2452,16 +2767,22 @@ func convertAnthropicResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, err
 			case "thinking":
 				flushText()
 				item := map[string]any{
+					"id":   "rs_item_" + itoa(rsSeq),
 					"type": "reasoning", "status": "completed",
 					"summary": []map[string]any{{"type": "summary_text", "text": strOf(b["thinking"])}},
 				}
+				rsSeq++
 				if sig, _ := b["signature"].(string); sig != "" {
 					item["encrypted_content"] = sig
 				}
 				output = append(output, item)
 			case "redacted_thinking":
 				flushText()
-				item := map[string]any{"type": "reasoning", "status": "completed", "summary": []any{}}
+				item := map[string]any{
+					"id":   "rs_item_" + itoa(rsSeq),
+					"type": "reasoning", "status": "completed", "summary": []any{},
+				}
+				rsSeq++
 				if data, _ := b["data"].(string); data != "" {
 					item["encrypted_content"] = data
 				}
@@ -2474,8 +2795,9 @@ func convertAnthropicResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, err
 	flushText()
 	if len(output) == 0 {
 		output = []map[string]any{{
+			"id":   "msg_item_" + itoa(msgSeq),
 			"type": "message", "role": "assistant", "status": "completed",
-			"content": []map[string]any{{"type": "output_text", "text": ""}},
+			"content": []map[string]any{{"type": "output_text", "text": "", "annotations": []any{}}},
 		}}
 	}
 	status, incReason := anthropicStopToResponsesDetail(strOf(src["stop_reason"]))
@@ -2492,6 +2814,7 @@ func convertAnthropicResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, err
 		out["model"] = m
 	}
 	out["usage"] = anthropicUsageToResponses(src["usage"])
+	responsesRequiredKeys(out, incReason != "")
 	return sonic.Marshal(out)
 }
 
@@ -2520,12 +2843,20 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 	finish := ""
 	var textParts []string
 	var chatAnnotations []map[string]any
+	// Synthesized items carry stable ids in the same msg_item_/rs_item_/
+	// fc_item_ convention the streaming converters use (OutputMessage and
+	// ReasoningItem both REQUIRE id).
+	msgSeq, rsSeq, fcSeq := 0, 0, 0
 	flushText := func() {
 		if len(textParts) > 0 {
 			output = append(output, map[string]any{
+				"id":   "msg_item_" + itoa(msgSeq),
 				"type": "message", "role": "assistant", "status": "completed",
-				"content": []map[string]any{{"type": "output_text", "text": strings.Join(textParts, "")}},
+				// annotations is REQUIRED on ResponseOutputText (real upstreams
+				// always send it, empty when there are no citations).
+				"content": []map[string]any{{"type": "output_text", "text": strings.Join(textParts, ""), "annotations": []any{}}},
 			})
+			msgSeq++
 			textParts = nil
 		}
 	}
@@ -2540,9 +2871,11 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 				if r, answer, ok := splitLeadingThinkBlock(c); ok {
 					if r != "" {
 						output = append(output, map[string]any{
+							"id":   "rs_item_" + itoa(rsSeq),
 							"type": "reasoning", "status": "completed",
 							"summary": []map[string]any{{"type": "summary_text", "text": r}},
 						})
+						rsSeq++
 					}
 					c = answer
 				}
@@ -2550,13 +2883,27 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 					textParts = append(textParts, c)
 				}
 			}
+			// Message-level refusal with empty/null content: Responses
+			// represents it as a refusal content part on the output message
+			// (dropping it would synthesize an empty output_text); the
+			// status/incomplete semantics still ride on finish_reason.
+			if ref := strOpt(msg["refusal"]); ref != "" && len(textParts) == 0 {
+				output = append(output, map[string]any{
+					"id":   "msg_item_" + itoa(msgSeq),
+					"type": "message", "role": "assistant", "status": "completed",
+					"content": []map[string]any{{"type": "refusal", "refusal": ref}},
+				})
+				msgSeq++
+			}
 			chatAnnotations = chatAnnotationsToResponses(msg["annotations"])
 			if rc := chatReasoningText(msg); rc != "" {
 				flushText()
 				output = append(output, map[string]any{
+					"id":   "rs_item_" + itoa(rsSeq),
 					"type": "reasoning", "status": "completed",
 					"summary": []map[string]any{{"type": "summary_text", "text": rc}},
 				})
+				rsSeq++
 			}
 			if tcs, ok := msg["tool_calls"].([]any); ok {
 				for _, tc := range tcs {
@@ -2576,13 +2923,18 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 						args = "{}"
 					}
 					name := strOpt(fnMap(fn, "name"))
+					// Missing tool_call id: fall back to a synthesized
+					// fc_item_<idx> id, same as the streaming converter (a ""
+					// id/call_id is a protocol violation upstream).
+					callID := firstNonEmpty(strOpt(tcm["id"]), "fc_item_"+itoa(fcSeq))
+					fcSeq++
 					// Custom/freeform call: unwrap {"input": "<raw>"} back
 					// to a custom_tool_call item (raw string input).
 					if r2c.custom[name] {
 						output = append(output, map[string]any{
 							"type": "custom_tool_call", "status": "completed",
-							"id":      strOpt(tcm["id"]),
-							"call_id": strOpt(tcm["id"]),
+							"id":      callID,
+							"call_id": callID,
 							"name":    name,
 							"input":   unwrapCustomCallArguments(args),
 						})
@@ -2590,8 +2942,8 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 					}
 					item := map[string]any{
 						"type": "function_call", "status": "completed",
-						"id":        strOpt(tcm["id"]),
-						"call_id":   strOpt(tcm["id"]),
+						"id":        callID,
+						"call_id":   callID,
 						"name":      name,
 						"arguments": args,
 					}
@@ -2622,8 +2974,9 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 	}
 	if len(output) == 0 {
 		output = []map[string]any{{
+			"id":   "msg_item_" + itoa(msgSeq),
 			"type": "message", "role": "assistant", "status": "completed",
-			"content": []map[string]any{{"type": "output_text", "text": ""}},
+			"content": []map[string]any{{"type": "output_text", "text": "", "annotations": []any{}}},
 		}}
 	}
 	status, incReason := openAIFinishToResponsesDetail(finish)
@@ -2640,6 +2993,7 @@ func convertOpenAIResponseToResponsesNS(body []byte, r2c r2cCtx) ([]byte, error)
 		out["model"] = m
 	}
 	out["usage"] = openAIUsageToResponses(src["usage"])
+	responsesRequiredKeys(out, incReason != "")
 	return sonic.Marshal(out)
 }
 

@@ -256,6 +256,7 @@ func TestResponsesSynthesis_AnthropicReasoning(t *testing.T) {
 		"response.reasoning_summary_part.added",
 		"response.reasoning_summary_text.delta",
 		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
 		"response.reasoning_summary_part.done",
 		"response.output_item.done",
 		"response.completed",
@@ -266,9 +267,18 @@ func TestResponsesSynthesis_AnthropicReasoning(t *testing.T) {
 	if added["type"] != "reasoning" || added["id"] != "rs_item_0" {
 		t.Errorf("reasoning item = %v, want reasoning rs_item_0", added)
 	}
+	// summary_text.done carries the full accumulated text; part.done carries
+	// the summary_text part (not the item).
+	if got := strOf(sseDataMap(t, events[5])["text"]); got != "hmm..." {
+		t.Errorf("reasoning_summary_text.done text = %q, want hmm...", got)
+	}
+	part := asMap(sseDataMap(t, events[6])["part"])
+	if part["type"] != "summary_text" || strOf(part["text"]) != "hmm..." {
+		t.Errorf("reasoning_summary_part.done part = %v, want summary_text hmm...", part)
+	}
 	// The signature lands verbatim on encrypted_content (round-trips back to
 	// anthropic thinking.signature on the next turn).
-	doneItem := asMap(sseDataMap(t, events[5])["item"])
+	doneItem := asMap(sseDataMap(t, events[7])["item"])
 	if doneItem["encrypted_content"] != "sig_abc" {
 		t.Errorf("encrypted_content = %v, want sig_abc", doneItem["encrypted_content"])
 	}
@@ -297,6 +307,7 @@ func TestResponsesSynthesis_ChatReasoning(t *testing.T) {
 		"response.output_item.added", // message msg_item_1
 		"response.content_part.added",
 		"response.output_text.delta",
+		"response.reasoning_summary_text.done",
 		"response.reasoning_summary_part.done",
 		"response.output_item.done",
 		"response.output_text.done",
@@ -317,7 +328,7 @@ func TestResponsesSynthesis_ChatReasoning(t *testing.T) {
 			t.Errorf("reasoning delta output_index = %v, want 0 (single reasoning item)", d["output_index"])
 		}
 	}
-	doneItem := asMap(sseDataMap(t, events[8])["item"])
+	doneItem := asMap(sseDataMap(t, events[10])["item"])
 	if strOf(asMap(asSlice(doneItem["summary"], 0))["text"]) != "think1think2" {
 		t.Errorf("reasoning summary = %v, want think1think2", doneItem["summary"])
 	}

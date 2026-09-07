@@ -337,10 +337,11 @@ func TestParity_AnthropicDoneTerminatorIgnoresLaterFrames(t *testing.T) {
 	if strings.Contains(out, "after") {
 		t.Errorf("content delta after [DONE] leaked into the client stream:\n%s", out)
 	}
-	// Exactly role + content + finish chunks and one [DONE]: the post-[DONE]
-	// message_delta must not emit a second finish chunk (nor its usage).
-	if n := strings.Count(out, "chat.completion.chunk"); n != 3 {
-		t.Errorf("chunk count = %d, want 3 (role, content, finish):\n%s", n, out)
+	// Exactly role + content + finish + usage chunks and one [DONE]: the
+	// post-[DONE] message_delta must not emit a second finish chunk (nor its
+	// usage).
+	if n := strings.Count(out, "chat.completion.chunk"); n != 4 {
+		t.Errorf("chunk count = %d, want 4 (role, content, finish, usage):\n%s", n, out)
 	}
 	if n := strings.Count(out, `"finish_reason":"stop"`); n != 1 {
 		t.Errorf("finish chunk count = %d, want 1:\n%s", n, out)

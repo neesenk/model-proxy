@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	sonic "github.com/bytedance/sonic"
 )
@@ -747,7 +748,12 @@ func degradeFileIDText(id, filename string, d *Diagnostics) string {
 func openaiContentPartToAnthropicBlock(part map[string]any, d *Diagnostics) map[string]any {
 	switch part["type"] {
 	case "text", "":
-		return map[string]any{"type": "text", "text": strOf(part["text"])}
+		// Skip empty text parts (Anthropic rejects empty text blocks,
+		// TextBlockParam minLength 1) — same rule as the string-content path.
+		if s := strOf(part["text"]); s != "" {
+			return map[string]any{"type": "text", "text": s}
+		}
+		return nil
 	case "image_url":
 		iu := asMap(part["image_url"])
 		if iu == nil {
@@ -911,6 +917,10 @@ type parsedFoldedSSEFrame[T any] struct {
 	// data-line index, allowing callers to recover the event paired with that
 	// line instead of applying the final event to every recovered frame.
 	line int
+	// done marks a literal [DONE] data line recovered by the per-line
+	// fallback: the terminator must survive the fold instead of being
+	// silently dropped as an unparseable line.
+	done bool
 }
 
 func foldedSSEFrameEvent(frameEvent string, dataEvents []string, line int) string {
@@ -938,6 +948,10 @@ func parseFoldedSSEFrames[T any](payload string) []parsedFoldedSSEFrame[T] {
 	}
 	var frames []parsedFoldedSSEFrame[T]
 	for lineIndex, line := range strings.Split(payload, "\n") {
+		if strings.TrimSpace(line) == "[DONE]" {
+			frames = append(frames, parsedFoldedSSEFrame[T]{done: true, line: lineIndex})
+			continue
+		}
 		var f T
 		if sonic.UnmarshalString(line, &f) == nil {
 			frames = append(frames, parsedFoldedSSEFrame[T]{value: f, line: lineIndex})
@@ -1035,15 +1049,16 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 	}
 	// max_completion_tokens wins over the legacy max_tokens when both are set;
 	// Anthropic requires max_tokens, so a generous default is injected last.
-	if mct, ok := src["max_completion_tokens"]; ok {
+	// An explicit null is treated as absent (mirrors the r→a v != nil guard).
+	if mct, ok := src["max_completion_tokens"]; ok && mct != nil {
 		out["max_tokens"] = mct
-	} else if mt, ok := src["max_tokens"]; ok {
+	} else if mt, ok := src["max_tokens"]; ok && mt != nil {
 		out["max_tokens"] = mt
 	} else {
 		out["max_tokens"] = 4096 // Anthropic requires it
 	}
 	if effort, ok := src["reasoning_effort"].(string); ok {
-		if th := effortToThinking(effort); th != nil {
+		if th := effortToThinking(normalizeReasoningEffort(d, effort), intOf(out["max_tokens"])); th != nil {
 			out["thinking"] = th
 		}
 	}
@@ -1064,7 +1079,19 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 	// suffixes solve the same problem).
 	idMap := map[string]string{}
 	usedNorm := map[string]bool{}
+	// Id-less tool_calls get a FRESH placeholder per occurrence: two id-less
+	// calls in one message must not collapse onto one memoized toolu_empty_N
+	// (duplicate tool_use ids are a hard 400). Id-less tool_results pair
+	// positionally with those placeholders in order of appearance — the only
+	// deterministic pairing available when neither side carries an id.
+	var emptyToolIDs []string
+	emptyResults := 0
 	normID := func(id string) string {
+		if id == "" {
+			n := sanitizeToolUseID("")
+			emptyToolIDs = append(emptyToolIDs, n)
+			return n
+		}
 		if n, ok := idMap[id]; ok {
 			return n
 		}
@@ -1076,6 +1103,17 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 		idMap[id] = n
 		return n
 	}
+	// normResultID maps a tool message's tool_call_id: non-empty ids go through
+	// the same memo as the tool_use side; an empty/missing id consumes the next
+	// unpaired id-less tool_use placeholder (order of appearance).
+	normResultID := func(id string) string {
+		if id == "" && emptyResults < len(emptyToolIDs) {
+			n := emptyToolIDs[emptyResults]
+			emptyResults++
+			return n
+		}
+		return normID(id)
+	}
 	flushPendingTool := func() {
 		if len(pendingTool) == 0 {
 			return
@@ -1086,7 +1124,7 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 			content, isError := splitToolResultError(openaiTextOf(tm["content"], d))
 			blocks = append(blocks, map[string]any{
 				"type":        "tool_result",
-				"tool_use_id": normID(tid),
+				"tool_use_id": normResultID(tid),
 				"content":     content,
 				"is_error":    isError,
 			})
@@ -1147,6 +1185,12 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 						"type": "tool_use", "id": normID(id), "name": name, "input": parseToolArgs(args, d),
 					})
 				}
+			}
+			if fc := asMap(mm["function_call"]); fc != nil {
+				// Legacy (pre-tool_calls) assistant function_call: deprecated
+				// and without an anthropic request-side equivalent — dropped,
+				// but never silently.
+				warnDiag(d, "block_dropped", "dropping legacy assistant function_call "+strOf(fc["name"])+" (deprecated; no anthropic equivalent)")
 			}
 			if len(blocks) > 0 {
 				msgs = append(msgs, map[string]any{"role": "assistant", "content": blocks})
@@ -1211,6 +1255,19 @@ func convertOpenAIRequestToAnthropic(body []byte, d *Diagnostics) ([]byte, error
 		if stops != "" {
 			out["stop_sequences"] = []any{stops}
 		}
+	}
+	// Anthropic has no response_format equivalent — drop observably (same
+	// contract as the r→a direction dropping text.format).
+	if rf := asMap(src["response_format"]); rf != nil {
+		warnDiag(d, "response_format_dropped", "dropping response_format (no anthropic equivalent)")
+	}
+	// Legacy request-level function-calling params (deprecated in favor of
+	// tools/tool_choice) have no anthropic equivalent — drop observably.
+	if fns, ok := src["functions"].([]any); ok && len(fns) > 0 {
+		warnDiag(d, "block_dropped", "dropping legacy request-level functions (deprecated; no anthropic equivalent)")
+	}
+	if src["function_call"] != nil {
+		warnDiag(d, "block_dropped", "dropping legacy request-level function_call (deprecated; no anthropic equivalent)")
 	}
 	return sonic.Marshal(out)
 }
@@ -1633,7 +1690,10 @@ func convertOpenAIResponseToAnthropic(body []byte) ([]byte, error) {
 		"model":       src.Model,
 		"content":     content,
 		"stop_reason": stopReason,
-		"usage":       usage,
+		// Official Message objects always carry the key (null when no stop
+		// sequence fired); the streaming converter already emits it.
+		"stop_sequence": nil,
+		"usage":         usage,
 	}
 	return sonic.Marshal(out)
 }
@@ -1736,6 +1796,7 @@ func convertAnthropicResponseToOpenAI(body []byte) ([]byte, error) {
 	out := map[string]any{
 		"id":      strings.TrimPrefix(src.ID, "msg_"),
 		"object":  "chat.completion",
+		"created": time.Now().Unix(),
 		"model":   src.Model,
 		"choices": []map[string]any{{"index": 0, "message": msg, "finish_reason": mapStopReasonToFinish(src.StopReason)}},
 		"usage":   usage,
@@ -1777,24 +1838,25 @@ const sseScanBuf = 8 * 1024 * 1024 // 8 MiB per line; oversized lines are warned
 // sequence) when tools interleave. usage from a trailing chunk (prompt+completion
 // tokens) is carried into the terminal message_delta.usage.
 type openaiSSEToAnthropicSSE struct {
-	sc        *bufio.Scanner
-	out       []byte
-	model     string
-	id        string
-	started   bool
-	closed    bool
-	done      bool
-	errored   bool
-	nextIdx   int                   // next anthropic content_block index
-	curKind   string                // "" / "text" (tools are buffered, never "current")
-	curIdx    int                   // anthropic index of the open text block
-	tools     map[int]*streamedTool // openai tool index → buffered call
-	toolOrder []int                 // openai tool indices in first-seen order
-	outTok    int                   // completion_tokens from trailing usage
-	inTok     int                   // prompt_tokens from trailing usage
-	cachedTok int                   // prompt_tokens_details.cached_tokens from trailing usage
-	createTok int                   // cache write (cache_creation_input_tokens / cache_write_tokens)
-	stopRsn   string                // finish_reason mapped to stop_reason
+	sc          *bufio.Scanner
+	out         []byte
+	model       string
+	id          string
+	started     bool
+	closed      bool
+	done        bool
+	errored     bool
+	bomStripped bool
+	nextIdx     int                   // next anthropic content_block index
+	curKind     string                // "" / "text" (tools are buffered, never "current")
+	curIdx      int                   // anthropic index of the open text block
+	tools       map[int]*streamedTool // openai tool index → buffered call
+	toolOrder   []int                 // openai tool indices in first-seen order
+	outTok      int                   // completion_tokens from trailing usage
+	inTok       int                   // prompt_tokens from trailing usage
+	cachedTok   int                   // prompt_tokens_details.cached_tokens from trailing usage
+	createTok   int                   // cache write (cache_creation_input_tokens / cache_write_tokens)
+	stopRsn     string                // finish_reason mapped to stop_reason
 }
 
 // streamedTool buffers one openai tool_call until the stream ends, so its
@@ -1964,6 +2026,7 @@ func (t *openaiSSEToAnthropicSSE) finish() {
 }
 
 func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
+	pendingEvent := ""
 	pendData := ""    // folded data lines of the SSE frame in progress
 	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
 	for len(t.out) == 0 {
@@ -1977,6 +2040,12 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 		line := ""
 		if t.sc.Scan() {
 			line = strings.TrimSpace(t.sc.Text())
+			if !t.bomStripped {
+				// Tolerate one leading UTF-8 BOM at stream start (some gateways
+				// prepend it); mid-stream BOMs stay untouched.
+				t.bomStripped = true
+				line = strings.TrimPrefix(line, "\ufeff")
+			}
 		} else if pendOpen {
 			// Scanner exhausted with a frame in progress: synthesize the
 			// dispatch blank line (the SSE spec delivers a trailing frame
@@ -2015,6 +2084,14 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			pendOpen = true
 			continue
 		}
+		// Classify the frame-terminating line first — it may open the NEXT
+		// frame's event type; the closing frame keeps its own.
+		frameEvent := pendingEvent
+		if line == "" {
+			pendingEvent = ""
+		} else if strings.HasPrefix(line, "event:") {
+			pendingEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		}
 		if line != "" || !pendOpen {
 			// Only a blank line dispatches a frame (SSE spec): event:/retry:/
 			// comment lines belong to the frame in progress even when they
@@ -2051,6 +2128,15 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 				if sonic.UnmarshalString(payload, &errString) == nil && errString.Error != "" {
 					errMessage = errString.Error
 				}
+			}
+		}
+		if errMessage == "" && errType == "" && frameEvent == "error" {
+			// Explicit `event: error` frame whose payload carries no "error"
+			// key — extract message/detail like the chat→responses sibling
+			// (cc-switch extract_chat_sse_error).
+			var data map[string]any
+			if sonic.UnmarshalString(payload, &data) == nil {
+				errMessage, errType = chatSSEErrorOf(data)
 			}
 		}
 		if errMessage != "" || errType != "" {
@@ -2097,6 +2183,12 @@ func (t *openaiSSEToAnthropicSSE) Read(p []byte) (int, error) {
 			} `json:"usage"`
 		}
 		for _, parsed := range parseFoldedSSEFrames[chatSSEChunk](payload) {
+			if parsed.done {
+				// A [DONE] line folded into a multi-frame payload (missing
+				// blank line) is still the explicit terminator.
+				t.done = true
+				break
+			}
 			chunk := parsed.value
 			if chunk.ID != "" {
 				t.id = chunk.ID // pass the upstream's real message id through
@@ -2171,10 +2263,14 @@ type anthropicSSEToOpenAISSE struct {
 	out          []byte
 	model        string
 	id           string
+	created      int64 // chat.completion.chunk created (unix seconds, constant per stream)
 	roleSent     bool
 	done         bool
 	finished     bool
+	errored      bool // stream terminated via an error path — never emit usage/[DONE]
+	usageSent    bool
 	doneSent     bool
+	bomStripped  bool
 	curBlock     int          // anthropic block index currently open
 	curType      string       // "text" / "tool_use" / ""
 	toolCallIdx  map[int]int  // anthropic block index → openai tool_call index
@@ -2196,6 +2292,7 @@ func newAnthropicToOpenAISSE(r io.Reader, model string) *anthropicSSEToOpenAISSE
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
 	return &anthropicSSEToOpenAISSE{sc: sc, model: model, id: "chatcmpl-conv",
+		created:     time.Now().Unix(),
 		toolCallIdx: map[int]int{}, toolArgsSeen: map[int]bool{}}
 }
 
@@ -2217,10 +2314,27 @@ func (t *anthropicSSEToOpenAISSE) usagePayload() map[string]any {
 func (t *anthropicSSEToOpenAISSE) emitChunk(delta map[string]any, finish any, usage map[string]any) {
 	m := map[string]any{
 		"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		"created": t.created,
 		"choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
 	}
 	if usage != nil {
 		m["usage"] = usage
+	}
+	b, _ := sonic.Marshal(m)
+	t.out = append(t.out, []byte("data: ")...)
+	t.out = append(t.out, b...)
+	t.out = append(t.out, []byte("\n\n")...)
+}
+
+// emitUsageChunk emits the spec-shaped terminal usage chunk
+// (ChatCompletionStreamOptions.include_usage): an additional chunk BEFORE
+// data: [DONE] whose choices is an empty array and whose usage shows the
+// token usage. The finish chunk itself carries only finish_reason.
+func (t *anthropicSSEToOpenAISSE) emitUsageChunk() {
+	m := map[string]any{
+		"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		"created": t.created,
+		"choices": []any{}, "usage": t.usagePayload(),
 	}
 	b, _ := sonic.Marshal(m)
 	t.out = append(t.out, []byte("data: ")...)
@@ -2241,12 +2355,21 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 	for len(t.out) == 0 {
 		if t.done {
 			if !t.finished {
-				t.emitChunk(map[string]any{}, "stop", t.usagePayload())
+				t.emitChunk(map[string]any{}, "stop", nil)
 				t.finished = true
 			}
-			if !t.doneSent {
-				t.out = append(t.out, []byte("data: [DONE]\n\n")...)
-				t.doneSent = true
+			// A stream that terminated via an error path gets the error chunk
+			// only — synthesizing a usage chunk or [DONE] after it would fake a
+			// clean terminal (fail-closed, like the responses→chat sibling).
+			if !t.errored {
+				if !t.usageSent {
+					t.emitUsageChunk()
+					t.usageSent = true
+				}
+				if !t.doneSent {
+					t.out = append(t.out, []byte("data: [DONE]\n\n")...)
+					t.doneSent = true
+				}
 			}
 			if len(t.out) == 0 {
 				return 0, io.EOF
@@ -2256,6 +2379,12 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 		line := ""
 		if t.sc.Scan() {
 			line = strings.TrimSpace(t.sc.Text())
+			if !t.bomStripped {
+				// Tolerate one leading UTF-8 BOM at stream start (some gateways
+				// prepend it); mid-stream BOMs stay untouched.
+				t.bomStripped = true
+				line = strings.TrimPrefix(line, "\ufeff")
+			}
 		} else if pendOpen {
 			// Scanner exhausted with a frame in progress: synthesize the
 			// dispatch blank line (the SSE spec delivers a trailing frame
@@ -2273,6 +2402,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				t.out = append(t.out, errObj...)
 				t.out = append(t.out, []byte("}\n\n")...)
 				t.finished = true
+				t.errored = true
 				t.done = true
 				continue
 			}
@@ -2285,6 +2415,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				t.out = append(t.out, errObj...)
 				t.out = append(t.out, []byte("}\n\n")...)
 				t.finished = true
+				t.errored = true
 			}
 			t.done = true
 			continue
@@ -2351,9 +2482,25 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 			} `json:"usage"`
 		}
 		for _, parsed := range parseFoldedSSEFrames[anthropicSSEEvent](payload) {
+			if parsed.done {
+				// A [DONE] line folded into a multi-frame payload (missing
+				// blank line) is still the explicit terminator.
+				t.done = true
+				break
+			}
 			ev := parsed.value
 			if ev.Message.Model != "" {
 				t.model = ev.Message.Model
+			}
+			if t.finished {
+				// Post-terminal guard: once the finish chunk went out at
+				// message_delta, ignore any content/tool frames a malformed
+				// upstream emits after it (sibling directions suppress the
+				// same way). message_stop/error still terminate the stream.
+				switch ev.Type {
+				case "content_block_start", "content_block_delta", "content_block_stop":
+					continue
+				}
 			}
 			switch ev.Type {
 			case "message_start":
@@ -2364,8 +2511,9 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 					t.id = ev.Message.ID // pass the upstream's real message id through
 				}
 			case "error":
-				// anthropic error event → openai error chunk + [DONE]. Don't silently
-				// turn an upstream error into a clean finish.
+				// anthropic error event → openai error chunk, fail-closed (no
+				// usage chunk / [DONE] after it). Don't silently turn an
+				// upstream error into a clean finish.
 				et := ev.Error.Type
 				if et == "" {
 					et = "api_error"
@@ -2375,6 +2523,7 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				t.out = append(t.out, errObj...)
 				t.out = append(t.out, []byte("}\n\n")...)
 				t.finished = true
+				t.errored = true
 				t.done = true
 			case "content_block_start":
 				t.curBlock = ev.Index
@@ -2465,11 +2614,13 @@ func (t *anthropicSSEToOpenAISSE) Read(p []byte) (int, error) {
 				updateUsageValue(ev.Usage.CacheRead, &t.cacheRead)
 				updateUsageValue(ev.Usage.CacheCreate, &t.cacheCreate)
 				updateUsageValue(ev.Usage.OutputTokens, &t.outputTokens)
-				// The finish chunk carries usage so the OpenAI-protocol usage scanner
-				// attributes tokens. Guard: a malformed stream with >1 message_delta
-				// must not emit >1 finish chunk.
+				// The finish chunk carries finish_reason only; usage follows in
+				// its own empty-choices chunk before [DONE] (the include_usage
+				// wire shape — the OpenAI-protocol usage scanner keys on the
+				// "usage" marker, not on the finish chunk). Guard: a malformed
+				// stream with >1 message_delta must not emit >1 finish chunk.
 				if !t.finished {
-					t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), t.usagePayload())
+					t.emitChunk(map[string]any{}, mapStopReasonToFinish(ev.Delta.StopReason), nil)
 					t.finished = true
 				}
 			case "message_stop":

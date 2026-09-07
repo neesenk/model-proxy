@@ -192,8 +192,10 @@ func TestConvertReasoning_ChatRequest(t *testing.T) {
 
 // B6: thinking.budget_tokens ↔ reasoning.effort (best-effort approximation).
 func TestConvertReasoning_EffortMapping(t *testing.T) {
-	// a→r: budget thresholds — >=10000 high, >=5000 medium, >0 low.
-	for budget, want := range map[int]string{10000: "high", 24000: "high", 5000: "medium", 9999: "medium", 1: "low", 4999: "low"} {
+	// a→r: budget thresholds sit at the effortToThinking ladder values, so
+	// each ladder rung round-trips to its own effort (>=32000 xhigh,
+	// >=16384 high, >=8192 medium, >=2048 low, >0 minimal).
+	for budget, want := range map[int]string{32000: "xhigh", 40000: "xhigh", 16384: "high", 10000: "medium", 8192: "medium", 5000: "low", 2048: "low", 1024: "minimal", 1: "minimal"} {
 		in := `{"model":"c","max_tokens":10,"thinking":{"type":"enabled","budget_tokens":` + itoa(budget) + `},"messages":[{"role":"user","content":"hi"}]}`
 		out, err := convertAnthropicRequestToResponses([]byte(in))
 		if err != nil {
@@ -213,15 +215,17 @@ func TestConvertReasoning_EffortMapping(t *testing.T) {
 		t.Errorf("disabled thinking must not set reasoning: %s", out)
 	}
 
-	// r→a: effort → thinking config with the fixed budget ladder.
+	// r→a: effort → thinking config with the fixed budget ladder, clamped
+	// below the effective max_tokens (here the injected default 4096 → 4095;
+	// Anthropic requires budget_tokens < max_tokens).
 	in2 := `{"model":"gpt-x","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
 	out2, err := convertResponsesRequestToAnthropic([]byte(in2), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	th := asMap(unmarshalMap(t, out2)["thinking"])
-	if th["type"] != "enabled" || th["budget_tokens"] != float64(24000) {
-		t.Errorf("effort high → thinking = %v, want enabled/24000", th)
+	if th["type"] != "enabled" || th["budget_tokens"] != float64(4095) {
+		t.Errorf("effort high → thinking = %v, want enabled/4095 (16384 clamped below default max_tokens 4096)", th)
 	}
 }
 
@@ -428,8 +432,10 @@ func TestConvertReasoning_ChatToAnthropic_Request(t *testing.T) {
 		t.Fatal(err)
 	}
 	th := asMap(unmarshalMap(t, out)["thinking"])
-	if th["type"] != "enabled" || th["budget_tokens"] != float64(24000) {
-		t.Errorf("chat→a thinking = %v, want enabled/24000", th)
+	// No max_tokens in the request → the injected default 4096 clamps the
+	// 16384 ladder value to 4095 (budget_tokens must be < max_tokens).
+	if th["type"] != "enabled" || th["budget_tokens"] != float64(4095) {
+		t.Errorf("chat→a thinking = %v, want enabled/4095 (16384 clamped below default max_tokens 4096)", th)
 	}
 	// No effort → no thinking key.
 	out2, err := convertOpenAIRequestToAnthropic([]byte(`{"model":"g","messages":[{"role":"user","content":"hi"}]}`), nil)

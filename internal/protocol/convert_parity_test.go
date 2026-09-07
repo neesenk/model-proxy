@@ -364,7 +364,8 @@ func TestParity_ReasoningEffortDialects(t *testing.T) {
 			t.Errorf("%s: effort none → thinking = %v, want disabled", pid, got)
 		}
 	}
-	// qwen-plan → enable_thinking bool.
+	// qwen-plan → enable_thinking bool. Only "none" disables: minimal is a
+	// real enabled rung (budget 1024) on the realigned ladder.
 	out, err := convertResponsesRequestToOpenAIFor([]byte(mk("high")), convertReqOpts{ReasoningDialect: ReasoningEnableThinking, ImageOK: true})
 	if err != nil {
 		t.Fatal(err)
@@ -373,8 +374,12 @@ func TestParity_ReasoningEffortDialects(t *testing.T) {
 		t.Errorf("qwen-plan enable_thinking = %v, want true", got)
 	}
 	out2, _ := convertResponsesRequestToOpenAIFor([]byte(mk("minimal")), convertReqOpts{ReasoningDialect: ReasoningEnableThinking, ImageOK: true})
+	if got := unmarshalMap(t, out2)["enable_thinking"]; got != true {
+		t.Errorf("qwen-plan minimal → enable_thinking = %v, want true (minimal is an enabled rung)", got)
+	}
+	out2, _ = convertResponsesRequestToOpenAIFor([]byte(mk("none")), convertReqOpts{ReasoningDialect: ReasoningEnableThinking, ImageOK: true})
 	if got := unmarshalMap(t, out2)["enable_thinking"]; got != false {
-		t.Errorf("qwen-plan minimal → enable_thinking = %v, want false", got)
+		t.Errorf("qwen-plan none → enable_thinking = %v, want false", got)
 	}
 	// aqp (OpenRouter 系) → native reasoning object.
 	out3, err := convertResponsesRequestToOpenAIFor([]byte(mk("medium")), convertReqOpts{ReasoningDialect: ReasoningOpenRouter, ImageOK: true})

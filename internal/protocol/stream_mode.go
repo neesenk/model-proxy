@@ -39,19 +39,24 @@ func parseWireSSE(raw []byte) ([]wireSSEEvent, error) {
 	var out []wireSSEEvent
 	event := ""
 	pend := ""
-	pendOpen := false // a data: line opened the current frame (an empty one folds to "")
+	pendOpen := false       // a data: line opened the current frame (an empty one folds to "")
+	var pendEvents []string // event: value current when each folded data: line was read
+	dispatch := func() {
+		out = append(out, recoverWireSSEFrames(wireSSEEvent{event: event, data: pend}, pendEvents)...)
+		pend, pendOpen, pendEvents = "", false, nil
+	}
 	for scanner.Scan() {
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		switch {
 		case strings.HasPrefix(line, "data:"):
 			pend = appendSSEData(pend, pendOpen, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			pendEvents = append(pendEvents, event)
 			pendOpen = true
 		case line == "":
 			// Blank line dispatches the folded frame (multi-line data joins
 			// with "\n" per the SSE spec) and closes its event scope.
 			if pendOpen {
-				out = append(out, wireSSEEvent{event: event, data: pend})
-				pend, pendOpen = "", false
+				dispatch()
 			}
 			event = ""
 		case strings.HasPrefix(line, "event:"):
@@ -63,9 +68,50 @@ func parseWireSSE(raw []byte) ([]wireSSEEvent, error) {
 	}
 	// A trailing frame without its final blank line still dispatches.
 	if pendOpen {
-		out = append(out, wireSSEEvent{event: event, data: pend})
+		dispatch()
 	}
 	return out, nil
+}
+
+// recoverWireSSEFrames gives the aggregation path the same per-data-line
+// recovery the streaming readers get from parseFoldedSSEFrames. A
+// spec-compliant folded frame parses as one payload and passes through
+// untouched; a non-compliant gateway that omits the blank line between frames
+// folds several JSON payloads into one frame, which no longer parses — retry
+// each folded data line as its own frame (keeping the event: value current
+// when that line was read) and warn. A recovered literal "[DONE]" line is an
+// explicit terminator: later lines of the same folded frame are not processed.
+func recoverWireSSEFrames(frame wireSSEEvent, dataEvents []string) []wireSSEEvent {
+	if frame.data == "[DONE]" {
+		return []wireSSEEvent{frame}
+	}
+	var probe map[string]any
+	if sonic.UnmarshalString(frame.data, &probe) == nil {
+		return []wireSSEEvent{frame}
+	}
+	if !strings.Contains(frame.data, "\n") {
+		convertWarn("dropping unparseable SSE data payload")
+		return []wireSSEEvent{frame}
+	}
+	var out []wireSSEEvent
+	for lineIndex, line := range strings.Split(frame.data, "\n") {
+		event := foldedSSEFrameEvent(frame.event, dataEvents, lineIndex)
+		if line == "[DONE]" {
+			out = append(out, wireSSEEvent{event: event, data: line})
+			break
+		}
+		var payload map[string]any
+		if sonic.UnmarshalString(line, &payload) != nil {
+			continue
+		}
+		out = append(out, wireSSEEvent{event: event, data: line})
+	}
+	if len(out) == 0 {
+		convertWarn("dropping unparseable SSE data payload")
+		return []wireSSEEvent{frame}
+	}
+	convertWarn(fmt.Sprintf("SSE frames merged by a non-spec gateway (missing blank line between frames); parsed %d frames individually", len(out)))
+	return out
 }
 
 func aggregateSSEToResponse(raw []byte, proto string) ([]byte, error) {
@@ -113,6 +159,13 @@ func aggregateResponsesSSE(events []wireSSEEvent) ([]byte, error) {
 		case "response.completed", "response.incomplete":
 			response = asMap(payload["response"])
 			terminal = true
+			// A terminal EVENT can still carry a failure (status failed/
+			// cancelled or a non-null error) — fail closed like the streaming
+			// converters instead of aggregating a clean response around it.
+			if st := strOpt(response["status"]); st == "failed" || st == "cancelled" || asMap(response["error"]) != nil {
+				emsg, etype := responsesErrorOf(payload)
+				return nil, fmt.Errorf("responses stream terminal event carries a failure (%s: %s)", etype, emsg)
+			}
 		case "response.failed", "response.cancelled", "error":
 			return nil, fmt.Errorf("responses stream terminated with %s", typ)
 		}
@@ -322,10 +375,32 @@ func emitWireSSE(out *bytes.Buffer, event string, payload any) {
 
 func responsesJSONToSSE(root map[string]any) ([]byte, error) {
 	var out bytes.Buffer
+	// Real Responses upstreams stamp every frame with an incrementing
+	// sequence_number from 0; strict SDK parsing requires it.
+	seq := 0
+	emit := func(event string, payload map[string]any) {
+		payload["sequence_number"] = seq
+		seq++
+		emitWireSSE(&out, event, payload)
+	}
+	status := strOpt(root["status"])
+	event := "response.completed"
+	if status == "incomplete" {
+		event = "response.incomplete"
+	} else if status == "failed" || status == "cancelled" {
+		return nil, fmt.Errorf("cannot synthesize success SSE from response status %s", status)
+	}
+	if _, ok := root["created_at"]; !ok {
+		// Responses wire contract: Unix seconds as a number (strongly-typed
+		// SDKs parse int64; an RFC3339 string would fail the whole frame).
+		// Backfill BEFORE building response.created so both terminal and
+		// created snapshots carry it.
+		root["created_at"] = time.Now().Unix()
+	}
 	created := cloneMap(root)
 	created["status"] = "in_progress"
 	delete(created, "output")
-	emitWireSSE(&out, "response.created", map[string]any{"type": "response.created", "response": created})
+	emit("response.created", map[string]any{"type": "response.created", "response": created})
 	for index, raw := range anySlice(root["output"]) {
 		item := asMap(raw)
 		added := cloneMap(item)
@@ -338,7 +413,7 @@ func responsesJSONToSSE(root map[string]any) ([]byte, error) {
 		case "reasoning":
 			added["summary"] = []any{}
 		}
-		emitWireSSE(&out, "response.output_item.added", map[string]any{
+		emit("response.output_item.added", map[string]any{
 			"type": "response.output_item.added", "output_index": index, "item": added,
 		})
 		switch strOpt(item["type"]) {
@@ -348,29 +423,31 @@ func responsesJSONToSSE(root map[string]any) ([]byte, error) {
 				if strOpt(part["type"]) != "output_text" {
 					continue
 				}
-				emitWireSSE(&out, "response.content_part.added", map[string]any{
+				emit("response.content_part.added", map[string]any{
 					"type": "response.content_part.added", "output_index": index, "content_index": contentIndex,
-					"part": map[string]any{"type": "output_text", "text": ""},
+					"item_id": item["id"],
+					"part":    map[string]any{"type": "output_text", "text": ""},
 				})
-				emitWireSSE(&out, "response.output_text.delta", map[string]any{
+				emit("response.output_text.delta", map[string]any{
 					"type": "response.output_text.delta", "output_index": index, "content_index": contentIndex,
-					"delta": strOpt(part["text"]),
+					"item_id": item["id"], "delta": strOpt(part["text"]),
 				})
-				emitWireSSE(&out, "response.output_text.done", map[string]any{
+				emit("response.output_text.done", map[string]any{
 					"type": "response.output_text.done", "output_index": index, "content_index": contentIndex,
-					"text": strOpt(part["text"]),
+					"item_id": item["id"], "text": strOpt(part["text"]),
 				})
-				emitWireSSE(&out, "response.content_part.done", map[string]any{
-					"type": "response.content_part.done", "output_index": index, "content_index": contentIndex, "part": part,
+				emit("response.content_part.done", map[string]any{
+					"type": "response.content_part.done", "output_index": index, "content_index": contentIndex,
+					"item_id": item["id"], "part": part,
 				})
 			}
 		case "function_call":
 			args := firstNonEmpty(strOpt(item["arguments"]), "{}")
-			emitWireSSE(&out, "response.function_call_arguments.delta", map[string]any{
+			emit("response.function_call_arguments.delta", map[string]any{
 				"type": "response.function_call_arguments.delta", "output_index": index,
 				"item_id": item["id"], "delta": args,
 			})
-			emitWireSSE(&out, "response.function_call_arguments.done", map[string]any{
+			emit("response.function_call_arguments.done", map[string]any{
 				"type": "response.function_call_arguments.done", "output_index": index,
 				"item_id": item["id"], "arguments": args,
 			})
@@ -378,33 +455,31 @@ func responsesJSONToSSE(root map[string]any) ([]byte, error) {
 			for summaryIndex, rawSummary := range anySlice(item["summary"]) {
 				summary := asMap(rawSummary)
 				text := strOpt(summary["text"])
-				emitWireSSE(&out, "response.reasoning_summary_text.delta", map[string]any{
-					"type": "response.reasoning_summary_text.delta", "output_index": index,
-					"summary_index": summaryIndex, "delta": text,
+				emit("response.reasoning_summary_part.added", map[string]any{
+					"type": "response.reasoning_summary_part.added", "output_index": index,
+					"item_id": item["id"], "summary_index": summaryIndex,
+					"part": map[string]any{"type": "summary_text", "text": ""},
 				})
-				emitWireSSE(&out, "response.reasoning_summary_text.done", map[string]any{
+				emit("response.reasoning_summary_text.delta", map[string]any{
+					"type": "response.reasoning_summary_text.delta", "output_index": index,
+					"item_id": item["id"], "summary_index": summaryIndex, "delta": text,
+				})
+				emit("response.reasoning_summary_text.done", map[string]any{
 					"type": "response.reasoning_summary_text.done", "output_index": index,
-					"summary_index": summaryIndex, "text": text,
+					"item_id": item["id"], "summary_index": summaryIndex, "text": text,
+				})
+				emit("response.reasoning_summary_part.done", map[string]any{
+					"type": "response.reasoning_summary_part.done", "output_index": index,
+					"item_id": item["id"], "summary_index": summaryIndex,
+					"part": map[string]any{"type": "summary_text", "text": text},
 				})
 			}
 		}
-		emitWireSSE(&out, "response.output_item.done", map[string]any{
+		emit("response.output_item.done", map[string]any{
 			"type": "response.output_item.done", "output_index": index, "item": item,
 		})
 	}
-	status := strOpt(root["status"])
-	event := "response.completed"
-	if status == "incomplete" {
-		event = "response.incomplete"
-	} else if status == "failed" || status == "cancelled" {
-		return nil, fmt.Errorf("cannot synthesize success SSE from response status %s", status)
-	}
-	if _, ok := root["created_at"]; !ok {
-		// Responses wire contract: Unix seconds as a number (strongly-typed
-		// SDKs parse int64; an RFC3339 string would fail the whole frame).
-		root["created_at"] = time.Now().Unix()
-	}
-	emitWireSSE(&out, event, map[string]any{"type": event, "response": root})
+	emit(event, map[string]any{"type": event, "response": root})
 	return out.Bytes(), nil
 }
 
@@ -480,11 +555,17 @@ func anthropicJSONToSSE(root map[string]any) ([]byte, error) {
 		}
 		emitWireSSE(&out, "content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
 	}
-	emitWireSSE(&out, "message_delta", map[string]any{
+	messageDelta := map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": root["stop_reason"], "stop_sequence": root["stop_sequence"]},
-		"usage": root["usage"],
-	})
+	}
+	if root["usage"] != nil {
+		// Anthropic's streaming contract carries usage (with output_tokens) on
+		// message_delta; when the source JSON lacks it, omit the key entirely
+		// rather than emitting a null.
+		messageDelta["usage"] = root["usage"]
+	}
+	emitWireSSE(&out, "message_delta", messageDelta)
 	emitWireSSE(&out, "message_stop", map[string]any{"type": "message_stop"})
 	return out.Bytes(), nil
 }
