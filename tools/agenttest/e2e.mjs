@@ -246,7 +246,7 @@ async function runProject(project, o, protocol, model) {
 const REQ_LINE = /\[proto=(\S+) provider=(\S+)\] (\w+) (\S+) model=(\S+) status=(\d+) (\d+)ms/;
 const SUSPICIOUS = /panic|FAILED|level=error|\bfatal\b/i;
 
-function analyzeProxy(o, snapshot, modelSet) {
+async function analyzeProxy(o, snapshot, modelSet) {
   const report = { failures: [], warnings: [], lines: [] };
 
   // --- 运行日志新增内容 ---
@@ -264,6 +264,7 @@ function analyzeProxy(o, snapshot, modelSet) {
 
   const reqStats = new Map(); // key: proto status → count
   const badLines = [];
+  const pending5xx = new Map(); // proto → 待关联的 ≥500 行(failover 启发式)
   let oursTotal = 0;
   let otherLines = 0;
   for (const line of newLog.split("\n")) {
@@ -279,14 +280,31 @@ function analyzeProxy(o, snapshot, modelSet) {
       continue;
     }
     oursTotal++;
+    const statusN = Number(status);
     const key = `${proto} ${reqPath} ${status}`;
     reqStats.set(key, (reqStats.get(key) ?? 0) + 1);
-    if (Number(status) >= 400) badLines.push(line.trim().slice(0, 200));
-    if (Number(status) >= 500) report.failures.push(`上游 ${status}: ${proto} ${reqPath} model=${modelMap} provider=${provider}`);
-    else if (Number(status) >= 400) report.warnings.push(`上游 ${status}: ${proto} ${reqPath} model=${modelMap}`);
+    if (statusN >= 400) badLines.push(line.trim().slice(0, 200));
+    // 日志行没有 request id,无法精确关联 attempt;启发式:≥500 的行先挂起,
+    // 窗口内同 proto 后续出现 <400 的行即按"成功 failover 的瞬时失败"降级。
+    if (statusN >= 500) {
+      const pend = pending5xx.get(proto) ?? [];
+      pend.push(`上游 ${status}: ${proto} ${reqPath} model=${modelMap} provider=${provider}`);
+      pending5xx.set(proto, pend);
+    } else if (statusN < 400) {
+      const pend = pending5xx.get(proto);
+      if (pend?.length) {
+        for (const p of pend) report.warnings.push(`${p}(同协议后续有成功请求,按成功 failover 的瞬时失败处理——启发式)`);
+        pending5xx.delete(proto);
+      }
+    }
+    if (statusN >= 400 && statusN < 500) report.warnings.push(`上游 ${status}: ${proto} ${reqPath} model=${modelMap}`);
+  }
+  for (const pend of pending5xx.values()) {
+    for (const p of pend) report.failures.push(`${p}(窗口内同协议无成功请求)`);
   }
   report.lines.push(`窗口内我们的请求 ${oursTotal} 条(其它流量 ${otherLines} 条):`);
   for (const [k, n] of [...reqStats.entries()].sort()) report.lines.push(`  ${n}× ${k}`);
+  report.lines.push(`${DIM}5xx 判定为启发式:日志行无 request id,≥500 行若同协议后续出现 <400 行则按成功 failover 降级为 warn${RESET}`);
   if (badLines.length) {
     report.lines.push("可疑日志行(前 10 条):");
     for (const l of badLines.slice(0, 10)) report.lines.push(`  ${YELLOW}${l}${RESET}`);
@@ -294,27 +312,28 @@ function analyzeProxy(o, snapshot, modelSet) {
 
   // --- /api/status 计数器 delta ---
   try {
-    return apiGet(o, "/api/status").then((after) => {
-      const before = snapshot.status?.counters ?? {};
-      const deltas = [];
-      for (const [prov, c] of Object.entries(after.counters ?? {})) {
-        const b = before[prov] ?? {};
-        const dReq = (c.requests ?? 0) - (b.requests ?? 0);
-        const dFail = (c.failures ?? 0) - (b.failures ?? 0);
-        const d429 = (c.rate_limited_429 ?? 0) - (b.rate_limited_429 ?? 0);
-        if (dReq || dFail || d429) {
-          deltas.push(`  ${prov}: requests +${dReq}, failures +${dFail}, 429 +${d429}`);
-          if (dFail > 0) report.failures.push(`provider ${prov} failures +${dFail}`);
-          if (d429 > 0) report.warnings.push(`provider ${prov} rate_limited_429 +${d429}`);
-        }
+    const after = await apiGet(o, "/api/status");
+    const before = snapshot.status?.counters ?? {};
+    const deltas = [];
+    for (const [prov, c] of Object.entries(after.counters ?? {})) {
+      const b = before[prov] ?? {};
+      const dReq = (c.requests ?? 0) - (b.requests ?? 0);
+      const dFail = (c.failures ?? 0) - (b.failures ?? 0);
+      const dFover = (c.failovers ?? 0) - (b.failovers ?? 0);
+      const d429 = (c.rate_limited_429 ?? 0) - (b.rate_limited_429 ?? 0);
+      if (dReq || dFail || dFover || d429) {
+        deltas.push(`  ${prov}: requests +${dReq}, failures +${dFail}, failovers +${dFover}, 429 +${d429}`);
+        // failures 是 attempt 级计数:成功 failover 也会 +1,只作 warn。
+        if (dFail > 0) report.warnings.push(`provider ${prov} failures +${dFail}(可能含成功 failover 的瞬时失败)`);
+        if (d429 > 0) report.warnings.push(`provider ${prov} rate_limited_429 +${d429}`);
       }
-      report.lines.push(`计数器 delta:${deltas.length ? "" : " 无变化"}`);
-      report.lines.push(...deltas);
-      return report;
-    });
+    }
+    report.lines.push(`计数器 delta:${deltas.length ? "" : " 无变化"}`);
+    report.lines.push(...deltas);
+    return report;
   } catch (e) {
     report.warnings.push(`/api/status 读取失败: ${e.message}`);
-    return Promise.resolve(report);
+    return report;
   }
 }
 

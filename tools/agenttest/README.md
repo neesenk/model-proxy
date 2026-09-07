@@ -24,6 +24,74 @@ node agenttest.mjs --matrix --protocols anthropic,chat,responses \
 node agenttest.mjs --protocol anthropic --prompt "hi" --dump-dir /tmp/wire
 ```
 
+## codews — 真实代码实现工程全量回归
+
+`codews.mjs` 复用同一套核心,给每个 provider/model 一个**真实的编码工程任务**:
+agent 在独立工程副本里读 `SPEC.md`,用 `read_file`/`write_file` 实现
+`src/strutil.js` 三个纯函数,并把 `input.txt` 逐行 slugify 写到 `output.txt`。
+判定全部在 harness 侧真实执行(不信模型自评):
+
+1. 在工程副本里跑 `node --test`(node:test 功能测试);
+2. `output.txt` 与期望**逐字节**比对(真实读写往返);
+3. agent 回复 DONE。
+
+```bash
+node codews.mjs                                   # 全 provider/model × 3 协议
+node codews.mjs --providers zhipu --models glm-5.3
+node codews.mjs --protocols anthropic --concurrency 4
+node codews.mjs --clean                           # 仅清理并退出;配合 --providers/--models 清理后连跑
+```
+
+- 每组合一次多轮真实请求(读 SPEC → 实现 → 写回),`x-mp-force-provider` 钉死;
+  报告落 `codews-last.json`,工程副本保留在 `.codews-work/` 供检查失败实现。
+- 失败区分:功能测试未过(模型实现错误或转换问题)、缺 output.txt(未完成
+  写回)、上游错误、任务超时。
+
+## compare — 原生协议 vs 转换协议对比
+
+`compare.mjs` 回答"同一模型,provider 原生协议和经 proxy 转换的协议在
+实现上是否有差异":从 `model_caps.json` 读每个 (provider, model) 的原生
+协议(verdict=yes 的腿),对 codews 首跑中「原生 PASS + 转换 FAIL」的可疑
+组合做多轮复测(原生 ×2 对照 + 转换 ×3),消除单次采样的随机性:
+
+```bash
+node compare.mjs                          # 自动筛 codews-last.json 的可疑组合
+node compare.mjs --providers zhipu --models glm-5.2    # 指定目标跑全部协议
+node compare.mjs --repeats 3 --native-repeats 2
+```
+
+判定:转换 0 通过而原生有通过 → 强信号;失败分桶 impl-error(模型实现错)/
+chain-broken(工具链断裂——没读 SPEC 没写文件,转换层强信号)/upstream/
+timeout。强信号组合建议再用 dump 抓 wire 逐轮比对(`runCodeTask` 透传
+`dumpDir`),区分「内容保真但模型行为分化」与「转换丢失/畸变」。
+
+## sweep — config 全量回归
+
+`sweep.mjs` 复用同一套核心(`lib/core.mjs`:pi agent loop、场景判定、
+force-provider 钉死),对 **config.yaml 配置的全部 provider × model** 按
+协议 × thinking 参数矩阵发起真实请求,汇总结果并分析失败原因:
+
+```bash
+node sweep.mjs                                    # 全 provider/model × 3 协议,ping 场景
+node sweep.mjs --providers zhipu,volcengine       # provider 配置名子串过滤
+node sweep.mjs --models glm-5.3,kimi-k3           # model id 子串过滤
+node sweep.mjs --scenarios ping,tool,memory,thinking --thinking off,high
+```
+
+- 每行请求经 `x-mp-force-provider` 钉死到所属 provider,nonce 撞开响应
+  cache,保证真实打到上游转换链路;thinking 非 off 档只对 models.dev 目录
+  判定 `reasoning=true` 的模型执行(其余 SKIP;先 `models pull` 刷新目录)。
+- 结果逐行打印,汇总表按 provider/model × 协议(+th)给出 pass 比;
+  `sweep-last.json` 落全量明细(已 gitignore)。
+- 失败分析:所有失败一律列出并按成因聚类(限流/鉴权/模型不存在/role
+  拒绝/特性拒绝/图片不支持/超时/thinking 未返回/路由/响应转换);daemon
+  探测 verdict(`model_caps.json`、`quota_state.json` 的 `wire_caps`)只作
+  诊断上下文——runtime 会按 verdict 把请求转换到可用腿,客户端协议腿的
+  no 解释不了任何失败;仅当错误显示请求确实打进了判 no 的腿时标注
+  **选择违例**(那意味着协议选择有 bug)。退出码 0 仅当无失败。
+- 规模提示:默认只跑 ping(约 3×模型数 次真实请求);全场景 × 双 thinking
+  档约为 其 4 倍,先用 `--providers/--models` 缩小范围试跑。
+
 三种 `--protocol` 对应代理的三个 ingress 路径:
 
 | protocol | pi-ai api | 打到代理的路径 |
@@ -92,8 +160,8 @@ node e2e.mjs --projects pi-coding --with-thinking
 
 后端分析内容:
 
-- **运行日志**(解析顺序: `--log-file` > config `log_file` > `$TMPDIR/model-proxy.log`):按字节 offset 只分析窗口内新行,解析每请求行 `[proto=X provider=Y] POST /path model=A→B status=N`,按 proto×status 聚合(只统计本次 `--models` 的流量,其它流量单列计数),status≥500 判 FAIL、≥400 判 warn,并扫描 panic/FAILED/error 可疑行。
-- **内部运行数据**(`GET /api/status`):diff 窗口前后每 provider 的 `requests/failures/rate_limited_429` 计数器,failures 增长判 FAIL、429 增长判 warn。
+- **运行日志**(解析顺序: `--log-file` > config `log_file` > `$TMPDIR/model-proxy.log`):按字节 offset 只分析窗口内新行,解析每请求行 `[proto=X provider=Y] POST /path model=A→B status=N`,按 proto×status 聚合(只统计本次 `--models` 的流量,其它流量单列计数),status≥400 判 warn;status≥500 的行先挂起,窗口内同协议后续出现 status<400 的行则按成功 failover 的瞬时失败降级为 warn(启发式:日志行无 request id,无法精确关联 attempt),窗口结束仍挂起的才判 FAIL,并扫描 panic/FAILED/error 可疑行。
+- **内部运行数据**(`GET /api/status`):diff 窗口前后每 provider 的 `requests/failures/failovers/rate_limited_429` 计数器并全部展示;failures 是 attempt 级计数(成功 failover 也会 +1),增长只判 warn 并注明「可能含成功 failover 的瞬时失败」,429 增长判 warn。
 - **request_log**(`GET /api/requests`):检测是否开启;未开启时给出开启提示(config `request_log` 段,需重启 daemon)。
 
 判定:项目运行全过 + matrix 过 + 后端无异常 ⇒ `E2E PASS`(exit 0),否则 exit 1。
