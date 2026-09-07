@@ -184,14 +184,13 @@ func TestConvertGolden_ErrorFixtures(t *testing.T) {
 				var envelope map[string]any
 				parseErr := sonic.UnmarshalString(body, &envelope)
 				recognized := parseErr == nil && asMap(envelope["error"]) != nil
-				if !recognized {
-					if err == nil {
-						t.Fatalf("unrecognized error fixture converted successfully: %s", converted)
-					}
-					return
-				}
+				// Unrecognized bodies (HTML error pages, {"detail":...},
+				// empty) must DEGRADE to a synthesized envelope, never fail:
+				// failing closed here escalates a translatable 4xx into an
+				// opaque "response conversion failed" 502 that hides the
+				// upstream diagnosis.
 				if err != nil {
-					t.Fatalf("recognized error fixture failed conversion: %v", err)
+					t.Fatalf("error fixture conversion failed (recognized=%v): %v", recognized, err)
 				}
 				out := unmarshalMap(t, converted)
 				if asMap(out["error"]) == nil {

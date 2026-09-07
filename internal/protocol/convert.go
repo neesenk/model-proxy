@@ -1362,22 +1362,31 @@ func injectAnthropicCacheBreakpointsTree(root map[string]any) bool {
 // the client protocol. Error bodies must never pass through a success-response
 // converter: an OpenAI {"error":...} otherwise looks like an empty completed
 // Responses object (or an empty Anthropic message).
+//
+// An unrecognized or unparseable body NEVER fails the conversion: the client
+// must still learn WHY the request died (codex rejects unsupported models with
+// a FastAPI {"detail":...} envelope; some gateways answer 4xx with no body at
+// all). Such bodies degrade to a synthesized envelope carrying the raw text
+// (capped) — failing closed here would escalate a translatable 400 into an
+// opaque "response conversion failed" 502 that hides the upstream diagnosis.
 func convertErrorResponse(body []byte, clientProto, targetProto string, status int) ([]byte, error) {
 	if !needsConversion(clientProto, targetProto) {
 		return body, nil
 	}
 	var src map[string]any
-	if err := sonic.Unmarshal(body, &src); err != nil {
-		return nil, fmt.Errorf("parse upstream error response: %w", err)
-	}
+	parseErr := sonic.Unmarshal(body, &src)
 	errSrc := asMap(src["error"])
 	if errSrc == nil && strOf(src["type"]) == "error" {
 		// Bare error envelope with no nested "error" object — the fields live
 		// at the top level ({"type":"error","message":...}).
 		errSrc = src
 	}
+	if errSrc == nil && parseErr == nil && strOf(src["detail"]) != "" {
+		// FastAPI-style envelope (codex/ChatGPT backend): {"detail":"..."}.
+		errSrc = map[string]any{"message": strOf(src["detail"])}
+	}
 	if errSrc == nil {
-		return nil, fmt.Errorf("upstream status %d has no recognized error envelope", status)
+		errSrc = map[string]any{"message": rawErrorMessage(body, status)}
 	}
 	message := firstNonEmpty(strOpt(errSrc["message"]), fmt.Sprintf("upstream request failed with status %d", status))
 	// A bare envelope's top-level "type" is the literal "error" marker, not an
@@ -2512,4 +2521,20 @@ func convertSSEReaderNS(r io.Reader, clientProto, targetProto, model string, r2c
 		return conversion.stream(r, model, r2c)
 	}
 	return r
+}
+
+// rawErrorMessage extracts a client-safe message from an unparseable or
+// unrecognized error body: the trimmed raw text capped at 500 bytes, or the
+// generic status line for an empty body.
+func rawErrorMessage(body []byte, status int) string {
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return fmt.Sprintf("upstream request failed with status %d", status)
+	}
+	// Truncate on a rune boundary — slicing bytes mid-rune produces invalid
+	// UTF-8 that downstream JSON marshaling replaces with U+FFFD noise.
+	if runes := []rune(text); len(runes) > 500 {
+		text = string(runes[:500]) + "…"
+	}
+	return text
 }

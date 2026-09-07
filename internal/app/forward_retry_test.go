@@ -674,3 +674,228 @@ func TestForward_StrictLossyRefusesAndAnswers400(t *testing.T) {
 		t.Fatalf("400 body lacks the strict_lossy feature marker: %s", raw)
 	}
 }
+
+// TestForward_LearnsDeveloperRoleRename pins the developer-role learning
+// retry: a chat upstream that 400s the developer role gets the request
+// retried once with developer renamed to system, the lesson persists for the
+// (provider, model), and the SECOND request is pre-renamed before it leaves.
+func TestForward_LearnsDeveloperRoleRename(t *testing.T) {
+	var up *fakeUpstream
+	up = newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		// newFakeUpstream drains r.Body before dispatching; reject by hit
+		// count (first hit = the developer-role request).
+		if up.hits() == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, "{\"code\":\"InvalidParameter\",\"message\":\"The parameter `messages.role` specified in the request are not valid: invalid value: `developer`, supported values are [system user assistant tool]\"}")
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"id":"c1","choices":[{"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	})
+	cfg := &Config{
+		Providers: map[string]Provider{"v": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
+		Routes:    map[string][]RouteTarget{"m1": {{Provider: "v", Model: "m1"}}},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["v"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	// Chat client speaking chat backend (passthrough): a developer-roled
+	// system message rides through byte-level.
+	body := `{"model":"m1","messages":[{"role":"developer","content":"be brief"},{"role":"user","content":"ping"}]}`
+	resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first request status = %d: %s", resp.StatusCode, rb)
+	}
+
+	if up.hits() != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (reject + renamed retry)", up.hits())
+	}
+	if !strings.Contains(up.lastBody(), `"system"`) || strings.Contains(up.lastBody(), `"developer"`) {
+		t.Errorf("retry body not renamed: %s", up.lastBody())
+	}
+	if !p.runtimeState.ParamBlocked("v", "m1", "developer_role") {
+		t.Error("developer_role lesson not persisted")
+	}
+	firstRound := up.hits()
+
+	// Second request: pre-renamed on the way out (no reject round-trip).
+	resp2, err := http.Post(px.URL+"/v1/chat/completions", "application/json", stringReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second request status = %d: %s", resp2.StatusCode, rb2)
+	}
+	if up.hits() != firstRound+1 {
+		t.Errorf("upstream hits after second request = %d, want %d (no reject round-trip)", up.hits(), firstRound+1)
+	}
+	if strings.Contains(up.lastBody(), `"developer"`) {
+		t.Errorf("second request body not pre-renamed: %s", up.lastBody())
+	}
+}
+
+// TestForward_LearnsThinkingAdaptiveE2E pins the thinking_adaptive lesson end
+// to end through the full forward pipeline: an anthropic upstream that
+// rejects budget-based thinking (shopee's wording) gets the request retried
+// once with {"type":"adaptive"}, the lesson persists, and the SECOND request
+// is pre-rewritten before it leaves.
+func TestForward_LearnsThinkingAdaptiveE2E(t *testing.T) {
+	var up *fakeUpstream
+	up = newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		if up.lastBody() == "" || !strings.Contains(up.lastBody(), `"adaptive"`) {
+			// first hit carries budget-based thinking (the only shape the
+			// client sends) — reject with shopee's exact wording
+			if up.hits() == 1 {
+				w.WriteHeader(http.StatusBadRequest)
+				io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\""}}`)
+				return
+			}
+		}
+		w.Header().Set("content-type", "application/json")
+		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	})
+	cfg := &Config{
+		Providers: map[string]Provider{"s": {AnthropicBaseURL: up.srv.URL, Provider: testProviderID}},
+		Routes:    map[string][]RouteTarget{"m": {{Provider: "s", Model: "m", Protocol: "anthropic"}}},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["s"] = &testProv{key: "k"}
+	px := httptest.NewServer(http.HandlerFunc(p.Handler))
+	defer px.Close()
+
+	body := `{"model":"m","max_tokens":100,"thinking":{"type":"enabled","budget_tokens":8000},"messages":[{"role":"user","content":"ping"}]}`
+	resp, err := http.Post(px.URL+"/v1/messages", "application/json", stringReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first request status = %d: %s", resp.StatusCode, rb)
+	}
+	if up.hits() != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (reject + adaptive retry)", up.hits())
+	}
+	if !strings.Contains(up.lastBody(), `{"type":"adaptive"}`) {
+		t.Errorf("retry body thinking not adaptive: %s", up.lastBody())
+	}
+	if !p.runtimeState.ParamBlocked("s", "m", "thinking_adaptive") {
+		t.Error("thinking_adaptive lesson not persisted")
+	}
+
+	resp2, err := http.Post(px.URL+"/v1/messages", "application/json", stringReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second request status = %d: %s", resp2.StatusCode, rb2)
+	}
+	if up.hits() != 3 {
+		t.Errorf("upstream hits after second request = %d, want 3 (no reject round-trip)", up.hits())
+	}
+	if !strings.Contains(up.lastBody(), `{"type":"adaptive"}`) {
+		t.Errorf("second request not pre-rewritten: %s", up.lastBody())
+	}
+}
+
+// TestForward_ErrorDegradationVisibleE2E pins the error-degradation contract
+// end to end: an upstream 4xx with an unrecognized envelope (FastAPI detail,
+// empty body) must reach cross-protocol clients as a translated envelope
+// carrying the upstream message — never an opaque "response conversion
+// failed" 502.
+func TestForward_ErrorDegradationVisibleE2E(t *testing.T) {
+	cases := []struct {
+		name       string
+		upstream   string
+		status     int
+		clientPath string
+		wantBody   string
+	}{
+		{"fastapi detail via anthropic client", `{"detail":"The 'gpt-x' model is not supported when using Codex with a ChatGPT account."}`, 400, "/v1/messages", "not supported when using Codex"},
+		{"no body via anthropic client", ``, 400, "/v1/messages", "upstream request failed with status 400"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.upstream)
+			})
+			cfg := &Config{
+				Providers: map[string]Provider{"c": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
+				Routes:    map[string][]RouteTarget{"m": {{Provider: "c", Model: "m", Protocol: "responses"}}},
+			}
+			p := newTestProxy(t, cfg)
+			p.providers["c"] = &testProv{key: "k"}
+			px := httptest.NewServer(http.HandlerFunc(p.Handler))
+			defer px.Close()
+
+			resp, err := http.Post(px.URL+tc.clientPath, "application/json",
+				stringReader(`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"ping"}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rb, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d (want the upstream 400 preserved, not a 502): %s", resp.StatusCode, rb)
+			}
+			if !strings.Contains(string(rb), tc.wantBody) {
+				t.Errorf("client body lost the upstream diagnosis: %s", rb)
+			}
+			if !strings.Contains(string(rb), `"type":"error"`) {
+				t.Errorf("no anthropic error envelope: %s", rb)
+			}
+		})
+	}
+}
+
+// TestForward_ModelDeniedNewWordingE2E pins the v3 IsModelDenied marker end
+// to end: shopee's retcode-40403 wording must count as a model denial (model
+// failure recorded → model lock), while an adjacent plan-tier "not supported"
+// 400 must NOT.
+func TestForward_ModelDeniedNewWordingE2E(t *testing.T) {
+	run := func(t *testing.T, upstreamBody string, wantLocked bool) {
+		up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, upstreamBody)
+		})
+		cfg := &Config{
+			Providers: map[string]Provider{"s": {OpenAIBaseURL: up.srv.URL, Provider: testProviderID}},
+			Routes:    map[string][]RouteTarget{"m": {{Provider: "s", Model: "m"}}},
+		}
+		p := newTestProxy(t, cfg)
+		p.providers["s"] = &testProv{key: "k"}
+		px := httptest.NewServer(http.HandlerFunc(p.Handler))
+		defer px.Close()
+
+		resp, err := http.Post(px.URL+"/v1/chat/completions", "application/json",
+			stringReader(`{"model":"m","messages":[{"role":"user","content":"ping"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		locked := p.modelLocked("s", "m", time.Now())
+		if locked != wantLocked {
+			t.Errorf("model locked = %v, want %v", locked, wantLocked)
+		}
+	}
+	t.Run("retcode 40403 locks the model", func(t *testing.T) {
+		run(t, `{"retcode":40403,"message":"Model not supported by this endpoint"}`, true)
+	})
+	t.Run("plan-tier not supported does not lock", func(t *testing.T) {
+		run(t, `{"error":{"message":"Streaming is not supported for this plan tier"}}`, false)
+	})
+}

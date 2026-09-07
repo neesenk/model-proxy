@@ -16,6 +16,12 @@ func TestIsModelDenied(t *testing.T) {
 		{400, `{"error":"model is not available in your region"}`, true},
 		{400, `{"msg":"模型不存在"}`, true},
 		{400, `{"error":"The Model 'gpt-x' Does Not Exist"}`, true},
+		// v3 addition — shopee's retcode 40403 envelope. This marker triggers
+		// model lock + failover, so the boundary matters:
+		{400, `{"retcode":40403,"message":"Model not supported by this endpoint"}`, true},
+		// "supported" substrings that are NOT model denials must not fire.
+		{400, `{"error":"Streaming is not supported for this plan tier"}`, false},
+		{400, `{"error":"Unsupported parameter: 'temperature' is not supported"}`, false},
 		{400, `{"error":"invalid api key"}`, false},
 		{400, `{"error":"max_tokens is too large"}`, false},
 		{400, ``, false},

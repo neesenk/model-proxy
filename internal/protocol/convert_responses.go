@@ -1057,7 +1057,10 @@ func convertOpenAIRequestToResponses(body []byte, d *Diagnostics) ([]byte, error
 		}
 	}
 	if effort, ok := src["reasoning_effort"].(string); ok && effort != "" {
-		out["reasoning"] = map[string]any{"effort": effort}
+		// summary:"auto" asks the backend to stream reasoning summaries
+		// (opencodex sets it unconditionally); without it codex responses
+		// carry no reasoning items at all.
+		out["reasoning"] = map[string]any{"effort": effort, "summary": "auto"}
 	}
 	// max_completion_tokens wins over the legacy max_tokens when both are set.
 	if v, ok := src["max_completion_tokens"]; ok {

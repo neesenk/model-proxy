@@ -102,7 +102,7 @@ func (executor Executor) Execute(attempt Attempt) Result {
 	ctx, cancel := context.WithTimeout(exchange.Request.Context(), runtime.Scheduling.Timeout())
 	defer cancel()
 	body := exchange.Body
-	strippedParam, retriedImages := false, false
+	strippedParam, renamedRole, adaptedThinking, retriedImages := false, false, false, false
 	clientWantsStream := protocol.WantsStream(body)
 	for authAttempt := 0; authAttempt < 2; authAttempt++ {
 		targetURL := strings.TrimRight(plan.BaseURL(), "/") + plan.UpstreamPath()
@@ -239,6 +239,40 @@ func (executor Executor) Execute(attempt Attempt) Result {
 						authAttempt--
 						continue
 					}
+				}
+			}
+			// Same learning-retry family, different lesson: an upstream whose
+			// chat dialect rejects the developer role (400 naming the role or
+			// zhipu's generic role wording) learns ParamDeveloperRole and the
+			// request retries once with developer renamed to system. Like the
+			// param strip, this only fires after THIS upstream actually
+			// rejected the role — OpenAI-proper backends that accept developer
+			// are never rewritten.
+			if response.StatusCode == http.StatusBadRequest && !renamedRole && IsDeveloperRoleRejection(response.StatusCode, peek) {
+				if shaped, changed := RenameDeveloperRole(body); changed {
+					if executor.State != nil {
+						executor.State.LearnParamBlock(target, ParamDeveloperRole)
+					}
+					response.Body.Close()
+					body = shaped
+					renamedRole = true
+					authAttempt--
+					continue
+				}
+			}
+			// Budget-based → adaptive thinking, same self-healing shape:
+			// shopee's claude gateway 400s thinking.type.enabled on the
+			// adaptive-only models; retry once with {"type":"adaptive"}.
+			if response.StatusCode == http.StatusBadRequest && !adaptedThinking && IsThinkingDialectRejection(response.StatusCode, peek) {
+				if shaped, changed := RewriteThinkingAdaptive(body); changed {
+					if executor.State != nil {
+						executor.State.LearnParamBlock(target, ParamThinkingAdaptive)
+					}
+					response.Body.Close()
+					body = shaped
+					adaptedThinking = true
+					authAttempt--
+					continue
 				}
 			}
 		}

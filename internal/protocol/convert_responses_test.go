@@ -80,8 +80,8 @@ func TestConvertOpenAIRequestToResponses(t *testing.T) {
 	if m["instructions"] != "sys" {
 		t.Errorf("instructions = %v (first system not promoted)", m["instructions"])
 	}
-	if r := asMap(m["reasoning"]); strOf(r["effort"]) != "high" {
-		t.Errorf("reasoning = %v", m["reasoning"])
+	if r := asMap(m["reasoning"]); strOf(r["effort"]) != "high" || strOf(r["summary"]) != "auto" {
+		t.Errorf("reasoning = %v (want effort=high, summary=auto)", m["reasoning"])
 	}
 	input, _ := m["input"].([]any)
 	// user msg, function_call, function_call_output (system consumed as instructions)

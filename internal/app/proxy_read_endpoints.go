@@ -156,10 +156,25 @@ func (p *Proxy) learnParamBlock(provider, model, param string, generations ...ui
 }
 
 // applyParamBlock strips every learned-unsupported top-level parameter for the
-// (provider, model) from the outgoing body. Best-effort: a non-JSON body (or
-// one the params aren't in) passes through unchanged.
+// (provider, model) from the outgoing body. The dialect lessons rewrite
+// instead of strip: ParamDeveloperRole renames developer→system roles,
+// ParamThinkingAdaptive rewrites budget thinking to the adaptive spelling.
+// Best-effort: a non-JSON body (or one the params aren't in) passes through
+// unchanged.
 func (p *Proxy) applyParamBlock(provider, model string, body []byte) []byte {
 	for _, param := range p.runtimeState.ParamBlock(provider, model) {
+		switch param {
+		case targetexec.ParamDeveloperRole:
+			if nb, did := targetexec.RenameDeveloperRole(body); did {
+				body = nb
+			}
+			continue
+		case targetexec.ParamThinkingAdaptive:
+			if nb, did := targetexec.RewriteThinkingAdaptive(body); did {
+				body = nb
+			}
+			continue
+		}
 		if nb, did := targetexec.StripTopLevelParam(body, param); did {
 			body = nb
 		}
