@@ -71,8 +71,9 @@ providers:
     provider_id: codex
     priority: 2
     openai_base_url: https://chatgpt.com/backend-api/codex
+    # gpt-5.4 omitted: upstream rejects it for ChatGPT-account Codex access
+    # ("The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account").
     models:
-      - gpt-5.4
       - gpt-5.4-mini
       - gpt-5.5
       - gpt-5.6-luna
