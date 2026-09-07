@@ -39,3 +39,6 @@ yarn-error.log*
 
 # runtime config write lock
 config.yaml.lock
+
+# Local daemon runtime state (credential/token backups) — never commit
+.model-proxy/
