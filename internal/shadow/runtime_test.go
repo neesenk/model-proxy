@@ -104,6 +104,41 @@ func TestRuntimeTryAcquireAndRelease(t *testing.T) {
 	}
 }
 
+// TestRuntimeDroppedCountsGateRejections: Dropped counts only genuine gate
+// rejections (semaphore full), and acquire succeeds again after Release.
+func TestRuntimeDroppedCountsGateRejections(t *testing.T) {
+	var nilRuntime *Runtime
+	if got := nilRuntime.Dropped(); got != 0 {
+		t.Fatalf("nil runtime Dropped = %d, want 0", got)
+	}
+	nilRuntime.TryAcquire() // must not count: nil-receiver path is not a gate rejection
+
+	runtime := NewRuntime(Options{MaxConcurrent: 1})
+	permit := runtime.TryAcquire()
+	if permit == nil {
+		t.Fatal("first acquire failed")
+	}
+	if got := runtime.Dropped(); got != 0 {
+		t.Fatalf("Dropped after successful acquire = %d, want 0", got)
+	}
+	if rejected := runtime.TryAcquire(); rejected != nil {
+		rejected.Release()
+		t.Fatal("acquire on a full gate succeeded")
+	}
+	if got := runtime.Dropped(); got != 1 {
+		t.Fatalf("Dropped after gate rejection = %d, want 1", got)
+	}
+	permit.Release()
+	if reacquired := runtime.TryAcquire(); reacquired == nil {
+		t.Fatal("acquire after release failed")
+	} else {
+		reacquired.Release()
+	}
+	if got := runtime.Dropped(); got != 1 {
+		t.Fatalf("Dropped after release/reacquire = %d, want 1 (rejections are cumulative)", got)
+	}
+}
+
 func TestExecuteRewritesAndCapturesDetachedRequest(t *testing.T) {
 	var gotPath string
 	var gotQuery url.Values

@@ -114,6 +114,13 @@
     `GOTOOLCHAIN=go1.26.4 scripts/cover.sh`；`go test` 结果缓存会掩盖重测，
     本地压测与复跑一律 `-count=1`。cover.sh 在本地工具链与 go.mod 不一致时
     会打印漂移警告（不 fail，CI 口径仍是权威）。
+34. `post()` 返回 ≠ post-commit dispatch 已执行：shadow 的
+    `dispatchShadowAfterCommit`（`internal/forward/forward.go`）在响应写给
+    客户端之后才在请求 goroutine 里同步跑，客户端返回时它可能还没执行。对
+    「dispatch 恰好发生在某窗口内」（如并发 gate 饱和期）的断言，用计数
+    seam/barrier（如 `shadow.Runtime.Dropped()` + `waitUntil`）而不是赌
+    时序——慢机器 + race 下 dispatch 可能晚到窗口结束之后，产生合法但意外
+    的结果。
 
 ## 回归要求
 

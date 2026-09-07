@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"model-proxy/internal/targetexec"
@@ -44,6 +45,11 @@ type Runtime struct {
 	client     *http.Client
 	sampleRate float64
 	random     func() float64
+	// dropped counts TryAcquire calls the concurrency gate actually rejected
+	// (semaphore full). It observes the gate drop rate and doubles as a
+	// deterministic seam for concurrency tests: once Dropped increments, the
+	// dispatch under test provably ran while the gate was saturated.
+	dropped atomic.Int64
 }
 
 // NewRuntime builds a reload-swappable Shadow runtime.
@@ -97,7 +103,8 @@ type Permit struct {
 }
 
 // TryAcquire reserves one detached Shadow slot without blocking. A nil return
-// means that no slot is available.
+// means that no slot is available; only that genuine gate rejection is counted
+// in dropped (the nil-runtime / nil-semaphore paths are not).
 func (runtime *Runtime) TryAcquire() *Permit {
 	if runtime == nil || runtime.sem == nil {
 		return nil
@@ -106,8 +113,18 @@ func (runtime *Runtime) TryAcquire() *Permit {
 	case runtime.sem <- struct{}{}:
 		return &Permit{runtime: runtime}
 	default:
+		runtime.dropped.Add(1)
 		return nil
 	}
+}
+
+// Dropped reports how many dispatches the concurrency gate has rejected. A nil
+// runtime reports zero.
+func (runtime *Runtime) Dropped() int64 {
+	if runtime == nil {
+		return 0
+	}
+	return runtime.dropped.Load()
 }
 
 // Release returns this permit's slot at most once.

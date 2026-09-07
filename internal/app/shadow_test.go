@@ -530,8 +530,10 @@ func TestShadow_PooledCrossProtocolPreservesVirtualIdentity(t *testing.T) {
 // at 1 and an in-flight shadow request, the SECOND request's shadow must be
 // DROPPED by the gate (not queued behind the permit) while both primaries
 // answer normally. Ordering is deterministic: the first shadow's upstream
-// blocks until released, and the test waits for it to have acquired the permit
-// before sending the second request.
+// blocks until released, the test waits for it to have acquired the permit
+// before sending the second request, and the runtime's Dropped counter is the
+// barrier proving the second dispatch ran while the gate was still saturated
+// (post() returning does not imply the post-commit dispatch has run).
 func TestShadow_ConcurrencyGateSaturatesAndDrops(t *testing.T) {
 	acquired := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -582,6 +584,14 @@ func TestShadow_ConcurrencyGateSaturatesAndDrops(t *testing.T) {
 	if code, body := post(t, px.URL+"/v1/responses", `{"model":"glm","input":[]}`); code != 200 || !strings.Contains(body, `"primary":true`) {
 		t.Fatalf("request 2 (gate saturated): status=%d body=%s, want primary 200", code, body)
 	}
+	// post() returning does NOT imply the post-commit shadow dispatch has run:
+	// dispatchShadowAfterCommit executes in the request goroutine after the
+	// response reaches the client. Wait on the runtime's drop counter so the
+	// rejection provably happened while the gate was saturated, not by timing
+	// luck (a late dispatch after close(release) would be legally admitted).
+	waitUntil(t, "second shadow dropped by gate", func() bool {
+		return p.shadow.Load().Dropped() >= 1
+	})
 	if got := shadowHits.Load(); got != 1 {
 		t.Fatalf("shadow upstream hits while saturated = %d, want 1 (second shadow must be dropped, not queued)", got)
 	}
