@@ -330,7 +330,11 @@ func TestForward_Convert_LogsClientProtocolBody(t *testing.T) {
 		t.Fatalf("client did not get anthropic body: %s", string(clientBody))
 	}
 	// The request log must record the SAME anthropic body the client got — NOT the
-	// openai `choices` shape, and NOT empty.
+	// openai `choices` shape, and NOT empty. The record is enqueued from the
+	// handler goroutine after the body copy, so wait for the commit metrics
+	// before draining the logger (post() returning does not imply the record
+	// was enqueued yet).
+	awaitCommitMetrics(t, p, counters.PMKey{Provider: "oai", Model: "gpt-x"})
 	shutdown()
 	recs := allRecords(t, dir)
 	if len(recs) != 1 {

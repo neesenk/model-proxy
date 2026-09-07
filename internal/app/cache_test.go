@@ -94,6 +94,11 @@ func TestForward_CacheHit(t *testing.T) {
 	if hits != 1 {
 		t.Errorf("first request: upstream hits=%d want 1", hits)
 	}
+	// cache.Put happens after the response body is copied to the client, so the
+	// second request could beat it — wait for the entry to exist first.
+	waitUntil(t, "cache entry after first request", func() bool {
+		return p.cache.Stats().Entries == 1
+	})
 	second := do()
 	if hits != 1 {
 		t.Errorf("second (cached) request: upstream hits=%d want 1 (served from cache)", hits)
@@ -148,6 +153,11 @@ func TestForward_CacheHitHeader(t *testing.T) {
 	if h := do(); h.Get("x-mp-cache") != "" {
 		t.Errorf("first (miss) response x-mp-cache=%q want empty", h.Get("x-mp-cache"))
 	}
+	// cache.Put happens after the response body is copied to the client; wait
+	// for the entry so the replay provably reads a populated cache.
+	waitUntil(t, "cache entry after first request", func() bool {
+		return p.cache.Stats().Entries == 1
+	})
 	if h := do(); h.Get("x-mp-cache") != "hit" {
 		t.Errorf("second (cached) response x-mp-cache=%q want hit", h.Get("x-mp-cache"))
 	}
@@ -553,6 +563,11 @@ func TestForward_ForcedPooledProviderBypassesCache(t *testing.T) {
 	if primaryHits != 1 || pooledHits != 0 {
 		t.Fatalf("after prime primary/pooled hits=%d/%d want 1/0", primaryHits, pooledHits)
 	}
+	// cache.Put happens after the response body is copied to the client; wait
+	// for the entry so the replay provably reads a populated cache.
+	waitUntil(t, "cache entry after prime", func() bool {
+		return p.cache.Stats().Entries == 1
+	})
 	if h, got := do(""); h.Get("x-mp-cache") != "hit" || got != `{"from":"primary"}` {
 		t.Fatalf("ordinary replay cache=%q body=%s want hit/primary", h.Get("x-mp-cache"), got)
 	}

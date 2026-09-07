@@ -81,27 +81,21 @@ func TestForward_CommittedSSEStreamMidFailureIsNotRecalled(t *testing.T) {
 		t.Errorf("fallback was hit %d time(s) after a COMMITTED stream died — commit must mean no recall", len(*fallbackSeen))
 	}
 
-	// Post-commit death is not a pre-commit hard failure: circuit untouched.
-	if h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]; ok &&
-		(h.ConsecutiveFailures != 0 || h.CircuitOpenUntil.After(time.Now())) {
-		t.Errorf("mid-stream death poisoned the circuit: %+v", h)
-	}
-
 	// The request still reaches its terminal state: one committed end event
 	// (status 200, the committed response) and a request-log record carrying
-	// the partial stream the client saw.
-	endStatus := 0
-	for _, e := range p.events.Snapshot() {
-		if e.Type == "end" && e.Provider == "primary" {
-			endStatus = e.Status
-		}
-	}
-	if endStatus != 200 {
-		t.Errorf("end event status = %d, want 200 (committed)", endStatus)
-	}
+	// the partial stream the client saw. Both the end event and the record are
+	// emitted from the handler goroutine after the client may have already
+	// observed the broken stream, so poll for the end event instead of
+	// asserting it immediately.
 	deadline := time.Now().Add(2 * time.Second)
 	found := false
+	endStatus := 0
 	for time.Now().Before(deadline) && !found {
+		for _, e := range p.events.Snapshot() {
+			if e.Type == "end" && e.Provider == "primary" {
+				endStatus = e.Status
+			}
+		}
 		for _, r := range allRecords(t, dir) {
 			if r.Provider == "primary" && r.Status == 200 && strings.Contains(r.ResponseBody, "tial") {
 				found = true
@@ -112,8 +106,17 @@ func TestForward_CommittedSSEStreamMidFailureIsNotRecalled(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
+	if endStatus != 200 {
+		t.Errorf("end event status = %d, want 200 (committed)", endStatus)
+	}
 	if !found {
 		t.Error("no request-log record for the committed partial stream")
+	}
+
+	// Post-commit death is not a pre-commit hard failure: circuit untouched.
+	if h, ok := p.runtimeState.Dashboard(time.Now()).Providers["primary"]; ok &&
+		(h.ConsecutiveFailures != 0 || h.CircuitOpenUntil.After(time.Now())) {
+		t.Errorf("mid-stream death poisoned the circuit: %+v", h)
 	}
 }
 
