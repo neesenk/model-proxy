@@ -405,7 +405,8 @@ func TestStreaming_NoUsageNoDone(t *testing.T) {
 
 // TestStreaming_ErrorEvents: a mid-stream upstream error is propagated, not
 // silently turned into a clean finish. Forward: openai error chunk → anthropic
-// error event; reverse: anthropic error event → openai error chunk + [DONE].
+// error event; reverse: anthropic error event → openai error chunk, fail-closed
+// (NO synthesized [DONE] after the error — that would fake a clean terminal).
 func TestStreaming_ErrorEvents(t *testing.T) {
 	// forward: openai error → anthropic error event
 	fwd := "data: {\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
@@ -416,12 +417,15 @@ func TestStreaming_ErrorEvents(t *testing.T) {
 		t.Errorf("forward error not propagated:\n%s", s)
 	}
 
-	// reverse: anthropic error → openai error chunk + [DONE]
+	// reverse: anthropic error → openai error chunk, no [DONE]
 	rev := "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}\n\n"
 	out2 := readAllChecked(t, newAnthropicToOpenAISSE(strings.NewReader(rev), "claude"))
 	s2 := string(out2)
-	if !strings.Contains(s2, `"error"`) || !strings.Contains(s2, "overloaded") || !strings.Contains(s2, "data: [DONE]") {
+	if !strings.Contains(s2, `"error"`) || !strings.Contains(s2, "overloaded") {
 		t.Errorf("reverse error not propagated:\n%s", s2)
+	}
+	if strings.Contains(s2, "data: [DONE]") || strings.Contains(s2, `"finish_reason"`) {
+		t.Errorf("error-terminated stream synthesized a clean terminal:\n%s", s2)
 	}
 }
 

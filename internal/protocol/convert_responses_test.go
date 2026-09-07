@@ -238,8 +238,11 @@ func TestResponsesConversionMissingOptionalFieldsNeverEmitsLiteralNull(t *testin
 	if resblk == nil {
 		t.Fatalf("no tool_result block in %s", out)
 	}
-	if id, _ := resblk["tool_use_id"].(string); id != "" {
-		t.Errorf("tool_use_id for call_id-less function_call_output = %q, want \"\" (missing → empty, never \"null\")", id)
+	// A call_id-less function_call_output gets a synthesized placeholder id
+	// (the anthropic charset requires 1+ chars; sanitizeToolUseID's
+	// toolu_empty_<counter> convention, same as chat→a) — never "" or "null".
+	if id, _ := resblk["tool_use_id"].(string); !strings.HasPrefix(id, "toolu_empty_") {
+		t.Errorf("tool_use_id for call_id-less function_call_output = %q, want a toolu_empty_* placeholder (never \"null\")", id)
 	}
 	tc := asMap(m["tool_choice"])
 	if name, _ := tc["name"].(string); name != "" {
@@ -688,7 +691,7 @@ func TestConvertAnthropicRequestToResponses_SystemRoleMessageFoldsToInstructions
 // streams carry no reasoning summary at all (testdata/wire/responses_codex_
 // thinking.sse: zero reasoning items in the response).
 func TestConvertAnthropicRequestToResponses_ReasoningSummaryAuto(t *testing.T) {
-	in := `{"model":"claude-x","max_tokens":100,"thinking":{"type":"enabled","budget_tokens":8000},` +
+	in := `{"model":"claude-x","max_tokens":100,"thinking":{"type":"enabled","budget_tokens":8192},` +
 		`"messages":[{"role":"user","content":"hi"}]}`
 	out, err := convertAnthropicRequestToResponses([]byte(in))
 	if err != nil {

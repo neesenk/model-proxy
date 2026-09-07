@@ -14,6 +14,7 @@ package protocol
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -55,6 +56,13 @@ func responsesErrorOf(data map[string]any) (emsg, etype string) {
 	if e != nil {
 		emsg = strOf(e["message"])
 		etype = firstNonEmpty(strOpt(e["type"]), "api_error")
+		return
+	}
+	// Standalone error event (Responses streaming spec): the fields are
+	// top-level — {type:"error", code, message, param, sequence_number}.
+	if strKey(data, "type") == "error" {
+		emsg = strOf(data["message"])
+		etype = firstNonEmpty(strOpt(data["code"]), "api_error")
 	}
 	return
 }
@@ -122,6 +130,9 @@ type responsesSSEToAnthropicSSE struct {
 	stopRsn     string
 	hasToolUse  bool
 	pendArgs    map[string]string // early arguments deltas (before added/done)
+	itemsSeen   bool              // any output item frame (added/done/delta) was processed
+	idMap       map[string]string // raw tool_call id → sanitized tool_use id (per-stream pairing memo)
+	usedNorm    map[string]bool   // sanitized ids already taken (collision suffixing)
 }
 
 func newResponsesToAnthropicSSE(r io.Reader, model string) *responsesSSEToAnthropicSSE {
@@ -131,7 +142,26 @@ func newResponsesToAnthropicSSE(r io.Reader, model string) *responsesSSEToAnthro
 		sc: sc, model: model, id: "msg_conv",
 		blocks: map[int]*rsBlock{}, curTextOut: -1, curThinkOut: -1,
 		pendArgs: map[string]string{},
+		idMap:    map[string]string{}, usedNorm: map[string]bool{},
 	}
+}
+
+// normToolID sanitizes a Responses call_id into the anthropic tool_use id
+// charset (^[a-zA-Z0-9_-]+$) with a per-stream memo: the SAME raw id always
+// maps to the SAME sanitized id across start/delta/paired frames, and two
+// different raw ids that sanitize to the same string get _2/_3 suffixes (same
+// semantics as the request-side normID in convert.go).
+func (t *responsesSSEToAnthropicSSE) normToolID(id string) string {
+	if n, ok := t.idMap[id]; ok {
+		return n
+	}
+	n := sanitizeToolUseID(id)
+	for i := 2; t.usedNorm[n]; i++ {
+		n = fmt.Sprintf("%s_%d", sanitizeToolUseID(id), i)
+	}
+	t.usedNorm[n] = true
+	t.idMap[id] = n
+	return n
 }
 
 func (t *responsesSSEToAnthropicSSE) ensureStart() {
@@ -174,6 +204,96 @@ func (t *responsesSSEToAnthropicSSE) closeLeftoverBlocks() {
 	sort.Slice(left, func(i, j int) bool { return left[i].blockIdx < left[j].blockIdx })
 	for _, p := range left {
 		t.closeBlock(p.outIdx)
+	}
+}
+
+// emitDoneOnlyFunctionCall synthesizes a complete tool_use block (start →
+// args delta → stop) from a complete function_call item — used when the
+// gateway skipped added/deltas (done-only) or sent no item frames at all
+// (completed-only).
+func (t *responsesSSEToAnthropicSSE) emitDoneOnlyFunctionCall(item map[string]any, pendingArgs string) {
+	t.ensureStart()
+	t.hasToolUse = true
+	idx := t.nextIdx
+	t.nextIdx++
+	t.emit("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": idx,
+		"content_block": map[string]any{
+			"type":  "tool_use",
+			"id":    t.normToolID(firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))),
+			"name":  strOpt(item["name"]),
+			"input": map[string]any{},
+		},
+	})
+	args := firstNonEmpty(strKey(item, "arguments"), pendingArgs)
+	if args != "" && args != "{}" {
+		t.emit("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": idx,
+			"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
+		})
+	}
+	t.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
+}
+
+// emitCompletedMessageItem synthesizes text blocks from a COMPLETE message
+// item (done-only item, or response.completed.output when the stream carried
+// no item frames): output_text parts become text blocks; refusal parts become
+// text blocks too (anthropic has no refusal block — stop_reason carries the
+// semantics, aligned with the non-streaming converter).
+func (t *responsesSSEToAnthropicSSE) emitCompletedMessageItem(item map[string]any) {
+	t.ensureStart()
+	for _, p := range anySlice(item["content"]) {
+		pm := asMap(p)
+		if pm == nil {
+			continue
+		}
+		var text string
+		switch strOf(pm["type"]) {
+		case "output_text", "text", "input_text":
+			text = strOf(pm["text"])
+		case "refusal":
+			text = strOf(pm["refusal"])
+		default:
+			convertWarn("dropping responses content part in r→a stream: " + strOf(pm["type"]))
+			continue
+		}
+		idx := t.nextIdx
+		t.nextIdx++
+		t.emit("content_block_start", map[string]any{
+			"type":          "content_block_start",
+			"index":         idx,
+			"content_block": map[string]any{"type": "text", "text": ""},
+		})
+		if text != "" {
+			t.emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": idx,
+				"delta": map[string]any{"type": "text_delta", "text": text},
+			})
+		}
+		t.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": idx})
+	}
+}
+
+// materializeCompletedOutput synthesizes content from
+// response.completed.output when the stream carried NO output item frames at
+// all (a completed-only gateway): message items become text blocks,
+// function_call items become tool_use blocks (same shapes as the done-only
+// paths).
+func (t *responsesSSEToAnthropicSSE) materializeCompletedOutput(output any) {
+	for _, it := range anySlice(output) {
+		item := asMap(it)
+		if item == nil {
+			continue
+		}
+		switch strOf(item["type"]) {
+		case "message":
+			t.emitCompletedMessageItem(item)
+		case "function_call":
+			t.emitDoneOnlyFunctionCall(item, "")
+		}
 	}
 }
 
@@ -266,6 +386,13 @@ func (t *responsesSSEToAnthropicSSE) Read(p []byte) (int, error) {
 }
 
 func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
+	// Any output-item frame (added/done/delta) marks the stream as carrying
+	// items — a completed-only fallback must not re-synthesize them.
+	if strings.HasPrefix(event, "response.output_item.") || strings.HasPrefix(event, "response.output_text.") ||
+		strings.HasPrefix(event, "response.function_call") || strings.HasPrefix(event, "response.refusal.") ||
+		strings.HasPrefix(event, "response.reasoning") {
+		t.itemsSeen = true
+	}
 	switch event {
 	case "response.created", "response.in_progress":
 		t.ensureStart()
@@ -317,7 +444,7 @@ func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
 				"index": b.idx,
 				"content_block": map[string]any{
 					"type":  "tool_use",
-					"id":    firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
+					"id":    t.normToolID(firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"]))),
 					"name":  strOpt(item["name"]),
 					"input": map[string]any{},
 				},
@@ -441,7 +568,7 @@ func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
 				t.emit("content_block_start", map[string]any{
 					"type": "content_block_start", "index": b.idx,
 					"content_block": map[string]any{
-						"type": "tool_use", "id": hostedCallID(item), "name": "tool_search",
+						"type": "tool_use", "id": t.normToolID(hostedCallID(item)), "name": "tool_search",
 						"input": parseToolArgs(hostedCallArguments(item), nil),
 					},
 				})
@@ -462,34 +589,16 @@ func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
 			return
 		}
 		if t.blocks[outIdx] == nil {
-			// Done-only tool call (the gateway skipped added AND deltas):
-			// synthesize the whole block from the done frame's complete item —
-			// dropping it loses the call entirely (opencodex does the same).
-			if item := asMap(data["item"]); item != nil && item["type"] == "function_call" {
-				t.ensureStart()
-				t.hasToolUse = true
-				b := &rsBlock{kind: "tool_use", idx: t.nextIdx, itemID: strOf(item["id"]), opened: true, argsSeen: true}
-				t.nextIdx++
-				t.blocks[outIdx] = b
-				t.emit("content_block_start", map[string]any{
-					"type":  "content_block_start",
-					"index": b.idx,
-					"content_block": map[string]any{
-						"type":  "tool_use",
-						"id":    firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
-						"name":  strOpt(item["name"]),
-						"input": map[string]any{},
-					},
-				})
-				args := firstNonEmpty(strKey(item, "arguments"), takePendingArgs(t.pendArgs, strOpt(item["id"]), outIdx))
-				if args != "" && args != "{}" {
-					t.emit("content_block_delta", map[string]any{
-						"type":  "content_block_delta",
-						"index": b.idx,
-						"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
-					})
+			// Done-only item (the gateway skipped added AND deltas): synthesize
+			// the whole content from the done frame's complete item — dropping
+			// it loses the content entirely (opencodex does the same).
+			if item := asMap(data["item"]); item != nil {
+				switch item["type"] {
+				case "function_call":
+					t.emitDoneOnlyFunctionCall(item, takePendingArgs(t.pendArgs, strOpt(item["id"]), outIdx))
+				case "message":
+					t.emitCompletedMessageItem(item)
 				}
-				t.closeBlock(outIdx)
 			}
 			return
 		}
@@ -546,6 +655,11 @@ func (t *responsesSSEToAnthropicSSE) handle(event string, data map[string]any) {
 			if id := strOpt(resp["id"]); id != "" {
 				t.id = id
 			}
+			// Completed-only gateway: no item frames at all, full content in
+			// response.output — synthesize it instead of dropping the answer.
+			if !t.itemsSeen {
+				t.materializeCompletedOutput(resp["output"])
+			}
 		}
 		t.finish()
 	case "response.incomplete":
@@ -583,6 +697,7 @@ func knownResponsesEvent(event string) bool {
 	case "response.content_part.added", "response.content_part.done",
 		"response.output_text.done", "response.output_item.done",
 		"response.function_call_arguments.done", "response.refusal.done",
+		"response.reasoning_summary_text.done",
 		"response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		return true
 	}
@@ -653,12 +768,15 @@ type responsesSSEToOpenAISSE struct {
 	sc           *bufio.Scanner
 	out          []byte
 	model, id    string
+	created      int64 // chat.completion.chunk created (unix seconds, stable for the whole stream)
 	started      bool
 	done         bool
 	errored      bool
 	toolIdx      map[int]int       // responses output_index → chat tool_calls index
 	toolArgsSeen map[int]bool      // responses output_index → at least one arguments delta emitted
 	pendArgs     map[string]string // early arguments deltas (before added/done)
+	contentSeen  map[int]bool      // responses output_index → a text/annotation chunk was emitted
+	itemsSeen    bool              // any output item frame (added/done/delta) was processed
 	inTok        int
 	outTok       int
 	cachedTok    int // input_tokens_details.cached_tokens from response.completed
@@ -670,7 +788,19 @@ type responsesSSEToOpenAISSE struct {
 func newResponsesToOpenAISSE(r io.Reader, model string) *responsesSSEToOpenAISSE {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), sseScanBuf)
-	return &responsesSSEToOpenAISSE{sc: sc, model: model, id: "chatcmpl-conv", toolIdx: map[int]int{}, toolArgsSeen: map[int]bool{}, pendArgs: map[string]string{}}
+	return &responsesSSEToOpenAISSE{sc: sc, model: model, id: "chatcmpl-conv", created: time.Now().Unix(),
+		toolIdx: map[int]int{}, toolArgsSeen: map[int]bool{}, pendArgs: map[string]string{}, contentSeen: map[int]bool{}}
+}
+
+// emitChunk appends one chat.completion.chunk frame, filling the required
+// envelope fields (id/object/created/model — the chunk schema mandates all
+// four; created is one stable unix-seconds timestamp for the whole stream).
+func (t *responsesSSEToOpenAISSE) emitChunk(payload map[string]any) {
+	payload["id"] = t.id
+	payload["object"] = "chat.completion.chunk"
+	payload["created"] = t.created
+	payload["model"] = t.model
+	sseEmitData(&t.out, payload)
 }
 
 func (t *responsesSSEToOpenAISSE) ensureStart() {
@@ -678,9 +808,7 @@ func (t *responsesSSEToOpenAISSE) ensureStart() {
 		return
 	}
 	t.started = true
-	sseEmitData(&t.out, map[string]any{
-		"id":      t.id,
-		"object":  "chat.completion.chunk",
+	t.emitChunk(map[string]any{
 		"choices": []map[string]any{{"index": 0, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}},
 	})
 }
@@ -719,8 +847,7 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 			if err := t.sc.Err(); err != nil {
 				convertWarn("responses SSE scanner error: " + err.Error())
 			}
-			sseEmitData(&t.out, map[string]any{
-				"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+			t.emitChunk(map[string]any{
 				"error": map[string]any{
 					"message": "upstream stream terminated before a terminal event",
 					"type":    "api_error",
@@ -756,8 +883,7 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 		dataEvents := pendEvents
 		pendEvents = nil
 		if payload == "[DONE]" {
-			sseEmitData(&t.out, map[string]any{
-				"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+			t.emitChunk(map[string]any{
 				"error": map[string]any{
 					"message": "responses stream ended before response.completed",
 					"type":    "api_error",
@@ -787,6 +913,13 @@ func (t *responsesSSEToOpenAISSE) Read(p []byte) (int, error) {
 }
 
 func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
+	// Any output-item frame (added/done/delta) marks the stream as carrying
+	// items — a completed-only fallback must not re-synthesize them.
+	if strings.HasPrefix(event, "response.output_item.") || strings.HasPrefix(event, "response.output_text.") ||
+		strings.HasPrefix(event, "response.function_call") || strings.HasPrefix(event, "response.refusal.") ||
+		strings.HasPrefix(event, "response.reasoning") {
+		t.itemsSeen = true
+	}
 	switch event {
 	case "response.created", "response.in_progress":
 		if resp := asMap(data["response"]); resp != nil {
@@ -796,14 +929,17 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 			if m := strOpt(resp["model"]); m != "" {
 				t.model = m
 			}
+			if ca := intOf(resp["created_at"]); ca > 0 {
+				t.created = int64(ca)
+			}
 		}
 		t.ensureStart()
 	case "response.output_text.delta", "response.refusal.delta":
 		// refusal.delta carries refusal text — stream it as plain content
 		// (finish_reason carries the refusal semantics).
 		t.ensureStart()
-		sseEmitData(&t.out, map[string]any{
-			"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		t.contentSeen[intOf(data["output_index"])] = true
+		t.emitChunk(map[string]any{
 			"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": strOf(data["delta"])}, "finish_reason": nil}},
 		})
 	case "response.output_text.annotation.added":
@@ -812,8 +948,8 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 			return
 		}
 		t.ensureStart()
-		sseEmitData(&t.out, map[string]any{
-			"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		t.contentSeen[intOf(data["output_index"])] = true
+		t.emitChunk(map[string]any{
 			"choices": []map[string]any{{"index": 0, "delta": map[string]any{"annotations": annotations}, "finish_reason": nil}},
 		})
 	case "response.output_item.added":
@@ -834,8 +970,7 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 		t.hasToolUse = true
 		outIdx := intOf(data["output_index"])
 		idx := t.toolIndex(outIdx)
-		sseEmitData(&t.out, map[string]any{
-			"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		t.emitChunk(map[string]any{
 			"choices": []map[string]any{{"index": 0, "delta": map[string]any{
 				"tool_calls": []map[string]any{{
 					"index": idx, "id": firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
@@ -847,8 +982,7 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 		// item_id/output_index) so the leading segment is not lost.
 		if d := takePendingArgs(t.pendArgs, strOpt(item["id"]), outIdx); d != "" {
 			t.toolArgsSeen[outIdx] = true
-			sseEmitData(&t.out, map[string]any{
-				"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+			t.emitChunk(map[string]any{
 				"choices": []map[string]any{{"index": 0, "delta": map[string]any{
 					"tool_calls": []map[string]any{{"index": idx, "function": map[string]any{"arguments": d}}},
 				}, "finish_reason": nil}},
@@ -864,8 +998,7 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 			return
 		}
 		t.toolArgsSeen[outIdx] = true
-		sseEmitData(&t.out, map[string]any{
-			"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		t.emitChunk(map[string]any{
 			"choices": []map[string]any{{"index": 0, "delta": map[string]any{
 				"tool_calls": []map[string]any{{"index": idx, "function": map[string]any{"arguments": strOf(data["delta"])}}},
 			}, "finish_reason": nil}},
@@ -883,8 +1016,7 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 			if item["type"] == "web_search_call" {
 				name = "web_search"
 			}
-			sseEmitData(&t.out, map[string]any{
-				"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+			t.emitChunk(map[string]any{
 				"choices": []map[string]any{{"index": 0, "delta": map[string]any{
 					"tool_calls": []map[string]any{{
 						"index": idx, "id": hostedCallID(item), "type": "function",
@@ -894,7 +1026,19 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 			})
 			return
 		}
-		if item == nil || item["type"] != "function_call" {
+		if item == nil {
+			return
+		}
+		if item["type"] == "message" {
+			// Done-only message (the gateway skipped added AND deltas): the
+			// full text/refusal parts live in the done item — synthesize the
+			// content chunks instead of dropping the answer.
+			if !t.contentSeen[outIdx] {
+				t.emitCompletedMessageContent(item)
+			}
+			return
+		}
+		if item["type"] != "function_call" {
 			return
 		}
 		idx, ok := t.toolIdx[outIdx]
@@ -902,27 +1046,14 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 			// Done-only tool call (the gateway skipped added AND deltas):
 			// synthesize the complete call from the done frame's item — one
 			// chunk carrying id + name + full arguments (opencodex outbound).
-			t.ensureStart()
-			t.hasToolUse = true
-			idx = t.toolIndex(outIdx)
-			args := firstNonEmpty(strKey(item, "arguments"), takePendingArgs(t.pendArgs, strOpt(item["id"]), outIdx), "{}")
-			sseEmitData(&t.out, map[string]any{
-				"id": t.id, "object": "chat.completion.chunk", "model": t.model,
-				"choices": []map[string]any{{"index": 0, "delta": map[string]any{
-					"tool_calls": []map[string]any{{
-						"index": idx, "id": firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
-						"type": "function", "function": map[string]any{"name": strOpt(item["name"]), "arguments": args},
-					}},
-				}, "finish_reason": nil}},
-			})
+			t.emitDoneOnlyToolCall(item, takePendingArgs(t.pendArgs, strOpt(item["id"]), outIdx), outIdx)
 			return
 		}
 		if t.toolArgsSeen[outIdx] {
 			return
 		}
 		if args := strKey(item, "arguments"); args != "" && args != "{}" {
-			sseEmitData(&t.out, map[string]any{
-				"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+			t.emitChunk(map[string]any{
 				"choices": []map[string]any{{"index": 0, "delta": map[string]any{
 					"tool_calls": []map[string]any{{"index": idx, "function": map[string]any{"arguments": args}}},
 				}, "finish_reason": nil}},
@@ -932,8 +1063,7 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 		// reasoning_text.delta: OpenRouter-style dialect (see the r→anthropic
 		// converter for details).
 		t.ensureStart()
-		sseEmitData(&t.out, map[string]any{
-			"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		t.emitChunk(map[string]any{
 			"choices": []map[string]any{{"index": 0, "delta": map[string]any{"reasoning_content": strOf(data["delta"])}, "finish_reason": nil}},
 		})
 	case "response.completed":
@@ -943,8 +1073,7 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 			// finish (aligned with the non-streaming fail-closed rule).
 			if st := strOpt(resp["status"]); st == "failed" || st == "cancelled" || asMap(resp["error"]) != nil {
 				emsg, etype := responsesErrorOf(data)
-				sseEmitData(&t.out, map[string]any{
-					"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+				t.emitChunk(map[string]any{
 					"error": map[string]any{"message": emsg, "type": etype},
 				})
 				t.errored = true
@@ -952,6 +1081,14 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 				return
 			}
 			t.readUsage(resp)
+			if ca := intOf(resp["created_at"]); ca > 0 {
+				t.created = int64(ca)
+			}
+			// Completed-only gateway: no item frames at all, full content in
+			// response.output — synthesize it instead of dropping the answer.
+			if !t.itemsSeen {
+				t.materializeCompletedOutput(resp["output"])
+			}
 		}
 		t.finish()
 	case "response.incomplete":
@@ -968,8 +1105,7 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 		t.finish()
 	case "response.failed", "error":
 		emsg, etype := responsesErrorOf(data)
-		sseEmitData(&t.out, map[string]any{
-			"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		t.emitChunk(map[string]any{
 			"error": map[string]any{"message": emsg, "type": etype},
 		})
 		t.errored = true
@@ -977,6 +1113,77 @@ func (t *responsesSSEToOpenAISSE) handle(event string, data map[string]any) {
 	default:
 		if !knownResponsesEvent(event) {
 			convertWarn("ignoring unknown responses SSE event (r→chat): " + event)
+		}
+	}
+}
+
+// emitDoneOnlyToolCall synthesizes one complete tool_calls chunk (id + name +
+// full arguments) from a complete function_call item — done-only gateways
+// (skipped added AND deltas) and the completed-only output fallback.
+func (t *responsesSSEToOpenAISSE) emitDoneOnlyToolCall(item map[string]any, pendingArgs string, outIdx int) {
+	t.ensureStart()
+	t.hasToolUse = true
+	idx := t.toolIndex(outIdx)
+	args := firstNonEmpty(strKey(item, "arguments"), pendingArgs, "{}")
+	t.emitChunk(map[string]any{
+		"choices": []map[string]any{{"index": 0, "delta": map[string]any{
+			"tool_calls": []map[string]any{{
+				"index": idx, "id": firstNonEmpty(strOpt(item["call_id"]), strOpt(item["id"])),
+				"type": "function", "function": map[string]any{"name": strOpt(item["name"]), "arguments": args},
+			}},
+		}, "finish_reason": nil}},
+	})
+}
+
+// emitCompletedMessageContent synthesizes content chunks from a COMPLETE
+// message item (done-only item, or response.completed.output when the stream
+// carried no item frames): output_text parts stream as content; refusal parts
+// stream as content too (finish_reason carries the refusal semantics, aligned
+// with response.refusal.delta handling).
+func (t *responsesSSEToOpenAISSE) emitCompletedMessageContent(item map[string]any) {
+	t.ensureStart()
+	for _, p := range anySlice(item["content"]) {
+		pm := asMap(p)
+		if pm == nil {
+			continue
+		}
+		var text string
+		switch strOf(pm["type"]) {
+		case "output_text", "text", "input_text":
+			text = strOf(pm["text"])
+		case "refusal":
+			text = strOf(pm["refusal"])
+		default:
+			convertWarn("dropping responses content part in r→chat stream: " + strOf(pm["type"]))
+			continue
+		}
+		if text == "" {
+			continue
+		}
+		t.emitChunk(map[string]any{
+			"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": text}, "finish_reason": nil}},
+		})
+	}
+}
+
+// materializeCompletedOutput synthesizes content from
+// response.completed.output when the stream carried NO output item frames at
+// all (a completed-only gateway): message items become content chunks,
+// function_call items become complete tool_calls chunks (same shapes as the
+// done-only paths).
+func (t *responsesSSEToOpenAISSE) materializeCompletedOutput(output any) {
+	for i, it := range anySlice(output) {
+		item := asMap(it)
+		if item == nil {
+			continue
+		}
+		switch strOf(item["type"]) {
+		case "message":
+			t.emitCompletedMessageContent(item)
+		case "function_call":
+			// No item frames were seen, so the output slice position IS the
+			// output_index — distinct per call (no toolIndex collision).
+			t.emitDoneOnlyToolCall(item, "", i)
 		}
 	}
 }
@@ -1020,9 +1227,14 @@ func (t *responsesSSEToOpenAISSE) emitFinish() {
 		if t.reasoningTok > 0 {
 			usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": t.reasoningTok}
 		}
-		sseEmitData(&t.out, map[string]any{
-			"id": t.id, "object": "chat.completion.chunk", "model": t.model,
+		// include_usage contract: the finish chunk carries NO usage; usage
+		// arrives in a separate final chunk with an empty choices array,
+		// immediately before data: [DONE].
+		t.emitChunk(map[string]any{
 			"choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": fr}},
+		})
+		t.emitChunk(map[string]any{
+			"choices": []any{},
 			"usage":   usage,
 		})
 		sseDone(&t.out)
@@ -1295,13 +1507,15 @@ func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
 				})
 				t.emit("response.content_part.added", map[string]any{
 					"type": "response.content_part.added", "output_index": b.outIdx, "content_index": 0,
-					"part": map[string]any{"type": "output_text", "text": ""},
+					"item_id": b.itemID,
+					"part":    map[string]any{"type": "output_text", "text": ""},
 				})
 			}
 			d := strOf(delta["text"])
 			b.acc += d
 			t.emit("response.output_text.delta", map[string]any{
-				"type": "response.output_text.delta", "output_index": b.outIdx, "content_index": 0, "delta": d,
+				"type": "response.output_text.delta", "output_index": b.outIdx, "content_index": 0,
+				"item_id": b.itemID, "delta": d,
 			})
 		case "citations_delta":
 			if b.kind != "text" || !b.opened {
@@ -1331,13 +1545,15 @@ func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
 				})
 				t.emit("response.reasoning_summary_part.added", map[string]any{
 					"type": "response.reasoning_summary_part.added", "output_index": b.outIdx, "summary_index": 0,
-					"item": map[string]any{"type": "reasoning", "id": b.itemID, "summary": []any{}},
+					"item_id": b.itemID,
+					"part":    map[string]any{"type": "summary_text", "text": ""},
 				})
 			}
 			d := strOf(delta["thinking"])
 			b.acc += d
 			t.emit("response.reasoning_summary_text.delta", map[string]any{
-				"type": "response.reasoning_summary_text.delta", "output_index": b.outIdx, "summary_index": 0, "delta": d,
+				"type": "response.reasoning_summary_text.delta", "output_index": b.outIdx, "summary_index": 0,
+				"item_id": b.itemID, "delta": d,
 			})
 		case "signature_delta":
 			if !prepareAnthropicReverseBlock(b, "thinking") {
@@ -1375,12 +1591,18 @@ func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
 		var doneItem map[string]any
 		switch b.kind {
 		case "text":
-			t.emit("response.output_text.done", map[string]any{"type": "response.output_text.done", "output_index": b.outIdx, "content_index": 0, "text": b.acc})
+			t.emit("response.output_text.done", map[string]any{
+				"type": "response.output_text.done", "output_index": b.outIdx, "content_index": 0,
+				"item_id": b.itemID, "text": b.acc,
+			})
 			part := map[string]any{"type": "output_text", "text": b.acc}
 			if len(b.annotations) > 0 {
 				part["annotations"] = b.annotations
 			}
-			t.emit("response.content_part.done", map[string]any{"type": "response.content_part.done", "output_index": b.outIdx, "content_index": 0, "part": part})
+			t.emit("response.content_part.done", map[string]any{
+				"type": "response.content_part.done", "output_index": b.outIdx, "content_index": 0,
+				"item_id": b.itemID, "part": part,
+			})
 			doneItem = map[string]any{
 				"type": "message", "id": b.itemID, "status": "completed", "role": "assistant",
 				"content": []map[string]any{part},
@@ -1390,7 +1612,18 @@ func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
 			if b.signature != "" {
 				doneItem["encrypted_content"] = b.signature
 			}
-			t.emit("response.reasoning_summary_part.done", map[string]any{"type": "response.reasoning_summary_part.done", "output_index": b.outIdx, "summary_index": 0, "item": doneItem})
+			// Real upstreams pair reasoning_summary_text.delta with a .done
+			// carrying the full text, and summary_part.added/done carry the
+			// PART (not the item).
+			t.emit("response.reasoning_summary_text.done", map[string]any{
+				"type": "response.reasoning_summary_text.done", "output_index": b.outIdx, "summary_index": 0,
+				"item_id": b.itemID, "text": b.acc,
+			})
+			t.emit("response.reasoning_summary_part.done", map[string]any{
+				"type": "response.reasoning_summary_part.done", "output_index": b.outIdx, "summary_index": 0,
+				"item_id": b.itemID,
+				"part":    map[string]any{"type": "summary_text", "text": b.acc},
+			})
 		case "redacted_thinking":
 			doneItem = map[string]any{"type": "reasoning", "id": b.itemID, "status": "completed", "summary": []any{}}
 			if b.signature != "" {
@@ -1449,9 +1682,10 @@ func (t *anthropicSSEToResponsesSSE) handle(event string, data map[string]any) {
 			emsg = strOf(e["message"])
 			etype = firstNonEmpty(strOpt(e["type"]), "api_error")
 		}
+		t.ensureCreated()
 		t.emit("response.failed", map[string]any{
 			"type":     "response.failed",
-			"response": map[string]any{"id": t.id, "status": "failed", "error": map[string]any{"code": etype, "message": emsg}},
+			"response": map[string]any{"id": t.id, "object": "response", "status": "failed", "error": map[string]any{"code": etype, "message": emsg}},
 		})
 		t.done = true
 	default:
@@ -1590,10 +1824,16 @@ type openaiSSEToResponsesSSE struct {
 	done            bool
 	nextOutIdx      int
 	textOut         int // output_index of the open message/text item (-1 none)
+	msgOpened       bool
+	msgParts        int // content parts added to the message item (next content_index)
 	textOpened      bool
+	textPartIdx     int    // content_index of the output_text part within the message item
 	textAcc         string // accumulated text (for the *.done text field)
 	textAnnotations []map[string]any
-	rsOut           int // output_index of the open reasoning item (-1 none)
+	refOpened       bool   // refusal content part opened on the message item
+	refPartIdx      int    // content_index of the refusal part
+	refAcc          string // accumulated refusal text
+	rsOut           int    // output_index of the open reasoning item (-1 none)
 	rsOpened        bool
 	rsAcc           string           // accumulated reasoning text
 	toolOut         map[int]int      // chat tool_calls index → responses output_index
@@ -1652,22 +1892,64 @@ func (t *openaiSSEToResponsesSSE) ensureCreated() {
 	})
 }
 
+// msgItemID returns the message item's synthesized id (empty-safe: only
+// meaningful once openMsgItem ran).
+func (t *openaiSSEToResponsesSSE) msgItemID() string { return "msg_item_" + itoa(t.textOut) }
+
+// rsItemID returns the reasoning item's synthesized id.
+func (t *openaiSSEToResponsesSSE) rsItemID() string { return "rs_item_" + itoa(t.rsOut) }
+
+// openMsgItem emits the message output_item.added once; text and refusal
+// content parts attach to it on demand.
+func (t *openaiSSEToResponsesSSE) openMsgItem() {
+	if t.msgOpened {
+		return
+	}
+	t.msgOpened = true
+	t.textOut = t.nextOutIdx
+	t.nextOutIdx++
+	t.ensureCreated()
+	t.emit("response.output_item.added", map[string]any{
+		"type": "response.output_item.added", "output_index": t.textOut,
+		"item": map[string]any{"type": "message", "id": t.msgItemID(), "status": "in_progress", "role": "assistant", "content": []any{}},
+	})
+}
+
 func (t *openaiSSEToResponsesSSE) openText() {
 	if t.textOpened {
 		return
 	}
 	t.textOpened = true
-	t.textOut = t.nextOutIdx
-	t.nextOutIdx++
-	id := "msg_item_" + itoa(t.textOut)
-	t.ensureCreated()
-	t.emit("response.output_item.added", map[string]any{
-		"type": "response.output_item.added", "output_index": t.textOut,
-		"item": map[string]any{"type": "message", "id": id, "status": "in_progress", "role": "assistant", "content": []any{}},
-	})
+	t.openMsgItem()
+	t.textPartIdx = t.msgParts
+	t.msgParts++
 	t.emit("response.content_part.added", map[string]any{
-		"type": "response.content_part.added", "output_index": t.textOut, "content_index": 0,
-		"part": map[string]any{"type": "output_text", "text": ""},
+		"type": "response.content_part.added", "output_index": t.textOut, "content_index": t.textPartIdx,
+		"item_id": t.msgItemID(),
+		"part":    map[string]any{"type": "output_text", "text": ""},
+	})
+}
+
+// pushRefusalDelta streams one chat delta.refusal fragment as a
+// response.refusal.delta within a refusal content part (the Responses
+// representation of refusal; aligned with the non-streaming refusal part).
+func (t *openaiSSEToResponsesSSE) pushRefusalDelta(d string) {
+	t.ensureCreated()
+	if !t.refOpened {
+		t.refOpened = true
+		t.openMsgItem()
+		t.refPartIdx = t.msgParts
+		t.msgParts++
+		t.emit("response.content_part.added", map[string]any{
+			"type": "response.content_part.added", "output_index": t.textOut, "content_index": t.refPartIdx,
+			"item_id": t.msgItemID(),
+			"part":    map[string]any{"type": "refusal", "refusal": ""},
+		})
+	}
+	t.refAcc += d
+	t.emit("response.refusal.delta", map[string]any{
+		"type": "response.refusal.delta", "output_index": t.textOut, "content_index": t.refPartIdx,
+		"item_id": t.msgItemID(), "delta": d,
 	})
 }
 
@@ -1680,15 +1962,15 @@ func (t *openaiSSEToResponsesSSE) openReasoning() {
 	t.rsOpened = true
 	t.rsOut = t.nextOutIdx
 	t.nextOutIdx++
-	id := "rs_item_" + itoa(t.rsOut)
 	t.ensureCreated()
 	t.emit("response.output_item.added", map[string]any{
 		"type": "response.output_item.added", "output_index": t.rsOut,
-		"item": map[string]any{"type": "reasoning", "id": id, "status": "in_progress", "summary": []any{}},
+		"item": map[string]any{"type": "reasoning", "id": t.rsItemID(), "status": "in_progress", "summary": []any{}},
 	})
 	t.emit("response.reasoning_summary_part.added", map[string]any{
 		"type": "response.reasoning_summary_part.added", "output_index": t.rsOut, "summary_index": 0,
-		"item": map[string]any{"type": "reasoning", "id": id, "summary": []any{}},
+		"item_id": t.rsItemID(),
+		"part":    map[string]any{"type": "summary_text", "text": ""},
 	})
 }
 
@@ -1855,6 +2137,11 @@ func (t *openaiSSEToResponsesSSE) handle(event string, data map[string]any) {
 	if c, ok := delta["content"].(string); ok && c != "" {
 		t.pushContentDelta(c)
 	}
+	// Refusal streams as a refusal content part with response.refusal.delta
+	// events (the Responses representation of refusal).
+	if rf, ok := delta["refusal"].(string); ok && rf != "" {
+		t.pushRefusalDelta(rf)
+	}
 	for _, annotation := range chatAnnotationsToResponses(delta["annotations"]) {
 		t.ensureCreated()
 		t.openText()
@@ -1862,7 +2149,7 @@ func (t *openaiSSEToResponsesSSE) handle(event string, data map[string]any) {
 		t.textAnnotations = append(t.textAnnotations, annotation)
 		t.emit("response.output_text.annotation.added", map[string]any{
 			"type": "response.output_text.annotation.added", "output_index": t.textOut,
-			"content_index": 0, "item_id": "msg_item_" + itoa(t.textOut),
+			"content_index": t.textPartIdx, "item_id": t.msgItemID(),
 			"annotation_index": index, "annotation": annotation,
 		})
 	}
@@ -1876,7 +2163,8 @@ func (t *openaiSSEToResponsesSSE) handle(event string, data map[string]any) {
 		t.openReasoning()
 		t.rsAcc += rc
 		t.emit("response.reasoning_summary_text.delta", map[string]any{
-			"type": "response.reasoning_summary_text.delta", "output_index": t.rsOut, "summary_index": 0, "delta": rc,
+			"type": "response.reasoning_summary_text.delta", "output_index": t.rsOut, "summary_index": 0,
+			"item_id": t.rsItemID(), "delta": rc,
 		})
 	}
 	if tcs, ok := delta["tool_calls"].([]any); ok {
@@ -2047,7 +2335,8 @@ func (t *openaiSSEToResponsesSSE) pushTextDelta(d string) {
 	t.openText()
 	t.textAcc += d
 	t.emit("response.output_text.delta", map[string]any{
-		"type": "response.output_text.delta", "output_index": t.textOut, "content_index": 0, "delta": d,
+		"type": "response.output_text.delta", "output_index": t.textOut, "content_index": t.textPartIdx,
+		"item_id": t.msgItemID(), "delta": d,
 	})
 }
 
@@ -2058,7 +2347,8 @@ func (t *openaiSSEToResponsesSSE) pushReasoningDelta(d string) {
 	t.openReasoning()
 	t.rsAcc += d
 	t.emit("response.reasoning_summary_text.delta", map[string]any{
-		"type": "response.reasoning_summary_text.delta", "output_index": t.rsOut, "summary_index": 0, "delta": d,
+		"type": "response.reasoning_summary_text.delta", "output_index": t.rsOut, "summary_index": 0,
+		"item_id": t.rsItemID(), "delta": d,
 	})
 }
 
@@ -2171,7 +2461,7 @@ func (t *openaiSSEToResponsesSSE) closeItems() {
 	if t.rsOpened {
 		open = append(open, openItem{t.rsOut, "reasoning", -1})
 	}
-	if t.textOpened {
+	if t.msgOpened {
 		open = append(open, openItem{t.textOut, "message", -1})
 	}
 	for chatIdx, outIdx := range t.toolOut {
@@ -2181,21 +2471,48 @@ func (t *openaiSSEToResponsesSSE) closeItems() {
 	for _, it := range open {
 		switch it.kind {
 		case "message":
-			id := "msg_item_" + itoa(it.outIdx)
-			t.emit("response.output_text.done", map[string]any{
-				"type": "response.output_text.done", "output_index": it.outIdx, "content_index": 0, "text": t.textAcc,
-			})
-			part := map[string]any{"type": "output_text", "text": t.textAcc}
-			if len(t.textAnnotations) > 0 {
-				part["annotations"] = t.textAnnotations
+			id := t.msgItemID()
+			// Close the opened content parts in content_index order (text and
+			// refusal are the only parts this converter opens).
+			type msgPart struct {
+				idx  int
+				part map[string]any
 			}
-			t.emit("response.content_part.done", map[string]any{
-				"type": "response.content_part.done", "output_index": it.outIdx, "content_index": 0,
-				"part": part,
-			})
+			var parts []msgPart
+			if t.textOpened {
+				part := map[string]any{"type": "output_text", "text": t.textAcc}
+				if len(t.textAnnotations) > 0 {
+					part["annotations"] = t.textAnnotations
+				}
+				parts = append(parts, msgPart{t.textPartIdx, part})
+			}
+			if t.refOpened {
+				parts = append(parts, msgPart{t.refPartIdx, map[string]any{"type": "refusal", "refusal": t.refAcc}})
+			}
+			sort.Slice(parts, func(i, j int) bool { return parts[i].idx < parts[j].idx })
+			content := make([]map[string]any, 0, len(parts))
+			for _, mp := range parts {
+				switch strOf(mp.part["type"]) {
+				case "output_text":
+					t.emit("response.output_text.done", map[string]any{
+						"type": "response.output_text.done", "output_index": it.outIdx, "content_index": mp.idx,
+						"item_id": id, "text": t.textAcc,
+					})
+				case "refusal":
+					t.emit("response.refusal.done", map[string]any{
+						"type": "response.refusal.done", "output_index": it.outIdx, "content_index": mp.idx,
+						"item_id": id, "refusal": t.refAcc,
+					})
+				}
+				t.emit("response.content_part.done", map[string]any{
+					"type": "response.content_part.done", "output_index": it.outIdx, "content_index": mp.idx,
+					"item_id": id, "part": mp.part,
+				})
+				content = append(content, mp.part)
+			}
 			doneItem := map[string]any{
 				"type": "message", "id": id, "status": "completed", "role": "assistant",
-				"content": []map[string]any{part},
+				"content": content,
 			}
 			t.doneItems = append(t.doneItems, doneItem)
 			t.emit("response.output_item.done", map[string]any{
@@ -2203,12 +2520,20 @@ func (t *openaiSSEToResponsesSSE) closeItems() {
 				"item": doneItem,
 			})
 		case "reasoning":
-			id := "rs_item_" + itoa(it.outIdx)
+			id := t.rsItemID()
 			doneItem := map[string]any{"type": "reasoning", "id": id, "status": "completed",
 				"summary": []map[string]any{{"type": "summary_text", "text": t.rsAcc}}}
+			// Real upstreams pair reasoning_summary_text.delta with a .done
+			// carrying the full text, and summary_part.added/done carry the
+			// PART (not the item).
+			t.emit("response.reasoning_summary_text.done", map[string]any{
+				"type": "response.reasoning_summary_text.done", "output_index": it.outIdx, "summary_index": 0,
+				"item_id": id, "text": t.rsAcc,
+			})
 			t.emit("response.reasoning_summary_part.done", map[string]any{
 				"type": "response.reasoning_summary_part.done", "output_index": it.outIdx, "summary_index": 0,
-				"item": doneItem,
+				"item_id": id,
+				"part":    map[string]any{"type": "summary_text", "text": t.rsAcc},
 			})
 			t.doneItems = append(t.doneItems, doneItem)
 			t.emit("response.output_item.done", map[string]any{
