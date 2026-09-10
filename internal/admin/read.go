@@ -62,11 +62,24 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 
 	cacheInfo := map[string]any{"enabled": false}
 	if stats := state.Cache.Stats(); stats.Entries > 0 || stats.Hits > 0 || state.Cache != nil {
+		models := make([]map[string]any, 0, len(stats.Models))
+		for _, m := range stats.Models {
+			models = append(models, map[string]any{
+				"model":   m.Name,
+				"hits":    m.Hits,
+				"misses":  m.Misses,
+				"entries": m.Entries,
+			})
+		}
 		cacheInfo = map[string]any{
 			"enabled": true,
 			"hits":    stats.Hits,
 			"misses":  stats.Misses,
+			// Live gauge, not cumulative: can be lower than misses (failed
+			// requests miss without storing; TTL/expiry and eviction remove
+			// entries while counters only grow).
 			"entries": stats.Entries,
+			"models":  models,
 		}
 	}
 

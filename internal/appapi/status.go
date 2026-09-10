@@ -86,7 +86,27 @@ type StatusResp struct {
 	Quota      map[string]StatusQuota       `json:"quota"`
 	Schedule   StatusSchedule               `json:"schedule"`
 	Counters   map[string]StatusCounters    `json:"counters"`
+	Cache      *CacheStats                  `json:"cache"`
 	Warnings   []string                     `json:"warnings"`
+}
+
+// CacheStats mirrors the documented /api/status `cache` object
+// ({enabled,hits,misses,entries,models}, docs/web-api.md): the exact-response
+// cache counters snapshotted with the rest of the Dashboard.
+type CacheStats struct {
+	Enabled bool             `json:"enabled"`
+	Hits    uint64           `json:"hits"`
+	Misses  uint64           `json:"misses"`
+	Entries uint64           `json:"entries"`
+	Models  []CacheModelStat `json:"models,omitempty"`
+}
+
+// CacheModelStat is one called model's share of the cache counters.
+type CacheModelStat struct {
+	Model   string `json:"model"`
+	Hits    uint64 `json:"hits"`
+	Misses  uint64 `json:"misses"`
+	Entries uint64 `json:"entries"`
 }
 
 // --- /api/tokens decoded shape ---

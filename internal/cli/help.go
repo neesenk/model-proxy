@@ -195,6 +195,16 @@ Usage:
   each model is currently scheduled to (first-choice + ordered list + sticky
   state). The daemon (` + "`model-proxy serve`" + `) must be running.`,
 
+	"cache": `cache [--json] [--config PATH]
+
+  Show the exact-response cache counters (GET /api/status): entries, hits,
+  misses and the hit rate over all recorded lookups. A disabled cache prints
+  a hint instead. The daemon (` + "`model-proxy serve`" + ` + web.enabled) must
+  be running.
+
+Flags:
+  --json   Dump the raw {enabled,hits,misses,entries} object.`,
+
 	"pin": `pin [<route> <provider>] [--ttl DUR] [--config PATH]
 
   Temporarily force a route onto ONE provider without editing config.yaml (a

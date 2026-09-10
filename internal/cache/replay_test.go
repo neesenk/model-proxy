@@ -11,12 +11,12 @@ import (
 func TestReplayPreservesHeadersStatusBodyAndFlushes(t *testing.T) {
 	store := testStore()
 	body := bytes.Repeat([]byte("x"), 40*1024)
-	store.Put("key", http.StatusCreated, http.Header{
+	store.Put("key", "m", http.StatusCreated, http.Header{
 		"Set-Cookie":    {"a=1", "b=2"},
 		"Content-Type":  {"text/event-stream"},
 		"Cache-Control": {"no-cache"},
 	}, body, time.Unix(1000, 0))
-	entry, ok := store.Lookup("key", time.Unix(1001, 0))
+	entry, ok := store.Lookup("key", "m", time.Unix(1001, 0))
 	if !ok {
 		t.Fatal("stored entry missed")
 	}
@@ -37,8 +37,8 @@ func TestReplayPreservesHeadersStatusBodyAndFlushes(t *testing.T) {
 
 func TestReplayStopsOnWriteError(t *testing.T) {
 	store := testStore()
-	store.Put("key", 200, nil, []byte("body"), time.Now())
-	entry, _ := store.Lookup("key", time.Now())
+	store.Put("key", "m", 200, nil, []byte("body"), time.Now())
+	entry, _ := store.Lookup("key", "m", time.Now())
 	want := errors.New("write failed")
 	writer := &recordingWriter{header: make(http.Header), writeErr: want}
 	if err := Replay(writer, entry); !errors.Is(err, want) {

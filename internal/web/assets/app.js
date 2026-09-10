@@ -657,10 +657,11 @@ const STATUS_SECTIONS = [
   { key: 'providers', label: 'Providers' },
   { key: 'models', label: 'Models' },
   { key: 'tokens', label: 'Token Usage' },
-  { key: 'agents', label: 'Agents' },
+  { key: 'cache', label: 'Cache' },
   { key: 'logs', label: 'Logs' },
+  { key: 'live', label: 'Live' },
 ];
-let statusCache = { st: null, tok: [], logs: [], accounts: [], agents: [] };
+let statusCache = { st: null, tok: [], logs: [], accounts: [], agents: [], since: 0 };
 // modelsCache is the last GET /api/models response ({providers:{…}}): the
 // startup protocol probe's per-provider capability matrix. Read only through
 // modelsCache.<field> so jstests/contract.test.mjs pins the documented fields.
@@ -808,11 +809,13 @@ function renderStatusSection(key) {
       break;
     case 'tokens':
       main.innerHTML = '';
+      renderTokensRangeControls(main);
       renderTokensCard(main, statusCache.tok || []);
-      break;
-    case 'agents':
-      main.innerHTML = '';
       renderAgentsCard(main, statusCache.agents || []);
+      break;
+    case 'cache':
+      main.innerHTML = '';
+      if (st) renderCacheCard(main, st);
       break;
     case 'logs':
       // Don't clear here — renderLogsInto captures the existing scroll position
@@ -1141,13 +1144,85 @@ function renderScheduleCard(target, st) {
   }
   const html = buildCard('Schedule', `${names.length} routes`, blocks, 'flush');
   target.insertAdjacentHTML('beforeend', html);
+  const card = target.lastElementChild;
+  const msg = card && card.querySelector('.card-body');
+  card.addEventListener('click', async (e) => {
+    const toggle = e.target.closest('[data-pin-toggle]');
+    if (toggle) {
+      const menu = card.querySelector(`[data-pin-menu="${CSS.escape(toggle.dataset.pinToggle)}"]`);
+      const wasHidden = menu && menu.hidden;
+      card.querySelectorAll('.route-pin-menu').forEach((m) => { m.hidden = true; });
+      if (menu && wasHidden) menu.hidden = false;
+      return;
+    }
+    if (!e.target.closest('.route-pin-menu')) {
+      card.querySelectorAll('.route-pin-menu').forEach((m) => { m.hidden = true; });
+    }
+    const pinBtn = e.target.closest('[data-pin-route]');
+    const unpinBtn = e.target.closest('[data-unpin-route]');
+    if (!pinBtn && !unpinBtn) return;
+    try {
+      if (pinBtn) {
+        await apiPost('/api/pin', { route: pinBtn.dataset.pinRoute, provider: pinBtn.dataset.pinProvider });
+      } else {
+        await apiDel('/api/pin?route=' + encodeURIComponent(unpinBtn.dataset.unpinRoute));
+      }
+      await renderStatusTab();
+    } catch (err) {
+      if (msg) showMsg(msg, 'err', err.message);
+    }
+  });
 }
 
 // renderTokensCard draws the per-(provider, model) token usage table.
+// renderCacheCard shows the exact-response cache counters (GET /api/status
+// `cache`: {enabled,hits,misses,entries,models}). A disabled cache renders a
+// hint instead of a zero table; hit rate comes from the pure cacheHitRate
+// helper and shows "—" before the first lookup. entries is a live gauge
+// (current held responses), not a cumulative counter — it can be lower than
+// misses because failed requests miss without storing, and TTL/eviction
+// removes entries while counters only grow.
+function renderCacheCard(target, st) {
+  const c = (st && st.cache) || {};
+  let body;
+  if (!c.enabled) {
+    body = `<div class="empty-state">Exact response cache is off — enable <code>cache.enabled</code> in config to dedupe identical requests.</div>`;
+  } else {
+    const models = c.models || [];
+    let rows = `<tr class="mono">
+      <td>total</td>
+      <td class="num">${fmtNum(c.entries)}</td>
+      <td class="num">${fmtNum(c.hits)}</td>
+      <td class="num">${fmtNum(c.misses)}</td>
+      <td class="num">${esc(cacheHitRate(c.hits, c.misses))}</td>
+    </tr>`;
+    for (const m of models) {
+      rows += `<tr class="mono">
+        <td>${esc(m.model)}</td>
+        <td class="num">${fmtNum(m.entries)}</td>
+        <td class="num">${fmtNum(m.hits)}</td>
+        <td class="num">${fmtNum(m.misses)}</td>
+        <td class="num">${esc(cacheHitRate(m.hits, m.misses))}</td>
+      </tr>`;
+    }
+    body = `<table class="table">
+      <thead><tr>
+        <th>model</th><th class="num">entries (live)</th><th class="num">hits</th><th class="num">misses</th><th class="num">hit rate</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  }
+  const html = buildCard('Cache', 'exact response cache', body, 'flush');
+  target.insertAdjacentHTML('beforeend', html);
+}
+
 function renderTokensCard(target, usage) {
   if (!usage || usage.length === 0) {
+    const empty = tokensRange.preset === 'all'
+      ? 'No observed usage yet. Counts accrue as the proxy streams SSE responses.'
+      : `No usage in the selected range (${tokenRangeLabel(tokensRange)}).`;
     const html = buildCard('Token usage', '0',
-      `<div class="empty-state">No observed usage yet. Counts accrue as the proxy streams SSE responses.</div>`);
+      `<div class="empty-state">${empty}</div>`);
     target.insertAdjacentHTML('beforeend', html);
     return;
   }

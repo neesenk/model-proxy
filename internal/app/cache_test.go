@@ -48,8 +48,8 @@ func TestNewResponseCacheAdaptsResolvedConfig(t *testing.T) {
 		t.Errorf("MaxBodyBytes = %d, want configured 123", got)
 	}
 	now := time.Unix(1000, 0)
-	store.Put("key", http.StatusOK, nil, []byte("body"), now)
-	if _, ok := store.Lookup("key", now.Add(2*time.Minute)); ok {
+	store.Put("key", "m", http.StatusOK, nil, []byte("body"), now)
+	if _, ok := store.Lookup("key", "m", now.Add(2*time.Minute)); ok {
 		t.Error("configured one-minute TTL did not expire entry")
 	}
 }
@@ -187,7 +187,7 @@ func TestReload_RebuildsCache(t *testing.T) {
 	if p.cache == nil {
 		t.Fatal("cache not created despite cache.enabled")
 	}
-	p.cache.Put("k", http.StatusOK, nil, []byte("x"), time.Now())
+	p.cache.Put("k", "m", http.StatusOK, nil, []byte("x"), time.Now())
 
 	// Disable via reload → cache gone.
 	write("")

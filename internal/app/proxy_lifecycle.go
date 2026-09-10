@@ -32,6 +32,15 @@ func (p *Proxy) StartRuntimeServices(cfg *Config) {
 		})
 	}
 
+	// Cache-counter persistence (cache_state.json): owned by the lifecycle;
+	// per-minute saves plus one final save in closeRuntimeServices. Skipped
+	// entirely when the cache is disabled.
+	if p.cache != nil && p.cacheStatePath != "" {
+		p.lifecycle.Run(func(stop <-chan struct{}) {
+			p.cacheSaveLoop(stop)
+		})
+	}
+
 	// Security audit log (guard.audit): reload-owned. The boot generation
 	// reconciles here; Reload reconciles again per generation (audit off→on
 	// starts it, on→off drains+stops it, audit_path changes swap the file).
@@ -89,6 +98,9 @@ func (p *Proxy) closeRuntimeServices() {
 			}
 		}
 	}
+	// Final cache-counter flush: the per-minute loop is gone by now (lifecycle
+	// wait), so this save is what makes shutdown lose at most the last minute.
+	p.saveCacheState()
 }
 
 // budgetPorts adapts Proxy state to the budget watcher's narrow copy-by-value

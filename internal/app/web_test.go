@@ -125,8 +125,8 @@ cache: {enabled: true, ttl: 1h}
 		t.Fatal("cache not created despite cache.enabled")
 	}
 	now := time.Now()
-	p.cache.Put("k", http.StatusOK, nil, []byte("x"), now)
-	if _, ok := p.cache.Lookup("k", now); !ok {
+	p.cache.Put("k", "m", http.StatusOK, nil, []byte("x"), now)
+	if _, ok := p.cache.Lookup("k", "m", now); !ok {
 		t.Fatal("seeded cache entry should hit")
 	}
 	w2 := NewWebServer(p, "test-config.yaml")
@@ -140,6 +140,12 @@ cache: {enabled: true, ttl: 1h}
 			Hits    uint64 `json:"hits"`
 			Misses  uint64 `json:"misses"`
 			Entries uint64 `json:"entries"`
+			Models  []struct {
+				Model   string `json:"model"`
+				Hits    uint64 `json:"hits"`
+				Misses  uint64 `json:"misses"`
+				Entries uint64 `json:"entries"`
+			} `json:"models"`
 		} `json:"cache"`
 	}
 	if err := json.Unmarshal(rec2.Body.Bytes(), &on); err != nil {

@@ -22,7 +22,13 @@ request log、`internal/cache`、
 - 命中重放原始客户端协议字节并设置 `x-mp-cache: hit`；
 - cache hit 不计 provider metrics/agent stats，但产生 live end event；
 - pin 和 force-provider 跳过读写缓存；
-- reload 重建缓存并清空条目。
+- reload 重建缓存并清空条目（缓存 body 不落盘）；
+- **命中/未命中计数器持久化**：`~/.model-proxy/cache_state.json`（`internal/app/cache_state.go`）按
+  called model 名记录累计 hits/misses（含 per-model 明细；entries 是 live gauge 不落盘）。app 拥有
+  文件 I/O，cache 叶子保持零 I/O：启动与 reload 建 store 时 load-seed（`Store.Seed`，累加式），
+  lifecycle 拥有的每分钟循环 + shutdown final save 原子写（temp+fsync+rename，同 quota_state 模式），
+  reset-stats 即时落盘零状态（防下次 tick 或 crash 复活已重置的历史）；corrupt/未来 version 文件按零状态
+  起步，绝不阻塞启动。
 
 缓存机制由 `internal/cache` 叶子包拥有：request key、TTL/容量 store、
 bounded recorder、转换后 header normalization 与逐块 flush replay。
@@ -39,7 +45,7 @@ generation 隔离，reload 后旧请求即使完成也只能写入旧 Store。
 `internal/app/proxy_http.go` 与 `internal/web/server.go` 服务（events 包只提供
 `ServeEvents` handler，不拥有 HTTP 路由）。
 
-forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens 和稳定 request_id。cache hit、400/502 终局也必须产生 end。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
+forward 产生 start/end，包含 agent、protocol、provider、status、latency、tokens 和稳定 request_id。cache hit、400/502 终局也必须产生 end。**只有 LLM 协议路径**（`/v1/messages`、`/v1/chat/completions`、`/v1/responses`）进入 live/请求日志；未知路径（浏览器 `/.well-known/...` 探测、favicon、迷路 GET）在 handler 层直接 502，**不产生 live 事件、不写请求日志**（unrouted model 仍是非空 proto，照旧产生终局 end）。`GET /api/events` 先重放 ring，再推送 SSE，15 秒 keepalive。
 
 出站秘密扫描（DLP-lite，`guard.secrets`）在 forward 读取完整请求体后、cache
 查询与所有 forward 分支之前对共享 body 扫描一次（`internal/guard` 的高置信
@@ -107,10 +113,13 @@ Close-once 回调，日志 schema、入队与 replay 判断不进入 transport �
   shadow report 上限 10000 均只保留 metadata，调用方没有可忘记设置的开关。
 - detail/replay 才调用 `requestlog.QueryRecords` 保留完整 body。
 
-扫描 `requests-*.log` 时不假设文件名顺序等于 record timestamp 严格顺序（孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。查询带**文件级提前终止**：单 writer 向同一文件按 Ts 非降序追加，因此文件最后一条可采纳记录是全文件上界——top-K 堆满后，最新记录仍严格老于堆底的文件不可能改变结果，直接跳过不流式读取；最新记录老于 From 下界（含边界，matches 只丢严格小于 From 的记录）的文件同理无命中。该顺序前提**逐文件验证而非假设**：每个文件独立 peek 首条（头部 128KiB）与末条（尾部 128KiB）记录，首条晚于末条（手工构造/损坏文件）或任何异常（打不开、行超长、JSON 解析失败）都回退为完整流式扫描；跨文件乱序仍被容忍。
+扫描 `requests-*.log` 时不假设文件名顺序等于 record timestamp 严格顺序（孤儿 active 文件或时钟纠正可能让旧名文件持有新记录），单行用 `bufio.Reader.ReadBytes`（不用 Scanner，避免默认 token cap 丢尾）。查询带**文件级提前终止**：单 writer 向同一文件按 Ts 非降序追加，因此文件最后一条可采纳记录是全文件上界——top-K 堆满后，最新记录仍严格老于堆底的文件不可能改变结果，直接跳过不流式读取；最新记录老于 From 下界（含边界，matches 只丢严格小于 From 的记录）的文件同理无命中。该顺序前提**逐文件验证而非假设**：每个文件独立 peek 首条（头部 128KiB）与末条（尾部 128KiB）记录，首条晚于末条（手工构造/损坏文件）或任何异常（打不开、行超长、JSON 解析失败）都回退为完整流式扫描；跨文件乱序仍被容忍。按 `request_id`/`session_id` 查询另有**行级提前终止**：`rawPrefilter` 先做字节包含检查，行内不含该值就跳过 `json.Unmarshal`（避免为多 MB body 反复分配/解析），命中唯一 request_id 后立即停止扫描——多 GB 活动日志下打开一条记录从秒级降到几十毫秒，唯一性保证早停不改变结果（body 里恰好出现该字符串的假命中仍由 `Filter.matches` 精确校验）。
 
-JSONL schema、writer/rotation/retention、查询 heap、Summary 与 Shadow 聚合由
-`internal/observe/requestlog` 拥有；`internal/app/observe_adapters.go` 只完成 config
+JSONL schema、Record 编码、查询 heap、Summary 与 Shadow 聚合由
+`internal/observe/requestlog` 拥有；非阻塞队列、单 writer、按天命名+size 轮转、retention 与
+owner-only 权限等持久化机制由共享 sink `internal/observe/logfile` 拥有（seclog 同一模式；
+活动文件按天命名，同日重启追加同一文件，size 轮转改名，首次写入才懒建文件）；
+`internal/app/observe_adapters.go` 只完成 config
 和执行上下文到纯值 Input 的映射。通用 stream capture 留在
 `internal/transport/bodycapture`，两者不反向依赖。
 

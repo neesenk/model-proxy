@@ -108,6 +108,10 @@ type processServices struct {
 	// state path). Same leaf-lock + survives-reload discipline as wireCaps.
 	modelCaps     runtimewire.ModelStore
 	modelCapsPath string
+	// cacheStatePath is the cache-counters state file (~/.model-proxy/
+	// cache_state.json): load-seeds a fresh store, per-minute loop + shutdown
+	// + reset persist it. Empty = never persist (degenerate constructors).
+	cacheStatePath string
 }
 
 // Proxy holds the compiled provider instances + the config.
@@ -261,7 +265,9 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	p.agents = counters.NewAgentCounter()
 	// Exact-match response cache. nil unless cache.enabled is set in config, so
 	// the default (off) path and direct-NewProxy tests pay zero overhead.
-	p.cache = NewResponseCache(cfg.Cache)
+	// Seeded from cache_state.json so restarts continue the hit/miss history.
+	p.cacheStatePath = CacheStatePath(qpath)
+	p.cache = p.seedResponseCache(cfg.Cache)
 	p.responsesState = protocol.NewResponsesStateStore(protocol.ResponsesStatePath(qpath))
 	p.modelCapsPath = runtimewire.ModelCapsPath(qpath)
 	// Live request monitor hub (SSE /api/events). Always on — empty unless a Web
@@ -297,14 +303,15 @@ func NewProxyWithStatePath(cfg *Config, qpath string) *Proxy {
 	if loaded := p.quota.LoadedSticky; len(loaded) > 0 && fpMatch {
 		p.runtimeState.RestoreSticky(loaded)
 	}
-	// Restore frozen health state (rate-limit/circuit cooldowns, model lockouts,
-	// learned param blocklist) persisted before the last restart — ONLY when the
-	// file's config fingerprint matches the current config: health is keyed by
-	// provider name, so without the gate a different config (or a test binary
-	// sharing the state file) would inherit cooldowns onto unrelated same-named
-	// providers. Only future-dated cooldowns are applied — expired ones
-	// self-heal by being dropped. A restored circuit gets a full failure count
-	// so its next failure re-opens it immediately (same semantics as before).
+	// Restore frozen health state (rate-limit/circuit cooldowns, operator
+	// freezes, model lockouts, learned param blocklist) persisted before the
+	// last restart — ONLY when the file's config fingerprint matches the
+	// current config: health is keyed by provider name, so without the gate a
+	// different config (or a test binary sharing the state file) would inherit
+	// cooldowns onto unrelated same-named providers. Expired cooldowns
+	// self-heal by being dropped; operator freezes have no expiry and restore
+	// as-is. A restored circuit gets a full failure count so its next failure
+	// re-opens it immediately (same semantics as before).
 	if loaded := p.quota.LoadedHealth; len(loaded) > 0 && p.quota.LoadedHealthFP != "" && p.quota.LoadedHealthFP == fp {
 		p.runtimeState.RestoreHealth(loaded, time.Now(), cfg.Scheduling.Threshold())
 	}
@@ -380,10 +387,31 @@ func (p *Proxy) resetStats() error {
 	if cache != nil {
 		cache.Reset()
 	}
+	// Persist the zeroed counters immediately: otherwise the next per-minute
+	// save (or a crash) would resurrect a history the user just reset.
+	p.saveCacheState()
 	return nil
 }
 
-// newResponseCache adapts resolved application configuration into the
+// seedResponseCache adapts resolved application configuration into the
+// repository-leaf cache component — the single NewResponseCache call site —
+// and seeds it from cache_state.json so restarts and reloads continue the
+// cumulative hit/miss history (see cache_state.go for the file contract).
+func (p *Proxy) seedResponseCache(config CacheConfig) *responsecache.Store {
+	store := NewResponseCache(config)
+	if store == nil {
+		return nil
+	}
+	state := loadCacheState(p.cacheStatePath)
+	models := make([]responsecache.ModelStat, 0, len(state.Models))
+	for _, m := range state.Models {
+		models = append(models, responsecache.ModelStat{Name: m.Model, Hits: m.Hits, Misses: m.Misses})
+	}
+	store.Seed(state.Hits, state.Misses, models)
+	return store
+}
+
+// NewResponseCache adapts resolved application configuration into the
 // repository-leaf cache component.
 func NewResponseCache(config CacheConfig) *responsecache.Store {
 	if !config.IsEnabled() {

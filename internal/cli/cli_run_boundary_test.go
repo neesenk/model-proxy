@@ -87,8 +87,10 @@ func TestRunCLIArgsCommandHelpContract(t *testing.T) {
 	helpCommands := []string{
 		"add",
 		"audit",
+		"cache",
 		"config",
 		"doctor",
+		"freeze",
 		"login",
 		"logout",
 		"models",
@@ -213,9 +215,11 @@ func TestCLICommandRegistryIsExhaustive(t *testing.T) {
 	wantTargets := map[string]string{
 		"add":      "clipresets.RunAdd",
 		"audit":    "cliaudit.RunAudit",
+		"cache":    "clistatus.RunCache",
 		"presets":  "clipresets.RunPresets",
 		"config":   "cliconfig.CmdConfigRun",
 		"doctor":   "clidoctor.RunDoctor",
+		"freeze":   "cliadmin.RunFreeze",
 		"login":    "clilogin.CmdLogin",
 		"logout":   "cliaccount.RunLogout",
 		"models":   "climodels.RunModels",
