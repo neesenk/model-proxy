@@ -68,6 +68,86 @@ export function untilHuman(ts, now = Date.now()) {
   return ` (in ${fmtDur(ms / 1000)})`;
 }
 
+// providerFrozen reports whether a /api/status health entry counts as frozen
+// for the Providers card: an operator freeze (h.frozen), an open/half-open
+// circuit, or an active rate-limit cooldown. nowMs is injected for
+// determinism. A missing entry (healthy provider, health is created lazily on
+// first failure/freeze) is not frozen.
+export function providerFrozen(h, nowMs = Date.now()) {
+  if (!h) return false;
+  if (h.frozen) return true;
+  if (h.circuit_state === 'open' || h.circuit_state === 'half_open') return true;
+  const rlUntil = h.rate_limited_until ? new Date(h.rate_limited_until).getTime() : 0;
+  return rlUntil > nowMs;
+}
+
+// providerNames computes the row set of the Providers card: the union of the
+// schedule preview's ordered provider names and the health map's keys, sorted.
+// The schedule alone is NOT sufficient: scheduling drops unavailable targets
+// (operator-frozen, circuit-open, rate-limit cooldown, quota-exhausted) from
+// every route's ordered chain, so a frozen provider would vanish from the card
+// — row, pill, and unfreeze button — exactly when the operator needs to see
+// and unfreeze it. Health entries are created lazily on failure/freeze, so
+// every unavailable provider is guaranteed a health key to union in.
+export function providerNames(models, health) {
+  const names = new Set();
+  for (const route of Object.keys(models || {})) {
+    for (const p of (((models || {})[route] || {}).ordered || [])) {
+      if (p && p.provider) names.add(p.provider);
+    }
+  }
+  for (const name of Object.keys(health || {})) names.add(name);
+  return Array.from(names).sort();
+}
+
+// settingsDiff computes the minimal POST /api/config/edit payload for the
+// Config tab's settings form. `loaded` is the GET /api/config `settings`
+// projection (nested by kind), `current` is the form's readback in the same
+// shape. Only changed fields are returned, grouped by edit kind; a field the
+// user cleared (empty string / null) becomes an explicit null, which the
+// backend deletes so the code default applies again. Comparison is on the
+// string form of the value (form inputs are strings, JSON gives numbers /
+// booleans / null), so an untouched field never produces a write.
+export function settingsDiff(loaded, current) {
+  const norm = (v) => {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    return String(v);
+  };
+  const out = {};
+  for (const kind of Object.keys(current || {})) {
+    const edited = current[kind] || {};
+    const was = (loaded && loaded[kind]) || {};
+    const changed = {};
+    for (const key of Object.keys(edited)) {
+      const now = edited[key];
+      if (norm(now) === norm(was[key])) continue;
+      changed[key] = (now === '' || now === null || now === undefined) ? null : now;
+    }
+    if (Object.keys(changed).length) out[kind] = changed;
+  }
+  return out;
+}
+
+// settingsRestartKeys lists the changed dotted keys a hot reload does NOT
+// apply, for the settings form's post-save warning. A group-level `restart`
+// marks every changed field of that block (request_log, stats); a field-level
+// `restart` marks one key inside an otherwise hot-reloadable block
+// (log_level/log_file, scheduling.quota_poll_interval).
+export function settingsRestartKeys(diff, groups) {
+  const out = [];
+  for (const group of groups || []) {
+    const changed = diff && diff[group.kind];
+    if (!changed) continue;
+    for (const field of group.fields || []) {
+      if ((group.restart || field.restart) && Object.prototype.hasOwnProperty.call(changed, field.key)) {
+        out.push(`${group.kind}.${field.key}`);
+      }
+    }
+  }
+  return out;
+}
+
 // YAML_EDITOR_MIN_HEIGHT is the hard floor for the Raw YAML editor: below it
 // the Config card would collapse into an unusable strip, so short viewports
 // scroll the page instead.

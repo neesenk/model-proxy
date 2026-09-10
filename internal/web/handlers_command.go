@@ -177,13 +177,20 @@ func (s *Server) handleConfigValidate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": len(issues) == 0, "errors": issues})
 }
 
+// configEditKinds are the structured edit kinds POST /api/config/edit accepts.
+// provider/route are name-scoped; the rest mutate a fixed scalar block.
+var configEditKinds = map[string]bool{
+	"general": true, "scheduling": true, "request_log": true,
+	"stats": true, "cache": true, "provider": true, "route": true,
+}
+
 func (s *Server) handleConfigEdit(w http.ResponseWriter, r *http.Request) {
 	var req appapi.EditRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.Kind != "general" && req.Kind != "scheduling" && req.Kind != "provider" && req.Kind != "route" {
+	if !configEditKinds[req.Kind] {
 		writeJSONErr(w, http.StatusBadRequest, "unknown edit kind: "+req.Kind)
 		return
 	}

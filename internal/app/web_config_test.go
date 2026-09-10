@@ -906,3 +906,105 @@ providers:
 		t.Errorf("pprof index body does not look like the profile list: %q", body)
 	}
 }
+
+// TestConfigSettingsFormRoundTrip exercises the Config-tab settings form end to
+// end: GET /api/config projects the scalar blocks, and POST /api/config/edit
+// writes request_log/stats/cache/general through the same validate+save+reload
+// pipeline (with null deleting a key so the code default applies again).
+func TestConfigSettingsFormRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	original := `listen: 127.0.0.1:0
+log_level: warn
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+scheduling:
+  circuit_threshold: 7
+  sticky_dwell: 2m
+request_log:
+  enabled: true
+  max_file_size: 1048576
+cache:
+  enabled: false
+`
+	if err := os.WriteFile(cfgPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, p := newTestWeb(t)
+	w.configFile = cfgPath
+
+	rec := httptest.NewRecorder()
+	serveWeb(w, rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if rec.Code != 200 {
+		t.Fatalf("GET /api/config status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Settings struct {
+			LogLevel   string `json:"log_level"`
+			Scheduling struct {
+				CircuitThreshold  *int   `json:"circuit_threshold"`
+				StickyDwell       string `json:"sticky_dwell"`
+				QuotaSwitchMargin *int   `json:"quota_switch_margin"`
+			} `json:"scheduling"`
+			RequestLog struct {
+				Enabled     bool  `json:"enabled"`
+				MaxFileSize int64 `json:"max_file_size"`
+			} `json:"request_log"`
+			Cache struct {
+				Enabled bool   `json:"enabled"`
+				TTL     string `json:"ttl"`
+			} `json:"cache"`
+		} `json:"settings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode settings: %v body=%s", err, rec.Body.String())
+	}
+	if got.Settings.LogLevel != "warn" || got.Settings.Scheduling.StickyDwell != "2m" {
+		t.Errorf("settings = %+v", got.Settings)
+	}
+	if got.Settings.Scheduling.CircuitThreshold == nil || *got.Settings.Scheduling.CircuitThreshold != 7 {
+		t.Errorf("circuit_threshold = %v", got.Settings.Scheduling.CircuitThreshold)
+	}
+	if got.Settings.Scheduling.QuotaSwitchMargin != nil {
+		t.Errorf("unset quota_switch_margin = %v, want null", *got.Settings.Scheduling.QuotaSwitchMargin)
+	}
+	if !got.Settings.RequestLog.Enabled || got.Settings.RequestLog.MaxFileSize != 1048576 {
+		t.Errorf("request_log = %+v", got.Settings.RequestLog)
+	}
+	if got.Settings.Cache.Enabled || got.Settings.Cache.TTL != "" {
+		t.Errorf("cache = %+v", got.Settings.Cache)
+	}
+
+	edit := func(body string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		serveWeb(w, rec, httptest.NewRequest(http.MethodPost, "/api/config/edit", strings.NewReader(body)))
+		if rec.Code != 200 {
+			t.Fatalf("POST /api/config/edit %s status=%d body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+	edit(`{"kind":"scheduling","data":{"circuit_threshold":null,"sticky_dwell":"5m"}}`)
+	edit(`{"kind":"cache","data":{"enabled":true,"ttl":"60m"}}`)
+	edit(`{"kind":"request_log","data":{"max_file_size":1073741824}}`)
+
+	content, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	if strings.Contains(text, "circuit_threshold") {
+		t.Errorf("null edit must delete circuit_threshold:\n%s", text)
+	}
+	for _, want := range []string{"sticky_dwell: 5m", "cache:", "enabled: true", "ttl: 60m", "max_file_size: 1073741824"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("edited config missing %q:\n%s", want, text)
+		}
+	}
+	// The reload is process-local: the live config must reflect the edits.
+	if p.cfg.Scheduling.CircuitThreshold != 0 || p.cfg.Scheduling.StickyDwell != "5m" {
+		t.Errorf("reloaded scheduling = %+v", p.cfg.Scheduling)
+	}
+	if !p.cfg.Cache.Enabled || p.cfg.Cache.TTL != "60m" {
+		t.Errorf("reloaded cache = %+v", p.cfg.Cache)
+	}
+}

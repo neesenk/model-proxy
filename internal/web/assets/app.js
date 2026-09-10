@@ -1876,18 +1876,15 @@ async function renderConfigTab() {
        <header class="card-head"><h2>Add provider preset</h2></header>
        <div class="card-body">
          <div class="row-actions">
-           <select id="preset-select" aria-label="Provider preset"></select>
+           <select id="preset-select" class="req-input" aria-label="Provider preset"></select>
            <button class="btn small" id="btn-preset-add">Add &amp; reload</button>
          </div>
          <div id="preset-msg" aria-live="polite"></div>
        </div>
      </div>
-     <div class="card" id="effective-routes-card">
-       <header class="card-head"><h2>Effective routes</h2></header>
-       <div class="card-body"><span class="msg">loading…</span></div>
-     </div>
      <details class="editor" id="ed-provider"><summary>Provider scalars</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <details class="editor" id="ed-route"><summary>Routes</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
+     <details class="editor" id="ed-settings"><summary>Settings (log / scheduling / request log / stats / cache)</summary><div class="editor-body"><span class="msg">loading…</span></div></details>
      <div class="card" id="yaml-card">
        <header class="card-head"><h2>Raw YAML</h2><span class="meta" id="yaml-meta"></span></header>
        <div class="card-body">
@@ -2005,7 +2002,6 @@ async function loadConfigAll() {
          </dl>
        </div>
      </div>`;
-  renderEffectiveRoutes(cfg);
   setYamlValue(cfg.yaml || '');
   // Fresh baseline for restart-key diffing; the lint result for the loaded
   // text arrives via the 'change'-triggered debounce.
@@ -2022,6 +2018,9 @@ async function loadConfigAll() {
 
   // Route form
   buildRouteForm('ed-route');
+
+  // Scalar settings form (log level, scheduling, request_log, stats, cache)
+  buildSettingsForm();
   scheduleYamlEditorResize();
 }
 
@@ -2225,29 +2224,6 @@ function buildRouteForm(editorId) {
   }
 }
 
-// renderEffectiveRoutes draws the read-only route table from /api/config
-// (derived routes aggregated from provider model lists with provider-level
-// priorities + aliases; explicit routes: entries override per name).
-function renderEffectiveRoutes(cfg) {
-  const card = document.getElementById('effective-routes-card');
-  if (!card) return;
-  const routes = (cfg && cfg.routes) || {};
-  const names = Object.keys(routes).sort();
-  if (!names.length) {
-    card.querySelector('.card-body').innerHTML = '<span class="msg">no routes</span>';
-    return;
-  }
-  const rows = names.map((name) => {
-    const targets = (routes[name] || []).map((t) => {
-      const alias = t.Model !== name ? ` <span class="meta">(alias of ${t.Model})</span>` : '';
-      return `${esc(t.provider)}/${esc(t.Model)}<span class="meta"> p${t.priority}</span>${alias}`;
-    }).join(' → ');
-    return `<tr><td>${esc(name)}</td><td>${targets || '—'}</td></tr>`;
-  }).join('');
-  card.querySelector('.card-body').innerHTML =
-    `<table class="table"><thead><tr><th>model</th><th>targets (scheduling order, priority asc)</th></tr></thead><tbody>${rows}</tbody></table>`;
-}
-
 // providerOptions / modelsForProvider read the cached config so every row shares
 // one source of truth (provider_models from /api/config).
 function providerOptions() {
@@ -2269,9 +2245,13 @@ function addRouteTargetRow(t) {
   row.className = 'route-target-row';
   const provs = providerOptions();
   const provOpts = provs.map((p) => `<option value="${esc(p)}"${p === t.provider ? ' selected' : ''}>${esc(p)}</option>`).join('');
-  const models = modelsForProvider(t.provider);
+  // A blank t.provider renders as the FIRST option (browser default), so the
+  // model list must be built for that effective provider — otherwise the
+  // select shows aqp while the model dropdown stays empty.
+  const effProvider = t.provider || provs[0] || '';
+  const models = modelsForProvider(effProvider);
   // ensure the current model is selectable even if not in the provider's list
-  const modelSet = models.includes(t.model) ? models : [...models, t.model];
+  const modelSet = !t.model || models.includes(t.model) ? models : [...models, t.model];
   const modelOpts = modelSet.map((m) => `<option value="${esc(m)}"${m === t.model ? ' selected' : ''}>${esc(m)}</option>`).join('');
   row.innerHTML =
     `<select class="rt-provider" autocomplete="off">${provOpts}</select>
@@ -2285,7 +2265,7 @@ function addRouteTargetRow(t) {
   provSel.addEventListener('change', () => {
     const cur = modelSel.value;
     const ms = modelsForProvider(provSel.value);
-    modelSel.innerHTML = ms.map((m) => `<option value="${esc(m)}">`).join('');
+    modelSel.innerHTML = ms.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
     if (ms.includes(cur)) modelSel.value = cur;
   });
   row.querySelector('button').addEventListener('click', () => { row.remove(); });
@@ -2360,6 +2340,343 @@ async function deleteRoute() {
     showMsg(msg, 'ok', `deleted ${name}`);
   } catch (e) {
     showMsg(msg, 'err', e.message);
+  }
+}
+
+// --- Settings form (scalar config blocks) ---
+
+// SETTINGS_GROUPS is the form spec for the scalar config blocks that used to be
+// YAML-editor-only. Each group maps to one /api/config/edit kind; `restart:true`
+// marks a field a hot reload does NOT apply (same code facts as RESTART_KEYS
+// above: request_log logger and stats store are built once at startup).
+// `placeholder` shows the code default for a key that is absent in the file.
+const SETTINGS_GROUPS = [
+  {
+    kind: 'general', title: 'General', fields: [
+      {
+        key: 'log_level', label: 'log_level', type: 'select', options: ['debug', 'info', 'warn', 'error'], def: 'info', restart: true,
+        help: 'Runtime log verbosity for the daemon log.',
+      },
+      {
+        key: 'log_file', label: 'log_file', type: 'text', def: '/tmp/model-proxy.log', restart: true,
+        help: 'Log file path (the pid file is derived from the same directory).',
+      },
+    ],
+  },
+  {
+    kind: 'scheduling', title: 'Scheduling', fields: [
+      {
+        key: 'circuit_threshold', label: 'circuit_threshold', type: 'number', def: '3',
+        help: 'Consecutive failover-eligible failures before a provider circuit opens.',
+      },
+      {
+        key: 'circuit_cooldown', label: 'circuit_cooldown', type: 'text', def: '10m',
+        help: 'How long the circuit stays open before a single half-open probe.',
+      },
+      {
+        key: 'rate_limit_backoff', label: 'rate_limit_backoff', type: 'text', def: '60s',
+        help: 'Skip duration after a transient 429 with no reset hint or Retry-After, then probe.',
+      },
+      {
+        key: 'quota_cooldown', label: 'quota_cooldown', type: 'text', def: '1h',
+        help: 'Skip duration after a 429 classified quota-exhausted with no reset hint. The daily class locks until midnight instead.',
+      },
+      {
+        key: 'model_lockout', label: 'model_lockout', type: 'text', def: '10m',
+        help: 'Lock a (provider, model) pair after a model-level failure: 404, model-denied, or an empty 200.',
+      },
+      {
+        key: 'retry_wait', label: 'retry_wait', type: 'text', def: '10s',
+        help: 'When every target is cooling down, wait up to this long for the earliest expiry and retry (at most twice). 0 disables the wait.',
+      },
+      {
+        key: 'upstream_timeout', label: 'upstream_timeout', type: 'text', def: '1800s',
+        help: 'Per-upstream-request timeout.',
+      },
+      {
+        key: 'sticky_dwell', label: 'sticky_dwell', type: 'text', def: '10m',
+        help: 'Minimum time on the chosen provider before re-evaluating (conversation stickiness).',
+      },
+      {
+        key: 'quota_poll_interval', label: 'quota_poll_interval', type: 'text', def: '5m', restart: true,
+        help: 'Background quota poll cadence.',
+      },
+      {
+        key: 'quota_switch_margin', label: 'quota_switch_margin', type: 'number', def: '15',
+        help: 'Switch provider when another one beats the current effective remaining by at least this many percentage points.',
+      },
+      {
+        key: 'quality_error_weight', label: 'quality_error_weight', type: 'number', def: '100',
+        help: 'Surplus penalty per unit error-rate EWMA (2m half-life), in percent (100 = 1.0), subtracted from the quota surplus. 0 disables the signal.',
+      },
+      {
+        key: 'quality_ttft_weight', label: 'quality_ttft_weight', type: 'number', def: '20',
+        help: 'Surplus penalty per unit normalized TTFT EWMA (10s reference), in percent (20 = 0.2). 0 disables the signal.',
+      },
+    ],
+  },
+  {
+    kind: 'request_log', title: 'Request log', restart: true,
+    note: 'request_log.* only takes effect after a daemon restart (the logger is built at startup).',
+    fields: [
+      {
+        key: 'enabled', label: 'enabled', type: 'checkbox', def: 'false',
+        help: 'Write each committed upstream call (request + response body) as one JSONL line to a rotating file. Off by default so the hot path stays free.',
+      },
+      {
+        key: 'dir', label: 'dir', type: 'text', def: '~/.model-proxy/log/requests',
+        help: 'Directory holding the daily rotating request-log files.',
+      },
+      {
+        key: 'max_file_size', label: 'max_file_size (bytes)', type: 'number', def: '1073741824',
+        help: 'Rotate to a new file when the next line would exceed this size (1 GiB).',
+      },
+      {
+        key: 'max_body_bytes', label: 'max_body_bytes (bytes)', type: 'number', def: '5242880',
+        help: 'Per-body capture cap (5 MiB). Larger bodies are truncated in the log but still forwarded intact.',
+      },
+      {
+        key: 'retention', label: 'retention', type: 'text', def: '720h',
+        help: 'Delete rotated files older than this (30d). 0 keeps them forever. The active file is never deleted.',
+      },
+    ],
+  },
+  {
+    kind: 'stats', title: 'Stats', restart: true,
+    note: 'stats.db_path / stats.retention only take effect after a daemon restart (the SQLite store is opened at startup).',
+    fields: [
+      {
+        key: 'db_path', label: 'db_path', type: 'text', def: '~/.model-proxy/stats.db',
+        help: 'SQLite database for per-provider x model x minute call statistics.',
+      },
+      {
+        key: 'retention', label: 'retention', type: 'text', def: '720h',
+        help: 'Delete minute buckets older than this (30d). 0 keeps history forever.',
+      },
+    ],
+  },
+  {
+    kind: 'cache', title: 'Response cache',
+    fields: [
+      {
+        key: 'enabled', label: 'enabled', type: 'checkbox', def: 'false',
+        help: 'Replay a byte-identical request (SHA-256 of method + path + body) from the exact response cache, marked x-mp-cache: hit.',
+      },
+      {
+        key: 'ttl', label: 'ttl', type: 'text', def: '10m',
+        help: 'Cached entry lifetime.',
+      },
+      {
+        key: 'max_entries', label: 'max_entries', type: 'number', def: '1000',
+        help: 'Maximum live cache entries; least-recently-used entries are evicted first.',
+      },
+      {
+        key: 'max_body_bytes', label: 'max_body_bytes (bytes)', type: 'number', def: '262144',
+        help: 'Only responses at or below this size (256 KiB) are cached.',
+      },
+    ],
+  },
+];
+
+// HELP_ICON_SVG is the inline info glyph used by every settings help button.
+// currentColor keeps it on the theme (muted → accent on hover/open); an SVG
+// avoids font-dependent glyph metrics and stays crisp at small sizes.
+const HELP_ICON_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="6.3"/><path d="M8 7.2v4.1"/><path d="M8 4.7h.01"/></svg>';
+
+// buildSettingsForm renders every group into #ed-settings. Values come from the
+// cached /api/config `settings` projection (null → empty input, so the
+// placeholder's code default shows through).
+function buildSettingsForm() {
+  const host = document.querySelector('#ed-settings .editor-body');
+  if (!host) return;
+  // A re-render replaces the buttons the popover is anchored to; close it so it
+  // cannot float over a detached control.
+  closeSettingsHelp();
+  const settings = (configCache && configCache.settings) || {};
+  const blocks = SETTINGS_GROUPS.map((group) => {
+    const values = settings[group.kind] || {};
+    const fields = group.fields.map((field) => settingsFieldHTML(group, field, values[field.key])).join('');
+    return `<section class="settings-group">
+      <div class="section-title">${esc(group.title)}</div>
+      <div class="grid cols-3 settings-grid">${fields}</div>
+      ${group.note ? `<div class="settings-note">ⓘ ${esc(group.note)}</div>` : ''}
+    </section>`;
+  }).join('');
+  host.innerHTML = `${blocks}
+    <div class="row-actions settings-actions">
+      <span class="spacer"></span>
+      <button class="btn primary small" id="btn-settings-save">Apply settings</button>
+    </div>
+    <div class="msg" id="settings-msg"></div>`;
+  document.getElementById('btn-settings-save').addEventListener('click', applySettings);
+  wireSettingsHelp();
+}
+
+// settingsLabelHTML renders the field label plus its click-to-open (?) help
+// button. The help text and default are carried in data attributes so the
+// popover is built from the same spec that renders the control.
+function settingsLabelHTML(id, group, field) {
+  if (!field.help) return `<label for="${id}">${esc(field.label)}</label>`;
+  return `<div class="field-head">
+    <label for="${id}">${esc(field.label)}</label>
+    <button type="button" class="help-btn" aria-expanded="false" aria-label="help: ${esc(group.kind)}.${esc(field.key)}" data-help="${esc(field.help)}" data-default="${esc(field.def || '')}">${HELP_ICON_SVG}</button>
+  </div>`;
+}
+
+// settingsFieldHTML renders one control using the shared .field / .field.check
+// control styles (never a bare input, which would render OS-native chrome).
+// `def` is the code default: it is the placeholder for an absent key and the
+// value shown in the (?) popover.
+function settingsFieldHTML(group, field, value) {
+  const id = `set-${group.kind}-${field.key}`;
+  const text = value === null || value === undefined ? '' : String(value);
+  const label = settingsLabelHTML(id, group, field);
+  if (field.type === 'checkbox') {
+    return `<div class="field check">
+      <input type="checkbox" id="${id}"${value === true ? ' checked' : ''}>
+      ${label}
+    </div>`;
+  }
+  if (field.type === 'select') {
+    const options = (field.options || []).map((opt) => `<option value="${esc(opt)}"${opt === text ? ' selected' : ''}>${esc(opt)}</option>`).join('');
+    return `<div class="field">
+      ${label}
+      <select id="${id}">${options}</select>
+    </div>`;
+  }
+  const type = field.type === 'number' ? 'number' : 'text';
+  const placeholder = field.def ? ` placeholder="${esc(field.def)}"` : '';
+  return `<div class="field">
+    ${label}
+    <input id="${id}" type="${type}" value="${esc(text)}"${placeholder} autocomplete="off">
+  </div>`;
+}
+
+// settingsHelpEl is the single floating (?) popover shared by every field. It
+// is created lazily and positioned with fixed coordinates from the button's
+// viewport rect, so it escapes the details/overflow containers.
+let settingsHelpEl = null;
+let settingsHelpWired = false;
+
+function wireSettingsHelp() {
+  if (settingsHelpWired) return;
+  settingsHelpWired = true;
+  document.addEventListener('click', (event) => {
+    const btn = event.target && event.target.closest ? event.target.closest('.help-btn') : null;
+    if (btn) {
+      event.preventDefault();
+      toggleSettingsHelp(btn);
+      return;
+    }
+    if (settingsHelpEl && !settingsHelpEl.hidden && !settingsHelpEl.contains(event.target)) closeSettingsHelp();
+  });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeSettingsHelp(); });
+  window.addEventListener('resize', closeSettingsHelp);
+  window.addEventListener('scroll', closeSettingsHelp, true);
+}
+
+function closeSettingsHelp() {
+  if (!settingsHelpEl || settingsHelpEl.hidden) return;
+  settingsHelpEl.hidden = true;
+  const open = document.querySelector('.help-btn[aria-expanded="true"]');
+  if (open) open.setAttribute('aria-expanded', 'false');
+}
+
+// toggleSettingsHelp opens the popover for `btn` (or closes it when the same
+// button is clicked again). Content is the spec's help text plus the code
+// default, so a field can never show help without a default and vice versa.
+function toggleSettingsHelp(btn) {
+  if (!settingsHelpEl) {
+    settingsHelpEl = document.createElement('div');
+    settingsHelpEl.className = 'help-popover';
+    settingsHelpEl.setAttribute('role', 'dialog');
+    settingsHelpEl.setAttribute('aria-label', 'setting help');
+    settingsHelpEl.hidden = true;
+    document.body.appendChild(settingsHelpEl);
+  }
+  const alreadyOpen = !settingsHelpEl.hidden && btn.getAttribute('aria-expanded') === 'true';
+  if (alreadyOpen) {
+    closeSettingsHelp();
+    return;
+  }
+  closeSettingsHelp();
+  const def = btn.dataset.default || '';
+  settingsHelpEl.innerHTML = `<p>${esc(btn.dataset.help || '')}</p>
+    ${def ? `<p class="help-popover-def">default: <code>${esc(def)}</code></p>` : ''}`;
+  settingsHelpEl.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+  positionSettingsHelp(btn);
+}
+
+// positionSettingsHelp anchors the popover under the button, flipping above it
+// and clamping to the viewport when there is no room below.
+function positionSettingsHelp(btn) {
+  const margin = 8;
+  const rect = btn.getBoundingClientRect();
+  const box = settingsHelpEl.getBoundingClientRect();
+  let left = rect.left;
+  if (left + box.width > window.innerWidth - margin) left = window.innerWidth - margin - box.width;
+  if (left < margin) left = margin;
+  let top = rect.bottom + 6;
+  if (top + box.height > window.innerHeight - margin) top = rect.top - box.height - 6;
+  if (top < margin) top = margin;
+  settingsHelpEl.style.left = `${left}px`;
+  settingsHelpEl.style.top = `${top}px`;
+}
+
+// readSettingsForm reads the controls back into the settings shape keyed by
+// edit kind (checkbox → boolean, everything else → string).
+function readSettingsForm() {
+  const out = {};
+  for (const group of SETTINGS_GROUPS) {
+    const data = {};
+    for (const field of group.fields) {
+      const input = document.getElementById(`set-${group.kind}-${field.key}`);
+      if (!input) continue;
+      data[field.key] = field.type === 'checkbox' ? input.checked : input.value;
+    }
+    out[group.kind] = data;
+  }
+  return out;
+}
+
+// applySettings POSTs one /api/config/edit per changed kind (only changed fields
+// are sent, see settingsDiff), then refreshes the tab so the YAML editor and
+// every form show the persisted state.
+async function applySettings() {
+  const btn = document.getElementById('btn-settings-save');
+  const diff = settingsDiff((configCache && configCache.settings) || {}, readSettingsForm());
+  const kinds = Object.keys(diff);
+  if (!kinds.length) {
+    showMsg(document.getElementById('settings-msg'), 'ok', 'no changes');
+    return;
+  }
+  const restart = settingsRestartKeys(diff, SETTINGS_GROUPS);
+  btn.disabled = true;
+  showMsg(document.getElementById('settings-msg'), 'ok', 'saving…');
+  const applied = [];
+  try {
+    for (const kind of kinds) {
+      await apiPost('/api/config/edit', { kind, data: diff[kind] });
+      applied.push(kind);
+    }
+  } catch (e) {
+    // A multi-kind apply can fail halfway; resync so the form and YAML show
+    // exactly what was persisted, then report the backend error verbatim.
+    await loadConfigAll().catch(() => {});
+    const msg = document.getElementById('settings-msg');
+    const partial = applied.length ? ` (applied: ${applied.join(', ')})` : '';
+    showMsg(msg, 'err', e.message + partial);
+    return;
+  } finally {
+    btn.disabled = false;
+  }
+  await loadConfigAll();
+  const msg = document.getElementById('settings-msg');
+  if (restart.length) {
+    showMsg(msg, 'warn', `saved & reloaded — ${restart.join(', ')} only take effect after a daemon restart.`);
+  } else {
+    showMsg(msg, 'ok', 'saved & reloaded');
   }
 }
 

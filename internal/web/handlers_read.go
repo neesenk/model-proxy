@@ -453,5 +453,5 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, _ *http.Request) {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"yaml": d.YAML, "summary": d.Summary, "provider_models": d.ProviderModels, "provider_meta": d.ProviderMeta, "routes": d.Routes})
+	writeJSON(w, http.StatusOK, map[string]any{"yaml": d.YAML, "summary": d.Summary, "provider_models": d.ProviderModels, "provider_meta": d.ProviderMeta, "routes": d.Routes, "settings": d.Settings})
 }

@@ -382,7 +382,66 @@ func (s *Service) ConfigDocument() (appapi.ConfigDocument, error) {
 		ProviderModels: providerModels,
 		ProviderMeta:   providerMeta,
 		Routes:         routes,
+		Settings:       configSettings(config),
 	}, nil
+}
+
+// configSettings projects the scalar blocks the Config tab edits through forms.
+// Raw file values win; only log_level/log_file carry the loader's defaults (the
+// form diffs against the loaded value, so an untouched field is never written).
+func configSettings(config *configdomain.Config) appapi.ConfigSettings {
+	return appapi.ConfigSettings{
+		LogLevel: config.LogLevel,
+		LogFile:  config.LogFile,
+		Scheduling: appapi.ConfigScheduling{
+			CircuitThreshold:   optionalInt(config.Scheduling.CircuitThreshold),
+			CircuitCooldown:    config.Scheduling.CircuitCooldown,
+			RateLimitBackoff:   config.Scheduling.RateLimitBackoff,
+			QuotaCooldown:      config.Scheduling.QuotaCooldown,
+			ModelLockout:       config.Scheduling.ModelLockout,
+			RetryWait:          config.Scheduling.RetryWait,
+			UpstreamTimeout:    config.Scheduling.UpstreamTimeout,
+			StickyDwell:        config.Scheduling.StickyDwell,
+			QuotaPollInterval:  config.Scheduling.QuotaPollInterval,
+			QuotaSwitchMargin:  optionalInt(config.Scheduling.QuotaSwitchMargin),
+			QualityErrorWeight: copyIntPtr(config.Scheduling.QualityErrorWeight),
+			QualityTTFTWeight:  copyIntPtr(config.Scheduling.QualityTTFTWeight),
+		},
+		RequestLog: appapi.ConfigRequestLog{
+			Enabled:      config.RequestLog.Enabled,
+			Dir:          config.RequestLog.Dir,
+			MaxFileSize:  config.RequestLog.MaxFileSize,
+			MaxBodyBytes: config.RequestLog.MaxBodyBytes,
+			Retention:    config.RequestLog.Retention,
+		},
+		Stats: appapi.ConfigStats{
+			DBPath:    config.Stats.DBPath,
+			Retention: config.Stats.Retention,
+		},
+		Cache: appapi.ConfigCache{
+			Enabled:      config.Cache.Enabled,
+			TTL:          config.Cache.TTL,
+			MaxEntries:   config.Cache.MaxEntries,
+			MaxBodyBytes: config.Cache.MaxBodyBytes,
+		},
+	}
+}
+
+// optionalInt maps the zero value ("key absent") to a nil JSON pointer.
+func optionalInt(value int) *int {
+	if value == 0 {
+		return nil
+	}
+	return &value
+}
+
+// copyIntPtr detaches an optional config pointer from the loaded Config value.
+func copyIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 // Presets exposes the shared preset catalog for the web Add-Provider wizard.

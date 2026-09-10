@@ -214,3 +214,73 @@ func TestEditConfigNonMappingConfig(t *testing.T) {
 		t.Errorf("err = %v, want mapping error", err)
 	}
 }
+
+// TestEditConfigScalarBlocks covers the request_log/stats/cache kinds the
+// Config tab's settings form drives: each kind mutates only its own block, and
+// JSON numbers (float64) land as plain YAML integers, not scientific notation.
+func TestEditConfigScalarBlocks(t *testing.T) {
+	path := writeTestConfig(t)
+	spy := &reloadSpy{}
+	service := editService(t, path, spy)
+
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "request_log",
+		Data: map[string]any{
+			"enabled":       true,
+			"dir":           "~/requests",
+			"max_file_size": float64(1073741824),
+			"retention":     "720h",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "stats",
+		Data: map[string]any{"retention": "720h"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "cache",
+		Data: map[string]any{"enabled": false, "ttl": "60m", "max_entries": float64(6000)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content := readConfig(t, path)
+	for _, want := range []string{
+		"request_log:", "enabled: true", "dir: ~/requests",
+		"max_file_size: 1073741824", "retention: 720h",
+		"stats:", "retention: 720h",
+		"cache:", "enabled: false", "ttl: 60m", "max_entries: 6000",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("edited config missing %q:\n%s", want, content)
+		}
+	}
+	if len(spy.calls) != 3 {
+		t.Errorf("reload calls = %v", spy.calls)
+	}
+}
+
+// TestEditConfigNilDeletesKey pins the form's "clear = revert to default"
+// contract: a nil data value removes the key so the code default applies again.
+func TestEditConfigNilDeletesKey(t *testing.T) {
+	path := writeTestConfig(t)
+	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:8080\nproviders:\n  zhipu: {provider_id: zhipu, openai_base_url: https://example.test, models: [glm]}\nscheduling:\n  circuit_threshold: 7\n  sticky_dwell: 2m\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := editService(t, path, &reloadSpy{})
+	if err := service.EditConfig(appapi.EditRequest{
+		Kind: "scheduling",
+		Data: map[string]any{"circuit_threshold": nil, "sticky_dwell": "2m"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content := readConfig(t, path)
+	if strings.Contains(content, "circuit_threshold") {
+		t.Errorf("nil value must delete the key:\n%s", content)
+	}
+	if !strings.Contains(content, "sticky_dwell: 2m") {
+		t.Errorf("unchanged key must survive:\n%s", content)
+	}
+}

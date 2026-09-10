@@ -151,6 +151,63 @@ type ConfigDocument struct {
 	ProviderModels map[string][]string            `json:"provider_models"`
 	ProviderMeta   map[string]ConfigProviderMeta  `json:"provider_meta"`
 	Routes         map[string][]ConfigRouteTarget `json:"routes"`
+	Settings       ConfigSettings                 `json:"settings"`
+}
+
+// ConfigSettings is the structured projection of the scalar config blocks the
+// Config tab edits through forms instead of the Raw YAML editor. Values are the
+// RAW file values (empty/zero = key absent, so the form shows the code default
+// as a placeholder); the two exceptions are log_level/log_file, which the loader
+// fills with its effective defaults. Optional ints are pointers so "unset" is
+// distinguishable from an explicit 0 (quality weights: 0 disables the signal).
+// Everything not represented here stays YAML-only.
+type ConfigSettings struct {
+	LogLevel   string           `json:"log_level"`
+	LogFile    string           `json:"log_file"`
+	Scheduling ConfigScheduling `json:"scheduling"`
+	RequestLog ConfigRequestLog `json:"request_log"`
+	Stats      ConfigStats      `json:"stats"`
+	Cache      ConfigCache      `json:"cache"`
+}
+
+// ConfigScheduling mirrors scheduling.* — every field defaults in code, so an
+// empty string / nil pointer means "use the default".
+type ConfigScheduling struct {
+	CircuitThreshold   *int   `json:"circuit_threshold"`
+	CircuitCooldown    string `json:"circuit_cooldown"`
+	RateLimitBackoff   string `json:"rate_limit_backoff"`
+	QuotaCooldown      string `json:"quota_cooldown"`
+	ModelLockout       string `json:"model_lockout"`
+	RetryWait          string `json:"retry_wait"`
+	UpstreamTimeout    string `json:"upstream_timeout"`
+	StickyDwell        string `json:"sticky_dwell"`
+	QuotaPollInterval  string `json:"quota_poll_interval"`
+	QuotaSwitchMargin  *int   `json:"quota_switch_margin"`
+	QualityErrorWeight *int   `json:"quality_error_weight"`
+	QualityTTFTWeight  *int   `json:"quality_ttft_weight"`
+}
+
+// ConfigRequestLog mirrors request_log.* (whole block is restart-only).
+type ConfigRequestLog struct {
+	Enabled      bool   `json:"enabled"`
+	Dir          string `json:"dir"`
+	MaxFileSize  int64  `json:"max_file_size"`
+	MaxBodyBytes int    `json:"max_body_bytes"`
+	Retention    string `json:"retention"`
+}
+
+// ConfigStats mirrors stats.* (db_path/retention are restart-only).
+type ConfigStats struct {
+	DBPath    string `json:"db_path"`
+	Retention string `json:"retention"`
+}
+
+// ConfigCache mirrors cache.* (hot-reloadable).
+type ConfigCache struct {
+	Enabled      bool   `json:"enabled"`
+	TTL          string `json:"ttl"`
+	MaxEntries   int    `json:"max_entries"`
+	MaxBodyBytes int    `json:"max_body_bytes"`
 }
 
 // ModelProtocols is one model's three-protocol probe verdict matrix, with each

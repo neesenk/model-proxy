@@ -643,6 +643,74 @@ func TestConfigDocument(t *testing.T) {
 	if len(targets) != 1 || targets[0].Provider != "zhipu" || targets[0].Model != "glm" || targets[0].Priority != 1 {
 		t.Errorf("routes = %v", document.Routes)
 	}
+	// Settings project the effective log level (loader default) and keep unset
+	// scheduling scalars as null pointers so the form can show the code default.
+	if document.Settings.LogLevel != "info" {
+		t.Errorf("settings log_level = %q, want effective default info", document.Settings.LogLevel)
+	}
+	if document.Settings.Scheduling.CircuitThreshold != nil {
+		t.Errorf("unset circuit_threshold = %v, want nil", *document.Settings.Scheduling.CircuitThreshold)
+	}
+	if document.Settings.RequestLog.Enabled || document.Settings.Cache.Enabled {
+		t.Errorf("settings enabled flags = %+v, want false", document.Settings)
+	}
+}
+
+// TestConfigDocumentSettings pins the raw scalar projection for the blocks the
+// Config tab's settings form edits (empty = key absent, so the form shows the
+// code default as a placeholder).
+func TestConfigDocumentSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	config := `listen: 127.0.0.1:8080
+log_level: debug
+log_file: /tmp/mp.log
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://example.test, models: [glm]}
+scheduling:
+  circuit_threshold: 5
+  circuit_cooldown: 2m
+  quality_error_weight: 0
+request_log:
+  enabled: true
+  retention: 720h
+stats:
+  retention: 0
+cache:
+  enabled: true
+  max_entries: 6000
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := New(Ports{ConfigFile: func() string { return path }})
+	document, err := service.ConfigDocument()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := document.Settings
+	if settings.LogLevel != "debug" || settings.LogFile != "/tmp/mp.log" {
+		t.Errorf("general settings = %+v", settings)
+	}
+	if settings.Scheduling.CircuitThreshold == nil || *settings.Scheduling.CircuitThreshold != 5 {
+		t.Errorf("circuit_threshold = %v", settings.Scheduling.CircuitThreshold)
+	}
+	if settings.Scheduling.CircuitCooldown != "2m" {
+		t.Errorf("circuit_cooldown = %q", settings.Scheduling.CircuitCooldown)
+	}
+	// An explicit 0 must survive as a non-nil pointer (it disables the signal).
+	if settings.Scheduling.QualityErrorWeight == nil || *settings.Scheduling.QualityErrorWeight != 0 {
+		t.Errorf("quality_error_weight = %v, want explicit 0", settings.Scheduling.QualityErrorWeight)
+	}
+	if !settings.RequestLog.Enabled || settings.RequestLog.Retention != "720h" {
+		t.Errorf("request_log = %+v", settings.RequestLog)
+	}
+	if settings.Stats.Retention != "0" {
+		t.Errorf("stats retention = %q, want \"0\"", settings.Stats.Retention)
+	}
+	if !settings.Cache.Enabled || settings.Cache.MaxEntries != 6000 {
+		t.Errorf("cache = %+v", settings.Cache)
+	}
 }
 
 func TestConfigDocumentErrors(t *testing.T) {

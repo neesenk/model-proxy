@@ -367,6 +367,61 @@ main {
 .field.check { grid-template-columns: auto 1fr; align-items: center; gap: 8px; }
 .field.check input { width: auto; }
 
+/* Settings form: .field carries a bottom margin for stacked layouts; inside a
+   .grid row the grid gap already spaces fields, so drop the double spacing. */
+.settings-grid .field { margin-bottom: 0; }
+.settings-note { font-size: 11px; color: var(--muted); margin: 8px 0 0; }
+
+/* Settings groups: one padded section per block, separated by a hairline so
+   Scheduling / Request log / Stats / Cache read as distinct groups instead of
+   one continuous field wall. */
+.settings-group { padding: 16px 0; border-top: 1px solid var(--border-2); }
+.settings-group:first-child { padding-top: 0; border-top: 0; }
+.settings-group > .section-title { margin-bottom: 10px; }
+.settings-actions { margin-top: 0; }
+
+/* Field label row: label + click-to-open info button. Borderless icon that
+   tints on hover/open keeps 25 fields from reading as a wall of badges; the
+   icon is one step smaller than the label and hugs it (tight gap + no extra
+   button chrome). */
+.field-head { display: flex; align-items: center; gap: 2px; }
+.help-btn {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .12s ease, background-color .12s ease;
+}
+.help-btn svg { width: 11px; height: 11px; display: block; }
+.help-btn:hover { color: var(--accent); background: var(--surface-2); }
+.help-btn[aria-expanded="true"] { color: var(--accent); background: var(--surface-2); }
+.help-btn:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent); outline-offset: 1px; }
+
+/* Floating help popover (fixed positioning so it escapes the details card). */
+.help-popover {
+  position: fixed;
+  z-index: 60;
+  max-width: 320px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.help-popover p { margin: 0; }
+.help-popover .help-popover-def { margin-top: 6px; color: var(--muted); font-size: 11px; }
+.help-popover-def code { font-family: var(--mono); color: var(--text); }
+
 textarea.yaml {
   width: 100%;
   height: 480px;
