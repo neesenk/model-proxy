@@ -83,6 +83,21 @@ func containsFold(value, substring string) bool {
 	return strings.Contains(strings.ToLower(value), strings.ToLower(substring))
 }
 
+// rawPrefilter is a cheap byte-level gate before json.Unmarshal. A RequestID or
+// Session query only admits lines that literally contain the value, so a
+// multi-MB body line that cannot match skips the decode (and its body string
+// allocations) entirely. A false positive — the value appearing inside a body —
+// is still rejected by Filter.matches after decoding.
+func rawPrefilter(line []byte, filter Filter) bool {
+	if filter.RequestID != "" && !bytes.Contains(line, []byte(filter.RequestID)) {
+		return false
+	}
+	if filter.Session != "" && !bytes.Contains(line, []byte(filter.Session)) {
+		return false
+	}
+	return true
+}
+
 // QueryRecords streams every request-log file and returns matching full records
 // newest first. A positive limit retains only a timestamp top-K in memory.
 //
@@ -100,7 +115,76 @@ func containsFold(value, substring string) bool {
 // letting an older-named file hold newer records) stays tolerated: every file
 // is peeked independently.
 func QueryRecords(dir string, filter Filter) ([]Record, error) {
-	return query(dir, filter, false)
+	return query(dir, filter, false, nil)
+}
+
+// Facets are the distinct providers and models observed in the scanned
+// request-log window. The filter dropdowns must offer what actually appears in
+// the log, NOT the configured provider/model catalog (config can list models
+// with no traffic yet, and the log can hold models since removed from config).
+// ProviderModels maps each provider to the models seen with it, so the UI can
+// link the provider and model dropdowns from data.
+type Facets struct {
+	Providers      []string            `json:"providers"`
+	Models         []string            `json:"models"`
+	ProviderModels map[string][]string `json:"provider_models"`
+}
+
+// facetCollector accumulates the distinct values during one scan. It is fed
+// every decoded record BEFORE filter.matches, so the dropdowns are not narrowed
+// by the currently applied model/provider filter.
+type facetCollector struct {
+	providers  map[string]bool
+	models     map[string]bool
+	byProvider map[string]map[string]bool
+}
+
+func newFacetCollector() *facetCollector {
+	return &facetCollector{
+		providers:  map[string]bool{},
+		models:     map[string]bool{},
+		byProvider: map[string]map[string]bool{},
+	}
+}
+
+func (c *facetCollector) add(record Record) {
+	model := record.Exposed
+	if model == "" {
+		model = record.CalledModel
+	}
+	if record.Provider != "" {
+		c.providers[record.Provider] = true
+	}
+	if model != "" {
+		c.models[model] = true
+	}
+	if record.Provider != "" && model != "" {
+		if c.byProvider[record.Provider] == nil {
+			c.byProvider[record.Provider] = map[string]bool{}
+		}
+		c.byProvider[record.Provider][model] = true
+	}
+}
+
+func (c *facetCollector) facets() Facets {
+	out := Facets{
+		Providers:      sortedFacetKeys(c.providers),
+		Models:         sortedFacetKeys(c.models),
+		ProviderModels: make(map[string][]string, len(c.byProvider)),
+	}
+	for provider, models := range c.byProvider {
+		out.ProviderModels[provider] = sortedFacetKeys(models)
+	}
+	return out
+}
+
+func sortedFacetKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // peekLastRecordTs reads only the trailing chunk of the JSONL file at path and
@@ -195,7 +279,7 @@ func peekFirstRecordTs(path string) (string, bool) {
 	return record.Ts, true
 }
 
-func query(dir string, filter Filter, metadataOnly bool) ([]Record, error) {
+func query(dir string, filter Filter, metadataOnly bool, facets *facetCollector) ([]Record, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -217,7 +301,8 @@ func query(dir string, filter Filter, metadataOnly bool) ([]Record, error) {
 	if filter.Limit > 0 {
 		newest = &timestampMinHeap{}
 	}
-	for i := len(names) - 1; i >= 0; i-- {
+	found := false
+	for i := len(names) - 1; i >= 0 && !found; i-- {
 		path := filepath.Join(dir, names[i])
 		lastTs, lastOK := peekLastRecordTs(path)
 		firstTs, firstOK := peekFirstRecordTs(path)
@@ -253,23 +338,35 @@ func query(dir string, filter Filter, metadataOnly bool) ([]Record, error) {
 		reader := bufio.NewReaderSize(file, 64*1024)
 		for {
 			line, readErr := reader.ReadBytes('\n')
-			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
+			if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 && rawPrefilter(trimmed, filter) {
 				var record Record
-				if json.Unmarshal(trimmed, &record) == nil && filter.matches(record) {
-					if metadataOnly || filter.UsageOnly {
-						if filter.UsageOnly {
-							record.ParsedUsage = ExtractUsage(record.ResponseBody)
-						}
-						record.RequestBody = ""
-						record.ResponseBody = ""
-						record.ResponseHeaders = ""
+				if json.Unmarshal(trimmed, &record) == nil {
+					if facets != nil {
+						facets.add(record)
 					}
-					if newest == nil {
-						records = append(records, record)
-					} else {
-						heap.Push(newest, record)
-						if newest.Len() > filter.Limit {
-							heap.Pop(newest)
+					if filter.matches(record) {
+						if metadataOnly || filter.UsageOnly {
+							if filter.UsageOnly {
+								record.ParsedUsage = ExtractUsage(record.ResponseBody)
+							}
+							record.RequestBody = ""
+							record.ResponseBody = ""
+							record.ResponseHeaders = ""
+						}
+						if newest == nil {
+							records = append(records, record)
+						} else {
+							heap.Push(newest, record)
+							if newest.Len() > filter.Limit {
+								heap.Pop(newest)
+							}
+						}
+						// A request_id identifies exactly one record, so once it is found
+						// no other file or line can add anything — stop scanning (this is
+						// what makes opening a record in the UI cheap on a multi-GB log).
+						if filter.RequestID != "" {
+							found = true
+							break
 						}
 					}
 				}

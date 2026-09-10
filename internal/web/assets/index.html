@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>model-proxy</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="vendor/codemirror.min.css">
   <link rel="stylesheet" href="vendor/uPlot.min.css">
@@ -24,7 +25,6 @@
         <button data-tab="analytics" class="tab"      role="tab" aria-selected="false">Analytics</button>
         <button data-tab="requests" class="tab"       role="tab" aria-selected="false">Requests</button>
         <button data-tab="security" class="tab"       role="tab" aria-selected="false">Security</button>
-        <button data-tab="live" class="tab"            role="tab" aria-selected="false">Live</button>
       </nav>
     </div>
   </header>
@@ -36,7 +36,6 @@
     <section id="tab-analytics" class="tab-panel"       role="tabpanel" aria-label="Analytics"></section>
     <section id="tab-requests" class="tab-panel"        role="tabpanel" aria-label="Requests"></section>
     <section id="tab-security" class="tab-panel"        role="tabpanel" aria-label="Security"></section>
-    <section id="tab-live" class="tab-panel"            role="tabpanel" aria-label="Live"></section>
   </main>
 
   <dialog id="login-modal" aria-labelledby="login-title">
@@ -50,6 +49,8 @@
   </dialog>
 
   <dialog id="add-modal" aria-labelledby="add-title"></dialog>
+
+  <dialog id="confirm-modal" aria-labelledby="confirm-title"></dialog>
 
   <dialog id="admin-auth-modal" aria-labelledby="admin-auth-title">
     <form id="admin-auth-form">

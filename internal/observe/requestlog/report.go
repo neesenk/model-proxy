@@ -14,11 +14,16 @@ type Summary struct {
 	CalledModel   string `json:"called_model"`
 	UpstreamModel string `json:"upstream_model"`
 	Provider      string `json:"provider"`
+	Agent         string `json:"agent"`
 	Attempt       int    `json:"attempt"`
 	Status        int    `json:"status"`
 	LatencyMs     int64  `json:"latency_ms"`
 	RequestSize   int    `json:"request_size"`
 	ResponseSize  int64  `json:"response_size"`
+	Input         uint64 `json:"input,omitempty"`
+	Output        uint64 `json:"output,omitempty"`
+	CacheRead     uint64 `json:"cache_read,omitempty"`
+	CacheCreation uint64 `json:"cache_creation,omitempty"`
 	Shadow        bool   `json:"shadow,omitempty"`
 }
 
@@ -29,8 +34,10 @@ func Summarize(record Record) Summary {
 		Protocol: record.Protocol, Method: record.Method, Path: record.Path,
 		Exposed: record.Exposed, CalledModel: record.CalledModel,
 		UpstreamModel: record.UpstreamModel, Provider: record.Provider,
-		Attempt: record.Attempt, Status: record.Status, LatencyMs: record.LatencyMs,
+		Agent: record.Agent, Attempt: record.Attempt, Status: record.Status, LatencyMs: record.LatencyMs,
 		RequestSize: record.RequestSize, ResponseSize: record.ResponseSize,
+		Input: record.ParsedUsage.Input, Output: record.ParsedUsage.Output,
+		CacheRead: record.ParsedUsage.CacheRead, CacheCreation: record.ParsedUsage.CacheCreation,
 		Shadow: record.Shadow,
 	}
 }
@@ -38,7 +45,7 @@ func Summarize(record Record) Summary {
 // QuerySummaries returns list-safe metadata. Bodies and response headers are
 // discarded before top-K retention, so memory is bounded by metadata size.
 func QuerySummaries(dir string, filter Filter) ([]Summary, error) {
-	records, err := query(dir, filter, true)
+	records, err := query(dir, filter, true, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -47,6 +54,24 @@ func QuerySummaries(dir string, filter Filter) ([]Summary, error) {
 		summaries = append(summaries, Summarize(record))
 	}
 	return summaries, nil
+}
+
+// QuerySummariesWithFacets is QuerySummaries plus the data-driven filter
+// facets: the distinct providers/models observed in the scanned window (and
+// the provider→models mapping for the linked dropdowns). Facets are collected
+// from every decoded record before the request's own model/provider filter is
+// applied, so the dropdowns never narrow themselves into a dead end.
+func QuerySummariesWithFacets(dir string, filter Filter) ([]Summary, Facets, error) {
+	collector := newFacetCollector()
+	records, err := query(dir, filter, true, collector)
+	if err != nil {
+		return nil, Facets{}, err
+	}
+	summaries := make([]Summary, 0, len(records))
+	for _, record := range records {
+		summaries = append(summaries, Summarize(record))
+	}
+	return summaries, collector.facets(), nil
 }
 
 // ShadowReportEntry aggregates paired primary/shadow observations.
@@ -66,7 +91,7 @@ type ShadowReportEntry struct {
 // ShadowReport pairs primary records with shadow-<request-id> records and
 // aggregates them by route and provider pair.
 func ShadowReport(dir string, filter Filter) ([]ShadowReportEntry, error) {
-	records, err := query(dir, filter, true)
+	records, err := query(dir, filter, true, nil)
 	if err != nil {
 		return nil, err
 	}

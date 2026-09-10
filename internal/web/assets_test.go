@@ -147,7 +147,11 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 		"function analyticsSave(name, val)",
 		"function analyticsRenderHints(panel, resp)",
 		"function analyticsRenderCharts(panel, resp)",
-		"function analyticsRenderTable(panel, resp)",
+		"function analyticsRenderCostTable(panel, resp)",
+		"analyticsChartSeries(",
+		"analyticsChartColors()",
+		"stroke, width: 1.5",
+		"id=\"an-cost-table\"",
 		"if (name === 'analytics') renderAnalyticsTab();",
 		"apiGet('/api/analytics?'",
 		"price_coverage",
@@ -161,7 +165,7 @@ func TestWebAssetsAnalyticsTabContract(t *testing.T) {
 
 func TestWebAssetsEmbeddedAndOffline(t *testing.T) {
 	for _, name := range []string{
-		"index.html", "app.js", "pure.js", "styles.css", "vendor/codemirror.min.js",
+		"index.html", "app.js", "pure.js", "styles.css", "icon.svg", "vendor/codemirror.min.js",
 		"vendor/codemirror.min.css", "vendor/uPlot.min.js", "vendor/uPlot.min.css",
 		"vendor/yaml.min.js", "vendor/closebrackets.min.js", "vendor/matchbrackets.min.js",
 		"vendor/README.md",
@@ -174,5 +178,97 @@ func TestWebAssetsEmbeddedAndOffline(t *testing.T) {
 		if strings.Contains(mustWebAsset(t, name), "https://") || strings.Contains(mustWebAsset(t, name), "http://") {
 			t.Errorf("%s contains a runtime CDN URL", name)
 		}
+	}
+}
+
+// TestWebAssetsLiveSessionContract protects the Live session-analysis wiring:
+// the session selector/panel exist, the pure summary helper is used, and the
+// persisted session query is wired to the documented endpoint.
+func TestWebAssetsLiveSessionContract(t *testing.T) {
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		`id="live-session"`,
+		`id="live-session-panel"`,
+		"function onLiveSessionChange(",
+		"function renderLiveSessionPanel(",
+		"liveSessionSummary(",
+		"apiGet('/api/requests?session='",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+}
+
+// TestWebAssetsBodyViewerContract protects the request/response body viewer
+// regressions: the body box must be tall with a visible scrollbar, the
+// long-line collapse threshold must leave ordinary prose readable, and chunk
+// loading must keep appending when a chunk renders collapsed (near-zero
+// height) content instead of stalling with the scrollbar already at the end.
+func TestWebAssetsBodyViewerContract(t *testing.T) {
+	css := mustWebAsset(t, "styles.css")
+	for _, want := range []string{
+		"max-height: min(70vh, 760px)",
+		"scrollbar-width: thin",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("styles.css missing %q", want)
+		}
+	}
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		"const BODY_LONG_LINE = 4000;",
+		"for (let guard = 0; guard < 64; guard += 1)",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+}
+
+// TestWebAssetsRequestsSessionContract protects the Requests-tab session
+// drill-down: a session selector + summary strip, the session query param, and
+// the shared summary renderer (also used by the Live session panel).
+func TestWebAssetsRequestsSessionContract(t *testing.T) {
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		`id="req-session"`,
+		`id="req-session-summary"`,
+		"function renderRequestsSessionSummary(",
+		"function sessionSummaryHTML(",
+		"q.set('session', requestsFilter.session)",
+		"renderRequestsSessionSummary(combos)",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	// The Live panel must reuse the shared summary renderer, not a second copy.
+	if !strings.Contains(js, "sessionSummaryHTML(s)") {
+		t.Errorf("app.js: Live session panel should reuse sessionSummaryHTML")
+	}
+}
+
+// TestWebAssetsLiveDetailErrorTerminal protects the 404 fetch-loop fix: the
+// Live post-render pass must consult shouldFetchDetail (which treats a recorded
+// error or a 404 as terminal) instead of unconditionally re-fetching open rows,
+// and a 404/notLogged must render as a neutral hint, not a red error.
+func TestWebAssetsLiveDetailErrorTerminal(t *testing.T) {
+	js := mustWebAsset(t, "app.js")
+	for _, want := range []string{
+		"shouldFetchDetail,",
+		"detailFetchState,",
+		"if (state.notLogged)",
+		"not logged — the request did not commit",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q", want)
+		}
+	}
+	if got := strings.Count(js, "if (!shouldFetchDetail("); got != 2 {
+		t.Errorf("app.js should gate both live detail ensure paths with shouldFetchDetail, got %d", got)
+	}
+	if got := strings.Count(js, "detailFetchState(e.status, e.message)"); got != 2 {
+		t.Errorf("app.js should normalize both live detail fetch failures with detailFetchState, got %d", got)
 	}
 }

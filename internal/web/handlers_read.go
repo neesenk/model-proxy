@@ -90,11 +90,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
 	dir := s.reads.RequestLogDirectory()
 	if dir == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "records": []any{}})
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "records": []any{}, "facets": requestlog.Facets{Providers: []string{}, Models: []string{}, ProviderModels: map[string][]string{}}})
 		return
 	}
 	q := r.URL.Query()
-	f := requestlog.Filter{Model: q.Get("model"), Provider: q.Get("provider"), ErrorsOnly: q.Get("errors") != "", Limit: 100}
+	f := requestlog.Filter{Model: q.Get("model"), Provider: q.Get("provider"), Session: q.Get("session"), ErrorsOnly: q.Get("errors") != "", Limit: 100}
 	if v := q.Get("shadow"); v == "only" || v == "exclude" {
 		f.Shadow = v
 	}

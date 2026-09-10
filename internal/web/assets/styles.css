@@ -28,6 +28,20 @@
   --acct-c2-bg: #ecf6ee; --acct-c2-bd: #3a7a44;
   --acct-c3-bg: #fbf0e8; --acct-c3-bd: #9a6b3a;
 
+  /* Analytics chart palette (categorical, cycled per series). Kept here so all
+     colors live in :root; app.js reads them via getComputedStyle for the uPlot
+     canvas strokes (uPlot does not auto-assign series colors). */
+  --chart-0: #2563eb;
+  --chart-1: #dc2626;
+  --chart-2: #16a34a;
+  --chart-3: #9333ea;
+  --chart-4: #ea580c;
+  --chart-5: #0891b2;
+  --chart-6: #ca8a04;
+  --chart-7: #db2777;
+  --chart-8: #4f46e5;
+  --chart-9: #059669;
+
   /* Logs: line-number gutter background (distinct from .log-pre surface). */
   --lognum-bg: #eef0f3;
 
@@ -191,6 +205,7 @@ main {
 }
 .card-head h2 { font-size: 13px; }
 .card-head .meta { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.card-head-side { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .card > .card-body { padding: 12px 14px; }
 .card-body.flush { padding: 0; }
 .card-body.tight { padding: 8px 14px; }
@@ -214,7 +229,6 @@ main {
   border: 1px solid transparent;
   white-space: nowrap;
 }
-.pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .pill.ok    { color: var(--ok-fg);  background: var(--ok-bg);  }
 .pill.warn  { color: var(--warn-fg);background: var(--warn-bg);}
 .pill.err   { color: var(--err-fg); background: var(--err-bg); }
@@ -240,6 +254,109 @@ main {
 .table td.num, .table th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .table td.mono, .table th.mono { font-family: var(--mono); font-size: 12px; }
 .table .subdue { color: var(--muted); }
+
+/* Requests: a summary row expands its full record in a detail row directly
+   below it (same table, so the detail stays visually attached to the click).
+   Clicking the row again collapses it; multiple rows can stay open at once. */
+.req-row { cursor: pointer; }
+.req-row:hover > td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.req-row.req-open > td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.req-detail-row > td { background: var(--surface-2); padding: 10px 12px; }
+.req-rec { font-size: 12px; }
+.req-rec + .req-rec { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-2); }
+.req-rec > .hint { margin-bottom: 6px; }
+.req-rec details { margin-top: 6px; }
+.req-rec summary { cursor: pointer; color: var(--muted); }
+.req-rec summary:hover { color: var(--text); }
+
+/* Live monitor rows reuse the Requests detail idiom: clickable summary rows
+   with an attached detail row that survives full-table re-renders. */
+.live-row { cursor: pointer; }
+.live-row:hover > td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.live-row.live-open > td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+
+/* Live session mode: toolbar + summary chips above the per-session table. */
+.live-toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.live-toolbar label { text-transform: uppercase; letter-spacing: .04em; }
+.live-session-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.live-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-pill);
+  padding: 2px 9px;
+}
+#live-session-panel { margin-top: 2px; }
+#live-session-panel .hint + .hint { margin-top: 2px; }
+#live-session-panel table.table { margin-top: 10px; }
+.live-detail-row > td { background: var(--surface-2); padding: 10px 12px; }
+#live-spacer { height: 80vh; }
+.live-guard-section { margin-bottom: 10px; }
+.live-guard-hit { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+.live-guard-hit .mono { color: var(--muted); }
+.live-guard-hit .badge { flex: none; }
+
+.live-response-section { margin-bottom: 10px; }
+.live-response-pre {
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+/* Captured bodies: drop the log gutter gradient (no line numbers here) and
+   give JSON/SSE a normal code surface. */
+.log-pre.body-pre { padding: 10px 12px; background: var(--surface-2); }
+/* Request/response body viewers get a tall, obviously scrollable box: the
+   shared 340px cap hid the overlay scrollbar on macOS and made a multi-MB body
+   look truncated. A visible thin scrollbar plus most-of-the-viewport height
+   makes "scroll for the rest" discoverable. */
+.req-detail-row .log-pre,
+.live-detail-row .log-pre {
+  max-height: min(70vh, 760px);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.req-detail-row .log-pre::-webkit-scrollbar,
+.live-detail-row .log-pre::-webkit-scrollbar { width: 10px; height: 10px; }
+.req-detail-row .log-pre::-webkit-scrollbar-thumb,
+.live-detail-row .log-pre::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+.req-detail-row .log-pre::-webkit-scrollbar-track,
+.live-detail-row .log-pre::-webkit-scrollbar-track { background: transparent; }
+.code-json .j-key { color: var(--accent); }
+.code-json .j-num { color: var(--muted); }
+.code-json .j-lit { color: var(--muted); font-style: italic; }
+
+/* A single over-long line (huge JSON string value) collapses into a <details>
+   so it can be read on demand instead of scrolling horizontally forever. */
+.json-long { margin: 4px 0; }
+.json-long > summary { cursor: pointer; color: var(--muted); }
+.json-long > summary:hover { color: var(--accent); }
+.json-long-meta { color: var(--muted); font-size: 11px; }
+.json-long-body {
+  margin: 6px 0 6px 12px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-2);
+  border-radius: var(--r-card);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* No inner scroll: expanded content flows into the surrounding body viewer
+     so one scroll (the viewer) reaches the whole value instead of trapping the
+     wheel in a nested 300px box. */
+}
 
 /* ---------- progress / quota bars ---------- */
 .bar-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; margin-bottom: 10px; }
@@ -281,7 +398,42 @@ main {
 }
 .route-node.first { border-color: var(--accent); color: var(--accent-ink); }
 .route-node.sticky { border-style: dashed; }
+.route-node.pinned { border-color: var(--warn); color: var(--warn-fg); }
 .route-node.unavailable { text-decoration: line-through; color: var(--muted); }
+.route-pin { color: var(--warn-fg); font-weight: 500; }
+.route-pin-wrap { position: relative; margin-left: 4px; }
+.route-pin-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  width: max-content;
+  max-width: 260px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: 0 4px 16px rgba(0,0,0,.18);
+}
+.route-pin-menu[hidden] { display: none; }
+.route-pin-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+.route-pin-item:hover { background: var(--surface-2); color: var(--accent-ink); }
+.route-pin-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .route-sep { color: var(--muted); padding: 0 2px; }
 .route-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
 
@@ -542,6 +694,15 @@ textarea.yaml {
   color: var(--err-fg);
 }
 .btn.danger:hover { background: var(--err-bg); }
+.btn.danger-solid {
+  background: var(--err);
+  border-color: var(--err);
+  color: #fff;
+}
+.btn.danger-solid:hover {
+  background: color-mix(in srgb, var(--err) 85%, #000);
+  border-color: color-mix(in srgb, var(--err) 85%, #000);
+}
 .btn.small { padding: 3px 8px; font-size: 12px; }
 .link-btn {
   appearance: none;
@@ -590,6 +751,84 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
 
 .row-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
 .spacer { flex: 1; }
+
+/* toolbar form controls (Requests/Security filters, preset wizard): these
+   <input>/<select> elements sit outside .field/.route-target-row, so without
+   this rule they render with OS-native chrome that clashes with the theme.
+   Same visual language as .field/.route-target-row controls (surface-2 fill,
+   border, focus ring), but auto-width for inline toolbars. max-width keeps a
+   long option/label from stretching the row. */
+.req-input {
+  max-width: 320px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-overflow: ellipsis;
+}
+.req-input:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+.req-input::placeholder { color: var(--muted); }
+
+/* One control height for a filter toolbar. Without it each control sizes to
+   its own padding (input 33.5px, select 32px, .btn 35.5px), so the row reads
+   ragged even though align-items centers them. */
+.req-controls .req-input,
+.req-controls .btn,
+.req-controls > label { height: 34px; }
+.req-controls > label { display: inline-flex; align-items: center; gap: 4px; }
+
+/* Searchable dropdown: a themed menu aligned to the input (the native
+   <datalist> popup is browser chrome we cannot position or style). The caret
+   is a CSS triangle so it follows the theme. */
+.combo { position: relative; display: inline-flex; }
+.combo .req-input { padding-right: 26px; }
+.combo::after {
+  content: '';
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.combo-menu {
+  position: fixed;
+  z-index: 70;
+  max-height: 260px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow);
+}
+.combo-option {
+  padding: 6px 10px;
+  border-radius: calc(var(--r-card) - 2px);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.combo-option:hover,
+.combo-option.active { background: var(--surface-2); color: var(--accent); }
+.combo-empty { padding: 6px 10px; font-size: 12px; color: var(--muted); }
+
+/* checkboxes: keep the native control (accessibility, keyboard/focus behavior
+   for free) but tint it with the theme accent instead of the OS default blue
+   — one rule covers every checkbox in the UI (req-errors, add-replace, …). */
+input[type="checkbox"] { accent-color: var(--accent); }
 .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px 0; font-weight: 500; }
 
 /* ---------- accounts ---------- */
@@ -670,6 +909,10 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
 .acct-main { min-width: 0; }
 /* status detail pane (mirrors .acct-main; the sidebar reuses .acct-nav) */
 .status-main { min-width: 0; }
+/* Cards have no margin of their own; sections stacking more than one card
+   (Token Usage renders the Token usage + Agents tables) need the same
+   14px vertical rhythm the Config tab uses (#tab-config > .card). */
+.status-main > .card { margin-bottom: 14px; }
 
 /* status sidebar — visually identical to .acct-nav but a DISTINCT class so the
    Accounts tab's global querySelector('.acct-nav' / '.acct-nav-item') can never
@@ -751,12 +994,23 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
 .prov-account.prov-acct-c3 { background: var(--acct-c3-bg); border-left-color: var(--acct-c3-bd); }
 .prov-accounts-row + tr > td { border-top: none; }
 
-/* Models card (Status → Models): one block per probed provider — a head row
-   with the config fingerprint + last probe time, then a model × protocol
-   verdict table. Verdict pills reuse the shared .pill ok/err/muted palette. */
-.model-caps-provider + .model-caps-provider { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-2); }
-.model-caps-head { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; padding: 2px 2px 8px; }
-.model-caps-head .subdue { color: var(--muted); font-size: 12px; }
+/* Models section (Status → Models): one card per probed provider — the card
+   head carries the provider name + config fingerprint + last probe time +
+   Refresh action, the body is the model × protocol verdict table. Verdict
+   pills reuse the shared .pill ok/err/muted palette. Cards stack with the
+   .status-main > .card spacing. */
+/* The card body is flush (no padding); align the table's outermost cells with
+   the card-head's 14px inset. */
+/* Each provider renders its own full-width table; auto layout would size the
+   chat/anthropic/responses columns per-table content and misalign the pills
+   across providers. Fixed layout keeps them aligned across cards AND fills
+   the card: the model column gets 30%, the three protocol columns share the
+   rest equally. Long model ids wrap rather than overflow. */
+.model-caps .table { table-layout: fixed; }
+.model-caps .table th:first-child { width: 30%; }
+.model-caps .table td:first-child { overflow-wrap: anywhere; }
+.model-caps .table th:first-child, .model-caps .table td:first-child { padding-left: 14px; }
+.model-caps .table th:last-child, .model-caps .table td:last-child { padding-right: 14px; }
 .model-caps-empty { color: var(--muted); }
 @media (max-width: 720px) {
   .status-layout { grid-template-columns: 1fr; }
@@ -839,6 +1093,96 @@ details.editor > .editor-body { padding: 12px 14px; border-top: 1px solid var(--
 .acct-tokens td, .acct-tokens th { padding: 5px 10px; }
 .acct-totals td { font-weight: 600; border-top: 2px solid var(--border); color: var(--text); }
 .acct-totals td:first-child { font-family: var(--sans); text-transform: uppercase; font-size: 11px; letter-spacing: .04em; color: var(--muted); }
+
+/* Agents card: per-agent summary row with per-(provider, model) breakdown
+   rows nested underneath. */
+.agent-summary td { font-weight: 600; border-top: 1px solid var(--border); }
+.agent-model td:first-child { padding-left: 1.75em; color: var(--muted); }
+
+/* Token usage toolbar: the time-dimension picker on the left, the Reset
+   counters action on the right — one row above the Token usage/Agents cards. */
+.tokens-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.tokens-toolbar .tr-wrap { margin-bottom: 0; }
+/* Time-dimension picker (token usage): trigger button + popover with a preset
+   column on the left and a two-month calendar on the right. */
+.tr-wrap { position: relative; display: inline-block; margin-bottom: 12px; }
+.tr-trigger { display: inline-flex; align-items: center; gap: 6px; }
+.tr-caption { color: var(--muted); }
+.tr-value { font-weight: 600; }
+.tr-chevron { color: var(--muted); font-size: 10px; }
+.tr-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  box-shadow: 0 4px 16px rgba(0,0,0,.18);
+}
+.tr-popover[hidden] { display: none; }
+.tr-presets { display: grid; gap: 2px; align-content: start; min-width: 120px; }
+.tr-preset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.tr-preset:hover { background: var(--surface-2); }
+.tr-preset.active { color: var(--accent-ink); font-weight: 600; }
+.tr-check { width: 1em; color: var(--accent); }
+.tr-cal { display: flex; gap: 8px; align-items: flex-start; }
+.tr-months { display: flex; gap: 16px; }
+.tr-month-title { text-align: center; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.tr-grid { border-collapse: collapse; }
+.tr-grid th {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 2px 0;
+  width: 30px;
+  text-align: center;
+}
+.tr-grid td { padding: 1px; text-align: center; }
+.tr-day {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tr-day:hover:not(:disabled) { background: var(--surface-2); }
+.tr-day:disabled { color: var(--muted); opacity: .45; cursor: default; }
+/* Selected start/end: solid inverted circle (adapts to dark mode via the
+   text/surface variables — the reference's black circle / white number). */
+.tr-day-selected,
+.tr-day-selected:hover:not(:disabled) { background: var(--text); color: var(--surface); }
+.tr-day-inrange { background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 4px; }
+.tr-blank { width: 30px; }
+.tr-nav {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 16px;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.tr-nav:hover:not(:disabled) { color: var(--text); }
+.tr-nav:disabled { opacity: .3; cursor: default; }
 
 .account-row {
   display: grid;
@@ -997,14 +1341,10 @@ dialog::backdrop { background: rgba(0,0,0,.45); backdrop-filter: blur(2px); }
 }
 .an-chart .uplot .u-title { font-size: 12px; color: var(--text); }
 .an-chart .uplot .u-legend { font-size: 11px; }
-.an-table {
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.5;
+.an-cost-table {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 10px 14px;
   overflow-x: auto;
-  margin: 0;
 }

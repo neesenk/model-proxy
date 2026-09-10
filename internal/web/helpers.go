@@ -23,6 +23,10 @@ func contentTypeFor(name string) string {
 		return "text/javascript; charset=utf-8"
 	case strings.HasSuffix(name, ".css"):
 		return "text/css; charset=utf-8"
+	case strings.HasSuffix(name, ".svg"):
+		// Browsers refuse octet-stream images under X-Content-Type-Options:
+		// nosniff, so the favicon needs its real MIME type.
+		return "image/svg+xml"
 	default:
 		return "application/octet-stream"
 	}

@@ -18,7 +18,14 @@
 import {
   esc, fmtNum, avgLatencyMs, hasReset, fmtDur, untilHuman,
   YAML_EDITOR_MIN_HEIGHT, visibleYamlEditorHeight,
-  verdictBadge, modelCapMatrix,
+  verdictBadge, modelCapMatrix, providerFrozen, providerNames, cacheHitRate,
+  settingsDiff, settingsRestartKeys, TOKEN_RANGES, tokensRangeQuery, tokenRangeLabel,
+  tokenRangeTriggerLabel, parseLocalDate, WEEKDAYS, monthTitle, calendarMonthGrid,
+  twoMonthWindow, shiftMonth, ymd, isFutureDay, rangePick,
+  parseSSE, isSSE, prettyJSON, highlightJSON, splitLinesByBudget, linkedModels,
+  analyticsChartSeries, liveSessionSummary,
+  fmtGuardDetail, fmtProgressBytes, mergeLiveAndPersistedRow, shouldFetchDetail,
+  detailFetchState,
 } from './pure.js';
 
 function el(tag, opts = {}) {
@@ -72,6 +79,16 @@ function fmtUnix(sec) {
   const d = new Date(sec * 1000);
   if (isNaN(d.getTime())) return '—';
   return d.toLocaleTimeString('en-US', { hour12: false });
+}
+
+// fmtSinceDate renders a unix-seconds anchor as the compact "YY-MM-DD HH:MM"
+// used by the cumulative usage cards' "Since …" label (e.g. Since 26-09-04 14:15).
+function fmtSinceDate(sec) {
+  if (!sec) return '';
+  const d = new Date(sec * 1000);
+  if (isNaN(d.getTime())) return '';
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  return `${p(d.getFullYear() % 100)}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 
@@ -194,7 +211,6 @@ const panels = {
   analytics: document.getElementById('tab-analytics'),
   requests: document.getElementById('tab-requests'),
   security: document.getElementById('tab-security'),
-  live: document.getElementById('tab-live'),
 };
 let activeTab = 'status';
 
@@ -215,7 +231,7 @@ let activeTab = 'status';
 function parseHash() {
   const raw = (location.hash || '').replace(/^#\/?/, ''); // drop leading "#"/"#/"
   const [tab, ...rest] = raw.split('/');
-  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'security' || tab === 'live') {
+  if (tab === 'config' || tab === 'accounts' || tab === 'status' || tab === 'analytics' || tab === 'requests' || tab === 'security') {
     // decodeURIComponent so provider/section names with special chars
     // round-trip; a malformed sequence decodes to "" (treated as "no sub" ->
     // first provider / default section). For #status/<section>, sub is the
@@ -264,14 +280,13 @@ function activateTab(name) {
     renderStatusTab();
   } else {
     stopStatusRefresh();
+    stopLiveEvents();
   }
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
   if (name === 'analytics') renderAnalyticsTab();
   if (name === 'requests') renderRequestsTab();
   if (name === 'security') renderSecurityTab();
-  if (name === 'live') renderLiveTab();
-  else stopLiveEvents();
   // Reflect the tab in the URL. A tab switch is a navigation the user may want
   // to Back out of, so push a history entry. Accounts adds its provider segment
   // in selectProvider (replaceState - same tab, finer-grained). Status includes
@@ -314,21 +329,20 @@ function activateTabSilent(name) {
     renderStatusTab();
   } else {
     stopStatusRefresh();
+    stopLiveEvents();
   }
   if (name === 'config') renderConfigTab();
   if (name === 'accounts') renderAccountsTab();
   if (name === 'analytics') renderAnalyticsTab();
   if (name === 'requests') renderRequestsTab();
   if (name === 'security') renderSecurityTab();
-  if (name === 'live') renderLiveTab();
-  else stopLiveEvents();
 }
 
 // ---------- Requests tab (request-log query UI) ----------
 
 // Per-tab filter state (model/provider substring + errors-only + shadow tri-state).
 // Persists across re-renders within a session so a refresh keeps the view.
-let requestsFilter = { model: '', provider: '', errors: false, shadow: '' };
+let requestsFilter = { session: '', model: '', provider: '', errors: false, shadow: '' };
 
 // renderRequestsTab builds the request-log query view: a filter row + a table of
 // metadata-only summaries fetched from /api/requests, with click-to-expand rows
@@ -337,66 +351,279 @@ let requestsFilter = { model: '', provider: '', errors: false, shadow: '' };
 async function renderRequestsTab() {
   const panel = panels.requests;
   if (!panel) return;
+  resetCombos();
   panel.innerHTML = `<div class="card"><div class="card-body">
     <div class="req-controls" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
-      <input id="req-model" placeholder="model filter" value="${esc(requestsFilter.model)}" class="req-input"/>
-      <input id="req-provider" placeholder="provider filter" value="${esc(requestsFilter.provider)}" class="req-input"/>
-      <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> errors only</label>
+      <select id="req-session" class="req-input" title="filter by client session"><option value="">all sessions</option></select>
+      <span class="combo"><input id="req-provider" placeholder="all providers" value="${esc(requestsFilter.provider)}" class="req-input"/></span>
+      <span class="combo"><input id="req-model" placeholder="all models" value="${esc(requestsFilter.model)}" class="req-input"/></span>
       <select id="req-shadow" class="req-input">
         <option value="" ${requestsFilter.shadow === '' ? 'selected' : ''}>all</option>
         <option value="only" ${requestsFilter.shadow === 'only' ? 'selected' : ''}>shadow only</option>
         <option value="exclude" ${requestsFilter.shadow === 'exclude' ? 'selected' : ''}>no shadow</option>
       </select>
-      <button id="req-refresh" class="btn">Refresh</button>
+      <label style="display:flex;align-items:center;gap:4px;"><input type="checkbox" id="req-errors" ${requestsFilter.errors ? 'checked' : ''}/> errors only</label>
+      <button id="req-refresh" class="btn danger-solid">Refresh</button>
     </div>
+    <div id="req-session-summary" style="margin-bottom:12px" hidden></div>
     <div id="req-table"></div>
-    <div id="req-detail" style="margin-top:12px;"></div>
   </div></div>`;
+  // combos carries the data-driven provider/model facet state, the recent
+  // session list (dropdown + per-session aggregate), and the last fetched rows
+  // (so the session summary can render once the aggregate arrives).
+  const combos = {
+    providerOptions: [], modelOptions: [],
+    facetState: { providerModels: {} },
+    sessions: [], lastRecords: [],
+  };
   const refresh = () => {
-    requestsFilter.model = document.getElementById('req-model').value.trim();
+    requestsFilter.session = document.getElementById('req-session').value;
     requestsFilter.provider = document.getElementById('req-provider').value.trim();
+    requestsFilter.model = document.getElementById('req-model').value.trim();
     requestsFilter.errors = document.getElementById('req-errors').checked;
     requestsFilter.shadow = document.getElementById('req-shadow').value;
-    loadRequests();
+    loadRequests(combos);
+  };
+  const onProviderSelect = () => {
+    const provider = document.getElementById('req-provider').value.trim();
+    const next = linkedModels(provider, combos.facetState.providerModels, {});
+    combos.modelOptions.splice(0, combos.modelOptions.length, ...next);
+    const modelInput = document.getElementById('req-model');
+    if (modelInput && modelInput.value.trim() && !next.includes(modelInput.value.trim())) modelInput.value = '';
+    refresh();
   };
   document.getElementById('req-refresh').onclick = refresh;
   document.getElementById('req-shadow').onchange = refresh;
-  for (const id of ['req-model', 'req-provider']) {
-    document.getElementById(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') refresh(); });
-  }
-  loadRequests();
+  document.getElementById('req-session').onchange = refresh;
+  // The checkbox applies immediately too — every filter control (session,
+  // combos, shadow select, errors only) has the same on-change behavior.
+  document.getElementById('req-errors').onchange = refresh;
+  attachCombo(document.getElementById('req-provider'), combos.providerOptions, onProviderSelect);
+  attachCombo(document.getElementById('req-model'), combos.modelOptions, refresh);
+  loadRequests(combos);
+  // Session dropdown options come from the persisted aggregate (request logging
+  // may be off → empty list, select stays "all sessions"). Fetched after the
+  // first load so the table renders immediately; the summary re-renders once
+  // the aggregate for a persisted selection is available.
+  apiGet('/api/sessions?limit=200').then((resp) => {
+    combos.sessions = (resp && resp.sessions) || [];
+    const sel = document.getElementById('req-session');
+    if (!sel) return;
+    const ids = combos.sessions.map((s) => s.session_id).filter(Boolean);
+    if (requestsFilter.session && !ids.includes(requestsFilter.session)) ids.unshift(requestsFilter.session);
+    sel.innerHTML = '<option value="">all sessions</option>' +
+      ids.map((id) => `<option value="${esc(id)}">${esc(liveSessionLabel(id))}</option>`).join('');
+    sel.value = requestsFilter.session;
+    renderRequestsSessionSummary(combos);
+  }).catch(() => { /* request logging off / unavailable */ });
 }
 
-async function loadRequests() {
+// comboInstances tracks live comboboxes so one set of global listeners can
+// close any open menu. Per-combo document/window listeners would leak on every
+// Requests re-render.
+const comboInstances = new Set();
+let comboGlobalsWired = false;
+
+function wireComboGlobals() {
+  if (comboGlobalsWired) return;
+  comboGlobalsWired = true;
+  document.addEventListener('pointerdown', (event) => {
+    comboInstances.forEach((combo) => {
+      if (!combo.menu.hidden && event.target !== combo.input && !combo.menu.contains(event.target)) combo.close();
+    });
+  });
+  const closeAll = () => comboInstances.forEach((combo) => combo.close());
+  window.addEventListener('resize', closeAll);
+  window.addEventListener('scroll', closeAll, true);
+}
+
+// resetCombos drops a previous Requests render's menus/state (its inputs are
+// gone) so stale fixed-positioned menus cannot float over the new tab.
+function resetCombos() {
+  comboInstances.forEach((combo) => combo.menu.remove());
+  comboInstances.clear();
+}
+
+// attachCombo turns a text input into a searchable dropdown. The menu is a
+// themed, fixed-positioned list aligned to the input's left edge and width
+// (the native <datalist> popup is browser chrome we cannot align or style).
+// Typing filters, ArrowUp/Down moves, Enter picks the active option (or, with
+// nothing active, falls through to onSelect), Escape/outside click closes.
+function attachCombo(input, options, onSelect) {
+  if (!input || input.dataset.comboWired === '1') return;
+  input.dataset.comboWired = '1';
+  input.setAttribute('role', 'combobox');
+  input.setAttribute('aria-autocomplete', 'list');
+  input.setAttribute('aria-expanded', 'false');
+  input.setAttribute('autocomplete', 'off');
+
+  const menu = document.createElement('div');
+  menu.className = 'combo-menu';
+  menu.setAttribute('role', 'listbox');
+  menu.hidden = true;
+  document.body.appendChild(menu);
+  let active = -1;
+
+  const close = () => {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+    active = -1;
+  };
+
+  const open = () => {
+    const query = input.value.trim().toLowerCase();
+    const list = (query ? options.filter((option) => option.toLowerCase().includes(query)) : options).slice(0, 200);
+    if (!list.length) {
+      menu.innerHTML = '<div class="combo-empty">no matching option</div>';
+    } else {
+      menu.innerHTML = list.map((option) => `<div class="combo-option" role="option" data-value="${esc(option)}">${esc(option)}</div>`).join('');
+    }
+    menu.hidden = false;
+    input.setAttribute('aria-expanded', 'true');
+    active = -1;
+    positionCombo(input, menu);
+    menu.querySelectorAll('.combo-option').forEach((option) => {
+      // mousedown (not click) so the pick lands before the input's blur.
+      option.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        input.value = option.dataset.value;
+        close();
+        onSelect();
+      });
+    });
+  };
+
+  input.addEventListener('focus', open);
+  input.addEventListener('click', open);
+  input.addEventListener('input', open);
+  input.addEventListener('keydown', (event) => {
+    const items = [...menu.querySelectorAll('.combo-option')];
+    if (event.key === 'Escape') { close(); return; }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      if (menu.hidden) { open(); return; }
+      if (!items.length) return;
+      active = event.key === 'ArrowDown'
+        ? (active + 1) % items.length
+        : (active - 1 + items.length) % items.length;
+      items.forEach((item, index) => item.classList.toggle('active', index === active));
+      items[active].scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    if (event.key === 'Enter') {
+      // Pick the highlighted option when there is one, otherwise apply the
+      // typed text (the backend match is a substring, so free text is valid).
+      if (!menu.hidden && active >= 0 && items[active]) {
+        event.preventDefault();
+        input.value = items[active].dataset.value;
+      }
+      close();
+      onSelect();
+    }
+  });
+  input.addEventListener('blur', () => { setTimeout(close, 0); });
+  comboInstances.add({ input, menu, close });
+  wireComboGlobals();
+}
+
+// positionCombo pins the fixed-positioned menu under the input, flipping above
+// and clamping to the viewport when there is no room below.
+function positionCombo(input, menu) {
+  const margin = 8;
+  const rect = input.getBoundingClientRect();
+  const box = menu.getBoundingClientRect();
+  let left = rect.left;
+  if (left + box.width > window.innerWidth - margin) left = window.innerWidth - margin - box.width;
+  if (left < margin) left = margin;
+  let top = rect.bottom + 4;
+  if (top + box.height > window.innerHeight - margin) top = rect.top - box.height - 4;
+  if (top < margin) top = margin;
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.minWidth = `${rect.width}px`;
+}
+
+// syncRequestFacets updates the two dropdowns from the response's data-driven
+// facets (distinct providers/models observed in the log window, NOT the config
+// catalog). The model list narrows to the selected provider via the facet's
+// provider→models map.
+function syncRequestFacets(facets, combos) {
+  if (!combos) return;
+  const data = facets || {};
+  combos.facetState.providerModels = data.provider_models || {};
+  const providers = data.providers || [];
+  combos.providerOptions.splice(0, combos.providerOptions.length, ...providers);
+  const providerInput = document.getElementById('req-provider');
+  const provider = providerInput ? providerInput.value.trim() : '';
+  const models = linkedModels(provider, combos.facetState.providerModels, {});
+  combos.modelOptions.splice(0, combos.modelOptions.length, ...models);
+}
+
+// hideRequestsSessionSummary clears the session aggregate strip (request
+// logging off or a failed query must not leave a stale summary behind).
+function hideRequestsSessionSummary() {
+  const host = document.getElementById('req-session-summary');
+  if (host) { host.hidden = true; host.innerHTML = ''; }
+}
+
+// renderRequestsSessionSummary shows the selected session's aggregate above the
+// request table (same chips as the Live session panel). Hidden when no session
+// is selected; the aggregate comes from /api/sessions (combos.sessions) and the
+// displayed rows fill in when the aggregate is missing (aged-out session).
+function renderRequestsSessionSummary(combos) {
+  const host = document.getElementById('req-session-summary');
+  if (!host) return;
+  if (!requestsFilter.session) { host.hidden = true; host.innerHTML = ''; return; }
+  const agg = (combos.sessions || []).find((s) => s.session_id === requestsFilter.session) || null;
+  const s = liveSessionSummary((combos.lastRecords || []).map(persistedSummaryRow), agg);
+  host.hidden = false;
+  host.innerHTML = sessionSummaryHTML(s, { live: false });
+}
+
+async function loadRequests(combos) {
   const tbl = document.getElementById('req-table');
-  const detail = document.getElementById('req-detail');
-  if (detail) detail.innerHTML = '';
-  if (tbl) tbl.innerHTML = '<span class="hint">loading…</span>';
+  // Rebuilding the table drops every open detail row (an in-flight fetch
+  // checks row.isConnected before filling); drop their chunk state too.
+  if (tbl) {
+    tbl.querySelectorAll('[data-chunk]').forEach((host) => bodyChunkRegistry.delete(host.dataset.chunk));
+    tbl.innerHTML = '<span class="hint">loading…</span>';
+  }
   const q = new URLSearchParams();
+  if (requestsFilter.session) q.set('session', requestsFilter.session);
   if (requestsFilter.model) q.set('model', requestsFilter.model);
   if (requestsFilter.provider) q.set('provider', requestsFilter.provider);
   if (requestsFilter.errors) q.set('errors', '1');
   if (requestsFilter.shadow) q.set('shadow', requestsFilter.shadow);
-  q.set('limit', '200');
+  // A session view is a focused drill-down, so pull more of it (still under
+  // the backend's 1000 cap) than the default browse window.
+  q.set('limit', requestsFilter.session ? '500' : '200');
   let resp;
   try {
     resp = await apiGet('/api/requests?' + q.toString());
   } catch (e) {
     if (tbl) tbl.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    hideRequestsSessionSummary();
     return;
   }
   if (!resp.enabled) {
     if (tbl) tbl.innerHTML = '<div class="msg hint">Request logging is off. Enable <code>request_log.enabled</code> in config to capture request/response bodies for replay and debugging.</div>';
+    hideRequestsSessionSummary();
     return;
   }
+  // Facets come from the scanned log window (data-driven), so refresh the
+  // dropdowns even when the current filter matches nothing.
+  syncRequestFacets(resp.facets, combos);
   const recs = resp.records || [];
+  combos.lastRecords = recs;
+  renderRequestsSessionSummary(combos);
   if (!recs.length) {
     if (tbl) tbl.innerHTML = '<div class="msg hint">No matching requests.</div>';
     return;
   }
   let rows = '';
   for (const r of recs) {
-    rows += `<tr class="req-row" data-id="${esc(r.request_id)}" style="cursor:pointer;">
+    rows += `<tr class="req-row" data-id="${esc(r.request_id)}">
       <td class="mono">${esc(fmtTime(r.ts))}</td>
       <td class="num ${r.status >= 400 ? 'err' : ''}">${r.status}</td>
       <td>${esc(r.exposed || r.called_model)}</td>
@@ -411,35 +638,241 @@ async function loadRequests() {
     <th class="num">ms</th><th class="num">req bytes</th><th class="num">resp bytes</th></tr></thead>
     <tbody>${rows}</tbody></table>`;
   document.querySelectorAll('.req-row').forEach((tr) => {
-    tr.onclick = () => loadRequestDetail(tr.dataset.id);
+    tr.onclick = () => toggleRequestDetail(tr);
   });
 }
 
-async function loadRequestDetail(id) {
-  const detail = document.getElementById('req-detail');
-  if (!detail) return;
-  detail.innerHTML = '<span class="hint">loading…</span>';
+// requestsDetailCache holds the fetched records by request_id so re-opening a
+// record skips the (slow) log rescan. Records are immutable once written; the
+// cache is bounded and in-page. Raw records are cached (not rendered HTML)
+// because the body renderer is stateful (chunked scroll-load).
+const REQUESTS_DETAIL_CACHE_MAX = 10;
+const requestsDetailCache = new Map();
+
+function cacheRequestDetail(id, recs) {
+  requestsDetailCache.set(id, recs);
+  while (requestsDetailCache.size > REQUESTS_DETAIL_CACHE_MAX) {
+    requestsDetailCache.delete(requestsDetailCache.keys().next().value);
+  }
+}
+
+// detailRecordsHTML renders the expanded detail for one request's records. Each
+// body is built lazily/bounded by capturedBodyView, so a multi-MB record does
+// not dump megabytes of DOM at once.
+function detailRecordsHTML(recs) {
+  wireBodyChunks();
+  let html = '';
+  for (const r of recs) {
+    const req = capturedBodyView(r.request_body, '', 'request');
+    const res = capturedBodyView(r.response_body, responseContentType(r), 'response');
+    html += `<div class="req-rec">
+      <div class="hint">${esc(r.ts)} · ${esc(r.method)} ${esc(r.path)} · attempt ${r.attempt} · ${r.status} · ${r.latency_ms}ms · ${esc(r.provider)}/${esc(r.upstream_model)}</div>
+      <details><summary>request body (${fmtNum(r.request_size)} bytes · ${esc(req.label)})</summary>${req.html}</details>
+      <details><summary>response body (${fmtNum(r.response_size)} bytes · ${esc(res.label)})</summary>${res.html}</details>
+    </div>`;
+  }
+  return html;
+}
+
+// toggleRequestDetail expands/collapses the full record under a summary row.
+// Multiple rows can stay open at once: clicking a row toggles only that row's
+// detail and never closes another row's. An in-flight fetch fills its own row
+// only if that row is still connected, so closing/re-opening while loading
+// cannot cross wires.
+async function toggleRequestDetail(tr) {
+  if (tr.classList.contains('req-open')) {
+    closeDetailFor(tr);
+    return;
+  }
+  const id = tr.dataset.id;
+  tr.classList.add('req-open');
+  const row = document.createElement('tr');
+  row.className = 'req-detail-row';
+  row.innerHTML = '<td colspan="7"><span class="hint">loading…</span></td>';
+  tr.insertAdjacentElement('afterend', row);
+  const cached = requestsDetailCache.get(id);
+  if (cached) {
+    row.firstElementChild.innerHTML = detailRecordsHTML(cached);
+    return;
+  }
   let resp;
   try {
     resp = await apiGet('/api/requests/' + encodeURIComponent(id));
   } catch (e) {
-    detail.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+    if (!row.isConnected) return;
+    row.firstElementChild.innerHTML = (e && e.status === 404)
+      ? '<div class="msg hint">not logged — the request did not commit, so there is no request-log record</div>'
+      : `<div class="msg err">${esc(e.message)}</div>`;
     return;
   }
+  if (!row.isConnected) return; // closed, or the table was rebuilt while loading
   const recs = resp.records || [];
   if (!recs.length) {
-    detail.innerHTML = '<div class="msg hint">no record</div>';
+    row.firstElementChild.innerHTML = '<div class="msg hint">no record</div>';
     return;
   }
-  let html = '';
-  for (const r of recs) {
-    html += `<div class="req-rec" style="border-top:1px solid var(--border,#333);padding-top:8px;margin-top:8px;">
-      <div class="hint">${esc(r.ts)} · ${esc(r.method)} ${esc(r.path)} · attempt ${r.attempt} · ${r.status} · ${r.latency_ms}ms · ${esc(r.provider)}/${esc(r.upstream_model)}</div>
-      <details><summary>request body (${fmtNum(r.request_size)} bytes)</summary><pre class="log-pre">${esc(r.request_body)}</pre></details>
-      <details><summary>response body (${fmtNum(r.response_size)} bytes)</summary><pre class="log-pre">${esc(r.response_body)}</pre></details>
-    </div>`;
+  row.firstElementChild.innerHTML = detailRecordsHTML(recs);
+  cacheRequestDetail(id, recs);
+}
+
+// closeDetailFor removes the detail row anchored to `tr` (its next sibling) and
+// drops that row's chunk state so it cannot leak.
+function closeDetailFor(tr) {
+  tr.classList.remove('req-open');
+  const row = tr.nextElementSibling;
+  if (!row || !row.classList.contains('req-detail-row')) return;
+  row.querySelectorAll('[data-chunk]').forEach((host) => bodyChunkRegistry.delete(host.dataset.chunk));
+  row.remove();
+}
+
+// BODY_CHUNK_CHARS bounds how much of a large body enters the DOM at once.
+// Reaching the bottom of the scroll box appends the next chunk (no button).
+const BODY_CHUNK_CHARS = 64 * 1024;
+// BODY_LONG_LINE collapses a single over-long line — a pasted file, a base64
+// blob, a multi-MB JSON string value — into an expandable block. It sits well
+// above ordinary long prose (a 1–3 KB thinking/text block) so reading a
+// conversation by scrolling still works; only genuinely huge values collapse.
+const BODY_LONG_LINE = 4000;
+const bodyChunkRegistry = new Map();
+let bodyChunkSeq = 0;
+let bodyChunkWired = false;
+
+// wireBodyChunks installs one capture-phase scroll listener (scroll does not
+// bubble) that appends the next chunk when a chunked body reaches its bottom.
+function wireBodyChunks() {
+  if (bodyChunkWired) return;
+  bodyChunkWired = true;
+  document.addEventListener('scroll', (event) => {
+    const host = event.target;
+    if (!host || !host.dataset || !host.dataset.chunk) return;
+    if (host.scrollTop + host.clientHeight < host.scrollHeight - 80) return;
+    appendNextChunk(host);
+  }, true);
+}
+
+// appendNextChunk appends the following chunk of a scroll-loaded body and drops
+// the chunk state once the last one is in the DOM. A chunk whose content is
+// entirely collapsed (over-long lines render as closed <details>) adds almost
+// no height, so keep appending while the host still has no scroll room —
+// otherwise the scrollbar would already sit at the bottom and the user could
+// never trigger the remaining chunks.
+function appendNextChunk(host) {
+  const id = host.dataset.chunk;
+  const state = bodyChunkRegistry.get(id);
+  if (!state) return;
+  // Bounded so a pathological body cannot stall the main thread: every pass
+  // either consumes a chunk or returns once the host has scroll room again.
+  for (let guard = 0; guard < 64; guard += 1) {
+    state.index += 1;
+    const chunk = state.chunks[state.index];
+    if (chunk === undefined) {
+      bodyChunkRegistry.delete(id);
+      delete host.dataset.chunk;
+      return;
+    }
+    host.insertAdjacentHTML('beforeend', state.render(chunk));
+    if (state.chunks[state.index + 1] === undefined) {
+      bodyChunkRegistry.delete(id);
+      delete host.dataset.chunk;
+      return;
+    }
+    if (host.scrollHeight > host.clientHeight + 80) return;
   }
-  detail.innerHTML = html;
+}
+
+// longLineHTML renders one over-long line as a collapsed <details>: a short
+// escaped preview in the summary, the full (wrapped) value on expand. Returns
+// '' for a normal line so callers can fall back to their own rendering.
+function longLineHTML(line) {
+  if (line.length <= BODY_LONG_LINE) return '';
+  return `<details class="json-long"><summary>${esc(line.slice(0, 100))}… <span class="json-long-meta">${fmtNum(line.length)} chars</span></summary><pre class="json-long-body">${esc(line)}</pre></details>`;
+}
+
+// jsonLinesHTML renders pretty JSON line by line: normal lines get syntax
+// highlighting, over-long lines collapse into an expandable block.
+function jsonLinesHTML(text) {
+  return text.split('\n').map((line) => longLineHTML(line) || highlightJSON(line)).join('\n');
+}
+
+// plainLinesHTML is jsonLinesHTML without highlighting (non-JSON bodies).
+function plainLinesHTML(text) {
+  return text.split('\n').map((line) => longLineHTML(line) || esc(line)).join('\n');
+}
+
+// chunkedBodyHTML renders `text` with `render` in whole-line chunks: the first
+// chunk in the DOM, the rest appended as the user scrolls to the bottom.
+function chunkedBodyHTML(text, render, cls) {
+  const chunks = splitLinesByBudget(text, BODY_CHUNK_CHARS);
+  if (chunks.length <= 1) return `<div class="log-pre body-pre ${cls}">${render(text)}</div>`;
+  const id = `body-chunk-${++bodyChunkSeq}`;
+  bodyChunkRegistry.set(id, { chunks, index: 0, render });
+  return `<div class="log-pre body-pre ${cls}" data-chunk="${id}">${render(chunks[0])}</div>`;
+}
+
+// BODY_RENDER_MAX caps pretty-printing: beyond it the detail view falls back
+// to the raw pre. Coding-agent contexts routinely reach a few MB, so the
+// formatting ceiling sits above the default 5 MiB max_body_bytes.
+const BODY_RENDER_MAX = 8 * 1024 * 1024;
+// BODY_HIGHLIGHT_MAX caps syntax highlighting. A multi-MB body is still
+// pretty-printed, but skipping the per-token <span> keeps the DOM small.
+const BODY_HIGHLIGHT_MAX = 256 * 1024;
+// BODY_LINE_MAX caps per-line rendering; a longer body falls back to the
+// chunked viewer.
+const BODY_LINE_MAX = 5000;
+
+// responseContentType extracts content-type from the record's allowlisted
+// response_headers JSON ({"content-type":…}); empty when absent/unparseable.
+function responseContentType(record) {
+  if (!record || !record.response_headers) return '';
+  try {
+    const headers = JSON.parse(record.response_headers);
+    return String((headers && (headers['content-type'] || headers['Content-Type'])) || '');
+  } catch (_) {
+    return '';
+  }
+}
+
+// capturedBodyView renders one captured body and returns {label, html}. The
+// label feeds the <details> summary; the html is already escaped/safe:
+//   - request JSON object/array → pretty-printed, syntax-highlighted, with
+//     over-long string values collapsed into expandable blocks
+//   - response (SSE stream or JSON) → line-based raw view (one row per source
+//     line), because pretty-printing a stream made the detail unreasonably tall
+//   - anything else (or over the size cap) → plain <pre>
+function capturedBodyView(text, contentType, kind) {
+  if (!text) return { label: 'empty', html: '<div class="hint">(empty body)</div>' };
+  if (text.length > BODY_RENDER_MAX) {
+    return {
+      label: 'raw',
+      html: `<div class="hint">body over ${fmtNum(BODY_RENDER_MAX)} bytes — showing raw</div><pre class="log-pre body-pre">${esc(text)}</pre>`,
+    };
+  }
+  if (kind === 'response') {
+    if (isSSE(text, contentType)) {
+      const label = text.length <= BODY_HIGHLIGHT_MAX ? `SSE · ${fmtNum(parseSSE(text).length)} events` : 'SSE';
+      return { label, html: bodyLinesHTML(text) };
+    }
+    return { label: 'text', html: bodyLinesHTML(text) };
+  }
+  const pretty = prettyJSON(text);
+  if (pretty !== null) {
+    // Highlight only small bodies: per-line spans on a multi-MB body would
+    // accumulate tens of thousands of nodes as the user scrolls. Over the cap
+    // the JSON is still pretty-printed and long values still collapse.
+    const highlight = pretty.length <= BODY_HIGHLIGHT_MAX;
+    return { label: 'JSON', html: chunkedBodyHTML(pretty, highlight ? jsonLinesHTML : plainLinesHTML, highlight ? 'code-json' : '') };
+  }
+  return { label: 'text', html: bodyLinesHTML(text) };
+}
+
+// bodyLinesHTML renders captured text one source line per row in the log
+// gutter style (line numbers), so a streamed response stays compact instead
+// of expanding into pretty-printed indentation. Over-long lines collapse, and
+// very long bodies fall back to the chunked viewer.
+function bodyLinesHTML(text) {
+  const lines = text.split('\n');
+  if (lines.length > BODY_LINE_MAX) return chunkedBodyHTML(text, plainLinesHTML, '');
+  return `<div class="log-pre">${lines.map((line) => longLineHTML(line) || `<span class="log-line">${esc(line)}</span>`).join('')}</div>`;
 }
 
 // ---------- Security tab (guard audit log) ----------
@@ -533,47 +966,305 @@ async function loadSecurity() {
     <tbody>${rows}</tbody></table>`;
 }
 
-// ---------- Live tab (real-time request monitor via SSE) ----------
+// ---------- Live monitor (Status → Live section, SSE /api/events) ----------
 
 let liveES = null;       // the EventSource for /api/events (null when not connected)
-const liveRows = [];     // newest-first ring of rendered events (capped)
+let liveActive = false;  // the section's card is mounted and connected
+let liveRows = [];       // newest-first ring of merged request rows (capped)
+let liveByReq = {};      // request_id -> row object (while in the ring)
+let liveOpenIds = new Set();     // request_ids whose detail row is expanded
+let liveDetailState = new Map(); // request_id -> {loading, error} (records live in requestsDetailCache)
+let livePendingGuards = new Map(); // request_id -> [{ts, type, detail}] for hits that arrived before start
+let liveEventSeq = 0;    // synthetic key counter for standalone event-only rows
 
-// renderLiveTab opens an SSE connection to /api/events and prepends each event
-// as a row (newest on top). The connection is closed on leaving the tab
-// (stopLiveEvents). A start event (in-flight) is dimmed; an end event shows the
-// chosen provider, status, latency, and best-effort tokens. Non-lifecycle
-// events (guard, budget) render as a single event line: type badge + detail.
-function renderLiveTab() {
-  const panel = panels.live;
-  if (!panel) return;
+// Session mode (Live card): selecting a session replaces the live table with a
+// per-session analysis. Rows merge the persisted request log (/api/requests?
+// session=) with the live event rows; token/cost totals come from the
+// /api/sessions aggregate (persisted rows carry no tokens).
+let liveSessionFilter = '';   // selected session id ('' = live mode)
+let liveSessionRecords = [];  // persisted Summary rows for the selected session
+let liveSessionAgg = null;    // persisted SessionSummary for the selected session
+let liveSessionList = [];     // recent SessionSummary list (dropdown options)
+let liveSessionLoading = false;
+let liveSessionError = '';
+const liveSessionOpenIds = new Set();
+let liveSessionOptionsKey = '';
+
+// renderLiveCard mounts the live request monitor into the Status Live section
+// and opens the SSE connection (closed by stopLiveEvents when the section or
+// tab is left). Rows are merged per request: a start event opens a dimmed
+// in-flight row; guard hits attach a ⚑ badge and accumulate in the row so the
+// expanded detail can list every hit; the end event fills in
+// provider/status/latency/tokens. Clicking a request row toggles the full detail
+// (fetched from /api/requests/<id> once the request ends). Non-request events
+// without a known request id (budget & friends) still render as standalone
+// one-line rows. The All/live table is updated incrementally on each SSE event;
+// the session panel keeps its full re-render.
+function renderLiveCard(target) {
   stopLiveEvents();
-  liveRows.length = 0;
-  panel.innerHTML = `<div class="card"><div class="card-body">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <span class="card-title">Live requests</span>
-      <span id="live-status" class="hint">connecting…</span>
-    </div>
-    <div id="live-table"></div>
-  </div></div>`;
+  liveRows = [];
+  liveByReq = {};
+  liveOpenIds.clear();
+  liveDetailState.clear();
+  livePendingGuards.clear();
+  liveEventSeq = 0;
+  liveSessionFilter = '';
+  liveSessionRecords = [];
+  liveSessionAgg = null;
+  liveSessionList = [];
+  liveSessionLoading = false;
+  liveSessionError = '';
+  liveSessionOpenIds.clear();
+  liveSessionOptionsKey = '';
+  target.insertAdjacentHTML('beforeend', buildCard('Live requests', '',
+    `<div class="live-toolbar">
+       <label class="hint" for="live-session">session</label>
+       <select id="live-session" class="req-input"><option value="">all (live)</option></select>
+     </div>
+     <div id="live-table"><span class="msg hint">connecting…</span></div>
+     <div id="live-session-panel" hidden></div>`, 'tight'));
+  const sel = document.getElementById('live-session');
+  if (sel) sel.onchange = () => onLiveSessionChange(sel.value);
+  // Preload recent persisted sessions so the dropdown lists them even before
+  // the first live event (best-effort: request logging may be off).
+  apiGet('/api/sessions?limit=200').then((resp) => {
+    liveSessionList = (resp && resp.sessions) || [];
+    refreshLiveSessionOptions();
+  }).catch(() => { /* request logging off / unavailable */ });
+  liveActive = true;
   try {
     liveES = new EventSource('/api/events');
   } catch (e) {
-    document.getElementById('live-status').textContent = 'SSE unsupported';
+    liveActive = false;
+    const t = document.getElementById('live-table');
+    if (t) t.innerHTML = '<span class="msg err">SSE unsupported by this browser.</span>';
     return;
   }
   liveES.onopen = () => {
-    const s = document.getElementById('live-status');
-    if (s) s.textContent = 'live';
+    const t = document.getElementById('live-table');
+    if (t && !liveRows.length) t.innerHTML = '<span class="msg hint">Waiting for requests…</span>';
   };
   liveES.onerror = () => {
-    const s = document.getElementById('live-status');
-    if (s) s.textContent = 'reconnecting…';
+    const t = document.getElementById('live-table');
+    if (t && !liveRows.length) t.innerHTML = '<span class="msg hint">reconnecting…</span>';
   };
   liveES.onmessage = (m) => {
     let e;
     try { e = JSON.parse(m.data); } catch (_) { return; }
-    addLiveRow(e);
+    applyLiveEvent(e);
+    applyLiveEventDOM(e);
   };
+}
+
+// refreshLiveSessionOptions rebuilds the session dropdown from live rows plus
+// the persisted session list. Rebuilds only when the option set changes so a
+// busy stream does not reset the control on every event.
+function refreshLiveSessionOptions() {
+  const sel = document.getElementById('live-session');
+  if (!sel) return;
+  const ids = new Set();
+  for (const r of liveRows) if (r.session) ids.add(r.session);
+  for (const s of liveSessionList) if (s.session_id) ids.add(s.session_id);
+  const sorted = [...ids].sort();
+  const key = sorted.join('\n');
+  if (key === liveSessionOptionsKey) return;
+  liveSessionOptionsKey = key;
+  sel.innerHTML = '<option value="">all (live)</option>' +
+    sorted.map((id) => `<option value="${esc(id)}">${esc(liveSessionLabel(id))}</option>`).join('');
+  sel.value = liveSessionFilter;
+}
+
+// liveSessionLabel shortens a session UUID for the dropdown; the option value
+// keeps the full id.
+function liveSessionLabel(id) {
+  return id.length > 14 ? id.slice(0, 8) + '…' + id.slice(-4) : id;
+}
+
+// onLiveSessionChange switches between the live table and one session's
+// analysis, loading the persisted request list + aggregate for the selection.
+function onLiveSessionChange(value) {
+  liveSessionFilter = value;
+  liveSessionRecords = [];
+  liveSessionAgg = null;
+  liveSessionError = '';
+  liveSessionOpenIds.clear();
+  const tbl = document.getElementById('live-table');
+  const panel = document.getElementById('live-session-panel');
+  if (!value) {
+    // All (live) mode: the pure live ring, no persisted backfill.
+    if (tbl) tbl.hidden = false;
+    if (panel) { panel.hidden = true; panel.innerHTML = ''; }
+    liveSessionLoading = false;
+    renderLiveTable();
+    return;
+  }
+  if (tbl) tbl.hidden = true;
+  if (panel) panel.hidden = false;
+  liveSessionLoading = true;
+  renderLiveSessionPanel();
+  Promise.all([
+    apiGet('/api/requests?session=' + encodeURIComponent(value) + '&limit=500')
+      .then((r) => ({ recs: (r && r.records) || [] }))
+      .catch((e) => ({ err: e.message })),
+    apiGet('/api/sessions?limit=200').then((r) => (r && r.sessions) || []).catch(() => []),
+  ]).then(([reqs, sessions]) => {
+    if (liveSessionFilter !== value) return; // switched away while loading
+    liveSessionLoading = false;
+    if (reqs.err) liveSessionError = reqs.err;
+    else liveSessionRecords = reqs.recs;
+    liveSessionList = sessions;
+    liveSessionAgg = sessions.find((s) => s.session_id === value) || null;
+    refreshLiveSessionOptions();
+    renderLiveSessionPanel();
+  });
+}
+
+// persistedSummaryRow projects a /api/requests Summary (snake_case) into the
+// camelCase row shape shared with live event rows (latencyMs/cacheRead/
+// cacheCreation), so liveSessionSummary folds persisted rows correctly even
+// without an /api/sessions aggregate.
+function persistedSummaryRow(rec) {
+  return {
+    requestId: rec.request_id,
+    ts: rec.ts,
+    session: rec.session_id,
+    agent: rec.agent || '',
+    model: rec.exposed || rec.upstream_model || rec.called_model || '',
+    provider: rec.provider || '',
+    status: rec.status || 0,
+    latencyMs: rec.latency_ms != null ? rec.latency_ms : null,
+    input: rec.input || 0,
+    output: rec.output || 0,
+    cacheRead: rec.cache_read || 0,
+    cacheCreation: rec.cache_creation || 0,
+    inFlight: false,
+    guardHits: [],
+    progressText: '', progressBytes: 0,
+    persisted: true,
+  };
+}
+
+// liveSessionRows merges the persisted request summaries with the live event
+// rows for the selected session. Live wins on in-flight state,
+// status, latency, provider, and model; persisted fills missing agent and
+// tokens. Newest first.
+function liveSessionRows() {
+  const byId = new Map();
+  for (const rec of liveSessionRecords) {
+    byId.set(rec.request_id, persistedSummaryRow(rec));
+  }
+  for (const r of liveRows) {
+    if (r.session !== liveSessionFilter) continue;
+    const persisted = byId.get(r.requestId);
+    byId.set(r.requestId, mergeLiveAndPersistedRow(r, persisted || {
+      requestId: r.requestId, ts: r.ts, session: r.session,
+      agent: '', model: '', provider: '', status: 0, latencyMs: null,
+      input: 0, output: 0, cacheRead: 0, cacheCreation: 0,
+      inFlight: false, guardHits: [],
+      progressText: '', progressBytes: 0,
+    }));
+  }
+  return [...byId.values()].sort((a, b) => liveTsMs(b.ts) - liveTsMs(a.ts));
+}
+
+// liveTsMs normalizes a live event timestamp (unix ms) or a persisted record
+// timestamp (RFC3339) to a comparable millisecond value.
+function liveTsMs(ts) {
+  const n = typeof ts === 'number' ? ts : Date.parse(ts);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// sessionSummaryHTML renders the shared session chips + providers/models lines
+// used by the Live session panel and the Requests session filter. `opts.live`
+// false omits the trailing live-row count (Requests rows are all persisted).
+function sessionSummaryHTML(s, opts) {
+  const showLive = !opts || opts.live !== false;
+  const chips = [
+    `${fmtNum(s.requests)} requests`,
+    `${fmtNum(s.input)} in / ${fmtNum(s.output)} out`,
+    (s.cacheRead || s.cacheCreation) ? `${fmtNum(s.cacheRead)} cache-read · ${fmtNum(s.cacheCreation)} cache-write` : '',
+    s.avgLatencyMs != null ? `avg ${s.avgLatencyMs}ms` : '',
+    s.errors ? `${fmtNum(s.errors)} errors` : '',
+    s.cost != null ? '$' + s.cost.toFixed(4) : '',
+    showLive ? `${fmtNum(s.liveRows)} live` : '',
+  ].filter(Boolean).map((c) => `<span class="live-chip">${esc(c)}</span>`).join('');
+  const meta = [
+    s.providers.length ? 'providers: ' + s.providers.join(', ') : '',
+    s.models.length ? 'models: ' + s.models.join(', ') : '',
+  ].filter(Boolean).map((line) => `<div class="hint">${esc(line)}</div>`).join('');
+  return `<div class="live-session-summary">${chips}</div>${meta}`;
+}
+
+// renderLiveSessionPanel renders the selected session's analysis: summary
+// chips + distinct models/providers, then the merged request table with the
+// existing click-to-expand detail.
+function renderLiveSessionPanel() {
+  const panel = document.getElementById('live-session-panel');
+  if (!panel || !liveSessionFilter) return;
+  if (liveSessionLoading) { panel.innerHTML = '<span class="hint">loading session…</span>'; return; }
+  if (liveSessionError) { panel.innerHTML = `<div class="msg err">${esc(liveSessionError)}</div>`; return; }
+  const rows = liveSessionRows();
+  const s = liveSessionSummary(rows, liveSessionAgg);
+  const body = rows.length
+    ? `<table class="table"><thead><tr>
+         <th>time</th><th>agent</th><th>model</th><th>provider</th>
+         <th>status</th><th class="num">latency</th><th class="num">tokens in / out</th>
+       </tr></thead><tbody>${rows.map((r) => {
+         const open = liveSessionOpenIds.has(r.requestId);
+         const sc = r.status >= 400 ? 'err' : '';
+         const lt = r.latencyMs != null ? r.latencyMs + 'ms' : '';
+         const tk = (r.input || r.output) ? `${fmtNum(r.input)} / ${fmtNum(r.output)}` : '';
+         const detail = open ? renderLiveDetailRow(r) : '';
+         return `<tr class="live-row${open ? ' live-open' : ''}" data-id="${esc(r.requestId)}" data-live-key="${esc(r.requestId)}">
+           <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
+           <td class="mono">${esc(r.agent || '—')}</td>
+           <td>${esc(r.model || '—')}</td>
+           <td class="mono">${esc(r.provider || '—')}</td>
+           <td class="num ${sc}">${esc(String(r.status || '—'))}</td>
+           <td class="num">${esc(lt)}</td>
+           <td class="num">${esc(tk)}</td>
+         </tr>${detail}`;
+       }).join('')}</tbody></table>`
+    : '<div class="msg hint">no requests recorded for this session yet</div>';
+  panel.innerHTML = `${sessionSummaryHTML(s)}${body}`;
+  panel.querySelectorAll('.live-row').forEach((tr) => {
+    tr.onclick = () => toggleLiveSessionRow(tr.dataset.id);
+  });
+  for (const id of liveSessionOpenIds) ensureLiveSessionDetail(id);
+}
+
+// toggleLiveSessionRow expands/collapses one request's detail in the session
+// panel.
+function toggleLiveSessionRow(id) {
+  if (liveSessionOpenIds.has(id)) {
+    liveSessionOpenIds.delete(id);
+  } else {
+    liveSessionOpenIds.add(id);
+    // Explicit re-open clears a recorded fetch error so it can be retried.
+    const state = liveDetailState.get(id) || {};
+    if (state.error || state.notLogged) liveDetailState.set(id, { ...state, error: '', notLogged: false });
+    ensureLiveSessionDetail(id);
+  }
+  renderLiveSessionPanel();
+}
+
+// ensureLiveSessionDetail loads /api/requests/<id> once per open row.
+function ensureLiveSessionDetail(id) {
+  if (!shouldFetchDetail(requestsDetailCache.has(id), liveDetailState.get(id), false)) return;
+  const state = liveDetailState.get(id) || {};
+  liveDetailState.set(id, { ...state, loading: true, error: '' });
+  fetchLiveSessionDetail(id);
+}
+
+async function fetchLiveSessionDetail(id) {
+  try {
+    const resp = await apiGet('/api/requests/' + encodeURIComponent(id));
+    cacheRequestDetail(id, resp.records || []);
+    liveDetailState.set(id, { loading: false, error: '' });
+  } catch (e) {
+    liveDetailState.set(id, detailFetchState(e.status, e.message));
+  }
+  if (liveSessionOpenIds.has(id)) renderLiveSessionPanel();
 }
 
 function stopLiveEvents() {
@@ -581,41 +1272,660 @@ function stopLiveEvents() {
     liveES.close();
     liveES = null;
   }
+  liveActive = false;
 }
 
-function addLiveRow(e) {
-  liveRows.unshift(e);
-  if (liveRows.length > 100) liveRows.length = 100;
+// applyLiveEvent folds one SSE event into the merged row set (liveRows /
+// liveByReq). It does not touch the DOM; the caller applies the corresponding
+// DOM update via applyLiveEventDOM, which performs targeted surgery in
+// All/live mode and falls back to renderLiveTable for the session panel.
+function applyLiveEvent(e) {
+  if (e.type === 'start') {
+    liveByReq[e.request_id] = {
+      requestId: e.request_id,
+      ts: e.ts, session: e.session_id || '', agent: e.agent, model: e.exposed || '—',
+      provider: '', status: 0, latencyMs: null, input: 0, output: 0,
+      inFlight: true, guardHits: popPendingGuards(e.request_id),
+      progressText: '', progressBytes: 0,
+    };
+    liveRows.unshift(liveByReq[e.request_id]);
+    trimLiveRows();
+    return;
+  }
+  if (e.type === 'end') {
+    // An end without a start (ring trimmed or missed start): synthesize the row.
+    const row = liveByReq[e.request_id] || synthLiveRow(e);
+    row.ts = e.ts;
+    if (!row.session && e.session_id) row.session = e.session_id;
+    row.provider = e.provider || '—';
+    row.status = e.status || 0;
+    row.latencyMs = e.latency_ms;
+    row.input = e.input || 0;
+    row.output = e.output || 0;
+    row.inFlight = false;
+    return;
+  }
+  if (e.type === 'progress') {
+    if (e.request_id && liveByReq[e.request_id]) {
+      const row = liveByReq[e.request_id];
+      row.progressText = e.text || '';
+      row.progressBytes = e.received_bytes || 0;
+    }
+    return;
+  }
+  // Non-lifecycle event (guard/budget/…): attach to the request's row when the
+  // id is known, else queue it so a later start/end can claim it.
+  const hit = { ts: e.ts, type: e.type, detail: e.detail || '' };
+  if (e.request_id && liveByReq[e.request_id]) {
+    liveByReq[e.request_id].guardHits.push(hit);
+  } else if (e.request_id) {
+    const pending = livePendingGuards.get(e.request_id) || [];
+    pending.push(hit);
+    livePendingGuards.set(e.request_id, pending);
+  } else {
+    liveRows.unshift({
+      ts: e.ts, agent: e.agent, model: e.exposed || '',
+      eventOnly: true, guardDetail: (e.type || '') + ' ' + (e.detail || ''),
+      key: 'ev-' + (liveEventSeq++),
+    });
+    trimLiveRows();
+  }
+}
+
+// popPendingGuards returns and clears any guard hits that arrived before the
+// request's start event, so they still attach to the correct row.
+function popPendingGuards(id) {
+  const hits = livePendingGuards.get(id) || [];
+  livePendingGuards.delete(id);
+  return hits;
+}
+
+// synthLiveRow back-fills a ring entry for an end event whose start row was
+// already trimmed, keeping the by-id index consistent.
+function synthLiveRow(e) {
+  const row = {
+    requestId: e.request_id,
+    ts: e.ts, session: e.session_id || '', agent: e.agent, model: e.exposed || '—',
+    provider: '', status: 0, latencyMs: null, input: 0, output: 0,
+    inFlight: false, guardHits: popPendingGuards(e.request_id),
+    progressText: '', progressBytes: 0,
+  };
+  liveByReq[e.request_id] = row;
+  liveRows.unshift(row);
+  trimLiveRows();
+  return row;
+}
+
+function trimLiveRows() {
+  if (liveRows.length <= 100) return;
+  const excess = liveRows.length - 100;
+  liveRows.length = 100;
+  // Rebuild the id index from what survives the ring.
+  liveByReq = {};
+  for (const r of liveRows) {
+    if (r.requestId) liveByReq[r.requestId] = r;
+  }
+  // Remove surplus DOM rows from the end of the tbody. Oldest rows live at the
+  // end because new rows are prepended; each summary may be followed by its
+  // detail row.
+  const tbl = document.getElementById('live-table');
+  const tbody = tbl && tbl.querySelector('tbody');
+  if (!tbody) return;
+  let removed = 0;
+  let node = tbody.lastElementChild;
+  while (node && removed < excess) {
+    const prev = node.previousElementSibling;
+    if (node.classList.contains('live-detail-row')) {
+      node.remove();
+    } else {
+      const id = node.dataset.id;
+      if (id && liveOpenIds.has(id)) {
+        liveOpenIds.delete(id);
+        liveDetailState.delete(id);
+      }
+      const detail = node.nextElementSibling;
+      if (detail && detail.classList.contains('live-detail-row')) detail.remove();
+      node.remove();
+      removed++;
+    }
+    node = prev;
+  }
+}
+
+// liveSummaryRowHTML returns the summary <tr> for one live request row. `open`
+// is whether the detail is currently expanded; the caller decides based on
+// liveOpenIds.
+function liveSummaryRowHTML(r, open) {
+  const dim = r.inFlight ? ' subdue' : '';
+  const openCls = open ? ' live-open' : '';
+  const guardCount = r.guardHits.length;
+  const guardTitle = guardCount
+    ? esc(r.guardHits.map((h) => fmtGuardDetail(h.detail)).join('\n'))
+    : '';
+  const guard = guardCount
+    ? ` <span class="badge warn" title="${guardTitle}">⚑ guard${guardCount > 1 ? ' ×' + guardCount : ''}</span>`
+    : '';
+  const sc = r.status >= 400 ? 'err' : (r.inFlight ? 'subdue' : '');
+  const status = r.inFlight ? '···' : (r.status || '—');
+  const lt = (!r.inFlight && r.latencyMs != null) ? r.latencyMs + 'ms' : '';
+  const tk = (!r.inFlight && (r.input || r.output)) ? `${fmtNum(r.input)} / ${fmtNum(r.output)}` : '';
+  return `<tr class="live-row${openCls}" data-id="${esc(r.requestId)}" data-live-key="${esc(r.requestId)}">
+    <td class="mono${dim}">${esc(fmtTimeSafe(r.ts))}</td>
+    <td class="mono${dim}">${esc(r.agent || '—')}</td>
+    <td class="${dim ? 'subdue' : ''}">${esc(r.model)}${guard}</td>
+    <td class="mono${dim}">${esc(r.inFlight ? '…' : (r.provider || '—'))}</td>
+    <td class="num ${sc}">${esc(String(status))}</td>
+    <td class="num">${lt}</td>
+    <td class="num">${tk}</td>
+  </tr>`;
+}
+
+// liveEventRowHTML returns a one-line standalone row for non-request events.
+function liveEventRowHTML(r) {
+  return `<tr data-live-key="${esc(r.key)}">
+    <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
+    <td class="mono">${esc(r.agent || '—')}</td>
+    <td colspan="5"><span class="badge warn" title="${esc(fmtGuardDetail(r.guardDetail))}">⚑ ${esc(fmtGuardDetail(r.guardDetail) || 'event')}</span></td>
+  </tr>`;
+}
+
+// liveRowHTML returns {summary, detail} HTML for one live row. The detail string
+// is empty when the row is collapsed. Used by full renders and by incremental
+// updates that replace a single row in place.
+function liveRowHTML(r) {
+  if (r.eventOnly) {
+    return { summary: liveEventRowHTML(r), detail: '' };
+  }
+  const open = liveOpenIds.has(r.requestId);
+  return {
+    summary: liveSummaryRowHTML(r, open),
+    detail: open ? renderLiveDetailRow(r) : '',
+  };
+}
+
+// renderLiveTable redraws the merged rows: one line per request. In-flight
+// rows are dimmed with a pending marker; the tokens column reads "in / out".
+// This is the full-rebuild path used on tab switches and as a fallback; the
+// hot SSE path uses applyLiveEventDOM for targeted surgery. Because new rows
+// are PREPENDED, the rebuild preserves the viewport (captureLiveViewState /
+// restoreLiveViewState): a visible expanded row is pinned in place, and when
+// the page is scrolled away from the top the visible region does not shift;
+// open request/response body <details> are re-opened after the rebuild.
+function renderLiveTable() {
+  refreshLiveSessionOptions();
+  if (liveSessionFilter) {
+    // Session mode: the live table is hidden; refresh the session panel from
+    // the merged live + persisted rows instead.
+    renderLiveSessionPanel();
+    return;
+  }
   const tbl = document.getElementById('live-table');
   if (!tbl) return;
+  // All (live) view is the pure live ring (newest 100 events, no persisted
+  // backfill); persisted history lives in the session view and Requests tab.
+  const rows = liveRows;
+  if (!rows.length) {
+    tbl.innerHTML = '<span class="msg hint">Waiting for requests…</span>';
+    maybeRemoveLiveSpacer(tbl);
+    return;
+  }
+  const viewState = captureLiveViewState(tbl);
+  // Drop chunk state for body views that are about to be replaced.
+  tbl.querySelectorAll('.req-detail-row [data-chunk]').forEach((host) => {
+    bodyChunkRegistry.delete(host.dataset.chunk);
+  });
   tbl.innerHTML = `<table class="table"><thead><tr>
     <th>time</th><th>agent</th><th>model</th><th>provider</th>
-    <th>status</th><th class="num">latency</th><th class="num">tokens</th></tr></thead>
-    <tbody>${liveRows.map((r) => {
-      if (r.type !== 'start' && r.type !== 'end') {
-        // Non-lifecycle event (guard/budget): provider/status/latency carry no
-        // meaning, so render a single event line — type badge + agent + detail.
-        return `<tr>
-          <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
-          <td class="mono">${esc(r.agent || '—')}</td>
-          <td colspan="5"><span class="badge warn">⚑ ${esc(r.type)}</span> <span class="mono subdue">${esc(r.detail || '')}</span></td>
-        </tr>`;
-      }
-      const sc = r.status >= 400 ? 'err' : (r.type === 'start' ? 'subdue' : '');
-      const p = r.type === 'start' ? '…' : (r.provider || '—');
-      const st = r.type === 'start' ? '···' : (r.status || '');
-      const lt = r.type === 'start' ? '' : (r.latency_ms != null ? r.latency_ms + 'ms' : '');
-      const tk = (r.type === 'end' && (r.input || r.output)) ? `${fmtNum(r.input)}→${fmtNum(r.output)}` : '';
-      return `<tr>
-        <td class="mono">${esc(fmtTimeSafe(r.ts))}</td>
-        <td class="mono">${esc(r.agent || '—')}</td>
-        <td>${esc(r.exposed || '—')}</td>
-        <td class="mono">${esc(p)}</td>
-        <td class="num ${sc}">${st}</td>
-        <td class="num">${lt}</td>
-        <td class="num">${tk}</td>
-      </tr>`;
-    }).join('')}</tbody></table>`;
+    <th>status</th><th class="num">latency</th><th class="num">tokens in / out</th></tr></thead>
+    <tbody>${rows.map((r) => { const h = liveRowHTML(r); return h.summary + h.detail; }).join('')}</tbody></table>`;
+  document.querySelectorAll('#live-table .live-row').forEach((tr) => {
+    tr.onclick = () => toggleLiveRowDetail(tr.dataset.id);
+  });
+  for (const r of rows) {
+    if (r.requestId && liveOpenIds.has(r.requestId) && !r.inFlight) {
+      ensureLiveDetailFetched(r.requestId);
+    }
+  }
+  if (liveOpenIds.size > 0) maybeAddLiveSpacer(tbl);
+  else maybeRemoveLiveSpacer(tbl);
+  restoreLiveViewState(tbl, viewState);
+}
+
+// captureLiveViewState snapshots, before a full-table rebuild: (1) which
+// <details> are open inside expanded rows (keyed "requestId:recIndex:ordinal"
+// where ordinal is the element's index among ALL details in its .req-rec —
+// the record HTML is deterministic across rebuilds and body chunks only
+// append, so ordinals are stable; this covers the request/response body
+// containers AND the nested over-long-line blocks), and (2) the scroll
+// anchor — a visible expanded row wins (the user is reading it); otherwise
+// the first visible row when the page is scrolled away from the top.
+// scrollY ≈ 0 keeps the natural "pinned to newest" behavior.
+function captureLiveViewState(tbl) {
+  const openBodies = new Set();
+  tbl.querySelectorAll('.live-detail-row').forEach((row) => {
+    let owner = row.previousElementSibling;
+    while (owner && !owner.classList.contains('live-row')) owner = owner.previousElementSibling;
+    const id = owner && owner.dataset.id;
+    if (!id) return;
+    row.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
+      rec.querySelectorAll('details').forEach((d, dIdx) => {
+        if (d.open) openBodies.add(id + ':' + recIdx + ':' + dIdx);
+      });
+    });
+  });
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  let anchor = null;
+  let firstVisible = null;
+  for (const tr of tbl.querySelectorAll('tr[data-live-key]')) {
+    const rect = tr.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.top >= vh) continue;
+    if (tr.classList.contains('live-open')) {
+      anchor = { key: tr.dataset.liveKey, top: rect.top };
+      break;
+    }
+    if (!firstVisible) firstVisible = { key: tr.dataset.liveKey, top: rect.top };
+  }
+  if (!anchor && firstVisible && window.scrollY > 2) anchor = firstVisible;
+  return { anchor, openBodies };
+}
+
+// restoreLiveViewState re-applies captureLiveViewState after the rebuild:
+// re-open the body <details> first (they change heights), then scroll so the
+// anchor row sits exactly where it was. A trimmed-out anchor (ring overflow)
+// degrades to no adjustment.
+function restoreLiveViewState(tbl, state) {
+  if (state.openBodies.size) {
+    tbl.querySelectorAll('.live-detail-row').forEach((row) => {
+      let owner = row.previousElementSibling;
+      while (owner && !owner.classList.contains('live-row')) owner = owner.previousElementSibling;
+      const id = owner && owner.dataset.id;
+      if (!id) return;
+      row.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
+        rec.querySelectorAll('details').forEach((d, dIdx) => {
+          if (state.openBodies.has(id + ':' + recIdx + ':' + dIdx)) d.open = true;
+        });
+      });
+    });
+  }
+  if (!state.anchor) return;
+  for (const tr of tbl.querySelectorAll('tr[data-live-key]')) {
+    if (tr.dataset.liveKey !== state.anchor.key) continue;
+    const delta = tr.getBoundingClientRect().top - state.anchor.top;
+    if (delta) window.scrollBy(0, delta);
+    return;
+  }
+}
+
+// findLiveSummaryRow locates a request's summary <tr> inside the live tbody.
+function findLiveSummaryRow(tbody, id) {
+  return tbody.querySelector(`tr.live-row[data-id="${esc(id)}"]`);
+}
+
+// updateLiveSummaryRow replaces one summary <tr> in place with its current
+// rendering and re-attaches the click handler.
+function updateLiveSummaryRow(tr, r) {
+  const open = liveOpenIds.has(r.requestId);
+  tr.insertAdjacentHTML('beforebegin', liveSummaryRowHTML(r, open));
+  const next = tr.previousElementSibling;
+  tr.remove();
+  next.onclick = () => toggleLiveRowDetail(next.dataset.id);
+  return next;
+}
+
+// captureLiveDetailOpenBodies snapshots which <details> are open inside one
+// detail row, scoped to that row so incremental replacements can preserve them.
+function captureLiveDetailOpenBodies(detailRow) {
+  const openBodies = new Set();
+  detailRow.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
+    rec.querySelectorAll('details').forEach((d, dIdx) => {
+      if (d.open) openBodies.add(recIdx + ':' + dIdx);
+    });
+  });
+  return openBodies;
+}
+
+// restoreLiveDetailOpenBodies re-opens the details captured by
+// captureLiveDetailOpenBodies after an in-place detail replacement.
+function restoreLiveDetailOpenBodies(detailRow, openBodies) {
+  if (!openBodies.size) return;
+  detailRow.querySelectorAll('.req-rec').forEach((rec, recIdx) => {
+    rec.querySelectorAll('details').forEach((d, dIdx) => {
+      if (openBodies.has(recIdx + ':' + dIdx)) d.open = true;
+    });
+  });
+}
+
+// replaceLiveDetailInPlace swaps the content of an existing detail <tr> without
+// disturbing its adjacent summary row, preserving open body <details> state.
+function replaceLiveDetailInPlace(detailRow, r) {
+  detailRow.querySelectorAll('[data-chunk]').forEach((host) => {
+    bodyChunkRegistry.delete(host.dataset.chunk);
+  });
+  const openBodies = captureLiveDetailOpenBodies(detailRow);
+  const cell = detailRow.querySelector('td');
+  if (cell) cell.innerHTML = liveDetailHTML(r);
+  restoreLiveDetailOpenBodies(detailRow, openBodies);
+}
+
+// updateLiveDetailForRow inserts, updates, or removes the detail <tr> that
+// follows a summary row to match liveOpenIds and the current row state.
+function updateLiveDetailForRow(tr, r) {
+  const wantDetail = liveOpenIds.has(r.requestId);
+  let detail = tr.nextElementSibling;
+  const hasDetail = detail && detail.classList.contains('live-detail-row');
+  if (!wantDetail) {
+    if (hasDetail) detail.remove();
+    return;
+  }
+  if (hasDetail) {
+    replaceLiveDetailInPlace(detail, r);
+  } else {
+    tr.insertAdjacentHTML('afterend', renderLiveDetailRow(r));
+  }
+  if (!r.inFlight) ensureLiveDetailFetched(r.requestId);
+}
+
+// updateLiveResponseSection swaps just the in-flight response area inside an
+// expanded detail row, used by progress events that do not touch the summary.
+function updateLiveResponseSection(detailCell, r) {
+  if (!detailCell) return;
+  const section = detailCell.querySelector('.live-response-section');
+  if (section) section.outerHTML = liveResponseHTML(r);
+}
+
+// captureLiveScrollAnchor picks a visible row to pin during a prepend. An
+// expanded row wins; otherwise the first visible row is used only when the
+// page is scrolled away from the top (scrollY > 2), so the "pinned to newest"
+// behavior at the top is preserved.
+function captureLiveScrollAnchor(tbl) {
+  if (window.scrollY <= 2) return null;
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  let anchor = null;
+  let firstVisible = null;
+  for (const tr of tbl.querySelectorAll('tr[data-live-key]')) {
+    const rect = tr.getBoundingClientRect();
+    if (rect.bottom <= 0 || rect.top >= vh) continue;
+    if (tr.classList.contains('live-open')) {
+      anchor = { key: tr.dataset.liveKey, top: rect.top };
+      break;
+    }
+    if (!firstVisible) firstVisible = { key: tr.dataset.liveKey, top: rect.top };
+  }
+  return anchor || firstVisible || null;
+}
+
+// compensateLiveScroll scrolls by the delta needed to keep the anchor row at
+// the same viewport position after a prepend changed its location.
+function compensateLiveScroll(anchor) {
+  if (!anchor) return;
+  for (const tr of document.querySelectorAll('#live-table tr[data-live-key]')) {
+    if (tr.dataset.liveKey !== anchor.key) continue;
+    const delta = tr.getBoundingClientRect().top - anchor.top;
+    if (delta) window.scrollBy(0, delta);
+    return;
+  }
+}
+
+// maybeAddLiveSpacer ensures a tall trailing spacer exists inside #live-table
+// whenever a row is expanded. The spacer gives the sub-screen (page not
+// scrollable) case enough room for prepend scroll compensation to work.
+function maybeAddLiveSpacer(tbl) {
+  if (!tbl || liveOpenIds.size === 0) return;
+  let spacer = tbl.querySelector('#live-spacer');
+  if (!spacer) {
+    spacer = document.createElement('div');
+    spacer.id = 'live-spacer';
+    tbl.appendChild(spacer);
+  }
+}
+
+// maybeRemoveLiveSpacer drops the spacer once no live rows are expanded.
+function maybeRemoveLiveSpacer(tbl) {
+  if (!tbl) return;
+  const spacer = tbl.querySelector('#live-spacer');
+  if (spacer && liveOpenIds.size === 0) spacer.remove();
+}
+
+// prependLiveRows inserts new rows at the top of the live tbody with scroll
+// compensation so the visible viewport does not jump.
+function prependLiveRows(tbl, tbody, rows) {
+  maybeAddLiveSpacer(tbl);
+  const anchor = captureLiveScrollAnchor(tbl);
+  const html = rows.map((r) => { const h = liveRowHTML(r); return h.summary + h.detail; }).join('');
+  tbody.insertAdjacentHTML('afterbegin', html);
+  for (const r of rows) {
+    if (r.requestId) {
+      const tr = findLiveSummaryRow(tbody, r.requestId);
+      if (tr) tr.onclick = () => toggleLiveRowDetail(tr.dataset.id);
+    }
+  }
+  compensateLiveScroll(anchor);
+}
+
+// applyLiveEventDOM performs targeted DOM surgery for All/live mode after
+// applyLiveEvent has updated liveRows/liveByReq. Session mode still falls back
+// to the existing full re-render. start and eventOnly rows are prepended;
+// end/progress/guard events update the existing row in place.
+function applyLiveEventDOM(e) {
+  if (liveSessionFilter) {
+    renderLiveTable();
+    return;
+  }
+  refreshLiveSessionOptions();
+  const tbl = document.getElementById('live-table');
+  if (!tbl) return;
+  const tbody = tbl.querySelector('tbody');
+  if (!tbody) {
+    renderLiveTable();
+    return;
+  }
+
+  if (e.type === 'start') {
+    const row = liveByReq[e.request_id];
+    if (!row) return;
+    prependLiveRows(tbl, tbody, [row]);
+    return;
+  }
+
+  if (e.type === 'end') {
+    const row = liveByReq[e.request_id];
+    if (!row) return;
+    const tr = findLiveSummaryRow(tbody, row.requestId);
+    if (!tr) {
+      // End without a matching DOM row (synthesized/trimmed): prepend it.
+      prependLiveRows(tbl, tbody, [row]);
+      return;
+    }
+    const next = updateLiveSummaryRow(tr, row);
+    updateLiveDetailForRow(next, row);
+    return;
+  }
+
+  if (e.type === 'progress') {
+    const row = liveByReq[e.request_id];
+    if (!row) return;
+    const tr = findLiveSummaryRow(tbody, row.requestId);
+    if (!tr) return;
+    const detail = tr.nextElementSibling;
+    if (detail && detail.classList.contains('live-detail-row')) {
+      updateLiveResponseSection(detail.querySelector('td'), row);
+    }
+    return;
+  }
+
+  // Guard/budget/other non-lifecycle events attached to a known request.
+  if (e.request_id && liveByReq[e.request_id]) {
+    const row = liveByReq[e.request_id];
+    const tr = findLiveSummaryRow(tbody, row.requestId);
+    if (!tr) return;
+    const next = updateLiveSummaryRow(tr, row);
+    updateLiveDetailForRow(next, row);
+    return;
+  }
+
+  // Event-only row (no request id): prepend it.
+  const row = liveRows[0];
+  if (row && row.eventOnly) prependLiveRows(tbl, tbody, [row]);
+}
+
+// renderLiveDetailRow builds the <tr> shown beneath an expanded live row.
+function renderLiveDetailRow(r) {
+  return `<tr class="req-detail-row live-detail-row"><td colspan="7">${liveDetailHTML(r)}</td></tr>`;
+}
+
+// liveGuardSectionHTML renders the accumulated guard hits for a live detail
+// cell. Extracted so incremental updates can replace just this section.
+function liveGuardSectionHTML(r) {
+  if (!r.guardHits || !r.guardHits.length) return '';
+  let html = `<div class="live-guard-section"><div class="section-title">guard hits</div>`;
+  for (const h of r.guardHits) {
+    html += `<div class="live-guard-hit">
+      <span class="mono">${esc(fmtTimeSafe(h.ts))}</span>
+      <span class="badge warn">⚑ ${esc(fmtGuardDetail(h.detail))}</span>
+    </div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+// liveDetailHTML renders the expanded content for one live row: accumulated
+// guard hits first, then the requestlog body records (or a hint while in flight
+// or before the first fetch).
+function liveDetailHTML(r) {
+  let html = liveGuardSectionHTML(r);
+  const state = liveDetailState.get(r.requestId) || {};
+  const recs = requestsDetailCache.get(r.requestId);
+  if (r.inFlight) {
+    html += liveResponseHTML(r);
+    html += '<div class="msg hint">request still in flight — body records appear when it completes</div>';
+    return html;
+  }
+  if (state.loading) {
+    html += '<span class="hint">loading…</span>';
+    return html;
+  }
+  if (state.notLogged) {
+    html += '<div class="msg hint">not logged — the request did not commit, so there is no request-log record</div>';
+    return html;
+  }
+  if (state.error) {
+    html += `<div class="msg err">${esc(state.error)}</div>`;
+    return html;
+  }
+  if (recs && recs.length) {
+    html += detailRecordsHTML(recs);
+    return html;
+  }
+  if (recs && !recs.length) {
+    html += '<div class="msg hint">no record</div>';
+    return html;
+  }
+  // Ended but records not fetched yet; the post-render pass will start the fetch.
+  html += '<span class="hint">loading…</span>';
+  return html;
+}
+
+// liveResponseHTML renders the accumulated upstream response for an in-flight
+// request. The text is head-capped and throttled by the backend; the label
+// shows the total bytes received so far.
+function liveResponseHTML(r) {
+  const text = r.progressText || '';
+  const bytes = r.progressBytes || 0;
+  let html = '<div class="live-response-section"><div class="section-title">live response';
+  if (bytes > 0) {
+    html += ` <span class="hint">(${esc(fmtProgressBytes(bytes))})</span>`;
+  }
+  html += '</div>';
+  if (text) {
+    html += `<pre class="live-response-pre mono">${esc(text)}</pre>`;
+  } else {
+    html += '<div class="msg hint">waiting for first bytes from upstream…</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// toggleLiveRowDetail expands/collapses the detail for a live request row.
+// In All/live mode this performs in-place DOM surgery; the session panel keeps
+// its full re-render.
+function toggleLiveRowDetail(id) {
+  if (liveSessionFilter) {
+    // Session panel is not yet incremental; reuse its existing toggle path.
+    toggleLiveSessionRow(id);
+    return;
+  }
+  const tbl = document.getElementById('live-table');
+  const tr = tbl && tbl.querySelector(`tbody tr.live-row[data-id="${esc(id)}"]`);
+  const row = liveByReq[id];
+  if (!tr || !row) {
+    // DOM not built yet or out of sync: fall back to a full render.
+    if (liveOpenIds.has(id)) liveOpenIds.delete(id);
+    else liveOpenIds.add(id);
+    renderLiveTable();
+    return;
+  }
+
+  if (liveOpenIds.has(id)) {
+    liveOpenIds.delete(id);
+    const detail = tr.nextElementSibling;
+    if (detail && detail.classList.contains('live-detail-row')) detail.remove();
+    tr.classList.remove('live-open');
+    maybeRemoveLiveSpacer(tbl);
+  } else {
+    liveOpenIds.add(id);
+    if (!row.inFlight) {
+      const state = liveDetailState.get(id) || {};
+      if (state.error || state.notLogged) liveDetailState.set(id, { ...state, error: '', notLogged: false });
+    }
+    tr.insertAdjacentHTML('afterend', renderLiveDetailRow(row));
+    tr.classList.add('live-open');
+    maybeAddLiveSpacer(tbl);
+    if (!row.inFlight) ensureLiveDetailFetched(id);
+  }
+}
+
+// ensureLiveDetailFetched starts a fetch for the requestlog records if the row
+// has ended and the records are not already cached, in flight, or failed. A
+// recorded error is terminal here (see shouldFetchDetail) so a 404 cannot loop.
+function ensureLiveDetailFetched(id) {
+  const row = liveByReq[id];
+  if (!shouldFetchDetail(requestsDetailCache.has(id), liveDetailState.get(id), !row || row.inFlight)) return;
+  const state = liveDetailState.get(id) || {};
+  liveDetailState.set(id, { ...state, loading: true, error: '' });
+  fetchLiveDetail(id);
+}
+
+// fetchLiveDetail loads /api/requests/<id>, caches the records, and updates
+// the detail row in place if the row is still open. Session mode still falls
+// back to the session panel's full re-render.
+async function fetchLiveDetail(id) {
+  let recs = [];
+  try {
+    const resp = await apiGet('/api/requests/' + encodeURIComponent(id));
+    recs = resp.records || [];
+  } catch (e) {
+    liveDetailState.set(id, detailFetchState(e.status, e.message));
+    updateLiveDetailRow(id);
+    return;
+  }
+  cacheRequestDetail(id, recs);
+  liveDetailState.set(id, { loading: false, error: '' });
+  updateLiveDetailRow(id);
+}
+
+// updateLiveDetailRow finds the open live detail row and refreshes its content.
+function updateLiveDetailRow(id) {
+  if (liveSessionFilter) {
+    renderLiveSessionPanel();
+    return;
+  }
+  if (!liveOpenIds.has(id)) return;
+  const row = liveByReq[id];
+  if (!row) return;
+  const tbl = document.getElementById('live-table');
+  const tr = tbl && tbl.querySelector(`tbody tr.live-row[data-id="${esc(id)}"]`);
+  if (!tr) return;
+  updateLiveDetailForRow(tr, row);
 }
 
 // ---------- inline message helpers ----------
@@ -692,21 +2002,29 @@ async function refreshConnIndicator() {
 // when warnings exist) + a sidebar+detail layout. Only the active section's
 // pane re-renders on each 5s tick; section switches render from the cache with
 // no extra fetch. Auto-refreshes every 5s while the Status tab is active; the
-// timer is cleared when the user leaves the tab.
+// timer is cleared when the user leaves the tab, and a tick is skipped while
+// a popup (e.g. the pin menu) is open inside the panel so the background
+// refresh never closes it.
 async function renderStatusTab() {
   if (statusInflight) return;
   statusInflight = true;
   try {
-    const [st, tok, logs, acc, agents, modelsDoc] = await Promise.all([
+    // An incomplete custom range (tokensRangeQuery → null) never fires a
+    // request the server would 400 — the cards keep their previous data
+    // while the date-input hint shows.
+    const rangeQuery = tokensRangeQuery(tokensRange, Date.now());
+    const tokensFetch = rangeQuery === null
+      ? Promise.resolve({ usage: statusCache.tok || [], agents: statusCache.agents || [] })
+      : apiGet('/api/tokens' + rangeQuery).catch(() => ({ usage: [], agents: [] }));
+    const [st, tok, logs, acc, modelsDoc] = await Promise.all([
       apiGet('/api/status'),
-      apiGet('/api/tokens').catch(() => ({ usage: [] })),
+      tokensFetch,
       apiGet('/api/logs?tail=200').catch(() => ({ lines: [] })),
       apiGet('/api/accounts').catch(() => ({ providers: [] })),
-      apiGet('/api/agents').catch(() => ({ buckets: [] })),
       apiGet('/api/models').catch(() => ({ providers: {} })),
     ]);
     setConn('ok', `v${st.version || '?'} · ${st.uptime || '—'} · ${st.listen || ''}`);
-    statusCache = { st, tok: tok.usage || [], logs: logs.lines || [], accounts: acc.providers || [], agents: agents.buckets || [] };
+    statusCache = { st, tok: tok.usage || [], logs: logs.lines || [], accounts: acc.providers || [], agents: tok.agents || [], since: tok.since || 0 };
     modelsCache = modelsDoc;
     renderStatusPanel();
   } catch (e) {
@@ -831,6 +2149,15 @@ function renderStatusSection(key) {
       // .log-pre and defeat the capture.
       renderLogsInto(main, statusCache.logs || []);
       break;
+    case 'live':
+      // The live card is event-driven (SSE), not poll-driven: mount it once
+      // per section entry. The 5s status tick re-renders the active section,
+      // which must NOT wipe the card or reconnect the EventSource.
+      if (!liveActive) {
+        main.innerHTML = '';
+        renderLiveCard(main);
+      }
+      break;
   }
 }
 
@@ -849,6 +2176,9 @@ function selectStatusSection(name, push = true) {
 function selectStatusSectionSilent(name) {
   if (!STATUS_SECTIONS.some((s) => s.key === name)) name = 'schedule';
   statusSelected = name;
+  // Leaving the Live section closes its SSE connection (the card is remounted
+  // fresh, rows reset, on the next entry).
+  if (name !== 'live') stopLiveEvents();
   document.querySelectorAll('.status-nav-item').forEach((b) => {
     b.classList.toggle('active', b.dataset.section === name);
   });
@@ -861,9 +2191,15 @@ function selectStatusSectionSilent(name) {
 }
 
 // buildCard wraps a title + body in the .card/.card-head/.card-body shell.
-function buildCard(title, meta, bodyHTML, extraBodyClass = '') {
+// headActionsHTML, when given, pins extra controls (buttons) to the right end
+// of the header, grouped with the meta text.
+function buildCard(title, meta, bodyHTML, extraBodyClass = '', headActionsHTML = '') {
+  const metaHTML = meta ? `<span class="meta">${esc(meta)}</span>` : '';
+  const headRight = headActionsHTML
+    ? `<span class="card-head-side">${metaHTML}${headActionsHTML}</span>`
+    : metaHTML;
   return `<section class="card">
-    <header class="card-head"><h2>${esc(title)}</h2>${meta ? `<span class="meta">${esc(meta)}</span>` : ''}</header>
+    <header class="card-head"><h2>${esc(title)}</h2>${headRight}</header>
     <div class="card-body ${extraBodyClass}">${bodyHTML}</div>
   </section>`;
 }
@@ -882,21 +2218,24 @@ function renderWarningsCard(target, st) {
 // provider with no health record (never failed / never rate-limited; health is
 // created lazily on first failure) shows a neutral "—" rather than "unknown".
 function healthPill(h) {
-  if (!h) return `<span class="pill muted"><span class="dot"></span>—</span>`;
+  if (!h) return `<span class="pill muted">—</span>`;
   const now = Date.now();
   const rlUntil = h.rate_limited_until ? new Date(h.rate_limited_until).getTime() : 0;
+  if (h.frozen) {
+    return `<span class="pill warn" title="manually frozen by operator — excluded from scheduling until unfreeze">frozen</span>`;
+  }
   if (h.circuit_state === 'open' || h.circuit_state === 'half_open') {
     const tail = h.circuit_state === 'half_open' ? ' (probing)' : untilHuman(h.circuit_until, now);
-    return `<span class="pill err" title="circuit ${esc(h.circuit_state)}"><span class="dot"></span>circuit ${esc(h.circuit_state)}${esc(tail)}</span>`;
+    return `<span class="pill err" title="circuit ${esc(h.circuit_state)}">circuit ${esc(h.circuit_state)}${esc(tail)}</span>`;
   }
   if (rlUntil && rlUntil > now) {
     const kind = h.rate_limit_kind && h.rate_limit_kind !== 'transient' ? ` (${h.rate_limit_kind})` : '';
-    return `<span class="pill warn" title="rate-limited (${esc(h.rate_limit_kind || 'transient')}) until ${esc(h.rate_limited_until)}"><span class="dot"></span>rate-limited${esc(kind)}${esc(untilHuman(h.rate_limited_until, now))}</span>`;
+    return `<span class="pill warn" title="rate-limited (${esc(h.rate_limit_kind || 'transient')}) until ${esc(h.rate_limited_until)}">rate-limited${esc(kind)}${esc(untilHuman(h.rate_limited_until, now))}</span>`;
   }
   if (h.available) {
-    return `<span class="pill ok"><span class="dot"></span>available</span>`;
+    return `<span class="pill ok">available</span>`;
   }
-  return `<span class="pill muted"><span class="dot"></span>unavailable</span>`;
+  return `<span class="pill muted">unavailable</span>`;
 }
 
 // accountRemainingPill renders a compact pill summarizing one account's quota
@@ -908,21 +2247,21 @@ function healthPill(h) {
 // `snap` is a raw provider.QuotaSnapshot (PascalCase) from /api/status.quota,
 // keyed by accountProviderKey(p, a); null when the account has no snapshot yet.
 function accountRemainingPill(snap) {
-  if (!snap) return `<span class="pill muted"><span class="dot"></span>no data</span>`;
+  if (!snap) return `<span class="pill muted">no data</span>`;
   if (snap.Err) {
     const k = quotaErrKind(snap);
     const lbl = k === 'session-expired' ? 'session expired'
       : k === 'not-logged-in' ? 'not logged in' : 'error';
-    return `<span class="pill err"><span class="dot"></span>${esc(lbl)}</span>`;
+    return `<span class="pill err">${esc(lbl)}</span>`;
   }
   const ult = (snap.Windows || []).find((w) => w.Ultimate);
   if (ult && ult.RemainingPct != null && ult.RemainingPct >= 0) {
     const p = ult.RemainingPct;
     const cls = p > 0.3 ? 'ok' : (p > 0.1 ? 'warn' : 'err');
-    return `<span class="pill ${cls}"><span class="dot"></span>${(p * 100).toFixed(1)}% left</span>`;
+    return `<span class="pill ${cls}">${(p * 100).toFixed(1)}% left</span>`;
   }
-  if (snap.Plan) return `<span class="pill muted"><span class="dot"></span>${esc(snap.Plan)}</span>`;
-  return `<span class="pill ok"><span class="dot"></span>available</span>`;
+  if (snap.Plan) return `<span class="pill muted">${esc(snap.Plan)}</span>`;
+  return `<span class="pill ok">available</span>`;
 }
 
 // renderProvidersCard draws the per-provider health + request-counter table,
@@ -930,35 +2269,41 @@ function accountRemainingPill(snap) {
 // account showing label/email + a remaining-amount pill). This replaces the
 // standalone Quota section: the per-account remaining quota now lives here.
 //
-// Provider names are enumerated from the SCHEDULE (the union of every route's
-// ordered chain), NOT from `health`: a health entry is only created lazily when
-// a provider fails or gets rate-limited, so a fresh daemon (or all-healthy
-// providers) has health={} and the old health-only enumeration rendered nothing.
-// Schedule is the authoritative source of "which providers are configured".
-// `health` (may be absent → neutral "—") and `counters` (absent → 0) are joined
-// per name; accounts come from /api/accounts (statusCache.accounts).
+// Provider names come from providerNames (pure.js): the UNION of the schedule
+// preview's ordered chains and the health map's keys. Schedule alone
+// enumerates every configured provider for a fresh all-healthy daemon (health
+// is created lazily on failure/freeze, so health={} then), but scheduling
+// drops UNAVAILABLE targets (operator-frozen, circuit-open, rate-limit
+// cooldown, quota-exhausted) from ordered — the health union keeps those rows
+// (and their unfreeze button) visible. `health` (may be absent → neutral "—")
+// and `counters` (absent → 0) are joined per name; accounts come from
+// /api/accounts (statusCache.accounts).
 function renderProvidersCard(target, st) {
   const health = st.health || {};
   const counters = st.counters || {};
   const quota = st.quota || {};
   const models = (st.schedule && st.schedule.models) || {};
-  const nameSet = new Set();
-  for (const route of Object.keys(models)) {
-    for (const p of (models[route].ordered || [])) {
-      if (p && p.provider) nameSet.add(p.provider);
-    }
-  }
-  const names = Array.from(nameSet).sort();
+  const names = providerNames(models, health);
   if (names.length === 0) return;
   // Index /api/accounts by provider name so each row can look up its accounts.
   const acctByName = {};
   for (const p of (statusCache.accounts || [])) acctByName[p.name] = p;
   let rows = '';
+  const nowMs = Date.now();
   for (const name of names) {
     const c = counters[name] || {};
+    // Per-row unfreeze only makes sense while the provider is actually frozen
+    // (operator freeze, circuit open/half-open, or inside a rate-limit
+    // cooldown); health entries are created lazily on failure/freeze, so a
+    // healthy provider has no entry and gets the freeze button instead.
+    const h = health[name];
+    const frozen = providerFrozen(h, nowMs);
+    const action = frozen
+      ? ` <button class="btn small danger-solid" data-unfreeze="${esc(name)}" title="clear circuit/rate-limit cooldowns + model locks">unfreeze</button>`
+      : ` <button class="btn small" data-freeze="${esc(name)}" title="exclude from scheduling until unfreeze">freeze</button>`;
     rows += `<tr>
-      <td class="mono">${esc(name)}</td>
-      <td>${healthPill(health[name])}${unfreezeBtn(name, health[name])}</td>
+      <td class="mono">${esc(name)}${action}</td>
+      <td>${healthPill(health[name])}</td>
       <td class="num">${fmtNum(c.requests)}</td>
       <td class="num">${fmtNum(c.failovers)}</td>
       <td class="num">${fmtNum(c.rate_limited_429)}</td>
@@ -1000,34 +2345,26 @@ function renderProvidersCard(target, st) {
           <th class="num">lat</th><th class="num">last</th>
         </tr></thead>
         <tbody>${rows}</tbody>
-      </table>
-      <div class="row-actions" style="padding: 8px 12px;">
-        <span class="spacer"></span>
-        <button class="btn small" id="btn-unfreeze-all">Unfreeze all</button>
-      </div>`, 'flush');
+      </table>`, 'flush');
   target.insertAdjacentHTML('beforeend', html);
-  const ubtn = document.getElementById('btn-unfreeze-all');
-  if (ubtn) ubtn.addEventListener('click', unfreezeAll);
   for (const b of document.querySelectorAll('[data-unfreeze]')) {
     b.addEventListener('click', () => unfreezeProvider(b.dataset.unfreeze, b));
   }
+  for (const b of document.querySelectorAll('[data-freeze]')) {
+    b.addEventListener('click', () => freezeProvider(b.dataset.freeze, b));
+  }
 }
 
-// unfreezeBtn renders a small "unfreeze" button next to the health pill when
-// the provider is frozen (circuit open/half-open or inside a rate-limit
-// cooldown). Clicking clears the frozen state via POST /api/health/reset so
-// the provider is retried immediately — the operator escape hatch for abnormal
-// edge cases (account topped up, misclassified 429, window reset early).
-function unfreezeBtn(name, h) {
-  if (!h) return '';
-  const now = Date.now();
-  const rlUntil = h.rate_limited_until ? new Date(h.rate_limited_until).getTime() : 0;
-  const frozen = h.circuit_state === 'open' || h.circuit_state === 'half_open' || rlUntil > now;
-  if (!frozen) return '';
-  return ` <button class="btn small" data-unfreeze="${esc(name)}" title="clear circuit/rate-limit cooldowns + model locks">unfreeze</button>`;
-}
-
+// unfreezeProvider clears one provider's frozen state (circuit open/half-open,
+// rate-limit cooldown, model locks) via POST /api/health/reset so it is
+// retried immediately — the operator escape hatch for abnormal edge cases
+// (account topped up, misclassified 429, window reset early). Rendered only on
+// frozen rows; confirmed via the themed modal (same pattern as unfreezeAll).
 async function unfreezeProvider(name, btn) {
+  const ok = await confirmDialog('Unfreeze provider',
+    `Clear circuit-breaker, rate-limit cooldown and model-lock state for ${name}? The provider is retried immediately.`,
+    'Unfreeze');
+  if (!ok) return;
   if (btn) { btn.disabled = true; btn.textContent = 'unfreezing…'; }
   try {
     await apiPost('/api/health/reset', { provider: name });
@@ -1038,26 +2375,35 @@ async function unfreezeProvider(name, btn) {
   }
 }
 
-async function unfreezeAll() {
-  const btn = document.getElementById('btn-unfreeze-all');
-  if (btn) { btn.disabled = true; btn.textContent = 'unfreezing…'; }
+// freezeProvider manually freezes one provider via POST /api/health/freeze so
+// scheduling skips it until unfreeze — the operator counterpart of
+// unfreezeProvider, for taking a degraded/misbehaving provider out of rotation
+// without editing config. Rendered only on non-frozen rows; confirmed via the
+// themed modal (same pattern as unfreezeProvider).
+async function freezeProvider(name, btn) {
+  const ok = await confirmDialog('Freeze provider',
+    `Freeze ${name}? The provider is excluded from scheduling — no requests are routed to it — until you unfreeze it. The freeze persists across restarts.`,
+    'Freeze');
+  if (!ok) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'freezing…'; }
   try {
-    await apiPost('/api/health/reset', {});
+    await apiPost('/api/health/freeze', { provider: name });
     await renderStatusTab();
   } catch (e) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Unfreeze all'; }
-    window.alert('unfreeze failed: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'freeze'; }
+    window.alert('freeze failed: ' + e.message);
   }
 }
 
 // renderModelsCard draws the startup protocol probe's capability matrix
-// (GET /api/models, cached in modelsCache): one block per provider showing its
-// config fingerprint + last probe time, with one row per model and a pill per
-// protocol leg (chat / anthropic / responses). Verdicts are backend-owned —
-// the UI never re-derives support, it renders yes ✓ / no ✗ / unknown ? with
-// unknown (muted, probe pending) visually distinct from no (err, concluded
-// negative or unsupported by definition). Providers with no probe data are
-// omitted server-side; an empty store renders a hint instead of a blank card.
+// (GET /api/models, cached in modelsCache): ONE CARD PER PROVIDER — the card
+// head carries the provider name, config fingerprint, last probe time and the
+// Refresh action; the body is the model × protocol table with a verdict pill
+// per leg (chat / anthropic / responses). Verdicts are backend-owned — the UI
+// never re-derives support, it renders yes ✓ / no ✗ / unknown ? with unknown
+// (muted, probe pending) visually distinct from no (err, concluded negative
+// or unsupported by definition). Providers with no probe data are omitted
+// server-side; an empty store renders a hint instead of a blank section.
 function renderModelsCard(target, providers) {
   const entries = modelCapMatrix(providers);
   if (!entries.length) {
@@ -1065,7 +2411,6 @@ function renderModelsCard(target, providers) {
       '<div class="model-caps-empty">no probe data yet — provider models are probed for protocol support at daemon startup</div>'));
     return;
   }
-  let blocks = '';
   for (const p of entries) {
     let rows = '';
     for (const m of p.models) {
@@ -1079,32 +2424,63 @@ function renderModelsCard(target, providers) {
     if (!p.models.length) {
       rows = '<tr><td colspan="4" class="subdue">probed, no models recorded</td></tr>';
     }
-    blocks += `<div class="model-caps-provider">
-      <div class="model-caps-head">
-        <span class="mono">${esc(p.name)}</span>
-        <span class="mono subdue">fp ${esc(p.fingerprint || '—')}</span>
-        <span class="subdue">probed ${esc(fmtTimeSafe(p.probedAt) || '—')}</span>
-      </div>
-      <table class="table">
+    target.insertAdjacentHTML('beforeend', buildCard(
+      p.name,
+      `fp ${p.fingerprint || '—'} · probed ${fmtTimeSafe(p.probedAt) || '—'}`,
+      `<table class="table">
         <thead><tr><th>model</th><th>chat</th><th>anthropic</th><th>responses</th></tr></thead>
         <tbody>${rows}</tbody>
-      </table>
-    </div>`;
+      </table>`,
+      'flush model-caps',
+      `<button class="btn small danger-solid model-caps-refresh" data-models-refresh="${esc(p.name)}">Refresh</button>`));
   }
-  target.insertAdjacentHTML('beforeend',
-    buildCard('Models', `${entries.length} provider${entries.length === 1 ? '' : 's'} probed`, blocks, 'flush'));
+  target.querySelectorAll('[data-models-refresh]').forEach((btn) => {
+    btn.addEventListener('click', () => refreshProviderModels(btn));
+  });
+}
+
+// refreshProviderModels runs the daemon's models refresh (the web twin of
+// `model-proxy models refresh <provider>`) for one provider: fetch the live
+// list, probe every candidate, write the callable subset to config and
+// reload. The result summary is surfaced verbatim (the backend owns the
+// verdicts); the tab re-renders from fresh /api/models data afterwards.
+async function refreshProviderModels(btn) {
+  const provider = btn.getAttribute('data-models-refresh');
+  btn.disabled = true;
+  btn.textContent = 'refreshing…';
+  try {
+    const r = await apiPost('/api/models/refresh', { provider });
+    const lines = [`${r.provider}: ${r.kept.length} model${r.kept.length === 1 ? '' : 's'} kept (${r.config_updated ? 'config updated, reloaded' : 'config unchanged'})`];
+    if (r.added.length) lines.push(`added: ${r.added.join(', ')}`);
+    if (r.removed.length) lines.push(`removed: ${r.removed.join(', ')}`);
+    for (const d of r.probe_dropped) lines.push(`dropped: ${d.model} — ${d.reason}`);
+    if (r.policy_dropped.length) lines.push(`policy-filtered: ${r.policy_dropped.join(', ')}`);
+    if (r.warning) lines.push(`warning: ${r.warning}`);
+    window.alert(lines.join('\n'));
+    await renderStatusTab();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Refresh';
+    window.alert('models refresh failed: ' + e.message);
+  }
 }
 
 // protoVerdictPill renders one protocol leg's probe verdict as a pill:
 // yes → ok ✓, no → err ✗, unknown → muted ? (see verdictBadge in pure.js).
+// No leading dot — the glyph already encodes the verdict, and three dotted
+// pills per row read as noise.
 function protoVerdictPill(v) {
   const b = verdictBadge(v);
-  return `<span class="pill ${esc(b.cls)}"><span class="dot"></span>${esc(b.glyph)} ${esc(b.label)}</span>`;
+  return `<span class="pill ${esc(b.cls)}">${esc(b.glyph)} ${esc(b.label)}</span>`;
 }
 
 // renderScheduleCard builds the per-route schedule view: each route shows its
 // ordered provider chain with the first choice highlighted, sticky marker, and
-// pool summary.
+// pool summary. An active operator pin is OVERLAID on the default chain (the
+// backend reports the unpinned order under pin) — the pinned node gets a 📌
+// badge + the effective-first highlight stays on the pinned provider, so the
+// override and what it overrides are both visible. Pin/unpin actions mutate
+// via /api/pin and re-render from the refreshed /api/status.
 function renderScheduleCard(target, st) {
   const models = (st.schedule && st.schedule.models) || {};
   const names = Object.keys(models).sort();
@@ -1113,21 +2489,47 @@ function renderScheduleCard(target, st) {
   for (const route of names) {
     const info = models[route];
     const ordered = info.ordered || [];
+    const effectiveFirst = info.first || (ordered[0] && ordered[0].provider) || '';
     let chain = '';
     ordered.forEach((p, i) => {
       const classes = ['route-node'];
-      if (i === 0) classes.push('first');
+      if (p.provider === effectiveFirst) classes.push('first');
       if (info.sticky && info.sticky === p.provider) classes.push('sticky');
       if (!p.available) classes.push('unavailable');
+      const pinned = info.pin && (info.pin === p.provider || info.pin === p.pool_parent);
+      if (pinned) classes.push('pinned');
       const peak = p.peak ? ' · peak' : '';
       const tier = p.tier ? ` · ${esc(p.tier)}` : '';
       const parent = p.pool_parent ? ` (${esc(p.pool_parent)})` : '';
-      const title = `priority ${p.priority} · tier ${esc(p.tier || '?')} · surplus ${(p.surplus || 0).toFixed(2)}${peak}`;
-      chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${esc(p.provider)}${esc(parent)}${tier}</span>`;
+      const title = `priority ${p.priority} · tier ${esc(p.tier || '?')} · surplus ${(p.surplus || 0).toFixed(2)}${peak}${pinned ? ' · pinned (no failover)' : ''}`;
+      chain += `<span class="${classes.join(' ')}" title="${esc(title)}">${pinned ? '📌 ' : ''}${esc(p.provider)}${esc(parent)}${tier}</span>`;
       if (i < ordered.length - 1) chain += `<span class="route-sep">→</span>`;
     });
+    // Unpinned routes get a pin button opening a small popover menu of the
+    // route's own chain providers (pinning anything else is a no-op
+    // server-side); pinned routes keep the pinned-node + unpin UX. The menu
+    // floats over the card (absolute in .route-pin-wrap) — not an in-flow
+    // banner, not a native <select>.
+    if (!info.pin && ordered.length) {
+      const items = ordered.map((p) =>
+        `<button class="route-pin-item" data-pin-route="${esc(route)}" data-pin-provider="${esc(p.provider)}">${esc(p.provider)}${p.pool_parent ? ` <span class="route-meta">(${esc(p.pool_parent)})</span>` : ''}</button>`,
+      ).join('');
+      chain += `<span class="route-pin-wrap">` +
+        `<button class="btn small" data-pin-toggle="${esc(route)}" title="pin ${esc(route)} to one provider (no failover)">📌 pin</button>` +
+        `<div class="route-pin-menu" data-pin-menu="${esc(route)}" hidden>${items}</div>` +
+        `</span>`;
+    }
     if (!chain) chain = `<span class="route-meta">no providers available</span>`;
     let meta = '';
+    if (info.pin) {
+      const exp = info.pin_expires ? ` · expires ${esc(info.pin_expires)}` : ' · no expiry';
+      meta += `<span class="route-pin">pinned: <span class="mono">${esc(info.pin)}</span>${exp}</span> `;
+      meta += `<button class="btn small" data-unpin-route="${esc(route)}">unpin</button>`;
+      if (info.first && info.first !== info.pin) {
+        meta += ` <span class="route-meta">effective: ${esc(info.first)} (pool account of ${esc(info.pin)})</span>`;
+      }
+      meta += '<br>';
+    }
     if (info.sticky) {
       meta += `sticky: <span class="mono">${esc(info.sticky)}</span>`;
       if (info.sticky_dwell_remaining_sec) {
@@ -2882,9 +4284,10 @@ function selectProviderSilent(name) {
   // Capture each <details> section's open/closed state BEFORE the re-render
   // wipes them, so we can restore it after (e.g. a Refresh-usage click re-renders
   // the pane - a collapsed Usage section should stay collapsed, an expanded one
-  // stay expanded). Both sections default to open (the <details open> attribute
-  // in accountUsageDetails/accountTokensDetails); this restore only kicks in for
-  // a re-render where the user changed a section's state.
+  // stay expanded). Sections with data default to open (the `open` attribute in
+  // accountUsageDetails/accountTokensDetails; empty ones default to collapsed);
+  // this restore only kicks in for a re-render where the user changed a
+  // section's state.
   const secOpen = {};
   main.querySelectorAll('details.acct-section').forEach((d) => {
     secOpen[(d.dataset.acct || '') + '/' + (d.dataset.sec || '')] = d.open;
@@ -3392,9 +4795,10 @@ function pollLogin(sessionId) {
 //
 // Renders the Analytics tab: range/granularity/provider/model controls, then
 // fetches /api/analytics and draws two uPlot trend charts (tokens + equivalent
-// cost), a per-(provider,model) summary table, and an unpriced-models hint when
-// some series have no configured price. The chart data binding matches the
-// /api/analytics JSON shape:
+// cost), a cost-only summary table, and an unpriced-models hint when some
+// series have no configured price. Per-request/token totals live on the Status
+// page (Token usage), so this tab is deliberately trends + cost only. The chart
+// data binding matches the /api/analytics JSON shape:
 //   series[].points[].{bucket,requests,input,output,cache_creation,cache_read,cost,priced}
 //   price_coverage.{priced,unpriced}
 // Control selections persist to localStorage so a refresh keeps the view.

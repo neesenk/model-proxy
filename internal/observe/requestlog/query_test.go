@@ -118,7 +118,7 @@ func TestMetadataQueryClearsBodiesAndResponseHeadersBeforeRetention(t *testing.T
 	}
 	writeRecordFile(t, dir, "requests-20260718-100000.log", source)
 
-	metadata, err := query(dir, Filter{Limit: 1}, true)
+	metadata, err := query(dir, Filter{Limit: 1}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,5 +483,104 @@ func TestQueryRecordsEarlyTerminationPeekFallback(t *testing.T) {
 		if record.RequestID != "new" {
 			t.Errorf("record %d = %q, want the 29 newest records of the newest file", i+1, record.RequestID)
 		}
+	}
+}
+
+// TestRawPrefilter pins the cheap byte gate that lets a RequestID/Session query
+// skip json.Unmarshal on lines that cannot match.
+func TestRawPrefilter(t *testing.T) {
+	line := []byte(`{"request_id":"abc","session_id":"sess-1","response_body":"body"}`)
+	tests := []struct {
+		name   string
+		filter Filter
+		want   bool
+	}{
+		{"empty filter admits", Filter{}, true},
+		{"request id present", Filter{RequestID: "abc"}, true},
+		{"request id absent", Filter{RequestID: "zzz"}, false},
+		{"session present", Filter{Session: "sess-1"}, true},
+		{"session absent", Filter{Session: "nope"}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := rawPrefilter(line, test.filter); got != test.want {
+				t.Errorf("rawPrefilter = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// TestQueryRecordsRequestIDPrefilterCorrectness covers the byte gate's two
+// hazards: a real match in an OLDER file must still be found (the gate must not
+// stop the cross-file scan), and a newer record whose body merely CONTAINS the
+// id string must not be returned (false positives fall through to the exact
+// match check).
+func TestQueryRecordsRequestIDPrefilterCorrectness(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordFile(t, dir, "requests-20260718-100000.log", []Record{
+		{Ts: "2026-07-18T10:00:00Z", RequestID: "target", Provider: "zhipu", Status: 200, RequestBody: `{"prompt":"hi"}`},
+	})
+	writeRecordFile(t, dir, "requests-20260718-110000.log", []Record{
+		{Ts: "2026-07-18T11:00:00Z", RequestID: "other", Provider: "zhipu", Status: 200, RequestBody: `{"note":"target appears in this body"}`},
+	})
+
+	records, err := QueryRecords(dir, Filter{RequestID: "target", Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].RequestID != "target" {
+		t.Fatalf("records = %+v, want the single older-file target record", records)
+	}
+}
+
+// TestQueryRecordsRequestIDStopsAtFirstMatch pins the early stop: a request_id
+// identifies exactly one record, so the scan must not keep decoding the rest of
+// the file (or older files) after the match.
+func TestQueryRecordsRequestIDStopsAtFirstMatch(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordFile(t, dir, "requests-20260718-100000.log", []Record{
+		{Ts: "2026-07-18T10:00:00Z", RequestID: "dup", Status: 200},
+		{Ts: "2026-07-18T10:01:00Z", RequestID: "dup", Status: 500},
+		{Ts: "2026-07-18T10:02:00Z", RequestID: "other", Status: 200},
+	})
+	records, err := QueryRecords(dir, Filter{RequestID: "dup", Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Status != 200 {
+		t.Fatalf("records = %+v, want only the first matching record", records)
+	}
+}
+
+// TestQuerySummariesWithFacets pins the data-driven filter facets: distinct
+// providers/models come from the scanned log, and they are NOT narrowed by the
+// request's own model/provider filter (otherwise the UI dropdowns could lock
+// the user into the current selection).
+func TestQuerySummariesWithFacets(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordFile(t, dir, "requests-20260718-100000.log", []Record{
+		{Ts: "2026-07-18T10:00:00Z", RequestID: "a", Provider: "zhipu", Exposed: "glm-5.3", CalledModel: "glm-5.3", Status: 200},
+		{Ts: "2026-07-18T10:01:00Z", RequestID: "b", Provider: "deepseek", Exposed: "deepseek-v4-pro", CalledModel: "deepseek-v4-pro", Status: 200},
+		{Ts: "2026-07-18T10:02:00Z", RequestID: "c", Provider: "zhipu", Exposed: "glm-5.3", CalledModel: "glm-5.3", Status: 500},
+	})
+
+	summaries, facets, err := QuerySummariesWithFacets(dir, Filter{Provider: "zhipu", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("summaries = %d, want 2 (provider filter applied)", len(summaries))
+	}
+	if !reflect.DeepEqual(facets.Providers, []string{"deepseek", "zhipu"}) {
+		t.Errorf("providers = %v, want both despite the filter", facets.Providers)
+	}
+	if !reflect.DeepEqual(facets.Models, []string{"deepseek-v4-pro", "glm-5.3"}) {
+		t.Errorf("models = %v", facets.Models)
+	}
+	if !reflect.DeepEqual(facets.ProviderModels["zhipu"], []string{"glm-5.3"}) {
+		t.Errorf("zhipu models = %v", facets.ProviderModels["zhipu"])
+	}
+	if !reflect.DeepEqual(facets.ProviderModels["deepseek"], []string{"deepseek-v4-pro"}) {
+		t.Errorf("deepseek models = %v", facets.ProviderModels["deepseek"])
 	}
 }

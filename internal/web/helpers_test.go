@@ -17,6 +17,7 @@ func TestContentTypeFor(t *testing.T) {
 		"page.html": "text/html; charset=utf-8",
 		"app.js":    "text/javascript; charset=utf-8",
 		"style.css": "text/css; charset=utf-8",
+		"icon.svg":  "image/svg+xml",
 		"logo.png":  "application/octet-stream",
 		"":          "application/octet-stream",
 	}

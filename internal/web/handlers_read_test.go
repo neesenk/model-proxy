@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -24,28 +25,40 @@ import (
 )
 
 type readAPIStub struct {
-	dashboard appapi.Dashboard
-	logFile   string
-	logDir    string
-	accounts  []appapi.ProviderAccounts
-	tokens    []appapi.TokenUsage
-	stats     func(appapi.StatsQuery) ([]observestats.Bucket, error)
-	agents    func(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error)
-	analytics func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
-	pricing   appapi.PricingSnapshot
-	fusion    func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
-	pins      []appapi.Pin
-	security  func(appapi.SecurityQuery) (appapi.SecurityResult, error)
-	config    func() (appapi.ConfigDocument, error)
-	presets   []presets.Preset
-	models    appapi.ModelsDocument
+	dashboard  appapi.Dashboard
+	logFile    string
+	logDir     string
+	accounts   []appapi.ProviderAccounts
+	tokens     []appapi.TokenUsage
+	agentRows  []appapi.AgentUsage
+	tokensFrom int64
+	agentsFrom int64
+	statsSince int64
+	stats      func(appapi.StatsQuery) ([]observestats.Bucket, error)
+	agents     func(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error)
+	analytics  func(appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
+	pricing    appapi.PricingSnapshot
+	fusion     func(string, time.Time) (map[string]fusion.WorkflowStats, []fusion.Run)
+	pins       []appapi.Pin
+	security   func(appapi.SecurityQuery) (appapi.SecurityResult, error)
+	config     func() (appapi.ConfigDocument, error)
+	presets    []presets.Preset
+	models     appapi.ModelsDocument
 }
 
 func (r *readAPIStub) Dashboard(time.Time) appapi.Dashboard { return r.dashboard }
 func (r *readAPIStub) LogFile() string                      { return r.logFile }
 func (r *readAPIStub) RequestLogDirectory() string          { return r.logDir }
 func (r *readAPIStub) Accounts() []appapi.ProviderAccounts  { return r.accounts }
-func (r *readAPIStub) Tokens() []appapi.TokenUsage          { return r.tokens }
+func (r *readAPIStub) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
+	r.tokensFrom = from
+	return r.tokens, nil
+}
+func (r *readAPIStub) Agents(from, to int64) ([]appapi.AgentUsage, error) {
+	r.agentsFrom = from
+	return r.agentRows, nil
+}
+func (r *readAPIStub) StatsSince() int64 { return r.statsSince }
 func (r *readAPIStub) Stats(q appapi.StatsQuery) ([]observestats.Bucket, error) {
 	if r.stats == nil {
 		return nil, nil
@@ -257,8 +270,10 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 			Schedule: json.RawMessage(`{"enabled":true}`), Counters: map[string]appapi.Metrics{"p": {Requests: 2}},
 			Cache: map[string]any{"hits": 1}, Warnings: []string{"watch quota"},
 		},
-		accounts: []appapi.ProviderAccounts{{Name: "upstream", ProviderID: "p", Billing: "metered", Accounts: []appapi.Account{{ID: "a", Label: "primary"}}}},
-		tokens:   []appapi.TokenUsage{{Provider: "p", Model: "m", Input: 3, Output: 4, Requests: 1}},
+		accounts:   []appapi.ProviderAccounts{{Name: "upstream", ProviderID: "p", Billing: "metered", Accounts: []appapi.Account{{ID: "a", Label: "primary"}}}},
+		tokens:     []appapi.TokenUsage{{Provider: "p", Model: "m", Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10, Requests: 1}},
+		agentRows:  []appapi.AgentUsage{{Agent: "pi", Requests: 1, Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10, Models: []appapi.AgentModelUsage{{Provider: "p", Model: "m", Requests: 1, Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10}}}},
+		statsSince: 1788874500,
 		fusion: func(workflow string, _ time.Time) (map[string]fusion.WorkflowStats, []fusion.Run) {
 			if workflow != "judge" {
 				t.Fatalf("fusion workflow = %q, want judge", workflow)
@@ -267,7 +282,8 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 		},
 		pins: []appapi.Pin{{Route: "chat", Provider: "p", ExpiresAt: expires}, {Route: "all", Provider: "fallback"}},
 		config: func() (appapi.ConfigDocument, error) {
-			return appapi.ConfigDocument{YAML: "listen: :8317\n", Summary: appapi.ConfigSummary{Listen: ":8317", ProviderCount: 1, RouteCount: 2}, ProviderModels: map[string][]string{"p": {"m"}}, Routes: map[string][]appapi.ConfigRouteTarget{"chat": {{Provider: "p", Model: "m", Priority: 3}}}}, nil
+			threshold := 7
+			return appapi.ConfigDocument{YAML: "listen: :8317\n", Summary: appapi.ConfigSummary{Listen: ":8317", ProviderCount: 1, RouteCount: 2}, ProviderModels: map[string][]string{"p": {"m"}}, Routes: map[string][]appapi.ConfigRouteTarget{"chat": {{Provider: "p", Model: "m", Priority: 3}}}, Settings: appapi.ConfigSettings{LogLevel: "warn", Scheduling: appapi.ConfigScheduling{CircuitThreshold: &threshold}}}, nil
 		},
 	}
 	s := newReadServer(t, reads, func(o *Options) { o.Version = "v-test" })
@@ -300,11 +316,93 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 	}
 	tokens := serveRead(t, s, http.MethodGet, "/api/tokens")
 	var gotTokens struct {
-		Usage []appapi.TokenUsage `json:"usage"`
+		Usage  []appapi.TokenUsage `json:"usage"`
+		Agents []appapi.AgentUsage `json:"agents"`
+		Since  int64               `json:"since"`
+		Window string              `json:"window"`
 	}
 	decodeReadJSON(t, tokens, &gotTokens)
-	if tokens.Code != http.StatusOK || len(gotTokens.Usage) != 1 || gotTokens.Usage[0].Output != 4 {
+	if tokens.Code != http.StatusOK || len(gotTokens.Usage) != 1 ||
+		gotTokens.Usage[0] != (appapi.TokenUsage{Provider: "p", Model: "m", Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10, Requests: 1}) {
 		t.Fatalf("tokens = %#v", gotTokens)
+	}
+	wantAgent := appapi.AgentUsage{Agent: "pi", Requests: 1, Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10,
+		Models: []appapi.AgentModelUsage{{Provider: "p", Model: "m", Requests: 1, Input: 3, Output: 4, CacheCreation: 1, CacheRead: 2, Total: 10}}}
+	if len(gotTokens.Agents) != 1 || !reflect.DeepEqual(gotTokens.Agents[0], wantAgent) {
+		t.Fatalf("tokens.agents = %#v", gotTokens.Agents)
+	}
+	if gotTokens.Window != "all" || reads.tokensFrom != 0 || reads.agentsFrom != 0 {
+		t.Errorf("default tokens window = %q (from %d/%d), want \"all\" with from=0",
+			gotTokens.Window, reads.tokensFrom, reads.agentsFrom)
+	}
+
+	// ?window=1h switches both projections to the persisted-bucket view
+	// (from > 0, minute-truncated) and echoes the window; ?window=all is the
+	// explicit form of the default; an unknown window is rejected 400.
+	windowed := serveRead(t, s, http.MethodGet, "/api/tokens?window=1h")
+	var gotWindowed struct {
+		Window string `json:"window"`
+	}
+	decodeReadJSON(t, windowed, &gotWindowed)
+	if windowed.Code != http.StatusOK || gotWindowed.Window != "1h" {
+		t.Fatalf("windowed tokens = (%d, %#v)", windowed.Code, gotWindowed)
+	}
+	if reads.tokensFrom <= 0 || reads.agentsFrom <= 0 {
+		t.Errorf("window=1h from = %d/%d, want > 0", reads.tokensFrom, reads.agentsFrom)
+	}
+	if reads.tokensFrom%60 != 0 {
+		t.Errorf("window start %d not truncated to a minute boundary", reads.tokensFrom)
+	}
+	if rec := serveRead(t, s, http.MethodGet, "/api/tokens?window=all"); rec.Code != http.StatusOK || reads.tokensFrom != 0 {
+		t.Errorf("window=all = (%d, from %d), want 200 with from=0", rec.Code, reads.tokensFrom)
+	}
+	badWindow := serveRead(t, s, http.MethodGet, "/api/tokens?window=fortnight")
+	var badWindowBody struct {
+		Error string `json:"error"`
+	}
+	decodeReadJSON(t, badWindow, &badWindowBody)
+	if badWindow.Code != http.StatusBadRequest || !strings.Contains(badWindowBody.Error, "window") {
+		t.Errorf("unknown window = (%d, %#v), want 400 naming the window contract", badWindow.Code, badWindowBody)
+	}
+
+	// from/to is the range form of the selector: unix seconds or RFC3339
+	// (same parser as /api/stats), from truncated down to the minute
+	// boundary. Unparseable bounds, from > to, and window+from/to combos are
+	// all 400.
+	ranged := serveRead(t, s, http.MethodGet, "/api/tokens?from=1788874517&to=1788878100")
+	var rangedBody struct {
+		From int64 `json:"from"`
+		To   int64 `json:"to"`
+	}
+	decodeReadJSON(t, ranged, &rangedBody)
+	if ranged.Code != http.StatusOK {
+		t.Fatalf("from/to tokens = %d", ranged.Code)
+	}
+	if rangedBody.From != 1788874500 || rangedBody.To != 1788878100 {
+		t.Errorf("range echo = (%d, %d), want (1788874500, 1788878100)", rangedBody.From, rangedBody.To)
+	}
+	if reads.tokensFrom != 1788874500 || reads.agentsFrom != 1788874500 {
+		t.Errorf("from=1788874517 truncated to %d/%d, want minute boundary 1788874500",
+			reads.tokensFrom, reads.agentsFrom)
+	}
+	rfc := serveRead(t, s, http.MethodGet, "/api/tokens?from=2026-09-08T00:00:00Z")
+	if rfc.Code != http.StatusOK || reads.tokensFrom != 1788825600 {
+		t.Errorf("RFC3339 from = (%d, %d), want (200, 1788825600)", rfc.Code, reads.tokensFrom)
+	}
+	for _, url := range []string{
+		"/api/tokens?from=soon",
+		"/api/tokens?to=tomorrow",
+		"/api/tokens?from=200&to=100",
+		"/api/tokens?window=1h&from=100",
+		"/api/tokens?window=1h&to=100",
+	} {
+		rec := serveRead(t, s, http.MethodGet, url)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400", url, rec.Code)
+		}
+	}
+	if gotTokens.Since != 1788874500 {
+		t.Fatalf("tokens.since = %d, want 1788874500", gotTokens.Since)
 	}
 
 	fusionResponse := serveRead(t, s, http.MethodGet, "/api/fusion?workflow=judge")
@@ -335,6 +433,11 @@ func TestReadStatusAccountsTokensFusionPinsAndConfig(t *testing.T) {
 	decodeReadJSON(t, config, &gotConfig)
 	if config.Code != http.StatusOK || gotConfig.Summary.RouteCount != 2 || gotConfig.ProviderModels["p"][0] != "m" || gotConfig.Routes["chat"][0].Priority != 3 {
 		t.Fatalf("config = %#v", gotConfig)
+	}
+	// The scalar settings projection must survive the handler's explicit
+	// field mapping (docs/web-api.md GET /api/config).
+	if gotConfig.Settings.LogLevel != "warn" || gotConfig.Settings.Scheduling.CircuitThreshold == nil || *gotConfig.Settings.Scheduling.CircuitThreshold != 7 {
+		t.Fatalf("config settings = %#v", gotConfig.Settings)
 	}
 
 	reads.config = func() (appapi.ConfigDocument, error) {
@@ -387,16 +490,28 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 
 	writeReadLog(t, tmp,
 		requestlog.Record{Ts: "2026-07-29T12:00:00Z", RequestID: "old", CalledModel: "m", Provider: "p", Status: 200, RequestBody: "secret", ResponseBody: "reply", ResponseHeaders: `{"x-request-id":"x"}`},
-		requestlog.Record{Ts: "2026-07-29T12:01:00Z", RequestID: "wanted", Shadow: true, CalledModel: "Model-X", Provider: "Provider-X", Status: 500, RequestBody: "secret", ResponseBody: "reply", ResponseHeaders: `{"x-request-id":"x"}`},
+		requestlog.Record{Ts: "2026-07-29T12:01:00Z", RequestID: "wanted", Shadow: true, Agent: "claude-code", CalledModel: "Model-X", Provider: "Provider-X", Status: 500, RequestBody: "secret", ResponseBody: "reply", ResponseHeaders: `{"x-request-id":"x"}`},
 	)
 	list := serveRead(t, s, http.MethodGet, "/api/requests?model=model-x&provider=provider-x&errors=1&shadow=only&status=500&limit=5000&from=2026-07-29T12:00:30Z&to=2026-07-29T12:02:00Z")
 	var gotList struct {
 		Enabled bool                 `json:"enabled"`
 		Records []requestlog.Summary `json:"records"`
+		Facets  requestlog.Facets    `json:"facets"`
 	}
 	decodeReadJSON(t, list, &gotList)
 	if list.Code != http.StatusOK || !gotList.Enabled || len(gotList.Records) != 1 || gotList.Records[0].RequestID != "wanted" || gotList.Records[0].Status != 500 {
 		t.Fatalf("request list = %#v", gotList)
+	}
+	if gotList.Records[0].Agent != "claude-code" {
+		t.Errorf("list summary agent = %q, want claude-code", gotList.Records[0].Agent)
+	}
+	// Facets are data-driven (distinct log values), NOT the config catalog, and
+	// must not be narrowed by the request's own model/provider filter.
+	if len(gotList.Facets.Providers) != 2 || len(gotList.Facets.Models) != 2 {
+		t.Fatalf("request facets = %#v, want both providers/models despite the filter", gotList.Facets)
+	}
+	if len(gotList.Facets.ProviderModels["Provider-X"]) != 1 || gotList.Facets.ProviderModels["Provider-X"][0] != "Model-X" {
+		t.Fatalf("provider_models facet = %#v", gotList.Facets.ProviderModels)
 	}
 	if strings.Contains(list.Body.String(), "secret") || strings.Contains(list.Body.String(), "reply") || strings.Contains(list.Body.String(), "x-request-id") {
 		t.Fatalf("request list leaked detail data: %s", list.Body.String())
@@ -410,6 +525,9 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	if detail.Code != http.StatusOK || len(gotDetail.Records) != 1 || gotDetail.Records[0].RequestBody != "secret" || gotDetail.Records[0].ResponseHeaders != `{"x-request-id":"x"}` {
 		t.Fatalf("request detail = %#v", gotDetail)
 	}
+	if gotDetail.Records[0].Agent != "claude-code" {
+		t.Errorf("detail record agent = %q, want claude-code", gotDetail.Records[0].Agent)
+	}
 	missing := serveRead(t, s, http.MethodGet, "/api/requests/nope")
 	var routeError struct {
 		Error string `json:"error"`
@@ -422,8 +540,9 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	reads.logDir = ""
 	disabled := serveRead(t, s, http.MethodGet, "/api/requests")
 	var gotDisabled struct {
-		Enabled bool  `json:"enabled"`
-		Records []any `json:"records"`
+		Enabled bool              `json:"enabled"`
+		Records []any             `json:"records"`
+		Facets  requestlog.Facets `json:"facets"`
 	}
 	decodeReadJSON(t, disabled, &gotDisabled)
 	// The contract is a NON-NULL empty array: `len(...) != 0` alone would also
@@ -431,8 +550,8 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	if disabled.Code != http.StatusOK || gotDisabled.Enabled || gotDisabled.Records == nil {
 		t.Fatalf("disabled request logging = %#v (records must be a non-null empty array)", gotDisabled)
 	}
-	if body := disabled.Body.String(); !strings.Contains(body, `"records":[]`) {
-		t.Fatalf("disabled request logging body must serialize records as []: %s", body)
+	if body := disabled.Body.String(); !strings.Contains(body, `"records":[]`) || !strings.Contains(body, `"providers":[]`) {
+		t.Fatalf("disabled request logging body must serialize records/facets as []: %s", body)
 	}
 	noDetail := serveRead(t, s, http.MethodGet, "/api/requests/")
 	decodeReadJSON(t, noDetail, &routeError)
@@ -449,6 +568,25 @@ func TestReadLogsAndRequestLogEndpoints(t *testing.T) {
 	decodeReadJSON(t, detailFailure, &routeError)
 	if detailFailure.Code != http.StatusInternalServerError || !strings.HasPrefix(routeError.Error, "request query: ") {
 		t.Fatalf("request detail error = (%d, %#v)", detailFailure.Code, routeError)
+	}
+}
+
+// TestReadRequestsSessionFilter: the /api/requests?session= param narrows the
+// request-log scan to one client session.
+func TestReadRequestsSessionFilter(t *testing.T) {
+	tmp := t.TempDir()
+	writeReadLog(t, tmp,
+		requestlog.Record{Ts: "2026-07-29T12:00:00Z", RequestID: "a", SessionID: "sess-a", CalledModel: "m", Provider: "p", Status: 200},
+		requestlog.Record{Ts: "2026-07-29T12:01:00Z", RequestID: "b", SessionID: "sess-b", CalledModel: "m", Provider: "p", Status: 200},
+	)
+	s := newReadServer(t, &readAPIStub{logDir: tmp})
+	list := serveRead(t, s, http.MethodGet, "/api/requests?session=sess-b")
+	var got struct {
+		Records []requestlog.Summary `json:"records"`
+	}
+	decodeReadJSON(t, list, &got)
+	if list.Code != http.StatusOK || len(got.Records) != 1 || got.Records[0].RequestID != "b" || got.Records[0].SessionID != "sess-b" {
+		t.Fatalf("session-filtered requests = %#v", got)
 	}
 }
 
