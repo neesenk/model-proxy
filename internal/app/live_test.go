@@ -516,31 +516,25 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	// Collect events with a short grace for the async publish.
-	var got []observeevents.Event
+	// Collect events with a short grace for the async publish. Progress events
+	// may be interleaved, so ignore them and wait until we have both start and end.
+	var startEv, endEv observeevents.Event
 	deadline := time.After(time.Second)
-	for len(got) < 2 {
+	for startEv.Type == "" || endEv.Type == "" {
 		select {
 		case e := <-ch:
-			got = append(got, e)
+			switch e.Type {
+			case "start":
+				startEv = e
+			case "end":
+				endEv = e
+			}
 		case <-deadline:
-			t.Fatalf("received %d events, want 2 (start+end): %+v", len(got), got)
+			t.Fatalf("did not receive start+end events; start=%+v end=%+v", startEv, endEv)
 		}
 	}
-	if got[0].Type != "start" {
-		t.Errorf("first event type=%q want start", got[0].Type)
-	}
-	if got[0].Agent != "claude-code" || got[0].Exposed != "glm" {
-		t.Errorf("start event = %+v want agent claude-code / exposed glm", got[0])
-	}
-	var endEv observeevents.Event
-	for _, e := range got {
-		if e.Type == "end" {
-			endEv = e
-		}
-	}
-	if endEv.Type != "end" {
-		t.Fatal("no end event received")
+	if startEv.Agent != "claude-code" || startEv.Exposed != "glm" {
+		t.Errorf("start event = %+v want agent claude-code / exposed glm", startEv)
 	}
 	if endEv.Provider != "z" || endEv.UpstreamModel != "glm" || endEv.Status != 200 {
 		t.Errorf("end event = %+v want provider z / glm / 200", endEv)

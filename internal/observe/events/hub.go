@@ -14,11 +14,15 @@ const recentCap = 200
 // fires when the outbound secret scan hits (Detail then carries the pattern
 // type names and the configured action — never the matched content); "budget"
 // fires when a configured monthly cost budget crosses (Detail carries the
-// JSON {scope, month, threshold_usd, actual_usd} payload).
+// JSON {scope, month, threshold_usd, actual_usd} payload); "progress" fires
+// as the committed upstream response body streams to the client.
 type Event struct {
-	Type          string `json:"type"` // "start" | "end" | "guard" | "budget"
-	Ts            int64  `json:"ts"`   // unix milliseconds
-	RequestID     string `json:"request_id"`
+	Type      string `json:"type"` // "start" | "end" | "guard" | "budget" | "progress"
+	Ts        int64  `json:"ts"`   // unix milliseconds
+	RequestID string `json:"request_id"`
+	// SessionID is the client session id resolved from the configured header
+	// allowlist (request_log.session_headers); "" when the client sent none.
+	SessionID     string `json:"session_id,omitempty"`
 	Agent         string `json:"agent"`
 	Protocol      string `json:"protocol"`
 	Exposed       string `json:"exposed"`
@@ -28,7 +32,9 @@ type Event struct {
 	LatencyMs     int64  `json:"latency_ms"`
 	Input         uint64 `json:"input"`
 	Output        uint64 `json:"output"`
-	Detail        string `json:"detail,omitempty"` // free-form context for non-lifecycle types
+	ReceivedBytes int64  `json:"received_bytes,omitempty"` // response bytes seen so far (progress only)
+	Text          string `json:"text,omitempty"`           // head-capped response prefix (progress only)
+	Detail        string `json:"detail,omitempty"`         // free-form context for non-lifecycle types
 }
 
 // Hub fans events out to subscribers and retains a bounded recent-event ring.
@@ -116,6 +122,16 @@ func (h *Hub) SubscribeContext(ctx context.Context) (<-chan Event, []Event, func
 		stop()
 		cancel()
 	}
+}
+
+// HasSubscribers reports whether any active subscription exists. It is safe
+// to call from the hot path; the subscriber snapshot is loaded atomically.
+func (h *Hub) HasSubscribers() bool {
+	if h == nil {
+		return false
+	}
+	subs := h.subs.Load()
+	return subs != nil && len(*subs) > 0
 }
 
 // Snapshot returns a detached copy of the recent-event ring.

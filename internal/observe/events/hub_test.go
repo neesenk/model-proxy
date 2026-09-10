@@ -106,3 +106,22 @@ func TestNilHubPublishAndFindEnd(t *testing.T) {
 		t.Fatal("nil Hub found an event")
 	}
 }
+
+func TestHubHasSubscribers(t *testing.T) {
+	h := NewHub()
+	if h.HasSubscribers() {
+		t.Fatal("new hub should have no subscribers")
+	}
+	_, _, cancel := h.Subscribe()
+	if !h.HasSubscribers() {
+		t.Fatal("hub should report subscribers after Subscribe")
+	}
+	cancel()
+	if h.HasSubscribers() {
+		t.Fatal("hub should report no subscribers after cancel")
+	}
+	var nilHub *Hub
+	if nilHub.HasSubscribers() {
+		t.Fatal("nil hub should report no subscribers")
+	}
+}
