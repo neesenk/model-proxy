@@ -158,8 +158,81 @@ func (s *Server) handleAccountsList(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.reads.ModelsDocument())
 }
-func (s *Server) handleTokens(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"usage": s.reads.Tokens()})
+
+// handleTokens serves GET /api/tokens. With no params it returns the
+// cumulative provider/model token counters plus the agent-dimension breakdown
+// over the same in-memory since-daemon-start window (both reset by
+// POST /api/tokens/reset). Two range selectors switch to aggregating
+// persisted minute buckets instead:
+//
+//   - ?window=1h|24h|7d|all (legacy preset contract) — minute >= now-window.
+//   - ?from=&to= (unix seconds or RFC3339, same parser as /api/stats) —
+//     either bound may be omitted (unbounded on that side).
+//
+// Boundary semantics (storage is minute-aligned): from truncates DOWN to the
+// minute boundary so the whole boundary minute counts; a to inside a minute
+// includes that minute's bucket (bucket start <= to). Windowed views cover
+// completed persisted minutes only — sub-minute live counters appear only in
+// the cumulative view. Fail-closed validation: an unknown window, an
+// unparseable from/to, from > to, or window combined with from/to is a 400 —
+// a malformed selector must not silently widen or narrow the reported usage.
+// Windowed agent queries stay on GET /api/agents.
+func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	window := q.Get("window")
+	fromStr, toStr := q.Get("from"), q.Get("to")
+	if window != "" && (fromStr != "" || toStr != "") {
+		writeJSONErr(w, http.StatusBadRequest, "window and from/to are mutually exclusive")
+		return
+	}
+	var from, to int64
+	if window != "" {
+		windowSecs, ok := observestats.ParseWindow(window)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, "window must be one of 1h, 24h, 7d, all")
+			return
+		}
+		if windowSecs > 0 {
+			from = (time.Now().Unix() - windowSecs) / 60 * 60
+		}
+	}
+	if fromStr != "" {
+		n, ok := parseStatsTime(fromStr)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, "from must be unix seconds or RFC3339")
+			return
+		}
+		from = n / 60 * 60
+	}
+	if toStr != "" {
+		n, ok := parseStatsTime(toStr)
+		if !ok {
+			writeJSONErr(w, http.StatusBadRequest, "to must be unix seconds or RFC3339")
+			return
+		}
+		to = n
+	}
+	if from > 0 && to > 0 && from > to {
+		writeJSONErr(w, http.StatusBadRequest, "from must be <= to")
+		return
+	}
+	usage, err := s.reads.Tokens(from, to)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "token usage query: "+err.Error())
+		return
+	}
+	agents, err := s.reads.Agents(from, to)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "agent usage query: "+err.Error())
+		return
+	}
+	if window == "" {
+		window = "all"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"usage": usage, "agents": agents, "since": s.reads.StatsSince(),
+		"window": window, "from": from, "to": to,
+	})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

@@ -59,8 +59,21 @@ func Bootstrap(
 			Requests: base.TokenRequests,
 		})
 	}
+	agentBaseline, err := store.LoadCumulativeAgents()
+	if err != nil {
+		logx.Warnf("[stats] load agent baseline failed: %v", err)
+		agentBaseline = map[AgentKey]AgentCounters{}
+	}
+	for key, base := range agentBaseline {
+		agents.Seed(obscounters.AgentKey{Agent: key.Agent, Provider: key.Provider, Model: key.Model},
+			obscounters.AgentCount{
+				Requests: base.Requests, Input: base.Input, Output: base.Output,
+				CacheCreation: base.CacheCreation, CacheRead: base.CacheRead,
+				LatencySum: base.LatencySum, Failures: base.Failures,
+			})
+	}
 	return BootstrapResult{
 		Store:   store,
-		Flusher: NewFlusher(store, metrics, tokens, agents, baseline),
+		Flusher: NewFlusher(store, metrics, tokens, agents, baseline, agentBaseline),
 	}
 }

@@ -458,6 +458,43 @@ func TestFormatAgentsTable_Latency(t *testing.T) {
 	}
 }
 
+// TestFormatAgentsTable_ModelBreakdown: each agent summary row is followed by
+// per-(provider, model) breakdown rows carrying every token dimension
+// (cache create/read + total), models sorted by total desc.
+func TestFormatAgentsTable_ModelBreakdown(t *testing.T) {
+	resp := stats.AgentResp{Bucket: 60, Buckets: []observestats.AgentBucket{
+		{Agent: "codex", Provider: "zhipu", Model: "glm-5", Requests: 2, Input: 100, Output: 10, CacheCreation: 4, CacheRead: 40},
+		{Agent: "codex", Provider: "aqp", Model: "glm-5.2", Requests: 1, Input: 300, Output: 20},
+		{Agent: "codex", Provider: "zhipu", Model: "glm-5", Requests: 1, Input: 50, Output: 5, CacheRead: 20},
+	}}
+	out := stats.FormatAgentsTable(resp)
+	for _, want := range []string{"cache_create", "cache_read", "total", "zhipu/glm-5", "aqp/glm-5.2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("formatAgentsTable missing %q:\n%s", want, out)
+		}
+	}
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 4 { // header + agent summary + 2 model rows
+		t.Fatalf("table lines = %d, want 4:\n%s", len(lines), out)
+	}
+	// Agent summary: two zhipu/glm-5 buckets folded (reqs 2+1, cache_read 40+20)
+	// plus aqp: totals 229+320 = 549; models sorted aqp (320) above zhipu (229).
+	assertRow := func(line string, wants ...string) {
+		t.Helper()
+		for _, want := range wants {
+			if !strings.Contains(line, want) {
+				t.Errorf("row %q missing %q:\n%s", line, want, out)
+			}
+		}
+	}
+	assertRow(lines[1], "codex", "4", "450", "35", "4", "60", "549")
+	assertRow(lines[2], "  aqp/glm-5.2", "1", "300", "20", "320")
+	assertRow(lines[3], "  zhipu/glm-5", "3", "150", "15", "60", "229")
+	if strings.Contains(lines[2], "codex") || strings.Contains(lines[3], "codex") {
+		t.Errorf("model rows must not repeat the agent label:\n%s", out)
+	}
+}
+
 // TestRenderAgentsCLI: `stats --by-agent` fetches /api/agents and renders a
 // per-agent summary sorted by total tokens desc, with the exact header + the
 // heaviest agent on top. Guards the CLI display contract for the agent view.

@@ -6,12 +6,14 @@ import (
 	"errors"
 	"io"
 	"model-proxy/internal/accounts"
+	"model-proxy/internal/appapi"
 	"model-proxy/internal/login"
 	"model-proxy/internal/observe/counters"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -222,8 +224,21 @@ func TestAPITokens(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status=%d want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), `"input":30`) || !strings.Contains(rec.Body.String(), `"output":12`) {
-		t.Errorf("tokens body missing committed usage: %s", rec.Body.String())
+	var body struct {
+		Usage  []appapi.TokenUsage `json:"usage"`
+		Agents []appapi.AgentUsage `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode tokens body: %v (%s)", err, rec.Body.String())
+	}
+	wantUsage := appapi.TokenUsage{Provider: "zhipu", Model: "glm-5", Input: 30, Output: 12, CacheCreation: 2, CacheRead: 5, Total: 49, Requests: 1}
+	if len(body.Usage) != 1 || body.Usage[0] != wantUsage {
+		t.Errorf("usage = %+v, want [%+v]", body.Usage, wantUsage)
+	}
+	wantAgent := appapi.AgentUsage{Agent: "codex", Input: 30, Output: 12, CacheCreation: 2, CacheRead: 5, Total: 49,
+		Models: []appapi.AgentModelUsage{{Provider: "zhipu", Model: "glm-5", Input: 30, Output: 12, CacheCreation: 2, CacheRead: 5, Total: 49}}}
+	if len(body.Agents) != 1 || !reflect.DeepEqual(body.Agents[0], wantAgent) {
+		t.Errorf("agents = %+v, want [%+v]", body.Agents, wantAgent)
 	}
 
 	// POST /api/tokens/reset clears the counter.

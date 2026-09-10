@@ -189,6 +189,30 @@ func (p *Proxy) adminPorts(
 			}
 			return p.tokens.Snapshot()
 		},
+		AgentUsage: func() map[obscounters.AgentKey]obscounters.AgentCount {
+			if p.agents == nil {
+				return nil
+			}
+			return p.agents.Snapshot()
+		},
+		TokenUsageRange: func(from, to int64) (map[observestats.Key]observestats.Counters, error) {
+			if p.stats == nil {
+				return map[observestats.Key]observestats.Counters{}, nil
+			}
+			return p.stats.LoadCumulativeRange(from, to)
+		},
+		AgentUsageRange: func(from, to int64) (map[observestats.AgentKey]observestats.AgentCounters, error) {
+			if p.stats == nil {
+				return map[observestats.AgentKey]observestats.AgentCounters{}, nil
+			}
+			return p.stats.LoadCumulativeAgentsRange(from, to)
+		},
+		StatsSince: func() int64 {
+			if p.stats == nil {
+				return 0
+			}
+			return p.stats.EarliestMinute()
+		},
 		StatsRange: func(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error) {
 			if p.stats == nil {
 				return []observestats.Bucket{}, nil

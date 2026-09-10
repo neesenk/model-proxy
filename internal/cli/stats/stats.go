@@ -326,8 +326,9 @@ type AgentResp struct {
 }
 
 // renderAgents fetches /api/agents and renders a per-agent summary ("who is
-// burning my quota"): buckets are collapsed by agent, summing requests +
-// input/output tokens. --json passes the raw /api/agents response through.
+// burning my quota") with a per-(provider, model) breakdown under each agent:
+// requests, all four token buckets and their total, latency, failures. --json
+// passes the raw /api/agents response through.
 func RenderAgents(listen string, opts StatsOpts) (string, error) {
 	base := "http://" + listen
 	q := url.Values{}
@@ -371,9 +372,11 @@ func RenderAgents(listen string, opts StatsOpts) (string, error) {
 	return FormatStatsSummary(SummarizeAgents(resp)) + "\n" + FormatAgentsTable(resp), nil
 }
 
-// formatAgentsTable collapses agent-dimension buckets into one row per agent
-// (SUM of requests/input/output across providers, models, and minutes in range),
-// sorted by total tokens desc so the heaviest agent is on top.
+// formatAgentsTable collapses agent-dimension buckets into one summary row per
+// agent plus one breakdown row per (provider, model) underneath it — requests,
+// all four token buckets and their total, latency and failures summed across
+// minutes in range. Agents sort by total tokens desc (heaviest on top), and so
+// do the models within each agent.
 func FormatAgentsTable(resp AgentResp) string {
 	if len(resp.Buckets) == 0 {
 		from := time.Unix(resp.From, 0).Format("01-02 15:04")
@@ -381,13 +384,19 @@ func FormatAgentsTable(resp AgentResp) string {
 		return fmt.Sprintf("(no agent stats in range %s .. %s)\n", from, to)
 	}
 	type agentTotals struct {
-		Requests uint64
-		Input    uint64
-		Output   uint64
-		Latency  uint64
-		Failures uint64
+		Requests      uint64
+		Input         uint64
+		Output        uint64
+		CacheCreation uint64
+		CacheRead     uint64
+		Latency       uint64
+		Failures      uint64
+	}
+	totalTokens := func(t *agentTotals) uint64 {
+		return t.Input + t.Output + t.CacheCreation + t.CacheRead
 	}
 	per := map[string]*agentTotals{}
+	perModel := map[string]map[string]*agentTotals{}
 	for _, b := range resp.Buckets {
 		t := per[b.Agent]
 		if t == nil {
@@ -397,31 +406,69 @@ func FormatAgentsTable(resp AgentResp) string {
 		t.Requests += b.Requests
 		t.Input += b.Input
 		t.Output += b.Output
+		t.CacheCreation += b.CacheCreation
+		t.CacheRead += b.CacheRead
 		t.Latency += b.LatencySum
 		t.Failures += b.Failures
+		models := perModel[b.Agent]
+		if models == nil {
+			models = map[string]*agentTotals{}
+			perModel[b.Agent] = models
+		}
+		pm := models[b.Provider+"/"+b.Model]
+		if pm == nil {
+			pm = &agentTotals{}
+			models[b.Provider+"/"+b.Model] = pm
+		}
+		pm.Requests += b.Requests
+		pm.Input += b.Input
+		pm.Output += b.Output
+		pm.CacheCreation += b.CacheCreation
+		pm.CacheRead += b.CacheRead
+		pm.Latency += b.LatencySum
+		pm.Failures += b.Failures
 	}
 	agents := make([]string, 0, len(per))
 	for a := range per {
 		agents = append(agents, a)
 	}
 	sort.Slice(agents, func(i, j int) bool {
-		ti := per[agents[i]].Input + per[agents[i]].Output
-		tj := per[agents[j]].Input + per[agents[j]].Output
+		ti, tj := totalTokens(per[agents[i]]), totalTokens(per[agents[j]])
 		if ti != tj {
 			return ti > tj
 		}
 		return agents[i] < agents[j]
 	})
-	out := fmt.Sprintf("%-16s %10s %12s %12s %8s %8s\n", "agent", "reqs", "input", "output", "lat", "fail")
-	for _, a := range agents {
-		t := per[a]
+	out := fmt.Sprintf("%-24s %8s %10s %10s %12s %11s %10s %8s %8s\n",
+		"agent / model", "reqs", "input", "output", "cache_create", "cache_read", "total", "lat", "fail")
+	formatRow := func(label string, t *agentTotals) string {
 		avgLat := uint64(0)
 		if t.Requests > 0 {
 			avgLat = t.Latency / t.Requests
 		}
-		out += fmt.Sprintf("%-16.16s %10s %12s %12s %8s %8s\n",
-			a, cliframework.CompactNum(t.Requests), cliframework.CompactNum(t.Input), cliframework.CompactNum(t.Output),
+		return fmt.Sprintf("%-24.24s %8s %10s %10s %12s %11s %10s %8s %8s\n",
+			label, cliframework.CompactNum(t.Requests), cliframework.CompactNum(t.Input),
+			cliframework.CompactNum(t.Output), cliframework.CompactNum(t.CacheCreation),
+			cliframework.CompactNum(t.CacheRead), cliframework.CompactNum(totalTokens(t)),
 			cliframework.CompactNum(avgLat), cliframework.CompactNum(t.Failures))
+	}
+	for _, a := range agents {
+		out += formatRow(a, per[a])
+		models := perModel[a]
+		names := make([]string, 0, len(models))
+		for name := range models {
+			names = append(names, name)
+		}
+		sort.Slice(names, func(i, j int) bool {
+			ti, tj := totalTokens(models[names[i]]), totalTokens(models[names[j]])
+			if ti != tj {
+				return ti > tj
+			}
+			return names[i] < names[j]
+		})
+		for _, name := range names {
+			out += formatRow("  "+name, models[name])
+		}
 	}
 	return out
 }
@@ -536,7 +583,8 @@ func SummarizeAnalytics(resp AnalyticsResp) StatsSummary {
 }
 
 // SummarizeAgents aggregates the /api/agents response. The top contributor is
-// the heaviest agent by input+output tokens, matching the table's sort order.
+// the heaviest agent by total tokens (all four buckets: input + output +
+// cache_creation + cache_read), matching the table's sort order.
 func SummarizeAgents(resp AgentResp) StatsSummary {
 	s := StatsSummary{From: resp.From, To: resp.To, HasSuccess: true}
 	perTokens := map[string]uint64{}
@@ -544,7 +592,7 @@ func SummarizeAgents(resp AgentResp) StatsSummary {
 	for _, b := range resp.Buckets {
 		s.Requests += b.Requests
 		s.Failures += b.Failures
-		tokens := b.Input + b.Output
+		tokens := b.Input + b.Output + b.CacheCreation + b.CacheRead
 		perTokens[b.Agent] += tokens
 		totalTokens += tokens
 	}

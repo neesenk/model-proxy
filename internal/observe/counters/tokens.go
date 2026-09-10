@@ -169,7 +169,7 @@ func (s *UsageScanner) parseLine(line []byte) {
 	if !bytes.Contains(payload, usageMarker) {
 		return
 	}
-	// Try anthropic shapes first, then openai.
+	// Try anthropic shapes first, then openai chat, then responses.
 	var anth struct {
 		Type    string `json:"type"`
 		Message struct {
@@ -180,15 +180,17 @@ func (s *UsageScanner) parseLine(line []byte) {
 			} `json:"usage"`
 		} `json:"message"`
 		Usage struct {
-			InputTokens  uint64 `json:"input_tokens"`
-			OutputTokens uint64 `json:"output_tokens"`
+			InputTokens         uint64 `json:"input_tokens"`
+			OutputTokens        uint64 `json:"output_tokens"`
+			CacheCreationTokens uint64 `json:"cache_creation_input_tokens"`
+			CacheReadTokens     uint64 `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(payload, &anth) == nil {
 		if anth.Type == "message_start" {
 			s.acc.Input += anth.Message.Usage.InputTokens
-			s.acc.CacheCreation += anth.Message.Usage.CacheCreationTokens
-			s.acc.CacheRead += anth.Message.Usage.CacheReadTokens
+			s.acc.CacheCreation = max(s.acc.CacheCreation, anth.Message.Usage.CacheCreationTokens)
+			s.acc.CacheRead = max(s.acc.CacheRead, anth.Message.Usage.CacheReadTokens)
 		}
 		if anth.Type == "message_delta" {
 			s.acc.Output += anth.Usage.OutputTokens
@@ -198,16 +200,58 @@ func (s *UsageScanner) parseLine(line []byte) {
 			// chunk, after message_start fired). Read it here so converted routes
 			// attribute input tokens (otherwise they'd be permanently 0).
 			s.acc.Input += anth.Usage.InputTokens
+			// Cache buckets merge by per-field MAX, never +=: dialects deliver
+			// the real values only here (zhipu/aqp/shopee/kimi-code send zero or
+			// null cache usage in message_start), while others repeat the same
+			// cumulative value in BOTH frames (deepseek cache_read:256 in
+			// message_start and message_delta) — addition would double-count.
+			// Same per-field-max rule as requestlog's extractSSEUsage.
+			s.acc.CacheCreation = max(s.acc.CacheCreation, anth.Usage.CacheCreationTokens)
+			s.acc.CacheRead = max(s.acc.CacheRead, anth.Usage.CacheReadTokens)
 		}
 	}
 	var oai struct {
 		Usage *struct {
 			PromptTokens     uint64 `json:"prompt_tokens"`
 			CompletionTokens uint64 `json:"completion_tokens"`
+			PromptDetails    *struct {
+				CachedTokens uint64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			PromptCacheHit uint64 `json:"prompt_cache_hit_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(payload, &oai) == nil && oai.Usage != nil {
 		s.acc.Input += oai.Usage.PromptTokens
 		s.acc.Output += oai.Usage.CompletionTokens
+		// Cached prompt tokens ride in prompt_tokens_details (openai contract);
+		// deepseek additionally spells them prompt_cache_hit_tokens — details win
+		// when both are present. Max-merge like the anthropic cache buckets: a
+		// usage chunk repeats cumulative counters, never deltas.
+		cached := oai.Usage.PromptCacheHit
+		if oai.Usage.PromptDetails != nil {
+			cached = oai.Usage.PromptDetails.CachedTokens
+		}
+		s.acc.CacheRead = max(s.acc.CacheRead, cached)
+	}
+	// /v1/responses client streams carry one cumulative snapshot in
+	// response.completed (usage is null on in_progress frames); every field
+	// merges by max, mirroring extractSSEUsage.
+	var resp struct {
+		Response *struct {
+			Usage *struct {
+				InputTokens  uint64 `json:"input_tokens"`
+				OutputTokens uint64 `json:"output_tokens"`
+				InputDetails *struct {
+					CachedTokens uint64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(payload, &resp) == nil && resp.Response != nil && resp.Response.Usage != nil {
+		s.acc.Input = max(s.acc.Input, resp.Response.Usage.InputTokens)
+		s.acc.Output = max(s.acc.Output, resp.Response.Usage.OutputTokens)
+		if resp.Response.Usage.InputDetails != nil {
+			s.acc.CacheRead = max(s.acc.CacheRead, resp.Response.Usage.InputDetails.CachedTokens)
+		}
 	}
 }

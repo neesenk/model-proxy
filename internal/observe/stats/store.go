@@ -93,6 +93,8 @@ func (s *Store) migrate() error {
 		requests  INTEGER NOT NULL DEFAULT 0,
 		input     INTEGER NOT NULL DEFAULT 0,
 		output    INTEGER NOT NULL DEFAULT 0,
+		cache_creation INTEGER NOT NULL DEFAULT 0,
+		cache_read  INTEGER NOT NULL DEFAULT 0,
 		latency_ms_sum INTEGER NOT NULL DEFAULT 0,
 		failures  INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (agent, provider, model, minute)
@@ -104,6 +106,8 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumns("agent_buckets", [][2]string{
 		{"latency_ms_sum", "INTEGER NOT NULL DEFAULT 0"},
 		{"failures", "INTEGER NOT NULL DEFAULT 0"},
+		{"cache_creation", "INTEGER NOT NULL DEFAULT 0"},
+		{"cache_read", "INTEGER NOT NULL DEFAULT 0"},
 	}); err != nil {
 		return fmt.Errorf("migrate stats schema: %w", err)
 	}
@@ -259,12 +263,14 @@ func (s *Store) FlushAgentsContext(
 	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO agent_buckets
-		(agent, provider, model, minute, requests, input, output, latency_ms_sum, failures)
-		VALUES (?,?,?,?,?,?,?,?,?)
+		(agent, provider, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, failures)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(agent, provider, model, minute) DO UPDATE SET
 			requests = requests + excluded.requests,
 			input = input + excluded.input,
 			output = output + excluded.output,
+			cache_creation = cache_creation + excluded.cache_creation,
+			cache_read = cache_read + excluded.cache_read,
 			latency_ms_sum = latency_ms_sum + excluded.latency_ms_sum,
 			failures = failures + excluded.failures`)
 	if err != nil {
@@ -282,6 +288,8 @@ func (s *Store) FlushAgentsContext(
 			delta.Requests,
 			delta.Input,
 			delta.Output,
+			delta.CacheCreation,
+			delta.CacheRead,
 			delta.LatencySum,
 			delta.Failures,
 		); err != nil {

@@ -63,7 +63,7 @@ func TestStatsFlushTwoMinutes(t *testing.T) {
 	ss := openFlusherTestStore(t)
 	m := obscounters.NewMetricsStore()
 	tc := obscounters.NewTokenCounter()
-	f := NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[Key]Counters{})
+	f := NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[Key]Counters{}, nil)
 
 	// Minute 1: 1 request, 1 failover.
 	m.Inc("z", "m", obscounters.EvRequests)
@@ -120,7 +120,7 @@ func TestStatsRestoreOnBoot(t *testing.T) {
 	}
 	m := obscounters.NewMetricsStore()
 	tc := obscounters.NewTokenCounter()
-	f := NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[Key]Counters{})
+	f := NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[Key]Counters{}, nil)
 	m.Inc("a", "x", obscounters.EvRequests)
 	m.Inc("a", "x", obscounters.EvRequests)
 	m.Inc("a", "x", obscounters.EvFailures)
@@ -183,7 +183,7 @@ func TestLegacyTokensPath(t *testing.T) {
 // reports false (the idle-proxy path).
 func TestStatsFlushEmptyIsNoop(t *testing.T) {
 	ss := openFlusherTestStore(t)
-	f := NewFlusher(ss, obscounters.NewMetricsStore(), obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), map[Key]Counters{})
+	f := NewFlusher(ss, obscounters.NewMetricsStore(), obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), map[Key]Counters{}, nil)
 	if f.Flush(time.Now()) {
 		t.Error("flush with no deltas should report false")
 	}
@@ -200,7 +200,7 @@ func TestFlush_DefersBaselineOnFlushError(t *testing.T) {
 	ss := openFlusherTestStore(t)
 	sink := &failOnceStatsSink{Store: ss}
 	metrics := obscounters.NewMetricsStore()
-	f := NewFlusher(sink, metrics, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil)
+	f := NewFlusher(sink, metrics, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil, nil)
 
 	addReq := func(n int) {
 		for i := 0; i < n; i++ {
@@ -269,7 +269,7 @@ func TestStatsPendingBacklogIsBoundedWithoutLosingTotals(t *testing.T) {
 	sink := &alwaysFailStatsSink{Store: store}
 	metrics := obscounters.NewMetricsStore()
 	agents := obscounters.NewAgentCounter()
-	flusher := NewFlusher(sink, metrics, obscounters.NewTokenCounter(), agents, nil)
+	flusher := NewFlusher(sink, metrics, obscounters.NewTokenCounter(), agents, nil, nil)
 	key := Key{Provider: "zhipu", Model: "glm-5"}
 	agentKey := AgentKey{
 		Agent: "codex", Provider: "zhipu", Model: "glm-5",
@@ -337,8 +337,7 @@ func TestStatsPendingDrainIsBoundedPerCycle(t *testing.T) {
 		obscounters.NewMetricsStore(),
 		obscounters.NewTokenCounter(),
 		obscounters.NewAgentCounter(),
-		nil,
-	)
+		nil, nil)
 	key := Key{Provider: "p", Model: "m"}
 	total := MaxStatsBatchesPerFlush + 5
 	for index := 0; index < total; index++ {
@@ -421,20 +420,27 @@ func sumRequests(t *testing.T, ss *Store) uint64 {
 // TestDiffAgent: per-key deltas clamp at 0 and omit unchanged keys.
 func TestDiffAgent(t *testing.T) {
 	cur := map[AgentKey]AgentCounters{
-		{Agent: "a", Provider: "z", Model: "m"}: {Requests: 5, Input: 10, Output: 2},
+		{Agent: "a", Provider: "z", Model: "m"}: {Requests: 5, Input: 10, Output: 2, CacheRead: 8},
 		{Agent: "b", Provider: "z", Model: "m"}: {Requests: 3, Input: 0, Output: 0},
+		// Cache-only movement (no requests/input/output delta) must still flush.
+		{Agent: "c", Provider: "z", Model: "m"}: {Requests: 1, CacheCreation: 4, CacheRead: 9},
 	}
 	prev := map[AgentKey]AgentCounters{
-		{Agent: "a", Provider: "z", Model: "m"}: {Requests: 2, Input: 10, Output: 0}, // reqs +3, output +2; input unchanged
+		{Agent: "a", Provider: "z", Model: "m"}: {Requests: 2, Input: 10, Output: 0, CacheRead: 3}, // reqs +3, output +2, cache_read +5; input unchanged
+		{Agent: "c", Provider: "z", Model: "m"}: {Requests: 1, CacheRead: 9},
 	}
 	d := DiffAgent(cur, prev)
 	ad, ok := d[AgentKey{Agent: "a", Provider: "z", Model: "m"}]
-	if !ok || ad.Requests != 3 || ad.Input != 0 || ad.Output != 2 {
-		t.Errorf("a delta = %+v want reqs=3 in=0 out=2", ad)
+	if !ok || ad.Requests != 3 || ad.Input != 0 || ad.Output != 2 || ad.CacheRead != 5 {
+		t.Errorf("a delta = %+v want reqs=3 in=0 out=2 cr=5", ad)
 	}
 	bd, ok := d[AgentKey{Agent: "b", Provider: "z", Model: "m"}]
 	if !ok || bd.Requests != 3 {
 		t.Errorf("b delta = %+v want reqs=3 (new key)", bd)
+	}
+	cd, ok := d[AgentKey{Agent: "c", Provider: "z", Model: "m"}]
+	if !ok || cd.CacheCreation != 4 || cd.CacheRead != 0 || cd.Requests != 0 {
+		t.Errorf("c delta = %+v want cache-only delta cc=4", cd)
 	}
 	// A key whose counters only decreased (e.g. after reset) clamps to 0 and is
 	// omitted when ALL fields are 0.
@@ -447,6 +453,18 @@ func TestDiffAgent(t *testing.T) {
 	}
 }
 
+// TestMergeAgentDeltas accumulates every agent counter field when backlog
+// batches coalesce.
+func TestMergeAgentDeltas(t *testing.T) {
+	key := AgentKey{Agent: "a", Provider: "z", Model: "m"}
+	dst := map[AgentKey]AgentCounters{key: {Requests: 1, Input: 2, Output: 3, CacheCreation: 4, CacheRead: 5, LatencySum: 6, Failures: 7}}
+	MergeAgentDeltas(dst, map[AgentKey]AgentCounters{key: {Requests: 10, Input: 20, Output: 30, CacheCreation: 40, CacheRead: 50, LatencySum: 60, Failures: 70}})
+	if got := dst[key]; got.Requests != 11 || got.Input != 22 || got.Output != 33 ||
+		got.CacheCreation != 44 || got.CacheRead != 55 || got.LatencySum != 66 || got.Failures != 77 {
+		t.Errorf("merged agent delta = %+v", got)
+	}
+}
+
 // TestFlusherResetClearsEverything covers the in-package reset path: durable
 // rows, runtime baselines, and pending queues all clear atomically.
 func TestFlusherResetClearsEverything(t *testing.T) {
@@ -454,7 +472,7 @@ func TestFlusherResetClearsEverything(t *testing.T) {
 	m := obscounters.NewMetricsStore()
 	tc := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	f := NewFlusher(ss, m, tc, agents, nil)
+	f := NewFlusher(ss, m, tc, agents, nil, nil)
 
 	m.Inc("a", "x", obscounters.EvRequests)
 	tc.Commit(obscounters.PMKey{Provider: "a", Model: "x"}, obscounters.TokenUsage{Input: 3})
@@ -481,7 +499,7 @@ func TestFlusherResetClearsEverything(t *testing.T) {
 func TestPendingCountsContext(t *testing.T) {
 	ss := openFlusherTestStore(t)
 	m := obscounters.NewMetricsStore()
-	f := NewFlusher(ss, m, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil)
+	f := NewFlusher(ss, m, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil, nil)
 	m.Inc("a", "x", obscounters.EvRequests)
 	f.Flush(time.Now())
 
@@ -526,7 +544,7 @@ func TestFlushForShutdownDrainsPending(t *testing.T) {
 	ss := openFlusherTestStore(t)
 	sink := &failOnceSink{Store: ss, failNext: true}
 	m := obscounters.NewMetricsStore()
-	f := NewFlusher(sink, m, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil)
+	f := NewFlusher(sink, m, obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil, nil)
 	m.Inc("a", "x", obscounters.EvRequests)
 
 	f.FlushForShutdown(StatsShutdownFlushTimeout)

@@ -145,7 +145,7 @@ func TestAdditiveMigrationForLegacySchemasIsIdempotent(t *testing.T) {
 		t.Fatalf("first Open: %v", err)
 	}
 	assertColumns(t, store, "minute_buckets", "latency_ms_sum", "ttft_ms_sum")
-	assertColumns(t, store, "agent_buckets", "latency_ms_sum", "failures")
+	assertColumns(t, store, "agent_buckets", "latency_ms_sum", "failures", "cache_creation", "cache_read")
 
 	statsRows, err := store.QueryRange(0, 120, "", "", 60)
 	if err != nil {
@@ -160,7 +160,8 @@ func TestAdditiveMigrationForLegacySchemasIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(agentRows) != 1 || agentRows[0].Requests != 3 || agentRows[0].Input != 30 ||
-		agentRows[0].Output != 10 || agentRows[0].LatencySum != 0 || agentRows[0].Failures != 0 {
+		agentRows[0].Output != 10 || agentRows[0].CacheCreation != 0 || agentRows[0].CacheRead != 0 ||
+		agentRows[0].LatencySum != 0 || agentRows[0].Failures != 0 {
 		t.Errorf("migrated agent row = %+v", agentRows)
 	}
 	if err := store.Close(); err != nil {
@@ -173,7 +174,7 @@ func TestAdditiveMigrationForLegacySchemasIsIdempotent(t *testing.T) {
 	}
 	defer reopened.Close()
 	assertColumns(t, reopened, "minute_buckets", "latency_ms_sum", "ttft_ms_sum")
-	assertColumns(t, reopened, "agent_buckets", "latency_ms_sum", "failures")
+	assertColumns(t, reopened, "agent_buckets", "latency_ms_sum", "failures", "cache_creation", "cache_read")
 	if err := reopened.Flush(60, map[Key]Counters{
 		{Provider: "legacy-provider", Model: "legacy-model"}: {
 			Requests: 1, Input: 5, LastRequestAt: 200, LatencySum: 400, TTFTSum: 100,
@@ -183,7 +184,7 @@ func TestAdditiveMigrationForLegacySchemasIsIdempotent(t *testing.T) {
 	}
 	if err := reopened.FlushAgents(60, map[AgentKey]AgentCounters{
 		{Agent: "legacy-agent", Provider: "legacy-provider", Model: "legacy-model"}: {
-			Requests: 2, Input: 5, Output: 6, LatencySum: 700, Failures: 1,
+			Requests: 2, Input: 5, Output: 6, CacheCreation: 3, CacheRead: 7, LatencySum: 700, Failures: 1,
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -196,8 +197,8 @@ func TestAdditiveMigrationForLegacySchemasIsIdempotent(t *testing.T) {
 	}
 	agentRows, _ = reopened.QueryAgents(0, 120, "", "", "", 60)
 	if len(agentRows) != 1 || agentRows[0].Requests != 5 || agentRows[0].Input != 35 ||
-		agentRows[0].Output != 16 || agentRows[0].LatencySum != 700 ||
-		agentRows[0].Failures != 1 {
+		agentRows[0].Output != 16 || agentRows[0].CacheCreation != 3 || agentRows[0].CacheRead != 7 ||
+		agentRows[0].LatencySum != 700 || agentRows[0].Failures != 1 {
 		t.Errorf("post-reopen agent upsert = %+v", agentRows)
 	}
 }

@@ -136,17 +136,17 @@ func TestFlushAndQueryAgentsRawWideAndFilters(t *testing.T) {
 	store := newTestStore(t, 0)
 	key := AgentKey{Agent: "codex", Provider: "zhipu", Model: "glm-5"}
 	if err := store.FlushAgents(0, map[AgentKey]AgentCounters{
-		key: {Requests: 3, Input: 100, Output: 200, LatencySum: 1500, Failures: 0},
+		key: {Requests: 3, Input: 100, Output: 200, CacheCreation: 5, CacheRead: 40, LatencySum: 1500, Failures: 0},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
-		key: {Requests: 5, Input: 400, Output: 800, LatencySum: 6000, Failures: 1},
+		key: {Requests: 5, Input: 400, Output: 800, CacheCreation: 10, CacheRead: 60, LatencySum: 6000, Failures: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
-		key: {Requests: 2, Input: 10, Output: 20, LatencySum: 500, Failures: 2},
+		key: {Requests: 2, Input: 10, Output: 20, CacheRead: 4, LatencySum: 500, Failures: 2},
 		{Agent: "claude-code", Provider: "zhipu", Model: "glm-5"}: {Requests: 7},
 		{Agent: "codex", Provider: "other", Model: "other"}:       {Requests: 11},
 	}); err != nil {
@@ -163,11 +163,12 @@ func TestFlushAndQueryAgentsRawWideAndFilters(t *testing.T) {
 	if len(raw) != 2 {
 		t.Fatalf("raw agent rows = %d, want 2: %+v", len(raw), raw)
 	}
-	if raw[0].Minute != 0 || raw[0].Requests != 3 {
+	if raw[0].Minute != 0 || raw[0].Requests != 3 || raw[0].CacheCreation != 5 || raw[0].CacheRead != 40 {
 		t.Errorf("minute 0 = %+v", raw[0])
 	}
 	if raw[1].Minute != 60 || raw[1].Requests != 7 || raw[1].Input != 410 ||
-		raw[1].Output != 820 || raw[1].LatencySum != 6500 || raw[1].Failures != 3 {
+		raw[1].Output != 820 || raw[1].CacheCreation != 10 || raw[1].CacheRead != 64 ||
+		raw[1].LatencySum != 6500 || raw[1].Failures != 3 {
 		t.Errorf("minute 60 upsert = %+v", raw[1])
 	}
 
@@ -179,7 +180,8 @@ func TestFlushAndQueryAgentsRawWideAndFilters(t *testing.T) {
 		t.Fatalf("wide agent rows = %d, want 1: %+v", len(wide), wide)
 	}
 	if got := wide[0]; got.Minute != 0 || got.Requests != 10 || got.Input != 510 ||
-		got.Output != 1020 || got.LatencySum != 8000 || got.Failures != 3 {
+		got.Output != 1020 || got.CacheCreation != 15 || got.CacheRead != 104 ||
+		got.LatencySum != 8000 || got.Failures != 3 {
 		t.Errorf("wide agent bucket = %+v", got)
 	}
 
@@ -196,6 +198,137 @@ func TestFlushAndQueryAgentsRawWideAndFilters(t *testing.T) {
 	}
 	if len(providerModel) != 1 || providerModel[0].Requests != 11 {
 		t.Errorf("provider/model filter = %+v", providerModel)
+	}
+}
+
+// TestLoadCumulativeRangeWindowBoundaries pins the range aggregation behind
+// the /api/tokens time selector: the from bound is inclusive (a bucket whose
+// minute equals from counts), a to inside a minute includes that minute's
+// bucket, either bound <= 0 is unbounded (both zero = all-time), a range
+// beyond all data is empty, and an inverted range aggregates to empty.
+func TestLoadCumulativeRangeWindowBoundaries(t *testing.T) {
+	store := newTestStore(t, 0)
+	key := Key{Provider: "zhipu", Model: "glm-5"}
+	agentKey := AgentKey{Agent: "codex", Provider: "zhipu", Model: "glm-5"}
+	if err := store.Flush(60, map[Key]Counters{
+		key: {Requests: 1, Input: 10, Output: 1, CacheRead: 2, TokenRequests: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Flush(120, map[Key]Counters{
+		key: {Requests: 1, Input: 20, Output: 2, CacheCreation: 3, CacheRead: 4, TokenRequests: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
+		agentKey: {Requests: 1, Input: 5, Output: 1, CacheRead: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FlushAgents(120, map[AgentKey]AgentCounters{
+		agentKey: {Requests: 1, Input: 7, Output: 2, CacheCreation: 1, CacheRead: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// from exactly on a bucket boundary includes that bucket; a from inside
+	// the previous minute resolves to the same set (storage is
+	// minute-aligned).
+	for _, from := range []int64{120, 61} {
+		got, err := store.LoadCumulativeRange(from, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[key].Input != 20 || got[key].Output != 2 ||
+			got[key].CacheCreation != 3 || got[key].CacheRead != 4 || got[key].TokenRequests != 1 {
+			t.Errorf("LoadCumulativeRange(%d, 0) = %+v, want only the minute-120 bucket", from, got)
+		}
+		agents, err := store.LoadCumulativeAgentsRange(from, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(agents) != 1 || agents[agentKey].Input != 7 || agents[agentKey].CacheCreation != 1 ||
+			agents[agentKey].CacheRead != 2 {
+			t.Errorf("LoadCumulativeAgentsRange(%d, 0) = %+v, want only the minute-120 bucket", from, agents)
+		}
+	}
+
+	// from <= 0 is all-time — identical to the cumulative loaders.
+	all, err := store.LoadCumulativeRange(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all[key].Input != 30 || all[key].CacheRead != 6 || all[key].TokenRequests != 2 {
+		t.Errorf("LoadCumulativeRange(0, 0) = %+v, want all-time totals", all)
+	}
+	base, err := store.LoadCumulative()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base[key] != all[key] {
+		t.Errorf("LoadCumulative() = %+v differs from LoadCumulativeRange(0, 0) = %+v", base[key], all[key])
+	}
+	allAgents, err := store.LoadCumulativeAgentsRange(-5, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allAgents[agentKey].Input != 12 || allAgents[agentKey].CacheRead != 3 {
+		t.Errorf("LoadCumulativeAgentsRange(-5, 0) = %+v, want all-time totals", allAgents)
+	}
+
+	// A window beyond all data aggregates to empty maps (no zero rows).
+	empty, err := store.LoadCumulativeRange(1<<40, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("LoadCumulativeRange(future) = %+v, want empty", empty)
+	}
+	emptyAgents, err := store.LoadCumulativeAgentsRange(1<<40, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emptyAgents) != 0 {
+		t.Errorf("LoadCumulativeAgentsRange(future) = %+v, want empty", emptyAgents)
+	}
+
+	// to bound: a to inside a minute includes that minute's bucket (bucket
+	// start <= to); a to before it excludes it. Closed ranges work on both
+	// sides, and an inverted range (from > to) aggregates to empty.
+	closed, err := store.LoadCumulativeRange(0, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closed) != 1 || closed[key].Input != 10 || closed[key].CacheRead != 2 {
+		t.Errorf("LoadCumulativeRange(0, 60) = %+v, want only the minute-60 bucket", closed)
+	}
+	closedInside, err := store.LoadCumulativeRange(0, 119)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closedInside) != 1 || closedInside[key].Input != 10 {
+		t.Errorf("LoadCumulativeRange(0, 119) = %+v, want minute-60 only (120 not started by 119)", closedInside)
+	}
+	closedAgents, err := store.LoadCumulativeAgentsRange(120, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closedAgents) != 1 || closedAgents[agentKey].Input != 7 {
+		t.Errorf("LoadCumulativeAgentsRange(120, 120) = %+v, want only the minute-120 bucket", closedAgents)
+	}
+	inverted, err := store.LoadCumulativeRange(120, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inverted) != 0 {
+		t.Errorf("LoadCumulativeRange(120, 60) = %+v, want empty for inverted range", inverted)
+	}
+	invertedAgents, err := store.LoadCumulativeAgentsRange(120, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invertedAgents) != 0 {
+		t.Errorf("LoadCumulativeAgentsRange(120, 60) = %+v, want empty for inverted range", invertedAgents)
 	}
 }
 
@@ -266,7 +399,7 @@ func TestJSONFieldContract(t *testing.T) {
 		}
 	}
 	agentJSON, _ := json.Marshal(AgentBucket{})
-	for _, field := range []string{`"agent"`, `"provider"`, `"model"`, `"minute"`, `"requests"`, `"input"`, `"output"`, `"latency_ms_sum"`, `"failures"`} {
+	for _, field := range []string{`"agent"`, `"provider"`, `"model"`, `"minute"`, `"requests"`, `"input"`, `"output"`, `"cache_creation"`, `"cache_read"`, `"latency_ms_sum"`, `"failures"`} {
 		if !strings.Contains(string(agentJSON), field) {
 			t.Errorf("AgentBucket JSON missing %s: %s", field, agentJSON)
 		}

@@ -218,23 +218,25 @@ keepalive 由应用层 `internal/app/proxy_http.go` 与 `internal/web/server.go`
 `internal/app`。
 
 `internal/observe/requestlog` 是只依赖 `internal/config` 值类型（生效值
-accessor）的请求访问日志数据面叶子包，拥有
-JSONL Record schema、body/header 截断与白名单、非阻塞队列、单 writer 的轮转/
-retention/owner-only 权限、流式 top-K 查询（带文件级提前终止：peek 文件末尾记录
+accessor）与 `observe/logfile`、`observe/logx` 的请求访问日志数据面叶子包，拥有
+JSONL Record schema、body/header 截断与白名单、Record 编码与入队；非阻塞队列、单 writer 的轮转/
+retention/owner-only 权限由共享 `observe/logfile` sink 拥有（文件按天命名
+`requests-YYYYMMDD.log`，同日重启追加同一文件，size 轮转改名
+`requests-YYYYMMDD--HHMMSS-<seq>.log`，首次写入才懒建文件）；流式 top-K 查询（带文件级提前终止：peek 文件末尾记录
 Ts 为上界，堆满或越 From 下界的文件整文件跳过，peek 异常回退全量流扫）、list-safe
-Summary 和 Shadow 聚合。应用层 `internal/app/observe_adapters.go` 只把 `RequestLogConfig` 生效值
+Summary 和 Shadow 聚合仍归本包。应用层 `internal/app/observe_adapters.go` 只把 `RequestLogConfig` 生效值
 适配为纯值输入；`forward.LogCtx`/HTTP/RouteTarget 到 Record 的映射归
 `internal/forward.BuildRequestLogInput`；capture 在转换器外层的位置、
 `internal/runtime.Lifecycle` 的 Shadow-before-drain 顺序、Web 参数、CLI replay policy 和
 Fusion/Shadow eligibility 继续由应用层编排。列表与 Shadow 必须调用强制丢弃
 body/header 的 metadata API，detail/replay 才能查询完整 Record。
 
-`internal/observe/seclog` 是只依赖 `observe/logx`（本身为叶子）的安全审计日志叶子包，拥有审计事件
-Record schema（kind: secret/path/drift）、JSONL 写入、按大小+按天轮转、retention
-sweep、owner-only 权限（文件 0600/目录 0700）、非阻塞队列与单 writer、离线 top-K
+`internal/observe/seclog` 是只依赖 `observe/logfile` 与 `observe/logx`（均为叶子）的安全审计日志叶子包，拥有审计事件
+Record schema（kind: secret/path/drift）与编码；非阻塞队列、按大小+按天轮转、retention
+sweep、owner-only 权限（文件 0600/目录 0700）与单 writer 由共享 `observe/logfile` sink 拥有（与 request log 同一模式；文件按天命名，同日重启追加同一文件）；离线 top-K
 查询（与 requestlog 同形的文件级提前终止：peek 最后一条完整记录——torn tail 不算——
 作为全文件 Ts 上界；被跳过文件内的 corrupt 行不再计入 Skipped，打不开的文件仍计入），
-以及供 CLI 绕开 daemon 直接追加的 `AppendSync`。红线：`Record.Names` 只含
+以及供 CLI 绕开 daemon 直接追加的 `AppendSync`（写同命名规则的天文件，O_APPEND 单行追加与运行中的 Logger 共存）。红线：`Record.Names` 只含
 模式类型名/路径类别名，秘密值永不进入 Record；drift 记录的 detail 只含客户端名与
 指针 host。应用层只注入纯值（命中名、动作、路由元数据），扫描、阈值与派发决策
 不进本包。Logger 是 reload-owned：`internal/app/observe_adapters.go` 的
@@ -446,7 +448,7 @@ daemon/supervisor 的 signal 与 pid/probe 编排。child process detach 属性�
 不得回依赖根 `cli`（DAG guard 强制）：`cli/login`（login/import）、
 `cli/models`（models/test）、`cli/doctor`（doctor）、`cli/presets`（add/presets）、
 `cli/stats`（stats/usage）、`cli/audit`（audit）、`cli/status`（serve
-status/schedule/routes）、`cli/admin`（pin/unpin/unfreeze）、`cli/diag`
+status/schedule/routes）、`cli/admin`（pin/unpin/unfreeze/freeze）、`cli/diag`
 （wire/replay/shadow）、`cli/config`（config init|print|check）、
 `cli/account`（logout）、`cli/serve`（daemon/stop/reload 编排）。
 `cli/clitest` 是纯测试支撑包：拥有子进程 harness（TestHelperProcess 分发）与共享
@@ -476,6 +478,7 @@ forward guard 命中审计 / audit CLI / doctor drift → internal/observe/seclo
 stats flusher / admin read ports → internal/observe/stats
 budget watcher adapter → internal/observe/budget → internal/observe/stats / internal/observe/events / internal/pricing
 应用 / CLI / observe / fusion 等组件的日志调用点 → internal/observe/logx（级别过滤叶子包，serve 启动时 SetLevel 一次）
+observe/requestlog、observe/seclog 的持久化 → internal/observe/logfile（共享轮转 JSONL sink 叶子包：非阻塞队列、单 writer、按天命名+size 轮转、retention、owner-only 权限）
 forward / target executor / cache adapter → internal/cache
 target executor / Shadow → internal/transport/bodycapture
 config / app / provider / providerbuild / login / pricing / CLI 出站调用 → internal/upstreamproxy（上游代理策略叶子包）
@@ -512,7 +515,7 @@ application → serveAssembly → applicationRuntime → Proxy
   observe/logx`（registry + 进程级 shell：调度循环、help、takeover/restore）；
 - `catalog → upstreamproxy`；
 - `cli/account → accounts, cli/framework, cli/serve, config, display, login, providerbuild`（`logout`）；
-- `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`）；
+- `cli/admin → cli/framework, config, daemonctl, display`（`pin`/`unpin`/`unfreeze`/`freeze`）；
 - `cli/audit → cli/framework, config, observe/seclog`（`audit`）；
 - `cli/clicommon → appapi, daemonctl, display, provider`；
 - `cli/clitest → accounts`（纯测试支撑：子进程 harness 与共享 fixture，生产代码不得依赖）；
@@ -537,8 +540,9 @@ application → serveAssembly → applicationRuntime → Proxy
   plan/executor 装配；不得回依赖 app/web/cli）；
 - `observe/budget → config, observe/events, observe/logx, observe/stats, pricing`（config 是
   budgets 生效值所需的值类型，stats 是 analytics bucket 值类型与分钟对齐 seam）；
-- `observe/requestlog → config, observe/logx`（config 是生效值 accessor 所需的值类型）；
-- `observe/seclog → observe/logx`；
+- `observe/requestlog → config, observe/logfile, observe/logx`（config 是生效值 accessor 所需的值类型；logfile 是共享持久化 sink）；
+- `observe/seclog → observe/logfile, observe/logx`；
+- `observe/logfile → observe/logx`（共享轮转 JSONL sink 叶子包）；
 - `observe/stats → observe/counters, observe/logx`；
 - `presets → config, configedit, provider`；
 - `probe → config, provider`；

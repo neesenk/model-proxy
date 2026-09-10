@@ -57,6 +57,19 @@ type Ports struct {
 	RequestLogDirectory func() string
 	// TokenUsage returns the token counter snapshot (nil when disabled).
 	TokenUsage func() map[obscounters.TokenKey]obscounters.TokenUsage
+	// AgentUsage returns the agent counter snapshot (nil when disabled) —
+	// the cumulative agent-dimension counterpart of TokenUsage.
+	AgentUsage func() map[obscounters.AgentKey]obscounters.AgentCount
+	// TokenUsageRange/AgentUsageRange aggregate persisted minute buckets with
+	// from <= minute <= to (either bound <= 0 unbounded) — the range
+	// counterparts backing the /api/tokens time selector (empty maps, nil
+	// error, when the store is disabled).
+	TokenUsageRange func(from, to int64) (map[observestats.Key]observestats.Counters, error)
+	AgentUsageRange func(from, to int64) (map[observestats.AgentKey]observestats.AgentCounters, error)
+	// StatsSince returns the oldest persisted bucket minute across both stats
+	// tables (unix seconds, 0 when empty) — the anchor for the cumulative
+	// usage "Since" label.
+	StatsSince func() int64
 	// StatsRange/AgentStats/Analytics query the stats store; the closures
 	// return empty (non-nil) slices when the store is disabled.
 	StatsRange func(from, to int64, provider, model string, bucketSecs int64) ([]observestats.Bucket, error)

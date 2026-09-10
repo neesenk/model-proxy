@@ -3,6 +3,8 @@ package counters
 import (
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -20,8 +22,25 @@ func TestDetectAgent(t *testing.T) {
 		{"codex ua", "codex_cli_rs/0.5.0", nil, "codex"},
 		{"opencode ua", "opencode/0.1", nil, "opencode"},
 		{"pi ua", "pi/2.0", nil, "pi"},
+		// pi-ai (pi >= 0.85) sends "pi (<platform> <release>; <arch>)" for LLM calls.
+		{"pi ai ua", "pi (darwin 25.6.0; arm64)", nil, "pi"},
+		{"pi ai ua embedded", "somehost pi (darwin 25.6.0; arm64)", nil, "pi"},
+		{"pi ua with version detail", "pi/0.85.1 (darwin; node/v26.8.1; arm64)", nil, "pi"},
+		{"not pi (substring)", "pinecone/1.0", nil, "pinecone"},
+		{"not pi (prefix only)", "pip/24.0", nil, "pip"},
 		{"no ua", "", nil, "unknown"},
-		{"unrecognized", "curl/8.0", nil, "other"},
+		// Unrecognized UAs fall back to their product token instead of a flat
+		// "other", so unknown clients stay distinguishable.
+		{"unrecognized curl", "curl/8.0", nil, "curl"},
+		{"unrecognized go", "Go-http-client/2.0", nil, "go-http-client"},
+		{"unrecognized python", "python-requests/2.31.0", nil, "python-requests"},
+		{"unrecognized caps lowered", "OpenAI/JS 4.2", nil, "openai"},
+		{"unrecognized truncated", "a-very-long-client-product-name/9.9.9", nil, "a-very-long-client-produ"},
+		// No usable product token: label with the raw UA instead of "other".
+		{"garbage raw ua", "()/*", nil, "()/*"},
+		{"punct ua", "/§!", nil, "/\u00a7!"},
+		{"whitespace collapsed", "  ()  /*  ", nil, "()-/*"},
+		{"whitespace only", "   ", nil, "other"},
 	}
 	for _, c := range cases {
 		r := &http.Request{Header: http.Header{}}
@@ -109,12 +128,13 @@ func TestTokenCounter(t *testing.T) {
 func TestAgentCounter(t *testing.T) {
 	a := NewAgentCounter()
 	a.IncRequests("codex", "p", "m")
-	a.AddTokens("codex", "p", "m", TokenUsage{Input: 3, Output: 4})
+	a.AddTokens("codex", "p", "m", TokenUsage{Input: 3, Output: 4, CacheCreation: 1, CacheRead: 6})
 	a.AddLatency("codex", "p", "m", 25)
 	a.IncFailure("codex", "p", "m")
 
 	got := a.Snapshot()[AgentKey{Agent: "codex", Provider: "p", Model: "m"}]
-	if got.Requests != 1 || got.Input != 3 || got.Output != 4 {
+	if got.Requests != 1 || got.Input != 3 || got.Output != 4 ||
+		got.CacheCreation != 1 || got.CacheRead != 6 {
 		t.Fatalf("snapshot = %+v", got)
 	}
 	a.Reset()
@@ -177,5 +197,111 @@ func TestUsageScannerShapesAndChunking(t *testing.T) {
 	want := TokenUsage{Input: 17, Output: 7, CacheRead: 3, Requests: 1}
 	if snap != want {
 		t.Fatalf("committed = %+v, want %+v", snap, want)
+	}
+}
+
+// scanWireFixture replays one recorded wire stream through a UsageScanner and
+// returns the committed usage.
+func scanWireFixture(t *testing.T, name string) TokenUsage {
+	t.Helper()
+	f, err := os.Open(filepath.Join("..", "..", "..", "testdata", "wire", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tc := NewTokenCounter()
+	k := TokenKey{Provider: "p", Model: "m"}
+	s := NewUsageScanner(f, k, tc, nil)
+	if _, err := io.Copy(io.Discard, s); err != nil {
+		t.Fatal(err)
+	}
+	return tc.Snapshot()[k]
+}
+
+// TestUsageScannerAnthropicCacheWireShapes pins cache accounting on real
+// recorded anthropic-protocol streams: dialects that send zero/null cache
+// usage in message_start and the real values only in message_delta must still
+// count (zhipu, aqp, kimi-code), and a dialect repeating the same cumulative
+// cache_read in BOTH frames must count it once, not twice (deepseek).
+func TestUsageScannerAnthropicCacheWireShapes(t *testing.T) {
+	cases := []struct {
+		fixture string
+		want    TokenUsage
+	}{
+		// message_start all-zero usage; message_delta carries input 12, output 3.
+		{"anthropic_zhipu.sse", TokenUsage{Input: 12, Output: 3, Requests: 1}},
+		// message_start cache fields null; message_delta cache_read 64.
+		{"anthropic_aqp_tool.sse", TokenUsage{Input: 112, Output: 11, CacheRead: 64, Requests: 1}},
+		// message_start input 222 / cache_read 0; message_delta cache_read 222.
+		{"anthropic_kimi-code_tool.sse", TokenUsage{Input: 222, Output: 82, CacheRead: 222, Requests: 1}},
+	}
+	for _, c := range cases {
+		if got := scanWireFixture(t, c.fixture); got != c.want {
+			t.Errorf("%s: committed = %+v, want %+v", c.fixture, got, c.want)
+		}
+	}
+
+	// deepseek repeats cache_read_input_tokens:256 in message_start AND
+	// message_delta — max-merge must count it once (naive += would give 512).
+	// (Input is 39+39=78 under the scanner's long-standing += semantics for
+	// converted-route input; only the cache merge rule is pinned here.)
+	got := scanWireFixture(t, "anthropic_deepseek_tool.sse")
+	if got.CacheRead != 256 || got.CacheCreation != 0 || got.Output != 72 {
+		t.Errorf("deepseek double-frame cache: committed = %+v, want cache_read=256 cache_creation=0 output=72", got)
+	}
+}
+
+// TestUsageScannerChatCachedTokensWireShapes pins cache accounting on real
+// recorded chat-protocol streams: cached prompt tokens ride in
+// usage.prompt_tokens_details.cached_tokens (deepseek also spells them
+// prompt_cache_hit_tokens).
+func TestUsageScannerChatCachedTokensWireShapes(t *testing.T) {
+	cases := []struct {
+		fixture string
+		want    TokenUsage
+	}{
+		{"chat_deepseek_tool.sse", TokenUsage{Input: 295, Output: 70, CacheRead: 256, Requests: 1}},
+		{"chat_shopee.sse", TokenUsage{Input: 11, Output: 3, CacheRead: 4, Requests: 1}},
+		// prompt_tokens_details present with cached_tokens 0 → no cache credit.
+		{"chat_zhipu.sse", TokenUsage{Input: 12, Output: 389, Requests: 1}},
+	}
+	for _, c := range cases {
+		if got := scanWireFixture(t, c.fixture); got != c.want {
+			t.Errorf("%s: committed = %+v, want %+v", c.fixture, got, c.want)
+		}
+	}
+}
+
+// prompt_cache_hit_tokens without prompt_tokens_details still counts (the
+// deepseek spelling, details preferred when both are present).
+func TestUsageScannerChatPromptCacheHitFallback(t *testing.T) {
+	stream := "data: {\"choices\":[]}\n\n" +
+		"data: {\"usage\":{\"prompt_tokens\":300,\"completion_tokens\":10,\"prompt_cache_hit_tokens\":128}}\n\n"
+	tc := NewTokenCounter()
+	k := TokenKey{Provider: "deepseek", Model: "d"}
+	s := NewUsageScanner(io.NopCloser(strings.NewReader(stream)), k, tc, nil)
+	if _, err := io.Copy(io.Discard, s); err != nil {
+		t.Fatal(err)
+	}
+	if got := tc.Snapshot()[k]; got.CacheRead != 128 || got.Input != 300 {
+		t.Errorf("committed = %+v, want cache_read=128 input=300", got)
+	}
+}
+
+// TestUsageScannerResponsesWireShapes pins usage accounting for /v1/responses
+// client streams: one cumulative snapshot in response.completed (usage null on
+// in_progress frames), cached input in input_tokens_details.cached_tokens.
+func TestUsageScannerResponsesWireShapes(t *testing.T) {
+	cases := []struct {
+		fixture string
+		want    TokenUsage
+	}{
+		{"responses_shopee.sse", TokenUsage{Input: 11, Output: 3, CacheRead: 4, Requests: 1}},
+		{"responses_aqp.sse", TokenUsage{Input: 19, Output: 144, Requests: 1}},
+	}
+	for _, c := range cases {
+		if got := scanWireFixture(t, c.fixture); got != c.want {
+			t.Errorf("%s: committed = %+v, want %+v", c.fixture, got, c.want)
+		}
 	}
 }

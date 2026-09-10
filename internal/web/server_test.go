@@ -32,7 +32,9 @@ func (testReadAPI) Dashboard(time.Time) appapi.Dashboard                   { ret
 func (testReadAPI) LogFile() string                                        { return "" }
 func (testReadAPI) RequestLogDirectory() string                            { return "" }
 func (testReadAPI) Accounts() []appapi.ProviderAccounts                    { return nil }
-func (testReadAPI) Tokens() []appapi.TokenUsage                            { return nil }
+func (testReadAPI) Tokens(int64, int64) ([]appapi.TokenUsage, error)       { return nil, nil }
+func (testReadAPI) Agents(int64, int64) ([]appapi.AgentUsage, error)       { return nil, nil }
+func (testReadAPI) StatsSince() int64                                      { return 0 }
 func (testReadAPI) Stats(appapi.StatsQuery) ([]observestats.Bucket, error) { return nil, nil }
 func (testReadAPI) AgentStats(appapi.AgentStatsQuery) ([]observestats.AgentBucket, error) {
 	return nil, nil

@@ -179,7 +179,7 @@ func TestStatsResetSerializesWithFlushAndRebaselines(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	flusher := observestats.NewFlusher(sink, metrics, tokens, agents, nil)
+	flusher := observestats.NewFlusher(sink, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{
 		processServices: processServices{
 			metrics: metrics, tokens: tokens, agents: agents,
@@ -277,7 +277,7 @@ func TestStatsFlusherRetriesPipelinesIndependently(t *testing.T) {
 	sink := &failAgentOnceSink{Store: store, failAgent: true}
 	metrics := obscounters.NewMetricsStore()
 	agents := obscounters.NewAgentCounter()
-	flusher := observestats.NewFlusher(sink, metrics, obscounters.NewTokenCounter(), agents, nil)
+	flusher := observestats.NewFlusher(sink, metrics, obscounters.NewTokenCounter(), agents, nil, nil)
 
 	for range 2 {
 		metrics.Inc("provider", "model", obscounters.EvRequests)
@@ -333,8 +333,7 @@ func TestStatsFlusherPrunesDuringIdleMinute(t *testing.T) {
 	}
 
 	flusher := observestats.NewFlusher(
-		store, obscounters.NewMetricsStore(), obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil,
-	)
+		store, obscounters.NewMetricsStore(), obscounters.NewTokenCounter(), obscounters.NewAgentCounter(), nil, nil)
 	if flusher.Flush(now) {
 		t.Fatal("idle prune reported a counter write")
 	}
@@ -351,7 +350,7 @@ func TestProxyCloseFinalFlushesOnceAndClosesStatsStore(t *testing.T) {
 	metrics := obscounters.NewMetricsStore()
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
-	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil)
+	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{
 		processServices: processServices{
 			lifecycle: runtimestate.NewLifecycle(),
@@ -417,7 +416,7 @@ func TestProxyCloseRetriesTransientFinalStatsFailure(t *testing.T) {
 			tokens:    tokens,
 			agents:    agents,
 			stats:     store,
-			flusher:   observestats.NewFlusher(sink, metrics, tokens, agents, nil),
+			flusher:   observestats.NewFlusher(sink, metrics, tokens, agents, nil, nil),
 		},
 	}
 	t.Cleanup(proxy.Close)
@@ -469,7 +468,7 @@ func TestStatsShutdownFlushHonorsContextDeadline(t *testing.T) {
 	sink := &blockingShutdownStatsSink{
 		Store: store, entered: make(chan struct{}),
 	}
-	flusher := observestats.NewFlusher(sink, metrics, tokens, agents, nil)
+	flusher := observestats.NewFlusher(sink, metrics, tokens, agents, nil, nil)
 	addRuntimeStats(metrics, tokens, agents, 1, 5)
 
 	const timeout = 75 * time.Millisecond
@@ -497,7 +496,7 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	tokens := obscounters.NewTokenCounter()
 	agents := obscounters.NewAgentCounter()
 	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
-	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil)
+	flusher := observestats.NewFlusher(store, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{
 		generationState: generationState{
 			cache: cache,
@@ -511,7 +510,7 @@ func TestTokensResetClearsDurableRuntimeAndCacheState(t *testing.T) {
 	if !flusher.Flush(time.Unix(120, 0)) {
 		t.Fatal("reset precondition flush did not write")
 	}
-	cache.Put("key", http.StatusOK, http.Header{"X-Test": {"value"}}, []byte("body"), time.Now())
+	cache.Put("key", "m", http.StatusOK, http.Header{"X-Test": {"value"}}, []byte("body"), time.Now())
 
 	recorder := httptest.NewRecorder()
 	serveWeb(NewWebServer(proxy, "test-config.yaml"),
@@ -553,8 +552,7 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 	agents := obscounters.NewAgentCounter()
 	cache := NewResponseCache(CacheConfig{Enabled: true, TTL: "1h"})
 	flusher := observestats.NewFlusher(
-		&resetErrorSink{Store: store}, metrics, tokens, agents, nil,
-	)
+		&resetErrorSink{Store: store}, metrics, tokens, agents, nil, nil)
 	proxy := &Proxy{
 		generationState: generationState{
 			cache: cache,
@@ -565,7 +563,7 @@ func TestTokensResetFailurePreservesLiveState(t *testing.T) {
 		},
 	}
 	addRuntimeStats(metrics, tokens, agents, 1, 5)
-	cache.Put("key", http.StatusOK, nil, []byte("body"), time.Now())
+	cache.Put("key", "m", http.StatusOK, nil, []byte("body"), time.Now())
 
 	recorder := httptest.NewRecorder()
 	serveWeb(NewWebServer(proxy, "test-config.yaml"),

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"model-proxy/internal/accounts"
@@ -163,10 +164,40 @@ func (s *Service) Accounts() []appapi.ProviderAccounts {
 	return out
 }
 
-func (s *Service) Tokens() []appapi.TokenUsage {
+// Tokens projects the per-(provider, model) token usage rows. from <= 0 &&
+// to <= 0 is the cumulative hot-counter view; any bound > 0 aggregates
+// persisted minute buckets (Requests is the persisted token_requests count
+// there).
+func (s *Service) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
+	if from > 0 || to > 0 {
+		snapshot, err := s.ports.TokenUsageRange(from, to)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]appapi.TokenUsage, 0, len(snapshot))
+		for key, counters := range snapshot {
+			if obscounters.IsVirtualProvider(key.Provider) {
+				continue
+			}
+			out = append(out, appapi.TokenUsage{
+				Provider:      key.Provider,
+				Model:         key.Model,
+				Input:         counters.Input,
+				Output:        counters.Output,
+				CacheCreation: counters.CacheCreation,
+				CacheRead:     counters.CacheRead,
+				Total:         counters.Input + counters.Output + counters.CacheCreation + counters.CacheRead,
+				Requests:      counters.TokenRequests,
+			})
+		}
+		return out, nil
+	}
 	snapshot := s.ports.TokenUsage()
 	out := make([]appapi.TokenUsage, 0, len(snapshot))
 	for key, usage := range snapshot {
+		if obscounters.IsVirtualProvider(key.Provider) {
+			continue
+		}
 		out = append(out, appapi.TokenUsage{
 			Provider:      key.Provider,
 			Model:         key.Model,

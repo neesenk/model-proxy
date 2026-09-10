@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"time"
@@ -9,11 +10,24 @@ import (
 // LoadCumulative returns all-time provider/model totals. Additive counters use
 // SUM and LastRequestAt uses MAX across minute buckets.
 func (s *Store) LoadCumulative() (map[Key]Counters, error) {
+	return s.LoadCumulativeRange(0, 0)
+}
+
+// LoadCumulativeRange is LoadCumulative restricted to buckets with
+// from <= minute <= to (either bound <= 0 means unbounded on that side).
+// Buckets are minute-aligned: callers truncate the window start DOWN to the
+// minute boundary so the whole boundary minute counts, and a to inside a
+// minute includes that minute's bucket (bucket start <= to).
+func (s *Store) LoadCumulativeRange(from, to int64) (map[Key]Counters, error) {
+	if to <= 0 {
+		to = math.MaxInt64
+	}
 	rows, err := s.db.Query(`SELECT provider, model,
 		SUM(requests), SUM(failovers), SUM(rate_limited_429), SUM(failures),
 		SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), SUM(token_requests),
 		MAX(last_request_at), SUM(latency_ms_sum), SUM(ttft_ms_sum)
-		FROM minute_buckets GROUP BY provider, model`)
+		FROM minute_buckets WHERE minute >= ? AND minute <= ? GROUP BY provider, model`,
+		max(from, 0), to)
 	if err != nil {
 		return nil, err
 	}
@@ -40,6 +54,57 @@ func (s *Store) LoadCumulative() (map[Key]Counters, error) {
 			&counters.LastRequestAt,
 			&counters.LatencySum,
 			&counters.TTFTSum,
+		); err != nil {
+			return nil, err
+		}
+		cumulative[key] = counters
+	}
+	return cumulative, rows.Err()
+}
+
+// LoadCumulativeAgents returns all-time agent/provider/model totals — the
+// agent-dimension counterpart of LoadCumulative, used to restore the hot
+// AgentCounter and the flusher's agent diff baseline at boot so restarts
+// don't zero the Agents card (and the first post-boot flush doesn't
+// re-count history into agent_buckets).
+func (s *Store) LoadCumulativeAgents() (map[AgentKey]AgentCounters, error) {
+	return s.LoadCumulativeAgentsRange(0, 0)
+}
+
+// LoadCumulativeAgentsRange is LoadCumulativeAgents restricted to buckets with
+// from <= minute <= to (either bound <= 0 unbounded) — the range counterpart
+// used by the token-usage time selector.
+func (s *Store) LoadCumulativeAgentsRange(from, to int64) (map[AgentKey]AgentCounters, error) {
+	if to <= 0 {
+		to = math.MaxInt64
+	}
+	rows, err := s.db.Query(`SELECT agent, provider, model,
+		SUM(requests), SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read),
+		SUM(latency_ms_sum), SUM(failures)
+		FROM agent_buckets WHERE minute >= ? AND minute <= ? GROUP BY agent, provider, model`,
+		max(from, 0), to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cumulative := map[AgentKey]AgentCounters{}
+	for rows.Next() {
+		var (
+			key      AgentKey
+			counters AgentCounters
+		)
+		if err := rows.Scan(
+			&key.Agent,
+			&key.Provider,
+			&key.Model,
+			&counters.Requests,
+			&counters.Input,
+			&counters.Output,
+			&counters.CacheCreation,
+			&counters.CacheRead,
+			&counters.LatencySum,
+			&counters.Failures,
 		); err != nil {
 			return nil, err
 		}
@@ -212,10 +277,10 @@ func localCalendarStart(date, granularity string) int64 {
 // range. bucketSecs <= 60 preserves each raw minute row; wider buckets sum and
 // floor exactly like QueryRange.
 func (s *Store) QueryAgents(from, to int64, agent, provider, model string, bucketSecs int64) ([]AgentBucket, error) {
-	selectColumns := "agent, provider, model, minute, requests, input, output, latency_ms_sum, failures"
+	selectColumns := "agent, provider, model, minute, requests, input, output, cache_creation, cache_read, latency_ms_sum, failures"
 	groupClause := ""
 	if bucketSecs > 60 {
-		selectColumns = "agent, provider, model, (minute / ?) * ? AS minute, SUM(requests), SUM(input), SUM(output), SUM(latency_ms_sum), SUM(failures)"
+		selectColumns = "agent, provider, model, (minute / ?) * ? AS minute, SUM(requests), SUM(input), SUM(output), SUM(cache_creation), SUM(cache_read), SUM(latency_ms_sum), SUM(failures)"
 		groupClause = " GROUP BY agent, provider, model, (minute / ?) * ?"
 	}
 
@@ -259,6 +324,8 @@ func (s *Store) QueryAgents(from, to int64, agent, provider, model string, bucke
 			&bucket.Requests,
 			&bucket.Input,
 			&bucket.Output,
+			&bucket.CacheCreation,
+			&bucket.CacheRead,
 			&bucket.LatencySum,
 			&bucket.Failures,
 		); err != nil {
@@ -267,4 +334,32 @@ func (s *Store) QueryAgents(from, to int64, agent, provider, model string, bucke
 		buckets = append(buckets, bucket)
 	}
 	return buckets, rows.Err()
+}
+
+// EarliestMinute returns the oldest bucket minute across BOTH tables (unix
+// seconds), 0 when no rows exist. It anchors the "Since <time>" label for the
+// cumulative usage surfaces (/api/tokens): the counters are seeded from the
+// persisted all-time totals, so the earliest bucket is when the current
+// counting epoch began (initial data or the last full reset).
+func (s *Store) EarliestMinute() int64 {
+	var minPM, minAgent sql.NullInt64
+	if err := s.db.QueryRow(`SELECT MIN(minute) FROM minute_buckets`).Scan(&minPM); err != nil {
+		return 0
+	}
+	if err := s.db.QueryRow(`SELECT MIN(minute) FROM agent_buckets`).Scan(&minAgent); err != nil {
+		return 0
+	}
+	switch {
+	case minPM.Valid && minAgent.Valid:
+		if minPM.Int64 < minAgent.Int64 {
+			return minPM.Int64
+		}
+		return minAgent.Int64
+	case minPM.Valid:
+		return minPM.Int64
+	case minAgent.Valid:
+		return minAgent.Int64
+	default:
+		return 0
+	}
 }

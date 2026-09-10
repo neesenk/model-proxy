@@ -719,7 +719,14 @@ async function renderStatusTab() {
     statusInflight = false;
   }
   if (activeTab === 'status' && !statusTimer) {
-    statusTimer = setInterval(() => { renderStatusTab(); }, 5000);
+    statusTimer = setInterval(() => {
+      // A background tick must not wipe an open popup (the pin menu lives
+      // inside the re-rendered pane) — skip this tick; the next one after
+      // the menu closes picks the data up. Explicit renders (mutations,
+      // section switches) bypass this guard and refresh immediately.
+      if (panels.status && panels.status.querySelector('.route-pin-menu:not([hidden]), .tr-popover:not([hidden])')) return;
+      renderStatusTab();
+    }, 5000);
   }
 }
 
@@ -1239,73 +1246,291 @@ function renderTokensCard(target, usage) {
       <td class="num">${fmtNum(u.output)}</td>
       <td class="num">${fmtNum(u.cache_creation)}</td>
       <td class="num">${fmtNum(u.cache_read)}</td>
+      <td class="num">${fmtNum(u.total)}</td>
       <td class="num">${fmtNum(u.requests)}</td>
     </tr>`;
   }
-  const html = buildCard('Token usage', `${totalReqs} requests`, `
+  const html = buildCard('Token usage', `${totalReqs} requests · ${tokensRangeMeta()}`, `
       <table class="table">
         <thead><tr>
           <th>provider</th><th>model</th>
           <th class="num">input</th><th class="num">output</th>
           <th class="num">cache create</th><th class="num">cache read</th>
-          <th class="num">requests</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-      <div class="row-actions" style="padding: 8px 12px;">
-        <span class="spacer"></span>
-        <button class="btn small" id="btn-tokens-reset">Reset counters</button>
-      </div>`, 'flush');
-  target.insertAdjacentHTML('beforeend', html);
-  const btn = document.getElementById('btn-tokens-reset');
-  if (btn) btn.addEventListener('click', resetTokens);
-}
-
-// renderAgentsCard draws the per-agent breakdown ("who is burning my quota"):
-// collapses /api/agents buckets by agent (summing requests + tokens over the
-// range), sorted by total tokens desc. The range mirrors the API default (last
-// 60 minutes); the meta line shows the active window.
-function renderAgentsCard(target, buckets) {
-  const per = {};
-  for (const b of (buckets || [])) {
-    const a = b.agent || 'unknown';
-    const cur = per[a] || { requests: 0, input: 0, output: 0 };
-    cur.requests += Number(b.requests || 0);
-    cur.input += Number(b.input || 0);
-    cur.output += Number(b.output || 0);
-    per[a] = cur;
-  }
-  const agents = Object.keys(per).sort((x, y) => {
-    const tx = per[x].input + per[x].output, ty = per[y].input + per[y].output;
-    return tx !== ty ? ty - tx : x.localeCompare(y);
-  });
-  if (!agents.length) {
-    target.insertAdjacentHTML('beforeend', buildCard('Agents', 'last 60 min',
-      `<div class="msg hint">No agent activity in the last 60 minutes. Agents are detected from the client User-Agent (claude-cli, codex, opencode, pi).</div>`));
-    return;
-  }
-  let rows = '';
-  for (const a of agents) {
-    const t = per[a];
-    rows += `<tr>
-      <td class="mono">${esc(a)}</td>
-      <td class="num">${fmtNum(t.requests)}</td>
-      <td class="num">${fmtNum(t.input)}</td>
-      <td class="num">${fmtNum(t.output)}</td>
-    </tr>`;
-  }
-  const html = buildCard('Agents', `${agents.length} active · last 60 min`, `
-      <table class="table">
-        <thead><tr>
-          <th>agent</th><th class="num">requests</th>
-          <th class="num">input</th><th class="num">output</th>
+          <th class="num">total</th><th class="num">requests</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`, 'flush');
   target.insertAdjacentHTML('beforeend', html);
 }
 
+// sinceLabel renders the counting-epoch anchor shared by the Token usage and
+// Agents cards: the earliest persisted bucket as "since YY-MM-DD HH:MM", or
+// "since start" before any bucket exists (fresh DB / stats disabled).
+function sinceLabel() {
+  const s = fmtSinceDate(statusCache.since);
+  return s ? `since ${s}` : 'since start';
+}
+
+// tokensRange is the APPLIED time-dimension state of the token usage cards: a
+// preset value from pure.js TOKEN_RANGES (default 'today' — the day's usage is
+// the common case; 'all' = cumulative counters) plus the applied custom
+// range's 'YYYY-MM-DD' days. tokensRangePicker
+// is the popover's own UI state (open flag, the left month of the two-month
+// calendar view, an in-progress custom start-day pick, and whether the custom
+// row shows the checkmark while picking). Both are module-level like
+// requestsFilter: they persist across re-renders within the session, and an
+// open popover blocks the 5s tick (see renderStatusTab) so a re-render can
+// never clobber an in-progress pick.
+let tokensRange = { preset: 'today', customStart: '', customEnd: '' };
+let tokensRangePicker = { open: false, view: null, pick: null, selecting: false };
+
+// tokensRangeMeta is the shared range label for the Token usage and Agents
+// cards: the counting-epoch anchor for the cumulative view, the selected
+// range otherwise.
+function tokensRangeMeta() {
+  return tokensRange.preset === 'all' ? sinceLabel() : tokenRangeLabel(tokensRange);
+}
+
+// rangePickerClose closes the popover and discards any in-progress custom
+// pick — Esc and outside clicks never change the applied range.
+function rangePickerClose() {
+  tokensRangePicker = { open: false, view: null, pick: null, selecting: false };
+  document.removeEventListener('keydown', rangePickerOnKey);
+  document.removeEventListener('click', rangePickerOnOutside, true);
+}
+
+function rangePickerOnKey(e) {
+  if (e.key === 'Escape') {
+    rangePickerClose();
+    renderStatusPanel();
+  }
+}
+
+function rangePickerOnOutside(e) {
+  if (!e.target.closest('.tr-wrap')) {
+    rangePickerClose();
+    renderStatusPanel();
+  }
+}
+
+// renderTokensRangeControls draws the 时间维度-style time-dimension picker
+// above the Token usage / Agents cards (one picker drives both — they share
+// the same /api/tokens payload): a two-part trigger button (caption + active
+// dimension + chevron) opening a popover with a preset list on the left
+// (checkmark on the active preset, click applies and closes) and a two-month
+// calendar on the right for the custom range (first click sets start, second
+// sets end with swap, complete range applies and closes; future days are
+// dimmed and unclickable; ‹ › move the window by one month, never past the
+// month containing today).
+function renderTokensRangeControls(target) {
+  const picker = tokensRangePicker;
+  const presets = TOKEN_RANGES.map((w) => {
+    const active = w.value === 'custom'
+      ? (tokensRange.preset === 'custom' || picker.selecting)
+      : tokensRange.preset === w.value;
+    return `<button class="tr-preset${active ? ' active' : ''}" data-tr-preset="${esc(w.value)}">
+      <span class="tr-check">${active ? '✓' : ''}</span>${esc(w.label)}
+    </button>`;
+  }).join('');
+
+  let calendar = '';
+  if (picker.open) {
+    const now = Date.now();
+    const months = twoMonthWindow(picker.view.year, picker.view.month).map(({ year, month }) => {
+      const weeks = calendarMonthGrid(year, month).map((week) => `<tr>${week.map((day) => {
+        if (day === null) return '<td class="tr-blank"></td>';
+        const dayYmd = ymd(year, month, day);
+        const future = isFutureDay(year, month, day, now);
+        // While a NEW pick is in progress the previously applied range's
+        // highlight gives way to the pick's own start circle.
+        const applied = tokensRange.preset === 'custom' && !picker.pick ? tokensRange : null;
+        const isStart = dayYmd === picker.pick || (applied && dayYmd === applied.customStart);
+        const isEnd = applied && dayYmd === applied.customEnd;
+        const inRange = applied && !isStart && !isEnd &&
+          dayYmd > applied.customStart && dayYmd < applied.customEnd;
+        const cls = ['tr-day'];
+        if (isStart || isEnd) cls.push('tr-day-selected');
+        else if (inRange) cls.push('tr-day-inrange');
+        return `<td><button class="${cls.join(' ')}" data-tr-day="${dayYmd}" ${future ? 'disabled' : ''}>${day}</button></td>`;
+      }).join('')}</tr>`).join('');
+      const header = WEEKDAYS.map((w) => `<th>${w}</th>`).join('');
+      return `<div class="tr-month">
+        <div class="tr-month-title">${esc(monthTitle(year, month))}</div>
+        <table class="tr-grid"><thead><tr>${header}</tr></thead><tbody>${weeks}</tbody></table>
+      </div>`;
+    }).join('');
+    const thisMonth = (() => { const d = new Date(now); return d.getFullYear() * 12 + d.getMonth(); })();
+    const viewRight = picker.view.year * 12 + picker.view.month + 1;
+    calendar = `<div class="tr-cal">
+      <button class="tr-nav tr-prev" data-tr-nav="-1" aria-label="previous month">‹</button>
+      <div class="tr-months">${months}</div>
+      <button class="tr-nav tr-next" data-tr-nav="1" aria-label="next month" ${viewRight >= thisMonth ? 'disabled' : ''}>›</button>
+    </div>`;
+  }
+
+  target.insertAdjacentHTML('beforeend',
+    `<div class="tokens-toolbar">
+      <div class="tr-wrap">
+        <button class="btn small tr-trigger" id="tr-trigger" aria-haspopup="true" aria-expanded="${picker.open}">
+          <span class="tr-caption">Time Range</span>
+          <span class="tr-value">${esc(tokenRangeTriggerLabel(tokensRange))}</span>
+          <span class="tr-chevron">▾</span>
+        </button>
+        <div class="tr-popover" ${picker.open ? '' : 'hidden'}>
+          <div class="tr-presets">${presets}</div>
+          ${calendar}
+        </div>
+      </div>
+      <button class="btn small danger-solid" id="btn-tokens-reset">Reset counters</button>
+    </div>`);
+
+  const wrap = target.lastElementChild.querySelector('.tr-wrap');
+  target.querySelector('#btn-tokens-reset').addEventListener('click', resetTokens);
+  wrap.querySelector('#tr-trigger').addEventListener('click', () => {
+    if (picker.open) {
+      rangePickerClose();
+    } else {
+      // Open on the month containing the current selection (custom start day
+      // when a custom range is applied), else the month containing today.
+      const anchor = (tokensRange.preset === 'custom' && parseLocalDate(tokensRange.customStart)) || new Date();
+      tokensRangePicker = { open: true, view: { year: anchor.getFullYear(), month: anchor.getMonth() }, pick: null, selecting: false };
+      document.addEventListener('keydown', rangePickerOnKey);
+      document.addEventListener('click', rangePickerOnOutside, true);
+    }
+    renderStatusPanel();
+  });
+  wrap.querySelectorAll('[data-tr-preset]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const value = btn.dataset.trPreset;
+      if (value === 'custom') {
+        // Checkmark moves to custom and the calendar takes over; the applied
+        // range only changes once both days are picked.
+        tokensRangePicker.selecting = true;
+        tokensRangePicker.pick = null;
+        renderStatusPanel();
+        return;
+      }
+      tokensRange.preset = value;
+      rangePickerClose();
+      renderStatusTab();
+    });
+  });
+  wrap.querySelectorAll('[data-tr-day]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!tokensRangePicker.selecting && tokensRange.preset !== 'custom') {
+        // Clicking days without the custom dimension armed starts a custom pick.
+        tokensRangePicker.selecting = true;
+      }
+      const result = rangePick(tokensRangePicker.pick, btn.dataset.trDay);
+      if (!result.complete) {
+        tokensRangePicker.pick = result.pick;
+        renderStatusPanel();
+        return;
+      }
+      tokensRange = { preset: 'custom', customStart: result.start, customEnd: result.end };
+      rangePickerClose();
+      renderStatusTab();
+    });
+  });
+  wrap.querySelectorAll('[data-tr-nav]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      tokensRangePicker.view = shiftMonth(picker.view.year, picker.view.month, Number(btn.dataset.trNav));
+      renderStatusPanel();
+    });
+  });
+}
+
+// renderAgentsCard draws the per-agent breakdown ("who is burning my quota"):
+// one summary row per agent (the server-provided totals from /api/tokens,
+// heaviest first) with its per-(provider, model) breakdown rows nested
+// underneath — every row shows all five token dimensions. Rendered directly
+// under the Token usage card in the same section — the same since-daemon-start
+// window as the provider/model table (both reset by the Reset counters button).
+function renderAgentsCard(target, agents) {
+  if (!agents || !agents.length) {
+    const hint = tokensRange.preset === 'all'
+      ? 'No agent activity yet. Agents are detected from the client User-Agent (claude-cli, codex, opencode, pi); unrecognized clients are labeled by their User-Agent.'
+      : `No agent activity in the selected range (${tokenRangeLabel(tokensRange)}).`;
+    target.insertAdjacentHTML('beforeend', buildCard('Agents', tokensRangeMeta(),
+      `<div class="msg hint">${hint}</div>`));
+    return;
+  }
+  let rows = '';
+  for (const a of agents) {
+    rows += `<tr class="agent-summary">
+      <td class="mono">${esc(a.agent)}</td>
+      <td class="num">${fmtNum(a.requests)}</td>
+      <td class="num">${fmtNum(a.input)}</td>
+      <td class="num">${fmtNum(a.output)}</td>
+      <td class="num">${fmtNum(a.cache_creation)}</td>
+      <td class="num">${fmtNum(a.cache_read)}</td>
+      <td class="num">${fmtNum(a.total)}</td>
+    </tr>`;
+    for (const m of (a.models || [])) {
+      rows += `<tr class="agent-model">
+        <td class="mono">${esc(m.provider)}/${esc(m.model)}</td>
+        <td class="num">${fmtNum(m.requests)}</td>
+        <td class="num">${fmtNum(m.input)}</td>
+        <td class="num">${fmtNum(m.output)}</td>
+        <td class="num">${fmtNum(m.cache_creation)}</td>
+        <td class="num">${fmtNum(m.cache_read)}</td>
+        <td class="num">${fmtNum(m.total)}</td>
+      </tr>`;
+    }
+  }
+  const html = buildCard('Agents', `${agents.length} active · ${tokensRangeMeta()}`, `
+      <table class="table">
+        <thead><tr>
+          <th>agent / model</th><th class="num">requests</th>
+          <th class="num">input</th><th class="num">output</th>
+          <th class="num">cache create</th><th class="num">cache read</th>
+          <th class="num">total</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`, 'flush');
+  target.insertAdjacentHTML('beforeend', html);
+}
+
+// confirmDialog shows the themed #confirm-modal in place of window.confirm.
+// Resolves true only when the confirm button is clicked; Esc, Close and
+// Cancel all resolve false.
+function confirmDialog(title, message, confirmLabel) {
+  const modal = document.getElementById('confirm-modal');
+  if (!modal) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    modal.innerHTML =
+      `<form method="dialog">
+        <header class="modal-head">
+          <h2 id="confirm-title">${esc(title)}</h2>
+          <button type="button" class="link-btn" id="confirm-cancel" aria-label="Close">Close</button>
+        </header>
+        <div class="modal-body">
+          <p>${esc(message)}</p>
+          <div class="modal-actions">
+            <button type="button" class="btn small" id="confirm-no">Cancel</button>
+            <button type="button" class="btn small danger-solid" id="confirm-yes">${esc(confirmLabel)}</button>
+          </div>
+        </div>
+      </form>`;
+    const onCancel = () => resolve(false);
+    const done = (ok) => {
+      modal.removeEventListener('cancel', onCancel);
+      if (modal.open) modal.close();
+      resolve(ok);
+    };
+    modal.addEventListener('cancel', onCancel, { once: true });
+    document.getElementById('confirm-cancel').addEventListener('click', () => done(false));
+    document.getElementById('confirm-no').addEventListener('click', () => done(false));
+    document.getElementById('confirm-yes').addEventListener('click', () => done(true));
+    modal.showModal();
+  });
+}
+
 async function resetTokens() {
+  const ok = await confirmDialog('Reset token usage counters',
+    'This zeroes the per-(provider, model) token usage stats. The action cannot be undone.',
+    'Reset counters');
+  if (!ok) return;
   const btn = document.getElementById('btn-tokens-reset');
   if (btn) { btn.disabled = true; btn.textContent = 'resetting…'; }
   try {
@@ -2465,7 +2690,10 @@ function accountUsageDetails(p, snap, acctKey) {
       hint = 'available';
     }
   }
-  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="usage" open>
+  // Default the section to collapsed when there is no snapshot at all ("no
+  // data") - an error snapshot stays open so the Re-login action is visible.
+  const openAttr = snap ? ' open' : '';
+  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="usage"${openAttr}>
     <summary>Usage<span class="acct-hint">${esc(hint)}</span></summary>
     <div class="acct-section-body">${renderAccountUsage(p, snap)}</div>
   </details>`;
@@ -2479,7 +2707,9 @@ function accountTokensDetails(rows, acctKey) {
   const hint = rows.length
     ? `${rows.length} model${rows.length > 1 ? 's' : ''} · ${fmtNum(totalReqs)} req`
     : 'no usage';
-  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="tokens" open>
+  // Default the section to collapsed when there are no token rows ("no usage").
+  const openAttr = rows.length ? ' open' : '';
+  return `<details class="acct-section" data-acct="${esc(acctKey)}" data-sec="tokens"${openAttr}>
     <summary>Token usage<span class="acct-hint">${esc(hint)}</span></summary>
     <div class="acct-section-body">${renderAccountTokens(rows)}</div>
   </details>`;
@@ -2874,6 +3104,7 @@ function analyticsSave(name, val) {
 async function renderAnalyticsTab() {
   const panel = panels.analytics;
   if (!panel) return;
+  destroyAnalyticsCharts(); // the innerHTML reset below drops the chart DOM
   const state = analyticsState();
   panel.innerHTML = `
     <div class="analytics-controls">
@@ -2893,16 +3124,18 @@ async function renderAnalyticsTab() {
       </label>
       <datalist id="an-provider-list"></datalist>
       <label>Model
-        <input id="an-model" placeholder="model" />
+        <input id="an-model" placeholder="model" list="an-model-list" />
       </label>
+      <datalist id="an-model-list"></datalist>
       <button id="an-refresh" class="btn small" type="button">Refresh</button>
     </div>
+    <div id="an-error" class="msg err" hidden></div>
     <div id="an-unpriced" class="an-hint" hidden></div>
     <div class="an-charts">
       <div id="an-token-chart" class="an-chart"></div>
       <div id="an-cost-chart" class="an-chart"></div>
     </div>
-    <pre id="an-table" class="an-table"></pre>`;
+    <div id="an-cost-table" class="an-cost-table"></div>`;
   const elRange = panel.querySelector('#an-range');
   const elGran = panel.querySelector('#an-gran');
   const elProvider = panel.querySelector('#an-provider');
@@ -2924,15 +3157,21 @@ async function renderAnalyticsTab() {
   if (state.provider) q.set('provider', state.provider);
   if (state.model) q.set('model', state.model);
   let resp;
+  const errEl = panel.querySelector('#an-error');
   try {
     resp = await apiGet('/api/analytics?' + q.toString());
+    if (errEl) errEl.hidden = true;
   } catch (e) {
-    panel.querySelector('#an-table').textContent = 'analytics unavailable: ' + e.message;
+    if (errEl) {
+      errEl.hidden = false;
+      errEl.textContent = 'analytics unavailable: ' + e.message;
+    }
     return;
   }
+  analyticsFillDatalists(panel, resp, state.provider);
   analyticsRenderHints(panel, resp);
   analyticsRenderCharts(panel, resp);
-  analyticsRenderTable(panel, resp);
+  analyticsRenderCostTable(panel, resp);
 }
 
 // analyticsRenderHints surfaces the unpriced-models hint when /api/analytics
@@ -2953,74 +3192,118 @@ function analyticsRenderHints(panel, resp) {
   }
 }
 
+// analyticsChartColors reads the categorical chart palette from the :root CSS
+// variables (the only place colors are defined). Falls back to a single hue if
+// the stylesheet is unavailable.
+function analyticsChartColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const out = [];
+  for (let i = 0; i < 10; i++) {
+    const v = cs.getPropertyValue('--chart-' + i).trim();
+    if (v) out.push(v);
+  }
+  return out.length ? out : ['#2563eb'];
+}
+
+// analyticsCharts holds the live uPlot instances so a re-render destroys the
+// previous ones instead of leaking them.
+let analyticsCharts = [];
+
+// destroyAnalyticsCharts tears down the charts rendered for the previous view.
+function destroyAnalyticsCharts() {
+  for (const u of analyticsCharts) {
+    try { u.destroy(); } catch (_) { /* already detached */ }
+  }
+  analyticsCharts = [];
+}
+
+// analyticsFillDatalists populates the provider/model suggestion lists from the
+// response so the free-text filters are usable. The provider→models map only
+// grows within a session: a narrowed response must not erase options the user
+// can switch back to.
+const analyticsFacetModels = new Map();
+function analyticsFillDatalists(panel, resp, provider) {
+  for (const s of ((resp && resp.series) || [])) {
+    if (!s || !s.provider) continue;
+    let set = analyticsFacetModels.get(s.provider);
+    if (!set) { set = new Set(); analyticsFacetModels.set(s.provider, set); }
+    set.add(s.model);
+  }
+  const providers = [...analyticsFacetModels.keys()].sort();
+  const models = linkedModels(provider || '', Object.fromEntries([...analyticsFacetModels].map(([p, set]) => [p, [...set]])), {});
+  const pList = panel.querySelector('#an-provider-list');
+  const mList = panel.querySelector('#an-model-list');
+  if (pList) pList.innerHTML = providers.map((p) => `<option value="${esc(p)}"></option>`).join('');
+  if (mList) mList.innerHTML = models.map((m) => `<option value="${esc(m)}"></option>`).join('');
+}
+
 // analyticsRenderCharts draws the token + equivalent-cost trend charts with
-// uPlot. Each (provider,model) series becomes one line. The x-axis is the
-// sorted union of bucket timestamps across all series; missing buckets for a
-// given series render as 0 tokens / null cost (uPlot gap).
+// uPlot. Each (provider,model) series becomes one line, sharing a color across
+// both charts. x is in unix seconds — uPlot's time unit — and every series gets
+// an explicit stroke because uPlot 1.6.x does not auto-assign colors (a missing
+// stroke renders the axes and legend but no line).
 function analyticsRenderCharts(panel, resp) {
   if (typeof uPlot === 'undefined') return; // vendored script failed to load
-  const series = (resp && resp.series) || [];
   const tokenHost = panel.querySelector('#an-token-chart');
   const costHost = panel.querySelector('#an-cost-chart');
   if (!tokenHost || !costHost) return;
-  // Clear any previous chart DOM (re-render path).
+  destroyAnalyticsCharts();
   tokenHost.innerHTML = '';
   costHost.innerHTML = '';
-  const xs = Array.from(new Set(series.flatMap((s) => s.points.map((p) => p.bucket)))).sort((a, b) => a - b);
-  const xMs = xs.map((t) => t * 1000); // uPlot expects ms timestamps for time scales
-  const tokenData = [xMs];
-  const costData = [xMs];
+  const token = analyticsChartSeries(resp && resp.series, 'tokens');
+  const cost = analyticsChartSeries(resp && resp.series, 'cost');
+  if (!token.x.length) return;
+  const colors = analyticsChartColors();
   const tokenSeries = [{ label: 'time' }];
   const costSeries = [{ label: 'time' }];
-  for (const s of series) {
-    const key = s.provider + '/' + s.model;
-    const byTs = Object.fromEntries(s.points.map((p) => [p.bucket, p]));
-    tokenData.push(xs.map((t) => {
-      const p = byTs[t];
-      return p ? (p.input || 0) + (p.output || 0) : 0;
-    }));
-    tokenSeries.push({ label: key, points: { show: false } });
-    costData.push(xs.map((t) => {
-      const p = byTs[t];
-      return p && p.cost != null ? p.cost : null;
-    }));
-    costSeries.push({ label: key, points: { show: false } });
-  }
-  const baseOpts = (title, yLabel) => ({
+  token.labels.forEach((label, i) => {
+    const stroke = colors[i % colors.length];
+    tokenSeries.push({ label, stroke, width: 1.5, points: { show: false } });
+    costSeries.push({ label, stroke, width: 1.5, points: { show: false } });
+  });
+  const baseOpts = (host, title, yLabel) => ({
     title,
-    width: Math.max(tokenHost.clientWidth || 600, 320),
+    width: Math.max(host.clientWidth || 600, 320),
     height: 220,
     series: [],
     scales: { x: { time: true } },
     axes: [{}, { label: yLabel, size: 60 }],
     legend: { show: true, live: false },
   });
-  const tokenOpts = baseOpts('Tokens (input + output)', 'tokens');
+  const tokenOpts = baseOpts(tokenHost, 'Tokens (input + output)', 'tokens');
   tokenOpts.series = tokenSeries;
-  try { new uPlot(tokenOpts, tokenData, tokenHost); } catch (_) { /* malformed data */ }
-  const costOpts = baseOpts('Equivalent cost (USD)', 'USD');
+  try { analyticsCharts.push(new uPlot(tokenOpts, [token.x, ...token.ys], tokenHost)); } catch (_) { /* malformed data */ }
+  const costOpts = baseOpts(costHost, 'Equivalent cost (USD)', 'USD');
   costOpts.series = costSeries;
-  try { new uPlot(costOpts, costData, costHost); } catch (_) { /* malformed data */ }
+  try { analyticsCharts.push(new uPlot(costOpts, [cost.x, ...cost.ys], costHost)); } catch (_) { /* malformed data */ }
 }
 
-// analyticsRenderTable renders the per-(provider,model) summary as a plain
-// preformatted table. Aggregates requests/input/output across all buckets and
-// sums cost only over priced buckets; unpriced series show "n/a".
-function analyticsRenderTable(panel, resp) {
-  const series = (resp && resp.series) || [];
-  const rows = series.map((s) => {
-    let reqs = 0, input = 0, output = 0, cost = null;
+// analyticsRenderCostTable renders the cost view Token Usage does not have: one
+// row per (provider,model) with the window's equivalent cost and its share of
+// the priced total. Token/request totals deliberately stay on the Status page,
+// so the two views do not duplicate each other.
+function analyticsRenderCostTable(panel, resp) {
+  const host = panel.querySelector('#an-cost-table');
+  if (!host) return;
+  const rows = ((resp && resp.series) || []).map((s) => {
+    let cost = null;
     for (const p of s.points) {
-      reqs += p.requests || 0;
-      input += p.input || 0;
-      output += p.output || 0;
-      if (p.cost != null) { cost = (cost || 0) + p.cost; }
+      if (p.cost != null) cost = (cost || 0) + p.cost;
     }
-    const costStr = cost == null ? 'n/a' : '$' + cost.toFixed(2);
-    return [s.provider, s.model, reqs, input, output, costStr].join('\t');
+    return { provider: s.provider, model: s.model, cost };
   });
-  panel.querySelector('#an-table').textContent =
-    ['provider\tmodel\treqs\tinput\toutput\tcost'].concat(rows).join('\n');
+  const total = rows.reduce((sum, r) => sum + (r.cost || 0), 0);
+  rows.sort((a, b) => (b.cost || 0) - (a.cost || 0));
+  const body = rows.map((r) => `<tr>
+      <td class="mono">${esc(r.provider)}</td>
+      <td class="mono">${esc(r.model)}</td>
+      <td class="num">${r.cost == null ? 'n/a' : '$' + r.cost.toFixed(4)}</td>
+      <td class="num">${r.cost == null || total <= 0 ? '—' : (r.cost / total * 100).toFixed(1) + '%'}</td>
+    </tr>`).join('');
+  host.innerHTML = `<table class="table">
+      <thead><tr><th>provider</th><th>model</th><th class="num">equivalent cost</th><th class="num">share</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="4" class="hint">no series in range</td></tr>'}</tbody>
+    </table>`;
 }
 
 // ===========================================================================

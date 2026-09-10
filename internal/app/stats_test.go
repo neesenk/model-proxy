@@ -3,11 +3,13 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"model-proxy/internal/appapi"
 	obscounters "model-proxy/internal/observe/counters"
 	observestats "model-proxy/internal/observe/stats"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,7 +17,175 @@ import (
 
 // ---- stats_http_test.go ----
 
-// TestAPIStatsHandler verifies /api/stats returns persisted buckets as JSON.
+// TestAPITokensWindowSelector: ?window= switches /api/tokens from the
+// cumulative hot counters to the persisted minute buckets, for both the usage
+// rows and the nested agent breakdown; the default keeps the hot counters.
+func TestAPITokensWindowSelector(t *testing.T) {
+	minute := time.Now().Unix() / 60 * 60
+	p := &Proxy{
+		processServices: processServices{
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			agents:  obscounters.NewAgentCounter(),
+			stats:   newTestStatsStore(t),
+		},
+	}
+	// Persisted history: one bucket inside the 1h window, one far outside it.
+	if err := p.stats.Flush(minute, map[observestats.Key]observestats.Counters{
+		{Provider: "zhipu", Model: "glm-5"}: {Input: 100, Output: 20, CacheCreation: 5, CacheRead: 6, TokenRequests: 4},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.stats.Flush(minute-2*3600, map[observestats.Key]observestats.Counters{
+		{Provider: "zhipu", Model: "glm-5"}: {Input: 900, Output: 90, TokenRequests: 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.stats.FlushAgents(minute, map[observestats.AgentKey]observestats.AgentCounters{
+		{Agent: "codex", Provider: "zhipu", Model: "glm-5"}: {Requests: 4, Input: 100, Output: 20, CacheRead: 6},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.stats.FlushAgents(minute-2*3600, map[observestats.AgentKey]observestats.AgentCounters{
+		{Agent: "codex", Provider: "zhipu", Model: "glm-5"}: {Requests: 9, Input: 900, Output: 90},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The hot counters deliberately differ so the two views are distinguishable.
+	p.tokens.Commit(obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}, obscounters.TokenUsage{Input: 7, Output: 3})
+	p.agents.AddTokens("codex", "zhipu", "glm-5", obscounters.TokenUsage{Input: 7, Output: 3})
+
+	mux := http.NewServeMux()
+	NewWebServer(p, "test-config.yaml").Register(mux)
+	get := func(path string) (int, struct {
+		Usage  []appapi.TokenUsage `json:"usage"`
+		Agents []appapi.AgentUsage `json:"agents"`
+		Window string              `json:"window"`
+	}) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		var body struct {
+			Usage  []appapi.TokenUsage `json:"usage"`
+			Agents []appapi.AgentUsage `json:"agents"`
+			Window string              `json:"window"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode %s: %v; body=%s", path, err, rec.Body.String())
+		}
+		return rec.Code, body
+	}
+
+	code, all := get("/api/tokens")
+	if code != http.StatusOK || all.Window != "all" {
+		t.Fatalf("default /api/tokens = (%d, window %q)", code, all.Window)
+	}
+	if len(all.Usage) != 1 || all.Usage[0].Input != 7 {
+		t.Errorf("default usage = %+v, want the hot counters (input 7)", all.Usage)
+	}
+
+	code, windowed := get("/api/tokens?window=1h")
+	if code != http.StatusOK || windowed.Window != "1h" {
+		t.Fatalf("windowed /api/tokens = (%d, window %q)", code, windowed.Window)
+	}
+	wantUsage := appapi.TokenUsage{
+		Provider: "zhipu", Model: "glm-5",
+		Input: 100, Output: 20, CacheCreation: 5, CacheRead: 6, Total: 131, Requests: 4,
+	}
+	if len(windowed.Usage) != 1 || windowed.Usage[0] != wantUsage {
+		t.Errorf("windowed usage = %+v, want [%+v] (old bucket excluded)", windowed.Usage, wantUsage)
+	}
+	wantAgents := []appapi.AgentUsage{{
+		Agent: "codex", Requests: 4, Input: 100, Output: 20, CacheRead: 6, Total: 126,
+		Models: []appapi.AgentModelUsage{
+			{Provider: "zhipu", Model: "glm-5", Requests: 4, Input: 100, Output: 20, CacheRead: 6, Total: 126},
+		},
+	}}
+	if !reflect.DeepEqual(windowed.Agents, wantAgents) {
+		t.Errorf("windowed agents = %+v, want %+v", windowed.Agents, wantAgents)
+	}
+
+	// A window covering both buckets aggregates them (boundary inclusion).
+	_, wide := get("/api/tokens?window=24h")
+	if len(wide.Usage) != 1 || wide.Usage[0].Input != 1000 || wide.Usage[0].Requests != 13 {
+		t.Errorf("24h usage = %+v, want both buckets (input 1000, requests 13)", wide.Usage)
+	}
+	if rec := httptest.NewRecorder(); true {
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tokens?window=bogus", nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("bogus window status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// TestAPITokensClosedRange: from/to gives a closed range (the 昨天/yesterday
+// preset's shape) — buckets are excluded on BOTH sides, for the usage rows
+// and the agent breakdown alike.
+func TestAPITokensClosedRange(t *testing.T) {
+	now := time.Now()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	yesterdayNoon := midnight.Add(-12*time.Hour).Unix() / 60 * 60
+	todayMinute := midnight.Add(12*time.Hour).Unix() / 60 * 60
+	twoDaysAgo := midnight.Add(-36*time.Hour).Unix() / 60 * 60
+	from := midnight.Add(-24 * time.Hour).Unix() // yesterday 00:00 local
+	to := midnight.Unix() - 1                    // yesterday 23:59:59 local
+
+	p := &Proxy{
+		processServices: processServices{
+			metrics: obscounters.NewMetricsStore(),
+			tokens:  obscounters.NewTokenCounter(),
+			agents:  obscounters.NewAgentCounter(),
+			stats:   newTestStatsStore(t),
+		},
+	}
+	flush := func(minute int64, input uint64) {
+		t.Helper()
+		if err := p.stats.Flush(minute, map[observestats.Key]observestats.Counters{
+			{Provider: "zhipu", Model: "glm-5"}: {Input: input, Output: 1, CacheRead: 2, TokenRequests: 1},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.stats.FlushAgents(minute, map[observestats.AgentKey]observestats.AgentCounters{
+			{Agent: "codex", Provider: "zhipu", Model: "glm-5"}: {Requests: 1, Input: input, Output: 1, CacheRead: 2},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flush(twoDaysAgo, 900)    // before from — excluded
+	flush(yesterdayNoon, 100) // inside the closed range
+	flush(todayMinute, 500)   // after to — excluded
+
+	mux := http.NewServeMux()
+	NewWebServer(p, "test-config.yaml").Register(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/tokens?from=%d&to=%d", from, to), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Usage  []appapi.TokenUsage `json:"usage"`
+		Agents []appapi.AgentUsage `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	wantUsage := appapi.TokenUsage{
+		Provider: "zhipu", Model: "glm-5",
+		Input: 100, Output: 1, CacheRead: 2, Total: 103, Requests: 1,
+	}
+	if len(body.Usage) != 1 || body.Usage[0] != wantUsage {
+		t.Errorf("closed-range usage = %+v, want [%+v] (both sides excluded)", body.Usage, wantUsage)
+	}
+	wantAgents := []appapi.AgentUsage{{
+		Agent: "codex", Requests: 1, Input: 100, Output: 1, CacheRead: 2, Total: 103,
+		Models: []appapi.AgentModelUsage{
+			{Provider: "zhipu", Model: "glm-5", Requests: 1, Input: 100, Output: 1, CacheRead: 2, Total: 103},
+		},
+	}}
+	if !reflect.DeepEqual(body.Agents, wantAgents) {
+		t.Errorf("closed-range agents = %+v, want %+v", body.Agents, wantAgents)
+	}
+}
 func TestAPIStatsHandler(t *testing.T) {
 	p := &Proxy{
 		processServices: processServices{
@@ -279,6 +449,11 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 			Requests: 3, Input: 1000, Output: 200,
 		},
 		{Provider: "other", Model: "other"}: {Requests: 99},
+		// Virtual counter namespaces share the (provider, model) key space but
+		// are not upstream usage; the projection must drop them.
+		{Provider: "guard", Model: "ssh"}:        {Requests: 9},
+		{Provider: "attempts", Model: "ok"}:      {Requests: 9},
+		{Provider: "routing", Model: "decision"}: {Requests: 9},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -352,6 +527,39 @@ func TestAPIAnalyticsHandler(t *testing.T) {
 	}
 	if len(got.PriceCoverage.Priced) != 0 {
 		t.Errorf("price_coverage.priced must be empty, got %+v", got.PriceCoverage.Priced)
+	}
+
+	// Unfiltered query: the virtual namespaces (guard/attempts/routing) must not
+	// surface as series or as unpriced "models".
+	all := httptest.NewRecorder()
+	mux.ServeHTTP(all, httptest.NewRequest(
+		http.MethodGet,
+		fmt.Sprintf("/api/analytics?from=%d&to=%d&granularity=day", minute, minute),
+		nil,
+	))
+	if all.Code != http.StatusOK {
+		t.Fatalf("unfiltered status=%d want 200; body=%s", all.Code, all.Body.String())
+	}
+	var allResp struct {
+		Series []struct {
+			Provider string `json:"provider"`
+		} `json:"series"`
+		PriceCoverage struct {
+			Unpriced []string `json:"unpriced"`
+		} `json:"price_coverage"`
+	}
+	if err := json.Unmarshal(all.Body.Bytes(), &allResp); err != nil {
+		t.Fatalf("unmarshal unfiltered analytics: %v\n%s", err, all.Body.String())
+	}
+	for _, s := range allResp.Series {
+		if obscounters.IsVirtualProvider(s.Provider) {
+			t.Errorf("virtual provider %q leaked into analytics series", s.Provider)
+		}
+	}
+	for _, m := range allResp.PriceCoverage.Unpriced {
+		if m == "ssh" || m == "ok" || m == "decision" {
+			t.Errorf("virtual model %q leaked into price_coverage.unpriced", m)
+		}
 	}
 
 	bad := httptest.NewRecorder()

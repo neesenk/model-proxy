@@ -313,6 +313,38 @@ func TestUsageScannerAnthropic(t *testing.T) {
 	}
 }
 
+// zhipu/aqp shape: message_start carries zero/null cache usage and the real
+// values arrive only in message_delta — the counter→stats path must still
+// attribute them.
+func TestUsageScannerAnthropicCacheInMessageDelta(t *testing.T) {
+	stream := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":null,\"cache_read_input_tokens\":null}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":112,\"output_tokens\":11,\"cache_read_input_tokens\":64}}\n\n")
+	tc := obscounters.NewTokenCounter()
+	key := obscounters.TokenKey{Provider: "aqp", Model: "glm-5.2"}
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
+	io.Copy(io.Discard, sc)
+
+	got := tc.Snapshot()[key]
+	if got.Input != 112 || got.CacheRead != 64 || got.Output != 11 {
+		t.Errorf("usage = %+v, want in=112 cr=64 out=11", got)
+	}
+}
+
+// deepseek shape: cache_read_input_tokens repeated with the same cumulative
+// value in message_start AND message_delta must be counted once, not doubled.
+func TestUsageScannerAnthropicCacheRepeatedNotDoubled(t *testing.T) {
+	stream := []byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":39,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":256,\"output_tokens\":0}}}\n\n" +
+		"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":39,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":256,\"output_tokens\":72}}\n\n")
+	tc := obscounters.NewTokenCounter()
+	key := obscounters.TokenKey{Provider: "deepseek", Model: "d"}
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
+	io.Copy(io.Discard, sc)
+
+	if got := tc.Snapshot()[key]; got.CacheRead != 256 {
+		t.Errorf("cache_read = %d, want 256 (counted once, not doubled)", got.CacheRead)
+	}
+}
+
 func TestUsageScannerOpenAI(t *testing.T) {
 	stream := []byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13}}\n\n")
 	tc := obscounters.NewTokenCounter()
@@ -321,6 +353,20 @@ func TestUsageScannerOpenAI(t *testing.T) {
 	got := tc.Snapshot()[obscounters.TokenKey{Provider: "deepseek", Model: "d"}]
 	if got.Input != 7 || got.Output != 13 {
 		t.Errorf("usage = %+v, want in=7 out=13", got)
+	}
+}
+
+// Chat usage chunks carry cached prompt tokens in
+// prompt_tokens_details.cached_tokens — they must land in the CacheRead bucket.
+func TestUsageScannerOpenAICachedTokens(t *testing.T) {
+	stream := []byte("data: {\"id\":\"x\",\"choices\":[]}\n\ndata: {\"usage\":{\"prompt_tokens\":295,\"completion_tokens\":70,\"prompt_tokens_details\":{\"cached_tokens\":256}}}\n\n")
+	tc := obscounters.NewTokenCounter()
+	key := obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}
+	sc := obscounters.NewUsageScanner(io.NopCloser(bytes.NewReader(stream)), key, tc, nil)
+	io.Copy(io.Discard, sc)
+	got := tc.Snapshot()[key]
+	if got.Input != 295 || got.Output != 70 || got.CacheRead != 256 {
+		t.Errorf("usage = %+v, want in=295 out=70 cr=256", got)
 	}
 }
 
@@ -378,7 +424,7 @@ func TestTokenCounterPersist(t *testing.T) {
 	defer ss.Close()
 	m := obscounters.NewMetricsStore()
 	tc := obscounters.NewTokenCounter()
-	f := observestats.NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{})
+	f := observestats.NewFlusher(ss, m, tc, obscounters.NewAgentCounter(), map[observestats.Key]observestats.Counters{}, nil)
 
 	tc.Commit(obscounters.TokenKey{Provider: "z", Model: "m"}, obscounters.TokenUsage{Input: 10, Output: 20, Requests: 1})
 	m.Inc("z", "m", obscounters.EvRequests)
@@ -599,14 +645,17 @@ func TestForwardCommitsOnDisconnect(t *testing.T) {
 		<-r.Context().Done() // hold open until the proxy closes the body (disconnect)
 	}))
 	defer up.Close()
-	cfg, err := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: glm-5}]\n"))
+	// The route's target model equals the called model ("m") so the stream
+	// stays on the zero-copy passthrough this test was written for: both usage
+	// frames coalesce into the proxy's first Read before the disconnect.
+	cfg, err := LoadConfigFromBytes("test", []byte("listen: 127.0.0.1:0\nproviders:\n  zhipu:\n    provider_id: zhipu\n    openai_base_url: "+up.URL+"\nroutes:\n  m: [{provider: zhipu, model: m}]\n"))
 	if err != nil {
 		t.Fatalf("LoadConfigFromBytes: %v", err)
 	}
 	p := newTestProxy(t, cfg)
 	rec := &disconnectWriter{ResponseRecorder: httptest.NewRecorder()}
 	p.Handler(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)))
-	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "glm-5"}]
+	got := p.tokens.Snapshot()[obscounters.TokenKey{Provider: "zhipu", Model: "m"}]
 	if got.Input != 42 {
 		t.Errorf("input tokens after disconnect = %d, want 42 (observed usage must commit on client-cancel, not be silently dropped)", got.Input)
 	}
@@ -771,7 +820,8 @@ func TestDetectAgent(t *testing.T) {
 		{"codex ua", "codex_cli_rs/0.144.1", "", "codex"},
 		{"opencode ua", "opencode/0.5", "", "opencode"},
 		{"pi ua", "pi/1.0", "", "pi"},
-		{"unknown other ua", "curl/8.0", "", "other"},
+		{"pi ai ua", "pi (darwin 25.6.0; arm64)", "", "pi"},
+		{"unknown other ua", "curl/8.0", "", "curl"},
 		{"no ua", "", "", "unknown"},
 	}
 	for _, c := range cases {

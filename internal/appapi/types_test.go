@@ -41,11 +41,13 @@ func TestRequirePorts(t *testing.T) {
 // fakeReads/fakeCommands satisfy the port interfaces with zero values.
 type fakeReads struct{}
 
-func (fakeReads) Dashboard(time.Time) Dashboard { return Dashboard{} }
-func (fakeReads) LogFile() string               { return "" }
-func (fakeReads) RequestLogDirectory() string   { return "" }
-func (fakeReads) Accounts() []ProviderAccounts  { return nil }
-func (fakeReads) Tokens() []TokenUsage          { return nil }
+func (fakeReads) Dashboard(time.Time) Dashboard             { return Dashboard{} }
+func (fakeReads) LogFile() string                           { return "" }
+func (fakeReads) RequestLogDirectory() string               { return "" }
+func (fakeReads) Accounts() []ProviderAccounts              { return nil }
+func (fakeReads) Tokens(int64, int64) ([]TokenUsage, error) { return nil, nil }
+func (fakeReads) Agents(int64, int64) ([]AgentUsage, error) { return nil, nil }
+func (fakeReads) StatsSince() int64                         { return 0 }
 func (fakeReads) Stats(StatsQuery) ([]observestats.Bucket, error) {
 	return nil, nil
 }

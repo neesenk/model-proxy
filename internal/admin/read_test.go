@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -231,13 +232,16 @@ func TestTokensProjection(t *testing.T) {
 			}
 		},
 	})
-	out := service.Tokens()
+	out, err := service.Tokens(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(out) != 1 {
 		t.Fatalf("tokens = %v", out)
 	}
 	got := out[0]
 	if got.Provider != "up" || got.Model != "m" || got.Input != 1 || got.Output != 2 ||
-		got.CacheCreation != 3 || got.CacheRead != 4 || got.Requests != 5 {
+		got.CacheCreation != 3 || got.CacheRead != 4 || got.Total != 10 || got.Requests != 5 {
 		t.Errorf("token usage = %+v", got)
 	}
 }
@@ -246,8 +250,133 @@ func TestTokensNilSnapshot(t *testing.T) {
 	service := New(Ports{
 		TokenUsage: func() map[obscounters.TokenKey]obscounters.TokenUsage { return nil },
 	})
-	if out := service.Tokens(); len(out) != 0 {
+	if out, _ := service.Tokens(0, 0); len(out) != 0 {
 		t.Errorf("tokens = %v, want empty", out)
+	}
+}
+
+// TestTokensWindowedProjection: from > 0 reads the persisted-bucket port, not
+// the hot counters, and maps token_requests into Requests; store errors
+// propagate.
+func TestTokensWindowedProjection(t *testing.T) {
+	wantErr := errors.New("store closed")
+	service := New(Ports{
+		TokenUsage: func() map[obscounters.TokenKey]obscounters.TokenUsage {
+			t.Error("windowed Tokens must not read the hot counters")
+			return nil
+		},
+		TokenUsageRange: func(from, to int64) (map[observestats.Key]observestats.Counters, error) {
+			if from <= 0 {
+				t.Errorf("TokenUsageRange from = %d, want > 0", from)
+			}
+			return map[observestats.Key]observestats.Counters{
+				{Provider: "up", Model: "m"}: {Input: 10, Output: 4, CacheCreation: 2, CacheRead: 8, TokenRequests: 3},
+			}, nil
+		},
+	})
+	out, err := service.Tokens(3600, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := appapi.TokenUsage{Provider: "up", Model: "m", Input: 10, Output: 4, CacheCreation: 2, CacheRead: 8, Total: 24, Requests: 3}
+	if len(out) != 1 || out[0] != want {
+		t.Errorf("windowed tokens = %+v, want [%+v]", out, want)
+	}
+	service.ports.TokenUsageRange = func(int64, int64) (map[observestats.Key]observestats.Counters, error) {
+		return nil, wantErr
+	}
+	if _, err := service.Tokens(3600, 0); !errors.Is(err, wantErr) {
+		t.Errorf("Tokens error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestAgentsProjection(t *testing.T) {
+	service := New(Ports{
+		AgentUsage: func() map[obscounters.AgentKey]obscounters.AgentCount {
+			return map[obscounters.AgentKey]obscounters.AgentCount{
+				{Agent: "codex", Provider: "z", Model: "glm"}:     {Requests: 2, Input: 10, Output: 4, CacheCreation: 1, CacheRead: 5},
+				{Agent: "codex", Provider: "a", Model: "glm-5.2"}: {Requests: 1, Input: 40, Output: 8},
+				{Agent: "pi", Provider: "z", Model: "glm"}:        {Requests: 1, Input: 3, Output: 4},
+				{Agent: "pi", Provider: "a", Model: "m2"}:         {Requests: 7},
+			}
+		},
+	})
+	got, err := service.Agents(0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// codex totals 10+4+1+5 + 40+8 = 68 across two models; pi totals 7.
+	want := []appapi.AgentUsage{
+		{
+			Agent: "codex", Requests: 3, Input: 50, Output: 12, CacheCreation: 1, CacheRead: 5, Total: 68,
+			Models: []appapi.AgentModelUsage{
+				{Provider: "a", Model: "glm-5.2", Requests: 1, Input: 40, Output: 8, Total: 48},
+				{Provider: "z", Model: "glm", Requests: 2, Input: 10, Output: 4, CacheCreation: 1, CacheRead: 5, Total: 20},
+			},
+		},
+		{
+			Agent: "pi", Requests: 8, Input: 3, Output: 4, Total: 7,
+			Models: []appapi.AgentModelUsage{
+				{Provider: "z", Model: "glm", Requests: 1, Input: 3, Output: 4, Total: 7},
+				{Provider: "a", Model: "m2", Requests: 7},
+			},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("agents = %+v, want %+v", got, want)
+	}
+}
+
+// TestAgentsWindowedProjection: from > 0 reads the persisted-bucket port and
+// produces the same nested shape as the cumulative view; store errors
+// propagate.
+func TestAgentsWindowedProjection(t *testing.T) {
+	wantErr := errors.New("store closed")
+	service := New(Ports{
+		AgentUsage: func() map[obscounters.AgentKey]obscounters.AgentCount {
+			t.Error("windowed Agents must not read the hot counters")
+			return nil
+		},
+		AgentUsageRange: func(from, to int64) (map[observestats.AgentKey]observestats.AgentCounters, error) {
+			if from <= 0 {
+				t.Errorf("AgentUsageRange from = %d, want > 0", from)
+			}
+			return map[observestats.AgentKey]observestats.AgentCounters{
+				{Agent: "codex", Provider: "z", Model: "glm"}: {Requests: 2, Input: 10, Output: 4, CacheRead: 6},
+				{Agent: "codex", Provider: "a", Model: "m2"}:  {Requests: 1, Input: 30, Output: 6},
+			}, nil
+		},
+	})
+	got, err := service.Agents(3600, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []appapi.AgentUsage{
+		{
+			Agent: "codex", Requests: 3, Input: 40, Output: 10, CacheRead: 6, Total: 56,
+			Models: []appapi.AgentModelUsage{
+				{Provider: "a", Model: "m2", Requests: 1, Input: 30, Output: 6, Total: 36},
+				{Provider: "z", Model: "glm", Requests: 2, Input: 10, Output: 4, CacheRead: 6, Total: 20},
+			},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("windowed agents = %+v, want %+v", got, want)
+	}
+	service.ports.AgentUsageRange = func(int64, int64) (map[observestats.AgentKey]observestats.AgentCounters, error) {
+		return nil, wantErr
+	}
+	if _, err := service.Agents(3600, 0); !errors.Is(err, wantErr) {
+		t.Errorf("Agents error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestAgentsNilSnapshot(t *testing.T) {
+	service := New(Ports{
+		AgentUsage: func() map[obscounters.AgentKey]obscounters.AgentCount { return nil },
+	})
+	if out, _ := service.Agents(0, 0); len(out) != 0 {
+		t.Errorf("agents = %v, want empty", out)
 	}
 }
 
@@ -556,5 +685,64 @@ func TestPresetsListsSharedCatalog(t *testing.T) {
 	}
 	if !known {
 		t.Error("preset catalog missing zhipu")
+	}
+}
+
+// TestTokensExcludesVirtualProviders: guard/attempts/routing/fusion share the
+// (provider, model) key space with upstream usage but are request counters, not
+// billable models — they must not appear in /api/tokens (cumulative or windowed).
+func TestTokensExcludesVirtualProviders(t *testing.T) {
+	service := New(Ports{
+		TokenUsage: func() map[obscounters.TokenKey]obscounters.TokenUsage {
+			return map[obscounters.TokenKey]obscounters.TokenUsage{
+				{Provider: "up", Model: "m"}:             {Input: 1, Requests: 1},
+				{Provider: "guard", Model: "ssh"}:        {Requests: 9},
+				{Provider: "attempts", Model: "ok"}:      {Requests: 9},
+				{Provider: "routing", Model: "decision"}: {Requests: 9},
+				{Provider: "fusion", Model: "wf"}:        {Requests: 9},
+			}
+		},
+		TokenUsageRange: func(from, to int64) (map[observestats.Key]observestats.Counters, error) {
+			return map[observestats.Key]observestats.Counters{
+				{Provider: "up", Model: "m"}:      {Input: 1, TokenRequests: 1},
+				{Provider: "guard", Model: "ssh"}: {Requests: 9},
+			}, nil
+		},
+	})
+	for _, tc := range []struct {
+		name     string
+		from, to int64
+	}{
+		{"cumulative", 0, 0},
+		{"windowed", 3600, 0},
+	} {
+		out, err := service.Tokens(tc.from, tc.to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) != 1 || out[0].Provider != "up" {
+			t.Errorf("%s tokens = %+v, want only up/m", tc.name, out)
+		}
+	}
+}
+
+// TestAnalyticsExcludesVirtualProviders: the calendar-bucket projection drops
+// virtual counter namespaces so they cannot surface as unpriced "models".
+func TestAnalyticsExcludesVirtualProviders(t *testing.T) {
+	service := New(Ports{
+		Analytics: func(from, to int64, provider, model, granularity string) ([]observestats.AnalyticsBucket, error) {
+			return []observestats.AnalyticsBucket{
+				{Provider: "up", Model: "m", Bucket: 1},
+				{Provider: "guard", Model: "ssh", Bucket: 1},
+				{Provider: "routing", Model: "decision", Bucket: 1},
+			}, nil
+		},
+	})
+	out, err := service.Analytics(appapi.AnalyticsQuery{Granularity: "day"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Provider != "up" {
+		t.Errorf("analytics = %+v, want only up/m", out)
 	}
 }

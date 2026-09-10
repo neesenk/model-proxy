@@ -50,6 +50,26 @@ const (
 	EvRoutingObserved MetricsEvent = "routing_observed"
 )
 
+// VirtualProviders names the counter namespaces that share the (provider,
+// model) key space with upstream usage but are NOT upstream providers: guard
+// hits, attempt outcomes, routing-decision latency and fusion orchestration
+// runs. They are meaningful in the /api/stats per-minute time series (the
+// "virtual key" trick documented above), but must never be projected as token
+// usage or billable models by /api/tokens or /api/analytics.
+var VirtualProviders = map[string]struct{}{
+	"guard":    {},
+	"attempts": {},
+	"routing":  {},
+	"fusion":   {},
+}
+
+// IsVirtualProvider reports whether provider is a virtual counter namespace
+// (see VirtualProviders) rather than a real upstream provider.
+func IsVirtualProvider(provider string) bool {
+	_, ok := VirtualProviders[provider]
+	return ok
+}
+
 type ProviderMetrics struct {
 	Requests       atomic.Uint64
 	Failovers      atomic.Uint64

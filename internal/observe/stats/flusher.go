@@ -74,9 +74,11 @@ func NewFlusher(
 	tokens *obscounters.TokenCounter,
 	agents *obscounters.AgentCounter,
 	baseline map[Key]Counters,
+	agentBaseline map[AgentKey]AgentCounters,
 ) *Flusher {
 	return &Flusher{
 		stats: stats, metrics: metrics, tokens: tokens, agents: agents, prev: baseline,
+		agentPrev: agentBaseline,
 	}
 }
 
@@ -122,6 +124,7 @@ func (f *Flusher) collectAgents() map[AgentKey]AgentCounters {
 			Agent: key.Agent, Provider: key.Provider, Model: key.Model,
 		}] = AgentCounters{
 			Requests: counters.Requests, Input: counters.Input, Output: counters.Output,
+			CacheCreation: counters.CacheCreation, CacheRead: counters.CacheRead,
 			LatencySum: counters.LatencySum, Failures: counters.Failures,
 		}
 	}
@@ -170,13 +173,16 @@ func DiffAgent(
 	for key, currentCounters := range current {
 		previousCounters := previous[key]
 		delta := AgentCounters{
-			Requests:   SubtractCounter(currentCounters.Requests, previousCounters.Requests),
-			Input:      SubtractCounter(currentCounters.Input, previousCounters.Input),
-			Output:     SubtractCounter(currentCounters.Output, previousCounters.Output),
-			LatencySum: SubtractCounter(currentCounters.LatencySum, previousCounters.LatencySum),
-			Failures:   SubtractCounter(currentCounters.Failures, previousCounters.Failures),
+			Requests:      SubtractCounter(currentCounters.Requests, previousCounters.Requests),
+			Input:         SubtractCounter(currentCounters.Input, previousCounters.Input),
+			Output:        SubtractCounter(currentCounters.Output, previousCounters.Output),
+			CacheCreation: SubtractCounter(currentCounters.CacheCreation, previousCounters.CacheCreation),
+			CacheRead:     SubtractCounter(currentCounters.CacheRead, previousCounters.CacheRead),
+			LatencySum:    SubtractCounter(currentCounters.LatencySum, previousCounters.LatencySum),
+			Failures:      SubtractCounter(currentCounters.Failures, previousCounters.Failures),
 		}
 		if delta.Requests == 0 && delta.Input == 0 && delta.Output == 0 &&
+			delta.CacheCreation == 0 && delta.CacheRead == 0 &&
 			delta.LatencySum == 0 && delta.Failures == 0 {
 			continue
 		}
@@ -326,6 +332,8 @@ func MergeAgentDeltas(
 		current.Requests += add.Requests
 		current.Input += add.Input
 		current.Output += add.Output
+		current.CacheCreation += add.CacheCreation
+		current.CacheRead += add.CacheRead
 		current.LatencySum += add.LatencySum
 		current.Failures += add.Failures
 		destination[key] = current

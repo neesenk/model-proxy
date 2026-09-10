@@ -60,7 +60,10 @@ type ProviderAccounts struct {
 	Accounts   []Account `json:"accounts"`
 }
 
-// TokenUsage is one flattened provider/model usage counter.
+// TokenUsage is one flattened provider/model usage counter. Total is the
+// display total across all four token buckets (input + output + cache_creation
+// + cache_read): the buckets are anthropic-normalized (input excludes cached
+// tokens), so the total is their plain sum.
 type TokenUsage struct {
 	Provider      string `json:"provider"`
 	Model         string `json:"model"`
@@ -68,7 +71,39 @@ type TokenUsage struct {
 	Output        uint64 `json:"output"`
 	CacheCreation uint64 `json:"cache_creation"`
 	CacheRead     uint64 `json:"cache_read"`
+	Total         uint64 `json:"total"`
 	Requests      uint64 `json:"requests"`
+}
+
+// AgentUsage is the agent-dimension counterpart of TokenUsage: one agent's
+// cumulative usage, served alongside TokenUsage in GET /api/tokens (same
+// in-memory since-daemon-start window, reset together by
+// POST /api/tokens/reset). Range-windowed agent queries stay on
+// GET /api/agents (persisted agent_buckets). The top-level fields are the
+// per-agent totals across every (provider, model) the agent touched; Models
+// carries the per-(provider, model) breakdown. Total has the same
+// four-bucket-sum definition as TokenUsage.Total, at both levels.
+type AgentUsage struct {
+	Agent         string            `json:"agent"`
+	Requests      uint64            `json:"requests"`
+	Input         uint64            `json:"input"`
+	Output        uint64            `json:"output"`
+	CacheCreation uint64            `json:"cache_creation"`
+	CacheRead     uint64            `json:"cache_read"`
+	Total         uint64            `json:"total"`
+	Models        []AgentModelUsage `json:"models"`
+}
+
+// AgentModelUsage is one (provider, model) row of an agent's breakdown.
+type AgentModelUsage struct {
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	Requests      uint64 `json:"requests"`
+	Input         uint64 `json:"input"`
+	Output        uint64 `json:"output"`
+	CacheCreation uint64 `json:"cache_creation"`
+	CacheRead     uint64 `json:"cache_read"`
+	Total         uint64 `json:"total"`
 }
 
 // Pin is the public projection of one manual route pin.
@@ -315,7 +350,13 @@ type ReadAPI interface {
 	LogFile() string
 	RequestLogDirectory() string
 	Accounts() []ProviderAccounts
-	Tokens() []TokenUsage
+	// Tokens/Agents project the usage counters. from <= 0 && to <= 0 is the
+	// all-time cumulative view (hot counters); any bound > 0 aggregates
+	// persisted minute buckets with from <= minute <= to (the /api/tokens
+	// time-range selector).
+	Tokens(from, to int64) ([]TokenUsage, error)
+	Agents(from, to int64) ([]AgentUsage, error)
+	StatsSince() int64
 	Stats(StatsQuery) ([]observestats.Bucket, error)
 	AgentStats(AgentStatsQuery) ([]observestats.AgentBucket, error)
 	Analytics(AnalyticsQuery) ([]observestats.AnalyticsBucket, error)
