@@ -192,6 +192,27 @@ func TestRequestLogInputFallsBackToUpstreamBodyForInternalLeg(t *testing.T) {
 	}
 }
 
+// TestRequestLogInputCarriesAgent: the detected agent is threaded from the
+// pipeline's LogCtx through to the request-log input.
+func TestRequestLogInputCarriesAgent(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+
+	input := BuildRequestLogInput(
+		LogCtx{RequestID: "req-agent", Exposed: "route", Agent: "claude-code"},
+		request,
+		"anthropic",
+		"m",
+		RouteTarget{Provider: "p", Model: "m"},
+		response,
+		time.Now(),
+		nil,
+	)
+	if input.Agent != "claude-code" {
+		t.Errorf("agent = %q, want claude-code", input.Agent)
+	}
+}
+
 // TestRequestLogInputCarriesConversionDiagnostics: per-attempt conversion
 // diagnostics ride the log context into the request-log input.
 func TestRequestLogInputCarriesConversionDiagnostics(t *testing.T) {

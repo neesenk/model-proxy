@@ -391,6 +391,31 @@ func TestExposedModels_PicksBestPriority(t *testing.T) {
 	}
 }
 
+// --- exposedModels: deterministic sorted order (routes is a map) ---
+
+func TestExposedModels_SortedByExposedName(t *testing.T) {
+	cfg := &configdomain.Config{
+		Providers: map[string]configdomain.Provider{
+			"a": {Provider: "static", Models: []string{"m1", "m2", "m3"}},
+		},
+		Routes: map[string][]configdomain.RouteTarget{
+			"zeta":  {{Provider: "a", Model: "m3"}},
+			"alpha": {{Provider: "a", Model: "m1"}},
+			"mid":   {{Provider: "a", Model: "m2"}},
+		},
+	}
+	got := takeover.ExposedModels(cfg, nil, cfg.Routes)
+	if len(got) != 3 {
+		t.Fatalf("exposedModels len=%d want 3", len(got))
+	}
+	want := []string{"alpha", "mid", "zeta"}
+	for i, name := range want {
+		if got[i].Exposed != name {
+			t.Fatalf("exposedModels[%d].Exposed=%q want sorted order %v", i, got[i].Exposed, want)
+		}
+	}
+}
+
 // --- provider id: template default + per-template override ---
 
 func TestTemplateProviderID(t *testing.T) {

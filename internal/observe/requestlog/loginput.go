@@ -5,6 +5,7 @@ package requestlog
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	configdomain "model-proxy/internal/config"
@@ -15,10 +16,24 @@ import (
 // duplicated in this observation scope.
 type LogCtx struct {
 	RequestID   string
+	SessionID   string
 	Attempt     int
 	Exposed     string
+	Agent       string
 	OrigBody    []byte
 	Diagnostics []ConversionDiagnostic
+}
+
+// SessionID returns the first non-empty value among headers (an ordered
+// allowlist from config.RequestLogConfig.ResolvedSessionHeaders), trimmed.
+// Empty means the client sent none of the recognized session headers.
+func SessionID(r *http.Request, headers []string) string {
+	for _, h := range headers {
+		if v := strings.TrimSpace(r.Header.Get(h)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // BuildInput maps application-owned request/route state to the detached
@@ -37,10 +52,15 @@ func BuildInput(
 	if len(requestBody) == 0 {
 		requestBody = upstreamRequestBody
 	}
+	sessionID := context.SessionID
+	if sessionID == "" {
+		// Legacy fallback for callers that predate the allowlist.
+		sessionID = request.Header.Get("x-claude-code-session-id")
+	}
 	return Input{
 		StartedAt:      startedAt,
 		RequestID:      context.RequestID,
-		SessionID:      request.Header.Get("x-claude-code-session-id"),
+		SessionID:      sessionID,
 		Protocol:       protocol,
 		Method:         request.Method,
 		Path:           request.URL.Path,
@@ -48,6 +68,7 @@ func BuildInput(
 		UpstreamModel:  target.Model,
 		Exposed:        context.Exposed,
 		Provider:       target.Provider,
+		Agent:          context.Agent,
 		Attempt:        context.Attempt,
 		Status:         response.StatusCode,
 		RequestBody:    requestBody,

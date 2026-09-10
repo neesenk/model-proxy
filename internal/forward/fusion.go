@@ -175,6 +175,7 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 		Type:      "start",
 		Ts:        start.UnixMilli(),
 		RequestID: legID,
+		SessionID: fc.flc.SessionID,
 		Agent:     fc.agent,
 		Protocol:  fc.proto,
 		Exposed:   fc.flc.Exposed,
@@ -187,6 +188,7 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 			Type:          "end",
 			Ts:            time.Now().UnixMilli(),
 			RequestID:     legID,
+			SessionID:     fc.flc.SessionID,
 			Agent:         fc.agent,
 			Protocol:      fc.proto,
 			Exposed:       fc.flc.Exposed,
@@ -387,7 +389,7 @@ func (p pipeline) callFusionLeg(ctx context.Context, fc fusionCtx, idx int, tag 
 	// log / API.
 	if logger := p.svc.ReqLog; logger != nil {
 		logInput := BuildRequestLogInput(
-			LogCtx{RequestID: legID, Exposed: fc.flc.Exposed},
+			LogCtx{RequestID: legID, SessionID: fc.flc.SessionID, Exposed: fc.flc.Exposed, Agent: fc.agent},
 			req,
 			fc.proto,
 			fc.calledModel,
@@ -453,7 +455,7 @@ func (p pipeline) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byt
 	}
 	// The log ctx carries NO origBody so the request log stores the actual
 	// synthesis body (with the candidate sections), not the client's original.
-	flc := LogCtx{RequestID: fc.flc.RequestID, Attempt: fc.flc.Attempt, Exposed: fc.flc.Exposed}
+	flc := LogCtx{RequestID: fc.flc.RequestID, SessionID: fc.flc.SessionID, Attempt: fc.flc.Attempt, Exposed: fc.flc.Exposed, Agent: fc.agent}
 	attempt := newTargetAttempt(
 		fc.runtime,
 		plan,
@@ -468,6 +470,7 @@ func (p pipeline) callFusionSynthesizer(fc fusionCtx, st RouteTarget, body []byt
 			CacheKey:    cacheKey,
 			Log: targetexec.LogContext{
 				RequestID:    flc.RequestID,
+				SessionID:    flc.SessionID,
 				Attempt:      flc.Attempt,
 				Exposed:      flc.Exposed,
 				OriginalBody: flc.OrigBody,

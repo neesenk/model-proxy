@@ -11,7 +11,6 @@ import (
 	// dispatches into that mux only when MP_PPROF=1 was set at construction.
 	_ "net/http/pprof"
 
-	"model-proxy/internal/forward"
 	"model-proxy/internal/httpx"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/protocol"
@@ -109,17 +108,20 @@ func (p *Proxy) Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proto := string(protocol.ForPath(r.URL.Path))
-	// Generate the request id ONCE, here at the handler top, so EVERY downstream
-	// path — including the unknown-path 502 below, which returns before forward —
-	// can publish live events carrying a stable id (the contract: every start/end
-	// carries a stable request_id; cache-hit and 400/502 terminals must produce an
-	// end). Cheap: one atomic add, no data dependency.
-	requestID := nextRequestID()
 	if proto == "" {
-		p.publishTerminalEvent(requestID, r, "", r.URL.Path, http.StatusBadGateway)
+		// Non-LLM path (browser well-known probes, favicon, stray GETs): answer
+		// 502 WITHOUT a live event. The Live monitor is an LLM-request view; only
+		// /v1/messages, /v1/chat/completions and /v1/responses produce events.
+		// Unrouted MODEL requests still emit a terminal end inside forward (proto
+		// is non-empty there) — that is the retry-loop case the contract protects.
 		http.Error(w, fmt.Sprintf("no route for path %s", r.URL.Path), http.StatusBadGateway)
 		return
 	}
+	// Generate the request id ONCE, here, so every downstream path — forward,
+	// cache hit, and the 400/502 terminals inside forward — publishes events with
+	// a stable id (the contract: every start/end carries a stable request_id).
+	// Cheap: one atomic add, no data dependency.
+	requestID := nextRequestID()
 	p.forward(proto, w, r, requestID)
 }
 
@@ -169,17 +171,6 @@ func writeModels(w http.ResponseWriter, data []byte) {
 		return
 	}
 	w.Write([]byte(`{"object":"list","data":[]}`))
-}
-
-// publishTerminalEvent emits a live "end" event for a request that ends before
-// the normal start/commit flow — a malformed body (400) or an unrouted model
-// (502). Without it, an agent retry-looping on a missing/removed model is
-// invisible to the live monitor, defeating the feature's core use case. The
-// requestID is generated at the handler top and threaded in so these terminal
-// events still pair with a stable id (the contract: 400/502 终局也必须产生 end
-// 且带稳定 request_id).
-func (p *Proxy) publishTerminalEvent(requestID string, r *http.Request, proto, exposed string, status int) {
-	forward.PublishTerminalEvent(p.events, requestID, r, proto, exposed, status)
 }
 
 // isAdminProxyEndpoint reports whether the path is an admin-surface endpoint

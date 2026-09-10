@@ -2,6 +2,7 @@ package takeover
 
 import (
 	"os"
+	"sort"
 	"strings"
 
 	"model-proxy/internal/catalog"
@@ -46,6 +47,10 @@ func ExposedModels(cfg *configdomain.Config, meta map[string]map[string]catalog.
 		// Use the highest-priority target's provider/model for metadata.
 		add(exposed, primaryTarget(targets))
 	}
+	// routes is a map — sort by exposed name so serialized client configs
+	// (pi models.json, opencode model maps) get a deterministic model order
+	// instead of a random one per run.
+	sort.Slice(out, func(i, j int) bool { return out[i].Exposed < out[j].Exposed })
 	return out
 }
 
@@ -120,7 +125,12 @@ func piInputModalities(in []string) []string {
 
 // piModelsCollection builds pi's model list: {id, name, input, maxTokens,
 // contextWindow} per exposed model, with conservative defaults for missing
-// metadata and one fallback entry when the route table is empty.
+// metadata and one fallback entry when the route table is empty. Every entry
+// carries compat.sendSessionAffinityHeaders:true so pi sends its session id
+// (x-session-affinity) to the proxy — the anthropic-messages and
+// openai-completions paths gate that header on this flag (openai-responses
+// sends it by default), and the proxy records it as the request-log/live
+// session_id.
 func piModelsCollection(models []ExposedModel) []map[string]any {
 	piModels := []map[string]any{}
 	for _, m := range models {
@@ -129,6 +139,7 @@ func piModelsCollection(models []ExposedModel) []map[string]any {
 			"id":        m.Exposed,
 			"input":     piInputModalities(m.PM.Modalities.Input),
 			"maxTokens": m.PM.Output,
+			"compat":    map[string]any{"sendSessionAffinityHeaders": true},
 		}
 		// reasoning is what makes pi send reasoning params and surface
 		// thinking blocks; omitting it silently disables thinking for

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	responsecache "model-proxy/internal/cache"
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/guard"
 	guardsession "model-proxy/internal/guard/session"
 	"model-proxy/internal/observe/counters"
@@ -478,12 +479,14 @@ func TestForceProvider(t *testing.T) {
 }
 
 // TestPublishTerminalEvent: the terminal live event carries the request id,
-// detected agent, protocol, exposed name and status.
+// detected agent, protocol, exposed name, status, and the session id resolved
+// from the configured header allowlist.
 func TestPublishTerminalEvent(t *testing.T) {
 	h := newHarness()
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	r.Header.Set("User-Agent", "claude-cli/1.0")
-	PublishTerminalEvent(h.events, "req-term", r, "anthropic", "glm", 400)
+	r.Header.Set("x-session-affinity", "sess-1")
+	PublishTerminalEvent(h.events, "req-term", r, "anthropic", "glm", 400, configdomain.DefaultSessionHeaders)
 	ends := h.endEvents("req-term")
 	if len(ends) != 1 {
 		t.Fatalf("end events = %+v, want exactly 1", ends)
@@ -491,6 +494,9 @@ func TestPublishTerminalEvent(t *testing.T) {
 	e := ends[0]
 	if e.Status != 400 || e.Protocol != "anthropic" || e.Exposed != "glm" || e.Agent == "" {
 		t.Errorf("event = %+v, want status 400 with proto/exposed/agent", e)
+	}
+	if e.SessionID != "sess-1" {
+		t.Errorf("session id = %q, want sess-1", e.SessionID)
 	}
 }
 

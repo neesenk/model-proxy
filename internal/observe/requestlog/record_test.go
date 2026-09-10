@@ -35,6 +35,7 @@ func TestBuildRecordPreservesFieldsAndExactHeaderAllowlist(t *testing.T) {
 		UpstreamModel:     "upstream-model",
 		Exposed:           "route-model",
 		Provider:          "provider-a",
+		Agent:             "claude-code",
 		Attempt:           2,
 		Status:            201,
 		RequestBody:       []byte(originalBody),
@@ -58,7 +59,8 @@ func TestBuildRecordPreservesFieldsAndExactHeaderAllowlist(t *testing.T) {
 		record.CalledModel != "client-model" ||
 		record.UpstreamModel != "upstream-model" ||
 		record.Exposed != "route-model" ||
-		record.Provider != "provider-a" {
+		record.Provider != "provider-a" ||
+		record.Agent != "claude-code" {
 		t.Errorf("string fields were not preserved: %+v", record)
 	}
 	if record.Attempt != 2 || record.Status != 201 || record.LatencyMs != 77 {
@@ -89,6 +91,9 @@ func TestBuildRecordPreservesFieldsAndExactHeaderAllowlist(t *testing.T) {
 	}
 	if bytes.Contains(line, []byte{'\n'}) {
 		t.Errorf("marshaled record contains a literal newline: %q", line)
+	}
+	if !bytes.Contains(line, []byte(`"agent":"claude-code"`)) {
+		t.Errorf("marshaled record missing agent field: %q", line)
 	}
 }
 

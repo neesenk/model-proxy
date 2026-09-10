@@ -31,6 +31,9 @@ type Services struct {
 	ResponsesState *protocol.ResponsesStateStore // previous_response_id replay; nil = off
 	FusionReg      *fusion.Registry              // fusion orchestration observability
 	ReqLog         *requestlog.Logger            // per-request access log; nil = disabled
+	// SessionHeaders is the ordered client session-header allowlist
+	// (request_log.session_headers) used for the request log and live events.
+	SessionHeaders []string
 
 	// ClientFor resolves the upstream client for one route target from the
 	// request snapshot's config (app: Proxy.clientFor — per-provider proxy_url
@@ -147,7 +150,7 @@ func (p pipeline) dispatchShadowAfterCommit(
 // publishTerminalEvent emits a live "end" event for a request that ends before
 // the normal start/commit flow (see PublishTerminalEvent).
 func (p pipeline) publishTerminalEvent(requestID string, r *http.Request, proto, exposed string, status int) {
-	PublishTerminalEvent(p.svc.Events, requestID, r, proto, exposed, status)
+	PublishTerminalEvent(p.svc.Events, requestID, r, proto, exposed, status, p.svc.SessionHeaders)
 }
 
 // resolvedBackendProto delegates the wire-verdict backend protocol resolution

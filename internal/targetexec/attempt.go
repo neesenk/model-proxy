@@ -29,7 +29,10 @@ type Exchange struct {
 // LogContext carries stable request identity into the application-owned
 // request-log adapter without exposing root package types to targetexec.
 type LogContext struct {
-	RequestID    string
+	RequestID string
+	// SessionID is the client session id resolved from the configured header
+	// allowlist; carried alongside RequestID for the request log and live events.
+	SessionID    string
 	Attempt      int
 	Exposed      string
 	OriginalBody []byte

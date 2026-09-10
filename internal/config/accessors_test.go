@@ -113,6 +113,22 @@ func TestRequestLogConfigAccessors(t *testing.T) {
 	}
 }
 
+func TestRequestLogSessionHeaders(t *testing.T) {
+	if got := (RequestLogConfig{}).ResolvedSessionHeaders(); !reflect.DeepEqual(got, DefaultSessionHeaders) {
+		t.Errorf("default session headers = %v, want %v", got, DefaultSessionHeaders)
+	}
+	custom := []string{"x-my-session"}
+	if got := (RequestLogConfig{SessionHeaders: custom}).ResolvedSessionHeaders(); !reflect.DeepEqual(got, custom) {
+		t.Errorf("configured session headers = %v, want %v", got, custom)
+	}
+	// The default allowlist must not contain per-request ids.
+	for _, h := range DefaultSessionHeaders {
+		if h == "x-client-request-id" {
+			t.Error("x-client-request-id is per-request on most clients and must not be a default session header")
+		}
+	}
+}
+
 func TestCacheConfigAccessors(t *testing.T) {
 	def := CacheConfig{}
 	if def.IsEnabled() {

@@ -13,6 +13,7 @@ import (
 	"model-proxy/internal/observe/counters"
 	observeevents "model-proxy/internal/observe/events"
 	"model-proxy/internal/observe/logx"
+	"model-proxy/internal/observe/requestlog"
 	"model-proxy/internal/observe/seclog"
 	"model-proxy/internal/protocol"
 	"model-proxy/internal/routing"
@@ -65,6 +66,10 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	// Detect the calling agent once (UA / known headers); attributed to guard
 	// and cache-hit events here and to whichever target commits downstream.
 	agent := counters.DetectAgent(r)
+	// Resolve the client session id once from the configured header allowlist;
+	// it rides every live event and the request log (never the routing sticky
+	// key, which stays x-claude-code-session-id).
+	clientSession := requestlog.SessionID(r, cfg.RequestLog.ResolvedSessionHeaders())
 
 	calledModel := protocol.ExtractModel(origBody)
 	if calledModel == "" {
@@ -133,6 +138,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 				Type:      "guard",
 				Ts:        time.Now().UnixMilli(),
 				RequestID: requestID,
+				SessionID: clientSession,
 				Agent:     agent,
 				Protocol:  proto,
 				Exposed:   exposed,
@@ -170,6 +176,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 					Type:      "guard",
 					Ts:        time.Now().UnixMilli(),
 					RequestID: requestID,
+					SessionID: clientSession,
 					Agent:     agent,
 					Protocol:  proto,
 					Exposed:   exposed,
@@ -259,6 +266,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 					Type:      "guard",
 					Ts:        time.Now().UnixMilli(),
 					RequestID: requestID,
+					SessionID: clientSession,
 					Agent:     agent,
 					Protocol:  proto,
 					Exposed:   exposed,
@@ -302,7 +310,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 	var cacheKey string
 	if cache != nil && forcedProvider == "" && !force {
 		cacheKey = responsecache.Key(r, origBody)
-		if e, ok := cache.Lookup(cacheKey, time.Now()); ok {
+		if e, ok := cache.Lookup(cacheKey, calledModel, time.Now()); ok {
 			// Live monitor (#6): a cache hit skips the normal start/end flow, so
 			// emit an end event explicitly — otherwise the live view is blind to
 			// these (e.g. a retry-looping agent served from cache stays invisible).
@@ -366,6 +374,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		Type:      "start",
 		Ts:        time.Now().UnixMilli(),
 		RequestID: requestID,
+		SessionID: clientSession,
 		Agent:     agent,
 		Protocol:  proto,
 		Exposed:   exposed,
@@ -391,6 +400,8 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 		sessionKey:  sessionKey,
 		agent:       agent,
 		requestID:   requestID,
+
+		clientSession: clientSession,
 
 		targets:        targets,
 		routeKeys:      routeKeys,
@@ -475,7 +486,7 @@ func (p pipeline) forward(runtime Snapshot, proto string, w http.ResponseWriter,
 			continue
 		}
 		// Terminal: every target failed across all passes — classify and answer.
-		p.writeAllTargetsFailed(w, r, requestID, proto, exposed, agent, res, decision)
+		p.writeAllTargetsFailed(w, r, requestID, proto, exposed, agent, clientSession, res, decision)
 		return
 	}
 }
@@ -496,7 +507,7 @@ const statusClientGone = 499
 func (p pipeline) writeAllTargetsFailed(
 	w http.ResponseWriter,
 	r *http.Request,
-	requestID, proto, exposed, agent string,
+	requestID, proto, exposed, agent, sessionID string,
 	res serveResult,
 	decision routing.FailureDecision,
 ) {
@@ -518,6 +529,7 @@ func (p pipeline) writeAllTargetsFailed(
 		Type:      "end",
 		Ts:        time.Now().UnixMilli(),
 		RequestID: requestID,
+		SessionID: sessionID,
 		Agent:     agent,
 		Protocol:  proto,
 		Exposed:   exposed,
@@ -599,6 +611,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 	r := req.request
 	agent := req.agent
 	requestID := req.requestID
+	clientSession := req.clientSession
 	origBody := req.origBody
 
 	planner := requestRoutingPlanner(p, runtime, routeKeys)
@@ -651,7 +664,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				proto:   proto, calledModel: calledModel, upPath: upPath, agent: agent,
 				sessionKey: sessionKey,
 				origBody:   origBody,
-				flc:        LogCtx{RequestID: requestID, Attempt: st.attempt, Exposed: exposed, OrigBody: origBody},
+				flc:        LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody},
 			}
 			st.attempt++
 			res.tried[t.Provider] = true
@@ -715,7 +728,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				convDiags = append(convDiags, targetexec.ConversionDiagnostic{Code: item.Code, Detail: item.Detail})
 			}
 		}
-		flc := LogCtx{RequestID: requestID, Attempt: st.attempt, Exposed: exposed, OrigBody: origBody, Diagnostics: convDiags}
+		flc := LogCtx{RequestID: requestID, SessionID: clientSession, Attempt: st.attempt, Exposed: exposed, Agent: agent, OrigBody: origBody, Diagnostics: convDiags}
 		st.attempt++
 		// One-shot larger-context retry: when this target answers a
 		// context-overflow 400, the executor calls ctxRetry for a strictly-larger-
@@ -748,6 +761,7 @@ func (p pipeline) serveOnce(req serveRequest, st *serveState) serveResult {
 				CacheKey:    cacheKey,
 				Log: targetexec.LogContext{
 					RequestID:    flc.RequestID,
+					SessionID:    flc.SessionID,
 					Attempt:      flc.Attempt,
 					Exposed:      flc.Exposed,
 					OriginalBody: flc.OrigBody,
@@ -819,6 +833,9 @@ type serveRequest struct {
 	sessionKey  string
 	agent       string
 	requestID   string
+	// clientSession is the observability session id (header allowlist), distinct
+	// from sessionKey (the routing sticky key).
+	clientSession string
 
 	targets   []RouteTarget
 	routeKeys map[string]bool
@@ -839,12 +856,14 @@ type serveRequest struct {
 // invisible to the live monitor, defeating the feature's core use case. The
 // requestID is generated at the handler top and threaded in so these terminal
 // events still pair with a stable id (the contract: 400/502 终局也必须产生 end
-// 且带稳定 request_id).
-func PublishTerminalEvent(events *observeevents.Hub, requestID string, r *http.Request, proto, exposed string, status int) {
+// 且带稳定 request_id). sessionHeaders is the configured allowlist used to
+// resolve the live event's session_id.
+func PublishTerminalEvent(events *observeevents.Hub, requestID string, r *http.Request, proto, exposed string, status int, sessionHeaders []string) {
 	events.Publish(observeevents.Event{
 		Type:      "end",
 		Ts:        time.Now().UnixMilli(),
 		RequestID: requestID,
+		SessionID: requestlog.SessionID(r, sessionHeaders),
 		Agent:     counters.DetectAgent(r),
 		Protocol:  proto,
 		Exposed:   exposed,

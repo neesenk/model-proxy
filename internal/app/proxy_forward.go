@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/forward"
 	"model-proxy/internal/targetexec"
 )
@@ -38,6 +39,7 @@ func (p *Proxy) forwardServices() forward.Services {
 		ResponsesState: p.responsesState,
 		FusionReg:      p.fusionReg,
 		ReqLog:         p.reqLog,
+		SessionHeaders: p.sessionHeaders(),
 		NewHealthGate: func(parentOf map[string]string) targetexec.HealthGate {
 			return proxyHealthGate{proxy: p, parentOf: parentOf}
 		},
@@ -51,6 +53,16 @@ func (p *Proxy) forwardServices() forward.Services {
 		ResolveBackendProto: p.resolvedBackendProto,
 		ResolverState:       p,
 	}
+}
+
+// sessionHeaders resolves the client session-header allowlist for terminal
+// (pre-start) live events; the main pipeline reads the same value from the
+// per-request config snapshot.
+func (p *Proxy) sessionHeaders() []string {
+	if cfg := p.cfgSnapshot(); cfg != nil {
+		return cfg.RequestLog.ResolvedSessionHeaders()
+	}
+	return configdomain.DefaultSessionHeaders
 }
 
 // proxyRouteState adapts Proxy's pin/cooldown scheduling queries to

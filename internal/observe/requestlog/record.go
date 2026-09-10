@@ -22,6 +22,7 @@ type Record struct {
 	UpstreamModel   string `json:"upstream_model"`
 	Exposed         string `json:"exposed"`
 	Provider        string `json:"provider"`
+	Agent           string `json:"agent"`
 	Attempt         int    `json:"attempt"`
 	Status          int    `json:"status"`
 	LatencyMs       int64  `json:"latency_ms"`
@@ -59,6 +60,7 @@ type Input struct {
 	UpstreamModel     string
 	Exposed           string
 	Provider          string
+	Agent             string
 	Attempt           int
 	Status            int
 	RequestBody       []byte
@@ -100,6 +102,7 @@ func (l *Logger) BuildRecord(in Input) *Record {
 		UpstreamModel:   in.UpstreamModel,
 		Exposed:         in.Exposed,
 		Provider:        in.Provider,
+		Agent:           in.Agent,
 		Attempt:         in.Attempt,
 		Status:          in.Status,
 		LatencyMs:       latency,
@@ -169,6 +172,8 @@ func appendRecordLine(dst []byte, rec *Record) []byte {
 	dst = appendJSONString(dst, rec.Exposed)
 	dst = append(dst, `,"provider":`...)
 	dst = appendJSONString(dst, rec.Provider)
+	dst = append(dst, `,"agent":`...)
+	dst = appendJSONString(dst, rec.Agent)
 	dst = append(dst, `,"attempt":`...)
 	dst = strconv.AppendInt(dst, int64(rec.Attempt), 10)
 	dst = append(dst, `,"status":`...)

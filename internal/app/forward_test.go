@@ -170,11 +170,13 @@ func TestForward_DialRefusedFailsOver(t *testing.T) {
 // ---- forward_events_test.go ----
 
 // TestForward_EarlyEventsHaveRequestID (bug 7): live events published on the
-// EARLY-return paths (missing model 400, unrouted model 502, unknown path 502)
-// used to carry an empty request_id — requestID was generated deep in forward
-// (at the start-event), after these returns. The contract (fusion-shadow-cache
+// EARLY-return paths (missing model 400, unrouted model 502) used to carry an
+// empty request_id — requestID was generated deep in forward (at the
+// start-event), after these returns. The contract (fusion-shadow-cache
 // "forward 产生 start/end，含稳定 request_id；cache hit、400/502 终局也必须产生
 // end") requires every event to carry a stable id so start↔end pairing works.
+// Non-LLM paths (proto=="") are the exception: they 502 without a live event,
+// so browser probes cannot pollute the Live view.
 func TestForward_EarlyEventsHaveRequestID(t *testing.T) {
 	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
 providers:
@@ -231,19 +233,17 @@ routes:
 		}
 	}
 
-	// Unknown path (proto=="") → handler emits a terminal end event (502 终局也
-	// 必须产生 end) with a non-empty request_id. Previously: no event at all.
-	if code := do(`{}`, "/v1/no-such-path"); code != http.StatusBadGateway {
-		t.Errorf("unknown-path: status=%d, want 502", code)
-	}
-	ids = endEventIDs()
-	if len(ids) == 0 {
-		t.Fatalf("unknown-path: expected a terminal end event, got none")
-	}
-	for _, id := range ids {
-		if id == "" {
-			t.Errorf("unknown-path end event has empty request_id")
+	// Unknown path (proto=="") → 502 WITHOUT a live event: the Live monitor is
+	// an LLM-request view, so browser probes (/.well-known/..., favicon) and
+	// stray paths must not appear. Unrouted MODEL requests (above) still emit a
+	// terminal end because proto is non-empty there.
+	for _, path := range []string{"/v1/no-such-path", "/.well-known/appspecific/com.doesnotexist.json", "/favicon.ico"} {
+		if code := do(`{}`, path); code != http.StatusBadGateway {
+			t.Errorf("unknown-path %s: status=%d, want 502", path, code)
 		}
+	}
+	if ids := endEventIDs(); len(ids) != 0 {
+		t.Fatalf("unknown-path: expected no live event, got %v", ids)
 	}
 }
 

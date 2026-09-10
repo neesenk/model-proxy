@@ -2,6 +2,7 @@ package forward
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -96,6 +97,46 @@ func TestServeFusionFanOutSynthesis(t *testing.T) {
 	// Fusion commits never dispatch the route's Shadow.
 	if len(h.shadow) != 0 {
 		t.Errorf("shadow dispatches = %+v, want none from a fusion commit", h.shadow)
+	}
+}
+
+// TestServeFusionSynthesizerResponseModelIsCalledModel: the synthesizer's
+// upstream echoes ITS model (here "synth", target model "ms") in the streamed
+// message_start, but the client called "m" — the client-facing bytes must
+// carry the called model, like any alias target.
+func TestServeFusionSynthesizerResponseModelIsCalledModel(t *testing.T) {
+	pa := newFakeUpstream(t, anthropicDraftResponder("draft-A"))
+	pb := newFakeUpstream(t, anthropicDraftResponder("draft-B"))
+	ps := newFakeUpstream(t, anthropicSSEResponder("final answer"))
+	h := newHarness()
+	w := h.serve(h.snapshot(fusionRecipeConfig(pa, pb, ps)), "anthropic", "/v1/messages", fusionAnthropicBody, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	var startPayload string
+	for _, frame := range strings.Split(w.Body.String(), "\n\n") {
+		if strings.Contains(frame, `"message_start"`) {
+			startPayload = frame
+			break
+		}
+	}
+	if startPayload == "" {
+		t.Fatalf("no message_start frame in client stream: %s", w.Body.String())
+	}
+	data := strings.TrimSpace(strings.TrimPrefix(startPayload[strings.Index(startPayload, "data:"):], "data:"))
+	var payload struct {
+		Message struct {
+			Model string `json:"model"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		t.Fatalf("message_start payload does not parse: %v (%q)", err, data)
+	}
+	if payload.Message.Model != "m" {
+		t.Fatalf("message_start model = %q, want the called model %q", payload.Message.Model, "m")
+	}
+	if strings.Contains(w.Body.String(), `"model":"synth"`) || strings.Contains(w.Body.String(), `"model":"ms"`) {
+		t.Fatalf("upstream model leaked into client stream: %s", w.Body.String())
 	}
 }
 

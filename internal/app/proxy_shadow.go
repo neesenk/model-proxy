@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/requestlog"
 
 	"model-proxy/internal/forward"
@@ -161,7 +162,7 @@ func (p *Proxy) runShadow(runtime RuntimeSnapshot, shadowRuntime *shadowexec.Run
 		}
 	}
 	logInput := forward.BuildRequestLogInput(
-		forward.LogCtx{RequestID: "shadow-" + primaryReqID, Exposed: exposed},
+		forward.LogCtx{RequestID: "shadow-" + primaryReqID, SessionID: requestlog.SessionID(result.Request, p.sessionHeaders()), Exposed: exposed, Agent: counters.DetectAgent(result.Request)},
 		result.Request,
 		proto,
 		calledModel,

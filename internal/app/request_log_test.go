@@ -561,6 +561,60 @@ func TestForward_RequestLog_NilLoggerPassThrough(t *testing.T) {
 	}
 }
 
+// TestForward_RequestLog_CapturesAgent proves the detected calling agent is
+// persisted in the request-log record for both recognized and unrecognized UAs.
+func TestForward_RequestLog_CapturesAgent(t *testing.T) {
+	const responseBody = `{"id":"r","object":"response","status":"completed","output":[]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = io.WriteString(w, responseBody)
+	}))
+	defer upstream.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"backend": {OpenAIBaseURL: upstream.URL, Provider: testProviderID},
+		},
+		Routes: map[string][]RouteTarget{
+			"client-model": {{Provider: "backend", Model: "client-model", Protocol: "responses"}},
+		},
+	}
+	proxy, dir, shutdown := newReqLogProxy(t, cfg)
+	proxy.providers["backend"] = &testProv{key: "test-token"}
+	server := httptest.NewServer(http.HandlerFunc(proxy.Handler))
+	defer server.Close()
+
+	postWithUA := func(ua string) {
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", strings.NewReader(`{"model":"client-model","input":[]}`))
+		req.Header.Set("user-agent", ua)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	postWithUA("claude-cli/1.0")
+	postWithUA("curl/8.0")
+
+	awaitCommitMetrics(t, proxy, counters.PMKey{Provider: "backend", Model: "client-model"})
+	shutdown()
+	records := allRecords(t, dir)
+	if len(records) != 2 {
+		t.Fatalf("record count = %d, want 2", len(records))
+	}
+	byAgent := map[string]bool{}
+	for _, r := range records {
+		byAgent[r.Agent] = true
+	}
+	if !byAgent["claude-code"] {
+		t.Errorf("missing claude-code agent in records: %+v", records)
+	}
+	if !byAgent["curl"] {
+		t.Errorf("missing curl-derived agent in records: %+v", records)
+	}
+}
+
 func TestReload_WarnsWhenRequestLogEnabledButInactive(t *testing.T) {
 	t.Setenv("MP_MODELSDEV_URL", "http://127.0.0.1:1")
 	useStaticProviderPools(t, "backend")

@@ -14,8 +14,10 @@ import (
 // (internal/observe/requestlog) stays decoupled from pipeline vocabulary.
 type LogCtx struct {
 	RequestID string
+	SessionID string
 	Attempt   int
 	Exposed   string
+	Agent     string
 	OrigBody  []byte
 	// Diagnostics of THIS attempt's request conversion (empty on passthrough)
 	Diagnostics []targetexec.ConversionDiagnostic
@@ -68,8 +70,10 @@ func BuildRequestLogInput(
 	return requestlog.BuildInput(
 		requestlog.LogCtx{
 			RequestID:   context.RequestID,
+			SessionID:   context.SessionID,
 			Attempt:     context.Attempt,
 			Exposed:     context.Exposed,
+			Agent:       context.Agent,
 			OrigBody:    context.OrigBody,
 			Diagnostics: diags,
 		},

@@ -120,28 +120,59 @@ func (effects targetExecutionEffects) CaptureResponse(
 	attempt targetexec.AttemptDTO,
 ) io.ReadCloser {
 	logger := effects.proxy.reqLog
-	if logger == nil {
-		return body
+	if logger != nil {
+		logContext := forward.LogCtx{
+			RequestID: attempt.Scope.Log.RequestID,
+			SessionID: attempt.Scope.Log.SessionID,
+			Attempt:   attempt.Scope.Log.Attempt,
+			Exposed:   attempt.Scope.Log.Exposed,
+			Agent:     attempt.Scope.Agent,
+			OrigBody:  attempt.Scope.Log.OriginalBody,
+		}
+		input := forward.BuildRequestLogInput(
+			logContext,
+			attempt.Request,
+			string(attempt.Protocol),
+			attempt.Scope.CalledModel,
+			attempt.Target,
+			attempt.Response,
+			attempt.Started,
+			attempt.Body,
+		)
+		body = bodycapture.New(body, logger.MaxBodyBytes(), func(captured []byte, total int64, truncated bool) {
+			requestlog.Complete(logger, input, captured, total, truncated)
+		})
 	}
-	logContext := forward.LogCtx{
-		RequestID: attempt.Scope.Log.RequestID,
-		Attempt:   attempt.Scope.Log.Attempt,
-		Exposed:   attempt.Scope.Log.Exposed,
-		OrigBody:  attempt.Scope.Log.OriginalBody,
+
+	// Live response preview: bounded, throttled tap on the committed response
+	// body when someone is watching the Live monitor. The tap is zero-cost when
+	// no subscribers exist (HasSubscribers is an atomic snapshot read).
+	if effects.proxy.events != nil && effects.proxy.events.HasSubscribers() {
+		body = observeevents.NewProgressReader(body, observeevents.ProgressMeta{
+			RequestID:     attempt.Scope.Log.RequestID,
+			Agent:         attempt.Scope.Agent,
+			Protocol:      string(attempt.Protocol),
+			Exposed:       attempt.Scope.Log.Exposed,
+			Provider:      attempt.Target.Provider,
+			UpstreamModel: attempt.Target.Model,
+		}, func(text string, receivedBytes int64) {
+			effects.proxy.events.Publish(observeevents.Event{
+				Type:          "progress",
+				Ts:            time.Now().UnixMilli(),
+				RequestID:     attempt.Scope.Log.RequestID,
+				SessionID:     attempt.Scope.Log.SessionID,
+				Agent:         attempt.Scope.Agent,
+				Protocol:      string(attempt.Protocol),
+				Exposed:       attempt.Scope.Log.Exposed,
+				Provider:      attempt.Target.Provider,
+				UpstreamModel: attempt.Target.Model,
+				ReceivedBytes: receivedBytes,
+				Text:          text,
+			})
+		})
 	}
-	input := forward.BuildRequestLogInput(
-		logContext,
-		attempt.Request,
-		string(attempt.Protocol),
-		attempt.Scope.CalledModel,
-		attempt.Target,
-		attempt.Response,
-		attempt.Started,
-		attempt.Body,
-	)
-	return bodycapture.New(body, logger.MaxBodyBytes(), func(captured []byte, total int64, truncated bool) {
-		requestlog.Complete(logger, input, captured, total, truncated)
-	})
+
+	return body
 }
 
 func (effects targetExecutionEffects) CaptureUsage(
@@ -204,6 +235,7 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			Type:          "end",
 			Ts:            time.Now().UnixMilli(),
 			RequestID:     attempt.Scope.Log.RequestID,
+			SessionID:     attempt.Scope.Log.SessionID,
 			Agent:         attempt.Scope.Agent,
 			Protocol:      string(attempt.Protocol),
 			Exposed:       attempt.Scope.Log.Exposed,

@@ -106,4 +106,12 @@ func TestPiModelsCollectionReasoningAndInput(t *testing.T) {
 	if in := byID["bare"]["input"].([]string); len(in) != 1 || in[0] != "text" {
 		t.Errorf("bare input = %v, want [text] fallback", in)
 	}
+	// Every entry opts into pi's session-affinity header so the proxy can
+	// attribute requests to a session (request-log session_id / live events).
+	for id, e := range byID {
+		compat, ok := e["compat"].(map[string]any)
+		if !ok || compat["sendSessionAffinityHeaders"] != true {
+			t.Errorf("%s compat = %v, want sendSessionAffinityHeaders:true", id, e["compat"])
+		}
+	}
 }
