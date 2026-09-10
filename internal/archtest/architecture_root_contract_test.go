@@ -148,7 +148,7 @@ func TestArchitectureRootBoundaries(t *testing.T) {
 			"fusionReg": true, "catalog": true, "budget": true,
 			"proxyResolver": true, "transports": true, "transportsMu": true,
 			"wireCaps": true, "wireProbe": true,
-			"modelCaps": true, "modelCapsPath": true,
+			"modelCaps": true, "modelCapsPath": true, "cacheStatePath": true,
 		}
 		if got := structContractViolations(
 			namedStructFields(t, rootPackage, "processServices"), wantServices, nil,

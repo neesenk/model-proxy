@@ -10,7 +10,7 @@
 2. **404 failover 并锁模型**：proxy 只转发已知 LLM 路径，404 表示模型或上游路径不可用。
 3. **400/403 model-denied failover**：只有保守命中模型不可用语义才 failover；普通 4xx 原样 commit。
 4. **Unsupported parameter 自动剥离一次**：只处理顶层字段，受 never-strip 白名单保护，并按 `(provider, model)` 学习。
-5. **daily/quota 429 使用长冷却**：body reset hint 始终优先；没有 hint 时 daily 到午夜、quota 默认 1h；`unfreeze` 是人工逃生口。
+5. **daily/quota 429 使用长冷却**：body reset hint 始终优先；没有 hint 时 daily 到午夜、quota 默认 1h；`unfreeze` 是人工逃生口（no-arg = 全部），`freeze` 是反向人工开关（显式冻结 provider 至 unfreeze，成功/失败记录不解冻；**刻意只接受显式 provider、无 freeze-all**——全冻结=自我断供，批量形式只留在逃生口一侧）。
 6. **冻结态恢复需要 config fingerprint**：防止不同配置或测试二进制把同名 provider 的旧状态恢复到当前实例。
 7. **最后一个 target commit 上游错误**：保留真实 404/400 状态与错误信息，而不是统一改写成 502；跨协议时只把错误 envelope 翻译为客户端协议，学习到的模型锁仍保留。
 8. **Pin 是硬禁 failover**：即使 pinned provider 已熔断，仍返回失败，不自动逃到其他 provider。
@@ -42,6 +42,8 @@
 31. **无 probed-yes 替代腿时的有意透传**：chat/responses 客户端遇模型级当前腿 no 时优先转 probed-yes 替代腿，其次 **unknown** 替代腿（unknown ≠ dead）；三条腿全 no 时**有意维持原协议透传/等效选择**，让上游错误经错误体降级干净浮现，而不是 proxy 侧凭空合成失败。锁定测试：`TestResolveModel` 的 all-no 用例。
 
 32. **学习-重试家族的 fusion 覆盖范围（有意）**：`developer_role`/`thinking_adaptive` 两条改写型课程只在主 executor 路径生效；Fusion BufferedLeg 未接入（fusion 腿不做方言学习重试，失败即按面板语义处理）。如需接入按 executor 的同款结构补 `buffered_leg.go`。
+
+33. **响应 model 归一化以 calledModel 为唯一客户端可见名（含 `provider/model` 前缀形态）**：只要 target 真实模型与请求里的 calledModel 不同，响应字节的 model 一律改写回 calledModel——客户端（尤其把响应 model 记入 session、resume 时按它寻路的 agent）只能看到自己调用过的名字，上游名永不泄漏。这也覆盖 `provider/model` 前缀调用（响应 echo 完整前缀形态）和显式 claude-* 别名路由。Shadow 只进 request log 不回客户端，刻意不改写。契约与路径清单见 `docs/architecture/protocol-conversion.md` 接线要求。锁定测试：`TestForward_AliasResponseModelNormalizationE2E`（`internal/app`）、`TestExecutorNormalizes*`（`internal/targetexec`）。
 
 ## qwen-plan：用量仅控制台、不轮询（有意为之）
 

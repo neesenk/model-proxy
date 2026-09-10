@@ -54,6 +54,13 @@ func (fake *commandFake) ResetHealth(provider string) ([]string, int, error) {
 	return nil, 0, nil
 }
 
+func (fake *commandFake) FreezeHealth(provider string) ([]string, error) {
+	if fake.freezeHealth != nil {
+		return fake.freezeHealth(provider)
+	}
+	return nil, nil
+}
+
 func (fake *commandFake) SetPin(route, provider string, ttl time.Duration) (appapi.Pin, bool) {
 	if fake.setPin != nil {
 		return fake.setPin(route, provider, ttl)
@@ -425,7 +432,7 @@ func TestCommandConfigContract(t *testing.T) {
 		if got.Kind != "route" || got.Name != "fast" || len(got.Data) != 1 || got.Data["model"] != "gpt" {
 			t.Fatalf("EditConfig request=%#v", got)
 		}
-		for _, kind := range []string{"general", "scheduling", "provider", "route"} {
+		for _, kind := range []string{"general", "scheduling", "request_log", "stats", "cache", "provider", "route"} {
 			requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/config/edit", `{"kind":"`+kind+`"}`), http.StatusOK, map[string]any{"status": "reloaded"})
 			if got.Kind != kind {
 				t.Fatalf("EditConfig kind=%q want %q", got.Kind, kind)

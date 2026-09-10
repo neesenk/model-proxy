@@ -64,6 +64,7 @@ type testCommandAPI struct {
 func (testCommandAPI) ResetStats() error                         { return nil }
 func (testCommandAPI) RefreshQuota(string) bool                  { return true }
 func (testCommandAPI) ResetHealth(string) ([]string, int, error) { return nil, 0, nil }
+func (testCommandAPI) FreezeHealth(string) ([]string, error)     { return nil, nil }
 func (testCommandAPI) SetPin(string, string, time.Duration) (appapi.Pin, bool) {
 	return appapi.Pin{}, true
 }
@@ -176,5 +177,9 @@ func TestServerLoginTransport(t *testing.T) {
 }
 
 func (testCommandAPI) AddPreset(string) ([]string, string, error) { return nil, "", nil }
+
+func (testCommandAPI) RefreshModels(string) (appapi.ModelsRefreshResult, error) {
+	return appapi.ModelsRefreshResult{}, nil
+}
 
 func (testReadAPI) Presets() []presets.Preset { return nil }

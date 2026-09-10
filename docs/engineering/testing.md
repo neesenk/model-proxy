@@ -191,7 +191,8 @@ HTTP 测试必须覆盖筛选参数接线、nil Store 空数组与 Store 错误 
 探测执行的纯测试归 `internal/probe/*_test.go`：`Do` 的请求构造配方
 （Accept/BodyLimit、`/v1/messages` 的 anthropic-version 预置）、
 max_completion_tokens 改名重试、`ProbeModelProtocols` 的三腿 base/body 规则
-（未配置 base 的腿不探、impl 方言 body 优先、按腿重试）与 `PickModel` 的
+（未配置 base 的腿不探、impl 方言 body 优先、按腿重试）、`ProbeModels` 的
+批量 fan-out（输入顺序保持、模型级并发上限）与 `PickModel` 的
 选取顺序。wire capability 的 verdict JSON、freshness、provider 级与模型级
 HTTP status 分类（`ClassifyStatus`/`ClassifyModelStatus` 表驱动）、两级协议
 选择矩阵（`Resolve`/`ResolveModel`）、detached snapshot、404 纠正、按当前
@@ -204,7 +205,12 @@ runtime 404 纠正（provider 级与模型粒度）与持久化 round trip 的�
 恢复测试必须覆盖“未知 parent + 空 base URL”不得被缺省 map lookup 误接纳。
 CLI 侧的矩阵探测保留/丢弃判定、PROTOCOLS 列渲染与 model_caps.json 只读
 投影（fingerprint 门控、畸形文件静默降级）测试归
-`internal/cli/models/*_test.go`。
+`internal/cli/models/*_test.go`。daemon 孪生 `POST /api/models/refresh`
+的编排（fetch+探测+写 config+reload+缓存替换、全失败/impl 缺失的
+unvalidated 安全网、reload 失败恢复 .bak）测试归
+`internal/admin/models_refresh_test.go`，transport 契约归
+`internal/web/handlers_command_test.go`，ProviderImpl/ModelCapsReplace
+端口装配归 `internal/app/proxy_read_view_test.go`。
 
 generation-scoped health、sticky、pin、model lock、paramBlock、spread、quota、
 schedule、persist/dashboard snapshot 的纯状态机测试归
@@ -290,6 +296,7 @@ Fuzz 语料补充规则：`FuzzConvertSSE` 的 seed 阶段会从协议包读取�
 | 错误体降级可见 | 跨协议客户端收到上游 4xx 的翻译 envelope（含 detail/空 body 的合成文案），status 保留、绝不升级 502 | `TestForward_ErrorDegradationVisibleE2E` |
 | 模型拒绝新措辞边界 | retcode 40403 措辞计入模型拒绝（锁模型+failover）；相邻套餐层 "not supported" 措辞不锁 | `TestForward_ModelDeniedNewWordingE2E` |
 | 腿选择（unknown 优先于死腿） | 模型级当前腿 no 且存在 probed-yes/unknown 替代腿 → 请求实际打到替代腿的 wire 路径；全 no 维持原协议让错误浮现 | `TestModelCaps_Forward_UnknownLegBeatsDeadLegE2E` |
+| 响应 model 归一化（alias） | alias 路由请求体 model 改写为上游名；响应 model 在 buffered、SSE、cache-hit 重放三条客户端路径上都归一回 calledModel，上游名不泄漏 | `TestForward_AliasResponseModelNormalizationE2E` |
 | 跨层一致性 | forward 与 takeover 在全部 verdict 叉积上都不使用 probed-no 腿（all-no 例外见条目 31） | `internal/takeover` 的 `TestProtocolLayersNeverPassThroughProbedNoLegs` |
 
 真实上游维度的对应验证由 `tools/agenttest` 承担（`sweep.mjs` 参数矩阵、
@@ -320,6 +327,7 @@ ok/err/错误率/p50/p95/p99/流式 TTFT/状态码分布，`-max-error-rate` 超
 - 包级 TestMain 会把 HOME 重定向到临时目录，live helper 用包级 init 捕获的真实 HOME 还原后再构建 provider；配置始终通过上面的显式绝对路径加载。
 - 成本：每个用例都是真实付费调用，prompt 必须极短、max_tokens 给小值（≤512）。
 - 安全：响应 body 不打全量（失败 excerpt ≤500 字符）；禁止输出 API key/token/凭据。
+- alias 响应 model 归一化的 live 对应用例是 `TestLive_AliasResponseModelNormalization`（hermetic 对应 `TestForward_AliasResponseModelNormalizationE2E`，见上方 forward e2e 契约表）：kimi-code 的 kimi-k3→k3 alias 形态下，chat buffered/SSE、anthropic 转换与 anthropic 透传（含 message_start 嵌套 model）五条客户端路径都必须回显 calledModel，并用 target-model commit metrics 证明上游确实收到 k3——缺了这条，上游若某天自己回显 kimi-k3，断言将失去对归一化的证明力。
 
 ## 文档修改检查清单
 

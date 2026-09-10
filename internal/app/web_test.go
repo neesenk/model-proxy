@@ -156,6 +156,14 @@ cache: {enabled: true, ttl: 1h}
 	if !on.Cache.Enabled || on.Cache.Hits != 1 || on.Cache.Entries != 1 {
 		t.Errorf("cache status = %+v want enabled=true hits=1 entries=1: %s", on.Cache, rec2.Body.String())
 	}
+	// The hit and the live entry both attribute to the called model "m": the
+	// per-model breakdown rides the same cache object.
+	if len(on.Cache.Models) != 1 {
+		t.Fatalf("cache models = %+v, want one row for the called model", on.Cache.Models)
+	}
+	if m := on.Cache.Models[0]; m.Model != "m" || m.Hits != 1 || m.Entries != 1 {
+		t.Errorf("cache model row = %+v, want model m with 1 hit 1 entry", m)
+	}
 }
 
 // TestAPIStatusModelLocks: /api/status exposes ACTIVE model locks (provider →
@@ -209,11 +217,13 @@ func TestAPIStatusUnknown404(t *testing.T) {
 }
 
 // TestAPITokens verifies /api/tokens returns the snapshot and /api/tokens/reset
-// zeros it. The snapshot key shape is {provider, model} → {input, output, ...}.
+// zeros it. The snapshot key shape is {provider, model} → {input, output, ...};
+// the agents array carries the same four token buckets plus the derived total.
 func TestAPITokens(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	w, p := newTestWeb(t)
-	p.tokens.Commit(counters.TokenKey{Provider: "zhipu", Model: "glm-5"}, counters.TokenUsage{Input: 30, Output: 12})
+	p.tokens.Commit(counters.TokenKey{Provider: "zhipu", Model: "glm-5"}, counters.TokenUsage{Input: 30, Output: 12, CacheCreation: 2, CacheRead: 5})
+	p.agents.AddTokens("codex", "zhipu", "glm-5", counters.TokenUsage{Input: 30, Output: 12, CacheCreation: 2, CacheRead: 5})
 
 	mux := http.NewServeMux()
 	w.Register(mux)

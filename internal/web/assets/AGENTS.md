@@ -14,6 +14,14 @@
 
 新增或修改 `/api/*` 字段时先更新 `docs/web-api.md`，再更新前端。前端不得依赖未文档化字段。
 
+## 样式约定
+
+- 设计基调见 `styles.css` 文件头注释：仪表盘美学、细线边框、等宽展示数据、单一琥珀强调色；颜色只编码语义（ok/warn/err），不做装饰。
+- 颜色一律引用 `:root` 的 CSS 变量（`--surface-2`、`--border`、`--text`、`--muted`、`--accent` 等），禁止写死色值——dark 主题靠 `prefers-color-scheme` 重定义同一组变量成立，写死色值会在深色下破损。
+- 表单控件必须套用既有的控件样式组之一：整宽表单用 `.field`（input/textarea/select），工具行内联控件用 `.req-input`，路由编辑行用 `.route-target-row`。**裸 `<input>`/`<select>` 会渲染成浏览器原生样式，与主题不符**——新增控件时先归组，不要写一次性 ID 样式。
+- 控件视觉语言统一为：`var(--surface-2)` 底 + `1px solid var(--border)` + `var(--r-card)` 圆角 + 13px，focus 态 `outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent)`；新控件样式沿用这组值。
+- 原生控件优先保留语义：能用 `accent-color`（checkbox/radio）就不用 `appearance: none` 全自定义；确需自定义时必须补全勾选标记、focus 环、disabled 态。
+
 ## 验证
 
 ```bash

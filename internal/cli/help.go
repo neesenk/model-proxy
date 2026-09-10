@@ -38,7 +38,9 @@ Commands:
   pin <route> <prov>   Temporarily force a route onto one provider (no failover)
   unpin <route>        Remove a pin
   unfreeze [provider]  Clear frozen provider state (circuit/rate-limit/model locks)
+  freeze <provider>    Manually freeze a provider (exclude from scheduling until unfreeze)
   stats                Show per-(provider, model) call statistics (queries the daemon)
+  cache                Show exact-response cache hit stats (queries the daemon)
   doctor               Offline scheduling diagnostic (config only, no daemon)
   audit                Show the security audit log (offline, no daemon)
   test <model>         End-to-end probe of a model's route targets (real upstream calls)

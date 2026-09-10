@@ -937,21 +937,27 @@ ROUTE            PRIMARY      SHADOW       SAMPLES   MATCH   P_LAT   S_LAT    P_
 
 ---
 
-## 17. `unfreeze` — 清理冻结的 provider 状态（需 daemon + web.enabled）
+## 17. `unfreeze` / `freeze` — 清理 / 手动冻结 provider 状态（需 daemon + web.enabled）
 
 ```
 unfreeze [provider] [--config PATH]
+freeze <provider> [--config PATH]
 ```
 
 逻辑（`internal/cli/admin/unfreeze.go` 的 `CmdUnfreeze`）：经 `POST /api/health/reset`（`internal/web` transport 的 `CommandAPI`）清 daemon 内存里的**冻结运行态**——熔断开路冷却、429 限频冷却（含 quota/daily 类的长冷却）、模型级锁定（model lockout）——目标 provider 下次请求立即重试，不再等冷却到期。不带参数清全部 provider；池化父名清其全部虚拟账号（同 pin 的匹配语义）。**不清** sticky、pin、已学习的剥参 blocklist（请求体知识，非冻结态）。用于异常边界：账号已充值、429 误分类、上游窗口提前重置等。请求体为空=清全部；**畸形 JSON 返回 400（防误清全部）**；清理后**同步落盘成功才返回 200**（否则 500）——持久化在 `quota_state.json` 的冻结态同步被清后状态覆盖，不会在下轮配额落盘前因重启复活。
 
+`freeze`（`internal/cli/admin/freeze.go` 的 `CmdFreeze`，经 `POST /api/health/freeze`）是反向操作：把 provider 显式标记为 operator-frozen，调度永远跳过它，直到 `unfreeze` 清除。与熔断/限频不同，该冻结**无到期时间、成功/失败/限频记录均不清除**，并随 `quota_state.json` 的 `health` 段（`frozen: true`）落盘、按同一 config 指纹门控跨重启恢复。**freeze 必须显式指定 provider**（池化父名冻结其全部虚拟账号）——没有 freeze-all（全冻结路由 = 自我断供，逃生口 unfreeze 才保留 no-arg = all）；不带参数是 usage 错误（exit 1），API 空/缺 `provider` 返回 400 `provider is required`。从未失败过的 provider（无 health 条目）也可冻结（惰性建条目）。**不动** sticky、pin、quota、模型锁与剥参 blocklist；unknown provider 名匹配为空。与 unfreeze 同样：畸形 JSON 返回 400，落盘成功才返回 200（否则 500，内存态已生效但持久化滞后）。全冻结路由的请求按既有 all-down 分类终局 502（frozen 不是 rate-limit 类 down 原因，无等待重试）。
+
 ### stdout
 
-- 有清理：`✓ unfroze <all providers|PROVIDER>: <NAME(, NAME…)> (+<N> model lock(s))`（绿；NAME 为被清的 provider 冷却条目，无冷却仅有锁时显示 `(no provider cooldowns)`）
-- 无冻结态：`• no frozen state on <all providers|PROVIDER>`（灰）
+- unfreeze 有清理：`✓ unfroze <all providers|PROVIDER>: <NAME(, NAME…)> (+<N> model lock(s))`（绿；NAME 为被清的 provider 冷却条目，无冷却仅有锁时显示 `(no provider cooldowns)`）
+- unfreeze 无冻结态：`• no frozen state on <all providers|PROVIDER>`（灰）
+- freeze 有匹配：`✓ froze <PROVIDER>: <NAME(, NAME…)>`（绿）
+- freeze 无匹配：`• no matching provider for <PROVIDER>`（灰）
 
 ### 失败（stderr `✗ <ERR>` + exit 1）
 
+- freeze 不带参数：`✗ usage: model-proxy freeze <provider>`
 - 不可达：`cannot reach daemon at <LISTEN>: <ERR>` + 换行 `is `model-proxy serve` running?`
 - daemon 非 200：响应体截断 200 字符
 
@@ -981,7 +987,7 @@ wire record <provider> [--model M] [--prompt P] [--out DIR]
 audit [--stats] [--from TIME] [--to TIME] [--kind KIND] [--limit N] [--json] [--config PATH]
 ```
 
-逻辑（`internal/cli/audit/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
+逻辑（`internal/cli/audit/audit.go` 的 `CmdAudit` -> `RenderAudit`）：离线直读 seclog 目录——`guard.audit_path`（默认 `~/.model-proxy/log/security/security.log`）取 `filepath.Dir`，扫描其中全部 `security-*.log`（活动 + 轮转文件，daemon 不在也能查，同 `doctor` 离线语义）。config 加载失败 -> `log.Fatal`（stderr）+ exit 1（同 `stats`）。
 
 - `--from` / `--to`：`now`、时长（`1h`/`30m`，表示"多久之前"；另接受整数天数后缀 `7d`）、unix 秒、RFC3339；默认不限（闭区间，毫秒精度）。负时长（如 `-1h`/`-7d`）报错；`--from` 晚于 `--to` -> `✗ --from is after --to (empty window)` + exit 1。
 - `--kind`：`secret` | `path` | `drift`；其他值 -> stderr `✗ invalid --kind "<V>": must be secret, path, or drift` + exit 1。
@@ -1015,6 +1021,21 @@ by action
 ```
 
 首行 range 是查询窗口（不限显示 `-`，非数据 min/max）。各段按 count 降序、name 升序；空段（如无 action）整段省略。`total` 为 0 时只输出首行 + `(no security audit records in <DIR>)`。
+
+---
+
+## 20. `cache` — 精确响应缓存统计（需 daemon + web.enabled）
+
+`CmdCache`（`internal/cli/status/cache_cmd.go`）GET 运行中 daemon 的 `/api/status`，只取其中的 `cache` 对象（`{enabled,hits,misses,entries,models}`，与 Web UI Status 的 Cache 页卡同一字段）渲染：先四行全局表 `entries (live)` / `hits` / `misses` / `hit rate`，再按 model 的明细表（每行 `MODEL / ENTRIES / HITS / MISSES / HIT RATE`，按 model 名排序；无明细时省略）。
+
+- **hit rate** = `hits/(hits+misses)`，一位小数百分比；`hits+misses == 0`（daemon 刚启动、尚无任何查找）时显示 `—` 而非 `0.0%`（`CacheHitRate`）。
+- **归因口径**：hit/miss 记在**发起查找的请求的 called（exposed）model 名**下；entries 明细是该 model 当前持有的存活条数（live gauge，可小于 misses——失败请求 miss 不落条、TTL 懒过期与容量淘汰会移除条目）。
+- **cache 关闭**（`enabled:false`，缺省即关闭）：打印 `(exact response cache is disabled — set cache.enabled: true in config)` 后 exit 0，不渲染零值表。
+- **`--json`**：原样输出 `{enabled,hits,misses,entries,models}` 缩进 JSON，供脚本解析。
+- **错误路径**（os.Exit(1)，同 `schedule` 语义）：daemon 不可达 → `✗ cannot reach daemon at <LISTEN> …is model-proxy serve running?`；HTTP 非 200 → `✗ daemon returned HTTP <N>`；`/api/status` 404（web.enabled 关闭）→ `✗ web UI endpoints not available — is web.enabled true on the daemon?`；JSON 解析失败 → `✗ parse status response: …`。
+- 计数语义：命中不产生上游调用、不计 provider metrics/agent stats；`hits`/`misses` 只在真实 `Lookup` 时累计（`/debug/route` 预览用 `Peek`，故意不计数）；`POST` 重置统计会同时清零 cache 条目、计数与 per-model 明细。
+
+锁定测试：`internal/cli/status/cache_cmd_test.go`（计数渲染 + 27.8% 命中率、零查找 `—`、per-model 明细表、关闭提示、`--json` 结构含 models、no-daemon 退出码）；`internal/cache/store_test.go`（`TestStorePerModelBreakdown`：归因、排序、空 model 不出行、reset 清明细）。
 
 ---
 

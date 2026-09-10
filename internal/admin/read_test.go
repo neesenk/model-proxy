@@ -40,6 +40,7 @@ func TestDashboardProjection(t *testing.T) {
 					RateLimitedUntil: now.Add(30 * time.Minute),
 					RateLimitKind:    runtimestate.Quota,
 				},
+				"iced": {CircuitState: "closed", Available: false, Frozen: true},
 			},
 			ModelLocks: map[string][]runtimestate.ModelLockStatus{
 				"down": {{Provider: "down", Model: "m", LockedUntil: now.Add(2 * time.Hour)}},
@@ -72,12 +73,22 @@ func TestDashboardProjection(t *testing.T) {
 	if dashboard.Uptime == "" || !strings.HasSuffix(dashboard.Uptime, "s") {
 		t.Errorf("uptime = %q, want a duration string", dashboard.Uptime)
 	}
+	if strings.Contains(dashboard.Uptime, ".") {
+		t.Errorf("uptime = %q, want whole-second granularity (no fractional part)", dashboard.Uptime)
+	}
 	up, ok := dashboard.Health["up"].(map[string]any)
 	if !ok || up["circuit_state"] != "closed" || up["available"] != true {
 		t.Errorf("health[up] = %v", dashboard.Health["up"])
 	}
 	if _, present := up["circuit_until"]; present {
 		t.Errorf("healthy provider must not carry circuit_until: %v", up)
+	}
+	if _, present := up["frozen"]; present {
+		t.Errorf("non-frozen provider must not carry frozen: %v", up)
+	}
+	iced, ok := dashboard.Health["iced"].(map[string]any)
+	if !ok || iced["frozen"] != true || iced["available"] != false {
+		t.Errorf("health[iced] = %v, want frozen:true + available:false", dashboard.Health["iced"])
 	}
 	down, ok := dashboard.Health["down"].(map[string]any)
 	if !ok || down["available"] != false {

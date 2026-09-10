@@ -129,7 +129,7 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 #   audit: true             # 默认 true：命中持久化到安全审计日志（`model-proxy audit` 查询）
 #   session_scan: true      # 默认 true：分片泄露检测——同一 session（x-claude-code-session-id）多条请求
 #                           # 拼出一个 known-secret 即命中 known_secret_fragmented（redact 对此降级为 log）
-#   audit_path: ""          # 默认派生 <home>/.model-proxy/security.log；自定义必须是绝对路径（不展开 ~）
+#   audit_path: ""          # 默认派生 <home>/.model-proxy/log/security/security.log；自定义必须是绝对路径（不展开 ~）
 #   extra_patterns:         # 自定义秘密格式（gitleaks extend 式，热 reload 生效）
 #     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}
 #   extra_paths:            # 自定义敏感路径（字面量）
@@ -143,7 +143,7 @@ routes:  # claude-* 别名 = 普通显式路由（全协议生效）；也可在
 
 > **模型元数据**：`models:` 只填模型名，`context`/`output`/`modalities`/`tool_call` 在运行时从 [models.dev](https://models.dev) 自动补全（缓存于 `~/.model-proxy/models_cache.json`，24h TTL，ETag `304`-aware；`models pull` 强制刷新）。网络、HTTP 或响应解析失败时已有缓存继续可用且不会被覆盖；无可用缓存时 `models pull` 明确报错，普通列表/刷新与 takeover 按原有 best-effort 语义使用保守默认值。匹配不到的模型会在 `takeover` 时告警。`MP_MODELSDEV_URL` 环境变量可覆盖 models.dev 端点（测试/镜像用）。
 >
-> **路由推导**：`routes` 块默认完全不用写。每个 provider `models:` 里列出的模型自动按暴露名聚合成多目标路由（多个 provider 提供同名模型即自动 failover 组），`priority` 继承 provider 的 `priority:`（lower wins），provider 的 `alias:` 可把上游模型改名后统一暴露（如 kimi-code 的 `k3` → `kimi-k3`）。显式 `routes:` 仅用于覆盖：fusion 目标、`protocol:` 转换声明、特殊排序。查看生效表：`model-proxy routes [model]`、Web UI Config 页或 `GET /api/config`。
+> **路由推导**：`routes` 块默认完全不用写。每个 provider `models:` 里列出的模型自动按暴露名聚合成多目标路由（多个 provider 提供同名模型即自动 failover 组），`priority` 继承 provider 的 `priority:`（lower wins），provider 的 `alias:` 可把上游模型改名后统一暴露（如 kimi-code 的 `k3` → `kimi-k3`）：请求体 model 改写为上游名，响应里的 model 字段则归一回暴露名，客户端始终只看到自己调用的名字。显式 `routes:` 仅用于覆盖：fusion 目标、`protocol:` 转换声明、特殊排序。查看生效表：`model-proxy routes [model]`、Web UI Config 页或 `GET /api/config`。
 
 ## 用法
 
@@ -227,6 +227,9 @@ model-proxy unpin glm-5.2
 model-proxy unfreeze                     # 全部 provider
 model-proxy unfreeze zhipu               # 单个（池化父名 = 全部账号）
 
+# 手动冻结 provider：调度跳过它直到 unfreeze（排障/摘除异常上游，不改 config）
+model-proxy freeze zhipu                 # 必须指定 provider（池化父名 = 全部账号），无 freeze-all
+
 # 调用统计（需 daemon + web.enabled）
 model-proxy stats                  # 最近 60min 的 per-(provider,model) 调用统计（reqs/failover/429/fail/lat/ttft/input/output）
 model-proxy stats --bucket 1h      # 按小时聚合展示
@@ -242,6 +245,9 @@ model-proxy replay <request_id> --to kimi-code   # 用另一个后端重答历�
 model-proxy audit                  # 最近的 guard 命中（秘密/路径）与 takeover 漂移记录
 model-proxy audit --kind drift --from 7d --json   # 过滤 + 原始 JSON
 model-proxy audit --stats --from 7d  # 聚合视图：by kind/命中名 top10/agent top10/action（--json 出结构化聚合）
+
+# 精确响应缓存统计（需 daemon）
+model-proxy cache                  # 条目数 / 命中 / 未命中 / 命中率（--json 出原始对象）
 ```
 
 ## Web UI
@@ -251,10 +257,10 @@ model-proxy audit --stats --from 7d  # 聚合视图：by kind/命中名 top10/ag
 - **Status** — 实时面板：uptime / 版本 / listen 地址、每 provider 的熔断/限频状态、配额快照、每路由当前调度选择、请求计数器（含平均延迟）、观测到的 token 用量（按 provider×model）、按 agent 的用量卡片、响应缓存命中率、日志尾部。Models 小节展示启动期协议探测的每 provider×model 三协议能力矩阵（chat/anthropic/responses 的 yes/no/unknown，数据源 `GET /api/models`）。
 - **Config** — 原始 YAML 编辑器（GET 返回原文件、POST 经 `validate → backup(<configDir>/.model-proxy/back/<base>.<时间戳>.bak) → atomic write → reload` 流水线落盘 + 热重载）+ 结构化编辑表单（`general` / `scheduling` / `provider` / `route`，通过 yaml.Node API **保留注释与键序**）。
 - **Accounts** — 列出每个 provider 的账号（`id` / `label` / `added_at`，aqp/codex 额外显示 email；**响应结构里根本没有 key 字段，secret 不可能被序列化出去**）；apikey 类 provider 可在 UI 添加/删除账号；**每个账号卡片有 Test 按钮**（真实最小请求测活，显示 HTTP 状态 + 延迟）；aqp/codex 走**异步登录**（浏览器完成 SSO / OAuth device flow → UI 轮询直到 `done`/`error`）。
-- **Analytics** — token + 等价成本趋势（日历日/月聚合；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a`）。
-- **Requests** — 请求日志查询（需 `request_log.enabled`）：按 model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。
+- **Analytics** — token + 等价成本**趋势图**与成本汇总表（日历日/月聚合；价格来自 OpenRouter 目录或 config `prices:`，未定价显示 `n/a`）。per-(provider,model) 的 token/请求总量在 Status 页 Token Usage，两页不重复。
+- **Requests** — 请求日志查询（需 `request_log.enabled`）：按 session/model/provider/状态/时间/影子过滤，点击行展开完整 request/response body；影子评测的记录带 `shadow` 徽标。顶部 **session 下拉**（选项来自 `/api/sessions`）选中后，表格上方显示该会话汇总（请求数 / input+output / 缓存读写 / 平均延迟 / 错误 / 等价成本 / model、provider），表格按 `session=` 过滤，仍可与 model/provider/shadow/errors 叠加。
 - **Security** — 安全审计查询（需 `guard.audit`）：guard 命中（秘密/路径类型）与 takeover 漂移记录，按 kind/时间过滤；只展示类型名与路由元数据，匹配内容永不进入 UI。每个客户端会话的 token 等价成本汇总在 `/api/sessions`（Requests 页同源数据）。
-- **Live** — 实时请求监视（SSE 推送）：哪个 agent 正在发请求、路由到哪个上游、状态/token/耗时——抓「疯狂重试的 agent」就靠它。
+- **Live** — 实时请求监视（SSE 推送）：哪个 agent 正在发请求、路由到哪个上游、状态/token/耗时——抓「疯狂重试的 agent」就靠它。顶部 **session 选择器**可选一个客户端会话，看该会话的请求分析（请求数 / input+output / 缓存读写 / 平均延迟 / 错误 / 等价成本 / model、provider），实时行与持久化行合并、逐行可展开 body。会话 id 来自 `request_log.session_headers` 允许列表（Claude Code/OpenCode 默认带；pi 需 takeover 模板写入的 `compat.sendSessionAffinityHeaders`）。
 
 **所有写操作都会即时热重载运行中的 serve（进程内 `p.reload`，无需重启）**：改 config、增删账号、aqp/codex 登录完成 —— 改动立即生效。账号增删虽不改 `config.yaml`，但 reload 会重建 providers（重新读池文件），新加/删除的账号随即（取消）展开成虚拟 provider；reload 还会顺手清空熔断/限频/粘性状态并重建响应缓存，所以 UI 改动也是"给卡住的 provider 复位"的手段。
 
@@ -401,7 +407,7 @@ routes:
 - **敏感路径信号（默认 log）**：`~/.ssh`、`~/.aws/credentials`、`~/.model-proxy`、`~/.gnupg`、`~/.kube/config`、`~/.docker/config.json`、`~/.config/gcloud`、`.env` 出现在请求体里即按类别告警（`ssh`/`aws_creds`/`proxy_creds`/…）——在秘密出现之前给出"意图级"信号。命中按出现位置分两级：**strong**（路径在工具调用/工具结果位——anthropic `tool_use.input`/`tool_result.content`、openai `tool_calls[].function.arguments` 与 `role:"tool"` 消息 content、responses `function_call.arguments`/`function_call_output.output`，即"agent 通过工具读敏感文件"的 MCP Tool Poisoning 特征动作）按 `guard.paths` 配置处理：live event + `("guard", <类别>)` 计数器 + 审计，block 只对 strong 生效；**weak**（正文/user 消息里提及——coding agent 讨论 `.env` 是常态）只计 `("guard", <类别>_text)` 计数器并写 action=`log-weak` 的审计记录，不发 live event（避免刷屏）、永不 block（正文提及敏感路径不阻断）。结构识别是字面量预过滤之后才做的一遍流式 JSON 扫描（干净 body 零成本）；body 非合法 JSON 或结构识别失败时全部按 weak 处理（宁低勿高）。只支持 log/block/off，不支持 redact（改路径会破坏正常编码工作）。
 - **分片泄露检测（`guard.session_scan`，默认开）**：单请求扫描挡不住把秘密拆成多段、每次请求带一段的偷法。代理按 `x-claude-code-session-id` 会话头维护有界内存窗口（每会话保留最近请求 body 尾部 32KiB，LRU 上限 256 会话、总量 ≤8MiB，reload 不清、永不落盘/日志），跟踪每个 known-secret 在该会话中**按序出现的最长前缀**（每段 ≥8 字节）；后续请求补齐剩余部分即命中 `known_secret_fragmented`（计数器/live event/审计与单请求命中同通路）。只覆盖 known-secret（池凭据/OAuth token）原文形态；段间隔超过 32KiB 窗口或会话被淘汰后不追溯（有界启发式，非会话录像）；无会话头的请求不聚合（单请求扫描已覆盖）。**redact 对分片命中降级为 log**——秘密横跨多个请求，任何一个 body 都无法改写；block 拒绝补齐段所在请求（400），此前的分段已放行（它们各自是干净请求）。
 
-动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off；strong 按配置、weak 恒为计数+审计，见上）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器，weak 路径命中例外：不发 live event，计数器名带 `_text` 后缀），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先、paths=block 只阻断 strong 命中。命中持久化到安全审计日志（默认 `~/.model-proxy/security*.log`，0600，按大小+按天轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
+动作与观测：`guard.secrets` 控制秘密类命中（log/redact/block/off），`guard.paths` 控制路径命中（log/block/off；strong 按配置、weak 恒为计数+审计，见上）。命中只上报**模式类型名/路径类别名**（live event + `("guard", <名>)` 计数器，weak 路径命中例外：不发 live event，计数器名带 `_text` 后缀），匹配内容永不落日志、事件或测试输出。同一请求同时命中两类时两类都计数/审计（secrets=block 不短路 paths 扫描），响应动作 secrets 优先、paths=block 只阻断 strong 命中。命中持久化到安全审计日志（默认 `~/.model-proxy/log/security/security*.log`，0600，与请求日志同一持久化模式：活动文件按天命名、同日重启追加同一文件，超大小归档轮转，30 天保留），用 `model-proxy audit [--kind secret|path|drift] [--from 1h] [--json]` 离线查询；`doctor --live` 检出 takeover 漂移（客户端 BASE_URL 被改离代理——API key 劫持手法）时也会写一条 `drift` 审计记录。
 
 规则维护：你的凭据免维护（自动派生）；新 key 格式用 `guard.extra_patterns`（config 热 reload 即时生效）或向上游同步内置表（升 `rules.json` 的 upstream pin → 重抽 → review）；敏感路径用 `guard.extra_paths`。
 
@@ -542,7 +548,7 @@ routes:
 - **限频跳过**（429，三维分类）：先采纳响应里的精确重置时间（body 文本 "reset after 2h5m"/"Resets in 164h"/RFC3339，上限 7 天），其次 `Retry-After` 头；都没有时按分类退避——日配额锁到本地次日 0 点、配额耗尽（余额/套餐窗口）等 `quota_cooldown`（默认 1h）、普通频率限制等 `rate_limit_backoff`（默认 60s）。不计入熔断。分类（transient/quota/daily）在 `serve status`（`rl:quota`/`rl:daily`）和 Web UI 健康 pill 上可见。
 - **模型级锁定**（`model_lockout`，默认 10m）：上游 404（模型被移除）、400/403「模型不可用/无权限」、空 200（`Content-Length: 0` 直接 failover；流式零字节本次难免、下次 failover）→ 只锁 `(provider, model)`，**不毒化整个账号**——同账号的其他模型照常服务。单目标路由的末 target 仍把上游原始错误（404/400）原样回给客户端。
 - **400 自动剥参**：上游 400 报「Unsupported parameter: 'xxx'」时，自动把该顶层参数记入 per-provider blocklist，当次剥离重试一次、后续请求预防性剥离（`model`/`messages` 等关键字段永不剥）。
-- **冻结态持久化 + unfreeze**：限频/熔断冷却、模型锁、剥参 blocklist 随 `quota_state.json` 落盘，重启后按 config 指纹匹配恢复（防串配置）。异常边界（账号已充值、429 误分类、上游提前重置）用 `model-proxy unfreeze [provider]` 或 Web UI Providers 卡的 unfreeze 按钮立即解冻重试。
+- **冻结态持久化 + unfreeze/freeze**：限频/熔断冷却、模型锁、剥参 blocklist 随 `quota_state.json` 落盘，重启后按 config 指纹匹配恢复（防串配置）。异常边界（账号已充值、429 误分类、上游提前重置）用 `model-proxy unfreeze [provider]` 或 Web UI Providers 卡的 unfreeze 按钮立即解冻重试；反向地，`model-proxy freeze <provider>` 或 Providers 卡的 freeze 按钮把 provider 显式冻结（调度排除、无到期、成功/失败记录不解冻，必须指定 provider——无 freeze-all，同样按指纹落盘恢复），直到 unfreeze。
 - **全冷却等待重试**（`retry_wait`，默认 10s，`"0"` 关闭）：当路由的**所有**目标都在冷却（限频/熔断）且最早到期 ≤ 预算时，代理静默等到期后整体重试，最多 2 次——代替立即报错让客户端走自己的重试循环；某目标在调度和终局之间恢复但本轮未被试，则**零等待立即重排**一次（仍在 2 次预算内）；客户端断开立即中止。重试耗尽或冷却超预算时按**跨轮失败类别**给出诚实终局：**纯限频 → 429 + `Retry-After`**，含硬失败/熔断成分 → 502（`x-mp-force-provider` 一次性覆盖不参与等待）。
 - **粘性驻留**（`sticky_dwell`，默认 10m）：每个路由「停」在一个 provider 上，在驻留窗口内优先用它（保 prompt cache，不为已恢复的高优先 provider 频繁回切）；只有它熔断/限频或驻留到期才换。10m ≈ 2× 缓存 TTL（~5m）：够保住活跃会话缓存、扛过短暂抖动，又能在有限时间内回到首选 provider。
 - **上游超时**（`upstream_timeout`，默认 1800s）：每个上游请求带超时，挂起的上游在超时后失败进入熔断/failover，而不是无限拖住请求；默认 1800s 以容纳长 thinking 流与超长输出，需要更快 failover 可调小。

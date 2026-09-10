@@ -121,12 +121,13 @@ func (s *Server) handleRequestsList(w http.ResponseWriter, r *http.Request) {
 			f.To = time.Unix(n, 0)
 		}
 	}
-	records, err := requestlog.QuerySummaries(dir, f)
+	f.UsageOnly = true
+	records, facets, err := requestlog.QuerySummariesWithFacets(dir, f)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "request query: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "records": records})
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "records": records, "facets": facets})
 }
 
 func (s *Server) handleRequestDetail(w http.ResponseWriter, r *http.Request) {

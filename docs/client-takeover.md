@@ -113,6 +113,13 @@ pi-responses=responses）。**takeover 的目标是让 agent 用 provider 原生
 
 凭据一律占位符 `PROXY_MANAGED`,真实 key 只在代理侧。
 
+**pi 会话归因**：pi 的 anthropic-messages 与 openai-completions 路径只在
+`model.compat.sendSessionAffinityHeaders` 为 true 时才发 `x-session-affinity`
+（openai-responses 默认就发）。`piModelsCollection` 给每个模型写入
+`compat: {sendSessionAffinityHeaders: true}`,因此 takeover 后的 pi 请求带会话
+UUID，代理据此填请求日志 `session_id` 与 live 事件 `session_id`（见
+`docs/web-api.md` 的 `/api/events`、Live 会话分析）。
+
 ## 机制契约（与模板机制无关的部分不变）
 
 - 备份位于 `<configDir>/.model-proxy/<client>.bak`(+ sha256 meta)；

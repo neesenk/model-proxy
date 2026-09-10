@@ -12,6 +12,7 @@ import (
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/credstore"
 	"model-proxy/internal/fusion"
+	obscounters "model-proxy/internal/observe/counters"
 	"model-proxy/internal/observe/seclog"
 	observestats "model-proxy/internal/observe/stats"
 	domainpresets "model-proxy/internal/presets"
@@ -31,6 +32,9 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 		entry := map[string]any{
 			"circuit_state": providerState.CircuitState,
 			"available":     providerState.Available,
+		}
+		if providerState.Frozen {
+			entry["frozen"] = true
 		}
 		if now.Before(providerState.CircuitOpenUntil) {
 			entry["circuit_until"] = providerState.CircuitOpenUntil.UTC().Format(time.RFC3339)
@@ -98,7 +102,9 @@ func (s *Service) Dashboard(now time.Time) appapi.Dashboard {
 	}
 
 	return appapi.Dashboard{
-		Uptime:          time.Since(state.StartedAt).String(),
+		// Truncate to whole seconds: Go's Duration.String() would render
+		// nanosecond precision ("4m26.428520875s") — noise for a header label.
+		Uptime:          time.Since(state.StartedAt).Truncate(time.Second).String(),
 		Listen:          state.Listen,
 		Health:          health,
 		ModelLocks:      modelLocks,
@@ -205,10 +211,94 @@ func (s *Service) Tokens(from, to int64) ([]appapi.TokenUsage, error) {
 			Output:        usage.Output,
 			CacheCreation: usage.CacheCreation,
 			CacheRead:     usage.CacheRead,
+			Total:         usage.Input + usage.Output + usage.CacheCreation + usage.CacheRead,
 			Requests:      usage.Requests,
 		})
 	}
+	return out, nil
+}
+
+// Agents collapses the agent counters into one row per agent with a
+// per-(provider, model) breakdown (the agent-dimension counterpart of Tokens;
+// same reset semantics and the same range semantics: from <= 0 && to <= 0 is
+// the cumulative view, any bound > 0 aggregates persisted minute buckets).
+// Agents sort by total tokens desc (heaviest first, name tiebreak); each
+// agent's models sort the same way.
+func (s *Service) Agents(from, to int64) ([]appapi.AgentUsage, error) {
+	if from > 0 || to > 0 {
+		snapshot, err := s.ports.AgentUsageRange(from, to)
+		if err != nil {
+			return nil, err
+		}
+		counts := make(map[obscounters.AgentKey]obscounters.AgentCount, len(snapshot))
+		for key, counters := range snapshot {
+			counts[obscounters.AgentKey{Agent: key.Agent, Provider: key.Provider, Model: key.Model}] = obscounters.AgentCount{
+				Requests:      counters.Requests,
+				Input:         counters.Input,
+				Output:        counters.Output,
+				CacheCreation: counters.CacheCreation,
+				CacheRead:     counters.CacheRead,
+			}
+		}
+		return aggregateAgentUsage(counts), nil
+	}
+	return aggregateAgentUsage(s.ports.AgentUsage()), nil
+}
+
+// aggregateAgentUsage groups one (agent, provider, model) counter snapshot
+// into the nested per-agent + per-model payload.
+func aggregateAgentUsage(snapshot map[obscounters.AgentKey]obscounters.AgentCount) []appapi.AgentUsage {
+	byAgent := map[string]*appapi.AgentUsage{}
+	for key, usage := range snapshot {
+		total := usage.Input + usage.Output + usage.CacheCreation + usage.CacheRead
+		agent := byAgent[key.Agent]
+		if agent == nil {
+			agent = &appapi.AgentUsage{Agent: key.Agent}
+			byAgent[key.Agent] = agent
+		}
+		agent.Requests += usage.Requests
+		agent.Input += usage.Input
+		agent.Output += usage.Output
+		agent.CacheCreation += usage.CacheCreation
+		agent.CacheRead += usage.CacheRead
+		agent.Total += total
+		agent.Models = append(agent.Models, appapi.AgentModelUsage{
+			Provider:      key.Provider,
+			Model:         key.Model,
+			Requests:      usage.Requests,
+			Input:         usage.Input,
+			Output:        usage.Output,
+			CacheCreation: usage.CacheCreation,
+			CacheRead:     usage.CacheRead,
+			Total:         total,
+		})
+	}
+	out := make([]appapi.AgentUsage, 0, len(byAgent))
+	for _, agent := range byAgent {
+		sort.Slice(agent.Models, func(i, j int) bool {
+			if agent.Models[i].Total != agent.Models[j].Total {
+				return agent.Models[i].Total > agent.Models[j].Total
+			}
+			if agent.Models[i].Provider != agent.Models[j].Provider {
+				return agent.Models[i].Provider < agent.Models[j].Provider
+			}
+			return agent.Models[i].Model < agent.Models[j].Model
+		})
+		out = append(out, *agent)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Total != out[j].Total {
+			return out[i].Total > out[j].Total
+		}
+		return out[i].Agent < out[j].Agent
+	})
 	return out
+}
+
+// StatsSince reports the oldest persisted bucket minute (unix seconds, 0 when
+// no history) — the anchor for the cumulative usage "Since" label.
+func (s *Service) StatsSince() int64 {
+	return s.ports.StatsSince()
 }
 
 func (s *Service) Stats(query appapi.StatsQuery) ([]observestats.Bucket, error) {
@@ -232,14 +322,29 @@ func (s *Service) AgentStats(query appapi.AgentStatsQuery) ([]observestats.Agent
 	)
 }
 
+// Analytics projects the calendar-day/month buckets and drops the virtual
+// counter namespaces (guard/attempts/routing/fusion): they are request
+// counters, not upstream usage, so they would otherwise surface as billable
+// models with zero tokens and an "unpriced" hint.
 func (s *Service) Analytics(query appapi.AnalyticsQuery) ([]observestats.AnalyticsBucket, error) {
-	return s.ports.Analytics(
+	buckets, err := s.ports.Analytics(
 		query.From,
 		query.To,
 		query.Provider,
 		query.Model,
 		query.Granularity,
 	)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]observestats.AnalyticsBucket, 0, len(buckets))
+	for _, b := range buckets {
+		if obscounters.IsVirtualProvider(b.Provider) {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }
 
 func (s *Service) Pricing() appapi.PricingSnapshot {
