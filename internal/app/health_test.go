@@ -720,3 +720,284 @@ func TestHealthResetAPI_PersistsClearedState(t *testing.T) {
 		t.Errorf("frozen entry still on disk after reset: %s", data)
 	}
 }
+
+// ---- freeze_test.go ----
+
+// TestFreezeHealth: the proxy method marks providers operator-frozen (pooled
+// parent = all its virtual accounts, unknown/empty = no match — freeze has no
+// freeze-all, unlike resetHealth) — and never touches rate-limit cooldowns,
+// model locks, param blocklists, sticky, or pins.
+func TestFreezeHealth(t *testing.T) {
+	cfg := &Config{Providers: map[string]Provider{
+		"a": {OpenAIBaseURL: "http://x", Provider: testProviderID},
+		"b": {OpenAIBaseURL: "http://y", Provider: testProviderID},
+	}}
+	p := newTestProxy(t, cfg)
+	p.mu.Lock()
+	p.parentOf = map[string]string{"a#v1": "a", "a#v2": "a"}
+	p.providers["a#v1"] = &testProv{key: "a1"}
+	p.providers["a#v2"] = &testProv{key: "a2"}
+	p.providers["b"] = &testProv{key: "b"}
+	p.mu.Unlock()
+	now := time.Now()
+	p.recordRateLimit("a#v1", now.Add(time.Hour), rlQuota)
+	p.recordModelFailure("a#v1", "m1", Scheduling{ModelLockout: "1h"})
+	p.learnParamBlock("a#v1", "m1", "max_tokens")
+	seedRuntimeSticky(t, p, "route1", "a#v1", now)
+	p.runtimeState.SetPin("route2", runtimestate.Pin{Provider: "a#v1"})
+
+	if frozen := p.freezeHealth("missing", nil); len(frozen) != 0 {
+		t.Errorf("unknown freeze = %v, want empty (no entries created)", frozen)
+	}
+	if frozen := p.freezeHealth("", nil); len(frozen) != 0 {
+		t.Errorf("empty-name freeze = %v, want empty (no freeze-all)", frozen)
+	}
+	if got := len(p.runtimeState.Dashboard(now).Providers); got != 1 {
+		t.Errorf("unknown/empty freeze created health entries: %d, want only the rate-limited a#v1", got)
+	}
+
+	frozen := p.freezeHealth("a", nil)
+	if len(frozen) != 3 || frozen[0] != "a" || frozen[1] != "a#v1" || frozen[2] != "a#v2" {
+		t.Errorf("frozen = %v, want [a a#v1 a#v2] (direct name + pooled virtuals)", frozen)
+	}
+	snapshot := p.runtimeState.Dashboard(now)
+	for _, name := range []string{"a", "a#v1", "a#v2"} {
+		status := snapshot.Providers[name]
+		if !status.Frozen || status.Available {
+			t.Errorf("%s status = %+v, want frozen + unavailable", name, status)
+		}
+	}
+	// Freeze never disturbs the other state dimensions — the rate-limit
+	// cooldown on a#v1 survives next to the freeze.
+	if !snapshot.Providers["a#v1"].RateLimitedUntil.After(now) {
+		t.Error("rate-limit cooldown lost to freeze")
+	}
+	if !p.runtimeState.ModelLocked("a#v1", "m1", now) ||
+		!p.runtimeState.ParamBlocked("a#v1", "m1", "max_tokens") {
+		t.Error("model lock / param blocklist disturbed by freeze")
+	}
+	if _, stickyOK := p.runtimeState.Sticky("route1"); !stickyOK || len(p.runtimeState.Pins(now)) != 1 {
+		t.Error("sticky/pins disturbed by freeze")
+	}
+	if _, bHas := snapshot.Providers["b"]; bHas {
+		t.Error("unmatched provider b got a health entry")
+	}
+
+	// Unfreeze (ResetHealth) is the only way back.
+	p.resetHealth("a")
+	if p.runtimeState.Dashboard(now).Providers["a#v1"].Frozen {
+		t.Error("unfreeze did not clear the manual freeze")
+	}
+}
+
+// TestHealthFreezeAPI: POST /api/health/freeze — {"provider":name} freezes one
+// (pooled parent = all accounts); an empty/missing provider is REJECTED with
+// 400 (freeze has no freeze-all, unlike /api/health/reset). The response
+// carries the frozen names and /api/status reports the entry frozen +
+// unavailable.
+func TestHealthFreezeAPI(t *testing.T) {
+	w, p := newTestWeb(t)
+	mux := http.NewServeMux()
+	w.Register(mux)
+	p.mu.Lock()
+	p.providers["zhipu"] = &testProv{key: "z"}
+	p.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/health/freeze", strings.NewReader(`{"provider":"zhipu"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Frozen []string `json:"frozen"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Frozen) != 1 || out.Frozen[0] != "zhipu" {
+		t.Errorf("response = %+v, want frozen [zhipu]", out)
+	}
+	status := p.runtimeState.Dashboard(time.Now()).Providers["zhipu"]
+	if !status.Frozen || status.Available {
+		t.Errorf("zhipu status after freeze = %+v", status)
+	}
+	// An unknown provider freezes nothing but is not an error.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/health/freeze", strings.NewReader(`{"provider":"missing"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("unknown freeze: status = %d, want 200", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Frozen) != 0 {
+		t.Errorf("unknown provider frozen = %v, want empty", out.Frozen)
+	}
+	// Empty body / missing provider is rejected — freeze has no freeze-all.
+	for _, body := range []string{"", `{}`, `{"provider":""}`} {
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/health/freeze", strings.NewReader(body)))
+		if rec.Code != 400 {
+			t.Fatalf("empty-provider freeze (%q): status = %d, want 400", body, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "provider is required") {
+			t.Errorf("empty-provider freeze (%q): body = %s, want the required error", body, rec.Body.String())
+		}
+	}
+	if got := len(p.runtimeState.Dashboard(time.Now()).Providers); got != 1 {
+		t.Errorf("rejected empty freezes touched state: %d entries, want only zhipu", got)
+	}
+	// Unfreeze restores scheduling eligibility.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/health/reset", strings.NewReader(`{"provider":"zhipu"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("unfreeze after freeze: status = %d", rec.Code)
+	}
+	if _, has := p.runtimeState.Dashboard(time.Now()).Providers["zhipu"]; has {
+		t.Error("zhipu health entry survived unfreeze")
+	}
+}
+
+// TestHealthFreezeAPI_MalformedJSON: a malformed body returns 400 and freezes
+// nothing — it must never be silently coerced into any default scope.
+func TestHealthFreezeAPI_MalformedJSON(t *testing.T) {
+	w, p := newTestWeb(t)
+	mux := http.NewServeMux()
+	w.Register(mux)
+	p.mu.Lock()
+	p.providers["zhipu"] = &testProv{key: "z"}
+	p.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/health/freeze", strings.NewReader(`{"provider":`)))
+	if rec.Code != 400 {
+		t.Fatalf("malformed body: status = %d, want 400", rec.Code)
+	}
+	if got := len(p.runtimeState.Dashboard(time.Now()).Providers); got != 0 {
+		t.Errorf("malformed body froze %d providers, want none", got)
+	}
+}
+
+// TestHealthFreezeAPI_PersistsFrozenState: a successful freeze lands in the
+// on-disk health section (frozen: true) and a restart with the same config
+// restores it — the provider stays excluded from scheduling until unfreeze.
+func TestHealthFreezeAPI_PersistsFrozenState(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	w, p := newTestWeb(t)
+	mux := http.NewServeMux()
+	w.Register(mux)
+	p.mu.Lock()
+	p.providers["zhipu"] = &testProv{key: "z"}
+	p.mu.Unlock()
+	statePath := p.quota.Path
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/health/freeze", strings.NewReader(`{"provider":"zhipu"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrap struct {
+		Health map[string]json.RawMessage `json:"health"`
+	}
+	if err := json.Unmarshal(data, &wrap); err != nil {
+		t.Fatal(err)
+	}
+	var entry struct {
+		Frozen bool `json:"frozen"`
+	}
+	if err := json.Unmarshal(wrap.Health["zhipu"], &entry); err != nil || !entry.Frozen {
+		t.Errorf("freeze not on disk after API freeze: %s (err=%v)", wrap.Health["zhipu"], err)
+	}
+
+	// Restart on the same state file + config: the freeze restores.
+	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+`))
+	p2 := newTestProxyAt(t, cfg, statePath)
+	status := p2.runtimeState.Dashboard(time.Now()).Providers["zhipu"]
+	if !status.Frozen || status.Available {
+		t.Errorf("freeze not restored after restart: %+v", status)
+	}
+	if p2.runtimeState.TargetHealthy("zhipu", "m", time.Now()) {
+		t.Error("restored freeze does not block scheduling")
+	}
+}
+
+// TestHealthFreezeAPI_ProviderStaysInStatusPayload (UI regression): after
+// freezing a provider, /api/status must still surface it — the WebUI
+// Providers card enumerates rows from the schedule preview's ordered chains,
+// and scheduling drops the frozen provider from `ordered`, so `health` is the
+// only place the row (frozen pill + unfreeze button) can come from. This pins
+// the backend half of that contract through the real API chain: health keeps
+// the provider with frozen:true + available:false, while schedule ordered
+// legitimately no longer lists it (it is excluded from scheduling).
+func TestHealthFreezeAPI_ProviderStaysInStatusPayload(t *testing.T) {
+	cfg, _ := LoadConfigFromBytes("test", []byte(`listen: 127.0.0.1:0
+providers:
+  zhipu: {provider_id: zhipu, openai_base_url: https://x}
+routes:
+  glm-5.2: [{provider: zhipu, model: glm-5.2}]
+`))
+	p := newTestProxy(t, cfg)
+	p.mu.Lock()
+	p.providers["zhipu"] = &testProv{key: "z"}
+	p.mu.Unlock()
+	w := NewWebServer(p, "test-config.yaml")
+	mux := http.NewServeMux()
+	w.Register(mux)
+
+	type statusPayload struct {
+		Health map[string]struct {
+			Frozen    bool `json:"frozen"`
+			Available bool `json:"available"`
+		} `json:"health"`
+		Schedule struct {
+			Models map[string]struct {
+				Ordered []struct {
+					Provider string `json:"provider"`
+				} `json:"ordered"`
+			} `json:"models"`
+		} `json:"schedule"`
+	}
+	getStatus := func() statusPayload {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/api/status", nil))
+		if rec.Code != 200 {
+			t.Fatalf("GET /api/status: %d (%s)", rec.Code, rec.Body.String())
+		}
+		var st statusPayload
+		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	before := getStatus()
+	ordered := before.Schedule.Models["glm-5.2"].Ordered
+	if len(ordered) != 1 || ordered[0].Provider != "zhipu" {
+		t.Fatalf("precondition: zhipu should be in the schedule chain: %+v", ordered)
+	}
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/api/health/freeze", strings.NewReader(`{"provider":"zhipu"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("freeze: status = %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	after := getStatus()
+	entry, ok := after.Health["zhipu"]
+	if !ok || !entry.Frozen || entry.Available {
+		t.Errorf("frozen provider missing from /api/status health: %+v (frozen=%v available=%v)",
+			after.Health, entry.Frozen, entry.Available)
+	}
+	for _, o := range after.Schedule.Models["glm-5.2"].Ordered {
+		if o.Provider == "zhipu" {
+			t.Error("frozen provider must be excluded from the schedule chain")
+		}
+	}
+}

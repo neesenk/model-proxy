@@ -17,27 +17,32 @@ func (m *Manager) RestoreSticky(sticky map[string]Sticky) {
 	}
 }
 
-// RestoreHealth restores future-dated cooldowns and model locks, plus all
-// learned parameter blocks. A restored circuit receives the threshold failure
-// count so its next hard failure immediately re-opens it.
+// RestoreHealth restores future-dated cooldowns, operator freezes, and model
+// locks, plus all learned parameter blocks. A restored circuit receives the
+// threshold failure count so its next hard failure immediately re-opens it.
 func (m *Manager) RestoreHealth(health map[string]PersistedHealth, now time.Time, threshold int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureLocked()
 	for name, persisted := range health {
-		if now.Before(persisted.RateLimitedUntil) || now.Before(persisted.CircuitOpenUntil) {
+		rateLimited := now.Before(persisted.RateLimitedUntil)
+		circuitOpen := now.Before(persisted.CircuitOpenUntil)
+		if rateLimited || circuitOpen || persisted.Frozen {
 			state := m.health[name]
 			if state == nil {
 				state = &providerHealth{}
 				m.health[name] = state
 			}
-			if now.Before(persisted.RateLimitedUntil) {
+			if rateLimited {
 				state.rateLimitedUntil = persisted.RateLimitedUntil
 				state.rateLimitKind = ParseRateLimitKind(persisted.RateLimitKind)
 			}
-			if now.Before(persisted.CircuitOpenUntil) {
+			if circuitOpen {
 				state.circuitOpenUntil = persisted.CircuitOpenUntil
 				state.consecutiveFailures = threshold
+			}
+			if persisted.Frozen {
+				state.frozen = true
 			}
 		}
 		for model, until := range persisted.ModelLocks {
@@ -101,11 +106,12 @@ func (m *Manager) snapshotHealthLocked(now time.Time) map[string]PersistedHealth
 		if state := m.health[name]; state != nil {
 			persisted.RateLimitedUntil = state.rateLimitedUntil
 			persisted.CircuitOpenUntil = state.circuitOpenUntil
+			persisted.Frozen = state.frozen
 			if now.Before(state.rateLimitedUntil) {
 				persisted.RateLimitKind = state.rateLimitKind.String()
 			}
 		}
-		if persisted.RateLimitedUntil.IsZero() && persisted.CircuitOpenUntil.IsZero() {
+		if persisted.RateLimitedUntil.IsZero() && persisted.CircuitOpenUntil.IsZero() && !persisted.Frozen {
 			if !hasModelState(name, m.modelLocks, m.paramBlock) {
 				continue
 			}

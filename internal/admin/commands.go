@@ -50,6 +50,16 @@ func (s *Service) ResetHealth(provider string) ([]string, int, error) {
 	return cleared, locks, nil
 }
 
+func (s *Service) FreezeHealth(provider string) ([]string, error) {
+	frozen := s.ports.FreezeHealth(provider, nil)
+	if s.ports.QuotaEnabled() {
+		if err := s.ports.QuotaPersist(); err != nil {
+			return frozen, err
+		}
+	}
+	return frozen, nil
+}
+
 func (s *Service) SetPin(route, provider string, ttl time.Duration) (appapi.Pin, bool) {
 	expiresAt, ok := s.ports.SetPin(route, provider, ttl)
 	if !ok {

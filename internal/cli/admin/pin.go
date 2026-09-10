@@ -1,6 +1,6 @@
 // Package admin owns the daemon admin mutation commands: `pin`/`unpin`
-// (temporary runtime route hot-switch) and `unfreeze` (clear frozen runtime
-// health state).
+// (temporary runtime route hot-switch), `unfreeze` (clear frozen runtime
+// health state), and `freeze` (manually exclude a provider from scheduling).
 package admin
 
 import (

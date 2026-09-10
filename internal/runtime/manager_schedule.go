@@ -344,6 +344,7 @@ func (m *Manager) Dashboard(now time.Time) DashboardSnapshot {
 			RateLimitedUntil:    state.rateLimitedUntil,
 			RateLimitKind:       state.rateLimitKind,
 			HalfOpenInFlight:    state.halfOpenInFlight,
+			Frozen:              state.frozen,
 		}
 	}
 	for key, entry := range m.modelLocks {

@@ -228,8 +228,9 @@ func (p *Proxy) adminPorts(
 			overrides, catalog := p.detachedPricing()
 			return catalog, overrides
 		},
-		ResetStats:  p.resetStats,
-		ResetHealth: p.resetHealth,
+		ResetStats:   p.resetStats,
+		ResetHealth:  p.resetHealth,
+		FreezeHealth: p.freezeHealth,
 		QuotaEnabled: func() bool {
 			return p.quota != nil
 		},

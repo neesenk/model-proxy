@@ -73,6 +73,7 @@ type fakeCommands struct{}
 func (fakeCommands) ResetStats() error                         { return nil }
 func (fakeCommands) RefreshQuota(string) bool                  { return false }
 func (fakeCommands) ResetHealth(string) ([]string, int, error) { return nil, 0, nil }
+func (fakeCommands) FreezeHealth(string) ([]string, error)     { return nil, nil }
 func (fakeCommands) SetPin(string, string, time.Duration) (Pin, bool) {
 	return Pin{}, false
 }

@@ -48,13 +48,13 @@ refresh 去重、poll/refresh lifecycle 和 `~/.model-proxy/quota_state.json` �
 - model-scoped paramBlock；
 - config fingerprint；
 - 顶层 `wire_caps`：provider 级 wire 探测 verdict（`{base_url, chat, responses, probed_at, probe_version}`，三态以 `"yes"/"no"/"unknown"` 字符串落盘；旧版 `anthropic` 字段已随「anthropic 支持改由 config `anthropic_base_url` 声明」移除，旧文件里的该字段读取时忽略），按 parent provider 名 keyed。与 health 不同：**不受 config fingerprint 门控、reload 不清空**（能力是端点属性而非凭据/配额状态）；恢复时同时要求 parent 仍存在、记录的 `base_url` 与当前 config 一致**且 `probe_version` 为当前探测语义版本**（`runtimewire.ProbeVersion`，当前 2 = 工具注入的 agent 级探测；v1 裸 ping 条目按不匹配处理、全量重探），不匹配即作废重探。探测完成与 404 纠正时经 async persist 写盘（请求路径不得同步 persist——forward 不持 `p.mu` 转发，但 persist 经 fullSnapshot 取 `p.mu.RLock`，同步调用会排在 pending reload writer 之后阻塞请求路径，故一律异步）。verdict、选择策略与并发 map 统一归 `internal/runtime/wirecap.Store`；其 mutex 是 leaf lock，持锁时不回调 Proxy，也不进入 `Proxy.mu → runtime.Manager` 锁序。
-- 独立文件 `model_caps.json`（quota_state.json 的 sibling，路径经 `runtimewire.ModelCapsPath(qpath)` 派生）：模型级三协议矩阵（`{version:4, providers:{<name>:{fingerprint, probed_at, models:{<id>:{chat, anthropic, responses}}}}}`，三态同 `wire_caps` 字符串）。与 `wire_caps` 同文件共存不同，模型级能力有自己的文件生命周期；原子写沿用 quota 模式（同目录唯一临时文件 + fsync + rename，目录 0700、文件 0644）。**失效按 fingerprint（无 TTL）与文件 version**：：fingerprint = `providerbuild.ProtocolConfigFingerprint`（provider_id|openai_base_url|anthropic_base_url|sorted(headers) 的 sha256 前 16 hex），boot 只恢复 fingerprint 仍匹配当前 config 的条目，provider 从 config 删除即丢；version 不匹配（探测语义变更，如 v2 起探测腿注入 function tool 声明、v3 起计入腿级拒绝措辞("model not supported"/"not supported by this endpoint"),v4 起裸 "not supported for" 收窄为 "not supported for <model> in <path>" 正则(排除套餐层措辞误伤)）整份文件按缺失处理、全量重探；结论为 unknown 的腿下一轮探测 pass 重探，且 unknown 是唯一不落盘原因的结论——探测 pass 对 inconclusive 腿打一条 warn（`[modelcaps] <p>/<m> leg <leg> inconclusive: status=N err=...`，只含 status/err 不含 body），否则事后无法区分上游 429/5xx 与 proxy 侧拨号/超时。探测完成与模型级 404 纠正时 async persist（quota-tracked goroutine，死锁理由同上）。并发 map 归 `internal/runtime/wirecap.ModelStore`（leaf RWMutex、nil-safe，与 Store 同纪律；跨 reload 存活，不进 `Proxy.mu → runtime.Manager` 锁序）。`Restore` 在 boot **和每次 reload** 都执行（reload 在 `p.mu` 写锁内对 snapshot 自校验，fingerprint 变化的条目立即丢弃），并把 fingerprint map 安装为 store 的 expected fingerprints：`Put` 携带与 expected 不一致的 fingerprint（reload 前捕获 cfg 的旧探测 pass 在 swap 后才写回）会被静默丢弃，stale verdict 不能覆盖新 generation 的状态。CLI `models` 列表/refresh 表对它做**只读**投影（fingerprint 必须匹配当前 config；文件缺失/畸形静默降级为无数据，PROTOCOLS 列显示 `-`）。takeover 的协议变体选择同样**只读**消费它（`internal/takeover/probecaps.go`，同一 fingerprint 校验；探测 no 会推翻端点声明、yes 可补出静态判定拿不到的 responses 腿，缺失/陈旧一律回退静态声明）。
+- 独立文件 `model_caps.json`（quota_state.json 的 sibling，路径经 `runtimewire.ModelCapsPath(qpath)` 派生）：模型级三协议矩阵（`{version:4, providers:{<name>:{fingerprint, probed_at, models:{<id>:{chat, anthropic, responses}}}}}`，三态同 `wire_caps` 字符串）。与 `wire_caps` 同文件共存不同，模型级能力有自己的文件生命周期；原子写沿用 quota 模式（同目录唯一临时文件 + fsync + rename，目录 0700、文件 0644）。**失效按 fingerprint（无 TTL）与文件 version**：：fingerprint = `providerbuild.ProtocolConfigFingerprint`（provider_id|openai_base_url|anthropic_base_url|sorted(headers) 的 sha256 前 16 hex），boot 只恢复 fingerprint 仍匹配当前 config 的条目，provider 从 config 删除即丢；fingerprint 不覆盖 models 列表，故每个探测 pass 另行把当前 config（models: ∪ 显式/派生路由 target）不再服务的 model 条目从 store 剔除（`ModelStore.PruneModels`，prune 触发 async persist）——从 config 删掉的 model 不会滞留在矩阵和 /api/models 投影里；version 不匹配（探测语义变更，如 v2 起探测腿注入 function tool 声明、v3 起计入腿级拒绝措辞("model not supported"/"not supported by this endpoint"),v4 起裸 "not supported for" 收窄为 "not supported for <model> in <path>" 正则(排除套餐层措辞误伤)）整份文件按缺失处理、全量重探；结论为 unknown 的腿下一轮探测 pass 重探，且 unknown 是唯一不落盘原因的结论——探测 pass 对 inconclusive 腿打一条 warn（`[modelcaps] <p>/<m> leg <leg> inconclusive: status=N err=...`，只含 status/err 不含 body），否则事后无法区分上游 429/5xx 与 proxy 侧拨号/超时。探测完成与模型级 404 纠正时 async persist（quota-tracked goroutine，死锁理由同上）；`POST /api/models/refresh`（`models refresh` CLI 的 daemon 孪生）探测健康时经 `ModelStore.ReplaceProviderModels` 整体替换该 provider 的条目并 async persist（全失败/impl 缺失不替换，fail-closed）。并发 map 归 `internal/runtime/wirecap.ModelStore`（leaf RWMutex、nil-safe，与 Store 同纪律；跨 reload 存活，不进 `Proxy.mu → runtime.Manager` 锁序）。`Restore` 在 boot **和每次 reload** 都执行（reload 在 `p.mu` 写锁内对 snapshot 自校验，fingerprint 变化的条目立即丢弃），并把 fingerprint map 安装为 store 的 expected fingerprints：`Put` 携带与 expected 不一致的 fingerprint（reload 前捕获 cfg 的旧探测 pass 在 swap 后才写回）会被静默丢弃，stale verdict 不能覆盖新 generation 的状态。CLI `models` 列表/refresh 表对它做**只读**投影（fingerprint 必须匹配当前 config；文件缺失/畸形静默降级为无数据，PROTOCOLS 列显示 `-`）。takeover 的协议变体选择同样**只读**消费它（`internal/takeover/probecaps.go`，同一 fingerprint 校验；探测 no 会推翻端点声明、yes 可补出静态判定拿不到的 responses 腿，缺失/陈旧一律回退静态声明）。
 
 陈旧超过 `3 × quota_poll_interval` 或带错误的 quota snapshot 视为 `BillingUnknown`，不得误当 pay-as-you-go。
 
 tracker 在每次 commit 新快照（pollAll/pollOne/429 refresh）时，以**上一次已 commit 快照**为基线计算 ultimate 窗口的耗尽预测：`rate = Δused/Δt`，`ExhaustionEta = as_of + remaining/rate`，挂到 `QuotaSnapshot.ExhaustionEta` 后进 Manager。以下情况不预测（零值）：首个快照无基线、任一侧带错误、速率 ≤0（空闲或窗口已 reset）、`Δt > 3 × quota_poll_interval`（轮询断档，基线陈旧）、窗口已耗尽或未测量。预测**仅展示用**（`usage` CLI 窗口行尾、Web Status 配额卡），调度不读，不落盘；重启后首轮 poll 可用从 quota_state.json 恢复的上一快照作基线（断档超界则不预测）。`usage` CLI 是独立进程、单次 live fetch，其基线是经 `provider.DecorateExhaustionEta` 读取的持久化快照（按普通 provider 名 keyed；池化虚拟账号 key 无 CLI 预测）。
 
-当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze 时写盘。`Proxy.Close` 先通过 lifecycle gate 停止接收新任务，再等待 poller goroutine（含 reload 的 `pollAsync` 与 429 的 `refreshAsync`）后做 final flush；dispatch 的 accepting 检查与 `WaitGroup.Add` 在同一把锁内，不得与 shutdown 的 `Wait` 竞争。
+当前实现使用 tracker 实例内的 `persistMu` 串行化 snapshot → **唯一同目录临时文件** → rename（每次写一个唯一 `.tmp`，多个 tracker/process 或 tracker 与同步调用者不再争用同名，rename 不会再 ENOENT），并在 quota poll、manual refresh、部分 429 refresh 和 unfreeze/freeze 时写盘。`Proxy.Close` 先通过 lifecycle gate 停止接收新任务，再等待 poller goroutine（含 reload 的 `pollAsync` 与 429 的 `refreshAsync`）后做 final flush；dispatch 的 accepting 检查与 `WaitGroup.Add` 在同一把锁内，不得与 shutdown 的 `Wait` 竞争。
 
 ### config generation 一致性
 
@@ -186,6 +186,10 @@ spread。请求路径不深拷贝 quota 的 Notes/Windows/Details，也不为 pr
 且强制 `Commit=false`。`/debug/schedule` 与 `/api/status.schedule` 必须用捕获
 config generation 时取得的这一个 DashboardSnapshot 计算，不得再次进入 Manager；
 因此同一响应中的 health/quota/pin/sticky/order 属于同一时刻、同一 generation。
+`ScheduleInput.IgnorePins`（仅预览路径使用）跳过 pin 收窄：route 有生效 pin 时，
+`schedule.models[route].ordered` 展示**未 pin 的默认调度链**（unpin 后恢复的
+顺序），`first` 仍是 pin 生效时的实际首选，`pin`/`pin_expires` 标注覆盖关系——
+操作员能同时看到 pin 的覆盖效果与被覆盖的默认链。
 
 `POST /debug/route`（`internal/app/proxy_read_endpoints.go`，body = 客户端原样请求体，
 `?proto=` 覆盖协议，默认 anthropic）是**单请求版**的决策预览：复刻 forward 的早期
@@ -250,9 +254,19 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
 - pin 仅在内存中，reload 不清，重启清除；
 - pin/force 请求必须绕过响应缓存。
 
+## Freeze
+
+`freeze <provider>` / `POST /api/health/freeze` 是 unfreeze 的反向人工开关：在 `providerHealth` 上设置显式 `frozen` 标志，`available()` 恒 false——调度（`decideOrder` 的 availability 过滤）、`TargetHealthy`、`CooldownState`/`HasRecoveredUntried` 全部把它当 down，直到 unfreeze。
+
+- 匹配语义与 unfreeze 同形（池化父名=全部虚拟账号）但**必须显式指定 provider：空名不匹配任何目标（无 freeze-all）**——与 unfreeze 的 no-arg = all 刻意不对称（全冻结=自我断供，只有逃生口保留批量形式）；API 空/缺 `provider` 返回 400 `provider is required`，CLI 不带参数是 usage 错误。匹配在**已知 provider key 全集**（组合根在 `p.mu` 下同锁读出的 `p.providers`：config 名 + 池化虚拟 `name#id`）上迭代并惰性建 health 条目，因此从未失败过的 provider 也能冻结；unknown 名匹配为空。
+- 无到期时间；`RecordSuccess`/`RecordFailure`/`RecordRateLimit` 均不清除——只有 ResetHealth（unfreeze，删整条 health 条目）能解冻。
+- 不动 quality EWMA、模型锁、quota、sticky、pin、paramBlock（对比：unfreeze 会清 quality EWMA）。
+- 持久化：`PersistedHealth.frozen`（omitempty）随 `quota_state.json` health 段落盘，**frozen-only 条目**（无未来冷却、无模型态）不触发零时间丢弃规则；RestoreHealth 在无未来冷却时也恢复 frozen 条目。同一 config 指纹门控，指纹不匹配不恢复。
+- `CooldownState` 分类：frozen 是 down 但**不是 rate-limit 类**——走 `default` 分支，`allRateLimited=false`、`until=now`，全冻结路由终局 502（不进入 wait-retry：`DecideFailure` 只在 earliest 严格未来时等待，`now` 不产生等待也不空转）。
+
 ## Unfreeze
 
-`unfreeze [provider]` / `POST /api/health/reset` 清除熔断、限频和模型锁，不清 sticky、pin、paramBlock。
+`unfreeze [provider]` / `POST /api/health/reset` 清除熔断、限频和模型锁（含 operator 手动冻结标志——删条目即解冻），不清 sticky、pin、paramBlock。
 
 空 body 清全部；池化父名清所有虚拟账号。畸形 JSON 必须返回 400，持久化成功后才能返回 200。
 
@@ -273,4 +287,4 @@ session sticky 使用 `x-claude-code-session-id`；没有 session id 才退回 r
   flush logger/Responses state。
 - fingerprint mismatch、旧请求/慢 quota poll/resolver spread 跨 generation、
   reload clear、pin 跨 reload 保留、mutation 后立即重启。
-- pin、force、unfreeze 与 cache/failover 的交互。
+- pin、force、unfreeze/freeze 与 cache/failover 的交互。

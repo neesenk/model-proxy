@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -377,5 +379,230 @@ func TestHasRecoveredUntriedIgnoresQuotaExhausted(t *testing.T) {
 	}, 1)
 	if !m.HasRecoveredUntried(targets, map[string]bool{}, now, maxAge) {
 		t.Fatal("stale exhaustion suppressed the ordinary recovered-untried signal")
+	}
+}
+
+// TestFreezeHealthMatchSemantics: freeze matches like ResetHealth (direct
+// name, pooled parent → all virtual accounts) but iterates the KNOWN universe,
+// so a never-failed provider (no health entry) is frozen too; an unknown name
+// matches nothing — and unlike ResetHealth, an EMPTY name matches nothing too
+// (freeze deliberately has no freeze-all; unfreeze keeps no-arg = all).
+func TestFreezeHealthMatchSemantics(t *testing.T) {
+	t.Parallel()
+
+	m := newTestManager(7)
+	parentOf := map[string]string{"pool#a": "pool", "pool#b": "pool"}
+	known := []string{"direct", "pool#a", "pool#b", "other"}
+
+	if got := m.FreezeHealth("missing", parentOf, known); len(got) != 0 {
+		t.Fatalf("unknown freeze = %v, want empty", got)
+	}
+	if got := m.FreezeHealth("", parentOf, known); len(got) != 0 {
+		t.Fatalf("empty-name freeze = %v, want empty (no freeze-all)", got)
+	}
+	if got := m.Dashboard(time.Now()).Providers; len(got) != 0 {
+		t.Fatalf("unknown/empty freeze created health entries: %v", got)
+	}
+
+	if got := m.FreezeHealth("direct", parentOf, known); !reflect.DeepEqual(got, []string{"direct"}) {
+		t.Fatalf("direct freeze = %v, want [direct]", got)
+	}
+	if got := m.FreezeHealth("pool", parentOf, known); !reflect.DeepEqual(got, []string{"pool#a", "pool#b"}) {
+		t.Fatalf("pooled parent freeze = %v, want [pool#a pool#b]", got)
+	}
+	// Re-freezing is idempotent and still reports the match.
+	if got := m.FreezeHealth("pool", parentOf, known); !reflect.DeepEqual(got, []string{"pool#a", "pool#b"}) {
+		t.Fatalf("repeat freeze = %v, want [pool#a pool#b]", got)
+	}
+
+	now := time.Now()
+	providers := m.Dashboard(now).Providers
+	for _, name := range []string{"direct", "pool#a", "pool#b"} {
+		status := providers[name]
+		if !status.Frozen || status.Available {
+			t.Errorf("%s status = %+v, want frozen and unavailable", name, status)
+		}
+		if m.TargetHealthy(name, "m", now) {
+			t.Errorf("%s frozen but TargetHealthy", name)
+		}
+	}
+	if providers["other"].Frozen {
+		t.Error("unmatched provider was frozen")
+	}
+}
+
+// TestFreezeHealthSchedulingAndLifecycle: a frozen provider is dropped by
+// scheduling and stays frozen across success/failure/rate-limit recording —
+// only ResetHealth (unfreeze) clears it, and freeze never touches quality
+// EWMA, model locks, quotas, sticky, or pins.
+func TestFreezeHealthSchedulingAndLifecycle(t *testing.T) {
+	t.Parallel()
+
+	// Real clock: RecordSuccess/RecordModelFailure stamp time.Now()
+	// internally, so a fake `now` would misalign their horizons.
+	now := time.Now()
+	m := newTestManager(7)
+	known := []string{"a", "b"}
+	targets := []Target{{Provider: "a"}, {Provider: "b"}}
+
+	order := func() []string {
+		result := m.DecideOrder(ScheduleInput{
+			Exposed: "route", Targets: targets, Now: now, QuotaMaxAge: time.Hour,
+		})
+		names := make([]string, 0, len(result.Order))
+		for _, index := range result.Order {
+			names = append(names, targets[index].Provider)
+		}
+		return names
+	}
+	if got := order(); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("pre-freeze order = %v", got)
+	}
+	m.FreezeHealth("a", nil, known)
+	if got := order(); !reflect.DeepEqual(got, []string{"b"}) {
+		t.Fatalf("frozen provider not excluded from scheduling: %v", got)
+	}
+
+	// Freeze preserves every other state dimension on the entry.
+	m.RecordFailure("a", 3, time.Hour, 7) // quality signal + failure count
+	m.RecordModelFailure("a", "m1", time.Hour, 7)
+	m.SetQuota("a", &provider.QuotaSnapshot{Plan: "paid"}, 7)
+	m.SetSticky("route", Sticky{Provider: "a", Since: now}, 7)
+	m.SetPin("route2", Pin{Provider: "a"})
+
+	// Freeze itself never prunes the quality EWMA (unlike ResetHealth).
+	qualityBefore := m.Dashboard(now).Quality["a"]
+	m.FreezeHealth("a", nil, known)
+	if got := m.Dashboard(now).Quality["a"]; got != qualityBefore {
+		t.Errorf("freeze touched quality EWMA: %+v → %+v", qualityBefore, got)
+	}
+
+	// Success/failure/rate-limit recording must NOT clear the freeze. (Success
+	// is recorded on m0 so the m1 model lock — cleared by RecordSuccess on the
+	// SAME model by long-standing design — survives for the assertion below.)
+	m.RecordSuccess("a", "m0", 7)
+	m.RecordFailure("a", 1, time.Minute, 7)
+	m.RecordRateLimit("a", now.Add(time.Minute), Transient, 7)
+	if !m.Dashboard(now).Providers["a"].Frozen || m.TargetHealthy("a", "other-model", now) {
+		t.Fatal("recording cleared the operator freeze")
+	}
+	if !m.ModelLocked("a", "m1", now) || m.Quota("a").Plan != "paid" {
+		t.Error("freeze disturbed model locks or quotas")
+	}
+	if _, ok := m.Sticky("route"); !ok || len(m.Pins(now)) != 1 {
+		t.Error("freeze disturbed sticky/pins")
+	}
+
+	// Unfreeze clears the freeze (and the rest of the health entry) but keeps
+	// quality-adjacent state semantics of ResetHealth.
+	cleared, _ := m.ResetHealth("a", nil)
+	if !reflect.DeepEqual(cleared, []string{"a"}) {
+		t.Fatalf("reset cleared = %v, want [a]", cleared)
+	}
+	if _, ok := m.Dashboard(now).Providers["a"]; ok {
+		t.Error("health entry survived ResetHealth")
+	}
+	if got := order(); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("post-unfreeze order = %v", got)
+	}
+}
+
+// TestCooldownStateClassifiesFrozenAsNonRateLimited: a frozen target is down
+// but NOT rate-limit class — an all-frozen route must terminate as 502
+// (allRateLimited=false) with earliest recovery "now" (no wait-retry spin:
+// DecideFailure only waits when earliest is strictly in the future).
+func TestCooldownStateClassifiesFrozenAsNonRateLimited(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	targets := []Target{{Provider: "a"}, {Provider: "b"}}
+	m := newTestManager(1)
+	m.FreezeHealth("a", nil, []string{"a", "b"})
+	m.FreezeHealth("b", nil, []string{"a", "b"})
+
+	down, rate, earliest := m.CooldownState(targets, now, 15*time.Minute)
+	if !down || rate || !earliest.Equal(now) {
+		t.Fatalf("all-frozen cooldown = %v %v %v, want allDown + non-rate-limit + now", down, rate, earliest)
+	}
+	if m.HasRecoveredUntried(targets, map[string]bool{}, now, 15*time.Minute) {
+		t.Fatal("frozen target reported as recovered untried")
+	}
+	// A rate-limited sibling keeps its own horizon; the frozen one stays
+	// non-rate-limit class.
+	m.RecordRateLimit("b", now.Add(5*time.Minute), Quota, 1)
+	down, rate, earliest = m.CooldownState(targets, now, 15*time.Minute)
+	if !down || rate || !earliest.Equal(now) {
+		t.Fatalf("frozen+rate-limited cooldown = %v %v %v, want frozen target keeps 502 class", down, rate, earliest)
+	}
+}
+
+// TestFrozenHealthPersistRoundTrip: the operator freeze round-trips through
+// SnapshotForPersist/RestoreHealth — including a frozen-ONLY entry (no
+// cooldowns, no model state), which the zero-time drop rule must keep — and
+// the JSON shape uses `frozen` with omitempty.
+func TestFrozenHealthPersistRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	m := newTestManager(11)
+	m.FreezeHealth("frozen-only", nil, []string{"frozen-only"})
+	m.FreezeHealth("frozen-circuit", nil, []string{"frozen-circuit"})
+	m.mu.Lock()
+	m.health["frozen-circuit"].circuitOpenUntil = now.Add(time.Hour)
+	m.mu.Unlock()
+	m.RecordRateLimit("plain", now.Add(time.Hour), Quota, 11)
+
+	snapshot := m.SnapshotForPersist(nil, now)
+	if !snapshot.Health["frozen-only"].Frozen || !snapshot.Health["frozen-circuit"].Frozen {
+		t.Fatalf("frozen flags missing from snapshot: %+v", snapshot.Health)
+	}
+	if snapshot.Health["plain"].Frozen {
+		t.Error("non-frozen provider serialized as frozen")
+	}
+
+	data, err := json.Marshal(snapshot.Health["frozen-only"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	// Go's omitempty does not drop zero time.Time values, so the two cooldown
+	// fields are always present; the freeze must serialize as frozen:true and
+	// carry no model_locks/param_block.
+	if string(raw["frozen"]) != "true" {
+		t.Fatalf("frozen-only entry JSON = %s, want frozen:true", data)
+	}
+	if _, ok := raw["model_locks"]; ok {
+		t.Fatalf("frozen-only entry carries model_locks: %s", data)
+	}
+	if _, ok := raw["param_block"]; ok {
+		t.Fatalf("frozen-only entry carries param_block: %s", data)
+	}
+	if data, _ := json.Marshal(snapshot.Health["plain"]); strings.Contains(string(data), `"frozen"`) {
+		t.Fatalf("omitempty violated for non-frozen entry: %s", data)
+	}
+
+	restored := newTestManager(12)
+	restored.RestoreHealth(snapshot.Health, now, 4)
+	status := restored.Dashboard(now).Providers
+	if !status["frozen-only"].Frozen || status["frozen-only"].Available {
+		t.Errorf("frozen-only entry not restored: %+v", status["frozen-only"])
+	}
+	if !status["frozen-circuit"].Frozen || !status["frozen-circuit"].CircuitOpenUntil.Equal(now.Add(time.Hour)) {
+		t.Errorf("frozen+circuit entry not restored: %+v", status["frozen-circuit"])
+	}
+	if restored.TargetHealthy("frozen-only", "m", now) {
+		t.Error("restored freeze does not block scheduling")
+	}
+	// Expired-cooldown entries still drop unless frozen: restore at a later
+	// clock must keep the freeze but shed the elapsed circuit.
+	later := now.Add(2 * time.Hour)
+	restoredLate := newTestManager(12)
+	restoredLate.RestoreHealth(snapshot.Health, later, 4)
+	late := restoredLate.Dashboard(later).Providers
+	if !late["frozen-circuit"].Frozen || late["frozen-circuit"].CircuitState != "closed" {
+		t.Errorf("late restore = %+v, want frozen with expired circuit shed", late["frozen-circuit"])
 	}
 }

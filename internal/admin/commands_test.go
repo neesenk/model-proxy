@@ -100,6 +100,49 @@ func TestResetHealth(t *testing.T) {
 	}
 }
 
+func TestFreezeHealth(t *testing.T) {
+	persisted := 0
+	service := New(Ports{
+		FreezeHealth: func(name string, known []string) []string {
+			if name != "up" {
+				t.Errorf("FreezeHealth name = %q", name)
+			}
+			if known != nil {
+				t.Errorf("FreezeHealth known = %v, want nil (composition root derives it)", known)
+			}
+			return []string{"up"}
+		},
+		QuotaEnabled: func() bool { return true },
+		QuotaPersist: func() error { persisted++; return nil },
+	})
+	frozen, err := service.FreezeHealth("up")
+	if err != nil || len(frozen) != 1 || frozen[0] != "up" || persisted != 1 {
+		t.Errorf("FreezeHealth = %v %v, persisted = %d", frozen, err, persisted)
+	}
+
+	// A persist failure propagates but keeps the frozen projection.
+	wantErr := errors.New("persist failed")
+	service = New(Ports{
+		FreezeHealth: func(string, []string) []string { return []string{"up"} },
+		QuotaEnabled: func() bool { return true },
+		QuotaPersist: func() error { return wantErr },
+	})
+	frozen, err = service.FreezeHealth("up")
+	if !errors.Is(err, wantErr) || len(frozen) != 1 {
+		t.Errorf("FreezeHealth persist failure = %v %v", frozen, err)
+	}
+
+	// Disabled tracker: no persist.
+	service = New(Ports{
+		FreezeHealth: func(string, []string) []string { return nil },
+		QuotaEnabled: func() bool { return false },
+		QuotaPersist: func() error { t.Error("Persist on disabled tracker"); return nil },
+	})
+	if _, err := service.FreezeHealth("up"); err != nil {
+		t.Errorf("FreezeHealth disabled tracker err = %v", err)
+	}
+}
+
 func TestSetAndClearPin(t *testing.T) {
 	expires := time.Date(2026, 8, 1, 13, 0, 0, 0, time.UTC)
 	service := New(Ports{

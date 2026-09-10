@@ -106,6 +106,28 @@ func (p *Proxy) resetHealth(name string) (cleared []string, locks int) {
 	return p.runtimeState.ResetHealth(name, parentOf)
 }
 
+// freezeHealth marks the matched providers as operator-frozen (excluded from
+// scheduling until unfreeze). Unlike resetHealth, freeze always requires an
+// explicit target — an empty name matches nothing (no freeze-all). Match
+// semantics otherwise mirror resetHealth; unlike it, the match iterates the
+// KNOWN universe of runtime provider keys — the current generation's provider
+// impls (config names + pooled virtual `name#id` keys) — so a never-failed
+// provider (no health entry yet) can be frozen too. A nil known derives that
+// universe from the current generation under the same read lock as parentOf,
+// so the two can never cross generations.
+func (p *Proxy) freezeHealth(name string, known []string) (frozen []string) {
+	p.mu.RLock()
+	parentOf := p.parentOf
+	if known == nil {
+		known = make([]string, 0, len(p.providers))
+		for key := range p.providers {
+			known = append(known, key)
+		}
+	}
+	p.mu.RUnlock()
+	return p.runtimeState.FreezeHealth(name, parentOf, known)
+}
+
 // cooldownState inspects a route's target providers' health (and quota
 // exhaustion — skipped targets never earn a health entry) for the wait-retry
 // decision: allDown = EVERY target is currently unavailable; allRateLimited =

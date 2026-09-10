@@ -66,6 +66,7 @@ func TestAdminAuthGatesMutationEndpoints(t *testing.T) {
 		{http.MethodPost, "/api/tokens/reset", ""},
 		{http.MethodPost, "/api/quota/refresh", ""},
 		{http.MethodPost, "/api/health/reset", ""},
+		{http.MethodPost, "/api/health/freeze", ""},
 		{http.MethodPost, "/api/pin", `{"route":"glm","provider":"zhipu"}`},
 		{http.MethodDelete, "/api/pin?route=glm", ""},
 		{http.MethodPost, "/api/config/validate", "listen: 127.0.0.1:0\nproviders: {}\n"},

@@ -11,9 +11,16 @@ type providerHealth struct {
 	rateLimitedUntil    time.Time
 	rateLimitKind       RateLimitKind
 	halfOpenInFlight    bool
+	// frozen is the operator-set freeze (CLI freeze / POST /api/health/freeze):
+	// the provider is excluded from scheduling until ResetHealth (unfreeze)
+	// clears the entry. Success/failure/rate-limit recording never clears it.
+	frozen bool
 }
 
 func (h *providerHealth) available(now time.Time) bool {
+	if h.frozen {
+		return false
+	}
 	if now.Before(h.rateLimitedUntil) {
 		return false
 	}
@@ -71,6 +78,43 @@ func (m *Manager) ResetHealth(name string, parentOf map[string]string) (cleared 
 	}
 	sort.Strings(cleared)
 	return cleared, locks
+}
+
+// FreezeHealth marks the matched providers as operator-frozen: available()
+// reports false (scheduling skips them) until ResetHealth (unfreeze) clears the
+// entry. Unlike ResetHealth, freeze ALWAYS requires an explicit target — an
+// empty name matches nothing (freeze-all is deliberately not offered; unfreeze
+// keeps the no-arg = all escape hatch). A pooled parent name matches all its
+// virtual accounts. The match iterates the KNOWN universe of runtime provider
+// keys (config names plus pooled virtual account keys) instead of only
+// existing health entries, so a never-failed provider can be frozen too;
+// entries are created lazily for that. Quality EWMA, model locks, quotas,
+// sticky, and pins are NOT touched. Returns the sorted matched names; an
+// unknown (or empty) name matches nothing (empty result).
+func (m *Manager) FreezeHealth(name string, parentOf map[string]string, known []string) (frozen []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureLocked()
+	if name == "" {
+		return nil
+	}
+	match := func(providerName string) bool {
+		return providerName == name || parentOf[providerName] == name
+	}
+	for _, providerName := range known {
+		if !match(providerName) {
+			continue
+		}
+		state := m.health[providerName]
+		if state == nil {
+			state = &providerHealth{}
+			m.health[providerName] = state
+		}
+		state.frozen = true
+		frozen = append(frozen, providerName)
+	}
+	sort.Strings(frozen)
+	return frozen
 }
 
 func (m *Manager) TargetHealthy(providerName, model string, now time.Time) bool {

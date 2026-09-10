@@ -80,6 +80,14 @@ type Ports struct {
 	// ResetHealth clears circuit/model-lock health for one provider (or all
 	// when name is empty) and reports the cleared entries.
 	ResetHealth func(name string) (cleared []string, locks int)
+	// FreezeHealth marks one provider as operator-frozen — excluded from
+	// scheduling until ResetHealth — and reports the matched entries. Unlike
+	// ResetHealth, freeze always requires an explicit name (pooled parent =
+	// all its virtual accounts); an empty name matches nothing. known is the
+	// universe of runtime provider keys; a nil known lets the composition root
+	// derive it from the current generation (config names + pooled virtual
+	// account keys) under the same lock as the parentOf read.
+	FreezeHealth func(name string, known []string) (frozen []string)
 	// Quota* drive the background quota tracker; QuotaEnabled reports whether
 	// the tracker exists at all (degenerate configs run without one).
 	QuotaEnabled func() bool

@@ -289,6 +289,61 @@ func TestCommandHealthResetContract(t *testing.T) {
 	})
 }
 
+func TestCommandHealthFreezeContract(t *testing.T) {
+	t.Run("named provider freezes and reports matches", func(t *testing.T) {
+		var provider string
+		server := newCommandTestServer(t, &commandFake{freezeHealth: func(got string) ([]string, error) {
+			provider = got
+			return []string{"aqp", "aqp#one"}, nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/health/freeze", `{"provider":"aqp"}`), http.StatusOK, map[string]any{"frozen": []any{"aqp", "aqp#one"}})
+		if provider != "aqp" {
+			t.Fatalf("FreezeHealth provider=%q want aqp", provider)
+		}
+	})
+	t.Run("empty provider is rejected — no freeze-all", func(t *testing.T) {
+		called := false
+		server := newCommandTestServer(t, &commandFake{freezeHealth: func(string) ([]string, error) {
+			called = true
+			return nil, nil
+		}})
+		for _, body := range []string{"", `{}`, `{"provider":""}`} {
+			recorder := commandRequest(server, http.MethodPost, "/api/health/freeze", body)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("body %q: status=%d body=%s, want 400", body, recorder.Code, recorder.Body.String())
+			}
+			if got := commandJSON(t, recorder)["error"]; got != "provider is required" {
+				t.Errorf("body %q: error=%q, want the provider-required message", body, got)
+			}
+		}
+		if called {
+			t.Error("empty provider reached FreezeHealth — freeze-all must be rejected at the transport")
+		}
+	})
+	t.Run("malformed body", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{})
+		recorder := commandRequest(server, http.MethodPost, "/api/health/freeze", "{")
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		if errorText := commandJSON(t, recorder)["error"]; !strings.HasPrefix(errorText.(string), "malformed JSON body: ") {
+			t.Fatalf("error=%q missing malformed prefix", errorText)
+		}
+	})
+	t.Run("persist error preserves the stable prefix", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{freezeHealth: func(string) ([]string, error) {
+			return nil, errors.New("write state")
+		}})
+		recorder := commandRequest(server, http.MethodPost, "/api/health/freeze", `{"provider":"aqp"}`)
+		if recorder.Code != http.StatusInternalServerError {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		if got, want := commandJSON(t, recorder)["error"], "state frozen in memory but persist failed: write state"; got != want {
+			t.Fatalf("error=%q want %q", got, want)
+		}
+	})
+}
+
 func TestCommandPinContract(t *testing.T) {
 	t.Run("set applies TTL and returns normalized expiry", func(t *testing.T) {
 		var route, provider string

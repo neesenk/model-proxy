@@ -15,3 +15,7 @@ func RunUnpin(args []string) { CmdUnpin(args, cliframework.LoadCmdConfig(args)) 
 // RunUnfreeze is the process-level entry for `unfreeze`: load config, then
 // POST the health reset to the running daemon.
 func RunUnfreeze(args []string) { CmdUnfreeze(args, cliframework.LoadCmdConfig(args)) }
+
+// RunFreeze is the process-level entry for `freeze`: load config, then POST
+// the health freeze to the running daemon.
+func RunFreeze(args []string) { CmdFreeze(args, cliframework.LoadCmdConfig(args)) }

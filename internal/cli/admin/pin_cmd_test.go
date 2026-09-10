@@ -22,6 +22,8 @@ func pinDaemon(t *testing.T) *httptest.Server {
 			clitest.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": "cannot pin: no target"})
 		case r.URL.Path == "/api/health/reset" && r.Method == http.MethodPost:
 			clitest.WriteJSON(w, http.StatusOK, map[string]any{"cleared": []string{"zhipu"}, "model_locks_cleared": 1})
+		case r.URL.Path == "/api/health/freeze" && r.Method == http.MethodPost:
+			clitest.WriteJSON(w, http.StatusOK, map[string]any{"frozen": []string{"zhipu"}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -55,6 +57,28 @@ func TestCmdUnfreeze_InProcess(t *testing.T) {
 	out := clitest.GrabStdout(t, func() { RunUnfreeze([]string{"zhipu", "--config", cfg}) })
 	if !strings.Contains(out, "zhipu") {
 		t.Errorf("unfreeze out=%q", out)
+	}
+}
+
+// TestCmdFreeze_InProcess: `freeze <provider>` posts the freeze and prints the
+// frozen line (no os.Exit on the success path).
+func TestCmdFreeze_InProcess(t *testing.T) {
+	srv := pinDaemon(t)
+	cfg := pinDaemonConfig(t, srv)
+	out := clitest.GrabStdout(t, func() { RunFreeze([]string{"zhipu", "--config", cfg}) })
+	if !strings.Contains(out, "froze zhipu") {
+		t.Errorf("freeze out=%q", out)
+	}
+}
+
+// TestCmdFreeze_RequiresProvider: bare `freeze` is a usage error (exit 1) —
+// unlike `unfreeze`, freeze has no no-arg = all form.
+func TestCmdFreeze_RequiresProvider(t *testing.T) {
+	srv := pinDaemon(t)
+	cfg := pinDaemonConfig(t, srv)
+	_, stderr, code := clitest.RunCLI(t, "freeze", cfg)
+	if code != 1 || !strings.Contains(stderr, "usage: model-proxy freeze <provider>") {
+		t.Errorf("freeze (no provider): exit=%d stderr=%q", code, stderr)
 	}
 }
 
@@ -100,5 +124,10 @@ func TestCmdPin_DaemonErrors(t *testing.T) {
 	_, stderr, code = clitest.RunCLI(t, "unfreeze", dead, "zhipu")
 	if code != 1 || !strings.Contains(stderr, "cannot reach daemon") {
 		t.Errorf("unfreeze unreachable: exit=%d stderr=%q", code, stderr)
+	}
+
+	_, stderr, code = clitest.RunCLI(t, "freeze", dead, "zhipu")
+	if code != 1 || !strings.Contains(stderr, "cannot reach daemon") {
+		t.Errorf("freeze unreachable: exit=%d stderr=%q", code, stderr)
 	}
 }

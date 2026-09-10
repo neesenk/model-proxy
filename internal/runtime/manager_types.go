@@ -88,6 +88,7 @@ type PersistedHealth struct {
 	RateLimitedUntil time.Time            `json:"rate_limited_until,omitempty"`
 	RateLimitKind    string               `json:"rate_limit_kind,omitempty"`
 	CircuitOpenUntil time.Time            `json:"circuit_open_until,omitempty"`
+	Frozen           bool                 `json:"frozen,omitempty"`
 	ModelLocks       map[string]time.Time `json:"model_locks,omitempty"`
 	ParamBlock       map[string][]string  `json:"param_block,omitempty"`
 }
@@ -109,6 +110,7 @@ type ProviderStatus struct {
 	RateLimitedUntil    time.Time
 	RateLimitKind       RateLimitKind
 	HalfOpenInFlight    bool
+	Frozen              bool
 }
 
 // ModelLockStatus is the detached dashboard state of one model lock.

@@ -81,6 +81,29 @@ func (s *Server) handleHealthReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"cleared": cleared, "model_locks_cleared": locks})
 }
 
+func (s *Server) handleHealthFreeze(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
+	// Unlike /api/health/reset (empty = all), freeze always requires an
+	// explicit target — a freeze-all footgun has no unfreeze-all urgency
+	// justification.
+	if req.Provider == "" {
+		writeJSONErr(w, http.StatusBadRequest, "provider is required")
+		return
+	}
+	frozen, err := s.commands.FreezeHealth(req.Provider)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "state frozen in memory but persist failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"frozen": frozen})
+}
+
 func (s *Server) handlePinSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Route      string `json:"route"`

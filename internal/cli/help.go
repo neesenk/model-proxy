@@ -286,6 +286,18 @@ Flags:
   its accounts. Sticky routes, pins, and learned parameter blocklists are
   NOT cleared. Requires a running daemon.`,
 
+	"freeze": `freeze <provider> [--config PATH]
+
+  Manually freeze a provider via the running daemon: the provider is
+  excluded from scheduling (never selected as a target) until
+  ` + "`unfreeze`" + ` clears it. The freeze is explicit — it has no expiry and
+  is NOT cleared by success/failure recording — and persists across
+  restarts (same config-fingerprint gate as the rest of the health state).
+  A pooled parent name freezes all its accounts. Unlike unfreeze, freeze
+  always requires an explicit provider (no freeze-all). Sticky routes,
+  pins, quotas, and learned parameter blocklists are NOT touched.
+  Requires a running daemon.`,
+
 	"wire": `wire record <provider> [--model M] [--prompt P] [--out DIR]
 
   Record RAW upstream SSE streams for the golden-replay tests: one minimal

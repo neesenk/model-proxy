@@ -338,6 +338,11 @@ type CommandAPI interface {
 	ResetStats() error
 	RefreshQuota(provider string) bool
 	ResetHealth(provider string) ([]string, int, error)
+	// FreezeHealth marks one provider as operator-frozen until ResetHealth;
+	// unlike ResetHealth it always requires an explicit provider (no
+	// freeze-all). Persist-then-return semantics mirror ResetHealth (the
+	// error means the in-memory freeze is live but durable state is stale).
+	FreezeHealth(provider string) ([]string, error)
 	SetPin(route, provider string, ttl time.Duration) (Pin, bool)
 	ClearPin(route string) bool
 	SaveConfig([]byte) error

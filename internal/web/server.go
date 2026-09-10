@@ -295,6 +295,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleQuotaRefresh(w, r)
 	case p == "/api/health/reset" && r.Method == http.MethodPost:
 		s.handleHealthReset(w, r)
+	case p == "/api/health/freeze" && r.Method == http.MethodPost:
+		s.handleHealthFreeze(w, r)
 	case p == "/api/stats" && r.Method == http.MethodGet:
 		s.handleStats(w, r)
 	case p == "/api/agents" && r.Method == http.MethodGet:

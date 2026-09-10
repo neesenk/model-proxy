@@ -501,8 +501,9 @@ type PersistedQuotaSnapshot struct {
 }
 
 // persist writes the quota/sticky/health snapshot atomically (tmp + rename).
-// Returns the write error so synchronous callers (unfreeze API) can fail the
-// operation instead of reporting a false success; background callers log it.
+// Returns the write error so synchronous callers (unfreeze/freeze APIs) can
+// fail the operation instead of reporting a false success; background callers
+// log it.
 func (t *QuotaTracker) Persist() error {
 	if t.Path == "" {
 		return nil // in-memory tracker (direct-construct tests) has no file
