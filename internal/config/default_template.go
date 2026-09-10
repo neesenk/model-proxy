@@ -217,10 +217,14 @@ providers:
 # (reload is not enough). Uncomment to enable:
 # request_log:
 #   enabled: true                       # default false
-#   dir: ~/.model-proxy/requests        # default
+#   dir: ~/.model-proxy/log/requests    # default
 #   max_file_size: 1073741824           # 1G per file (rotate on size or day)
 #   max_body_bytes: 5242880             # 5MB cap per body (truncates past it)
 #   retention: 720h                     # 30d; delete rotated files older than this; 0 = forever
+#   # Client session-id header allowlist (ordered; first non-empty wins); drives
+#   # the request-log session_id + live /api/events session_id. Default:
+#   # [x-claude-code-session-id, x-session-affinity, x-session-id, x-opencode-session]
+#   # session_headers: [x-claude-code-session-id, x-session-affinity]
 
 # Web admin UI + JSON API (/ui/ + /api/). Enabled by default. Without the
 # optional auth block below, listen must stay loopback (enforced at startup);
@@ -308,7 +312,7 @@ providers:
 #                         # reported as known_secret_fragmented — under secrets=redact
 #                         # a fragmented hit degrades to log: a cross-request secret
 #                         # cannot be rewritten)
-#   audit_path: ""        # optional absolute path; default ~/.model-proxy/security.log
+#   audit_path: ""        # optional absolute path; default ~/.model-proxy/log/security/security.log
 #   extra_patterns:       # user secret formats (gitleaks extend-style)
 #     - {name: myvendor_key, regex: '\bmv-[A-Za-z0-9]{32,}', literal: 'mv-'}
 #                         # name: ^[a-z0-9_]{1,32}$; literal (optional) must be a

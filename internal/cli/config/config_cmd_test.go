@@ -130,7 +130,7 @@ func TestCLI_ConfigCheckGuardSummary(t *testing.T) {
 	})
 	for _, want := range []string{
 		"guard: secrets=log known_secrets=true decode=true paths=log audit=true",
-		"audit_path: " + filepath.Join(home, ".model-proxy", "security.log"),
+		"audit_path: " + filepath.Join(home, ".model-proxy", "log", "security", "security.log"),
 		"patterns: built-in tables (embedded) + 0 custom",
 		"extra_paths: 0",
 	} {

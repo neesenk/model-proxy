@@ -62,7 +62,7 @@ func serveSecurity(t *testing.T, w *WebServer, path string) (int, appapi.Securit
 func TestAPISecurityProjection(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	writeSecLogFile(t, filepath.Join(home, ".model-proxy"), []string{"not-json"},
+	writeSecLogFile(t, filepath.Join(home, ".model-proxy", "log", "security"), []string{"not-json"},
 		seclog.Record{Ts: 1700000000000, Kind: "secret", RequestID: "r1", Agent: "codex", Protocol: "anthropic", Exposed: "gpt-x", Names: []string{"aws-access-key"}, Action: "blocked"},
 		seclog.Record{Ts: 1700000001000, Kind: "path", Agent: "pi", Exposed: "gpt-x", Names: []string{"home-outside-root"}, Action: "warn", Detail: "outside allowed roots"},
 		seclog.Record{Ts: 1700000002000, Kind: "drift", Agent: "codex", Exposed: "gpt-x", Names: []string{"credential-shape"}, Action: "warn"},

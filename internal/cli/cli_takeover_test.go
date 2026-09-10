@@ -375,11 +375,12 @@ routes:
 	return cfgPath, home
 }
 
-// securityLogFiles lists the security-*.log files under <home>/.model-proxy
-// (nil when the dir does not exist — nothing was ever appended).
+// securityLogFiles lists the security-*.log files under the default audit
+// dir <home>/.model-proxy/log/security (nil when the dir does not exist —
+// nothing was ever appended).
 func securityLogFiles(t *testing.T, home string) []string {
 	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(home, ".model-proxy"))
+	entries, err := os.ReadDir(filepath.Join(home, ".model-proxy", "log", "security"))
 	if err != nil {
 		return nil
 	}
@@ -469,7 +470,7 @@ func TestCLI_TakeoverDriftWarnsAndAudits(t *testing.T) {
 		t.Errorf("claude was rewritten successfully and must not drift:\n%s", stderr)
 	}
 
-	result, err := observeseclog.Query(filepath.Join(home, ".model-proxy"),
+	result, err := observeseclog.Query(filepath.Join(home, ".model-proxy", "log", "security"),
 		observeseclog.Filter{Kind: observeseclog.KindDrift})
 	if err != nil {
 		t.Fatalf("query audit log: %v", err)

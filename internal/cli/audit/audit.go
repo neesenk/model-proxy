@@ -26,7 +26,7 @@ import (
 // It reads the seclog JSONL directory directly — the daemon does not need to
 // be running (same offline semantics as `doctor`). The directory derives from
 // guard.audit_path (a file path whose basename is the security-*.log prefix
-// family), falling back to ~/.model-proxy/security.log.
+// family), falling back to ~/.model-proxy/log/security/security.log.
 
 // auditStatsLimit caps how many filtered records `--stats` aggregates. Stats
 // must summarize the whole filtered set, so the table pager --limit does not
@@ -123,7 +123,8 @@ func ParseAuditFlags(args []string) (AuditOpts, error) {
 }
 
 // AuditDir resolves the security audit log directory for a loaded config:
-// the directory half of guard.audit_path (default ~/.model-proxy/security.log).
+// the directory half of guard.audit_path (default
+// ~/.model-proxy/log/security/security.log).
 func AuditDir(cfg *configdomain.Config) string {
 	return filepath.Dir(cfg.Guard.AuditPathValue(cliframework.HomeDir()))
 }

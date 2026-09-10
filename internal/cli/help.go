@@ -239,7 +239,7 @@ Usage:
 
   Show the security audit log (secret/path hits and doctor takeover-drift
   findings). Offline: reads the seclog files directly from guard.audit_path
-  (default ~/.model-proxy/security.log) — no daemon needed.
+  (default ~/.model-proxy/log/security/security.log) — no daemon needed.
 
   Flags:
   --from TIME   range start: now, duration ago (1h, 30m, 7d), unix seconds,

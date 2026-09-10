@@ -430,7 +430,7 @@ func TestFormatAuditTableSanitizesDetail(t *testing.T) {
 func TestAuditCLISubprocess(t *testing.T) {
 	home := t.TempDir()
 	cfgPath := clitest.WriteTempConfig(t, clitest.MinimalConfig)
-	dir := filepath.Join(home, ".model-proxy")
+	dir := filepath.Join(home, ".model-proxy", "log", "security")
 	writeAuditRecord(t, dir, &observeseclog.Record{
 		Kind: observeseclog.KindDrift, Agent: "doctor",
 		Detail: "client=pi expected=h1 actual=h2",

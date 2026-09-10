@@ -61,7 +61,7 @@ func TestGuardNewFieldDefaults(t *testing.T) {
 	if got := cfg.Guard.PathsAction(); got != "log" {
 		t.Errorf("PathsAction() = %q, want default %q", got, "log")
 	}
-	if got, want := cfg.Guard.AuditPathValue("/home/u"), "/home/u/.model-proxy/security.log"; got != want {
+	if got, want := cfg.Guard.AuditPathValue("/home/u"), "/home/u/.model-proxy/log/security/security.log"; got != want {
 		t.Errorf("AuditPathValue() = %q, want derived default %q", got, want)
 	}
 }

@@ -3,29 +3,23 @@ package seclog
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"model-proxy/internal/observe/logfile"
 	"time"
 )
 
 // AppendSync appends one record directly to dir without a Logger, for CLI
 // paths that run outside the daemon lifecycle (e.g. doctor drift findings).
-// It writes a single O_APPEND line into a per-day file, creating the
-// directory 0700 and the file 0600, and narrows permissions on pre-existing
-// storage. The per-day name never collides with a Logger's active file, so
-// both can coexist in one directory and one Query scans both.
+// It writes a single O_APPEND line into the per-day <prefix>YYYYMMDD.log file
+// (the same naming a running Logger uses), creating the directory 0700 and
+// the file 0600, and narrows permissions on pre-existing storage. Coexistence
+// with a running Logger in the same directory is safe: both append single
+// lines with O_APPEND, so one Query scans them all.
 func AppendSync(dir string, rec *Record) error {
 	if rec == nil {
 		return fmt.Errorf("seclog: nil record")
 	}
 	if dir == "" {
 		return fmt.Errorf("seclog: empty directory")
-	}
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return fmt.Errorf("seclog: mkdir %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, dirMode); err != nil {
-		return fmt.Errorf("seclog: chmod %s: %w", dir, err)
 	}
 	now := time.Now()
 	if rec.Ts == 0 {
@@ -35,18 +29,8 @@ func AppendSync(dir string, rec *Record) error {
 	if err != nil {
 		return fmt.Errorf("seclog: encode record: %w", err)
 	}
-	line = append(line, '\n')
-	path := filepath.Join(dir, filePrefix+now.Format("20060102")+fileSuffix)
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, logFileMode)
-	if err != nil {
-		return fmt.Errorf("seclog: open %s: %w", path, err)
-	}
-	defer func() { _ = file.Close() }()
-	if err := file.Chmod(logFileMode); err != nil {
-		return fmt.Errorf("seclog: chmod %s: %w", path, err)
-	}
-	if _, err := file.Write(line); err != nil {
-		return fmt.Errorf("seclog: append %s: %w", path, err)
+	if err := logfile.AppendLine(dir, filePrefix, line, now); err != nil {
+		return fmt.Errorf("seclog: %w", err)
 	}
 	return nil
 }

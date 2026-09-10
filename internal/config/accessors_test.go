@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -69,7 +70,7 @@ func TestRequestLogConfigAccessors(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	def := RequestLogConfig{}
-	if got := def.ResolvedDir(); got != filepath.Join(home, ".model-proxy", "requests") {
+	if got := def.ResolvedDir(); got != filepath.Join(home, ".model-proxy", "log", "requests") {
 		t.Errorf("default dir = %q", got)
 	}
 	if got := (RequestLogConfig{Dir: "/tmp/requests"}).ResolvedDir(); got != "/tmp/requests" {

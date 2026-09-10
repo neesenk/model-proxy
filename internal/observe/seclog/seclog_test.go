@@ -2,6 +2,7 @@ package seclog
 
 import (
 	"fmt"
+	"model-proxy/internal/observe/logfile"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -121,7 +122,7 @@ func TestRotationAcrossFiles(t *testing.T) {
 	}
 	var files int
 	for _, entry := range entries {
-		if isLogFile(entry.Name()) {
+		if isAuditFile(entry.Name()) {
 			files++
 		}
 	}
@@ -222,28 +223,14 @@ func TestEnqueueDropsWhenQueueFull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	logger.writeRecord = func(*Record, time.Time) error {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		<-release
-		return nil
-	}
-	go logger.Run()
-
-	logger.Enqueue(&Record{Kind: KindSecret})
-	<-entered // the single writer is now blocked inside writeRecord
-	for i := 0; i < queueCapacity+10; i++ {
+	// Run is deliberately not started, so the shared sink queue fills
+	// deterministically and the non-blocking offer starts dropping.
+	for i := 0; i < logfile.DefaultQueueCapacity+10; i++ {
 		logger.Enqueue(&Record{Kind: KindSecret})
 	}
 	if got := logger.Dropped(); got != 10 {
 		t.Errorf("dropped = %d, want 10", got)
 	}
-	close(release)
-	logger.Shutdown()
 }
 
 func TestShutdownDrainsQueuedRecords(t *testing.T) {
@@ -322,7 +309,7 @@ func TestFileAndDirectoryPermissions(t *testing.T) {
 	}
 	var files int
 	for _, entry := range entries {
-		if !isLogFile(entry.Name()) {
+		if !isAuditFile(entry.Name()) {
 			continue
 		}
 		files++
@@ -334,8 +321,13 @@ func TestFileAndDirectoryPermissions(t *testing.T) {
 			t.Errorf("file %s mode = %o, want %o", entry.Name(), got, logFileMode)
 		}
 	}
-	if files < 2 {
-		t.Fatalf("log files = %d, want the AppendSync and Logger files", files)
+	if files < 1 {
+		t.Fatalf("log files = %d, want at least the shared per-day AppendSync/Logger file", files)
+	}
+	// AppendSync and the Logger share the per-day file, so both records must
+	// land in it.
+	if result := queryKinds(t, dir, Filter{}); len(result.Records) != 2 {
+		t.Fatalf("records in shared per-day file = %d, want 2", len(result.Records))
 	}
 }
 

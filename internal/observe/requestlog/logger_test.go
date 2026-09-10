@@ -1,22 +1,20 @@
 package requestlog
 
 import (
-	"errors"
 	"fmt"
+	"model-proxy/internal/observe/logfile"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestLoggerEnqueueDropsWhenQueueIsFull(t *testing.T) {
 	logger := New(Options{Directory: t.TempDir(), MaxFileSize: 1 << 30, MaxBodyBytes: 1024})
-	for i := 0; i < queueCapacity+17; i++ {
+	for i := 0; i < logfile.DefaultQueueCapacity+17; i++ {
 		logger.Enqueue(&Record{Ts: "t", RequestID: fmt.Sprintf("r-%d", i)})
 	}
-	if got := atomic.LoadUint64(&logger.dropped); got != 17 {
+	if got := logger.Dropped(); got != 17 {
 		t.Errorf("dropped = %d, want 17", got)
 	}
 }
@@ -66,7 +64,7 @@ func TestLoggerShutdownDrainsEveryAcceptedUniqueRecord(t *testing.T) {
 	}
 	logger.Shutdown()
 
-	if got := atomic.LoadUint64(&logger.dropped); got != 0 {
+	if got := logger.Dropped(); got != 0 {
 		t.Fatalf("dropped = %d, want 0", got)
 	}
 	records, err := QueryRecords(dir, Filter{})
@@ -107,89 +105,35 @@ func TestLoggerShutdownDrainsEveryAcceptedUniqueRecord(t *testing.T) {
 	}
 }
 
-func TestLoggerCountsEveryWriteError(t *testing.T) {
-	logger := New(Options{
-		Directory: t.TempDir(), MaxFileSize: 1 << 30, MaxBodyBytes: 4096,
-	})
-	logger.writeRecord = func(*Record, time.Time) error {
-		return errors.New("injected write failure")
-	}
-	go logger.Run()
-	for i := 0; i < 5; i++ {
-		logger.Enqueue(&Record{Ts: "t", RequestID: fmt.Sprintf("r-%d", i)})
-	}
-	logger.Shutdown()
-	if got := atomic.LoadUint64(&logger.writeErrors); got != 5 {
-		t.Fatalf("writeErrors = %d, want 5", got)
-	}
-}
-
-func TestLoggerRetentionSweepDeletesExpiredLogsOnly(t *testing.T) {
+// TestLoggerRestartsAppendToTheSamePerDayFile pins the file-naming contract
+// that keeps the log directory to one file per day even across process
+// restarts: two logger generations writing on the same day must produce a
+// single file holding both records.
+func TestLoggerRestartsAppendToTheSamePerDayFile(t *testing.T) {
 	dir := t.TempDir()
-	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
-	oldTime := now.Add(-40 * 24 * time.Hour)
-	recentTime := now.Add(-24 * time.Hour)
 
-	oldArchive := filepath.Join(dir, "requests-20260601-000000--20260601-010000-1.log")
-	recentArchive := filepath.Join(dir, "requests-20260727-000000--20260727-010000-1.log")
-	orphanedActive := filepath.Join(dir, "requests-20260601-000000.log")
-	currentActive := filepath.Join(dir, "requests-20260728-120000.log")
-	ignoredFile := filepath.Join(dir, "other-20260601.log")
+	first := New(Options{Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 4096})
+	go first.Run()
+	first.Enqueue(&Record{Ts: "t", RequestID: "first", Status: 200})
+	first.Shutdown()
 
-	for _, item := range []struct {
-		path    string
-		modTime time.Time
-	}{
-		{oldArchive, oldTime},
-		{recentArchive, recentTime},
-		{orphanedActive, oldTime},
-		{currentActive, oldTime},
-		{ignoredFile, oldTime},
-	} {
-		if err := os.WriteFile(item.path, []byte("{}\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(item.path, item.modTime, item.modTime); err != nil {
-			t.Fatal(err)
-		}
+	second := New(Options{Directory: dir, MaxFileSize: 1 << 30, MaxBodyBytes: 4096})
+	go second.Run()
+	second.Enqueue(&Record{Ts: "t", RequestID: "second", Status: 200})
+	second.Shutdown()
+
+	names := requestLogFileNames(t, dir)
+	if len(names) != 1 {
+		t.Fatalf("files = %v, want exactly one per-day file across restarts", names)
 	}
-
-	logger := New(Options{Directory: dir, Retention: 30 * 24 * time.Hour})
-	logger.sweep(now, currentActive)
-
-	for _, check := range []struct {
-		name       string
-		path       string
-		wantExists bool
-	}{
-		{"expired archive", oldArchive, false},
-		{"recent archive", recentArchive, true},
-		{"expired orphaned active file", orphanedActive, false},
-		{"current active file", currentActive, true},
-		{"unrelated file", ignoredFile, true},
-	} {
-		_, err := os.Stat(check.path)
-		exists := err == nil
-		if exists != check.wantExists {
-			t.Errorf("%s exists = %v, want %v (stat err %v)", check.name, exists, check.wantExists, err)
-		}
-	}
-}
-
-func TestLoggerZeroRetentionKeepsExpiredLogs(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "requests-20200101-000000--20200101-010000-1.log")
-	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+	records, err := QueryRecords(dir, Filter{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
-		t.Fatal(err)
+	if len(records) != 2 {
+		t.Fatalf("records in shared per-day file = %d, want 2", len(records))
 	}
-
-	logger := New(Options{Directory: dir})
-	logger.sweep(time.Date(2026, 7, 28, 0, 0, 0, 0, time.UTC), "")
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("zero retention removed old log: %v", err)
+	if records[0].RequestID != "first" || records[1].RequestID != "second" {
+		t.Errorf("request ids = [%s %s], want [first second] (append order preserved)", records[0].RequestID, records[1].RequestID)
 	}
 }

@@ -135,7 +135,8 @@ func (c Config) CredentialsMode() string {
 // degrades to log there because a cross-request secret cannot be rewritten).
 // audit (default
 // true) persists security events to the audit log at audit_path (default
-// ~/.model-proxy/security.log, resolved by the caller via AuditPathValue).
+// ~/.model-proxy/log/security/security.log, resolved by the caller via
+// AuditPathValue).
 // extra_patterns / extra_paths extend the built-in tables (gitleaks
 // [extend]-style). Hits are reported by pattern type name / path category
 // only — matched secret content is never logged.
@@ -153,7 +154,7 @@ type GuardConfig struct {
 	// window and reported as known_secret_fragmented.
 	SessionScan bool `yaml:"session_scan"`
 	// AuditPath is an optional absolute path for the security audit log;
-	// empty = AuditPathValue derives <home>/.model-proxy/security.log.
+	// empty = AuditPathValue derives <home>/.model-proxy/log/security/security.log.
 	AuditPath     string         `yaml:"audit_path"`
 	ExtraPatterns []ExtraPattern `yaml:"extra_patterns"`
 	// ExtraPaths are literal sensitive-path strings matched against the
@@ -231,13 +232,20 @@ func (g GuardConfig) AuditEnabled() bool { return g.Audit }
 // known-secret) detection is active (default true, applied at load).
 func (g GuardConfig) SessionScanEnabled() bool { return g.SessionScan }
 
+// LogDir returns the root directory that holds all rotating JSONL logs, one
+// subdirectory per log kind (requests/, security/).
+func LogDir(home string) string {
+	return filepath.Join(home, ".model-proxy", "log")
+}
+
 // AuditPathValue returns the configured audit log path, or the default
-// <home>/.model-proxy/security.log when unset.
+// <home>/.model-proxy/log/security/security.log when unset (the log directory
+// is its parent).
 func (g GuardConfig) AuditPathValue(home string) string {
 	if g.AuditPath != "" {
 		return g.AuditPath
 	}
-	return filepath.Join(home, ".model-proxy", "security.log")
+	return filepath.Join(LogDir(home), "security", "security.log")
 }
 
 // BudgetsConfig configures personal monthly spend alerts on the equivalent
@@ -424,15 +432,43 @@ type RequestLogConfig struct {
 	MaxFileSize  int64  `yaml:"max_file_size"`
 	MaxBodyBytes int    `yaml:"max_body_bytes"`
 	Retention    string `yaml:"retention"`
+	// SessionHeaders is the ordered allowlist of client request headers whose
+	// first non-empty value becomes the request's session id (request-log
+	// `session_id` and live /api/events `session_id`). Defaults to
+	// DefaultSessionHeaders.
+	SessionHeaders []string `yaml:"session_headers"`
+}
+
+// DefaultSessionHeaders is the built-in session-header allowlist, tried in
+// order (first non-empty wins). Coding agents disagree on the header: Claude
+// Code sends x-claude-code-session-id, pi (anthropic/openai-completions when
+// compat.sendSessionAffinityHeaders is on) and OpenCode send x-session-affinity
+// (+ x-session-id), OpenCode's own provider sends x-opencode-session.
+// x-client-request-id is deliberately excluded: pi reuses it as its session id
+// but other clients use it per request.
+var DefaultSessionHeaders = []string{
+	"x-claude-code-session-id",
+	"x-session-affinity",
+	"x-session-id",
+	"x-opencode-session",
+}
+
+// ResolvedSessionHeaders returns the configured session-header allowlist or the
+// built-in default when unset.
+func (r RequestLogConfig) ResolvedSessionHeaders() []string {
+	if len(r.SessionHeaders) > 0 {
+		return r.SessionHeaders
+	}
+	return DefaultSessionHeaders
 }
 
 // ResolvedDir returns the request-log directory, defaulting to
-// ~/.model-proxy/requests.
+// ~/.model-proxy/log/requests.
 func (r RequestLogConfig) ResolvedDir() string {
 	if r.Dir != "" {
 		return ExpandPath(r.Dir)
 	}
-	return filepath.Join(homeDir(), ".model-proxy", "requests")
+	return filepath.Join(LogDir(homeDir()), "requests")
 }
 
 // MaxFileSizeBytes returns the per-file rotation cap in bytes, defaulting to 1 GiB.
@@ -1294,7 +1330,7 @@ func (c *Config) validate() error {
 	// guard.audit_path: when set it must be absolute (unset = the caller
 	// derives the default from the home dir, see AuditPathValue).
 	if c.Guard.AuditPath != "" && !filepath.IsAbs(c.Guard.AuditPath) {
-		return fmt.Errorf("guard.audit_path %q must be an absolute path (or unset for the default ~/.model-proxy/security.log)", c.Guard.AuditPath)
+		return fmt.Errorf("guard.audit_path %q must be an absolute path (or unset for the default ~/.model-proxy/log/security/security.log)", c.Guard.AuditPath)
 	}
 	// guard.extra_patterns: a bad rule must fail at load, not silently never
 	// fire — name restricted to a log-safe token, regex must compile, and a

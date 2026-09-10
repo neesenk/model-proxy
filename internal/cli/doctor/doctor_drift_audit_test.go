@@ -78,7 +78,7 @@ routes:
 		t.Fatalf("diagnosis missing drift line:\n%s", out)
 	}
 
-	dir := filepath.Join(home, ".model-proxy")
+	dir := filepath.Join(home, ".model-proxy", "log", "security")
 	result, err := observeseclog.Query(dir, observeseclog.Filter{Kind: observeseclog.KindDrift})
 	if err != nil {
 		t.Fatalf("query audit log: %v", err)
@@ -127,7 +127,7 @@ routes:
 			t.Fatalf("renderDoctorLive run %d: %v", run, err)
 		}
 	}
-	result, err := observeseclog.Query(filepath.Join(home, ".model-proxy"),
+	result, err := observeseclog.Query(filepath.Join(home, ".model-proxy", "log", "security"),
 		observeseclog.Filter{Kind: observeseclog.KindDrift})
 	if err != nil {
 		t.Fatalf("query audit log: %v", err)
@@ -161,8 +161,8 @@ routes:
 	if !strings.Contains(out, "takeover drift: opencode") {
 		t.Fatalf("diagnosis missing drift line:\n%s", out)
 	}
-	entries, err := os.ReadDir(filepath.Join(home, ".model-proxy"))
-	if err != nil {
+	entries, err := os.ReadDir(filepath.Join(home, ".model-proxy", "log", "security"))
+	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {

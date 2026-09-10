@@ -77,7 +77,7 @@ func Query(dir string, filter Filter) (*Result, error) {
 		if entry.IsDir() {
 			continue
 		}
-		if isLogFile(entry.Name()) {
+		if isAuditFile(entry.Name()) {
 			names = append(names, entry.Name())
 		}
 	}
