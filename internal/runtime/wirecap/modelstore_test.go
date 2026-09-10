@@ -58,6 +58,71 @@ func TestModelStorePutGetSnapshotRestore(t *testing.T) {
 	}
 }
 
+func TestModelStorePruneModels(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := &ModelStore{}
+	store.Put("aqp", "fp", "m1", ModelProtocols{Chat: Yes, Anthropic: No, Responses: No}, now)
+	store.Put("aqp", "fp", "stale", ModelProtocols{Chat: Yes, Anthropic: Yes, Responses: Yes}, now)
+
+	if pruned := store.PruneModels("aqp", map[string]bool{"m1": true}); !pruned {
+		t.Fatal("PruneModels = false, want true (stale model removed)")
+	}
+	if _, ok := store.Get("aqp", "stale"); ok {
+		t.Error("dropped model survived pruning")
+	}
+	if mp, ok := store.Get("aqp", "m1"); !ok || mp.Chat != Yes {
+		t.Errorf("kept model = %+v, ok=%v — must survive pruning", mp, ok)
+	}
+	// Idempotent: nothing left to remove; unknown provider is a no-op.
+	if store.PruneModels("aqp", map[string]bool{"m1": true}) {
+		t.Error("second prune = true, want false (nothing to remove)")
+	}
+	if store.PruneModels("ghost", map[string]bool{}) {
+		t.Error("pruning an unknown provider = true, want false")
+	}
+	var nilStore *ModelStore
+	if nilStore.PruneModels("aqp", map[string]bool{}) {
+		t.Error("nil ModelStore PruneModels = true, want false")
+	}
+}
+
+func TestModelStoreReplaceProviderModels(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := &ModelStore{}
+	store.Put("aqp", "fp", "old", ModelProtocols{Chat: Yes}, now)
+
+	// Replace drops models absent from the fresh matrix and updates the stamp.
+	fresh := map[string]ModelProtocols{
+		"m1": {Chat: Yes, Anthropic: No, Responses: Yes},
+		"m2": {Chat: No, Anthropic: No, Responses: Yes},
+	}
+	store.ReplaceProviderModels("aqp", "fp", fresh, now.Add(time.Minute))
+	if _, ok := store.Get("aqp", "old"); ok {
+		t.Error("replaced entry kept a model absent from the fresh matrix")
+	}
+	if mp, ok := store.Get("aqp", "m2"); !ok || mp.Responses != Yes {
+		t.Errorf("replaced entry m2 = %+v, ok=%v", mp, ok)
+	}
+	if got := store.Snapshot()["aqp"].ProbedAt; !got.Equal(now.Add(time.Minute)) {
+		t.Errorf("ProbedAt = %v, want the replace stamp", got)
+	}
+	// The input map must not alias the store.
+	fresh["m1"] = ModelProtocols{}
+	if mp, _ := store.Get("aqp", "m1"); mp.Chat != Yes {
+		t.Error("ReplaceProviderModels aliased the caller's map")
+	}
+
+	// Stale-generation guard: a fingerprint mismatch against Restore's
+	// expected map is dropped like a stale Put.
+	store.Restore(store.Snapshot(), map[string]string{"aqp": "fp-new"})
+	store.ReplaceProviderModels("aqp", "fp", map[string]ModelProtocols{"ghost": {Chat: Yes}}, now)
+	if _, ok := store.Get("aqp", "ghost"); ok {
+		t.Error("stale-generation replace wrote over the current generation")
+	}
+	var nilStore *ModelStore
+	nilStore.ReplaceProviderModels("aqp", "fp", nil, now)
+}
+
 func TestModelStoreMarkResponsesUnsupported(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	store := &ModelStore{}

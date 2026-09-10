@@ -100,3 +100,6 @@ func (fakeCommands) BeginLogin(context.Context, string) (LoginStart, error) {
 func (fakeReads) Presets() []presets.Preset { return nil }
 
 func (fakeCommands) AddPreset(string) ([]string, string, error) { return nil, "", nil }
+func (fakeCommands) RefreshModels(string) (ModelsRefreshResult, error) {
+	return ModelsRefreshResult{}, nil
+}

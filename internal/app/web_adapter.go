@@ -12,7 +12,9 @@ import (
 	observestats "model-proxy/internal/observe/stats"
 	"model-proxy/internal/pricing"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
 	runtimewire "model-proxy/internal/runtime/wirecap"
+	"model-proxy/internal/upstreamproxy"
 	webtransport "model-proxy/internal/web"
 	"model-proxy/internal/webauth"
 	"net/http"
@@ -262,6 +264,35 @@ func (p *Proxy) adminPorts(
 		ProbeRuntime: func() (*configdomain.Config, map[string]provider.Provider) {
 			runtime := p.SnapshotRuntime()
 			return runtime.Cfg, runtime.Providers
+		},
+		ProviderImpl: func(name string) provider.Provider {
+			// Same parent-or-first-pooled-virtual resolution as the model-caps
+			// probe pass: the model list is per-upstream, not per-account.
+			p.mu.RLock()
+			defer p.mu.RUnlock()
+			impl := p.providers[name]
+			if impl == nil {
+				if vids := p.poolIndex[name]; len(vids) > 0 {
+					impl = p.providers[vids[0]]
+				}
+			}
+			return impl
+		},
+		ModelCapsReplace: func(name string, models map[string]runtimewire.ModelProtocols) {
+			p.mu.RLock()
+			provCfg, ok := p.cfg.Providers[name]
+			p.mu.RUnlock()
+			if !ok {
+				return
+			}
+			p.modelCaps.ReplaceProviderModels(name, providerbuild.ProtocolConfigFingerprint(provCfg), models, time.Now())
+			p.persistModelCaps()
+		},
+		ProbeHTTPClient: func() *http.Client {
+			p.mu.RLock()
+			timeout := p.cfg.Scheduling.Timeout()
+			p.mu.RUnlock()
+			return &http.Client{Timeout: timeout, Transport: upstreamproxy.AutoTransport()}
 		},
 		NewAqpClient:    newAqpClient,
 		NewCodexOptions: newCodexOptions,

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	configdomain "model-proxy/internal/config"
 	"model-proxy/internal/provider"
@@ -151,6 +152,49 @@ func TestProbeModelProtocolsRetryPerLeg(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("anthropic calls = %d, want 2 (initial + retry)", calls)
+	}
+}
+
+// TestProbeModelsBatchOrderAndConcurrency: the batch helper preserves input
+// order and bounds MODEL-level concurrency — each model fans its own legs out
+// concurrently (chat+responses here, no anthropic base), so HTTP-level
+// in-flight can reach concurrency × legs but never more.
+func TestProbeModelsBatchOrderAndConcurrency(t *testing.T) {
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ids := []string{"m1", "m2", "m3", "m4", "m5"}
+	prov := configdomain.Provider{OpenAIBaseURL: srv.URL}
+	out := ProbeModels(context.Background(), srv.Client(), prov, matrixImpl{}, ids, 2)
+	if len(out) != len(ids) {
+		t.Fatalf("results = %d, want %d", len(out), len(ids))
+	}
+	for i, id := range ids {
+		if out[i].ID != id {
+			t.Errorf("results[%d].ID = %q, want %q (input order preserved)", i, out[i].ID, id)
+		}
+		if r := legByName(out[i].Legs, LegChat); r.Status != 200 {
+			t.Errorf("results[%d] chat leg = %+v, want 200", i, r)
+		}
+	}
+	// 2 models in flight × 2 probed legs each = 4; a 3rd concurrent model
+	// would push it to 6.
+	if maxInFlight > 4 {
+		t.Errorf("max in-flight = %d, want <= 4 (2 models × 2 legs)", maxInFlight)
 	}
 }
 

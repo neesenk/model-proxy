@@ -7,6 +7,7 @@ import (
 
 	"model-proxy/internal/admin"
 	"model-proxy/internal/provider"
+	"model-proxy/internal/providerbuild"
 	runtimestate "model-proxy/internal/runtime"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 )
@@ -152,5 +153,68 @@ func TestAdminModelCapsPortProjectsDetachedSnapshot(t *testing.T) {
 	document := admin.New(ports).ModelsDocument()
 	if got := document.Providers["up"].Models["m1"]; got.Chat != "yes" || got.Anthropic != "no" || got.Responses != "unknown" {
 		t.Errorf("ModelsDocument = %+v, want yes/no/unknown strings", got)
+	}
+}
+
+// TestAdminModelCapsReplacePortStampsCurrentFingerprint: the ModelCapsReplace
+// port (models refresh) overwrites the provider's matrix wholesale, stamped
+// with the CURRENT generation's protocol fingerprint so the entry survives
+// the next boot's restore gate.
+func TestAdminModelCapsReplacePortStampsCurrentFingerprint(t *testing.T) {
+	p := newTestProxy(t, &Config{
+		Providers: map[string]Provider{
+			"up": {Provider: testProviderID, OpenAIBaseURL: "https://example.test", Models: []string{"m1"}},
+		},
+	})
+	p.modelCaps.Put("up", "stale", "old-m",
+		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triNo}, time.Now())
+
+	ports := p.adminPorts(func() string { return "" }, nil, nil)
+	ports.ModelCapsReplace("up", map[string]runtimewire.ModelProtocols{
+		"m1": {Chat: triYes, Anthropic: triNo, Responses: triYes},
+	})
+
+	if _, ok := p.modelCaps.Get("up", "old-m"); ok {
+		t.Error("replaced entry kept a model absent from the fresh matrix")
+	}
+	if mp, ok := p.modelCaps.Get("up", "m1"); !ok || mp.Responses != triYes {
+		t.Errorf("replaced matrix m1 = %+v ok=%v", mp, ok)
+	}
+	wantFP := providerbuild.ProtocolConfigFingerprint(p.cfg.Providers["up"])
+	if fp, _ := p.modelCaps.ProviderFingerprint("up"); fp != wantFP {
+		t.Errorf("fingerprint = %q, want the current generation's %q", fp, wantFP)
+	}
+	// Unknown providers are dropped, not created.
+	ports.ModelCapsReplace("ghost", map[string]runtimewire.ModelProtocols{"m": {Chat: triYes}})
+	if _, ok := p.modelCaps.Get("ghost", "m"); ok {
+		t.Error("ModelCapsReplace created an entry for an unconfigured provider")
+	}
+}
+
+// TestAdminProviderImplPortResolvesPoolFallback: ProviderImpl returns the
+// named provider's impl, falling back to the credential pool's first virtual
+// for pooled parents (the probe/fetch path mirrors the model-caps pass).
+func TestAdminProviderImplPortResolvesPoolFallback(t *testing.T) {
+	p := newTestProxy(t, &Config{
+		Providers: map[string]Provider{
+			"up": {Provider: testProviderID, OpenAIBaseURL: "https://example.test", Models: []string{"m1"}},
+		},
+	})
+	direct := &testProv{key: "direct"}
+	virtual := &testProv{key: "pool"}
+	p.providers["solo"] = direct
+	// A pooled parent has NO direct impl — only virtuals (production shape).
+	p.providers["pooled#a1"] = virtual
+	p.poolIndex["pooled"] = []string{"pooled#a1"}
+
+	ports := p.adminPorts(func() string { return "" }, nil, nil)
+	if got := ports.ProviderImpl("solo"); got != direct {
+		t.Errorf("ProviderImpl(solo) = %v, want the direct impl", got)
+	}
+	if got := ports.ProviderImpl("pooled"); got != virtual {
+		t.Errorf("ProviderImpl(pooled) = %v, want the pool's first virtual", got)
+	}
+	if got := ports.ProviderImpl("ghost"); got != nil {
+		t.Errorf("ProviderImpl(ghost) = %v, want nil", got)
 	}
 }

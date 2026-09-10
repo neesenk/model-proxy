@@ -18,6 +18,31 @@ func (s *Server) handleTokensReset(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
 }
 
+// handleModelsRefresh serves POST /api/models/refresh: the daemon twin of
+// `model-proxy models refresh <provider>` (fetch live list → 3-protocol probe
+// → write the callable subset to config → hot-reload → replace cached
+// verdicts). The result carries the kept list, the config diff, and any
+// unvalidated-write warning for the UI to surface.
+func (s *Server) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Provider string `json:"provider"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONErr(w, http.StatusBadRequest, "malformed JSON body: "+err.Error())
+		return
+	}
+	if req.Provider == "" {
+		writeJSONErr(w, http.StatusBadRequest, "provider is required")
+		return
+	}
+	result, err := s.commands.RefreshModels(req.Provider)
+	if err != nil {
+		writePortErr(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Provider string `json:"provider,omitempty"`

@@ -99,6 +99,59 @@ func (store *ModelStore) Put(parent, fingerprint, model string, mp ModelProtocol
 	store.caps[parent] = entry
 }
 
+// PruneModels drops verdicts for models not in keep under one provider — the
+// current config generation no longer serves them (removed from models:/routes
+// since the last probe pass). The protocol fingerprint does not cover the
+// model list, so pruning is how dropped models leave the store (and the
+// /api/models projection). Reports whether anything was removed.
+func (store *ModelStore) PruneModels(parent string, keep map[string]bool) bool {
+	if store == nil {
+		return false
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	entry, ok := store.caps[parent]
+	if !ok {
+		return false
+	}
+	pruned := false
+	for model := range entry.Models {
+		if !keep[model] {
+			delete(entry.Models, model)
+			pruned = true
+		}
+	}
+	return pruned
+}
+
+// ReplaceProviderModels overwrites one provider's whole model set with a
+// freshly probed matrix — used by models refresh (CLI `models refresh` and
+// POST /api/models/refresh), which validates the full candidate set in one
+// pass. Same stale-generation guard as Put: a refresh result computed against
+// a superseded config generation is dropped.
+func (store *ModelStore) ReplaceProviderModels(parent, fingerprint string, models map[string]ModelProtocols, now time.Time) {
+	if store == nil {
+		return
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if want, ok := store.expected[parent]; ok && want != fingerprint {
+		return
+	}
+	if store.caps == nil {
+		store.caps = map[string]ProviderModelCaps{}
+	}
+	copied := make(map[string]ModelProtocols, len(models))
+	for model, mp := range models {
+		copied[model] = mp
+	}
+	store.caps[parent] = ProviderModelCaps{
+		Fingerprint: fingerprint,
+		ProbedAt:    now,
+		Models:      copied,
+	}
+}
+
 // MarkResponsesUnsupported corrects a stale positive model-level verdict
 // after a verdict-selected /responses request receives a route-level 404.
 // No-op when the (parent, model) entry doesn't exist — a verdict-driven choice

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"model-proxy/internal/catalog"
@@ -73,47 +72,26 @@ func CheckProviderModels(cfg *configdomain.Config, provName string, ids []string
 
 	client := &http.Client{Timeout: cfg.Scheduling.Timeout(), Transport: upstreamproxy.AutoTransport()}
 
-	type result struct {
-		idx      int
-		id       string
-		legs     []probe.LegResult
-		verdicts runtimewire.ModelProtocols
-	}
-	results := make([]result, len(ids))
-
-	sem := make(chan struct{}, probeConcurrency)
-	var wg sync.WaitGroup
-	for i, id := range ids {
-		wg.Add(1)
-		go func(i int, id string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			legs := probe.ProbeModelProtocols(context.Background(), client, provCfg, impl, id)
-			mp := runtimewire.ModelProtocols{}
-			for _, leg := range legs {
-				v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
-				switch leg.Leg {
-				case probe.LegChat:
-					mp.Chat = v
-				case probe.LegAnthropic:
-					mp.Anthropic = v
-				case probe.LegResponses:
-					mp.Responses = v
-				}
+	probed := probe.ProbeModels(context.Background(), client, provCfg, impl, ids, probeConcurrency)
+	protocols = make(map[string]runtimewire.ModelProtocols, len(probed))
+	for _, r := range probed {
+		mp := runtimewire.ModelProtocols{}
+		for _, leg := range r.Legs {
+			v := runtimewire.ClassifyModelStatus(leg.Probed, leg.Status, leg.Err, leg.Body)
+			switch leg.Leg {
+			case probe.LegChat:
+				mp.Chat = v
+			case probe.LegAnthropic:
+				mp.Anthropic = v
+			case probe.LegResponses:
+				mp.Responses = v
 			}
-			results[i] = result{i, id, legs, mp}
-		}(i, id)
-	}
-	wg.Wait()
-
-	protocols = make(map[string]runtimewire.ModelProtocols, len(results))
-	for _, r := range results {
-		protocols[r.id] = r.verdicts
-		if r.verdicts.Chat == runtimewire.Yes || r.verdicts.Anthropic == runtimewire.Yes || r.verdicts.Responses == runtimewire.Yes {
-			kept = append(kept, r.id)
+		}
+		protocols[r.ID] = mp
+		if mp.Chat == runtimewire.Yes || mp.Anthropic == runtimewire.Yes || mp.Responses == runtimewire.Yes {
+			kept = append(kept, r.ID)
 		} else {
-			dropped = append(dropped, DropReason{Model: r.id, Status: legStatus(r.legs), Reason: legsSummary(r.legs)})
+			dropped = append(dropped, DropReason{Model: r.ID, Status: legStatus(r.Legs), Reason: legsSummary(r.Legs)})
 		}
 	}
 	persistModelCaps(provName, provCfg, protocols)

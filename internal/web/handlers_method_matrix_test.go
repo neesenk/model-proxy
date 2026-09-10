@@ -33,6 +33,9 @@ func TestServeAPIWrongMethodMatrix(t *testing.T) {
 		{http.MethodPost, "/api/presets"},
 		{http.MethodPut, "/api/quota/refresh"},
 		{http.MethodGet, "/api/health/reset"},
+		{http.MethodGet, "/api/health/freeze"},
+		{http.MethodGet, "/api/models/refresh"},
+		{http.MethodPut, "/api/models/refresh"},
 	}
 	for _, tc := range cases {
 		rec := guardRequest(t, tc.method, tc.path, "", "")

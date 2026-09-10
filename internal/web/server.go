@@ -261,6 +261,8 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleStatus(w, r)
 	case p == "/api/models" && r.Method == http.MethodGet:
 		s.handleModels(w, r)
+	case p == "/api/models/refresh" && r.Method == http.MethodPost:
+		s.handleModelsRefresh(w, r)
 	case p == "/api/logs" && r.Method == http.MethodGet:
 		s.handleLogs(w, r)
 	case p == "/api/requests" && r.Method == http.MethodGet:

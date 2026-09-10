@@ -8,6 +8,7 @@
 package admin
 
 import (
+	"net/http"
 	"time"
 
 	responsecache "model-proxy/internal/cache"
@@ -98,6 +99,20 @@ type Ports struct {
 	// one runtime snapshot, so an account probe can never pair one config
 	// generation with another generation's impl.
 	ProbeRuntime func() (cfg *configdomain.Config, providers map[string]provider.Provider)
+	// ProviderImpl resolves one provider's implementation for models
+	// fetch/probe: the named provider, or its credential pool's first virtual
+	// when pooled (the model list is per-upstream, not per-account). Nil when
+	// the provider is not built (not logged in).
+	ProviderImpl func(name string) provider.Provider
+	// ModelCapsReplace overwrites one provider's model-level verdict matrix
+	// with freshly probed results and persists model_caps.json (async). The
+	// closure computes the current generation's protocol fingerprint itself;
+	// stale-generation writes are dropped by the store.
+	ModelCapsReplace func(name string, models map[string]runtimewire.ModelProtocols)
+	// ProbeHTTPClient builds the HTTP client used for upstream model probes
+	// (proxy-chain transport + scheduling timeout). Transport policy stays
+	// composition-owned so admin never imports it.
+	ProbeHTTPClient func() *http.Client
 
 	// Login constructor seams. Production wires the login package defaults;
 	// tests point them at stub endpoints after construction.

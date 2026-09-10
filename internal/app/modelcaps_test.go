@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"model-proxy/internal/providerbuild"
 	runtimewire "model-proxy/internal/runtime/wirecap"
 )
 
@@ -187,6 +188,42 @@ func TestModelCaps_UnknownLegsReprobed(t *testing.T) {
 	}
 	if mp, _ := p.modelCaps.Get("p", "m1"); mp.Chat != triYes {
 		t.Errorf("chat leg after re-probe = %s, want yes", mp.Chat)
+	}
+}
+
+// TestModelCaps_StaleModelsPruned: models dropped from config since the last
+// pass (fingerprint unchanged — it does not cover the model list) are pruned
+// from the store on the next pass, so /api/models stops serving them; the
+// still-configured concluded models are NOT re-probed.
+func TestModelCaps_StaleModelsPruned(t *testing.T) {
+	openai := newMatrixUpstream(t, nil)
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"p": {OpenAIBaseURL: openai.srv.URL, Provider: testProviderID, Models: []string{"m1"}},
+		},
+		Routes: map[string][]RouteTarget{},
+	}
+	p := newTestProxy(t, cfg)
+	p.providers["p"] = &testProv{key: "k"}
+
+	// Pre-seed concluded verdicts under the CURRENT fingerprint: m1 (still
+	// configured) + stale (removed from models: since the last pass).
+	fp := providerbuild.ProtocolConfigFingerprint(cfg.Providers["p"])
+	p.modelCaps.Put("p", fp, "m1",
+		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triNo}, time.Now())
+	p.modelCaps.Put("p", fp, "stale",
+		runtimewire.ModelProtocols{Chat: triYes, Anthropic: triNo, Responses: triNo}, time.Now())
+
+	p.probeAllModelCaps()
+
+	if _, ok := p.modelCaps.Get("p", "stale"); ok {
+		t.Error("model dropped from config survived the probe pass — must be pruned")
+	}
+	if _, ok := p.modelCaps.Get("p", "m1"); !ok {
+		t.Error("configured model lost in pruning")
+	}
+	if total := openai.totalHits(); total != 0 {
+		t.Errorf("concluded models re-probed (%d hits), want 0 (fingerprint unchanged)", total)
 	}
 }
 

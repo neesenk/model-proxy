@@ -17,18 +17,20 @@ import (
 type commandFake struct {
 	mu sync.Mutex
 
-	resetStats  func() error
-	refresh     func(string) bool
-	resetHealth func(string) ([]string, int, error)
-	setPin      func(string, string, time.Duration) (appapi.Pin, bool)
-	clearPin    func(string) bool
-	save        func([]byte) error
-	validate    func([]byte) []appapi.ValidationIssue
-	edit        func(appapi.EditRequest) error
-	add         func(context.Context, string, appapi.AccountInput) (appapi.MutationResult, error)
-	probe       func(context.Context, string, string) (appapi.ProbeResult, error)
-	remove      func(string, string) (appapi.MutationResult, error)
-	begin       func(context.Context, string) (appapi.LoginStart, error)
+	resetStats   func() error
+	refresh      func(string) bool
+	resetHealth  func(string) ([]string, int, error)
+	freezeHealth func(string) ([]string, error)
+	setPin       func(string, string, time.Duration) (appapi.Pin, bool)
+	clearPin     func(string) bool
+	save         func([]byte) error
+	validate     func([]byte) []appapi.ValidationIssue
+	edit         func(appapi.EditRequest) error
+	add          func(context.Context, string, appapi.AccountInput) (appapi.MutationResult, error)
+	probe        func(context.Context, string, string) (appapi.ProbeResult, error)
+	remove       func(string, string) (appapi.MutationResult, error)
+	begin        func(context.Context, string) (appapi.LoginStart, error)
+	refreshMdls  func(string) (appapi.ModelsRefreshResult, error)
 }
 
 func (fake *commandFake) ResetStats() error {
@@ -178,6 +180,53 @@ func TestCommandTokensResetContract(t *testing.T) {
 	t.Run("error", func(t *testing.T) {
 		server := newCommandTestServer(t, &commandFake{resetStats: func() error { return errors.New("sqlite unavailable") }})
 		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/tokens/reset", ""), http.StatusInternalServerError, map[string]any{"error": "sqlite unavailable"})
+	})
+}
+
+func TestCommandModelsRefreshContract(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		var gotProvider string
+		server := newCommandTestServer(t, &commandFake{refreshMdls: func(provider string) (appapi.ModelsRefreshResult, error) {
+			gotProvider = provider
+			return appapi.ModelsRefreshResult{
+				Provider:      provider,
+				Kept:          []string{"glm"},
+				Added:         []string{"glm"},
+				Removed:       []string{},
+				PolicyDropped: []string{},
+				ProbeDropped:  []appapi.ModelsRefreshDrop{},
+				ConfigUpdated: true,
+			}, nil
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/refresh", `{"provider":"zhipu"}`), http.StatusOK, map[string]any{
+			"provider":       "zhipu",
+			"kept":           []any{"glm"},
+			"added":          []any{"glm"},
+			"removed":        []any{},
+			"policy_dropped": []any{},
+			"probe_dropped":  []any{},
+			"config_updated": true,
+		})
+		if gotProvider != "zhipu" {
+			t.Fatalf("RefreshModels provider=%q want zhipu", gotProvider)
+		}
+	})
+	t.Run("missing provider field", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/refresh", `{}`), http.StatusBadRequest, map[string]any{"error": "provider is required"})
+	})
+	t.Run("malformed body", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{})
+		rec := commandRequest(server, http.MethodPost, "/api/models/refresh", "not-json")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("malformed body status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("command error maps to port status", func(t *testing.T) {
+		server := newCommandTestServer(t, &commandFake{refreshMdls: func(string) (appapi.ModelsRefreshResult, error) {
+			return appapi.ModelsRefreshResult{}, appapi.NewHTTPError(http.StatusNotFound, "unknown provider: ghost")
+		}})
+		requireCommandResponse(t, commandRequest(server, http.MethodPost, "/api/models/refresh", `{"provider":"ghost"}`), http.StatusNotFound, map[string]any{"error": "unknown provider: ghost"})
 	})
 }
 
@@ -515,3 +564,10 @@ func TestCommandLoginContract(t *testing.T) {
 }
 
 func (*commandFake) AddPreset(string) ([]string, string, error) { return nil, "", nil }
+
+func (fake *commandFake) RefreshModels(provider string) (appapi.ModelsRefreshResult, error) {
+	if fake.refreshMdls != nil {
+		return fake.refreshMdls(provider)
+	}
+	return appapi.ModelsRefreshResult{Provider: provider}, nil
+}

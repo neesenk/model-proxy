@@ -142,6 +142,28 @@ type ModelsDocument struct {
 	Providers map[string]ProviderModelCaps `json:"providers"`
 }
 
+// ModelsRefreshDrop is one model dropped by the models-refresh endpoint probe,
+// with the per-leg reason summary (same rendering as the CLI's drop summary).
+type ModelsRefreshDrop struct {
+	Model  string `json:"model"`
+	Reason string `json:"reason"`
+}
+
+// ModelsRefreshResult is the outcome of POST /api/models/refresh (the daemon
+// twin of `model-proxy models refresh <provider>`): the validated model list,
+// the config diff it produced, and a warning when the list was written
+// unvalidated (fetch/probe infra down or an all-failed probe).
+type ModelsRefreshResult struct {
+	Provider      string              `json:"provider"`
+	Kept          []string            `json:"kept"`
+	Added         []string            `json:"added"`
+	Removed       []string            `json:"removed"`
+	PolicyDropped []string            `json:"policy_dropped"`
+	ProbeDropped  []ModelsRefreshDrop `json:"probe_dropped"`
+	Warning       string              `json:"warning,omitempty"`
+	ConfigUpdated bool                `json:"config_updated"`
+}
+
 // StatsQuery is the normalized query passed through the read port.
 type StatsQuery struct {
 	From       int64
@@ -334,6 +356,14 @@ type CommandAPI interface {
 	// block is already persisted). Credentials are added afterwards through
 	// AddAccount/BeginLogin as usual.
 	AddPreset(name string) (warnings []string, reloadWarning string, err error)
+	// RefreshModels is the daemon twin of `model-proxy models refresh
+	// <provider>`: fetch the provider's live model list, probe every candidate
+	// with the 3-protocol matrix, overwrite providers.<name>.models with the
+	// callable subset, hot-reload, and replace the provider's cached verdicts
+	// with the fresh matrix. Safety nets mirror the CLI — a fetch/probe
+	// outage never wipes models:, the list is written unvalidated with a
+	// warning instead.
+	RefreshModels(provider string) (ModelsRefreshResult, error)
 }
 
 // RequirePorts validates that both application ports are present. It is

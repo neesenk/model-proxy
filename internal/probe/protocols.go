@@ -187,6 +187,38 @@ func legBody(leg Leg, model string) []byte {
 	return nil
 }
 
+// ModelLegs is one model's full leg set from ProbeModels (input order
+// preserved).
+type ModelLegs struct {
+	ID   string
+	Legs []LegResult
+}
+
+// ProbeModels probes a batch of models with ProbeModelProtocols under a
+// bounded concurrency (values < 1 degrade to sequential), preserving input
+// order. Shared by `models refresh` (CLI) and the daemon's
+// POST /api/models/refresh so the fan-out discipline lives in exactly one
+// place; verdict classification of the legs stays with each caller.
+func ProbeModels(ctx context.Context, client *http.Client, prov configdomain.Provider, impl provider.Provider, ids []string, concurrency int) []ModelLegs {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	out := make([]ModelLegs, len(ids))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[i] = ModelLegs{ID: id, Legs: ProbeModelProtocols(ctx, client, prov, impl, id)}
+		}(i, id)
+	}
+	wg.Wait()
+	return out
+}
+
 // PickModel picks the model id used in probe bodies: the provider's first
 // configured model, else the first explicit route target pointing at it, else
 // a derived route target for it. Shared by the daemon's capability probing and

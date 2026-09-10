@@ -4,7 +4,10 @@
 // model_caps.json. The cache is invalidated ONLY by the provider's
 // protocol-relevant config fingerprint (base urls / provider_id / headers) —
 // an unchanged fingerprint means no re-probe (no TTL); legs that concluded
-// Unknown (auth/quota/5xx/network) are re-probed on the next pass.
+// Unknown (auth/quota/5xx/network) are re-probed on the next pass. The
+// fingerprint does NOT cover the model list: each pass prunes verdicts for
+// models the current config no longer serves (removed from models:/routes),
+// so the store and /api/models never serve dropped models.
 //
 // The verdicts feed two consumers: forward's protocol selection
 // (resolvedBackendProto inserts the model-level matrix between ProtocolHint
@@ -86,11 +89,22 @@ func (p *Proxy) probeAllModelCaps() {
 	client := &http.Client{Timeout: wireCapProbeTimeout, Transport: upstreamproxy.AutoTransport()}
 	sem := make(chan struct{}, wireCapProbeConcurrency)
 	var wg sync.WaitGroup
-	probed := false
+	dirty := false
 	now := time.Now()
 	for name, provCfg := range cfg.Providers {
 		fp := providerbuild.ProtocolConfigFingerprint(provCfg)
 		models := modelCapsModels(cfg, derived, name)
+		// Prune verdicts for models the current config no longer serves. The
+		// fingerprint does not cover the model list, so without this a model
+		// removed from models:/routes would linger in the store (and in
+		// /api/models) forever.
+		keep := make(map[string]bool, len(models))
+		for _, m := range models {
+			keep[m] = true
+		}
+		if p.modelCaps.PruneModels(name, keep) {
+			dirty = true
+		}
 		if provider.ProtocolHint(provCfg.Provider, "") != "" {
 			// Hint-covered provider (codex → responses): the protocol is known
 			// without probing. Synthesize once, then the fingerprint skip
@@ -103,7 +117,7 @@ func (p *Proxy) probeAllModelCaps() {
 							Anthropic: triNo,
 							Responses: triYes,
 						}, now)
-						probed = true
+						dirty = true
 					}
 				}
 			}
@@ -134,7 +148,7 @@ func (p *Proxy) probeAllModelCaps() {
 		if len(models) == 0 {
 			continue
 		}
-		probed = true
+		dirty = true
 		for _, model := range models {
 			wg.Add(1)
 			go func(name string, provCfg Provider, impl provider.Provider, fp, model string) {
@@ -170,7 +184,7 @@ func (p *Proxy) probeAllModelCaps() {
 		}
 	}
 	wg.Wait()
-	if probed {
+	if dirty {
 		p.persistModelCaps()
 	}
 }
