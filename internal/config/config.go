@@ -672,7 +672,8 @@ type Provider struct {
 	// value = the exposed name clients call. The route target still forwards
 	// the real upstream model name, so providers that name the same model
 	// differently (e.g. kimi-code's "k3" vs everyone else's "kimi-k3") can be
-	// aggregated under one exposed name.
+	// aggregated under one exposed name. Responses are normalized back to the
+	// exposed name before commit (docs/architecture/protocol-conversion.md).
 	Alias map[string]string `yaml:"alias"`
 	// Capabilities is a manual per-model capability override — the escape hatch
 	// for models the models.dev catalog doesn't know (codex/aqp/volcengine blind

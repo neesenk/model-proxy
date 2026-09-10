@@ -323,6 +323,13 @@ func (executor Executor) commit(
 	if modeMismatch {
 		clientStream = clientWantsStream
 	}
+	// Response model normalization (provider alias): when the target's real
+	// upstream model differs from the called name, upstreams echo THEIR model
+	// in the response and clients learn an id they never called. The rewrite
+	// applies to the final client-facing bytes (before logging/usage/cache, so
+	// a cache hit replays the same normalized bytes); "" keeps the zero-copy
+	// passthrough byte-identical.
+	normalizeModel := responseModelNormalization(plan, scope)
 	var converted []byte
 	if modeMismatch || (convert && !upstreamStream) {
 		all, readErr := readCapped(response.Body, maxConvertBufferBytes)
@@ -355,6 +362,38 @@ func (executor Executor) commit(
 				executor.Responses.RecordJSON(scope.ResponsesSession, scope.ResponsesHistory, converted)
 			}
 		}
+	}
+	// Same-protocol non-stream passthrough normally streams the body through
+	// untouched; an alias target instead buffers it once so the model field can
+	// be normalized before commit (a read failure fails closed, exactly like
+	// the buffered conversion above).
+	if normalizeModel != "" && !transformed && response.StatusCode < 300 && !upstreamStream {
+		all, readErr := readCapped(response.Body, maxConvertBufferBytes)
+		response.Body.Close()
+		if readErr != nil {
+			logx.Warnf("[proto=%s provider=%s] response read for model normalization failed: %v — failing closed",
+				plan.ClientProtocol(), dto.Target.Provider, readErr)
+			http.Error(
+				exchange.Writer,
+				"upstream response read failed during model normalization",
+				http.StatusBadGateway,
+			)
+			return Result{Committed: true}
+		}
+		// The body is already consumed and closed, so it must be served from
+		// the buffer either way; only a CHANGED body drops Content-Length.
+		normalized := protocol.NormalizeResponseModel(all, plan.ClientProtocol(), normalizeModel)
+		if !bytes.Equal(normalized, all) {
+			transformed = true
+		}
+		converted = normalized
+	}
+	// SSE normalization rewrites frame bytes in flight, so any upstream
+	// Content-Length no longer describes the client body — treat the stream as
+	// transformed for header purposes (strip length headers here and in the
+	// cached replay headers).
+	if normalizeModel != "" && response.StatusCode < 300 && upstreamStream {
+		transformed = true
 	}
 	// Hop-by-hop headers belong to ONE transport connection, never to the
 	// client (RFC 9110 §7.6.1): strip Connection (plus every header it names),
@@ -402,6 +441,11 @@ func (executor Executor) commit(
 			// net/http body contract broken).
 			body = &convertedStreamBody{reader: protocol.ConvertSSE(response.Body, plan.ClientProtocol(), plan.BackendProtocol(), plan.Target().Model, scope.ResponseContext), source: response.Body}
 		}
+	} else if converted != nil {
+		body = io.NopCloser(bytes.NewReader(converted))
+	}
+	if normalizeModel != "" && response.StatusCode < 300 && converted == nil && upstreamStream {
+		body = protocol.NormalizeSSEModelStream(body, plan.ClientProtocol(), normalizeModel)
 	}
 	if plan.ClientProtocol() == protocol.Responses && executor.Responses != nil && len(scope.ResponsesHistory) > 0 && converted == nil && upstreamStream && response.StatusCode < 300 {
 		responses := executor.Responses
@@ -437,7 +481,7 @@ func (executor Executor) commit(
 			plan.ClientProtocol(), dto.Target.Provider)
 	}
 	if recorder != nil && recorder.Complete() && len(recorder.Body()) > 0 {
-		cache.Put(scope.CacheKey, response.StatusCode, responsecache.HeaderForCapturedBody(response.Header, convert, modeMismatch, clientWantsStream), recorder.Body(), time.Now())
+		cache.Put(scope.CacheKey, scope.CalledModel, response.StatusCode, responsecache.HeaderForCapturedBody(response.Header, transformed, modeMismatch, clientWantsStream), recorder.Body(), time.Now())
 	}
 	dto.TotalMilliseconds = time.Since(dto.Started).Milliseconds()
 	dto.TTFTMilliseconds = dto.TotalMilliseconds
@@ -491,6 +535,10 @@ func convertBuffered(all []byte, status int, convert, upstreamStream, clientWant
 	if status >= 400 && convert {
 		return protocol.ConvertErrorResponse(all, plan.ClientProtocol(), plan.BackendProtocol(), status)
 	}
+	normalizeModel := ""
+	if status < 300 {
+		normalizeModel = responseModelNormalization(plan, scope)
+	}
 	if upstreamStream && !clientWantsStream {
 		if convert {
 			var err error
@@ -499,7 +547,11 @@ func convertBuffered(all []byte, status int, convert, upstreamStream, clientWant
 				return nil, err
 			}
 		}
-		return protocol.AggregateSSE(all, plan.ClientProtocol())
+		aggregated, err := protocol.AggregateSSE(all, plan.ClientProtocol())
+		if err != nil {
+			return nil, err
+		}
+		return protocol.NormalizeResponseModel(aggregated, plan.ClientProtocol(), normalizeModel), nil
 	}
 	if !upstreamStream && clientWantsStream {
 		var err error
@@ -509,12 +561,31 @@ func convertBuffered(all []byte, status int, convert, upstreamStream, clientWant
 				return nil, err
 			}
 		}
+		// Normalize the JSON BEFORE synthesizing SSE so every stamped frame
+		// carries the called model.
+		all = protocol.NormalizeResponseModel(all, plan.ClientProtocol(), normalizeModel)
 		return protocol.ResponseToSSE(all, plan.ClientProtocol())
 	}
 	if convert {
-		return protocol.ConvertResponse(all, plan.ClientProtocol(), plan.BackendProtocol(), scope.ResponseContext)
+		converted, err := protocol.ConvertResponse(all, plan.ClientProtocol(), plan.BackendProtocol(), scope.ResponseContext)
+		if err != nil {
+			return nil, err
+		}
+		return protocol.NormalizeResponseModel(converted, plan.ClientProtocol(), normalizeModel), nil
 	}
 	return all, nil
+}
+
+// responseModelNormalization reports the client-facing model name when the
+// target's real upstream model differs from the called (exposed) name — the
+// provider-alias case. "" means no rewrite: same-name targets keep the
+// zero-copy passthrough with zero parsing overhead.
+func responseModelNormalization(plan Plan, scope Scope) string {
+	called := scope.CalledModel
+	if called == "" || plan.Target().Model == "" || plan.Target().Model == called {
+		return ""
+	}
+	return called
 }
 
 func (executor Executor) release(provider string) {

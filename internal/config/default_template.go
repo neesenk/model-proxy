@@ -133,15 +133,18 @@ providers:
     openai_base_url: https://api.kimi.com/coding/v1
     anthropic_base_url: https://api.kimi.com/coding
     usage_url: https://api.kimi.com/coding/v1/usages
-    # alias exposes k3 under the unified third-party name kimi-k3 (upstream
-    # still receives "k3"), so providers naming the same model differently
-    # aggregate into one route.
+    # alias exposes k3 under the unified third-party name kimi-k3, so providers
+    # naming the same model differently aggregate into one route. Requests are
+    # rewritten to the upstream name "k3"; the response's model field is
+    # normalized back to the called name, so clients only ever see "kimi-k3".
     alias:
       k3: kimi-k3
+      kimi-for-coding: kimi-k2.7-code
     models:
+      - k3
+      - k3-256k
       - kimi-for-coding
       - kimi-for-coding-highspeed
-      - k3
 
   # Qianwen Token Plan 个人版 (千问 AI Token Plan personal edition). API key via
   # 'login qwen-plan' (from the Token Plan console; key format sk-sp-…). Two

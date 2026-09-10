@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"model-proxy/internal/catalog"
+	"model-proxy/internal/observe/counters"
 )
 
 // liveTimeout caps one upstream round trip.
@@ -528,5 +529,145 @@ func TestLive_AnthropicPassthrough(t *testing.T) {
 	liveStatusOK(t, status, raw)
 	if !strings.Contains(raw, `"type":"message"`) {
 		t.Fatalf("live: not an anthropic message response:\n%s", liveExcerpt(raw))
+	}
+}
+
+// TestLive_AliasResponseModelNormalization is the live counterpart of
+// TestForward_AliasResponseModelNormalizationE2E and pins the original
+// client-resume regression ("Could not restore model model-proxy/k3"): on
+// the kimi-code alias shape (client calls kimi-k3, upstream serves k3) the
+// request leaves as k3 — proven by target-model commit metrics — while
+// every client-facing response path carries the called model kimi-k3.
+func TestLive_AliasResponseModelNormalization(t *testing.T) {
+	t.Run("OpenAITarget", func(t *testing.T) {
+		cfg := liveConfig(t)
+		liveRequireKimiK3(t, cfg)
+		srv, p := liveProxy(t, cfg, map[string][]RouteTarget{
+			"kimi-k3": {{Provider: "kimi-code", Model: "k3", Protocol: "openai"}},
+		}, "kimi-code")
+		defer srv.Close()
+
+		// Buffered chat: the response model echoes the CALLED name…
+		status, raw := livePost(t, srv, "/v1/chat/completions",
+			`{"model":"kimi-k3","max_tokens":32,"messages":[{"role":"user","content":"reply with exactly: pong"}]}`)
+		liveStatusOK(t, status, raw)
+		var chat struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal([]byte(raw), &chat); err != nil {
+			t.Fatalf("live: response is not a chat completion JSON: %v\n%s", err, liveExcerpt(raw))
+		}
+		if chat.Model != "kimi-k3" {
+			t.Fatalf("live: buffered chat model = %q, want called model kimi-k3:\n%s", chat.Model, liveExcerpt(raw))
+		}
+		// …while the upstream really was called as k3 (target-model commit
+		// metrics). Without this, the assertions above would also pass if
+		// kimi one day echoes kimi-k3 itself and would prove nothing about
+		// normalization.
+		awaitCommitMetrics(t, p, counters.PMKey{Provider: "kimi-code", Model: "k3"})
+
+		// Streamed chat: every chunk's model is the called name. The check
+		// is structural — content text may legitimately contain "k3".
+		status, raw = livePost(t, srv, "/v1/chat/completions",
+			`{"model":"kimi-k3","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"reply with exactly: pong"}]}`)
+		liveStatusOK(t, status, raw)
+		chunks := 0
+		for _, ev := range parseSSE(raw) {
+			if ev.data == "[DONE]" {
+				continue
+			}
+			m := unmarshalMap(t, []byte(ev.data))
+			if model := strOpt(m["model"]); model != "" {
+				chunks++
+				if model != "kimi-k3" {
+					t.Fatalf("live: stream chunk model = %q, want kimi-k3:\n%s", model, liveExcerpt(raw))
+				}
+			}
+		}
+		if chunks == 0 {
+			t.Fatalf("live: no chat chunk carried a model field:\n%s", liveExcerpt(raw))
+		}
+
+		// Anthropic ingress against the same openai target exercises the
+		// conversion path: message_start's nested message.model.
+		status, raw = livePost(t, srv, "/v1/messages",
+			`{"model":"kimi-k3","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"reply with exactly: pong"}]}`)
+		liveStatusOK(t, status, raw)
+		liveRequireAnthropicStreamModel(t, raw, "kimi-k3")
+	})
+
+	t.Run("AnthropicPassthrough", func(t *testing.T) {
+		cfg := liveConfig(t)
+		liveRequireKimiK3(t, cfg)
+		if cfg.Providers["kimi-code"].AnthropicBaseURL == "" {
+			t.Skip("live: kimi-code has no anthropic_base_url")
+		}
+		srv, _ := liveProxy(t, cfg, map[string][]RouteTarget{
+			"kimi-k3": {{Provider: "kimi-code", Model: "k3", Protocol: "anthropic"}},
+		}, "kimi-code")
+		defer srv.Close()
+
+		// Buffered: top-level message model on the zero-copy path.
+		status, raw := livePost(t, srv, "/v1/messages",
+			`{"model":"kimi-k3","max_tokens":32,"messages":[{"role":"user","content":"reply with exactly: pong"}]}`)
+		liveStatusOK(t, status, raw)
+		var msg struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+			t.Fatalf("live: response is not an anthropic message JSON: %v\n%s", err, liveExcerpt(raw))
+		}
+		if msg.Model != "kimi-k3" {
+			t.Fatalf("live: anthropic buffered model = %q, want kimi-k3:\n%s", msg.Model, liveExcerpt(raw))
+		}
+
+		// Streamed: the nested message_start message.model splice.
+		status, raw = livePost(t, srv, "/v1/messages",
+			`{"model":"kimi-k3","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"reply with exactly: pong"}]}`)
+		liveStatusOK(t, status, raw)
+		liveRequireAnthropicStreamModel(t, raw, "kimi-k3")
+	})
+}
+
+// liveRequireKimiK3 skips unless the kimi-code provider still declares k3 —
+// the alias scenario this suite pins no longer exists without it.
+func liveRequireKimiK3(t *testing.T, cfg *Config) {
+	t.Helper()
+	prov, ok := cfg.Providers["kimi-code"]
+	if !ok {
+		t.Skip(`live: provider "kimi-code" not in config`)
+	}
+	for _, m := range prov.Models {
+		if m == "k3" {
+			return
+		}
+	}
+	t.Skip("live: kimi-code no longer declares k3 — alias scenario gone")
+}
+
+// liveRequireAnthropicStreamModel requires exactly one message_start event
+// whose nested message.model is want, and no event exposing any other model.
+func liveRequireAnthropicStreamModel(t *testing.T, raw, want string) {
+	t.Helper()
+	starts := 0
+	for _, ev := range parseSSE(raw) {
+		m := unmarshalMap(t, []byte(ev.data))
+		if model := strOpt(m["model"]); model != "" && model != want {
+			t.Fatalf("live: anthropic event model = %q, want %s:\n%s", model, want, liveExcerpt(raw))
+		}
+		if sseEventType(ev) != "message_start" {
+			continue
+		}
+		starts++
+		message := asMap(m["message"])
+		if message == nil {
+			t.Fatalf("live: message_start without message object:\n%s", liveExcerpt(raw))
+		}
+		if model := strOpt(message["model"]); model != want {
+			t.Fatalf("live: message_start message.model = %q, want %s:\n%s", model, want, liveExcerpt(raw))
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("live: message_start events = %d, want 1:\n%s", starts, liveExcerpt(raw))
 	}
 }

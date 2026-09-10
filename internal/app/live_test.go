@@ -553,10 +553,15 @@ func TestForward_EmitsLiveEvents(t *testing.T) {
 // TestForward_LiveEndEventCarriesStreamUsage proves that the terminal live
 // event is published only after the client-facing SSE stream has passed through
 // targetexec's usage capture. The usage frame is the normal OpenAI Chat
-// completion shape, rather than a synthetic event DTO.
+// completion shape, rather than a synthetic event DTO. The route's target model
+// (gpt-x) differs from the called model (glm), so the client-facing stream is
+// model-normalized while the usage frames pass through.
 func TestForward_LiveEndEventCarriesStreamUsage(t *testing.T) {
 	const upstreamStream = "data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
 		"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9,\"total_tokens\":26}}\n\n" +
+		"data: [DONE]\n\n"
+	const clientStream = "data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"model\":\"glm\",\"choices\":[],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":9,\"total_tokens\":26}}\n\n" +
 		"data: [DONE]\n\n"
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/event-stream")
@@ -590,7 +595,7 @@ func TestForward_LiveEndEventCarriesStreamUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("content-type"), "text/event-stream") || string(body) != upstreamStream {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("content-type"), "text/event-stream") || string(body) != clientStream {
 		t.Fatalf("client stream status=%d content-type=%q body=%q", resp.StatusCode, resp.Header.Get("content-type"), body)
 	}
 
