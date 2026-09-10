@@ -75,7 +75,8 @@ func TestConfigInitWizard_SelectProviders(t *testing.T) {
 		t.Fatalf("providers = %v, want exactly deepseek+zhipu", cfg.Providers)
 	}
 	// No explicit routes are written; the table is derived from the selected
-	// providers, so unselected providers (codex/gpt-5.5) contribute nothing.
+	// providers, so unselected providers (codex/gpt-6-astra, codex-only model)
+	// contribute nothing.
 	if len(cfg.Routes) != 0 {
 		t.Errorf("wizard wrote explicit routes %v, want none (routes are derived)", cfg.Routes)
 	}
@@ -85,8 +86,8 @@ func TestConfigInitWizard_SelectProviders(t *testing.T) {
 			derived[prov.ExposedModelName(m)] = true
 		}
 	}
-	if derived["gpt-5.5"] {
-		t.Errorf("gpt-5.5 derived although codex was not selected")
+	if derived["gpt-6-astra"] {
+		t.Errorf("gpt-6-astra derived although codex was not selected")
 	}
 
 	for _, want := range []string{"model-proxy login deepseek", "model-proxy login zhipu", "model-proxy serve", "model-proxy test deepseek-v4-pro"} {
@@ -157,7 +158,7 @@ func TestConfigInitWizard_TakeoverConfirmed(t *testing.T) {
 	if strings.Contains(out, "model-proxy takeover claude") {
 		t.Errorf("next steps still suggest takeover after it ran:\n%s", out)
 	}
-	if !strings.Contains(out, "model-proxy test gpt-5.5") {
+	if !strings.Contains(out, "model-proxy test gpt-5.6-luna") {
 		t.Errorf("output missing codex test hint:\n%s", out)
 	}
 }

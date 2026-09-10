@@ -53,16 +53,30 @@ providers:
     # peak_hours:                       # multi-segment, per-segment multiplier
     #   - {window: "14:00-18:00", multiplier: 2}
     models:
-      - glm-5.2
-      - deepseek-v4-pro
+      - claude-opus-4-8
+      - claude-opus-5
+      - claude-sonnet-5
       - deepseek-v4-flash
+      - deepseek-v4-pro
+      - glm-5.2
+      - glm-5.3
+      - glm-5.3-flash
+      - gpt-5.6-luna
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - kimi-k3
   codex:
     openai_base_url: https://chatgpt.com/backend-api/codex
     # client_version: "0.144.1"   # optional; auto-detected from codex CLI if omitted
     provider_id: codex
     priority: 1
+    # gpt-5.4 omitted: upstream rejects it for ChatGPT-account Codex access
+    # ("The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account").
     models:
-      - gpt-5.5
+      - gpt-5.6-luna
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - gpt-6-astra
   # External provider (Zhipu BigModel — API key via login zhipu)
   # /models endpoint only lists 8 chat models; multimodal models exist but
   # must be added manually here (they use different API paths). Metadata
@@ -77,16 +91,10 @@ providers:
                                        # authoritative — models.dev metadata is ignored for it.
     usage_url: https://open.bigmodel.cn/api/monitor/usage/quota/limit  # usage zhipu: 5h/weekly/monthly quota + token consumption
     models:
-      - glm-5.2
-      - glm-5.1
-      - glm-5
       - glm-5-turbo
-      - glm-4.7
-      - glm-4.6
-      - glm-4.5
-      - glm-4.5-air
-      - glm-4v-plus
-      - cogview-4-plus
+      - glm-5.2
+      - glm-5.3
+      - glm-5.3-flash
   # DeepSeek (API key via 'login deepseek'). One key serves both protocols; the
   # two endpoints are per-protocol: openai_base_url = OpenAI base, anthropic_base_url =
   # Anthropic base (no /v1; proxy keeps the client /v1/messages path).
@@ -103,6 +111,8 @@ providers:
     models:
       - deepseek-v4-pro
       - deepseek-v4-flash
+      - deepseek-v4-flash-vision-exp
+      - deepseek-v4.1-flash-expires-on-0910
 
   # Volcengine Ark (火山方舟, including 'Agent Plan'). API key via 'login volcengine'.
   # Two protocol bases: openai_base_url = Ark OpenAI base, anthropic_base_url =
@@ -115,10 +125,15 @@ providers:
     anthropic_base_url: https://ark.cn-beijing.volces.com/api/plan
     usage_url: https://ark.cn-beijing.volces.com/api/plan/v3/models
     models:
-      - doubao-seed-1-8-251228
-      - doubao-seed-2-0-code
-      - doubao-seed-1-6-251015
-      - doubao-seed-2-0-lite-260428
+      - deepseek-v4-flash
+      - deepseek-v4-pro
+      - doubao-seed-evolving
+      - glm-5.2
+      - glm-5.3
+      - glm-5.3-flash
+      - kimi-k2.7-code
+      - kimi-k3
+      - minimax-m3
 
   # Kimi Code (Moonshot membership coding plan). API key via 'login kimi-code'
   # (from https://www.kimi.com/code/console). Two protocol bases under one
