@@ -171,6 +171,11 @@ type ScheduleInput struct {
 	QualityTTFTWeight float64
 	Commit            bool
 	Generation        uint64
+	// IgnorePins renders the schedule as if no operator pin existed. Only
+	// meaningful for read-only previews (Commit=false): the dashboard overlays
+	// the pin on the DEFAULT chain instead of showing the pin-narrowed chain,
+	// so operators can see what the pin overrides.
+	IgnorePins bool
 }
 
 // ScheduleFacts is the quota projection used for one input target. Facts stays

@@ -134,7 +134,9 @@ func TestSetPin_Validation(t *testing.T) {
 }
 
 // TestScheduleStatus_ShowsPin: /debug/schedule labels a pinned route with its
-// pin provider + expiry, and the pin's narrowing of `ordered` is visible.
+// pin provider + expiry, and OVERLAYS the pin on the default scheduling chain:
+// `ordered` keeps the unpinned chain (what unpinning restores) while `first`
+// stays the effective pin-applied choice.
 func TestScheduleStatus_ShowsPin(t *testing.T) {
 	cfg := &Config{
 		Providers: map[string]Provider{
@@ -164,9 +166,14 @@ func TestScheduleStatus_ShowsPin(t *testing.T) {
 	if ri.PinExpires == "" {
 		t.Error("pin_expires empty; want an 'expires in' label")
 	}
-	// Pin narrowed ordered to deepseek only.
-	if len(ri.Ordered) != 1 || ri.Ordered[0].Provider != "deepseek" {
-		t.Errorf("ordered=%+v want [deepseek] (pin narrows it)", ri.Ordered)
+	// Pin overlays the DEFAULT chain: ordered keeps both providers in their
+	// unpinned order (zhipu p1 first), while first reports the effective
+	// pin-applied choice (deepseek).
+	if len(ri.Ordered) != 2 || ri.Ordered[0].Provider != "zhipu" || ri.Ordered[1].Provider != "deepseek" {
+		t.Errorf("ordered=%+v want [zhipu deepseek] (default chain preserved under pin)", ri.Ordered)
+	}
+	if ri.First != "deepseek" {
+		t.Errorf("first=%q want deepseek (effective pin-applied choice)", ri.First)
 	}
 }
 

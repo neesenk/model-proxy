@@ -255,7 +255,7 @@ func scheduleStatusFromSnapshot(
 				PeakMultiplier:  pconf.PeakMultiplier(now),
 			}
 		}
-		decision := RuntimeSnapshot.PreviewOrder(runtimestate.ScheduleInput{
+		baseInput := runtimestate.ScheduleInput{
 			Exposed:           exposed,
 			Targets:           runtimeTargets,
 			RouteKeys:         routeKeys,
@@ -266,21 +266,30 @@ func scheduleStatusFromSnapshot(
 			QualityErrWeight:  cfg.Scheduling.QualityErrorWeightValue(),
 			QualityTTFTWeight: cfg.Scheduling.QualityTTFTWeightValue(),
 			Generation:        RuntimeSnapshot.Generation,
-		})
+		}
+		// Surface an active manual pin (hot-switch) so /debug/schedule shows WHY
+		// a route is narrowed to one provider, plus its expiry. The pin is
+		// OVERLAID on the default scheduling chain rather than replacing it:
+		// `ordered` carries the unpinned chain (IgnorePins — what unpinning
+		// restores) while `first` stays the EFFECTIVE choice, computed from
+		// the pin-applied preview.
+		pin, pinned := RuntimeSnapshot.Pins[exposed]
+		ri := routeInfo{}
+		if pinned {
+			ri.Pin = pin.Provider
+			ri.PinExpires = pin.ExpiresLabel(now)
+			if eff := RuntimeSnapshot.PreviewOrder(baseInput); len(eff.Order) > 0 {
+				ri.First = targets[eff.Order[0]].Provider
+			}
+			baseInput.IgnorePins = true
+		}
+		decision := RuntimeSnapshot.PreviewOrder(baseInput)
 		ordered := make([]RouteTarget, 0, len(decision.Order))
 		for _, index := range decision.Order {
 			ordered = append(ordered, targets[index])
 		}
-		ri := routeInfo{}
-		if len(ordered) > 0 {
+		if !pinned && len(ordered) > 0 {
 			ri.First = ordered[0].Provider
-		}
-		// Surface an active manual pin (hot-switch) so /debug/schedule shows WHY a
-		// route is narrowed to one provider, plus its expiry. The pin's effect on
-		// `ordered` is already applied inside decideOrder; this just labels it.
-		if pin, ok := RuntimeSnapshot.Pins[exposed]; ok {
-			ri.Pin = pin.Provider
-			ri.PinExpires = pin.ExpiresLabel(now)
 		}
 		// Track which parents appear in `ordered` so the route-level `pools`
 		// summary can be emitted. A parent may have more accounts in poolIndex

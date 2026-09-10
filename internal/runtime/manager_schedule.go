@@ -428,17 +428,24 @@ func quotaExhaustedUntil(snapshot *provider.QuotaSnapshot, now time.Time, maxAge
 // PreviewOrder derives a read-only schedule from this exact detached
 // dashboard snapshot. It never re-enters Manager, so health/quota/pin/sticky
 // and the displayed order cannot come from different mutations or generations.
+// input.IgnorePins renders the chain as if no operator pin existed (the
+// dashboard overlays the pin on the default chain instead of showing the
+// pin-narrowed chain).
 func (snapshot DashboardSnapshot) PreviewOrder(input ScheduleInput) ScheduleResult {
 	input.Commit = false
 	input.Generation = snapshot.Generation
 	if !snapshot.capturedAt.IsZero() {
 		input.Now = snapshot.capturedAt
 	}
+	pins := snapshot.Pins
+	if input.IgnorePins {
+		pins = nil
+	}
 	state := scheduleState{
 		quotas:  snapshot.Quotas,
 		quality: snapshot.Quality,
 		sticky:  snapshot.Sticky,
-		pins:    snapshot.Pins,
+		pins:    pins,
 		spread:  snapshot.spread,
 		targetAvailable: func(target Target, now time.Time) bool {
 			if status, ok := snapshot.Providers[target.Provider]; ok && !status.Available {

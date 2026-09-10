@@ -86,7 +86,9 @@ recipe 仍为 route-local，不进入跨 route pool。去重 identity 是
 多目标 route —— 暴露名 = 模型名，或 provider 的 `alias:` 改名（如 kimi-code 的
 `k3` 暴露为 `kimi-k3`，与其他 provider 的同名模型聚合）；target 保留上游真实
 模型名，priority 继承 provider 的 `priority:`（lower wins），并按
-`(priority, provider)` 排序保证确定性。
+`(priority, provider)` 排序保证确定性。请求方向把 body 的 model 改写为上游
+真实名；响应方向对称地把客户端可见字节的 model 归一回暴露名（契约见
+`protocol-conversion.md` 接线要求的「响应 model 归一化」）。
 
 - 推导是纯 config 计算：不读凭据/login 状态（构造与 reload 各恰好一次
   `DeriveRoutesFrom(cfg)`，由 `internal/archtest` 的 owner 契约保护）；CLI

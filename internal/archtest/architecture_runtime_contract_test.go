@@ -207,8 +207,12 @@ func TestArchitectureRuntimeBoundaries(t *testing.T) {
 		)
 
 		statusFromSnapshot := namedFunction(t, proxyFile, "scheduleStatusFromSnapshot")
-		if got := namedCallCountInNode(statusFromSnapshot.Body, "PreviewOrder"); got != 1 {
-			t.Errorf("scheduleStatusFromSnapshot PreviewOrder calls = %d, want exactly 1", got)
+		// At most two PreviewOrder calls per route: the pin-applied preview
+		// (effective first choice) and — only when a pin is active — the
+		// IgnorePins preview (default chain the pin overlays). Both consume the
+		// SAME detached snapshot, so the single-generation guarantee holds.
+		if got := namedCallCountInNode(statusFromSnapshot.Body, "PreviewOrder"); got < 1 || got > 2 {
+			t.Errorf("scheduleStatusFromSnapshot PreviewOrder calls = %d, want 1..2 (pin-applied + unpinned overlay)", got)
 		}
 		for _, forbidden := range []string{"Dashboard", "DecideOrder", "SchedulingQuotas"} {
 			if got := namedCallCountInNode(statusFromSnapshot.Body, forbidden); got != 0 {
