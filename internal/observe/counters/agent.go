@@ -136,6 +136,8 @@ type AgentCount struct {
 	CacheCreation uint64
 	CacheRead     uint64
 	LatencySum    uint64 // cumulative upstream latency ms (commit-only)
+	TTFTSum       uint64 // cumulative upstream first-byte ms (commit-only; streaming responses)
+	DurationSum   uint64 // cumulative full call wall-clock ms, send → end of body (commit-only)
 	Failures      uint64 // all-targets-failed 502 count
 }
 
@@ -208,9 +210,11 @@ func (a *AgentCounter) Snapshot() map[AgentKey]AgentCount {
 	return out
 }
 
-// addLatency records the upstream response latency (ms) for one (agent,provider,
-// model) — called on commit alongside the metrics addLatency.
-func (a *AgentCounter) AddLatency(agent, provider, model string, ms uint64) {
+// addLatency records the upstream response latency (ms) and time-to-first-
+// byte (ms) for one (agent, provider, model) — called on commit alongside
+// the metrics AddLatency (same commit-only semantics; ttft is 0 for
+// non-streaming responses).
+func (a *AgentCounter) AddLatency(agent, provider, model string, ms, ttftMs uint64) {
 	if a == nil || agent == "" {
 		return
 	}
@@ -223,6 +227,25 @@ func (a *AgentCounter) AddLatency(agent, provider, model string, ms uint64) {
 		a.m[k] = c
 	}
 	c.LatencySum += ms
+	c.TTFTSum += ttftMs
+}
+
+// addDuration records the FULL call wall-clock (send → end of the streamed
+// body) for one (agent, provider, model) — the tok/s denominator (see
+// MetricsStore.AddDuration).
+func (a *AgentCounter) AddDuration(agent, provider, model string, totalMs uint64) {
+	if a == nil || agent == "" {
+		return
+	}
+	k := AgentKey{Agent: agent, Provider: provider, Model: model}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	c := a.m[k]
+	if c == nil {
+		c = &AgentCount{}
+		a.m[k] = c
+	}
+	c.DurationSum += totalMs
 }
 
 // incFailure bumps the failure count (all-targets-failed 502) for an agent.

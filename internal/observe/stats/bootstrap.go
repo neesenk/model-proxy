@@ -51,7 +51,7 @@ func Bootstrap(
 			Requests: base.Requests, Failovers: base.Failovers,
 			RateLimited429: base.RateLimited429, Failures: base.Failures,
 			LastRequestAt: base.LastRequestAt, LatencySum: base.LatencySum,
-			TTFTSum: base.TTFTSum,
+			TTFTSum: base.TTFTSum, DurationSum: base.DurationSum,
 		})
 		tokens.Seed(runtimeKey, obscounters.TokenUsage{
 			Input: base.Input, Output: base.Output,

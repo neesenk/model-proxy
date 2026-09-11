@@ -76,11 +76,15 @@ type ProviderMetrics struct {
 	RateLimited429 atomic.Uint64
 	Failures       atomic.Uint64
 	LastRequestAt  atomic.Int64 // unix seconds
-	// LatencySum/TTFTSum are cumulative millisecond sums over COMMITTED (served)
-	// responses; avg = sum/requests. Latency = full request wall-clock (send →
-	// end of streamed body); TTFT = send → first byte written to the client.
-	LatencySum atomic.Uint64
-	TTFTSum    atomic.Uint64
+	// LatencySum/TTFTSum/DurationSum are cumulative millisecond sums over
+	// COMMITTED (served) responses; avg = sum/requests. Latency = upstream
+	// response-HEADER arrival (send → headers; excludes the streamed body and
+	// client slow-read); TTFT = send → first byte written to the client;
+	// Duration = full call wall-clock (send → end of streamed body) — the
+	// honest denominator for token-per-second speed.
+	LatencySum  atomic.Uint64
+	TTFTSum     atomic.Uint64
+	DurationSum atomic.Uint64
 }
 
 // ProviderMetricsSnapshot is the JSON-friendly, lock-acquired copy.
@@ -92,6 +96,7 @@ type ProviderMetricsSnapshot struct {
 	LastRequestAt  int64  `json:"last_request_at"`
 	LatencySum     uint64 `json:"latency_ms_sum"`
 	TTFTSum        uint64 `json:"ttft_ms_sum"`
+	DurationSum    uint64 `json:"duration_ms_sum"`
 }
 
 type MetricsStore struct {
@@ -160,6 +165,15 @@ func (s *MetricsStore) AddLatency(provider, model string, latencyMs, ttftMs uint
 	pm.TTFTSum.Add(ttftMs)
 }
 
+// addDuration records one served response's FULL call wall-clock (send → end
+// of the streamed body, milliseconds) — distinct from AddLatency's
+// header-arrival latency, which excludes the generation tail. This is the
+// denominator for token-per-second speed.
+func (s *MetricsStore) AddDuration(provider, model string, totalMs uint64) {
+	pm := s.Entry(PMKey{Provider: provider, Model: model})
+	pm.DurationSum.Add(totalMs)
+}
+
 // snapshot returns a detached per-(provider,model) copy. Callers may read the
 // returned map without holding the lock. Entries are read UNDER the lock: a
 // concurrent Reset between key collection and a re-creating Entry lookup used
@@ -177,6 +191,7 @@ func (s *MetricsStore) Snapshot() map[PMKey]ProviderMetricsSnapshot {
 			LastRequestAt:  pm.LastRequestAt.Load(),
 			LatencySum:     pm.LatencySum.Load(),
 			TTFTSum:        pm.TTFTSum.Load(),
+			DurationSum:    pm.DurationSum.Load(),
 		}
 	}
 	return out
@@ -196,6 +211,7 @@ func (s *MetricsStore) AggregateByProvider() map[string]ProviderMetricsSnapshot 
 		cur.Failures += snap.Failures
 		cur.LatencySum += snap.LatencySum
 		cur.TTFTSum += snap.TTFTSum
+		cur.DurationSum += snap.DurationSum
 		if snap.LastRequestAt > cur.LastRequestAt {
 			cur.LastRequestAt = snap.LastRequestAt
 		}
@@ -216,6 +232,7 @@ func (s *MetricsStore) Seed(k PMKey, snap ProviderMetricsSnapshot) {
 	pm.LastRequestAt.Store(snap.LastRequestAt)
 	pm.LatencySum.Store(snap.LatencySum)
 	pm.TTFTSum.Store(snap.TTFTSum)
+	pm.DurationSum.Store(snap.DurationSum)
 }
 
 // reset zeroes every counter (in-memory). The SQLite history is cleared

@@ -85,6 +85,43 @@ func TestSessionSummariesAggregatesAndCosts(t *testing.T) {
 	}
 }
 
+// TestSessionSummariesAgents pins the per-session agent list that links the
+// Requests page's agent and session filters: one label per session in the
+// normal case, every observed label when a client-supplied session id is
+// reused across agents (most recently seen first, matching Providers), and no
+// empty label for agent-less records.
+func TestSessionSummariesAgents(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordFile(t, dir, "requests-20260801-100000.log", []Record{
+		{Ts: "2026-08-01T10:00:00Z", RequestID: "1", SessionID: "sess-a", Provider: "zhipu", UpstreamModel: "glm-4.7", Agent: "claude-code", Status: 200},
+		{Ts: "2026-08-01T10:01:00Z", RequestID: "2", SessionID: "sess-a", Provider: "zhipu", UpstreamModel: "glm-4.7", Agent: "claude-code", Status: 200},
+		{Ts: "2026-08-01T10:02:00Z", RequestID: "3", SessionID: "sess-b", Provider: "codex", UpstreamModel: "gpt-5.6", Agent: "codex", Status: 200},
+		// Same session id seen from a second client, and one record with no
+		// agent at all (pre-dimension log line).
+		{Ts: "2026-08-01T10:03:00Z", RequestID: "4", SessionID: "sess-b", Provider: "codex", UpstreamModel: "gpt-5.6", Agent: "pi", Status: 200},
+		{Ts: "2026-08-01T10:04:00Z", RequestID: "5", SessionID: "sess-c", Provider: "zhipu", UpstreamModel: "glm-4.7", Status: 200},
+	})
+
+	sessions, err := SessionSummaries(dir, 100, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := map[string][]string{}
+	for _, s := range sessions {
+		agents[s.SessionID] = s.Agents
+	}
+	if got := agents["sess-a"]; len(got) != 1 || got[0] != "claude-code" {
+		t.Errorf("sess-a agents = %v, want one deduplicated label", got)
+	}
+	// Records iterate newest-first, so the most recent agent leads.
+	if got := agents["sess-b"]; len(got) != 2 || got[0] != "pi" || got[1] != "codex" {
+		t.Errorf("sess-b agents = %v, want [pi codex]", got)
+	}
+	if got := agents["sess-c"]; len(got) != 0 {
+		t.Errorf("sess-c agents = %v, want none (no agent recorded, not an empty label)", got)
+	}
+}
+
 func TestExtractUsageShapes(t *testing.T) {
 	cases := map[string]Usage{
 		`{}`: {},

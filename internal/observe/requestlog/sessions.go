@@ -168,9 +168,13 @@ func extractSSEUsage(body string) Usage {
 }
 
 // SessionSummary aggregates one client session's committed requests: time
-// span, models/providers touched, token totals, and (via the caller's cost
-// lookup) the equivalent USD cost. Shadow records count toward their session
-// (they are real upstream spend) and are reported separately.
+// span, models/providers/agents touched, token totals, and (via the caller's
+// cost lookup) the equivalent USD cost. Shadow records count toward their
+// session (they are real upstream spend) and are reported separately.
+// Agents is normally a single label (one client owns a session id), but it is
+// a list because the session headers are client-supplied: an id reused across
+// clients must not silently drop one of them. The UI links the agent and
+// session filters through it.
 type SessionSummary struct {
 	SessionID      string   `json:"session_id"`
 	FirstTs        string   `json:"first_ts"`
@@ -180,6 +184,7 @@ type SessionSummary struct {
 	Errors         int      `json:"errors"`
 	Providers      []string `json:"providers"`
 	Models         []string `json:"models"`
+	Agents         []string `json:"agents"`
 	Usage          Usage    `json:"usage"`
 	CostUSD        float64  `json:"cost_usd"`
 }
@@ -196,10 +201,20 @@ func SessionSummaries(dir string, scanLimit, limit int, costOf func(model string
 	if err != nil {
 		return nil, err
 	}
+	return aggregateSessions(records, limit, costOf), nil
+}
+
+// aggregateSessions is the shared grouping behind the file-scan
+// SessionSummaries and the index-backed Indexer.SessionSummaries: records must
+// arrive newest-first with ParsedUsage populated, and the index path must
+// apply the same top-K window (newest scanLimit rows, session-less rows
+// included) before calling this.
+func aggregateSessions(records []Record, limit int, costOf func(model string, usage Usage) float64) []SessionSummary {
 	type agg struct {
-		summary  SessionSummary
-		byModel  map[string]Usage
-		provSeen map[string]bool
+		summary   SessionSummary
+		byModel   map[string]Usage
+		provSeen  map[string]bool
+		agentSeen map[string]bool
 	}
 	bySession := map[string]*agg{}
 	// records arrive newest-first: the first record seen per session sets
@@ -211,9 +226,10 @@ func SessionSummaries(dir string, scanLimit, limit int, costOf func(model string
 		a := bySession[r.SessionID]
 		if a == nil {
 			a = &agg{
-				summary:  SessionSummary{SessionID: r.SessionID, LastTs: r.Ts},
-				byModel:  map[string]Usage{},
-				provSeen: map[string]bool{},
+				summary:   SessionSummary{SessionID: r.SessionID, LastTs: r.Ts},
+				byModel:   map[string]Usage{},
+				provSeen:  map[string]bool{},
+				agentSeen: map[string]bool{},
 			}
 			bySession[r.SessionID] = a
 		}
@@ -230,6 +246,12 @@ func SessionSummaries(dir string, scanLimit, limit int, costOf func(model string
 			// Records iterate newest-first: plain append keeps the most
 			// recently active provider first.
 			a.summary.Providers = append(a.summary.Providers, r.Provider)
+		}
+		// Agent can be empty on records written before the dimension existed;
+		// an empty label is not a filter value, so it is not offered as one.
+		if r.Agent != "" && !a.agentSeen[r.Agent] {
+			a.agentSeen[r.Agent] = true
+			a.summary.Agents = append(a.summary.Agents, r.Agent)
 		}
 		model := r.UpstreamModel
 		if model == "" {
@@ -266,5 +288,5 @@ func SessionSummaries(dir string, scanLimit, limit int, costOf func(model string
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
-	return out, nil
+	return out
 }

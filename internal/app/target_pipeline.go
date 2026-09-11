@@ -220,6 +220,14 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			uint64(attempt.UpstreamMilliseconds),
 			uint64(attempt.TTFTMilliseconds),
 		)
+		// Full call wall-clock (send → end of streamed body) — the tok/s
+		// denominator; header-arrival latency above deliberately excludes the
+		// generation tail.
+		effects.proxy.metrics.AddDuration(
+			target.Provider,
+			target.Model,
+			uint64(attempt.TotalMilliseconds),
+		)
 	}
 	if effects.proxy.agents != nil && attempt.Scope.Agent != "" {
 		effects.proxy.agents.IncRequests(attempt.Scope.Agent, target.Provider, target.Model)
@@ -228,6 +236,13 @@ func (effects targetExecutionEffects) Committed(attempt targetexec.AttemptDTO) {
 			target.Provider,
 			target.Model,
 			uint64(attempt.UpstreamMilliseconds),
+			uint64(attempt.TTFTMilliseconds),
+		)
+		effects.proxy.agents.AddDuration(
+			attempt.Scope.Agent,
+			target.Provider,
+			target.Model,
+			uint64(attempt.TotalMilliseconds),
 		)
 	}
 	if effects.proxy.events != nil {

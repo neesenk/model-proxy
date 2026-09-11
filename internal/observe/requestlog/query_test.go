@@ -552,6 +552,51 @@ func TestQueryRecordsRequestIDStopsAtFirstMatch(t *testing.T) {
 	}
 }
 
+// TestQueryAgentFilterAndFacets pins the agent dimension of the Requests
+// filter: the agent match is EXACT (not the substring match model/provider
+// use, so one agent label cannot select another that contains it), the agent
+// facet lists the distinct agents observed in the log, records with no agent
+// contribute no facet option, and the facet is not narrowed by the request's
+// own agent filter (the dropdown must stay reversible).
+func TestQueryAgentFilterAndFacets(t *testing.T) {
+	dir := t.TempDir()
+	writeRecordFile(t, dir, "requests-20260718-100000.log", []Record{
+		{Ts: "2026-07-18T10:00:00Z", RequestID: "a", Provider: "zhipu", Exposed: "glm-5.3", CalledModel: "glm-5.3", Agent: "claude-code", Status: 200},
+		{Ts: "2026-07-18T10:01:00Z", RequestID: "b", Provider: "zhipu", Exposed: "glm-5.3", CalledModel: "glm-5.3", Agent: "claude-code-router", Status: 200},
+		{Ts: "2026-07-18T10:02:00Z", RequestID: "c", Provider: "deepseek", Exposed: "deepseek-v4-pro", CalledModel: "deepseek-v4-pro", Agent: "codex", Status: 200},
+		{Ts: "2026-07-18T10:03:00Z", RequestID: "d", Provider: "deepseek", Exposed: "deepseek-v4-pro", CalledModel: "deepseek-v4-pro", Status: 200},
+	})
+
+	summaries, facets, err := QuerySummariesWithFacets(dir, Filter{Agent: "claude-code", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].RequestID != "a" {
+		t.Fatalf("agent filter = %+v, want only request a (exact match, not the claude-code-router prefix)", summaries)
+	}
+	if !reflect.DeepEqual(facets.Agents, []string{"claude-code", "claude-code-router", "codex"}) {
+		t.Errorf("agents = %v, want all three despite the filter and without an empty label for the agent-less record", facets.Agents)
+	}
+
+	// An agent that only appears as a substring of a real label matches nothing.
+	none, _, err := QuerySummariesWithFacets(dir, Filter{Agent: "claude", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Errorf("agent=claude = %+v, want no rows (exact match)", none)
+	}
+
+	// Agent ANDs with the other dimensions rather than replacing them.
+	combined, _, err := QuerySummariesWithFacets(dir, Filter{Agent: "codex", Provider: "zhipu", Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(combined) != 0 {
+		t.Errorf("agent+provider = %+v, want no rows (codex never used zhipu)", combined)
+	}
+}
+
 // TestQuerySummariesWithFacets pins the data-driven filter facets: distinct
 // providers/models come from the scanned log, and they are NOT narrowed by the
 // request's own model/provider filter (otherwise the UI dropdowns could lock

@@ -126,8 +126,165 @@ func TestQueryAnalyticsDayMonthAndFilters(t *testing.T) {
 		months[0].Requests != 7 || months[0].Input != 90 {
 		t.Errorf("month = %+v", months)
 	}
-	if _, err := store.QueryAnalytics(0, 1, "", "", "hour"); err == nil ||
-		!strings.Contains(err.Error(), "day or month") {
+	if _, err := store.QueryAnalytics(0, 1, "", "", "year"); err == nil ||
+		!strings.Contains(err.Error(), "minute, hour, day, week or month") {
+		t.Fatalf("invalid granularity error = %v", err)
+	}
+}
+
+func TestQueryAnalyticsHourBucketsAndWidenedCounters(t *testing.T) {
+	store := newTestStore(t, 0)
+	now := time.Now().In(time.Local)
+	// Anchor to a whole local hour so the label round-trip is exact.
+	hourStart := now.Truncate(time.Hour)
+	first := hourStart.Add(10*time.Minute).Unix() / 60 * 60
+	second := hourStart.Add(20*time.Minute).Unix() / 60 * 60
+	nextHour := hourStart.Add(time.Hour).Add(5*time.Minute).Unix() / 60 * 60
+	key := Key{Provider: "p", Model: "m"}
+	for minute, counters := range map[int64]Counters{
+		first:    {Requests: 2, Failovers: 1, RateLimited429: 1, Failures: 1, Input: 10, Output: 20, LatencySum: 300, TTFTSum: 30, DurationSum: 1000, LastRequestAt: 100},
+		second:   {Requests: 2, Failovers: 2, RateLimited429: 0, Failures: 0, Input: 30, Output: 40, LatencySum: 500, TTFTSum: 50, DurationSum: 1400, LastRequestAt: 300},
+		nextHour: {Requests: 1, Input: 50, Output: 60, LatencySum: 800, TTFTSum: 80, LastRequestAt: 200},
+	} {
+		if err := store.Flush(minute, map[Key]Counters{key: counters}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	buckets, err := store.QueryAnalytics(first-60, nextHour+60, "p", "m", "hour")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("hour buckets = %d, want 2: %+v", len(buckets), buckets)
+	}
+	if buckets[0].Bucket != hourStart.Unix() {
+		t.Errorf("first hour bucket = %d, want %d (local hour start)", buckets[0].Bucket, hourStart.Unix())
+	}
+	if buckets[0].Requests != 4 || buckets[0].Failovers != 3 || buckets[0].RateLimited429 != 1 ||
+		buckets[0].Failures != 1 || buckets[0].Input != 40 || buckets[0].Output != 60 ||
+		buckets[0].LastRequestAt != 300 {
+		t.Errorf("first hour counters = %+v", buckets[0])
+	}
+	// Averages are requests-weighted over the whole bucket: (300+500)/4 = 200
+	// latency, (1000+1400)/4 = 600 full-call duration (the tok/s denominator).
+	if buckets[0].AvgLatencyMs != 200 || buckets[0].AvgTtftMs != 20 || buckets[0].AvgDurationMs != 600 {
+		t.Errorf("hour averages = %.1f/%.1f/%.1f, want 200/20/600", buckets[0].AvgLatencyMs, buckets[0].AvgTtftMs, buckets[0].AvgDurationMs)
+	}
+	if buckets[1].Bucket != hourStart.Add(time.Hour).Unix() || buckets[1].Requests != 1 {
+		t.Errorf("second hour bucket = %+v", buckets[1])
+	}
+}
+
+func TestQueryAnalyticsMinuteAndWeekBuckets(t *testing.T) {
+	store := newTestStore(t, 0)
+	now := time.Now().In(time.Local)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	// Anchor on THIS week's Monday (local weeks start Monday): Wednesday
+	// 12:34 and the same week's Friday 01:00 must fold into one bucket; the
+	// previous Wednesday belongs to the week before.
+	monday := dayStart.AddDate(0, 0, -((int(dayStart.Weekday()) + 6) % 7))
+	wed := monday.AddDate(0, 0, 2).Add(12*time.Hour + 34*time.Minute)
+	fri := monday.AddDate(0, 0, 4).Add(time.Hour)
+	prevWed := wed.AddDate(0, 0, -7)
+	min := func(ts time.Time) int64 { return ts.Unix() / 60 * 60 }
+	key := Key{Provider: "p", Model: "m"}
+	for minute, counters := range map[int64]Counters{
+		min(wed):     {Requests: 1, Input: 10, LatencySum: 100},
+		min(fri):     {Requests: 2, Input: 20, LatencySum: 200},
+		min(prevWed): {Requests: 4, Input: 40, LatencySum: 400},
+	} {
+		if err := store.Flush(minute, map[Key]Counters{key: counters}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	weeks, err := store.QueryAnalytics(min(prevWed)-60, min(fri)+3600, "p", "m", "week")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(weeks) != 2 {
+		t.Fatalf("week buckets = %d, want 2: %+v", len(weeks), weeks)
+	}
+	// Local weeks start Monday.
+	wantMonday := func(ts time.Time) time.Time {
+		off := (int(ts.Weekday()) + 6) % 7 // Sunday→6
+		return time.Date(ts.Year(), ts.Month(), ts.Day()-off, 0, 0, 0, 0, time.Local)
+	}
+	if weeks[0].Bucket != wantMonday(prevWed).Unix() || weeks[0].Requests != 4 {
+		t.Errorf("prev week = %+v, want Monday %d with 4 reqs", weeks[0], wantMonday(prevWed).Unix())
+	}
+	if weeks[1].Bucket != wantMonday(wed).Unix() || weeks[1].Requests != 3 || weeks[1].Input != 30 || weeks[1].AvgLatencyMs != 100 {
+		t.Errorf("this week = %+v", weeks[1])
+	}
+
+	minutes, err := store.QueryAnalytics(min(wed), min(wed)+60, "p", "m", "minute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(minutes) != 1 || minutes[0].Bucket != min(wed) || minutes[0].Requests != 1 {
+		t.Errorf("minute buckets = %+v", minutes)
+	}
+	if _, err := store.QueryAnalytics(0, 1, "", "", "year"); err == nil ||
+		!strings.Contains(err.Error(), "minute, hour, day, week or month") {
+		t.Fatalf("invalid granularity error = %v", err)
+	}
+}
+
+func TestQueryAnalyticsAgents(t *testing.T) {
+	store := newTestStore(t, 0)
+	now := time.Now().In(time.Local)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	minute := dayStart.Add(3*time.Hour).Unix() / 60 * 60
+	if err := store.FlushAgents(minute, map[AgentKey]AgentCounters{
+		{Agent: "codex", Provider: "zhipu", Model: "glm-5"}:       {Requests: 3, Input: 100, Output: 200, CacheCreation: 5, CacheRead: 40, LatencySum: 1500, TTFTSum: 150, Failures: 1},
+		{Agent: "claude-code", Provider: "zhipu", Model: "glm-5"}: {Requests: 7, Input: 10, Output: 20},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FlushAgents(minute+60, map[AgentKey]AgentCounters{
+		{Agent: "codex", Provider: "zhipu", Model: "glm-5"}: {Requests: 1, Input: 50, Output: 60, LatencySum: 500, TTFTSum: 50},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	buckets, err := store.QueryAnalyticsAgents(minute-60, minute+120, "", "zhipu", "", "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("agent day buckets = %d, want 2: %+v", len(buckets), buckets)
+	}
+	codex, claude := buckets[0], buckets[1]
+	if codex.Agent != "claude-code" || claude.Agent != "codex" {
+		t.Fatalf("agent order = %s/%s, want claude-code first", codex.Agent, claude.Agent)
+	}
+	if codex.Requests != 7 || codex.Input != 10 || codex.Output != 20 || codex.Failures != 0 {
+		t.Errorf("claude-code day = %+v", codex)
+	}
+	if claude.Requests != 4 || claude.Input != 150 || claude.Output != 260 || claude.CacheRead != 40 ||
+		claude.Failures != 1 || claude.LatencySum != 2000 || claude.AvgLatencyMs != 500 ||
+		claude.TTFTSum != 200 || claude.AvgTtftMs != 50 {
+		t.Errorf("codex day = %+v", claude)
+	}
+	// agent_buckets has no failover/429 columns — those stay zero (ttft is
+	// now recorded; asserted above).
+	if claude.Failovers != 0 || claude.RateLimited429 != 0 {
+		t.Errorf("agent dimension must not fabricate failover/429: %+v", claude)
+	}
+	if claude.Bucket != dayStart.Unix() {
+		t.Errorf("agent day bucket = %d, want %d", claude.Bucket, dayStart.Unix())
+	}
+
+	filtered, err := store.QueryAnalyticsAgents(minute-60, minute+120, "codex", "zhipu", "", "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].Agent != "codex" {
+		t.Fatalf("agent filter = %+v", filtered)
+	}
+	if _, err := store.QueryAnalyticsAgents(0, 1, "", "", "", "year"); err == nil ||
+		!strings.Contains(err.Error(), "minute, hour, day, week or month") {
 		t.Fatalf("invalid granularity error = %v", err)
 	}
 }
@@ -136,17 +293,17 @@ func TestFlushAndQueryAgentsRawWideAndFilters(t *testing.T) {
 	store := newTestStore(t, 0)
 	key := AgentKey{Agent: "codex", Provider: "zhipu", Model: "glm-5"}
 	if err := store.FlushAgents(0, map[AgentKey]AgentCounters{
-		key: {Requests: 3, Input: 100, Output: 200, CacheCreation: 5, CacheRead: 40, LatencySum: 1500, Failures: 0},
+		key: {Requests: 3, Input: 100, Output: 200, CacheCreation: 5, CacheRead: 40, LatencySum: 1500, TTFTSum: 150, Failures: 0},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
-		key: {Requests: 5, Input: 400, Output: 800, CacheCreation: 10, CacheRead: 60, LatencySum: 6000, Failures: 1},
+		key: {Requests: 5, Input: 400, Output: 800, CacheCreation: 10, CacheRead: 60, LatencySum: 6000, TTFTSum: 600, Failures: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FlushAgents(60, map[AgentKey]AgentCounters{
-		key: {Requests: 2, Input: 10, Output: 20, CacheRead: 4, LatencySum: 500, Failures: 2},
+		key: {Requests: 2, Input: 10, Output: 20, CacheRead: 4, LatencySum: 500, TTFTSum: 50, Failures: 2},
 		{Agent: "claude-code", Provider: "zhipu", Model: "glm-5"}: {Requests: 7},
 		{Agent: "codex", Provider: "other", Model: "other"}:       {Requests: 11},
 	}); err != nil {
@@ -168,7 +325,7 @@ func TestFlushAndQueryAgentsRawWideAndFilters(t *testing.T) {
 	}
 	if raw[1].Minute != 60 || raw[1].Requests != 7 || raw[1].Input != 410 ||
 		raw[1].Output != 820 || raw[1].CacheCreation != 10 || raw[1].CacheRead != 64 ||
-		raw[1].LatencySum != 6500 || raw[1].Failures != 3 {
+		raw[1].LatencySum != 6500 || raw[1].TTFTSum != 650 || raw[1].Failures != 3 {
 		t.Errorf("minute 60 upsert = %+v", raw[1])
 	}
 
@@ -181,7 +338,7 @@ func TestFlushAndQueryAgentsRawWideAndFilters(t *testing.T) {
 	}
 	if got := wide[0]; got.Minute != 0 || got.Requests != 10 || got.Input != 510 ||
 		got.Output != 1020 || got.CacheCreation != 15 || got.CacheRead != 104 ||
-		got.LatencySum != 8000 || got.Failures != 3 {
+		got.LatencySum != 8000 || got.TTFTSum != 800 || got.Failures != 3 {
 		t.Errorf("wide agent bucket = %+v", got)
 	}
 
@@ -393,10 +550,15 @@ func TestJSONFieldContract(t *testing.T) {
 		}
 	}
 	analyticsJSON, _ := json.Marshal(AnalyticsBucket{})
-	for _, field := range []string{`"provider"`, `"model"`, `"bucket"`, `"requests"`, `"input"`, `"output"`, `"cache_creation"`, `"cache_read"`, `"last_request_at"`} {
+	for _, field := range []string{`"provider"`, `"model"`, `"bucket"`, `"requests"`, `"failovers"`, `"rate_limited_429"`, `"failures"`, `"input"`, `"output"`, `"cache_creation"`, `"cache_read"`, `"latency_ms_sum"`, `"ttft_ms_sum"`, `"last_request_at"`, `"avg_latency_ms"`, `"avg_ttft_ms"`} {
 		if !strings.Contains(string(analyticsJSON), field) {
 			t.Errorf("AnalyticsBucket JSON missing %s: %s", field, analyticsJSON)
 		}
+	}
+	// The agent dimension rides the same struct: the field is omitempty, so
+	// assert it on a bucket that actually carries an agent.
+	if agentAnalytics, _ := json.Marshal(AnalyticsBucket{Agent: "codex"}); !strings.Contains(string(agentAnalytics), `"agent":"codex"`) {
+		t.Errorf("AnalyticsBucket JSON missing agent: %s", agentAnalytics)
 	}
 	agentJSON, _ := json.Marshal(AgentBucket{})
 	for _, field := range []string{`"agent"`, `"provider"`, `"model"`, `"minute"`, `"requests"`, `"input"`, `"output"`, `"cache_creation"`, `"cache_read"`, `"latency_ms_sum"`, `"failures"`} {
@@ -413,10 +575,10 @@ func TestAverageMillisecondsAndLocalCalendarStartFailures(t *testing.T) {
 	if got := averageMilliseconds(2, 3); got != 0.7 {
 		t.Errorf("rounded average = %v, want 0.7", got)
 	}
-	if got := localCalendarStart("invalid-date", "day"); got != 0 {
+	if got := localCalendarStart("invalid-date", "2006-01-02", "day"); got != 0 {
 		t.Errorf("invalid day = %d, want 0", got)
 	}
-	if got := localCalendarStart("x", "month"); got != 0 {
+	if got := localCalendarStart("x", "2006-01", "month"); got != 0 {
 		t.Errorf("short invalid month = %d, want 0", got)
 	}
 }

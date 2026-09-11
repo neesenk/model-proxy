@@ -129,12 +129,13 @@ func TestAgentCounter(t *testing.T) {
 	a := NewAgentCounter()
 	a.IncRequests("codex", "p", "m")
 	a.AddTokens("codex", "p", "m", TokenUsage{Input: 3, Output: 4, CacheCreation: 1, CacheRead: 6})
-	a.AddLatency("codex", "p", "m", 25)
+	a.AddLatency("codex", "p", "m", 25, 5)
 	a.IncFailure("codex", "p", "m")
 
 	got := a.Snapshot()[AgentKey{Agent: "codex", Provider: "p", Model: "m"}]
 	if got.Requests != 1 || got.Input != 3 || got.Output != 4 ||
-		got.CacheCreation != 1 || got.CacheRead != 6 {
+		got.CacheCreation != 1 || got.CacheRead != 6 ||
+		got.LatencySum != 25 || got.TTFTSum != 5 {
 		t.Fatalf("snapshot = %+v", got)
 	}
 	a.Reset()

@@ -21,6 +21,7 @@ import (
 type Filter struct {
 	Model      string
 	Provider   string
+	Agent      string
 	Status     int
 	ErrorsOnly bool
 	RequestID  string
@@ -46,6 +47,13 @@ func (f Filter) matches(record Record) bool {
 		return false
 	}
 	if f.Provider != "" && !containsFold(record.Provider, f.Provider) {
+		return false
+	}
+	// Agent is an exact match (not the substring match model/provider use):
+	// the labels are a closed, short set produced by counters.DetectAgent and
+	// the UI offers them as a facet-driven dropdown, so a substring would let
+	// "claude-code" also select a hypothetical "claude-code-router".
+	if f.Agent != "" && record.Agent != f.Agent {
 		return false
 	}
 	if f.Status != 0 && record.Status != f.Status {
@@ -118,15 +126,17 @@ func QueryRecords(dir string, filter Filter) ([]Record, error) {
 	return query(dir, filter, false, nil)
 }
 
-// Facets are the distinct providers and models observed in the scanned
+// Facets are the distinct providers, models and agents observed in the scanned
 // request-log window. The filter dropdowns must offer what actually appears in
 // the log, NOT the configured provider/model catalog (config can list models
-// with no traffic yet, and the log can hold models since removed from config).
+// with no traffic yet, and the log can hold models since removed from config);
+// agents are never configured at all, so the log is their only source.
 // ProviderModels maps each provider to the models seen with it, so the UI can
 // link the provider and model dropdowns from data.
 type Facets struct {
 	Providers      []string            `json:"providers"`
 	Models         []string            `json:"models"`
+	Agents         []string            `json:"agents"`
 	ProviderModels map[string][]string `json:"provider_models"`
 }
 
@@ -136,6 +146,7 @@ type Facets struct {
 type facetCollector struct {
 	providers  map[string]bool
 	models     map[string]bool
+	agents     map[string]bool
 	byProvider map[string]map[string]bool
 }
 
@@ -143,6 +154,7 @@ func newFacetCollector() *facetCollector {
 	return &facetCollector{
 		providers:  map[string]bool{},
 		models:     map[string]bool{},
+		agents:     map[string]bool{},
 		byProvider: map[string]map[string]bool{},
 	}
 }
@@ -158,6 +170,9 @@ func (c *facetCollector) add(record Record) {
 	if model != "" {
 		c.models[model] = true
 	}
+	if record.Agent != "" {
+		c.agents[record.Agent] = true
+	}
 	if record.Provider != "" && model != "" {
 		if c.byProvider[record.Provider] == nil {
 			c.byProvider[record.Provider] = map[string]bool{}
@@ -170,6 +185,7 @@ func (c *facetCollector) facets() Facets {
 	out := Facets{
 		Providers:      sortedFacetKeys(c.providers),
 		Models:         sortedFacetKeys(c.models),
+		Agents:         sortedFacetKeys(c.agents),
 		ProviderModels: make(map[string][]string, len(c.byProvider)),
 	}
 	for provider, models := range c.byProvider {
